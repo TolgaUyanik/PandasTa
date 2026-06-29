@@ -12,6 +12,7 @@ from .hwma import hwma
 from .jma import jma
 from .kama import kama
 from .ichimoku import ichimoku
+from .ichimoku_ml import ichimoku_ml
 from .linreg import linreg
 from .linreg_channel import linreg_channel
 from .ma import ma
