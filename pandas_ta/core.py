@@ -1228,6 +1228,11 @@ class AnalysisIndicators(BasePandasObject):
         result = linreg(close=close, length=length, offset=offset, adjust=adjust, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ma_disparity(self, length=None, ma_type=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ma_disparity(close=close, length=length, ma_type=ma_type, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def mcgd(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = mcgd(close=close, length=length, offset=offset, **kwargs)
@@ -1288,6 +1293,19 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     def supertrend(self, length=None, multiplier=None, offset=None, **kwargs):
+        # A removed duplicate accessor advertised period/mamode/drift. None are
+        # read by overlap/supertrend.py, whose signature is
+        # (high, low, close, length, multiplier, offset, **kwargs) and which
+        # only pulls fillna/fill_method out of **kwargs -- so all three were
+        # silently discarded and the indicator fell back to length=7. Reject
+        # all three, not just `period`: a half-guard implies the rest are
+        # validated, and they are not.
+        unread = {"period", "mamode", "drift"} & kwargs.keys()
+        if unread:
+            raise TypeError(
+                f"supertrend() got {sorted(unread)}; only length, multiplier "
+                "and offset are honored"
+            )
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
@@ -1506,12 +1524,12 @@ class AnalysisIndicators(BasePandasObject):
             result = short_run(fast=fast, slow=slow, length=length, offset=offset, **kwargs)
             return self._post_process(result, **kwargs)
 
-    def supertrend(self, period=None, multiplier=None, mamode=None, drift=None, offset=None, **kwargs):
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = supertrend(high=high, low=low, close=close, period=period, multiplier=multiplier, mamode=mamode, drift=drift, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
+    # NOTE: a second `supertrend` accessor used to live here, taking `period=`
+    # and forwarding it to overlap/supertrend.py, whose signature is `length=`.
+    # `period` landed in **kwargs and was silently discarded, so
+    # `df.ta.supertrend(period=10)` returned SUPERT_7_3.0 (the default length),
+    # not SUPERT_10_3.0. Being defined second, it also shadowed the correct
+    # accessor above. Removed 2026-07-29; use `length=`.
 
     def ttm_trend(self, length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))

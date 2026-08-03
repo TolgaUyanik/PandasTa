@@ -16,6 +16,7 @@ from .ichimoku_ml import ichimoku_ml
 from .linreg import linreg
 from .linreg_channel import linreg_channel
 from .ma import ma
+from .ma_disparity import ma_disparity
 from .mcgd import mcgd
 from .midpoint import midpoint
 from .mmar import mmar
