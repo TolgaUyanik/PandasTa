@@ -30,6 +30,7 @@ from .pvo import pvo
 from .qqe import qqe
 from .roc import roc
 from .rsi import rsi
+from .rsi_divergence import rsi_divergence
 from .rsx import rsx
 from .rvgi import rvgi
 from .slope import slope

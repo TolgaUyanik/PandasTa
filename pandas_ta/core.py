@@ -1067,6 +1067,13 @@ class AnalysisIndicators(BasePandasObject):
         result = rsi(close=close, length=length, scalar=scalar, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rsi_divergence(self, rsi_length=None, pivot_left=None, pivot_right=None, min_lookback=None, max_lookback=None, rsi_oversold=None, rsi_overbought=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rsi_divergence(high=high, low=low, close=close, rsi_length=rsi_length, pivot_left=pivot_left, pivot_right=pivot_right, min_lookback=min_lookback, max_lookback=max_lookback, rsi_oversold=rsi_oversold, rsi_overbought=rsi_overbought, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rsx(self, length=None, drift=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = rsx(close=close, length=length, drift=drift, offset=offset, **kwargs)
@@ -1259,6 +1266,13 @@ class AnalysisIndicators(BasePandasObject):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
         result = midprice(high=high, low=low, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def nadaraya_watson_envelope(self, lookback=None, h=None, r=None, atr_length=None, atr_mult=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = nadaraya_watson_envelope(high=high, low=low, close=close, lookback=lookback, h=h, r=r, atr_length=atr_length, atr_mult=atr_mult, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def ohlc4(self, offset=None, **kwargs):
@@ -1468,6 +1482,14 @@ class AnalysisIndicators(BasePandasObject):
         result = aroon(high=high, low=low, length=length, scalar=scalar, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def band_cross_retest(self, ma_type=None, len_fast=None, len_slow=None, atr_length=None, min_ext_atr=None, min_vel_atr=None, min_sep_atr=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = band_cross_retest(high=high, low=low, close=close, volume=volume, ma_type=ma_type, len_fast=len_fast, len_slow=len_slow, atr_length=atr_length, min_ext_atr=min_ext_atr, min_vel_atr=min_vel_atr, min_sep_atr=min_sep_atr, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def chop(self, length=None, atr_length=None, scalar=None, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -1497,9 +1519,24 @@ class AnalysisIndicators(BasePandasObject):
         result = dpo(close=close, length=length, centered=centered, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def equal_highs_lows(self, left=None, right=None, tol_mode=None, atr_length=None, atr_mult=None, pct_tol=None, lookback_pivots=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = equal_highs_lows(high=high, low=low, close=close, left=left, right=right, tol_mode=tol_mode, atr_length=atr_length, atr_mult=atr_mult, pct_tol=pct_tol, lookback_pivots=lookback_pivots, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def increasing(self, length=None, strict=None, asint=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = increasing(close=close, length=length, strict=strict, asint=asint, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def liquidity_compression_box(self, window=None, atr_length=None, max_atr_mult=None, min_wick_touches=None, max_body_pct=None, touch_tol_pct=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        result = liquidity_compression_box(high=high, low=low, close=close, open_=open_, window=window, atr_length=atr_length, max_atr_mult=max_atr_mult, min_wick_touches=min_wick_touches, max_body_pct=max_body_pct, touch_tol_pct=touch_tol_pct, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def long_run(self, fast=None, slow=None, length=None, offset=None, **kwargs):
@@ -1549,6 +1586,16 @@ class AnalysisIndicators(BasePandasObject):
         result = qstick(open_=open_, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def renko_trend(self, brick_pct=None, brick_fixed=None, max_iterations=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = renko_trend(close=close, brick_pct=brick_pct, brick_fixed=brick_fixed, max_iterations=max_iterations, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ribbon_concordance(self, ma_type=None, base_length=None, spacing=None, ribbon_size=None, smooth_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ribbon_concordance(close=close, ma_type=ma_type, base_length=base_length, spacing=spacing, ribbon_size=ribbon_size, smooth_length=smooth_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def short_run(self, fast=None, slow=None, length=None, offset=None, **kwargs):
         if fast is None and slow is None:
             return self._df
@@ -1592,6 +1639,14 @@ class AnalysisIndicators(BasePandasObject):
     def vhf(self, length=None, drift=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = vhf(close=close, length=length, drift=drift, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def volume_sr_zones(self, pivot_length=None, vol_length=None, vol_mult=None, atr_length=None, zone_atr_mult=None, max_levels=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = volume_sr_zones(high=high, low=low, close=close, volume=volume, pivot_length=pivot_length, vol_length=vol_length, vol_mult=vol_mult, atr_length=atr_length, zone_atr_mult=zone_atr_mult, max_levels=max_levels, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def xsignals(self, xa=None, xb=None, above=True, long=True, asbool=None, trend_reset=0, trade_offset=None, offset=None, **kwargs):

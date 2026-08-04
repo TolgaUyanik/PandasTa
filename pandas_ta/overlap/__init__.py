@@ -21,6 +21,7 @@ from .mcgd import mcgd
 from .midpoint import midpoint
 from .mmar import mmar
 from .midprice import midprice
+from .nadaraya_watson_envelope import nadaraya_watson_envelope
 from .ohlc4 import ohlc4
 from .pwma import pwma
 from .rainbow import rainbow

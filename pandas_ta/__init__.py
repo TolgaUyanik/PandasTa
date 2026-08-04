@@ -48,7 +48,7 @@ Category = {
     "momentum": [
         "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
         "coppock", "cti", "dm", "er", "eri", "fisher", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd",
-        "mom", "pgo", "po", "ppo", "psl", "pvo", "qqe", "roc", "rsi", "rsx", "rvgi",
+        "mom", "pgo", "po", "ppo", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr"
     ],
@@ -56,8 +56,8 @@ Category = {
     "overlap": [
         "alma", "dema", "ema", "ema_align", "fwma", "hilo", "hl2", "hlc3", "hma", "ichimoku", "ichimoku_ml",
         "jma", "kama", "linreg", "linreg_channel", "ma_disparity", "mcgd", "midpoint", "midprice", "mmar",
-        "ohlc4", "pwma", "rainbow", "rma", "sinwma", "sma", "ssf", "supertrend", "swma",
-        "t3", "tema", "trima", "vidya", "vwap", "vwma", "wcp", "wma", "zlma"
+        "nadaraya_watson_envelope", "ohlc4", "pwma", "rainbow", "rma", "sinwma", "sma", "ssf", "supertrend",
+        "swma", "t3", "tema", "trima", "vidya", "vwap", "vwma", "wcp", "wma", "zlma"
     ],
     # Performance
     "performance": ["log_return", "percent_return", "trend_return"],
@@ -68,10 +68,11 @@ Category = {
     ],
     # Trend
     "trend": [
-        "adx", "amat", "aroon", "bos", "choch", "chop", "cksp", "decay", "decreasing",
-        "dpo", "fvg", "halftrend", "increasing", "long_run", "nwog", "ob", "pmax", "priorday_fib",
-        "priormonth_range", "psar", "qstick", "short_run", "swing_equilibrium", "tsignals", "ttm_trend",
-        "vhf", "vortex", "xsignals", "zigzag", "zigzag_fib"
+        "adx", "amat", "aroon", "band_cross_retest", "bos", "choch", "chop", "cksp", "decay", "decreasing",
+        "dpo", "equal_highs_lows", "fvg", "halftrend", "increasing", "liquidity_compression_box", "long_run",
+        "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "renko_trend",
+        "ribbon_concordance", "short_run", "swing_equilibrium", "tsignals", "ttm_trend",
+        "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib"
     ],
     # Volatility
     "volatility": [
