@@ -18,6 +18,7 @@ from .pmax import pmax
 from .psar import psar
 from .qstick import qstick
 from .short_run import short_run
+from .swing_equilibrium import swing_equilibrium
 from .tsignals import tsignals
 from .ttm_trend import ttm_trend
 from .vhf import vhf
