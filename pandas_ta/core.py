@@ -1511,6 +1511,13 @@ class AnalysisIndicators(BasePandasObject):
         result = pmax(high=high, low=low, close=close, length=length, multiplier=multiplier, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def priorday_fib(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = priorday_fib(high=high, low=low, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def qstick(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
@@ -1565,6 +1572,13 @@ class AnalysisIndicators(BasePandasObject):
     def xsignals(self, xa=None, xb=None, above=True, long=True, asbool=None, trend_reset=0, trade_offset=None, offset=None, **kwargs):
         signal = self._get_column(kwargs.pop("close", "close"))
         result = xsignals(signal=signal, xa=xa, xb=xb, above=above, long=long, asbool=asbool, trend_reset=trend_reset, trade_offset=trade_offset, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def zigzag_fib(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = zigzag_fib(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     # Utility

@@ -15,6 +15,7 @@ from .increasing import increasing
 from .long_run import long_run
 from .ob import ob
 from .pmax import pmax
+from .priorday_fib import priorday_fib
 from .psar import psar
 from .qstick import qstick
 from .short_run import short_run
@@ -25,3 +26,4 @@ from .vhf import vhf
 from .vortex import vortex
 from .xsignals import xsignals
 from .zigzag import zigzag
+from .zigzag_fib import zigzag_fib
