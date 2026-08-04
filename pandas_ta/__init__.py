@@ -46,7 +46,7 @@ Category = {
     "cycles": ["dsp", "ebsw"],
     # Momentum
     "momentum": [
-        "ao", "apo", "bias", "bop", "brar", "cci", "cfo", "cg", "cmo",
+        "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
         "coppock", "cti", "dm", "er", "eri", "fisher", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd",
         "mom", "pgo", "po", "ppo", "psl", "pvo", "qqe", "roc", "rsi", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
@@ -75,14 +75,14 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "bbands", "donchian", "hwc", "kc", "massi",
+        "aberration", "accbands", "atr", "atr_ma_multiple", "bbands", "donchian", "hwc", "kc", "massi",
         "natr", "pdist", "rvi", "thermo", "true_range", "ui"
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
         "ad", "adosc", "aobv", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
-        "pvol", "pvr", "pvt", "vfi", "vol_delta"
+        "pvol", "pvr", "pvt", "vfi", "vol_delta", "weis_wave"
     ],
 }
 

@@ -17,3 +17,4 @@ from .pvt import pvt
 from .vfi import vfi
 from .vol_delta import vol_delta
 from .vp import vp
+from .weis_wave import weis_wave

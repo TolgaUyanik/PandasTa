@@ -923,6 +923,13 @@ class AnalysisIndicators(BasePandasObject):
         result = cci(high=high, low=low, close=close, length=length, c=c, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def cdvo(self, atr_length=None, smooth=None, rank_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = cdvo(high=high, low=low, close=close, atr_length=atr_length, smooth=smooth, rank_length=rank_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cfo(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = cfo(close=close, length=length, offset=offset, **kwargs)
@@ -1655,6 +1662,13 @@ class AnalysisIndicators(BasePandasObject):
         result = atr(high=high, low=low, close=close, length=length, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def atr_ma_multiple(self, atr_length=None, ma_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = atr_ma_multiple(high=high, low=low, close=close, atr_length=atr_length, ma_length=ma_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def bbands(self, length=None, std=None, mamode=None, offset=None, **kwargs):
         close  = self._get_column(kwargs.pop("close", "close"))
         result = bbands(close=close, length=length, std=std, mamode=mamode, offset=offset, **kwargs)
@@ -1846,4 +1860,14 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = vp(close=close, volume=volume, width=width, percent=percent, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def weis_wave(self, method=None, value=None, price_source=None, use_true_range=None,
+                  oscillating=False, normalize=False, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = weis_wave(high=high, low=low, close=close, open_=open_, volume=volume, method=method, value=value, price_source=price_source, use_true_range=use_true_range, oscillating=oscillating, normalize=normalize, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)

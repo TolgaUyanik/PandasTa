@@ -2,6 +2,7 @@
 from .aberration import aberration
 from .accbands import accbands
 from .atr import atr
+from .atr_ma_multiple import atr_ma_multiple
 from .bbands import bbands
 from .donchian import donchian
 from .hwc import hwc
