@@ -1790,6 +1790,15 @@ class AnalysisIndicators(BasePandasObject):
         result = obv(close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def pocket_pivot(self, length=None, max_offset_pct=None, lookback=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = pocket_pivot(close=close, open_=open_, high=high, low=low, volume=volume, length=length, max_offset_pct=max_offset_pct, lookback=lookback, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pvi(self, length=None, initial=None, signed=True, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))

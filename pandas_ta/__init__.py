@@ -81,7 +81,7 @@ Category = {
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "aobv", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pvi",
+        "ad", "adosc", "aobv", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
         "pvol", "pvr", "pvt", "vfi", "vol_delta"
     ],
 }
