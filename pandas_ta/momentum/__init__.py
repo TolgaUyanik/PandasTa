@@ -15,6 +15,7 @@ from .er import er
 from .eri import eri
 from .fisher import fisher
 from .inertia import inertia
+from .kalman_rsi import kalman_rsi
 from .kdj import kdj
 from .kst import kst
 from .lrsi import lrsi

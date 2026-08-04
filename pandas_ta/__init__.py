@@ -47,7 +47,7 @@ Category = {
     # Momentum
     "momentum": [
         "ao", "apo", "bias", "bop", "brar", "cci", "cfo", "cg", "cmo",
-        "coppock", "cti", "dm", "er", "eri", "fisher", "inertia", "kdj", "kst", "lrsi", "macd",
+        "coppock", "cti", "dm", "er", "eri", "fisher", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd",
         "mom", "pgo", "po", "ppo", "psl", "pvo", "qqe", "roc", "rsi", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr"

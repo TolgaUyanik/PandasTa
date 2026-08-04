@@ -983,6 +983,11 @@ class AnalysisIndicators(BasePandasObject):
 
         return self._post_process(result, **kwargs)
 
+    def kalman_rsi(self, length=None, process_noise=None, measurement_noise=None, initial_error=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = kalman_rsi(close=close, length=length, process_noise=process_noise, measurement_noise=measurement_noise, initial_error=initial_error, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kdj(self, length=None, signal=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
