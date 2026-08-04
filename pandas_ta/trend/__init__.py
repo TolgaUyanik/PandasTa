@@ -13,9 +13,11 @@ from .fvg import fvg
 from .halftrend import halftrend
 from .increasing import increasing
 from .long_run import long_run
+from .nwog import nwog
 from .ob import ob
 from .pmax import pmax
 from .priorday_fib import priorday_fib
+from .priormonth_range import priormonth_range
 from .psar import psar
 from .qstick import qstick
 from .short_run import short_run

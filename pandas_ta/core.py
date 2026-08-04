@@ -1523,6 +1523,19 @@ class AnalysisIndicators(BasePandasObject):
         result = priorday_fib(high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def priormonth_range(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = priormonth_range(high=high, low=low, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def nwog(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = nwog(open_=open_, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def qstick(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
