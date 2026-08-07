@@ -51,6 +51,7 @@ def rsi_divergence(high, low, close, rsi_length=None, pivot_left=None, pivot_rig
     if high is None or low is None or close is None: return
 
     rsi_val = rsi(close, length=rsi_length)
+    if rsi_val is None: return
     pivot_low = _confirm_strict_pivots(low, pivot_left, pivot_right, is_high=False)
     pivot_high = _confirm_strict_pivots(high, pivot_left, pivot_right, is_high=True)
 

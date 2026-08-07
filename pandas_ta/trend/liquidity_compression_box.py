@@ -25,6 +25,7 @@ def liquidity_compression_box(high, low, close, open_, window=None, atr_length=N
     if high is None or low is None or close is None or open_ is None: return
 
     atr_val = atr(high, low, close, length=atr_length)
+    if atr_val is None: return
 
     n = len(close)
     h = high.to_numpy(dtype=float)
