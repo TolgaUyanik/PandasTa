@@ -1610,6 +1610,16 @@ class AnalysisIndicators(BasePandasObject):
     # not SUPERT_10_3.0. Being defined second, it also shadowed the correct
     # accessor above. Removed 2026-07-29; use `length=`.
 
+    def sphinx_unicorn(self, swing=None, fvg_look=None, strict=None, need_disp=None, need_bpr=None,
+                       bpr_look=None, disp_min_pct=None, disp_ratio=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sphinx_unicorn(high=high, low=low, close=close, swing=swing, fvg_look=fvg_look,
+                                 strict=strict, need_disp=need_disp, need_bpr=need_bpr, bpr_look=bpr_look,
+                                 disp_min_pct=disp_min_pct, disp_ratio=disp_ratio, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ttm_trend(self, length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

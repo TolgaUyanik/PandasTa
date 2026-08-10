@@ -71,7 +71,7 @@ Category = {
         "adx", "amat", "aroon", "band_cross_retest", "bos", "choch", "chop", "cksp", "decay", "decreasing",
         "dpo", "equal_highs_lows", "fvg", "halftrend", "increasing", "liquidity_compression_box", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "renko_trend",
-        "ribbon_concordance", "short_run", "swing_equilibrium", "tsignals", "ttm_trend",
+        "ribbon_concordance", "short_run", "sphinx_unicorn", "swing_equilibrium", "tsignals", "ttm_trend",
         "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib"
     ],
     # Volatility
