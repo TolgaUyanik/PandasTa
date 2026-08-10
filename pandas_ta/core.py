@@ -1735,6 +1735,13 @@ class AnalysisIndicators(BasePandasObject):
         result = donchian(high=high, low=low, lower_length=lower_length, upper_length=upper_length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def har_park(self, short_length=None, medium_length=None, long_length=None, fit_window=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = har_park(high=high, low=low, close=close, short_length=short_length, medium_length=medium_length, long_length=long_length, fit_window=fit_window, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def hwc(self, na=None, nb=None, nc=None, nd=None, scalar=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = hwc(close=close, na=na, nb=nb, nc=nc, nd=nd, scalar=scalar, offset=offset, **kwargs)

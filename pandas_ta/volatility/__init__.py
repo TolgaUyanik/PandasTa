@@ -5,6 +5,7 @@ from .atr import atr
 from .atr_ma_multiple import atr_ma_multiple
 from .bbands import bbands
 from .donchian import donchian
+from .har_park import har_park
 from .hwc import hwc
 from .kc import kc
 from .massi import massi
