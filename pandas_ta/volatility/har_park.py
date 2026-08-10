@@ -5,7 +5,7 @@ from pandas import Series
 from pandas_ta.utils import get_offset, verify_series
 
 
-def _parkinson_pct(high: Series, low: Series) -> Series:
+def _parkinson_pct(high: Series, low: Series) -> np.ndarray:
     """Parkinson range-based volatility, as a % of price (already
     scale-free -- no distance-form reformulation needed). Causal: uses
     only the current bar's own high/low, no look-ahead. Split out as its
@@ -13,11 +13,15 @@ def _parkinson_pct(high: Series, low: Series) -> Series:
     value without pulling in the regression machinery (Fletcher round 1:
     the original test suite re-derived this exact expression inline,
     which meant a wrong constant here would cancel against itself in
-    every test)."""
+    every test). Returns a bare ndarray, deliberately NOT a Series --
+    index bookkeeping is the caller's job (Fletcher round 2: an earlier
+    version built the Series here using `high.index`, while `har_park`
+    had always used `close.index`; when high/low carry a different index
+    from close this silently changed which index the result carried,
+    latent in this monorepo where callers pass columns off one frame)."""
     ln2 = np.log(2.0)
     hl_valid = (high > 0) & (low > 0) & (high >= low)
-    park_pct = np.where(hl_valid, np.sqrt(np.log(high / low) ** 2 / (4 * ln2)) * 100, 0.0)
-    return Series(park_pct, index=high.index)
+    return np.where(hl_valid, np.sqrt(np.log(high / low) ** 2 / (4 * ln2)) * 100, 0.0)
 
 
 def har_park(high, low, close, short_length=None, medium_length=None, long_length=None,
@@ -35,7 +39,7 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
 
     if high is None or low is None or close is None: return
 
-    park_pct = _parkinson_pct(high, low)
+    park_pct = Series(_parkinson_pct(high, low), index=close.index)
 
     # HAR components: short/medium/long SMAs of Parkinson vol (source
     # defaults 1/5/22 bars, "daily/weekly/monthly-equivalent").
@@ -98,11 +102,15 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
     # an ABSOLUTE `singular_values.min() < 1e-12` threshold. That is
     # wrong -- this Gram-style matrix's entries scale with
     # fit_window * park_pct^2, so an absolute floor tracks price/vol
-    # MAGNITUDE, not conditioning. Verified by construction: a perfectly
-    # rank-deficient (constant H/L ratio) matrix at BIST-limit-lock scale
-    # (+/-10%) has singular values well above 1e-12 in absolute terms and
-    # sails through with garbage, arbitrarily-amplified coefficients --
-    # exactly the failure this guard exists to prevent. The threshold
+    # MAGNITUDE, not conditioning, and the miss is fit_window-dependent:
+    # measured directly, a constant-H/L-ratio (rank-deficient) input at
+    # BIST-limit-lock scale (+/-10%) with fit_window=500 (the default)
+    # has 56 of 401 solvable bars sitting in the 1e-12..1.7e-12 min-
+    # singular-value band -- just above the old absolute floor, so the
+    # old guard let those 56 through with unstable, arbitrarily-amplified
+    # coefficients (at fit_window=100 the same +/-10% input never crosses
+    # 1e-12 at all, so the old guard happened to catch every bar there --
+    # the failure only shows up at the wider window). The threshold
     # below is RELATIVE to the matrix's own scale (condition-number
     # style: smallest singular value vs. largest), which is scale-
     # invariant and actually catches rank-deficiency regardless of the

@@ -124,7 +124,7 @@ def test_correctness_against_independent_lstsq_solve():
     short_length, medium_length, long_length = 1, 5, 22
     out = ta.har_park(high, low, close, fit_window=fit_window)
 
-    park_pct = _parkinson_pct(high, low)
+    park_pct = pd.Series(_parkinson_pct(high, low), index=close.index)
     x1 = park_pct.rolling(short_length).mean()
     x2 = park_pct.rolling(medium_length).mean()
     x3 = park_pct.rolling(long_length).mean()
@@ -169,23 +169,51 @@ def test_parkinson_formula_matches_hand_computed_value():
     high = pd.Series([110.0], index=pd.date_range("2020-01-01", periods=1))
     low = pd.Series([100.0], index=pd.date_range("2020-01-01", periods=1))
     out = _parkinson_pct(high, low)
-    assert out.iloc[0] == pytest.approx(5.723959637, abs=1e-8)
+    assert out[0] == pytest.approx(5.723959637, abs=1e-8)
 
 
 def test_near_singular_guard_is_scale_relative_not_absolute():
     # Fletcher round 1 CRITICAL-class catch: a first version of the guard
     # used an ABSOLUTE 1e-12 singular-value floor, which tracks matrix
     # MAGNITUDE (this Gram-style matrix scales with fit_window *
-    # park_pct^2), not conditioning -- a constant-H/L-ratio (rank-
-    # deficient by construction) input at BIST-limit-lock scale (+/-10%)
-    # sailed straight through the old guard with garbage, arbitrarily-
-    # amplified coefficients. The fix makes the threshold relative to the
-    # matrix's own scale (condition-number style). This test pins that at
-    # BIST magnitude specifically -- the exact scale the old guard failed
-    # at -- not just at a scale small enough to trip an absolute floor.
-    n = 300
+    # park_pct^2), not conditioning. The fix makes the threshold relative
+    # to the matrix's own scale (condition-number style).
+    #
+    # Fletcher round 2: an earlier version of THIS test used n=300,
+    # fit_window=100 -- at those parameters the matrix is already small
+    # enough (max min-singular-value 3.6e-13) that the OLD absolute guard
+    # also caught it, so the test passed even against a full revert of
+    # the fix and gave zero regression protection. The miss is
+    # fit_window-DEPENDENT, not magnitude-only: measured directly, at the
+    # DEFAULT fit_window=500 with this same +/-10% constant ratio, 56 of
+    # 401 solvable bars have min-singular-value in the 1e-12..1.7e-12
+    # band (max measured 1.664e-12) -- just above the old absolute floor,
+    # comfortably below the new relative one. n=900 is required so 401
+    # bars are actually solvable at fit_window=500 within a 900-bar
+    # frame. Verified: the OLD guard admits 56/401 bars here; the NEW
+    # guard admits 0.
+    n = 900
     close = pd.Series(100 + np.arange(n) * 0.01, index=pd.date_range("2020-01-01", periods=n, freq="B"))
     high = close * 1.10
     low = close * 0.90
+    out = ta.har_park(high, low, close, fit_window=500)
+    assert out.isna().all(), "constant H/L ratio at BIST-limit-lock magnitude, fit_window=500 (the default) must yield all-NaN (rank-deficient fit) -- the old absolute-1e-12 guard let 56/401 such bars through with unstable coefficients"
+
+
+def test_result_carries_close_index_even_when_high_low_index_differs():
+    # Fletcher round 2: _parkinson_pct's Series-building was extracted
+    # using `high.index`, while har_park had always keyed its output off
+    # `close.index`. Positionally-aligned high/low/close inputs (the
+    # normal case, and the only case exercised elsewhere in this file)
+    # never surface the gap since all three already share one index --
+    # this test deliberately gives high/low a DIFFERENT index object
+    # (same length, same positions, but not `is`/`==` the same index) to
+    # confirm the result is keyed off `close.index`, not whatever
+    # `_parkinson_pct` happens to receive.
+    high, low, close = _ohlc(n=200, seed=7)
+    high = high.copy()
+    high.index = pd.RangeIndex(len(high))
+    low = low.copy()
+    low.index = pd.RangeIndex(len(low))
     out = ta.har_park(high, low, close, fit_window=100)
-    assert out.isna().all(), "constant H/L ratio at BIST-limit-lock magnitude must yield all-NaN (rank-deficient fit), not garbage coefficients"
+    assert out.index.equals(close.index)
