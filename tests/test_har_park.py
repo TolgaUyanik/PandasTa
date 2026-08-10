@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from .context import pandas_ta as ta
+from pandas_ta.volatility.har_park import _parkinson_pct
 
 
 def _ohlc(n=100, seed=0):
@@ -123,12 +124,7 @@ def test_correctness_against_independent_lstsq_solve():
     short_length, medium_length, long_length = 1, 5, 22
     out = ta.har_park(high, low, close, fit_window=fit_window)
 
-    ln2 = np.log(2.0)
-    hl_valid = (high > 0) & (low > 0) & (high >= low)
-    park_pct = pd.Series(
-        np.where(hl_valid, np.sqrt(np.log(high / low) ** 2 / (4 * ln2)) * 100, 0.0),
-        index=close.index,
-    )
+    park_pct = _parkinson_pct(high, low)
     x1 = park_pct.rolling(short_length).mean()
     x2 = park_pct.rolling(medium_length).mean()
     x3 = park_pct.rolling(long_length).mean()
@@ -161,3 +157,35 @@ def test_offset():
         out.iloc[:-1].reset_index(drop=True),
         check_names=False,
     )
+
+
+def test_parkinson_formula_matches_hand_computed_value():
+    # Fletcher round 1: every prior test re-derived the Parkinson formula
+    # inline from the implementation, so a wrong constant (e.g. 2*ln2
+    # instead of 4*ln2) would cancel against itself and stay green
+    # everywhere. This is the one test with a literal, hand-computed
+    # expected value with no shared code: for high=110, low=100,
+    # Parkinson % = sqrt(ln(1.1)^2 / (4*ln(2))) * 100 = 5.723959637...
+    high = pd.Series([110.0], index=pd.date_range("2020-01-01", periods=1))
+    low = pd.Series([100.0], index=pd.date_range("2020-01-01", periods=1))
+    out = _parkinson_pct(high, low)
+    assert out.iloc[0] == pytest.approx(5.723959637, abs=1e-8)
+
+
+def test_near_singular_guard_is_scale_relative_not_absolute():
+    # Fletcher round 1 CRITICAL-class catch: a first version of the guard
+    # used an ABSOLUTE 1e-12 singular-value floor, which tracks matrix
+    # MAGNITUDE (this Gram-style matrix scales with fit_window *
+    # park_pct^2), not conditioning -- a constant-H/L-ratio (rank-
+    # deficient by construction) input at BIST-limit-lock scale (+/-10%)
+    # sailed straight through the old guard with garbage, arbitrarily-
+    # amplified coefficients. The fix makes the threshold relative to the
+    # matrix's own scale (condition-number style). This test pins that at
+    # BIST magnitude specifically -- the exact scale the old guard failed
+    # at -- not just at a scale small enough to trip an absolute floor.
+    n = 300
+    close = pd.Series(100 + np.arange(n) * 0.01, index=pd.date_range("2020-01-01", periods=n, freq="B"))
+    high = close * 1.10
+    low = close * 0.90
+    out = ta.har_park(high, low, close, fit_window=100)
+    assert out.isna().all(), "constant H/L ratio at BIST-limit-lock magnitude must yield all-NaN (rank-deficient fit), not garbage coefficients"

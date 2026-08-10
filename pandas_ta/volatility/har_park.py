@@ -5,6 +5,21 @@ from pandas import Series
 from pandas_ta.utils import get_offset, verify_series
 
 
+def _parkinson_pct(high: Series, low: Series) -> Series:
+    """Parkinson range-based volatility, as a % of price (already
+    scale-free -- no distance-form reformulation needed). Causal: uses
+    only the current bar's own high/low, no look-ahead. Split out as its
+    own function so it's independently testable against a hand-computed
+    value without pulling in the regression machinery (Fletcher round 1:
+    the original test suite re-derived this exact expression inline,
+    which meant a wrong constant here would cancel against itself in
+    every test)."""
+    ln2 = np.log(2.0)
+    hl_valid = (high > 0) & (low > 0) & (high >= low)
+    park_pct = np.where(hl_valid, np.sqrt(np.log(high / low) ** 2 / (4 * ln2)) * 100, 0.0)
+    return Series(park_pct, index=high.index)
+
+
 def har_park(high, low, close, short_length=None, medium_length=None, long_length=None,
              fit_window=None, offset=None, **kwargs):
     """Indicator: HAR-Parkinson Volatility Forecast (HARPARK)"""
@@ -20,12 +35,7 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
 
     if high is None or low is None or close is None: return
 
-    # Parkinson range-based volatility, percent of price, causal (current
-    # bar's own H/L only -- no look-ahead).
-    ln2 = np.log(2.0)
-    hl_valid = (high > 0) & (low > 0) & (high >= low)
-    park_pct = np.where(hl_valid, np.sqrt(np.log(high / low) ** 2 / (4 * ln2)) * 100, 0.0)
-    park_pct = Series(park_pct, index=close.index)
+    park_pct = _parkinson_pct(high, low)
 
     # HAR components: short/medium/long SMAs of Parkinson vol (source
     # defaults 1/5/22 bars, "daily/weekly/monthly-equivalent").
@@ -79,14 +89,24 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
     # (necessary there -- Pine has no linear-algebra library); numpy's
     # solve() computes the same result without reimplementing pivoting by
     # hand, but `LinAlgError` alone only fires on an EXACTLY singular
-    # matrix -- Pine's guard (`ok := false` whenever a post-pivot entry's
-    # |value| < 1e-12) also catches the NEAR-singular band, which numpy's
-    # solve() would happily return numerically unstable, arbitrarily
-    # amplified coefficients for instead of NaN. x1/x2/x3 are three SMAs
-    # of the same series (correlated by construction) and a BIST
-    # limit-lock streak (constant H/L ratio for several bars) pushes
-    # toward exactly this near-singular regime, so the smallest-singular-
-    # value check below is a real guard, not defensive-only boilerplate.
+    # matrix. x1/x2/x3 are three SMAs of the same series (correlated by
+    # construction) and a BIST limit-lock streak (constant H/L ratio for
+    # several bars) pushes toward near-singular, not exactly-singular --
+    # the gap `LinAlgError` alone misses.
+    #
+    # Fletcher round 1 correction: an earlier version of this guard used
+    # an ABSOLUTE `singular_values.min() < 1e-12` threshold. That is
+    # wrong -- this Gram-style matrix's entries scale with
+    # fit_window * park_pct^2, so an absolute floor tracks price/vol
+    # MAGNITUDE, not conditioning. Verified by construction: a perfectly
+    # rank-deficient (constant H/L ratio) matrix at BIST-limit-lock scale
+    # (+/-10%) has singular values well above 1e-12 in absolute terms and
+    # sails through with garbage, arbitrarily-amplified coefficients --
+    # exactly the failure this guard exists to prevent. The threshold
+    # below is RELATIVE to the matrix's own scale (condition-number
+    # style: smallest singular value vs. largest), which is scale-
+    # invariant and actually catches rank-deficiency regardless of the
+    # underlying volatility magnitude.
     for t in range(n):
         if np.isnan(s00v[t]):
             continue
@@ -98,7 +118,7 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
         ])
         rhs = np.array([s0yv[t], s1yv[t], s2yv[t], s3yv[t]])
         singular_values = np.linalg.svd(a, compute_uv=False)
-        if singular_values.min() < 1e-12:
+        if singular_values.min() < 1e-12 * singular_values.max():
             continue
         try:
             coeffs = np.linalg.solve(a, rhs)
@@ -119,10 +139,13 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
     # would pass earlier -- matching the source's own conservative gate,
     # not a reformulation.
     bar_index = np.arange(n)
-    # Pine's `fitWindow / 2` on two ints performs INTEGER division (`//`
-    # here, not `/`) -- matched exactly, not just "close enough": at
-    # fit_window=501 the two differ by half a bar (332 vs 332.5), shifting
-    # the first-ready bar by one.
+    # Pine's `fitWindow / 2` on two ints performs INTEGER division -- `//`
+    # here, not `/`, matches that exactly for fidelity to the source. In
+    # practice this is behaviorally a no-op against a strict `>` on an
+    # integer bar_index (e.g. fit_window=501: `> 332` and `> 332.5` both
+    # first admit bar 333, verified across fit_window 1..2000) -- kept
+    # for fidelity to the source expression, not because it changes any
+    # bar's readiness.
     fit_ready = (bar_index > (long_length + fit_window // 2 + 60)) & b0.notna().to_numpy()
     fpct_raw = b0 + b1 * x1 + b2 * x2 + b3 * x3
     fpct = fpct_raw.clip(lower=0.0)
