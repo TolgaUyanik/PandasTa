@@ -23,24 +23,32 @@ Fixed to `lo = gap_end + 1` (re-derived from the Pine source's `for k =
 off0 to i-1` directly, independent of the buggy version). Every
 end-to-end scenario below is built on physically valid OHLC (low <= high
 always -- each scenario asserts this itself at construction time, so the
-claim can't silently rot again) and at least one test per helper is a
-"several bars before the swing" case that specifically fails on the
-pre-fix code.
+claim can't silently rot again) and at least one `_find_nested_fvg` test is
+a "several bars before the swing" case that specifically fails on the
+pre-fix code; `_find_disp_fvg`'s several-bars-before case
+(`test_find_disp_fvg_bearish_branch_several_bars_before_t_bar`) covers its
+`d>0` loop path but is not a regression test for THIS bug -- the fix lived
+entirely in `_find_nested_fvg`, and `_find_disp_fvg` has no fill scan to
+trip.
 
 Fletcher round 3: an earlier revision of this docstring claimed "every
 scenario ... confirmed to discriminate" without having actually measured
 it -- exactly the kind of unverified claim this whole review chain exists
-to kill, caught only because a reviewer ran it. The real count, measured
-by temporarily reverting `sphinx_unicorn.py`'s fix and running this file:
-**8 of 23 tests fail against the pre-fix code** (`test_find_nested_fvg_
-gap_several_bars_before_swing_unfilled`, `test_arm_bear_fires_...`,
-`test_fire_bear_activates_on_close_below_need_...`, `test_fire_bear_
-blocked_by_bpr_...`, `test_fire_bear_activates_when_bpr_displacement_gap_
-present`, `test_arm_bull_and_dist_bull_hold_...`, `test_clustering_
-merges_...`, `test_causal_no_lookahead`) -- these are the discriminating
-regression tests. The other 15 are NaN-padded isolated unit tests,
-naming/accessor/reachability checks, and `test_fire_bull_activates_...`
-(added after this count was taken) that verify real behavior but do not
+to kill, caught only because a reviewer ran it. Fletcher round 4 caught
+the SAME unverified-claim pattern one paragraph later: a prior revision
+here asserted (without re-measuring) that the newly added
+`test_fire_bull_activates_...` was a non-discriminator, when it is in fact
+the 9th failure. The real count, measured by temporarily reverting
+`sphinx_unicorn.py`'s fix and running this file: **9 of 23 tests fail
+against the pre-fix code** (`test_find_nested_fvg_gap_several_bars_before_
+swing_unfilled`, `test_arm_bear_fires_...`, `test_fire_bear_activates_on_
+close_below_need_...`, `test_fire_bear_blocked_by_bpr_...`, `test_fire_
+bear_activates_when_bpr_displacement_gap_present`, `test_arm_bull_and_
+dist_bull_hold_...`, `test_fire_bull_activates_on_close_above_need_...`,
+`test_clustering_merges_...`, `test_causal_no_lookahead`) -- these are the
+discriminating regression tests. The other 14 are NaN-padded isolated unit
+tests and naming/accessor checks (`test_columns_and_naming`,
+`test_accessor_matches_direct_call`) that verify real behavior but do not
 happen to exercise the specific fill-scan bug that was fixed.
 """
 import numpy as np
@@ -182,9 +190,9 @@ def test_find_disp_fvg_min_sz_is_the_binding_floor():
 # round 2 found the SAME defect reintroduced in the one bullish scenario
 # added to close a coverage gap. Not every scenario below discriminates
 # against the pre-fix bug (some -- `test_columns_and_naming`,
-# `test_accessor_matches_direct_call`, `test_fire_bull_activates_...` --
-# verify other properties entirely); the module docstring above names
-# exactly which ones do, measured, not assumed.
+# `test_accessor_matches_direct_call` -- verify other properties
+# entirely); the module docstring above names exactly which ones do,
+# measured, not assumed.
 
 def _flooded_ohlc(n=30):
     high = np.full(n, 200.0)
@@ -287,7 +295,7 @@ def test_fire_bear_activates_when_bpr_displacement_gap_present():
 
 def test_arm_bull_and_dist_bull_hold_without_immediate_fire():
     # Bullish mirror: bearish FVG (SIBI) at bars [5,6,7] (low[5]=104.0 >
-    # high[7]=101.0), swing HIGH pivot at bar 10 nested inside (101.0,
+    # high[7]=101.5), swing HIGH pivot at bar 10 nested inside (101.5,
     # 104.0). Baseline kept LOW (close=85.0, below need=104.0) so arming
     # doesn't also immediately fire -- verified during development that a
     # baseline of 150.0 (as used for the bearish scenarios) fires on the
@@ -302,7 +310,7 @@ def test_arm_bull_and_dist_bull_hold_without_immediate_fire():
     # output under the buggy code -- a non-discriminating test. Bars 5/6/7
     # are now genuinely valid (low <= high on every one) and independently
     # confirmed to return (nan, nan) under the pre-fix filled-check
-    # formula, (104.0, 101.0) under the fix.
+    # formula, (104.0, 101.5) under the fix.
     n = 20
     high = np.full(n, 90.0)
     low = np.full(n, 80.0)
