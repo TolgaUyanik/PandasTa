@@ -211,9 +211,20 @@ def test_result_carries_close_index_even_when_high_low_index_differs():
     # confirm the result is keyed off `close.index`, not whatever
     # `_parkinson_pct` happens to receive.
     high, low, close = _ohlc(n=200, seed=7)
+    baseline = ta.har_park(high, low, close, fit_window=100)
+
     high = high.copy()
     high.index = pd.RangeIndex(len(high))
     low = low.copy()
     low.index = pd.RangeIndex(len(low))
     out = ta.har_park(high, low, close, fit_window=100)
+
+    # Index correctness AND value correctness -- a silent pandas reindex
+    # (e.g. if _parkinson_pct went back to building its own Series off
+    # high.index) would keep out.index == close.index but reindex the
+    # underlying values to all-NaN. Compare against the same-index
+    # baseline positionally so both failure modes are caught.
     assert out.index.equals(close.index)
+    pd.testing.assert_series_equal(
+        out.reset_index(drop=True), baseline.reset_index(drop=True), check_names=False,
+    )
