@@ -20,11 +20,28 @@ NaN-padded arrays where the fill-scan has nothing to trip over, and (b) the
 end-to-end scenarios were built on PHYSICALLY IMPOSSIBLE bars (a bar's low
 set 49 points above its own high, to dodge the bug rather than expose it).
 Fixed to `lo = gap_end + 1` (re-derived from the Pine source's `for k =
-off0 to i-1` directly, independent of the buggy version). Every scenario
-below is rebuilt on physically valid OHLC (low <= high always) and at
-least one test per helper is a "several bars before the swing" case that
-specifically fails on the pre-fix code -- verified during development by
-running the buggy version against these exact arrays.
+off0 to i-1` directly, independent of the buggy version). Every
+end-to-end scenario below is built on physically valid OHLC (low <= high
+always -- each scenario asserts this itself at construction time, so the
+claim can't silently rot again) and at least one test per helper is a
+"several bars before the swing" case that specifically fails on the
+pre-fix code.
+
+Fletcher round 3: an earlier revision of this docstring claimed "every
+scenario ... confirmed to discriminate" without having actually measured
+it -- exactly the kind of unverified claim this whole review chain exists
+to kill, caught only because a reviewer ran it. The real count, measured
+by temporarily reverting `sphinx_unicorn.py`'s fix and running this file:
+**8 of 23 tests fail against the pre-fix code** (`test_find_nested_fvg_
+gap_several_bars_before_swing_unfilled`, `test_arm_bear_fires_...`,
+`test_fire_bear_activates_on_close_below_need_...`, `test_fire_bear_
+blocked_by_bpr_...`, `test_fire_bear_activates_when_bpr_displacement_gap_
+present`, `test_arm_bull_and_dist_bull_hold_...`, `test_clustering_
+merges_...`, `test_causal_no_lookahead`) -- these are the discriminating
+regression tests. The other 15 are NaN-padded isolated unit tests,
+naming/accessor/reachability checks, and `test_fire_bull_activates_...`
+(added after this count was taken) that verify real behavior but do not
+happen to exercise the specific fill-scan bug that was fixed.
 """
 import numpy as np
 import pandas as pd
@@ -158,13 +175,16 @@ def test_find_disp_fvg_min_sz_is_the_binding_floor():
 # ---------------------------------------------------------------------------
 # End-to-end sphinx_unicorn() scenarios
 # ---------------------------------------------------------------------------
-# All bars are physically valid (low <= high everywhere) -- the Fletcher-
-# round-1 MAJOR finding was that the original scenarios dodged the CRITICAL
-# bug via inverted bars (a low set 49 points above its own high). Every
-# scenario here was independently re-run against the pre-fix code during
-# development and confirmed to produce a DIFFERENT (degenerate) result,
-# not asserted in the test itself but load-bearing for why these
-# particular bar layouts were chosen.
+# All bars are physically valid (low <= high everywhere -- each scenario
+# builder asserts this itself at construction time) -- the Fletcher-round-1
+# MAJOR finding was that the original scenarios dodged the CRITICAL bug via
+# inverted bars (a low set 49 points above its own high), and Fletcher
+# round 2 found the SAME defect reintroduced in the one bullish scenario
+# added to close a coverage gap. Not every scenario below discriminates
+# against the pre-fix bug (some -- `test_columns_and_naming`,
+# `test_accessor_matches_direct_call`, `test_fire_bull_activates_...` --
+# verify other properties entirely); the module docstring above names
+# exactly which ones do, measured, not assumed.
 
 def _flooded_ohlc(n=30):
     high = np.full(n, 200.0)
@@ -210,6 +230,7 @@ def test_fire_bear_activates_on_close_below_need_and_clears_armed_slot():
     n = 20
     high, low, close = _bearish_setup_bars(n)
     close[15], low[15], high[15] = 90.0, 89.0, 91.0
+    assert low[15] <= high[15], "construction check: bar 15 must be physically valid"
     idx = pd.date_range("2020-01-01", periods=n, freq="B")
     out = ta.sphinx_unicorn(
         pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
@@ -235,6 +256,7 @@ def test_fire_bear_blocked_by_bpr_when_no_adequate_displacement_gap():
     high, low, close = _bearish_setup_bars(n)
     close[15], low[15], high[15] = 90.0, 89.0, 91.0
     low[13] = 85.0
+    assert low[15] <= high[15] and low[13] <= high[13], "construction check: bars 13/15 must be physically valid"
     idx = pd.date_range("2020-01-01", periods=n, freq="B")
     out = ta.sphinx_unicorn(
         pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx), fvg_look=10,
@@ -254,6 +276,7 @@ def test_fire_bear_activates_when_bpr_displacement_gap_present():
     high, low, close = _bearish_setup_bars(n)
     close[15], low[15], high[15] = 90.0, 89.0, 99.0
     low[13] = 104.0
+    assert low[15] <= high[15] and low[13] <= high[13], "construction check: bars 13/15 must be physically valid"
     idx = pd.date_range("2020-01-01", periods=n, freq="B")
     out = ta.sphinx_unicorn(
         pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx), fvg_look=10,
@@ -297,11 +320,39 @@ def test_arm_bull_and_dist_bull_hold_without_immediate_fire():
     )
     assert out["SPHINX_ARM_BULL_2"].iloc[12] == 1
     assert out["SPHINX_FIRE_BULL_2"].iloc[12] == 0
-    # matched gap: (t=low[5]=104.0, b=high[7]=101.0). need = max(swing_
-    # price=102.0, zt=104.0) = 104.0
+    # matched gap: (t=low[5]=104.0, b=high[7]=101.5) -- b is high[7]
+    # (101.5), NOT bar 7's own low (101.0); need = max(swing_price=102.0,
+    # zt=104.0) = 104.0 (need_disp=True uses zt here, so zb is inert for
+    # this specific assertion, but the value is still worth getting right).
     # dist = (85.0 - 104.0) / 85.0 * 100
     assert out["SPHINX_DIST_BULL_2"].iloc[12] == pytest.approx((85.0 - 104.0) / 85.0 * 100, abs=1e-9)
     assert out["SPHINX_DIST_BULL_2"].iloc[15] == pytest.approx((85.0 - 104.0) / 85.0 * 100, abs=1e-9)
+
+
+def test_fire_bull_activates_on_close_above_need_and_clears_armed_slot():
+    # Extends the bullish arm scenario above: push close past need=104.0
+    # at bar 18 -- fires, and the armed slot clears (DIST NaN afterward).
+    n = 25
+    high = np.full(n, 90.0)
+    low = np.full(n, 80.0)
+    close = np.full(n, 85.0)
+    high[5], low[5] = 104.5, 104.0
+    high[6], low[6] = 101.5, 100.9
+    high[7], low[7] = 101.5, 101.0
+    high[8] = high[9] = high[11] = high[12] = 101.5
+    high[10], low[10] = 102.0, 101.8
+    close[18], low[18], high[18] = 110.0, 109.0, 111.0
+    assert (low[:19] <= high[:19]).all(), "construction check: every bar must be physically valid"
+    idx = pd.date_range("2020-01-01", periods=n, freq="B")
+    out = ta.sphinx_unicorn(
+        pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
+        fvg_look=10, need_bpr=False,
+    )
+    assert out["SPHINX_FIRE_BULL_2"].iloc[18] == 1
+    assert out["SPHINX_FIRE_BULL_2"].sum() == 1
+    # need = 104.0 (see arm test above); dist = (110.0 - 104.0) / 110.0 * 100
+    assert out["SPHINX_DIST_BULL_2"].iloc[18] == pytest.approx((110.0 - 104.0) / 110.0 * 100, abs=1e-9)
+    assert out["SPHINX_DIST_BULL_2"].iloc[19:].isna().all()
 
 
 def test_clustering_merges_overlapping_zone_updates_span_no_second_arm():
