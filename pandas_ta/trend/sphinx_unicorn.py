@@ -60,8 +60,21 @@ def _find_nested_fvg(high_v, low_v, swing_bar, probe, radius, strict, is_bull_se
         # Filled check: has price already traded back through the gap
         # between its formation and the swing bar (exclusive of the
         # formation bar itself, inclusive of the swing bar)?
+        #
+        # Fletcher CRITICAL catch: an earlier version of this line read
+        # `lo = gap_end - d + 1`, which is `swing_bar - 2*d + 1` -- an
+        # extra `-d` that drags the scan back INTO the gap's own bars
+        # (gap_start..gap_end) for any d >= 3, where the gap's own low
+        # is (almost always) below its own high, so the gap declares
+        # itself filled. Net effect: only gaps ending within ~2 bars of
+        # the swing could ever match; fvg_look behaved like fvg_look=2
+        # regardless of the actual parameter. Re-derived from the Pine
+        # source directly: `for k = off0 to i-1` in Pine-relative terms
+        # maps to the absolute range [swing_bar-d+1, swing_bar] --
+        # exactly `gap_end+1` to `swing_bar` (gap_end = swing_bar-d), no
+        # second `d` term.
         filled = False
-        lo = gap_end - d + 1
+        lo = gap_end + 1
         hi = swing_bar
         for k in range(max(lo, 0), hi + 1):
             ref = low_v[k] if is_bull_setup else high_v[k]
@@ -79,7 +92,16 @@ def _find_disp_fvg(high_v, low_v, t_bar, is_bull_setup, nz_t, nz_b, lookback, mi
     """Balanced Price Range check: does a same-direction gap, formed in
     the `lookback` bars up to and including `t_bar`, overlap the nesting
     FVG [nz_b, nz_t] by at least a hair and clear the size floor? True/
-    False. Absolute bar-index form of the source's `find_disp_fvg`."""
+    False. Absolute bar-index form of the source's `find_disp_fvg`.
+
+    The overlap test is `overlap > 0` (strictly positive), not Pine's
+    `ov >= syminfo.mintick` -- a second, smaller `mintick` substitution
+    alongside `disp_min_pct` (see the module docstring's mintick
+    paragraph), admitting a fractional-float overlap Pine's one-tick
+    floor would reject. Deliberately not tied to `min_sz`/`disp_min_pct`
+    (which floors the gap's own SIZE, a different quantity from how much
+    it overlaps the nesting zone) -- left as `> 0` rather than inventing
+    a second undocumented threshold."""
     nest_sz = nz_t - nz_b
     need_sz = max(min_sz, ratio * nest_sz)
     for d in range(0, lookback + 1):
@@ -146,7 +168,7 @@ def sphinx_unicorn(high, low, close, swing=None, fvg_look=None, strict=None,
     # unbounded/ring-buffered array). See the module docstring for the
     # measured consequence and why this follows the source's own stated
     # design intent rather than a probable bug in its actual code.
-    armed_top = [np.nan, np.nan]     # [bear, bull] -- index 0/1 matches source's z_armed slot convention
+    armed_top = [np.nan, np.nan]     # [bear, bull] -- NOTE: opposite of the source's z_armed slot order (source: 0=bull via _arm(0)/z_armed[0], 1=bear via _arm(1)/z_armed[1]); this port's [0]=bear/[1]=bull is internal-only, never compared against the source's array
     armed_bot = [np.nan, np.nan]
     armed_swing = [np.nan, np.nan]
 
@@ -292,6 +314,20 @@ source rather than the author's actual design, and chasing bug-for-bug
 fidelity to it would require reproducing the full ring buffer for
 uncertain benefit -- this port follows the stated design ("never
 re-arms") instead.
+
+Two concrete consequences of this divergence, so "arms a fresh zone
+here" isn't read as behavioral equivalence: (1) in the source, that
+re-promotion ALSO raises `arm_bull`/`arm_bear` for the re-clustered
+swing -- this port emits no arm signal on the bars where the source's
+literal code would. (2) The source's re-promotion repoints `z_armed` at
+the OLD zone's (already-established) top/bot, not the new swing's own
+range -- so its subsequent `need` threshold is computed from a different
+price range than the freshly-armed zone this port creates, and the
+OLD zone in the source is left stranded in state ARMED but no longer
+tracked by anything, permanently unable to fire (itself further evidence
+the source's behavior is unintended, not designed). This divergence is
+untestable in this port by construction -- there is no ring buffer here
+to exhibit the source's literal behavior against.
 
 ⚠ `min_ticks`/`syminfo.mintick` (a secondary floor under the source's real
 gate, its own comment: "The ratio is the real gate") has no equivalent in
