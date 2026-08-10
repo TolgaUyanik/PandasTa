@@ -183,6 +183,7 @@ def _bearish_setup_bars(n=30):
     high[7], low[7] = 104.5, 103.0
     low[8] = low[9] = low[11] = low[12] = 102.5
     low[10] = 102.0
+    assert (low[:13] <= high[:13]).all(), "construction check: every bar must be physically valid"
     return high, low, close
 
 
@@ -245,9 +246,10 @@ def test_fire_bear_blocked_by_bpr_when_no_adequate_displacement_gap():
 def test_fire_bear_activates_when_bpr_displacement_gap_present():
     # Same setup, but this time a genuine bearish displacement gap forms
     # right at the crossing bar (bar 13's low=104.0 > bar 15's high=99.0,
-    # a valid bearish FVG overlapping the armed zone [100.0, 103.0] with
-    # size 5.0 >= need_sz=max(0.01%*90, 0.75*3.0=2.25)) -- BPR passes,
-    # fire happens.
+    # a valid bearish FVG overlapping the armed zone [100.8, 103.0] (zb is
+    # high[gap_start]=high[5]=100.8, NOT bar 5's own low of 100.0 -- see
+    # test_arm_bear_fires_...'s comment) with size 5.0 >= need_sz=
+    # max(0.01%*90, 0.75*2.2=1.65)) -- BPR passes, fire happens.
     n = 20
     high, low, close = _bearish_setup_bars(n)
     close[15], low[15], high[15] = 90.0, 89.0, 99.0
@@ -268,15 +270,26 @@ def test_arm_bull_and_dist_bull_hold_without_immediate_fire():
     # baseline of 150.0 (as used for the bearish scenarios) fires on the
     # SAME bar it arms, since 150.0 already clears need=104.0, which
     # would make this test unable to isolate ARM from FIRE.
+    #
+    # Fletcher round 2 MAJOR: the first version of this scenario set
+    # `low[5], high[5] = 104.0, 103.5` -- low ABOVE high on bar 5,
+    # reintroducing the exact physically-impossible-bar defect round 1
+    # was written to eliminate, and confirmed (during this fix, by
+    # running the pre-fix formula against it) to produce BYTE-IDENTICAL
+    # output under the buggy code -- a non-discriminating test. Bars 5/6/7
+    # are now genuinely valid (low <= high on every one) and independently
+    # confirmed to return (nan, nan) under the pre-fix filled-check
+    # formula, (104.0, 101.0) under the fix.
     n = 20
     high = np.full(n, 90.0)
     low = np.full(n, 80.0)
     close = np.full(n, 85.0)
-    low[5], high[5] = 104.0, 103.5
-    low[6], high[6] = 101.5, 100.9
-    low[7], high[7] = 101.5, 101.0
+    high[5], low[5] = 104.5, 104.0
+    high[6], low[6] = 101.5, 100.9
+    high[7], low[7] = 101.5, 101.0
     high[8] = high[9] = high[11] = high[12] = 101.5
     high[10], low[10] = 102.0, 101.8
+    assert (low[:13] <= high[:13]).all(), "construction check: every bar must be physically valid"
     idx = pd.date_range("2020-01-01", periods=n, freq="B")
     out = ta.sphinx_unicorn(
         pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
@@ -284,7 +297,8 @@ def test_arm_bull_and_dist_bull_hold_without_immediate_fire():
     )
     assert out["SPHINX_ARM_BULL_2"].iloc[12] == 1
     assert out["SPHINX_FIRE_BULL_2"].iloc[12] == 0
-    # need = max(swing_price=102.0, zt=104.0) = 104.0
+    # matched gap: (t=low[5]=104.0, b=high[7]=101.0). need = max(swing_
+    # price=102.0, zt=104.0) = 104.0
     # dist = (85.0 - 104.0) / 85.0 * 100
     assert out["SPHINX_DIST_BULL_2"].iloc[12] == pytest.approx((85.0 - 104.0) / 85.0 * 100, abs=1e-9)
     assert out["SPHINX_DIST_BULL_2"].iloc[15] == pytest.approx((85.0 - 104.0) / 85.0 * 100, abs=1e-9)
@@ -298,6 +312,7 @@ def test_clustering_merges_overlapping_zone_updates_span_no_second_arm():
     high[22], low[22] = 105.0, 104.0
     low[23] = low[24] = low[26] = low[27] = 103.5
     low[25] = 103.0
+    assert (low[:28] <= high[:28]).all(), "construction check: every bar must be physically valid"
     idx = pd.date_range("2020-01-01", periods=n, freq="B")
     out = ta.sphinx_unicorn(
         pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),

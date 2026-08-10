@@ -95,10 +95,11 @@ def _find_disp_fvg(high_v, low_v, t_bar, is_bull_setup, nz_t, nz_b, lookback, mi
     False. Absolute bar-index form of the source's `find_disp_fvg`.
 
     The overlap test is `overlap > 0` (strictly positive), not Pine's
-    `ov >= syminfo.mintick` -- a second, smaller `mintick` substitution
-    alongside `disp_min_pct` (see the module docstring's mintick
-    paragraph), admitting a fractional-float overlap Pine's one-tick
-    floor would reject. Deliberately not tied to `min_sz`/`disp_min_pct`
+    `ov >= syminfo.mintick` -- a second, independent `mintick`
+    substitution alongside `disp_min_pct` (the module docstring's mintick
+    paragraph covers `disp_min_pct` only, not this one), admitting a
+    fractional-float overlap Pine's one-tick floor would reject.
+    Deliberately not tied to `min_sz`/`disp_min_pct`
     (which floors the gap's own SIZE, a different quantity from how much
     it overlaps the nesting zone) -- left as `> 0` rather than inventing
     a second undocumented threshold."""
