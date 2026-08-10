@@ -5,6 +5,15 @@ synthetic data.
 
 Reachability tests `import pandas_ta`, NOT `importlib.util.spec_from_file_
 location` (see TODO.md TVPTA-3(c)).
+
+Fletcher round 1 (2026-08-10): the original `test_correctness_against_
+independent_ols_refit` copied eleven lines of park_pct/rolling/shift logic
+verbatim from the implementation -- it would have stayed green even if
+`.shift(1)` were flipped to `.shift(-1)` (textbook look-ahead, exactly what
+this candidate was originally deferred over). Replaced with a genuinely
+independent causality test (mutate future bars, assert past output is
+unchanged) and kept the lstsq check as what it actually is: a solver
+correctness check, not a from-scratch reimplementation.
 """
 import numpy as np
 import pandas as pd
@@ -28,32 +37,87 @@ def test_name_and_series():
     high, low, close = _ohlc(n=200)
     out = ta.har_park(high, low, close, fit_window=100)
     assert isinstance(out, pd.Series)
-    assert out.name == "HARPARK_1_5_22"
+    assert out.name == "HARPARK_1_5_22_100"
 
 
-def test_never_negative():
-    # Source clips fpctRaw at 0.0 -- a negative forecasted volatility is
-    # not a meaningful value, matching how natr/atr are non-negative.
-    high, low, close = _ohlc(n=200, seed=1)
+def test_accessor_matches_direct_call():
+    # Gate (c): reachable via df.ta.har_park(), not just the bare function
+    # -- the ichimoku_ml lesson (a file that exists but isn't registered
+    # in core.py is unreachable). This file's own module docstring claims
+    # reachability is tested; until now nothing here actually asserted it.
+    high, low, close = _ohlc(n=200, seed=5)
+    df = pd.DataFrame({"high": high, "low": low, "close": close})
+    via_accessor = df.ta.har_park(fit_window=100)
+    direct = ta.har_park(high, low, close, fit_window=100)
+    pd.testing.assert_series_equal(via_accessor, direct)
+
+
+def test_never_negative_and_clip_actually_engages():
+    # Not just "the data we happened to generate never went negative" --
+    # a volatility-collapse regime (high vol for 150 bars, then near-zero)
+    # empirically drives the RAW forecast below zero (a regression trained
+    # on the high-vol regime extrapolates negative from the collapsed
+    # inputs), and the clip is verified to actually bind: exact 0.0, not
+    # just "small positive."
+    n = 250
+    rng = np.random.RandomState(9)
+    close = pd.Series(100 + np.cumsum(rng.randn(n) * 3), index=pd.date_range("2020-01-01", periods=n, freq="B"))
+    high = close.copy()
+    low = close.copy()
+    high.iloc[:150] = close.iloc[:150] + np.abs(rng.randn(150)) * 5 + 0.5
+    low.iloc[:150] = close.iloc[:150] - np.abs(rng.randn(150)) * 5 - 0.5
+    high.iloc[150:] = close.iloc[150:] + 0.001
+    low.iloc[150:] = close.iloc[150:] - 0.001
+
     out = ta.har_park(high, low, close, fit_window=100)
     assert (out.dropna() >= 0).all()
+    assert (out.dropna() == 0.0).any(), "clip never actually bound on this data -- test is vacuous if this fails"
 
 
-def test_nan_before_fit_ready_then_finite():
-    # fit_ready requires bar_index > long_length + fit_window/2 + 60 AND a
-    # solved regression -- with fit_window=100, long_length=22 that's
-    # bar_index > 133. Confirms the causal gate actually gates (gate a).
+def test_nan_before_fit_ready_then_finite_throughout():
+    # fit_ready requires bar_index > long_length + fit_window//2 + 60 --
+    # with fit_window=100, long_length=22 that's bar_index > 132, so the
+    # first finite bar is index 133. Was previously checked with a loose
+    # `.any()` past bar 150 (passes if even 1 of 100 bars is finite); now
+    # `.all()` (every bar from the ready point on must be finite) plus an
+    # exact boundary pin so an off-by-one in fit_ready regresses loudly.
     high, low, close = _ohlc(n=250, seed=2)
     out = ta.har_park(high, low, close, fit_window=100)
     assert out.iloc[:133].isna().all()
-    assert out.iloc[150:].notna().any()
+    assert pd.notna(out.iloc[133])
+    assert out.iloc[133:].notna().all()
 
 
-def test_correctness_against_independent_ols_refit():
-    # Independently recompute the Parkinson series and the regression fit
-    # at ONE specific bar using numpy.linalg.lstsq directly on hand-sliced
-    # windows -- does not reuse the module's rolling-sum machinery, so this
-    # actually validates gate (d), not just that the wiring round-trips.
+def test_causal_no_lookahead():
+    # The single highest-value correctness check for a candidate deferred
+    # specifically for correctness risk: mutate every bar strictly AFTER
+    # bar t and assert the output at and before t is bit-identical. This
+    # locks the .shift(1) direction and the rolling-window alignment
+    # without reusing a single line of the implementation -- a flipped
+    # shift() or a training window that leaks x[t] instead of x[t-1]
+    # would fail this immediately.
+    high, low, close = _ohlc(n=250, seed=6)
+    out_before = ta.har_park(high, low, close, fit_window=100)
+
+    t = 200
+    high_mut, low_mut, close_mut = high.copy(), low.copy(), close.copy()
+    high_mut.iloc[t + 1:] *= 1.5
+    low_mut.iloc[t + 1:] *= 0.6
+    close_mut.iloc[t + 1:] *= 1.2
+    out_after = ta.har_park(high_mut, low_mut, close_mut, fit_window=100)
+
+    pd.testing.assert_series_equal(out_before.iloc[: t + 1], out_after.iloc[: t + 1])
+
+
+def test_correctness_against_independent_lstsq_solve():
+    # Solver correctness check: recompute the regression fit at bar t via
+    # numpy.linalg.lstsq on hand-sliced windows, independent of the
+    # module's own rolling-sum/normal-equations machinery. This validates
+    # the SOLVE step, not the Parkinson formula or the causal direction --
+    # see test_causal_no_lookahead above for that, and note this test
+    # reuses the park_pct/x1/x2/x3 computation (same formula, deliberately
+    # -- the point here is isolating the solver, not re-deriving the
+    # formula from scratch).
     high, low, close = _ohlc(n=250, seed=3)
     fit_window = 100
     short_length, medium_length, long_length = 1, 5, 22

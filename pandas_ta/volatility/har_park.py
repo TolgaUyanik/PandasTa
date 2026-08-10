@@ -77,8 +77,16 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
     # Solve the symmetric 4x4 system per bar. The source hand-rolls
     # Gaussian elimination with partial pivoting inside a Pine-array UDF
     # (necessary there -- Pine has no linear-algebra library); numpy's
-    # solve() is the direct equivalent and gets the same result without
-    # reimplementing pivoting by hand.
+    # solve() computes the same result without reimplementing pivoting by
+    # hand, but `LinAlgError` alone only fires on an EXACTLY singular
+    # matrix -- Pine's guard (`ok := false` whenever a post-pivot entry's
+    # |value| < 1e-12) also catches the NEAR-singular band, which numpy's
+    # solve() would happily return numerically unstable, arbitrarily
+    # amplified coefficients for instead of NaN. x1/x2/x3 are three SMAs
+    # of the same series (correlated by construction) and a BIST
+    # limit-lock streak (constant H/L ratio for several bars) pushes
+    # toward exactly this near-singular regime, so the smallest-singular-
+    # value check below is a real guard, not defensive-only boilerplate.
     for t in range(n):
         if np.isnan(s00v[t]):
             continue
@@ -89,6 +97,9 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
             [s03v[t], s13v[t], s23v[t], s33v[t]],
         ])
         rhs = np.array([s0yv[t], s1yv[t], s2yv[t], s3yv[t]])
+        singular_values = np.linalg.svd(a, compute_uv=False)
+        if singular_values.min() < 1e-12:
+            continue
         try:
             coeffs = np.linalg.solve(a, rhs)
         except np.linalg.LinAlgError:
@@ -108,7 +119,11 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
     # would pass earlier -- matching the source's own conservative gate,
     # not a reformulation.
     bar_index = np.arange(n)
-    fit_ready = (bar_index > (long_length + fit_window / 2 + 60)) & b0.notna().to_numpy()
+    # Pine's `fitWindow / 2` on two ints performs INTEGER division (`//`
+    # here, not `/`) -- matched exactly, not just "close enough": at
+    # fit_window=501 the two differ by half a bar (332 vs 332.5), shifting
+    # the first-ready bar by one.
+    fit_ready = (bar_index > (long_length + fit_window // 2 + 60)) & b0.notna().to_numpy()
     fpct_raw = b0 + b1 * x1 + b2 * x2 + b3 * x3
     fpct = fpct_raw.clip(lower=0.0)
     fpct = fpct.where(fit_ready, np.nan)
@@ -125,8 +140,12 @@ def har_park(high, low, close, short_length=None, medium_length=None, long_lengt
     if "fill_method" in kwargs:
         result.fillna(method=kwargs["fill_method"], inplace=True)
 
-    # Name and Categorize it
-    result.name = f"HARPARK_{short_length}_{medium_length}_{long_length}"
+    # Name and Categorize it. fit_window is included -- it's the single
+    # most consequential parameter (sets both the refit window and, via
+    # fit_ready, the warm-up gate); two calls differing only in
+    # fit_window produce numerically different series and must not share
+    # a column name (a silent collision risk in a parameter sweep).
+    result.name = f"HARPARK_{short_length}_{medium_length}_{long_length}_{fit_window}"
     result.category = "volatility"
 
     return result
@@ -153,12 +172,15 @@ itself (`fpct`, the scale-free % output) is ported. NOT replicated: the
 price-scale `expRange` conversion (`fpct/100 * close * sqrt(4ln2)`, a raw
 price-magnitude reformulation of the same signal -- excluded per the
 Indicator Book's "raw price-level forms earn nothing by design" law, the
-scale-free `fpct` this function returns is the correct form already), the
-rolling `percentrank`/regime-threshold classification (computed in the
-source on the price-scale `expRange`, which would additionally entangle
-price drift into the percentile ranking over a 500-bar window -- a
-reformulation risk beyond this port's scope, not a per-bar indicator math
-question), and all display/table/alert logic.
+scale-free `fpct` this function returns is the correct form already), and
+all display/table/alert logic (info table, plots).
+
+⚠ The source's rolling `percentrank`/regime-threshold classification is
+GENUINE per-bar math (not display) and is NOT ported here, for a
+different reason: the source computes it on the price-scale `expRange`,
+which entangles price drift into a 500-bar percentile ranking -- a
+reformulation question (should it rank the scale-free `fpct` instead?),
+deliberately deferred rather than guessed at in this pass.
 
 Calculation:
     Default Inputs:
@@ -168,7 +190,11 @@ Calculation:
     Rolling OLS, refit every bar over fit_window trailing bars:
         park_pct[t] ~ b0 + b1*x1[t-1] + b2*x2[t-1] + b3*x3[t-1]
     HARPARK[t] = max(b0 + b1*x1[t] + b2*x2[t] + b3*x3[t], 0)   (NaN until
-        bar_index > long_length + fit_window/2 + 60 and the fit exists)
+        bar_index > long_length + fit_window//2 + 60 and the fit exists)
+
+Requires >= fit_window bars of history (verify_series's own floor); on a
+shorter frame this function returns None and the caller's `_attach`-style
+wiring silently omits the column entirely -- not an error, just absent.
 
 Args:
     high (pd.Series): Series of 'high's
