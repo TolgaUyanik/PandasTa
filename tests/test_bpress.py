@@ -303,22 +303,61 @@ def test_rejects_non_finite_close():
         ta.bpress(with_neg_inf, length=500)
 
 
+def test_rejects_non_numeric_close_dtype():
+    """Fletcher round 2 NIT: `np.isinf()` on an object-dtype Series (e.g.
+    a caller accidentally passing strings) used to leak a raw TypeError,
+    not the ValueError this function's other validation guarantees --
+    same class of gap the length-validation MAJOR fix closed. Must be
+    ValueError, specifically."""
+    bad = pd.Series(["a"] * 600, index=_close(n=600).index, dtype=object)
+    with pytest.raises(ValueError):
+        ta.bpress(bad, length=500)
+
+
 def test_nan_close_propagates_but_does_not_raise():
     """Companion to the finite-close test above: NaN (as opposed to inf)
     is legitimate upstream-gap data, not rejected -- but it nulls every
-    rolling window that contains it, i.e. the following `length - 1`
-    bars of output, by construction (rolling regression sums a NaN in)."""
+    rolling window that contains it, i.e. `length` bars of output
+    (indices `[gap_at, gap_at + length - 1]`), by construction (rolling
+    regression sums a NaN in).
+
+    Fletcher round 2 MAJOR: the original fixture (n=700, gap_at=300,
+    length=500) made `out.iloc[gap_at:poisoned_end+1]` cover almost the
+    ENTIRE 700-row series (poisoned_end=799 > 699), so "poisoned span is
+    NaN" was trivially true for ANY reason including "bpress is just
+    broken and returns all-NaN" -- and the "resumes after" slice
+    (`out.iloc[800:]` on a 700-row Series) was an EMPTY slice, so
+    `.notna().all()` passed vacuously, testing nothing. Resized so all
+    three regions (pre-gap / poisoned / resumed) are non-empty and
+    verified with an exact count guard that an all-NaN output cannot
+    satisfy.
+    """
     length = 500
-    close = _close(n=700)
+    gap_at = 600
+    n = 1400
+    close = _close(n=n)
     gapped = close.copy()
-    gap_at = 300
     gapped.iloc[gap_at] = np.nan
 
     out = ta.bpress(gapped, length=length)  # must not raise
-    poisoned_end = gap_at + length - 1
-    assert out.iloc[gap_at:poisoned_end + 1].isna().all()
-    # Once the gap has rolled out of every window, output resumes.
-    assert out.iloc[poisoned_end + 1:].notna().all()
+    assert out is not None
+
+    pre_gap = out.iloc[length - 1:gap_at]
+    poisoned = out.iloc[gap_at:gap_at + length]
+    tail = out.iloc[gap_at + length:]
+
+    assert len(pre_gap) > 0
+    assert len(poisoned) == length
+    assert len(tail) > 0
+
+    assert pre_gap.notna().all(), "output before the gap must be clean"
+    assert poisoned.isna().all(), "every window containing the NaN must be NaN"
+    assert tail.notna().all(), "output must resume once the gap rolls out of every window"
+
+    # Count guard: an all-NaN (or otherwise broken) output cannot satisfy
+    # this exact arithmetic, unlike the vacuous slice-based checks alone.
+    expected_notna = len(pre_gap) + len(tail)
+    assert out.notna().sum() == expected_notna
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +373,48 @@ def test_offset_shifts_output():
     pd.testing.assert_series_equal(shifted, base.shift(1), check_names=False)
 
 
+def test_negative_offset_shifts_backward_non_causal():
+    """A negative offset pulls FUTURE bars' values backward -- explicitly
+    non-causal. bpress() does not forbid it (matches every other
+    pandas_ta indicator's `offset` kwarg), but it must behave exactly
+    like `Series.shift(-1)`, i.e. the caller owns the causality break,
+    not a bug in this function."""
+    close = _close()
+    base = ta.bpress(close, length=500)
+    shifted = ta.bpress(close, length=500, offset=-1)
+    pd.testing.assert_series_equal(shifted, base.shift(-1), check_names=False)
+
+
 def test_fillna_kwarg_fills_leading_nan():
     close = _close()
     out = ta.bpress(close, length=500, fillna=0.0)
     assert out.isna().sum() == 0
     assert (out.iloc[:499] == 0.0).all()
+
+
+def test_fill_method_kwarg():
+    """`fill_method` (via `Series.fillna(method=...)`) is a documented,
+    live kwarg but was previously untested. Uses a pandas API deprecated
+    in >=2.1 and removed in 3.0 -- see the in-source comment in
+    bpress.py -- so this test also acts as a canary: it will start
+    failing the moment the installed pandas version drops support,
+    which is exactly when the migration noted there becomes mandatory."""
+    close = _close()
+    out = ta.bpress(close, length=500, fill_method="bfill")
+    assert out.isna().sum() == 0
+
+
+def test_returns_none_when_series_shorter_than_length():
+    """Fletcher round 2 MINOR: `length > len(close)` returns None via
+    `verify_series` (pandas_ta convention) with NO error and NO warning
+    from this function -- silent by design, matching every other
+    indicator in this module, but easy to miss (a <500-bar ticker's
+    BPRESS_500 column just vanishes). Pinned here as documented,
+    intentional behavior, not an oversight."""
+    close = _close(n=100)
+    assert ta.bpress(close, length=500) is None
+
+
+def test_returns_none_for_absurdly_large_length():
+    close = _close(n=700)
+    assert ta.bpress(close, length=1e30) is None

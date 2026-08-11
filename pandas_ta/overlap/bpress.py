@@ -20,8 +20,12 @@ def bpress(close, length=None, offset=None, **kwargs):
     # raw TypeError out of `np.isfinite('500')` instead of the ValueError
     # this docstring promises -- and since `indicator_engine.py` wraps
     # every TVPTA-4/6 call in a bare `except Exception`, that TypeError
-    # was silently swallowed into a dropped column with no crash, the
-    # exact failure mode a caller bug should NOT get to hide behind.
+    # was swallowed into a dropped column, logged only as a generic
+    # "skipped" warning indistinguishable from a genuinely unsupported
+    # frame (Fletcher round 2 NIT: the call site DOES log, it is not
+    # fully silent -- but the log line carries no information that
+    # would let anyone tell "caller passed a bad length" apart from
+    # "this ticker's history is too short").
     if length is not None:
         if isinstance(length, bool) or not isinstance(
             length, (int, float, np.integer, np.floating)
@@ -51,6 +55,14 @@ def bpress(close, length=None, offset=None, **kwargs):
     # allowed here (legitimate upstream gap handling); only +/-inf is
     # rejected -- see the Args docstring for the NaN behavior this leaves
     # in place by construction.
+    #
+    # Fletcher round 2 (NIT): `np.isinf()` on an object-dtype Series (e.g.
+    # a caller accidentally passing strings) raises a raw TypeError, not
+    # the ValueError the length validation above was specifically built to
+    # guarantee -- a lateral move from the pre-length-fix AttributeError,
+    # same class of gap. Reject non-numeric dtype explicitly first.
+    if not np.issubdtype(close.dtype, np.number):
+        raise ValueError(f"close must be numeric, got dtype {close.dtype}")
     if np.isinf(close).any():
         raise ValueError(
             "close must be finite (no +/-inf) for a log-price indicator "
@@ -97,6 +109,15 @@ def bpress(close, length=None, offset=None, **kwargs):
     if "fillna" in kwargs:
         bpress.fillna(kwargs["fillna"], inplace=True)
     if "fill_method" in kwargs:
+        # `Series.fillna(method=...)` is deprecated in pandas>=2.1 and
+        # REMOVED in pandas 3.0 (Fletcher round 2 NIT). This repo pins
+        # pandas 1.5.3 today, where it still works, and every sibling
+        # indicator in this package (linreg.py, dpo.py, etc.) uses the
+        # exact same idiom -- kept consistent with them rather than
+        # migrated in isolation. When the package-wide pandas floor moves
+        # past 2.1, replace with an explicit `.bfill()`/`.ffill()` dispatch
+        # on `kwargs["fill_method"]` across the whole package at once, not
+        # just here.
         bpress.fillna(method=kwargs["fill_method"], inplace=True)
 
     # Name and Categorize it
@@ -205,5 +226,12 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.Series: New feature generated. Name: BPRESS_{length}
+    pd.Series: New feature generated. Name: BPRESS_{length}. Returns
+        `None` (pandas_ta convention, via `verify_series`) when
+        `len(close) < length` -- e.g. a 100-bar frame with the default
+        `length=500` -- no column is produced and NO error/warning is
+        raised by this function itself (the caller, e.g.
+        `indicator_engine.py`'s `_attach`, is responsible for handling a
+        `None` result; there it is a silent no-op column drop by design,
+        matching every other indicator in this module).
 """
