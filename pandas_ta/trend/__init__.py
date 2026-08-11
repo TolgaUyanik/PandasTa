@@ -24,6 +24,7 @@ from .priorday_fib import priorday_fib
 from .priormonth_range import priormonth_range
 from .psar import psar
 from .qstick import qstick
+from .rejection_blocks import rejection_blocks
 from .renko_trend import renko_trend
 from .ribbon_concordance import ribbon_concordance
 from .short_run import short_run

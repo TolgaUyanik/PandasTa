@@ -1596,6 +1596,17 @@ class AnalysisIndicators(BasePandasObject):
         result = qstick(open_=open_, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rejection_blocks(self, swing_len=None, min_wick_ratio=None, min_wick_atr=None,
+                          atr_len=None, max_zones=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rejection_blocks(open_=open_, high=high, low=low, close=close, swing_len=swing_len,
+                                   min_wick_ratio=min_wick_ratio, min_wick_atr=min_wick_atr,
+                                   atr_len=atr_len, max_zones=max_zones, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def renko_trend(self, brick_pct=None, brick_fixed=None, max_iterations=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = renko_trend(close=close, brick_pct=brick_pct, brick_fixed=brick_fixed, max_iterations=max_iterations, offset=offset, **kwargs)
