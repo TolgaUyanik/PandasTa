@@ -29,6 +29,7 @@ from .renko_trend import renko_trend
 from .ribbon_concordance import ribbon_concordance
 from .short_run import short_run
 from .sphinx_unicorn import sphinx_unicorn
+from .sr_force import sr_force
 from .swing_equilibrium import swing_equilibrium
 from .tsignals import tsignals
 from .ttm_trend import ttm_trend

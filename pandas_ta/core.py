@@ -1612,6 +1612,17 @@ class AnalysisIndicators(BasePandasObject):
                                    atr_len=atr_len, max_zones=max_zones, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sr_force(self, swing_len=None, retest_lookback=None, touch_tol_pct=None,
+                 debounce_bars=None, max_levels=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sr_force(high=high, low=low, close=close, swing_len=swing_len,
+                           retest_lookback=retest_lookback, touch_tol_pct=touch_tol_pct,
+                           debounce_bars=debounce_bars, max_levels=max_levels,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def renko_trend(self, brick_pct=None, brick_fixed=None, max_iterations=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = renko_trend(close=close, brick_pct=brick_pct, brick_fixed=brick_fixed, max_iterations=max_iterations, offset=offset, **kwargs)
