@@ -1863,6 +1863,14 @@ class AnalysisIndicators(BasePandasObject):
         result = aobv(close=close, volume=volume, fast=fast, slow=slow, mamode=mamode, max_lookback=max_lookback, min_lookback=min_lookback, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def avwap_z(self, anchor=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = avwap_z(high=high, low=low, close=close, volume=volume, anchor=anchor, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cmf(self, open_=None, length=None, offset=None, **kwargs):
         if open_ is not None:
             open_ = self._get_column(kwargs.pop("open", "open"))
