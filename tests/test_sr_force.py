@@ -442,6 +442,73 @@ def test_max_levels_fifo_cap_per_side():
     assert dist_res.iloc[22:].eq(20.0).all()
 
 
+def test_dist_and_score_report_zero_not_nan_when_close_equals_level_price():
+    # THE dedicated regression test for the Fletcher MAJOR fix (round 1
+    # on this port): before the fix, the side-constraint filters used
+    # strict >/< , so Close landing EXACTLY on a level's price -- the
+    # single most informative bar, price sitting exactly on a heavily
+    # re-tested level -- reported NaN on BOTH SCORE and DIST instead of
+    # the obvious answer: you are AT that level right now, distance 0.
+    # Mirrors rejection_blocks.py's own "zero not nan while price inside
+    # zone" regression test for the same class of gap.
+    #
+    # Resistance: swing high at bar 5 (H=107, unique vs flooded H=101),
+    # confirms at bar 7 -> level A, price=107, score=0.294 (single
+    # self-touch, same as the other single-touch scenarios in this
+    # file). At bar 15, Close is set to EXACTLY 107 (H/L widened just
+    # enough to keep the bar physically valid; this incidentally also
+    # creates a brand new candidate resistance pivot at bar 15, but it
+    # would not confirm until bar 17 -- irrelevant to this test, which
+    # only asserts bar 15 itself, before that second pivot ever enters
+    # the pool).
+    n = 20
+    H, L, C = _flooded_hlc(n)
+    H[5], L[5], C[5] = 107.0, 99.0, 100.0
+    H[15], L[15], C[15] = 107.5, 106.5, 107.0
+    out = _run(H, L, C, swing_len=2, retest_lookback=50, touch_tol_pct=0.003, debounce_bars=2)
+
+    assert math.isclose(out["SRF_SCORE_RES_2"].iloc[7], 0.294, rel_tol=1e-9)
+    assert out["SRF_DIST_RES_2"].iloc[15] == 0.0, "must be 0.0 (Close == level price), never NaN"
+    assert math.isclose(out["SRF_SCORE_RES_2"].iloc[15], 0.294, rel_tol=1e-9), \
+        "must report the level's real score, never NaN, at the exact equality boundary"
+
+
+def test_dist_and_score_report_zero_not_nan_when_close_equals_level_price_support_mirror():
+    # Mirror of the above on the support side.
+    n = 20
+    H, L, C = _flooded_hlc(n)
+    H[5], L[5], C[5] = 101.0, 93.0, 100.0
+    H[15], L[15], C[15] = 93.5, 92.5, 93.0
+    out = _run(H, L, C, swing_len=2, retest_lookback=50, touch_tol_pct=0.003, debounce_bars=2)
+
+    assert math.isclose(out["SRF_SCORE_SUP_2"].iloc[7], 0.294, rel_tol=1e-9)
+    assert out["SRF_DIST_SUP_2"].iloc[15] == 0.0, "must be 0.0 (Close == level price), never NaN"
+    assert math.isclose(out["SRF_SCORE_SUP_2"].iloc[15], 0.294, rel_tol=1e-9), \
+        "must report the level's real score, never NaN, at the exact equality boundary"
+
+
+def test_retest_score_nan_close_does_not_block_touch_via_high_or_low():
+    # THE dedicated regression test for the Fletcher MINOR fix: the
+    # source's touch-scan guard is `not na(high[i]) and not na(low[i])`
+    # -- close is NOT part of it. A NaN close on an otherwise-valid bar
+    # must not block a touch registered via that bar's high or low; it
+    # must simply fail its OWN band comparison (NaN comparisons are
+    # always False), leaving the high/low disjuncts free to still fire.
+    # An earlier version of this port guarded on high/low/close
+    # together, which silently dropped this touch.
+    H, L, C = _mk(_T, [])
+    j = _T - 2  # the same minimum-countable offset (i=2) used throughout this file
+    H[j] = _PRICE  # touch registers via high
+    C[j] = np.nan  # close is NaN on this same bar -- must not block it
+    got_with_nan_close = _retest_score(H, L, C, _T, _PRICE, _LOOKBACK, _TOL, _DEBOUNCE)
+
+    H2, L2, C2 = _mk(_T, [2])  # equivalent bar, ordinary (non-NaN) close touch
+    got_ordinary = _retest_score(H2, L2, C2, _T, _PRICE, _LOOKBACK, _TOL, _DEBOUNCE)
+
+    assert got_with_nan_close == got_ordinary
+    assert got_with_nan_close > 0.0, "test construction check: the touch must actually register"
+
+
 def test_score_nan_exactly_when_dist_nan_and_bounded_when_populated():
     open_, high, low, close = _random_walk_ohlc(n=250, seed=11)
     out = ta.sr_force(high, low, close)

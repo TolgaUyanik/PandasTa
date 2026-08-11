@@ -130,7 +130,39 @@ def _retest_score(high_v, low_v, close_v, t, price, retest_lookback, touch_tol_p
     function's caller-visible touch count) vs `cnt` (capped, used for
     both the division and the `countFactor` step function) are kept as
     two separate values below, mirroring the source's own two-stage
-    `cnt`/`avgWeight` computation order.
+    `cnt`/`avgWeight` computation order. NOTE: `final_score = cnt *
+    avg_weight * count_factor` is algebraically just `weight_score *
+    count_factor` -- the capped `cnt` in `avg_weight`'s denominator
+    cancels against the `cnt` multiplied back in for `final_score`. Kept
+    as the three-factor form below (not simplified) because that is the
+    literal shape of the source's own `finalScore = cnt * avgWeight *
+    countFactor` line -- a port mirrors the source's arithmetic, not an
+    algebraically-reduced equivalent of it.
+
+    Touch-scan NaN guard: only `high`/`low` are checked for NaN before a
+    bar is skipped (`if np.isnan(h) or np.isnan(l): continue`), matching
+    the source's own guard (`not na(high[i]) and not na(low[i])` --
+    `close[i]` is NOT part of that guard). A NaN `close` is NOT special-
+    cased here; it simply fails its own `lower <= c <= upper` comparison
+    (a NaN comparison is always False in both Pine and Python, not an
+    error), exactly like the source: a bar with a valid high/low but a
+    NaN close can still register a touch via its high or low. An earlier
+    version of this port guarded on all three of high/low/close, which
+    silently dropped touches the source would have counted, shifting
+    `last_touch_bar` (and therefore every later touch's debounce
+    decision) for the rest of the scan -- Fletcher-caught, fixed here.
+
+    `time_weight = 1.0 - (i / retest_lookback) * 0.5`: `i` and
+    `retest_lookback` are both Python `int`, so `i / retest_lookback` is
+    genuine float (true) division here regardless. The source's own
+    `timeWeight = 1.0 - (i / 50) * 0.5` (both `i` and `50` are Pine
+    `int`) is ALSO genuine float division, not integer-truncating --
+    checked directly against TradingView's Pine v6 migration guide,
+    which states int/int division with a non-evenly-divisible result
+    always yields a fractional value in v6 (this is a v5-only behavior,
+    removed in v6), and this source is `//@version=6` (line 1 of
+    `1BcGW1Og.pine`). Recorded here since this exact question was raised
+    and independently verified during this port's own review.
     """
     upper = price * (1.0 + touch_tol_pct)
     lower = price * (1.0 - touch_tol_pct)
@@ -142,8 +174,10 @@ def _retest_score(high_v, low_v, close_v, t, price, retest_lookback, touch_tol_p
         if j < 0:
             continue  # matches Pine's `not na(high[i])` guard at the start of history
         h, l, c = high_v[j], low_v[j], close_v[j]
-        if np.isnan(h) or np.isnan(l) or np.isnan(c):
-            continue
+        if np.isnan(h) or np.isnan(l):
+            continue  # matches Pine's `not na(high[i]) and not na(low[i])` guard
+            # exactly -- close is deliberately NOT part of this guard, see the
+            # "Touch-scan NaN guard" paragraph above.
         touched = (lower <= h <= upper) or (lower <= l <= upper) or (lower <= c <= upper)
         if touched and (i - last_touch_bar) >= debounce_bars:
             cnt_raw += 1
@@ -234,17 +268,27 @@ def sr_force(high, low, close, swing_len=None, retest_lookback=None, touch_tol_p
         # rejection_blocks.py), so a stale wrong-side level can persist
         # in the pool indefinitely -- constraining the candidate set to
         # the correct side of price before the argmin is REQUIRED here,
-        # not just a nice-to-have. ---
+        # not just a nice-to-have.
+        #
+        # Fletcher MAJOR (this port's own round 1): the filters use
+        # >=/<= (a level AT close price qualifies), not strict >/<,
+        # clamped to a non-negative distance (`max(..., 0.0)`) --
+        # matching `rejection_blocks.py`'s post-Fletcher-round-1 pattern
+        # (the "tap" moment there). An earlier version of this port used
+        # strict inequality, which meant Close landing EXACTLY on a
+        # heavily re-tested level -- the single most informative bar --
+        # reported NaN on both SCORE and DIST instead of the obvious
+        # answer: you are AT that level right now, distance 0. ---
         c = close_v[t]
-        res_cands = [lv for lv in res_levels if lv.price > c]
+        res_cands = [lv for lv in res_levels if lv.price >= c]
         if res_cands:
             nearest = min(res_cands, key=lambda lv: lv.price - c)
-            dist_res[t] = (nearest.price - c) / c * 100
+            dist_res[t] = max(nearest.price - c, 0.0) / c * 100
             score_res[t] = nearest.score
-        sup_cands = [lv for lv in sup_levels if lv.price < c]
+        sup_cands = [lv for lv in sup_levels if lv.price <= c]
         if sup_cands:
             nearest = min(sup_cands, key=lambda lv: c - lv.price)
-            dist_sup[t] = (c - nearest.price) / c * 100
+            dist_sup[t] = max(c - nearest.price, 0.0) / c * 100
             score_sup[t] = nearest.score
 
     score_res = Series(score_res, index=close.index)
@@ -319,15 +363,22 @@ ratio-vs-VWAP status text), and all label/table drawing.
 ⚠ `swing_len` is a FIXED parameter here, not the source's adaptive
 `autoBars` (`round(ATR(14) / SMA(TrueRange, 50) * 5)`, clamped to
 [3, 10], recomputed every bar and fed as BOTH the left and right window
-to `ta.pivothigh`/`ta.pivotlow`). A per-bar-varying pivot window has no
-single "confirmation lag" a causal port can state as a fact about the
-output, and no sibling port in this fork's `trend/` package reproduces a
-bar-varying pivot window either. `swing_len=5` (this port's default) is
-the value `autoBars` converges to when ATR(14) roughly equals the
-50-bar mean True Range (a common regime, not an edge case) -- a
-reasonable representative constant, not a derivation of the source's
-exact per-bar behavior. Pass `swing_len` explicitly to match a specific
-market's typical `autoBars` value if that matters downstream.
+to `ta.pivothigh`/`ta.pivotlow`). Each individual pivot under the
+source's scheme DOES have a well-defined confirmation lag -- its own
+bar's `autoBars` value, known at that bar -- so "no single confirmation
+lag exists" is not the honest reason for fixing it; the honest reason is
+portability/simplicity: no sibling port in this fork's `trend/` package
+reproduces a bar-varying pivot window (`ta.pivothigh`/`ta.pivotlow` with
+a per-bar-changing left/right argument has no established translation
+pattern here yet), and a single fixed `swing_len` keeps this port
+consistent with `_confirm_strict_pivots`'s existing fixed-window
+contract, shared verbatim with `liquidity_sweep.py`/`rejection_blocks.py`.
+`swing_len=5` (this port's default) is the value `autoBars` converges to
+when ATR(14) roughly equals the 50-bar mean True Range (a common regime,
+not an edge case) -- a reasonable representative constant, not a
+derivation of the source's exact per-bar behavior. Pass `swing_len`
+explicitly to match a specific market's typical `autoBars` value if that
+matters downstream.
 
 ⚠ The retest-score scan window is anchored to the CONFIRMING bar, not
 the pivot bar -- see `_retest_score`'s docstring for the full account of
@@ -349,19 +400,31 @@ mandate to translate the math as computed.
 ever draws ALL qualifying levels as labels, filtered by the separate,
 not-ported `calcHistoricalPower` >= `powerThreshold`; it never asks "how
 far to the nearest level" or "what is ITS score"). "Nearest" is
-side-constrained (a resistance level's price must be strictly above
-Close, a support level's price strictly below) before the argmin, same
-discipline as `liquidity_sweep.py`'s Fletcher-MAJOR fix and
-`rejection_blocks.py`'s zone-edge version of it -- REQUIRED here (not
-just good practice) because a level in this indicator's pool never
-resolves on a break, only on FIFO eviction, so a stale wrong-side level
-can sit in the pool indefinitely, unlike the sweep/break-then-reclaim
-lifecycles that structurally bound `liquidity_sweep`'s/
-`rejection_blocks`'s wrong-side exposure. `SRF_DIST_RES`/`SRF_DIST_SUP`
-are >= 0 whenever populated, by construction; `SRF_SCORE_RES`/
-`SRF_SCORE_SUP` are NaN exactly when their paired `DIST` column is NaN
-(no qualifying level on that side), and in [0, 5] whenever populated
-(the source's own `finalScore` cap).
+side-constrained (a resistance level's price must be AT OR ABOVE Close,
+a support level's price AT OR BELOW) before the argmin, same discipline
+as `liquidity_sweep.py`'s Fletcher-MAJOR fix and `rejection_blocks.py`'s
+zone-edge version of it -- REQUIRED here (not just good practice)
+because a level in this indicator's pool never resolves on a break, only
+on FIFO eviction, so a stale wrong-side level can sit in the pool
+indefinitely, unlike the sweep/break-then-reclaim lifecycles that
+structurally bound `liquidity_sweep`'s/`rejection_blocks`'s wrong-side
+exposure. The boundary uses `>=`/`<=`, not strict `>`/`<`, with the
+reported distance clamped to `max(..., 0.0)` -- Fletcher MAJOR (this
+port's own round 1): an earlier strict-inequality version reported NaN
+on BOTH `SCORE` and `DIST` the moment Close landed EXACTLY on a level's
+price (the single most informative bar -- price sitting exactly on a
+heavily re-tested level) instead of the obvious answer, 0 -- the same
+class of gap `rejection_blocks.py`'s own Fletcher round 1 fixed for its
+zone edges (see that module's docstring for the mirror account).
+Regression test: `tests/test_sr_force.py::
+test_dist_and_score_report_zero_not_nan_when_close_equals_level_price`
+(+ support-side mirror) assert `DIST == 0.0` and `SCORE` equal to that
+exact level's own score, not NaN, at the exact equality boundary.
+`SRF_DIST_RES`/`SRF_DIST_SUP` are >= 0 whenever populated, by
+construction; `SRF_SCORE_RES`/`SRF_SCORE_SUP` are NaN exactly when their
+paired `DIST` column is NaN (no level on the correct side of price, per
+the `>=`/`<=` rule above), and in [0, 5] whenever populated (the
+source's own `finalScore` cap).
 
 Calculation:
     Default Inputs:
@@ -384,11 +447,12 @@ Calculation:
         score = min(cnt * avg_weight * count_factor, 5.0)
         level (price=P, score=score) pushed onto that side's pool; if pool
         size > max_levels, the OLDEST level is dropped (FIFO).
-    SRF_DIST_RES = (nearest active resistance level's price - Close) / Close
-        * 100, restricted to resistance levels with price > Close (NaN if
-        none qualify); SRF_SCORE_RES = that nearest level's score (NaN
-        exactly when SRF_DIST_RES is NaN).
-    SRF_DIST_SUP / SRF_SCORE_SUP: mirror on the support side (price < Close).
+    SRF_DIST_RES = max(nearest active resistance level's price - Close, 0.0)
+        / Close * 100, restricted to resistance levels with price >= Close
+        (NaN if none qualify -- 0.0, not NaN, when Close sits exactly on the
+        nearest qualifying level's price); SRF_SCORE_RES = that nearest
+        level's score (NaN exactly when SRF_DIST_RES is NaN).
+    SRF_DIST_SUP / SRF_SCORE_SUP: mirror on the support side (price <= Close).
 
 Args:
     high (pd.Series): Series of 'high's
