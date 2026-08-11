@@ -68,26 +68,43 @@ def test_pandas_ta_linreg_tsf_matches_current_bar_fit():
     lr_default = _linreg(s, length=length)
     lr_tsf = _linreg(s, length=length, tsf=True)
 
-    def _fit_at_last_point(window):
+    def _fit_at_point(window, x_eval):
         x = np.arange(len(window))
         m, b = np.polyfit(x, window, 1)
-        return m * (len(window) - 1) + b
+        return m * x_eval + b
 
-    manual = [
+    def _fit_at_last_point(window):
+        return _fit_at_point(window, len(window) - 1)
+
+    def _fit_at_prev_point(window):
+        return _fit_at_point(window, len(window) - 2)
+
+    manual_current = [
         _fit_at_last_point(y[i - length + 1:i + 1])
         for i in range(length - 1, n)
     ]
-    manual = pd.Series(manual, index=range(length - 1, n))
+    manual_current = pd.Series(manual_current, index=range(length - 1, n))
 
-    default_diff = (lr_default.iloc[length - 1:].reset_index(drop=True)
-                    - manual.reset_index(drop=True)).abs().max()
+    manual_prev = [
+        _fit_at_prev_point(y[i - length + 1:i + 1])
+        for i in range(length - 1, n)
+    ]
+    manual_prev = pd.Series(manual_prev, index=range(length - 1, n))
+
     tsf_diff = (lr_tsf.iloc[length - 1:].reset_index(drop=True)
-                - manual.reset_index(drop=True)).abs().max()
+                - manual_current.reset_index(drop=True)).abs().max()
+    default_diff = (lr_default.iloc[length - 1:].reset_index(drop=True)
+                    - manual_prev.reset_index(drop=True)).abs().max()
 
     assert tsf_diff < 1e-9, "tsf=True must match the current-bar OLS fit"
-    assert default_diff > 1e-3, (
-        "sanity check: the untagged default must NOT match the current-bar "
-        "fit, confirming tsf=True is a deliberate, necessary choice"
+    # Strong claim (Fletcher round 1 MINOR): not just "default != current-bar
+    # fit" but "default IS EXACTLY the one-bar-behind fit" -- independently
+    # re-derived by review at 1.28e-13 on a different seed/window than this
+    # test's, confirming the mechanism, not just the symptom.
+    assert default_diff < 1e-9, (
+        "the untagged default must match the ONE-BAR-BEHIND OLS fit exactly "
+        "-- proving *why* tsf=True is required, not just that the default "
+        "disagrees with the current-bar fit"
     )
 
 
@@ -236,3 +253,89 @@ def test_rejects_non_positive_close():
     bad2.iloc[10] = -5.0
     with pytest.raises(ValueError):
         ta.bpress(bad2, length=500)
+
+
+def test_rejects_non_integral_length():
+    """Fletcher round 1 MAJOR: a fractional length used to silently
+    truncate (`int(500.7) == 500`) while the output Series stayed named
+    'BPRESS_500', misreporting the window actually used. Must raise
+    instead of coercing."""
+    close = _close()
+    with pytest.raises(ValueError):
+        ta.bpress(close, length=500.7)
+    with pytest.raises(ValueError):
+        ta.bpress(close, length=500.5)
+    # A float with no fractional part is fine -- it's genuinely integral.
+    out = ta.bpress(close, length=250.0)
+    assert out.name == "BPRESS_250"
+
+
+def test_rejects_non_numeric_length():
+    """Fletcher round 1 MAJOR: a non-numeric length used to leak a raw
+    TypeError out of `np.isfinite('500')` instead of the ValueError this
+    function's docstring promises -- and since indicator_engine.py wraps
+    every call in a bare `except Exception`, that TypeError silently
+    dropped the column with no visible failure. Must be ValueError,
+    specifically, not merely 'raises something'."""
+    close = _close()
+    with pytest.raises(ValueError):
+        ta.bpress(close, length="500")
+    # bool is an int subclass in Python -- `length=True` must not silently
+    # become length=1.
+    with pytest.raises(ValueError):
+        ta.bpress(close, length=True)
+
+
+def test_rejects_non_finite_close():
+    """Fletcher round 1 MINOR: `(close <= 0).any()` never fires on +/-inf
+    (inf > 0), yet `log(inf) == inf` poisons every rolling window
+    containing it -- silently, with no error, indistinguishable from
+    'not enough history yet'. A single inf must be rejected outright."""
+    close = _close(n=600)
+    with_pos_inf = close.copy()
+    with_pos_inf.iloc[300] = np.inf
+    with pytest.raises(ValueError):
+        ta.bpress(with_pos_inf, length=500)
+
+    with_neg_inf = close.copy()
+    with_neg_inf.iloc[300] = -np.inf
+    with pytest.raises(ValueError):
+        ta.bpress(with_neg_inf, length=500)
+
+
+def test_nan_close_propagates_but_does_not_raise():
+    """Companion to the finite-close test above: NaN (as opposed to inf)
+    is legitimate upstream-gap data, not rejected -- but it nulls every
+    rolling window that contains it, i.e. the following `length - 1`
+    bars of output, by construction (rolling regression sums a NaN in)."""
+    length = 500
+    close = _close(n=700)
+    gapped = close.copy()
+    gap_at = 300
+    gapped.iloc[gap_at] = np.nan
+
+    out = ta.bpress(gapped, length=length)  # must not raise
+    poisoned_end = gap_at + length - 1
+    assert out.iloc[gap_at:poisoned_end + 1].isna().all()
+    # Once the gap has rolled out of every window, output resumes.
+    assert out.iloc[poisoned_end + 1:].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# offset / fillna kwargs (Fletcher round 1 NIT: documented and live but
+# previously untested; offset in particular could silently break causality
+# if a caller passed a negative value, which shifts future data backward).
+# ---------------------------------------------------------------------------
+
+def test_offset_shifts_output():
+    close = _close()
+    base = ta.bpress(close, length=500)
+    shifted = ta.bpress(close, length=500, offset=1)
+    pd.testing.assert_series_equal(shifted, base.shift(1), check_names=False)
+
+
+def test_fillna_kwarg_fills_leading_nan():
+    close = _close()
+    out = ta.bpress(close, length=500, fillna=0.0)
+    assert out.isna().sum() == 0
+    assert (out.iloc[:499] == 0.0).all()

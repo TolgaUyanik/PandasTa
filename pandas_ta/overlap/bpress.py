@@ -10,12 +10,31 @@ def bpress(close, length=None, offset=None, **kwargs):
     # Explicit ValueError on a bad `length`, not a silent fallback to the
     # default -- an earlier port in this batch quietly swallowed a NaN/inf
     # `length` into "use the default", masking a caller bug (hard-won
-    # lesson, see docstring in tests/test_bpress.py).
+    # lesson, see docstring in tests/test_bpress.py). Fletcher round 1
+    # (MAJOR): the original version only rejected non-finite/non-positive
+    # `length` and then did a bare `int(length)` -- so 500.7 silently
+    # truncated to 500 while the output Series was STILL named
+    # "BPRESS_500", lying about the window actually used, and `length=True`
+    # silently became 1 (bool is an int subclass, sails through
+    # `np.isfinite`). A non-numeric `length` (e.g. `'500'`) used to leak a
+    # raw TypeError out of `np.isfinite('500')` instead of the ValueError
+    # this docstring promises -- and since `indicator_engine.py` wraps
+    # every TVPTA-4/6 call in a bare `except Exception`, that TypeError
+    # was silently swallowed into a dropped column with no crash, the
+    # exact failure mode a caller bug should NOT get to hide behind.
     if length is not None:
+        if isinstance(length, bool) or not isinstance(
+            length, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError(
+                f"length must be numeric, got {type(length).__name__}: {length!r}"
+            )
         if not np.isfinite(length):
             raise ValueError(f"length must be finite, got {length}")
         if length <= 0:
             raise ValueError(f"length must be positive, got {length}")
+        if float(length) != int(length):
+            raise ValueError(f"length must be integral, got {length}")
         length = int(length)
     else:
         length = 500
@@ -23,6 +42,20 @@ def bpress(close, length=None, offset=None, **kwargs):
     offset = get_offset(offset)
     if close is None: return
 
+    # Fletcher round 1 (MINOR): the original `(close <= 0).any()` guard
+    # never fires on `+inf`/`-inf` (inf > 0), yet `np.log(inf) == inf`
+    # poisons every rolling window that contains it -- verified: one inf
+    # at bar 300 of a 600-bar series silently produced 0 non-NaN output
+    # values across the WHOLE series (indistinguishable from "not enough
+    # history yet"), no error. NaN close values are deliberately still
+    # allowed here (legitimate upstream gap handling); only +/-inf is
+    # rejected -- see the Args docstring for the NaN behavior this leaves
+    # in place by construction.
+    if np.isinf(close).any():
+        raise ValueError(
+            "close must be finite (no +/-inf) for a log-price indicator "
+            "(math.log(inf) silently poisons every window containing it)"
+        )
     if (close <= 0).any():
         raise ValueError(
             "close must be strictly positive for a log-price indicator "
@@ -141,12 +174,30 @@ it is scale-free by construction -- verified, not merely asserted):
     magnitude without any further normalization. Tested directly (not
     just documented) in tests/test_bpress.py::test_scale_invariance.
 
+Filed under `overlap/` (not `momentum/`) following the precedent of
+`ma_disparity` -- another distance-from-a-moving-line derivative already
+living in this package's `overlap/` -- rather than `bias`, which is the
+same shape of feature (Close vs. its own trend) but lives in
+`pandas_ta/momentum/`. Either home is defensible for this kind of
+derived, already-relational feature; `overlap/` was chosen for proximity
+to the `linreg` function it wraps.
+
 Args:
-    close (pd.Series): Series of 'close's. Must be strictly positive
-        (log of a non-positive price is undefined) -- raises ValueError
-        otherwise.
+    close (pd.Series): Series of 'close's. Must be strictly positive and
+        finite (no +/-inf) -- log of a non-positive or infinite price is
+        either undefined or poisons every rolling window containing it;
+        raises ValueError in either case. A NaN close IS allowed and
+        propagates by construction: any rolling window containing it
+        produces NaN, so a single NaN close nulls the following
+        `length - 1` bars of output (this is legitimate upstream-gap
+        behavior, not a bug).
     length (int): Regression window length. Default: 500. Must be a
-        finite positive int -- raises ValueError otherwise.
+        finite, positive, INTEGRAL numeric value (int or a float with no
+        fractional part, e.g. 500.0) -- raises ValueError on a
+        non-numeric, non-finite, non-positive, or fractional (e.g. 500.7)
+        value, rather than silently truncating and returning a Series
+        whose `BPRESS_{length}` name would then lie about the window
+        actually used.
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:
