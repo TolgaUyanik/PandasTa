@@ -8,10 +8,15 @@ Reachability tests `import pandas_ta` (`.context`), NOT `importlib.util.
 spec_from_file_location` (see TODO.md TVPTA-3(c)).
 
 All end-to-end scenarios below are built on physically valid OHLC (low <=
-high on every bar -- each scenario builder asserts this itself at
-construction time, per this project's own documented history of tests
+min(open, close) and max(open, close) <= high on every bar -- i.e. both
+the open and the close sit INSIDE the [low, high] range, not just
+low <= high -- each scenario builder asserts this full invariant itself
+at construction time, per this project's own documented history of tests
 dodging bugs via impossible bars, see tests/test_sphinx_unicorn.py's
-module docstring for the precedent incident this guards against).
+module docstring for the precedent incident this guards against, and
+Fletcher round 1 here, which caught two scenarios in this exact file that
+passed a low<=high-only guard while having open/close sit outside
+[low, high]).
 
 Every scenario's expected values were hand-derived against the .pine
 source's own logic (`docs/TradingView/pine/QjOFE86I-Kale-Rejection-
@@ -150,7 +155,15 @@ def _flooded_ohlc(n, o=100.0, h=101.0, l=99.0, c=100.0):
 
 
 def _run(O, H, L, C, **kwargs):
-    assert (L <= H).all(), "construction check: every bar must be physically valid"
+    # Fletcher MAJOR (round 1): a bare `(L <= H).all()` check does NOT
+    # catch a bar whose open/close sit OUTSIDE [low, high] (e.g. both
+    # below low, or both above high) -- exactly the false-confidence-guard
+    # failure mode this file's own module docstring cites the
+    # test_sphinx_unicorn.py incident to prevent, and it was sitting
+    # undetected in two of this file's own scenarios. Full invariant:
+    # low <= min(open, close) and max(open, close) <= high.
+    assert (L <= np.minimum(O, C)).all() and (np.maximum(O, C) <= H).all() and (L <= H).all(), \
+        "construction check: every bar must be physically valid"
     idx = _idx(len(O))
     return ta.rejection_blocks(
         pd.Series(O, index=idx), pd.Series(H, index=idx),
@@ -304,64 +317,143 @@ def test_combined_pool_shared_fifo_cap_across_directions():
     assert out["RB_DIST_SUP_2"].iloc[16:].notna().all(), "bullish zone must still be active"
 
 
-def test_dist_res_ignores_stale_zone_below_price():
-    # THE side-constraint regression test (this port's analogue of
-    # liquidity_sweep.py's Fletcher-MAJOR-fix regression test) -- built
-    # side-constrained from the start, not as a follow-up fix.
+def test_dist_res_prefers_zone_containing_price_over_farther_zone():
+    # Fletcher round 1 renamed/re-derived this test (was
+    # `..._ignores_stale_zone_below_price`, asserting the FARTHER zone B's
+    # distance won). That assertion was measured against pre-MINOR-fix
+    # code; it is no longer correct, for a structural reason worth stating
+    # explicitly: a bearish zone's SPENT check (`close > zone.top`) fires
+    # every bar, so an ACTIVE bearish zone can NEVER have `top < close` --
+    # if it did, it would already have been spent and removed before this
+    # bar's DIST computation runs. So "zone A, bot below close, still
+    # active" can only ever mean `bot <= close <= top` -- CONTAINING
+    # price, i.e. exactly the TAP-moment scenario the MINOR fix (see
+    # rejection_blocks.py's `_new_zone`-adjacent dist_res/dist_sup block
+    # comment) targets, not a genuinely wrong-side/stale zone (which is
+    # structurally impossible here, unlike liquidity_sweep.py's point
+    # levels with a separate broken-but-unresolved state).
     #
-    # Zone A (stale): swing high at bar 5, top=200 (so it can NEVER be
-    # spent within this scenario -- close never approaches 200), bot=101
-    # (O=100,C=101) -- BELOW the flood close of 105, so it's "already
-    # behind price," not real resistance.
+    # So this test's real, still-valuable job post-fix: prove a zone
+    # CONTAINING price (distance 0, "you're already there") correctly
+    # wins the argmin over a farther zone that's merely AHEAD (a smaller
+    # positive distance) -- i.e. the raw (unclamped) `bot - c` key must
+    # keep favoring the more-negative (contained) zone over the
+    # less-negative-but-still-smaller positive value of an ahead-only
+    # zone, not fall back to reporting the ahead zone once one candidate
+    # is a match. An implementation that reverted to the pre-fix
+    # `bot > c` filter would instead report zone B's (125-105)/105*100 =
+    # 19.05 here -- this test fails loudly against that regression.
     #
-    # Zone B (genuine): swing high at bar 15, top=140, bot=125
-    # (O=124,C=125) -- ABOVE the flood close of 105, genuine overhead
-    # resistance.
+    # Zone A (contains price): swing high at bar 5, top=200 (never spent
+    # -- close never approaches 200), bot=101 (O=100,C=101) -- BELOW the
+    # flood close of 105, so [101, 200] CONTAINS close=105.
     #
-    # By absolute distance alone, A (|101-105|=4) is CLOSER than B
-    # (|125-105|=20) -- an unconstrained argmin would pick A and report
-    # (101-105)/105*100 = -3.81% (negative -- a level that isn't
-    # resistance at all). The side-constrained implementation must
-    # exclude A (bot=101 is not > close=105) and pick B.
+    # Zone B (genuine, farther): swing high at bar 15, top=140, bot=125
+    # (O=124,C=125) -- entirely ABOVE the flood close of 105, genuine
+    # overhead resistance at +19.05%.
     n = 25
     O, H, L, C = _flooded_ohlc(n, o=105.0, h=106.0, l=104.0, c=105.0)
-    O[5], H[5], L[5], C[5] = 100.0, 200.0, 104.0, 101.0
+    # L[5]=99.0 (not the flooded 104.0): required so open(100)/close(101)
+    # both sit inside [low, high] (Fletcher MAJOR round 1 fix -- the
+    # original 104.0 put both open and close BELOW low, an impossible
+    # bar). Side effect: low=99.0 is now also a strict-unique local min
+    # vs the flooded low=104.0, so this bar ALSO confirms a bullish zone
+    # at bar 7 -- harmless here, this test asserts nothing about
+    # RB_DIST_SUP/RB_TAP_BULL/RB_SPENT_BULL.
+    O[5], H[5], L[5], C[5] = 100.0, 200.0, 99.0, 101.0
     O[15], H[15], L[15], C[15] = 124.0, 140.0, 104.0, 125.0
     out = _run(O, H, L, C, swing_len=2, min_wick_ratio=0.0, min_wick_atr=0.0, atr_len=2)
 
     assert out["RB_SPENT_BEAR_2"].sum() == 0, "zone A must never spend in this scenario -- both zones stay simultaneously active"
     dist_res = out["RB_DIST_RES_2"]
     post_b = dist_res.iloc[17:]
-    assert post_b.notna().all()
-    expected = (125.0 - 105.0) / 105.0 * 100
-    assert np.allclose(post_b.to_numpy(), expected, atol=1e-9)
-    assert (dist_res.dropna() >= 0).all(), "must pick zone B (above price), never the stale zone A (below price)"
+    assert post_b.notna().all(), "must be 0.0 (zone A contains price), never NaN"
+    assert np.allclose(post_b.to_numpy(), 0.0, atol=1e-9), \
+        "must pick zone A (contains price, distance 0), never fall back to zone B's farther 19.05%"
 
 
-def test_dist_sup_ignores_stale_zone_above_price():
-    # Mirror of the above on the support side: a stale bullish zone
-    # sitting ABOVE close (already passed through, not real support) must
-    # not win the DIST_SUP argmin over a genuine support zone below price.
+def test_dist_sup_prefers_zone_containing_price_over_farther_zone():
+    # Mirror of the above on the support side. Same structural argument:
+    # an active bullish zone's SPENT check (`close < zone.bot`) fires
+    # every bar, so an active bullish zone can never have `bot > close`
+    # -- "zone A, top above close, still active" can only mean
+    # `bot <= close <= top`, containing price.
+    #
+    # Zone A (contains price): swing low at bar 5, bot=10 (never spent --
+    # close never drops near 10), top=109 (O=110,C=109 -> body_bot=109) --
+    # ABOVE the flood close of 105, so [10, 109] CONTAINS close=105.
+    #
+    # Zone B (genuine, farther): swing low at bar 15, top=85, bot=70
+    # (O=86,C=85) -- entirely BELOW the flood close of 105, genuine
+    # support at -19.05%.
     n = 25
     O, H, L, C = _flooded_ohlc(n, o=105.0, h=106.0, l=104.0, c=105.0)
-    # Zone A (stale bullish): swing low at bar 5, bot=10 (never spent --
-    # close never drops near 10), top=109 (O=109,C=108 -> body_bot=108?
-    # need top = body_bot). Use O=109.0, C=... wait top must be ABOVE
-    # close(105) to be "stale" (already passed from below). Set
-    # body_bot=109 (O=110,C=109) so top=109 > close(105) -- excluded.
-    O[5], H[5], L[5], C[5] = 110.0, 106.0, 10.0, 109.0
-    # Zone B (genuine bullish): swing low at bar 15, top=85 < close(105) --
-    # genuine support below price. body_bot=85 (O=86,C=85), bot=70.
+    # H[5]=110.0 (not the flooded 106.0): required so open(110)/close(109)
+    # both sit inside [low, high] (Fletcher MAJOR round 1 fix -- the
+    # original 106.0 put both open and close ABOVE high, an impossible
+    # bar). Side effect: high=110.0 is now also a strict-unique local max
+    # vs the flooded high=106.0, so this bar ALSO confirms a bearish zone
+    # at bar 7 -- harmless here, this test asserts nothing about
+    # RB_DIST_RES/RB_TAP_BEAR/RB_SPENT_BEAR.
+    O[5], H[5], L[5], C[5] = 110.0, 110.0, 10.0, 109.0
     O[15], H[15], L[15], C[15] = 86.0, 106.0, 70.0, 85.0
     out = _run(O, H, L, C, swing_len=2, min_wick_ratio=0.0, min_wick_atr=0.0, atr_len=2)
 
     assert out["RB_SPENT_BULL_2"].sum() == 0, "zone A must never spend -- both zones stay simultaneously active"
     dist_sup = out["RB_DIST_SUP_2"]
     post_b = dist_sup.iloc[17:]
-    assert post_b.notna().all()
-    expected = (105.0 - 85.0) / 105.0 * 100
-    assert np.allclose(post_b.to_numpy(), expected, atol=1e-9)
-    assert (dist_sup.dropna() >= 0).all(), "must pick zone B (below price), never the stale zone A (above price)"
+    assert post_b.notna().all(), "must be 0.0 (zone A contains price), never NaN"
+    assert np.allclose(post_b.to_numpy(), 0.0, atol=1e-9), \
+        "must pick zone A (contains price, distance 0), never fall back to zone B's farther 19.05%"
+
+
+def test_dist_res_zero_not_nan_while_price_inside_zone():
+    # THE direct regression test for the Fletcher MINOR fix itself:
+    # before the fix, DIST_RES went NaN exactly when price was AT or
+    # INSIDE an active zone -- the precise moment RB_TAP_BEAR fires and an
+    # ML consumer most needs a real number, not a missing one. This test
+    # isolates a SINGLE zone (no second zone competing in the argmin) and
+    # walks close from outside, to the exact near-edge boundary, to
+    # strictly inside, checking DIST_RES is 0.0 (not NaN) throughout.
+    n = 20
+    O, H, L, C = _flooded_ohlc(n)
+    # Bearish zone at bar 5 (as in test_bearish_tap_then_spent_lifecycle):
+    # top=110, bot=101, confirms at bar 7.
+    O[5], H[5], L[5], C[5] = 100.0, 110.0, 99.0, 101.0
+    # Bar 10: close=105 -- strictly INSIDE [101, 110], not the boundary.
+    O[10], H[10], L[10], C[10] = 104.0, 106.0, 103.0, 105.0
+    # Bar 11: close=101 -- exactly AT the near edge (z.bot).
+    O[11], H[11], L[11], C[11] = 101.0, 102.0, 100.0, 101.0
+    out = _run(O, H, L, C, swing_len=2, min_wick_ratio=0.0, min_wick_atr=0.0, atr_len=2)
+
+    assert out["RB_SPENT_BEAR_2"].sum() == 0, "zone must stay active (close never exceeds top=110) throughout"
+    dist_res = out["RB_DIST_RES_2"]
+    assert dist_res.iloc[10] == 0.0, "close=105 strictly inside [101,110] must report 0.0, not NaN"
+    assert dist_res.iloc[11] == 0.0, "close=101 == z.bot (exact boundary) must report 0.0, not NaN"
+    # bars outside the zone (flooded close=100 < bot=101) still report the
+    # genuine positive distance, unaffected by the fix.
+    assert dist_res.iloc[7] == 1.0
+    assert dist_res.iloc[9] == 1.0
+
+
+def test_dist_sup_zero_not_nan_while_price_inside_zone():
+    # Mirror of the above on the support side.
+    n = 20
+    O, H, L, C = _flooded_ohlc(n)
+    # Bullish zone at bar 5: top=99, bot=90, confirms at bar 7.
+    O[5], H[5], L[5], C[5] = 100.0, 101.0, 90.0, 99.0
+    # Bar 10: close=95 -- strictly INSIDE [90, 99].
+    O[10], H[10], L[10], C[10] = 96.0, 97.0, 94.0, 95.0
+    # Bar 11: close=99 -- exactly AT the near edge (z.top).
+    O[11], H[11], L[11], C[11] = 99.0, 100.0, 98.0, 99.0
+    out = _run(O, H, L, C, swing_len=2, min_wick_ratio=0.0, min_wick_atr=0.0, atr_len=2)
+
+    assert out["RB_SPENT_BULL_2"].sum() == 0, "zone must stay active (close never drops below bot=90) throughout"
+    dist_sup = out["RB_DIST_SUP_2"]
+    assert dist_sup.iloc[10] == 0.0, "close=95 strictly inside [90,99] must report 0.0, not NaN"
+    assert dist_sup.iloc[11] == 0.0, "close=99 == z.top (exact boundary) must report 0.0, not NaN"
+    assert dist_sup.iloc[7] == 1.0
+    assert dist_sup.iloc[9] == 1.0
 
 
 # ---------------------------------------------------------------------------

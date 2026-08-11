@@ -234,22 +234,41 @@ def rejection_blocks(open_, high, low, close, swing_len=None, min_wick_ratio=Non
         zones = survivors
 
         # --- 3. distance to nearest ACTIVE zone on the correct side of
-        # price -- constrained to the side price would need to move
-        # TOWARD to reach the zone's near (tap-triggering) edge, same
-        # discipline as `liquidity_sweep.py`'s Fletcher-MAJOR-fixed
-        # DIST_RES/DIST_SUP (an unconstrained nearest-by-absolute-distance
-        # argmin could otherwise pick a zone on the wrong side of price).
-        # "Active" includes a tapped-but-not-yet-spent zone -- it is still
-        # tracked and still resolvable, only a spent zone leaves the pool.
+        # price -- constrained to zones price hasn't already moved fully
+        # PAST (the far edge), same discipline as `liquidity_sweep.py`'s
+        # Fletcher-MAJOR-fixed DIST_RES/DIST_SUP (an unconstrained
+        # nearest-by-absolute-distance argmin could otherwise pick a zone
+        # on the wrong side of price). "Active" includes a
+        # tapped-but-not-yet-spent zone -- it is still tracked and still
+        # resolvable, only a spent zone leaves the pool.
+        #
+        # Fletcher MINOR (this port's own round 1, distinct from
+        # liquidity_sweep's MAJOR): the first version of this block
+        # required the NEAR edge strictly ahead of price (`bot > c` /
+        # `top < c`), so a zone price had already TAPPED INTO (price
+        # inside [bot, top], the exact TAP moment RB_TAP_BEAR/BULL fires)
+        # reported NaN instead of the geometrically obvious answer -- you
+        # are AT that resistance/support right now, distance 0. Fixed by
+        # widening the candidate filter to the FAR edge (`top >= c` /
+        # `bot <= c` -- the spent check already guarantees an active
+        # bearish zone always has `top >= c`/an active bullish zone always
+        # has `bot <= c`, so this filter is a no-op safety net, not a
+        # behavior change, for the "genuinely ahead" case) and clamping
+        # the reported distance to >= 0 so a contained zone reports 0
+        # rather than a negative value; the raw (unclamped) argmin key is
+        # kept so a zone price is INSIDE always wins over a merely-nearby
+        # zone price hasn't reached yet (a more negative raw `bot - c` /
+        # `c - top` beats a smaller positive one, matching "you're already
+        # there beats you're almost there").
         c = close_v[t]
-        res_cands = [z for z in zones if z.dir == -1 and z.bot > c]
+        res_cands = [z for z in zones if z.dir == -1 and z.top >= c]
         if res_cands:
             nearest = min(res_cands, key=lambda z: z.bot - c)
-            dist_res[t] = (nearest.bot - c) / c * 100
-        sup_cands = [z for z in zones if z.dir == 1 and z.top < c]
+            dist_res[t] = max(nearest.bot - c, 0.0) / c * 100
+        sup_cands = [z for z in zones if z.dir == 1 and z.bot <= c]
         if sup_cands:
             nearest = min(sup_cands, key=lambda z: c - z.top)
-            dist_sup[t] = (c - nearest.top) / c * 100
+            dist_sup[t] = max(c - nearest.top, 0.0) / c * 100
 
     tap_bull = Series(tap_bull, index=close.index)
     tap_bear = Series(tap_bear, index=close.index)
@@ -348,12 +367,43 @@ final, still-forming bar, per this project's `df.iloc[-3]` signal-bar law.
 of existing Pine math (the source only ever asks "did THIS zone get
 tapped," never "how far to the nearest zone") -- added in the family's
 `dist_to_res_level`/`LSH_DIST_RES`/`SPHINX_DIST_*` tradition for a
-scale-free distance feature. "Nearest" is nearest-by-distance to the
-zone's NEAR (tap-triggering) edge -- `bot` for a bearish/resistance zone,
-`top` for a bullish/support zone -- restricted to zones on the correct
-side of price (`z.bot > close` for DIST_RES, `z.top < close` for
-DIST_SUP), so this port ships the `liquidity_sweep.py` Fletcher-MAJOR
-side-constraint fix from the start rather than needing a follow-up round.
+scale-free distance feature. "Nearest" is nearest-by-(possibly negative)
+raw distance to the zone's NEAR (tap-triggering) edge -- `bot` for a
+bearish/resistance zone, `top` for a bullish/support zone -- among zones
+NOT YET fully passed (`z.top >= close` for DIST_RES, `z.bot <= close` for
+DIST_SUP), with the reported distance clamped to >= 0. This is the same
+side-discipline `liquidity_sweep.py`'s Fletcher-MAJOR fix established
+(never let an unconstrained argmin pick a zone the wrong side of price),
+shipped here from the start rather than needing a follow-up round --
+but see the next paragraph for a related, DISTINCT hole this port's own
+Fletcher round 1 found and fixed in the clamping itself.
+
+⚠ Fletcher MINOR (round 1): the first version of this port's DIST
+columns required the near edge STRICTLY ahead of price (`bot > close` /
+`top < close`, no clamping), so a zone price had already TAPPED INTO
+(price sitting inside `[bot, top]` -- precisely the moment `RB_TAP_BEAR`/
+`RB_TAP_BULL` fires) reported NaN instead of the geometrically obvious
+answer: you are AT that resistance/support right now, distance 0. This
+is NOT the same failure mode as the Fletcher-MAJOR side-constraint bug
+above -- it is a *within-side* boundary/containment gap, not a
+wrong-side pick, and it is specific to this indicator's ZONE (not point)
+levels: `SPENT` fires the moment `close` crosses the FAR edge, so an
+active bearish zone provably always has `top >= close` and an active
+bullish zone always has `bot <= close` (if it didn't, it would already
+be spent and gone) -- meaning the "restricted to the correct side" test
+alone can never exclude a genuinely wrong-side active zone here the way
+it does for `liquidity_sweep.py`'s point levels; the real gap was purely
+the missing 0-clamp for the contained case. Fixed by widening the
+candidate filter to the far edge (a no-op for the "genuinely ahead" case,
+given the invariant above) and reporting `max(nearest_edge_distance, 0)`.
+Dedicated regression tests: `tests/test_rejection_blocks.py::
+test_dist_res_zero_not_nan_while_price_inside_zone` (and its DIST_SUP
+mirror) assert 0.0, not NaN, both strictly inside a zone and at the exact
+near-edge boundary; `test_dist_res_prefers_zone_containing_price_over_
+farther_zone` (and its mirror) assert a contained zone's distance-0
+correctly outranks a merely-nearby zone's smaller-but-still-positive
+distance.
+
 "Active" includes a tapped-but-not-yet-spent zone (still tracked, still
 resolvable); only a spent zone leaves the pool and stops contributing to
 either DIST column.
@@ -371,7 +421,7 @@ Calculation:
         bearish (from a swing high): wick = high[p] - body_top,
             zone = [body_top, high[p]]
         bullish (from a swing low):  wick = body_bot - low[p],
-            zone = [low[p], body_top]
+            zone = [low[p], body_bot]
         qualifies iff wick >= min_wick_ratio * rng
             AND wick >= min_wick_atr * ATR(atr_len)[t]  (today's ATR)
         qualifying zone pushed onto the COMBINED pool; if pool size >
@@ -383,11 +433,14 @@ Calculation:
                 this bar for it.
             TAPPED (sticky, fires once): high[t] >= zone.bot (bearish) or
                 low[t] <= zone.top (bullish), and not already tapped.
-    DIST_RES = (nearest active bearish zone's `bot` - close) / close * 100,
-        restricted to zones with `bot > close` (NaN if none qualify).
-    DIST_SUP = (close - nearest active bullish zone's `top`) / close * 100,
-        restricted to zones with `top < close` (NaN if none qualify).
-        Both are >= 0 whenever populated, by construction.
+    DIST_RES = max(nearest active bearish zone's `bot` - close, 0) / close
+        * 100, among zones with `top >= close` (NaN only if the pool has
+        no active bearish zone at all).
+    DIST_SUP = max(close - nearest active bullish zone's `top`, 0) / close
+        * 100, among zones with `bot <= close` (NaN only if the pool has
+        no active bullish zone at all).
+        Both are >= 0 whenever populated, by construction; 0 exactly
+        while price sits inside the nearest zone (the TAP window).
 
 Args:
     open_ (pd.Series): Series of 'open's
