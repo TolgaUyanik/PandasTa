@@ -4,7 +4,7 @@ import pandas as pd
 from pandas import DataFrame, Series
 
 from pandas_ta.overlap.hlc3 import hlc3
-from pandas_ta.utils import get_offset, is_datetime_ordered, verify_series
+from pandas_ta.utils import get_offset, verify_series
 
 
 _VALID_ANCHORS = {"D": "D", "W": "W", "M": "M"}
@@ -86,13 +86,21 @@ def avwap_z(high, low, close, volume, anchor=None, min_samples=None, offset=None
     # cumsum()`/`.transform("first")` both follow ROW order, not TIME
     # order, so an out-of-order frame lets a bar's output incorporate a
     # LATER-timestamped row that merely appears earlier in the frame.
-    # `pandas_ta.overlap.vwap` calls this exact same `is_datetime_ordered`
-    # check but only WARNS and continues; this port raises instead, per
-    # its own stated convention of raising rather than silently degrading
-    # (matches the type check just above, which already claimed to be
-    # stricter than vwap.py here -- prior to this check that claim was
-    # only true for TYPE, not ORDER; it is genuinely true for both now).
-    if not is_datetime_ordered(close):
+    #
+    # Fletcher round 2 (MAJOR): the round-1 fix used `is_datetime_ordered`,
+    # which is `is_datetime64_any_dtype(index) and index[0] < index[-1]`
+    # -- an ENDPOINT comparison only, never interior monotonicity. Verified
+    # directly: swapping just two ADJACENT MIDDLE rows of a 120-row
+    # DatetimeIndex (first/last timestamps unchanged) still passes that
+    # check and still silently returns non-causal output -- the exact bug
+    # this guard exists to close, still open for any interior shuffle.
+    # `close.index.is_monotonic_increasing` is the correct, exact check
+    # (O(n), true iff EVERY consecutive pair is non-decreasing, not just
+    # the first vs. the last) -- used here instead. `pandas_ta.overlap.
+    # vwap` calls the weaker endpoint check but only WARNS and continues;
+    # this port checks strictly MORE (full monotonicity, not just
+    # endpoints) AND raises instead of warning.
+    if not close.index.is_monotonic_increasing:
         raise ValueError(
             "avwap_z requires a time-ordered (ascending) DatetimeIndex; "
             "groupby(periods).cumsum() and groupby(periods).transform('first') "
@@ -145,9 +153,15 @@ def avwap_z(high, low, close, volume, anchor=None, min_samples=None, offset=None
     #                    magnitude flip, not just noise)
     #                    NaN mask (stdev==0 positions): scale-DEPENDENT
     #                    (differs between the 1x and 1000x runs)
-    #   this reformulation: max |Z(1x) - Z(1000x)| = 2.87e-13  (~10,300x tighter)
-    #                    max relative stdev error = 3.72e-14
+    #   this reformulation: max |Z(1x) - Z(1000x)| = 7.91e-13  (~3,700x tighter)
+    #                    max relative stdev error = 2.60e-13 (convention:
+    #                    |stdev(1x)*k - stdev(kx)| / max(|stdev(1x)*k|,
+    #                    |stdev(kx)|), NaN positions excluded)
     #                    NaN mask: scale-INVARIANT (identical both runs)
+    #   (Fletcher round 2 MINOR: this reformulation's two figures were
+    #   previously stated as 2.87e-13/3.72e-14 -- did not reproduce on
+    #   re-measurement, corrected above; the naive-formula figures did
+    #   reproduce exactly and are unchanged.)
     # The fix -- computing the sum of squares as a deviation from a fixed
     # per-period REFERENCE value (here, each period's own first
     # typical_price) rather than from the (much larger) raw price -- is
@@ -203,37 +217,62 @@ def avwap_z(high, low, close, volume, anchor=None, min_samples=None, offset=None
         z = (close - vwap_val) / stdev
     z = z.where(stdev > 0)
 
-    # THE n=2 CASE (Fletcher round 1, MAJOR): the n=1 guard just above
-    # only prevents a divide-by-EXACTLY-zero; it does NOT bound Z once a
-    # period has 2+ samples. Solving the n=2 case in closed form (2
-    # samples, volumes v1/v2, typical prices p1/p2): vwap = (p1*v1 +
-    # p2*v2)/(v1+v2) (the ordinary 2-point VWAP), stdev = |p1-p2| *
-    # sqrt(v1*v2)/(v1+v2), and therefore
-    #     Z(2nd bar) = (p2 - vwap) / stdev = sign(p2-p1) * sqrt(v1/v2)
-    # -- i.e. on a period's SECOND bar, Z depends on NOTHING but the
-    # ratio of the first two bars' VOLUMES, is completely UNBOUNDED (a
-    # 100:1 volume ratio between consecutive bars, unremarkable on a
-    # thin BIST name, gives |Z|=10 from price action alone), and is
+    # THE n=2 CASE (Fletcher round 1, MAJOR; formula CORRECTED round 2,
+    # also MAJOR): the n=1 guard just above only prevents a
+    # divide-by-EXACTLY-zero; it does NOT bound Z once a period has 2+
+    # samples. Solving the n=2 case in closed form (2 samples, volumes
+    # v1/v2, typical prices p1/p2, and -- this is the part round 1 got
+    # wrong -- the period's SECOND BAR'S OWN CLOSE c2, which need not
+    # equal p2 since Z is computed against `close`, not `typical_price`):
+    # vwap = (p1*v1 + p2*v2)/(v1+v2) (the ordinary 2-point VWAP),
+    # stdev = |p1-p2| * sqrt(v1*v2)/(v1+v2), and therefore
+    #     Z(2nd bar) = (c2 - vwap) / stdev
+    #                = sign(p2-p1)*sqrt(v1/v2)
+    #                  + (c2-p2)*(v1+v2)/(|p2-p1|*sqrt(v1*v2))
+    # Round 1's version dropped the second term (silently assuming
+    # c2 == p2, i.e. close == hlc3, which is only true on a flat/doji
+    # bar) -- independently re-derived and verified: on
+    # `_random_ohlcv(n=2000, seed=11)`, the round-1 formula predicts
+    # max |Z| = 3.77 on the period's 2nd bar; ACTUAL max |Z| there is
+    # 857.22 (max diff between round-1's formula and the real output:
+    # 324.14 on an independently generated fixture with wider volume
+    # dispersion; max diff between THIS formula and the real output:
+    # 7.1e-11 on the same fixture, 1.68e-11 on the file's own fixture --
+    # both effectively floating-point noise, not a further approximation).
+    # The DOMINANT driver of the blowup on real (non-flat) OHLC is
+    # therefore the FIRST term's denominator going to zero as p2->p1 --
+    # i.e. a near-zero within-period price move on low relative volume at
+    # the first bar -- NOT primarily the volume ratio in isolation (the
+    # volume-ratio term alone, sign(p2-p1)*sqrt(v1/v2), maxes at only
+    # ~3.8 on the fixture below; the second term is what actually reaches
+    # into the hundreds). It is still, overall, completely UNBOUNDED and
     # heavy-tailed rather than merely "occasionally large": measured
     # directly on this file's own `_random_ohlcv()` test fixture (n=2000,
     # seed=11, anchor="W") AVWAP_Z_W ranges -857.22..106.31 over the full
     # series; 0.75% of ALL rows have |Z|>5, 0.35% have |Z|>10; every one
     # of those extreme values sits on a period's 2nd-or-early bar (see
     # tests/test_avwap_z.py::test_second_bar_of_period_z_is_unbounded_by_
-    # volume_ratio for the exact closed-form pin, and the module
-    # docstring's "THE n=2 CASE" section for the full derivation +
-    # measurement). This is a REAL property of the ported formula, not a
-    # bug to silently paper over -- Pine's own bands are exactly as
-    # degenerate there (a near-zero-width band around 2 points is exactly
-    # as volume-ratio-driven as this Z is), this port just makes the
-    # degeneracy visible as a number instead of an invisible pixel-width
-    # band on a chart.
+    # volume_ratio for the closed-form pin on a FLAT bar, where the two
+    # formulas coincide, and test_second_bar_z_full_formula_on_non_flat_
+    # bar for the corrected two-term formula on a bar where they do NOT,
+    # and the module docstring's "THE n=2 CASE" section for the full
+    # derivation + measurement). This is a REAL property of the ported
+    # formula, not a bug to silently paper over -- Pine's own bands are
+    # exactly as degenerate there (a near-zero-width band around 2 points
+    # is exactly as prone to a stray close blowing the ratio up), this
+    # port just makes the degeneracy visible as a number instead of an
+    # invisible pixel-width band on a chart.
     #
     # `min_samples` (opt-in, default None/disabled -- Pine parity):
-    # forces Z to NaN for any bar where fewer than `min_samples` samples
-    # have accumulated in the current anchor period so far, INCLUDING the
-    # n=2 case above (n=1 is already NaN via the stdev==0 guard
-    # regardless of this parameter). This is a PORT DEVIATION, not
+    # forces Z to NaN for any bar where fewer than `min_samples` BARS
+    # have elapsed in the current anchor period so far (counts rows via
+    # `cumcount`, NOT rows with volume > 0 specifically -- a leading
+    # zero/NaN-volume bar, already excluded from cum_v via the `cum_v > 0`
+    # guard above, still consumes one unit of the min_samples budget, so
+    # the mask can lift slightly earlier than "k samples with real volume
+    # have accumulated" would read), INCLUDING the n=2 case above (n=1 is
+    # already NaN via the stdev==0 guard regardless of this parameter).
+    # This is a PORT DEVIATION, not
     # something the source does or needs (the source never computes a
     # ratio, only plots bands, so it has no analogous "too few samples"
     # failure mode) -- purely a downstream-ML-safety knob a caller can
@@ -382,16 +421,31 @@ Deliberately LEFT OUT, and why:
       on them once the raw levels are dropped).
 
 THE n=2 CASE -- Z is unbounded and heavy-tailed on each anchor period's
-2nd bar, driven purely by the intra-period volume ratio (Fletcher round
-1, MAJOR -- this was previously undocumented; only the n=1 case above
-was). Solving the n=2 case in closed form (2 samples, volumes v1/v2,
-typical prices p1/p2): vwap = (p1*v1 + p2*v2)/(v1+v2) (the ordinary
-2-point VWAP), stdev = |p1-p2| * sqrt(v1*v2)/(v1+v2), therefore:
-    Z(2nd bar) = (p2 - vwap) / stdev = sign(p2-p1) * sqrt(v1/v2)
-This depends on NOTHING but the ratio of the first two bars' volumes --
-a 100:1 volume ratio between consecutive bars (unremarkable on a thin
-BIST name) gives |Z|=10 from price action alone, regardless of how
-small the actual price move was. Measured directly on this file's own
+2nd bar (Fletcher round 1, MAJOR -- this was previously undocumented;
+only the n=1 case above was. Fletcher round 2, MAJOR: round 1's formula
+below was itself wrong -- corrected here). Solving the n=2 case in
+closed form (2 samples, volumes v1/v2, typical prices p1/p2, and the
+2nd bar's own CLOSE c2 -- which need not equal p2, since Z divides by
+`close`, not `typical_price`): vwap = (p1*v1 + p2*v2)/(v1+v2) (the
+ordinary 2-point VWAP), stdev = |p1-p2| * sqrt(v1*v2)/(v1+v2), therefore:
+    Z(2nd bar) = (c2 - vwap) / stdev
+               = sign(p2-p1)*sqrt(v1/v2)
+                 + (c2-p2)*(v1+v2)/(|p2-p1|*sqrt(v1*v2))
+Round 1 of this docstring dropped the second term (silently assuming
+c2 == p2, true only on a flat/doji bar) and claimed Z "depends on
+NOTHING but the ratio of the first two bars' volumes" -- independently
+re-derived and verified false on non-flat bars: on this file's own
+`_random_ohlcv(n=2000, seed=11)` fixture, the round-1 (volume-ratio-only)
+formula predicts a max |Z| of 3.77 at the 2nd bar; the ACTUAL measured
+extreme there is 857.22, and the round-1 formula gets the SIGN wrong on
+a meaningful fraction of 2nd bars. The corrected two-term formula above
+matches the real output to ~1.7e-11 (floating-point noise, not a further
+approximation). The DOMINANT driver on real (non-flat) OHLC is therefore
+the first term's denominator -- |p2-p1| -- going to zero (a near-zero
+within-period price move at the 2nd bar) combined with a nonzero
+(c2-p2), NOT the volume ratio in isolation (the volume-ratio term alone
+maxes at ~3.8 on the fixture below). It remains, overall, completely
+UNBOUNDED and heavy-tailed: measured directly on this file's own
 `_random_ohlcv()` test fixture (n=2000, seed=11, anchor="W"):
 AVWAP_Z_W ranges -857.22..106.31 over the full 2000-bar series; 0.75%
 of ALL rows have |Z|>5, 0.35% have |Z|>10 -- these are not rare
@@ -399,12 +453,14 @@ one-off outliers, every extreme sits on a period's 2nd-or-early bar,
 by construction. This is a REAL property of the ported formula, not a
 bug silently papered over: Pine's own fixed-multiple bands are exactly
 as degenerate at n=2 (a near-zero-width band spanning 2 points is just
-as volume-ratio-driven), this port merely turns that same degeneracy
-into a visible number instead of an invisible pixel-width band on a
-chart. See `min_samples` below for an opt-in mitigation, and
-tests/test_avwap_z.py::test_second_bar_of_period_z_is_unbounded_by_
-volume_ratio for the closed-form pin (volumes [10000, 100] -> exactly
-sqrt(100) = 10.0).
+as prone to a stray close blowing the ratio up), this port merely turns
+that same degeneracy into a visible number instead of an invisible
+pixel-width band on a chart. See `min_samples` below for an opt-in
+mitigation, tests/test_avwap_z.py::test_second_bar_of_period_z_is_
+unbounded_by_volume_ratio for the closed-form pin on a FLAT bar (where
+the two formulas coincide: volumes [10000, 100] -> exactly sqrt(100) =
+10.0), and test_second_bar_z_full_formula_on_non_flat_bar for the
+corrected two-term formula pinned on a bar where they do NOT coincide.
 
 ⚠ Register caveat: `docs/knowledgebase/IndicatorMLRegister.md`'s
 auto-measured range for `AVWAP_Z_W` is NOT trustworthy evidence against
@@ -445,18 +501,22 @@ same-unit stdev, DIST_PCT divides by close and multiplies by 100), so
 scaling every OHLCV price column by a constant k>0 leaves both columns
 ALGEBRAICALLY unchanged. Not byte-identical in floating point, though:
 measured directly on `_random_ohlcv()` (n=120, seed=11) at k=1000 --
-max |Z(1x) - Z(1000x)| = 2.87e-13, max relative stdev error = 3.72e-14,
-NaN mask (stdev==0 positions) scale-INVARIANT (identical both scales;
-the pre-fix naive formula was NOT: 2.96e-09 max |Z| error, relative
-stdev error up to 1.0, and a scale-DEPENDENT NaN mask -- see the
-numerical-stability comment above the variance calculation in this file
-for the full before/after). tests/test_avwap_z.py::test_scale_invariant_
-under_price_rescale/_volume_rescale assert to rtol=1e-9/atol=1e-11 (not
-exact equality, and not the older/looser 1e-6 this test used before
-Fletcher round 1 tightened it to something that actually has teeth
-against the measured 2.87e-13 error). Also scale-invariant under volume
-rescaling alone (`volume * m` for any constant m>0), verified the same
-way.
+max |Z(1x) - Z(1000x)| = 7.91e-13, max relative stdev error = 2.60e-13
+(convention: |stdev(1x)*k - stdev(kx)| / max(|stdev(1x)*k|, |stdev(kx)|),
+NaN positions excluded -- Fletcher round 2 MINOR: the figures previously
+here, 2.87e-13/3.72e-14, did not reproduce on re-measurement and are
+corrected in this revision), NaN mask (stdev==0 positions)
+scale-INVARIANT (identical both scales; the pre-fix naive formula was
+NOT: 2.96e-09 max |Z| error, relative stdev error up to 1.0, and a
+scale-DEPENDENT NaN mask -- see the numerical-stability comment above
+the variance calculation in this file for the full before/after; ~3,700x
+tighter on Z, not the previously-claimed ~10,300x). tests/test_avwap_z.
+py::test_scale_invariant_under_price_rescale/_volume_rescale assert to
+rtol=1e-9/atol=1e-11 (not exact equality, and not the older/looser 1e-6
+this test used before Fletcher round 1 tightened it -- still ~12x margin
+above the true 7.91e-13 error, so it has teeth without being flaky).
+Also scale-invariant under volume rescaling alone (`volume * m` for any
+constant m>0), verified the same way.
 
 Args:
     high (pd.Series): Series of 'high's
@@ -469,11 +529,15 @@ Args:
         cryptic AttributeError a bare `.to_period()` call would raise), or
         a DatetimeIndex that is present but not ascending-ordered (rather
         than the silent non-causal-but-doesn't-crash result an unordered
-        groupby produces). `pandas_ta.overlap.vwap` checks this exact same
-        ordering condition (`is_datetime_ordered`) but only WARNS and
-        continues; this port raises on both checks instead, consistent
-        with its own stated convention elsewhere (`anchor`/`min_samples`
-        validation below) of raising rather than silently degrading.
+        groupby produces). Checked via `index.is_monotonic_increasing`
+        (exact -- true iff every consecutive pair is non-decreasing, not
+        merely the first timestamp vs. the last). `pandas_ta.overlap.vwap`
+        checks only the weaker first-vs-last endpoint comparison
+        (`is_datetime_ordered`) and WARNS rather than raises; this port
+        checks strictly more (full monotonicity) AND raises on both
+        gaps, consistent with its own stated convention elsewhere
+        (`anchor`/`min_samples` validation below) of raising rather than
+        silently degrading.
     volume (pd.Series): Series of 'volume's
     anchor (str): One of "D" (day/session), "W" (week), or "M" (month),
         case-insensitive. Must match one of these 3 if given, or raises
@@ -484,8 +548,10 @@ Args:
         Default: "W"
     min_samples (int): Opt-in port deviation, OFF by default (Pine
         parity): if given, forces AVWAP_Z_{anchor} to NaN for every bar
-        where fewer than `min_samples` samples have accumulated in the
-        current anchor period so far -- a mitigation for "THE n=2 CASE"
+        where fewer than `min_samples` BARS have elapsed in the current
+        anchor period so far (counts elapsed rows, not specifically rows
+        with volume > 0 -- see the in-source comment above the mask) --
+        a mitigation for "THE n=2 CASE"
         above (an n=1 bar is already NaN regardless, via the stdev==0
         guard). Does NOT affect AVWAP_DIST_PCT_{anchor}, which has no
         comparable small-n numerical degeneracy (see the Calculation

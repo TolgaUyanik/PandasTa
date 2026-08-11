@@ -97,15 +97,23 @@ def test_hand_computed_week_anchor_fixture():
 
 
 # ---------------------------------------------------------------------------
-# THE n=2 CASE (Fletcher round 1, MAJOR) -- Z on a period's 2nd bar is
-# UNBOUNDED, driven purely by the ratio of the first two bars' volumes:
-# closed form Z = sign(p2-p1) * sqrt(v1/v2), independent of the actual
-# price move's size. Pinned directly, not just asserted qualitatively.
+# THE n=2 CASE (Fletcher round 1, MAJOR; formula CORRECTED round 2, also
+# MAJOR) -- Z on a period's 2nd bar is UNBOUNDED. On a FLAT bar (close ==
+# hlc3), the closed form reduces to Z = sign(p2-p1) * sqrt(v1/v2); on a
+# NON-flat bar it does not (see the two-term formula in avwap_z.py's
+# module docstring, and the dedicated non-flat test just below this one).
+# Pinned directly, not just asserted qualitatively.
 # ---------------------------------------------------------------------------
 
 def test_second_bar_of_period_z_is_unbounded_by_volume_ratio():
-    # v1=10000, v2=100 -> Z = sign(p2-p1) * sqrt(10000/100) = sign * 10.0.
-    # p2 > p1 (110 > 100) -> sign=+1 -> Z = +10.0 exactly.
+    # FLAT bar (O=H=L=C=110), so close == hlc3 and the reduced formula
+    # applies exactly: v1=10000, v2=100 -> Z = sign(p2-p1) * sqrt(10000/100)
+    # = sign * 10.0. p2 > p1 (110 > 100) -> sign=+1 -> Z = +10.0 exactly.
+    # This is the DEGENERATE special case of the general two-term formula
+    # (the second term vanishes identically when c2 == p2) -- see
+    # test_second_bar_z_full_formula_on_non_flat_bar below for the general
+    # case, where this reduction does NOT hold and this simpler formula
+    # alone would be wrong.
     dates = ["2024-01-01", "2024-01-02"]  # same week (Mon, Tue)
     values = [100.0, 110.0]
     volumes = [10000.0, 100.0]
@@ -113,11 +121,52 @@ def test_second_bar_of_period_z_is_unbounded_by_volume_ratio():
     out = ta.avwap_z(high, low, close, volume, anchor="W")
     z1 = out["AVWAP_Z_W"].iloc[1]
     assert z1 == pytest.approx(10.0, abs=1e-9), (
-        "closed-form n=2 case: Z(2nd bar) = sign(p2-p1) * sqrt(v1/v2) = "
-        "sqrt(10000/100) = 10.0 -- if this drifts, the n=2 derivation in "
-        "avwap_z.py's module docstring is now wrong and must be re-checked"
+        "closed-form n=2 case on a FLAT 2nd bar: Z(2nd bar) = "
+        "sign(p2-p1) * sqrt(v1/v2) = sqrt(10000/100) = 10.0 -- if this "
+        "drifts, the n=2 derivation in avwap_z.py's module docstring is "
+        "now wrong and must be re-checked"
     )
     assert abs(z1) > 9, "must be genuinely large, not just nonzero -- this is the MAJOR the fix documents"
+
+
+def test_second_bar_z_full_formula_on_non_flat_bar():
+    # Fletcher round 2, MAJOR: round 1's formula (sign(p2-p1)*sqrt(v1/v2))
+    # is only correct when the 2nd bar is FLAT (close == hlc3, tested
+    # above). On a NON-flat bar it is wrong, because Z divides by `close`,
+    # not `typical_price`. Bar0 flat (p1=100, v1=10000). Bar1 NON-flat:
+    # H=120, L=105, C=110 -> hlc3 = p2 = (120+105+110)/3 = 335/3 =
+    # 111.6666...  (!= close=110), v2=100.
+    #
+    # Hand-derived via the corrected closed form (see avwap_z.py's module
+    # docstring "THE n=2 CASE" for the full derivation):
+    #   vwap  = (p1*v1 + p2*v2) / (v1+v2)
+    #         = (100*10000 + (335/3)*100) / 10100
+    #   stdev = |p1-p2| * sqrt(v1*v2) / (v1+v2)
+    #         = |100 - 335/3| * sqrt(10000*100) / 10100
+    #   Z     = (c2 - vwap) / stdev
+    #         = sign(p2-p1)*sqrt(v1/v2)
+    #           + (c2-p2)*(v1+v2)/(|p2-p1|*sqrt(v1*v2))
+    # Computed by hand (as a calculator, independent of calling avwap_z):
+    #   Z = 8.557142857142853
+    # The round-1 (flat-bar-only) formula would instead predict
+    # sign(p2-p1)*sqrt(v1/v2) = sign(+11.667)*sqrt(100) = +10.0 -- a
+    # materially different, WRONG number for this bar.
+    dates = ["2024-01-01", "2024-01-02"]
+    idx = pd.DatetimeIndex(dates)
+    high = pd.Series([100.0, 120.0], index=idx)
+    low = pd.Series([100.0, 105.0], index=idx)
+    close = pd.Series([100.0, 110.0], index=idx)
+    volume = pd.Series([10000.0, 100.0], index=idx)
+    out = ta.avwap_z(high, low, close, volume, anchor="W")
+    z1 = out["AVWAP_Z_W"].iloc[1]
+    assert z1 == pytest.approx(8.557142857142857, abs=1e-9), (
+        "the corrected two-term n=2 formula must hold on a NON-flat bar, "
+        "where close != hlc3 -- the round-1 flat-bar-only formula would "
+        "predict 10.0 here, which is wrong"
+    )
+    assert z1 != pytest.approx(10.0, abs=0.1), (
+        "must NOT match the round-1 (flat-bar-only, WRONG on this bar) formula"
+    )
 
 
 def test_second_bar_z_flips_sign_with_price_direction():
@@ -292,7 +341,9 @@ def test_scale_invariant_under_price_rescale():
     # sum-of-squares subtraction that loses a few ULPs differently at
     # different absolute price scales (see the numerical-stability
     # comment in avwap_z.py). Measured directly on THIS fixture at k=1000:
-    # max |Z(1x)-Z(1000x)| = 2.87e-13, max |DIST_PCT| diff = 3.48e-14 --
+    # max |Z(1x)-Z(1000x)| = 7.91e-13, max |DIST_PCT| diff = 3.48e-14
+    # (Fletcher round 2 MINOR: the Z figure here previously read 2.87e-13,
+    # did not reproduce on re-measurement; corrected) --
     # rtol=1e-9/atol=1e-11 below has real margin against those (not the
     # rtol/atol=1e-6 this test used before Fletcher round 1, which was ~6
     # orders of magnitude looser than the actual measured error and would
@@ -386,6 +437,50 @@ def test_unordered_datetime_index_raises():
     assert not close_s.index.is_monotonic_increasing, "construction check: must actually be unsorted"
     with pytest.raises(ValueError, match="order"):
         ta.avwap_z(high_s, low_s, close_s, volume_s, anchor="W")
+
+
+def test_interior_shuffle_with_endpoints_preserved_still_raises():
+    # Fletcher round 2, MAJOR: round 1's guard used `is_datetime_ordered`,
+    # which is `index[0] < index[-1]` -- an ENDPOINT comparison only. A
+    # shuffle that swaps two ADJACENT MIDDLE rows (leaving the first and
+    # last timestamps untouched) passes that check and silently returns
+    # non-causal output. This test constructs EXACTLY that case -- proof
+    # the seed-99 full-permutation test above is not sufficient on its
+    # own (it happens to also break the endpoint check, by luck of that
+    # particular seed) and that this shuffle specifically defeats the
+    # weaker check while `index.is_monotonic_increasing` (the round-2 fix)
+    # still catches it.
+    high, low, close, volume = _random_ohlcv()
+    order = np.arange(len(close))
+    order[40], order[41] = order[41], order[40]  # swap two adjacent interior rows only
+    high_s, low_s, close_s, volume_s = high.iloc[order], low.iloc[order], close.iloc[order], volume.iloc[order]
+    assert close_s.index[0] == close.index[0] and close_s.index[-1] == close.index[-1], (
+        "construction check: endpoints must be UNCHANGED -- this is the case "
+        "the endpoint-only is_datetime_ordered check cannot detect"
+    )
+    assert not close_s.index.is_monotonic_increasing, "construction check: must actually be unsorted"
+    with pytest.raises(ValueError, match="order"):
+        ta.avwap_z(high_s, low_s, close_s, volume_s, anchor="W")
+
+
+def test_single_row_frame_does_not_raise():
+    # Fletcher round 2, MINOR: the round-1 endpoint-only guard
+    # (`index[0] < index[-1]`) rejected a valid 1-row frame, since
+    # index[0] == index[-1] trivially fails a strict `<` comparison --
+    # silently dropping the AVWAP columns downstream (indicator_engine.py
+    # wraps every call in a bare try/except). `is_monotonic_increasing`
+    # is True for a length-1 index by definition, so this must NOT raise
+    # and must return the documented degenerate row (Z NaN via the
+    # stdev==0 guard, DIST_PCT ~= 0.0).
+    idx = pd.DatetimeIndex(["2024-01-01"])
+    high = pd.Series([100.0], index=idx)
+    low = pd.Series([100.0], index=idx)
+    close = pd.Series([100.0], index=idx)
+    volume = pd.Series([1000.0], index=idx)
+    out = ta.avwap_z(high, low, close, volume, anchor="W")
+    assert list(out.columns) == ["AVWAP_Z_W", "AVWAP_DIST_PCT_W"]
+    assert pd.isna(out["AVWAP_Z_W"].iloc[0])
+    assert out["AVWAP_DIST_PCT_W"].iloc[0] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_negative_cumulative_volume_maps_to_nan_not_finite_garbage():
