@@ -314,6 +314,31 @@ def test_rejects_non_numeric_close_dtype():
         ta.bpress(bad, length=500)
 
 
+def test_accepts_numeric_extension_dtype_without_crashing():
+    """Fletcher round 3 MINOR: the dtype guard above used
+    `np.issubdtype(close.dtype, np.number)`, which itself raises a raw
+    TypeError on pandas nullable extension dtypes (e.g. "Float64") --
+    the exact failure mode the guard exists to eliminate, leaking from
+    inside the guard, on input that IS legitimately numeric. Fixed with
+    `pd.api.types.is_numeric_dtype`, which correctly recognizes "Float64"
+    as numeric (verified: returns True) and lets it through -- it must
+    NOT raise at all, and the output must match the plain-float64 path
+    bar-for-bar. Not reachable from this pipeline today (nothing in
+    backtesting_engine/ produces extension dtypes), but the guard must
+    behave correctly if it's ever handed one rather than just "not throw
+    the wrong exception" -- rejecting valid numeric data would be its own
+    bug."""
+    close_f64 = _close(n=600)
+    close_ext = close_f64.astype("Float64")
+    out_f64 = ta.bpress(close_f64, length=500)
+    out_ext = ta.bpress(close_ext, length=500)
+    assert out_ext is not None
+    np.testing.assert_allclose(
+        out_ext.to_numpy(dtype=float), out_f64.to_numpy(dtype=float),
+        equal_nan=True,
+    )
+
+
 def test_nan_close_propagates_but_does_not_raise():
     """Companion to the finite-close test above: NaN (as opposed to inf)
     is legitimate upstream-gap data, not rejected -- but it nulls every
@@ -395,10 +420,16 @@ def test_fillna_kwarg_fills_leading_nan():
 def test_fill_method_kwarg():
     """`fill_method` (via `Series.fillna(method=...)`) is a documented,
     live kwarg but was previously untested. Uses a pandas API deprecated
-    in >=2.1 and removed in 3.0 -- see the in-source comment in
-    bpress.py -- so this test also acts as a canary: it will start
-    failing the moment the installed pandas version drops support,
-    which is exactly when the migration noted there becomes mandatory."""
+    (FutureWarning) in >=2.1 and REMOVED in 3.0 -- see the in-source
+    comment in bpress.py. Fletcher round 3 NIT: an earlier version of
+    this docstring called it a "canary" that "will start failing the
+    moment support drops" -- false, since nothing in this suite turns
+    FutureWarning into an error (no pytest.ini/pyproject.toml warning
+    filter exists in this fork), so this test sails through the entire
+    2.1-2.x deprecation window silently and would only start failing at
+    the 3.0 removal itself -- i.e. simultaneously with production
+    breaking, not ahead of it. This is coverage for a previously-untested
+    kwarg, not an early-warning system."""
     close = _close()
     out = ta.bpress(close, length=500, fill_method="bfill")
     assert out.isna().sum() == 0

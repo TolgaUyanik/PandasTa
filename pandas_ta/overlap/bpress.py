@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import numpy as np
+import pandas as pd
 from pandas_ta.overlap.linreg import linreg
 from pandas_ta.utils import get_offset, verify_series
 
@@ -61,7 +62,13 @@ def bpress(close, length=None, offset=None, **kwargs):
     # the ValueError the length validation above was specifically built to
     # guarantee -- a lateral move from the pre-length-fix AttributeError,
     # same class of gap. Reject non-numeric dtype explicitly first.
-    if not np.issubdtype(close.dtype, np.number):
+    # Fletcher round 3 (MINOR): `np.issubdtype(close.dtype, np.number)`
+    # itself raises a raw TypeError on pandas nullable extension dtypes
+    # (e.g. "Float64") -- the exact failure mode this guard exists to
+    # eliminate, leaking from inside the guard. `pd.api.types.is_numeric_
+    # dtype` handles numpy AND extension dtypes uniformly and returns a
+    # bool instead of throwing.
+    if not pd.api.types.is_numeric_dtype(close):
         raise ValueError(f"close must be numeric, got dtype {close.dtype}")
     if np.isinf(close).any():
         raise ValueError(
@@ -110,14 +117,18 @@ def bpress(close, length=None, offset=None, **kwargs):
         bpress.fillna(kwargs["fillna"], inplace=True)
     if "fill_method" in kwargs:
         # `Series.fillna(method=...)` is deprecated in pandas>=2.1 and
-        # REMOVED in pandas 3.0 (Fletcher round 2 NIT). This repo pins
-        # pandas 1.5.3 today, where it still works, and every sibling
-        # indicator in this package (linreg.py, dpo.py, etc.) uses the
-        # exact same idiom -- kept consistent with them rather than
-        # migrated in isolation. When the package-wide pandas floor moves
-        # past 2.1, replace with an explicit `.bfill()`/`.ffill()` dispatch
-        # on `kwargs["fill_method"]` across the whole package at once, not
-        # just here.
+        # REMOVED in pandas 3.0 (Fletcher round 2 NIT). Fletcher round 3:
+        # an earlier version of this comment claimed "this repo pins
+        # pandas 1.5.3" -- false. pandas is UNPINNED in this package
+        # (setup.py: install_requires=["pandas"]); 1.5.3 just happens to
+        # be what's installed on this machine. This is inherited
+        # package-wide tech debt (131 call sites use the same idiom,
+        # confirmed via grep, including linreg.py/dpo.py), not a decision
+        # made here -- migrating bpress alone would be pointless churn
+        # against an unmigrated codebase. When the package-wide pandas
+        # floor moves past 2.1, replace with an explicit `.bfill()`/
+        # `.ffill()` dispatch on `kwargs["fill_method"]` across the whole
+        # package at once, not just here.
         bpress.fillna(method=kwargs["fill_method"], inplace=True)
 
     # Name and Categorize it
@@ -209,9 +220,11 @@ Args:
         either undefined or poisons every rolling window containing it;
         raises ValueError in either case. A NaN close IS allowed and
         propagates by construction: any rolling window containing it
-        produces NaN, so a single NaN close nulls the following
-        `length - 1` bars of output (this is legitimate upstream-gap
-        behavior, not a bug).
+        produces NaN, so a single NaN close nulls `length` bars of output
+        (the gap bar itself plus the following `length - 1`) -- this is
+        legitimate upstream-gap behavior, not a bug. See
+        tests/test_bpress.py::test_nan_close_propagates_but_does_not_raise
+        for the exact span this covers.
     length (int): Regression window length. Default: 500. Must be a
         finite, positive, INTEGRAL numeric value (int or a float with no
         fractional part, e.g. 500.0) -- raises ValueError on a
