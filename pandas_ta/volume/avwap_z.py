@@ -231,26 +231,31 @@ def avwap_z(high, low, close, volume, anchor=None, min_samples=None, offset=None
     #                  + (c2-p2)*(v1+v2)/(|p2-p1|*sqrt(v1*v2))
     # Round 1's version dropped the second term (silently assuming
     # c2 == p2, i.e. close == hlc3, which is only true on a flat/doji
-    # bar) -- independently re-derived and verified: on
-    # `_random_ohlcv(n=2000, seed=11)`, the round-1 formula predicts
-    # max |Z| = 3.77 on the period's 2nd bar; ACTUAL max |Z| there is
-    # 857.22 (max diff between round-1's formula and the real output:
-    # 324.14 on an independently generated fixture with wider volume
-    # dispersion; max diff between THIS formula and the real output:
-    # 7.1e-11 on the same fixture, 1.68e-11 on the file's own fixture --
-    # both effectively floating-point noise, not a further approximation).
+    # bar) -- independently re-derived and verified on this file's own
+    # `_random_ohlcv(n=2000, seed=11)` fixture: the round-1 formula's own
+    # max |value| on the period's 2nd bar is only 3.77 (matching what it
+    # predicts as the theoretical ceiling), and it diverges from the
+    # ACTUAL output by up to 857.79 there; THIS (two-term) formula
+    # matches the actual output to within 1.68e-11 on the same
+    # fixture -- effectively floating-point noise, not a further
+    # approximation.
     # The DOMINANT driver of the blowup on real (non-flat) OHLC is
-    # therefore the FIRST term's denominator going to zero as p2->p1 --
-    # i.e. a near-zero within-period price move on low relative volume at
-    # the first bar -- NOT primarily the volume ratio in isolation (the
-    # volume-ratio term alone, sign(p2-p1)*sqrt(v1/v2), maxes at only
-    # ~3.8 on the fixture below; the second term is what actually reaches
-    # into the hundreds). It is still, overall, completely UNBOUNDED and
-    # heavy-tailed rather than merely "occasionally large": measured
-    # directly on this file's own `_random_ohlcv()` test fixture (n=2000,
-    # seed=11, anchor="W") AVWAP_Z_W ranges -857.22..106.31 over the full
-    # series; 0.75% of ALL rows have |Z|>5, 0.35% have |Z|>10; every one
-    # of those extreme values sits on a period's 2nd-or-early bar (see
+    # therefore the SECOND term's denominator, |p2-p1|, going to zero as
+    # p2->p1 -- NOT primarily the volume-ratio term (the first term,
+    # sign(p2-p1)*sqrt(v1/v2)) in isolation. Measured exactly at the
+    # fixture's own global extreme (Z=-857.22, a 2nd bar): the SECOND
+    # term's volume factor (v1+v2)/sqrt(v1*v2) is 2.31 -- near its floor
+    # of 2 at v1==v2, i.e. volume is close to BALANCED there, not
+    # imbalanced -- while 1/|p2-p1| is 1093.5; the blowup is essentially
+    # pure "the two bars' typical prices happened to sit almost exactly
+    # equal," not a volume-ratio effect (that would show up as a large
+    # volume factor, which it is not, here). It is still, overall,
+    # completely UNBOUNDED and heavy-tailed rather than merely
+    # "occasionally large": measured directly on this file's own
+    # `_random_ohlcv()` test fixture (n=2000, seed=11, anchor="W")
+    # AVWAP_Z_W ranges -857.22..106.31 over the full series; 0.75% of ALL
+    # rows have |Z|>5 (14 of 15 sit on a period's 2nd bar, 1 on the 3rd),
+    # 0.35% have |Z|>10 (all 7 on the 2nd bar) (see
     # tests/test_avwap_z.py::test_second_bar_of_period_z_is_unbounded_by_
     # volume_ratio for the closed-form pin on a FLAT bar, where the two
     # formulas coincide, and test_second_bar_z_full_formula_on_non_flat_
@@ -441,16 +446,21 @@ extreme there is 857.22, and the round-1 formula gets the SIGN wrong on
 a meaningful fraction of 2nd bars. The corrected two-term formula above
 matches the real output to ~1.7e-11 (floating-point noise, not a further
 approximation). The DOMINANT driver on real (non-flat) OHLC is therefore
-the first term's denominator -- |p2-p1| -- going to zero (a near-zero
+the SECOND term's denominator -- |p2-p1| -- going to zero (a near-zero
 within-period price move at the 2nd bar) combined with a nonzero
-(c2-p2), NOT the volume ratio in isolation (the volume-ratio term alone
-maxes at ~3.8 on the fixture below). It remains, overall, completely
-UNBOUNDED and heavy-tailed: measured directly on this file's own
-`_random_ohlcv()` test fixture (n=2000, seed=11, anchor="W"):
-AVWAP_Z_W ranges -857.22..106.31 over the full 2000-bar series; 0.75%
-of ALL rows have |Z|>5, 0.35% have |Z|>10 -- these are not rare
-one-off outliers, every extreme sits on a period's 2nd-or-early bar,
-by construction. This is a REAL property of the ported formula, not a
+(c2-p2), NOT the volume-ratio (first) term in isolation. At the
+fixture's own global extreme (Z=-857.22, a 2nd bar), the second term's
+volume factor (v1+v2)/sqrt(v1*v2) is 2.31 -- near its floor of 2 at
+v1==v2, i.e. volume is close to BALANCED there, not imbalanced -- while
+1/|p2-p1| is 1093.5: the blowup is essentially pure "the two bars'
+typical prices happened to sit almost exactly equal," not a
+volume-ratio effect. It remains, overall, completely UNBOUNDED and
+heavy-tailed: measured directly on this file's own `_random_ohlcv()`
+test fixture (n=2000, seed=11, anchor="W"): AVWAP_Z_W ranges
+-857.22..106.31 over the full 2000-bar series; 0.75% of ALL rows have
+|Z|>5 (14 of 15 sit on a period's 2nd bar, 1 on the 3rd), 0.35% have
+|Z|>10 (all 7 on the 2nd bar) -- these are not rare one-off outliers.
+This is a REAL property of the ported formula, not a
 bug silently papered over: Pine's own fixed-multiple bands are exactly
 as degenerate at n=2 (a near-zero-width band spanning 2 points is just
 as prone to a stray close blowing the ratio up), this port merely turns
