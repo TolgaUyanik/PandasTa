@@ -1539,6 +1539,16 @@ class AnalysisIndicators(BasePandasObject):
         result = liquidity_compression_box(high=high, low=low, close=close, open_=open_, window=window, atr_length=atr_length, max_atr_mult=max_atr_mult, min_wick_touches=min_wick_touches, max_body_pct=max_body_pct, touch_tol_pct=touch_tol_pct, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def liquidity_sweep(self, swing_len=None, atr_len=None, atr_mult=None, max_levels=None,
+                         max_age=None, mode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = liquidity_sweep(high=high, low=low, close=close, swing_len=swing_len, atr_len=atr_len,
+                                  atr_mult=atr_mult, max_levels=max_levels, max_age=max_age, mode=mode,
+                                  offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def long_run(self, fast=None, slow=None, length=None, offset=None, **kwargs):
         if fast is None and slow is None:
             return self._df
