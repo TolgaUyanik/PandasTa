@@ -96,6 +96,78 @@ def test_hand_computed_week_anchor_fixture():
     assert dist.iloc[4] == pytest.approx(0.0, abs=1e-9)
 
 
+# ---------------------------------------------------------------------------
+# THE n=2 CASE (Fletcher round 1, MAJOR) -- Z on a period's 2nd bar is
+# UNBOUNDED, driven purely by the ratio of the first two bars' volumes:
+# closed form Z = sign(p2-p1) * sqrt(v1/v2), independent of the actual
+# price move's size. Pinned directly, not just asserted qualitatively.
+# ---------------------------------------------------------------------------
+
+def test_second_bar_of_period_z_is_unbounded_by_volume_ratio():
+    # v1=10000, v2=100 -> Z = sign(p2-p1) * sqrt(10000/100) = sign * 10.0.
+    # p2 > p1 (110 > 100) -> sign=+1 -> Z = +10.0 exactly.
+    dates = ["2024-01-01", "2024-01-02"]  # same week (Mon, Tue)
+    values = [100.0, 110.0]
+    volumes = [10000.0, 100.0]
+    high, low, close, volume = _flat_bar_frame(values, volumes, dates)
+    out = ta.avwap_z(high, low, close, volume, anchor="W")
+    z1 = out["AVWAP_Z_W"].iloc[1]
+    assert z1 == pytest.approx(10.0, abs=1e-9), (
+        "closed-form n=2 case: Z(2nd bar) = sign(p2-p1) * sqrt(v1/v2) = "
+        "sqrt(10000/100) = 10.0 -- if this drifts, the n=2 derivation in "
+        "avwap_z.py's module docstring is now wrong and must be re-checked"
+    )
+    assert abs(z1) > 9, "must be genuinely large, not just nonzero -- this is the MAJOR the fix documents"
+
+
+def test_second_bar_z_flips_sign_with_price_direction():
+    # Same volume ratio, price direction reversed (p2 < p1) -> Z negative.
+    dates = ["2024-01-01", "2024-01-02"]
+    values = [110.0, 100.0]
+    volumes = [10000.0, 100.0]
+    high, low, close, volume = _flat_bar_frame(values, volumes, dates)
+    out = ta.avwap_z(high, low, close, volume, anchor="W")
+    assert out["AVWAP_Z_W"].iloc[1] == pytest.approx(-10.0, abs=1e-9)
+
+
+def test_min_samples_masks_the_n2_blowup_when_opted_in():
+    # Same fixture as the pin test above (Z(bar1) = +10.0 with
+    # min_samples unset/None) -- with min_samples=3, bar1 has only 2
+    # accumulated samples (< 3), so it must be masked to NaN too, not
+    # just bar0 (which is already NaN via the stdev==0 guard regardless).
+    dates = ["2024-01-01", "2024-01-02"]
+    values = [100.0, 110.0]
+    volumes = [10000.0, 100.0]
+    high, low, close, volume = _flat_bar_frame(values, volumes, dates)
+    out_default = ta.avwap_z(high, low, close, volume, anchor="W")
+    out_masked = ta.avwap_z(high, low, close, volume, anchor="W", min_samples=3)
+    assert out_default["AVWAP_Z_W"].iloc[1] == pytest.approx(10.0, abs=1e-9)
+    assert pd.isna(out_masked["AVWAP_Z_W"].iloc[1])
+    assert pd.isna(out_masked["AVWAP_Z_W"].iloc[0])
+    # DIST_PCT is deliberately NEVER masked by min_samples -- no numerical
+    # degeneracy at small n for a price ratio, see the docstring.
+    pd.testing.assert_series_equal(
+        out_default["AVWAP_DIST_PCT_W"], out_masked["AVWAP_DIST_PCT_W"], check_names=False,
+    )
+
+
+def test_min_samples_none_default_is_pine_parity_no_change():
+    high, low, close, volume = _flat_bar_frame(_VALUES_W, _VOLUMES_W, _DATES_W)
+    out_default = ta.avwap_z(high, low, close, volume, anchor="W")
+    out_explicit_none = ta.avwap_z(high, low, close, volume, anchor="W", min_samples=None)
+    pd.testing.assert_frame_equal(out_default, out_explicit_none)
+
+
+def test_invalid_min_samples_raises():
+    high, low, close, volume = _flat_bar_frame(_VALUES_W, _VOLUMES_W, _DATES_W)
+    with pytest.raises(ValueError, match="min_samples"):
+        ta.avwap_z(high, low, close, volume, anchor="W", min_samples=0)
+    with pytest.raises(ValueError, match="min_samples"):
+        ta.avwap_z(high, low, close, volume, anchor="W", min_samples=2.5)
+    with pytest.raises(ValueError, match="min_samples"):
+        ta.avwap_z(high, low, close, volume, anchor="W", min_samples="3")
+
+
 def test_week_anchor_resets_cumulants_not_carried_across_boundary():
     # Regression-shaped check for the reset itself: if bar4's cumulants
     # were NOT reset (i.e. the bug this port must avoid: carrying week 1's
@@ -219,23 +291,31 @@ def test_scale_invariant_under_price_rescale():
     # ratios ALGEBRAICALLY, but Z's denominator (`stdev`) is built from a
     # sum-of-squares subtraction that loses a few ULPs differently at
     # different absolute price scales (see the numerical-stability
-    # comment in avwap_z.py) -- verified negligible here (rtol/atol
-    # 1e-6), several orders of magnitude tighter than anything that could
-    # matter for an ML feature, and NaN-position-identical (`check_exact`
-    # off does not relax where a value is/isn't NaN).
+    # comment in avwap_z.py). Measured directly on THIS fixture at k=1000:
+    # max |Z(1x)-Z(1000x)| = 2.87e-13, max |DIST_PCT| diff = 3.48e-14 --
+    # rtol=1e-9/atol=1e-11 below has real margin against those (not the
+    # rtol/atol=1e-6 this test used before Fletcher round 1, which was ~6
+    # orders of magnitude looser than the actual measured error and would
+    # have passed a formula a million times worse than this one). NaN
+    # positions are checked separately and exactly (`check_exact` on the
+    # numeric comparison does not relax where a value is/isn't NaN, but a
+    # dedicated boolean-mask assertion has more signal on failure).
     high, low, close, volume = _random_ohlcv()
     out = ta.avwap_z(high, low, close, volume, anchor="W")
     out_x1000 = ta.avwap_z(high * 1000, low * 1000, close * 1000, volume, anchor="W")
     pd.testing.assert_series_equal(out["AVWAP_Z_W"].isna(), out_x1000["AVWAP_Z_W"].isna())
-    pd.testing.assert_frame_equal(out, out_x1000, check_exact=False, rtol=1e-6, atol=1e-6)
+    pd.testing.assert_frame_equal(out, out_x1000, check_exact=False, rtol=1e-9, atol=1e-11)
 
 
 def test_scale_invariant_under_volume_rescale():
+    # Measured directly on THIS fixture at m=50: max |Z| diff 1.25e-14,
+    # max |DIST_PCT| diff 1.38e-14 -- same tightened tolerance as the
+    # price-rescale test above, for the same reason.
     high, low, close, volume = _random_ohlcv()
     out = ta.avwap_z(high, low, close, volume, anchor="W")
     out_x50 = ta.avwap_z(high, low, close, volume * 50, anchor="W")
     pd.testing.assert_series_equal(out["AVWAP_Z_W"].isna(), out_x50["AVWAP_Z_W"].isna())
-    pd.testing.assert_frame_equal(out, out_x50, check_exact=False, rtol=1e-6, atol=1e-6)
+    pd.testing.assert_frame_equal(out, out_x50, check_exact=False, rtol=1e-9, atol=1e-11)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +364,45 @@ def test_non_datetime_index_raises():
     volume = pd.Series(np.full(n, 100.0), index=idx)
     with pytest.raises(ValueError, match="DatetimeIndex"):
         ta.avwap_z(high, low, close, volume, anchor="W")
+
+
+def test_unordered_datetime_index_raises():
+    # Fletcher round 1, MAJOR: a DatetimeIndex that is present but NOT
+    # sorted ascending previously passed straight through (only the TYPE
+    # was checked, not the ORDER) and silently produced non-causal
+    # results, because groupby(periods).cumsum()/.transform("first") both
+    # follow ROW order, not TIME order. `_random_ohlcv()` is already
+    # sorted by construction (pd.date_range), so this shuffles it via
+    # .sample(frac=1) -- same DatetimeIndex dtype, same set of
+    # timestamps, just out of chronological order -- to prove the type
+    # check alone (which every OTHER test in this file exercises via a
+    # sorted frame, and therefore could never catch this gap) is not
+    # sufficient.
+    high, low, close, volume = _random_ohlcv()
+    rng = np.random.RandomState(99)
+    order = rng.permutation(len(close))
+    high_s, low_s, close_s, volume_s = high.iloc[order], low.iloc[order], close.iloc[order], volume.iloc[order]
+    assert isinstance(close_s.index, pd.DatetimeIndex)
+    assert not close_s.index.is_monotonic_increasing, "construction check: must actually be unsorted"
+    with pytest.raises(ValueError, match="order"):
+        ta.avwap_z(high_s, low_s, close_s, volume_s, anchor="W")
+
+
+def test_negative_cumulative_volume_maps_to_nan_not_finite_garbage():
+    # NIT: Pine's guard is `cumV > 0 ? ... : na`, which also treats a
+    # NEGATIVE cumV as na, not just a zero one. Not reachable with a real
+    # OHLCV feed (volume is never negative in practice), but cheap to
+    # honor exactly rather than let `.replace(0.0, nan)` leave a negative
+    # cumV to produce finite (garbage) output instead.
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03"]
+    values = [100.0, 100.0, 105.0]
+    volumes = [-50.0, 40.0, 100.0]  # cumV: -50, -10, 90 -- first two bars negative
+    high, low, close, volume = _flat_bar_frame(values, volumes, dates)
+    out = ta.avwap_z(high, low, close, volume, anchor="W")
+    assert pd.isna(out["AVWAP_Z_W"].iloc[0])
+    assert pd.isna(out["AVWAP_DIST_PCT_W"].iloc[0])
+    assert pd.isna(out["AVWAP_Z_W"].iloc[1])
+    assert pd.isna(out["AVWAP_DIST_PCT_W"].iloc[1])
 
 
 def test_none_anchor_uses_documented_default():

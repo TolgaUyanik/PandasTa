@@ -4,7 +4,7 @@ import pandas as pd
 from pandas import DataFrame, Series
 
 from pandas_ta.overlap.hlc3 import hlc3
-from pandas_ta.utils import get_offset, verify_series
+from pandas_ta.utils import get_offset, is_datetime_ordered, verify_series
 
 
 _VALID_ANCHORS = {"D": "D", "W": "W", "M": "M"}
@@ -27,10 +27,30 @@ def _validate_anchor(anchor):
     return _VALID_ANCHORS[key]
 
 
-def avwap_z(high, low, close, volume, anchor=None, offset=None, **kwargs):
+def _validate_min_samples(min_samples):
+    """None -> disabled (documented default -- exact Pine-parity
+    behavior, no extra masking beyond the stdev==0 guard). Anything else
+    must be a finite, positive, INTEGRAL numeric value, or raise -- same
+    swallowed-bad-kwarg shape this batch has fixed repeatedly elsewhere
+    (bpress's `length`, liquidity_sweep's `swing_len`, etc.)."""
+    if min_samples is None:
+        return None
+    if isinstance(min_samples, bool) or not isinstance(min_samples, (int, float, np.integer, np.floating)):
+        raise ValueError(f"min_samples must be numeric, got {type(min_samples).__name__}: {min_samples!r}")
+    if not np.isfinite(min_samples):
+        raise ValueError(f"min_samples must be finite, got {min_samples}")
+    if min_samples < 1:
+        raise ValueError(f"min_samples must be >= 1, got {min_samples}")
+    if float(min_samples) != int(min_samples):
+        raise ValueError(f"min_samples must be integral, got {min_samples}")
+    return int(min_samples)
+
+
+def avwap_z(high, low, close, volume, anchor=None, min_samples=None, offset=None, **kwargs):
     """Indicator: Anchored VWAP Z-Score (AVWAP_Z)"""
     # Validate Arguments
     anchor = _validate_anchor(anchor)
+    min_samples = _validate_min_samples(min_samples)
     high = verify_series(high)
     low = verify_series(low)
     close = verify_series(close)
@@ -59,6 +79,27 @@ def avwap_z(high, low, close, volume, anchor=None, offset=None, **kwargs):
             "warns and then crashes later on this same gap -- this port "
             "raises explicitly instead, per this batch's swallowed-bad-"
             "input convention (see docstring in bpress.py / liquidity_sweep.py)."
+        )
+    # ORDERING, not just typing (Fletcher round 1, MAJOR): a DatetimeIndex
+    # that is present but NOT sorted ascending passes the isinstance check
+    # above yet silently breaks causality below -- `groupby(periods).
+    # cumsum()`/`.transform("first")` both follow ROW order, not TIME
+    # order, so an out-of-order frame lets a bar's output incorporate a
+    # LATER-timestamped row that merely appears earlier in the frame.
+    # `pandas_ta.overlap.vwap` calls this exact same `is_datetime_ordered`
+    # check but only WARNS and continues; this port raises instead, per
+    # its own stated convention of raising rather than silently degrading
+    # (matches the type check just above, which already claimed to be
+    # stricter than vwap.py here -- prior to this check that claim was
+    # only true for TYPE, not ORDER; it is genuinely true for both now).
+    if not is_datetime_ordered(close):
+        raise ValueError(
+            "avwap_z requires a time-ordered (ascending) DatetimeIndex; "
+            "groupby(periods).cumsum() and groupby(periods).transform('first') "
+            "both follow ROW order, not TIME order, so unsorted input silently "
+            "produces non-causal results (a bar's output can incorporate a "
+            "later-timestamped row that appears earlier in the frame). Sort "
+            "the input by its index before calling."
         )
 
     # Calculate Result
@@ -89,28 +130,33 @@ def avwap_z(high, low, close, volume, anchor=None, offset=None, **kwargs):
     # literal formula, not a semantic one): Pine's `cumPV2/cumV -
     # vwapVal^2` subtracts two large near-equal numbers (both ~price^2)
     # whenever a period's TRUE variance is small relative to price^2 --
-    # classic catastrophic cancellation. Measured directly (see
-    # tests/test_avwap_z.py::test_scale_invariant_under_price_rescale's
-    # development history): on ordinary ~100-price synthetic data this
-    # formula's floating-point error is ~1e-12 in absolute terms, but
-    # right at a period's stdev==0 boundary that ~1e-12 noise decides
-    # whether `variance.clip(lower=0)` lands on exactly 0.0 (-> Z is NaN,
-    # the documented guard below) or a tiny positive epsilon (-> Z
-    # divides by a near-zero stdev and explodes to +/-thousands) --
-    # verified to differ in exactly this way between a series and that
-    # same series' prices scaled by 1000x, which is mathematically
-    # required to be scale-invariant (see the docstring's
-    # Scale-invariance section) but was NOT, prior to this fix, at
-    # floating-point precision. The standard fix -- computing the sum of
-    # squares as a deviation from a fixed per-period REFERENCE value
-    # (here, each period's own first typical_price) rather than from the
-    # (much larger) raw price -- is algebraically IDENTICAL to Pine's
-    # formula (Var(X) = Var(X - ref) for any constant `ref`) but reduces
-    # the observed floating-point error by ~1000x (measured: ~1e-12 ->
-    # ~1e-15 at the same 1000x price scale). It does not eliminate the
-    # boundary flip-flop entirely (no finite-precision formula can), so
-    # `stdev > 0` below is a description of intent, not a bulletproof
-    # guarantee at the sub-epsilon boundary.
+    # classic catastrophic cancellation. Measured directly on this file's
+    # own test fixture (tests/test_avwap_z.py::_random_ohlcv(), n=120,
+    # seed=11), comparing the naive `cumPV2/cumV - vwapVal^2` formula
+    # against this reformulation, both evaluated on the fixture as-is and
+    # on the SAME fixture with high/low/close scaled by k=1000 (volume
+    # unchanged) -- mathematically required to leave Z unchanged (see the
+    # docstring's Scale-invariance section), so any difference is pure
+    # floating-point error:
+    #   naive formula:  max |Z(1x) - Z(1000x)| = 2.96e-09
+    #                    max relative stdev error = 1.0 (i.e. a stdev
+    #                    that should be ~0 came out finite at one scale
+    #                    and exactly 0.0 at the other -- a full sign/
+    #                    magnitude flip, not just noise)
+    #                    NaN mask (stdev==0 positions): scale-DEPENDENT
+    #                    (differs between the 1x and 1000x runs)
+    #   this reformulation: max |Z(1x) - Z(1000x)| = 2.87e-13  (~10,300x tighter)
+    #                    max relative stdev error = 3.72e-14
+    #                    NaN mask: scale-INVARIANT (identical both runs)
+    # The fix -- computing the sum of squares as a deviation from a fixed
+    # per-period REFERENCE value (here, each period's own first
+    # typical_price) rather than from the (much larger) raw price -- is
+    # algebraically IDENTICAL to Pine's formula (Var(X) = Var(X - ref) for
+    # any constant `ref`). It reduces, but does not eliminate, the
+    # boundary flip-flop at any finite precision, so `stdev > 0` below is
+    # a description of intent, not a bulletproof guarantee at the
+    # sub-epsilon boundary. Re-measure against `_random_ohlcv()` (same
+    # method as above) if this formula changes again.
     typical_price = hlc3(high=high, low=low, close=close)
     periods = close.index.to_period(anchor)
 
@@ -124,7 +170,14 @@ def avwap_z(high, low, close, volume, anchor=None, offset=None, **kwargs):
     cum_pvd2 = wpd2.groupby(periods).cumsum()
 
     with np.errstate(invalid="ignore", divide="ignore"):
-        cum_v_safe = cum_v.replace(0.0, np.nan)  # cumV==0 -> na, matches Pine's `cumV > 0 ? ... : na`
+        # `.where(cum_v > 0)`, not `.replace(0.0, np.nan)`: Pine's guard is
+        # `cumV > 0 ? ... : na`, which also maps a NEGATIVE cumV to na (not
+        # reachable with a real OHLCV feed -- volume is never negative --
+        # but `.replace(0.0, ...)` would let a negative cumV survive as
+        # finite garbage instead of na, a real divergence from Pine even
+        # though it costs nothing to close given volume is never negative
+        # in practice).
+        cum_v_safe = cum_v.where(cum_v > 0)
         mean_deviation = cum_pvd / cum_v_safe
         vwap_val = ref + mean_deviation
         variance = (cum_pvd2 / cum_v_safe) - mean_deviation ** 2
@@ -149,6 +202,55 @@ def avwap_z(high, low, close, volume, anchor=None, offset=None, **kwargs):
     with np.errstate(invalid="ignore", divide="ignore"):
         z = (close - vwap_val) / stdev
     z = z.where(stdev > 0)
+
+    # THE n=2 CASE (Fletcher round 1, MAJOR): the n=1 guard just above
+    # only prevents a divide-by-EXACTLY-zero; it does NOT bound Z once a
+    # period has 2+ samples. Solving the n=2 case in closed form (2
+    # samples, volumes v1/v2, typical prices p1/p2): vwap = (p1*v1 +
+    # p2*v2)/(v1+v2) (the ordinary 2-point VWAP), stdev = |p1-p2| *
+    # sqrt(v1*v2)/(v1+v2), and therefore
+    #     Z(2nd bar) = (p2 - vwap) / stdev = sign(p2-p1) * sqrt(v1/v2)
+    # -- i.e. on a period's SECOND bar, Z depends on NOTHING but the
+    # ratio of the first two bars' VOLUMES, is completely UNBOUNDED (a
+    # 100:1 volume ratio between consecutive bars, unremarkable on a
+    # thin BIST name, gives |Z|=10 from price action alone), and is
+    # heavy-tailed rather than merely "occasionally large": measured
+    # directly on this file's own `_random_ohlcv()` test fixture (n=2000,
+    # seed=11, anchor="W") AVWAP_Z_W ranges -857.22..106.31 over the full
+    # series; 0.75% of ALL rows have |Z|>5, 0.35% have |Z|>10; every one
+    # of those extreme values sits on a period's 2nd-or-early bar (see
+    # tests/test_avwap_z.py::test_second_bar_of_period_z_is_unbounded_by_
+    # volume_ratio for the exact closed-form pin, and the module
+    # docstring's "THE n=2 CASE" section for the full derivation +
+    # measurement). This is a REAL property of the ported formula, not a
+    # bug to silently paper over -- Pine's own bands are exactly as
+    # degenerate there (a near-zero-width band around 2 points is exactly
+    # as volume-ratio-driven as this Z is), this port just makes the
+    # degeneracy visible as a number instead of an invisible pixel-width
+    # band on a chart.
+    #
+    # `min_samples` (opt-in, default None/disabled -- Pine parity):
+    # forces Z to NaN for any bar where fewer than `min_samples` samples
+    # have accumulated in the current anchor period so far, INCLUDING the
+    # n=2 case above (n=1 is already NaN via the stdev==0 guard
+    # regardless of this parameter). This is a PORT DEVIATION, not
+    # something the source does or needs (the source never computes a
+    # ratio, only plots bands, so it has no analogous "too few samples"
+    # failure mode) -- purely a downstream-ML-safety knob a caller can
+    # opt into. Deliberately NOT applied to DIST_PCT: that column is a
+    # price ratio, not a stdev ratio, and has no comparable degeneracy at
+    # small n -- a 2-sample VWAP is a noisier ESTIMATE of the eventual
+    # within-period VWAP, not a numerically unbounded quantity, so
+    # masking it would throw away well-behaved information for no
+    # numerical-safety reason. Deliberately NOT folded into the column
+    # NAME (unlike `anchor`, a structural parameter that changes which
+    # formula/reset-boundary applies): `min_samples` only ever REMOVES
+    # values from the SAME Z definition, the same relationship every
+    # other optional masking knob in this file (`offset`, `fillna`) has
+    # to its own column name.
+    if min_samples is not None:
+        bar_count = typical_price.groupby(periods).cumcount() + 1
+        z = z.where(bar_count >= min_samples)
 
     # DIST_PCT: signed % distance from the anchored VWAP itself, scaled by
     # price rather than by stdev -- the SAME "raw level -> scale-free
@@ -179,6 +281,15 @@ def avwap_z(high, low, close, volume, anchor=None, offset=None, **kwargs):
         z.fillna(method=kwargs["fill_method"], inplace=True)
         dist_pct.fillna(method=kwargs["fill_method"], inplace=True)
 
+    # Category is "volume" (volume-weighted inputs -- consistent with
+    # every sibling in this directory), which disagrees on its face with
+    # the ML-register/family-doc placement of AVWAP_Z_*/AVWAP_DIST_PCT_*
+    # under "Band / channel" (center-line +/- sigma-envelope SHAPE, see
+    # docs/indicators/family-band-channel.md Sec 2.8 in the Backtesting
+    # repo) -- both are correct, they're just two different axes
+    # (pandas_ta Category = what the inputs are; ML-register family =
+    # what the output SHAPE is), the same split NWE (Sec 2.7 on the same
+    # page) already lives with.
     df = DataFrame({z.name: z, dist_pct.name: dist_pct})
     df.name = f"AVWAP_Z_{anchor}"
     df.category = "volume"
@@ -193,6 +304,14 @@ Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the
 TradingView community indicator "MAEM - Volume Suite" by MAEmisary,
 https://www.tradingview.com/script/wbrAnavm/ (ported into AwakenAnalytics/
 Backtesting TVPTA continuation, 2026-08-11).
+
+pandas_ta Category: "volume" (volume-weighted inputs, consistent with
+every sibling in this directory). ML-register family (downstream, in
+the Backtesting repo): "Band / channel" (center-line +/- sigma-envelope
+SHAPE), see docs/indicators/family-band-channel.md Sec 2.8 -- both are
+correct at once, they classify along different axes (inputs vs. output
+shape); nothing else in this docstring cross-references that split, so
+it's stated here explicitly.
 
 Anchor portability (why this candidate is portable at all, unlike the
 immediately preceding declined candidate W74Algwa-...-v6, which needed a
@@ -262,46 +381,99 @@ Deliberately LEFT OUT, and why:
       not even accepted as parameters here (no plotted quantity depends
       on them once the raw levels are dropped).
 
+THE n=2 CASE -- Z is unbounded and heavy-tailed on each anchor period's
+2nd bar, driven purely by the intra-period volume ratio (Fletcher round
+1, MAJOR -- this was previously undocumented; only the n=1 case above
+was). Solving the n=2 case in closed form (2 samples, volumes v1/v2,
+typical prices p1/p2): vwap = (p1*v1 + p2*v2)/(v1+v2) (the ordinary
+2-point VWAP), stdev = |p1-p2| * sqrt(v1*v2)/(v1+v2), therefore:
+    Z(2nd bar) = (p2 - vwap) / stdev = sign(p2-p1) * sqrt(v1/v2)
+This depends on NOTHING but the ratio of the first two bars' volumes --
+a 100:1 volume ratio between consecutive bars (unremarkable on a thin
+BIST name) gives |Z|=10 from price action alone, regardless of how
+small the actual price move was. Measured directly on this file's own
+`_random_ohlcv()` test fixture (n=2000, seed=11, anchor="W"):
+AVWAP_Z_W ranges -857.22..106.31 over the full 2000-bar series; 0.75%
+of ALL rows have |Z|>5, 0.35% have |Z|>10 -- these are not rare
+one-off outliers, every extreme sits on a period's 2nd-or-early bar,
+by construction. This is a REAL property of the ported formula, not a
+bug silently papered over: Pine's own fixed-multiple bands are exactly
+as degenerate at n=2 (a near-zero-width band spanning 2 points is just
+as volume-ratio-driven), this port merely turns that same degeneracy
+into a visible number instead of an invisible pixel-width band on a
+chart. See `min_samples` below for an opt-in mitigation, and
+tests/test_avwap_z.py::test_second_bar_of_period_z_is_unbounded_by_
+volume_ratio for the closed-form pin (volumes [10000, 100] -> exactly
+sqrt(100) = 10.0).
+
+⚠ Register caveat: `docs/knowledgebase/IndicatorMLRegister.md`'s
+auto-measured range for `AVWAP_Z_W` is NOT trustworthy evidence against
+the above -- `scripts/utils/gen_indicator_register.py`'s synthetic
+fixture hardcodes `Volume=1e6` (a CONSTANT), which forces v1==v2==1e6
+on every 2-sample period and pins that register row's measured Z to
+exactly +/-1.0 on its own fixture. Real (non-constant) volume is what
+produces the blowup measured above; the register's narrow range is an
+artifact of its own generator, not a property of this indicator.
+
 Calculation:
     Default Inputs:
-        anchor="W" ("D", "W", or "M")
+        anchor="W" ("D", "W", or "M"), min_samples=None (disabled)
     typical_price = HLC3 = (high + low + close) / 3
     Reset each bar's cumulants to 0 at the first bar of every new
         `index.to_period(anchor)` period (day/week/month boundary):
             cumPV  = groupby(period).cumsum(typical_price * volume)
             cumV   = groupby(period).cumsum(volume)
             cumPV2 = groupby(period).cumsum(volume * typical_price^2)
-    vwap  = cumPV / cumV                              (NaN where cumV == 0)
-    var   = max(cumPV2/cumV - vwap^2, 0)               (NaN where cumV == 0)
+    vwap  = cumPV / cumV                              (NaN where cumV <= 0)
+    var   = max(cumPV2/cumV - vwap^2, 0)               (NaN where cumV <= 0)
     stdev = sqrt(var)
     AVWAP_Z_{anchor}        = (close - vwap) / stdev   (NaN where stdev == 0 --
                                 deterministically true on every period's own
                                 first bar; this port's own divide-by-zero
-                                guard, the source never divides by stdev)
-    AVWAP_DIST_PCT_{anchor} = (close - vwap) / close * 100
+                                guard, the source never divides by stdev.
+                                UNBOUNDED, heavy-tailed on the period's 2nd
+                                bar and not fully tamed for several bars
+                                after -- see "THE n=2 CASE" above. If
+                                `min_samples` is given, ALSO NaN wherever
+                                fewer than `min_samples` samples have
+                                accumulated in the current period so far.)
+    AVWAP_DIST_PCT_{anchor} = (close - vwap) / close * 100  (never masked
+                                by `min_samples` -- see Args below)
 
 Scale-invariance: both outputs are already ratios (Z divides by a
 same-unit stdev, DIST_PCT divides by close and multiplies by 100), so
 scaling every OHLCV price column by a constant k>0 leaves both columns
 ALGEBRAICALLY unchanged. Not byte-identical in floating point, though:
-verified in tests/test_avwap_z.py::test_scale_invariant_under_price_
-rescale to agree to rtol/atol 1e-6 (not exact equality) at a 1000x price
-multiplier -- see the numerical-stability comment above the variance
-calculation in this file for why an exact match isn't achievable (Pine's
-own sum-of-squares variance formula loses a few ULPs differently at
-different absolute price scales; this port's period-anchored-deviation
-reformulation reduces, but cannot fully eliminate, that at any finite
-precision). Also scale-invariant under volume rescaling alone (`volume *
-m` for any constant m>0), verified the same way.
+measured directly on `_random_ohlcv()` (n=120, seed=11) at k=1000 --
+max |Z(1x) - Z(1000x)| = 2.87e-13, max relative stdev error = 3.72e-14,
+NaN mask (stdev==0 positions) scale-INVARIANT (identical both scales;
+the pre-fix naive formula was NOT: 2.96e-09 max |Z| error, relative
+stdev error up to 1.0, and a scale-DEPENDENT NaN mask -- see the
+numerical-stability comment above the variance calculation in this file
+for the full before/after). tests/test_avwap_z.py::test_scale_invariant_
+under_price_rescale/_volume_rescale assert to rtol=1e-9/atol=1e-11 (not
+exact equality, and not the older/looser 1e-6 this test used before
+Fletcher round 1 tightened it to something that actually has teeth
+against the measured 2.87e-13 error). Also scale-invariant under volume
+rescaling alone (`volume * m` for any constant m>0), verified the same
+way.
 
 Args:
     high (pd.Series): Series of 'high's
     low (pd.Series): Series of 'low's
-    close (pd.Series): Series of 'close's. Index MUST be a pd.DatetimeIndex
-        (required for the `.to_period(anchor)` reset boundary) -- raises
-        ValueError otherwise, rather than the cryptic AttributeError a
-        bare `.to_period()` call on a non-datetime index would raise, or
-        `pandas_ta.overlap.vwap`'s own silent print-and-continue.
+    close (pd.Series): Series of 'close's. Index MUST be a pd.DatetimeIndex,
+        SORTED ASCENDING (required for the `.to_period(anchor)` reset
+        boundary AND for `groupby(periods).cumsum()`/`.transform("first")`
+        to follow chronological rather than merely row order) -- raises
+        ValueError on either gap: a non-DatetimeIndex (rather than the
+        cryptic AttributeError a bare `.to_period()` call would raise), or
+        a DatetimeIndex that is present but not ascending-ordered (rather
+        than the silent non-causal-but-doesn't-crash result an unordered
+        groupby produces). `pandas_ta.overlap.vwap` checks this exact same
+        ordering condition (`is_datetime_ordered`) but only WARNS and
+        continues; this port raises on both checks instead, consistent
+        with its own stated convention elsewhere (`anchor`/`min_samples`
+        validation below) of raising rather than silently degrading.
     volume (pd.Series): Series of 'volume's
     anchor (str): One of "D" (day/session), "W" (week), or "M" (month),
         case-insensitive. Must match one of these 3 if given, or raises
@@ -310,6 +482,17 @@ Args:
         rejection_blocks' equivalents). `None` (the actual default
         sentinel) is not an error and means "use the default."
         Default: "W"
+    min_samples (int): Opt-in port deviation, OFF by default (Pine
+        parity): if given, forces AVWAP_Z_{anchor} to NaN for every bar
+        where fewer than `min_samples` samples have accumulated in the
+        current anchor period so far -- a mitigation for "THE n=2 CASE"
+        above (an n=1 bar is already NaN regardless, via the stdev==0
+        guard). Does NOT affect AVWAP_DIST_PCT_{anchor}, which has no
+        comparable small-n numerical degeneracy (see the Calculation
+        section). Must be a finite, positive, integral numeric value if
+        given, or raises ValueError (same swallowed-bad-kwarg shape as
+        `anchor`). `None` (the default) means "disabled," not an error.
+        Default: None
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:
@@ -318,7 +501,9 @@ Kwargs:
 
 Raises:
     ValueError: `anchor` given and not "D"/"W"/"M" (case-insensitive) or
-        not a str; `close.index` is not a pd.DatetimeIndex.
+        not a str; `min_samples` given and not a finite, positive,
+        integral numeric value; `close.index` is not a pd.DatetimeIndex,
+        or is a pd.DatetimeIndex that is not sorted ascending.
 
 Returns:
     pd.DataFrame: AVWAP_Z_{anchor}, AVWAP_DIST_PCT_{anchor}.
