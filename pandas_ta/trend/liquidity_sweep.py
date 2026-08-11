@@ -41,6 +41,46 @@ class _Level:
         self.broken = broken
 
 
+def _positive_int(value, default, name):
+    """None -> default (that's a normal, documented default -- not bad
+    input). Anything else must coerce to a positive int, or raise. Fixes
+    a Fletcher MINOR: the original version silently fell back to
+    `default` on 0/negative input too (e.g. `swing_len=0` silently became
+    10), the same swallowed-bad-kwarg shape as this project's known
+    `ema(presma=...)` incident."""
+    if value is None:
+        return default
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive int, got {value}")
+    return value
+
+
+def _nonneg_float(value, default, name):
+    """Same fix, float/>=0 variant (`atr_mult`)."""
+    if value is None:
+        return default
+    value = float(value)
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got {value}")
+    return value
+
+
+def _validate_mode(mode):
+    """None -> 'both' (documented default). Anything else must be exactly
+    'wick'/'reclaim'/'both' (case-insensitive), or raise -- the original
+    version silently fell back to 'both' on any unrecognized string
+    (e.g. `mode='bogus'`), same swallowed-bad-kwarg shape as above."""
+    if mode is None:
+        return "both"
+    if not isinstance(mode, str):
+        raise ValueError(f"mode must be a str ('wick'/'reclaim'/'both'), got {type(mode)!r}")
+    mode = mode.lower()
+    if mode not in ("wick", "reclaim", "both"):
+        raise ValueError(f"mode must be 'wick', 'reclaim', or 'both', got {mode!r}")
+    return mode
+
+
 def _process_side(levels, t, extreme_v, close_v, atr_v, atr_mult, max_age,
                    mode_wick, mode_reclaim, is_bear):
     """Advance one side's level pool (bear=BSL/swing-highs, bull=SSL/
@@ -55,11 +95,11 @@ def _process_side(levels, t, extreme_v, close_v, atr_v, atr_mult, max_age,
             continue  # aged out, no event -- matches Pine's maxAge branch
 
         if is_bear:
-            pen_ok = (atr_mult == 0.0) or (extreme_v[t] - lvl.price >= atr_v[t] * atr_mult)
-            is_sweep = mode_wick and (not lvl.broken) and (extreme_v[t] > lvl.price) and (close_v[t] < lvl.price) and pen_ok
+            pen_ok = bool((atr_mult == 0.0) or (extreme_v[t] - lvl.price >= atr_v[t] * atr_mult))
+            is_sweep = bool(mode_wick and (not lvl.broken) and (extreme_v[t] > lvl.price) and (close_v[t] < lvl.price) and pen_ok)
         else:
-            pen_ok = (atr_mult == 0.0) or (lvl.price - extreme_v[t] >= atr_v[t] * atr_mult)
-            is_sweep = mode_wick and (not lvl.broken) and (extreme_v[t] < lvl.price) and (close_v[t] > lvl.price) and pen_ok
+            pen_ok = bool((atr_mult == 0.0) or (lvl.price - extreme_v[t] >= atr_v[t] * atr_mult))
+            is_sweep = bool(mode_wick and (not lvl.broken) and (extreme_v[t] < lvl.price) and (close_v[t] > lvl.price) and pen_ok)
 
         reclaim = False
         broken = lvl.broken
@@ -88,14 +128,12 @@ def _process_side(levels, t, extreme_v, close_v, atr_v, atr_mult, max_age,
 def liquidity_sweep(high, low, close, swing_len=None, atr_len=None, atr_mult=None,
                      max_levels=None, max_age=None, mode=None, offset=None, **kwargs):
     """Indicator: Liquidity Sweep Hunter (LSH)"""
-    swing_len = int(swing_len) if swing_len and swing_len > 0 else 10
-    atr_len = int(atr_len) if atr_len and atr_len > 0 else 14
-    atr_mult = float(atr_mult) if atr_mult is not None and atr_mult >= 0 else 0.1
-    max_levels = int(max_levels) if max_levels and max_levels > 0 else 10
-    max_age = int(max_age) if max_age and max_age > 0 else 300
-    mode = mode.lower() if mode and isinstance(mode, str) else "both"
-    if mode not in ("wick", "reclaim", "both"):
-        mode = "both"
+    swing_len = _positive_int(swing_len, 10, "swing_len")
+    atr_len = _positive_int(atr_len, 14, "atr_len")
+    atr_mult = _nonneg_float(atr_mult, 0.1, "atr_mult")
+    max_levels = _positive_int(max_levels, 10, "max_levels")
+    max_age = _positive_int(max_age, 300, "max_age")
+    mode = _validate_mode(mode)
     mode_wick = mode in ("wick", "both")
     mode_reclaim = mode in ("reclaim", "both")
 
@@ -127,8 +165,8 @@ def liquidity_sweep(high, low, close, swing_len=None, atr_len=None, atr_mult=Non
     sweep_bear = np.zeros(n, dtype=int)
     reclaim_bull = np.zeros(n, dtype=int)
     reclaim_bear = np.zeros(n, dtype=int)
-    dist_res = np.full(n, np.nan)   # % distance to nearest unswept BSL (resistance, above)
-    dist_sup = np.full(n, np.nan)   # % distance to nearest unswept SSL (support, below)
+    dist_res = np.full(n, np.nan)   # % distance to nearest ACTIVE BSL strictly ABOVE close (resistance)
+    dist_sup = np.full(n, np.nan)   # % distance to nearest ACTIVE SSL strictly BELOW close (support)
 
     bear_levels = []  # BSL pool, from confirmed swing HIGHS
     bull_levels = []  # SSL pool, from confirmed swing LOWS
@@ -161,11 +199,30 @@ def liquidity_sweep(high, low, close, swing_len=None, atr_len=None, atr_mult=Non
         sweep_bull[t] = int(did_sweep_bull)
         reclaim_bull[t] = int(did_reclaim_bull)
 
-        if bear_levels:
-            nearest = min(bear_levels, key=lambda lv: abs(lv.price - close_v[t]))
+        # Fletcher MAJOR fix: the argmin must be constrained to levels on
+        # the CORRECT side of price, not just nearest-by-absolute-
+        # distance over the whole pool. A `broken` bear (BSL) level can
+        # sit BELOW close while awaiting reclaim (mode="both", up to
+        # `max_age` bars) -- an unconstrained abs-distance argmin then
+        # picks that stale below-price level over a genuine overhead
+        # resistance level, reporting a NEGATIVE "distance to resistance"
+        # for a level that isn't resistance at all. Measured on real data
+        # (GARAN.IS full history) pre-fix: 27.2% of non-NaN DIST_RES
+        # values negative, 15.2% of all bars had a real overhead BSL but
+        # reported a below-price broken level instead. Same issue
+        # mirrored on DIST_SUP (11.9% negative pre-fix). Constraining to
+        # `price > close`/`price < close` makes both columns always
+        # non-negative when populated, matching what "distance to
+        # resistance/support" implies; NaN when no level qualifies on
+        # that side (an empty pool, or a pool where every level has
+        # already been overtaken by price without resolving).
+        res_cands = [lv for lv in bear_levels if lv.price > close_v[t]]
+        if res_cands:
+            nearest = min(res_cands, key=lambda lv: lv.price - close_v[t])
             dist_res[t] = (nearest.price - close_v[t]) / close_v[t] * 100
-        if bull_levels:
-            nearest = min(bull_levels, key=lambda lv: abs(lv.price - close_v[t]))
+        sup_cands = [lv for lv in bull_levels if lv.price < close_v[t]]
+        if sup_cands:
+            nearest = min(sup_cands, key=lambda lv: close_v[t] - lv.price)
             dist_sup[t] = (close_v[t] - nearest.price) / close_v[t] * 100
 
     sweep_bull = Series(sweep_bull, index=close.index)
@@ -264,14 +321,28 @@ law, not this function).
 
 ⚠ Simplified vs. the source in two ways, both deliberate: (1) the
 source's per-level `line`/`label` drawing objects are dropped entirely --
-pure state, no chart I/O. (2) "nearest unswept level" for the two `DIST`
-columns is defined here as nearest-by-absolute-price-distance across the
-WHOLE active pool for that side, a natural reading the source itself
+pure state, no chart I/O. (2) "nearest ACTIVE level" for the two `DIST`
+columns is defined here as nearest-by-distance among levels on the
+CORRECT side of price (a BSL/bear level strictly above close for
+DIST_RES, an SSL/bull level strictly below close for DIST_SUP) within
+the active pool for that side -- a natural reading the source itself
 never needed (it never asks "how far to the nearest level," only "did
 THIS level's price get hit") -- this is this port's own addition to
 satisfy the project's scale-free-distance convention (see `docs/
 indicators/family-structure-smc.md` header / `dist_to_res_level`
-precedent), not a translation of existing Pine math.
+precedent), not a translation of existing Pine math. "Active" here
+INCLUDES a `broken`-but-not-yet-reclaimed level (mode="reclaim"/"both") --
+it is still in the pool, still resolvable, just past its break point;
+only a resolved (swept or reclaimed) or aged-out level leaves the pool.
+Fletcher MAJOR (round 1): an earlier version picked the nearest level by
+ABSOLUTE distance across the WHOLE pool regardless of side, so a broken
+bear level sitting below price (awaiting reclaim, up to `max_age` bars)
+could win the argmin against a genuine overhead resistance level and
+report a negative "distance to resistance" -- measured on GARAN.IS full
+history, 27.2% of non-NaN DIST_RES values were negative under the old
+logic. Fixed by constraining the candidate set to the correct side
+before taking the nearest (see the loop body); DIST_RES/DIST_SUP are now
+non-negative whenever populated, by construction.
 
 Calculation:
     Default Inputs:
@@ -296,27 +367,47 @@ Calculation:
             Either event resolves (removes) the level; sweep and reclaim
                 are mutually exclusive for a given level on a given bar
                 (their close-side conditions are complements).
-    DIST_RES = (nearest active BSL/bear-level price - close) / close * 100
-        (NaN if no active BSL level); DIST_SUP = (close - nearest active
-        SSL/bull-level price) / close * 100 (NaN if no active SSL level).
+    DIST_RES = (nearest active BSL/bear-level price - close) / close * 100,
+        restricted to active BSL levels with price > close (NaN if none
+        qualify -- empty pool, or every active level already overtaken by
+        price). DIST_SUP = (close - nearest active SSL/bull-level price) /
+        close * 100, restricted to active SSL levels with price < close
+        (NaN if none qualify). Both are >= 0 whenever populated, by
+        construction ("active" includes a broken-but-not-yet-reclaimed
+        level -- it is still tracked, just past its break point; only a
+        resolved or aged-out level leaves the pool).
 
 Args:
     high (pd.Series): Series of 'high's
     low (pd.Series): Series of 'low's
     close (pd.Series): Series of 'close's
-    swing_len (int): Bars either side required for a pivot. Default: 10
-    atr_len (int): ATR lookback for the penetration filter. Default: 14
+    swing_len (int): Bars either side required for a pivot. Must be > 0
+        if given. Default: 10
+    atr_len (int): ATR lookback for the penetration filter. Must be > 0
+        if given. Default: 14
     atr_mult (float): Minimum penetration, as a multiple of ATR. 0 disables
-        the filter. Default: 0.1
-    max_levels (int): Max active levels tracked per side. Default: 10
+        the filter. Must be >= 0 if given. Default: 0.1
+    max_levels (int): Max active levels tracked per side. Must be > 0 if
+        given. Default: 10
     max_age (int): Levels older than this (bars since confirmation) expire
-        unresolved. Default: 300
-    mode (str): "wick", "reclaim", or "both". Default: "both"
+        unresolved. Must be > 0 if given. Default: 300
+    mode (str): "wick", "reclaim", or "both" (case-insensitive). Default: "both"
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:
     fillna (value, optional): pd.DataFrame.fillna(value)
     fill_method (value, optional): Type of fill method
+
+Raises:
+    ValueError: `mode` given and not one of "wick"/"reclaim"/"both"
+        (case-insensitive) or not a str; `swing_len`/`atr_len`/
+        `max_levels`/`max_age` given and <= 0; `atr_mult` given and < 0.
+        Fletcher MINOR (round 1): the original version silently fell back
+        to the default on any of these instead (`mode="bogus"` silently
+        became "both", `swing_len=0` silently became 10) -- same
+        swallowed-bad-kwarg shape as this project's known
+        `ema(presma=...)` incident. `None` (the actual default sentinel)
+        still means "use the default," not an error.
 
 Returns:
     pd.DataFrame: LSH_SWEEP_BULL, LSH_SWEEP_BEAR, LSH_RECLAIM_BULL,

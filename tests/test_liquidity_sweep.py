@@ -64,9 +64,40 @@ def test_process_side_bear_wick_sweep():
     new_levels, swept, reclaimed = _process_side(
         levels, 5, high_v, close_v, atr_v, atr_mult=0.0, max_age=300,
         mode_wick=True, mode_reclaim=True, is_bear=True)
-    assert swept is True
-    assert reclaimed is False
+    # Fletcher MINOR (round 1): `assert swept is True` only passed
+    # because every scenario in this file happened to use atr_mult=0.0,
+    # which short-circuits `pen_ok`/`is_sweep` to a genuine Python bool
+    # via the `atr_mult == 0.0 or ...` OR-chain. Any atr_mult > 0 routes
+    # through a numpy comparison instead, and `numpy.bool_(True) is True`
+    # is False -- the `_process_side` return values were never guaranteed
+    # Python bool before the `bool(...)` coercions added at the source.
+    # Truthy checks (not `is` identity) are correct regardless of dtype;
+    # the atr_mult>0 case immediately below is the actual regression test
+    # for the dtype bug itself.
+    assert swept
+    assert not reclaimed
     assert new_levels == []  # resolved level leaves the pool
+    assert type(swept) is bool and type(reclaimed) is bool
+
+
+def test_process_side_bear_wick_sweep_atr_mult_positive_returns_python_bool():
+    # Regression test for the numpy.bool_ dtype bug itself: atr_mult=0.5
+    # forces `pen_ok`/`is_sweep` through the numpy comparison branch
+    # (`extreme_v[t] - lvl.price >= atr_v[t] * atr_mult`), not the
+    # atr_mult==0.0 short-circuit every other scenario in this file uses.
+    # Pre-fix, `swept` here was `numpy.bool_(True)`, and `swept is True`
+    # would have failed.
+    levels = [_Level(price=110.0, lvl_bar=0)]
+    high_v = np.array([0, 0, 0, 0, 0, 113.0])   # penetration 3.0 >= atr(1.0)*0.5
+    close_v = np.array([0, 0, 0, 0, 0, 95.0])
+    atr_v = np.full(6, 1.0)
+    new_levels, swept, reclaimed = _process_side(
+        levels, 5, high_v, close_v, atr_v, atr_mult=0.5, max_age=300,
+        mode_wick=True, mode_reclaim=True, is_bear=True)
+    assert swept
+    assert not reclaimed
+    assert type(swept) is bool and type(reclaimed) is bool
+    assert new_levels == []
 
 
 def test_process_side_bear_break_then_next_bar_reclaim():
@@ -78,13 +109,13 @@ def test_process_side_bear_break_then_next_bar_reclaim():
     lvls, swept, reclaimed = _process_side(
         levels, 5, high_v, close_v, atr_v, atr_mult=0.0, max_age=300,
         mode_wick=True, mode_reclaim=True, is_bear=True)
-    assert swept is False and reclaimed is False
+    assert not swept and not reclaimed
     assert len(lvls) == 1 and lvls[0].broken is True
     # bar 6: close crosses back below -> reclaim fires, level resolves
     lvls2, swept2, reclaimed2 = _process_side(
         lvls, 6, high_v, close_v, atr_v, atr_mult=0.0, max_age=300,
         mode_wick=True, mode_reclaim=True, is_bear=True)
-    assert swept2 is False and reclaimed2 is True
+    assert not swept2 and reclaimed2
     assert lvls2 == []
 
 
@@ -98,7 +129,7 @@ def test_process_side_max_age_expires_without_event():
         mode_wick=True, mode_reclaim=True, is_bear=True)
     # age = 6 - 0 = 6 > max_age(5) -> expires silently, even though bar 6's
     # own high/close would otherwise have triggered a sweep
-    assert swept is False and reclaimed is False
+    assert not swept and not reclaimed
     assert lvls == []
 
 
@@ -134,6 +165,7 @@ def test_pivot_confirms_and_dist_res_populates():
     assert out["LSH_DIST_RES_2"].iloc[7:].iloc[:3].eq(10.0).all()
     assert out["LSH_SWEEP_BEAR_2"].sum() == 0
     assert out["LSH_RECLAIM_BEAR_2"].sum() == 0
+    assert (out["LSH_DIST_RES_2"].dropna() >= 0).all()
 
 
 def test_bear_wick_sweep_fires_and_resolves_level():
@@ -157,6 +189,7 @@ def test_bear_wick_sweep_fires_and_resolves_level():
     assert out["LSH_RECLAIM_BEAR_2"].sum() == 0
     assert pd.isna(out["LSH_DIST_RES_2"].iloc[10])
     assert out["LSH_DIST_RES_2"].iloc[9] == 10.0  # still active the bar before the sweep
+    assert (out["LSH_DIST_RES_2"].dropna() >= 0).all()
 
 
 def test_bear_break_then_reclaim_two_step():
@@ -179,10 +212,59 @@ def test_bear_break_then_reclaim_two_step():
     assert out["LSH_SWEEP_BEAR_2"].sum() == 0
     assert out["LSH_RECLAIM_BEAR_2"].iloc[11] == 1
     assert out["LSH_RECLAIM_BEAR_2"].sum() == 1
-    # bar 10 itself: still broken, not yet resolved -- DIST_RES still
-    # reflects the (broken but not yet removed) level
-    assert out["LSH_DIST_RES_2"].iloc[10] == pytest.approx((110.0 - 112.0) / 112.0 * 100, abs=1e-9)
+    # bar 10 itself: the level (110.0) is still broken and NOT yet
+    # resolved -- it stays in the pool -- but close (112.0) has already
+    # moved ABOVE it, so it no longer qualifies as an overhead resistance
+    # level for DIST_RES's side-constrained argmin (Fletcher MAJOR fix,
+    # round 1: pre-fix this asserted a NEGATIVE value here, exactly the
+    # "broken level below price reported as resistance" bug the fix
+    # closes). NaN is correct: no active bear level currently sits above
+    # close.
+    assert pd.isna(out["LSH_DIST_RES_2"].iloc[10])
     assert pd.isna(out["LSH_DIST_RES_2"].iloc[11])
+    assert (out["LSH_DIST_RES_2"].dropna() >= 0).all()
+
+
+def test_dist_res_ignores_stale_broken_level_below_price():
+    # THE regression test for the Fletcher MAJOR (round 1): a stale,
+    # BROKEN bear (BSL) level sitting BELOW close must not win the
+    # DIST_RES argmin just because it happens to be numerically closer
+    # than a genuine overhead resistance level.
+    #
+    # Level A: swing high at bar 5 (110.0), confirms bar 7. At bar 10,
+    # close breaks decisively above it (115.5, with atr_mult=0.0 so
+    # pen_ok is unconditional) -> marked broken, no reclaim (close never
+    # drops back below 110.0 again in this scenario -- flooded at 115.5
+    # from bar 11 on). Level A now permanently sits BELOW close,
+    # unresolved, still in the pool (not swept, not reclaimed, not aged
+    # out at n=30/max_age=300).
+    #
+    # Level B: swing high at bar 20 (130.0, unique in its window against
+    # the 116.0 flood), confirms bar 22 -- a genuine overhead level ABOVE
+    # close (115.5).
+    #
+    # By absolute distance alone, A (|110-115.5|=5.5) is CLOSER than B
+    # (|130-115.5|=14.5) -- the pre-fix argmin would have picked A and
+    # reported a negative "distance to resistance" for a level that isn't
+    # resistance at all (it's below price). The fix must pick B.
+    n = 30
+    high, low, close = _flooded_ohlc(n)
+    high[5], low[5] = 110.0, 95.0
+    high[10], low[10], close[10] = 116.0, 115.0, 115.5
+    high[11:], low[11:], close[11:] = 116.0, 115.0, 115.5
+    high[20], low[20] = 130.0, 115.0
+    assert (low <= high).all(), "construction check: every bar must be physically valid"
+    idx = _idx(n)
+    out = ta.liquidity_sweep(
+        pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
+        swing_len=2, atr_mult=0.0,
+    )
+    assert out["LSH_SWEEP_BEAR_2"].sum() == 0
+    assert out["LSH_RECLAIM_BEAR_2"].sum() == 0  # level A never reclaims -- stays broken, stays in the pool
+    post_b = out["LSH_DIST_RES_2"].iloc[22:]
+    assert post_b.notna().all()
+    assert (post_b >= 0).all(), "must pick level B (above price), never the stale broken level A (below price)"
+    assert np.allclose(post_b.to_numpy(), (130.0 - 115.5) / 115.5 * 100, atol=1e-6)
 
 
 def test_bull_wick_sweep_mirrors_bear():
@@ -203,6 +285,7 @@ def test_bull_wick_sweep_mirrors_bear():
     assert out["LSH_SWEEP_BULL_2"].sum() == 1
     assert out["LSH_RECLAIM_BULL_2"].sum() == 0
     assert pd.isna(out["LSH_DIST_SUP_2"].iloc[10])
+    assert (out["LSH_DIST_SUP_2"].dropna() >= 0).all()
 
 
 def test_bull_break_then_reclaim_mirrors_bear():
@@ -241,6 +324,7 @@ def test_atr_penetration_filter_blocks_shallow_wick():
     )
     assert out["LSH_SWEEP_BEAR_2"].sum() == 0
     assert out["LSH_DIST_RES_2"].iloc[10] == pytest.approx((110.0 - 95.0) / 95.0 * 100, abs=1e-9)
+    assert (out["LSH_DIST_RES_2"].dropna() >= 0).all()
 
 
 def test_max_age_expires_level_unresolved():
@@ -258,6 +342,7 @@ def test_max_age_expires_level_unresolved():
     assert out["LSH_DIST_RES_2"].iloc[11:].isna().all()
     assert out["LSH_SWEEP_BEAR_2"].sum() == 0
     assert out["LSH_RECLAIM_BEAR_2"].sum() == 0
+    assert (out["LSH_DIST_RES_2"].dropna() >= 0).all()
 
 
 def test_wick_mode_ignores_reclaim_path():
@@ -275,9 +360,17 @@ def test_wick_mode_ignores_reclaim_path():
     )
     assert out["LSH_SWEEP_BEAR_2"].sum() == 0
     assert out["LSH_RECLAIM_BEAR_2"].sum() == 0
-    # level never gets marked broken in this mode, so it just keeps
-    # reporting whatever the nearest bear level's distance is (still 110)
-    assert out["LSH_DIST_RES_2"].iloc[10] == pytest.approx((110.0 - 112.0) / 112.0 * 100, abs=1e-9)
+    # level never gets marked broken in this mode (break/reclaim logic is
+    # off), so it survives unresolved at price=110.0 throughout. At bar
+    # 10 itself close (112.0) is temporarily ABOVE it, so it doesn't
+    # qualify as overhead resistance for that one bar (side-constrained
+    # DIST_RES, Fletcher MAJOR fix) -- NaN, not the stale/negative value
+    # a whole-pool nearest-by-abs-distance argmin would have reported
+    # pre-fix. Once close reverts to the flooded 100.0 (bar 11 on), the
+    # same never-resolved level qualifies again at its original distance.
+    assert pd.isna(out["LSH_DIST_RES_2"].iloc[10])
+    assert out["LSH_DIST_RES_2"].iloc[11] == pytest.approx(10.0, abs=1e-9)
+    assert (out["LSH_DIST_RES_2"].dropna() >= 0).all()
 
 
 def test_causal_no_lookahead():
@@ -355,21 +448,79 @@ def test_columns_and_naming():
     }
     assert set(out.columns) == expected
     assert out.name == "LSH_10"
-    # Scale-free gate (d): the 4 flag columns are 0/1 categoricals; the 2
-    # DIST columns are already `(price_diff / close) * 100` ratios, scale-
-    # free by construction (same algebraic form as SPHINX_DIST_*/priorday_
-    # fib's proof) -- not re-derived here, just confirmed dtype/int-ness.
+    # Scale-free gate (d): the 4 flag columns are 0/1 categoricals,
+    # confirmed here; the 2 DIST columns are `(price_diff / close) * 100`
+    # ratios, scale-free by construction (same algebraic form as
+    # SPHINX_DIST_*/priorday_fib's proof) -- Fletcher NIT (round 1): an
+    # earlier version of this comment claimed this without actually
+    # checking it; `test_dist_columns_scale_invariant` now verifies it
+    # directly (OHLC x1000 -> byte-identical DIST output).
     for c in ("LSH_SWEEP_BULL_10", "LSH_SWEEP_BEAR_10", "LSH_RECLAIM_BULL_10", "LSH_RECLAIM_BEAR_10"):
         assert set(out[c].unique()) <= {0, 1}
 
 
-def test_invalid_mode_falls_back_to_both():
+def test_invalid_mode_raises():
+    # Fletcher MINOR (round 1): the original version silently fell back
+    # to "both" on any unrecognized mode string -- fixed to raise, same
+    # shape as the swing_len/atr_mult fixes below.
     n = 20
     high, low, close = _flooded_ohlc(n)
     high[5], low[5] = 110.0, 95.0
     idx = _idx(n)
-    out = ta.liquidity_sweep(
-        pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
-        swing_len=2, mode="bogus",
-    )
-    assert out["LSH_DIST_RES_2"].iloc[7:10].notna().all()
+    with pytest.raises(ValueError, match="mode"):
+        ta.liquidity_sweep(
+            pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
+            swing_len=2, mode="bogus",
+        )
+
+
+def test_invalid_atr_mult_raises():
+    n = 20
+    high, low, close = _flooded_ohlc(n)
+    idx = _idx(n)
+    with pytest.raises(ValueError, match="atr_mult"):
+        ta.liquidity_sweep(
+            pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
+            swing_len=2, atr_mult=-1.0,
+        )
+
+
+def test_invalid_swing_len_raises():
+    n = 20
+    high, low, close = _flooded_ohlc(n)
+    idx = _idx(n)
+    with pytest.raises(ValueError, match="swing_len"):
+        ta.liquidity_sweep(
+            pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx),
+            swing_len=0,
+        )
+
+
+def test_none_params_still_use_documented_defaults():
+    # None is the actual default sentinel, not "bad input" -- must not
+    # raise, and must behave identically to omitting the kwargs entirely.
+    n = 30
+    high, low, close = _flooded_ohlc(n)
+    high[5], low[5] = 110.0, 95.0
+    idx = _idx(n)
+    h, l, c = pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx)
+    out_none = ta.liquidity_sweep(h, l, c, swing_len=None, atr_len=None, atr_mult=None,
+                                   max_levels=None, max_age=None, mode=None)
+    out_omitted = ta.liquidity_sweep(h, l, c)
+    pd.testing.assert_frame_equal(out_none, out_omitted)
+
+
+def test_dist_columns_scale_invariant():
+    # NIT: test_columns_and_naming asserted the DIST columns were
+    # scale-free "by construction" without actually checking it -- this
+    # confirms it directly: scaling OHLC by a constant factor must not
+    # change the (already-a-ratio) DIST_RES/DIST_SUP output at all.
+    n = 30
+    high, low, close = _flooded_ohlc(n)
+    high[5], low[5] = 110.0, 95.0
+    high[10], low[10], close[10] = 112.0, 94.0, 95.0
+    idx = _idx(n)
+    h, l, c = pd.Series(high, index=idx), pd.Series(low, index=idx), pd.Series(close, index=idx)
+    out = ta.liquidity_sweep(h, l, c, swing_len=2, atr_mult=0.0)
+    out_x1000 = ta.liquidity_sweep(h * 1000, l * 1000, c * 1000, swing_len=2, atr_mult=0.0)
+    pd.testing.assert_frame_equal(out, out_x1000)
