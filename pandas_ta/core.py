@@ -1993,6 +1993,15 @@ class AnalysisIndicators(BasePandasObject):
         result = pvt(close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tri_dir_pressure(self, use_volume=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = tri_dir_pressure(open_=open_, high=high, low=low, close=close, volume=volume, use_volume=use_volume, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def vfi(self, length=None, coef=None, vcoef=None, mamode=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
