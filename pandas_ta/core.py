@@ -1629,6 +1629,14 @@ class AnalysisIndicators(BasePandasObject):
                                    atr_len=atr_len, max_zones=max_zones, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sr_decay(self, swing_len=None, max_levels=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sr_decay(high=high, low=low, close=close, swing_len=swing_len,
+                           max_levels=max_levels, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def sr_force(self, swing_len=None, retest_lookback=None, touch_tol_pct=None,
                  debounce_bars=None, max_levels=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
