@@ -654,6 +654,18 @@ Args:
         signal. Must be a non-negative int if given (0 disables the score
         floor). Default: 5
     offset (int): How many periods to offset the result. Default: 0
+        ⚠ Fletcher round 2, NIT: with `offset != 0`, `Series.shift(offset)`
+        introduces leading NaN rows into FSME_MAG_BULL/BEAR, which
+        silently promotes them from int64 to float64 (pandas has no
+        native NaN-capable int64) -- e.g. the register/family-structure-
+        smc.md doc's `int64` dtype for these two columns holds only at the
+        default `offset=0`. Not treated as a bug worth an `Int64` (nullable
+        pandas dtype) conversion here -- that would ripple a different,
+        less-common dtype into every downstream consumer for a cosmetic
+        gain -- but a caller relying on `FSME_MAG_*.dtype == int64` under
+        a nonzero offset should convert explicitly
+        (`.astype("Int64")` or `.fillna(0).astype("int64")`, the latter
+        if a shifted-in NaN can safely read as "no fire").
 
 Kwargs:
     fillna (value, optional): pd.DataFrame.fillna(value)

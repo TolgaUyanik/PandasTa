@@ -342,6 +342,21 @@ def test_score_at_creation_matches_maintain_formula():
 # bot=high[0]=10 -- every later baseline bar has low==99 (<=99) and
 # high==101 (>=10), so in_gap stays true and close never drops below
 # bot=10, so it's never filled. Bear is the mirror (bars 0-1 HIGH).
+#
+# ⚠ Fletcher round 2: this helper sets BOTH bars 0 and 1 to the identical
+# flat value, so `bull_gap_raw` (`low[t] > high[t-2]`) actually fires TWICE
+# -- at t=2 (vs high[0]) AND t=3 (vs high[1]) -- birthing TWO separate
+# `_Zone` objects, not one (confirmed directly against the module's own
+# `_Zone.__init__` via instrumentation, not assumed; mirror for
+# `_permanent_bear_base`). Every comment below that says "the permanent
+# zone" / "zone A" (singular) is describing this pair loosely: since both
+# zones share the exact same top/bot (hence the same mid), any single-
+# zone assertion (a boundary check, a nearest-zone pick, an in-gap test)
+# is unaffected by which of the two actually "wins" -- they are
+# interchangeable for every test in this file EXCEPT the FIFO-eviction
+# scenario below, where insertion order (and therefore which one gets
+# evicted first) is the entire point; see `_fifo_scenario`'s own comment
+# for that scenario's actual (verified) zone-birth/eviction lineage.
 # ---------------------------------------------------------------------------
 
 def _permanent_bull_base(n):
@@ -416,39 +431,73 @@ def test_expired_kills_zone_after_max_fvg_age():
 # ---------------------------------------------------------------------------
 
 def _fifo_scenario(n=30):
-    # zone1 (bull, permanent): bars 0-1 low regime -> born bar 2,
-    # top=99, bot=10.
+    # Fletcher round 2: this scenario actually births SEVEN zones, not
+    # three -- confirmed directly by instrumenting `_Zone.__init__`, not
+    # assumed (an earlier version of this comment claimed 3 zones/1
+    # eviction; both counts were wrong). In insertion order:
+    #   B2  bull  (born t=2,  top=99,  bot=10)   -- from _permanent_bull_base
+    #   B3  bull  (born t=3,  top=99,  bot=10)   -- ditto, see that helper's
+    #                                                own "births TWO zones" note
+    #   B10 bear  (born t=10, top=99,  bot=61)   -- dip at bar 10 (high=61)
+    #   B12 bear  (born t=12, top=59,  bot=55)   -- gap-confirm vs low[10]=59;
+    #                                                bar 13 reverts to baseline
+    #                                                (close=100>top=59) -> filled
+    #   B14 bull  (born t=14, top=99,  bot=55)   -- baseline low[14]=99 vs
+    #                                                high[12]=55; NEVER filled
+    #                                                (baseline close=100>=55)
+    #   B22 bull  (born t=22, top=110, bot=101)  -- gap-confirm at bar 22
+    #                                                (low[22]=110>high[20]=101
+    #                                                baseline); its own bot=101
+    #                                                means the very next
+    #                                                baseline bar (close=100)
+    #                                                fills it at bar 23
+    #   B24 bear  (born t=24, top=110, bot=101)  -- gap-confirm vs low[22]=110;
+    #                                                baseline close=100 never
+    #                                                exceeds top=110 -> never
+    #                                                filled
+    # With fvg_lookback=2 (evict index 0 whenever a push makes len>2), the
+    # pool after each push is: [B2,B3] -> push B10 evicts B2 -> [B3,B10] ->
+    # push B12 evicts B3 -> [B10,B12] -> push B14 evicts B10 -> [B12,B14] ->
+    # push B22 evicts B12 -> [B14,B22] -> push B24 evicts B14 -> [B22,B24].
+    # So the capped pool's FINAL two slots are B22 (bull, but dead/filled
+    # since bar 23) and B24 (bear, alive) -- B14, the last surviving LIVE
+    # bull zone, is evicted by the B24 push, not by anything involving "zone1"
+    # (B2/B3, which were evicted far earlier, at the B10/B12 pushes).
     O, H, L, C = _permanent_bull_base(n)
-    # zone2 (bear, dies quickly): dip at bar 10 (high=61), gap-confirm at
-    # bar 12 (high[12]=55 < low[10]=59); bar 13 reverts to baseline
-    # (close=100 > top=55) -> filled immediately.
     O[10], H[10], L[10], C[10] = 60.0, 61.0, 59.0, 60.0
     O[12], H[12], L[12], C[12] = 52.0, 55.0, 50.0, 51.0
-    # zone3 (bull #2): gap-confirm at bar 22 (low[22]=110 > high[20]=101
-    # baseline); its own bot=101 means the very next baseline bar
-    # (close=100) fills it again.
     O[22], H[22], L[22], C[22] = 111.0, 112.0, 110.0, 111.0
     return O, H, L, C
 
 
 def test_dead_zone_lingers_in_pool_until_fifo_evicted():
-    # fvg_lookback=2: by bar 22, pool=[zone1(alive), zone2(dead)]; pushing
-    # zone3 overflows to 3>2 and evicts INDEX 0 = zone1 -- the ALIVE
-    # zone, not the dead one -- because eviction is insertion-order, not
-    # liveness-order. At bar 25 (baseline reverted, zone3 already
-    # filled), CE_DIST_BULL must be NaN: zone1 (which would still
-    # qualify -- baseline low=99<=top=99, close=100>=bot=10 -- if still
-    # tracked) was evicted, and zone3 is dead.
+    # fvg_lookback=2: per `_fifo_scenario`'s own (verified) comment, the
+    # capped pool's final two slots are B22 (bull, dead/filled since bar
+    # 23) and B24 (bear, alive) -- NEITHER is a live BULL zone, so
+    # CE_DIST_BULL must be NaN at bar 25. The assertions below are
+    # unchanged from (and still exactly as discriminating as) the original
+    # write-up; only the "which zone got evicted" narrative above was
+    # wrong, not what the test actually verifies: a filled/expired zone
+    # does not vacate its slot early, and the pool's FIFO eviction is
+    # insertion-order, not liveness-order -- both still demonstrated here.
     O, H, L, C = _fifo_scenario()
     out_capped = _run(O, H, L, C, atr_len=2, pivot_len=2, fvg_lookback=2, max_fvg_age=200, **_TRIVIAL)
     assert np.isnan(out_capped["FSME_CE_DIST_BULL_2"].iloc[25])
 
-    # Control: with capacity for all 3 zones (fvg_lookback=10), zone1 is
-    # NEVER evicted and still reports a real distance at bar 25 -- proving
-    # the capped case's NaN above is specifically an eviction effect, not
-    # some other coincidental zone-death.
+    # Control: with capacity for all 7 zones (fvg_lookback=10), nothing is
+    # evicted -- B14 (bull, born t=14, top=99/bot=55, mid=77, never filled)
+    # is still live and in-gap at bar 25 and supplies a real distance
+    # (measured directly: |close(100) - mid(77)| / ATR(2)[25] = 5.9193...,
+    # not a coincidence -- confirmed via a direct ATR call), proving the
+    # capped case's NaN above is specifically an eviction effect, not some
+    # other coincidental zone-death. B2/B3 (evicted long before bar 22) are
+    # NOT the zone supplying this distance, contrary to an earlier version
+    # of this comment.
     out_uncapped = _run(O, H, L, C, atr_len=2, pivot_len=2, fvg_lookback=10, max_fvg_age=200, **_TRIVIAL)
     assert not np.isnan(out_uncapped["FSME_CE_DIST_BULL_2"].iloc[25])
+    idx = _idx(len(O))
+    a25 = _atr_fn(_series(H, idx), _series(L, idx), _series(C, idx), length=2).iloc[25]
+    assert math.isclose(out_uncapped["FSME_CE_DIST_BULL_2"].iloc[25], abs(100.0 - 77.0) / a25, rel_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -500,9 +549,13 @@ def test_ce_dist_bear_nan_just_outside_bot_boundary():
 # ---------------------------------------------------------------------------
 
 def test_ce_dist_picks_nearer_zone_among_two_live_candidates():
-    # zone A (permanent, top=99,bot=10, mid=54.5) from the bars 0-1 low
-    # regime. zone B (top=80,bot=20, mid=50) from a gap at bar 10
-    # (high[8]=20, low[10]=80). At bar 12, both are simultaneously live
+    # "zone A" here is really a PAIR of identical zones (top=99,bot=10,
+    # mid=54.5, born t=2 AND t=3 -- see `_permanent_bull_base`'s own
+    # comment); which of the two the nearest-zone argmin would pick is
+    # irrelevant since they share the same top/bot/mid, so this scenario
+    # still has exactly two DISTINCT distances to choose between (zone
+    # A-pair vs zone B). zone B (top=80,bot=20, mid=50) from a gap at bar
+    # 10 (high[8]=20, low[10]=80). At bar 12, both are simultaneously live
     # and in-gap (low=55<=80 and <=99; high=65>=20 and >=10; close=62 not
     # below either bot). close=62 is nearer to mid_A(54.5) than mid_B(50)
     # in ATR-normalized terms -- confirmed against a direct atr() call,
@@ -543,7 +596,9 @@ def _liq_keep_scenario(n=30):
     # (close>open), wick ratio (min(90.5,91)-85)/(93-85)=5.5/8=0.6875.
     O[20], H[20], L[20], C[20] = 90.5, 93.0, 85.0, 91.0
     # Bar 22 (sweep_confirm=2 bars after bar 20): bullish confirming
-    # candle, inside the permanent zone's gap.
+    # candle, inside the permanent zone pair's gap (top=99/bot=10,
+    # identical for both the t=2 and t=3 births -- see
+    # `_permanent_bull_base`'s comment).
     O[22], H[22], L[22], C[22] = 100.0, 102.0, 99.0, 101.0
     return O, H, L, C
 
@@ -707,19 +762,83 @@ def test_bear_sweep_and_magnet_fire_end_to_end():
 # ---------------------------------------------------------------------------
 
 def _random_walk_ohlcv(n=250, seed=11):
+    # Fletcher round 2, MAJOR: the ORIGINAL version of this fixture (wicks
+    # sized off `close`, body sized off `close`'s own one-bar step, both
+    # ~0.6-0.7 stdev) was 100% degenerate on ALL SIX columns at n=250,
+    # 1000, AND 3000 -- MAG_BULL/MAG_BEAR unique values == {0}, all four
+    # CE_DIST/CE_SCORE columns entirely NaN. Root cause: `open_ =
+    # close.shift(1)` made every body approx one bar's close-to-close
+    # return (~0.6 stdev) while wicks inflated ATR to ~1.7, so
+    # `midBody >= ATR*1.25` (the default `require_disp` gate) was a
+    # ~3.5-sigma event that essentially never fired -- so no FVG zone was
+    # EVER created at default params, silently. This made
+    # `test_ce_score_nan_exactly_when_ce_dist_nan_and_bounded_when_populated`
+    # vacuous (both `if len(pop_dist):`/`if len(pop_score):` guards below
+    # were False, so the >=0 / 0..10 boundedness assertions never ran) and
+    # made `test_causal_no_lookahead`/`test_causal_deletion_no_lookahead`
+    # evidence-free (a stub returning constant zeros/NaNs would have
+    # passed both), despite both being cited elsewhere (this module's own
+    # docstring, family-structure-smc.md §4g) as the causality proof.
+    #
+    # Fixed by anchoring wicks to the BODY (not to `close`) and widening
+    # the close-to-close step to 1.2: `open_ = close.shift(1)`,
+    # `high = max(open_,close) + |randn|*0.15 + 0.02`,
+    # `low = min(open_,close) - |randn|*0.15 - 0.02` -- this keeps the
+    # body itself (|close-open|, ~1.2 stdev) comparable to or larger than
+    # ATR (now dominated by the tight 0.15-scaled wicks, not the body),
+    # so `midBody >= ATR*1.25` is a plausible, non-vanishing event. At the
+    # literal engine defaults (require_disp=True, min_gap_atr=0.25,
+    # min_score=5, pivot_len=5), MEASURED directly (not assumed) at n=250
+    # (this fixture's own default): FSME_MAG_BULL_5 fires 1/250,
+    # FSME_MAG_BEAR_5 fires 1/250, FSME_CE_DIST_BULL_5 populated 96/250
+    # (range 0.0069..2.76), FSME_CE_DIST_BEAR_5 populated 63/250 (range
+    # 0.0067..2.35), FSME_CE_SCORE_BULL_5 range 6..9, FSME_CE_SCORE_BEAR_5
+    # range 6..8 -- also checked at n=1000 (MAG_BEAR fires 1/1000,
+    # MAG_BULL 0/1000 -- CE_DIST/SCORE still populate hundreds of rows
+    # each) and n=3000 (MAG_BULL 5/3000, MAG_BEAR 6/3000), so this is a
+    # durable fix, not a single lucky seed.
     rng = np.random.RandomState(seed)
     idx = _idx(n)
-    close = pd.Series(100 + np.cumsum(rng.randn(n) * 0.6), index=idx)
-    high = close + np.abs(rng.randn(n)) * 0.7 + 0.05
-    low = close - np.abs(rng.randn(n)) * 0.7 - 0.05
-    open_ = close.shift(1).fillna(close.iloc[0]).clip(lower=low, upper=high)
+    close = pd.Series(100 + np.cumsum(rng.randn(n) * 1.2), index=idx)
+    open_ = close.shift(1).fillna(close.iloc[0])
+    high = pd.Series(np.maximum(open_.to_numpy(), close.to_numpy()) + np.abs(rng.randn(n)) * 0.15 + 0.02, index=idx)
+    low = pd.Series(np.minimum(open_.to_numpy(), close.to_numpy()) - np.abs(rng.randn(n)) * 0.15 - 0.02, index=idx)
     volume = pd.Series(1e6 + np.abs(rng.randn(n)) * 2e5, index=idx)
-    assert (low <= close).all() and (close <= high).all()
-    assert (low <= open_).all() and (open_ <= high).all()
+    _valid_ohlc(open_, high, low, close)
+
+    # Non-degeneracy guard (Fletcher round 2): this fixture backs the
+    # causality and NaN-pairing/boundedness tests below, and their
+    # evidentiary value depends entirely on the indicator actually firing/
+    # populating at DEFAULT params on the data they run against. Only
+    # enforced at the fixture's default n=250 -- MAG firing needs more
+    # bars to accumulate a sweep+zone confluence (measured: MAG never
+    # fires by n=60, the small size `test_reachable_via_category_and_
+    # accessor` uses, where only reachability/equality is checked, not
+    # values) so a blanket assertion at every n would be a false-negative
+    # trap, not a real regression signal.
+    if n >= 250:
+        _canary = ta.fvg_sweep_magnet(open_, high, low, close, volume)
+        assert _canary["FSME_MAG_BULL_5"].sum() > 0, \
+            "fixture regressed to degenerate: no FSME_MAG_BULL_5 fires at default params (Fletcher round 2)"
+        assert _canary["FSME_MAG_BEAR_5"].sum() > 0, \
+            "fixture regressed to degenerate: no FSME_MAG_BEAR_5 fires at default params (Fletcher round 2)"
+        for col in ("FSME_CE_DIST_BULL_5", "FSME_CE_DIST_BEAR_5",
+                    "FSME_CE_SCORE_BULL_5", "FSME_CE_SCORE_BEAR_5"):
+            assert _canary[col].notna().any(), \
+                f"fixture regressed to degenerate: {col} all-NaN at default params (Fletcher round 2)"
+
     return open_, high, low, close, volume
 
 
 def test_ce_score_nan_exactly_when_ce_dist_nan_and_bounded_when_populated():
+    # Fletcher round 2: this test used to guard the >=0 / 0..10 assertions
+    # behind `if len(pop_dist):`/`if len(pop_score):`, which made them
+    # silently NEVER EXECUTE on the (then-degenerate) fixture -- the
+    # NaN-pairing check alone is trivially true for two all-NaN columns.
+    # Now that `_random_walk_ohlcv` is non-degenerate at its own default n
+    # (guarded by its own canary assertion), `len(pop_dist) > 0` is
+    # asserted directly instead of gating on it -- a future regression
+    # back to all-NaN output fails LOUD here, not silently.
     open_, high, low, close, volume = _random_walk_ohlcv()
     out = ta.fvg_sweep_magnet(open_, high, low, close, volume)
     for dist_col, score_col in (("FSME_CE_DIST_BULL_5", "FSME_CE_SCORE_BULL_5"),
@@ -730,16 +849,33 @@ def test_ce_score_nan_exactly_when_ce_dist_nan_and_bounded_when_populated():
             f"{score_col} must be NaN exactly when {dist_col} is NaN"
         pop_dist = dist.dropna()
         pop_score = score.dropna()
-        if len(pop_dist):
-            assert (pop_dist >= 0.0).all()
-        if len(pop_score):
-            assert (pop_score >= 0.0).all() and (pop_score <= 10.0).all()
+        assert len(pop_dist) > 0, f"{dist_col} must have at least one populated value on this fixture"
+        assert len(pop_score) > 0, f"{score_col} must have at least one populated value on this fixture"
+        assert (pop_dist >= 0.0).all()
+        assert (pop_score >= 0.0).all() and (pop_score <= 10.0).all()
     for mag_col in ("FSME_MAG_BULL_5", "FSME_MAG_BEAR_5"):
         assert out[mag_col].isin([0, 1]).all()
+        assert out[mag_col].sum() > 0, f"{mag_col} must fire at least once on this fixture"
 
 
 # ---------------------------------------------------------------------------
 # Causality -- mutation and truncation
+#
+# Fletcher round 2: on the ORIGINAL (degenerate) fixture, both tests below
+# compared an all-zero/all-NaN `out_full.iloc[:151]` against an equally
+# all-zero/all-NaN `out_mut`/`out_trunc` -- a stub that always returned
+# constant zeros/NaNs would have passed both, despite this module's own
+# docstring and family-structure-smc.md §4g citing these two tests as the
+# causality proof. On the rebuilt (non-degenerate) fixture, the compared
+# prefix `iloc[:151]` (t=150) itself carries real signal, MEASURED
+# directly: FSME_CE_DIST_BULL_5 populated 65/151 rows, FSME_CE_DIST_BEAR_5
+# 38/151, FSME_MAG_BEAR_5 fires once (bar 102) -- so a mutation/truncation
+# strictly AFTER t=150 changing any of THOSE values would now be caught.
+# FSME_MAG_BULL_5's only fire in this fixture is at bar 241 (past the
+# compared prefix) -- its causality is exercised by `test_mag_fires_at_
+# literal_engine_defaults` below instead (full 250-bar frame, no
+# mutation), not by the byte-identical-prefix comparison here; noted so
+# this isn't overclaimed as covering all 6 columns equally.
 # ---------------------------------------------------------------------------
 
 def test_causal_no_lookahead():
@@ -770,6 +906,34 @@ def test_causal_deletion_no_lookahead():
     out_trunc = ta.fvg_sweep_magnet(open_.iloc[:t + 1], high.iloc[:t + 1], low.iloc[:t + 1],
                                      close.iloc[:t + 1], volume.iloc[:t + 1])
     pd.testing.assert_frame_equal(out_full.iloc[:t + 1], out_trunc)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end at literal engine defaults (Fletcher round 2): every other
+# MAG_BULL/MAG_BEAR assertion in this file (the boundary/window/cooldown/
+# gate scenarios above) uses `_TRIVIAL` (require_disp=False, min_gap_atr=
+# 0.0, min_score=0) at pivot_len=2 -- deliberately, to isolate one gate at
+# a time from the others (see `_TRIVIAL`'s own definition comment). That
+# means the parameter set `indicator_engine.py` actually calls
+# (`fvg_sweep_magnet(open_, high, low, close, volume)` -- every kwarg at
+# its documented default: require_disp=True, disp_atr_mult=1.25,
+# min_gap_atr=0.25, min_score=5, pivot_len=5, ...) had ZERO end-to-end
+# coverage: no test observed a fire under the actual production code
+# path. This test closes that gap directly.
+# ---------------------------------------------------------------------------
+
+def test_mag_fires_at_literal_engine_defaults():
+    open_, high, low, close, volume = _random_walk_ohlcv()
+    # No kwargs at all -- byte-for-byte the same call indicator_engine.py
+    # makes (backtesting_engine/indicator_engine.py's
+    # `_calculate_tvpta4_indicators`, volume-required bucket).
+    out = ta.fvg_sweep_magnet(open_, high, low, close, volume)
+    assert out["FSME_MAG_BULL_5"].sum() > 0, "no bull magnet ever fires at literal engine defaults"
+    assert out["FSME_MAG_BEAR_5"].sum() > 0, "no bear magnet ever fires at literal engine defaults"
+    assert out["FSME_CE_DIST_BULL_5"].notna().any()
+    assert out["FSME_CE_DIST_BEAR_5"].notna().any()
+    assert out["FSME_CE_SCORE_BULL_5"].dropna().between(0.0, 10.0).all()
+    assert out["FSME_CE_SCORE_BEAR_5"].dropna().between(0.0, 10.0).all()
 
 
 # ---------------------------------------------------------------------------
