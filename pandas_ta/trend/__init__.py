@@ -12,6 +12,7 @@ from .decreasing import decreasing
 from .dpo import dpo
 from .equal_highs_lows import equal_highs_lows
 from .fvg import fvg
+from .fvg_sweep_magnet import fvg_sweep_magnet
 from .halftrend import halftrend
 from .increasing import increasing
 from .liquidity_compression_box import liquidity_compression_box

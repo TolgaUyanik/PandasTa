@@ -1191,6 +1191,23 @@ class AnalysisIndicators(BasePandasObject):
         result = ema(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def fvg_sweep_magnet(self, fvg_lookback=None, disp_atr_mult=None, atr_len=None, min_gap_atr=None,
+                          require_disp=None, max_fvg_age=None, pivot_len=None, liq_keep=None,
+                          sweep_wick_mult=None, sweep_confirm=None, magnet_window=None, min_score=None,
+                          offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = fvg_sweep_magnet(open_=open_, high=high, low=low, close=close, volume=volume,
+                                   fvg_lookback=fvg_lookback, disp_atr_mult=disp_atr_mult, atr_len=atr_len,
+                                   min_gap_atr=min_gap_atr, require_disp=require_disp, max_fvg_age=max_fvg_age,
+                                   pivot_len=pivot_len, liq_keep=liq_keep, sweep_wick_mult=sweep_wick_mult,
+                                   sweep_confirm=sweep_confirm, magnet_window=magnet_window, min_score=min_score,
+                                   offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def fwma(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = fwma(close=close, length=length, offset=offset, **kwargs)
