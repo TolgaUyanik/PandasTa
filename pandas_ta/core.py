@@ -1039,6 +1039,25 @@ class AnalysisIndicators(BasePandasObject):
         result = ppo(close=close, fast=fast, slow=slow, scalar=scalar, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def pressure_pulse(self, balance_length=None, min_gain=None, max_gain=None,
+                        drift_gain=None, drift_damping=None, atr_length=None,
+                        pulse_norm_length=None, pulse_smooth_length=None,
+                        memory_min=None, memory_max=None, min_tick=None,
+                        offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = pressure_pulse(
+            open_=open_, high=high, low=low, close=close,
+            balance_length=balance_length, min_gain=min_gain, max_gain=max_gain,
+            drift_gain=drift_gain, drift_damping=drift_damping, atr_length=atr_length,
+            pulse_norm_length=pulse_norm_length, pulse_smooth_length=pulse_smooth_length,
+            memory_min=memory_min, memory_max=memory_max, min_tick=min_tick,
+            offset=offset, **kwargs,
+        )
+        return self._post_process(result, **kwargs)
+
     def psl(self, open_=None, length=None, scalar=None, drift=None, offset=None, **kwargs):
         if open_ is not None:
             open_ = self._get_column(kwargs.pop("open", "open"))
