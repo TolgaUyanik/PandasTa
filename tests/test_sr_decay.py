@@ -135,12 +135,35 @@ def test_attenuation_price_decay_caps_at_one():
     assert math.isclose(got, expected, rel_tol=1e-12)
 
 
-def test_attenuation_full_cap_at_one():
-    # time_decay=1.0 (bars_ago >= 50) AND a large price move -> exactly
-    # 1.0 via the source's own separate final min(attenuation, 1.0) cap,
-    # not merely a coincidence of the two sub-term caps.
+def test_attenuation_saturates_at_one_when_both_terms_max():
+    # Fletcher round 2 (MINOR): this test's comment used to claim it
+    # proved the source's final `min(attenuation, 1.0)` cap was doing
+    # real work, "not merely a coincidence of the two sub-term caps".
+    # That was FALSE and provably so -- with time_decay and price_decay
+    # each already clipped to [0,1], `td*0.6 + pd*0.4` has a maximum of
+    # exactly 1.0, so the final cap can never reduce anything: it is
+    # arithmetically unreachable dead code. Verified by mutation:
+    # deleting the final `min(..., 1.0)` from `_attenuation` leaves the
+    # ENTIRE file green. The cap is retained in the port only for source
+    # fidelity (the same "translate the math as computed" discipline the
+    # module docstring invokes for the /10-vs-11 swirl divisor), NOT
+    # because it is load-bearing. What this test actually pins is the
+    # saturation VALUE when both sub-terms are already at their caps.
     got = _attenuation(price=100.0, close_t=200.0, time_decay=1.0)
     assert got == 1.0
+
+
+def test_attenuation_returns_nan_for_non_positive_price():
+    # Fletcher round 2 (MINOR): the round-1 `price <= 0 -> np.nan` guard
+    # shipped with ZERO coverage -- reverting it to the pre-guard body
+    # (which raised ZeroDivisionError) failed 0 of 49 tests, because every
+    # other `_attenuation` call site in this file passes price=100.0.
+    # Unreachable on real market data, but it is the ONLY reachable way to
+    # get a NaN ATTEN alongside a real SWIRL, i.e. the one documented
+    # exception to the `ATTEN.isna() => SWIRL.isna()` implication asserted
+    # globally below.
+    assert np.isnan(_attenuation(price=0.0, close_t=100.0, time_decay=0.1))
+    assert np.isnan(_attenuation(price=-5.0, close_t=100.0, time_decay=0.1))
 
 
 def test_attenuation_symmetric_in_direction():
@@ -525,9 +548,20 @@ def test_atten_swirl_bounded_and_atten_isna_implies_swirl_isna():
     # The POSITIVE case this bound alone cannot exercise -- a level that
     # actually HAS real ATTEN alongside permanently-NaN SWIRL -- is
     # covered end-to-end by
-    # test_atten_real_swirl_permanently_nan_for_early_history_level below;
-    # this test only checks the bound holds and never inverts, dropped
-    # NaN checks omitted here would silently pass a stub too.
+    # test_atten_real_swirl_permanently_nan_for_early_history_level below.
+    #
+    # Fletcher round 2 (NIT) -- the honest limit of THIS test: on
+    # seed=11/n=250 the atten/swirl NaN masks are IDENTICAL (37/37 RES,
+    # 19/19 SUP), i.e. zero asymmetric rows in EITHER direction, so the
+    # implication cannot be "demonstrated" here -- reverting it to the
+    # round-0 buggy polarity leaves this file green. It earns its place as
+    # a REGRESSION GUARD, not a demonstration: it does bite an
+    # `_attenuation`-returns-NaN mutation, including the newly reachable
+    # `price <= 0` path. The bound half is likewise slack on this fixture
+    # (measured ATTEN 0.101..0.170 / 0.076..0.217 against a 1.0 cap; SWIRL
+    # 0.803..1.322 / 0.602..1.602 against a 5.0 cap). The DEMONSTRATED
+    # asymmetric case lives in the early-history test below; the caps live
+    # in the isolated `_attenuation`/`_swirl` unit tests above.
     open_, high, low, close = _random_walk_ohlc(n=250, seed=11)
     out = ta.sr_decay(high, low, close)
     for atten_col, swirl_col in (("SRD_ATTEN_RES_5", "SRD_SWIRL_RES_5"),
@@ -540,8 +574,13 @@ def test_atten_swirl_bounded_and_atten_isna_implies_swirl_isna():
         pop_swirl = swirl.dropna()
         assert len(pop_atten) > 0, "test construction check: must actually produce populated levels"
         assert (pop_atten >= 0.0).all() and (pop_atten <= 1.0).all()
-        if len(pop_swirl):
-            assert (pop_swirl >= 0.0).all() and (pop_swirl <= 5.0).all()
+        # Fletcher round 2 (MINOR): this was `if len(pop_swirl):`, so
+        # stubbing _swirl to return NaN unconditionally left the test
+        # GREEN (bound branch skipped; the implication above is trivially
+        # all-True when swirl is entirely NaN). Mirrors the atten branch's
+        # hard construction check now.
+        assert len(pop_swirl) > 0, "test construction check: must actually produce populated swirl values"
+        assert (pop_swirl >= 0.0).all() and (pop_swirl <= 5.0).all()
 
 
 def test_atten_real_swirl_permanently_nan_for_early_history_level():
