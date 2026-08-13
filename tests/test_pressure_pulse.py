@@ -490,11 +490,23 @@ def test_flat_bars_early_in_history_saturate_without_price_scaled_floor():
 
     # THIS is the assertion that fails against the pre-fix (1e-8-only)
     # floor: the broken and fixed readings diverge by a MATERIAL, not
-    # rounding-level, amount at the pathological bars. Threshold set with
-    # real margin below the measured value (0.4345 at this fixture and
-    # the shipped 2.5e-3 default -- Fletcher round 2 flagged the prior
-    # threshold/measurement pair as only 1.5x apart; this is ~8.7x).
-    assert diff_broken_fixed.max() > 0.3
+    # rounding-level, amount at the pathological bars.
+    #
+    # Fletcher round 3 (MINOR): the previous comment here claimed this
+    # pair sits "~8.7x" apart, contrasted against a prior 1.5x. That was
+    # an apples-to-oranges ratio -- it divided the NEW measurement
+    # (0.4345) by the OLD threshold (0.05). On a like-for-like basis the
+    # shipped pair is 0.4345/0.3 = 1.45x, i.e. marginally TIGHTER than
+    # the 0.076153/0.05 = 1.52x it was meant to improve on. Threshold
+    # lowered to 0.1 here, giving a real 4.3x measured/threshold margin.
+    #
+    # But the ratio is not what makes this test discriminate, and quoting
+    # one invited exactly the confusion above. The real discriminator is
+    # that the pre-fix floor makes this diff EXACTLY 0.0 (measured, not
+    # asserted: two pre-fix-equivalent runs are bit-identical), so ANY
+    # positive threshold separates fixed from broken. The margin only
+    # governs robustness to fixture drift.
+    assert diff_broken_fixed.max() > 0.1
     # Both remain within the general (-2,2) bound regardless (that holds
     # unconditionally by construction, see BOUNDEDNESS) -- this test is
     # about the MEANINGFULNESS of the reading, not the bound itself.
