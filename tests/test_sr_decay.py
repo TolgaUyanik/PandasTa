@@ -159,9 +159,12 @@ def test_attenuation_returns_nan_for_non_positive_price():
     # (which raised ZeroDivisionError) failed 0 of 49 tests, because every
     # other `_attenuation` call site in this file passes price=100.0.
     # A non-positive price is unreachable on real market data, but this is
-    # one of TWO reachable ways to get a NaN ATTEN alongside a real SWIRL
-    # -- the other is a NaN Close on a level's own confirming bar (halted
-    # or missing session), which IS reachable on real data; see
+    # one of TWO code paths that yield a NaN ATTEN alongside a real SWIRL
+    # -- the other is a NaN Close on a level's own confirming bar with a
+    # real High/Low. Fletcher round 4: that path was previously called
+    # "reachable on real data" without measurement; it is NOT observed --
+    # 0 of 7,038,656 bars across datastore/cache{,_hourly,_crypto} carry a
+    # NaN Close at all. Both paths are defensive-contract, not observed.
     # test_attenuation_returns_nan_for_nan_close_t below. Fletcher round 3
     # (MAJOR): this comment, §2h, and the module docstring all previously
     # claimed the price<=0 path was "the ONLY" such exception. False --
@@ -173,9 +176,14 @@ def test_attenuation_returns_nan_for_non_positive_price():
 
 
 def test_attenuation_returns_nan_for_nan_close_t():
-    # Fletcher round 3 (MAJOR): the SECOND reachable exception to
-    # `ATTEN.isna() => SWIRL.isna()`, and the one that actually occurs on
-    # real data -- a halted/missing session close. `_attenuation` consumes
+    # Fletcher round 3 (MAJOR): the SECOND code path breaking
+    # `ATTEN.isna() => SWIRL.isna()`. ⚠ Round 4: an earlier version of
+    # this comment called it "the one that actually occurs on real data"
+    # -- unmeasured and wrong (0 of 7,038,656 datastore bars have a NaN
+    # Close). It requires a vendor bar carrying a real High/Low but no
+    # settled close; a genuinely missing session nulls H/L/C together,
+    # which nulls ATR and SWIRL too, so the implication HOLDS there.
+    # `_attenuation` consumes
     # Close[t] directly, so a NaN Close nulls it; `_swirl` does NOT,
     # because `ATR(14)[t]`'s true range reads Close[t-1], never Close[t].
     # Three documents previously called the price<=0 path "the ONLY" way
@@ -210,8 +218,14 @@ def test_nan_close_on_confirming_bar_breaks_atten_swirl_implication_end_to_end()
     atten = out["SRD_ATTEN_RES_2"]
     swirl = out["SRD_SWIRL_RES_2"]
     asymmetric = (atten.isna() & swirl.notna())
-    assert asymmetric.sum() > 0, \
-        "a NaN Close on the confirming bar must produce ATTEN-NaN/SWIRL-real rows"
+    # Fletcher round 4 (NIT): assert the EXACT count, not just > 0 --
+    # family-structure-smc.md §2h publishes "17 rows" in bold, so any
+    # drift in _flooded_hlc/swing_len/the pivot rule must fail here rather
+    # than silently rotting the published number behind a green suite.
+    assert asymmetric.sum() == 17, \
+        f"expected exactly 17 ATTEN-NaN/SWIRL-real rows (the count published in " \
+        f"family-structure-smc.md §2h), got {int(asymmetric.sum())} at " \
+        f"{list(np.nonzero(asymmetric.to_numpy())[0])}"
     assert not (atten.notna() | swirl.isna()).all(), \
         "this is the documented counterexample: the implication must NOT hold here"
 
