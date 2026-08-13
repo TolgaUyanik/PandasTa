@@ -809,23 +809,45 @@ def _random_walk_ohlcv(n=250, seed=11):
     # Non-degeneracy guard (Fletcher round 2): this fixture backs the
     # causality and NaN-pairing/boundedness tests below, and their
     # evidentiary value depends entirely on the indicator actually firing/
-    # populating at DEFAULT params on the data they run against. Only
-    # enforced at the fixture's default n=250 -- MAG firing needs more
-    # bars to accumulate a sweep+zone confluence (measured: MAG never
-    # fires by n=60, the small size `test_reachable_via_category_and_
-    # accessor` uses, where only reachability/equality is checked, not
-    # values) so a blanket assertion at every n would be a false-negative
-    # trap, not a real regression signal.
+    # populating at DEFAULT params on the data they run against.
+    #
+    # Fletcher round 3 (MINOR): the ENTIRE guard used to sit behind
+    # `if n >= 250`, justified by MAG's firing rate -- but that reasoning
+    # only ever applied to the two MAG assertions. The four CE_* columns
+    # are NOT degenerate at small n (measured at n=60: CE_DIST_BULL 29/60,
+    # CE_DIST_BEAR 12/60, SCORE pair identically populated), so gating
+    # them too silently disarmed the guard for the one consumer that runs
+    # at n=60 -- `test_reachable_via_category_and_accessor` -- leaving it
+    # able to compare two all-NaN frames and pass green, i.e. exactly the
+    # round-0 failure mode this canary exists to kill. CE checks now run
+    # UNCONDITIONALLY; only the MAG checks stay gated (measured: MAG
+    # genuinely never fires by n=60, so asserting it there would be a
+    # false-negative trap, not a regression signal).
+    #
+    # Message wording is deliberately cause-NEUTRAL (round 3): this
+    # assertion lives in a shared helper, so an *indicator* regression
+    # trips it identically to a *fixture* regression -- the old text
+    # ("fixture regressed to degenerate") pre-judged the cause and would
+    # point the next engineer at the one file that had not changed.
+    _canary = ta.fvg_sweep_magnet(open_, high, low, close, volume)
+    for col in ("FSME_CE_DIST_BULL_5", "FSME_CE_DIST_BEAR_5",
+                "FSME_CE_SCORE_BULL_5", "FSME_CE_SCORE_BEAR_5"):
+        assert _canary[col].notna().any(), (
+            f"{col} all-NaN at default params -- either this fixture regressed "
+            "or fvg_sweep_magnet did; check test_mag_fires_at_literal_engine_"
+            "defaults and git-blame both (Fletcher round 2/3)"
+        )
     if n >= 250:
-        _canary = ta.fvg_sweep_magnet(open_, high, low, close, volume)
-        assert _canary["FSME_MAG_BULL_5"].sum() > 0, \
-            "fixture regressed to degenerate: no FSME_MAG_BULL_5 fires at default params (Fletcher round 2)"
-        assert _canary["FSME_MAG_BEAR_5"].sum() > 0, \
-            "fixture regressed to degenerate: no FSME_MAG_BEAR_5 fires at default params (Fletcher round 2)"
-        for col in ("FSME_CE_DIST_BULL_5", "FSME_CE_DIST_BEAR_5",
-                    "FSME_CE_SCORE_BULL_5", "FSME_CE_SCORE_BEAR_5"):
-            assert _canary[col].notna().any(), \
-                f"fixture regressed to degenerate: {col} all-NaN at default params (Fletcher round 2)"
+        assert _canary["FSME_MAG_BULL_5"].sum() > 0, (
+            "no FSME_MAG_BULL_5 fires at default params -- either this fixture "
+            "regressed or fvg_sweep_magnet did; check test_mag_fires_at_literal_"
+            "engine_defaults and git-blame both (Fletcher round 2/3)"
+        )
+        assert _canary["FSME_MAG_BEAR_5"].sum() > 0, (
+            "no FSME_MAG_BEAR_5 fires at default params -- either this fixture "
+            "regressed or fvg_sweep_magnet did; check test_mag_fires_at_literal_"
+            "engine_defaults and git-blame both (Fletcher round 2/3)"
+        )
 
     return open_, high, low, close, volume
 
@@ -862,26 +884,42 @@ def test_ce_score_nan_exactly_when_ce_dist_nan_and_bounded_when_populated():
 # Causality -- mutation and truncation
 #
 # Fletcher round 2: on the ORIGINAL (degenerate) fixture, both tests below
-# compared an all-zero/all-NaN `out_full.iloc[:151]` against an equally
-# all-zero/all-NaN `out_mut`/`out_trunc` -- a stub that always returned
-# constant zeros/NaNs would have passed both, despite this module's own
-# docstring and family-structure-smc.md §4g citing these two tests as the
-# causality proof. On the rebuilt (non-degenerate) fixture, the compared
-# prefix `iloc[:151]` (t=150) itself carries real signal, MEASURED
-# directly: FSME_CE_DIST_BULL_5 populated 65/151 rows, FSME_CE_DIST_BEAR_5
-# 38/151, FSME_MAG_BEAR_5 fires once (bar 102) -- so a mutation/truncation
-# strictly AFTER t=150 changing any of THOSE values would now be caught.
-# FSME_MAG_BULL_5's only fire in this fixture is at bar 241 (past the
-# compared prefix) -- its causality is exercised by `test_mag_fires_at_
-# literal_engine_defaults` below instead (full 250-bar frame, no
-# mutation), not by the byte-identical-prefix comparison here; noted so
-# this isn't overclaimed as covering all 6 columns equally.
+# compared an all-zero/all-NaN prefix against an equally all-zero/all-NaN
+# `out_mut`/`out_trunc` -- a stub that always returned constant zeros/NaNs
+# would have passed both, despite this module's own docstring and
+# family-structure-smc.md §4g citing these two tests as the causality proof.
+#
+# Fletcher round 3 (MINOR): the round-2 rebuild fixed the degeneracy but
+# left a real gap it then disclosed honestly rather than closing --
+# FSME_MAG_BULL_5's only fire at n=250 is bar 241, PAST the t=150 cut, so
+# 1 of the 6 columns was flat in the compared prefix and its no-lookahead
+# property rested entirely on an external real-data pass with no unit-level
+# regression guard. Closed here by raising the fixture to n=3000 and the
+# cut to t=400, which costs ~0.1s. MEASURED on that frame: MAG_BULL fires
+# at bars [98, 378, 490, 1504, 2745] and MAG_BEAR at [331, 741, 1043, 1799,
+# 2054, 2882], so the compared prefix `iloc[:401]` contains 2 bull and 1
+# bear fire -- ALL SIX columns now carry real signal across the cut, and a
+# mutation/truncation strictly after t=400 that changed any of them would
+# be caught.
 # ---------------------------------------------------------------------------
 
+_CAUSALITY_N = 3000
+_CAUSALITY_T = 400
+
+
 def test_causal_no_lookahead():
-    open_, high, low, close, volume = _random_walk_ohlcv()
+    open_, high, low, close, volume = _random_walk_ohlcv(n=_CAUSALITY_N)
     out_full = ta.fvg_sweep_magnet(open_, high, low, close, volume)
-    t = 150
+    t = _CAUSALITY_T
+    # Guard the premise this test's evidentiary value rests on: every
+    # column must actually carry signal in the compared prefix, else this
+    # degrades back into comparing two constant frames (round-0 failure).
+    _pre = out_full.iloc[:t + 1]
+    assert _pre["FSME_MAG_BULL_5"].sum() > 0 and _pre["FSME_MAG_BEAR_5"].sum() > 0, \
+        "compared prefix must contain MAG fires of BOTH directions (Fletcher round 3)"
+    for _c in ("FSME_CE_DIST_BULL_5", "FSME_CE_DIST_BEAR_5",
+               "FSME_CE_SCORE_BULL_5", "FSME_CE_SCORE_BEAR_5"):
+        assert _pre[_c].notna().any(), f"compared prefix must populate {_c} (Fletcher round 3)"
 
     rng = np.random.RandomState(99)
     open2, high2, low2, close2, volume2 = open_.copy(), high.copy(), low.copy(), close.copy(), volume.copy()
@@ -900,9 +938,9 @@ def test_causal_no_lookahead():
 
 
 def test_causal_deletion_no_lookahead():
-    open_, high, low, close, volume = _random_walk_ohlcv()
+    open_, high, low, close, volume = _random_walk_ohlcv(n=_CAUSALITY_N)
     out_full = ta.fvg_sweep_magnet(open_, high, low, close, volume)
-    t = 150
+    t = _CAUSALITY_T
     out_trunc = ta.fvg_sweep_magnet(open_.iloc[:t + 1], high.iloc[:t + 1], low.iloc[:t + 1],
                                      close.iloc[:t + 1], volume.iloc[:t + 1])
     pd.testing.assert_frame_equal(out_full.iloc[:t + 1], out_trunc)
@@ -923,15 +961,25 @@ def test_causal_deletion_no_lookahead():
 # ---------------------------------------------------------------------------
 
 def test_mag_fires_at_literal_engine_defaults():
+    # Fletcher round 3 (NIT): as originally written, every assertion here
+    # was byte-identical to one the `_random_walk_ohlcv` canary already
+    # runs on the SAME zero-kwarg call, so this test could never fail on
+    # its own -- any regression aborted in the fixture first, and it bought
+    # a third redundant 250-bar computation. Narrowed to what the canary
+    # does NOT cover: the exact fire BARS. That turns a "something fired"
+    # check into a "fired in precisely these places" check, which also
+    # catches a silent shift in gate semantics (a change that moved every
+    # fire by one bar, or added/removed one, passes `sum() > 0` and fails
+    # here). Bars measured directly on this fixture at literal defaults.
     open_, high, low, close, volume = _random_walk_ohlcv()
     # No kwargs at all -- byte-for-byte the same call indicator_engine.py
     # makes (backtesting_engine/indicator_engine.py's
     # `_calculate_tvpta4_indicators`, volume-required bucket).
     out = ta.fvg_sweep_magnet(open_, high, low, close, volume)
-    assert out["FSME_MAG_BULL_5"].sum() > 0, "no bull magnet ever fires at literal engine defaults"
-    assert out["FSME_MAG_BEAR_5"].sum() > 0, "no bear magnet ever fires at literal engine defaults"
-    assert out["FSME_CE_DIST_BULL_5"].notna().any()
-    assert out["FSME_CE_DIST_BEAR_5"].notna().any()
+    assert list(np.nonzero(out["FSME_MAG_BULL_5"].to_numpy())[0]) == [241], \
+        "bull magnet must fire at exactly bar 241 at literal engine defaults"
+    assert list(np.nonzero(out["FSME_MAG_BEAR_5"].to_numpy())[0]) == [102], \
+        "bear magnet must fire at exactly bar 102 at literal engine defaults"
     assert out["FSME_CE_SCORE_BULL_5"].dropna().between(0.0, 10.0).all()
     assert out["FSME_CE_SCORE_BEAR_5"].dropna().between(0.0, 10.0).all()
 
@@ -962,6 +1010,13 @@ def _bars(n=60, seed=1):
     low = close - 1
     open_ = close.shift(1).fillna(close.iloc[0]).clip(lower=low, upper=high)
     volume = pd.Series(1e6, index=idx)
+    # Fletcher round 3 (NIT): this was the only scenario builder in the
+    # file NOT calling `_valid_ohlc`, directly contradicting the module
+    # docstring's claim that "every scenario builder asserts this full
+    # invariant at construction time". Its output was in fact valid --
+    # the assertion was simply missing, which is exactly how the two
+    # impossible-OHLC bars round 0 found got in elsewhere.
+    _valid_ohlc(open_, high, low, close)
     return open_, high, low, close, volume
 
 
@@ -1014,10 +1069,22 @@ def test_none_params_use_documented_defaults():
     ]
 
 
-def test_min_score_zero_allowed():
-    open_, high, low, close, volume = _bars()
-    out = ta.fvg_sweep_magnet(open_, high, low, close, volume, min_score=0)
-    assert "FSME_MAG_BULL_5" in out.columns
+def test_min_score_zero_allowed_and_actually_gates():
+    # Fletcher round 3 (NIT): this asserted only that a column NAME exists
+    # after passing min_score=0 -- true for every parameterization, and
+    # already covered by `test_none_params_use_documented_defaults`. It
+    # verified acceptance of the value and nothing about its EFFECT.
+    # Strengthened to pin the gate's actual behavior: on the standard
+    # fixture, min_score=0 and the default 5 both admit the fires, while
+    # min_score=10 suppresses them entirely (measured: 1/1 -> 1/1 -> 0/0).
+    open_, high, low, close, volume = _random_walk_ohlcv()
+    permissive = ta.fvg_sweep_magnet(open_, high, low, close, volume, min_score=0)
+    strict = ta.fvg_sweep_magnet(open_, high, low, close, volume, min_score=10)
+    assert "FSME_MAG_BULL_5" in permissive.columns
+    assert permissive["FSME_MAG_BULL_5"].sum() > 0 and permissive["FSME_MAG_BEAR_5"].sum() > 0, \
+        "min_score=0 must admit the fires this fixture produces"
+    assert strict["FSME_MAG_BULL_5"].sum() == 0 and strict["FSME_MAG_BEAR_5"].sum() == 0, \
+        "min_score=10 must suppress them -- else min_score is not gating anything"
 
 
 # ---------------------------------------------------------------------------
