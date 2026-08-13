@@ -447,10 +447,10 @@ currently-overlapping FVG zone firing in the sweep's direction becomes a
 "magnet" signal.
 
 Source: TradingView community indicator "FVG Sweep Magnet Engine
-[PhenLabs]" by PhenLabs, https://www.tradingview.com/script/
-1FFYDfSr-FVG-Sweep-Magnet-Engine-PhenLabs/ (ported into AwakenAnalytics/
-Backtesting TVPTA-6, 2026-08-11; MPL-2.0 per TradingView's open-source
-publication convention). Replaces the source's FVG-qualification gate
+[PhenLabs]" by PhenLabs,
+https://www.tradingview.com/script/1FFYDfSr-FVG-Sweep-Magnet-Engine-PhenLabs/
+(ported into AwakenAnalytics/Backtesting TVPTA-6, 2026-08-11; MPL-2.0 per
+TradingView's open-source publication convention). Replaces the source's FVG-qualification gate
 (`bullGapRaw`/`bearGapRaw` + the `sizeOk*`/`dispOk*` filters), its
 liquidity-pool push/FIFO-cap maintenance (`f_pushLiq`), its sweep-
 detection loops (the `bullSweep`/`bearSweep` `for` blocks), its FVG

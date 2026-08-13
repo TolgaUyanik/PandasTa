@@ -391,15 +391,22 @@ def test_filled_kills_zone_on_close_below_bot():
 
 
 def test_expired_kills_zone_after_max_fvg_age():
-    # Permanent-zone construction, but max_fvg_age=5 forces expiry: born
-    # bar 2, age=5 at bar 7 (5>5 false, still alive), age=6 at bar 8
-    # (6>5 true, expired).
+    # _permanent_bull_base sets BOTH bars 0 and 1 to the same low regime,
+    # so bull_gap_raw (low[t] > high[t-2]) fires at BOTH t=2 (vs high[0])
+    # AND t=3 (vs high[1]) -- two zones are actually born here, not one
+    # (verified against the module's own output, not assumed). With
+    # max_fvg_age=5: zone born t=2 expires at age=6 (bar 8, 6>5); zone
+    # born t=3 expires at age=6 (bar 9, 6>5) -- one bar later since it was
+    # born one bar later. So CE_DIST_BULL stays populated through bar 8
+    # (the t=3 zone is still alive there) and only goes permanently NaN
+    # from bar 9, once BOTH zones have expired.
     O, H, L, C = _permanent_bull_base(12)
     out = _run(O, H, L, C, atr_len=2, pivot_len=2, max_fvg_age=5, **_TRIVIAL)
     dist = out["FSME_CE_DIST_BULL_2"]
     assert not np.isnan(dist.iloc[7])
-    assert np.isnan(dist.iloc[8])
-    assert dist.iloc[8:].isna().all()
+    assert not np.isnan(dist.iloc[8])
+    assert np.isnan(dist.iloc[9])
+    assert dist.iloc[9:].isna().all()
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +427,7 @@ def _fifo_scenario(n=30):
     # zone3 (bull #2): gap-confirm at bar 22 (low[22]=110 > high[20]=101
     # baseline); its own bot=101 means the very next baseline bar
     # (close=100) fills it again.
-    O[22], H[22], L[22], C[22] = 108.0, 112.0, 110.0, 111.0
+    O[22], H[22], L[22], C[22] = 111.0, 112.0, 110.0, 111.0
     return O, H, L, C
 
 
@@ -504,7 +511,7 @@ def test_ce_dist_picks_nearer_zone_among_two_live_candidates():
     n = 15
     O, H, L, C = _permanent_bull_base(n)
     O[8], H[8], L[8], C[8] = 20.0, 20.0, 19.0, 19.5
-    O[10], H[10], L[10], C[10] = 79.0, 81.0, 80.0, 80.5
+    O[10], H[10], L[10], C[10] = 80.0, 81.0, 80.0, 80.5
     O[12], H[12], L[12], C[12] = 60.0, 65.0, 55.0, 62.0
 
     idx = _idx(n)
