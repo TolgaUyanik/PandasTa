@@ -158,12 +158,62 @@ def test_attenuation_returns_nan_for_non_positive_price():
     # shipped with ZERO coverage -- reverting it to the pre-guard body
     # (which raised ZeroDivisionError) failed 0 of 49 tests, because every
     # other `_attenuation` call site in this file passes price=100.0.
-    # Unreachable on real market data, but it is the ONLY reachable way to
-    # get a NaN ATTEN alongside a real SWIRL, i.e. the one documented
-    # exception to the `ATTEN.isna() => SWIRL.isna()` implication asserted
-    # globally below.
+    # A non-positive price is unreachable on real market data, but this is
+    # one of TWO reachable ways to get a NaN ATTEN alongside a real SWIRL
+    # -- the other is a NaN Close on a level's own confirming bar (halted
+    # or missing session), which IS reachable on real data; see
+    # test_attenuation_returns_nan_for_nan_close_t below. Fletcher round 3
+    # (MAJOR): this comment, §2h, and the module docstring all previously
+    # claimed the price<=0 path was "the ONLY" such exception. False --
+    # `_attenuation` consumes Close[t] while `ATR(14)[t]`'s true range
+    # reads Close[t-1] and never Close[t], so a NaN Close nulls ATTEN and
+    # leaves SWIRL real.
     assert np.isnan(_attenuation(price=0.0, close_t=100.0, time_decay=0.1))
     assert np.isnan(_attenuation(price=-5.0, close_t=100.0, time_decay=0.1))
+
+
+def test_attenuation_returns_nan_for_nan_close_t():
+    # Fletcher round 3 (MAJOR): the SECOND reachable exception to
+    # `ATTEN.isna() => SWIRL.isna()`, and the one that actually occurs on
+    # real data -- a halted/missing session close. `_attenuation` consumes
+    # Close[t] directly, so a NaN Close nulls it; `_swirl` does NOT,
+    # because `ATR(14)[t]`'s true range reads Close[t-1], never Close[t].
+    # Three documents previously called the price<=0 path "the ONLY" way
+    # to break the implication -- measured counterexample below proves
+    # otherwise on strictly positive prices.
+    assert np.isnan(_attenuation(price=100.0, close_t=float("nan"), time_decay=0.1))
+
+
+def test_nan_close_on_confirming_bar_breaks_atten_swirl_implication_end_to_end():
+    # The end-to-end half: every price in this frame is >= 99.0 (strictly
+    # positive, so the price<=0 guard is NOT what fires), yet a NaN Close
+    # on the confirming bar produces rows where ATTEN is NaN while SWIRL
+    # is real -- i.e. `(atten.notna() | swirl.isna()).all()` is False.
+    # Measured: 17 such rows on this construction.
+    n = 40
+    H, L, C = _flooded_hlc(n)
+    H[20], L[20], C[20] = 107.0, 99.0, 100.0   # swing high, confirms at 22
+    C[22] = np.nan                              # halted/missing session close
+    assert np.nanmin(np.concatenate([H, L, C])) > 0.0, \
+        "construction check: every price must be strictly positive, so price<=0 is not the cause"
+    # Deliberately bypasses `_run`/`_valid_hlc`: that guard asserts
+    # `low <= close <= high`, which a NaN close can never satisfy (every
+    # NaN comparison is False). A missing session close is MISSING DATA,
+    # not a physically impossible bar -- the distinction the guard exists
+    # to enforce. Validity is asserted below on the non-NaN bars only.
+    real = ~np.isnan(C)
+    assert (L[real] <= C[real]).all() and (C[real] <= H[real]).all() and (L <= H).all(), \
+        "construction check: every bar with a real close must satisfy low <= close <= high"
+    idx = _idx(len(H))
+    out = ta.sr_decay(pd.Series(H, index=idx), pd.Series(L, index=idx),
+                      pd.Series(C, index=idx), swing_len=2, max_levels=20)
+    atten = out["SRD_ATTEN_RES_2"]
+    swirl = out["SRD_SWIRL_RES_2"]
+    asymmetric = (atten.isna() & swirl.notna())
+    assert asymmetric.sum() > 0, \
+        "a NaN Close on the confirming bar must produce ATTEN-NaN/SWIRL-real rows"
+    assert not (atten.notna() | swirl.isna()).all(), \
+        "this is the documented counterexample: the implication must NOT hold here"
 
 
 def test_attenuation_symmetric_in_direction():

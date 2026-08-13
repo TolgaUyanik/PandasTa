@@ -408,7 +408,7 @@ range). ⚠ The NaN-pairing between `ATTEN`/`SWIRL` is ONE-DIRECTIONAL, NOT
 the two-way pairing `sr_force.py`'s `SRF_SCORE_*`/`SRF_DIST_*` have:
 `ATTEN.isna()` implies `SWIRL.isna()` (no side-valid level at all -> both
 NaN, same "no candidate" gate), but NOT the reverse -- `_attenuation`
-never itself returns NaN for a real, positively-priced level (it has no
+never itself returns NaN for a positively-priced level confirmed on a bar with a non-NaN Close (it has no
 ATR dependency), while `_swirl` CAN return NaN for a level confirmed
 before `ATR(14)` had ANY valid history yet (very early bars only), and
 that NaN is then frozen on the level like every other per-level scalar
