@@ -409,22 +409,31 @@ Same class of gotcha as bpress's `linreg(..., tsf=True)` requirement.
 ATR SEEDING (Pine `ta.atr` vs this fork's `atr()` -- measured divergence,
 documented not hidden): Pine's `ta.atr` uses an SMA-seeded Wilder
 recursion (first ATR = SMA of the first `length` true ranges, every prior
-bar undefined). This fork's `atr()` composes `true_range()` (which
-explicitly NaNs the very first bar, `iloc[:drift] = NaN`, since there is
-no previous close) with `rma()` (an `ewm(alpha=1/length, min_periods=
-length)`, i.e. src-seeded not SMA-seeded) -- so `atr()`'s first non-NaN
-bar lands ONE BAR LATER than Pine's own (idx `atr_length` vs
-`atr_length - 1`, 0-indexed), and its early post-warmup values differ from
-a true SMA-seeded Wilder ATR by a measured, geometrically-decaying amount:
-0.134 at the seed+1 bar, 0.0224 fourteen bars later, 6.3e-5 by bar 100,
-6.6e-11 by bar 299 (length=14, seed=0 synthetic OHLC; see
-tests/test_pressure_pulse.py for the reproducible check). This divergence
-is bounded to the warmup window and immaterial to `PRESSURE_PULSE` in
-practice because `safeAtr` already falls back to `High-Low` whenever ATR
-is undefined (matching the source's own `nz(atrValue, high-low)` design)
--- the 1-bar shift only changes WHICH side of that fallback a single bar
-lands on, not whether the fallback pattern exists. Not claimed to be an
-exact match; the divergence is measured and bounded, not hand-waved away.
+bar undefined, simple Wilder recursion afterward). This fork's `atr()`
+composes `true_range()` (which explicitly NaNs the very first bar,
+`iloc[:drift] = NaN`, since there is no previous close) with `rma()` --
+NOT a simple src-seeded recursion (an earlier draft of this docstring, and
+of this test file's reference implementation, wrongly assumed that and
+had to be corrected once measured): `rma()` is `close.ewm(alpha=1/length,
+min_periods=length).mean()` with pandas' DEFAULT `adjust=True`, i.e. a
+WEIGHTED-AVERAGE form (weights `(1-alpha)**i` over all prior valid
+observations), a third distinct seeding convention from both Pine's own
+SMA-seed and a simple recursion. So `atr()`'s first non-NaN bar lands ONE
+BAR LATER than Pine's own (idx `atr_length` vs `atr_length - 1`,
+0-indexed, since `true_range()`'s forced bar-0 NaN pushes `rma()`'s
+`min_periods` count back by one), and its early post-warmup values differ
+from a true SMA-seeded Wilder ATR by a measured, geometrically-decaying
+amount: 0.1336 at that first non-NaN bar, 6.33e-5 by bar 100, 6.64e-11 by
+bar 299 (length=14, seed=0 synthetic OHLC -- these are the exact numbers
+`tests/test_pressure_pulse.py::test_atr_seeding_divergence_from_pine_is_
+bounded` prints and regression-pins every run, not a one-off exploration).
+This divergence is bounded to the warmup window and immaterial to
+`PRESSURE_PULSE` in practice because `safeAtr` already falls back to
+`High-Low` whenever ATR is undefined (matching the source's own
+`nz(atrValue, high-low)` design) -- the 1-bar shift only changes WHICH
+side of that fallback a single bar lands on, not whether the fallback
+pattern exists. Not claimed to be an exact match; the divergence is
+measured and bounded, not hand-waved away.
 
 MINTICK SUBSTITUTION: Pine's `syminfo.mintick` (the listed instrument's
 minimum price increment, from TradingView's own exchange metadata) has no
