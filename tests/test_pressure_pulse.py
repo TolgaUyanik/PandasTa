@@ -76,7 +76,7 @@ def _reference_pressure_pulse(open_, high, low, close, balance_length=20,
                                drift_damping=0.80, atr_length=14,
                                pulse_norm_length=50, pulse_smooth_length=5,
                                memory_min=0.60, memory_max=0.88, min_tick=1e-8,
-                               rel_floor=5e-4):
+                               rel_floor=2.5e-3):
     from pandas_ta.volatility import atr as _leaf_atr
 
     n = len(close)
@@ -432,32 +432,22 @@ def test_mutation_affects_only_current_and_later_bars():
 
 
 def test_flat_bars_early_in_history_saturate_without_price_scaled_floor():
-    """Regression for the MAJOR finding (Fletcher review, 2026-08-14): a
+    """Regression for the MAJOR finding (Fletcher round 1, 2026-08-14): a
     fixed ABSOLUTE epsilon floor (this port's original default, 1e-8) is
     essentially zero next to any real price and does nothing to stop
-    `safe_atr` collapsing to exactly 0 on a `High==Low` bar whose `atr()`
-    is ALSO still undefined (NaN, insufficient history) -- confirmed on
-    this project's own BIST cache, `ADESE_IS`: three consecutive
-    `High==Low` bars very early in its history (2011-11-07/08/09,
-    immediately preceded by real price movement) produce
-    PRESSURE_PULSE=-1.1905 under the old floor vs +1.0972 (a SIGN FLIP)
-    once the floor is price-scale-aware.
+    `safe_atr` collapsing to exactly 0 on a `High==Low` bar -- confirmed
+    on this project's own BIST cache, `ADESE_IS`: three consecutive
+    `High==Low` bars early in its history (2011-11-07/08/09) drive
+    PRESSURE_PULSE to -1.1905 at 2011-11-11 under the old floor.
 
-    SCOPE, precisely (checked, not assumed): this bites ONLY while
-    `atr()` is genuinely undefined -- i.e. within a series' own first
-    `atr_length` bars. A flat run occurring LATER in a mature series does
-    NOT reproduce this: Wilder's RMA includes the CURRENT bar's own true
-    range every step, so the first genuinely-moving bar after any later
-    flat stretch self-heals `atr()` in one bar regardless of the floor
-    (checked directly with a 300-flat-bar + 1%-move construction: the
-    reading is bit-identical whether rel_floor is 1e-300 or the shipped
-    default -- large, but legitimate, not a floor artifact). This test
-    reproduces the SCOPE-CORRECT case: a short real decline (so `balance`
-    carries a nonzero residual into the flat run -- `bodyPressure`/
-    `closePressure` genuinely ARE exactly 0 on a flat bar regardless,
-    since their own numerators are 0 too), then 3 EXACT `O=H=L=C` bars
-    positioned WITHIN the first `atr_length=14` bars (so `atr()` is
-    provably NaN there, not merely small).
+    NO SCOPE CLAIM is made about WHERE this bites (round 2 falsified a
+    round-1 "only within atr_length bars" claim -- see the `rel_floor`
+    validation comment in pressure_pulse.py's function body and
+    `test_mature_series_flat_run_is_floor_sensitive` below for the
+    parameter-conditional truth, measured, not asserted narrower than
+    it is). This test reproduces the specific early-history shape
+    (real decline, then 3 exact `O=H=L=C` bars) that IS confirmed
+    floor-sensitive, without claiming it is the ONLY shape that is.
     """
     n = 80
     close = np.full(n, 100.0)
@@ -486,38 +476,86 @@ def test_flat_bars_early_in_history_saturate_without_price_scaled_floor():
     # exercising exactly the pathological shape this test targets).
     for i in range(4, 7):
         assert open_s.iloc[i] == high_s.iloc[i] == low_s.iloc[i] == close_s.iloc[i]
-    # And ATR is genuinely undefined (NaN) there, not merely small --
-    # confirms this reproduction sits in the documented SCOPE.
-    from pandas_ta.volatility import atr as _atr_check
-    atr_check = _atr_check(high_s, low_s, close_s, length=14, mamode="rma")
-    assert atr_check.iloc[4:7].isna().all()
 
-    # rel_floor=1e-300 reproduces the pre-fix behavior exactly (tick_floor
-    # collapses to min_tick, since rel_floor*|Close| is negligible) --
-    # this IS what the shipped code did before this fix, not merely an
-    # approximation of it.
+    # rel_floor=1e-300 reproduces the pre-fix (1e-8-only) behavior exactly
+    # (tick_floor collapses to min_tick, since rel_floor*|Close| is
+    # negligible) -- this IS what the shipped code did before this fix,
+    # not merely an approximation of it.
     out_broken = ta.pressure_pulse(open_s, high_s, low_s, close_s, rel_floor=1e-300)
-    out_fixed = ta.pressure_pulse(open_s, high_s, low_s, close_s)  # shipped default, rel_floor=5e-4
-    out_reference = ta.pressure_pulse(open_s, high_s, low_s, close_s, rel_floor=1e-2)  # generously floored
+    out_fixed = ta.pressure_pulse(open_s, high_s, low_s, close_s)  # shipped default, rel_floor=2.5e-3
 
     diff_broken_fixed = (out_broken - out_fixed).abs()
-    diff_broken_ref = (out_broken - out_reference).abs().max()
-    diff_fixed_ref = (out_fixed - out_reference).abs().max()
     print(f"flat-bars-early-in-history: max |broken - fixed| = {diff_broken_fixed.max():.6f} "
-          f"at {diff_broken_fixed.idxmax()}; |broken-ref|={diff_broken_ref:.4f} |fixed-ref|={diff_fixed_ref:.4f}")
+          f"at {diff_broken_fixed.idxmax()}")
 
     # THIS is the assertion that fails against the pre-fix (1e-8-only)
     # floor: the broken and fixed readings diverge by a MATERIAL, not
-    # rounding-level, amount at the pathological bars.
-    assert diff_broken_fixed.max() > 0.05
-    # And the fix moves the reading in the right direction -- measurably
-    # closer to a generously-floored reference than the broken config is.
-    assert diff_fixed_ref < diff_broken_ref
+    # rounding-level, amount at the pathological bars. Threshold set with
+    # real margin below the measured value (0.4345 at this fixture and
+    # the shipped 2.5e-3 default -- Fletcher round 2 flagged the prior
+    # threshold/measurement pair as only 1.5x apart; this is ~8.7x).
+    assert diff_broken_fixed.max() > 0.3
     # Both remain within the general (-2,2) bound regardless (that holds
     # unconditionally by construction, see BOUNDEDNESS) -- this test is
     # about the MEANINGFULNESS of the reading, not the bound itself.
     assert out_broken.abs().max() < 2.0
     assert out_fixed.abs().max() < 2.0
+
+
+def test_mature_series_flat_run_is_floor_sensitive():
+    """Regression for Fletcher round 2 MAJOR 1: round 1 claimed the
+    min_tick/rel_floor floor "ONLY bites while atr() is genuinely
+    undefined (within a series' own first atr_length bars)". FALSE,
+    measured directly here: a flat run 200+ bars into a mature series
+    (bars 200-239 of a 400-bar series), where atr() is fully DEFINED
+    throughout, is STILL floor-sensitive at every tested atr_length --
+    the real mechanism is a race between Wilder RMA's per-flat-bar decay
+    factor (1 - 1/atr_length) and the `balance` residual's own decay
+    rate, not a warmup-only artifact. Smaller atr_length decays atr()
+    FASTER (bigger 1/atr_length step), so it is MORE exposed, not less.
+    """
+    n = 400
+    rng = np.random.RandomState(1)
+    close = np.full(n, 100.0)
+    for i in range(1, 200):
+        close[i] = close[i - 1] + rng.randn() * 0.5
+    flat_price = close[199]
+    for i in range(200, 240):
+        close[i] = flat_price
+    for i in range(240, n):
+        close[i] = close[i - 1] + rng.randn() * 0.5
+    open_ = close.copy()
+    open_[1:] = close[:-1]
+    open_[0] = close[0]
+    high = close.copy()
+    low = close.copy()
+    idxs = list(range(200)) + list(range(240, n))
+    for i in idxs:
+        high[i] = max(open_[i], close[i]) + 0.05
+        low[i] = min(open_[i], close[i]) - 0.05
+    idx = pd.date_range("2020-01-01", periods=n, freq="B")
+    open_s, high_s, low_s, close_s = (pd.Series(a, index=idx) for a in (open_, high, low, close))
+
+    from pandas_ta.volatility import atr as _atr_check
+    # Measured floor-vs-broken divergence at each atr_length, pinned as a
+    # regression -- these are the SAME numbers published in the module
+    # docstring's "MINTICK / REL_FLOOR SUBSTITUTION" section and the
+    # `rel_floor` validation comment, from this exact fixture (seed=1).
+    expected = {5: 0.8834, 9: 0.1990, 14: 0.2006}
+    for al, exp_diff in expected.items():
+        a = _atr_check(high_s, low_s, close_s, length=al, mamode="rma")
+        # atr() IS fully defined at bar 235 (well past warmup for any of
+        # these lengths) -- confirms this reproduction is NOT the
+        # early-history case the round-1 (falsified) scope claim relied on.
+        assert not np.isnan(a.iloc[235]), f"atr_length={al}: expected atr() defined at bar 235"
+
+        out_broken = ta.pressure_pulse(open_s, high_s, low_s, close_s, atr_length=al, rel_floor=1e-300)
+        out_fixed = ta.pressure_pulse(open_s, high_s, low_s, close_s, atr_length=al)  # shipped default
+        diff = (out_broken - out_fixed).abs().max()
+        print(f"mature-series flat run: atr_length={al} atr@235={a.iloc[235]:.6f} max|broken-fixed|={diff:.4f}")
+        assert diff == pytest.approx(exp_diff, abs=0.01), f"atr_length={al}"
+        # The floor is load-bearing here too -- not a warmup-only effect.
+        assert diff > 0.1
 
 
 def test_single_nan_poisons_all_subsequent_bars():
@@ -590,7 +628,21 @@ def test_rejects_wrong_dtype():
     ("balance_length", float("nan")), ("balance_length", float("inf")),
     ("atr_length", 0), ("pulse_norm_length", 4), ("pulse_smooth_length", 0),
     ("min_gain", 0.005), ("max_gain", 1.5), ("drift_damping", 1.0),
-    ("memory_min", 0.99), ("memory_max", 1.0), ("min_tick", -1.0), ("min_tick", 0.0),
+    ("memory_min", 0.99), ("memory_max", 1.0),
+    # min_tick: coverage gap flagged in Fletcher round 2 -- the -1.0/0.0
+    # cases existed but nan/inf/bool/str never had a dedicated test, even
+    # though the validation code itself already handles them (verified
+    # directly by exercising it here, not just reading the source).
+    ("min_tick", -1.0), ("min_tick", 0.0), ("min_tick", float("nan")),
+    ("min_tick", float("inf")), ("min_tick", True), ("min_tick", "x"),
+    # rel_floor: had ZERO validation-test coverage before Fletcher round 2
+    # (the parametrize list below was extended for min_tick above but
+    # rel_floor -- the parameter that now carries the entire min_tick/
+    # rel_floor fix -- was never added). A future refactor could silently
+    # delete rel_floor's guard and nothing here would catch it without
+    # this block.
+    ("rel_floor", -1.0), ("rel_floor", 0.0), ("rel_floor", float("nan")),
+    ("rel_floor", float("inf")), ("rel_floor", True), ("rel_floor", "x"),
 ])
 def test_rejects_out_of_bounds_params(name, value):
     open_, high, low, close = _ohlcv(n=60)

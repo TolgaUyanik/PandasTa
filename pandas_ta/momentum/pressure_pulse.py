@@ -138,88 +138,98 @@ def pressure_pulse(open_, high, low, close,
     # here originally, not a doc gap: a fixed ABSOLUTE epsilon floor
     # (1e-8) is essentially zero relative to any real price, so it does
     # nothing to stop `safe_atr` collapsing to (near-)zero on a
-    # `High == Low` bar (the fallback `h - lo` is EXACTLY 0 there, and
-    # `atr()` itself is undefined this early in a series regardless).
+    # `High == Low` bar.
     #
-    # The EXACT, measured mechanism (corrected once, then re-verified --
-    # see git history for the first, imprecise draft of this comment):
-    # `trendPressure = clip((balance[t]-balance[t-1])/safe_atr, -2,2)/2`
-    # and `stretchPressure = clip((Close[t]-balance[t])/safe_atr, -2,2)/2`
-    # do NOT depend on Close/Open/High/Low directly -- they depend on
-    # `balance`, the Predictive Balance filter's own recursive STATE,
-    # which can carry a tiny nonzero residual (from `drift`/prediction
-    # lag left over from real price movement BEFORE a flat run started)
-    # even while the bar's own OHLC is perfectly flat. `bodyPressure`/
-    # `closePressure` genuinely ARE exactly 0 on a flat bar (their
-    # numerators, `Close-Open` and `2*Close-High-Low`, are 0 too --
-    # verified: 400 perfectly flat bars with NO preceding momentum give
-    # exactly 0.0, 0 bars above |0.5|) -- but `trendPressure`/
-    # `stretchPressure`'s numerators need not be exactly 0, only small.
-    # Divide a small-but-nonzero residual by a dust-sized `safe_atr` and
-    # the ratio explodes past the +-2 clip, saturating those two terms
-    # (40% of the composite's weight) -- confirmed on this project's own
-    # BIST cache, `ADESE_IS`: three consecutive `High==Low` bars
-    # (2011-11-07/08/09, `O=H=L=C=0.7519277532892589`, immediately
-    # preceded by real price movement) each carry a `balance[t]-
-    # balance[t-1]` residual of order 3e-5 and a `Close-balance` residual
-    # of order 3.5e-4 -- both saturate `stretchPressure` to exactly -1.0
-    # under the old 1e-8 floor, and the resulting saturated `rawPressure`
-    # then propagates forward through `pressureMemory`'s IIR recursion
-    # and the 5-bar EMA smoothing, landing at PRESSURE_PULSE=-1.1905 two
-    # bars later (2011-11-11) -- vs +1.0972 (a SIGN FLIP) once the floor
-    # is price-scale-aware (`min_tick=0.01`, an absolute floor
-    # representative of this ~0.75-price stock's real tick size).
+    # The mechanism: `trendPressure = clip((balance[t]-balance[t-1])/
+    # safe_atr, -2,2)/2` and `stretchPressure = clip((Close[t]-balance[t])
+    # /safe_atr, -2,2)/2` do NOT depend on Close/Open/High/Low directly --
+    # they depend on `balance`, the Predictive Balance filter's own
+    # recursive STATE, which can carry a small nonzero residual left over
+    # from real price movement even while the bar's own OHLC is perfectly
+    # flat. `bodyPressure`/`closePressure` genuinely ARE exactly 0 on a
+    # flat bar (their numerators, `Close-Open` and `2*Close-High-Low`,
+    # are 0 too -- verified: 400 perfectly flat bars with no preceding
+    # momentum give exactly 0.0). Divide a small-but-nonzero `balance`
+    # residual by a dust-sized `safe_atr` and the ratio explodes past the
+    # +-2 clip, saturating those two terms (40% of the composite weight).
     #
-    # SCOPE, precisely (checked, not assumed -- a first draft of this
-    # section over-generalized to "any flat run" and had to be narrowed):
-    # this ONLY bites while `atr()` is itself genuinely UNDEFINED (NaN,
-    # insufficient history -- i.e. within a series' own first
-    # `atr_length` bars), so the fallback `High-Low` is live AND that
-    # bar's own range is exactly 0. A flat run occurring LATER in a
-    # series, once `atr()` is defined, does NOT reproduce this: Wilder's
-    # RMA includes the CURRENT bar's own true range every step (it is
-    # not lag-1), so the very first genuinely-moving bar after ANY flat
-    # stretch (long or short, anywhere in a mature series) immediately
-    # pulls its own large true range into `atr()`, self-healing in one
-    # bar -- checked directly with a synthetic 300-bar-flat + 1%-move
-    # construction: `safe_atr` at the moving bar is already ~0.073 (not
-    # dust) purely from that bar's own jump, and the resulting
-    # PRESSURE_PULSE reading (+-0.63) is BIT-IDENTICAL whether `rel_floor`
-    # is 1e-300 or the shipped default -- i.e. that reading is large but
-    # LEGITIMATE (a real, big stretch-from-balance after a quiet spell),
-    # not a floor artifact, and an earlier draft of this comment wrongly
-    # cited it as a second manifestation of the bug. The regression test,
-    # tests/test_pressure_pulse.py::
-    # test_flat_bars_early_in_history_saturate_without_price_scaled_floor,
-    # reproduces the SCOPE-CORRECT case instead: a short real move, then
-    # exact flat bars positioned WITHIN the first atr_length bars.
+    # SCOPE -- NO universal "ONLY" claim is made here (this section has
+    # been through 4 wrong/over-narrow scope claims across this port's
+    # review history; a 5th unqualified "ONLY" is not being risked).
+    # `safe_atr` shrinking toward the floor is a RACE between two decay
+    # rates during any flat run, regardless of where in the series it
+    # occurs: Wilder's RMA decays `atr()` by a factor `(1 - 1/atr_length)`
+    # PER FLAT BAR (so SMALLER `atr_length` decays FASTER, not slower --
+    # counter-intuitive but measured), while the `balance`/`drift`
+    # residual feeding `trendPressure`/`stretchPressure` decays at its own
+    # rate set by `drift_damping`/`reaction` (roughly 0.80-0.88/bar at
+    # defaults). Whichever decays faster determines whether the floor
+    # still matters deep into a mature series, not merely in a series'
+    # first `atr_length` bars. Measured directly (own reproduction: seed
+    # 1, a 400-bar synthetic series, flat run at bars 200-239 -- 200+
+    # bars past any warmup, `atr()` fully defined throughout -- max
+    # |fixed(rel_floor=2.5e-3) - broken(rel_floor~0)| over the whole
+    # series for each `atr_length`):
+    #   atr_length=5:  atr() @bar235 = 0.000164 (defined) -- max diff 0.8834
+    #   atr_length=9:  atr() @bar235 = 0.007068 (defined) -- max diff 0.1990
+    #   atr_length=14 (default): atr() @bar235 = 0.033300 (defined) -- max diff 0.2006
+    # i.e. the floor is load-bearing at EVERY tested `atr_length`, deep in
+    # a mature series, not just near-warmup -- confirming this is a
+    # parameter-conditional, not scope-limited, effect. This project's own
+    # `test_bounded_by_fuzzing` draws `atr_length` from `randint(1, 40)`
+    # every run, so the suite already walks through this region; a
+    # DEDICATED regression, test_mature_series_flat_run_is_floor_
+    # sensitive, pins the table above directly (not left "known but
+    # unpinned").
     #
     # Fix: floor BOTH `safe_atr` and `candle_range` at
-    # `max(min_tick, rel_floor * |Close|)` -- price-scale-aware, not a
-    # fixed absolute epsilon -- so the floor tracks whatever instrument's
-    # price magnitude is actually in play instead of vanishing next to
-    # it. `min_tick` remains available for a caller who knows their exact
-    # exchange tick size and wants an ABSOLUTE floor on top of the
-    # relative one (the two are combined via max()); `rel_floor` is the
-    # one that actually prevents the ADESE-class saturation on a bare
-    # Series with no symbol context. Default 5e-4 (0.05% of Close) was
-    # CHOSEN BY MEASUREMENT, not copied from a suggested example: at this
-    # value, ALL THREE of ADESE's flat-bar `trendPressure`/
-    # `stretchPressure` ratios drop below the +-2 clip threshold
-    # (verified componentwise, not just at the final smoothed output --
-    # 3e-4 was the measured threshold where saturation first stops on
-    # this case; 5e-4 keeps a margin above it). A candidate default of
-    # 1e-6 (a plausible-looking "small" relative epsilon) was tried FIRST
-    # and measured to have ZERO effect on this exact case (still -1.1905,
-    # bit-identical to no floor at all) -- confirmed empirically, not
-    # assumed, before being replaced with the validated 5e-4. Sweep
-    # footprint at the shipped default, 40 BIST_100 daily tickers /
-    # 180,842 bars (same sample as the overlap measurement): only 82
-    # bars (0.05%) move by >0.01 vs. an unfloor'd (rel_floor~0) run, 27
-    # (0.01%) by >0.05 -- a small, surgical correction confined to the
-    # pathological near-zero-ATR bars this floor targets, not a wholesale
-    # rescaling of the indicator (see module docstring "MINTICK / REL_
-    # FLOOR SUBSTITUTION").
+    # `max(min_tick, rel_floor * |Close|)`. `min_tick` is an ABSOLUTE
+    # floor (a fixed price increment, e.g. an exact known exchange tick
+    # size) -- it is NOT price-scale-aware by itself, and calling it that
+    # was a mislabel in an earlier draft of this comment (min_tick=0.01 is
+    # simply a bigger constant than 1e-8, nothing more). `rel_floor` is
+    # the genuinely price-scale-aware term (a fraction of `|Close|`) and
+    # is what actually prevents the ADESE-class saturation on a bare
+    # Series with no symbol context; the two combine via `max()`.
+    #
+    # DEFAULT, and an ACCURACY criterion, not just a clipping one (a prior
+    # draft's "all ratios drop below the +-2 clip" criterion was WRONG to
+    # rely on alone -- clipping stops but the reading can still be wildly
+    # off, floor-determined rather than data-determined, while staying
+    # inside the clip). ADESE's own adjusted close grid steps by
+    # ~0.0020655 near this date (measured from consecutive nonzero close
+    # diffs) -- an honest, ticker-specific reference floor, NOT a generic
+    # constant. Measured PRESSURE_PULSE at 2011-11-11 against that
+    # reference (min_tick=0.0020655, rel_floor~0): +0.6950. Sweeping
+    # `rel_floor` against that reference, max |Δ| restricted to the
+    # 2011-11-07..11 window specifically: 5e-4 -> 0.7004 (still
+    # SIGN-FLIPS on 11-07 and 11-10 against the reference); 1e-3 ->
+    # 0.5651; 2e-3 -> 0.2377; 2.5e-3 -> 0.0610 (matches sign on all 5
+    # bars); 5e-3 -> 0.3712 (worse -- overshoots). `rel_floor=2.5e-3`
+    # (0.25% of Close) is the shipped default: smallest tested value that
+    # both matches ADESE's real-tick sign on every checked bar in this
+    # window AND sits near the measured error minimum for it, not merely
+    # "small". At this default, PRESSURE_PULSE at 2011-11-11 is +0.6671
+    # (vs -1.1905 unfloored, vs +1.0972 if a caller explicitly passes
+    # min_tick=0.01 -- a DIFFERENT, larger absolute floor than the
+    # shipped default's effective ~1.9e-3 at this price, not the same
+    # run; the three numbers are NOT interchangeable and must not be
+    # conflated). This is a genuine improvement for THIS window, not a
+    # full fix for the ticker: the max |Δ| against the honest-tick
+    # reference over ADESE's FULL history (not just this window) is
+    # 0.1316 at the shipped default, at a DIFFERENT bar (2012-11-20, a
+    # separate near-zero-range stretch elsewhere in this same, thinly-
+    # traded ticker's history, unrelated to the November 2011 episode
+    # this section otherwise discusses) -- fixing one pathological window
+    # does not fix every one a chronically-illiquid name can produce;
+    # floor-sensitivity remains, documented, not hidden. Sweep footprint
+    # at the shipped default, 40 BIST_100 daily tickers / 180,842 bars:
+    # 339 bars (0.19%) move by >0.01 vs. an unfloored (rel_floor~0) run,
+    # 94 (0.05%) by >0.05, 51 (0.03%) by >0.1, max diff 0.534 -- larger
+    # footprint than the previous (insufficiently-justified) 5e-4
+    # default, still well under 1% of bars, and now justified against
+    # accuracy on at least one concrete case rather than merely
+    # clipping (see module docstring "MINTICK / REL_FLOOR SUBSTITUTION").
     if min_tick is None:
         min_tick = 1e-8
     else:
@@ -230,7 +240,7 @@ def pressure_pulse(open_, high, low, close,
             raise ValueError(f"min_tick must be finite and positive, got {min_tick}")
 
     if rel_floor is None:
-        rel_floor = 5e-4
+        rel_floor = 2.5e-3
     else:
         if isinstance(rel_floor, bool) or not isinstance(rel_floor, (int, float, np.integer, np.floating)):
             raise ValueError(f"rel_floor must be numeric, got {type(rel_floor).__name__}: {rel_floor!r}")
@@ -303,11 +313,12 @@ def pressure_pulse(open_, high, low, close,
     atr_arr = atr_series.to_numpy(dtype="float64", copy=False) if atr_series is not None else np.full(n, np.nan)
     safe_atr = np.where(np.isfinite(atr_arr), atr_arr, h - lo)
 
-    # Price-scale-aware floor -- see the rel_floor validation comment above
-    # for why a fixed absolute epsilon (this port's original 1e-8) is a
-    # real bug, not a documentation nuance: it does nothing to stop a
-    # flat/halted run's ATR decaying to double-precision dust, and the
-    # first moving bar after such a run then saturates against it.
+    # tick_floor combines an ABSOLUTE term (min_tick) with the actually
+    # price-scale-aware term (rel_floor * |Close|) via max() -- see the
+    # rel_floor validation comment above for why a fixed absolute epsilon
+    # alone (this port's original 1e-8-only default) was a real numerical
+    # bug, the measured mechanism, and why no universal "only bites here"
+    # scope claim is made.
     tick_floor = np.maximum(min_tick, rel_floor * np.abs(c))
     safe_atr = np.maximum(safe_atr, tick_floor)
     candle_range = np.maximum(h - lo, tick_floor)
@@ -552,48 +563,83 @@ MINTICK / REL_FLOOR SUBSTITUTION: Pine's `syminfo.mintick` (the listed
 instrument's minimum price increment, from TradingView's own exchange
 metadata) has no equivalent for a bare OHLC Series with no symbol/
 exchange context. `safeAtr` and `candleRange` are floored at
-`max(min_tick, rel_floor * |Close|)` -- a price-scale-aware relative
-floor (`rel_floor`, default 5e-4, i.e. 0.05% of Close), NOT a fixed
-absolute epsilon.
+`max(min_tick, rel_floor * |Close|)`. `min_tick` is an ABSOLUTE floor (a
+fixed price increment) -- calling it "price-scale-aware" in an earlier
+draft of this section was a mislabel, since a bigger constant is still
+just a constant, not a scale-aware term. `rel_floor` (default 2.5e-3,
+i.e. 0.25% of Close) IS the price-scale-aware term.
 
 This matters because an earlier version of this port used ONLY a fixed
-absolute epsilon (1e-8) here, which was a REAL NUMERICAL BUG, not a
-documentation nuance -- 1e-8 is effectively zero next to any real price,
-so it does nothing to stop `safe_atr` collapsing on a `High == Low` bar
-(the fallback `High-Low` is EXACTLY 0 there). The EXACT mechanism,
-measured, not the first (wrong) guess at it: `trendPressure`/
-`stretchPressure` depend on `balance` -- the Predictive Balance filter's
-own recursive STATE -- which can carry a tiny nonzero residual left over
-from real price movement BEFORE a flat run even while the CURRENT bar's
-OHLC is perfectly flat (unlike `bodyPressure`/`closePressure`, whose
-numerators, `Close-Open` and `2*Close-High-Low`, genuinely ARE exactly 0
-on a flat bar -- verified: 400 perfectly flat bars with no preceding
-momentum give exactly 0.0 output, 0 bars above |0.5|). Divide that small
-residual by a dust-sized `safe_atr` and the ratio blows past the +-2
-clip, saturating those two terms. Confirmed on this project's own BIST
-cache: `ADESE_IS`'s three consecutive `High==Low` bars (2011-11-07/08/09,
-immediately preceded by real price movement) each saturate
-`stretchPressure` to exactly -1.0 under the old fixed-epsilon floor, and
-the saturated `rawPressure` propagates through `pressureMemory`'s IIR
-recursion and the 5-bar EMA smoothing to PRESSURE_PULSE=-1.1905 two bars
-later -- a SIGN FLIP to +1.0972 once the floor is price-scale-aware (full
-derivation, and the precise SCOPE this bites under -- genuinely undefined
-`atr()`, i.e. only within a series' own first `atr_length` bars, NOT any
-flat run anywhere; a later-in-series flat run self-heals in one bar via
-Wilder's same-bar true-range inclusion, checked directly and NOT a
-manifestation of this bug -- in the `rel_floor` validation comment in the
-function body). `rel_floor=5e-4` was chosen by MEASUREMENT: it is the
-smallest tested value (after 1e-4, which was insufficient) that clears
-ALL THREE of ADESE's flat-bar ratios below the clip threshold, with
-margin; sweep footprint on 40 BIST_100 daily
-tickers / 180,842 bars is small and targeted (82 bars, 0.05%, move by
->0.01 vs. an unfloored run; 27 bars, 0.01%, by >0.05) -- this is a
-surgical correction of the pathological near-zero-ATR case, not a
-wholesale rescaling of the indicator's everyday behavior. `min_tick`
-remains available as an ADDITIONAL absolute floor for a caller who knows
-their instrument's exact tick size (combined with the relative floor via
-`max()`); on its own, at the library default (1e-8), it does essentially
-nothing -- the relative floor is what carries the fix.
+absolute epsilon (1e-8, via `min_tick` alone) here, which was a REAL
+NUMERICAL BUG, not a documentation nuance -- 1e-8 is effectively zero
+next to any real price, so it does nothing to stop `safe_atr` collapsing
+on a `High == Low` bar (the fallback `High-Low` is EXACTLY 0 there). The
+mechanism: `trendPressure`/`stretchPressure` depend on `balance` -- the
+Predictive Balance filter's own recursive STATE -- which can carry a
+small nonzero residual left over from real price movement even while the
+CURRENT bar's OHLC is perfectly flat (unlike `bodyPressure`/
+`closePressure`, whose numerators, `Close-Open` and `2*Close-High-Low`,
+genuinely ARE exactly 0 on a flat bar). Divide that residual by a
+dust-sized `safe_atr` and the ratio blows past the +-2 clip, saturating
+those two terms.
+
+SCOPE -- stated as a measured, parameter-conditional fact, NOT a claim of
+where it is confined to (this port's review history has now falsified
+four progressively-narrower scope claims; a fifth "ONLY X" is not being
+risked here). The floor matters wherever `safe_atr` shrinks toward it
+faster than the `balance` residual itself decays -- a race between
+Wilder RMA's per-flat-bar decay factor `(1 - 1/atr_length)` (SMALLER
+`atr_length` decays FASTER) and the residual's own decay rate
+(`drift_damping`/`reaction`-driven, ~0.80-0.88/bar at defaults). This is
+NOT confined to a series' first `atr_length` bars -- measured directly on
+a 400-bar synthetic series with a flat run 200+ bars past any warmup
+(bars 200-239, `atr()` fully defined throughout), max
+|fixed(rel_floor=2.5e-3) - broken(rel_floor~0)| over the series: 0.8834
+at `atr_length=5`, 0.1990 at `atr_length=9`, 0.2006 at `atr_length=14`
+(the shipped default) -- the floor is load-bearing at every tested
+`atr_length`, deep in a mature series. See
+tests/test_pressure_pulse.py::test_mature_series_flat_run_is_floor_
+sensitive for the pinned regression, and the `rel_floor` validation
+comment in the function body for the full table.
+
+Confirmed on this project's own BIST cache: `ADESE_IS`'s three
+consecutive `High==Low` bars (2011-11-07/08/09, immediately preceded by
+real price movement) saturate `stretchPressure`, and the saturated
+`rawPressure` propagates through `pressureMemory`'s IIR recursion and the
+5-bar EMA smoothing to PRESSURE_PULSE=-1.1905 at 2011-11-11 under the old
+1e-8-only floor. At the SHIPPED default (`rel_floor=2.5e-3`), that same
+bar reads **+0.6671** -- NOT +1.0972 (an earlier draft of this section
+conflated the shipped default's own result with a different run, an
+explicit `min_tick=0.01` caller override, which gives +1.0972; the two
+must not be conflated, they are different floors -- 0.01 absolute vs the
+shipped default's effective ~1.9e-3 at this ~0.75 price).
+
+The default was chosen against an ACCURACY criterion, not merely a
+clipping one (a prior draft's "ratios drop below the clip" criterion was
+insufficient on its own -- clipping stops, but the reading can still be
+floor-determined rather than data-determined while staying inside the
+clip). ADESE's own adjusted close grid steps by ~0.0020655 near this date
+(measured from consecutive nonzero close diffs, not assumed) -- used as
+an honest, ticker-specific reference floor. PRESSURE_PULSE at
+2011-11-11 against that reference: +0.6950. Sweeping `rel_floor` (max
+|delta| vs that reference, restricted to the 2011-11-07..11 window):
+5e-4 gives 0.7004 and still SIGN-FLIPS on 11-07 and 11-10; 2.5e-3
+(shipped) gives 0.0610 and matches sign on all 5 bars; 5e-3 gives 0.3712
+(worse -- overshoots). `rel_floor=2.5e-3` is a genuine improvement for
+THIS window, NOT a full fix for the ticker: the max |delta| against the
+honest-tick reference over ADESE's FULL history is 0.1316 at the shipped
+default, at a DIFFERENT bar (2012-11-20, a separate near-zero-range
+stretch elsewhere in this same thinly-traded name, unrelated to the
+November 2011 episode) -- fixing one pathological window does not fix
+every one a chronically-illiquid ticker can produce; documented, not
+hidden. Sweep footprint at the shipped default, 40 BIST_100 daily
+tickers / 180,842 bars: 339 bars (0.19%) move by >0.01 vs. an unfloored
+run, 94 (0.05%) by >0.05, 51 (0.03%) by >0.1, max diff 0.534 -- larger
+footprint than the earlier (insufficiently-justified) 5e-4 default,
+still well under 1% of bars. `min_tick` remains available as an
+ADDITIONAL absolute floor for a caller who knows their instrument's exact
+tick size (combined with the relative floor via `max()`); on its own, at
+the library default (1e-8), it does essentially nothing.
 
 BOUNDEDNESS (verified by fuzzing, NOT the scoping survey's "+-1" claim --
 that claim is WRONG): `compressedPressure = 2*r / (1.5 + |r|)` is bounded
@@ -696,9 +742,11 @@ Args:
     rel_floor (float): Price-scale-aware relative floor on `safeAtr`/
         `candleRange`, as a fraction of `|Close|` -- see "MINTICK /
         REL_FLOOR SUBSTITUTION" for why this exists (a fixed absolute
-        floor alone was a real numerical bug, not a doc gap) and how the
-        default was measured. Default: 5e-4 (0.05% of Close). Must be
-        finite and positive.
+        floor alone was a real numerical bug, not a doc gap), how the
+        default was measured against an ACCURACY criterion (not merely a
+        clipping one), and the remaining, documented floor-sensitivity
+        this does NOT fully eliminate. Default: 2.5e-3 (0.25% of Close).
+        Must be finite and positive.
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:
