@@ -206,7 +206,20 @@ Calculation:
     mining, and NOT equivalent to vol_delta's un-volume-weighted form
     ((close-open)/(high-low), a straight-line fraction of the bar's
     range) since the two use different (linear vs triangular-CDF)
-    models of where price spent its time within the bar.
+    models of where price spent its time within the bar. "Not
+    equivalent" is a narrow, correct claim, not a claim of
+    independence: measured on 57 BIST_100 daily tickers (242,745 bars,
+    AwakenAnalytics/Backtesting's backtest_results/tvpta6/
+    tri_dir_pressure_overlap_20260813.md), ps vs the linear form
+    correlates at pearson=0.840 (R^2=0.706) scale-free, and the
+    as-deployed (use_volume=False) column correlates with
+    VOL_DELTA_APPROX at spearman=0.760 -- MORE collinear than the
+    VOL_DELTA/VOL_DELTA_APPROX pair that fork's own family doc already
+    flags as redundant twins to prune (spearman=0.666). Genuinely
+    different model, substantially overlapping in practice -- both are
+    true, and a caller doing feature selection across this family
+    should treat all three columns as one collinearity group, not
+    assume this one is independent because its formula is.
 
 Args:
     open_ (pd.Series): Series of 'open's

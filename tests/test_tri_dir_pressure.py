@@ -59,7 +59,16 @@ def _edge_case_bars():
     whenever `high == low`. That branch is only reachable on malformed
     data (e.g. a corrupted tick); see
     `test_degenerate_branch_on_malformed_data` below, which deliberately
-    does NOT claim valid OHLC.
+    does NOT claim valid OHLC. "Malformed" is NOT a hypothetical here --
+    Fletcher review measured 7,686 `High==Low` bars on a 57-ticker BIST
+    daily sample (250,431 bars), 374 of which (0.15% of all bars) also
+    have `Close != Open` and would hit this exact branch, printing
+    TRI_DIR_PRESSURE at exactly +-1.0 from a limit-locked/thin-print bar
+    rather than real intrabar pressure -- a genuine BIST data-quality
+    consideration for anyone mining this column, not dead code. See
+    `backtest_results/tvpta6/tri_dir_pressure_overlap_20260813.md` in
+    the Backtesting repo and `family-cumulative-volume.md`'s "BIST
+    specifics" section for the full measurement.
 
     bar 0 (general branch, mode strictly inside [low, high]):
         O=10 H=12 L=9 C=11 -> op=10, md=11, lw=2, rw=1
