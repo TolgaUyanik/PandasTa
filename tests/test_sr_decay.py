@@ -164,8 +164,8 @@ def test_attenuation_returns_nan_for_non_positive_price():
     # real High/Low. Fletcher round 4: that path was previously called
     # "reachable on real data" without measurement; it is NOT observed --
     # 0 of 7,038,656 bars across datastore/cache{,_hourly,_crypto} carry a
-    # NaN Close at all. Both paths are defensive-contract, not observed.
-    # test_attenuation_returns_nan_for_nan_close_t below. Fletcher round 3
+    # NaN Close at all. Both paths are defensive-contract, not observed;
+    # see test_attenuation_returns_nan_for_nan_close_t below. Fletcher round 3
     # (MAJOR): this comment, §2h, and the module docstring all previously
     # claimed the price<=0 path was "the ONLY" such exception. False --
     # `_attenuation` consumes Close[t] while `ATR(14)[t]`'s true range
@@ -180,9 +180,12 @@ def test_attenuation_returns_nan_for_nan_close_t():
     # `ATTEN.isna() => SWIRL.isna()`. ⚠ Round 4: an earlier version of
     # this comment called it "the one that actually occurs on real data"
     # -- unmeasured and wrong (0 of 7,038,656 datastore bars have a NaN
-    # Close). It requires a vendor bar carrying a real High/Low but no
-    # settled close; a genuinely missing session nulls H/L/C together,
-    # which nulls ATR and SWIRL too, so the implication HOLDS there.
+    # Close). ⚠ Round 5: this comment previously said a fully missing
+    # session (H/L/C all NaN) nulls ATR and SWIRL too, so the implication
+    # would HOLD there -- reasoned, not run, and false. ATR(14) is
+    # RMA-smoothed and steps over the NaN true range, so an all-NaN bar
+    # breaks the implication on the same 17 rows (measured: ATR[22]=2.504).
+    # ANY NaN Close on a confirming bar breaks it, High/Low real or not.
     # `_attenuation` consumes
     # Close[t] directly, so a NaN Close nulls it; `_swirl` does NOT,
     # because `ATR(14)[t]`'s true range reads Close[t-1], never Close[t].
