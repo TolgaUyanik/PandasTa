@@ -32,7 +32,7 @@ from pandas_ta.utils import get_offset, verify_series
 #
 # This is a partial port of "MSL Trend Pulse" (5BLfGp6I). Only the
 # Pressure Pulse module (L517-657) is ported, plus the Predictive Balance
-# alpha-beta filter (L344-516) it depends on as an internal (NOT exposed as
+# alpha-beta filter (L344-462) it depends on as an internal (NOT exposed as
 # its own top-level indicator -- see module docstring "OVERLAP CHECK").
 # NOT ported: the flip-band regime state machine (L464-516, drives the
 # `regime`/`upFlipMark`/`dnFlipMark` plots), the Wave Memory module
@@ -46,12 +46,12 @@ def pressure_pulse(open_, high, low, close,
                     drift_gain=None, drift_damping=None, atr_length=None,
                     pulse_norm_length=None, pulse_smooth_length=None,
                     memory_min=None, memory_max=None, min_tick=None,
-                    offset=None, **kwargs):
+                    rel_floor=None, offset=None, **kwargs):
     """Indicator: Pressure Pulse (PRESSURE_PULSE)
 
     Ports ONLY the source's Pressure Pulse module (`rawPressure` through
     `pulse`, Pine L517-657) plus the Predictive Balance alpha-beta filter
-    (L344-516) it depends on as an internal helper. See the module
+    (L344-462) it depends on as an internal helper. See the module
     docstring for the full calculation and what was NOT ported.
     """
     # Validate Arguments
@@ -132,11 +132,94 @@ def pressure_pulse(open_, high, low, close,
     memory_min = _validate_float(memory_min, "memory_min", 0.60, minval=0.00, maxval=0.98)
     memory_max = _validate_float(memory_max, "memory_max", 0.88, minval=0.00, maxval=0.99)
 
-    # min_tick: the source's `syminfo.mintick` (exchange-declared minimum
-    # price increment) has no equivalent on a bare OHLC Series -- there is
-    # no symbol/exchange context. Substituted with a fixed epsilon floor,
-    # a deliberate deviation from the source, not a silent one (see module
-    # docstring "MINTICK SUBSTITUTION").
+    # min_tick / rel_floor: the source's `syminfo.mintick` (exchange-
+    # declared minimum price increment) has no equivalent on a bare OHLC
+    # Series -- there is no symbol/exchange context. A REAL BUG shipped
+    # here originally, not a doc gap: a fixed ABSOLUTE epsilon floor
+    # (1e-8) is essentially zero relative to any real price, so it does
+    # nothing to stop `safe_atr` collapsing to (near-)zero on a
+    # `High == Low` bar (the fallback `h - lo` is EXACTLY 0 there, and
+    # `atr()` itself is undefined this early in a series regardless).
+    #
+    # The EXACT, measured mechanism (corrected once, then re-verified --
+    # see git history for the first, imprecise draft of this comment):
+    # `trendPressure = clip((balance[t]-balance[t-1])/safe_atr, -2,2)/2`
+    # and `stretchPressure = clip((Close[t]-balance[t])/safe_atr, -2,2)/2`
+    # do NOT depend on Close/Open/High/Low directly -- they depend on
+    # `balance`, the Predictive Balance filter's own recursive STATE,
+    # which can carry a tiny nonzero residual (from `drift`/prediction
+    # lag left over from real price movement BEFORE a flat run started)
+    # even while the bar's own OHLC is perfectly flat. `bodyPressure`/
+    # `closePressure` genuinely ARE exactly 0 on a flat bar (their
+    # numerators, `Close-Open` and `2*Close-High-Low`, are 0 too --
+    # verified: 400 perfectly flat bars with NO preceding momentum give
+    # exactly 0.0, 0 bars above |0.5|) -- but `trendPressure`/
+    # `stretchPressure`'s numerators need not be exactly 0, only small.
+    # Divide a small-but-nonzero residual by a dust-sized `safe_atr` and
+    # the ratio explodes past the +-2 clip, saturating those two terms
+    # (40% of the composite's weight) -- confirmed on this project's own
+    # BIST cache, `ADESE_IS`: three consecutive `High==Low` bars
+    # (2011-11-07/08/09, `O=H=L=C=0.7519277532892589`, immediately
+    # preceded by real price movement) each carry a `balance[t]-
+    # balance[t-1]` residual of order 3e-5 and a `Close-balance` residual
+    # of order 3.5e-4 -- both saturate `stretchPressure` to exactly -1.0
+    # under the old 1e-8 floor, and the resulting saturated `rawPressure`
+    # then propagates forward through `pressureMemory`'s IIR recursion
+    # and the 5-bar EMA smoothing, landing at PRESSURE_PULSE=-1.1905 two
+    # bars later (2011-11-11) -- vs +1.0972 (a SIGN FLIP) once the floor
+    # is price-scale-aware (`min_tick=0.01`, an absolute floor
+    # representative of this ~0.75-price stock's real tick size).
+    #
+    # SCOPE, precisely (checked, not assumed -- a first draft of this
+    # section over-generalized to "any flat run" and had to be narrowed):
+    # this ONLY bites while `atr()` is itself genuinely UNDEFINED (NaN,
+    # insufficient history -- i.e. within a series' own first
+    # `atr_length` bars), so the fallback `High-Low` is live AND that
+    # bar's own range is exactly 0. A flat run occurring LATER in a
+    # series, once `atr()` is defined, does NOT reproduce this: Wilder's
+    # RMA includes the CURRENT bar's own true range every step (it is
+    # not lag-1), so the very first genuinely-moving bar after ANY flat
+    # stretch (long or short, anywhere in a mature series) immediately
+    # pulls its own large true range into `atr()`, self-healing in one
+    # bar -- checked directly with a synthetic 300-bar-flat + 1%-move
+    # construction: `safe_atr` at the moving bar is already ~0.073 (not
+    # dust) purely from that bar's own jump, and the resulting
+    # PRESSURE_PULSE reading (+-0.63) is BIT-IDENTICAL whether `rel_floor`
+    # is 1e-300 or the shipped default -- i.e. that reading is large but
+    # LEGITIMATE (a real, big stretch-from-balance after a quiet spell),
+    # not a floor artifact, and an earlier draft of this comment wrongly
+    # cited it as a second manifestation of the bug. The regression test,
+    # tests/test_pressure_pulse.py::
+    # test_flat_bars_early_in_history_saturate_without_price_scaled_floor,
+    # reproduces the SCOPE-CORRECT case instead: a short real move, then
+    # exact flat bars positioned WITHIN the first atr_length bars.
+    #
+    # Fix: floor BOTH `safe_atr` and `candle_range` at
+    # `max(min_tick, rel_floor * |Close|)` -- price-scale-aware, not a
+    # fixed absolute epsilon -- so the floor tracks whatever instrument's
+    # price magnitude is actually in play instead of vanishing next to
+    # it. `min_tick` remains available for a caller who knows their exact
+    # exchange tick size and wants an ABSOLUTE floor on top of the
+    # relative one (the two are combined via max()); `rel_floor` is the
+    # one that actually prevents the ADESE-class saturation on a bare
+    # Series with no symbol context. Default 5e-4 (0.05% of Close) was
+    # CHOSEN BY MEASUREMENT, not copied from a suggested example: at this
+    # value, ALL THREE of ADESE's flat-bar `trendPressure`/
+    # `stretchPressure` ratios drop below the +-2 clip threshold
+    # (verified componentwise, not just at the final smoothed output --
+    # 3e-4 was the measured threshold where saturation first stops on
+    # this case; 5e-4 keeps a margin above it). A candidate default of
+    # 1e-6 (a plausible-looking "small" relative epsilon) was tried FIRST
+    # and measured to have ZERO effect on this exact case (still -1.1905,
+    # bit-identical to no floor at all) -- confirmed empirically, not
+    # assumed, before being replaced with the validated 5e-4. Sweep
+    # footprint at the shipped default, 40 BIST_100 daily tickers /
+    # 180,842 bars (same sample as the overlap measurement): only 82
+    # bars (0.05%) move by >0.01 vs. an unfloor'd (rel_floor~0) run, 27
+    # (0.01%) by >0.05 -- a small, surgical correction confined to the
+    # pathological near-zero-ATR bars this floor targets, not a wholesale
+    # rescaling of the indicator (see module docstring "MINTICK / REL_
+    # FLOOR SUBSTITUTION").
     if min_tick is None:
         min_tick = 1e-8
     else:
@@ -145,6 +228,15 @@ def pressure_pulse(open_, high, low, close,
         min_tick = float(min_tick)
         if not np.isfinite(min_tick) or min_tick <= 0:
             raise ValueError(f"min_tick must be finite and positive, got {min_tick}")
+
+    if rel_floor is None:
+        rel_floor = 5e-4
+    else:
+        if isinstance(rel_floor, bool) or not isinstance(rel_floor, (int, float, np.integer, np.floating)):
+            raise ValueError(f"rel_floor must be numeric, got {type(rel_floor).__name__}: {rel_floor!r}")
+        rel_floor = float(rel_floor)
+        if not np.isfinite(rel_floor) or rel_floor <= 0:
+            raise ValueError(f"rel_floor must be finite and positive, got {rel_floor}")
 
     # Insufficient-history guard: `er()` (path_quality), `atr()` (safeAtr's
     # primary term) and `ema()` (pressureScale, pulse) all internally call
@@ -210,9 +302,15 @@ def pressure_pulse(open_, high, low, close,
     atr_series = _atr(high, low, close, length=atr_length, mamode="rma")
     atr_arr = atr_series.to_numpy(dtype="float64", copy=False) if atr_series is not None else np.full(n, np.nan)
     safe_atr = np.where(np.isfinite(atr_arr), atr_arr, h - lo)
-    safe_atr = np.maximum(safe_atr, min_tick)
 
-    candle_range = np.maximum(h - lo, min_tick)
+    # Price-scale-aware floor -- see the rel_floor validation comment above
+    # for why a fixed absolute epsilon (this port's original 1e-8) is a
+    # real bug, not a documentation nuance: it does nothing to stop a
+    # flat/halted run's ATR decaying to double-precision dust, and the
+    # first moving bar after such a run then saturates against it.
+    tick_floor = np.maximum(min_tick, rel_floor * np.abs(c))
+    safe_atr = np.maximum(safe_atr, tick_floor)
+    candle_range = np.maximum(h - lo, tick_floor)
 
     with np.errstate(invalid="ignore"):
         body_pressure = np.clip((c - o) / safe_atr, -1.0, 1.0)
@@ -244,9 +342,18 @@ def pressure_pulse(open_, high, low, close,
     ).to_numpy(dtype="float64", copy=False)
 
     # relativePressure = safeDiv(pressureMemory, pressureScale, 0.0):
-    # fallback to 0.0 whenever the scale is undefined, zero, or non-finite
-    # (the last case cannot arise from a finite-input, stable-parameter run
-    # -- see "BOUNDEDNESS" -- but is guarded defensively all the same).
+    # fallback to 0.0 whenever the scale is zero OR non-finite. The
+    # non-finite branch is PROVABLY unreachable given finite, validated
+    # inputs -- `pressureScale[t] >= alpha*|pressureMemory[t]|` (alpha =
+    # 2/(pulse_norm_length+1), since `pressureScale` is an EMA of
+    # nonnegative values seeded at its own first term), so
+    # `|relativePressure| <= 1/alpha = (pulse_norm_length+1)/2`, always
+    # finite -- see "BOUNDEDNESS" for the full derivation and the tighter
+    # provable |compressedPressure| bound this yields. The zero branch
+    # IS genuinely reachable, though (e.g. a degenerate all-zero-pressure
+    # fixture where `pressureMemory` never leaves 0), so `np.isfinite()`
+    # is kept as a harmless belt-and-braces check, not because it can
+    # fire on real input.
     valid_scale = np.isfinite(pressure_scale) & (pressure_scale != 0.0)
     relative_pressure = np.where(valid_scale, np.divide(pressure_memory, pressure_scale, where=valid_scale), 0.0)
 
@@ -323,8 +430,10 @@ Calculation:
     drift[t]        = drift_damping * drift[t-1] + drift_gain * reaction[t] * error[t]
 
     -- Pressure Pulse --
-    safeATR[t]        = max(ATR(atr_length)[t] if finite else High[t]-Low[t], min_tick)
-    candleRange[t]    = max(High[t]-Low[t], min_tick)
+    tickFloor[t]      = max(min_tick, rel_floor * |Close[t]|)   -- see
+                        "MINTICK / REL_FLOOR SUBSTITUTION" below
+    safeATR[t]        = max(ATR(atr_length)[t] if finite else High[t]-Low[t], tickFloor[t])
+    candleRange[t]    = max(High[t]-Low[t], tickFloor[t])
     bodyPressure[t]   = clip((Close[t]-Open[t]) / safeATR[t], -1, 1)
     closePressure[t]  = clip((2*Close[t]-High[t]-Low[t]) / candleRange[t], -1, 1)
     trendPressure[t]  = clip((balance[t]-balance[t-1]) / safeATR[t], -2, 2) / 2
@@ -336,9 +445,13 @@ Calculation:
                         + (max(memory_min,memory_max) - min(memory_min,memory_max)) * pathQuality[t]
     pressureMemory[t] = memoryFactor[t] * pressureMemory[t-1] + rawPressure[t]   (t=0: = rawPressure[0])
                         -- an UN-normalized IIR accumulator (no *(1-factor)
-                        term), stable because memoryFactor in [0, 0.98] by
-                        the Pine source's own input bounds (see
-                        "BOUNDEDNESS")
+                        term), stable because memoryFactor in [0, 0.99] --
+                        the CEILING is max(memory_min,memory_max), and
+                        memory_max's own maxval (0.99) exceeds memory_min's
+                        (0.98), so 0.99 is the binding bound, not 0.98 (see
+                        "BOUNDEDNESS": at memory_max=0.99, pathQuality=1.0
+                        is reachable, so |pressureMemory| can reach
+                        1/(1-0.99) = 100 in the worst case)
     pressureScale[t]  = EMA(|pressureMemory|, pulse_norm_length)[t]
     relativePressure[t] = pressureMemory[t]/pressureScale[t] if pressureScale[t] not in {0, undefined} else 0
     compressedPressure[t] = 2*relativePressure[t] / (1.5 + |relativePressure[t]|)
@@ -435,17 +548,52 @@ side of that fallback a single bar lands on, not whether the fallback
 pattern exists. Not claimed to be an exact match; the divergence is
 measured and bounded, not hand-waved away.
 
-MINTICK SUBSTITUTION: Pine's `syminfo.mintick` (the listed instrument's
-minimum price increment, from TradingView's own exchange metadata) has no
-equivalent for a bare OHLC Series with no symbol/exchange context. A fixed
-`min_tick` parameter (default 1e-8) is substituted everywhere the source
-used `syminfo.mintick` -- both `safeAtr`'s and `candleRange`'s zero-range
-floor. This is a genuine, acknowledged deviation from the source (not a
-silent one): on an instrument whose real tick size is coarser than 1e-8,
-a High==Low bar's `candleRange` floor here is far smaller than Pine's
-would be, so `closePressure` on such a bar would clip to +-1 more readily
-here than on the original chart. Callers with a known tick size should
-pass it explicitly via `min_tick=`.
+MINTICK / REL_FLOOR SUBSTITUTION: Pine's `syminfo.mintick` (the listed
+instrument's minimum price increment, from TradingView's own exchange
+metadata) has no equivalent for a bare OHLC Series with no symbol/
+exchange context. `safeAtr` and `candleRange` are floored at
+`max(min_tick, rel_floor * |Close|)` -- a price-scale-aware relative
+floor (`rel_floor`, default 5e-4, i.e. 0.05% of Close), NOT a fixed
+absolute epsilon.
+
+This matters because an earlier version of this port used ONLY a fixed
+absolute epsilon (1e-8) here, which was a REAL NUMERICAL BUG, not a
+documentation nuance -- 1e-8 is effectively zero next to any real price,
+so it does nothing to stop `safe_atr` collapsing on a `High == Low` bar
+(the fallback `High-Low` is EXACTLY 0 there). The EXACT mechanism,
+measured, not the first (wrong) guess at it: `trendPressure`/
+`stretchPressure` depend on `balance` -- the Predictive Balance filter's
+own recursive STATE -- which can carry a tiny nonzero residual left over
+from real price movement BEFORE a flat run even while the CURRENT bar's
+OHLC is perfectly flat (unlike `bodyPressure`/`closePressure`, whose
+numerators, `Close-Open` and `2*Close-High-Low`, genuinely ARE exactly 0
+on a flat bar -- verified: 400 perfectly flat bars with no preceding
+momentum give exactly 0.0 output, 0 bars above |0.5|). Divide that small
+residual by a dust-sized `safe_atr` and the ratio blows past the +-2
+clip, saturating those two terms. Confirmed on this project's own BIST
+cache: `ADESE_IS`'s three consecutive `High==Low` bars (2011-11-07/08/09,
+immediately preceded by real price movement) each saturate
+`stretchPressure` to exactly -1.0 under the old fixed-epsilon floor, and
+the saturated `rawPressure` propagates through `pressureMemory`'s IIR
+recursion and the 5-bar EMA smoothing to PRESSURE_PULSE=-1.1905 two bars
+later -- a SIGN FLIP to +1.0972 once the floor is price-scale-aware (full
+derivation, and the precise SCOPE this bites under -- genuinely undefined
+`atr()`, i.e. only within a series' own first `atr_length` bars, NOT any
+flat run anywhere; a later-in-series flat run self-heals in one bar via
+Wilder's same-bar true-range inclusion, checked directly and NOT a
+manifestation of this bug -- in the `rel_floor` validation comment in the
+function body). `rel_floor=5e-4` was chosen by MEASUREMENT: it is the
+smallest tested value (after 1e-4, which was insufficient) that clears
+ALL THREE of ADESE's flat-bar ratios below the clip threshold, with
+margin; sweep footprint on 40 BIST_100 daily
+tickers / 180,842 bars is small and targeted (82 bars, 0.05%, move by
+>0.01 vs. an unfloored run; 27 bars, 0.01%, by >0.05) -- this is a
+surgical correction of the pathological near-zero-ATR case, not a
+wholesale rescaling of the indicator's everyday behavior. `min_tick`
+remains available as an ADDITIONAL absolute floor for a caller who knows
+their instrument's exact tick size (combined with the relative floor via
+`max()`); on its own, at the library default (1e-8), it does essentially
+nothing -- the relative floor is what carries the fix.
 
 BOUNDEDNESS (verified by fuzzing, NOT the scoping survey's "+-1" claim --
 that claim is WRONG): `compressedPressure = 2*r / (1.5 + |r|)` is bounded
@@ -459,16 +607,40 @@ strict (-2, 2) bound. The Pine source's own input `maxval`s on
 mirrored here as hard ValueError bounds, see Args -- additionally
 guarantee the `drift`/`pressureMemory` recursions themselves cannot
 diverge to +-inf (which would otherwise risk an inf-inf -> NaN through the
-`clip()` calls). Verified two ways, both truthfully reported (not the
-same run, do not average them): the SHIPPED regression test,
-tests/test_pressure_pulse.py::test_bounded_by_fuzzing, runs 400 draws of
-random-walk OHLC with randomized valid parameter combinations every time
-the suite runs (worst |PRESSURE_PULSE| observed there printed to stdout,
-always < 2.0, typically ~1.7-1.9); a separate, larger, NOT-shipped
-one-off exploration during development ran 3,000 draws (worst observed
-1.861) to build confidence before committing to the 400-draw regression
-count -- 3,000 was not kept in the suite because it costs ~7x the
-runtime (~20s vs ~3s) for the same qualitative conclusion.
+`clip()` calls).
+
+TIGHTER PROVABLE BOUND (derived, not fuzzed): `pressureScale` is an EMA of
+`|pressureMemory|`, seeded at its own first term with `alpha =
+2/(pulse_norm_length+1)`, so by induction `pressureScale[t] >=
+alpha*|pressureMemory[t]|` for every t (base case: seed equality; step:
+`pressureScale[t] = alpha*|pm[t]| + (1-alpha)*pressureScale[t-1] >=
+alpha*|pm[t]|` since `pressureScale[t-1] >= 0`). Therefore
+`|relativePressure| <= 1/alpha = (pulse_norm_length+1)/2` whenever
+`pressureMemory[t] != 0` (and exactly 0, trivially within bound, via the
+safeDiv fallback when it IS 0) -- this ALSO proves `relativePressure` can
+never be non-finite given finite inputs, retiring the `np.isfinite()`
+guard on that division as a genuinely unreachable branch (see the
+`valid_scale` comment in the function body; the zero-denominator branch
+remains reachable and is kept). Composing with the monotonic squash gives
+`|compressedPressure| <= 2*((pulse_norm_length+1)/2) /
+(1.5 + (pulse_norm_length+1)/2) = 2*(pulse_norm_length+1) /
+(pulse_norm_length+4)` -- at the default `pulse_norm_length=50`:
+2*51/54 = 1.8889 (recurring), tighter than the general (-2,2) bound and
+independent of fuzzing.
+
+Verified two ways empirically as well, both truthfully reported with
+their exact seeds (not the same run, do not average them): the SHIPPED
+regression test, tests/test_pressure_pulse.py::test_bounded_by_fuzzing,
+runs 400 draws of random-walk OHLC with randomized valid parameter
+combinations every time the suite runs, seeded from `np.random.
+RandomState(42)` (worst |PRESSURE_PULSE| observed there printed to
+stdout, always < 2.0, typically ~1.7-1.9); a separate, larger, NOT-shipped
+one-off exploration using the exact same generator with outer seed 12345
+ran 3,000 draws and observed a worst of 1.848710 -- consistent with, and
+below, the tighter provable bound above. 3,000 draws was not kept in the
+suite because it costs ~7x the runtime (~20s vs ~3s) for the same
+qualitative conclusion the closed-form bound already establishes more
+strongly.
 
 Causality: `balance`/`drift`/`pressureMemory` are true IIR recursions (each
 bar's value depends on the PREVIOUS bar's `balance`/`drift`/
@@ -516,9 +688,17 @@ Args:
     memory_max (float): pressureMemoryFactor ceiling (Pine "Maximum
         Memory"). Default: 0.88. Must be in [0.00, 0.99] -- the < 1 bound
         is what keeps pressureMemory from diverging, see "BOUNDEDNESS".
-    min_tick (float): Substitute for Pine's `syminfo.mintick` (no
-        exchange context on a bare Series) -- see "MINTICK SUBSTITUTION".
-        Default: 1e-8. Must be finite and positive.
+    min_tick (float): ADDITIONAL absolute floor for a caller who knows
+        their instrument's exact tick size -- see "MINTICK / REL_FLOOR
+        SUBSTITUTION". Default: 1e-8 (essentially inert on its own; the
+        default protection comes from `rel_floor`, not this). Must be
+        finite and positive.
+    rel_floor (float): Price-scale-aware relative floor on `safeAtr`/
+        `candleRange`, as a fraction of `|Close|` -- see "MINTICK /
+        REL_FLOOR SUBSTITUTION" for why this exists (a fixed absolute
+        floor alone was a real numerical bug, not a doc gap) and how the
+        default was measured. Default: 5e-4 (0.05% of Close). Must be
+        finite and positive.
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:

@@ -1043,7 +1043,7 @@ class AnalysisIndicators(BasePandasObject):
                         drift_gain=None, drift_damping=None, atr_length=None,
                         pulse_norm_length=None, pulse_smooth_length=None,
                         memory_min=None, memory_max=None, min_tick=None,
-                        offset=None, **kwargs):
+                        rel_floor=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -1054,7 +1054,7 @@ class AnalysisIndicators(BasePandasObject):
             drift_gain=drift_gain, drift_damping=drift_damping, atr_length=atr_length,
             pulse_norm_length=pulse_norm_length, pulse_smooth_length=pulse_smooth_length,
             memory_min=memory_min, memory_max=memory_max, min_tick=min_tick,
-            offset=offset, **kwargs,
+            rel_floor=rel_floor, offset=offset, **kwargs,
         )
         return self._post_process(result, **kwargs)
 

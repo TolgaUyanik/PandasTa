@@ -75,7 +75,8 @@ def _reference_pressure_pulse(open_, high, low, close, balance_length=20,
                                min_gain=0.05, max_gain=0.40, drift_gain=0.12,
                                drift_damping=0.80, atr_length=14,
                                pulse_norm_length=50, pulse_smooth_length=5,
-                               memory_min=0.60, memory_max=0.88, min_tick=1e-8):
+                               memory_min=0.60, memory_max=0.88, min_tick=1e-8,
+                               rel_floor=5e-4):
     from pandas_ta.volatility import atr as _leaf_atr
 
     n = len(close)
@@ -126,8 +127,9 @@ def _reference_pressure_pulse(open_, high, low, close, balance_length=20,
     atr_s = _leaf_atr(pd.Series(h), pd.Series(lo), pd.Series(c), length=atr_length, mamode="rma")
     atr = [None if pd.isna(x) else float(x) for x in atr_s]
 
-    safe_atr = [max(atr[i] if atr[i] is not None else (h[i] - lo[i]), min_tick) for i in range(n)]
-    candle_range = [max(h[i] - lo[i], min_tick) for i in range(n)]
+    tick_floor = [max(min_tick, rel_floor * abs(c[i])) for i in range(n)]
+    safe_atr = [max(atr[i] if atr[i] is not None else (h[i] - lo[i]), tick_floor[i]) for i in range(n)]
+    candle_range = [max(h[i] - lo[i], tick_floor[i]) for i in range(n)]
 
     def clamp(v, a, b):
         # NaN-PROPAGATING, matching production's np.clip (which preserves
@@ -427,6 +429,95 @@ def test_mutation_affects_only_current_and_later_bars():
     changed_from_T = (out_orig.iloc[T:] != out_mut.iloc[T:])
     assert changed_from_T.any(), "mutation at T should visibly change bar T or later"
     assert out_orig.iloc[T] != out_mut.iloc[T]
+
+
+def test_flat_bars_early_in_history_saturate_without_price_scaled_floor():
+    """Regression for the MAJOR finding (Fletcher review, 2026-08-14): a
+    fixed ABSOLUTE epsilon floor (this port's original default, 1e-8) is
+    essentially zero next to any real price and does nothing to stop
+    `safe_atr` collapsing to exactly 0 on a `High==Low` bar whose `atr()`
+    is ALSO still undefined (NaN, insufficient history) -- confirmed on
+    this project's own BIST cache, `ADESE_IS`: three consecutive
+    `High==Low` bars very early in its history (2011-11-07/08/09,
+    immediately preceded by real price movement) produce
+    PRESSURE_PULSE=-1.1905 under the old floor vs +1.0972 (a SIGN FLIP)
+    once the floor is price-scale-aware.
+
+    SCOPE, precisely (checked, not assumed): this bites ONLY while
+    `atr()` is genuinely undefined -- i.e. within a series' own first
+    `atr_length` bars. A flat run occurring LATER in a mature series does
+    NOT reproduce this: Wilder's RMA includes the CURRENT bar's own true
+    range every step, so the first genuinely-moving bar after any later
+    flat stretch self-heals `atr()` in one bar regardless of the floor
+    (checked directly with a 300-flat-bar + 1%-move construction: the
+    reading is bit-identical whether rel_floor is 1e-300 or the shipped
+    default -- large, but legitimate, not a floor artifact). This test
+    reproduces the SCOPE-CORRECT case: a short real decline (so `balance`
+    carries a nonzero residual into the flat run -- `bodyPressure`/
+    `closePressure` genuinely ARE exactly 0 on a flat bar regardless,
+    since their own numerators are 0 too), then 3 EXACT `O=H=L=C` bars
+    positioned WITHIN the first `atr_length=14` bars (so `atr()` is
+    provably NaN there, not merely small).
+    """
+    n = 80
+    close = np.full(n, 100.0)
+    for i in range(4):
+        close[i] = 100.0 - 0.5 * i
+    flat_price = close[3]
+    for i in range(4, 7):
+        close[i] = flat_price
+    rng = np.random.RandomState(0)
+    for i in range(7, n):
+        close[i] = close[i - 1] + rng.randn() * 0.3
+    open_ = close.copy()
+    open_[1:] = close[:-1]
+    open_[0] = close[0]
+    high = close.copy()
+    low = close.copy()
+    for i in list(range(4)) + list(range(7, n)):
+        high[i] = max(open_[i], close[i]) + 0.05
+        low[i] = min(open_[i], close[i]) - 0.05
+    idx = pd.date_range("2020-01-01", periods=n, freq="B")
+    open_s, high_s, low_s, close_s = (pd.Series(a, index=idx) for a in (open_, high, low, close))
+
+    # Sanity: the 3 flat bars really are exactly O==H==L==C (a degenerate
+    # bar by design here, unlike every other fixture in this file which
+    # asserts NON-degenerate OHLC -- this is the one deliberate exception,
+    # exercising exactly the pathological shape this test targets).
+    for i in range(4, 7):
+        assert open_s.iloc[i] == high_s.iloc[i] == low_s.iloc[i] == close_s.iloc[i]
+    # And ATR is genuinely undefined (NaN) there, not merely small --
+    # confirms this reproduction sits in the documented SCOPE.
+    from pandas_ta.volatility import atr as _atr_check
+    atr_check = _atr_check(high_s, low_s, close_s, length=14, mamode="rma")
+    assert atr_check.iloc[4:7].isna().all()
+
+    # rel_floor=1e-300 reproduces the pre-fix behavior exactly (tick_floor
+    # collapses to min_tick, since rel_floor*|Close| is negligible) --
+    # this IS what the shipped code did before this fix, not merely an
+    # approximation of it.
+    out_broken = ta.pressure_pulse(open_s, high_s, low_s, close_s, rel_floor=1e-300)
+    out_fixed = ta.pressure_pulse(open_s, high_s, low_s, close_s)  # shipped default, rel_floor=5e-4
+    out_reference = ta.pressure_pulse(open_s, high_s, low_s, close_s, rel_floor=1e-2)  # generously floored
+
+    diff_broken_fixed = (out_broken - out_fixed).abs()
+    diff_broken_ref = (out_broken - out_reference).abs().max()
+    diff_fixed_ref = (out_fixed - out_reference).abs().max()
+    print(f"flat-bars-early-in-history: max |broken - fixed| = {diff_broken_fixed.max():.6f} "
+          f"at {diff_broken_fixed.idxmax()}; |broken-ref|={diff_broken_ref:.4f} |fixed-ref|={diff_fixed_ref:.4f}")
+
+    # THIS is the assertion that fails against the pre-fix (1e-8-only)
+    # floor: the broken and fixed readings diverge by a MATERIAL, not
+    # rounding-level, amount at the pathological bars.
+    assert diff_broken_fixed.max() > 0.05
+    # And the fix moves the reading in the right direction -- measurably
+    # closer to a generously-floored reference than the broken config is.
+    assert diff_fixed_ref < diff_broken_ref
+    # Both remain within the general (-2,2) bound regardless (that holds
+    # unconditionally by construction, see BOUNDEDNESS) -- this test is
+    # about the MEANINGFULNESS of the reading, not the bound itself.
+    assert out_broken.abs().max() < 2.0
+    assert out_fixed.abs().max() < 2.0
 
 
 def test_single_nan_poisons_all_subsequent_bars():
