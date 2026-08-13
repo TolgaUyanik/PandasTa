@@ -414,7 +414,7 @@ def test_atten_sup_excludes_level_price_has_moved_above():
     assert not atten_sup.iloc[27:].isna().any()
 
 
-def test_max_levels_fifo_cap_per_side():
+def test_max_levels_fifo_cap_resistance_side():
     # max_levels=1: level 1 (price=105, confirms bar 7) must be EVICTED
     # the instant level 2 (price=120, confirms bar 22) is pushed -- ATTEN
     # must jump straight to level 2's value, never level 1's.
@@ -434,6 +434,30 @@ def test_max_levels_fifo_cap_per_side():
     assert atten_res.iloc[22:].eq(level2_atten).all()
 
 
+def test_max_levels_fifo_cap_support_side():
+    # Fletcher NIT: the resistance-side test above was misleadingly named
+    # "_per_side" while only ever exercising the resistance pool -- a
+    # copy-paste inversion in sr_decay.py's support-side eviction branch
+    # (`sup_levels.pop(0)`) would have gone uncaught. Mirror on the
+    # support side: level 1 (price=95, confirms bar 7) must be EVICTED the
+    # instant level 2 (price=80, confirms bar 22) is pushed under
+    # max_levels=1.
+    n = 30
+    H = np.full(n, 101.0); L = np.full(n, 99.0); C = np.full(n, 100.0)
+    H[5], L[5], C[5] = 101.0, 95.0, 100.0
+    H[20], L[20], C[20] = 101.0, 80.0, 100.0
+    out = _run(H, L, C, swing_len=2, max_levels=1)
+
+    atten_sup = out["SRD_ATTEN_SUP_2"]
+    assert not atten_sup.iloc[7:22].isna().any()
+    level1_atten = atten_sup.iloc[7]
+    assert atten_sup.iloc[7:22].eq(level1_atten).all()
+    level2_atten = atten_sup.iloc[22]
+    assert not math.isclose(level2_atten, level1_atten, rel_tol=1e-9), \
+        "level 1 must be evicted, not still reported, once level 2 confirms under max_levels=1"
+    assert atten_sup.iloc[22:].eq(level2_atten).all()
+
+
 def test_atten_and_swirl_report_real_values_not_nan_when_close_equals_level_price():
     # THE dedicated regression test for the Fletcher-MAJOR fix
     # sr_force.py's DIST/SCORE columns already established: before that
@@ -446,7 +470,7 @@ def test_atten_and_swirl_report_real_values_not_nan_when_close_equals_level_pric
     # earlier) so ATR(14)/SMA(high-low,14) are already warmed up by the
     # confirming bar -- this test's SWIRL assertion needs a REAL (not
     # early-history-NaN) swirl value to be meaningful; see
-    # test_atten_swirl_nan_relationship_is_one_directional_and_bounded for
+    # test_atten_real_swirl_permanently_nan_for_early_history_level for
     # the (expected, documented) early-history NaN-swirl case this
     # deliberately avoids. At bar 30, Close is set to EXACTLY 107 (H/L
     # widened just enough to keep the bar physically valid; this
@@ -486,19 +510,31 @@ def test_atten_and_swirl_report_real_values_not_nan_when_close_equals_level_pric
         "must report the level's real swirl, never NaN, at the exact equality boundary"
 
 
-def test_atten_swirl_nan_relationship_is_one_directional_and_bounded():
-    # ATTEN.isna() must imply SWIRL.isna() (no side-valid level at all),
-    # but NOT the reverse: a level confirmed before ATR(14) had any valid
-    # history can carry a real ATTEN (no ATR dependency) alongside a
-    # permanently-NaN SWIRL. See the module docstring's account of why
-    # this differs from sr_force.py's fully two-way SCORE/DIST pairing.
+def test_atten_swirl_bounded_and_atten_isna_implies_swirl_isna():
+    # Fletcher MAJOR (round 1): the expression previously shipped here was
+    # `(atten.isna() | swirl.notna()).all()`, which is
+    # `atten.notna() => swirl.notna()` -- the LOGICAL INVERSE of the
+    # documented invariant, and it happened to pass only because seed=11/
+    # n=250 has no pivot confirming before ATR(14) warms up on this
+    # particular fixture (no statistical power to catch the bug it
+    # claimed to guard). The correct proposition, matching this test's own
+    # (unchanged) failure message and the module docstring's account of
+    # why the ATTEN/SWIRL relationship is one-directional (NOT
+    # sr_force.py's fully two-way SCORE/DIST pairing), is
+    # `atten.isna() => swirl.isna()`, i.e. `atten.notna() | swirl.isna()`.
+    # The POSITIVE case this bound alone cannot exercise -- a level that
+    # actually HAS real ATTEN alongside permanently-NaN SWIRL -- is
+    # covered end-to-end by
+    # test_atten_real_swirl_permanently_nan_for_early_history_level below;
+    # this test only checks the bound holds and never inverts, dropped
+    # NaN checks omitted here would silently pass a stub too.
     open_, high, low, close = _random_walk_ohlc(n=250, seed=11)
     out = ta.sr_decay(high, low, close)
     for atten_col, swirl_col in (("SRD_ATTEN_RES_5", "SRD_SWIRL_RES_5"),
                                   ("SRD_ATTEN_SUP_5", "SRD_SWIRL_SUP_5")):
         atten = out[atten_col]
         swirl = out[swirl_col]
-        assert (atten.isna() | swirl.notna()).all(), \
+        assert (atten.notna() | swirl.isna()).all(), \
             f"{atten_col}.isna() must imply {swirl_col}.isna() (no side-valid level -> both NaN)"
         pop_atten = atten.dropna()
         pop_swirl = swirl.dropna()
@@ -506,6 +542,46 @@ def test_atten_swirl_nan_relationship_is_one_directional_and_bounded():
         assert (pop_atten >= 0.0).all() and (pop_atten <= 1.0).all()
         if len(pop_swirl):
             assert (pop_swirl >= 0.0).all() and (pop_swirl <= 5.0).all()
+
+
+def test_atten_real_swirl_permanently_nan_for_early_history_level():
+    # THE positive, end-to-end regression test the module docstring's
+    # "one-directional NaN relationship" paragraph (and family-structure-
+    # smc.md §2h, and the register's srd_swirl_ `why` string) all rest on
+    # -- Fletcher MAJOR (round 1): nothing in the suite previously
+    # exercised this end-to-end (test_swirl_returns_nan_when_both_atr_
+    # invalid only forces NaN into a synthetic atr_v array and never calls
+    # sr_decay() itself).
+    #
+    # Swing high at bar 3 (H=110, unique vs flooded H=101), confirms at
+    # bar 5 (swing_len=2) -- deliberately BEFORE ATR(14) has any valid
+    # history (needs ~14 bars), so this level's SWIRL is computed from
+    # `atr_near`/`atr_current` that are both still NaN at confirmation.
+    # ATTEN has no ATR dependency and is real regardless.
+    n = 40
+    H, L, C = _flooded_hlc(n)
+    H[3], L[3], C[3] = 110.0, 99.0, 100.0
+    out = _run(H, L, C, swing_len=2, max_levels=20)
+
+    atten_res = out["SRD_ATTEN_RES_2"]
+    swirl_res = out["SRD_SWIRL_RES_2"]
+    assert atten_res.iloc[:5].isna().all()
+
+    price_change_pct = abs(100.0 - 110.0) / 110.0 * 100.0
+    time_decay = min(2 / 50.0, 1.0)
+    price_decay = min(price_change_pct / 10.0, 1.0)
+    expected_atten = min(time_decay * 0.6 + price_decay * 0.4, 1.0)
+    assert math.isclose(atten_res.iloc[5], expected_atten, rel_tol=1e-9)
+    assert not np.isnan(atten_res.iloc[5]), "ATTEN must be real -- no ATR dependency"
+    assert np.isnan(swirl_res.iloc[5]), \
+        "SWIRL must be NaN -- ATR(14) has no valid history yet at this early confirming bar"
+
+    # the NaN is frozen at creation (like every other per-level scalar
+    # here) and never heals even once ATR(14) has long warmed up by later
+    # bars -- ATTEN stays real and constant for the same reason.
+    assert atten_res.iloc[5:].eq(atten_res.iloc[5]).all()
+    assert swirl_res.iloc[5:].isna().all(), \
+        "the NaN SWIRL must never heal, even after ATR(14) warms up at later bars"
 
 
 # ---------------------------------------------------------------------------

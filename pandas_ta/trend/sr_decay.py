@@ -92,7 +92,18 @@ def _attenuation(price, close_t, time_decay):
     exactly -- `currentPrice` in the source is simply `close` read on the
     bar the function executes on, which (module 6's calling site) is
     always the confirming bar, i.e. this function's own `close_t`.
+
+    `price <= 0` (unreachable on real market data -- a confirmed swing
+    pivot price is never zero or negative) returns NaN rather than
+    raising ZeroDivisionError: the source has no equivalent guard (Pine
+    division by zero is `na`, not an exception), and this fork's
+    try/except-per-indicator wiring in `indicator_engine.py` would
+    otherwise silently drop all 4 SRD_ columns on a single degenerate
+    input row -- a defensive guard, not a behavior change for any real
+    price series.
     """
+    if price <= 0:
+        return np.nan
     price_change_pct = abs(close_t - price) / price * 100.0
     price_decay = min(price_change_pct / 10.0, 1.0)
     attenuation = time_decay * 0.6 + price_decay * 0.4
@@ -110,13 +121,34 @@ def _swirl(atr_v, hl_sma_v, high_v, low_v, t, bars_ago):
     reproducing a real distinction in the source, not an inconsistency
     introduced by this port: `atr_v` is `ta.atr(14)` (Wilder/RMA-smoothed
     TRUE range, gap-inclusive -- `pandas_ta.volatility.atr`'s own default
-    `mamode="rma"` matches Pine's `ta.atr` exactly), used for
+    `mamode="rma"` matches Pine's `ta.atr` FORMULA exactly), used for
     `volatility_change = atr_current / atr_near`; `hl_sma_v` is a plain
     14-bar SIMPLE moving average of `high - low` (bar range, NOT true
     range -- no gap component), used as each scanned bar's own
     normalizer inside the swirl sum. The source's `ta.atr(14)` and
     `ta.sma(high - low, 14)` genuinely are two different series; this
     port keeps them separate rather than collapsing to one for tidiness.
+
+    ⚠ ONE REAL DIVERGENCE from the source, not merely a formula match: in
+    the .pine source, both `ta.atr(14)` (inside `calcSwirl`, itself only
+    called from the `if not na(swingHigh)`/`if not na(swingLow)` blocks,
+    module 6, lines 367-372/392-397) and `ta.sma(high - low, 14)` (inside
+    `calcSwirl`'s own `for i = 0 to 10` loop) are call sites that Pine
+    only advances on the bars where they actually EXECUTE -- i.e. only on
+    confirming bars, not every bar. This port instead computes `atr_v`/
+    `hl_sma_v` as ordinary EVERY-BAR series (via this fork's own `atr()`
+    and a plain `.rolling(14).mean()`) and indexes into them at the
+    bars the source's sparse calls would have landed on. The two are NOT
+    proven identical series -- Pine's own conditional-call-site semantics
+    for `ta.*` functions are a known subtlety this port does not attempt
+    to replicate bar-for-bar. The every-bar interpretation is the
+    deliberate, reasonable choice here (an every-bar ATR/SMA series is
+    the only practical way to look up "the ATR value at the pivot bar,
+    however many bars ago that was" without re-deriving a sparse-call
+    warm-up state machine), not an oversight; flagged explicitly because
+    every OTHER quirk in this file (the /10 divisor, the barsAgo clamp,
+    the atrNear fallback) is reproduced to the digit, and this is the one
+    place that is not.
 
     `atrNear = ta.atr(14)[barsAgo]` reads the ATR value AT THE PIVOT BAR
     itself (`t - bars_ago`, which under this port's construction is
@@ -383,9 +415,17 @@ that NaN is then frozen on the level like every other per-level scalar
 here. So a level from early history can report a real `ATTEN` alongside a
 permanently-NaN `SWIRL`; a level with no candidate at all reports NaN on
 both. Verified: `tests/test_sr_decay.py::
-test_atten_swirl_nan_relationship_is_one_directional_and_bounded`. This
-port intentionally does not re-expose its own DIST column -- combine with
-`sr_force()`'s `SRF_DIST_RES`/`SRF_DIST_SUP` for distance.
+test_atten_swirl_bounded_and_atten_isna_implies_swirl_isna` (the bound,
+across a random-walk fixture) and, end-to-end, `tests/test_sr_decay.py::
+test_atten_real_swirl_permanently_nan_for_early_history_level` (a
+constructed level that actually exhibits real-ATTEN/NaN-SWIRL, proving
+the positive case the bound alone cannot -- Fletcher MAJOR round 1: an
+earlier version of the first test asserted the LOGICAL INVERSE of this
+paragraph, `atten.notna() => swirl.notna()`, and passed only because its
+fixture had no early-history level to catch it; fixed, and the missing
+positive test added, same round). This port intentionally does not
+re-expose its own DIST column -- combine with `sr_force()`'s
+`SRF_DIST_RES`/`SRF_DIST_SUP` for distance.
 
 Calculation:
     Default Inputs:
