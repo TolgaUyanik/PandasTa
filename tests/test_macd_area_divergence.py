@@ -305,7 +305,13 @@ def test_scale_invariance_holds_on_the_firing_fixtures():
         base = macd_area_divergence(h, l, c, **P)
         assert base[col].sum() > 0, "fixture stopped firing -- test has no power"
         scaled = macd_area_divergence(h * 8, l * 8, c * 8, **P)
-        pd.testing.assert_frame_equal(base, scaled, check_exact=False, rtol=1e-12)
+        # x8 is an exponent shift, so demand BIT-equality here rather than a
+        # tolerance. Fletcher NIT (round 1): the power-of-two test above runs
+        # on `_realistic()`, where MADIV_BOT is identically zero -- so its
+        # bit-identity assertion on the BOT column is vacuous, and "bit-
+        # identical on all six columns" had never been asserted with a live
+        # BOT flag until this line.
+        pd.testing.assert_frame_equal(base, scaled, check_exact=True)
 
 
 # ---------------------------------------------------------------------------
