@@ -356,7 +356,7 @@ and the two corrections in detail):
     the maximum over the register's full 212 `OK`-verdict columns; a full
     programmatic sweep was started but not completed).
   - `bias` (Oscillator/momentum, `(close-SMA20)/SMA20`,
-    `indicator_engine.py:1147`): Spearman 0.9361 / 0.9370 / 0.9138.
+    `indicator_engine.py:1146`): Spearman 0.9361 / 0.9370 / 0.9138.
   - `RSI`: Spearman 0.9276 / 0.9308 / 0.9097.
   - `ATR_POSITION` (register verdict NORMALIZE, not OK): Spearman
     0.9216 / 0.9265 / 0.8638.
