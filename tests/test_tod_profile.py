@@ -14,6 +14,15 @@ MUTANT (`_load_self_inclusion_mutant`) that loads the real module's own source
 via `importlib`, reverses exactly the two marked ordering lines, and `exec`s
 the result into an in-memory module -- so the mutant is provably the real
 algorithm with one thing changed, never a hand-reimplementation.
+
+Read this before "fixing" the port to match Pine: THE MUTANT IS THE
+PINE-FAITHFUL VARIANT. The source's accumulation block is gated on
+`barstate.isconfirmed` (L145), which is TRUE on historical bars, so bar i is
+folded into its slot (L149) before `rNow = f_metric(curSlot)` (L180) reads
+that slot back -- Pine's plotted value for bar i INCLUDES bar i. This port
+deliberately deviates to strictly-prior, because a self-included baseline is
+a within-bar leak in a walk-forward backtest. That deviation is the whole
+reason this test exists; it is not a fidelity bug to be repaired.
 """
 import numpy as np
 import pandas as pd

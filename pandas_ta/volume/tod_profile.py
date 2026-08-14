@@ -250,10 +250,17 @@ DELIBERATELY NOT EMITTED, and why
       are INTERMEDIATE quantities in the source -- neither is ever plotted
       or tabulated; only the slot means reach output. `rvolBar` is also
       already computed bit-for-bit by the consuming engine as `VOL_RATIO`
-      (`volume / SMA(volume,20)`, indicator_engine.py:494 /
-      speedy_indicators.py:429), and its `bbWidth` input is already there as
-      `BB_BWidth` (`bbands(Close,20,2)` column 3, speedy_indicators.py:141).
+      (`volume / SMA(volume,20)`, written by
+      `indicator_engine._calculate_volume_indicators` /
+      `speedy_indicators.calculate_volume_indicators_custom`), and its
+      `bbWidth` input is already there as `BB_BWidth` (`bbands(Close,20,2)`
+      column 3, `speedy_indicators.calculate_bollinger_bands`).
       Re-emitting either would be a pure duplicate.
+      (Anchors are FUNCTION NAMES, not line numbers, per the consuming
+      repo's Indicator Book citation convention -- an earlier revision of
+      this docstring cited indicator_engine.py:494 for a `VOL_RATIO`
+      assignment that is on :495, which is the rot that convention exists
+      to prevent.)
     - A combined "heat" column (Pine `rNow`/`f_combine`, L164-175, L180).
       Every option is a deterministic pointwise function -- mean or max --
       of the two slot columns already emitted, so it adds no information a
@@ -267,7 +274,9 @@ NOT PORTED (the other two of the source's three systems)
     - The LIVE HEAT renderer (L180-197): `plotshape`/`plot`/`barcolor`/
       `bgcolor` gradient drawing plus the `winStart` marker. Presentation
       only; the underlying `rNow` is the slot means already emitted.
-    - The entire `barstate.islast` PANEL (L202-292). A single-snapshot
+    - The entire `barstate.islast` PANEL (L202 to the source's last line,
+      291 -- an earlier revision of this docstring said "L202-292", one
+      line past EOF). A single-snapshot
       dashboard computed once on the final bar, not a per-bar causal series
       -- declined for exactly the reason `volume/avwap_z.py` declined its
       source's Module 2. Its contiguous-slot WINDOW MERGING (L217-241) is
@@ -300,9 +309,30 @@ CAUSALITY
     swap is performed as an executable MUTANT in
     tests/test_tod_profile.py::test_self_inclusion_mutant_is_detected, which
     loads this module's own source via `importlib`, reverses exactly the two
-    marked lines, and shows REAL and MUTANT disagree -- the source's
-    `barstate.isconfirmed` gate (L145) is suggestive of this ordering but is
-    not proof of a pandas translation, so it is proven rather than asserted.
+    marked lines, and shows REAL and MUTANT disagree.
+
+    A DELIBERATE DEVIATION FROM THE SOURCE, stated plainly because an
+    earlier revision of this docstring got it backwards. THE SOURCE
+    SELF-INCLUDES on every historical bar. Its accumulation block is gated
+    on `barstate.isconfirmed` (L145), and on historical bars that gate is
+    TRUE -- so `array.set(rvolSum, curSlot, ... + rvolBar)` (L149) has
+    already folded bar i into slot `curSlot` by the time `float rNow =
+    f_metric(curSlot)` (L180) reads that slot back out through `f_slotRvol`
+    (L158-160). Pine's plotted value for bar i therefore INCLUDES bar i.
+    `isconfirmed` only suppresses the fold on the live, still-forming bar;
+    it is not a strictly-prior guarantee and is NOT evidence for the
+    ordering this port uses.
+
+    This port deviates ON PURPOSE. A self-included baseline is a within-bar
+    leak: the value at bar i would depend on bar i's own volume and BB
+    width, so in a walk-forward backtest the labelled bar informs the
+    feature that is supposed to predict it. On a charting indicator that
+    costs nothing; in this fork's consumer it is a leak. The leak is also
+    invisible to a prefix-truncation test (it is entirely within-bar, so a
+    truncated run and a full run agree while both are wrong) -- which is
+    precisely why the mutant test above exists: THE MUTANT IS THE
+    PINE-FAITHFUL VARIANT, and the test's job is to prove this module is
+    not it.
 
 EXPANDING-WINDOW WARM-UP
     The slot mean is an EXPANDING mean, so early bars rest on far fewer
