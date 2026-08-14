@@ -201,7 +201,7 @@ def inverse_fvg(high, low, close, atr_len=None, vol_mult=None, max_fvg_age=None,
                     ifv.mitigated = True
                     mit_bear[t] = 1
 
-        # --- 4. Strict FIFO limiting (source lines 322-327): keep only
+        # --- 4. Strict FIFO limiting (source lines 322-326): keep only
         # the `max_ifvg` most recently confirmed zones, newest at index 0,
         # dropping from the END (oldest). The source pops regardless of
         # mitigation state, as here. ---
@@ -304,26 +304,46 @@ block, the inversion state machine that promotes a detected FVG to a
 confirmed IFVG zone (both polarities), the post-confirmation mitigation
 check, and the FIFO cap on tracked zones.
 
-⚠ THE LIQUIDITY-SWEEP HALF WAS DELIBERATELY NOT PORTED -- scope decision,
-not an oversight. The source is a dual system: an `piv`-object liquidity-
-sweep tracker (arrays of pivot objects flagged broken/mitigated/wicked,
-source lines ~131-224) alongside the IFVG tracker (lines ~231-327). The
-sweep half is a near-duplicate of this fork's already-shipped
-`trend/liquidity_sweep.py` (`LSH_SWEEP_BULL/BEAR`,
-`LSH_RECLAIM_BULL/BEAR`, `LSH_DIST_RES/SUP`): both take `ta.pivothigh`/
-`ta.pivotlow` swings into a per-side pool of level objects; both resolve a
-level either as a WICK SWEEP (`high > level and close < level` on the
-swing-high side -- the source's `get.wic := true` branch, LSH's
-`is_sweep`) or as a BREAK-THEN-RECLAIM (`close` through the level flags
-`brk`/`broken`, a later opposite close resolves it -- the source's
-`get.tak := true` branch, LSH's `reclaim`); both age levels out
-(source: `n - get.bix > 2000`, LSH: `max_age`) and remove a level from the
-pool once resolved. The differences are parameterization, not mechanism
-(the source hard-codes its age cap and has no ATR-penetration filter,
-where LSH exposes `max_age`/`atr_mult`, and the source's three-way `opt`
-input toggles wick-only / reclaim-only / both, which LSH exposes as
-`mode`). Re-porting it would ship a second, slightly-worse copy of six
-columns that already exist. Only the IFVG half is genuinely new here.
+⚠ THE LIQUIDITY-SWEEP HALF WAS DELIBERATELY NOT PORTED -- a VALUE call,
+and NOT because it is mechanically equivalent to what this fork already
+ships. The source is a dual system: a `piv`-object liquidity-sweep tracker
+(arrays of pivot objects flagged broken/mitigated/wicked, source lines
+~131-224) alongside the IFVG tracker (lines ~231-326).
+
+WHAT IS GENUINELY SHARED with this fork's `trend/liquidity_sweep.py`
+(`LSH_SWEEP_BULL/BEAR`, `LSH_RECLAIM_BULL/BEAR`, `LSH_DIST_RES/SUP`):
+(a) both take `ta.pivothigh`/`ta.pivotlow` swings into a per-side pool of
+level objects; (b) both fire a WICK SWEEP on the same condition -- on the
+swing-high side `high > level and close < level` (source `get.wic := true`,
+L151-158; LSH's `is_sweep`); (c) both share the age-out-and-remove
+lifecycle (source `n - get.bix > 2000`, L172/L211; LSH's `max_age`), and a
+resolved level leaves the pool in both.
+
+WHAT IS NOT SHARED -- the second resolution is a DIFFERENT EVENT in each,
+not a reparameterization. After a swing high is broken upward
+(`close > get.prc` sets `brk`, L146-149), the source's SIGNAL is a
+break-then-RETEST THAT HOLDS: `low < get.prc and close > get.prc` ->
+`get.tak := true` plus a "Bullish Sweep" alert (L163-169; the aPivL mirror
+is `high > get.prc and close < get.prc` -> bearish `tak`, L201-207). A
+close back the OTHER way while broken (`close < get.prc`, L161-162) sets
+`get.mit := true` -- a SILENT removal that emits no signal at all.
+`liquidity_sweep.py::_process_side` (L108-111) fires `reclaim` on exactly
+that silent path -- `broken and close_v[t] < lvl.price` on the swing-high
+side -- i.e. on a FAILED break. The source signals the break that HOLDS;
+LSH signals the break that FAILS. Second, smaller divergence: in the
+source's wick-only mode (`oW`) any close through a level KILLS it
+(`get.mit := true`, L146-150), whereas LSH's `mode="wick"` never sets
+`broken` and keeps the level alive until it is swept or ages out. The
+source's own name for the option is "Only Outbreaks & Retest" -- the
+retest-hold is its distinctive half, and it is NOT in this fork at all.
+
+THE DROP STANDS, ON VALUE: the wick-sweep half would ship a second copy of
+`LSH_SWEEP_*`, and the genuinely-unported retest-hold signal was judged not
+worth a seventh sweep column in this pass -- the port's budget went to the
+IFVG half, which has no counterpart in the fork at all. RE-OPENABLE: adding
+the source's `get.tak` retest-hold (as new columns, or as a `mode="retest"`
+on `liquidity_sweep`) is a real unbuilt candidate; a future pass must
+measure it rather than assume it is already covered.
 
 ⚠ NOT PORTED (display/alerting only, no signal math): every `box.new`/
 `line.new`/`label.new` call and their per-bar coordinate updates
