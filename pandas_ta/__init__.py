@@ -72,7 +72,8 @@ Category = {
         "dpo", "equal_highs_lows", "fvg", "fvg_sweep_magnet", "halftrend", "increasing", "inverse_fvg", "liquidity_compression_box",
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
-        "ribbon_concordance", "short_run", "sphinx_unicorn", "sr_decay", "sr_force", "swing_equilibrium", "tsignals", "ttm_trend",
+        "ribbon_concordance", "sd_zone_pro", "short_run", "sphinx_unicorn", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
+        "ttm_trend",
         "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib"
     ],
     # Volatility

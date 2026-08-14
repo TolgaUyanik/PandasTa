@@ -1699,6 +1699,22 @@ class AnalysisIndicators(BasePandasObject):
                                    atr_len=atr_len, max_zones=max_zones, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sd_zone_pro(self, pivot_length=None, group=None, max_bar_dist=None,
+                    merge_tol_mult=None, atr_length=None, box_atr_mult=None,
+                    max_boxes=None, vol_length=None, merge_cross_side=None,
+                    offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = sd_zone_pro(high=high, low=low, close=close, volume=volume,
+                             pivot_length=pivot_length, group=group,
+                             max_bar_dist=max_bar_dist, merge_tol_mult=merge_tol_mult,
+                             atr_length=atr_length, box_atr_mult=box_atr_mult,
+                             max_boxes=max_boxes, vol_length=vol_length,
+                             merge_cross_side=merge_cross_side, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def sr_decay(self, swing_len=None, max_levels=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

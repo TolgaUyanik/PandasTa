@@ -30,6 +30,7 @@ from .qstick import qstick
 from .rejection_blocks import rejection_blocks
 from .renko_trend import renko_trend
 from .ribbon_concordance import ribbon_concordance
+from .sd_zone_pro import sd_zone_pro
 from .short_run import short_run
 from .sphinx_unicorn import sphinx_unicorn
 from .sr_decay import sr_decay
