@@ -17,6 +17,17 @@ from .ichimoku_ml import ichimoku_ml
 from .linreg import linreg
 from .linreg_channel import linreg_channel
 from .ma import ma
+# iama imports pandas_ta.volatility.atr, whose own top-level `from
+# pandas_ta.overlap import ma` resolves against THIS partially-built
+# module while overlap/__init__.py is still executing (a circular
+# self-import) -- placing this line before `ma` is bound above makes
+# Python fall back to binding the SUBMODULE `pandas_ta.overlap.ma`
+# instead of the function, breaking every caller of atr() fork-wide with
+# `TypeError: 'module' object is not callable` (verified: moving this
+# import above line 20 reproduces the break across the whole suite, not
+# just iama's own tests -- see the TVPTA-6 candidate-12 session notes).
+# Must stay below the `ma` import.
+from .iama import iama
 from .ma_disparity import ma_disparity
 from .mcgd import mcgd
 from .midpoint import midpoint

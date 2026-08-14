@@ -1272,6 +1272,16 @@ class AnalysisIndicators(BasePandasObject):
         result = kama(close=close, length=length, fast=fast, slow=slow, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def iama(self, length=None, k=None, atr_length=None, norm_length=None,
+             min_tick=None, rel_floor=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = iama(high=high, low=low, close=close, length=length, k=k,
+                       atr_length=atr_length, norm_length=norm_length,
+                       min_tick=min_tick, rel_floor=rel_floor, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ichimoku(self, tenkan=None, kijun=None, senkou=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
