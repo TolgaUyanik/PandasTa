@@ -1017,6 +1017,13 @@ class AnalysisIndicators(BasePandasObject):
         result = macd(close=close, fast=fast, slow=slow, signal=signal, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def macd_area_divergence(self, fast_len=None, mid_len=None, slow_len=None, macd_fast=None, macd_slow=None, macd_signal=None, shrink=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = macd_area_divergence(high=high, low=low, close=close, fast_len=fast_len, mid_len=mid_len, slow_len=slow_len, macd_fast=macd_fast, macd_slow=macd_slow, macd_signal=macd_signal, shrink=shrink, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def mom(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = mom(close=close, length=length, offset=offset, **kwargs)

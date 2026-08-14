@@ -21,6 +21,7 @@ from .kdj import kdj
 from .kst import kst
 from .lrsi import lrsi
 from .macd import macd
+from .macd_area_divergence import macd_area_divergence
 from .mom import mom
 from .pgo import pgo
 from .po import po
