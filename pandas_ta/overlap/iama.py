@@ -324,48 +324,70 @@ sum-of-gains-vs-losses ratio), not an efficiency ratio at all -- a
 different volatility-adaption mechanism, not compared numerically here
 since kama is the closer analog by construction.
 
-MEASURED OVERLAP IS HIGH -- read before treating this as a novel feature,
-and note this section was ITSELF corrected by Fletcher review (TVPTA-6
-candidate 12, 2026-08-14): the first version measured `IAMA_DIST` against
+MEASURED OVERLAP IS HIGH -- read before treating this as a novel feature.
+This section went through TWO rounds of Fletcher review (TVPTA-6
+candidate 12, 2026-08-14), each catching a different flavor of the same
+mistake -- publishing a number without executing the exact thing it was
+labeled as. Round 1: the first version measured `IAMA_DIST` against
 `dist_to_kama`, a HYPOTHETICAL feature nobody had built, and argued that
-made the overlap tolerable ("not an existing shipped column"). That
-argument was wrong in the way that matters -- it never checked the
-Backtesting project's OWN mineable feature set. `bias = (close-SMA20)/
-SMA20` (`backtesting_engine/indicator_engine.py:1147`, register verdict
-OK/admitted) is an EXISTING, shipped, mineable column in the IDENTICAL
-`(close-MA)/MA` form, and against it: **Spearman 0.936 pooled, 0.937
-per-ticker median, 0.914 per-ticker minimum** (180,082 joint bars, 40
-BIST_100 tickers, `datastore/cache/*_1d.parquet`, shipped iama defaults)
--- HIGHER than the original (never-built) `dist_to_kama` comparator
-(0.922-0.929) and higher than either prior TVPTA-6 overlap finding this
-batch (`tri_dir_pressure` vs `VOL_DELTA_APPROX` 0.760; `pressure_pulse`
-vs `WILLR_14` 0.799/0.805). Full corrected measurement, including the
-same finding corroborated by the project's OWN already-shipped `kama`
-distance feature (`mkt_kama_pos = close/kama(10,2,30)-1`,
-`indicator_engine.py:377`, Spearman 0.929 -- consistent with the original
-`dist_to_kama` number, so that measurement wasn't wrong, just aimed at
-the wrong headline) and five other shipped `(close-X)/X`-family columns:
-`backtest_results/tvpta6/iama_overlap_20260814.md`.
+made the overlap tolerable ("not an existing shipped column") -- wrong,
+because it never checked the Backtesting project's OWN mineable feature
+set. Round 2: the fix for round 1 introduced a NEW error -- a
+`mkt_kama_pos` row computed as `close/kama(10,2,30)-1` on each TICKER's
+own close and labeled "the project's own already-shipped kama distance
+feature", when the REAL `mkt_kama_pos` (`indicator_engine.py:376`, inside
+`compute_market_trend`) is computed on the XU100.IS INDEX's close and
+broadcast to every ticker -- a different, much less correlated signal.
+Round 2 also found the "every OK-verdict column" claim was never checked
+against `NWE_MID_200_8.0_8.0`, which turns out to overlap MORE than
+`bias`.
+
+**Verified, current numbers** (40 BIST_100 tickers, `datastore/cache/
+*_1d.parquet`, shipped `iama` defaults, all four comparator columns
+pulled from the SAME `IndicatorEngine(include_advanced=False).
+compute_all()` frame `IAMA_DIST` was computed against -- not a
+hand-reconstruction; see the module docstring below and
+`backtest_results/tvpta6/iama_overlap_20260814.md` for the full method
+and the two corrections in detail):
+
+  - `NWE_MID_200_8.0_8.0` (Band/channel, `(close-nw_mid)/close*100`):
+    Spearman 0.9498 pooled / 0.9507 per-ticker median / 0.9053 per-ticker
+    minimum -- the HIGHEST of the enumerated set measured (NOT claimed as
+    the maximum over the register's full 212 `OK`-verdict columns; a full
+    programmatic sweep was started but not completed).
+  - `bias` (Oscillator/momentum, `(close-SMA20)/SMA20`,
+    `indicator_engine.py:1147`): Spearman 0.9361 / 0.9370 / 0.9138.
+  - `RSI`: Spearman 0.9276 / 0.9308 / 0.9097.
+  - `ATR_POSITION` (register verdict NORMALIZE, not OK): Spearman
+    0.9216 / 0.9265 / 0.8638.
+  - REAL `mkt_kama_pos` (index-derived, broadcast, `indicator_engine.py:
+    376`): Spearman 0.5020 pooled / 0.4933 median / 0.1696 minimum --
+    materially LOWER than the other four; this is the number that
+    corrects round 2's error, not a corroboration of anything.
+
+Ranking convention: by SIGNED Spearman, since every comparator measured
+here came out positive -- stated explicitly because a strongly negative
+correlation would be equally redundant for a DecisionTree split, which
+does not care about sign, only ordering.
 
 Mechanically expected either way: `f_efficiency`'s `dir/pth` IS the same
 Kaufman efficiency-ratio formula as kama's own `er`, and f_ima's two
 additional terms (squashed slope, volatility multiplier) modulate rather
 than replace that shared driver -- apparently not enough to move the RANK
-ordering far from a plain `(close-MA)/MA` distance, whether the MA is
-`kama`, `bias`'s static SMA20, or anything else in that family.
+ordering far from other `(close-X)/X`-shaped distances from a smoother.
 
 **Ship call: this pandas_ta port is KEPT (code correct, tested, cheap to
 hold) but the Backtesting-side wiring was REVERTED** the same session --
-at 0.93+ against a column ALREADY in the mining pool, "flag it and let
-mining decide" (this batch's own `pressure_pulse`/`tri_dir_pressure`
-precedent, ~0.76-0.80 against THEIR shipped siblings) is not a real
-option; mining would just weigh the same ordering twice. Re-wiring
-requires an actual mining A/B run (with vs without `IAMA_DIST` in the
-pool) showing it earns something `bias` doesn't, not another correlation
-measurement. See `datastore/source/pine_candidates_families.csv` (slug
-6SVLw0kE-Institutional-Moving-Averages, status back to `defer`) for the
-standing decision -- do not re-derive the numbers from this docstring,
-read the artifact.
+at 0.92-0.95 against multiple columns ALREADY in the mining pool, "flag
+it and let mining decide" (this batch's own `pressure_pulse`/
+`tri_dir_pressure` precedent, ~0.76-0.80 against THEIR shipped siblings)
+is not a real option; mining would just weigh the same ordering twice.
+Re-wiring requires an actual mining A/B run (with vs without `IAMA_DIST`
+in the pool) showing it earns something the existing columns don't, not
+another correlation measurement. See `datastore/source/
+pine_candidates_families.csv` (slug 6SVLw0kE-Institutional-Moving-
+Averages, status back to `defer`) for the standing decision -- do not
+re-derive the numbers from this docstring, read the artifact.
 
 SCALE-FREE OUTPUT: `ima` itself (the adaptive line) is a price level and
 is NOT returned -- only `(close - ima) / ima * 100`, the same distance-form
