@@ -3,6 +3,7 @@ from .adx import adx
 from .amat import amat
 from .aroon import aroon
 from .band_cross_retest import band_cross_retest
+from .bdi4kewl import bdi4kewl
 from .bos import bos
 from .choch import choch
 from .chop import chop

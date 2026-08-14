@@ -1541,6 +1541,30 @@ class AnalysisIndicators(BasePandasObject):
         result = band_cross_retest(high=high, low=low, close=close, volume=volume, ma_type=ma_type, len_fast=len_fast, len_slow=len_slow, atr_length=atr_length, min_ext_atr=min_ext_atr, min_vel_atr=min_vel_atr, min_sep_atr=min_sep_atr, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def bdi4kewl(self, pivot_left=None, pivot_right=None, impulse_lookback=None,
+                 min_impulse_atr=None, min_reversal_atr=None, max_confirmation_bars=None,
+                 min_swing_separation_atr=None, context_bars=None, long_rsi_level=None,
+                 short_rsi_level=None, long_bb_level=None, short_bb_level=None,
+                 activity_volume_ratio=None, activity_range_atr=None,
+                 rejection_wick_ratio=None, min_score=None, enable_rescue_branch=None,
+                 offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = bdi4kewl(open_=open_, high=high, low=low, close=close, volume=volume,
+                           pivot_left=pivot_left, pivot_right=pivot_right,
+                           impulse_lookback=impulse_lookback, min_impulse_atr=min_impulse_atr,
+                           min_reversal_atr=min_reversal_atr, max_confirmation_bars=max_confirmation_bars,
+                           min_swing_separation_atr=min_swing_separation_atr, context_bars=context_bars,
+                           long_rsi_level=long_rsi_level, short_rsi_level=short_rsi_level,
+                           long_bb_level=long_bb_level, short_bb_level=short_bb_level,
+                           activity_volume_ratio=activity_volume_ratio, activity_range_atr=activity_range_atr,
+                           rejection_wick_ratio=rejection_wick_ratio, min_score=min_score,
+                           enable_rescue_branch=enable_rescue_branch, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def chop(self, length=None, atr_length=None, scalar=None, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
