@@ -807,8 +807,9 @@ def _load_backdating_mutant():
     section claims. This loads a MUTATED copy of the real module (source
     read from disk, the two known write-sites `out_long[t] = 1` /
     `out_short[t] = 1` textually replaced with `out_long[c.pivot_bar] =
-    1` / `out_short[c.pivot_bar] = 1`, executed as a separate module via
-    `importlib` rather than hand-reimplemented) so the test below can
+    1` / `out_short[c.pivot_bar] = 1`, then compiled and exec'd into an
+    in-memory module -- source read from the real module's `__file__` via
+    `importlib`, never hand-reimplemented) so the test below can
     prove, by actually running it, that a truncation point BEFORE
     confirmation catches what a truncation point after it cannot.
     """
@@ -864,9 +865,10 @@ def test_truncation_before_confirmation_catches_backdating_mutant():
     2): the mutant patches both `out_long[t] = 1` and `out_short[t] = 1`,
     but an earlier version of this test only ever asserted against the
     LONG column, leaving the SHORT write-site patched-but-unexercised.
-    This exact fixture also produces a genuine SHORT signal (confirmed at
-    bar 36, anchored at bar 34), reused here rather than building a
-    second fixture.
+    The mirror uses the dedicated `_clean_short_scenario` fixture (pivot
+    54, confirms 56); `_clean_long_scenario`'s own incidental SHORT
+    anchors at bar 26, too early for a `+1` truncation to leave a
+    computable frame.
     """
     df, pivot_idx = _clean_long_scenario()
     truncate_at = pivot_idx + 1  # excludes the confirmation bar (pivot_idx + 2) entirely
