@@ -2063,6 +2063,16 @@ class AnalysisIndicators(BasePandasObject):
         result = pvt(close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tod_profile(self, length=None, bb_length=None, bb_std=None,
+                    min_samples=None, scope=None, tz=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = tod_profile(close=close, volume=volume, length=length,
+                             bb_length=bb_length, bb_std=bb_std,
+                             min_samples=min_samples, scope=scope, tz=tz,
+                             offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def tri_dir_pressure(self, use_volume=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
