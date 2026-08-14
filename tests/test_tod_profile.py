@@ -22,8 +22,7 @@ import pytest
 from pandas_ta.volume import tod_profile
 
 P = dict(length=20, bb_length=20, min_samples=5)
-COLS = ["TOD_SLOT_RVOL_20_20", "TOD_SLOT_VVOL_20_20",
-        "TOD_RVOL_REL_20_20", "TOD_VVOL_REL_20_20"]
+COLS = ["TOD_SLOT_RVOL_20_20", "TOD_SLOT_VVOL_20_20"]
 
 # BIST's real hourly shape: 9 bars/session at :30 past the hour, 06:30-14:30Z.
 SESSION_HOURS = [6, 7, 8, 9, 10, 11, 12, 13, 14]
@@ -68,7 +67,7 @@ def _run(df, **kw):
 
 # ───────────────────────────── shape / smoke ─────────────────────────────
 
-def test_returns_the_four_named_columns():
+def test_returns_the_two_named_columns():
     r = _run(_hourly_frame())
     assert list(r.columns) == COLS
     assert r.name == "TOD_20_20"
@@ -107,11 +106,6 @@ def test_matches_an_independent_reference_implementation():
 
     np.testing.assert_allclose(r[COLS[0]].values, exp_r, rtol=1e-12)
     np.testing.assert_allclose(r[COLS[1]].values, exp_v, rtol=1e-12)
-    # ...and the REL columns are exactly bar-ratio / slot-mean
-    np.testing.assert_allclose(
-        r[COLS[2]].values, rvol.values / np.array(exp_r), rtol=1e-12)
-    np.testing.assert_allclose(
-        r[COLS[3]].values, vvol.values / np.array(exp_v), rtol=1e-12)
 
 
 def test_min_samples_floor_is_respected_exactly():

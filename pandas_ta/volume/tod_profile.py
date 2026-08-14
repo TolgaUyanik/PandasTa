@@ -25,8 +25,7 @@ def tod_profile(close, volume, length=None, bb_length=None, bb_std=None,
     if close is None or volume is None: return
 
     _props = f"_{length}_{bb_length}"
-    names = [f"TOD_SLOT_RVOL{_props}", f"TOD_SLOT_VVOL{_props}",
-             f"TOD_RVOL_REL{_props}", f"TOD_VVOL_REL{_props}"]
+    names = [f"TOD_SLOT_RVOL{_props}", f"TOD_SLOT_VVOL{_props}"]
 
     n = len(close)
 
@@ -110,10 +109,8 @@ def tod_profile(close, volume, length=None, bb_length=None, bb_std=None,
 
     slot_rvol = Series(slot_rvol, index=close.index)
     slot_vvol = Series(slot_vvol, index=close.index)
-    rvol_rel = Series(rvol_bar, index=close.index) / slot_rvol.where(slot_rvol > 0)
-    vvol_rel = Series(vvol_bar, index=close.index) / slot_vvol.where(slot_vvol > 0)
 
-    result = [slot_rvol, slot_vvol, rvol_rel, vvol_rel]
+    result = [slot_rvol, slot_vvol]
 
     # Offset
     if offset != 0:
@@ -150,8 +147,7 @@ The question it answers is not "buy or sell" but "at what TIME OF DAY does
 this instrument typically wake up". For every minute-of-day slot it keeps a
 running mean of two per-bar ratios -- volume vs its own trailing MA, and
 Bollinger-Band width vs its own trailing MA -- and reports, for each bar,
-what that bar's slot HISTORICALLY does, plus how the current bar compares
-to its own slot's norm.
+what that bar's slot HISTORICALLY does.
 
 pandas_ta Category: "volume". Justification for the pick over "volatility":
 the source's primary metric is relative VOLUME (`rvolBar`, Pine L135) --
@@ -215,7 +211,7 @@ SLOT KEY
     relabeling there, but the minute-of-day key is the source's own and
     stays correct on a feed whose bars do not share one minute offset.
 
-COLUMNS (4)
+COLUMNS (2) -- exactly the source's own two per-slot outputs
     TOD_SLOT_RVOL_{length}_{bb_length}
         Mean of `volume / MA(volume, length)` over all STRICTLY-PRIOR bars
         sharing this bar's slot. Pine `f_slotRvol(curSlot)` (L158-160, L180).
@@ -223,14 +219,31 @@ COLUMNS (4)
     TOD_SLOT_VVOL_{length}_{bb_length}
         Same, for `BBwidth / MA(BBwidth, length)`. Pine `f_slotVolat` (L161-163).
         ">1 means the bands typically expand at this time of day."
-    TOD_RVOL_REL_{length}_{bb_length}
-        This bar's own `volume / MA(volume, length)` DIVIDED BY its slot's
-        historical mean -- i.e. relative volume with the time-of-day
-        seasonality divided out. Not in the source (whose heat asks only
-        whether the SLOT is typically hot); added here because the
-        seasonality-ADJUSTED reading is the ML-usable form.
-    TOD_VVOL_REL_{length}_{bb_length}
-        Same, for band width.
+
+WHAT WAS BUILT, MEASURED, AND THEN REMOVED (read before re-adding it)
+    An earlier revision of this module also emitted two "seasonality-adjusted"
+    columns, TOD_RVOL_REL / TOD_VVOL_REL = the bar's own ratio DIVIDED BY its
+    slot's historical mean. They were removed after measurement, not on taste:
+
+      - `TOD_RVOL_REL` scored Spearman **+0.934364** against the consuming
+        engine's existing `VOL_RATIO` (n=548,754, pooled over 89 BIST_100
+        hourly frames / 556,397 bars). `VOL_RATIO` IS this column's own
+        numerator (`volume / SMA(volume,20)`, i.e. Pine `rvolBar`) -- so the
+        division by the slot mean barely reorders anything.
+      - `TOD_VVOL_REL` scored only 0.669583 against the engine's shipped set
+        (vs `CHOP`) -- but **+0.999021** against its OWN numerator
+        `BBwidth / SMA(BBwidth,20)`, which simply is not an engine column.
+        Its apparently-safe score was an artifact of the comparator's absence,
+        not evidence of independent content.
+
+    The generalisation, which is the reason this note exists: the slot mean is
+    a slowly-varying, near-constant divisor, so `bar_ratio / slot_mean` is
+    close to a monotone rescaling of `bar_ratio` and carries almost none of
+    the time-of-day information its name advertises. If a
+    volatility-EXPANSION ratio is wanted downstream, add it deliberately as a
+    volatility-family column named for what it is -- do not reintroduce it
+    under a time-of-day name. Full grid:
+    Backtesting/backtest_results/tvpta6/tod_overlap_20260814.md
 
 DELIBERATELY NOT EMITTED, and why
     - The raw per-bar ratios `rvolBar` (L135) and `volatBar` (L140). These
@@ -314,8 +327,6 @@ Calculation:
     # strictly-prior same-slot samples only:
     TOD_SLOT_RVOL   = mean(rvolBar[j]  : j < i, slot[j] == slot[i])
     TOD_SLOT_VVOL   = mean(volatBar[j] : j < i, slot[j] == slot[i])
-    TOD_RVOL_REL    = rvolBar  / TOD_SLOT_RVOL
-    TOD_VVOL_REL    = volatBar / TOD_SLOT_VVOL
 
 Args:
     close (pd.Series): Series of 'close's. Must carry a DatetimeIndex.
@@ -338,6 +349,6 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.DataFrame: TOD_SLOT_RVOL, TOD_SLOT_VVOL, TOD_RVOL_REL, TOD_VVOL_REL
-        columns. All-NaN (never raising) on degenerate input -- see above.
+    pd.DataFrame: TOD_SLOT_RVOL, TOD_SLOT_VVOL columns. All-NaN (never
+        raising) on degenerate input -- see above.
 """
