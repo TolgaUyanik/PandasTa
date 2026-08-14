@@ -16,6 +16,7 @@ from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
 from .halftrend import halftrend
 from .increasing import increasing
+from .inverse_fvg import inverse_fvg
 from .liquidity_compression_box import liquidity_compression_box
 from .liquidity_sweep import liquidity_sweep
 from .long_run import long_run

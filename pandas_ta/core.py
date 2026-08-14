@@ -1606,6 +1606,16 @@ class AnalysisIndicators(BasePandasObject):
         result = increasing(close=close, length=length, strict=strict, asint=asint, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def inverse_fvg(self, atr_len=None, vol_mult=None, max_fvg_age=None,
+                    max_ifvg=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = inverse_fvg(high=high, low=low, close=close, atr_len=atr_len,
+                             vol_mult=vol_mult, max_fvg_age=max_fvg_age,
+                             max_ifvg=max_ifvg, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def liquidity_compression_box(self, window=None, atr_length=None, max_atr_mult=None, min_wick_touches=None, max_body_pct=None, touch_tol_pct=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
