@@ -24,8 +24,13 @@ from .ma import ma
 # Python fall back to binding the SUBMODULE `pandas_ta.overlap.ma`
 # instead of the function, breaking every caller of atr() fork-wide with
 # `TypeError: 'module' object is not callable` (verified: moving this
-# import above line 20 reproduces the break across the whole suite, not
-# just iama's own tests -- see the TVPTA-6 candidate-12 session notes).
+# import above the `from .ma import ma` line reproduces the break across
+# the whole suite, not just iama's own tests). This is a PRE-EXISTING
+# fork hazard, not iama-specific: independently reproduced by hoisting
+# the unrelated, already-present `.supertrend` import above `.ma`
+# instead, with iama nowhere involved (TVPTA-6 candidate-12 Fletcher
+# review, 2026-08-14) -- any overlap-package module that transitively
+# imports atr()/ma() would trip this if placed above line 19.
 # Must stay below the `ma` import.
 from .iama import iama
 from .ma_disparity import ma_disparity

@@ -214,14 +214,29 @@ def test_mutation_only_changes_current_and_later_bars():
     """IIR recursion causality: mutating bar T's close changes bar T and
     every bar strictly AFTER T (via the carried `ima[t-1]` state and the
     backward-looking eff/slope windows that include bar T), and must
-    change NOTHING strictly before T."""
-    _, high, low, close = _ohlcv(n=150, seed=5)
+    change NOTHING strictly before T.
+
+    The whole bar (open/high/low/close) is shifted by the SAME delta --
+    a pure parallel translation -- rather than bumping close alone, which
+    would produce a physically invalid bar (close > high) in this exact
+    file whose own `_ohlcv` helper asserts strict OHLC validity. iama
+    itself only consumes high/low/close, but keeping open in lockstep
+    means the mutated frame stays representationally valid throughout,
+    not just at fixture-construction time."""
+    open_, high, low, close = _ohlcv(n=150, seed=5)
     base = ta.iama(high=high, low=low, close=close)
 
     mutate_at = 100
-    close2 = close.copy()
-    close2.iloc[mutate_at] += 5.0
-    out2 = ta.iama(high=high, low=low, close=close2)
+    delta = 5.0
+    open2, high2, low2, close2 = open_.copy(), high.copy(), low.copy(), close.copy()
+    open2.iloc[mutate_at] += delta
+    high2.iloc[mutate_at] += delta
+    low2.iloc[mutate_at] += delta
+    close2.iloc[mutate_at] += delta
+    assert low2.iloc[mutate_at] < min(open2.iloc[mutate_at], close2.iloc[mutate_at]) \
+        and max(open2.iloc[mutate_at], close2.iloc[mutate_at]) < high2.iloc[mutate_at], \
+        "mutated bar must stay physically valid OHLC (parallel shift should guarantee this)"
+    out2 = ta.iama(high=high2, low=low2, close=close2)
 
     before = base.iloc[:mutate_at]
     before2 = out2.iloc[:mutate_at]
@@ -231,6 +246,19 @@ def test_mutation_only_changes_current_and_later_bars():
     after2 = out2.iloc[mutate_at:]
     diffs = (after != after2) & ~(after.isna() & after2.isna())
     assert diffs.any(), "mutating bar T should change bar T and/or later bars"
+    # Tighten beyond "any bar differs": the mutated bar T itself, and the
+    # LAST bar of the series (proving the change propagates all the way
+    # through the recursion, not just for a few bars before decaying back
+    # to coincidence), must both differ.
+    first_after = after.iloc[0]
+    first_after2 = after2.iloc[0]
+    assert not (pd.isna(first_after) and pd.isna(first_after2)) and first_after != first_after2, \
+        "mutated bar T itself must differ"
+    last_after = after.iloc[-1]
+    last_after2 = after2.iloc[-1]
+    assert not (pd.isna(last_after) and pd.isna(last_after2)) and last_after != last_after2, \
+        "the LAST bar of the series must still differ -- the mutation's effect must propagate " \
+        "through the whole recursion, not just touch a few nearby bars"
 
 
 def test_no_lookahead_truncation():

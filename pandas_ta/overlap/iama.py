@@ -17,7 +17,10 @@ from pandas_ta.utils import get_offset, verify_series
 # (d) Numeric correctness spot-checked against the source .pine's own math
 #     (docs/TradingView/pine/6SVLw0kE-Institutional-Moving-Averages.pine
 #     L122-133), not just "runs without crashing" -- see
-#     test_hand_computed_first_bars.
+#     test_correctness_vs_independent_reference_default_params /
+#     _custom_params (an independently-derived per-bar reference
+#     implementation, not a copy of this file's vectorized code) and
+#     test_bar_zero_is_closed_form (the trivial out[0]==close[0] identity).
 # (e) Docstring names source URL + author.
 # (f) Test asserts real behavior (hand-computed fixture, causality by
 #     mutation AND truncation, canary-guarded fixture, scale-free
@@ -139,7 +142,9 @@ def iama(high, low, close, length=None, k=None, atr_length=None,
     # sign (the numerator |close - close.shift(k)| is never negative). So
     # this floor is numerical hygiene (avoid an explicit 0/0 -> nan or
     # x/0 -> inf on a genuinely flat ATR run), not a correctness fix in
-    # the pressure_pulse sense -- see test_flat_range_no_divide_warning.
+    # the pressure_pulse sense -- see test_flat_price_eff_and_slope_are_zero
+    # (a flat-OHLC fixture that exercises this exact path without raising
+    # or producing a divide warning).
     if min_tick is None:
         min_tick = 1e-8
     else:
@@ -203,6 +208,14 @@ def iama(high, low, close, length=None, k=None, atr_length=None,
     # general convention (kama.py/vidya.py both leave warmup NaN rather
     # than substituting a proxy) and is the more conservative of the two
     # readings, not because Pine's exact na-arg behavior was confirmed.
+    # round-half-up (`floor(x+0.5)`) vs Python's banker's-rounding `round()`
+    # would only diverge on an exact .5 tie -- provably UNREACHABLE here,
+    # not merely untested at the shipped default: for integer `length`,
+    # `length/3.0 mod 1` is always in {0, 1/3, 2/3}, never 0.5 (`length`
+    # would need to be an odd multiple of 1.5, impossible for an integer).
+    # Verified by brute force over length in [2, 2000] during the TVPTA-6
+    # candidate-12 Fletcher review, 2026-08-14 -- the rounding-mode choice
+    # is a dead branch, not a live judgment call.
     slope_len = max(1, int(np.floor(length / 3.0 + 0.5)))
     slope_num = (close - close.shift(slope_len)).abs().to_numpy(dtype="float64", copy=False)
     tick_floor = np.maximum(min_tick, rel_floor * np.abs(c))
@@ -311,32 +324,48 @@ sum-of-gains-vs-losses ratio), not an efficiency ratio at all -- a
 different volatility-adaption mechanism, not compared numerically here
 since kama is the closer analog by construction.
 
-MEASURED OVERLAP IS HIGH -- read before treating this as a novel feature.
-40 BIST_100 daily tickers, `datastore/cache/*_1d.parquet`, shipped
-defaults (length=9/k=1.0/atr_length=14/norm_length=50) vs the SAME
-distance transform applied to `kama(close, length=9)` (kama's own raw
-output is a price level, not scale-free, so a like-for-like comparison
-requires putting it through the identical `(close-x)/x*100` transform
-`iama` itself ships -- see `backtest_results/tvpta6/
-iama_overlap_20260814.md` for the full methodology, including a real
-`kama()` seed-artifact wrinkle found while measuring this): **Spearman
-0.922** (180,362 joint bars), stable under two robustness checks (matched
-length=9 vs kama's own default length=10: 0.922 vs 0.929; winsorized
-Pearson vs raw Spearman: 0.904 vs 0.922) -- the raw, non-winsorized
-Pearson (0.214) is misleadingly low, an artifact of a small number of
-extreme `dist_to_kama` outliers near kama's own zero-seeded bar, not a
-sign of genuine independence. This is HIGHER than either prior TVPTA-6
-overlap finding in this batch (`tri_dir_pressure` vs `VOL_DELTA_APPROX`
-0.760; `pressure_pulse` vs `WILLR_14` 0.799/0.805) -- both mechanically
-expected, since `f_efficiency`'s `dir/pth` IS the same Kaufman
-efficiency-ratio formula as kama's own `er`, and f_ima's two additional
-terms modulate rather than replace that shared driver. Shipped anyway on
-this batch's own precedent (measure, flag loudly, let mining/selection
-weigh it, per the GOVERNING PRINCIPLE) -- but unlike the two prior cases,
-`dist_to_kama` is not an EXISTING shipped column, only a trivial
-composition of an existing primitive, so this is a judgment call a
-reviewer should specifically re-examine, not a settled "ship it" -- do
-not re-derive the numbers from this docstring, read the artifact.
+MEASURED OVERLAP IS HIGH -- read before treating this as a novel feature,
+and note this section was ITSELF corrected by Fletcher review (TVPTA-6
+candidate 12, 2026-08-14): the first version measured `IAMA_DIST` against
+`dist_to_kama`, a HYPOTHETICAL feature nobody had built, and argued that
+made the overlap tolerable ("not an existing shipped column"). That
+argument was wrong in the way that matters -- it never checked the
+Backtesting project's OWN mineable feature set. `bias = (close-SMA20)/
+SMA20` (`backtesting_engine/indicator_engine.py:1147`, register verdict
+OK/admitted) is an EXISTING, shipped, mineable column in the IDENTICAL
+`(close-MA)/MA` form, and against it: **Spearman 0.936 pooled, 0.937
+per-ticker median, 0.914 per-ticker minimum** (180,082 joint bars, 40
+BIST_100 tickers, `datastore/cache/*_1d.parquet`, shipped iama defaults)
+-- HIGHER than the original (never-built) `dist_to_kama` comparator
+(0.922-0.929) and higher than either prior TVPTA-6 overlap finding this
+batch (`tri_dir_pressure` vs `VOL_DELTA_APPROX` 0.760; `pressure_pulse`
+vs `WILLR_14` 0.799/0.805). Full corrected measurement, including the
+same finding corroborated by the project's OWN already-shipped `kama`
+distance feature (`mkt_kama_pos = close/kama(10,2,30)-1`,
+`indicator_engine.py:377`, Spearman 0.929 -- consistent with the original
+`dist_to_kama` number, so that measurement wasn't wrong, just aimed at
+the wrong headline) and five other shipped `(close-X)/X`-family columns:
+`backtest_results/tvpta6/iama_overlap_20260814.md`.
+
+Mechanically expected either way: `f_efficiency`'s `dir/pth` IS the same
+Kaufman efficiency-ratio formula as kama's own `er`, and f_ima's two
+additional terms (squashed slope, volatility multiplier) modulate rather
+than replace that shared driver -- apparently not enough to move the RANK
+ordering far from a plain `(close-MA)/MA` distance, whether the MA is
+`kama`, `bias`'s static SMA20, or anything else in that family.
+
+**Ship call: this pandas_ta port is KEPT (code correct, tested, cheap to
+hold) but the Backtesting-side wiring was REVERTED** the same session --
+at 0.93+ against a column ALREADY in the mining pool, "flag it and let
+mining decide" (this batch's own `pressure_pulse`/`tri_dir_pressure`
+precedent, ~0.76-0.80 against THEIR shipped siblings) is not a real
+option; mining would just weigh the same ordering twice. Re-wiring
+requires an actual mining A/B run (with vs without `IAMA_DIST` in the
+pool) showing it earns something `bias` doesn't, not another correlation
+measurement. See `datastore/source/pine_candidates_families.csv` (slug
+6SVLw0kE-Institutional-Moving-Averages, status back to `defer`) for the
+standing decision -- do not re-derive the numbers from this docstring,
+read the artifact.
 
 SCALE-FREE OUTPUT: `ima` itself (the adaptive line) is a price level and
 is NOT returned -- only `(close - ima) / ima * 100`, the same distance-form
