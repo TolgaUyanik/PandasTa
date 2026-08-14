@@ -204,9 +204,18 @@ def _clean_long_scenario():
     then a strong upward reversal. Confirms as a LONG signal at
     pivot_idx + pivot_right (default pivot_right=2). Hand-verified: at
     the pivot bar (index 54), independently recomputed priorMove/
-    location/momentum/active/rejection are all True (score=5); impulse
-    10.92 clears 2.0*ATR=1.37; the confirming bar's close - pivotLow
-    clears 1.2*ATR well within 2 bars of confirmation."""
+    location/momentum/active/rejection are all True (score=5); ATR[54] =
+    0.8470, so 2.0*ATR = 1.6939, and impulse (rolling-12-bar high minus
+    pivotLow) = 13.1887, well clear of that threshold; the confirming
+    bar's close - pivotLow clears 1.2*ATR (1.0164) well within 2 bars of
+    confirmation. ⚠ Fletcher round 1 (MAJOR): an earlier version of this
+    docstring quoted `_expiry_scenario`'s numbers (10.92/1.37) here by
+    copy-paste error -- the assertions below never depended on the wrong
+    prose (13.19 >> 1.69 holds exactly as much as the false 10.92 >> 1.37
+    did), but this docstring is the only WRITTEN evidence the fixture was
+    actually hand-verified, and it wasn't describing itself. Re-verified
+    directly against this exact fixture via a standalone script before
+    being written here, not reasoned by analogy to a sibling scenario."""
     n_warm = 40
     rng = np.random.default_rng(3)
     warm = 100 + np.cumsum(rng.normal(0, 0.05, n_warm))
@@ -488,6 +497,14 @@ def test_defaults_are_non_degenerate_canary():
     populated_rescue = out[rescue_col].dropna()
     assert len(populated_rescue) == long_sum + short_sum
     assert populated_rescue.isin([0.0, 1.0]).all()
+    # Fletcher MINOR (round 1): `isin([0.0, 1.0])` alone is satisfied by a
+    # CONSTANT 0.0 column -- the rescue branch is the narrowest gate in
+    # the whole state machine (score==2 AND active AND rejection) and so
+    # the likeliest to silently stop firing; a constant-0.0 RESCUE column
+    # would pass every assertion above it. On this exact fixture it fires
+    # 2/57 times (verified before writing this assertion) -- mirrors the
+    # SCORE nunique canary just above.
+    assert populated_rescue.nunique() > 1, "canary tripped: RESCUE never fires (or always fires) on this fixture"
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +740,104 @@ def test_truncation_matches_prefix_of_full_series():
         assert np.array_equal(left[~both_nan], right[~both_nan]), f"{col} differs between full and truncated runs"
 
     assert out_truncated["STURN_LONG_3_2"].sum() > 0
+
+
+def _load_backdating_mutant():
+    """Fletcher MINOR (round 1): the two causality tests above truncate/
+    mutate PAST the confirmation bar (`confirm_bar+3`/`+5`), so a back-
+    dating port (writing the flag at `c.pivot_bar` instead of `t`) and
+    the real, confirmation-bar port produce IDENTICAL prefixes under
+    both tests -- both runs reach the same confirmation event and back-
+    date identically either way. Neither test can actually distinguish
+    "flag on the confirming bar" from "flag back-dated to the pivot bar",
+    which is precisely the property the module docstring's CAUSALITY
+    section claims. This loads a MUTATED copy of the real module (source
+    read from disk, the two known write-sites `out_long[t] = 1` /
+    `out_short[t] = 1` textually replaced with `out_long[c.pivot_bar] =
+    1` / `out_short[c.pivot_bar] = 1`, executed as a separate module via
+    `importlib` rather than hand-reimplemented) so the test below can
+    prove, by actually running it, that a truncation point BEFORE
+    confirmation catches what a truncation point after it cannot.
+    """
+    import importlib
+    import importlib.util
+
+    # `pandas_ta.trend.bdi4kewl` resolves to the FUNCTION (re-exported by
+    # `pandas_ta/trend/__init__.py`'s `from .bdi4kewl import bdi4kewl`,
+    # which shadows the submodule name in that package's namespace) --
+    # `importlib.import_module` on the dotted path gets the actual
+    # SUBMODULE object, which has a real `__file__`.
+    real_module = importlib.import_module("pandas_ta.trend.bdi4kewl")
+    with open(real_module.__file__, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    marker_long = "out_long[t] = 1"
+    marker_short = "out_short[t] = 1"
+    assert src.count(marker_long) == 1 and src.count(marker_short) == 1, \
+        "write-site markers moved or duplicated -- update this mutant loader"
+    mutated_src = src.replace(marker_long, "out_long[c.pivot_bar] = 1", 1)
+    mutated_src = mutated_src.replace(marker_short, "out_short[c.pivot_bar] = 1", 1)
+    assert mutated_src != src
+
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix="_bdi4kewl_mutant.py", delete=False) as f:
+        f.write(mutated_src)
+        mutant_path = f.name
+    spec = importlib.util.spec_from_file_location("bdi4kewl_backdating_mutant", mutant_path)
+    mutant_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mutant_module)
+    return mutant_module.bdi4kewl
+
+
+def test_truncation_before_confirmation_catches_backdating_mutant():
+    """The real fix for the gap above: truncate BEFORE the confirmation
+    bar (`pivot_idx + 1`, i.e. the confirming bar at `pivot_idx + 2` is
+    NOT in the truncated frame at all), so only the FULL run ever reaches
+    confirmation and can write a back-dated marker at `pivot_idx`. Proven
+    two ways on the SAME fixture and cutoff:
+
+    1. The REAL port: `STURN_LONG_3_2[pivot_idx]` is 0 in both the full
+       and the truncated run (it never writes there, back-dated or not)
+       -- no divergence, matching the CAUSALITY claim.
+    2. The MUTANT (`_load_backdating_mutant`): its FULL run DOES write 1
+       at `pivot_idx` (proving the mutant is live, not a no-op), but its
+       TRUNCATED run (which never reaches the confirmation bar) does not
+       -- a genuine, detected divergence. This is the concrete
+       demonstration that this test methodology has power; the
+       `confirm_bar+3`/`+5` cutoffs used elsewhere in this file do not.
+    """
+    df, pivot_idx = _clean_long_scenario()
+    truncate_at = pivot_idx + 1  # excludes the confirmation bar (pivot_idx + 2) entirely
+
+    # capture OHLCV references BEFORE calling the accessor -- it renames
+    # `df`'s own columns to lowercase IN PLACE (see the mutation test
+    # above for the same gotcha).
+    open_ = df["Open"]
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+    volume = df["Volume"]
+
+    # 1. Real port: no divergence at pivot_idx, because it never writes there.
+    out_full = df.ta.bdi4kewl()
+    out_truncated = df.iloc[:truncate_at].ta.bdi4kewl()
+    assert out_full["STURN_LONG_3_2"].iloc[pivot_idx] == 0
+    assert out_truncated["STURN_LONG_3_2"].iloc[pivot_idx] == 0
+
+    # 2. Mutant: full run back-dates (proves the mutant is real); truncated
+    # run never reaches confirmation, so it cannot -- divergence detected.
+    mutant_fn = _load_backdating_mutant()
+
+    mutant_full = mutant_fn(open_=open_, high=high, low=low, close=close, volume=volume)
+    mutant_truncated = mutant_fn(open_=open_.iloc[:truncate_at], high=high.iloc[:truncate_at],
+                                  low=low.iloc[:truncate_at], close=close.iloc[:truncate_at],
+                                  volume=volume.iloc[:truncate_at])
+
+    mutant_full_at_pivot = mutant_full["STURN_LONG_3_2"].iloc[pivot_idx]
+    mutant_truncated_at_pivot = mutant_truncated["STURN_LONG_3_2"].iloc[pivot_idx]
+    assert mutant_full_at_pivot == 1, "mutant setup invariant: the full run must actually back-date"
+    assert mutant_truncated_at_pivot == 0, "mutant setup invariant: truncated run must not reach confirmation"
+    assert mutant_full_at_pivot != mutant_truncated_at_pivot, \
+        "this truncation point failed to catch the back-dating mutant -- test has no power"
 
 
 # ---------------------------------------------------------------------------

@@ -189,7 +189,21 @@ def bdi4kewl(open_, high, low, close, volume, pivot_left=None, pivot_right=None,
     rsi_v = rsi(close, length=14).to_numpy(dtype=float)
     ema21_v = ema(close, length=21).to_numpy(dtype=float)
     bb_basis = sma(close, length=20)
-    bb_dev = stdev(close, length=20) * 2.0
+    # ddof=0 (population stdev), NOT this package's own `stdev()` default
+    # of ddof=1 (sample) -- Pine's `ta.stdev(source, length, biased)`
+    # defaults `biased=true`, i.e. the POPULATION estimator, which is
+    # exactly why this same package's `bbands()` hard-defaults `ddof=0`
+    # (`pandas_ta/volatility/bbands.py`) rather than trusting `stdev()`'s
+    # own default. Fletcher-caught (round 1): the original version of this
+    # line used the bare `stdev()` default (ddof=1), inflating the
+    # deviation by sqrt(20/19) (~2.6%) and pulling `bbPosition` toward
+    # 0.5 -- measured to flip the 0.35/0.65 threshold on 0.766% of bars
+    # (529/69,063) on a real-data sample, changing 4 flag-bars and 5
+    # SCORE values across 25,085 signals over 367,417 bars. Small, but a
+    # genuine mistranslation of Pine's default, not a warmup/seeding
+    # convention difference (unlike the "borrowed primitives" caveat
+    # elsewhere in this docstring, which is about warmup, not defaults).
+    bb_dev = stdev(close, length=20, ddof=0) * 2.0
     bb_upper_v = (bb_basis + bb_dev).to_numpy(dtype=float)
     bb_lower_v = (bb_basis - bb_dev).to_numpy(dtype=float)
     bb_denom_v = bb_upper_v - bb_lower_v
@@ -533,8 +547,10 @@ Calculation:
         activity_volume_ratio=1.15, activity_range_atr=1.10,
         rejection_wick_ratio=0.25, min_score=3, enable_rescue_branch=True
     ATR(14), RSI(14), EMA(21) on close; Bollinger basis=SMA(20),
-        deviation=STDEV(20)*2, bbPosition=(close-lower)/(upper-lower)
-        (0.5 if upper==lower or either is na); +DI/-DI via ADX(14);
+        deviation=STDEV(20, ddof=0)*2 (POPULATION stdev, matching Pine's
+        `ta.stdev(..., biased=true)` default -- NOT this package's own
+        `stdev()` default of ddof=1/sample), bbPosition=(close-lower)/
+        (upper-lower) (0.5 if upper==lower or either is na); +DI/-DI via ADX(14);
         MACD(12,26,9) histogram; volumeRatio=volume/SMA(volume,20)
         (0.0 if the average is not > 0).
     A confirmed pivot low/high at anchor bar p (visible `pivot_right`
