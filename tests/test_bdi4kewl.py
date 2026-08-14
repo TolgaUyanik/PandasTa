@@ -207,7 +207,7 @@ def _clean_long_scenario():
     location/momentum/active/rejection are all True (score=5); ATR[54] =
     0.8470, so 2.0*ATR = 1.6939, and impulse (rolling-12-bar high minus
     pivotLow) = 13.1887, well clear of that threshold; the confirming
-    bar's close - pivotLow clears 1.2*ATR (1.0164) well within 2 bars of
+    bar's close - pivotLow clears 1.2*ATR (1.0163) well within 2 bars of
     confirmation. ⚠ Fletcher round 1 (MAJOR): an earlier version of this
     docstring quoted `_expiry_scenario`'s numbers (10.92/1.37) here by
     copy-paste error -- the assertions below never depended on the wrong
@@ -233,6 +233,59 @@ def _clean_long_scenario():
     close = np.concatenate([warm, down, [pivot_close, confirm1, confirm2], rev])
     n = len(close)
     pivot_idx = n_warm + down_n
+
+    open_ = close.copy()
+    open_[1:] = close[:-1]
+    open_[pivot_idx] = pivot_open
+
+    high = np.zeros(n)
+    low = np.zeros(n)
+    for i in range(n):
+        o, c = open_[i], close[i]
+        if i == pivot_idx:
+            high[i], low[i] = pivot_high_price, pivot_low_price
+        else:
+            high[i] = max(o, c) + abs(rng.normal(0, 0.03))
+            low[i] = min(o, c) - abs(rng.normal(0, 0.03))
+
+    volume = np.full(n, 1_000_000.0)
+    volume[pivot_idx] = 3_000_000.0
+
+    df = _to_frame(open_, high, low, close, volume)
+    return df, pivot_idx
+
+
+def _clean_short_scenario():
+    """Mirror of `_clean_long_scenario`: 40 quiet warmup bars, a clean
+    14-bar RALLY, a deep-UPPER-wick bearish reversal pivot bar, then a
+    strong downward reversal. Confirms as a SHORT signal at pivot_idx +
+    pivot_right, same pivot_idx=54/confirm_bar=56 as the LONG scenario
+    (same warmup length, same up_n=14=down_n) -- built as its own fixture
+    (not reused from `_clean_long_scenario`'s incidental background-noise
+    SHORT signal) specifically so `test_truncation_before_confirmation_
+    catches_backdating_mutant`'s SHORT-side mirror has a pivot bar
+    comfortably past this module's own `min_len=35` floor (the LONG
+    fixture's own organic SHORT signal, confirmed by direct pivot-
+    detection inspection, anchors at bar 26 -- too early for a `+1`
+    truncation to leave a computable frame). Verified directly against
+    this exact fixture: SHORT fires at bar 56 with score 5.0."""
+    n_warm = 40
+    rng = np.random.default_rng(3)
+    warm = 100 + np.cumsum(rng.normal(0, 0.05, n_warm))
+    up_n = 14
+    up = warm[-1] + np.cumsum(np.full(up_n, 0.9)) + rng.normal(0, 0.05, up_n)
+    pivot_close = up[-1] + 0.3
+    pivot_high_price = pivot_close + 3.0
+    pivot_open = pivot_close + 0.1
+    pivot_low_price = pivot_close - 0.15
+    confirm1 = pivot_close - 0.05
+    confirm2 = pivot_close - 0.10
+    rev_n = 6
+    rev = pivot_high_price - np.cumsum(np.full(rev_n, 2.0)) + rng.normal(0, 0.05, rev_n)
+
+    close = np.concatenate([warm, up, [pivot_close, confirm1, confirm2], rev])
+    n = len(close)
+    pivot_idx = n_warm + up_n
 
     open_ = close.copy()
     open_[1:] = close[:-1]
@@ -760,7 +813,7 @@ def _load_backdating_mutant():
     confirmation catches what a truncation point after it cannot.
     """
     import importlib
-    import importlib.util
+    import types
 
     # `pandas_ta.trend.bdi4kewl` resolves to the FUNCTION (re-exported by
     # `pandas_ta/trend/__init__.py`'s `from .bdi4kewl import bdi4kewl`,
@@ -778,13 +831,15 @@ def _load_backdating_mutant():
     mutated_src = mutated_src.replace(marker_short, "out_short[c.pivot_bar] = 1", 1)
     assert mutated_src != src
 
-    import tempfile
-    with tempfile.NamedTemporaryFile("w", suffix="_bdi4kewl_mutant.py", delete=False) as f:
-        f.write(mutated_src)
-        mutant_path = f.name
-    spec = importlib.util.spec_from_file_location("bdi4kewl_backdating_mutant", mutant_path)
-    mutant_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mutant_module)
+    # Fletcher NIT (round 2): the original version of this loader wrote
+    # the mutated source to a temp file via `tempfile.NamedTemporaryFile
+    # (..., delete=False)` and never cleaned it up, leaking one file per
+    # test run. `exec(compile(...))` into a fresh in-memory `types.
+    # ModuleType` gets the same result (a real module object with the
+    # mutated `bdi4kewl` bound inside it, imports and all) with no
+    # filesystem footprint at all.
+    mutant_module = types.ModuleType("bdi4kewl_backdating_mutant")
+    exec(compile(mutated_src, "<bdi4kewl_backdating_mutant>", "exec"), mutant_module.__dict__)
     return mutant_module.bdi4kewl
 
 
@@ -804,6 +859,14 @@ def test_truncation_before_confirmation_catches_backdating_mutant():
        -- a genuine, detected divergence. This is the concrete
        demonstration that this test methodology has power; the
        `confirm_bar+3`/`+5` cutoffs used elsewhere in this file do not.
+
+    Both checks are then MIRRORED on the SHORT side (Fletcher NIT, round
+    2): the mutant patches both `out_long[t] = 1` and `out_short[t] = 1`,
+    but an earlier version of this test only ever asserted against the
+    LONG column, leaving the SHORT write-site patched-but-unexercised.
+    This exact fixture also produces a genuine SHORT signal (confirmed at
+    bar 36, anchored at bar 34), reused here rather than building a
+    second fixture.
     """
     df, pivot_idx = _clean_long_scenario()
     truncate_at = pivot_idx + 1  # excludes the confirmation bar (pivot_idx + 2) entirely
@@ -838,6 +901,47 @@ def test_truncation_before_confirmation_catches_backdating_mutant():
     assert mutant_truncated_at_pivot == 0, "mutant setup invariant: truncated run must not reach confirmation"
     assert mutant_full_at_pivot != mutant_truncated_at_pivot, \
         "this truncation point failed to catch the back-dating mutant -- test has no power"
+
+    # --- SHORT-side mirror (Fletcher NIT, round 2): the mutant patches
+    # BOTH `out_long[t] = 1` and `out_short[t] = 1` (see
+    # `_load_backdating_mutant`'s docstring), but everything above only
+    # ever checked the LONG column -- the SHORT write-site was patched
+    # and never exercised by an assertion. Uses the dedicated
+    # `_clean_short_scenario` fixture (a mirror of `_clean_long_scenario`,
+    # same pivot_idx=54/confirm_bar=56 shape) rather than reusing
+    # `_clean_long_scenario`'s own incidental background-noise SHORT
+    # signal -- that signal's real anchor bar, found by direct pivot-
+    # detection inspection, is bar 26 (NOT `confirm_bar - pivot_right` --
+    # a candidate can be created well before the bar it eventually
+    # fires on), too early for a `pivot_idx_short + 1` truncation to
+    # leave a computable frame (`min_len=35`). Mirrors the LONG block
+    # above exactly: real port shows 0/0 at the SHORT pivot bar; the
+    # mutant's full run DOES back-date SHORT to its pivot bar while its
+    # own earlier truncation (before ITS confirmation bar) cannot.
+    df_short, pivot_idx_short = _clean_short_scenario()
+    truncate_at_short = pivot_idx_short + 1  # excludes SHORT's own confirmation bar (pivot_idx_short + 2)
+
+    open_s = df_short["Open"]
+    high_s = df_short["High"]
+    low_s = df_short["Low"]
+    close_s = df_short["Close"]
+    volume_s = df_short["Volume"]
+
+    out_full_short = df_short.ta.bdi4kewl()
+    out_truncated_short = df_short.iloc[:truncate_at_short].ta.bdi4kewl()
+    assert out_full_short["STURN_SHORT_3_2"].iloc[pivot_idx_short] == 0
+    assert out_truncated_short["STURN_SHORT_3_2"].iloc[pivot_idx_short] == 0
+
+    mutant_full_short = mutant_fn(open_=open_s, high=high_s, low=low_s, close=close_s, volume=volume_s)
+    mutant_truncated_short = mutant_fn(open_=open_s.iloc[:truncate_at_short], high=high_s.iloc[:truncate_at_short],
+                                        low=low_s.iloc[:truncate_at_short], close=close_s.iloc[:truncate_at_short],
+                                        volume=volume_s.iloc[:truncate_at_short])
+    mutant_full_short_at_pivot = mutant_full_short["STURN_SHORT_3_2"].iloc[pivot_idx_short]
+    mutant_truncated_short_at_pivot = mutant_truncated_short["STURN_SHORT_3_2"].iloc[pivot_idx_short]
+    assert mutant_full_short_at_pivot == 1, "mutant setup invariant: the SHORT full run must actually back-date"
+    assert mutant_truncated_short_at_pivot == 0, "mutant setup invariant: SHORT truncated run must not reach confirmation"
+    assert mutant_full_short_at_pivot != mutant_truncated_short_at_pivot, \
+        "this truncation point failed to catch the SHORT-side back-dating mutant -- test has no power"
 
 
 # ---------------------------------------------------------------------------
