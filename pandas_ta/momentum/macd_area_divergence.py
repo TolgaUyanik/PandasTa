@@ -361,7 +361,7 @@ Source: TradingView community indicator "趋势结构系统均线共振版" (Tre
 Structure System, MA Resonance Edition), https://www.tradingview.com/
 script/iOd2A4mw/ (ported into AwakenAnalytics/Backtesting TVPTA-6
 candidate 15; MPL-2.0 per TradingView's open-source publication
-convention). Pine v6, 173 lines.
+convention). Pine v6, 172 lines.
 
 WHAT IS NOT PORTED (all verified against the source, line by line):
   * The 6-MA ribbon itself (L9-14) and its six `plot()` calls (L16-21).

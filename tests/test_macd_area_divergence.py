@@ -2,7 +2,7 @@
 """Tests for `macd_area_divergence` (MADIV), TVPTA-6 candidate 15.
 
 Ported from the TradingView Pine v6 source "趋势结构系统均线共振版"
-(iOd2A4mw.pine, 173 lines).
+(iOd2A4mw.pine, 172 lines).
 
 Fixtures use SHORT MA/MACD lengths (3/5/8 and 3/6/3) rather than the
 20/60/120 + 12/26/9 defaults: the alignment gate flips only a handful of
