@@ -1540,6 +1540,18 @@ class AnalysisIndicators(BasePandasObject):
         result = aroon(high=high, low=low, length=length, scalar=scalar, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def atr_push(self, atr_length=None, breakout_lookback=None, push_window=None,
+                 min_push_atr=None, max_push_candles=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = atr_push(open_=open_, high=high, low=low, close=close,
+                          atr_length=atr_length, breakout_lookback=breakout_lookback,
+                          push_window=push_window, min_push_atr=min_push_atr,
+                          max_push_candles=max_push_candles, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def band_cross_retest(self, ma_type=None, len_fast=None, len_slow=None, atr_length=None, min_ext_atr=None, min_vel_atr=None, min_sep_atr=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
