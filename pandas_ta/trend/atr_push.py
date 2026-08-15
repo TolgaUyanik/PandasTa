@@ -152,60 +152,31 @@ def atr_push(open_, high, low, close, atr_length=None, breakout_lookback=None,
     bull = bull_flag.astype(float).where(warm)
     bear = bear_flag.astype(float).where(warm)
 
-    # --- Continuous strength form (NOT in the source) -----------------
-    # The source only ever consumes the 0/1 flag. `bull_leg / atr` is the
-    # same quantity the flag thresholds at `min_push_atr`, published raw:
-    # a dense, scale-free impulse magnitude in ATR units. A 0/1 flag that
-    # fires on a small fraction of bars is hard for a tree miner to use in
-    # a conjunction (support collapses); the continuous form is the
-    # mineable sibling.
-    #
-    # DEGENERATE-ATR GUARD. `atr_v > 0` alone is NOT enough, measured:
-    # on a perfectly flat frame pandas_ta's ATR comes back as 2.22e-16
-    # (float residue in `true_range`'s subtractions), not 0.0, so a bare
-    # `> 0` test passes and a push leg measured over a window that
-    # reaches OUTSIDE the flat stretch divides by it -- a constructed
-    # case in the test suite yields 4.50e+16. A value like that would
-    # destroy any split threshold or correlation computed over the
-    # column, so ATR is treated as degenerate below a RELATIVE floor
-    # (1e-12 of price) rather than an absolute one. This is a numerical
-    # guard on a division the source never performs; there is no Pine
-    # behaviour here to be unfaithful to, and the FLAG columns keep
-    # Pine's comparison semantics untouched.
-    #
-    # ⚠ Outside that guard `APUSH_STR_*` is genuinely UNBOUNDED above --
-    # it is an ATR-multiple, and a quiet ATR window under a large leg
-    # legitimately reads high. It is not a bounded oscillator.
-    safe_atr = atr_v.where(atr_v > 1e-12 * close.abs())
-    str_bull = bull_leg / safe_atr
-    str_bear = bear_leg / safe_atr
+    # NOTE: `bull_leg` / `bear_leg` are used ONLY inside the threshold
+    # comparisons above. A continuous `leg / atr` form WAS built here and
+    # was REMOVED after measurement -- see "THE CONTINUOUS STRENGTH FORM"
+    # in the docstring below. Do not re-add it without re-measuring.
 
     # Offset
     if offset != 0:
         bull = bull.shift(offset)
         bear = bear.shift(offset)
-        str_bull = str_bull.shift(offset)
-        str_bear = str_bear.shift(offset)
 
     # Handle fills
     if "fillna" in kwargs:
-        for s in (bull, bear, str_bull, str_bear):
+        for s in (bull, bear):
             s.fillna(kwargs["fillna"], inplace=True)
     if "fill_method" in kwargs:
-        for s in (bull, bear, str_bull, str_bear):
+        for s in (bull, bear):
             s.fillna(method=kwargs["fill_method"], inplace=True)
 
     _props = f"_{atr_length}_{breakout_lookback}_{push_window}"
     bull.name = f"APUSH_BULL{_props}"
     bear.name = f"APUSH_BEAR{_props}"
-    str_bull.name = f"APUSH_STR_BULL{_props}"
-    str_bear.name = f"APUSH_STR_BEAR{_props}"
 
     df = DataFrame({
         bull.name: bull,
         bear.name: bear,
-        str_bull.name: str_bull,
-        str_bear.name: str_bear,
     })
     df.name = f"APUSH{_props}"
     df.category = "trend"
@@ -219,14 +190,52 @@ A bar qualifies as a bullish push when it closes green, closes above the
 highest high of the `breakout_lookback` bars BEFORE it, and has travelled
 at least `min_push_atr` x ATR up from the lowest low of the trailing
 `push_window` bars (that window includes the current bar). Bearish is the
-mirror. Alongside each flag this ships the CONTINUOUS quantity the flag
-thresholds -- the impulse leg measured in ATR units -- which is dense and
-scale-free where the flag is sparse.
+mirror.
 
 Ported from the TradingView Pine v6 source "Buy and Sell Zones"
 (`LStt7FmQ-Buy-and-Sell-Zones.pine`, `wc -l` = 1513; the file has no
 trailing newline, so 1514 content lines). The push detector itself is
 Pine L336-386. `enoughHistory` also reads `maximumPushCandles` (L58).
+
+=== THE CONTINUOUS STRENGTH FORM: BUILT, MEASURED, REMOVED ============
+
+Two further columns were built here and REMOVED before this landed:
+`APUSH_STR_BULL` / `APUSH_STR_BEAR`, the impulse leg published raw in ATR
+units -- `(close - lowest(low, push_window)) / atr` and its mirror. The
+motivation was sound (a sparse 0/1 flag is hard for a tree miner to place
+inside a conjunction), but they are near-duplicates of columns the
+consuming engine already ships, and the measurement says so:
+
+  APUSH_STR_BULL x dist_low_5        rho = +0.858779   n = 404,066
+  APUSH_STR_BEAR x dist_from_high_5  rho = -0.845240   n = 404,066
+
+That is not a coincidence, it is arithmetic. The engine computes
+`dist_low_5 = (close - low.rolling(5).min()) / close` and
+`dist_from_high_5 = (close - high.rolling(5).max()) / close`. The
+NUMERATOR IS IDENTICAL and the WINDOW IS IDENTICAL; only the denominator
+differs, `close` instead of `atr`. Dividing by a slowly-varying divisor
+is close to a monotone rescaling, so a rank correlation barely moves --
+the same failure mode that got `TOD_RVOL_REL`/`TOD_VVOL_REL` removed at
+0.934/0.999. The project's shipping precedents are ~0.9 revert and
+0.76-0.80 ship-with-disclosure; 0.859 sits above the disclosure band.
+
+The two 0/1 FLAGS were kept because the CONJUNCTION is what is actually
+new here -- neither leg alone is novel, the requirement that both hold on
+the same bar is. They measure far lower: max |rho| 0.508954
+(APUSH_BULL x PPIVOT_VOLRATIO_10_10, n=329,922) and 0.488968
+(APUSH_BEAR x BOS_BEAR, n=404,066), with 1 of 924 measured flag cells at
+or above 0.5 and none at or above 0.6. Full grid:
+`backtest_results/tvpta6/atr_push_overlap_20260815.md` in the consuming
+repo.
+
+⚠ If a continuous form is ever wanted, it must be a form of the
+CONJUNCTION (which is not shipped anywhere), not of either leg alone --
+and it must carry a RELATIVE degenerate-ATR guard. Measured while the
+removed columns existed: a bare `atr > 0` mask does NOT protect the
+division, because on a perfectly flat frame `pandas_ta.atr` returns
+2.22e-16 rather than 0.0; a frame whose push window reaches outside the
+flat stretch then produced 4.50e+16. A floor of `1e-12 * |close|` handled
+it. Recorded so the next attempt does not rediscover it.
 
 === WHAT THIS PORT DELIBERATELY DOES NOT SHIP =========================
 
@@ -298,16 +307,14 @@ Calculation:
                     and (close - push_lo) >= atr_v * min_push_atr
     APUSH_BEAR    = enough and close < open and close < prev_lo
                     and (push_hi - close) >= atr_v * min_push_atr
-    APUSH_STR_BULL = (close - push_lo) / atr_v       [NaN where atr_v <= 0]
-    APUSH_STR_BEAR = (push_hi - close) / atr_v       [NaN where atr_v <= 0]
 
-    All four columns are NaN through warmup rather than 0 -- "unknown",
+    Both columns are NaN through warmup rather than 0 -- "unknown",
     not "no push".
 
-Scale-freedom: every column is invariant to a positive rescale of all
-four price series. The flags compare two price-scaled quantities
-(`close - push_lo` vs `atr_v * min_push_atr`), and the strength columns
-are a ratio of two price-scaled quantities. Volume is not read at all.
+Scale-freedom: both columns are invariant to a positive rescale of all
+four price series -- the flags compare two price-scaled quantities
+(`close - push_lo` vs `atr_v * min_push_atr`) against each other. Volume
+is not read at all.
 
 Args:
     open_ (pd.Series): Series of 'open's
@@ -329,5 +336,5 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.DataFrame: APUSH_BULL, APUSH_BEAR, APUSH_STR_BULL, APUSH_STR_BEAR
+    pd.DataFrame: APUSH_BULL, APUSH_BEAR
 """

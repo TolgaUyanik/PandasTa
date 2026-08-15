@@ -78,10 +78,7 @@ _PARAMS = dict(atr_length=2, breakout_lookback=2, push_window=2,
 def test_column_names_and_category():
     df = _flat_then_push()
     r = atr_push(df.open, df.high, df.low, df.close, **_PARAMS)
-    assert list(r.columns) == [
-        "APUSH_BULL_2_2_2", "APUSH_BEAR_2_2_2",
-        "APUSH_STR_BULL_2_2_2", "APUSH_STR_BEAR_2_2_2",
-    ]
+    assert list(r.columns) == ["APUSH_BULL_2_2_2", "APUSH_BEAR_2_2_2"]
     assert r.name == "APUSH_2_2_2"
     assert r.category == "trend"
 
@@ -89,10 +86,7 @@ def test_column_names_and_category():
 def test_default_props_suffix():
     df = _frame([(100.0, 101.0, 99.0, 100.0)] * 40)
     r = atr_push(df.open, df.high, df.low, df.close)
-    assert list(r.columns) == [
-        "APUSH_BULL_14_5_5", "APUSH_BEAR_14_5_5",
-        "APUSH_STR_BULL_14_5_5", "APUSH_STR_BEAR_14_5_5",
-    ]
+    assert list(r.columns) == ["APUSH_BULL_14_5_5", "APUSH_BEAR_14_5_5"]
 
 
 def test_dataframe_accessor_matches_direct_call():
@@ -134,12 +128,14 @@ def test_hand_derived_bull_push_bar():
     r = atr_push(df.open, df.high, df.low, df.close, **_PARAMS)
     assert r["APUSH_BULL_2_2_2"].iloc[10] == 1.0
     assert r["APUSH_BEAR_2_2_2"].iloc[10] == 0.0
-    # STR = leg / atr = 5 / 3.5014657...
+    # And the margin is real, not marginal: leg/atr = 5 / 3.5014657 =
+    # 1.42797..., comfortably clear of the 1.0 threshold. Pinned directly
+    # rather than via a shipped column (the strength columns were built,
+    # measured at rho 0.859 against `dist_low_5`, and removed).
     from pandas_ta.volatility.atr import atr as _atr
     a10 = _atr(df.high, df.low, df.close, length=2).iloc[10]
-    assert r["APUSH_STR_BULL_2_2_2"].iloc[10] == pytest.approx(5.0 / a10)
-    # bear leg on the same bar: recentPushHigh = max(101, 104.5) = 104.5
-    assert r["APUSH_STR_BEAR_2_2_2"].iloc[10] == pytest.approx(0.5 / a10)
+    assert 5.0 / a10 == pytest.approx(1.4279725, abs=1e-6)
+    assert 0.5 / a10 == pytest.approx(0.1427973, abs=1e-6)
 
 
 def test_flat_bars_never_fire():
@@ -179,9 +175,12 @@ def test_breakout_is_load_bearing():
     assert far["APUSH_BULL_2_8_2"].iloc[10] == 0.0     # window reaches bar 4
 
 
-def test_flag_implies_strength_at_or_above_threshold():
-    """Structural invariant: the flag is exactly the strength column
-    thresholded (plus candle direction + breakout). Checked on noise."""
+def test_flag_implies_leg_at_or_above_threshold():
+    """Structural invariant: on every bar the flag fires, the impulse leg
+    really is >= min_push_atr x ATR. The leg is recomputed here from the
+    frame (the shipped columns no longer expose it), so this is a genuine
+    cross-check of the gate, not a tautology over one column."""
+    from pandas_ta.volatility.atr import atr as _atr
     rng = np.random.default_rng(11)
     n = 800
     c = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
@@ -193,7 +192,11 @@ def test_flag_implies_strength_at_or_above_threshold():
         r = atr_push(df.open, df.high, df.low, df.close, min_push_atr=mult)
         fired = r["APUSH_BULL_14_5_5"] == 1.0
         assert fired.sum() > 0, f"no bull flags at min_push_atr={mult}"
-        assert (r.loc[fired, "APUSH_STR_BULL_14_5_5"] >= mult - 1e-12).all()
+        leg = df.close - df.low.rolling(5).min()
+        thresh = _atr(df.high, df.low, df.close, length=14) * mult
+        assert (leg[fired] >= thresh[fired] - 1e-12).all()
+        # and the gate really binds: some bars fail it
+        assert (~fired & (leg < thresh)).sum() > 0
 
 
 def test_enough_history_gate_boundary():
@@ -238,19 +241,24 @@ def test_flat_frame_atr_is_float_residue_not_zero():
     assert a.iloc[-1] < 1e-15
 
 
-def test_degenerate_atr_masks_strength_but_not_flag():
-    """A flat ATR window under a push window that reaches outside it is
-    the blow-up case: without the relative guard this frame produces
-    4.50e+16. The FLAG columns are untouched (Pine compares, never
-    divides); only the strength columns -- this port's own addition --
-    are masked."""
+def test_degenerate_atr_would_blow_up_a_division_flags_are_immune():
+    """The reason any FUTURE continuous form must carry a RELATIVE ATR
+    guard, kept as an executable record after the strength columns were
+    removed. On this frame the ATR window is flat while the push window
+    reaches outside it, so `leg / atr` evaluates to 4.50e+16. The shipped
+    FLAG columns are structurally immune -- Pine compares against ATR and
+    never divides by it -- which this asserts rather than assumes."""
+    from pandas_ta.volatility.atr import atr as _atr
     rows = [(100.0, 100.0, 90.0, 100.0)] + [(100.0, 100.0, 100.0, 100.0)] * 8
     df = _frame(rows)
-    kw = {**_PARAMS, "push_window": 9}
-    r = atr_push(df.open, df.high, df.low, df.close, **kw)
-    assert np.isnan(r["APUSH_STR_BULL_2_2_9"].iloc[-1])
-    assert r["APUSH_BULL_2_2_9"].iloc[-1] in (0.0, 1.0)   # flag still defined
+    a = _atr(df.high, df.low, df.close, length=2)
+    leg = df.close - df.low.rolling(9).min()
+    assert a.iloc[-1] > 0                       # a bare `> 0` guard passes
+    assert (leg.iloc[-1] / a.iloc[-1]) > 1e15   # ...and it does not protect
+    r = atr_push(df.open, df.high, df.low, df.close,
+                 **{**_PARAMS, "push_window": 9})
     assert not np.isinf(r.to_numpy(dtype=float)).any()
+    assert set(r["APUSH_BULL_2_2_9"].dropna().unique()) <= {0.0, 1.0}
 
 
 def test_flat_frame_produces_no_infinities():
@@ -274,9 +282,13 @@ def _noise_frame(seed=3, n=600):
 
 @pytest.mark.parametrize("k", [10.0, 0.1, 1234.5])
 def test_scale_free_under_price_rescale(k):
-    """All four columns are invariant to multiplying every price by k.
+    """Both columns are invariant to multiplying every price by k.
+
     NaN masks must match exactly too -- an invariance claim that quietly
-    changed which bars are populated would be worthless."""
+    changed which bars are populated would be worthless. And the columns
+    must not be trivially invariant by being constant: a column that
+    never fires is invariant to everything, so the fire count is asserted
+    non-degenerate before the comparison is allowed to mean anything."""
     df = _noise_frame()
     base = atr_push(df.open, df.high, df.low, df.close)
     scaled = atr_push(df.open * k, df.high * k, df.low * k, df.close * k)
@@ -284,6 +296,7 @@ def test_scale_free_under_price_rescale(k):
     for col in base.columns:
         b, s = base[col].dropna(), scaled[col].dropna()
         assert len(b) > 100
+        assert 0 < b.sum() < len(b), f"{col} is constant; invariance is vacuous"
         np.testing.assert_allclose(s.to_numpy(), b.to_numpy(),
                                    rtol=1e-9, atol=1e-12)
 
@@ -330,9 +343,9 @@ def test_mutant_a_dropping_the_shift_kills_every_flag():
     mut = mod.atr_push(df.open, df.high, df.low, df.close)
     assert real["APUSH_BULL_14_5_5"].sum() > 0
     assert mut["APUSH_BULL_14_5_5"].sum() == 0
-    # the bear side and the strength columns are untouched by this edit
-    pd.testing.assert_series_equal(real["APUSH_STR_BULL_14_5_5"],
-                                   mut["APUSH_STR_BULL_14_5_5"])
+    # the bear side is untouched by this edit -- it reads prev_structure_LOW
+    pd.testing.assert_series_equal(real["APUSH_BEAR_14_5_5"],
+                                   mut["APUSH_BEAR_14_5_5"])
 
 
 def test_mutant_b_forward_shifted_push_window_changes_output():
@@ -348,9 +361,8 @@ def test_mutant_b_forward_shifted_push_window_changes_output():
     df = _noise_frame()
     real = atr_push(df.open, df.high, df.low, df.close)
     mut = mod.atr_push(df.open, df.high, df.low, df.close)
-    diff = (real["APUSH_STR_BULL_14_5_5"] - mut["APUSH_STR_BULL_14_5_5"]).abs()
-    assert diff.max() > 1e-6, "fixture cannot detect a one-bar future leak"
-    assert (real["APUSH_BULL_14_5_5"] != mut["APUSH_BULL_14_5_5"]).sum() > 0
+    disagree = (real["APUSH_BULL_14_5_5"] != mut["APUSH_BULL_14_5_5"]).sum()
+    assert disagree > 0, "fixture cannot detect a one-bar future leak"
 
 
 def test_truncation_matches_prefix_of_full_series():
