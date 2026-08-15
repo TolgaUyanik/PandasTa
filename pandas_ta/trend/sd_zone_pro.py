@@ -98,8 +98,15 @@ class _Zone(object):
     `box.set_right` (L419-425), `box.delete` on FIFO eviction (L224/L376),
     and `array.get` in the cross-side merge (L203/L355) purely to recolour
     the survivor (`box.set_bgcolor`/`set_border_color`, not ported). Its
-    `array.size` (L172/L191/L324/L343) is only a loop bound over the
-    parallel float arrays. So the zone state is NOT locked inside drawing
+    `array.size` on the box arrays appears at FOURTEEN sites, not four:
+    the `> 0` guards and their loop bounds (L172-173/L191-192/L324-325/
+    L343-344, L419-420/L423-424) AND the FIFO capacity predicate
+    (L223/L375, `array.size(...) > maxBoxCount`). That last one is
+    state-BEARING, not a loop bound -- but it is not INDEPENDENT state:
+    all five parallel arrays are pushed and shifted in lockstep
+    (L216-220/L368-372 push, L224-228/L376-380 shift), so
+    `size(boxes) == size(vols)` always holds and this port tracks the
+    population off the float side while modelling the same eviction. So the zone state is NOT locked inside drawing
     objects and this class is a faithful stand-in, not an approximation.
     (An earlier revision of this paragraph said the box array was "only
     ever iterated" for the first two -- literally false, since L203/L355
