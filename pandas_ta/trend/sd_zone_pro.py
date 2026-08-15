@@ -93,10 +93,17 @@ class _Zone(object):
     `closed*ClusterBoxes` (box[]) alongside `closed*ClusterTops`,
     `closed*ClusterBottoms`, `closed*ClusterVols` (float[]) and
     `closed*ClusterLabels`. Every merge test reads the FLOAT arrays
-    (L175-177, L194-196, L327-329, L346-348); the box array is only ever
-    iterated for `box.set_right` (L419-425) and `box.delete` on FIFO
-    eviction (L224/L376). So the zone state is NOT locked inside drawing
+    (L175-177, L194-196, L327-329, L346-348); the box array is read at
+    only three kinds of site, NONE of which carries state:
+    `box.set_right` (L419-425), `box.delete` on FIFO eviction (L224/L376),
+    and `array.get` in the cross-side merge (L203/L355) purely to recolour
+    the survivor (`box.set_bgcolor`/`set_border_color`, not ported). Its
+    `array.size` (L172/L191/L324/L343) is only a loop bound over the
+    parallel float arrays. So the zone state is NOT locked inside drawing
     objects and this class is a faithful stand-in, not an approximation.
+    (An earlier revision of this paragraph said the box array was "only
+    ever iterated" for the first two -- literally false, since L203/L355
+    do `array.get` it. The conclusion is unchanged; the sentence was not.)
 
     `opened_at` / `closed_at` are BAR INDICES in the port's own
     (causality-critical) sense: the bar on which the zone became visible
@@ -454,7 +461,7 @@ supply shelf and the nearest demand shelf, plus (optionally) the nearest
 shelf's mass expressed in average-bars-of-volume.
 
 Source: TradingView community indicator "SD Zone Pro"
-(`docs/TradingView/pine/gIs5tbMW.pine`, Pine v6, 441 lines; see
+(`docs/TradingView/pine/gIs5tbMW.pine`, Pine v6, 440 lines; see
 `datastore/source/pine_candidates_families.csv` for the attribution row)
 (ported into AwakenAnalytics/Backtesting TVPTA-6, 2026-08-15; MPL-2.0
 per TradingView's open-source publication convention).

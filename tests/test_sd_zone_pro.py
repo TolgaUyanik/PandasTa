@@ -2,7 +2,7 @@
 """Tests for `sd_zone_pro` (SDZ), TVPTA-6 candidate 19.
 
 Ported from the TradingView Pine v6 source "SD Zone Pro"
-(`gIs5tbMW.pine`, 441 lines).
+(`gIs5tbMW.pine`, 440 lines).
 
 Two kinds of test live here:
 
