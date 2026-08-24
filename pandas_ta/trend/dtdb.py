@@ -612,15 +612,15 @@ does not.
 === SCALE-FREE ========================================================
 
 No column carries a price level. `DTDB_CONF`, `DTDB_PEND` and `DTDB_RES`
-are counts; `DTDB_TGT` is the measured target as a fraction of the
+are counts; `DTDB_TGT_PCT` is the measured target as a fraction of the
 confirming close. Every threshold inside the matcher is ATR-scaled
-(`tol = atr * tol_atr`, `buf = atr * bufIn`, `vtol = tol + atr *
+(`tol = atr * tol_atr`, `buf = atr * buf_atr`, `vtol = tol + atr *
 voidTol`), exactly as in the source, so the whole pipeline is invariant
 to multiplying all prices by a constant. Pinned by
 `test_scale_free_under_price_rescale`, which also asserts the columns are
 non-degenerate so invariance cannot be bought with a constant column.
 
-`DTDB_TGT` guards `close == 0` (and NaN close) before dividing; the
+`DTDB_TGT_PCT` guards `close == 0` (and NaN close) before dividing; the
 source never divides by price at all, since it plots a target LEVEL.
 
 === TIMEFRAME SENSITIVITY (not a bug) =================================
@@ -724,5 +724,6 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.DataFrame: DTDB_CONF, DTDB_TGT, DTDB_PEND, DTDB_RES columns.
+    pd.DataFrame: DTDB_CONF_BULL, DTDB_CONF_BEAR, DTDB_PEND, DTDB_RES,
+        DTDB_TGT_PCT columns (five).
 """

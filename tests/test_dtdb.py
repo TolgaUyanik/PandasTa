@@ -370,7 +370,7 @@ def test_scale_free_under_price_rescale(k):
         assert len(b) > 100
         nz = int((b != 0).sum())
         fired += nz
-        assert 0 <= nz < len(b)
+        assert 0 < nz < len(b)
         if exact:
             np.testing.assert_array_equal(s.to_numpy(), b.to_numpy())
         else:
