@@ -611,7 +611,8 @@ does not.
 
 === SCALE-FREE ========================================================
 
-No column carries a price level. `DTDB_CONF`, `DTDB_PEND` and `DTDB_RES`
+No column carries a price level. `DTDB_CONF_BULL`, `DTDB_CONF_BEAR`,
+`DTDB_PEND` and `DTDB_RES`
 are counts; `DTDB_TGT_PCT` is the measured target as a fraction of the
 confirming close. Every threshold inside the matcher is ATR-scaled
 (`tol = atr * tol_atr`, `buf = atr * buf_atr`, `vtol = tol + atr *
