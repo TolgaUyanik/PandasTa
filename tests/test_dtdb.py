@@ -198,7 +198,7 @@ def test_equal_tops_tolerance_is_load_bearing():
 
 
 def test_minimum_depth_is_load_bearing():
-    """`min(h1, h2) - l1 > 1.5 * tol` (Pine L215): a double top whose
+    """`min(h1, h2) - l1 > 1.5 * tol` (Pine L209, the DT shape test): a double top whose
     trough is a scratch rather than a real retracement is rejected.
 
     The gate is isolated by moving `tol_atr`, not the price path, so that
@@ -223,7 +223,7 @@ def test_minimum_depth_is_load_bearing():
 
 
 def test_weaker_mode_rejects_a_higher_second_peak():
-    """`dbl_mode="weaker"` adds `h2 <= h1 + tol * 0.25` (Pine L215)."""
+    """`dbl_mode="weaker"` adds `h2 <= h1 + tol * 0.25` (Pine L209, the DT shape test)."""
     c = [107.0] * 5 + [106, 105, 104, 103, 102, 101, 100] \
         + [101, 102, 103, 104, 105, 106, 107.6] \
         + [107.6 - i for i in range(1, 20)] + [88.0] * 8
@@ -248,7 +248,7 @@ def test_max_wait_voids_a_pattern_that_never_breaks():
 
 def test_void_past_the_extreme_discards_the_pattern():
     """Price running above `ext + vtol` kills a forming double top
-    (Pine L344-345), and does so long before `max_wait` would.
+    (Pine L345), and does so long before `max_wait` would.
 
     The spike is deliberately delayed to bars 22+: an earlier draft
     spiked from bar 19, which voided the pattern on the very bar it was
@@ -269,7 +269,7 @@ def test_void_past_the_extreme_discards_the_pattern():
 
 def test_wick_mode_confirms_where_close_mode_does_not():
     """`mode="wick"` tests the bar's LOW against the neckline instead of
-    its close (Pine L347/L351) -- a spike through that closes back must
+    its close (Pine L347 bear / L352 bull) -- a spike through that closes back must
     confirm in wick mode and not in close mode."""
     c = [107.0] * 5 + [106, 105, 104, 103, 102, 101, 100] \
         + [101, 102, 103, 104, 105, 106, 107] + [105.0, 103.0, 101.0] \
@@ -296,7 +296,7 @@ def test_double_bottom_is_the_mirror():
 
 
 def test_region_taken_blocks_an_overlapping_second_pattern():
-    """`f_regionTaken` (Pine L139-154) admits ONE pattern per region.
+    """`f_regionTaken` (Pine L139-153) admits ONE pattern per region.
     A path whose first three pivots are LOW-HIGH-LOW matches a double
     BOTTOM, which then blocks the double TOP its next pivot would form.
     This is the exact mechanism whose H&S half was deliberately NOT

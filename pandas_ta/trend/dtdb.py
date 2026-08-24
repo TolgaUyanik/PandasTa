@@ -102,7 +102,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
     atr_s = atr(high, low, close, length=atr_length)
 
     # Pine: ph = ta.pivothigh(pivLen, pivLen); pl = ta.pivotlow(pivLen, pivLen)
-    # (source L67-68). `_confirm_pivots` is IMPORTED from `zigzag_fib` rather
+    # (source L75-76). `_confirm_pivots` is IMPORTED from `zigzag_fib` rather
     # than copied a third time -- see the DIVERGENCES section of the module
     # docstring for why that deliberately breaks this package's
     # self-contained-module convention.
@@ -125,7 +125,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
     for _arr in (conf_bear, conf_bull, tgt, pend, res):
         _arr[warm:] = 0.0
 
-    # zigzag state -- Pine's zzB / zzP / zzD (source L61-63), capped at 20.
+    # zigzag state -- Pine's zzB / zzP / zzD (source L65-67), capped at 20.
     zz_b, zz_p, zz_d = [], [], []
     pats = []
 
@@ -153,7 +153,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
         return appended
 
     def _region_taken(s, e):
-        """Pine f_regionTaken, source L139-154. Rejects a new span that
+        """Pine f_regionTaken, source L139-153. Rejects a new span that
         overlaps an existing pattern's span by more than 15% of the shorter
         of the two. Pine guards `m >= 2` on the point array; every DT/DB
         pattern here carries 3 or 4 points, so that guard is always true and
@@ -168,7 +168,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
         return False
 
     def _cross_bar(j, from_bar, to_bar, level, bear, max_back):
-        """Pine f_crossBar, source L156-167, with `slp` fixed at 0.0.
+        """Pine f_crossBar, source L156-166, with `slp` fixed at 0.0.
 
         Walks BACKWARD from `from_bar - 1` and returns the FIRST bar whose
         low (bear) / high (bull) reaches `level`, or -1. Pine addresses those
@@ -221,8 +221,8 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
         })
 
     def _match_high(j, tol):
-        """Pine f_matchHigh, source L168-221 -- DOUBLE TOP branch ONLY
-        (L202-221). The H&S branch (L171-201) is NOT ported; see the module
+        """Pine f_matchHigh, source L169-221 -- DOUBLE TOP branch ONLY
+        (L200-221). The H&S branch (L172-199) is NOT ported; see the module
         docstring, this is NOT behaviour-neutral."""
         m = len(zz_d)
         if m < 3:
@@ -254,8 +254,8 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
                  j, start_b, zz_b[m - 1])
 
     def _match_low(j, tol):
-        """Pine f_matchLow, source L223-273 -- DOUBLE BOTTOM branch ONLY
-        (L255-273). The inverse-H&S branch (L224-254) is NOT ported."""
+        """Pine f_matchLow, source L222-273 -- DOUBLE BOTTOM branch ONLY
+        (L253-273). The inverse-H&S branch (L225-252) is NOT ported."""
         m = len(zz_d)
         if m < 3:
             return
@@ -283,7 +283,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
         _new_pat(2, 1, h1, (l1 + l2) / 2.0, zz_b[m - 1], ex, ex,
                  j, start_b, zz_b[m - 1])
 
-    # --- engine, Pine L321-418. Pine gates the whole block on
+    # --- engine, Pine L323-416. Pine gates the whole block on
     # `barstate.isconfirmed`; every bar of a historical frame is confirmed,
     # so the gate is the identity here.
     for j in range(n):
@@ -292,7 +292,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
         buf = atr_j * buf_atr
         vtol = tol + atr_j * void_atr
 
-        # Pine L328-333: the HIGH pivot is pushed and matched BEFORE the low
+        # Pine L330-335: the HIGH pivot is pushed and matched BEFORE the low
         # pivot on a bar that confirms both. Order is load-bearing (it
         # decides which of the two claims the region first).
         if ph[j] == ph[j]:
@@ -331,7 +331,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
                         height = neck_c - p["apex"]
                         p["target"] = neck_c + height
                     # f_draw is NOT ported, but its two STATE mutations
-                    # (Pine L293-294) are: the forward-cross point is
+                    # (Pine L294-295) are: the forward-cross point is
                     # appended to p.px, which moves p.px[m-1] and therefore
                     # changes what `f_regionTaken` blocks afterwards.
                     p["last_bar"] = _cross_fwd(j, p)
@@ -361,7 +361,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
                         p["result"] = 2
                 if p["result"] == 0 and j - p["conf_bar"] > track_bars:
                     p["result"] = 3
-                # Pine L372-374 also bumps the per-run res/hits counters
+                # Pine L381/L383 also bumps the per-run res/hits counters
                 # here. Those are aggregates over the whole run, not per-bar
                 # features, and are NOT ported.
                 if p["result"] == 1:
@@ -376,7 +376,7 @@ def dtdb(high, low, close, pivots=None, tol_atr=None, buf_atr=None,
             else:
                 i += 1
 
-        # Pine L401-418: cap CONFIRMED patterns, oldest first.
+        # Pine L400-416: cap CONFIRMED patterns, oldest first.
         cnt = 0
         for p in pats:
             if p["confirmed"]:
@@ -524,14 +524,14 @@ target on the break bar" state is no longer recoverable from
    DIVERGENCE. Do not "fix" it into equivalence.
 
    The source matches H&S FIRST and lets it SUPPRESS the double top on
-   the same pivot window (L202: `if n >= 3 and showDT and not matched5`;
-   the mirror is L255 for the double bottom). With the H&S branch gone,
+   the same pivot window (L200: `if n >= 3 and showDT and not matched5`;
+   the mirror is L253 for the double bottom). With the H&S branch gone,
    `matched5` is permanently false, the guard is vacuous, and a 5-pivot
    window the source would have consumed as an H&S is instead tested as
    a double top on its last three pivots. MORE double tops fire here
    than the source produces.
 
-   Second, independent mechanism: `f_regionTaken` (L139-154) scans the
+   Second, independent mechanism: `f_regionTaken` (L139-153) scans the
    `pats` array across ALL pattern kinds, not just its own. With no H&S
    or inverse-H&S patterns ever entering that pool, the occupied-region
    set is strictly smaller, so DT/DB candidates the source would have
@@ -549,14 +549,14 @@ target on the break bar" state is no longer recoverable from
    `f_newPat(1, -1, l1, 0.0, ...)` (L211) and the double bottom passes
    `0.0` (L264), and both call `f_crossBar` with `slp = 0.0` (L206,
    L259). So `neckSlope` and `neckX` are dead fields for DT/DB, and
-   `f_neckAt` (L84-86) -- `p.neck + p.neckSlope * (b - p.neckX)` --
+   `f_neckAt` (L84-85) -- `p.neck + p.neckSlope * (b - p.neckX)` --
    collapses to the constant `p.neck`. Removing them removes an entire
    class of bar-index off-by-one arithmetic from the two functions where
    this port's risk is concentrated (`f_crossBar`, `f_crossFwd`).
 
-3. `f_draw` (L291-312) is NOT ported -- EXCEPT ITS TWO STATE MUTATIONS,
+3. `f_draw` (L291-311) is NOT ported -- EXCEPT ITS TWO STATE MUTATIONS,
    which are. This is the subtle one. `f_draw` is nominally a drawing
-   routine, but L293-294 mutate engine state that later matching reads:
+   routine, but L294-295 mutate engine state that later matching reads:
 
        f_addPt(p, tb, f_neckAt(p, tb))
        p.trailB := math.max(p.trailB, tb)
@@ -568,14 +568,14 @@ target on the break bar" state is no longer recoverable from
    the region it blocks. That mutation IS ported (`p["last_bar"] =
    _cross_fwd(...)`), and `f_crossFwd` (L276-289) is ported with it,
    solely because of this. The second, `p.trailB`, is read only by the
-   `line.new` at L306 and is genuinely drawing-only; it is dropped.
+   `line.new` at L307 and is genuinely drawing-only; it is dropped.
 
-4. NOT PORTED, no behavioural consequence: `f_delete` (L313-319, pure
+4. NOT PORTED, no behavioural consequence: `f_delete` (L313-321, pure
    drawing-handle cleanup -- the `array.remove(pats, ...)` beside every
    call IS ported), every `line.new` / `box` / `label.new`, the hit-rate
-   table (L412-430), and the four `alertcondition` calls (L435-438).
+   table (L418-433), and the four `alertcondition` calls (L435-438).
 
-5. THE RUNNING HIT-RATE COUNTERS `res` / `hits` (L372-374) ARE NOT
+5. THE RUNNING HIT-RATE COUNTERS `res` / `hits` (L381, L383) ARE NOT
    PORTED. They are per-RUN aggregates, not per-bar features: emitting a
    running hit rate as a column would leak the outcome distribution of
    the whole series backward into every bar. Dropped on purpose.
@@ -587,7 +587,7 @@ target on the break bar" state is no longer recoverable from
    raw. `DTDB_RES` publishes the ordered part of it (+1 target / -1
    invalidated) and emits 0 for a timeout, which is a non-event.
 
-7. `maxKeep` (L401-418) IS ported. It evicts the oldest CONFIRMED
+7. `maxKeep` (L400-416) IS ported. It evicts the oldest CONFIRMED
    pattern once more than `max_keep` are held, which shrinks the
    region-occupancy set and therefore admits later patterns -- state,
    not display, despite the input's "keep the chart clean" tooltip.
@@ -595,7 +595,7 @@ target on the break bar" state is no longer recoverable from
 === CAUSALITY =========================================================
 
 A pattern is BORN on the bar its third pivot CONFIRMS -- that is
-`bar_index` in `f_newPat` (L124), i.e. `pivots` bars after the pivot
+`bar_index` in `f_newPat` (L125), i.e. `pivots` bars after the pivot
 itself. It CONFIRMS on a later bar still, and RESOLVES later than that.
 Every write in this module is at the index of the bar carrying the
 information, never back-dated to the pattern's pivots or apex. The
