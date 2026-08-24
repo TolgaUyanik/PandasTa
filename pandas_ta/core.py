@@ -1740,6 +1740,19 @@ class AnalysisIndicators(BasePandasObject):
                              merge_cross_side=merge_cross_side, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sr_corridor(self, pivot_left=None, pivot_right=None, atr_length=None,
+                    zone_atr=None, invalidation_atr=None, max_zones=None,
+                    offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sr_corridor(high=high, low=low, close=close,
+                             pivot_left=pivot_left, pivot_right=pivot_right,
+                             atr_length=atr_length, zone_atr=zone_atr,
+                             invalidation_atr=invalidation_atr,
+                             max_zones=max_zones, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def sr_decay(self, swing_len=None, max_levels=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
