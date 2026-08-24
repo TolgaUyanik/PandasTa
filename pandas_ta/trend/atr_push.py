@@ -90,10 +90,12 @@ def atr_push(open_, high, low, close, atr_length=None, breakout_lookback=None,
     # `ta.highest(high[1], breakoutLookback)` reads the series ALREADY
     # SHIFTED BY ONE BAR, so the window is bars t-1 .. t-breakoutLookback
     # and the CURRENT bar's own high is EXCLUDED. Dropping the `.shift(1)`
-    # would let the current high enter its own breakout test, which for a
-    # bar that makes a new high silently guarantees `close > prev_high`
-    # is measured against that same bar -- a self-referential, always-
-    # weaker test. `tests/test_atr_push.py` proves the difference with an
+    # would let the current high enter its own breakout test. That is not
+    # merely a weaker test, it is UNSATISFIABLE for valid OHLC: it asks
+    # for `close > max(High over a window containing High[t])`, and
+    # `close <= High[t]` always. The column goes silently DEAD -- it does
+    # not degrade, it stops firing entirely (measured: 0 fires vs 41).
+    # A mistranslation here yields a dead column, not a leak. `tests/test_atr_push.py` proves the difference with an
     # in-memory MUTANT of this module, not with an assertion.
     #
     # `min_periods` is left at the rolling default (== window), which
@@ -209,15 +211,50 @@ consuming engine already ships, and the measurement says so:
   APUSH_STR_BULL x dist_low_5        rho = +0.858779   n = 404,066
   APUSH_STR_BEAR x dist_from_high_5  rho = -0.845240   n = 404,066
 
-That is not a coincidence, it is arithmetic. The engine computes
-`dist_low_5 = (close - low.rolling(5).min()) / close` and
-`dist_from_high_5 = (close - high.rolling(5).max()) / close`. The
-NUMERATOR IS IDENTICAL and the WINDOW IS IDENTICAL; only the denominator
-differs, `close` instead of `atr`. Dividing by a slowly-varying divisor
-is close to a monotone rescaling, so a rank correlation barely moves --
-the same failure mode that got `TOD_RVOL_REL`/`TOD_VVOL_REL` removed at
-0.934/0.999. The project's shipping precedents are ~0.9 revert and
-0.76-0.80 ship-with-disclosure; 0.859 sits above the disclosure band.
+That overlap is MEASURED, not an arithmetic identity. An earlier
+revision of this docstring asserted the numerator and window were
+IDENTICAL and only the divisor differed. That was written from memory,
+not from the engine, and it is WRONG. The engine computes, verbatim
+(`backtesting_engine/indicator_engine.py:1320-1323` in the consuming
+repo):
+
+        for n in (5, 21, 63):
+            roll_low = low.shift(1).rolling(n, min_periods=max(1, n // 2)).min()
+            df[f'dist_low_{n}'] = ((close - roll_low) / close.clip(lower=eps)).clip(lower=0.0)
+            roll_high = high.shift(1).rolling(n, min_periods=max(1, n // 2)).max()
+
+`APUSH_STR_BULL` was `(close - low.rolling(5).min()) / atr`: the same
+STYLE of numerator over a ONE-BAR-OFFSET window, differing in FOUR ways,
+not one.
+
+  1. `.shift(1)`       -- the engine's window is t-5..t-1; ours was
+                          t-4..t, and so INCLUDED the current bar.
+  2. `min_periods`     -- the engine uses max(1, 5 // 2) = 2; ours was 5.
+  3. `.clip(lower=0.0)`-- the engine cannot go negative; ours could.
+  4. the divisor       -- `close` vs `atr`.
+
+They are different series, and measurably so: the engine's real
+`dist_low_5` correlates 0.908 with the misquoted unshifted/unclipped
+form, and `APUSH_STR_BULL` measures 0.848 against the engine-ACTUAL
+column versus 0.916 against the misquoted one.
+
+Difference 3 is load-bearing inside this very docstring: the DI-5
+finding below depends on `APUSH_STR_BULL` being unshifted AND unclipped
+-- that is the only reason it reached a pooled minimum of -1.01925,
+while `dist_low_5` cannot go below 0. The identity claim and that
+finding could never both have been true.
+
+So 0.858779 is the MEASURED consequence of a NEAR-OVERLAPPING window
+(4 of 5 bars shared) plus a slowly-varying divisor -- dividing by a
+slowly-varying divisor is close to a monotone rescaling, so a rank
+correlation barely moves. It is the same failure mode that got
+`TOD_RVOL_REL`/`TOD_VVOL_REL` removed at 0.934/0.999, but it is an
+empirical result, not a derivation.
+
+THE REMOVAL IS CORRECT ON THE MEASUREMENT ALONE. 0.858779 was genuinely
+measured over 404,066 pooled bars and sits above the project's 0.76-0.80
+ship-with-disclosure band, near its ~0.9 revert precedent. That decision
+stands on its own and never needed an identity argument.
 
 The two 0/1 FLAGS were kept because the CONJUNCTION is what is actually
 new here -- neither leg alone is novel, the requirement that both hold on
@@ -228,9 +265,16 @@ or above 0.5 and none at or above 0.6. Full grid:
 `backtest_results/tvpta6/atr_push_overlap_20260815.md` in the consuming
 repo.
 
-⚠ If a continuous form is ever wanted, it must be a form of the
-CONJUNCTION (which is not shipped anywhere), not of either leg alone --
-and it must carry a RELATIVE degenerate-ATR guard. Measured while the
+⚠ A continuous form is NOT prohibited by the above, and the earlier
+claim that any such form "must be of the CONJUNCTION" does not follow
+from a single measured overlap. What the 0.858779 rules out is THIS
+column -- an unshifted, unclipped, `min_periods=5`, ATR-divided bull leg
+-- against THESE comparators on THIS universe. A form that shifts the
+window, clips, or normalises differently is a DIFFERENT column and must
+be MEASURED on its own rather than ruled out by inheritance. A form of
+the conjunction remains the most likely to clear the band, because the
+conjunction is not shipped anywhere, but that is a prior, not a rule.
+Any such attempt must also carry a RELATIVE degenerate-ATR guard. Measured while the
 removed columns existed: a bare `atr > 0` mask does NOT protect the
 division, because on a perfectly flat frame `pandas_ta.atr` returns
 2.22e-16 rather than 0.0; a frame whose push window reaches outside the
@@ -261,8 +305,10 @@ declare genuine `array<float>` / `array<int>` / `array<bool>` state
 `buyInvalidated`, and the sell mirrors), with `array<box> buyBoxes`
 (L394) / `array<box> sellBoxes` (L428) as a DISPLAY MIRROR of that state.
 A grep for `box.|label.|line.|color.|bgcolor|border` matches 60 of the
-file's 1513 lines. The lifecycle is portable; it is simply not worth its
-cost here.
+file's 1514 content lines (`wc -l` reports 1513 only because the final
+line is unterminated; `grep` counts it, and so must this ratio -- see
+the `wc -l` note above, which had it right). The lifecycle is
+portable; it is simply not worth its cost here.
 
 ⚠ RE-OPENABLE, genuinely unported second-tier concept: the source's
 DEPARTURE -> RETEST -> REACTION ladder is NOT covered by any existing
@@ -291,6 +337,19 @@ INCLUDING the current bar, as one term of a pivot-anchored confluence
 score. `trend/ob.py`'s "impulse close" compares against the single prior
 bar's high. None of the three requires a prior-N-bar breakout AND an
 ATR-scaled leg together, which is this indicator's whole content.
+
+⚠ FORK-HYGIENE NOTE ON `trend/bos.py`, BLAST RADIUS ZERO. Its
+`rolling(swing_length, center=True)` is genuinely NON-CAUSAL -- it reads
+`swing_length // 2` bars into the future. The defect is real and worth a
+low-priority fix. It is NOT, however, a live-book issue, and must not be
+filed as one: `bos.py` is a DORMANT, UNREFERENCED module here. The
+consuming repo's `IndicatorEngine` never imports it (`grep -c "bos"
+backtesting_engine/indicator_engine.py` -> 0, and `bos` is absent from
+its `pandas_ta.trend` import list); the engine computes `BOS_BULL` /
+`BOS_BEAR` itself and CAUSALLY at `indicator_engine.py:549-552`, via
+`_sh_vals.shift(2).ffill()` (mirrored at `speedy_indicators.py:412`).
+The two `StrategyMaster.csv` rows mentioning `BOS_BULL` therefore use the
+engine's causal column, not this one, and are NOT compromised by it.
 
 Calculation:
     Default Inputs:
