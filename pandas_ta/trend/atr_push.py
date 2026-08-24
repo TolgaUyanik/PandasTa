@@ -234,9 +234,15 @@ not one.
   4. the divisor       -- `close` vs `atr`.
 
 They are different series, and measurably so: the engine's real
-`dist_low_5` correlates 0.908 with the misquoted unshifted/unclipped
-form, and `APUSH_STR_BULL` measures 0.848 against the engine-ACTUAL
-column versus 0.916 against the misquoted one.
+`dist_low_5` correlates 0.915898 with the misquoted unshifted/unclipped
+form (n=404,956), and `APUSH_STR_BULL` measures 0.858779 against the
+engine-ACTUAL column (n=404,066) versus 0.920964 against the misquoted
+one. The 0.858779 is NOT a separate number -- it IS the published grid
+maximum for this pair, measured by the harness against the engine's real
+column. Bear mirror: -0.845240 engine-actual vs -0.913926 misquoted.
+(Fletcher round 2, MAJOR: an earlier revision gave 0.908 / 0.848 / 0.916,
+which were a 25-frame subset reported as if full-universe. Re-measured
+over all 89 cached BIST_100 daily frames.)
 
 Difference 3 is load-bearing inside this very docstring: the DI-5
 finding below depends on `APUSH_STR_BULL` being unshifted AND unclipped
