@@ -535,13 +535,20 @@ target on the break bar" state is no longer recoverable from
    same event as the first): `f_regionTaken` (L139-153) scans the `pats`
    array across ALL pattern kinds, not just its own.
    PER WINDOW the replacement region is CONTAINED, not merely different:
-   a double top anchors its span at `zzB[n-4]` (L207) where an H&S
-   anchors at `zzB[n-6]` (L184), and both end at the same last pivot, so
-   the DT occupies strictly LESS of that window than the H&S it
-   displaces. (`legW` is not the lever -- `legW_DT = (zzB[n-1]-h1Bar)/2`
-   at L205 and `legW_HS = (zzB[n-1]-lsBar)/4` at L179 are both the MEAN
-   LEG LENGTH and are equal under the symmetry L186 enforces. The
-   narrowing comes from the left anchor moving n-6 -> n-4.)
+   both stored spans end at `zzB[n-1]` (L198 for H&S, L220 for DT) and
+   the left anchor moves from `zzB[n-6]`/`crossB` (L184) to
+   `zzB[n-4]`/`crossB` (L207), so the DT occupies strictly LESS of that
+   window than the H&S it displaces.
+   (`legW` is NOT the lever, and not for the reason an earlier revision
+   of this docstring gave. It never enters the occupied region at all:
+   `f_regionTaken` compares only `p.px[0]` and `p.px[m-1]` (L147-148),
+   while `legW` reaches only `trailBar`/`p.trailB` (L185, L208), which
+   the pool scan never reads. That earlier revision claimed `legW_DT`
+   (L205) and `legW_HS` (L179) are "equal under the symmetry L186
+   enforces" -- FALSE. L186 is five PRICE comparisons plus a region
+   check and contains NO bar term, so it constrains nothing temporal;
+   `max(3, int(span/2))` and `max(3, int(span/4))` are not equal in
+   general.)
    What breaks nesting is DOWNSTREAM: the port then admits DT/DB the
    source rejected outright, occupying regions the source never held --
    so globally neither pool is a subset of the other. That AGAIN admits
