@@ -531,12 +531,22 @@ target on the break bar" state is no longer recoverable from
    a double top on its last three pivots. MORE double tops fire here
    than the source produces.
 
-   Second, independent mechanism: `f_regionTaken` (L139-153) scans the
-   `pats` array across ALL pattern kinds, not just its own. With no H&S
-   or inverse-H&S patterns ever entering that pool, the occupied-region
-   set is strictly smaller, so DT/DB candidates the source would have
-   rejected as overlapping are admitted here. That AGAIN admits more
-   double tops.
+   Second, DEPENDENT mechanism (not independent -- its premise is the
+   same event as the first): `f_regionTaken` (L139-153) scans the `pats`
+   array across ALL pattern kinds, not just its own.
+   PER WINDOW the replacement region is CONTAINED, not merely different:
+   a double top anchors its span at `zzB[n-4]` (L207) where an H&S
+   anchors at `zzB[n-6]` (L184), and both end at the same last pivot, so
+   the DT occupies strictly LESS of that window than the H&S it
+   displaces. (`legW` is not the lever -- `legW_DT = (zzB[n-1]-h1Bar)/2`
+   at L205 and `legW_HS = (zzB[n-1]-lsBar)/4` at L179 are both the MEAN
+   LEG LENGTH and are equal under the symmetry L186 enforces. The
+   narrowing comes from the left anchor moving n-6 -> n-4.)
+   What breaks nesting is DOWNSTREAM: the port then admits DT/DB the
+   source rejected outright, occupying regions the source never held --
+   so globally neither pool is a subset of the other. That AGAIN admits
+   more double tops. REASONED FROM THE SOURCE, NOT MEASURED: no H&S
+   implementation exists here to diff against.
 
    Net: this module reproduces the source ONLY under
    `showHS = false, showIHS = false`. It is NOT equivalent to the
