@@ -215,7 +215,7 @@ That overlap is MEASURED, not an arithmetic identity. An earlier
 revision of this docstring asserted the numerator and window were
 IDENTICAL and only the divisor differed. That was written from memory,
 not from the engine, and it is WRONG. The engine computes, verbatim
-(`backtesting_engine/indicator_engine.py:1320-1323` in the consuming
+(`backtesting_engine/indicator_engine.py:1320-1324` in the consuming
 repo):
 
         for n in (5, 21, 63):
@@ -236,7 +236,7 @@ not one.
 They are different series, and measurably so: the engine's real
 `dist_low_5` correlates 0.915898 with the misquoted unshifted/unclipped
 form (n=404,956), and `APUSH_STR_BULL` measures 0.858779 against the
-engine-ACTUAL column (n=404,066) versus 0.920964 against the misquoted
+engine-ACTUAL column (n=404,066) versus 0.92096 against the misquoted
 one. The 0.858779 is NOT a separate number -- it IS the published grid
 maximum for this pair, measured by the harness against the engine's real
 column. Bear mirror: -0.845240 engine-actual vs -0.913926 misquoted.
