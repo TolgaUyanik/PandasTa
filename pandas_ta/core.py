@@ -1613,6 +1613,19 @@ class AnalysisIndicators(BasePandasObject):
         result = dpo(close=close, length=length, centered=centered, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def dtdb(self, pivots=None, tol_atr=None, buf_atr=None, void_atr=None,
+             max_wait=None, track_bars=None, max_keep=None, atr_length=None,
+             mode=None, dbl_mode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = dtdb(high=high, low=low, close=close, pivots=pivots,
+                      tol_atr=tol_atr, buf_atr=buf_atr, void_atr=void_atr,
+                      max_wait=max_wait, track_bars=track_bars,
+                      max_keep=max_keep, atr_length=atr_length, mode=mode,
+                      dbl_mode=dbl_mode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def equal_highs_lows(self, left=None, right=None, tol_mode=None, atr_length=None, atr_mult=None, pct_tol=None, lookback_pivots=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
