@@ -758,3 +758,85 @@ def test_nan_input_does_not_raise_and_stays_nan():
     d.loc[d.index[200:206], "high"] = np.nan
     r = range_profile(d.high, d.low, d.close)
     assert r[OSC].notna().sum() > 100
+
+
+# ---------------------------------------------------------------------
+# the incoherent-bar guard (a deviation from the source, so it is tested
+# as one: both that it fires, and that turning it off restores the
+# source's behaviour)
+# ---------------------------------------------------------------------
+def _mgros_shaped(n=400, bad_at=159):
+    """A frame carrying the exact defect measured on
+    `datastore/cache/MGROS_IS_1d.parquet` index 159: High AND Low blown
+    up by ~6 orders of magnitude while Open/Close stay sane, and no
+    close-to-close jump anywhere, so a c2c-based cleaner cannot see it.
+    """
+    d = _noise(seed=77, n=n, flat_every=0)
+    d = d.copy()
+    d.loc[d.index[bad_at], "high"] = 12_235_458.0
+    d.loc[d.index[bad_at], "low"] = 10_991_170.0
+    return d
+
+
+def test_guard_catches_the_mgros_shaped_print():
+    d = _mgros_shaped()
+    c2c = d["close"].pct_change().abs()
+    assert (c2c > 0.105).sum() == 0, "fixture must be invisible to a c2c cleaner"
+
+    off = range_profile(d.high, d.low, d.close, require_coherent_bars=False)
+    on = range_profile(d.high, d.low, d.close, require_coherent_bars=True)
+
+    # The defect's signature is NOT an out-of-range blow-up, which is
+    # what makes it dangerous: every real bar collapses into bin 0, the
+    # value area is that single bin, and the oscillator PINS at exactly
+    # -ob_os_level -- a plausible-looking "permanently at the oversold
+    # edge" reading, with the value-area width pinned at the collapsed
+    # profile's 2 * bin_size / mid_price = 200% signature.
+    o_off = off[OSC].to_numpy()
+    pinned = np.isclose(o_off[159:159 + 110], -80.0, rtol=0, atol=0.05)
+    assert pinned.sum() > 100, f"fixture did not pin the oscillator: {pinned.sum()}"
+    w_off = off[VAW].to_numpy()[159:159 + 110]
+    assert np.nanmin(w_off) > 190.0 and np.nanmax(w_off) < 210.0
+
+    o_on = on[OSC].to_numpy()
+    assert np.isclose(o_on[159:159 + 110], -80.0, rtol=0, atol=0.05).sum() <= 1
+    w_on = on[VAW].to_numpy()[159:159 + 110]
+    assert np.nanmax(w_on) < 60.0, f"guard left the width blown out: {np.nanmax(w_on)}"
+
+    # bounded blast radius: the profile is a fixed rolling window, so
+    # nothing before the bad bar and nothing beyond `lookback` bars
+    # after it may differ.
+    a = off[OSC].to_numpy()
+    b = on[OSC].to_numpy()
+    both = np.isfinite(a) & np.isfinite(b)
+    moved = np.where(both & (a != b))[0]
+    assert len(moved) > 0
+    assert moved.min() >= 159
+    assert moved.max() <= 159 + 110
+
+
+def test_guard_off_is_a_no_op_on_a_coherent_frame():
+    """Every bar of a clean frame satisfies `low <= close <= high`, so
+    the guard must not change a single value there -- it is a filter on
+    non-bars, not a smoother."""
+    d = _noise(seed=53, n=700)
+    on = range_profile(d.high, d.low, d.close, require_coherent_bars=True)
+    off = range_profile(d.high, d.low, d.close, require_coherent_bars=False)
+    pd.testing.assert_frame_equal(on, off)
+
+
+def test_guard_does_not_rescue_a_coherent_but_impossible_frame():
+    """The ARCLK shape: `High / Low` pinned near 3.0 with `close ==
+    low` for a whole era. Coherent, so the guard passes it through
+    unchanged -- asserted here so the module docstring's "what the
+    guard does not catch" is a tested claim, not a hedge."""
+    d = _noise(seed=61, n=500, flat_every=0)
+    d = d.copy()
+    sl = slice(100, 300)
+    d.loc[d.index[sl], "low"] = d.loc[d.index[sl], "close"]
+    d.loc[d.index[sl], "high"] = d.loc[d.index[sl], "close"] * 3.0
+    coherent = (d.low <= d.close) & (d.close <= d.high)
+    assert bool(coherent.all()), "fixture must stay coherent"
+    on = range_profile(d.high, d.low, d.close, require_coherent_bars=True)
+    off = range_profile(d.high, d.low, d.close, require_coherent_bars=False)
+    pd.testing.assert_frame_equal(on, off)

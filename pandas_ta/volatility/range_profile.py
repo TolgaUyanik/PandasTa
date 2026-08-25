@@ -88,6 +88,51 @@ DELIBERATE SUBSTITUTIONS (two, both documented as such):
      `::test_matches_an_integer_weight_transliteration_exactly` pins
      this module to the count form bar-for-bar.
 
+INCOHERENT-BAR GUARD -- A DELIBERATE DEVIATION, NOT IN THE SOURCE.
+A range-binning profile is structurally exposed to a single absurd
+print: one bad High stretches `price_range`, and every real bar then
+falls into one bucket. TradingView data does not have this problem;
+this project's yfinance cache does, and DI-1 is blind to it because
+the defect leaves no close-to-close jump.
+
+Measured on `datastore/cache/MGROS_IS_1d.parquet` (5,678 daily bars):
+index 159 (2004-12-29) carries `High = 12,235,458` and
+`Low = 10,991,170` against `Open = Close = 11.61`, and 162 bars have
+`High > 2 * Close` while ZERO bars fail the c2c test. Unguarded, the
+oscillator's minimum on that frame is -835.11 and the value-area
+width reaches 8,999.32% of price (70 bars above 1,000%) against a
+clean-bar maximum of 167.66%. It is not always a visible blow-up:
+around index 268-270 the column sits at -79.999, an apparently normal
+"at the oversold edge" reading that is entirely an artifact.
+
+The guard is definitional rather than heuristic: a bar failing
+`low <= close <= high` is not an OHLC bar, so it is dropped from the
+window -- from the extremes that set the bin edges AND from the
+deposits -- rather than being allowed to define the profile's range.
+On MGROS that catches 162 of 162 absurd bars and takes the minimum to
+-391.70 and the width maximum to 167.66 with zero bars above 1,000%;
+159 of 5,516 co-populated bars change, and the first 52 populated
+bars are withdrawn because MGROS's indices 0-161 are ALL incoherent,
+so those windows never had a valid profile to begin with.
+`require_coherent_bars=False` restores the source's behaviour exactly.
+
+WHAT THE GUARD DOES NOT CATCH, measured and not hidden:
+`ARCLK_IS_1d.parquet` carries 714 bars (2000-05-10..2003-05-27) with
+`High / Low` pinned near 3.0 while `close == low` -- physically
+impossible under BIST's +/-10% daily limit, but perfectly COHERENT, so
+the guard passes them and every emitted column is byte-identical with
+the guard on and off for that frame. That is a whole-era systematic
+defect in the High series affecting every High-consuming indicator in
+this engine (ATR, natr, Donchian, BB), not a single-print spike, and
+it is left as a data-integrity finding rather than patched behind one
+indicator. No BIST-specific span filter is applied here: this module
+has no way to know its bars come from a limit-banded exchange.
+
+CONTAMINATION IS BOUNDED HERE, unlike a zone-lifecycle indicator: the
+profile is a FIXED `lookback`-bar rolling window, so one bad print can
+reach at most `lookback` subsequent bars. Measured on MGROS: 164
+incoherent bars taint 381 of 5,568 populated bars (6.84%).
+
 STATE CARRIED ACROSS BARS (faithful to the source, and a real
 property of the column): `mid_price`, `range_high` and `range_low` are
 Pine `var float`s (source lines 57-59). They are only reassigned inside
@@ -336,7 +381,8 @@ def _fmt(x):
 
 
 def range_profile(high, low, close, lookback=None, ob_os_level=None,
-                  bins=None, min_range_pct=None, offset=None, **kwargs):
+                  bins=None, min_range_pct=None, require_coherent_bars=True,
+                  offset=None, **kwargs):
     """Indicator: Range Profile Oscillator (RPO)"""
     lookback = _validated_int(lookback, 110, "lookback")
     bins = _validated_int(bins, 50, "bins")
@@ -355,14 +401,36 @@ def range_profile(high, low, close, lookback=None, ob_os_level=None,
     if high is None or low is None or close is None: return
 
     n = len(close)
-    h_v = high.to_numpy(dtype=float)
+    h_v = high.to_numpy(dtype=float).copy()
     l_v = low.to_numpy(dtype=float)
     c_v = close.to_numpy(dtype=float)
 
+    # DELIBERATE DEVIATION -- NOT IN THE PINE SOURCE. See the module
+    # docstring's INCOHERENT-BAR GUARD block. A bar that does not
+    # satisfy `low <= close <= high` is not an OHLC bar; it is dropped
+    # from the window entirely (both from the min/max that set the bin
+    # edges and from the deposits), instead of being allowed to set the
+    # profile's range. `require_coherent_bars=False` reproduces the
+    # source's unguarded behaviour exactly.
+    if require_coherent_bars:
+        coherent = (np.isfinite(h_v) & np.isfinite(l_v) & np.isfinite(c_v)
+                    & (l_v <= c_v) & (c_v <= h_v))
+        h_v = np.where(coherent, h_v, np.nan)
+        l_v = np.where(coherent, l_v, np.nan)
+        masked_high = Series(h_v, index=high.index)
+        masked_low = Series(l_v, index=low.index)
+        min_periods = 1
+    else:
+        l_v = l_v.copy()
+        masked_high, masked_low = high, low
+        min_periods = lookback
+
     # Source line 82-87: min(low) / max(high) over the SAME window the
     # profile is built from -- bar `t` back through `t - lookback + 1`.
-    roll_min = low.rolling(lookback).min().to_numpy(dtype=float)
-    roll_max = high.rolling(lookback).max().to_numpy(dtype=float)
+    roll_min = masked_low.rolling(lookback, min_periods=min_periods) \
+        .min().to_numpy(dtype=float)
+    roll_max = masked_high.rolling(lookback, min_periods=min_periods) \
+        .max().to_numpy(dtype=float)
 
     osc = np.full(n, np.nan)
     va_width = np.full(n, np.nan)
@@ -493,6 +561,10 @@ Args:
     ob_os_level (float): Value-area coverage in PERCENT, and the level
         the oscillator's breakout flags fire at. Default: 80.0
     bins (int): Number of price buckets. Default: 50
+    require_coherent_bars (bool): NOT IN THE SOURCE. Drop any window
+        bar failing `low <= close <= high` from both the window
+        extremes and the profile deposits. False reproduces the
+        source. Default: True
     min_range_pct (float): Relative substitute for the source's
         `syminfo.mintick * 5` degeneracy guard -- the window's range
         must exceed this fraction of the window's mid price for the
