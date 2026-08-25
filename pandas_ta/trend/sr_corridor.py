@@ -98,7 +98,7 @@ _ZONE_SUPPORT = -1
 
 def sr_corridor(high, low, close, pivot_left=None, pivot_right=None,
                 atr_length=None, zone_atr=None, invalidation_atr=None,
-                max_zones=None, offset=None, **kwargs):
+                max_zones=None, max_edge_atr=None, offset=None, **kwargs):
     """Indicator: Support/Resistance Corridor Width (SRCOR)"""
     pivot_left = _validated_int(pivot_left, 8, "pivot_left")
     pivot_right = _validated_int(pivot_right, 5, "pivot_right")
@@ -107,6 +107,18 @@ def sr_corridor(high, low, close, pivot_left=None, pivot_right=None,
     zone_atr = _validated_float(zone_atr, 0.60, "zone_atr")
     invalidation_atr = _validated_float(invalidation_atr, 0.10,
                                         "invalidation_atr", positive=False)
+    # `max_edge_atr` is the ONE knob with no counterpart in the Pine
+    # source (see the DELIBERATE DEVIATION block below). A positive
+    # infinity explicitly disables it and reproduces the source's
+    # unbounded behaviour bit-for-bit, which is how the deviation is
+    # tested; every other value goes through the same validation as the
+    # ported parameters.
+    if max_edge_atr is None:
+        max_edge_atr = 50.0
+    elif isinstance(max_edge_atr, float) and np.isposinf(max_edge_atr):
+        pass
+    else:
+        max_edge_atr = _validated_float(max_edge_atr, 50.0, "max_edge_atr")
 
     min_len = pivot_left + pivot_right + 1
     high = verify_series(high, min_len)
@@ -179,6 +191,75 @@ def sr_corridor(high, low, close, pivot_left=None, pivot_right=None,
     # Every `box`/`line`/`label`/`table` call inside the zone block is
     # dropped, as is the per-zone `zoneEvaluated` bookkeeping, which
     # exists only to stop the state machine re-reporting a zone.
+    #
+    # DELIBERATE DEVIATION FROM THE SOURCE -- `max_edge_atr`. This is the
+    # ONE rule in this module that the Pine source does not contain, and
+    # it is stated here rather than buried because every other line above
+    # is a faithfulness note.
+    #
+    #   THE SOURCE LINE THAT DOES NOT EXIST. The source's zone lifecycle
+    #   is exactly three rules: born on a confirmed pivot (L337-391),
+    #   evicted oldest-first past `MAX_STORED_ZONES = 40` (L148 declares
+    #   it; L383-391 is the eviction loop), and killed by a close beyond
+    #   its edge plus `atr * invalidationBufferATR` (L398-441). Grep the
+    #   whole 1,489-line source for a bound on how FAR a zone may sit
+    #   from price, or on how OLD it may get: there is none. `L400` is
+    #   the only distance test in the zone block and it is the
+    #   invalidation buffer, not a sanity bound.
+    #
+    #   WHY THAT IS A DEFECT ON THIS DATA, MEASURED. `MGROS.IS` carries a
+    #   pre-2005 lira-redenomination residual: `High`/`Low` are in OLD
+    #   lira while `Open`/`Close` are in NEW lira, so `High` peaks at
+    #   12,235,458 at index 159 against a `Close` of 11.61, and 162 bars
+    #   carry `High > 2*Close`. DI-1's c2c test passes on ALL of them
+    #   (0 failures) because `Close` itself is clean, so nothing upstream
+    #   catches it. Under the source's three rules that produces two
+    #   immortal populations: seven resistance zones born at index 57-164
+    #   with tops of 8.3e6-1.2e7, which `close > top + buf` can never
+    #   reach again; and one support zone born at index 224 whose BOTTOM
+    #   is a legitimate 9.228 but whose TOP is 87,970, because its depth
+    #   was scaled by a contaminated `atr[pivotRight]` of ~1.46e5. None
+    #   of them is ever evicted either -- eviction fires only when the
+    #   LIVE count exceeds 40, and ordinary zones die fast enough that it
+    #   never does. The support zone then wins the nearest-support race
+    #   on every subsequent bar for free, because the source's zero-clamp
+    #   (L473-480) scores any zone price sits INSIDE at distance 0.
+    #   Result, measured: 5,410 of that frame's 5,485 populated bars
+    #   (98.6%), contiguous from index 268 to 5677, carry |value| > 1000,
+    #   median |numerator| 87,953 against a median `Close` of 20.02
+    #   (4,393x price). The ATR divisor on those bars is NORMAL --
+    #   median 0.6113 against 0.6391 over the whole frame -- so this is
+    #   a numerator defect, not a divisor collapse.
+    #
+    #   THE RULE ADDED. A zone is eligible to BOUND the corridor only if
+    #   the edge that would bound it lies within `max_edge_atr * atr` of
+    #   the current close -- the TOP for a support zone, the BOTTOM for a
+    #   resistance zone, i.e. exactly the number that enters the emitted
+    #   arithmetic. It is applied ONLY to eligibility in step 3. Zones
+    #   are still born, evicted and invalidated exactly as the source
+    #   does, and the bound is REVERSIBLE: a far zone becomes eligible
+    #   again if price travels back to it, which a removal rule could not
+    #   express. Because both surviving edges are then within
+    #   `max_edge_atr` of the same close, the emitted column is bounded
+    #   by construction to +/- 2 * max_edge_atr.
+    #
+    #   WHY 50.0. It is a SANITY bound placed in clear air between two
+    #   populations, not a percentile fitted to one. Measured over the
+    #   same 89 BIST_100 daily frames / 367,669 populated bars: on the 87
+    #   clean frames the winning zone's edge distance has median 3.73 ATR,
+    #   q0.999 29.31 and a MAXIMUM of 124.29, and only 63 of 357,840 bars
+    #   (0.0176%) have a winner beyond 50 ATR; the contaminated winners
+    #   sit near 1.4e5 ATR, about 2,800x the bound. Three orders of
+    #   magnitude separate them.
+    #
+    #   WHAT IT DOES NOT DO, so it is not oversold: it does NOT make a
+    #   contaminated frame correct. During the contaminated era itself
+    #   both the levels and the ATR are garbage together and the ratio
+    #   stays small, so nothing here detects that; DI-5 does. What it
+    #   stops is one bad print poisoning the column for the REST of the
+    #   series after prices return to a normal scale. The immortal zones
+    #   also still occupy FIFO slots (8 of 40 on `MGROS.IS`), which this
+    #   rule does not reclaim.
     # ------------------------------------------------------------------
     zone_top = []
     zone_bottom = []
@@ -232,13 +313,22 @@ def sr_corridor(high, low, close, pivot_left=None, pivot_right=None,
         best_res = np.nan
         sup_top = np.nan
         res_bottom = np.nan
+        # The DELIBERATE DEVIATION, and the only line in this loop the
+        # source does not have. When the ATR is unusable there is nothing
+        # to measure the bound in, so no bound is applied -- and the
+        # emit below is NaN on those bars anyway.
+        edge_cap = a * max_edge_atr if (not np.isnan(a) and a > 0) else np.inf
         for t, b, y in zip(zone_top, zone_bottom, zone_type):
             if y == _ZONE_SUPPORT and c >= b:
+                if abs(c - t) > edge_cap:
+                    continue
                 d = c - t if c > t else 0.0
                 if np.isnan(best_sup) or d < best_sup:
                     best_sup = d
                     sup_top = t
             elif y == _ZONE_RESISTANCE and c <= t:
+                if abs(c - b) > edge_cap:
+                    continue
                 d = b - c if c < b else 0.0
                 if np.isnan(best_res) or d < best_res:
                     best_res = d
@@ -310,6 +400,18 @@ conventions rule out (nominal-drift decay). Dividing by the same bar's
 ATR makes it invariant to a rescaling of the whole price series, which
 `tests/test_sr_corridor.py` checks bit-exactly at power-of-two factors.
 
+ONE DELIBERATE DEVIATION FROM THE SOURCE: `max_edge_atr`. The source's
+zone lifecycle has no bound on how far from price a zone may sit and no
+bound on its age, so a zone born off a corrupted High can neither be
+invalidated nor evicted and bounds the corridor forever. Measured on
+`MGROS.IS` (a pre-2005 lira-redenomination residual that DI-1's c2c test
+passes): 5,410 of 5,485 populated bars, 98.6% of the frame, contiguous
+over twenty-one years. `max_edge_atr` makes a zone eligible to bound the
+corridor only while the edge that would bound it is within that many ATR
+of the current close. Default 50.0; pass `float('inf')` to reproduce the
+source exactly. Full argument, measurements and residuals: the DELIBERATE
+DEVIATION block in the function body.
+
 Source: TradingView community indicator, Pine v6, published script
 `yQdPgJ6s` ("Crypto Intraday Engine"), 1,489 content lines (ported into
 AwakenAnalytics/Backtesting TVPTA-6, 2026-08-25; MPL-2.0 per
@@ -334,9 +436,10 @@ Calculation:
         `max_zones`, and die on
         close > top + ATR * invalidation_atr        (resistance)
         close < bottom - ATR * invalidation_atr     (support)
-    Nearest support = the eligible (close >= bottom) support zone
-        minimising `close - top` clamped at 0 inside the zone;
-        resistance mirrors it. Ties go to the older zone.
+    Nearest support = the eligible (close >= bottom, AND
+        `|close - top| <= ATR * max_edge_atr`) support zone minimising
+        `close - top` clamped at 0 inside the zone; resistance mirrors it
+        on its BOTTOM edge. Ties go to the older zone.
     SRCOR_WIDTH_ATR = (nearest_resistance_bottom - nearest_support_top)
         / ATR, and NaN unless BOTH sides have an eligible zone.
 
@@ -352,6 +455,12 @@ Args:
     invalidation_atr (float): Extra ATR multiple price must close beyond
         a zone before it dies. 0 reproduces a bare break. Default: 0.10
     max_zones (int): Shared FIFO cap across both zone types. Default: 40
+    max_edge_atr (float): NOT IN THE SOURCE -- sanity bound on zone
+        eligibility. A zone may bound the corridor only while the edge
+        that would bound it (a support's TOP, a resistance's BOTTOM) is
+        within this many ATR of the current close. Bounds the emitted
+        column to +/- 2 * max_edge_atr by construction.
+        `float('inf')` disables it and reproduces the source. Default: 50.0
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:

@@ -242,9 +242,34 @@ def test_delta_iii_invalidation_buffer_changes_the_output():
     m = np.isfinite(a) & np.isfinite(b)
     assert m.sum() > 100
     assert (a[m] != b[m]).sum() > 0
-    # the buffer can only make zones live LONGER, so it can only add
-    # populated bars, never remove them
-    assert np.isfinite(a).sum() >= np.isfinite(b).sum()
+
+
+def test_the_buffer_does_NOT_monotonically_add_populated_bars():
+    """An earlier version of this file asserted that the buffer "can only
+    make zones live LONGER, so it can only add populated bars, never
+    remove them". That is FALSE, and this test is the counterexample
+    that replaces it.
+
+    The reason it is false is delta-vs-VOLSR number six: the FIFO cap is
+    SHARED across both zone types (source L148 declares `MAX_STORED_ZONES
+    = 40`; L383-391 is the eviction loop). A zone the buffer keeps alive
+    occupies a slot, so it can push an OLDER zone off the other side of
+    the FIFO -- and if that older zone was the only one on its side, the
+    bar loses its corridor instead of gaining one.
+
+    Measured over `max_zones` in {3,4,5,6,8,10,15,20} x 40 seeds: 59 of
+    the 320 runs have the BUFFERED column strictly less populated than
+    the bare one. At the shipped `max_zones = 40` there are 0 of 40 --
+    so the property holds at the default and is not a property of the
+    module. One case is pinned exactly below rather than left as a rate.
+    """
+    d = _noise(seed=5, n=1200)
+    kw = dict(max_zones=5)
+    buffered = sr_corridor(d.high, d.low, d.close, **kw)[COL]
+    bare = sr_corridor(d.high, d.low, d.close, invalidation_atr=0.0, **kw)[COL]
+    assert int(buffered.notna().sum()) == 829
+    assert int(bare.notna().sum()) == 850
+    assert int(buffered.notna().sum()) < int(bare.notna().sum())
 
 
 # NOTE: the delta-(v) test lives BELOW `_load_mutant`, because the
@@ -349,6 +374,123 @@ def test_delta_v_distance_is_zero_clamped_inside_the_zone():
     both = np.isfinite(real) & np.isfinite(mut)
     assert both.sum() > 300
     assert (real[both] != mut[both]).sum() > 0, "the clamp is not load-bearing"
+
+
+# ---------------------------------------------------------------------
+# `max_edge_atr` -- the ONE deliberate deviation from the Pine source
+# ---------------------------------------------------------------------
+def _contaminated(n=900, seed=3, spike_bar=60, spike=1.0e6):
+    """The `MGROS.IS` defect shape, reduced to its minimum: an otherwise
+    ordinary path around 100 with ONE corrupted `High`.
+
+    That is all it takes. The spike inflates ATR for many bars after it
+    (ATR is an RMA, so it decays rather than resets), so the next pivot
+    LOW forms a support zone whose BOTTOM is a legitimate price but
+    whose TOP is scaled by the contaminated ATR. Price then sits INSIDE
+    that zone forever, the source's zero-clamp scores it at distance 0,
+    and it wins the nearest-support race on every later bar. It can
+    never be invalidated (its bottom is a real, never-revisited price)
+    and never evicted (eviction fires only when the LIVE count exceeds
+    `max_zones`, which ordinary zone death keeps it from doing).
+    """
+    rng = np.random.default_rng(seed)
+    c = 100 * np.exp(np.cumsum(rng.normal(0.0, 0.011, n)))
+    h = c * (1 + abs(rng.normal(0, 0.005, n)))
+    l = c * (1 - abs(rng.normal(0, 0.005, n)))
+    h = h.copy()
+    h[spike_bar] = spike
+    return pd.DataFrame({"open": c, "high": h, "low": l, "close": c})
+
+
+def test_infinite_max_edge_atr_reproduces_the_unbounded_source():
+    """The deviation must be a real, switchable rule and not a silent
+    rewrite: `float('inf')` disables it, and on a CLEAN path that must
+    give a column identical to the default, bit-for-bit -- otherwise the
+    bound is reshaping ordinary data rather than guarding it."""
+    d = _noise(n=1200)
+    base = sr_corridor(d.high, d.low, d.close)[COL]
+    unb = sr_corridor(d.high, d.low, d.close,
+                      max_edge_atr=float("inf"))[COL]
+    assert int(base.notna().sum()) > 300
+    assert (base.isna().to_numpy() == unb.isna().to_numpy()).all()
+    np.testing.assert_array_equal(base.dropna().to_numpy(),
+                                  unb.dropna().to_numpy())
+
+
+def test_one_corrupted_high_poisons_the_unbounded_column():
+    """The defect the deviation exists for, demonstrated on the source's
+    own behaviour. Without the bound a SINGLE bad `High` destroys most
+    of the remaining series."""
+    d = _contaminated()
+    v = sr_corridor(d.high, d.low, d.close,
+                    max_edge_atr=float("inf"))[COL].to_numpy()
+    f = np.isfinite(v)
+    assert int(f.sum()) == 843
+    assert int((f & (np.abs(v) > 1000)).sum()) == 726     # 86% of the frame
+    assert np.nanmax(v) > 7.0e5
+
+
+def test_the_bound_removes_the_poisoned_tail():
+    """Same frame, shipped default. The tail is gone, and the column is
+    still populated on the large majority of the bars it had."""
+    d = _contaminated()
+    v = sr_corridor(d.high, d.low, d.close)[COL].to_numpy()
+    f = np.isfinite(v)
+    assert int(f.sum()) == 689
+    assert int((f & (np.abs(v) > 1000)).sum()) == 0
+    assert np.nanmax(np.abs(v)) < 100.0
+
+
+def test_the_bound_caps_the_column_at_twice_max_edge_atr():
+    """Both surviving edges are within `max_edge_atr * atr` of the SAME
+    close, so the emitted gap cannot exceed twice that. Checked on the
+    contaminated frame -- where the unbounded column reaches 7.7e5 -- at
+    two different bounds, so the cap tracks the parameter rather than
+    happening to hold once."""
+    d = _contaminated()
+    for cap in (5.0, 50.0):
+        v = sr_corridor(d.high, d.low, d.close, max_edge_atr=cap)[COL]
+        v = v.dropna().to_numpy()
+        assert len(v) > 100
+        assert np.abs(v).max() <= 2.0 * cap + 1e-9
+
+
+def test_the_bound_is_eligibility_not_removal_so_it_is_reversible():
+    """The bound is applied ONLY inside the nearest-zone search, and is
+    recomputed from scratch every bar out of `close` and `atr`. A zone
+    that falls out of range must therefore come BACK into play, which a
+    removal rule could not express.
+
+    Driven through the ATR rather than through price, so nothing else
+    moves: `close` is parked at 100 for the whole tail (the two zones
+    stay eligible under the source's own `c <= top` / `c >= bottom`
+    tests and neither is ever invalidated), while `high`/`low` widen,
+    collapse and widen again. Each block is a PLATEAU, so it adds no
+    pivots of its own. Since `edge_cap = atr * max_edge_atr`, the same
+    fixed edge distance is inside the bound, then outside it, then
+    inside it again. The `inf` control is populated throughout, which is
+    what proves the zones were never destroyed.
+    """
+    tail = [(30, 103.0, 97.0), (70, 100.05, 99.95), (40, 103.0, 97.0)]
+    c = list(_CORRIDOR_PATH)
+    h = [x + 0.5 for x in _CORRIDOR_PATH]
+    l = [x - 0.5 for x in _CORRIDOR_PATH]
+    for n, hi, lo in tail:
+        c += [100.0] * n
+        h += [hi] * n
+        l += [lo] * n
+    d = pd.DataFrame({"open": c, "high": h, "low": l, "close": c})
+    kw = dict(pivot_left=2, pivot_right=1)
+    tight = sr_corridor(d.high, d.low, d.close, max_edge_atr=1.5, **kw)[COL21]
+    loose = sr_corridor(d.high, d.low, d.close,
+                        max_edge_atr=float("inf"), **kw)[COL21]
+
+    wide_1, narrow, wide_2 = 80, 120, 180
+    for j in (wide_1, narrow, wide_2):
+        assert loose.notna().iloc[j], f"control lost the corridor at {j}"
+    assert tight.notna().iloc[wide_1]
+    assert tight.isna().iloc[narrow], "bound never suppressed the zone"
+    assert tight.notna().iloc[wide_2], "bound was not reversible"
 
 
 # ---------------------------------------------------------------------
@@ -565,6 +707,9 @@ def test_mutant_b_using_tomorrows_atr_is_caught():
     dict(zone_atr=0.0), dict(zone_atr=-1.0), dict(zone_atr=float("nan")),
     dict(zone_atr=float("inf")), dict(zone_atr=True),
     dict(invalidation_atr=-0.1), dict(invalidation_atr=float("inf")),
+    dict(max_edge_atr=0.0), dict(max_edge_atr=-1.0),
+    dict(max_edge_atr=float("nan")), dict(max_edge_atr=float("-inf")),
+    dict(max_edge_atr=True),
 ])
 def test_invalid_arguments_raise_value_error(kw):
     d = _noise(n=300)
@@ -584,7 +729,7 @@ def test_none_arguments_use_defaults():
     a = sr_corridor(d.high, d.low, d.close)
     b = sr_corridor(d.high, d.low, d.close, pivot_left=None, pivot_right=None,
                     atr_length=None, zone_atr=None, invalidation_atr=None,
-                    max_zones=None)
+                    max_zones=None, max_edge_atr=None)
     pd.testing.assert_frame_equal(a, b)
 
 
