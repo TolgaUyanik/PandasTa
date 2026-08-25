@@ -52,7 +52,18 @@ OSC = "RPO_OSC_110_80"
 VAW = "RPO_VA_WIDTH_PCT_110_80"
 UP = "RPO_BREAK_UP_110_80"
 DN = "RPO_BREAK_DN_110_80"
-COLS = [OSC, VAW, UP, DN]
+SHIPPED = [VAW, UP, DN]          # what the engine actually receives
+COLS = [OSC] + SHIPPED           # + the deleted oscillator, test-hook only
+
+
+def _rp(*args, **kwargs):
+    """Every property test runs against the FULL set including the
+    deleted `RPO_OSC`, because that is the quantity all three shipped
+    columns are derived from. `emit_osc` is a test hook, never a
+    production setting -- `test_osc_is_not_shipped_by_default` pins
+    that."""
+    kwargs.setdefault("emit_osc", True)
+    return range_profile(*args, **kwargs)
 
 
 def _noise(seed=17, n=900, sigma=0.013, flat_every=25):
@@ -120,7 +131,7 @@ def test_hand_derived_bar_5():
         RPO_VA_WIDTH_PCT = (24.5 - 21.5)/23.75 * 100
                          = 12.631578947368421
     """
-    r = range_profile(_HAND.high, _HAND.low, _HAND.close, **_HP)
+    r = _rp(_HAND.high, _HAND.low, _HAND.close, **_HP)
     assert r[_HOSC].iloc[:5].isna().all()
     assert r[_HOSC].iloc[5] == 50.0
     assert r[_HVAW].iloc[5] == pytest.approx(3.0 / 23.75 * 100.0, rel=0, abs=1e-12)
@@ -141,19 +152,30 @@ def test_hand_derived_bar_6_and_crossover_strictness():
     and non-strict on the previous, so 50.0 -> 58.33 IS a crossover
     (the previous bar sitting exactly ON the level does not block it).
     """
-    r = range_profile(_HAND.high, _HAND.low, _HAND.close, **_HP)
+    r = _rp(_HAND.high, _HAND.low, _HAND.close, **_HP)
     assert r[_HOSC].iloc[6] == pytest.approx(1.75 / 1.5 * 50.0, rel=0, abs=1e-12)
     assert r[_HUP].iloc[6] == 1.0
     assert r[_HDN].iloc[6] == 0.0
 
 
+def test_osc_is_not_shipped_by_default():
+    """`RPO_OSC` was measured at Spearman +0.858558 against the
+    consuming engine's `close_vs_qtr_mean_pct` and DELETED. The default
+    call must not emit it, and neither must the DataFrame accessor --
+    that is the whole point of the deletion."""
+    d = _noise(n=400).assign(volume=1e6)
+    assert list(range_profile(d.high, d.low, d.close).columns) == SHIPPED
+    assert list(d.ta.range_profile().columns) == SHIPPED
+    assert OSC not in d.ta.range_profile().columns
+
+
 def test_column_names_and_shape():
     d = _noise(n=400)
-    r = range_profile(d.high, d.low, d.close)
+    r = _rp(d.high, d.low, d.close)
     assert list(r.columns) == COLS
     assert r.name == "RPO_110_80"
     assert r.category == "volatility"
-    r2 = range_profile(d.high, d.low, d.close, lookback=60, ob_os_level=70.5)
+    r2 = _rp(d.high, d.low, d.close, lookback=60, ob_os_level=70.5)
     assert list(r2.columns) == ["RPO_OSC_60_70.5", "RPO_VA_WIDTH_PCT_60_70.5",
                                 "RPO_BREAK_UP_60_70.5", "RPO_BREAK_DN_60_70.5"]
 
@@ -162,7 +184,7 @@ def test_registered_and_accessor():
     assert "range_profile" in ta.Category["volatility"]
     d = _noise(n=300)
     d = d.assign(volume=1e6)
-    r = d.ta.range_profile()
+    r = d.ta.range_profile(emit_osc=True)
     assert list(r.columns) == COLS
 
 
@@ -170,7 +192,7 @@ def test_warmup_is_exactly_lookback_bars():
     """Source line 81 is `bar_index >= lookback`, so the first
     populated index is `lookback`, not `lookback - 1`."""
     d = _noise(n=400)
-    r = range_profile(d.high, d.low, d.close, lookback=110)
+    r = _rp(d.high, d.low, d.close, lookback=110)
     first = int(np.argmax(r[OSC].notna().to_numpy()))
     assert first == 110
     assert r[OSC].iloc[:110].isna().all()
@@ -435,7 +457,7 @@ def test_matches_an_integer_weight_transliteration_exactly():
     constant this port drops."""
     total_cells = 0
     for d in _xlat_frames():
-        got = range_profile(d.high, d.low, d.close)[OSC].to_numpy()
+        got = _rp(d.high, d.low, d.close)[OSC].to_numpy()
         ref = _transliterate(d.high.tolist(), d.low.tolist(),
                              d.close.tolist(), "count")
         assert np.array_equal(np.isnan(got), np.isnan(ref)), "NaN masks differ"
@@ -487,8 +509,8 @@ def test_scale_invariance_bit_exact_on_a_power_of_two():
     a ratio of two such differences, so the columns must come back
     BIT-identical -- not merely close."""
     d = _noise(n=800)
-    a = range_profile(d.high, d.low, d.close)
-    b = range_profile(d.high * 8, d.low * 8, d.close * 8)
+    a = _rp(d.high, d.low, d.close)
+    b = _rp(d.high * 8, d.low * 8, d.close * 8)
     for col in COLS:
         x, y = a[col].to_numpy(), b[col].to_numpy()
         assert np.array_equal(np.isnan(x), np.isnan(y)), f"{col}: NaN masks differ"
@@ -508,8 +530,8 @@ def test_scale_invariance_on_a_non_power_of_two():
     """x10 is not exact in binary, so this one is a tolerance test --
     stated explicitly rather than hidden behind a default."""
     d = _noise(seed=31, n=700)
-    a = range_profile(d.high, d.low, d.close)
-    b = range_profile(d.high * 10, d.low * 10, d.close * 10)
+    a = _rp(d.high, d.low, d.close)
+    b = _rp(d.high * 10, d.low * 10, d.close * 10)
     for col in (OSC, VAW):
         x, y = a[col].to_numpy(), b[col].to_numpy()
         assert np.array_equal(np.isnan(x), np.isnan(y)), f"{col}: NaN masks differ"
@@ -532,7 +554,7 @@ def test_no_raw_price_level_is_ever_emitted():
     column may carry values of the price's own order for the whole
     column."""
     d = _noise(n=900)
-    r = range_profile(d.high, d.low, d.close)
+    r = _rp(d.high, d.low, d.close)
     assert r[VAW].dropna().max() < 100.0     # value-area width as % of price
     assert r[VAW].dropna().min() >= 0.0
 
@@ -598,11 +620,11 @@ def test_truncation_matches_prefix_of_full_series():
     what the mutants below are for. Run on the FULL emitted set,
     including the carried-forward `mid_price`/`range_*` state."""
     d = _noise(n=700)
-    full = range_profile(d.high, d.low, d.close)
+    full = _rp(d.high, d.low, d.close)
     for k in (150, 301, 455, 699):
         p = d.iloc[:k]
         pd.testing.assert_frame_equal(
-            range_profile(p.high, p.low, p.close), full.iloc[:k])
+            range_profile(p.high, p.low, p.close, emit_osc=True), full.iloc[:k])
 
 
 @pytest.mark.parametrize("pairs,tag,min_moved", [
@@ -620,9 +642,9 @@ def test_causality_mutants_are_caught(pairs, tag, min_moved):
     disagree at the cut; the real module never disagrees at any k.
     """
     d = _noise(n=900)
-    real_full = range_profile(d.high, d.low, d.close)[OSC]
+    real_full = _rp(d.high, d.low, d.close)[OSC]
     mod = _load_mutant(pairs, tag)
-    mut_full = mod.range_profile(d.high, d.low, d.close)[OSC]
+    mut_full = mod.range_profile(d.high, d.low, d.close, emit_osc=True)[OSC]
 
     r_n, m_n = int(real_full.notna().sum()), int(mut_full.notna().sum())
     assert r_n > 500 and m_n > 500, "mutant collapsed the column; not perturbing"
@@ -644,9 +666,9 @@ def test_causality_mutants_are_caught(pairs, tag, min_moved):
             continue
         p = d.iloc[:k]
         r_dis, r_cells, r_mm = _finite_disagreement(
-            real_full, range_profile(p.high, p.low, p.close)[OSC], k)
+            real_full, range_profile(p.high, p.low, p.close, emit_osc=True)[OSC], k)
         m_dis, m_cells, m_mm = _finite_disagreement(
-            mut_full, mod.range_profile(p.high, p.low, p.close)[OSC], k)
+            mut_full, mod.range_profile(p.high, p.low, p.close, emit_osc=True)[OSC], k)
         assert r_cells > 0 and m_cells > 0, "no co-populated cells to compare"
         assert r_dis == 0 and r_mm == 0, f"REAL module leaked at k={k}"
         real_hits += r_dis
@@ -663,10 +685,10 @@ def test_carried_forward_state_is_backward_looking_only():
     without touching the window arithmetic. A run whose tail is
     replaced by garbage must leave every earlier bar untouched."""
     d = _noise(n=600)
-    full = range_profile(d.high, d.low, d.close)
+    full = _rp(d.high, d.low, d.close)
     e = d.copy()
     e.loc[e.index[400:], ["high", "low", "close"]] *= 3.7
-    tail = range_profile(e.high, e.low, e.close)
+    tail = _rp(e.high, e.low, e.close)
     pd.testing.assert_frame_equal(full.iloc[:400], tail.iloc[:400])
 
 
@@ -684,9 +706,9 @@ def test_min_range_pct_gates_the_rebuild_and_carries_forward():
                             np.full(150, 175.0) + np.arange(150) * 1e-4])
     d = pd.DataFrame({"high": close + 0.01, "low": close - 0.01,
                       "close": close})
-    strict = range_profile(d.high, d.low, d.close, lookback=50,
+    strict = _rp(d.high, d.low, d.close, lookback=50,
                            min_range_pct=0.05)[["RPO_OSC_50_80"]]
-    loose = range_profile(d.high, d.low, d.close, lookback=50,
+    loose = _rp(d.high, d.low, d.close, lookback=50,
                           min_range_pct=0.0)[["RPO_OSC_50_80"]]
     a = strict["RPO_OSC_50_80"].to_numpy()
     b = loose["RPO_OSC_50_80"].to_numpy()
@@ -710,7 +732,7 @@ def test_all_flat_window_refreshes_the_midline_but_not_the_value_area():
     high[:60] = close[:60] + 0.4
     low[:60] = close[:60] - 0.4
     d = pd.DataFrame({"high": high, "low": low, "close": close})
-    r = range_profile(d.high, d.low, d.close, lookback=20, bins=8,
+    r = _rp(d.high, d.low, d.close, lookback=20, bins=8,
                       min_range_pct=0.0)
     col = "RPO_OSC_20_80"
     # bars past index ~80 sit on an all-flat window: still populated,
@@ -731,32 +753,32 @@ def test_all_flat_window_refreshes_the_midline_but_not_the_value_area():
 def test_bad_arguments_raise(kw):
     d = _noise(n=200)
     with pytest.raises(ValueError):
-        range_profile(d.high, d.low, d.close, **kw)
+        _rp(d.high, d.low, d.close, **kw)
 
 
 def test_short_series_returns_none():
     d = _noise(n=20)
-    assert range_profile(d.high, d.low, d.close, lookback=110) is None
+    assert _rp(d.high, d.low, d.close, lookback=110) is None
 
 
 def test_offset_shifts_every_column():
     d = _noise(n=400)
-    a = range_profile(d.high, d.low, d.close)
-    b = range_profile(d.high, d.low, d.close, offset=2)
+    a = _rp(d.high, d.low, d.close)
+    b = _rp(d.high, d.low, d.close, offset=2)
     for col in COLS:
         pd.testing.assert_series_equal(b[col], a[col].shift(2))
 
 
 def test_fillna_kwarg():
     d = _noise(n=300)
-    r = range_profile(d.high, d.low, d.close, fillna=0.0)
+    r = _rp(d.high, d.low, d.close, fillna=0.0)
     assert r.notna().all().all()
 
 
 def test_nan_input_does_not_raise_and_stays_nan():
     d = _noise(n=400)
     d.loc[d.index[200:206], "high"] = np.nan
-    r = range_profile(d.high, d.low, d.close)
+    r = _rp(d.high, d.low, d.close)
     assert r[OSC].notna().sum() > 100
 
 
@@ -783,8 +805,8 @@ def test_guard_catches_the_mgros_shaped_print():
     c2c = d["close"].pct_change().abs()
     assert (c2c > 0.105).sum() == 0, "fixture must be invisible to a c2c cleaner"
 
-    off = range_profile(d.high, d.low, d.close, require_coherent_bars=False)
-    on = range_profile(d.high, d.low, d.close, require_coherent_bars=True)
+    off = _rp(d.high, d.low, d.close, require_coherent_bars=False)
+    on = _rp(d.high, d.low, d.close, require_coherent_bars=True)
 
     # The defect's signature is NOT an out-of-range blow-up, which is
     # what makes it dangerous: every real bar collapses into bin 0, the
@@ -820,8 +842,8 @@ def test_guard_off_is_a_no_op_on_a_coherent_frame():
     the guard must not change a single value there -- it is a filter on
     non-bars, not a smoother."""
     d = _noise(seed=53, n=700)
-    on = range_profile(d.high, d.low, d.close, require_coherent_bars=True)
-    off = range_profile(d.high, d.low, d.close, require_coherent_bars=False)
+    on = _rp(d.high, d.low, d.close, require_coherent_bars=True)
+    off = _rp(d.high, d.low, d.close, require_coherent_bars=False)
     pd.testing.assert_frame_equal(on, off)
 
 
@@ -837,6 +859,6 @@ def test_guard_does_not_rescue_a_coherent_but_impossible_frame():
     d.loc[d.index[sl], "high"] = d.loc[d.index[sl], "close"] * 3.0
     coherent = (d.low <= d.close) & (d.close <= d.high)
     assert bool(coherent.all()), "fixture must stay coherent"
-    on = range_profile(d.high, d.low, d.close, require_coherent_bars=True)
-    off = range_profile(d.high, d.low, d.close, require_coherent_bars=False)
+    on = _rp(d.high, d.low, d.close, require_coherent_bars=True)
+    off = _rp(d.high, d.low, d.close, require_coherent_bars=False)
     pd.testing.assert_frame_equal(on, off)

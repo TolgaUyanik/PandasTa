@@ -145,6 +145,39 @@ window in which every bar has `high == low` (all weight zero -- a BIST
 limit-lock streak is the realistic case) refreshes the midline while
 leaving the value area stale.
 
+WHAT WAS BUILT, MEASURED, AND THEN REMOVED (read before re-adding it).
+The oscillator of source line 150 -- the source's own headline output,
+`RPO_OSC_110_80` -- is COMPUTED here but NOT EMITTED. It was measured
+against the COMPLETE 472-column numeric output of the consuming
+engine's `IndicatorEngine(include_advanced=True).compute_all()`, pooled
+over 89 BIST_100 daily frames / 405,312 bars (395,470 co-populated),
+and scored:
+
+    +0.858558  close_vs_qtr_mean_pct
+    +0.855717  close_vs_qtr_median_pct
+    +0.844715  ICHI_PRICE_VS_CLOUD
+    +0.828585  ATRMAX_14_50
+
+-- 8 cells at or above 0.80, and the shape is not one unlucky
+comparator: the modal bin of a 110-bar range profile tracks that
+window's central tendency closely, so `(close - mid) / half_width` is
+close to a volatility-normalised "close versus its quarterly mean",
+which this engine already ships. Dropping the two most contaminated
+frames (MGROS.IS, ARCLK.IS) moves it to +0.859858, so the number is
+not a data artifact either. The consuming project's precedent band is
+"~0.9 revert / 0.76-0.80 ship with disclosure", and its own record
+includes columns deleted at 0.859 and 0.845, so this one is deleted.
+Full grid:
+Backtesting/backtest_results/tvpta6/rpo_overlap_20260825.md
+
+WHAT SURVIVED that measurement, and why it is not the same statistic:
+the value-area WIDTH (max |rho| 0.548605 vs `sup_level_touches_120`;
+0.537112 vs `natr`) and the two CROSSING EVENTS (0.173316 vs
+`log_return`; 0.144673 vs `VELOCITY`). The width is the extent of the
+DENSEST part of the window rather than the dispersion of all of it,
+and a crossing is an event where the oscillator is a level -- neither
+duplicates anything in the engine at the level the oscillator did.
+
 SHARED KERNEL. `_profile_bins`, `_poc` and `_value_area` are module-
 level and deliberately reusable. `K0SEi3Ct` (TL PbD Shape Pro) source
 lines 186-198 run the SAME outward-expansion loop with the same
@@ -382,7 +415,7 @@ def _fmt(x):
 
 def range_profile(high, low, close, lookback=None, ob_os_level=None,
                   bins=None, min_range_pct=None, require_coherent_bars=True,
-                  offset=None, **kwargs):
+                  emit_osc=False, offset=None, **kwargs):
     """Indicator: Range Profile Oscillator (RPO)"""
     lookback = _validated_int(lookback, 110, "lookback")
     bins = _validated_int(bins, 50, "bins")
@@ -506,7 +539,16 @@ def range_profile(high, low, close, lookback=None, ob_os_level=None,
         for s in (osc_s, vaw_s, up_s, dn_s):
             s.fillna(method=kwargs["fill_method"], inplace=True)
 
-    df = DataFrame({s.name: s for s in (osc_s, vaw_s, up_s, dn_s)})
+    # `RPO_OSC` IS NOT SHIPPED. See "WHAT WAS BUILT, MEASURED, AND THEN
+    # REMOVED" in the module docstring: it measured Spearman +0.858558
+    # against the consuming engine's `close_vs_qtr_mean_pct` over
+    # 395,470 pooled bars. `emit_osc=True` is NOT a feature switch and
+    # nothing in production sets it -- it exists so the port's
+    # correctness, causality and scale-invariance can still be asserted
+    # directly against the quantity every shipped column is derived
+    # from. Do not wire it into an engine.
+    out = ((osc_s,) if emit_osc else ()) + (vaw_s, up_s, dn_s)
+    df = DataFrame({s.name: s for s in out})
     df.name = f"RPO{tag}"
     df.category = "volatility"
     return df
@@ -548,10 +590,11 @@ Calculation:
     range_high = minL + (hi + 1) * bin_size
     half_range = (range_high - range_low) / 2
 
-    RPO_OSC          = (close - mid_price) / half_range * ob_os_level
+    osc              = (close - mid_price) / half_range * ob_os_level
+                       (computed, NOT emitted -- see the module docstring)
     RPO_VA_WIDTH_PCT = (range_high - range_low) / mid_price * 100
-    RPO_BREAK_UP     = crossover(RPO_OSC,  ob_os_level)
-    RPO_BREAK_DN     = crossunder(RPO_OSC, -ob_os_level)
+    RPO_BREAK_UP     = crossover(osc,  ob_os_level)
+    RPO_BREAK_DN     = crossunder(osc, -ob_os_level)
 
 Args:
     high (pd.Series): Series of 'high's
@@ -561,6 +604,10 @@ Args:
     ob_os_level (float): Value-area coverage in PERCENT, and the level
         the oscillator's breakout flags fire at. Default: 80.0
     bins (int): Number of price buckets. Default: 50
+    emit_osc (bool): NOT A FEATURE SWITCH. `RPO_OSC` is deleted, not
+        optional -- see "WHAT WAS BUILT, MEASURED, AND THEN REMOVED"
+        above. True adds it back so the port's properties can be
+        asserted against it in tests. Default: False
     require_coherent_bars (bool): NOT IN THE SOURCE. Drop any window
         bar failing `low <= close <= high` from both the window
         extremes and the profile deposits. False reproduces the
@@ -578,6 +625,7 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.DataFrame: RPO_OSC, RPO_VA_WIDTH_PCT, RPO_BREAK_UP,
-        RPO_BREAK_DN columns.
+    pd.DataFrame: RPO_VA_WIDTH_PCT, RPO_BREAK_UP, RPO_BREAK_DN columns
+        (and RPO_OSC only when `emit_osc=True`, which is a test hook,
+        not a production setting).
 """
