@@ -120,13 +120,24 @@ WHAT THE GUARD DOES NOT CATCH, measured and not hidden:
 `ARCLK_IS_1d.parquet` carries 714 bars (2000-05-10..2003-05-27) with
 `High / Low` pinned near 3.0 while `close == low` -- physically
 impossible under BIST's +/-10% daily limit, but perfectly COHERENT, so
-the guard passes them and every emitted column is byte-identical with
-the guard on and off for that frame. That is a whole-era systematic
-defect in the High series affecting every High-consuming indicator in
-this engine (ATR, natr, Donchian, BB), not a single-print spike, and
-it is left as a data-integrity finding rather than patched behind one
-indicator. No BIST-specific span filter is applied here: this module
-has no way to know its bars come from a limit-banded exchange.
+the guard passes every one of them through. That is a whole-era
+systematic defect in the High series affecting every High-consuming
+indicator in this engine (ATR, natr, Donchian, BB), not a single-print
+spike, and it is left as a data-integrity finding rather than patched
+behind one indicator. No BIST-specific span filter is applied here:
+this module has no way to know its bars come from a limit-banded
+exchange.
+
+  CORRECTION (2026-08-25). An earlier revision of this block claimed
+  "every emitted column is byte-identical with the guard on and off
+  for that frame". That is FALSE and was not measured before it was
+  written: ARCLK also carries 103 SEPARATELY incoherent bars (indices
+  70..4947), which the guard does fire on, moving 651 of 6,619
+  `RPO_VA_WIDTH_PCT` cells, 7 `RPO_BREAK_UP` and 2 `RPO_BREAK_DN`.
+  The true, narrow claim -- the one that is actually tested, in
+  `test_guard_does_not_rescue_a_coherent_but_impossible_frame` -- is
+  that a frame carrying ONLY the coherent-but-impossible shape comes
+  back byte-identical with the guard on and off.
 
 CONTAMINATION IS BOUNDED HERE, unlike a zone-lifecycle indicator: the
 profile is a FIXED `lookback`-bar rolling window, so one bad print can
