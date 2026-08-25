@@ -27,13 +27,19 @@ WHAT IS PORTED (source lines 80-203):
 WHAT IS NOT PORTED:
 
   * 152-200 plots, hlines, fills, gradients -- drawing only.
-  * 205-326 the BUY/SELL label + TP/SL block. That block is a
+  * 215-225 background highlights, two `display.none` score plots and
+            the BUY/SELL chart labels -- drawing only.
+  * 227-326 the TP/SL block (the source's own `// TP/SL` comment is at
+            line 227, its first statement `if (breakout_up or
+            breakout_down) and showTargets` at 229). That block is a
             paper-trade simulator (entry line, ATR- or percent-sized
             stop, three RR targets, linefills), not a feature. It is
             declined in full; `atrPeriod`/`slAtrMult`/`rrTp1..3` are
             therefore not arguments here.
-  * 207-210 the `sig_filter` alternation state (blocks a second
-            same-direction signal until an opposite one fires). That is
+  * 205-213 the `sig_filter` alternation state (`var int
+            last_signal_dir` at 205, the two gated assignments at
+            207-208, the state update at 210-213) -- it blocks a second
+            same-direction signal until an opposite one fires. That is
             a POSITION-STATE filter, i.e. the same "am I already long"
             bookkeeping this project's own backtester owns; emitting it
             as a feature would bake one entry policy into a column. The
