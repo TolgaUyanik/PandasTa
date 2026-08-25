@@ -10,6 +10,7 @@ from .hwc import hwc
 from .kc import kc
 from .massi import massi
 from .pdist import pdist
+from .range_profile import range_profile
 from .natr import natr
 from .rvi import rvi
 from .thermo import thermo

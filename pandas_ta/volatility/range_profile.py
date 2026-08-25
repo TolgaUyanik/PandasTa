@@ -1,0 +1,511 @@
+# -*- coding: utf-8 -*-
+"""Range Profile Oscillator (RPO) -- port of TradingView `atvJpWjW`.
+
+Source: `docs/TradingView/pine/atvJpWjW-Range-Profile-Oscillator.pine`
+(326 physical lines, `//@version=6`, MPL-2.0, (c) Uncle_the_shooter).
+
+WHAT IS PORTED (source lines 80-203):
+
+  * 80-110  the 50-bin RANGE-OCCUPANCY profile over a `lookback`-bar
+            window. Every bar's [low, high] deposits weight into every
+            bin it spans. NO volume field is read anywhere in the
+            source (`grep -c '\\bvolume\\b'` on the source file returns
+            0), which is exactly why this is a VOLATILITY column and
+            not a Volume one -- it profiles where price SPENT RANGE,
+            not where it traded size.
+  * 112-121 the MODAL bin (heaviest bin, first-index tie-break) -> the
+            midline price `mid_price`.
+  * 123-146 the VALUE AREA: expand outward from the modal bin,
+            alternating toward the heavier neighbour, until
+            `ob_os_level`% of the total weight is enclosed ->
+            `range_low` / `range_high`.
+  * 148-150 the payoff, already scale-free:
+            `osc = (close - mid_price) / half_range * ob_os_level`.
+  * 202-203 `ta.crossover(osc, ob_os_level)` /
+            `ta.crossunder(osc, -ob_os_level)` breakout flags.
+
+WHAT IS NOT PORTED:
+
+  * 152-200 plots, hlines, fills, gradients -- drawing only.
+  * 205-326 the BUY/SELL label + TP/SL block. That block is a
+            paper-trade simulator (entry line, ATR- or percent-sized
+            stop, three RR targets, linefills), not a feature. It is
+            declined in full; `atrPeriod`/`slAtrMult`/`rrTp1..3` are
+            therefore not arguments here.
+  * 207-210 the `sig_filter` alternation state (blocks a second
+            same-direction signal until an opposite one fires). That is
+            a POSITION-STATE filter, i.e. the same "am I already long"
+            bookkeeping this project's own backtester owns; emitting it
+            as a feature would bake one entry policy into a column. The
+            RAW `ta.crossover`/`ta.crossunder` are emitted instead,
+            which is what `sig_filter = false` (the source's own
+            default, line 15) produces.
+
+DELIBERATE SUBSTITUTIONS (two, both documented as such):
+
+  1. `syminfo.mintick` (source line 89, the ONLY `syminfo.`/`session.`/
+     `timeframe.`/`request.security` reference in the whole file -- see
+     the grep table in the porting notes) has no counterpart outside
+     TradingView. The source's guard is `price_range > mintick * 5`:
+     "the window is not degenerate". It is replaced by a RELATIVE
+     guard, `price_range > min_range_pct * |maxH + minL| / 2`, so the
+     port stays scale-free. `min_range_pct = 0.001` (0.1%) is the
+     shipped default because at BIST-typical tick/price ratios
+     `5 * mintick / price` lands in roughly 0.1%-1% (0.01 tick on a
+     500 TL name -> 0.01%; 0.01 tick on a 5 TL name -> 1%), and 0.1% is
+     the conservative end of that. `min_range_pct = 0.0` reproduces
+     "any strictly positive range".
+  2. Pine's `add = candle_size * (bin_size / candle_size)` (source
+     lines 104/107-110) is algebraically `bin_size` for every bar, so
+     the profile is a pure OCCUPANCY COUNT scaled by a constant. Every
+     downstream comparison -- the modal-bin argmax, `total * pct`, and
+     the running `remaining` subtraction -- is homogeneous of degree 1
+     in the weights, so the constant factor is dropped and the weights
+     are carried as exact integer counts. This is algebraically
+     identical and strictly BETTER conditioned than the source: Pine's
+     multiply/divide round-trip leaves ~1 ulp of noise per bar, and
+     both the modal-bin argmax and the `remaining > 0` stopping test
+     are EXACT-TIE comparisons that this noise can flip.
+
+     This is measured, not assumed. Three transliterations of the same
+     source -- `add = candle_size * (bin_size/candle_size)` (literal),
+     `add = bin_size` (algebraic), `add = 1` (this port's integer
+     count) -- were run over 1,640 co-populated bars of four synthetic
+     random-walk frames and DISAGREE WITH ONE ANOTHER:
+
+         literal vs algebraic   77 / 1640 bars  (4.70%)
+         literal vs count      100 / 1640       (6.10%)
+         algebraic vs count     26 / 1640       (1.59%)
+
+     literal vs count decomposes into a modal-bin flip on 29 bars and a
+     value-area edge move on 61 (low) / 66 (high); the enclosed span
+     changes by at most 1 bin on 55 of them, by 2 on one and by 4 on
+     one. So there is NO bit-exact "Pine answer" to reproduce -- the
+     source's own arithmetic is unstable at these ties -- and this port
+     implements the exact-arithmetic form, which is deterministic.
+     `tests/test_range_profile.py::test_transliterations_of_the_source_disagree_with_each_other`
+     re-derives those counts, and
+     `::test_matches_an_integer_weight_transliteration_exactly` pins
+     this module to the count form bar-for-bar.
+
+STATE CARRIED ACROSS BARS (faithful to the source, and a real
+property of the column): `mid_price`, `range_high` and `range_low` are
+Pine `var float`s (source lines 57-59). They are only reassigned inside
+their guards, so on a bar where the range guard fails the PREVIOUS
+bar's values persist and the oscillator is computed from them against
+TODAY's close. There is one asymmetry, preserved on purpose:
+`mid_price` is assigned before the `total > 0` check (line 121) while
+`range_low`/`range_high` are assigned after it (lines 145-146), so a
+window in which every bar has `high == low` (all weight zero -- a BIST
+limit-lock streak is the realistic case) refreshes the midline while
+leaving the value area stale.
+
+SHARED KERNEL. `_profile_bins`, `_poc` and `_value_area` are module-
+level and deliberately reusable. `K0SEi3Ct` (TL PbD Shape Pro) source
+lines 186-198 run the SAME outward-expansion loop with the same
+`vUp >= vDn` tie-break as this source's lines 133-144 -- verified by
+reading both, see `_value_area`'s docstring for the line-by-line
+correspondence -- and fills its bins with the `mode="overlap"` rule
+(its lines 170-175). `Vrrujyso` (Delta Volume Profile) does NOT share
+the expansion loop: `grep -c while` on its source returns 0 and it has
+no value area at all; it needs only `mode="point"` binning and its own
+balance-weighted modal-row score.
+"""
+import numpy as np
+from pandas import DataFrame, Series
+
+from pandas_ta.utils import get_offset, verify_series
+
+
+def _validated_int(value, default, name, positive=True):
+    """None -> default (a normal, documented default, not bad input).
+    Anything else must be a genuine, finite, integral value, or raise.
+    Same helper, same rejection paths, as `sr_corridor.py`/`dtdb.py`."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an int, got bool {value!r}")
+    if isinstance(value, float):
+        if value != value:
+            raise ValueError(f"{name} must be a finite int, got NaN")
+        if np.isinf(value):
+            raise ValueError(f"{name} must be a finite int, got inf")
+        if not value.is_integer():
+            raise ValueError(f"{name} must be an integral value, got {value}")
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an int, got {value!r}")
+    if positive and value <= 0:
+        raise ValueError(f"{name} must be a positive int, got {value}")
+    if not positive and value < 0:
+        raise ValueError(f"{name} must be a non-negative int, got {value}")
+    return value
+
+
+def _validated_float(value, default, name, positive=True):
+    """Same nan/inf discipline as `_validated_int`, float variant."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a float, got bool {value!r}")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a float, got {value!r}")
+    if value != value:
+        raise ValueError(f"{name} must be finite, got NaN")
+    if np.isinf(value):
+        raise ValueError(f"{name} must be finite, got inf")
+    if positive and value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value}")
+    if not positive and value < 0:
+        raise ValueError(f"{name} must be >= 0, got {value}")
+    return value
+
+
+# ---------------------------------------------------------------------
+# SHARED PROFILE KERNEL
+#
+# Three functions, all independent of this indicator's parameters, so
+# the two remaining profile candidates can import them instead of
+# re-implementing:
+#
+#   K0SEi3Ct  ->  _profile_bins(mode="overlap") + _poc + _value_area
+#   Vrrujyso  ->  _profile_bins(mode="point") only (it has no value
+#                 area; its modal row uses a delta-BALANCE score, not a
+#                 raw max, so it must not call `_poc`)
+# ---------------------------------------------------------------------
+def _profile_bins(win_high, win_low, lo_edge, bin_size, bins,
+                  mode="span", weight=None, price=None):
+    """Bin one window of bars into `bins` equal price buckets.
+
+    Returns a float array of length `bins`. `lo_edge` is the price of
+    the bottom of bin 0 and `bin_size` the bucket height, so bin `b`
+    covers `[lo_edge + b*bin_size, lo_edge + (b+1)*bin_size)`.
+
+    mode="span"      every bin the bar's [low, high] SPANS receives the
+                     bar's full weight. Bin indices come from
+                     `floor((price - lo_edge) / bin_size)` clamped to
+                     `[0, bins-1]`, matching `atvJpWjW` lines 100-101.
+                     Bars with `high == low` are SKIPPED, matching that
+                     source's `if candle_size > 0` (line 98) -- which
+                     means a limit-locked BIST bar contributes nothing.
+    mode="overlap"   every bin receives `weight * overlap / (high-low)`,
+                     the volume-profile rule of `K0SEi3Ct` lines
+                     170-175. Bars with `high <= low` deposit their
+                     whole weight into the single bin holding `high`
+                     (that source's own `if h <= l` branch, lines
+                     166-168), so a locked bar is NOT dropped here.
+    mode="point"     the bar's whole weight goes into the one bin
+                     holding `price[i]` (`Vrrujyso` lines 126-129 use
+                     hlc3). Requires `price`.
+
+    `weight=None` means 1.0 per bar, which is what `atvJpWjW` reduces
+    to (see the module docstring, substitution 2).
+    """
+    win_high = np.asarray(win_high, dtype=float)
+    win_low = np.asarray(win_low, dtype=float)
+    m = win_high.shape[0]
+    if weight is None:
+        w = np.ones(m, dtype=float)
+    else:
+        w = np.asarray(weight, dtype=float)
+        if w.shape[0] != m:
+            raise ValueError("weight length must match the window length")
+    out = np.zeros(bins, dtype=float)
+    if bin_size <= 0 or m == 0:
+        return out
+
+    if mode == "point":
+        if price is None:
+            raise ValueError("mode='point' requires `price`")
+        p = np.asarray(price, dtype=float)
+        idx = np.clip(np.floor((p - lo_edge) / bin_size), 0, bins - 1)
+        ok = np.isfinite(p) & np.isfinite(w)
+        np.add.at(out, idx[ok].astype(np.int64), w[ok])
+        return out
+
+    b1 = np.clip(np.floor((win_low - lo_edge) / bin_size), 0, bins - 1)
+    b2 = np.clip(np.floor((win_high - lo_edge) / bin_size), 0, bins - 1)
+    finite = np.isfinite(win_high) & np.isfinite(win_low) & np.isfinite(w)
+
+    if mode == "span":
+        ok = finite & ((win_high - win_low) > 0)
+        if not ok.any():
+            return out
+        # difference-array accumulation: O(window + bins) instead of the
+        # source's nested `for b = b1 to b2` loop, same result.
+        diff = np.zeros(bins + 1, dtype=float)
+        lo_i = b1[ok].astype(np.int64)
+        hi_i = b2[ok].astype(np.int64)
+        np.add.at(diff, lo_i, w[ok])
+        np.add.at(diff, hi_i + 1, -w[ok])
+        return np.cumsum(diff)[:bins]
+
+    if mode == "overlap":
+        rng = win_high - win_low
+        flat = finite & (rng <= 0)
+        if flat.any():
+            np.add.at(out, b2[flat].astype(np.int64), w[flat])
+        real = finite & (rng > 0)
+        for i in np.flatnonzero(real):
+            lo_b = int(b1[i])
+            hi_b = int(b2[i])
+            for b in range(lo_b, hi_b + 1):
+                b_bot = lo_edge + b * bin_size
+                ov = min(win_high[i], b_bot + bin_size) - max(win_low[i], b_bot)
+                if ov > 0:
+                    out[b] += w[i] * ov / rng[i]
+        return out
+
+    raise ValueError(f"unknown mode {mode!r}")
+
+
+def _poc(weights):
+    """(modal bin index, total weight).
+
+    Strict `>` scan from bin 0 upward, so the LOWEST index wins a tie --
+    identical tie-break in `atvJpWjW` lines 115-119 (`if total_bin >
+    max_total`) and `K0SEi3Ct` lines 179-184 (`if vv > pocV`).
+    `np.argmax` has the same first-maximum rule.
+    """
+    weights = np.asarray(weights, dtype=float)
+    if weights.size == 0:
+        return 0, 0.0
+    return int(np.argmax(weights)), float(weights.sum())
+
+
+def _value_area(weights, poc_idx, total, frac):
+    """Value area around `poc_idx`, as INCLUSIVE bin indices (lo, hi).
+
+    Expand outward one bin at a time, always toward the heavier
+    neighbour, until `frac * total` of the weight is enclosed.
+
+    THE SHARED LOOP. `atvJpWjW` lines 133-144 and `K0SEi3Ct` lines
+    189-197 are the same loop written two ways; the correspondence,
+    read off both sources:
+
+      atvJpWjW                          K0SEi3Ct
+      remaining = total*pct - mid_total vaVol = pocV          (same start:
+                                                 the modal bin is
+                                                 pre-counted)
+      while remaining > 0               while vaVol < total*vaP/100
+        and (lowB > 0 or highB < N-1)     and (up < nB or dn >= 0)
+      upper = w[highB+1] else -1        vUp = vols[up] else -1.0
+      lower = w[lowB-1]  else -1        vDn = vols[dn] else -1.0
+      if upper >= lower and upper >= 0  if vUp >= vDn
+        highB += 1; remaining -= upper    vaVol += vUp; up += 1
+      else if lower >= 0                else
+        lowB -= 1;  remaining -= lower    vaVol += vDn; dn -= 1
+      -> lowB, highB (last included)    -> dn+1, up-1 (last included)
+
+    The tie-break is `>=` toward the UPPER side in both. atvJpWjW's
+    extra `>= 0` guards and its `else: break` are unreachable given the
+    while condition (both neighbours can only be -1 when the profile is
+    already fully enclosed, which ends the loop), so the two loops are
+    behaviourally the same; the guards are kept here because they are
+    in the source being ported.
+
+    `frac` is a FRACTION (0.8), not a percent -- the callers do their
+    own `/100`, as both sources do.
+    """
+    weights = np.asarray(weights, dtype=float)
+    n_bins = weights.shape[0]
+    lo_b = hi_b = int(poc_idx)
+    if n_bins == 0 or total <= 0:
+        return lo_b, hi_b
+    remaining = total * frac - weights[lo_b]
+    while remaining > 0 and (lo_b > 0 or hi_b < n_bins - 1):
+        upper = weights[hi_b + 1] if hi_b < n_bins - 1 else -1.0
+        lower = weights[lo_b - 1] if lo_b > 0 else -1.0
+        if upper >= lower and upper >= 0:
+            hi_b += 1
+            remaining -= upper
+        elif lower >= 0:
+            lo_b -= 1
+            remaining -= lower
+        else:
+            break
+    return lo_b, hi_b
+
+
+def _fmt(x):
+    """`80.0` -> `80`, `0.5` -> `0.5`, for column suffixes."""
+    return int(x) if float(x).is_integer() else x
+
+
+def range_profile(high, low, close, lookback=None, ob_os_level=None,
+                  bins=None, min_range_pct=None, offset=None, **kwargs):
+    """Indicator: Range Profile Oscillator (RPO)"""
+    lookback = _validated_int(lookback, 110, "lookback")
+    bins = _validated_int(bins, 50, "bins")
+    ob_os_level = _validated_float(ob_os_level, 80.0, "ob_os_level")
+    min_range_pct = _validated_float(min_range_pct, 0.001, "min_range_pct",
+                                     positive=False)
+    if lookback < 2:
+        raise ValueError(f"lookback must be >= 2, got {lookback}")
+    if bins < 2:
+        raise ValueError(f"bins must be >= 2, got {bins}")
+
+    high = verify_series(high, lookback + 1)
+    low = verify_series(low, lookback + 1)
+    close = verify_series(close, lookback + 1)
+    offset = get_offset(offset)
+    if high is None or low is None or close is None: return
+
+    n = len(close)
+    h_v = high.to_numpy(dtype=float)
+    l_v = low.to_numpy(dtype=float)
+    c_v = close.to_numpy(dtype=float)
+
+    # Source line 82-87: min(low) / max(high) over the SAME window the
+    # profile is built from -- bar `t` back through `t - lookback + 1`.
+    roll_min = low.rolling(lookback).min().to_numpy(dtype=float)
+    roll_max = high.rolling(lookback).max().to_numpy(dtype=float)
+
+    osc = np.full(n, np.nan)
+    va_width = np.full(n, np.nan)
+
+    mid_price = np.nan
+    range_low = np.nan
+    range_high = np.nan
+    frac = ob_os_level / 100.0
+
+    # Source line 81: `if bar_index >= lookback`. bar_index is 0-based,
+    # so the FIRST computed bar is index `lookback` and its window is
+    # `[1, lookback]` -- index 0 is never read even though a full
+    # window already exists at index `lookback - 1`. That one-bar
+    # conservatism is the source's, and is kept.
+    for t in range(lookback, n):
+        min_l = roll_min[t]
+        max_h = roll_max[t]
+        if np.isfinite(min_l) and np.isfinite(max_h):
+            price_range = max_h - min_l
+            # DELIBERATE SUBSTITUTION 1 (see module docstring):
+            # `price_range > syminfo.mintick * 5` -> relative floor.
+            floor = min_range_pct * abs(max_h + min_l) / 2.0
+            if price_range > floor and price_range > 0:
+                bin_size = price_range / bins
+                w = _profile_bins(h_v[t - lookback + 1:t + 1],
+                                  l_v[t - lookback + 1:t + 1],
+                                  min_l, bin_size, bins, mode="span")
+                mid_bin, total = _poc(w)
+                mid_price = min_l + bin_size * (mid_bin + 0.5)
+                if total > 0:
+                    lo_b, hi_b = _value_area(w, mid_bin, total, frac)
+                    range_low = min_l + lo_b * bin_size
+                    range_high = min_l + (hi_b + 1) * bin_size
+
+        # Source lines 149-150. Uses whatever `mid_price` / `range_*`
+        # currently hold -- refreshed this bar, or carried forward.
+        if np.isfinite(range_high) and np.isfinite(range_low) \
+                and np.isfinite(mid_price):
+            half_range = (range_high - range_low) / 2.0
+            if half_range > 0 and np.isfinite(c_v[t]):
+                osc[t] = (c_v[t] - mid_price) / half_range * ob_os_level
+                if mid_price > 0:
+                    va_width[t] = (range_high - range_low) / mid_price * 100.0
+
+    # Source lines 202-203: `ta.crossover` / `ta.crossunder`. NaN
+    # wherever either endpoint of the pair is NaN, so warm-up is never
+    # reported as "no breakout".
+    prev = np.concatenate(([np.nan], osc[:-1]))
+    pair_ok = np.isfinite(osc) & np.isfinite(prev)
+    break_up = np.where(pair_ok,
+                        ((osc > ob_os_level) & (prev <= ob_os_level)).astype(float),
+                        np.nan)
+    break_dn = np.where(pair_ok,
+                        ((osc < -ob_os_level) & (prev >= -ob_os_level)).astype(float),
+                        np.nan)
+
+    tag = f"_{lookback}_{_fmt(ob_os_level)}"
+    osc_s = Series(osc, index=close.index, name=f"RPO_OSC{tag}")
+    vaw_s = Series(va_width, index=close.index, name=f"RPO_VA_WIDTH_PCT{tag}")
+    up_s = Series(break_up, index=close.index, name=f"RPO_BREAK_UP{tag}")
+    dn_s = Series(break_dn, index=close.index, name=f"RPO_BREAK_DN{tag}")
+
+    if offset != 0:
+        osc_s = osc_s.shift(offset)
+        vaw_s = vaw_s.shift(offset)
+        up_s = up_s.shift(offset)
+        dn_s = dn_s.shift(offset)
+
+    if "fillna" in kwargs:
+        for s in (osc_s, vaw_s, up_s, dn_s):
+            s.fillna(kwargs["fillna"], inplace=True)
+    if "fill_method" in kwargs:
+        for s in (osc_s, vaw_s, up_s, dn_s):
+            s.fillna(method=kwargs["fill_method"], inplace=True)
+
+    df = DataFrame({s.name: s for s in (osc_s, vaw_s, up_s, dn_s)})
+    df.name = f"RPO{tag}"
+    df.category = "volatility"
+    return df
+
+
+range_profile.__doc__ = """Range Profile Oscillator (RPO)
+
+Ports the calculation half of the TradingView indicator `atvJpWjW`
+("Range Profile Oscillator", (c) Uncle_the_shooter, MPL-2.0). Over a
+rolling `lookback`-bar window the bar RANGES (not volume -- the source
+reads no volume field at all) are binned into `bins` equal price
+buckets. The heaviest bucket is the midline; the value area is grown
+outward from it, always toward the heavier neighbour, until
+`ob_os_level`% of the profile weight is enclosed. The oscillator is
+the current close's distance from the midline in units of half the
+value-area width, rescaled by `ob_os_level` so that +/-`ob_os_level`
+marks the value-area edges.
+
+Filed under `volatility` because it measures how price RANGE is
+distributed, and because the porting register
+(`datastore/source/pine_candidates_families.csv`, slug
+`atvJpWjW-Range-Profile-Oscillator`) records `family=volatility` for
+this candidate.
+
+Sources:
+    docs/TradingView/pine/atvJpWjW-Range-Profile-Oscillator.pine
+
+Calculation:
+    minL      = min(low,  lookback)          # window = [t-lookback+1, t]
+    maxH      = max(high, lookback)
+    bin_size  = (maxH - minL) / bins
+    w[b]      = number of window bars whose [low, high] spans bin b
+                (bars with high == low contribute nothing)
+    mid_bin   = argmax(w)                    # first maximum wins ties
+    mid_price = minL + bin_size * (mid_bin + 0.5)
+    lo, hi    = expand outward from mid_bin toward the heavier
+                neighbour until ob_os_level% of sum(w) is enclosed
+    range_low  = minL + lo * bin_size
+    range_high = minL + (hi + 1) * bin_size
+    half_range = (range_high - range_low) / 2
+
+    RPO_OSC          = (close - mid_price) / half_range * ob_os_level
+    RPO_VA_WIDTH_PCT = (range_high - range_low) / mid_price * 100
+    RPO_BREAK_UP     = crossover(RPO_OSC,  ob_os_level)
+    RPO_BREAK_DN     = crossunder(RPO_OSC, -ob_os_level)
+
+Args:
+    high (pd.Series): Series of 'high's
+    low (pd.Series): Series of 'low's
+    close (pd.Series): Series of 'close's
+    lookback (int): Profile window in bars. Default: 110
+    ob_os_level (float): Value-area coverage in PERCENT, and the level
+        the oscillator's breakout flags fire at. Default: 80.0
+    bins (int): Number of price buckets. Default: 50
+    min_range_pct (float): Relative substitute for the source's
+        `syminfo.mintick * 5` degeneracy guard -- the window's range
+        must exceed this fraction of the window's mid price for the
+        profile to be rebuilt (otherwise the previous bar's midline and
+        value area are carried forward, as in the source). 0.0 means
+        "any strictly positive range". Default: 0.001
+    offset (int): How many periods to offset the result. Default: 0
+
+Kwargs:
+    fillna (value, optional): pd.DataFrame.fillna(value)
+    fill_method (value, optional): Type of fill method
+
+Returns:
+    pd.DataFrame: RPO_OSC, RPO_VA_WIDTH_PCT, RPO_BREAK_UP,
+        RPO_BREAK_DN columns.
+"""
