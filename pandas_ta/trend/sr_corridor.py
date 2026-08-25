@@ -202,8 +202,12 @@ def sr_corridor(high, low, close, pivot_left=None, pivot_right=None,
     #   evicted oldest-first past `MAX_STORED_ZONES = 40` (L148 declares
     #   it; L383-391 is the eviction loop), and killed by a close beyond
     #   its edge plus `atr * invalidationBufferATR` (L398-441). Grep the
-    #   whole 1,489-line source for a bound on how FAR a zone may sit
-    #   from price, or on how OLD it may get: there is none. `L400` is
+    #   zone LIFECYCLE (L337-441) for a bound on how FAR a zone may sit
+    #   from price, or on how OLD it may get: there is none. (The only
+    #   age term anywhere in the file is `math.max(zoneCreatedBar,
+    #   bar_index - 5000)` at L1097/L1211 -- it clamps the DRAWN box's
+    #   left edge in the un-ported visual block and never touches the
+    #   zone arrays.) `L400` is
     #   the only distance test in the zone block and it is the
     #   invalidation buffer, not a sanity bound.
     #
