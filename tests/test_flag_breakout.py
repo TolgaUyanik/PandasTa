@@ -574,10 +574,15 @@ def test_window_r2_matches_pandas_ta_linreg_r_squared():
     invariant to an affine shift of x, so `length = lookback + 1` is the
     same statistic.
 
-    Measured on a 6,729-bar frame across all eleven default lookbacks:
-    agreement to 3.166e-09, and linreg takes 21.8 s against 0.018 s for
-    the grid -- 1,182x. Two consequences, both load-bearing:
-      * 3e-09 is NOT exact. linreg evaluates `rn / sqrt(divisor * ...)`,
+    Re-measured 2026-08-26 over the twelve cached 6,729-bar BIST daily
+    frames (AFYON..AYCES), all eleven default lookbacks: worst absolute
+    disagreement 6.754508e-11 (AVGYO.IS) .. 1.189183e-09 (ALCAR.IS),
+    ARCLK.IS 3.174802e-10; linreg 18.7-20.1 s per frame against
+    0.012-0.016 s for the grid, 1,254x-1,624x. (An earlier revision
+    quoted 3.166e-09 on an UNNAMED 6,729-bar frame; that is above every
+    frame sampled and does not reproduce.) Two consequences, both
+    load-bearing:
+      * ~1e-10 is NOT exact. linreg evaluates `rn / sqrt(divisor * ...)`,
         a different algebraic form, so swapping it in would move the
         `r2 >= staff_min_r2` gate at the margin.
       * `rolling(...).apply(raw=False)` is a Python-level call per bar
@@ -655,6 +660,20 @@ def test_truncation_matches_prefix_of_full_series():
 
 
 def _mutant_table(pairs, tag, cols, df, emit_pole=False):
+    """REAL-vs-MUTANT prefix table over the first 12 perturbed bars.
+
+    ⚠ THE ASSERTION IS `mut_hits > 0`, NOT "caught at every k", AND THAT
+    IS DELIBERATE.  A truncation at `k` catches the back-dating mutant
+    only where it cuts BETWEEN the channel start (where the mutant
+    writes) and the confirmation bar (where the real module writes).
+    Truncate past the confirmation and both runs have written, so the
+    mutant reproduces its own full-run prefix self-consistently and there
+    is nothing to disagree with.  Measured 2026-08-26 on the shipped
+    fixtures: mutant A 6 of the 12 sampled k, mutant B 6 of 12 -- the
+    same k in both (369, 726, 769, 783, 983, 1009).  Any summary saying
+    "caught at every k" is overstating what this table can do; it is
+    caught wherever it is OBSERVABLE, which is the correct claim.
+    """
     kw = {"emit_pole": True} if emit_pole else {}
     real_full = flag_breakout(df.high, df.low, df.close, **kw)
     mod = _load_mutant(pairs, tag)

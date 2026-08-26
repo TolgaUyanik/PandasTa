@@ -196,21 +196,49 @@ The measurement is not the usual one.  It is not close to some existing
 engine column; it is close to THE OTHER TWO COLUMNS OF THIS SAME PORT.
 Pooled over 89 BIST_100 daily frames / 404,066 populated bars:
 
-    rho(FLAG_POLE_ATR, FLAG_CONF_BULL + FLAG_CONF_BEAR)  =  0.999999
     rho(FLAG_POLE_ATR, FLAG_CONF_BEAR)                   =  0.912957
+    rho(FLAG_POLE_ATR, FLAG_CONF_BULL)                   =  0.407082
+    rho(FLAG_POLE_ATR, FLAG_CONF_BULL + FLAG_CONF_BEAR)  =  0.999999
     bars where exactly one of the two is non-zero        =  0
 
+THE DELETION RESTS ON THE FIRST LINE, 0.912957 against a SINGLE flag,
+which is above the consuming project's ~0.9 revert line.  An earlier
+revision of this docstring rested it on the third line instead, and that
+was a bad argument: rho against the SUM of a port's own two DISJOINT
+flags is ~1.0 BY CONSTRUCTION for any magnitude written on exactly the
+union support, so it discriminates nothing.  Measured on the same pool,
+`DTDB_TGT_PCT` against `DTDB_CONF_BULL + DTDB_CONF_BEAR` is 0.999998 --
+a column that was correctly SHIPPED.  A statistic that returns ~1.0 for
+a shipped column and a deleted one alike is a tautology detector, not a
+gate; do not re-introduce it as one.
+
 The support is IDENTICAL by construction -- the pole height is written
-on precisely the bars a flag confirms -- so as a rank variable the column
-IS the union of the two flags.  Its magnitude content is real but lives
-on 1,153 of 404,066 bars (0.285%), where it takes 1,151 distinct values
-over 1.922560 .. 16.061707; a rank statistic over the whole column cannot
-see any of that, and neither can a threshold split that is really just
-selecting "an event happened".  The consuming project's precedent band is
-"~0.9 revert / 0.76-0.80 ship with disclosure", and 0.999999 is at the
-top of its own record of deleted columns.  So this one is deleted, on the
-same `emit_*=False` pattern `volatility/range_profile.py` uses for
-`RPO_OSC`.
+on precisely the bars a flag confirms -- so as a rank variable over the
+WHOLE column it is the union of the two flags.  Its magnitude content is
+real but lives on 1,153 of 404,066 bars (0.285%), where it takes 1,151
+distinct values over 1.922560 .. 16.061707; a rank statistic over the
+whole column cannot see any of that, and neither can a threshold split
+that is really just selecting "an event happened".  Deleted on the same
+`emit_*=False` pattern `volatility/range_profile.py` uses for `RPO_OSC`.
+
+⚠ WHAT NEITHER STATISTIC ANSWERS, AND IT IS AN OPEN QUESTION FOR THE
+CONSUMING PROJECT'S OWNER, NOT A RULE DECIDED HERE: whether the
+magnitude carries information the flag does not ON THE BARS WHERE IT
+EXISTS.  Measured on the same 89-frame pool, restricted to each column's
+own non-zero support:
+
+    rho(FLAG_POLE_ATR, FLAG_CONF_BULL) | POLE_ATR != 0  = +0.371765  n=1,153
+    rho(FLAG_POLE_ATR, FLAG_CONF_BEAR) | POLE_ATR != 0  = -0.371765  n=1,153
+    rho(DTDB_TGT_PCT,  DTDB_CONF_BULL) | TGT_PCT  != 0  = -0.137055  n=1,397
+    rho(DTDB_TGT_PCT,  DTDB_CONF_BEAR) | TGT_PCT  != 0  = +0.137055  n=1,397
+
+(The two rows of each pair are exact mirrors because on the support one
+flag is 1 - the other; and rho against the SUM is DEGENERATE there, the
+sum being identically 1 -- which is the construction argument above,
+restated as a measurement.)  Both magnitudes are therefore only weakly
+tied to WHICH side fired, i.e. they do carry within-support variation
+the flags cannot supply.  Sizing that against a miner is an
+incremental-lift test nobody has run.
 
 ⚠ AND A CLAIM THAT WAS WRONG, corrected here rather than carried: an
 earlier revision said this column is ">= `staff_min_atr` wherever it is
@@ -258,10 +286,11 @@ and the edge's tracked extremes (L212-220) -- while the R^2 straightness
 gate reads CLOSE only.  So it is less High-exposed than a range or
 profile detector but not immune.  Measured behaviour on the two frames
 this project has escalated as contaminated is in the family page,
-`docs/indicators/family-trend-overlay.md`; the headline is that the
-column set is EVENT-SPARSE, so the realistic failure is a spurious
-confirmation, not a blow-up in magnitude -- `FLAG_POLE_ATR` is bounded
-below by `staff_min_atr` and above only by the data.
+`docs/indicators/family-structure-smc.md` section 6o (NOT
+`family-trend-overlay.md`, where an earlier revision of this docstring
+pointed and which carries no FLAG reference at all); the headline is
+that the column set is EVENT-SPARSE, so the realistic failure is a
+spurious confirmation, not a blow-up in magnitude.
 
 NO GUARD IS ADDED HERE.  `range_profile` added a `low <= close <= high`
 coherence guard because a single absurd High could redefine an entire
@@ -354,14 +383,24 @@ def _window_r2_grid(c, lookbacks):
     Pearson r (`linreg(..., r=True)`), and r^2 IS this statistic -- with
     `length = lookback + 1`, since r is invariant to the affine shift
     between Pine's x = 0..lookback and linreg's x = 1..length.  The reuse
-    was tested, not dismissed: on a 6,729-bar frame across all eleven
-    default lookbacks the two agree to 3.166e-09 and linreg takes 21.8 s
-    against 0.018 s here, 1,182x.  Both halves of that matter -- 3e-09 is
-    NOT exact (linreg evaluates `rn / sqrt(divisor * ...)`, a different
-    algebraic form, which would move the `r2 >= staff_min_r2` gate at the
-    margin), and `rolling(...).apply(raw=False)` is a Python call per bar
-    per lookback.  `test_window_r2_matches_pandas_ta_linreg_r_squared`
-    pins the equivalence so this decision stays auditable.
+    was tested, not dismissed.  Re-measured 2026-08-26 across all eleven
+    default lookbacks on the twelve cached 6,729-bar BIST daily frames
+    (AFYON..AYCES alphabetically), worst absolute disagreement per frame:
+
+        6.754508e-11 (AVGYO.IS)  ..  1.189183e-09 (ALCAR.IS)
+        ARCLK.IS 3.174802e-10        median ~3.1e-10
+
+    with `linreg` taking 18.7-20.1 s per frame against 0.012-0.016 s for
+    the grid, 1,254x-1,624x.  ⚠ An earlier revision of this docstring
+    quoted "3.166e-09 on a 6,729-bar frame" WITHOUT naming the frame;
+    that figure is above every one of the twelve sampled here and does
+    not reproduce, so the measured RANGE is quoted instead.  Both halves
+    still matter -- ~1e-10 is NOT exact (linreg evaluates
+    `rn / sqrt(divisor * ...)`, a different algebraic form, which would
+    move the `r2 >= staff_min_r2` gate at the margin), and
+    `rolling(...).apply(raw=False)` is a Python call per bar per
+    lookback.  `test_window_r2_matches_pandas_ta_linreg_r_squared` pins
+    the equivalence so this decision stays auditable.
 
     The five sums are taken over an EXPLICIT sliding window rather than
     from a long cumulative sum: `sumY2 - sumY*sumY/nf` is a cancelling
