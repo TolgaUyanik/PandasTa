@@ -178,8 +178,11 @@ def test_pole_is_NOT_bounded_below_by_staff_min_atr():
     back: L136 tests the height against the ATR of the DETECTION bar,
     while the emitted ratio divides by the ATR of the CONFIRMATION bar,
     and ATR can RISE over the channel's life. Measured minimum over
-    1,153 events pooled across 89 BIST_100 daily frames: 1.922560,
-    below the 2.0 gate. Both halves are pinned here.
+    1,153 events pooled across 89 BIST_100 daily frames: 1.922567, on
+    ECILC.IS, below the 2.0 gate (pooled maximum 16.061690 on IMASM.IS;
+    an earlier revision quoted 1.922560 / 16.061707, which is a
+    transcription error, not float32 precision). Both halves are pinned
+    here.
 
     (a) THE MECHANISM, on the hand fixture: the gate saw 10.869268 ATR at
         the detection bar and the column emits 9.833099 at the

@@ -215,8 +215,9 @@ gate; do not re-introduce it as one.
 The support is IDENTICAL by construction -- the pole height is written
 on precisely the bars a flag confirms -- so as a rank variable over the
 WHOLE column it is the union of the two flags.  Its magnitude content is
-real but lives on 1,153 of 404,066 bars (0.285%), where it takes 1,151
-distinct values over 1.922560 .. 16.061707; a rank statistic over the
+real but lives on 1,153 of 404,066 bars (0.285%), where it takes 1,153
+distinct values (1,151 at 6-dp resolution) over 1.922567 (ECILC.IS) ..
+16.061690 (IMASM.IS), float64; a rank statistic over the
 whole column cannot see any of that, and neither can a threshold split
 that is really just selecting "an event happened".  Deleted on the same
 `emit_*=False` pattern `volatility/range_profile.py` uses for `RPO_OSC`.
@@ -235,10 +236,38 @@ own non-zero support:
 (The two rows of each pair are exact mirrors because on the support one
 flag is 1 - the other; and rho against the SUM is DEGENERATE there, the
 sum being identically 1 -- which is the construction argument above,
-restated as a measurement.)  Both magnitudes are therefore only weakly
-tied to WHICH side fired, i.e. they do carry within-support variation
-the flags cannot supply.  Sizing that against a miner is an
-incremental-lift test nobody has run.
+restated as a measurement.)
+
+🔴 THOSE TWO RHO ARE NOT COMMENSURABLE AND MUST NOT BE READ SIDE BY SIDE.
+A Spearman between a continuous magnitude and a BINARY flag is capped by
+that flag's CLASS PREVALENCE on the support, and the two supports differ
+by 3.5x.  Reported against each column's own attainable ceiling (the
+comotonic sorted-vs-sorted pairing, which maximises Pearson-on-ranks):
+
+                                     FLAG_POLE_ATR   DTDB_TGT_PCT
+    support n                                1,153          1,397
+    BULL prevalence on the support          0.1657         0.5770
+    attainable max |rho|                  0.643926       0.855708
+    measured |rho|                        0.371765       0.137055
+    as % of its own ceiling                  57.7%          16.0%
+    AUC bull vs bear (0.5 = none)         0.788671       0.419917
+    median bull vs bear             5.1937 / 3.3526  0.0856 / 0.0990
+
+So the POLE's within-support ORDERING is largely explained by which side
+fired -- bull poles are measurably taller -- while DTDB_TGT_PCT's is not
+(AUC 0.420, within a coin flip of no discrimination and in the OPPOSITE
+direction).  An earlier revision of this docstring read |0.3718| and
+|0.1371| as "both only weakly tied", which INVERTS the pole.
+
+🔴 AND THE INFERENCE THAT FOLLOWED IS DELETED, NOT SOFTENED: that revision
+concluded the two "do carry within-support variation the flags cannot
+supply".  No rho establishes that and none needs to -- on the support the
+flag pair collapses to ONE binary while FLAG_POLE_ATR takes 1,153
+distinct values on 1,153 bars, so it holds BY CARDINALITY at any rho.  It
+is arithmetic, not a finding, and it means the question this block opens
+with is not answerable by this statistic at all.  Sizing the residual is
+an incremental-lift test against the consuming project's miner; nobody
+has run it.
 
 ⚠ AND A CLAIM THAT WAS WRONG, corrected here rather than carried: an
 earlier revision said this column is ">= `staff_min_atr` wherever it is
@@ -246,8 +275,16 @@ non-zero, by construction of the L136 gate".  **That is false.**  The
 L136 gate tests `height >= staff_min_atr * ATR[DETECTION bar]` while the
 emitted ratio divides by `ATR[CONFIRMATION bar]`, and ATR can RISE over
 the channel's life.  Measured minimum over the 1,153 events above:
-**1.922560**, below the 2.0 gate.  The column has no lower bound that
-survives the detection-to-confirmation gap.
+**1.922567**, on ECILC.IS, below the 2.0 gate.  The column has no lower
+bound that survives the detection-to-confirmation gap.
+
+⚠ That minimum, and the maximum quoted further up, are the CORRECTED
+values.  An earlier revision wrote 1.922560 / 16.061707; recomputed at
+float64 by re-running this module on the two frames that carry them they
+are 1.922567 (ECILC.IS) / 16.061690 (IMASM.IS) -- off by 7.4e-6 and
+1.7e-5, far beyond the ~6e-8 float32 storage error of the overlap
+harness's work cache, so a transcription error rather than a precision
+one.
 
 What SURVIVES that measurement, and why it is not the same statistic: the
 two CONF flags are near-independent of each other (rho = -0.001062), so
