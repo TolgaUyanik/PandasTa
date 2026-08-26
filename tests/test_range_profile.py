@@ -749,6 +749,8 @@ def test_all_flat_window_refreshes_the_midline_but_not_the_value_area():
     dict(lookback=float("inf")), dict(bins=1), dict(bins=0),
     dict(ob_os_level=0.0), dict(ob_os_level=-5.0),
     dict(ob_os_level=float("nan")), dict(min_range_pct=-0.1),
+    dict(min_coherent_bars=-1), dict(min_coherent_bars=2.5),
+    dict(min_coherent_bars=True), dict(min_coherent_bars=111),
 ])
 def test_bad_arguments_raise(kw):
     d = _noise(n=200)
@@ -795,8 +797,8 @@ def _mgros_shaped(n=400, bad_at=159):
     """
     d = _noise(seed=77, n=n, flat_every=0)
     d = d.copy()
-    d.loc[d.index[bad_at], "high"] = 12_235_458.0
-    d.loc[d.index[bad_at], "low"] = 10_991_170.0
+    d.loc[d.index[bad_at], "high"] = 12_235_458.333849315
+    d.loc[d.index[bad_at], "low"] = 10_991_174.435491757
     return d
 
 
@@ -862,3 +864,114 @@ def test_guard_does_not_rescue_a_coherent_but_impossible_frame():
     on = _rp(d.high, d.low, d.close, require_coherent_bars=True)
     off = _rp(d.high, d.low, d.close, require_coherent_bars=False)
     pd.testing.assert_frame_equal(on, off)
+
+
+# ---------------------------------------------------------------------
+# the coherence FLOOR (`min_coherent_bars`) -- the second half of the
+# incoherent-bar deviation, added 2026-08-26 after review
+# ---------------------------------------------------------------------
+def _mostly_incoherent_prefix(n=400, bad_until=162):
+    """The MGROS shape at the START of a frame: indices 0..bad_until-1
+    are all incoherent, so the first bars past `bar_index >= lookback`
+    have a window holding only a handful of real bars.
+
+    Reproduces `datastore/cache/MGROS_IS_1d.parquet`, whose indices
+    0-161 are all incoherent and whose bar 162 emitted a full 50-bin
+    profile built from EXACTLY ONE coherent bar.
+    """
+    d = _noise(seed=91, n=n, flat_every=0).copy()
+    # blow the High/Low apart from Open/Close, the real defect's shape:
+    # `low <= close <= high` fails, no close-to-close jump anywhere.
+    d.loc[d.index[:bad_until], "high"] = 12_235_458.333849315
+    d.loc[d.index[:bad_until], "low"] = 10_991_174.435491757
+    return d
+
+
+def test_min_coherent_bars_floors_the_profile_support():
+    """Without a floor, one surviving bar is enough to rebuild a full
+    50-bin profile. With the shipped floor it is not.
+
+    This is the MINOR-1 finding of the 2026-08-25 review, pinned:
+    MGROS.IS bar 162 emitted `RPO_VA_WIDTH_PCT = 7.849436` from a
+    110-bar window containing one coherent bar.
+    """
+    d = _mostly_incoherent_prefix()
+    coherent = (d.low <= d.close) & (d.close <= d.high)
+    assert int(coherent[:162].sum()) == 0, "fixture prefix must be all-bad"
+    c2c = d["close"].pct_change().abs()
+    assert int((c2c > 0.105).sum()) == 0, "fixture must be invisible to DI-1"
+
+    unfloored = _rp(d.high, d.low, d.close, min_coherent_bars=0)
+    floored = _rp(d.high, d.low, d.close)          # default = bins = 50
+
+    # the one-bar profile exists without the floor ...
+    assert np.isfinite(unfloored[VAW].to_numpy(float)[162])
+    assert np.isfinite(unfloored[OSC].to_numpy(float)[162])
+    # ... and is gone with it, along with every window below 50 bars.
+    assert not np.isfinite(floored[VAW].to_numpy(float)[162])
+
+    # the first bar the floored run populates has >= 50 coherent bars
+    # behind it -- computed from the fixture, not read back out.
+    support = pd.Series(coherent.to_numpy().astype(float)) \
+        .rolling(110, min_periods=1).sum().to_numpy()
+    first = int(np.flatnonzero(np.isfinite(floored[VAW].to_numpy(float)))[0])
+    assert support[first] >= 50
+    assert support[first - 1] < 50
+
+    # WITHDRAWAL-ONLY: the floor may remove cells; it may never change a
+    # surviving value and may never create one.
+    for col in COLS:
+        a = unfloored[col].to_numpy(float)
+        b = floored[col].to_numpy(float)
+        na_a, na_b = np.isnan(a), np.isnan(b)
+        assert not (na_a & ~na_b).any(), f"{col}: floor CREATED a cell"
+        both = ~na_a & ~na_b
+        assert np.array_equal(a[both], b[both]), f"{col}: floor MOVED a value"
+        assert (~na_a & na_b).sum() > 0, f"{col}: floor withdrew nothing"
+
+
+def test_min_coherent_bars_is_monotone_in_the_floor():
+    """Raising the floor may only ever remove more cells. A floor that
+    let a bar back in would mean the support count is not the thing
+    being thresholded."""
+    d = _mostly_incoherent_prefix()
+    prev = None
+    for floor in (0, 5, 20, 50, 110):
+        pop = _rp(d.high, d.low, d.close,
+                  min_coherent_bars=floor)[VAW].notna().to_numpy()
+        if prev is not None:
+            assert not (pop & ~prev).any(), f"floor={floor} re-populated a bar"
+        prev = pop
+
+
+def test_min_coherent_bars_is_not_applied_with_the_guard_off():
+    """`require_coherent_bars=False` reproduces the Pine source exactly,
+    so the floor -- which is not in the source -- must not act there.
+    That branch's own `min_periods=lookback` already forces full
+    support, so this costs nothing."""
+    d = _mostly_incoherent_prefix()
+    a = _rp(d.high, d.low, d.close, require_coherent_bars=False,
+            min_coherent_bars=0)
+    b = _rp(d.high, d.low, d.close, require_coherent_bars=False,
+            min_coherent_bars=110)
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_min_coherent_bars_default_is_bins_clamped_to_lookback():
+    """The default is `bins`, so it moves when `bins` does -- and a
+    `bins > lookback` configuration is clamped rather than flooring
+    every bar out of existence."""
+    d = _noise(seed=93, n=400, flat_every=0).copy()
+    d.loc[d.index[:80], "high"] = 12_235_458.333849315
+    d.loc[d.index[:80], "low"] = 10_991_174.435491757
+
+    lo = _rp(d.high, d.low, d.close, lookback=110, bins=10)
+    hi = _rp(d.high, d.low, d.close, lookback=110, bins=90)
+    n_lo = int(lo["RPO_VA_WIDTH_PCT_110_80"].notna().sum())
+    n_hi = int(hi["RPO_VA_WIDTH_PCT_110_80"].notna().sum())
+    assert n_lo > n_hi, (n_lo, n_hi)
+
+    # bins > lookback: clamped to lookback, so bars with a fully
+    # coherent window still populate.
+    clamped = _rp(d.high, d.low, d.close, lookback=60, bins=200)
+    assert int(clamped["RPO_VA_WIDTH_PCT_60_80"].notna().sum()) > 0

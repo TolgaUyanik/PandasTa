@@ -61,6 +61,17 @@ DELIBERATE SUBSTITUTIONS (two, both documented as such):
      500 TL name -> 0.01%; 0.01 tick on a 5 TL name -> 1%), and 0.1% is
      the conservative end of that. `min_range_pct = 0.0` reproduces
      "any strictly positive range".
+
+     HOW MUCH IT ACTUALLY GATES, measured (2026-08-26, over every
+     cached BIST daily frame -- 577 frames / 2,133,141 rows /
+     2,063,552 bars whose window range is strictly positive): the
+     relative floor withdraws 203 further bars, 0.0098%, on 5 of the
+     577 frames -- KGYO.IS 72, KSTUR.IS 57, SKYLP.IS 37, RUZYE.IS 20,
+     YBTAS.IS 17. On those bars the profile is NOT rebuilt and the
+     previous bar's midline and value area are carried forward, which
+     is the source's own behaviour when its `mintick * 5` guard fails.
+     Reproduce with
+     `Backtesting/scripts/analysis/measure_rpo_window_support.py`.
   2. Pine's `add = candle_size * (bin_size / candle_size)` (source
      lines 104/107-110) is algebraically `bin_size` for every bar, so
      the profile is a pure OCCUPANCY COUNT scaled by a constant. Every
@@ -86,9 +97,17 @@ DELIBERATE SUBSTITUTIONS (two, both documented as such):
      literal vs count decomposes into a modal-bin flip on 29 bars and a
      value-area edge move on 61 (low) / 66 (high); the enclosed span
      changes by at most 1 bin on 55 of them, by 2 on one and by 4 on
-     one. So there is NO bit-exact "Pine answer" to reproduce -- the
-     source's own arithmetic is unstable at these ties -- and this port
-     implements the exact-arithmetic form, which is deterministic.
+     one. So the Pine answer is not recoverable FROM THE SOURCE TEXT.
+     TradingView's own evaluation is deterministic -- it runs one
+     definite float program and returns one definite answer -- but the
+     text does not FIX that program at the exact-tie comparisons: it
+     leaves the accumulation order of `candle_size * (bin_size /
+     candle_size)` unpinned, and the three faithful readings above
+     disagree on 26-100 of 1,640 bars because of it. There is therefore
+     no reading of the text that can be certified bit-exact against
+     TradingView without running TradingView. This port implements the
+     exact-arithmetic form, which is deterministic AND
+     reading-independent.
      `tests/test_range_profile.py::test_transliterations_of_the_source_disagree_with_each_other`
      re-derives those counts, and
      `::test_matches_an_integer_weight_transliteration_exactly` pins
@@ -103,7 +122,7 @@ the defect leaves no close-to-close jump.
 
 Measured on `datastore/cache/MGROS_IS_1d.parquet` (5,678 daily bars):
 index 159 (2004-12-29) carries `High = 12,235,458` and
-`Low = 10,991,170` against `Open = Close = 11.61`, and 162 bars have
+`Low = 10,991,174` against `Open = Close = 11.61`, and 162 bars have
 `High > 2 * Close` while ZERO bars fail the c2c test. Unguarded, the
 oscillator's minimum on that frame is -835.11 and the value-area
 width reaches 8,999.32% of price (70 bars above 1,000%) against a
@@ -122,11 +141,60 @@ bars are withdrawn because MGROS's indices 0-161 are ALL incoherent,
 so those windows never had a valid profile to begin with.
 `require_coherent_bars=False` restores the source's behaviour exactly.
 
-WHAT THE GUARD DOES NOT CATCH, measured and not hidden:
-`ARCLK_IS_1d.parquet` carries 714 bars (2000-05-10..2003-05-27) with
-`High / Low` pinned near 3.0 while `close == low` -- physically
-impossible under BIST's +/-10% daily limit, but perfectly COHERENT, so
-the guard passes every one of them through. That is a whole-era
+THE COHERENCE FLOOR (`min_coherent_bars`), added 2026-08-26. The
+sentence above covers the windows the guard WITHDRAWS. It does not
+cover the windows it EMITS from almost nothing. Masking bars out of
+the rolling extremes requires `min_periods=1`, and with no floor that
+is taken literally: MGROS bar 162 (2005-01-03) emitted
+`RPO_VA_WIDTH_PCT = 7.849436` and `RPO_OSC = 143.454530` from a
+110-bar window containing EXACTLY ONE coherent bar -- a 50-bin
+"profile" and a "value area" built from a single candle, and nothing
+downstream could tell it apart from one backed by 110.
+
+So a bar now needs `min_coherent_bars` surviving bars in its window or
+it emits NaN. The default is `bins` (50, clamped to `lookback`): a
+`bins`-bucket density is not estimable from fewer than `bins`
+observations, which ties the floor to a parameter the caller already
+sets rather than to a new magic number. NaN, not carry-forward, is
+deliberate and is the OPPOSITE call from the `min_range_pct` guard
+above -- that guard fires on a degenerate but REAL window, where the
+last valid profile is the best available answer; this one fires on
+MISSING DATA, where any emitted number is fabricated. The carried
+`mid_price`/`range_*` state is not invalidated, it is simply not read
+on such a bar. `min_coherent_bars=0` restores the pre-floor
+behaviour. The floor is applied ONLY when `require_coherent_bars=True`
+-- the guard-off branch's contract is to reproduce the source exactly,
+and its `min_periods = lookback` already forces full support.
+
+BLAST RADIUS, measured 2026-08-26 over every cached BIST daily frame
+(577 frames / 2,133,141 rows / 2,069,619 bars where a profile is
+reachable at all): 19 bars sit on a window holding fewer than 20
+coherent bars and 4 on fewer than 5 -- ALL 23 on MGROS.IS. At the
+shipped floor of 50 the count is 295 bars on 3 frames (EPLAS.IS 163,
+MZHLD.IS 83, MGROS.IS 49). Re-running the module on those 3 frames
+before and after: every changed cell is a WITHDRAWAL, 0 values change
+and 0 cells appear -- VA_WIDTH loses 49/163/83, each break flag
+49/164/87 (the extra flag cells are the crossing pair's second
+endpoint). Both figures are reproduced by
+`Backtesting/scripts/analysis/measure_rpo_window_support.py` and
+pinned by `test_min_coherent_bars_floors_the_profile_support`.
+
+WHAT THE GUARD DOES NOT CATCH, measured and not hidden. THE COUNT
+DEPENDS ON THE PREDICATE, so all three are published (re-measured
+2026-08-26 on `ARCLK_IS_1d.parquet`, 6,729 bars):
+
+    High / Low > 2.5                               784 bars
+    High / Low > 2.5 AND coherent                  714
+    High / Low > 2.5 AND coherent AND close == low 633
+
+All three span the same era, 2000-05-10..2003-05-27, and the ratio on
+the coherent set is tight (p1 2.996 / median 3.067 / p99 3.318 / max
+3.430). An earlier revision of this block wrote "714 bars ... while
+`close == low`", which is the count for the predicate WITHOUT the
+`close == low` clause; with it the count is 633. Quote the predicate
+beside whichever number is used. These bars are physically impossible
+under BIST's +/-10% daily limit but perfectly COHERENT, so the guard
+passes every one of them through. That is a whole-era
 systematic defect in the High series affecting every High-consuming
 indicator in this engine (ATR, natr, Donchian, BB), not a single-print
 spike, and it is left as a data-integrity finding rather than patched
@@ -432,7 +500,8 @@ def _fmt(x):
 
 def range_profile(high, low, close, lookback=None, ob_os_level=None,
                   bins=None, min_range_pct=None, require_coherent_bars=True,
-                  emit_osc=False, offset=None, **kwargs):
+                  min_coherent_bars=None, emit_osc=False, offset=None,
+                  **kwargs):
     """Indicator: Range Profile Oscillator (RPO)"""
     lookback = _validated_int(lookback, 110, "lookback")
     bins = _validated_int(bins, 50, "bins")
@@ -443,6 +512,17 @@ def range_profile(high, low, close, lookback=None, ob_os_level=None,
         raise ValueError(f"lookback must be >= 2, got {lookback}")
     if bins < 2:
         raise ValueError(f"bins must be >= 2, got {bins}")
+    # THE COHERENCE FLOOR (see the module docstring). Default `bins`:
+    # a `bins`-bucket density is not estimable from fewer than `bins`
+    # observations. Clamped to `lookback` so a `bins > lookback`
+    # configuration cannot floor every bar out of existence.
+    min_coherent_bars = _validated_int(
+        min_coherent_bars, bins if bins <= lookback else lookback,
+        "min_coherent_bars", positive=False)
+    if min_coherent_bars > lookback:
+        raise ValueError(
+            f"min_coherent_bars must be <= lookback ({lookback}), "
+            f"got {min_coherent_bars}")
 
     high = verify_series(high, lookback + 1)
     low = verify_series(low, lookback + 1)
@@ -469,11 +549,21 @@ def range_profile(high, low, close, lookback=None, ob_os_level=None,
         l_v = np.where(coherent, l_v, np.nan)
         masked_high = Series(h_v, index=high.index)
         masked_low = Series(l_v, index=low.index)
+        # `min_periods = 1` is NOT a statement that one bar is enough.
+        # It differs from the guard-off branch's `lookback` because the
+        # mask can legitimately empty most of a window while the bars
+        # that DO have support must still get their rolling extremes.
+        # The actual support requirement is `min_coherent_bars`,
+        # enforced per bar in the loop below; without it this branch
+        # would rebuild a full `bins`-bin profile from a single
+        # surviving bar (measured on MGROS.IS -- module docstring).
         min_periods = 1
+        support_mask = coherent
     else:
         l_v = l_v.copy()
         masked_high, masked_low = high, low
         min_periods = lookback
+        support_mask = np.isfinite(h_v) & np.isfinite(l_v)
 
     # Source line 82-87: min(low) / max(high) over the SAME window the
     # profile is built from -- bar `t` back through `t - lookback + 1`.
@@ -481,6 +571,9 @@ def range_profile(high, low, close, lookback=None, ob_os_level=None,
         .min().to_numpy(dtype=float)
     roll_max = masked_high.rolling(lookback, min_periods=min_periods) \
         .max().to_numpy(dtype=float)
+    # Bars surviving into the window `[t - lookback + 1, t]`.
+    support = Series(support_mask.astype(float)) \
+        .rolling(lookback, min_periods=1).sum().to_numpy(dtype=float)
 
     osc = np.full(n, np.nan)
     va_width = np.full(n, np.nan)
@@ -496,6 +589,18 @@ def range_profile(high, low, close, lookback=None, ob_os_level=None,
     # window already exists at index `lookback - 1`. That one-bar
     # conservatism is the source's, and is kept.
     for t in range(lookback, n):
+        # DELIBERATE DEVIATION -- THE COHERENCE FLOOR, not in the Pine
+        # source. Fewer than `min_coherent_bars` surviving bars is
+        # MISSING DATA, not the degenerate-but-real window the range
+        # guard below handles, so the bar emits NaN instead of a
+        # profile built from a handful of bars OR a carried-forward
+        # one. The carried state is deliberately left untouched: it is
+        # not invalidated, it is simply not read on this bar. Applied
+        # only when the coherence guard is on -- `require_coherent_bars
+        # =False` must reproduce the source exactly, and there
+        # `min_periods = lookback` already forces full support.
+        if require_coherent_bars and support[t] < min_coherent_bars:
+            continue
         min_l = roll_min[t]
         max_h = roll_max[t]
         if np.isfinite(min_l) and np.isfinite(max_h):
@@ -609,6 +714,9 @@ Calculation:
 
     osc              = (close - mid_price) / half_range * ob_os_level
                        (computed, NOT emitted -- see the module docstring)
+    (a bar whose window holds fewer than `min_coherent_bars`
+     coherent bars is skipped entirely and emits NaN)
+
     RPO_VA_WIDTH_PCT = (range_high - range_low) / mid_price * 100
     RPO_BREAK_UP     = crossover(osc,  ob_os_level)
     RPO_BREAK_DN     = crossunder(osc, -ob_os_level)
@@ -629,6 +737,16 @@ Args:
         bar failing `low <= close <= high` from both the window
         extremes and the profile deposits. False reproduces the
         source. Default: True
+    min_coherent_bars (int): NOT IN THE SOURCE, and the other half of
+        the guard above -- the minimum number of surviving bars a
+        window must hold before the profile is rebuilt at all. Below
+        it the bar emits NaN (it does NOT carry the previous profile
+        forward: too few bars is missing data, not a degenerate-but-
+        real window). Default: `bins`, clamped to `lookback` -- a
+        `bins`-bucket density is not estimable from fewer than `bins`
+        observations. 0 disables the floor. Ignored when
+        `require_coherent_bars=False`, whose contract is to reproduce
+        the source exactly. Default: None (-> `bins`)
     min_range_pct (float): Relative substitute for the source's
         `syminfo.mintick * 5` degeneracy guard -- the window's range
         must exceed this fraction of the window's mid price for the
