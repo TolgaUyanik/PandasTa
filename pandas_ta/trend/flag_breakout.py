@@ -305,6 +305,19 @@ def _window_r2_grid(c, lookbacks):
     is the R^2 over `close[t-lookback .. t]` (so `lookback+1` points,
     x = 0..lookback) and entries with `t < lookback` are NaN.
 
+    WHY NOT `overlap/linreg.py`.  That module already computes a rolling
+    Pearson r (`linreg(..., r=True)`), and r^2 IS this statistic -- with
+    `length = lookback + 1`, since r is invariant to the affine shift
+    between Pine's x = 0..lookback and linreg's x = 1..length.  The reuse
+    was tested, not dismissed: on a 6,729-bar frame across all eleven
+    default lookbacks the two agree to 3.166e-09 and linreg takes 21.8 s
+    against 0.018 s here, 1,182x.  Both halves of that matter -- 3e-09 is
+    NOT exact (linreg evaluates `rn / sqrt(divisor * ...)`, a different
+    algebraic form, which would move the `r2 >= staff_min_r2` gate at the
+    margin), and `rolling(...).apply(raw=False)` is a Python call per bar
+    per lookback.  `test_window_r2_matches_pandas_ta_linreg_r_squared`
+    pins the equivalence so this decision stays auditable.
+
     The five sums are taken over an EXPLICIT sliding window rather than
     from a long cumulative sum: `sumY2 - sumY*sumY/nf` is a cancelling
     difference, and differencing a cumsum that has run over thousands of

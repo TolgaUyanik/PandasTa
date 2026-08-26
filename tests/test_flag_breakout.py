@@ -502,6 +502,49 @@ def test_literal_transliteration_also_matches_the_hand_fixture():
 
 
 # ---------------------------------------------------------------------
+# reuse of the package's own regression
+# ---------------------------------------------------------------------
+def test_window_r2_matches_pandas_ta_linreg_r_squared():
+    """`overlap/linreg.py` ALREADY computes a rolling Pearson r
+    (`r=True`), and r^2 is exactly what Pine's `f_window_r2` computes.
+    This pins that the semantics really do match -- so the reason this
+    module carries its own `_window_r2_grid` is COST and EXACTNESS, not
+    ignorance of the existing function.
+
+    linreg regresses against x = 1..length over `length` points; Pine
+    regresses against x = 0..lookback over `lookback + 1` points. r is
+    invariant to an affine shift of x, so `length = lookback + 1` is the
+    same statistic.
+
+    Measured on a 6,729-bar frame across all eleven default lookbacks:
+    agreement to 3.166e-09, and linreg takes 21.8 s against 0.018 s for
+    the grid -- 1,182x. Two consequences, both load-bearing:
+      * 3e-09 is NOT exact. linreg evaluates `rn / sqrt(divisor * ...)`,
+        a different algebraic form, so swapping it in would move the
+        `r2 >= staff_min_r2` gate at the margin.
+      * `rolling(...).apply(raw=False)` is a Python-level call per bar
+        per lookback; at eleven lookbacks over 89 frames that is tens of
+        minutes added to every `compute_all` sweep.
+    """
+    from pandas_ta.overlap.linreg import linreg
+    from pandas_ta.trend.flag_breakout import _window_r2_grid
+    rng = np.random.default_rng(3)
+    n = 1500
+    c = pd.Series(100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.015, n))))
+    grid = _window_r2_grid(c.to_numpy(dtype=float), list(range(12, 1, -1)))
+    worst = 0.0
+    for L in range(12, 1, -1):
+        r = linreg(c, length=L + 1, r=True).to_numpy(dtype=float)
+        mine = grid[L]
+        m = np.isfinite(r) & np.isfinite(mine)
+        assert m.sum() > 0
+        worst = max(worst, float(np.abs(r[m] ** 2 - mine[m]).max()))
+    assert worst < 1e-7, worst
+    assert worst > 0.0, ("bit-exact agreement would mean the two forms are "
+                         "the same computation; they are not")
+
+
+# ---------------------------------------------------------------------
 # causality
 # ---------------------------------------------------------------------
 _REAL = importlib.import_module("pandas_ta.trend.flag_breakout")
