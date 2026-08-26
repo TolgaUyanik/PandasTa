@@ -936,12 +936,21 @@ def test_min_coherent_bars_is_monotone_in_the_floor():
     being thresholded."""
     d = _mostly_incoherent_prefix()
     prev = None
+    strictly_shrank = 0
     for floor in (0, 5, 20, 50, 110):
         pop = _rp(d.high, d.low, d.close,
                   min_coherent_bars=floor)[VAW].notna().to_numpy()
         if prev is not None:
             assert not (pop & ~prev).any(), f"floor={floor} re-populated a bar"
+            if pop.sum() < prev.sum():
+                strictly_shrank += 1
         prev = pop
+    # Fletcher round 2, NIT: the monotone assertion above passes VACUOUSLY
+    # if the floor stops acting at all -- it only forbids re-population.
+    # Require at least one step to actually remove cells, so this test
+    # dies with the floor rather than surviving it.
+    assert strictly_shrank >= 1, (
+        "raising the floor never removed a cell -- the floor is inert")
 
 
 def test_min_coherent_bars_is_not_applied_with_the_guard_off():

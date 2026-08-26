@@ -166,6 +166,19 @@ behaviour. The floor is applied ONLY when `require_coherent_bars=True`
 -- the guard-off branch's contract is to reproduce the source exactly,
 and its `min_periods = lookback` already forces full support.
 
+⚠ INTERACTION WITH `min_range_pct`, stated because it is latent
+rather than live. Because a floored bar leaves the carried state
+intact, a LATER bar that clears the floor but then trips the
+`min_range_pct` guard would carry a PRE-GAP midline and value area
+across the very hole the floor exists to suppress, and emit it as a
+normal number. Measured 2026-08-26 over all 577 cached BIST daily
+frames: incidence is ZERO -- the floored set {EPLAS.IS, MZHLD.IS,
+MGROS.IS} and the range-gated set {KGYO.IS, KSTUR.IS, SKYLP.IS,
+RUZYE.IS, YBTAS.IS} are DISJOINT, so no frame can currently exhibit
+it. That disjointness is a property of this cache, NOT of the
+algorithm -- re-check it after any cache refresh before relying on
+this note.
+
 BLAST RADIUS, measured 2026-08-26 over every cached BIST daily frame
 (577 frames / 2,133,141 rows / 2,069,619 bars where a profile is
 reachable at all): 19 bars sit on a window holding fewer than 20
@@ -181,7 +194,9 @@ pinned by `test_min_coherent_bars_floors_the_profile_support`.
 
 WHAT THE GUARD DOES NOT CATCH, measured and not hidden. THE COUNT
 DEPENDS ON THE PREDICATE, so all three are published (re-measured
-2026-08-26 on `ARCLK_IS_1d.parquet`, 6,729 bars):
+2026-08-26 on `ARCLK_IS_1d.parquet`, 6,729 bars; escalated to the
+canonical register as row DI-5b -- see
+`docs/knowledgebase/06-data-quality.md`):
 
     High / Low > 2.5                               784 bars
     High / Low > 2.5 AND coherent                  714
