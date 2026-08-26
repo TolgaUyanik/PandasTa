@@ -1223,7 +1223,7 @@ class AnalysisIndicators(BasePandasObject):
                       edge_max_bars=None, edge_max_width_pct=None,
                       max_edge_slope_ratio=None, min_slope_atr=None,
                       breakout_atr_mult=None, atr_length=None,
-                      width_mode=None, offset=None, **kwargs):
+                      width_mode=None, emit_pole=False, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
@@ -1240,7 +1240,7 @@ class AnalysisIndicators(BasePandasObject):
                                min_slope_atr=min_slope_atr,
                                breakout_atr_mult=breakout_atr_mult,
                                atr_length=atr_length, width_mode=width_mode,
-                               offset=offset, **kwargs)
+                               emit_pole=emit_pole, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def fvg_sweep_magnet(self, fvg_lookback=None, disp_atr_mult=None, atr_len=None, min_gap_atr=None,

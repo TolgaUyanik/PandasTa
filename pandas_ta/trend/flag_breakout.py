@@ -172,16 +172,9 @@ WHAT THIS EMITS (four columns; `_props` = `_{staff_max_bars}_
                    ATR`), else 0.0.
   FLAG_CONF_BEAR   the mirror: falling pole, upward-sloped channel,
                    close breaks DOWN through the lower rail.
-  FLAG_POLE_ATR    the pole's height divided by that bar's ATR, written
-                   ON THE CONFIRMATION BAR ONLY, 0.0 elsewhere.  This is
-                   the source's own `STAFF : x ATR` label quantity
-                   (L382), and it is a dimensionless RATIO -- the pole's
-                   two prices are never emitted.  It is >= `staff_min_atr`
-                   wherever it is non-zero, by construction of the L136
-                   gate, but not exactly equal to the label's value: the
-                   label rounds to 1 decimal (`math.round(..., 1)`) and
-                   divides by the ATR of the DRAWING bar, whereas this
-                   divides by the ATR of the confirmation bar.
+  FLAG_POLE_ATR    COMPUTED but NOT EMITTED by default -- pass
+                   `emit_pole=True`.  See "WHAT WAS BUILT, MEASURED, AND
+                   THEN REMOVED" below before re-enabling it.
   FLAG_PEND        the live-tracking state AFTER bar `t` is processed:
                    +1 while a bull edge is being extended, -1 while a
                    bear edge is, 0 when neither, and their SUM (so 0)
@@ -192,6 +185,47 @@ WHAT THIS EMITS (four columns; `_props` = `_{staff_max_bars}_
 All four are NaN before the first bar at which ATR is finite (index 14
 at the default `atr_length=14`, measured, because `atr` needs a prior
 close for its first true range), and 0.0-or-event from there.
+
+WHAT WAS BUILT, MEASURED, AND THEN REMOVED (read before re-enabling it).
+`FLAG_POLE_ATR` -- the pole's height divided by the confirmation bar's
+ATR, i.e. the source's own `STAFF : x ATR` label quantity (L382) -- is
+COMPUTED here but NOT EMITTED.  It was a fourth shipped column until it
+was measured.
+
+The measurement is not the usual one.  It is not close to some existing
+engine column; it is close to THE OTHER TWO COLUMNS OF THIS SAME PORT.
+Pooled over 89 BIST_100 daily frames / 404,066 populated bars:
+
+    rho(FLAG_POLE_ATR, FLAG_CONF_BULL + FLAG_CONF_BEAR)  =  0.999999
+    rho(FLAG_POLE_ATR, FLAG_CONF_BEAR)                   =  0.912957
+    bars where exactly one of the two is non-zero        =  0
+
+The support is IDENTICAL by construction -- the pole height is written
+on precisely the bars a flag confirms -- so as a rank variable the column
+IS the union of the two flags.  Its magnitude content is real but lives
+on 1,153 of 404,066 bars (0.285%), where it takes 1,151 distinct values
+over 1.922560 .. 16.061707; a rank statistic over the whole column cannot
+see any of that, and neither can a threshold split that is really just
+selecting "an event happened".  The consuming project's precedent band is
+"~0.9 revert / 0.76-0.80 ship with disclosure", and 0.999999 is at the
+top of its own record of deleted columns.  So this one is deleted, on the
+same `emit_*=False` pattern `volatility/range_profile.py` uses for
+`RPO_OSC`.
+
+⚠ AND A CLAIM THAT WAS WRONG, corrected here rather than carried: an
+earlier revision said this column is ">= `staff_min_atr` wherever it is
+non-zero, by construction of the L136 gate".  **That is false.**  The
+L136 gate tests `height >= staff_min_atr * ATR[DETECTION bar]` while the
+emitted ratio divides by `ATR[CONFIRMATION bar]`, and ATR can RISE over
+the channel's life.  Measured minimum over the 1,153 events above:
+**1.922560**, below the 2.0 gate.  The column has no lower bound that
+survives the detection-to-confirmation gap.
+
+What SURVIVES that measurement, and why it is not the same statistic: the
+two CONF flags are near-independent of each other (rho = -0.001062), so
+they are not restating one another, and `FLAG_PEND` is a dense STATE
+rather than an event (rho +0.017523 / -0.004677 against the two flags).
+Full grid: Backtesting/backtest_results/tvpta6/flag_overlap_20260826.md
 
 CAUSALITY.  A flag confirms AT THE BREAKOUT.  Every write in this module
 lands on the bar being processed: `conf_*[t]`, `pole[t]` and `pend[t]`
@@ -370,7 +404,8 @@ def flag_breakout(high, low, close, staff_min_atr=None, staff_min_bars=None,
                   staff_min_r2=None, edge_min_bars=None, edge_max_bars=None,
                   edge_max_width_pct=None, max_edge_slope_ratio=None,
                   min_slope_atr=None, breakout_atr_mult=None,
-                  atr_length=None, width_mode=None, offset=None, **kwargs):
+                  atr_length=None, width_mode=None, emit_pole=False,
+                  offset=None, **kwargs):
     """Indicator: Flag Pattern Breakout (FLAG)"""
     staff_min_atr = _validated_float(staff_min_atr, 2.0, "staff_min_atr")
     staff_min_bars = _validated_int(staff_min_bars, 2, "staff_min_bars")
@@ -601,7 +636,11 @@ def flag_breakout(high, low, close, staff_min_atr=None, staff_min_bars=None,
     conf_bear = Series(conf_bear, index=close.index)
     pole = Series(pole, index=close.index)
     pend = Series(pend, index=close.index)
-    out = [conf_bull, conf_bear, pole, pend]
+    # `pole` is COMPUTED unconditionally -- see "WHAT WAS BUILT, MEASURED
+    # AND THEN REMOVED" in the module docstring -- but emitted only on
+    # request, because as a column it is rank-equivalent to the two flags.
+    out = [conf_bull, conf_bear, pole, pend] if emit_pole else \
+        [conf_bull, conf_bear, pend]
 
     if offset != 0:
         out = [s.shift(offset) for s in out]
@@ -613,7 +652,10 @@ def flag_breakout(high, low, close, staff_min_atr=None, staff_min_bars=None,
         for s in out:
             s.fillna(method=kwargs["fill_method"], inplace=True)
 
-    conf_bull, conf_bear, pole, pend = out
+    if emit_pole:
+        conf_bull, conf_bear, pole, pend = out
+    else:
+        conf_bull, conf_bear, pend = out
     _props = (f"_{staff_max_bars}_{_fmt(staff_min_r2)}"
               f"_{_fmt(breakout_atr_mult)}")
     conf_bull.name = f"FLAG_CONF_BULL{_props}"
@@ -621,7 +663,9 @@ def flag_breakout(high, low, close, staff_min_atr=None, staff_min_bars=None,
     pole.name = f"FLAG_POLE_ATR{_props}"
     pend.name = f"FLAG_PEND{_props}"
 
-    df = DataFrame({s.name: s for s in (conf_bull, conf_bear, pole, pend)})
+    emitted = (conf_bull, conf_bear, pole, pend) if emit_pole else \
+        (conf_bull, conf_bear, pend)
+    df = DataFrame({s.name: s for s in emitted})
     df.name = f"FLAG{_props}"
     df.category = "trend"
     return df
@@ -679,6 +723,9 @@ Args:
     breakout_atr_mult (float): ATR buffer the close must clear.
         Default: 0.15
     atr_length (int): ATR length. Default: 14
+    emit_pole (bool): also emit `FLAG_POLE_ATR`, the pole height in ATR
+        units. Default: False -- it measured rho 0.999999 against the sum
+        of the two CONF flags and was removed; see the module docstring.
     width_mode (str): 'source' reproduces the source's two DIFFERENT
         width tests (raw extreme span on the bull side, slope-projected
         gap on the bear side); 'raw' and 'projected' force one rule on
@@ -690,6 +737,6 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.DataFrame: FLAG_CONF_BULL, FLAG_CONF_BEAR, FLAG_POLE_ATR,
-    FLAG_PEND columns.
+    pd.DataFrame: FLAG_CONF_BULL, FLAG_CONF_BEAR, FLAG_PEND columns
+    (plus FLAG_POLE_ATR when `emit_pole=True`).
 """

@@ -47,9 +47,10 @@ from pandas_ta.volatility.atr import atr as _atr
 
 BULL = "FLAG_CONF_BULL_12_0.85_0.15"
 BEAR = "FLAG_CONF_BEAR_12_0.85_0.15"
-POLE = "FLAG_POLE_ATR_12_0.85_0.15"
+POLE = "FLAG_POLE_ATR_12_0.85_0.15"   # emit_pole=True only -- see the module docstring
 PEND = "FLAG_PEND_12_0.85_0.15"
-COLS = [BULL, BEAR, POLE, PEND]
+COLS = [BULL, BEAR, PEND]
+COLS_WITH_POLE = [BULL, BEAR, POLE, PEND]
 
 
 # ---------------------------------------------------------------------
@@ -98,8 +99,11 @@ def test_column_names_and_category():
     df = _hand(1)
     out = flag_breakout(df.high, df.low, df.close)
     assert list(out.columns) == COLS
+    assert POLE not in out.columns, "FLAG_POLE_ATR must stay opt-in"
     assert out.category == "trend"
     assert out.name == "FLAG_12_0.85_0.15"
+    assert list(flag_breakout(df.high, df.low, df.close,
+                             emit_pole=True).columns) == COLS_WITH_POLE
 
 
 def test_registered_in_category_dict():
@@ -120,7 +124,6 @@ def test_props_suffix_tracks_the_three_named_parameters():
                         staff_min_r2=0.9, breakout_atr_mult=0.25)
     assert list(out.columns) == ["FLAG_CONF_BULL_10_0.9_0.25",
                                 "FLAG_CONF_BEAR_10_0.9_0.25",
-                                "FLAG_POLE_ATR_10_0.9_0.25",
                                 "FLAG_PEND_10_0.9_0.25"]
 
 
@@ -147,24 +150,75 @@ def test_confirmation_is_on_the_breakout_bar_not_the_pole_or_channel():
     """The pole spans bars 30-34 and the channel bars 34-38. Nothing is
     written on any of them."""
     df = _hand(1)
-    out = flag_breakout(df.high, df.low, df.close)
+    out = flag_breakout(df.high, df.low, df.close, emit_pole=True)
     for bar in range(30, 39):
         assert out[BULL].iloc[bar] == 0.0
         assert out[POLE].iloc[bar] == 0.0
 
 
 def test_pole_height_is_an_atr_ratio_and_no_price_is_emitted():
+    """`FLAG_POLE_ATR` is opt-in (see `test_pole_column_is_not_emitted_
+    by_default`); this pins WHAT it is when asked for."""
     df = _hand(1)
-    out = flag_breakout(df.high, df.low, df.close)
+    out = flag_breakout(df.high, df.low, df.close, emit_pole=True)
     a = _atr(df.high, df.low, df.close, length=14)
     height = df.high.iloc[34] - df.low.iloc[29]       # 103.05 - 99.95
     assert height == pytest.approx(3.10)
+    # divided by the CONFIRMATION bar's ATR, not the detection bar's
     assert out[POLE].iloc[39] == pytest.approx(height / a.iloc[39])
-    # >= the staff_min_atr gate, by construction of the L136 floor
-    nz = out[POLE].to_numpy()
-    assert (nz[np.isfinite(nz) & (nz != 0.0)] >= 2.0).all()
+    assert out[POLE].iloc[39] != pytest.approx(height / a.iloc[34])
     # and never anywhere near a price
     assert out[POLE].max() < 100.0
+
+
+def test_pole_is_NOT_bounded_below_by_staff_min_atr():
+    """An earlier revision asserted `FLAG_POLE_ATR >= staff_min_atr`
+    wherever non-zero, "by construction of the L136 floor". That is
+    FALSE and the assertion is kept here inverted so it cannot come
+    back: L136 tests the height against the ATR of the DETECTION bar,
+    while the emitted ratio divides by the ATR of the CONFIRMATION bar,
+    and ATR can RISE over the channel's life. Measured minimum over
+    1,153 events pooled across 89 BIST_100 daily frames: 1.922560,
+    below the 2.0 gate. Both halves are pinned here.
+
+    (a) THE MECHANISM, on the hand fixture: the gate saw 10.869268 ATR at
+        the detection bar and the column emits 9.833099 at the
+        confirmation bar -- strictly smaller, because ATR grew.
+    (b) A REAL SUB-GATE VALUE, on `seed=13`: 1.977549, below 2.0.
+    """
+    # (a) the mechanism
+    df = _hand(1)
+    a = _atr(df.high, df.low, df.close, length=14)
+    height = df.high.iloc[34] - df.low.iloc[29]
+    at_detection = height / a.iloc[34]
+    at_confirmation = flag_breakout(df.high, df.low, df.close,
+                                    emit_pole=True)[POLE].iloc[39]
+    assert at_detection == pytest.approx(10.869268, abs=1e-6)
+    assert at_confirmation == pytest.approx(9.833099, abs=1e-6)
+    assert at_confirmation < at_detection
+
+    # (b) a value that actually breaches the gate
+    d2 = _noise(n=8000, seed=13)
+    nz = flag_breakout(d2.high, d2.low, d2.close,
+                       emit_pole=True)[POLE].to_numpy(dtype=float)
+    nz = nz[np.isfinite(nz) & (nz != 0.0)]
+    assert nz.size > 0 and nz.min() > 0.0
+    assert nz.min() == pytest.approx(1.977549, abs=1e-6)
+    assert nz.min() < 2.0
+
+
+def test_pole_column_is_not_emitted_by_default():
+    """It measured rho 0.999999 against FLAG_CONF_BULL + FLAG_CONF_BEAR
+    over 404,066 pooled bars, with identical support. It is computed and
+    gated, not deleted from the module, so the finding stays
+    reproducible."""
+    df = _noise(n=6000, seed=5)
+    assert POLE not in flag_breakout(df.high, df.low, df.close).columns
+    on = flag_breakout(df.high, df.low, df.close, emit_pole=True)
+    assert POLE in on.columns
+    # the containment that drove the deletion, re-derived here
+    union = (on[BULL].fillna(0.0) != 0.0) | (on[BEAR].fillna(0.0) != 0.0)
+    assert int(((on[POLE].fillna(0.0) != 0.0) ^ union).sum()) == 0
 
 
 def test_pole_height_gate_is_load_bearing_and_NOT_monotone():
@@ -308,8 +362,11 @@ def test_scale_invariance_times_ten():
     for col in (BULL, BEAR, PEND):
         assert (base[col].dropna().to_numpy()
                 == up[col].dropna().to_numpy()).all()
-    np.testing.assert_allclose(base[POLE].dropna().to_numpy(),
-                               up[POLE].dropna().to_numpy(), rtol=1e-9)
+    bp = flag_breakout(df.high, df.low, df.close, emit_pole=True)[POLE]
+    up_p = flag_breakout(df.high * 10.0, df.low * 10.0,
+                         df.close * 10.0, emit_pole=True)[POLE]
+    np.testing.assert_allclose(bp.dropna().to_numpy(),
+                               up_p.dropna().to_numpy(), rtol=1e-9)
 
 
 def test_thresholds_are_atr_scaled_not_absolute():
@@ -484,7 +541,8 @@ def test_matches_a_literal_pine_order_transliteration(seed):
     a = _atr(df.high, df.low, df.close, length=14).to_numpy(dtype=float)
     ref = _literal(df.high.to_numpy(float), df.low.to_numpy(float),
                    df.close.to_numpy(float), a)
-    got = flag_breakout(df.high, df.low, df.close).to_numpy(dtype=float)
+    got = flag_breakout(df.high, df.low, df.close,
+                        emit_pole=True).to_numpy(dtype=float)
     assert (np.isnan(ref) == np.isnan(got)).all(), "NaN masks diverge"
     m = np.isfinite(ref) & np.isfinite(got)
     assert m.sum() > 0
@@ -596,10 +654,11 @@ def test_truncation_matches_prefix_of_full_series():
             flag_breakout(d.high, d.low, d.close), full.iloc[:k])
 
 
-def _mutant_table(pairs, tag, cols, df):
-    real_full = flag_breakout(df.high, df.low, df.close)
+def _mutant_table(pairs, tag, cols, df, emit_pole=False):
+    kw = {"emit_pole": True} if emit_pole else {}
+    real_full = flag_breakout(df.high, df.low, df.close, **kw)
     mod = _load_mutant(pairs, tag)
-    mut_full = mod.flag_breakout(df.high, df.low, df.close)
+    mut_full = mod.flag_breakout(df.high, df.low, df.close, **kw)
 
     # PERTURBING, not unsatisfiable: the same total, on different bars.
     tot_r = float(real_full[cols].fillna(0.0).to_numpy().sum())
@@ -618,9 +677,9 @@ def _mutant_table(pairs, tag, cols, df):
         k = int(bar) + 1
         d = df.iloc[:k]
         r_dis, r_n = _finite_disagreement(
-            real_full, flag_breakout(d.high, d.low, d.close), cols, k)
+            real_full, flag_breakout(d.high, d.low, d.close, **kw), cols, k)
         m_dis, m_n = _finite_disagreement(
-            mut_full, mod.flag_breakout(d.high, d.low, d.close), cols, k)
+            mut_full, mod.flag_breakout(d.high, d.low, d.close, **kw), cols, k)
         assert r_n > 0 and m_n > 0, "no co-populated cells to compare"
         assert r_dis == 0, f"REAL module leaked at k={k}: {r_dis} cells"
         rows.append((k, r_dis, r_n, m_dis, m_n))
@@ -643,12 +702,12 @@ def test_mutant_a_backdating_confirmation_to_the_channel_start_is_caught():
 def test_mutant_b_backdating_the_pole_height_is_caught():
     """The same edit on the measured-height column, proving the detector
     is not specific to the two flags."""
-    _mutant_table(_B, "b", [POLE], _noise(n=6000, seed=5))
+    _mutant_table(_B, "b", [POLE], _noise(n=6000, seed=5), emit_pole=True)
 
 
 def test_nothing_is_written_before_the_first_pattern_can_exist():
     df = _hand(1)
-    out = flag_breakout(df.high, df.low, df.close)
+    out = flag_breakout(df.high, df.low, df.close, emit_pole=True)
     assert out.iloc[14:30][[BULL, BEAR, POLE]].to_numpy().sum() == 0.0
 
 
