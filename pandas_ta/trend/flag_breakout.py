@@ -129,6 +129,17 @@ this indicator.
      computed and then only used by the commented-out branch.  They are
      simply absent here.
 
+INPUT RANGES ARE DELIBERATELY NOT RE-ENFORCED.  The source's `input.*`
+calls carry UI slider bounds -- `staff_min_atr` minval 0.5,
+`staff_max_opposite` 0..5, `staff_min_r2` 0.5..0.999, `edge_min_bars`
+2..15, `edge_max_width_pct` 10..90, `max_edge_slope_ratio` 0.05..1.0,
+`min_slope_atr` 0..0.5, `breakout_atr_mult` 0..1 (L38-58).  Only the ones
+that are STRUCTURAL are enforced here (`staff_max_bars >=
+staff_min_bars`, `edge_min_bars >= 2` -- below 2 the channel has no
+slope, positivity/finiteness on the rest).  The cosmetic slider caps are
+not, so a caller may sweep past them; the shipped defaults are all inside
+the source's ranges.
+
 PINE-6 ARITHMETIC.  Nothing in the ported range does integer division:
 the only `/` operators are `sumX * sumY / nf` and friends inside
 `f_window_r2` (L115-118, all `float`), `edge_max_width_pct / 100.0`
