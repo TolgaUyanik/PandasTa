@@ -1217,6 +1217,32 @@ class AnalysisIndicators(BasePandasObject):
         result = ema(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def flag_breakout(self, staff_min_atr=None, staff_min_bars=None,
+                      staff_max_bars=None, staff_max_opposite=None,
+                      staff_min_r2=None, edge_min_bars=None,
+                      edge_max_bars=None, edge_max_width_pct=None,
+                      max_edge_slope_ratio=None, min_slope_atr=None,
+                      breakout_atr_mult=None, atr_length=None,
+                      width_mode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = flag_breakout(high=high, low=low, close=close,
+                               staff_min_atr=staff_min_atr,
+                               staff_min_bars=staff_min_bars,
+                               staff_max_bars=staff_max_bars,
+                               staff_max_opposite=staff_max_opposite,
+                               staff_min_r2=staff_min_r2,
+                               edge_min_bars=edge_min_bars,
+                               edge_max_bars=edge_max_bars,
+                               edge_max_width_pct=edge_max_width_pct,
+                               max_edge_slope_ratio=max_edge_slope_ratio,
+                               min_slope_atr=min_slope_atr,
+                               breakout_atr_mult=breakout_atr_mult,
+                               atr_length=atr_length, width_mode=width_mode,
+                               offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def fvg_sweep_magnet(self, fvg_lookback=None, disp_atr_mult=None, atr_len=None, min_gap_atr=None,
                           require_disp=None, max_fvg_age=None, pivot_len=None, liq_keep=None,
                           sweep_wick_mult=None, sweep_confirm=None, magnet_window=None, min_score=None,

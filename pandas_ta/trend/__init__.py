@@ -14,6 +14,7 @@ from .decreasing import decreasing
 from .dpo import dpo
 from .dtdb import dtdb
 from .equal_highs_lows import equal_highs_lows
+from .flag_breakout import flag_breakout
 from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
 from .halftrend import halftrend

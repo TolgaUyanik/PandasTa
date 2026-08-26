@@ -69,7 +69,7 @@ Category = {
     # Trend
     "trend": [
         "adx", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
-        "dpo", "equal_highs_lows", "fvg", "fvg_sweep_magnet", "halftrend", "increasing", "inverse_fvg", "liquidity_compression_box",
+        "dpo", "equal_highs_lows", "flag_breakout", "fvg", "fvg_sweep_magnet", "halftrend", "increasing", "inverse_fvg", "liquidity_compression_box",
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
         "ribbon_concordance", "sd_zone_pro", "short_run", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
