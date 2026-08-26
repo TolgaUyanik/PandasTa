@@ -232,9 +232,11 @@ def test_pend_marks_the_channel_and_resets_on_confirmation():
 def test_pend_is_a_NET_so_zero_is_ambiguous():
     """Documented, not hidden: `FLAG_PEND` sums +1 (bull channel live)
     and -1 (bear channel live), so a bar tracking BOTH reads 0.0, the
-    same as a bar tracking neither. On 20 cached BIST daily frames this
-    was measured at 1,106 of 28,897 tracking bars (3.83%); here the test
-    only pins that the encoding really is a net."""
+    same as a bar tracking neither. On the alphabetically-first 20 of the
+    578 cached BIST daily frames in the consuming project (A1CAP.IS ..
+    AKFYE.IS -- NOT its BIST_100 pool), 69,467 bars, this was measured at
+    1,106 of 28,897 tracking bars, 3.83%; here the test only pins that
+    the encoding really is a net."""
     df = _noise(n=4000, seed=17)
     out = flag_breakout(df.high, df.low, df.close)
     assert set(np.unique(out[PEND].dropna())) <= {-1.0, 0.0, 1.0}
