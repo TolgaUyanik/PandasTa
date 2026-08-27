@@ -83,17 +83,32 @@ needs in order to re-derive it -- not because the column ships.
 
 `TVS_DIST` is not merely a rescaled Supertrend distance.  Its SIGN
 carries the direction (see below) and its MAGNITUDE carries the thing
-that is new.  In the uptrend branch that magnitude is an EXACT detector
-of the rate limit: `TVS_DIST > mult` if and only if the clamp bound on
-that bar.  Proof, all within `dir == 1`: `dist > mult` <=> `close -
-stop > mult*atr` <=> `stop < target`; but an UNCLAMPED positive step is
-exactly `target - stop`, which lands `stop` ON `target` (`dist ==
-mult`), and a negative step is discarded by the ratchet leaving `stop >
-target` (`dist < mult`).  So `stop` can only sit strictly below its
-target if the step was cut down to `+vmax*atr` this bar.  An ordinary
-ratchet stop -- Supertrend, HalfTrend, Chande-Kroll -- closes that gap
-in one bar and therefore cannot express the quantity at all.  Pinned by
-`test_dist_above_mult_is_exactly_the_clamp_binding`.
+that is new.  In the uptrend branch that magnitude detects the rate
+limit: `TVS_DIST > mult` if and only if the clamp bound on that bar.
+Proof, all within `dir == 1`: `dist > mult` <=> `close - stop >
+mult*atr` <=> `stop < target`; but an UNCLAMPED positive step is
+`target - stop`, which lands `stop` ON `target` (`dist == mult`), and a
+negative step is discarded by the ratchet leaving `stop > target`
+(`dist < mult`).  So `stop` can only sit strictly below its target if
+the step was cut down to `+vmax*atr` this bar.  An ordinary ratchet
+stop -- Supertrend, HalfTrend, Chande-Kroll -- closes that gap in one
+bar and therefore cannot express the quantity at all.
+
+⚠ THE "IFF" IS EXACT IN EXACT ARITHMETIC; AT FLOAT64 IT NEEDS A ~1e-12
+TOLERANCE.  The proof above uses `stop_prev + (target - stop_prev) ==
+target`, an identity that binary floating point does not honour: the
+sum re-rounds and lands a few ulps either side, so an UNCLAMPED bar can
+read `dist` marginally above `mult` and be miscalled as a clamped one.
+Measured, not assumed: on this module's own test fixture
+(`_walk(1200, seed=11)`) a strict `dist > mult` disagrees with a
+reference run that records when it actually clamped on 31 of 648
+uptrend bars, and on a 20,000-bar walk (seed 7) on 516 of 9,587
+(5.38%); at `dist > mult + 1e-12` both disagreement counts are 0.  So
+the detector is exact in exact arithmetic and, at float64, requires a
+~1e-12 tolerance -- which is what
+`test_dist_above_mult_is_exactly_the_clamp_binding` supplies, and it is
+load-bearing rather than cosmetic.  A consumer thresholding this column
+must carry the same tolerance.
 
 The sign recovers the direction: at the end of any bar with `dir == 1`
 the source has either left `close >= stop` standing (L76 did not fire)
@@ -353,7 +368,11 @@ def tvstop(high, low, close, atr_length=None, mult=None, multm=None,
     # `var float stop = na` / `var int dir = 1`  (L63-64)
     stop = np.nan
     direction = 1
-    prev_direction = None  # `dir[1]`; na before the first bar
+    # `dir[1]`.  Seeded None, but the warm-up skip path below reassigns
+    # it to `direction` before the first EVALUATED bar, so it reads 1
+    # there, not None.  See the flip-assignment comment at the bottom of
+    # the loop.
+    prev_direction = None
 
     for t in range(n):
         a_t = a[t]
@@ -390,8 +409,27 @@ def tvstop(high, low, close, atr_length=None, mult=None, multm=None,
                     stop = c_t - mult * a_t        # L84
 
         dist[t] = (c_t - stop) / a_t
-        # L86-87.  `dir[1]` is na on the very first evaluated bar, and
-        # `na == -1` is na in Pine, so no flip is claimed there.
+        # L86-87.  ⚠ On the FIRST EVALUATED bar `prev_direction` is 1,
+        # NOT None: the skip path above assigns `prev_direction =
+        # direction` on every ATR-NaN bar it steps over, `direction` is
+        # seeded to 1, and this fork's `atr` came back NaN at index 0 at
+        # each length checked (1, 2, 3, 14) because a true range needs a
+        # prior close -- so bar 0 is skipped and performs that
+        # reassignment.  What suppresses a spurious flip on the first
+        # evaluated bar is therefore that `direction` is UNCHANGED there
+        # (the `na(stop)` branch cannot flip it), NOT a None sentinel.
+        # Pine gets the same answer by a different route: there `dir[1]`
+        # really is `na` and `na == -1` is `na`.
+        #
+        # The skip path's assignment is what keeps `prev_direction ==
+        # direction` true on entry to a bar, so a flip is not claimed
+        # ACROSS a skipped bar.  MEASURED: deleting it left
+        # each output cell bit-identical over 40 randomised trials with
+        # 1-7 mid-series NaN runs of 1-19 bars, because an evaluated bar
+        # restores the same invariant on its last line.  It is kept
+        # because it states that invariant where a reader would
+        # otherwise have to re-derive it -- redundant today, not dead by
+        # accident.
         flip_bull[t] = 1.0 if (direction == 1 and prev_direction == -1) else 0.0
         flip_bear[t] = 1.0 if (direction == -1 and prev_direction == 1) else 0.0
         prev_direction = direction

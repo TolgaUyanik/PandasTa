@@ -44,7 +44,11 @@ lose:
 * SCALE INVARIANCE at x10 and at x8 (an exact power of two, so the
   mantissas are untouched and the check can be BIT-exact).
 * The rate limit itself, as an inequality on the reconstructed stop --
-  and, in the uptrend branch, as an IFF against `TVS_DIST > mult`.
+  and, in the uptrend branch, as an IFF against `TVS_DIST > mult`.  That
+  IFF holds in EXACT ARITHMETIC; at float64 it needs a ~1e-12 tolerance,
+  because `stop_prev + (target - stop_prev)` does not have to round back
+  to `target`.  The tolerance is load-bearing and its measured
+  strict-equality failure counts are recorded at the assertion.
 * What dividing by ATR actually does, MEASURED rather than assumed: an
   exactly-zero ATR does NOT arise in this fork (`non_zero_range` floors
   it), a dead-flat series reads 0.0 rather than inf, and the real
@@ -504,7 +508,15 @@ def test_stop_ratchets_within_a_direction():
 def test_dist_above_mult_is_exactly_the_clamp_binding():
     """In the uptrend branch `TVS_DIST > mult` iff the L71 clamp cut the
     step to `+vmax*atr` on that bar -- an IFF, both directions checked
-    against a run of the reference loop that records when it clamped."""
+    against a run of the reference loop that records when it clamped.
+
+    ⚠ THE IFF IS EXACT IN EXACT ARITHMETIC ONLY.  Its proof rests on
+    `stop_prev + (target - stop_prev) == target`, which binary floating
+    point does not honour -- the sum re-rounds a few ulps either side --
+    so an UNCLAMPED bar can read marginally above `mult`.  The `1e-12`
+    below is therefore LOAD-BEARING, not cosmetic: see the comment on
+    that line for the measured strict-equality failure counts.
+    """
     a = _atr(high=HI, low=LO, close=CL, length=14)
     df = _full(HI, LO, CL)
     dist = df[COLS[0]].to_numpy()
@@ -536,6 +548,18 @@ def test_dist_above_mult_is_exactly_the_clamp_binding():
 
     m = np.isfinite(dist) & isbull
     assert m.sum() > 300
+    # ⚠ THE 1e-12 IS LOAD-BEARING AND ITS SIZE IS PINNED BY MEASUREMENT.
+    # `stop_prev + (target - stop_prev)` need not round back to `target`,
+    # so a bar the clamp did NOT cut can still read fractionally above
+    # `mult`. MEASURED 2026-08-27, re-run each time this number is
+    # touched: with a STRICT `dist > 3.0` this assertion fails on 31 of
+    # the 648 uptrend bars of THIS fixture (`_walk(1200, seed=11)`), and
+    # on 516 of 9,587 (5.38%) of a 20,000-bar `_walk(20000, seed=7)`;
+    # with the `+ 1e-12` both disagreement counts are 0. 1e-12 is ~2,250
+    # ulps at 3.0 -- wide against float noise, and ~4e-13 of `mult`, far
+    # below any clamp cut a real series produces. Do not tighten it to
+    # strict equality (the test then fails) and do not widen it without
+    # re-running those two counts.
     above = dist[m] > 3.0 + 1e-12
     np.testing.assert_array_equal(above, bound[m])
     assert above.sum() > 50, "clamp never bound -- the test proves nothing"
@@ -670,8 +694,11 @@ def test_a_nan_bar_is_skipped_not_consumed():
     assert np.isfinite(v[299]) and np.isfinite(v[305])
     assert np.isfinite(v[-1])
 
-    # A reset would put the bar-305 distance at exactly -/+ mult; it is
-    # not, because the pre-gap stop survived.
+    # A reset would put the bar-305 distance AT -/+ mult -- exactly so
+    # in exact arithmetic, and to within float rounding at float64 --
+    # so the test is that it is not NEAR mult, with the 1e-9 the band
+    # a reset would have to land inside. It does not, because the
+    # pre-gap stop survived the gap.
     assert abs(abs(v[305]) - 3.0) > 1e-9
 
 
