@@ -15,18 +15,30 @@ lose:
   a no-op once the series flips; dropping the upper clamp changes the
   all-uptrend series immediately.  The brief this port was written
   against named the wrong half; these two tests are the evidence.
-* CAUSALITY, by future-perturbation (rewrite bars [j:], demand bars
-  [0:j] bit-identical) and by truncation.  Two PERTURBING look-ahead
-  mutants -- `importlib` source read, one write index shifted forward,
-  `exec`'d into a fresh in-memory module, never a hand-written copy --
-  must be caught by both, so the tests are not vacuous.  Disagreement
-  is scored ONLY on cells finite in both runs, after asserting the NaN
-  masks match, because a bare `!=` on NaN-bearing floats passes on a
-  null mutant.
+* CAUSALITY, by FUTURE-PERTURBATION -- rewrite every bar from `j`
+  onward, demand bars `[0:j]` bit-identical -- swept over 30 offsets in
+  BOTH directions.  The sweep and the two directions are not decoration:
+  a one-bar leak proposes one step, and the RATCHET discards it whenever
+  the sign is wrong, so a single-offset one-directional version of this
+  test passed BOTH mutants during development.  Two PERTURBING
+  look-ahead mutants (`importlib` source read, one write index shifted
+  forward, `exec`'d into a fresh in-memory module, never a hand-written
+  copy) are each proved LIVE against the real module first, then caught.
+  Disagreement is scored ONLY on cells finite in both runs, after
+  asserting the NaN masks match, because a bare `!=` on NaN-bearing
+  floats passes on a null mutant.
+* Truncation is kept as corroboration, and its MEASURED weakness is
+  pinned rather than hidden: over the same sweep it catches the `target`
+  mutant 7 times and the `flip` mutant NOT AT ALL.  It is not a
+  substitute for the perturbation sweep.
 * SCALE INVARIANCE at x10 and at x8 (an exact power of two, so the
   mantissas are untouched and the check can be BIT-exact).
-* The rate limit itself, as an inequality on the reconstructed stop.
-* That the guard against a zero-ATR run emits NaN and never inf.
+* The rate limit itself, as an inequality on the reconstructed stop --
+  and, in the uptrend branch, as an IFF against `TVS_DIST > mult`.
+* What dividing by ATR actually does, MEASURED rather than assumed: an
+  exactly-zero ATR does NOT arise in this fork (`non_zero_range` floors
+  it), a dead-flat series reads 0.0 rather than inf, and the real
+  unguarded hazard is a COLLAPSED-but-positive ATR amplifying the ratio.
 """
 import importlib
 import types
@@ -499,7 +511,13 @@ def test_dist_above_mult_is_exactly_the_clamp_binding():
 def test_sign_of_dist_is_exactly_the_direction():
     """The port drops the source's `dir` because it is recoverable from
     `sign(TVS_DIST)`. Pin that: a bull flip bar is positive, a bear flip
-    bar is negative, and the sign is constant between flips."""
+    bar is negative, and the sign is constant between flips.
+
+    Scope: this holds wherever `TVS_DIST != 0`, which is every bar of
+    this fixture (asserted). It is NOT universal -- an exact 0 is
+    reachable and identifies nothing; see
+    `test_flat_series_atr_is_epsilon_floored_and_dist_is_zero_not_inf`.
+    """
     df = tvstop(HI, LO, CL).dropna()
     v = df[COLS[0]].to_numpy()
     fu = df[COLS[1]].to_numpy() == 1.0
