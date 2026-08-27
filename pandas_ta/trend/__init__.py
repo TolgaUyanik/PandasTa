@@ -41,6 +41,7 @@ from .sr_decay import sr_decay
 from .sr_force import sr_force
 from .swing_equilibrium import swing_equilibrium
 from .tsignals import tsignals
+from .tvstop import tvstop
 from .ttm_trend import ttm_trend
 from .vhf import vhf
 from .volume_sr_zones import volume_sr_zones

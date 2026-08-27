@@ -73,7 +73,7 @@ Category = {
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
         "ribbon_concordance", "sd_zone_pro", "short_run", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
-        "ttm_trend",
+        "ttm_trend", "tvstop",
         "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib"
     ],
     # Volatility

@@ -1839,6 +1839,16 @@ class AnalysisIndicators(BasePandasObject):
         result = ttm_trend(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tvstop(self, atr_length=None, mult=None, multm=None, vmax=None,
+               mamode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tvstop(high=high, low=low, close=close,
+                        atr_length=atr_length, mult=mult, multm=multm,
+                        vmax=vmax, mamode=mamode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def vortex(self, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
