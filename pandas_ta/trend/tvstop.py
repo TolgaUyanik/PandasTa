@@ -64,11 +64,22 @@ WHAT IS EMITTED, AND WHAT IS DELIBERATELY NOT
 The source's payload is `stop`, a raw PRICE LEVEL.  Under this project's
 scale-free law (`docs/indicators/` INDOC: raw price-level indicators
 earn nothing by design, because nominal drift decays them) a price is
-not shippable, so this module emits the DISTANCE instead:
+not shippable, so the DISTANCE was built instead -- and then deleted on
+its own measurement.  What ships is the pair of flip events:
 
-    TVS_DIST   (close - stop) / atr      signed, in ATR units
     TVS_FLIP_BULL   L86 `flipUp`         0/1
     TVS_FLIP_BEAR   L87 `flipDown`       0/1
+    TVS_DIST   (close - stop) / atr      signed, in ATR units
+               -- NOT emitted by default; pass `emit_dist=True`.  It was
+               built, wired, MEASURED and DELETED at Spearman 0.930462
+               against the engine's `RSI`; see "WHAT WAS BUILT,
+               MEASURED AND THEN DELETED" below.
+
+Everything from here to that section describes `TVS_DIST`, which is
+still COMPUTED (the flags are read off its state machine) and still
+available under `emit_dist=True`.  It is kept because the deletion has
+to stay reproducible and because the properties below are what a reader
+needs in order to re-derive it -- not because the column ships.
 
 `TVS_DIST` is not merely a rescaled Supertrend distance.  Its SIGN
 carries the direction (see below) and its MAGNITUDE carries the thing
@@ -96,6 +107,65 @@ series does exactly this -- the ATR is at the `non_zero_range` epsilon
 floor (see below), `target` rounds to `close`, the stop never moves and
 EVERY bar reads 0.0 while `dir` is still 1.  Do not read `sign(dist)`
 as the direction without handling 0.
+
+WHAT WAS BUILT, MEASURED AND THEN DELETED
+
+`TVS_DIST` was the port's headline column and it is not shipped.  It
+duplicates an ENGINE column, and not marginally:
+
+    Spearman(TVS_DIST, RSI) = +0.930462 over 404,066 pooled bars
+    (89 BIST_100 daily frames, AwakenAnalytics `Backtesting`).
+
+That is not a pooling artifact.  Measured on each frame SEPARATELY the
+same cell reads mean +0.9321 / median +0.9329 / min +0.8126 / max
++0.9595 across all 89 -- a structural relationship, above the host
+project's ~0.9 revert line on every basis available.  `cmo` scores
+identically (+0.930462) because it is a monotone recode of RSI, and the
+next comparators follow it down: `ATRMAX_14_50` 0.908, `QQE_RSIMA`
+0.902, `zscore` 0.900.
+
+The MECHANISM is clear in hindsight and is the reason the number is so
+stable.  In an uptrend the stop may close its gap to the target at no
+more than `vmax * ATR` per bar, so `close - stop` ACCUMULATES the recent
+up-move in ATR units -- which is, to a monotone transform, the quantity
+RSI reports.  The rate limiter turns the distance into a slow momentum
+integrator.
+
+⚠ It is worth being blunt about what that costs, because the honest
+reading is that this port's headline idea did not survive contact with
+the engine.  What survives is the pair of FLIP flags, whose maxima over
+the same 478 comparators are +0.202650 (`TVS_FLIP_BULL` x
+`IFVG_MIT_BEAR_14`) and +0.219132 (`TVS_FLIP_BEAR` x
+`APUSH_BEAR_14_5_5`).
+
+⚠ Do NOT re-add `TVS_DIST` on the argument that it is not a duplicate of
+the engine's STOP lane.  That is true and irrelevant: measured over all
+eleven stop-lane columns its maximum is +0.786164 against
+`Supertrend_Direction`, which would only have put it in the
+ship-with-disclosure band.  The deletion rests on RSI, a momentum
+oscillator, not on the stop lane.
+
+⚠ Nor on the argument that it is a distinct concept.  `FINDINGS.md`
+records that RSI is never selected by any mined tree in level form, so a
+column that tracks RSI at rho 0.93 is duplicating something that does
+not earn.
+
+The module still COMPUTES the column and emits it under
+`emit_dist=True`, so the finding stays reproducible.
+
+WHAT IS *NOT* SETTLED BY THAT MEASUREMENT.  The genuinely novel quantity
+this indicator carries is the CLAMP BINDING, not the distance itself,
+and the distance is only its proxy.  A binary clamp flag was PROBED
+against the same 478 comparators on the same pool and came back
+materially cleaner -- bull-side max +0.745392 against `ATR_BREAKOUT_UP`,
+bear-side +0.678733 against `ATR_BREAKOUT_DN`, and the direction-free
+union +0.516067 -- with fire rates of 15.62% / 10.56% / 26.17%.
+⚠ THAT IS A PROBE, NOT A VERDICT, and it is deliberately NOT shipped
+here: the probe column was reconstructed OUTSIDE
+`IndicatorEngine.compute_all`, and its causality, scale-invariance and
+contamination gates were never run.  Anyone picking it up owes it the
+full gate stack.  Artifact:
+`backtest_results/tvpta6/tvstop_clamp_probe_20260827.csv`.
 
 NOT PORTED, and each is a distinct decline:
 
@@ -247,7 +317,7 @@ def _fmt(x):
 
 
 def tvstop(high, low, close, atr_length=None, mult=None, multm=None,
-           vmax=None, mamode=None, offset=None, **kwargs):
+           vmax=None, mamode=None, emit_dist=False, offset=None, **kwargs):
     """Indicator: Terminal Velocity Stop (TVS)"""
     atr_length = _validated_int(atr_length, 14, "atr_length")
     mult = _validated_float(mult, 3.0, "mult")
@@ -327,11 +397,14 @@ def tvstop(high, low, close, atr_length=None, mult=None, multm=None,
         prev_direction = direction
 
     _props = f"_{atr_length}_{_fmt(mult)}_{_fmt(multm)}_{_fmt(vmax)}"
-    out = [
-        Series(dist, index=close.index, name=f"TVS_DIST{_props}"),
-        Series(flip_bull, index=close.index, name=f"TVS_FLIP_BULL{_props}"),
-        Series(flip_bear, index=close.index, name=f"TVS_FLIP_BEAR{_props}"),
-    ]
+    # `dist` is COMPUTED unconditionally -- it IS the state machine's
+    # output and the flags are read off its sign changes -- but emitted
+    # only on request. See "WHAT WAS BUILT, MEASURED AND THEN DELETED".
+    out = [Series(flip_bull, index=close.index, name=f"TVS_FLIP_BULL{_props}"),
+           Series(flip_bear, index=close.index, name=f"TVS_FLIP_BEAR{_props}")]
+    if emit_dist:
+        out.insert(0, Series(dist, index=close.index,
+                             name=f"TVS_DIST{_props}"))
 
     if offset != 0:
         names = [s.name for s in out]
@@ -365,10 +438,11 @@ The stop chases a target of `close - mult * ATR` in an uptrend and
 crosses its own stop the direction flips and the stop is reset to the
 opposite side of price, bypassing the rate limit.
 
-Emitted as a SCALE-FREE distance rather than the source's price level:
-`TVS_DIST` is `(close - stop) / ATR`, signed, so its sign is the trend
-direction and its magnitude is how far price has outrun a stop that is
-forbidden to chase it faster than `vmax` ATR per bar.
+Emits the two DIRECTION-FLIP events.  The scale-free distance
+`TVS_DIST = (close - stop) / ATR` -- the port's original headline
+column -- is computed but NOT emitted by default: it measured Spearman
+0.930462 against the engine's `RSI` and was deleted.  Pass
+`emit_dist=True` to reproduce the finding.  See the module docstring.
 
 Sources:
     https://www.tradingview.com/script/7YXrxMjV-Terminal-Velocity-Stop-Lyro-RS/
@@ -391,6 +465,10 @@ Args:
         in ATR. Source `vmax`. Default: 0.3
     mamode (str): Moving average used by ATR. Default: None -> the
         fork's `atr` default, 'rma'
+    emit_dist (bool): also emit `TVS_DIST`, `(close - stop) / ATR`.
+        Default: False -- it measured Spearman 0.930462 against the
+        engine's `RSI` over 404,066 bars (per-frame mean 0.9321 across
+        89 frames) and was removed; see the module docstring.
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:
@@ -398,5 +476,6 @@ Kwargs:
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.DataFrame: TVS_DIST, TVS_FLIP_BULL, TVS_FLIP_BEAR columns.
+    pd.DataFrame: TVS_FLIP_BULL, TVS_FLIP_BEAR columns (plus TVS_DIST,
+    first, when `emit_dist=True`).
 """

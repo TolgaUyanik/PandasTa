@@ -3,6 +3,16 @@
 port of TradingView `7YXrxMjV` (116 content lines; `wc -l` 116 and
 `grep -c ''` 116, newline-terminated).
 
+⚠ READ THIS FIRST.  The module SHIPS two columns, `TVS_FLIP_BULL` and
+`TVS_FLIP_BEAR`.  Its third, `TVS_DIST`, was built, wired, MEASURED and
+DELETED -- Spearman 0.930462 against the engine's `RSI` over 404,066
+pooled bars, per-frame mean 0.9321 across all 89 -- and is now behind
+`emit_dist=True`.  Most tests here call the `_full` wrapper, which sets
+that flag, because `TVS_DIST` is the state machine's only continuous
+read-out and testing through it exercises the real code path.  The
+SHIPPED two-column shape is pinned by
+`test_default_output_omits_the_deleted_dist_column`.
+
 What these tests actually pin, in order of how much they would hurt to
 lose:
 
@@ -73,8 +83,32 @@ def _ramp(n=400, step=0.6, start=100.0):
 
 
 HI, LO, CL = _walk()
-COLS = ["TVS_DIST_14_3_3_0.3", "TVS_FLIP_BULL_14_3_3_0.3",
-        "TVS_FLIP_BEAR_14_3_3_0.3"]
+SHIPPED = ["TVS_FLIP_BULL_14_3_3_0.3", "TVS_FLIP_BEAR_14_3_3_0.3"]
+DISTCOL = "TVS_DIST_14_3_3_0.3"
+COLS = [DISTCOL] + SHIPPED
+
+
+def _full(*args, **kwargs):
+    """`tvstop` with `emit_dist=True`.
+
+    Most of this file is about the state machine, whose only continuous
+    read-out is `TVS_DIST` -- and that column is NOT emitted by default,
+    because it measured Spearman 0.930462 against the engine's `RSI`
+    over 404,066 pooled bars and was deleted. It is still COMPUTED, so
+    these tests exercise the real code path rather than a reduced one;
+    the DEFAULT two-column shape is pinned separately by
+    `test_default_output_omits_the_deleted_dist_column`.
+    """
+    kwargs.setdefault("emit_dist", True)
+    return tvstop(*args, **kwargs)
+
+
+def _full_of(fn):
+    """Same, for an `exec`'d mutant module's `tvstop`."""
+    def _w(*args, **kwargs):
+        kwargs.setdefault("emit_dist", True)
+        return fn(*args, **kwargs)
+    return _w
 
 
 # ------------------------------------------------- Pine transliteration
@@ -124,7 +158,7 @@ def _pine_reference(close, atr_series, mult=3.0, multm=3.0, vmax=0.3):
 
 def test_matches_a_literal_pine_order_transliteration():
     a = _atr(high=HI, low=LO, close=CL, length=14)
-    got = tvstop(HI, LO, CL)
+    got = _full(HI, LO, CL)
     stops, dirs, fu, fd = _pine_reference(CL, a)
 
     ok = (a.to_numpy() > 0)                    # bars the module evaluates
@@ -188,7 +222,7 @@ def test_lower_clamp_is_dead_in_the_uptrend_branch():
     L71 is a bit-exact no-op."""
     h, l, c = _ramp()
     a = _atr(high=h, low=l, close=c, length=14)
-    assert (tvstop(h, l, c)[COLS[0]].dropna() > 0).all(), "ramp flipped"
+    assert (_full(h, l, c)[COLS[0]].dropna() > 0).all(), "ramp flipped"
 
     base = _variant(c, a, "source")
     np.testing.assert_array_equal(base, _variant(c, a, "drop_lower"))
@@ -306,7 +340,7 @@ def _sweep_perturbations(fn):
 
 
 def test_future_bars_do_not_move_past_output():
-    bad, n = _sweep_perturbations(tvstop)
+    bad, n = _sweep_perturbations(_full)
     assert n > 50000, "no co-populated cells to compare"
     assert bad == 0, f"{bad} of {n} past cells moved when the FUTURE changed"
 
@@ -319,8 +353,8 @@ def test_mutants_are_live_and_differ_from_the_real_module(pairs, tag):
     replace that silently did nothing would otherwise make every mutant
     test below pass for the wrong reason."""
     mut = _load_mutant(pairs, tag)
-    real = tvstop(HI, LO, CL)[COLS].to_numpy()
-    got = mut.tvstop(HI, LO, CL)[COLS].to_numpy()
+    real = _full(HI, LO, CL)[COLS].to_numpy()
+    got = _full_of(mut.tvstop)(HI, LO, CL)[COLS].to_numpy()
     bad, n = _disagree(real, got)
     assert n > 2000
     assert bad > 0, f"mutant {tag} is byte-different but behaviour-identical"
@@ -330,13 +364,13 @@ def test_mutants_are_live_and_differ_from_the_real_module(pairs, tag):
                                        (_M_FLIP, "flip")])
 def test_lookahead_mutants_are_caught_by_future_perturbation(pairs, tag):
     mut = _load_mutant(pairs, tag)
-    bad, n = _sweep_perturbations(mut.tvstop)
+    bad, n = _sweep_perturbations(_full_of(mut.tvstop))
     assert n > 50000
     assert bad > 0, f"mutant {tag} was NOT caught -- the test is vacuous"
 
 
 def test_truncation_matches_prefix_of_full_series():
-    bad, n = _truncation_sweep(tvstop)
+    bad, n = _truncation_sweep(_full)
     assert n > 50000
     assert bad == 0
 
@@ -366,7 +400,7 @@ def test_truncation_is_a_weaker_detector_than_perturbation(pairs, tag,
     ever starts catching `flip`, the fixture changed -- re-derive the
     number, do not widen the assertion."""
     mut = _load_mutant(pairs, tag)
-    bad, n = _truncation_sweep(mut.tvstop)
+    bad, n = _truncation_sweep(_full_of(mut.tvstop))
     assert n > 50000
     assert bad == expected
 
@@ -378,8 +412,8 @@ def test_truncation_is_a_weaker_detector_than_perturbation(pairs, tag,
 def test_scale_invariance(k):
     """x8 is an exact power of two, so every mantissa is untouched and
     the comparison can be BIT-exact rather than approximate."""
-    base = tvstop(HI, LO, CL)
-    scaled = tvstop(HI * k, LO * k, CL * k)
+    base = _full(HI, LO, CL)
+    scaled = _full(HI * k, LO * k, CL * k)
     for col in COLS:
         a, b = base[col].to_numpy(), scaled[col].to_numpy()
         assert (np.isnan(a) == np.isnan(b)).all(), f"{col}: NaN masks differ"
@@ -393,7 +427,7 @@ def test_scale_invariance(k):
 
 def test_flags_fire_but_not_always():
     """`0 < fires < n` on both flags -- neither dead nor degenerate."""
-    df = tvstop(HI, LO, CL)
+    df = _full(HI, LO, CL)
     for col in COLS[1:]:
         v = df[col].dropna().to_numpy()
         fires = int(v.sum())
@@ -410,7 +444,7 @@ def _reconstruct_stop(df, close, a):
 
 def test_stop_travel_is_capped_at_vmax_atr_on_non_flip_bars():
     a = _atr(high=HI, low=LO, close=CL, length=14)
-    df = tvstop(HI, LO, CL)
+    df = _full(HI, LO, CL)
     stop = _reconstruct_stop(df, CL, a)
     fu = df[COLS[1]].to_numpy()
     fd = df[COLS[2]].to_numpy()
@@ -433,7 +467,7 @@ def test_reset_bars_can_and_do_exceed_the_rate_limit():
     direction, not the L78/L84 flip resets. Without this the test above
     could be passing on a series where nothing ever moves fast."""
     a = _atr(high=HI, low=LO, close=CL, length=14)
-    df = tvstop(HI, LO, CL)
+    df = _full(HI, LO, CL)
     stop = _reconstruct_stop(df, CL, a)
     flips = ((df[COLS[1]].to_numpy() == 1.0)
              | (df[COLS[2]].to_numpy() == 1.0))
@@ -448,7 +482,7 @@ def test_reset_bars_can_and_do_exceed_the_rate_limit():
 
 def test_stop_ratchets_within_a_direction():
     a = _atr(high=HI, low=LO, close=CL, length=14)
-    df = tvstop(HI, LO, CL)
+    df = _full(HI, LO, CL)
     stop = _reconstruct_stop(df, CL, a)
     d = np.sign(df[COLS[0]].to_numpy())
     up = dn = 0
@@ -472,7 +506,7 @@ def test_dist_above_mult_is_exactly_the_clamp_binding():
     step to `+vmax*atr` on that bar -- an IFF, both directions checked
     against a run of the reference loop that records when it clamped."""
     a = _atr(high=HI, low=LO, close=CL, length=14)
-    df = tvstop(HI, LO, CL)
+    df = _full(HI, LO, CL)
     dist = df[COLS[0]].to_numpy()
 
     c, av = list(CL), list(a)
@@ -518,7 +552,7 @@ def test_sign_of_dist_is_exactly_the_direction():
     reachable and identifies nothing; see
     `test_flat_series_atr_is_epsilon_floored_and_dist_is_zero_not_inf`.
     """
-    df = tvstop(HI, LO, CL).dropna()
+    df = _full(HI, LO, CL).dropna()
     v = df[COLS[0]].to_numpy()
     fu = df[COLS[1]].to_numpy() == 1.0
     fd = df[COLS[2]].to_numpy() == 1.0
@@ -549,7 +583,7 @@ def test_a_vertical_candle_moves_supertrend_further_than_tvs():
     low = Series(np.minimum(c, np.roll(c, 1)) - 0.05)
 
     a = _atr(high=high, low=low, close=close, length=14)
-    tvs = tvstop(high, low, close)
+    tvs = _full(high, low, close)
     stop = _reconstruct_stop(tvs, close, a)
     tvs_travel = abs(stop[150] - stop[149])
     assert tvs_travel <= 0.3 * a.iloc[150] + 1e-9
@@ -578,7 +612,7 @@ def test_flat_series_atr_is_epsilon_floored_and_dist_is_zero_not_inf():
     assert np.unique(a.to_numpy()).size == 1
     assert float(a.iloc[-1]) == 2.220446049250313e-16
 
-    df = tvstop(flat, flat, flat)
+    df = _full(flat, flat, flat)
     v = df.to_numpy(dtype=float)
     assert not np.isinf(v).any()
     body = df[COLS[0]].dropna().to_numpy()
@@ -596,7 +630,7 @@ def test_a_flat_patch_then_a_step_inflates_dist_far_beyond_mult():
     close = Series(c)
     high = Series(np.maximum(c, np.roll(c, 1)))
     low = Series(np.minimum(c, np.roll(c, 1)))
-    d = tvstop(high, low, close)[COLS[0]].to_numpy()
+    d = _full(high, low, close)[COLS[0]].to_numpy()
     assert not np.isinf(d[np.isfinite(d)]).any()
     assert np.nanmax(np.abs(d)) > 10.0 * 3.0     # 3.0 == default mult
 
@@ -607,14 +641,14 @@ def test_non_positive_atr_is_what_the_guard_actually_covers():
     h, l, c = _walk(n=400, seed=3)
     c2 = c.copy()
     c2.iloc[200] = np.nan
-    df = tvstop(h, l, c2)
+    df = _full(h, l, c2)
     v = df[COLS[0]].to_numpy()
     assert np.isnan(v[200])
     assert not np.isinf(df.to_numpy(dtype=float)).any()
 
 
 def test_nan_masks_are_identical_across_the_three_columns():
-    df = tvstop(HI, LO, CL)
+    df = _full(HI, LO, CL)
     masks = [df[c].isna().to_numpy() for c in COLS]
     for m in masks[1:]:
         np.testing.assert_array_equal(masks[0], m)
@@ -631,7 +665,7 @@ def test_a_nan_bar_is_skipped_not_consumed():
     h, l, c = _walk(n=600, seed=5)
     c2 = c.copy()
     c2.iloc[300:305] = np.nan
-    v = tvstop(h, l, c2)[COLS[0]].to_numpy()
+    v = _full(h, l, c2)[COLS[0]].to_numpy()
     assert np.isnan(v[300:305]).all()
     assert np.isfinite(v[299]) and np.isfinite(v[305])
     assert np.isfinite(v[-1])
@@ -644,39 +678,60 @@ def test_a_nan_bar_is_skipped_not_consumed():
 # ------------------------------------------------- shape / plumbing
 
 
-def test_columns_name_and_category():
+def test_default_output_omits_the_deleted_dist_column():
+    """The SHIPPED shape. `TVS_DIST` measured Spearman 0.930462 against
+    the engine's RSI over 404,066 pooled bars (per-frame mean 0.9321
+    across all 89 frames) and was deleted; the module still computes it,
+    and `emit_dist=True` still returns it FIRST."""
     df = tvstop(HI, LO, CL)
+    assert list(df.columns) == SHIPPED
+    assert DISTCOL not in df.columns
+    full = tvstop(HI, LO, CL, emit_dist=True)
+    assert list(full.columns) == [DISTCOL] + SHIPPED
+    for c in SHIPPED:
+        np.testing.assert_array_equal(df[c].to_numpy(), full[c].to_numpy())
+
+
+def test_columns_name_and_category():
+    df = _full(HI, LO, CL)
     assert isinstance(df, DataFrame)
     assert list(df.columns) == COLS
+    assert tvstop(HI, LO, CL).name == "TVS_14_3_3_0.3"
     assert df.name == "TVS_14_3_3_0.3"
     assert df.category == "trend"
 
 
 def test_props_track_the_parameters():
-    df = tvstop(HI, LO, CL, atr_length=20, mult=2.5, multm=4.0, vmax=1.0)
+    df = _full(HI, LO, CL, atr_length=20, mult=2.5, multm=4.0, vmax=1.0)
     assert list(df.columns) == ["TVS_DIST_20_2.5_4_1",
                                 "TVS_FLIP_BULL_20_2.5_4_1",
                                 "TVS_FLIP_BEAR_20_2.5_4_1"]
+    assert list(tvstop(HI, LO, CL, atr_length=20, mult=2.5, multm=4.0,
+                       vmax=1.0).columns) == ["TVS_FLIP_BULL_20_2.5_4_1",
+                                              "TVS_FLIP_BEAR_20_2.5_4_1"]
 
 
 def test_offset_shifts_and_keeps_names():
-    base = tvstop(HI, LO, CL)
-    off = tvstop(HI, LO, CL, offset=2)
+    base = _full(HI, LO, CL)
+    off = _full(HI, LO, CL, offset=2)
     assert list(off.columns) == COLS
     np.testing.assert_array_equal(off[COLS[0]].to_numpy()[2:],
                                   base[COLS[0]].to_numpy()[:-2])
 
 
 def test_short_series_returns_none():
+    assert _full(HI.iloc[:5], LO.iloc[:5], CL.iloc[:5]) is None
     assert tvstop(HI.iloc[:5], LO.iloc[:5], CL.iloc[:5]) is None
 
 
 def test_dataframe_accessor():
     df = DataFrame({"high": HI, "low": LO, "close": CL})
     out = df.ta.tvstop()
-    assert list(out.columns) == COLS
-    np.testing.assert_array_equal(out[COLS[0]].to_numpy(),
-                                  tvstop(HI, LO, CL)[COLS[0]].to_numpy())
+    assert list(out.columns) == SHIPPED
+    np.testing.assert_array_equal(out[SHIPPED[0]].to_numpy(),
+                                  tvstop(HI, LO, CL)[SHIPPED[0]].to_numpy())
+    full = df.ta.tvstop(emit_dist=True)
+    assert list(full.columns) == COLS
 
 
 def test_registered_in_the_trend_category():
@@ -697,14 +752,14 @@ def test_registered_in_the_trend_category():
 ])
 def test_bad_arguments_raise(kwargs):
     with pytest.raises(ValueError):
-        tvstop(HI, LO, CL, **kwargs)
+        _full(HI, LO, CL, **kwargs)
 
 
 def test_source_slider_caps_are_not_re_enforced():
     """L20 caps `vmax` at 2 and L12/L16 floor the multipliers at 0.5 in
     the TradingView UI. Those are widget bounds, not preconditions, and
     -- as in `flag_breakout` -- this port does not re-enforce them."""
-    df = tvstop(HI, LO, CL, vmax=5.0, mult=0.1, multm=0.1)
+    df = _full(HI, LO, CL, vmax=5.0, mult=0.1, multm=0.1)
     assert df[df.columns[0]].notna().sum() > 100
 
 
@@ -714,7 +769,7 @@ def test_vmax_monotonically_loosens_the_stop():
     h, l, c = _ramp()
     prev = None
     for v in (0.1, 0.3, 1.0, 3.0):
-        d = tvstop(h, l, c, vmax=v)[f"TVS_DIST_14_3_3_{_fmtv(v)}"]
+        d = _full(h, l, c, vmax=v)[f"TVS_DIST_14_3_3_{_fmtv(v)}"]
         cur = d.dropna().to_numpy()
         if prev is not None:
             assert (cur <= prev + 1e-9).all(), f"vmax={v} did not tighten"
