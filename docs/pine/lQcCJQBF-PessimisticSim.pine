@@ -1,0 +1,435 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+//@version=6
+
+// @description Broker-agnostic pessimistic fill simulator. Runs a shadow account
+//              alongside any indicator or strategy, filling every signal at the
+//              worst plausible price (half-spread + slippage + a fraction of the
+//              adverse bar excursion) so you can see whether an edge survives
+//              real-world friction.
+//
+//              Instrument-agnostic: set pointValue for futures, pick a commission
+//              model, pick a sizing model, pick a fill model. Defaults reproduce
+//              spot crypto / stock behaviour (multiplier 1, percent commission,
+//              risk-based sizing, next-bar-open fills).
+library("PessimisticSim", overlay = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DESIGN CONSTRAINT
+//  Exported functions cannot read global-scope variables that are of 'input'
+//  form or that get reassigned with ':='. Everything therefore travels through
+//  SimConfig. This is also why the host script can share ONE sizing rule with
+//  the shadow account: call qtyFor() for your live orders too.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum How commission is charged on each fill.
+// @field pct     Percent of notional (crypto, most CFD brokers).
+// @field perUnit Flat amount per contract or share (futures, many equity brokers).
+// @field both    Percent of notional plus a flat per-unit amount.
+export enum CommMode
+    pct     = "Percent of notional"
+    perUnit = "Flat per unit"
+    both    = "Percent + flat per unit"
+
+// @enum How position size is derived.
+// @field riskStop   Risk a percent of equity across the stop distance. Needs stopDist > 0.
+// @field fixedUnits Always trade a fixed number of units. Ignores stopDist.
+// @field equityPct  Notional equal to a percent of equity. Ignores stopDist.
+export enum SizeMode
+    riskStop   = "Risk % across stop distance"
+    fixedUnits = "Fixed units"
+    equityPct  = "Percent of equity notional"
+
+// @enum Where the order is assumed to fill.
+// @field nextOpen    Next bar's open. Pass PRIOR-bar signals (sig[1]).
+// @field signalClose Close of the signal bar. Pass CURRENT-bar signals.
+export enum FillMode
+    nextOpen    = "Next bar open"
+    signalClose = "Signal bar close"
+
+// @type Instrument, cost, sizing and execution assumptions for the shadow account.
+// @field spreadPct   Assumed FULL spread, percent. Half is charged per side.
+// @field slipPct     Extra slippage percent per side.
+// @field advFrac     Fraction of the fill bar's adverse excursion added to the fill.
+//                    Inert under FillMode.signalClose (the bar is already over).
+// @field commMode    Commission model.
+// @field commPct     Commission percent of notional, per side.
+// @field commPerUnit Flat commission per contract or share, per side.
+// @field commMin     Minimum commission per fill. Applied only when qty > 0.
+// @field pointValue  Currency value of one full point of price movement, per unit.
+//                    1.0 for spot crypto, stocks and cash FX. 50 for ES, 20 for NQ,
+//                    100 for most equity options, 1000 for CL.
+// @field qtyStep     Rounds size DOWN to this increment. 0 = no rounding.
+//                    Set 1 for futures and most stocks; leave 0 for crypto.
+// @field initCap     Starting equity of the shadow account.
+// @field sizeMode    Position sizing model.
+// @field riskPct     Risk per trade, percent of equity. SizeMode.riskStop only.
+// @field maxTotalPct Ceiling on total open risk, percent of equity. riskStop only.
+// @field fixedUnits  Units per entry. SizeMode.fixedUnits only.
+// @field equityPct   Notional as percent of equity. SizeMode.equityPct only.
+// @field useLevCap   Apply the leverage cap on top of the chosen sizing model.
+// @field maxLeverage Max notional / equity.
+// @field maxUnits    Max entries per position. MUST equal the host strategy's
+//                    `pyramiding` value or the two engines are not comparable.
+// @field fillMode    Execution assumption. Determines which signals step() wants.
+export type SimConfig
+    float    spreadPct   = 0.02
+    float    slipPct     = 0.02
+    float    advFrac     = 0.25
+    CommMode commMode    = CommMode.pct
+    float    commPct     = 0.06
+    float    commPerUnit = 0.0
+    float    commMin     = 0.0
+    float    pointValue  = 1.0
+    float    qtyStep     = 0.0
+    float    initCap     = 10000.0
+    SizeMode sizeMode    = SizeMode.riskStop
+    float    riskPct     = 0.5
+    float    maxTotalPct = 5.0
+    float    fixedUnits  = 1.0
+    float    equityPct   = 100.0
+    bool     useLevCap   = true
+    float    maxLeverage = 2.0
+    int      maxUnits    = 1
+    FillMode fillMode    = FillMode.nextOpen
+
+// @type Mutable state of the shadow account. Create with newState().
+// @field equity   Realised equity, commissions already deducted.
+// @field dir      1 long, -1 short, 0 flat.
+// @field entry    Volume-weighted average entry price.
+// @field qty      Total units held.
+// @field units    Number of fills making up the current position.
+// @field trades   Closed trades.
+// @field wins     Closed trades with net > 0.
+// @field grossP   Sum of winning net PnL.
+// @field grossL   Sum of absolute losing net PnL.
+// @field commPaid Total commission paid, both sides.
+// @field peak     Mark-to-market equity high water mark.
+// @field maxDD    Worst mark-to-market drawdown, as a negative fraction.
+// @field consecL  Current consecutive-loss run.
+// @field maxConsL Longest consecutive-loss run.
+// @field sumTrPct Sum of per-trade returns, percent of equity-before-trade.
+// @field skipped  Entry signals dropped because sizing returned zero units.
+//                 Non-zero means the comparison understates trade count —
+//                 usually a sizing misconfiguration, not a property of the edge.
+export type SimState
+    float equity   = na
+    int   dir      = 0
+    float entry    = na
+    float qty      = 0.0
+    int   units    = 0
+    int   trades   = 0
+    int   wins     = 0
+    float grossP   = 0.0
+    float grossL   = 0.0
+    float commPaid = 0.0
+    float peak     = na
+    float maxDD    = 0.0
+    int   consecL  = 0
+    int   maxConsL = 0
+    float sumTrPct = 0.0
+    int   skipped  = 0
+
+// @function Creates a fresh shadow account seeded from `cfg`.
+// @param cfg Configuration object.
+// @returns A SimState ready to pass to step().
+export newState(SimConfig cfg) =>
+    SimState.new(equity = cfg.initCap, peak = cfg.initCap)
+
+// ───────────────────────── COST MODEL ─────────────────────────
+
+// @function Commission for one fill under the configured model.
+// @param cfg   Configuration object.
+// @param price Fill price.
+// @param qty   Units filled.
+// @returns Commission in account currency. Zero when qty <= 0.
+export commissionFor(SimConfig cfg, float price, float qty) =>
+    float result = 0.0
+    if qty > 0
+        p = cfg.commMode == CommMode.perUnit ? 0.0 : price * qty * cfg.pointValue * cfg.commPct / 100.0
+        f = cfg.commMode == CommMode.pct     ? 0.0 : qty * cfg.commPerUnit
+        result := math.max(p + f, cfg.commMin)
+    result
+
+// ───────────────────────── SIZING ─────────────────────────
+
+// @function Position size under the configured sizing model, with an optional
+//           leverage cap and quantity-step rounding. Host scripts should call
+//           this for their live orders too, so both engines size identically.
+// @param cfg      Configuration object.
+// @param equity   Account equity to size against.
+// @param stopDist Distance from entry to stop, in PRICE units. Only used by
+//                 SizeMode.riskStop; pass 0 in the other modes.
+// @param price    Fill price, used by the leverage cap and equityPct sizing.
+// @param openRisk Risk already committed by open positions, in CURRENCY
+//                 (i.e. qty * stopDist * pointValue). riskStop only.
+// @returns Units to trade, rounded down to qtyStep. Zero when unsizable.
+export qtyFor(SimConfig cfg, float equity, float stopDist, float price, float openRisk) =>
+    float q         = 0.0
+    notionalPerUnit = price * cfg.pointValue
+    if cfg.sizeMode == SizeMode.fixedUnits
+        q := cfg.fixedUnits
+    else if cfg.sizeMode == SizeMode.equityPct
+        q := notionalPerUnit > 0 ? equity * (cfg.equityPct / 100.0) / notionalPerUnit : 0.0
+    else
+        budget      = equity * (cfg.riskPct / 100.0)
+        ceiling     = equity * (cfg.maxTotalPct / 100.0)
+        allowed     = math.min(budget, math.max(ceiling - openRisk, 0.0))
+        riskPerUnit = stopDist * cfg.pointValue
+        q := riskPerUnit > 0 ? allowed / riskPerUnit : 0.0
+    if cfg.useLevCap and notionalPerUnit > 0
+        q := math.min(q, equity * cfg.maxLeverage / notionalPerUnit)
+    q := math.max(q, 0.0)
+    cfg.qtyStep > 0 ? math.floor(q / cfg.qtyStep) * cfg.qtyStep : q
+
+// ───────────────────────── FILL MODEL ─────────────────────────
+
+// @function Worst-case buy fill: reference price + half-spread + slippage +
+//           a slice of the adverse upward excursion.
+// @param cfg      Configuration object.
+// @param refPrice Reference price (bar open, or close under signalClose).
+// @param advHigh  Adverse extreme to price against. Pass the bar high under
+//                 nextOpen; pass refPrice under signalClose to disable it.
+// @returns The pessimistic buy price.
+export buyFillPrice(SimConfig cfg, float refPrice, float advHigh) =>
+    refPrice * (1.0 + (cfg.spreadPct / 2.0 + cfg.slipPct) / 100.0) + cfg.advFrac * math.max(advHigh - refPrice, 0.0)
+
+// @function Worst-case sell fill: reference price - half-spread - slippage -
+//           a slice of the adverse downward excursion.
+// @param cfg      Configuration object.
+// @param refPrice Reference price (bar open, or close under signalClose).
+// @param advLow   Adverse extreme to price against. Pass the bar low under
+//                 nextOpen; pass refPrice under signalClose to disable it.
+// @returns The pessimistic sell price.
+export sellFillPrice(SimConfig cfg, float refPrice, float advLow) =>
+    refPrice * (1.0 - (cfg.spreadPct / 2.0 + cfg.slipPct) / 100.0) - cfg.advFrac * math.max(refPrice - advLow, 0.0)
+
+// ───────────────────────── TRADE LIFECYCLE ─────────────────────────
+
+// @function Flattens the position at `exitPrice`, books PnL and updates stats.
+//           No-op when flat.
+// @param s         Shadow account state.
+// @param cfg       Configuration object.
+// @param exitPrice Fill price for the exit.
+// @returns Void.
+export method closeAt(SimState s, SimConfig cfg, float exitPrice) =>
+    if s.dir != 0 and s.qty > 0
+        pnl  = (s.dir == 1 ? exitPrice - s.entry : s.entry - exitPrice) * s.qty * cfg.pointValue
+        comm = commissionFor(cfg, exitPrice, s.qty)
+        net  = pnl - comm
+        eqB  = s.equity
+        s.commPaid := s.commPaid + comm
+        s.equity   := s.equity + net
+        s.trades   := s.trades + 1
+        s.sumTrPct := s.sumTrPct + (eqB > 0 ? net / eqB * 100.0 : 0.0)
+        if net > 0
+            s.wins    := s.wins + 1
+            s.grossP  := s.grossP + net
+            s.consecL := 0
+        else
+            s.grossL   := s.grossL + math.abs(net)
+            s.consecL  := s.consecL + 1
+            s.maxConsL := math.max(s.maxConsL, s.consecL)
+        s.dir   := 0
+        s.qty   := 0.0
+        s.units := 0
+        s.entry := na
+
+// @function Opens a position, or adds a unit while `units < cfg.maxUnits`.
+//           Add-ons blend into a volume-weighted average entry and are sized
+//           against the risk already committed.
+// @param s         Shadow account state.
+// @param cfg       Configuration object.
+// @param dir       1 to go long, -1 to go short.
+// @param fillPrice Pessimistic fill price.
+// @param stopDist  Distance from entry to stop, in price units. Pass 0 under
+//                  fixedUnits / equityPct sizing.
+// @returns Void.
+export method openAt(SimState s, SimConfig cfg, int dir, float fillPrice, float stopDist) =>
+    if dir != 0 and (s.dir == 0 or (s.dir == dir and s.units < cfg.maxUnits))
+        openRisk = s.dir == dir ? s.qty * stopDist * cfg.pointValue : 0.0
+        q = qtyFor(cfg, s.equity, stopDist, fillPrice, openRisk)
+        if q > 0
+            comm   = commissionFor(cfg, fillPrice, q)
+            newQty = s.qty + q
+            s.commPaid := s.commPaid + comm
+            s.equity   := s.equity - comm
+            s.entry    := s.units == 0 or na(s.entry) ? fillPrice : (s.entry * s.qty + fillPrice * q) / newQty
+            s.qty      := newQty
+            s.dir      := dir
+            s.units    := s.units + 1
+        else
+            s.skipped := s.skipped + 1
+
+// @function Marks the account to market and updates equity peak and drawdown.
+// @param s     Shadow account state.
+// @param cfg   Configuration object.
+// @param price Current mark price, normally close.
+// @returns Void.
+export method mark(SimState s, SimConfig cfg, float price) =>
+    unreal = s.dir == 0 ? 0.0 : (s.dir == 1 ? price - s.entry : s.entry - price) * s.qty * cfg.pointValue
+    mtm    = s.equity + unreal
+    s.peak  := math.max(nz(s.peak, mtm), mtm)
+    s.maxDD := s.peak > 0 ? math.min(s.maxDD, (mtm - s.peak) / s.peak) : s.maxDD
+
+// @function General escape hatch: processes one bar against explicit fill prices.
+//           Use when your execution model is neither FillMode case — limit fills,
+//           stop fills, VWAP, session opens, anything.
+//           Order is exits, then reversals, then entries, then mark-to-market.
+// @param s             Shadow account state.
+// @param cfg           Configuration object.
+// @param longIn        Long entry signal.
+// @param longOut       Long exit signal.
+// @param shortIn       Short entry signal.
+// @param shortOut      Short exit signal.
+// @param buyPrice      Price paid when buying.
+// @param sellPrice     Price received when selling.
+// @param markPrice     Price for the mark-to-market update.
+// @param stopDistLong  Stop distance for longs, price units.
+// @param stopDistShort Stop distance for shorts, price units.
+// @returns Void.
+export method stepAt(SimState s, SimConfig cfg, bool longIn, bool longOut, bool shortIn, bool shortOut,
+     float buyPrice, float sellPrice, float markPrice, float stopDistLong, float stopDistShort) =>
+    if longOut and s.dir == 1
+        s.closeAt(cfg, sellPrice)
+    if shortOut and s.dir == -1
+        s.closeAt(cfg, buyPrice)
+    if longIn
+        if s.dir == -1
+            s.closeAt(cfg, buyPrice)
+        s.openAt(cfg, 1, buyPrice, stopDistLong)
+    if shortIn
+        if s.dir == 1
+            s.closeAt(cfg, sellPrice)
+        s.openAt(cfg, -1, sellPrice, stopDistShort)
+    s.mark(cfg, markPrice)
+
+// @function Processes one bar using the configured FillMode. Call once per
+//           confirmed bar.
+//           FillMode.nextOpen    — pass PRIOR-bar signals (sig[1]); this bar's
+//                                  open is the fill, its high/low the excursion.
+//           FillMode.signalClose — pass CURRENT-bar signals; the close is the
+//                                  fill and advFrac is inert.
+//           Getting this pairing wrong produces plausible-but-wrong results, so
+//           check it first when a comparison looks strange.
+// @param s             Shadow account state.
+// @param cfg           Configuration object.
+// @param longIn        Long entry signal, shifted per FillMode.
+// @param longOut       Long exit signal, shifted per FillMode.
+// @param shortIn       Short entry signal, shifted per FillMode.
+// @param shortOut      Short exit signal, shifted per FillMode.
+// @param o             Bar open.
+// @param h             Bar high.
+// @param l             Bar low.
+// @param c             Bar close.
+// @param stopDistLong  Stop distance for longs, price units.
+// @param stopDistShort Stop distance for shorts, price units.
+// @returns Void.
+export method step(SimState s, SimConfig cfg, bool longIn, bool longOut, bool shortIn, bool shortOut,
+     float o, float h, float l, float c, float stopDistLong, float stopDistShort) =>
+    atClose = cfg.fillMode == FillMode.signalClose
+    refP    = atClose ? c : o
+    advH    = atClose ? c : h
+    advL    = atClose ? c : l
+    s.stepAt(cfg, longIn, longOut, shortIn, shortOut,
+         buyFillPrice(cfg, refP, advH), sellFillPrice(cfg, refP, advL), c, stopDistLong, stopDistShort)
+
+// ───────────────────────── METRICS ─────────────────────────
+
+// @function Profit factor with safe handling of an empty loss column.
+// @param gp Gross profit.
+// @param gl Gross loss, as a positive number.
+// @returns gp/gl, 999 when there are no losses, 0 when there is nothing.
+export pf(float gp, float gl) =>
+    gl > 0 ? gp / gl : gp > 0 ? 999.0 : 0.0
+
+// @function Net profit of the shadow account, in currency.
+// @param s   Shadow account state.
+// @param cfg Configuration object.
+// @returns equity - initCap.
+export method netProfit(SimState s, SimConfig cfg) =>
+    s.equity - cfg.initCap
+
+// @function Profit factor of the shadow account.
+// @param s Shadow account state.
+// @returns Profit factor.
+export method profitFactor(SimState s) =>
+    pf(s.grossP, s.grossL)
+
+// @function Win rate of the shadow account, percent.
+// @param s Shadow account state.
+// @returns Percentage of closed trades that were profitable.
+export method winRatePct(SimState s) =>
+    s.trades > 0 ? 100.0 * s.wins / s.trades : 0.0
+
+// @function Average per-trade return, percent of equity-before-trade.
+// @param s Shadow account state.
+// @returns Mean trade return, percent.
+export method avgTradePct(SimState s) =>
+    s.trades > 0 ? s.sumTrPct / s.trades : 0.0
+
+// @function Round-trip friction as a percent of notional. Only meaningful under
+//           CommMode.pct — flat commissions do not scale with notional, so this
+//           returns na under the other models. Compare against avgTradePct():
+//           if the average trade does not clear this, the edge is smaller than
+//           the cost of trading it.
+// @param cfg Configuration object.
+// @returns Round-trip cost, percent, or na under flat commission models.
+export method rtCostPct(SimConfig cfg) =>
+    cfg.commMode == CommMode.pct ? 2.0 * (cfg.commPct + cfg.spreadPct / 2.0 + cfg.slipPct) : na
+
+// ───────────────────────── REPORTING ─────────────────────────
+
+// @function Row labels matching the order of rowValues(). Lay out an audit table
+//           in the host script from these, so strategy.* calls stay in the host.
+// @returns Array of ten label strings.
+export rowLabels() =>
+    array.from("Net Profit $", "Profit Factor", "Win Rate %", "Trades", "Max DD %",
+         "Avg Trade %", "Max Consec Loss", "Commission $", "Skipped Entries", "RT Cost %")
+
+// @function Preformatted metric strings for the shadow account, aligned to rowLabels().
+// @param s   Shadow account state.
+// @param cfg Configuration object.
+// @returns Array of ten value strings.
+export method rowValues(SimState s, SimConfig cfg) =>
+    rt = cfg.rtCostPct()
+    array.from(
+         str.tostring(s.netProfit(cfg), "#,###"),
+         str.tostring(s.profitFactor(), "#.##"),
+         str.tostring(s.winRatePct(), "#.#"),
+         str.tostring(s.trades),
+         str.tostring(s.maxDD * 100.0, "#.##"),
+         str.tostring(s.avgTradePct(), "#.###"),
+         str.tostring(s.maxConsL),
+         str.tostring(s.commPaid, "#,###"),
+         str.tostring(s.skipped),
+         na(rt) ? "n/a (flat)" : str.tostring(rt, "#.###"))
+
+// @function Compares a host strategy's headline numbers against the shadow
+//           account and returns a verdict string.
+// @param s           Shadow account state.
+// @param cfg         Configuration object.
+// @param strategyPF  Host strategy profit factor.
+// @param strategyNet Host strategy net profit.
+// @returns "DIVERGED — investigate", "SURVIVES", or "NO EDGE".
+export method verdict(SimState s, SimConfig cfg, float strategyPF, float strategyNet) =>
+    simPF  = s.profitFactor()
+    simNet = s.netProfit(cfg)
+    (strategyPF >= 1.3 and simPF < 1.0) or (strategyNet > 0 and simNet < 0) ? "DIVERGED — investigate" :
+         simPF >= 1.3 ? "SURVIVES" : "NO EDGE"
+
+// ───────────────────────── DEMO (chart output only) ─────────────────────────
+// A published library needs to produce something on its own chart. This runs a
+// trivial EMA cross through the sim so the publication preview is not blank.
+// It has zero effect on importing scripts.
+var SimConfig demoCfg   = SimConfig.new()
+var SimState  demoState = newState(demoCfg)
+demoEma  = ta.ema(close, 50)
+demoIn   = ta.crossover(close, demoEma)
+demoOut  = ta.crossunder(close, demoEma)
+demoStop = ta.atr(14) * 2.0
+if barstate.isconfirmed
+    demoState.step(demoCfg, demoIn[1], demoOut[1], false, false,
+         open, high, low, close, nz(demoStop[1], 0.0), nz(demoStop[1], 0.0))
+plot(demoState.equity, "Demo shadow equity", color = color.yellow)
+
+

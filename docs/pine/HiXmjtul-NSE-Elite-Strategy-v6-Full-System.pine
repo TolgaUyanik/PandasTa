@@ -1,0 +1,667 @@
+// ============================================================
+// NSE ELITE TRADING SYSTEM v6.0
+// By: Top 1% NSE Disciplined Trader
+// Platform: TradingView | Pine Script v6
+// Markets: NSE Equities, Nifty50, BankNifty, MidCap
+// Timeframes: Works on 5m / 15m / 1H / Daily
+// ============================================================
+// STRATEGY PILLARS:
+//   1. Trend Structure (Higher High / Higher Low or vice versa)
+//   2. Multi-TimeFrame Confluence (HTF Bias + LTF Entry)
+//   3. Institutional Order Blocks & Fair Value Gaps (SMC)
+//   4. Volume & Delivery Confirmation (NSE Cash)
+//   5. Momentum & Divergence (RSI, MACD, Stochastic)
+//   6. Volatility Regime Filter (ATR + India VIX proxy)
+//   7. Session & News Time Filter (NSE Calendar)
+//   8. Risk Management: SL, Target, Trailing, Position Sizing
+//   9. Sentiment Dashboard (Breadth, Put-Call Ratio proxy)
+//  10. Visual Cockpit – complete trade decision panel
+// ============================================================
+
+//@version=6
+strategy(
+     title            = "NSE Elite Strategy v6 — Full System",
+     shorttitle       = "NSE_ELITE_v6",
+     overlay          = true,
+     pyramiding       = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value= 25,
+     initial_capital  = 100000,
+     currency         = currency.INR,
+     commission_type  = strategy.commission.percent,
+     commission_value = 0.01,           // realistic NSE brokerage + STT
+     slippage         = 2,
+     calc_on_every_tick = false
+     )
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 1 — USER INPUTS  ░░░
+// ══════════════════════════════════════════════════════════════
+
+// ── Trend & Structure ─────────────────────────────────────────
+grpTrend = "📈 Trend & Structure"
+emaFast      = input.int(21,  "Fast EMA",          group=grpTrend, minval=5)
+emaMid       = input.int(50,  "Mid EMA",            group=grpTrend, minval=10)
+emaSlow      = input.int(200, "Slow EMA (Trend)",   group=grpTrend, minval=50)
+useHHHL      = input.bool(true,"Use HH/HL Structure Filter", group=grpTrend)
+swingLen     = input.int(21,  "Swing Lookback (bars)", group=grpTrend, minval=3)
+
+// ── SMC – Order Blocks & FVG ──────────────────────────────────
+grpSMC = "🏦 Smart Money (OB / FVG)"
+showOB       = input.bool(true, "Show Order Blocks",       group=grpSMC)
+showFVG      = input.bool(true, "Show Fair Value Gaps",    group=grpSMC)
+obLookback   = input.int(25,   "OB Lookback (bars)",       group=grpSMC, minval=5)
+fvgThresh    = input.float(0.1,"FVG Min Size % of Price",  group=grpSMC, minval=0.0)
+
+// ── Volume ────────────────────────────────────────────────────
+grpVol = "📊 Volume & Delivery"
+volMaPeriod  = input.int(144,   "Volume MA Period",   group=grpVol)
+volMultiplier= input.float(2.0,"High Vol Multiplier",group=grpVol, minval=1.0)
+
+// ── Momentum ──────────────────────────────────────────────────
+grpMom = "⚡ Momentum (RSI / MACD / Stoch)"
+rsiLen       = input.int(14,  "RSI Length",          group=grpMom)
+rsiOB        = input.float(75,"RSI Overbought",       group=grpMom)
+rsiOS        = input.float(25,"RSI Oversold",         group=grpMom)
+macdFast     = input.int(9,  "MACD Fast",            group=grpMom)
+macdSlow     = input.int(26,  "MACD Slow",            group=grpMom)
+macdSig      = input.int(9,   "MACD Signal",          group=grpMom)
+stochK       = input.int(5,  "Stoch K",              group=grpMom)
+stochD       = input.int(3,   "Stoch D",              group=grpMom)
+stochSmooth  = input.int(3,   "Stoch Smooth",         group=grpMom)
+
+// ── Volatility & VIX Proxy ────────────────────────────────────
+grpVix = "🌡️ Volatility (ATR / VIX Proxy)"
+atrLen       = input.int(144,   "ATR Length",                  group=grpVix)
+atrMultSL    = input.float(1.9,"ATR × for Stop Loss",         group=grpVix, minval=0.5)
+atrMultTP    = input.float(25.0,"ATR × for Take Profit",       group=grpVix, minval=1.0)
+atrMultTrl   = input.float(4.0,"ATR × for Trailing Stop",     group=grpVix, minval=0.5)
+maxAtrFilter = input.float(2.9,"Max ATR % (skip if > this %)",group=grpVix, minval=0.5)
+
+// ── Session / News Filter ─────────────────────────────────────
+grpSession = "⏰ Session & News Filter"
+useSessFilter= input.bool(true,"Only Trade NSE Session",          group=grpSession)
+avoidOpen    = input.bool(true,"Avoid 1st 15 min (09:15–09:30)",  group=grpSession)
+avoidClose   = input.bool(true,"Avoid Last 15 min (15:15–15:30)", group=grpSession)
+avoidExpiry  = input.bool(true,"Avoid Thursday Expiry Caution Zone",group=grpSession)
+
+// ── Risk Management ───────────────────────────────────────────
+grpRisk = "🛡️ Risk Management"
+riskPct      = input.float(1.0,"Risk % per Trade",    group=grpRisk, minval=0.1, maxval=5.0)
+rrMin        = input.float(2.0,"Minimum R:R Ratio",   group=grpRisk, minval=1.0)
+useTrailing  = input.bool(true,"Use Trailing Stop",   group=grpRisk)
+trailOffset  = input.float(1.1,"Trailing Offset ATR ×", group=grpRisk, minval=0.1)
+
+// ── Candlestick Patterns ──────────────────────────────────────
+grpCandle = "🕯️ Candlestick Patterns"
+useEngulf    = input.bool(true,"Engulfing Pattern",        group=grpCandle)
+usePin       = input.bool(true,"Pin Bar / Hammer",         group=grpCandle)
+useInsideBar = input.bool(false,"Inside Bar Breakout",     group=grpCandle)
+useDoji      = input.bool(false,"Doji Reversal",           group=grpCandle)
+
+// ── Display ───────────────────────────────────────────────────
+grpDisplay = "🎨 Display Settings"
+showDashboard= input.bool(true, "Show Trading Dashboard",  group=grpDisplay)
+showSignals  = input.bool(false, "Show Buy/Sell Signals",   group=grpDisplay)
+showLevels   = input.bool(false, "Show SL/TP Levels",       group=grpDisplay)
+showEMAs     = input.bool(false, "Show EMAs",               group=grpDisplay)
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 2 — CORE CALCULATIONS  ░░░
+// ══════════════════════════════════════════════════════════════
+
+// ── EMAs ──────────────────────────────────────────────────────
+ema21  = ta.ema(close, emaFast)
+ema50  = ta.ema(close, emaMid)
+ema200 = ta.ema(close, emaSlow)
+
+bullTrend = ema21 > ema50 and ema50 > ema200
+bearTrend = ema21 < ema50 and ema50 < ema200
+
+// ── ATR ───────────────────────────────────────────────────────
+atr    = ta.atr(atrLen)
+atrPct = (atr / close) * 100
+
+// ── RSI ───────────────────────────────────────────────────────
+rsi    = ta.rsi(close, rsiLen)
+
+// ── MACD ──────────────────────────────────────────────────────
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdBull = macdLine > signalLine and macdLine > 0
+macdBear = macdLine < signalLine and macdLine < 0
+macdCross_up   = ta.crossover(macdLine,  signalLine)
+macdCross_down = ta.crossunder(macdLine, signalLine)
+
+// ── Stochastic ────────────────────────────────────────────────
+stK = ta.sma(ta.stoch(close, high, low, stochK), stochSmooth)
+stD = ta.sma(stK, stochD)
+stochBull = stK > stD and stK < 80
+stochBear = stK < stD and stK > 20
+
+// ── Volume ────────────────────────────────────────────────────
+volMA      = ta.sma(volume, volMaPeriod)
+highVol    = volume > volMA * volMultiplier
+risingVol  = volume > volume[1]
+
+// ── HH / HL Structure ─────────────────────────────────────────
+swingHigh  = ta.pivothigh(high, swingLen, swingLen)
+swingLow   = ta.pivotlow(low,  swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+var float prevSH = na
+var float prevSL = na
+
+if not na(swingHigh)
+    prevSH := lastSH
+    lastSH := swingHigh
+
+if not na(swingLow)
+    prevSL := lastSL
+    lastSL := swingLow
+
+hhStructure = not na(lastSH) and not na(prevSH) and lastSH > prevSH
+hlStructure = not na(lastSL) and not na(prevSL) and lastSL > prevSL
+llStructure = not na(lastSH) and not na(prevSH) and lastSH < prevSH
+lhStructure = not na(lastSL) and not na(prevSL) and lastSL < prevSL
+
+bullStructure = useHHHL ? (hhStructure or hlStructure) : true
+bearStructure = useHHHL ? (llStructure or lhStructure) : true
+
+// ── Fair Value Gaps (FVG) ─────────────────────────────────────
+fvgBullSize = low[0] - high[2]   // bullish FVG: gap up
+fvgBearSize = low[2] - high[0]   // bearish FVG: gap down
+fvgThreshAbs = close * fvgThresh / 100
+
+bullFVG = fvgBullSize > fvgThreshAbs
+bearFVG = fvgBearSize > fvgThreshAbs
+
+// ── Order Block Detection ─────────────────────────────────────
+// Bearish OB: last bearish candle before strong bullish move
+// Bullish OB: last bullish candle before strong bearish move
+strongBullMove = close > close[1] * 1.01  // +0.5%
+strongBearMove = close < close[1] * 0.99  // -0.5%
+
+bullOB_top    = ta.valuewhen(strongBullMove, high[1], 0)
+bullOB_bottom = ta.valuewhen(strongBullMove, low[1],  0)
+bearOB_top    = ta.valuewhen(strongBearMove, high[1], 0)
+bearOB_bottom = ta.valuewhen(strongBearMove, low[1],  0)
+
+inBullOB = low <= bullOB_top and high >= bullOB_bottom
+inBearOB = low <= bearOB_top and high >= bearOB_bottom
+
+// ── Candlestick Patterns ──────────────────────────────────────
+bodySize   = math.abs(close - open)
+upperWick  = high - math.max(close, open)
+lowerWick  = math.min(close, open) - low
+totalRange = high - low
+
+// Bullish Engulfing
+bullEngulf = useEngulf and close > open and close[1] < open[1] and
+             close > open[1] and open < close[1]
+
+// Bearish Engulfing
+bearEngulf = useEngulf and close < open and close[1] > open[1] and
+             close < open[1] and open > close[1]
+
+// Hammer / Pin Bar Bullish
+hammer = usePin and lowerWick >= bodySize * 2 and upperWick <= bodySize * 0.5 and
+         totalRange > 0
+
+// Shooting Star / Pin Bar Bearish
+shootingStar = usePin and upperWick >= bodySize * 2 and
+               lowerWick <= bodySize * 0.5 and totalRange > 0
+
+// Inside Bar
+insideBar  = useInsideBar and high < high[1] and low > low[1]
+ibBullBreak= insideBar[1] and close > high[2]
+ibBearBreak= insideBar[1] and close < low[2]
+
+// Doji
+dojiBody   = bodySize <= totalRange * 0.1
+bullDoji   = useDoji and dojiBody and close[1] < open[1]  // doji after down candle
+bearDoji   = useDoji and dojiBody and close[1] > open[1]  // doji after up candle
+
+// Composite pattern signal
+bullCandlePattern = bullEngulf or hammer or ibBullBreak or bullDoji
+bearCandlePattern = bearEngulf or shootingStar or ibBearBreak or bearDoji
+
+// ── Session filter — FIX 1, 2 ─────────────────────────────────
+inNSESession  = useSessFilter ? not na(time("1","0915-1530","Asia/Kolkata")) : true
+// FIX 2: default to false (not blocking) when toggle is OFF
+avoidOpenZone = avoidOpen  ? not na(time("1","0915-0930","Asia/Kolkata")) : false
+avoidCloseZone= avoidClose ? not na(time("1","1515-1530","Asia/Kolkata")) : false
+// FIX 1: was dayofweek.tuesday — corrected to Tuesday
+isTuesday    = dayofweek == dayofweek.tuesday
+expiryAlert   = avoidExpiry and isTuesday
+sessionOK     = inNSESession and not avoidOpenZone and not avoidCloseZone
+
+// ── Volatility Filter ─────────────────────────────────────────
+volatilityOK = atrPct < maxAtrFilter
+
+// ── RSI Divergence (Simple) ───────────────────────────────────
+priceLow1  = ta.lowest(low,  14)
+priceLow2  = ta.lowest(low,  28)
+rsiLow1    = ta.lowest(rsi,  14)
+rsiLow2    = ta.lowest(rsi,  28)
+bullDiv    = priceLow1 < priceLow2 and rsiLow1 > rsiLow2  // price lower, RSI higher
+
+priceHigh1 = ta.highest(high, 14)
+priceHigh2 = ta.highest(high, 28)
+rsiHigh1   = ta.highest(rsi,  14)
+rsiHigh2   = ta.highest(rsi,  28)
+bearDiv = priceHigh1 > priceHigh2 and rsiHigh1 < rsiHigh2 and ema21 < ema50
+
+// ── Supertrend (additional confirmation) ─────────────────────
+[superT, superDir] = ta.supertrend(1.4, atrLen)
+stBull = superDir < 0   // price above supertrend = bullish
+stBear = superDir > 0
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 3 — SIGNAL SCORING ENGINE  ░░░
+// ══════════════════════════════════════════════════════════════
+// Each factor contributes a score. Minimum score threshold
+// required before a trade is taken — ensures confluence.
+
+var int bullScore = 0
+var int bearScore = 0
+
+// Recalculate scores each bar
+bullScore := 0
+bearScore := 0
+
+// Trend (weight 2)
+bullScore += bullTrend ? 1 : 0
+bearScore += bearTrend ? 1 : 0
+
+// Structure (weight 2)
+bullScore += bullStructure ? 1 : 0
+bearScore += bearStructure ? 1 : 0
+
+// Momentum RSI (weight 1)
+bullScore += (rsi > 50 and rsi < rsiOB) ? 1 : 0
+bearScore += (rsi < 50 and rsi > rsiOS) ? 1 : 0
+
+// MACD (weight 1)
+bullScore += macdBull ? 1 : 0
+bearScore += macdBear ? 1 : 0
+
+// MACD Crossover (weight 2)
+bullScore += macdCross_up   ? 1 : 0
+bearScore += macdCross_down ? 1 : 0
+
+// Stochastic (weight 1)
+bullScore += stochBull ? 1 : 0
+bearScore += stochBear ? 1 : 0
+
+// Volume confirmation (weight 2)
+bullScore += (highVol and close > open) ? 3 : 0
+bearScore += (highVol and close < open) ? 3 : 0
+
+// Candle Pattern (weight 2)
+bullScore += bullCandlePattern ? 1 : 0
+bearScore += bearCandlePattern ? 1 : 0
+
+// Supertrend (weight 1)
+bullScore += stBull ? 2 : 0
+bearScore += stBear ? 2 : 0
+
+// Order Block Touch (weight 2)
+bullScore += inBullOB ? 2 : 0
+bearScore += inBearOB ? 2 : 0
+
+// RSI Divergence (weight 3 – high quality signal)
+bullScore += bullDiv ? 3 : 0
+bearScore += bearDiv ? 3 : 0
+
+// Max possible = 22; require at least 8 for a trade entry
+scoreThresh = 8
+
+longCondition  = bullScore >= scoreThresh and sessionOK and volatilityOK
+shortCondition = bearScore >= scoreThresh and sessionOK and volatilityOK
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 4 — POSITION SIZING & R:R CHECK  ░░░
+// ══════════════════════════════════════════════════════════════
+
+slDist   = atr * atrMultSL
+tpDist   = atr * atrMultTP
+rrRatio  = tpDist / slDist
+
+longSL   = close - slDist
+longTP   = close + tpDist
+shortSL  = close + slDist
+shortTP  = close - tpDist
+
+rrOK     = rrRatio >= rrMin
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 5 — STRATEGY ENTRIES & EXITS  ░░░
+// ══════════════════════════════════════════════════════════════
+
+if longCondition and rrOK and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long, comment="BUY▲ Confluence")
+    strategy.exit("LONG_EXIT", "LONG",
+         stop   = longSL,
+         limit  = longTP,
+         trail_price  = useTrailing ? close : na,
+         trail_offset = useTrailing ? atr * atrMultTrl / syminfo.mintick : na)
+
+if shortCondition and rrOK and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short, comment="SELL▼ Confluence")
+    strategy.exit("SHORT_EXIT", "SHORT",
+         stop   = shortSL,
+         limit  = shortTP,
+         trail_price  = useTrailing ? close : na,
+         trail_offset = useTrailing ? atr * atrMultTrl / syminfo.mintick : na)
+
+// Exit on trend flip regardless
+if strategy.position_size > 0 and bearTrend
+    strategy.close("LONG", comment="Trend Flip")
+
+if strategy.position_size < 0 and bullTrend
+    strategy.close("SHORT", comment="Trend Flip")
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 6 — VISUAL OVERLAYS  ░░░
+// ══════════════════════════════════════════════════════════════
+
+// ── EMAs ──────────────────────────────────────────────────────
+plot(showEMAs ? ema21  : na, "EMA 21",  color=color.new(#00E5FF, 0),  linewidth=1)
+plot(showEMAs ? ema50  : na, "EMA 50",  color=color.new(#FF9800, 0),  linewidth=2)
+plot(showEMAs ? ema200 : na, "EMA 200", color=color.new(#F44336, 0),  linewidth=2)
+
+// ── Supertrend ────────────────────────────────────────────────
+supertrendPlot = plot(superT, "SuperTrend",
+     color = superDir < 0 ? color.new(color.green, 30) : color.new(color.red, 30),
+     linewidth=1, style=plot.style_stepline)
+
+// ── Buy / Sell Signals ────────────────────────────────────────
+plotshape(showSignals and longCondition  and rrOK,
+     title="BUY Signal", style=shape.labelup, location=location.belowbar,
+     color=color.new(#00C853, 0), textcolor=color.white,
+     text="BUY\n▲", size=size.normal)
+
+plotshape(showSignals and shortCondition and rrOK,
+     title="SELL Signal", style=shape.labeldown, location=location.abovebar,
+     color=color.new(#D50000, 0), textcolor=color.white,
+     text="SELL\n▼", size=size.normal)
+
+// ── SL / TP Levels ────────────────────────────────────────────
+longSLPlot  = strategy.position_size > 0 ? longSL  : na
+longTPPlot  = strategy.position_size > 0 ? longTP  : na
+shortSLPlot = strategy.position_size < 0 ? shortSL : na
+shortTPPlot = strategy.position_size < 0 ? shortTP : na
+
+plot(showLevels ? longSLPlot  : na, "Long SL",  color=color.new(#FF1744,0), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? longTPPlot  : na, "Long TP",  color=color.new(#00C853,0), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? shortSLPlot : na, "Short SL", color=color.new(#FF1744,0), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? shortTPPlot : na, "Short TP", color=color.new(#00C853,0), linewidth=1, style=plot.style_linebr)
+
+// ── Fair Value Gap Highlight ──────────────────────────────────
+bgcolor(showFVG and bullFVG ? color.new(#00E5FF, 90) : na, title="Bull FVG")
+bgcolor(showFVG and bearFVG ? color.new(#FF6D00, 90) : na, title="Bear FVG")
+
+// ── Order Block Boxes ─────────────────────────────────────────
+// (Drawn as background shading near OB zones)
+bgcolor(showOB and inBullOB ? color.new(#69F0AE, 85) : na, title="In Bull OB")
+bgcolor(showOB and inBearOB ? color.new(#FF5252, 85) : na, title="In Bear OB")
+
+// ── Expiry Warning ────────────────────────────────────────────
+bgcolor(expiryAlert ? color.new(#FFF176, 90) : na, title="Expiry Day Caution")
+
+// ── Divergence Labels ─────────────────────────────────────────
+plotshape(bullDiv, title="Bull Divergence", style=shape.diamond,
+     location=location.belowbar, color=color.new(#00BFA5,0),
+     size=size.tiny, text="DIV↑")
+
+plotshape(bearDiv, title="Bear Divergence", style=shape.diamond,
+     location=location.abovebar, color=color.new(#BF360C,0),
+     size=size.tiny, text="DIV↓")
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 7 — INFORMATION DASHBOARD  ░░░
+// ══════════════════════════════════════════════════════════════
+
+scoreBar(v, mx) =>
+    filled = math.round(v / mx * 10)
+    bar = ""
+    for i = 1 to 10
+        bar += i <= filled ? "█" : "░"
+    bar
+
+trendLabel(bull, bear) =>
+    bull ? "🟢 BULLISH" : bear ? "🔴 BEARISH" : "⚪ NEUTRAL"
+
+if showDashboard and barstate.islast
+    var table dash = table.new(
+         position.top_right, 2, 22,
+         bgcolor=color.new(#0D1117, 5),
+         border_color=color.new(#30363D, 100),
+         border_width=1,
+         frame_color=color.new(#58A6FF, 100),
+         frame_width=2)
+
+    // Header
+    table.cell(dash, 0, 0, "  NSE ELITE SYSTEM v6  ",
+         bgcolor=color.new(#1F2937, 0), text_color=color.new(#F0F6FF,0),
+         text_size=size.normal, text_halign=text.align_center)
+    table.cell(dash, 1, 0, syminfo.ticker + " | " + timeframe.period + "m",
+         bgcolor=color.new(#1F2937, 0), text_color=color.new(#58A6FF,0),
+         text_size=size.normal, text_halign=text.align_center)
+
+    // Trend
+    table.cell(dash, 0, 1, "TREND BIAS",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 1, trendLabel(bullTrend, bearTrend),
+         bgcolor=color.new(#161B22,0),
+         text_color = bullTrend ? color.new(#3FB950,0) : bearTrend ? color.new(#F85149,0) : color.new(#8B949E,0),
+         text_size=size.small)
+
+    // Structure
+    table.cell(dash, 0, 2, "STRUCTURE",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 2, hhStructure ? "HH+HL ✅" : llStructure ? "LL+LH ⛔" : "RANGING ⚠️",
+         bgcolor=color.new(#161B22,0),
+         text_color = hhStructure ? color.new(#3FB950,0) : llStructure ? color.new(#F85149,0) : color.new(#E3B341,0),
+         text_size=size.small)
+
+    // RSI
+    table.cell(dash, 0, 3, "RSI(" + str.tostring(rsiLen) + ")",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    rsiColor = rsi > rsiOB ? color.new(#F85149,0) : rsi < rsiOS ? color.new(#3FB950,0) : color.new(#E3B341,0)
+    table.cell(dash, 1, 3, str.tostring(math.round(rsi, 1)) + (rsi > rsiOB ? " ⚠️OB" : rsi < rsiOS ? " ⚠️OS" : " ✅"),
+         bgcolor=color.new(#161B22,0), text_color=rsiColor, text_size=size.small)
+
+    // MACD
+    table.cell(dash, 0, 4, "MACD",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    macdStatus = macdCross_up ? "CROSS UP 🚀" : macdCross_down ? "CROSS DOWN 📉" : macdBull ? "BULLISH ▲" : macdBear ? "BEARISH ▼" : "NEUTRAL"
+    table.cell(dash, 1, 4, macdStatus,
+         bgcolor=color.new(#161B22,0),
+         text_color = macdBull ? color.new(#3FB950,0) : macdBear ? color.new(#F85149,0) : color.new(#8B949E,0),
+         text_size=size.small)
+
+    // Stochastic
+    table.cell(dash, 0, 5, "STOCHASTIC",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(math.round(stK, 1)) + " / " + str.tostring(math.round(stD, 1)),
+         bgcolor=color.new(#161B22,0),
+         text_color = stochBull ? color.new(#3FB950,0) : stochBear ? color.new(#F85149,0) : color.new(#8B949E,0),
+         text_size=size.small)
+
+    // Volume
+    table.cell(dash, 0, 6, "VOLUME",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    volStatus = highVol ? "HIGH 🔥" : risingVol ? "RISING ↑" : "NORMAL"
+    table.cell(dash, 1, 6, volStatus,
+         bgcolor=color.new(#161B22,0),
+         text_color = highVol ? color.new(#F0883E,0) : color.new(#8B949E,0),
+         text_size=size.small)
+
+    // ATR
+    table.cell(dash, 0, 7, "ATR % (Volatility)",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    atrColor = atrPct > maxAtrFilter ? color.new(#F85149,0) : color.new(#3FB950,0)
+    table.cell(dash, 1, 7, str.tostring(math.round(atrPct, 2)) + "%" + (atrPct > maxAtrFilter ? " ⛔HIGH" : " ✅OK"),
+         bgcolor=color.new(#161B22,0), text_color=atrColor, text_size=size.small)
+
+    // Supertrend
+    table.cell(dash, 0, 8, "SUPERTREND",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 8, stBull ? "ABOVE ✅ BUY SIDE" : "BELOW ⛔ SELL SIDE",
+         bgcolor=color.new(#161B22,0),
+         text_color = stBull ? color.new(#3FB950,0) : color.new(#F85149,0),
+         text_size=size.small)
+
+    // OB / FVG
+    table.cell(dash, 0, 9, "ORDER BLOCK",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 9, inBullOB ? "In BULL OB 🟢" : inBearOB ? "In BEAR OB 🔴" : "No OB Touch",
+         bgcolor=color.new(#161B22,0),
+         text_color = inBullOB ? color.new(#3FB950,0) : inBearOB ? color.new(#F85149,0) : color.new(#8B949E,0),
+         text_size=size.small)
+
+    // Divergence
+    table.cell(dash, 0, 10, "DIVERGENCE",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 10, bullDiv ? "🟢 BULL DIV" : bearDiv ? "🔴 BEAR DIV" : "None",
+         bgcolor=color.new(#161B22,0),
+         text_color = bullDiv ? color.new(#3FB950,0) : bearDiv ? color.new(#F85149,0) : color.new(#8B949E,0),
+         text_size=size.small)
+
+    // Session
+    table.cell(dash, 0, 11, "SESSION",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 11, sessionOK ? "✅ TRADE ZONE" : "⛔ AVOID",
+         bgcolor=color.new(#161B22,0),
+         text_color = sessionOK ? color.new(#3FB950,0) : color.new(#F85149,0),
+         text_size=size.small)
+
+    // Expiry
+    table.cell(dash, 0, 12, "EXPIRY ALERT",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 12, expiryAlert ? "⚠️ TUESDAY – BE CAREFUL" : "✅ Normal Day",
+         bgcolor=color.new(#161B22,0),
+         text_color = expiryAlert ? color.new(#E3B341,0) : color.new(#3FB950,0),
+         text_size=size.small)
+
+    // ── Score Bars ────────────────────────────────────────────
+    table.cell(dash, 0, 13, "BULL SCORE",
+         bgcolor=color.new(#0D1117,0), text_color=color.new(#3FB950,0), text_size=size.small)
+    table.cell(dash, 1, 13, str.tostring(bullScore) + "/22  " + scoreBar(bullScore, 22),
+         bgcolor=color.new(#0D1117,0), text_color=color.new(#3FB950,0), text_size=size.small)
+
+    table.cell(dash, 0, 14, "BEAR SCORE",
+         bgcolor=color.new(#0D1117,0), text_color=color.new(#F85149,0), text_size=size.small)
+    table.cell(dash, 1, 14, str.tostring(bearScore) + "/22  " + scoreBar(bearScore, 22),
+         bgcolor=color.new(#0D1117,0), text_color=color.new(#F85149,0), text_size=size.small)
+
+    // ── Trade Signal ──────────────────────────────────────────
+    sigText  = longCondition and rrOK ? "🚀 LONG SIGNAL ACTIVE" :
+               shortCondition and rrOK ? "📉 SHORT SIGNAL ACTIVE" :
+               "⏳ NO SIGNAL — WAIT"
+    sigColor = longCondition and rrOK ? color.new(#3FB950,0) :
+               shortCondition and rrOK ? color.new(#F85149,0) :
+               color.new(#8B949E,0)
+    sigBG    = longCondition and rrOK ? color.new(#0A2A0A,0) :
+               shortCondition and rrOK ? color.new(#2A0A0A,0) :
+               color.new(#161B22,0)
+
+    table.cell(dash, 0, 15, "SIGNAL",
+         bgcolor=sigBG, text_color=sigColor, text_size=size.small)
+    table.cell(dash, 1, 15, sigText,
+         bgcolor=sigBG, text_color=sigColor, text_size=size.small)
+
+    // ── SL / TP / R:R ─────────────────────────────────────────
+    table.cell(dash, 0, 16, "STOP LOSS",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 16,
+         strategy.position_size > 0 ? "₹" + str.tostring(math.round(longSL, 2)) :
+         strategy.position_size < 0 ? "₹" + str.tostring(math.round(shortSL, 2)) : "—",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#F85149,0), text_size=size.small)
+
+    table.cell(dash, 0, 17, "TAKE PROFIT",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    table.cell(dash, 1, 17,
+         strategy.position_size > 0 ? "₹" + str.tostring(math.round(longTP, 2)) :
+         strategy.position_size < 0 ? "₹" + str.tostring(math.round(shortTP, 2)) : "—",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#3FB950,0), text_size=size.small)
+
+    table.cell(dash, 0, 18, "R:R RATIO",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    rrColor = rrRatio >= rrMin ? color.new(#3FB950,0) : color.new(#F85149,0)
+    table.cell(dash, 1, 18, "1 : " + str.tostring(math.round(rrRatio, 2)) + (rrOK ? " ✅" : " ⛔"),
+         bgcolor=color.new(#161B22,0), text_color=rrColor, text_size=size.small)
+
+    // ── Position ──────────────────────────────────────────────
+    table.cell(dash, 0, 19, "POSITION",
+         bgcolor=color.new(#161B22,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    posText  = strategy.position_size > 0 ? "📗 LONG — IN TRADE" :
+               strategy.position_size < 0 ? "📕 SHORT — IN TRADE" : "💤 FLAT"
+    posColor = strategy.position_size > 0 ? color.new(#3FB950,0) :
+               strategy.position_size < 0 ? color.new(#F85149,0) : color.new(#8B949E,0)
+    table.cell(dash, 1, 19, posText,
+         bgcolor=color.new(#161B22,0), text_color=posColor, text_size=size.small)
+
+    // ── Performance ───────────────────────────────────────────
+    table.cell(dash, 0, 20, "NET P&L",
+         bgcolor=color.new(#0D1117,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    pnl = strategy.netprofit
+    pnlColor = pnl >= 0 ? color.new(#3FB950,0) : color.new(#F85149,0)
+    table.cell(dash, 1, 20, "₹" + str.tostring(math.round(pnl, 0)),
+         bgcolor=color.new(#0D1117,0), text_color=pnlColor, text_size=size.small)
+
+    table.cell(dash, 0, 21, "WIN RATE",
+         bgcolor=color.new(#0D1117,0), text_color=color.new(#8B949E,0), text_size=size.small)
+    winRate = strategy.wintrades / math.max(strategy.closedtrades, 1) * 100
+    table.cell(dash, 1, 21,
+         str.tostring(math.round(winRate, 1)) + "% (" +
+         str.tostring(strategy.wintrades) + "W / " +
+         str.tostring(strategy.losstrades) + "L)",
+         bgcolor=color.new(#0D1117,0),
+         text_color = winRate >= 50 ? color.new(#3FB950,0) : color.new(#F85149,0),
+         text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  SECTION 8 — ALERTS  ░░░
+// ══════════════════════════════════════════════════════════════
+
+// ── Note on alertcondition ────────────────────────────────────
+// Pine Script requires "const string" for alertcondition message.
+// Dynamic values (price, SL, TP, score) are injected by TradingView
+// at alert-fire time using {{}} placeholders — no str.tostring() allowed.
+// For full dynamic detail, the strategy.entry comment field is used
+// and visible in the Strategy Tester log.
+
+alertcondition(longCondition and rrOK,
+     title   = "NSE ELITE — BUY Signal",
+     message = "NSE ELITE v6 | {{ticker}} | {{interval}} | BUY SIGNAL | Price: {{close}} | Check chart for SL/TP levels.")
+
+alertcondition(shortCondition and rrOK,
+     title   = "NSE ELITE — SELL Signal",
+     message = "NSE ELITE v6 | {{ticker}} | {{interval}} | SELL SIGNAL | Price: {{close}} | Check chart for SL/TP levels.")
+
+alertcondition(bullDiv,
+     title   = "NSE ELITE — Bullish Divergence",
+     message = "NSE ELITE v6 | {{ticker}} | {{interval}} | BULLISH RSI DIVERGENCE detected | Price: {{close}}")
+
+alertcondition(bearDiv,
+     title   = "NSE ELITE — Bearish Divergence",
+     message = "NSE ELITE v6 | {{ticker}} | {{interval}} | BEARISH RSI DIVERGENCE detected | Price: {{close}}")
+
+alertcondition(expiryAlert and sessionOK,
+     title   = "NSE ELITE — Expiry Day Caution",
+     message = "NSE ELITE v6 | {{ticker}} | THURSDAY EXPIRY DAY — Reduce position size and widen stops!")
+
+alertcondition(strategy.position_size > 0 and bearTrend,
+     title   = "NSE ELITE — Trend Flip (Close Long)",
+     message = "NSE ELITE v6 | {{ticker}} | {{interval}} | TREND FLIPPED BEARISH — Consider closing Long position!")
+
+alertcondition(strategy.position_size < 0 and bullTrend,
+     title   = "NSE ELITE — Trend Flip (Close Short)",
+     message = "NSE ELITE v6 | {{ticker}} | {{interval}} | TREND FLIPPED BULLISH — Consider closing Short position!")
+
+// ══════════════════════════════════════════════════════════════
+// ░░░  END OF SCRIPT  ░░░
+// ══════════════════════════════════════════════════════════════

@@ -1,0 +1,828 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © robbatt
+
+//@version=6
+
+// PUBLISH #2 of 4 (depends on lib_smt). Publish privately on TradingView, then set the
+// import version numbers in the downstream files to the published version.
+import Danieltrade29292/lib_smt/1 as st
+
+// @description Fair Value Gap engine — detection, testing/inversion lifecycle, HTF nesting filters, entry-candidate selection, stop-loss derivation, and FVG drawing — extracted 1:1 from rewrite_strategy.pine.
+library("lib_fvg", overlay = true)
+
+export enum FVGFilterReason
+    FullyNestedInHTF                = "fully nested in HTF"
+    PartiallyNestedInUntestedHTF    = "partially nested in untested HTF"
+    NearbyHTF                       = "nearby HTF"
+    OverriddenByNewerLTF            = "overridden by newer LTF"  // soft-park for HTF when a newer LTF takes priority
+    Expired                         = "expired"
+    ReInversed                      = "re-inversed"
+    InversionTooFar                 = "inversion too far"
+    MaxTestsExceeded                = "max tests exeeded"
+    UsingTradeClosed                = "used by trade (closed)"
+    InversedWithoutSMT              = "inversed w/o SMT" // (§3.8) iFVG predates the current SMT — permanently unusable, wiped eagerly
+    ReplacedByNewerFVG              = "replaced by newer FVG in same TF" // single-FVG-per-TF mode: newer FVG on same TF evicts the old one
+
+export enum EntryFilterReason
+    NoValidSMT                    = "no valid SMT"
+    NoSession                     = "not in session"
+    NoIntraSMTZone                = "in no-intra-SMT zone"
+    SessionLocked                 = "session lock active"
+    DayLocked                     = "day lock active"
+    TP1BeforeFill                 = "TP1 hit before limit fill"   // pending limit cancelled — price reached TP1 before the order filled
+    WrongSession                  = "trading disabled for session"
+    InvalidOnInversionPosActive   = "invalidated on inversion, position already active" // gate: filled position present, no new entries
+    PendingPosBetterEntry         = "replaced by FVG closer to price"                   // §3.2 true upgrade: pending limit replaced by nearer iFVG
+    PendingPosReversal            = "cancelled — SMT direction reversed"
+    InvalidOnInversionBetterEntry = "invalidated on inversion, used higher prio FVG"    // inversed[] cleanup after market pipeline
+    InsufficientQty               = "entry candidate: SL distance excessive ➔ high risk ➔ qty < 3"
+    BlockedByUntestedHTF          = "close inside untested HTF"                         // §3.9 close-inside-untested-HTF — transient, re-evaluated each bar
+    OutsidePrevSessionRange       = "entry chases breakout of previous session range"  // London → Asia.h/l, NY → London.h/l, inclusive at boundary
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        FVG declaration
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+export type Bar
+    float o
+    float h
+    float l
+    float c
+    float top
+    float btm
+    int   t_open = time
+    int   i_open = bar_index
+    int   t_close = time
+    int   i_close = bar_index
+    box   bar_box = na
+    label bar_label = na
+
+// FVGFillState — what price has done to this gap (pure price-action, independent of strategy role)
+export enum FVGFillState
+    Untested   = "untested"                          // gap detected, never price-tested
+    Tested     = "tested"                       // bar body overlapped gap (test_count > 0, not yet inversed)
+    Inversed   = "inversed"                     // bar closed through the gap
+    Retested   = "retested"                     // price touched the entry edge after inversion
+    ReInversed = "re-inversed"                  // bar closed back through entry edge — terminal price-action invalidation
+
+// FVGLifecycle — what role this FVG has in the strategy pipeline
+export enum FVGLifecycle
+    WaitForInverse  = "wait for inverse" // in items[] — eligible for inversion, not yet inversed
+    InversedWaitingForRetest   = "wait for retest"  // in inversed[] — inversed but not yet selected as entry candidate
+    UsedForSetup    = "entry pending"    // selected as entry candidate; limit placed and pending fill (TouchLimit)
+    Upgraded        = "upgraded"         // was UsedForSetup but replaced by a closer iFVG (§3.2); order cancelled
+    UsedForTrade    = "in-trade"         // position filled; FVG is being monitored until position closes
+    Invalidated     = "invalidated"      // system-rejected: gate check failure, pre-SMT, session block, etc.
+
+export enum FVGTestedByMode
+    Body = "body" // requires FVG timeframe candle to open/close within the bar
+    Wick = "wick" // FVG timeframe wick inside the FVG is enough to count a test (wait for HTF FVG close to count test)
+
+// 1. FVG Data Structure
+export type FVG
+    bool        is_bullish_original       // original direction
+    bool        is_bullish_post_inverse   // inversed direction
+    string      tf
+    int         tf_id
+    chart.point top_left
+    chart.point bottom_right
+    float       hh                        // for check if FVG highest high equals session high => SL at ll
+    float       ll                        // for check if FVG lowest low equals session low => SL at hh
+    int         deprecate_at
+    float       sl_level                    = na
+    bool        is_active                   = true
+    int         test_count                  = 0     // used for bars_to_inverse (test_count + 1)
+    int         first_test_idx              = na
+    bool        is_inversed                 = false
+    bool        has_touched                 = false // For Rejection Entry Tracking
+    box         fvg_box                     = na
+    label       tooltip_label               = na    // hover anchor for detailed reason text
+
+    // flags for more efficient drawing
+    bool        hidden                      = false
+    bool        draw_signal_inversed        = false
+    bool        draw_signal_text            = false
+    bool        draw_signal_highlight       = false
+    bool        draw_signal_set_candidate   = false
+    bool        draw_signal_reset_candidate = false
+
+    FVGFillState      fill_state            = FVGFillState.Untested  // price-action state of the gap
+    FVGLifecycle      lifecycle             = FVGLifecycle.WaitForInverse  // strategy pipeline role
+    FVGFilterReason   filter_reason         = na  // reason for invalidation or filter skip
+    EntryFilterReason entry_filter_reason   = na
+    Bar               tf_inversion_bar      = na
+    int               inversion_idx         = na
+
+export method equals(FVG this, FVG other) =>
+    if na(this) != na(other) // only one is na
+        false
+    else if na(this) // other must also be na
+        true
+    else // else they equal on same timeframe and when detected on same bar_index
+        this.top_left.time == other.top_left.time and this.tf_id == other.tf_id
+
+export method remove(FVG[] this, FVG item) =>
+    int i = this.size() -1
+    while i >= 0
+        FVG fvg = this.get(i)
+        if fvg.equals(item)
+            this.remove(i)
+            break
+        i -= 1
+
+// §3.9 — Unified spatial relationship check: this (LTF) vs one HTF FVG.
+// Resolves formation time internally and returns the exact FVGFilterReason to stamp, or na if no relation.
+//
+// LTF newer (this confirmed after htf_fvg) → htf_fvg gets OverriddenByNewerLTF
+// HTF newer (htf_fvg confirmed after this) → this gets one of:
+//   FullyNestedInHTF             — both LTF edges inside HTF gap (when check_nested=true)
+//   PartiallyNestedInUntestedHTF — only LTF entry edge inside HTF gap, HTF untested (when check_untested=true)
+//   NearbyHTF                    — entry edge strictly outside HTF gap but within nearby_threshold (pass 0 to suppress)
+//
+// Caller: assign the returned reason to this when reason != OverriddenByNewerLTF, else assign to htf_fvg.
+// entry edge: top_left for bullish-post-inverse, bottom_right for bearish-post-inverse.
+export method check_nested_in(FVG this, FVG htf_fvg, bool check_nested, bool check_untested, bool check_nearby, float nearby_threshold, bool check_newer_ltf) =>
+
+    bool  ltf_is_newer      = check_newer_ltf and this.bottom_right.time > htf_fvg.bottom_right.time
+
+    bool entry_edge_nearby = false
+    bool entry_edge_inside = false
+    bool opposite_edge_inside = false
+
+    if this.is_bullish_post_inverse
+        float entry_edge        = this.top_left.price
+        float opposite_edge     = this.bottom_right.price
+        float htf_entry_edge    = htf_fvg.top_left.price
+        float htf_opposite_edge = htf_fvg.bottom_right.price
+
+        entry_edge_inside      := htf_opposite_edge <= entry_edge and entry_edge <= htf_entry_edge
+        // nearby: entry edge strictly below htf bottom (outside gap), within threshold
+        entry_edge_nearby      := check_nearby and not entry_edge_inside
+                                   and entry_edge >= htf_opposite_edge - nearby_threshold
+                                   and entry_edge <  htf_opposite_edge
+        opposite_edge_inside   := htf_opposite_edge <= opposite_edge and opposite_edge <= htf_entry_edge
+    else
+        float entry_edge        = this.bottom_right.price
+        float opposite_edge     = this.top_left.price
+        float htf_entry_edge    = htf_fvg.bottom_right.price
+        float htf_opposite_edge = htf_fvg.top_left.price
+
+        entry_edge_inside      := htf_opposite_edge >= entry_edge and entry_edge >= htf_entry_edge
+        // nearby: entry edge strictly above htf top (outside gap), within threshold
+        entry_edge_nearby      := check_nearby and not entry_edge_inside
+                                   and entry_edge <= htf_opposite_edge + nearby_threshold
+                                   and entry_edge >  htf_opposite_edge
+        opposite_edge_inside   := htf_opposite_edge >= opposite_edge and opposite_edge >= htf_entry_edge
+
+    bool fully_nested = check_nested   and entry_edge_inside and opposite_edge_inside
+    bool partial      = check_untested and entry_edge_inside and not opposite_edge_inside and check_untested and htf_fvg.test_count == 0
+    bool nearby       = check_nearby   and not entry_edge_inside and not opposite_edge_inside and entry_edge_nearby and nearby_threshold > 0
+
+    if ltf_is_newer
+        FVGFilterReason.OverriddenByNewerLTF
+    else if fully_nested
+        FVGFilterReason.FullyNestedInHTF
+    else if partial
+        FVGFilterReason.PartiallyNestedInUntestedHTF
+    else if nearby
+        FVGFilterReason.NearbyHTF
+    else
+        na // not nested, not overridden
+
+
+
+export method distance_to_price_post_inverse(FVG this, float price) =>
+    if this.is_bullish_post_inverse
+        price - this.top_left.price
+    else
+        this.bottom_right.price - price
+
+export method is_higher_tf_or_closer_to_price_than(FVG this, FVG other) =>
+    if na(this)
+        false
+    else if na(other)
+        true
+    else
+        this.tf_id > other.tf_id // same timeframe -> seek closest to price
+         or this.tf_id == other.tf_id and this.distance_to_price_post_inverse(close) < other.distance_to_price_post_inverse(close)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     FVG declaration
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        FVG detection
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// --- Logic to Calculate Final SL based on Section 6 ---
+export method get_stop_loss(FVG this, float entry_price, float session_extreme, bool enable_sl_at_fvg_created_swing_point, float trail_session_level_tight_threshold) =>
+    float sl = na
+
+    if this.is_bullish_post_inverse // Entry is LONG
+        // Prio 1: Lowest Low of testing bars ... otherwise inversion bar Low
+        float sl1 = nz(this.sl_level, this.tf_inversion_bar.l)
+
+        // Prio 2 Fallback: if entry > sl1 use FVG top (closer edge)
+        sl := (entry_price > sl1) ? sl1 : this.top_left.price
+
+        // Prio 3 Override: Swing low created by FVG (and not taken out yet)
+        if enable_sl_at_fvg_created_swing_point and not na(this.ll)
+            sl := this.ll
+
+        // Prio 4 Override: Session low nearby, tighten SL
+        else if not na(trail_session_level_tight_threshold)
+         and not na(session_extreme)
+         and math.abs(entry_price - session_extreme) <= trail_session_level_tight_threshold
+            sl := math.min(sl, session_extreme)
+    else // we Entry is SHORT
+        // Prio 1: Highest High of testing bars ... otherwise inversion bar High
+        float sl1 = nz(this.sl_level, this.tf_inversion_bar.h)
+
+        // Prio 2 Fallback: if entry < sl1 use FVG bottom (closer edge)
+        sl := (entry_price < sl1) ? sl1 : this.bottom_right.price
+
+        // Prio 3 Override: Swing high created by FVG (and not taken out yet)
+        if enable_sl_at_fvg_created_swing_point and not na(this.hh)
+            sl := this.hh
+
+        // Prio 3: Session Override
+        else if not na(trail_session_level_tight_threshold)
+         and not na(session_extreme)
+         and math.abs(session_extreme - entry_price) <= trail_session_level_tight_threshold
+            sl := math.max(sl, session_extreme)
+    sl
+
+export method delete_bar(Bar this) =>
+    if not na(this)
+        this.bar_box.delete()
+        this.bar_label.delete()
+
+export method delete_fvg(FVG this) =>
+    if not na(this)
+        this.fvg_box.delete()
+        this.tf_inversion_bar.delete_bar()
+        this.tooltip_label.delete()
+
+// 2. FVG Buffer (State Management)
+export type FVGBuffer
+
+    FVG[] items       // Standard FVGs being monitored
+    FVG[] inversed    // FVGs that have been inversed (Ready for entry)
+    FVG[] invalidated // Queue for deletion
+
+// ── Entry-rejection logger ──────────────────────────────────────────────────
+// Emits a multi-line trace to the Pine Logs panel for every entry-decision
+// rejection (gated by `enable_entry_log` so call sites can wire it freely).
+// Use case: "SMT detected + valid FVG inversed but no entry — why?"
+export log_entry_rejection(bool enable_log, FVG fvg, EntryFilterReason reason, st.SMT smt = na, string note = "") =>
+    if enable_log
+        bool   is_bull = na(fvg) ? false : (fvg.is_inversed ? fvg.is_bullish_post_inverse : fvg.is_bullish_original)
+        string dir     = na(fvg) ? "?" : (is_bull ? "Bull" : "Bear")
+        string smt_str = na(smt) ? "-"
+             : str.format("PRIO_{0} sess={1} leader={2} follow={3} age={4}bars",
+              smt.prio, smt.session_id,
+              smt.leader == st.CHART ? "CHART" : "OTHER",
+              str.tostring(smt.follow_level.price, format.mintick),
+              bar_index - smt.detection_bar)
+        // Show original direction → post-inverse direction so a "Bear" rejection
+        // on an originally-bullish (green) FVG is unambiguous.
+        string orig_dir = na(fvg) ? "?" : (fvg.is_bullish_original ? "Bull" : "Bear")
+        string post_dir = na(fvg) ? "?" : (fvg.is_bullish_post_inverse ? "Bull" : "Bear")
+        string dir_str  = na(fvg) ? "?"
+         : (fvg.is_inversed ? str.format("{0}->{1}", orig_dir, post_dir) : orig_dir)
+        // filter_reason: parking reason that can keep an iFVG in inversed[] yet
+        // disqualify it from find_entry_candidate_fvg (e.g. fully nested in HTF).
+        // inv_age: bars since inversion — non-zero means the iFVG is stale
+        // (single-bar entry window already expired on a prior bar).
+        string filter_str = na(fvg) or na(fvg.filter_reason) ? "-" : str.tostring(fvg.filter_reason)
+        string inv_age    = na(fvg) or na(fvg.inversion_idx) ? "-" : str.format("{0}bars", bar_index - fvg.inversion_idx)
+        string fvg_str = na(fvg) ? "-"
+             : str.format("{0}m {1} top={2} bot={3} sl={4} fill={5} life={6} filter={7} inv_age={8}",
+              fvg.tf, dir_str,
+              str.tostring(fvg.top_left.price, format.mintick),
+              str.tostring(fvg.bottom_right.price, format.mintick),
+              str.tostring(fvg.sl_level, format.mintick),
+              str.tostring(fvg.fill_state), str.tostring(fvg.lifecycle),
+              filter_str, inv_age)
+        log.info(str.format("ENTRY REJECTED — {0}\n  Reason : {1}\n  SMT    : {2}\n  FVG    : {3}\n  Note   : {4}",
+              dir, str.tostring(reason), smt_str, fvg_str, note == "" ? "-" : note))
+
+export method invalidate_fvg(FVGBuffer this, FVG fvg, FVGFilterReason reason = na, EntryFilterReason entry_block_reason = na, FVGLifecycle lifecycle = FVGLifecycle.Invalidated) =>
+    if not na(fvg)
+        fvg.lifecycle           := lifecycle
+        if not na(reason)
+            fvg.filter_reason := reason
+        if not na(entry_block_reason)
+            fvg.entry_filter_reason := entry_block_reason
+        fvg.draw_signal_text    := true
+        fvg.draw_signal_reset_candidate := true
+        this.invalidated.push(fvg)
+
+export method add_fvg(FVGBuffer this, FVG fvg, bool enable_single_fvg_per_tf) =>
+    // Single-FVG-per-TF mode: evict older FVGs on the same timeframe from items[].
+    // Matches reference behaviour where MTFFVGState holds ONE FVG per TF — newer replaces older.
+    // Only affects items[] (pre-inversion). Inversed FVGs in inversed[] are independent.
+    if enable_single_fvg_per_tf
+        int k = this.items.size() - 1
+        while k >= 0
+            FVG old = this.items.get(k)
+            if old.tf_id == fvg.tf_id
+             and old.is_bullish_original == fvg.is_bullish_original
+                this.invalidate_fvg(this.items.remove(k), FVGFilterReason.ReplacedByNewerFVG)
+            k -= 1
+    this.items.push(fvg)
+
+// 3. FVG Detection Logic
+export method detect_fvg(FVGBuffer this, string tf, int tf_id, int t2, float h2, float l2, float h1, float l1, float h0, float l0, float min_gap_size, int fvg_deprecation_period, bool enable_single_fvg_per_tf) =>
+    if barstate.isconfirmed
+        if h2 + min_gap_size <= l0  // Bullish FVG: high[2] < low
+            float hh = math.max(h0,h1) // if not set it is considered swept from the start and won't be used
+            this.add_fvg(FVG.new(is_bullish_original = true , is_bullish_post_inverse = false, tf = tf, tf_id = tf_id, deprecate_at = time + fvg_deprecation_period, top_left = chart.point.from_time(t2, l0), bottom_right = chart.point.now(h2), hh = hh), enable_single_fvg_per_tf)
+        if l2 - min_gap_size >= h0  // Bearish FVG: low[2] > high
+            float ll = math.min(l0,l1) // if not set it is considered swept from the start and won't be used
+            this.add_fvg(FVG.new(is_bullish_original = false, is_bullish_post_inverse = true , tf = tf, tf_id = tf_id, deprecate_at = time + fvg_deprecation_period, top_left = chart.point.from_time(t2, l2), bottom_right = chart.point.now(h0), ll = ll), enable_single_fvg_per_tf)
+
+export method invalidate_all_of_direction(FVGBuffer this, bool fvg_is_bullish, FVGFilterReason reason) =>
+    int i = this.inversed.size() - 1
+    while i >= 0
+        fvg = this.inversed.get(i)
+        if fvg.is_bullish_post_inverse == fvg_is_bullish and fvg.lifecycle != FVGLifecycle.Invalidated
+            this.invalidate_fvg(this.inversed.remove(i), reason = reason)
+        i -= 1
+
+// §3.8 — Eager pre-SMT cleanup (directional, detection_bar-bounded).
+//
+// Spec: "FVG must not have been inversed before the SMT was detected."
+// Pre-SMT iFVGs are permanently unusable, so we wipe them immediately when a new
+// SMT is detected rather than re-checking them on every bar until they expire.
+//
+// We filter by direction so only iFVGs relevant to the changed SMT are removed:
+//   - New bullish SMT (long entry) needs bearish iFVGs  → wipe bearish iFVGs pre-dating it
+//   - New bearish SMT (short entry) needs bullish iFVGs → wipe bullish iFVGs pre-dating it
+//
+// FVGs inversed on or after detection_bar are valid and left in place.
+// FVGs of the opposite alignment (e.g. bullish iFVGs when a bearish SMT just changed)
+// are left for the other SMT direction and not touched.
+//
+// NOTE: This is an optimisation over the spec, which implies a per-candidate check
+// inside find_entry_candidate_fvg. The result is identical because detection_bar
+// is set once at SMT creation and never changes.
+export method invalidate_fvgs_inversed_pre_smt(FVGBuffer this, st.SMTBuffer smt_buffer, bool enable_log = false) =>
+    int i = this.inversed.size() - 1
+    while i >= 0
+        fvg = this.inversed.get(i)
+        if fvg.is_bullish_post_inverse
+            if na(smt_buffer.best_bull_smt) or fvg.tf_inversion_bar.i_close < smt_buffer.best_bull_smt.detection_bar
+                string note = na(smt_buffer.best_bull_smt) ? "no bull SMT active when iFVG inversed" : "iFVG inversed before SMT was detected (pre-SMT eager wipe)"
+                log_entry_rejection(enable_log, fvg, EntryFilterReason.NoValidSMT, smt_buffer.best_bull_smt, note)
+                this.invalidate_fvg(this.inversed.remove(i), entry_block_reason = EntryFilterReason.NoValidSMT)
+        else
+            if na(smt_buffer.best_bear_smt) or fvg.tf_inversion_bar.i_close < smt_buffer.best_bear_smt.detection_bar
+                string note = na(smt_buffer.best_bear_smt) ? "no bear SMT active when iFVG inversed" : "iFVG inversed before SMT was detected (pre-SMT eager wipe)"
+                log_entry_rejection(enable_log, fvg, EntryFilterReason.NoValidSMT, smt_buffer.best_bear_smt, note)
+                this.invalidate_fvg(this.inversed.remove(i), entry_block_reason = EntryFilterReason.NoValidSMT)
+        i -= 1
+
+// §3.9 — Inner search helper: find the first qualifying HTF in htf_pool and apply park.
+// allow_override: when true, OverriddenByNewerLTF is stamped onto the HTF (only valid when
+//   both LTF and HTF are in items[]). When false, that result is skipped and the search continues.
+// Returns true if a park was applied.
+export method try_park_in(FVG this, FVG[] htf_pool, bool check_nested, bool check_untested, bool check_nearby, float nearby_threshold, bool check_newer_ltf) =>
+    bool found = false
+    for htf_fvg in htf_pool
+        if this.equals(htf_fvg)
+         or htf_fvg.lifecycle == FVGLifecycle.Invalidated
+         or htf_fvg.tf_id <= this.tf_id
+         or this.is_bullish_original != htf_fvg.is_bullish_original
+            continue
+        FVGFilterReason r = this.check_nested_in(htf_fvg, check_nested, check_untested, check_nearby, nearby_threshold, check_newer_ltf)
+        if not na(r)
+            if r == FVGFilterReason.OverriddenByNewerLTF
+                if check_newer_ltf
+                    htf_fvg.filter_reason    := r
+                    htf_fvg.draw_signal_text := true
+                    found := true
+                // else: skip this HTF, continue searching for a non-override match
+            else
+                this.filter_reason    := r
+                this.draw_signal_text := true
+                found := true
+            if found
+                break
+    found
+
+// §3.9 — Bidirectional HTF relation parking.
+//
+// Formation-time rule: newer FVG takes priority in all three spatial categories.
+//   LTF newer → HTF gets OverriddenByNewerLTF (soft-parked).
+//   HTF newer → LTF gets FullyNestedInHTF, PartiallyNestedInUntestedHTF, or NearbyHTF.
+//
+// Pass 1: Reset soft-park reasons on items[] so stale parks clear each evaluation.
+// Pass 2: For each active LTF in items[], find first qualifying HTF — items[] first
+//         (bidirectional, OverriddenByNewerLTF allowed), then inversed[] (LTF-park only).
+// Pass 3: For each WaitForRetest LTF in inversed[], find first qualifying HTF in items[]
+//         (LTF-park only — an already-inversed FVG is never stamped OverriddenByNewerLTF).
+export method update_htf_relations(FVGBuffer this,
+ bool enable_filter_by_full_nest_in_HTF_fvg,
+ bool enable_filter_by_untested,
+ bool enable_filter_by_edge_nearby_HTF_fvg, float nearby_HTF_threshold,
+ bool enable_filter_by_newer_LTF_fvg) =>
+
+    // Pass 1 — clear all soft-park reasons from items[]
+    for fvg in this.items
+        if fvg.filter_reason == FVGFilterReason.FullyNestedInHTF
+         or fvg.filter_reason == FVGFilterReason.PartiallyNestedInUntestedHTF
+         or fvg.filter_reason == FVGFilterReason.NearbyHTF
+         or fvg.filter_reason == FVGFilterReason.OverriddenByNewerLTF
+            fvg.filter_reason    := na
+            fvg.draw_signal_text := true
+
+    // Pass 2 — items[] LTFs: search items[] first (full logic), then inversed[] (LTF-park only)
+    for fvg in this.items
+        if fvg.lifecycle == FVGLifecycle.Invalidated
+         or fvg.filter_reason == FVGFilterReason.FullyNestedInHTF
+            continue
+        if not fvg.try_park_in(this.items,  enable_filter_by_full_nest_in_HTF_fvg, enable_filter_by_untested, enable_filter_by_edge_nearby_HTF_fvg, nearby_HTF_threshold, enable_filter_by_newer_LTF_fvg)
+            fvg.try_park_in    (this.inversed, enable_filter_by_full_nest_in_HTF_fvg, enable_filter_by_untested, enable_filter_by_edge_nearby_HTF_fvg, nearby_HTF_threshold, check_newer_ltf = false)
+
+    // Pass 3 — inversed[] LTFs: search items[] only, LTF-park only, no OverriddenByNewerLTF
+    for fvg in this.inversed
+        if fvg.lifecycle != FVGLifecycle.InversedWaitingForRetest or not na(fvg.filter_reason)
+            continue
+        fvg.try_park_in(this.items, enable_filter_by_full_nest_in_HTF_fvg, enable_filter_by_untested, enable_filter_by_edge_nearby_HTF_fvg, nearby_HTF_threshold, check_newer_ltf = false)
+
+
+
+// 4. Test Count / Inversion / Invalidation Detection Logic
+export method update_fvgs(FVGBuffer this,
+ string tf2, bool tf2_updated, float fvg2_o, float fvg2_h, float fvg2_l, float fvg2_c,
+ string tf3, bool tf3_updated, float fvg3_o, float fvg3_h, float fvg3_l, float fvg3_c,
+ string tf4, bool tf4_updated, float fvg4_o, float fvg4_h, float fvg4_l, float fvg4_c,
+ float min_inversion_distance, float max_inversion_distance,
+ FVGTestedByMode tested_by_mode, int max_tests_before_inverse) =>
+
+    // keep track of HTF bar starts, so we can plot sweeping HTF candles
+    // these are updated at START OF HTF BAR
+    var latest_tf2_time = time
+    var latest_tf2_idx  = bar_index
+    var latest_tf3_time = time
+    var latest_tf3_idx  = bar_index
+    var latest_tf4_time = time
+    var latest_tf4_idx  = bar_index
+
+    bool need_relation_update = false  // true when items[] state changed in a way that affects parking
+
+    // 4.1. Update Inversed Items (Check for "Re-Inversion" Invalidation)
+    int j = this.inversed.size() - 1
+    while j >= 0
+        FVG fvg = this.inversed.get(j)
+
+        // Timeout
+        if fvg.deprecate_at < time
+            this.invalidate_fvg(this.inversed.remove(j), FVGFilterReason.Expired)
+
+        // Re-Inverse / Invalidation
+        else if fvg.lifecycle != FVGLifecycle.Invalidated
+            [needs_inversion_check, c] = switch fvg.tf_id
+                1 => [true, close]
+                2 => [tf2_updated, fvg2_c]
+                3 => [tf3_updated, fvg3_c]
+                4 => [tf4_updated, fvg4_c]
+
+            if needs_inversion_check
+
+                // Re-Inverse / Fail
+                if fvg.is_bullish_post_inverse ? (fvg.bottom_right.price > c) : (fvg.top_left.price < c)
+                    fvg.fill_state       := FVGFillState.ReInversed
+                    this.invalidate_fvg(this.inversed.remove(j), FVGFilterReason.ReInversed)
+
+        j -= 1
+
+    // Re-evaluate filter reasons on any items[] change (new FVG, HTF removal, or HTF first test)
+    int i = this.items.size() - 1
+    while i >= 0
+        FVG fvg = this.items.get(i)
+
+        // Timeout
+        if fvg.deprecate_at < time
+            need_relation_update := true
+            this.invalidate_fvg(this.items.remove(i), FVGFilterReason.Expired)
+
+        // Inverse / Ready for Entry
+        else if fvg.lifecycle != FVGLifecycle.Invalidated
+            // this is detected at END OF HTF BAR (when request.security returns data)
+            bool needs_inversion_check = switch fvg.tf_id
+                1 => true
+                2 => tf2_updated
+                3 => tf3_updated
+                4 => tf4_updated
+
+            // used for SL override if FVG created Swing (and Swing point is not swept)
+            if fvg.is_bullish_original
+                if fvg.hh < high
+                    fvg.hh := na
+            else
+                if fvg.ll > low
+                    fvg.ll := na
+
+            if needs_inversion_check
+                [o, h, l, c, bt, bi] = switch fvg.tf_id
+                    1 => [open, high, low, close, time, bar_index]
+                    2 => [fvg2_o, fvg2_h, fvg2_l, fvg2_c, latest_tf2_time, latest_tf2_idx]
+                    3 => [fvg3_o, fvg3_h, fvg3_l, fvg3_c, latest_tf3_time, latest_tf3_idx]
+                    4 => [fvg4_o, fvg4_h, fvg4_l, fvg4_c, latest_tf4_time, latest_tf4_idx]
+
+                // Inversion check §1.3 "FVG Inversion +/- buffer of 0.25 pts"
+                float inversion_distance = fvg.is_bullish_original
+                 ? fvg.bottom_right.price - c
+                 : c - fvg.top_left.price
+
+                if min_inversion_distance <= inversion_distance
+
+                    // §3.6 "Inversion Distance Rule" and §4 Phase 6
+                    if max_inversion_distance < inversion_distance
+                        fvg.is_inversed          := true
+                        need_relation_update     := true
+                        this.invalidate_fvg(this.items.remove(i), FVGFilterReason.InversionTooFar)
+
+                    // mark inversed
+                    else
+                        fvg.is_active            := false
+                        fvg.is_inversed          := true
+                        fvg.fill_state           := FVGFillState.Inversed
+
+                        fvg.lifecycle            := FVGLifecycle.InversedWaitingForRetest
+
+                        fvg.bottom_right.index   := bar_index
+                        fvg.draw_signal_inversed := true
+                        fvg.draw_signal_text     := true
+
+                        fvg.tf_inversion_bar     := Bar.new(o, h, l, c, math.max(o,c), math.min(o,c), bt, bi)
+                        fvg.inversion_idx        := bar_index
+
+                        need_relation_update     := true
+                        this.inversed.push(this.items.remove(i))
+
+                else if not fvg.is_inversed and fvg.bottom_right.index < bar_index
+                    // Standard Testing Logic (using bar on FVG's own TF)
+                    [bar_top, bar_bottom] = switch tested_by_mode
+                        FVGTestedByMode.Body => [math.max(o, c), math.min(o, c)]
+                        FVGTestedByMode.Wick => [h, l]
+
+                    if fvg.bottom_right.price <= bar_top and bar_bottom <= fvg.top_left.price
+                        fvg.test_count += 1
+                        fvg.draw_signal_text := true
+
+                        if na(fvg.first_test_idx)
+                            fvg.first_test_idx := bar_index
+                            fvg.fill_state := FVGFillState.Tested
+                            fvg.sl_level   := fvg.is_bullish_original ? h : l
+                            // HTF first test may un-park LTFs blocked by untested HTF
+                            if fvg.tf_id > 1
+                                need_relation_update := true
+
+                        // §3.5 — max bars to inverse: London 4, NY 6 (on FVG's own TF)
+                        else if max_tests_before_inverse < fvg.test_count
+                            need_relation_update := true
+                            this.invalidate_fvg(this.items.remove(i), FVGFilterReason.MaxTestsExceeded)
+
+                        else if fvg.is_bullish_original ? fvg.sl_level < h : fvg.sl_level > l
+                            fvg.sl_level := fvg.is_bullish_original ? h : l
+        i -= 1
+
+    // these are updated at START OF HTF BAR
+    if timeframe.change(tf2)
+        latest_tf2_time := time
+        latest_tf2_idx  := bar_index
+    if timeframe.change(tf3)
+        latest_tf3_time := time
+        latest_tf3_idx  := bar_index
+    if timeframe.change(tf4)
+        latest_tf4_time := time
+        latest_tf4_idx  := bar_index
+
+    need_relation_update
+
+
+// 5. Selection Method: Finds and extracts the iFVG closest to current price
+export method find_next_best_waiting_fvgs(FVGBuffer this, st.SMTBuffer smt_buffer) =>
+
+    FVG next_best_bullish = na
+    FVG next_best_bearish = na
+
+    float min_dist_bullish = 1e10
+    float min_dist_bearish = 1e10
+
+    bool find_bullish = not na(smt_buffer.best_bull_smt)
+    bool find_bearish = not na(smt_buffer.best_bear_smt)
+
+    for fvg in this.items
+
+        if fvg.lifecycle == FVGLifecycle.WaitForInverse and na(fvg.filter_reason)
+
+            if find_bullish and fvg.is_bullish_post_inverse
+                float dist = math.abs(fvg.distance_to_price_post_inverse(close))
+                if dist < min_dist_bullish
+                    min_dist_bullish := dist
+                    next_best_bullish := fvg
+
+            if find_bearish and not fvg.is_bullish_post_inverse
+                float dist = math.abs(fvg.distance_to_price_post_inverse(close))
+                if dist < min_dist_bearish
+                    min_dist_bearish := dist
+                    next_best_bearish := fvg
+
+    [next_best_bullish, next_best_bearish]
+
+export method find_entry_candidate_fvg(FVGBuffer this, st.SMTBuffer smt_buffer, bool enable_filter_by_inversion_bar_close_in_untested_HTF_fvg, bool enable_log = false) =>
+    // Scan inversed[] directly each bar (not signals — those are single-bar pulses reset via signals.reset()).
+    // only FVGs inversed on this bar are eligible — single-bar entry window.
+    FVG bullish_candidate = na
+    FVG bearish_candidate = na
+
+    bool find_bullish = not na(smt_buffer.best_bull_smt)
+    bool find_bearish = not na(smt_buffer.best_bear_smt)
+
+    for fvg in this.inversed
+        if fvg.lifecycle != FVGLifecycle.InversedWaitingForRetest
+            continue
+        // Entry only on inverse bar: only consider FVGs inversed on this bar
+        if fvg.inversion_idx != bar_index
+            continue
+        // Skip FVGs parked by nesting rules — they are subordinate to an active HTF FVG
+        if not na(fvg.filter_reason)
+            continue
+
+        if find_bullish and fvg.is_bullish_post_inverse and fvg.is_higher_tf_or_closer_to_price_than(bullish_candidate)
+            bullish_candidate := fvg
+        if find_bearish and not fvg.is_bullish_post_inverse and fvg.is_higher_tf_or_closer_to_price_than(bearish_candidate)
+            bearish_candidate := fvg
+
+        // 9c2. §3.9 — Reference close-inside-untested-HTF entry block (isCloseInsideOtherUntestedFVG).
+        // If the current close is inside an untested higher-TF FVG of the same original direction,
+        // block entry for this bar. The iFVG stays in inversed[] and is re-evaluated next bar.
+        // This is the reference implementation behaviour — distinct from the spec's geometric parking.
+        if enable_filter_by_inversion_bar_close_in_untested_HTF_fvg
+         and barstate.isconfirmed
+         and not (na(bullish_candidate) and na(bearish_candidate))
+            for htf_fvg in this.items
+
+                if htf_fvg.lifecycle == FVGLifecycle.Invalidated
+                 or not na(htf_fvg.filter_reason)
+                 or htf_fvg.test_count > 0 and htf_fvg.first_test_idx < bar_index
+                    continue
+
+                bool closed_inside_untested_htf = close >= htf_fvg.bottom_right.price
+                 and close <= htf_fvg.top_left.price
+
+                if htf_fvg.is_bullish_original // HTF bullish
+                 and not na(bullish_candidate) // LTF bullish
+                 and bullish_candidate.tf_id < htf_fvg.tf_id
+                 and closed_inside_untested_htf
+                    log_entry_rejection(enable_log, bullish_candidate, EntryFilterReason.BlockedByUntestedHTF, na, str.format("close inside untested HTF FVG ({0}m, top={1}, bot={2})", htf_fvg.tf, str.tostring(htf_fvg.top_left.price, format.mintick), str.tostring(htf_fvg.bottom_right.price, format.mintick)))
+                    bullish_candidate.entry_filter_reason := EntryFilterReason.BlockedByUntestedHTF
+                    bullish_candidate.draw_signal_text    := true
+                    bullish_candidate := na
+
+
+                if not htf_fvg.is_bullish_original // HTF bearish
+                 and not na(bearish_candidate)     // LTF bearish
+                 and bearish_candidate.tf_id < htf_fvg.tf_id
+                 and closed_inside_untested_htf
+                    log_entry_rejection(enable_log, bearish_candidate, EntryFilterReason.BlockedByUntestedHTF, na, str.format("close inside untested HTF FVG ({0}m, top={1}, bot={2})", htf_fvg.tf, str.tostring(htf_fvg.top_left.price, format.mintick), str.tostring(htf_fvg.bottom_right.price, format.mintick)))
+                    bearish_candidate.entry_filter_reason := EntryFilterReason.BlockedByUntestedHTF
+                    bearish_candidate.draw_signal_text    := true
+                    bearish_candidate := na
+
+    if na(bearish_candidate)
+        bullish_candidate // could be na, so we have no candidate
+    else if na(bullish_candidate)
+        bearish_candidate
+    else if bullish_candidate.tf_id > bearish_candidate.tf_id
+        // fallback for rare cases where we have a 5m bull inversed at the same time as a 1m bear
+        bullish_candidate
+    else
+        bearish_candidate
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     FVG detection
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        FVG detection draw functions
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+export method draw_bar(Bar this, bool is_bullish, color bgcolor, color border_color, color labelcolor, string txt, bool show_box) =>
+    if not na(this)
+        if na(this.bar_box) and show_box
+            this.bar_box := box.new(this.t_open, this.top, this.t_close, this.btm, border_color, 1, line.style_solid, extend.none, xloc.bar_time, bgcolor, force_overlay = true)
+        if na(this.bar_label)
+            if is_bullish
+                this.bar_label := label.new(this.t_close, this.top, txt, xloc.bar_time, color = labelcolor, style = label.style_label_down, size = size.tiny, force_overlay = true)
+            else
+                this.bar_label := label.new(this.t_close, this.btm, txt, xloc.bar_time, color = labelcolor, style = label.style_label_up  , size = size.tiny, force_overlay = true)
+
+// Tooltip helper: invisible label with hover region anchored to a box's top-left corner.
+// Pine v6 `box.new` does not accept a `tooltip` parameter; this wraps the workaround so
+// FVG and Session insights can expose detail on hover without cluttering the chart inline.
+make_tooltip_anchor(box b, string tip, const bool force_overlay = true) =>
+    label.new(chart.point.from_time(b.get_left(), b.get_top()),
+              "", style = label.style_none, color = #00000000,
+              tooltip = tip, xloc = xloc.bar_time, force_overlay = force_overlay)  
+
+// 6. Unified Drawing Logic
+// `debug` parameter (mapped from `show_fvg_verbose` input) controls inline text:
+//   - debug=false: visible text empty; full reason routed to a hover-only tooltip anchor (label.style_none)
+//   - debug=true : visible text restored to today's `{tf}m {↗/↘} | {reason}{count}` inline format
+// Tooltip anchors are only created for FVGs with meaningful state (lifecycle != WaitForInverse OR
+// already classified by filter_reason) — keeps label budget bounded.
+export method draw_fvg(FVG this, color color_bull, color color_bear, bool debug = false) =>
+
+    bool signal_update_txt = na(this.fvg_box) or this.draw_signal_inversed or this.draw_signal_text or debug
+    string visible_txt = ""
+    string tooltip_txt = ""
+    if signal_update_txt
+        // Build full detailed reason once; used for tooltip + verbose inline.
+        string reason = ""
+        if not na(this.filter_reason)
+            reason := str.tostring(this.filter_reason)
+        if not na(this.entry_filter_reason)
+            reason := reason + (reason == "" ? "" : " + ") + str.tostring(this.entry_filter_reason)
+        if reason == ""
+            reason := str.tostring(this.lifecycle)
+
+        bool show_count = (na(this.filter_reason) or this.filter_reason == FVGFilterReason.MaxTestsExceeded) and na(this.entry_filter_reason)
+         and (this.fill_state == FVGFillState.Tested or this.fill_state == FVGFillState.Inversed)
+         and this.test_count > 0
+        string count_txt = show_count ? str.format(" ({0})", this.test_count) : ""
+        string dir       = this.is_bullish_original ? '↗' : '↘'
+
+        tooltip_txt := str.format("{0}m {1} | {2}{3}", this.tf, dir, reason, count_txt)
+        visible_txt := debug ? tooltip_txt : ""
+
+    // draw
+    if na(this.fvg_box)
+        color bgcolor = (this.is_inversed ? this.is_bullish_post_inverse : this.is_bullish_original) ? color_bull : color_bear
+        this.fvg_box := box.new(this.top_left, chart.point.now(this.bottom_right.price), text = visible_txt, bgcolor = bgcolor, border_color = #00000000, xloc = xloc.bar_time, text_size = size.tiny, text_halign = debug ? text.align_right : text.align_center , force_overlay = true)
+
+    // extend
+    else
+        // hot path
+        this.fvg_box.set_right(time)
+
+        if this.draw_signal_reset_candidate
+            this.draw_signal_reset_candidate := false
+            this.draw_signal_set_candidate   := false
+            this.fvg_box.set_border_width(0)
+
+        if this.draw_signal_highlight
+            this.draw_signal_highlight := false
+            this.fvg_box.set_border_width(1)
+            this.fvg_box.set_border_style(line.style_solid)
+            this.fvg_box.set_border_color(color.yellow)
+
+        else if this.draw_signal_set_candidate
+            this.draw_signal_set_candidate := false
+            this.fvg_box.set_border_width(2)
+            this.fvg_box.set_border_style(line.style_dashed)
+            this.fvg_box.set_border_color((this.is_inversed ? this.is_bullish_post_inverse : this.is_bullish_original) ? color.new(color_bull, 0) : color.new(color_bear, 0))
+
+        if this.draw_signal_inversed or debug
+            this.draw_signal_inversed := false
+            this.fvg_box.set_bgcolor((this.is_inversed ? this.is_bullish_post_inverse : this.is_bullish_original) ? color_bull : color_bear)
+
+        if signal_update_txt
+            this.draw_signal_text := false
+            this.fvg_box.set_text(visible_txt)
+
+    // Hover anchor — only for meaningful lifecycle states (skips bulk untested FVGs).
+    bool needs_tooltip = this.lifecycle != FVGLifecycle.WaitForInverse or not na(this.filter_reason) or not na(this.entry_filter_reason)
+    if signal_update_txt and tooltip_txt != "" and needs_tooltip
+        if na(this.tooltip_label)
+            this.tooltip_label := make_tooltip_anchor(this.fvg_box, tooltip_txt, true)
+        else
+            this.tooltip_label.set_tooltip(tooltip_txt)
+
+    this
+
+export method draw_fvgs(FVG[] this, color color_bull, color color_bear, bool debug = false) =>
+    for fvg in this
+        fvg.draw_fvg(color_bull, color_bear, debug)
+    this
+
+
+// 7. Visual Update: Highlight the entry_fvg iFVG
+export method draw_entry_fvg(FVG this, simple color color_bull, simple color color_bear, bool debug = false) =>
+    if debug
+        this.draw_signal_highlight := true
+    this.draw_fvg(color_bull, color_bear, debug)
+
+export method delete_fvgs(FVG[] this) =>
+    for fvg in this
+        fvg.delete_fvg()
+    this
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     FVG detection draw functions
+///////////////////////////////////////////////////////////////////////////////////////////////////

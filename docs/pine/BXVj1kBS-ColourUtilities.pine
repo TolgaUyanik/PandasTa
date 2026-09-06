@@ -1,0 +1,651 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+// @description     Utility functions for colour manipulation.
+// @author          GoemonYae, 2024-04 – 2026-01
+library("ColourUtilities", overlay=false)
+
+const int VERSION = 8
+
+import GoemonYae/FiltersToolkit/2 as filt
+
+
+//==================================================================//
+//#region                      CONTENT                              //
+//==================================================================//
+//
+// * adjust_colour (with dark_mode support for background-aware desaturation)
+// * get_average_colour
+// * `Palette` type with following methods:
+//     - add_colour
+//     - apply_default_palette
+//     - get_colour
+//     - get_gradient_colour  (value-to-colour mapping with optional mid_point for asymmetric value_ranges)
+//     - get_adaptive_line_colour  (RECOMMENDED: dark_mode aware line colouring)
+//     - get_adaptive_fill_colour  (RECOMMENDED: dark_mode aware fill colouring)
+//     - get_momentum_colour  (direction-aware momentum colouring)
+//
+//#endregion
+
+
+//==================================================================//
+//#region                  INTERNAL HELPERS                         //
+//==================================================================//
+
+// @function            Adjust a single colour component with desaturation, smoothing, and clipping.
+// @param component     <float> The colour component value (0-255).
+// @param avg           <float> Average of all RGB components.
+// @param adjustment_factor <float> How much to adjust towards the target.
+// @param smoothen_amount <int> SuperSmoother critical period, or `na` to skip.
+// @param min_val       <int> Minimum allowed value.
+// @param max_val       <int> Maximum allowed value.
+// @param dark_mode     <bool> When true, desaturate towards black; when false, towards grey.
+// @returns             <float> The adjusted component value.
+_adjust_colour_component(
+	float component,
+	float avg,
+	float adjustment_factor,
+	int smoothen_amount,
+	int min_val,
+	int max_val,
+	bool dark_mode
+) =>
+	// Dark mode: desaturate towards black (0), Light mode: desaturate towards grey (avg)
+	float desat_target = dark_mode ? 0.0 : avg
+	float adjusted = component + (desat_target - component) * adjustment_factor
+	if not na(smoothen_amount)
+		adjusted := math.min(
+			math.max(
+				math.round(filt.super_smoother_2pole(adjusted, smoothen_amount)),
+				min_val
+			),
+			max_val
+		)
+	adjusted
+
+
+// @function            Darken a colour by reducing its RGB values proportionally (preserves hue, reduces brightness).
+// @param rgb           <color> The input colour.
+// @param darken_factor <float> How much to darken (0 = no change, 1 = black).
+// @returns             <color> Darkened colour.
+_darken_colour(color rgb, float darken_factor) =>
+	float factor = 1.0 - math.max(0.0, math.min(1.0, darken_factor))
+	int r = math.round(color.r(rgb) * factor)
+	int g = math.round(color.g(rgb) * factor)
+	int b = math.round(color.b(rgb) * factor)
+	color.rgb(r, g, b, color.t(rgb))
+
+//#endregion
+
+
+//==================================================================//
+//#region                 EXPORTED FUNCTIONS                        //
+//==================================================================//
+
+// @function            Reduces saturation, increases transparency, or smoothens an RGB colour between subsequent bars.
+// @param rgb           <color> The input colour.
+// @param desaturation_amount <float> 0 = no desaturation, 1 = full desaturation (grey/black depending on dark_mode). Negative values increase saturation.
+// @param transparency_amount <float> How much more transparent the colour should become. Range: -1 to 1.
+// @param smoothen_amount <int> If not `na`, uses 2-pole SuperSmoother to smoothen colour transitions. Should be between 5 and 500.
+// @param dark_mode     <bool> When true, desaturation moves towards black instead of grey. Default = false.
+// @returns             <color> Colour with adjusted saturation, transparency, and smoothing.
+export adjust_colour(
+	color rgb,
+	float desaturation_amount = 0,
+	float transparency_amount = 0,
+	int smoothen_amount = na,
+	bool dark_mode = false
+) =>
+	bool invalid_desat = desaturation_amount < -1 or desaturation_amount > 1
+	bool invalid_transp = transparency_amount < -1 or transparency_amount > 1
+	bool invalid_smooth = na(smoothen_amount) ? false : (smoothen_amount < 5 or smoothen_amount > 500)
+
+	if invalid_desat or invalid_transp or invalid_smooth
+		runtime.error(
+			"In `adjust_colour()`: `desaturation_amount` and `transparency_amount` must be between -1 and 1; "
+				+ "`smoothen_amount` must be between 5 and 500, or `na`."
+		)
+
+	// Compute colours
+	float avg = math.avg(color.r(rgb), color.g(rgb), color.b(rgb))
+	float r_adj = _adjust_colour_component(color.r(rgb), avg, desaturation_amount, smoothen_amount, 0, 255, dark_mode)
+	float g_adj = _adjust_colour_component(color.g(rgb), avg, desaturation_amount, smoothen_amount, 0, 255, dark_mode)
+	float b_adj = _adjust_colour_component(color.b(rgb), avg, desaturation_amount, smoothen_amount, 0, 255, dark_mode)
+
+	// Compute transparency
+	int alpha = int(color.t(rgb))
+	int alpha_adj = alpha + math.max(math.min(100, math.round((100 - alpha) * transparency_amount)), 0)
+	if not na(smoothen_amount)
+		alpha_adj := math.min(
+			math.max(math.round(filt.super_smoother_2pole(alpha_adj, smoothen_amount)), 0),
+			100
+		)
+
+	color.rgb(r_adj, g_adj, b_adj, alpha_adj)
+
+
+// @function            Returns the average of two colours. Weights and output transparency can be overridden.
+// @param c1            <color> First colour to be averaged.
+// @param c2            <color> Second colour to be averaged.
+// @param c1_weight     <float> Weight for the first colour. Default = 0.5 (equal weights). The second colour weight is `1 - c1_weight`.
+// @param transparency  <int> Override transparency (0-100). Default `na` uses average of both colours.
+// @returns             <color> Averaged colour.
+export get_average_colour(
+	color c1,
+	color c2,
+	float c1_weight = 0.5,
+	int transparency = na
+) =>
+	float c2_weight = 1 - c1_weight
+	int red = math.min(math.max(math.round(c1_weight * color.r(c1) + c2_weight * color.r(c2)), 0), 255)
+	int green = math.min(math.max(math.round(c1_weight * color.g(c1) + c2_weight * color.g(c2)), 0), 255)
+	int blue = math.min(math.max(math.round(c1_weight * color.b(c1) + c2_weight * color.b(c2)), 0), 255)
+	int transp = math.min(
+		math.max(
+			na(transparency) ? math.round(c1_weight * color.t(c1) + c2_weight * color.t(c2)) : transparency,
+			0
+		),
+		100
+	)
+	color.rgb(red, green, blue, transp)
+
+
+// @function            Returns an appropriate zero-line colour based on dark/light mode.
+// @param dark_mode     <bool> When true, returns a dark zero-line colour. Default = false.
+// @param transparency  <int> Transparency of the zero line (0-100). Default = 70.
+// @returns             <color> Zero-line colour.
+export get_zero_line_colour(bool dark_mode = false, int transparency = 70) =>
+	dark_mode ? color.new(#1a1a2e, transparency) : color.new(color.gray, transparency)
+
+//#endregion
+
+
+//==================================================================//
+//#region                    PALETTE ENUM                           //
+//==================================================================//
+
+// @enum                    Names of available pre-defined colour palettes.
+// @field gyts_purple       GYTS pink-purple gradient (bearish pink → bullish purple).
+// @field gyts_green        GYTS pink-green gradient (bearish pink → bullish green).
+// @field deep_purple       Deep Purple gradient (darker → lighter purple).
+// @field rainbow           (Ritchie Blackmore's) Rainbow gradient (bearish turquoise → green → orange → purple).
+// @field pink_floyd        Pink Floyd gradient (magenta → orange).
+// @field whitesnake        Whitesnake gradient (muted pink → muted green).
+// @field golden_earring    Golden Earring (purple → yellow/gold).
+// @field black_sabbath     Black Sabbath gradient (dark red → teal).
+// @field blue_oyster_cult  Blue Öyster Cult (orange → blue).
+// @field maroon5           Maroon 5 gradient (pink → cyan).
+// @field green_day         Green Day gradient (yellow → green).
+// @field aqua              Aqua gradient (cyan → deep blue).
+// @field violet_road       Violet Road gradient (purple → green).
+export enum PaletteNames
+	gyts_purple      = 'GYTS pink-purple'
+	gyts_green       = 'GYTS pink-green'
+	deep_purple      = 'Deep Purple'
+	rainbow          = 'Rainbow'
+	pink_floyd       = 'Pink Floyd'
+	whitesnake       = 'Whitesnake'
+	golden_earring   = 'Golden Earring'
+	black_sabbath    = 'Black Sabbath'
+	blue_oyster_cult = 'Blue Öyster Cult' 
+	maroon5          = 'Maroon 5'
+	green_day        = 'Green Day'
+	aqua             = 'Aqua'
+	violet_road      = 'Violet Road'
+
+//#endregion
+
+
+//==================================================================//
+//#region                    PALETTE TYPE                           //
+//==================================================================//
+
+// @type                Colour palette container with methods for gradient and adaptive colouring.
+// @field transparency  <int> Default transparency applied when retrieving colours.
+// @field palette       <array<color>> Internal array of colours in the palette.
+export type Palette
+	int transparency = 0
+	array<color> palette = na
+
+
+// @function            Add a colour to the Palette. Colours can be retrieved by index.
+// @param self          <Palette> The palette instance.
+// @param colour        <color> The colour to add.
+// @returns             <Palette> The palette instance (for chaining).
+export method add_colour(Palette self, color colour) =>
+	if na(self.palette)
+		self.palette := array.new<color>(1, colour)
+	else
+		self.palette.push(colour)
+	self
+
+
+// @function            Applies one of the pre-defined 6-colour gradient palettes.
+// @param self          <Palette> The palette instance.
+// @param palette_name  <PaletteNames> The enum name of the palette to apply.
+// @returns             <Palette> The palette instance (for chaining).
+export method apply_default_palette(Palette self, PaletteNames palette_name) =>
+	switch palette_name
+		PaletteNames.gyts_purple =>
+			self.add_colour(color.new(#C94264, 0))  // from bearish...
+			self.add_colour(color.new(#EC7298, 0))
+			self.add_colour(color.new(#F6ADCD, 0))
+			self.add_colour(color.new(#ABB0F5, 0))
+			self.add_colour(color.new(#7272ED, 0))
+			self.add_colour(color.new(#4242C9, 0))  // ...to bullish
+
+		PaletteNames.gyts_green =>
+			self.add_colour(color.new(#C94264, 0))  // from bearish...
+			self.add_colour(color.new(#EC7298, 0))
+			self.add_colour(color.new(#F6ADCD, 0))
+			self.add_colour(color.new(#9DCBBA, 0))
+			self.add_colour(color.new(#129490, 0))
+			self.add_colour(color.new(#065143, 0))  // ...to bullish
+
+		PaletteNames.deep_purple =>
+			self.add_colour(color.new(#953CB3, 0))  // from bearish...
+			self.add_colour(color.new(#9753BF, 0))
+			self.add_colour(color.new(#9A6ACB, 0))
+			self.add_colour(color.new(#9C81D6, 0))
+			self.add_colour(color.new(#9F98E2, 0))
+			self.add_colour(color.new(#A1AFEE, 0))  // ...to bullish
+
+		PaletteNames.rainbow =>
+			self.add_colour(color.new(#33A8C7, 0))  // from bearish...
+			self.add_colour(color.new(#A0E426, 0))
+			self.add_colour(color.new(#FDF148, 0))
+			self.add_colour(color.new(#FFAB00, 0))
+			self.add_colour(color.new(#F050AE, 0))
+			self.add_colour(color.new(#9336FD, 0))  // ...to bullish
+
+		PaletteNames.pink_floyd =>
+			self.add_colour(color.new(#FF51EB, 0))  // from bearish...
+			self.add_colour(color.new(#FC67D2, 0))
+			self.add_colour(color.new(#FA7DB8, 0))
+			self.add_colour(color.new(#F7939F, 0))
+			self.add_colour(color.new(#F5A985, 0))
+			self.add_colour(color.new(#F2BF6C, 0))  // ...to bullish
+
+		PaletteNames.whitesnake =>
+			self.add_colour(color.new(#E69699, 0))  // from bearish...
+			self.add_colour(color.new(#DDA09F, 0))
+			self.add_colour(color.new(#D5AAA5, 0))
+			self.add_colour(color.new(#CCB3AC, 0))
+			self.add_colour(color.new(#C4BDB2, 0))
+			self.add_colour(color.new(#BBC7B8, 0))  // ...to bullish
+
+		PaletteNames.golden_earring =>
+			self.add_colour(color.new(#7718D0, 0))  // from bearish...
+			self.add_colour(color.new(#863BAD, 0))
+			self.add_colour(color.new(#955F8B, 0))
+			self.add_colour(color.new(#A58268, 0))
+			self.add_colour(color.new(#B4A646, 0))
+			self.add_colour(color.new(#C3C923, 0))  // ...to bullish
+
+		PaletteNames.black_sabbath =>
+			self.add_colour(color.new(#BB2D38, 0))  // from bearish...
+			self.add_colour(color.new(#A44149, 0))
+			self.add_colour(color.new(#8C565A, 0))
+			self.add_colour(color.new(#756A6C, 0))
+			self.add_colour(color.new(#5D7F7D, 0))
+			self.add_colour(color.new(#46938E, 0))  // ...to bullish
+
+		PaletteNames.blue_oyster_cult =>
+			self.add_colour(color.new(#F4A261, 0))  // from bearish...
+			self.add_colour(color.new(#CFA379, 0))
+			self.add_colour(color.new(#A9A592, 0))
+			self.add_colour(color.new(#84A6AA, 0))
+			self.add_colour(color.new(#5EA8C3, 0))
+			self.add_colour(color.new(#39A9DB, 0))  // ...to bullish
+
+		PaletteNames.maroon5 =>
+			self.add_colour(color.new(#E85C90, 0))  // from bearish...
+			self.add_colour(color.new(#CB79A2, 0))
+			self.add_colour(color.new(#AE97B5, 0))
+			self.add_colour(color.new(#92B4C7, 0))
+			self.add_colour(color.new(#75D2DA, 0))
+			self.add_colour(color.new(#58EFEC, 0))  // ...to bullish
+
+		PaletteNames.green_day =>
+			self.add_colour(color.new(#D6C41E, 0))  // from bearish...
+			self.add_colour(color.new(#B3B823, 0))
+			self.add_colour(color.new(#90AC29, 0))
+			self.add_colour(color.new(#6CA12E, 0))
+			self.add_colour(color.new(#499534, 0))
+			self.add_colour(color.new(#268939, 0))  // ...to bullish
+
+		PaletteNames.aqua =>
+			self.add_colour(color.new(#44DBB8, 0))  // from bearish...
+			self.add_colour(color.new(#3FB5BE, 0))
+			self.add_colour(color.new(#3A8FC4, 0))
+			self.add_colour(color.new(#346ACA, 0))
+			self.add_colour(color.new(#2F44D0, 0))
+			self.add_colour(color.new(#2A1ED6, 0))  // ...to bullish
+
+		PaletteNames.violet_road =>
+			self.add_colour(color.new(#9044D6, 0))  // from bearish...
+			self.add_colour(color.new(#8463CA, 0))
+			self.add_colour(color.new(#7883BE, 0))
+			self.add_colour(color.new(#6DA2B3, 0))
+			self.add_colour(color.new(#61C2A7, 0))
+			self.add_colour(color.new(#55E19B, 0))  // ...to bullish
+
+	self
+
+
+// @function            Retrieves a colour from the palette by index, optionally overriding transparency.
+// @param self          <Palette> The palette instance.
+// @param colour_no     <int> Index of the colour (1-based). In default palettes, bearish colours are first.
+// @param transparency  <int> Override transparency (0-100). Default `na` uses palette's default transparency.
+// @returns             <color> The requested colour.
+export method get_colour(Palette self, int colour_no, int transparency = na) =>
+	if na(self.palette)
+		runtime.error(
+			"Error in `get_colour()`: Palette is not defined. "
+				+ "Use `apply_default_palette()` or `add_colour()` first."
+		)
+	else if colour_no > self.palette.size()
+		runtime.error(
+			"Error in `get_colour()`: `colour_no` (" + str.tostring(colour_no) + ") "
+				+ "exceeds palette size (" + str.tostring(self.palette.size()) + ")."
+		)
+
+	color.new(self.palette.get(colour_no - 1), nz(transparency, self.transparency))
+
+
+// @function            Maps a value to a colour using a smooth gradient across the palette.
+//                      Use for oscillators, normalised indicators, or any bounded value.
+// @param self          <Palette> The palette instance.
+// @param value         <float> The value to map to a colour.
+// @param value_min     <float> Value mapping to the first colour (bearish). Default = -1.0.
+// @param value_max     <float> Value mapping to the last colour (bullish). Default = 1.0.
+// @param mid_point     <float> Optional. Defines where the neutral/middle colour appears.
+//                      Useful for asymmetric ranges (e.g., min=-0.4, max=0.6, mid=0.0).
+// @returns             <color> Colour from the palette based on where value falls in the range.
+export method get_gradient_colour(
+	Palette self,
+	float value,
+	float value_min = -1.0,
+	float value_max = 1.0,
+	float mid_point = na
+) =>
+	int n = self.palette.size()
+	if na(mid_point)
+		// Simple linear gradient across full palette
+		color.from_gradient(value, value_min, value_max, self.get_colour(1), self.get_colour(n))
+	else
+		// Two-segment gradient with mid_point as the neutral colour
+		int mid = int(math.ceil(n / 2.0))
+		if value >= mid_point
+			color.from_gradient(value, mid_point, value_max, self.get_colour(mid), self.get_colour(n))
+		else
+			color.from_gradient(value, value_min, mid_point, self.get_colour(1), self.get_colour(mid))
+
+
+// @function            RECOMMENDED: Returns line colour with automatic dark/light mode adaptation.
+//                      Dark mode: Directional colours that darken near zero for visibility.
+//                      Light mode: Smooth gradient from bearish to bullish colours.
+// @param self          <Palette> The palette instance.
+// @param value         <float> The signal value to map.
+// @param value_min     <float> Value mapping to bearish colour. Default = -1.0.
+// @param value_max     <float> Value mapping to bullish colour. Default = 1.0.
+// @param value_mid     <float> Optional. Defines the neutral point. Default = average of min/max.
+// @param dark_mode     <bool> When true, uses dark-mode optimised colouring. Default = false.
+// @returns             <color> Line colour optimised for the background.
+export method get_adaptive_line_colour(
+	Palette self,
+	float value,
+	float value_min = -1.0,
+	float value_max = 1.0,
+	float value_mid = na,
+	bool dark_mode = false
+) =>
+	int n = self.palette.size()
+	int mid = int(math.ceil(n / 2.0))
+	float mid_point = na(value_mid) ? (value_min + value_max) / 2.0 : value_mid
+	bool is_bullish = value >= mid_point
+
+	// Calculate magnitude (0 at midpoint, 1 at extremes)
+	float range_span = is_bullish ? (value_max - mid_point) : (mid_point - value_min)
+	range_span := range_span == 0 ? 0.0001 : range_span
+	float magnitude = math.min(math.abs(value - mid_point) / range_span, 1.0)
+
+	color result = na
+	if dark_mode
+		// Dark mode: Directional colours that darken near zero
+		// Use colours near the extremes (index 2 and n-1) for better saturation
+		color directional = is_bullish ? self.get_colour(n - 1) : self.get_colour(2)
+		float darken_amount = (1.0 - magnitude) * 0.75
+		result := _darken_colour(directional, darken_amount)
+	else
+		// Light mode: Smooth gradient through the palette
+		if is_bullish
+			result := color.from_gradient(value, mid_point, value_max, self.get_colour(mid), self.get_colour(n))
+		else
+			result := color.from_gradient(value, value_min, mid_point, self.get_colour(1), self.get_colour(mid))
+
+	result
+
+
+// @function            RECOMMENDED: Returns fill colour with automatic dark/light mode adaptation.
+//                      Uses directional colours with magnitude-based intensity ("neon glow" effect).
+// @param self          <Palette> The palette instance.
+// @param value         <float> The signal value to map.
+// @param value_min     <float> Value mapping to bearish colour. Default = -1.0.
+// @param value_max     <float> Value mapping to bullish colour. Default = 1.0.
+// @param value_mid     <float> Optional. Defines the neutral point. Default = average of min/max.
+// @param dark_mode     <bool> When true, uses dark-mode optimised transparency. Default = false.
+// @param base_transp   <float> Minimum transparency at maximum magnitude (0-1). Default = 0.25.
+// @param fade_transp   <float> Maximum transparency near zero (0-1). Default = 0.92.
+// @returns             <color> Fill colour with appropriate transparency.
+export method get_adaptive_fill_colour(
+	Palette self,
+	float value,
+	float value_min = -1.0,
+	float value_max = 1.0,
+	float value_mid = na,
+	bool dark_mode = false,
+	float base_transp = 0.25,
+	float fade_transp = 0.92
+) =>
+	int n = self.palette.size()
+	float mid_point = na(value_mid) ? (value_min + value_max) / 2.0 : value_mid
+	bool is_bullish = value >= mid_point
+
+	// Calculate magnitude with non-linear curve for dramatic effect at extremes
+	float range_span = is_bullish ? (value_max - mid_point) : (mid_point - value_min)
+	range_span := range_span == 0 ? 0.0001 : range_span
+	float magnitude = math.min(math.abs(value - mid_point) / range_span, 1.0)
+	float magnitude_curved = math.pow(magnitude, 0.6)
+
+	// Use directional colours near the extremes for better saturation
+	color fill_base = is_bullish ? self.get_colour(n - 1) : self.get_colour(2)
+
+	// Calculate transparency: high near zero, low at extremes
+	float transp_range = fade_transp - base_transp
+	float final_transp = fade_transp - (magnitude_curved * transp_range)
+
+	// Adjustment for dark mode - fills should be more transparent to avoid overpowering the line
+	if dark_mode
+		final_transp := math.min(0.95, final_transp + 0.15)
+
+	color.new(fill_base, int(final_transp * 100))
+
+
+// @function            Maps a value to a colour with direction-aware intensity.
+//                      Bullish values (above zero) use upper palette half, bearish use lower half.
+//                      Colour intensity increases when value moves consistently in one direction.
+//                      Ideal for momentum, rate-of-change, or derivative signals.
+// @param self          <Palette> The palette instance.
+// @param value         <float> The value to map (typically momentum or rate of change).
+// @param intensity     <float> Value magnitude for full colour saturation. Default = 1.0.
+// @param lookback      <int> Bars to check for consistent directional movement. Default = 3.
+// @returns             <color> Colour reflecting both value sign (bull/bear) and trend strength.
+export method get_momentum_colour(
+	Palette self,
+	float value,
+	float intensity = 1.0,
+	int lookback = 3
+) =>
+	int n = self.palette.size()
+	int mid = int(math.ceil(n / 2.0))
+
+	// Check if value is moving consistently in one direction
+	bool strengthening = true
+	bool weakening = true
+	for i = 1 to lookback
+		if math.abs(value) <= math.abs(value[i])
+			strengthening := false
+		if math.abs(value) >= math.abs(value[i])
+			weakening := false
+
+	// Normalise magnitude to 0-1 range
+	float magnitude = math.min(math.abs(value) / intensity, 1.0)
+
+	// When strengthening, use full palette range (more saturated outer colours)
+	// When weakening or choppy, use inner colours (more muted)
+	float range_factor = strengthening ? 1.0 : (weakening ? 0.5 : 0.75)
+	float adjusted_magnitude = magnitude * range_factor
+
+	if value >= 0
+		// Bullish: gradient from middle colour to last colour
+		color.from_gradient(adjusted_magnitude, 0, 1, self.get_colour(mid), self.get_colour(n))
+	else
+		// Bearish: gradient from middle colour to first colour
+		color.from_gradient(adjusted_magnitude, 0, 1, self.get_colour(mid), self.get_colour(1))
+
+
+// @function            Maps a value to a colour with direction-aware intensity and dark mode support.
+//                      Similar to get_momentum_colour but adapts neutral colours for dark backgrounds.
+// @param self          <Palette> The palette instance.
+// @param value         <float> The value to map (typically momentum or rate of change).
+// @param intensity     <float> Value magnitude for full colour saturation. Default = 1.0.
+// @param lookback      <int> Bars to check for consistent directional movement. Default = 3.
+// @param dark_mode     <bool> When true, low-magnitude colours are darker. Default = false.
+// @returns             <color> Colour reflecting value sign, trend strength, and background adaptation.
+export method get_momentum_colour_adaptive(
+	Palette self,
+	float value,
+	float intensity = 1.0,
+	int lookback = 3,
+	bool dark_mode = false
+) =>
+	int n = self.palette.size()
+	int mid = int(math.ceil(n / 2.0))
+
+	// Check if value is moving consistently in one direction
+	bool strengthening = true
+	bool weakening = true
+	for i = 1 to lookback
+		if math.abs(value) <= math.abs(value[i])
+			strengthening := false
+		if math.abs(value) >= math.abs(value[i])
+			weakening := false
+
+	// Normalise magnitude to 0-1 range
+	float magnitude = math.min(math.abs(value) / intensity, 1.0)
+
+	// When strengthening, use full palette range
+	float range_factor = strengthening ? 1.0 : (weakening ? 0.5 : 0.75)
+	float adjusted_magnitude = magnitude * range_factor
+
+	color base_colour = na
+	if value >= 0
+		base_colour := color.from_gradient(adjusted_magnitude, 0, 1, self.get_colour(mid), self.get_colour(n))
+	else
+		base_colour := color.from_gradient(adjusted_magnitude, 0, 1, self.get_colour(mid), self.get_colour(1))
+
+	// For dark mode, blend low-magnitude colours towards dark
+	if dark_mode and adjusted_magnitude < 0.5
+		color dark_neutral = color.new(#1a1a2e, 0)
+		float blend_amount = (0.5 - adjusted_magnitude) * 0.6  // Up to 30% blend at zero magnitude
+		base_colour := get_average_colour(base_colour, dark_neutral, 1.0 - blend_amount)
+
+	base_colour
+
+//#endregion
+
+
+//==================================================================//
+//#region                EXAMPLE APPLICATION                        //
+//==================================================================//
+
+signal_ema_fast = ta.ema(close, 20)
+signal_ema_slow = ta.ema(close, 200)
+
+//─────────────────── setup: palette and signals ───────────────────//
+
+var p_ema_fast = Palette.new(transparency=0)
+var p_ema_slow = Palette.new(transparency=0)
+var p_osc = Palette.new(transparency=30)
+
+i_palette_name = input.enum(PaletteNames.gyts_purple, 'Palette')
+if barstate.isfirst
+	p_ema_fast.apply_default_palette(i_palette_name)
+	p_ema_slow.apply_default_palette(i_palette_name)
+	p_osc.apply_default_palette(i_palette_name)
+
+// Colours of EMAs - using momentum colour for rate-of-change based colouring (dark mode)
+c_ema_fast = p_ema_fast.get_momentum_colour_adaptive(signal_ema_fast - signal_ema_fast[1], intensity=0.0002, lookback=3, dark_mode=true)
+c_ema_fast := adjust_colour(c_ema_fast, smoothen_amount=20, dark_mode=true)
+c_ema_slow = p_ema_slow.get_momentum_colour_adaptive(signal_ema_slow - signal_ema_slow[1], intensity=0.0002, lookback=3, dark_mode=true)
+
+// Moving Average Difference (MAD) calculation with min-max scaling
+import GoemonYae/MathTransform/5
+signal_osc = MathTransform.scaler_min_max((signal_ema_fast - signal_ema_slow) / signal_ema_slow, 2000, -1, 1)
+
+//───────────────── momentum saturated - dark mode ─────────────────//
+
+c_osc_momentum_line = p_osc.get_momentum_colour_adaptive(signal_osc - signal_osc[1], intensity=0.005, lookback=3, dark_mode=true)
+c_osc_momentum_line := adjust_colour(c_osc_momentum_line, desaturation_amount=-0.2, smoothen_amount=20, dark_mode=true)
+c_osc_momentum_fill = adjust_colour(c_osc_momentum_line, desaturation_amount=0.3, transparency_amount=0.65, smoothen_amount=20, dark_mode=true)
+
+//────────────────────── adaptive light mode ───────────────────────//
+
+c_osc_light_line = p_osc.get_adaptive_line_colour(signal_osc, value_min=-1, value_max=1, dark_mode=false)
+c_osc_light_line := adjust_colour(c_osc_light_line, smoothen_amount=15, dark_mode=false)
+c_osc_light_fill = p_osc.get_adaptive_fill_colour(signal_osc, value_min=-1, value_max=1, dark_mode=false)
+c_osc_light_fill := adjust_colour(c_osc_light_fill, smoothen_amount=20, dark_mode=false)
+c_osc_light_zero = get_zero_line_colour(dark_mode=false)
+
+//──────────── adaptive dark mode with offset midpoint ─────────────//
+
+offset_midpoint = -0.5
+c_osc_dark_line = p_osc.get_adaptive_line_colour(signal_osc, value_min=-1, value_max=1, value_mid=offset_midpoint, dark_mode=true)
+c_osc_dark_line := adjust_colour(c_osc_dark_line, smoothen_amount=15, dark_mode=true)
+c_osc_dark_fill = p_osc.get_adaptive_fill_colour(signal_osc, value_min=-1, value_max=1, value_mid=offset_midpoint, dark_mode=true)
+c_osc_dark_fill := adjust_colour(c_osc_dark_fill, smoothen_amount=20, dark_mode=true)
+c_osc_dark_zero = get_zero_line_colour(dark_mode=true)
+
+//──────────────────────────── plotting ────────────────────────────//
+
+// EMAs on price chart
+plot(signal_ema_fast, 'Fast EMA', color=c_ema_fast, linewidth=3, force_overlay=true)
+plot(signal_ema_slow, 'Slow EMA', color=c_ema_slow, linewidth=3, force_overlay=true)
+
+// "Momentum" (top section)
+p_osc_momentum = plot(signal_osc, 'MAD "Momentum"', color=c_osc_momentum_line, linewidth=4)
+p_osc_momentum_zero = plot(0, 'Zero "Momentum"', color=color.new(color.gray, 70), linewidth=2)
+fill(p_osc_momentum_zero, p_osc_momentum, c_osc_momentum_fill, 'MAD fill "Momentum"')
+
+// "Adaptive" Light Mode - force white background for this section
+offset_light = -2.5
+h_light_top = hline(offset_light + 1.2, display=display.none)
+h_light_bot = hline(offset_light - 1.2, display=display.none)
+fill(h_light_top, h_light_bot, color.new(#ffffff, 0))
+
+p_osc_light = plot(signal_osc + offset_light, 'MAD "Adaptive" Light', color=c_osc_light_line, linewidth=4)
+p_osc_light_zero = plot(offset_light, 'Zero "Adaptive" Light', color=c_osc_light_zero, linewidth=2)
+fill(p_osc_light_zero, p_osc_light, c_osc_light_fill, 'MAD fill "Adaptive" Light')
+
+// "Adaptive" Dark Mode with offset midpoint - force black background
+offset_dark = -5.0
+h_dark_top = hline(offset_dark + 1.2, display=display.none)
+h_dark_bot = hline(offset_dark - 1.2, display=display.none)
+fill(h_dark_top, h_dark_bot, color.new(#000000, 0))
+
+p_osc_dark = plot(signal_osc + offset_dark, 'MAD "Adaptive" Dark', color=c_osc_dark_line, linewidth=4)
+p_osc_dark_zero = plot(offset_dark + offset_midpoint, 'Zero "Adaptive" Dark', color=c_osc_dark_zero, linewidth=2)
+fill(p_osc_dark_zero, p_osc_dark, c_osc_dark_fill, 'MAD fill "Adaptive" Dark')
+
+//#endregion

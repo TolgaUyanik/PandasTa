@@ -1,0 +1,631 @@
+//@version=6
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © MYNAMEISBRANDON
+
+//@description Candle pressure helpers for converting OHLC candle structure into normalized pressure, buy/sell percentages, and compact display text.
+library("CandlePressure_Utilities", true)
+
+
+// ==============================================================================================
+// 📚 LIBRARY MAP
+// ==============================================================================================
+//
+// CandlePressure_Utilities is organized into the following helper regions:
+//
+// • Model Defaults
+//   - default wick deadzone and pressure-model weights
+//
+// • Math Helpers
+//   - clamp(), safeDiv(), and small reusable math utilities
+//
+// • Display Helpers
+//   - compact number formatting, buy/sell split formatting, and contrast text helpers
+//
+// • UI + PredVol Display Helpers
+//   - table size, label size, table position, RelVol text, and percent-change helpers
+//
+// • Percent + Bias Display Helpers
+//   - whole-percent formatting, rounded percent integers, volume-safe percent integers,
+//     and simple black/white text selection
+//
+// • Candle Pressure Helpers
+//   - OHLC candle-pressure components, pressure-to-buy/sell conversion, oscillator output,
+//     and alternate body/wick buy-sell allocation
+//
+// ==============================================================================================
+
+
+// ==============================================================================================
+// 🟢 REGION: Model Defaults
+// ==============================================================================================
+//
+// 📌 PURPOSE:
+//     Centralizes the default candle-pressure model values used by this library.
+//
+// 🧠 DEFAULT MODEL:
+//     • Wick Deadzone = 0.02
+//     • CLV Weight    = 0.55
+//     • Body Weight   = 0.30
+//     • Wick Weight   = 0.15
+//
+// 📘 INTERPRETATION:
+//     • Wick Deadzone controls when wick imbalance is ignored as small noise.
+//     • CLV Weight controls how much close-location matters.
+//     • Body Weight controls how much open-to-close direction matters.
+//     • Wick Weight controls how much lower-vs-upper wick imbalance matters.
+//
+// ==============================================================================================
+
+// @function Returns the default candle-pressure model values used by this library
+// @returns Wick deadzone, CLV weight, body weight, wick weight
+export modelDefaults() =>
+    [0.02, 0.55, 0.30, 0.15]
+
+// ==============================================================================================
+// 🔴 END REGION: Model Defaults
+// ==============================================================================================
+
+
+// ==============================================================================================
+// 🟢 REGION: Math Helpers
+// ==============================================================================================
+//
+// 📌 PURPOSE:
+//     Small math helpers used internally by the candle-pressure model and available
+//     for scripts that want the same utility behavior.
+//
+// ==============================================================================================
+
+// @function Restricts a value to a lower and upper bound
+// @param v Input value
+// @param lo Lower bound
+// @param hi Upper bound
+// @returns Clamped value
+export clamp(float v, float lo, float hi) =>
+    math.min(math.max(v, lo), hi)
+
+// @function Safely divides two values with fallback protection
+// @param numerator Numerator value
+// @param denominator Denominator value
+// @param fallback Value returned when division is unsafe
+// @returns numerator / denominator, or fallback when unsafe
+export safeDiv(float numerator, float denominator, float fallback) =>
+    na(numerator) or na(denominator) or math.abs(denominator) < 1e-10 ? fallback : numerator / denominator
+
+// ==============================================================================================
+// 🔴 END REGION: Math Helpers
+// ==============================================================================================
+
+
+// ==============================================================================================
+// 🟢 REGION: Display Helpers
+// ==============================================================================================
+//
+// 📌 PURPOSE:
+//     Lightweight formatting helpers that are useful for table cells, labels, and
+//     candle-pressure demo scripts.
+//
+// ==============================================================================================
+
+// @function Formats compact numbers like 1500 -> 1.5k, 2500000 -> 2.5m
+// @param val Input value
+// @param sigFigs Significant figures to keep
+// @param naText Text returned when val is na
+// @returns Compact formatted string
+export fmtCompact(float val, simple int sigFigs = 3, simple string naText = "—") =>
+    if na(val)
+        naText
+    else
+        float absVal = math.abs(val)
+        float divisor = absVal >= 1e9 ? 1e9 : absVal >= 1e6 ? 1e6 : absVal >= 1e3 ? 1e3 : 1.0
+        string suffix = absVal >= 1e9 ? "b" : absVal >= 1e6 ? "m" : absVal >= 1e3 ? "k" : ""
+
+        int sf = math.max(1, math.min(sigFigs, 10))
+
+        string hashes =
+             sf == 1 ? "" :
+             sf == 2 ? "#" :
+             sf == 3 ? "##" :
+             sf == 4 ? "###" :
+             sf == 5 ? "####" :
+             sf == 6 ? "#####" :
+             sf == 7 ? "######" :
+             sf == 8 ? "#######" :
+             sf == 9 ? "########" :
+             "#########"
+
+        string fmt = sf == 1 ? "#" : "#." + hashes
+        str.tostring(val / divisor, fmt) + suffix
+
+// @function Formats buy/sell percentages into rounded split text like 62/38
+// @param buyPct Buy percentage
+// @param sellPct Sell percentage
+// @param volumeValue Volume value used to zero output on no-volume bars
+// @returns Formatted buy/sell split text
+export fmtBuySellSplit(float buyPct, float sellPct, float volumeValue) =>
+    if na(buyPct) or na(sellPct) or na(volumeValue)
+        "—"
+    else
+        int buyPctI = volumeValue <= 0.0 ? 0 : math.min(100, math.max(0, int(math.round(buyPct))))
+        int sellPctI = volumeValue <= 0.0 ? 0 : 100 - buyPctI
+        str.tostring(buyPctI) + "/" + str.tostring(sellPctI)
+
+// @function Chooses black or white text based on background brightness
+// @param bg Background color
+// @returns Contrast text color
+export contrastText(color bg) =>
+    if na(bg)
+        color.white
+    else
+        float r = color.r(bg)
+        float g = color.g(bg)
+        float b = color.b(bg)
+        float lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        lum >= 140 ? #000000 : color.white
+
+// ==============================================================================================
+// 🔴 END REGION: Display Helpers
+// ==============================================================================================
+
+// ==============================================================================================
+// 🟢 REGION: UI + PredVol Display Helpers
+// ==============================================================================================
+//
+// 📌 PURPOSE:
+//     Tiny shared UI/display helpers used by the Candle Pressure demo and compatible
+//     table/label scripts such as PredVol.
+//
+// ==============================================================================================
+
+// @function Removes leading zero from decimal text, e.g. 0.25 -> .25 and -0.25 -> -.25
+// @param txt Input text
+// @returns Adjusted text
+export stripLeadingZero(string txt) =>
+    string out = txt
+    out := str.startswith(out, "0.") ? str.replace(out, "0.", ".") : out
+    out := str.startswith(out, "-0.") ? str.replace(out, "-0.", "-.") : out
+    out
+
+// @function Formats relative volume with two decimals and stripped leading zero
+// @param val Relative volume value
+// @param naText Text returned when val is na
+// @returns Formatted relative-volume text
+export fmtRelVol(float val, string naText = "—") =>
+    na(val) ? naText : stripLeadingZero(str.tostring(val, "0.00"))
+
+// @function Percent change from base value
+// @param currentValue Current/projected value
+// @param baseValue Comparison baseline
+// @returns Percent change
+export pctChange(float currentValue, float baseValue) =>
+    na(currentValue) or na(baseValue) or baseValue <= 0.0 ? na : ((currentValue / baseValue) - 1.0) * 100.0
+
+// @function Converts user-facing table-size text to Pine table text size
+// @param sizeText Size text
+// @returns Pine size enum
+export tableTextSize(string sizeText) =>
+    sizeText == "Tiny" ? size.tiny :
+     sizeText == "Small" ? size.small :
+     sizeText == "Normal" ? size.normal :
+     size.large
+
+// @function Converts user-facing label-size text to Pine label size
+// @param sizeText Size text
+// @returns Pine size enum
+export labelSize(string sizeText) =>
+    sizeText == "Tiny" ? size.tiny :
+     sizeText == "Small" ? size.small :
+     sizeText == "Normal" ? size.normal :
+     sizeText == "Large" ? size.large :
+     size.huge
+
+// @function Converts user-facing table-position text to Pine table position
+// @param posText Position text
+// @returns Pine position enum
+export tablePos(string posText) =>
+    posText == "Top Left" ? position.top_left :
+     posText == "Top Center" ? position.top_center :
+     posText == "Top Right" ? position.top_right :
+     posText == "Middle Left" ? position.middle_left :
+     posText == "Middle Center" ? position.middle_center :
+     posText == "Middle Right" ? position.middle_right :
+     posText == "Bottom Left" ? position.bottom_left :
+     posText == "Bottom Center" ? position.bottom_center :
+     position.bottom_right
+
+// ==============================================================================================
+// 🔴 END REGION: UI + PredVol Display Helpers
+// ==============================================================================================
+
+// ==============================================================================================
+// 🟢 REGION: Percent + Bias Display Helpers
+// ==============================================================================================
+//
+// 📌 PURPOSE:
+//     Small display helpers used by PredVol-style table cells, labels, candle-pressure
+//     displays, and color functions.
+//
+// 🧠 INCLUDES:
+//     • fmtPctWhole() = rounded whole-percent display text
+//     • pctInt()      = rounded/clamped 0..100 integer percent
+//     • pctIntVol()   = rounded/clamped 0..100 integer percent with no-volume protection
+//     • bw()          = tiny black/white text resolver
+//
+// ==============================================================================================
+
+// @function Formats a percent value as a rounded whole-percent string
+// @param val Percent value
+// @param naText Text returned when val is na
+// @returns Rounded percent string
+export fmtPctWhole(float val, string naText = "—") =>
+    na(val) ? naText : str.tostring(int(math.round(val))) + "%"
+
+// @function Rounds and clamps a percent value into 0..100 integer form
+// @param pct Percent value
+// @returns Integer percent from 0 to 100
+export pctInt(float pct) =>
+    na(pct) ? 0 : math.min(100, math.max(0, int(math.round(pct))))
+
+// @function Rounds and clamps a percent value, returning 0 on no-volume bars
+// @param pct Percent value
+// @param volumeValue Volume value
+// @returns Integer percent from 0 to 100
+export pctIntVol(float pct, float volumeValue) =>
+    na(pct) or na(volumeValue) or volumeValue <= 0.0 ? 0 : pctInt(pct)
+
+// @function Returns black text when condition is true, otherwise white
+// @param useBlack Whether black text should be used
+// @returns Text color
+export bw(bool useBlack) =>
+    useBlack ? #000000 : color.white
+
+// ==============================================================================================
+// 🔴 END REGION: Percent + Bias Display Helpers
+// ==============================================================================================
+
+// ==============================================================================================
+// 🟢 REGION: Candle Pressure Helpers
+// ==============================================================================================
+//
+// 📌 PURPOSE:
+//     Converts pure OHLC candle structure into a normalized pressure score,
+//     then optionally maps that pressure score into buy/sell percentages.
+//
+// 🧠 USER-FACING MODEL:
+//     This region helps scripts:
+//
+//     • evaluate where the close sits inside the candle range
+//     • measure directional body dominance relative to the candle range
+//     • measure lower-vs-upper wick imbalance
+//     • combine those components into one normalized pressure score
+//     • convert that pressure score into buy/sell percentages
+//
+// 🧭 WHAT EACH HELPER DOES:
+//     • candlePressurePartsFull() -> Returns CLV, body %, body term, wick raw, wick used, and pressure
+//     • candlePressureParts()     -> Compatibility helper returning the compact 5-value model
+//     • pressureToBuySell()       -> Converts normalized pressure into buy/sell percentages
+//     • pressureOsc()             -> Converts normalized pressure into a -100..+100 oscillator value
+//     • candlePressureMetrics()   -> One-call wrapper returning pressure, buy %, and sell %
+//     • bodyWickRateBuyPct()      -> Alternate buy % allocator from body/wick structure only
+//
+// 📘 INTERPRETATION:
+//     • CLV (-1..+1) measures where the close sits inside the candle range.
+//     • bodyPct01 (0..1) measures body size relative to the full candle range.
+//     • bodyTerm11 (-1..+1) applies candle direction to bodyPct01.
+//     • wickRaw11 (-1..+1) compares lower wick vs upper wick.
+//     • wickUsed11 applies a deadzone so tiny wick differences can be ignored.
+//     • pressure (-1..+1) is the weighted blend of CLV, body term, and wick structure.
+//     • buy/sell percentages are derived from that final pressure score.
+//
+// 📎 NOTES:
+//     • This is intentionally pure OHLC candle structure.
+//     • RSI, DMI, ATR, relative volume, and trend filters should remain separate layers.
+//     • Default values are aligned with the PredVol house model.
+//
+// ==============================================================================================
+
+// ──────────────────────────────────────────────
+// 🟦 Subregion: Full Candle Pressure Parts Resolver
+// ──────────────────────────────────────────────
+//
+// Output model:
+//     • clv11      -> close location value in -1..+1
+//     • bodyPct01  -> body size as a fraction of range in 0..1
+//     • bodyTerm11 -> signed body contribution in -1..+1
+//     • wickRaw11  -> raw lower-vs-upper wick imbalance in -1..+1
+//     • wickUsed11 -> deadzoned wick imbalance in -1..+1
+//     • pressure   -> weighted final candle pressure in -1..+1
+//
+
+// @function Converts OHLC candle structure into full normalized pressure components and final pressure
+// @param openValue Real open
+// @param highValue Real high
+// @param lowValue Real low
+// @param closeValue Real close
+// @param wickDeadzone Wick imbalance threshold below which wick contribution is forced to 0
+// @param weightClv Weight assigned to the CLV component
+// @param weightBody Weight assigned to the body component
+// @param weightWick Weight assigned to the wick component
+// @returns CLV, body % of range, signed body term, raw wick imbalance, deadzoned wick imbalance, final pressure
+export candlePressurePartsFull(
+     float openValue,
+     float highValue,
+     float lowValue,
+     float closeValue,
+     float wickDeadzone = 0.02,
+     float weightClv = 0.55,
+     float weightBody = 0.30,
+     float weightWick = 0.15) =>
+
+    float rangeValue = highValue - lowValue
+
+    if na(openValue) or na(highValue) or na(lowValue) or na(closeValue) or rangeValue <= 0.0
+        [na, na, na, na, na, na]
+    else
+        float clampedClose = clamp(closeValue, lowValue, highValue)
+        float clampedOpen = clamp(openValue, lowValue, highValue)
+
+        float clv11 = ((2.0 * clampedClose) - highValue - lowValue) / rangeValue
+
+        float bodyValue = clampedClose - clampedOpen
+        float bodyPct01 = clamp(math.abs(bodyValue) / rangeValue, 0.0, 1.0)
+
+        float bodyDir =
+             bodyValue > 0.0 ? 1.0 :
+             bodyValue < 0.0 ? -1.0 :
+             0.0
+
+        float bodyTerm11 = bodyDir * bodyPct01
+
+        float upperWick = highValue - math.max(clampedClose, clampedOpen)
+        float lowerWick = math.min(clampedClose, clampedOpen) - lowValue
+
+        float wickRaw11 = (lowerWick - upperWick) / rangeValue
+        float wickUsed11 = math.abs(wickRaw11) < wickDeadzone ? 0.0 : wickRaw11
+
+        float weightSum = math.max(weightClv + weightBody + weightWick, 1e-10)
+
+        float pressure =
+             ((weightClv / weightSum) * clv11) +
+             ((weightBody / weightSum) * bodyTerm11) +
+             ((weightWick / weightSum) * wickUsed11)
+
+        pressure := clamp(pressure, -1.0, 1.0)
+
+        [clv11, bodyPct01, bodyTerm11, wickRaw11, wickUsed11, pressure]
+
+// ──────────────────────────────────────────────
+// 🟦 Subregion: Compact Candle Pressure Parts Resolver
+// ──────────────────────────────────────────────
+//
+// Output model:
+//     • clv11
+//     • bodyPct01
+//     • wickRaw11
+//     • wickUsed11
+//     • pressure
+//
+
+// @function Converts OHLC candle structure into the compact 5-part pressure output
+// @param openValue Real open
+// @param highValue Real high
+// @param lowValue Real low
+// @param closeValue Real close
+// @param wickDeadzone Wick imbalance threshold below which wick contribution is forced to 0
+// @param weightClv Weight assigned to the CLV component
+// @param weightBody Weight assigned to the body component
+// @param weightWick Weight assigned to the wick component
+// @returns CLV, body % of range, raw wick imbalance, deadzoned wick imbalance, final pressure
+export candlePressureParts(
+     float openValue,
+     float highValue,
+     float lowValue,
+     float closeValue,
+     float wickDeadzone = 0.02,
+     float weightClv = 0.55,
+     float weightBody = 0.30,
+     float weightWick = 0.15) =>
+
+    [clv11, bodyPct01, bodyTerm11, wickRaw11, wickUsed11, pressure] =
+         candlePressurePartsFull(openValue, highValue, lowValue, closeValue, wickDeadzone, weightClv, weightBody, weightWick)
+
+    [clv11, bodyPct01, wickRaw11, wickUsed11, pressure]
+
+// ──────────────────────────────────────────────
+// 🟦 Subregion: Pressure to Buy/Sell Converter
+// ──────────────────────────────────────────────
+//
+// Behavior:
+//     • Maps -1.0 -> 0 / 100
+//     • Maps  0.0 -> 50 / 50
+//     • Maps +1.0 -> 100 / 0
+//     • Returns na / na when volume is missing
+//     • Returns 0 / 0 when volume is present but non-positive
+//     • Returns 50 / 50 when pressure is na but volume is valid
+//
+
+// @function Converts normalized pressure into buy/sell percentages
+// @param pressure Candle pressure in the -1..+1 range
+// @param volumeValue Volume value used to optionally zero outputs on no-volume bars
+// @returns Buy %, Sell %
+export pressureToBuySell(float pressure, float volumeValue) =>
+    bool missingVolume = na(volumeValue)
+    bool noVolume = not missingVolume and volumeValue <= 0.0
+
+    float pressureClamped = na(pressure) ? na : clamp(pressure, -1.0, 1.0)
+
+    float buyPct =
+         missingVolume ? na :
+         noVolume ? 0.0 :
+         na(pressureClamped) ? 50.0 :
+         clamp(((pressureClamped + 1.0) * 0.5) * 100.0, 0.0, 100.0)
+
+    float sellPct =
+         missingVolume ? na :
+         noVolume ? 0.0 :
+         100.0 - buyPct
+
+    [buyPct, sellPct]
+
+// @function Converts normalized pressure into a -100..+100 oscillator value
+// @param pressure Candle pressure in the -1..+1 range
+// @returns Pressure oscillator value
+export pressureOsc(float pressure) =>
+    na(pressure) ? na : clamp(pressure, -1.0, 1.0) * 100.0
+
+// ──────────────────────────────────────────────
+// 🟦 Subregion: Candle Pressure Metrics Wrapper
+// ──────────────────────────────────────────────
+//
+// Purpose:
+//     One-call convenience wrapper for scripts that only need final pressure,
+//     buy %, and sell %.
+//
+// Notes:
+//     • This is the preferred helper for PredVol-style table rows.
+//     • Uses standard OHLCV argument order.
+//
+
+// @function Returns candle pressure, buy %, and sell % using the shared pressure model
+// @param openValue Real open
+// @param highValue Real high
+// @param lowValue Real low
+// @param closeValue Real close
+// @param volumeValue Volume value used to optionally zero outputs on no-volume bars
+// @param wickDeadzone Wick imbalance threshold below which wick contribution is forced to 0
+// @param weightClv Weight assigned to the CLV component
+// @param weightBody Weight assigned to the body component
+// @param weightWick Weight assigned to the wick component
+// @returns Pressure, Buy %, Sell %
+export candlePressureMetrics(
+     float openValue,
+     float highValue,
+     float lowValue,
+     float closeValue,
+     float volumeValue,
+     float wickDeadzone = 0.02,
+     float weightClv = 0.55,
+     float weightBody = 0.30,
+     float weightWick = 0.15) =>
+
+    [clv11, bodyPct01, bodyTerm11, wickRaw11, wickUsed11, pressure] =
+         candlePressurePartsFull(openValue, highValue, lowValue, closeValue, wickDeadzone, weightClv, weightBody, weightWick)
+
+    [buyPct, sellPct] =
+         pressureToBuySell(pressure, volumeValue)
+
+    [pressure, buyPct, sellPct]
+
+// ──────────────────────────────────────────────
+// 🟦 Subregion: Alternate Body/Wick Buy Allocator
+// ──────────────────────────────────────────────
+//
+// Purpose:
+//     Returns an alternate buy percentage derived from candle body and wick
+//     structure without using the weighted CLV/body/wick pressure engine.
+//
+// Notes:
+//     • This can be useful as a comparison model.
+//     • The main pressure model should stay the default for PredVol-style Buy/Sell.
+//
+
+// @function Returns an alternate buy percentage from candle body and wick structure
+// @param openValue Real open
+// @param highValue Real high
+// @param lowValue Real low
+// @param closeValue Real close
+// @returns Buy percentage in the 0..100 range
+export bodyWickRateBuyPct(
+     float openValue,
+     float highValue,
+     float lowValue,
+     float closeValue) =>
+
+    float rangeValue = highValue - lowValue
+
+    if na(openValue) or na(highValue) or na(lowValue) or na(closeValue) or rangeValue <= 0.0
+        na
+    else
+        float clampedClose = clamp(closeValue, lowValue, highValue)
+        float clampedOpen = clamp(openValue, lowValue, highValue)
+
+        float upperWick = highValue - math.max(clampedOpen, clampedClose)
+        float lowerWick = math.min(clampedOpen, clampedClose) - lowValue
+        float bodySize = math.abs(clampedClose - clampedOpen)
+        float denom = upperWick + lowerWick + bodySize
+
+        float buyRate =
+             denom > 0.0 ?
+             0.5 * (upperWick + lowerWick + (clampedClose >= clampedOpen ? 2.0 * bodySize : 0.0)) / denom :
+             0.5
+
+        clamp(buyRate * 100.0, 0.0, 100.0)
+
+// @function Returns alternate body/wick buy and sell percentages
+// @param openValue Real open
+// @param highValue Real high
+// @param lowValue Real low
+// @param closeValue Real close
+// @param volumeValue Volume value used to optionally zero outputs on no-volume bars
+// @returns Buy %, Sell %
+export bodyWickRateBuySell(
+     float openValue,
+     float highValue,
+     float lowValue,
+     float closeValue,
+     float volumeValue) =>
+
+    float buyPctRaw = bodyWickRateBuyPct(openValue, highValue, lowValue, closeValue)
+
+    float buyPct =
+         na(volumeValue) ? na :
+         volumeValue <= 0.0 ? 0.0 :
+         na(buyPctRaw) ? 50.0 :
+         buyPctRaw
+
+    float sellPct =
+         na(volumeValue) ? na :
+         volumeValue <= 0.0 ? 0.0 :
+         100.0 - buyPct
+
+    [buyPct, sellPct]
+
+// ──────────────────────────────────────────────
+// 🟦 Subregion: Example Usage
+// ──────────────────────────────────────────────
+//
+// Example usage in a script that imports this library:
+//
+// import MYNAMEISBRANDON/CandlePressure_Utilities/1 as cp
+//
+// [pressure, buyPct, sellPct] = cp.candlePressureMetrics(
+//      open,
+//      high,
+//      low,
+//      close,
+//      volume)
+//
+// string splitText = cp.fmtBuySellSplit(
+//      buyPct,
+//      sellPct,
+//      volume)
+//
+// float pressureOsc = cp.pressureOsc(
+//      pressure)
+//
+// [clv11, bodyPct01, bodyTerm11, wickRaw11, wickUsed11, pressureFull] = cp.candlePressurePartsFull(
+//      open,
+//      high,
+//      low,
+//      close)
+//
+// [altBuyPct, altSellPct] = cp.bodyWickRateBuySell(
+//      open,
+//      high,
+//      low,
+//      close,
+//      volume)
+//
+// ==============================================================================================
+// 🔴 END REGION: Candle Pressure Helpers
+// ==============================================================================================

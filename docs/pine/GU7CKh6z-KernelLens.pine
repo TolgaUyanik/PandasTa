@@ -1,0 +1,757 @@
+//@version=6
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  KernelLens — Professional Kernel Regression Library
+//
+//  Author      : a_jabbaroff
+//  License     : Mozilla Public License 2.0
+//  Version     : 1.0.0
+//  PineScript  : v6
+//
+// ─── Abstract ────────────────────────────────────────────────────────────────
+//
+//  KernelLens implements the Nadaraya–Watson non-parametric regression
+//  estimator for Pine Script v6.  The library ships eight classical kernels
+//  — Rational Quadratic, Gaussian, Periodic, Locally Periodic, Epanechnikov,
+//  Tricube, Triangular, and Cosine — each wrapped in a three-mode filter
+//  layer (None / Smooth / Zero Lag), a unified string dispatcher for
+//  dropdown-driven kernel selection, and five utility exports covering
+//  slope, trend state, crossover signaling, residual confidence bands, and
+//  Silverman's rule-of-thumb bandwidth recommendation.
+//
+//  Every estimator is engineered for correctness and determinism:
+//  bandwidth-aware loop windows, NA-safe iteration, division-by-zero guards,
+//  and runtime input validation at every public entry point.  Historical
+//  plots are immutable by construction — no request.security, no lookahead,
+//  no future-bar leakage.  Real-time flicker on the live bar is exposed as
+//  an explicit _phase parameter, letting the caller trade reactivity for
+//  non-repainting stability on a per-call basis.  Academic references are
+//  cited inline next to the formulas they describe.
+//
+// ─── Mathematical Foundation ─────────────────────────────────────────────────
+//
+//  Given a source series y_t and a symmetric kernel K with scale parameter ℓ
+//  (the "bandwidth"), the Nadaraya–Watson estimator of the regression function
+//  m(x) = E[y | x] evaluated at the current bar is:
+//
+//                   Σᵢ K(dᵢ / ℓ) · y_{t−i}
+//         ŷ(t)  =  ───────────────────────        (1)
+//                   Σᵢ K(dᵢ / ℓ)
+//
+//  where dᵢ is the bar-distance from the kernel center and the sum runs over
+//  a finite window determined by the effective support of K.  The estimator is
+//  a locally weighted average; it is unbiased up to O(ℓ²) for twice-
+//  differentiable m, with asymptotic variance of order (nℓ)⁻¹.
+//
+// ─── References ──────────────────────────────────────────────────────────────
+//
+//   • Nadaraya, E. A. (1964).  On estimating regression.  Theory of
+//     Probability & Its Applications, 9(1), 141–142.
+//   • Watson, G. S. (1964).  Smooth regression analysis.  Sankhyā: The Indian
+//     Journal of Statistics, Series A, 26(4), 359–372.
+//   • Silverman, B. W. (1986).  Density Estimation for Statistics and Data
+//     Analysis.  Chapman & Hall, London.
+//   • Cleveland, W. S. (1979).  Robust locally weighted regression and
+//     smoothing scatterplots.  J. Amer. Statist. Assoc., 74(368), 829–836.
+//   • Wand, M. P. & Jones, M. C. (1995).  Kernel Smoothing.  Chapman & Hall.
+//   • MacKay, D. J. C. (1998).  Introduction to Gaussian Processes.  NIPS
+//     Tutorial.
+//   • Rasmussen, C. E. & Williams, C. K. I. (2006).  Gaussian Processes for
+//     Machine Learning.  MIT Press.  (Rational Quadratic; Locally Periodic.)
+//   • Ehlers, J. F. (2000).  Rocket Science for Traders.  John Wiley & Sons.
+//     (Zero-lag smoothing trick: 2·raw − smooth.)
+//
+// ─── Kernel Catalogue ────────────────────────────────────────────────────────
+//
+//   #   Name                Formula                                  Support
+//   ─── ─────────────────── ──────────────────────────────────────── ─────────
+//   1   Rational Quadratic  (1 + d² / (2·α·ℓ²))^(−α)                 ℝ
+//   2   Gaussian / RBF      exp(−d² / (2·ℓ²))                        ℝ
+//   3   Periodic            exp(−2·sin²(π·d/p) / ℓ²)                 ℝ
+//   4   Locally Periodic    Periodic · Gaussian                      ℝ
+//   5   Epanechnikov        (3/4)·(1 − u²)  ·  𝟙{|u|≤1}              [−ℓ, ℓ]
+//   6   Tricube             (70/81)·(1 − |u|³)³  ·  𝟙{|u|≤1}         [−ℓ, ℓ]
+//   7   Triangular          (1 − |u|)  ·  𝟙{|u|≤1}                   [−ℓ, ℓ]
+//   8   Cosine              (π/4)·cos(π·u/2)  ·  𝟙{|u|≤1}            [−ℓ, ℓ]
+//
+//   where u = d / ℓ and 𝟙 is the indicator function.
+//
+// ─── Filter Layer ────────────────────────────────────────────────────────────
+//
+//   "No Filter"   ŷ = ŷ_raw                                     (single-pass)
+//   "Smooth"      ŷ = K(ŷ_raw)                                  (double-pass)
+//   "Zero Lag"    ŷ = 2·ŷ_raw − K(ŷ_raw)                        (Ehlers ZL)
+//
+//   The "Zero Lag" mode uses the same de-lagging identity as ZLEMA: subtract
+//   the residual lag introduced by smoothing from the raw estimate.
+//
+// ─── Utilities ───────────────────────────────────────────────────────────────
+//
+//   slope              — discrete first derivative of an estimate
+//   trendState         — ternary trend indicator  (+1 up / −1 down / 0 flat)
+//   crossSignal        — kernel crossover signal  (+1 bull / −1 bear / 0)
+//   confidenceBand     — residual standard deviation for ± k·σ bands
+//   silvermanBandwidth — rule-of-thumb optimal ℓ suggestion
+//   estimate           — string-dispatched unified kernel call
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+library("KernelLens", overlay = true)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   SECTION 0   —   CONSTANTS & INTERNAL HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Public string constants ─────────────────────────────────────────────────
+
+const string FILTER_NONE     = "No Filter"
+const string FILTER_SMOOTH   = "Smooth"
+const string FILTER_ZEROLAG  = "Zero Lag"
+
+const string KERNEL_RQ       = "Rational Quadratic"
+const string KERNEL_GAUSS    = "Gaussian"
+const string KERNEL_PERIODIC = "Periodic"
+const string KERNEL_LOCPER   = "Locally Periodic"
+const string KERNEL_EPA      = "Epanechnikov"
+const string KERNEL_TRICUBE  = "Tricube"
+const string KERNEL_TRIANG   = "Triangular"
+const string KERNEL_COSINE   = "Cosine"
+
+// ─── Tuning constants ────────────────────────────────────────────────────────
+
+// Tail cutoff for infinite-support kernels (3σ captures ≈ 99.7 % of mass).
+const int TAIL_SIGMAS     = 3
+
+// Minimum number of periodic cycles to span in Periodic kernel.
+const int PERIODIC_CYCLES = 10
+
+// Absolute minimum loop depth — keeps math well-defined at tiny bandwidths.
+const int MIN_DEPTH       = 4
+
+
+// ─── Input validation ────────────────────────────────────────────────────────
+// Pine runtime.error() halts the script on the first invalid bar, so these
+// assertions never execute twice in practice.  They return the validated value
+// so they can be used as pass-through expressions in call-site assignments.
+
+_assertFilter(simple string _filter) =>
+    bool ok = _filter == FILTER_NONE or _filter == FILTER_SMOOTH or _filter == FILTER_ZEROLAG
+    if not ok
+        runtime.error("KernelLens: invalid filter '" + _filter + "'. Expected one of: '" + FILTER_NONE + "', '" + FILTER_SMOOTH + "', '" + FILTER_ZEROLAG + "'.")
+    _filter
+
+
+_assertBandwidth(simple int _bandwidth) =>
+    if _bandwidth <= 0
+        runtime.error("KernelLens: bandwidth must be a positive integer (got " + str.tostring(_bandwidth) + ").")
+    _bandwidth
+
+
+_assertPeriod(simple int _period) =>
+    if _period <= 0
+        runtime.error("KernelLens: period must be a positive integer (got " + str.tostring(_period) + ").")
+    _period
+
+
+_assertAlpha(simple float _alpha) =>
+    if _alpha <= 0.0
+        runtime.error("KernelLens: shapeAlpha must be strictly positive (got " + str.tostring(_alpha) + ").")
+    _alpha
+
+
+// ─── Loop depth selectors ────────────────────────────────────────────────────
+// For each kernel family, return the smallest loop depth that captures
+// essentially all of the kernel's mass.  Compact-support kernels terminate
+// exactly at ℓ; infinite-support kernels terminate at a multiple of ℓ.
+
+_depthInfinite(simple int _bandwidth) =>
+    math.max(_bandwidth * TAIL_SIGMAS, MIN_DEPTH)
+
+
+_depthCompact(simple int _bandwidth) =>
+    math.max(_bandwidth, MIN_DEPTH)
+
+
+_depthPeriodic(simple int _bandwidth, simple int _period) =>
+    int byScale  = _bandwidth * TAIL_SIGMAS
+    int byCycles = _period    * PERIODIC_CYCLES
+    math.max(math.max(byScale, byCycles), MIN_DEPTH)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   SECTION 1   —   RAW KERNEL ESTIMATORS   (single-pass, internal)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//   Each _rawXxx function evaluates ŷ = Σ K·y / Σ K over a finite window whose
+//   depth is chosen by the corresponding _depth* helper.  Bars outside the
+//   chart history (na values) are skipped — they do not poison the sum.
+//
+//   The kernel is centered _phase bars into the past, which controls the
+//   trade-off between signal freshness and stability:
+//       _phase = 0   →  live estimate at current bar  (most reactive)
+//       _phase = k   →  estimate at bar[k], lagging k bars but non-repainting
+//                       for barstate-confirmed values
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── 1.1  Rational Quadratic ──────────────────────────────────────────────────
+//    w(d) = (1 + d² / (2·α·ℓ²))^(−α)
+
+_rawRationalQuadratic(series float _src, simple int _bandwidth, simple float _alpha, simple int _phase) =>
+    int   depth      = _depthInfinite(_bandwidth)
+    float twoAlphaEl = math.pow(_bandwidth, 2) * 2.0 * _alpha
+    float num        = 0.0
+    float den        = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            d = i - _phase
+            w = math.pow(1.0 + (d * d) / twoAlphaEl, -_alpha)
+            num += y * w
+            den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.2  Gaussian (Radial Basis Function) ────────────────────────────────────
+//    w(d) = exp(−d² / (2·ℓ²))
+
+_rawGaussian(series float _src, simple int _bandwidth, simple int _phase) =>
+    int   depth  = _depthInfinite(_bandwidth)
+    float twoEll = math.pow(_bandwidth, 2) * 2.0
+    float num    = 0.0
+    float den    = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            d = i - _phase
+            w = math.exp(-(d * d) / twoEll)
+            num += y * w
+            den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.3  Periodic  (Mackay 1998) ─────────────────────────────────────────────
+//    w(d) = exp(−2·sin²(π·d/p) / ℓ²)
+
+_rawPeriodic(series float _src, simple int _bandwidth, simple int _period, simple int _phase) =>
+    int   depth = _depthPeriodic(_bandwidth, _period)
+    float ellSq = math.pow(_bandwidth, 2)
+    float num   = 0.0
+    float den   = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            d    = i - _phase
+            sinV = math.sin(math.pi * d / _period)
+            w    = math.exp(-2.0 * sinV * sinV / ellSq)
+            num += y * w
+            den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.4  Locally Periodic  (Rasmussen & Williams 2006) ───────────────────────
+//    w(d) = Periodic(d) · Gaussian(d)
+//           = exp(−2·sin²(π·d/p) / ℓ²)  ·  exp(−d² / (2·ℓ²))
+//    Models quasi-periodic patterns that slowly drift with time.
+
+_rawLocallyPeriodic(series float _src, simple int _bandwidth, simple int _period, simple int _phase) =>
+    int   depth  = _depthInfinite(_bandwidth)
+    float ellSq  = math.pow(_bandwidth, 2)
+    float twoEll = ellSq * 2.0
+    float num    = 0.0
+    float den    = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            d    = i - _phase
+            sinV = math.sin(math.pi * d / _period)
+            wP   = math.exp(-2.0 * sinV * sinV / ellSq)
+            wG   = math.exp(-(d * d) / twoEll)
+            w    = wP * wG
+            num += y * w
+            den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.5  Epanechnikov  (Watson 1964) ─────────────────────────────────────────
+//    w(u) = (3/4)·(1 − u²)  for |u| ≤ 1, else 0    (u = d/ℓ)
+//    Minimizes asymptotic MSE among all non-negative kernels of bounded support.
+
+_rawEpanechnikov(series float _src, simple int _bandwidth, simple int _phase) =>
+    int   depth = _depthCompact(_bandwidth)
+    float bw    = float(_bandwidth)
+    float num   = 0.0
+    float den   = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            u = (i - _phase) / bw
+            if math.abs(u) <= 1.0
+                w = 0.75 * (1.0 - u * u)
+                num += y * w
+                den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.6  Tricube  (Cleveland 1979 — LOWESS) ──────────────────────────────────
+//    w(u) = (70/81)·(1 − |u|³)³  for |u| ≤ 1, else 0
+//    Near-Gaussian shape with strict compact support.
+
+_rawTricube(series float _src, simple int _bandwidth, simple int _phase) =>
+    int   depth = _depthCompact(_bandwidth)
+    float bw    = float(_bandwidth)
+    float coef  = 70.0 / 81.0
+    float num   = 0.0
+    float den   = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            u  = (i - _phase) / bw
+            au = math.abs(u)
+            if au <= 1.0
+                inner = 1.0 - au * au * au
+                w     = coef * inner * inner * inner
+                num += y * w
+                den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.7  Triangular ──────────────────────────────────────────────────────────
+//    w(u) = 1 − |u|  for |u| ≤ 1, else 0
+//    Simplest non-uniform compact-support kernel; fastest to compute.
+
+_rawTriangular(series float _src, simple int _bandwidth, simple int _phase) =>
+    int   depth = _depthCompact(_bandwidth)
+    float bw    = float(_bandwidth)
+    float num   = 0.0
+    float den   = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            u  = (i - _phase) / bw
+            au = math.abs(u)
+            if au <= 1.0
+                w = 1.0 - au
+                num += y * w
+                den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ── 1.8  Cosine  (Raised-cosine kernel) ──────────────────────────────────────
+//    w(u) = (π/4)·cos(π·u/2)  for |u| ≤ 1, else 0
+//    Continuously differentiable at the boundary, unlike Epanechnikov.
+
+_rawCosine(series float _src, simple int _bandwidth, simple int _phase) =>
+    int   depth = _depthCompact(_bandwidth)
+    float bw    = float(_bandwidth)
+    float coef  = math.pi / 4.0
+    float num   = 0.0
+    float den   = 0.0
+    for i = _phase to _phase + depth
+        y = _src[i]
+        if not na(y)
+            u = (i - _phase) / bw
+            if math.abs(u) <= 1.0
+                w = coef * math.cos(math.pi * u / 2.0)
+                num += y * w
+                den += w
+    den > 0.0 ? num / den : float(na)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   SECTION 2   —   PUBLIC KERNEL API   (with filter layer)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//   Each export validates its inputs, computes the raw estimate once, and —
+//   for Smooth / Zero Lag modes — re-applies the kernel to its own output.
+//   For the default "No Filter" mode, only one pass is executed, so there is
+//   no performance penalty for keeping the filter optional.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// @function   Rational Quadratic kernel regression.  Equivalent to an
+//             infinite mixture of Gaussian kernels across length scales.
+//             As α → ∞, collapses to the pure Gaussian; as α → 0⁺, longer
+//             length scales dominate and the curve becomes more "stretched".
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _shapeAlpha  Shape parameter α (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export rationalQuadratic(series float _src, simple int _bandwidth, simple float _shapeAlpha, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    a  = _assertAlpha(_shapeAlpha)
+    raw = _rawRationalQuadratic(_src, bw, a, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawRationalQuadratic(raw, bw, a, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Gaussian (Radial Basis Function) kernel regression.  The
+//             canonical smoother: mathematically well-understood, infinitely
+//             differentiable, and asymptotically consistent for any source
+//             distribution with finite second moment.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export gaussian(series float _src, simple int _bandwidth, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    raw = _rawGaussian(_src, bw, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawGaussian(raw, bw, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Periodic kernel regression (Mackay 1998).  Models exactly
+//             repeating signals with repetition distance p.  Suitable for
+//             session-cyclic patterns, weekly seasonality, or any feature
+//             with a known integer period measured in bars.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _period      Repetition distance p in bars (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export periodic(series float _src, simple int _bandwidth, simple int _period, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    p  = _assertPeriod(_period)
+    raw = _rawPeriodic(_src, bw, p, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawPeriodic(raw, bw, p, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Locally Periodic kernel regression — product of Periodic and
+//             Gaussian kernels.  Models signals that repeat approximately
+//             with slow amplitude/phase drift over time.  Ideal for seasonal
+//             financial cycles that evolve with the underlying trend.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _period      Repetition distance p in bars (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export locallyPeriodic(series float _src, simple int _bandwidth, simple int _period, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    p  = _assertPeriod(_period)
+    raw = _rawLocallyPeriodic(_src, bw, p, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawLocallyPeriodic(raw, bw, p, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Epanechnikov kernel regression.  Asymptotically minimizes
+//             mean squared error among all non-negative kernels of bounded
+//             support (Watson 1964).  Parabolic profile; weight is exactly
+//             zero beyond ±ℓ, so there is no tail contamination.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export epanechnikov(series float _src, simple int _bandwidth, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    raw = _rawEpanechnikov(_src, bw, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawEpanechnikov(raw, bw, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Tricube kernel regression.  The kernel used by LOWESS
+//             (Cleveland 1979): near-Gaussian shape with strict compact
+//             support, cheap to compute, and the de-facto standard for
+//             robust locally weighted scatterplot smoothing.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export tricube(series float _src, simple int _bandwidth, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    raw = _rawTricube(_src, bw, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawTricube(raw, bw, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Triangular kernel regression.  Linear decay, compact support;
+//             the simplest non-uniform kernel.  Computationally cheapest of
+//             the compact-support family — useful for tight intraday loops.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export triangular(series float _src, simple int _bandwidth, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    raw = _rawTriangular(_src, bw, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawTriangular(raw, bw, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// @function   Cosine (raised-cosine) kernel regression.  Compact support with
+//             continuous first derivative at the boundary — unlike
+//             Epanechnikov which is only C⁰.  Produces visibly smoother
+//             transitions at the support edges.
+// @param _src         Source series to smooth.
+// @param _bandwidth   Kernel scale ℓ (must be > 0).
+// @param _phase       Kernel center offset in bars (≥ 0).
+// @param _filter      "No Filter" | "Smooth" | "Zero Lag".
+// @returns            <series float> Nadaraya–Watson estimate.
+export cosineKernel(series float _src, simple int _bandwidth, simple int _phase, simple string _filter) =>
+    f  = _assertFilter(_filter)
+    bw = _assertBandwidth(_bandwidth)
+    raw = _rawCosine(_src, bw, _phase)
+    float result = raw
+    if f == FILTER_SMOOTH or f == FILTER_ZEROLAG
+        smooth = _rawCosine(raw, bw, _phase)
+        result := f == FILTER_SMOOTH ? smooth : 2.0 * raw - smooth
+    result
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   SECTION 3   —   UNIFIED DISPATCHER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function   String-dispatched unified kernel call.  Routes to the correct
+//             kernel based on _kernelType.  Useful when the kernel type is
+//             chosen via an input.string dropdown — lets the caller write one
+//             expression instead of a ternary chain.
+//
+//             For kernels that do not use _shapeAlpha or _period, any
+//             positive value may be passed — the dispatcher ignores unused
+//             parameters.
+//
+// @param _kernelType  KERNEL_RQ | KERNEL_GAUSS | KERNEL_PERIODIC |
+//                     KERNEL_LOCPER | KERNEL_EPA | KERNEL_TRICUBE |
+//                     KERNEL_TRIANG | KERNEL_COSINE
+// @param _src         Source series.
+// @param _bandwidth   Kernel scale ℓ.
+// @param _shapeAlpha  RQ shape parameter (pass 1.0 for non-RQ kernels).
+// @param _period      Periodic repetition distance (pass 1 for non-periodic).
+// @param _phase       Kernel center offset.
+// @param _filter      Filter mode.
+// @returns            <series float> estimate.
+export estimate(simple string _kernelType, series float _src, simple int _bandwidth, simple float _shapeAlpha, simple int _period, simple int _phase, simple string _filter) =>
+    float result = switch _kernelType
+        KERNEL_RQ       => rationalQuadratic (_src, _bandwidth, _shapeAlpha, _phase, _filter)
+        KERNEL_GAUSS    => gaussian          (_src, _bandwidth,              _phase, _filter)
+        KERNEL_PERIODIC => periodic          (_src, _bandwidth, _period,     _phase, _filter)
+        KERNEL_LOCPER   => locallyPeriodic   (_src, _bandwidth, _period,     _phase, _filter)
+        KERNEL_EPA      => epanechnikov      (_src, _bandwidth,              _phase, _filter)
+        KERNEL_TRICUBE  => tricube           (_src, _bandwidth,              _phase, _filter)
+        KERNEL_TRIANG   => triangular        (_src, _bandwidth,              _phase, _filter)
+        KERNEL_COSINE   => cosineKernel      (_src, _bandwidth,              _phase, _filter)
+        =>
+            runtime.error("KernelLens.estimate: unknown kernel type '" + _kernelType + "'. Expected one of the KERNEL_* constants.")
+            float(na)
+    result
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   SECTION 4   —   UTILITY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function   Discrete first derivative: (y_t − y_{t−step}) / step.
+//             Used for slope-based trend detection on kernel outputs.
+// @param _estimate  Any series (typically a kernel output).
+// @param _step      Step size for the finite difference (must be ≥ 1).
+// @returns          <series float> slope in source-units per bar.
+export slope(series float _estimate, simple int _step) =>
+    if _step <= 0
+        runtime.error("KernelLens.slope: step must be ≥ 1 (got " + str.tostring(_step) + ").")
+    (_estimate - _estimate[_step]) / _step
+
+
+// @function   Ternary trend state derived from an estimate's finite difference.
+//             +1 if rising, −1 if falling, 0 if exactly flat over the window.
+// @param _estimate  Input series.
+// @param _step      Lookback for the difference.
+// @returns          <series int>  −1, 0, or +1.
+export trendState(series float _estimate, simple int _step) =>
+    if _step <= 0
+        runtime.error("KernelLens.trendState: step must be ≥ 1.")
+    float diff = _estimate - _estimate[_step]
+    diff > 0.0 ? 1 : diff < 0.0 ? -1 : 0
+
+
+// @function   Crossover signal between two series.  Returns +1 on the bar
+//             where _fast crosses above _slow (bullish), −1 on a bearish
+//             cross, and 0 otherwise.  Uses ta.crossover / ta.crossunder
+//             under the hood so the signal is non-repainting once the bar
+//             is confirmed.
+// @param _fast  Fast series.
+// @param _slow  Slow series.
+// @returns      <series int>  −1, 0, or +1.
+export crossSignal(series float _fast, series float _slow) =>
+    bool up = ta.crossover (_fast, _slow)
+    bool dn = ta.crossunder(_fast, _slow)
+    up ? 1 : dn ? -1 : 0
+
+
+// @function   Residual standard deviation band — a computationally cheap
+//             proxy for the kernel-weighted local variance.  Computed as the
+//             rolling σ of (src − estimate) over a fixed window.  To draw a
+//             confidence envelope:
+//                 upper = estimate + k * confidenceBand(src, estimate, win)
+//                 lower = estimate − k * confidenceBand(src, estimate, win)
+//             where k is a z-score multiplier (e.g. 1.96 for 95 % nominal).
+// @param _src       Original source series.
+// @param _estimate  Kernel estimate of _src.
+// @param _window    Rolling window over which to compute σ.
+// @returns          <series float> residual σ.
+export confidenceBand(series float _src, series float _estimate, simple int _window) =>
+    if _window <= 1
+        runtime.error("KernelLens.confidenceBand: window must be ≥ 2.")
+    float residual = _src - _estimate
+    ta.stdev(residual, _window)
+
+
+// @function   Silverman's rule-of-thumb bandwidth: h ≈ 1.06·σ·n^(−1/5).
+//             Provides a statistically reasonable starting value for a
+//             Gaussian-family bandwidth on a given source and window.
+//             Note: Pine kernel bandwidth must be <simple int>, so this
+//             value is intended for diagnostic inspection (plot it, print it)
+//             rather than direct wiring into the kernel calls.
+// @param _src     Source series.
+// @param _window  Window for the σ estimate.
+// @returns        <series float> recommended bandwidth (in bars, as float).
+export silvermanBandwidth(series float _src, simple int _window) =>
+    if _window <= 1
+        runtime.error("KernelLens.silvermanBandwidth: window must be ≥ 2.")
+    float sigma = ta.stdev(_src, _window)
+    float n     = float(_window)
+    1.06 * sigma * math.pow(n, -0.2)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   SECTION 5   —   LIBRARY DEMONSTRATION   (all 8 kernels, per-kernel toggle)
+// ═══════════════════════════════════════════════════════════════════════════════
+// A live showcase of every kernel family shipped with KernelLens.  The four
+// most commonly used kernels — Rational Quadratic, Gaussian, Epanechnikov,
+// and Tricube — are visible by default.  The four auxiliary kernels —
+// Periodic, Locally Periodic, Triangular, and Cosine — are off by default
+// and can be switched on individually from the settings panel.  Every
+// kernel has its own clearly distinct color, so all eight can coexist on
+// the same chart without visual collision.
+//
+// Kernels are computed lazily: disabled kernels skip the weighted sum
+// entirely, so the default preview costs exactly four kernel passes per
+// bar and nothing more.
+
+// ─── Visibility toggles ──────────────────────────────────────────────────────
+const string GRP_DEMO = "KernelLens — Demo Kernels"
+
+bool showRQ    = input.bool(true,  "Rational Quadratic  (Raw)",  group = GRP_DEMO)
+bool showGauss = input.bool(true,  "Gaussian  (Smooth)",          group = GRP_DEMO)
+bool showEpa   = input.bool(true,  "Epanechnikov  (Raw)",        group = GRP_DEMO)
+bool showTri   = input.bool(true,  "Tricube  (Zero Lag)",         group = GRP_DEMO)
+bool showPer   = input.bool(false, "Periodic  (Raw)",            group = GRP_DEMO)
+bool showLP    = input.bool(false, "Locally Periodic  (Raw)",    group = GRP_DEMO)
+bool showTrg   = input.bool(false, "Triangular  (Smooth)",        group = GRP_DEMO)
+bool showCos   = input.bool(false, "Cosine  (Smooth)",            group = GRP_DEMO)
+
+// ─── Lazy kernel evaluation ──────────────────────────────────────────────────
+// Each kernel is only computed if its toggle is enabled, so disabled
+// kernels cost zero CPU — not even one loop iteration.
+
+float demoRQ    = na
+float demoGauss = na
+float demoEpa   = na
+float demoTri   = na
+float demoPer   = na
+float demoLP    = na
+float demoTrg   = na
+float demoCos   = na
+
+if showRQ
+    demoRQ    := rationalQuadratic(close, 16, 1.0,   2, FILTER_NONE)
+if showGauss
+    demoGauss := gaussian         (close, 16,        2, FILTER_SMOOTH)
+if showEpa
+    demoEpa   := epanechnikov     (close, 32,        2, FILTER_NONE)
+if showTri
+    demoTri   := tricube          (close, 32,        2, FILTER_ZEROLAG)
+if showPer
+    demoPer   := periodic         (close, 20, 20,    2, FILTER_NONE)
+if showLP
+    demoLP    := locallyPeriodic  (close, 24, 20,    2, FILTER_NONE)
+if showTrg
+    demoTrg   := triangular       (close, 24,        2, FILTER_SMOOTH)
+if showCos
+    demoCos   := cosineKernel     (close, 24,        2, FILTER_SMOOTH)
+
+// ─── Plots — neon stepline style with outer glow halo ───────────────────────
+// Each kernel is drawn as two stacked steplines sharing the same color:
+//   • Outer glow  — linewidth=6, 60 % transparent (halo layer)
+//   • Inner core  — linewidth=2, fully opaque     (bright center line)
+// Stepline style emphasizes the bar-level granularity of the NW estimate,
+// and the double-layer render produces a clean neon glow on dark charts
+// without losing the distinct hue of each kernel.
+//
+// Palette — maximum hue separation on a dark background:
+//   Orange → Cyan → Neon Green → Hot Pink → Gold → Coral → Lavender → Ice
+
+// Rational Quadratic — Orange
+plot(demoRQ,    "Rational Quadratic — Glow",  color = color.new(#FF9500, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoRQ,    "Rational Quadratic",         color = color.new(#FF9500,  0), style = plot.style_stepline, linewidth = 2)
+
+// Gaussian — Cyan
+plot(demoGauss, "Gaussian — Smooth — Glow",   color = color.new(#00D4FF, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoGauss, "Gaussian — Smooth",          color = color.new(#00D4FF,  0), style = plot.style_stepline, linewidth = 2)
+
+// Epanechnikov — Neon Green
+plot(demoEpa,   "Epanechnikov — Glow",        color = color.new(#32FF7E, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoEpa,   "Epanechnikov",               color = color.new(#32FF7E,  0), style = plot.style_stepline, linewidth = 2)
+
+// Tricube — Hot Pink
+plot(demoTri,   "Tricube — Zero Lag — Glow",  color = color.new(#FF3EB5, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoTri,   "Tricube — Zero Lag",         color = color.new(#FF3EB5,  0), style = plot.style_stepline, linewidth = 2)
+
+// Periodic — Gold
+plot(demoPer,   "Periodic — Glow",            color = color.new(#FFE066, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoPer,   "Periodic",                   color = color.new(#FFE066,  0), style = plot.style_stepline, linewidth = 2)
+
+// Locally Periodic — Coral
+plot(demoLP,    "Locally Periodic — Glow",    color = color.new(#FF5C5C, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoLP,    "Locally Periodic",           color = color.new(#FF5C5C,  0), style = plot.style_stepline, linewidth = 2)
+
+// Triangular — Lavender
+plot(demoTrg,   "Triangular — Smooth — Glow", color = color.new(#B388FF, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoTrg,   "Triangular — Smooth",        color = color.new(#B388FF,  0), style = plot.style_stepline, linewidth = 2)
+
+// Cosine — Ice White
+plot(demoCos,   "Cosine — Smooth — Glow",     color = color.new(#E8F1F2, 60), style = plot.style_stepline, linewidth = 6)
+plot(demoCos,   "Cosine — Smooth",            color = color.new(#E8F1F2,  0), style = plot.style_stepline, linewidth = 2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//   END CODE
+// ═══════════════════════════════════════════════════════════════════════════════

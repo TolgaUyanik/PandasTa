@@ -1,0 +1,376 @@
+//@version=6
+// =============================================================================
+// SMB Capital — "The Fashionably Late Scalp"  (9 EMA x VWAP)
+// TradingView Pine Script v5 STRATEGY (for the Strategy Tester / backtesting)
+// -----------------------------------------------------------------------------
+// Source of rules: SMB Capital official cheat sheet (smbtraining.com, Apr 2024),
+// cross-checked against the SMB video description and third-party write-ups.
+//
+// THE SETUP (long; short is the exact mirror):
+//   1. Divergence: a sustained move makes the 9 EMA and the (session) VWAP diverge.
+//   2. "The Turn": price puts in a distinct LOW OF DAY, then starts back up.
+//   3. Convergence: the 9 EMA rises back and CROSSES the VWAP.
+//   Cheat-sheet wording (verbatim):
+//     "When an upsloping 9 EMA crosses a flat to downsloping VWAP, we enter the
+//      trade long. We enter the trade as soon as the cross occurs."
+//     "Hard stop 1/3 the distance from Vwap to the Low of the day."
+//     "Take the measured move from the low of the day to the spot of the 'cross'.
+//      Target 1 measured move above the cross."
+//   Quoted stats: ~60% win rate, ~3:1 reward:risk.
+//   Ideal times (EST): 10:00-10:45 and 10:46-13:30.
+//
+// NOTE on "flat-to-downsloping VWAP": this is the VWAP's DAY POSTURE (heavy/flat
+// from an earlier decline), not a 1-3 bar micro-slope. Measure it over a LONGER
+// lookback (vwapSlopeLen, default 10) — a short window just sees the bounce tick
+// VWAP up and wrongly rejects every long. If you get too few trades, watch the
+// on-chart DIAGNOSTIC TABLE (top-right): it shows how many signals survive each
+// gate, so you can see exactly which filter is the bottleneck.
+//
+// ENTRY MODE (input "Entry mode"):
+//  - "Anticipate cross (stop order)" [default]: enter AT the cross. Since
+//    EMA_next = alpha*P + (1-alpha)*EMA_now, we invert it for the price P that
+//    makes the 9 EMA meet VWAP: P* = (VWAP - (1-alpha)*EMA_now)/alpha, and rest a
+//    stop-entry there. Price touching P* IS the cross -> intrabar fill. The trigger
+//    is fixed at bar close and refreshed each bar (non-repainting). Your fill sits
+//    above VWAP for longs (price leads the lagging EMA) while stop/target stay
+//    anchored to the geometric cross (VWAP) and low-of-day. The trigger overshoots
+//    VWAP by ~4x the EMA-VWAP gap at arming, so realized R:R degrades steeply the
+//    further the EMA lags VWAP — the "Minimum reward:risk" input gates that (it is
+//    the honest cost of a momentum entry vs the theoretical 3:1).
+//  - "React next bar open (market)": the old behaviour — market order on the next
+//    bar's open after a confirmed close-basis cross (fills one candle late).
+//
+// BACKTEST HONESTY: signals gated on barstate.isconfirmed, strategy runs on bar
+// close. No repaint / no lookahead (anticipatory stop is price-driven off a level
+// fixed at the prior close). VWAP is hand-rolled and shares ONE daily anchor with
+// the low/high of day. Needs a volume-bearing instrument (errors on no-volume).
+// =============================================================================
+
+strategy(
+     title              = "SMB Fashionably Late Scalp (9EMA x VWAP)",
+     shorttitle         = "FL Scalp",
+     overlay            = true,
+     pyramiding         = 0,
+     initial_capital    = 1000000,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 1,
+     commission_type    = strategy.commission.cash_per_order,
+     commission_value   = 0.01,
+     calc_on_every_tick = false,
+     process_orders_on_close = false,
+     max_labels_count   = 500,
+     max_lines_count    = 500)
+
+// ------------------------------- Inputs --------------------------------------
+grpCore = "Core"
+emaLen  = input.int(9, "EMA length", minval=1, group=grpCore)
+entryMode = input.string("Anticipate cross (stop order)", "Entry mode", group=grpCore,
+     options=["Anticipate cross (stop order)", "React next bar open (market)"],
+     tooltip="Anticipate = rest a stop-entry at the price where the 9 EMA would meet VWAP, so you fill AT the cross intrabar. React = market order on the next bar's open after a confirmed cross (fills one candle late).")
+
+grpSlope = "Slope definition (operationalizes 'upsloping / flat-to-downsloping')"
+slopeLen     = input.int(3, "EMA slope lookback (bars)", minval=1, group=grpSlope,
+     tooltip="How the 9 EMA's up/down slope is measured. Short = responsive to the bounce.")
+vwapSlopeLen = input.int(10, "VWAP slope lookback (bars)", minval=1, group=grpSlope,
+     tooltip="LONGER than the EMA lookback on purpose: 'flat-to-downsloping VWAP' is the day posture, not a 1-3 bar tick. Raise if you get no longs.")
+emaSlopeThr  = input.float(0.02, "EMA slope threshold (% over lookback)", minval=0.0, step=0.01, group=grpSlope,
+     tooltip="EMA is UP if it rose more than this %, DOWN if it fell more, else FLAT.")
+vwapSlopeThr = input.float(0.05, "VWAP flat-band threshold (% over lookback)", minval=0.0, step=0.01, group=grpSlope,
+     tooltip="'Flat-to-downsloping VWAP' (long) = VWAP did NOT rise more than this % over its lookback. Set 0 for strict flat-or-down.")
+
+grpSetup = "Setup / re-entry"
+requireTurn   = input.bool(true, "Require a prior 'turn' (distinct LOD/HOD)", group=grpSetup,
+     tooltip="Long needs a low-of-day put in some bars ago (price turned up) before the cross.")
+turnLookback  = input.int(2, "Min bars since LOD/HOD to count as a turn", minval=0, group=grpSetup)
+reentryCooldownBars = input.int(1, "Re-entry cooldown (bars flat after an exit)", minval=0, group=grpSetup,
+     tooltip="Bars that must pass after a position closes before a new entry can fire.")
+
+grpDir = "Direction"
+allowLong  = input.bool(true,  "Allow longs",  group=grpDir)
+allowShort = input.bool(true,  "Allow shorts", group=grpDir)
+
+grpRisk = "Stop & target"
+stopFrac      = input.float(1.0/3.0, "Stop fraction of (anchor -> LOD/HOD)", minval=0.01, maxval=1.0, step=0.01, group=grpRisk,
+     tooltip="Official rule = 1/3. Stop sits this fraction of the way from the anchor toward the day's extreme.")
+stopAnchor    = input.string("VWAP -> low of day", "Stop anchor mode", group=grpRisk,
+     options=["VWAP -> low of day", "Cross price -> low of day"],
+     tooltip="Official = VWAP->low of day. TradingView variant = cross point (signal-bar close)->the divergence extreme.")
+crossPriceMode= input.string("VWAP at cross", "Cross price for measured move", group=grpRisk,
+     options=["VWAP at cross", "Signal bar close"],
+     tooltip="Which price is 'the spot of the cross' for the measured-move target. (React mode only; Anticipate forces VWAP.)")
+minRR = input.float(1.5, "Minimum reward:risk to enter (0 = off)", minval=0.0, step=0.1, group=grpRisk,
+     tooltip="Rejects setups whose realized R:R — measured from the actual fill/trigger, not from VWAP — is below this. In Anticipate mode this bounds how far the 9 EMA may lag VWAP at arming (the trigger overshoots VWAP by ~4x that gap). 0 disables.")
+
+grpFilt = "Optional filters"
+useSession   = input.bool(true, "Restrict to ideal EST time windows", group=grpFilt)
+sessMorning  = input.session("1000-1045", "Morning window (New York / EST)", group=grpFilt)
+sessMidday   = input.session("1046-1330", "Mid-day window (New York / EST)", group=grpFilt,
+     tooltip="Cheat sheet prints '1:30 am' — treated as a typo for 1:30 PM (1330).")
+useFlatVeto  = input.bool(false, "Veto if 9 EMA was flat too long after the turn", group=grpFilt,
+     tooltip="Approximate: tracks the longest flat 9-EMA run since the most recent extreme (turn). Off by default.")
+flatVetoMin  = input.int(15, "Flat veto minutes", minval=1, group=grpFilt)
+useVolConfirm= input.bool(false, "Require above-average volume on signal bar", group=grpFilt,
+     tooltip="Proxy for 'convergence volume > divergence volume'. Off by default.")
+volLen       = input.int(20, "Volume average length", minval=1, group=grpFilt)
+
+grpDiag = "Diagnostics"
+showDiag = input.bool(true, "Show signal-funnel table (top-right)", group=grpDiag,
+     tooltip="Counts how many EMA×VWAP crosses survive each gate, so you can see what blocks entries.")
+
+// ------------------------------ Series ---------------------------------------
+ema9 = ta.ema(close, emaLen)
+
+// Shared daily anchor: BOTH the VWAP and the LOD/HOD reset on this exact bar.
+newDay = timeframe.change("D") or barstate.isfirst
+
+// Hand-rolled session VWAP (resets on newDay, same bar as LOD/HOD)
+var float cumPV  = 0.0
+var float cumVol = 0.0
+if newDay
+    cumPV  := 0.0
+    cumVol := 0.0
+cumPV  += hlc3 * nz(volume)
+cumVol += nz(volume)
+vwapv = cumVol > 0 ? cumPV / cumVol : na
+
+// Slopes (percent change over their own lookbacks)
+emaChgPct  = (ema9  - ema9[slopeLen])      / ema9  * 100.0
+vwapChgPct = (vwapv - vwapv[vwapSlopeLen]) / vwapv * 100.0
+emaUp   = emaChgPct >  emaSlopeThr
+emaDown = -emaChgPct >  emaSlopeThr
+emaFlat = not emaUp and not emaDown
+vwapFlatOrDown = vwapChgPct <=  vwapSlopeThr    // long: VWAP not strongly up
+vwapFlatOrUp   = vwapChgPct >= -vwapSlopeThr    // short: VWAP not strongly down
+
+// --------------- Low/high of day, "turn", and flat tracking ------------------
+var float lod = na
+var float hod = na
+var int barsSinceLow  = 0
+var int barsSinceHigh = 0
+var int flatRun     = 0
+var int lastFlatRun = 0
+
+bool isNewLow  = false
+bool isNewHigh = false
+if newDay
+    lod := low
+    hod := high
+    barsSinceLow  := 0
+    barsSinceHigh := 0
+    flatRun     := 0
+    lastFlatRun := 0
+else
+    isNewLow  := low  < lod
+    isNewHigh := high > hod
+    if isNewLow
+        lod := low
+        barsSinceLow := 0
+    else
+        barsSinceLow += 1
+    if isNewHigh
+        hod := high
+        barsSinceHigh := 0
+    else
+        barsSinceHigh += 1
+    // Flat run scoped to "since the most recent extreme" (~ after the turn)
+    if isNewLow or isNewHigh
+        flatRun     := 0
+        lastFlatRun := 0
+    else if emaFlat
+        flatRun     += 1
+        lastFlatRun := math.max(lastFlatRun, flatRun)
+    else
+        flatRun := 0
+
+// --------------------------- Gates & filters ---------------------------------
+tfMin        = timeframe.in_seconds() / 60.0
+flatVetoBars = math.max(1, math.round(flatVetoMin / math.max(tfMin, 1.0)))
+
+inMorning = not na(time(timeframe.period, sessMorning, "America/New_York"))
+inMidday  = not na(time(timeframe.period, sessMidday,  "America/New_York"))
+inWindow  = not useSession or inMorning or inMidday
+
+volOK      = not useVolConfirm or (not na(volume) and volume > ta.sma(volume, volLen))
+flatVetoOn = useFlatVeto and lastFlatRun >= flatVetoBars
+
+crossUp = ta.crossover(ema9, vwapv)
+crossDn = ta.crossunder(ema9, vwapv)
+
+turnLong  = not requireTurn or barsSinceLow  >= turnLookback
+turnShort = not requireTurn or barsSinceHigh >= turnLookback
+
+antic = entryMode == "Anticipate cross (stop order)"
+
+// -------------------------- Stop / target levels -----------------------------
+// In Anticipate mode the fill sits above/below VWAP (at the trigger) but the
+// stop/target stay anchored to the geometric cross (VWAP) and the day extreme, so
+// force VWAP anchoring there; the close-based anchors are for React mode only.
+crossPrice     = (crossPriceMode == "VWAP at cross"     or antic) ? vwapv : close
+topAnchorLong  = (stopAnchor    == "VWAP -> low of day" or antic) ? vwapv : close
+botAnchorShort = (stopAnchor    == "VWAP -> low of day" or antic) ? vwapv : close
+
+stopLongCalc    = topAnchorLong  - stopFrac * (topAnchorLong  - lod)
+targetLongCalc  = crossPrice     + (crossPrice - lod)
+stopShortCalc   = botAnchorShort + stopFrac * (hod - botAnchorShort)
+targetShortCalc = crossPrice     - (hod - crossPrice)
+
+// Geometry must be sane: stop on the correct side of price, target beyond price.
+validLong  = lod < vwapv and stopLongCalc  < close and targetLongCalc  > close
+validShort = hod > vwapv and stopShortCalc > close and targetShortCalc < close
+
+// Re-entry cooldown & one-at-a-time. Stamp while in a position AND on the bar we
+// just went flat, so an intrabar exit still counts toward the cooldown.
+var int lastInPosBar = na
+if strategy.position_size != 0 or (strategy.position_size == 0 and strategy.position_size[1] != 0)
+    lastInPosBar := bar_index
+cooldownOK = na(lastInPosBar) or (bar_index - lastInPosBar >= reentryCooldownBars)
+flat = strategy.position_size == 0
+
+// ---------------- Entry-trigger math (anticipatory stop entries) -------------
+// EMA_next = alpha*P + (1-alpha)*EMA_now.  Solve EMA_next = VWAP for the price P
+// that makes the 9 EMA meet VWAP, then rest a stop-entry there to fill AT the cross.
+//   P* = (VWAP_est - (1-alpha)*EMA_now) / alpha
+// P* overshoots VWAP by ((1-alpha)/alpha)*(VWAP-EMA) = 4x the gap for a 9 EMA, so
+// the further the EMA lags VWAP at arming, the worse the fill and R:R — the minRR
+// gate below bounds that.
+alpha     = 2.0 / (emaLen + 1)
+vwapEst   = vwapv                                          // lightweight: VWAP barely moves per bar
+trigRaw   = (vwapEst - (1.0 - alpha) * ema9) / alpha
+trigLong  = math.max(trigRaw, close + syminfo.mintick)    // buy-stop must sit above price
+trigShort = math.min(trigRaw, close - syminfo.mintick)    // sell-stop must sit below price
+
+// Realized R:R at the actual entry proxy (trigger in Anticipate, close in React)
+entryRefLong  = antic ? trigLong  : close
+entryRefShort = antic ? trigShort : close
+rrLong  = (targetLongCalc  - entryRefLong)  / math.max(entryRefLong  - stopLongCalc,  syminfo.mintick)
+rrShort = (entryRefShort   - targetShortCalc) / math.max(stopShortCalc - entryRefShort, syminfo.mintick)
+rrOKL   = minRR <= 0 or rrLong  >= minRR
+rrOKS   = minRR <= 0 or rrShort >= minRR
+
+// Mode-aware "raw candidate" + geometry (funnel and the real signal share these).
+// Anticipate: arm while the cross is still PENDING (EMA pre-cross side), the trigger
+// is genuinely ahead of price, there is room to the target, and R:R passes.
+// React: fire on the confirmed crossover, geometry judged at the close.
+rawL  = antic ? (allowLong  and ema9 < vwapv) : (allowLong  and crossUp)
+rawS  = antic ? (allowShort and ema9 > vwapv) : (allowShort and crossDn)
+geomL = antic ? (lod < vwapv and trigRaw > close and stopLongCalc  < trigLong  and targetLongCalc  > trigLong  and rrOKL) : (validLong  and rrOKL)
+geomS = antic ? (hod > vwapv and trigRaw < close and stopShortCalc > trigShort and targetShortCalc < trigShort and rrOKS) : (validShort and rrOKS)
+
+// -------------------- Staged signals (shared with funnel) --------------------
+L1 = rawL                                                    // raw cross / pending pre-cross
+L2 = L1 and emaUp and vwapFlatOrDown                         // + slope posture
+L3 = L2 and turnLong                                         // + the turn
+L4 = L3 and inWindow                                         // + session window
+L5 = L4 and geomL                                            // + valid geometry
+L6 = L5 and volOK and not flatVetoOn                         // + optional filters
+enterLong = L6 and barstate.isconfirmed and flat and cooldownOK
+
+// Short stages (mirror)
+S1 = rawS
+S2 = S1 and emaDown and vwapFlatOrUp
+S3 = S2 and turnShort
+S4 = S3 and inWindow
+S5 = S4 and geomS
+S6 = S5 and volOK and not flatVetoOn
+enterShort = S6 and barstate.isconfirmed and flat and cooldownOK
+
+// ------------------------------ Orders ---------------------------------------
+var float posStop   = na
+var float posTarget = na
+
+if antic
+    // Rest a stop-entry AT the computed cross price; refresh or cancel each bar.
+    if enterLong
+        strategy.entry("Long", strategy.long, stop=trigLong)
+        posStop   := stopLongCalc
+        posTarget := targetLongCalc
+    else
+        strategy.cancel("Long")
+    if enterShort
+        strategy.entry("Short", strategy.short, stop=trigShort)
+        posStop   := stopShortCalc
+        posTarget := targetShortCalc
+    else
+        strategy.cancel("Short")
+else
+    // React: market entry, fills at the next bar's open after the confirmed cross.
+    if enterLong
+        strategy.entry("Long", strategy.long)
+        posStop   := stopLongCalc
+        posTarget := targetLongCalc
+    if enterShort
+        strategy.entry("Short", strategy.short)
+        posStop   := stopShortCalc
+        posTarget := targetShortCalc
+
+if strategy.position_size > 0
+    strategy.exit("L exit", from_entry="Long",  stop=posStop, limit=posTarget)
+if strategy.position_size < 0
+    strategy.exit("S exit", from_entry="Short", stop=posStop, limit=posTarget)
+
+// ------------------------------- Plots ---------------------------------------
+plot(ema9,  "9 EMA", color=color.orange, linewidth=2)
+plot(vwapv, "VWAP",  color=color.blue,   linewidth=2)
+
+plotshape(enterLong,  title="Long entry/arm",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(enterShort, title="Short entry/arm", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.small)
+
+// Resting stop-entry trigger (where the 9 EMA would meet VWAP) while armed
+plot(antic and enterLong  ? trigLong  : na, "Buy-stop trigger",  color=color.new(color.lime,    0), style=plot.style_cross, linewidth=2)
+plot(antic and enterShort ? trigShort : na, "Sell-stop trigger", color=color.new(color.fuchsia, 0), style=plot.style_cross, linewidth=2)
+
+inPos = strategy.position_size != 0
+plot(inPos ? posStop   : na, "Stop",   color=color.new(color.red,   0), style=plot.style_linebr)
+plot(inPos ? posTarget : na, "Target", color=color.new(color.green, 0), style=plot.style_linebr)
+
+// ------------------------- Signal-funnel diagnostics -------------------------
+var int cCross   = 0
+var int cSlope   = 0
+var int cTurn    = 0
+var int cSession = 0
+var int cValid   = 0
+var int cFilt    = 0
+var int cEntry   = 0
+if barstate.isconfirmed
+    if L1 or S1
+        cCross += 1
+    if L2 or S2
+        cSlope += 1
+    if L3 or S3
+        cTurn += 1
+    if L4 or S4
+        cSession += 1
+    if L5 or S5
+        cValid += 1
+    if L6 or S6
+        cFilt += 1
+    if enterLong or enterShort
+        cEntry += 1
+
+var table diag = na
+if showDiag and barstate.islast
+    if na(diag)
+        diag := table.new(position.top_right, 2, 8, border_width=1, frame_color=color.gray, frame_width=1)
+    hb = color.new(color.blue, 0)
+    rb = color.new(#1e1e1e, 0)
+    tc = color.white
+    table.cell(diag, 0, 0, "signal funnel",         text_color=tc, bgcolor=hb, text_size=size.small)
+    table.cell(diag, 1, 0, "count",                 text_color=tc, bgcolor=hb, text_size=size.small)
+    table.cell(diag, 0, 1, antic ? "pending pre-cross" : "EMA x VWAP crosses", text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 1, 1, str.tostring(cCross),     text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 0, 2, "+ slope posture",        text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 1, 2, str.tostring(cSlope),     text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 0, 3, "+ the turn",             text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 1, 3, str.tostring(cTurn),      text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 0, 4, "+ session window",       text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 1, 4, str.tostring(cSession),   text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 0, 5, "+ geometry / R:R",       text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 1, 5, str.tostring(cValid),     text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 0, 6, "+ opt. filters",         text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 1, 6, str.tostring(cFilt),      text_color=tc, bgcolor=rb, text_size=size.small)
+    table.cell(diag, 0, 7, antic ? "ENTRIES (arms)" : "ENTRIES", text_color=tc, bgcolor=hb, text_size=size.small)
+    table.cell(diag, 1, 7, str.tostring(cEntry),     text_color=tc, bgcolor=hb, text_size=size.small)
+
+// --------------------------- Fail loud on no volume --------------------------
+if barstate.islastconfirmedhistory and na(vwapv)
+    runtime.error("VWAP is na: this symbol has no volume data. The Fashionably Late Scalp needs a volume-bearing instrument (stocks/futures).")

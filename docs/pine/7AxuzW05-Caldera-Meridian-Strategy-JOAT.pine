@@ -1,0 +1,405 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy(title="Caldera Meridian Strategy [JOAT]", shorttitle="CMS [JOAT]", overlay=true, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1, pyramiding=0, process_orders_on_close=true, max_lines_count=300, max_labels_count=220, max_boxes_count=120, max_bars_back=2500)
+
+// Caldera Meridian Strategy [JOAT]
+// A native TradingView strategy that integrates JOAT-style regime, structure,
+// pressure, auction, and probabilistic continuation modules. The strategy does
+// not import indicators, because Pine strategies cannot consume external
+// indicator output directly. All decisions are close-confirmed and self-contained.
+
+//==============================================================================
+// Inputs
+//==============================================================================
+groupRegime = "Regime Engine"
+fastLen = input.int(21, "Fast EMA", minval=2, maxval=100, group=groupRegime)
+midLen = input.int(55, "Mid EMA", minval=5, maxval=200, group=groupRegime)
+slowLen = input.int(200, "Slow EMA", minval=50, maxval=500, group=groupRegime)
+atrLen = input.int(21, "ATR length", minval=2, maxval=100, group=groupRegime)
+regimeLen = input.int(120, "Regime memory", minval=30, maxval=500, group=groupRegime)
+transitionLen = input.int(80, "Markov transition memory", minval=20, maxval=300, group=groupRegime)
+minContinuation = input.float(58.0, "Minimum continuation probability", minval=45.0, maxval=90.0, step=0.5, group=groupRegime)
+
+groupStructure = "Structure + Auction"
+pivotLen = input.int(5, "Pivot confirmation", minval=2, maxval=20, group=groupStructure)
+pressureLen = input.int(24, "Pressure window", minval=5, maxval=100, group=groupStructure)
+volumeLen = input.int(34, "Volume baseline", minval=5, maxval=200, group=groupStructure)
+auctionLen = input.int(90, "Auction memory", minval=20, maxval=300, group=groupStructure)
+valueDev = input.float(1.15, "Value deviation", minval=0.2, maxval=4.0, step=0.05, group=groupStructure)
+displaceMult = input.float(1.10, "Displacement ATR multiplier", minval=0.2, maxval=4.0, step=0.05, group=groupStructure)
+
+groupFilters = "Filters"
+useHtfFilter = input.bool(true, "Use confirmed HTF filter", group=groupFilters)
+htfFrame = input.timeframe("240", "Confirmed HTF", group=groupFilters)
+htfLen = input.int(55, "HTF EMA length", minval=5, maxval=200, group=groupFilters)
+useSession = input.bool(false, "Use session filter", group=groupFilters)
+tradeSession = input.session("0930-1600", "Trading session", group=groupFilters)
+minScore = input.float(72.0, "Minimum execution score", minval=50.0, maxval=95.0, step=0.5, group=groupFilters)
+
+groupRisk = "Risk Management"
+riskAtr = input.float(1.7, "Stop ATR multiplier", minval=0.2, maxval=8.0, step=0.1, group=groupRisk)
+rr1 = input.float(1.0, "TP1 R", minval=0.2, maxval=8.0, step=0.1, group=groupRisk)
+rr2 = input.float(2.0, "TP2 R", minval=0.2, maxval=12.0, step=0.1, group=groupRisk)
+rr3 = input.float(3.2, "TP3 R", minval=0.2, maxval=20.0, step=0.1, group=groupRisk)
+tp1Qty = input.float(35.0, "TP1 quantity %", minval=1.0, maxval=95.0, step=1.0, group=groupRisk)
+tp2Qty = input.float(35.0, "TP2 quantity %", minval=1.0, maxval=95.0, step=1.0, group=groupRisk)
+allowRegimeExit = input.bool(true, "Exit on regime flip", group=groupRisk)
+allowPressureExit = input.bool(true, "Exit on pressure risk-off", group=groupRisk)
+
+groupVisual = "Visual System"
+showCloud = input.bool(true, "Show regime cloud", group=groupVisual)
+showRails = input.bool(true, "Show active trade rails", group=groupVisual)
+showDashboard = input.bool(true, "Show dashboard", group=groupVisual)
+paintCandles = input.bool(true, "Color candles by strategy state", group=groupVisual)
+
+//==============================================================================
+// Palette
+//==============================================================================
+color joatCyan = color.rgb(8, 239, 251)
+color joatMagenta = color.rgb(217, 2, 255)
+color joatGold = color.rgb(255, 200, 0)
+color joatTeal = color.rgb(38, 166, 154)
+color joatCoral = color.rgb(239, 83, 80)
+color joatViolet = color.rgb(125, 92, 255)
+color joatBlue = color.rgb(56, 189, 248)
+color joatInk = color.rgb(8, 10, 18)
+color joatPanel = color.rgb(15, 18, 28)
+color joatGrid = color.rgb(42, 48, 68)
+color joatText = color.rgb(226, 232, 240)
+color joatMute = color.rgb(130, 140, 160)
+
+//==============================================================================
+// Utility
+//==============================================================================
+f_clamp(float value, float minValue, float maxValue) =>
+    math.max(minValue, math.min(maxValue, value))
+
+f_safeDiv(float num, float den, float fallback) =>
+    math.abs(den) > 0.0000001 ? num / den : fallback
+
+f_boolScore(bool condition, float weight) =>
+    condition ? weight : 0.0
+
+f_confirmedHtfEma(string tf, int len) =>
+    request.security(syminfo.tickerid, tf, ta.ema(close, len)[1], lookahead=barmerge.lookahead_on)
+
+f_scoreColor(float score, int direction) =>
+    direction == 1 ? color.from_gradient(score, 0.0, 100.0, joatCoral, joatCyan) : color.from_gradient(score, 0.0, 100.0, joatTeal, joatMagenta)
+
+tp1Part = f_clamp(tp1Qty, 1.0, 90.0)
+tp2Part = f_clamp(tp2Qty, 1.0, 95.0 - tp1Part)
+tp3Part = math.max(100.0 - tp1Part - tp2Part, 1.0)
+
+//==============================================================================
+// Regime Module
+//==============================================================================
+atr = ta.atr(atrLen)
+fast = ta.ema(close, fastLen)
+mid = ta.ema(close, midLen)
+slow = ta.ema(close, slowLen)
+vwapLine = ta.vwap(hlc3)
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+rsi = ta.rsi(close, 14)
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+
+trendBull = fast > mid and mid > slow and close > mid
+trendBear = fast < mid and mid < slow and close < mid
+momentumBull = macdHist > 0 and rsi > 52 and plusDI > minusDI
+momentumBear = macdHist < 0 and rsi < 48 and minusDI > plusDI
+vwapBull = close > vwapLine and vwapLine > vwapLine[1]
+vwapBear = close < vwapLine and vwapLine < vwapLine[1]
+
+atrPct = close != 0.0 ? atr / close * 100.0 : 0.0
+atrRank = ta.percentrank(atrPct, regimeLen)
+atrRankSafe = na(atrRank) ? 50.0 : atrRank
+expansion = atrRankSafe > 62.0
+compression = atrRankSafe < 32.0
+
+htfBasis = f_confirmedHtfEma(htfFrame, htfLen)
+htfBull = close > htfBasis
+htfBear = close < htfBasis
+htfPassLong = not useHtfFilter or htfBull
+htfPassShort = not useHtfFilter or htfBear
+
+sessionOk = not useSession or not na(time(timeframe.period, tradeSession))
+canConfirm = barstate.isconfirmed
+
+state = trendBull ? 1 : trendBear ? -1 : 0
+prevState = nz(state[1], 0)
+fromBull = prevState == 1 ? 1.0 : 0.0
+fromBear = prevState == -1 ? 1.0 : 0.0
+fromNeutral = prevState == 0 ? 1.0 : 0.0
+toBull = state == 1 ? 1.0 : 0.0
+toBear = state == -1 ? 1.0 : 0.0
+toNeutral = state == 0 ? 1.0 : 0.0
+
+pBullBull = f_safeDiv(ta.sma(fromBull * toBull, transitionLen), ta.sma(fromBull, transitionLen), 0.50)
+pBearBear = f_safeDiv(ta.sma(fromBear * toBear, transitionLen), ta.sma(fromBear, transitionLen), 0.50)
+pNeutralNeutral = f_safeDiv(ta.sma(fromNeutral * toNeutral, transitionLen), ta.sma(fromNeutral, transitionLen), 0.33)
+continuation = state == 1 ? pBullBull : state == -1 ? pBearBear : pNeutralNeutral
+continuationPct = f_clamp(continuation * 100.0, 0.0, 100.0)
+probPass = continuationPct >= minContinuation or expansion
+
+//==============================================================================
+// Pressure and Auction Module
+//==============================================================================
+spread = math.max(high - low, syminfo.mintick)
+body = close - open
+signedBody = body / spread * volume
+pressureRaw = ta.ema(signedBody, pressureLen)
+pressureBase = ta.ema(math.abs(signedBody), pressureLen)
+pressureOsc = f_clamp(f_safeDiv(pressureRaw, pressureBase, 0.0) * 100.0, -100.0, 100.0)
+volumeBase = ta.sma(volume, volumeLen)
+volumeImpulse = f_safeDiv(volume, volumeBase, 1.0)
+bidPressure = pressureOsc > 12.0 and volumeImpulse > 1.05
+askPressure = pressureOsc < -12.0 and volumeImpulse > 1.05
+absorptionBull = low < low[1] and close > open and pressureOsc > pressureOsc[1] and volumeImpulse > 1.1
+absorptionBear = high > high[1] and close < open and pressureOsc < pressureOsc[1] and volumeImpulse > 1.1
+
+weightedPrice = f_safeDiv(ta.sma(hlc3 * volume, auctionLen), ta.sma(volume, auctionLen), hlc3)
+auctionDev = ta.stdev(hlc3, auctionLen)
+valueHigh = weightedPrice + auctionDev * valueDev
+valueLow = weightedPrice - auctionDev * valueDev
+auctionDiscount = close < valueLow and close > low + spread * 0.45
+auctionPremium = close > valueHigh and close < high - spread * 0.45
+auctionReclaim = close > valueLow and close[1] <= valueLow[1]
+auctionReject = close < valueHigh and close[1] >= valueHigh[1]
+
+//==============================================================================
+// Structure Module
+//==============================================================================
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+var float lastPivotHigh = na
+var float lastPivotLow = na
+
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+
+displacement = math.abs(close - open) > atr * displaceMult and volumeImpulse > 1.0
+bosUp = not na(lastPivotHigh) and close > lastPivotHigh and close[1] <= lastPivotHigh and displacement
+bosDown = not na(lastPivotLow) and close < lastPivotLow and close[1] >= lastPivotLow and displacement
+sweepLow = not na(lastPivotLow) and low < lastPivotLow and close > lastPivotLow
+sweepHigh = not na(lastPivotHigh) and high > lastPivotHigh and close < lastPivotHigh
+fvgBull = low > high[2] and close > open
+fvgBear = high < low[2] and close < open
+
+var int structureBias = 0
+if bosUp
+    structureBias := 1
+else if bosDown
+    structureBias := -1
+
+structureBull = structureBias == 1 or sweepLow or fvgBull
+structureBear = structureBias == -1 or sweepHigh or fvgBear
+
+//==============================================================================
+// Execution Score
+//==============================================================================
+longScoreRaw = 0.0
+longScoreRaw += f_boolScore(trendBull, 16.0)
+longScoreRaw += f_boolScore(momentumBull, 12.0)
+longScoreRaw += f_boolScore(vwapBull, 9.0)
+longScoreRaw += f_boolScore(bidPressure, 12.0)
+longScoreRaw += f_boolScore(absorptionBull, 8.0)
+longScoreRaw += f_boolScore(structureBull, 14.0)
+longScoreRaw += f_boolScore(auctionDiscount or auctionReclaim, 10.0)
+longScoreRaw += f_boolScore(htfPassLong, 8.0)
+longScoreRaw += f_boolScore(probPass, 7.0)
+longScoreRaw += f_clamp(adx / 8.0, 0.0, 4.0)
+
+shortScoreRaw = 0.0
+shortScoreRaw += f_boolScore(trendBear, 16.0)
+shortScoreRaw += f_boolScore(momentumBear, 12.0)
+shortScoreRaw += f_boolScore(vwapBear, 9.0)
+shortScoreRaw += f_boolScore(askPressure, 12.0)
+shortScoreRaw += f_boolScore(absorptionBear, 8.0)
+shortScoreRaw += f_boolScore(structureBear, 14.0)
+shortScoreRaw += f_boolScore(auctionPremium or auctionReject, 10.0)
+shortScoreRaw += f_boolScore(htfPassShort, 8.0)
+shortScoreRaw += f_boolScore(probPass, 7.0)
+shortScoreRaw += f_clamp(adx / 8.0, 0.0, 4.0)
+
+longScore = f_clamp(longScoreRaw, 0.0, 100.0)
+shortScore = f_clamp(shortScoreRaw, 0.0, 100.0)
+dominantDir = longScore > shortScore ? 1 : shortScore > longScore ? -1 : 0
+dominantScore = math.max(longScore, shortScore)
+strategyColor = dominantDir == 1 ? f_scoreColor(longScore, 1) : dominantDir == -1 ? f_scoreColor(shortScore, -1) : joatGold
+
+flat = strategy.position_size == 0
+longSignal = canConfirm and sessionOk and flat and longScore >= minScore and longScore > shortScore + 8.0 and htfPassLong and not auctionPremium
+shortSignal = canConfirm and sessionOk and flat and shortScore >= minScore and shortScore > longScore + 8.0 and htfPassShort and not auctionDiscount
+riskOffLong = canConfirm and strategy.position_size > 0 and ((allowRegimeExit and state == -1) or (allowPressureExit and pressureOsc < -20.0) or shortScore > longScore + 6.0)
+riskOffShort = canConfirm and strategy.position_size < 0 and ((allowRegimeExit and state == 1) or (allowPressureExit and pressureOsc > 20.0) or longScore > shortScore + 6.0)
+
+//==============================================================================
+// Orders and Risk State
+//==============================================================================
+var float activeLongStop = na
+var float activeLongTp1 = na
+var float activeLongTp2 = na
+var float activeLongTp3 = na
+var float activeShortStop = na
+var float activeShortTp1 = na
+var float activeShortTp2 = na
+var float activeShortTp3 = na
+
+if longSignal
+    entry = close
+    structureStop = not na(lastPivotLow) ? lastPivotLow : na
+    atrStop = close - atr * riskAtr
+    stop = na(structureStop) ? atrStop : math.min(atrStop, structureStop)
+    risk = math.max(math.abs(entry - stop), atr * 0.25)
+    activeLongStop := stop
+    activeLongTp1 := entry + risk * rr1
+    activeLongTp2 := entry + risk * rr2
+    activeLongTp3 := entry + risk * rr3
+    activeShortStop := na
+    activeShortTp1 := na
+    activeShortTp2 := na
+    activeShortTp3 := na
+    strategy.entry("CMS-L", strategy.long, comment="CMS Long")
+
+if shortSignal
+    entry = close
+    structureStop = not na(lastPivotHigh) ? lastPivotHigh : na
+    atrStop = close + atr * riskAtr
+    stop = na(structureStop) ? atrStop : math.max(atrStop, structureStop)
+    risk = math.max(math.abs(entry - stop), atr * 0.25)
+    activeShortStop := stop
+    activeShortTp1 := entry - risk * rr1
+    activeShortTp2 := entry - risk * rr2
+    activeShortTp3 := entry - risk * rr3
+    activeLongStop := na
+    activeLongTp1 := na
+    activeLongTp2 := na
+    activeLongTp3 := na
+    strategy.entry("CMS-S", strategy.short, comment="CMS Short")
+
+if strategy.position_size > 0 and not na(activeLongStop)
+    strategy.exit("CMS-L-TP1", from_entry="CMS-L", stop=activeLongStop, limit=activeLongTp1, qty_percent=tp1Part)
+    strategy.exit("CMS-L-TP2", from_entry="CMS-L", stop=activeLongStop, limit=activeLongTp2, qty_percent=tp2Part)
+    strategy.exit("CMS-L-TP3", from_entry="CMS-L", stop=activeLongStop, limit=activeLongTp3, qty_percent=tp3Part)
+
+if strategy.position_size < 0 and not na(activeShortStop)
+    strategy.exit("CMS-S-TP1", from_entry="CMS-S", stop=activeShortStop, limit=activeShortTp1, qty_percent=tp1Part)
+    strategy.exit("CMS-S-TP2", from_entry="CMS-S", stop=activeShortStop, limit=activeShortTp2, qty_percent=tp2Part)
+    strategy.exit("CMS-S-TP3", from_entry="CMS-S", stop=activeShortStop, limit=activeShortTp3, qty_percent=tp3Part)
+
+if riskOffLong
+    strategy.close("CMS-L", comment="CMS Long Risk-Off")
+if riskOffShort
+    strategy.close("CMS-S", comment="CMS Short Risk-Off")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeLongStop := na
+    activeLongTp1 := na
+    activeLongTp2 := na
+    activeLongTp3 := na
+    activeShortStop := na
+    activeShortTp1 := na
+    activeShortTp2 := na
+    activeShortTp3 := na
+
+//==============================================================================
+// Visuals
+//==============================================================================
+pFast = plot(showCloud ? fast : na, "CMS fast regime", color=color.new(joatCyan, dominantDir == 1 ? 0 : 45), linewidth=1)
+pMid = plot(showCloud ? mid : na, "CMS mid regime", color=color.new(strategyColor, 0), linewidth=2)
+pSlow = plot(showCloud ? slow : na, "CMS slow regime", color=color.new(joatMagenta, dominantDir == -1 ? 0 : 45), linewidth=1)
+fill(pFast, pMid, color=color.new(dominantDir == 1 ? joatCyan : joatGold, 88), title="CMS fast-mid field")
+fill(pMid, pSlow, color=color.new(dominantDir == -1 ? joatMagenta : joatViolet, 90), title="CMS mid-slow field")
+
+pValueHigh = plot(valueHigh, "CMS value high", color=color.new(joatMagenta, 60), linewidth=1)
+pWeighted = plot(weightedPrice, "CMS auction center", color=color.new(joatGold, 15), linewidth=2)
+pValueLow = plot(valueLow, "CMS value low", color=color.new(joatCyan, 60), linewidth=1)
+fill(pValueHigh, pValueLow, color=color.new(joatViolet, 93), title="CMS value field")
+plot(htfBasis, "CMS confirmed HTF basis", color=color.new(joatBlue, useHtfFilter ? 35 : 100), linewidth=1)
+barcolor(paintCandles ? color.new(strategyColor, dominantScore >= minScore ? 8 : 36) : na)
+
+plotshape(longSignal, title="CMS long entry", style=shape.square, location=location.belowbar, color=color.new(joatCyan, 0), size=size.tiny, text="CMS", textcolor=joatInk)
+plotshape(shortSignal, title="CMS short entry", style=shape.square, location=location.abovebar, color=color.new(joatMagenta, 0), size=size.tiny, text="CMS", textcolor=joatText)
+
+var line railEntry = na
+var line railStop = na
+var line railTp1 = na
+var line railTp2 = na
+var line railTp3 = na
+var linefill railRisk = na
+var linefill railReward = na
+
+newPosition = showRails and strategy.position_size != 0 and strategy.position_size[1] == 0
+if newPosition
+    if not na(railEntry)
+        line.delete(railEntry)
+    if not na(railStop)
+        line.delete(railStop)
+    if not na(railTp1)
+        line.delete(railTp1)
+    if not na(railTp2)
+        line.delete(railTp2)
+    if not na(railTp3)
+        line.delete(railTp3)
+    if not na(railRisk)
+        linefill.delete(railRisk)
+    if not na(railReward)
+        linefill.delete(railReward)
+
+    isLong = strategy.position_size > 0
+    entryRail = strategy.position_avg_price
+    stopRail = isLong ? activeLongStop : activeShortStop
+    tp1Rail = isLong ? activeLongTp1 : activeShortTp1
+    tp2Rail = isLong ? activeLongTp2 : activeShortTp2
+    tp3Rail = isLong ? activeLongTp3 : activeShortTp3
+    railColor = isLong ? joatCyan : joatMagenta
+    x2 = bar_index + 80
+    railEntry := line.new(bar_index, entryRail, x2, entryRail, color=color.new(joatText, 0), width=2)
+    railStop := line.new(bar_index, stopRail, x2, stopRail, color=color.new(joatCoral, 0), width=2)
+    railTp1 := line.new(bar_index, tp1Rail, x2, tp1Rail, color=color.new(joatGold, 0), width=1)
+    railTp2 := line.new(bar_index, tp2Rail, x2, tp2Rail, color=color.new(railColor, 0), width=1)
+    railTp3 := line.new(bar_index, tp3Rail, x2, tp3Rail, color=color.new(railColor, 10), width=2)
+    railRisk := linefill.new(railEntry, railStop, color.new(joatCoral, 86))
+    railReward := linefill.new(railEntry, railTp3, color.new(railColor, 88))
+
+if showRails and strategy.position_size != 0 and not na(railEntry)
+    nextX = bar_index + 80
+    line.set_x2(railEntry, nextX)
+    line.set_x2(railStop, nextX)
+    line.set_x2(railTp1, nextX)
+    line.set_x2(railTp2, nextX)
+    line.set_x2(railTp3, nextX)
+
+//==============================================================================
+// Dashboard
+//==============================================================================
+var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(joatPanel, 4), border_color=color.new(joatGrid, 35), border_width=1)
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "CMS [JOAT]", text_color=joatText, bgcolor=color.new(strategyColor, 72), text_size=size.small)
+    table.cell(dash, 1, 0, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=joatText, bgcolor=color.new(strategyColor, 72), text_size=size.small)
+    table.cell(dash, 0, 1, "Long score", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 1, str.tostring(longScore, "#.0"), text_color=f_scoreColor(longScore, 1), text_size=size.tiny)
+    table.cell(dash, 0, 2, "Short score", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 2, str.tostring(shortScore, "#.0"), text_color=f_scoreColor(shortScore, -1), text_size=size.tiny)
+    table.cell(dash, 0, 3, "Regime", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 3, state == 1 ? "BULL" : state == -1 ? "BEAR" : "NEUTRAL", text_color=state == 1 ? joatCyan : state == -1 ? joatMagenta : joatGold, text_size=size.tiny)
+    table.cell(dash, 0, 4, "Continuation", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(continuationPct, "#.0") + "%", text_color=color.from_gradient(continuationPct, 0.0, 100.0, joatCoral, joatCyan), text_size=size.tiny)
+    table.cell(dash, 0, 5, "Pressure", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(pressureOsc, "#.0"), text_color=pressureOsc >= 0 ? joatCyan : joatMagenta, text_size=size.tiny)
+    table.cell(dash, 0, 6, "Auction", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 6, auctionDiscount ? "DISCOUNT" : auctionPremium ? "PREMIUM" : "VALUE", text_color=auctionDiscount ? joatCyan : auctionPremium ? joatMagenta : joatGold, text_size=size.tiny)
+    table.cell(dash, 0, 7, "Volatility", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 7, compression ? "COMPRESS" : expansion ? "EXPAND" : "NORMAL", text_color=compression ? joatGold : expansion ? joatViolet : joatText, text_size=size.tiny)
+    table.cell(dash, 0, 8, "Risk-off", text_color=joatMute, text_size=size.tiny)
+    table.cell(dash, 1, 8, riskOffLong or riskOffShort ? "ACTIVE" : "NONE", text_color=riskOffLong or riskOffShort ? joatCoral : joatMute, text_size=size.tiny)
+
+//==============================================================================
+// Alerts
+//==============================================================================
+alertcondition(longSignal, "CMS Long Entry [JOAT]", "Caldera Meridian Strategy [JOAT]: close-confirmed long strategy entry.")
+alertcondition(shortSignal, "CMS Short Entry [JOAT]", "Caldera Meridian Strategy [JOAT]: close-confirmed short strategy entry.")
+alertcondition(riskOffLong, "CMS Long Risk-Off [JOAT]", "Caldera Meridian Strategy [JOAT]: long risk-off exit condition.")
+alertcondition(riskOffShort, "CMS Short Risk-Off [JOAT]", "Caldera Meridian Strategy [JOAT]: short risk-off exit condition.")

@@ -1,0 +1,440 @@
+//@version=6
+// NeuPortal - Empirical Range | what this market actually did, not what a formula assumes
+//
+// ------------------------------------------------------------------------------
+// THE PROBLEM WITH EVERY OTHER BAND
+// The standard volatility band is per-bar sigma times the square root of the horizon. That rule
+// assumes returns are independent draws from one fixed distribution. Crypto returns are neither:
+// volatility clusters, tails are fat at short horizons, and the SHAPE of the distribution changes
+// as the horizon grows. Measured across the full Binance daily history, the root-t 80% band comes
+// out 0.80x the empirical width at one day, 0.88x at seven and 1.00x at thirty for BTC - the error
+// changes sign with the horizon. One sigma cannot carry that, whatever you multiply it by.
+//
+// So this measures instead, and draws the assumption next to the measurement so you can see the gap.
+//
+// ------------------------------------------------------------------------------
+// WHAT IT DOES THAT NOTHING ELSE IN THE LIBRARY DOES
+//
+//  - CONDITIONAL BANDS. An unconditional band averages today's market with every regime the
+//    symbol has ever been in. Switch conditioning on and only windows whose starting volatility
+//    resembled today's are counted - quiet compared with quiet, violent with violent. The table
+//    shows how many windows survived the filter, because a conditional band on 20 windows is
+//    worse than an unconditional one on 500.
+//
+//  - TOUCH vs CLOSE PROBABILITY. Type a price. You get the share of historical windows that
+//    FINISHED beyond it, and the share that TOUCHED it at any point on the way. These are very
+//    different numbers, and for most real questions the second one is the one that matters.
+//    Both come from actual highs and lows of real windows, not from a closed-form approximation.
+//
+//  - THE HONEST SAMPLE SIZE. Overlapping windows flatter a sample: 3,000 rolling 24-bar returns
+//    come from 125 genuinely independent windows, and quantile standard errors scale with the
+//    second number. Both are printed, and the small one is flagged red when it gets thin.
+//
+//  - OUT-OF-SAMPLE COVERAGE. The band is fitted on the older part of the chart and tested on the
+//    newer part it never saw. Target 50% for the core, 80% for the wide. BOTH DIRECTIONS FAIL:
+//    a band that contains everything is cowardice, not skill - and that is the failure mode that
+//    flatters the author, which is exactly why nobody else reports it.
+//
+//  - THREE HORIZONS AT ONCE, and the shape of the distribution (skew, excess kurtosis) so you can
+//    see how far from Gaussian this symbol actually is at your horizon.
+//
+// ------------------------------------------------------------------------------
+// HOW TO READ IT
+// The core 50% zone is the headline: half of comparable historical moves finished inside it. The
+// wide 80% band is risk context. The median is the centre of the measured distribution - not a
+// target and not a call. The horizon is in BARS, so it means whatever your timeframe means.
+//
+// The band is drawn FLAT on purpose. It describes one moment in the future, not a path to it; a
+// diagonal would be a claim about the route, and this makes no claim about the route.
+//
+// Free and open source. We publish our own forecasts hashed and Bitcoin-timestamped before the
+// event and scored in public afterwards, misses included, at neuportal.ai/experiment.
+//
+// Nothing here is a signal, a target or a recommendation.
+// Educational content - not financial advice.
+indicator("NeuPortal - Empirical Range", "NP Range", overlay = true,
+     max_lines_count = 200, max_labels_count = 100, max_boxes_count = 100, max_bars_back = 5000)
+
+// =========== 1) HORIZON ===========
+g1 = "1) Horizon"
+H = input.int(24, "Horizon (bars ahead)", minval = 2, maxval = 400, group = g1,
+     display = display.none,
+     tooltip = "Counted in bars of the current timeframe. 24 bars on 1H is a day, 30 bars on 1D " +
+               "is a month. Everything below is measured over exactly this window length.")
+lookback = input.int(3000, "History to measure (bars)", minval = 200, maxval = 5000, group = g1,
+     display = display.none,
+     tooltip = "How much past history to measure from. More is better, but the chart has to " +
+               "actually have it - the table reports what was really used, not what was asked for.")
+
+// =========== 2) CONDITIONING ===========
+g2 = "2) Conditioning"
+useCond = input.bool(false, "Match today's volatility regime", group = g2, display = display.none,
+     tooltip = "OFF: every window in history counts equally, including regimes nothing like today. " +
+               "ON: only windows whose starting volatility was within the tolerance below are " +
+               "counted. Conditional bands are sharper but rest on fewer windows - watch the count.")
+condTol = input.float(35, "Volatility tolerance (%)", minval = 10, maxval = 100, step = 5,
+     group = g2, display = display.none,
+     tooltip = "A window is kept if its starting volatility was within this percentage of today's.")
+
+// =========== 3) LEVEL PROBABILITY ===========
+g3 = "3) Probability of a level"
+useLvl = input.bool(false, "Test a price level", group = g3, display = display.none)
+lvlPx  = input.float(0.0, "Level", group = g3, display = display.none,
+     tooltip = "Leave 0 to use the price 5% away in the direction of the median. The readout gives " +
+               "the share of historical windows that FINISHED beyond this level, and the share " +
+               "that TOUCHED it at any point inside the window. The second is usually the answer.")
+
+// =========== 4) VALIDATION ===========
+g4 = "4) Validation"
+doTest = input.bool(true, "Test the band on unseen history", group = g4, display = display.none)
+trainPct = input.float(60, "Fit on the oldest % of history", minval = 30, maxval = 90, step = 5,
+     group = g4, display = display.none,
+     tooltip = "The newest slice is held back and used only to check how often price really landed " +
+               "inside. In-sample coverage is ~50% by construction and proves nothing.")
+
+// =========== 5) DISPLAY ===========
+g5 = "5) Display"
+showWide  = input.bool(true, "Wide 80% band", group = g5, display = display.none)
+showRootT = input.bool(true, "Compare with sigma x root-t", group = g5, display = display.none)
+showMulti = input.bool(true, "Multi-horizon comparison", group = g5, display = display.none)
+showShape = input.bool(true, "Distribution shape (skew, kurtosis)", group = g5, display = display.none)
+showTable = input.bool(true, "Readout table", group = g5, display = display.none)
+tblPos    = input.string("Bottom right", "Table position",
+     options = ["Top right", "Bottom right", "Bottom left", "Middle right"], group = g5,
+     display = display.none)
+
+// ---------- palette: restrained on purpose. On a price chart, saturation reads as a hype channel;
+// a research desk reads as restraint. One bright neutral, one cool accent, greys.
+cMed  = #F5F1E4
+cCore = #7FA8C9
+cTail = #6E7A88
+cRoot = #C08457
+cLvl  = #B07FD6
+cInk  = #131A24
+cTxt  = #D8DCE3
+cMut  = #8A929C
+cGood = #4FB98A
+cBad  = #D9453A
+
+// ---------- series computed at global scope (Pine needs these outside the last-bar block) -------
+lr1  = math.log(close / close[1])
+sdLen = lookback < 500 ? lookback : 500
+sd1  = ta.stdev(lr1, sdLen)
+// Volatility of the H bars ENDING at each bar - used to decide whether a historical window
+// started in a regime resembling today's.
+volH = ta.stdev(lr1, H)
+// Extremes reached during the H bars ending at each bar, for touch probabilities.
+hiH  = ta.highest(high, H)
+loH  = ta.lowest(low, H)
+
+// ---------- helpers (top level: Pine rejects a function declared inside an if block) ----------
+
+// Log returns over H bars across the slice [iFrom .. iTo] of history (0 = current bar), optionally
+// keeping only windows whose starting volatility resembled today's.
+retArray(iFrom, iTo, cond, tol, vNow) =>
+    out = array.new<float>()
+    for i = iFrom to iTo
+        p1 = close[i]
+        p0 = close[i + H]
+        v0 = volH[i + H]
+        keep = not cond or (not na(v0) and not na(vNow) and vNow > 0 and
+             math.abs(v0 - vNow) / vNow <= tol)
+        if not na(p0) and not na(p1) and p0 > 0 and keep
+            array.push(out, math.log(p1 / p0))
+    out
+
+// Highest and lowest points REACHED inside each window, as log distance from the window's start.
+// This is what makes a touch probability real rather than an approximation.
+extArray(iFrom, iTo, wantUp, cond, tol, vNow) =>
+    out = array.new<float>()
+    for i = iFrom to iTo
+        p0 = close[i + H]
+        ex = wantUp ? hiH[i] : loH[i]
+        v0 = volH[i + H]
+        keep = not cond or (not na(v0) and not na(vNow) and vNow > 0 and
+             math.abs(v0 - vNow) / vNow <= tol)
+        if not na(p0) and not na(ex) and p0 > 0 and ex > 0 and keep
+            array.push(out, math.log(ex / p0))
+    out
+
+// TradingView's percentile takes 0-100, not 0-1. Passing 0.25 asks for the 0.25th percentile -
+// essentially the sample minimum. That bug put the first version of this band 20% below spot.
+qtl(a, p) =>
+    array.size(a) < 10 ? float(na) : array.percentile_linear_interpolation(a, p)
+
+shareAbove(a, x) =>
+    n = array.size(a)
+    c = 0
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(a, i) >= x
+                c := c + 1
+    n == 0 ? float(na) : c / n
+
+var array<line>  LS = array.new<line>()
+var array<label> LB = array.new<label>()
+var array<box>   BX = array.new<box>()
+
+wipe() =>
+    while array.size(LS) > 0
+        line.delete(array.pop(LS))
+    while array.size(LB) > 0
+        label.delete(array.pop(LB))
+    while array.size(BX) > 0
+        box.delete(array.pop(BX))
+
+rail(x1, x2, y, c, st, w) =>
+    if not na(y)
+        array.push(LS, line.new(x1, y, x2, y, xloc.bar_index, extend.none, c, st, w))
+
+band(x1, x2, top, bot, c) =>
+    if not na(top) and not na(bot)
+        array.push(BX, box.new(x1, top, x2, bot, na, 0, line.style_solid, extend.none,
+             xloc.bar_index, c))
+
+tag(x, y, t, c, sz) =>
+    if not na(y)
+        array.push(LB, label.new(x, y, t, xloc.bar_index, yloc.price, na, label.style_none, c, sz,
+             text.align_left))
+
+f(v) => str.tostring(v, format.mintick)
+pc(v) => na(v) ? "-" : str.tostring(v * 100, "#.0") + "%"
+
+tblAnchor = tblPos == "Top right" ? position.top_right :
+     tblPos == "Bottom left" ? position.bottom_left :
+     tblPos == "Middle right" ? position.middle_right : position.bottom_right
+var table tbl = table.new(tblAnchor, 3, 16, bgcolor = color.new(cInk, 6), border_width = 1,
+     border_color = color.new(cMut, 75))
+
+row(i, k, v, w, vc) =>
+    table.cell(tbl, 0, i, " " + k + " ", text_color = cMut, text_size = size.tiny,
+         text_halign = text.align_left)
+    table.cell(tbl, 1, i, " " + v + " ", text_color = vc, text_size = size.tiny,
+         text_halign = text.align_right)
+    table.cell(tbl, 2, i, " " + w + " ", text_color = cMut, text_size = size.tiny,
+         text_halign = text.align_right)
+
+head(i, k, v) =>
+    table.cell(tbl, 0, i, " " + k + " ", text_color = cTxt, text_size = size.small,
+         text_halign = text.align_left)
+    table.cell(tbl, 1, i, "", text_color = cMut, text_size = size.tiny)
+    table.cell(tbl, 2, i, " " + v + " ", text_color = cMut, text_size = size.tiny,
+         text_halign = text.align_right)
+
+// Width of the core zone at a given horizon, as a fraction of price - used by the multi-horizon
+// comparison. Declared at top level because Pine will not take it anywhere else.
+coreWidth(hz, cond, tol, vNow, maxBars) =>
+    a = array.new<float>()
+    room = bar_index - hz
+    lim  = room < maxBars ? room : maxBars
+    if lim > 50
+        for i = 0 to lim
+            p1 = close[i]
+            p0 = close[i + hz]
+            v0 = volH[i + hz]
+            keep = not cond or (not na(v0) and not na(vNow) and vNow > 0 and
+                 math.abs(v0 - vNow) / vNow <= tol)
+            if not na(p0) and not na(p1) and p0 > 0 and keep
+                array.push(a, math.log(p1 / p0))
+    a
+
+var float coreLoP = na
+var float coreHiP = na
+
+if barstate.islast
+    wipe()
+    b0   = bar_index
+    tol  = condTol / 100
+    vNow = volH
+
+    // ---------- the measurement ----------
+    room  = bar_index - H
+    avail = room < lookback ? room : lookback
+    all   = retArray(0, avail, useCond, tol, vNow)
+    n     = array.size(all)
+    nInd  = int(n / H)                    // overlapping windows are not observations
+
+    p10 = qtl(all, 10)
+    p25 = qtl(all, 25)
+    p50 = qtl(all, 50)
+    p75 = qtl(all, 75)
+    p90 = qtl(all, 90)
+
+    px    = close
+    coreL = px * math.exp(p25)
+    coreH = px * math.exp(p75)
+    wideL = px * math.exp(p10)
+    wideH = px * math.exp(p90)
+    med   = px * math.exp(p50)
+    coreLoP := coreL
+    coreHiP := coreH
+
+    // ---------- the textbook band, for contrast ----------
+    sH     = sd1 * math.sqrt(H)
+    rootLo = px * math.exp(-1.2816 * sH)
+    rootHi = px * math.exp( 1.2816 * sH)
+    ratio  = na(p90) or na(p10) or sH == 0 ? float(na) : (p90 - p10) / (2 * 1.2816 * sH)
+
+    // ---------- shape: how far from Gaussian this symbol is at this horizon ----------
+    float skew = na
+    float kurt = na
+    if showShape and n > 30
+        m = array.avg(all)
+        s = array.stdev(all)
+        if s > 0
+            s3 = 0.0
+            s4 = 0.0
+            for i = 0 to n - 1
+                z = (array.get(all, i) - m) / s
+                s3 := s3 + z * z * z
+                s4 := s4 + z * z * z * z
+            skew := s3 / n
+            kurt := s4 / n - 3
+
+    // ---------- out-of-sample check ----------
+    float covCore = na
+    float covWide = na
+    if doTest and n > 200
+        split = int(avail * (1 - trainPct / 100))
+        if split > 30
+            train = retArray(split, avail, useCond, tol, vNow)
+            t25 = qtl(train, 25)
+            t75 = qtl(train, 75)
+            t10 = qtl(train, 10)
+            t90 = qtl(train, 90)
+            if not na(t25) and not na(t90)
+                test = retArray(0, split - 1, useCond, tol, vNow)
+                nT = array.size(test)
+                if nT > 20
+                    hitC = 0
+                    hitW = 0
+                    for i = 0 to nT - 1
+                        r = array.get(test, i)
+                        if r >= t25 and r <= t75
+                            hitC := hitC + 1
+                        if r >= t10 and r <= t90
+                            hitW := hitW + 1
+                    covCore := hitC / nT
+                    covWide := hitW / nT
+
+    // ---------- level probability: finish beyond vs touch on the way ----------
+    float pClose = na
+    float pTouch = na
+    float theLvl = na
+    if useLvl and n > 30
+        theLvl := lvlPx > 0 ? lvlPx : px * (p50 >= 0 ? 1.05 : 0.95)
+        d = math.log(theLvl / px)
+        up = theLvl >= px
+        pClose := up ? shareAbove(all, d) : 1 - shareAbove(all, d)
+        ext = extArray(0, avail, up, useCond, tol, vNow)
+        pTouch := up ? shareAbove(ext, d) : shareAbove(ext, -d)
+
+    // ---------- draw ----------
+    x1 = b0 + 1
+    x2 = b0 + H
+    if showWide
+        band(x1, x2, wideH, coreH, color.new(cTail, 92))
+        band(x1, x2, coreL, wideL, color.new(cTail, 92))
+        rail(x1, x2, wideH, color.new(cTail, 20), line.style_dotted, 1)
+        rail(x1, x2, wideL, color.new(cTail, 20), line.style_dotted, 1)
+    band(x1, x2, coreH, coreL, color.new(cCore, 84))
+    rail(x1, x2, coreH, cCore, line.style_dashed, 2)
+    rail(x1, x2, coreL, cCore, line.style_dashed, 2)
+    rail(x1, x2, med,   cMed,  line.style_solid,  2)
+
+    if showRootT
+        rail(x1, x2, rootHi, color.new(cRoot, 35), line.style_dashed, 1)
+        rail(x1, x2, rootLo, color.new(cRoot, 35), line.style_dashed, 1)
+        tag(x2 + 1, rootHi, "  root-t 80%", color.new(cRoot, 25), size.tiny)
+
+    if useLvl and not na(theLvl)
+        rail(b0 - 40, x2, theLvl, color.new(cLvl, 20), line.style_dashed, 1)
+        tag(x2 + 1, theLvl, "  level " + f(theLvl), cLvl, size.small)
+
+    tag(x2 + 1, med,   "  median "   + f(med),   cMed,  size.normal)
+    tag(x2 + 1, coreH, "  core 50% " + f(coreH), cCore, size.small)
+    tag(x2 + 1, coreL, "  core 50% " + f(coreL), cCore, size.small)
+    if showWide
+        tag(x2 + 1, wideH, "  80% " + f(wideH), cTail, size.tiny)
+        tag(x2 + 1, wideL, "  80% " + f(wideL), cTail, size.tiny)
+
+    // ---------- readout ----------
+    if showTable
+        r = 0
+        head(r, "NEUPORTAL - EMPIRICAL RANGE", syminfo.ticker + "  " + timeframe.period)
+        r := r + 1
+        row(r, "horizon", str.tostring(H) + " bars", useCond ? "regime-matched" : "all regimes", cTxt)
+        r := r + 1
+        row(r, "median", f(med), pc(math.exp(p50) - 1), cMed)
+        r := r + 1
+        row(r, "core 50%", f(coreL) + " - " + f(coreH),
+             pc((coreH - coreL) / px) + " wide", cCore)
+        r := r + 1
+        row(r, "wide 80%", f(wideL) + " - " + f(wideH),
+             pc((wideH - wideL) / px) + " wide", cTail)
+        r := r + 1
+
+        // The two sample sizes, side by side. The small one is the one that matters, and it goes
+        // red when it is too thin to support a quantile anyone should act on.
+        row(r, "windows", str.tostring(n) + " overlapping",
+             useCond ? "after filter" : "unfiltered", cMut)
+        r := r + 1
+        row(r, "independent", str.tostring(nInd), nInd < 30 ? "TOO FEW" : "ok",
+             nInd < 30 ? cBad : cTxt)
+        r := r + 1
+        row(r, "empirical / root-t", na(ratio) ? "-" : str.tostring(ratio, "#.00") + "x",
+             na(ratio) ? "" : (ratio < 1 ? "textbook too wide" : "textbook too narrow"),
+             na(ratio) ? cMut : (ratio < 0.95 or ratio > 1.05 ? cRoot : cTxt))
+        r := r + 1
+
+        if showShape and not na(skew)
+            row(r, "skew", str.tostring(skew, "#.00"),
+                 skew > 0.1 ? "right tail" : skew < -0.1 ? "left tail" : "symmetric", cTxt)
+            r := r + 1
+            row(r, "excess kurtosis", str.tostring(kurt, "#.00"),
+                 kurt > 1 ? "fat tails" : "near normal", kurt > 1 ? cRoot : cTxt)
+            r := r + 1
+
+        if useLvl and not na(pTouch)
+            row(r, "level " + f(theLvl), pc(pClose), "finishes beyond", cLvl)
+            r := r + 1
+            row(r, "", pc(pTouch), "touched on the way", cLvl)
+            r := r + 1
+
+        if showMulti
+            // Same measurement at two longer horizons. Widths that do not scale like root-t are
+            // the whole point of this script, and here it is visible in one glance.
+            a2 = coreWidth(H * 2, useCond, tol, vNow, 2000)
+            a3 = coreWidth(H * 3, useCond, tol, vNow, 2000)
+            w2 = array.size(a2) > 30 ? qtl(a2, 75) - qtl(a2, 25) : float(na)
+            w3 = array.size(a3) > 30 ? qtl(a3, 75) - qtl(a3, 25) : float(na)
+            w1 = na(p75) ? float(na) : p75 - p25
+            row(r, "core width " + str.tostring(H) + "b", pc(w1), "measured", cTxt)
+            r := r + 1
+            row(r, "core width " + str.tostring(H * 2) + "b", pc(w2),
+                 na(w2) or na(w1) ? "" : str.tostring(w2 / w1, "#.00") + "x  (root-t: 1.41x)", cTxt)
+            r := r + 1
+            row(r, "core width " + str.tostring(H * 3) + "b", pc(w3),
+                 na(w3) or na(w1) ? "" : str.tostring(w3 / w1, "#.00") + "x  (root-t: 1.73x)", cTxt)
+            r := r + 1
+
+        if doTest and not na(covCore)
+            // Green only when coverage is near what the band promises. Too wide is not a pass.
+            cc = math.abs(covCore - 0.50) <= 0.07 ? cGood : cBad
+            cw = math.abs(covWide - 0.80) <= 0.07 ? cGood : cBad
+            row(r, "out-of-sample core", pc(covCore), "target 50%", cc)
+            r := r + 1
+            row(r, "out-of-sample wide", pc(covWide), "target 80%", cw)
+            r := r + 1
+        row(r, "neuportal.ai", "free, open source", "not financial advice", cMut)
+
+// ---------- alerts ----------
+// Fire when price leaves the zone that was supposed to hold it half the time.
+alertcondition(not na(coreHiP) and close > coreHiP, "Above core 50%",
+     "Price closed above the measured core 50% zone")
+alertcondition(not na(coreLoP) and close < coreLoP, "Below core 50%",
+     "Price closed below the measured core 50% zone")
+
+// MAINTENANCE NOTE: ASCII only in this file. TradingView renders published source in a
+// different encoding, and em dashes, middle dots and box-drawing characters come out as
+// mojibake on the script page. Keep every character in this file plain ASCII.

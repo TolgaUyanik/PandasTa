@@ -1,0 +1,414 @@
+//@version=6
+// @description Machine Learning Library - Adaptive learning algorithms for parameter optimization
+// Version: v3 (2026-04-17) — Added fpendingqueuepushtyped, ftrainingbufferpushtyped (sample_type support)
+library("MLLib", overlay = false)
+
+// @type SGD learning state for tracking parameter updates
+// @field param Current parameter value
+// @field updates Number of updates performed
+// @field last_error Last prediction error
+export type SGDState
+    float param
+    int updates = 0
+    float last_error = na
+
+// @function Pivot-based SGD for adaptive sensitivity tuning (Kirschenbaum method)
+// @param feature_z Z-score of the predictive feature (e.g., basket vector)
+// @param baseline_ma Baseline moving average (center line)
+// @param baseline_dev Standard deviation for band calculation
+// @param pivot_high Recent pivot high price (na if none)
+// @param pivot_low Recent pivot low price (na if none)
+// @param sensitivity_current Current sensitivity parameter value
+// @param learning_rate Learning rate for SGD updates
+// @param sensitivity_min Minimum allowed sensitivity value
+// @param sensitivity_max Maximum allowed sensitivity value
+// @param coupling_strength Coupling strength for gating updates (0-1)
+// @param coupling_gate Minimum coupling threshold for updates
+// @param pivot_lookback Lookback period to historical feature/price at pivot
+// @param proximity_pct Proximity threshold (0-1) for pivot to be "near band"
+// @param survival_prob Survival probability for band calculation (e.g., 0.68 for 1-sigma)
+// @returns [new_sensitivity, update_count] Updated sensitivity and number of updates performed
+export f_kirschenbaum_sgd(float feature_z, float baseline_ma, float baseline_dev, float pivot_high, float pivot_low, float sensitivity_current, float learning_rate, float sensitivity_min, float sensitivity_max, float coupling_strength, float coupling_gate, int pivot_lookback, float proximity_pct, float survival_prob) =>
+    float sens_out = sensitivity_current
+    int updates = 0
+    
+    // Process pivot high (resistance test)
+    if not na(pivot_high)
+        float hist_feature_z = nz(feature_z[pivot_lookback])
+        float hist_ma = nz(baseline_ma[pivot_lookback])
+        float hist_dev = nz(baseline_dev[pivot_lookback])
+        
+        if hist_dev > 0
+            // Calculate predicted band using historical feature
+            float hist_shift = hist_feature_z * sensitivity_current
+            float pred_up = hist_ma + hist_dev * math.sqrt(-2.0 * math.log(1.0 - survival_prob)) + hist_shift
+            
+            // Check if pivot was near the predicted band
+            float dist_to_ma = pivot_high - hist_ma
+            float band_width = pred_up - hist_ma
+            float proximity = band_width > 0 ? dist_to_ma / band_width : 0.0
+            
+            if proximity_pct >= 1.0 or (proximity >= (1.0 - proximity_pct))
+                // Calculate prediction error
+                float pred_z = (pred_up - hist_ma) / hist_dev
+                float actual_z = (pivot_high - hist_ma) / hist_dev
+                float error = pred_z - actual_z
+                
+                // SGD update with coupling gate
+                float gradient = error * hist_feature_z
+                float effective_lr = learning_rate
+                if coupling_strength < coupling_gate
+                    effective_lr *= coupling_strength / coupling_gate
+                
+                sens_out := math.max(sensitivity_min, math.min(sensitivity_max, sens_out - effective_lr * gradient))
+                updates += 1
+    
+    // Process pivot low (support test)
+    if not na(pivot_low)
+        float hist_feature_z = nz(feature_z[pivot_lookback])
+        float hist_ma = nz(baseline_ma[pivot_lookback])
+        float hist_dev = nz(baseline_dev[pivot_lookback])
+        
+        if hist_dev > 0
+            // Calculate predicted band using historical feature
+            float hist_shift = hist_feature_z * sensitivity_current
+            float pred_dn = hist_ma - hist_dev * math.sqrt(-2.0 * math.log(1.0 - survival_prob)) + hist_shift
+            
+            // Check if pivot was near the predicted band
+            float dist_to_ma = hist_ma - pivot_low
+            float band_width = hist_ma - pred_dn
+            float proximity = band_width > 0 ? dist_to_ma / band_width : 0.0
+            
+            if proximity_pct >= 1.0 or (proximity >= (1.0 - proximity_pct))
+                // Calculate prediction error (note: inverted for lower band)
+                float pred_z = (hist_ma - pred_dn) / hist_dev
+                float actual_z = (hist_ma - pivot_low) / hist_dev
+                float error = pred_z - actual_z
+                
+                // SGD update with coupling gate (inverted gradient for lower band)
+                float gradient = error * hist_feature_z * -1.0
+                float effective_lr = learning_rate
+                if coupling_strength < coupling_gate
+                    effective_lr *= coupling_strength / coupling_gate
+                
+                sens_out := math.max(sensitivity_min, math.min(sensitivity_max, sens_out - effective_lr * gradient))
+                updates += 1
+    
+    [sens_out, updates]
+
+// @function Generic SGD parameter update with optional gating
+// @param param_current Current parameter value
+// @param gradient Gradient (error * feature)
+// @param learning_rate Learning rate
+// @param param_min Minimum parameter value
+// @param param_max Maximum parameter value
+// @param gate_strength Gating strength (0-1, optional)
+// @param gate_threshold Minimum gate strength to allow full update
+// @returns float Updated parameter value
+export f_sgd_update(float param_current, float gradient, float learning_rate, float param_min, float param_max, float gate_strength, float gate_threshold) =>
+    float effective_lr = learning_rate
+    if gate_strength < gate_threshold
+        effective_lr *= gate_strength / gate_threshold
+    math.max(param_min, math.min(param_max, param_current - effective_lr * gradient))
+
+// ============================================================================
+// MLLib v2 — ADDITIONS for causal outcome labeling + training buffer management
+// Append to existing MLLib. Existing exports untouched.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// OutcomeLabel: joint (amplitude, horizon) realization from lookforward scan.
+// Returns ready=true only when enough future bars exist to scan fully.
+// ----------------------------------------------------------------------------
+export type OutcomeLabel
+    float amplitude    // signed, in ATR units
+    int   horizon      // first bar where |diff| > amp_thresh*ATR
+    bool  ready        // true when horizon was resolved within [k_min, k_max]
+
+// Compute outcome from a CLOSED signal bar at absolute index signal_bar_idx.
+// close_current: close[0] on this call (latest confirmed bar).
+// close_at_signal, atr_at_signal: snapshots at signal time.
+// Call repeatedly until ready=true or bars_elapsed >= k_max.
+// On ready=true, store label and pop the pending record.
+export foutcomelabelstep(int bars_elapsed, float close_at_signal, float atr_at_signal,
+                        float amp_thresh, int k_min, int k_max,
+                        float close_now) =>
+    OutcomeLabel res = OutcomeLabel.new(0.0, 0, false)
+    // FIX-1: Reject invalid inputs immediately (prevents NaN propagation)
+    if na(close_at_signal) or na(atr_at_signal) or na(close_now) or atr_at_signal <= 0
+        res
+    else
+        if bars_elapsed >= k_min and bars_elapsed <= k_max
+            float diff = close_now - close_at_signal
+            float denom = math.max(atr_at_signal, 1e-10)
+            // FIX-1: Compare normalized amplitude to threshold consistently
+            float amp_norm = diff / denom
+            if math.abs(amp_norm) >= amp_thresh
+                res.amplitude := amp_norm
+                res.horizon   := bars_elapsed
+                res.ready     := true
+        if bars_elapsed >= k_max and not res.ready
+            // Exhausted window without reaching threshold: label as weak outcome
+            float diff = close_now - close_at_signal
+            float denom = math.max(atr_at_signal, 1e-10)
+            float amp_norm = diff / denom
+            // FIX-1: Guard against NaN amplitude in timeout path
+            if not na(amp_norm)
+                res.amplitude := amp_norm
+                res.horizon   := k_max
+                res.ready     := true
+        res
+
+// ----------------------------------------------------------------------------
+// TrainingBuffer: multi-array holder for causal training cases.
+// UDT-FIX: Atomic training buffer sample to prevent desync
+export type TBSample
+    float f1
+    float f2
+    float f3
+    float f4
+    float f5
+    float f6
+    float f7
+    int packed
+    float amplitude
+    int horizon
+    int bar_idx
+    int direction
+    int sample_type  // 0=FiringOnly, 1=Causation, 2=both
+    float f8_val     // 8th channel (Both8D mode)
+
+// Legacy TrainingBuffer type (deprecated, use array<TBSample> instead)
+export type TrainingBuffer
+    array<float> f1
+    array<float> f2
+    array<float> f3
+    array<float> f4
+    array<float> f5
+    array<float> f6
+    array<float> f7
+    array<int>   packed
+    array<float> amplitude
+    array<int>   horizon
+    array<int>   bar_idx
+    array<int>   direction
+
+// UDT-FIX: New atomic training buffer
+export ftrainingbuffernew_atomic() =>
+    array.new<TBSample>()
+
+// Legacy function (deprecated)
+export ftrainingbuffernew() =>
+    TrainingBuffer.new(
+      array.new<float>(), array.new<float>(), array.new<float>(),
+      array.new<float>(), array.new<float>(), array.new<float>(),
+      array.new<float>(), array.new<int>(),
+      array.new<float>(), array.new<int>(), array.new<int>(),
+      array.new<int>())
+
+// UDT-FIX: Atomic push with sample_type and f8_val
+// PERF WARNING: This function always does array.push(). For circular buffer pattern,
+// caller should check size BEFORE calling this and use array.set() instead when full:
+//   if array.size(tb) < max_size
+//       ML.ftrainingbufferpush_atomic(tb, ...)
+//   else
+//       // Circular overwrite - caller creates sample manually
+//       sample = TBSample.new(...)
+//       array.set(tb, write_head % max_size, sample)
+//       write_head += 1
+export ftrainingbufferpush_atomic(array<TBSample> tb, float v1, float v2, float v3, float v4,
+                                  float v5, float v6, float v7, int pk, float amp, int hor,
+                                  int bar_i, int dir, int stype, float f8) =>
+    TBSample sample = TBSample.new(v1, v2, v3, v4, v5, v6, v7, pk, amp, hor, bar_i, dir, stype, f8)
+    array.push(tb, sample)
+    array.size(tb)
+
+// Legacy function (deprecated)
+export ftrainingbufferpush(TrainingBuffer tb, float v1, float v2, float v3, float v4,
+                          float v5, float v6, float v7, int pk, float amp, int hor,
+                          int bar_i, int dir) =>
+    array.push(tb.f1, v1)
+    array.push(tb.f2, v2)
+    array.push(tb.f3, v3)
+    array.push(tb.f4, v4)
+    array.push(tb.f5, v5)
+    array.push(tb.f6, v6)
+    array.push(tb.f7, v7)
+    array.push(tb.packed, pk)
+    array.push(tb.amplitude, amp)
+    array.push(tb.horizon, hor)
+    array.push(tb.bar_idx, bar_i)
+    array.push(tb.direction, dir)
+    array.size(tb.amplitude)
+
+// PERF FIX #1: Circular buffer (O(1) instead of O(N) shift)
+// CRITICAL: This function is now a NO-OP. Caller MUST use circular write pattern:
+//   if array.size(tb) < max_size
+//       array.push(tb, new_sample)
+//   else
+//       array.set(tb, write_head % max_size, new_sample)
+//       write_head += 1
+// This eliminates O(N) array.shift() operations that cause 40M operations on 50k bars
+export ftrainingbuffercap_atomic(array<TBSample> tb) =>
+    // NO-OP: Buffer capping now handled by caller via modulo indexing
+    // Returning current size for compatibility
+    array.size(tb)
+
+// Legacy function (deprecated)
+export ftrainingbuffercap(TrainingBuffer tb, int max_size) =>
+    while array.size(tb.amplitude) > max_size
+        array.shift(tb.f1)
+        array.shift(tb.f2)
+        array.shift(tb.f3)
+        array.shift(tb.f4)
+        array.shift(tb.f5)
+        array.shift(tb.f6)
+        array.shift(tb.f7)
+        array.shift(tb.packed)
+        array.shift(tb.amplitude)
+        array.shift(tb.horizon)
+        array.shift(tb.bar_idx)
+        array.shift(tb.direction)
+    array.size(tb.amplitude)
+
+// UDT-FIX: Atomic pending queue sample to prevent desync
+export type PQSample
+    int bar_idx
+    float close_at
+    float atr_at
+    int direction
+    float snap_f1
+    float snap_f2
+    float snap_f3
+    float snap_f4
+    float snap_f5
+    float snap_f6
+    float snap_f7
+    int snap_packed
+    int sample_type  // 0=FiringOnly, 1=Causation, 2=both
+    float f8_val     // 8th channel (Both8D mode)
+
+// Legacy PendingQueue type (deprecated, use array<PQSample> instead)
+export type PendingQueue
+    array<int>   bar_idx
+    array<float> close_at
+    array<float> atr_at
+    array<int>   direction
+    array<float> snap_f1
+    array<float> snap_f2
+    array<float> snap_f3
+    array<float> snap_f4
+    array<float> snap_f5
+    array<float> snap_f6
+    array<float> snap_f7
+    array<int>   snap_packed
+
+// UDT-FIX: New atomic pending queue
+export fpendingqueuenew_atomic() =>
+    array.new<PQSample>()
+
+// Legacy function (deprecated)
+export fpendingqueuenew() =>
+    PendingQueue.new(
+      array.new<int>(), array.new<float>(), array.new<float>(), array.new<int>(),
+      array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
+      array.new<float>(), array.new<float>(), array.new<float>(), array.new<int>())
+
+// UDT-FIX: Atomic push with sample_type and f8_val
+export fpendingqueuepush_atomic(array<PQSample> pq, int b, float c, float a, int dir,
+                                float f1, float f2, float f3, float f4,
+                                float f5, float f6, float f7, int pk, int stype, float f8) =>
+    PQSample sample = PQSample.new(b, c, a, dir, f1, f2, f3, f4, f5, f6, f7, pk, stype, f8)
+    array.push(pq, sample)
+    array.size(pq)
+
+// Legacy function (deprecated)
+export fpendingqueuepush(PendingQueue pq, int b, float c, float a, int dir,
+                        float f1, float f2, float f3, float f4,
+                        float f5, float f6, float f7, int pk) =>
+    array.push(pq.bar_idx, b)
+    array.push(pq.close_at, c)
+    array.push(pq.atr_at, a)
+    array.push(pq.direction, dir)
+    array.push(pq.snap_f1, f1)
+    array.push(pq.snap_f2, f2)
+    array.push(pq.snap_f3, f3)
+    array.push(pq.snap_f4, f4)
+    array.push(pq.snap_f5, f5)
+    array.push(pq.snap_f6, f6)
+    array.push(pq.snap_f7, f7)
+    array.push(pq.snap_packed, pk)
+    array.size(pq.bar_idx)
+
+// UDT-FIX: Atomic popfront (single shift operation)
+export fpendingqueuepopfront_atomic(array<PQSample> pq) =>
+    if array.size(pq) > 0
+        array.shift(pq)
+    array.size(pq)
+
+// Legacy function (deprecated)
+export fpendingqueuepopfront(PendingQueue pq) =>
+    if array.size(pq.bar_idx) > 0
+        array.shift(pq.bar_idx)
+        array.shift(pq.close_at)
+        array.shift(pq.atr_at)
+        array.shift(pq.direction)
+        array.shift(pq.snap_f1)
+        array.shift(pq.snap_f2)
+        array.shift(pq.snap_f3)
+        array.shift(pq.snap_f4)
+        array.shift(pq.snap_f5)
+        array.shift(pq.snap_f6)
+        array.shift(pq.snap_f7)
+        array.shift(pq.snap_packed)
+    array.size(pq.bar_idx)
+
+// ============================================================================
+// MLLib v3 — ADDITIONS for extended PendingQueue + TrainingBuffer with sample_type flag
+// Append to existing MLLib v2. Existing exports untouched.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Extended push: adds sample_type (0=firing_only, 1=causation_only, 2=both)
+// Required for training_mode="Both" to let query filter by origin.
+// ----------------------------------------------------------------------------
+export fpendingqueuepushtyped(PendingQueue pq, int bar_idx, float c0, float atr0,
+                               int dir_, float f1, float f2, float f3, float f4,
+                               float f5, float f6, float f7, int packed, int stype) =>
+    array.push(pq.bar_idx, bar_idx)
+    array.push(pq.close_at, c0)
+    array.push(pq.atr_at, atr0)
+    array.push(pq.direction, dir_)
+    array.push(pq.snap_f1, f1)
+    array.push(pq.snap_f2, f2)
+    array.push(pq.snap_f3, f3)
+    array.push(pq.snap_f4, f4)
+    array.push(pq.snap_f5, f5)
+    array.push(pq.snap_f6, f6)
+    array.push(pq.snap_f7, f7)
+    array.push(pq.snap_packed, packed)
+    // stype tracked in parallel array on caller side (not in struct)
+    // Return [pq, stype] to force compiler to acknowledge stype usage
+    [pq, stype]
+
+// ----------------------------------------------------------------------------
+// Training buffer push with sample_type
+// ----------------------------------------------------------------------------
+export ftrainingbufferpushtyped(TrainingBuffer tb, float f1, float f2, float f3,
+                                 float f4, float f5, float f6, float f7, int packed,
+                                 float amp, int hor, int bar_idx, int dir_, int stype) =>
+    array.push(tb.f1, f1)
+    array.push(tb.f2, f2)
+    array.push(tb.f3, f3)
+    array.push(tb.f4, f4)
+    array.push(tb.f5, f5)
+    array.push(tb.f6, f6)
+    array.push(tb.f7, f7)
+    array.push(tb.packed, packed)
+    array.push(tb.amplitude, amp)
+    array.push(tb.horizon, hor)
+    array.push(tb.bar_idx, bar_idx)
+    array.push(tb.direction, dir_)
+    // stype tracked in parallel array on caller side (not in struct)
+    // Return [tb, stype] to force compiler to acknowledge stype usage
+    [tb, stype]

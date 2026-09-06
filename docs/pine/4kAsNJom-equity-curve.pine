@@ -1,0 +1,287 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// @description Library for equity curve calculations, performance metrics, and related utilities.
+//              Extracted from Asset Rotation System [NR] [InvestorUnknown].
+//              Functions that originally used `var` (stateful persistence) have been restructured
+//              so the caller maintains state via `var` variables and passes previous values each bar.
+
+//@version=6
+library("equity_curve")
+
+// ╔════════════════════════════╗
+// ║      HELPER FUNCTIONS      ║
+// ╚════════════════════════════╝
+
+// @function Remove exchange prefix from ticker string (e.g., "BINANCE:BTCUSD" → "BTCUSD")
+// @param name Ticker string potentially containing exchange prefix
+// @returns Ticker without exchange prefix
+export f_remove_exchange_name(simple string name) =>
+    string[] parts = str.split(name, ":")
+    string result  = array.size(parts) > 1 ? array.get(parts, 1) : name
+    result
+
+// ╔════════════════════════════╗
+// ║     RETURN CALCULATIONS    ║
+// ╚════════════════════════════╝
+
+// @function Calculate bar-over-bar return as decimal (close-to-close, for buy-and-hold)
+// @returns Return as decimal (e.g., 0.02 for +2%)
+export f_roc() =>
+    roc = ta.roc(close, 1)
+    r   = roc / 100
+
+// @function Calculate open-to-close return (realistic strategy entry assumption at bar open)
+// @returns Intrabar return as decimal
+export f_roc_entry() =>
+    r = (close - open) / open
+
+// ╔════════════════════════════╗
+// ║    EQUITY CALCULATIONS     ║
+// ╚════════════════════════════╝
+
+// @function Calculate strategy equity for a rotation system (stateless — caller must maintain var state).
+//           Uses best_asset[2] so signal is visible 1 bar before equity acts on it.
+// @param ticker1 Asset 1 ticker string
+// @param ticker2 Asset 2 ticker string
+// @param ticker3 Asset 3 ticker string
+// @param ticker4 Asset 4 ticker string
+// @param ticker5 Asset 5 ticker string
+// @param ticker6 Asset 6 ticker string
+// @param best_asset The currently selected best-performing asset ticker
+// @param r1 Per-bar return for asset 1 (open-to-close)
+// @param r2 Per-bar return for asset 2
+// @param r3 Per-bar return for asset 3
+// @param r4 Per-bar return for asset 4
+// @param r5 Per-bar return for asset 5
+// @param r6 Per-bar return for asset 6
+// @param backtest Whether backtesting is active this bar
+// @param prev_equity Previous bar's equity value (caller initializes var as na)
+// @param prev_peak Previous bar's peak equity value (caller initializes var as na)
+// @param prev_dd Previous bar's max drawdown value (caller initializes var as 0.0)
+// @returns [equity, peak_equity, max_drawdown]
+export f_equity(simple string ticker1, simple string ticker2, simple string ticker3,
+ simple string ticker4, simple string ticker5, simple string ticker6,
+ series string best_asset, series float r1, series float r2, series float r3,
+ series float r4, series float r5, series float r6, series bool backtest,
+ series float prev_equity, series float prev_peak, series float prev_dd) =>
+
+    float equity       = na
+    float peak_equity  = prev_peak
+    float max_drawdown = prev_dd
+
+    if backtest
+        // best_asset[2] = signal from 2 bars ago; user sees it at [1], equity acts at [0]
+        a = switch best_asset[2]
+            ticker1 => r1
+            ticker2 => r2
+            ticker3 => r3
+            ticker4 => r4
+            ticker5 => r5
+            ticker6 => r6
+            "USD"   => 0.0
+
+        equity         := na(prev_equity) ? 1.0 : prev_equity * (1 + nz(a, 0.0))
+
+        peak_equity    := math.max(na(prev_peak) ? equity : prev_peak, equity)
+        current_dd      = peak_equity > 0 ? (peak_equity - equity) / peak_equity : 0
+        if current_dd > max_drawdown
+            max_drawdown := current_dd
+        if equity > peak_equity
+            peak_equity  := equity
+    else
+        equity := 1
+
+    [equity, peak_equity, max_drawdown]
+
+// @function Calculate buy-and-hold equity for a single asset (stateless — caller must maintain var state)
+// @param r Per-bar return (close-to-close)
+// @param backtest Whether backtesting is active this bar
+// @param prev_equity Previous bar's equity value (caller initializes var as na)
+// @param prev_peak Previous bar's peak equity value (caller initializes var as na)
+// @param prev_dd Previous bar's max drawdown value (caller initializes var as 0.0)
+// @returns [equity, peak_equity, max_drawdown]
+export f_buy_and_hold(series float r, series bool backtest,
+ series float prev_equity, series float prev_peak, series float prev_dd) =>
+
+    float equity       = na
+    float peak_equity  = prev_peak
+    float max_drawdown = prev_dd
+
+    if backtest
+        equity         := na(prev_equity) ? 1 : prev_equity * (1 + r)
+
+        peak_equity    := math.max(na(prev_peak) ? equity : prev_peak, equity)
+        current_dd      = peak_equity > 0 ? (peak_equity - equity) / peak_equity : 0
+        if current_dd > max_drawdown
+            max_drawdown := current_dd
+        if equity > peak_equity
+            peak_equity  := equity
+    else
+        equity := 1
+
+    [equity, peak_equity, max_drawdown]
+
+// ╔════════════════════════════╗
+// ║    LOOKBACK & COLORING     ║
+// ╚════════════════════════════╝
+
+// @function Calculate lookback period as bar count since condition became true (stateless — caller must maintain var state)
+// @param active Whether the counting condition is active this bar
+// @param prev_count Previous bar's raw count (caller initializes var as 0)
+// @returns [output, count] — output is the adjusted lookback for metrics; count is the raw counter to feed back next bar
+export f_since(series bool active, series int prev_count) =>
+    int count  = active ? prev_count + 1 : prev_count
+    int output = count > 2 ? count - 1 : count
+    [output, count]
+
+// @function Return color for equity curve based on currently held asset.
+//           Uses best_asset[1] so signal is visible 1 bar before equity execution.
+// @param ticker1 Asset 1 ticker string
+// @param ticker2 Asset 2 ticker string
+// @param ticker3 Asset 3 ticker string
+// @param ticker4 Asset 4 ticker string
+// @param ticker5 Asset 5 ticker string
+// @param ticker6 Asset 6 ticker string
+// @param best_asset The confirmed best-performing asset ticker
+// @param backtest Whether backtesting is active
+// @param colors Array of 8 colors: [asset1, asset2, asset3, asset4, asset5, asset6, usd, text]
+// @returns Color corresponding to the currently held asset
+export f_best_asset_col(simple string ticker1, simple string ticker2, simple string ticker3,
+ simple string ticker4, simple string ticker5, simple string ticker6,
+ series string best_asset, series bool backtest, color[] colors) =>
+
+    if backtest
+        col = switch best_asset[1]
+            ticker1 => array.get(colors, 0)
+            ticker2 => array.get(colors, 1)
+            ticker3 => array.get(colors, 2)
+            ticker4 => array.get(colors, 3)
+            ticker5 => array.get(colors, 4)
+            ticker6 => array.get(colors, 5)
+            "USD"   => array.get(colors, 6)
+    else
+        col = color.new(color.white, 100)
+
+// ╔════════════════════════════╗
+// ║   PERFORMANCE METRICS      ║
+// ╚════════════════════════════╝
+
+// @function Calculate performance metrics from an equity curve
+// @param base The equity curve series
+// @param Lookback Number of bars to analyze (capped at 4998)
+// @param backtest Whether backtesting is active
+// @param max_drawdown Maximum drawdown value (pre-calculated, as decimal e.g. 0.25 = 25%)
+// @returns Array of 10 floats: [mean_all%, mean_pos%, mean_neg%, stdev_all%, stdev_pos%, stdev_neg%, sharpe, sortino, omega, max_dd%]
+export f_PerformanceMetrics(series float base, series int Lookback, series bool backtest, series float max_drawdown) =>
+    pos_sum                 = 0.0
+    neg_sum                 = 0.0
+    pos_count               = 0
+    neg_count               = 0
+    returns_sum             = 0.0
+    returns_squared_sum     = 0.0
+    pos_returns_squared_sum = 0.0
+    neg_returns_squared_sum = 0.0
+
+    lookback = Lookback
+    if Lookback > 4999
+        lookback := 4998
+
+    if backtest
+        for i = 0 to lookback - 1
+            r = (base[i] - base[i + 1]) / base[i + 1]
+            returns_sum         += r
+            returns_squared_sum += r * r
+
+            if r > 0
+                pos_sum                 += r
+                pos_count               += 1
+                pos_returns_squared_sum += r * r
+            else if r < 0
+                neg_sum                 += r
+                neg_count               += 1
+                neg_returns_squared_sum += r * r
+
+    float[] export_array = array.new_float(10)
+
+    mean_all    = math.round(returns_sum / lookback, 4)
+    mean_pos    = pos_count != 0 ? math.round(pos_sum / pos_count, 4) : na
+    mean_neg    = neg_count != 0 ? math.round(neg_sum / neg_count, 4) : na
+
+    stddev_all  = math.round(math.sqrt((returns_squared_sum - (returns_sum * returns_sum) / lookback) / lookback), 4)
+    stddev_pos  = pos_count != 0 ? math.round(math.sqrt((pos_returns_squared_sum - (pos_sum * pos_sum) / pos_count) / pos_count), 4) : na
+    stddev_neg  = neg_count != 0 ? math.round(math.sqrt((neg_returns_squared_sum - (neg_sum * neg_sum) / neg_count) / neg_count), 4) : na
+
+    sharpe_ratio  = math.round((mean_all / stddev_all) * math.sqrt(255), 3)
+    sortino_ratio = math.round((mean_all / stddev_neg) * math.sqrt(255), 3)
+    omega_ratio   = math.round(pos_sum / math.abs(neg_sum), 3)
+
+    array.set(export_array, 0, mean_all    * 100)
+    array.set(export_array, 1, mean_pos    * 100)
+    array.set(export_array, 2, mean_neg    * 100)
+    array.set(export_array, 3, stddev_all  * 100)
+    array.set(export_array, 4, stddev_pos  * 100)
+    array.set(export_array, 5, stddev_neg  * 100)
+    array.set(export_array, 6, sharpe_ratio)
+    array.set(export_array, 7, sortino_ratio)
+    array.set(export_array, 8, omega_ratio)
+    array.set(export_array, 9, max_drawdown * 100)
+
+    export_array
+
+// @function Populate a performance metrics comparison table. Caller must create the table with `var` and pass it in.
+//           Should only be called on barstate.islast.
+// @param p Pre-created table (caller uses: var table p = table.new(position.top_left, 8, 15, ...))
+// @param ticker1 Asset 1 ticker string
+// @param ticker2 Asset 2 ticker string
+// @param ticker3 Asset 3 ticker string
+// @param ticker4 Asset 4 ticker string
+// @param ticker5 Asset 5 ticker string
+// @param ticker6 Asset 6 ticker string
+// @param strategy Strategy metrics array (from f_PerformanceMetrics)
+// @param a1 Buy-and-hold metrics for asset 1
+// @param a2 Buy-and-hold metrics for asset 2
+// @param a3 Buy-and-hold metrics for asset 3
+// @param a4 Buy-and-hold metrics for asset 4
+// @param a5 Buy-and-hold metrics for asset 5
+// @param a6 Buy-and-hold metrics for asset 6
+// @param colors Array of 8 colors
+// @returns The table object
+export f_PerfMetricTable(table p, simple string ticker1, simple string ticker2, simple string ticker3,
+ simple string ticker4, simple string ticker5, simple string ticker6,
+ float[] strategy, float[] a1, float[] a2, float[] a3, float[] a4, float[] a5, float[] a6, color[] colors) =>
+
+    // Header
+    table.cell(p, 0, 0, "Performance Metrics [NR]", text_color = color.white, bgcolor = color.gray)
+    table.merge_cells(p, 0, 0, 7, 0)
+
+    // Column headers
+    table.cell(p, 1, 1, "Strategy",                                              text_color = array.get(colors, 7))
+    table.cell(p, 2, 1, str.tostring(f_remove_exchange_name(ticker1)),            text_color = array.get(colors, 0))
+    table.cell(p, 3, 1, str.tostring(f_remove_exchange_name(ticker2)),            text_color = array.get(colors, 1))
+    table.cell(p, 4, 1, str.tostring(f_remove_exchange_name(ticker3)),            text_color = array.get(colors, 2))
+    table.cell(p, 5, 1, str.tostring(f_remove_exchange_name(ticker4)),            text_color = array.get(colors, 3))
+    table.cell(p, 6, 1, str.tostring(f_remove_exchange_name(ticker5)),            text_color = array.get(colors, 4))
+    table.cell(p, 7, 1, str.tostring(f_remove_exchange_name(ticker6)),            text_color = array.get(colors, 5))
+
+    // Metrics rows
+    for i = 0 to array.size(strategy) - 1
+        metric = switch i
+            0  => "Mean (All Returns) %"
+            1  => "Mean (Positive Returns) %"
+            2  => "Mean (Negative Returns) %"
+            3  => "STDEV (All Returns) %"
+            4  => "STDEV (Positive Returns) %"
+            5  => "STDEV (Negative Returns) %"
+            6  => "Sharpe Ratio"
+            7  => "Sortino Ratio"
+            8  => "Omega Ratio"
+            9  => "Maximum Drawdown %"
+
+        table.cell(p, 0, i + 2, metric,                                text_color = array.get(colors, 7))
+        table.cell(p, 1, i + 2, str.tostring(array.get(strategy, i)),  text_color = array.get(colors, 7))
+        table.cell(p, 2, i + 2, str.tostring(array.get(a1, i)),        text_color = array.get(colors, 0))
+        table.cell(p, 3, i + 2, str.tostring(array.get(a2, i)),        text_color = array.get(colors, 1))
+        table.cell(p, 4, i + 2, str.tostring(array.get(a3, i)),        text_color = array.get(colors, 2))
+        table.cell(p, 5, i + 2, str.tostring(array.get(a4, i)),        text_color = array.get(colors, 3))
+        table.cell(p, 6, i + 2, str.tostring(array.get(a5, i)),        text_color = array.get(colors, 4))
+        table.cell(p, 7, i + 2, str.tostring(array.get(a6, i)),        text_color = array.get(colors, 5))
+    p

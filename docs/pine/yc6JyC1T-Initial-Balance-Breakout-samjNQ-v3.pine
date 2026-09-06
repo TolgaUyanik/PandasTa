@@ -1,0 +1,105 @@
+
+//@version=6
+strategy("Initial Balance Breakout [MES] v3",
+     overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.25,
+     slippage=1,
+     calc_on_every_tick=false)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+ib_session    = input.session("0930-1030", "IB Window (60 min)", tooltip="First hour of RTH defines the Initial Balance")
+trade_session = input.session("1030-1430", "Trade Window",        tooltip="No new entries after 2:30 PM ET")
+ext1_mult     = input.float(1.0, "Target 1 (× IB range)", step=0.25, minval=0.25)
+ext2_mult     = input.float(1.5, "Target 2 (× IB range)", step=0.25, minval=0.5)
+sl_mode       = input.string("Opposite IB", "Stop Loss at", options=["Opposite IB", "IB Midpoint"])
+min_ib_pts    = input.float(8.0,  "Min IB Range (pts)", step=1.0, minval=1.0, tooltip="Skip day if IB is too narrow")
+max_ib_pts    = input.float(60.0, "Max IB Range (pts)", step=1.0, minval=5.0,  tooltip="Skip day if IB is too wide")
+use_vwap      = input.bool(true,  "VWAP Trend Filter",            tooltip="Long only above VWAP, short only below VWAP")
+
+// ─── VWAP ─────────────────────────────────────────────────────────────────────
+vwap_val = ta.vwap(hlc3)
+
+// ─── Session Masks ────────────────────────────────────────────────────────────
+in_ib    = not na(time(timeframe.period, ib_session,    "America/New_York"))
+in_trade = not na(time(timeframe.period, trade_session, "America/New_York"))
+in_eod   = not na(time(timeframe.period, "1555-1600",   "America/New_York"))
+
+// ─── Daily State ──────────────────────────────────────────────────────────────
+var float ib_high      = na
+var float ib_low       = na
+var bool  ib_locked    = false
+var bool  ib_tradeable = false
+var bool  long_taken   = false
+var bool  short_taken  = false
+
+if ta.change(time("D")) != 0
+    ib_high      := na
+    ib_low       := na
+    ib_locked    := false
+    ib_tradeable := false
+    long_taken   := false
+    short_taken  := false
+
+// ─── Build IB ─────────────────────────────────────────────────────────────────
+if in_ib
+    ib_high   := na(ib_high) ? high : math.max(ib_high, high)
+    ib_low    := na(ib_low)  ? low  : math.min(ib_low,  low)
+    ib_locked := false
+
+if not in_ib and not na(ib_high) and not ib_locked
+    ib_locked := true
+    rng        = ib_high - ib_low
+    ib_tradeable := rng >= min_ib_pts and rng <= max_ib_pts
+
+// ─── Derived Levels ───────────────────────────────────────────────────────────
+ib_range = ib_locked ? ib_high - ib_low : na
+ib_mid   = ib_locked ? math.avg(ib_high, ib_low) : na
+t1_long  = ib_locked ? ib_high + ext1_mult * ib_range : na
+t2_long  = ib_locked ? ib_high + ext2_mult * ib_range : na
+t1_short = ib_locked ? ib_low  - ext1_mult * ib_range : na
+t2_short = ib_locked ? ib_low  - ext2_mult * ib_range : na
+
+sl_long  = sl_mode == "IB Midpoint" ? ib_mid : ib_low
+sl_short = sl_mode == "IB Midpoint" ? ib_mid : ib_high
+
+// ─── VWAP Trend Filter ────────────────────────────────────────────────────────
+vwap_long_ok  = not use_vwap or close > vwap_val
+vwap_short_ok = not use_vwap or close < vwap_val
+
+// ─── Signals (unconditional for history tracking) ─────────────────────────────
+cross_above_ibh = ta.crossover(close,  ib_high)
+cross_below_ibl = ta.crossunder(close, ib_low)
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+active = ib_locked and ib_tradeable
+plot(active ? ib_high  : na, "IB High",  color=color.new(color.blue,   0),  linewidth=2, style=plot.style_linebr)
+plot(active ? ib_low   : na, "IB Low",   color=color.new(color.blue,   0),  linewidth=2, style=plot.style_linebr)
+plot(active ? ib_mid   : na, "IB Mid",   color=color.new(color.gray,   0),  linewidth=1, style=plot.style_linebr)
+plot(active ? t1_long  : na, "T1 Long",  color=color.new(color.green, 40),  linewidth=1, style=plot.style_linebr)
+plot(active ? t2_long  : na, "T2 Long",  color=color.new(color.green,  0),  linewidth=2, style=plot.style_linebr)
+plot(active ? t1_short : na, "T1 Short", color=color.new(color.red,   40),  linewidth=1, style=plot.style_linebr)
+plot(active ? t2_short : na, "T2 Short", color=color.new(color.red,    0),  linewidth=2, style=plot.style_linebr)
+plot(use_vwap ? vwap_val : na, "VWAP",   color=color.new(color.orange,  0), linewidth=1)
+
+bgcolor(in_ib ? color.new(color.yellow, 88) : na, title="IB Window")
+bgcolor(ib_locked and not ib_tradeable ? color.new(color.gray, 93) : na, title="Filtered Day")
+
+// ─── Entry & Exit Logic ───────────────────────────────────────────────────────
+long_ok  = active and in_trade and not long_taken  and strategy.position_size == 0 and vwap_long_ok
+short_ok = active and in_trade and not short_taken and strategy.position_size == 0 and vwap_short_ok
+
+if long_ok and cross_above_ibh
+    strategy.entry("Long IB", strategy.long)
+    strategy.exit("Long Exit", "Long IB", stop=sl_long, limit=t2_long)
+    long_taken := true
+
+if short_ok and cross_below_ibl
+    strategy.entry("Short IB", strategy.short)
+    strategy.exit("Short Exit", "Short IB", stop=sl_short, limit=t2_short)
+    short_taken := true
+
+if in_eod and strategy.position_size != 0
+    strategy.close_all("EOD Flat")

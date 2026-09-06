@@ -1,0 +1,731 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © NICK789
+
+//@version=6
+strategy(
+     title="McGinley T3 Flow Campaign [NICK789]",
+     shorttitle="McG T3 Flow Campaign",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=30,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     initial_capital=100000,
+     margin_long=0,
+     margin_short=0,
+     process_orders_on_close=true,
+     pyramiding=0,
+     max_lines_count=500,
+     max_labels_count=500
+)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 01. INPUTS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+string G_TIME   = "01. Backtest Window"
+string G_ENGINE = "02. Signal Engine"
+string G_TARGET = "03. Targets / Stop"
+string G_VIS    = "04. Visual Display"
+string G_COLOR  = "05. Colours"
+
+startTime = input.time(timestamp("01 Jan 2026 00:00 +1100"), "Backtest Start", group=G_TIME)
+
+engineMode = input.string(
+     "McGinley Only",
+     "Engine Mode",
+     options=["McGinley Only", "T3 Only", "McGinley + T3 Blend"],
+     group=G_ENGINE
+)
+
+sourcePrice = input.source(close, "Source", group=G_ENGINE)
+mcgLength   = input.int(65, "McGinley Length", minval=1, group=G_ENGINE)
+t3Length    = input.int(14, "T3 Length", minval=1, group=G_ENGINE)
+t3Volume    = input.float(0.70, "T3 Smoothing Factor", minval=0.10, maxval=1.00, step=0.05, group=G_ENGINE)
+
+trailAtrLen  = input.int(28, "ATR Trail Length", minval=1, group=G_ENGINE)
+trailAtrMult = input.float(1.20, "ATR Trail Multiplier", minval=0.05, step=0.05, group=G_ENGINE)
+
+useTargets = input.bool(true, "Enable Take Profit", group=G_TARGET, inline="target")
+targetMult = input.float(1.0, "Target Distance Multiplier", minval=0.1, step=0.1, group=G_TARGET, inline="target")
+
+targetMode = input.string(
+     "Flow Trail Based",
+     "Target Mode",
+     options=["Flow Trail Based", "ATR Baseline"],
+     group=G_TARGET
+)
+
+tpExitMode = input.string(
+     "Scale Out TP1/TP2/TP3",
+     "Take Profit Exit Mode",
+     options=["TP1 Only", "TP2 Only", "TP3 Only", "Scale Out TP1/TP2/TP3"],
+     group=G_TARGET
+)
+
+tp1Percent = input.int(30, "TP1 Size (%)", minval=1, maxval=100, group=G_TARGET)
+tp2Percent = input.int(30, "TP2 Size (%)", minval=1, maxval=100, group=G_TARGET)
+tp3Percent = input.int(40, "TP3 Size (%)", minval=1, maxval=100, group=G_TARGET)
+
+tp1RR = input.float(1.0, "TP1 Risk/Reward", minval=0.1, step=0.1, group=G_TARGET)
+tp2RR = input.float(2.0, "TP2 Risk/Reward", minval=0.1, step=0.1, group=G_TARGET)
+tp3RR = input.float(3.0, "TP3 Risk/Reward", minval=0.1, step=0.1, group=G_TARGET)
+
+stopMode = input.string(
+     "Visual Only",
+     "Stop Mode",
+     options=["Off", "Visual Only", "Visual + Strategy Exit"],
+     group=G_TARGET
+)
+
+showTrail      = input.bool(true, "Show ATR Signal Trail", group=G_VIS)
+showCloud      = input.bool(true, "Show Signal Ribbon", group=G_VIS)
+showComponents = input.bool(false, "Show McGinley / T3 Components", group=G_VIS)
+showLevels     = input.bool(true, "Show Entry / Target Lines", group=G_VIS)
+showSignals    = input.bool(true, "Show Main Signal Labels", group=G_VIS)
+showFollowUps  = input.bool(true, "Show Continuation Triangles", group=G_VIS)
+showPulse      = input.bool(true, "Show Signal Background Pulse", group=G_VIS)
+colorCandles   = input.bool(false, "Colour Candles By Trend", group=G_VIS)
+showDash       = input.bool(true, "Show Dashboard", group=G_VIS)
+
+bullColor = input.color(#00E5A8, "Bull Colour", group=G_COLOR)
+bearColor = input.color(#FF3D71, "Bear Colour", group=G_COLOR)
+flatColor = input.color(#B8B8B8, "Neutral Colour", group=G_COLOR)
+stopColor = input.color(color.orange, "Stop Colour", group=G_COLOR)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 02. CUSTOM TYPES
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+type FlowCampaign
+    int   side
+    int   startBar
+    int   finishBar
+    float entry
+    float t1
+    float t2
+    float t3
+    float sl
+    bool  active
+
+method open(FlowCampaign c, int _side, float _entry, float _unit, float _rr1, float _rr2, float _rr3, bool _hasSL) =>
+    c.side      := _side
+    c.startBar  := bar_index
+    c.finishBar := na
+    c.entry     := _entry
+    c.t1        := _entry + _unit * _rr1 * _side
+    c.t2        := _entry + _unit * _rr2 * _side
+    c.t3        := _entry + _unit * _rr3 * _side
+    c.sl        := _hasSL ? _entry - _unit * _rr2 * _side : na
+    c.active    := true
+
+method finish(FlowCampaign c) =>
+    c.finishBar := bar_index
+    c.active    := false
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 03. HELPER FUNCTIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+f_mcginley(float _src, int _len) =>
+    var float mg = na
+    previous = nz(mg[1], _src)
+    ratio = previous != 0.0 ? _src / previous : 1.0
+    ratio := ratio <= 0.0 ? 1.0 : ratio
+    mg := na(mg[1]) ? _src : mg[1] + (_src - mg[1]) / (_len * math.pow(ratio, 4))
+    mg
+
+f_t3(float _src, int _len, float _v) =>
+    e1 = ta.ema(_src, _len)
+    e2 = ta.ema(e1, _len)
+    e3 = ta.ema(e2, _len)
+    e4 = ta.ema(e3, _len)
+    e5 = ta.ema(e4, _len)
+    e6 = ta.ema(e5, _len)
+
+    c1 = -_v * _v * _v
+    c2 = 3.0 * _v * _v + 3.0 * _v * _v * _v
+    c3 = -6.0 * _v * _v - 3.0 * _v - 3.0 * _v * _v * _v
+    c4 = 1.0 + 3.0 * _v + _v * _v * _v + 3.0 * _v * _v
+
+    c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
+
+f_json(string _action, float _portion, float _target, float _stop) =>
+    closedTrades = strategy.closedtrades
+    winRateNow = closedTrades > 0 ? strategy.wintrades / closedTrades * 100.0 : 0.0
+    pnlNow = strategy.netprofit_percent + strategy.openprofit_percent
+    startText = "n/a"
+
+    '{"ticker":"' + syminfo.ticker +
+     '","action":"' + _action +
+     '","price":"' + str.tostring(close) +
+     '","time":"' + str.format_time(timenow, "yyyy-MM-dd HH:mm", syminfo.timezone) +
+     '","tf":"' + timeframe.period +
+     '","per":"' + str.tostring(_portion) +
+     '","tp":"' + str.tostring(_target) +
+     '","sl":"' + str.tostring(_stop) +
+     '","TotalTrades":"' + str.tostring(closedTrades) +
+     '","PNL":"' + str.tostring(pnlNow, "#.##") +
+     '","WinRate":"' + str.tostring(winRateNow, "#.##") +
+     '","MaxDraw":"' + str.tostring(strategy.max_drawdown_percent, "#.##") +
+     '","StartDate":"' + startText + '"}'
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 04. PERFORMANCE STATE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+tradeCount = strategy.closedtrades
+winRate = tradeCount > 0 ? strategy.wintrades / tradeCount * 100.0 : 0.0
+netPnl = strategy.netprofit_percent + strategy.openprofit_percent
+maxDD = strategy.max_drawdown_percent
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 05. FLOW ENGINE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+mcgCurve = f_mcginley(sourcePrice, mcgLength)
+t3Curve  = f_t3(sourcePrice, t3Length, t3Volume)
+
+useMcgOnly = engineMode == "McGinley Only"
+useT3Only  = engineMode == "T3 Only"
+useBlend   = engineMode == "McGinley + T3 Blend"
+
+engineBasis =
+     useMcgOnly ? mcgCurve :
+     useT3Only ? t3Curve :
+     (mcgCurve + t3Curve) / 2.0
+
+engineText =
+     useMcgOnly ? "McGinley" :
+     useT3Only ? "T3" :
+     "McGinley + T3"
+
+trailDistance = ta.atr(trailAtrLen) * trailAtrMult
+
+flowTrail = engineBasis
+flowTrail := nz(flowTrail[1], flowTrail)
+
+upperTrailLock = engineBasis + trailDistance
+lowerTrailLock = engineBasis - trailDistance
+
+if lowerTrailLock > flowTrail
+    flowTrail := lowerTrailLock
+
+if upperTrailLock < flowTrail
+    flowTrail := upperTrailLock
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 06. SIGNAL STATE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+longSignal  = ta.crossover(flowTrail, flowTrail[2]) and barstate.isconfirmed
+shortSignal = ta.crossunder(flowTrail, flowTrail[2]) and barstate.isconfirmed
+
+var int visualTrend = 0
+
+if longSignal
+    visualTrend := 1
+
+if shortSignal
+    visualTrend := -1
+
+trendBull = visualTrend == 1
+trendBear = visualTrend == -1
+
+trailColor =
+     trendBull ? bullColor :
+     trendBear ? bearColor :
+     flatColor
+
+var int lastSignalSide = 0
+
+primaryLong  = longSignal and lastSignalSide != 1
+primaryShort = shortSignal and lastSignalSide != -1
+
+followLong  = longSignal and lastSignalSide == 1
+followShort = shortSignal and lastSignalSide == -1
+
+if longSignal
+    lastSignalSide := 1
+
+if shortSignal
+    lastSignalSide := -1
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 07. CAMPAIGN STATE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+atrBase      = ta.atr(200)
+flowDistance = math.abs(close - flowTrail)
+flowFloor    = atrBase * 0.25
+
+targetUnit =
+     targetMode == "Flow Trail Based" ? math.max(flowDistance, flowFloor) :
+     atrBase
+
+campaignStep = targetUnit * targetMult
+
+hasStopLine = stopMode != "Off"
+stopIsLive  = stopMode == "Visual + Strategy Exit"
+
+scaleOutMode = tpExitMode == "Scale Out TP1/TP2/TP3"
+
+scaleTotal = math.max(float(tp1Percent + tp2Percent + tp3Percent), 1.0)
+
+safeT1 = scaleOutMode ? float(tp1Percent) / scaleTotal * 100.0 : 100.0
+safeT2 = scaleOutMode ? float(tp2Percent) / scaleTotal * 100.0 : 100.0
+safeT3 = scaleOutMode ? float(tp3Percent) / scaleTotal * 100.0 : 100.0
+
+useTP1Exit = tpExitMode == "TP1 Only" or scaleOutMode
+useTP2Exit = tpExitMode == "TP2 Only" or scaleOutMode
+useTP3Exit = tpExitMode == "TP3 Only" or scaleOutMode
+
+var FlowCampaign campaign = FlowCampaign.new(0, na, na, na, na, na, na, na, false)
+
+var float liveLongT1  = na
+var float liveLongT2  = na
+var float liveLongT3  = na
+var float liveShortT1 = na
+var float liveShortT2 = na
+var float liveShortT3 = na
+var float liveLongSL  = na
+var float liveShortSL = na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 08. ORDER FLOW
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+allowTrading = time >= startTime
+
+if allowTrading
+
+    if longSignal and strategy.position_size <= 0
+        strategy.close("Short", comment="Short Exit", alert_message=f_json("exit_sell", 100.0, na, na))
+        strategy.entry("Long", strategy.long, comment="Long", alert_message=f_json("buy", 0.0, na, na))
+
+        if useTargets
+            campaign.open(1, close, campaignStep, tp1RR, tp2RR, tp3RR, hasStopLine)
+
+            liveLongT1  := campaign.t1
+            liveLongT2  := campaign.t2
+            liveLongT3  := campaign.t3
+            liveLongSL  := campaign.sl
+
+            liveShortT1 := na
+            liveShortT2 := na
+            liveShortT3 := na
+            liveShortSL := na
+
+    if shortSignal and strategy.position_size >= 0
+        strategy.close("Long", comment="Long Exit", alert_message=f_json("exit_buy", 100.0, na, na))
+        strategy.entry("Short", strategy.short, comment="Short", alert_message=f_json("sell", 0.0, na, na))
+
+        if useTargets
+            campaign.open(-1, close, campaignStep, tp1RR, tp2RR, tp3RR, hasStopLine)
+
+            liveShortT1 := campaign.t1
+            liveShortT2 := campaign.t2
+            liveShortT3 := campaign.t3
+            liveShortSL := campaign.sl
+
+            liveLongT1  := na
+            liveLongT2  := na
+            liveLongT3  := na
+            liveLongSL  := na
+
+    if strategy.position_size > 0
+
+        if stopIsLive and not na(liveLongSL) and low <= liveLongSL
+            strategy.close("Long", comment="Long SL", alert_message=f_json("exit_buy", 100.0, na, liveLongSL))
+            liveLongT1 := na
+            liveLongT2 := na
+            liveLongT3 := na
+            liveLongSL := na
+            campaign.finish()
+
+        else
+            if useTargets and useTP1Exit and not na(liveLongT1) and high > liveLongT1
+                strategy.close("Long", comment="Long TP1", qty_percent=safeT1, alert_message=f_json("exit_buy", safeT1, liveLongT1, liveLongSL))
+
+                if scaleOutMode
+                    liveLongT1 := na
+                else
+                    liveLongT1 := na
+                    liveLongT2 := na
+                    liveLongT3 := na
+                    liveLongSL := na
+                    campaign.finish()
+
+            if useTargets and useTP2Exit and not na(liveLongT2) and high > liveLongT2
+                strategy.close("Long", comment="Long TP2", qty_percent=safeT2, alert_message=f_json("exit_buy", safeT2, liveLongT2, liveLongSL))
+
+                if scaleOutMode
+                    liveLongT2 := na
+                else
+                    liveLongT1 := na
+                    liveLongT2 := na
+                    liveLongT3 := na
+                    liveLongSL := na
+                    campaign.finish()
+
+            if useTargets and useTP3Exit and not na(liveLongT3) and high > liveLongT3
+                strategy.close("Long", comment="Long TP3", qty_percent=safeT3, alert_message=f_json("exit_buy", safeT3, liveLongT3, liveLongSL))
+                liveLongT1 := na
+                liveLongT2 := na
+                liveLongT3 := na
+                liveLongSL := na
+                campaign.finish()
+
+    if strategy.position_size < 0
+
+        if stopIsLive and not na(liveShortSL) and high >= liveShortSL
+            strategy.close("Short", comment="Short SL", alert_message=f_json("exit_sell", 100.0, na, liveShortSL))
+            liveShortT1 := na
+            liveShortT2 := na
+            liveShortT3 := na
+            liveShortSL := na
+            campaign.finish()
+
+        else
+            if useTargets and useTP1Exit and not na(liveShortT1) and low < liveShortT1
+                strategy.close("Short", comment="Short TP1", qty_percent=safeT1, alert_message=f_json("exit_sell", safeT1, liveShortT1, liveShortSL))
+
+                if scaleOutMode
+                    liveShortT1 := na
+                else
+                    liveShortT1 := na
+                    liveShortT2 := na
+                    liveShortT3 := na
+                    liveShortSL := na
+                    campaign.finish()
+
+            if useTargets and useTP2Exit and not na(liveShortT2) and low < liveShortT2
+                strategy.close("Short", comment="Short TP2", qty_percent=safeT2, alert_message=f_json("exit_sell", safeT2, liveShortT2, liveShortSL))
+
+                if scaleOutMode
+                    liveShortT2 := na
+                else
+                    liveShortT1 := na
+                    liveShortT2 := na
+                    liveShortT3 := na
+                    liveShortSL := na
+                    campaign.finish()
+
+            if useTargets and useTP3Exit and not na(liveShortT3) and low < liveShortT3
+                strategy.close("Short", comment="Short TP3", qty_percent=safeT3, alert_message=f_json("exit_sell", safeT3, liveShortT3, liveShortSL))
+                liveShortT1 := na
+                liveShortT2 := na
+                liveShortT3 := na
+                liveShortSL := na
+                campaign.finish()
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 09. ENGINE VISUALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+componentMcgVisible = showComponents and not useT3Only
+componentT3Visible  = showComponents and not useMcgOnly
+
+cloudColor =
+     trendBull ? color.new(bullColor, 86) :
+     trendBear ? color.new(bearColor, 86) :
+     color.new(flatColor, 90)
+
+signalRibbonColor =
+     trendBull ? color.new(bullColor, 84) :
+     trendBear ? color.new(bearColor, 84) :
+     color.new(flatColor, 90)
+
+mcgPlot = plot(
+     componentMcgVisible ? mcgCurve : na,
+     "McGinley Component",
+     color=color.new(bullColor, useBlend ? 25 : 5),
+     linewidth=useBlend ? 2 : 3
+)
+
+t3Plot = plot(
+     componentT3Visible ? t3Curve : na,
+     "T3 Component",
+     color=color.new(bearColor, useBlend ? 25 : 5),
+     linewidth=useBlend ? 2 : 3
+)
+
+fill(
+     mcgPlot,
+     t3Plot,
+     color=showCloud and useBlend ? cloudColor : na,
+     title="Engine Component Cloud"
+)
+
+trailPlot = plot(
+     showTrail ? flowTrail : na,
+     "ATR Signal Trail",
+     color=trailColor,
+     linewidth=4,
+     style=plot.style_stepline
+)
+
+basisPlot = plot(
+     showCloud ? engineBasis : na,
+     "Selected Engine Basis",
+     color=color.new(chart.fg_color, 100),
+     linewidth=1
+)
+
+fill(
+     trailPlot,
+     basisPlot,
+     color=showCloud ? signalRibbonColor : na,
+     title="Signal Trail Ribbon"
+)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 10. CAMPAIGN LINE VISUALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var line  entryLine = na
+var line  t1Line    = na
+var line  t2Line    = na
+var line  t3Line    = na
+var line  slLine    = na
+
+var label entryTag = na
+var label t1Tag    = na
+var label t2Tag    = na
+var label t3Tag    = na
+var label slTag    = na
+
+campaignReady = showLevels and useTargets and not na(campaign.startBar) and not na(campaign.entry)
+lineEndRaw    = campaign.active ? bar_index : campaign.finishBar
+lineEnd        = not na(campaign.startBar) ? math.max(campaign.startBar + 1, nz(lineEndRaw, bar_index)) : bar_index
+
+campaignColor =
+     campaign.side == 1 ? bullColor :
+     campaign.side == -1 ? bearColor :
+     flatColor
+
+campaignPrefix =
+     campaign.side == 1 ? "L-" :
+     campaign.side == -1 ? "S-" :
+     ""
+
+entryLineColor = color.new(chart.fg_color, 0)
+t1LineColor    = color.new(campaignColor, 55)
+t2LineColor    = color.new(campaignColor, 30)
+t3LineColor    = color.new(campaignColor, 0)
+slLineColor    = color.new(stopColor, 0)
+
+entryText = "ENTRY\n" + str.tostring(campaign.entry, format.mintick)
+tp1Text   = campaignPrefix + "TP1\n" + str.tostring(campaign.t1, format.mintick)
+tp2Text   = campaignPrefix + "TP2\n" + str.tostring(campaign.t2, format.mintick)
+tp3Text   = campaignPrefix + "TP3\n" + str.tostring(campaign.t3, format.mintick)
+slText    = not na(campaign.sl) ? campaignPrefix + "SL\n" + str.tostring(campaign.sl, format.mintick) : campaignPrefix + "SL"
+
+if campaignReady
+
+    if na(entryLine)
+        entryLine := line.new(campaign.startBar, campaign.entry, lineEnd, campaign.entry, xloc=xloc.bar_index, color=entryLineColor, width=2)
+        t1Line    := line.new(campaign.startBar, campaign.t1,    lineEnd, campaign.t1,    xloc=xloc.bar_index, color=t1LineColor, width=1)
+        t2Line    := line.new(campaign.startBar, campaign.t2,    lineEnd, campaign.t2,    xloc=xloc.bar_index, color=t2LineColor, width=1)
+        t3Line    := line.new(campaign.startBar, campaign.t3,    lineEnd, campaign.t3,    xloc=xloc.bar_index, color=t3LineColor, width=2)
+
+        entryTag := label.new(lineEnd, campaign.entry, entryText, xloc=xloc.bar_index, style=label.style_none, textcolor=entryLineColor, color=color.new(color.black, 100), size=size.small)
+        t1Tag    := label.new(lineEnd, campaign.t1, tp1Text, xloc=xloc.bar_index, style=label.style_none, textcolor=t1LineColor, color=color.new(color.black, 100), size=size.small)
+        t2Tag    := label.new(lineEnd, campaign.t2, tp2Text, xloc=xloc.bar_index, style=label.style_none, textcolor=t2LineColor, color=color.new(color.black, 100), size=size.small)
+        t3Tag    := label.new(lineEnd, campaign.t3, tp3Text, xloc=xloc.bar_index, style=label.style_none, textcolor=t3LineColor, color=color.new(color.black, 100), size=size.small)
+
+    else
+        line.set_xy1(entryLine, campaign.startBar, campaign.entry)
+        line.set_xy2(entryLine, lineEnd, campaign.entry)
+        line.set_color(entryLine, entryLineColor)
+        line.set_width(entryLine, 2)
+
+        line.set_xy1(t1Line, campaign.startBar, campaign.t1)
+        line.set_xy2(t1Line, lineEnd, campaign.t1)
+        line.set_color(t1Line, t1LineColor)
+        line.set_width(t1Line, 1)
+
+        line.set_xy1(t2Line, campaign.startBar, campaign.t2)
+        line.set_xy2(t2Line, lineEnd, campaign.t2)
+        line.set_color(t2Line, t2LineColor)
+        line.set_width(t2Line, 1)
+
+        line.set_xy1(t3Line, campaign.startBar, campaign.t3)
+        line.set_xy2(t3Line, lineEnd, campaign.t3)
+        line.set_color(t3Line, t3LineColor)
+        line.set_width(t3Line, 2)
+
+        label.set_xy(entryTag, lineEnd, campaign.entry)
+        label.set_text(entryTag, entryText)
+        label.set_textcolor(entryTag, entryLineColor)
+
+        label.set_xy(t1Tag, lineEnd, campaign.t1)
+        label.set_text(t1Tag, tp1Text)
+        label.set_textcolor(t1Tag, t1LineColor)
+
+        label.set_xy(t2Tag, lineEnd, campaign.t2)
+        label.set_text(t2Tag, tp2Text)
+        label.set_textcolor(t2Tag, t2LineColor)
+
+        label.set_xy(t3Tag, lineEnd, campaign.t3)
+        label.set_text(t3Tag, tp3Text)
+        label.set_textcolor(t3Tag, t3LineColor)
+
+    if hasStopLine and not na(campaign.sl)
+        if na(slLine)
+            slLine := line.new(campaign.startBar, campaign.sl, lineEnd, campaign.sl, xloc=xloc.bar_index, color=slLineColor, width=2, style=line.style_dashed)
+            slTag  := label.new(lineEnd, campaign.sl, slText, xloc=xloc.bar_index, style=label.style_none, textcolor=slLineColor, color=color.new(color.black, 100), size=size.small)
+        else
+            line.set_xy1(slLine, campaign.startBar, campaign.sl)
+            line.set_xy2(slLine, lineEnd, campaign.sl)
+            line.set_color(slLine, slLineColor)
+            line.set_style(slLine, line.style_dashed)
+            line.set_width(slLine, 2)
+
+            label.set_xy(slTag, lineEnd, campaign.sl)
+            label.set_text(slTag, slText)
+            label.set_textcolor(slTag, slLineColor)
+
+    else
+        if not na(slLine)
+            line.delete(slLine)
+            slLine := na
+        if not na(slTag)
+            label.delete(slTag)
+            slTag := na
+
+if not campaignReady
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if not na(t1Line)
+        line.delete(t1Line)
+        t1Line := na
+    if not na(t2Line)
+        line.delete(t2Line)
+        t2Line := na
+    if not na(t3Line)
+        line.delete(t3Line)
+        t3Line := na
+    if not na(slLine)
+        line.delete(slLine)
+        slLine := na
+
+    if not na(entryTag)
+        label.delete(entryTag)
+        entryTag := na
+    if not na(t1Tag)
+        label.delete(t1Tag)
+        t1Tag := na
+    if not na(t2Tag)
+        label.delete(t2Tag)
+        t2Tag := na
+    if not na(t3Tag)
+        label.delete(t3Tag)
+        t3Tag := na
+    if not na(slTag)
+        label.delete(slTag)
+        slTag := na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 11. SIGNAL VISUALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+plotshape(
+     showSignals and primaryLong,
+     title="Primary Long",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=bullColor,
+     text="MG\nBUY",
+     textcolor=color.black,
+     size=size.small
+)
+
+plotshape(
+     showSignals and primaryShort,
+     title="Primary Short",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=bearColor,
+     text="MG\nSELL",
+     textcolor=color.white,
+     size=size.small
+)
+
+plotshape(
+     showSignals and showFollowUps and followLong,
+     title="Long Follow-up",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=color.new(bullColor, 65),
+     size=size.tiny
+)
+
+plotshape(
+     showSignals and showFollowUps and followShort,
+     title="Short Follow-up",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=color.new(bearColor, 65),
+     size=size.tiny
+)
+
+bgcolor(
+     showPulse and primaryLong ? color.new(bullColor, 88) :
+     showPulse and primaryShort ? color.new(bearColor, 88) :
+     na,
+     title="Signal Pulse"
+)
+
+barcolor(colorCandles ? trailColor : na)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 12. DASHBOARD
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var table dash = table.new(position.top_right, 2, 6, border_width=1)
+
+f_dashCell(int _col, int _row, string _txt, color _txtCol, color _bgCol) =>
+    table.cell(
+         dash,
+         _col,
+         _row,
+         _txt,
+         text_color=_txtCol,
+         bgcolor=_bgCol,
+         text_size=size.small
+    )
+
+stateText =
+     trendBull ? "BULL FLOW" :
+     trendBear ? "BEAR FLOW" :
+     "NEUTRAL"
+
+posText =
+     strategy.position_size > 0 ? "LONG" :
+     strategy.position_size < 0 ? "SHORT" :
+     "FLAT"
+
+dashBg = color.new(color.black, 15)
+
+if showDash
+    f_dashCell(0, 0, "McG T3 Flow", color.white, dashBg)
+    f_dashCell(1, 0, engineMode, color.white, dashBg)
+
+    f_dashCell(0, 1, "Target Mode", color.white, dashBg)
+    f_dashCell(1, 1, targetMode, color.white, dashBg)
+
+    f_dashCell(0, 2, "State", color.white, dashBg)
+    f_dashCell(1, 2, stateText, trailColor, dashBg)
+
+    f_dashCell(0, 3, "Position", color.white, dashBg)
+    f_dashCell(1, 3, posText, color.white, dashBg)
+
+    f_dashCell(0, 4, "Win Rate", color.white, dashBg)
+    f_dashCell(1, 4, str.tostring(winRate, "#.##") + "%", color.white, dashBg)
+
+    f_dashCell(0, 5, "PNL / DD", color.white, dashBg)
+    f_dashCell(1, 5, str.tostring(netPnl, "#.##") + "% / " + str.tostring(maxDD, "#.##") + "%", color.white, dashBg)
+else
+    table.clear(dash, 0, 0, 1, 5)

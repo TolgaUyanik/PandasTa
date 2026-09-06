@@ -1,0 +1,175 @@
+//@version=5
+strategy("Sweep & React", overlay=true, pyramiding=0, process_orders_on_close=false, max_labels_count=500, max_boxes_count=500)
+
+signalTf = input.timeframe("15", "Signal-Zeiteinheit")
+rr = input.float(2.0, "CRV", minval=0.5)
+showFrame = input.bool(true, "Orderrahmen anzeigen")
+showResult = input.bool(true, "Trade-Ergebnis anzeigen")
+showDaily = input.bool(true, "Tagesauswertung anzeigen")
+
+lr = 2
+tz = "Europe/Berlin"
+inSession = not na(time(timeframe.period, "0800-2100", tz))
+
+f_signal() =>
+    ph = ta.pivothigh(high, lr, lr)
+    pl = ta.pivotlow(low, lr, lr)
+
+    var float lastHighFractal = na
+    var float lastLowFractal = na
+
+    if not na(ph)
+        lastHighFractal := ph
+
+    if not na(pl)
+        lastLowFractal := pl
+
+    bearSweep = not na(lastHighFractal) and high > lastHighFractal and close < lastHighFractal
+    bullSweep = not na(lastLowFractal) and low < lastLowFractal and close > lastLowFractal
+
+    [bearSweep, bullSweep, high, low, time]
+
+[bearSweepRaw, bullSweepRaw, sigHigh, sigLow, sigTime] = request.security(syminfo.tickerid, signalTf, f_signal(), lookahead=barmerge.lookahead_off)
+
+newSignalBar = ta.change(sigTime) != 0
+
+inTrade = strategy.position_size != 0
+
+bearSweep = not inTrade and bearSweepRaw and newSignalBar
+bullSweep = not inTrade and bullSweepRaw and newSignalBar
+
+var bool pendingLong = false
+var bool pendingShort = false
+var int sweepBar = na
+var float sweepHigh = na
+var float sweepLow = na
+
+if bullSweep
+    pendingLong := true
+    pendingShort := false
+    sweepBar := bar_index
+    sweepHigh := sigHigh
+    sweepLow := sigLow
+
+if bearSweep
+    pendingShort := true
+    pendingLong := false
+    sweepBar := bar_index
+    sweepHigh := sigHigh
+    sweepLow := sigLow
+
+isNextBar = bar_index == sweepBar + 1
+
+var float activeEntry = na
+var float activeSL = na
+var float activeTP = na
+var int activeStart = na
+var int activeDir = 0
+
+if pendingLong and isNextBar and not inTrade and inSession
+    entry = sweepHigh
+    sl = sweepLow
+    risk = entry - sl
+    tp = entry + risk * rr
+    strategy.entry("Long", strategy.long, stop=entry)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    activeEntry := entry
+    activeSL := sl
+    activeTP := tp
+    activeStart := bar_index
+    activeDir := 1
+    pendingLong := false
+
+if pendingShort and isNextBar and not inTrade and inSession
+    entry = sweepLow
+    sl = sweepHigh
+    risk = sl - entry
+    tp = entry - risk * rr
+    strategy.entry("Short", strategy.short, stop=entry)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    activeEntry := entry
+    activeSL := sl
+    activeTP := tp
+    activeStart := bar_index
+    activeDir := -1
+    pendingShort := false
+
+if not na(sweepBar) and bar_index > sweepBar + 1 and not inTrade
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    pendingLong := false
+    pendingShort := false
+    sweepBar := na
+    sweepHigh := na
+    sweepLow := na
+
+var box riskBox = na
+var box rewardBox = na
+
+tradeJustOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
+tradeJustClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if tradeJustOpened and showFrame
+    if strategy.position_size > 0
+        riskBox := box.new(activeStart, activeEntry, bar_index, activeSL, bgcolor=color.new(color.red, 85), border_color=color.red)
+        rewardBox := box.new(activeStart, activeTP, bar_index, activeEntry, bgcolor=color.new(color.green, 85), border_color=color.green)
+    if strategy.position_size < 0
+        riskBox := box.new(activeStart, activeSL, bar_index, activeEntry, bgcolor=color.new(color.red, 85), border_color=color.red)
+        rewardBox := box.new(activeStart, activeEntry, bar_index, activeTP, bgcolor=color.new(color.green, 85), border_color=color.green)
+
+if inTrade and showFrame
+    if not na(riskBox)
+        box.set_right(riskBox, bar_index)
+    if not na(rewardBox)
+        box.set_right(rewardBox, bar_index)
+
+dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+newDay = dayKey != dayKey[1]
+
+var int dayWins = 0
+var int dayLosses = 0
+var float dayR = 0.0
+var float dayLow = na
+var float dayHigh = na
+
+if na(dayLow)
+    dayLow := low
+    dayHigh := high
+
+dayLow := math.min(dayLow, low)
+dayHigh := math.max(dayHigh, high)
+
+if tradeJustClosed
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    resultIsTP = lastProfit > 0
+
+    if resultIsTP
+        dayWins += 1
+        dayR += rr
+    else
+        dayLosses += 1
+        dayR -= 1.0
+
+    if showResult
+        resultText = resultIsTP ? "TP" : "SL"
+        resultColor = resultIsTP ? color.green : color.red
+        yResult = math.min(activeEntry, math.min(activeSL, activeTP)) - ta.atr(14) * 0.25
+        label.new(bar_index, yResult, resultText, style=label.style_label_up, color=resultColor, textcolor=color.white, size=size.small)
+
+    riskBox := na
+    rewardBox := na
+    activeEntry := na
+    activeSL := na
+    activeTP := na
+    activeStart := na
+    activeDir := 0
+
+if newDay and showDaily and (dayWins + dayLosses > 0)
+    d = str.tostring(dayofmonth(time[1], tz)) + "." + str.tostring(month(time[1], tz)) + "." + str.tostring(year(time[1], tz))
+    txt = d + "\nGewinntrades: " + str.tostring(dayWins) + "\nVerlusttrades: " + str.tostring(dayLosses) + "\nNetto-R: " + str.tostring(dayR, "#.##")
+    label.new(bar_index[1], dayLow - ta.atr(14) * 0.8, txt, style=label.style_label_up, color=dayR >= 0 ? color.green : color.red, textcolor=color.white, size=size.small)
+    dayWins := 0
+    dayLosses := 0
+    dayR := 0.0
+    dayLow := low
+    dayHigh := high

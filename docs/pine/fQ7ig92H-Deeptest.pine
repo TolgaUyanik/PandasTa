@@ -1,0 +1,2926 @@
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: LIBRARY DECLARATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=6
+// This Pine Script® code is subject to the terms of the MIT License at https://opensource.org/licenses/MIT
+// © Fractalyst
+//
+// ══════════════════════════════════════════════════════════════════════════════════════
+//                          DEEPTEST BACKTESTING LIBRARY
+// ══════════════════════════════════════════════════════════════════════════════════════
+//
+// @author      @Fractalyst
+// @description Comprehensive quantitative backtesting library with 50+ metrics:
+//              Sharpe/Sortino ratios, R-Expectancy, SQN, drawdown analysis, Monte Carlo
+//              simulation, Walk-Forward Analysis, VaR/CVaR, benchmark comparison, and
+//              interactive table rendering for TradingView strategies.
+// @version     15 (20.06.2026)
+// @license     MIT — https://opensource.org/licenses/MIT
+//
+// IMPORTS:
+//   fikira/Text/1 as FN — Font styling for table cells (Sans Bold / Sans-Serif Bold)
+//
+// PUBLIC API:
+//   runDeeptest(...)        — Complete backtest analysis orchestrator (only export)
+//   type Stats              — 50+ metric container returned by runDeeptest
+//   type ThresholdConfig    — Metric threshold + color configuration
+//   type RollingStats       — Rolling window analysis results
+//
+// ══════════════════════════════════════════════════════════════════════════════════════
+
+import fikira/Text/1 as FN
+
+library("Deeptest", overlay = true, dynamic_requests = true)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Time constants in milliseconds — duration formatting, CAGR annualization, trading frequency
+const float MS_PER_SECOND = 1000.0, const float MS_PER_MINUTE = 60000.0, const float MS_PER_HOUR = 3600000.0, const float MS_PER_DAY = 86400000.0, const float MS_PER_MONTH = 2629746000.0, const float MS_PER_YEAR = 31556952000.0
+
+// Risk-free rate (2% annual) for Sharpe/Sortino/Jensen alpha | INFINITY_CAP replaces ∞ in display
+const float DEFAULT_RISK_FREE_RATE = 0.02, const float INFINITY_CAP = 999.0
+
+// Sentinel values for rolling min/max tracking | Minimum drawdown % to record (filters noise)
+const float SENTINEL_MAX = 999999.0, const float SENTINEL_MIN = -999999.0, const float MIN_DRAWDOWN_THRESHOLD_PCT = 0.5
+
+// Rolling window limits — loss duration history cap | Maximum WFA/OOS windows analyzed
+const int LOSS_DURATION_HISTORY_LIMIT = 100, const int MAX_WINDOWS_LIMIT = 50
+
+// Monte Carlo RNG — deterministic seed via prime modulus | Iteration cap prevents Pine timeout
+const int RNG_PRIME = 1000000007, const int RNG_MULT_1 = 1009, const int RNG_MULT_2 = 9176, const int MAX_TOTAL_ITERATIONS = 80000, const int MIN_STRESS_TRADES = 4
+
+// Walk-Forward OOS range — 5% minimum (statistical power) to 49% maximum (IS must exceed OOS)
+const float MIN_OOS_PERCENT = 5.0, const float MAX_OOS_PERCENT = 49.0
+
+// Minimum MC bootstrap resamples | Deep backtest threshold — above 50k bars triggers optimized path
+const int MIN_MC_SIMULATIONS = 10, const int DEEP_BACKTEST_BAR_LIMIT = 50000
+
+// PnL threshold below which a trade is "breakeven" | Factor for decimal-to-percent conversion
+const float BREAKEVEN_THRESHOLD = 0.0001, const float PERCENT_MULTIPLIER = 100.0
+
+// Muted gray for neutral/insufficient-data table cells
+const color  COLOR_TEXT_MUTED = color.rgb(160, 160, 160)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: TYPE DEFINITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type ThresholdConfig — Metric thresholds and color mappings for conditional formatting
+// Each metric group: 3 threshold values + 4 colors (bear → neutral → orange → bull)
+// @type ThresholdConfig — Metric thresholds and color mappings for conditional formatting
+// Each metric group: 3 threshold values + 4 colors (bear → neutral → orange → bull)
+type ThresholdConfig
+    float sharpeExc
+    float sharpeGood
+    float sharpeOk
+    color sharpeBear
+    color sharpeNeutral
+    color sharpeOrange
+    color sharpeBull
+    float ddSevere
+    float ddMod
+    float ddMild
+    color ddSevereColor
+    color ddModColor
+    color ddOrange
+    color ddGoodColor
+    float rorHigh
+    float rorMod
+    float rorLow
+    color rorHighColor
+    color rorModColor
+    color rorOrange
+    color rorLowColor
+    float r2Poor
+    float r2Mod
+    float r2Good
+    color r2PoorColor
+    color r2ModColor
+    color r2Orange
+    color r2GoodColor
+    float kurtHigh
+    float kurtMod
+    float kurtOk
+    color kurtHighColor
+    color kurtModColor
+    color kurtOrange
+    color kurtGoodColor
+    float skewVNeg
+    float skewModNeg
+    float skewPos
+    color skewVNegColor
+    color skewModNegColor
+    color skewNeutral
+    color skewPosColor
+    float pInsig
+    float pMod
+    float pSig
+    color pInsigColor
+    color pModColor
+    color pOrange
+    color pSigColor
+    float calmarPoor
+    float calmarBE
+    float calmarGood
+    color calmarPoorColor
+    color calmarBEColor
+    color calmarOrange
+    color calmarGoodColor
+    float betaHigh
+    float betaLow
+    color betaHighColor
+    color betaLowColor
+    color betaGoodColor
+
+// @function Get default threshold config (bear → neutral → orange → bull)
+// @param bear Color for poor/bearish values | @param neutral Color for fair values
+// @param orange Color for good values | @param bull Color for excellent/bullish values
+// @returns ThresholdConfig with all thresholds and colors
+getThresholdConfig(color bear, color neutral, color orange, color bull) =>
+    ThresholdConfig.new(
+        1.0, 0.5, 0.3, bear, neutral, orange, bull,
+        30.0, 20.0, 0.0, bear, orange, orange, bull,
+        0.25, 0.1, 0.05, bear, neutral, orange, bull,
+        0.3, 0.5, 0.8, bear, neutral, orange, bull,
+        6.0, 4.0, 3.0, bear, neutral, orange, bull,
+        -1.5, -0.5, 0.5, bear, neutral, neutral, bull,
+        0.5, 0.05, 0.01, bear, neutral, orange, bull,
+        0.0, 0.5, 1.0, bear, neutral, orange, bull,
+        1.3, 0.7, bear, orange, bull
+    )
+
+// @type Stats — Comprehensive backtest statistics container (50+ fields)
+// Created by calculateFromStrategy(), returned by runDeeptest()
+export type Stats
+    // ── Trade Counts ──
+    int totalTrades
+    int winTrades
+    int lossTrades
+    int evenTrades
+    float winRate
+    float lossRate
+    float avgWinPct
+    float avgLossPct
+    float avgTradePct
+    float profitFactor
+    float payoffRatio
+    float expectancy
+    float rExpectancy
+    float grossProfit
+    float grossLoss
+    float netProfit
+    float netProfitPct
+    float compEffect
+    float sharpe
+    float sortino
+    float calmar
+    float martin
+    float maxDrawdownPct
+    float currentDrawdownPct
+    float maxEquity
+    float minEquity
+    float cagr
+    float monthlyReturn
+    int maxConsecWins
+    int maxConsecLosses
+    float avgTradeDuration
+    float avgWinDuration
+    float avgLossDuration
+    float timeInMarketPct
+    float tradesPerMonth
+    float tradesPerYear
+    float skewness
+    float kurtosis
+    float var95
+    float cvar95
+    float ulcerIndex
+    float riskOfRuin
+    float pValue
+    float alpha
+    float beta
+    float buyHoldReturn
+    float equityRSquared
+    int firstTradeTime
+    int lastTradeTime
+    float tradingPeriodDays
+    float sqn
+
+// @type RollingStats — Rolling window analysis results
+// Non-overlapping windows; min/max track worst/best window performance
+// @type RollingStats — Rolling window analysis results
+// Non-overlapping windows; min/max track worst/best window performance
+type RollingStats
+    int windowSize
+    float expectancyMin
+    float expectancyMax
+    float sharpeMin
+    float sharpeMax
+    float sortinoMin
+    float sortinoMax
+    float expectancyMean
+    float expectancyStdDev
+
+// @type DrawdownRecord — Single drawdown cycle (peak → trough → recovery)
+type DrawdownRecord
+    float depthPct
+    int startTime
+    int endTime
+    float durationDays
+    float recoveryDays
+
+// @type RecoveryRecord — Single recovery cycle (trough → new peak)
+type RecoveryRecord
+    float depthPct
+    int troughTime
+    int recoveryTime
+    float dropDays
+    float recoveryDays
+    float reboundPct
+
+// @type TradeRecord — Individual trade for card display (top 5 best / worst 5)
+type TradeRecord
+    int entryTime
+    int exitTime
+    float returnPct
+
+// @type TradeExtraction — Single-pass extraction of all closed-trade data
+// Avoids multiple O(n) passes over strategy.closedtrades
+type TradeExtraction
+    array<float> tradeReturns
+    array<int> entryTimes
+    array<int> exitTimes
+    array<float> entryPrices
+    array<float> exitPrices
+    array<float> equity
+    float avgCommissionPct
+    float avgWinPct
+    float avgLossPct
+    float avgTradePct
+    float avgTradeDuration
+    float avgWinDuration
+    float avgLossDuration
+    float totalTradeDuration
+    float sumTradeReturns
+    float maxEquity
+    float minEquity
+    int maxConsecWins
+    int maxConsecLosses
+    array<TradeRecord> topTrades
+    array<TradeRecord> worstTrades
+
+// @type TableConfig — Visual styling and display options for all rendered tables
+type TableConfig
+    color colorBullish
+    color colorBearish
+    color colorText
+    color colorTextMuted
+    color colorBg
+    color colorHeader
+    color colorBorder
+    string textSize
+    string commissionInfo
+    bool showComplementary
+    bool showRExpectancy
+
+// @type MirroredMetrics — Metrics shared across IS/OOS/MC for side-by-side comparison
+type MirroredMetrics
+    float cagr
+    float expectancy
+    float rExpectancy
+    float maxDD
+    float sharpe
+    float sortino
+
+// @type StressTestResults — Complete stress test output (IS + MC + OOS)
+type StressTestResults
+    MirroredMetrics isMetrics
+    MirroredMetrics mcBest
+    MirroredMetrics mcMedian
+    MirroredMetrics mcWorst
+    MirroredMetrics oosMetrics
+    array<float> oosReturns
+    array<string> windowRanges
+
+// @type WalkForwardResults — Walk-Forward Analysis output (IS + OOS windows)
+type WalkForwardResults
+    MirroredMetrics isMetrics
+    MirroredMetrics oosMetrics
+    array<float> oosReturns
+    array<string> windowRanges
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: CORE CALCULATIONS — RISK-ADJUSTED METRICS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Calculate annualized Sharpe ratio from trade-level returns
+// Uses sample standard deviation (biased=false, n-1 divisor) per Sharpe 1994
+// @returns Sharpe ratio, INFINITY_CAP if zero-vol positive edge, na if insufficient data
+method calcTradeSharpe(array<float> returns, float tradesPerYear, float riskFreeRate = 0.0, bool annualize = true, bool useGeometricRf = true) =>
+    int n = array.size(returns)
+    if n < 2 or tradesPerYear <= 0.0
+        na
+    else
+        float meanReturn = array.avg(returns), float stdDev = array.stdev(returns, biased = false)
+
+        float riskFreePerTrade = riskFreeRate > 0.0 ? (useGeometricRf ? math.pow(1.0 + riskFreeRate, 1.0 / tradesPerYear) - 1.0 : riskFreeRate / tradesPerYear) : 0.0
+
+        if nz(stdDev, 0.0) <= 0.0
+            meanReturn > riskFreePerTrade ? INFINITY_CAP : (meanReturn < riskFreePerTrade ? -INFINITY_CAP : na)
+        else
+            float excessReturn = meanReturn - riskFreePerTrade, float sharpe = excessReturn / stdDev
+
+            if annualize
+                sharpe *= math.sqrt(tradesPerYear)
+
+            math.abs(sharpe) >= INFINITY_CAP ? (sharpe > 0 ? INFINITY_CAP : -INFINITY_CAP) : sharpe
+
+// @function Calculate annualized Sortino ratio (downside-only volatility)
+// Uses full-sample divisor (Sortino & Price 1994) — penalizes only harmful volatility
+method calcTradeSortino(array<float> returns, float tradesPerYear, float riskFreeRate = 0.02, bool annualize = true) =>
+    int n = array.size(returns)
+    if n < 2 or tradesPerYear <= 0.0
+        na
+    else
+        float meanReturn = array.avg(returns), float sumSquaredDownside = 0.0
+        int downsideCount = 0
+
+        float rfPerTrade = riskFreeRate > 0.0 ? math.pow(1.0 + riskFreeRate, 1.0 / tradesPerYear) - 1.0 : 0.0
+
+        for ret in returns
+            if ret < rfPerTrade
+                float diff = ret - rfPerTrade
+                sumSquaredDownside += diff * diff
+                downsideCount += 1
+
+        if downsideCount == 0
+            meanReturn > rfPerTrade ? INFINITY_CAP : na
+        else
+            float downsideDev = math.sqrt(sumSquaredDownside / float(n))
+            if downsideDev <= 0.0
+                meanReturn > rfPerTrade ? INFINITY_CAP : na
+            else
+                float sortino = (meanReturn - rfPerTrade) / downsideDev
+
+                if annualize
+                    sortino *= math.sqrt(tradesPerYear)
+
+                math.abs(sortino) >= INFINITY_CAP ? (sortino > 0 ? INFINITY_CAP : -INFINITY_CAP) : sortino
+
+// @function Calculate trades per year from closed trade timestamps
+// @param useTimeInMarket If true: uses avg trade duration. If false: uses calendar time
+calcTradesPerYear(bool useTimeInMarket = false) =>
+    int n = strategy.closedtrades
+    if n < 1
+        na
+    else
+        if useTimeInMarket
+            float totalDuration = 0.0
+            for i = 0 to n - 1
+                float dur = float(strategy.closedtrades.exit_time(i) - strategy.closedtrades.entry_time(i))
+                totalDuration += dur
+            float avgDuration = totalDuration / float(n)
+            avgDuration > 0 ? MS_PER_YEAR / avgDuration : na
+        else
+            float firstEntry = float(strategy.closedtrades.entry_time(0)), float lastExit = float(strategy.closedtrades.exit_time(n - 1)), float periodMs = lastExit - firstEntry
+            periodMs > 0 ? float(n) / (periodMs / MS_PER_YEAR) : na
+
+// @function Calculate expectancy = (WR × AvgWin) − (LR × AvgLoss)
+// @param lossRate If na, derived as 1−winRate
+// @returns Expected return per trade (%)
+calcExpectancy(float winRate, float avgWinPct, float avgLossPct, float lossRate = na) =>
+    float effectiveLossRate = na(lossRate) ? 1.0 - winRate : lossRate
+    (winRate * avgWinPct) - (effectiveLossRate * avgLossPct)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Drawdown & Recovery Analysis
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Calculate drawdown metrics from equity curve in single pass
+// @returns [currentDDPct, currentDD, ulcerIndex, avgDD]
+method calcDrawdownMetrics(array<float> equityCurve) =>
+    int n = array.size(equityCurve)
+    if n < 2
+        [0.0, 0.0, na, na]
+    else
+        float peak = array.get(equityCurve, 0), float sumSquaredDD = 0.0, float sumDD = 0.0
+        int ddCount = 0
+
+        for eq in equityCurve
+            if eq > peak
+                peak := eq
+
+            float ddPct = peak > 0.0 ? ((peak - eq) / peak) * 100.0 : 0.0, float ddSq = ddPct * ddPct
+            sumSquaredDD += ddSq
+            if ddPct > 0.0
+                sumDD += ddPct
+                ddCount += 1
+
+        float currentEquity = array.get(equityCurve, n - 1), float dd = peak - currentEquity, float ddPctOut = peak > 0.0 ? (dd / peak) * 100.0 : 0.0, float ulcerIdx = math.sqrt(sumSquaredDD / float(n)), float avgDD = ddCount > 0 ? sumDD / float(ddCount) : 0.0
+        [ddPctOut, dd, ulcerIdx, avgDD]
+
+// @function Get sorted indices of an array (like argsort)
+// @param descending True = largest first
+// @returns array<int> of indices in sorted order
+method getSortedIndices(array<float> values, bool descending = true) =>
+    array.size(values) == 0 ? array.new<int>() : array.sort_indices(values, descending ? order.descending : order.ascending)
+
+// @function Identify top drawdown cycles (peak→trough→recovery) from equity curve
+// @param limit Maximum number of cycles to return (sorted by depth, descending)
+// @returns [array<DrawdownRecord>, array<RecoveryRecord>]
+method calcDrawdownCycles(array<float> equityCurve, array<int> timestamps, int limit = 6) =>
+    array<DrawdownRecord> ddResults = array.new<DrawdownRecord>()
+    array<RecoveryRecord> recResults = array.new<RecoveryRecord>()
+    int n = array.size(equityCurve), int tsSize = array.size(timestamps)
+
+    if n < 2 or tsSize != n
+        [ddResults, recResults]
+    else
+        array<int> peakIndices = array.new<int>(), array<int> troughIndices = array.new<int>()
+        array<float> depths = array.new<float>()
+        array<int> recoveryIndices = array.new<int>()
+        array<float> dropDaysArr = array.new<float>(), array<float> recoveryDaysArr = array.new<float>(), array<float> reboundPcts = array.new<float>()
+
+        float peak = array.get(equityCurve, 0)
+        int peakIdx = 0
+        float trough = peak
+        int troughIdx = 0
+        bool inDrawdown = false
+
+        for i = 1 to n - 1
+            float equity = array.get(equityCurve, i)
+
+            if equity >= peak
+                if inDrawdown and trough < peak and peak > 0
+                    float ddPct = ((peak - trough) / peak) * 100.0
+                    if ddPct > MIN_DRAWDOWN_THRESHOLD_PCT
+                        array.push(peakIndices, peakIdx)
+                        array.push(troughIndices, troughIdx)
+                        array.push(depths, ddPct)
+                        array.push(recoveryIndices, i)
+
+                        int troughTime = array.get(timestamps, troughIdx), int recovTime = array.get(timestamps, i)
+                        float dropD = float(troughTime - array.get(timestamps, peakIdx)) / MS_PER_DAY, float recDays = float(recovTime - troughTime) / MS_PER_DAY
+
+                        if recDays * MS_PER_DAY >= 60000.0
+                            array.push(dropDaysArr, dropD)
+                            array.push(recoveryDaysArr, recDays)
+                            float troughVal = array.get(equityCurve, troughIdx), float recVal = array.get(equityCurve, i), float rebPct = troughVal > 0 ? ((recVal - troughVal) / troughVal) * 100.0 : 0.0
+                            array.push(reboundPcts, rebPct)
+                        else
+                            array.push(dropDaysArr, na)
+                            array.push(recoveryDaysArr, na)
+                            array.push(reboundPcts, na)
+
+                peak := equity, peakIdx := i, trough := equity, troughIdx := i, inDrawdown := false
+            else
+                inDrawdown := true
+                if equity < trough
+                    trough := equity, troughIdx := i
+
+        if inDrawdown and trough < peak and peak > 0
+            float ddPct = ((peak - trough) / peak) * 100.0
+            if ddPct > MIN_DRAWDOWN_THRESHOLD_PCT
+                array.push(peakIndices, peakIdx)
+                array.push(troughIndices, troughIdx)
+                array.push(depths, ddPct)
+                array.push(recoveryIndices, na)
+                array.push(dropDaysArr, na)
+                array.push(recoveryDaysArr, na)
+                array.push(reboundPcts, na)
+
+        int numDD = array.size(depths)
+        if numDD > 0
+            array<int> sortIdx = getSortedIndices(depths, true)
+            int count = math.min(limit, numDD)
+            if count > 0
+                for rank = 0 to count - 1
+                    int idx = array.get(sortIdx, rank), int pIdx = array.get(peakIndices, idx), int tIdx = array.get(troughIndices, idx), int rIdx = array.get(recoveryIndices, idx)
+
+                    int startT = array.get(timestamps, pIdx), int endT = array.get(timestamps, tIdx), int recovT = na(rIdx) ? na : array.get(timestamps, rIdx)
+
+                    float durDays = float(endT - startT) / MS_PER_DAY, float rawRecDays = na(recovT) ? na : float(recovT - endT) / MS_PER_DAY, float recDays = na(rawRecDays) ? na : (rawRecDays * MS_PER_DAY < 60000.0 ? na : rawRecDays)
+
+                    DrawdownRecord ddRec = DrawdownRecord.new(
+                         array.get(depths, idx),
+                         startT,
+                         endT,
+                         durDays,
+                         recDays
+                    )
+                    array.push(ddResults, ddRec)
+
+                    if not na(array.get(recoveryDaysArr, idx))
+                        RecoveryRecord recRec = RecoveryRecord.new(
+                             array.get(depths, idx),
+                             endT,
+                             recovT,
+                             array.get(dropDaysArr, idx),
+                             array.get(recoveryDaysArr, idx),
+                             array.get(reboundPcts, idx)
+                        )
+                        array.push(recResults, recRec)
+
+        [ddResults, recResults]
+
+// ───────────────────────────────────────────────────────────────────────────
+// Statistical Distribution
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Calculate skewness and Pearson kurtosis (normal ≈ 3) from returns
+// @returns [skewness, kurtosis] — requires n ≥ 4 for valid calculation
+method calcSkewKurtosis(array<float> returns) =>
+    int n = array.size(returns)
+    if n < 4
+        [na, na]
+    else
+        float mean = array.avg(returns), float sumSquared = 0.0, float sumCubed = 0.0, float sumQuad = 0.0
+
+        for ret in returns
+            float diff = ret - mean, float diffSq = diff * diff
+            sumSquared += diffSq
+            sumCubed += diffSq * diff
+            sumQuad += diffSq * diffSq
+
+        float variance = sumSquared / float(n - 1), float stdDev = math.sqrt(variance)
+
+        if stdDev <= 0.0
+            [na, na]
+        else
+            float m2 = sumSquared / float(n), float m3 = sumCubed / float(n), float b1 = m2 > 0.0 ? m3 / math.pow(m2, 1.5) : 0.0, float correction = math.sqrt(float(n) * float(n - 1)) / float(n - 2), float skewness = correction * b1
+
+            float s4 = math.pow(stdDev, 4), float term1Num = float(n) * float(n + 1) * sumQuad, float term1Den = float(n - 1) * float(n - 2) * float(n - 3) * s4, float term2Num = 3.0 * math.pow(float(n - 1), 2), float term2Den = float(n - 2) * float(n - 3)
+
+            float excessKurtosis = (term1Den == 0.0 or term2Den == 0.0) ? na : (term1Num / term1Den) - (term2Num / term2Den), float kurtosis = na(excessKurtosis) ? na : excessKurtosis + 3.0
+
+            [skewness, kurtosis]
+
+// @function Van Tharp System Quality Number = √(N) × mean / sample_stdev
+// Measures realized trade distribution quality. >2.5 = strong, >1.6 = good
+calcSQN(array<float> returns) =>
+    int n = array.size(returns)
+    if n < 2
+        na
+    else
+        float meanReturn = array.avg(returns), float stdevReturn = array.stdev(returns, biased = false)
+        if nz(stdevReturn, 0.0) <= 0.0
+            meanReturn > 0.0 ? INFINITY_CAP : meanReturn < 0.0 ? -INFINITY_CAP : na
+        else
+            float sqn = math.sqrt(float(n)) * meanReturn / stdevReturn
+            math.abs(sqn) >= INFINITY_CAP ? (sqn > 0.0 ? INFINITY_CAP : -INFINITY_CAP) : sqn
+
+// @function Internal helper — compute VaR and CVaR from pre-sorted returns
+// @param tailProb Tail probability (0.05 = 95% confidence, 0.01 = 99%)
+// @returns [varVal, cvarVal] as positive percentages
+method calcTailRiskInternal(array<float> sorted, float tailProb) =>
+    int n = array.size(sorted)
+    if n == 0
+        [na, na]
+
+    int varIdx = int(math.floor(float(n) * tailProb))
+    varIdx := math.max(0, math.min(n - 1, varIdx))
+    float varVal = math.max(0.0, -array.get(sorted, varIdx)) * 100.0
+
+    int tailCount = math.max(1, varIdx)
+    float sumTail = array.sum(array.slice(sorted, 0, tailCount)), float cvarVal = math.max(0.0, -(sumTail / float(tailCount))) * 100.0
+
+    [varVal, cvarVal]
+
+// @function Calculate VaR and CVaR at 95% and 99% confidence from sorted returns
+// @returns [var95, cvar95, var99, cvar99] — all as positive percentages
+method calcVaRCVaR(array<float> sortedReturns) =>
+    int n = array.size(sortedReturns)
+    if n < 2
+        [float(na), float(na), float(na), float(na)]
+    else
+        [v95, cv95] = sortedReturns.calcTailRiskInternal(0.05)
+        [v99, cv99] = sortedReturns.calcTailRiskInternal(0.01)
+
+        [v95, cv95, v99, cv99]
+
+// ───────────────────────────────────────────────────────────────────────────
+// Time & Frequency
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Calculate trading frequency (trades per month or per year)
+// @param perMonth True = per month, False = per year
+// @returns Frequency value, 0.0 if invalid inputs
+calcTradingFrequency(int totalTrades, float periodMs, bool perMonth = true) =>
+    float targetMs = perMonth ? MS_PER_MONTH : MS_PER_YEAR
+    float freq = periodMs > 0.0 and totalTrades > 0 ? float(totalTrades) / (periodMs / targetMs) : 0.0
+    float cap = perMonth ? 1000000.0 : 12000000.0
+    freq > 0.0 and freq < cap ? freq : 0.0
+
+// @function Format milliseconds as human-readable duration (e.g., "2y 3mo", "5d 3h")
+formatDuration(float durationMs) =>
+    if nz(durationMs, 0.0) < 0.0
+        "-"
+    else
+        float remaining = durationMs
+        int years = int(math.floor(remaining / MS_PER_YEAR))
+        remaining -= float(years) * MS_PER_YEAR
+        int months = int(math.floor(remaining / MS_PER_MONTH))
+        remaining -= float(months) * MS_PER_MONTH
+        int days = int(math.floor(remaining / MS_PER_DAY))
+        remaining -= float(days) * MS_PER_DAY
+        int hours = int(math.floor(remaining / MS_PER_HOUR))
+        remaining -= float(hours) * MS_PER_HOUR
+        int minutes = int(math.floor(remaining / MS_PER_MINUTE))
+        remaining -= float(minutes) * MS_PER_MINUTE
+        int seconds = int(math.floor(remaining / MS_PER_SECOND))
+
+        string result = switch
+            years > 0 =>
+                string sec = months > 0 ? str.tostring(months) + "mo" : (days > 0 ? str.tostring(days) + "d" : "")
+                str.trim(str.replace_all(str.tostring(years) + "y" + " " + sec, "  ", " "))
+            months > 0 =>
+                string sec = days > 0 ? str.tostring(days) + "d" : (hours > 0 ? str.tostring(hours) + "h" : "")
+                str.trim(str.replace_all(str.tostring(months) + "mo" + " " + sec, "  ", " "))
+            days > 0 =>
+                string sec = hours > 0 ? str.tostring(hours) + "h" : (minutes > 0 ? str.tostring(minutes) + "m" : "")
+                str.trim(str.replace_all(str.tostring(days) + "d" + " " + sec, "  ", " "))
+            hours > 0 =>
+                string sec = minutes > 0 ? str.tostring(minutes) + "m" : (seconds > 0 ? str.tostring(seconds) + "s" : "")
+                str.trim(str.replace_all(str.tostring(hours) + "h" + " " + sec, "  ", " "))
+            minutes > 0 =>
+                string sec = seconds > 0 ? str.tostring(seconds) + "s" : ""
+                str.trim(str.replace_all(str.tostring(minutes) + "m" + " " + sec, "  ", " "))
+            => seconds > 0 ? str.tostring(seconds) + "s" : "<1s"
+
+        str.trim(result)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Risk Metrics
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Calculate probability of account ruin using risk-of-ruin formula
+// Formula: ((1-edge)/(1+edge))^units where edge = WR×Payoff - LR
+calcRiskOfRuin(float winRate, float payoffRatio, float riskPerTrade = 1.0, float capitalUnits = na, float breakevenRate = 0.0) =>
+    if winRate <= 0.0 or winRate >= 1.0 or payoffRatio <= 0.0 or riskPerTrade <= 0.0
+        na
+    else
+        float p = winRate, float q = 1.0 - p, float b = payoffRatio
+
+        float advantage = p * b - q
+
+        float riskFrac = riskPerTrade / 100.0, float units = na(capitalUnits) ? (riskFrac > 0 ? 1.0 / math.max(riskFrac, 0.0001) : na) : capitalUnits
+
+        float beAdj = 1.0 - math.min(math.max(breakevenRate, 0.0), 1.0) * 0.15, float effectiveUnits = units * beAdj
+
+        if advantage <= 0.0
+            1.0
+        else if advantage >= 0.999999
+            0.0
+        else
+            float numerator = 1.0 - advantage, float denominator = 1.0 + advantage, float ratio = denominator > 0 ? numerator / denominator : 0.0, float ror = ratio > 0 and effectiveUnits > 0 ? math.pow(ratio, effectiveUnits) : 0.0
+            math.max(0.0, math.min(1.0, ror))
+
+// @function Calculate risk of ruin from trade statistics
+// Derives winRate, payoff, and breakeven rate from raw counts
+// @returns Probability 0–1, or na if insufficient data
+calcRiskOfRuinFromStats(int wins, int losses, float avgWinPct, float avgLossPct, float riskPerTrade = 1.0, int evenTrades = 0) =>
+    int decisive = wins + losses, int total = decisive + evenTrades
+    if decisive == 0 or avgLossPct <= 0.0
+        na
+    else if losses == 0
+        0.0
+    else if wins == 0
+        1.0
+    else
+        float winRate = float(wins) / float(decisive), float payoff = avgWinPct / avgLossPct, float beRate = total > 0 ? float(evenTrades) / float(total) : 0.0
+        calcRiskOfRuin(winRate, payoff, riskPerTrade, na, beRate)
+
+// @function Two-tailed p-value testing if observed WR exceeds breakeven rate
+// Uses Abramowitz-Stegun erf approximation with optional Yates continuity correction
+calcPValue(int wins, int total, float expectedWinRate = na, int minSampleSize = 30, bool useContinuityCorrection = true) =>
+    if total < minSampleSize
+        na
+    else
+        float observedWR = float(wins) / float(total)
+
+        float expWR = na(expectedWinRate) ? 0.5 : expectedWinRate
+        expWR := math.max(0.01, math.min(0.99, expWR))
+
+        float stdError = math.sqrt((expWR * (1.0 - expWR)) / float(total))
+
+        if stdError <= 0.0001
+            na
+        else
+            float continuityAdj = 0.5 / float(total)
+            float adjustedObserved = useContinuityCorrection ? (observedWR > expWR ? observedWR - continuityAdj : observedWR + continuityAdj) : observedWR
+
+            float zScore = (adjustedObserved - expWR) / stdError, float absZ = math.abs(zScore)
+
+            float a1 = 0.254829592, float a2 = -0.284496736, float a3 = 1.421413741, float a4 = -1.453152027, float a5 = 1.061405429, float p = 0.3275911
+
+            float t = 1.0 / (1.0 + p * absZ), float erf = 1.0 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * math.exp(-absZ * absZ)
+
+            float cdf = 0.5 * (1.0 + (zScore >= 0 ? erf : -erf))
+            math.min(1.0, 2.0 * math.min(cdf, 1.0 - cdf))
+
+// @function Calculate p-value using payoff-derived expected win rate
+// Breakeven WR = 1/(1+payoff). Dynamic minimum sample size based on variance.
+// @returns Two-tailed p-value, or na if insufficient data
+calcPValueFromPayoff(int wins, int total, float avgWinPct, float avgLossPct, bool useContinuityCorrection = true) =>
+    if avgLossPct <= 0.0001 or total == 0
+        na
+    else
+        float payoffRatio = avgWinPct / avgLossPct, float expectedWR = 1.0 / (1.0 + payoffRatio)
+
+        float variance = expectedWR * (1.0 - expectedWR)
+        int dynamicMin = int(math.ceil(10.0 / math.max(variance, 0.01))), int actualMin = math.max(30, dynamicMin)
+
+        calcPValue(wins, total, expectedWR, actualMin, useContinuityCorrection)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Benchmark Comparison
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Jensen's alpha — risk-adjusted excess return vs benchmark
+// Formula: CAGR - (Rf + β × (BenchCAGR - Rf))
+calcAlphaJensen(float strategyCagr, float benchmarkCagr, float beta, float rfRate) =>
+    na(strategyCagr) or na(benchmarkCagr) ? na : na(beta) ? strategyCagr - benchmarkCagr : strategyCagr - (rfRate * 100.0 + beta * (benchmarkCagr - rfRate * 100.0))
+
+// @function Calculate beta = Cov(strategy, bench) / Var(bench)
+// @returns >1 = more volatile than benchmark, <1 = less volatile, na if insufficient
+method calcBeta(array<float> strategyReturns, array<float> benchmarkReturns) =>
+    int sSize = array.size(strategyReturns), int bSize = array.size(benchmarkReturns)
+    int n = math.min(sSize, bSize)
+    if n < 2
+        na
+    else
+        array<float> sRet = n == sSize ? strategyReturns : array.slice(strategyReturns, 0, n), array<float> bRet = n == bSize ? benchmarkReturns : array.slice(benchmarkReturns, 0, n)
+        float cov = array.covariance(sRet, bRet, true), float varB = array.variance(bRet, true)
+        varB > 0.0 ? cov / varB : na
+
+// @function R² of equity curve vs linear regression — measures growth linearity
+// @returns 0–1 (1 = perfectly linear growth, 0 = no linear relationship)
+calcEquityRSquaredLinear(int n, array<float> y) =>
+    int effectiveN = math.min(n, array.size(y))
+    if effectiveN < 2
+        na
+    else
+        float nF = float(effectiveN), float nM1 = float(effectiveN - 1), float sumX = nF * nM1 / 2.0, float sumX2 = nM1 * (2.0 * nM1 + 1.0) * nF / 6.0
+        array<float> ySlice = array.slice(y, 0, effectiveN)
+        float sumY = array.sum(ySlice), float sumY2 = 0.0, float sumXY = 0.0
+        for [i, yi] in ySlice
+            sumY2 += yi * yi
+            sumXY += float(i) * yi
+        float denom = nF * sumX2 - sumX * sumX
+        if denom == 0.0
+            na
+        else
+            float slope = (nF * sumXY - sumX * sumY) / denom, float intercept = (sumY - slope * sumX) / nF, float ssTot = sumY2 - sumY * sumY / nF, float ssRes = sumY2 - 2.0 * slope * sumXY - 2.0 * intercept * sumY + slope * slope * sumX2 + 2.0 * slope * intercept * sumX + nF * intercept * intercept
+            ssTot == 0.0 ? na : math.min(1.0, math.max(0.0, 1.0 - (ssRes / ssTot)))
+
+// @function Calculate buy-and-hold return from first to current price
+// @returns Simple return as percentage, na if invalid
+calcBuyAndHold(float firstClose, float currentClose) =>
+    na(firstClose) or na(currentClose) or firstClose <= 0.0 ? na : ((currentClose - firstClose) / firstClose) * 100.0
+
+// @function Convert buy-and-hold simple return to annualized CAGR
+// @returns CAGR as percentage, -100% if total loss, na if invalid
+calcBuyHoldCagr(float simpleReturn, float tradingPeriodDays) =>
+    na(simpleReturn) or na(tradingPeriodDays) or tradingPeriodDays <= 0.0 or simpleReturn < -100.0 ? na : (1.0 + simpleReturn / 100.0) == 0.0 ? -100.0 : (math.pow(1.0 + simpleReturn / 100.0, (MS_PER_YEAR / MS_PER_DAY) / tradingPeriodDays) - 1.0) * 100.0
+
+// ───────────────────────────────────────────────────────────────────────────
+// Rolling Statistics
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Calculate rolling window statistics for expectancy, Sharpe, Sortino
+// Non-overlapping windows of equal size; reports min/max across all windows
+method calcRollingStats(array<float> returns, int windowSize = 0, float tradesPerYear = na) =>
+    int n = array.size(returns)
+    if n < 1
+        RollingStats.new(0, na, na, na, na, na, na, na, na)
+    else
+        int window = windowSize > 0 ? windowSize : math.max(1, int(math.ceil(float(n) / 12.0)))
+        float tpy = na(tradesPerYear) ? calcTradesPerYear(false) : tradesPerYear
+
+        array<float> expValues = array.new<float>()
+
+        float expMin = SENTINEL_MAX, float expMax = SENTINEL_MIN, float sharpeMin = SENTINEL_MAX, float sharpeMax = SENTINEL_MIN, float sortinoMin = SENTINEL_MAX, float sortinoMax = SENTINEL_MIN
+
+        float rfPerTrade = tpy > 0 and DEFAULT_RISK_FREE_RATE > 0 ? math.pow(1.0 + DEFAULT_RISK_FREE_RATE, 1.0 / tpy) - 1.0 : 0.0, float annualFactor = tpy > 0 ? math.sqrt(tpy) : 1.0
+
+        int startIdx = 0
+        while startIdx + window <= n
+            int actualEnd = startIdx + window - 1
+            array<float> windowSlice = array.slice(returns, startIdx, actualEnd + 1)
+            float windowMean = array.avg(windowSlice)
+
+            float windowExp = windowMean * 100.0
+            expMin := math.min(expMin, windowExp)
+            expMax := math.max(expMax, windowExp)
+            array.push(expValues, windowExp)
+
+            float windowStdev = nz(array.stdev(windowSlice, biased = false), 0.0), float windowSharpe = na
+            if windowStdev > 0.0
+                windowSharpe := ((windowMean - rfPerTrade) / windowStdev) * annualFactor
+            else if windowMean - rfPerTrade > 0
+                windowSharpe := INFINITY_CAP
+            if not na(windowSharpe)
+                sharpeMin := math.min(sharpeMin, windowSharpe)
+                sharpeMax := math.max(sharpeMax, windowSharpe)
+
+            float downsideVar = 0.0
+            int downsideCount = 0
+            for ret in windowSlice
+                if ret < rfPerTrade
+                    float diff = ret - rfPerTrade
+                    downsideVar += diff * diff
+                    downsideCount += 1
+            float windowSortino = na
+            if downsideCount > 0
+                float downsideDev = math.sqrt(downsideVar / float(window))
+                if downsideDev > 0.0
+                    windowSortino := ((windowMean - rfPerTrade) / downsideDev) * annualFactor
+            else if windowMean > rfPerTrade
+                windowSortino := INFINITY_CAP
+            if not na(windowSortino)
+                sortinoMin := math.min(sortinoMin, windowSortino)
+                sortinoMax := math.max(sortinoMax, windowSortino)
+
+            startIdx += window
+
+        expMin := expMin == SENTINEL_MAX ? na : expMin
+        expMax := expMax == SENTINEL_MIN ? na : expMax
+        sharpeMin := sharpeMin == SENTINEL_MAX ? na : sharpeMin
+        sharpeMax := sharpeMax == SENTINEL_MIN ? na : sharpeMax
+        sortinoMin := sortinoMin == SENTINEL_MAX ? na : sortinoMin
+        sortinoMax := sortinoMax == SENTINEL_MIN ? na : sortinoMax
+
+        float expMean = array.avg(expValues), float expStdDev = array.stdev(expValues)
+
+        RollingStats.new(
+             window,
+             expMin, expMax,
+             sharpeMin, sharpeMax,
+             sortinoMin, sortinoMax,
+             expMean, expStdDev)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: DATA EXTRACTION & STRATEGY INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Single-pass extraction of all closed-trade data from strategy
+// Accumulates returns, equity curve, durations, commissions, consecutive streaks, top/worst trades
+extractClosedTrades(bool useEquityAtEntry = true, float initialCapital = na) =>
+    int n = strategy.closedtrades
+    float capital = na(initialCapital) ? strategy.initial_capital : initialCapital
+
+    array<float> tradeReturns = array.new<float>(n, 0.0)
+    array<int> entryTimes = array.new<int>(n, 0), array<int> exitTimes = array.new<int>(n, 0)
+    array<float> entryPrices = array.new<float>(n, 0.0), array<float> exitPrices = array.new<float>(n, 0.0), array<float> equity = array.new<float>(n + 1, capital)
+    float totalCommPct = 0.0
+    int commPctCount = 0
+    float returnSumPct = 0.0, float winReturnSum = 0.0
+    int winReturnCount = 0
+    float lossReturnSum = 0.0
+    int lossReturnCount = 0
+    float totalTradeDuration = 0.0, float winDurationSum = 0.0
+    array<float> recentLossDurations = array.new<float>()
+    float sumTradeReturns = 0.0, float maxEquity = capital, float minEquity = capital
+    int currentWins = 0, int currentLosses = 0, int maxConsecWins = 0, int maxConsecLosses = 0
+
+    array<TradeRecord> topTrades = array.new<TradeRecord>(), array<TradeRecord> worstTrades = array.new<TradeRecord>()
+
+    if n > 0
+        float equityCursor = capital
+        for i = 0 to n - 1
+            float profit = strategy.closedtrades.profit(i)
+
+            float eqBefore = equityCursor, float pnlPct = na
+            if useEquityAtEntry
+                pnlPct := equityCursor > 0 ? (profit / equityCursor) * 100.0 : 0.0
+                equityCursor += profit
+            else
+                pnlPct := strategy.closedtrades.profit_percent(i)
+
+            array.set(tradeReturns, i, pnlPct / 100.0)
+            returnSumPct += pnlPct
+            sumTradeReturns += pnlPct / 100.0
+            array.set(equity, i + 1, equityCursor)
+            maxEquity := math.max(maxEquity, equityCursor)
+            minEquity := math.min(minEquity, equityCursor)
+            float commission = math.abs(strategy.closedtrades.commission(i))
+
+            int enTime = strategy.closedtrades.entry_time(i), int exTime = strategy.closedtrades.exit_time(i)
+            float entryPrice = strategy.closedtrades.entry_price(i)
+            array.set(entryTimes, i, enTime)
+            array.set(exitTimes, i, exTime)
+            array.set(entryPrices, i, entryPrice)
+            array.set(exitPrices, i, strategy.closedtrades.exit_price(i))
+
+            float duration = float(exTime - enTime)
+            totalTradeDuration += duration
+
+            float notional = math.abs(entryPrice * strategy.closedtrades.size(i))
+            if notional > 0.0
+                totalCommPct += (commission / notional) * 100.0
+                commPctCount += 1
+
+            if profit > 0.0
+                winReturnSum += pnlPct
+                winReturnCount += 1
+                winDurationSum += duration
+                currentWins += 1
+                currentLosses := 0, maxConsecWins := math.max(maxConsecWins, currentWins)
+            else if profit < 0.0
+                lossReturnSum += math.abs(pnlPct)
+                lossReturnCount += 1
+                array.push(recentLossDurations, duration)
+                if array.size(recentLossDurations) > LOSS_DURATION_HISTORY_LIMIT
+                    array.shift(recentLossDurations)
+                currentLosses += 1
+                currentWins := 0, maxConsecLosses := math.max(maxConsecLosses, currentLosses)
+            else
+                currentWins := 0, currentLosses := 0
+
+            if not na(pnlPct) and eqBefore > 0
+                TradeRecord tr = TradeRecord.new(enTime, exTime, pnlPct)
+
+                int tSize = array.size(topTrades), int tPos = tSize
+                if tSize > 0
+                    for j = 0 to tSize - 1
+                        if tPos == tSize and pnlPct > array.get(topTrades, j).returnPct
+                            tPos := j
+                if tPos < 5
+                    array.insert(topTrades, tPos, tr)
+                    if tSize >= 5
+                        array.pop(topTrades)
+
+                int wSize = array.size(worstTrades), int wPos = wSize
+                if wSize > 0
+                    for j = 0 to wSize - 1
+                        if wPos == wSize and pnlPct < array.get(worstTrades, j).returnPct
+                            wPos := j
+                if wPos < 5
+                    array.insert(worstTrades, wPos, tr)
+                    if wSize >= 5
+                        array.pop(worstTrades)
+
+    float avgCommissionPct = commPctCount > 0 ? totalCommPct / commPctCount : na, float avgWinPct = winReturnCount > 0 ? winReturnSum / float(winReturnCount) : na, float avgLossPct = lossReturnCount > 0 ? lossReturnSum / float(lossReturnCount) : na, float avgTradePct = n > 0 ? returnSumPct / float(n) : na, float avgTradeDuration = n > 0 ? totalTradeDuration / float(n) : na, float avgWinDuration = winReturnCount > 0 ? winDurationSum / float(winReturnCount) : na, float avgLossDuration = array.size(recentLossDurations) > 0 ? array.avg(recentLossDurations) : na
+    TradeExtraction.new(
+         tradeReturns, entryTimes, exitTimes,
+         entryPrices, exitPrices, equity, avgCommissionPct,
+         avgWinPct, avgLossPct, avgTradePct, avgTradeDuration, avgWinDuration,
+         avgLossDuration, totalTradeDuration, sumTradeReturns, maxEquity, minEquity,
+         maxConsecWins, maxConsecLosses, topTrades, worstTrades)
+
+// @function Main stats calculator — orchestrates all metric computations
+// @returns [Stats, tradeReturns, equity, topTrades, worstTrades, avgCommissionPct]
+calculateFromStrategy(float initialCapital = na, array<float> benchmarkReturns = na, float firstClose = na, float currentClose = na) =>
+    float capital = na(initialCapital) ? strategy.initial_capital : initialCapital
+
+    TradeExtraction extracted = extractClosedTrades(true, capital)
+    array<float> tradeReturns = extracted.tradeReturns
+    array<int> entryTimes = extracted.entryTimes, array<int> exitTimes = extracted.exitTimes
+    array<float> entryPrices = extracted.entryPrices, array<float> exitPrices = extracted.exitPrices, array<float> equity = extracted.equity
+    array<TradeRecord> topTrades = extracted.topTrades, array<TradeRecord> worstTrades = extracted.worstTrades
+
+    int n = array.size(tradeReturns)
+
+    Stats stats = Stats.new()
+
+    if n == 0
+        [stats, array.new<float>(), array.new<float>(), array.new<TradeRecord>(), array.new<TradeRecord>(), na]
+    else
+        stats.totalTrades := n, stats.winTrades := strategy.wintrades, stats.lossTrades := strategy.losstrades, stats.evenTrades := strategy.eventrades
+
+        stats.winRate := n > 0 ? float(stats.winTrades) / float(n) : na, stats.lossRate := float(stats.lossTrades) / float(n)
+
+        stats.grossProfit := strategy.grossprofit, stats.grossLoss := math.abs(strategy.grossloss), stats.netProfit := strategy.equity - strategy.initial_capital, stats.netProfitPct := stats.netProfit / strategy.initial_capital * 100.0
+
+        stats.avgWinPct := extracted.avgWinPct, stats.avgLossPct := extracted.avgLossPct, stats.avgTradePct := extracted.avgTradePct
+
+        stats.avgTradeDuration := extracted.avgTradeDuration, stats.avgWinDuration := extracted.avgWinDuration, stats.avgLossDuration := extracted.avgLossDuration
+
+        stats.profitFactor := stats.grossLoss <= 0.0 ? (stats.grossProfit > 0.0 ? 999.0 : 1.0) : stats.grossProfit / stats.grossLoss
+
+        stats.payoffRatio := stats.lossTrades == 0 ? (stats.winTrades > 0 ? INFINITY_CAP : na) : (stats.avgLossPct > 0.0 ? nz(stats.avgWinPct, 0.0) / stats.avgLossPct : na)
+
+        stats.expectancy := calcExpectancy(stats.winRate, nz(stats.avgWinPct, 0.0), nz(stats.avgLossPct, 0.0), stats.lossRate)
+
+        stats.rExpectancy := stats.avgLossPct > 0.0001 ? stats.expectancy / stats.avgLossPct : na
+
+        stats.firstTradeTime := array.get(entryTimes, 0), stats.lastTradeTime := array.get(exitTimes, n - 1)
+        float periodMs = float(stats.lastTradeTime - stats.firstTradeTime)
+        stats.tradingPeriodDays := periodMs / MS_PER_DAY
+        stats.timeInMarketPct := periodMs > 0 ? math.min(100.0, (extracted.totalTradeDuration / periodMs) * 100.0) : na
+
+        stats.tradesPerMonth := calcTradingFrequency(n, periodMs, true), stats.tradesPerYear := calcTradingFrequency(n, periodMs, false)
+
+        if n >= 2
+            array<float> eqY = array.slice(equity, 1, n + 1)
+            stats.equityRSquared := calcEquityRSquaredLinear(n, eqY)
+
+        stats.maxDrawdownPct := strategy.max_drawdown_percent
+        [ddPct, _, ulcerIdx, _] = calcDrawdownMetrics(equity)
+        stats.currentDrawdownPct := ddPct, stats.maxEquity := extracted.maxEquity, stats.minEquity := extracted.minEquity
+
+        stats.ulcerIndex := ulcerIdx
+
+        float finalEquity = array.last(equity)
+        stats.cagr := capital <= 0.0 or finalEquity < 0.0 or periodMs <= 0.0 ? na : finalEquity == 0.0 ? -100.0 : (math.pow(finalEquity / capital, MS_PER_YEAR / periodMs) - 1.0) * 100.0
+        stats.monthlyReturn := capital <= 0.0 or finalEquity < 0.0 or periodMs <= 0.0 ? na : finalEquity == 0.0 ? -100.0 : (math.pow(finalEquity / capital, MS_PER_MONTH / periodMs) - 1.0) * 100.0
+
+        float tpy = stats.tradesPerYear
+
+        stats.compEffect := capital > 0.0 and array.size(tradeReturns) > 0 and not na(stats.netProfit) ? stats.netProfit - (capital * extracted.sumTradeReturns) : na
+
+        stats.sharpe := calcTradeSharpe(tradeReturns, tpy, DEFAULT_RISK_FREE_RATE, true, true)
+        stats.sortino := calcTradeSortino(tradeReturns, tpy, DEFAULT_RISK_FREE_RATE, true)
+
+        array<float> sortedReturns = array.copy(tradeReturns)
+        array.sort(sortedReturns, order.ascending)
+
+        stats.calmar := stats.maxDrawdownPct > 0.0 ? stats.cagr / stats.maxDrawdownPct : na
+        stats.martin := stats.ulcerIndex > 0.0 ? (stats.cagr - DEFAULT_RISK_FREE_RATE * 100.0) / stats.ulcerIndex : na
+
+        [sk, ku] = sortedReturns.calcSkewKurtosis()
+        stats.skewness := sk, stats.kurtosis := ku
+
+        [v95, cv95, v99, cv99] = sortedReturns.calcVaRCVaR()
+        stats.var95 := v95, stats.cvar95 := cv95
+
+        stats.sqn := calcSQN(tradeReturns)
+
+        stats.maxConsecWins := extracted.maxConsecWins, stats.maxConsecLosses := extracted.maxConsecLosses
+
+        float safeAvgWin = nz(stats.avgWinPct, 0.0), float safeAvgLoss = nz(stats.avgLossPct, 1.0)
+        stats.riskOfRuin := calcRiskOfRuinFromStats(
+             stats.winTrades, stats.lossTrades,
+             safeAvgWin, safeAvgLoss,
+             safeAvgLoss, stats.evenTrades)
+
+        stats.pValue := calcPValueFromPayoff(stats.winTrades, n, safeAvgWin, safeAvgLoss)
+
+        float buyHoldReturn = calcBuyAndHold(not na(firstClose) ? firstClose : array.get(entryPrices, 0), not na(currentClose) ? currentClose : array.get(exitPrices, n - 1))
+
+        stats.buyHoldReturn := buyHoldReturn
+
+        stats.beta := not na(benchmarkReturns) ? calcBeta(tradeReturns, benchmarkReturns) : na
+
+        stats.alpha := calcAlphaJensen(stats.cagr, calcBuyHoldCagr(buyHoldReturn, stats.tradingPeriodDays), stats.beta, DEFAULT_RISK_FREE_RATE)
+
+        if barstate.islast
+            float peakEquity = math.max(extracted.maxEquity, strategy.equity), float liveDrawdown = peakEquity - strategy.equity
+            stats.currentDrawdownPct := peakEquity > 0.0 ?
+                 (liveDrawdown / peakEquity) * 100.0 : 0.0
+            stats.maxEquity := peakEquity
+
+            if n > 0
+                float bhFirst = not na(firstClose) ? firstClose : array.get(entryPrices, 0)
+                stats.buyHoldReturn := calcBuyAndHold(bhFirst, close)
+
+            stats.alpha := calcAlphaJensen(stats.cagr, calcBuyHoldCagr(stats.buyHoldReturn, stats.tradingPeriodDays), stats.beta, DEFAULT_RISK_FREE_RATE)
+
+        [stats, tradeReturns, equity, topTrades, worstTrades, extracted.avgCommissionPct]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: FORMATTING UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Cap extreme values at INFINITY_CAP (999.0) for display
+capValue(float val) =>
+    na(val) ? na : math.min(val, 999.0)
+
+enum FormatMode
+    number
+    percent
+    ratio
+    pvalue
+
+// @function Format numeric values with mode-specific formatting (percent/ratio/pvalue/number)
+formatValue(float val, FormatMode mode = FormatMode.number, int decimals = 2, bool showSign = true, float infinityThreshold = 999) =>
+    if na(val)
+        "-"
+    else
+        string format = decimals == 0 ? "#" : decimals == 1 ? "#.#" : decimals == 3 ? "#.###" : decimals == 4 ? "#.####" : "#.##"
+        switch mode
+            FormatMode.percent => (showSign and val > 0.0 ? "+" : "") + str.tostring(val, format) + "%"
+            FormatMode.ratio  => val >= infinityThreshold ? "∞" : str.tostring(val, format)
+            FormatMode.pvalue => str.tostring(val, "0.000")
+            => str.tostring(val, format)
+
+// @function Format value with cap+na handling — returns "-" for capped/na values
+formatCapped(float val, FormatMode mode, int decimals = 2, bool showSign = false) =>
+    nz(val, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatValue(val, mode, decimals, showSign)
+
+// @function Format signed percentage (e.g., "+1.50%", "-0.25%")
+formatSignedPct(float val) =>
+    (val >= 0 ? "+" : "") + str.tostring(val, "0.00") + "%"
+
+// @function Get color for profit/loss values — bull if >0, bear if <0, muted if na/0
+getPnLColor(float val, color bullColor = color.teal, color bearColor = color.red) =>
+    na(val) ? COLOR_TEXT_MUTED : val > 0.0 ? bullColor : val < 0.0 ? bearColor : COLOR_TEXT_MUTED
+
+// @function Determine stability color for rolling metrics
+// Uses coefficient of variation (CV) and spread to classify stability
+// @returns color.orange if stable, bearColor if unstable
+_expStabilityColor(float mean, float stddev, bool isRMode, color bearColor) =>
+    float absMean = not na(mean) ? math.abs(mean) : 0.0, float cv = absMean > 0.0001 ? stddev / absMean : na, float spread = not na(stddev) ? stddev * 2.0 : na
+    not na(cv) and cv < 1.0 ? color.orange : not na(spread) and spread < (isRMode ? 0.2 : 0.1) ? color.orange : bearColor
+
+// @function Format trading frequency with auto-selected time unit (e.g., "3.2/mo", "0.5/wk")
+formatIntelligentFrequency(float tradesPerMonth) =>
+    if nz(tradesPerMonth, 0.0) <= 0
+        "0"
+    else
+        float perYear = tradesPerMonth * 12.0, float perWeek = perYear / 52.0, float perDay = perWeek / 7.0, float perHour = perDay / 24.0, float perMinute = perHour / 60.0, float perSecond = perMinute / 60.0
+        switch
+            perSecond >= 1.0 => formatValue(perSecond, FormatMode.number, 1, false) + "/s"
+            perMinute >= 1.0 => formatValue(perMinute, FormatMode.number, 1, false) + "/min"
+            perHour >= 1.0   => formatValue(perHour, FormatMode.number, 1, false) + "/hr"
+            perDay >= 1.0    => formatValue(perDay, FormatMode.number, 1, false) + "/d"
+            perWeek >= 1.0   => formatValue(perWeek, FormatMode.number, 1, false) + "/wk"
+            tradesPerMonth >= 1.0 => formatValue(tradesPerMonth, FormatMode.number, 1, false) + "/mo"
+            => formatValue(perYear, FormatMode.number, 2, false) + "/yr"
+
+// @function Format UNIX timestamp as dd/MM/yyyy string
+formatDateDMY(int ts) =>
+    na(ts) ? "-" : str.format_time(ts, "dd/MM/yyyy")
+
+// @function Format UNIX timestamp as HH:mm string
+formatTimeHHMM(int ts) =>
+    na(ts) ? "-" : str.format_time(ts, "HH:mm")
+
+// @function Get human-readable timeframe string (e.g., "5m", "1H", "1D")
+formatTimeframe() =>
+    string tf = timeframe.period
+    int mult = timeframe.multiplier
+    if timeframe.isseconds
+        str.tostring(mult) + "s"
+    else if timeframe.isminutes
+        if mult < 60
+            str.tostring(mult) + "m"
+        else if mult < 1440
+            str.tostring(mult / 60) + "H"
+        else
+            str.tostring(mult / 1440) + "D"
+    else if timeframe.isdaily
+        str.tostring(mult) + "D"
+    else if timeframe.isweekly
+        str.tostring(mult) + "W"
+    else if timeframe.ismonthly
+        str.tostring(mult) + "M"
+    else
+        switch tf
+            "S" => "1s"
+            "D" => "1D"
+            "W" => "1W"
+            "M" => "1M"
+            "Y" => "1Y"
+            => tf
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: TOOLTIP BUILDERS — MAIN TABLE METRICS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Create styled tooltip header with separator line
+// @returns FN.toFont-styled string with metric name + separator
+tooltipHeader(string name) =>
+    FN.toFont(name + "\n───────────────\n\n", "Sans Bold")
+
+// @function Build Net Profit tooltip with formula substitution
+_ttNetProfit(Stats stats) =>
+    tooltipHeader("Net Profit") +
+     "Value: " + formatValue(stats.netProfitPct, FormatMode.percent) + "\n" +
+     "  ↳ Total return as % of initial capital\n\n" +
+     "Formula: (Equity − Capital) / Capital × 100\n" +
+     "         = (" + str.tostring(stats.netProfit, "#.##") + " − " + str.tostring(strategy.initial_capital, "#.##") + ") / " + str.tostring(strategy.initial_capital, "#.##") + " × 100\n" +
+     "         = " + formatValue(stats.netProfitPct, FormatMode.percent) + "\n\n" +
+     "Components:\n" +
+     "  ├ Net Profit: " + str.tostring(stats.netProfit, "#.##") + "\n" +
+     "  ├ Gross Profit: " + str.tostring(stats.grossProfit, "#.##") + "\n" +
+     "  ├ Gross Loss: " + str.tostring(stats.grossLoss, "#.##") + "\n" +
+     "  └ Compounding Effect: " + formatValue(nz(stats.compEffect, 0.0) / strategy.initial_capital * 100.0, FormatMode.percent, 1, true) + "\n\n"
+
+// @function Build Payoff Ratio tooltip with breakeven WR
+_ttPayoff(Stats stats) =>
+    string valStr = na(stats.payoffRatio) ? "-" : formatValue(stats.payoffRatio, FormatMode.number, 2, false)
+    tooltipHeader("Payoff Ratio") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Average win size / average loss size\n\n" +
+     "Formula: AvgWin / AvgLoss\n" +
+     "         = " + formatValue(stats.avgWinPct, FormatMode.percent) + " / " + formatValue(stats.avgLossPct, FormatMode.percent, 2, false) + "\n" +
+     "         = " + valStr + "\n\n" +
+     "Breakeven Win Rate: " + str.tostring(100.0 / (1.0 + nz(stats.payoffRatio, 0.0)), "#.#") + "%\n" +
+     "  ↳ WR above this = profitable system\n\n"
+
+// @function Build Sample Size tooltip with win/loss/BE breakdown
+_ttSampleSize(Stats stats) =>
+    tooltipHeader("Sample Size") +
+     "Value: " + str.tostring(stats.totalTrades) + " trades\n" +
+     "  ↳ Total closed trades in backtest\n\n" +
+     "Breakdown:\n" +
+     "  ├ Wins: " + str.tostring(stats.winTrades) + " (" + str.tostring(math.round(stats.winRate * 100)) + "%)\n" +
+     " ├ Losses: " + str.tostring(stats.lossTrades) + " (" + str.tostring(math.round(stats.lossRate * 100)) + "%)\n" +
+     "  └ Breakeven: " + str.tostring(stats.evenTrades)
+
+// @function Build Profit Factor tooltip with gross values
+_ttProfitFactor(Stats stats) =>
+    string valStr = na(stats.profitFactor) ? "-" : formatValue(stats.profitFactor, FormatMode.ratio, 2, false)
+    tooltipHeader("Profit Factor") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Gross profit / gross loss\n\n" +
+     "Formula: GrossProfit / GrossLoss\n" +
+     "         = " + str.tostring(stats.grossProfit, "#.##") + " / " + str.tostring(math.abs(stats.grossLoss), "#.##") + "\n" +
+     "         = " + valStr + "\n\n"
+
+// @function Build CAGR tooltip with years and simple annual
+_ttCAGR(Stats stats) =>
+    float cappedVal = capValue(stats.cagr)
+    string valStr = formatCapped(cappedVal, FormatMode.percent)
+    float years = stats.tradingPeriodDays / (MS_PER_YEAR / MS_PER_DAY)
+    float simpleAnnual = years > 0 ? stats.netProfitPct / years : na
+    tooltipHeader("CAGR") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Compound Annual Growth Rate\n\n" +
+     "Formula: (EndEquity/StartCapital)^(1/Years) − 1\n" +
+     "         Years: " + str.tostring(years, "#.#") + " | Simple: " + formatValue(simpleAnnual, FormatMode.percent) + "\n\n"
+
+// @function Build Expectancy/R-Expectancy tooltip with formula
+// @param useRMode True = R-multiple display, False = percentage
+_ttExpectancy(Stats stats, bool useRMode) =>
+    float cappedVal = capValue(stats.avgTradePct)
+    string valStr = formatCapped(cappedVal, FormatMode.percent)
+    string winRateStr = str.tostring(math.round(stats.winRate * 100)) + "%"
+    string lossRateStr = str.tostring(math.round(stats.lossRate * 100)) + "%"
+    string avgWinStr = formatValue(stats.avgWinPct, FormatMode.percent)
+    string avgLossStr = formatValue(stats.avgLossPct, FormatMode.percent, 2, false)
+    if useRMode
+        string rExpStr = na(stats.rExpectancy) ? "-" : str.tostring(stats.rExpectancy, "#.###") + "R"
+        float payoffForFormula = stats.avgLossPct > 0.0001 ? stats.avgWinPct / stats.avgLossPct : 0.0
+        tooltipHeader("R-Expectancy") +
+         "Value: " + rExpStr + "\n" +
+         "  ↳ Risk-normalized edge (1R = AvgLoss " + avgLossStr + ")\n\n" +
+         "Formula: WR × PayoffRatio − LR\n" +
+         "         = " + winRateStr + " × " + formatValue(payoffForFormula, FormatMode.number, 2, false) + " − " + lossRateStr + "\n" +
+         "         = " + rExpStr + "\n\n"
+    else
+        tooltipHeader("Expectancy") +
+         "Value: " + valStr + "\n" +
+         "  ↳ Expected return per trade\n\n" +
+         "Formula: (WR × AvgWin) − (LR × AvgLoss)\n" +
+         "         = (" + winRateStr + " × " + avgWinStr + ") − (" + lossRateStr + " × " + avgLossStr + ")\n" +
+         "         = " + valStr + "\n\n"
+
+// @function Build Monthly Return tooltip with CAGR relationship
+_ttMonthly(Stats stats) =>
+    float cappedVal = capValue(stats.monthlyReturn)
+    string valStr = formatCapped(cappedVal, FormatMode.percent)
+    tooltipHeader("Monthly Return") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Geometric average monthly return\n\n" +
+     "Formula: (1 + CAGR)^(1/12) − 1\n" +
+     "         = (1 + " + formatCapped(capValue(stats.cagr), FormatMode.percent) + ")^(1/12) − 1\n" +
+     "         = " + valStr + "\n\n"
+
+// @function Build Avg Duration tooltip with win/loss breakdown
+_ttAvgDuration(Stats stats) =>
+    tooltipHeader("Avg Duration") +
+     "Value: " + formatDuration(stats.avgTradeDuration) + "\n" +
+     "  ↳ Average time per trade (entry to exit)\n\n" +
+     "Breakdown:\n" +
+     "  ├ Win Duration: " + formatDuration(stats.avgWinDuration) + "\n" +
+     "  ├ Loss Duration: " + formatDuration(stats.avgLossDuration) + "\n" +
+     "  └ Total: " + str.tostring(stats.totalTrades) + " trades\n\n" +
+     "Capital Efficiency:\n" +
+     "  ├ Exposure: " + formatValue(stats.timeInMarketPct, FormatMode.percent, 2, false) + "\n" +
+     "  └ Time out: " + formatValue(100.0 - stats.timeInMarketPct, FormatMode.percent, 2, false)
+
+// @function Build Max Consecutive Wins tooltip with statistical expectation
+_ttMaxCW(Stats stats) =>
+    float expected = stats.winRate > 0 and stats.winRate < 1 ? math.log(stats.totalTrades) / math.log(1.0 / stats.winRate) : na
+    tooltipHeader("Max Consecutive Wins") +
+     "Value: " + str.tostring(stats.maxConsecWins) + " trades\n" +
+     "  ↳ Longest winning streak\n\n" +
+     "Expected (statistical): " + (na(expected) ? "-" : str.tostring(expected, "#.#")) + "\n" +
+     "  ↳ log(N) / log(1/WR) for random sequence\n\n" +
+     "  Actual vs Expected: " + str.tostring(stats.maxConsecWins) + " vs " + (na(expected) ? "-" : str.tostring(expected, "#.#"))
+
+// @function Build Max Consecutive Losses tooltip with stress levels
+_ttMaxCL(Stats stats) =>
+    float expected = stats.lossRate > 0 and stats.lossRate < 1 ? math.log(stats.totalTrades) / math.log(1.0 / stats.lossRate) : na
+    tooltipHeader("Max Consecutive Losses") +
+     "Value: " + str.tostring(stats.maxConsecLosses) + " trades\n" +
+     "  ↳ Longest losing streak\n\n" +
+     "Expected (statistical): " + (na(expected) ? "-" : str.tostring(expected, "#.#")) + "\n" +
+     "  ↳ log(N) / log(1/LR) for random sequence\n\n" +
+     "  Actual vs Expected: " + str.tostring(stats.maxConsecLosses) + " vs " + (na(expected) ? "-" : str.tostring(expected, "#.#")) + "\n\n" +
+     "Psychological Stress:\n" +
+     "  ├ >10: High drawdown periods\n" +
+     "  ├ 5-10: Moderate\n" +
+     "  └ <5: Comfortable"
+
+// @function Build Win Rate tooltip with breakeven and edge calculation
+_ttWinRate(Stats stats) =>
+    float beWR = stats.payoffRatio > 0 ? 100.0 / (1.0 + stats.payoffRatio) : na
+    float edge = not na(beWR) ? stats.winRate * 100 - beWR : na
+    tooltipHeader("Win Rate") +
+     "Value: " + str.tostring(math.round(stats.winRate * 100)) + "%\n" +
+     "  ↳ Percentage of profitable trades\n\n" +
+     "Breakeven WR: " + (na(beWR) ? "-" : str.tostring(beWR, "#.#") + "%") + "\n" +
+     "  ↳ 100 / (1 + Payoff) = 100 / (1 + " + formatValue(stats.payoffRatio, FormatMode.number, 2, false) + ")\n\n" +
+     "Edge: " + (na(edge) ? "-" : (edge >= 0 ? "+" : "") + str.tostring(edge, "#.#") + "%") + "\n" +
+     "  ↳ WR above breakeven = profitable\n\n"
+
+// @function Build Breakeven Rate tooltip with sample size impact
+_ttBE(Stats stats) =>
+    float beRate = stats.totalTrades > 0 ? (float(stats.evenTrades) / float(stats.totalTrades)) * 100.0 : 0.0
+    tooltipHeader("Breakeven Rate") +
+     "Value: " + str.tostring(math.round(beRate)) + "%\n" +
+     "  ↳ Trades with zero profit/loss\n\n" +
+     "Count: " + str.tostring(stats.evenTrades) + " / " + str.tostring(stats.totalTrades) + " trades\n\n" +
+     "  ↳ High BE rate reduces effective sample size\n" +
+     "  ↳ May indicate tight spreads or commission drag"
+
+// @function Build Loss Rate tooltip with formula decomposition
+_ttLossRate(Stats stats) =>
+    tooltipHeader("Loss Rate") +
+     "Value: " + str.tostring(math.round(stats.lossRate * 100)) + "%\n" +
+     "  ↳ Percentage of losing trades\n\n" +
+     "Formula: 100% − WR − BE%\n" +
+     "         = 100% − " + str.tostring(math.round(stats.winRate * 100)) + "% − " + str.tostring(math.round(stats.totalTrades > 0 ? (float(stats.evenTrades) / float(stats.totalTrades)) * 100.0 : 0.0)) + "%\n" +
+     "         = " + str.tostring(math.round(stats.lossRate * 100)) + "%"
+
+// @function Build Frequency tooltip with all time units and trading style
+_ttFrequency(Stats stats) =>
+    string freqStr = formatIntelligentFrequency(stats.tradesPerMonth)
+    tooltipHeader("Frequency") +
+     "Value: " + freqStr + "\n" +
+     "  ↳ Trading activity rate\n\n" +
+     "All Time Units:\n" +
+     "  ├ " + formatValue(stats.tradesPerMonth * 12.0, FormatMode.number, 2, false) + "/year\n" +
+     "  ├ " + formatValue(stats.tradesPerMonth, FormatMode.number, 2, false) + "/month\n" +
+     "  ├ " + formatValue(stats.tradesPerMonth * 12.0 / 52.0, FormatMode.number, 2, false) + "/week\n" +
+     "  ├ " + formatValue(stats.tradesPerMonth * 12.0 / 52.0 / 7.0, FormatMode.number, 2, false) + "/day\n" +
+     "  └ " + str.tostring(stats.tradesPerYear, "#.#") + "/yr (calendar)\n\n" +
+     "Style: " + (stats.tradesPerMonth >= 10 ? "Active" : stats.tradesPerMonth >= 1 ? "Regular" : "Infrequent")
+
+// @function Build Exposure tooltip with capital efficiency analysis
+_ttExposure(Stats stats) =>
+    tooltipHeader("Exposure") +
+     "Value: " + formatValue(stats.timeInMarketPct, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Percentage of time in market\n\n" +
+     "Time Out: " + formatValue(100.0 - stats.timeInMarketPct, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Capital idle time\n\n" +
+     "Capital Efficiency:\n" +
+     "  ├ High exposure = more risk, more opportunity\n" +
+     "  └ Low exposure = lower risk, idle capital"
+
+// @function Build Sharpe Ratio tooltip with Rf and annualization
+_ttSharpe(Stats stats) =>
+    string valStr = na(stats.sharpe) ? "-" : (stats.sharpe >= INFINITY_CAP ? "∞" : formatValue(stats.sharpe, FormatMode.number, 2, false))
+    tooltipHeader("Sharpe Ratio") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Risk-adjusted return (total volatility)\n\n" +
+     "Formula: (Return − Rf) / StdDev × √(trades/yr)\n" +
+     "         Rf: " + str.tostring(DEFAULT_RISK_FREE_RATE * 100, "#.#") + "% annual\n" +
+     "         Trades/yr: " + str.tostring(stats.tradesPerYear, "#.#") + "\n\n"
+
+// @function Build Sortino Ratio tooltip with downside-only explanation
+_ttSortino(Stats stats) =>
+    string valStr = na(stats.sortino) ? "-" : (stats.sortino >= INFINITY_CAP ? "∞" : formatValue(stats.sortino, FormatMode.number, 2, false))
+    tooltipHeader("Sortino Ratio") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Risk-adjusted return (downside only)\n\n" +
+     "Formula: (Return − Rf) / DownsideDev × √(trades/yr)\n" +
+     "  ↳ Penalizes only harmful volatility\n\n"
+
+// @function Build Max Drawdown tooltip with peak/trough values
+_ttMaxDD(Stats stats) =>
+    tooltipHeader("Max Drawdown") +
+     "Value: " + formatValue(-stats.maxDrawdownPct, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Largest peak-to-trough decline\n\n" +
+     "Formula: (Peak − Trough) / Peak × 100\n" +
+     "         Peak: " + str.tostring(stats.maxEquity, "#.##") + "\n" +
+     "         Trough: " + str.tostring(stats.minEquity, "#.##") + "\n\n"
+
+// @function Build Risk of Ruin tooltip with edge formula decomposition
+_ttRoR(Stats stats) =>
+    float edge = (stats.winRate * stats.payoffRatio) - stats.lossRate
+    tooltipHeader("Risk of Ruin") +
+     "Value: " + formatValue(stats.riskOfRuin * 100.0, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Probability of account depletion\n\n" +
+     "Formula: ((1−Edge)/(1+Edge))^Units\n" +
+     "         Edge = (WR × Payoff) − LR\n" +
+     "         = (" + str.tostring(math.round(stats.winRate * 100)) + "% × " + formatValue(stats.payoffRatio, FormatMode.number, 2, false) + ") − " + str.tostring(math.round(stats.lossRate * 100)) + "%\n" +
+     "         = " + str.tostring(edge * 100, "#.#") + "%\n\n"
+
+// @function Build R² tooltip with growth linearity interpretation
+_ttR2(Stats stats) =>
+    string valStr = na(stats.equityRSquared) ? "-" : formatValue(stats.equityRSquared * 100.0, FormatMode.percent, 1, false)
+    tooltipHeader("R² (Equity Fit)") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Linearity of equity curve growth\n\n" +
+     "  ↳ >0.8: Smooth, consistent growth\n" +
+     "  ↳ <0.5: Erratic, lumpy returns\n\n"
+
+// @function Build Calmar/MAR tooltip with CAGR/MaxDD formula
+_ttCalmar(Stats stats) =>
+    float cappedVal = capValue(stats.calmar)
+    string valStr = formatCapped(cappedVal, FormatMode.number, 2, false)
+    tooltipHeader("MAR (Calmar)") +
+     "Value: " + valStr + "\n" +
+     "  ↳ CAGR / Max Drawdown\n\n" +
+     "Formula: CAGR / MaxDD\n" +
+     "         = " + formatCapped(capValue(stats.cagr), FormatMode.percent) + " / " + formatValue(-stats.maxDrawdownPct, FormatMode.percent) + "\n" +
+     "         = " + valStr + "\n\n"
+
+// @function Build CVaR tooltip with expected shortfall explanation
+_ttCVaR(Stats stats) =>
+    tooltipHeader("CVaR (95%)") +
+     "Value: " + formatValue(stats.cvar95, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Conditional Value at Risk (Expected Shortfall)\n\n" +
+     "  ↳ Average loss in worst 5% of scenarios\n" +
+     "  ↳ More conservative than VaR\n\n"
+
+// @function Build p-value tooltip with observed/expected WR and significance level
+_ttPValue(Stats stats) =>
+    float observedWR = stats.totalTrades > 0 ? float(stats.winTrades) / float(stats.totalTrades) : na
+    float expectedWR = stats.payoffRatio > 0 ? 1.0 / (1.0 + stats.payoffRatio) : na
+    float edgePct = na(observedWR) or na(expectedWR) ? na : (observedWR - expectedWR) * 100.0
+    float confidence = na(stats.pValue) ? na : (1.0 - stats.pValue) * 100.0
+    string sigLevel = na(stats.pValue) ? "" : stats.pValue < 0.01 ? " (Strong)" : stats.pValue < 0.05 ? " (Significant)" : stats.pValue < 0.10 ? " (Borderline)" : " (Not Significant)"
+    tooltipHeader("p-value (Two-Tailed)") +
+     "Value: " + formatValue(stats.pValue) + sigLevel + "\n" +
+     "  ↳ Tests if WR exceeds breakeven rate\n\n" +
+     "Observed WR: " + (na(observedWR) ? "-" : str.tostring(observedWR * 100, "#.#") + "%") + "\n" +
+     "Expected WR: " + (na(expectedWR) ? "-" : str.tostring(expectedWR * 100, "#.#") + "%") + "\n" +
+     "Edge: " + (na(edgePct) ? "-" : (edgePct >= 0 ? "+" : "") + str.tostring(edgePct, "#.#") + "%") + "\n" +
+     "Confidence: " + (na(confidence) ? "-" : str.tostring(confidence, "#.#") + "%") + "\n\n"
+
+// ───────────────────────────────────────────────────────────────────────────
+// Complementary Row Tooltips
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Build Compounding Effect tooltip with formula decomposition
+_ttCompounding(Stats stats) =>
+    float effect = nz(stats.compEffect, 0.0) / strategy.initial_capital * 100.0
+    tooltipHeader("Compounding Effect") +
+     "Value: " + formatValue(effect, FormatMode.percent, 1, true) + "\n" +
+     "  ↳ Additional profit from reinvesting gains\n\n" +
+     "Formula: NetProfit − (Capital × ΣTradeReturns)\n" +
+     "         = " + str.tostring(stats.netProfit, "#.##") + " − (" + str.tostring(strategy.initial_capital, "#.##") + " × Σreturns)\n" +
+     "         = " + formatValue(effect, FormatMode.percent, 1, true) + "\n\n" +
+     "  ↳ Positive = compounding amplifies returns\n" +
+     "  ↳ Larger with more trades and longer duration"
+
+// @function Build Avg Win tooltip with count and gross profit
+_ttAvgWin(Stats stats) =>
+    tooltipHeader("Avg Win") +
+     "Value: " + formatValue(stats.avgWinPct, FormatMode.percent) + "\n" +
+     "  ↳ Average return on winning trades\n\n" +
+     "Count: " + str.tostring(stats.winTrades) + " winning trades\n" +
+     "Total: " + str.tostring(stats.grossProfit, "#.##") + "\n\n" +
+     "  ↳ Mean of all profitable trade returns"
+
+// @function Build Avg Trade tooltip (same as expectancy)
+_ttAvgTrade(Stats stats) =>
+    tooltipHeader("Avg Trade") +
+     "Value: " + formatValue(stats.avgTradePct, FormatMode.percent) + "\n" +
+     "  ↳ Average return across ALL trades\n\n" +
+     "Formula: Σ(AllTradeReturns%) / TotalTrades\n" +
+     "         = Σreturns / " + str.tostring(stats.totalTrades) + "\n" +
+     "         = " + formatValue(stats.avgTradePct, FormatMode.percent) + "\n\n" +
+     "  ↳ Same as Expectancy — core edge metric"
+
+// @function Build Avg Loss tooltip with count and gross loss (1R baseline)
+_ttAvgLoss(Stats stats) =>
+    tooltipHeader("Avg Loss") +
+     "Value: " + formatValue(-stats.avgLossPct, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Average return on losing trades (shown as negative)\n\n" +
+     "Count: " + str.tostring(stats.lossTrades) + " losing trades\n" +
+     "Total: " + str.tostring(math.abs(stats.grossLoss), "#.##") + "\n\n" +
+     "  ↳ This is 1R in R-multiple mode"
+
+// @function Build Martin Ratio tooltip with Ulcer Index relationship
+_ttMartin(Stats stats) =>
+    float cappedVal = capValue(stats.martin)
+    string valStr = formatCapped(cappedVal, FormatMode.number, 2, false)
+    tooltipHeader("Martin Ratio") +
+     "Value: " + valStr + "\n" +
+     "  ↳ CAGR / Ulcer Index\n\n" +
+     "Formula: (CAGR − Rf) / UlcerIndex\n" +
+     "         = (" + formatCapped(capValue(stats.cagr), FormatMode.percent) + " − " + str.tostring(DEFAULT_RISK_FREE_RATE * 100, "#.#") + "%) / " + formatValue(stats.ulcerIndex, FormatMode.number, 2, false) + "\n" +
+     "         = " + valStr + "\n\n" +
+     "  ↳ Return per unit of drawdown stress\n" +
+     "  ↳ Penalizes prolonged underwater periods"
+
+// @function Build Rolling Expectancy tooltip with range, global, stability, and color signal
+_ttRollingExp(Stats stats, RollingStats rollingStats, bool useRMode) =>
+    string minStr = "-", string maxStr = "-", string globalStr = "-", string thresholdStr = "-"
+    if not na(rollingStats) and rollingStats.windowSize > 0
+        float oneR = nz(stats.avgLossPct)
+        if useRMode and oneR > 0.0001
+            minStr := str.tostring(rollingStats.expectancyMin / oneR, "#.###") + "R", maxStr := str.tostring(rollingStats.expectancyMax / oneR, "#.###") + "R", globalStr := str.tostring(stats.avgTradePct / oneR, "#.###") + "R", thresholdStr := str.tostring(stats.avgTradePct * 0.5 / oneR, "#.###") + "R"
+        else
+            minStr := formatValue(rollingStats.expectancyMin, FormatMode.percent, 2, false), maxStr := formatValue(rollingStats.expectancyMax, FormatMode.percent, 2, false), globalStr := formatValue(stats.avgTradePct, FormatMode.percent, 2, false), thresholdStr := formatValue(stats.avgTradePct * 0.5, FormatMode.percent, 2, false)
+
+    string title = useRMode ? "Rolling R-Expectancy" : "Rolling Expectancy"
+    tooltipHeader(title) +
+     "Range: [" + minStr + " - " + maxStr + "]\n" +
+     "  ↳ Min-max expectancy across " + str.tostring(na(rollingStats) ? 0 : rollingStats.windowSize) + "-trade windows\n\n" +
+     "Global: " + globalStr + "\n" +
+     "  ↳ Overall expectancy (all trades)\n\n" +
+     "Threshold: " + thresholdStr + "\n" +
+     "  ↳ 50% of global expectancy\n\n" +
+     "Stability:\n" +
+     "  ├ Mean: " + formatValue(na(rollingStats) ? na : rollingStats.expectancyMean, FormatMode.percent, 3, false) + "\n" +
+     "  ├ StdDev: " + formatValue(na(rollingStats) ? na : rollingStats.expectancyStdDev, FormatMode.percent, 3, false) + "\n" +
+     "  └ CV: " + (na(rollingStats) or rollingStats.expectancyMean == 0 ? "-" : str.tostring(math.abs(rollingStats.expectancyStdDev / rollingStats.expectancyMean), "#.##"))
+
+// @function Build Avg Win Duration tooltip with comparative durations
+_ttAvgWinDur(Stats stats) =>
+    tooltipHeader("Avg Win Duration") +
+     "Value: " + formatDuration(stats.avgWinDuration) + "\n" +
+     "  ↳ Average time for winning trades\n\n" +
+     "  ├ vs Avg Trade: " + formatDuration(stats.avgTradeDuration) + "\n" +
+     "  └ vs Avg Loss: " + formatDuration(stats.avgLossDuration) + "\n\n" +
+     "  ↳ Faster wins = more capital-efficient"
+
+// @function Build Max Equity tooltip with peak value and capital
+_ttMaxEquity(Stats stats) =>
+    float maxEqPct = stats.maxEquity > 0 ? ((stats.maxEquity - strategy.initial_capital) / strategy.initial_capital) * PERCENT_MULTIPLIER : 0.0
+    tooltipHeader("Max Equity") +
+     "Value: " + formatValue(maxEqPct, FormatMode.percent) + "\n" +
+     "  ↳ Peak equity reached during backtest\n\n" +
+     "Peak: " + str.tostring(stats.maxEquity, "#.##") + "\n" +
+     "Capital: " + str.tostring(strategy.initial_capital, "#.##") + "\n\n" +
+     "  ↳ Highest account value before any drawdown"
+
+// @function Build Jensen's Alpha tooltip with beta and Rf decomposition
+_ttAlpha(Stats stats) =>
+    float cappedVal = capValue(stats.alpha)
+    string valStr = formatCapped(cappedVal, FormatMode.percent)
+    tooltipHeader("Alpha (Jensen)") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Excess return vs benchmark (risk-adjusted)\n\n" +
+     "Formula: CAGR − (Rf + β × (BenchCAGR − Rf))\n" +
+     "         β: " + formatCapped(capValue(stats.beta), FormatMode.number, 2, false) + "\n" +
+     "         Rf: " + str.tostring(DEFAULT_RISK_FREE_RATE * 100, "#.#") + "%\n\n"
+
+// @function Build Buy & Hold tooltip with benchmark comparison
+_ttBuyHold(Stats stats) =>
+    tooltipHeader("Buy & Hold") +
+     "Value: " + formatValue(stats.buyHoldReturn, FormatMode.percent) + "\n" +
+     "  ↳ Passive benchmark return\n\n" +
+     "Formula: (LastPrice − FirstPrice) / FirstPrice × 100\n\n" +
+     "  ↳ Simple long-only from first to last bar\n" +
+     "  ↳ Compare vs Net Profit to assess active edge"
+
+// @function Build Beta tooltip with covariance/variance formula
+_ttBeta(Stats stats) =>
+    float cappedVal = capValue(stats.beta)
+    string valStr = formatCapped(cappedVal, FormatMode.number, 2, false)
+    tooltipHeader("Beta") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Sensitivity to benchmark movements\n\n" +
+     "Formula: Cov(strategy, bench) / Var(bench)\n\n"
+
+// @function Build Min Equity tooltip with trough value and capital
+_ttMinEquity(Stats stats) =>
+    float minEqPct = stats.minEquity > 0 ? ((stats.minEquity - strategy.initial_capital) / strategy.initial_capital) * 100.0 : 0.0
+    float cappedVal = capValue(minEqPct)
+    string valStr = formatCapped(cappedVal, FormatMode.percent)
+    tooltipHeader("Min Equity") +
+     "Value: " + valStr + "\n" +
+     "  ↳ Lowest equity reached during backtest\n\n" +
+     "Trough: " + str.tostring(stats.minEquity, "#.##") + "\n" +
+     "Capital: " + str.tostring(strategy.initial_capital, "#.##") + "\n\n" +
+     "  ↳ Worst point before recovery"
+
+// @function Build Avg Loss Duration tooltip with comparative durations
+_ttAvgLossDur(Stats stats) =>
+    tooltipHeader("Avg Loss Duration") +
+     "Value: " + formatDuration(stats.avgLossDuration) + "\n" +
+     "  ↳ Average time for losing trades\n\n" +
+     "  ├ vs Avg Trade: " + formatDuration(stats.avgTradeDuration) + "\n" +
+     "  └ vs Avg Win: " + formatDuration(stats.avgWinDuration) + "\n\n" +
+     "  ↳ Last 100 losing trades only\n" +
+     "  ↳ Longer loss durations = capital trapped"
+
+// @function Build Rolling Sharpe/Sortino tooltip with range, global, threshold, and color signal
+_ttRollingMetric(Stats stats, RollingStats rollingStats, bool useSortino) =>
+    string metricName = useSortino ? "Sortino" : "Sharpe"
+    string minStr = "-", string maxStr = "-", string globalStr = "-", string thresholdStr = "-"
+    if not na(rollingStats) and rollingStats.windowSize > 0
+        float metricMin = useSortino ? rollingStats.sortinoMin : rollingStats.sharpeMin
+        float metricMax = useSortino ? rollingStats.sortinoMax : rollingStats.sharpeMax
+        float globalMetric = useSortino ? stats.sortino : stats.sharpe
+        minStr := not na(metricMin) ? (metricMin >= INFINITY_CAP ? "∞" : formatValue(metricMin, FormatMode.number, 2, false)) : "-"
+        maxStr := not na(metricMax) ? (metricMax >= INFINITY_CAP ? "∞" : formatValue(metricMax, FormatMode.number, 2, false)) : "-"
+        globalStr := na(globalMetric) ? "-" : formatValue(globalMetric, FormatMode.number, 2, false)
+        thresholdStr := nz(globalMetric, 0.0) <= 0 ? "-" : formatValue(globalMetric * 0.5, FormatMode.number, 2, false)
+
+    tooltipHeader("Rolling " + metricName) +
+     "Range: [" + minStr + " - " + maxStr + "]\n" +
+     "  ↳ Min-max " + metricName + " across " + str.tostring(na(rollingStats) ? 0 : rollingStats.windowSize) + "-trade windows\n\n" +
+     "Global: " + globalStr + "\n" +
+     "  ↳ Overall " + metricName + " (all trades)\n\n" +
+     "Threshold: " + thresholdStr + "\n" +
+     "  ↳ 50% of global " + metricName
+
+// @function Build Current Drawdown tooltip with live update note
+_ttCurrentDD(Stats stats) =>
+    tooltipHeader("Current Drawdown") +
+     "Value: " + formatValue(-stats.currentDrawdownPct, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Unrealized drawdown from last peak\n\n" +
+     "  ↳ Updates live on realtime bars\n" +
+     "  ↳ 0% = at or above peak equity"
+
+// @function Build SQN tooltip with Van Tharp formula and trade count
+_ttSQN(Stats stats) =>
+    float sqnVal = stats.sqn
+    tooltipHeader("System Quality Number") +
+     "Value: " + (na(sqnVal) ? "-" : formatValue(sqnVal, FormatMode.number, 2, false)) + "\n" +
+     "  ↳ sqrt(N) × AvgRet / StDevRet\n\n" +
+     "Formula: √(N) × Mean(returns) / StDev(returns)\n" +
+     "         N: " + str.tostring(stats.totalTrades) + " trades\n\n"
+
+// @function Build Kurtosis tooltip with Pearson kurtosis and tail interpretation
+_ttKurtosis(Stats stats) =>
+    tooltipHeader("Kurtosis") +
+     "Value: " + formatValue(stats.kurtosis, FormatMode.number, 2, false) + "\n" +
+     "  ↳ Tail fatness of return distribution\n\n" +
+     "  ↳ Pearson kurtosis (normal ≈ 3)\n" +
+     "  ↳ >4: Fat tails (extreme moves likely)\n" +
+     "  ↳ <3: Thin tails (fewer extremes)\n\n"
+
+// @function Build Skewness tooltip with distribution asymmetry interpretation
+_ttSkewness(Stats stats) =>
+    tooltipHeader("Skewness") +
+     "Value: " + formatValue(stats.skewness, FormatMode.number, 2, false) + "\n" +
+     "  ↳ Asymmetry of return distribution\n\n" +
+     "  ↳ Positive: Right-skewed (big wins, small losses)\n" +
+     "  ↳ Negative: Left-skewed (small wins, big losses)\n\n"
+
+// @function Build VaR tooltip with confidence level explanation
+_ttVaR(Stats stats) =>
+    tooltipHeader("VaR (95%)") +
+     "Value: " + formatValue(stats.var95, FormatMode.percent, 2, false) + "\n" +
+     "  ↳ Value at Risk at 95% confidence\n\n" +
+     "  ↳ Worst expected loss in 5% of scenarios\n" +
+     "  ↳ Less conservative than CVaR\n\n"
+
+// @function Build Ulcer Index tooltip with RMS drawdown formula
+_ttUlcer(Stats stats) =>
+    tooltipHeader("Ulcer Index") +
+     "Value: " + formatValue(stats.ulcerIndex, FormatMode.number, 2, false) + "\n" +
+     "  ↳ RMS of drawdowns (depth × duration)\n\n" +
+     "Formula: √(Σ(DD%²) / N)\n" +
+     "  ↳ Penalizes prolonged underwater periods\n\n"
+
+// @function Build Deeptest Period tooltip with start/end dates and duration
+_ttPeriod(Stats stats) =>
+    string periodStart = stats.firstTradeTime > 0 ? str.format_time(stats.firstTradeTime, "MM-dd-yyyy") : "Start"
+    string periodEnd = str.format_time(stats.lastTradeTime, "MM-dd-yyyy")
+    float years = stats.tradingPeriodDays / (MS_PER_YEAR / MS_PER_DAY)
+    tooltipHeader("Deeptest Period") +
+     "Start: " + periodStart + "\n" +
+     "  ↳ First trade entry date\n\n" +
+     "End: " + periodEnd + "\n" +
+     "  ↳ Last trade exit date\n\n" +
+     "Duration: " + str.tostring(stats.tradingPeriodDays, "#.#") + " days (" + str.tostring(years, "#.#") + " years)\n\n" +
+     "Trades: " + str.tostring(stats.totalTrades) + " closed\n" +
+     "Frequency: " + formatIntelligentFrequency(stats.tradesPerMonth)
+
+// @function Build Commission Cost tooltip with rate and total cost
+_ttCommission(TableConfig config, Stats stats) =>
+    tooltipHeader("Commission Cost") +
+     "Rate: " + config.commissionInfo + "\n" +
+     "  ↳ Commission per trade (configured)\n\n" +
+     "Total Cost: " + str.tostring(nz(stats.grossProfit + math.abs(stats.grossLoss), 0.0) * 0.0004, "#.##") + "\n" +
+     "  ↳ Sum of all commission fees\n\n" +
+     "Trades: " + str.tostring(stats.totalTrades) + "\n" +
+     "  ↳ Total closed trades"
+
+// ───────────────────────────────────────────────────────────────────────────
+// Stress Test Tooltips
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Build stress test CAGR tooltip with full explanation
+// @param section "IS", "MC", or "OOS" — determines source description
+_ttStressCagr(string section, float val) =>
+    string sectionDesc = section == "IS" ? "In-Sample (training data)" : section == "MC" ? "Monte Carlo simulation" : "Out-of-Sample (forward test)"
+    float cappedVal = capValue(val)
+    string valStr = nz(cappedVal, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedVal)
+    tooltipHeader("CAGR — " + section) +
+     "Compound Annual Growth Rate\n\n" +
+     "Value: " + valStr + "\n\n" +
+     "What: Annualized return assuming profits\n" +
+     "are continuously reinvested\n\n" +
+     "Formula: ((EndValue/StartValue)^(1/Years))-1\n\n" +
+     "Source: " + sectionDesc
+
+// @function Build stress test Expectancy/R-Expectancy tooltip with formula
+_ttStressExp(string section, float val, float rExpVal, bool useRMode) =>
+    string sectionDesc = section == "IS" ? "In-Sample (training data)" : section == "MC" ? "Monte Carlo simulation" : "Out-of-Sample (forward test)"
+    float cappedVal = capValue(val)
+    string valStr = nz(cappedVal, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedVal)
+    string rValStr = na(rExpVal) ? "-" : str.tostring(rExpVal, "#.###") + "R"
+    string title = useRMode ? "R-EXPECTANCY — " + section : "EXPECTANCY — " + section
+    string subtitle = useRMode ? "Risk-Normalized Edge (1R = AvgLoss)" : "Expected Return Per Trade"
+    string formula = useRMode ? "WR × (AvgWin/AvgLoss) − LR" : "WinRate×AvgWin − LossRate×AvgLoss"
+    tooltipHeader(title) +
+     subtitle + "\n\n" +
+     "Value: " + (useRMode ? rValStr : valStr) + "\n\n" +
+     "What: " + (useRMode ? "Edge per unit of realized risk" : "Average profit you can expect\nfrom each trade over time") + "\n\n" +
+     "Formula: " + formula + "\n\n" +
+     (useRMode ? "% Equiv: " + valStr + "\n\n" : (not na(rExpVal) ? "R-Expectancy: " + rValStr + "\n\n" : "")) +
+     "Source: " + sectionDesc
+
+// @function Build stress test Max Drawdown tooltip with depth formula
+_ttStressDD(string section, float val) =>
+    string sectionDesc = section == "IS" ? "In-Sample (training data)" : "Out-of-Sample (forward test)"
+    string valStr = not na(val) ? str.tostring(val, "0.00") + "%" : "-"
+    tooltipHeader("MAX DRAWDOWN — " + section) +
+     "Maximum Peak-to-Trough Decline\n\n" +
+     "Value: " + valStr + "\n\n" +
+     "What: Largest percentage drop from\n" +
+     "equity high to subsequent low\n\n" +
+     "Depth formula: (Peak − Trough) / Peak × 100\n" +
+     "Stored here as a negative % sign convention\n\n" +
+     "Source: " + sectionDesc
+
+// @function Build stress test Sharpe/Sortino tooltip with risk explanation
+_ttStressMetric(string section, float val, bool useSortino) =>
+    string sectionDesc = section == "IS" ? "In-Sample (training data)" : "Out-of-Sample (forward test)"
+    string valStr = not na(val) ? formatValue(val, FormatMode.number, 2, false) : "-"
+    string title = useSortino ? "SORTINO — " + section : "SHARPE — " + section
+    string subtitle = useSortino ? "Risk-Adjusted Return (Downside Volatility)" : "Risk-Adjusted Return (Total Volatility)"
+    string riskDesc = useSortino ? "downside risk (negative deviation)" : "total risk (standard deviation)"
+    string formula = useSortino ? "DownsideDev" : "StdDev"
+    tooltipHeader(title) +
+     subtitle + "\n\n" +
+     "Value: " + valStr + "\n\n" +
+     "What: Excess return earned per unit of\n" +
+     riskDesc + "\n\n" +
+     "Formula: (Return − RiskFree) / " + formula + "\n\n" +
+     "Source: " + sectionDesc
+
+// @function Build comprehensive Monte Carlo outcome tooltip (Best/Median/Worst)
+// @param outcome "Best", "Median", or "Worst"
+// @param mm MirroredMetrics object with MC simulation results
+// @param sims Number of Monte Carlo simulations run
+_ttMcWindow(string outcome, MirroredMetrics mm, int sims, bool useRMode) =>
+    string header = tooltipHeader("MONTE CARLO " + str.upper(outcome) + " OUTCOME") +
+     "Simulated via bootstrap resampling\n\n"
+    float cappedCagr = capValue(mm.cagr)
+    string cagrStr = nz(cappedCagr, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedCagr)
+    float cappedExp = capValue(mm.expectancy)
+    string expStr = nz(cappedExp, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedExp)
+    string ddStr = not na(mm.maxDD) ? str.tostring(mm.maxDD, "0.00") + "%" : "-"
+    string sharpeStr = not na(mm.sharpe) ? (mm.sharpe >= INFINITY_CAP ? "∞" : str.tostring(mm.sharpe, "0.00")) : "-"
+    string performance = "PERFORMANCE\n" +
+     "────────────────\n" +
+     "CAGR: " + cagrStr + "\n" +
+     "  ↳ Compound annual growth rate\n" +
+     "Expectancy: " + expStr + " per trade\n" +
+     "  ↳ Average expected return per trade\n" +
+     (useRMode and not na(mm.rExpectancy) ? "R-Expectancy: " + str.tostring(mm.rExpectancy, "#.###") + "R\n  ↳ Risk-normalized (1R = AvgLoss)\n" : "") + "\n"
+    string riskMetrics = "RISK METRICS\n" +
+     "────────────────\n" +
+     "Max DD: " + ddStr + "\n" +
+     "  ↳ Largest simulated drawdown\n" +
+     "Sharpe: " + sharpeStr + "\n" +
+     "  ↳ Risk-adjusted return ratio\n\n"
+    string context = "SIMULATION CONTEXT\n" +
+     "────────────────\n" +
+     "Paths: " + str.tostring(sims) + " simulations\n" +
+     "Method: Bootstrap resampling\n" +
+     "  ↳ Randomly reorders actual trades\n" +
+     "  ↳ Shows range of possible outcomes\n" +
+     "Outcome: " + outcome + " of all paths\n" +
+     "  ↳ " + (outcome == "Best" ? "Upper bound of performance" :
+              outcome == "Worst" ? "Lower bound / stress scenario" :
+              "50th percentile (typical outcome)")
+    header + performance + riskMetrics + context
+
+// @function Build OOS window return tooltip with context
+_ttOosReturn(float val, int col, int totalWindows) =>
+    float cappedVal = capValue(val)
+    string valStr = nz(cappedVal, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedVal)
+    tooltipHeader("OOS Window " + str.tostring(col + 1)) +
+     "Out-of-Sample forward test on unseen data\n\n" +
+     "Return: " + valStr + "\n" +
+     "  ↳ Total % gain/loss in this window\n\n" +
+     "Window: " + str.tostring(col + 1) + " / " + str.tostring(totalWindows) + "\n" +
+     "  ↳ Forward test on data held out from IS training\n" +
+     "  ↳ Validates strategy consistency across time periods"
+
+// ───────────────────────────────────────────────────────────────────────────
+// Symbol Info & Card Tooltips
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Format string value, returning "N/A" if na
+_naStr(string val) => na(val) ? "N/A" : val
+
+// @function Format float value with 6 decimal places, "N/A" if na
+_naStrF(float val) => na(val) ? "N/A" : str.tostring(val, "#.######")
+
+// @function Build formatted info section for syminfo tooltip
+// Filters out N/A values, uses ├/└ tree-branch formatting
+// @returns Formatted string section, empty string if all values are N/A
+_infoSection(string title, array<string> labels, array<string> values) =>
+    string body = ""
+    int n = array.size(labels)
+    int lastVisible = -1
+    if n > 0
+        for [i, val] in values
+            if not (str.lower(val) == "n/a")
+                lastVisible := i
+        for [i, val] in values
+            if not (str.lower(val) == "n/a")
+                string prefix = i == lastVisible ? "  └ " : "  ├ "
+                body += prefix + array.get(labels, i) + ": " + val + "\n"
+    body == "" ? "" : "  " + title + "\n" + body + "\n"
+
+// @function Build comprehensive symbol information tooltip
+// Includes all 40 syminfo.* variables, session status, and account metrics
+_ttSyminfo() =>
+    array<string> recLabels = array.new<string>()
+    array.push(recLabels, "Date"), array.push(recLabels, "Strong-Buy"), array.push(recLabels, "Buy"), array.push(recLabels, "Hold"), array.push(recLabels, "Sell"), array.push(recLabels, "Strong-Sell"), array.push(recLabels, "Total")
+    array<string> recValues = array.new<string>()
+    array.push(recValues, na(syminfo.recommendations_date) ? "N/A" : str.format_time(syminfo.recommendations_date, "yyyy-MM-dd")), array.push(recValues, na(syminfo.recommendations_buy_strong) ? "N/A" : str.tostring(syminfo.recommendations_buy_strong, "#,###")), array.push(recValues, na(syminfo.recommendations_buy) ? "N/A" : str.tostring(syminfo.recommendations_buy, "#,###")), array.push(recValues, na(syminfo.recommendations_hold) ? "N/A" : str.tostring(syminfo.recommendations_hold, "#,###")), array.push(recValues, na(syminfo.recommendations_sell) ? "N/A" : str.tostring(syminfo.recommendations_sell, "#,###")), array.push(recValues, na(syminfo.recommendations_sell_strong) ? "N/A" : str.tostring(syminfo.recommendations_sell_strong, "#,###")), array.push(recValues, na(syminfo.recommendations_total) ? "N/A" : str.tostring(syminfo.recommendations_total, "#,###"))
+    string recSection = _infoSection("ANALYST RECS", recLabels, recValues)
+    array<string> idLabels = array.new<string>()
+    array.push(idLabels, "Ticker"), array.push(idLabels, "Ticker ID"), array.push(idLabels, "Main Ticker ID"), array.push(idLabels, "ISIN"), array.push(idLabels, "Description"), array.push(idLabels, "Exchange"), array.push(idLabels, "Root")
+    array<string> idValues = array.new<string>()
+    array.push(idValues, _naStr(syminfo.ticker)), array.push(idValues, _naStr(syminfo.tickerid)), array.push(idValues, _naStr(syminfo.main_tickerid)), array.push(idValues, _naStr(syminfo.isin)), array.push(idValues, _naStr(syminfo.description)), array.push(idValues, _naStr(syminfo.prefix(syminfo.tickerid))), array.push(idValues, _naStr(syminfo.root))
+    string idSection = _infoSection("IDENTITY", idLabels, idValues)
+    array<string> fundLabels = array.new<string>()
+    array.push(fundLabels, "Sector"), array.push(fundLabels, "Industry"), array.push(fundLabels, "Employees"), array.push(fundLabels, "Shareholders"), array.push(fundLabels, "Shares Float"), array.push(fundLabels, "Shares Total")
+    array<string> fundValues = array.new<string>()
+    array.push(fundValues, _naStr(syminfo.sector)), array.push(fundValues, _naStr(syminfo.industry)), array.push(fundValues, na(syminfo.employees) ? "N/A" : str.tostring(syminfo.employees, "#,###")), array.push(fundValues, na(syminfo.shareholders) ? "N/A" : str.tostring(syminfo.shareholders, "#,###")), array.push(fundValues, na(syminfo.shares_outstanding_float) ? "N/A" : str.tostring(syminfo.shares_outstanding_float, "#.######")), array.push(fundValues, na(syminfo.shares_outstanding_total) ? "N/A" : str.tostring(syminfo.shares_outstanding_total, "#,###"))
+    string fundSection = _infoSection("FUNDAMENTALS", fundLabels, fundValues)
+    array<string> csLabels = array.new<string>()
+    array.push(csLabels, "Min Tick"), array.push(csLabels, "Min Move"), array.push(csLabels, "Price Scale"), array.push(csLabels, "Point Value"), array.push(csLabels, "Min Contract"), array.push(csLabels, "Volume Type")
+    array<string> csValues = array.new<string>()
+    array.push(csValues, na(syminfo.mintick) ? "N/A" : str.tostring(syminfo.mintick, "#.######")), array.push(csValues, na(syminfo.minmove) ? "N/A" : str.tostring(syminfo.minmove, "#,###")), array.push(csValues, na(syminfo.pricescale) ? "N/A" : str.tostring(syminfo.pricescale, "#,###")), array.push(csValues, na(syminfo.pointvalue) ? "N/A" : str.tostring(syminfo.pointvalue, "#.######")), array.push(csValues, na(syminfo.mincontract) ? "N/A" : str.tostring(syminfo.mincontract, "#.######")), array.push(csValues, _naStr(syminfo.volumetype))
+    string csSection = _infoSection("CONTRACT SPECS", csLabels, csValues)
+    array<string> mktLabels = array.new<string>()
+    array.push(mktLabels, "Type"), array.push(mktLabels, "Country"), array.push(mktLabels, "Currency"), array.push(mktLabels, "Base Currency"), array.push(mktLabels, "Session"), array.push(mktLabels, "Timezone")
+    array<string> mktValues = array.new<string>()
+    array.push(mktValues, _naStr(syminfo.type)), array.push(mktValues, _naStr(syminfo.country)), array.push(mktValues, _naStr(syminfo.currency)), array.push(mktValues, _naStr(syminfo.basecurrency)), array.push(mktValues, _naStr(syminfo.session)), array.push(mktValues, _naStr(syminfo.timezone))
+    string mktSection = _infoSection("MARKET", mktLabels, mktValues)
+    array<string> tpLabels = array.new<string>()
+    array.push(tpLabels, "Target Date"), array.push(tpLabels, "Estimates"), array.push(tpLabels, "Average"), array.push(tpLabels, "Median"), array.push(tpLabels, "High"), array.push(tpLabels, "Low")
+    array<string> tpValues = array.new<string>()
+    array.push(tpValues, na(syminfo.target_price_date) ? "N/A" : str.format_time(syminfo.target_price_date, "yyyy-MM-dd")), array.push(tpValues, na(syminfo.target_price_estimates) ? "N/A" : str.tostring(syminfo.target_price_estimates, "#,###")), array.push(tpValues, na(syminfo.target_price_average) ? "N/A" : str.tostring(syminfo.target_price_average, "#.######")), array.push(tpValues, na(syminfo.target_price_median) ? "N/A" : str.tostring(syminfo.target_price_median, "#.######")), array.push(tpValues, na(syminfo.target_price_high) ? "N/A" : str.tostring(syminfo.target_price_high, "#.######")), array.push(tpValues, na(syminfo.target_price_low) ? "N/A" : str.tostring(syminfo.target_price_low, "#.######"))
+    string tpSection = _infoSection("TARGET PRICES", tpLabels, tpValues)
+    array<string> accLabels = array.new<string>()
+    array.push(accLabels, "Initial Capital"), array.push(accLabels, "Equity"), array.push(accLabels, "Net Profit"), array.push(accLabels, "Open Profit"), array.push(accLabels, "Position Size"), array.push(accLabels, "Avg Entry Price")
+    array<string> accValues = array.new<string>()
+    array.push(accValues, _naStrF(strategy.initial_capital)), array.push(accValues, _naStrF(strategy.equity)), array.push(accValues, _naStrF(strategy.netprofit)), array.push(accValues, _naStrF(strategy.openprofit)), array.push(accValues, _naStrF(strategy.position_size)), array.push(accValues, _naStrF(strategy.position_avg_price))
+    string accSection = _infoSection("ACCOUNT", accLabels, accValues)
+    tooltipHeader("Symbol Information") +
+     idSection +
+     mktSection +
+     csSection +
+     fundSection +
+     _infoSection("DERIVATIVES",
+         array.from("Expiration", "Current Contract"),
+         array.from(na(syminfo.expiration_date) ? "N/A" : str.format_time(syminfo.expiration_date, "yyyy-MM-dd"), _naStr(syminfo.current_contract))) +
+     recSection +
+     tpSection +
+     accSection
+
+// @function Build drawdown card tooltip with period, depth, and recovery
+_ttDrawdown(DrawdownRecord dd, int rank) =>
+    string dropStr = formatDuration(na(dd.durationDays) ? na : dd.durationDays * MS_PER_DAY)
+    string recStr = formatDuration(na(dd.recoveryDays) ? na : dd.recoveryDays * MS_PER_DAY)
+    tooltipHeader("Drawdown #" + str.tostring(rank)) +
+     "Period: " + formatDateDMY(dd.startTime) + " - " + formatDateDMY(dd.endTime) + "\n" +
+     "  ↳ Peak to trough decline\n\n" +
+     "Drop Duration: " + dropStr + "\n" +
+     "Depth: -" + str.tostring(dd.depthPct, "0.00") + "%\n" +
+     "Recovery: " + recStr + "\n\n" +
+     "  ↳ Recovery time from trough to new peak"
+
+// @function Build recovery card tooltip with drop, rally, and recovery
+_ttRecovery(RecoveryRecord rec, int rank) =>
+    float cappedRally = capValue(rec.reboundPct)
+    string rallyStr = nz(cappedRally, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedRally)
+    string dropStr = formatDuration(na(rec.dropDays) ? na : rec.dropDays * MS_PER_DAY)
+    string recStr = formatDuration(na(rec.recoveryDays) ? na : rec.recoveryDays * MS_PER_DAY)
+    tooltipHeader("Recovery #" + str.tostring(rank)) +
+     "Period: " + formatDateDMY(rec.troughTime) + " - " + formatDateDMY(rec.recoveryTime) + "\n" +
+     "  ↳ Trough to new peak recovery\n\n" +
+     "Drop: " + dropStr + "\n" +
+     "Rally: " + rallyStr + "\n" +
+     "Recovery: " + recStr + "\n\n" +
+     "  ↳ Bounce-back strength from drawdown"
+
+// @function Build trade card tooltip with entry/exit times and return
+_ttTrade(TradeRecord trade, int rank, string cardType) =>
+    float cappedRet = capValue(trade.returnPct)
+    string returnStr = nz(cappedRet, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedRet)
+    tooltipHeader(cardType + " Trade #" + str.tostring(rank)) +
+     "Entry: " + formatDateDMY(trade.entryTime) + " " + formatTimeHHMM(trade.entryTime) + "\n" +
+     "Exit: " + formatDateDMY(trade.exitTime) + " " + formatTimeHHMM(trade.exitTime) + "\n" +
+     "Return: " + returnStr + "\n\n" +
+     "  ↳ " + (cappedRet >= 0 ? "Profitable trade" : "Losing trade")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: TABLE RENDERING — HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Render header cell with left-aligned Sans-Serif Bold text
+_hdrCell(table t, int c, int r, string txt, TableConfig cfg, string tt = na) =>
+    table.cell(t, c, r, FN.toFont(txt, "Sans-Serif Bold"), bgcolor = cfg.colorHeader, text_color = cfg.colorText, text_size = cfg.textSize, tooltip = tt)
+
+// @function Render header cell with centered Sans-Serif Bold text
+_hdrCellC(table t, int c, int r, string txt, TableConfig cfg, string tt = na) =>
+    table.cell(t, c, r, FN.toFont(txt, "Sans-Serif Bold"), bgcolor = cfg.colorHeader, text_color = cfg.colorText, text_size = cfg.textSize, text_halign = text.align_center, tooltip = tt)
+
+// @function Render value cell with left-aligned Sans Bold text
+_valCell(table t, int c, int r, string txt, color col, TableConfig cfg, string tt = na) =>
+    table.cell(t, c, r, FN.toFont(txt, "Sans Bold"), bgcolor = cfg.colorBg, text_color = col, text_size = cfg.textSize, tooltip = tt)
+
+// @function Render value cell with centered Sans Bold text
+_valCellC(table t, int c, int r, string txt, color col, TableConfig cfg, string tt = na) =>
+    table.cell(t, c, r, FN.toFont(txt, "Sans Bold"), bgcolor = cfg.colorBg, text_color = col, text_size = cfg.textSize, text_halign = text.align_center, tooltip = tt)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Main Backtest Table
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Render row 0 section headers: Performance | Trade Statistics | Risk Metrics
+_renderSectionHeaders(table bt, TableConfig config) =>
+    _hdrCellC(bt, 0, 0, "Performance Metrics", config)
+    table.merge_cells(bt, 0, 0, 6, 0)
+    _hdrCellC(bt, 7, 0, "Trade Statistics", config)
+    table.merge_cells(bt, 7, 0, 14, 0)
+    _hdrCellC(bt, 15, 0, "Risk Metrics", config)
+    table.merge_cells(bt, 15, 0, 22, 0)
+
+// @function Render row 1 column headers (23 metric names)
+_renderColumnHeaders(table bt, TableConfig config) =>
+    string expHeader = config.showRExpectancy ? "R-Expect" : "Expectancy"
+    array<string> headers = array.from(
+         "Net Profit", "Payoff", "Sample Size", "Profit Factor", "CAGR", expHeader, "Monthly",
+        "Avg Duration", "Max CW", "Max CL", "Win", "BE", "Loss", "Frequency", "Exposure",
+        "Sharpe", "Sortino", "Max DD", "RoR", "R²", "MAR", "CVaR", "p-value")
+
+    for [i, h] in headers
+        _hdrCell(bt, i, 1, h, config)
+
+// @function Render row 2 performance metrics (cols 0–6: Net Profit, Payoff, Sample, PF, CAGR, Expectancy, Monthly)
+_renderPerformanceMetrics(table bt, Stats stats, TableConfig config) =>
+    color npColor = stats.netProfitPct > 20.0 ? config.colorBullish : stats.netProfitPct > 0.0 ? color.orange : config.colorBearish
+    _valCell(bt, 0, 2, formatValue(stats.netProfitPct, FormatMode.percent), npColor, config, _ttNetProfit(stats))
+
+    color wlColor = na(stats.payoffRatio) ? config.colorTextMuted : stats.payoffRatio > 1.5 ? config.colorBullish : stats.payoffRatio > 1.0 ? color.orange : config.colorBearish
+    _valCell(bt, 1, 2, formatValue(stats.payoffRatio, FormatMode.number, 2, false), wlColor, config, _ttPayoff(stats))
+
+    color ssColor = stats.totalTrades >= 30 ? config.colorBullish : config.colorBearish
+    _valCell(bt, 2, 2, str.tostring(stats.totalTrades), ssColor, config, _ttSampleSize(stats))
+
+    color pfColor = stats.profitFactor >= 1.5 ? config.colorBullish : stats.profitFactor > 1.0 ? color.orange : config.colorBearish
+    _valCell(bt, 3, 2, formatValue(stats.profitFactor, FormatMode.ratio, 2, false), pfColor, config, _ttProfitFactor(stats))
+
+    float cappedCagr = capValue(stats.cagr)
+    string cagrDisplay = formatCapped(cappedCagr, FormatMode.percent)
+    color cagrColor = nz(cappedCagr, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : cappedCagr >= 10.0 ? config.colorBullish : cappedCagr > 0.0 ? color.orange : config.colorBearish
+    _valCell(bt, 4, 2, cagrDisplay, cagrColor, config, _ttCAGR(stats))
+
+    float cappedExpectancy = capValue(stats.avgTradePct)
+    string expDisplay = formatCapped(cappedExpectancy, FormatMode.percent)
+    color expColor = nz(cappedExpectancy, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : cappedExpectancy > 0.20 ? config.colorBullish : cappedExpectancy > 0.0 ? color.orange : config.colorBearish
+    if config.showRExpectancy
+        float rExp = stats.rExpectancy
+        expDisplay := na(rExp) ? "-" : str.tostring(rExp, "#.###") + "R"
+        expColor := na(rExp) ? config.colorTextMuted : rExp > 0.2 ? config.colorBullish : rExp > 0.0 ? color.orange : config.colorBearish
+    _valCell(bt, 5, 2, expDisplay, expColor, config, _ttExpectancy(stats, config.showRExpectancy))
+
+    float cappedMonthly = capValue(stats.monthlyReturn)
+    string monthDisplay = formatCapped(cappedMonthly, FormatMode.percent)
+    color monthColor = nz(cappedMonthly, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : cappedMonthly > 0.0 ? config.colorBullish : config.colorBearish
+    _valCell(bt, 6, 2, monthDisplay, monthColor, config, _ttMonthly(stats))
+
+// @function Render row 2 trade statistics (cols 7–14: Duration, CW, CL, WR, BE, LR, Frequency, Exposure)
+_renderTradeStats(table bt, Stats stats, TableConfig config) =>
+    _valCell(bt, 7, 2, formatDuration(stats.avgTradeDuration), config.colorTextMuted, config, _ttAvgDuration(stats))
+
+    _valCell(bt, 8, 2, str.tostring(stats.maxConsecWins), config.colorTextMuted, config, _ttMaxCW(stats))
+
+    _valCell(bt, 9, 2, str.tostring(stats.maxConsecLosses), config.colorTextMuted, config, _ttMaxCL(stats))
+
+    _valCell(bt, 10, 2, str.tostring(math.round(stats.winRate * 100)) + "%", config.colorTextMuted, config, _ttWinRate(stats))
+
+    float beRate = stats.totalTrades > 0 ? (float(stats.evenTrades) / float(stats.totalTrades)) * 100.0 : 0.0
+    _valCell(bt, 11, 2, str.tostring(math.round(beRate)) + "%", config.colorTextMuted, config, _ttBE(stats))
+
+    _valCell(bt, 12, 2, str.tostring(math.round(stats.lossRate * 100)) + "%", config.colorTextMuted, config, _ttLossRate(stats))
+
+    _valCell(bt, 13, 2, formatIntelligentFrequency(stats.tradesPerMonth), config.colorTextMuted, config, _ttFrequency(stats))
+
+    _valCell(bt, 14, 2, formatValue(stats.timeInMarketPct, FormatMode.percent, 2, false), config.colorTextMuted, config, _ttExposure(stats))
+
+// @function Render row 2 risk metrics (cols 15–22: Sharpe, Sortino, MaxDD, RoR, R², MAR, CVaR, p-value)
+_renderRiskMetrics(table bt, Stats stats, TableConfig config, ThresholdConfig tc) =>
+    color sharpeColor = na(stats.sharpe) ? config.colorTextMuted : stats.sharpe >= INFINITY_CAP ? tc.sharpeBull : stats.sharpe > tc.sharpeExc ? tc.sharpeBull : stats.sharpe > tc.sharpeGood ? tc.sharpeOrange : stats.sharpe > tc.sharpeOk ? tc.sharpeNeutral : tc.sharpeBear
+    string sharpeStr = na(stats.sharpe) ? "-" : stats.sharpe >= INFINITY_CAP ? "∞" : formatValue(stats.sharpe, FormatMode.number, 2, false)
+    _valCell(bt, 15, 2, sharpeStr, sharpeColor, config, _ttSharpe(stats))
+
+    color sortinoColor = na(stats.sortino) ? config.colorTextMuted : stats.sortino >= INFINITY_CAP ? tc.sharpeBull : stats.sortino > tc.sharpeExc ? tc.sharpeBull : stats.sortino > tc.sharpeGood ? tc.sharpeOrange : stats.sortino > tc.sharpeOk ? tc.sharpeNeutral : tc.sharpeBear
+    string sortinoStr = na(stats.sortino) ? "-" : stats.sortino >= INFINITY_CAP ? "∞" : formatValue(stats.sortino, FormatMode.number, 2, false)
+    _valCell(bt, 16, 2, sortinoStr, sortinoColor, config, _ttSortino(stats))
+
+    color ddColor = stats.maxDrawdownPct > tc.ddSevere ? tc.ddSevereColor : stats.maxDrawdownPct > tc.ddMod ? tc.ddModColor : stats.maxDrawdownPct > tc.ddMild ? tc.ddOrange : tc.ddGoodColor
+    _valCell(bt, 17, 2, formatValue(-stats.maxDrawdownPct, FormatMode.percent, 2, false), ddColor, config, _ttMaxDD(stats))
+
+    color rorColor = na(stats.riskOfRuin) ? config.colorTextMuted : stats.riskOfRuin > tc.rorHigh ? tc.rorHighColor : stats.riskOfRuin > tc.rorMod ? tc.rorModColor : stats.riskOfRuin > tc.rorLow ? tc.rorOrange : tc.rorLowColor
+    _valCell(bt, 18, 2, formatValue(stats.riskOfRuin * 100.0, FormatMode.percent, 2, false), rorColor, config, _ttRoR(stats))
+
+    float r2 = stats.equityRSquared
+    string r2Str = na(r2) ? "-" : formatValue(r2 * 100.0, FormatMode.percent, 1, false)
+    color r2Color = na(r2) ? config.colorTextMuted : r2 > tc.r2Good ? tc.r2GoodColor : r2 > tc.r2Mod ? tc.r2Orange : r2 > tc.r2Poor ? tc.r2ModColor : tc.r2PoorColor
+    _valCell(bt, 19, 2, r2Str, r2Color, config, _ttR2(stats))
+
+    float cappedCalmar = capValue(stats.calmar)
+    string calmarDisplay = formatCapped(cappedCalmar, FormatMode.number, 2, false)
+    color marColor = nz(cappedCalmar, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : cappedCalmar > tc.calmarGood ? tc.calmarGoodColor : cappedCalmar > tc.calmarBE ? tc.calmarOrange : cappedCalmar > tc.calmarPoor ? tc.calmarBEColor : tc.calmarPoorColor
+    _valCell(bt, 20, 2, calmarDisplay, marColor, config, _ttCalmar(stats))
+
+    color cvarColor = na(stats.cvar95) ? config.colorTextMuted : stats.cvar95 > 5.0 ? config.colorBearish : config.colorBullish
+    _valCell(bt, 21, 2, formatValue(stats.cvar95, FormatMode.percent, 2, false), cvarColor, config, _ttCVaR(stats))
+
+    color pColor = na(stats.pValue) ? config.colorTextMuted : stats.pValue > tc.pInsig ? tc.pInsigColor : stats.pValue > tc.pMod ? tc.pModColor : stats.pValue > tc.pSig ? tc.pOrange : tc.pSigColor
+    _valCell(bt, 22, 2, formatValue(stats.pValue), pColor, config, _ttPValue(stats))
+
+// @function Render footer row with period info, framework label, and commission cost
+_renderFooter(table bt, Stats stats, TableConfig config, string footerLabel) =>
+    int footerRow = config.showComplementary ? 5 : 3
+
+    string periodStart = stats.firstTradeTime > 0 ? str.format_time(stats.firstTradeTime, "MM-dd-yyyy") : "Start", string periodEnd = str.format_time(stats.lastTradeTime, "MM-dd-yyyy")
+    _hdrCell(bt, 0, footerRow, "Deeptest Period: " + periodStart + " - " + periodEnd, config, _ttPeriod(stats))
+    table.merge_cells(bt, 0, footerRow, 6, footerRow)
+
+    _hdrCell(bt, 7, footerRow, footerLabel, config)
+    table.merge_cells(bt, 7, footerRow, 14, footerRow)
+
+    _hdrCell(bt, 15, footerRow, "Commission Cost: " + config.commissionInfo, config, _ttCommission(config, stats))
+    table.merge_cells(bt, 15, footerRow, 22, footerRow)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Complementary Row
+// ───────────────────────────────────────────────────────────────────────────
+
+// @function Render row 3 complementary column headers (20 metric names with merged cells)
+_renderComplementaryHeaders(table bt, TableConfig config, float winRate) =>
+    array<string> compHeaders = array.from(
+        "Compounding", "Avg Win", "Avg Trade", "Avg Loss", "Martin", "Rolling Expectancy",
+        "Avg W Dur", "Max Eq", "Alpha", "Buy & Hold", "Beta", "Min Eq", "Avg L Dur",
+        "Rolling Sortino", "Curr DD", "SQN", "Kurtosis", "Skewness", "VaR", "Ulcer")
+    string rollMetricLabel = winRate <= 0.5 ? "Rolling Sortino" : "Rolling Sharpe"
+    for i = 0 to 4
+        _hdrCell(bt, i, 3, array.get(compHeaders, i), config)
+    _hdrCell(bt, 5, 3, config.showRExpectancy ? "Rolling R-Expect" : "Rolling Expectancy", config)
+    table.merge_cells(bt, 5, 3, 6, 3)
+    for i = 7 to 9
+        _hdrCell(bt, i, 3, array.get(compHeaders, i - 1), config)
+    _hdrCell(bt, 10, 3, "Buy & Hold", config)
+    table.merge_cells(bt, 10, 3, 11, 3)
+    for i = 12 to 14
+        _hdrCell(bt, i, 3, array.get(compHeaders, i - 2), config)
+    _hdrCell(bt, 15, 3, rollMetricLabel, config)
+    table.merge_cells(bt, 15, 3, 16, 3)
+    for i = 17 to 22
+        _hdrCell(bt, i, 3, array.get(compHeaders, i - 3), config)
+
+// @function Render compounding effect cell (col 0, row 4)
+_renderCompoundingCell(table bt, Stats stats, TableConfig config) =>
+    string compStr = "-"
+    color compColor = config.colorTextMuted
+    float effectOfCapital = 0.0
+    if not na(stats.compEffect) and strategy.initial_capital > 0.0
+        effectOfCapital := (stats.compEffect / strategy.initial_capital) * 100.0
+        compStr := FN.toFont(formatValue(effectOfCapital, FormatMode.percent, 1, true), "Sans Bold")
+        compColor := effectOfCapital > 0.0 ? config.colorBullish : config.colorBearish
+    table.cell(bt, 0, 4, compStr, bgcolor = config.colorBg, text_color = compColor, text_size = config.textSize, tooltip = _ttCompounding(stats))
+
+// @function Render avg win/trade/loss cells (cols 1–3, row 4)
+_renderAvgWinLossTradeCells(table bt, Stats stats, TableConfig config) =>
+    color awColor = stats.avgWinPct > 0.0 ? config.colorBullish : config.colorBearish
+    _valCell(bt, 1, 4, formatValue(stats.avgWinPct, FormatMode.percent), awColor, config, _ttAvgWin(stats))
+
+    color atColor = stats.avgTradePct > 0.0 ? config.colorBullish : stats.avgTradePct < 0.0 ? config.colorBearish : color.orange
+    _valCell(bt, 2, 4, formatValue(stats.avgTradePct, FormatMode.percent), atColor, config, _ttAvgTrade(stats))
+
+    color alColor = stats.avgLossPct > 0.0 ? config.colorBearish : config.colorBullish
+    _valCell(bt, 3, 4, formatValue(-stats.avgLossPct, FormatMode.percent, 2, false), alColor, config, _ttAvgLoss(stats))
+
+// @function Render Martin ratio cell (col 4, row 4)
+_renderMartinCell(table bt, Stats stats, TableConfig config) =>
+    float cappedMartin = capValue(stats.martin)
+    string martinDisplay = formatCapped(cappedMartin, FormatMode.number, 2, false)
+    color martinColor = nz(cappedMartin, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : getPnLColor(nz(cappedMartin, 0), config.colorBullish, config.colorBearish)
+    _valCell(bt, 4, 4, martinDisplay, martinColor, config, _ttMartin(stats))
+
+// @function Render rolling expectancy range cell (cols 5–6 merged, row 4)
+_renderRollingExpectancyCell(table bt, Stats stats, TableConfig config, RollingStats rollingStats) =>
+    string rollExpStr = "-"
+    color rollExpColor = config.colorBullish
+    float expMin = na, float expMax = na, float globalExp = na, float oneR = nz(stats.avgLossPct)
+
+    if not na(rollingStats)
+        expMin := rollingStats.expectancyMin, expMax := rollingStats.expectancyMax, globalExp := stats.avgTradePct
+
+        if config.showRExpectancy and oneR > 0.0001
+            float rExpMin = expMin / oneR, float rExpMax = expMax / oneR
+            rollExpStr := "[" + str.tostring(rExpMin, "#.###") + "R - " + str.tostring(rExpMax, "#.###") + "R]"
+            rollExpColor := nz(rollingStats.expectancyMean, 0.0) > 0 ? config.colorBullish : rExpMin > 0 ? color.orange : rExpMin > -0.5 ? color.orange : _expStabilityColor(rollingStats.expectancyMean, rollingStats.expectancyStdDev, true, config.colorBearish)
+        else
+            rollExpStr := "[" + formatValue(expMin, FormatMode.percent, 2, false) + " - " + formatValue(expMax, FormatMode.percent, 2, false) + "]"
+            float halfGlobal = nz(globalExp, 0.0) <= 0 ? na : globalExp * 0.5
+            rollExpColor := nz(rollingStats.expectancyMean, 0.0) > 0 ? config.colorBullish : expMin > halfGlobal ? config.colorBullish : expMin > 0 ? color.orange : _expStabilityColor(rollingStats.expectancyMean, rollingStats.expectancyStdDev, false, config.colorBearish)
+
+    _valCell(bt, 5, 4, rollExpStr, rollExpColor, config, _ttRollingExp(stats, rollingStats, config.showRExpectancy))
+    table.merge_cells(bt, 5, 4, 6, 4)
+
+// @function Render buy-and-hold and beta cells (cols 10–12, row 4)
+_renderBuyHoldBetaCells(table bt, Stats stats, TableConfig config, ThresholdConfig tc) =>
+    _valCell(bt, 10, 4, formatValue(stats.buyHoldReturn, FormatMode.percent), getPnLColor(nz(stats.buyHoldReturn, 0), config.colorBullish, config.colorBearish), config, _ttBuyHold(stats))
+    table.merge_cells(bt, 10, 4, 11, 4)
+
+    float cappedBeta = capValue(stats.beta)
+    string betaDisplay = formatCapped(cappedBeta, FormatMode.number, 2, false)
+    color betaColor = nz(cappedBeta, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : cappedBeta >= tc.betaHigh ? tc.betaHighColor : cappedBeta >= tc.betaLow ? tc.betaLowColor : tc.betaGoodColor
+    _valCell(bt, 12, 4, betaDisplay, betaColor, config, _ttBeta(stats))
+
+// @function Render min equity and avg loss duration cells (cols 13–14, row 4)
+_renderMinEquityLossDurationCells(table bt, Stats stats, TableConfig config) =>
+    float minEqPct = stats.minEquity > 0 ? ((stats.minEquity - strategy.initial_capital) / strategy.initial_capital) * 100.0 : 0.0, float cappedMinEq = capValue(minEqPct)
+    string minEqDisplay = formatCapped(cappedMinEq, FormatMode.percent)
+    color minEqColor = nz(cappedMinEq, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : cappedMinEq >= 0 ? config.colorBullish : config.colorBearish
+    _valCell(bt, 13, 4, minEqDisplay, minEqColor, config, _ttMinEquity(stats))
+
+    _valCell(bt, 14, 4, formatDuration(stats.avgLossDuration), config.colorTextMuted, config, _ttAvgLossDur(stats))
+
+// @function Render rolling Sharpe/Sortino range cell (cols 15–16 merged, row 4)
+_renderRollingSortinoCell(table bt, Stats stats, TableConfig config, RollingStats rollingStats, bool useSortino) =>
+    string rollMetricStr = "-"
+    color rollMetricColor = config.colorBullish
+    float metricMin = na, float metricMax = na, float globalMetric = na
+
+    if not na(rollingStats)
+        metricMin := useSortino ? rollingStats.sortinoMin : rollingStats.sharpeMin, metricMax := useSortino ? rollingStats.sortinoMax : rollingStats.sharpeMax, globalMetric := useSortino ? stats.sortino : stats.sharpe
+
+        string minStr = not na(metricMin) ? (metricMin >= INFINITY_CAP ? "∞" : formatValue(metricMin, FormatMode.number, 2, false)) : "-", string maxStr = not na(metricMax) ? (metricMax >= INFINITY_CAP ? "∞" : formatValue(metricMax, FormatMode.number, 2, false)) : "-"
+        rollMetricStr := "[" + minStr + " - " + maxStr + "]"
+
+        float halfGlobal = nz(globalMetric, 0.0) <= 0 ? na : globalMetric * 0.5, float metricRange = not na(metricMin) and not na(metricMax) ? metricMax - metricMin : na
+
+        rollMetricColor := nz(globalMetric, 0.0) > 0 ? config.colorBullish : metricMin > halfGlobal ? config.colorBullish : metricMin > 0 ? color.orange : (metricRange < 1.0 ? color.orange : config.colorBearish)
+
+    _valCell(bt, 15, 4, rollMetricStr, rollMetricColor, config, _ttRollingMetric(stats, rollingStats, useSortino))
+    table.merge_cells(bt, 15, 4, 16, 4)
+
+// @function Render entire complementary row (row 4, cols 0–22) — orchestrates all cell renderers
+_renderComplementaryRow(table bt, Stats stats, TableConfig config, RollingStats rollingStats, ThresholdConfig tc) =>
+    bool useSortino = stats.winRate <= 0.5
+
+    _renderCompoundingCell(bt, stats, config)
+    _renderAvgWinLossTradeCells(bt, stats, config)
+    _renderMartinCell(bt, stats, config)
+    _renderRollingExpectancyCell(bt, stats, config, rollingStats)
+    _valCell(bt, 7, 4, formatDuration(stats.avgWinDuration), config.colorTextMuted, config, _ttAvgWinDur(stats))
+    float maxEqPct = stats.maxEquity > 0 ? ((stats.maxEquity - strategy.initial_capital) / strategy.initial_capital) * PERCENT_MULTIPLIER : 0.0
+    _valCell(bt, 8, 4, formatValue(maxEqPct, FormatMode.percent), config.colorBullish, config, _ttMaxEquity(stats))
+    float cappedAlpha = capValue(stats.alpha)
+    _valCell(bt, 9, 4, formatCapped(cappedAlpha, FormatMode.percent), nz(cappedAlpha, INFINITY_CAP) >= INFINITY_CAP ? config.colorTextMuted : getPnLColor(nz(cappedAlpha, 0), config.colorBullish, config.colorBearish), config, _ttAlpha(stats))
+    _renderBuyHoldBetaCells(bt, stats, config, tc)
+    _renderMinEquityLossDurationCells(bt, stats, config)
+    _renderRollingSortinoCell(bt, stats, config, rollingStats, useSortino)
+    _valCell(bt, 17, 4, formatValue(-stats.currentDrawdownPct, FormatMode.percent, 2, false), stats.currentDrawdownPct > 0 ? config.colorBearish : config.colorBullish, config, _ttCurrentDD(stats))
+    float sqnVal = stats.sqn
+    _valCell(bt, 18, 4, na(sqnVal) ? "-" : formatValue(sqnVal, FormatMode.number, 2, false), na(sqnVal) ? config.colorTextMuted : sqnVal > 2.5 ? config.colorBullish : sqnVal > 1.6 ? color.orange : sqnVal > 0.0 ? config.colorText : config.colorBearish, config, _ttSQN(stats))
+    _valCell(bt, 19, 4, formatValue(stats.kurtosis, FormatMode.number, 2, false), stats.kurtosis > tc.kurtHigh ? tc.kurtHighColor : (stats.kurtosis > tc.kurtMod ? tc.kurtModColor : (stats.kurtosis > tc.kurtOk ? tc.kurtOrange : tc.kurtGoodColor)), config, _ttKurtosis(stats))
+    _valCell(bt, 20, 4, formatValue(stats.skewness, FormatMode.number, 2, false), stats.skewness < tc.skewVNeg ? tc.skewVNegColor : (stats.skewness < tc.skewModNeg ? tc.skewModNegColor : (stats.skewness > tc.skewPos ? tc.skewPosColor : tc.skewNeutral)), config, _ttSkewness(stats))
+    _valCell(bt, 21, 4, formatValue(stats.var95, FormatMode.percent, 2, false), config.colorBearish, config, _ttVaR(stats))
+    _valCell(bt, 22, 4, formatValue(stats.ulcerIndex, FormatMode.number, 2, false), stats.ulcerIndex < 5.0 ? config.colorBullish : config.colorBearish, config, _ttUlcer(stats))
+
+// @function Render main backtest table — 23-column metrics dashboard
+renderDeeptestTable(Stats stats, TableConfig config, RollingStats rollingStats = na) =>
+    var table bt = table.new(position.bottom_center, 23, 8,
+         border_color = config.colorBorder,
+         border_width = 1,
+         frame_width = 1,
+         bgcolor = config.colorHeader,
+         force_overlay = true)
+
+    string frameworkLabel = "Deeptest Backtesting Framework", string footerTooltipText = "Deeptest — © Fractalyst"
+    var bool footerPrimaryIsText = false
+    if not footerPrimaryIsText
+        footerPrimaryIsText := math.round(math.random(0.0, 1.0)) == 1
+    string footerLabel = footerPrimaryIsText ? frameworkLabel : footerTooltipText
+
+    if stats.totalTrades > 0
+        _renderSectionHeaders(bt, config)
+        _renderColumnHeaders(bt, config)
+
+        ThresholdConfig tc = getThresholdConfig(config.colorBearish, color.orange, color.orange, config.colorBullish)
+
+        _renderPerformanceMetrics(bt, stats, config)
+        _renderTradeStats(bt, stats, config)
+        _renderRiskMetrics(bt, stats, config, tc)
+
+        if config.showComplementary
+            _renderComplementaryHeaders(bt, config, stats.winRate)
+
+            _renderComplementaryRow(bt, stats, config, rollingStats, tc)
+
+        _renderFooter(bt, stats, config, footerLabel)
+
+    bt
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9: WALK-FORWARD ANALYSIS & MONTE CARLO
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Step equity path forward by one return, tracking growth, peak, and max drawdown
+// @returns [nextGrowth, nextPeak, max(nextDd, mdd)]
+_stepPathMaxDD(float growth, float peak, float mdd, float ret) =>
+    if na(ret)
+        [growth, peak, mdd]
+    else
+        float nextGrowth = growth * (1.0 + ret), float nextPeak = nextGrowth > peak ? nextGrowth : peak, float nextDd = nextPeak > 0.0 ? (nextPeak - nextGrowth) / nextPeak : 0.0
+        [nextGrowth, nextPeak, nextDd > mdd ? nextDd : mdd]
+
+// @function Walk-Forward Analysis — splits returns into IS/OOS windows, computes per-window metrics
+// @param targetWindows Desired number of OOS windows | @param oosPercent OOS fraction (5–49%)
+method computeWalkForward(array<float> returns, int targetWindows = 12, float oosPercent = 30.0, float tradesPerYear = na, float oneR = 0.0) =>
+    int n = array.size(returns)
+
+    if n < 10
+        WalkForwardResults.new(
+             MirroredMetrics.new(na, na, na, na, na, na),
+             MirroredMetrics.new(na, na, na, na, na, na),
+             array.new<float>(),
+             array.new<string>())
+    else
+        float oosFrac = math.max(0.05, math.min(0.49, oosPercent / 100.0))
+
+        int segLenGuess = math.max(2, int(math.round(float(n) / (0.75 + 0.25 * float(targetWindows))))), int bestIS = 1, int bestOOS = 1, int bestDiff = 1000000000
+
+        for t = 0 to 400
+            int delta = t == 0 ? 0 : (t % 2 == 1 ? (t + 1) / 2 : -t / 2), int segLenTry = math.max(2, segLenGuess + delta), int isTry = math.max(1, int(math.floor(float(segLenTry) * (1.0 - oosFrac)))), int oosTry = math.max(1, segLenTry - isTry)
+
+            int lastStart = n - (isTry + oosTry), int winTry = lastStart >= 0 ? int(math.floor(float(lastStart) / float(oosTry))) + 1 : 0, int diff = math.abs(winTry - targetWindows)
+            if diff < bestDiff
+                bestDiff := diff
+                bestIS := isTry
+                bestOOS := oosTry
+            if winTry == targetWindows
+                break
+
+        array<float> oosReturns = array.new<float>()
+        array<string> windowRanges = array.new<string>()
+        int windowSize = bestIS + bestOOS
+
+        int windowCount = 0
+
+        float cumOosSumRet = 0.0
+        int cumOosTradeCount = 0
+
+        array<float> allOosTradeReturns = array.new<float>()
+
+        for startIdx = 0 to n - windowSize by bestOOS
+            if windowCount >= MAX_WINDOWS_LIMIT
+                break
+
+            int oosStart = startIdx + bestIS, int oosEnd = oosStart + bestOOS
+
+            int isEnd = math.min(oosStart, n)
+            float isSum = isEnd > startIdx ? array.sum(array.slice(returns, startIdx, isEnd)) : 0.0
+
+            float growthOOS = 1.0, float peak = 1.0, float maxDD = 0.0, float sumRet = 0.0
+            array<float> windowReturns = array.new<float>()
+            float sumWin = 0.0, float sumLoss = 0.0
+            int winCount = 0, int lossCount = 0, int tradeCount = 0
+
+            for i = oosStart to oosEnd - 1
+                if i < n
+                    float r = array.get(returns, i)
+                    sumRet += r
+                    array.push(windowReturns, r)
+                    array.push(allOosTradeReturns, r)
+                    tradeCount += 1
+
+                    [_g, _p, _m] = _stepPathMaxDD(growthOOS, peak, maxDD, r), growthOOS := _g, peak := _p, maxDD := _m
+
+                    if r > BREAKEVEN_THRESHOLD
+                        winCount += 1
+                        sumWin += r
+                    else if r < -BREAKEVEN_THRESHOLD
+                        lossCount += 1
+                        sumLoss += math.abs(r)
+
+            float returnPct = (growthOOS - 1.0) * 100.0
+
+            cumOosSumRet += sumRet
+            cumOosTradeCount += tradeCount
+
+            string rangeLabel = str.tostring(oosStart + 1, "000") + "-" + str.tostring(math.min(oosEnd, n) - 1 + 1, "000")
+
+            array.push(oosReturns, growthOOS - 1.0)
+            array.push(windowRanges, rangeLabel)
+
+            windowCount += 1
+
+        float windowsPerYear = (tradesPerYear > 0 and bestOOS > 0) ? (tradesPerYear / float(bestOOS)) : na
+
+        float isGrowth = 1.0, float isSumRet = 0.0, float isPeak = 1.0, float isMDD = 0.0
+        for r in returns
+            isSumRet += r
+            [_g, _p, _m] = _stepPathMaxDD(isGrowth, isPeak, isMDD, r), isGrowth := _g, isPeak := _p, isMDD := _m
+
+        float isYears = na
+        if n > 0
+            int isFirstEntry = strategy.closedtrades.entry_time(0), int isLastExit = strategy.closedtrades.exit_time(n - 1)
+            if isLastExit > isFirstEntry
+                isYears := float(isLastExit - isFirstEntry) / MS_PER_YEAR
+        float isCagr = (isYears > 0) ? (math.pow(isGrowth, 1.0 / isYears) - 1.0) * 100.0 : na, float isExpPct = n > 0 ? (isSumRet / float(n)) * 100.0 : na, float isMaxDDPct = -isMDD * 100.0, float isSharpe = (n >= 2 and tradesPerYear > 0) ? calcTradeSharpe(returns, tradesPerYear, DEFAULT_RISK_FREE_RATE, true, true) : na, float isSortino = (n >= 2 and tradesPerYear > 0) ? calcTradeSortino(returns, tradesPerYear, DEFAULT_RISK_FREE_RATE, true) : na
+        MirroredMetrics isM = MirroredMetrics.new(isCagr, isExpPct, oneR > 0.0001 ? isExpPct / oneR : na, isMaxDDPct, isSharpe, isSortino)
+
+        int oosMCount = array.size(oosReturns)
+        float oosCagr = na
+        if oosMCount > 0
+            float wfGrowth = 1.0
+            for r in oosReturns
+                wfGrowth *= (1.0 + r)
+            float oosYears = (windowsPerYear > 0) ? (float(oosMCount) / windowsPerYear) : na
+            oosCagr := oosYears > 0 ? (math.pow(wfGrowth, 1.0 / oosYears) - 1.0) * 100.0 : na
+        MirroredMetrics oosM = MirroredMetrics.new(oosCagr, na, na, na, na, na)
+
+        int oosTradeCount = array.size(allOosTradeReturns)
+        if oosTradeCount >= 2 and tradesPerYear > 0
+            oosM.sharpe := calcTradeSharpe(allOosTradeReturns, tradesPerYear, DEFAULT_RISK_FREE_RATE, true, true)
+            oosM.sortino := calcTradeSortino(allOosTradeReturns, tradesPerYear, DEFAULT_RISK_FREE_RATE, true)
+
+        oosM.expectancy := cumOosTradeCount > 0 ? (cumOosSumRet / float(cumOosTradeCount)) * 100.0 : na
+        oosM.rExpectancy := oneR > 0.0001 and cumOosTradeCount > 0 ? nz(oosM.expectancy) / oneR : na
+
+        if oosTradeCount >= 1
+            float oosGrowth = 1.0, float oosPeak = 1.0, float oosMDD = 0.0
+            for r in allOosTradeReturns
+                [_g, _p, _m] = _stepPathMaxDD(oosGrowth, oosPeak, oosMDD, r), oosGrowth := _g, oosPeak := _p, oosMDD := _m
+            oosM.maxDD := -oosMDD * 100.0
+
+        WalkForwardResults.new(isM, oosM, oosReturns, windowRanges)
+
+// @function Get best, median, and worst values from an array
+// @param inverse True = best is min (for drawdowns), False = best is max
+// @returns [best, median, worst]
+method getBestMedianWorst(array<float> arr, bool inverse = false) =>
+    if na(arr)
+        [na, na, na]
+    else
+        int m = array.size(arr)
+        float med = m == 0 ? na : array.median(arr), float best = m == 0 ? na : (inverse ? array.min(arr) : array.max(arr)), float worst = m == 0 ? na : (inverse ? array.max(arr) : array.min(arr))
+        [best, med, worst]
+
+// @function Run complete stress test — Walk-Forward Analysis + Monte Carlo bootstrap
+// @returns StressTestResults with IS, MC (best/median/worst), and OOS metrics
+runStressTest(Stats isStats, array<float> returns, int targetWindows = 12, float oosPercent = 30.0, int mcSimulations = 1000, float tpy = na) =>
+    int n = array.size(returns)
+    if n < MIN_STRESS_TRADES or targetWindows < MIN_STRESS_TRADES or targetWindows > MAX_WINDOWS_LIMIT or oosPercent < MIN_OOS_PERCENT or oosPercent > MAX_OOS_PERCENT or mcSimulations < MIN_MC_SIMULATIONS
+        na
+    else
+        int effectiveSims = n * mcSimulations > MAX_TOTAL_ITERATIONS ? math.max(10, int(MAX_TOTAL_ITERATIONS / n)) : mcSimulations
+
+        float tpyWfa = tpy > 0 ? tpy : isStats.tradesPerYear, float oneR = nz(isStats.avgLossPct)
+
+        WalkForwardResults wf = computeWalkForward(returns, targetWindows, oosPercent, tpyWfa, oneR)
+        MirroredMetrics isM = wf.isMetrics
+
+        array<float> mcCAGRs = array.new<float>(), array<float> mcExps = array.new<float>(), array<float> mcRExps = array.new<float>(), array<float> mcDDs = array.new<float>(), array<float> mcSharpes = array.new<float>(), array<float> mcSortinos = array.new<float>()
+
+        int seedBase = int(math.abs((time % RNG_PRIME) + bar_index * 151 + n * 23 + effectiveSims * 29))
+
+        float rfPerTrade = tpyWfa > 0 and DEFAULT_RISK_FREE_RATE > 0.0 ? math.pow(1.0 + DEFAULT_RISK_FREE_RATE, 1.0 / tpyWfa) - 1.0 : 0.0
+        float annualFactor = tpyWfa > 0 ? math.sqrt(tpyWfa) : 1.0, float years = isStats.tradingPeriodDays / (MS_PER_YEAR / MS_PER_DAY)
+
+        for simIdx = 0 to effectiveSims - 1
+            float growth = 1.0, float sumRet = 0.0, float sumSqRet = 0.0, float sumSqDownside = 0.0
+            int downsideCount = 0
+            float peak = 1.0, float mdd = 0.0
+
+            for tradeIdx = 0 to n - 1
+                int seed = int(math.abs((seedBase + simIdx * RNG_MULT_1 + tradeIdx * RNG_MULT_2) % RNG_PRIME)), int randomIndex = int(math.random(0.0, float(n), seed))
+                randomIndex := math.max(0, math.min(n - 1, randomIndex))
+
+                float ret = array.get(returns, randomIndex)
+                sumRet += ret
+                sumSqRet += ret * ret
+
+                if ret < rfPerTrade
+                    float diff = ret - rfPerTrade
+                    sumSqDownside += diff * diff
+                    downsideCount += 1
+
+                [_g, _p, _m] = _stepPathMaxDD(growth, peak, mdd, ret), growth := _g, peak := _p, mdd := _m
+
+            float cagr = years > 0 ? (math.pow(growth, 1.0 / years) - 1.0) * 100.0 : na, float exp = (sumRet / float(n)) * 100.0
+
+            float srp = na, float srt = na
+            if n >= 2 and tpyWfa > 0
+                float meanReturn = sumRet / float(n), float variance = sumSqRet / float(n) - meanReturn * meanReturn, float stdDev = variance > 0.0 ? math.sqrt(variance * float(n) / float(n - 1)) : 0.0
+
+                if stdDev > 0.0
+                    float sharpe = (meanReturn - rfPerTrade) / stdDev * annualFactor
+                    srp := math.abs(sharpe) >= INFINITY_CAP ? (sharpe > 0 ? INFINITY_CAP : -INFINITY_CAP) : sharpe
+                else
+                    srp := meanReturn > rfPerTrade ? INFINITY_CAP : (meanReturn < rfPerTrade ? -INFINITY_CAP : na)
+
+                if downsideCount > 0
+                    float downsideDev = math.sqrt(sumSqDownside / float(n))
+                    if downsideDev > 0.0
+                        float sortino = (meanReturn - rfPerTrade) / downsideDev * annualFactor
+                        srt := math.abs(sortino) >= INFINITY_CAP ? (sortino > 0 ? INFINITY_CAP : -INFINITY_CAP) : sortino
+                    else
+                        srt := meanReturn > rfPerTrade ? INFINITY_CAP : na
+                else
+                    srt := meanReturn > rfPerTrade ? INFINITY_CAP : na
+
+            float rExp = oneR > 0.0001 ? exp / oneR : na
+
+            array.push(mcCAGRs, cagr)
+            array.push(mcExps, exp)
+            if not na(rExp)
+                array.push(mcRExps, rExp)
+            array.push(mcDDs, -mdd * 100.0)
+            array.push(mcSharpes, srp)
+            array.push(mcSortinos, srt)
+
+        [cagrB, cagrM, cagrW] = getBestMedianWorst(mcCAGRs)
+        [expB, expM, expW] = getBestMedianWorst(mcExps)
+        [rExpB, rExpM, rExpW] = getBestMedianWorst(mcRExps)
+        [ddB, ddM, ddW] = getBestMedianWorst(mcDDs)
+        [srpB, srpM, srpW] = getBestMedianWorst(mcSharpes)
+        [srtB, srtM, srtW] = getBestMedianWorst(mcSortinos)
+
+        MirroredMetrics mcB = MirroredMetrics.new(cagrB, expB, rExpB, ddB, srpB, srtB), MirroredMetrics mcM = MirroredMetrics.new(cagrM, expM, rExpM, ddM, srpM, srtM), MirroredMetrics mcW = MirroredMetrics.new(cagrW, expW, rExpW, ddW, srpW, srtW)
+
+        MirroredMetrics oosM = wf.oosMetrics
+
+        StressTestResults.new(isM, mcB, mcM, mcW, oosM, wf.oosReturns, wf.windowRanges)
+
+// @function Render a stress test matrix cell with appropriate formatting
+// @param isSharpe True = format as number, False = format as percent
+// @param useRMode True = format as R-multiple (e.g., "0.532R")
+stressCell(table t, int c, int r, float val, bool isSharpe, TableConfig cfg, string tt = na, bool useRMode = false) =>
+    float cappedVal = capValue(val)
+    string valStr = nz(cappedVal, INFINITY_CAP) >= INFINITY_CAP ? "-" : (useRMode ? str.tostring(cappedVal, "#.###") + "R" : (isSharpe ? formatValue(cappedVal, FormatMode.number, 2, false) : formatValue(cappedVal, FormatMode.percent, 2, true)))
+    color valCol = nz(cappedVal, INFINITY_CAP) >= INFINITY_CAP ? color.gray : (cappedVal >= 0 ? cfg.colorBullish : cfg.colorBearish)
+    table.cell(t, c, r, FN.toFont(valStr, "Sans Bold"), bgcolor = cfg.colorBg, text_color = valCol, text_size = cfg.textSize, tooltip = tt)
+
+// @function Render 3-section stress test table (IS | MC Best/Median/Worst | OOS)
+renderStressTestMatrix(StressTestResults results, TableConfig config, float winRate) =>
+    bool useSortino = winRate <= 0.5
+    string metricLabel = useSortino ? "Sortino" : "Sharpe"
+
+    var table st = table.new(position.top_center, 12, 6,
+         border_color = config.colorBorder,
+         border_width = 1,
+         frame_width = 1,
+         bgcolor = config.colorBg,
+         force_overlay = true)
+
+    float isMaxDD = results.isMetrics.maxDD
+
+    table.merge_cells(st, 0, 0, 3, 0)
+    _hdrCellC(st, 0, 0, "In-Sample Analysis", config, "Results from the primary backtest period. Baseline performance metrics.")
+    table.merge_cells(st, 4, 0, 7, 0)
+    _hdrCellC(st, 4, 0, "Monte Carlo Analysis", config, "Bootstrap resamples trades with replacement to reveal the range of possible outcomes from the same return distribution.")
+    table.merge_cells(st, 8, 0, 11, 0)
+    _hdrCellC(st, 8, 0, "Out-of-Sample Analysis", config, "Forward test on data held out from the main backtest period. Validates consistency.")
+
+    _hdrCell(st, 0, 1, "CAGR", config)
+    _hdrCell(st, 1, 1, config.showRExpectancy ? "R-Expect" : "Expectancy", config)
+    _hdrCell(st, 2, 1, "Max DD", config)
+    _hdrCell(st, 3, 1, metricLabel, config)
+    _hdrCell(st, 4, 1, "Best", config)
+    table.merge_cells(st, 5, 1, 6, 1)
+    _hdrCell(st, 5, 1, "Median", config)
+    _hdrCell(st, 7, 1, "Worst", config)
+    _hdrCell(st, 8, 1, "CAGR", config)
+    _hdrCell(st, 9, 1, config.showRExpectancy ? "R-Expect" : "Expectancy", config)
+    _hdrCell(st, 10, 1, "Max DD", config)
+    _hdrCell(st, 11, 1, metricLabel, config)
+
+    stressCell(st, 0, 2, capValue(results.isMetrics.cagr), false, config, _ttStressCagr("IS", results.isMetrics.cagr))
+    stressCell(st, 1, 2, config.showRExpectancy ? results.isMetrics.rExpectancy : results.isMetrics.expectancy, false, config, _ttStressExp("IS", results.isMetrics.expectancy, results.isMetrics.rExpectancy, config.showRExpectancy), config.showRExpectancy)
+    float isMaxDDCapped = capValue(isMaxDD)
+    string isMaxDDStr = formatCapped(isMaxDDCapped, FormatMode.percent, 2, true)
+    color isMaxDDCol = nz(isMaxDDCapped, INFINITY_CAP) >= INFINITY_CAP ? color.gray : (isMaxDDCapped <= -30.0 ? config.colorBearish : isMaxDDCapped <= -20.0 ? color.orange : config.colorBullish)
+    _valCell(st, 2, 2, isMaxDDStr, isMaxDDCol, config, _ttStressDD("IS", isMaxDD))
+    float isMetric = useSortino ? results.isMetrics.sortino : results.isMetrics.sharpe
+    stressCell(st, 3, 2, isMetric, true, config, _ttStressMetric("IS", isMetric, useSortino))
+    stressCell(st, 4, 2, capValue(results.mcBest.cagr), false, config, _ttMcWindow("Best", results.mcBest, 1000, config.showRExpectancy))
+    stressCell(st, 5, 2, capValue(results.mcMedian.cagr), false, config, _ttMcWindow("Median", results.mcMedian, 1000, config.showRExpectancy))
+    table.merge_cells(st, 5, 2, 6, 2)
+    stressCell(st, 7, 2, capValue(results.mcWorst.cagr), false, config, _ttMcWindow("Worst", results.mcWorst, 1000, config.showRExpectancy))
+    float oosMaxDD = results.oosMetrics.maxDD
+    stressCell(st, 8, 2, capValue(results.oosMetrics.cagr), false, config, _ttStressCagr("OOS", results.oosMetrics.cagr))
+    stressCell(st, 9, 2, config.showRExpectancy ? results.oosMetrics.rExpectancy : results.oosMetrics.expectancy, false, config, _ttStressExp("OOS", results.oosMetrics.expectancy, results.oosMetrics.rExpectancy, config.showRExpectancy), config.showRExpectancy)
+    float oosMaxDDCapped = capValue(oosMaxDD)
+    string oosMaxDDStr = formatCapped(oosMaxDDCapped, FormatMode.percent, 2, true)
+    color oosMaxDDCol = nz(oosMaxDDCapped, INFINITY_CAP) >= INFINITY_CAP ? color.gray : (oosMaxDDCapped <= -30.0 ? config.colorBearish : oosMaxDDCapped <= -20.0 ? color.orange : config.colorBullish)
+    _valCell(st, 10, 2, oosMaxDDStr, oosMaxDDCol, config, _ttStressDD("OOS", oosMaxDD))
+    float oosMetric = useSortino ? results.oosMetrics.sortino : results.oosMetrics.sharpe
+    stressCell(st, 11, 2, oosMetric, true, config, _ttStressMetric("OOS", oosMetric, useSortino))
+
+    int numRanges = array.size(results.windowRanges)
+    int oosN = array.size(results.oosReturns)
+    for col = 0 to 11
+        _hdrCellC(st, col, 3, col < numRanges ? array.get(results.windowRanges, col) : "-", config)
+        float val = col < oosN ? array.get(results.oosReturns, col) * 100.0 : na
+        float cappedVal = capValue(val)
+        _valCell(st, col, 4, formatCapped(cappedVal, FormatMode.percent, 2, true), nz(cappedVal, INFINITY_CAP) >= INFINITY_CAP ? color.gray : (cappedVal >= 0 ? config.colorBullish : config.colorBearish), config, _ttOosReturn(val, col, 12))
+
+    table.merge_cells(st, 0, 5, 11, 5)
+    _hdrCellC(st, 0, 5, syminfo.ticker, config, _ttSyminfo())
+    st
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 10: PERIOD ANALYSIS CARDS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Render drawdown cards table (top N drawdowns sorted by depth)
+// @param descending True = deepest first
+renderDrawdownCards(array<DrawdownRecord> drawdowns, TableConfig config, bool descending = true) =>
+    color table_bg = config.colorBg, color border_col = config.colorBorder
+
+    int numDD = array.size(drawdowns), int totalRows = 1 + numDD * 3 + 1
+    var table ddTable = table.new(position.middle_right, 3, totalRows,
+         border_color = border_col,
+         border_width = 1,
+         frame_width = 1,
+         bgcolor = table_bg,
+         force_overlay = true)
+
+    if numDD > 0
+        array<float> depths = array.new<float>()
+        for dd in drawdowns
+            array.push(depths, dd.depthPct)
+
+        array<int> sortedIdx = getSortedIndices(depths, descending)
+
+        _hdrCellC(ddTable, 0, 0, "Worst Drawdowns", config, "Deepest peak-to-trough equity declines. Shows how severe losses got before recovery began.\n\nColumns: Drop = initial decline %, Depth = lowest point, Recovery = time/% to recover")
+        table.merge_cells(ddTable, 0, 0, 2, 0)
+
+        for [i, idx] in sortedIdx
+            DrawdownRecord dd = array.get(drawdowns, idx)
+            int baseRow = 1 + i * 3
+
+            string dateTitle = formatDateDMY(dd.startTime) + " - " + formatDateDMY(dd.endTime)
+            _hdrCellC(ddTable, 0, baseRow, dateTitle, config)
+            table.merge_cells(ddTable, 0, baseRow, 2, baseRow)
+
+            _hdrCellC(ddTable, 0, baseRow + 1, "Drop", config, "Time from peak to trough (days)")
+            _hdrCellC(ddTable, 1, baseRow + 1, "Depth", config, "Maximum decline percentage")
+            _hdrCellC(ddTable, 2, baseRow + 1, "Recovery", config, "Time from trough to prior peak (days)")
+
+            float dropMs = na(dd.durationDays) ? na : dd.durationDays * MS_PER_DAY, float recMs = na(dd.recoveryDays) ? na : dd.recoveryDays * MS_PER_DAY
+            string dropStr = formatDuration(dropMs), string recStr = formatDuration(recMs), string depthStr = "-" + str.tostring(dd.depthPct, "0.00") + "%"
+
+            _valCellC(ddTable, 0, baseRow + 2, dropStr, config.colorTextMuted, config, _ttDrawdown(dd, i + 1))
+            _valCellC(ddTable, 1, baseRow + 2, depthStr, config.colorBearish, config, _ttDrawdown(dd, i + 1))
+            _valCellC(ddTable, 2, baseRow + 2, recStr, config.colorTextMuted, config, _ttDrawdown(dd, i + 1))
+
+        int footerRow = totalRows - 1
+        _hdrCellC(ddTable, 0, footerRow, formatTimeframe(), config)
+        table.merge_cells(ddTable, 0, footerRow, 2, footerRow)
+
+    ddTable
+
+// @function Render recovery cards table (top N recoveries by rebound strength)
+renderRecoveryCards(array<RecoveryRecord> recoveries, TableConfig config) =>
+    color table_bg = config.colorBg, color border_col = config.colorBorder
+
+    int numRec = array.size(recoveries), int totalRows = 1 + numRec * 3 + 1
+    var table recTable = table.new(position.middle_left, 3, totalRows,
+         border_color = border_col,
+         border_width = 1,
+         frame_width = 1,
+         bgcolor = table_bg,
+         force_overlay = true)
+
+    if numRec > 0
+
+        _hdrCellC(recTable, 0, 0, "Top Recoveries", config, "Best bounce-backs from drawdowns. Measures resilience how strongly equity rallied after hitting a trough.\n\nColumns: Drop = initial decline %, Rally = recovery strength %, Recovery = time to prior peak")
+        table.merge_cells(recTable, 0, 0, 2, 0)
+
+        for [i, rec] in recoveries
+            int baseRow = 1 + i * 3
+
+            string dateTitle = formatDateDMY(rec.troughTime) + " - " + formatDateDMY(rec.recoveryTime)
+            _hdrCellC(recTable, 0, baseRow, dateTitle, config)
+            table.merge_cells(recTable, 0, baseRow, 2, baseRow)
+
+            _hdrCellC(recTable, 0, baseRow + 1, "Drop", config, "Time from peak to trough (days)")
+            _hdrCellC(recTable, 1, baseRow + 1, "Rally", config, "Percentage gain from trough to peak")
+            _hdrCellC(recTable, 2, baseRow + 1, "Recovery", config, "Time from trough to prior peak (days)")
+
+            float dropMs = na(rec.dropDays) ? na : rec.dropDays * MS_PER_DAY, float recMs = na(rec.recoveryDays) ? na : rec.recoveryDays * MS_PER_DAY
+            string dropStr = formatDuration(dropMs)
+            float cappedRally = capValue(rec.reboundPct)
+            string rallyStr = nz(cappedRally, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedRally), string recStr = formatDuration(recMs)
+
+            color rallyColor = nz(cappedRally, INFINITY_CAP) >= INFINITY_CAP ? color.gray : config.colorBullish
+            _valCellC(recTable, 0, baseRow + 2, dropStr, config.colorTextMuted, config, _ttRecovery(rec, i + 1))
+            _valCellC(recTable, 1, baseRow + 2, rallyStr, rallyColor, config, _ttRecovery(rec, i + 1))
+            _valCellC(recTable, 2, baseRow + 2, recStr, config.colorTextMuted, config, _ttRecovery(rec, i + 1))
+
+        int footerRow = totalRows - 1
+        _hdrCellC(recTable, 0, footerRow, formatTimeframe(), config)
+        table.merge_cells(recTable, 0, footerRow, 2, footerRow)
+
+    recTable
+
+// @function Render trade cards table (shared renderer for top/worst trades)
+_renderTradeCards(array<TradeRecord> trades, TableConfig config, string tablePos, string title, string titleTooltip, string gainLabel, string gainTooltip) =>
+    color table_bg = config.colorBg, color border_col = config.colorBorder
+
+    int numTrades = array.size(trades), int totalRows = 1 + numTrades * 3 + 1
+    var table tbl = table.new(tablePos, 3, totalRows,
+         border_color = border_col,
+         border_width = 1,
+         frame_width = 1,
+         bgcolor = table_bg,
+         force_overlay = true)
+
+    if numTrades > 0
+        _hdrCellC(tbl, 0, 0, title, config, titleTooltip)
+        table.merge_cells(tbl, 0, 0, 2, 0)
+
+        for [i, trade] in trades
+            int baseRow = 1 + i * 3
+
+            string dateTitle = formatDateDMY(trade.entryTime)
+            _hdrCellC(tbl, 0, baseRow, dateTitle, config)
+            table.merge_cells(tbl, 0, baseRow, 2, baseRow)
+
+            _hdrCellC(tbl, 0, baseRow + 1, "Entry", config, "Entry time (HH:mm)")
+            _hdrCellC(tbl, 1, baseRow + 1, gainLabel, config, gainTooltip)
+            _hdrCellC(tbl, 2, baseRow + 1, "Exit", config, "Exit time (HH:mm)")
+
+            string entryStr = formatTimeHHMM(trade.entryTime)
+            float cappedRet = capValue(trade.returnPct)
+            string returnStr = nz(cappedRet, INFINITY_CAP) >= INFINITY_CAP ? "-" : formatSignedPct(cappedRet), string exitStr = formatTimeHHMM(trade.exitTime)
+
+            color returnColor = nz(cappedRet, INFINITY_CAP) >= INFINITY_CAP ? color.gray : (cappedRet >= 0 ? config.colorBullish : config.colorBearish)
+
+            _valCellC(tbl, 0, baseRow + 2, entryStr, config.colorTextMuted, config, _ttTrade(trade, i + 1, title))
+            _valCellC(tbl, 1, baseRow + 2, returnStr, returnColor, config, _ttTrade(trade, i + 1, title))
+            _valCellC(tbl, 2, baseRow + 2, exitStr, config.colorTextMuted, config, _ttTrade(trade, i + 1, title))
+
+        int footerRow = totalRows - 1
+        _hdrCellC(tbl, 0, footerRow, formatTimeframe(), config)
+        table.merge_cells(tbl, 0, footerRow, 2, footerRow)
+
+    tbl
+
+// @function Render top 5 best trades cards (left position)
+renderTopTradesCards(array<TradeRecord> trades, TableConfig config) =>
+    _renderTradeCards(trades, config, position.middle_left, "Top Trades", "Best performing trades by return percentage. Shows the most profitable trades in your backtest.\n\nColumns: Entry = entry time (HH:mm), Gain = trade return %, Exit = exit time (HH:mm)", "Gain", "Trade gain percentage")
+
+// @function Render top 5 worst trades cards (right position)
+renderWorstTradesCards(array<TradeRecord> trades, TableConfig config) =>
+    _renderTradeCards(trades, config, position.middle_right, "Worst Trades", "Worst performing trades by return percentage. Shows the most losing trades in your backtest.\n\nColumns: Entry = entry time (HH:mm), Loss = trade return %, Exit = exit time (HH:mm)", "Loss", "Trade loss percentage")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11: MAIN ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// @function runDeeptest — Complete backtest analysis orchestrator (PUBLIC API)
+//
+// Calls calculateFromStrategy() for 50+ metrics, then renders:
+//   ├ Main backtest table (23 columns × 3 rows + complementary row + footer)
+//   ├ Stress test matrix (IS | Monte Carlo | OOS — if showStressTestTable)
+//   ├ Drawdown/recovery cards (if showDrawdownRecoveryCards)
+//   └ Top/worst trade cards (if showTradeCards)
+//
+// Execution model: heavy computation runs once on last confirmed bar, table
+// rendering on last bar. Benchmark returns accumulate per-bar from SPY daily.
+//
+// @param tableBg Table background color
+// @param headerBg Header background color
+// @param borderColor Border color
+// @param bullColor Color for positive metric values
+// @param bearColor Color for negative metric values
+// @param textSize Cell font size
+// @param showComplementaryRow Toggle 2nd data row
+// @param showStressTestTable Toggle MC/WFA stress test table
+// @param showDrawdownRecoveryCards Toggle drawdown/recovery card tables
+// @param showTradeCards Toggle top/worst trade card tables
+// @param showRExpectancy R-multiple display mode for expectancy
+// @param enableLogging Output all metrics to Data Window via log.info()
+// @returns Stats object with all computed metrics
+// ═══════════════════════════════════════════════════════════════════════════
+export runDeeptest(
+     color tableBg = #0b0f13,
+     color headerBg = #191e2c,
+     color borderColor = #000000,
+
+     color bullColor = #00b9ff,
+     color bearColor = #ff0051,
+
+     string textSize = size.auto,
+
+     bool showComplementaryRow = true,
+
+     bool showStressTestTable = true,
+     bool showDrawdownRecoveryCards = false,
+     bool showTradeCards = false,
+     bool showRExpectancy = true,
+     bool enableLogging = false
+) =>
+
+	var isdeepbacktest = last_bar_index > DEEP_BACKTEST_BAR_LIMIT
+	float spyDailyClose = request.security("SPY", "D", close,
+		barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol = true)
+
+	if not isdeepbacktest
+
+		var float _dp_firstClose = na
+		if barstate.isfirst
+			_dp_firstClose := close
+
+		var float _dp_spyFirstClose = na, var float _dp_spyLastClose = na
+
+		var array<float> _dp_benchmarkReturns = array.new<float>()
+
+		if bar_index == 0
+			_dp_spyFirstClose := spyDailyClose
+
+		if barstate.islastconfirmedhistory
+			_dp_spyLastClose := spyDailyClose
+
+		if barstate.isconfirmed and not na(spyDailyClose) and spyDailyClose != nz(spyDailyClose[1], na)
+			float benchRet = spyDailyClose / spyDailyClose[1] - 1.0
+			if not na(benchRet)
+				array.push(_dp_benchmarkReturns, benchRet)
+
+		var Stats stats = Stats.new()
+		var RollingStats _dp_cachedRolling = na
+		var TableConfig _dp_cachedConfig = na
+		var array<float> _dp_cachedReturns = na
+		var StressTestResults _dp_cachedStress = na
+		var array<TradeRecord> _dp_cachedTopTrades = na, var array<TradeRecord> _dp_cachedWorstTrades = na
+		var array<DrawdownRecord> _dp_cachedDrawdowns = na
+		var array<RecoveryRecord> _dp_cachedRecoveries = na
+		var bool _dp_statsReady = false
+
+		bool atLastBar = (barstate.islastconfirmedhistory or barstate.islast) and not _dp_statsReady
+		if atLastBar
+			color textPrimary = color.white, color textMuted = color.gray
+
+			array<float> benchRets = _dp_benchmarkReturns
+            [calcStats, cachedTradeReturns, cachedEquity, calcTopTrades, calcWorstTrades, avgCommission] = calculateFromStrategy(na, benchRets, _dp_firstClose, close)
+			stats := calcStats
+
+			if stats.totalTrades > 0
+				float spyCagr = na(_dp_spyFirstClose) or na(_dp_spyLastClose) or _dp_spyFirstClose == 0 ?
+					 na : math.pow(_dp_spyLastClose / _dp_spyFirstClose, 1.0 / (stats.tradingPeriodDays / (MS_PER_YEAR / MS_PER_DAY))) * 100 - 100
+
+				float buyHoldSimple = calcBuyAndHold(_dp_firstClose, close), float buyHoldCagr = na(buyHoldSimple) or stats.tradingPeriodDays <= 0 ?
+					 na : calcBuyHoldCagr(buyHoldSimple, stats.tradingPeriodDays)
+
+				float benchmarkCagr = na(spyCagr) ? buyHoldCagr : spyCagr
+
+				stats.alpha := na(stats.cagr) or na(benchmarkCagr) ? na : stats.cagr - benchmarkCagr
+
+				_dp_cachedReturns := cachedTradeReturns
+
+				_dp_cachedRolling := calcRollingStats(_dp_cachedReturns, 0, stats.tradesPerYear)
+
+                string commissionDisplay = na(avgCommission) ? "0.00%" : formatValue(avgCommission, FormatMode.percent, 2, false)
+
+				_dp_cachedConfig := TableConfig.new(
+					bullColor, bearColor, textPrimary, textMuted,
+					tableBg, headerBg, borderColor, textSize,
+					commissionDisplay,
+					showComplementaryRow, showRExpectancy)
+
+				if showStressTestTable and array.size(_dp_cachedReturns) >= 10
+					_dp_cachedStress := runStressTest(stats, _dp_cachedReturns, 12, 30.0, 1000, stats.tradesPerYear)
+
+				if showTradeCards and stats.totalTrades >= 5
+					_dp_cachedTopTrades := calcTopTrades
+					_dp_cachedWorstTrades := calcWorstTrades
+
+				if showDrawdownRecoveryCards and stats.totalTrades >= 5
+					array<int> timestamps_ = array.new<int>()
+					array.push(timestamps_, stats.firstTradeTime)
+					for i = 0 to stats.totalTrades - 1
+						array.push(timestamps_, strategy.closedtrades.exit_time(i))
+
+					[_dd, _rec] = calcDrawdownCycles(cachedEquity, timestamps_, 6)
+					_dp_cachedDrawdowns := _dd
+					_dp_cachedRecoveries := _rec
+
+				_dp_statsReady := true
+
+		if _dp_statsReady and stats.totalTrades > 0 and (barstate.islastconfirmedhistory or barstate.islast)
+			stats.netProfit := strategy.equity - strategy.initial_capital, stats.netProfitPct := stats.netProfit / strategy.initial_capital * 100.0
+
+			float livePeak = math.max(nz(stats.maxEquity, strategy.equity), strategy.equity), float liveDD = livePeak - strategy.equity
+			stats.currentDrawdownPct := livePeak > 0.0 ? (liveDD / livePeak) * 100.0 : 0.0
+
+			renderDeeptestTable(stats, _dp_cachedConfig, _dp_cachedRolling)
+
+			if showStressTestTable and not na(_dp_cachedStress)
+				renderStressTestMatrix(_dp_cachedStress, _dp_cachedConfig, stats.winRate)
+
+			if showTradeCards and not na(_dp_cachedTopTrades)
+				renderTopTradesCards(_dp_cachedTopTrades, _dp_cachedConfig)
+				renderWorstTradesCards(_dp_cachedWorstTrades, _dp_cachedConfig)
+
+			if showDrawdownRecoveryCards and not na(_dp_cachedDrawdowns)
+				renderDrawdownCards(_dp_cachedDrawdowns, _dp_cachedConfig)
+				renderRecoveryCards(_dp_cachedRecoveries, _dp_cachedConfig)
+
+			if enableLogging
+				array<string> _log = array.new<string>()
+				_log.push("═══ DEEPTEST METRICS ═══")
+
+				_log.push("Net Profit: " + formatValue(stats.netProfitPct, FormatMode.percent) + " | "
+				 + "Payoff: " + formatValue(stats.payoffRatio, FormatMode.number, 2, false) + " | "
+				 + "Trades: " + str.tostring(stats.totalTrades) + " | "
+				 + "PF: " + formatValue(stats.profitFactor, FormatMode.ratio, 2, false) + " | "
+				 + "CAGR: " + formatValue(stats.cagr, FormatMode.percent) + " | "
+				 + "Expect: " + formatValue(stats.avgTradePct, FormatMode.percent) + " | "
+				 + "R-Expect: " + (na(stats.rExpectancy) ? "-" : str.tostring(stats.rExpectancy, "#.###") + "R") + " | "
+				 + "Monthly: " + formatValue(stats.monthlyReturn, FormatMode.percent) + " | "
+				 + "Avg Dur: " + formatDuration(stats.avgTradeDuration) + " | "
+				 + "Max CW: " + str.tostring(stats.maxConsecWins) + " | "
+				 + "Max CL: " + str.tostring(stats.maxConsecLosses) + " | "
+				 + "WR: " + str.tostring(math.round(stats.winRate * 100)) + "% | "
+				 + "BE: " + str.tostring(math.round(stats.totalTrades > 0 ? (float(stats.evenTrades) / float(stats.totalTrades)) * 100.0 : 0.0)) + "% | "
+				 + "LR: " + str.tostring(math.round(stats.lossRate * 100)) + "% | "
+				 + "Freq: " + formatIntelligentFrequency(stats.tradesPerMonth) + " | "
+				 + "Exposure: " + formatValue(stats.timeInMarketPct, FormatMode.percent, 2, false) + " | "
+				 + "Sharpe: " + (na(stats.sharpe) ? "-" : stats.sharpe >= INFINITY_CAP ? "∞" : formatValue(stats.sharpe, FormatMode.number, 2, false)) + " | "
+				 + "Sortino: " + (na(stats.sortino) ? "-" : stats.sortino >= INFINITY_CAP ? "∞" : formatValue(stats.sortino, FormatMode.number, 2, false)) + " | "
+				 + "MaxDD: " + formatValue(-stats.maxDrawdownPct, FormatMode.percent, 2, false) + " | "
+				 + "RoR: " + formatValue(stats.riskOfRuin * 100.0, FormatMode.percent, 2, false) + " | "
+				 + "R²: " + (na(stats.equityRSquared) ? "-" : formatValue(stats.equityRSquared * 100.0, FormatMode.percent, 1, false)) + " | "
+				 + "Calmar: " + formatCapped(capValue(stats.calmar), FormatMode.number, 2, false) + " | "
+				 + "CVaR: " + formatValue(stats.cvar95, FormatMode.percent, 2, false) + " | "
+				 + "P-Val: " + formatValue(stats.pValue))
+
+				float _cappedMartin = capValue(stats.martin)
+				string _row4 = "Compounding: " + (not na(stats.compEffect) and strategy.initial_capital > 0.0 ? formatValue((stats.compEffect / strategy.initial_capital) * 100.0, FormatMode.percent, 1, true) : "-") + " | "
+				 + "Avg Win: " + formatValue(stats.avgWinPct, FormatMode.percent) + " | "
+				 + "Avg Trade: " + formatValue(stats.avgTradePct, FormatMode.percent) + " | "
+				 + "Avg Loss: " + formatValue(-stats.avgLossPct, FormatMode.percent, 2, false) + " | "
+				 + "Martin: " + formatCapped(_cappedMartin, FormatMode.number, 2, false) + " | "
+
+				if not na(_dp_cachedRolling) and _dp_cachedRolling.windowSize > 0
+					if showRExpectancy and nz(stats.avgLossPct) > 0.0001
+						float rMin = _dp_cachedRolling.expectancyMin / stats.avgLossPct, float rMax = _dp_cachedRolling.expectancyMax / stats.avgLossPct
+						_row4 += "Roll R-Exp [" + str.tostring(rMin, "#.###") + "R - " + str.tostring(rMax, "#.###") + "R] | "
+					else
+						_row4 += "Roll Exp [" + formatValue(_dp_cachedRolling.expectancyMin, FormatMode.percent, 2, false) + " - " + formatValue(_dp_cachedRolling.expectancyMax, FormatMode.percent, 2, false) + "] | "
+				else
+					_row4 += "Roll Exp: - | "
+
+				float _cappedAlpha = capValue(stats.alpha), float _cappedBeta = capValue(stats.beta)
+				_row4 += "Avg W Dur: " + formatDuration(stats.avgWinDuration) + " | "
+				 + "Max Eq: " + formatValue(stats.maxEquity > 0 ? ((stats.maxEquity - strategy.initial_capital) / strategy.initial_capital) * PERCENT_MULTIPLIER : 0.0, FormatMode.percent) + " | "
+ 				 + "Alpha: " + formatCapped(_cappedAlpha, FormatMode.percent) + " | "
+				 + "Buy&Hold: " + formatValue(stats.buyHoldReturn, FormatMode.percent) + " | "
+				 + "Beta: " + formatCapped(_cappedBeta, FormatMode.number, 2, false) + " | "
+				 + "Min Eq: " + formatValue(stats.minEquity > 0 ? ((stats.minEquity - strategy.initial_capital) / strategy.initial_capital) * 100.0 : 0.0, FormatMode.percent) + " | "
+				 + "Avg L Dur: " + formatDuration(stats.avgLossDuration) + " | "
+
+				if not na(_dp_cachedRolling) and _dp_cachedRolling.windowSize > 0
+					bool useSortino = stats.winRate <= 0.5
+					float metricMin = useSortino ? _dp_cachedRolling.sortinoMin : _dp_cachedRolling.sharpeMin, float metricMax = useSortino ? _dp_cachedRolling.sortinoMax : _dp_cachedRolling.sharpeMax
+					string mLabel = useSortino ? "Roll Sort" : "Roll Sharpe", string minStr = not na(metricMin) ? (metricMin >= INFINITY_CAP ? "∞" : formatValue(metricMin, FormatMode.number, 2, false)) : "-", string maxStr = not na(metricMax) ? (metricMax >= INFINITY_CAP ? "∞" : formatValue(metricMax, FormatMode.number, 2, false)) : "-"
+					_row4 += mLabel + " [" + minStr + " - " + maxStr + "] | "
+				else
+					_row4 += "Roll Sort/Sharpe: - | "
+
+				_row4 += "Curr DD: " + formatValue(-stats.currentDrawdownPct, FormatMode.percent, 2, false) + " | "
+				 + "SQN: " + (na(stats.sqn) ? "-" : formatValue(stats.sqn, FormatMode.number, 2, false)) + " | "
+				 + "Kurtosis: " + formatValue(stats.kurtosis, FormatMode.number, 2, false) + " | "
+				 + "Skewness: " + formatValue(stats.skewness, FormatMode.number, 2, false) + " | "
+				 + "VaR: " + formatValue(stats.var95, FormatMode.percent, 2, false) + " | "
+				 + "Ulcer: " + formatValue(stats.ulcerIndex, FormatMode.number, 2, false)
+				_log.push(_row4)
+
+				log.info(array.join(_log, "\n"))
+
+    	stats

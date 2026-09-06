@@ -1,0 +1,171 @@
+//@version=5
+// v2.4.2 (2026-05-28): library title renamed AFZT_Scoring_public → AFZT_Scoring_Lib →
+// "ZT_Scoring_Lib" — TV content-fingerprints any republish under the banned AFZT_
+// namespace (KLP cleared because its names had no banned predecessor). Dropping the
+// AFZT_ prefix to "ZT_" mirrors KLP's net-new naming and is expected to publish Public
+// cleanly. No functional change; exports + signatures unchanged.
+library("ZT_Scoring_Lib", overlay=false)
+
+// =====================================================================
+// Alpha Flow – Zone Trader
+// AFZT_Scoring Library (Parity pass for Core v10.36 → v10.37 refactor)
+// Goal: preserve scoring/grade/confidence behavior exactly, with no
+// repaint impact and no state mutation.
+// =====================================================================
+
+BASE_NONE = 0
+BASE_CISD = 1
+BASE_ICEBERG = 2
+BASE_CLIMAX = 3
+BASE_FAILED_THRUST = 4
+BASE_FLOW_TRADES = 5
+BASE_EXHAUSTION = 6
+BASE_DELTA_DIVERGENCE = 99
+
+// Bit positions for packed scoring flags (Phase 2 token optimization)
+// 0  tier1Supply
+// 1  tier1Demand
+// 2  tier2Supply
+// 3  tier2Demand
+// 4  tier3SupplyImbal
+// 5  tier3DemandImbal
+// 6  deltaDiv
+// 7  bearEngulf
+// 8  bullEngulf
+// 9  bearRev1
+// 10 bullRev1
+// Helper: integer power-of-two bit value (avoids shift operator parsing edge cases)
+bitVal(int b) =>
+    int(math.round(math.pow(2.0, b)))
+
+// bit test without bitwise ops
+hasBit_v2(int mask, int bit) =>
+    // Works because mask is sum of distinct powers of two
+    int b = bitVal(bit)
+    int q = math.floor(mask / b)
+    (q % 2) == 1
+
+
+export packFlags_v2(bool tier1Supply, bool tier1Demand, bool tier2Supply, bool tier2Demand, bool tier3SupplyImbal, bool tier3DemandImbal, bool deltaDiv, bool bearEngulf, bool bullEngulf, bool bearRev1, bool bullRev1) =>
+    int m = 0
+    m := m + (tier1Supply ? bitVal(0) : 0)
+    m := m + (tier1Demand ? bitVal(1) : 0)
+    m := m + (tier2Supply ? bitVal(2) : 0)
+    m := m + (tier2Demand ? bitVal(3) : 0)
+    m := m + (tier3SupplyImbal ? bitVal(4) : 0)
+    m := m + (tier3DemandImbal ? bitVal(5) : 0)
+    m := m + (deltaDiv ? bitVal(6) : 0)
+    m := m + (bearEngulf ? bitVal(7) : 0)
+    m := m + (bullEngulf ? bitVal(8) : 0)
+    m := m + (bearRev1 ? bitVal(9) : 0)
+    m := m + (bullRev1 ? bitVal(10) : 0)
+    m
+
+// Normalized confidence (0..100) from confluence score
+export confPct_v1036(float _score) =>
+    _max = 6.4
+    _score <= 0 ? 0.0 : _score >= _max ? 100.0 : (_score / _max) * 100.0
+
+// Internal: v10.36 confluence scoring (hybrid buckets + weights)
+calculateConfluenceScore_v1036(int baseSignal, bool isSupply, bool cisd_signal, bool icebergSignal, bool failedThrustPrecomp, bool extremePressurePrecomp, bool exhaustionPrecomp, bool tier1Supply, bool tier1Demand, bool tier2Supply, bool tier2Demand, bool tier3SupplyImbal, bool tier3DemandImbal, bool deltaDiv, bool bearEngulf, bool bullEngulf, bool bearRev1, bool bullRev1) =>
+    float score = 0.0
+
+    // BUCKET 1: Volume/Effort Family (1.0 point max)
+    bool hasVolumeBucket =
+         (baseSignal != BASE_CLIMAX and ((isSupply and tier1Supply) or (not isSupply and tier1Demand))) or
+         (baseSignal != BASE_FAILED_THRUST and not (baseSignal != BASE_CLIMAX and ((isSupply and tier1Supply) or (not isSupply and tier1Demand))) and failedThrustPrecomp) or
+         ((isSupply and tier3SupplyImbal) or (not isSupply and tier3DemandImbal))
+
+    if hasVolumeBucket
+        score += 1.0
+
+    // BUCKET 2: Pressure Family (1.0 point max)
+    bool hasPressureBucket =
+         ((baseSignal != BASE_DELTA_DIVERGENCE) and ((isSupply and tier2Supply) or (not isSupply and tier2Demand))) or
+         deltaDiv or
+         extremePressurePrecomp
+
+    if hasPressureBucket
+        score += 1.05
+
+    // BUCKET 3: Pattern Family (0.5 points max)
+    bool hasPatternBucket =
+         (isSupply and bearEngulf) or
+         (not isSupply and bullEngulf) or
+         (isSupply and bearRev1) or
+         (not isSupply and bullRev1)
+
+    if hasPatternBucket
+        score += 0.45
+
+    // BUCKET 4: Structure Family (2.0 points max)
+    bool hasStructureBucket =
+         (baseSignal != BASE_CISD and cisd_signal) or
+         (baseSignal != BASE_EXHAUSTION and exhaustionPrecomp)
+
+    if hasStructureBucket
+        score += 2.5
+
+    // ICEBERG/LEVEL DEFENSE BUCKET (0.5-1.0 points)
+    // v10.36 logic: don't count as confluence if it's the base signal
+    if icebergSignal and baseSignal != BASE_ICEBERG
+        score += ((baseSignal == BASE_CLIMAX or baseSignal == BASE_FAILED_THRUST) ? 1.0 : baseSignal == BASE_EXHAUSTION ? 0.5 : 1.0)
+
+    // EXTREME IMBALANCE as confluence only (demoted from base)
+    bool hasImbalanceBucket = (isSupply and tier3SupplyImbal) or (not isSupply and tier3DemandImbal)
+    if hasImbalanceBucket
+        score += 0.4
+
+    // Preserve original behavior (redundant returns are harmless)
+    score
+
+// Public: score (v10.36 parity)
+export getScore_v1036(
+     int  baseSignal,
+     bool isSupply,
+     bool cisd_signal,
+     bool icebergSignal,
+     bool failedThrustPrecomp,
+     bool extremePressurePrecomp,
+     bool exhaustionPrecomp,
+     bool tier1Supply,
+     bool tier1Demand,
+     bool tier2Supply,
+     bool tier2Demand,
+     bool tier3SupplyImbal,
+     bool tier3DemandImbal,
+     bool deltaDiv,
+     bool bearEngulf,
+     bool bullEngulf,
+     bool bearRev1,
+     bool bullRev1
+ ) =>
+    calculateConfluenceScore_v1036(baseSignal, isSupply, cisd_signal, icebergSignal, failedThrustPrecomp, extremePressurePrecomp, exhaustionPrecomp, tier1Supply, tier1Demand, tier2Supply, tier2Demand, tier3SupplyImbal, tier3DemandImbal, deltaDiv, bearEngulf, bullEngulf, bearRev1, bullRev1)
+export getScoreMask_v1036(
+     int  baseSignal,
+     bool isSupply,
+     bool cisd_signal,
+     bool icebergSignal,
+     bool failedThrustPrecomp,
+     bool extremePressurePrecomp,
+     bool exhaustionPrecomp,
+     int  flagsMask
+ ) =>
+    bool tier1Supply      = hasBit_v2(flagsMask, 0)
+    bool tier1Demand      = hasBit_v2(flagsMask, 1)
+    bool tier2Supply      = hasBit_v2(flagsMask, 2)
+    bool tier2Demand      = hasBit_v2(flagsMask, 3)
+    bool tier3SupplyImbal = hasBit_v2(flagsMask, 4)
+    bool tier3DemandImbal = hasBit_v2(flagsMask, 5)
+    bool deltaDiv         = hasBit_v2(flagsMask, 6)
+    bool bearEngulf       = hasBit_v2(flagsMask, 7)
+    bool bullEngulf       = hasBit_v2(flagsMask, 8)
+    bool bearRev1         = hasBit_v2(flagsMask, 9)
+    bool bullRev1         = hasBit_v2(flagsMask, 10)
+
+    calculateConfluenceScore_v1036(baseSignal, isSupply, cisd_signal, icebergSignal, failedThrustPrecomp, extremePressurePrecomp, exhaustionPrecomp, tier1Supply, tier1Demand, tier2Supply, tier2Demand, tier3SupplyImbal, tier3DemandImbal, deltaDiv, bearEngulf, bullEngulf, bearRev1, bullRev1)
+
+
+// Public: grade from score (v10.36 parity)
+export getGradeFromScore_v1036(float score) =>
+    score >= 2.5 ? "A+" : score >= 1.0 ? "Very Strong" : "Strong"

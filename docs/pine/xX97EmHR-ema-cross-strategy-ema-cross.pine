@@ -1,0 +1,153 @@
+//@version=6
+strategy("EMA Cross Strategy (ema_cross)", overlay=true,
+     initial_capital=1500, currency=currency.USD,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.04,
+     slippage=1)
+
+// ============================= Inputs =============================
+emaFastLen        = input.int(50,  "EMA Fast Length", group="Indicators")
+emaSlowLen        = input.int(200, "EMA Slow Length", group="Indicators")
+rsiLen            = input.int(14,  "RSI Length", group="Indicators")
+atrLen            = input.int(14,  "ATR Length", group="Indicators")
+volMaLen          = input.int(20,  "Volume MA Length", group="Indicators")
+
+rsiOverbought     = input.float(65.0, "RSI Overbought", group="Entry Filters")
+rsiOversold       = input.float(35.0, "RSI Oversold", group="Entry Filters")
+volFactorMin      = input.float(1.5,  "Min Volume Factor", group="Entry Filters")
+trendStrengthMin  = input.float(0.5,  "Min Trend Strength %", group="Entry Filters")
+useTradingHours   = input.bool(true, "Block entries 02:00-04:59 UTC", group="Entry Filters")
+
+baseTpPct         = input.float(0.02,  "Base TP %", group="Exit / TP-SL")
+baseSlPct         = input.float(0.015, "Base SL %", group="Exit / TP-SL")
+maxTpPct          = input.float(0.04,  "Max TP %", group="Exit / TP-SL")
+maxSlPct          = input.float(0.03,  "Max SL %", group="Exit / TP-SL")
+
+basePosition      = input.float(30.0, "Base Position (quote)", group="Sizing")
+positionCapPct    = input.float(2.8,   "Position Cap (% equity)", group="Sizing")
+minPosition       = input.float(5.0,   "Min Position (quote)", group="Sizing")
+leverage          = input.float(50,    "Leverage", group="Sizing")
+
+maxDailyTrades    = input.int(500,   "Max Daily Trades", group="Risk")
+maxDailyLossPct   = input.float(5.0, "Max Daily Loss %", group="Risk")
+tpStreakBlock     = input.int(10,    "Consecutive TP Wins to Block", group="Risk")
+
+// ===== WEBHOOK CONFIG =====
+webhookSecret     = input.string("8faf8f08d2ebcf12018be3f9859639a0c82a3772d4e74379a7991f0071090ff9", "Webhook Secret", group="Webhook")
+
+// ============================= Indicators =============================
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+rsi      = ta.rsi(close, rsiLen)
+atr      = ta.atr(atrLen)
+volMa    = ta.sma(volume, volMaLen)
+
+atrR30    = ta.sma(atr, 30)
+atrR100   = ta.sma(atr, 100)
+volRegime = atrR100 != 0 ? atrR30 / atrR100 : 1.0
+trendStr  = emaSlow != 0 ? (emaFast - emaSlow) / emaSlow * 100 : 0.0
+
+volFactor    = volMa != 0 ? volume / volMa : 0.0
+volConfirmed = volFactor > volFactorMin
+strongTrend  = math.abs(trendStr) > trendStrengthMin
+
+utcHour        = hour(time, "UTC")
+inTradingHours = not useTradingHours or not (utcHour == 2 or utcHour == 3 or utcHour == 4)
+
+// ============================= Daily risk state =============================
+var int   dailyTradeCount = 0
+var float dailyPnlQuote   = 0.0
+var int   tpStreakCount   = 0
+var bool  dayBlocked      = false
+
+newDay = ta.change(time("D")) != 0
+if newDay
+    dailyTradeCount := 0
+    dailyPnlQuote   := 0.0
+    tpStreakCount   := 0
+    dayBlocked      := false
+
+canTrade = not dayBlocked and dailyTradeCount < maxDailyTrades
+     and dailyPnlQuote >= -(strategy.equity * maxDailyLossPct / 100)
+     and inTradingHours
+
+// ============================= Entry conditions =============================
+longCond  = close > emaFast and emaFast > 0 and close > emaSlow and emaSlow > 0
+     and rsi > rsiOverbought and volConfirmed and strongTrend and trendStr > 0
+shortCond = close < emaFast and close < emaSlow
+     and rsi < rsiOversold and volConfirmed and strongTrend and trendStr < 0
+
+// ============================= TP/SL sizing =============================
+vReg  = math.min(2.0, math.max(0.5, volRegime))
+tpPct = math.min(maxTpPct, baseTpPct * vReg)
+slPct = math.min(maxSlPct, baseSlPct * vReg)
+
+// ============================= Position sizing =============================
+atrPct       = close != 0 ? atr / close : 0.0
+volScalar    = atrPct != 0 ? math.min(1.0, 0.005 / atrPct) : 1.0
+rawPos       = basePosition * volScalar
+capPos       = strategy.equity * positionCapPct / 100
+posSizeQuote = math.max(minPosition, math.min(rawPos, capPos))
+qty          = close != 0 ? posSizeQuote * leverage / close : 0.0
+
+// ============================= State for open trade =============================
+var float entryPriceRef  = na
+var float activeTp       = na
+var float activeSl       = na
+var float activePosQuote = na
+
+flat = strategy.position_size == 0
+
+// ============================= Entries with alerts =============================
+if flat and longCond and canTrade
+    strategy.entry("Long", strategy.long, qty=qty)
+    entryPriceRef  := close
+    activeTp       := tpPct
+    activeSl       := slPct
+    activePosQuote := posSizeQuote
+    dailyTradeCount += 1
+    alert('{"secret":"' + webhookSecret + '","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"qty":' + str.tostring(qty) + ',"tp":' + str.tostring(tpPct) + ',"sl":' + str.tostring(slPct) + ',"interval":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+if flat and shortCond and canTrade
+    strategy.entry("Short", strategy.short, qty=qty)
+    entryPriceRef  := close
+    activeTp       := tpPct
+    activeSl       := slPct
+    activePosQuote := posSizeQuote
+    dailyTradeCount += 1
+    alert('{"secret":"' + webhookSecret + '","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"qty":' + str.tostring(qty) + ',"tp":' + str.tostring(tpPct) + ',"sl":' + str.tostring(slPct) + ',"interval":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+// ============================= Exits with alerts =============================
+if strategy.position_size > 0 and not na(strategy.position_avg_price)
+    pnlPct = (close - strategy.position_avg_price) / strategy.position_avg_price
+    if pnlPct >= activeTp
+        strategy.close("Long", comment="TP")
+        dailyPnlQuote += activePosQuote * leverage * pnlPct
+        tpStreakCount += 1
+        if tpStreakCount >= tpStreakBlock
+            dayBlocked := true
+        alert('{"secret":"' + webhookSecret + '","action":"close","symbol":"' + syminfo.ticker + '","reason":"TP","price":' + str.tostring(close) + ',"interval":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+    else if pnlPct <= -activeSl
+        strategy.close("Long", comment="SL")
+        dailyPnlQuote += activePosQuote * leverage * pnlPct
+        tpStreakCount := 0
+        alert('{"secret":"' + webhookSecret + '","action":"close","symbol":"' + syminfo.ticker + '","reason":"SL","price":' + str.tostring(close) + ',"interval":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0 and not na(strategy.position_avg_price)
+    pnlPct = (strategy.position_avg_price - close) / strategy.position_avg_price
+    if pnlPct >= activeTp
+        strategy.close("Short", comment="TP")
+        dailyPnlQuote += activePosQuote * leverage * pnlPct
+        tpStreakCount += 1
+        if tpStreakCount >= tpStreakBlock
+            dayBlocked := true
+        alert('{"secret":"' + webhookSecret + '","action":"close","symbol":"' + syminfo.ticker + '","reason":"TP","price":' + str.tostring(close) + ',"interval":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+    else if pnlPct <= -activeSl
+        strategy.close("Short", comment="SL")
+        dailyPnlQuote += activePosQuote * leverage * pnlPct
+        tpStreakCount := 0
+        alert('{"secret":"' + webhookSecret + '","action":"close","symbol":"' + syminfo.ticker + '","reason":"SL","price":' + str.tostring(close) + ',"interval":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+// ============================= Plots =============================
+plot(emaFast, "EMA Fast", color=color.new(color.blue, 0))
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0))

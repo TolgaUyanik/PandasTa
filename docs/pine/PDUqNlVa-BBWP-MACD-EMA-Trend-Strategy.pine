@@ -1,0 +1,235 @@
+//@version=5
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//  BBWP + Stoch RSI + EMA Trend LONG Strategy
+//  Designed for 4H timeframe - highly adjustable
+//  Entry - BBWP expansion (BBWP), Trend (slow/fast ema correlation), Momentum (Stoch RSI cross)
+//  Exit - BBWP extremes, Momentum OR trailing SL
+//
+//
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+strategy(
+     title         = 'BBWP + MACD + EMA Trend Strategy',
+     shorttitle    = 'BB·SRSI·EMA',
+     overlay       = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 100,
+     initial_capital   = 1000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2
+ )
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── EMA Settings ─────────────────────────────────────────────────────────────
+i_slowEmaLen    = input.int  (200,  'Slow EMA Length',          minval = 1,   group = 'EMA Settings',  tooltip = 'Price must be above this EMA for a long entry to be valid.')
+i_fastEmaLen    = input.int  (50,   'Fast EMA Length',          minval = 1,   group = 'EMA Settings',  tooltip = 'Optional faster EMA displayed on chart for visual reference.')
+
+// ── MACD Settings ────────────────────────────────────────────────────────────
+//i_macdFast      = input.int  (12,   'MACD Fast Length',         minval = 1,   group = 'MACD Settings')
+//i_macdSlow      = input.int  (26,   'MACD Slow Length',         minval = 1,   group = 'MACD Settings')
+//i_macdSignal    = input.int  (9,    'MACD Signal Length',       minval = 1,   group = 'MACD Settings')
+
+// ── BBWP Settings ────────────────────────────────────────────────────────────
+i_bbwSrc        = input.source(close, 'BBWP Price Source',                    group = 'BBWP Settings')
+i_bbwBasisType  = input.string('SMA', 'BBW Basis MA Type', ['SMA','EMA','WMA','RMA','HMA'], group = 'BBWP Settings')
+i_bbwLen        = input.int  (7,    'BBW Basis Length',         minval = 1,   group = 'BBWP Settings', tooltip = 'Length for the Bollinger Band Width calculation.')
+i_bbwpLookback  = input.int  (100,  'BBWP Lookback Period',     minval = 10,  group = 'BBWP Settings', tooltip = 'Number of historical BBW values to rank the current BBW against.')
+
+// Stoch RSI
+smoothK = input.int(3, "K", minval=1, group = 'Stoch RSI Settings')
+smoothD = input.int(3, "D", minval=1, group = 'Stoch RSI Settings')
+lengthRSI = input.int(14, "RSI Length", minval=1, group = 'Stoch RSI Settings')
+lengthStoch = input.int(14, "Stochastic Length", minval=1, group = 'Stoch RSI Settings')
+src = input(close, title="RSI Source", group = 'Stoch RSI Settings')
+
+// ── Entry Conditions ─────────────────────────────────────────────────────────
+i_bbwpExpandMin = input.int  (20,   'BBWP Expansion Threshold (%)', minval = 1, maxval = 100, group = 'Entry Conditions',
+                               tooltip = 'BBWP must be at or above this percentile for an entry to trigger. Helps avoid sideways/low-volatility periods.')
+i_bbwpExpandBars= input.int  (2,    'BBWP Rising Bars Required',    minval = 1,               group = 'Entry Conditions',
+                               tooltip = 'Number of consecutive bars BBWP must be rising before entry is allowed.')
+
+// ── Stop Loss Settings ───────────────────────────────────────────────────────
+i_slLookback    = input.int  (10,   'Swing Low Lookback (bars)',    minval = 1, maxval = 50,  group = 'Stop Loss Settings',
+                               tooltip = 'Bars to look back for the previous swing low used as the stop loss level.')
+i_slBuffer      = input.float(0.1,  'SL Buffer (%)',                minval = 0, step  = 0.05, group = 'Stop Loss Settings',
+                               tooltip = 'Percentage buffer added below the swing low to set the stop loss.')
+
+// ── Take Profit / Exit Settings ──────────────────────────────────────────────
+i_bbwpExtremeHi = input.int  (80,   'BBWP Extreme High (%)',        minval = 50, maxval = 100, group = 'Exit Settings',
+                               tooltip = 'BBWP must be at or above this level for the exit condition to be considered.')
+//i_exitOnMacdX   = input.bool (true, 'Exit on MACD Cross Below Signal at BBWP Extreme', group = 'Exit Settings',
+//                               tooltip = 'When enabled, exits the trade when BBWP is at an extreme high AND the MACD line crosses below the signal line (momentum exhaustion).')
+
+// ── Display Settings ─────────────────────────────────────────────────────────
+i_showEmas      = input.bool (true,  'Show EMAs on Chart',          group = 'Display')
+i_showSlLine    = input.bool (true,  'Show Stop Loss Line',         group = 'Display')
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@function Selects basis moving average type for BBW based on user input string.
+f_basisMa(float _src, int _len) =>
+    i_bbwBasisType == 'SMA'  ? ta.sma (_src, _len) :
+     i_bbwBasisType == 'EMA' ? ta.ema (_src, _len) :
+     i_bbwBasisType == 'WMA' ? ta.wma (_src, _len) :
+     i_bbwBasisType == 'RMA' ? ta.rma (_src, _len) :
+     i_bbwBasisType == 'HMA' ? ta.hma (_src, _len) :
+     na
+
+//@function Computes BBWP using a rolling sorted array for efficient piecewise percentile rank.
+//          Produces results immediately from the first valid BBW bar (no na warmup period).
+//@param _price   (float) Price source.
+//@param _bbwLen  (int)   BBW basis MA length.
+//@param _bbwpLen (int)   BBWP lookback period.
+//@returns (float) Percentile rank of current BBW (0–100).
+f_bbwp(float _price, int _bbwLen, int _bbwpLen) =>
+    var array<float> a_raw    = array.new_float()
+    var array<float> a_sorted = array.new_float()
+
+    float _basis = f_basisMa(_price, _bbwLen)
+    float _bbw   = 2 * ta.stdev(_price, _bbwLen) / _basis
+
+    float _bbwp = na
+
+    if bar_index >= _bbwLen
+        int _rank = array.binary_search_rightmost(a_sorted, _bbw)
+        _bbwp    := array.size(a_sorted) > 0 ? _rank * 100.0 / array.size(a_sorted) : 0.0
+
+        array.push(a_raw, _bbw)
+        array.insert(a_sorted, array.binary_search_rightmost(a_sorted, _bbw), _bbw)
+
+        if array.size(a_raw) > _bbwpLen
+            float _old = array.shift(a_raw)
+            array.remove(a_sorted, array.binary_search_rightmost(a_sorted, _old))
+
+    _bbwp
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// EMAs
+float slowEma = ta.ema(close, i_slowEmaLen)
+float fastEma = ta.ema(close, i_fastEmaLen)
+
+// MACD
+//[macdLine, signalLine, hist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSignal)
+//bool macdBullCross = ta.crossover (macdLine, signalLine)  // MACD crosses above signal → uptrend
+//bool macdBearCross = ta.crossunder(macdLine, signalLine)  // MACD crosses below signal → momentum lost
+//
+//// Better momentum exhaustion detection
+//bool histFalling   = hist < hist[1]                    // Histogram is declining (most important)
+//bool histBearish   = hist <= 0                         // Histogram turned negative
+//
+//// Optional: Rising for entry confirmation
+//bool histRising    = hist > hist[1]
+
+// Stoch RSIrsi1 = ta.rsi(src, lengthRSI)
+rsi1 = ta.rsi(src, lengthRSI)
+k = ta.sma(ta.stoch(rsi1, rsi1, rsi1, lengthStoch), smoothK)
+d = ta.sma(k, smoothD)
+stochrsiBullCross = ta.crossover(k,d)
+stochrsiBearCross = ta.crossunder(k,d)
+
+// BBWP
+float bbwp = f_bbwp(i_bbwSrc, i_bbwLen, i_bbwpLookback)
+
+// ── BBWP Expansion Check ─────────────────────────────────────────────────────
+// BBWP must be above the minimum threshold AND rising for N consecutive bars
+bool bbwpAboveMin = not na(bbwp) and bbwp >= i_bbwpExpandMin
+
+// Check BBWP has been rising for i_bbwpExpandBars consecutive bars
+bool bbwpRising = true
+if i_bbwpExpandBars > 1
+    for i = 0 to i_bbwpExpandBars - 2
+        if na(bbwp[i+1]) or bbwp[i] <= bbwp[i+1]
+            bbwpRising := false
+
+bool bbwpExpanding = bbwpAboveMin and bbwpRising
+
+// ── Swing Low for Stop Loss ───────────────────────────────────────────────────
+float swingLow    = ta.lowest(low, i_slLookback)
+float stopLossLvl = swingLow * (1 - i_slBuffer / 100)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// All three conditions must be true simultaneously on entry bar:
+//   1. MACD bullish crossover (uptrend momentum trigger)
+//   2. Price above slow EMA  (trend filter)
+//   3. BBWP is expanding     (volatility filter — avoids sideways chop)
+
+bool entryCondition = stochrsiBullCross //macdBullCross
+                     and fastEma > slowEma
+                     and bbwpExpanding
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXIT CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool exitCondition = not na(bbwp) 
+                     and bbwp >= i_bbwpExtremeHi 
+                     and stochrsiBearCross
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRATEGY EXECUTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Track stop loss level at entry using a var so it persists across bars
+var float activeSL = na
+
+if strategy.position_size == 0
+    activeSL := na
+
+if entryCondition and strategy.position_size == 0
+    activeSL := stopLossLvl
+    strategy.entry('Long', strategy.long, comment = 'Entry: MACD↑ + EMA + BBWP↑')
+
+// Stop loss — updated to current swing low trail (or fix at entry, adjust as preferred)
+if strategy.position_size > 0
+    // Update trailing swing low SL
+    float currentSL = ta.lowest(low, i_slLookback) * (1 - i_slBuffer / 100)
+    activeSL := math.max(na(activeSL) ? currentSL : activeSL, currentSL) // Only move SL up (trail)
+    strategy.exit('SL', from_entry = 'Long', stop = activeSL, comment = 'Stop: Swing Low')
+
+if exitCondition and strategy.position_size > 0
+    strategy.close('Long', comment = 'Exit: BBWP Extreme + MACD↓')
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// EMAs
+plot(i_showEmas ? slowEma : na, 'Slow EMA', color = color.new(#FF6B6B, 0),  linewidth = 2)
+plot(i_showEmas ? fastEma : na, 'Fast EMA', color = color.new(#4ECDC4, 0),  linewidth = 1)
+
+// Active Stop Loss Line
+plot(i_showSlLine and strategy.position_size > 0 ? activeSL : na, 'Active Stop Loss', color = color.new(color.red, 20), linewidth = 1, style = plot.style_linebr)
+
+// Entry signal marker
+plotshape(entryCondition and strategy.position_size == 0, title = 'Entry Signal', style = shape.triangleup,   location = location.belowbar, color = color.new(#00FF88, 0), size = size.small, text = 'ENTER')
+
+// Exit signal marker
+plotshape(exitCondition  and strategy.position_size > 0,  title = 'Exit Signal',  style = shape.triangledown, location = location.abovebar, color = color.new(#FF4444, 0), size = size.small, text = 'EXIT')
+
+// Background highlight when in a trade
+bgcolor(strategy.position_size > 0 ? color.new(#00FF88, 92) : na, title = 'In Trade BG')
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// end

@@ -1,0 +1,144 @@
+// AvwapLib — Shared utility library for AVWAP + TraderLion strategy backtests
+// Pine Script v6 | Session 10 | Trading System
+//@version=6
+
+// @description Shared functions: AVWAP, stage classification, position sizing,
+//              swing detection, and risk helpers. Used by all strategy() scripts.
+//              NOTE: rs_vs_spy() cannot live here (request.security() banned in
+//              library exports) — each strategy implements it inline.
+library("AvwapLib", overlay=true)
+
+// ──────────────────────────────────────────────
+// AVWAP (Anchored VWAP)
+// ──────────────────────────────────────────────
+
+// @function Anchored VWAP from a specific bar to current bar.
+//           Uses loop approach with bounded max_lookback for robustness.
+// @param src         Source price (typically hlc3)
+// @param anchor_bar  Bar index of anchor point (from find_swing_high/low)
+// @param max_lookback Maximum bars to look back (cap for performance, default 500 ~2yr daily)
+// @returns AVWAP value, or na if anchor invalid or out of range
+export avwap(series float src, series int anchor_bar, simple int max_lookback) =>
+    if na(anchor_bar) or bar_index < anchor_bar
+        float(na)
+    else
+        int lb = math.min(bar_index - anchor_bar, max_lookback)
+        float sum_pv = 0.0
+        float sum_v  = 0.0
+        for i = 0 to lb
+            sum_pv += nz(src[i] * volume[i])
+            sum_v  += nz(volume[i])
+        sum_v > 0 ? sum_pv / sum_v : float(na)
+
+// @function AVWAP slope — rate of change over lookback period.
+// @param avwap_val AVWAP series
+// @param lookback  Number of bars for slope calculation
+// @returns Slope (positive = rising, negative = falling), or na
+export avwap_slope(series float avwap_val, simple int lookback) =>
+    lookback > 0 and not na(avwap_val) and not na(avwap_val[lookback])
+         ? (avwap_val - avwap_val[lookback]) / lookback
+         : float(na)
+
+// ──────────────────────────────────────────────
+// Market Structure
+// ──────────────────────────────────────────────
+
+// @function Daily Closing Range — where price closed within the bar's range.
+// @returns DCR as percentage (0 = closed at low, 100 = closed at high)
+export dcr() =>
+    float rng = high - low
+    rng > 0 ? (close - low) / rng * 100.0 : 50.0
+
+// @function Relative Volume — current bar volume vs historical average.
+//           Uses volume[1] offset to avoid including current bar in average.
+// @param period Lookback period for average calculation
+// @returns RVOL ratio (>1 = above average)
+export rvol(simple int period) =>
+    float avg_vol = ta.sma(volume[1], period)
+    avg_vol > 0 ? volume / avg_vol : float(na)
+
+// @function Stage 2 check (simplified Weinstein model).
+//           Conditions: price > SMA50, SMA50 rising (vs 10 bars ago), price > SMA200.
+// @returns true if all Stage 2 conditions met
+export is_stage2() =>
+    float sma50     = ta.sma(close, 50)
+    float sma200    = ta.sma(close, 200)
+    float sma50_lag = sma50[10]
+    not na(sma50) and not na(sma200) and not na(sma50_lag)
+         and close > sma50 and sma50 > sma50_lag and close > sma200
+
+// ──────────────────────────────────────────────
+// Position Sizing & Risk
+// ──────────────────────────────────────────────
+
+// @function Position size: shares = floor(equity * risk% / risk_per_share).
+// @param entry    Entry price
+// @param stop     Stop-loss price
+// @param risk_pct Risk as decimal (0.01 = 1%)
+// @param equity   Account equity
+// @returns Number of shares (integer), 0 if invalid
+export calc_shares(float entry, float stop, float risk_pct, float equity) =>
+    float risk_per_share = math.abs(entry - stop)
+    risk_per_share > 0 ? math.floor(equity * risk_pct / risk_per_share) : 0
+
+// @function Validate risk/reward ratio meets minimum threshold.
+// @param entry  Entry price
+// @param stop   Stop-loss price
+// @param target Target price
+// @param min_rr Minimum required R:R (e.g., 2.0 for 1:2)
+// @returns true if R:R >= min_rr
+export rr_valid(float entry, float stop, float target, float min_rr) =>
+    float risk   = math.abs(entry - stop)
+    float reward = math.abs(target - entry)
+    risk > 0 ? reward / risk >= min_rr : false
+
+// ──────────────────────────────────────────────
+// Anti-Repainting Guard
+// ──────────────────────────────────────────────
+
+// @function Returns true only on confirmed (closed) bars.
+//           MUST gate every entry/exit signal to prevent repainting.
+// @returns true if bar is confirmed
+export confirmed() =>
+    barstate.isconfirmed
+
+// ──────────────────────────────────────────────
+// Swing Detection
+// ──────────────────────────────────────────────
+
+// @function Bar index of the most recent confirmed swing high.
+//           Uses ta.pivothigh — confirmed 'strength' bars after the actual high.
+//           Result persists (via var) until a new swing high is detected.
+// @param strength Number of bars required on each side to confirm pivot
+// @returns Bar index of last swing high, or na if none found yet
+export find_swing_high(simple int strength) =>
+    float ph = ta.pivothigh(high, strength, strength)
+    var int last_bar = int(na)
+    if not na(ph)
+        last_bar := bar_index - strength
+    last_bar
+
+// @function Bar index of the most recent confirmed swing low.
+//           Uses ta.pivotlow — confirmed 'strength' bars after the actual low.
+//           Result persists (via var) until a new swing low is detected.
+// @param strength Number of bars required on each side to confirm pivot
+// @returns Bar index of last swing low, or na if none found yet
+export find_swing_low(simple int strength) =>
+    float pl = ta.pivotlow(low, strength, strength)
+    var int last_bar = int(na)
+    if not na(pl)
+        last_bar := bar_index - strength
+    last_bar
+
+// ──────────────────────────────────────────────
+// rs_vs_spy() — NOT in this library.
+// request.security() is banned in Pine Script library exports.
+// Each strategy script implements RS inline. Template:
+//
+//   float spy_close = request.security("SPY", timeframe.period,
+//        close[1], lookahead = barmerge.lookahead_on)
+//   float stock_perf = (close[1] - close[lookback]) / close[lookback]
+//   float spy_perf   = (spy_close - spy_close[lookback]) / spy_close[lookback]
+//   bool  rs_ok      = stock_perf > spy_perf
+//
+// ──────────────────────────────────────────────

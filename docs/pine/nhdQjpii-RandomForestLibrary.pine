@@ -1,0 +1,955 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ShigemiQuant
+
+//@version=6
+library("RandomForestLibrary", overlay = false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  RandomForestLibrary — World's First Random Forest Library for TradingView
+//  Implements: CART decision trees, bootstrap aggregation, OOB scoring,
+//              weighted Gini importance (scikit-learn compatible)
+//  Supports:   Classification (binary) and Multi-output Regression
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EXPORT TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//@type Pseudo-random number generator state (LCG)
+export type RNG
+    int seed = 0
+
+//@type A single node in a decision tree (complete binary tree indexing)
+export type Node
+    int     feature_idx = -1
+    float   threshold   = 0.0
+    int     left_idx    = -1
+    int     right_idx   = -1
+    int     label       = 0
+    float   prob        = 0.0    // class 1 probability (leaf only)
+    bool    is_leaf     = true
+    int     n_samples   = 0
+    float   gini        = 0.0
+    array<float> outputs       // regression: mean target per horizon (length = n_horizons)
+
+//@type A single decision tree containing its node array and metadata
+export type Tree
+    array<Node> nodes
+    int     max_depth    = 0
+    int     n_leaves     = 0
+    int     n_split_fail = 0
+
+//@type Random Forest ensemble model
+export type Forest
+    array<Tree>   trees
+    int           n_estimators          = 10
+    int           max_depth             = 5
+    int           max_features          = 0
+    int           min_samples_leaf      = 5
+    int           n_features            = 0
+    int           n_classes             = 0
+    int           n_threshold_candidates = 10
+    bool          is_fitted             = false
+    matrix<float> X_train
+    array<int>    y_train
+    array<float>  oob_prob_sum
+    array<int>    oob_count
+    array<float>  feature_importances
+    array<int>    tree_leaf_counts
+    array<int>    tree_split_fails
+    array<int>    tree_root_features
+    RNG           rng
+    string        mode           = "classifier"   // "classifier" or "regressor"
+    matrix<float> Y_train                          // regression targets (n_samples x n_horizons)
+    int           n_horizons     = 0               // number of output horizons
+    matrix<float> oob_pred_sum                     // OOB accumulated predictions (n_samples x n_horizons)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  RNG METHODS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//@function Advance the LCG random number generator and return the next value
+//@param this RNG state object
+//@returns int — positive pseudo-random integer
+export method next(RNG this) =>
+    // Park-Miller LCG: a=48271, m=2^31-1 (max product ≈ 1.04e14 < 2^53, safe for float64)
+    this.seed := (48271 * this.seed) % 2147483647
+    if this.seed <= 0
+        this.seed := 1
+    this.seed
+
+//@function Generate a random integer in [0, max_val)
+//@param this RNG state object
+//@param max_val Upper bound (exclusive)
+//@returns int — random integer in [0, max_val)
+export method next_int(RNG this, int max_val) =>
+    max_val > 0 ? this.next() % max_val : 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  INTERNAL: GINI IMPURITY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Compute Gini impurity for a binary classification node
+// gini = 1 - p0^2 - p1^2
+_gini_impurity(int count0, int count1) =>
+    int total = count0 + count1
+    float result = 0.0
+    if total > 0
+        float p0 = count0 / float(total)
+        float p1 = count1 / float(total)
+        result := 1.0 - p0 * p0 - p1 * p1
+    result
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  INTERNAL: BUILD ONE DECISION TREE (Iterative, level-by-level CART)
+//
+//  Uses complete binary tree indexing:
+//    node i  ->  left child = 2*i + 1,  right child = 2*i + 2
+//    max nodes for depth D = 2^(D+1) - 1
+//
+//  assignments[j] = node index that sample j currently belongs to
+// ═══════════════════════════════════════════════════════════════════════════════
+
+_build_tree(Forest forest, array<int> boot_indices, matrix<float> X, array<int> y, int max_depth) =>
+    int n_boot     = boot_indices.size()
+    int max_nodes  = int(math.pow(2, max_depth + 1)) - 1
+    int n_features = X.columns()
+    int max_feat   = forest.max_features
+    int min_leaf   = forest.min_samples_leaf
+    int n_thresh   = forest.n_threshold_candidates
+
+    // Pre-allocate node array
+    array<Node> nodes = array.new<Node>()
+    for _i = 0 to max_nodes - 1
+        nodes.push(Node.new())
+
+    // Track which node each bootstrap sample belongs to
+    array<int> assignments = array.new<int>(n_boot, 0)  // all start at root (index 0)
+
+    // Feature importances accumulated for this tree
+    array<float> tree_importances = array.new<float>(n_features, 0.0)
+
+    // Process level by level
+    for level = 0 to max_depth
+        int first_node = int(math.pow(2, level)) - 1
+        int last_node  = int(math.pow(2, level + 1)) - 2
+
+        for node_idx = first_node to last_node
+            // Collect samples assigned to this node
+            array<int> node_samples = array.new<int>()
+            for j = 0 to n_boot - 1
+                if assignments.get(j) == node_idx
+                    node_samples.push(j)
+
+            int n_node = node_samples.size()
+            if n_node == 0
+                continue
+
+            // Count classes
+            int count1 = 0
+            for j = 0 to n_node - 1
+                if y.get(boot_indices.get(node_samples.get(j))) == 1
+                    count1 += 1
+            int count0 = n_node - count1
+
+            // Compute gini for this node
+            float node_gini = _gini_impurity(count0, count1)
+
+            // Record node metadata
+            Node nd_meta = nodes.get(node_idx)
+            nd_meta.n_samples := n_node
+            nd_meta.gini      := node_gini
+            nodes.set(node_idx, nd_meta)
+
+            // Make leaf if pure, too small, or last level
+            if count0 == 0 or count1 == 0 or n_node < min_leaf * 2 or level == max_depth
+                Node nd = nodes.get(node_idx)
+                nd.is_leaf  := true
+                nd.label    := count1 >= count0 ? 1 : 0
+                nd.prob     := n_node > 0 ? float(count1) / float(n_node) : 0.5
+                nodes.set(node_idx, nd)
+                continue
+
+            // Random feature subset: select max_features features
+            array<int> feat_pool = array.new<int>()
+            for f = 0 to n_features - 1
+                feat_pool.push(f)
+
+            array<int> feat_subset = array.new<int>()
+            for _s = 0 to max_feat - 1
+                if feat_pool.size() > 0
+                    int pick = forest.rng.next_int(feat_pool.size())
+                    feat_subset.push(feat_pool.get(pick))
+                    feat_pool.remove(pick)
+
+            // Find best split among selected features
+            float best_weighted_gini = 1e10
+            int   best_feat          = -1
+            float best_thresh        = 0.0
+            float best_gini_left     = 0.0
+            float best_gini_right    = 0.0
+            int   best_nl            = 0
+            int   best_nr            = 0
+
+            for fi = 0 to feat_subset.size() - 1
+                int f = feat_subset.get(fi)
+                // Find min/max of feature f for samples in this node
+                float fmin =  1e18
+                float fmax = -1e18
+                for j = 0 to n_node - 1
+                    int si = boot_indices.get(node_samples.get(j))
+                    float v = X.get(si, f)
+                    fmin := math.min(fmin, v)
+                    fmax := math.max(fmax, v)
+
+                if fmax > fmin
+                    float f_span = fmax - fmin
+                    for t = 1 to n_thresh
+                        float thresh = fmin + f_span * (forest.rng.next() / 2147483647.0)
+                        int nl = 0
+                        int nr = 0
+                        int cl = 0
+                        int cr = 0
+                        for j = 0 to n_node - 1
+                            int si = boot_indices.get(node_samples.get(j))
+                            float val = X.get(si, f)
+                            if val <= thresh
+                                nl += 1
+                                if y.get(si) == 1
+                                    cl += 1
+                            else
+                                nr += 1
+                                if y.get(si) == 1
+                                    cr += 1
+
+                        if nl >= min_leaf and nr >= min_leaf
+                            float gl = _gini_impurity(nl - cl, cl)
+                            float gr = _gini_impurity(nr - cr, cr)
+                            float weighted = (nl * gl + nr * gr) / float(n_node)
+                            if weighted < best_weighted_gini
+                                best_weighted_gini := weighted
+                                best_feat          := f
+                                best_thresh        := thresh
+                                best_gini_left     := gl
+                                best_gini_right    := gr
+                                best_nl            := nl
+                                best_nr            := nr
+
+            // Apply split or make leaf
+            if best_feat == -1
+                Node nd = nodes.get(node_idx)
+                nd.is_leaf  := true
+                nd.label    := count1 >= count0 ? 1 : 0
+                nd.prob     := n_node > 0 ? float(count1) / float(n_node) : 0.5
+                nodes.set(node_idx, nd)
+            else
+                Node nd = nodes.get(node_idx)
+                nd.is_leaf     := false
+                nd.feature_idx := best_feat
+                nd.threshold   := best_thresh
+                nd.left_idx    := 2 * node_idx + 1
+                nd.right_idx   := 2 * node_idx + 2
+                nodes.set(node_idx, nd)
+
+                // Default children labels to parent's majority class
+                int parent_label = count1 >= count0 ? 1 : 0
+                float parent_prob = n_node > 0 ? float(count1) / float(n_node) : 0.5
+                Node left_child  = nodes.get(2 * node_idx + 1)
+                Node right_child = nodes.get(2 * node_idx + 2)
+                left_child.label  := parent_label
+                left_child.prob   := parent_prob
+                right_child.label := parent_label
+                right_child.prob  := parent_prob
+                nodes.set(2 * node_idx + 1, left_child)
+                nodes.set(2 * node_idx + 2, right_child)
+
+                // Weighted Gini decrease (scikit-learn compatible importance)
+                float gini_decrease = n_node * node_gini - best_nl * best_gini_left - best_nr * best_gini_right
+                tree_importances.set(best_feat, tree_importances.get(best_feat) + gini_decrease)
+
+                // Assign samples to children
+                for j = 0 to n_node - 1
+                    int si = boot_indices.get(node_samples.get(j))
+                    float val = X.get(si, best_feat)
+                    if val <= best_thresh
+                        assignments.set(node_samples.get(j), 2 * node_idx + 1)
+                    else
+                        assignments.set(node_samples.get(j), 2 * node_idx + 2)
+
+    // Note: unvisited nodes default to is_leaf=true (Node default), no cleanup needed
+
+    // Normalize tree importances within this tree, then add to forest
+    float tree_imp_sum = 0.0
+    for f = 0 to n_features - 1
+        tree_imp_sum += tree_importances.get(f)
+    if tree_imp_sum > 0.0
+        for f = 0 to n_features - 1
+            float normalized = tree_importances.get(f) / tree_imp_sum
+            forest.feature_importances.set(f, forest.feature_importances.get(f) + normalized)
+
+    // Post-process: count leaves from actual node states (robust against Pine Script loop scoping)
+    int final_leaf_count = 0
+    int final_split_fail = 0
+    for i = 0 to max_nodes - 1
+        Node nd_check = nodes.get(i)
+        if nd_check.n_samples > 0 and nd_check.is_leaf
+            final_leaf_count += 1
+            if nd_check.gini > 0.0 and nd_check.feature_idx == -1
+                final_split_fail += 1
+
+    Tree result = Tree.new(nodes = nodes, max_depth = max_depth, n_leaves = final_leaf_count, n_split_fail = final_split_fail)
+    result
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  INTERNAL: BUILD ONE REGRESSION TREE (Iterative, level-by-level CART)
+//
+//  Uses MSE (sum over all horizons) as split criterion instead of Gini.
+//  Leaf values are per-horizon means stored in node.outputs.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+_build_tree_regressor(Forest forest, array<int> boot_indices, matrix<float> X, matrix<float> Y, int max_depth) =>
+    int n_boot      = boot_indices.size()
+    int max_nodes   = int(math.pow(2, max_depth + 1)) - 1
+    int n_features  = X.columns()
+    int n_horizons  = Y.columns()
+    int max_feat    = forest.max_features
+    int min_leaf    = forest.min_samples_leaf
+    int n_thresh    = forest.n_threshold_candidates
+
+    // Pre-allocate node array with outputs initialized
+    array<Node> nodes = array.new<Node>()
+    for _i = 0 to max_nodes - 1
+        nodes.push(Node.new(outputs = array.new<float>(n_horizons, 0.0)))
+
+    // Track which node each bootstrap sample belongs to
+    array<int> assignments = array.new<int>(n_boot, 0)  // all start at root (index 0)
+
+    // Feature importances accumulated for this tree
+    array<float> tree_importances = array.new<float>(n_features, 0.0)
+
+    // Process level by level
+    for level = 0 to max_depth
+        int first_node = int(math.pow(2, level)) - 1
+        int last_node  = int(math.pow(2, level + 1)) - 2
+
+        for node_idx = first_node to last_node
+            // Collect samples assigned to this node
+            array<int> node_samples = array.new<int>()
+            for j = 0 to n_boot - 1
+                if assignments.get(j) == node_idx
+                    node_samples.push(j)
+
+            int n_node = node_samples.size()
+            if n_node == 0
+                continue
+
+            // Compute per-horizon means and MSE for this node
+            array<float> node_means = array.new<float>(n_horizons, 0.0)
+            // Accumulate sums
+            for j = 0 to n_node - 1
+                int si = boot_indices.get(node_samples.get(j))
+                for h = 0 to n_horizons - 1
+                    node_means.set(h, node_means.get(h) + Y.get(si, h))
+            // Divide by n_node to get means
+            for h = 0 to n_horizons - 1
+                node_means.set(h, node_means.get(h) / float(n_node))
+
+            // Compute node MSE (sum over horizons)
+            float node_mse = 0.0
+            for j = 0 to n_node - 1
+                int si = boot_indices.get(node_samples.get(j))
+                for h = 0 to n_horizons - 1
+                    float diff = Y.get(si, h) - node_means.get(h)
+                    node_mse += diff * diff
+            node_mse := n_node > 0 ? node_mse / float(n_node) : 0.0
+
+            // Record node metadata
+            Node nd_meta = nodes.get(node_idx)
+            nd_meta.n_samples := n_node
+            nd_meta.gini      := node_mse  // reuse gini field for MSE
+            nodes.set(node_idx, nd_meta)
+
+            // Make leaf if too small or last level
+            if n_node < min_leaf * 2 or level == max_depth
+                Node nd = nodes.get(node_idx)
+                nd.is_leaf  := true
+                nd.outputs  := node_means
+                nodes.set(node_idx, nd)
+                continue
+
+            // Random feature subset: select max_features features
+            array<int> feat_pool = array.new<int>()
+            for f = 0 to n_features - 1
+                feat_pool.push(f)
+
+            array<int> feat_subset = array.new<int>()
+            for _s = 0 to max_feat - 1
+                if feat_pool.size() > 0
+                    int pick = forest.rng.next_int(feat_pool.size())
+                    feat_subset.push(feat_pool.get(pick))
+                    feat_pool.remove(pick)
+
+            // Find best split among selected features (MSE reduction)
+            float best_weighted_mse = 1e18
+            int   best_feat         = -1
+            float best_thresh       = 0.0
+            float best_mse_left     = 0.0
+            float best_mse_right    = 0.0
+            int   best_nl           = 0
+            int   best_nr           = 0
+
+            for fi = 0 to feat_subset.size() - 1
+                int f = feat_subset.get(fi)
+                // Find min/max of feature f for samples in this node
+                float fmin =  1e18
+                float fmax = -1e18
+                for j = 0 to n_node - 1
+                    int si = boot_indices.get(node_samples.get(j))
+                    float v = X.get(si, f)
+                    fmin := math.min(fmin, v)
+                    fmax := math.max(fmax, v)
+
+                if fmax > fmin
+                    float f_span = fmax - fmin
+                    for t = 1 to n_thresh
+                        float thresh = fmin + f_span * (forest.rng.next() / 2147483647.0)
+                        int nl = 0
+                        int nr = 0
+                        // Accumulate sums for left/right per horizon
+                        array<float> sum_left  = array.new<float>(n_horizons, 0.0)
+                        array<float> sum_right = array.new<float>(n_horizons, 0.0)
+                        array<float> sum2_left  = array.new<float>(n_horizons, 0.0)
+                        array<float> sum2_right = array.new<float>(n_horizons, 0.0)
+
+                        for j = 0 to n_node - 1
+                            int si = boot_indices.get(node_samples.get(j))
+                            float val = X.get(si, f)
+                            if val <= thresh
+                                nl += 1
+                                for h = 0 to n_horizons - 1
+                                    float yv = Y.get(si, h)
+                                    sum_left.set(h, sum_left.get(h) + yv)
+                                    sum2_left.set(h, sum2_left.get(h) + yv * yv)
+                            else
+                                nr += 1
+                                for h = 0 to n_horizons - 1
+                                    float yv = Y.get(si, h)
+                                    sum_right.set(h, sum_right.get(h) + yv)
+                                    sum2_right.set(h, sum2_right.get(h) + yv * yv)
+
+                        if nl >= min_leaf and nr >= min_leaf
+                            // MSE = mean(y^2) - mean(y)^2, summed over horizons
+                            float mse_l = 0.0
+                            float mse_r = 0.0
+                            for h = 0 to n_horizons - 1
+                                float mean_l = sum_left.get(h) / float(nl)
+                                float mean_r = sum_right.get(h) / float(nr)
+                                mse_l += sum2_left.get(h) / float(nl) - mean_l * mean_l
+                                mse_r += sum2_right.get(h) / float(nr) - mean_r * mean_r
+                            float weighted = (nl * mse_l + nr * mse_r) / float(n_node)
+                            if weighted < best_weighted_mse
+                                best_weighted_mse := weighted
+                                best_feat         := f
+                                best_thresh       := thresh
+                                best_mse_left     := mse_l
+                                best_mse_right    := mse_r
+                                best_nl           := nl
+                                best_nr           := nr
+
+            // Apply split or make leaf
+            if best_feat == -1
+                Node nd = nodes.get(node_idx)
+                nd.is_leaf  := true
+                nd.outputs  := node_means
+                nodes.set(node_idx, nd)
+            else
+                Node nd = nodes.get(node_idx)
+                nd.is_leaf     := false
+                nd.feature_idx := best_feat
+                nd.threshold   := best_thresh
+                nd.left_idx    := 2 * node_idx + 1
+                nd.right_idx   := 2 * node_idx + 2
+                nd.outputs     := node_means  // store parent means as fallback
+                nodes.set(node_idx, nd)
+
+                // Initialize children outputs with parent means as default
+                Node left_child  = nodes.get(2 * node_idx + 1)
+                Node right_child = nodes.get(2 * node_idx + 2)
+                array<float> parent_means_copy1 = array.new<float>(n_horizons, 0.0)
+                array<float> parent_means_copy2 = array.new<float>(n_horizons, 0.0)
+                for h = 0 to n_horizons - 1
+                    parent_means_copy1.set(h, node_means.get(h))
+                    parent_means_copy2.set(h, node_means.get(h))
+                left_child.outputs  := parent_means_copy1
+                right_child.outputs := parent_means_copy2
+                nodes.set(2 * node_idx + 1, left_child)
+                nodes.set(2 * node_idx + 2, right_child)
+
+                // MSE decrease (importance)
+                float mse_decrease = n_node * node_mse - best_nl * best_mse_left - best_nr * best_mse_right
+                tree_importances.set(best_feat, tree_importances.get(best_feat) + mse_decrease)
+
+                // Assign samples to children
+                for j = 0 to n_node - 1
+                    int si = boot_indices.get(node_samples.get(j))
+                    float val = X.get(si, best_feat)
+                    if val <= best_thresh
+                        assignments.set(node_samples.get(j), 2 * node_idx + 1)
+                    else
+                        assignments.set(node_samples.get(j), 2 * node_idx + 2)
+
+    // Normalize tree importances within this tree, then add to forest
+    float tree_imp_sum = 0.0
+    for f = 0 to n_features - 1
+        tree_imp_sum += tree_importances.get(f)
+    if tree_imp_sum > 0.0
+        for f = 0 to n_features - 1
+            float normalized = tree_importances.get(f) / tree_imp_sum
+            forest.feature_importances.set(f, forest.feature_importances.get(f) + normalized)
+
+    // Post-process: count leaves
+    int final_leaf_count = 0
+    int final_split_fail = 0
+    for i = 0 to max_nodes - 1
+        Node nd_check = nodes.get(i)
+        if nd_check.n_samples > 0 and nd_check.is_leaf
+            final_leaf_count += 1
+            if nd_check.gini > 0.0 and nd_check.feature_idx == -1
+                final_split_fail += 1
+
+    Tree result = Tree.new(nodes = nodes, max_depth = max_depth, n_leaves = final_leaf_count, n_split_fail = final_split_fail)
+    result
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TREE METHODS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//@function Predict the class label for a single sample using one tree
+//@param this Tree object
+//@param sample Feature vector for the sample
+//@returns int — predicted class label
+export method tree_predict(Tree this, array<float> sample) =>
+    int current    = 0
+    int max_iter   = 30  // safety limit (depth won't exceed this)
+    int prediction = 0
+    int n_nodes    = this.nodes.size()
+
+    for _iter = 0 to max_iter
+        if current < 0 or current >= n_nodes
+            break
+
+        Node nd = this.nodes.get(current)
+        if nd.is_leaf
+            prediction := nd.label
+            break
+
+        float val = sample.get(nd.feature_idx)
+        current := val <= nd.threshold ? nd.left_idx : nd.right_idx
+
+    prediction
+
+//@function Predict class 1 probability for a single sample using one tree (leaf probability)
+//@param this Tree object
+//@param sample Feature vector for the sample
+//@returns float — class 1 probability from the leaf node
+export method tree_predict_proba(Tree this, array<float> sample) =>
+    int current  = 0
+    int max_iter = 30
+    float prob   = 0.5
+    int n_nodes  = this.nodes.size()
+
+    for _iter = 0 to max_iter
+        if current < 0 or current >= n_nodes
+            break
+
+        Node nd = this.nodes.get(current)
+        if nd.is_leaf
+            prob := nd.prob
+            break
+
+        float val = sample.get(nd.feature_idx)
+        current := val <= nd.threshold ? nd.left_idx : nd.right_idx
+
+    prob
+
+//@function Predict multi-output values for a single sample using one tree (regression)
+//@param this Tree object
+//@param sample Feature vector for the sample
+//@param n_horizons Number of output horizons
+//@returns array<float> — predicted values per horizon from the leaf node
+export method tree_predict_multi(Tree this, array<float> sample, int n_horizons) =>
+    int current  = 0
+    int max_iter = 30
+    int n_nodes  = this.nodes.size()
+    array<float> result = array.new<float>(n_horizons, 0.0)
+
+    for _iter = 0 to max_iter
+        if current < 0 or current >= n_nodes
+            break
+
+        Node nd = this.nodes.get(current)
+        if nd.is_leaf
+            if not na(nd.outputs)
+                for h = 0 to n_horizons - 1
+                    result.set(h, nd.outputs.get(h))
+            break
+
+        float val = sample.get(nd.feature_idx)
+        current := val <= nd.threshold ? nd.left_idx : nd.right_idx
+
+    result
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  FOREST METHODS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//@function Initialize the Random Forest with hyperparameters
+//@param this Forest object
+//@param n_estimators Number of trees in the forest (default: 10)
+//@param max_depth Maximum depth of each tree (default: 5)
+//@param max_features Number of features to consider at each split; 0 = auto ceil(sqrt(n_features)) (default: 0)
+//@param min_samples_leaf Minimum samples required in a leaf node (default: 5)
+//@param n_threshold_candidates Number of threshold candidates per feature (default: 10)
+//@param seed Random seed for reproducibility (default: 42)
+//@returns Forest — initialized forest object
+export method init(Forest this, int n_estimators = 10, int max_depth = 5, int max_features = 0, int min_samples_leaf = 5, int n_threshold_candidates = 10, int seed = 42) =>
+    this.n_estimators          := n_estimators
+    this.max_depth             := max_depth
+    this.max_features          := max_features
+    this.min_samples_leaf      := min_samples_leaf
+    this.n_threshold_candidates := n_threshold_candidates
+    this.is_fitted             := false
+    this.trees                 := array.new<Tree>()
+    this.oob_prob_sum          := array.new<float>()
+    this.oob_count             := array.new<int>()
+    this.feature_importances   := array.new<float>()
+    this.tree_leaf_counts      := array.new<int>()
+    this.tree_split_fails      := array.new<int>()
+    this.tree_root_features    := array.new<int>()
+    this.rng                   := RNG.new(seed)
+    this.mode                  := "classifier"
+    this.n_horizons            := 0
+    this
+
+//@function Train the Random Forest on the given dataset
+//@param this Forest object (must be initialized via init())
+//@param X Feature matrix — rows are samples, columns are features
+//@param y Label array — integer class labels (0, 1, ...)
+//@returns Forest — fitted forest object
+export method fit(Forest this, matrix<float> X, array<int> y) =>
+    this.mode := "classifier"
+    int n_samples  = X.rows()
+    int n_features = X.columns()
+
+    this.n_features := n_features
+    this.X_train    := X
+    this.y_train    := y
+
+    // Determine n_classes from labels (minimum 2 for binary classification safety)
+    int max_label = 0
+    for i = 0 to y.size() - 1
+        max_label := math.max(max_label, y.get(i))
+    this.n_classes := math.max(max_label + 1, 2)
+
+    // Auto-set max_features if 0
+    if this.max_features == 0 and n_features > 0
+        this.max_features := int(math.ceil(math.sqrt(n_features)))
+
+    // Initialize per-sample OOB tracking (soft voting: accumulate probabilities)
+    this.oob_prob_sum := array.new<float>(n_samples, 0.0)
+    this.oob_count    := array.new<int>(n_samples, 0)
+
+    // Initialize feature importances accumulator
+    this.feature_importances := array.new<float>(n_features, 0.0)
+
+    // Clear trees
+    this.trees := array.new<Tree>()
+
+    if n_samples > 0
+        // Build each tree
+        for t = 0 to this.n_estimators - 1
+            // Bootstrap sampling
+            array<int>  boot_indices = array.new<int>()
+            array<bool> in_bag       = array.new<bool>(n_samples, false)
+            for _s = 0 to n_samples - 1
+                int pick = this.rng.next_int(n_samples)
+                boot_indices.push(pick)
+                in_bag.set(pick, true)
+
+            // Build tree
+            Tree tree = _build_tree(this, boot_indices, X, y, this.max_depth)
+            this.trees.push(tree)
+
+            // Record debug info per tree
+            this.tree_leaf_counts.push(tree.n_leaves)
+            this.tree_split_fails.push(tree.n_split_fail)
+            int root_feat = tree.nodes.size() > 0 ? tree.nodes.get(0).feature_idx : -1
+            this.tree_root_features.push(root_feat)
+
+            // OOB evaluation — soft voting (accumulate leaf probabilities per sample)
+            array<float> oob_sample = array.new<float>(n_features, 0.0)
+            for s = 0 to n_samples - 1
+                if not in_bag.get(s)
+                    for f = 0 to n_features - 1
+                        oob_sample.set(f, X.get(s, f))
+                    float oob_prob = tree.tree_predict_proba(oob_sample)
+                    this.oob_prob_sum.set(s, this.oob_prob_sum.get(s) + oob_prob)
+                    this.oob_count.set(s, this.oob_count.get(s) + 1)
+
+        // Average feature importances across trees (scikit-learn compatible)
+        // Each tree's importance was already normalized within _build_tree
+        int n_trees_built = this.trees.size()
+        if n_trees_built > 0
+            for f = 0 to n_features - 1
+                this.feature_importances.set(f, this.feature_importances.get(f) / float(n_trees_built))
+
+    this.is_fitted := n_samples > 0
+    this
+
+//@function Predict the probability of class 1 for a single sample (soft voting, scikit-learn compatible)
+//@param this Forest object (must be fitted)
+//@param sample Feature vector for the sample
+//@returns float — average leaf probability across all trees
+export method predict_proba(Forest this, array<float> sample) =>
+    int n_trees    = this.trees.size()
+    float prob_sum = 0.0
+
+    for t = 0 to n_trees - 1
+        prob_sum += this.trees.get(t).tree_predict_proba(sample)
+
+    n_trees > 0 ? prob_sum / float(n_trees) : 0.5
+
+//@function Predict the class label for a single sample (soft voting, threshold = 0.5)
+//@param this Forest object (must be fitted)
+//@param sample Feature vector for the sample
+//@returns int — predicted class label
+export method predict(Forest this, array<float> sample) =>
+    // Soft voting: consistent with predict_proba
+    this.predict_proba(sample) >= 0.5 ? 1 : 0
+
+//@function Predict class labels for multiple samples (batch prediction)
+//@param this Forest object (must be fitted)
+//@param X Feature matrix — rows are samples, columns are features
+//@returns array<int> — predicted class labels for each row
+export method predict_batch(Forest this, matrix<float> X) =>
+    int n_samples  = X.rows()
+    int n_features = X.columns()
+    array<int> predictions = array.new<int>()
+    array<float> sample = array.new<float>(n_features, 0.0)
+
+    for i = 0 to n_samples - 1
+        for f = 0 to n_features - 1
+            sample.set(f, X.get(i, f))
+        predictions.push(this.predict(sample))
+
+    predictions
+
+//@function Compute the Out-of-Bag accuracy score (scikit-learn compatible)
+//@param this Forest object (must be fitted)
+//@returns float — OOB accuracy (0.0 to 1.0)
+export method oob_score(Forest this) =>
+    int total_correct = 0
+    int total_counted = 0
+
+    for i = 0 to this.oob_count.size() - 1
+        int cnt = this.oob_count.get(i)
+        if cnt > 0
+            total_counted += 1
+            // Soft voting: average probability across OOB trees, threshold at 0.5
+            float avg_prob = this.oob_prob_sum.get(i) / float(cnt)
+            int oob_pred = avg_prob >= 0.5 ? 1 : 0
+            if oob_pred == this.y_train.get(i)
+                total_correct += 1
+
+    total_counted > 0 ? float(total_correct) / float(total_counted) : 0.0
+
+//@function Get the normalized feature importance scores (weighted Gini decrease)
+//@param this Forest object (must be fitted)
+//@returns array<float> — importance score per feature (sums to 1.0)
+export method feature_importance(Forest this) =>
+    this.feature_importances
+
+//@function Train the Random Forest as a regressor on multi-output targets
+//@param this Forest object (must be initialized via init())
+//@param X Feature matrix — rows are samples, columns are features
+//@param Y Target matrix — rows are samples, columns are horizons
+//@returns Forest — fitted forest object
+export method fit_regressor(Forest this, matrix<float> X, matrix<float> Y) =>
+    this.mode := "regressor"
+    int n_samples  = X.rows()
+    int n_features = X.columns()
+    int n_horizons = Y.columns()
+
+    this.n_features := n_features
+    this.X_train    := X
+    this.Y_train    := Y
+    this.n_horizons := n_horizons
+
+    // Auto-set max_features if 0 (regression default: n_features / 3, at least 1)
+    if this.max_features == 0 and n_features > 0
+        this.max_features := math.max(int(math.ceil(n_features / 3.0)), 1)
+
+    // Initialize OOB tracking for regression
+    this.oob_pred_sum := matrix.new<float>(n_samples, n_horizons, 0.0)
+    this.oob_count    := array.new<int>(n_samples, 0)
+
+    // Initialize feature importances accumulator
+    this.feature_importances := array.new<float>(n_features, 0.0)
+
+    // Clear trees
+    this.trees := array.new<Tree>()
+
+    if n_samples > 0
+        // Build each tree
+        for t = 0 to this.n_estimators - 1
+            // Bootstrap sampling
+            array<int>  boot_indices = array.new<int>()
+            array<bool> in_bag       = array.new<bool>(n_samples, false)
+            for _s = 0 to n_samples - 1
+                int pick = this.rng.next_int(n_samples)
+                boot_indices.push(pick)
+                in_bag.set(pick, true)
+
+            // Build regression tree
+            Tree tree = _build_tree_regressor(this, boot_indices, X, Y, this.max_depth)
+            this.trees.push(tree)
+
+            // Record debug info per tree
+            this.tree_leaf_counts.push(tree.n_leaves)
+            this.tree_split_fails.push(tree.n_split_fail)
+            int root_feat = tree.nodes.size() > 0 ? tree.nodes.get(0).feature_idx : -1
+            this.tree_root_features.push(root_feat)
+
+            // OOB evaluation — accumulate predictions per OOB sample
+            array<float> oob_sample = array.new<float>(n_features, 0.0)
+            for s = 0 to n_samples - 1
+                if not in_bag.get(s)
+                    for f = 0 to n_features - 1
+                        oob_sample.set(f, X.get(s, f))
+                    array<float> oob_pred = tree.tree_predict_multi(oob_sample, n_horizons)
+                    for h = 0 to n_horizons - 1
+                        this.oob_pred_sum.set(s, h, this.oob_pred_sum.get(s, h) + oob_pred.get(h))
+                    this.oob_count.set(s, this.oob_count.get(s) + 1)
+
+        // Average feature importances across trees
+        int n_trees_built = this.trees.size()
+        if n_trees_built > 0
+            for f = 0 to n_features - 1
+                this.feature_importances.set(f, this.feature_importances.get(f) / float(n_trees_built))
+
+    this.is_fitted := n_samples > 0
+    this
+
+//@function Predict multi-output values for a single sample (average across all trees)
+//@param this Forest object (must be fitted as regressor)
+//@param sample Feature vector for the sample
+//@returns array<float> — predicted values per horizon (averaged across trees)
+export method predict_multi(Forest this, array<float> sample) =>
+    int n_trees    = this.trees.size()
+    int n_horizons = this.n_horizons
+    array<float> result = array.new<float>(n_horizons, 0.0)
+
+    for t = 0 to n_trees - 1
+        array<float> tree_pred = this.trees.get(t).tree_predict_multi(sample, n_horizons)
+        for h = 0 to n_horizons - 1
+            result.set(h, result.get(h) + tree_pred.get(h))
+
+    if n_trees > 0
+        for h = 0 to n_horizons - 1
+            result.set(h, result.get(h) / float(n_trees))
+
+    result
+
+//@function Predict multi-output values per tree for a single sample (for confidence intervals)
+//@param this Forest object (must be fitted as regressor)
+//@param sample Feature vector for the sample
+//@returns matrix<float> — predictions matrix (n_estimators x n_horizons)
+export method predict_multi_per_tree(Forest this, array<float> sample) =>
+    int n_trees    = this.trees.size()
+    int n_horizons = this.n_horizons
+    matrix<float> result = matrix.new<float>(n_trees, n_horizons, 0.0)
+
+    for t = 0 to n_trees - 1
+        array<float> tree_pred = this.trees.get(t).tree_predict_multi(sample, n_horizons)
+        for h = 0 to n_horizons - 1
+            result.set(t, h, tree_pred.get(h))
+
+    result
+
+//@function Compute the Out-of-Bag R² score for regression (average across horizons)
+//@param this Forest object (must be fitted as regressor)
+//@returns float — average OOB R² across all horizons
+export method oob_r2(Forest this) =>
+    int n_horizons = this.n_horizons
+    int n_samples  = this.oob_count.size()
+    float total_r2 = 0.0
+
+    for h = 0 to n_horizons - 1
+        // Compute mean of actual values for OOB samples
+        float y_sum   = 0.0
+        int   n_valid = 0
+        for i = 0 to n_samples - 1
+            int cnt = this.oob_count.get(i)
+            if cnt > 0
+                y_sum   += this.Y_train.get(i, h)
+                n_valid += 1
+
+        if n_valid > 0
+            float y_mean = y_sum / float(n_valid)
+
+            // Compute SS_res and SS_tot
+            float ss_res = 0.0
+            float ss_tot = 0.0
+            for i = 0 to n_samples - 1
+                int cnt = this.oob_count.get(i)
+                if cnt > 0
+                    float y_actual = this.Y_train.get(i, h)
+                    float y_pred   = this.oob_pred_sum.get(i, h) / float(cnt)
+                    float res_diff = y_actual - y_pred
+                    float tot_diff = y_actual - y_mean
+                    ss_res += res_diff * res_diff
+                    ss_tot += tot_diff * tot_diff
+
+            float r2 = ss_tot > 0.0 ? 1.0 - ss_res / ss_tot : 0.0
+            total_r2 += r2
+
+    n_horizons > 0 ? total_r2 / float(n_horizons) : 0.0
+
+//@function Compute OOB residual standard deviation per horizon (for prediction intervals)
+//@param this Forest object (must be fitted as regressor)
+//@returns array<float> — standard deviation of OOB residuals per horizon
+export method oob_residual_std(Forest this) =>
+    int n_horizons = this.n_horizons
+    int n_samples  = this.oob_count.size()
+    array<float> result = array.new<float>(n_horizons, 0.0)
+    for h = 0 to n_horizons - 1
+        float sum_res  = 0.0
+        float sum_res2 = 0.0
+        int   n_valid  = 0
+        for i = 0 to n_samples - 1
+            int cnt = this.oob_count.get(i)
+            if cnt > 0
+                float y_actual = this.Y_train.get(i, h)
+                float y_pred   = this.oob_pred_sum.get(i, h) / float(cnt)
+                float residual = y_actual - y_pred
+                sum_res  += residual
+                sum_res2 += residual * residual
+                n_valid  += 1
+        if n_valid > 1
+            float mean_res = sum_res / float(n_valid)
+            float variance = sum_res2 / float(n_valid) - mean_res * mean_res
+            variance := variance * float(n_valid) / float(n_valid - 1)  // Bessel's correction
+            result.set(h, math.sqrt(math.max(variance, 0.0)))
+    result
+
+//@function Returns library version number for debugging version mismatch issues
+//@returns int — library internal version (bump this number each time you publish a new version to TV)
+export lib_version() =>
+    2  // ← bump this number each time you publish a new version to TV

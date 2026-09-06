@@ -1,0 +1,1351 @@
+//@version=6
+indicator("TitanLevels",
+         shorttitle       = "TitanLevels",
+         overlay          = true,
+         max_lines_count  = 500,
+         max_labels_count = 500,
+         max_boxes_count  = 500,
+         max_bars_back    = 500)
+
+// ════════════════════════════════════════════════════════════
+//  TitanLevels — suite combinată
+//    1) Sweep Rejection Levels (multi-timeframe)
+//    2) ICT Killzones & Pivots + Day/Week/Month
+//    3) Supply / Demand + Swing H/L
+//    4) Key Levels (port SpacemanBTC IDWM)
+//  Subject to the Mozilla Public License 2.0 — https://mozilla.org/MPL/2.0/
+// ════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════
+//  📈  1) SWEEP REJECTION LEVELS
+// ════════════════════════════════════════════════════════════
+
+// ============================================================
+//  Sweep Rejection Levels — Multi-Timeframe
+//
+//  Detectează formațiunea de 2 candele adiacente:
+//    - VÂRF (bearish) : stânga bullish -> dreapta bearish;
+//                       dreapta face wick PESTE close-ul stângii
+//                       și închide SUB el  (sweep + rejection).
+//    - FUND (bullish) : stânga bearish -> dreapta bullish;
+//                       dreapta face wick SUB close-ul stângii
+//                       și închide PESTE el.
+//
+//  Linia se trage la CLOSE-ul candelei din stânga, ancorată în timp
+//  la candela sursă și extinsă spre dreapta.
+//  Culoarea + label-ul indică timeframe-ul pe care a fost detectată.
+//
+//  LIFECYCLE: linia dispare după N evenimente (default 3). Două moduri:
+//    - Spargere (close) : candela ÎNCHIDE de partea opusă a nivelului.
+//                         Wick-urile care traversează nu contează.
+//    - Atingere (wick)  : wick-ul atinge nivelul; se numără o singură dată
+//                         per vizită (prețul trebuie să plece și să revină).
+//
+//  LOOKBACK: se detectează doar în ultimele N candele ALE FIECĂRUI TF.
+//
+//  NOTĂ: request.security() nu poate coborî sub timeframe-ul chartului.
+//  Pentru detecție corectă a M15, stai pe chart de 15m sau mai jos.
+// ============================================================
+
+// ---------------- Timeframes ----------------
+gTF = "📈 Sweep — Timeframes"
+useM15 = input.bool(true,  "M15",   inline = "m15", group = gTF)
+tfM15  = input.timeframe("15",  "",  inline = "m15", group = gTF)
+useH1  = input.bool(true,  "H1",    inline = "h1",  group = gTF)
+tfH1   = input.timeframe("60",  "",  inline = "h1",  group = gTF)
+useH2  = input.bool(true,  "H2",    inline = "h2",  group = gTF)
+tfH2   = input.timeframe("120", "",  inline = "h2",  group = gTF)
+useH4  = input.bool(true,  "H4",    inline = "h4",  group = gTF)
+tfH4   = input.timeframe("240", "",  inline = "h4",  group = gTF)
+useD   = input.bool(true,  "Daily", inline = "d",   group = gTF)
+tfD    = input.timeframe("1D",  "",  inline = "d",   group = gTF)
+
+// ---------------- Detecție ----------------
+gDet = "📈 Sweep — Detecție"
+lookback = input.int(50, "Lookback (candele per TF)", minval = 1, group = gDet,
+     tooltip = "Detectează doar în ultimele N candele ale fiecărui timeframe scanat.")
+reqOpp   = input.bool(true, "Cere culori opuse (reversal)", group = gDet)
+reqWicks = input.bool(true, "Cere wick pe ambele candele",  group = gDet)
+minWick  = input.float(0.0, "Wick minim (puncte)", minval = 0, step = 0.1, group = gDet,
+     tooltip = "Fiecare candelă trebuie să aibă wick total (sus+jos) peste această valoare.")
+minSweep = input.float(0.0, "Sweep minim peste close (puncte)", minval = 0, step = 0.1, group = gDet,
+     tooltip = "Cât de mult trebuie wick-ul candelei din dreapta să depășească close-ul stângii.")
+maxPerTF = input.int(20, "Max niveluri per TF (cap)", minval = 1, maxval = 100, group = gDet,
+     tooltip = "Plafon dur de siguranță pe fiecare timeframe.")
+
+// ---------------- Lifecycle ----------------
+gLC = "📈 Sweep — Lifecycle"
+lcMode     = input.string("Spargere (close)", "Mod numărare", options = ["Spargere (close)", "Atingere (wick)"], group = gLC,
+     tooltip = "Spargere = candela ÎNCHIDE de partea cealaltă a liniei (traversările cu wick nu contează). Atingere = wick-ul atinge linia.")
+delOnTouch = input.bool(true, "Șterge linia după N evenimente", group = gLC)
+maxTouch   = input.int(3, "Număr de evenimente", minval = 1, maxval = 20, group = gLC,
+     tooltip = "Linia dispare după N spargeri (sau atingeri, în funcție de mod).")
+touchTol   = input.float(0.0, "Toleranță (puncte)", minval = 0, step = 0.1, group = gLC,
+     tooltip = "Doar pentru modul Atingere: cât de aproape trebuie prețul de linie. 0 = atingere exactă.")
+showCount  = input.bool(true, "Arată contorul în label (ex. M15 2/3)", group = gLC)
+
+isBreakMode = lcMode == "Spargere (close)"
+
+// ---------------- Stil ----------------
+gSt = "📈 Sweep — Stil"
+cM15 = input.color(color.rgb(247, 82,  95),  "M15",   group = gSt)
+cH1  = input.color(color.rgb(38,  198, 218), "H1",    group = gSt)
+cH2  = input.color(color.rgb(255, 214, 0),   "H2",    group = gSt)
+cH4  = input.color(color.rgb(170, 0,   255), "H4",    group = gSt)
+cD   = input.color(color.rgb(41,  98,  255), "Daily", group = gSt)
+lw         = input.int(1, "Grosime linie", minval = 1, maxval = 4, group = gSt)
+h4Dashed   = input.bool(true, "H4 linie punctată", group = gSt)
+showLabels = input.bool(true, "Arată label TF", group = gSt)
+labelSizeS = input.string("small", "Mărime label", options = ["tiny", "small", "normal", "large"], group = gSt)
+
+f_size(string s) =>
+    s == "tiny" ? size.tiny : s == "normal" ? size.normal : s == "large" ? size.large : size.small
+
+// ---------------- Detecție per timeframe ----------------
+// Se evaluează pe ultimele DOUĂ candele închise ale TF-ului cerut
+// (offset [2] = stânga, [1] = dreapta) -> non-repainting.
+f_detect(string tf) =>
+    [lC, lO, lH, lL, rO, rH, rL, rC, lt, curIdx, riIdx] = request.security(syminfo.tickerid, tf,
+         [close[2], open[2], high[2], low[2], open[1], high[1], low[1], close[1], time[2], bar_index, bar_index[1]],
+         lookahead = barmerge.lookahead_off)
+
+    // fire o singură dată, când se închide o nouă candelă pe TF-ul respectiv
+    newBar = ta.change(curIdx) != 0
+
+    // wick total (sus + jos) pentru fiecare candelă
+    lWick = (lH - math.max(lO, lC)) + (math.min(lO, lC) - lL)
+    rWick = (rH - math.max(rO, rC)) + (math.min(rO, rC) - rL)
+    wicksOK = not reqWicks or (lWick > minWick and rWick > minWick)
+
+    // culori
+    leftBull  = lC > lO
+    leftBear  = lC < lO
+    rightBull = rC > rO
+    rightBear = rC < rO
+    oppTop = not reqOpp or (leftBull and rightBear)
+    oppBot = not reqOpp or (leftBear and rightBull)
+
+    // pattern-uri
+    bearTop = newBar and oppTop and (rH > lC + minSweep) and (rC < lC) and wicksOK   // sweep sus + close sub
+    bullBot = newBar and oppBot and (rL < lC - minSweep) and (rC > lC) and wicksOK   // sweep jos + close peste
+
+    sig = bearTop or bullBot
+    [sig, lC, lt, riIdx, curIdx]
+
+// ---------------- Stocare (arrays paralele per TF) ----------------
+var array<line>  laM15 = array.new_line()
+var array<label> lbM15 = array.new_label()
+var array<int>   liM15 = array.new_int()
+var array<float> lpM15 = array.new_float()
+var array<int>   ltM15 = array.new_int()
+var array<bool>  lcM15 = array.new_bool()
+
+var array<line>  laH1  = array.new_line()
+var array<label> lbH1  = array.new_label()
+var array<int>   liH1  = array.new_int()
+var array<float> lpH1  = array.new_float()
+var array<int>   ltH1  = array.new_int()
+var array<bool>  lcH1  = array.new_bool()
+
+var array<line>  laH2  = array.new_line()
+var array<label> lbH2  = array.new_label()
+var array<int>   liH2  = array.new_int()
+var array<float> lpH2  = array.new_float()
+var array<int>   ltH2  = array.new_int()
+var array<bool>  lcH2  = array.new_bool()
+
+var array<line>  laH4  = array.new_line()
+var array<label> lbH4  = array.new_label()
+var array<int>   liH4  = array.new_int()
+var array<float> lpH4  = array.new_float()
+var array<int>   ltH4  = array.new_int()
+var array<bool>  lcH4  = array.new_bool()
+
+var array<line>  laD   = array.new_line()
+var array<label> lbD   = array.new_label()
+var array<int>   liD   = array.new_int()
+var array<float> lpD   = array.new_float()
+var array<int>   ltD   = array.new_int()
+var array<bool>  lcD   = array.new_bool()
+
+// scoate elementul de la index i din toate array-urile paralele
+f_remove(int i, array<line> aL, array<label> aB, array<int> aI, array<float> aP, array<int> aT, array<bool> aC) =>
+    line.delete(array.get(aL, i))
+    label.delete(array.get(aB, i))
+    array.remove(aL, i)
+    array.remove(aB, i)
+    array.remove(aI, i)
+    array.remove(aP, i)
+    array.remove(aT, i)
+    array.remove(aC, i)
+
+// ---------------- Desenare + lifecycle ----------------
+f_draw(bool cond, float lvl, int t1, int riIdx, int curIdx, color col, string stl, string txt,
+       array<line> aL, array<label> aB, array<int> aI, array<float> aP, array<int> aT, array<bool> aC) =>
+
+    // 1) desenează la detecție
+    if cond and not na(lvl) and not na(t1)
+        ln = line.new(t1, lvl, time, lvl, xloc = xloc.bar_time, extend = extend.right,
+                 color = col, width = lw, style = stl)
+        lb = label.new(t1, lvl, showLabels ? txt : "", xloc = xloc.bar_time,
+                 style = label.style_none, textcolor = col, size = f_size(labelSizeS))
+        array.push(aL, ln)
+        array.push(aB, lb)
+        array.push(aI, riIdx)
+        array.push(aP, lvl)
+        array.push(aT, 0)
+        // stare inițială:
+        //  - mod Spargere : reținem pe ce parte a nivelului e prețul (close > nivel)
+        //  - mod Atingere : marcăm dacă bara curentă traversează deja nivelul,
+        //                   ca să nu numărăm sweep-ul care tocmai a creat linia
+        array.push(aC, isBreakMode ? close > lvl : (low <= lvl + touchTol and high >= lvl - touchTol))
+
+    // 2) numărare evenimente + ștergere (parcurgem invers ca să putem elimina în siguranță)
+    if array.size(aP) > 0
+        for i = array.size(aP) - 1 to 0
+            p = array.get(aP, i)
+            if isBreakMode
+                // SPARGERE: close pe partea opusă față de starea anterioară
+                wasAbove = array.get(aC, i)
+                nowAbove = close > p
+                if nowAbove != wasAbove
+                    array.set(aT, i, array.get(aT, i) + 1)
+                    array.set(aC, i, nowAbove)
+            else
+                // ATINGERE: wick intră în nivel; se numără o dată per vizită
+                inside = low <= p + touchTol and high >= p - touchTol
+                wasIn  = array.get(aC, i)
+                if inside and not wasIn
+                    array.set(aT, i, array.get(aT, i) + 1)
+                    array.set(aC, i, true)
+                else if not inside
+                    array.set(aC, i, false)
+            cnt = array.get(aT, i)
+            if delOnTouch and cnt >= maxTouch
+                f_remove(i, aL, aB, aI, aP, aT, aC)
+            else if showLabels and showCount
+                label.set_text(array.get(aB, i),
+                     txt + " " + str.tostring(cnt) + "/" + str.tostring(maxTouch))
+
+    // 3) expirare după lookback candele ale TF-ului
+    while array.size(aI) > 0 and not na(curIdx) and (curIdx - array.get(aI, 0)) >= lookback
+        f_remove(0, aL, aB, aI, aP, aT, aC)
+
+    // 4) plafon dur de siguranță
+    while array.size(aL) > maxPerTF
+        f_remove(0, aL, aB, aI, aP, aT, aC)
+
+// ---------------- Rulare ----------------
+[sM15, vM15, xM15, iM15, cIM15] = f_detect(tfM15)
+[sH1,  vH1,  xH1,  iH1,  cIH1 ] = f_detect(tfH1)
+[sH2,  vH2,  xH2,  iH2,  cIH2 ] = f_detect(tfH2)
+[sH4,  vH4,  xH4,  iH4,  cIH4 ] = f_detect(tfH4)
+[sD,   vD,   xD,   iD,   cID  ] = f_detect(tfD)
+
+if useM15
+    f_draw(sM15, vM15, xM15, iM15, cIM15, cM15, line.style_solid, "M15", laM15, lbM15, liM15, lpM15, ltM15, lcM15)
+if useH1
+    f_draw(sH1, vH1, xH1, iH1, cIH1, cH1, line.style_solid, "H1", laH1, lbH1, liH1, lpH1, ltH1, lcH1)
+if useH2
+    f_draw(sH2, vH2, xH2, iH2, cIH2, cH2, line.style_solid, "H2", laH2, lbH2, liH2, lpH2, ltH2, lcH2)
+if useH4
+    f_draw(sH4, vH4, xH4, iH4, cIH4, cH4, h4Dashed ? line.style_dashed : line.style_solid, "H4", laH4, lbH4, liH4, lpH4, ltH4, lcH4)
+if useD
+    f_draw(sD, vD, xD, iD, cID, cD, line.style_solid, "Daily", laD, lbD, liD, lpD, ltD, lcD)
+
+
+// ═══════════════════════════════════════════════════════════
+//  🕐  2) ICT KILLZONES & PIVOTS + DAY/WEEK/MONTH
+//      (fără Opening Prices și fără Timestamps)
+// ═══════════════════════════════════════════════════════════
+var G_KZ         = "🕐 ICT Killzones"
+var g_SETTINGS   = "🕐 ICT — Settings"
+kz_max_days      = input.int(3, "Session Drawing Limit", 1, group = g_SETTINGS)
+kz_tf_limit      = input.timeframe("30", "Timeframe Limit", group = g_SETTINGS)
+kz_gmt_tz        = input.string("America/New_York", "Timezone",
+                   options = ["America/New_York","GMT-12","GMT-11","GMT-10","GMT-9","GMT-8","GMT-7","GMT-6","GMT-5","GMT-4","GMT-3","GMT-2","GMT-1","GMT+0","GMT+1","GMT+2","GMT+3","GMT+4","GMT+5","GMT+6","GMT+7","GMT+8","GMT+9","GMT+10","GMT+11","GMT+12","GMT+13","GMT+14"],
+                   group = g_SETTINGS)
+kz_lbl_size_str  = input.string("Normal", "Label Size", options = ["Auto","Tiny","Small","Normal","Large","Huge"], group = g_SETTINGS)
+kz_txt_color     = input.color(color.black, "Text Color", group = g_SETTINGS)
+kz_use_cutoff    = input.bool(false, "Drawing Cutoff Time", inline = "CO", group = g_SETTINGS)
+kz_cutoff        = input.session("1800-1801", "", inline = "CO", group = g_SETTINGS)
+
+kz_show_kz       = input.bool(true,  "Show Killzone Boxes", inline = "KZ", group = G_KZ)
+kz_show_txt      = input.bool(true,  "Display Text",        inline = "KZ", group = G_KZ)
+
+kz_use_as   = input.bool   (true,        "", inline = "ASIA", group = G_KZ)
+kz_as_txt   = input.string ("Asia",      "", inline = "ASIA", group = G_KZ)
+kz_asia     = input.session("2000-0000", "", inline = "ASIA", group = G_KZ)
+kz_as_color = input.color  (color.blue,  "", inline = "ASIA", group = G_KZ)
+
+kz_use_lo   = input.bool   (true,        "", inline = "LONDON", group = G_KZ)
+kz_lo_txt   = input.string ("London",    "", inline = "LONDON", group = G_KZ)
+kz_london   = input.session("0200-0500", "", inline = "LONDON", group = G_KZ)
+kz_lo_color = input.color  (color.red,   "", inline = "LONDON", group = G_KZ)
+
+kz_use_na   = input.bool   (true,        "",      inline = "NYAM", group = G_KZ)
+kz_na_txt   = input.string ("NY AM",     "",      inline = "NYAM", group = G_KZ)
+kz_nyam     = input.session("0930-1100", "",      inline = "NYAM", group = G_KZ)
+kz_na_color = input.color  (#089981,     "",      inline = "NYAM", group = G_KZ)
+
+kz_use_nl   = input.bool   (true,        "",       inline = "NYLU", group = G_KZ)
+kz_nl_txt   = input.string ("NY Lunch",  "",       inline = "NYLU", group = G_KZ)
+kz_nylu     = input.session("1200-1300", "",       inline = "NYLU", group = G_KZ)
+kz_nl_color = input.color  (color.yellow,"",       inline = "NYLU", group = G_KZ)
+
+kz_use_np   = input.bool   (true,        "",       inline = "NYPM", group = G_KZ)
+kz_np_txt   = input.string ("NY PM",     "",       inline = "NYPM", group = G_KZ)
+kz_nypm     = input.session("1330-1600", "",       inline = "NYPM", group = G_KZ)
+kz_np_color = input.color  (color.purple,"",       inline = "NYPM", group = G_KZ)
+
+kz_box_transp  = input.int(70, "Box Transparency",  0, 100, group = G_KZ)
+kz_text_transp = input.int(50, "Text Transparency", 0, 100, group = G_KZ)
+
+var g_LABELS      = "🕐 ICT — Killzone Pivots"
+kz_show_pivots    = input.bool(true,  "Show Pivots",         inline = "PV", group = g_LABELS)
+kz_use_alerts     = input.bool(true,  "Alert Broken Pivots", inline = "PV", group = g_LABELS)
+kz_show_midpoints = input.bool(false, "Show Pivot Midpoints",inline = "mp", group = g_LABELS)
+kz_stop_midpoints = input.bool(true,  "Stop Once Mitigated", inline = "mp", group = g_LABELS)
+kz_show_labels    = input.bool(true,  "Show Pivot Labels",   inline = "LB", group = g_LABELS)
+kz_label_price    = input.bool(false, "Display Price",       inline = "LB", group = g_LABELS)
+kz_label_right    = input.bool(false, "Right Side",          inline = "LB", group = g_LABELS)
+kz_ext_pivots     = input.string("Until Mitigated", "Extend Pivots...", options = ["Until Mitigated","Past Mitigation"], group = g_LABELS)
+kz_ext_which      = input.string("Most Recent",     "...From Which Sessions", options = ["Most Recent","All"], group = g_LABELS)
+
+kz_ash_str = input.string("AS.H",    "KZ1 Labels", inline = "L_AS", group = g_LABELS)
+kz_asl_str = input.string("AS.L",    "",           inline = "L_AS", group = g_LABELS)
+kz_loh_str = input.string("LO.H",    "KZ2 Labels", inline = "L_LO", group = g_LABELS)
+kz_lol_str = input.string("LO.L",    "",           inline = "L_LO", group = g_LABELS)
+kz_nah_str = input.string("NYAM.H",  "KZ3 Labels", inline = "L_NA", group = g_LABELS)
+kz_nal_str = input.string("NYAM.L",  "",           inline = "L_NA", group = g_LABELS)
+kz_nlh_str = input.string("NYL.H",   "KZ4 Labels", inline = "L_NL", group = g_LABELS)
+kz_nll_str = input.string("NYL.L",   "",           inline = "L_NL", group = g_LABELS)
+kz_nph_str = input.string("NYPM.H",  "KZ5 Labels", inline = "L_NP", group = g_LABELS)
+kz_npl_str = input.string("NYPM.L",  "",           inline = "L_NP", group = g_LABELS)
+
+kz_kzp_style_str = input.string("Solid",  "Pivot Style",    options = ["Solid","Dotted","Dashed"], inline = "KZP", group = g_LABELS)
+kz_kzp_width     = input.int(1, "",                         inline = "KZP", group = g_LABELS)
+kz_kzm_style_str = input.string("Dotted", "Midpoint Style", options = ["Solid","Dotted","Dashed"], inline = "KZM", group = g_LABELS)
+kz_kzm_width     = input.int(1, "",                         inline = "KZM", group = g_LABELS)
+
+var g_RNG         = "🕐 ICT — Killzone Range"
+kz_show_range     = input.bool(false, "Show Killzone Range", group = g_RNG)
+kz_show_range_avg = input.bool(true,  "Show Average",        group = g_RNG)
+kz_range_avg      = input.int(5,      "Average Length",      group = g_RNG)
+kz_range_pos_str  = input.string("Top Right", "Table Position", options = ["Bottom Center","Bottom Left","Bottom Right","Middle Center","Middle Left","Middle Right","Top Center","Top Left","Top Right"], group = g_RNG)
+kz_range_sz_str   = input.string("Normal",    "Table Size",    options = ["Auto","Tiny","Small","Normal","Large","Huge"], group = g_RNG)
+
+var g_DWM         = "🕐 ICT — Day/Week/Month"
+kz_sep_unlimited  = input.bool(false, "Unlimited", group = g_DWM)
+kz_alert_HL       = input.bool(false, "Alert High/Low Break", group = g_DWM)
+
+kz_show_d_open = input.bool(false, "D Open",    inline = "DO", group = g_DWM)
+kz_dhl         = input.bool(false, "High/Low",  inline = "DO", group = g_DWM)
+kz_ds          = input.bool(false, "Separators",inline = "DO", group = g_DWM)
+kz_d_color     = input.color(color.blue,  "",   inline = "DO", group = g_DWM)
+
+kz_show_w_open = input.bool(false, "W Open",    inline = "WO", group = g_DWM)
+kz_whl         = input.bool(false, "High/Low",  inline = "WO", group = g_DWM)
+kz_ws          = input.bool(false, "Separators",inline = "WO", group = g_DWM)
+kz_w_color     = input.color(#089981, "",        inline = "WO", group = g_DWM)
+
+kz_show_m_open = input.bool(false, "M Open",    inline = "MO", group = g_DWM)
+kz_mhl         = input.bool(false, "High/Low",  inline = "MO", group = g_DWM)
+kz_ms          = input.bool(false, "Separators",inline = "MO", group = g_DWM)
+kz_m_color     = input.color(color.red, "",     inline = "MO", group = g_DWM)
+
+kz_htf_style_str = input.string("Solid", "Style", options = ["Solid","Dotted","Dashed"], inline = "D0", group = g_DWM)
+kz_htf_width     = input.int(1, "",                inline = "D0", group = g_DWM)
+
+kz_dow_labels   = input.bool(true,    "Day of Week Labels", inline = "DOW", group = g_DWM)
+kz_dow_yloc     = input.string("Bottom", "",  options = ["Top","Bottom"],          inline = "DOW", group = g_DWM)
+kz_dow_xloc     = input.string("Midnight","", options = ["Midnight","Midday"],     inline = "DOW", group = g_DWM)
+kz_dow_hide_wknd = input.bool(true,   "Hide Weekend Labels", group = g_DWM)
+
+// ── Helpers ───────────────────────────────────────────────
+kz_get_line_type(s) =>
+    switch s
+        "Solid"  => line.style_solid
+        "Dotted" => line.style_dotted
+        "Dashed" => line.style_dashed
+        => line.style_solid
+
+kz_get_size(x) =>
+    switch x
+        "Auto"   => size.auto
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        => size.normal
+
+kz_get_table_pos(p) =>
+    switch p
+        "Bottom Center" => position.bottom_center
+        "Bottom Left"   => position.bottom_left
+        "Bottom Right"  => position.bottom_right
+        "Middle Center" => position.middle_center
+        "Middle Left"   => position.middle_left
+        "Middle Right"  => position.middle_right
+        "Top Center"    => position.top_center
+        "Top Left"      => position.top_left
+        "Top Right"     => position.top_right
+        => position.top_right
+
+kz_lbl_size  = kz_get_size(kz_lbl_size_str)
+kz_kzp_style = kz_get_line_type(kz_kzp_style_str)
+kz_kzm_style = kz_get_line_type(kz_kzm_style_str)
+kz_htf_style = kz_get_line_type(kz_htf_style_str)
+kz_range_pos = kz_get_table_pos(kz_range_pos_str)
+kz_range_sz  = kz_get_size(kz_range_sz_str)
+
+var kz_tf_ok = timeframe.in_seconds() <= timeframe.in_seconds(kz_tf_limit)
+var kz_transparent = #ffffff00
+var kz_ext_current = kz_ext_which == "Most Recent"
+var kz_ext_past    = kz_ext_pivots == "Past Mitigation"
+
+kz_t_co = not na(time("", kz_cutoff, kz_gmt_tz))
+
+// ── UDT ───────────────────────────────────────────────────
+type kz_t
+    string         _title
+    array<box>     _box
+    array<line>    _hi_line
+    array<line>    _md_line
+    array<line>    _lo_line
+    array<label>   _hi_label
+    array<label>   _lo_label
+    array<bool>    _hi_valid
+    array<bool>    _md_valid
+    array<bool>    _lo_valid
+    array<float>   _range_store
+    float          _range_current
+
+type kz_dwm_hl_t
+    array<line>  hi_line
+    array<line>  lo_line
+    array<label> hi_label
+    array<label> lo_label
+    bool         hit_high = false
+    bool         hit_low  = false
+
+type kz_dwm_info_t
+    string tf
+    float  o  = na
+    float  h  = na
+    float  l  = na
+    float  ph = na
+    float  pl = na
+
+type kz_helper_t
+    kz_t   _kz
+    string session
+    color  c
+    string box_txt
+    string hi_txt
+    string lo_txt
+
+// ── Init killzones ────────────────────────────────────────
+kz_initKZ() =>
+    res = array.new<kz_helper_t>()
+    if kz_use_as
+        res.push(kz_helper_t.new(kz_t.new(kz_as_txt, array.new<box>(), array.new<line>(), array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>(), array.new<bool>(), array.new<bool>(), array.new<bool>(), array.new<float>()), kz_asia,   kz_as_color, kz_as_txt, kz_ash_str, kz_asl_str))
+    if kz_use_lo
+        res.push(kz_helper_t.new(kz_t.new(kz_lo_txt, array.new<box>(), array.new<line>(), array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>(), array.new<bool>(), array.new<bool>(), array.new<bool>(), array.new<float>()), kz_london, kz_lo_color, kz_lo_txt, kz_loh_str, kz_lol_str))
+    if kz_use_na
+        res.push(kz_helper_t.new(kz_t.new(kz_na_txt, array.new<box>(), array.new<line>(), array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>(), array.new<bool>(), array.new<bool>(), array.new<bool>(), array.new<float>()), kz_nyam,   kz_na_color, kz_na_txt, kz_nah_str, kz_nal_str))
+    if kz_use_nl
+        res.push(kz_helper_t.new(kz_t.new(kz_nl_txt, array.new<box>(), array.new<line>(), array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>(), array.new<bool>(), array.new<bool>(), array.new<bool>(), array.new<float>()), kz_nylu,   kz_nl_color, kz_nl_txt, kz_nlh_str, kz_nll_str))
+    if kz_use_np
+        res.push(kz_helper_t.new(kz_t.new(kz_np_txt, array.new<box>(), array.new<line>(), array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>(), array.new<bool>(), array.new<bool>(), array.new<bool>(), array.new<float>()), kz_nypm,   kz_np_color, kz_np_txt, kz_nph_str, kz_npl_str))
+    res
+
+var array<kz_helper_t> _kz_arr = kz_initKZ()
+
+var kz_d_hl = kz_dwm_hl_t.new(array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>())
+var kz_w_hl = kz_dwm_hl_t.new(array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>())
+var kz_m_hl = kz_dwm_hl_t.new(array.new<line>(), array.new<line>(), array.new<label>(), array.new<label>())
+var kz_d_info = kz_dwm_info_t.new("D")
+var kz_w_info = kz_dwm_info_t.new("W")
+var kz_m_info = kz_dwm_info_t.new("M")
+
+var kz_d_sep_line = array.new<line>()
+var kz_w_sep_line = array.new<line>()
+var kz_m_sep_line = array.new<line>()
+var kz_d_line  = array.new<line>()
+var kz_w_line  = array.new<line>()
+var kz_m_line  = array.new<line>()
+var kz_d_label = array.new<label>()
+var kz_w_label = array.new<label>()
+var kz_m_label = array.new<label>()
+
+// ── DWM update ────────────────────────────────────────────
+kz_update_dwm(kz_dwm_info_t n) =>
+    if timeframe.change(n.tf)
+        n.ph := n.h
+        n.pl := n.l
+        n.o  := open
+        n.h  := high
+        n.l  := low
+    else
+        n.h := math.max(high, n.h)
+        n.l := math.min(low,  n.l)
+
+if kz_dhl or kz_show_d_open
+    kz_update_dwm(kz_d_info)
+if kz_whl or kz_show_w_open
+    kz_update_dwm(kz_w_info)
+if kz_mhl or kz_show_m_open
+    kz_update_dwm(kz_m_info)
+
+// ── Box/text color ────────────────────────────────────────
+kz_box_color(color c) => color.new(c, kz_box_transp)
+kz_tc(color c)        => color.new(c, kz_text_transp)
+
+// ── DWM functions ─────────────────────────────────────────
+kz_dwm_sep(string tf, bool use, array<line> arr, color col) =>
+    if use
+        if timeframe.change(tf)
+            arr.unshift(line.new(bar_index, high*1.0001, bar_index, low, style=kz_htf_style, width=kz_htf_width, extend=extend.both, color=col))
+            if not kz_sep_unlimited and arr.size() > kz_max_days
+                arr.pop().delete()
+
+kz_dwm_open(string tf, bool use, array<line> lns, array<label> lbls, kz_dwm_info_t n, color col) =>
+    if use
+        if lns.size() > 0
+            lns.get(0).set_x2(time)
+            lbls.get(0).set_x(time)
+        if timeframe.change(tf)
+            lns.unshift(line.new(time, n.o, time, n.o, xloc=xloc.bar_time, style=kz_htf_style, width=kz_htf_width, color=col))
+            lbls.unshift(label.new(time, n.o, tf+" OPEN", xloc=xloc.bar_time, style=label.style_label_left, color=kz_transparent, textcolor=kz_txt_color, size=kz_lbl_size))
+            if not kz_sep_unlimited and lns.size() > kz_max_days
+                lns.pop().delete()
+                lbls.pop().delete()
+
+kz_dwm_hl(string tf, bool use, kz_dwm_hl_t hl, kz_dwm_info_t n, color col) =>
+    if use
+        if hl.hi_line.size() > 0
+            hl.hi_line.get(0).set_x2(time)
+            hl.lo_line.get(0).set_x2(time)
+            hl.hi_label.get(0).set_x(time)
+            hl.lo_label.get(0).set_x(time)
+        if timeframe.change(tf)
+            hl.hi_line.unshift(line.new(time, n.ph, time, n.ph, xloc=xloc.bar_time, style=kz_htf_style, width=kz_htf_width, color=col))
+            hl.lo_line.unshift(line.new(time, n.pl, time, n.pl, xloc=xloc.bar_time, style=kz_htf_style, width=kz_htf_width, color=col))
+            hl.hi_label.unshift(label.new(time, n.ph, "P"+tf+"H", xloc=xloc.bar_time, style=label.style_label_left, color=kz_transparent, textcolor=kz_txt_color, size=kz_lbl_size))
+            hl.lo_label.unshift(label.new(time, n.pl, "P"+tf+"L", xloc=xloc.bar_time, style=label.style_label_left, color=kz_transparent, textcolor=kz_txt_color, size=kz_lbl_size))
+            hl.hit_high := false
+            hl.hit_low  := false
+            if not kz_sep_unlimited and hl.hi_line.size() > kz_max_days
+                hl.hi_line.pop().delete()
+                hl.lo_line.pop().delete()
+                hl.hi_label.pop().delete()
+                hl.lo_label.pop().delete()
+        if hl.hi_line.size() > 0 and kz_alert_HL
+            if not hl.hit_high and high > hl.hi_line.get(0).get_y1()
+                hl.hit_high := true
+                alert(str.format("Hit P{0}H", tf))
+            if not hl.hit_low and low < hl.lo_line.get(0).get_y1()
+                hl.hit_low := true
+                alert(str.format("Hit P{0}L", tf))
+
+// ── DWM main ──────────────────────────────────────────────
+if kz_tf_ok
+    kz_dwm_sep("D", kz_ds, kz_d_sep_line, kz_d_color)
+    kz_dwm_sep("W", kz_ws, kz_w_sep_line, kz_w_color)
+    kz_dwm_sep("M", kz_ms, kz_m_sep_line, kz_m_color)
+    kz_dwm_open("D", kz_show_d_open, kz_d_line, kz_d_label, kz_d_info, kz_d_color)
+    kz_dwm_open("W", kz_show_w_open, kz_w_line, kz_w_label, kz_w_info, kz_w_color)
+    kz_dwm_open("M", kz_show_m_open, kz_m_line, kz_m_label, kz_m_info, kz_m_color)
+    kz_dwm_hl("D", kz_dhl, kz_d_hl, kz_d_info, kz_d_color)
+    kz_dwm_hl("W", kz_whl, kz_w_hl, kz_w_info, kz_w_color)
+    kz_dwm_hl("M", kz_mhl, kz_m_hl, kz_m_info, kz_m_color)
+
+// ── KZ delete helper ──────────────────────────────────────
+kz_del(kz_t k) =>
+    if k._box.size() > kz_max_days
+        k._box.pop().delete()
+    if k._hi_line.size() > kz_max_days
+        k._hi_line.pop().delete()
+        k._lo_line.pop().delete()
+        k._hi_valid.pop()
+        k._lo_valid.pop()
+        if kz_show_midpoints
+            k._md_line.pop().delete()
+            k._md_valid.pop()
+    if k._hi_label.size() > kz_max_days
+        k._hi_label.pop().delete()
+        k._lo_label.pop().delete()
+
+// ── Update price string ───────────────────────────────────
+kz_update_price_str(label L, float P) =>
+    S   = L.get_text()
+    pre = str.trim(str.substring(S, 0, str.pos(S, " ")))
+    L.set_text(str.format("{0} ({1})", pre, P))
+
+// ── Adjust inside session ─────────────────────────────────
+kz_adjust_in(kz_t k, bool t) =>
+    if t
+        b0 = k._box.get(0)
+        b0.set_right(time)
+        newTop    = math.max(b0.get_top(),    high)
+        newBottom = math.min(b0.get_bottom(), low)
+        b0.set_top(newTop)
+        b0.set_bottom(newBottom)
+        k._range_current := newTop - newBottom
+        if kz_show_pivots and k._hi_line.size() > 0
+            h0 = k._hi_line.get(0)
+            l0 = k._lo_line.get(0)
+            h0.set_x2(time)
+            l0.set_x2(time)
+            if high > h0.get_y1()
+                h0.set_xy1(time, high)
+                h0.set_xy2(time, high)
+            if low < l0.get_y1()
+                l0.set_xy1(time, low)
+                l0.set_xy2(time, low)
+            if kz_show_midpoints
+                m0 = k._md_line.get(0)
+                mid = math.avg(h0.get_y2(), l0.get_y2())
+                m0.set_x2(time)
+                m0.set_xy1(time, mid)
+                m0.set_xy2(time, mid)
+        if kz_show_labels and k._hi_label.size() > 0
+            if kz_label_right
+                k._hi_label.get(0).set_x(time)
+                k._lo_label.get(0).set_x(time)
+            if high > k._hi_label.get(0).get_y()
+                k._hi_label.get(0).set_xy(time, high)
+                if kz_label_price
+                    kz_update_price_str(k._hi_label.get(0), high)
+            if low < k._lo_label.get(0).get_y()
+                k._lo_label.get(0).set_xy(time, low)
+                if kz_label_price
+                    kz_update_price_str(k._lo_label.get(0), low)
+
+// ── Adjust outside session ────────────────────────────────
+kz_adjust_out(kz_t k, bool t, bool t_prev) =>
+    boxCount = k._box.size()
+    if not t and boxCount > 0
+        if t_prev
+            k._range_store.unshift(k._range_current)
+            if k._range_store.size() > kz_range_avg
+                k._range_store.pop()
+    if kz_show_pivots and boxCount > 0
+        for i = 0 to boxCount - 1
+            if not kz_ext_current or i == 0
+                hv = k._hi_valid.get(i)
+                if kz_ext_past or hv
+                    k._hi_line.get(i).set_x2(time)
+                    if kz_show_labels and kz_label_right
+                        k._hi_label.get(i).set_x(time)
+                if hv and high > k._hi_line.get(i).get_y1()
+                    if kz_use_alerts and i == 0
+                        alert("Broke " + k._title + " High", alert.freq_once_per_bar)
+                    k._hi_valid.set(i, false)
+                    if kz_show_labels and kz_label_right
+                        k._hi_label.get(i).set_style(label.style_label_down)
+                else if kz_use_cutoff ? kz_t_co : false
+                    k._hi_valid.set(i, false)
+
+                lv = k._lo_valid.get(i)
+                if kz_ext_past or lv
+                    k._lo_line.get(i).set_x2(time)
+                    if kz_show_labels and kz_label_right
+                        k._lo_label.get(i).set_x(time)
+                if lv and low < k._lo_line.get(i).get_y1()
+                    if kz_use_alerts and i == 0
+                        alert("Broke " + k._title + " Low", alert.freq_once_per_bar)
+                    k._lo_valid.set(i, false)
+                    if kz_show_labels and kz_label_right
+                        k._lo_label.get(i).set_style(label.style_label_up)
+                else if kz_use_cutoff ? kz_t_co : false
+                    k._lo_valid.set(i, false)
+
+                if kz_show_midpoints and not t
+                    if kz_stop_midpoints ? k._md_valid.get(i) : true
+                        k._md_line.get(i).set_x2(time)
+                        if k._md_valid.get(i) and low <= k._md_line.get(i).get_y1() and high >= k._md_line.get(i).get_y1()
+                            k._md_valid.set(i, false)
+            else
+                break
+
+// ── Manage KZ ─────────────────────────────────────────────
+kz_manage(kz_helper_t h) =>
+    k   = h._kz
+    c   = h.c
+    if kz_tf_ok
+        _t   = time("", h.session, kz_gmt_tz)
+        _tp  = time("", h.session, kz_gmt_tz, bars_back = 1)
+        t      = not na(_t)
+        t_prev = not na(_tp)
+        if t and not t_prev
+            _bc = kz_box_color(c)
+            _tc = kz_tc(c)
+            k._box.unshift(box.new(time, high, time, low,
+                           xloc=xloc.bar_time,
+                           border_color = kz_show_kz ? _bc : na,
+                           bgcolor      = kz_show_kz ? _bc : na,
+                           text         = kz_show_kz and kz_show_txt ? h.box_txt : na,
+                           text_color   = _tc))
+            if kz_show_pivots
+                k._hi_line.unshift(line.new(time, high, time, high, xloc=xloc.bar_time, style=kz_kzp_style, color=c, width=kz_kzp_width))
+                k._lo_line.unshift(line.new(time, low,  time, low,  xloc=xloc.bar_time, style=kz_kzp_style, color=c, width=kz_kzp_width))
+                if kz_show_midpoints
+                    k._md_line.unshift(line.new(time, math.avg(high,low), time, math.avg(high,low), xloc=xloc.bar_time, style=kz_kzm_style, color=c, width=kz_kzm_width))
+                    k._md_valid.unshift(true)
+                k._hi_valid.unshift(true)
+                k._lo_valid.unshift(true)
+                if kz_show_labels
+                    _ht = kz_label_price ? str.format("{0} ({1})", h.hi_txt, high) : h.hi_txt
+                    _lt = kz_label_price ? str.format("{0} ({1})", h.lo_txt, low)  : h.lo_txt
+                    if kz_label_right
+                        k._hi_label.unshift(label.new(time, high, _ht, xloc=xloc.bar_time, color=kz_transparent, textcolor=kz_txt_color, style=label.style_label_left, size=kz_lbl_size))
+                        k._lo_label.unshift(label.new(time, low,  _lt, xloc=xloc.bar_time, color=kz_transparent, textcolor=kz_txt_color, style=label.style_label_left, size=kz_lbl_size))
+                    else
+                        k._hi_label.unshift(label.new(time, high, _ht, xloc=xloc.bar_time, color=kz_transparent, textcolor=kz_txt_color, style=label.style_label_down, size=kz_lbl_size))
+                        k._lo_label.unshift(label.new(time, low,  _lt, xloc=xloc.bar_time, color=kz_transparent, textcolor=kz_txt_color, style=label.style_label_up,   size=kz_lbl_size))
+            kz_del(k)
+        kz_adjust_in(k, t)
+        kz_adjust_out(k, t, t_prev)
+
+for [_, v] in _kz_arr
+    kz_manage(v)
+
+// ── Day of week labels ────────────────────────────────────
+kz_new_dow_time = kz_dow_xloc == "Midday" ? time - timeframe.in_seconds("D") / 2 * 1000 : time
+kz_new_day      = dayofweek(kz_new_dow_time, kz_gmt_tz) != dayofweek(kz_new_dow_time, kz_gmt_tz)[1]
+var kz_dow_top  = kz_dow_yloc == "Top"
+
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==1 and kz_new_day and not kz_dow_hide_wknd, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="SUNDAY")
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==2 and kz_new_day, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="MONDAY")
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==3 and kz_new_day, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="TUESDAY")
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==4 and kz_new_day, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="WEDNESDAY")
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==5 and kz_new_day, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="THURSDAY")
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==6 and kz_new_day, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="FRIDAY")
+plotchar(kz_dow_labels and timeframe.isintraday and dayofweek(kz_new_dow_time, kz_gmt_tz)==7 and kz_new_day and not kz_dow_hide_wknd, location=kz_dow_top?location.top:location.bottom, char="", textcolor=kz_txt_color, text="SATURDAY")
+
+// ── Range table ───────────────────────────────────────────
+kz_get_min_days() =>
+    store = array.new_int()
+    for [_, v] in _kz_arr
+        sz = v._kz._range_store.size()
+        if sz > 0
+            store.push(sz)
+    store.min()
+
+if kz_show_range and barstate.islast
+    var tbl = table.new(kz_range_pos, 10, 10, chart.bg_color, chart.fg_color, 2, chart.fg_color, 1)
+    table.cell(tbl, 0, 0, "Killzone", text_size=kz_range_sz, text_color=kz_txt_color)
+    table.cell(tbl, 1, 0, "Range",    text_size=kz_range_sz, text_color=kz_txt_color)
+    if kz_show_range_avg
+        table.cell(tbl, 2, 0, "Avg (" + str.tostring(kz_get_min_days()) + ")", text_size=kz_range_sz, text_color=kz_txt_color)
+    for [index, v] in _kz_arr
+        k   = v._kz
+        col = v.c
+        in_s = not na(time("", v.session, kz_gmt_tz))
+        table.cell(tbl, 0, index+1, v.box_txt,                    text_size=kz_range_sz, bgcolor=kz_box_color(col), text_color=kz_txt_color)
+        table.cell(tbl, 1, index+1, str.tostring(k._range_current),text_size=kz_range_sz, bgcolor=in_s?kz_box_color(col):na, text_color=kz_txt_color)
+        if kz_show_range_avg
+            table.cell(tbl, 2, index+1, str.tostring(k._range_store.avg()), text_size=kz_range_sz, text_color=kz_txt_color)
+
+
+// ═══════════════════════════════════════════════════════════
+//  📦  3) SUPPLY / DEMAND + SWING H/L
+// ═══════════════════════════════════════════════════════════
+var G_SD = "📦 Supply / Demand"
+
+// ── S/D inputs ───────────────────────────────────────────
+switch_poi              = input.bool(true,   "Supply/Demand Zone",          group = G_SD, inline = "Switch1")
+swing_length            = input.int (10,     "Swing H/L Length",            group = G_SD, inline = "Switch2", minval = 1, maxval = 50)
+history_of_demand       = input.int (20,     "History",                     group = G_SD, inline = "Switch2", minval = 5, maxval = 50)
+sd_box_width            = input.float(5,     "S/D Box Width",               group = G_SD, inline = "Switch2", minval = 1, maxval = 10, step = 0.5)
+show_pa_labels          = input.bool(true,   "Show Price Action Labels",     group = G_SD)
+supply_color            = input.color(color.new(#f02c2c, 70), "Supply",     group = G_SD, inline = "3")
+supply_outline_color    = input.color(color.new(#858181, 100), "Outline",   group = G_SD, inline = "3")
+demand_color            = input.color(color.new(#00FFFF, 70),  "Demand",    group = G_SD, inline = "3")
+demand_outline_color    = input.color(color.new(#797474, 100), "Outline",   group = G_SD, inline = "3")
+poi_label_color         = input.color(color.rgb(0, 0, 0),      "POI Label", group = G_SD, inline = "7")
+swing_type_color        = input.color(color.black, "Price Action Label",    group = G_SD, inline = "7")
+
+// ── Swing buy/sell inputs ────────────────────────────────
+sd_no          = input.int  (3,    "Swing",           group = G_SD)
+sd_showBuySell = input.bool (false,"Show Buy/Sell",   group = G_SD)
+sd_showTSL     = input.bool (true, "Show TSL Line",   group = G_SD)
+sd_showBarCol  = input.bool (false,"Enable Barcolor",  group = G_SD)
+sd_showBgCol   = input.bool (false,"Enable Bgcolor",   group = G_SD)
+
+// ── S/D helpers ──────────────────────────────────────────
+atrpoi = ta.atr(50)
+
+f_array_add_pop_float(arrFloat, val) =>
+    array.unshift(arrFloat, val)
+    array.pop(arrFloat)
+
+f_array_add_pop_int(arrInt, val) =>
+    array.unshift(arrInt, val)
+    array.pop(arrInt)
+
+f_sh_sl_labels(arrFloat, swing_type) =>
+    if array.size(arrFloat) >= 2
+        curr = array.get(arrFloat, 0)
+        prev = array.get(arrFloat, 1)
+        if swing_type == 1
+            txt = curr >= prev ? "HH" : "LH"
+            label.new(bar_index - swing_length, curr, text=txt, style=label.style_label_down, textcolor=swing_type_color, color=color.new(swing_type_color, 100), size=size.tiny)
+        else if swing_type == -1
+            txt = curr >= prev ? "HL" : "LL"
+            label.new(bar_index - swing_length, curr, text=txt, style=label.style_label_up, textcolor=swing_type_color, color=color.new(swing_type_color, 100), size=size.tiny)
+
+f_check_overlapping(new_poi, box_arr, _atrpoi) =>
+    atr_threshold = _atrpoi * 2.0
+    ok = true
+    sz = array.size(box_arr)
+    for i = 0 to sz - 1
+        b = array.get(box_arr, i)
+        if not na(b)
+            top    = box.get_top(b)
+            bottom = box.get_bottom(b)
+            poi    = (top + bottom) * 0.5
+            if new_poi >= poi - atr_threshold and new_poi <= poi + atr_threshold
+                ok := false
+                break
+    ok
+
+f_supply_demand(val_arr, bn_arr, box_arr, label_arr, box_type, _atrpoi) =>
+    atr_buffer = _atrpoi * (sd_box_width / 10.0)
+    left_ix    = array.get(bn_arr, 0)
+    right_ix   = bar_index
+    float box_top    = na
+    float box_bottom = na
+    float poi        = na
+    if box_type == 1
+        box_top    := array.get(val_arr, 0)
+        box_bottom := box_top - atr_buffer
+        poi        := (box_top + box_bottom) * 0.5
+    else if box_type == -1
+        box_bottom := array.get(val_arr, 0)
+        box_top    := box_bottom + atr_buffer
+        poi        := (box_top + box_bottom) * 0.5
+    if na(poi) or na(left_ix)
+        na
+    else
+        can_draw = f_check_overlapping(poi, box_arr, _atrpoi)
+        if can_draw and switch_poi
+            lastBox = array.get(box_arr, array.size(box_arr) - 1)
+            if not na(lastBox)
+                box.delete(lastBox)
+            lastLbl = array.get(label_arr, array.size(label_arr) - 1)
+            if not na(lastLbl)
+                box.delete(lastLbl)
+            if box_type == 1
+                nb = box.new(left=left_ix, top=box_top, right=right_ix, bottom=box_bottom,
+                             border_color=supply_outline_color, bgcolor=supply_color, extend=extend.right,
+                             text="SUPPLY", text_halign=text.align_center, text_valign=text.align_center,
+                             text_color=poi_label_color, text_size=size.small, xloc=xloc.bar_index)
+                f_array_add_pop_float(box_arr, nb)
+            else
+                nb = box.new(left=left_ix, top=box_top, right=right_ix, bottom=box_bottom,
+                             border_color=demand_outline_color, bgcolor=demand_color, extend=extend.right,
+                             text="DEMAND", text_halign=text.align_center, text_valign=text.align_center,
+                             text_color=poi_label_color, text_size=size.small, xloc=xloc.bar_index)
+                f_array_add_pop_float(box_arr, nb)
+            npl = box.new(left=left_ix, top=poi, right=right_ix, bottom=poi,
+                          border_color=color.new(poi_label_color, 90), bgcolor=color.new(poi_label_color, 90),
+                          extend=extend.right, text="POI", text_halign=text.align_left, text_valign=text.align_center,
+                          text_color=poi_label_color, text_size=size.small, xloc=xloc.bar_index)
+            f_array_add_pop_float(label_arr, npl)
+
+f_sd_to_bos(box_arr, bos_arr, label_arr, zone_type) =>
+    if switch_poi
+        for i = array.size(box_arr) - 1 to 0
+            b = array.get(box_arr, i)
+            if na(b)
+                continue
+            float lvl_to_break = na
+            if zone_type == 1
+                lvl_to_break := box.get_top(b)
+                if close >= lvl_to_break
+                    cb = box.copy(b)
+                    f_array_add_pop_float(bos_arr, cb)
+                    top    = box.get_top(b)
+                    bottom = box.get_bottom(b)
+                    mid    = (top + bottom) * 0.5
+                    box.set_top(cb, mid)
+                    box.set_bottom(cb, mid)
+                    box.set_extend(cb, extend.none)
+                    box.set_right(cb, bar_index)
+                    box.set_text(cb, "")
+                    box.delete(b)
+                    lb = array.get(label_arr, i)
+                    if not na(lb)
+                        box.delete(lb)
+                    array.set(box_arr, i, na)
+                    array.set(label_arr, i, na)
+            else if zone_type == -1
+                lvl_to_break := box.get_bottom(b)
+                if close <= lvl_to_break
+                    cb = box.copy(b)
+                    f_array_add_pop_float(bos_arr, cb)
+                    top    = box.get_top(b)
+                    bottom = box.get_bottom(b)
+                    mid    = (top + bottom) * 0.5
+                    box.set_top(cb, mid)
+                    box.set_bottom(cb, mid)
+                    box.set_extend(cb, extend.none)
+                    box.set_right(cb, bar_index)
+                    box.set_text(cb, "")
+                    box.delete(b)
+                    lb = array.get(label_arr, i)
+                    if not na(lb)
+                        box.delete(lb)
+                    array.set(box_arr, i, na)
+                    array.set(label_arr, i, na)
+
+f_extend_box_endpoint(box_arr) =>
+    sz = array.size(box_arr)
+    for i = 0 to sz - 1
+        b = array.get(box_arr, i)
+        if not na(b)
+            box.set_right(b, bar_index + 100)
+
+// ── S/D arrays ───────────────────────────────────────────
+swing_high_sd = ta.pivothigh(high, swing_length, swing_length)
+swing_low_sd  = ta.pivotlow (low,  swing_length, swing_length)
+
+var swing_high_values = array.new_float(5, 0.0)
+var swing_low_values  = array.new_float(5, 0.0)
+var swing_high_bns    = array.new_int(5, 0)
+var swing_low_bns     = array.new_int(5, 0)
+
+var current_supply_box = array.new_box(history_of_demand, na)
+var current_demand_box = array.new_box(history_of_demand, na)
+var current_supply_poi = array.new_box(history_of_demand, na)
+var current_demand_poi = array.new_box(history_of_demand, na)
+
+var supply_bos = array.new_box(5, na)
+var demand_bos = array.new_box(5, na)
+
+if not na(swing_high_sd)
+    f_array_add_pop_float(swing_high_values, swing_high_sd)
+    f_array_add_pop_int(swing_high_bns, bar_index[swing_length])
+    if show_pa_labels
+        f_sh_sl_labels(swing_high_values, 1)
+    f_supply_demand(swing_high_values, swing_high_bns, current_supply_box, current_supply_poi, 1, atrpoi)
+else if not na(swing_low_sd)
+    f_array_add_pop_float(swing_low_values, swing_low_sd)
+    f_array_add_pop_int(swing_low_bns, bar_index[swing_length])
+    if show_pa_labels
+        f_sh_sl_labels(swing_low_values, -1)
+    f_supply_demand(swing_low_values, swing_low_bns, current_demand_box, current_demand_poi, -1, atrpoi)
+
+f_sd_to_bos(current_supply_box, supply_bos, current_supply_poi, 1)
+f_sd_to_bos(current_demand_box, demand_bos, current_demand_poi, -1)
+f_extend_box_endpoint(current_supply_box)
+f_extend_box_endpoint(current_demand_box)
+
+// ── Swing Buy/Sell (TSL) ─────────────────────────────────
+sd_res = ta.highest(high, sd_no)
+sd_sup = ta.lowest (low,  sd_no)
+sd_avd = close > sd_res[1] ? 1 : close < sd_sup[1] ? -1 : 0
+sd_avn = ta.valuewhen(sd_avd != 0, sd_avd, 0)
+sd_tsl = sd_avn == 1 ? sd_sup : sd_res
+
+sd_Buy  = ta.crossover (close, sd_tsl)
+sd_Sell = ta.crossunder(close, sd_tsl)
+sd_colr = close >= sd_tsl ? color.green : close <= sd_tsl ? color.red : na
+
+plotshape(sd_showBuySell and sd_Buy,  "BUY",  shape.labelup,   location.belowbar, color=color.green, text="BUY",  textcolor=color.black)
+plotshape(sd_showBuySell and sd_Sell, "SELL", shape.labeldown, location.abovebar, color=color.red,   text="SELL", textcolor=color.black)
+plot(sd_showTSL ? sd_tsl : na, color=sd_colr, linewidth=3, title="TSL")
+barcolor(sd_showBarCol ? sd_colr : na)
+bgcolor(sd_showBgCol  ? sd_colr : na)
+
+alertcondition(sd_Buy,  title="Buy Signal",  message="Buy")
+alertcondition(sd_Sell, title="Sell Signal", message="Sell")
+
+
+
+// ═══════════════════════════════════════════════════════════
+//  📍  4) KEY LEVELS — Full SpacemanBTC IDWM port
+// ═══════════════════════════════════════════════════════════
+var G_KL = "📍 Key Levels"
+
+kl_display    = input.string("Standard", "Display Style", options = ["Standard", "Right Anchored"], inline = "kld",  group = G_KL)
+kl_merge      = input.bool  (true,       "Merge Levels",  inline = "kld",  group = G_KL)
+kl_dist       = input.int   (30,  "Distance",        minval = 5, maxval = 500, inline = "kldist", group = G_KL)
+kl_radist     = input.int   (250, "Anchor Distance", minval = 5, maxval = 500, inline = "kldist", group = G_KL)
+kl_lblsz      = input.string("Medium", "Text Size",  options = ["Small","Medium","Large"],          group = G_KL)
+kl_linesz     = input.string("Small",  "Line Width", options = ["Small","Medium","Large"],  inline = "klls", group = G_KL)
+kl_linesty    = input.string("Solid",  "Line Style", options = ["Solid","Dashed","Dotted"], inline = "klls", group = G_KL)
+kl_globaltext = input.bool  (false, "Global ShortHand", group = G_KL)
+kl_globalcol  = input.bool  (false, "Global Coloring",  inline = "klgc", group = G_KL)
+kl_gcol       = input.color (color.white, "",            inline = "klgc", group = G_KL)
+
+kl_4h_o  = input.bool(false,"Open",     inline="kl4h",  group=G_KL)
+kl_4h_hl = input.bool(false,"Prev H/L", inline="kl4h",  group=G_KL)
+kl_4h_m  = input.bool(false,"Prev Mid", inline="kl4h",  group=G_KL)
+kl_4h_sh = input.bool(false,"ShortHand",inline="kl4hsh",group=G_KL)
+kl_4h_c  = input.color(color.orange,"", inline="kl4hsh",group=G_KL)
+
+kl_d_o   = input.bool(true, "Open",     inline="kld1",  group=G_KL)
+kl_d_hl  = input.bool(false,"Prev H/L", inline="kld1",  group=G_KL)
+kl_d_m   = input.bool(false,"Prev Mid", inline="kld1",  group=G_KL)
+kl_d_sh  = input.bool(false,"ShortHand",inline="kldag", group=G_KL)
+kl_d_c   = input.color(#08bcd4,"",      inline="kldag", group=G_KL)
+
+kl_mon_hl = input.bool(true, "Mon Range",inline="klmon",  group=G_KL)
+kl_mon_m  = input.bool(true, "Mid",      inline="klmon",  group=G_KL)
+kl_mon_sh = input.bool(false,"ShortHand",inline="klmonsh",group=G_KL)
+kl_mon_c  = input.color(color.white,"", inline="klmonsh",group=G_KL)
+
+kl_w_o   = input.bool(true, "Open",     inline="klw1",  group=G_KL)
+kl_w_hl  = input.bool(true, "Prev H/L", inline="klw1",  group=G_KL)
+kl_w_m   = input.bool(true, "Prev Mid", inline="klw1",  group=G_KL)
+kl_w_sh  = input.bool(false,"ShortHand",inline="klwsh", group=G_KL)
+kl_w_c   = input.color(#fffcbc,"",      inline="klwsh", group=G_KL)
+
+kl_mo_o  = input.bool(true, "Open",     inline="klmo1", group=G_KL)
+kl_mo_hl = input.bool(true, "Prev H/L", inline="klmo1", group=G_KL)
+kl_mo_m  = input.bool(true, "Prev Mid", inline="klmo1", group=G_KL)
+kl_mo_sh = input.bool(false,"ShortHand",inline="klmosh",group=G_KL)
+kl_mo_c  = input.color(#08d48c,"",      inline="klmosh",group=G_KL)
+
+kl_q_o   = input.bool(true, "Open",     inline="klq1",  group=G_KL)
+kl_q_hl  = input.bool(false,"Prev H/L", inline="klq1",  group=G_KL)
+kl_q_m   = input.bool(true, "Prev Mid", inline="klq1",  group=G_KL)
+kl_q_sh  = input.bool(false,"ShortHand",inline="klqsh", group=G_KL)
+kl_q_c   = input.color(color.red,"",    inline="klqsh", group=G_KL)
+
+kl_y_o   = input.bool(true, "Open",     inline="kly1",  group=G_KL)
+kl_y_hl  = input.bool(false,"H/L",      inline="kly1",  group=G_KL)
+kl_y_m   = input.bool(true, "Mid",      inline="kly1",  group=G_KL)
+kl_y_sh  = input.bool(false,"ShortHand",inline="klysh", group=G_KL)
+kl_y_c   = input.color(color.red,"",    inline="klysh", group=G_KL)
+
+kl_lon_en = input.bool(false,"London",  inline="klfx",  group=G_KL)
+kl_us_en  = input.bool(false,"NY",      inline="klfx",  group=G_KL)
+kl_as_en  = input.bool(false,"Asia",    inline="klfx",  group=G_KL)
+kl_fx_sh  = input.bool(false,"ShortHand",inline="klfxsh",group=G_KL)
+kl_lon_c  = input.color(color.white,"London",inline="klfxc",group=G_KL)
+kl_us_c   = input.color(color.white,"NY",    inline="klfxc",group=G_KL)
+kl_as_c   = input.color(color.white,"Asia",  inline="klfxc",group=G_KL)
+
+kl_lon_ses = input.session("0800-1600","London Session",  group=G_KL)
+kl_us_ses  = input.session("1400-2100","New York Session",group=G_KL)
+kl_as_ses2 = input.session("0000-0900","Tokyo Session",   group=G_KL)
+
+var kl_4h_cv  = kl_4h_c
+var kl_d_cv   = kl_d_c
+var kl_mon_cv = kl_mon_c
+var kl_w_cv   = kl_w_c
+var kl_mo_cv  = kl_mo_c
+var kl_q_cv   = kl_q_c
+var kl_y_cv   = kl_y_c
+var kl_lon_cv = kl_lon_c
+var kl_us_cv  = kl_us_c
+var kl_as_cv  = kl_as_c
+
+if kl_globalcol
+    kl_4h_cv  := kl_gcol
+    kl_d_cv   := kl_gcol
+    kl_mon_cv := kl_gcol
+    kl_w_cv   := kl_gcol
+    kl_mo_cv  := kl_gcol
+    kl_q_cv   := kl_gcol
+    kl_y_cv   := kl_gcol
+    kl_lon_cv := kl_gcol
+    kl_us_cv  := kl_gcol
+    kl_as_cv  := kl_gcol
+
+_kl_lw = kl_linesz  == "Large" ? 3 : kl_linesz  == "Medium" ? 2 : 1
+_kl_fs = kl_lblsz   == "Large" ? size.large : kl_lblsz == "Small" ? size.small : size.normal
+_kl_ls = kl_linesty == "Dashed" ? line.style_dashed : kl_linesty == "Dotted" ? line.style_dotted : line.style_solid
+kl_t(string sh, string full, bool use_sh) => use_sh or kl_globaltext ? sh : full
+
+[_4ht, _4ho]   = request.security(syminfo.tickerid,"240",[time,    open],    lookahead=barmerge.lookahead_on)
+[_4hht,_4hh]   = request.security(syminfo.tickerid,"240",[time[1], high[1]], lookahead=barmerge.lookahead_on)
+[_4hlt,_4hl]   = request.security(syminfo.tickerid,"240",[time[1], low[1]],  lookahead=barmerge.lookahead_on)
+[_dt,  _do]    = request.security(syminfo.tickerid,"D",  [time,    open],    lookahead=barmerge.lookahead_on)
+[_dht, _dh]    = request.security(syminfo.tickerid,"D",  [time[1], high[1]], lookahead=barmerge.lookahead_on)
+[_dlt, _dl]    = request.security(syminfo.tickerid,"D",  [time[1], low[1]],  lookahead=barmerge.lookahead_on)
+_cdh           = request.security(syminfo.tickerid,"D",  high,               lookahead=barmerge.lookahead_on)
+_cdl           = request.security(syminfo.tickerid,"D",  low,                lookahead=barmerge.lookahead_on)
+[_wt,  _wo]    = request.security(syminfo.tickerid,"W",  [time,    open],    lookahead=barmerge.lookahead_on)
+[_wht, _wh]    = request.security(syminfo.tickerid,"W",  [time[1], high[1]], lookahead=barmerge.lookahead_on)
+[_wlt, _wl]    = request.security(syminfo.tickerid,"W",  [time[1], low[1]],  lookahead=barmerge.lookahead_on)
+[_mt,  _mo]    = request.security(syminfo.tickerid,"M",  [time,    open],    lookahead=barmerge.lookahead_on)
+[_mht, _mh]    = request.security(syminfo.tickerid,"M",  [time[1], high[1]], lookahead=barmerge.lookahead_on)
+[_mlt, _ml]    = request.security(syminfo.tickerid,"M",  [time[1], low[1]],  lookahead=barmerge.lookahead_on)
+[_qt,  _qo]    = request.security(syminfo.tickerid,"3M", [time,    open],    lookahead=barmerge.lookahead_on)
+[_qht, _qh]    = request.security(syminfo.tickerid,"3M", [time[1], high[1]], lookahead=barmerge.lookahead_on)
+[_qlt, _ql]    = request.security(syminfo.tickerid,"3M", [time[1], low[1]],  lookahead=barmerge.lookahead_on)
+[_yt,  _yo]    = request.security(syminfo.tickerid,"12M",[time,    open],    lookahead=barmerge.lookahead_on)
+[_yht, _yh]    = request.security(syminfo.tickerid,"12M",[time,    high],    lookahead=barmerge.lookahead_on)
+[_ylt, _yl]    = request.security(syminfo.tickerid,"12M",[time,    low],     lookahead=barmerge.lookahead_on)
+
+var int   _mon_t  = time
+var float _mon_h  = high
+var float _mon_l  = low
+var bool  _mon_ok = false
+if _wt != _wt[1]
+    _mon_ok := false
+if kl_mon_hl and not _mon_ok
+    _mon_ok := true
+    _mon_t  := _dt
+    _mon_h  := _cdh
+    _mon_l  := _cdl
+
+var float _lh=0.0, var float _ll=close, var int _lt=time
+var float _flh=0.0, var float _fll=0.0, var float _flo=0.0
+var bool _lon_off=false
+_lon_in = not na(time("",kl_lon_ses))
+if _lon_in
+    if high>_lh
+        _lh:=high
+    if low<_ll
+        _ll:=low
+    if _lon_off
+        _lt:=time
+        _flo:=open
+    _flh:=_lh
+    _fll:=_ll
+    _lon_off:=false
+else
+    if not _lon_off
+        _flh:=_lh
+        _fll:=_ll
+    _lon_off:=true
+    _lh:=0.0
+    _ll:=close
+
+var float _uh=0.0, var float _ul=close, var int _ut=time
+var float _fuh=0.0, var float _ful=0.0, var float _fuo=0.0
+var bool _us_off=false
+_us_in = not na(time("",kl_us_ses))
+if _us_in
+    if high>_uh
+        _uh:=high
+    if low<_ul
+        _ul:=low
+    if _us_off
+        _ut:=time
+        _fuo:=open
+    _fuh:=_uh
+    _ful:=_ul
+    _us_off:=false
+else
+    if not _us_off
+        _fuh:=_uh
+        _ful:=_ul
+    _us_off:=true
+    _uh:=0.0
+    _ul:=close
+
+var float _ah=0.0, var float _al=close, var int _at2=time
+var float _fah=0.0, var float _fal=0.0, var float _fao=0.0
+var bool _as_off=false
+_as_in = not na(time("",kl_as_ses2))
+if _as_in
+    if high>_ah
+        _ah:=high
+    if low<_al
+        _al:=low
+    if _as_off
+        _at2:=time
+        _fao:=open
+    _fah:=_ah
+    _fal:=_al
+    _as_off:=false
+else
+    if not _as_off
+        _fah:=_ah
+        _fal:=_al
+    _as_off:=true
+    _ah:=0.0
+    _al:=close
+
+var float[] _pa = array.new<float>()
+var label[] _la = array.new<label>()
+
+kl_mrg(float[] pa, label[] la, float price, label lbl, color c) =>
+    if pa.includes(price)
+        idx  = pa.indexof(price)
+        hold = la.get(idx)
+        hold.set_text(lbl.get_text() + " / " + hold.get_text())
+        lbl.set_text("")
+        hold.set_textcolor(c)
+    else
+        pa.push(price)
+        la.push(lbl)
+
+kl_draw(int x1, float y, int x2, string txt, color c) =>
+    var line  _l  = line.new (x1, y, x2, y, xloc=xloc.bar_time, color=c, style=_kl_ls, width=_kl_lw)
+    var label _lb = label.new(x2, y, txt,   xloc=xloc.bar_time, style=label.style_none, textcolor=c, size=_kl_fs)
+    line.set_x1(_l, x1)
+    line.set_x2(_l, x2)
+    line.set_y1(_l, y)
+    line.set_y2(_l, y)
+    label.set_x(_lb, x2)
+    label.set_y(_lb, y)
+    label.set_text(_lb, txt)
+    _lb
+
+if barstate.islast
+    _rl  = int(timenow + (time - time[1]) * kl_dist)
+    _rla = int(timenow + (time - time[1]) * kl_radist)
+    _ra  = kl_display == "Right Anchored"
+    _pa.clear()
+    _la.clear()
+
+    t4o = _ra ? _rla : _4ht
+    t4h = _ra ? _rla : _4hht
+    if kl_4h_o
+        lb = kl_draw(t4o, _4ho, _rl, kl_t("4H-O","4H Open",kl_4h_sh), kl_4h_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_4ho,lb,kl_4h_cv)
+    if kl_4h_hl
+        lb1 = kl_draw(t4h, _4hh, _rl, kl_t("P-4H-H","Prev 4H High",kl_4h_sh), kl_4h_cv)
+        lb2 = kl_draw(t4h, _4hl, _rl, kl_t("P-4H-L","Prev 4H Low", kl_4h_sh), kl_4h_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_4hh,lb1,kl_4h_cv)
+            kl_mrg(_pa,_la,_4hl,lb2,kl_4h_cv)
+    if kl_4h_m
+        v = (_4hh+_4hl)/2
+        lb = kl_draw(t4h, v, _rl, kl_t("P-4H-M","Prev 4H Mid",kl_4h_sh), kl_4h_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_4h_cv)
+
+    tmon = _ra ? _rla : _mon_t
+    if kl_mon_hl
+        lb1 = kl_draw(tmon, _mon_h, _rl, kl_t("MDAY-H","Monday High",kl_mon_sh), kl_mon_cv)
+        lb2 = kl_draw(tmon, _mon_l, _rl, kl_t("MDAY-L","Monday Low", kl_mon_sh), kl_mon_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_mon_h,lb1,kl_mon_cv)
+            kl_mrg(_pa,_la,_mon_l,lb2,kl_mon_cv)
+    if kl_mon_m
+        v = (_mon_h+_mon_l)/2
+        lb = kl_draw(tmon, v, _rl, kl_t("MDAY-M","Monday Mid",kl_mon_sh), kl_mon_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_mon_cv)
+
+    tdo = _ra ? _rla : _dt
+    tdh = _ra ? _rla : _dht
+    if kl_d_o
+        lb = kl_draw(tdo, _do, _rl, kl_t("DO","Daily Open",kl_d_sh), kl_d_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_do,lb,kl_d_cv)
+    if kl_d_hl
+        lb1 = kl_draw(tdh, _dh, _rl, kl_t("PDH","Prev Day High",kl_d_sh), kl_d_cv)
+        lb2 = kl_draw(tdh, _dl, _rl, kl_t("PDL","Prev Day Low", kl_d_sh), kl_d_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_dh,lb1,kl_d_cv)
+            kl_mrg(_pa,_la,_dl,lb2,kl_d_cv)
+    if kl_d_m
+        v = (_dh+_dl)/2
+        lb = kl_draw(tdh, v, _rl, kl_t("PDM","Prev Day Mid",kl_d_sh), kl_d_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_d_cv)
+
+    two = _ra ? _rla : _wt
+    twh = _ra ? _rla : _wht
+    if kl_w_o
+        lb = kl_draw(two, _wo, _rl, kl_t("WO","Weekly Open",kl_w_sh), kl_w_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_wo,lb,kl_w_cv)
+    if kl_w_hl
+        lb1 = kl_draw(twh, _wh, _rl, kl_t("PWH","Prev Week High",kl_w_sh), kl_w_cv)
+        lb2 = kl_draw(twh, _wl, _rl, kl_t("PWL","Prev Week Low", kl_w_sh), kl_w_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_wh,lb1,kl_w_cv)
+            kl_mrg(_pa,_la,_wl,lb2,kl_w_cv)
+    if kl_w_m
+        v = (_wh+_wl)/2
+        lb = kl_draw(twh, v, _rl, kl_t("PWM","Prev Week Mid",kl_w_sh), kl_w_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_w_cv)
+
+    tmo = _ra ? _rla : _mt
+    tmh = _ra ? _rla : _mht
+    if kl_mo_o
+        lb = kl_draw(tmo, _mo, _rl, kl_t("MO","Monthly Open",kl_mo_sh), kl_mo_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_mo,lb,kl_mo_cv)
+    if kl_mo_hl
+        lb1 = kl_draw(tmh, _mh, _rl, kl_t("PMH","Prev Month High",kl_mo_sh), kl_mo_cv)
+        lb2 = kl_draw(tmh, _ml, _rl, kl_t("PML","Prev Month Low", kl_mo_sh), kl_mo_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_mh,lb1,kl_mo_cv)
+            kl_mrg(_pa,_la,_ml,lb2,kl_mo_cv)
+    if kl_mo_m
+        v = (_mh+_ml)/2
+        lb = kl_draw(tmh, v, _rl, kl_t("PMM","Prev Month Mid",kl_mo_sh), kl_mo_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_mo_cv)
+
+    tqo = _ra ? _rla : _qt
+    tqh = _ra ? _rla : _qht
+    if kl_q_o
+        lb = kl_draw(tqo, _qo, _rl, kl_t("QO","Quarterly Open",kl_q_sh), kl_q_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_qo,lb,kl_q_cv)
+    if kl_q_hl
+        lb1 = kl_draw(tqh, _qh, _rl, kl_t("PQH","Prev Quarter High",kl_q_sh), kl_q_cv)
+        lb2 = kl_draw(tqh, _ql, _rl, kl_t("PQL","Prev Quarter Low", kl_q_sh), kl_q_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_qh,lb1,kl_q_cv)
+            kl_mrg(_pa,_la,_ql,lb2,kl_q_cv)
+    if kl_q_m
+        v = (_qh+_ql)/2
+        lb = kl_draw(tqh, v, _rl, kl_t("PQM","Prev Quarter Mid",kl_q_sh), kl_q_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_q_cv)
+
+    tyo = _ra ? _rla : _yt
+    if kl_y_o
+        lb = kl_draw(tyo, _yo, _rl, kl_t("YO","Yearly Open",kl_y_sh), kl_y_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_yo,lb,kl_y_cv)
+    if kl_y_hl
+        lb1 = kl_draw(tyo, _yh, _rl, kl_t("CYH","Current Year High",kl_y_sh), kl_y_cv)
+        lb2 = kl_draw(tyo, _yl, _rl, kl_t("CYL","Current Year Low", kl_y_sh), kl_y_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_yh,lb1,kl_y_cv)
+            kl_mrg(_pa,_la,_yl,lb2,kl_y_cv)
+    if kl_y_m
+        v = (_yh+_yl)/2
+        lb = kl_draw(tyo, v, _rl, kl_t("CYM","Current Year Mid",kl_y_sh), kl_y_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,v,lb,kl_y_cv)
+
+    tlt = _ra ? _rla : _lt
+    tut = _ra ? _rla : _ut
+    tat = _ra ? _rla : _at2
+    if kl_lon_en
+        lb1 = kl_draw(tlt, _flh, _rl, kl_t("Lon-H","London High", kl_fx_sh), kl_lon_cv)
+        lb2 = kl_draw(tlt, _fll, _rl, kl_t("Lon-L","London Low",  kl_fx_sh), kl_lon_cv)
+        lb3 = kl_draw(tlt, _flo, _rl, kl_t("Lon-O","London Open", kl_fx_sh), kl_lon_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_flh,lb1,kl_lon_cv)
+            kl_mrg(_pa,_la,_fll,lb2,kl_lon_cv)
+            kl_mrg(_pa,_la,_flo,lb3,kl_lon_cv)
+    if kl_us_en
+        lb1 = kl_draw(tut, _fuh, _rl, kl_t("NY-H","New York High", kl_fx_sh), kl_us_cv)
+        lb2 = kl_draw(tut, _ful, _rl, kl_t("NY-L","New York Low",  kl_fx_sh), kl_us_cv)
+        lb3 = kl_draw(tut, _fuo, _rl, kl_t("NY-O","New York Open", kl_fx_sh), kl_us_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_fuh,lb1,kl_us_cv)
+            kl_mrg(_pa,_la,_ful,lb2,kl_us_cv)
+            kl_mrg(_pa,_la,_fuo,lb3,kl_us_cv)
+    if kl_as_en
+        lb1 = kl_draw(tat, _fah, _rl, kl_t("AS-H","Asia High", kl_fx_sh), kl_as_cv)
+        lb2 = kl_draw(tat, _fal, _rl, kl_t("AS-L","Asia Low",  kl_fx_sh), kl_as_cv)
+        lb3 = kl_draw(tat, _fao, _rl, kl_t("AS-O","Asia Open", kl_fx_sh), kl_as_cv)
+        if kl_merge
+            kl_mrg(_pa,_la,_fah,lb1,kl_as_cv)
+            kl_mrg(_pa,_la,_fal,lb2,kl_as_cv)
+            kl_mrg(_pa,_la,_fao,lb3,kl_as_cv)
+
+
+// ── END ───────────────────────────────────────────────────

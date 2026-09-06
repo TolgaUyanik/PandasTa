@@ -1,0 +1,214 @@
+//@version=6
+// =====================================================================
+// pbkr_common — PBKR 시스템 공통 계산 함수
+// 핸드북 (TraderLion Trader's Handbook) Chapter 4-5 기준 메트릭
+//
+// Export rule: 공통 사용 빈도 ≥ 2개 셋업/전술 지표에서 사용되는 함수만.
+// plot/alert/table 없음. 순수 함수/타입 export 라이브러리.
+//
+// v4.6 changes (2026-05-14):
+//   - add f_launch_conv_core (200SMA 제외 — core 10/21/50 spread)
+//   - existing f_launch_conv 그대로 유지 (backward compat)
+//
+// v4.5 changes (2026-05-13):
+//   - f_vol_pack: RVOL NaNx 방지 (volume nz-safe + v50→v10→v5 graduated fallback)
+//   - 시그니처/타입 변경 없음 — 정상 케이스(v50>0)에서는 기존과 100% 동일 값
+// =====================================================================
+library("pbkr_common", overlay = false)
+
+// =====================================================================
+// 1. Helper utilities
+// =====================================================================
+
+// 값을 [lo, hi] 범위로 클램프
+export f_clamp(float v, float lo, float hi) =>
+    math.min(math.max(v, lo), hi)
+
+// Rate of Change (%)
+// src[len] 기준 변화율, 0 이하면 na 반환
+export f_roc(float src, int len) =>
+    src[len] > 0 ? (src - src[len]) / src[len] * 100 : na
+
+// Day Close Range (%) — 핸드북 강세 시그널 (close가 당일 high에 가까울수록 높음)
+export f_dcr(float h, float l, float c) =>
+    (c - l) / math.max(h - l, syminfo.mintick) * 100
+
+// 한국 거래소(KOSPI/KOSDAQ) 가격대별 호가 단위
+export f_tick(float p) =>
+    p < 2000 ? 1 : p < 5000 ? 5 : p < 20000 ? 10 :
+     p < 50000 ? 50 : p < 200000 ? 100 : p < 500000 ? 500 : 1000
+
+// 호가 단위로 올림/내림
+export f_round_up(float p) =>
+    na(p) ? na : math.ceil(p / f_tick(p)) * f_tick(p)
+
+export f_round_down(float p) =>
+    na(p) ? na : math.floor(p / f_tick(p)) * f_tick(p)
+
+// NA-safe max
+export f_nzmax(float a, float b) =>
+    na(a) ? b : na(b) ? a : math.max(a, b)
+
+// Best support — 진입가(entry) 아래에 있는 후보 5개 중 가장 가까운 (= 최대) 가격
+// 진입가 위에 있는 후보는 무시. 어떤 후보도 entry 아래에 없으면 na 반환.
+export f_best_support(float entry, float a, float b, float c, float d, float e) =>
+    float s = na
+    if not na(entry)
+        if not na(a) and a < entry
+            s := na(s) ? a : math.max(s, a)
+        if not na(b) and b < entry
+            s := na(s) ? b : math.max(s, b)
+        if not na(c) and c < entry
+            s := na(s) ? c : math.max(s, c)
+        if not na(d) and d < entry
+            s := na(s) ? d : math.max(s, d)
+        if not na(e) and e < entry
+            s := na(s) ? e : math.max(s, e)
+    s
+
+// =====================================================================
+// 2. Trend MA — 핸드북 표준 일봉 MA 5종
+// 10SMA / 21EMA / 50SMA / 150SMA / 200SMA
+// =====================================================================
+
+export type MAPack
+    float sma10
+    float ema21
+    float sma50
+    float sma150
+    float sma200
+
+export f_ma_pack() =>
+    MAPack.new(
+         ta.sma(close, 10),
+         ta.ema(close, 21),
+         ta.sma(close, 50),
+         ta.sma(close, 150),
+         ta.sma(close, 200))
+
+// LaunchPad MA convergence — 4개 MA(10/21/50/200) spread를 기준가 대비 %로
+// 스프레드가 좁을수록 (= 값이 작을수록) 4MA 수렴 = LaunchPad 베이스
+// v4.5까지 기본 spread 함수 — v4.6부터는 f_launch_conv_core 권장 (200SMA 제외)
+export f_launch_conv(float sma10, float ema21, float sma50, float sma200, float ref_price) =>
+    float ma_max = math.max(math.max(sma10, ema21), math.max(sma50, sma200))
+    float ma_min = math.min(math.min(sma10, ema21), math.min(sma50, sma200))
+    (ma_max - ma_min) / math.max(ref_price, syminfo.mintick) * 100
+
+// v4.6: Core LP spread — 10SMA / 21EMA / 50SMA만 사용 (200SMA 제외)
+// 강세 power-trend leader는 200SMA가 너무 아래에 있어 4-MA spread가 과대 계산됨.
+// 핸드북 정통 LP "MA 수렴 + consolidation" 정의는 core MA cluster (10/21/50)이고,
+// 200SMA는 context (Stage 2 / 추세 방향) 용도로만 사용.
+// 검증: 005930 core spread 16.65% (v4.5 4-MA 43.55% 대비 절반 이하)
+export f_launch_conv_core(float sma10, float ema21, float sma50, float ref_price) =>
+    float ma_max = math.max(sma10, math.max(ema21, sma50))
+    float ma_min = math.min(sma10, math.min(ema21, sma50))
+    not na(ref_price) and ref_price > 0 ?
+         (ma_max - ma_min) / ref_price * 100 : na
+
+// =====================================================================
+// 3. Volume signatures
+// =====================================================================
+
+export type VolPack
+    float vol50      // 50일 평균 거래량
+    float vol10
+    float vol5
+    float rvol       // 현재 거래량 / 50일 평균 (fallback: v10 → v5 → na)
+    float run_rate   // 누적 vs 평균 (일봉=rvol 동일, 단 fallback 적용)
+
+// v4.5 Tier 0 fix: NaNx 방지 (volume/SMA na-safe + v50→v10→v5 graduated fallback).
+// Signature 보존 — 함수 본문만 수정. 정상 케이스 (v50>0)에서는 기존과 100% 동일 값.
+export f_vol_pack() =>
+    float v50    = ta.sma(volume, 50)
+    float v10    = ta.sma(volume, 10)
+    float v5     = ta.sma(volume, 5)
+    float curr_v = nz(volume, 0.0)
+    float rv = na
+    if not na(v50) and v50 > 0
+        rv := curr_v / v50
+    else if not na(v10) and v10 > 0
+        rv := curr_v / v10
+    else if not na(v5) and v5 > 0
+        rv := curr_v / v5
+    VolPack.new(v50, v10, v5, rv, rv)
+
+// 거래량 dry-up — 베이스 형성기 강세 신호 (vol10이 vol50 대비 mult 미만)
+export f_vol_dryup(float vol10, float vol50, float mult = 0.85) =>
+    vol50 > 0 and vol10 < vol50 * mult
+
+// HV1 (High Volume Day 1) — 핸드북 기준: 평균 대비 mult배 이상
+export f_hv1(float vol, float vol50, float mult = 2.0) =>
+    vol50 > 0 and vol >= vol50 * mult
+
+// Pocket Pivot 기준 거래량 — 직전 N봉 중 down-day(close < prev close) 거래량 최대값
+// 오늘 거래량이 이 값을 초과하면 Pocket Pivot 시그널
+// lookback은 simple int (for-loop bound 제약)
+export f_pocket_pivot_vol(simple int lookback = 10) =>
+    float mv = 0.0
+    for i = 1 to lookback
+        if close[i] < close[i + 1]
+            mv := math.max(mv, volume[i])
+    mv
+
+// =====================================================================
+// 4. Range / volatility metrics
+// =====================================================================
+
+// ADR% — Average Daily Range (high/low 비율 20일 평균)
+export f_adr20() =>
+    ta.sma(high / math.max(low, syminfo.mintick), 20) * 100 - 100
+
+// Tight range — 가격 압축 검출
+// short_n 봉 range가 long_n 봉 range의 ratio 이하면 압축 상태
+export f_tight_range(int short_n = 5, int long_n = 20, float ratio = 0.65) =>
+    float short_range = (ta.highest(high, short_n) - ta.lowest(low, short_n)) / math.max(close, syminfo.mintick) * 100
+    float long_range  = (ta.highest(high, long_n)  - ta.lowest(low, long_n))  / math.max(close, syminfo.mintick) * 100
+    long_range > 0 ? short_range <= long_range * ratio : false
+
+// =====================================================================
+// 5. 52-week high / low context
+// =====================================================================
+
+export type HighLowPack
+    float hh52         // 52주 고가
+    float ll52         // 52주 저가
+    float off_52h_pct  // 현재가의 52H 대비 위치 (음수 = 아래)
+    float off_52l_pct  // 현재가의 52L 대비 위치 (양수 = 위)
+
+export f_high_low_pack() =>
+    float hh = ta.highest(high, 252)
+    float ll = ta.lowest(low, 252)
+    HighLowPack.new(
+         hh,
+         ll,
+         hh > 0 ? (close - hh) / hh * 100 : na,
+         ll > 0 ? (close - ll) / ll * 100 : na)
+
+// =====================================================================
+// 6. Phase classification — 핸드북 사이클 후반 검출
+// Phase 0 = Base, 1/2/3 = 진행 단계. Phase 3 이상은 후반(주의)
+// =====================================================================
+
+export f_phase_code(int lookback = 120) =>
+    float prior_high = ta.highest(high, lookback)
+    float prior_low  = ta.lowest(low, lookback)
+    float rally_pct  = (prior_high - prior_low) / math.max(prior_low, syminfo.mintick) * 100
+    rally_pct < 50 ? 0 : rally_pct < 100 ? 1 : rally_pct < 200 ? 2 : 3
+
+export f_phase_txt(int phase) =>
+    phase == 0 ? "Base" : phase == 1 ? "Phase1" : phase == 2 ? "Phase2" : "Phase3"
+
+// =====================================================================
+// 7. Tick-aware formatting
+// =====================================================================
+
+export f_px(float v) =>
+    na(v) ? "-" : str.tostring(v, format.mintick)
+
+export f_pct(float v) =>
+    na(v) ? "-" : str.tostring(v, "#.##") + "%"
+
+// =====================================================================
+// 라이브러리 자체 컴파일 확인용 더미 plot (publish 시 필요)
+// =====================================================================
+plot(na, "lib_anchor", display = display.none)

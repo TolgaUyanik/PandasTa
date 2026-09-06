@@ -1,0 +1,621 @@
+//@version=5
+library("Core", overlay=false, dynamic_requests=true)
+
+// ======================
+// === Session / Gaps ===
+// ======================
+
+export inRTH() =>
+    not na(time(timeframe.period, "0930-1600", "America/New_York"))
+
+export gapFlags(float prevDayClose, float gapPct) =>
+    sess       = time(timeframe.period, "0930-1600", "America/New_York")
+    isRTH      = not na(sess)
+    sessionBeg = isRTH and not isRTH[1]
+    sessionEnd = not isRTH and isRTH[1]
+    var bool todayGapUp = false
+    var bool todayGapDown = false
+    
+    if sessionBeg
+        todayGapUp := prevDayClose > 0 and (open - prevDayClose) / prevDayClose > gapPct
+        todayGapDown := prevDayClose > 0 and (prevDayClose - open) / prevDayClose > gapPct
+    if sessionEnd
+        todayGapUp := false
+        todayGapDown := false
+    
+    [todayGapUp, todayGapDown]
+
+// Gap info with magnitude (nice for open playbooks)
+export gapInfo(float prevClose) =>
+    sess       = time(timeframe.period, "0930-1600", "America/New_York")
+    isRTH      = not na(sess)
+    sessionBeg = isRTH and not isRTH[1]
+    sessionEnd = not isRTH and isRTH[1]
+    var float gapPct = na
+    if sessionBeg
+        gapPct := prevClose > 0 ? (open - prevClose) / prevClose * 100.0 : na
+    if sessionEnd
+        gapPct := na
+    dir = na(gapPct) ? 0 : gapPct > 0 ? 1 : gapPct < 0 ? -1 : 0
+    [gapPct, dir]
+
+// ======================
+// ====== Volume ========
+// ======================
+
+export relativeVolume(int len) =>
+    avgVol = ta.sma(volume, len)
+    relVol = na(avgVol) or avgVol == 0 ? 0.0 : volume / avgVol
+    [relVol, avgVol]
+
+// Make bar timing reusable
+export barSeconds() =>
+    timeframe.isseconds ? timeframe.multiplier :
+     timeframe.isminutes ? timeframe.multiplier * 60 :
+     timeframe.isdaily   ? 23400 : 60   // equities RTH default
+
+// Bar timing on non-equity daily charts (safety)
+export barSecondsOpt(int rthSecondsDefault=23400) =>
+    timeframe.isseconds ? timeframe.multiplier :
+     timeframe.isminutes ? timeframe.multiplier * 60 :
+     timeframe.isdaily   ? rthSecondsDefault : 60
+
+// Real-time relative volume (for 1–5m bars)
+export relVolRealtime(int len) =>
+    avg = ta.sma(volume, len)
+    barSecs = barSeconds()
+    elapsed = math.max(math.min((timenow - time) / 1000.0, barSecs), 1.0)
+    pctDone = math.min(math.max(elapsed / barSecs, 0.05), 1.0)
+    estFull = volume / pctDone
+    rel     = na(avg) or avg == 0 ? 0.0 : estFull / avg
+    pace    = pctDone > 0.6 and rel > 1.5 ? "FAST" :
+              pctDone > 0.6 and rel < 0.6 ? "SLOW" : "NORMAL"
+    secsLeft = math.max(barSecs - elapsed, 0)
+    [rel, avg, pctDone, pace, secsLeft]
+
+// ======================
+// ======== MTF =========
+// ======================
+
+// MTF alignment check - accepts pre-calculated HTF EMA value
+export mtfAlign(float htfEma, float tol) =>
+    dist = na(htfEma) or htfEma == 0 ? na : (close - htfEma) / htfEma
+    bullOK = na(dist) ? true : dist >= -tol  // Allow within tolerance below
+    bearOK = na(dist) ? true : dist <=  tol  // Allow within tolerance above (symmetric)
+    [bullOK, bearOK, dist]
+
+// HTF distance calculation - accepts pre-calculated HTF EMA value
+export htfDistanceAbs(float htfEma, float fallback=0.015) =>
+    hdist  = na(htfEma) or htfEma == 0 ? fallback : math.abs(close - htfEma) / htfEma
+    hdist
+
+// 3-state MTF for gating & dashboard
+export mtfState(float htfEma, float tol) =>
+    dist  = na(htfEma) or htfEma == 0 ? na : (close - htfEma) / htfEma
+    state = na(dist) ? 0 : dist >  tol ?  1 : dist < -tol ? -1 : 0
+    okLong  = state >= 0
+    okShort = state <= 0
+    [state, okLong, okShort, dist]
+
+// ======================
+// === Adaptive Trend ===
+// ======================
+
+f_adaptiveEma(float src, float length) =>
+    L = math.max(math.round(length), 1)
+    alpha = 2.0 / (L + 1.0)
+    var float emaValue = na
+    emaValue := na(emaValue[1]) ? src : (alpha * src + (1.0 - alpha) * nz(emaValue[1], src))
+    emaValue
+
+export adaptiveLength(int rocLen, int minSmooth, int maxSmooth, bool useAdaptive, int baseSmoothing, int speedLookback) =>
+    _rocLen       = math.max(rocLen, 1)
+    _minSmooth    = math.max(minSmooth, 2)
+    _maxSmooth    = math.max(maxSmooth, _minSmooth + 1)
+    _baseSmooth   = math.max(baseSmoothing, _minSmooth)
+    _speedLB      = math.max(speedLookback, 20)
+    trendSpeed    = math.abs(ta.roc(close, _rocLen))
+    maxSpeed      = ta.highest(trendSpeed, _speedLB)
+    normSpeed     = na(maxSpeed) or maxSpeed <= 0 ? 0.0 : math.min(math.max(trendSpeed / maxSpeed, 0.0), 1.0)
+    adaptiveLen   = useAdaptive ? (_maxSmooth - (normSpeed * (_maxSmooth - _minSmooth))) : _baseSmooth
+    [adaptiveLen, trendSpeed, normSpeed]
+
+export adaptiveTrend(float src, float adaptiveLen) =>
+    f_adaptiveEma(src, adaptiveLen)
+
+// ======================
+// ====== ATR bands =====
+// ======================
+
+export atrBands(int atrLen, float atrMult, float basis) =>
+    _atrLen = math.max(atrLen, 1)
+    _mult   = math.max(atrMult, 0.1)
+    atrVal  = ta.atr(_atrLen)
+    upper   = basis + atrVal * _mult
+    lower   = basis - atrVal * _mult
+    [atrVal, upper, lower]
+
+// ======================
+// ====== Scoring =======
+// ======================
+
+export calcTrendStrength(float closePrice, float fastEMA, float slowEMA, bool volumeConfirmed, bool speedConfirmed) =>
+    score = 0
+    score += closePrice > fastEMA ? 1 : 0
+    score += fastEMA > slowEMA ? 1 : 0
+    score += volumeConfirmed ? 1 : 0
+    score += speedConfirmed ? 1 : 0
+    math.min(score, 4)
+
+export calcMovementPotential(bool inExpansionZone, int trendStrength, bool speedConfirmed) =>
+    potential = 0
+    potential += trendStrength >= 3 ? 2 : trendStrength >= 2 ? 1 : 0
+    potential += inExpansionZone ? 1 : 0
+    potential += speedConfirmed ? 1 : 0
+    math.min(potential, 4)
+
+export combineSignalScore(int trendStrength, int movementPotential, int mtfBonus, int volumeSurgeBonus) =>
+    math.min(trendStrength + movementPotential + mtfBonus + volumeSurgeBonus, 6)
+
+// ======================
+// === Strength 0–10  ===
+// ======================
+
+export strength10(bool dirLong, float volRatio, float htfDistance, bool isTraditional, bool isAltPattern, float bodySize, float rsi) =>
+    s = 0
+    s += volRatio > 2 ? 3 : volRatio > 1.5 ? 2 : volRatio > 1 ? 1 : 0
+    s += htfDistance < 0.01 ? 2 : htfDistance < 0.02 ? 1 : 0
+    s += isTraditional ? 2 : isAltPattern ? 1 : 0
+    s += bodySize > 0.30 ? 2 : bodySize > 0.15 ? 1 : 0
+    s += dirLong ? (rsi > 50 ? 1 : 0) : (rsi < 50 ? 1 : 0)
+    math.min(s, 10)
+
+// ======================
+// === Session Metrics ===
+// ======================
+
+// Add session-specific volatility and volume profiles
+export sessionProfile() =>
+    currentHour = hour(time, "America/New_York")
+    currentMin = minute(time, "America/New_York")
+    
+    // Combined time value for easier comparison
+    timeVal = currentHour * 100 + currentMin
+    
+    isPremarket = timeVal < 930
+    isOpen = timeVal >= 930 and timeVal <= 1030
+    isMidDay = timeVal >= 1100 and timeVal <= 1300
+    isPowerHour = timeVal >= 1500
+    
+    // Session-specific ATR multipliers
+    sessionATRMult = isOpen ? 1.5 : isMidDay ? 0.7 : isPowerHour ? 1.2 : 1.0
+    
+    // Expected volume profile
+    sessionVolProfile = isOpen ? 2.5 : isMidDay ? 0.6 : isPowerHour ? 1.8 : 1.0
+    
+    // Add session name for dashboard
+    sessionName = isPremarket ? "PRE" : 
+                  isOpen ? "OPEN" : 
+                  isMidDay ? "MID" : 
+                  isPowerHour ? "POWER" : "AFT"
+    
+    // Add quality flag
+    isQualityTime = isOpen or isPowerHour
+    
+    [isOpen, isMidDay, isPowerHour, sessionATRMult, sessionVolProfile, sessionName, isQualityTime]
+
+// ======================
+// === Microstructure ===
+// ======================
+
+// Tape reading simulation for day trading
+export microstructure(int lookback) =>
+    lb = math.max(1, lookback)
+    
+    // Enhanced with price location
+    priceLocation = (high - low) == 0 ? 0 : (close - low) / (high - low) * 2 - 1
+    weightedVolume = volume * priceLocation
+    
+    // Cumulative delta
+    buyVol = close > (high + low) / 2 ? volume : 0
+    sellVol = close < (high + low) / 2 ? volume : 0
+    delta = math.sum(buyVol - sellVol, lb)
+    
+    // Existing calculations
+    accDist = math.sum(weightedVolume, lb)
+    priceRejection = high - close > close - low
+    priceAcceptance = math.abs(close - open) > (high - low) * 0.55
+    exhaustion = ta.rsi(close, 5) > 85 or ta.rsi(close, 5) < 15
+    
+    [accDist, priceRejection, priceAcceptance, exhaustion, delta]
+
+// Pressure normalizer
+export normalizePressure(float pressure, int lookback) =>
+    lb = math.max(1, lookback)
+    base = ta.sma(volume, lb) * lb
+    base == 0 ? 0.0 : pressure / base
+
+// Helper: normalized tick pressure from microstructure
+export tickPressureNorm(int lb) =>
+    [_a,_rj,_ac,_ex, delta] = microstructure(lb)
+    normalizePressure(delta, lb)
+
+// Z-score helper for robust scoring across symbols
+export zscore(float x, int lb) =>
+    m = ta.sma(x, lb)
+    s = ta.stdev(x, lb)
+    s == 0 ? 0.0 : (x - m) / s
+
+// Convenience: z-score of normalized tick pressure
+export tickPressureZ(int lb) =>
+    p = tickPressureNorm(lb)
+    z = zscore(p, lb)
+    z
+
+// ======================
+// === Enhanced Strength ===
+// ======================
+
+// Enhanced strength calculation for day trading
+export strength10DayTrade(bool dirLong, float volRatio, float htfDistance, bool isTraditional, bool isAltPattern, float bodySize, float rsi, bool sessionBonus, float tickPressure) =>
+    s = 0
+    s += volRatio > 3 ? 3 : volRatio > 2 ? 2 : volRatio > 1.2 ? 1 : 0
+    s += htfDistance < 0.005 ? 1 : 0
+    s += isTraditional ? 2 : isAltPattern ? 1 : 0
+    s += bodySize > 0.40 ? 3 : bodySize > 0.25 ? 2 : bodySize > 0.15 ? 1 : 0
+    s += dirLong ? (rsi > 55 and rsi < 75 ? 1 : 0) : (rsi < 45 and rsi > 25 ? 1 : 0)
+    s += sessionBonus ? 1 : 0
+    s += math.abs(tickPressure) > 1.0 ? 1 : 0 // Z-score threshold (pass tickPressureZ(...) to this param)
+    math.min(s, 10)
+
+// ======================
+// === VWAP Bands =======
+// ======================
+
+// VWAP deviation bands for day trading
+export vwapBands(float vwap, int length) =>
+    dev = ta.stdev(hlc3, math.max(10, length))
+    vwap1Upper = vwap + dev
+    vwap1Lower = vwap - dev
+    vwap2Upper = vwap + dev * 2
+    vwap2Lower = vwap - dev * 2
+    safeDev    = dev == 0.0 ? syminfo.mintick : dev
+    vwapPosition = (close - vwap) / safeDev
+    isExtended   = math.abs(vwapPosition) > 2
+    [vwap1Upper, vwap1Lower, vwap2Upper, vwap2Lower, vwapPosition, isExtended]
+
+// VWAP chop detector (stricter)
+export vwapChop(float vwap, float dev, float atrPct, float rsi) =>
+    d = math.max(dev, syminfo.mintick)
+    nearVWAP = close > (vwap - d) and close < (vwap + d)
+    lowATR   = atrPct < 0.6
+    neutral  = rsi > 45 and rsi < 55
+    nearVWAP and (lowATR or neutral)
+
+// ======================
+// === Risk/Reward ======
+// ======================
+
+// Risk/Reward calculator for dashboard
+export calcRiskReward(float entry, float stop, float tp1, float tp2, float tp3, float shares) =>
+    rawRisk = math.abs(entry - stop)
+    risk    = math.max(rawRisk, syminfo.mintick)
+
+    r1 = na(tp1) ? 0.0 : math.abs(tp1 - entry) / risk
+    r2 = na(tp2) ? 0.0 : math.abs(tp2 - entry) / risk
+    r3 = na(tp3) ? 0.0 : math.abs(tp3 - entry) / risk
+
+    dollarRisk = risk * shares
+    dollarTP1  = r1 * dollarRisk
+    dollarTP2  = r2 * dollarRisk
+    dollarTP3  = r3 * dollarRisk
+    [r1, r2, r3, dollarRisk, dollarTP1, dollarTP2, dollarTP3]
+
+// ======================
+// === Market Regime ====
+// ======================
+
+// Expose squeeze ratio (nice for the dash and alerts)
+export squeezeBBKC() =>
+    bbDev   = ta.stdev(close, 20)
+    bbWidth = 4.0 * bbDev             // 2σ bands
+    kcAtr   = ta.atr(10)
+    kcWidth = 3.0 * kcAtr             // 1.5*ATR channels
+    isSq    = bbWidth < kcWidth
+    ratio   = kcWidth == 0 ? 0.0 : bbWidth / kcWidth
+    [isSq, ratio, bbWidth, kcWidth]
+
+// Market regime detector
+export marketRegime(int lookback) =>
+    atr20 = ta.atr(20)
+    sma20 = ta.sma(close, 20)
+    ema9  = ta.ema(close, 9)
+    trending = math.abs(ema9 - sma20) > atr20 * 0.5
+
+    base = ta.sma(atr20, 100)
+    lowVol  = atr20 < base * 0.7
+    highVol = atr20 > base * 1.3
+
+    highest = ta.highest(high,  lookback)
+    lowest  = ta.lowest(low,    lookback)
+    rng     = math.max(highest - lowest, syminfo.mintick)
+    chop    = 100 * ta.atr(14) / rng
+    isChoppy = chop > 61.8
+
+    // Add BB squeeze detection (width comparison)
+    [isSq, sqRatio, _, _] = squeezeBBKC()
+    squeeze = isSq
+
+    regime = trending and highVol ? "BREAKOUT" :
+             trending and not highVol ? "TREND" :
+             isChoppy ? "CHOP" : "RANGE"
+    [regime, trending, lowVol, highVol, isChoppy, squeeze, sqRatio]
+
+// Squeeze bucketing for the dashboard (clean color logic)
+export squeezeBucket(float ratio) =>
+    // <0.80 tight, 0.80-1.00 normal, >1.00 loose
+    ratio < 0.80 ? "TIGHT" : ratio <= 1.00 ? "NORMAL" : "LOOSE"
+
+// ======================
+// === Dynamic Cooldown ===
+// ======================
+
+// Dynamic cooldown (regime aware)
+export dynamicCooldown(int baseBars, float atrPct, bool inChop, int maxBars) =>
+    hh = hour(time, "America/New_York")
+    mm = minute(time, "America/New_York")
+    isOpen  = (hh == 9 and mm >= 30) or (hh == 10 and mm <= 30)
+    isLunch = hh >= 11 and hh <= 13
+
+    volF  = atrPct > 1.0 ? 1.5 : atrPct < 0.5 ? 0.7 : 1.0
+    chopF = inChop ? 2.0 : 1.0
+    todF  = isLunch ? 1.5 : isOpen ? 1.0 : 1.0
+
+    raw   = baseBars * volF * chopF * todF
+    cool  = math.max(1, math.min(math.round(raw), maxBars))
+    [cool, raw]
+
+// ======================
+// === Dashboard Utils ===
+// ======================
+
+// Stricter VWAP mode utility (string for dashboard)
+export vwapMode(bool inChop) => inChop ? "CHOP" : "TREND"
+
+// Safer string/format helpers (for neat rows)
+export toPctStr(float x) => na(x) ? "-" : str.tostring(x, "#.00") + "%"
+export yesNo(bool b) => b ? "YES" : "NO"
+export trendLabel(int state) =>
+    state > 0 ? "BULL" : state < 0 ? "BEAR" : "NEUTRAL"
+
+// R floor helper
+export minRByPct(float price, float pct) =>
+    math.max(price * pct, syminfo.mintick)
+
+// Optional: graded VWAP chop score (0–2)
+export vwapChopScore(float vwap, float dev, float atrPct, float rsi) =>
+    d   = math.max(dev, syminfo.mintick)
+    near= close > vwap - d and close < vwap + d
+    vol = atrPct < 0.6 ? 1 : 0
+    neu = (rsi > 45 and rsi < 55) ? 1 : 0
+    math.min((near ? 1 : 0) + vol + neu, 2)
+
+// Add adaptive StrengthGate helper (for dashboard & alerts)
+export strengthGateSuggest(bool isQualityTime, bool inChop, int baseGate) =>
+    base = math.max(0, baseGate)
+    adj  = (not isQualityTime and inChop) ? 2 : inChop ? 1 : 0
+    base + adj
+
+// Add a "why" string for cooldown (for the dashboard)
+export cooldownReason(float atrPct, bool inChop) =>
+    r = atrPct > 1.0 ? "High ATR" : atrPct < 0.5 ? "Low ATR" : "Normal ATR"
+    inChop ? r + " + CHOP" : r
+
+// One-liner for suggested Strength gate + hard gates
+export readyGates(bool isQualityTime, bool inChop, float relVol, float atrPct, int baseGate) =>
+    sg    = strengthGateSuggest(isQualityTime, inChop, baseGate)
+    volOK = relVol >= 1.0
+    atrOK = atrPct  >= 0.4
+    [sg, volOK, atrOK]
+
+// Direction-aware ready verdict (single call in your indicator)
+export readyVerdict(bool isLong, int mtfStateVal, float relVol, float atrPercent, int strengthScore, int strengthGate) =>
+    dirOK = isLong ? (mtfStateVal >= 0) : (mtfStateVal <= 0)
+    volOK = relVol >= 1.0
+    atrOK = atrPercent >= 0.4
+    strOK = strengthScore >= strengthGate
+    allOK = dirOK and volOK and atrOK and strOK
+    [allOK, dirOK, volOK, atrOK, strOK]
+
+// Optional: structural stop helper (reused by indicators)
+export structuralStops(bool isLong, float sigLow, float sigHigh, float vwap, float dev, float atr, float stopBufAtr) =>
+    d  = math.max(dev, syminfo.mintick)
+    st = isLong ? math.min(sigLow, vwap - d) - atr * stopBufAtr
+     : math.max(sigHigh, vwap + d) + atr * stopBufAtr
+    nz(st, close)  // never na
+
+// EMA slope % for dash (clean trend read)
+export emaSlopePct(series float ema, int bars) =>
+    prev = nz(ema[bars], ema)
+    ema == 0 ? 0.0 : (ema - prev) / ema * 100.0
+
+// ======================
+// === Dashboard Helpers ===
+// ======================
+
+// ATR% helper for consistent gating/labels
+export atrPct(int len) =>
+    c = nz(close, 1.0)
+    atrVal = ta.atr(len)
+    c == 0 ? 0.0 : atrVal / c * 100.0
+
+// Cooldown tracking (bars remaining + active flag)
+export cooldownStatus(int lastSigBar, int cooldownBars) =>
+    bsb = na(lastSigBar) ? na : bar_index - lastSigBar
+    left = na(bsb) ? 0 : math.max(cooldownBars - bsb, 0)
+    [left, left > 0]
+
+// EMA slope sign (+/−/0) for quick "slope up/down/flat"
+export emaSlopeSign(series float ema, int bars) =>
+    prev = nz(ema[bars], ema)
+    diff = ema - prev
+    diff > 0 ? 1 : diff < 0 ? -1 : 0
+
+// Bar progress as a single helper (reuses your barSeconds)
+export barProgress() =>
+    bs  = barSeconds()
+    el  = math.max(math.min((timenow - time) / 1000.0, bs), 1.0)
+    pct = math.min(math.max(el / bs, 0.05), 1.0)
+    left= math.max(bs - el, 0)
+    [pct, left]
+
+// RTH markers for open/close events (useful for labels)
+export rthMarkers() =>
+    sess = time(timeframe.period, "0930-1600", "America/New_York")
+    isR  = not na(sess)
+    openBar  = isR and not isR[1]
+    closeBar = not isR and isR[1]
+    [isR, openBar, closeBar]
+
+// Ready-gate "badge" strings (one-liners for the dash)
+export badge(bool ok) => ok ? "OK" : "FAIL"
+export triBadge(int x) => x > 0 ? "UP" : x < 0 ? "DOWN" : "FLAT"
+
+// Microstructure acceptance threshold tweak (less false positives)
+export priceAcceptanceAdaptive(float minBodyFrac=0.55) =>
+    rng  = math.max(high - low, syminfo.mintick)
+    body = math.abs(close - open) / rng
+    // scale required body by ATR% (small ATR% → demand a bit more body)
+    atrp = atrPct(14)
+    need = atrp < 0.5 ? (minBodyFrac + 0.05) : minBodyFrac
+    body > need
+
+// Speed confirmed helper for 1-5m charts (less flicker)
+export speedConfirmed(int rocLen=5, int emaLen=5, int smaLen=20) =>
+    roc = math.abs(ta.roc(close, rocLen))
+    emaRoc = ta.ema(roc, emaLen)
+    smaRoc = ta.sma(roc, smaLen)
+    emaRoc > smaRoc
+
+// ======================
+// === Quality Scoring System ===
+// ======================
+
+// Setup quality scoring system
+export setupScore(bool isLoose, bool isNormal, bool vwapTrend, bool emaUp, bool mtfBull, bool relVolOK, bool microOK, bool cooldownOK) =>
+    score = 0
+    score += isLoose ? 2 : isNormal ? 1 : 0
+    score += vwapTrend ? 2 : 0
+    score += emaUp ? 2 : 0
+    score += mtfBull ? 2 : 0
+    score += relVolOK ? 1 : 0
+    score += microOK ? 1 : 0
+    score += cooldownOK ? 0 : 0  // Can adjust weight
+    score
+
+// Setup tier classification
+export setupTier(int score) =>
+    score >= 8 ? "S" : score >= 6 ? "A" : score >= 4 ? "B" : "C"
+
+// Combined helper for dashboard
+export setupQuality(int score) =>
+    tier = setupTier(score)
+    color = tier == "S" ? color.green :  tier == "A" ? color.orange :      tier == "B" ? color.yellow : color.gray
+    [tier, color, score]
+
+// Directional micro ok from your existing pieces
+f_microOK(bool isLong, bool priceAccept, float tickNorm) =>
+    priceAccept and (isLong ? (tickNorm > 0) : (tickNorm < 0))
+
+// Map score → tier/color (reuse your existing)
+export setupQualityColor(int score) =>
+    tier = setupTier(score)
+    col  = tier == "S" ? color.green : tier == "A" ? color.orange : tier == "B" ? color.yellow : color.gray
+    [tier, col, score]
+
+// Directional score: flips EMA/MTF/Micro for shorts
+export setupScoreDir(bool isLong, bool isLoose, bool isNormal, bool vwapTrend, bool emaUp, bool mtfBull, bool relVolOK, bool priceAccept, float tickNorm, bool cooldownOK) =>
+    emaPass  = isLong ? emaUp        : not emaUp
+    mtfPass  = isLong ? mtfBull      : not mtfBull
+    microOK  = f_microOK(isLong, priceAccept, tickNorm)
+    // reuse your base score logic
+    base = setupScore(isLoose, isNormal, vwapTrend, emaPass, mtfPass, relVolOK, microOK, cooldownOK)
+    base
+
+// Convenience: compute both
+export setupScoresBoth(bool isLoose, bool isNormal, bool vwapTrend, bool emaUp, bool mtfBull, bool relVolOK, bool priceAccept, float tickNorm, bool cooldownOK) =>
+    longScore  = setupScoreDir(true,  isLoose, isNormal, vwapTrend, emaUp, mtfBull, relVolOK, priceAccept, tickNorm, cooldownOK)
+    shortScore = setupScoreDir(false, isLoose, isNormal, vwapTrend, emaUp, mtfBull, relVolOK, priceAccept, tickNorm, cooldownOK)
+    [longScore, shortScore]
+
+// ======================
+// === Rule Gate Evaluator ===
+// ======================
+
+// Direction-aware rule gates
+export ruleGatesDir(bool isLong, bool squeezeTight, bool emaUp, bool vwapTrend, float relVol, float relVolThresh, float tickNorm, bool useSqzGate, bool useEmaGate, bool useVwapGate, bool useVolGate, bool useMicroGate) =>
+    // Squeeze gate (block new entries when TIGHT if enabled)
+    sqzOK   = not useSqzGate or not squeezeTight
+
+    // EMA gate: want EMA up for longs, down for shorts
+    emaOK   = not useEmaGate or (isLong ? emaUp : not emaUp)
+
+    // VWAP regime gate: allow only when not in chop (as you define it)
+    vwapOK  = not useVwapGate or vwapTrend
+
+    // Volume gate
+    volOK   = not useVolGate or (relVol >= relVolThresh)
+
+    // Microstructure gate: want +Δ for longs, −Δ for shorts
+    microOK = not useMicroGate or (isLong ? (tickNorm > 0) : (tickNorm < 0))
+
+    allOK   = sqzOK and emaOK and vwapOK and volOK and microOK
+    [allOK, sqzOK, emaOK, vwapOK, volOK, microOK]
+
+// Backward-compatible wrapper (keeps your current signature alive)
+export ruleGates(bool squeezeTight, bool emaUp, bool vwapTrend, float relVol, float relVolThresh, float tickNorm, bool useSqzGate, bool useVwapGate, bool useVolGate, bool useMicroGate) =>
+    // Default to "long" semantics for legacy calls
+    ruleGatesDir(true, squeezeTight, emaUp, vwapTrend, relVol, relVolThresh, tickNorm,
+                 useSqzGate, true, useVwapGate, useVolGate, useMicroGate)
+
+// ======================
+// === Arrow Color by Market State ===
+// ======================
+
+// Arrow color by market state for visual feedback
+export arrowColor(string bucket, color baseColor, bool useRegimeColor) =>
+    if not useRegimeColor
+        baseColor
+    else
+        alpha = bucket == "LOOSE" ? 0 : bucket == "TIGHT" ? 65 : 30
+        color.new(baseColor, alpha)
+
+// ======================
+// === High-Leverage Helpers ===
+// ======================
+
+// ORB helper (so your indicator can drop its inline ORB block)
+export orbHiLo(int minutes) =>
+    newD  = timeframe.change("D")
+    var float hi = na
+    var float lo = na
+    var bool  set = false
+    inORB = (time - time("D")) <= minutes * 60 * 1000
+
+    if newD
+        hi := high
+        lo := low
+        set := false
+    else if inORB and not set
+        hi := math.max(nz(hi, high), high)
+        lo := math.min(nz(lo, low),  low)
+    else if not inORB and not set
+        set := true
+    [hi, lo, inORB, set]
+
+// Previous-day H/L helper (saves repeated boilerplate)
+export prevDayHL() =>
+    ph = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_off)
+    pl = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_off)
+    pc = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_off)
+    [ph, pl, pc]

@@ -1,0 +1,226 @@
+// @version=6
+strategy("Frosty Alerts",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100)
+
+// === USER CONFIGURABLE INPUTS ===
+enableBuy          = input.bool(true, "Enable Long Signals")
+enableSell         = input.bool(true, "Enable Short Signals")
+signalLogic        = input.string("Single", "Signal Logic", options=["Single", "Dual"])
+
+buySignalSource1   = input.source(close, "Long Signal Source 1")
+buySignalSource2   = input.source(close, "Long Signal Source 2")
+sellSignalSource1  = input.source(close, "Short Signal Source 1")
+sellSignalSource2  = input.source(close, "Short Signal Source 2")
+
+exitSignalType     = input.string("Custom", "Exit Signal Type", options=["Custom", "Session End"])
+buyExitSource      = input.source(close, "Long Exit Source")
+sellExitSource     = input.source(close, "Short Exit Source")
+
+// === TRADING WINDOWS (America/New_York) ===
+useTradingWindow        = input.bool(true, "Use Trading Windows?")
+
+// Evening window
+enableEveningWindow     = input.bool(true,  "Enable Evening Window")
+eveningSessionStr       = input.session("1800-2359", "Evening Window (NY time)")
+flattenAtEveningEnd     = input.bool(true,  "Flatten at End of Evening?")
+sendEveningFlattenAlert = input.bool(true,  "Alert on Evening Flatten?")
+eveningFlattenMsg       = input.string("{\"action\":\"flatten\",\"window\":\"evening\"}", "Evening Flatten Alert Message")
+
+// Overnight window
+enableOvernightWindow   = input.bool(true,  "Enable Overnight Window")
+overnightSessionStr     = input.session("0000-0800", "Overnight Window (NY time)")
+flattenAtOvernightEnd   = input.bool(true,  "Flatten at End of Overnight?")
+sendOverFlattenAlert    = input.bool(true,  "Alert on Overnight Flatten?")
+overnightFlattenMsg     = input.string("{\"action\":\"flatten\",\"window\":\"overnight\"}", "Overnight Flatten Alert Message")
+
+// NY session window
+enableNYWindow          = input.bool(true,  "Enable NY Session Window")
+nySessionStr            = input.session("0930-1600", "NY Session (NY time)")
+flattenAtNYEnd          = input.bool(true,  "Flatten at End of NY Session?")
+sendNYFlattenAlert      = input.bool(true,  "Alert on NY Session Flatten?")
+nyFlattenMsg            = input.string("{\"action\":\"flatten\",\"window\":\"ny_session\"}", "NY Session Flatten Alert Message")
+
+// Membership (NY time). Use time(..., "America/New_York") and convert to bools via not na(...)
+evTime  = time(timeframe.period, eveningSessionStr,   "America/New_York")
+ovTime  = time(timeframe.period, overnightSessionStr, "America/New_York")
+nyTime  = time(timeframe.period, nySessionStr,        "America/New_York")
+
+inEveningRaw   = not na(evTime)
+inOvernightRaw = not na(ovTime)
+inNYRaw        = not na(nyTime)
+
+// Apply master/leg enables
+inEvening   = useTradingWindow and enableEveningWindow   ? inEveningRaw   : false
+inOvernight = useTradingWindow and enableOvernightWindow ? inOvernightRaw : false
+inNY        = useTradingWindow and enableNYWindow        ? inNYRaw        : false
+
+// Overall in-window: any enabled window qualifies
+inAnyWindow = useTradingWindow ? (inEvening or inOvernight or inNY) : true
+
+// End-of-window detection (guard first bar; no na()/nz() on bools)
+endOfEvening   = useTradingWindow and enableEveningWindow   and bar_index > 0 and inEvening[1]   and not inEvening
+endOfOvernight = useTradingWindow and enableOvernightWindow and bar_index > 0 and inOvernight[1] and not inOvernight
+endOfNY        = useTradingWindow and enableNYWindow        and bar_index > 0 and inNY[1]        and not inNY
+
+// === RENKO CONFIGURATION ===
+renkoBrickSize = input.float(10.0, "Renko Brick Size (must match chart)", minval=0.1)
+
+// === TRAILING STOP CONFIG ===
+initialSLBricks     = input.int(2, "Initial SL (bricks)", minval=1)
+trailStartBricks    = input.int(1, "Start Trailing After (bricks)", minval=1)
+trailDistanceBricks = input.int(2, "Trailing Distance (bricks)", minval=1)
+
+// === STATIC TP/SL CONFIG ===
+enableStaticTP   = input.bool(true, "Enable Static Take Profit")
+enableStaticSL   = input.bool(false, "Enable Static Stop Loss (Overrides Trailing)")
+takeProfitBricks = input.int(5, "Take Profit (bricks)", minval=1)
+stopLossBricks   = input.int(3, "Stop Loss (bricks)", minval=1)
+
+// === DAILY TRADE LIMIT CONFIG ===
+enableTradeLimit = input.bool(false, "Enable Trade Count Limits?")
+maxTradesPerDay  = input.int(1, "Number of Trades Allowed", minval=1)
+
+var int dailyTradeCount = 0
+var int lastTradeDay = na
+today    = timestamp("GMT-0", year, month, dayofmonth)
+isNewDay = na(lastTradeDay) or (today != lastTradeDay)
+
+if isNewDay
+    lastTradeDay    := today
+    dailyTradeCount := 0
+
+canTradeToday = not enableTradeLimit or (dailyTradeCount < maxTradesPerDay)
+
+// === ENTRY LOGIC ===
+buyCondition  = (signalLogic == "Single" and buySignalSource1 > 0) or (signalLogic == "Dual" and buySignalSource1 > 0 and buySignalSource2 > 0)
+sellCondition = (signalLogic == "Single" and sellSignalSource1 > 0) or (signalLogic == "Dual" and sellSignalSource1 > 0 and sellSignalSource2 > 0)
+
+// Allow entries only inside any enabled window (or all day if master disabled)
+canEnterNow = canTradeToday and inAnyWindow
+
+buyExitCondition  = (exitSignalType == "Custom" and buyExitSource  > 0 and strategy.position_size > 0)
+sellExitCondition = (exitSignalType == "Custom" and sellExitSource > 0 and strategy.position_size < 0)
+
+// "Session End" exits fire at the end of ANY enabled window
+if exitSignalType == "Session End"
+    if endOfEvening
+        if strategy.position_size > 0
+            strategy.close("Long", comment="Session End (Evening)", alert_message = "closelong")
+        if strategy.position_size < 0
+            strategy.close("Short", comment="Session End (Evening)", alert_message = "closeshort")
+    if endOfOvernight
+        if strategy.position_size > 0
+            strategy.close("Long", comment="Session End (Overnight)", alert_message = "closelong")
+        if strategy.position_size < 0
+            strategy.close("Short", comment="Session End (Overnight)", alert_message = "closeshort")
+    if endOfNY
+        if strategy.position_size > 0
+            strategy.close("Long", comment="Session End (NY)", alert_message = "closelong")
+        if strategy.position_size < 0
+            strategy.close("Short", comment="Session End (NY)", alert_message = "closeshort")
+
+// Block entries outside the window; count when an entry is placed
+if (enableBuy and buyCondition and canEnterNow)
+    strategy.entry("Long", strategy.long, alert_message = "buy")
+    dailyTradeCount += 1
+
+if (enableSell and sellCondition and canEnterNow)
+    strategy.entry("Short", strategy.short, alert_message = "sell")
+    dailyTradeCount += 1
+
+// Manual (custom) exits
+if (buyExitCondition)
+    strategy.close("Long", alert_message = "closelong")
+
+if (sellExitCondition)
+    strategy.close("Short", alert_message = "closeshort")
+
+// === TRAILING + STATIC LOGIC ===
+var float entryPrice  = na
+var float trailStop   = na
+var int   bricksMoved = 0
+var float peakPrice   = na
+var float troughPrice = na
+
+if (strategy.opentrades > 0)
+    if na(entryPrice)
+        entryPrice  := strategy.position_avg_price
+        bricksMoved := 0
+        peakPrice   := close
+        troughPrice := close
+        trailStop   := na
+
+    // LONG
+    if strategy.position_size > 0
+        if close > peakPrice + renkoBrickSize * 0.9
+            bricksMoved += 1
+            peakPrice   := close
+
+        if enableStaticSL
+            trailStop := entryPrice - stopLossBricks * renkoBrickSize
+        else
+            if bricksMoved >= trailStartBricks
+                trailStop := peakPrice - trailDistanceBricks * renkoBrickSize
+            else
+                trailStop := entryPrice - initialSLBricks * renkoBrickSize
+
+        if close <= trailStop
+            strategy.close("Long", comment=enableStaticSL ? "Static SL Hit" : "Trailing SL Hit", alert_message = "closelong")
+
+        if enableStaticTP
+            tpLevel = entryPrice + takeProfitBricks * renkoBrickSize
+            if close >= tpLevel
+                strategy.close("Long", comment="Static TP Hit", alert_message = "closelong")
+
+    // SHORT
+    if strategy.position_size < 0
+        if close < troughPrice - renkoBrickSize * 0.9
+            bricksMoved += 1
+            troughPrice := close
+
+        if enableStaticSL
+            trailStop := entryPrice + stopLossBricks * renkoBrickSize
+        else
+            if bricksMoved >= trailStartBricks
+                trailStop := troughPrice + trailDistanceBricks * renkoBrickSize
+            else
+                trailStop := entryPrice + initialSLBricks * renkoBrickSize
+
+        if close >= trailStop
+            strategy.close("Short", comment=enableStaticSL ? "Static SL Hit" : "Trailing SL Hit", alert_message = "closeshort")
+
+        if enableStaticTP
+            tpLevel = entryPrice - takeProfitBricks * renkoBrickSize
+            if close <= tpLevel
+                strategy.close("Short", comment="Static TP Hit", alert_message = "closeshort")
+
+// === PER-WINDOW FLATTEN ===
+if flattenAtEveningEnd and endOfEvening
+    strategy.close_all(comment="Flatten: End of Evening")
+    if sendEveningFlattenAlert
+        alert(eveningFlattenMsg, alert.freq_once_per_bar)
+
+if flattenAtOvernightEnd and endOfOvernight
+    strategy.close_all(comment="Flatten: End of Overnight")
+    if sendOverFlattenAlert
+        alert(overnightFlattenMsg, alert.freq_once_per_bar)
+
+if flattenAtNYEnd and endOfNY
+    strategy.close_all(comment="Flatten: End of NY Session")
+    if sendNYFlattenAlert
+        alert(nyFlattenMsg, alert.freq_once_per_bar)
+
+// === RESET WHEN FLAT ===
+if strategy.opentrades == 0
+    entryPrice  := na
+    bricksMoved := 0
+    trailStop   := na
+    peakPrice   := na
+    troughPrice := na
+
+// === Visuals (optional) ===
+plotshape(endOfEvening,   title="End of Evening",   style=shape.flag, location=location.top, size=size.tiny, text="EoE")
+plotshape(endOfOvernight, title="End of Overnight", style=shape.flag, location=location.top, size=size.tiny, text="EoO")
+plotshape(endOfNY,        title="End of NY",        style=shape.flag, location=location.top, size=size.tiny, text="EoN")

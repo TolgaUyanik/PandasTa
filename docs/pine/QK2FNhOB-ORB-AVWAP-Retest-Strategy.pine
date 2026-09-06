@@ -1,0 +1,198 @@
+//@version=6
+strategy("ORB AVWAP Retest Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false, max_lines_count=500, max_labels_count=500)
+
+clockTimezone = input.string("America/New_York", "Clock Timezone", group="1. Session")
+breakoutTf = input.timeframe("5", "Breakout Timeframe", group="1. Session")
+orStartHour = input.int(9, "Range Start Hour", minval=0, maxval=23, group="1. Session")
+orStartMinute = input.int(30, "Range Start Minute", minval=0, maxval=59, group="1. Session")
+orEndHour = input.int(9, "Range End Hour", minval=0, maxval=23, group="1. Session")
+orEndMinute = input.int(45, "Range End Minute", minval=0, maxval=59, group="1. Session")
+tradeEndHour = input.int(16, "Last Entry Hour", minval=0, maxval=23, group="1. Session")
+tradeEndMinute = input.int(0, "Last Entry Minute", minval=0, maxval=59, group="1. Session")
+oneTradePerSession = input.bool(true, "One Trade Per Session", group="1. Session")
+
+allowLongs = input.bool(true, "Allow Longs", group="2. Direction")
+allowShorts = input.bool(true, "Allow Shorts", group="2. Direction")
+
+stopMode = input.string("Range Other Side", "Stop Mode", options=["Range Other Side", "ATR"], group="3. Risk")
+atrLen = input.int(14, "ATR Length", minval=1, group="3. Risk")
+atrMult = input.float(1.0, "ATR Multiplier", minval=0.1, step=0.1, group="3. Risk")
+targetR = input.float(1.0, "Target R", minval=0.1, step=0.1, group="3. Risk")
+
+sizingMode = input.string("Dollar Risk", "Sizing Mode", options=["Fixed Contracts", "Dollar Risk"], group="4. Sizing")
+fixedQty = input.float(1, "Fixed Contracts", minval=0.001, step=1, group="4. Sizing")
+riskDollars = input.float(800, "Dollar Risk", minval=1, step=50, group="4. Sizing")
+maxContracts = input.float(50, "Max Contracts", minval=1, step=1, group="4. Sizing")
+
+showRange = input.bool(true, "Show Range", group="5. Display")
+showAvwap = input.bool(true, "Show Anchored VWAP", group="5. Display")
+showTradeLines = input.bool(true, "Show Stop/Target Lines", group="5. Display")
+previousTradesToShow = input.int(10, "Previous Trades To Show", minval=0, maxval=100, group="5. Display")
+
+toTimeInt(h, m) =>
+    h * 10000 + m * 100
+
+barTimeInt() =>
+    hour(time, clockTimezone) * 10000 + minute(time, clockTimezone) * 100 + second(time, clockTimezone)
+
+orStartTime = toTimeInt(orStartHour, orStartMinute)
+orEndTime = toTimeInt(orEndHour, orEndMinute)
+tradeEndTime = toTimeInt(tradeEndHour, tradeEndMinute)
+nowTime = barTimeInt()
+
+newSession = ta.change(time("D", "0000-2359", clockTimezone)) != 0
+inOpeningRange = nowTime >= orStartTime and nowTime < orEndTime
+afterOpeningRange = nowTime >= orEndTime
+beforeTradeEnd = nowTime <= tradeEndTime
+
+var float rangeHigh = na
+var float rangeLow = na
+var bool rangeReady = false
+var int breakoutDir = 0
+var int breakoutBar = na
+var bool tradedThisSession = false
+var float cumPv = 0.0
+var float cumVol = 0.0
+var float activeStop = na
+var float activeTarget = na
+var line stopLine = na
+var line targetLine = na
+var array<line> savedStopLines = array.new<line>()
+var array<line> savedTargetLines = array.new<line>()
+
+deleteLine(lineId) =>
+    if not na(lineId)
+        line.delete(lineId)
+
+setTradeLine(lineId, price, lineColor) =>
+    line result = lineId
+    if na(result)
+        result := line.new(time, price, time_close, price, xloc=xloc.bar_time, extend=extend.right, color=lineColor, width=2, force_overlay=true)
+    else
+        line.set_xy1(result, time, price)
+        line.set_xy2(result, time_close, price)
+        line.set_color(result, lineColor)
+    result
+
+trimTradeLines() =>
+    while array.size(savedStopLines) > previousTradesToShow
+        line oldStop = array.shift(savedStopLines)
+        line oldTarget = array.shift(savedTargetLines)
+        deleteLine(oldStop)
+        deleteLine(oldTarget)
+
+finishTradeLines() =>
+    if not na(stopLine)
+        line.set_x2(stopLine, time)
+        line.set_extend(stopLine, extend.none)
+    if not na(targetLine)
+        line.set_x2(targetLine, time)
+        line.set_extend(targetLine, extend.none)
+
+if newSession
+    finishTradeLines()
+    rangeHigh := na
+    rangeLow := na
+    rangeReady := false
+    breakoutDir := 0
+    breakoutBar := na
+    tradedThisSession := false
+    cumPv := 0.0
+    cumVol := 0.0
+    activeStop := na
+    activeTarget := na
+    stopLine := na
+    targetLine := na
+
+if nowTime >= orStartTime
+    cumPv += hlc3 * volume
+    cumVol += volume
+
+avwap = cumVol > 0 ? cumPv / cumVol : na
+
+if inOpeningRange
+    rangeHigh := na(rangeHigh) ? high : math.max(rangeHigh, high)
+    rangeLow := na(rangeLow) ? low : math.min(rangeLow, low)
+
+if afterOpeningRange and not rangeReady and not na(rangeHigh) and not na(rangeLow) and rangeHigh > rangeLow
+    rangeReady := true
+
+canLookForBreakout = rangeReady and beforeTradeEnd and (not oneTradePerSession or not tradedThisSession) and strategy.position_size == 0
+
+if canLookForBreakout and breakoutDir == 0
+    if allowLongs and close > rangeHigh
+        breakoutDir := 1
+        breakoutBar := bar_index
+    else if allowShorts and close < rangeLow
+        breakoutDir := -1
+        breakoutBar := bar_index
+
+longRetestReject = breakoutDir == 1 and bar_index > breakoutBar and low <= avwap and close > avwap and close > open and low > rangeLow
+shortRetestReject = breakoutDir == -1 and bar_index > breakoutBar and high >= avwap and close < avwap and close < open and high < rangeHigh
+
+atr = ta.atr(atrLen)
+
+calcQty(entryPrice, stopPrice) =>
+    riskPerContract = math.abs(entryPrice - stopPrice) * syminfo.pointvalue
+    rawQty = sizingMode == "Fixed Contracts" ? fixedQty : (riskPerContract > 0 ? math.floor(riskDollars / riskPerContract) : 0)
+    math.min(maxContracts, rawQty)
+
+if canLookForBreakout and longRetestReject
+    entryPrice = close
+    stopPrice = stopMode == "ATR" ? entryPrice - atr * atrMult : rangeLow
+    riskPoints = entryPrice - stopPrice
+    qty = calcQty(entryPrice, stopPrice)
+    if riskPoints > 0 and qty > 0
+        targetPrice = entryPrice + riskPoints * targetR
+        activeStop := stopPrice
+        activeTarget := targetPrice
+        strategy.entry("Long", strategy.long, qty=qty)
+        strategy.exit("Long Exit", "Long", stop=stopPrice, limit=targetPrice)
+        tradedThisSession := true
+        breakoutDir := 0
+        if showTradeLines
+            stopLine := setTradeLine(stopLine, stopPrice, color.new(color.red, 0))
+            targetLine := setTradeLine(targetLine, targetPrice, color.new(color.lime, 0))
+            array.push(savedStopLines, stopLine)
+            array.push(savedTargetLines, targetLine)
+            trimTradeLines()
+
+if canLookForBreakout and shortRetestReject
+    entryPrice = close
+    stopPrice = stopMode == "ATR" ? entryPrice + atr * atrMult : rangeHigh
+    riskPoints = stopPrice - entryPrice
+    qty = calcQty(entryPrice, stopPrice)
+    if riskPoints > 0 and qty > 0
+        targetPrice = entryPrice - riskPoints * targetR
+        activeStop := stopPrice
+        activeTarget := targetPrice
+        strategy.entry("Short", strategy.short, qty=qty)
+        strategy.exit("Short Exit", "Short", stop=stopPrice, limit=targetPrice)
+        tradedThisSession := true
+        breakoutDir := 0
+        if showTradeLines
+            stopLine := setTradeLine(stopLine, stopPrice, color.new(color.red, 0))
+            targetLine := setTradeLine(targetLine, targetPrice, color.new(color.lime, 0))
+            array.push(savedStopLines, stopLine)
+            array.push(savedTargetLines, targetLine)
+            trimTradeLines()
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    finishTradeLines()
+    activeStop := na
+    activeTarget := na
+    stopLine := na
+    targetLine := na
+
+tfMismatch = timeframe.in_seconds(timeframe.period) != timeframe.in_seconds(breakoutTf)
+if barstate.islast and tfMismatch
+    label.new(bar_index, high, "Set chart timeframe to " + breakoutTf + " for exact breakout logic.", style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black, force_overlay=true)
+
+plot(showRange and rangeReady ? rangeHigh : na, "Range High", color=color.new(color.white, 0), linewidth=2, style=plot.style_linebr)
+plot(showRange and rangeReady ? rangeLow : na, "Range Low", color=color.new(color.white, 0), linewidth=2, style=plot.style_linebr)
+plot(showAvwap ? avwap : na, "Anchored VWAP", color=color.new(color.yellow, 0), linewidth=2)
+
+plotshape(breakoutDir == 1 and breakoutDir[1] == 0, "Upside Breakout Confirmed", shape.circle, location.abovebar, color=color.new(color.lime, 0), size=size.tiny, text="BO", force_overlay=true)
+plotshape(breakoutDir == -1 and breakoutDir[1] == 0, "Downside Breakout Confirmed", shape.circle, location.belowbar, color=color.new(color.red, 0), size=size.tiny, text="BO", force_overlay=true)
+plotshape(longRetestReject, "Long Retest Entry", shape.triangleup, location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L", force_overlay=true)
+plotshape(shortRetestReject, "Short Retest Entry", shape.triangledown, location.abovebar, color=color.new(color.red, 0), size=size.small, text="S", force_overlay=true)

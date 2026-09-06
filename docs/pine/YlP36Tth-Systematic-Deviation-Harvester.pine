@@ -1,0 +1,166 @@
+//@version=6
+strategy("Systematic Deviation Harvester", overlay=false, pyramiding=100, precision=2, process_orders_on_close=true)
+
+// ========================================================================= // 
+// STRATEGY: Systematic Deviation Harvester
+// AUTHOR: Capitalist_Zach
+// ========================================================================= // 
+
+// ==========================================
+// --- PARAMETER CONFIGURATION PANEL ---
+// ==========================================
+// Exposes user-adjustable strategy settings to the interface.
+
+group_thresholds = "Drawdown Thresholds"
+// Peak-to-trough percentage decline required to trigger the Alpha 1 tier entry.
+threshold_minor  = input.float(5.0,  title="Minor Drop Threshold (%)",          group=group_thresholds)
+// Peak-to-trough percentage decline required to trigger the Alpha 2 tier entry.
+threshold_major  = input.float(10.0, title="Major Drop Threshold (%)",          group=group_thresholds)
+// Toggle switch to enable or completely bypass the high performance α3 pyramid sequence. Default is OFF.
+use_p2_scaling   = input.bool(false, title="Enable Dynamic Scaling", group=group_thresholds, tooltip="If ON, enables the rally reset tracking and unlocks the aggressive α3 tier. If OFF, runs standard α1/α2 logic exactly like original script.")
+// Specific drawdown compression target that permits the Phase 2 gear to engage.
+threshold_reset  = input.float(2.0,  title="Rally Reset Threshold (%)",         group=group_thresholds, tooltip="The % recovery off the lowest low post-α2 required to engage the Phase 2 Expansion.")
+
+group_execution  = "True Compounding Sizing"
+// Percentage allocation of total real-time account equity for the initial scale-in.
+pct_minor        = input.float(5.0,  title="Minor Drop Buy (% of Equity)",      group=group_execution)
+// Percentage allocation of total real-time account equity for the secondary scale-in.
+pct_major        = input.float(10.0, title="Major Drop Buy (% of Equity)",      group=group_execution)
+
+group_profit     = "Unified Compounding Exit"
+// Original default profit target variable used when phase 2 scaling is offline.
+take_profit_pct  = input.float(5.0,  title="Compounding Profit Target (%)",     group=group_profit, tooltip="Profit % required from your AVERAGE cost before selling everything")
+// Maximum allowable peak-to-exit retraction distance in percentage points.
+trail_offset_pct = input.float(1.0,  title="Trailing Offset (%)",               group=group_profit)
+
+// ==========================================
+// --- ENGINE RESOLUTION & CALENDAR BENCHMARKS ---
+// ==========================================
+// Enforces structural execution limits and flags macro-time transitions.
+
+// Verifies that data processing occurs strictly on the 1-Day chart resolution.
+is_daily_chart = timeframe.isdaily and timeframe.multiplier == 1
+// Detects the opening bar of a new calendar year to anchor time-based high tracking.
+is_new_year    = ta.change(year) != 0
+
+// ==========================================
+// --- DRAWDOWN MEASUREMENT SYSTEM ---
+// ==========================================
+// Tracks trailing multi-month high-water marks and monitors percentage contraction.
+
+// Declares state-retaining variables that persist across individual bar cycles.
+var float annual_high          = na     // Active reference peak for the current tracking cycle.
+var bool  minor_triggered      = false  // Execution state flag for the Alpha 1 level order.
+var bool  major_triggered      = false  // Execution state flag for the Alpha 2 level order.
+var bool  p2_scaling_engaged   = false  // Operational flag tracking if the system has shifted into Phase 2.
+var float post_a2_low          = na     // Structural lowest price achieved following the α2 entry execution.
+var bool  a3_triggered         = false  // Execution state flag for the tertiary Alpha 3 order.
+
+// Dynamic Calculation of Alpha 3 Threshold
+threshold_super = threshold_minor + threshold_major
+
+if is_daily_chart
+    if is_new_year
+        // Annual Boundary Transition: Purges previous benchmarks and forces a complete state downshift.
+        annual_high          := high
+        minor_triggered      := false
+        major_triggered      := false
+        p2_scaling_engaged   := false
+        post_a2_low          := na
+        a3_triggered         := false
+    else if na(annual_high) or high > annual_high
+        // High-Water Mark Update: Registers a new, higher peak for the current period.
+        annual_high          := high
+        minor_triggered      := false
+        major_triggered      := false
+
+// Computes current distance from the tracking peak to the latest closing price.
+current_drawdown = is_daily_chart and not na(annual_high) and annual_high > 0 ? 
+                   ((annual_high - close) / annual_high) * 100 : 0.0
+
+// ==========================================
+// --- PHASE 2 STATE TRANSMISSION ENGINE ---
+// ==========================================
+// Monitors post-α2 price action to determine precisely when to unlock the tertiary stage.
+
+if is_daily_chart and strategy.position_size > 0 and use_p2_scaling
+    if major_triggered and not p2_scaling_engaged
+        // Track the lowest low established exclusively after the α2 trigger has been deployed
+        post_a2_low := na(post_a2_low) ? low : math.min(post_a2_low, low)
+        
+        // Phase 2 Trigger: Unlock tier if market close bounces by the reset threshold off the post-α2 low
+        if close >= post_a2_low * (1 + (threshold_reset / 100))
+            p2_scaling_engaged := true
+
+// ==========================================
+// --- RE-ARMAMENT / RE-NEUTRAL HANDLERS ---
+// ==========================================
+// Completely flushes and resets the system mechanics once positions are entirely closed.
+
+if is_daily_chart
+    if strategy.position_size == 0
+        // Complete Downshift Rule: Clears all system memory and returns transmission to neutral.
+        minor_triggered      := false
+        major_triggered      := false
+        p2_scaling_engaged   := false
+        post_a2_low          := na
+        a3_triggered         := false
+
+// ==========================================
+// --- AUTOMATED ENTRY ROUTINES ---
+// ==========================================
+// Converts fractional equity parameters into discrete order contracts and transmits entry requests.
+
+if is_daily_chart
+    // Automatic Sizing Math: Automatically derives the α3 buy amount as the sum of minor + major allocation inputs.
+    pct_super        = pct_minor + pct_major
+
+    // Sizing Engine: Translates nominal equity percentages into live share counts using current closing prices.
+    qty_minor_shares = (strategy.equity * (pct_minor / 100)) / close
+    qty_major_shares = (strategy.equity * (pct_major / 100)) / close
+    qty_super_shares = (strategy.equity * (pct_super / 100)) / close
+
+    // Alpha 1 Entry: Triggers a long-side market execution when minor drawdown floors are crossed.
+    if current_drawdown >= threshold_minor and not minor_triggered
+        strategy.entry("α1", strategy.long, qty=qty_minor_shares)
+        minor_triggered := true
+
+    // Alpha 2 Entry: Triggers a secondary, deep-value long order if selling cascades past major target levels.
+    if current_drawdown >= threshold_major and not major_triggered
+        strategy.entry("α2", strategy.long, qty=qty_major_shares)
+        major_triggered := true
+
+    // Alpha 3 Entry (Phase 2 Activated): Deploys heaviest tier if enabled and market rolls over post-rally.
+    if use_p2_scaling and p2_scaling_engaged and current_drawdown >= threshold_super and not a3_triggered
+        strategy.entry("α3", strategy.long, qty=qty_super_shares)
+        a3_triggered := true
+
+// ==========================================
+// --- TOTAL BASKET SYMMETRICAL LIQUIDATION ---
+// ==========================================
+// Evaluates aggregate exposure metrics and matches profit expectations symmetrically to exposure tiers.
+
+if strategy.position_size > 0
+    // Dynamic Symmetrical Exit Engine: Bypassed if Phase 2 scaling is off to maintain pristine original logic.
+    dynamic_tp_pct = use_p2_scaling ? (a3_triggered ? threshold_super : (major_triggered ? threshold_major : threshold_minor)) : take_profit_pct
+
+    // Dynamic Scale Converter: Maps mathematically calculated percentages directly into minimal price ticks.
+    activation_ticks = strategy.position_avg_price * (dynamic_tp_pct / 100) / syminfo.mintick
+    offset_ticks     = strategy.position_avg_price * (trail_offset_pct / 100) / syminfo.mintick
+
+    // Omega Master Exit: Monopolizes open position management to lock in composite profits.
+    strategy.exit("Ω", trail_points=activation_ticks, trail_offset=offset_ticks)
+
+// ==========================================
+// --- SUB-WINDOW TELEMETRY PLOTS ---
+// ==========================================
+// Generates secondary-pane visual indicator data streams for tracking performance.
+
+// Renders the real-time drawdown landscape as an amber filled area profile.
+plot(is_daily_chart ? current_drawdown : na, title="Systematic Deviation %", color=#E1B333, linewidth=2, style=plot.style_area)
+// Places a yellow dashed reference line indicating the first scale-in barrier.
+hline(threshold_minor, title="Minor Threshold", color=color.yellow, linestyle=hline.style_dashed)
+// Places a solid red reference line indicating the catastrophic drop tracking barrier.
+hline(threshold_major, title="Major Threshold", color=color.red, linestyle=hline.style_solid)
+// Projects a solid orange reference line indicating the Phase 2 Alpha 3 activation drop target (only if enabled).
+plot(use_p2_scaling ? threshold_super : na, title="Super Threshold", color=color.orange, style=plot.style_line, linewidth=1)

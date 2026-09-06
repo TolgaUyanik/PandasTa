@@ -1,0 +1,880 @@
+//@version=6
+// Nasrul Fib + S/R M5 Strategy — entry reversal & breakout di level M30
+// Metodologi: Trend → Level → Signal
+// v4.3: Fib/S/R dari pasangan pivot ZigZag terakhir + leg aktif (bukan SH/SL stale); structure break
+// v4.2: proses bar M30 selesai ([1] saat m30BarNew) + refresh Fib live
+// Referensi: strategies/nasrul/riset.md, strategies/nasrul/evaluasi.md
+strategy("Nasrul Fib SR M5", shorttitle="NasrulM5", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.01, max_lines_count=500, max_labels_count=500, max_boxes_count=100, calc_on_every_tick=false)
+
+// ── Input groups ──
+grpStruct = "Struktur Pasar (Trend → Level)"
+grpZz     = "ZigZag M30 (HTF Engine)"
+grpPat    = "Pola Candlestick"
+grpFlt    = "Filter & Konfluensi"
+grpTrade  = "Money Management"
+grpDisp   = "Tampilan"
+
+// ── HTF M30 ──
+m30Tf        = input.timeframe("30", "Timeframe struktur", group=grpStruct)
+allowChoppy  = input.bool(false, "Izinkan trade saat choppy M30", group=grpStruct)
+allowCounter = input.bool(false, "Izinkan counter-trend", group=grpStruct)
+requireTrendReversal = input.bool(true, "Reversal wajib searah trend M30", group=grpStruct)
+setupMode = input.string("Both", "Mode setup", options=["Both", "Reversal", "Breakout"], group=grpStruct)
+
+// ── ZigZag HTF ──
+devMode   = input.string("Persen", "Mode deviation", options=["Persen", "ATR"], group=grpZz)
+devPct    = input.float(0.75, "Deviation %", minval=0.1, maxval=5.0, step=0.05, group=grpZz)
+atrLenHtf = input.int(14, "Panjang ATR M30", minval=1, group=grpZz)
+atrMult   = input.float(1.5, "ATR × multiplier", minval=0.1, step=0.1, group=grpZz)
+depth     = input.int(12, "Depth (min bar antar pivot)", minval=1, group=grpZz)
+backstep  = input.int(3, "Backstep", minval=1, group=grpZz)
+minLegAtrMult = input.float(1.5, "Min leg Fib (× ATR M30)", minval=0.5, step=0.1, group=grpZz)
+
+// ── Patterns ──
+usePin     = input.bool(true, "Pin bar", group=grpPat)
+useEngulf  = input.bool(true, "Engulfing", group=grpPat)
+useIBBreak = input.bool(true, "Inside bar breakout", group=grpPat)
+useFalseBO = input.bool(true, "False breakout IB", group=grpPat)
+minBarAtr  = input.float(0.25, "Min range bar (× ATR M5)", minval=0.1, step=0.05, group=grpPat)
+
+// ── Filters (evaluasi: toleransi + konfirmasi body/candle) ──
+levelProxMult    = input.float(0.4, "Zona level (× ATR M5)", minval=0.05, step=0.05, group=grpFlt, tooltip="Lebar box visual di chart")
+signalProxMult      = input.float(0.3, "Toleransi sinyal (× ATR M5)", minval=0.05, step=0.05, group=grpFlt, tooltip="Proximity konfirmasi pola di level")
+proximityAlertMult  = input.float(0.3, "Alert proximity M30 (× ATR M5)", minval=0.05, step=0.05, group=grpFlt)
+levelConfirmMode = input.string("Candle", "Konfirmasi level", options=["Candle", "Body", "Close"], group=grpFlt, tooltip="Candle=wick touch | Body=overlap body | Close=close saja")
+minConfluence   = input.int(2, "Min konfluensi reversal", minval=1, maxval=5, group=grpFlt)
+minConfluenceBO = input.int(1, "Min konfluensi breakout", minval=1, maxval=5, group=grpFlt)
+minRR           = input.float(2.0, "Min R:R", minval=1.0, step=0.1, group=grpFlt)
+useMAConfluence = input.bool(true, "MA 8/21 konfluensi", group=grpFlt)
+
+// ── Trade (evaluasi: 3 mode entry) ──
+entryMode = input.string("Market", "Mode entry", options=["Market", "Limit", "Trend-only"], tooltip="Market=close | Limit=50% retrace | Trend-only=close + wajib MA searah", group=grpTrade)
+limitExpireBars = input.int(3, "Limit expire (bar)", minval=1, maxval=20, group=grpTrade)
+riskPct   = input.float(1.0, "Risk % equity", minval=0.1, maxval=5.0, step=0.1, group=grpTrade)
+atrSlPad  = input.float(0.1, "SL padding (× ATR)", minval=0.0, step=0.05, group=grpTrade)
+
+// ── Display ──
+showLabels     = input.bool(true, "Label sinyal", group=grpDisp)
+showLevelLines = input.bool(true, "Garis level M30", group=grpDisp)
+showZones      = input.bool(true, "Zona level M30 (box)", group=grpDisp)
+showFibZones   = input.bool(true, "Zona Fibonacci", group=grpDisp)
+showSRZones    = input.bool(true, "Zona Support / Resistance", group=grpDisp)
+zoneExtend     = input.int(50, "Perpanjang zona (bar ke kanan)", minval=5, maxval=300, group=grpDisp)
+zoneLookback   = input.int(80, "Lebar zona ke kiri (bar)", minval=10, maxval=500, group=grpDisp)
+colZoneFib50   = input.color(color.new(color.yellow, 75), "Warna zona Fib 50%", group=grpDisp)
+colZoneFib618  = input.color(color.new(color.fuchsia, 75), "Warna zona Fib 61.8%", group=grpDisp)
+colZoneSup     = input.color(color.new(color.lime, 78), "Warna zona Support", group=grpDisp)
+colZoneRes     = input.color(color.new(color.red, 78), "Warna zona Resistance", group=grpDisp)
+showZigZag     = input.bool(true, "Garis ZigZag M30", group=grpDisp)
+showPivotLabels = input.bool(true, "Label SH / SL pivot", group=grpDisp)
+showFibDraw    = input.bool(true, "Fib dashed (0–100%)", group=grpDisp)
+showFib382     = input.bool(false, "Level 38.2%", group=grpDisp)
+showFib786     = input.bool(false, "Level 78.6%", group=grpDisp)
+showSRLines    = input.bool(true, "Garis S/R horizontal", group=grpDisp)
+maxSegs        = input.int(40, "Max segmen ZigZag", minval=5, maxval=200, group=grpDisp)
+maxSrLines     = input.int(6, "Max garis S/R", minval=2, maxval=20, group=grpDisp)
+lineWidth      = input.int(2, "Ketebalan garis ZZ", minval=1, maxval=4, group=grpDisp)
+colHigh        = input.color(color.new(color.red, 0), "Warna Swing High", group=grpDisp)
+colLow         = input.color(color.new(color.lime, 0), "Warna Swing Low", group=grpDisp)
+colLine        = input.color(color.new(color.orange, 0), "Warna garis ZZ", group=grpDisp)
+colDrawFib50   = input.color(color.new(color.yellow, 0), "Warna Fib 50% (draw)", group=grpDisp)
+colDrawFib618  = input.color(color.new(color.fuchsia, 0), "Warna Fib 61.8% (draw)", group=grpDisp)
+colDrawSup     = input.color(color.new(color.lime, 30), "Warna S/R Support", group=grpDisp)
+colDrawRes     = input.color(color.new(color.red, 30), "Warna S/R Resistance", group=grpDisp)
+
+TREND_UP    = 1
+TREND_DOWN  = -1
+TREND_CHOP  = 2
+TREND_RANGE = 0
+
+// ── HTF engine inline (monolith — ZigZag + Trend + Fib + S/R) ──
+fibBetween(float a0, float a100, float pct) =>
+    a0 + (a100 - a0) * pct / 100.0
+
+trendLabel(int t) =>
+    t == TREND_UP ? "Uptrend" : t == TREND_DOWN ? "Downtrend" : t == TREND_RANGE ? "Range" : "Choppy"
+
+// Satu langkah engine per bar M30 — dipanggil dari chart (bukan request.security UDF)
+htfStep(float pHigh, float pLow, float pClose, int pBarTime, float pAtrVal, bool useAtrDev, float pDevPct, float pAtrMult, int pDepth, int pBackstep, float pMinLegAtrMult, bool pAllowChoppy, int pMaxLevels, bool pFlipOnBreak) =>
+    var float lastPivotPrice = na
+    var int   lastPivotZzIdx = 0
+    var int   zzDir          = 0
+    var float extremePrice   = na
+    var int   extremeTime    = na
+    var int   extremeZzIdx   = 0
+    var int   zzBarIdx       = 0
+    var float lastSwingHigh      = na
+    var int   lastSwingHighTime  = na
+    var float lastSwingLow       = na
+    var int   lastSwingLowTime   = na
+    var array<float> pivotPrices = array.new_float()
+    var array<int>   pivotTypes  = array.new_int()
+    var int   trendState = TREND_CHOP
+    var float fib50      = na
+    var float fib618     = na
+    var float fib0       = na
+    var float fib100     = na
+    var float fib382     = na
+    var float fib786     = na
+    var array<float> srPrices  = array.new_float()
+    var array<int>   srTypes   = array.new_int()
+    var array<bool>  srFlipped = array.new_bool()
+    int   newPivotType  = 0
+    float newPivotPrice = na
+    int   newPivotTime  = na
+    bool  fibSetNew     = false
+    zzBarIdx += 1
+    // Structure break — percepat flip leg saat harga menembus pivot terakhir
+    if zzDir == 1 and not na(lastSwingLow) and pClose < lastSwingLow
+        zzDir := -1
+        extremePrice := pLow
+        extremeTime := pBarTime
+        extremeZzIdx := zzBarIdx
+    else if zzDir == -1 and not na(lastSwingHigh) and pClose > lastSwingHigh
+        zzDir := 1
+        extremePrice := pHigh
+        extremeTime := pBarTime
+        extremeZzIdx := zzBarIdx
+    if na(lastPivotPrice)
+        lastPivotPrice := pLow
+        lastPivotZzIdx := zzBarIdx
+        zzDir := 1
+        extremePrice := pHigh
+        extremeTime := pBarTime
+        extremeZzIdx := zzBarIdx
+        lastSwingLow := pLow
+        lastSwingLowTime := pBarTime
+    else if zzDir == 1
+        if pHigh >= extremePrice
+            extremePrice := pHigh
+            extremeTime := pBarTime
+            extremeZzIdx := zzBarIdx
+        float devThr = useAtrDev ? pAtrVal * pAtrMult : extremePrice * pDevPct / 100.0
+        float drop = extremePrice - pLow
+        bool passDepth = na(lastPivotPrice) ? true : zzBarIdx - lastPivotZzIdx >= pDepth
+        bool passBack = na(lastPivotPrice) or math.abs(extremeZzIdx - lastPivotZzIdx) >= pBackstep
+        if drop >= devThr and passDepth and passBack
+            float shPrice = extremePrice
+            array.push(pivotPrices, shPrice)
+            array.push(pivotTypes, 1)
+            while array.size(pivotPrices) > 41
+                array.shift(pivotPrices)
+                array.shift(pivotTypes)
+            lastSwingHigh := shPrice
+            lastSwingHighTime := extremeTime
+            lastPivotPrice := shPrice
+            lastPivotZzIdx := zzBarIdx
+            zzDir := -1
+            extremePrice := pLow
+            extremeTime := pBarTime
+            extremeZzIdx := zzBarIdx
+            float sh1 = na
+            float sh2 = na
+            float sl1 = na
+            float sl2 = na
+            int shFound = 0
+            int slFound = 0
+            int pSz = array.size(pivotTypes)
+            if pSz > 0
+                for i = pSz - 1 to 0
+                    int pt = array.get(pivotTypes, i)
+                    if pt == 1
+                        shFound += 1
+                        if shFound == 1
+                            sh1 := array.get(pivotPrices, i)
+                        else if shFound == 2
+                            sh2 := array.get(pivotPrices, i)
+                    else if pt == -1
+                        slFound += 1
+                        if slFound == 1
+                            sl1 := array.get(pivotPrices, i)
+                        else if slFound == 2
+                            sl2 := array.get(pivotPrices, i)
+            trendState := TREND_CHOP
+            if not na(sh1) and not na(sh2) and not na(sl1) and not na(sl2)
+                bool hh = sh1 > sh2
+                bool hl = sl1 > sl2
+                bool lh = sh1 < sh2
+                bool ll = sl1 < sl2
+                if hh and hl
+                    trendState := TREND_UP
+                else if lh and ll
+                    trendState := TREND_DOWN
+                else if not hh and not lh and not hl and not ll
+                    trendState := TREND_CHOP
+                else
+                    trendState := TREND_RANGE
+            array.push(srPrices, shPrice)
+            array.push(srTypes, 1)
+            array.push(srFlipped, false)
+            while array.size(srPrices) > pMaxLevels
+                array.shift(srPrices)
+                array.shift(srTypes)
+                array.shift(srFlipped)
+            newPivotType := 1
+            newPivotPrice := shPrice
+            newPivotTime := lastSwingHighTime
+            if not na(lastSwingHigh) and not na(lastSwingLow)
+                float legUp = math.abs(lastSwingHigh - lastSwingLow)
+                if legUp >= pAtrVal * pMinLegAtrMult and (pAllowChoppy or trendState != TREND_CHOP)
+                    float f0 = trendState == TREND_UP or (trendState == TREND_RANGE and lastSwingHighTime > lastSwingLowTime) ? lastSwingHigh : lastSwingLow
+                    float f100 = trendState == TREND_UP or (trendState == TREND_RANGE and lastSwingHighTime > lastSwingLowTime) ? lastSwingLow : lastSwingHigh
+                    fib0 := f0
+                    fib100 := f100
+                    fib382 := fibBetween(f0, f100, 38.2)
+                    fib50 := fibBetween(f0, f100, 50.0)
+                    fib618 := fibBetween(f0, f100, 61.8)
+                    fib786 := fibBetween(f0, f100, 78.6)
+                    fibSetNew := true
+    else if zzDir == -1
+        if pLow <= extremePrice
+            extremePrice := pLow
+            extremeTime := pBarTime
+            extremeZzIdx := zzBarIdx
+        float devThrDn = useAtrDev ? pAtrVal * pAtrMult : extremePrice * pDevPct / 100.0
+        float rise = pHigh - extremePrice
+        bool passDepthDn = na(lastPivotPrice) ? true : zzBarIdx - lastPivotZzIdx >= pDepth
+        bool passBackDn = na(lastPivotPrice) or math.abs(extremeZzIdx - lastPivotZzIdx) >= pBackstep
+        if rise >= devThrDn and passDepthDn and passBackDn
+            float slPrice = extremePrice
+            array.push(pivotPrices, slPrice)
+            array.push(pivotTypes, -1)
+            while array.size(pivotPrices) > 41
+                array.shift(pivotPrices)
+                array.shift(pivotTypes)
+            lastSwingLow := slPrice
+            lastSwingLowTime := extremeTime
+            lastPivotPrice := slPrice
+            lastPivotZzIdx := zzBarIdx
+            zzDir := 1
+            extremePrice := pHigh
+            extremeTime := pBarTime
+            extremeZzIdx := zzBarIdx
+            float sh1d = na
+            float sh2d = na
+            float sl1d = na
+            float sl2d = na
+            int shFoundD = 0
+            int slFoundD = 0
+            int pSzD = array.size(pivotTypes)
+            if pSzD > 0
+                for i = pSzD - 1 to 0
+                    int ptD = array.get(pivotTypes, i)
+                    if ptD == 1
+                        shFoundD += 1
+                        if shFoundD == 1
+                            sh1d := array.get(pivotPrices, i)
+                        else if shFoundD == 2
+                            sh2d := array.get(pivotPrices, i)
+                    else if ptD == -1
+                        slFoundD += 1
+                        if slFoundD == 1
+                            sl1d := array.get(pivotPrices, i)
+                        else if slFoundD == 2
+                            sl2d := array.get(pivotPrices, i)
+            trendState := TREND_CHOP
+            if not na(sh1d) and not na(sh2d) and not na(sl1d) and not na(sl2d)
+                bool hhD = sh1d > sh2d
+                bool hlD = sl1d > sl2d
+                bool lhD = sh1d < sh2d
+                bool llD = sl1d < sl2d
+                if hhD and hlD
+                    trendState := TREND_UP
+                else if lhD and llD
+                    trendState := TREND_DOWN
+                else if not hhD and not lhD and not hlD and not llD
+                    trendState := TREND_CHOP
+                else
+                    trendState := TREND_RANGE
+            array.push(srPrices, slPrice)
+            array.push(srTypes, -1)
+            array.push(srFlipped, false)
+            while array.size(srPrices) > pMaxLevels
+                array.shift(srPrices)
+                array.shift(srTypes)
+                array.shift(srFlipped)
+            newPivotType := -1
+            newPivotPrice := slPrice
+            newPivotTime := lastSwingLowTime
+            if not na(lastSwingHigh) and not na(lastSwingLow)
+                float legDn = math.abs(lastSwingHigh - lastSwingLow)
+                if legDn >= pAtrVal * pMinLegAtrMult and (pAllowChoppy or trendState != TREND_CHOP)
+                    float f0d = trendState == TREND_UP or (trendState == TREND_RANGE and lastSwingHighTime > lastSwingLowTime) ? lastSwingHigh : lastSwingLow
+                    float f100d = trendState == TREND_UP or (trendState == TREND_RANGE and lastSwingHighTime > lastSwingLowTime) ? lastSwingLow : lastSwingHigh
+                    fib0 := f0d
+                    fib100 := f100d
+                    fib382 := fibBetween(f0d, f100d, 38.2)
+                    fib50 := fibBetween(f0d, f100d, 50.0)
+                    fib618 := fibBetween(f0d, f100d, 61.8)
+                    fib786 := fibBetween(f0d, f100d, 78.6)
+                    fibSetNew := true
+    if pFlipOnBreak and array.size(srPrices) > 0
+        for i = 0 to array.size(srPrices) - 1
+            if not array.get(srFlipped, i)
+                float lvl = array.get(srPrices, i)
+                int tp = array.get(srTypes, i)
+                bool broken = tp == -1 ? pClose < lvl : pClose > lvl
+                if broken
+                    array.set(srFlipped, i, true)
+                    array.set(srTypes, i, tp == -1 ? 1 : -1)
+    float rtSh1 = na
+    float rtSh2 = na
+    float rtSl1 = na
+    float rtSl2 = na
+    int rtShF = 0
+    int rtSlF = 0
+    int rtSz = array.size(pivotTypes)
+    if rtSz > 0
+        for i = rtSz - 1 to 0
+            int rtPt = array.get(pivotTypes, i)
+            if rtPt == 1
+                rtShF += 1
+                if rtShF == 1
+                    rtSh1 := array.get(pivotPrices, i)
+                else if rtShF == 2
+                    rtSh2 := array.get(pivotPrices, i)
+            else if rtPt == -1
+                rtSlF += 1
+                if rtSlF == 1
+                    rtSl1 := array.get(pivotPrices, i)
+                else if rtSlF == 2
+                    rtSl2 := array.get(pivotPrices, i)
+    if not na(rtSh1) and not na(rtSh2) and not na(rtSl1) and not na(rtSl2)
+        bool rtHh = rtSh1 > rtSh2
+        bool rtHl = rtSl1 > rtSl2
+        bool rtLh = rtSh1 < rtSh2
+        bool rtLl = rtSl1 < rtSl2
+        if rtHh and rtHl
+            trendState := TREND_UP
+        else if rtLh and rtLl
+            trendState := TREND_DOWN
+        else if not rtHh and not rtLh and not rtHl and not rtLl
+            trendState := TREND_CHOP
+        else
+            trendState := TREND_RANGE
+    // Fib + leg aktif dari pasangan pivot terakhir (riset: leg impulsif ZigZag, bukan last SH + last SL terpisah)
+    float actLegHi = na
+    float actLegLo = na
+    int nPv = array.size(pivotPrices)
+    if nPv >= 2
+        float pv1 = array.get(pivotPrices, nPv - 2)
+        float pv2 = array.get(pivotPrices, nPv - 1)
+        actLegHi := math.max(pv1, pv2)
+        actLegLo := math.min(pv1, pv2)
+        if zzDir == 1
+            actLegHi := math.max(actLegHi, pHigh)
+        if zzDir == -1
+            actLegLo := math.min(actLegLo, pLow)
+    else if nPv == 1
+        float pv0 = array.get(pivotPrices, 0)
+        int tv0 = array.get(pivotTypes, 0)
+        if tv0 == -1
+            actLegLo := pv0
+            actLegHi := zzDir == 1 ? pHigh : pv0
+        else
+            actLegHi := pv0
+            actLegLo := zzDir == -1 ? pLow : pv0
+    if not na(actLegHi) and not na(actLegLo)
+        float legSz = math.abs(actLegHi - actLegLo)
+        if legSz >= pAtrVal * pMinLegAtrMult
+            bool upImpulse = zzDir == 1
+            float f0v = upImpulse ? actLegHi : actLegLo
+            float f100v = upImpulse ? actLegLo : actLegHi
+            fib0 := f0v
+            fib100 := f100v
+            fib382 := fibBetween(f0v, f100v, 38.2)
+            fib50 := fibBetween(f0v, f100v, 50.0)
+            fib618 := fibBetween(f0v, f100v, 61.8)
+            fib786 := fibBetween(f0v, f100v, 78.6)
+    [lastSwingHigh, lastSwingLow, fib50, fib618, trendState, newPivotType, newPivotPrice, fibSetNew, zzDir, fib0, fib100, fib382, fib786, newPivotTime, actLegHi, actLegLo]
+
+useAtrDev = devMode == "ATR"
+m30High  = request.security(syminfo.tickerid, m30Tf, high, barmerge.gaps_off, barmerge.lookahead_off)
+m30Low   = request.security(syminfo.tickerid, m30Tf, low, barmerge.gaps_off, barmerge.lookahead_off)
+m30Close = request.security(syminfo.tickerid, m30Tf, close, barmerge.gaps_off, barmerge.lookahead_off)
+m30Time  = request.security(syminfo.tickerid, m30Tf, time, barmerge.gaps_off, barmerge.lookahead_off)
+m30Atr   = request.security(syminfo.tickerid, m30Tf, ta.atr(atrLenHtf), barmerge.gaps_off, barmerge.lookahead_off)
+
+m30BarNew = ta.change(m30Time) != 0
+// Saat m30BarNew, security mengembalikan bar M30 *baru* (1 candle M5). Feed bar M30 *selesai* via [1].
+processDraw = barstate.isconfirmed and m30BarNew
+m30ProcHigh  = m30High[1]
+m30ProcLow   = m30Low[1]
+m30ProcClose = m30Close[1]
+m30ProcTime  = m30Time[1]
+m30ProcAtr   = m30Atr[1]
+
+var float m30LastSH   = na
+var float m30LastSL   = na
+var float m30Fib50    = na
+var float m30Fib618   = na
+var int   m30Trend    = TREND_CHOP
+var int   m30NewPt    = 0
+var float m30NewPp    = na
+var bool  m30FibNew   = false
+var int   m30ZzDir    = 0
+var float m30F0       = na
+var float m30F100     = na
+var float m30F382     = na
+var float m30F786     = na
+var int   m30NewPTime = na
+var float m30LegHigh  = na
+var float m30LegLow   = na
+
+if processDraw and not na(m30ProcAtr) and not na(m30ProcTime)
+    [snapSH, snapSL, snapF50, snapF618, snapTrend, newPt, newPp, snapFibNew, snapZzDir, snapF0, snapF100, snapF382, snapF786, newPTime, snapLegHi, snapLegLo] = htfStep(m30ProcHigh, m30ProcLow, m30ProcClose, m30ProcTime, m30ProcAtr, useAtrDev, devPct, atrMult, depth, backstep, minLegAtrMult, true, maxSrLines, true)
+    m30LastSH := snapSH
+    m30LastSL := snapSL
+    m30Fib50 := snapF50
+    m30Fib618 := snapF618
+    m30Trend := snapTrend
+    m30NewPt := newPt
+    m30NewPp := newPp
+    m30FibNew := snapFibNew
+    m30ZzDir := snapZzDir
+    m30F0 := snapF0
+    m30F100 := snapF100
+    m30F382 := snapF382
+    m30F786 := snapF786
+    m30NewPTime := newPTime
+    m30LegHigh := snapLegHi
+    m30LegLow := snapLegLo
+else
+    m30NewPt := 0
+    m30FibNew := false
+
+// Level display — leg aktif M30 + perpanjang extreme bar M30 berjalan
+var float dispFib50  = na
+var float dispFib618 = na
+var float dispSH     = na
+var float dispSL     = na
+
+updateDisplayLevels() =>
+    float outF50  = m30Fib50
+    float outF618 = m30Fib618
+    float outSH   = m30LastSH
+    float outSL   = m30LastSL
+    if not na(m30LegHigh) and not na(m30LegLow) and not na(m30Atr)
+        float liveHi = m30ZzDir == 1 ? math.max(m30LegHigh, m30High) : m30LegHigh
+        float liveLo = m30ZzDir == -1 ? math.min(m30LegLow, m30Low) : m30LegLow
+        if liveHi < liveLo
+            liveHi := math.max(m30High, m30LastSH, m30LegHigh)
+            liveLo := math.min(m30Low, m30LastSL, m30LegLow)
+        float legSz = math.abs(liveHi - liveLo)
+        if legSz >= m30Atr * minLegAtrMult
+            bool upImpulse = m30ZzDir == 1
+            float f0 = upImpulse ? liveHi : liveLo
+            float f100 = upImpulse ? liveLo : liveHi
+            outF50 := fibBetween(f0, f100, 50.0)
+            outF618 := fibBetween(f0, f100, 61.8)
+    [outF50, outF618, outSH, outSL]
+
+[liveF50, liveF618, liveSH, liveSL] = updateDisplayLevels()
+if not na(liveF50)
+    dispFib50 := liveF50
+if not na(liveF618)
+    dispFib618 := liveF618
+if not na(liveSH)
+    dispSH := liveSH
+if not na(liveSL)
+    dispSL := liveSL
+
+// ── HTF visual drawing (ZZ / Fib dashed / S/R lines) ──
+var array<float> drawPivotPrices = array.new_float()
+var array<int>   drawPivotTimes  = array.new_int()
+var array<line>  zzLines         = array.new_line()
+var array<line>  fibLines        = array.new_line()
+var array<label> fibLabels       = array.new_label()
+var array<line>  srLines         = array.new_line()
+var int          fibAnchorTime   = na
+
+clearFibDrawings() =>
+    while array.size(fibLines) > 0
+        line.delete(array.pop(fibLines))
+    while array.size(fibLabels) > 0
+        label.delete(array.pop(fibLabels))
+
+drawFibLevel(float lvl, string lbl, color col, int startTime) =>
+    if showFibDraw and not na(lvl) and not na(startTime)
+        int endTime = time + timeframe.in_seconds(m30Tf) * 20 * 1000
+        array.push(fibLines, line.new(startTime, lvl, endTime, lvl, xloc=xloc.bar_time, color=col, width=1, style=line.style_dashed))
+        array.push(fibLabels, label.new(time, lvl, lbl + " " + str.tostring(lvl, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(col, 70), textcolor=color.white, size=size.tiny))
+
+drawPivotSegment(float pPrice, int pTime, int pType) =>
+    array.push(drawPivotPrices, pPrice)
+    array.push(drawPivotTimes, pTime)
+    if array.size(drawPivotPrices) >= 2 and showZigZag
+        int prevTime = array.get(drawPivotTimes, array.size(drawPivotTimes) - 2)
+        float prevPrice = array.get(drawPivotPrices, array.size(drawPivotPrices) - 2)
+        array.push(zzLines, line.new(prevTime, prevPrice, pTime, pPrice, xloc=xloc.bar_time, color=colLine, width=lineWidth))
+        while array.size(zzLines) > maxSegs
+            line.delete(array.shift(zzLines))
+    if showPivotLabels and not na(pTime)
+        string lblText = pType == 1 ? "SH\n" + str.tostring(pPrice, format.mintick) : "SL\n" + str.tostring(pPrice, format.mintick)
+        color lblCol = pType == 1 ? colHigh : colLow
+        labelStyle = pType == 1 ? label.style_label_down : label.style_label_up
+        label.new(pTime, pPrice, lblText, xloc=xloc.bar_time, style=labelStyle, color=lblCol, textcolor=color.white, size=size.small)
+    while array.size(drawPivotPrices) > maxSegs + 1
+        array.shift(drawPivotPrices)
+        array.shift(drawPivotTimes)
+
+if processDraw
+    if m30NewPt != 0 and not na(m30NewPp) and not na(m30NewPTime)
+        drawPivotSegment(m30NewPp, m30NewPTime, m30NewPt)
+        if showSRLines
+            color colSr = m30NewPt == 1 ? colDrawRes : colDrawSup
+            int srEndTime = time + timeframe.in_seconds(m30Tf) * 30 * 1000
+            array.push(srLines, line.new(m30NewPTime, m30NewPp, srEndTime, m30NewPp, xloc=xloc.bar_time, color=colSr, width=1))
+            while array.size(srLines) > maxSrLines
+                line.delete(array.shift(srLines))
+    if m30FibNew and showFibDraw and not na(m30NewPTime)
+        fibAnchorTime := m30NewPTime
+        clearFibDrawings()
+        drawFibLevel(m30F0, "0%", color.new(color.blue, 50), fibAnchorTime)
+        if showFib382
+            drawFibLevel(m30F382, "38.2%", color.new(color.teal, 50), fibAnchorTime)
+        drawFibLevel(m30Fib50, "50%", colDrawFib50, fibAnchorTime)
+        drawFibLevel(m30Fib618, "61.8%", colDrawFib618, fibAnchorTime)
+        if showFib786
+            drawFibLevel(m30F786, "78.6%", color.new(color.orange, 50), fibAnchorTime)
+        drawFibLevel(m30F100, "100%", color.new(color.blue, 50), fibAnchorTime)
+
+// ── M5 helpers ──
+atr5 = ta.atr(14)
+levelZone  = atr5 * levelProxMult
+signalZone = atr5 * signalProxMult
+ema8  = ta.ema(close, 8)
+ema21 = ta.ema(close, 21)
+
+body      = math.abs(close - open)
+rangeBar  = high - low
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+isBull    = close > open
+isBear    = close < open
+barOk     = rangeBar >= atr5 * minBarAtr
+confirmed = barstate.isconfirmed
+
+maTrendOkLong  = ema8 > ema21
+maTrendOkShort = ema8 < ema21
+entryGateLong  = entryMode != "Trend-only" or maTrendOkLong
+entryGateShort = entryMode != "Trend-only" or maTrendOkShort
+
+// ── Level proximity (evaluasi: body / candle / close) ──
+atLevel(float lvl) =>
+    bool hit = false
+    if not na(lvl)
+        if levelConfirmMode == "Close"
+            hit := math.abs(close - lvl) <= signalZone
+        else if levelConfirmMode == "Body"
+            hit := math.max(open, close) >= lvl - signalZone and math.min(open, close) <= lvl + signalZone
+        else
+            hit := low <= lvl + signalZone and high >= lvl - signalZone
+    hit
+
+atFib50  = atLevel(dispFib50)
+atFib618 = atLevel(dispFib618)
+atSRSup  = atLevel(dispSL)
+atSRRes  = atLevel(dispSH)
+
+atLevelLong  = atFib50 or atFib618 or atSRSup
+atLevelShort = atFib50 or atFib618 or atSRRes
+
+// ── Zona level M30 ──
+var box zoneFib50  = na
+var box zoneFib618 = na
+var box zoneSup    = na
+var box zoneRes    = na
+
+upsertZone(box bx, float lvl, color bgCol, color borderCol, string lbl) =>
+    box result = bx
+    if showZones and not na(lvl)
+        int leftB = math.max(0, bar_index - zoneLookback)
+        int rightB = bar_index + zoneExtend
+        float top = lvl + levelZone
+        float bot = lvl - levelZone
+        if na(result)
+            result := box.new(leftB, top, rightB, bot, xloc=xloc.bar_index, border_color=borderCol, bgcolor=bgCol, border_width=1, text=lbl, text_size=size.small, text_color=borderCol, text_halign=text.align_right, text_valign=text.align_center)
+        else
+            box.set_left(result, leftB)
+            box.set_top(result, top)
+            box.set_right(result, rightB)
+            box.set_bottom(result, bot)
+            box.set_text(result, lbl)
+    else if not na(result)
+        box.delete(result)
+        result := na
+    result
+
+if confirmed or barstate.islast
+    zoneFib50 := upsertZone(zoneFib50, showFibZones ? dispFib50 : na, colZoneFib50, color.new(color.yellow, 30), "Fib 50%")
+    zoneFib618 := upsertZone(zoneFib618, showFibZones ? dispFib618 : na, colZoneFib618, color.new(color.fuchsia, 30), "Fib 61.8%")
+    zoneSup := upsertZone(zoneSup, showSRZones ? dispSL : na, colZoneSup, color.new(color.lime, 30), "Support M30")
+    zoneRes := upsertZone(zoneRes, showSRZones ? dispSH : na, colZoneRes, color.new(color.red, 30), "Resistance M30")
+
+plot(showLevelLines ? dispFib50 : na, "Fib 50% M30", color=color.new(color.yellow, 40), linewidth=1, style=plot.style_linebr)
+plot(showLevelLines ? dispFib618 : na, "Fib 61.8% M30", color=color.new(color.fuchsia, 40), linewidth=1, style=plot.style_linebr)
+plot(showLevelLines ? dispSL : na, "Support M30", color=color.new(color.lime, 50), linewidth=1, style=plot.style_linebr)
+plot(showLevelLines ? dispSH : na, "Resistance M30", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+
+// ── Pattern engine ──
+pinBarBull = barOk and lowerWick >= body * 2 and upperWick <= body * 0.5 and rangeBar > 0
+pinBarBear = barOk and upperWick >= body * 2 and lowerWick <= body * 0.5 and rangeBar > 0
+
+engulfBull = barOk and isBull and isBear[1] and close >= open[1] and open <= close[1]
+engulfBear = barOk and isBear and isBull[1] and close <= open[1] and open >= close[1]
+
+insideBar1 = high[1] < high[2] and low[1] > low[2]
+motherHigh = high[2]
+motherLow  = low[2]
+
+ibBreakBull = barOk and insideBar1 and close > motherHigh and close[1] <= motherHigh
+ibBreakBear = barOk and insideBar1 and close < motherLow and close[1] >= motherLow
+
+falseBreakBull = barOk and insideBar1 and low < motherLow and close > motherLow and close < motherHigh
+falseBreakBear = barOk and insideBar1 and high > motherHigh and close < motherHigh and close > motherLow
+
+patBullReversal = (usePin and pinBarBull) or (useEngulf and engulfBull) or (useFalseBO and falseBreakBull)
+patBearReversal = (usePin and pinBarBear) or (useEngulf and engulfBear) or (useFalseBO and falseBreakBear)
+patBullBreakout = useIBBreak and ibBreakBull
+patBearBreakout = useIBBreak and ibBreakBear
+
+// ── Confluence scorer ──
+scoreLong(bool forBreakout) =>
+    int s = 0
+    if atFib50 or atFib618
+        s += 1
+    if atSRSup
+        s += 1
+    if atFib50 and atSRSup
+        s += 1
+    if useMAConfluence and ema8 > ema21
+        s += 1
+    if forBreakout and not na(m30LastSH) and close > m30LastSH
+        s += 1
+    s
+
+scoreShort(bool forBreakout) =>
+    int s = 0
+    if atFib50 or atFib618
+        s += 1
+    if atSRRes
+        s += 1
+    if atFib618 and atSRRes
+        s += 1
+    if useMAConfluence and ema8 < ema21
+        s += 1
+    if forBreakout and not na(m30LastSL) and close < m30LastSL
+        s += 1
+    s
+
+trendOkLong() =>
+    allowCounter or m30Trend == TREND_UP
+
+trendOkShort() =>
+    allowCounter or m30Trend == TREND_DOWN
+
+revTrendLong() =>
+    not requireTrendReversal or allowCounter or m30Trend == TREND_UP or m30Trend == TREND_RANGE
+
+revTrendShort() =>
+    not requireTrendReversal or allowCounter or m30Trend == TREND_DOWN or m30Trend == TREND_RANGE
+
+choppyOk() =>
+    allowChoppy or m30Trend != TREND_CHOP
+
+breakoutLong  = not na(m30LastSH) and close > m30LastSH and close[1] <= m30LastSH and barOk
+breakoutShort = not na(m30LastSL) and close < m30LastSL and close[1] >= m30LastSL and barOk
+
+// ── SL / TP / Entry ──
+calcLongSL(string pat) =>
+    float sl = na
+    pad = atr5 * atrSlPad
+    if pat == "Pin" or pat == "Engulf"
+        sl := low - pad
+    else if insideBar1
+        sl := motherLow - pad
+    else
+        sl := low - pad
+    sl
+
+calcShortSL(string pat) =>
+    float sl = na
+    pad = atr5 * atrSlPad
+    if pat == "Pin" or pat == "Engulf"
+        sl := high + pad
+    else if insideBar1
+        sl := motherHigh + pad
+    else
+        sl := high + pad
+    sl
+
+calcLongTP(float entry, float sl) =>
+    float tp = na
+    if not na(m30LastSH) and m30LastSH > entry
+        tp := m30LastSH
+    if na(tp) or tp <= entry
+        tp := entry + math.abs(entry - sl) * minRR
+    tp
+
+calcShortTP(float entry, float sl) =>
+    float tp = na
+    if not na(m30LastSL) and m30LastSL < entry
+        tp := m30LastSL
+    if na(tp) or tp >= entry
+        tp := entry - math.abs(entry - sl) * minRR
+    tp
+
+validRR(float entry, float sl, float tp) =>
+    risk = math.abs(entry - sl)
+    reward = math.abs(tp - entry)
+    risk > 0 and reward >= risk * minRR
+
+getPatName(bool pin, bool engulf, bool ib, bool fb) =>
+    pin ? "Pin" : engulf ? "Engulf" : fb ? "FalseBO" : ib ? "IB Break" : "—"
+
+calcEntryPx(bool isLong, string pat) =>
+    float px = close
+    if entryMode == "Limit"
+        if pat == "Pin"
+            px := isLong ? low + rangeBar * 0.5 : high - rangeBar * 0.5
+        else if pat == "Engulf"
+            px := (high + low) / 2.0
+        else if pat == "FalseBO" or pat == "IB Break"
+            px := (motherHigh + motherLow) / 2.0
+    px
+
+calcQty(float entry, float sl) =>
+    riskCash = strategy.equity * riskPct / 100.0
+    riskDist = math.abs(entry - sl)
+    riskDist > 0 ? riskCash / riskDist : na
+
+// ── Signal assembly (fix: reversal range allowed, breakout strict trend) ──
+var string lastSig = "—"
+var int longLimitBar  = na
+var int shortLimitBar = na
+
+bool revLong = (setupMode == "Both" or setupMode == "Reversal") and patBullReversal and atLevelLong
+bool revShort = (setupMode == "Both" or setupMode == "Reversal") and patBearReversal and atLevelShort
+bool boLong = (setupMode == "Both" or setupMode == "Breakout") and (patBullBreakout or breakoutLong)
+bool boShort = (setupMode == "Both" or setupMode == "Breakout") and (patBearBreakout or breakoutShort)
+
+revLongOk  = revLong and revTrendLong()
+revShortOk = revShort and revTrendShort()
+boLongOk   = boLong and trendOkLong()
+boShortOk  = boShort and trendOkShort()
+
+longPatName  = getPatName(pinBarBull, engulfBull, ibBreakBull, falseBreakBull)
+shortPatName = getPatName(pinBarBear, engulfBear, ibBreakBear, falseBreakBear)
+
+longConfRev  = scoreLong(false)
+shortConfRev = scoreShort(false)
+longConfBO   = scoreLong(true)
+shortConfBO  = scoreShort(true)
+
+longConf  = revLongOk ? longConfRev : longConfBO
+shortConf = revShortOk ? shortConfRev : shortConfBO
+
+longMinConf  = revLongOk ? minConfluence : minConfluenceBO
+shortMinConf = revShortOk ? minConfluence : minConfluenceBO
+
+longSetup  = confirmed and choppyOk() and longConf >= longMinConf and (revLongOk or boLongOk) and entryGateLong
+shortSetup = confirmed and choppyOk() and shortConf >= shortMinConf and (revShortOk or boShortOk) and entryGateShort
+
+longSignal  = longSetup and strategy.position_size == 0
+shortSignal = shortSetup and strategy.position_size == 0
+
+// Limit expire
+if entryMode == "Limit" and strategy.position_size == 0
+    if not na(longLimitBar) and bar_index - longLimitBar >= limitExpireBars
+        strategy.cancel("Long")
+        longLimitBar := na
+    if not na(shortLimitBar) and bar_index - shortLimitBar >= limitExpireBars
+        strategy.cancel("Short")
+        shortLimitBar := na
+
+if strategy.position_size != 0
+    longLimitBar := na
+    shortLimitBar := na
+
+// ── Execute trades ──
+if longSignal
+    entryPx = calcEntryPx(true, longPatName)
+    slPx = calcLongSL(longPatName)
+    tpPx = calcLongTP(entryPx, slPx)
+    qty = calcQty(entryPx, slPx)
+    if validRR(entryPx, slPx, tpPx) and not na(qty) and qty > 0
+        if entryMode == "Limit"
+            strategy.entry("Long", strategy.long, limit=entryPx, qty=qty, comment="BUY " + longPatName)
+            longLimitBar := bar_index
+        else
+            strategy.entry("Long", strategy.long, qty=qty, comment="BUY " + longPatName)
+        strategy.exit("Long Exit", "Long", stop=slPx, limit=tpPx)
+        lastSig := "BUY " + longPatName + " Konf:" + str.tostring(longConf) + " " + entryMode
+        if showLabels
+            label.new(bar_index, low, "▲ BUY\n" + longPatName + "\nKonf:" + str.tostring(longConf) + "\n" + entryMode, style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if shortSignal
+    entryPx = calcEntryPx(false, shortPatName)
+    slPx = calcShortSL(shortPatName)
+    tpPx = calcShortTP(entryPx, slPx)
+    qty = calcQty(entryPx, slPx)
+    if validRR(entryPx, slPx, tpPx) and not na(qty) and qty > 0
+        if entryMode == "Limit"
+            strategy.entry("Short", strategy.short, limit=entryPx, qty=qty, comment="SELL " + shortPatName)
+            shortLimitBar := bar_index
+        else
+            strategy.entry("Short", strategy.short, qty=qty, comment="SELL " + shortPatName)
+        strategy.exit("Short Exit", "Short", stop=slPx, limit=tpPx)
+        lastSig := "SELL " + shortPatName + " Konf:" + str.tostring(shortConf) + " " + entryMode
+        if showLabels
+            label.new(bar_index, high, "▼ SELL\n" + shortPatName + "\nKonf:" + str.tostring(shortConf) + "\n" + entryMode, style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// ── Status table ──
+proxZoneAlert = atr5 * proximityAlertMult
+nearFib50Alert  = not na(dispFib50) and math.abs(close - dispFib50) <= proxZoneAlert
+nearFib618Alert = not na(dispFib618) and math.abs(close - dispFib618) <= proxZoneAlert
+nearSRAlert     = (not na(dispSH) and math.abs(close - dispSH) <= proxZoneAlert) or (not na(dispSL) and math.abs(close - dispSL) <= proxZoneAlert)
+proxTxt = nearFib50Alert ? "Fib50" : nearFib618Alert ? "Fib61.8" : nearSRAlert ? "S/R" : "—"
+legTxt = m30ZzDir == 1 ? "Leg naik" : m30ZzDir == -1 ? "Leg turun" : "—"
+
+var table tbl = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, "Nasrul M5 v4.3", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, trendLabel(m30Trend), text_color=m30Trend == TREND_UP ? colLow : m30Trend == TREND_DOWN ? colHigh : color.orange, text_size=size.small)
+    table.cell(tbl, 0, 1, "Fib 50%", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, na(dispFib50) ? "—" : str.tostring(dispFib50, format.mintick), text_color=color.yellow, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Fib 61.8%", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, na(dispFib618) ? "—" : str.tostring(dispFib618, format.mintick), text_color=color.fuchsia, text_size=size.tiny)
+    table.cell(tbl, 0, 3, "SH / SL", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, (na(dispSH) ? "—" : str.tostring(dispSH, format.mintick)) + " / " + (na(dispSL) ? "—" : str.tostring(dispSL, format.mintick)), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "Leg M30", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, legTxt, text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 5, "Proximity", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 5, proxTxt, text_color=nearFib50Alert or nearFib618Alert or nearSRAlert ? color.yellow : color.gray, text_size=size.tiny)
+    table.cell(tbl, 0, 6, "Konfluensi L/S", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 6, str.tostring(longConfRev) + "/" + str.tostring(shortConfRev), text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 7, "Konfirmasi", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 7, levelConfirmMode, text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 8, "Entry mode", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 8, entryMode, text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 0, 9, "Last signal", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 9, lastSig, text_color=color.white, text_size=size.tiny)
+    inZone = atLevelLong or atLevelShort ? "Di zona" : "—"
+    table.cell(tbl, 0, 10, "Harga", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 10, inZone, text_color=atLevelLong or atLevelShort ? color.yellow : color.gray, text_size=size.tiny)
+    statTxt = choppyOk() ? "Ready" : "Blocked choppy"
+    table.cell(tbl, 0, 11, "Status", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 11, statTxt, text_color=choppyOk() ? color.lime : color.red, text_size=size.tiny)
+
+newSwingHighM30 = processDraw and m30NewPt == 1
+newSwingLowM30  = processDraw and m30NewPt == -1
+
+alertcondition(longSetup, "Nasrul Buy M5", "Nasrul M5: BUY signal")
+alertcondition(shortSetup, "Nasrul Sell M5", "Nasrul M5: SELL signal")
+alertcondition(newSwingHighM30, "Swing High M30", "Nasrul: Swing High M30 baru")
+alertcondition(newSwingLowM30, "Swing Low M30", "Nasrul: Swing Low M30 baru")
+alertcondition(processDraw and m30FibNew, "Fib baru terbentuk", "Nasrul: Set Fibonacci M30 baru")
+alertcondition(nearFib50Alert, "Mendekati Fib 50%", "Nasrul: Harga mendekati Fib 50% M30")
+alertcondition(nearFib618Alert, "Mendekati Fib 61.8%", "Nasrul: Harga mendekati Fib 61.8% M30")
+alertcondition(nearSRAlert, "Mendekati S/R M30", "Nasrul: Harga mendekati S/R M30")

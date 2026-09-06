@@ -1,0 +1,1705 @@
+//@version=6
+// @description Non-trading utilities for Pine Script strategies. Most notably a news
+// calendar state machine that bundles the NewsTypes vocabulary and calendar data
+// libraries into a single NewsState object, and a P&L tracker UDT with per-trade
+// labels and session / daily accumulators. Built on the UDT pseudo-class pattern —
+// each capability owns its state behind a tight method surface so callers don't
+// reinvent the bookkeeping.
+library("Vantage_Utils", true)
+import Vantage-Stack/Vantage_News/26 as packed
+import Vantage-Stack/Vantage_News_Historical/2 as hist
+import Vantage-Stack/Vantage_News_Types/1 as nt
+
+// ─────────────────────────────────────────────────────────────────────────
+// USAGE — instantiate a NewsState and/or PnLTracker and call methods on them.
+// Copy the patterns into your strategy and adjust the timezone, dates, and
+// handler hooks to match.
+// ─────────────────────────────────────────────────────────────────────────
+//
+//   import Vantage-Stack/Vantage_Utils/1 as utils
+//
+//   // News-calendar state machine
+//   var utils.NewsState news = utils.NewsState.new()
+//   utils.LoadEvents(news)
+//   utils.EvaluateForDate(news, "2026-04-13")
+//   bool  blocked     = utils.IsBlocked(news, timenow_ms)
+//   string nextWindow = utils.GetNextTradingWindowText(news, rangeEndMs, "America/Los_Angeles")
+//
+//   // P&L tracker
+//   var utils.PnLTracker pnl = utils.PnLTracker.new()
+//   utils.PnlCheckDayBoundary(pnl, "America/Los_Angeles")
+//   // On each realized exit event from your strategy:
+//   utils.PnlOnExitEvent(pnl, direction, fillPx, entryPx, fillQty, profit, commission, showLabels)
+//
+// ─────────────────────────────────────────────────────────────────────────
+
+// ============================================================================
+// STATE MACHINE CONSTANTS (must match main script values)
+// ============================================================================
+int _S_RESET              = 0
+int _S_IDLE               = 1
+int _S_WAITING_FOR_SETUP  = 2
+int _S_WAITING_FOR_BREAKOUT = 3
+int _S_IN_BREAKOUT_TRADE  = 4
+int _S_AWAITING_RECOUP    = 5
+int _S_IN_RECOUP_TRADE    = 6
+int _S_COOLDOWN           = 7
+int _S_CLEANING_UP        = 8
+
+// ============================================================================
+// INFO PANEL CONTEXT UDTs
+// ============================================================================
+
+// @type Session state context for info panel rendering: current state, halt/block/delay flags, position info, entry/exit prices, and filter status
+export type InfoPanelStatusCtx
+    int    currentState
+    string resetReason
+    bool   dllHalt
+    bool   profitHalt
+    bool   winHalt
+    bool   newsBlocked
+    bool   hitLimit
+    bool   profitTargetReached
+    int    giveUpTimeTs
+    string giveUpTimeInput
+    int    rangeEndTs
+    string tzInput
+    bool   newsDelayed
+    string delayedUntilText
+    string nextTradingFromNews
+    bool   useSev3TimeWindow
+    float  longEntry
+    float  shortEntry
+    int    positionSide
+    float  entryPrice
+    bool   recoupIsLong
+    int    tradeSetsCompleted
+    int    emergencyExitBar
+    bool   emergencyExitSent
+    int    lockUntilBarIdx
+    bool   skipRecoupTrade
+
+// @type Data context for info panel rendering: risk calculations, range metrics, P&L totals, display configuration, and news window text
+export type InfoPanelDataCtx
+    string presetTxt
+    color  presetCol
+    string stFilterMode
+    bool   supertrendBullish
+    float  trendStrength
+    bool   strongBearish
+    bool   strongBullish
+    float  rangeHigh
+    float  rangeLow
+    float  effectiveMaxRange
+    bool   isAutoRiskMode
+    float  maxRangePoints
+    float  prevRangePoints
+    string prevRangeDate
+    bool   snapTaken
+    bool   autoRiskEnabled
+    float  riskDollarsEff
+    float  estAutoRiskFromMaxRange
+    float  riskDollarsInput
+    float  totalRiskModeled
+    bool   dllExhausted
+    bool   isHailMary
+    bool   minOneYMOvershoot
+    bool   partialExitActive
+    bool   greenDayOptimized
+    float  estTotalRiskManual
+    bool   estOvershootManual
+    float  estTotalRiskAuto
+    bool   estOvershootAuto
+    float  dayPL
+    float  profitHaltTargetDollars
+    bool   isHaltPctOrFixed
+    bool   isHaltWinCount
+    int    haltAfterWinTrades
+    int    brcSpikeCount       = 0
+    string brcFilterMode       = "Off"
+    bool   inDefine            = false
+
+// ============================================================================
+// PNL TRACKER
+// ============================================================================
+
+// @type Accumulates realized P&L across a session: running dollar/point totals, trade/win/loss counts, day boundary detection, and chart label reference
+export type PnLTracker
+    varip float sessionPL
+    varip float dayPL
+    varip float curLossDollars
+    varip int dayWinCount
+    varip float lastTradePoints
+    varip float lastTradeDollars
+    varip bool lastTradeWasProfit
+    varip bool lastTradeWasLong
+    varip int lastTradeQty
+    varip int lastTradeBar
+    varip int lastProfitLblBar
+    varip int dayStartMs
+
+// @function Calculates realized P&L in dollars for a single trade including commission.
+// @param entryPrice Entry fill price
+// @param exitPrice Exit fill price
+// @param qty Position quantity (contracts)
+// @param commission Commission in dollars per side
+// @returns Realized P&L in dollars
+export PnlCalcTrade(float entryPrice, float exitPrice, float qty, float commission) =>
+    bool isLong = qty > 0
+    float absQty = math.abs(qty)
+    float points = isLong ? (exitPrice - entryPrice) : (entryPrice - exitPrice)
+    float dollars = (points * syminfo.pointvalue * absQty) - commission
+    [points, dollars]
+
+// @function Draws a P&L label on the chart at the current bar.
+// @param pnl PnLTracker instance
+// @param points Points gained or lost
+// @param dollars Dollar P&L for the trade
+// @param isLong True if the trade was a long
+// @param isProfit True if the trade was profitable
+export PnlDrawLabel(PnLTracker pnl, float points, float dollars, bool isLong, bool isProfit) =>
+    string labelText = "P/L: " + str.tostring(points, "#.##") + " pts, $" + str.tostring(dollars, "#.##") + " [" + (isLong ? "Long" : "Short") + "]"
+    color labelColor = isProfit ? color.green : color.red
+    float yOffsetAmt = syminfo.mintick * 90
+    float yPos = isProfit ? (high + yOffsetAmt) : (low - yOffsetAmt)
+    string labelStyle = isProfit ? label.style_label_down : label.style_label_up
+    int bumpSteps = isProfit and not na(pnl.lastProfitLblBar) and bar_index == pnl.lastProfitLblBar + 1 ? 1 : 0
+    float bump = syminfo.mintick * 60 * bumpSteps
+    yPos := isProfit ? (yPos + bump) : yPos
+    label.new(bar_index, yPos, labelText, style=labelStyle, color=labelColor, textcolor=color.white, size=size.small)
+    if isProfit
+        pnl.lastProfitLblBar := bar_index
+    true
+
+// @function Processes a trade exit event: calculates P&L, updates tracker totals, and optionally draws a label.
+// @param pnl PnLTracker instance
+// @param direction Trade direction: 1=long, -1=short
+// @param fillPrice Exit fill price
+// @param entryPrice Entry fill price
+// @param fillQty Quantity filled on exit
+// @param profit Raw profit from strategy (used for sign check)
+// @param commission Commission in dollars per side
+// @param showLabels Whether to draw a P&L label on the chart
+export PnlOnExitEvent(PnLTracker pnl, int direction, float fillPrice, float entryPrice, int fillQty, float profit, float commission, bool showLabels) =>
+    if not na(profit)
+        bool isLong = direction > 0
+        [points, dollars] = PnlCalcTrade(entryPrice, fillPrice, isLong ? fillQty : -fillQty, commission)
+        pnl.sessionPL := pnl.sessionPL + dollars
+        pnl.dayPL := pnl.dayPL + dollars
+        pnl.curLossDollars := pnl.dayPL < 0 ? -pnl.dayPL : 0.0
+        pnl.lastTradePoints := points
+        pnl.lastTradeDollars := dollars
+        pnl.lastTradeWasProfit := points > 0
+        pnl.lastTradeWasLong := isLong
+        pnl.lastTradeQty := fillQty
+        pnl.lastTradeBar := bar_index
+        if points > 0
+            pnl.dayWinCount := pnl.dayWinCount + 1
+        if showLabels
+            PnlDrawLabel(pnl, points, dollars, isLong, points > 0)
+    true
+
+// @function Resets session-level P&L accumulators (does not reset day totals).
+// @param pnl PnLTracker instance
+export PnlResetSession(PnLTracker pnl) =>
+    pnl.sessionPL := 0.0
+    pnl.lastTradePoints := na
+    pnl.lastTradeDollars := na
+    pnl.lastTradeWasProfit := false
+    pnl.lastTradeWasLong := false
+    pnl.lastTradeQty := 0
+    pnl.lastTradeBar := na
+    true
+
+// @function Resets all day-level P&L accumulators and counters.
+// @param pnl PnLTracker instance
+export PnlResetDay(PnLTracker pnl) =>
+    pnl.dayPL := 0.0
+    pnl.curLossDollars := 0.0
+    pnl.dayWinCount := 0
+    pnl.lastProfitLblBar := na
+    true
+
+// @function Checks whether the current bar crosses into a new calendar day and resets day totals if so.
+// @param pnl PnLTracker instance
+// @param timezone Timezone string for day boundary detection (e.g., "America/Los_Angeles")
+// @returns True if a day boundary was detected and totals were reset
+export PnlCheckDayBoundary(PnLTracker pnl, string timezone) =>
+    int yy = year(time, timezone)
+    int mm = month(time, timezone)
+    int dd = dayofmonth(time, timezone)
+    int todayOpen = timestamp(timezone, yy, mm, dd, 15, 0)
+    int effectiveDayStart = time < todayOpen ? todayOpen - 86400000 : todayOpen
+    bool newDay = na(pnl.dayStartMs) or effectiveDayStart != pnl.dayStartMs
+    if newDay
+        pnl.dayStartMs := effectiveDayStart
+        PnlResetDay(pnl)
+    newDay
+
+// @function Ensures the P&L label object exists, creating it if necessary.
+// @param pnl PnLTracker instance
+// @param showLabels Whether labels are enabled; no-ops if false
+export PnlEnsureLabel(PnLTracker pnl, bool showLabels) =>
+    if showLabels and not na(pnl.lastTradeBar) and pnl.lastTradeBar == bar_index and not na(pnl.lastTradePoints)
+        PnlDrawLabel(pnl, pnl.lastTradePoints, pnl.lastTradeDollars, pnl.lastTradeWasLong, pnl.lastTradeWasProfit)
+    true
+
+// ============================================================================
+// INFO PANEL RENDERER
+// ============================================================================
+
+_f_panel_size(simple string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : s == "Large" ? size.large : size.small
+
+// @function Renders the strategy info panel table on the chart. Deletes the existing table, creates a new one, and populates all rows from the provided context structs. Call on barstate.islast only.
+// @param panelRef Existing table reference (pass na on first call)
+// @param sc InfoPanelStatusCtx populated with current session state
+// @param dc InfoPanelDataCtx populated with current risk and P&L data
+// @param panelSize Table text size: "Small", "Normal", "Large", etc.
+// @returns Updated table reference; store this and pass back on the next call
+export RenderInfoPanel(table panelRef, InfoPanelStatusCtx sc, InfoPanelDataCtx dc, simple string panelSize = "Small") =>
+    if not na(panelRef)
+        table.delete(panelRef)
+    simple string _sz = _f_panel_size(panelSize)
+    int _rows = dc.stFilterMode != "Off" ? 9 : 8
+    table _panel = table.new(position=position.top_right, columns=2, rows=_rows, bgcolor=color.new(color.blue, 90), border_width=1, border_color=color.blue)
+
+    table.cell(_panel, 0, 0, text="", bgcolor=color.new(color.navy, 100), text_color=color.new(color.white, 100), text_size=_sz)
+    table.cell(_panel, 1, 0, text="", bgcolor=color.new(color.navy, 100), text_color=color.new(color.white, 100), text_size=_sz)
+
+    string _statusTxt = ""
+    color _statusCol = color.gray
+
+    if sc.dllHalt
+        _statusTxt := "Halted: DLL"
+        _statusCol := color.red
+    else if sc.profitHalt
+        _statusTxt := "Halted: Profit Reached"
+        _statusCol := color.green
+    else if sc.winHalt
+        _statusTxt := "Halted: Wins"
+        _statusCol := color.green
+    else if sc.tradeSetsCompleted == 0 and not na(sc.giveUpTimeTs) and time >= sc.giveUpTimeTs and (sc.currentState == _S_IDLE or sc.currentState == _S_CLEANING_UP)
+        _statusTxt := "Done: Give-up (" + sc.giveUpTimeInput + ")"
+        _statusCol := color.gray
+    else if sc.newsBlocked
+        _statusTxt := "Blocked: News"
+        _statusCol := color.red
+    else if sc.hitLimit
+        _statusTxt := "Halted: Max Sets"
+        _statusCol := color.white
+    else if sc.currentState == _S_IDLE and str.startswith(sc.resetReason, "Skipped:")
+        _statusTxt := sc.resetReason
+        _statusCol := color.gray
+    else if sc.currentState == _S_IDLE
+        string _nxt = sc.nextTradingFromNews
+        if str.length(_nxt) == 0 and not na(sc.rangeEndTs) and time < sc.rangeEndTs
+            int _displayTs = sc.rangeEndTs
+            int _dow = dayofweek(_displayTs, sc.tzInput)
+            if _dow == dayofweek.saturday
+                _displayTs := _displayTs + 2 * 86400000
+            else if _dow == dayofweek.sunday
+                _displayTs := _displayTs + 86400000
+            int _dow2 = dayofweek(_displayTs, sc.tzInput)
+            string _dn = _dow2 == 1 ? "Sun" : _dow2 == 2 ? "Mon" : _dow2 == 3 ? "Tue" : _dow2 == 4 ? "Wed" : _dow2 == 5 ? "Thu" : _dow2 == 6 ? "Fri" : "Sat"
+            int _mm = month(_displayTs, sc.tzInput)
+            int _dd = dayofmonth(_displayTs, sc.tzInput)
+            int _hh = hour(_displayTs, sc.tzInput)
+            int _mn = minute(_displayTs, sc.tzInput)
+            int _h12 = _hh % 12 == 0 ? 12 : _hh % 12
+            string _ap = _hh >= 12 ? "pm" : "am"
+            _nxt := _dn + " " + str.tostring(_mm) + "/" + str.tostring(_dd) + " @ " + str.tostring(_h12) + ":" + str.tostring(_mn, "00") + " " + _ap
+        _statusTxt := str.length(_nxt) > 0 ? "Idle: Next " + _nxt : "Idle"
+        if sc.skipRecoupTrade
+            _statusTxt := _statusTxt + " [No Recoup]"
+        _statusCol := color.white
+    else if sc.currentState == _S_WAITING_FOR_SETUP
+        if sc.newsDelayed
+            _statusTxt := "Waiting: News clears " + sc.delayedUntilText
+            _statusCol := color.white
+        else
+            _statusTxt := "Waiting: Mid-range"
+            _statusCol := color.white
+    else if sc.currentState == _S_WAITING_FOR_BREAKOUT
+        string _lp = not na(sc.longEntry) ? str.tostring(sc.longEntry, "#.##") : "?"
+        string _sp = not na(sc.shortEntry) ? str.tostring(sc.shortEntry, "#.##") : "?"
+        _statusTxt := "Ready: L@" + _lp + " / S@" + _sp
+        if sc.skipRecoupTrade
+            _statusTxt := _statusTxt + " [NR]"
+        _statusCol := color.green
+    else if sc.currentState == _S_IN_BREAKOUT_TRADE
+        string _dir = sc.positionSide == 1 ? "LONG" : "SHORT"
+        string _ep = not na(sc.entryPrice) ? str.tostring(sc.entryPrice, "#.##") : "?"
+        _statusTxt := "Trading: " + _dir + " @ " + _ep
+        _statusCol := color.green
+    else if sc.currentState == _S_AWAITING_RECOUP
+        string _rd = sc.recoupIsLong ? "Long" : "Short"
+        _statusTxt := "Pending: Recoup " + _rd
+        _statusCol := color.yellow
+    else if sc.currentState == _S_IN_RECOUP_TRADE
+        string _rd2 = sc.recoupIsLong ? "LONG" : "SHORT"
+        string _ep2 = not na(sc.entryPrice) ? str.tostring(sc.entryPrice, "#.##") : "?"
+        _statusTxt := "Recoup: " + _rd2 + " @ " + _ep2
+        _statusCol := color.green
+    else if sc.currentState == _S_COOLDOWN
+        if not na(sc.emergencyExitBar) and not sc.emergencyExitSent and bar_index < sc.emergencyExitBar
+            _statusTxt := "Cooldown: Sweeping"
+            _statusCol := color.white
+        else
+            int _remain = not na(sc.lockUntilBarIdx) ? math.max(0, sc.lockUntilBarIdx - bar_index) : 0
+            _statusTxt := "Cooldown: " + str.tostring(_remain) + " bars"
+            _statusCol := color.white
+    else if sc.currentState == _S_CLEANING_UP
+        _statusTxt := "Session: Ending"
+        _statusCol := color.white
+    else
+        _statusTxt := "State: " + str.tostring(sc.currentState)
+        _statusCol := color.white
+
+    table.cell(_panel, 0, 1, text="Status", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 1, text=_statusTxt, bgcolor=color.navy, text_color=_statusCol, text_size=_sz)
+
+    table.cell(_panel, 0, 2, text="Mode", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 2, text=dc.presetTxt, bgcolor=color.navy, text_color=dc.presetCol, text_size=_sz)
+
+    int _ro = dc.stFilterMode != "Off" ? 1 : 0
+
+    if dc.stFilterMode != "Off"
+        string _stTxt = dc.supertrendBullish ? "Bullish" : "Bearish"
+        _stTxt := _stTxt + " " + str.tostring(math.abs(dc.trendStrength), "#.#") + "x"
+        color _stCol = dc.supertrendBullish ? color.green : color.red
+        if dc.stFilterMode == "Bias"
+            _stTxt := _stTxt + " [Bias]"
+            _stCol := color.yellow
+        else if dc.stFilterMode == "Filter" and not dc.strongBearish and not dc.strongBullish
+            _stTxt := _stTxt + " [Weak]"
+            _stCol := color.yellow
+        table.cell(_panel, 0, 3, text="Trend", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+        table.cell(_panel, 1, 3, text=_stTxt, bgcolor=color.navy, text_color=_stCol, text_size=_sz)
+
+    string _rangeTxt = "—"
+    color _rangeCol = color.white
+    bool _autoSizer = dc.isAutoRiskMode and na(dc.effectiveMaxRange)
+    float _effMaxDisplay = not _autoSizer and dc.isAutoRiskMode and not na(dc.effectiveMaxRange) ? dc.effectiveMaxRange : dc.maxRangePoints
+    if not na(dc.rangeHigh) and not na(dc.rangeLow)
+        float _rw = dc.rangeHigh - dc.rangeLow
+        if dc.inDefine
+            _rangeTxt := str.tostring(_rw, "#") + " / " + str.tostring(dc.maxRangePoints, "#") + " target"
+            _rangeCol := color.gray
+        else if _autoSizer
+            _rangeTxt := str.tostring(_rw, "#") + " (Auto)"
+        else
+            _rangeTxt := str.tostring(_rw, "#") + " / " + str.tostring(_effMaxDisplay, "#") + " max"
+            if _rw > _effMaxDisplay
+                _rangeCol := color.red
+    else if _autoSizer and _effMaxDisplay > 0
+        _rangeTxt := str.tostring(_effMaxDisplay, "#") + " (target)"
+    else if _effMaxDisplay > 0
+        string _src = dc.isAutoRiskMode and not na(dc.effectiveMaxRange) and dc.effectiveMaxRange < dc.maxRangePoints ? " (DLL)" : ""
+        _rangeTxt := str.tostring(_effMaxDisplay, "#") + " max" + _src
+    else if not na(dc.prevRangePoints)
+        _rangeTxt := str.tostring(dc.prevRangePoints, "#") + " (" + dc.prevRangeDate + ")"
+    if dc.brcFilterMode != "Off" and dc.brcSpikeCount > 0
+        _rangeTxt := _rangeTxt + " (BRC:" + str.tostring(dc.brcSpikeCount) + ")"
+        _rangeCol := color.orange
+    table.cell(_panel, 0, 3 + _ro, text="Range", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 3 + _ro, text=_rangeTxt, bgcolor=color.navy, text_color=_rangeCol, text_size=_sz)
+
+    string _riskTxt = ""
+    if dc.snapTaken and not na(dc.riskDollarsEff)
+        _riskTxt := "$" + str.tostring(dc.riskDollarsEff, "#.##")
+        if dc.autoRiskEnabled
+            _riskTxt := _riskTxt + " (Auto)"
+    else if not dc.snapTaken and not na(dc.estAutoRiskFromMaxRange)
+        _riskTxt := "$" + str.tostring(dc.estAutoRiskFromMaxRange, "#.##") + " (Auto)"
+    else if dc.autoRiskEnabled
+        _riskTxt := "Auto (Pending)"
+    else
+        _riskTxt := "$" + str.tostring(math.abs(dc.riskDollarsInput), "#.##")
+    table.cell(_panel, 0, 4 + _ro, text="Risk - Initial", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 4 + _ro, text=_riskTxt, bgcolor=color.navy, text_color=color.white, text_size=_sz)
+
+    string _totalTxt = "—"
+    color _totalCol = color.white
+    if dc.snapTaken and not na(dc.totalRiskModeled)
+        _totalTxt := "$" + str.tostring(dc.totalRiskModeled, "#.##")
+        if dc.dllExhausted
+            _totalTxt := _totalTxt + " (DLL)"
+            _totalCol := color.white
+        else if dc.isHailMary
+            _totalTxt := _totalTxt + " (!!)"
+            _totalCol := color.red
+        else if dc.minOneYMOvershoot
+            _totalTxt := _totalTxt + " (!)"
+            _totalCol := color.red
+        else if dc.partialExitActive
+            _totalTxt := _totalTxt + " (P)"
+            _totalCol := color.blue
+        else if dc.greenDayOptimized
+            _totalTxt := _totalTxt + " (G)"
+            _totalCol := color.green
+    else if not dc.snapTaken and not na(dc.estTotalRiskManual)
+        _totalTxt := "$" + str.tostring(dc.estTotalRiskManual, "#.##")
+        if dc.estOvershootManual
+            _totalTxt := _totalTxt + " (!)"
+            _totalCol := color.red
+    else if not dc.snapTaken and not na(dc.estTotalRiskAuto)
+        _totalTxt := "$" + str.tostring(dc.estTotalRiskAuto, "#.##") + " (Auto est)"
+        if dc.estOvershootAuto
+            _totalTxt := _totalTxt + " (!)"
+            _totalCol := color.red
+    else if not dc.snapTaken and not na(dc.totalRiskModeled)
+        _totalTxt := "$" + str.tostring(dc.totalRiskModeled, "#.##") + " (Prev)"
+        _totalCol := color.white
+    table.cell(_panel, 0, 5 + _ro, text="Risk - Total", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 5 + _ro, text=_totalTxt, bgcolor=color.navy, text_color=_totalCol, text_size=_sz)
+
+    string _plTxt = "$" + str.tostring(dc.dayPL, "#.##")
+    if dc.isHaltPctOrFixed
+        if dc.profitHaltTargetDollars > 0
+            _plTxt := _plTxt + " / $" + str.tostring(dc.profitHaltTargetDollars, "#.##") + " Target"
+    else if dc.isHaltWinCount and dc.haltAfterWinTrades > 0
+        _plTxt := _plTxt + " / " + str.tostring(dc.haltAfterWinTrades) + " Wins"
+    color _plCol = dc.dayPL > 0 ? color.green : dc.dayPL < 0 ? color.red : color.white
+    if sc.profitTargetReached
+        _plCol := color.green
+    table.cell(_panel, 0, 6 + _ro, text="Day P&L", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 6 + _ro, text=_plTxt, bgcolor=color.navy, text_color=_plCol, text_size=_sz)
+
+    string _nextTradingTxt = "—"
+    bool _anyHalt = sc.dllHalt or sc.profitHalt or sc.winHalt or sc.hitLimit
+    if not _anyHalt and ((sc.currentState == _S_IDLE and time < sc.rangeEndTs) or (sc.currentState == _S_WAITING_FOR_SETUP and sc.newsDelayed)) and sc.useSev3TimeWindow
+        _nextTradingTxt := sc.nextTradingFromNews
+        if str.length(_nextTradingTxt) == 0
+            _nextTradingTxt := "—"
+    table.cell(_panel, 0, 7 + _ro, text="Next Trading", bgcolor=color.navy, text_color=color.white, text_size=_sz)
+    table.cell(_panel, 1, 7 + _ro, text=_nextTradingTxt, bgcolor=color.navy, text_color=color.white, text_size=_sz)
+
+    _panel
+
+// ============================================================================
+// LOGGING WRAPPERS (from LO1_Utils)
+// ============================================================================
+
+// @function Logs exitCleanupDone set to true with context, tradeSet, and bar index.
+// @param context Context label string
+// @param tradeSet Current trade set index
+// @param barIdx Current bar index
+export LogCleanupTrue(string context, int tradeSet, int barIdx) =>
+    log.info("[CLEANUP] exitCleanupDone → true ({0}, tradeSet={1}, bar={2})", context, tradeSet, barIdx)
+
+// @function Logs exitCleanupDone set to false with context and bar index.
+// @param context Context label string
+// @param barIdx Current bar index
+export LogCleanupFalse(string context, int barIdx) =>
+    log.info("[CLEANUP] exitCleanupDone → false ({0}, bar={1})", context, barIdx)
+
+// @function Logs a state machine transition with from/to states, trigger, bar index, and tradeSet.
+// @param fromState Previous state integer ID
+// @param toState Next state integer ID
+// @param trigger String describing the event that caused the transition
+// @param barIdx Current bar index
+// @param tradeSet Current trade set index
+export LogState(int fromState, int toState, string trigger, int barIdx, int tradeSet) =>
+    log.info("State • {0} → {1} • trigger={2} • bar={3} • tradeSet={4}", fromState, toState, trigger, barIdx, tradeSet)
+
+// @function Logs the auto-sizer's partial exit mode selection and baseline comparison.
+// @param mode Selected partial exit mode string
+// @param baseline Baseline contract count without partial exit
+// @param withPartial Contract count with partial exit applied
+// @param delta Incremental difference between withPartial and baseline
+export LogPartialExitAutosizer(string mode, int baseline, int withPartial, int delta) =>
+    log.info("[PARTIAL-EXIT] AutoSizer • mode={0} • baseline={1} • withPartial={2} • delta=+{3}", mode, baseline, withPartial, delta)
+
+// @function Logs the partial exit optimizer's best configuration result.
+// @param t1qty T1 partial exit quantity
+// @param bestK Best K value selected by the optimizer
+// @param exitQty Total exit quantity
+// @param ymQty YM mini contract count
+// @param worstCase Worst-case scenario string
+// @param recoupNet Net recoup outcome string
+export LogPartialExitOptimizer(int t1qty, int bestK, int exitQty, int ymQty, string worstCase, string recoupNet) =>
+    log.info("[PARTIAL-EXIT] Optimizer • T1qty={0} • bestK={1} • exitQty={2} • ymQty={3} • worstCase={4} • recoupNet={5}", t1qty, bestK, exitQty, ymQty, worstCase, recoupNet)
+
+// @function Logs a partial exit cancellation showing how many MYM contracts were kept.
+// @param keptMYM Number of MYM micro contracts retained after cancellation
+export LogPartialExitCancel(int keptMYM) =>
+    log.info("[PARTIAL-EXIT] RecoupTP • MYM CancelSweep • keptMYM={0} • exiting all remaining", keptMYM)
+
+// @function Logs session open with version prefix, date, and range high/low prices.
+// @param versionPrefix Version string prefix for the log line
+// @param dateStr Session date string
+// @param rangeHigh Session range high price
+// @param rangeLow Session range low price
+export LogSessionStart(string versionPrefix, string dateStr, float rangeHigh, float rangeLow) =>
+    log.info("[SESSION] " + versionPrefix + dateStr + " | range " + str.tostring(rangeHigh) + "-" + str.tostring(rangeLow))
+
+// @function Logs session close with version prefix, date, and total trade set count.
+// @param versionPrefix Version string prefix for the log line
+// @param dateStr Session date string
+// @param tradeSets Total number of trade sets completed this session
+export LogSessionEnd(string versionPrefix, string dateStr, int tradeSets) =>
+    log.info("[SESSION-END] " + versionPrefix + dateStr + " | trades: " + str.tostring(tradeSets))
+
+// @function Logs a recoup trade cleanup sweep with ticker, tradeSet, qty, and kept MYM count.
+// @param tag Log tag identifying the cleanup origin
+// @param ticker Chart ticker symbol
+// @param tradeSet Current trade set index
+// @param qty Exit quantity dispatched
+// @param keptMYM Number of MYM micro contracts retained
+export LogOppCleanup(string tag, string ticker, int tradeSet, int qty, int keptMYM) =>
+    log.info("{0} • CHART • {1} • tradeSet={2} • exitQty={3} • keptMYM={4}", tag, ticker, tradeSet, qty, keptMYM)
+
+// @function Logs a P&L override showing bracket vs actual fill prices and resulting dollar P&L.
+// @param bracketExitPx Bracket order exit price
+// @param fillPx Actual exit fill price
+// @param bracketEntryPx Bracket order entry price
+// @param entryPx Actual entry fill price
+// @param dollars Resulting dollar P&L after override
+export LogPlOverride(float bracketExitPx, float fillPx, float bracketEntryPx, float entryPx, float dollars) =>
+    log.info("[PL-OVERRIDE] exitBracketPx={0} exitFillPx={1} entryBracketPx={2} entryFillPx={3} dollars={4}", bracketExitPx, fillPx, bracketEntryPx, entryPx, dollars)
+
+// @function Logs an atomic exit dispatch including cancel and close flags, tickers, qty, and proxy gate status.
+// @param simPrefix Simulation mode prefix string
+// @param reason Exit reason label
+// @param doCancelAll Whether to cancel all open brackets
+// @param doClose Whether to close the position
+// @param chartTkr Chart instrument ticker symbol
+// @param proxyTkr Proxy instrument ticker symbol
+// @param exitQty Quantity being exited
+// @param proxyGate Whether the proxy exit gate is open
+export LogExitAtomic(string simPrefix, string reason, bool doCancelAll, bool doClose, string chartTkr, string proxyTkr, int exitQty, bool proxyGate) =>
+    string _qtyStr = exitQty > 0 ? " • qty=" + str.tostring(exitQty) : ""
+    log.info(simPrefix + "ExitAtomic • reason=" + reason + " • doCancelAll=" + str.tostring(doCancelAll) + " • doClose=" + str.tostring(doClose) + " • chart=" + chartTkr + " • proxy=" + proxyTkr + _qtyStr + " • proxyGate=" + str.tostring(proxyGate))
+
+// @function Logs the end-of-session cleanup sweep status including position and bracket state.
+// @param barIdx Current bar index
+// @param tradeSets Total trade sets completed
+// @param inPos Whether the strategy is currently in a position
+// @param bracketsIssued Whether bracket orders have been issued
+// @param firing Whether the cleanup sweep is actively firing
+export LogCleanupSweep(int barIdx, int tradeSets, bool inPos, bool bracketsIssued, bool firing) =>
+    log.info("[CLEANUP-SWEEP] bar={0} • tradeSets={1} • inPos={2} • bracketsIssued={3} • firing={4}", barIdx, tradeSets, inPos, bracketsIssued, firing)
+
+// @function Logs a live session marker showing cleanup state and tradeSet at a given bar.
+// @param barIdx Current bar index
+// @param exitCleanupDone Whether exit cleanup has completed
+// @param tradeSet Current trade set index
+export LogLiveMarker(int barIdx, bool exitCleanupDone, int tradeSet) =>
+    log.info("[LIVE] bar={0} — entering realtime polling (exitCleanupDone={1} tradeSet={2})", barIdx, exitCleanupDone, tradeSet)
+
+// ── BRC Range Spike Filter ──
+// Detects monster candles during range formation that set artificial high/low extremes.
+// Library holds computation and logging; main script applies revert decisions.
+
+// @type Bar Range Condition evaluation state: spike detection, peak BRC count, lockout tracking, and session range high/low
+export type BrcState
+    int   spikeCount        = 0
+    int   barsElapsed       = 0
+    bool  sessionSkipped    = false
+    float peakBRC           = 0.0
+    float currentBRC        = 0.0
+    bool  revertHigh        = false
+    bool  revertLow         = false
+    float naturalHigh       = na
+    float naturalLow        = na
+    float lockedHigh        = na
+    float lockedLow         = na
+
+// @function Resets all BRC state fields to their initial values for a new session.
+// @param s BrcState instance to reset
+export BrcReset(BrcState s) =>
+    s.spikeCount := 0
+    s.barsElapsed := 0
+    s.sessionSkipped := false
+    s.peakBRC := 0.0
+    s.currentBRC := 0.0
+    s.revertHigh := false
+    s.revertLow := false
+    s.naturalHigh := na
+    s.naturalLow := na
+    s.lockedHigh := na
+    s.lockedLow := na
+    true
+
+// @function Evaluates a single bar against the Bar Range Condition. Updates spike count, peak BRC, lockout state, and session range in the provided BrcState.
+// @param s BrcState instance (updated in place)
+// @param prevDayHigh Previous day's high price
+// @param prevDayLow Previous day's low price
+// @param barHigh Current bar's high price
+// @param barLow Current bar's low price
+// @param threshold BRC spike threshold in points
+// @param minElapsed Minimum bars elapsed before BRC evaluation begins
+// @param maxSpikes Maximum spikes before BRC is marked FILTERED
+// @param filterMode Spike filter mode string
+// @param showDebug Whether to log debug output to the chart
+// @param lockAfterSpike Bars to lock out after a spike (0 = no lockout)
+export BrcCheckBar(BrcState s, float prevDayHigh, float prevDayLow, float barHigh, float barLow, float threshold, int minElapsed, int maxSpikes, string filterMode, bool showDebug, int lockAfterSpike = 0) =>
+    s.revertHigh := false
+    s.revertLow := false
+    s.barsElapsed += 1
+    float _prevNatH = s.naturalHigh
+    float _prevNatL = s.naturalLow
+    s.naturalHigh := na(s.naturalHigh) ? barHigh : math.max(s.naturalHigh, barHigh)
+    s.naturalLow := na(s.naturalLow) ? barLow : math.min(s.naturalLow, barLow)
+    float _brcHigh = na(prevDayHigh) ? 0.0 : math.max(0.0, barHigh - prevDayHigh)
+    float _brcLow = na(prevDayLow) ? 0.0 : math.max(0.0, prevDayLow - barLow)
+    float _brc = math.max(_brcHigh, _brcLow)
+    float _brcNatHigh = na(_prevNatH) ? 0.0 : math.max(0.0, barHigh - _prevNatH)
+    float _brcNatLow = na(_prevNatL) ? 0.0 : math.max(0.0, _prevNatL - barLow)
+    float _brcNat = math.max(_brcNatHigh, _brcNatLow)
+    s.currentBRC := _brcNat
+    s.peakBRC := math.max(s.peakBRC, _brcNat)
+    bool _shouldRevert = s.barsElapsed >= minElapsed and _brc > threshold
+    bool _isSpike = s.barsElapsed >= minElapsed and _brcNat > threshold
+    if _shouldRevert and (filterMode == "Filter" or filterMode == "Skip")
+        if _brcHigh >= _brcLow
+            s.revertHigh := true
+        else
+            s.revertLow := true
+    if _isSpike
+        s.spikeCount += 1
+        string _side = _brcNatHigh >= _brcNatLow ? "HIGH" : "LOW"
+        if lockAfterSpike > 0 and s.spikeCount == lockAfterSpike
+            if s.revertHigh
+                s.lockedHigh := prevDayHigh
+            if s.revertLow
+                s.lockedLow := prevDayLow
+            log.info("[BRC] LOCKED | spike #{0} | lockedHigh={1} | lockedLow={2}", s.spikeCount, str.tostring(s.lockedHigh, "#"), str.tostring(s.lockedLow, "#"))
+        if maxSpikes > 0 and s.spikeCount >= maxSpikes
+            s.sessionSkipped := true
+        log.info("[BRC] SPIKE #{0} {1} | natBRC={2} | actBRC={3} | thresh={4}", s.spikeCount, _side, str.tostring(_brcNat, "#"), str.tostring(_brc, "#"), str.tostring(threshold, "#"))
+        if s.sessionSkipped
+            log.info("[BRC] CIRCUIT BREAKER | {0} spikes >= max {1}", s.spikeCount, maxSpikes)
+        if filterMode == "Filter" or filterMode == "Skip" or showDebug
+            label.new(bar_index, barLow, "BRC +" + str.tostring(_brcNat, "#"), style=label.style_label_up, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
+    true
+
+// @function Logs the BRC result summary line (CLEAN or FILTERED) with peak BRC, spike count, range, and threshold.
+// @param s BrcState instance containing computed results
+// @param dayHigh Session day high price
+// @param dayLow Session day low price
+// @param threshold BRC spike threshold used for this session
+export BrcLogSummary(BrcState s, float dayHigh, float dayLow, float threshold) =>
+    float _range = not na(dayHigh) and not na(dayLow) ? dayHigh - dayLow : 0.0
+    string _status = s.sessionSkipped ? "SKIPPED" : s.spikeCount > 0 ? "FILTERED" : "CLEAN"
+    log.info("[BRC] {0} | peakBRC={1} | spikes={2} | range={3} | thresh={4}", _status, str.tostring(s.peakBRC, "#"), s.spikeCount, str.tostring(_range, "#"), str.tostring(threshold, "#"))
+    true
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 5: NEWS SYSTEM (light/inline mode — no external data imports) ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// ============================================================================
+// NEWS CONSTANTS (TYPE_* identifiers)
+// ============================================================================
+
+export const int TYPE_CPI_m_m = 0
+export const int TYPE_CPI_y_y = 1
+export const int TYPE_Core_CPI_m_m = 2
+export const int TYPE_Core_PPI_m_m = 3
+export const int TYPE_FOMC_Economic_Projections = 4
+export const int TYPE_FOMC_Meeting_Minutes = 5
+export const int TYPE_Federal_Funds_Rate = 6
+export const int TYPE_ISM_Manufacturing_PMI = 7
+export const int TYPE_ISM_Services_PMI = 8
+export const int TYPE_Non_Farm_Employment_Change = 9
+export const int TYPE_PPI_m_m = 10
+export const int TYPE_President_Trump_Speaks = 11
+export const int TYPE_Unemployment_Rate = 12
+export const int TYPE_Core_PCE_Price_Index_m_m = 13
+export const int TYPE_Core_Retail_Sales_m_m = 14
+export const int TYPE_FOMC_Press_Conference = 15
+export const int TYPE_FOMC_Statement = 16
+export const int TYPE_Fed_Chair_Powell_Speaks = 17
+export const int TYPE_Fed_Chair_Powell_Testifies = 18
+export const int TYPE_Retail_Sales_m_m = 19
+export const int TYPE_ADP_Non_Farm_Employment_Change = 20
+export const int TYPE_Advance_GDP_q_q = 21
+export const int TYPE_Average_Hourly_Earnings_m_m = 22
+export const int TYPE_Employment_Cost_Index_q_q = 23
+export const int TYPE_Final_GDP_q_q = 24
+export const int TYPE_Flash_Manufacturing_PMI = 25
+export const int TYPE_Flash_Services_PMI = 26
+export const int TYPE_JOLTS_Job_Openings = 27
+export const int TYPE_Jackson_Hole_Symposium = 28
+export const int TYPE_Prelim_GDP_q_q = 29
+export const int TYPE_Prelim_UoM_Consumer_Sentiment = 30
+export const int TYPE_Prelim_UoM_Inflation_Expectations = 31
+export const int TYPE_Unemployment_Claims = 32
+export const int TYPE_Business_Inventories_m_m = 33
+export const int TYPE_Capacity_Utilization_Rate = 34
+export const int TYPE_Crude_Oil_Inventories = 35
+export const int TYPE_Existing_Home_Sales = 36
+export const int TYPE_Industrial_Production_m_m = 37
+export const int TYPE_NAHB_Housing_Market_Index = 38
+export const int TYPE_Natural_Gas_Storage = 39
+export const int TYPE_Personal_Spending_m_m = 40
+export const int TYPE_Personal_Income_m_m = 41
+export const int TYPE_Philly_Fed_Manufacturing_Index = 42
+export const int TYPE_Revised_UoM_Inflation_Expectations = 43
+export const int TYPE_Revised_UoM_Consumer_Sentiment = 44
+export const int TYPE_Futures_Contract_Roll_Over_Day = 45
+export const int TYPE_10_y_Bond_Auction = 46
+export const int TYPE_30_y_Bond_Auction = 47
+export const int TYPE_ADP_Weekly_Employment_Change = 48
+export const int TYPE_API_Weekly_Statistical_Bulletin = 49
+export const int TYPE_Advance_GDP_Price_Index_q_q = 50
+export const int TYPE_Bank_Holiday = 51
+export const int TYPE_Bank_Stress_Test_Results = 52
+export const int TYPE_Beige_Book = 53
+export const int TYPE_Building_Permits = 54
+export const int TYPE_CB_Consumer_Confidence = 55
+export const int TYPE_CB_Leading_Index_m_m = 56
+export const int TYPE_Challenger_Job_Cuts_y_y = 57
+export const int TYPE_Chicago_PMI = 58
+export const int TYPE_Cleveland_Fed_Inflation_Expectations = 59
+export const int TYPE_Construction_Spending_m_m = 60
+export const int TYPE_Consumer_Credit_m_m = 61
+export const int TYPE_Core_Durable_Goods_Orders_m_m = 62
+export const int TYPE_Current_Account = 63
+export const int TYPE_Daylight_Saving_Time_Shift = 64
+export const int TYPE_Durable_Goods_Orders_m_m = 65
+export const int TYPE_Empire_State_Manufacturing_Index = 66
+export const int TYPE_FOMC_Financial_Stability_Report = 67
+export const int TYPE_FOMC_Member_Barkin_Speaks = 68
+export const int TYPE_FOMC_Member_Barr_Speaks = 69
+export const int TYPE_FOMC_Member_Bostic_Speaks = 70
+export const int TYPE_FOMC_Member_Bowman_Speaks = 71
+export const int TYPE_FOMC_Member_Collins_Speaks = 72
+export const int TYPE_FOMC_Member_Cook_Speaks = 73
+export const int TYPE_FOMC_Member_Daly_Speaks = 74
+export const int TYPE_FOMC_Member_Goolsbee_Speaks = 75
+export const int TYPE_FOMC_Member_Hammack_Speaks = 76
+export const int TYPE_FOMC_Member_Harker_Speaks = 77
+export const int TYPE_FOMC_Member_Jefferson_Speaks = 78
+export const int TYPE_FOMC_Member_Kashkari_Speaks = 79
+export const int TYPE_FOMC_Member_Kugler_Speaks = 80
+export const int TYPE_FOMC_Member_Logan_Speaks = 81
+export const int TYPE_FOMC_Member_Miran_Speaks = 82
+export const int TYPE_FOMC_Member_Musalem_Speaks = 83
+export const int TYPE_FOMC_Member_Paulson_Speaks = 84
+export const int TYPE_FOMC_Member_Schmid_Speaks = 85
+export const int TYPE_FOMC_Member_Waller_Speaks = 86
+export const int TYPE_FOMC_Member_Williams_Speaks = 87
+export const int TYPE_Factory_Orders_m_m = 88
+export const int TYPE_Fed_Monetary_Policy_Report = 89
+export const int TYPE_Federal_Budget_Balance = 90
+export const int TYPE_Final_GDP_Price_Index_q_q = 91
+export const int TYPE_Final_Manufacturing_PMI = 92
+export const int TYPE_Final_Services_PMI = 93
+export const int TYPE_Final_Wholesale_Inventories_m_m = 94
+export const int TYPE_Goods_Trade_Balance = 95
+export const int TYPE_HPI_m_m = 96
+export const int TYPE_Housing_Starts = 97
+export const int TYPE_ISM_Manufacturing_Prices = 98
+export const int TYPE_Import_Prices_m_m = 99
+export const int TYPE_Loan_Officer_Survey = 100
+export const int TYPE_Mortgage_Delinquencies = 101
+export const int TYPE_NFIB_Small_Business_Index = 102
+export const int TYPE_New_Home_Sales = 103
+export const int TYPE_Pending_Home_Sales_m_m = 104
+export const int TYPE_Prelim_Benchmark_Payrolls_Revision = 105
+export const int TYPE_Prelim_GDP_Price_Index_q_q = 106
+export const int TYPE_Prelim_Nonfarm_Productivity_q_q = 107
+export const int TYPE_Prelim_Unit_Labor_Costs_q_q = 108
+export const int TYPE_Prelim_Wholesale_Inventories_m_m = 109
+export const int TYPE_RCM_TIPP_Economic_Optimism = 110
+export const int TYPE_Revised_Nonfarm_Productivity_q_q = 111
+export const int TYPE_Revised_Unit_Labor_Costs_q_q = 112
+export const int TYPE_Richmond_Manufacturing_Index = 113
+export const int TYPE_S_P_CS_Composite_20_HPI_y_y = 114
+export const int TYPE_TIC_Long_Term_Purchases = 115
+export const int TYPE_Trade_Balance = 116
+export const int TYPE_Treasury_Currency_Report = 117
+export const int TYPE_Wards_Total_Vehicle_Sales = 118
+export const int TYPE_2_y_Bond_Auction = 119
+export const int TYPE_FOMC_Member_Bullard_Speaks = 120
+export const int TYPE_PCE_Price_Index_m_m = 121
+export const int TYPE_CME_Early_Close = 122
+export const int TYPE_President_Trump_Speaks_After_Hours = 123
+export const int TYPE_War = 124
+
+export const int TYPE_President_Trump_Speaks_During_Market = TYPE_President_Trump_Speaks
+export const int TYPE_Fed_Chair_Testifies = TYPE_Fed_Chair_Powell_Testifies
+export const int TYPE_Speech_Fed_Chair_Powell = TYPE_Fed_Chair_Powell_Speaks
+export const int TYPE_Philadelphia_Fed_Manufacturing_Index = TYPE_Philly_Fed_Manufacturing_Index
+export const int TYPE_Wholesale_Inventories_m_m = TYPE_Final_Wholesale_Inventories_m_m
+export const int TYPE_PPI_y_y = TYPE_PPI_m_m
+export const int TYPE_GDP_q_q = TYPE_Prelim_GDP_q_q
+export const int TYPE_Leading_Index_m_m = TYPE_CB_Leading_Index_m_m
+export const int TYPE_NY_Manufacturing_Index = TYPE_Empire_State_Manufacturing_Index
+export const int TYPE_Final_Composite_PMI = TYPE_Final_Services_PMI
+export const int TYPE_Treasury_Bond_Auction_10_Y = TYPE_10_y_Bond_Auction
+export const int TYPE_Treasury_Bond_Auction_20_Y = TYPE_10_y_Bond_Auction
+export const int TYPE_Treasury_Bond_Auction_30_Y = TYPE_30_y_Bond_Auction
+export const int TYPE_Treasury_Bond_Auction_5_Y = TYPE_10_y_Bond_Auction
+export const int TYPE_Treasury_Bond_Auction_7_Y = TYPE_10_y_Bond_Auction
+export const int TYPE_5_y_Note_Auction = TYPE_10_y_Bond_Auction
+export const int TYPE_20_y_Bond_Auction = TYPE_10_y_Bond_Auction
+export const int TYPE_Revised_GDP_q_q = TYPE_Prelim_GDP_q_q
+export const int TYPE_Initial_Unemployment_Claims = TYPE_Unemployment_Claims
+export const int TYPE_Consumer_Confidence = TYPE_CB_Consumer_Confidence
+export const int TYPE_Case_Shiller_HPI_y_y = TYPE_S_P_CS_Composite_20_HPI_y_y
+export const int TYPE_SP_CS_Composite_20_HPI_y_y = TYPE_S_P_CS_Composite_20_HPI_y_y
+export const int TYPE_Prel_Unit_Labor_Costs_q_q = TYPE_Prelim_Unit_Labor_Costs_q_q
+export const int TYPE_Prel_UoM_Consumer_Sentiment = TYPE_Prelim_UoM_Consumer_Sentiment
+export const int TYPE_Prel_UoM_Inflation_Expectations = TYPE_Prelim_UoM_Inflation_Expectations
+export const int TYPE_Prel_Wholesale_Inventories_m_m = TYPE_Prelim_Wholesale_Inventories_m_m
+export const int TYPE_Prel_Avg_Hourly_Earnings_q_q = TYPE_Prelim_Nonfarm_Productivity_q_q
+
+// ============================================================================
+// NEWS HELPER FUNCTIONS
+// ============================================================================
+
+// @function Returns an array mapping each TYPE_ integer ID to its default severity level. Delegates to the NewsTypes library. Index with a TYPE_ constant to get severity: 1=low, 2=medium (delayed start), 3=high (full-day block).
+// @returns int[] — severity array indexed by TYPE_ ID
+export LoadTypeSevByTypeId() =>
+    int[] typeSevByTypeId = array.new_int()
+    array.push(typeSevByTypeId, 1)  // 0 TYPE_CPI_m_m
+    array.push(typeSevByTypeId, 2)  // 1 TYPE_CPI_y_y
+    array.push(typeSevByTypeId, 1)  // 2 TYPE_Core_CPI_m_m
+    array.push(typeSevByTypeId, 2)  // 3 TYPE_Core_PPI_m_m
+    array.push(typeSevByTypeId, 1)  // 4 TYPE_FOMC_Economic_Projections
+    array.push(typeSevByTypeId, 3)  // 5 TYPE_FOMC_Meeting_Minutes
+    array.push(typeSevByTypeId, 1)  // 6 TYPE_Federal_Funds_Rate
+    array.push(typeSevByTypeId, 3)  // 7 TYPE_ISM_Manufacturing_PMI
+    array.push(typeSevByTypeId, 1)  // 8 TYPE_ISM_Services_PMI
+    array.push(typeSevByTypeId, 2)  // 9 TYPE_Non_Farm_Employment_Change
+    array.push(typeSevByTypeId, 2)  // 10 TYPE_PPI_m_m
+    array.push(typeSevByTypeId, 3)  // 11 TYPE_President_Trump_Speaks
+    array.push(typeSevByTypeId, 2)  // 12 TYPE_Unemployment_Rate
+    array.push(typeSevByTypeId, 1)  // 13 TYPE_Core_PCE_Price_Index_m_m
+    array.push(typeSevByTypeId, 2)  // 14 TYPE_Core_Retail_Sales_m_m
+    array.push(typeSevByTypeId, 1)  // 15 TYPE_FOMC_Press_Conference
+    array.push(typeSevByTypeId, 3)  // 16 TYPE_FOMC_Statement
+    array.push(typeSevByTypeId, 1)  // 17 TYPE_Fed_Chair_Powell_Speaks
+    array.push(typeSevByTypeId, 1)  // 18 TYPE_Fed_Chair_Powell_Testifies
+    array.push(typeSevByTypeId, 2)  // 19 TYPE_Retail_Sales_m_m
+    array.push(typeSevByTypeId, 2)  // 20 TYPE_ADP_Non_Farm_Employment_Change
+    array.push(typeSevByTypeId, 1)  // 21 TYPE_Advance_GDP_q_q
+    array.push(typeSevByTypeId, 2)  // 22 TYPE_Average_Hourly_Earnings_m_m
+    array.push(typeSevByTypeId, 1)  // 23 TYPE_Employment_Cost_Index_q_q
+    array.push(typeSevByTypeId, 1)  // 24 TYPE_Final_GDP_q_q
+    array.push(typeSevByTypeId, 1)  // 25 TYPE_Flash_Manufacturing_PMI
+    array.push(typeSevByTypeId, 1)  // 26 TYPE_Flash_Services_PMI
+    array.push(typeSevByTypeId, 2)  // 27 TYPE_JOLTS_Job_Openings
+    array.push(typeSevByTypeId, 1)  // 28 TYPE_Jackson_Hole_Symposium
+    array.push(typeSevByTypeId, 1)  // 29 TYPE_Prelim_GDP_q_q
+    array.push(typeSevByTypeId, 1)  // 30 TYPE_Prelim_UoM_Consumer_Sentiment
+    array.push(typeSevByTypeId, 1)  // 31 TYPE_Prelim_UoM_Inflation_Expectations
+    array.push(typeSevByTypeId, 1)  // 32 TYPE_Unemployment_Claims
+    array.push(typeSevByTypeId, 1)  // 33 TYPE_Business_Inventories_m_m
+    array.push(typeSevByTypeId, 2)  // 34 TYPE_Capacity_Utilization_Rate
+    array.push(typeSevByTypeId, 1)  // 35 TYPE_Crude_Oil_Inventories
+    array.push(typeSevByTypeId, 1)  // 36 TYPE_Existing_Home_Sales
+    array.push(typeSevByTypeId, 2)  // 37 TYPE_Industrial_Production_m_m
+    array.push(typeSevByTypeId, 2)  // 38 TYPE_NAHB_Housing_Market_Index
+    array.push(typeSevByTypeId, 1)  // 39 TYPE_Natural_Gas_Storage
+    array.push(typeSevByTypeId, 1)  // 40 TYPE_Personal_Spending_m_m
+    array.push(typeSevByTypeId, 1)  // 41 TYPE_Personal_Income_m_m
+    array.push(typeSevByTypeId, 2)  // 42 TYPE_Philly_Fed_Manufacturing_Index
+    array.push(typeSevByTypeId, 1)  // 43 TYPE_Revised_UoM_Inflation_Expectations
+    array.push(typeSevByTypeId, 1)  // 44 TYPE_Revised_UoM_Consumer_Sentiment
+    array.push(typeSevByTypeId, 3)  // 45 TYPE_Futures_Contract_Roll_Over_Day
+    array.push(typeSevByTypeId, 1)  // 46 TYPE_10_y_Bond_Auction
+    array.push(typeSevByTypeId, 1)  // 47 TYPE_30_y_Bond_Auction
+    array.push(typeSevByTypeId, 1)  // 48 TYPE_ADP_Weekly_Employment_Change
+    array.push(typeSevByTypeId, 1)  // 49 TYPE_API_Weekly_Statistical_Bulletin
+    array.push(typeSevByTypeId, 1)  // 50 TYPE_Advance_GDP_Price_Index_q_q
+    array.push(typeSevByTypeId, 3)  // 51 TYPE_Bank_Holiday
+    array.push(typeSevByTypeId, 1)  // 52 TYPE_Bank_Stress_Test_Results
+    array.push(typeSevByTypeId, 3)  // 53 TYPE_Beige_Book
+    array.push(typeSevByTypeId, 1)  // 54 TYPE_Building_Permits
+    array.push(typeSevByTypeId, 1)  // 55 TYPE_CB_Consumer_Confidence
+    array.push(typeSevByTypeId, 1)  // 56 TYPE_CB_Leading_Index_m_m
+    array.push(typeSevByTypeId, 1)  // 57 TYPE_Challenger_Job_Cuts_y_y
+    array.push(typeSevByTypeId, 1)  // 58 TYPE_Chicago_PMI
+    array.push(typeSevByTypeId, 1)  // 59 TYPE_Cleveland_Fed_Inflation_Expectations
+    array.push(typeSevByTypeId, 1)  // 60 TYPE_Construction_Spending_m_m
+    array.push(typeSevByTypeId, 1)  // 61 TYPE_Consumer_Credit_m_m
+    array.push(typeSevByTypeId, 1)  // 62 TYPE_Core_Durable_Goods_Orders_m_m
+    array.push(typeSevByTypeId, 1)  // 63 TYPE_Current_Account
+    array.push(typeSevByTypeId, 1)  // 64 TYPE_Daylight_Saving_Time_Shift
+    array.push(typeSevByTypeId, 1)  // 65 TYPE_Durable_Goods_Orders_m_m
+    array.push(typeSevByTypeId, 1)  // 66 TYPE_Empire_State_Manufacturing_Index
+    array.push(typeSevByTypeId, 1)  // 67 TYPE_FOMC_Financial_Stability_Report
+    array.push(typeSevByTypeId, 1)  // 68 TYPE_FOMC_Member_Barkin_Speaks
+    array.push(typeSevByTypeId, 1)  // 69 TYPE_FOMC_Member_Barr_Speaks
+    array.push(typeSevByTypeId, 1)  // 70 TYPE_FOMC_Member_Bostic_Speaks
+    array.push(typeSevByTypeId, 1)  // 71 TYPE_FOMC_Member_Bowman_Speaks
+    array.push(typeSevByTypeId, 1)  // 72 TYPE_FOMC_Member_Collins_Speaks
+    array.push(typeSevByTypeId, 1)  // 73 TYPE_FOMC_Member_Cook_Speaks
+    array.push(typeSevByTypeId, 2)  // 74 TYPE_FOMC_Member_Daly_Speaks
+    array.push(typeSevByTypeId, 2)  // 75 TYPE_FOMC_Member_Goolsbee_Speaks
+    array.push(typeSevByTypeId, 1)  // 76 TYPE_FOMC_Member_Hammack_Speaks
+    array.push(typeSevByTypeId, 1)  // 77 TYPE_FOMC_Member_Harker_Speaks
+    array.push(typeSevByTypeId, 1)  // 78 TYPE_FOMC_Member_Jefferson_Speaks
+    array.push(typeSevByTypeId, 1)  // 79 TYPE_FOMC_Member_Kashkari_Speaks
+    array.push(typeSevByTypeId, 1)  // 80 TYPE_FOMC_Member_Kugler_Speaks
+    array.push(typeSevByTypeId, 1)  // 81 TYPE_FOMC_Member_Logan_Speaks
+    array.push(typeSevByTypeId, 1)  // 82 TYPE_FOMC_Member_Miran_Speaks
+    array.push(typeSevByTypeId, 1)  // 83 TYPE_FOMC_Member_Musalem_Speaks
+    array.push(typeSevByTypeId, 1)  // 84 TYPE_FOMC_Member_Paulson_Speaks
+    array.push(typeSevByTypeId, 2)  // 85 TYPE_FOMC_Member_Schmid_Speaks
+    array.push(typeSevByTypeId, 1)  // 86 TYPE_FOMC_Member_Waller_Speaks
+    array.push(typeSevByTypeId, 1)  // 87 TYPE_FOMC_Member_Williams_Speaks
+    array.push(typeSevByTypeId, 1)  // 88 TYPE_Factory_Orders_m_m
+    array.push(typeSevByTypeId, 1)  // 89 TYPE_Fed_Monetary_Policy_Report
+    array.push(typeSevByTypeId, 1)  // 90 TYPE_Federal_Budget_Balance
+    array.push(typeSevByTypeId, 1)  // 91 TYPE_Final_GDP_Price_Index_q_q
+    array.push(typeSevByTypeId, 1)  // 92 TYPE_Final_Manufacturing_PMI
+    array.push(typeSevByTypeId, 1)  // 93 TYPE_Final_Services_PMI
+    array.push(typeSevByTypeId, 1)  // 94 TYPE_Final_Wholesale_Inventories_m_m
+    array.push(typeSevByTypeId, 1)  // 95 TYPE_Goods_Trade_Balance
+    array.push(typeSevByTypeId, 1)  // 96 TYPE_HPI_m_m
+    array.push(typeSevByTypeId, 1)  // 97 TYPE_Housing_Starts
+    array.push(typeSevByTypeId, 1)  // 98 TYPE_ISM_Manufacturing_Prices
+    array.push(typeSevByTypeId, 1)  // 99 TYPE_Import_Prices_m_m
+    array.push(typeSevByTypeId, 1)  // 100 TYPE_Loan_Officer_Survey
+    array.push(typeSevByTypeId, 1)  // 101 TYPE_Mortgage_Delinquencies
+    array.push(typeSevByTypeId, 1)  // 102 TYPE_NFIB_Small_Business_Index
+    array.push(typeSevByTypeId, 1)  // 103 TYPE_New_Home_Sales
+    array.push(typeSevByTypeId, 1)  // 104 TYPE_Pending_Home_Sales_m_m
+    array.push(typeSevByTypeId, 1)  // 105 TYPE_Prelim_Benchmark_Payrolls_Revision
+    array.push(typeSevByTypeId, 1)  // 106 TYPE_Prelim_GDP_Price_Index_q_q
+    array.push(typeSevByTypeId, 1)  // 107 TYPE_Prelim_Nonfarm_Productivity_q_q
+    array.push(typeSevByTypeId, 1)  // 108 TYPE_Prelim_Unit_Labor_Costs_q_q
+    array.push(typeSevByTypeId, 1)  // 109 TYPE_Prelim_Wholesale_Inventories_m_m
+    array.push(typeSevByTypeId, 1)  // 110 TYPE_RCM_TIPP_Economic_Optimism
+    array.push(typeSevByTypeId, 1)  // 111 TYPE_Revised_Nonfarm_Productivity_q_q
+    array.push(typeSevByTypeId, 1)  // 112 TYPE_Revised_Unit_Labor_Costs_q_q
+    array.push(typeSevByTypeId, 1)  // 113 TYPE_Richmond_Manufacturing_Index
+    array.push(typeSevByTypeId, 1)  // 114 TYPE_S_P_CS_Composite_20_HPI_y_y
+    array.push(typeSevByTypeId, 1)  // 115 TYPE_TIC_Long_Term_Purchases
+    array.push(typeSevByTypeId, 1)  // 116 TYPE_Trade_Balance
+    array.push(typeSevByTypeId, 1)  // 117 TYPE_Treasury_Currency_Report
+    array.push(typeSevByTypeId, 1)  // 118 TYPE_Wards_Total_Vehicle_Sales
+    array.push(typeSevByTypeId, 1)  // 119 TYPE_2_y_Bond_Auction
+    array.push(typeSevByTypeId, 1)  // 120 TYPE_FOMC_Member_Bullard_Speaks
+    array.push(typeSevByTypeId, 1)  // 121 TYPE_PCE_Price_Index_m_m
+    array.push(typeSevByTypeId, 1)  // 122 TYPE_CME_Early_Close
+    array.push(typeSevByTypeId, 1)  // 123 TYPE_President_Trump_Speaks_After_Hours
+    array.push(typeSevByTypeId, 3)  // 124 TYPE_War
+    typeSevByTypeId
+
+// ============================================================================
+// NEWS ENUM + UDT DEFINITIONS
+// ============================================================================
+
+export const int TYPE_CME_EARLY_CLOSE = 122
+
+// @type News event policy classification: BLOCK, DELAY, ALLOW, or UNKNOWN
+export enum PolicyType
+    inherit = "Inherit"
+    ignore = "Ignore"
+    delay = "Delay then trade"
+    block = "Block entire day"
+
+// @type Configuration for the news calendar integration layer: severity enable flags, delay minutes, demote/promote override lists, and session timing
+export type NewsConfig
+    bool useSev3TimeWindow
+    bool useSev3Filter
+    bool useSev2Filter
+    bool useSev1Filter
+    int sev3PostDelayMin
+    bool applyLibExceptionMappings
+    string newsTzConst
+    array<PolicyType> policyByTypeId
+    array<int> typeSevByTypeId
+    PolicyType defaultPolicyHigh
+    PolicyType defaultPolicyMedium
+    PolicyType defaultPolicyLow
+
+// @type Cache of last news evaluation results to avoid re-computing on every bar: evaluation date, next event metadata, and scan expiry
+export type NewsCache
+    array<string> dateStr
+    array<int> timeMS
+    array<int> severity
+    array<string> excTag
+    array<int> typeId
+    array<int> libDelayMins
+    array<string> dayStr
+    array<int> dayStart
+    array<int> dayEnd
+
+// @type Full resolved news state for the current session date: block/delay flags, delay end timestamp, reasons, severity, next trading window, and display text fields
+export type NewsState
+    NewsConfig config
+    NewsCache cache
+    varip bool allDayBlocked = false
+    varip bool timedBlocked = false
+    varip int releaseMs = 0
+    varip string reasonsToday = ""
+    varip string primaryBlockReason = ""
+    varip string primaryDelayReason = ""
+    varip int maxSevToday = 0
+    varip string evaluatedDate = ""
+    varip bool initialized = false
+    varip string nextBlockDate = na
+    varip string nextBlockReasons = ""
+    varip int nextBlockSev = 0
+    varip string nextAllowedDate = na
+    varip string nextNewsDate = na
+    varip string nextNewsReasons = ""
+    varip bool nextNewsIsBlock = false
+    varip int nextNewsReleaseMs = 0
+    varip string nextTradingDate = ""
+    varip int nextTradingStartMs = 0
+    varip string nextTradingReasons = ""
+    varip int lastEventMs = 0
+
+// ============================================================================
+// NEWS TIER 0: PURE HELPERS
+// ============================================================================
+
+export DateKey(string _s) =>
+    int _yy = int(str.tonumber(str.substring(_s, 0, 4)))
+    int _mm = int(str.tonumber(str.substring(_s, 5, 7)))
+    int _dd = int(str.tonumber(str.substring(_s, 8, 10)))
+    _yy * 10000 + _mm * 100 + _dd
+
+// ============================================================================
+// NEWS TIER 0.5: INITIALIZATION & DATA LOADING (light mode — no external libs)
+// ============================================================================
+
+MergeRows(NewsState this, string[] _dateArr, int[] _timeArr, int[] _typeArr, int[] _excSevArr, int[] _excDelayArr) =>
+    int _count = array.size(_dateArr)
+    int _sevSize = array.size(this.config.typeSevByTypeId)
+    if _count > 0
+        for _i = 0 to _count - 1
+            string _d = array.get(_dateArr, _i)
+            int _t = array.get(_timeArr, _i)
+            int _tid = array.get(_typeArr, _i)
+            if _tid >= _sevSize
+                continue
+            int _sevBase = array.get(this.config.typeSevByTypeId, _tid)
+            int _excSev = array.get(_excSevArr, _i)
+            int _sevEff = (this.config.applyLibExceptionMappings and _excSev > 0) ? _excSev : _sevBase
+            int _excDelay = array.get(_excDelayArr, _i)
+            array.push(this.cache.dateStr, _d)
+            array.push(this.cache.timeMS, _t)
+            array.push(this.cache.typeId, _tid)
+            array.push(this.cache.severity, _sevEff)
+            array.push(this.cache.excTag, "")
+            array.push(this.cache.libDelayMins, _excDelay)
+    _count
+
+BuildDayIndex(NewsState this) =>
+    array.clear(this.cache.dayStr)
+    array.clear(this.cache.dayStart)
+    array.clear(this.cache.dayEnd)
+    int _rowsIdx = array.size(this.cache.dateStr)
+    if _rowsIdx > 0
+        string _curDayIdx = array.get(this.cache.dateStr, 0)
+        int _startIdx = 0
+        for _iIdx = 1 to _rowsIdx - 1
+            string _dIdx = array.get(this.cache.dateStr, _iIdx)
+            bool _changedIdx = _dIdx != _curDayIdx
+            if _changedIdx
+                array.push(this.cache.dayStr, _curDayIdx)
+                array.push(this.cache.dayStart, _startIdx)
+                array.push(this.cache.dayEnd, _iIdx)
+                _curDayIdx := _dIdx
+                _startIdx := _iIdx
+        array.push(this.cache.dayStr, _curDayIdx)
+        array.push(this.cache.dayStart, _startIdx)
+        array.push(this.cache.dayEnd, _rowsIdx)
+    true
+
+Init(NewsState this) =>
+    this.initialized := true
+    this.evaluatedDate := ""
+    this.allDayBlocked := false
+    this.timedBlocked := false
+    this.releaseMs := 0
+    this.reasonsToday := ""
+    this.primaryBlockReason := ""
+    this.primaryDelayReason := ""
+    this.maxSevToday := 0
+    this.lastEventMs := 0
+    this.nextTradingDate := ""
+    this.nextTradingStartMs := 0
+    this.nextTradingReasons := ""
+    true
+
+
+// Copy library-returned arrays element-by-element (F27 fix) and merge into cache
+_copyAndMerge(NewsState this, string[] _dP, int[] _tP, int[] _iP, int[] _sP, int[] _delP) =>
+    int _n = array.size(_dP)
+    string[] _dArr = array.new_string()
+    int[] _tArr = array.new_int()
+    int[] _idArr = array.new_int()
+    int[] _sevArr = array.new_int()
+    int[] _delArr = array.new_int()
+    for _k = 0 to _n - 1
+        array.push(_dArr, array.get(_dP, _k))
+        array.push(_tArr, array.get(_tP, _k))
+        array.push(_idArr, array.get(_iP, _k))
+        array.push(_sevArr, array.get(_sP, _k))
+        array.push(_delArr, array.get(_delP, _k))
+    MergeRows(this, _dArr, _tArr, _idArr, _sevArr, _delArr)
+
+export LoadEvents(NewsState this) =>
+    if array.size(this.config.typeSevByTypeId) == 0
+        this.config.typeSevByTypeId := LoadTypeSevByTypeId()
+    array.clear(this.cache.dateStr)
+    array.clear(this.cache.timeMS)
+    array.clear(this.cache.severity)
+    array.clear(this.cache.excTag)
+    array.clear(this.cache.typeId)
+    array.clear(this.cache.libDelayMins)
+    [_hD, _hT, _hI, _hS, _hDel] = hist.LoadNewsRows()
+    _copyAndMerge(this, _hD, _hT, _hI, _hS, _hDel)
+    [_dPacked, _tPacked, _iPacked, _sPacked, _delPacked] = packed.LoadNewsRows()
+    _copyAndMerge(this, _dPacked, _tPacked, _iPacked, _sPacked, _delPacked)
+    BuildDayIndex(this)
+    Init(this)
+    true
+
+// ============================================================================
+// NEWS TIER 1: SIMPLE GETTERS
+// ============================================================================
+
+export IsAllDayBlocked(NewsState this) =>
+    this.config.useSev3TimeWindow and this.allDayBlocked
+
+export IsDelayed(NewsState this, int currentTimeMs) =>
+    bool _delayed = false
+    if this.config.useSev3TimeWindow and this.timedBlocked and this.releaseMs > 0
+        _delayed := currentTimeMs < this.releaseMs
+    _delayed
+
+export GetReleaseMs(NewsState this) => this.timedBlocked ? this.releaseMs : 0
+export GetReasonsToday(NewsState this) => this.reasonsToday
+export GetPrimaryBlockReason(NewsState this) => this.primaryBlockReason
+export GetPrimaryDelayReason(NewsState this) => this.primaryDelayReason
+export GetMaxSeverity(NewsState this) => this.maxSevToday
+export GetNextBlockDate(NewsState this) => this.nextBlockDate
+export GetNextBlockReasons(NewsState this) => this.nextBlockReasons
+export GetNextBlockSev(NewsState this) => this.nextBlockSev
+export GetNextAllowedDate(NewsState this) => this.nextAllowedDate
+export GetNextTradingDate(NewsState this) => this.nextTradingDate
+export GetNextTradingStartMs(NewsState this) => this.nextTradingStartMs
+export GetNextTradingReasons(NewsState this) => this.nextTradingReasons
+
+// ============================================================================
+// NEWS TIER 2: COMPOUND GETTERS
+// ============================================================================
+
+// Returns true if news prevents trading RIGHT NOW — covers both the all-day
+// block and the pre-release delay window. Most callers want this.
+//
+// WARNING: Do NOT use this when you specifically mean "kill the session for
+// the rest of the day." On a delay-then-trade day IsBlocked() is true during
+// the pre-release window and false afterward; treating it as a terminal
+// block sends the session to cleanup before the delay ever ends. For that
+// branch call IsAllDayBlocked() directly, and handle the delay via
+// IsDelayed() on a separate path that waits it out.
+export IsBlocked(NewsState this, int currentTimeMs) =>
+    IsAllDayBlocked(this) or IsDelayed(this, currentTimeMs)
+
+export WillTradeToday(NewsState this) => not IsAllDayBlocked(this)
+
+export GetDelayText(NewsState this, int currentTimeMs) =>
+    string _result = ""
+    if IsDelayed(this, currentTimeMs) and this.releaseMs > 0
+        int _relMinutes = int(math.floor(this.releaseMs / 60000))
+        _relMinutes := math.max(0, math.min(_relMinutes, 23 * 60 + 59))
+        int _hh24 = int(math.floor(_relMinutes / 60))
+        int _mm = _relMinutes - _hh24 * 60
+        int _hh12 = _hh24 % 12
+        if _hh12 == 0
+            _hh12 := 12
+        string _suffix = _hh24 >= 12 ? "pm" : "am"
+        _result := str.format("{0}:{1} {2}", str.tostring(_hh12), str.tostring(_mm, "00"), _suffix)
+    _result
+
+export GetActionUntilText(NewsState this, int currentTimeMs) =>
+    string _result = ""
+    if this.config.useSev3TimeWindow
+        if IsAllDayBlocked(this)
+            _result := "Full Day"
+        else if IsDelayed(this, currentTimeMs) and this.releaseMs > 0
+            int _relMinutes = int(math.floor(this.releaseMs / 60000))
+            _relMinutes := math.max(0, math.min(_relMinutes, 23 * 60 + 59))
+            int _hh24 = int(math.floor(_relMinutes / 60))
+            int _mm = _relMinutes - _hh24 * 60
+            int _hh12 = _hh24 % 12
+            if _hh12 == 0
+                _hh12 := 12
+            string _suffix = _hh24 >= 12 ? "pm" : "am"
+            _result := str.format("{0}:{1} {2}", str.tostring(_hh12), str.tostring(_mm, "00"), _suffix)
+    _result
+
+export GetDelayHHMM(NewsState this, int currentTimeMs) =>
+    int _result = na
+    if IsDelayed(this, currentTimeMs) and this.releaseMs > 0
+        int _relMinutes = int(math.floor(this.releaseMs / 60000))
+        _relMinutes := math.max(0, math.min(_relMinutes, 23 * 60 + 59))
+        int _hh = int(math.floor(_relMinutes / 60))
+        int _mm = _relMinutes - _hh * 60
+        _result := _hh * 100 + _mm
+    _result
+
+export GetBlockedFlag(NewsState this) => IsAllDayBlocked(this) ? 1 : 0
+
+export GetDelayHour(NewsState this, int currentTimeMs) =>
+    int _result = na
+    if IsDelayed(this, currentTimeMs) and this.releaseMs > 0
+        int _relMinutes = int(math.floor(this.releaseMs / 60000))
+        _result := int(math.floor(_relMinutes / 60))
+    _result
+
+export GetDelayMinute(NewsState this, int currentTimeMs) =>
+    int _result = na
+    if IsDelayed(this, currentTimeMs) and this.releaseMs > 0
+        int _relMinutes = int(math.floor(this.releaseMs / 60000))
+        int _hh = int(math.floor(_relMinutes / 60))
+        _result := _relMinutes - _hh * 60
+    _result
+
+export GetDelayEndTimestamp(NewsState this, int _sessionRangeEnd, int currentTimeMs) =>
+    int _result = na
+    if IsDelayed(this, currentTimeMs) and this.releaseMs > 0
+        int _relMinutes = int(math.floor(this.releaseMs / 60000))
+        int _relH = int(math.floor(_relMinutes / 60))
+        int _relM = _relMinutes - _relH * 60
+        int _yy = year(_sessionRangeEnd, this.config.newsTzConst)
+        int _mm = month(_sessionRangeEnd, this.config.newsTzConst)
+        int _dd = dayofmonth(_sessionRangeEnd, this.config.newsTzConst)
+        _result := timestamp(this.config.newsTzConst, _yy, _mm, _dd, _relH, _relM)
+    _result
+
+export GetNextTradingWindowText(NewsState this, int _defaultStartMs, string _tzInput) =>
+    string _result = "-"
+    if not na(this.nextTradingDate) and str.length(this.nextTradingDate) > 0
+        int _yy = int(str.tonumber(str.substring(this.nextTradingDate, 0, 4)))
+        int _mm = int(str.tonumber(str.substring(this.nextTradingDate, 5, 7)))
+        int _dd = int(str.tonumber(str.substring(this.nextTradingDate, 8, 10)))
+        int _t = timestamp(_tzInput, _yy, _mm, _dd, 12, 0)
+        int _dow = dayofweek(_t, _tzInput)
+        if _dow == dayofweek.saturday
+            _t := _t + 2 * 86400000
+        else if _dow == dayofweek.sunday
+            _t := _t + 86400000
+        int _displayDow = dayofweek(_t, _tzInput)
+        int _displayMm = month(_t, _tzInput)
+        int _displayDd = dayofmonth(_t, _tzInput)
+        string _dayName = switch _displayDow
+            1 => "Sun"
+            2 => "Mon"
+            3 => "Tue"
+            4 => "Wed"
+            5 => "Thu"
+            6 => "Fri"
+            7 => "Sat"
+            => "???"
+        int _startMs = this.nextTradingStartMs > 0 ? this.nextTradingStartMs : _defaultStartMs
+        int _relMinutes = int(math.floor(_startMs / 60000))
+        _relMinutes := math.max(0, math.min(_relMinutes, 23 * 60 + 59))
+        int _hh24 = int(math.floor(_relMinutes / 60))
+        int _mn = _relMinutes - _hh24 * 60
+        int _hh12 = _hh24 % 12
+        if _hh12 == 0
+            _hh12 := 12
+        string _ampm = _hh24 >= 12 ? "pm" : "am"
+        string _timeStr = str.tostring(_hh12) + ":" + str.tostring(_mn, "00") + " " + _ampm
+        _result := _dayName + " " + str.tostring(_displayMm) + "/" + str.tostring(_displayDd) + " @ " + _timeStr
+    _result
+
+// ============================================================================
+// NEWS TIER 2.5: EVENT NAME LOOKUP
+// ============================================================================
+
+export GetEventName(int _tid) =>
+    string _nm = switch _tid
+        TYPE_CPI_m_m => "CPI m/m"
+        TYPE_CPI_y_y => "CPI y/y"
+        TYPE_Core_CPI_m_m => "Core CPI m/m"
+        TYPE_Core_PPI_m_m => "Core PPI m/m"
+        TYPE_FOMC_Economic_Projections => "FOMC Economic Projections"
+        TYPE_FOMC_Meeting_Minutes => "FOMC Meeting Minutes"
+        TYPE_Federal_Funds_Rate => "Federal Funds Rate"
+        TYPE_ISM_Manufacturing_PMI => "ISM Manufacturing PMI"
+        TYPE_ISM_Services_PMI => "ISM Services PMI"
+        TYPE_Non_Farm_Employment_Change => "Non-Farm Employment Change"
+        TYPE_PPI_m_m => "PPI m/m"
+        TYPE_President_Trump_Speaks => "President Trump Speaks"
+        TYPE_Unemployment_Rate => "Unemployment Rate"
+        TYPE_Core_PCE_Price_Index_m_m => "Core PCE Price Index m/m"
+        TYPE_PCE_Price_Index_m_m => "PCE Price Index m/m"
+        TYPE_Core_Retail_Sales_m_m => "Core Retail Sales m/m"
+        TYPE_FOMC_Press_Conference => "FOMC Press Conference"
+        TYPE_FOMC_Statement => "FOMC Statement"
+        TYPE_Fed_Chair_Powell_Speaks => "Fed Chair Powell Speaks"
+        TYPE_Fed_Chair_Powell_Testifies => "Fed Chair Powell Testifies"
+        TYPE_Retail_Sales_m_m => "Retail Sales m/m"
+        TYPE_ADP_Non_Farm_Employment_Change => "ADP Non-Farm Employment Change"
+        TYPE_Advance_GDP_q_q => "Advance GDP q/q"
+        TYPE_Average_Hourly_Earnings_m_m => "Average Hourly Earnings m/m"
+        TYPE_Employment_Cost_Index_q_q => "Employment Cost Index q/q"
+        TYPE_Final_GDP_q_q => "Final GDP q/q"
+        TYPE_Flash_Manufacturing_PMI => "Flash Manufacturing PMI"
+        TYPE_Flash_Services_PMI => "Flash Services PMI"
+        TYPE_JOLTS_Job_Openings => "JOLTS Job Openings"
+        TYPE_Jackson_Hole_Symposium => "Jackson Hole Symposium"
+        TYPE_Prelim_GDP_q_q => "Prelim GDP q/q"
+        TYPE_Prelim_UoM_Consumer_Sentiment => "Prelim UoM Consumer Sentiment"
+        TYPE_Prelim_UoM_Inflation_Expectations => "Prelim UoM Inflation Expectations"
+        TYPE_Unemployment_Claims => "Unemployment Claims"
+        TYPE_2_y_Bond_Auction => "2-y Bond Auction"
+        TYPE_10_y_Bond_Auction => "10-y Bond Auction"
+        TYPE_30_y_Bond_Auction => "30-y Bond Auction"
+        TYPE_ADP_Weekly_Employment_Change => "ADP Weekly Employment Change"
+        TYPE_API_Weekly_Statistical_Bulletin => "API Weekly Statistical Bulletin"
+        TYPE_Advance_GDP_Price_Index_q_q => "Advance GDP Price Index q/q"
+        TYPE_Bank_Holiday => "Bank Holiday"
+        TYPE_Bank_Stress_Test_Results => "Bank Stress Test Results"
+        TYPE_Beige_Book => "Beige Book"
+        TYPE_Building_Permits => "Building Permits"
+        TYPE_CB_Consumer_Confidence => "CB Consumer Confidence"
+        TYPE_CB_Leading_Index_m_m => "CB Leading Index m/m"
+        TYPE_Challenger_Job_Cuts_y_y => "Challenger Job Cuts y/y"
+        TYPE_Chicago_PMI => "Chicago PMI"
+        TYPE_Cleveland_Fed_Inflation_Expectations => "Cleveland Fed Inflation Expectations"
+        TYPE_Construction_Spending_m_m => "Construction Spending m/m"
+        TYPE_Consumer_Credit_m_m => "Consumer Credit m/m"
+        TYPE_Core_Durable_Goods_Orders_m_m => "Core Durable Goods Orders m/m"
+        TYPE_Current_Account => "Current Account"
+        TYPE_Daylight_Saving_Time_Shift => "Daylight Saving Time Shift"
+        TYPE_Durable_Goods_Orders_m_m => "Durable Goods Orders m/m"
+        TYPE_Empire_State_Manufacturing_Index => "Empire State Manufacturing Index"
+        TYPE_FOMC_Financial_Stability_Report => "FOMC Financial Stability Report"
+        TYPE_FOMC_Member_Barkin_Speaks => "FOMC Member Barkin Speaks"
+        TYPE_FOMC_Member_Barr_Speaks => "FOMC Member Barr Speaks"
+        TYPE_FOMC_Member_Bostic_Speaks => "FOMC Member Bostic Speaks"
+        TYPE_FOMC_Member_Bowman_Speaks => "FOMC Member Bowman Speaks"
+        TYPE_FOMC_Member_Bullard_Speaks => "FOMC Member Bullard Speaks"
+        TYPE_FOMC_Member_Collins_Speaks => "FOMC Member Collins Speaks"
+        TYPE_FOMC_Member_Cook_Speaks => "FOMC Member Cook Speaks"
+        TYPE_FOMC_Member_Daly_Speaks => "FOMC Member Daly Speaks"
+        TYPE_FOMC_Member_Goolsbee_Speaks => "FOMC Member Goolsbee Speaks"
+        TYPE_FOMC_Member_Hammack_Speaks => "FOMC Member Hammack Speaks"
+        TYPE_FOMC_Member_Harker_Speaks => "FOMC Member Harker Speaks"
+        TYPE_FOMC_Member_Jefferson_Speaks => "FOMC Member Jefferson Speaks"
+        TYPE_FOMC_Member_Kashkari_Speaks => "FOMC Member Kashkari Speaks"
+        TYPE_FOMC_Member_Kugler_Speaks => "FOMC Member Kugler Speaks"
+        TYPE_FOMC_Member_Logan_Speaks => "FOMC Member Logan Speaks"
+        TYPE_FOMC_Member_Miran_Speaks => "FOMC Member Miran Speaks"
+        TYPE_FOMC_Member_Musalem_Speaks => "FOMC Member Musalem Speaks"
+        TYPE_FOMC_Member_Paulson_Speaks => "FOMC Member Paulson Speaks"
+        TYPE_FOMC_Member_Schmid_Speaks => "FOMC Member Schmid Speaks"
+        TYPE_FOMC_Member_Waller_Speaks => "FOMC Member Waller Speaks"
+        TYPE_FOMC_Member_Williams_Speaks => "FOMC Member Williams Speaks"
+        TYPE_Factory_Orders_m_m => "Factory Orders m/m"
+        TYPE_Fed_Monetary_Policy_Report => "Fed Monetary Policy Report"
+        TYPE_Federal_Budget_Balance => "Federal Budget Balance"
+        TYPE_Final_GDP_Price_Index_q_q => "Final GDP Price Index q/q"
+        TYPE_Final_Manufacturing_PMI => "Final Manufacturing PMI"
+        TYPE_Final_Services_PMI => "Final Services PMI"
+        TYPE_Final_Wholesale_Inventories_m_m => "Final Wholesale Inventories m/m"
+        TYPE_Goods_Trade_Balance => "Goods Trade Balance"
+        TYPE_HPI_m_m => "HPI m/m"
+        TYPE_Housing_Starts => "Housing Starts"
+        TYPE_ISM_Manufacturing_Prices => "ISM Manufacturing Prices"
+        TYPE_Import_Prices_m_m => "Import Prices m/m"
+        TYPE_Industrial_Production_m_m => "Industrial Production m/m"
+        TYPE_Business_Inventories_m_m => "Business Inventories m/m"
+        TYPE_Capacity_Utilization_Rate => "Capacity Utilization Rate"
+        TYPE_Existing_Home_Sales => "Existing Home Sales"
+        TYPE_Loan_Officer_Survey => "Loan Officer Survey"
+        TYPE_Mortgage_Delinquencies => "Mortgage Delinquencies"
+        TYPE_NAHB_Housing_Market_Index => "NAHB Housing Market Index"
+        TYPE_NFIB_Small_Business_Index => "NFIB Small Business Index"
+        TYPE_New_Home_Sales => "New Home Sales"
+        TYPE_Pending_Home_Sales_m_m => "Pending Home Sales m/m"
+        TYPE_Personal_Income_m_m => "Personal Income m/m"
+        TYPE_Personal_Spending_m_m => "Personal Spending m/m"
+        TYPE_Prelim_Benchmark_Payrolls_Revision => "Prelim Benchmark Payrolls Revision"
+        TYPE_Prelim_GDP_Price_Index_q_q => "Prelim GDP Price Index q/q"
+        TYPE_Prelim_Nonfarm_Productivity_q_q => "Prelim Nonfarm Productivity q/q"
+        TYPE_Prelim_Unit_Labor_Costs_q_q => "Prelim Unit Labor Costs q/q"
+        TYPE_Prelim_Wholesale_Inventories_m_m => "Prelim Wholesale Inventories m/m"
+        TYPE_RCM_TIPP_Economic_Optimism => "RCM/TIPP Economic Optimism"
+        TYPE_Revised_Nonfarm_Productivity_q_q => "Revised Nonfarm Productivity q/q"
+        TYPE_Revised_Unit_Labor_Costs_q_q => "Revised Unit Labor Costs q/q"
+        TYPE_Revised_UoM_Consumer_Sentiment => "Revised UoM Consumer Sentiment"
+        TYPE_Revised_UoM_Inflation_Expectations => "Revised UoM Inflation Expectations"
+        TYPE_Richmond_Manufacturing_Index => "Richmond Manufacturing Index"
+        TYPE_S_P_CS_Composite_20_HPI_y_y => "S&P/CS Composite-20 HPI y/y"
+        TYPE_TIC_Long_Term_Purchases => "TIC Long-Term Purchases"
+        TYPE_Trade_Balance => "Trade Balance"
+        TYPE_Treasury_Currency_Report => "Treasury Currency Report"
+        TYPE_Wards_Total_Vehicle_Sales => "Ward's Total Vehicle Sales"
+        TYPE_Futures_Contract_Roll_Over_Day => "Futures Contract Roll Over Day"
+        TYPE_CME_EARLY_CLOSE => "CME Early Close"
+        TYPE_War => "War / Geopolitical Crisis"
+        => "News Event"
+    _nm
+
+// ============================================================================
+// NEWS TIER 3: DATE CHECKERS
+// ============================================================================
+
+export CheckDateBlocked(NewsState this, string _dateStr) =>
+    bool _blocked = false
+    string _reasons = ""
+    string _seen = ""
+    int _maxSev = 0
+    if this.config.useSev3TimeWindow
+        int _rowsEval = array.size(this.cache.dateStr)
+        int _policySize = array.size(this.config.policyByTypeId)
+        if _rowsEval > 0
+            for _i = 0 to _rowsEval - 1
+                if array.get(this.cache.dateStr, _i) == _dateStr
+                    int _tid = array.get(this.cache.typeId, _i)
+                    if _tid >= _policySize
+                        continue
+                    int _sev = array.get(this.cache.severity, _i)
+                    PolicyType _pol = array.get(this.config.policyByTypeId, _tid)
+                    bool _isAllDay = _pol == PolicyType.block or (_pol == PolicyType.inherit and _sev == 3 and this.config.useSev3Filter)
+                    if _isAllDay
+                        string _nm = GetEventName(_tid)
+                        bool _dupe = str.contains("|" + _seen + "|", "|" + _nm + "|")
+                        if not _dupe
+                            _reasons := _reasons == "" ? _nm : _reasons + ", " + _nm
+                            _seen := _seen == "" ? _nm : _seen + "|" + _nm
+                        _maxSev := _sev > _maxSev ? _sev : _maxSev
+                        _blocked := true
+    [_blocked, _reasons, _maxSev]
+
+export CheckDateDelay(NewsState this, string _dateStr) =>
+    int _releaseMax = 0
+    string _reasons = ""
+    string _seen = ""
+    if this.config.useSev3TimeWindow
+        int _rowsEval = array.size(this.cache.dateStr)
+        int _policySize = array.size(this.config.policyByTypeId)
+        if _rowsEval > 0
+            for _i = 0 to _rowsEval - 1
+                if array.get(this.cache.dateStr, _i) == _dateStr
+                    int _tid = array.get(this.cache.typeId, _i)
+                    if _tid >= _policySize
+                        continue
+                    int _sev = array.get(this.cache.severity, _i)
+                    PolicyType _pol = array.get(this.config.policyByTypeId, _tid)
+                    bool _isTimed = _pol == PolicyType.delay or (_pol == PolicyType.inherit and ((_sev == 2 and this.config.useSev2Filter) or (_sev == 1 and this.config.useSev1Filter)))
+                    if _isTimed
+                        int _tMs = array.get(this.cache.timeMS, _i)
+                        bool _timeValid = _tMs > 0 and _tMs < 86400000
+                        if _timeValid
+                            int _delayMinEff = this.config.sev3PostDelayMin
+                            int _relMs = _tMs + _delayMinEff * 60000
+                            if _relMs > _releaseMax
+                                _releaseMax := _relMs
+                            string _nm = GetEventName(_tid)
+                            bool _dupe = str.contains("|" + _seen + "|", "|" + _nm + "|")
+                            if not _dupe
+                                _reasons := _reasons == "" ? _nm : _reasons + ", " + _nm
+                                _seen := _seen == "" ? _nm : _seen + "|" + _nm
+    [_releaseMax, _reasons]
+
+// ============================================================================
+// NEWS TIER 4: SESSION EVALUATION
+// ============================================================================
+
+export EvaluateForDate(NewsState this, string _dateStr) =>
+    bool _needEval = this.evaluatedDate != _dateStr
+    if _needEval
+        bool _allDay = false
+        bool _timed = false
+        int _lastMs = 0
+        int _releaseMax = 0
+        string _reasons = ""
+        string _seen = ""
+        int _maxSev = 0
+        string _primaryBlock = ""
+        string _primaryDelay = ""
+        if this.config.useSev3TimeWindow
+            int _rowsNews = array.size(this.cache.dateStr)
+            int _policySize = array.size(this.config.policyByTypeId)
+            if _rowsNews > 0
+                for _i = 0 to _rowsNews - 1
+                    if array.get(this.cache.dateStr, _i) == _dateStr
+                        int _tid = array.get(this.cache.typeId, _i)
+                        int _sev = array.get(this.cache.severity, _i)
+                        if _tid >= _policySize
+                            continue
+                        PolicyType _pol = array.get(this.config.policyByTypeId, _tid)
+                        bool _isAllDay = _pol == PolicyType.block or (_pol == PolicyType.inherit and _sev == 3 and this.config.useSev3Filter)
+                        bool _isTimed = _pol == PolicyType.delay or (_pol == PolicyType.inherit and ((_sev == 2 and this.config.useSev2Filter) or (_sev == 1 and this.config.useSev1Filter)))
+                        if _isAllDay
+                            _allDay := true
+                            string _nm = GetEventName(_tid)
+                            bool _dupe = str.contains("|" + _seen + "|", "|" + _nm + "|")
+                            if not _dupe
+                                _reasons := _reasons == "" ? _nm : _reasons + ", " + _nm
+                                _seen := _seen == "" ? _nm : _seen + "|" + _nm
+                                if _primaryBlock == ""
+                                    _primaryBlock := _nm
+                            _maxSev := _sev > _maxSev ? _sev : _maxSev
+                        if _isTimed
+                            int _tMs = array.get(this.cache.timeMS, _i)
+                            bool _timeValid = _tMs > 0 and _tMs < 86400000
+                            if _timeValid
+                                _timed := true
+                                if _tMs > _lastMs
+                                    _lastMs := _tMs
+                                int _relMs = _tMs + this.config.sev3PostDelayMin * 60000
+                                if _relMs > _releaseMax
+                                    _releaseMax := _relMs
+                                    _primaryDelay := GetEventName(_tid)
+                                string _nm = GetEventName(_tid)
+                                bool _dupe = str.contains("|" + _seen + "|", "|" + _nm + "|")
+                                if not _dupe
+                                    _reasons := _reasons == "" ? _nm : _reasons + ", " + _nm
+                                    _seen := _seen == "" ? _nm : _seen + "|" + _nm
+                                _maxSev := _sev > _maxSev ? _sev : _maxSev
+        this.allDayBlocked := _allDay
+        this.timedBlocked := _timed
+        this.releaseMs := _timed ? _releaseMax : 0
+        this.lastEventMs := _lastMs
+        this.reasonsToday := _reasons
+        this.primaryBlockReason := _primaryBlock
+        this.primaryDelayReason := _primaryDelay
+        this.maxSevToday := _maxSev
+        this.evaluatedDate := _dateStr
+    [this.allDayBlocked, this.timedBlocked, this.releaseMs, this.reasonsToday, this.maxSevToday]
+
+// ============================================================================
+// NEWS TIER 5: FUTURE SCANNERS
+// ============================================================================
+
+export ScanFuture(NewsState this, string _sessionDateStr, int _rangeEndTime, string _tzInput) =>
+    string _earliestBlockedDate = na
+    string _earliestBlockedReasons = ""
+    int _earliestBlockedSev = 0
+    int _sessKey = DateKey(_sessionDateStr)
+    int _dayN = array.size(this.cache.dayStr)
+    bool _foundNext = false
+    for _j = 0 to _dayN - 1
+        if not _foundNext
+            string _d = array.get(this.cache.dayStr, _j)
+            int _dKey = DateKey(_d)
+            if _dKey > _sessKey
+                [_blk, _reas, _sev] = CheckDateBlocked(this, _d)
+                if _blk
+                    _earliestBlockedDate := _d
+                    _earliestBlockedReasons := _reas
+                    _earliestBlockedSev := _sev
+                    _foundNext := true
+    this.nextBlockDate := _earliestBlockedDate
+    this.nextBlockReasons := _earliestBlockedReasons
+    this.nextBlockSev := _earliestBlockedSev
+    this.nextAllowedDate := na
+    if this.allDayBlocked
+        int _yy = year(_rangeEndTime, _tzInput)
+        int _mm = month(_rangeEndTime, _tzInput)
+        int _dd = dayofmonth(_rangeEndTime, _tzInput)
+        int _baseMid = timestamp(_tzInput, _yy, _mm, _dd, 0, 0)
+        for _k = 1 to 14
+            if na(this.nextAllowedDate)
+                int _t = _baseMid + _k * 86400000
+                int _yN = year(_t, _tzInput)
+                int _mN = month(_t, _tzInput)
+                int _dN = dayofmonth(_t, _tzInput)
+                string _dstr = str.tostring(_yN) + "-" + str.tostring(_mN, "00") + "-" + str.tostring(_dN, "00")
+                [_blk, _ignoredReasons, _ignoredSev] = CheckDateBlocked(this, _dstr)
+                if not _blk
+                    this.nextAllowedDate := _dstr
+    true
+
+export ScanNextEvent(NewsState this, string _sessionDateStr) =>
+    this.nextNewsDate := na
+    this.nextNewsReasons := ""
+    this.nextNewsIsBlock := false
+    this.nextNewsReleaseMs := 0
+    int _sessKey = DateKey(_sessionDateStr)
+    int _dayN = array.size(this.cache.dayStr)
+    bool _found = false
+    for _j = 0 to _dayN - 1
+        if not _found
+            string _d = array.get(this.cache.dayStr, _j)
+            int _dKey = DateKey(_d)
+            if _dKey > _sessKey
+                [_blk, _blkReas, _blkSev] = CheckDateBlocked(this, _d)
+                if _blk
+                    this.nextNewsDate := _d
+                    this.nextNewsReasons := _blkReas
+                    this.nextNewsIsBlock := true
+                    _found := true
+                else
+                    [_delMs, _delReas] = CheckDateDelay(this, _d)
+                    if _delMs > 0
+                        this.nextNewsDate := _d
+                        this.nextNewsReasons := _delReas
+                        this.nextNewsIsBlock := false
+                        this.nextNewsReleaseMs := _delMs
+                        _found := true
+    true
+
+export FindNextTradingWindow(NewsState this, string _todayDateStr, int _rangeEndTime, int _defaultStartMs, string _tzInput) =>
+    EvaluateForDate(this, _todayDateStr)
+    if not IsAllDayBlocked(this)
+        this.nextTradingDate := _todayDateStr
+        if this.timedBlocked and this.releaseMs > 0
+            this.nextTradingStartMs := this.releaseMs
+            this.nextTradingReasons := this.reasonsToday
+        else
+            this.nextTradingStartMs := _defaultStartMs
+            this.nextTradingReasons := ""
+    else
+        this.nextTradingDate := na
+        this.nextTradingStartMs := 0
+        this.nextTradingReasons := ""
+        int _yy = year(_rangeEndTime, _tzInput)
+        int _mm = month(_rangeEndTime, _tzInput)
+        int _dd = dayofmonth(_rangeEndTime, _tzInput)
+        int _baseMid = timestamp(_tzInput, _yy, _mm, _dd, 0, 0)
+        for _k = 1 to 14
+            if na(this.nextTradingDate)
+                int _t = _baseMid + _k * 86400000
+                int _dow = dayofweek(_t, _tzInput)
+                bool _isWeekday = _dow >= 2 and _dow <= 6
+                if _isWeekday
+                    int _yN = year(_t, _tzInput)
+                    int _mN = month(_t, _tzInput)
+                    int _dN = dayofmonth(_t, _tzInput)
+                    string _dstr = str.tostring(_yN) + "-" + str.tostring(_mN, "00") + "-" + str.tostring(_dN, "00")
+                    [_blk, _reas, _sev] = CheckDateBlocked(this, _dstr)
+                    if not _blk
+                        this.nextTradingDate := _dstr
+                        [_delayMs, _delayReasons] = CheckDateDelay(this, _dstr)
+                        if _delayMs > 0
+                            this.nextTradingStartMs := _delayMs
+                            this.nextTradingReasons := _delayReasons
+                        else
+                            this.nextTradingStartMs := _defaultStartMs
+                            this.nextTradingReasons := ""
+    ScanFuture(this, _todayDateStr, _rangeEndTime, _tzInput)
+    ScanNextEvent(this, _todayDateStr)
+    true
+
+// ============================================================================
+// NEWS: CME EARLY CLOSE
+// ============================================================================
+
+export CheckCmeEarlyClose(NewsState this, string _dateStr, int _rangeEndTs, string _tzInput) =>
+    int _haltTs = 0
+    int _dayIdx = array.indexof(this.cache.dayStr, _dateStr)
+    if _dayIdx >= 0
+        int _start = array.get(this.cache.dayStart, _dayIdx)
+        int _end = array.get(this.cache.dayEnd, _dayIdx)
+        for _i = _start to _end - 1
+            int _tid = array.get(this.cache.typeId, _i)
+            if _tid == TYPE_CME_EARLY_CLOSE
+                int _timeMs = array.get(this.cache.timeMS, _i)
+                int _yy = year(_rangeEndTs, _tzInput)
+                int _mm = month(_rangeEndTs, _tzInput)
+                int _dd = dayofmonth(_rangeEndTs, _tzInput)
+                int _haltHour = math.floor(_timeMs / 3600000)
+                int _haltMin = math.floor((_timeMs % 3600000) / 60000)
+                _haltTs := timestamp(_tzInput, _yy, _mm, _dd, _haltHour, _haltMin)
+                break
+    _haltTs

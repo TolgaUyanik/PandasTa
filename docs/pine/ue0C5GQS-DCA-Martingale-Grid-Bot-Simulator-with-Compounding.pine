@@ -1,0 +1,147 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © happydappyman
+
+//@version=6
+//Simulates Pionex Martingale Bot. First safety order matches initial buy quantity
+//Updated to Pine Script v6 (trade history trimming support + minor robustness)
+//v6 note: Strategies now trim oldest trades instead of erroring at the old ~9000 trade limit.
+//Remember to allow pyramiding buys in properties tab (n grids + 1).
+//For high-value coins like BTC, lower the Min Qty Threshold significantly..
+strategy("DCA Grid Bot Vr4.4", overlay=true, initial_capital=1000, default_qty_type=strategy.fixed, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.05, pyramiding=15)
+
+// Use fixed initial capital for sizing (no automatic compounding)
+var float calc_capital = strategy.initial_capital
+var float accumulated_profit = 0.0
+var int last_closed_trades = 0
+var int next_compound_time = na
+
+// Function to add months to a timestamp
+add_months(int ts, int add_m) =>
+    int y = year(ts)
+    int m = month(ts) + add_m
+    int new_y = y + (m - 1) / 12
+    int new_m = ((m - 1) % 12) + 1
+    int d = dayofmonth(ts)
+    int h = hour(ts)
+    int min_ = minute(ts)
+    int s = second(ts)
+    timestamp(new_y, new_m, d, h, min_, s)
+
+// Inputs
+compounding_frequency = input.int(0, "Compounding Frequency (months, 0=off)", minval=0)
+grid_count = input.int(8, "Grid Count", minval=1)
+grid_spacing_pct = input.float(4.2, "Grid Spacing %", minval=0.1, step=0.1)
+scale_factor = input.float(1.5, "Scale Factor per Grid", minval=1.0, step=0.1)
+tp_pct = input.float(4.4, "Take Profit %", minval=0.1, step=0.1)
+total_exposure_pct = input.float(100.0, "Total Exposure (% of Initial Capital)", minval=10.0, maxval=100.0, step=5.0)
+min_qty = input.float(0.01, "Min Qty Threshold (units)")
+
+// Periodic compounding check
+if compounding_frequency > 0
+    if na(next_compound_time)
+        next_compound_time := add_months(time, compounding_frequency)
+    if time >= next_compound_time
+        calc_capital += math.max(0, accumulated_profit)
+        accumulated_profit := 0.0
+        next_compound_time := add_months(next_compound_time, compounding_frequency)
+
+// Cumulative multiplier for sizing (geometric)
+cumul_mult = math.pow(scale_factor, grid_count) - 1
+cumul_mult := (scale_factor != 1 ? (cumul_mult / (scale_factor - 1)) + 1 : grid_count + 1)
+base_risk_pct = total_exposure_pct / cumul_mult
+
+// State tracking
+var float initial_entry_price = na
+var int current_grid_level = 0
+var float[] grid_levels = array.new_float(0)
+
+// Persistent plot levels (horizontal grid lines until TP)
+var float grid_plot1 = na
+var float grid_plot2 = na
+var float grid_plot3 = na
+var float grid_plot4 = na
+var float grid_plot5 = na
+var float grid_plot6 = na
+var float grid_plot7 = na
+var float grid_plot8 = na
+
+// Entry logic
+in_position = strategy.position_size > 0
+
+if not in_position and barstate.isconfirmed
+    size_pct = base_risk_pct
+    new_qty = (size_pct / 100 * calc_capital / close)
+    if new_qty >= min_qty
+        initial_entry_price := close
+        current_grid_level := 0
+        array.clear(grid_levels)
+        for i = 1 to grid_count
+            grid_price = initial_entry_price * (1 - i * grid_spacing_pct / 100)
+            array.push(grid_levels, grid_price)
+
+        strategy.entry("Initial Buy", strategy.long, qty = new_qty)
+        label.new(bar_index, high, "Initial: " + str.tostring(close, "#.####"), color=color.green, style=label.style_label_down)
+
+        // Lock horizontal grid plot levels
+        plot_size = array.size(grid_levels)
+        grid_plot1 := plot_size > 0 ? array.get(grid_levels, 0) : na
+        grid_plot2 := plot_size > 1 ? array.get(grid_levels, 1) : na
+        grid_plot3 := plot_size > 2 ? array.get(grid_levels, 2) : na
+        grid_plot4 := plot_size > 3 ? array.get(grid_levels, 3) : na
+        grid_plot5 := plot_size > 4 ? array.get(grid_levels, 4) : na
+        grid_plot6 := plot_size > 5 ? array.get(grid_levels, 5) : na
+        grid_plot7 := plot_size > 6 ? array.get(grid_levels, 6) : na
+        grid_plot8 := plot_size > 7 ? array.get(grid_levels, 7) : na
+
+// Grid safety orders (while loop allows multiple fills on big gaps)
+if in_position and current_grid_level < grid_count and barstate.isconfirmed
+    grid_size = array.size(grid_levels)
+    float added_qty_this_bar = 0.0
+    while current_grid_level < grid_count and grid_size > current_grid_level
+        if close > array.get(grid_levels, current_grid_level)
+            break
+        scale_mult = math.pow(scale_factor, current_grid_level)
+        size_pct = base_risk_pct * scale_mult
+        new_qty = (size_pct / 100 * calc_capital / close)
+        if new_qty < min_qty
+            break
+        strategy.entry("Grid Buy " + str.tostring(current_grid_level + 1), strategy.long, qty = new_qty)
+        label.new(bar_index, high, "Grid " + str.tostring(current_grid_level + 1) + ": " + str.tostring(close, "#.####"), color=color.red, style=label.style_label_down)
+        added_qty_this_bar += new_qty
+        current_grid_level += 1
+
+// Take Profit
+avg_entry = strategy.position_avg_price
+position_pnl_pct = (close - avg_entry) / avg_entry * 100
+if in_position and position_pnl_pct >= tp_pct
+    strategy.close_all("TP Hit")
+    initial_entry_price := na
+    current_grid_level := 0
+    grid_plot1 := na
+    grid_plot2 := na
+    grid_plot3 := na
+    grid_plot4 := na
+    grid_plot5 := na
+    grid_plot6 := na
+    grid_plot7 := na
+    grid_plot8 := na
+
+// Accumulate realized profits (v6-safe version with first_index for trimming)
+if strategy.closedtrades > last_closed_trades
+    int start_idx = math.max(last_closed_trades, strategy.closedtrades.first_index)
+    for i = start_idx to strategy.closedtrades - 1
+        float prof = strategy.closedtrades.profit(i)
+        if not na(prof)
+            accumulated_profit += prof
+    last_closed_trades := strategy.closedtrades
+
+// Debug plots (horizontal grid levels + initial entry)
+plot(na(initial_entry_price) ? na : initial_entry_price, "Initial Entry", color=color.green, style=plot.style_linebr)
+plot(grid_plot1, "Grid 1", color=color.red, style=plot.style_linebr)
+plot(grid_plot2, "Grid 2", color=color.red, style=plot.style_linebr)
+plot(grid_plot3, "Grid 3", color=color.red, style=plot.style_linebr)
+plot(grid_plot4, "Grid 4", color=color.red, style=plot.style_linebr)
+plot(grid_plot5, "Grid 5", color=color.red, style=plot.style_linebr)
+plot(grid_plot6, "Grid 6", color=color.red, style=plot.style_linebr)
+plot(grid_plot7, "Grid 7", color=color.red, style=plot.style_linebr)
+plot(grid_plot8, "Grid 8", color=color.red, style=plot.style_linebr)

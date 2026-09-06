@@ -1,0 +1,142 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// MMF Flow Regime Classifier v3
+//
+// v3 changes:
+//   • FIXED timeframe dependence: all momentum/z calcs now execute INSIDE
+//     request.security() in the data timeframe. Ratio mode uses a spread
+//     symbol ("FRED:RMFSL/FRED:M2SL") so the z-score is computed natively on
+//     monthly bars regardless of chart timeframe. v2 computed ROC on chart
+//     bars, which produced garbage (near-zero z) on any chart faster than
+//     the data frequency.
+//   • FIXED units: TradingView serves FRED levels in raw dollars; the level
+//     change is now auto-scaled to $B for display.
+//   • Added optional regime persistence filter (N consecutive bars) to
+//     suppress single-bar regime flips.
+//
+// Regime map:
+//   1. DEPLOYMENT  rates ↓ + real outflows      → strongest risk-on confirm
+//   2. FEAR        rates ↓ + assets building    → 2008 signature, risk-off
+//   3. CARRY       rates ↑ + assets building    → cash attraction, tightening
+//   4. MELT-UP     rates ↑ + real outflows      → rare, violent risk-on
+//   5. DECEL       z < 0 but level still rising → inflows slowing, neutral+
+//
+// Note: with lookahead off, the newest bar on sub-monthly charts reflects the
+// in-progress monthly observation and can revise until the month closes.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("MMF Flow Regime Classifier v3", shorttitle = "MMF Regime v3", overlay = false)
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpD = "Data Sources"
+mmfSym  = input.symbol("FRED:RMFSL", "MMF asset series", group = grpD,
+     tooltip = "FRED:RMFSL (monthly retail, SA) | FRED:WRMFNS (weekly retail, NSA) | FRED:MMMFFAQ027S (quarterly total)")
+m2Sym   = input.symbol("FRED:M2SL", "M2 series (for ratio mode)", group = grpD)
+rateSym = input.symbol("FRED:DGS2", "Front-end rate series", group = grpD,
+     tooltip = "FRED:DGS2 (2Y) or FRED:DTB3 (3-mo bill)")
+tf      = input.timeframe("1M", "Data timeframe", group = grpD)
+
+grpC = "Calculation"
+useRatio = input.bool(true, "Normalize by M2 (cash preference mode)", group = grpC,
+     tooltip = "ON: z-score of MMF/M2 share momentum. OFF: raw level momentum.")
+rocLen   = input.int(3,  "Flow ROC lookback (data bars)",       minval = 1,  group = grpC)
+zLen     = input.int(36, "Z-score lookback (data bars)",        minval = 12, group = grpC)
+smthLen  = input.int(2,  "Signal smoothing (data bars)",        minval = 1,  group = grpC)
+rateLen  = input.int(3,  "Rate direction lookback (data bars)", minval = 1,  group = grpC)
+zBand    = input.float(0.25, "Neutral band (|z| below = neutral)", minval = 0.0, step = 0.05, group = grpC)
+persist  = input.int(1, "Regime persistence (bars to confirm)", minval = 1, maxval = 6, group = grpC,
+     tooltip = "Raw regime must hold this many consecutive data bars before the confirmed regime flips. 1 = off.")
+
+grpV = "Display"
+showBg    = input.bool(true, "Regime background shading", group = grpV)
+showTable = input.bool(true, "Status table",              group = grpV)
+
+// ── Series — ALL calcs inside security, in the data timeframe ────────────────
+sigSym = useRatio ? mmfSym + "/" + m2Sym : mmfSym   // spread symbol for ratio
+
+zOf() =>
+    r = ta.roc(close, rocLen)
+    zr = (r - ta.sma(r, zLen)) / ta.stdev(r, zLen)
+    ta.sma(zr, smthLen)
+
+z       = request.security(sigSym,  tf, zOf())
+lvlChg  = request.security(mmfSym,  tf, close - close[rocLen])   // raw $ change
+rateChg = request.security(rateSym, tf, close - close[rateLen])
+
+realOut = lvlChg < 0
+
+// ── Regime logic ─────────────────────────────────────────────────────────────
+ratesFalling = rateChg < 0
+inNeutral    = math.abs(z) < zBand
+
+// 0 neutral | 1 deployment | 2 fear | 3 carry | 4 melt-up | 5 decel
+rawRegime = inNeutral ? 0 :
+     z > 0 and ratesFalling     ? 2 :
+     z > 0 and not ratesFalling ? 3 :
+     realOut and ratesFalling   ? 1 :
+     realOut                    ? 4 : 5
+
+// Persistence filter: confirmed regime only flips after N consecutive bars
+var int regime = 0
+var int hold   = 0
+if rawRegime == regime
+    hold := 0
+else
+    hold := rawRegime == rawRegime[1] ? hold + 1 : 1
+    if hold >= persist
+        regime := rawRegime
+        hold := 0
+
+regimeName(r) =>
+    r == 1 ? "DEPLOYMENT — risk-on confirmed" :
+     r == 2 ? "FEAR — easing not believed"     :
+     r == 3 ? "CARRY — cash attraction"        :
+     r == 4 ? "MELT-UP — extreme risk-on"      :
+     r == 5 ? "DECEL — inflows slowing"        : "NEUTRAL"
+
+colDeploy = color.new(#26a69a, 0)   // true outflow, rates falling
+colFear   = color.new(#ef5350, 0)   // building, rates falling
+colCarry  = color.new(#ffb74d, 0)   // building, rates rising
+colMelt   = color.new(#00e5ff, 0)   // true outflow, rates rising
+colDecel  = color.new(#5b7a99, 0)   // NOT an outflow — inflows just slowing.
+                                     // Deliberately slate/gray-blue, distinct
+                                     // from the teal/cyan outflow states, so
+                                     // it never reads as "money leaving."
+colNeut   = color.new(#787b86, 0)
+
+regimeCol(r) =>
+    r == 1 ? colDeploy : r == 2 ? colFear : r == 3 ? colCarry :
+     r == 4 ? colMelt : r == 5 ? colDecel : colNeut
+
+// Auto-scale a raw-dollar value to a readable $B string
+fmtB(v) =>
+    str.tostring(v / 1e9, "#.#") + " $B"
+
+// ── Plots ────────────────────────────────────────────────────────────────────
+plot(z, "Flow z-score", style = plot.style_columns, color = regimeCol(regime))
+hline(0, "Zero", color = color.new(color.gray, 50))
+hline( 2, "+2σ", color = color.new(color.gray, 70), linestyle = hline.style_dotted)
+hline(-2, "-2σ", color = color.new(color.gray, 70), linestyle = hline.style_dotted)
+
+plot(ratesFalling ? -0.1 : 0.1, "Rate direction (± strip)",
+     style = plot.style_circles, color = color.new(ratesFalling ? colDeploy : colCarry, 60))
+
+bgcolor(showBg ? color.new(regimeCol(regime), 88) : na)
+
+// ── Status table ─────────────────────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 4, border_width = 1)
+if barstate.islast and showTable
+    hdrBg = color.new(color.black, 20)
+    table.cell(t, 0, 0, "Regime", text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 0, regimeName(regime), text_color = color.white, bgcolor = regimeCol(regime), text_size = size.small)
+    table.cell(t, 0, 1, "Flow z" + (useRatio ? " (MMF/M2)" : ""), text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 1, str.tostring(z, "#.##"), text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 0, 2, "Level Δ (" + str.tostring(rocLen) + " bars)", text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 2, (realOut ? "OUTFLOW -" : "INFLOW +") + fmtB(math.abs(lvlChg)), text_color = realOut ? colMelt : color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 0, 3, "Rate Δ (" + str.tostring(rateLen) + " bars)", text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+    table.cell(t, 1, 3, str.tostring(rateChg, "#.##") + " pts", text_color = color.white, bgcolor = hdrBg, text_size = size.small)
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(ta.change(regime) != 0,         "Regime change",       "MMF regime changed")
+alertcondition(regime == 2 and regime[1] != 2, "FEAR regime entered", "Rates falling + MMF assets building — easing not believed")
+alertcondition(regime == 1 and regime[1] != 1, "DEPLOYMENT entered",  "Rates falling + real MMF outflows — risk-on confirmed")
+alertcondition(regime == 4 and regime[1] != 4, "MELT-UP entered",     "Rates rising + real MMF outflows — verify against price action")

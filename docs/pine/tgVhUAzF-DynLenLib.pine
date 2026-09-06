@@ -1,0 +1,742 @@
+//@version=5
+
+library("DynLenLib", false)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Global controls & utilities
+//──────────────────────────────────────────────────────────────────────────────
+
+// Compile-time max window used by loop-based primitives.
+// Adjust if you need longer dynamic windows. Keep reasonable for performance.
+const int MAX_WIN = 1000
+
+// Clamp dynamic length to [1, MAX_WIN].
+clamp_len(series int len) =>
+    int(math.max(1, math.min(MAX_WIN, len)))
+
+// Return true when current bar has at least `len` bars of history available.
+have_bars(series int len) =>
+    bar_index >= clamp_len(len) - 1
+
+// Robust safe division
+safe_div(float n, float d) =>
+    d == 0.0 or na(d) ? na : n / d
+
+// Sum over last `len` bars with dynamic length (inclusive of current bar).
+export sum_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float s = 0.0
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            s += nz(src[i])
+        s
+
+// Dynamic lag: value `len` bars ago with dynamic length.
+export lag_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float out = na
+        for i = 0 to MAX_WIN - 1
+            if i == L
+                out := src[i]
+                break
+        out
+
+// Highest over last `len` bars with dynamic length.
+export highest_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float h = na
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            h := na(h) ? src[i] : math.max(h, src[i])
+        h
+
+// Lowest over last `len` bars with dynamic length.
+export lowest_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float l = na
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            l := na(l) ? src[i] : math.min(l, src[i])
+        l
+
+// Mean and (population) variance/stddev with dynamic length.
+mean_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    float s  = sum_dyn(src, L)
+    have_bars(L) ? s / L : na
+
+export var_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float sx  = sum_dyn(src, L)
+        float sx2 = sum_dyn(src*src, L)
+        float mu  = sx / L
+        float v   = sx2 / L - mu*mu
+        v < 0 ? 0 : v
+
+export stdev_dyn(series float src, series int len) =>
+    float v = var_dyn(src, len)
+    na(v) ? na : math.sqrt(v)
+
+// Price helpers
+export hl2()  => (high + low) / 2.0
+export hlc3() => (high + low + close) / 3.0
+export ohlc4()=> (open + high + low + close) / 4.0
+
+//──────────────────────────────────────────────────────────────────────────────
+// Moving Averages (dynamic lengths)
+//──────────────────────────────────────────────────────────────────────────────
+
+// Simple Moving Average (exact)
+export sma_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    have_bars(L) ? sum_dyn(src, L) / L : na
+
+// Exponential Moving Average (exact recursion, length may vary per bar)
+export ema_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    float a = 2.0 / (L + 1.0)
+    var float ema = na
+    if na(ema)
+        ema := sma_dyn(src, L)
+    else
+        ema := a * src + (1.0 - a) * nz(ema[1], src)
+    ema
+
+// Wilder's RMA/SMMA (exact recursion, dynamic length)
+export rma_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    float a = 1.0 / L
+    var float r = na
+    if na(r)
+        r := sma_dyn(src, L)
+    else
+        r := (1.0 - a) * nz(r[1]) + a * src
+    r
+
+// Smoothed Moving Average (SMMA) alias (same math as RMA)
+export smma_dyn(series float src, series int len) =>
+    rma_dyn(src, len)
+
+// Weighted Moving Average (linear weights 1..L, exact)
+export wma_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float num = 0.0
+        float den = 0.0
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            float w = (L - i)
+            num += nz(src[i]) * w
+            den += w
+        safe_div(num, den)
+
+// Volume-Weighted Moving Average (exact for dynamic window)
+export vwma_dyn(series float price, series float vol, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float num = 0.0
+        float den = 0.0
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            float v = nz(vol[i])
+            num += nz(price[i]) * v
+            den += v
+        safe_div(num, den)
+
+// Hull Moving Average (exact construction)
+export hma_dyn(series float src, series int len) =>
+    int L  = clamp_len(len)
+    int L2 = clamp_len(math.floor(L / 2))
+    int Lr = clamp_len(int(math.round(math.sqrt(L))))
+    float w1 = wma_dyn(src, L2)
+    float w2 = wma_dyn(src, L)
+    wma_dyn(2.0 * w1 - w2, Lr)
+
+// Double/Triple EMA using exact EMA dyn
+export dema_dyn(series float src, series int len) =>
+    float e1 = ema_dyn(src, len)
+    float e2 = ema_dyn(e1,  len)
+    2.0 * e1 - e2
+
+export tema_dyn(series float src, series int len) =>
+    float e1 = ema_dyn(src, len)
+    float e2 = ema_dyn(e1,  len)
+    float e3 = ema_dyn(e2,  len)
+    3.0*e1 - 3.0*e2 + e3
+
+// Kauffman Adaptive Moving Average (exact)
+export kama_dyn(series float src, series int erLen, series int fastLen, series int slowLen) =>
+    int L  = clamp_len(erLen)
+    float change = math.abs(src - nz(lag_dyn(src, L), src))
+    // Sum of absolute momentum over L
+    float absMom = 0.0
+    for i = 1 to MAX_WIN - 1
+        if i > L
+            break
+        absMom += math.abs(nz(src[i-1]) - nz(src[i]))
+    float er = safe_div(change, absMom)
+    float fastSC = 2.0 / (clamp_len(fastLen) + 1.0)
+    float slowSC = 2.0 / (clamp_len(slowLen) + 1.0)
+    float sc = math.pow(er * (fastSC - slowSC) + slowSC, 2.0)
+    var float kama = na
+    kama := na(kama) ? sma_dyn(src, L) : nz(kama[1]) + sc * (src - nz(kama[1]))
+    kama
+
+// McGinley Dynamic (exact)
+export mcginley_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    var float mg = na
+    mg := na(mg) ? src : nz(mg[1]) + (src - nz(mg[1])) / (L * math.pow(safe_div(src, nz(mg[1], src)), 4.0))
+    mg
+
+// Median (median price, not median filter)
+export median_price() => (high + low) * 0.5
+
+//──────────────────────────────────────────────────────────────────────────────
+// Volatility & ranges
+//──────────────────────────────────────────────────────────────────────────────
+
+export true_range() =>
+    float c1 = nz(close[1], close)
+    float tr1 = high - low
+    float tr2 = math.abs(high - c1)
+    float tr3 = math.abs(low  - c1)
+    math.max(tr1, math.max(tr2, tr3))
+
+export atr_dyn(series int len) =>
+    rma_dyn(true_range(), len)
+
+
+// Bollinger Bands (exact SMA+StDev)
+export bbands_dyn(series float src, series int len, float mult) =>
+    float bmid = sma_dyn(src, len)
+    float dev  = stdev_dyn(src, len)
+    float upper = na(bmid) or na(dev) ? na : bmid + mult * dev
+    float lower = na(bmid) or na(dev) ? na : bmid - mult * dev
+    [bmid, upper, lower]
+
+// Bollinger %B and Bandwidth
+export bb_percent_b(series float src, series int len, float mult) =>
+    [bmid, upper, lower] = bbands_dyn(src, len, mult)
+    na(upper) or na(lower) ? na : (src - lower) / (upper - lower)
+
+export bb_bandwidth(series float src, series int len, float mult) =>
+    [bmid, upper, lower] = bbands_dyn(src, len, mult)
+    na(upper) or na(lower) ? na : (upper - lower) / bmid
+
+// Keltner Channels (EMA mid, ATR bands)
+export keltner_dyn(series float src, series int lenEMA, series int lenATR, float multATR) =>
+    float mid   = ema_dyn(src, lenEMA)
+    float atrv  = atr_dyn(lenATR)
+    float upper = na(mid) or na(atrv) ? na : mid + multATR * atrv
+    float lower = na(mid) or na(atrv) ? na : mid - multATR * atrv
+    [mid, upper, lower]
+
+// Donchian Channels (highest/lowest)
+export donchian_dyn(series int len) =>
+    float hi = highest_dyn(high, len)
+    float lo = lowest_dyn(low,  len)
+    [ (hi + lo) * 0.5, hi, lo ]
+
+// Choppiness Index (E. Brown)
+export choppiness_index(series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float trSum = 0.0
+        float hi = na
+        float lo = na
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            trSum += nz(true_range()[i])
+            hi := na(hi) ? high[i] : math.max(hi, high[i])
+            lo := na(lo) ? low[i]  : math.min(lo,  low[i])
+        float denom = hi - lo
+        100.0 * safe_div(math.log10(trSum / denom), math.log10(L))
+
+// Volatility Stop (Chandelier-like using ATR)
+export vol_stop(series int lenATR, float mult) =>
+    float atrv = atr_dyn(lenATR)
+    float longStop  = close - mult * atrv
+    float shortStop = close + mult * atrv
+    [longStop, shortStop]
+
+//──────────────────────────────────────────────────────────────────────────────
+// Momentum, oscillators, trend-strength
+//──────────────────────────────────────────────────────────────────────────────
+
+// Rate of Change ROC% over dynamic length
+export roc_dyn(series float src, series int len) =>
+    float prev = lag_dyn(src, len)
+    safe_div(src - prev, prev) * 100.0
+
+// RSI (exact, dynamic RMA)
+export rsi_dyn(series float src, series int len) =>
+    float ch = src - nz(src[1], src)
+    float up = math.max(ch, 0)
+    float dn = math.max(-ch, 0)
+    float rs = safe_div(rma_dyn(up, len), rma_dyn(dn, len))
+    100.0 - 100.0 / (1.0 + rs)
+
+// Stochastic %K/%D
+export stoch_dyn(series int kLen, series int dLen, series int smoothK) =>
+    float ll = lowest_dyn(low,  kLen)
+    float hh = highest_dyn(high, kLen)
+    float rawK = safe_div(close - ll, hh - ll) * 100.0
+    float k = sma_dyn(rawK, clamp_len(smoothK))
+    float d = sma_dyn(k,     clamp_len(dLen))
+    [k, d]
+
+// Stochastic RSI
+export stoch_rsi_dyn(series int rsiLen, series int stochLen, series int kSmooth, series int dLen) =>
+    float r = rsi_dyn(close, rsiLen)
+    float ll = lowest_dyn(r,  stochLen)
+    float hh = highest_dyn(r, stochLen)
+    float raw = safe_div(r - ll, hh - ll) * 100.0
+    float k = sma_dyn(raw, kSmooth)
+    float d = sma_dyn(k,   dLen)
+    [k, d]
+
+// CCI (exact using mean deviation)
+export cci_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    float tp = src
+    float sma = sma_dyn(tp, L)
+    if not have_bars(L) or na(sma)
+        na
+    else
+        float md = 0.0
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            md += math.abs(nz(tp[i]) - sma)
+        0.015 == 0 ? na : (tp - sma) / (0.015 * (md / L))
+
+// Chande Momentum Oscillator (exact)
+export cmo_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    float sumUp = 0.0
+    float sumDn = 0.0
+    for i = 1 to MAX_WIN - 1
+        if i > L
+            break
+        float ch = nz(src[i-1]) - nz(src[i])
+        if ch > 0
+            sumUp += ch
+        else
+            sumDn += -ch
+    safe_div(100.0 * (sumUp - sumDn), (sumUp + sumDn))
+
+// TRIX (triple EMA of close, 1-bar ROC%)
+export trix_dyn(series int len) =>
+    float e1 = ema_dyn(close, len)
+    float e2 = ema_dyn(e1,    len)
+    float e3 = ema_dyn(e2,    len)
+    safe_div(e3 - nz(e3[1]), nz(e3[1])) * 100.0
+
+// True Strength Index (exact Ehlers form)
+export tsi_dyn(series int shortLen, series int longLen) =>
+    float m  = close - nz(close[1])
+    float sm = ema_dyn(ema_dyn(m,  shortLen), longLen)
+    float am = ema_dyn(ema_dyn(math.abs(m), shortLen), longLen)
+    100.0 * safe_div(sm, am)
+
+// Ultimate Oscillator
+export ultimate_osc(series int len1, series int len2, series int len3) =>
+    float c1 = nz(close[1], close)
+    float bp = close - math.min(low, c1)
+    float tr = math.max(high, c1) - math.min(low, c1)
+    float avg1 = safe_div(sum_dyn(bp, len1), sum_dyn(tr, len1))
+    float avg2 = safe_div(sum_dyn(bp, len2), sum_dyn(tr, len2))
+    float avg3 = safe_div(sum_dyn(bp, len3), sum_dyn(tr, len3))
+    100.0 * (4.0*avg1 + 2.0*avg2 + avg3) / 7.0
+
+// Detrended Price Oscillator (classic definition with displacement)
+export dpo_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    int disp = clamp_len(int(math.ceil(L / 2.0) + 1))
+    float smaL = sma_dyn(src, L)
+    float smaLag = lag_dyn(smaL, disp)  // lag SMA by dynamic displacement
+    float priceLag = lag_dyn(src, disp)
+    priceLag - smaLag
+
+// Williams %R
+export willr_dyn(series int len) =>
+    float hh = highest_dyn(high, len)
+    float ll = lowest_dyn(low,  len)
+    -100.0 * safe_div(hh - close, hh - ll)
+
+// MACD (EMA fast/slow; signal EMA)
+export macd_dyn(series float src, series int fastLen, series int slowLen, series int sigLen) =>
+    float fast = ema_dyn(src, fastLen)
+    float slow = ema_dyn(src, slowLen)
+    float macd = fast - slow
+    float sig  = ema_dyn(macd, sigLen)
+    float hist = macd - sig
+    [macd, sig, hist]
+
+// PPO (percent MACD)
+export ppo_dyn(series float src, series int fastLen, series int slowLen, series int sigLen) =>
+    float fast = ema_dyn(src, fastLen)
+    float slow = ema_dyn(src, slowLen)
+    float ppo  = 100.0 * safe_div(fast - slow, slow)
+    float sig  = ema_dyn(ppo, sigLen)
+    float hist = ppo - sig
+    [ppo, sig, hist]
+
+// Aroon (Up/Down)
+export aroon_dyn(series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        [na, na]
+    else
+        int idxH = 0
+        int idxL = 0
+        float hh = high
+        float ll = low
+        for i = 1 to MAX_WIN - 1
+            if i >= L
+                break
+            if high[i] >= hh
+                hh := high[i], idxH := i
+            if low[i]  <= ll
+                ll := low[i],  idxL := i
+        float up   = 100.0 * (L - idxH) / L
+        float down = 100.0 * (L - idxL) / L
+        [100.0 - up, 100.0 - down]
+
+// DMI / ADX (exact with dynamic RMA)
+export dmi_adx_dyn(series int diLen, series int adxLen) =>
+    float upMove   = high - nz(high[1])
+    float downMove = nz(low[1]) - low
+    float plusDM   = (upMove   > 0 and upMove   > downMove) ? upMove   : 0
+    float minusDM  = (downMove > 0 and downMove > upMove)   ? downMove : 0
+    float trv      = true_range()
+    float atrx     = rma_dyn(trv, diLen)
+    float pDI      = 100.0 * safe_div(rma_dyn(plusDM, diLen), atrx)
+    float mDI      = 100.0 * safe_div(rma_dyn(minusDM, diLen), atrx)
+    float dx       = 100.0 * safe_div(math.abs(pDI - mDI), (pDI + mDI))
+    float adx      = rma_dyn(dx, adxLen)
+    [pDI, mDI, adx]
+
+// Vortex Indicator
+export vortex_dyn(series int len) =>
+    int L = clamp_len(len)
+    float vp = 0.0
+    float vm = 0.0
+    float trS= 0.0
+    for i = 1 to MAX_WIN - 1
+        if i > L
+            break
+        vp  += math.abs(high[i-1] - low[i])
+        vm  += math.abs(low[i-1]  - high[i])
+        float c1 = nz(close[i])
+        float tr1 = high[i-1] - low[i-1]
+        float tr2 = math.abs(high[i-1] - c1)
+        float tr3 = math.abs(low[i-1]  - c1)
+        trS += math.max(tr1, math.max(tr2, tr3))
+    [safe_div(vp, trS), safe_div(vm, trS)]
+
+// Coppock Curve (standard: WMA(ROC(14)+ROC(11), 10); dynamic versions)
+export coppock_dyn(series int rocLen1, series int rocLen2, series int wmaLen) =>
+    float r1 = roc_dyn(close, rocLen1)
+    float r2 = roc_dyn(close, rocLen2)
+    wma_dyn(r1 + r2, wmaLen)
+
+// Relative Vigor Index (simplified classic ratio)
+export rvi_dyn(series int len) =>
+    float num = close - open
+    float den = high - low
+    float sn  = sma_dyn(num, len)
+    float sd  = sma_dyn(den, len)
+    safe_div(sn, sd)
+
+// Price Oscillator (PPO was above). Price Oscillator (PO) absolute:
+export price_osc_dyn(series float src, series int fastLen, series int slowLen) =>
+    ema_dyn(src, fastLen) - ema_dyn(src, slowLen)
+
+// Rank Correlation Index (RCI) (Spearman)
+// O(L^2) per bar; keep lengths modest for performance.
+export rci_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        // Rank current window values
+        float cur = na
+        float dsum = 0.0
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            float v_i = nz(src[i])
+            // Compute rank of v_i among window
+            int rank = 1
+            for j = 0 to MAX_WIN - 1
+                if j >= L
+                    break
+                if src[j] < v_i
+                    rank += 1
+            int t = L - i  // time index (1..L) newest=1? we set newest index=1 -> invert
+            int d = t - rank
+            dsum += d * d
+        1.0 - 6.0 * dsum / (L * (L*L - 1))
+
+// Trend Strength Index (TSI sometimes used for this; if you want separate, use tsi_dyn)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Volume-based indicators
+//──────────────────────────────────────────────────────────────────────────────
+
+export obv() =>
+    var float v = 0.0
+    float ch = close - nz(close[1], close)
+    v += ch > 0 ? volume : ch < 0 ? -volume : 0
+    v
+
+export pvt() =>
+    var float p = 0.0
+    p += safe_div(close - nz(close[1]), nz(close[1], close)) * volume
+    p
+
+// Chaikin Money Flow (exact)
+export cmf_dyn(series int len) =>
+    int L = clamp_len(len)
+    float num = 0.0
+    float den = 0.0
+    for i = 0 to MAX_WIN - 1
+        if i >= L
+            break
+        float hl = high[i] - low[i]
+        float mfm = hl == 0 ? 0 : ((close[i] - low[i]) - (high[i] - close[i])) / hl
+        float mfv = mfm * volume[i]
+        num += mfv
+        den += volume[i]
+    safe_div(num, den)
+
+// Accumulation/Distribution Line (ADL)
+export adl() =>
+    float hl = high - low
+    float mfm = hl == 0 ? 0 : ((close - low) - (high - close)) / hl
+    var float cum = 0.0
+    cum += mfm * volume
+    cum
+
+// Chaikin Oscillator = EMA(ADL, fast) - EMA(ADL, slow)
+export chaikin_osc_dyn(series int fastLen, series int slowLen) =>
+    float a = adl()
+    ema_dyn(a, fastLen) - ema_dyn(a, slowLen)
+
+// Money Flow Index (exact)
+export mfi_dyn(series int len) =>
+    int L = clamp_len(len)
+    float pos = 0.0
+    float neg = 0.0
+    for i = 1 to MAX_WIN - 1
+        if i > L
+            break
+        float tp  = (high[i] + low[i] + close[i]) / 3.0
+        float tp1 = (high[i-1] + low[i-1] + close[i-1]) / 3.0
+        float mf  = tp * volume[i]
+        if tp > tp1
+            pos += mf
+        else if tp < tp1
+            neg += mf
+    float mr = safe_div(pos, neg)
+    100.0 - 100.0 / (1.0 + mr)
+
+// Volume Oscillator (two MAs of volume)
+export volume_osc_dyn(series int fastLen, series int slowLen) =>
+    float f = ema_dyn(volume, fastLen)
+    float s = ema_dyn(volume, slowLen)
+    100.0 * safe_div(f - s, s)
+
+// Up/Down Volume (returns upVol, downVol)
+export up_down_volume() =>
+    float ch = close - nz(close[1], close)
+    [ch >= 0 ? volume : 0.0, ch < 0 ? volume : 0.0]
+
+// Cumulative Volume Delta (approximation: sign(close change) * volume)
+export cvd() =>
+    var float v = 0.0
+    float ch = close - nz(close[1], close)
+    v += ch > 0 ? volume : ch < 0 ? -volume : 0
+    v
+
+//──────────────────────────────────────────────────────────────────────────────
+// Price/Trend composites
+//──────────────────────────────────────────────────────────────────────────────
+
+// Supertrend (classic)
+export supertrend_dyn(series int atrLen, float mult) =>
+    float atrv = atr_dyn(atrLen)
+    float basicU = hl2() + mult * atrv
+    float basicL = hl2() - mult * atrv
+    var float finalU = na
+    var float finalL = na
+    finalU := na(finalU[1]) ? basicU : (close[1] > nz(finalU[1]) ? math.min(basicU, nz(finalU[1])) : basicU)
+    finalL := na(finalL[1]) ? basicL : (close[1] < nz(finalL[1]) ? math.max(basicL, nz(finalL[1])) : basicL)
+    var bool trendUp = true
+    trendUp := na(trendUp[1]) ? true :
+         (close > nz(finalU[1]) ? true :
+         close < nz(finalL[1]) ? false : nz(trendUp[1]))
+    float st = trendUp ? finalL : finalU
+    [st, trendUp]
+
+// Envelopes (percentage bands around SMA)
+export envelopes_dyn(series float src, series int len, float pct) =>
+    float mid = sma_dyn(src, len)
+    [mid, na(mid) ? na : mid * (1 + pct/100.0), na(mid) ? na : mid * (1 - pct/100.0)]
+
+// Linear Regression (least-squares) line and slope over dynamic window
+export linreg_line_slope(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        [na, na]
+    else
+        float sumX=0.0, sumY=0.0, sumXY=0.0, sumXX=0.0
+        // x = 0..L-1 (0 current, increasing into past)
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            float x = i
+            float y = nz(src[i])
+            sumX += x
+            sumY += y
+            sumXY += x*y
+            sumXX += x*x
+        float n = L
+        float denom = n*sumXX - sumX*sumX
+        float slope = safe_div(n*sumXY - sumX*sumY, denom)
+        float intercept = (sumY - slope*sumX)/n
+        // Value at x=0 (current bar) is intercept
+        [intercept, slope]
+
+// Least Squares Moving Average (LSMA)
+export lsma_dyn(series float src, series int len) =>
+    [y0, _] = linreg_line_slope(src, len)
+    y0
+
+// Correlation Coefficient between two series
+export corrcoef_dyn(series float a, series float b, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float sa = sum_dyn(a, L)
+        float sb = sum_dyn(b, L)
+        float sab= sum_dyn(a*b, L)
+        float saa= sum_dyn(a*a, L)
+        float sbb= sum_dyn(b*b, L)
+        float n = L
+        float num = n*sab - sa*sb
+        float den = math.sqrt((n*saa - sa*sa)*(n*sbb - sb*sb))
+        safe_div(num, den)
+
+// Parabolic SAR (classic; length param not used; provided for consistency)
+export psar(float step, float maxStep) =>
+    var bool up = true
+    var float af = step
+    var float ep = high
+    var float sar = low
+    if bar_index > 0
+        sar := nz(sar[1])
+        up  := nz(up[1])
+        af  := nz(af[1])
+        ep  := nz(ep[1])
+        if up
+            sar := sar + af * (ep - sar)
+            sar := math.min(sar, nz(low[1]), nz(low[2]))
+            if high > ep
+                ep := high
+                af := math.min(af + step, maxStep)
+            if low < sar
+                up := false
+                sar := ep
+                ep := low
+                af := step
+        else
+            sar := sar + af * (ep - sar)
+            sar := math.max(sar, nz(high[1]), nz(high[2]))
+            if low < ep
+                ep := low
+                af := math.min(af + step, maxStep)
+            if high > sar
+                up := true
+                sar := ep
+                ep := high
+                af := step
+    [sar, up]
+
+// Pivot Points (standard; returns P, R1..R3, S1..S3 from prior period)
+export pivots_standard() =>
+    float P  = (nz(high[1]) + nz(low[1]) + nz(close[1])) / 3.0
+    float R1 = 2*P - nz(low[1])
+    float S1 = 2*P - nz(high[1])
+    float R2 = P + (nz(high[1]) - nz(low[1]))
+    float S2 = P - (nz(high[1]) - nz(low[1]))
+    float R3 = nz(high[1]) + 2*(P - nz(low[1]))
+    float S3 = nz(low[1])  - 2*(nz(high[1]) - P)
+    [P, R1, R2, R3, S1, S2, S3]
+
+// Williams Alligator (SMMA with standard lengths; displacements handled by caller)
+export williams_alligator(series float src, series int jawLen, series int teethLen, series int lipsLen) =>
+    float jaw   = smma_dyn(src, jawLen)
+    float teeth = smma_dyn(src, teethLen)
+    float lips  = smma_dyn(src, lipsLen)
+    [jaw, teeth, lips]
+
+// Time-Weighted Average Price (rolling, weights by actual bar duration)
+export twap_dyn(series float src, series int len) =>
+    int L = clamp_len(len)
+    if not have_bars(L)
+        na
+    else
+        float num = 0.0
+        float den = 0.0
+        for i = 0 to MAX_WIN - 1
+            if i >= L
+                break
+            float dt = nz(time[i]) - nz(time[i+1], time[i])  // ms between bars
+            num += nz(src[i]) * dt
+            den += dt
+        safe_div(num, den)
+
+// Session/daily anchored VWAP helper: reset when `reset` is true
+export vwap_anchored(series float price, series float volume, series bool reset) =>
+    var float cumPV = 0.0
+    var float cumV  = 0.0
+    if reset
+        cumPV := 0.0, cumV := 0.0
+    cumPV += price * volume
+    cumV  += volume
+    safe_div(cumPV, cumV)
+
+// Price Performance (ROC alias)
+export performance_pct(series int len) =>
+    roc_dyn(close, len)

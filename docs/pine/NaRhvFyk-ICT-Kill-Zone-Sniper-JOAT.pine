@@ -1,0 +1,521 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+indicator("ICT Kill Zone Sniper [JOAT]", shorttitle = "KZ [JOAT]", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ICT KILL ZONE SNIPER [JOAT]
+// Color-codes every candle by its active kill zone (Asia / London / NY-AM /
+// NY-PM) and tracks each session's liquidity pool (high/low). Inside a kill
+// zone, after a sweep of the PRIOR session's high/low (liquidity grab) with a
+// reversal close, fires a BUY/SELL label with an ATR-anchored SL/TP zone.
+// Optional HTF EMA bias filter (lookahead_off) + VWAP σ bands. Cyberpunk UI.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────
+// 01 · KILL ZONES
+// ─────────────────────────────────────────────────────────────────────────
+gKZ = "01 · Kill Zones"
+tzIn     = input.string("America/New_York", "Session Timezone", options = ["America/New_York", "Europe/London", "Asia/Tokyo", "UTC", "Exchange"], group = gKZ, tooltip = "Wall-clock zone the kill-zone windows are evaluated in. ICT kill zones are classically defined in New York time.")
+asiaSess = input.session("2000-0000", "Asian Kill Zone",   group = gKZ, tooltip = "Asian range / accumulation window (default NY time).")
+lonSess  = input.session("0200-0500", "London Kill Zone",  group = gKZ, tooltip = "London open kill zone.")
+nyAmSess = input.session("0930-1100", "New York AM Kill Zone", group = gKZ, tooltip = "New York AM kill zone.")
+nyPmSess = input.session("1330-1600", "New York PM Kill Zone", group = gKZ, tooltip = "New York PM kill zone.")
+
+// ─────────────────────────────────────────────────────────────────────────
+// 02 · SIGNAL ENGINE
+// ─────────────────────────────────────────────────────────────────────────
+gEng = "02 · Signal Engine"
+atrLen     = input.int(14, "ATR Length", minval = 1, maxval = 200, group = gEng, tooltip = "Drives stop/target distance and the label offset.")
+confirmBar = input.bool(true, "Confirm On Bar Close", group = gEng, tooltip = "Evaluate sweeps on confirmed bars only to avoid intrabar repaint.")
+oncePerSes = input.bool(true, "One Signal Per Side Per Kill Zone", group = gEng, tooltip = "At most one long and one short reversal per kill-zone occurrence.")
+minWickAtr = input.float(0.03, "Min Sweep Depth (× ATR)", minval = 0.0, maxval = 3.0, step = 0.01, group = gEng, tooltip = "Reject micro-penetrations of the prior pool caused by spread / tick noise.")
+
+// ─────────────────────────────────────────────────────────────────────────
+// 03 · HTF BIAS FILTER
+// ─────────────────────────────────────────────────────────────────────────
+gBias = "03 · HTF Bias"
+useHtf   = input.bool(true, "Use HTF EMA Bias", group = gBias, tooltip = "Only take longs above the HTF EMA and shorts below it.")
+htfTF    = input.timeframe("60", "HTF Timeframe", group = gBias)
+htfEmaLen= input.int(50, "HTF EMA Length", minval = 2, maxval = 500, group = gBias)
+
+// ─────────────────────────────────────────────────────────────────────────
+// 04 · TRADE MODEL
+// ─────────────────────────────────────────────────────────────────────────
+gTrade = "04 · Trade Model"
+slBufAtr = input.float(0.25, "Stop Buffer Beyond Sweep (× ATR)", minval = 0.0, maxval = 5.0, step = 0.05, group = gTrade, tooltip = "Stop is placed beyond the swept extreme plus this ATR buffer.")
+rrTarget = input.float(2.0, "Risk / Reward Target (R)", minval = 0.25, maxval = 15.0, step = 0.25, group = gTrade)
+projLen  = input.int(30, "Level Projection (bars)", minval = 5, maxval = 300, group = gTrade)
+maxTrades= input.int(20, "Max Drawn Signals Kept", minval = 1, maxval = 80, group = gTrade)
+
+// ─────────────────────────────────────────────────────────────────────────
+// 05 · VISUALS
+// ─────────────────────────────────────────────────────────────────────────
+gVis = "05 · Visuals"
+colorCandles = input.bool(true, "Color Candles By Kill Zone", group = gVis, tooltip = "Tints each candle by its active kill zone: Asia indigo · London amber · NY-AM cyan · NY-PM teal.")
+candleTransp = input.int(35, "Candle Tint Transparency", minval = 0, maxval = 80, group = gVis, tooltip = "0 = solid session color, higher = subtler tint that preserves the wick.")
+showShade  = input.bool(false, "Shade Kill Zones (background)", group = gVis, tooltip = "Off by default — candle tint carries the session color. Enable for a faint extra background wash.")
+showBoxes  = input.bool(true, "Show Session Range Boxes", group = gVis)
+showPools  = input.bool(true, "Show Prior High/Low Pools", group = gVis)
+showSweeps = input.bool(true, "Show Swept-Liquidity Tags", group = gVis)
+showSignal = input.bool(true, "Show Signal Labels", group = gVis)
+showLines  = input.bool(true, "Show Entry / SL / TP Lines", group = gVis)
+showZones  = input.bool(true, "Show TP / SL Zone Boxes", group = gVis)
+useVwap    = input.bool(false, "Show VWAP + σ Bands", group = gVis, tooltip = "Session-anchored VWAP with a ±σ band. Off by default.")
+vwapDev    = input.float(1.0, "VWAP Band σ", minval = 0.5, maxval = 4.0, step = 0.5, group = gVis)
+shadeTransp= input.int(92, "Kill-Zone Shade Transparency", minval = 70, maxval = 98, group = gVis)
+boxTransp  = input.int(90, "Session Box Transparency", minval = 60, maxval = 98, group = gVis)
+maxBoxes   = input.int(16, "Session Boxes Kept", minval = 2, maxval = 60, group = gVis)
+maxSweepLbl= input.int(24, "Swept Tags Kept", minval = 2, maxval = 120, group = gVis)
+lblSizeOpt = input.string("Small", "Label Size", options = ["Tiny", "Small", "Normal", "Large"], group = gVis)
+
+// ─────────────────────────────────────────────────────────────────────────
+// 06 · DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────
+gDash = "06 · Dashboard"
+showDash   = input.bool(true, "Show Dashboard", group = gDash)
+dashPosOpt = input.string("Top Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = gDash)
+dashSizeOpt= input.string("Normal", "Text Size", options = ["Tiny", "Small", "Normal"], group = gDash)
+
+// ─────────────────────────────────────────────────────────────────────────
+// PALETTE — cyberpunk neon / chrome, per-session accents
+// ─────────────────────────────────────────────────────────────────────────
+color asiaCol = #3D5AFE   // indigo
+color lonCol  = #FFA726   // amber
+color nyAmCol = #00E5FF   // cyan
+color nyPmCol = #18C6D9   // teal-cyan (distinct PM)
+color bullCol = #00E676   // neon green
+color bearCol = #FF5252   // neon red
+color redRisk = #FF3D5A   // hot risk-zone red
+color chrome  = #AEBBD4   // brushed chrome (VWAP / header sheen)
+
+color panelBg    = #0A0E17
+color panelBgAlt = #0F1524
+color panelBorder= #1E2A44
+color txtHi      = #E6ECF5
+color txtLo      = #7C89A6
+color neutralCol = #5C6784
+color goodCol    = #00E676
+color badCol     = #FF5252
+
+// ─────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────
+f_size(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        => size.small
+
+f_pos(string p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        "Middle Right" => position.middle_right
+        => position.top_right
+
+f_sessName(int idx) =>
+    switch idx
+        1 => "ASIA"
+        2 => "LONDON"
+        3 => "NY AM"
+        4 => "NY PM"
+        => "—"
+
+f_sessCol(int idx) =>
+    switch idx
+        1 => asiaCol
+        2 => lonCol
+        3 => nyAmCol
+        4 => nyPmCol
+        => neutralCol
+
+// Parse "HHMM" from a session string into minutes-of-day
+f_startMin(string s) =>
+    float hh = str.tonumber(str.substring(s, 0, 2))
+    float mm = str.tonumber(str.substring(s, 2, 4))
+    na(hh) or na(mm) ? na : hh * 60.0 + mm
+
+string tzUse = tzIn == "Exchange" ? syminfo.timezone : tzIn
+
+// ─────────────────────────────────────────────────────────────────────────
+// CORE SERIES (global scope — evaluated every bar)
+// ─────────────────────────────────────────────────────────────────────────
+float atr    = ta.atr(atrLen)
+float htfEma = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+
+// VWAP + σ band (idiom #4) — computed every bar, only shown when toggled
+float vwapV = ta.vwap(hlc3)
+float vwSd  = ta.stdev(close, 100)
+float vwUp1 = vwapV + vwapDev * vwSd
+float vwLo1 = vwapV - vwapDev * vwSd
+
+// Kill-zone membership (na-guarded — works on every timeframe; na on non-intraday)
+bool inAsia = not na(time(timeframe.period, asiaSess, tzUse))
+bool inLon  = not na(time(timeframe.period, lonSess,  tzUse))
+bool inNYam = not na(time(timeframe.period, nyAmSess, tzUse))
+bool inNYpm = not na(time(timeframe.period, nyPmSess, tzUse))
+
+int  actIdx = inNYpm ? 4 : inNYam ? 3 : inLon ? 2 : inAsia ? 1 : 0
+bool inKZ   = actIdx != 0
+
+// ─────────────────────────────────────────────────────────────────────────
+// TYPES + HISTORY ARRAYS
+// ─────────────────────────────────────────────────────────────────────────
+type sbox
+    box   bx
+    label lb
+
+type trade
+    box   tpBx
+    box   slBx
+    line  en
+    line  sl
+    line  tp
+    label sll
+    label tpl
+    label sig
+
+var array<sbox>  boxHist   = array.new<sbox>()
+var array<label> sweepHist = array.new<label>()
+var array<trade> trHist    = array.new<trade>()
+
+// ─────────────────────────────────────────────────────────────────────────
+// SESSION STATE MACHINE — track each kill zone's developing high/low
+// ─────────────────────────────────────────────────────────────────────────
+var int   curSess  = 0
+var float sessH    = na
+var float sessL    = na
+var int   sessStart= na
+var float priorH   = na          // prior kill zone high  (liquidity pool)
+var float priorL   = na          // prior kill zone low   (liquidity pool)
+var bool  longDone = false
+var bool  shortDone= false
+var box   actBx    = na
+var label actLbl   = na
+
+bool sessChanged = actIdx != curSess
+
+// Finalize the just-ended session → becomes the prior liquidity pool
+if sessChanged and curSess != 0 and not na(sessH)
+    priorH := sessH
+    priorL := sessL
+    if not na(actBx)
+        box.set_top(actBx, sessH)
+        box.set_bottom(actBx, sessL)
+        array.push(boxHist, sbox.new(actBx, actLbl))
+        while array.size(boxHist) > maxBoxes
+            sbox old = array.shift(boxHist)
+            if not na(old.bx)
+                box.delete(old.bx)
+            if not na(old.lb)
+                label.delete(old.lb)
+    actBx := na
+    actLbl := na
+
+// Start a new kill zone
+if sessChanged and actIdx != 0
+    curSess := actIdx
+    sessH := high
+    sessL := low
+    sessStart := bar_index
+    longDone := false
+    shortDone := false
+    if showBoxes
+        color cz = f_sessCol(actIdx)
+        actBx := box.new(bar_index, high, bar_index, low, xloc = xloc.bar_index, bgcolor = color.new(cz, boxTransp), border_color = color.new(cz, 35), border_width = 1)
+        actLbl := label.new(bar_index, high, f_sessName(actIdx), xloc = xloc.bar_index, style = label.style_label_down, color = color.new(cz, 20), textcolor = color.white, size = size.tiny)
+else if sessChanged and actIdx == 0
+    curSess := 0
+
+// Continue the active kill zone
+if actIdx != 0 and actIdx == curSess
+    sessH := math.max(sessH, high)
+    sessL := math.min(sessL, low)
+    if not na(actBx)
+        box.set_top(actBx, sessH)
+        box.set_bottom(actBx, sessL)
+        box.set_right(actBx, bar_index)
+        if not na(actLbl)
+            label.set_x(actLbl, sessStart)
+            label.set_y(actLbl, sessH)
+
+// ─────────────────────────────────────────────────────────────────────────
+// PRIOR-POOL PROJECTION LINES (liquidity being hunted this kill zone)
+// ─────────────────────────────────────────────────────────────────────────
+var line poolHiLn = na
+var line poolLoLn = na
+if showPools
+    if na(poolHiLn)
+        poolHiLn := line.new(bar_index, close, bar_index, close, xloc = xloc.bar_index, color = color.new(bearCol, 30), width = 1, style = line.style_dashed)
+        poolLoLn := line.new(bar_index, close, bar_index, close, xloc = xloc.bar_index, color = color.new(bullCol, 30), width = 1, style = line.style_dashed)
+    if not na(priorH)
+        line.set_xy1(poolHiLn, bar_index - 1, priorH)
+        line.set_xy2(poolHiLn, bar_index + 2, priorH)
+    if not na(priorL)
+        line.set_xy1(poolLoLn, bar_index - 1, priorL)
+        line.set_xy2(poolLoLn, bar_index + 2, priorL)
+
+// ─────────────────────────────────────────────────────────────────────────
+// SWEEP + REVERSAL DETECTION
+// ─────────────────────────────────────────────────────────────────────────
+bool canEval  = inKZ and not na(atr) and atr > 0 and (not confirmBar or barstate.isconfirmed)
+float depthHi = not na(priorH) ? (high - priorH) / atr : na
+float depthLo = not na(priorL) ? (priorL - low) / atr : na
+
+// Grab of prior HIGH with close back below → bearish reversal (SELL)
+bool grabHigh = canEval and not na(priorH) and high > priorH and close < priorH and depthHi >= minWickAtr
+// Grab of prior LOW with close back above → bullish reversal (BUY)
+bool grabLow  = canEval and not na(priorL) and low  < priorL and close > priorL and depthLo >= minWickAtr
+
+bool biasLongOk  = not useHtf or (not na(htfEma) and close > htfEma)
+bool biasShortOk = not useHtf or (not na(htfEma) and close < htfEma)
+
+bool longGate  = not (oncePerSes and longDone)
+bool shortGate = not (oncePerSes and shortDone)
+
+bool takeLong  = grabLow  and biasLongOk  and longGate
+bool takeShort = grabHigh and biasShortOk and shortGate and not takeLong
+
+// Trackers
+var int   lastGrabSide = 0   // 1 = low grab (bull), -1 = high grab (bear)
+var int   lastSigSide  = 0
+var int   lastSigBar   = na
+var float lastEntry    = na
+var float lastStop     = na
+var float lastTgt      = na
+var int   sLong  = 0
+var int   sShort = 0
+
+if grabHigh
+    lastGrabSide := -1
+if grabLow
+    lastGrabSide := 1
+
+// Swept-liquidity tags — tiny, decluttered, capped
+if showSweeps and (grabHigh or grabLow)
+    float lvl = grabHigh ? priorH : priorL
+    color gc  = grabHigh ? bearCol : bullCol
+    string gt = grabHigh ? "swept ▲" : "swept ▼"
+    label swl = label.new(bar_index, lvl, gt, xloc = xloc.bar_index, style = grabHigh ? label.style_label_down : label.style_label_up, color = color.new(gc, 25), textcolor = color.white, size = size.tiny)
+    array.push(sweepHist, swl)
+    while array.size(sweepHist) > maxSweepLbl
+        label oldl = array.shift(sweepHist)
+        if not na(oldl)
+            label.delete(oldl)
+
+// ─────────────────────────────────────────────────────────────────────────
+// SIGNAL EXECUTION — ATR stop / RR target → LABEL pill + SL/TP zone boxes
+// ─────────────────────────────────────────────────────────────────────────
+if takeLong or takeShort
+    bool isLong = takeLong
+    float entv = close
+    float sweptExt = isLong ? math.min(low, priorL) : math.max(high, priorH)
+    float stopv = isLong ? sweptExt - atr * slBufAtr : sweptExt + atr * slBufAtr
+    float risk  = math.abs(entv - stopv)
+    float tgt   = isLong ? entv + risk * rrTarget : entv - risk * rrTarget
+    color c     = isLong ? bullCol : bearCol
+    int   xr    = bar_index + projLen
+
+    lastSigSide := isLong ? 1 : -1
+    lastSigBar  := bar_index
+    lastEntry   := entv
+    lastStop    := stopv
+    lastTgt     := tgt
+    if isLong
+        sLong += 1
+        longDone := true
+    else
+        sShort += 1
+        shortDone := true
+
+    box   tpBx = na
+    box   slBx = na
+    line  en   = na
+    line  sl   = na
+    line  tp   = na
+    label sll  = na
+    label tpl  = na
+    label sig  = na
+
+    // Zone boxes (idiom #2): reward tinted by signal hue, risk zone hot-red
+    if showZones
+        float tpTop = isLong ? tgt : entv
+        float tpBot = isLong ? entv : tgt
+        float slTop = isLong ? entv : stopv
+        float slBot = isLong ? stopv : entv
+        tpBx := box.new(bar_index, tpTop, xr, tpBot, xloc = xloc.bar_index, bgcolor = color.new(c, 84), border_color = color.new(c, 40), border_width = 1)
+        slBx := box.new(bar_index, slTop, xr, slBot, xloc = xloc.bar_index, bgcolor = color.new(redRisk, 84), border_color = color.new(redRisk, 45), border_width = 1)
+
+    // Entry / SL / TP lines + level labels
+    if showLines
+        en := line.new(bar_index, entv,  xr, entv,  xloc = xloc.bar_index, color = color.new(c, 0), width = 2)
+        sl := line.new(bar_index, stopv, xr, stopv, xloc = xloc.bar_index, color = color.new(redRisk, 10), width = 1, style = line.style_dashed)
+        tp := line.new(bar_index, tgt,   xr, tgt,   xloc = xloc.bar_index, color = color.new(c, 10), width = 1, style = line.style_dashed)
+        sll := label.new(xr, stopv, "SL " + str.tostring(stopv, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(redRisk, 10), textcolor = color.white, size = f_size(lblSizeOpt))
+        tpl := label.new(xr, tgt,   "TP " + str.tostring(rrTarget, "#.#") + "R", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(c, 12), textcolor = color.white, size = f_size(lblSizeOpt))
+
+    // Clean BUY/SELL label pill (idiom #1) — replaces the old triangles
+    if showSignal
+        string head = isLong ? "BUY" : "SELL"
+        string sub  = f_sessName(actIdx) + " · " + str.tostring(rrTarget, "#.#") + "R"
+        sig := label.new(bar_index, isLong ? low - atr * 0.6 : high + atr * 0.6, head + "\n" + sub, xloc = xloc.bar_index, style = isLong ? label.style_label_up : label.style_label_down, color = color.new(c, 5), textcolor = color.white, size = f_size(lblSizeOpt), text_formatting = text.format_bold)
+
+    // Store + cap (idiom #6): delete BEFORE dropping refs
+    array.push(trHist, trade.new(tpBx, slBx, en, sl, tp, sll, tpl, sig))
+    while array.size(trHist) > maxTrades
+        trade old = array.shift(trHist)
+        if not na(old.tpBx)
+            box.delete(old.tpBx)
+        if not na(old.slBx)
+            box.delete(old.slBx)
+        if not na(old.en)
+            line.delete(old.en)
+        if not na(old.sl)
+            line.delete(old.sl)
+        if not na(old.tp)
+            line.delete(old.tp)
+        if not na(old.sll)
+            label.delete(old.sll)
+        if not na(old.tpl)
+            label.delete(old.tpl)
+        if not na(old.sig)
+            label.delete(old.sig)
+
+// ─────────────────────────────────────────────────────────────────────────
+// PER-SESSION CANDLE COLORING (idiom #3) — build var, one call at col 0
+// ─────────────────────────────────────────────────────────────────────────
+color barCol = na
+if colorCandles
+    barCol := actIdx == 1 ? color.new(asiaCol, candleTransp) : actIdx == 2 ? color.new(lonCol, candleTransp) : actIdx == 3 ? color.new(nyAmCol, candleTransp) : actIdx == 4 ? color.new(nyPmCol, candleTransp) : na
+barcolor(barCol, title = "Kill Zone Candles")
+
+// ─────────────────────────────────────────────────────────────────────────
+// OPTIONAL BACKGROUND SHADE (off by default — candle tint carries the color)
+// ─────────────────────────────────────────────────────────────────────────
+bgcolor(showShade and actIdx == 1 ? color.new(asiaCol, shadeTransp) : na, title = "Asia KZ Shade")
+bgcolor(showShade and actIdx == 2 ? color.new(lonCol,  shadeTransp) : na, title = "London KZ Shade")
+bgcolor(showShade and actIdx == 3 ? color.new(nyAmCol, shadeTransp) : na, title = "NY AM KZ Shade")
+bgcolor(showShade and actIdx == 4 ? color.new(nyPmCol, shadeTransp) : na, title = "NY PM KZ Shade")
+
+// ─────────────────────────────────────────────────────────────────────────
+// VWAP + σ BANDS (idiom #4) — global plots at col 0, na-guarded by toggle
+// ─────────────────────────────────────────────────────────────────────────
+plot(useVwap ? vwapV : na, "VWAP", color = color.new(chrome, 0), linewidth = 2)
+pU1 = plot(useVwap ? vwUp1 : na, "VWAP +σ", color = color.new(chrome, 70))
+pL1 = plot(useVwap ? vwLo1 : na, "VWAP -σ", color = color.new(chrome, 70))
+fill(pU1, pL1, color = useVwap ? color.new(chrome, 92) : na, title = "VWAP σ Band")
+
+// ─────────────────────────────────────────────────────────────────────────
+// TIME TO NEXT KILL ZONE
+// ─────────────────────────────────────────────────────────────────────────
+float curTod = timeframe.isintraday ? hour(time, tzUse) * 60.0 + minute(time, tzUse) : na
+f_delta(float sm) => na(sm) or na(curTod) ? na : (math.round(sm) - math.round(curTod) + 1440) % 1440
+
+nextName = "—"
+float nextDelta = na
+if timeframe.isintraday
+    float dA = f_delta(f_startMin(asiaSess))
+    float dL = f_delta(f_startMin(lonSess))
+    float dM = f_delta(f_startMin(nyAmSess))
+    float dP = f_delta(f_startMin(nyPmSess))
+    // treat 0 (currently at open minute) as a full cycle so we point to the *next* one
+    dA := not na(dA) and dA == 0 ? 1440 : dA
+    dL := not na(dL) and dL == 0 ? 1440 : dL
+    dM := not na(dM) and dM == 0 ? 1440 : dM
+    dP := not na(dP) and dP == 0 ? 1440 : dP
+    float best = na
+    if not na(dA)
+        best := dA
+        nextName := "ASIA"
+    if not na(dL) and (na(best) or dL < best)
+        best := dL
+        nextName := "LONDON"
+    if not na(dM) and (na(best) or dM < best)
+        best := dM
+        nextName := "NY AM"
+    if not na(dP) and (na(best) or dP < best)
+        best := dP
+        nextName := "NY PM"
+    nextDelta := best
+
+string nextTxt = na(nextDelta) ? "—" : str.tostring(math.floor(nextDelta / 60)) + "h " + str.tostring(math.round(nextDelta % 60)) + "m → " + nextName
+
+// ─────────────────────────────────────────────────────────────────────────
+// DASHBOARD — cyberpunk chrome-gradient header, per-session accents
+// ─────────────────────────────────────────────────────────────────────────
+string biasTxt = not useHtf ? "OFF" : na(htfEma) ? "—" : close > htfEma ? "BULLISH" : close < htfEma ? "BEARISH" : "FLAT"
+color  biasCol = not useHtf ? neutralCol : na(htfEma) ? neutralCol : close > htfEma ? goodCol : close < htfEma ? badCol : neutralCol
+string grabTxt = lastGrabSide == 1 ? "LOW SWEEP ▲" : lastGrabSide == -1 ? "HIGH SWEEP ▼" : "—"
+color  grabC   = lastGrabSide == 1 ? goodCol : lastGrabSide == -1 ? badCol : neutralCol
+string sigTxt  = lastSigSide == 0 ? "—" : (lastSigSide == 1 ? "LONG" : "SHORT") + (na(lastSigBar) ? "" : "  " + str.tostring(bar_index - lastSigBar) + " bars ago")
+color  sigC    = lastSigSide == 1 ? bullCol : lastSigSide == -1 ? bearCol : neutralCol
+string entTxt  = na(lastEntry) ? "—" : str.tostring(lastEntry, format.mintick)
+string stTxt   = na(lastStop) or na(lastTgt) ? "—" : str.tostring(lastStop, format.mintick) + "  /  " + str.tostring(lastTgt, format.mintick)
+string sessTxt = inKZ ? f_sessName(actIdx) : "CLOSED"
+color  sessAcc = inKZ ? f_sessCol(actIdx) : neutralCol
+string hiTxt   = not na(sessH) ? str.tostring(sessH, format.mintick) : na(priorH) ? "—" : str.tostring(priorH, format.mintick)
+string loTxt   = not na(sessL) ? str.tostring(sessL, format.mintick) : na(priorL) ? "—" : str.tostring(priorL, format.mintick)
+string atrTxt  = na(atr) ? "—" : str.tostring(atr, format.mintick)
+
+// chrome-gradient header sheen: left = live session accent, right = accent→chrome blend
+color headL = sessAcc
+color headR = color.from_gradient(1.0, 0.0, 2.0, sessAcc, chrome)
+
+var int dashRows = 12
+var table dash = table.new(f_pos(dashPosOpt), 2, dashRows, frame_color = color.new(sessAcc, 25), frame_width = 1, border_width = 1, border_color = color.new(panelBorder, 10))
+
+if barstate.islast and showDash
+    ps = f_size(dashSizeOpt)
+    table.clear(dash, 0, 0, 1, dashRows - 1)
+    table.set_frame_color(dash, color.new(sessAcc, 25))
+
+    table.cell(dash, 0, 0, "⚡ KZ SNIPER", text_color = #05070C, text_size = ps, text_halign = text.align_left, bgcolor = headL)
+    table.cell(dash, 1, 0, sessTxt, text_color = #05070C, text_size = ps, text_halign = text.align_center, bgcolor = headR)
+    table.cell_set_text_formatting(dash, 0, 0, text.format_bold + text.format_italic)
+    table.cell_set_text_formatting(dash, 1, 0, text.format_bold + text.format_italic)
+
+    table.cell(dash, 0, 1, "Active Session", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBg)
+    table.cell(dash, 1, 1, sessTxt, text_color = sessAcc, text_size = ps, text_halign = text.align_center, bgcolor = panelBg)
+
+    table.cell(dash, 0, 2, "Session High", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBgAlt)
+    table.cell(dash, 1, 2, hiTxt, text_color = txtHi, text_size = ps, text_halign = text.align_center, bgcolor = panelBgAlt)
+
+    table.cell(dash, 0, 3, "Session Low", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBg)
+    table.cell(dash, 1, 3, loTxt, text_color = txtHi, text_size = ps, text_halign = text.align_center, bgcolor = panelBg)
+
+    table.cell(dash, 0, 4, "Next Kill Zone", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBgAlt)
+    table.cell(dash, 1, 4, timeframe.isintraday ? nextTxt : "intraday only", text_color = timeframe.isintraday ? txtHi : neutralCol, text_size = ps, text_halign = text.align_center, bgcolor = panelBgAlt)
+
+    table.cell(dash, 0, 5, "HTF Bias", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBg)
+    table.cell(dash, 1, 5, biasTxt, text_color = biasCol, text_size = ps, text_halign = text.align_center, bgcolor = panelBg)
+
+    table.cell(dash, 0, 6, "Last Liquidity Grab", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBgAlt)
+    table.cell(dash, 1, 6, grabTxt, text_color = grabC, text_size = ps, text_halign = text.align_center, bgcolor = panelBgAlt)
+
+    table.cell(dash, 0, 7, "Active Signal", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBg)
+    table.cell(dash, 1, 7, sigTxt, text_color = sigC, text_size = ps, text_halign = text.align_center, bgcolor = panelBg)
+
+    table.cell(dash, 0, 8, "Last Entry", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBgAlt)
+    table.cell(dash, 1, 8, entTxt, text_color = sigC, text_size = ps, text_halign = text.align_center, bgcolor = panelBgAlt)
+
+    table.cell(dash, 0, 9, "Stop / Target", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBg)
+    table.cell(dash, 1, 9, stTxt, text_color = txtHi, text_size = ps, text_halign = text.align_center, bgcolor = panelBg)
+
+    table.cell(dash, 0, 10, "ATR (" + str.tostring(atrLen) + ")", text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelBgAlt)
+    table.cell(dash, 1, 10, atrTxt, text_color = txtHi, text_size = ps, text_halign = text.align_center, bgcolor = panelBgAlt)
+
+    table.cell(dash, 0, 11, "Signals  L / S", text_color = #05070C, text_size = ps, text_halign = text.align_left, bgcolor = chrome)
+    table.cell(dash, 1, 11, str.tostring(sLong) + " / " + str.tostring(sShort), text_color = #05070C, text_size = ps, text_halign = text.align_center, bgcolor = chrome)
+    table.cell_set_text_formatting(dash, 0, 11, text.format_bold)
+    table.cell_set_text_formatting(dash, 1, 11, text.format_bold)
+
+// ─────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────
+alertcondition(takeLong,  "KZ Sniper Long",  "ICT Kill Zone Sniper: LONG — prior-pool low sweep + bullish reversal inside kill zone on {{ticker}} {{interval}}.")
+alertcondition(takeShort, "KZ Sniper Short", "ICT Kill Zone Sniper: SHORT — prior-pool high sweep + bearish reversal inside kill zone on {{ticker}} {{interval}}.")

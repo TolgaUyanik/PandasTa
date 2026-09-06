@@ -1,0 +1,242 @@
+//@version=5
+
+// @description 专业移动止盈库 - 为Pine Script策略提供完整的追踪止盈功能。支持做多做空双向交易，基于风险回报比智能激活，提供收盘价和高低价两种判断模式。包含完整的状态管理、调试信息和易用的API接口。适用于股票、外汇、加密货币等各种市场的风险管理。
+// @version 1.0
+// @author runto2006
+
+library("TrailingStopLibrary", overlay=true)
+
+// ============================================================================
+// 类型定义 (Type Definitions)
+// ============================================================================
+
+// @type 移动止盈配置对象
+// @field enabled (bool) 是否启用移动止盈功能
+// @field activation_ratio (float) 激活盈亏比 - 盈利达到止损距离的多少倍时激活追踪
+// @field pullback_percent (float) 回撤百分比 - 从最优价格回撤多少百分比时触发止盈
+// @field price_type (string) 价格判断类型 - "close"使用收盘价，"hl"使用高低价
+export type Config
+    bool enabled
+    float activation_ratio
+    float pullback_percent
+    string price_type
+
+// @type 移动止盈状态对象
+// @field activated (bool) 是否已激活追踪止盈
+// @field highest_price (float) 激活后记录的最高价格
+// @field lowest_price (float) 激活后记录的最低价格
+// @field activation_target (float) 激活目标价格
+export type State
+    bool activated
+    float highest_price
+    float lowest_price
+    float activation_target
+
+// ============================================================================
+// 配置和状态管理函数 (Configuration & State Management)
+// ============================================================================
+
+// @function 创建移动止盈配置对象
+// @param enabled (bool) 是否启用移动止盈，默认true
+// @param activation_ratio (float) 激活盈亏比，默认4.0，表示盈利4倍止损距离时激活
+// @param pullback_percent (float) 回撤百分比，默认1.0，表示回撤1%时触发止盈
+// @param price_type (string) 价格类型，默认"close"。"close"=收盘价模式，"hl"=高低价模式
+// @returns Config 配置对象
+export new_config(bool enabled = true, float activation_ratio = 4.0, float pullback_percent = 1.0, string price_type = "close") =>
+    Config.new(enabled, activation_ratio, pullback_percent, price_type)
+
+// @function 创建移动止盈状态对象
+// @returns State 初始化的状态对象
+export new_state() =>
+    State.new(false, na, na, na)
+
+// @function 重置移动止盈状态
+// @param state (State) 要重置的状态对象
+// @returns void
+export reset(State state) =>
+    state.activated := false
+    state.highest_price := na
+    state.lowest_price := na
+    state.activation_target := na
+
+// ============================================================================
+// 核心计算函数 (Core Calculation Functions)
+// ============================================================================
+
+// @function 计算激活目标价格
+// @param entry_price (float) 入场价格
+// @param stop_price (float) 止损价格
+// @param activation_ratio (float) 激活盈亏比
+// @param is_long (bool) 是否为多头持仓
+// @returns float 激活目标价格，如果输入无效则返回na
+export calc_activation_target(float entry_price, float stop_price, float activation_ratio, bool is_long) =>
+    if na(entry_price) or na(stop_price) or activation_ratio <= 0
+        na
+    else
+        stop_distance = math.abs(entry_price - stop_price)
+        if is_long
+            entry_price + (stop_distance * activation_ratio)
+        else
+            entry_price - (stop_distance * activation_ratio)
+
+// @function 获取用于判断的价格
+// @param price_type (string) 价格类型："close"或"hl"
+// @param is_long (bool) 是否为多头持仓
+// @param for_activation (bool) 是否用于激活判断，影响高低价的选择方向
+// @returns float 当前判断价格
+export get_check_price(string price_type, bool is_long, bool for_activation = true) =>
+    if price_type == "hl"
+        if for_activation
+            is_long ? high : low
+        else
+            is_long ? low : high
+    else
+        close
+
+// ============================================================================
+// 主要功能函数 (Main Functionality Functions)
+// ============================================================================
+
+// @function 检查是否应该激活移动止盈
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param entry_price (float) 入场价格
+// @param stop_price (float) 止损价格
+// @param is_long (bool) 是否为多头持仓
+// @param has_position (bool) 是否有持仓
+// @returns bool 是否成功激活
+export check_activation(Config config, State state, float entry_price, float stop_price, bool is_long, bool has_position) =>
+    if not config.enabled or state.activated or na(entry_price) or na(stop_price) or not has_position
+        false
+    else
+        activation_target = calc_activation_target(entry_price, stop_price, config.activation_ratio, is_long)
+        state.activation_target := activation_target
+        
+        if na(activation_target)
+            false
+        else
+            check_price = get_check_price(config.price_type, is_long, true)
+            should_activate = is_long ? check_price >= activation_target : check_price <= activation_target
+            
+            if should_activate
+                state.activated := true
+                if is_long
+                    state.highest_price := check_price
+                    state.lowest_price := na
+                else
+                    state.lowest_price := check_price
+                    state.highest_price := na
+            
+            should_activate
+
+// @function 更新移动止盈的追踪价格
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param is_long (bool) 是否为多头持仓
+// @returns void
+export update_tracking(Config config, State state, bool is_long) =>
+    if state.activated
+        check_price = get_check_price(config.price_type, is_long, true)
+        
+        if is_long
+            state.highest_price := math.max(state.highest_price, check_price)
+        else
+            state.lowest_price := math.min(state.lowest_price, check_price)
+
+// @function 检查是否触发移动止盈
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param entry_price (float) 入场价格
+// @param is_long (bool) 是否为多头持仓
+// @returns bool 是否触发止盈
+export check_trigger(Config config, State state, float entry_price, bool is_long) =>
+    if not state.activated or na(entry_price)
+        false
+    else
+        current_price = get_check_price(config.price_type, is_long, false)
+        
+        if is_long and not na(state.highest_price)
+            pullback_amount = (state.highest_price - current_price) / (state.highest_price - entry_price) * 100
+            pullback_amount >= config.pullback_percent
+        else if not is_long and not na(state.lowest_price)
+            pullback_amount = (current_price - state.lowest_price) / (entry_price - state.lowest_price) * 100
+            pullback_amount >= config.pullback_percent
+        else
+            false
+
+// ============================================================================
+// 便捷函数 (Convenience Functions)
+// ============================================================================
+
+// @function 一体化处理移动止盈逻辑
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param entry_price (float) 入场价格
+// @param stop_price (float) 止损价格
+// @param is_long (bool) 是否为多头持仓
+// @param has_position (bool) 是否有持仓
+// @returns bool 是否触发止盈
+export process(Config config, State state, float entry_price, float stop_price, bool is_long, bool has_position) =>
+    if not has_position
+        reset(state)
+        false
+    else
+        check_activation(config, state, entry_price, stop_price, is_long, has_position)
+        update_tracking(config, state, is_long)
+        check_trigger(config, state, entry_price, is_long)
+
+// @function 获取当前触发价格
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param is_long (bool) 是否为多头持仓
+// @returns float 触发价格，未激活时返回na
+export get_trigger_price(Config config, State state, bool is_long) =>
+    if not state.activated
+        na
+    else if is_long and not na(state.highest_price)
+        state.highest_price * (1 - config.pullback_percent / 100)
+    else if not is_long and not na(state.lowest_price)
+        state.lowest_price * (1 + config.pullback_percent / 100)
+    else
+        na
+
+// @function 计算当前回撤百分比
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param entry_price (float) 入场价格
+// @param is_long (bool) 是否为多头持仓
+// @returns float 当前回撤百分比，未激活时返回na
+export get_pullback_percent(Config config, State state, float entry_price, bool is_long) =>
+    if not state.activated or na(entry_price)
+        na
+    else
+        current_price = get_check_price(config.price_type, is_long, false)
+        
+        if is_long and not na(state.highest_price)
+            (state.highest_price - current_price) / (state.highest_price - entry_price) * 100
+        else if not is_long and not na(state.lowest_price)
+            (current_price - state.lowest_price) / (entry_price - state.lowest_price) * 100
+        else
+            na
+
+// @function 获取状态信息字符串（用于调试）
+// @param config (Config) 移动止盈配置
+// @param state (State) 移动止盈状态
+// @param entry_price (float) 入场价格
+// @param is_long (bool) 是否为多头持仓
+// @returns string 详细的状态信息
+export get_status_info(Config config, State state, float entry_price, bool is_long) =>
+    if not config.enabled
+        "TrailingStop: Disabled"
+    else if not state.activated
+        target_str = na(state.activation_target) ? "N/A" : str.tostring(state.activation_target, "#.####")
+        "TrailingStop: Inactive | Target: " + target_str
+    else
+        ref_price = is_long ? state.highest_price : state.lowest_price
+        ref_str = na(ref_price) ? "N/A" : str.tostring(ref_price, "#.####")
+        trigger_price = get_trigger_price(config, state, is_long)
+        trigger_str = na(trigger_price) ? "N/A" : str.tostring(trigger_price, "#.####")
+        pullback = get_pullback_percent(config, state, entry_price, is_long)
+        pullback_str = na(pullback) ? "N/A" : str.tostring(pullback, "#.##") + "%"
+        
+        "TrailingStop: Active | Ref: " + ref_str + " | Trigger: " + trigger_str + " | Pullback: " + pullback_str

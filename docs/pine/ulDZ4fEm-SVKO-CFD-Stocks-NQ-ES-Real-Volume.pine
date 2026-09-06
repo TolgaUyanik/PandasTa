@@ -1,0 +1,249 @@
+//@version=6
+indicator("SVKO CFD Stocks & NQ-ES Real Volume", shorttitle = "SVKO CFD Real Volume", overlay = false, format = format.volume)
+
+const string ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:._"
+const int BASE = 41
+const int MAX_FORMULA_TERMS = 10
+const int REQUEST_BARS = 100000
+const string DEFAULT_SYMBOL_ABBREVIATIONS = "MNQ = CME_MINI:MNQ1!\nNQ = CME_MINI:NQ1!\nQQQ = NASDAQ:QQQ\nMES = CME_MINI:MES1!\nES = CME_MINI:ES1!\nSPY = AMEX:SPY\nTN_NQ = TRADENATION:USTEC\nTS_NQ = TRADENATIONSB:USTEC\nTN_ES = TRADENATION:US500\nTS_ES = TRADENATIONSB:US500"
+const string DEFAULT_VOLUME_FORMULAS = "TRADENATION:NVDA.EX = NASDAQ:NVDA\nIG:NVDA = IG:NVDA\nMNQ = MNQ + 10*NQ + 60*QQQ\nTN_NQ = MNQ + 10*NQ + 60*QQQ\nTS_NQ = MNQ + 10*NQ + 60*QQQ\nMES = MES + 10*ES + 60*SPY\nTN_ES = MES + 10*ES + 60*SPY\nTS_ES = MES + 10*ES + 60*SPY\nIG:NASDAQ = MNQ + 10*NQ + 60*QQQ\nIG:SPTRD = MES + 10*ES + 60*SPY"
+
+groupVwap = "VWAP"
+groupSymbolMapper = "Use SVKO CFD Symbol Mapper"
+
+symbolAbbreviationsInput = input.text_area(DEFAULT_SYMBOL_ABBREVIATIONS, "Symbol abbreviations", tooltip = "Enter one ABBREVIATION = TRADINGVIEW_SYMBOL mapping per line. Abbreviations can be used on either side of a volume formula.", display = display.data_window)
+volumeFormulasInput = input.text_area(DEFAULT_VOLUME_FORMULAS, "Volume formulas", tooltip = "Enter one CHART_SYMBOL_OR_ABBREVIATION = weighted source formula per line. Terms use a symbol, an abbreviation, or positive_weight*symbol syntax and are joined with +. A formula can contain up to 10 terms.", display = display.data_window)
+showVwap = input.bool(true, "Show VWAP", group = groupVwap, display = display.data_window)
+vwapAnchorInput = input.string("Main Session", "Anchor", options = ["Main Session", "Full Session"], group = groupVwap, display = display.data_window, active = showVwap)
+mapperCode1Source = input.source(close, "1st code", tooltip = "Used only when no Volume formulas entry matches the current chart and its exchange prefix is listed in Broker exchange prefixes. Add SVKO CFD Symbol Mapper to the same chart, then select Map: 1st code here. A matching explicit formula always takes priority.", group = groupSymbolMapper, display = display.data_window)
+mapperCode2Source = input.source(close, "2nd code", tooltip = "Select Map: 2nd code from the same SVKO CFD Symbol Mapper instance. Both codes must be configured. If either source is left on close or the Mapper has no match, the indicator remains empty and makes no fallback volume request.", group = groupSymbolMapper, display = display.data_window)
+brokerExchangePrefixesInput = input.string("IG, TRADENATION, TRADENATIONSB", "Broker exchange prefixes", tooltip = "Used only by the SVKO CFD Symbol Mapper fallback. Enter comma-separated chart exchange prefixes that may use the two code inputs when no matching volume formula exists. Direct formulas are unaffected. Default: IG, TRADENATION, TRADENATIONSB.", group = groupSymbolMapper, display = display.data_window)
+
+compactText(string value) =>
+    str.replace_all(str.replace_all(str.replace_all(value, " ", ""), "\t", ""), "\r", "")
+
+validSymbol(string symbol) =>
+    int separator = str.pos(symbol, ":")
+    not na(separator) and separator > 0 and separator < str.length(symbol) - 1
+
+validAbbreviation(string abbreviation) =>
+    abbreviation != "" and not str.contains(abbreviation, ":") and not str.contains(abbreviation, "=") and not str.contains(abbreviation, "+") and not str.contains(abbreviation, "*")
+
+resolveSymbol(string value, array<string> abbreviations, array<string> symbols) =>
+    int abbreviationIndex = array.indexof(abbreviations, value)
+    abbreviationIndex >= 0 ? array.get(symbols, abbreviationIndex) : value
+
+decodeChunk(int code) =>
+    int value = code
+    string result = ""
+    bool valid = value >= 0
+    while value > 0 and valid
+        int digit = value % BASE
+        if digit == 0
+            valid := false
+        else
+            result := str.substring(ALPHABET, digit - 1, digit) + result
+            value := int(value / BASE)
+    valid ? result : "NO SYMBOL MAPPING"
+
+expandTransportSymbol(string symbol) =>
+    str.pos(symbol, "TNSB_") == 0 ? "TRADENATIONSB:" + str.substring(symbol, 5, str.length(symbol)) : str.pos(symbol, "TN_") == 0 ? "TRADENATION:" + str.substring(symbol, 3, str.length(symbol)) : symbol
+
+normaliseBrokerExchangePrefixes(string prefixes) =>
+    "," + str.upper(str.replace_all(prefixes, " ", "")) + ","
+
+isBrokerSymbol(string symbol, string brokerExchangePrefixes) =>
+    int separator = str.pos(symbol, ":")
+    string exchange = separator > 0 ? str.substring(symbol, 0, separator) : ""
+    separator > 0 and str.contains(brokerExchangePrefixes, "," + str.upper(exchange) + ",")
+
+symbolPrefix(string symbol) =>
+    int separator = str.pos(symbol, ":")
+    na(separator) ? "" : str.substring(symbol, 0, separator)
+
+isFuturesAnchorSymbol(string symbol) =>
+    string prefix = symbolPrefix(symbol)
+    prefix == "CME" or prefix == "CME_MINI"
+
+chartSymbol = ticker.standard(syminfo.tickerid)
+standardChart = chart.is_standard
+brokerExchangePrefixes = normaliseBrokerExchangePrefixes(brokerExchangePrefixesInput)
+brokerChart = isBrokerSymbol(chartSymbol, brokerExchangePrefixes)
+
+var array<string> sourceSymbols = array.new<string>()
+var array<float> sourceWeights = array.new<float>()
+var array<string> symbolAbbreviations = array.new<string>()
+var array<string> abbreviationSymbols = array.new<string>()
+var bool abbreviationsAreValid = true
+var bool hasActiveMapping = false
+var bool formulaIsValid = true
+var bool hasResolvedVolumeSource = false
+var int mainAnchorIndex = -1
+var int fullAnchorIndex = -1
+
+if barstate.isfirst
+    array<string> abbreviationLines = str.split(symbolAbbreviationsInput, "\n")
+    if array.size(abbreviationLines) > 0
+        for lineIndex = 0 to array.size(abbreviationLines) - 1
+            string abbreviationLine = compactText(array.get(abbreviationLines, lineIndex))
+            if abbreviationLine != ""
+                int separator = str.pos(abbreviationLine, "=")
+                if na(separator) or str.contains(str.substring(abbreviationLine, separator + 1, str.length(abbreviationLine)), "=")
+                    abbreviationsAreValid := false
+                else
+                    string abbreviation = str.substring(abbreviationLine, 0, separator)
+                    string abbreviationSymbol = str.substring(abbreviationLine, separator + 1, str.length(abbreviationLine))
+                    if not validAbbreviation(abbreviation) or not validSymbol(abbreviationSymbol) or array.indexof(symbolAbbreviations, abbreviation) >= 0
+                        abbreviationsAreValid := false
+                    else
+                        array.push(symbolAbbreviations, abbreviation)
+                        array.push(abbreviationSymbols, abbreviationSymbol)
+    array<string> mappingLines = str.split(volumeFormulasInput, "\n")
+    string activeFormula = ""
+    int activeLineCount = 0
+    bool activeLineSyntaxError = false
+    if array.size(mappingLines) > 0
+        for lineIndex = 0 to array.size(mappingLines) - 1
+            string mappingLine = compactText(array.get(mappingLines, lineIndex))
+            if mappingLine != ""
+                int separator = str.pos(mappingLine, "=")
+                if na(separator)
+                    if str.pos(mappingLine, chartSymbol) == 0
+                        activeLineSyntaxError := true
+                else
+                    string mappedChartSymbol = resolveSymbol(str.substring(mappingLine, 0, separator), symbolAbbreviations, abbreviationSymbols)
+                    if mappedChartSymbol == chartSymbol
+                        activeLineCount += 1
+                        activeFormula := str.substring(mappingLine, separator + 1, str.length(mappingLine))
+    hasActiveMapping := activeLineCount > 0 or activeLineSyntaxError
+    formulaIsValid := abbreviationsAreValid and not activeLineSyntaxError and activeLineCount == 1 and activeFormula != ""
+    if formulaIsValid
+        array<string> formulaTerms = str.split(activeFormula, "+")
+        int termCount = array.size(formulaTerms)
+        formulaIsValid := termCount > 0 and termCount <= MAX_FORMULA_TERMS
+        if formulaIsValid
+            for termIndex = 0 to termCount - 1
+                string formulaTerm = array.get(formulaTerms, termIndex)
+                int multiplierSeparator = str.pos(formulaTerm, "*")
+                float sourceWeight = 1.0
+                string sourceSymbolToken = formulaTerm
+                if not na(multiplierSeparator)
+                    string remainder = str.substring(formulaTerm, multiplierSeparator + 1, str.length(formulaTerm))
+                    if str.contains(remainder, "*")
+                        formulaIsValid := false
+                    sourceWeight := str.tonumber(str.substring(formulaTerm, 0, multiplierSeparator))
+                    sourceSymbolToken := remainder
+                string sourceSymbol = resolveSymbol(sourceSymbolToken, symbolAbbreviations, abbreviationSymbols)
+                if formulaIsValid and (na(sourceWeight) or sourceWeight <= 0 or not validSymbol(sourceSymbol))
+                    formulaIsValid := false
+                if formulaIsValid
+                    int existingIndex = array.indexof(sourceSymbols, sourceSymbol)
+                    if existingIndex >= 0
+                        array.set(sourceWeights, existingIndex, array.get(sourceWeights, existingIndex) + sourceWeight)
+                    else
+                        array.push(sourceSymbols, sourceSymbol)
+                        array.push(sourceWeights, sourceWeight)
+    if not formulaIsValid
+        array.clear(sourceSymbols)
+        array.clear(sourceWeights)
+    if formulaIsValid
+        hasResolvedVolumeSource := true
+    if abbreviationsAreValid and not hasActiveMapping and brokerChart
+        bool mapperSourcesConfigured = mapperCode1Source != close and mapperCode2Source != close
+        int mapperCode1 = int(math.round(mapperCode1Source))
+        int mapperCode2 = int(math.round(mapperCode2Source))
+        string mappedSymbol = expandTransportSymbol(decodeChunk(mapperCode1) + decodeChunk(mapperCode2))
+        bool mapperHasNoMapping = mapperCode1 == 0 and mapperCode2 == 0
+        bool mapperSymbolIsValid = validSymbol(mappedSymbol) and not str.contains(mappedSymbol, "NO SYMBOL MAPPING")
+        if mapperSourcesConfigured and not mapperHasNoMapping and mapperSymbolIsValid
+            array.push(sourceSymbols, mappedSymbol)
+            array.push(sourceWeights, 1.0)
+            hasResolvedVolumeSource := true
+    if hasResolvedVolumeSource
+        for sourceIndex = 0 to array.size(sourceSymbols) - 1
+            string sourceSymbol = array.get(sourceSymbols, sourceIndex)
+            if mainAnchorIndex < 0 and not isFuturesAnchorSymbol(sourceSymbol)
+                mainAnchorIndex := sourceIndex
+            if fullAnchorIndex < 0 and isFuturesAnchorSymbol(sourceSymbol)
+                fullAnchorIndex := sourceIndex
+        if fullAnchorIndex < 0
+            fullAnchorIndex := 0
+
+canRequest = standardChart and abbreviationsAreValid and hasResolvedVolumeSource and array.size(sourceSymbols) > 0
+float weightedVolume = na
+float weightedVolumeSum = 0.0
+bool mainSessionActive = false
+int mainTradingDay = na
+int fullTradingDay = na
+var bool hasSeenSourceData = false
+
+if canRequest
+    for sourceIndex = 0 to array.size(sourceSymbols) - 1
+        string sourceSymbol = array.get(sourceSymbols, sourceIndex)
+        float sourceWeight = array.get(sourceWeights, sourceIndex)
+        string extendedSymbol = ticker.modify(sourceSymbol, session = session.extended)
+        float sourceVolume = na
+        bool sourceIsMarket = false
+        int sourceTradingDay = na
+        bool sourceDataIsAvailable = false
+        if showVwap
+            [requestedVolume, requestedIsMarket, requestedTradingDay] = request.security(extendedSymbol, timeframe.period, [volume, session.ismarket, time_tradingday], gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true, calc_bars_count = REQUEST_BARS)
+            sourceVolume := requestedVolume
+            sourceIsMarket := requestedIsMarket
+            sourceTradingDay := requestedTradingDay
+            sourceDataIsAvailable := not na(requestedVolume) or not na(requestedTradingDay)
+        else
+            sourceVolume := request.security(extendedSymbol, timeframe.period, volume, gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true, calc_bars_count = REQUEST_BARS)
+            sourceDataIsAvailable := not na(sourceVolume)
+        if sourceDataIsAvailable
+            hasSeenSourceData := true
+        if not na(sourceVolume)
+            weightedVolumeSum += sourceWeight * sourceVolume
+        if showVwap and sourceIndex == mainAnchorIndex
+            mainSessionActive := sourceIsMarket
+            mainTradingDay := sourceTradingDay
+        if showVwap and sourceIndex == fullAnchorIndex
+            fullTradingDay := sourceTradingDay
+    weightedVolume := hasSeenSourceData ? weightedVolumeSum : na
+
+mainAnchorAvailable = mainAnchorIndex >= 0
+fullAnchorAvailable = fullAnchorIndex >= 0
+selectedAnchorAvailable = vwapAnchorInput == "Main Session" ? mainAnchorAvailable : fullAnchorAvailable
+
+var float cumulativePriceVolume = 0.0
+var float cumulativeVolume = 0.0
+var int trackedFullTradingDay = na
+bool fullSessionReset = false
+
+if showVwap and fullAnchorAvailable and not na(fullTradingDay) and (na(trackedFullTradingDay) or fullTradingDay != trackedFullTradingDay)
+    trackedFullTradingDay := fullTradingDay
+    fullSessionReset := true
+
+bool previousMainSessionActive = bar_index > 0 ? mainSessionActive[1] : false
+int previousMainTradingDay = bar_index > 0 ? mainTradingDay[1] : na
+bool mainSessionReset = mainSessionActive and (not previousMainSessionActive or na(previousMainTradingDay) or mainTradingDay != previousMainTradingDay)
+bool selectedReset = vwapAnchorInput == "Main Session" ? mainSessionReset : fullSessionReset
+bool selectedSessionActive = vwapAnchorInput == "Main Session" ? mainSessionActive : not na(trackedFullTradingDay)
+
+if selectedReset
+    cumulativePriceVolume := 0.0
+    cumulativeVolume := 0.0
+
+bool canAccumulateVwap = showVwap and canRequest and selectedAnchorAvailable and selectedSessionActive and not na(weightedVolume) and weightedVolume > 0
+if canAccumulateVwap
+    cumulativePriceVolume += hlc3 * weightedVolume
+    cumulativeVolume += weightedVolume
+
+float vwapValue = showVwap and selectedAnchorAvailable and selectedSessionActive and cumulativeVolume > 0 ? cumulativePriceVolume / cumulativeVolume : na
+
+plot(close >= open ? weightedVolume : na, "Up Volume", color = color.rgb(77, 77, 77), style = plot.style_columns, histbase = 0, format = format.volume)
+plot(close < open ? weightedVolume : na, "Down Volume", color = color.rgb(51, 51, 51), style = plot.style_columns, histbase = 0, format = format.volume)
+plot(vwapValue, "Real VWAP", color = color.rgb(255, 152, 0), linewidth = 1, style = plot.style_linebr, force_overlay = true, linestyle = plot.linestyle_dotted)
+
+var table warningTable = table.new(position.top_right, 1, 1)
+
+if barstate.islast
+    string warningMessage = not standardChart ? "Standard time-based chart required" : not abbreviationsAreValid ? "Invalid symbol abbreviations" : hasActiveMapping and not formulaIsValid ? "Invalid active volume formula" : canRequest and showVwap and not selectedAnchorAvailable ? "VWAP needs a non-futures source" : ""
+    color warningBackground = warningMessage == "" ? na : color.rgb(32, 32, 32)
+    color warningTextColour = warningMessage == "" ? na : color.rgb(255, 152, 0)
+    table.cell(warningTable, 0, 0, warningMessage, text_color = warningTextColour, bgcolor = warningBackground, text_size = size.small)

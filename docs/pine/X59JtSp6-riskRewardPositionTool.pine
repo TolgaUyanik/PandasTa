@@ -1,0 +1,692 @@
+//@// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © k4sual
+
+//@version=6
+library('riskRewardPositionTool', overlay = true)
+
+const color INVISIBLECOLOR = color.new(color.black, 100)
+var int oneBarInTime = int(timeframe.in_seconds(timeframe.period) * 1000)
+
+//@type positionData Stores relevant data for a position.
+//@field chart.point entry The entry point of the position on the chart.
+//@field chart.point entryActual The actual entry point of the position on the chart (can differ from the intended entry point if your order was not filled initially.) Do not change directly.
+//@field chart.point partial_1 The first partial take profit point of the position on the chart (if applicable). Do not modify directly.
+//@field chart.point partial_2 The second partial take profit point of the position on the chart (if applicable). Do not modify directly.
+//@field chart.point exit The exit point of the position on the chart. Do not modify directly.
+//@field float slPrice The stop loss price of the position.
+//@field bool useBreakevenStop Enables moving stop loss to breakeven +/- 1 tick after a configured RR threshold is reached.
+//@field float breakevenTriggerRR The RR threshold at which the breakeven stop becomes active.
+//@field float breakevenPrice The breakeven stop price used after activation. Do not modify directly.
+//@field bool breakevenArmed A boolean indicating whether the breakeven stop has been activated. Do not modify directly.
+//@field float partial1Price The first partial take profit price of the position (if applicable).
+//@field float partial2Price The second partial take profit price of the position (if applicable).
+//@field float tpPrice The take profit price of the position.
+//@field bool positionClosed A boolean indicating whether the position is closed or not. Do not modify directly.
+//@field bool positionEntered A boolean indicating whether the position is entered or not. Do not modify directly.
+//@field bool positionError A boolean indicating whether there is an error with the position data (e.g., invalid TP/SL prices given the entry price and position direction). Do not modify directly.
+//@field int dir The direction of the position (1 for long, -1 for short). You will have to specify the direction of the trade when creating it.
+//@field int winLoss An integer indicating the outcome of the position (1 for win, -1 for loss, 0 for breakeven, na for not closed). Do not modify directly.
+export type positionData
+    chart.point entry
+    chart.point entryActual
+
+    chart.point partial_1
+    chart.point partial_2
+    chart.point exit
+
+    float slPrice
+    bool useBreakevenStop = false
+    float breakevenTriggerRR = na
+    float breakevenPrice = na
+    bool breakevenArmed = false
+    float partial1Price
+    float partial2Price
+    float tpPrice
+
+    bool positionClosed = false
+    bool positionEntered = false
+    bool positionError = false
+    int dir
+    int winLoss // 1 for win, -1 for loss, 0 for breakeven, not closed = na
+    bool pnlDrawnForFirstTime = false
+
+//@type positionCSS Stores styling data for a position's drawing objects.
+//@field tpColor        Color for the take profit area.
+//@field slColor        Color for the stop loss area.
+//@field lineColor      Color for the entry line and PnL line.
+//@field labelTextColor Color for the text in the positionInfoLabel.
+//@field showEntryExitMarket Want to see the entry and exit markers?
+export type positionCSS
+    color tpColor
+    color slColor
+    color lineColor
+    color labelTextColor
+    bool showEntryExitMarker
+    color buyLblColor
+    color sellLblColor
+
+//@type positionDrawObject Stores relevant data for a position's drawing objects. You should not modify any of these directly. Instead, use enterOrder()
+//@field data             The positionData instance containing the position's data.
+//@field tpBox            The box object representing the take profit area on the chart.
+//@field slBox            The box object representing the stop loss area on the chart.
+//@field pnlBox           The box object representing the profit and loss area on the chart. This box updates based on the current price action if the position is open, or is overlayed on the TP or SL box with its color if the position is closed.
+//@field entryLine        The line object representing the entry price level on the chart.
+//@field breakevenLine    The optional line object representing the breakeven stop level on the chart (if enabled).
+//@field partialLine_1    The line object representing the first partial take profit level on the chart (if applicable).
+//@field partialLine_2    The line object representing the second partial take profit level on the chart (if applicable).
+//@field positionInfoLbl  The label object displaying information about the position, like Pnl in points and RR.
+//@field entryDot         The label object representing the entry point on the chart.
+//@field partial1Dot      The label object representing the first partial take profit point on the chart (if applicable).
+//@field partial2Dot      The label object representing the second partial take profit point on the chart (if applicable).
+//@field exitDot          The label object representing the exit point on the chart.
+export type positionDrawObject
+    positionData data
+    box tpBox
+    box slBox
+    box pnlBox
+
+    line entryLine
+    line breakevenLine
+    line partialLine_1
+    line partialLine_2
+
+    label positionInfoLbl
+    label entryDot
+    label partial1Dot
+    label partial2Dot
+    label exitDot
+
+    bool check = false
+//@function priceHit Checks if a given price level is inside a bar's true range.
+//@param price The price level to check.
+//@returns A boolean indicating whether the price level was hit during the bar or not.
+export priceHit(float price) =>
+    low <= price and high >= price
+    
+//@function Helper function used to draw take profit & stop loss boxes.
+//@returns The take profit and stop loss box objects.
+export createTpSlBoxes(positionData pos, positionCSS posCSS, int rightTime) =>
+    tpBox = box.new(
+        chart.point.from_time(pos.entry.time + rightTime, pos.tpPrice),
+        pos.entry,
+        bgcolor = posCSS.tpColor,
+        xloc = xloc.bar_time,
+        border_color = INVISIBLECOLOR)
+    slBox = box.new(
+        chart.point.from_time(pos.entry.time + rightTime, pos.slPrice),
+        pos.entry,
+        bgcolor = posCSS.slColor,
+        xloc = xloc.bar_time,
+        border_color = INVISIBLECOLOR)
+    [tpBox, slBox]
+
+//@function Helper function used to draw partial take profit lines.
+//@returns The first and second partial take profit line objects.
+export createPartialLines(positionData pos, positionCSS posCSS, int rightTime) =>
+    partialLine_1 = not na(pos.partial1Price) ? line.new(
+        chart.point.from_time(pos.entry.time, pos.partial1Price),
+        chart.point.from_time(pos.entry.time + rightTime, pos.partial1Price),
+        width = 1,
+        color = color.new(posCSS.tpColor, 0),
+        style = line.style_dotted,
+        xloc = xloc.bar_time) : na
+    partialLine_2 = not na(pos.partial2Price) ? line.new(
+        chart.point.from_time(pos.entry.time, pos.partial2Price),
+        chart.point.from_time(pos.entry.time + rightTime, pos.partial2Price),
+        width = 1,
+        color = color.new(posCSS.tpColor, 0),
+        style = line.style_dotted,
+        xloc = xloc.bar_time) : na
+    [partialLine_1, partialLine_2]
+
+//@function Helper function used to draw the entry line.
+//@returns The entry line object.
+export createEntryLine(positionData pos, positionCSS posCSS, int x2Time) =>
+    line.new(
+        chart.point.from_time(pos.entry.time, pos.entry.price),
+        chart.point.from_time(x2Time, pos.entry.price),
+        width = 1,
+        color = posCSS.lineColor,
+        xloc = xloc.bar_time)
+
+//@function Helper function used to draw the optional breakeven stop line.
+//@param pos The position data for which to draw the breakeven line.
+//@param posCSS The style settings for the position drawing objects.
+//@param x2Time The time coordinate for the line's right-side endpoint.
+//@returns The breakeven stop line object, or na if breakeven stop is disabled.
+export createBreakevenLine(positionData pos, positionCSS posCSS, int x2Time) =>
+    pos.useBreakevenStop and not na(pos.breakevenTriggerRR) ? line.new(
+        chart.point.from_time(pos.entry.time, pos.breakevenPrice),
+        chart.point.from_time(x2Time, pos.breakevenPrice),
+        width = 1,
+        color = color.new(posCSS.slColor, 0),
+        style = line.style_dotted,
+        xloc = xloc.bar_time) : na
+    
+//@function Helper function used to draw the profit/loss box.
+//@returns The profit/loss box object.
+export createPnlBox(positionData pos, int rightTime, float pnlPrice, color pnlColor) =>
+    box.new(
+        chart.point.from_time(pos.entry.time + rightTime, pnlPrice),
+        pos.entry,
+        bgcolor = pnlColor,
+        xloc = xloc.bar_time,
+        border_color = INVISIBLECOLOR)
+
+//@function Helper function used to draw the position information label.
+//@returns The position information label object.
+export createPositionInfoLbl(int lblTime, float lblPrice, string infoText, color bgColor, positionCSS posCSS) =>
+    label.new(
+        chart.point.from_time(lblTime, lblPrice),
+        xloc = xloc.bar_time,
+        text = infoText,
+        color = bgColor,
+        textcolor = posCSS.labelTextColor,
+        style = label.style_label_center, text_font_family = font.family_monospace)
+
+//@function Helper function used to draw the entry point label on the chart.
+//@returns The entry point label object.
+export createEntryDot(positionData pos, positionCSS posCSS, bool showDot) =>
+    label.new(
+        pos.entry,
+        xloc = xloc.bar_time,
+        yloc = pos.dir == 1 ? yloc.belowbar : yloc.abovebar,
+        style = label.style_none,
+        text = pos.dir == 1 ? '↑' : '↓',
+        size = size.normal,
+        textcolor = showDot ? pos.dir == 1 ? posCSS.buyLblColor : posCSS.sellLblColor : INVISIBLECOLOR)
+
+//@function Helper function used to draw the partial take profit point labels on the chart.
+//@returns The first and second partial take profit point label objects (if not na).
+export createPartialDot(positionData pos, positionCSS posCSS, float partialPrice, bool showDot) =>
+    not na(partialPrice) and priceHit(partialPrice) ? label.new(
+        chart.point.from_time(time, partialPrice),
+        xloc = xloc.bar_time,
+        yloc = pos.dir == 1 ? yloc.abovebar : yloc.belowbar,
+        style = label.style_none,
+        text = pos.dir == 1 ? '↓' : '↑',
+        size = size.normal,
+        textcolor = showDot ? pos.dir == 1 ? posCSS.sellLblColor : posCSS.buyLblColor : INVISIBLECOLOR) : na
+
+//@function Helper function used to draw the exit point label on the chart.
+//@returns The exit point label object.
+export createExitDot(positionData pos, positionCSS posCSS, chart.point exitPoint, bool showDot) =>
+    label.new(
+        exitPoint,
+        xloc = xloc.bar_time,
+        yloc = pos.dir == 1 ? yloc.abovebar : yloc.belowbar,
+        style = label.style_none,
+        text = pos.dir == 1 ? '↓' : '↑',
+        size = size.normal,
+        textcolor = showDot ? pos.dir == 1 ? posCSS.sellLblColor : posCSS.buyLblColor : INVISIBLECOLOR)
+
+//@function Used to draw a new position on the chart. Do not use directly. Instead, use enterOrder().
+//@returns The positionDrawObject instance containing the position's data and drawing objects.
+export drawNewPosition(positionData pos, positionCSS posCSS) =>
+    var positionDrawObject posDraw = na
+
+    if pos.useBreakevenStop and not na(pos.breakevenTriggerRR)
+        pos.breakevenPrice := pos.dir == 1 ? pos.entry.price + syminfo.mintick : pos.entry.price - syminfo.mintick
+
+    if (pos.tpPrice <= pos.entry.price and pos.slPrice <= pos.entry.price) or
+     (pos.tpPrice >= pos.entry.price and pos.slPrice >= pos.entry.price) or 
+     (not na(pos.partial1Price) and pos.partial1Price <= pos.entry.price and pos.slPrice <= pos.entry.price) or
+     (not na(pos.partial1Price) and pos.partial1Price >= pos.entry.price and pos.slPrice >= pos.entry.price) or
+     (not na(pos.partial2Price) and pos.partial2Price <= pos.entry.price and pos.slPrice <= pos.entry.price) or
+     (not na(pos.partial2Price) and pos.partial2Price >= pos.entry.price and pos.slPrice >= pos.entry.price)
+        runtime.error('Both stop loss and take profit or atleast 1 partial are on the same side of the position. Please check your position inputs and reload the indicator.')
+        pos.positionError := true
+
+    else if (pos.dir == 1 and
+        ((pos.tpPrice < pos.entry.price or pos.slPrice > pos.entry.price) or (not na(pos.partial1Price) and pos.partial1Price < pos.entry.price) or (not na(pos.partial2Price) and pos.partial2Price < pos.entry.price))) or
+       (pos.dir == -1 and
+        ((pos.tpPrice > pos.entry.price or pos.slPrice < pos.entry.price) or (not na(pos.partial1Price) and pos.partial1Price > pos.entry.price) or (not na(pos.partial2Price) and pos.partial2Price > pos.entry.price)))
+        runtime.error('Invalid take profit, partial or stop loss price given position direction. Please check your position inputs and reload the indicator.')
+        pos.positionError := true
+    
+    else if not na(pos.partial1Price) and not na(pos.partial2Price) and
+     ((pos.partial1Price <= pos.entry.price and pos.partial2Price >= pos.entry.price) or (pos.partial1Price >= pos.entry.price and pos.partial2Price <= pos.entry.price))
+        runtime.error('Partial 1 and Partial 2 are on opposite sides of the position. Please check your position inputs and reload the indicator.')
+        pos.positionError := true 
+
+    else if (pos.dir == 1 and ((not na(pos.partial1Price) and pos.partial1Price > pos.tpPrice) or (not na(pos.partial2Price) and pos.partial2Price > pos.tpPrice))) or
+     (pos.dir == -1 and ((not na(pos.partial1Price) and pos.partial1Price < pos.tpPrice) or (not na(pos.partial2Price) and pos.partial2Price < pos.tpPrice)))
+        runtime.error('Atleast 1 partial is placed beyond the final take profit level. Please check your position inputs and reload the indicator.')
+        pos.positionError := true
+
+    else if pos.useBreakevenStop and not na(pos.breakevenTriggerRR) and pos.breakevenTriggerRR <= 0
+        runtime.error('Breakeven trigger RR must be greater than 0 when breakeven stop is enabled. Please check your inputs and reload the indicator.')
+        pos.positionError := true
+
+    else
+        if pos.dir == 1 // buy position
+            // should position close instantly on entry
+            if (low < pos.slPrice)
+                pos.positionEntered := true
+                pos.positionClosed := true
+                pos.winLoss := -1
+                pos.exit := chart.point.from_time(time, pos.slPrice)
+
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, oneBarInTime)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time + oneBarInTime)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, oneBarInTime)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = createPnlBox(pos, oneBarInTime, pos.slPrice, posCSS.slColor),
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time + oneBarInTime),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl((pos.entry.time + pos.exit.time) / 2, pos.entry.price, '-' + str.tostring(math.round(math.abs(pos.entry.price - pos.slPrice))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), color.new(posCSS.slColor, 0), posCSS),
+                    entryDot = createEntryDot(pos, posCSS, posCSS.showEntryExitMarker),
+                    partial1Dot = createPartialDot(pos, posCSS, pos.partial1Price, posCSS.showEntryExitMarker),
+                    partial2Dot = createPartialDot(pos, posCSS, pos.partial2Price, posCSS.showEntryExitMarker),
+                    exitDot = createExitDot(pos, posCSS, pos.exit, posCSS.showEntryExitMarker),
+                    check = true)
+                    
+            else if (high > pos.tpPrice)
+                pos.positionEntered := true
+                pos.positionClosed := true
+                pos.winLoss := 1
+                pos.exit := chart.point.from_time(time, pos.tpPrice)
+
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, oneBarInTime)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time + oneBarInTime)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, oneBarInTime)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = createPnlBox(pos, oneBarInTime, pos.tpPrice, posCSS.tpColor),
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time + oneBarInTime),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl((pos.entry.time + pos.exit.time) / 2, pos.entry.price, '+' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), color.new(posCSS.tpColor, 0), posCSS),
+                    entryDot = createEntryDot(pos, posCSS, posCSS.showEntryExitMarker),
+                    partial1Dot = createPartialDot(pos, posCSS, pos.partial1Price, posCSS.showEntryExitMarker),
+                    partial2Dot = createPartialDot(pos, posCSS, pos.partial2Price, posCSS.showEntryExitMarker),
+                    exitDot = createExitDot(pos, posCSS, pos.exit, posCSS.showEntryExitMarker),
+                    check = true)
+            
+            else if (high > pos.entry.price and low < pos.entry.price)
+                pos.positionEntered := true
+                inProfit = close > pos.entry.price
+                
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, 0)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, 0)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = createPnlBox(pos, 0, close, inProfit ? posCSS.tpColor : posCSS.slColor),
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl(time, pos.entry.price, (close > pos.entry.price ? '+' : '-') + str.tostring(math.round(math.abs(close - pos.entry.price))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), inProfit ? color.new(posCSS.tpColor, 0) : color.new(posCSS.slColor, 0), posCSS),
+                    entryDot = createEntryDot(pos, posCSS, posCSS.showEntryExitMarker),
+                    partial1Dot = createPartialDot(pos, posCSS, pos.partial1Price, posCSS.showEntryExitMarker),
+                    partial2Dot = createPartialDot(pos, posCSS, pos.partial2Price, posCSS.showEntryExitMarker),
+                    exitDot = na,
+                    check = false)
+
+            else
+                pos.positionEntered := false
+                
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, 0)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, 0)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = na,
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl(pos.entry.time, pos.entry.price, 'RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), color.new(posCSS.lineColor, 0), posCSS),
+                    entryDot = na,
+                    partial1Dot = na,
+                    partial2Dot = na,
+                    exitDot = na,
+                    check = false)
+
+        else // sell position
+            // should position close instantly on entry
+            if (high > pos.slPrice)
+                pos.positionEntered := true
+                pos.positionClosed := true
+                pos.winLoss := -1
+                pos.exit := chart.point.from_time(time, pos.slPrice)
+
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, oneBarInTime)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time + oneBarInTime)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, oneBarInTime)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = createPnlBox(pos, oneBarInTime, pos.slPrice, posCSS.slColor),
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time + oneBarInTime),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl((pos.entry.time + pos.exit.time) / 2, pos.entry.price, '-' + str.tostring(math.round(math.abs(pos.entry.price - pos.slPrice))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), color.new(posCSS.slColor, 0), posCSS),
+                    entryDot = createEntryDot(pos, posCSS, posCSS.showEntryExitMarker),
+                    partial1Dot = createPartialDot(pos, posCSS, pos.partial1Price, posCSS.showEntryExitMarker),
+                    partial2Dot = createPartialDot(pos, posCSS, pos.partial2Price, posCSS.showEntryExitMarker),
+                    exitDot = createExitDot(pos, posCSS, pos.exit, posCSS.showEntryExitMarker),
+                    check = true)
+                    
+            else if (low < pos.tpPrice)
+                pos.positionEntered := true
+                pos.positionClosed := true
+                pos.winLoss := 1
+                pos.exit := chart.point.from_time(time, pos.tpPrice)
+
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, oneBarInTime)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time + oneBarInTime)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, oneBarInTime)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = createPnlBox(pos, oneBarInTime, pos.tpPrice, posCSS.tpColor),
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time + oneBarInTime),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl((pos.entry.time + pos.exit.time) / 2, pos.entry.price, '+' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), color.new(posCSS.tpColor, 0), posCSS),
+                    entryDot = createEntryDot(pos, posCSS, posCSS.showEntryExitMarker),
+                    partial1Dot = createPartialDot(pos, posCSS, pos.partial1Price, posCSS.showEntryExitMarker),
+                    partial2Dot = createPartialDot(pos, posCSS, pos.partial2Price, posCSS.showEntryExitMarker),
+                    exitDot = createExitDot(pos, posCSS, pos.exit, posCSS.showEntryExitMarker),
+                    check = true)
+            
+            else if (high > pos.entry.price and low < pos.entry.price)
+                pos.positionEntered := true
+                inProfit = close < pos.entry.price
+                
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, 0)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, 0)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = createPnlBox(pos, 0, close, inProfit ? posCSS.tpColor : posCSS.slColor),
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl(time, pos.entry.price, (close < pos.entry.price ? '+' : '-') + str.tostring(math.round(math.abs(close - pos.entry.price))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), inProfit ? color.new(posCSS.tpColor, 0) : color.new(posCSS.slColor, 0), posCSS),
+                    entryDot = createEntryDot(pos, posCSS, posCSS.showEntryExitMarker),
+                    partial1Dot = createPartialDot(pos, posCSS, pos.partial1Price, posCSS.showEntryExitMarker),
+                    partial2Dot = createPartialDot(pos, posCSS, pos.partial2Price, posCSS.showEntryExitMarker),
+                    exitDot = na,
+                    check = false)
+            else
+                pos.positionEntered := false
+                
+                [tpBox, slBox] = createTpSlBoxes(pos, posCSS, 0)
+                breakevenLine = createBreakevenLine(pos, posCSS, pos.entry.time)
+                [partialLine_1, partialLine_2] = createPartialLines(pos, posCSS, 0)
+
+                posDraw := positionDrawObject.new(
+                    data = pos,
+                    tpBox = tpBox,
+                    slBox = slBox,
+                    pnlBox = na,
+                    entryLine = createEntryLine(pos, posCSS, pos.entry.time),
+                    breakevenLine = breakevenLine,
+                    partialLine_1 = partialLine_1,
+                    partialLine_2 = partialLine_2,
+                    positionInfoLbl = createPositionInfoLbl(pos.entry.time, pos.entry.price, 'RR: ' + str.tostring(math.round(math.abs(pos.entry.price - pos.tpPrice) / math.abs(pos.entry.price - pos.slPrice), 2)), color.new(posCSS.lineColor, 0), posCSS),
+                    entryDot = na,
+                    partial1Dot = na,
+                    partial2Dot = na,
+                    exitDot = na,
+                    check = false)
+    
+    posDraw
+
+//@function Used to update exit parameters.
+//@param pos positionData object containing position data.
+//@param posCSS positionCSS object containing styling data for the position's drawing objects.
+//@returns Exit price/color.
+export method getExitParams(positionData pos, positionCSS posCSS) =>
+    effectiveStop = pos.breakevenArmed ? pos.breakevenPrice : pos.slPrice
+    exitPrice = pos.dir == 1 ? (high >= pos.tpPrice ? pos.tpPrice : (low < effectiveStop ? effectiveStop : close)) : (low <= pos.tpPrice ? pos.tpPrice : (high >= effectiveStop ? effectiveStop : close))
+    exitColor = ((pos.dir == 1 and exitPrice > pos.entry.price) or (pos.dir == -1 and exitPrice < pos.entry.price)) ? posCSS.tpColor : posCSS.slColor
+    [exitPrice, exitColor]
+
+//@function Used to enter an order.
+//@param pos positionData object containing position data.
+//@param posDrawArr An array of positionDrawObject instances to which the new position's drawing objects will be added.
+//@param posCSS positionCSS object containing styling data for the position's drawing objects.
+export enterOrder(positionData pos, array<positionDrawObject> posDrawArr, positionCSS posCSS) =>
+    if math.abs(time - pos.entry.time) < timeframe.in_seconds(timeframe.period) * 1000 and not (math.abs(time[1] - pos.entry.time) < timeframe.in_seconds(timeframe.period) * 1000) // if the current bar's time is equal to the entry time and the previous bar's time is not equal to the entry time (to avoid multiple calls on the same order)
+     and not pos.positionError // if there is no error with the position data
+        posDrawArr.push(drawNewPosition(pos, posCSS))
+
+//@function Used to update the position drawings on each bar. Make sure to call this function at least once per bar.
+//@param posDrawArr An array of positionDrawObject instances containing the position drawing objects to update.
+//@param posCSS positionCSS object containing styling data for the position's drawing objects.
+export updatePositions(array<positionDrawObject> posDrawArr, positionCSS posCSS) =>
+    if posDrawArr.size() > 0
+        for i = 0 to posDrawArr.size() - 1
+            varip positionDrawObject posDraw = na 
+            posDraw := posDrawArr.get(i)
+
+            if na(posDraw) or na(posDraw.data)
+                continue
+            
+            // first check if position is entered (if price touched entry price)
+            posDraw.data.entryActual := not posDraw.data.positionEntered and (low <= posDraw.data.entry.price and high >= posDraw.data.entry.price) ? chart.point.from_time(time, posDraw.data.entry.price) : posDraw.data.entryActual
+            posDraw.data.positionEntered := not posDraw.data.positionEntered and (low <= posDraw.data.entry.price and high >= posDraw.data.entry.price) ? true : posDraw.data.positionEntered
+            
+            if posDraw.data.positionEntered and not posDraw.data.pnlDrawnForFirstTime
+                posDraw.data.entryActual := chart.point.from_time(time, posDraw.data.entry.price)
+                posDraw.pnlBox := box.new(
+                    posDraw.data.entryActual,
+                    chart.point.from_time(time, close),
+                    bgcolor = ((posDraw.data.dir == 1 and close > posDraw.data.entry.price) or (posDraw.data.dir == -1 and close < posDraw.data.entry.price)) ? posCSS.tpColor : posCSS.slColor,
+                    xloc = xloc.bar_time,
+                    border_color = INVISIBLECOLOR)
+                posDraw.data.pnlDrawnForFirstTime := true
+
+
+
+            if not posDraw.data.positionError
+                if posDraw.data.positionEntered and not posDraw.data.positionClosed and time >= posDraw.data.entry.time
+                    if posDraw.data.useBreakevenStop and not na(posDraw.data.breakevenTriggerRR) and not posDraw.data.breakevenArmed
+                        triggerDistance = math.abs(posDraw.data.entry.price - posDraw.data.slPrice) * posDraw.data.breakevenTriggerRR
+                        triggerPrice = posDraw.data.dir == 1 ? posDraw.data.entry.price + triggerDistance : posDraw.data.entry.price - triggerDistance
+                        posDraw.data.breakevenArmed := posDraw.data.dir == 1 ? high >= triggerPrice : low <= triggerPrice
+
+                    // new entry dot
+                    if na(posDraw.entryDot)
+                        posDraw.entryDot := label.new(
+                             chart.point.from_time(time, posDraw.data.entryActual.price),
+                             xloc = xloc.bar_time,
+                             yloc = (posDraw.data.dir == 1) ? yloc.belowbar : yloc.abovebar,
+                             style = label.style_none,
+                             text = (posDraw.data.dir == 1) ? '↑' : '↓',
+                             size = size.normal,
+                             textcolor = posCSS.showEntryExitMarker ? posDraw.data.dir == 1 ? posCSS.buyLblColor : posCSS.sellLblColor : INVISIBLECOLOR)
+                    
+                    [exitPrice, exitColor] = getExitParams(posDraw.data, posCSS)
+
+                    // check if position should be closed
+                    if not posDraw.data.positionClosed and time >= posDraw.data.entry.time
+                        posDraw.pnlBox.set_bgcolor(exitColor)
+                        effectiveStop = posDraw.data.breakevenArmed ? posDraw.data.breakevenPrice : posDraw.data.slPrice
+                        if posDraw.data.dir == 1
+                            posDraw.data.positionClosed := posDraw.data.positionEntered and ((high >= posDraw.data.tpPrice) or (low <= effectiveStop))
+                        else if posDraw.data.dir == -1
+                            posDraw.data.positionClosed := posDraw.data.positionEntered and ((low <= posDraw.data.tpPrice) or (high >= effectiveStop))
+                        if posDraw.data.positionClosed
+                            if posDraw.data.dir == 1
+                                if high >= posDraw.data.tpPrice
+                                    posDraw.data.winLoss := 1
+                                else if effectiveStop > posDraw.data.entry.price
+                                    posDraw.data.winLoss := 1
+                                else if effectiveStop < posDraw.data.entry.price
+                                    posDraw.data.winLoss := -1
+                                else
+                                    posDraw.data.winLoss := 0
+                            else if posDraw.data.dir == -1
+                                if low <= posDraw.data.tpPrice
+                                    posDraw.data.winLoss := 1
+                                else if effectiveStop < posDraw.data.entry.price
+                                    posDraw.data.winLoss := 1
+                                else if effectiveStop > posDraw.data.entry.price
+                                    posDraw.data.winLoss := -1
+                                else
+                                    posDraw.data.winLoss := 0
+
+                    // update the position object only if the position is opened
+                    if (posDraw.data.positionEntered and not posDraw.data.positionClosed)
+                        // update the entry line
+                        posDraw.entryLine.set_xy2(time, posDraw.data.entry.price)
+                        // update the pnl box
+                        posDraw.pnlBox.set_top_left_point(posDraw.data.entryActual)
+                        posDraw.pnlBox.set_bottom_right_point(chart.point.from_time(time, close))
+                        // update the tp box
+                        posDraw.tpBox.set_right(time)
+                        // update the sl box
+                        posDraw.slBox.set_right(time)
+                        // update the optional breakeven line
+                        if not na(posDraw.breakevenLine)
+                            posDraw.breakevenLine.set_x2(time)
+                        // update the position info label
+                        posDraw.positionInfoLbl.set_xy((posDraw.data.entry.time + time) / 2, posDraw.data.entry.price)
+                        
+                        if posDraw.data.dir == 1
+                            posDraw.positionInfoLbl.set_color(close > posDraw.data.entry.price ? color.new(posCSS.tpColor, 0) : color.new(posCSS.slColor, 0))
+                            posDraw.positionInfoLbl.set_text((close > posDraw.data.entry.price ? '+' : '-') + str.tostring(math.round_to_mintick(math.abs(close - posDraw.data.entry.price))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(posDraw.data.entry.price - posDraw.data.tpPrice) / math.abs(posDraw.data.entry.price - posDraw.data.slPrice), 2)))
+                        else if posDraw.data.dir == -1
+                            posDraw.positionInfoLbl.set_color(close < posDraw.data.entry.price ? color.new(posCSS.tpColor, 0) : color.new(posCSS.slColor, 0))
+                            posDraw.positionInfoLbl.set_text((close > posDraw.data.entry.price ? '-' : '+') + str.tostring(math.round_to_mintick(math.abs(close - posDraw.data.entry.price))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(posDraw.data.entry.price - posDraw.data.tpPrice) / math.abs(posDraw.data.entry.price - posDraw.data.slPrice), 2)))
+
+                        // partial dots
+                        if (high >= posDraw.data.partial1Price and low <= posDraw.data.partial1Price) and na(posDraw.partial1Dot)
+                            posDraw.partial1Dot := label.new(
+                                 chart.point.from_time(time, posDraw.data.partial1Price),
+                                 xloc = xloc.bar_time,
+                                 yloc = posDraw.data.dir == 1 ? yloc.abovebar : yloc.belowbar,
+                                 style = label.style_none,
+                                 text = posDraw.data.dir == 1 ? '↓' : '↑',
+                                 size = size.normal,
+                                 textcolor = posCSS.showEntryExitMarker ? posDraw.data.dir == 1 ? posCSS.sellLblColor : posCSS.buyLblColor : INVISIBLECOLOR)
+
+                        if (high >= posDraw.data.partial2Price and low <= posDraw.data.partial2Price) and na(posDraw.partial2Dot)
+                            posDraw.partial2Dot := label.new(
+                                chart.point.from_time(time, posDraw.data.partial2Price),
+                                xloc = xloc.bar_time,
+                                yloc = posDraw.data.dir == 1 ? yloc.abovebar : yloc.belowbar,
+                                style = label.style_none,
+                                text = posDraw.data.dir == 1 ? '↓' : '↑',
+                                size = size.normal,
+                                textcolor = posCSS.showEntryExitMarker ? posDraw.data.dir == 1 ? posCSS.sellLblColor : posCSS.buyLblColor : INVISIBLECOLOR)
+
+                        // update partial lines
+                        if not na(posDraw.partialLine_1)
+                            if not na(posDraw.partial1Dot)
+                                posDraw.partialLine_1.set_x2(posDraw.partial1Dot.get_x())
+                            else
+                                posDraw.partialLine_1.set_x2(time)
+
+                        if not na(posDraw.partialLine_2)
+                            if not na(posDraw.partial2Dot)
+                                posDraw.partialLine_2.set_x2(posDraw.partial2Dot.get_x())
+                            else
+                                posDraw.partialLine_2.set_x2(time)
+
+                    if posDraw.data.positionClosed and not posDraw.check
+                        if na(posDraw.exitDot)
+                            posDraw.exitDot := label.new(
+                                 chart.point.from_time(time, exitPrice),
+                                 xloc = xloc.bar_time,
+                                 yloc = posDraw.data.dir == 1 ? yloc.abovebar : yloc.belowbar,
+                                 style = label.style_none,
+                                 text = posDraw.data.dir == 1 ? '↓' : '↑',
+                                 size = size.normal,
+                                 textcolor = posCSS.showEntryExitMarker ? posDraw.data.dir == 1 ? posCSS.sellLblColor : posCSS.buyLblColor : INVISIBLECOLOR)
+                        // get exit params
+                        posDraw.data.exit := chart.point.from_time(time, exitPrice)
+                        posDraw.check := true
+                        posDraw.pnlBox.set_top(posDraw.data.exit.price)
+                        posDraw.pnlBox.set_bottom(posDraw.data.entryActual.price)
+                        posDraw.pnlBox.set_bgcolor(exitColor)
+
+                        if not na(posDraw.partialLine_1)
+                            if not na(posDraw.partial1Dot)
+                                posDraw.partialLine_1.set_x2(posDraw.partial1Dot.get_x())
+                            else
+                                posDraw.partialLine_1.set_x2(time)
+
+                        if not na(posDraw.partialLine_2)
+                            if not na(posDraw.partial2Dot)
+                                posDraw.partialLine_2.set_x2(posDraw.partial2Dot.get_x())
+                            else
+                                posDraw.partialLine_2.set_x2(time)
+
+                        posDraw.entryLine.set_xy2(time, posDraw.data.entry.price)
+                        posDraw.tpBox.set_right(time)
+                        posDraw.slBox.set_right(time)
+                        if not na(posDraw.breakevenLine)
+                            posDraw.breakevenLine.set_x2(time)
+                        posDraw.pnlBox.set_right(time)
+                        posDraw.positionInfoLbl.set_xy((posDraw.data.entry.time + time) / 2, posDraw.data.entry.price)
+                        posDraw.positionInfoLbl.set_text((posDraw.data.winLoss == 1 ? '+' : posDraw.data.winLoss == -1 ? '-' : '') + str.tostring(math.round_to_mintick(math.abs(posDraw.data.exit.price - posDraw.data.entry.price))) + 'p ~ RR: ' + str.tostring(math.round(math.abs(posDraw.data.entry.price - posDraw.data.tpPrice) / math.abs(posDraw.data.entry.price - posDraw.data.slPrice), 2)))
+                    
+                if not posDraw.data.positionClosed and not posDraw.data.positionEntered // if position hasn't been entered yet
+                    posDraw.tpBox.set_right(time)
+                    posDraw.slBox.set_right(time)
+                    if not na(posDraw.breakevenLine)
+                        posDraw.breakevenLine.set_x2(time)
+                    if not na(posDraw.partialLine_1)
+                        posDraw.partialLine_1.set_x2(time)
+                    if not na(posDraw.partialLine_2)
+                        posDraw.partialLine_2.set_x2(time)
+                    posDraw.entryLine.set_xy2(time, posDraw.data.entry.price)
+                    posDraw.positionInfoLbl.set_xy((posDraw.data.entry.time + time) / 2, posDraw.data.entry.price)
+                    posDraw.positionInfoLbl.set_text('RR: ' + str.tostring(math.round(math.abs(posDraw.data.entry.price - posDraw.data.tpPrice) / math.abs(posDraw.data.entry.price - posDraw.data.slPrice), 2)))
+                    posDraw.positionInfoLbl.set_color(color.new(posCSS.lineColor, 0))
+                        
+            posDrawArr.set(i, posDraw)
+
+// Example usage
+// var _posDrawArr = array.new<positionDrawObject>()
+// var posCSS = positionCSS.new(<parameters...>)
+// 
+// enterOrder(
+//     positionData.new(
+//         entry = chart.point.from_time(timestamp("2025-04-21 19:41 +0500"), 21000.00),
+//         partial1Price = math.round_to_mintick(21100.00),
+//         partial2Price = math.round_to_mintick(21200.00),
+//         slPrice = math.round_to_mintick(20900.00),
+//         useBreakevenStop = true,
+//         breakevenTriggerRR = 1.0,
+//         tpPrice = math.round_to_mintick(21300.00),
+//         dir = 1
+//     ), _posDrawArr, posCSS)
+//
+// <later...>
+//
+// updatePositions(_posDrawArr, posCSS)
+//
+// Thank you for using my library. Happy trading! ;)

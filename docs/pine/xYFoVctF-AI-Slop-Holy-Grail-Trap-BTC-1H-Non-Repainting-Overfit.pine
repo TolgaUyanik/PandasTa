@@ -1,0 +1,618 @@
+//@version=6
+strategy("AI Slop Holy Grail Trap - BTC 1H Non-Repainting Overfit", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1, margin_long=1, margin_short=1, process_orders_on_close=true, calc_on_every_tick=false, use_bar_magnifier=false)
+
+// Input group labels 
+string G_CAP  = "0 · Period · Capital"
+string G_FILT = "1 · Trend & State Filters"
+string G_BRK  = "2 · Pullback & Breakout"
+string G_COIL = "3 · Coil & Reset"
+string G_HOT  = "4 · Hot Continuation"
+string G_VIEW = "5 · Visuals"
+
+// ── 0 · Period · Capital ──────────────────────────────────────────────
+int    startTime   = input.time(1514764800000, "Start Time", group=G_CAP, inline="win")  // 2018-01-01 UTC
+int    endTime     = input.time(1893456000000, "End Time",   group=G_CAP, inline="win", tooltip="Backtest window. Entries fire only inside the window; any position still open at the end is closed.")  // 2030-01-01 UTC
+float  leverage    = input.float(1.0, "Leverage", minval=1.0, maxval=125.0, step=0.5, group=G_CAP, tooltip="Multiplies margin into position size.\nNotional = Base Entry Amount (margin) × leverage.")
+float  baseAmount  = input.float(50.0, "Base Entry Amount", minval=0.0, group=G_CAP, inline="amt")
+string amountUnit  = input.string("%", "", options=["%", "$"], group=G_CAP, inline="amt", tooltip="Margin committed to one standard entry.\n% = percent of current equity (compounding).\n$ = fixed currency amount (no compounding).")
+bool   useVarSizing = input.bool(false, "Variable Position Sizing", group=G_CAP, tooltip="Off (default for this fixed-equity build): every entry uses exactly the base amount.\nOn: each entry's margin scales with its rule's risk multiplier (base × multiplier).")
+
+// Sizing & window helpers. stateMult is the per-rule risk multiplier; with
+// Variable Position Sizing off it is ignored and every entry uses the base amount.
+bool inWindow = time >= startTime and time <= endTime
+qtyFor(float stateMult) =>
+    float margin = (amountUnit == "%" ? strategy.equity * baseAmount / 100.0 : baseAmount) * (useVarSizing ? stateMult : 1.0)
+    math.max(margin, 0.0) * leverage / close
+
+// ── 1 · Trend & State Filters ─────────────────────────────────────────
+pEff13Min = input.float(0.1039, "Min efficiency · 13-bar", minval=0.03, maxval=0.25, step=0.001, group=G_FILT)
+pEff21Min = input.float(0.0795, "Min efficiency · 21-bar", minval=0.03, maxval=0.20, step=0.001, group=G_FILT)
+pRangeWideAtr = input.float(2.67, "Wide-range threshold (ATR)", minval=1.20, maxval=4.50, step=0.01, group=G_FILT)
+pAtrPctMin = input.float(0.00236, "Min ATR % of price", minval=0.0008, maxval=0.0060, step=0.0001, group=G_FILT)
+pMacro21Tol = input.float(0.0199, "Macro slope tolerance · HMA21", minval=0.0, maxval=0.08, step=0.001, group=G_FILT)
+pMacro55Tol = input.float(0.01, "Macro slope tolerance · HMA55", minval=0.0, maxval=0.05, step=0.001, group=G_FILT)
+pTrend13Min = input.float(0.0262, "Min trend slope · HMA13", minval=0.0, maxval=0.10, step=0.001, group=G_FILT)
+pSoft55Tol = input.float(0.0233, "Soft-trend slope tolerance · HMA55", minval=0.0, maxval=0.08, step=0.001, group=G_FILT)
+pOverFastAtr = input.float(1.127, "Overextension · fast (ATR)", minval=0.50, maxval=2.00, step=0.01, group=G_FILT)
+pOverSlowAtr = input.float(2.116, "Overextension · slow (ATR)", minval=1.20, maxval=3.60, step=0.01, group=G_FILT)
+
+// ── 2 · Pullback & Breakout ───────────────────────────────────────────
+pPullRange34Min = input.float(0.80, "Pullback min range position · 34", minval=0.50, maxval=0.98, step=0.01, group=G_BRK)
+pBreakRet12Min = input.float(0.0196, "Breakout min 12-bar return", minval=0.000, maxval=0.060, step=0.001, group=G_BRK)
+pBreakVolMin = input.float(1.19, "Breakout min relative volume", minval=0.40, maxval=2.20, step=0.01, group=G_BRK)
+pBreakEff13Min = input.float(0.18, "Breakout min efficiency · 13", minval=0.02, maxval=0.40, step=0.01, group=G_BRK)
+
+// ── 3 · Coil & Reset ──────────────────────────────────────────────────
+pCoilRangeMax = input.float(2.962, "Coil max range (ATR)", minval=1.40, maxval=5.80, step=0.01, group=G_COIL)
+pCoilEff13Max = input.float(0.467, "Coil max efficiency · 13", minval=0.15, maxval=0.80, step=0.01, group=G_COIL)
+pCoilAcc13Min = input.float(0.32, "Coil min acceleration · 13", minval=-0.10, maxval=0.90, step=0.01, group=G_COIL)
+pH21ClosePosMin = input.float(0.735, "HMA21 reset min close position", minval=0.45, maxval=0.96, step=0.01, group=G_COIL)
+
+// ── 4 · Hot Continuation ──────────────────────────────────────────────
+pHotRsiMin = input.float(70.78, "Hot continuation min RSI", minval=55.0, maxval=82.0, step=0.5, group=G_HOT)
+pHotDist8Min = input.float(1.512, "Hot continuation min distance · HMA8 (ATR)", minval=0.60, maxval=2.80, step=0.01, group=G_HOT)
+
+prevClose = nz(close[1], close)
+tr = math.max(high - low, math.max(math.abs(high - prevClose), math.abs(low - prevClose)))
+atr8 = ta.sma(tr, 8)
+atr21 = ta.sma(tr, 21)
+atrPct = atr8 / close
+atrRatio = atr21 > 0.0 ? atr8 / atr21 : na
+vol21 = ta.sma(volume, 21)
+volRel = vol21 > 0.0 ? volume / vol21 : 0.0
+
+hma5 = ta.wma(2.0 * ta.wma(close, 2) - ta.wma(close, 5), 2)
+hma8 = ta.wma(2.0 * ta.wma(close, 4) - ta.wma(close, 8), 3)
+hma13 = ta.wma(2.0 * ta.wma(close, 6) - ta.wma(close, 13), 4)
+hma21 = ta.wma(2.0 * ta.wma(close, 10) - ta.wma(close, 21), 5)
+hma34 = ta.wma(2.0 * ta.wma(close, 17) - ta.wma(close, 34), 6)
+hma55 = ta.wma(2.0 * ta.wma(close, 27) - ta.wma(close, 55), 7)
+hma89 = ta.wma(2.0 * ta.wma(close, 44) - ta.wma(close, 89), 9)
+
+prevHigh = nz(high[1], high)
+prevLow = nz(low[1], low)
+hi8 = ta.highest(prevHigh, 8)
+hi13 = ta.highest(prevHigh, 13)
+hi21 = ta.highest(prevHigh, 21)
+hi34 = ta.highest(prevHigh, 34)
+hi55 = ta.highest(prevHigh, 55)
+lo8 = ta.lowest(prevLow, 8)
+lo13 = ta.lowest(prevLow, 13)
+lo34 = ta.lowest(prevLow, 34)
+lo55 = ta.lowest(prevLow, 55)
+hi14 = ta.highest(high, 14)
+lo14 = ta.lowest(low, 14)
+
+barRange = math.max(high - low, syminfo.mintick)
+closePos = (close - low) / barRange
+bodyPct = math.abs(close - open) / barRange
+upperWick = (high - math.max(open, close)) / barRange
+lowerWick = (math.min(open, close) - low) / barRange
+range13 = math.max(hi13 - lo13, syminfo.mintick)
+range34 = math.max(hi34 - lo34, syminfo.mintick)
+range55 = math.max(hi55 - lo55, syminfo.mintick)
+rangePos13 = (close - lo13) / range13
+rangePos34 = (close - lo34) / range34
+rangePos55 = (close - lo55) / range55
+
+absChange = math.abs(close - prevClose)
+eff13Den = ta.sma(absChange, 13) * 13.0
+eff21Den = ta.sma(absChange, 21) * 21.0
+eff13 = eff13Den > 0.0 ? math.abs(close - close[13]) / eff13Den : 0.0
+eff21 = eff21Den > 0.0 ? math.abs(close - close[21]) / eff21Den : 0.0
+
+slope5 = (hma5 - hma5[2]) / atr8
+slope8 = (hma8 - hma8[3]) / atr8
+slope13 = (hma13 - hma13[3]) / atr8
+slope21 = (hma21 - hma21[5]) / atr8
+slope55 = (hma55 - hma55[8]) / atr8
+acc5 = ((hma5 - hma5[2]) - (hma5[2] - hma5[4])) / atr8
+acc13 = ((hma13 - hma13[3]) - (hma13[3] - hma13[6])) / atr8
+dist8 = (close - hma8) / atr8
+dist13 = (close - hma13) / atr8
+dist21 = (close - hma21) / atr8
+dist55 = (close - hma55) / atr8
+h55h89 = (hma55 - hma89) / atr8
+
+stackUp = hma5 > hma8 and hma8 > hma13 and hma13 > hma21
+stackDn = hma5 < hma8 and hma8 < hma13 and hma13 < hma21
+macroUp = hma13 > hma21 and hma21 > hma34 and slope21 > -pMacro21Tol
+macroDn = hma13 < hma21 and hma21 < hma34 and slope21 < pMacro21Tol
+trendUp = stackUp and macroUp and slope13 > pTrend13Min
+trendDn = stackDn and macroDn and slope13 < -pTrend13Min
+trendUpSoft = hma8 > hma21 and hma13 > hma34 and close > hma55 and slope55 > -pSoft55Tol
+macroBull = close > hma55 and hma21 > hma55 and hma55 > hma89 and slope55 > -pMacro55Tol
+macroBear = close < hma55 and hma21 < hma55 and hma55 < hma89 and slope55 < pMacro55Tol
+rangeWide = range13 / atr8 > pRangeWideAtr
+notDeadChop = eff13 > pEff13Min or eff21 > pEff21Min or rangeWide
+volOk = atrPct > pAtrPctMin and atr8 > syminfo.mintick
+overUp = dist8 > pOverFastAtr or dist21 > pOverSlowAtr
+overDn = dist8 < -pOverFastAtr or dist21 < -pOverSlowAtr
+rsi14 = ta.rsi(close, 14)
+stoch14 = hi14 - lo14 > 0.0 ? (close - lo14) / (hi14 - lo14) : na
+stochSlope = stoch14 - stoch14[3]
+bbMid20 = ta.sma(close, 20)
+bbSd20 = ta.stdev(close, 20)
+bbWidth20 = bbMid20 > 0.0 ? 4.0 * bbSd20 / bbMid20 : na
+
+ret6 = close / close[6] - 1.0
+ret12 = close / close[12] - 1.0
+ret21 = close / close[21] - 1.0
+ret34 = close / close[34] - 1.0
+rankLen = 340
+eff21Rank = ta.percentrank(eff21, rankLen) / 100.0
+ret34Rank = ta.percentrank(ret34, rankLen) / 100.0
+slope21Rank = ta.percentrank(slope21, rankLen) / 100.0
+volRelRank = ta.percentrank(volRel, rankLen) / 100.0
+bbWidth20Rank = ta.percentrank(bbWidth20, rankLen) / 100.0
+breakLong = close > hi8 and closePos > 0.62 and bodyPct > 0.28
+pullLong = low <= hma13 + 0.25 * atr8 and close > hma8 and closePos > 0.58
+pullRangeOk = rangePos34 > pPullRange34Min
+breakDrive = ret34 > 0.025
+breakExhaust = ret12 > 0.045 and volRel > 2.20 and dist21 > 1.40
+lBreakThrustUnderExpRisk = slope5 > 1.10 and dist13 < 1.25 and volRel < 2.00
+lBreakLateEffRangeRisk = eff21 > 0.56 and slope5 > 1.10 and rangePos55 > 0.88
+lBreakEffWickRisk = eff21 > 0.60 and dist21 > 1.00 and upperWick > 0.20
+freshDrive = ret34 > 0.012 and (ret12 > 0.004 or acc13 > 0.02)
+coilBreak = trendUpSoft and close > hi8 and closePos > 0.68 and bodyPct > 0.28 and range13 / atr8 < pCoilRangeMax and eff13 < pCoilEff13Max and ret6 > -0.002 and ret21 > -0.006 and volRel > 0.55 and volRel < 2.10 and dist8 > -0.10 and dist21 < 1.05 and acc13 > pCoilAcc13Min
+h21Reset = macroBull and trendUpSoft and low <= hma21 + 0.20 * atr8 and close > hma13 and closePos > pH21ClosePosMin and dist21 < 0.65 and dist21 > -0.40 and rangePos34 > 0.75 and eff13 < 0.55 and ret34 > 0.004 and ret12 > -0.012 and volRel > 0.45 and volRel < 1.80 and (hma55 - hma89) / atr8 < 1.10 and acc5 > -0.45
+midChaseLong = dist21 >= 1.30 and dist21 < 1.80
+weakMaturePull = (hma55 - hma89) / atr8 > 1.00 and bodyPct < 0.45
+quietMaturePull = eff13 > 0.60 and volRel < 1.00 and (hma55 - hma89) / atr8 > 0.55
+h21ResetRiskCut = acc5 < -0.10
+h21ResetQuietTopRisk = rangePos55 > 0.90 and volRel < 0.95
+maturePullFail = slope55 > 0.85 and acc5 < -0.45 and ret34 > 0.020
+breakShort = close < lo8 and closePos < 0.34 and bodyPct > 0.30
+bearSpreadOk = (hma55 - hma89) / atr8 >= -0.70
+bearFlush = trendDn and breakShort and rangePos34 < 0.32 and ret34 < -0.035 and ret12 < -0.012 and volRel > 1.60 and volRel < 3.00 and lowerWick >= 0.18 and bearSpreadOk and not overDn
+sFlushShallowEff = dist21 > -1.20 and eff13 >= 0.55
+sFlushRangeKnifeRisk = range34 / atr8 < 7.00 and lowerWick > 0.24 and h55h89 < -0.35
+sFlushLowEffFailRisk = slope5 > -1.20 and eff13 > 0.55 and eff21 < 0.55
+bearRallyReject = macroBear and hma8 < hma21 and hma13 < hma34 and high >= hma34 - 0.10 * atr8 and close < hma8 and closePos < 0.46 and upperWick > 0.42 and ret6 > -0.006 and ret12 > -0.015 and ret12 < 0.004 and dist21 > -1.20 and rangePos34 < 0.70 and acc5 < 0.20 and volRel > 0.45 and volRel < 2.80
+bearSlide = macroBear and hma8 < hma21 and hma13 < hma34 and close < hma8 and high >= hma21 - 0.20 * atr8 and closePos < 0.46 and upperWick > 0.38 and ret6 > -0.018 and ret12 < 0.006 and ret34 < -0.012 and dist21 > -1.20 and dist21 < 0.70 and rangePos34 < 0.72 and acc5 < 0.05 and close < open and slope5 < 0.00 and slope8 < -0.15 and volRel > 0.35 and volRel < 2.60 and not overDn
+sSlideNoRejectFallRisk = upperWick < 0.54 and slope8 < -0.55 and slope55 < -0.40
+sSlideLowRangeStallRisk = rangePos55 < 0.10 and acc5 > -0.50 and eff21 < 0.45
+sSlideDeepNormalRisk = dist55 < -2.00 and volRel >= 0.95 and volRel < 1.50
+mixedAuctionFailShort = not (macroBull and trendUpSoft) and not (macroBear and trendDn) and high >= hi8 - 0.05 * atr8 and close < hma13 and closePos < 0.32 and bodyPct > 0.22 and rangePos34 > 0.45 and acc13 < 0.10 and dist21 > -0.75 and dist21 < 1.10 and ret12 < 0.020 and volRel > 0.75 and volRel < 2.60 and upperWick > 0.52 and eff13 < 0.30
+shelfFailShort = not trendUp and high >= hma34 - 0.10 * atr8 and close < hma13 and closePos < 0.38 and upperWick > 0.34 and rangePos34 > 0.50 and rangePos34 < 0.76 and rangePos55 > 0.42 and rangePos55 < 0.82 and dist21 > -0.85 and dist21 < 0.85 and dist55 <= -0.15 and ret21 < 0.020 and ret34 > -0.045 and ret34 < 0.030 and eff13 < 0.34 and volRel > 0.40 and volRel < 2.30 and acc5 <= -0.10 and slope55 < 0.20 and h55h89 > 0.15
+sShelfResidualRisk = dist55 < -0.70 and ret34 > -0.025 and ret34 < 0.025
+washoutLong = not trendDn and rangePos34 < 0.00 and dist21 >= -1.20 and dist21 < -0.50 and volRel >= 0.80 and volRel < 1.20
+deepWashLong = not trendDn and rangePos34 < 0.00 and ret34 < -0.060 and dist21 >= -1.80 and dist21 < -0.35 and volRel >= 0.80 and volRel < 2.10 and (volRel < 1.80 or dist21 < -0.80)
+r21ReclaimLong = not trendDn and low <= hma21 and close > hma21 and closePos > 0.60 and bodyPct > 0.00 and rangePos34 >= 0.30 and rangePos34 < 0.70 and dist21 >= 0.65 and dist21 < 1.70 and ret34 >= -0.090 and ret34 < -0.018 and volRel >= 0.75 and volRel < 2.10 and eff13 < 0.30 and acc5 > 0.10
+lR21SoftLowEffRisk = volRel < 1.50 and slope8 > 0.00 and eff13 < 0.20
+c21CompactLong = not trendDn and low <= hma21 and close > hma21 and closePos > 0.58 and rangePos34 >= 0.45 and rangePos34 < 0.88 and dist21 >= -0.20 and dist21 < 0.80 and ret34 >= -0.020 and ret34 < 0.040 and volRel >= 0.70 and volRel < 2.10 and range13 / atr8 < 2.20 and eff13 < 0.28 and acc5 > -0.55
+c21ExtendedHold = rangePos34 > 0.48 and rangePos55 > 0.48 and closePos > 0.75 and lowerWick > 0.45 and volRel > 1.50 and volRel < 2.40 and slope21 > 0.35 and dist55 > 0.30 and ret21 > -0.012 and ret34 > -0.012 and not macroBear
+c21ResidualRisk = slope21 < -0.05 and rangePos55 > 0.70
+deepPullReclaimLong = not trendDn and low <= hma21 and close > hma21 and closePos > 0.58 and rangePos34 >= 0.00 and rangePos34 < 0.40 and dist21 >= -0.60 and dist21 < 0.35 and ret21 <= -0.024 and ret34 >= -0.050 and ret34 < 0.010 and volRel >= 0.35 and volRel < 1.20 and range13 / atr8 < 4.50 and eff13 < 0.28 and acc5 > 0.35
+rallyH21RejectShort = not trendUp and high >= hma21 and close < hma21 and closePos < 0.48 and rangePos34 >= 0.45 and rangePos34 < 0.88 and dist21 >= -0.60 and dist21 < 0.35 and ret21 >= 0.011 and ret34 >= -0.050 and ret34 < 0.010 and volRel >= 1.00 and volRel < 2.60 and eff13 < 0.28 and acc5 < 0.10
+quietTrendContinueLong = not trendDn and not macroBear and range55 / atr8 < 7.20 and atr8 / atr21 < 0.81 and close > hma13 and slope8 > 0.12 and slope8 < 0.61 and rangePos55 > 0.72 and closePos > 0.52 and volRel > 0.35 and volRel < 1.60 and dist21 > -0.35 and dist21 < 1.40 and ret21 > -0.040 and ret34 < 0.055 and eff21 < 0.55
+h13CompactReclaimLong = not trendDn and low <= hma13 and close > hma13 and closePos > 0.58 and rangePos34 >= 0.00 and rangePos34 < 0.40 and dist21 >= -0.20 and dist21 < 0.80 and ret34 >= -0.020 and ret34 < 0.040 and volRel >= 0.35 and volRel < 1.20 and range13 / atr8 < 3.40 and range34 / atr8 < 3.80 and eff13 < 0.55 and acc5 > 0.35
+rallyExhaustShort = not macroBull and ret21 > 0.045 and eff21 > 0.55 and slope21 > 0.22 and volRel < 0.95 and dist21 < 2.40 and rangePos55 > 0.35 and ret34 < 0.16
+sRupExtendedHold = rangePos55 > 0.86 and ret21 > 0.045 and ret34 > 0.040 and dist55 > 1.20 and dist21 < 0.80 and volRel < 1.20
+upperPumpFailShort = not macroBear and not trendDn and rangePos55 > 0.90 and rangePos34 > 0.65 and ret21 > 0.080 and eff21 > 0.38 and volRel < 0.75 and dist21 > -3.20 and dist21 < 2.20 and dist55 > -0.50 and dist55 < 3.50 and rsi14 > 58.0 and bbWidth20Rank > 0.55 and range55 / atr8 > 5.00 and (closePos < 0.55 or upperWick > 0.28) and slope21 > -3.00
+highRangeQuietFadeShort = not macroBear and not trendDn and rangePos55 > 0.86 and rangePos34 > 0.74 and ret21 > 0.035 and volRel < 0.95 and slope21 < 0.30 and dist21 > 0.00 and dist21 < 0.45 and rsi14 > 58.0 and dist55 > -0.80 and dist55 < 2.60 and (closePos < 0.55 or upperWick > 0.36)
+bullPauseTightShort = macroBull and not trendDn and rangePos34 > 0.82 and rangePos55 > 0.82 and dist21 > -1.20 and dist21 < 0.45 and dist55 > 0.50 and dist55 < 2.30 and ret21 > 0.000 and ret21 < 0.020 and upperWick > 0.48 and closePos < 0.45 and volRel > 0.35 and volRel < 1.25 and eff21 < 0.50 and rsi14 > 52.0 and rsi14 < 68.0 and slope55 > 0.40 and slope55 < 1.70
+bearLowContinuationShort = macroBear and not trendUp and rangePos34 < 0.24 and rangePos55 < 0.20 and dist21 > 0.60 and dist21 < 1.50 and dist55 > -1.00 and dist55 < 0.40 and ret21 > -0.035 and ret21 < 0.004 and ret34 > -0.040 and ret34 < 0.010 and volRel > 1.20 and volRel < 2.20 and closePos > 0.62 and eff21 > 0.25 and slope21 < -0.35 and upperWick < 0.48
+volumePivotLong = not macroBear and not trendDn and rangePos34 > 0.05 and rangePos34 < 0.34 and rangePos55 > 0.05 and rangePos55 < 0.40 and ret34 > -0.070 and ret34 < 0.006 and ret21 > -0.055 and ret21 < 0.045 and volRel > 1.70 and volRel < 4.30 and dist55 > 1.90 and dist55 < 4.40 and dist21 > -0.10 and dist21 < 2.25 and closePos > 0.46 and (lowerWick > 0.25 or close > prevHigh or low <= hma8 + 0.15 * atr8 and close > hma8) and eff21 < 0.70 and upperWick < 0.70
+bearMidAccelShort = macroBear and not trendUp and ret21 > -0.027 and ret21 < -0.018 and ret34 <= -0.021 and rangePos34 < 0.32 and rangePos55 < 0.30 and eff21 > 0.42 and slope8 < -0.50 and slope21 < -0.05 and dist55 < -0.50 and dist21 > -1.55 and dist21 < 0.95 and volRel > 0.35 and volRel < 2.20 and closePos > 0.10 and closePos < 0.80 and upperWick <= 0.23
+neutralRangeEdgeShort = not trendDn and not trendUp and rangePos55 > 0.88 and rangePos34 > 0.68 and eff21Rank < 0.42 and ret34Rank > 0.52 and ret34Rank < 0.98 and dist21 > -0.95 and dist21 < 2.20 and slope21Rank > 0.18 and slope21Rank < 0.90 and high >= hi21 - 0.30 * atr8 and closePos < 0.38 and upperWick > 0.30 and volRelRank > 0.06 and volRelRank < 0.90
+nEdgeCarryHold = macroBull and upperWick > 0.70 and lowerWick < 0.05 and ret21 > 0.003 and ret21 < 0.007 and ret34 > 0.008 and ret34 < 0.018 and rangePos34 > 0.82 and rangePos34 < 0.88 and rangePos55 > 0.86 and rangePos55 < 0.90
+bearLowerTailLong = macroBear and not trendDn and rangePos55 > 0.12 and rangePos55 < 0.34 and rangePos34 < 0.52 and rangePos13 < 0.80 and ret21 > -0.018 and ret21 < -0.005 and ret34 > -0.065 and ret34 < 0.018 and dist21 > -0.20 and dist21 < 0.75 and low <= hma21 + 0.35 * atr8 and slope21 > -0.75 and slope21 < 0.20 and lowerWick > 0.42 and upperWick < 0.30 and closePos > 0.62 and bodyPct < 0.66 and acc5 > -0.35 and eff21 < 0.45 and volRel > 0.60 and volRel < 2.60
+hotContinueLong = not macroBear and not trendDn and rangePos34 > 0.70 and rangePos13 > 0.68 and dist8 > pHotDist8Min and dist21 > 0.60 and rsi14 > pHotRsiMin and stoch14 > 0.72 and ret6 > 0.004 and ret21 > -0.006 and slope8 > 0.70 and slope13 > 0.25 and acc5 > -0.55 and close > hma8 and hma8 > hma13 and (close > hi8 or closePos > 0.62 or bodyPct > 0.42) and upperWick < 0.42 and range13 / atr8 < 6.80 and bbWidth20Rank < 0.92 and volRel > 0.35 and volRel < 3.40
+bearReliefFailShort = not macroBull and not trendUp and close < hma13 and rangePos55 > 0.20 and rangePos55 < 0.62 and rangePos34 > 0.20 and rangePos34 < 0.62 and ret12 < -0.006 and ret21 > -0.020 and ret21 < 0.010 and ret34 < 0.018 and dist21 > -1.10 and dist21 < 0.30 and dist55 < -1.20 and slope21 < -1.00 and bbWidth20Rank > 0.24 and bbWidth20Rank < 0.50 and volRel > 0.95 and volRel < 2.40 and rsi14 < 44.0 and closePos < 0.45 and upperWick < 0.40
+bullCompressionFailShort = macroBull and trendUp and atrRatio < 0.75 and eff21 < 0.18 and rangePos55 > 0.50 and rangePos55 < 0.76 and rangePos34 > 0.45 and rangePos34 < 0.82 and dist21 > 0.55 and dist21 < 2.10 and dist55 > 0.55 and dist55 < 2.80 and ret21 > -0.002 and ret21 < 0.025 and ret34 > -0.012 and ret34 < 0.030 and bbWidth20Rank > 0.25 and bbWidth20Rank < 0.82 and volRel > 0.80 and volRel < 2.60 and rsi14 > 50.0 and stoch14 > 0.60 and closePos < 0.86 and upperWick < 0.45
+midCoilReclaimLong = not macroBear and not trendDn and rangePos55 > 0.62 and rangePos55 < 0.72 and rangePos34 > 0.50 and rangePos34 < 0.88 and range13 / atr8 > 3.00 and range13 / atr8 < 7.60 and range55 / atr8 < 10.20 and eff21 < 0.20 and dist21 > -0.10 and dist21 < 0.90 and dist55 > 0.35 and dist55 < 1.55 and slope21 > 0.25 and slope21 < 1.25 and slope8 > 0.15 and closePos > 0.60 and lowerWick > 0.45 and upperWick < 0.62 and volRel > 0.30 and volRel < 1.65 and ret21 > -0.015 and ret34 > -0.030 and bbWidth20Rank < 0.72
+panicSnapLong = rsi14 <= 25.0 and stochSlope <= -0.35 and slope8 <= -0.85 and slope5 <= -0.95
+oSnapCarryHold = panicSnapLong and volRel > 5.00 and rangePos34 < -0.50 and rangePos55 < -0.50 and ret21 < -0.020 and ret34 < -0.015 and not macroBear and h55h89 > -0.10
+oSnapShockHold = panicSnapLong and not oSnapCarryHold and macroBear and trendDn and volRel > 1.20 and volRel < 2.20 and rangePos34 > -0.10 and rangePos34 < 0.02 and rangePos55 > -0.10 and rangePos55 < 0.02 and dist21 < -2.20 and h55h89 > -0.35 and ret21 < -0.030 and ret34 < -0.035 and stochSlope < -0.60
+lowCapLong = not macroBear and not trendDn and rangePos13 < -0.08 and closePos > 0.50 and dist21 > -2.30 and dist21 < 0.35 and ret34 > -0.045 and ret34 < 0.030 and volRel > 2.40 and rsi14 < 40.0 and h55h89 > -0.25 and lowerWick > 0.18
+lowCapWideLong = not macroBear and not trendDn and rangePos13 < -0.08 and closePos > 0.42 and dist21 > -1.80 and dist21 < 0.35 and ret21 > -0.040 and ret34 > -0.045 and ret34 < 0.030 and volRel > 2.40 and rsi14 < 40.0 and h55h89 > -0.25 and lowerWick > 0.18
+lowBalNoTrendLong = not macroBear and not trendDn and rangePos13 < 0.24 and closePos > 0.66 and dist21 > -0.90 and dist21 < 0.80 and ret21 > -0.035 and ret34 > -0.045 and ret34 < 0.030 and volRel > 1.70 and rsi14 < 52.0 and h55h89 > -0.25 and lowerWick > 0.18 and slope21 > -1.75
+lowDeepNoTrendLong = not macroBear and not trendDn and rangePos13 < 0.12 and rangePos34 > -0.05 and rangePos55 > 0.05 and closePos > 0.58 and dist21 > -1.80 and dist21 < 0.80 and ret21 > -0.030 and ret34 > -0.045 and ret34 < 0.030 and volRel > 2.40 and volRel < 4.30 and rsi14 < 46.0 and h55h89 > -0.25 and lowerWick > 0.18
+lowMidTimeLong = not macroBear and rangePos13 < 0.12 and closePos > 0.50 and dist21 > -0.90 and dist21 < 0.35 and ret34 > -0.045 and ret34 < 0.030 and volRel > 1.25 and rsi14 < 46.0 and h55h89 > -0.25 and lowerWick > 0.18
+midBaseReboundLong = not macroBear and not trendDn and rangePos34 > 0.30 and rangePos34 < 0.56 and rangePos55 > 0.30 and rangePos55 < 0.56 and dist21 > -0.95 and dist21 < 0.30 and ret21 > -0.015 and ret21 < 0.010 and ret34 > -0.020 and ret34 < 0.008 and eff21 < 0.24 and volRel > 0.30 and volRel < 2.10 and closePos > 0.15 and lowerWick > 0.15 and h55h89 > -1.30
+bullShakeBaseLong = not macroBear and rangePos34 > 0.50 and rangePos34 < 0.76 and rangePos55 > 0.42 and rangePos55 < 0.70 and ret21 > 0.010 and ret34 > -0.025 and ret34 < 0.012 and dist21 > -1.90 and dist21 < -0.25 and slope55 > 0.30 and h55h89 > -0.10 and volRel > 0.30 and volRel < 2.30 and eff21 < 0.36 and closePos > 0.10 and lowerWick > 0.10
+bullDipShakeLong = macroBull and not trendDn and rangePos34 > 0.60 and rangePos34 < 0.86 and rangePos55 > 0.58 and rangePos55 < 0.82 and dist21 > -1.90 and dist21 < -0.30 and dist55 > 0.20 and dist55 < 1.80 and ret21 > 0.012 and ret21 < 0.040 and ret34 > -0.012 and ret34 < 0.034 and slope55 > 1.30 and slope55 < 2.70 and h55h89 > 0.25 and h55h89 < 1.00 and volRel > 0.35 and volRel < 1.35 and eff13 > 0.35 and eff21 > 0.20 and eff21 < 0.60 and rsi14 > 58.0 and rsi14 < 64.0 and closePos > 0.10 and closePos < 0.58 and lowerWick > 0.16 and upperWick > 0.40
+bullShockAbsorbLong = not macroBear and rangePos13 < 0.05 and rangePos34 > 0.45 and rangePos34 < 0.60 and rangePos55 > 0.35 and rangePos55 < 0.55 and closePos > 0.55 and dist21 > -1.35 and dist21 < -0.20 and ret21 > 0.005 and ret34 > -0.030 and ret34 < -0.005 and volRel > 2.80 and volRel < 4.50 and h55h89 > 0.30 and slope55 > 0.30 and lowerWick > 0.35
+midBodyReboundLong = midBaseReboundLong and bodyPct > 0.35 and dist55 < 0.00 and ret34 > 0.000
+midNoWickReboundLong = midBaseReboundLong and upperWick < 0.12 and h55h89 > -0.50 and ret21 > -0.008
+midBodyTightLong = midBodyReboundLong and closePos < 0.65 and bodyPct > 0.40
+bullThrustContinuationLong = macroBull and not trendDn and rangePos34 > 0.84 and rangePos55 > 0.84 and ret21 > 0.060 and ret34 > 0.060 and rsi14 > 76.0 and h55h89 > 1.00 and slope55 > 2.00 and dist55 > 1.00 and dist21 > -1.50 and dist21 < 0.80 and volRel > 0.25 and volRel < 2.60 and closePos > 0.20 and bodyPct > 0.45
+pumpExhaustFailShort = not macroBear and rangePos34 > 0.74 and rangePos55 > 0.80 and ret21 > 0.014 and ret34 > 0.018 and volRel > 1.80 and rsi14 > 60.0 and slope8 > 1.00 and slope21 > 0.20 and h55h89 > 0.10 and bodyPct > 0.45 and closePos < 0.86
+bullAccelResetLong = macroBull and not trendDn and rangePos34 > 0.88 and rangePos55 > 0.88 and ret21 > 0.060 and ret34 > 0.060 and rsi14 > 76.0 and h55h89 > 1.00 and slope21 > 1.20 and slope55 > 2.00 and dist21 > -0.70 and dist21 < 0.70 and dist55 > 1.00 and volRel > 0.90 and volRel < 2.70 and acc5 > 0.70 and closePos > 0.45 and bodyPct > 0.45
+bullAccelBreakLong = macroBull and not trendDn and rangePos13 > 1.05 and rangePos34 > 1.04 and rangePos55 > 1.02 and ret21 > 0.060 and ret34 > 0.060 and rsi14 > 76.0 and h55h89 > 0.80 and slope21 > 1.20 and slope55 > 1.20 and dist21 > -0.20 and dist21 < 0.80 and dist55 > 1.00 and volRel > 1.00 and volRel < 2.60 and acc5 > 0.70 and closePos > 0.50 and bodyPct > 0.45
+volumeTopFailShort = not macroBear and trendUp and rangePos13 > 1.00 and rangePos34 > 1.00 and rangePos55 > 0.94 and ret21 > 0.016 and ret34 > 0.018 and volRel > 2.50 and rsi14 > 67.0 and slope8 > 0.90 and slope21 > 0.25 and slope55 < 2.20 and h55h89 < 1.25 and dist21 > 1.10 and dist55 > 1.00 and closePos > 0.45 and closePos < 0.86 and bodyPct > 0.45
+volumeTopClimaxShort = volumeTopFailShort and rangePos13 > 1.32 and rangePos34 > 1.12 and volRel > 2.80 and h55h89 < 0.85
+volumeTopTightShort = volumeTopFailShort and rangePos13 > 1.28 and rangePos34 > 1.10 and rangePos55 > 1.04 and volRel > 2.80 and h55h89 < 0.65 and slope55 < 1.20 and closePos > 0.70 and upperWick < 0.32
+shockLowTailLong = not macroBull and rangePos13 < 0.28 and rangePos34 < 0.28 and rangePos55 < 0.28 and dist21 > -1.80 and dist21 < -0.10 and dist55 > -2.30 and dist55 < -0.80 and ret12 < -0.010 and ret21 < -0.014 and ret34 < -0.018 and volRel > 0.95 and volRel < 3.20 and rsi14 < 36.0 and closePos > 0.38 and lowerWick > 0.38 and h55h89 > -0.40 and eff21 > 0.20
+shockLowReclaimLong = shockLowTailLong and closePos > 0.60 and acc5 > 0.80
+neutralReliefFailShort = not macroBull and not trendDn and rangePos34 > 0.45 and rangePos34 < 0.78 and rangePos55 > 0.60 and rangePos55 < 0.86 and ret21 > -0.004 and ret21 < 0.012 and ret34 > 0.004 and ret34 < 0.018 and dist21 > -1.05 and dist21 < 0.10 and dist55 > -1.20 and dist55 < 0.10 and h55h89 > -0.10 and h55h89 < 0.25 and slope21 > 0.00 and slope55 > 0.00 and volRel > 2.00 and rsi14 > 48.0 and rsi14 < 63.0 and closePos > 0.35 and closePos < 0.55 and lowerWick > 0.25 and bodyPct > 0.10
+neutralReliefBroadShort = not macroBull and not trendDn and rangePos34 > 0.40 and rangePos34 < 0.82 and rangePos55 > 0.55 and rangePos55 < 0.88 and ret21 > -0.006 and ret21 < 0.015 and ret34 > 0.003 and ret34 < 0.026 and dist21 > -0.75 and dist21 < 0.25 and dist55 > -0.55 and dist55 < 0.25 and h55h89 > -0.12 and h55h89 < 0.30 and slope21 > -0.10 and slope21 < 1.05 and slope55 > -0.10 and slope55 < 0.95 and volRel > 1.50 and rsi14 > 48.0 and rsi14 < 64.0 and closePos > 0.40 and closePos < 0.62 and lowerWick > 0.25 and bodyPct > 0.05
+neutralReliefQualityShort = neutralReliefBroadShort and dist21 > -0.65 and slope21 < 0.95 and (volRel > 3.00 or lowerWick > 0.42)
+bullRangeFadeShort = macroBull and trendUp and rangePos34 > 0.60 and rangePos34 < 1.12 and rangePos55 > 0.60 and rangePos55 < 1.10 and ret21 > 0.003 and ret21 < 0.022 and ret34 > 0.003 and ret34 < 0.024 and h55h89 > 0.04 and h55h89 < 0.78 and slope21 > 0.00 and slope21 < 2.15 and slope55 > 0.15 and slope55 < 1.25 and dist21 > -0.90 and dist21 < 1.70 and dist55 > 0.35 and dist55 < 2.55 and rsi14 > 56.0 and rsi14 < 71.0 and volRel > 0.70 and volRel < 2.45 and bodyPct < 0.62 and (upperWick > 0.28 or closePos < 0.70)
+bullClimaxRangeFadeShort = macroBull and trendUp and rangePos13 > 1.15 and rangePos34 > 1.06 and rangePos34 < 1.45 and rangePos55 > 1.02 and rangePos55 < 1.35 and ret21 > 0.004 and ret21 < 0.030 and ret34 > 0.003 and ret34 < 0.032 and h55h89 > 0.00 and h55h89 < 0.55 and slope21 > -0.10 and slope21 < 1.20 and slope55 > 0.10 and slope55 < 1.05 and dist21 > 1.80 and dist21 < 3.30 and dist55 > 2.60 and dist55 < 4.30 and volRel > 1.70 and volRel < 4.20 and rsi14 > 68.0 and rsi14 < 82.0 and closePos > 0.58 and bodyPct > 0.38
+bullAccelCompositeLong = bullAccelResetLong or bullAccelBreakLong
+bullDistributionFadeShort = not macroBear and rangePos34 > 0.72 and rangePos34 < 1.32 and rangePos55 > 0.78 and rangePos55 < 1.18 and ret21 > 0.004 and ret21 < 0.032 and ret34 > 0.004 and ret34 < 0.034 and h55h89 > 0.04 and h55h89 < 0.95 and slope21 > -0.15 and slope21 < 1.35 and slope55 > 0.10 and slope55 < 1.30 and dist21 > -0.80 and dist21 < 1.80 and dist55 > -0.40 and dist55 < 2.05 and rsi14 > 58.0 and rsi14 < 77.0 and volRel > 0.55 and volRel < 4.50 and bodyPct > 0.04 and (upperWick > 0.16 or lowerWick > 0.15 or closePos < 0.65)
+bullDistributionQualityShort = bullDistributionFadeShort and rangePos55 > 0.84 and slope55 < 0.95 and dist55 < 1.65 and (volRel > 1.20 or upperWick > 0.30 or lowerWick > 0.28)
+neutralLowReclaimLong = not macroBull and not trendUp and rangePos13 > -0.16 and rangePos13 < 0.30 and rangePos34 > -0.10 and rangePos34 < 0.30 and rangePos55 > -0.10 and rangePos55 < 0.28 and closePos > 0.38 and lowerWick > 0.38 and bodyPct < 0.34 and dist21 > -1.75 and dist21 < -0.10 and dist55 > -2.20 and dist55 < -0.80 and h55h89 > -0.12 and h55h89 < 0.20 and slope8 < -0.50 and slope21 > -1.90 and slope21 < -0.55 and slope55 > -0.70 and slope55 < 0.05 and ret21 > -0.035 and ret21 < -0.012 and ret34 > -0.035 and ret34 < -0.012 and volRel > 0.80 and volRel < 3.20 and rsi14 > 28.0 and rsi14 < 37.0 and eff21 > 0.20
+bearGapReliefFailShort = not macroBull and not trendUp and rangePos34 > 0.12 and rangePos34 < 0.72 and rangePos55 > 0.24 and rangePos55 < 0.84 and ret12 > -0.050 and ret12 < 0.008 and ret21 > -0.052 and ret21 < 0.004 and ret34 > -0.045 and ret34 < 0.014 and h55h89 > -1.10 and h55h89 < 0.25 and slope55 > -1.50 and slope55 < 0.30 and slope21 > -1.75 and slope21 < 0.35 and dist21 > -1.35 and dist21 < 1.45 and dist55 > -2.75 and dist55 < 0.75 and rsi14 > 38.0 and rsi14 < 55.0 and volRel > 0.35 and volRel < 2.70 and (upperWick > 0.24 or closePos < 0.40 or bodyPct > 0.50)
+bearGapShelfFailShort = bearGapReliefFailShort and rangePos34 > 0.25 and rangePos55 > 0.48 and ret21 < 0.000 and h55h89 < 0.05 and slope55 < 0.05 and dist55 < 0.20 and rsi14 < 53.5
+bearDeepDislocationLong = not macroBull and (macroBear or trendDn) and rangePos13 > -0.35 and rangePos13 < 0.36 and rangePos34 > -0.22 and rangePos34 < 0.38 and rangePos55 > -0.16 and rangePos55 < 0.42 and dist21 < -1.10 and dist55 < -2.45 and h55h89 > -0.70 and h55h89 < 0.60 and slope8 < -1.15 and slope21 < -0.45 and slope55 > -1.40 and ret12 > -0.020 and ret12 < 0.002 and ret21 > -0.026 and ret21 < 0.002 and ret34 > -0.018 and ret34 < 0.006 and volRel > 0.70 and volRel < 3.20 and rsi14 > 27.0 and rsi14 < 42.0 and closePos > 0.15 and upperWick < 0.36
+bearDeepSnapLong = bearDeepDislocationLong and dist55 < -3.00 and rsi14 < 38.5 and (lowerWick > 0.30 or closePos > 0.50)
+upperNeutralRolloverShort = not macroBull and not trendUp and rangePos34 > 0.70 and rangePos34 < 0.92 and rangePos55 > 0.70 and rangePos55 < 0.94 and ret12 > 0.000 and ret12 < 0.012 and ret21 > 0.008 and ret21 < 0.032 and ret34 > 0.030 and ret34 < 0.080 and dist21 > -0.95 and dist21 < 0.45 and dist55 > -1.30 and dist55 < -0.35 and h55h89 > 1.05 and h55h89 < 2.50 and slope21 < -0.30 and slope55 > 1.00 and volRel > 0.30 and volRel < 1.30 and rsi14 > 55.0 and rsi14 < 66.0 and (upperWick > 0.20 or closePos < 0.66)
+upperNeutralWickRolloverShort = upperNeutralRolloverShort and upperWick > 0.34 and bodyPct < 0.40
+bearReliefExtensionShort = not macroBull and not trendUp and rangePos34 > 0.14 and rangePos34 < 0.56 and rangePos55 > 0.54 and rangePos55 < 0.82 and ret12 > -0.050 and ret12 < -0.006 and ret21 > -0.035 and ret21 < -0.002 and ret34 > -0.020 and ret34 < 0.014 and dist21 > -1.05 and dist21 < 1.35 and dist55 > -2.60 and dist55 < -0.22 and h55h89 > -0.95 and h55h89 < -0.10 and slope21 < -0.30 and slope55 < -0.25 and volRel > 0.45 and volRel < 1.75 and rsi14 > 39.0 and rsi14 < 54.5 and (upperWick > 0.30 or closePos < 0.45 or bodyPct > 0.50)
+bearReliefExtensionTightShort = bearReliefExtensionShort and rangePos34 < 0.48 and dist55 < -0.45 and rsi14 < 51.5 and volRel < 1.35
+
+var int entryBar = na
+var int activeHold = na
+var string activeRule = ""
+var float entryClose = na
+var float entryAtr = na
+var float activeLow = na
+
+flat = strategy.position_size == 0
+if flat
+    entryBar := na
+    activeHold := na
+    activeRule := ""
+    entryClose := na
+    entryAtr := na
+    activeLow := na
+
+int sideNow = 0
+int holdNow = na
+float riskNow = na
+string ruleNow = ""
+if flat and volOk and notDeadChop and macroBull and trendUp and pullLong and pullRangeOk and eff13 > 0.32 and dist8 < 0.25 and dist21 > 0.65 and closePos > 0.75 and ret12 > 0.01 and freshDrive and not weakMaturePull and not quietMaturePull and not maturePullFail and not overUp
+    sideNow := 1
+    holdNow := 28
+    riskNow := 1.14
+    ruleNow := "L_PULL"
+else if flat and volOk and macroBull and trendUp and breakLong and lowerWick < 0.34 and rangePos34 > 0.75 and ret12 > pBreakRet12Min and breakDrive and volRel > pBreakVolMin and eff13 > pBreakEff13Min and acc13 > -0.03 and not breakExhaust and not midChaseLong and not overUp
+    sideNow := 1
+    holdNow := lBreakEffWickRisk ? 8 : lBreakLateEffRangeRisk ? 8 : 14
+    riskNow := lBreakEffWickRisk ? 0.04 : lBreakLateEffRangeRisk ? 0.25 : lBreakThrustUnderExpRisk ? 0.45 : dist21 < 1.30 ? 1.35 : 1.55
+    ruleNow := "L_BREAK"
+else if flat and volOk and notDeadChop and coilBreak and not overUp
+    sideNow := 1
+    holdNow := 8
+    riskNow := 0.72
+    ruleNow := "L_COIL"
+else if flat and volOk and notDeadChop and h21Reset and not h21ResetQuietTopRisk and acc13 < 0.35 and not overUp
+    sideNow := 1
+    holdNow := h21ResetQuietTopRisk ? 2 : 6
+    riskNow := h21ResetQuietTopRisk ? 0.02 : h21ResetRiskCut ? 0.16 : 0.48
+    ruleNow := "L_H21R"
+else if flat and volOk and macroBear and bearFlush and eff13 > 0.18
+    sideNow := -1
+    holdNow := sFlushLowEffFailRisk ? 2 : sFlushRangeKnifeRisk ? 4 : 8
+    riskNow := sFlushLowEffFailRisk ? 0.02 : sFlushRangeKnifeRisk ? 0.10 : sFlushShallowEff ? 0.30 : 0.78
+    ruleNow := "S_FLUSH"
+else if flat and volOk and macroBear and bearRallyReject and eff13 > 0.10
+    sideNow := -1
+    holdNow := rangePos34 < 0.30 and rangePos55 < 0.30 and ret21 < -0.006 and ret34 < -0.006 and closePos < 0.35 and upperWick > 0.50 and eff21 < 0.22 ? 96 : 8
+    riskNow := 0.54
+    ruleNow := "S_REJECT"
+else if flat and volOk and bearSlide and acc13 < 0.35 and volRel > 0.65
+    sideNow := -1
+    holdNow := sSlideDeepNormalRisk ? 2 : sSlideLowRangeStallRisk ? 2 : sSlideNoRejectFallRisk ? 4 : 8
+    riskNow := sSlideDeepNormalRisk ? 0.02 : sSlideLowRangeStallRisk ? 0.02 : sSlideNoRejectFallRisk ? 0.08 : 0.42
+    ruleNow := "S_SLIDE"
+else if flat and volOk and notDeadChop and bearMidAccelShort
+    sideNow := -1
+    holdNow := 12
+    riskNow := 0.20
+    ruleNow := "S_BMID"
+else if flat and volOk and neutralRangeEdgeShort
+    sideNow := -1
+    holdNow := nEdgeCarryHold ? 48 : 12
+    riskNow := 0.20
+    ruleNow := "S_NEDGE"
+else if flat and volOk and mixedAuctionFailShort
+    sideNow := -1
+    holdNow := 8
+    riskNow := 0.20
+    ruleNow := "S_AFAIL"
+else if flat and volOk and washoutLong
+    sideNow := 1
+    holdNow := 6
+    riskNow := 0.12
+    ruleNow := "L_WASH"
+else if flat and volOk and notDeadChop and deepWashLong
+    sideNow := 1
+    holdNow := 6
+    riskNow := 0.08
+    ruleNow := "L_DWASH"
+else if flat and volOk and notDeadChop and r21ReclaimLong
+    sideNow := 1
+    holdNow := lR21SoftLowEffRisk ? 2 : 4
+    riskNow := lR21SoftLowEffRisk ? 0.02 : 0.06
+    ruleNow := "L_R21"
+else if flat and volOk and notDeadChop and c21CompactLong
+    sideNow := 1
+    holdNow := c21ResidualRisk ? 2 : c21ExtendedHold ? 26 : 6
+    riskNow := c21ResidualRisk ? 0.01 : 0.04
+    ruleNow := "L_C21C"
+else if flat and volOk and notDeadChop and deepPullReclaimLong
+    sideNow := 1
+    holdNow := 4
+    riskNow := 0.25
+    ruleNow := "L_D21R"
+else if flat and volOk and notDeadChop and h13CompactReclaimLong
+    sideNow := 1
+    holdNow := 4
+    riskNow := 0.25
+    ruleNow := "L_H13C"
+else if flat and volOk and shelfFailShort
+    sideNow := -1
+    holdNow := sShelfResidualRisk ? 2 : 8
+    riskNow := sShelfResidualRisk ? 0.02 : 0.08
+    ruleNow := "S_SHELF"
+else if flat and volOk and notDeadChop and rallyH21RejectShort
+    sideNow := -1
+    holdNow := 8
+    riskNow := 0.25
+    ruleNow := "S_R21J"
+else if flat and volOk and notDeadChop and bearReliefFailShort
+    sideNow := -1
+    holdNow := 8
+    riskNow := 0.25
+    ruleNow := "S_BRELIEF"
+else if flat and volOk and notDeadChop and bullCompressionFailShort
+    sideNow := -1
+    holdNow := 12
+    riskNow := 0.25
+    ruleNow := "S_BCFAIL"
+else if flat and volOk and rallyExhaustShort
+    sideNow := -1
+    holdNow := sRupExtendedHold ? 24 : 12
+    riskNow := 0.20
+    ruleNow := "S_RUP"
+else if flat and volOk and upperPumpFailShort
+    sideNow := -1
+    holdNow := 8
+    riskNow := 0.25
+    ruleNow := "S_PTOP"
+else if flat and volOk and highRangeQuietFadeShort
+    sideNow := -1
+    holdNow := 4
+    riskNow := 0.25
+    ruleNow := "S_HIRANGE"
+else if flat and volOk and notDeadChop and bullPauseTightShort
+    sideNow := -1
+    holdNow := 48
+    riskNow := 0.25
+    ruleNow := "S_BPAU"
+else if flat and volOk and notDeadChop and bearLowContinuationShort
+    sideNow := -1
+    holdNow := 3
+    riskNow := 0.25
+    ruleNow := "S_G1T"
+else if flat and volOk and quietTrendContinueLong
+    sideNow := 1
+    holdNow := 2
+    riskNow := 0.25
+    ruleNow := "L_QCONT"
+else if flat and volOk and bearLowerTailLong
+    sideNow := 1
+    holdNow := 9
+    riskNow := 0.25
+    ruleNow := "L_TAILQ"
+else if flat and volOk and notDeadChop and midCoilReclaimLong
+    sideNow := 1
+    holdNow := 12
+    riskNow := 0.25
+    ruleNow := "L_MCOIL"
+else if flat and volOk and panicSnapLong
+    sideNow := 1
+    holdNow := oSnapCarryHold ? 16 : oSnapShockHold ? 7 : 4
+    riskNow := 0.25
+    ruleNow := "L_OSNAP"
+else if flat and volOk and hotContinueLong and slope55 < 2.50
+    sideNow := 1
+    holdNow := 6
+    riskNow := 0.25
+    ruleNow := "L_HOTC"
+else if flat and volOk and notDeadChop and bullDipShakeLong
+    sideNow := 1
+    holdNow := 36
+    riskNow := 0.25
+    ruleNow := "L_BDIP"
+else if flat and volOk and notDeadChop and volumePivotLong
+    sideNow := 1
+    holdNow := 6
+    riskNow := 0.25
+    ruleNow := "L_VPIV"
+else if flat and volOk and notDeadChop and lowDeepNoTrendLong
+    sideNow := 1
+    holdNow := 8
+    riskNow := 0.25
+    ruleNow := "L_LOWD2"
+else if flat and volOk and notDeadChop and lowMidTimeLong
+    sideNow := 1
+    holdNow := 24
+    riskNow := 0.25
+    ruleNow := "L_LOWM"
+else if flat and volOk and notDeadChop and midBodyTightLong
+    sideNow := 1
+    holdNow := 72
+    riskNow := 0.25
+    ruleNow := "L_MBT"
+else if flat and volOk and notDeadChop and bullAccelCompositeLong
+    sideNow := 1
+    holdNow := 72
+    riskNow := 0.25
+    ruleNow := "L_BACX"
+else if flat and volOk and notDeadChop and neutralLowReclaimLong
+    sideNow := 1
+    holdNow := 48
+    riskNow := 0.25
+    ruleNow := "L_NLR"
+else if flat and volOk and notDeadChop and bullClimaxRangeFadeShort
+    sideNow := -1
+    holdNow := 48
+    riskNow := 0.25
+    ruleNow := "S_BCLX"
+
+if inWindow and sideNow == 1
+    strategy.entry("L", strategy.long, qty=qtyFor(riskNow), comment=ruleNow)
+    entryBar := bar_index
+    activeHold := holdNow
+    activeRule := ruleNow
+    entryClose := close
+    entryAtr := atr8
+    activeLow := low
+else if inWindow and sideNow == -1
+    strategy.entry("S", strategy.short, qty=qtyFor(riskNow), comment=ruleNow)
+    entryBar := bar_index
+    activeHold := holdNow
+    activeRule := ruleNow
+    entryClose := close
+    entryAtr := atr8
+    activeLow := low
+
+if strategy.position_size != 0
+    activeLow := na(activeLow) ? low : math.min(activeLow, low)
+
+holdBars = not na(entryBar) ? bar_index - entryBar : na
+h21DrawdownAtr = not na(entryClose) and not na(entryAtr) and entryAtr > 0.0 and not na(activeLow) ? (activeLow - entryClose) / entryAtr : 0.0
+longH21Slip = strategy.position_size > 0 and activeRule == "L_H21R" and not na(holdBars) and holdBars >= 2 and holdBars <= 4 and h21DrawdownAtr < -0.80 and close < hma21
+longCoilTimeCarry = strategy.position_size > 0 and not na(holdBars) and activeRule == "L_COIL" and holdBars >= activeHold and holdBars < 72 and not macroBear and rangePos55 > 0.35 and dist21 > -1.85 and ret21 > -0.040 and ret34 > -0.045 and h55h89 > -0.85 and close > hma55 - 1.80 * atr8
+longCoilRecoveryCarry = strategy.position_size > 0 and not na(holdBars) and activeRule == "L_COIL" and holdBars >= activeHold and holdBars < 96 and h21DrawdownAtr > -2.60 and rangePos55 > 0.12 and dist21 > -3.10 and ret21 > -0.085 and ret34 > -0.095 and h55h89 > -1.65
+longCarryMfeAtr = not na(entryClose) and not na(entryAtr) and entryAtr > 0.0 ? (high - entryClose) / entryAtr : 0.0
+longCarryEdgeAtr = not na(entryClose) and not na(entryAtr) and entryAtr > 0.0 ? (close - entryClose) / entryAtr : 0.0
+longC21ImpulseTimeCarry = strategy.position_size > 0 and not na(holdBars) and activeRule == "L_C21C" and activeHold <= 8 and holdBars >= activeHold and holdBars < 24 and longCarryMfeAtr > 3.00 and longCarryEdgeAtr > 1.20 and not macroBear and ret34 > -0.015 and close > hma34 - 0.30 * atr8
+longPullTimeCarry = strategy.position_size > 0 and not na(holdBars) and activeRule == "L_PULL" and activeHold >= 28 and holdBars >= activeHold and holdBars < activeHold + 6 and close > entryClose and not macroBear and rangePos55 > 0.56 and ret21 < 0.004 and ret34 > 0.004 and h55h89 > 0.10 and dist21 > -1.95
+longTimeCarry = (strategy.position_size > 0 and not na(holdBars) and holdBars >= activeHold and holdBars < activeHold + 6 and close > entryClose and ((activeRule == "L_OSNAP" and activeHold > 4 and rangePos34 > 0.24 and dist21 > -0.85 and ret34 > -0.050 and h55h89 > -1.10 and slope21 > -2.00) or (activeRule == "L_OSNAP" and activeHold == 4 and rangePos34 > 0.50 and rangePos34 < 0.75 and rangePos55 > 0.50 and dist21 > -0.10 and ret21 > -0.012 and ret34 > -0.012 and h55h89 > -0.60 and slope21 > -1.20) or (activeRule == "L_C21C" and activeHold >= 26 and rangePos34 > 0.50 and dist21 > -0.20 and ret21 > 0.020 and ret34 > 0.035 and h55h89 > -0.20) or ((activeRule == "L_PULL" and activeHold >= 28 and rangePos55 > 0.70 and dist21 > -0.65 and ret34 > 0.015 and h55h89 > 0.70) or (activeRule == "L_PULL" and activeHold >= 28 and holdBars < activeHold + 6 and rangePos55 > 0.76 and dist21 > 0.60 and ret21 > -0.002 and ret34 > 0.015 and closePos > 0.58 and h55h89 > 0.05)) or ((activeRule == "L_TAILQ" and activeHold >= 9 and holdBars < activeHold + 2 and macroBull and rangePos34 > 0.68 and rangePos34 < 0.78 and rangePos55 > 0.68 and rangePos55 < 0.78 and dist21 > 0.00 and dist55 > 1.70 and ret21 > 0.015 and ret34 > 0.005 and closePos > 0.25 and closePos < 0.42 and acc5 < -2.00) or (activeRule == "L_TAILQ" and activeHold >= 9 and holdBars < activeHold + 2 and macroBull and rangePos34 > 0.40 and rangePos34 < 0.50 and rangePos55 > 0.40 and rangePos55 < 0.50 and dist21 > -1.45 and dist55 > 0.20 and ret21 > 0.005 and ret34 > 0.000 and volRel > 1.50 and closePos < 0.25 and bodyPct > 0.55 and acc5 < -1.50)))) or longCoilTimeCarry or longCoilRecoveryCarry or longC21ImpulseTimeCarry or longPullTimeCarry
+longTimed = strategy.position_size > 0 and not na(entryBar) and bar_index - entryBar >= activeHold and not longTimeCarry
+shortPumpTopTimeCarry = strategy.position_size < 0 and not na(holdBars) and activeRule == "S_PTOP" and holdBars >= activeHold and holdBars < 48 and close < entryClose and not macroBull and ret21 < 0.090 and ret34 < 0.120 and rangePos55 < 1.18 and dist55 < 3.80 and close < hma34 + 1.00 * atr8
+shortCarryMfeAtr = not na(entryClose) and not na(entryAtr) and entryAtr > 0.0 and not na(activeLow) ? (entryClose - activeLow) / entryAtr : 0.0
+shortCarryEdgeAtr = not na(entryClose) and not na(entryAtr) and entryAtr > 0.0 ? (entryClose - close) / entryAtr : 0.0
+shortHighRangeImpulseCarry = strategy.position_size < 0 and not na(holdBars) and activeRule == "S_HIRANGE" and holdBars >= activeHold and holdBars < 72 and shortCarryMfeAtr > 2.40 and shortCarryEdgeAtr > 0.8 and ret21 < 0.090 and ret34 < 0.135 and close < hma34 + 0.80 * atr8
+shortBmidImpulseCarry = strategy.position_size < 0 and not na(holdBars) and activeRule == "S_BMID" and holdBars >= activeHold and holdBars < 144 and close < entryClose and shortCarryMfeAtr > 1.20 and shortCarryEdgeAtr > 0.45 and not macroBull and ret21 < 0.030 and ret34 < 0.055 and close < hma34 + 0.85 * atr8
+shortTimeCarry = (strategy.position_size < 0 and not na(holdBars) and activeRule == "S_NEDGE" and activeHold > 12 and holdBars >= 30 and holdBars < 31 and close < entryClose and macroBear and rangePos34 > 0.20 and rangePos34 < 0.36 and dist21 > 0.80 and dist55 < 0.20 and ret21 < -0.005 and ret34 < -0.005 and volRel < 0.80) or shortPumpTopTimeCarry or shortHighRangeImpulseCarry or shortBmidImpulseCarry
+shortTimed = strategy.position_size < 0 and not na(entryBar) and bar_index - entryBar >= activeHold and not shortTimeCarry
+longC21TrendCarry = strategy.position_size > 0 and activeRule == "L_C21C" and activeHold >= 26 and not na(holdBars) and holdBars >= 20 and close > entryClose and macroBull and trendUp and rangePos34 > 0.90 and ret21 > 0.030 and ret34 > 0.045 and closePos > 0.55
+longRotationTake = strategy.position_size > 0 and not na(entryBar) and bar_index - entryBar >= 5 and dist8 > 1.10 and close < hma5 and upperWick > 0.22 and not longC21TrendCarry
+shortRotationTake = strategy.position_size < 0 and not na(entryBar) and bar_index - entryBar >= 4 and dist8 < -0.95 and close > hma5 and lowerWick > 0.22
+shortMfeAtr = not na(entryClose) and not na(entryAtr) and entryAtr > 0.0 and not na(activeLow) ? (entryClose - activeLow) / entryAtr : 0.0
+shortGivebackAtr = not na(entryAtr) and entryAtr > 0.0 and not na(activeLow) ? (close - activeLow) / entryAtr : 0.0
+shortBank = strategy.position_size < 0 and activeRule == "S_REJECT" and (activeHold <= 8 or holdBars >= 60) and not na(holdBars) and holdBars >= 3 and shortMfeAtr > 0.80 and shortGivebackAtr > 0.45 and closePos > 0.55
+shortFlushBank = strategy.position_size < 0 and activeRule == "S_FLUSH" and not na(holdBars) and holdBars >= 4 and shortMfeAtr > 1.00 and shortGivebackAtr > 0.60 and closePos > 0.55 and close > hma5 and close < entryClose
+shortFlushReclaim = strategy.position_size < 0 and activeRule == "S_FLUSH" and not na(entryBar) and bar_index - entryBar >= 4 and bar_index - entryBar <= 8 and close > strategy.position_avg_price and close > hma8 and closePos > 0.72 and lowerWick < 0.14
+shortRejectReclaim = strategy.position_size < 0 and activeRule == "S_REJECT" and not na(entryBar) and bar_index - entryBar >= 3 and bar_index - entryBar <= 5 and close > strategy.position_avg_price and dist13 > 0.25 and closePos > 0.80 and upperWick < 0.20
+longPullStructureCarry = strategy.position_size > 0 and not na(holdBars) and activeRule == "L_PULL" and activeHold >= 28 and holdBars < activeHold and close > entryClose and not macroBear and rangePos55 > 0.62 and ret34 > 0.008 and h55h89 > 0.20 and dist21 > -1.90
+longGapCarry = (strategy.position_size > 0 and not na(entryClose) and close > entryClose and ((activeRule == "L_OSNAP" and activeHold > 4 and dist21 > -1.40 and rangePos34 > 0.18) or (activeRule == "L_C21C" and dist21 > -1.60 and rangePos34 > 0.50 and ret34 > 0.000 and not macroBear and (ret21 > 0.005 or (holdBars >= 20 and ret21 > 0.003 and ret34 > 0.010 and lowerWick > 0.50 and h55h89 > 0.80))) or (activeRule == "L_PULL" and dist21 > -1.60 and rangePos55 > 0.70 and ret34 > 0.015 and not macroBear and (ret21 > 0.015 or (holdBars >= 23 and ret21 > 0.010 and h55h89 > 1.40))))) or longPullStructureCarry
+longShockCarry = strategy.position_size > 0 and activeRule == "L_OSNAP" and activeHold == 7 and not na(holdBars) and holdBars <= 6 and macroBear and dist21 > -0.35 and rangePos34 > 0.03 and rangePos34 < 0.20
+longInvalid = strategy.position_size > 0 and activeRule != "L_WASH" and activeRule != "L_DWASH" and activeRule != "L_LOWC" and activeRule != "L_LOWX" and activeRule != "L_LOWB2" and activeRule != "L_LOWD2" and activeRule != "L_LOWM" and activeRule != "L_MBASE" and activeRule != "L_BDIP" and activeRule != "L_BSHK" and activeRule != "L_MBOD" and activeRule != "L_MNWK" and activeRule != "L_MBT" and activeRule != "L_STAIL" and activeRule != "L_SREC" and activeRule != "L_NLR" and activeRule != "L_BACX" and activeRule != "L_BDL" and activeRule != "L_BDS" and not longShockCarry and not longGapCarry and not longTimeCarry and not na(entryBar) and bar_index - entryBar >= 3 and (close < hma34 - 0.55 * atr8 or (dist8 > 1.45 and close < hma5 and upperWick > 0.30))
+shortInvalid = strategy.position_size < 0 and not shortTimeCarry and (activeRule != "S_REJECT" or activeHold <= 8 or holdBars >= 60) and not na(entryBar) and bar_index - entryBar >= 3 and (close > hma34 + 0.55 * atr8 or (dist8 < -1.35 and close > hma5 and lowerWick > 0.30))
+if longH21Slip
+    strategy.close("L", comment=activeRule + " slip")
+else if longRotationTake
+    strategy.close("L", comment=activeRule + " rotation")
+else if longTimed
+    strategy.close("L", comment=activeRule + " time")
+else if longInvalid
+    strategy.close("L", comment=activeRule + " structure")
+if shortBank
+    strategy.close("S", comment=activeRule + " bank")
+else if shortFlushBank
+    strategy.close("S", comment=activeRule + " bank")
+else if shortFlushReclaim
+    strategy.close("S", comment=activeRule + " reclaim")
+else if shortRotationTake
+    strategy.close("S", comment=activeRule + " rotation")
+else if shortRejectReclaim
+    strategy.close("S", comment=activeRule + " reclaim")
+else if shortTimed
+    strategy.close("S", comment=activeRule + " time")
+else if shortInvalid
+    strategy.close("S", comment=activeRule + " structure")
+
+if not inWindow and strategy.position_size != 0
+    strategy.close_all(comment="Window end")
+
+longExitSlip = longH21Slip
+longExitRotation = not longExitSlip and longRotationTake
+longExitTime = not longExitSlip and not longExitRotation and longTimed
+longExitStructure = not longExitSlip and not longExitRotation and not longExitTime and longInvalid
+shortExitBank = shortBank
+shortExitFlushBank = not shortExitBank and shortFlushBank
+shortExitReclaim = not shortExitBank and not shortExitFlushBank and shortFlushReclaim
+shortExitRotation = not shortExitBank and not shortExitFlushBank and not shortExitReclaim and shortRotationTake
+shortExitRejectReclaim = not shortExitBank and not shortExitFlushBank and not shortExitReclaim and not shortExitRotation and shortRejectReclaim
+shortExitTime = not shortExitBank and not shortExitFlushBank and not shortExitReclaim and not shortExitRotation and not shortExitRejectReclaim and shortTimed
+shortExitStructure = not shortExitBank and not shortExitFlushBank and not shortExitReclaim and not shortExitRotation and not shortExitRejectReclaim and not shortExitTime and shortInvalid
+
+longStructureLine = strategy.position_size > 0 and activeRule != "L_WASH" and activeRule != "L_DWASH" and activeRule != "L_LOWC" and activeRule != "L_LOWX" and activeRule != "L_LOWB2" and activeRule != "L_LOWD2" and activeRule != "L_LOWM" and activeRule != "L_MBASE" and activeRule != "L_BDIP" and activeRule != "L_BSHK" and activeRule != "L_MBOD" and activeRule != "L_MNWK" and activeRule != "L_MBT" and activeRule != "L_STAIL" and activeRule != "L_SREC" and activeRule != "L_NLR" and activeRule != "L_BACX" and activeRule != "L_BDL" and activeRule != "L_BDS" and not na(holdBars) and holdBars >= 3 ? hma34 - 0.55 * atr8 : na
+shortStructureLine = strategy.position_size < 0 and not na(holdBars) and holdBars >= 3 ? hma34 + 0.55 * atr8 : na
+longH21SlipLine = strategy.position_size > 0 and activeRule == "L_H21R" and not na(holdBars) and holdBars >= 2 and holdBars <= 4 ? hma21 : na
+longRotationLine = strategy.position_size > 0 and not na(holdBars) and holdBars >= 5 and dist8 > 1.10 ? hma5 : na
+shortRotationLine = strategy.position_size < 0 and not na(holdBars) and holdBars >= 4 and dist8 < -0.95 ? hma5 : na
+activeEntryLine = strategy.position_size != 0 ? strategy.position_avg_price : na
+
+// ── Visual layer ──────────────────────────────────────────────────────
+bool  showTrend   = input.bool(true, "Trend HMAs (21 / 55)",        group=G_VIEW)
+bool  showLevels  = input.bool(false, "Entry price line",            group=G_VIEW)
+bool  showStops  = input.bool(true, "Stop price line",            group=G_VIEW)
+bool  showSignals = input.bool(true, "Entry markers",               group=G_VIEW)
+bool  showStateBg = input.bool(true, "Market-state background",      group=G_VIEW)
+bool  showStats   = input.bool(true, "Stats panel",                 group=G_VIEW)
+color longColor   = input.color(#10b981, "Long",  group=G_VIEW, inline="palette")
+color shortColor  = input.color(#f43f5e, "Short", group=G_VIEW, inline="palette")
+
+color OPT_PROFIT  = #22c55e
+color OPT_LOSS    = #ef4444
+color OPT_NEUTRAL = #6b7280
+color OPT_BASE    = #9aa0b5
+color OPT_INK     = #0f0f12
+color OPT_LINE    = #27272a
+color OPT_FRAME   = #3f3f46
+color OPT_DIM     = #a1a1aa
+
+bool  isLong  = strategy.position_size > 0.0
+bool  isShort = strategy.position_size < 0.0
+bool  inPos   = isLong or isShort
+color stateCol = macroBull ? longColor : macroBear ? shortColor : OPT_NEUTRAL
+
+plot(showTrend ? hma21 : na, "HMA 21", color=color.new(stateCol, 20), linewidth=2)
+plot(showTrend ? hma55 : na, "HMA 55", color=color.new(OPT_BASE, 55), linewidth=1)
+
+
+plot(showLevels and inPos ? activeEntryLine : na, "Entry price", color=color.new(OPT_BASE, 0), linewidth=1, style=plot.style_linebr)
+
+// Structure stop — the real invalidation level (close beyond hma34 ∓ 0.55·ATR).
+// The series is na when no position holds it (and for the long rules that exit on
+// time instead), so circles only print while the hma34 stop is actually live.
+plot(showStops ? longStructureLine  : na, "Structure stop (long)",  color=color.new(shortColor, 0), linewidth=1, style=plot.style_circles)
+plot(showStops ? shortStructureLine : na, "Structure stop (short)", color=color.new(shortColor, 0), linewidth=1, style=plot.style_circles)
+
+// Slip stop — L_H21R early cut at hma21 (only on bars 2–4 of an L_H21R long).
+plot(showStops ? longH21SlipLine : na, "Slip stop (HMA21)", color=color.new(shortColor, 0), linewidth=1, style=plot.style_circles)
+
+// Rotation exit — overextension take at hma5 (only while rotation is armed).
+plot(showStops ? longRotationLine  : na, "Rotation exit (long)",  color=color.new(shortColor, 0), linewidth=1, style=plot.style_circles)
+plot(showStops ? shortRotationLine : na, "Rotation exit (short)", color=color.new(shortColor, 0), linewidth=1, style=plot.style_circles)
+
+bgcolor(showStateBg and macroBull ? color.new(longColor, 95) : showStateBg and macroBear ? color.new(shortColor, 95) : na, title="Market state")
+
+// Entry markers
+plotshape(showSignals and sideNow == 1,  title="Long entry",  style=shape.labelup,   location=location.belowbar, color=longColor,  text="▲", textcolor=color.white, size=size.tiny)
+plotshape(showSignals and sideNow == -1, title="Short entry", style=shape.labeldown, location=location.abovebar, color=shortColor, text="▼", textcolor=color.white, size=size.tiny)
+
+
+var table panel = table.new(position.bottom_right, 2, 4,
+     frame_width=1, frame_color=color.new(OPT_FRAME, 0),
+     border_width=1, border_color=color.new(OPT_LINE, 0),
+     bgcolor=color.new(OPT_INK, 0))
+statRow(int r, string lbl, string val, color valCol) =>
+    table.cell(panel, 0, r, " " + lbl, text_color=color.new(OPT_DIM, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(panel, 1, r, val + " ", text_color=valCol, text_size=size.small, text_halign=text.align_right)
+if showStats
+    float netPct = strategy.initial_capital > 0.0 ? strategy.netprofit / strategy.initial_capital * 100.0 : 0.0
+    float winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : 0.0
+    statRow(0, "Position", isLong ? "LONG" : isShort ? "SHORT" : "FLAT", isLong ? longColor : isShort ? shortColor : color.new(OPT_DIM, 0))
+    statRow(1, "PnL %",    (netPct >= 0.0 ? "+" : "") + str.tostring(netPct, "0.0") + "%", netPct >= 0.0 ? OPT_PROFIT : OPT_LOSS)
+    statRow(2, "Win rate", strategy.closedtrades > 0 ? str.tostring(winRate, "0") + "%" : "—", winRate >= 50.0 ? OPT_PROFIT : color.new(OPT_DIM, 0))
+    statRow(3, "Trades",   str.tostring(strategy.closedtrades), color.new(OPT_DIM, 0))

@@ -1,0 +1,537 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy("Helios Institutional Synthesis Strategy [JOAT]", shorttitle="JIS [JOAT]", overlay=true, pyramiding=0, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.01, slippage=1, process_orders_on_close=true, calc_on_every_tick=false, max_bars_back=5000, max_labels_count=250, max_lines_count=250, max_boxes_count=120)
+
+// -----------------------------------------------------------------------------
+// Inputs
+// -----------------------------------------------------------------------------
+groupCore    = "Core Engine"
+groupFilters = "Filters"
+groupRisk    = "Risk Controls"
+groupVisual  = "Visuals"
+groupDash    = "Dashboard"
+
+baselineLen = input.int(34, "Adaptive Baseline Length", minval=5, maxval=300, group=groupCore)
+kamaLen     = input.int(14, "Efficiency Lookback", minval=2, maxval=100, group=groupCore)
+fastLen     = input.int(2, "Fast Period", minval=2, maxval=20, group=groupCore)
+slowLen     = input.int(30, "Slow Period", minval=3, maxval=100, group=groupCore)
+baselineSmo = input.int(5, "Baseline Smoothing", minval=1, maxval=50, group=groupCore)
+atrLen      = input.int(14, "ATR Length", minval=2, maxval=100, group=groupCore)
+adxLen      = input.int(14, "ADX / DMI Length", minval=2, maxval=100, group=groupCore)
+volLen      = input.int(50, "Volatility Window", minval=10, maxval=300, group=groupCore)
+anchorLen   = input.int(120, "Institutional Anchor Length", minval=20, maxval=500, group=groupCore)
+channelLen  = input.int(80, "Channel Memory", minval=20, maxval=400, group=groupCore)
+squeezeLen  = input.int(20, "Squeeze Length", minval=5, maxval=100, group=groupCore)
+htfTf       = input.timeframe("60", "Confirmation Timeframe", group=groupCore)
+
+useLongs        = input.bool(true, "Enable Longs", group=groupFilters)
+useShorts       = input.bool(true, "Enable Shorts", group=groupFilters)
+tradeSession    = input.session("0930-1600", "Trade Session", group=groupFilters)
+useSession      = input.bool(false, "Restrict to Session", group=groupFilters)
+minScore        = input.int(4, "Min Confluence Score", minval=2, maxval=8, group=groupFilters)
+cooldownBars    = input.int(4, "Cooldown Bars", minval=0, maxval=100, group=groupFilters)
+avoidCompression = input.bool(false, "Avoid Fresh Compression", group=groupFilters)
+minVolScore     = input.float(15.0, "Minimum Volatility Score", minval=0.0, maxval=100.0, step=1.0, group=groupFilters)
+maxVolScore     = input.float(95.0, "Maximum Volatility Score", minval=1.0, maxval=100.0, step=1.0, group=groupFilters)
+
+riskPct       = input.float(1.0, "Risk % per Trade", minval=0.1, maxval=10.0, step=0.1, group=groupRisk)
+stopATRMult   = input.float(1.8, "ATR Stop Multiple", minval=0.5, maxval=10.0, step=0.1, group=groupRisk)
+tpATRMult     = input.float(2.8, "ATR Target Multiple", minval=0.5, maxval=15.0, step=0.1, group=groupRisk)
+trailATRMult  = input.float(1.35, "ATR Trail Multiple", minval=0.25, maxval=8.0, step=0.05, group=groupRisk)
+minRR         = input.float(1.00, "Minimum Planned R Multiple", minval=0.5, maxval=6.0, step=0.05, group=groupRisk)
+maxATRPercent = input.float(4.5, "Max ATR % of Price", minval=0.1, maxval=25.0, step=0.1, group=groupRisk)
+maxDayLossPct = input.float(3.0, "Daily Equity Guard %", minval=0.0, maxval=20.0, step=0.1, group=groupRisk)
+maxHoldBars   = input.int(120, "Max Hold Bars", minval=1, maxval=2000, group=groupRisk)
+maxQty        = input.float(100000.0, "Max Position Qty", minval=0.0, group=groupRisk)
+minQty        = input.float(0.0, "Min Position Qty", minval=0.0, group=groupRisk)
+closeOnFlip   = input.bool(true, "Close On Regime Flip", group=groupRisk)
+
+showCloud      = input.bool(true, "Show Cloud", group=groupVisual)
+showCandles    = input.bool(true, "Color Candles", group=groupVisual)
+showLevels     = input.bool(true, "Show VWAP / PD Levels", group=groupVisual)
+showChannels   = input.bool(true, "Show Volatility Channels", group=groupVisual)
+showTradeZones = input.bool(true, "Show Trade Zone Boxes", group=groupVisual)
+showRiskRails  = input.bool(true, "Show Right-Side Risk Rails", group=groupVisual)
+showBg         = input.bool(true, "Regime Background", group=groupVisual)
+themePreset    = input.string("Helios Teal", "Theme Preset", options=["Helios Teal", "Consensus Aqua", "Sentinel Neon", "Cobalt Risk"], group=groupVisual)
+bullInput      = input.color(#12d6c1, "Bull Core", group=groupVisual)
+bearInput      = input.color(#ff5c7a, "Bear Core", group=groupVisual)
+accentInput    = input.color(#f4b942, "Neutral Accent", group=groupVisual)
+vwapInput      = input.color(#2196F3, "VWAP Core", group=groupVisual)
+panelBg        = input.color(color.new(#0d1117, 0), "Panel Background", group=groupDash)
+panelBorder    = input.color(color.new(#334155, 0), "Panel Border", group=groupDash)
+textMuted      = input.color(#9ca3af, "Muted Text", group=groupDash)
+showDash       = input.bool(true, "Show Dashboard", group=groupDash)
+dashSizeSel    = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal"], group=groupDash)
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_div(float num, float den) =>
+    den != 0.0 ? num / den : 0.0
+
+f_tanh(float x) =>
+    float ex = math.exp(2.0 * x)
+    f_div(ex - 1.0, ex + 1.0)
+
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : size.normal
+
+f_efficiency_ratio(series float src, int len) =>
+    float change = math.abs(src - src[len])
+    float vol = math.sum(math.abs(src - src[1]), len)
+    f_div(change, vol)
+
+f_adaptive_baseline(series float src, int len, int kamaLookback, int fastPer, int slowPer, int smoothLen) =>
+    float emaLine = ta.ema(src, len)
+    float er = f_efficiency_ratio(src, kamaLookback)
+    float fastSC = 2.0 / (fastPer + 1.0)
+    float slowSC = 2.0 / (slowPer + 1.0)
+    float sc = math.pow(er * (fastSC - slowSC) + slowSC, 2.0)
+    var float kamaLine = na
+    kamaLine := na(kamaLine[1]) ? src : kamaLine[1] + sc * (src - kamaLine[1])
+    float blended = emaLine + (kamaLine - emaLine) * f_clamp(er, 0.0, 1.0)
+    smoothLen > 1 ? ta.ema(blended, smoothLen) : blended
+
+f_qty(float entryPrice, float stopPrice, float equity, float riskPercent, float capQty, float floorQty) =>
+    float stopDist = math.abs(entryPrice - stopPrice)
+    float riskCash = equity * riskPercent * 0.01
+    float unitRisk = math.max(stopDist * syminfo.pointvalue, syminfo.mintick)
+    float rawQty = stopDist > syminfo.mintick ? riskCash / unitRisk : 0.0
+    math.max(floorQty, math.min(rawQty, capQty))
+
+f_theme_bull(string preset, color customBull) =>
+    preset == "Consensus Aqua" ? #00E5FF : preset == "Sentinel Neon" ? #00ff00 : preset == "Cobalt Risk" ? #00E676 : customBull
+
+f_theme_bear(string preset, color customBear) =>
+    preset == "Consensus Aqua" ? #FF1744 : preset == "Sentinel Neon" ? #ff0000 : preset == "Cobalt Risk" ? #FF1744 : customBear
+
+f_theme_accent(string preset, color customAccent) =>
+    preset == "Consensus Aqua" ? #0b7788 : preset == "Sentinel Neon" ? #808080 : preset == "Cobalt Risk" ? #FFD740 : customAccent
+
+f_num_txt(float x) =>
+    na(x) ? "n/a" : str.tostring(x, format.mintick)
+
+f_score_txt(int longScore, int shortScore) =>
+    "L " + str.tostring(longScore) + " / S " + str.tostring(shortScore)
+
+f_state_text(int state) =>
+    state == 2 ? "Bull Trend" :
+     state == 1 ? "Bull Expansion" :
+     state == -1 ? "Bear Expansion" :
+     state == -2 ? "Bear Trend" : "Range"
+
+f_add_trade_box(bool isLong, int leftBar, int rightBar, float entry, float stop, float target, color bull, color bear) =>
+    color riskCol = isLong ? color.new(bear, 88) : color.new(bear, 88)
+    color rewardCol = isLong ? color.new(bull, 88) : color.new(bull, 88)
+    box riskBox = isLong ? box.new(leftBar, entry, rightBar, stop, border_color=color.new(bear, 75), bgcolor=riskCol, border_width=0) : box.new(leftBar, stop, rightBar, entry, border_color=color.new(bear, 75), bgcolor=riskCol, border_width=0)
+    box rewardBox = isLong ? box.new(leftBar, target, rightBar, entry, border_color=color.new(bull, 75), bgcolor=rewardCol, border_width=0) : box.new(leftBar, entry, rightBar, target, border_color=color.new(bull, 75), bgcolor=rewardCol, border_width=0)
+    [riskBox, rewardBox]
+
+// -----------------------------------------------------------------------------
+// Core engine
+// -----------------------------------------------------------------------------
+bullBase = f_theme_bull(themePreset, bullInput)
+bearBase = f_theme_bear(themePreset, bearInput)
+accentBase = f_theme_accent(themePreset, accentInput)
+vwapBase = vwapInput
+
+atrVal  = ta.atr(atrLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+atrBase = ta.sma(atrVal, volLen)
+atrDev  = ta.stdev(atrVal, volLen)
+volZ    = f_div(atrVal - atrBase, atrDev)
+volScore = f_clamp(50.0 + 50.0 * f_tanh(volZ / 2.0), 0.0, 100.0)
+atrPct = f_div(atrVal, close) * 100.0
+
+baseline = f_adaptive_baseline(close, baselineLen, kamaLen, fastLen, slowLen, baselineSmo)
+baselineSlope = baseline - baseline[1]
+baselineUp = baselineSlope > 0
+baselineDown = baselineSlope < 0
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+rsiVal = ta.rsi(close, 14)
+trendUp = close > baseline and baselineUp and emaFast > emaSlow
+trendDown = close < baseline and baselineDown and emaFast < emaSlow
+
+sessionVWAPRaw = ta.vwap(hlc3)
+sessionVWAP = na(sessionVWAPRaw) ? ta.ema(hlc3, 34) : sessionVWAPRaw
+vwapSigma = math.max(ta.stdev(hlc3 - sessionVWAP, channelLen), syminfo.mintick)
+vwapUpper1 = sessionVWAP + vwapSigma
+vwapLower1 = sessionVWAP - vwapSigma
+vwapUpper2 = sessionVWAP + vwapSigma * 2.0
+vwapLower2 = sessionVWAP - vwapSigma * 2.0
+vwapDistance = f_div(close - sessionVWAP, vwapSigma)
+
+rangeHigh = ta.highest(high, anchorLen)
+rangeLow  = ta.lowest(low, anchorLen)
+rangeSpan = math.max(rangeHigh - rangeLow, syminfo.mintick)
+equilibrium = rangeLow + rangeSpan * 0.5
+discount25 = rangeLow + rangeSpan * 0.25
+premium75  = rangeLow + rangeSpan * 0.75
+pricePos = f_clamp(f_div(close - rangeLow, rangeSpan), 0.0, 1.0)
+
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+htfClose = request.security(syminfo.tickerid, htfTf, close[1], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+htfFast = request.security(syminfo.tickerid, htfTf, ta.ema(close, 21)[1], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+htfSlow = request.security(syminfo.tickerid, htfTf, ta.ema(close, 55)[1], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+htfBull = htfClose > htfFast and htfFast > htfSlow
+htfBear = htfClose < htfFast and htfFast < htfSlow
+
+channelMean = ta.ema((baseline + sessionVWAP) * 0.5, math.max(5, int(channelLen / 4)))
+channelMult = 1.55 * (0.75 + f_clamp(volScore / 100.0, 0.0, 1.0))
+channelUpper = channelMean + atrVal * channelMult
+channelLower = channelMean - atrVal * channelMult
+channelOuterUpper = channelMean + atrVal * channelMult * 1.65
+channelOuterLower = channelMean - atrVal * channelMult * 1.65
+
+bbBasis = ta.sma(close, squeezeLen)
+bbDev = ta.stdev(close, squeezeLen) * 2.0
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+kcBasis = ta.ema(close, squeezeLen)
+kcRange = ta.ema(ta.tr(true), squeezeLen) * 1.5
+kcUpper = kcBasis + kcRange
+kcLower = kcBasis - kcRange
+squeezeOn = bbUpper < kcUpper and bbLower > kcLower
+squeezeRelease = barstate.isconfirmed and not squeezeOn and squeezeOn[1]
+
+rangeRegime = adxVal < 18 and volScore < 70
+bullRegime = trendUp and not rangeRegime
+bearRegime = trendDown and not rangeRegime
+regimeState = bullRegime ? 2 : bearRegime ? -2 : rangeRegime ? 0 : trendUp ? 1 : trendDown ? -1 : 0
+regimeColor = regimeState == 2 ? bullBase : regimeState == 1 ? color.new(bullBase, 20) : regimeState == -1 ? color.new(bearBase, 20) : regimeState == -2 ? bearBase : accentBase
+
+// -----------------------------------------------------------------------------
+// Liquidity, volume pressure, and confluence
+// -----------------------------------------------------------------------------
+sessionOk = not useSession or not na(time(timeframe.period, tradeSession))
+aboveVWAP = close > sessionVWAP
+belowVWAP = close < sessionVWAP
+premDiscountLong = close < equilibrium or close < discount25
+premDiscountShort = close > equilibrium or close > premium75
+
+volumeBase = ta.sma(volume, 30)
+volumeSpike = volume > volumeBase * 1.35
+body = math.abs(close - open)
+spread = math.max(high - low, syminfo.mintick)
+delta = volume * f_div(close - open, spread)
+deltaEma = ta.ema(delta, 8)
+pressure = ta.ema(f_div(delta, math.max(volume, 1.0)) * 100.0, 8)
+
+recentSwingHigh = ta.highest(high[1], 12)
+recentSwingLow = ta.lowest(low[1], 12)
+bullSweepReclaim = barstate.isconfirmed and not na(recentSwingLow) and low < recentSwingLow and close > recentSwingLow and close > open and volumeSpike
+bearSweepReclaim = barstate.isconfirmed and not na(recentSwingHigh) and high > recentSwingHigh and close < recentSwingHigh and close < open and volumeSpike
+dailyBullSweep = barstate.isconfirmed and not na(pdl) and low < pdl and close > pdl
+dailyBearSweep = barstate.isconfirmed and not na(pdh) and high > pdh and close < pdh
+
+momLong = rsiVal > 52 and emaFast > emaSlow and pressure > -10
+momShort = rsiVal < 48 and emaFast < emaSlow and pressure < 10
+vwapBounceLong = barstate.isconfirmed and low <= vwapLower1 and close > vwapLower1 and close > open
+vwapBounceShort = barstate.isconfirmed and high >= vwapUpper1 and close < vwapUpper1 and close < open
+channelReclaimLong = barstate.isconfirmed and low < channelLower and close > channelLower and close > open
+channelRejectShort = barstate.isconfirmed and high > channelUpper and close < channelUpper and close < open
+
+volGate = volScore >= minVolScore and volScore <= maxVolScore and atrPct <= maxATRPercent
+squeezeGate = not avoidCompression or not squeezeOn
+dayChanged = dayofmonth != dayofmonth[1]
+var float dayStartEquity = na
+dayStartEquity := na(dayStartEquity[1]) or dayChanged ? strategy.equity : dayStartEquity[1]
+dayDrawdownPct = dayStartEquity > 0 ? f_div(dayStartEquity - strategy.equity, dayStartEquity) * 100.0 : 0.0
+dailyGuardOk = maxDayLossPct <= 0 or dayDrawdownPct < maxDayLossPct
+
+baselineCrossUp = ta.crossover(close, baseline)
+baselineCrossDown = ta.crossunder(close, baseline)
+vwapCrossUp = ta.crossover(close, sessionVWAP)
+vwapCrossDown = ta.crossunder(close, sessionVWAP)
+
+scoreLong =
+     (bullRegime ? 1 : 0) +
+     (aboveVWAP ? 1 : 0) +
+     (premDiscountLong ? 1 : 0) +
+     (momLong ? 1 : 0) +
+     (volGate ? 1 : 0) +
+     ((bullSweepReclaim or dailyBullSweep) ? 1 : 0) +
+     ((vwapBounceLong or channelReclaimLong or squeezeRelease) ? 1 : 0) +
+     (htfBull ? 1 : 0)
+
+scoreShort =
+     (bearRegime ? 1 : 0) +
+     (belowVWAP ? 1 : 0) +
+     (premDiscountShort ? 1 : 0) +
+     (momShort ? 1 : 0) +
+     (volGate ? 1 : 0) +
+     ((bearSweepReclaim or dailyBearSweep) ? 1 : 0) +
+     ((vwapBounceShort or channelRejectShort or squeezeRelease) ? 1 : 0) +
+     (htfBear ? 1 : 0)
+
+rawLongTrigger = scoreLong >= minScore and (baselineCrossUp or vwapCrossUp or bullSweepReclaim or dailyBullSweep or vwapBounceLong or channelReclaimLong)
+rawShortTrigger = scoreShort >= minScore and (baselineCrossDown or vwapCrossDown or bearSweepReclaim or dailyBearSweep or vwapBounceShort or channelRejectShort)
+
+var int lastEntryBar = na
+canTrade = na(lastEntryBar) or bar_index - lastEntryBar > cooldownBars
+
+longStopBase = math.min(close - atrVal * stopATRMult, nz(pdl, close - atrVal * stopATRMult))
+shortStopBase = math.max(close + atrVal * stopATRMult, nz(pdh, close + atrVal * stopATRMult))
+longTargetBase = close + atrVal * tpATRMult
+shortTargetBase = close - atrVal * tpATRMult
+longRR = f_div(longTargetBase - close, close - longStopBase)
+shortRR = f_div(close - shortTargetBase, shortStopBase - close)
+
+riskLongOk = longRR >= minRR and close > longStopBase and dailyGuardOk
+riskShortOk = shortRR >= minRR and close < shortStopBase and dailyGuardOk
+longTrigger = barstate.isconfirmed and sessionOk and useLongs and canTrade and volGate and squeezeGate and riskLongOk and rawLongTrigger and strategy.position_size <= 0
+shortTrigger = barstate.isconfirmed and sessionOk and useShorts and canTrade and volGate and squeezeGate and riskShortOk and rawShortTrigger and strategy.position_size >= 0
+
+longQty = f_qty(close, longStopBase, strategy.equity, riskPct, maxQty, minQty)
+shortQty = f_qty(close, shortStopBase, strategy.equity, riskPct, maxQty, minQty)
+
+// -----------------------------------------------------------------------------
+// Orders and active risk state
+// -----------------------------------------------------------------------------
+var float activeEntry = na
+var float activeStop = na
+var float activeTarget = na
+var int activeDirection = 0
+var int activeEntryBar = na
+var box activeRiskBox = na
+var box activeRewardBox = na
+
+if longTrigger
+    strategy.entry("Long", strategy.long, qty=longQty, comment="JOAT Long")
+    lastEntryBar := bar_index
+    activeEntry := close
+    activeStop := longStopBase
+    activeTarget := longTargetBase
+    activeDirection := 1
+    activeEntryBar := bar_index
+    if showTradeZones
+        box.delete(activeRiskBox)
+        box.delete(activeRewardBox)
+        [riskBox, rewardBox] = f_add_trade_box(true, bar_index, bar_index + 40, activeEntry, activeStop, activeTarget, bullBase, bearBase)
+        activeRiskBox := riskBox
+        activeRewardBox := rewardBox
+
+if shortTrigger
+    strategy.entry("Short", strategy.short, qty=shortQty, comment="JOAT Short")
+    lastEntryBar := bar_index
+    activeEntry := close
+    activeStop := shortStopBase
+    activeTarget := shortTargetBase
+    activeDirection := -1
+    activeEntryBar := bar_index
+    if showTradeZones
+        box.delete(activeRiskBox)
+        box.delete(activeRewardBox)
+        [riskBox, rewardBox] = f_add_trade_box(false, bar_index, bar_index + 40, activeEntry, activeStop, activeTarget, bullBase, bearBase)
+        activeRiskBox := riskBox
+        activeRewardBox := rewardBox
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeDirection := 0
+    activeEntry := na
+    activeStop := na
+    activeTarget := na
+    activeEntryBar := na
+
+if strategy.position_size > 0
+    float trailStop = close - atrVal * trailATRMult
+    activeStop := math.max(nz(activeStop, strategy.position_avg_price - atrVal * stopATRMult), trailStop)
+    activeStop := math.min(activeStop, strategy.position_avg_price - syminfo.mintick)
+    activeTarget := nz(activeTarget, strategy.position_avg_price + atrVal * tpATRMult)
+    strategy.exit("Long Exit", from_entry="Long", stop=activeStop, limit=activeTarget, comment="Structured Exit")
+    if closeOnFlip and barstate.isconfirmed and bearRegime and close < baseline
+        strategy.close("Long", comment="Regime Flip")
+
+if strategy.position_size < 0
+    float trailStop = close + atrVal * trailATRMult
+    activeStop := math.min(nz(activeStop, strategy.position_avg_price + atrVal * stopATRMult), trailStop)
+    activeStop := math.max(activeStop, strategy.position_avg_price + syminfo.mintick)
+    activeTarget := nz(activeTarget, strategy.position_avg_price - atrVal * tpATRMult)
+    strategy.exit("Short Exit", from_entry="Short", stop=activeStop, limit=activeTarget, comment="Structured Exit")
+    if closeOnFlip and barstate.isconfirmed and bullRegime and close > baseline
+        strategy.close("Short", comment="Regime Flip")
+
+barsInTrade = not na(activeEntryBar) ? bar_index - activeEntryBar : 0
+timeExitLong = barstate.isconfirmed and strategy.position_size > 0 and barsInTrade >= maxHoldBars
+timeExitShort = barstate.isconfirmed and strategy.position_size < 0 and barsInTrade >= maxHoldBars
+
+if timeExitLong
+    strategy.close("Long", comment="Time Guard")
+
+if timeExitShort
+    strategy.close("Short", comment="Time Guard")
+
+if not dailyGuardOk and strategy.position_size > 0
+    strategy.close("Long", comment="Daily Guard")
+
+if not dailyGuardOk and strategy.position_size < 0
+    strategy.close("Short", comment="Daily Guard")
+
+if showTradeZones and not na(activeRiskBox) and strategy.position_size != 0
+    box.set_right(activeRiskBox, bar_index + 40)
+    box.set_right(activeRewardBox, bar_index + 40)
+    if strategy.position_size > 0
+        box.set_lefttop(activeRiskBox, nz(activeEntryBar, bar_index), strategy.position_avg_price)
+        box.set_rightbottom(activeRiskBox, bar_index + 40, activeStop)
+        box.set_lefttop(activeRewardBox, nz(activeEntryBar, bar_index), activeTarget)
+        box.set_rightbottom(activeRewardBox, bar_index + 40, strategy.position_avg_price)
+    if strategy.position_size < 0
+        box.set_lefttop(activeRiskBox, nz(activeEntryBar, bar_index), activeStop)
+        box.set_rightbottom(activeRiskBox, bar_index + 40, strategy.position_avg_price)
+        box.set_lefttop(activeRewardBox, nz(activeEntryBar, bar_index), strategy.position_avg_price)
+        box.set_rightbottom(activeRewardBox, bar_index + 40, activeTarget)
+
+// -----------------------------------------------------------------------------
+// Visual layer
+// -----------------------------------------------------------------------------
+baselinePlot = plot(baseline, "Adaptive Baseline", color=regimeColor, linewidth=2)
+vwapPlot = plot(showLevels ? sessionVWAP : na, "VWAP", color=color.new(vwapBase, 0), linewidth=2)
+eqPlot = plot(showLevels ? equilibrium : na, "Equilibrium", color=color.new(accentBase, 20), linewidth=1)
+premiumPlot = plot(showLevels ? premium75 : na, "Premium", color=color.new(bearBase, 20), linewidth=1)
+discountPlot = plot(showLevels ? discount25 : na, "Discount", color=color.new(bullBase, 20), linewidth=1)
+fill(baselinePlot, vwapPlot, color.new(regimeColor, 90), title="Baseline VWAP Band")
+fill(discountPlot, eqPlot, color.new(bullBase, 93), title="Discount Zone")
+fill(eqPlot, premiumPlot, color.new(bearBase, 93), title="Premium Zone")
+
+cloudTop = plot(showCloud ? math.max(baseline, sessionVWAP) : na, "Cloud Top", display=display.none)
+cloudBot = plot(showCloud ? math.min(baseline, sessionVWAP) : na, "Cloud Bot", display=display.none)
+fill(cloudTop, cloudBot, color.new(regimeColor, 86), title="Trend Cloud")
+
+vwapU1Plot = plot(showLevels ? vwapUpper1 : na, "VWAP +1 Sigma", color=color.new(vwapBase, 55), linewidth=1)
+vwapL1Plot = plot(showLevels ? vwapLower1 : na, "VWAP -1 Sigma", color=color.new(vwapBase, 55), linewidth=1)
+vwapU2Plot = plot(showLevels ? vwapUpper2 : na, "VWAP +2 Sigma", color=color.new(vwapBase, 78), linewidth=1)
+vwapL2Plot = plot(showLevels ? vwapLower2 : na, "VWAP -2 Sigma", color=color.new(vwapBase, 78), linewidth=1)
+fill(vwapU1Plot, vwapL1Plot, color.new(vwapBase, 94), title="VWAP Inner Band")
+fill(vwapU2Plot, vwapU1Plot, color.new(bearBase, 94), title="VWAP Upper Risk")
+fill(vwapL1Plot, vwapL2Plot, color.new(bullBase, 94), title="VWAP Lower Risk")
+
+chUPlot = plot(showChannels ? channelUpper : na, "Channel High", color=color.new(bearBase, 45), linewidth=1)
+chLPlot = plot(showChannels ? channelLower : na, "Channel Low", color=color.new(bullBase, 45), linewidth=1)
+chOUPlot = plot(showChannels ? channelOuterUpper : na, "Outer Channel High", color=color.new(bearBase, 72), linewidth=1)
+chOLPlot = plot(showChannels ? channelOuterLower : na, "Outer Channel Low", color=color.new(bullBase, 72), linewidth=1)
+fill(chUPlot, chOUPlot, color.new(bearBase, 93), title="Upper Channel Pocket")
+fill(chOLPlot, chLPlot, color.new(bullBase, 93), title="Lower Channel Pocket")
+
+barCol =
+     regimeState == 2 ? color.new(bullBase, 25) :
+     regimeState == 1 ? color.new(bullBase, 55) :
+     regimeState == -1 ? color.new(bearBase, 55) :
+     regimeState == -2 ? color.new(bearBase, 25) :
+     color.new(accentBase, 65)
+barcolor(showCandles ? barCol : na, title="Regime Candles")
+bgcolor(showBg ? color.new(regimeColor, 92) : na, title="Regime Background")
+bgcolor(showBg and squeezeOn ? color.new(accentBase, 93) : na, title="Compression Guard Background")
+
+entryPlot = plot(strategy.position_size != 0 ? strategy.position_avg_price : na, "Active Entry", color=color.new(color.white, 0), linewidth=2, style=plot.style_linebr)
+stopPlot = plot(strategy.position_size != 0 ? activeStop : na, "Active Stop", color=color.new(bearBase, 0), linewidth=2, style=plot.style_linebr)
+targetPlot = plot(strategy.position_size != 0 ? activeTarget : na, "Active Target", color=color.new(bullBase, 0), linewidth=2, style=plot.style_linebr)
+fill(entryPlot, stopPlot, color.new(bearBase, 91), title="Active Risk Fill")
+fill(targetPlot, entryPlot, color.new(bullBase, 91), title="Active Reward Fill")
+
+// -----------------------------------------------------------------------------
+// Right-side entry, stop, target, and context labels
+// -----------------------------------------------------------------------------
+var line entryRail = na
+var line stopRail = na
+var line targetRail = na
+var line scoreRail = na
+var label entryLabel = na
+var label stopLabel = na
+var label targetLabel = na
+var label scoreLabel = na
+
+if barstate.islast
+    line.delete(entryRail)
+    line.delete(stopRail)
+    line.delete(targetRail)
+    line.delete(scoreRail)
+    label.delete(entryLabel)
+    label.delete(stopLabel)
+    label.delete(targetLabel)
+    label.delete(scoreLabel)
+    int x1 = bar_index - 8
+    int x2 = bar_index + 24
+    if showRiskRails and strategy.position_size != 0
+        float posEntry = strategy.position_avg_price
+        float activeRR = strategy.position_size > 0 ? f_div(activeTarget - posEntry, posEntry - activeStop) : f_div(posEntry - activeTarget, activeStop - posEntry)
+        entryRail := line.new(x1, posEntry, x2, posEntry, color=color.new(color.white, 0), style=line.style_solid, width=2)
+        stopRail := line.new(x1, activeStop, x2 + 2, activeStop, color=color.new(bearBase, 0), style=line.style_dashed, width=2)
+        targetRail := line.new(x1, activeTarget, x2 + 4, activeTarget, color=color.new(bullBase, 0), style=line.style_dashed, width=2)
+        scoreRail := line.new(x1, channelMean, x2 + 6, channelMean, color=color.new(regimeColor, 55), style=line.style_dotted, width=1)
+        entryLabel := label.new(x2, posEntry, "ENTRY  " + f_num_txt(posEntry), color=color.new(#161b22, 5), textcolor=color.white, style=label.style_label_left, size=size.small)
+        stopLabel := label.new(x2 + 2, activeStop, "STOP  " + f_num_txt(activeStop), color=color.new(#161b22, 5), textcolor=bearBase, style=label.style_label_left, size=size.small)
+        targetLabel := label.new(x2 + 4, activeTarget, "TARGET  " + f_num_txt(activeTarget), color=color.new(#161b22, 5), textcolor=bullBase, style=label.style_label_left, size=size.small)
+        scoreLabel := label.new(x2 + 6, channelMean, "RR  " + str.tostring(activeRR, "#.00") + "  " + f_score_txt(scoreLong, scoreShort), color=color.new(#161b22, 5), textcolor=regimeColor, style=label.style_label_left, size=size.tiny)
+
+// -----------------------------------------------------------------------------
+// Expanded diagnostics
+// -----------------------------------------------------------------------------
+confluencePeak = math.max(scoreLong, scoreShort)
+regimeText = f_state_text(regimeState)
+positionText = strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat"
+sessionText = sessionOk ? "Active" : "Blocked"
+riskText = not dailyGuardOk ? "Daily Guard" : not volGate ? "Vol Gate" : squeezeOn and avoidCompression ? "Compression" : "Accepted"
+setupText = longTrigger ? "Long Armed" : shortTrigger ? "Short Armed" : rawLongTrigger ? "Long Watch" : rawShortTrigger ? "Short Watch" : "No Trigger"
+liquidityText = bullSweepReclaim or dailyBullSweep ? "Bull Sweep" : bearSweepReclaim or dailyBearSweep ? "Bear Sweep" : "Clear"
+mtfText = htfBull ? "HTF Bull" : htfBear ? "HTF Bear" : "HTF Mixed"
+zoneText = close > premium75 ? "Premium" : close < discount25 ? "Discount" : close > equilibrium ? "Upper EQ" : "Lower EQ"
+
+var table dash = table.new(position.top_right, 2, 16, bgcolor=color.new(panelBg, 8), border_color=color.new(panelBorder, 0), border_width=1, frame_color=color.new(panelBorder, 0), frame_width=1)
+
+if showDash and barstate.islast
+    dashSize = f_size(dashSizeSel)
+    table.cell(dash, 0, 0, "JOAT INSTITUTIONAL SYNTHESIS", text_color=color.white, bgcolor=color.new(regimeColor, 70), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "JIS", text_color=color.white, bgcolor=color.new(regimeColor, 70), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 1, "Regime", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 1, regimeText, text_color=regimeColor, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 2, "Position", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 2, positionText, text_color=strategy.position_size > 0 ? bullBase : strategy.position_size < 0 ? bearBase : accentBase, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 3, "Confluence", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 3, f_score_txt(scoreLong, scoreShort), text_color=color.from_gradient(confluencePeak, 0, 8, accentBase, bullBase), bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 4, "Risk Gate", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 4, riskText, text_color=dailyGuardOk and volGate ? bullBase : bearBase, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 5, "Setup", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 5, setupText, text_color=longTrigger or rawLongTrigger ? bullBase : shortTrigger or rawShortTrigger ? bearBase : textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 6, "Volatility", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 6, str.tostring(volScore, "#.0") + " / ATR " + str.tostring(atrPct, "#.0") + "%", text_color=color.from_gradient(volScore, 0, 100, accentBase, bearBase), bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 7, "VWAP Sigma", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 7, (vwapDistance >= 0 ? "+" : "") + str.tostring(vwapDistance, "#.00"), text_color=color.from_gradient(f_clamp(vwapDistance, -2, 2), -2, 2, bearBase, bullBase), bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 8, "Liquidity", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 8, liquidityText, text_color=bullSweepReclaim or dailyBullSweep ? bullBase : bearSweepReclaim or dailyBearSweep ? bearBase : textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 9, "HTF Bias", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 9, mtfText, text_color=htfBull ? bullBase : htfBear ? bearBase : accentBase, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 10, "PD State", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 10, zoneText, text_color=premDiscountLong ? bullBase : premDiscountShort ? bearBase : accentBase, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 11, "Session", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 11, sessionText, text_color=sessionOk ? bullBase : bearBase, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 12, "Day Guard", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 12, str.tostring(dayDrawdownPct, "#.00") + "%", text_color=dailyGuardOk ? bullBase : bearBase, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 13, "Hold Bars", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 13, str.tostring(barsInTrade) + " / " + str.tostring(maxHoldBars), text_color=barsInTrade > maxHoldBars * 0.75 ? accentBase : color.white, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 14, "Stops", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 14, "SL " + f_num_txt(activeStop) + " / TP " + f_num_txt(activeTarget), text_color=color.white, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+    table.cell(dash, 0, 15, "Key Levels", text_color=textMuted, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_left)
+    table.cell(dash, 1, 15, "PDH " + f_num_txt(pdh) + " / PDL " + f_num_txt(pdl), text_color=color.white, bgcolor=color.new(panelBg, 0), text_size=dashSize, text_halign=text.align_right)
+
+// -----------------------------------------------------------------------------
+// Data-window exports and alerts
+// -----------------------------------------------------------------------------
+plot(scoreLong, "JIS Long Score", color=color.new(color.white, 100), display=display.data_window)
+plot(scoreShort, "JIS Short Score", color=color.new(color.white, 100), display=display.data_window)
+plot(volScore, "JIS Volatility Score", color=color.new(color.white, 100), display=display.data_window)
+plot(vwapDistance, "JIS VWAP Sigma", color=color.new(color.white, 100), display=display.data_window)
+plot(dayDrawdownPct, "JIS Day Drawdown Percent", color=color.new(color.white, 100), display=display.data_window)
+
+alertcondition(longTrigger, title="JIS Long Setup", message="Helios Institutional Synthesis Strategy: long setup on {{ticker}} ({{interval}})")
+alertcondition(shortTrigger, title="JIS Short Setup", message="Helios Institutional Synthesis Strategy: short setup on {{ticker}} ({{interval}})")
+alertcondition(barstate.isconfirmed and bullRegime and not bullRegime[1], title="JIS Bull Regime", message="Helios Institutional Synthesis Strategy: bullish regime on {{ticker}}")
+alertcondition(barstate.isconfirmed and bearRegime and not bearRegime[1], title="JIS Bear Regime", message="Helios Institutional Synthesis Strategy: bearish regime on {{ticker}}")
+alertcondition(barstate.isconfirmed and not dailyGuardOk, title="JIS Daily Guard", message="Helios Institutional Synthesis Strategy: daily risk guard active on {{ticker}}")

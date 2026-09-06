@@ -1,0 +1,309 @@
+//@version=6
+strategy(
+  title                   = "SMC Asian Session v3.1 — Multi-Instruments + Anti-Range",
+  overlay                 = true,
+  max_boxes_count         = 500,
+  max_lines_count         = 500,
+  max_bars_back           = 500,
+  pyramiding              = 1,
+  initial_capital         = 50000,
+  default_qty_type        = strategy.fixed,
+  default_qty_value       = 1,
+  commission_type         = strategy.commission.cash_per_contract,
+  commission_value        = 0.85,
+  slippage                = 1,
+  process_orders_on_close = true)
+// v3.1 — CHANGEMENT vs v3 :
+//   Filtre ANTI-RANGE : si trop de bougies récentes (hors session asiatique)
+//   chevauchent l'Asian High ou l'Asian Low, le niveau est considéré en
+//   consolidation → breakout non armé, retest non tradé, sweep bloqué sur ce
+//   niveau. Objectif : éliminer les faux breakout+retest générés par le chop.
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 1 — INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Unités ---
+i_unit   = input.string("ATR", "Unité des distances", options = ["ATR", "Points"], group = "Unités",
+  tooltip = "ATR : les valeurs ci-dessous sont des multiples d'ATR (portable entre instruments).\nPoints : valeurs en points bruts du symbole.")
+i_atrLen = input.int(14, "Longueur ATR", group = "Unités", minval = 1)
+
+// --- Session asiatique ---
+i_asianTime = input.session("0200-0800", "Heure session asiatique",      group = "Session Asiatique",
+  tooltip = "Exprimée en heure de Paris. 02:00–08:00 Paris ≈ 09:00–15:00 Tokyo (heure d'été). Le Japon n'a pas d'heure d'été : en hiver, la vraie session Tokyo se décale à 01:00–07:00 Paris.")
+i_asianTZ   = input.string("Europe/Paris", "Timezone session asiatique", group = "Session Asiatique")
+
+// --- Fenêtre de trading (London killzone) ---
+i_windowTime = input.session("0900-1200", "Fenêtre de trading",            group = "Fenêtre de Trading")
+i_windowTZ   = input.string("Europe/Paris", "Timezone fenêtre de trading", group = "Fenêtre de Trading")
+
+// --- Filtre Anti-Range ---
+i_useChop = input.bool(true, "Bloquer si le niveau est en consolidation", group = "Filtre Anti-Range",
+  tooltip = "Un niveau (Asian High ou Low) est 'en range' si trop de bougies récentes le chevauchent (high au-dessus ET low en-dessous). Aucun trade n'est pris sur un niveau en range.")
+i_chopLen = input.int(12, "Fenêtre d'analyse (bougies)",          group = "Filtre Anti-Range", minval = 3)
+i_chopMax = input.int(3,  "Bougies max chevauchant le niveau",    group = "Filtre Anti-Range", minval = 1,
+  tooltip = "Au-delà de ce nombre de bougies posées sur le niveau dans la fenêtre d'analyse, le niveau est déclaré en consolidation. 3 = tolérant (laisse passer un retest normal de 1-2 bougies).")
+
+// --- Scénario 1 : Breakout + Retest ---
+i_breakoutMin    = input.float(0.75, "Breakout min dépassement",  group = "Breakout + Retest", minval = 0.01, step = 0.05)
+i_breakoutMax    = input.float(4.0,  "Breakout max dépassement",  group = "Breakout + Retest", minval = 0.01, step = 0.05)
+i_retestMin      = input.float(0.3,  "Retest : approche max",     group = "Breakout + Retest", minval = 0.01, step = 0.05,
+  tooltip = "La bougie doit venir au moins à cette distance du niveau (filtre les bougies trop loin).")
+i_retestMax      = input.float(0.8,  "Retest : traversée max",    group = "Breakout + Retest", minval = 0.01, step = 0.05,
+  tooltip = "La bougie ne doit pas traverser le niveau de plus de cette distance (filtre les cassures).")
+i_useRetestHL    = input.bool(true,  "Retest sur High/Low asiatique (niveau cassé)", group = "Breakout + Retest")
+i_useRetestOpen  = input.bool(false, "Retest sur Open asiatique",  group = "Breakout + Retest")
+i_useRetestClose = input.bool(false, "Retest sur Close asiatique", group = "Breakout + Retest")
+i_useRetestAvg   = input.bool(false, "Retest sur Moyenne asiatique", group = "Breakout + Retest")
+i_slRetestPts    = input.float(0.8,  "SL distance depuis entrée", group = "Breakout + Retest", minval = 0.01, step = 0.05)
+
+// --- Scénario 2 : Sweep + Reversal ---
+i_sweepMin   = input.float(0.25, "Sweep min dépassement",      group = "Sweep + Reversal", minval = 0.01, step = 0.05)
+i_sweepMax   = input.float(1.25, "Sweep max dépassement",      group = "Sweep + Reversal", minval = 0.01, step = 0.05)
+i_slSweepBuf = input.float(0.8,  "SL buffer au-delà du sweep", group = "Sweep + Reversal", minval = 0.01, step = 0.05)
+
+// --- Risk Management ---
+i_rr = input.float(2.0, "Ratio RR", group = "Risk Management", minval = 0.5, step = 0.5)
+
+// --- Gestion de position ---
+i_intraday = input.bool(true, "Mode intraday (flat en fin de journée)", group = "Gestion de Position",
+  tooltip = "Activé : toute position est fermée dans la fenêtre de clôture forcée (+ filet de sécurité à l'ouverture asiatique suivante).\nDésactivé : la position court jusqu'au SL ou TP, même sur plusieurs jours.")
+i_flatTime = input.session("2245-2300", "Clôture forcée (flat)",     group = "Gestion de Position")
+i_flatTZ   = input.string("Europe/Paris", "Timezone clôture forcée", group = "Gestion de Position")
+
+// --- Affichage ---
+i_showDash = input.bool(true, "Afficher le dashboard", group = "Affichage")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 2 — SESSIONS, ATR ET DISTANCES
+// ══════════════════════════════════════════════════════════════════════════════
+
+inAsian  = not na(time(timeframe.period, i_asianTime,  i_asianTZ))
+inWindow = not na(time(timeframe.period, i_windowTime, i_windowTZ))
+inFlat   = not na(time(timeframe.period, i_flatTime,   i_flatTZ))
+
+asianJustStarted = inAsian and not inAsian[1]
+
+atrVal = ta.atr(i_atrLen)
+
+dist(_x) => i_unit == "ATR" ? _x * atrVal : _x
+
+d_boMin   = dist(i_breakoutMin)
+d_boMax   = dist(i_breakoutMax)
+d_rtMin   = dist(i_retestMin)
+d_rtMax   = dist(i_retestMax)
+d_slRt    = dist(i_slRetestPts)
+d_swMin   = dist(i_sweepMin)
+d_swMax   = dist(i_sweepMax)
+d_slSwBuf = dist(i_slSweepBuf)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 3 — CLÔTURES FORCÉES (MODE INTRADAY)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// RAPPEL : cancel_all() TOUJOURS AVANT close_all().
+
+forceClose = false
+if barstate.isconfirmed and i_intraday
+    if inFlat
+        strategy.cancel_all()
+        if strategy.position_size != 0
+            strategy.close_all("Flat EOD")
+            forceClose := true
+    if asianJustStarted and strategy.position_size != 0
+        strategy.cancel_all()
+        strategy.close_all("Flat sécurité")
+        forceClose := true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 4 — SUIVI DES NIVEAUX ASIATIQUES
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float asianHigh  = na
+var float asianLow   = na
+var float asianOpen  = na
+var float asianClose = na
+var float asianAvg   = na
+var float _sumClose  = 0.0
+var int   _nBars     = 0
+
+if barstate.isconfirmed
+    if asianJustStarted
+        asianHigh  := high
+        asianLow   := low
+        asianOpen  := open
+        asianClose := close
+        asianAvg   := close
+        _sumClose  := close
+        _nBars     := 1
+    else if inAsian
+        asianHigh  := math.max(asianHigh, high)
+        asianLow   := math.min(asianLow, low)
+        asianClose := close
+        _sumClose  += close
+        _nBars     += 1
+        asianAvg   := _sumClose / _nBars
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 4bis — FILTRE ANTI-RANGE
+// Une bougie "chevauche" un niveau si son high est au-dessus ET son low en-dessous.
+// On ne compte que les bougies HORS session asiatique (pendant la session, la
+// bougie qui fabrique le high/low chevaucherait le niveau par définition).
+// ══════════════════════════════════════════════════════════════════════════════
+
+straddleHigh = not inAsian and not na(asianHigh) and high >= asianHigh and low <= asianHigh ? 1.0 : 0.0
+straddleLow  = not inAsian and not na(asianLow)  and high >= asianLow  and low <= asianLow  ? 1.0 : 0.0
+
+nStrHigh = math.sum(straddleHigh, i_chopLen)
+nStrLow  = math.sum(straddleLow,  i_chopLen)
+
+chopHigh = i_useChop and nStrHigh > i_chopMax   // Asian High en consolidation → pas de trade dessus
+chopLow  = i_useChop and nStrLow  > i_chopMax   // Asian Low  en consolidation → pas de trade dessus
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 5 — FLAGS DE BREAKOUT
+// ══════════════════════════════════════════════════════════════════════════════
+
+var bool bullBreakout = false
+var bool bearBreakout = false
+var int  bullBoBar    = na
+var int  bearBoBar    = na
+
+if barstate.isconfirmed
+    if asianJustStarted
+        bullBreakout := false
+        bearBreakout := false
+        bullBoBar    := na
+        bearBoBar    := na
+
+    if inWindow and not inAsian and not na(asianHigh)
+        bullExt = close - asianHigh
+        bearExt = asianLow - close
+        // Anti-range : un breakout qui se produit pendant que le niveau est en
+        // consolidation n'est pas armé (c'est précisément le faux signal visé)
+        if bullExt >= d_boMin and bullExt <= d_boMax and not chopHigh
+            if not bullBreakout
+                bullBoBar := bar_index
+            bullBreakout := true
+        if bearExt >= d_boMin and bearExt <= d_boMax and not chopLow
+            if not bearBreakout
+                bearBoBar := bar_index
+            bearBreakout := true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6 — LOGIQUE D'ENTRÉE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float curSL = na
+var float curTP = na
+
+if strategy.position_size == 0 and strategy.opentrades == 0
+    curSL := na
+    curTP := na
+
+if barstate.isconfirmed and inWindow and not inAsian and not inFlat and strategy.position_size == 0
+
+    tookTrade = false
+
+    // ── SCÉNARIO 1 : Breakout + Retest ─────────────────────────────────────
+    // Anti-range vérifié aussi à l'entrée : le range a pu s'installer ENTRE
+    // l'armement du breakout et le retest.
+
+    if bullBreakout and not na(asianHigh) and bar_index > bullBoBar and not chopHigh
+        retestLong = (i_useRetestHL    and low <= asianHigh  + d_rtMin and low >= asianHigh  - d_rtMax)
+          or (i_useRetestOpen  and low <= asianOpen  + d_rtMin and low >= asianOpen  - d_rtMax)
+          or (i_useRetestClose and low <= asianClose + d_rtMin and low >= asianClose - d_rtMax)
+          or (i_useRetestAvg   and low <= asianAvg   + d_rtMin and low >= asianAvg   - d_rtMax)
+
+        if retestLong
+            curSL := close - d_slRt
+            curTP := close + (d_slRt * i_rr)
+            strategy.entry("BO_Long", strategy.long)
+            bullBreakout := false
+            tookTrade    := true
+
+    if not tookTrade and bearBreakout and not na(asianLow) and bar_index > bearBoBar and not chopLow
+        retestShort = (i_useRetestHL    and high >= asianLow   - d_rtMin and high <= asianLow   + d_rtMax)
+          or (i_useRetestOpen  and high >= asianOpen  - d_rtMin and high <= asianOpen  + d_rtMax)
+          or (i_useRetestClose and high >= asianClose - d_rtMin and high <= asianClose + d_rtMax)
+          or (i_useRetestAvg   and high >= asianAvg   - d_rtMin and high <= asianAvg   + d_rtMax)
+
+        if retestShort
+            curSL := close + d_slRt
+            curTP := close - (d_slRt * i_rr)
+            strategy.entry("BO_Short", strategy.short)
+            bearBreakout := false
+            tookTrade    := true
+
+    // ── SCÉNARIO 2 : Sweep + Reversal ──────────────────────────────────────
+    // Un "sweep" dans un range n'est pas un sweep, c'est du bruit → filtré aussi.
+
+    if not tookTrade and not na(asianLow) and not chopLow
+        sweptLow = low < asianLow
+           and asianLow - low >= d_swMin
+           and asianLow - low <= d_swMax
+           and close > asianLow
+
+        if sweptLow
+            curSL := low - d_slSwBuf
+            curTP := close + ((close - curSL) * i_rr)
+            strategy.entry("SW_Long", strategy.long)
+            tookTrade := true
+
+    if not tookTrade and not na(asianHigh) and not chopHigh
+        sweptHigh = high > asianHigh
+           and high - asianHigh >= d_swMin
+           and high - asianHigh <= d_swMax
+           and close < asianHigh
+
+        if sweptHigh
+            curSL := high + d_slSwBuf
+            curTP := close - ((curSL - close) * i_rr)
+            strategy.entry("SW_Short", strategy.short)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6bis — GESTION DES SORTIES
+// Brackets ré-affirmés à CHAQUE bougie tant que curSL est défini.
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.isconfirmed and not na(curSL) and not forceClose
+    strategy.exit("X", stop = curSL, limit = curTP)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 7 — VISUELS
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(asianHigh,  "Asian High",  color = color.new(#2962FF, 0), linewidth = 1)
+plot(asianLow,   "Asian Low",   color = color.new(#2962FF, 0), linewidth = 1)
+plot(asianOpen,  "Asian Open",  color = color.new(#FF9800, 0), linewidth = 1, style = plot.style_circles)
+plot(asianClose, "Asian Close", color = color.new(#FF9800, 0), linewidth = 1, style = plot.style_cross)
+plot(asianAvg,   "Asian Avg",   color = color.new(#089981, 0), linewidth = 1, style = plot.style_line)
+
+plot(strategy.position_size != 0 ? curSL : na, "SL actif", color = color.new(color.red,  30), linewidth = 1, style = plot.style_linebr)
+plot(strategy.position_size != 0 ? curTP : na, "TP actif", color = color.new(color.lime, 30), linewidth = 1, style = plot.style_linebr)
+
+bgcolor(inWindow and not inAsian ? color.new(color.teal, 92) : na, title = "Fenêtre de trading")
+// Fond orangé quand un niveau est en consolidation (trades bloqués dessus)
+bgcolor(inWindow and not inAsian and (chopHigh or chopLow) ? color.new(color.orange, 88) : na, title = "Anti-range actif")
+
+// ── Dashboard ──
+var table dash = table.new(position.top_right, 2, 11, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+
+f_row(_r, _label, _val, _col) =>
+    table.cell(dash, 0, _r, _label, text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, _r, _val,   text_color = _col,        text_size = size.small, text_halign = text.align_right)
+
+if i_showDash and barstate.islast
+    posTxt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "—"
+    posCol = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
+    f_row(0,  "ATR(" + str.tostring(i_atrLen) + ")", str.tostring(atrVal, format.mintick), color.yellow)
+    f_row(1,  "Asian High",   na(asianHigh) ? "—" : str.tostring(asianHigh, format.mintick), color.new(#2962FF, 0))
+    f_row(2,  "Asian Low",    na(asianLow)  ? "—" : str.tostring(asianLow,  format.mintick), color.new(#2962FF, 0))
+    f_row(3,  "Asian Open",   na(asianOpen) ? "—" : str.tostring(asianOpen, format.mintick), color.new(#FF9800, 0))
+    f_row(4,  "Asian Avg",    na(asianAvg)  ? "—" : str.tostring(asianAvg,  format.mintick), color.new(#089981, 0))
+    f_row(5,  "BO ↑ armé",    bullBreakout ? "OUI" : "non", bullBreakout ? color.lime : color.gray)
+    f_row(6,  "BO ↓ armé",    bearBreakout ? "OUI" : "non", bearBreakout ? color.red  : color.gray)
+    f_row(7,  "Range sur High", chopHigh ? "OUI (" + str.tostring(nStrHigh, "#") + " bougies)" : "non", chopHigh ? color.orange : color.gray)
+    f_row(8,  "Range sur Low",  chopLow  ? "OUI (" + str.tostring(nStrLow,  "#") + " bougies)" : "non", chopLow  ? color.orange : color.gray)
+    f_row(9,  "Position",     posTxt, posCol)
+    f_row(10, "Anti-range",   i_useChop ? "actif" : "off", i_useChop ? color.lime : color.gray)

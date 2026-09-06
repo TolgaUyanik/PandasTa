@@ -1,0 +1,2155 @@
+//@version=6
+strategy("Multi-Confluence Swing Strategy v4 (Ladder-TF+BlueLine+StateMachine)", shorttitle="MCS v4",
+     overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     initial_capital=10000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0.05, slippage=2,
+     pyramiding=0, calc_on_every_tick=false, process_orders_on_close=true, max_bars_back=500,
+     backtest_fill_limits_assumption=2)
+// Cost Scenario (Realistic Backtesting): commission_value and slippage above are "Normal" (0.05%,
+// 2 ticks). Like backtest_fill_limits_assumption, Pine v6 requires these strategy() declaration
+// parameters to be compile-time constants — they cannot be wired to input.*() calls, so a runtime
+// dropdown isn't possible. To compare cost scenarios, manually edit these two literals and re-run:
+//   Optimistic:   commission_value=0.02, slippage=1
+//   Normal:       commission_value=0.05, slippage=2  (current default)
+//   Conservative: commission_value=0.10, slippage=5
+// A strategy that only stays profitable under the Optimistic scenario should not be considered
+// robust — always check the Conservative scenario before trusting the backtest.
+
+// ============================= VERSION INFORMATION (Step 22.5) =============================
+STRATEGY_VERSION = "4.2.0"
+LAST_MAJOR_UPDATE = "2026-07-24: Signal-quality overhaul (strictness profiles, trade quality score, exit/stop/target model presets, weak-setup diagnostics, centralized entry/arrow sync)"
+PINE_VERSION_LABEL = "v6"
+ACTIVE_COMMISSION_PCT = 0.05
+ACTIVE_SLIPPAGE_TICKS = 2
+
+// ============================= ORDER TYPE / EXECUTION ASSUMPTIONS (documentation) =============
+// Entries: strategy.entry(...) with no limit/stop price => market order, filled at the signal
+// bar's close (process_orders_on_close=true).
+// Exits: strategy.exit(...) submits a stop order and, before the partial-profit R multiple is
+// reached, a limit order simultaneously — an OCO bracket.
+
+// ============================= BACKTEST WINDOW =============================
+g_win = "Backtest Window"
+useDateFilter = input.bool(true, "Limit backtest window", group=g_win)
+startTime = input.time(timestamp("2023-07-23T00:00:00"), "Start Date", group=g_win)
+inWindow = not useDateFilter or time >= startTime
+
+g_sample = "Sample Period (In-Sample / Out-of-Sample / Forward Test)"
+oosStartInput = input.time(timestamp("2025-07-23T00:00:00"), "Out-of-Sample Start Date", group=g_sample)
+useWalkForwardSplit = input.bool(false, "Enable Walk-Forward Validation Window", group=g_sample)
+wfValidStartInput = input.time(timestamp("2025-10-23T00:00:00"), "Walk-Forward Validation Start Date", group=g_sample)
+
+samplePeriod = time < oosStartInput ? "In-Sample" :
+     barstate.isrealtime ? "Forward Test" :
+     (useWalkForwardSplit and time >= wfValidStartInput) ? "Walk-Forward Validation" :
+     "Out-of-Sample"
+strategyModeText = not barstate.isrealtime ? "Backtest Mode" : "Forward Test Mode (paper — no live execution wired)"
+executionModeLabel = barstate.isrealtime ? "Forward Test / Paper Trading (Live Execution Disabled)" : ("Historical Backtest (" + samplePeriod + ")")
+
+f_alertMsg(kind, direction, setupNm, regime, score, sl, tp, rr, riskPct, entryPx, confirmed) =>
+    signalId = str.tostring(bar_index) + "-" + syminfo.ticker + "-" + timeframe.period
+    "MCS v4 | " + kind + " | " + syminfo.ticker + " (" + syminfo.prefix + ") | TF:" + timeframe.period +
+     " | Dir:" + direction + " | Px:" + str.tostring(close) + " | EntryPx:" + str.tostring(entryPx) +
+     " | Setup:" + setupNm + " | Regime:" + regime + " | Score:" + str.tostring(score, "#.#") +
+     " | SL:" + str.tostring(sl) + " | TP:" + str.tostring(tp) + " | RR:" + str.tostring(rr, "#.##") +
+     " | Risk%:" + str.tostring(riskPct, "#.##") + " | Time:" + str.tostring(time) +
+     " | ID:" + signalId + " | Confirmed:" + (confirmed ? "Yes" : "No") + " | Mode:" + strategyModeText
+
+// ============================= TIMEFRAME LADDER =============================
+g_ladder = "Timeframe Ladder (auto — higher-TF anchors follow the chart's own timeframe)"
+chartTFSeconds = timeframe.in_seconds()
+isLadderTF = chartTFSeconds == 900 or chartTFSeconds == 1800 or chartTFSeconds == 2700 or chartTFSeconds == 3600
+tfIndex = chartTFSeconds == 900 ? 0 : chartTFSeconds == 1800 ? 1 : chartTFSeconds == 2700 ? 2 : chartTFSeconds == 3600 ? 3 : -1
+timeframeClassification = tfIndex == 0 ? "Secondary Test Timeframe" : tfIndex >= 1 ? "Primary Timeframe" : "Unsupported / Manual Mode"
+enable15m = input.bool(true, "Enable trading on 15m chart", group=g_ladder)
+tf15mBlocked = chartTFSeconds == 900 and not enable15m
+
+f_ladderTF(offsetFromExec) =>
+    execIdx = chartTFSeconds == 900 ? 0 : chartTFSeconds == 1800 ? 1 : chartTFSeconds == 2700 ? 2 : 3
+    idx = execIdx + offsetFromExec
+    idx == 0 ? "15" : idx == 1 ? "30" : idx == 2 ? "45" : idx == 3 ? "60" : idx == 4 ? "240" : idx == 5 ? "D" : "W"
+
+trendTF   = isLadderTF ? f_ladderTF(1) : "240"
+confirmTF = isLadderTF ? f_ladderTF(2) : "60"
+macroTF   = isLadderTF ? f_ladderTF(3) : "D"
+
+// ============================= TREND STRUCTURE =============================
+g_trend = "Trend Structure (Ladder: Trend / Confirm / Macro layers)"
+trendFastLen   = input.int(21, "Trend-layer EMA Fast", group=g_trend)
+trendSlowLen   = input.int(55, "Trend-layer EMA Slow", group=g_trend)
+slopeLookback  = input.int(3, "EMA Slope Lookback (bars)", group=g_trend)
+adxLen  = input.int(14, "ADX Length (Trend layer)", group=g_trend)
+adxMin  = input.float(18, "Minimum ADX (trend strength, Trend layer)", group=g_trend)
+confirmFastLen = input.int(21, "Confirm-layer EMA Fast", group=g_trend)
+confirmSlowLen = input.int(55, "Confirm-layer EMA Slow", group=g_trend)
+macroFastLen   = input.int(20, "Macro-layer EMA Fast", group=g_trend)
+macroSlowLen   = input.int(50, "Macro-layer EMA Slow", group=g_trend)
+useAutoMicroTF = input.bool(true, "Auto-pick micro timeframe below chart TF (recommended)", group=g_trend)
+microTFManual  = input.timeframe("45", "Micro Timeframe (used only if auto is off)", group=g_trend)
+microFastLen   = input.int(9,  "Micro EMA Fast", group=g_trend)
+microSlowLen   = input.int(21, "Micro EMA Slow", group=g_trend)
+autoMicroTF = timeframe.in_seconds() <= timeframe.in_seconds("15") ? "5" : timeframe.in_seconds() <= timeframe.in_seconds("45") ? "15" : "45"
+microTF = useAutoMicroTF ? autoMicroTF : microTFManual
+enableCountertrend = input.bool(false, "Enable countertrend trades (tested worse — off by default)", group=g_trend)
+
+// ============================= ORANGE / BLUE REFERENCE LINES =============================
+g_line = "Orange / Blue Reference Lines (fixed 4H)"
+lineTF = "240"
+orangeLen = input.int(55, "Orange Line EMA Length (4H)", group=g_line)
+blueLen   = input.int(21, "Blue Line EMA Length (4H)", group=g_line)
+lineBreakHoldBars = input.int(3, "Bars price must stay on one side before a cross counts as a 'reclaim/breakdown'", group=g_line)
+
+// ============================= MOMENTUM TRIGGER =============================
+g_mom = "Momentum / Entry Trigger (Chart TF)"
+rsiLen            = input.int(14, "RSI Length", group=g_mom)
+rsiLongPullback   = input.int(45, "Long: RSI pullback trigger level", group=g_mom)
+rsiShortPullback  = input.int(55, "Short: RSI pullback trigger level", group=g_mom)
+rsiLongMaxChase   = input.int(75, "Skip long if RSI above (chasing)", group=g_mom)
+rsiShortMinChase  = input.int(25, "Skip short if RSI below (chasing)", group=g_mom)
+pullbackLookback  = input.int(6, "Pullback lookback (bars)", group=g_mom)
+useAutoConfirmBars = input.bool(true, "Auto-adapt break/reject confirmation bars to timeframe", group=g_mom)
+manualConfirmBars  = input.int(2, "Confirmation bars (used only if auto is off)", minval=1, maxval=3, group=g_mom)
+autoConfirmBars = timeframe.in_seconds() <= timeframe.in_seconds("45") ? 1 : 2
+confirmBars = useAutoConfirmBars ? autoConfirmBars : manualConfirmBars
+
+useAutoMinConfirm = input.bool(true, "Auto-adapt min secondary confirmations to timeframe", group=g_mom)
+manualMinConfirmations = input.int(4, "Min secondary confirmations, legacy vote (used only if auto is off, of 9)", minval=1, maxval=9, group=g_mom)
+autoMinConfirmations = timeframe.in_seconds() <= timeframe.in_seconds("15") ? 4 : 5
+minConfirmations = useAutoMinConfirm ? autoMinConfirmations : manualMinConfirmations
+
+entryEmaFastLen = input.int(9,  "Entry-TF EMA Fast (alignment check)", group=g_mom)
+entryEmaSlowLen = input.int(21, "Entry-TF EMA Slow (alignment check)", group=g_mom)
+
+// ============================= STOCHASTIC / STOCH RSI =============================
+g_stoch = "Stochastic / Stochastic RSI (momentum-zone confirmation)"
+stochLen    = input.int(14, "Stochastic %K Length", group=g_stoch)
+stochSmoothK = input.int(3, "Stochastic %K Smoothing", group=g_stoch)
+stochSmoothD = input.int(3, "Stochastic %D Smoothing", group=g_stoch)
+stochRsiLen  = input.int(14, "StochRSI Length", group=g_stoch)
+stochRsiSmoothK = input.int(3, "StochRSI %K Smoothing", group=g_stoch)
+stochRsiSmoothD = input.int(3, "StochRSI %D Smoothing", group=g_stoch)
+stochBullZoneLow  = input.int(35, "Bull momentum zone low", group=g_stoch)
+stochBullZoneHigh = input.int(80, "Bull momentum zone high (skip if already above)", group=g_stoch)
+stochBearZoneHigh = input.int(65, "Bear momentum zone high", group=g_stoch)
+stochBearZoneLow  = input.int(20, "Bear momentum zone low (skip if already below)", group=g_stoch)
+
+// ============================= CANDLE / VOLUME QUALITY =============================
+g_candle = "Candle Anatomy / Exhaustion Veto / Support-Resistance"
+exhaustionWickMult = input.float(1.2, "Exhaustion: wick must exceed body x", group=g_candle)
+exhaustionMaxClosePos = input.float(0.55, "Buying-exhaustion: veto long trigger if close position below (0-1)", group=g_candle)
+exhaustionMinClosePos = input.float(0.45, "Selling-exhaustion: veto short trigger if close position above (0-1)", group=g_candle)
+srLookback = input.int(20, "Support/Resistance lookback (bars)", group=g_candle)
+srProximityPct = input.float(0.3, "Near S/R if within % of swing level", group=g_candle)
+
+// ============================= VOLATILITY / VOLUME / FLOW =============================
+g_vol = "Volatility / Volume / Order-Flow Proxy"
+bbLen   = input.int(20, "BB Length", group=g_vol)
+bbMult  = input.float(2.0, "BB StdDev Mult", group=g_vol)
+bbExpandLookback = input.int(10, "BB Width Expansion Lookback", group=g_vol)
+bbLongLowerPctB  = input.float(-0.1, "Long: min %B (BB position)", step=0.05, group=g_vol)
+bbLongUpperPctB  = input.float(0.85, "Long: max %B (BB position, avoid chasing upper band)", step=0.05, group=g_vol)
+bbShortUpperPctB = input.float(1.1,  "Short: max %B (BB position)", step=0.05, group=g_vol)
+bbShortLowerPctB = input.float(0.15, "Short: min %B (BB position, avoid chasing lower band)", step=0.05, group=g_vol)
+volLen  = input.int(20, "Volume SMA Length", group=g_vol)
+volMult = input.float(1.3, "Min Volume vs Avg (x)", step=0.1, group=g_vol)
+obvEmaLen = input.int(21, "OBV EMA Length (flow)", group=g_vol)
+
+// ============================= RISK MANAGEMENT =============================
+g_risk = "Risk Management"
+atrLen        = input.int(14, "ATR Length", group=g_risk)
+atrSLMult     = input.float(2.2, "Stop Loss (ATR x, high-confidence trades)", group=g_risk)
+countertrendSLMult = input.float(1.5, "Stop Loss (ATR x, countertrend trades — tighter)", group=g_risk)
+minRR         = input.float(1.5, "Minimum Reward:Risk (fixed TP leg)", group=g_risk)
+trailAtrMult  = input.float(2.0, "Trailing Stop (ATR x, activates at partial-trigger R)", group=g_risk)
+riskPctPerTrade = input.float(1.0, "Risk per Trade (% equity, high-confidence)", group=g_risk)
+countertrendRiskPct = input.float(0.5, "Risk per Trade (% equity, countertrend — reduced)", group=g_risk)
+maxLeverage   = input.float(10.0, "Max Leverage (position notional cap)", group=g_risk)
+cooldownBars     = input.int(3, "Cooldown after exit (bars)", group=g_risk)
+flipCooldownBars = input.int(3, "Min bars between opposite signals", group=g_risk)
+partialTriggerR  = input.float(1.0, "Partial Exit Trigger (R multiple)", minval=0.1, step=0.1, group=g_risk)
+partialClosePct  = input.float(50.0, "Partial Exit Size (% of position)", minval=1.0, maxval=99.0, step=1.0, group=g_risk)
+maxPositionQty   = input.float(1000000, "Maximum Position Size (base currency units, hard cap)", group=g_risk)
+
+// ============================= SEPARATE LONG / SHORT PARAMETERS =============================
+g_direction = "Separate Long / Short Parameters"
+enableLongTrades  = input.bool(true, "Enable Long Trades", group=g_direction)
+enableShortTrades = input.bool(true, "Enable Short Trades", group=g_direction)
+scoreValidMinLong          = input.int(70, "Long: Valid Setup score >=", group=g_direction)
+scoreValidMinShort         = input.int(70, "Short: Valid Setup score >=", group=g_direction)
+scoreHighConvictionMinLong  = input.int(80, "Long: High-Conviction score >= (countertrend gate)", group=g_direction)
+scoreHighConvictionMinShort = input.int(80, "Short: High-Conviction score >= (countertrend gate)", group=g_direction)
+atrSLMultLong  = input.float(2.2, "Long: Stop Loss (ATR x, high-confidence)", group=g_direction)
+atrSLMultShort = input.float(2.2, "Short: Stop Loss (ATR x, high-confidence)", group=g_direction)
+minRRLong  = input.float(1.5, "Long: Minimum Reward:Risk", group=g_direction)
+minRRShort = input.float(1.5, "Short: Minimum Reward:Risk", group=g_direction)
+riskPctLong  = input.float(1.0, "Long: Risk per Trade (% equity, high-confidence)", group=g_direction)
+riskPctShort = input.float(1.0, "Short: Risk per Trade (% equity, high-confidence)", group=g_direction)
+autoDisableWeakDirection = input.bool(false, "Auto-disable a direction once its net P&L turns negative after N trades", group=g_direction)
+autoDisableMinTrades     = input.int(15, "Auto-disable: minimum trades before evaluating", group=g_direction)
+autoDisableMinProfitFactor = input.float(1.0, "Auto-disable: minimum acceptable profit factor for that direction", group=g_direction)
+autoDisableMaxConsecLosses = input.int(5, "Auto-disable: consecutive losses in that direction before disabling", group=g_direction)
+
+// ============================= TIMEFRAME PROFILES (Step 15.5 / 18.1 / 20) =============================
+g_tfprofile = "Timeframe Profiles (15m / 30m / 45m / 1H)"
+profileMode = input.string("Automatic Timeframe Profile", "Profile Mode", options=["Automatic Timeframe Profile", "Manual Shared Parameters", "Manual Timeframe-Specific Parameters"], group=g_tfprofile)
+
+p15_scoreValidMinLong  = input.int(45, "15m: Long Valid Score >=", group=g_tfprofile)
+p15_scoreValidMinShort = input.int(45, "15m: Short Valid Score >=", group=g_tfprofile)
+p15_atrSLMultLong  = input.float(2.0, "15m: Long ATR Stop Multiplier", group=g_tfprofile)
+p15_atrSLMultShort = input.float(2.0, "15m: Short ATR Stop Multiplier", group=g_tfprofile)
+p15_minRRLong  = input.float(1.4, "15m: Long Minimum RR", group=g_tfprofile)
+p15_minRRShort = input.float(1.4, "15m: Short Minimum RR", group=g_tfprofile)
+p15_cooldownBars = input.int(4, "15m: Cooldown Bars", group=g_tfprofile)
+
+p30_scoreValidMinLong  = input.int(70, "30m: Long Valid Score >= (Primary Timeframe)", group=g_tfprofile)
+p30_scoreValidMinShort = input.int(70, "30m: Short Valid Score >= (Primary Timeframe)", group=g_tfprofile)
+p30_atrSLMultLong  = input.float(2.2, "30m: Long ATR Stop Multiplier (Primary Timeframe)", group=g_tfprofile)
+p30_atrSLMultShort = input.float(2.2, "30m: Short ATR Stop Multiplier (Primary Timeframe)", group=g_tfprofile)
+p30_minRRLong  = input.float(1.5, "30m: Long Minimum RR (Primary Timeframe)", group=g_tfprofile)
+p30_minRRShort = input.float(1.5, "30m: Short Minimum RR (Primary Timeframe)", group=g_tfprofile)
+p30_cooldownBars = input.int(3, "30m: Cooldown Bars (Primary Timeframe)", group=g_tfprofile)
+
+p45_scoreValidMinLong  = input.int(68, "45m: Long Valid Score >= (Primary Timeframe)", group=g_tfprofile)
+p45_scoreValidMinShort = input.int(68, "45m: Short Valid Score >= (Primary Timeframe)", group=g_tfprofile)
+p45_atrSLMultLong  = input.float(2.3, "45m: Long ATR Stop Multiplier (Primary Timeframe)", group=g_tfprofile)
+p45_atrSLMultShort = input.float(2.3, "45m: Short ATR Stop Multiplier (Primary Timeframe)", group=g_tfprofile)
+p45_minRRLong  = input.float(1.6, "45m: Long Minimum RR (Primary Timeframe)", group=g_tfprofile)
+p45_minRRShort = input.float(1.6, "45m: Short Minimum RR (Primary Timeframe)", group=g_tfprofile)
+p45_cooldownBars = input.int(3, "45m: Cooldown Bars (Primary Timeframe)", group=g_tfprofile)
+
+p60_scoreValidMinLong  = input.int(65, "1H: Long Valid Score >= (Primary Timeframe)", group=g_tfprofile)
+p60_scoreValidMinShort = input.int(65, "1H: Short Valid Score >= (Primary Timeframe)", group=g_tfprofile)
+p60_atrSLMultLong  = input.float(2.5, "1H: Long ATR Stop Multiplier (Primary Timeframe)", group=g_tfprofile)
+p60_atrSLMultShort = input.float(2.5, "1H: Short ATR Stop Multiplier (Primary Timeframe)", group=g_tfprofile)
+p60_minRRLong  = input.float(1.7, "1H: Long Minimum RR (Primary Timeframe)", group=g_tfprofile)
+p60_minRRShort = input.float(1.7, "1H: Short Minimum RR (Primary Timeframe)", group=g_tfprofile)
+p60_cooldownBars = input.int(2, "1H: Cooldown Bars (Primary Timeframe)", group=g_tfprofile)
+
+autoScoreValidMinLong  = tfIndex == 0 ? 45 : tfIndex == 1 ? 70 : tfIndex == 2 ? 68 : tfIndex == 3 ? 65 : scoreValidMinLong
+autoScoreValidMinShort = tfIndex == 0 ? 45 : tfIndex == 1 ? 70 : tfIndex == 2 ? 68 : tfIndex == 3 ? 65 : scoreValidMinShort
+autoAtrSLMultLong  = tfIndex == 0 ? 2.0 : tfIndex == 1 ? 2.2 : tfIndex == 2 ? 1.5 : tfIndex == 3 ? 2.5 : atrSLMultLong
+autoAtrSLMultShort = tfIndex == 0 ? 2.0 : tfIndex == 1 ? 2.2 : tfIndex == 2 ? 1.5 : tfIndex == 3 ? 2.5 : atrSLMultShort
+autoMinRRLong  = tfIndex == 0 ? 1.4 : tfIndex == 1 ? 1.5 : tfIndex == 2 ? 1.6 : tfIndex == 3 ? 1.7 : minRRLong
+autoMinRRShort = tfIndex == 0 ? 1.4 : tfIndex == 1 ? 1.5 : tfIndex == 2 ? 1.6 : tfIndex == 3 ? 1.7 : minRRShort
+autoCooldownBars = tfIndex == 0 ? 4 : tfIndex == 1 ? 3 : tfIndex == 2 ? 3 : tfIndex == 3 ? 2 : cooldownBars
+
+manualTFScoreValidMinLong  = tfIndex == 0 ? p15_scoreValidMinLong  : tfIndex == 1 ? p30_scoreValidMinLong  : tfIndex == 2 ? p45_scoreValidMinLong  : tfIndex == 3 ? p60_scoreValidMinLong  : scoreValidMinLong
+manualTFScoreValidMinShort = tfIndex == 0 ? p15_scoreValidMinShort : tfIndex == 1 ? p30_scoreValidMinShort : tfIndex == 2 ? p45_scoreValidMinShort : tfIndex == 3 ? p60_scoreValidMinShort : scoreValidMinShort
+manualTFAtrSLMultLong  = tfIndex == 0 ? p15_atrSLMultLong  : tfIndex == 1 ? p30_atrSLMultLong  : tfIndex == 2 ? p45_atrSLMultLong  : tfIndex == 3 ? p60_atrSLMultLong  : atrSLMultLong
+manualTFAtrSLMultShort = tfIndex == 0 ? p15_atrSLMultShort : tfIndex == 1 ? p30_atrSLMultShort : tfIndex == 2 ? p45_atrSLMultShort : tfIndex == 3 ? p60_atrSLMultShort : atrSLMultShort
+manualTFMinRRLong  = tfIndex == 0 ? p15_minRRLong  : tfIndex == 1 ? p30_minRRLong  : tfIndex == 2 ? p45_minRRLong  : tfIndex == 3 ? p60_minRRLong  : minRRLong
+manualTFMinRRShort = tfIndex == 0 ? p15_minRRShort : tfIndex == 1 ? p30_minRRShort : tfIndex == 2 ? p45_minRRShort : tfIndex == 3 ? p60_minRRShort : minRRShort
+manualTFCooldownBars = tfIndex == 0 ? p15_cooldownBars : tfIndex == 1 ? p30_cooldownBars : tfIndex == 2 ? p45_cooldownBars : tfIndex == 3 ? p60_cooldownBars : cooldownBars
+
+activeScoreValidMinLong  = profileMode == "Automatic Timeframe Profile" ? autoScoreValidMinLong  : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFScoreValidMinLong  : scoreValidMinLong
+activeScoreValidMinShort = profileMode == "Automatic Timeframe Profile" ? autoScoreValidMinShort : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFScoreValidMinShort : scoreValidMinShort
+activeAtrSLMultLong  = profileMode == "Automatic Timeframe Profile" ? autoAtrSLMultLong  : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFAtrSLMultLong  : atrSLMultLong
+activeAtrSLMultShort = profileMode == "Automatic Timeframe Profile" ? autoAtrSLMultShort : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFAtrSLMultShort : atrSLMultShort
+activeMinRRLong  = profileMode == "Automatic Timeframe Profile" ? autoMinRRLong  : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFMinRRLong  : minRRLong
+activeMinRRShort = profileMode == "Automatic Timeframe Profile" ? autoMinRRShort : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFMinRRShort : minRRShort
+activeCooldownBars = profileMode == "Automatic Timeframe Profile" ? autoCooldownBars : profileMode == "Manual Timeframe-Specific Parameters" ? manualTFCooldownBars : cooldownBars
+
+timeframeProfileWarning = tfIndex == -1
+activeProfileLabel = profileMode + (timeframeProfileWarning ? " (UNSUPPORTED TF — using Manual Shared fallback)" : (" [" + (tfIndex == 0 ? "15m" : tfIndex == 1 ? "30m" : tfIndex == 2 ? "45m" : "1H") + "]"))
+
+// ============================= RISK LIMITS & LOCKOUTS =============================
+g_risklim = "Risk Limits & Lockouts"
+maxDailyLossPct       = input.float(3.0, "Max Daily Loss (% equity) — blocks new entries + force-closes", group=g_risklim)
+maxTradesPerDay       = input.int(4, "Max Trades per Day", group=g_risklim)
+maxTradesPerDay := tfIndex == 0 ? 10 : maxTradesPerDay
+maxConsecutiveLosses  = input.int(3, "Max Consecutive Losses before lockout", group=g_risklim)
+lossLockoutCooldownBars = input.int(20, "Lockout duration after max consecutive losses (bars)", group=g_risklim)
+maxDrawdownPct        = input.float(10.0, "Max Strategy Drawdown (%) — blocks new entries + force-closes", group=g_risklim)
+enableWeeklyRiskLimit = input.bool(false, "Enable Weekly Risk Limit", group=g_risklim)
+maxWeeklyLossPct      = input.float(6.0, "Max Weekly Loss (% equity, only if enabled above)", group=g_risklim)
+
+// ============================= EXIT MODELS (enable/disable independently) =============================
+g_exit = "Exit Models (test independently — each is its own toggle)"
+enableBreakeven        = input.bool(true, "Enable Break-Even", group=g_exit)
+breakevenTriggerR       = input.float(0.5, "Break-Even trigger (R multiple)", minval=0.1, step=0.1, group=g_exit)
+exitOnRegimeChange      = input.bool(false, "Exit on confirmed market-regime change against the position", group=g_exit)
+exitOnSetupInvalidation = input.bool(false, "Exit when the original trend score for the position's direction drops to zero", group=g_exit)
+exitOnTimeLimit         = input.bool(false, "Time Exit: close after a max number of bars in the trade", group=g_exit)
+maxBarsInTrade          = input.int(96, "Time Exit: max bars in trade", group=g_exit)
+exitOnMomentumLoss      = input.bool(false, "Exit when RSI crosses back through 50 against the position", group=g_exit)
+exitOnOppositeSignal    = input.bool(false, "Exit early when an opposite-direction setup reaches candidate status", group=g_exit)
+exitOnVolCollapse       = input.bool(false, "Exit when BB width collapses into the Consolidation threshold", group=g_exit)
+enableEmergencyExit     = input.bool(true, "Enable Emergency Risk Exit (extreme volatility spike while in a position)", group=g_exit)
+
+// ============================= EXIT PROFILE PRESETS =============================
+g_exitprofile = "Exit Profile"
+exitProfile = input.string("Custom", "Exit Profile", options=["Conservative", "Balanced", "Trend Capture", "Short-Term Profit", "Custom"], tooltip="Conservative = let winners breathe, late break-even. Balanced = documented starting point. Trend Capture = wide trailing, long max duration. Short-Term Profit = fast break-even/partial/exit for shorter-duration consistency. Custom = raw inputs above unchanged", group=g_exitprofile)
+
+finalBreakevenTriggerR = exitProfile == "Conservative" ? 0.7 : exitProfile == "Balanced" ? 0.5 : exitProfile == "Trend Capture" ? 1.0 : exitProfile == "Short-Term Profit" ? 0.4 : breakevenTriggerR
+finalPartialTriggerR   = exitProfile == "Conservative" ? 1.5 : exitProfile == "Balanced" ? 1.0 : exitProfile == "Trend Capture" ? 2.0 : exitProfile == "Short-Term Profit" ? 0.6 : partialTriggerR
+finalTrailAtrMult      = exitProfile == "Conservative" ? 2.5 : exitProfile == "Balanced" ? 2.0 : exitProfile == "Trend Capture" ? 3.0 : exitProfile == "Short-Term Profit" ? 1.5 : trailAtrMult
+finalMaxBarsInTrade    = exitProfile == "Conservative" ? 200 : exitProfile == "Balanced" ? 96 : exitProfile == "Trend Capture" ? 300 : exitProfile == "Short-Term Profit" ? 40 : maxBarsInTrade
+finalExitOnMomentumLoss = exitProfile == "Short-Term Profit" ? true : exitOnMomentumLoss
+finalExitOnTimeLimit = exitProfile == "Short-Term Profit" ? true : exitOnTimeLimit
+
+// ============================= SETUP STATE MACHINE =============================
+g_state = "Setup State Machine"
+useAutoSetupExpiry = input.bool(true, "Auto-adapt 'watching' expiry to timeframe", group=g_state)
+manualSetupExpiryBars = input.int(24, "Watching expiry (bars, used only if auto is off)", minval=5, group=g_state)
+autoSetupExpiryBars = timeframe.in_seconds() <= timeframe.in_seconds("15") ? 24 : timeframe.in_seconds() <= timeframe.in_seconds("45") ? 16 : 12
+setupExpiryBars = useAutoSetupExpiry ? autoSetupExpiryBars : manualSetupExpiryBars
+useAutoPendingExpiry = input.bool(true, "Auto-adapt 'confirmation pending' expiry to timeframe", group=g_state)
+manualPendingExpiryBars = input.int(4, "Confirmation-pending expiry (bars, used only if auto is off)", minval=1, group=g_state)
+autoPendingExpiryBars = confirmBars + 2
+pendingExpiryBars = useAutoPendingExpiry ? autoPendingExpiryBars : manualPendingExpiryBars
+
+// ============================= MARKET REGIME CLASSIFICATION =============================
+g_regime = "Market Regime Classification (7-state)"
+swingStructLen        = input.int(10, "Swing Structure Lookback (bars each side, for HH/HL/LH/LL)", group=g_regime)
+atrAvgLen             = input.int(50, "ATR Average Length (volatility baseline)", group=g_regime)
+abnormalVolMult       = input.float(2.0, "Abnormal Volatility: ATR vs its average (x)", group=g_regime)
+consolidationBBWidthPct = input.float(2.0, "Consolidation / Volatility Collapse: BB Width below (%)", group=g_regime)
+minEmaDistPctStrong   = input.float(0.5, "Strong Trend: min %% distance between 4H EMAs", step=0.1, group=g_regime)
+regimeStrongPoints    = input.int(7, "Strong Trend: min regime points (of 8)", minval=1, maxval=8, group=g_regime)
+regimeModeratePoints  = input.int(5, "Trend: min regime points (of 8)", minval=1, maxval=8, group=g_regime)
+effRegimeModeratePoints = tfIndex == 0 ? math.max(regimeModeratePoints - 1, 1) : regimeModeratePoints
+blockTradingInWeakRegimes = input.bool(true, "Block new entries during Consolidation / Abnormal Volatility / Undefined Market", group=g_regime)
+
+// ============================= STRICTNESS PROFILE (trade-frequency control) =============================
+g_strictness = "Strictness Profile (trade-frequency control)"
+strictnessProfile = input.string("Balanced", "Strictness Profile", options=["Strict", "Balanced", "Moderate", "Exploratory Backtest"], tooltip="Strict = fewer, higher-confidence trades. Balanced = default. Moderate = allows more entries while keeping mandatory risk/regime/HTF-data checks. Exploratory Backtest = broad historical signal collection for ANALYSIS ONLY — never treat as approved for live use", group=g_strictness)
+strictnessScoreDeltaStrict = input.int(8, "Strict: score threshold adjustment (+ stricter)", group=g_strictness)
+strictnessScoreDeltaModerate = input.int(-6, "Moderate: score threshold adjustment (- looser)", group=g_strictness)
+strictnessScoreDeltaExploratory = input.int(-14, "Exploratory: score threshold adjustment (- looser)", group=g_strictness)
+strictnessMinScoreFloor = input.int(35, "Absolute minimum score threshold floor", group=g_strictness)
+strictnessToleranceModerate = input.float(1.2, "Moderate: multiplier on signal-candle-size / EMA-extension tolerances", group=g_strictness)
+strictnessToleranceExploratory = input.float(1.5, "Exploratory: multiplier on signal-candle-size / EMA-extension tolerances", group=g_strictness)
+strictnessToleranceStrict = input.float(0.85, "Strict: multiplier on signal-candle-size / EMA-extension tolerances", group=g_strictness)
+strictnessAllowConsolidationModerate = input.bool(true, "Moderate/Exploratory: allow trading during Consolidation regime", group=g_strictness)
+isExploratoryMode = strictnessProfile == "Exploratory Backtest"
+
+strictnessScoreDelta = strictnessProfile == "Strict" ? strictnessScoreDeltaStrict : strictnessProfile == "Moderate" ? strictnessScoreDeltaModerate : strictnessProfile == "Exploratory Backtest" ? strictnessScoreDeltaExploratory : 0
+strictnessToleranceMult = strictnessProfile == "Strict" ? strictnessToleranceStrict : strictnessProfile == "Moderate" ? strictnessToleranceModerate : strictnessProfile == "Exploratory Backtest" ? strictnessToleranceExploratory : 1.0
+
+// ============================= PARAMETER SENSITIVITY TESTING (Step 15) =============================
+g_sensitivity = "Parameter Sensitivity Testing (Step 15 — manual multi-run protocol)"
+sensitivityTestMode = input.string("Default", "Sensitivity Test Mode", options=["Default", "Low", "High"], group=g_sensitivity)
+rsiLenLow  = input.int(12, "RSI Length — Low", group=g_sensitivity)
+rsiLenHigh = input.int(16, "RSI Length — High", group=g_sensitivity)
+atrSLMultLow  = input.float(1.5, "ATR Stop Multiplier — Low (both Long/Short)", group=g_sensitivity)
+atrSLMultHigh = input.float(2.5, "ATR Stop Multiplier — High (both Long/Short)", group=g_sensitivity)
+scoreValidMinLow  = input.int(65, "Minimum Entry Score — Low (both Long/Short)", group=g_sensitivity)
+scoreValidMinHigh = input.int(75, "Minimum Entry Score — High (both Long/Short)", group=g_sensitivity)
+minRRLow  = input.float(1.5, "Minimum Risk:Reward — Low (both Long/Short)", group=g_sensitivity)
+minRRHigh = input.float(2.0, "Minimum Risk:Reward — High (both Long/Short)", group=g_sensitivity)
+volMultLow  = input.float(1.0, "Volume Multiplier — Low", group=g_sensitivity)
+volMultHigh = input.float(1.4, "Volume Multiplier — High", group=g_sensitivity)
+bbMultLow  = input.float(1.8, "Bollinger Band StdDev Multiplier — Low", group=g_sensitivity)
+bbMultHigh = input.float(2.2, "Bollinger Band StdDev Multiplier — High", group=g_sensitivity)
+cooldownLow  = input.int(2, "Cooldown Bars — Low", group=g_sensitivity)
+cooldownHigh = input.int(6, "Cooldown Bars — High", group=g_sensitivity)
+abnormalVolMultLow  = input.float(1.6, "Abnormal Volatility ATR Multiplier — Low", group=g_sensitivity)
+abnormalVolMultHigh = input.float(2.4, "Abnormal Volatility ATR Multiplier — High", group=g_sensitivity)
+sensStableThresholdPct = input.float(15.0, "Classification: 'Stable' if max stat deviation below this %", group=g_sensitivity)
+sensModerateThresholdPct = input.float(30.0, "Classification: 'Moderately Stable' if below this %", group=g_sensitivity)
+sensSensitiveThresholdPct = input.float(50.0, "Classification: 'Sensitive' if below this %", group=g_sensitivity)
+sensHighSensitiveThresholdPct = input.float(75.0, "Classification: 'Highly Sensitive' if below this %; above it = 'Potentially Overfitted'", group=g_sensitivity)
+
+g_sensbaseline = "Sensitivity Baseline (paste the Default-run results here before switching to Low/High)"
+baselineNetProfit    = input.float(0.0, "Baseline Net Profit (from Default run)", group=g_sensbaseline)
+baselineProfitFactor = input.float(0.0, "Baseline Profit Factor (from Default run)", group=g_sensbaseline)
+baselineExpectancy   = input.float(0.0, "Baseline Expectancy per Trade (from Default run)", group=g_sensbaseline)
+baselineMaxDD        = input.float(0.0, "Baseline Max Drawdown % (from Default run)", group=g_sensbaseline)
+baselineTradeCount   = input.int(0, "Baseline Trade Count (from Default run)", group=g_sensbaseline)
+
+finalRsiLen = sensitivityTestMode == "Low" ? rsiLenLow : sensitivityTestMode == "High" ? rsiLenHigh : rsiLen
+finalAtrSLMultLong  = sensitivityTestMode == "Low" ? atrSLMultLow : sensitivityTestMode == "High" ? atrSLMultHigh : activeAtrSLMultLong
+finalAtrSLMultShort = sensitivityTestMode == "Low" ? atrSLMultLow : sensitivityTestMode == "High" ? atrSLMultHigh : activeAtrSLMultShort
+strictnessAdjScoreValidMinLong  = math.max(strictnessMinScoreFloor, activeScoreValidMinLong  + strictnessScoreDelta)
+strictnessAdjScoreValidMinShort = math.max(strictnessMinScoreFloor, activeScoreValidMinShort + strictnessScoreDelta)
+finalScoreValidMinLong  = sensitivityTestMode == "Low" ? scoreValidMinLow : sensitivityTestMode == "High" ? scoreValidMinHigh : strictnessAdjScoreValidMinLong
+finalScoreValidMinShort = sensitivityTestMode == "Low" ? scoreValidMinLow : sensitivityTestMode == "High" ? scoreValidMinHigh : strictnessAdjScoreValidMinShort
+finalMinRRLong  = sensitivityTestMode == "Low" ? minRRLow : sensitivityTestMode == "High" ? minRRHigh : activeMinRRLong
+finalMinRRShort = sensitivityTestMode == "Low" ? minRRLow : sensitivityTestMode == "High" ? minRRHigh : activeMinRRShort
+finalVolMult = sensitivityTestMode == "Low" ? volMultLow : sensitivityTestMode == "High" ? volMultHigh : volMult
+finalBBMult  = sensitivityTestMode == "Low" ? bbMultLow  : sensitivityTestMode == "High" ? bbMultHigh  : bbMult
+finalCooldownBars = sensitivityTestMode == "Low" ? cooldownLow : sensitivityTestMode == "High" ? cooldownHigh : activeCooldownBars
+finalAbnormalVolMult = sensitivityTestMode == "Low" ? abnormalVolMultLow : sensitivityTestMode == "High" ? abnormalVolMultHigh : abnormalVolMult
+
+
+// ============================= ENTRY SCORING SYSTEM (0-100 weighted) =============================
+g_score = "Entry Scoring System (0-100 weighted, transparent breakdown in table)"
+wTrendAlign     = input.float(15, "Weight: HTF trend alignment (Macro+Trend+Confirm)", group=g_score)
+wEmaSlope       = input.float(8,  "Weight: 4H EMA slope favorable", group=g_score)
+wStructure      = input.float(10, "Weight: market structure (HH/HL or LH/LL)", group=g_score)
+wRsiZone        = input.float(8,  "Weight: RSI in healthy continuation/pullback zone", group=g_score)
+wBBInteraction  = input.float(8,  "Weight: valid Bollinger Band interaction", group=g_score)
+wVolume         = input.float(10, "Weight: volume above average", group=g_score)
+wConfirmCandle  = input.float(6,  "Weight: confirmation candle direction", group=g_score)
+wBreakoutRetest = input.float(12, "Weight: confirmed breakout/rejection at 4H lines", group=g_score)
+wRegimeMatch    = input.float(10, "Weight: market regime matches trade direction", group=g_score)
+wPersistence    = input.float(5,  "Weight: trend persistence (bars since alignment)", group=g_score)
+wMicroAlign     = input.float(4,  "Weight: micro-timeframe trend alignment", group=g_score)
+wEntryEmaAlign  = input.float(4,  "Weight: entry-TF EMA alignment", group=g_score)
+persistenceMinBars = input.int(6, "Trend Persistence: min bars to award weight", group=g_score)
+
+g_scoreLevels = "Score Classification Thresholds"
+scoreObservationMin    = input.int(60, "Setup Under Observation: score >=", group=g_scoreLevels)
+scoreValidMin          = input.int(70, "Valid Setup: score >= (entry gate for high-confidence trades)", group=g_scoreLevels)
+scoreHighConvictionMin = input.int(80, "High-Conviction Setup: score >= (entry gate for countertrend trades)", group=g_scoreLevels)
+
+// ============================= SETUP TAXONOMY (enable/disable individually) =============================
+g_setups = "Setup Taxonomy A-G (enable/disable individually)"
+enableSetupA_Long  = input.bool(true,  "Enable Setup A Long: Trend Continuation (RSI pullback)", group=g_setups)
+enableSetupA_Long := tfIndex == 1 ? false : enableSetupA_Long
+enableSetupA_Short = input.bool(true,  "Enable Setup A Short: Trend Continuation (RSI pullback)", group=g_setups)
+enableSetupA_Short := tfIndex == 1 ? false : enableSetupA_Short
+enableSetupB_Long  = input.bool(true,  "Enable Setup B Long: Confirmed Breakout", group=g_setups)
+enableSetupB_Short = input.bool(true,  "Enable Setup B Short: Confirmed Breakdown", group=g_setups)
+enableSetupC_Long  = input.bool(true,  "Enable Setup C Long: Breakout and Retest", group=g_setups)
+enableSetupC_Short = input.bool(true,  "Enable Setup C Short: Breakdown and Retest", group=g_setups)
+enableSetupD_Long  = input.bool(false, "Enable Setup D Long: Reversal (countertrend, restrictive)", group=g_setups)
+enableSetupD_Short = input.bool(false, "Enable Setup D Short: Reversal (countertrend, restrictive)", group=g_setups)
+enableSetupE_Long  = input.bool(true,  "Enable Setup E Long: Volatility Compression and Expansion", group=g_setups)
+enableSetupE_Short = input.bool(true,  "Enable Setup E Short: Volatility Compression and Expansion", group=g_setups)
+enableSetupF_Long  = input.bool(true,  "Enable Setup F Long: EMA Pullback Continuation", group=g_setups)
+enableSetupF_Short = input.bool(true,  "Enable Setup F Short: EMA Pullback Continuation", group=g_setups)
+enableSetupG_Long  = input.bool(false, "Enable Setup G Long: Failed Breakdown", group=g_setups)
+enableSetupG_Short = input.bool(false, "Enable Setup G Short: Failed Breakout", group=g_setups)
+bbSqueezeLookback = input.int(30, "Setup E: BB squeeze lookback (bars)", group=g_setups)
+retestWindowBars  = input.int(8, "Setup C: bars allowed for retest after breakout", group=g_setups)
+entryEmaProximityPct = input.float(0.15, "Setup F: max %% distance from entry-TF EMA to count as 'at EMA'", step=0.05, group=g_setups)
+
+// ============================= MINIMUM VALIDATION CRITERIA =============================
+g_valid = "Minimum Validation Criteria (robustness classification)"
+minTradesForValid          = input.int(30, "Minimum trades for meaningful statistics", group=g_valid)
+minProfitFactorAcceptable  = input.float(1.3, "Minimum acceptable profit factor", group=g_valid)
+maxAcceptableDrawdownPctV  = input.float(20.0, "Maximum acceptable drawdown %", group=g_valid)
+
+// ============================= DISPLAY / VISUAL TOGGLES =============================
+g_display = "Visual Chart Records (toggle individually)"
+showEntryArrows     = input.bool(true, "Show Entry Arrows", group=g_display)
+showReactionDots    = input.bool(true, "Show reaction dots (watch-next-candle)", group=g_display)
+showExhaustionVeto  = input.bool(true, "Show exhaustion veto markers", group=g_display)
+showShortLabels     = input.bool(true, "Show Short Labels (LONG/SHORT/EXIT text on markers)", group=g_display)
+showDetailedTradeLabels = input.bool(false, "Show Detailed Trade Labels (full setup/score/SL/TP text on candles)", group=g_display)
+showRiskLevels      = input.bool(true, "Show stop-loss / take-profit levels while in a position", group=g_display)
+showSRLevels        = input.bool(false, "Show support/resistance swing levels used by setups", group=g_display)
+showExitMarkers     = input.bool(true, "Show Exit Markers", group=g_display)
+showCooldownRiskLockBg = input.bool(true, "Shade background during cooldown / risk-lock periods", group=g_display)
+showSetupDetectedMarkers = input.bool(false, "Show setup-detected markers (WATCH state entry)", group=g_display)
+showExpiredSetupMarkers  = input.bool(false, "Show expired-setup markers", group=g_display)
+showRejectedSignalMarkers = input.bool(false, "Show rejected-signal markers", group=g_display)
+maxEntryLabels = input.int(50, "Maximum entry labels kept on chart (oldest recycled)", minval=5, group=g_display)
+maxExitLabels  = input.int(50, "Maximum exit labels kept on chart (oldest recycled)", minval=5, group=g_display)
+
+g_lines = "Trade Levels on Chart"
+showEntryLine      = input.bool(true, "Show Entry Line", group=g_lines)
+showStopLossLine   = input.bool(true, "Show Stop Loss Line", group=g_lines)
+showTakeProfitLine = input.bool(true, "Show Take Profit Line", group=g_lines)
+
+// ============================= HTF CONFIRMATION INTEGRITY =============================
+g_htfint = "HTF Confirmation Integrity"
+useConfirmedHTFOnly = input.bool(true, "Use only fully-confirmed HTF bars (adds ~1 HTF bar lag, eliminates intrabar HTF repaint)", group=g_htfint)
+
+// ============================= EXPERIMENTAL INTRABAR MODE (off by default) =============================
+g_intrabar = "Experimental Intrabar Mode (NOT recommended — off by default)"
+enableIntrabarMode = input.bool(false, "Enable intrabar entry evaluation (can diverge from confirmed-candle backtest behavior)", group=g_intrabar)
+confirmGate = enableIntrabarMode ? true : barstate.isconfirmed
+
+// ============================= STOP-LOSS MODEL =============================
+g_stopmodel = "Stop-Loss Model"
+stopLossModel = input.string("ATR", "Stop-Loss Basis", options=["ATR", "Structure", "Combined (wider of the two)", "EMA-Based", "Swing-Based", "Volatility-Adjusted"], tooltip="ATR = fixed volatility multiple. Structure = beyond the nearest swing plus an ATR buffer. Combined = wider of ATR/Structure. EMA-Based = distance from the entry-TF EMA plus an ATR buffer. Swing-Based = the nearest swing level with NO extra buffer. Volatility-Adjusted = ATR stop scaled 70%-150% by current volatility vs its average", group=g_stopmodel)
+structureStopBufferATR = input.float(0.3, "Structure/EMA Stop: extra buffer beyond level (x ATR)", group=g_stopmodel)
+volAdjStopMinMult = input.float(0.7, "Volatility-Adjusted: minimum scale (x normal ATR stop)", group=g_stopmodel)
+volAdjStopMaxMult = input.float(1.5, "Volatility-Adjusted: maximum scale (x normal ATR stop)", group=g_stopmodel)
+
+// ============================= TAKE-PROFIT MODEL =============================
+g_tpmodel = "Take-Profit Model"
+takeProfitModel = input.string("Fixed R Multiple", "Take-Profit Basis", options=["Fixed R Multiple", "ATR Target", "Structure Target", "Bollinger Band Target"], tooltip="Fixed R Multiple = stop distance x minRR. ATR Target = a direct ATR multiple. Structure Target = the nearest opposing swing level. Bollinger Band Target = the opposite BB band. All models still respect the minimum-RR filter", group=g_tpmodel)
+atrTargetMult = input.float(3.0, "ATR Target: multiplier", group=g_tpmodel)
+
+// ============================= ADDITIONAL FALSE-SIGNAL FILTERS =============================
+g_filters2 = "Additional False-Signal Filters"
+minStopDistPct = input.float(0.1, "Minimum stop distance (% of price)", group=g_filters2)
+maxStopDistPct = input.float(5.0, "Maximum stop distance (% of price)", group=g_filters2)
+maxSignalCandleATRMult = input.float(3.0, "Skip if signal candle range exceeds (x ATR)", group=g_filters2)
+maxExtensionFromEmaPct = input.float(3.0, "Skip if price extended beyond (% from 4H Blue Line EMA)", group=g_filters2)
+minSwingRoomATR = input.float(0.5, "Minimum room to nearest opposing swing level (x ATR)", group=g_filters2)
+vetoResistanceOverheadLong = input.bool(false, "Long: veto if resistance immediately above", group=g_filters2)
+vetoSupportOverheadShort = input.bool(false, "Short: veto if support immediately below", group=g_filters2)
+
+// ============================= HTF LAYERS (request.security) =============================
+f_layer(fastLen, slowLen, confirmedOnly) =>
+    fast = ta.ema(close, fastLen)
+    slow = ta.ema(close, slowLen)
+    outFast = confirmedOnly ? fast[1] : fast
+    outSlow = confirmedOnly ? slow[1] : slow
+    [outFast, outSlow]
+
+f_layerAdx(fastLen, slowLen, adxLength, confirmedOnly) =>
+    emaFast = ta.ema(close, fastLen)
+    emaSlow = ta.ema(close, slowLen)
+    [diPlus, diMinus, adxV] = ta.dmi(adxLength, adxLength)
+    outFast = confirmedOnly ? emaFast[1] : emaFast
+    outSlow = confirmedOnly ? emaSlow[1] : emaSlow
+    outDiPlus = confirmedOnly ? diPlus[1] : diPlus
+    outDiMinus = confirmedOnly ? diMinus[1] : diMinus
+    outAdx = confirmedOnly ? adxV[1] : adxV
+    [outFast, outSlow, outDiPlus, outDiMinus, outAdx]
+
+[macroFastRaw, macroSlowRaw] = request.security(syminfo.tickerid, macroTF, f_layer(macroFastLen, macroSlowLen, useConfirmedHTFOnly), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[trendFastRaw, trendSlowRaw, trendDiPlusRaw, trendDiMinusRaw, trendAdxRaw] = request.security(syminfo.tickerid, trendTF, f_layerAdx(trendFastLen, trendSlowLen, adxLen, useConfirmedHTFOnly), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[confirmFastRaw, confirmSlowRaw] = request.security(syminfo.tickerid, confirmTF, f_layer(confirmFastLen, confirmSlowLen, useConfirmedHTFOnly), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[microFastRaw, microSlowRaw] = request.security(syminfo.tickerid, microTF, f_layer(microFastLen, microSlowLen, useConfirmedHTFOnly), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[orangeLineRaw, blueLineRaw] = request.security(syminfo.tickerid, lineTF, f_layer(orangeLen, blueLen, useConfirmedHTFOnly), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+macroBull = macroFastRaw > macroSlowRaw
+macroBear = macroFastRaw < macroSlowRaw
+
+trendFastRising  = trendFastRaw > trendFastRaw[slopeLookback]
+trendFastFalling = trendFastRaw < trendFastRaw[slopeLookback]
+trendBull = trendFastRaw > trendSlowRaw and trendFastRising
+trendBear = trendFastRaw < trendSlowRaw and trendFastFalling
+trendStrong = trendAdxRaw > adxMin
+
+confirmBull = confirmFastRaw > confirmSlowRaw
+confirmBear = confirmFastRaw < confirmSlowRaw
+
+microBull = microFastRaw > microSlowRaw
+microBear = microFastRaw < microSlowRaw
+
+orangeRising  = orangeLineRaw > orangeLineRaw[slopeLookback]
+orangeFalling = orangeLineRaw < orangeLineRaw[slopeLookback]
+blueRising    = blueLineRaw   > blueLineRaw[slopeLookback]
+blueFalling   = blueLineRaw   < blueLineRaw[slopeLookback]
+linesBullAligned = blueLineRaw > orangeLineRaw and blueRising and orangeRising
+linesBearAligned = blueLineRaw < orangeLineRaw and blueFalling and orangeFalling
+
+trendScoreLong  = (macroBull ? 1 : 0) + (trendBull ? 1 : 0) + (confirmBull ? 1 : 0)
+trendScoreShort = (macroBear ? 1 : 0) + (trendBear ? 1 : 0) + (confirmBear ? 1 : 0)
+
+trendUp   = trendScoreLong  >= 2 and trendStrong
+trendDown = trendScoreShort >= 2 and trendStrong
+longCountertrendOK  = trendScoreLong  == 1 and trendStrong
+shortCountertrendOK = trendScoreShort == 1 and trendStrong
+
+// ============================= ENTRY-TF INDICATORS =============================
+rsiVal = ta.rsi(close, finalRsiLen)
+atrVal = ta.atr(atrLen)
+
+bbBasis = ta.sma(close, bbLen)
+bbDev = finalBBMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbPercentB = (close - bbLower) / (bbUpper - bbLower)
+bbWidthPct = (bbUpper - bbLower) / bbBasis * 100
+bbExpanding = bbWidthPct > bbWidthPct[bbExpandLookback]
+
+volSma = ta.sma(volume, volLen)
+volRatio = volume / volSma
+volConfirmed = volRatio > finalVolMult
+
+obvVal = ta.obv
+obvEma = ta.ema(obvVal, obvEmaLen)
+obvRising  = obvVal > obvEma
+obvFalling = obvVal < obvEma
+
+entryEmaFast = ta.ema(close, entryEmaFastLen)
+entryEmaSlow = ta.ema(close, entryEmaSlowLen)
+entryEmaBull = entryEmaFast > entryEmaSlow
+entryEmaBear = entryEmaFast < entryEmaSlow
+
+stochRaw = ta.stoch(close, high, low, stochLen)
+stochK = ta.sma(stochRaw, stochSmoothK)
+stochD = ta.sma(stochK, stochSmoothD)
+stochBullMomentum = ta.crossover(stochK, stochD)  and stochK >= stochBullZoneLow  and stochK <= stochBullZoneHigh
+stochBearMomentum = ta.crossunder(stochK, stochD) and stochK <= stochBearZoneHigh and stochK >= stochBearZoneLow
+
+stochRsiRaw = ta.stoch(rsiVal, rsiVal, rsiVal, stochRsiLen)
+stochRsiK = ta.sma(stochRsiRaw, stochRsiSmoothK)
+stochRsiD = ta.sma(stochRsiK, stochRsiSmoothD)
+stochRsiBullMomentum = ta.crossover(stochRsiK, stochRsiD)  and stochRsiK >= stochBullZoneLow  and stochRsiK <= stochBullZoneHigh
+stochRsiBearMomentum = ta.crossunder(stochRsiK, stochRsiD) and stochRsiK <= stochBearZoneHigh and stochRsiK >= stochBearZoneLow
+
+candleRange = high - low
+candleBody  = math.abs(close - open)
+upperWick   = high - math.max(close, open)
+lowerWick   = math.min(close, open) - low
+closePosInRange = candleRange > 0 ? (close - low) / candleRange : 0.5
+
+sellingExhaustion = lowerWick > candleBody * exhaustionWickMult and closePosInRange > exhaustionMinClosePos and volConfirmed
+buyingExhaustion = upperWick > candleBody * exhaustionWickMult and closePosInRange < exhaustionMaxClosePos and volConfirmed
+
+recentSwingLow  = ta.lowest(low, srLookback)
+recentSwingHigh = ta.highest(high, srLookback)
+nearSupport    = low  <= recentSwingLow  * (1 + srProximityPct / 100)
+nearResistance = high >= recentSwingHigh * (1 - srProximityPct / 100)
+
+// ============================= BLUE LINE STATUS =============================
+priceAboveBlue = close > blueLineRaw
+priceBelowBlue = close < blueLineRaw
+var int barsAboveBlue = 0
+var int barsBelowBlue = 0
+barsAboveBlue := priceAboveBlue ? barsAboveBlue + 1 : 0
+barsBelowBlue := priceBelowBlue ? barsBelowBlue + 1 : 0
+
+blueTouched   = low <= blueLineRaw and high >= blueLineRaw
+blueReclaim   = ta.crossover(close, blueLineRaw)  and barsBelowBlue[1] >= lineBreakHoldBars
+blueBreakdown = ta.crossunder(close, blueLineRaw) and barsAboveBlue[1] >= lineBreakHoldBars
+
+blueLineState =
+
+     blueReclaim ? "Bullish Reclaim" :
+     blueBreakdown ? "Bearish Rejection" :
+     (priceAboveBlue and blueTouched) ? "Testing Support" :
+     (priceBelowBlue and blueTouched) ? "Testing Resistance" :
+     priceAboveBlue ? "Price Above" :
+     priceBelowBlue ? "Price Below" : "-"
+blueLineColor = (blueLineState == "Bullish Reclaim" or blueLineState == "Price Above" or blueLineState == "Testing Support") ? color.green :
+     (blueLineState == "Bearish Rejection" or blueLineState == "Price Below" or blueLineState == "Testing Resistance") ? color.red : color.gray
+
+// ============================= RISK LOCKOUT STATE =============================
+var float equityPeak = strategy.initial_capital
+equityPeak := math.max(equityPeak, strategy.equity)
+currentDrawdownPct = equityPeak != 0 ? (equityPeak - strategy.equity) / equityPeak * 100 : 0.0
+var float worstDrawdownPct = 0.0
+worstDrawdownPct := math.max(worstDrawdownPct, currentDrawdownPct)
+var float worstDrawdownAbs = 0.0
+worstDrawdownAbs := math.max(worstDrawdownAbs, equityPeak - strategy.equity)
+drawdownLockActive = currentDrawdownPct >= maxDrawdownPct
+
+var array<float> dailyReturns = array.new<float>(0)
+var float dayStartEquity = na
+newDay = ta.change(time("D")) != 0
+if newDay
+    if not na(dayStartEquity) and dayStartEquity != 0
+        array.push(dailyReturns, (strategy.equity - dayStartEquity) / dayStartEquity)
+        if array.size(dailyReturns) > 2000
+            array.shift(dailyReturns)
+    dayStartEquity := strategy.equity
+dailyPnLPct = (not na(dayStartEquity) and dayStartEquity != 0) ? (strategy.equity - dayStartEquity) / dayStartEquity * 100 : 0.0
+dailyLossLockActive = dailyPnLPct <= -maxDailyLossPct
+
+var int tradesToday = 0
+if newDay
+    tradesToday := 0
+tradesTodayLockActive = tradesToday >= maxTradesPerDay
+
+var float weekStartEquity = na
+newWeek = ta.change(time("W")) != 0
+if newWeek
+    weekStartEquity := strategy.equity
+weeklyPnLPct = (not na(weekStartEquity) and weekStartEquity != 0) ? (strategy.equity - weekStartEquity) / weekStartEquity * 100 : 0.0
+weeklyLossLockActive = enableWeeklyRiskLimit and weeklyPnLPct <= -maxWeeklyLossPct
+
+var int consecLosses = 0
+var int lossLockoutUntilBar = -1
+lossStreakLockActive = bar_index < lossLockoutUntilBar
+
+riskLockActive = dailyLossLockActive or weeklyLossLockActive or tradesTodayLockActive or lossStreakLockActive or drawdownLockActive
+riskLockReason =
+     drawdownLockActive ? "Max Drawdown" :
+     dailyLossLockActive ? "Daily Loss Limit" :
+     weeklyLossLockActive ? "Weekly Loss Limit" :
+     tradesTodayLockActive ? "Max Trades/Day" :
+     lossStreakLockActive ? "Consecutive Losses" : "-"
+
+// ============================= MARKET STRUCTURE (swing HH/HL vs LH/LL) =============================
+structSwingHigh = ta.pivothigh(high, swingStructLen, swingStructLen)
+structSwingLow  = ta.pivotlow(low, swingStructLen, swingStructLen)
+var float lastSwingHighA = na
+var float lastSwingHighB = na
+var float lastSwingLowA  = na
+var float lastSwingLowB  = na
+if not na(structSwingHigh)
+    lastSwingHighB := lastSwingHighA
+    lastSwingHighA := structSwingHigh
+if not na(structSwingLow)
+    lastSwingLowB := lastSwingLowA
+    lastSwingLowA := structSwingLow
+structureBullish = not na(lastSwingHighB) and not na(lastSwingLowB) and lastSwingHighA > lastSwingHighB and lastSwingLowA > lastSwingLowB
+structureBearish = not na(lastSwingHighB) and not na(lastSwingLowB) and lastSwingHighA < lastSwingHighB and lastSwingLowA < lastSwingLowB
+
+// ============================= MARKET REGIME CLASSIFICATION =============================
+emaDistPct = orangeLineRaw != 0 ? math.abs(blueLineRaw - orangeLineRaw) / orangeLineRaw * 100 : 0.0
+atrAvg = ta.sma(atrVal, atrAvgLen)
+atrRatio = atrAvg != 0 ? atrVal / atrAvg : 1.0
+abnormalVolatility = atrRatio > finalAbnormalVolMult
+regimeBullPoints = (close > blueLineRaw ? 1 : 0) + (close > orangeLineRaw ? 1 : 0) + (blueRising ? 1 : 0) + (orangeRising ? 1 : 0) + (linesBullAligned ? 1 : 0) + (structureBullish ? 1 : 0) + (rsiVal > 50 ? 1 : 0) + (trendScoreLong >= 2 ? 1 : 0)
+regimeBearPoints = (close < blueLineRaw ? 1 : 0) + (close < orangeLineRaw ? 1 : 0) + (blueFalling ? 1 : 0) + (orangeFalling ? 1 : 0) + (linesBearAligned ? 1 : 0) + (structureBearish ? 1 : 0) + (rsiVal < 50 ? 1 : 0) + (trendScoreShort >= 2 ? 1 : 0)
+
+REGIME_STRONG_BULL = "Strong Bullish Trend"
+REGIME_BULL        = "Bullish Trend"
+REGIME_CONSOL      = "Consolidation"
+REGIME_BEAR        = "Bearish Trend"
+REGIME_STRONG_BEAR = "Strong Bearish Trend"
+REGIME_ABNORMAL    = "Abnormal Volatility"
+REGIME_UNDEFINED   = "Undefined Market"
+
+marketRegime =
+     abnormalVolatility ? REGIME_ABNORMAL :
+     (regimeBullPoints >= regimeStrongPoints and emaDistPct >= minEmaDistPctStrong) ? REGIME_STRONG_BULL :
+     regimeBullPoints >= effRegimeModeratePoints ? REGIME_BULL :
+     (regimeBearPoints >= regimeStrongPoints and emaDistPct >= minEmaDistPctStrong) ? REGIME_STRONG_BEAR :
+     regimeBearPoints >= effRegimeModeratePoints ? REGIME_BEAR :
+     (math.abs(regimeBullPoints - regimeBearPoints) <= 1 and bbWidthPct < consolidationBBWidthPct) ? REGIME_CONSOL :
+     REGIME_UNDEFINED
+
+regimeDisplayColor =
+     marketRegime == REGIME_STRONG_BULL ? color.new(color.green, 0) :
+     marketRegime == REGIME_BULL ? color.new(color.green, 40) :
+     marketRegime == REGIME_STRONG_BEAR ? color.new(color.red, 0) :
+     marketRegime == REGIME_BEAR ? color.new(color.red, 40) :
+     marketRegime == REGIME_ABNORMAL ? color.fuchsia :
+     marketRegime == REGIME_CONSOL ? color.gray :
+     color.orange
+
+strictnessAllowsConsolidation = (strictnessProfile == "Moderate" or strictnessProfile == "Exploratory Backtest") and strictnessAllowConsolidationModerate
+strictnessAllowsConsolidation := tfIndex == 0 ? strictnessAllowConsolidationModerate : strictnessAllowsConsolidation
+regimeAllowsLong  = marketRegime == REGIME_STRONG_BULL or marketRegime == REGIME_BULL or (marketRegime == REGIME_CONSOL and strictnessAllowsConsolidation) or (not blockTradingInWeakRegimes)
+regimeAllowsShort = marketRegime == REGIME_STRONG_BEAR or marketRegime == REGIME_BEAR or (marketRegime == REGIME_CONSOL and strictnessAllowsConsolidation) or (not blockTradingInWeakRegimes)
+regimeBlocksAll = blockTradingInWeakRegimes and (marketRegime == REGIME_ABNORMAL or marketRegime == REGIME_UNDEFINED or (marketRegime == REGIME_CONSOL and not strictnessAllowsConsolidation))
+
+// ============================= ADDITIONAL FALSE-SIGNAL FILTER CHECKS =============================
+htfDataValid = not na(macroFastRaw) and not na(macroSlowRaw) and not na(trendFastRaw) and not na(trendSlowRaw) and not na(confirmFastRaw) and not na(confirmSlowRaw) and not na(orangeLineRaw) and not na(blueLineRaw)
+
+anticipatedStopDistLong  = atrVal * finalAtrSLMultLong
+anticipatedStopDistShort = atrVal * finalAtrSLMultShort
+stopDistOKLong  = close != 0 and (anticipatedStopDistLong  / close * 100) >= minStopDistPct and (anticipatedStopDistLong  / close * 100) <= maxStopDistPct
+stopDistOKShort = close != 0 and (anticipatedStopDistShort / close * 100) >= minStopDistPct and (anticipatedStopDistShort / close * 100) <= maxStopDistPct
+
+signalCandleOK = (high - low) <= atrVal * maxSignalCandleATRMult * strictnessToleranceMult
+
+extensionFromEmaPct = blueLineRaw != 0 ? math.abs(close - blueLineRaw) / blueLineRaw * 100 : 0.0
+extensionOK = extensionFromEmaPct <= maxExtensionFromEmaPct * strictnessToleranceMult
+
+roomToResistance = recentSwingHigh - close
+roomToSupport    = close - recentSwingLow
+longRoomOK  = roomToResistance >= atrVal * minSwingRoomATR
+shortRoomOK = roomToSupport    >= atrVal * minSwingRoomATR
+
+vetoLongOverhead  = vetoResistanceOverheadLong and nearResistance
+vetoShortOverhead = vetoSupportOverheadShort   and nearSupport
+
+falseSignalFiltersLongOK  = htfDataValid and stopDistOKLong  and signalCandleOK and extensionOK and longRoomOK  and not vetoLongOverhead
+falseSignalFiltersShortOK = htfDataValid and stopDistOKShort and signalCandleOK and extensionOK and shortRoomOK and not vetoShortOverhead
+
+// ============================= CONFLUENCE SIGNAL LOGIC =============================
+rsiDippedRecently  = ta.lowest(rsiVal, pullbackLookback) <= rsiLongPullback
+rsiPoppedRecently  = ta.highest(rsiVal, pullbackLookback) >= rsiShortPullback
+rsiLongTrigger  = ta.crossover(rsiVal, rsiLongPullback)  and rsiDippedRecently and rsiVal < rsiLongMaxChase
+rsiShortTrigger = ta.crossunder(rsiVal, rsiShortPullback) and rsiPoppedRecently and rsiVal > rsiShortMinChase
+
+emaCrossUp   = ta.crossover(close, orangeLineRaw)
+emaCrossDown = ta.crossunder(close, orangeLineRaw)
+
+emaBreakLongRaw  = ta.barssince(emaCrossUp)   == confirmBars and close > orangeLineRaw
+emaBreakShortRaw = ta.barssince(emaCrossDown) == confirmBars and close < orangeLineRaw
+
+bullCandle = close > open
+bearCandle = close < open
+
+touchedLine = low <= orangeLineRaw and high >= orangeLineRaw
+reactionUp   = touchedLine and close > orangeLineRaw and bullCandle
+reactionDown = touchedLine and close < orangeLineRaw and bearCandle
+
+progressUp1 = close > close[1]
+progressUp2 = progressUp1 and close[1] >= close[2]
+progressUp3 = progressUp2 and close[2] >= close[3]
+progressDown1 = close < close[1]
+progressDown2 = progressDown1 and close[1] <= close[2]
+progressDown3 = progressDown2 and close[2] <= close[3]
+progressUp   = confirmBars == 1 ? progressUp1   : confirmBars == 2 ? progressUp2   : progressUp3
+progressDown = confirmBars == 1 ? progressDown1 : confirmBars == 2 ? progressDown2 : progressDown3
+
+rejectionUpRaw   = reactionUp[confirmBars]   and progressUp   and bullCandle
+rejectionDownRaw = reactionDown[confirmBars] and progressDown and bearCandle
+
+dualLineBreakLong  = close > blueLineRaw and (blueRising or orangeRising)
+dualLineBreakShort = close < blueLineRaw and (blueFalling or orangeFalling)
+
+emaBreakLong  = emaBreakLongRaw  and dualLineBreakLong
+emaBreakShort = emaBreakShortRaw and dualLineBreakShort
+rejectionUp   = rejectionUpRaw   and dualLineBreakLong
+rejectionDown = rejectionDownRaw and dualLineBreakShort
+
+bbLongOK  = bbPercentB > bbLongLowerPctB  and bbPercentB < bbLongUpperPctB  and bbExpanding
+bbShortOK = bbPercentB < bbShortUpperPctB and bbPercentB > bbShortLowerPctB and bbExpanding
+
+totalScoreWeight = wTrendAlign + wEmaSlope + wStructure + wRsiZone + wBBInteraction + wVolume + wConfirmCandle + wBreakoutRetest + wRegimeMatch + wPersistence + wMicroAlign + wEntryEmaAlign
+
+longScoreRaw = (trendScoreLong >= 2 or longCountertrendOK ? wTrendAlign : 0.0) +
+     (blueRising and orangeRising ? wEmaSlope : 0.0) +
+     (structureBullish ? wStructure : 0.0) +
+     (rsiVal > rsiLongPullback and rsiVal < rsiLongMaxChase ? wRsiZone : 0.0) +
+     (bbLongOK ? wBBInteraction : 0.0) +
+     (volConfirmed ? wVolume : 0.0) +
+     (bullCandle ? wConfirmCandle : 0.0) +
+     ((emaBreakLong or rejectionUp) ? wBreakoutRetest : 0.0) +
+     ((marketRegime == REGIME_STRONG_BULL or marketRegime == REGIME_BULL) ? wRegimeMatch : 0.0) +
+     (barsAboveBlue >= persistenceMinBars ? wPersistence : 0.0) +
+     (microBull ? wMicroAlign : 0.0) +
+     (entryEmaBull ? wEntryEmaAlign : 0.0)
+
+shortScoreRaw = (trendScoreShort >= 2 or shortCountertrendOK ? wTrendAlign : 0.0) +
+     (blueFalling and orangeFalling ? wEmaSlope : 0.0) +
+     (structureBearish ? wStructure : 0.0) +
+     (rsiVal < rsiShortPullback and rsiVal > rsiShortMinChase ? wRsiZone : 0.0) +
+     (bbShortOK ? wBBInteraction : 0.0) +
+     (volConfirmed ? wVolume : 0.0) +
+     (bearCandle ? wConfirmCandle : 0.0) +
+     ((emaBreakShort or rejectionDown) ? wBreakoutRetest : 0.0) +
+     ((marketRegime == REGIME_STRONG_BEAR or marketRegime == REGIME_BEAR) ? wRegimeMatch : 0.0) +
+     (barsBelowBlue >= persistenceMinBars ? wPersistence : 0.0) +
+     (microBear ? wMicroAlign : 0.0) +
+     (entryEmaBear ? wEntryEmaAlign : 0.0)
+
+longScore  = totalScoreWeight > 0 ? longScoreRaw  / totalScoreWeight * 100 : 0.0
+shortScore = totalScoreWeight > 0 ? shortScoreRaw / totalScoreWeight * 100 : 0.0
+
+f_scoreLabel(score) =>
+    score < scoreObservationMin ? "No Trade" : score < scoreValidMin ? "Setup Under Observation" : score < scoreHighConvictionMin ? "Valid Setup" : "High-Conviction Setup"
+
+longScoreLabel  = f_scoreLabel(longScore)
+shortScoreLabel = f_scoreLabel(shortScore)
+
+longConfirmCount  = (volConfirmed ? 1 : 0) + (bbLongOK  ? 1 : 0) + (obvRising  ? 1 : 0) + (microBull ? 1 : 0) + (entryEmaBull ? 1 : 0) + (stochBullMomentum ? 1 : 0) + (stochRsiBullMomentum ? 1 : 0) + (nearSupport ? 1 : 0) + (linesBullAligned ? 1 : 0)
+shortConfirmCount = (volConfirmed ? 1 : 0) + (bbShortOK ? 1 : 0) + (obvFalling ? 1 : 0) + (microBear ? 1 : 0) + (entryEmaBear ? 1 : 0) + (stochBearMomentum ? 1 : 0) + (stochRsiBearMomentum ? 1 : 0) + (nearResistance ? 1 : 0) + (linesBearAligned ? 1 : 0)
+
+// ============================= TRADE QUALITY SCORE (0-100, separate from the entry score) =============
+g_quality = "Trade Quality Score (0-100, independent of the entry score)"
+wqTrendAlign      = input.float(12, "Quality Weight: HTF trend alignment", group=g_quality)
+wqRegimeQuality   = input.float(12, "Quality Weight: market-regime quality (Strong=full, Normal=partial)", group=g_quality)
+wqStructure       = input.float(10, "Quality Weight: market structure (HH/HL or LH/LL)", group=g_quality)
+wqVolatilityQuality = input.float(9, "Quality Weight: healthy (non-abnormal, expanding) volatility", group=g_quality)
+wqVolumeQuality   = input.float(9, "Quality Weight: volume confirmation", group=g_quality)
+wqEmaDistance     = input.float(9, "Quality Weight: not overextended from 4H Blue Line EMA", group=g_quality)
+wqSRDistance      = input.float(9, "Quality Weight: favorable support/resistance proximity", group=g_quality)
+wqExpectedRR      = input.float(10, "Quality Weight: adequate room to target before next opposing swing level", group=g_quality)
+wqScoreMargin     = input.float(8, "Quality Weight: entry score comfortably above its minimum (not a bare pass)", group=g_quality)
+wqCandleQuality   = input.float(6, "Quality Weight: signal candle body dominates its range in the trade direction", group=g_quality)
+wqConflict        = input.float(6, "Quality Weight: no simultaneous high opposite-direction score (no indicator conflict)", group=g_quality)
+scoreMarginThreshold = input.int(5, "Score Margin: points above minimum required to count as 'comfortable'", group=g_quality)
+
+g_qualityLevels = "Trade Quality Classification Thresholds"
+qualityRejectMax      = input.int(49, "Reject: score below this", group=g_qualityLevels)
+qualityLowMax         = input.int(59, "Low Quality: score below this", group=g_qualityLevels)
+qualityAcceptableMax  = input.int(69, "Acceptable: score below this", group=g_qualityLevels)
+qualityGoodMax        = input.int(79, "Good: score below this (80+ = High Quality)", group=g_qualityLevels)
+
+f_tradeQualityScore(isLong) =>
+    trendOK    = isLong ? trendScoreLong >= 2 : trendScoreShort >= 2
+    regimePts  = isLong ? (marketRegime == REGIME_STRONG_BULL ? 1.0 : marketRegime == REGIME_BULL ? 0.6 : 0.0) : (marketRegime == REGIME_STRONG_BEAR ? 1.0 : marketRegime == REGIME_BEAR ? 0.6 : 0.0)
+    structureOK = isLong ? structureBullish : structureBearish
+    volatilityOK = bbExpanding and not abnormalVolatility
+    volumeOK   = volConfirmed
+    emaDistOK  = extensionFromEmaPct <= (maxExtensionFromEmaPct * strictnessToleranceMult * 0.5)
+    srOK       = isLong ? nearSupport : nearResistance
+    rrRoomOK   = isLong ? longRoomOK : shortRoomOK
+    scoreMarginOK = isLong ? (longScore - finalScoreValidMinLong >= scoreMarginThreshold) : (shortScore - finalScoreValidMinShort >= scoreMarginThreshold)
+    candleRangeSafe = math.max(candleRange, syminfo.mintick)
+    candleQualityOK = isLong ? (candleBody / candleRangeSafe >= 0.5 and bullCandle) : (candleBody / candleRangeSafe >= 0.5 and bearCandle)
+    noConflict = isLong ? shortScore < scoreObservationMin : longScore < scoreObservationMin
+    rawQ = (trendOK ? wqTrendAlign : 0.0) + (regimePts * wqRegimeQuality) + (structureOK ? wqStructure : 0.0) + (volatilityOK ? wqVolatilityQuality : 0.0) + (volumeOK ? wqVolumeQuality : 0.0) + (emaDistOK ? wqEmaDistance : 0.0) + (srOK ? wqSRDistance : 0.0) + (rrRoomOK ? wqExpectedRR : 0.0) + (scoreMarginOK ? wqScoreMargin : 0.0) + (candleQualityOK ? wqCandleQuality : 0.0) + (noConflict ? wqConflict : 0.0)
+    totalQWeight = wqTrendAlign + wqRegimeQuality + wqStructure + wqVolatilityQuality + wqVolumeQuality + wqEmaDistance + wqSRDistance + wqExpectedRR + wqScoreMargin + wqCandleQuality + wqConflict
+    totalQWeight > 0 ? rawQ / totalQWeight * 100 : 0.0
+
+f_qualityLabel(q) =>
+    q <= qualityRejectMax ? "Reject" : q <= qualityLowMax ? "Low Quality" : q <= qualityAcceptableMax ? "Acceptable" : q <= qualityGoodMax ? "Good" : "High Quality"
+
+f_qualityBandIdx(q) =>
+    q <= qualityRejectMax ? 0 : q <= qualityLowMax ? 1 : q <= qualityAcceptableMax ? 2 : q <= qualityGoodMax ? 3 : 4
+
+longTradeQualityScore  = f_tradeQualityScore(true)
+shortTradeQualityScore = f_tradeQualityScore(false)
+
+// ============================= SETUP TAXONOMY A-G =============================
+setupA_Long  = rsiLongTrigger  and trendUp
+setupA_Short = rsiShortTrigger and trendDown
+
+setupB_Long  = emaBreakLong  and volConfirmed and bbExpanding
+setupB_Short = emaBreakShort and volConfirmed and bbExpanding
+
+var int lastBreakoutUpBar = -100000
+
+var int lastBreakoutDownBar = -100000
+if emaBreakLong
+    lastBreakoutUpBar := bar_index
+if emaBreakShort
+    lastBreakoutDownBar := bar_index
+setupC_Long  = (touchedLine and close > orangeLineRaw and bullCandle and (bar_index - lastBreakoutUpBar)   <= retestWindowBars and (bar_index - lastBreakoutUpBar)   > 0) or rejectionUp
+setupC_Short = (touchedLine and close < orangeLineRaw and bearCandle and (bar_index - lastBreakoutDownBar) <= retestWindowBars and (bar_index - lastBreakoutDownBar) > 0) or rejectionDown
+
+setupD_Long  = longCountertrendOK  and rsiLongTrigger
+setupD_Short = shortCountertrendOK and rsiShortTrigger
+
+bbWasSqueezed = bbWidthPct[1] <= ta.lowest(bbWidthPct, bbSqueezeLookback)[1] * 1.1
+setupE_Long  = bbWasSqueezed and bbExpanding and bullCandle and close > orangeLineRaw
+setupE_Short = bbWasSqueezed and bbExpanding and bearCandle and close < orangeLineRaw
+
+nearEntryEma = entryEmaFast != 0 and math.abs(close - entryEmaFast) / entryEmaFast * 100 <= entryEmaProximityPct
+setupF_Long  = nearEntryEma and trendUp   and bullCandle and close > entryEmaFast
+setupF_Short = nearEntryEma and trendDown and bearCandle and close < entryEmaFast
+
+setupG_Long  = emaBreakShortRaw[1] and close > orangeLineRaw and bullCandle and not dualLineBreakShort
+setupG_Short = emaBreakLongRaw[1]  and close < orangeLineRaw and bearCandle and not dualLineBreakLong
+
+anySetupLong  = (enableSetupA_Long and setupA_Long) or (enableSetupB_Long and setupB_Long) or (enableSetupC_Long and setupC_Long) or (enableSetupD_Long and setupD_Long) or (enableSetupE_Long and setupE_Long) or (enableSetupF_Long and setupF_Long) or (enableSetupG_Long and setupG_Long)
+anySetupShort = (enableSetupA_Short and setupA_Short) or (enableSetupB_Short and setupB_Short) or (enableSetupC_Short and setupC_Short) or (enableSetupD_Short and setupD_Short) or (enableSetupE_Short and setupE_Short) or (enableSetupF_Short and setupF_Short) or (enableSetupG_Short and setupG_Short)
+
+f_setupName(a, b, c, d, e, f, g) =>
+    a ? "A: Trend Continuation" : b ? "B: Confirmed Breakout" : c ? "C: Breakout and Retest" : d ? "D: Reversal" : e ? "E: Volatility Compression/Expansion" : f ? "F: EMA Pullback Continuation" : g ? "G: Failed Breakout" : "-"
+
+f_setupIdx(a, b, c, d, e, f, g) =>
+    a ? 0 : b ? 1 : c ? 2 : d ? 3 : e ? 4 : f ? 5 : g ? 6 : -1
+
+firedSetupLong  = f_setupName(enableSetupA_Long and setupA_Long, enableSetupB_Long and setupB_Long, enableSetupC_Long and setupC_Long, enableSetupD_Long and setupD_Long, enableSetupE_Long and setupE_Long, enableSetupF_Long and setupF_Long, enableSetupG_Long and setupG_Long)
+firedSetupShort = f_setupName(enableSetupA_Short and setupA_Short, enableSetupB_Short and setupB_Short, enableSetupC_Short and setupC_Short, enableSetupD_Short and setupD_Short, enableSetupE_Short and setupE_Short, enableSetupF_Short and setupF_Short, enableSetupG_Short and setupG_Short)
+
+// ============================= PER-DIRECTION STATISTICS (declared early — needed for auto-disable gating below) =============================
+var int longTradeCount = 0
+var int longWinCount = 0
+var float longNetPnL = 0.0
+var int shortTradeCount = 0
+var int shortWinCount = 0
+var float shortNetPnL = 0.0
+var int longConsecLosses = 0
+var int shortConsecLosses = 0
+var float longGrossProfit = 0.0
+var float longGrossLoss = 0.0
+var float shortGrossProfit = 0.0
+var float shortGrossLoss = 0.0
+longPF = longGrossLoss != 0 ? longGrossProfit / longGrossLoss : na
+shortPF = shortGrossLoss != 0 ? shortGrossProfit / shortGrossLoss : na
+directionLongBlocked  = autoDisableWeakDirection and longTradeCount  >= autoDisableMinTrades and (longNetPnL  <= 0 or (not na(longPF)  and longPF  < autoDisableMinProfitFactor) or longConsecLosses  >= autoDisableMaxConsecLosses)
+directionShortBlocked = autoDisableWeakDirection and shortTradeCount >= autoDisableMinTrades and (shortNetPnL <= 0 or (not na(shortPF) and shortPF < autoDisableMinProfitFactor) or shortConsecLosses >= autoDisableMaxConsecLosses)
+
+// ============================= FORWARD-TEST STATISTICS (Step 16.5) =============================
+var int fwdSignalsTotal = 0
+var int fwdConfirmedTrades = 0
+var int fwdRejectedSignals = 0
+var int fwdExpiredSetups = 0
+var int fwdLongTrades = 0
+var int fwdShortTrades = 0
+var int fwdWinCount = 0
+var float fwdGrossProfit = 0.0
+var float fwdGrossLoss = 0.0
+var float fwdEquityPeak = na
+var float fwdMaxDD = 0.0
+var float fwdSumConfirmDelay = 0.0
+var int fwdConfirmDelayCount = 0
+fwdWinRate = fwdConfirmedTrades > 0 ? fwdWinCount / fwdConfirmedTrades * 100 : na
+fwdProfitFactor = fwdGrossLoss != 0 ? fwdGrossProfit / fwdGrossLoss : na
+fwdExpectancy = fwdConfirmedTrades > 0 ? (fwdGrossProfit - fwdGrossLoss) / fwdConfirmedTrades : na
+fwdAvgConfirmDelay = fwdConfirmDelayCount > 0 ? fwdSumConfirmDelay / fwdConfirmDelayCount : na
+
+// ============================= SETUP FREQUENCY ANALYSIS (whole backtest, not just forward-test) =============
+var int totalSetupsDetected = 0
+var int totalSetupsExpiredAll = 0
+var float sumConfirmDelayAll = 0.0
+var int confirmDelayCountAll = 0
+var float sumSetupAgeAll = 0.0
+var int setupAgeCountAll = 0
+var int isTradeCount = 0
+var int oosTradeCount = 0
+confirmedSetupsTotal = longTradeCount + shortTradeCount
+setupConfirmationRate = totalSetupsDetected > 0 ? confirmedSetupsTotal / totalSetupsDetected * 100 : na
+avgConfirmationDelayAll = confirmDelayCountAll > 0 ? sumConfirmDelayAll / confirmDelayCountAll : na
+avgSetupAgeAll = setupAgeCountAll > 0 ? sumSetupAgeAll / setupAgeCountAll : na
+signalsPer100Candles = bar_index > 0 ? totalSetupsDetected / (bar_index + 1) * 100 : na
+barsPerMonthEstimate = 30.0 * 24.0 * 60.0 / math.max(timeframe.in_seconds() / 60.0, 0.001)
+tradesPerMonthEstimate = bar_index > 0 ? confirmedSetupsTotal / (bar_index + 1) * barsPerMonthEstimate : na
+
+// ============================= REJECTED-SIGNAL TRACKING (declared early, used below) =============
+REJ_RISKLOCK = 0
+REJ_REGIME = 1
+REJ_SCORE = 2
+REJ_EXHAUSTION = 3
+REJ_COOLDOWN = 4
+REJ_DIRECTION = 5
+REJ_OTHER = 6
+var array<int> rejectReasonCount = array.new<int>(7, 0)
+var int rejectedSignalsTotal = 0
+
+// ============================= COOLDOWN / SIGNAL BOOKKEEPING =============================
+var int lastExitBar = na
+var int lastSignalBar = na
+barsSinceExit   = na(lastExitBar) ? 999999 : bar_index - lastExitBar
+barsSinceSignal = na(lastSignalBar) ? 999999 : bar_index - lastSignalBar
+cooldownOK     = barsSinceExit >= finalCooldownBars
+flipCooldownOK = barsSinceSignal >= flipCooldownBars
+
+longTrigger  = anySetupLong
+shortTrigger = anySetupShort
+
+baseLongOK  = inWindow and not tf15mBlocked and not riskLockActive and enableLongTrades  and not directionLongBlocked  and confirmGate and longTrigger  and bullCandle and cooldownOK and flipCooldownOK and strategy.position_size <= 0 and not buyingExhaustion  and not regimeBlocksAll and (regimeAllowsLong  or longCountertrendOK) and falseSignalFiltersLongOK
+baseShortOK = inWindow and not tf15mBlocked and not riskLockActive and enableShortTrades and not directionShortBlocked and confirmGate and shortTrigger and bearCandle and cooldownOK and flipCooldownOK and strategy.position_size >= 0 and not sellingExhaustion and not regimeBlocksAll and (regimeAllowsShort or shortCountertrendOK) and falseSignalFiltersShortOK
+
+longSignalHigh  = baseLongOK  and trendUp   and longScore  >= finalScoreValidMinLong
+shortSignalHigh = baseShortOK and trendDown and shortScore >= finalScoreValidMinShort
+
+longSignalCounter  = enableCountertrend and baseLongOK  and not trendUp   and longCountertrendOK  and longScore  >= scoreHighConvictionMinLong
+shortSignalCounter = enableCountertrend and baseShortOK and not trendDown and shortCountertrendOK and shortScore >= scoreHighConvictionMinShort
+
+longSignal  = longSignalHigh  or longSignalCounter
+shortSignal = shortSignalHigh or shortSignalCounter
+
+conflictDetected = longSignal and shortSignal
+longSignal  := conflictDetected ? false : longSignal
+shortSignal := conflictDetected ? false : shortSignal
+
+finalLongEntryConfirmed  = longSignal
+finalShortEntryConfirmed = shortSignal
+
+isLongCountertrend  = longSignalCounter  and not longSignalHigh
+isShortCountertrend = shortSignalCounter and not shortSignalHigh
+
+candidateLong  = baseLongOK  and (trendUp   or longCountertrendOK) and longScore  >= scoreObservationMin
+candidateShort = baseShortOK and (trendDown or shortCountertrendOK) and shortScore >= scoreObservationMin
+
+// ============================= REJECTED-SIGNAL TRACKING =============================
+longTriggerNoSignal  = barstate.isconfirmed and inWindow and not tf15mBlocked and longTrigger  and bullCandle and strategy.position_size <= 0 and not finalLongEntryConfirmed
+shortTriggerNoSignal = barstate.isconfirmed and inWindow and not tf15mBlocked and shortTrigger and bearCandle and strategy.position_size >= 0 and not finalShortEntryConfirmed
+
+f_rejectReason(riskLock, directionOff, regimeBlock, regimeMismatch, exhaustion, cooldownBad, score, scoreMin) =>
+    riskLock ? REJ_RISKLOCK : directionOff ? REJ_DIRECTION : regimeBlock ? REJ_REGIME : regimeMismatch ? REJ_REGIME :
+     exhaustion ? REJ_EXHAUSTION : cooldownBad ? REJ_COOLDOWN : score < scoreMin ? REJ_SCORE : REJ_OTHER
+
+if longTriggerNoSignal
+    longRejReasonIdx = f_rejectReason(riskLockActive, not enableLongTrades or directionLongBlocked, regimeBlocksAll, not (regimeAllowsLong or longCountertrendOK), buyingExhaustion, not (cooldownOK and flipCooldownOK), longScore, finalScoreValidMinLong)
+    array.set(rejectReasonCount, longRejReasonIdx, array.get(rejectReasonCount, longRejReasonIdx) + 1)
+    rejectedSignalsTotal := rejectedSignalsTotal + 1
+    if barstate.isrealtime
+        fwdRejectedSignals := fwdRejectedSignals + 1
+    alert(f_alertMsg("Long Entry Rejected", "LONG", firedSetupLong, marketRegime, longScore, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+if shortTriggerNoSignal
+    shortRejReasonIdx = f_rejectReason(riskLockActive, not enableShortTrades or directionShortBlocked, regimeBlocksAll, not (regimeAllowsShort or shortCountertrendOK), sellingExhaustion, not (cooldownOK and flipCooldownOK), shortScore, finalScoreValidMinShort)
+    array.set(rejectReasonCount, shortRejReasonIdx, array.get(rejectReasonCount, shortRejReasonIdx) + 1)
+    rejectedSignalsTotal := rejectedSignalsTotal + 1
+    if barstate.isrealtime
+        fwdRejectedSignals := fwdRejectedSignals + 1
+    alert(f_alertMsg("Short Entry Rejected", "SHORT", firedSetupShort, marketRegime, shortScore, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+
+// ============================= POSITION STATE =============================
+var float entryPrice    = na
+var float entryStopInit = na
+var float entryStop     = na
+var float entryTP       = na
+var line  entryLine     = na
+var line  slLine        = na
+var line  tpLine        = na
+var float posHighest    = na
+var float posLowest     = na
+var bool  partialDone   = false
+var bool  breakevenFired = false
+var bool  trailingActivatedFired = false
+var float entryEquitySnapshot = na
+var int   activeSetupIdx = -1
+var string activeSetupName = "-"
+var string lastExitReason = "-"
+var bool lastExitWasLong = false
+var string currentSignalId = "-"
+var float entryQtySnapshot = na
+var string lastExecutionQuality = "-"
+var string activeEntrySamplePeriod = "-"
+var string lastFSMDirection = "-"
+var array<label> entryLabelIds = array.new<label>(0)
+var array<label> exitLabelIds  = array.new<label>(0)
+f_recycleLabels(arr, maxCount) =>
+    while array.size(arr) > maxCount
+        oldLbl = array.shift(arr)
+        label.delete(oldLbl)
+
+// ============================= PER-SETUP STATISTICS =============================
+var array<int>   setupTradeCount = array.new<int>(7, 0)
+var array<float> setupNetPnL     = array.new<float>(7, 0.0)
+var array<int>   setupWinCount   = array.new<int>(7, 0)
+var array<float> setupGrossProfit = array.new<float>(7, 0.0)
+var array<float> setupGrossLoss   = array.new<float>(7, 0.0)
+
+g_weaksetup = "Weak Setup Warning Thresholds"
+weakSetupMinProfitFactor = input.float(1.1, "Weak Setup Warning: minimum acceptable profit factor", group=g_weaksetup)
+weakSetupMinSample       = input.int(10, "Weak Setup Warning: minimum trades before judging", group=g_weaksetup)
+weakSetupMaxDrawdownPct  = input.float(15.0, "Weak Setup Warning: maximum acceptable share of total losses (%)", group=g_weaksetup)
+
+f_setupPF(idx) =>
+    gl = array.get(setupGrossLoss, idx)
+    gl != 0 ? array.get(setupGrossProfit, idx) / gl : na
+
+f_bestSetupPFName() =>
+    bestIdx = -1
+    bestPF = -1e10
+    for i = 0 to 6
+        pf = f_setupPF(i)
+        cnt = array.get(setupTradeCount, i)
+        if cnt >= weakSetupMinSample and not na(pf) and pf > bestPF
+            bestPF := pf
+            bestIdx := i
+    bestIdx == 0 ? "A" : bestIdx == 1 ? "B" : bestIdx == 2 ? "C" : bestIdx == 3 ? "D" : bestIdx == 4 ? "E" : bestIdx == 5 ? "F" : bestIdx == 6 ? "G" : "-"
+
+f_worstSetupPFName() =>
+    worstIdx = -1
+    worstPF = 1e10
+    for i = 0 to 6
+        pf = f_setupPF(i)
+        cnt = array.get(setupTradeCount, i)
+        if cnt >= weakSetupMinSample and not na(pf) and pf < worstPF
+            worstPF := pf
+            worstIdx := i
+    worstIdx == 0 ? "A" : worstIdx == 1 ? "B" : worstIdx == 2 ? "C" : worstIdx == 3 ? "D" : worstIdx == 4 ? "E" : worstIdx == 5 ? "F" : worstIdx == 6 ? "G" : "-"
+
+f_setupWeakWarning(idx) =>
+    cnt = array.get(setupTradeCount, idx)
+    pnl = array.get(setupNetPnL, idx)
+    pf = f_setupPF(idx)
+    setupLossShare = strategy.grossloss != 0 ? array.get(setupGrossLoss, idx) / strategy.grossloss * 100 : 0.0
+    cnt < weakSetupMinSample ? "Insufficient Sample" :
+     pnl < 0 ? "Negative Expectancy" :
+     (not na(pf) and pf < weakSetupMinProfitFactor) ? "Profit Factor Below Minimum" :
+     setupLossShare > weakSetupMaxDrawdownPct ? "Excessive Share of Total Losses" :
+     "OK"
+
+f_anyWeakSetupSummary() =>
+    txt = ""
+    for i = 0 to 6
+        w = f_setupWeakWarning(i)
+        if w != "OK" and w != "Insufficient Sample"
+            nm = i == 0 ? "A" : i == 1 ? "B" : i == 2 ? "C" : i == 3 ? "D" : i == 4 ? "E" : i == 5 ? "F" : "G"
+            txt := txt + nm + ":" + w + " "
+    txt == "" ? "No weak setups flagged" : txt
+
+// ============================= EXIT-REASON / EXPOSURE / SCORE-BAND / REGIME STATS =============
+EXIT_STOP = 0
+EXIT_TP = 1
+EXIT_TRAIL = 2
+EXIT_REGIME = 3
+EXIT_INVALID = 4
+EXIT_TIME = 5
+EXIT_MOMENTUM = 6
+EXIT_OPPOSITE = 7
+EXIT_DAILY = 8
+EXIT_MAXDD = 9
+EXIT_EMERGENCY = 10
+var array<int> exitReasonCount = array.new<int>(11, 0)
+var int cnt_Partial = 0
+var int cnt_ReachedBreakeven = 0
+var int cnt_Reached1R   = 0
+var int cnt_Reached1_5R = 0
+var int cnt_Reached2R   = 0
+var float sumMAEToStopRatio = 0.0
+var int maeRatioCount = 0
+STOP_EFF_MIN_SAMPLE = 15
+
+f_exitReasonIdx(reason) =>
+    reason == "Stop Loss" ? EXIT_STOP : reason == "Take Profit" ? EXIT_TP : reason == "Trailing Stop" ? EXIT_TRAIL :
+     reason == "Regime Change" ? EXIT_REGIME : reason == "Setup Invalidation" ? EXIT_INVALID :
+
+     reason == "Time Exit" ? EXIT_TIME : reason == "Momentum Loss" ? EXIT_MOMENTUM :
+     reason == "Opposite Signal" ? EXIT_OPPOSITE : reason == "Daily Risk Limit" ? EXIT_DAILY :
+     reason == "Maximum Drawdown Lock" ? EXIT_MAXDD : EXIT_EMERGENCY
+
+var int barsInPosition = 0
+barsInPosition := strategy.position_size != 0 ? barsInPosition + 1 : barsInPosition
+exposurePct = bar_index > 0 ? barsInPosition / (bar_index + 1) * 100 : 0.0
+
+var float sumEntryScore = 0.0
+var int entryScoreCount = 0
+avgEntryScore = entryScoreCount > 0 ? sumEntryScore / entryScoreCount : na
+
+var float activeEntryScore = na
+var string activeEntryRegime = "-"
+var array<float> scoreBandPnL   = array.new<float>(3, 0.0)
+var array<int>   scoreBandCount = array.new<int>(3, 0)
+f_scoreBandIdx(score) =>
+    score >= scoreHighConvictionMin ? 2 : score >= scoreValidMin ? 1 : 0
+
+var float activeTradeQualityScore = na
+var array<float> qualityBandPnL   = array.new<float>(5, 0.0)
+var array<int>   qualityBandCount = array.new<int>(5, 0)
+
+var array<float> regimePnL       = array.new<float>(7, 0.0)
+var array<int>   regimeTradeCount = array.new<int>(7, 0)
+f_regimeIdx(regime) =>
+    regime == REGIME_STRONG_BULL ? 0 : regime == REGIME_BULL ? 1 : regime == REGIME_CONSOL ? 2 :
+     regime == REGIME_BEAR ? 3 : regime == REGIME_STRONG_BEAR ? 4 : regime == REGIME_ABNORMAL ? 5 : 6
+
+g_overfit = "Overfitting Detection Thresholds (Step 15.4)"
+overfitProfitConcentrationPct = input.float(80.0, "Flag if one setup contributes more than this % of total net profit", group=g_overfit)
+overfitCostRatioPct = input.float(50.0, "Flag if commission+slippage consume more than this % of gross profit", group=g_overfit)
+
+var float isNetPnL = 0.0
+var float oosNetPnL = 0.0
+
+f_topSetupPnLShare() =>
+    total = 0.0
+    top = 0.0
+    for i = 0 to 6
+        pnl = array.get(setupNetPnL, i)
+        total := total + math.abs(pnl)
+        if pnl > top
+            top := pnl
+    total > 0 ? top / total * 100 : 0.0
+
+// ============================= ENTRIES =============================
+if finalLongEntryConfirmed and strategy.position_size < 0
+    strategy.close("Short", comment="Flip to Long")
+if finalShortEntryConfirmed and strategy.position_size > 0
+    strategy.close("Long", comment="Flip to Short")
+
+if finalLongEntryConfirmed
+    slMult    = isLongCountertrend ? countertrendSLMult : finalAtrSLMultLong
+    riskPct   = isLongCountertrend ? countertrendRiskPct : riskPctLong
+    rrUsed    = isLongCountertrend ? minRR : finalMinRRLong
+    atrStopDist    = atrVal * slMult
+    structStopDist = (close - recentSwingLow) + atrVal * structureStopBufferATR
+    emaStopDist    = (close - entryEmaFast) + atrVal * structureStopBufferATR
+    swingStopDist  = close - recentSwingLow
+    volAdjStopDist = atrStopDist * math.max(volAdjStopMinMult, math.min(volAdjStopMaxMult, atrRatio))
+    stopDist  = stopLossModel == "ATR" ? atrStopDist :
+         stopLossModel == "Structure" ? structStopDist :
+         stopLossModel == "EMA-Based" ? math.max(emaStopDist, atrVal * 0.5) :
+         stopLossModel == "Swing-Based" ? math.max(swingStopDist, atrVal * 0.3) :
+         stopLossModel == "Volatility-Adjusted" ? volAdjStopDist :
+         math.max(atrStopDist, structStopDist)
+    stopPrice = close - stopDist
+    atrTargetDist = atrVal * atrTargetMult
+    structTargetDist = recentSwingHigh - close
+    bbTargetDist = bbUpper - close
+    tpDist = takeProfitModel == "ATR Target" ? math.max(atrTargetDist, stopDist * rrUsed) :
+         takeProfitModel == "Structure Target" ? math.max(structTargetDist, stopDist * rrUsed) :
+         takeProfitModel == "Bollinger Band Target" ? math.max(bbTargetDist, stopDist * rrUsed) :
+         stopDist * rrUsed
+    tpPrice   = close + tpDist
+    riskAmt   = strategy.equity * riskPct / 100
+    qty       = riskAmt / stopDist
+    maxNotional = strategy.equity * maxLeverage
+    if qty * close > maxNotional
+        qty := maxNotional / close
+    if qty > maxPositionQty
+        qty := maxPositionQty
+    strategy.entry("Long", strategy.long, qty=qty)
+    entryPrice := close
+    entryStopInit := stopPrice
+    entryStop := stopPrice
+    entryTP := tpPrice
+    if showEntryLine or showStopLossLine or showTakeProfitLine
+        line.delete(entryLine)
+        line.delete(slLine)
+        line.delete(tpLine)
+        entryLine := showEntryLine ? line.new(bar_index, entryPrice, bar_index, entryPrice, color=color.blue, width=1) : na
+        slLine := showStopLossLine ? line.new(bar_index, entryStop, bar_index, entryStop, color=color.red, width=1, style=line.style_dashed) : na
+        tpLine := showTakeProfitLine ? line.new(bar_index, entryTP, bar_index, entryTP, color=color.green, width=1, style=line.style_dashed) : na
+    posHighest := high
+    posLowest := na
+    partialDone := false
+    breakevenFired := false
+    trailingActivatedFired := false
+    entryEquitySnapshot := strategy.equity
+    entryQtySnapshot := qty
+    activeSetupIdx := f_setupIdx(enableSetupA_Long and setupA_Long, enableSetupB_Long and setupB_Long, enableSetupC_Long and setupC_Long, enableSetupD_Long and setupD_Long, enableSetupE_Long and setupE_Long, enableSetupF_Long and setupF_Long, enableSetupG_Long and setupG_Long)
+    activeSetupName := firedSetupLong
+    activeEntryScore := longScore
+    activeTradeQualityScore := longTradeQualityScore
+    activeEntryRegime := marketRegime
+    activeEntrySamplePeriod := samplePeriod
+    currentSignalId := str.tostring(bar_index) + "-" + syminfo.ticker + "-" + timeframe.period
+    sumEntryScore := sumEntryScore + longScore
+    entryScoreCount := entryScoreCount + 1
+    lastSignalBar := bar_index
+    tradesToday := tradesToday + 1
+    if barstate.isrealtime
+        fwdSignalsTotal := fwdSignalsTotal + 1
+        fwdConfirmedTrades := fwdConfirmedTrades + 1
+        fwdLongTrades := fwdLongTrades + 1
+    alert(f_alertMsg("Long Entry Confirmed", "LONG", firedSetupLong, marketRegime, longScore, stopPrice, tpPrice, rrUsed, riskPct, close, true), alert.freq_once_per_bar_close)
+
+if finalShortEntryConfirmed
+    slMult    = isShortCountertrend ? countertrendSLMult : finalAtrSLMultShort
+    riskPct   = isShortCountertrend ? countertrendRiskPct : riskPctShort
+    rrUsed    = isShortCountertrend ? minRR : finalMinRRShort
+    atrStopDist    = atrVal * slMult
+    structStopDist = (recentSwingHigh - close) + atrVal * structureStopBufferATR
+    emaStopDist    = (entryEmaFast - close) + atrVal * structureStopBufferATR
+    swingStopDist  = recentSwingHigh - close
+    volAdjStopDist = atrStopDist * math.max(volAdjStopMinMult, math.min(volAdjStopMaxMult, atrRatio))
+    stopDist  = stopLossModel == "ATR" ? atrStopDist :
+         stopLossModel == "Structure" ? structStopDist :
+         stopLossModel == "EMA-Based" ? math.max(emaStopDist, atrVal * 0.5) :
+         stopLossModel == "Swing-Based" ? math.max(swingStopDist, atrVal * 0.3) :
+         stopLossModel == "Volatility-Adjusted" ? volAdjStopDist :
+         math.max(atrStopDist, structStopDist)
+    stopPrice = close + stopDist
+    atrTargetDist = atrVal * atrTargetMult
+    structTargetDist = close - recentSwingLow
+    bbTargetDist = close - bbLower
+    tpDist = takeProfitModel == "ATR Target" ? math.max(atrTargetDist, stopDist * rrUsed) :
+         takeProfitModel == "Structure Target" ? math.max(structTargetDist, stopDist * rrUsed) :
+         takeProfitModel == "Bollinger Band Target" ? math.max(bbTargetDist, stopDist * rrUsed) :
+         stopDist * rrUsed
+    tpPrice   = close - tpDist
+    riskAmt   = strategy.equity * riskPct / 100
+    qty       = riskAmt / stopDist
+    maxNotional = strategy.equity * maxLeverage
+    if qty * close > maxNotional
+        qty := maxNotional / close
+    if qty > maxPositionQty
+        qty := maxPositionQty
+    strategy.entry("Short", strategy.short, qty=qty)
+    entryPrice := close
+    entryStopInit := stopPrice
+    entryStop := stopPrice
+    entryTP := tpPrice
+    if showEntryLine or showStopLossLine or showTakeProfitLine
+        line.delete(entryLine)
+        line.delete(slLine)
+        line.delete(tpLine)
+        entryLine := showEntryLine ? line.new(bar_index, entryPrice, bar_index, entryPrice, color=color.blue, width=1) : na
+        slLine := showStopLossLine ? line.new(bar_index, entryStop, bar_index, entryStop, color=color.red, width=1, style=line.style_dashed) : na
+        tpLine := showTakeProfitLine ? line.new(bar_index, entryTP, bar_index, entryTP, color=color.green, width=1, style=line.style_dashed) : na
+    posLowest := low
+    posHighest := na
+    partialDone := false
+    breakevenFired := false
+    trailingActivatedFired := false
+    entryEquitySnapshot := strategy.equity
+    entryQtySnapshot := qty
+    activeSetupIdx := f_setupIdx(enableSetupA_Short and setupA_Short, enableSetupB_Short and setupB_Short, enableSetupC_Short and setupC_Short, enableSetupD_Short and setupD_Short, enableSetupE_Short and setupE_Short, enableSetupF_Short and setupF_Short, enableSetupG_Short and setupG_Short)
+    activeSetupName := firedSetupShort
+    activeEntryScore := shortScore
+    activeTradeQualityScore := shortTradeQualityScore
+    activeEntryRegime := marketRegime
+    activeEntrySamplePeriod := samplePeriod
+    currentSignalId := str.tostring(bar_index) + "-" + syminfo.ticker + "-" + timeframe.period
+    sumEntryScore := sumEntryScore + shortScore
+    entryScoreCount := entryScoreCount + 1
+    lastSignalBar := bar_index
+    tradesToday := tradesToday + 1
+    if barstate.isrealtime
+        fwdSignalsTotal := fwdSignalsTotal + 1
+        fwdConfirmedTrades := fwdConfirmedTrades + 1
+        fwdShortTrades := fwdShortTrades + 1
+    alert(f_alertMsg("Short Entry Confirmed", "SHORT", firedSetupShort, marketRegime, shortScore, stopPrice, tpPrice, rrUsed, riskPct, close, true), alert.freq_once_per_bar_close)
+
+// ============================= MANAGE OPEN POSITION =============================
+if strategy.position_size > 0
+    posHighest := math.max(nz(posHighest, high), high)
+    rMultiple = (close - entryPrice) / (entryPrice - entryStopInit)
+    if enableBreakeven and rMultiple >= finalBreakevenTriggerR and not breakevenFired
+        entryStop := math.max(entryStop, entryPrice)
+        breakevenFired := true
+        alert(f_alertMsg("Break-Even Activated", "LONG", activeSetupName, marketRegime, longScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+    if rMultiple >= finalPartialTriggerR and not partialDone
+        strategy.close("Long", qty_percent=partialClosePct, comment="Partial " + str.tostring(finalPartialTriggerR, "#.##") + "R")
+        partialDone := true
+        cnt_Partial := cnt_Partial + 1
+        alert(f_alertMsg("Partial Profit Triggered", "LONG", activeSetupName, marketRegime, longScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+    if rMultiple >= finalPartialTriggerR
+        if not trailingActivatedFired
+            trailingActivatedFired := true
+            alert(f_alertMsg("Trailing Stop Activated", "LONG", activeSetupName, marketRegime, longScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+        chLevel = posHighest - atrVal * finalTrailAtrMult
+        entryStop := math.max(entryStop, chLevel)
+        strategy.exit("Long Exit", from_entry="Long", stop=entryStop)
+    else
+        strategy.exit("Long Exit", from_entry="Long", stop=entryStop, limit=entryTP)
+
+if strategy.position_size < 0
+    posLowest := math.min(nz(posLowest, low), low)
+    rMultiple = (entryPrice - close) / (entryStopInit - entryPrice)
+    if enableBreakeven and rMultiple >= finalBreakevenTriggerR and not breakevenFired
+        entryStop := math.min(entryStop, entryPrice)
+        breakevenFired := true
+        alert(f_alertMsg("Break-Even Activated", "SHORT", activeSetupName, marketRegime, shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+    if rMultiple >= finalPartialTriggerR and not partialDone
+        strategy.close("Short", qty_percent=partialClosePct, comment="Partial " + str.tostring(finalPartialTriggerR, "#.##") + "R")
+        partialDone := true
+        cnt_Partial := cnt_Partial + 1
+        alert(f_alertMsg("Partial Profit Triggered", "SHORT", activeSetupName, marketRegime, shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+    if rMultiple >= finalPartialTriggerR
+        if not trailingActivatedFired
+            trailingActivatedFired := true
+            alert(f_alertMsg("Trailing Stop Activated", "SHORT", activeSetupName, marketRegime, shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+        chLevel = posLowest + atrVal * finalTrailAtrMult
+        entryStop := math.min(entryStop, chLevel)
+        strategy.exit("Short Exit", from_entry="Short", stop=entryStop)
+    else
+        strategy.exit("Short Exit", from_entry="Short", stop=entryStop, limit=entryTP)
+
+// ============================= ADDITIONAL EXIT MODELS =============================
+var bool exitReasonSetThisBar = false
+exitReasonSetThisBar := false
+
+regimeTurnedBearish   = strategy.position_size > 0 and (marketRegime == REGIME_BEAR or marketRegime == REGIME_STRONG_BEAR)
+regimeTurnedBullish   = strategy.position_size < 0 and (marketRegime == REGIME_STRONG_BULL or marketRegime == REGIME_BULL)
+setupInvalidatedLong  = strategy.position_size > 0 and trendScoreLong == 0
+setupInvalidatedShort = strategy.position_size < 0 and trendScoreShort == 0
+timeExitLong          = strategy.position_size > 0 and (bar_index - lastSignalBar) >= finalMaxBarsInTrade
+timeExitShort         = strategy.position_size < 0 and (bar_index - lastSignalBar) >= finalMaxBarsInTrade
+rsiCrossUnder50       = ta.crossunder(rsiVal, 50)
+rsiCrossOver50        = ta.crossover(rsiVal, 50)
+momentumLossLong      = strategy.position_size > 0 and rsiCrossUnder50
+momentumLossShort     = strategy.position_size < 0 and rsiCrossOver50
+volCollapseExit       = strategy.position_size != 0 and bbWidthPct < consolidationBBWidthPct
+emergencyCondition    = strategy.position_size != 0 and atrRatio > (finalAbnormalVolMult * 1.5)
+
+if barstate.isconfirmed and enableEmergencyExit and emergencyCondition
+    posDir = strategy.position_size > 0 ? "LONG" : "SHORT"
+    strategy.close_all(comment="Emergency Exit")
+    lastExitReason := "Emergency Exit"
+    exitReasonSetThisBar := true
+    alert(f_alertMsg("Emergency Exit", posDir, activeSetupName, marketRegime, strategy.position_size > 0 ? longScore : shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and not exitReasonSetThisBar and (dailyLossLockActive or drawdownLockActive) and strategy.position_size != 0
+    lockReason = drawdownLockActive ? "Maximum Drawdown Lock" : "Daily Risk Limit"
+    strategy.close_all(comment=lockReason)
+    lastExitReason := lockReason
+    exitReasonSetThisBar := true
+    alert(f_alertMsg(lockReason, strategy.position_size > 0 ? "LONG" : "SHORT", activeSetupName, marketRegime, strategy.position_size > 0 ? longScore : shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and not exitReasonSetThisBar and exitOnRegimeChange and (regimeTurnedBearish or regimeTurnedBullish)
+    strategy.close_all(comment="Regime Change")
+    lastExitReason := "Regime Change"
+    exitReasonSetThisBar := true
+    alert(f_alertMsg("Exit Due to Regime Change", strategy.position_size > 0 ? "LONG" : "SHORT", activeSetupName, marketRegime, strategy.position_size > 0 ? longScore : shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and not exitReasonSetThisBar and exitOnSetupInvalidation and (setupInvalidatedLong or setupInvalidatedShort)
+    strategy.close_all(comment="Setup Invalidation")
+    lastExitReason := "Setup Invalidation"
+    exitReasonSetThisBar := true
+    alert(f_alertMsg("Exit Due to Setup Invalidation", strategy.position_size > 0 ? "LONG" : "SHORT", activeSetupName, marketRegime, strategy.position_size > 0 ? longScore : shortScore, entryStop, entryTP, minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and not exitReasonSetThisBar and finalExitOnTimeLimit and (timeExitLong or timeExitShort)
+    strategy.close_all(comment="Time Exit")
+    lastExitReason := "Time Exit"
+    exitReasonSetThisBar := true
+
+if barstate.isconfirmed and not exitReasonSetThisBar and finalExitOnMomentumLoss and (momentumLossLong or momentumLossShort)
+    strategy.close_all(comment="Momentum Loss")
+    lastExitReason := "Momentum Loss"
+    exitReasonSetThisBar := true
+
+if barstate.isconfirmed and not exitReasonSetThisBar and exitOnVolCollapse and volCollapseExit
+    strategy.close_all(comment="Volatility Collapse")
+    lastExitReason := "Volatility Collapse"
+    exitReasonSetThisBar := true
+
+if barstate.isconfirmed and not exitReasonSetThisBar and exitOnOppositeSignal and strategy.position_size > 0 and candidateShort and not finalShortEntryConfirmed
+    strategy.close("Long", comment="Opposite Signal")
+    lastExitReason := "Opposite Signal"
+
+    exitReasonSetThisBar := true
+if barstate.isconfirmed and not exitReasonSetThisBar and exitOnOppositeSignal and strategy.position_size < 0 and candidateLong and not finalLongEntryConfirmed
+    strategy.close("Short", comment="Opposite Signal")
+    lastExitReason := "Opposite Signal"
+    exitReasonSetThisBar := true
+
+if strategy.position_size != 0
+    if not na(entryLine)
+        line.set_xy2(entryLine, bar_index, entryPrice)
+    if not na(slLine)
+        line.set_xy2(slLine, bar_index, entryStop)
+    if not na(tpLine)
+        line.set_xy2(tpLine, bar_index, entryTP)
+var bool justExited = false
+var array<string> recentTradesLog = array.new<string>(0)
+justExited := false
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    wasLong = strategy.position_size[1] > 0
+    tradePnL = na(entryEquitySnapshot) ? 0.0 : strategy.equity - entryEquitySnapshot
+    if not exitReasonSetThisBar
+        lastExitReason := trailingActivatedFired ? "Trailing Stop" : (tradePnL >= 0 ? "Take Profit" : "Stop Loss")
+    exitReasonIdxFinal = f_exitReasonIdx(lastExitReason)
+    array.set(exitReasonCount, exitReasonIdxFinal, array.get(exitReasonCount, exitReasonIdxFinal) + 1)
+    if wasLong
+        longTradeCount := longTradeCount + 1
+        longNetPnL := longNetPnL + tradePnL
+        if tradePnL > 0
+            longWinCount := longWinCount + 1
+            longGrossProfit := longGrossProfit + tradePnL
+            longConsecLosses := 0
+        else
+            longGrossLoss := longGrossLoss + (-tradePnL)
+            longConsecLosses := longConsecLosses + 1
+    else
+        shortTradeCount := shortTradeCount + 1
+        shortNetPnL := shortNetPnL + tradePnL
+        if tradePnL > 0
+            shortWinCount := shortWinCount + 1
+            shortGrossProfit := shortGrossProfit + tradePnL
+            shortConsecLosses := 0
+        else
+            shortGrossLoss := shortGrossLoss + (-tradePnL)
+            shortConsecLosses := shortConsecLosses + 1
+    if activeSetupIdx >= 0
+        array.set(setupTradeCount, activeSetupIdx, array.get(setupTradeCount, activeSetupIdx) + 1)
+        array.set(setupNetPnL, activeSetupIdx, array.get(setupNetPnL, activeSetupIdx) + tradePnL)
+        if tradePnL > 0
+            array.set(setupWinCount, activeSetupIdx, array.get(setupWinCount, activeSetupIdx) + 1)
+            array.set(setupGrossProfit, activeSetupIdx, array.get(setupGrossProfit, activeSetupIdx) + tradePnL)
+        else
+            array.set(setupGrossLoss, activeSetupIdx, array.get(setupGrossLoss, activeSetupIdx) + (-tradePnL))
+    if breakevenFired
+        cnt_ReachedBreakeven := cnt_ReachedBreakeven + 1
+    if not na(activeEntryScore)
+        bandIdx = f_scoreBandIdx(activeEntryScore)
+        array.set(scoreBandCount, bandIdx, array.get(scoreBandCount, bandIdx) + 1)
+        array.set(scoreBandPnL, bandIdx, array.get(scoreBandPnL, bandIdx) + tradePnL)
+    if not na(activeTradeQualityScore)
+        qBandIdx = f_qualityBandIdx(activeTradeQualityScore)
+        array.set(qualityBandCount, qBandIdx, array.get(qualityBandCount, qBandIdx) + 1)
+        array.set(qualityBandPnL, qBandIdx, array.get(qualityBandPnL, qBandIdx) + tradePnL)
+    regIdx = f_regimeIdx(activeEntryRegime)
+    array.set(regimeTradeCount, regIdx, array.get(regimeTradeCount, regIdx) + 1)
+    array.set(regimePnL, regIdx, array.get(regimePnL, regIdx) + tradePnL)
+    if activeEntrySamplePeriod == "In-Sample"
+        isNetPnL := isNetPnL + tradePnL
+        isTradeCount := isTradeCount + 1
+    else if activeEntrySamplePeriod == "Out-of-Sample" or activeEntrySamplePeriod == "Walk-Forward Validation"
+        oosNetPnL := oosNetPnL + tradePnL
+        oosTradeCount := oosTradeCount + 1
+    intendedRiskAmt = (not na(entryQtySnapshot) and not na(entryStopInit) and not na(entryPrice)) ? math.abs(entryPrice - entryStopInit) * entryQtySnapshot : na
+    executionRatio = (not na(intendedRiskAmt) and intendedRiskAmt != 0) ? math.abs(tradePnL) / intendedRiskAmt : na
+    lastExecutionQuality := lastExitReason != "Stop Loss" ? "N/A (non-stop exit)" : na(executionRatio) ? "Invalid Simulation" : executionRatio <= 1.1 ? "Excellent" : executionRatio <= 1.5 ? "Acceptable" : "Poor"
+    if not na(entryPrice) and not na(entryStopInit) and entryPrice != entryStopInit
+        riskDist = math.abs(entryPrice - entryStopInit)
+        mfeDist  = wasLong ? (nz(posHighest, entryPrice) - entryPrice) : (entryPrice - nz(posLowest, entryPrice))
+        mfeR = riskDist != 0 ? mfeDist / riskDist : na
+        if not na(mfeR)
+            if mfeR >= 1.0
+                cnt_Reached1R := cnt_Reached1R + 1
+            if mfeR >= 1.5
+                cnt_Reached1_5R := cnt_Reached1_5R + 1
+            if mfeR >= 2.0
+                cnt_Reached2R := cnt_Reached2R + 1
+        maeDist = wasLong ? (entryPrice - nz(posLowest, entryPrice)) : (nz(posHighest, entryPrice) - entryPrice)
+        maeDistClamped = math.max(maeDist, 0.0)
+        if riskDist != 0
+            sumMAEToStopRatio := sumMAEToStopRatio + (maeDistClamped / riskDist)
+            maeRatioCount := maeRatioCount + 1
+    if barstate.isrealtime
+        if tradePnL > 0
+            fwdWinCount := fwdWinCount + 1
+            fwdGrossProfit := fwdGrossProfit + tradePnL
+        else
+            fwdGrossLoss := fwdGrossLoss + (-tradePnL)
+        fwdEquityPeak := math.max(nz(fwdEquityPeak, strategy.equity), strategy.equity)
+        if fwdEquityPeak != 0
+            fwdMaxDD := math.max(fwdMaxDD, (fwdEquityPeak - strategy.equity) / fwdEquityPeak * 100)
+    if tradePnL < 0
+        consecLosses := consecLosses + 1
+        if consecLosses >= maxConsecutiveLosses
+            lossLockoutUntilBar := bar_index + lossLockoutCooldownBars
+            alert(f_alertMsg("Maximum Consecutive Losses Reached", wasLong ? "LONG" : "SHORT", activeSetupName, marketRegime, 0.0, float(na), float(na), minRR, riskPctPerTrade, entryPrice, true), alert.freq_once_per_bar_close)
+    else
+        consecLosses := 0
+    if showDetailedTradeLabels
+        resultPct = (not na(entryEquitySnapshot) and entryEquitySnapshot != 0) ? tradePnL / entryEquitySnapshot * 100 : na
+        resultR = (not na(entryPrice) and not na(entryStopInit) and entryPrice != entryStopInit and not na(entryQtySnapshot)) ? tradePnL / (math.abs(entryPrice - entryStopInit) * entryQtySnapshot) : na
+        tradeDurationBars = na(lastSignalBar) ? na : bar_index - lastSignalBar
+        exitLbl = label.new(bar_index, close, "Exit:" + lastExitReason + " | ID:" + currentSignalId + "\nP&L:" + str.tostring(tradePnL, "#.##") + " (" + (na(resultPct) ? "-" : str.tostring(resultPct, "#.##") + "%") + ", " + (na(resultR) ? "-" : str.tostring(resultR, "#.##") + "R") + ")\nDuration:" + (na(tradeDurationBars) ? "-" : str.tostring(tradeDurationBars)) + " bars", style=wasLong ? label.style_label_down : label.style_label_up, color=color.new(tradePnL >= 0 ? color.green : color.red, 70), textcolor=color.white, size=size.tiny)
+        array.push(exitLabelIds, exitLbl)
+        f_recycleLabels(exitLabelIds, maxExitLabels)
+    tradeResultR = (not na(entryPrice) and not na(entryStopInit) and entryPrice != entryStopInit and not na(entryQtySnapshot)) ? tradePnL / (math.abs(entryPrice - entryStopInit) * entryQtySnapshot) : na
+    recentTradeEntry = (wasLong ? "L:" : "S:") + activeSetupName + " " + (tradePnL >= 0 ? "+" : "") + str.tostring(tradePnL, "#.##") + (na(tradeResultR) ? "" : "(" + str.tostring(tradeResultR, "#.##") + "R)")
+    array.push(recentTradesLog, recentTradeEntry)
+    if array.size(recentTradesLog) > 5
+        array.shift(recentTradesLog)
+    lastExitBar := bar_index
+    entryStop := na
+    entryStopInit := na
+    entryTP := na
+    entryPrice := na
+    entryEquitySnapshot := na
+    activeSetupIdx := -1
+    activeSetupName := "-"
+    activeEntryScore := na
+    activeTradeQualityScore := na
+    activeEntryRegime := "-"
+    activeEntrySamplePeriod := "-"
+    currentSignalId := "-"
+    entryQtySnapshot := na
+    lastExitWasLong := wasLong
+    justExited := true
+    alert(f_alertMsg(lastExitReason == "Stop Loss" ? "Stop Loss Triggered" : lastExitReason == "Take Profit" ? "Take Profit Triggered" : "Exit: " + lastExitReason, wasLong ? "LONG" : "SHORT", "-", marketRegime, 0.0, float(na), float(na), minRR, riskPctPerTrade, float(na), true), alert.freq_once_per_bar_close)
+
+// ============================= RISK LOCK STATE-CHANGE ALERTS =============================
+riskLockActivePrev = riskLockActive[1]
+if barstate.isconfirmed and riskLockActive and not riskLockActivePrev
+    alert(f_alertMsg("Strategy Locked (" + riskLockReason + ")", "-", "-", marketRegime, 0.0, float(na), float(na), minRR, riskPctPerTrade, float(na), true), alert.freq_once_per_bar_close)
+if barstate.isconfirmed and not riskLockActive and riskLockActivePrev
+    alert(f_alertMsg("Strategy Unlocked", "-", "-", marketRegime, 0.0, float(na), float(na), minRR, riskPctPerTrade, float(na), true), alert.freq_once_per_bar_close)
+tradesTodayLockPrev = tradesTodayLockActive[1]
+if barstate.isconfirmed and tradesTodayLockActive and not tradesTodayLockPrev
+    alert(f_alertMsg("Daily Trading Limit Reached", "-", "-", marketRegime, 0.0, float(na), float(na), minRR, riskPctPerTrade, float(na), true), alert.freq_once_per_bar_close)
+riskLimitReachedThisBar = barstate.isconfirmed and (dailyLossLockActive or drawdownLockActive or weeklyLossLockActive) and not (dailyLossLockActive[1] or drawdownLockActive[1] or weeklyLossLockActive[1])
+if riskLimitReachedThisBar
+    alert(f_alertMsg("Risk Limit Reached (" + riskLockReason + ")", "-", "-", marketRegime, 0.0, float(na), float(na), minRR, riskPctPerTrade, float(na), true), alert.freq_once_per_bar_close)
+
+// ============================= SETUP / TRADE REGIME STATE MACHINE =============================
+ST_NO_TRADE      = "NO TRADE"
+ST_WATCH_LONG    = "WATCHING LONG"
+ST_WATCH_SHORT   = "WATCHING SHORT"
+ST_PENDING_LONG  = "LONG CONFIRMATION PENDING"
+ST_PENDING_SHORT = "SHORT CONFIRMATION PENDING"
+ST_OPEN_LONG     = "OPEN LONG"
+ST_OPEN_SHORT    = "OPEN SHORT"
+ST_ACTIVE_LONG   = "LONG ACTIVE"
+ST_ACTIVE_SHORT  = "SHORT ACTIVE"
+ST_INVALID       = "SETUP INVALIDATED"
+ST_EXPIRED       = "SETUP EXPIRED"
+ST_EXIT_LONG     = "EXIT LONG"
+ST_EXIT_SHORT    = "EXIT SHORT"
+
+var string regimeState   = ST_NO_TRADE
+var int    stateBarSince = bar_index
+
+if barstate.isconfirmed
+    if finalLongEntryConfirmed
+        if regimeState == ST_PENDING_LONG or regimeState == ST_WATCH_LONG
+            if regimeState == ST_PENDING_LONG
+                fwdSumConfirmDelay := fwdSumConfirmDelay + (bar_index - stateBarSince)
+                fwdConfirmDelayCount := fwdConfirmDelayCount + 1
+                sumConfirmDelayAll := sumConfirmDelayAll + (bar_index - stateBarSince)
+                confirmDelayCountAll := confirmDelayCountAll + 1
+            sumSetupAgeAll := sumSetupAgeAll + (bar_index - stateBarSince)
+            setupAgeCountAll := setupAgeCountAll + 1
+        regimeState := ST_OPEN_LONG
+        stateBarSince := bar_index
+    else if finalShortEntryConfirmed
+        if regimeState == ST_PENDING_SHORT or regimeState == ST_WATCH_SHORT
+            if regimeState == ST_PENDING_SHORT
+                fwdSumConfirmDelay := fwdSumConfirmDelay + (bar_index - stateBarSince)
+                fwdConfirmDelayCount := fwdConfirmDelayCount + 1
+                sumConfirmDelayAll := sumConfirmDelayAll + (bar_index - stateBarSince)
+                confirmDelayCountAll := confirmDelayCountAll + 1
+            sumSetupAgeAll := sumSetupAgeAll + (bar_index - stateBarSince)
+            setupAgeCountAll := setupAgeCountAll + 1
+        regimeState := ST_OPEN_SHORT
+        stateBarSince := bar_index
+    else if justExited
+        regimeState := strategy.position_size[1] > 0 ? ST_EXIT_LONG : ST_EXIT_SHORT
+        stateBarSince := bar_index
+    else if strategy.position_size > 0
+        if regimeState != ST_ACTIVE_LONG
+            regimeState := ST_ACTIVE_LONG
+            stateBarSince := bar_index
+    else if strategy.position_size < 0
+        if regimeState != ST_ACTIVE_SHORT
+            regimeState := ST_ACTIVE_SHORT
+            stateBarSince := bar_index
+    else
+        isTransient = regimeState == ST_OPEN_LONG or regimeState == ST_OPEN_SHORT or regimeState == ST_EXIT_LONG or regimeState == ST_EXIT_SHORT or regimeState == ST_INVALID or regimeState == ST_EXPIRED
+        effState = isTransient ? ST_NO_TRADE : regimeState
+        barsInState = bar_index - stateBarSince
+        if effState == ST_WATCH_LONG or effState == ST_PENDING_LONG
+            expiryLimit = effState == ST_PENDING_LONG ? pendingExpiryBars : setupExpiryBars
+            if not (trendUp or longCountertrendOK)
+                lastFSMDirection := "LONG"
+                regimeState := ST_INVALID
+                stateBarSince := bar_index
+            else if barsInState >= expiryLimit
+                lastFSMDirection := "LONG"
+                if barstate.isrealtime
+                    fwdExpiredSetups := fwdExpiredSetups + 1
+                totalSetupsExpiredAll := totalSetupsExpiredAll + 1
+                sumSetupAgeAll := sumSetupAgeAll + barsInState
+                setupAgeCountAll := setupAgeCountAll + 1
+                regimeState := ST_EXPIRED
+                stateBarSince := bar_index
+            else if effState == ST_WATCH_LONG and candidateLong
+                regimeState := ST_PENDING_LONG
+                stateBarSince := bar_index
+        else if effState == ST_WATCH_SHORT or effState == ST_PENDING_SHORT
+            expiryLimit = effState == ST_PENDING_SHORT ? pendingExpiryBars : setupExpiryBars
+            if not (trendDown or shortCountertrendOK)
+                lastFSMDirection := "SHORT"
+                regimeState := ST_INVALID
+                stateBarSince := bar_index
+            else if barsInState >= expiryLimit
+                lastFSMDirection := "SHORT"
+                if barstate.isrealtime
+                    fwdExpiredSetups := fwdExpiredSetups + 1
+                totalSetupsExpiredAll := totalSetupsExpiredAll + 1
+                sumSetupAgeAll := sumSetupAgeAll + barsInState
+                setupAgeCountAll := setupAgeCountAll + 1
+                regimeState := ST_EXPIRED
+                stateBarSince := bar_index
+            else if effState == ST_WATCH_SHORT and candidateShort
+                regimeState := ST_PENDING_SHORT
+                stateBarSince := bar_index
+        else
+            if trendUp or longCountertrendOK
+                totalSetupsDetected := totalSetupsDetected + 1
+                regimeState := ST_WATCH_LONG
+                stateBarSince := bar_index
+            else if trendDown or shortCountertrendOK
+                totalSetupsDetected := totalSetupsDetected + 1
+                regimeState := ST_WATCH_SHORT
+                stateBarSince := bar_index
+            else if isTransient
+                regimeState := ST_NO_TRADE
+                stateBarSince := bar_index
+
+barsInStateDisp = bar_index - stateBarSince
+
+setupDirection = (regimeState == ST_WATCH_LONG or regimeState == ST_PENDING_LONG or regimeState == ST_OPEN_LONG or regimeState == ST_ACTIVE_LONG) ? "LONG" :
+     (regimeState == ST_WATCH_SHORT or regimeState == ST_PENDING_SHORT or regimeState == ST_OPEN_SHORT or regimeState == ST_ACTIVE_SHORT) ? "SHORT" : "NONE"
+
+setupIsCountertrend = (setupDirection == "LONG" and not trendUp and longCountertrendOK) or (setupDirection == "SHORT" and not trendDown and shortCountertrendOK)
+setupConfidence = setupDirection == "NONE" ? "-" : setupIsCountertrend ? "COUNTERTREND" : "HIGH CONFIDENCE"
+
+f_confirmationDetail() =>
+    not confirmGate ? "Waiting for Candle Close" :
+     not htfDataValid ? "Waiting for Higher-Timeframe Confirmation" :
+     not volConfirmed ? "Waiting for Volume Confirmation" :
+     not bbExpanding ? "Waiting for Volatility Confirmation" :
+     "Waiting for Score Confirmation"
+
+confirmationStatus =
+     regimeState == ST_PENDING_LONG  ? ("L score " + str.tostring(longScore, "#.#")  + " — bar " + str.tostring(barsInStateDisp) + "/" + str.tostring(pendingExpiryBars) + " | " + f_confirmationDetail()) :
+     regimeState == ST_PENDING_SHORT ? ("S score " + str.tostring(shortScore, "#.#") + " — bar " + str.tostring(barsInStateDisp) + "/" + str.tostring(pendingExpiryBars) + " | " + f_confirmationDetail()) :
+     regimeState == ST_WATCH_LONG    ? ("L score " + str.tostring(longScore, "#.#")  + " — waiting trigger (" + str.tostring(barsInStateDisp) + "/" + str.tostring(setupExpiryBars) + ")") :
+     regimeState == ST_WATCH_SHORT   ? ("S score " + str.tostring(shortScore, "#.#") + " — waiting trigger (" + str.tostring(barsInStateDisp) + "/" + str.tostring(setupExpiryBars) + ")") :
+     "-"
+
+regimeColor =
+     (regimeState == ST_ACTIVE_LONG or regimeState == ST_OPEN_LONG) ? color.green :
+     (regimeState == ST_ACTIVE_SHORT or regimeState == ST_OPEN_SHORT) ? color.red :
+     (regimeState == ST_WATCH_LONG or regimeState == ST_PENDING_LONG) ? color.new(color.green, 30) :
+     (regimeState == ST_WATCH_SHORT or regimeState == ST_PENDING_SHORT) ? color.new(color.red, 30) :
+     (regimeState == ST_INVALID or regimeState == ST_EXPIRED) ? color.orange :
+     (regimeState == ST_EXIT_LONG or regimeState == ST_EXIT_SHORT) ? color.yellow : color.gray
+
+setupColor = setupDirection == "LONG" ? color.green : setupDirection == "SHORT" ? color.red : color.gray
+
+// ============================= CENTRALIZED TRADE RECOMMENDATION =============================
+currentTradeAction =
+     riskLockActive ? "RISK LOCKED" :
+     justExited ? "EXIT" :
+     finalLongEntryConfirmed ? "OPEN LONG" :
+     finalShortEntryConfirmed ? "OPEN SHORT" :
+     strategy.position_size > 0 ? "MANAGE POSITION" :
+     strategy.position_size < 0 ? "MANAGE POSITION" :
+     regimeState == ST_PENDING_LONG ? "LONG CONFIRMED" :
+     regimeState == ST_PENDING_SHORT ? "SHORT CONFIRMED" :
+     regimeState == ST_WATCH_LONG ? "LONG SETUP" :
+     regimeState == ST_WATCH_SHORT ? "SHORT SETUP" :
+     (regimeAllowsLong or regimeAllowsShort) ? "WAIT" : "NO TRADE"
+currentTradeActionColor =
+     currentTradeAction == "RISK LOCKED" ? color.red :
+     currentTradeAction == "EXIT" ? color.yellow :
+     currentTradeAction == "OPEN LONG" ? color.green :
+     currentTradeAction == "OPEN SHORT" ? color.red :
+     currentTradeAction == "MANAGE POSITION" ? (strategy.position_size > 0 ? color.green : color.red) :
+     currentTradeAction == "LONG SETUP" or currentTradeAction == "LONG CONFIRMED" ? color.new(color.green, 40) :
+     currentTradeAction == "SHORT SETUP" or currentTradeAction == "SHORT CONFIRMED" ? color.new(color.red, 40) :
+     color.gray
+
+stateChangedThisBar = barstate.isconfirmed and regimeState != regimeState[1]
+if stateChangedThisBar
+    alert("MCS v4 [" + timeframe.period + "] " + syminfo.ticker + " -> " + regimeState + " (" + setupConfidence + ") @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+    if regimeState == ST_WATCH_LONG
+        alert(f_alertMsg("Long Setup Detected", "LONG", firedSetupLong, marketRegime, longScore, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+    if regimeState == ST_WATCH_SHORT
+        alert(f_alertMsg("Short Setup Detected", "SHORT", firedSetupShort, marketRegime, shortScore, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+    if regimeState == ST_PENDING_LONG
+        alert(f_alertMsg("Long Setup Under Observation", "LONG", firedSetupLong, marketRegime, longScore, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+    if regimeState == ST_PENDING_SHORT
+        alert(f_alertMsg("Short Setup Under Observation", "SHORT", firedSetupShort, marketRegime, shortScore, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+    if regimeState == ST_INVALID
+        alert(f_alertMsg("Entry Cancelled", lastFSMDirection, "-", marketRegime, 0.0, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+    if regimeState == ST_EXPIRED
+        alert(f_alertMsg(lastFSMDirection == "LONG" ? "Long Setup Expired" : "Short Setup Expired", lastFSMDirection, "-", marketRegime, 0.0, float(na), float(na), float(na), float(na), close, false), alert.freq_once_per_bar_close)
+
+abnormalVolatilityNewlyDetected = barstate.isconfirmed and abnormalVolatility and not abnormalVolatility[1]
+if abnormalVolatilityNewlyDetected
+    alert(f_alertMsg("Abnormal Volatility Detected", "-", "-", marketRegime, 0.0, float(na), float(na), float(na), float(na), close, true), alert.freq_once_per_bar_close)
+
+var bool unsupportedTFAlerted = false
+if barstate.isconfirmed and timeframeProfileWarning and not unsupportedTFAlerted
+    alert("MCS v4 | Unsupported Timeframe Detected | " + syminfo.ticker + " | TF:" + timeframe.period + " | Falling back to Manual Shared Parameters", alert.freq_once_per_bar_close)
+    unsupportedTFAlerted := true
+if not timeframeProfileWarning
+    unsupportedTFAlerted := false
+
+htfDataNewlyInvalid = barstate.isconfirmed and not htfDataValid and htfDataValid[1]
+if htfDataNewlyInvalid
+    alert("MCS v4 | Higher-Timeframe Data Not Confirmed | " + syminfo.ticker + " | TF:" + timeframe.period + " | One or more HTF EMA layers returned na (insufficient history)", alert.freq_once_per_bar_close)
+
+// ============================= ROBUSTNESS CLASSIFICATION =============================
+totalTradesClosed = strategy.closedtrades
+profitFactorCalc = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
+winRatePct = totalTradesClosed != 0 ? strategy.wintrades / totalTradesClosed * 100 : na
+expectancyPerTrade = totalTradesClosed != 0 ? strategy.netprofit / totalTradesClosed : na
+
+avgMAEToStopRatio = maeRatioCount > 0 ? sumMAEToStopRatio / maeRatioCount : na
+stopEfficiencyLabel = maeRatioCount < STOP_EFF_MIN_SAMPLE ? "Statistically Unclear" :
+     avgMAEToStopRatio <= 0.4 ? "Too Wide" :
+     avgMAEToStopRatio <= 0.85 ? "Efficient" :
+     "Too Tight"
+pct1RReached   = totalTradesClosed > 0 ? cnt_Reached1R   / totalTradesClosed * 100 : na
+pct1_5RReached = totalTradesClosed > 0 ? cnt_Reached1_5R / totalTradesClosed * 100 : na
+pct2RReached   = totalTradesClosed > 0 ? cnt_Reached2R   / totalTradesClosed * 100 : na
+
+f_pctDiff(cur, base) => base != 0 ? (cur - base) / math.abs(base) * 100 : na
+netProfitPctDiff  = f_pctDiff(strategy.netprofit, baselineNetProfit)
+pfPctDiff         = f_pctDiff(nz(profitFactorCalc), baselineProfitFactor)
+expectancyPctDiff = f_pctDiff(nz(expectancyPerTrade), baselineExpectancy)
+ddPctDiff         = f_pctDiff(worstDrawdownPct, baselineMaxDD)
+maxAbsSensDiff = (sensitivityTestMode == "Default" or baselineTradeCount == 0) ? na : math.max(math.max(math.abs(nz(netProfitPctDiff)), math.abs(nz(pfPctDiff))), math.max(math.abs(nz(expectancyPctDiff)), math.abs(nz(ddPctDiff))))
+sensitivityClassification =
+     sensitivityTestMode == "Default" ? "Not Tested (running Default — switch to Low/High to compare)" :
+     baselineTradeCount == 0 ? "Not Tested (enter baseline results from a Default run first)" :
+     na(maxAbsSensDiff) ? "Not Tested (insufficient baseline data)" :
+     maxAbsSensDiff <= sensStableThresholdPct ? "Stable" :
+     maxAbsSensDiff <= sensModerateThresholdPct ? "Moderately Stable" :
+     maxAbsSensDiff <= sensSensitiveThresholdPct ? "Sensitive" :
+     maxAbsSensDiff <= sensHighSensitiveThresholdPct ? "Highly Sensitive" :
+     "Potentially Overfitted"
+
+profitConcentrationPct = f_topSetupPnLShare()
+costImpactAmt = (strategy.grossprofit - strategy.grossloss) - strategy.netprofit
+costRatioPct = strategy.grossprofit > 0 ? costImpactAmt / strategy.grossprofit * 100 : na
+longShortInconsistent = (longTradeCount >= 10 and shortTradeCount >= 10) and (((longNetPnL > 0) and (shortNetPnL < 0)) or ((longNetPnL < 0) and (shortNetPnL > 0))) and math.abs(longNetPnL - shortNetPnL) > math.abs(strategy.netprofit) * 0.5
+isSampleWeakFlag = totalTradesClosed < minTradesForValid
+oosVsIsWeakFlag = isNetPnL > 0 and oosNetPnL < 0
+overfitFlags = (profitConcentrationPct > overfitProfitConcentrationPct ? 1 : 0) + (not na(costRatioPct) and costRatioPct > overfitCostRatioPct ? 1 : 0) + (isSampleWeakFlag ? 1 : 0) + (oosVsIsWeakFlag ? 1 : 0) + (longShortInconsistent ? 1 : 0)
+overfittingWarningText = overfitFlags == 0 ? "No warning signs detected" : overfitFlags == 1 ? "1 warning sign — review before trusting results" : ("MULTIPLE WARNING SIGNS (" + str.tostring(overfitFlags) + ") — treat results with strong skepticism")
+
+robustnessLabel =
+     totalTradesClosed < 10 ? "Insufficient" :
+     totalTradesClosed < minTradesForValid ? "Weak" :
+     (na(profitFactorCalc) or profitFactorCalc < 1.0 or worstDrawdownPct > maxAcceptableDrawdownPctV * 1.5) ? "Weak" :
+     (profitFactorCalc < minProfitFactorAcceptable or worstDrawdownPct > maxAcceptableDrawdownPctV) ? "Under Development" :
+     (profitFactorCalc < minProfitFactorAcceptable * 1.3) ? "Acceptable for Forward Testing" :
+     "Robust"
+
+robustnessReason =
+     totalTradesClosed < 10 ? ("Only " + str.tostring(totalTradesClosed) + " trades — far too few to draw any conclusion.") :
+     totalTradesClosed < minTradesForValid ? ("Only " + str.tostring(totalTradesClosed) + " trades — below the " + str.tostring(minTradesForValid) + "-trade minimum.") :
+     (na(profitFactorCalc) or profitFactorCalc < 1.0) ? "Profit factor at or below 1.0 — not statistically profitable." :
+     worstDrawdownPct > maxAcceptableDrawdownPctV * 1.5 ? ("Drawdown " + str.tostring(worstDrawdownPct, "#.#") + "% far exceeds the " + str.tostring(maxAcceptableDrawdownPctV, "#.#") + "% ceiling.") :
+     profitFactorCalc < minProfitFactorAcceptable ? ("Profit factor " + str.tostring(profitFactorCalc, "#.##") + " below the " + str.tostring(minProfitFactorAcceptable, "#.##") + " acceptable minimum.") :
+     worstDrawdownPct > maxAcceptableDrawdownPctV ? ("Drawdown " + str.tostring(worstDrawdownPct, "#.#") + "% exceeds the " + str.tostring(maxAcceptableDrawdownPctV, "#.#") + "% ceiling.") :
+     profitFactorCalc < minProfitFactorAcceptable * 1.3 ? "Meets minimums but with limited margin — validate out-of-sample before scaling." :
+     "Meets trade-count, profit-factor and drawdown minimums with margin."
+
+// ============================= PROFIT-FACTOR DIAGNOSTIC (Step 18) =============================
+g_pfdiag = "Profit-Factor Diagnostic Thresholds"
+pfStatusLosingMax      = input.float(1.00, "Losing: profit factor below this", group=g_pfdiag)
+pfStatusWeakMax        = input.float(1.20, "Weak: profit factor below this", group=g_pfdiag)
+pfStatusDevelopingMax  = input.float(1.40, "Developing: profit factor below this", group=g_pfdiag)
+pfStatusAcceptableMax  = input.float(1.70, "Acceptable: profit factor below this (at/above = Strong)", group=g_pfdiag)
+minDesiredProfitFactor = input.float(1.30, "Minimum desired profit factor (display reference only)", group=g_pfdiag)
+
+f_pfStatus(pf) =>
+    na(pf) ? "No Data" : pf < pfStatusLosingMax ? "Losing" : pf < pfStatusWeakMax ? "Weak" : pf < pfStatusDevelopingMax ? "Developing" : pf < pfStatusAcceptableMax ? "Acceptable" : "Strong"
+
+pfAfterCosts = strategy.grossloss != 0 ? (strategy.grossprofit - costImpactAmt) / strategy.grossloss : na
+pfStatusText = f_pfStatus(profitFactorCalc)
+mainPFWeaknessText =
+     na(profitFactorCalc) ? "Insufficient closed trades to diagnose" :
+     (not na(costRatioPct) and costRatioPct > overfitCostRatioPct) ? "High commission/slippage impact relative to gross profit" :
+     (not na(longPF) and not na(shortPF) and longPF < shortPF - 0.3) ? "Long trades are the main drag on profit factor" :
+     (not na(longPF) and not na(shortPF) and shortPF < longPF - 0.3) ? "Short trades are the main drag on profit factor" :
+     profitConcentrationPct > overfitProfitConcentrationPct ? "Profit concentrated in one setup — fragile if that setup stops working" :
+     stopEfficiencyLabel == "Too Tight" ? "Stops may be too tight for normal volatility (see Stop Efficiency)" :
+     "No single dominant weakness detected — review the setup/regime breakdown manually"
+
+// ============================= PROFITABLE-TRADE DIAGNOSTIC (Step 19) =============================
+g_wrdiag = "Win-Rate Diagnostic Thresholds"
+wrStatusWeakMax      = input.float(35.0, "Weak: win rate % below this", group=g_wrdiag)
+wrStatusBelowAvgMax  = input.float(45.0, "Below Average: win rate % below this", group=g_wrdiag)
+wrStatusAverageMax   = input.float(55.0, "Average: win rate % below this", group=g_wrdiag)
+wrStatusGoodMax      = input.float(65.0, "Good: win rate % below this (at/above = Strong)", group=g_wrdiag)
+payoffRatio = (na(expectancyPerTrade) or totalTradesClosed == 0) ? na : (strategy.grossloss != 0 and strategy.wintrades != 0 and (totalTradesClosed - strategy.wintrades) != 0) ? (strategy.grossprofit / strategy.wintrades) / (strategy.grossloss / (totalTradesClosed - strategy.wintrades)) : na
+
+f_wrStatus(wr) =>
+    na(wr) ? "No Data" : wr < wrStatusWeakMax ? "Weak" : wr < wrStatusBelowAvgMax ? "Below Average" : wr < wrStatusAverageMax ? "Average" : wr < wrStatusGoodMax ? "Good" : "Strong"
+
+wrStatusText = f_wrStatus(winRatePct)
+longWinRatePct  = longTradeCount  > 0 ? longWinCount  / longTradeCount  * 100 : na
+shortWinRatePct = shortTradeCount > 0 ? shortWinCount / shortTradeCount * 100 : na
+mainWinRateWeaknessText =
+     na(winRatePct) ? "Insufficient closed trades to diagnose" :
+     stopEfficiencyLabel == "Too Tight" ? "Stops may be too tight, causing avoidable losses before the move develops" :
+     (not na(pct1RReached) and pct1RReached > 50 and winRatePct < 45) ? "Many trades reach 1R but still end as losers — target/trailing likely giving profit back" :
+     (not na(longWinRatePct) and not na(shortWinRatePct) and longWinRatePct < shortWinRatePct - 15) ? "Long trades have a materially lower win rate than short trades" :
+     (not na(longWinRatePct) and not na(shortWinRatePct) and shortWinRatePct < longWinRatePct - 15) ? "Short trades have a materially lower win rate than long trades" :
+     "No single dominant weakness detected — review the setup/regime breakdown manually"
+
+// ============================= MINIMUM STATISTICAL SAMPLE (Step 20) =============================
+g_sampledig = "Sample Size Classification Thresholds"
+sampleVerySmallMax  = input.int(59, "Very Small Sample: trades below this", group=g_sampledig)
+sampleLimitedMax    = input.int(99, "Limited Sample: trades below this", group=g_sampledig)
+sampleDevelopingMax = input.int(199, "Developing Sample: trades below this (200+ = More Useful Sample)", group=g_sampledig)
+
+f_sampleSizeClass(n) =>
+    n < minTradesForValid ? "Insufficient" : n <= sampleVerySmallMax ? "Very Small Sample" : n <= sampleLimitedMax ? "Limited Sample" : n <= sampleDevelopingMax ? "Developing Sample" : "More Useful Sample"
+
+sampleSizeClassText = f_sampleSizeClass(totalTradesClosed)
+
+f_downsideDev(arr) =>
+    n = array.size(arr)
+    sumSq = 0.0
+    cnt = 0
+    for i = 0 to n - 1
+        v = array.get(arr, i)
+        if v < 0
+            sumSq := sumSq + v * v
+            cnt := cnt + 1
+    cnt > 1 ? math.sqrt(sumSq / cnt) : na
+
+retCount = array.size(dailyReturns)
+retMean = retCount > 1 ? array.avg(dailyReturns) : na
+retStdev = retCount > 1 ? array.stdev(dailyReturns) : na
+sharpeEstimate = (retCount > 1 and not na(retStdev) and retStdev != 0) ? retMean / retStdev * math.sqrt(365) : na
+downsideDevEstimate = retCount > 1 ? f_downsideDev(dailyReturns) : na
+sortinoEstimate = (not na(downsideDevEstimate) and downsideDevEstimate != 0) ? retMean / downsideDevEstimate * math.sqrt(365) : na
+annualizedReturnPctEstimate = retCount > 0 ? retMean * 365 * 100 : na
+calmarEstimate = (not na(annualizedReturnPctEstimate) and worstDrawdownPct != 0) ? annualizedReturnPctEstimate / worstDrawdownPct : na
+recoveryFactor = worstDrawdownAbs != 0 ? strategy.netprofit / worstDrawdownAbs : na
+
+f_bestSetupName() =>
+    bestIdx = -1
+    bestPnL = -1e10
+    for i = 0 to 6
+        pnl = array.get(setupNetPnL, i)
+        cnt = array.get(setupTradeCount, i)
+        if cnt > 0 and pnl > bestPnL
+            bestPnL := pnl
+            bestIdx := i
+    bestIdx == 0 ? "A" : bestIdx == 1 ? "B" : bestIdx == 2 ? "C" : bestIdx == 3 ? "D" : bestIdx == 4 ? "E" : bestIdx == 5 ? "F" : bestIdx == 6 ? "G" : "-"
+
+f_worstSetupName() =>
+    worstIdx = -1
+    worstPnL = 1e10
+    for i = 0 to 6
+        pnl = array.get(setupNetPnL, i)
+        cnt = array.get(setupTradeCount, i)
+        if cnt > 0 and pnl < worstPnL
+            worstPnL := pnl
+            worstIdx := i
+    worstIdx == 0 ? "A" : worstIdx == 1 ? "B" : worstIdx == 2 ? "C" : worstIdx == 3 ? "D" : worstIdx == 4 ? "E" : worstIdx == 5 ? "F" : worstIdx == 6 ? "G" : "-"
+
+f_regimeName(idx) =>
+    idx == 0 ? "Strong Bull" : idx == 1 ? "Bull" : idx == 2 ? "Consolidation" : idx == 3 ? "Bear" : idx == 4 ? "Strong Bear" : idx == 5 ? "Abnormal Vol" : idx == 6 ? "Undefined" : "-"
+
+f_bestRegimeName() =>
+    bestIdx = -1
+    bestPnL = -1e10
+    for i = 0 to 6
+        pnl = array.get(regimePnL, i)
+        cnt = array.get(regimeTradeCount, i)
+        if cnt > 0 and pnl > bestPnL
+            bestPnL := pnl
+            bestIdx := i
+    f_regimeName(bestIdx)
+
+f_worstRegimeName() =>
+    worstIdx = -1
+    worstPnL = 1e10
+    for i = 0 to 6
+        pnl = array.get(regimePnL, i)
+        cnt = array.get(regimeTradeCount, i)
+        if cnt > 0 and pnl < worstPnL
+            worstPnL := pnl
+            worstIdx := i
+    f_regimeName(worstIdx)
+
+f_topRejectReasonName() =>
+    topIdx = -1
+    topCnt = 0
+    for i = 0 to 6
+        cnt = array.get(rejectReasonCount, i)
+        if cnt > topCnt
+            topCnt := cnt
+            topIdx := i
+    topIdx == REJ_RISKLOCK ? "Risk Lock" : topIdx == REJ_REGIME ? "Regime Block" : topIdx == REJ_SCORE ? "Score Below Threshold" : topIdx == REJ_EXHAUSTION ? "Exhaustion Veto" : topIdx == REJ_COOLDOWN ? "Cooldown Active" : topIdx == REJ_DIRECTION ? "Direction Disabled" : topIdx == REJ_OTHER ? "Other" : "-"
+
+// ============================= PLOTS =============================
+bgcolor(trendUp ? color.new(color.green, 92) : trendDown ? color.new(color.red, 92) : na, title="Trend Regime")
+
+plot(blueLineRaw, "Blue Line (4H EMA)", color=color.new(color.blue, 0), linewidth=2)
+plot(orangeLineRaw, "Orange Line (4H EMA)", color=color.new(color.orange, 0), linewidth=2)
+plot(bbUpper, "BB Upper", color=color.new(color.gray, 40))
+plot(bbBasis, "BB Basis", color=color.new(color.gray, 60))
+plot(bbLower, "BB Lower", color=color.new(color.gray, 40))
+
+plot(trendUp ? 1 : trendDown ? -1 : 0, "DBG_trend", display=display.data_window)
+plot(trendAdxRaw, "DBG_adxTrendTF", display=display.data_window)
+plot(rsiVal, "DBG_rsi", display=display.data_window)
+plot(stochK, "DBG_stochK", display=display.data_window)
+plot(stochRsiK, "DBG_stochRsiK", display=display.data_window)
+plot(closePosInRange, "DBG_closePosInRange", display=display.data_window)
+plot(sellingExhaustion ? 1 : buyingExhaustion ? -1 : 0, "DBG_exhaustion", display=display.data_window)
+plot(volRatio, "DBG_volRatio", display=display.data_window)
+plot(longScore, "DBG_longScore", display=display.data_window)
+plot(shortScore, "DBG_shortScore", display=display.data_window)
+
+plotshape(showReactionDots and reactionUp   and barstate.isconfirmed, title="Reaction Up (watch next candle)",   style=shape.circle, location=location.belowbar, color=color.new(color.teal, 60), size=size.tiny)
+plotshape(showReactionDots and reactionDown and barstate.isconfirmed, title="Reaction Down (watch next candle)", style=shape.circle, location=location.abovebar, color=color.new(color.maroon, 60), size=size.tiny)
+plotshape(showExhaustionVeto and baseShortOK and sellingExhaustion, title="Selling Exhaustion Veto", style=shape.xcross, location=location.abovebar, color=color.new(color.lime, 30), size=size.tiny)
+plotshape(showExhaustionVeto and baseLongOK  and buyingExhaustion,  title="Buying Exhaustion Veto",  style=shape.xcross, location=location.belowbar, color=color.new(color.fuchsia, 30), size=size.tiny)
+
+plotshape(showEntryArrows and finalLongEntryConfirmed and not isLongCountertrend and showShortLabels, title="Confirmed Long Entry (High Confidence)", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="LONG", textcolor=color.white)
+plotshape(showEntryArrows and finalLongEntryConfirmed and not isLongCountertrend and not showShortLabels, title="Confirmed Long Entry (High Confidence)", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(showEntryArrows and finalLongEntryConfirmed and isLongCountertrend and showShortLabels, title="Confirmed Long Entry (Countertrend)", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="LONG*", textcolor=color.white)
+plotshape(showEntryArrows and finalLongEntryConfirmed and isLongCountertrend and not showShortLabels, title="Confirmed Long Entry (Countertrend)", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(showEntryArrows and finalShortEntryConfirmed and not isShortCountertrend and showShortLabels, title="Confirmed Short Entry (High Confidence)", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SHORT", textcolor=color.white)
+plotshape(showEntryArrows and finalShortEntryConfirmed and not isShortCountertrend and not showShortLabels, title="Confirmed Short Entry (High Confidence)", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+plotshape(showEntryArrows and finalShortEntryConfirmed and isShortCountertrend and showShortLabels, title="Confirmed Short Entry (Countertrend)", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SHORT*", textcolor=color.white)
+plotshape(showEntryArrows and finalShortEntryConfirmed and isShortCountertrend and not showShortLabels, title="Confirmed Short Entry (Countertrend)", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+if showDetailedTradeLabels and finalLongEntryConfirmed
+    entryLbl = label.new(bar_index, low, "LONG | ID:" + currentSignalId + "\nSetup:" + activeSetupName + " Score:" + str.tostring(longScore, "#.#") + " Quality:" + str.tostring(activeTradeQualityScore, "#.#") + " (" + f_qualityLabel(activeTradeQualityScore) + ")" + "\nEntry:" + str.tostring(entryPrice) + " SL:" + str.tostring(entryStop) + " TP:" + str.tostring(entryTP), style=label.style_label_up, color=color.new(color.green, 70), textcolor=color.white, size=size.tiny)
+    array.push(entryLabelIds, entryLbl)
+    f_recycleLabels(entryLabelIds, maxEntryLabels)
+if showDetailedTradeLabels and finalShortEntryConfirmed
+    entryLbl2 = label.new(bar_index, high, "SHORT | ID:" + currentSignalId + "\nSetup:" + activeSetupName + " Score:" + str.tostring(shortScore, "#.#") + " Quality:" + str.tostring(activeTradeQualityScore, "#.#") + " (" + f_qualityLabel(activeTradeQualityScore) + ")" + "\nEntry:" + str.tostring(entryPrice) + " SL:" + str.tostring(entryStop) + " TP:" + str.tostring(entryTP), style=label.style_label_down, color=color.new(color.red, 70), textcolor=color.white, size=size.tiny)
+    array.push(entryLabelIds, entryLbl2)
+    f_recycleLabels(entryLabelIds, maxEntryLabels)
+
+plotshape(showSetupDetectedMarkers and stateChangedThisBar and regimeState == ST_WATCH_LONG, title="Potential Long", style=shape.circle, location=location.belowbar, color=color.new(color.green, 80), size=size.tiny)
+plotshape(showSetupDetectedMarkers and stateChangedThisBar and regimeState == ST_WATCH_SHORT, title="Potential Short", style=shape.circle, location=location.abovebar, color=color.new(color.red, 80), size=size.tiny)
+plotshape(showExpiredSetupMarkers and stateChangedThisBar and regimeState == ST_EXPIRED, title="Setup Expired", style=shape.xcross, location=location.abovebar, color=color.new(color.gray, 50), size=size.tiny)
+plotshape(showRejectedSignalMarkers and longTriggerNoSignal, title="Rejected Long", style=shape.diamond, location=location.belowbar, color=color.new(color.orange, 60), size=size.tiny)
+plotshape(showRejectedSignalMarkers and shortTriggerNoSignal, title="Rejected Short", style=shape.diamond, location=location.abovebar, color=color.new(color.orange, 60), size=size.tiny)
+
+plot(showRiskLevels and strategy.position_size != 0 ? entryStop : na, "Active Stop-Loss", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1)
+plot(showRiskLevels and strategy.position_size != 0 ? entryTP   : na, "Active Take-Profit", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)
+
+plot(showSRLevels ? recentSwingHigh : na, "Recent Swing High (resistance)", color=color.new(color.maroon, 50), style=plot.style_circles)
+plot(showSRLevels ? recentSwingLow  : na, "Recent Swing Low (support)", color=color.new(color.teal, 50), style=plot.style_circles)
+
+plotshape(showExitMarkers and justExited and lastExitWasLong,  title="Long Position Closed",  style=shape.xcross, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny, text="EXIT", textcolor=color.white)
+plotshape(showExitMarkers and justExited and lastExitWasLong,  title="Long Position Closed",  style=shape.xcross, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
+plotshape(showExitMarkers and justExited and not lastExitWasLong and showShortLabels, title="Short Position Closed", style=shape.xcross, location=location.belowbar, color=color.new(color.green, 20), size=size.tiny, text="EXIT", textcolor=color.white)
+plotshape(showExitMarkers and justExited and not lastExitWasLong and not showShortLabels, title="Short Position Closed", style=shape.xcross, location=location.belowbar, color=color.new(color.green, 20), size=size.tiny)
+
+bgcolor(showCooldownRiskLockBg and riskLockActive ? color.new(color.red, 85) : showCooldownRiskLockBg and not cooldownOK ? color.new(color.orange, 90) : na, title="Cooldown / Risk Lock")
+
+lineState = emaBreakLong ? "BREAK UP (confirmed)" : emaBreakShort ? "BREAK DOWN (confirmed)" : rejectionUp ? "REJECT UP (confirmed)" : rejectionDown ? "REJECT DOWN (confirmed)" : reactionUp ? "REACTING UP - WATCH" : reactionDown ? "REACTING DOWN - WATCH" : touchedLine ? "TOUCHING LINE" : "-"
+
+vetoState = (baseShortOK and sellingExhaustion) ? "SELLING EXHAUSTION (short blocked)" : (baseLongOK and buyingExhaustion) ? "BUYING EXHAUSTION (long blocked)" : "-"
+
+stochState = "K:" + str.tostring(stochK, "#.#") + (stochBullMomentum ? " BULL-X" : stochBearMomentum ? " BEAR-X" : "") + "  RSI-K:" + str.tostring(stochRsiK, "#.#") + (stochRsiBullMomentum ? " BULL-X" : stochRsiBearMomentum ? " BEAR-X" : "")
+
+srState = nearSupport and nearResistance ? "SUPPORT+RESIST" : nearSupport ? "NEAR SUPPORT" : nearResistance ? "NEAR RESISTANCE" : "-"
+
+bbState = str.tostring(bbPercentB, "#.##") + (bbExpanding ? " (expanding)" : " (contracting)")
+bbColor = bbLongOK ? color.green : bbShortOK ? color.red : color.gray
+
+timeframeStatusText  = not isLadderTF ? "UNSUPPORTED/UNTESTED (" + timeframe.period + ")" : tf15mBlocked ? "15m — comparison only (trading disabled)" : "Supported (" + timeframe.period + ")"
+timeframeStatusColor = not isLadderTF ? color.orange : tf15mBlocked ? color.orange : color.gray
+
+// ============================= TABLE LAYOUT & DISPLAY MODE =============================
+g_tablelayout = "Table Layout & Display Mode"
+displayMode = input.string("Compact", "Table Display Mode", options=["Compact", "Standard", "Diagnostic"], group=g_tablelayout)
+infoTablePosition = input.string("Top Right", "Main Table Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=g_tablelayout)
+tableBgTransparency = input.int(70, "Table Background Transparency (0-100)", minval=0, maxval=100, group=g_tablelayout)
+f_tablePos(posStr) =>
+    posStr == "Top Right" ? position.top_right : posStr == "Top Left" ? position.top_left : posStr == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+g_leverageref = "Trade Plan: Leverage Reference"
+leverageRef = input.float(15, "Leverage Reference (x)", minval=1, group=g_leverageref)
+marginRef = input.float(100, "Reference Margin ($) for leverage estimate", minval=1, group=g_leverageref)
+
+mainTblRows = displayMode == "Diagnostic" ? 51 : displayMode == "Standard" ? 30 : 22
+
+// ============================= MAIN TABLE (single persistent table, mode-gated) =============================
+var table mainTbl = table.new(f_tablePos(infoTablePosition), 2, mainTblRows, bgcolor=color.new(color.black, tableBgTransparency), border_width=1)
+
+f_hdr(r, txt) =>
+    table.cell(mainTbl, 0, r, txt, text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.gray, 55))
+    table.cell(mainTbl, 1, r, "", bgcolor=color.new(color.gray, 55))
+
+f_row(r, k, v, vColor) =>
+    table.cell(mainTbl, 0, r, k, text_color=color.white, text_size=size.small)
+    table.cell(mainTbl, 1, r, v, text_color=vColor, text_size=size.small)
+
+f_populateCompactRows() =>
+    volText = volConfirmed ? "Confirmed (" + str.tostring(volRatio, "#.##") + "x)" : "Weak (" + str.tostring(volRatio, "#.##") + "x)"
+    setupDirDisp = setupDirection == "NONE" ? "NEUTRAL" : setupDirection
+    hasLevels = strategy.position_size != 0 and not na(entryPrice) and not na(entryStop) and not na(entryTP)
+    rrDisp = hasLevels and entryPrice != entryStop ? str.tostring(math.abs(entryTP - entryPrice) / math.abs(entryPrice - entryStop), "#.##") + "R" : "-"
+    tableRecommendation =
+         strategy.position_size > 0 ? "OPEN LONG" :
+         strategy.position_size < 0 ? "OPEN SHORT" :
+         (regimeState == ST_WATCH_LONG or regimeState == ST_PENDING_LONG) ? "WATCH LONG" :
+         (regimeState == ST_WATCH_SHORT or regimeState == ST_PENDING_SHORT) ? "WATCH SHORT" :
+         "NO TRADE"
+    tableRecColor =
+         tableRecommendation == "OPEN LONG" ? color.green :
+         tableRecommendation == "OPEN SHORT" ? color.red :
+         tableRecommendation == "WATCH LONG" ? color.new(color.green, 40) :
+         tableRecommendation == "WATCH SHORT" ? color.new(color.red, 40) :
+         color.gray
+
+    f_hdr(0, "MARKET")
+    f_row(1, "Market Regime", marketRegime, regimeDisplayColor)
+    f_row(2, "EMA 21 (4H)", str.tostring(blueLineRaw, "#.##"), color.blue)
+    f_row(3, "EMA 55 (4H)", str.tostring(orangeLineRaw, "#.##"), color.orange)
+    f_row(4, "RSI", str.tostring(rsiVal, "#.#"), color.white)
+    f_row(5, "Volume", volText, volConfirmed ? color.green : color.gray)
+    f_row(6, "Trend Score", "L:" + str.tostring(trendScoreLong) + "/3  S:" + str.tostring(trendScoreShort) + "/3", color.white)
+
+    f_hdr(7, "SETUP")
+    f_row(8, "Setup Status", confirmationStatus, color.white)
+    f_row(9, "Setup Direction", setupDirDisp, setupColor)
+    f_row(10, "Setup Confidence", setupConfidence, setupColor)
+    f_row(11, "Confirmation Count", "L:" + str.tostring(longConfirmCount) + "/9  S:" + str.tostring(shortConfirmCount) + "/9", color.white)
+
+    f_hdr(12, "RECOMMENDATION")
+    f_row(13, "Status", tableRecommendation, tableRecColor)
+
+    f_hdr(14, "TRADE PLAN")
+    if hasLevels
+        f_row(15, "Action", tableRecommendation, tableRecColor)
+        f_row(16, "Entry", str.tostring(entryPrice), color.white)
+        f_row(17, "Stop Loss", str.tostring(entryStop), color.orange)
+        f_row(18, "Take Profit", str.tostring(entryTP), color.green)
+        f_row(19, "Risk:Reward", rrDisp, color.white)
+        refNotional = marginRef * leverageRef
+        refQty = entryPrice != 0 ? refNotional / entryPrice : na
+        estRiskUSD = refQty * math.abs(entryPrice - entryStop)
+        estRewardUSD = refQty * math.abs(entryTP - entryPrice)
+        f_row(20, "Est. Risk ($ @ " + str.tostring(leverageRef, "#") + "x, $" + str.tostring(marginRef, "#") + " margin)", "-$" + str.tostring(estRiskUSD, "#.##"), color.red)
+        f_row(21, "Est. Reward ($ @ " + str.tostring(leverageRef, "#") + "x, $" + str.tostring(marginRef, "#") + " margin)", "+$" + str.tostring(estRewardUSD, "#.##"), color.green)
+    else
+        f_row(15, "Status", "Waiting for Confirmation", color.gray)
+f_populateStandardRows() =>
+    f_hdr(22, "STATISTICS")
+    f_row(23, "Total Trades", str.tostring(totalTradesClosed), color.white)
+    f_row(24, "Win Rate", totalTradesClosed == 0 ? "-" : str.tostring(strategy.wintrades / totalTradesClosed * 100, "#.#") + "%", color.white)
+    f_row(25, "Profit Factor", strategy.grossloss != 0 ? str.tostring(strategy.grossprofit / strategy.grossloss, "#.##") : "-", pfStatusText == "Strong" ? color.green : color.orange)
+    f_row(26, "Payoff Ratio", na(payoffRatio) ? "-" : str.tostring(payoffRatio, "#.##"), color.white)
+    f_row(27, "9-Factor Confirmations (L/S)", str.tostring(longConfirmCount) + "/9  " + str.tostring(shortConfirmCount) + "/9", color.white)
+    f_row(28, "Trade Quality Score", na(activeTradeQualityScore) ? "-" : str.tostring(activeTradeQualityScore, "#.#") + " (" + f_qualityLabel(activeTradeQualityScore) + ")", color.white)
+    f_row(29, "Sample Size", sampleSizeClassText, color.white)
+
+f_populateDiagnosticRows() =>
+    f_hdr(30, "DIAGNOSTICS")
+    f_row(31, "Strictness Profile", strictnessProfile, isExploratoryMode ? color.orange : color.white)
+    f_row(32, "Exploratory Warning", isExploratoryMode ? "ACTIVE - not for live use" : "Not active", isExploratoryMode ? color.red : color.gray)
+    f_row(33, "Exit/Stop/Target Models", exitProfile + " | " + stopLossModel + " | " + takeProfitModel, color.white)
+    f_row(34, "PF Status", pfStatusText, pfStatusText == "Strong" ? color.green : color.orange)
+    f_row(35, "Main PF Weakness", mainPFWeaknessText, color.gray)
+    f_row(36, "PF After Costs", na(pfAfterCosts) ? "-" : str.tostring(pfAfterCosts, "#.##"), color.white)
+    f_row(37, "Best / Worst Setup PF", f_bestSetupPFName() + " / " + f_worstSetupPFName(), color.white)
+    f_row(38, "Win-Rate Status", wrStatusText, color.white)
+    f_row(39, "Long / Short Win Rate", (na(longWinRatePct) ? "-" : str.tostring(longWinRatePct, "#.#") + "%") + " / " + (na(shortWinRatePct) ? "-" : str.tostring(shortWinRatePct, "#.#") + "%"), color.white)
+    f_row(40, "Setups Detected/Confirmed/Rate", str.tostring(totalSetupsDetected) + " / " + str.tostring(confirmedSetupsTotal) + " / " + (na(setupConfirmationRate) ? "-" : str.tostring(setupConfirmationRate, "#.#") + "%"), color.white)
+    f_row(41, "Rejected / Expired", str.tostring(rejectedSignalsTotal) + " / " + str.tostring(totalSetupsExpiredAll), color.white)
+    f_row(42, "Signals/100 - Trades/Month", (na(signalsPer100Candles) ? "-" : str.tostring(signalsPer100Candles, "#.##")) + " / " + (na(tradesPerMonthEstimate) ? "-" : str.tostring(tradesPerMonthEstimate, "#.#")), color.white)
+    f_row(43, "Confirm Delay / Setup Age", (na(avgConfirmationDelayAll) ? "-" : str.tostring(avgConfirmationDelayAll, "#.#")) + " / " + (na(avgSetupAgeAll) ? "-" : str.tostring(avgSetupAgeAll, "#.#")), color.white)
+    f_row(44, "IS / OOS Trades", str.tostring(isTradeCount) + " / " + str.tostring(oosTradeCount), color.white)
+    f_row(45, "% Reached 1R/1.5R/2R", (na(pct1RReached) ? "-" : str.tostring(pct1RReached, "#.#")) + "/" + (na(pct1_5RReached) ? "-" : str.tostring(pct1_5RReached, "#.#")) + "/" + (na(pct2RReached) ? "-" : str.tostring(pct2RReached, "#.#")), color.white)
+    f_row(46, "Stop Efficiency", stopEfficiencyLabel, stopEfficiencyLabel == "Efficient" ? color.green : color.orange)
+    f_row(47, "Quality Bands (Rej/Low/Acc/Good/High)", str.tostring(array.get(qualityBandCount,0)) + "/" + str.tostring(array.get(qualityBandCount,1)) + "/" + str.tostring(array.get(qualityBandCount,2)) + "/" + str.tostring(array.get(qualityBandCount,3)) + "/" + str.tostring(array.get(qualityBandCount,4)), color.white)
+    f_row(48, "Weak Setup Warnings", f_anyWeakSetupSummary(), color.orange)
+    f_row(49, "Recent Trades", array.size(recentTradesLog) == 0 ? "-" : array.join(recentTradesLog, " | "), color.white)
+
+if barstate.islast
+    f_populateCompactRows()
+    if displayMode != "Compact"
+        f_populateStandardRows()
+    if displayMode == "Diagnostic"
+        f_populateDiagnosticRows()

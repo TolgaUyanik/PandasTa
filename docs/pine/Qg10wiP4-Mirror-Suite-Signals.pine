@@ -1,0 +1,384 @@
+//══════════════════════════════════════════════════════════════════════════════
+// MIRROR SUITE — SIGNALS (indicator)
+// © 2026 @TheGameStopsNow — Released under the MIT License
+// Free for anyone to use, modify, and share. See LICENSE / https://opensource.org/licenses/MIT
+//
+// WHAT THIS DOES
+//   Measures where price is *now* (as a z-score) against a mirrored, flipped
+//   copy of its own *past*, then signals the interaction between those two
+//   lines — either directly (Wave Flip / Momentum modes) or through a
+//   MACD-style histogram built from them (Histogram mode).
+//
+// QUICK START
+//   1) Add to a 15-minute chart. GME is the tuned baseline symbol.
+//   2) Pick a Preset in Settings → Inputs. Done. Presets carry backtested
+//      defaults and override every "Advanced" group below.
+//   3) Strategies backtest — this Signals version is for watching + alerts.
+//      Use the Strategy version for backtest results. Want to tinker? Set the
+//      Preset to "Custom" and all Advanced settings come alive.
+//
+// ALERTS / WEBHOOK (optional)
+//   Signals fire alert messages automatically. Leave Webhook Secret empty for
+//   plain-text alerts. Paste your own secret to emit JSON like
+//   {"secret":"...","action":"buy","ticker":"GME"} for a trading webhook.
+//   Create an alert with Condition = this indicator → "Any alert() function
+//   call" (for webhook JSON) or use the named alert conditions
+//   ("Long Entry" / "Exit Long").
+//══════════════════════════════════════════════════════════════════════════════
+//@version=6
+indicator("Mirror Suite — Signals", shorttitle="MIRROR SIG", overlay=false, precision=4, max_bars_back=5000)
+
+// ─── ① QUICK START ──────────────────────────────────────────────────────────
+g_qs = "① Quick Start — pick a preset and you're done"
+preset = input.string("GME Tuned — Histogram", "Preset", group=g_qs,
+     options=["GME Tuned — Histogram", "GME Swing — Wave + Momentum", "High Frequency — Wave Flips", "Custom (unlock Advanced settings)"],
+     tooltip="Presets carry backtested defaults (15m bars, 2023–2026, GME + NVDA/AMD/PLTR/SPY/IWM) and OVERRIDE all Advanced groups.\n\n• GME Tuned — Histogram: the flagship. Trades histogram/signal-line crosses. GME profit factor 1.73 in testing; strongest balance of return and robustness.\n• GME Swing — Wave + Momentum: fewer, higher-conviction trades (needs a line cross AND momentum). GME PF 1.81, ~40 trades/yr.\n• High Frequency — Wave Flips: trades every line cross. Most trades (~250/yr), steadiest across tickers, lower PF per trade.\n• Custom: nothing is overridden — every Advanced input below is live.")
+hold_overnight = input.bool(true, "Hold Overnight (block early signal exits)", group=g_qs,
+     tooltip="Self-imposed discipline — NOT a broker rule. Blocks signal exits until the position has been held at least 'Min Hold Sessions' trading days. (Stop loss / take profit exist only in the Strategy version and fire immediately there.) Testing across 42 tickers showed holding overnight is one of the biggest single improvements to total return.")
+min_hold_sessions = input.int(2, "Min Hold Sessions", minval=1, maxval=10, group=g_qs,
+     tooltip="Trading sessions to hold before a signal exit is allowed. 1 = hold overnight once; 2 = hold through two sessions (backtested best). Higher = more return in testing but drifts toward buy-and-hold.")
+
+// ─── ② ALERTS & WEBHOOK ─────────────────────────────────────────────────────
+g_al = "② Alerts & Webhook (optional)"
+webhook_secret = input.string("", "Webhook Secret", group=g_al,
+     tooltip="Leave EMPTY for plain-text alerts (e.g. 'MIRROR BUY GME').\nPaste your webhook secret to emit JSON order messages instead:\n{\"secret\":\"...\",\"action\":\"buy\",\"ticker\":\"GME\"}\nThen create an alert: Condition = this indicator → 'Any alert() function call' → enable Webhook URL.")
+
+// ─── ADVANCED · SIGNAL MODE ─────────────────────────────────────────────────
+g_mode = "Advanced · Signal Mode (Custom preset only)"
+signal_mode_in = input.string("Histogram Cross", "Signal Mode", group=g_mode,
+     options=["Histogram Cross", "Wave Flip", "Momentum", "Wave + Momentum"],
+     tooltip="How entries/exits are generated:\n• Histogram Cross: MACD-style — buy when the histogram crosses over its signal line, sell when it crosses under.\n• Wave Flip: buy when the Current line crosses over the Mirror line, sell on the cross under.\n• Momentum: buy when Current z-score exceeds the threshold, sell when it drops below the negative threshold (or a wave flip down).\n• Wave + Momentum: highest conviction — needs BOTH a wave flip up AND momentum to enter; exits on either turning down.")
+mom_thresh = input.float(0.7, "Momentum Threshold", minval=0.1, maxval=1.0, step=0.1, group=g_mode,
+     tooltip="Used by Momentum and Wave + Momentum modes. On the normalized -1..+1 scale (0.7 ≈ 2.1 standard deviations). Higher = rarer, stronger signals.")
+hist_trigger = input.string("Cross Signal Line", "Histogram Trigger", group=g_mode,
+     options=["Cross Signal Line", "Cross Zero", "Cross Zone"],
+     tooltip="Used by Histogram Cross mode. What the histogram must cross to trigger:\n• Signal Line (default, backtested): its own EMA.\n• Zero: the centerline — slower, fewer trades.\n• Zone: the +Zone Threshold up / -Zone Threshold down — rarest, strongest.")
+
+// ─── ADVANCED · MIRROR ENGINE ───────────────────────────────────────────────
+g_eng = "Advanced · Mirror Engine (Custom preset only)"
+src        = input.source(close, "Source", group=g_eng, tooltip="Price series the z-scores are computed from. Close is standard.")
+lookback   = input.int(420, "Lookback Window (bars)", minval=10, maxval=5000, step=10, group=g_eng,
+     tooltip="How much history the mirror can reach back into. Mostly matters when Mirror Shift is small; safe to leave alone.")
+zscore_win_in = input.int(20, "Z-Score Window", minval=10, maxval=500, group=g_eng,
+     tooltip="Bars used to normalize price into a z-score. Smaller = faster, more trades. 20 was the swept best across every ticker tested (old default was 34–36).")
+shift_bars_in = input.int(1260, "Mirror Shift (bars back)", minval=-200, maxval=2000, group=g_eng,
+     tooltip="How far back the mirrored copy of price is read from. The presets use 1260 (Histogram), 210 (Swing), 105 (High Frequency).")
+flip_x     = input.bool(true, "Flip X (Reverse Time)", group=g_eng, tooltip="Read the past backwards — the 'mirror' in Mirror. On for all presets.")
+flip_y     = input.bool(true, "Flip Y (Invert Price)", group=g_eng, tooltip="Invert the mirrored series — rallies in the past become dips in the mirror. On for all presets.")
+smooth_len = input.int(1, "Smoothing Length", minval=1, maxval=20, group=g_eng, tooltip="1 = raw (default, used by all presets). Higher smooths both lines — fewer whipsaws, later signals.")
+smooth_type = input.string("EMA", "Smoothing Type", options=["SMA", "EMA"], group=g_eng, tooltip="Only matters when Smoothing Length > 1.")
+
+// ─── ADVANCED · PASTE DRIFT ─────────────────────────────────────────────────
+g_drift = "Advanced · Paste Drift — lower-timeframe engine (Custom preset only)"
+use_drift_in = input.bool(false, "Enable Lower-TF Paste Drift (experimental)", group=g_drift,
+     tooltip="EXPERIMENTAL — computes the z-scores from lower-timeframe data. OFF by default and OFF in all presets: TradingView keeps only a short 1-minute history, so on long lookbacks the drift series goes empty and starves the signals, and live testing found session-gap distortions. If you enable it, keep Auto-Disable on and expect results to differ from the published preset stats.")
+drift_tf   = input.timeframe("1", "Drift Source Timeframe", group=g_drift, tooltip="Lower timeframe the drift engine samples when drift is enabled.")
+auto_drift = input.bool(true, "Auto-Disable Drift on Volatility", group=g_drift,
+     tooltip="When a volatility explosion is detected, temporarily switches back to chart-timeframe data for ~3 days so huge moves aren't flattened by the drift smoothing.")
+auto_mode  = input.string("Un-Drifted Hist > 1.5", "Volatility Trigger", group=g_drift,
+     options=["Un-Drifted Hist > 1.5", "Price Velocity (>4% in 3 bars)", "Volume Explosion (>5x 50-SMA)"],
+     tooltip="What counts as a volatility explosion for the auto-disable above.")
+
+// ─── ADVANCED · HISTOGRAM ───────────────────────────────────────────────────
+g_hist = "Advanced · Histogram (Custom preset only)"
+hist_mode = input.string("Regime Product", "Histogram Model", group=g_hist,
+     options=["Simple Difference", "Regime Product", "Directional Force", "Convergence Velocity", "Weighted Momentum"],
+     tooltip="How the two lines combine into a histogram:\n• Simple Difference: current − mirror\n• Regime Product (default): current × mirror — same-side agreement reads bullish\n• Directional Force: difference × average magnitude\n• Convergence Velocity: rate of change of the difference\n• Weighted Momentum: difference weighted by where price sits on the scale")
+hist_smooth_in = input.int(2, "Histogram Smoothing", minval=1, maxval=20, group=g_hist,
+     tooltip="SMA applied to the raw histogram. 2 was the swept best (old default was 4) — faster crosses, earlier entries.")
+signal_len_in = input.int(9, "Signal Line Length", minval=2, maxval=50, group=g_hist, tooltip="EMA of the histogram — the orange line entries/exits cross.")
+zone_thresh = input.float(0.5, "Zone Threshold", minval=0.1, maxval=3.0, step=0.1, group=g_hist, tooltip="Bull/Bear zone level used by the 'Cross Zone' histogram trigger.")
+
+// ─── ADVANCED · RISK ────────────────────────────────────────────────────────
+// SL/TP/trailing are execution-only — use the Strategy version to backtest them.
+g_risk = "Advanced · Risk (Custom preset only)"
+use_sl_tp_in = input.bool(true, "Use Fixed Stop Loss / Take Profit", group=g_risk, tooltip="Protective bracket around every position. All presets keep this ON — it's what makes 'hold overnight' safe.")
+sl_in  = input.float(6.0, "Stop Loss %", minval=0.1, maxval=50.0, step=0.5, group=g_risk, tooltip="Hard floor under the entry price. Presets: Histogram 6%, Swing/HF 7.5%.")
+tp_in  = input.float(110.0, "Take Profit %", minval=0.1, maxval=1000.0, step=1.0, group=g_risk, tooltip="Profit target. Wide targets let winners run — testing favored 110% (Histogram) / 60% (Wave presets) over tight targets.")
+use_trl_in = input.bool(false, "Use Trailing Stop", group=g_risk, tooltip="Locks in gains once price runs. Off in the Histogram preset, ON at 15% in the Wave presets. NOTE: presets override this silently — this checkbox shows the raw input, but the Info Panel on the chart shows the EFFECTIVE risk settings.")
+trl_in = input.float(15.0, "Trailing Stop %", minval=0.5, maxval=50.0, step=0.5, group=g_risk, tooltip="Distance the trailing stop follows behind the high-water mark.")
+
+// ─── ADVANCED · CALENDAR ────────────────────────────────────────────────────
+g_cal = "Advanced · Calendar Filters (Custom preset only)"
+skip_mon_in = input.bool(false, "Skip Monday", group=g_cal, tooltip="Block new entries on Mondays.")
+skip_tue_in = input.bool(false, "Skip Tuesday", group=g_cal, tooltip="Block new entries on Tuesdays.")
+skip_wed_in = input.bool(true,  "Skip Wednesday", group=g_cal, tooltip="Block new entries on Wednesdays. In GME testing, Wednesday was the only negative day — the Histogram preset skips it.")
+skip_thu_in = input.bool(false, "Skip Thursday", group=g_cal, tooltip="Block new entries on Thursdays. In GME testing Thursday was the BEST day — don't skip it.")
+skip_fri_in = input.bool(false, "Skip Friday", group=g_cal, tooltip="Block new entries on Fridays.")
+avoid_opex_in = input.bool(true, "Avoid OPEX Week", group=g_cal, tooltip="Skip entries within the buffer around monthly options expiration (3rd Friday). On in the Histogram preset.")
+opex_buffer_in = input.int(2, "OPEX Buffer (days)", minval=0, maxval=10, group=g_cal, tooltip="Calendar days before/after the 3rd Friday to avoid.")
+rth_only_in = input.bool(true, "Regular-Hours Entries Only", group=g_cal,
+     tooltip="Only signal new entries during the regular session (9:30–16:00 ET for US stocks). The presets were tuned on regular-hours data — pre/post-market bars distort the z-scores. Recommended ON, especially on charts with extended hours enabled.")
+
+// ─── DISPLAY ────────────────────────────────────────────────────────────────
+g_vis = "Display"
+show_price_marks = input.bool(true, "Also mark signals on the price chart", group=g_vis,
+     tooltip="Draws ▲/▼ signal markers directly on the price chart (on by default — this indicator has no trade arrows of its own).\nIf your TradingView version errors on this, open the code and delete ', force_overlay=true'.")
+show_price_mirror = input.bool(true, "Mirror Line on Price Chart (price-scaled)", group=g_vis,
+     tooltip="The classic 'overlay' view: draws the mirrored past re-scaled into TODAY'S dollars on the main price chart, so it follows price directly. Mapping: mirror price = rolling mean + mirror z-score × rolling stdev.\n\nRead it like this — price trading ABOVE the line = the Current side of the wave is winning (bullish); BELOW = the mirror is winning. Works in every Signal Mode; most intuitive with Wave Flip / Momentum. Turn off to keep the price chart clean.")
+show_info = input.bool(false, "Show Info Panel", group=g_vis, tooltip="Compact status table drawn in the BOTTOM-RIGHT of the main price chart (not this pane): preset, mode, signal state, sessions held, calendar, drift, and the EFFECTIVE risk settings after preset overrides. Off by default to keep charts clean.")
+col_current = input.color(#00E676, "Current Line", group=g_vis)
+col_mirror  = input.color(#00E5FF, "Mirror Line", group=g_vis)
+col_bull    = input.color(#00E676, "Bull Color", group=g_vis)
+col_bear    = input.color(#FF5252, "Bear Color", group=g_vis)
+lw          = input.int(2, "Line Width", minval=1, maxval=5, group=g_vis)
+
+// ─── PRESET RESOLUTION ──────────────────────────────────────────────────────
+// One rule: presets override everything; "Custom" unlocks everything.
+bool is_custom = preset == "Custom (unlock Advanced settings)"
+bool p_hist    = preset == "GME Tuned — Histogram"
+bool p_swing   = preset == "GME Swing — Wave + Momentum"
+
+string signal_mode = is_custom ? signal_mode_in : p_hist ? "Histogram Cross" : p_swing ? "Wave + Momentum" : "Wave Flip"
+int  zscore_win  = is_custom ? zscore_win_in  : 20
+int  shift_bars  = is_custom ? shift_bars_in  : p_hist ? 1260 : p_swing ? 210 : 105
+int  hist_smooth = is_custom ? hist_smooth_in : 2
+int  signal_len  = is_custom ? signal_len_in  : 9
+bool use_drift   = is_custom ? use_drift_in   : false  // presets run chart-TF only (TV 1m history is too short for drift; live engine found session-gap bugs)
+bool use_sl_tp   = is_custom ? use_sl_tp_in   : true
+float sl_perc    = is_custom ? sl_in          : p_hist ? 6.0 : 7.5
+float tp_perc    = is_custom ? tp_in          : p_hist ? 110.0 : 60.0
+bool use_trl     = is_custom ? use_trl_in     : not p_hist
+float trl_perc   = is_custom ? trl_in         : 15.0
+bool skip_mon    = is_custom ? skip_mon_in    : false
+bool skip_tue    = is_custom ? skip_tue_in    : false
+bool skip_wed    = is_custom ? skip_wed_in    : p_hist
+bool skip_thu    = is_custom ? skip_thu_in    : false
+bool skip_fri    = is_custom ? skip_fri_in    : false
+bool avoid_opex  = is_custom ? avoid_opex_in  : p_hist
+int  opex_buffer = is_custom ? opex_buffer_in : 2
+bool rth_only    = is_custom ? rth_only_in    : true
+
+// ─── MIRROR / DRIFT ENGINE ──────────────────────────────────────────────────
+int chart_secs = timeframe.in_seconds()
+int drift_secs = timeframe.in_seconds(drift_tf)
+int tf_ratio   = math.max(1, chart_secs / drift_secs)
+
+// Chart-timeframe z-score and its mirrored, flipped past
+float cz_mean = ta.sma(src, zscore_win)
+float cz_std  = ta.stdev(src, zscore_win)
+float cz      = cz_std > 0 ? (src - cz_mean) / cz_std : 0.0
+
+int max_off_c = math.max(lookback, shift_bars + zscore_win)
+float cm = na
+if bar_index >= max_off_c
+    int roff = flip_x ? (max_off_c - 1 - shift_bars) : shift_bars
+    if roff >= 0 and roff < bar_index
+        cm := nz(cz[roff])
+        if flip_y
+            cm := -cm
+
+// Drift-resolution series (windows scaled to the lower timeframe)
+int d_win   = math.min(zscore_win * tf_ratio, 4000)
+int d_shift = math.min(shift_bars * tf_ratio, 4900)
+int d_lb    = math.min(lookback * tf_ratio, 4900)
+
+float dz_mean = ta.sma(src, d_win)
+float dz_std  = ta.stdev(src, d_win)
+float dz      = dz_std > 0 ? (src - dz_mean) / dz_std : 0.0
+
+int d_max = math.max(d_lb, d_shift + d_win)
+float dm = na
+if bar_index >= d_max
+    int doff = flip_x ? (d_max - 1 - d_shift) : d_shift
+    if doff >= 0 and doff < math.min(bar_index, 4999)
+        dm := nz(dz[doff])
+        if flip_y
+            dm := -dm
+
+float ltf_cz = request.security(syminfo.tickerid, drift_tf, dz, barmerge.gaps_off, barmerge.lookahead_off)
+float ltf_cm = request.security(syminfo.tickerid, drift_tf, dm, barmerge.gaps_off, barmerge.lookahead_off)
+
+// Optional smoothing (presets use 1 = raw)
+float sz_d  = smooth_len > 1 ? (smooth_type == "SMA" ? ta.sma(ltf_cz, smooth_len) : ta.ema(ltf_cz, smooth_len)) : ltf_cz
+float sm_d  = smooth_len > 1 ? (smooth_type == "SMA" ? ta.sma(ltf_cm, smooth_len) : ta.ema(ltf_cm, smooth_len)) : ltf_cm
+float sz_nd = smooth_len > 1 ? (smooth_type == "SMA" ? ta.sma(cz, smooth_len) : ta.ema(cz, smooth_len)) : cz
+float sm_nd = smooth_len > 1 ? (smooth_type == "SMA" ? ta.sma(cm, smooth_len) : ta.ema(cm, smooth_len)) : cm
+
+// Histogram models — computed on both engines so the auto-drift switch is clean
+float raw_hist_d  = na
+float raw_hist_nd = na
+if hist_mode == "Simple Difference"
+    raw_hist_d  := sz_d - sm_d
+    raw_hist_nd := sz_nd - sm_nd
+else if hist_mode == "Regime Product"
+    raw_hist_d  := sz_d * sm_d
+    raw_hist_nd := sz_nd * sm_nd
+else if hist_mode == "Directional Force"
+    raw_hist_d  := (sz_d - sm_d) * math.abs((sz_d + sm_d) / 2.0)
+    raw_hist_nd := (sz_nd - sm_nd) * math.abs((sz_nd + sm_nd) / 2.0)
+else if hist_mode == "Convergence Velocity"
+    raw_hist_d  := (sz_d - sm_d) - (nz(sz_d[1]) - nz(sm_d[1]))
+    raw_hist_nd := (sz_nd - sm_nd) - (nz(sz_nd[1]) - nz(sm_nd[1]))
+else
+    raw_hist_d  := (sz_d - sm_d) * math.abs(sz_d) * (sz_d > 0 ? 1.0 : -1.0)
+    raw_hist_nd := (sz_nd - sm_nd) * math.abs(sz_nd) * (sz_nd > 0 ? 1.0 : -1.0)
+
+float hist_d  = hist_smooth > 1 ? ta.sma(raw_hist_d, hist_smooth) : raw_hist_d
+float sig_d   = ta.ema(nz(hist_d), signal_len)
+float hist_nd = hist_smooth > 1 ? ta.sma(raw_hist_nd, hist_smooth) : raw_hist_nd
+float sig_nd  = ta.ema(nz(hist_nd), signal_len)
+
+// Auto-disable drift during volatility explosions (3-day cooldown)
+bool final_use_drift = use_drift
+var int last_trigger_time = 0
+if use_drift and auto_drift
+    bool trigger_now = false
+    if auto_mode == "Un-Drifted Hist > 1.5"
+        trigger_now := math.abs(hist_nd) > 1.5
+    else if auto_mode == "Price Velocity (>4% in 3 bars)"
+        float pct_change = nz(close[3]) != 0 ? (math.abs(close - nz(close[3])) / nz(close[3])) * 100 : 0.0
+        trigger_now := pct_change > 4.0
+    else
+        float vol_sma = ta.sma(volume, 50)
+        trigger_now := volume > vol_sma * 5.0
+    if trigger_now
+        last_trigger_time := time
+    if last_trigger_time > 0 and (time - last_trigger_time) <= 259200000
+        final_use_drift := false
+
+// Active series
+float line_z = final_use_drift ? sz_d : sz_nd
+float line_m = final_use_drift ? sm_d : sm_nd
+float hist   = final_use_drift ? hist_d : hist_nd
+float sig    = final_use_drift ? sig_d : sig_nd
+
+// Normalized -1..+1 lines for Wave/Momentum modes and display
+float z_norm = math.max(-3.0, math.min(3.0, line_z)) / 3.0
+float m_norm = math.max(-3.0, math.min(3.0, nz(line_m))) / 3.0
+
+// ─── SIGNALS ────────────────────────────────────────────────────────────────
+bool wave_bull = ta.crossover(z_norm, m_norm)
+bool wave_bear = ta.crossunder(z_norm, m_norm)
+bool mom_bull  = z_norm > mom_thresh
+bool mom_bear  = z_norm < -mom_thresh
+
+bool x_sig_up  = ta.crossover(hist, sig)
+bool x_zero_up = ta.crossover(hist, 0)
+bool x_zone_up = ta.crossover(hist, zone_thresh)
+bool x_sig_dn  = ta.crossunder(hist, sig)
+bool x_zero_dn = ta.crossunder(hist, 0)
+bool x_zone_dn = ta.crossunder(hist, -zone_thresh)
+bool h_up = hist_trigger == "Cross Zero" ? x_zero_up : hist_trigger == "Cross Zone" ? x_zone_up : x_sig_up
+bool h_dn = hist_trigger == "Cross Zero" ? x_zero_dn : hist_trigger == "Cross Zone" ? x_zone_dn : x_sig_dn
+
+bool enter_signal = signal_mode == "Histogram Cross" ? h_up :
+     signal_mode == "Wave Flip" ? wave_bull :
+     signal_mode == "Momentum" ? mom_bull :
+     (wave_bull and mom_bull)
+bool exit_signal = signal_mode == "Histogram Cross" ? h_dn :
+     signal_mode == "Wave Flip" ? wave_bear :
+     signal_mode == "Momentum" ? (mom_bear or wave_bear) :
+     (wave_bear or mom_bear)
+
+// ─── CALENDAR FILTERS ───────────────────────────────────────────────────────
+bool dow_ok = true
+if skip_mon and dayofweek == 2
+    dow_ok := false
+if skip_tue and dayofweek == 3
+    dow_ok := false
+if skip_wed and dayofweek == 4
+    dow_ok := false
+if skip_thu and dayofweek == 5
+    dow_ok := false
+if skip_fri and dayofweek == 6
+    dow_ok := false
+
+int _dom = dayofmonth
+int _dow = dayofweek
+int _first_dow = ((_dow - ((_dom - 1) % 7)) + 7) % 7
+int _first_dow_adj = _first_dow == 0 ? 7 : _first_dow
+int _first_fri = _first_dow_adj <= 6 ? (6 - _first_dow_adj + 1) : (6 - _first_dow_adj + 8)
+int _third_fri = _first_fri + 14
+bool opex_ok = not avoid_opex or math.abs(_dom - _third_fri) > opex_buffer
+bool rth_ok = not rth_only or session.ismarket
+bool cal_ok = dow_ok and opex_ok and rth_ok
+
+// ─── POSITION STATE & HOLD-OVERNIGHT (simulated — self-imposed, not a broker PDT rule) ───
+// Simulates a single long position so exits/alerts mirror the Strategy version's signal flow.
+var bool inpos = false
+var int sessions_held = 0
+bool new_session = dayofmonth != nz(dayofmonth[1], dayofmonth) or month != nz(month[1], month) or year != nz(year[1], year)
+if inpos and new_session
+    sessions_held += 1
+bool overnight_ok = not hold_overnight or sessions_held >= min_hold_sessions
+bool goLong = (not inpos) and enter_signal and cal_ok
+bool goExit = inpos and exit_signal and overnight_ok
+if goLong
+    inpos := true
+    sessions_held := 0
+if goExit
+    inpos := false
+
+// ─── ALERTS ─────────────────────────────────────────────────────────────────
+string buy_msg   = webhook_secret == "" ? "MIRROR BUY " + syminfo.ticker :
+     '{"secret":"' + webhook_secret + '","action":"buy","ticker":"' + syminfo.ticker + '"}'
+string close_msg = webhook_secret == "" ? "MIRROR CLOSE " + syminfo.ticker :
+     '{"secret":"' + webhook_secret + '","action":"close","ticker":"' + syminfo.ticker + '"}'
+
+if goLong
+    alert(buy_msg, alert.freq_once_per_bar_close)
+if goExit
+    alert(close_msg, alert.freq_once_per_bar_close)
+
+alertcondition(goLong, "Long Entry", "Mirror Suite long entry")
+alertcondition(goExit, "Exit Long", "Mirror Suite exit")
+
+// ─── PLOTS ──────────────────────────────────────────────────────────────────
+bool show_hist = signal_mode == "Histogram Cross"
+
+color hist_col = hist > 0 and hist > nz(hist[1]) ? col_bull :
+     hist > 0 ? color.new(col_bull, 60) :
+     hist < 0 and hist < nz(hist[1]) ? col_bear : color.new(col_bear, 60)
+
+plot(show_hist ? hist : na, "Histogram", style=plot.style_columns, color=hist_col, linewidth=2)
+plot(show_hist ? sig : na, "Signal Line", color=color.new(#FFAB40, 0), linewidth=2)
+
+p_cur = plot(show_hist ? na : z_norm, "Current (now)", color=col_current, linewidth=lw)
+p_mir = plot(show_hist ? na : m_norm, "Mirror (the past)", color=col_mirror, linewidth=lw)
+fill(p_cur, p_mir, color=z_norm > m_norm ? color.new(col_bull, 85) : color.new(col_bear, 85), title="Divergence Fill")
+
+hline(0, "Zero", color=color.new(color.gray, 60), linestyle=hline.style_dotted)
+float guide_up = show_hist ? zone_thresh : (signal_mode == "Wave Flip" ? na : mom_thresh)
+plot(guide_up, "Upper Guide", color=color.new(color.gray, 75), style=plot.style_linebr, display=display.pane)
+plot(-guide_up, "Lower Guide", color=color.new(color.gray, 75), style=plot.style_linebr, display=display.pane)
+
+// ── PRICE-CHART OVERLAY: the mirror re-scaled into dollars (classic overlay view) ──
+// Maps the mirror z-score back into price space via the current rolling mean/stdev,
+// so the line rides alongside price on the main chart.
+float mirror_price = show_price_mirror and not na(line_m) ? cz_mean + line_m * cz_std : na
+plot(mirror_price, "Mirror (price-scaled)", color=color.new(col_mirror, 25), linewidth=2, force_overlay=true)
+
+// In-pane markers — RAW crosses, so every fill flip has a matching marker.
+// (Price-chart markers below stay "actionable only".)
+plotshape(enter_signal, "Signal ▲", shape.triangleup, location.bottom, color.new(col_bull, 0), size=size.tiny)
+plotshape(exit_signal, "Signal ▼", shape.triangledown, location.top, color.new(col_bear, 0), size=size.tiny)
+
+// Optional markers on the price chart (delete ', force_overlay=true' if your TV version rejects it)
+plotshape(show_price_marks and enter_signal and cal_ok, "Buy ▲ (price)", shape.triangleup, location.belowbar, color.new(col_bull, 0), size=size.small, force_overlay=true)
+plotshape(show_price_marks and exit_signal and inpos, "Sell ▼ (price)", shape.triangledown, location.abovebar, color.new(col_bear, 0), size=size.small, force_overlay=true)
+
+bgcolor(auto_drift and use_drift and not final_use_drift ? color.new(color.yellow, 92) : na, title="Drift Cooldown")
+
+// ─── INFO PANEL ─────────────────────────────────────────────────────────────
+// force_overlay: draw the panel on the main price chart, not this short pane
+// (delete ', force_overlay=true' if your TradingView version rejects it)
+var table info = table.new(position.bottom_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1, force_overlay=true)
+if show_info and barstate.islast
+    table.cell(info, 0, 0, "Preset", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 0, is_custom ? "CUSTOM" : p_hist ? "GME Histogram" : p_swing ? "GME Swing" : "High Frequency", text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 1, "Mode", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 1, signal_mode, text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 2, "State", text_color=color.gray, text_size=size.tiny)
+    string st = inpos ? "LONG" : enter_signal and cal_ok ? "ENTRY" : "FLAT"
+    table.cell(info, 1, 2, st, text_color=inpos ? color.lime : color.white, text_size=size.tiny)
+    table.cell(info, 0, 3, "Held", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 3, inpos ? str.tostring(sessions_held) + " / " + str.tostring(min_hold_sessions) + " sessions" : "—", text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 4, "Calendar", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 4, cal_ok ? "OK" : "SKIP DAY", text_color=cal_ok ? color.lime : color.red, text_size=size.tiny)
+    table.cell(info, 0, 5, "Drift", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 5, not use_drift ? "OFF" : final_use_drift ? "ON" : "COOLDOWN", text_color=color.aqua, text_size=size.tiny)
+    // Effective risk AFTER preset overrides (informational — execution lives in the Strategy version).
+    table.cell(info, 0, 6, "Risk", text_color=color.gray, text_size=size.tiny)
+    string risk_str = (use_sl_tp ? "SL " + str.tostring(sl_perc, "#.#") + "% · TP " + str.tostring(tp_perc, "#") + "%" : "no SL/TP") + (use_trl ? " · TRL " + str.tostring(trl_perc, "#.#") + "%" : "")
+    table.cell(info, 1, 6, risk_str, text_color=color.white, text_size=size.tiny)

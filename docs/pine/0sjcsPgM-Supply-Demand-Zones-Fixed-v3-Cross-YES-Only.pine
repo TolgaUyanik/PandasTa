@@ -1,0 +1,351 @@
+//@version=5
+indicator("Supply/Demand Zones / Interval Time V2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=200)
+
+// =============================================================================
+//                                  INPUTS
+// =============================================================================
+
+
+// === Time Range Settings ===
+time_group = "Time Range Settings"
+time_mode = input.string("Daily Interval", "Time Mode", options=["Daily Interval", "Repeating Interval"], group=time_group)
+interval_minutes = input.int(30, "Interval Duration (minutes)", minval=1, group=time_group, tooltip="Used only if Time Mode is 'Repeating Interval'.")
+timezone_offset = input.int(3, "Timezone Offset (hours from UTC)", minval=-12, maxval=14, group=time_group, tooltip="Offset in hours from UTC. Examples: 0=UTC, 2=UTC+2, -5=UTC-5. Used only if Time Mode is 'Daily Interval'.")
+start_hour = input.int(10, "Start Hour", minval=0, maxval=23, group=time_group)
+start_minute = input.int(0, "Start Minute", minval=0, maxval=59, group=time_group)
+end_hour = input.int(12, "End Hour", minval=0, maxval=23, group=time_group)
+end_minute = input.int(0, "End Minute", minval=0, maxval=59, group=time_group)
+
+// === Display Settings ===
+// Hidden from settings panel by using constants
+show_range_border = false
+show_range_lines = false
+show_subrange_zones = false
+show_subrange_labels = false
+show_range_info = false
+show_all_cross_zones = false
+show_session_bg = false
+
+// === Colors ===
+// Hidden from settings panel by using constants
+range_border_color = color.new(color.blue, 50)
+range_high_color = color.red
+range_low_color = color.green
+range_mid_color = color.yellow
+open_subrange_color = color.gray
+close_subrange_color = color.gray
+range_text_color = color.white
+subrange_text_color = color.white
+validated_zone_up_color = color.new(color.green, 85)
+validated_zone_down_color = color.new(color.red, 85)
+validated_zone_line_color = color.new(color.white, 50)
+
+// === Transparency ===
+// Hidden from settings panel by using constant
+subrange_transparency = 80
+
+// === Debug Settings ===
+// Hidden from settings panel by using constants
+show_debug_info = false
+show_monitoring_levels = false
+
+// =============================================================================
+//                                  LOGIC
+// =============================================================================
+
+// --- Function Definition ---
+f_is_in_daily_session() =>
+    timezone_str = timezone_offset >= 0 ? "UTC+" + str.tostring(timezone_offset) : "UTC" + str.tostring(timezone_offset)
+    t = time(timeframe.period, timezone_str)
+    session_start = timestamp(timezone_str, year(t), month(t), dayofmonth(t), start_hour, start_minute, 0)
+    session_end = timestamp(timezone_str, year(t), month(t), dayofmonth(t), end_hour, end_minute, 0)
+    if session_start > session_end
+        t >= session_start or t <= session_end
+    else
+        t >= session_start and t <= session_end
+
+// --- Session Detection ---
+is_in_session = false
+is_first_bar_of_session = false
+is_last_bar_of_session = false
+
+if time_mode == "Daily Interval"
+    is_in_session := f_is_in_daily_session()
+    is_first_bar_of_session := bar_index > 0 and is_in_session and not is_in_session[1]
+    is_last_bar_of_session := bar_index > 0 and not is_in_session and is_in_session[1]
+else // "Repeating Interval"
+    interval_ms = interval_minutes * 60 * 1000
+    day_start_utc = timestamp(year(time, "UTC"), month(time, "UTC"), dayofmonth(time, "UTC"), 0, 0, 0)
+    time_since_day_start = time - day_start_utc
+    current_interval_index = math.floor(time_since_day_start / interval_ms)
+    
+    prev_day_start_utc = timestamp(year(time[1], "UTC"), month(time[1], "UTC"), dayofmonth(time[1], "UTC"), 0, 0, 0)
+    prev_time_since_day_start = time[1] - prev_day_start_utc
+    prev_interval_index = math.floor(prev_time_since_day_start / interval_ms)
+    
+    is_first_bar_of_session := current_interval_index != prev_interval_index or day_start_utc != prev_day_start_utc
+    is_last_bar_of_session := is_first_bar_of_session
+    is_in_session := true
+
+// Variables to store current session state and values
+var float session_high = na
+var float session_low = na
+var float session_open = na
+var float session_close = na
+var int session_start_time = na
+
+// Variables for additional validation after Cross YES
+var bool is_monitoring = false
+var float monitoring_target_level = na
+var float monitoring_mid_level = na
+var int monitoring_bars_left = na
+var bool monitoring_result = na
+var bool monitoring_invalidated = false
+var float stored_final_mid = na
+var bool stored_close_above_mid = na
+var bool validation_completed = false
+var bool validation_passed = false
+var int range_end_time_for_zone = na
+var int monitoring_start_time = na
+var float stored_final_high = na
+var float stored_final_low = na
+
+// Array-uri pentru a stoca TOATE elementele zonelor nemitigate
+var array<box> all_unmitigated_boxes = array.new<box>()
+var array<line> all_unmitigated_high_lines = array.new<line>()
+var array<line> all_unmitigated_low_lines = array.new<line>()
+var array<line> all_unmitigated_mid_lines = array.new<line>()
+var array<bool> all_zones_mitigated = array.new<bool>()
+var array<int> all_zone_ids = array.new<int>()
+
+// --- Additional validation logic (IMMEDIATE after Cross YES) ---
+if is_last_bar_of_session and not is_monitoring
+    final_high_temp = session_high[1]
+    final_low_temp = session_low[1]
+    final_open_temp = session_open[1]
+    final_close_temp = session_close[1]
+    final_mid_temp = (final_high_temp + final_low_temp) / 2
+    
+    cross_valid_temp = (final_open_temp < final_mid_temp and final_close_temp > final_mid_temp) or (final_open_temp > final_mid_temp and final_close_temp < final_mid_temp)
+    
+    if cross_valid_temp
+        is_monitoring := true
+        monitoring_bars_left := 50
+        monitoring_result := false
+        monitoring_invalidated := false
+        validation_completed := false
+        validation_passed := false
+        stored_final_mid := final_mid_temp
+        stored_close_above_mid := final_close_temp > final_mid_temp
+        range_end_time_for_zone := time[1]
+        monitoring_start_time := session_start_time[1] 
+        stored_final_high := final_high_temp
+        stored_final_low := final_low_temp
+        
+        range_size = final_high_temp - final_low_temp
+        half_range = range_size / 2
+        
+        if final_close_temp > final_mid_temp
+            monitoring_target_level := final_high_temp + half_range
+        else
+            monitoring_target_level := final_low_temp - half_range
+            
+        monitoring_mid_level := final_mid_temp
+        
+        if show_debug_info
+            label.new(time, high + (high - low) * 0.3, "CROSS YES DETECTED\nStarting monitoring...", 
+              xloc=xloc.bar_time, style=label.style_label_down, color=color.purple, 
+              textcolor=color.white, size=size.normal)
+
+// Monitor price action after Cross YES - START FROM NEXT BAR
+if is_monitoring and monitoring_bars_left > 0 and not is_last_bar_of_session
+    monitoring_bars_left := monitoring_bars_left - 1
+    
+    if not monitoring_invalidated
+        mid_touched = false
+        if stored_close_above_mid
+            if low <= monitoring_mid_level
+                mid_touched := true
+        else
+            if high >= monitoring_mid_level
+                mid_touched := true
+        
+        if mid_touched
+            monitoring_invalidated := true
+            is_monitoring := false
+            validation_completed := true
+            validation_passed := false
+            if show_debug_info
+                label.new(time, low - (high - low) * 0.2, "MID TOUCHED - INVALIDATED", 
+                  xloc=xloc.bar_time, style=label.style_label_up, color=color.red, 
+                  textcolor=color.white, size=size.normal)
+    
+    if not monitoring_invalidated and not monitoring_result
+        target_hit = false
+        if stored_close_above_mid and high >= monitoring_target_level
+            target_hit := true
+        else if not stored_close_above_mid and low <= monitoring_target_level
+            target_hit := true
+            
+        if target_hit
+            monitoring_result := true
+            is_monitoring := false
+            validation_completed := true
+            validation_passed := true
+            
+            if show_debug_info
+                label.new(time, low - (high - low) * 0.2, "TARGET HIT - VALID", 
+                  xloc=xloc.bar_time, style=label.style_label_up, color=color.green, 
+                  textcolor=color.white, size=size.normal)
+
+            // Logica de creare a zonei
+            var box new_zone_box = na
+            var line new_zone_high_line = na
+            var line new_zone_low_line = na
+            var line new_zone_mid_line = na
+            new_zone_id = bar_index
+
+            float zone_top = na
+            float zone_bottom = na
+            color zone_bg_color = na
+
+            if stored_close_above_mid
+                zone_top := monitoring_mid_level
+                zone_bottom := stored_final_low
+                zone_bg_color := validated_zone_up_color
+            else
+                zone_top := stored_final_high
+                zone_bottom := monitoring_mid_level
+                zone_bg_color := validated_zone_down_color
+            
+            new_zone_box := box.new(monitoring_start_time, zone_top, time, zone_bottom,
+              xloc=xloc.bar_time, border_color=na, 
+              bgcolor=zone_bg_color, extend=extend.right)
+            
+            new_zone_high_line := line.new(monitoring_start_time, zone_top, time, zone_top,
+              xloc=xloc.bar_time, color=validated_zone_line_color, width=1, style=line.style_dotted, 
+              extend=extend.right)
+              
+            new_zone_low_line := line.new(monitoring_start_time, zone_bottom, time, zone_bottom,
+              xloc=xloc.bar_time, color=validated_zone_line_color, width=1, style=line.style_dotted, 
+              extend=extend.right)
+
+            new_zone_mid_line := line.new(monitoring_start_time, (zone_top + zone_bottom) / 2, time, (zone_top + zone_bottom) / 2,
+              xloc=xloc.bar_time, color=validated_zone_line_color, width=1, style=line.style_dotted, 
+              extend=extend.right)
+            
+            array.push(all_unmitigated_boxes, new_zone_box)
+            array.push(all_unmitigated_high_lines, new_zone_high_line)
+            array.push(all_unmitigated_low_lines, new_zone_low_line)
+            array.push(all_unmitigated_mid_lines, new_zone_mid_line)
+            array.push(all_zones_mitigated, false)
+            array.push(all_zone_ids, new_zone_id)
+
+    if monitoring_bars_left == 0 and not validation_completed
+        is_monitoring := false
+        validation_completed := true
+        validation_passed := false
+        if show_debug_info
+            label.new(time, low - (high - low) * 0.2, "TIMEOUT - NO TARGET", 
+              xloc=xloc.bar_time, style=label.style_label_up, color=color.gray, 
+              textcolor=color.white, size=size.normal)
+
+// Logica de mitigare a zonelor
+if array.size(all_unmitigated_boxes) > 0
+    for i = 0 to array.size(all_unmitigated_boxes) - 1
+        if array.get(all_zones_mitigated, i) == false
+            current_box = array.get(all_unmitigated_boxes, i)
+            
+            if not na(current_box)
+                zone_high = box.get_top(current_box)
+                zone_low = box.get_bottom(current_box)
+                
+                bar_touches_zone = (low <= zone_high and high >= zone_low)
+                
+                if bar_touches_zone
+                    array.set(all_zones_mitigated, i, true)
+                    
+                    box.set_right(current_box, time)
+                    box.set_extend(current_box, extend.none)
+                    
+                    current_high_line = array.get(all_unmitigated_high_lines, i)
+                    current_low_line = array.get(all_unmitigated_low_lines, i)
+                    current_mid_line = array.get(all_unmitigated_mid_lines, i)
+                    
+                    if not na(current_high_line)
+                        line.set_x2(current_high_line, time)
+                        line.set_extend(current_high_line, extend.none)
+                    if not na(current_low_line)
+                        line.set_x2(current_low_line, time)
+                        line.set_extend(current_low_line, extend.none)
+                    if not na(current_mid_line)
+                        line.set_x2(current_mid_line, time)
+                        line.set_extend(current_mid_line, extend.none)
+
+// --- Calculate values during session ---
+if is_first_bar_of_session
+    session_high := high
+    session_low := low
+    session_open := open
+    session_start_time := time
+else if is_in_session
+    session_high := math.max(session_high, high)
+    session_low := math.min(session_low, low)
+    session_close := close 
+
+// =============================================================================
+//                                  DRAWING
+// =============================================================================
+if is_last_bar_of_session
+    final_session_end_time = time[1]
+    final_high = session_high[1]
+    final_low = session_low[1]
+    final_open = session_open[1]
+    final_close = session_close[1]
+    final_mid = (final_high + final_low) / 2
+    final_start_time = session_start_time[1]
+    
+    cross_valid = (final_open < final_mid and final_close > final_mid) or (final_open > final_mid and final_close < final_mid)
+    
+    if cross_valid
+        if show_range_border
+            box.new(final_start_time, final_high, final_session_end_time, final_low,
+              xloc=xloc.bar_time,
+              border_color=range_border_color, border_width=1, border_style=line.style_dotted,
+              bgcolor=na)
+
+        if show_range_lines
+            line.new(final_start_time, final_high, final_session_end_time, final_high, xloc=xloc.bar_time, color=range_high_color, width=1)
+            line.new(final_start_time, final_low, final_session_end_time, final_low, xloc=xloc.bar_time, color=range_low_color, width=1)
+            line.new(final_start_time, final_mid, final_session_end_time, final_mid, xloc=xloc.bar_time, color=range_mid_color, style=line.style_dashed, width=1)
+        
+        total_range_size = final_high - final_low
+        if total_range_size > 0
+            open_below_mid = final_open < final_mid
+            close_below_mid = final_close < final_mid
+
+            open_zone_top = open_below_mid ? final_open : final_high
+            open_zone_bottom = open_below_mid ? final_low : final_open
+            if show_subrange_zones
+                box.new(final_start_time, open_zone_top, final_session_end_time, open_zone_bottom,
+                  xloc=xloc.bar_time, border_color=na, bgcolor=color.new(open_subrange_color, subrange_transparency))
+            if show_subrange_labels
+                open_sub_pct = (math.abs(final_open - (open_below_mid ? final_low : final_high)) / total_range_size) * 100
+                open_text = "OPEN " + str.tostring(open_sub_pct, "#.1") + "%\n" + str.tostring(final_open, format.mintick)
+                label.new(final_start_time + (final_session_end_time - final_start_time)/2, (open_zone_top + open_zone_bottom) / 2,
+                  open_text, xloc=xloc.bar_time, style=label.style_label_center, color=color.new(open_subrange_color, 100), 
+                  textcolor=subrange_text_color, size=size.small)
+
+            close_zone_top = close_below_mid ? final_close : final_high
+            close_zone_bottom = close_below_mid ? final_low : final_close
+            if show_subrange_zones
+                box.new(final_start_time, close_zone_top, final_session_end_time, close_zone_bottom,
+                  xloc=xloc.bar_time, border_color=na, bgcolor=color.new(close_subrange_color, subrange_transparency))
+            if show_subrange_labels
+                close_sub_pct = (math.abs(final_close - (close_below_mid ? final_low : final_high)) / total_range_size) * 100
+                close_text = "CLOSE " + str.tostring(close_sub_pct, "#.1") + "%\n" + str.tostring(final_close, format.mintick)
+                label.new(final_start_time + (final_session_end_time - final_start_time)/2, (close_zone_top + close_zone_bottom) / 2,
+                  close_text, xloc=xloc.bar_time, style=label.style_label_center, color=color.new(close_subrange_color, 100), 
+                  textcolor=subrange_text_color, size=size.small)
+
+bgcolor(is_in_session and show_session_bg ? color.new(color.blue, 90) : na, title="Active Session")

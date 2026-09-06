@@ -1,0 +1,1310 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © robbatt
+
+//@version=6
+
+// PUBLISH #1 of 4 (no dependencies). Publish privately on TradingView, then set the
+// import version numbers in the downstream files to the published version.
+
+// @description SMT divergence + session detection/lifecycle, SMT buffers, premium/discount zones, and their on-chart drawing — extracted 1:1 from rewrite_strategy.pine.
+library("lib_smt", overlay = true)
+
+////////////////////////////////////////////////////////////////////////////////
+//                               Helpers
+////////////////////////////////////////////////////////////////////////////////
+
+export const int ONE_SECOND = 1000
+export const int ONE_MINUTE = 60 * ONE_SECOND
+export const int ONE_HOUR   = 60 * ONE_MINUTE
+export const int ONE_DAY    = 24 * ONE_HOUR
+
+rotate(this, value, int max) =>
+    array.push(this,value)
+    if array.size(this) > max
+        array.shift(this) // returns removed
+    else
+        na // returns nothing
+
+
+export enum SMTFilterReason
+    SessionCutoffIntraBlocked = "intra SMT blocked (post-cutoff)"  // intra SMT exists but suppressed; no level/daily SMT present
+    SessionDeprecated         = "Session Deprecated"
+    BothSwept                 = "Swept"
+    Deprecated                = "Deprecated"
+    PriceMovedAway            = "Price moved away"
+    SessionEnded              = "Session Ended"
+    SessionStarted            = "Session Started"
+    NoIntraSMTZoneStarted     = "No-Trade Zone Started"
+    NoIntraSMTZoneEnded       = "No-Trade Zone Ended"
+    LondonOpen                = "London Open"
+    NYOpen                    = "NY Open"
+    TradeExit                 = "Trade Exit"
+
+
+// ── Insights visual encoding (shared design tokens for FVG / SMT / Session / Position) ──────
+// Lower opacity number = more opaque = more "active" / important.
+const int INSIGHT_OPACITY_HOT   = 30  // used for trade
+const int INSIGHT_OPACITY_WARM  = 50  // inversed waiting / entry candidate
+const int INSIGHT_OPACITY_COOL  = 70  // tested
+const int INSIGHT_OPACITY_FADE  = 80  // untested / waiting
+const int INSIGHT_OPACITY_GHOST = 90  // invalidated kept
+
+// Tooltip helper: invisible label with hover region anchored to a box's top-left corner.
+// Pine v6 `box.new` does not accept a `tooltip` parameter; this wraps the workaround so
+// FVG and Session insights can expose detail on hover without cluttering the chart inline.
+make_tooltip_anchor(box b, string tip, const bool force_overlay = true) =>
+    label.new(chart.point.from_time(b.get_left(), b.get_top()),
+              "", style = label.style_none, color = #00000000,
+              tooltip = tip, xloc = xloc.bar_time, force_overlay = force_overlay)  
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        SMT declaration
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// §2.1 SMT Types and Priority — priority constants, order inversed so higher int = higher priority
+// for direct int comparison in entry selection logic (higher value wins)
+export const int PRIO_1_ASIA_LONDON = 4
+export const int PRIO_2_NY          = 3
+export const int PRIO_3_DAILY       = 2
+export const int PRIO_4_INTRA       = 1
+
+// §2.2 — which instrument made the first sweep (leader) determines SMT direction attribution
+export const int CHART   = 0
+export const int OTHER   = 1
+
+// Direction
+export const int BULLISH = 1
+export const int BEARISH = -1
+
+
+// §2.1 — SMT signal record: captures the divergence moment for fvg_box and entry validation
+// detected_session_id: session active when sweep was detected (not necessarily the level's session)
+//   used for §2.3.2 London-detected invalidation on NY open
+// leader: instrument that swept first (CHART or OTHER) — §2.2.1 / §2.2.3
+// leader_level: the captured H/L level that was swept
+// sweep: the bar where the leading sweep occurred
+// follow_level: the corresponding level on the non-sweeping instrument (the threshold to watch)
+// session_id: source session the level belongs to
+// prio: §2.1 priority (drives entry selection and display color)
+// deprecate_at: bar_time after which SMT is timed out — §2.3.3 #1, §2.3.4 #2
+export type SMT
+    int             detected_session_id
+    int             leader
+    chart.point     leader_level
+    chart.point     sweep
+    chart.point     follow_level
+    int             session_id
+    int             prio
+    bool            is_bullish
+    int             deprecate_at
+    int             detection_bar                    // bar_index when SMT was first detected; set once at SMT.new(), never updated (unlike sweep.index for intra)
+    float           detection_close                  // chart price when SMT was first detected; set once at SMT.new(), never updated (unlike sweep.index for intra)
+    int             valid_from                       // §4 Phase 10: The current SMT must exist in the activeSMTs array with at least 3 matching entries (same kind, same direction). This is a safeguard against phantom SMT signals.
+                                                     // - reference code implemented this as loop that could have counted up by the same instance ... effectively a charge counter, possibly charged by any active SMT in direction. However backtest showed that using a min age (before ripe for entry / FVG inverse) per SMT was more effective.
+    bool            invalidated              = false
+    SMTFilterReason filter_reason            = na
+    line            leader_line              = na    // dotted
+    label           leader_label             = na
+    line            follow_line              = na    // solid, both are drawn on leader sweep, this is continued as marker level
+    line            follow_intermediate_line = na    // solid, both are drawn on leader sweep, this is continued as marker level
+    label           follow_label             = na
+    color           smt_color                = na
+    bool            draw_remove_highlight    = false
+    bool            used_for_trade           = false // set on fill; prevents deletion when invalidated after trade close
+    int             trade_end_time           = na    // set when position closes; follow_line stops extending at this bar
+
+export method equals(SMT this, SMT other) =>
+    if na(this)
+        na(other)
+    else
+        if na(other)
+            false
+        else // both defined
+            this.session_id == other.session_id
+             and this.is_bullish == other.is_bullish
+             and this.prio == other.prio
+             and this.leader == other.leader
+             and this.leader_level.price == other.leader_level.price
+
+export method delete_smt(SMT this) =>
+    if not na(this)
+        this.leader_line.delete()
+        this.leader_label.delete()
+        this.follow_line.delete()
+        this.follow_intermediate_line.delete()
+        this.follow_label.delete()
+
+export method delete_smts(SMT[] this) =>
+    for smt in this
+        smt.delete_smt()
+    this
+
+// §2.1 — visual priority mapping: teal=Asia/London (prio 1), orange=NY (prio 2),
+// gray=Daily (prio 3), red=Intra (prio 4)
+get_sweep_color(int prio) =>
+    switch prio
+        PRIO_1_ASIA_LONDON => color.teal
+        PRIO_2_NY          => color.orange
+        PRIO_3_DAILY       => color.gray
+        PRIO_4_INTRA       => color.red
+
+method set(SMT this, int leader, chart.point leader_level, float sweep_extreme, chart.point follow_level, int prio) =>
+    this.leader       := leader
+    this.leader_level := leader_level.copy()
+    this.sweep        := chart.point.now(sweep_extreme)
+    this.follow_level := follow_level.copy()
+    this.prio         := prio
+    this
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     SMT declaration
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        Session declaration
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// §2.1 — session IDs used to index monitored_sessions[] and route invalidation signals
+export const int ID_ASIA   = 0
+export const int ID_LONDON = 1
+export const int ID_NY     = 2
+
+export const int ID_OVNGHT = 0
+export const int ID_NO_SMT = 1
+export const int ID_PRE_NY = 2
+export const int ID_LON_NY = 3
+export const int ID_NY_EVE = 4
+
+// Session cutoff mode: what happens when time passes cutoff_at
+// LockSession — fires session_locked := true (no new entries of any kind)
+// BlockIntra  — only suppresses intra SMT entries (level/daily SMTs still tradeable)
+export enum SessionCutoffMode
+    LockSession = "lock session"
+    BlockIntra  = "block intra SMT only"
+
+// §2.2.1 / §2.2.2 — tracks the captured H/L for one instrument on a session or daily bar
+// is_consumed: set true when both instruments have swept this level (divergence resolved), OR on
+//   SMT timeout — blocks re-detection on the same level (§2.3.3 #1, §2.3.1 #1)
+// smt: the active SMT object for this level (na if none yet detected or already invalidated)
+//@type tracks session H/L
+export type SessionLevel
+    chart.point chart        // per-bar session H/L — drives session box resizing and follow level
+    chart.point other        // per-bar session H/L of other instrument
+    chart.point chart_smt_tf // session H/L snapshot at 2m bar boundaries — sweep detection threshold
+    chart.point other_smt_tf // session H/L snapshot at 2m bar boundaries for other instrument
+    bool  is_consumed = false
+    SMT   smt      = na
+
+// §2.2.1 Level Capture Timing — each session captures H/L at its close time
+// §2.1 — is_daily / is_session / is_no_intra_smt_zone flags route lifecycle behavior and SMT priority
+// timeout: SMT deprecation period for this session type (§2.3.3 #1 = 60min daily, §2.3.4 #2 = 30min intra)
+// enable_intra: §2.2.3 / §2.3.4 — London intra disabled by default to avoid phantom signals
+// is_consumed: true when both H and L levels on both instruments are swept — session removed from monitoring
+// §4/§10.6/§2.2.3 — Per-session strategy behaviour: entry limits, risk, intra SMT, cutoffs.
+// Set once at registration time; presence on Session implies the session is tradeable.
+// big_win_threshold: §10.6 — single-trade profit that triggers session lock
+// enable_intra:      §2.2.3 — opt-in for intra-session SMT detection
+export type StrategyConfig
+    // §10.6 / §2.2.3 — session scalars
+    float             big_win_threshold     = na
+    int               cutoff_hour           = na                // local hour at which cutoff fires; na = disabled
+    string            cutoff_tz             = na  // timezone for cutoff_hour interpretation
+    SessionCutoffMode cutoff_mode           = SessionCutoffMode.LockSession
+    int               max_losses            = 0
+    int               max_wins              = 0    // §12.x — session lock after N qualifying wins (TP2 hit OR trail exit) regardless of net P&L
+
+export type Session
+    // static (required)
+    int id
+    int prio
+    int timeout
+    string session
+    SessionLevel h
+    SessionLevel l
+
+    // static (optional)
+    color  _fill_color             = #2195f327
+    string _text                   = ""
+    color  _text_color             = #00000000
+    color  _border_color           = #00000000
+    bool   is_daily                = false
+    bool   is_session              = false
+    bool   is_no_intra_smt_zone    = false
+    bool   enable_intra_smts       = false
+    StrategyConfig strategy_config = na    // tradeable sessions only; presence implies enable_trade
+
+    // dynamic
+    int   start_time               = na
+    int   end_time                 = na
+    int   cutoff_at                = na    // wall-clock epoch of cutoff_hour on session day (DST-safe); na = disabled
+    bool  is_active                = false
+    bool  is_consumed              = false
+    box   box_chart                = na
+    box   box_other                = na
+    float mean_sum                 = 0
+    float mean_count               = 0
+    float mean                     = na
+    bool  is_any_low_swept         = false
+    bool  is_any_high_swept        = false
+
+    bool  draw_signal_consumed     = false // fires once when day moves to consumed_days
+    label tooltip_chart            = na    // hover anchor on box_chart for session info
+    label tooltip_other            = na    // hover anchor on box_other (panel)
+
+// §2.1 — monitored_sessions is fixed-size array indexed by session id (ID_ASIA/LONDON/NY)
+// replace() evicts previous day's same session when new one archives → auto-cleans stale levels
+export method replace(Session[] this, Session value) =>
+    removed = this.get(value.id)
+    this.set(value.id, value)
+    removed
+
+// One-shot signals emitted per bar when session lifecycle events occur
+// Used to trigger bulk invalidations: London open → daily clear (§2.3.3 #2), NY open → London-detected clear (§2.3.2 #2)
+// reset() is called every bar (not guarded by var) so signals are always single-bar pulses
+export type SessionSignals
+    // id of the session that produced the signal
+    int  signal_session_started           = na
+    int  signal_session_ending            = na
+    int  signal_session_ended             = na
+    int  signal_no_intra_smt_zone_started = na
+    int  signal_no_intra_smt_zone_ending  = na
+    int  signal_no_intra_smt_zone_ended   = na
+    int  signal_intra_smt_h               = na // TODO: in case of transition/overlap between London/NY this will be overridden by the second session checked
+    int  signal_intra_smt_l               = na
+    bool signal_session_consumed          = false
+
+export method reset(SessionSignals this) =>
+    this.signal_session_started           := na
+    this.signal_session_ending            := na
+    this.signal_session_ended             := na
+    this.signal_no_intra_smt_zone_started := na
+    this.signal_no_intra_smt_zone_ending  := na
+    this.signal_no_intra_smt_zone_ended   := na
+    this.signal_intra_smt_h               := na
+    this.signal_intra_smt_l               := na
+    this.signal_session_consumed          := false
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     Session declaration
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        SMT - Buffer
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// §2.1 ARCHITECTURE NOTE — Previous NY SMT (Prio 2):
+// There is NO separate "prevNY" session object. monitored_sessions is a fixed-size array[3]
+// indexed by ID_ASIA/LONDON/NY. When a NY session archives, replace() overwrites slot ID_NY,
+// so smt_buffer.monitored_sessions.get(ID_NY) always holds the MOST RECENTLY archived NY session —
+// which is yesterday's NY until today's NY archives at 23:00. This is how Prio 2 PrevNY levels
+// are naturally available without any special tracking.
+
+// §4 Phase 10 ARCHITECTURE NOTE — Triple verify N/A:
+// The original spec required ≥3 identical entries in a flat activeSMTs[] array as a
+// phantom-signal guard — i.e. the same SMT had to appear 3 times. In this architecture,
+// each SMT slot is structurally unique: session_smts uses replace-in-place (same level
+// overwrites itself), intra_smts has exactly 2 fixed slots (bull/bear), and daily_smts
+// evicts on timeout. Duplicate insertion of the same signal is architecturally impossible.
+// The triple-verify check would always be satisfied (count=1 per unique signal) or
+// always fail (never reaches 3), making it a no-op. Structural uniqueness is the guarantee.
+
+// Central SMT state container — three separate SMT lists for different timeout cycles (§2.3.3/§2.3.4)
+// and two session tracking structures for different eviction rules (§2.3.2 / §2.3.3 #2)
+export type SMTBuffer
+    // §2.1 — separate lists per priority tier for independent timeout management
+    SMT[] session_smts // max ~6, Asia/London/NY H+L — §2.3.2 timeout
+    SMT[] daily_smts   // max 30, D1–D15 H+L — §2.3.3 60min timeout, bulk-cleared on London open
+    SMT[] intra_smts   // max 2 (bull/bear), cleared on session change — §2.3.4 30min timeout
+    SMT[] invalidated  // deferred: draw phase checks keep flags and deletes or freezes lines
+    SMT[] delete_buffer // SMTs pruned from active arrays; draw block calls delete_smt() on these
+
+    // §2.2.1 — 3 slots indexed by ID_ASIA/LONDON/NY; replace-in-place evicts previous same-type session
+    Session[] monitored_sessions
+    // §2.2.2 — buffer queue of D1–D15 daily sessions (max size 15, can be smaller)
+    Session[] monitored_days
+    // consumed_days: days removed from ring when both H&L consumed, kept alive for box display
+    // evicted by bar_index cutoff in evict_consumed_days() on new_day
+    Session[] consumed_days
+    int max_days
+
+    SMT best_bull_smt = na
+    SMT best_bear_smt = na
+
+// §2.3.1 #1 / §2.3.3 #1 / §2.3.4 #2 — unified invalidation: marks SMT dead, queues for draw cleanup
+export method invalidate_smt(SMTBuffer this, SMT smt, SMTFilterReason reason) =>
+    if not na(smt) and not smt.invalidated
+        smt.invalidated   := true
+        smt.filter_reason := reason
+        this.invalidated.push(smt)
+
+// Cascading session invalidation — used when evicting an expired/replaced session
+export method invalidate_session(SMTBuffer this, Session sess, SMTFilterReason reason) =>
+    if not na(sess)
+        this.invalidate_smt(sess.h.smt, reason)
+        this.invalidate_smt(sess.l.smt, reason)
+
+// §2.3.4 #1 — intra SMTs are slot[0]=bullish, slot[1]=bearish; replacing one invalidates the old one
+export method set_intra(SMTBuffer this, SMT smt) =>
+    int i = smt.is_bullish ? 0 : 1
+    SMT existing = this.intra_smts.get(i)
+    if not na(existing)
+        this.invalidated.push(existing)   // draw cleanup
+    this.intra_smts.set(i, smt)
+
+// §2.3.4 #1 — clear intra SMTs on session change; sess=na clears all regardless of session_id
+// Guards against clearing intra SMTs that already belong to the incoming new session (overlap case)
+export method reset_intra(SMTBuffer this, SMTFilterReason reason, Session sess = na, bool reset_bull = true, bool reset_bear = true) =>
+    SMT bull = this.intra_smts.get(0)
+    SMT bear = this.intra_smts.get(1)
+    // in case of session overlap, the next session might already have stored an SMT
+    if not na(bull) and reset_bull and (na(sess) or bull.session_id == sess.id)
+        this.invalidate_smt(bull, reason)
+        this.intra_smts.set(0, na)
+    if not na(bear) and reset_bear and (na(sess) or bear.session_id == sess.id)
+        this.invalidate_smt(bear, reason)
+        this.intra_smts.set(1, na)
+
+// §2.3.3 #2 — ALL active Daily SMTs invalidated when London session opens
+// Also clears pending SMTs on monitored daily sessions so no new daily SMT forms before next London open
+export method invalidate_all_daily_smts(SMTBuffer this, SMTFilterReason reason) =>
+    for smt in this.daily_smts
+        if not na(smt) and not smt.invalidated
+            this.invalidate_smt(smt, reason)
+    // also clear any pending SMTs on monitored daily sessions
+    for sess in this.monitored_days
+        if not na(sess)
+            this.invalidate_session(sess, reason)
+
+export method invalidate_all_session_smts(SMTBuffer this, bool is_bullish, SMTFilterReason reason) =>
+    for smt in this.session_smts
+        if not na(smt) and not smt.invalidated and smt.is_bullish == is_bullish
+            this.invalidate_smt(smt, reason)
+
+// §11.3 — On full exit (SL/TP2/Trail): also invalidate the corresponding Daily SMT
+// if it was the entry source. Called alongside invalidate_all_session_smts.
+export method invalidate_entry_daily_smt(SMTBuffer this, SMT entry_smt, SMTFilterReason reason) =>
+    if not na(entry_smt) and entry_smt.prio == PRIO_3_DAILY and not entry_smt.invalidated
+        this.invalidate_smt(entry_smt, reason)
+
+// §2.3.2 #2 — Level SMTs detected during London are invalidated when NY session opens
+// Filters by detected_session_id so Asia-level SMTs detected before London survive into NY
+export method invalidate_by_detected_session_id(SMTBuffer this, int id, SMTFilterReason reason) =>
+    for smt in this.session_smts
+        if not na(smt) and not smt.invalidated and smt.detected_session_id == id
+            this.invalidate_smt(smt, reason)
+
+// Evict fully-consumed sessions from monitored slots — §2.3.1 #1 both-swept is terminal
+// Sessions with is_consumed=true have both H and L swept on both instruments; no further detection needed
+// monitored_sessions: set slot to na (fixed-size array, indices must remain stable)
+// monitored_days: remove from queue + push to consumed_days to keep box reference alive until timeout
+export method invalidate_swept_sessions(SMTBuffer this, SessionSignals session_signals, Session[] overflow_buffer) =>
+    int i = this.monitored_sessions.size() - 1
+    while i >= 0
+        Session sess = this.monitored_sessions.get(i)
+        if not na(sess) and sess.is_consumed
+            this.invalidate_session(sess, SMTFilterReason.BothSwept)
+            this.monitored_sessions.set(i, na)
+            // Push to overflow so the normal keep/delete path handles the box.
+            // draw_signal_consumed fires dashed borders if keep_box_history is on.
+            session_signals.signal_session_consumed := true
+            sess.draw_signal_consumed := true
+            overflow_buffer.push(sess)
+        i -= 1
+
+    int j = this.monitored_days.size() - 1
+    while j >= 0
+        Session sess = this.monitored_days.get(j)
+        if not na(sess) and sess.is_consumed
+            this.invalidate_session(sess, SMTFilterReason.BothSwept) // invalidates the day's SMTs
+
+            // signals the draw block that we want this drawn again (dashed borders)
+            session_signals.signal_session_consumed := true
+            sess.draw_signal_consumed := true
+
+            this.monitored_days.remove(j)  // remove from queue — stops SMT detection
+            this.consumed_days.push(sess)  // keep box reference alive until timeout
+        j -= 1
+
+// §2.1 — route new SMT to the correct list based on priority tier
+export method add_smt(SMTBuffer this, SMT smt) =>
+    if not na(smt)
+        switch smt.prio
+            PRIO_4_INTRA => this.set_intra(smt)
+            PRIO_3_DAILY => this.daily_smts.push(smt)
+            => this.session_smts.push(smt) // Prio 1/2
+
+// §2.3.1 #1 both-swept check + §2.3.3 #1 / §2.3.4 #2 timeout check
+// Both conditions call invalidate() which sets invalidated=true and queues for draw cleanup
+export method update_smt(SMT this, float other_high, float other_low, SMTBuffer smt_buffer, bool enable_invalidation_by_distance, float invalidation_dist_chart_led, float invalidation_dist_other_led) =>
+    if not na(this) and not this.invalidated
+        bool both_swept = switch this.leader
+            CHART => this.is_bullish ? this.follow_level.price >= other_low : this.follow_level.price <= other_high
+            OTHER => this.is_bullish ? this.follow_level.price >= low       : this.follow_level.price <=       high
+        // §2.3.1 distance check — directional (entry-window-missed) only.
+        // Reference point depends on which instrument led the sweep:
+        //   CHART-led (NQ swept first): use leader_level — NQ's swept H/L.
+        //   OTHER-led (ES swept first, NQ held): use detection_close — NQ's price
+        //     captured at the moment the SMT was detected. NQ is structurally far
+        //     from its own un-swept level on detection, so the captured price is
+        //     the meaningful entry-zone anchor — and the threshold is independently
+        //     calibrated (typically larger) via the OTHER-led inputs.
+        // Bullish SMT: invalidate only when close > reference + threshold (NQ rallied
+        //   X pts above the anchor — long entry window expired).
+        //   NQ moving deeper toward / through the level does NOT trip this rule;
+        //   that case is handled by the BothSwept branch.
+        // Bearish SMT: mirror — invalidate only when close < reference - threshold.
+        // Uses `close` (not high/low) so an intra-bar wick can't prematurely kill a setup.
+        // `other_high`/`other_low` are intentionally NOT used — correlated-asset movement
+        // must not invalidate a chart-anchored SMT setup.
+        bool  is_chart_led            = this.leader == CHART
+        float reference_price         = is_chart_led ? this.leader_level.price : this.detection_close
+        float invalidation_threshold  = is_chart_led ? invalidation_dist_chart_led : invalidation_dist_other_led
+        float price_dist_to_SMT_level = this.is_bullish ? close - reference_price : reference_price - close
+
+        if both_swept
+            smt_buffer.invalidate_smt(this, SMTFilterReason.BothSwept)
+        else if barstate.isconfirmed and this.deprecate_at <= time
+            smt_buffer.invalidate_smt(this, SMTFilterReason.Deprecated)
+        else if enable_invalidation_by_distance and price_dist_to_SMT_level >= invalidation_threshold
+            smt_buffer.invalidate_smt(this, SMTFilterReason.PriceMovedAway)
+
+// Per-bar SMT state update — checks both-swept and timeout for each active SMT list independently
+// Called before detect_smt so stale SMTs are already invalidated when detection runs
+export method update_smts(SMTBuffer this, float other_high, float other_low, bool enable_invalidation_by_distance, float invalidation_dist_chart_led, float invalidation_dist_other_led) =>
+    for smt in this.session_smts
+        smt.update_smt(other_high, other_low, this, enable_invalidation_by_distance, invalidation_dist_chart_led, invalidation_dist_other_led)
+    for smt in this.daily_smts
+        smt.update_smt(other_high, other_low, this, enable_invalidation_by_distance, invalidation_dist_chart_led, invalidation_dist_other_led)
+    for smt in this.intra_smts
+        smt.update_smt(other_high, other_low, this, enable_invalidation_by_distance, invalidation_dist_chart_led, invalidation_dist_other_led)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     SMT - Buffer
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        SMT Detection
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+export method update_session_level_sweeps(Session this, float other_high, float other_low) =>
+    if not this.is_any_high_swept
+        if this.h.chart.price < high or this.h.other.price < other_high
+            this.is_any_high_swept := true
+    if not this.is_any_low_swept
+        if this.l.chart.price > low or this.l.other.price > other_low
+            this.is_any_low_swept := true
+
+//@function
+// ─────────────────────────────────────────────────────────────────────────────
+// session.detect_smt — check if chart/other has swept H or L
+// §2.2.1 Level SMT Detection / §2.2.2 Daily SMT Detection / §2.2.3 Intra SMT Detection
+// is_intra=true  → called on live active session (§2.2.3); uses running H/L, equal high/low counts
+// is_intra=false → called on archived session (§2.2.1/§2.2.2); levels are fixed at capture time
+// active_session_id: session currently open, stored as detected_session_id on new SMTs
+//   so §2.3.2 London-detected invalidation can filter correctly on NY open
+// ─────────────────────────────────────────────────────────────────────────────
+export method detect_smt(Session this, float smt_h1, float smt_l1, float smt_c1, float smt_other_h1, float smt_other_l1, bool is_smt_tf_new_bar, SMTBuffer smt_buffer, int active_session_id, int smt_min_age, bool is_intra = false, bool is_blocked_intra_smt_bull = false, bool is_blocked_intra_smt_bear = false, int timeout_intra = na, float touch_tolerance = 0.0, int intra_min_swing_age = 0) =>
+    if not this.is_consumed and is_smt_tf_new_bar
+        SessionLevel h                   = this.h
+        SessionLevel l                   = this.l
+
+        int          prio                = is_intra                           ? PRIO_4_INTRA  : this.prio
+        int          timeout             = is_intra and not na(timeout_intra) ? timeout_intra : this.timeout
+        // §2.3.2 #2 — for non-intra, record which session was active when this SMT was detected
+        int          detected_session_id = is_intra                           ? this.id       : active_session_id
+
+        // Stale cleanup: SMT was invalidated externally (timeout, both-swept, bulk clear)
+        // For archived sessions (non-intra): mark level consumed — timeout is terminal (§2.3.3 #1 / §2.3.1 #1)
+        // For live intra sessions: clear the SMT reference but do NOT set is_consumed.
+        //   The session is still open; price can make new extremes and new SMTs should be detectable.
+        //   is_consumed on a live level only means "both instruments swept simultaneously" — a timeout
+        //   does not mean the level is structurally resolved, just that the window expired.
+        if not na(h.smt) and h.smt.invalidated
+            if not is_intra
+                h.is_consumed := true
+            h.smt := na
+        if not na(l.smt) and l.smt.invalidated
+            if not is_intra
+                l.is_consumed := true
+            l.smt := na
+
+        // ── HIGH ─────────────────────────────────────────────────────────────
+        // §2.2.1 Bearish SMT: one instrument sweeps its session high, the other does not.
+        // §2.2.3 Intra: equal high also counts (<=) — §2.2.3 "does NOT make a new high AND does NOT make an equal high"
+        if not h.is_consumed
+
+            // intra also checks equal high
+            bool hc = not (is_intra and is_blocked_intra_smt_bear) and h.chart_smt_tf.price - touch_tolerance < smt_h1
+            bool ho = not (is_intra and is_blocked_intra_smt_bear) and h.other_smt_tf.price - touch_tolerance < smt_other_h1
+
+            if hc and ho
+                // §2.3.1 #1 — Both swept simultaneously: divergence never formed.
+                // Intra: invalidate any pending SMT, keep level open.
+                // Non-intra: level consumed.
+                if not na(h.smt) and not h.smt.invalidated
+                    smt_buffer.invalidate_smt(h.smt, SMTFilterReason.BothSwept)
+                h.smt := na
+                if not is_intra
+                    h.is_consumed := true
+
+            else if hc or ho
+                bool chart_leads     = hc
+                int  new_leader      = chart_leads ? CHART                   : OTHER
+                lead_lvl             = chart_leads ? h.chart_smt_tf.copy()   : h.other_smt_tf.copy()
+                follow_lvl           = chart_leads ? h.other_smt_tf.copy()   : h.chart_smt_tf.copy()
+                sweep_pt             = chart_leads ? chart.point.now(smt_h1) : chart.point.now(smt_other_h1)
+                bool needs_create    = false
+
+                // §2.2.3 intra swing-age gate — true when the prior leader high was set less
+                // than `intra_min_swing_age` ms ago. Used below to skip CREATION and same-leader
+                // sweep updates only; opposite-leader BothSwept invalidation still fires because
+                // divergence death is independent of swing age.
+                bool intra_swing_too_young = is_intra and intra_min_swing_age > 0 and (time - lead_lvl.time) < intra_min_swing_age
+
+                if na(h.smt)
+                    needs_create := not h.is_consumed  // fresh SMT
+                else if h.smt.leader != new_leader
+                    // Opposite leader caught up: invalidate and recreate (intra) or consume (non-intra).
+                    smt_buffer.invalidate_smt(h.smt, SMTFilterReason.BothSwept)
+                    h.smt := na
+                    if is_intra
+                        needs_create := true // sweep changed leader, follower did not keep up
+                    else
+                        h.is_consumed := true
+                else if is_intra and not intra_swing_too_young
+                    // Same leader made a new extreme: update sweep point (§2.2.3 / §2.3.4 #4).
+                    h.smt.sweep := sweep_pt
+
+                if needs_create and intra_swing_too_young
+                    needs_create := false  // §2.2.3 swing-age gate blocks intra SMT creation
+
+                if needs_create
+                    h.smt := SMT.new(detected_session_id, is_bullish = false, leader = new_leader, prio = prio,
+                     detection_bar = bar_index, detection_close = smt_c1, valid_from = time + smt_min_age,
+                     leader_level = lead_lvl, sweep = sweep_pt, follow_level = follow_lvl,
+                     session_id = this.id, deprecate_at = time + timeout,
+                     smt_color = get_sweep_color(prio))
+                    smt_buffer.add_smt(h.smt)
+
+        // ── LOW ──────────────────────────────────────────────────────────────
+        // §2.2.1 Bullish SMT: one instrument sweeps its session low, the other does not.
+        // §2.2.3 Intra: equal low also counts (>=). Mirror of HIGH with direction inverted.
+        if not l.is_consumed
+
+            // intra also checks equal lows
+            bool lc = not (is_intra and is_blocked_intra_smt_bull) and l.chart_smt_tf.price + touch_tolerance > smt_l1
+            bool lo = not (is_intra and is_blocked_intra_smt_bull) and l.other_smt_tf.price + touch_tolerance > smt_other_l1
+
+            if lc and lo  // §2.3.1 #1 — both swept simultaneously: divergence never formed
+                if not na(l.smt) and not l.smt.invalidated
+                    smt_buffer.invalidate_smt(l.smt, SMTFilterReason.BothSwept)
+                l.smt := na
+                if not is_intra
+                    l.is_consumed := true
+
+            else if lc or lo
+                bool chart_leads     = lc
+                int  new_leader      = chart_leads ? CHART                   : OTHER
+                lead_lvl             = chart_leads ? l.chart_smt_tf.copy() : l.other_smt_tf.copy()
+                follow_lvl           = chart_leads ? l.other_smt_tf.copy() : l.chart_smt_tf.copy()
+                sweep_pt             = chart_leads ? chart.point.now(smt_l1) : chart.point.now(smt_other_l1)
+                bool needs_create    = false
+
+                // §2.2.3 intra swing-age gate — true when the prior leader low was set less
+                // than `intra_min_swing_age` ms ago. Used below to skip CREATION and same-leader
+                // sweep updates only; opposite-leader BothSwept invalidation still fires because
+                // divergence death is independent of swing age.
+                bool intra_swing_too_young = is_intra and intra_min_swing_age > 0 and (time - lead_lvl.time) < intra_min_swing_age
+
+                if na(l.smt)
+                    // §2.2.1 / §2.2.3 — fresh bullish SMT: chart instrument swept the low first
+                    needs_create := not l.is_consumed
+                else if l.smt.leader != new_leader
+                    smt_buffer.invalidate_smt(l.smt, SMTFilterReason.BothSwept)
+                    l.smt := na
+                    if is_intra
+                        needs_create := true
+                    else
+                        l.is_consumed := true
+                else if is_intra and not intra_swing_too_young
+                    l.smt.sweep := sweep_pt
+
+                if needs_create and intra_swing_too_young
+                    needs_create := false  // §2.2.3 swing-age gate blocks intra SMT creation
+
+                if needs_create
+                    l.smt := SMT.new(detected_session_id, is_bullish = true, leader = new_leader, prio = prio,
+                     detection_bar = bar_index, detection_close = smt_c1, valid_from = time + smt_min_age,
+                     leader_level = lead_lvl, sweep = sweep_pt, follow_level = follow_lvl,
+                     session_id = this.id, deprecate_at = time + timeout,
+                     smt_color = get_sweep_color(prio))
+                    smt_buffer.add_smt(l.smt)
+
+        // §2.3.1 #1 — when both H and L levels are consumed, session is fully resolved:
+        // removed from monitoring, no further SMT detection on these levels
+        if h.is_consumed and l.is_consumed and not is_intra
+            this.is_consumed := true
+
+export method detect_smts(Session[] this, SessionSignals signals, float smt_h1, float smt_l1, float smt_c1, float smt_other_h1, float smt_other_l1, bool is_smt_tf_new_bar, SMTBuffer smt_buffer, int active_session_id, int smt_min_age, float touch_tolerance = 0.0) =>
+    for s in this
+        if not na(s) and not s.is_consumed
+            s.detect_smt(smt_h1, smt_l1, smt_c1, smt_other_h1, smt_other_l1, is_smt_tf_new_bar, smt_buffer, active_session_id, smt_min_age, touch_tolerance = touch_tolerance)
+            if s.is_consumed and not na(signals)
+                signals.signal_session_consumed := true
+    this
+
+// §4 Phase 4 helper — true if any non-invalidated daily SMT of the given direction is active.
+// Used to determine whether intra SMT may still act as fallback after 12:00 London.
+export method has_active_daily_smt(SMTBuffer this, bool seeks_bullish) =>
+    bool found = false
+    for smt in this.daily_smts
+        if not na(smt) and not smt.invalidated and smt.is_bullish == seeks_bullish
+            found := true
+            break
+    found
+
+export method find_best_smt_by_prio(SMT[] this, int minimum_prio, bool seeks_bullish) =>
+    SMT best_smt = na
+    int highest_prio = minimum_prio
+    for smt in this
+        if na(smt)
+         or smt.invalidated
+         or smt.is_bullish != seeks_bullish
+         or time < smt.valid_from
+            continue
+        if smt.prio > highest_prio
+            highest_prio := smt.prio
+            best_smt := smt
+    best_smt
+
+// 3. Find Best Valid SMT
+// Looks through the buffer for the highest priority SMT
+export method find_best_smt_by_direction(SMTBuffer this, bool intra_smts_enabled, bool seeks_bullish) =>
+    SMT best_smt = na
+    int highest_prio = -1
+
+    // Prio 1-2 // pre-sorted by Asia/London > NY
+    best_smt := this.session_smts.find_best_smt_by_prio(highest_prio, seeks_bullish)
+
+    // Prio 3 // Daily
+    if na(best_smt)
+        best_smt := this.daily_smts.find_best_smt_by_prio(highest_prio, seeks_bullish)
+
+    // Prio 4 // Intra (only when no other SMTs found and in tradeable zone)
+    if na(best_smt) and intra_smts_enabled
+        best_smt := this.intra_smts.find_best_smt_by_prio(highest_prio, seeks_bullish)
+
+    best_smt
+
+
+// §2 SMT Resolver — find highest-prio SMT aligned with P/D zone
+// Separated from execution so it reads as a pure function of smt_buffer state.
+// allow_bullish_intra_smt_post_cutoff_if_has_daily_smt_active/bear: suppress intra for that direction (§4 Phase 4 London post-12:00 rule)
+// Returns [best_bull, best_bear]
+export method update_best_smts(SMTBuffer this, int pd_zone,
+ bool intra_smts_enabled,
+ bool allow_bullish_intra_smt_post_cutoff_if_has_daily_smt_active = false,
+ bool allow_bearish_intra_smt_post_cutoff_if_has_daily_smt_active = false) =>
+
+    if not na(pd_zone)
+        if pd_zone != 1 // not Premium zone (expensive) / in lower 75% of range
+            this.best_bull_smt := this.find_best_smt_by_direction(intra_smts_enabled or allow_bullish_intra_smt_post_cutoff_if_has_daily_smt_active, seeks_bullish = true)
+        else
+            this.best_bull_smt := na
+
+        if pd_zone != -1 // not Discount zone (cheap) / in upper 75% of range
+            this.best_bear_smt := this.find_best_smt_by_direction(intra_smts_enabled or allow_bearish_intra_smt_post_cutoff_if_has_daily_smt_active, seeks_bullish = false)
+        else
+            this.best_bear_smt := na
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     SMT Detection
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        Session management
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+export method rotate(Session[] this, Session sess, int max) => rotate(this, sess, max)
+
+// Archive a closed session into the appropriate monitoring slot
+// §2.1 — monitored_sessions uses replace-in-place (evicts previous same-type session)
+// §2.2.2 — monitored_days rotates queue (evicts oldest day when full)
+// Any SMTs on the evicted session are invalidated immediately
+export method add_session(SMTBuffer this, Session sess, Session[] overflow_buffer) =>
+    if not na(sess)
+
+        // for daily sessions, id becomes the day index, start with 1 (on the new element), increment all others (doesn't care if one has been consumed and evicted)
+        if sess.is_daily
+            sess.id := 1
+            for prev_day in this.monitored_days
+                prev_day.id += 1
+
+        // sort session into correct buffer category
+        Session overflow = switch sess.is_daily
+            true  => this.monitored_days.rotate(sess, this.max_days)
+            false => this.monitored_sessions.replace(sess)
+
+        // handle buffer overflow
+        if not na(overflow)
+            // invalidate any still-active SMTs on the evicted day
+            if not na(overflow.h.smt) and not overflow.h.smt.invalidated
+                this.invalidate_smt(overflow.h.smt, SMTFilterReason.SessionDeprecated)
+            if not na(overflow.l.smt) and not overflow.l.smt.invalidated
+                this.invalidate_smt(overflow.l.smt, SMTFilterReason.SessionDeprecated)
+
+            overflow_buffer.push(overflow)
+
+// Evict consumed daily sessions from consumed_days when they age out of the history window
+// Called only on new_day (not every bar) — bar_index cutoff approximates max_history_days
+// Conservative: may hold a session 1-2 extra days around holidays, never evicts early
+export method evict_consumed_days(SMTBuffer this, Session[] overflow_buffer, simple int max_history_days) =>
+    int darw_period   = max_history_days * ONE_DAY
+    int eviction_date = time - darw_period
+    int i = this.consumed_days.size() - 1
+    while i >= 0
+        Session sess = this.consumed_days.get(i)
+        if sess.end_time < eviction_date
+            overflow_buffer.push(sess)
+            this.consumed_days.remove(i)
+        i -= 1
+
+// Prune invalidated SMTs from active lists — called every confirmed bar.
+// SMTs that should not be kept (non-trade, keep flags off) are pushed to delete_buffer
+// for line deletion in the draw block. This avoids calling delete_smt() inside a loop
+// and keeps processing work separated from drawing work.
+// keep_reason: when true, SMTs with a filter_reason are NOT pushed to delete_buffer —
+// their line/label objects persist on screen for the user to see.
+export method clear_invalidated_smts(SMTBuffer this, bool keep_level = false, bool keep_intra = false, bool keep_reason = false) =>
+    int i = this.session_smts.size() - 1
+    while i >= 0
+        SMT smt = this.session_smts.get(i)
+        if not na(smt) and smt.invalidated
+            if not smt.used_for_trade and not keep_level and not (keep_reason and not na(smt.filter_reason))
+                this.delete_buffer.push(smt)
+            this.session_smts.remove(i)
+        i -= 1
+
+    int j = this.daily_smts.size() - 1
+    while j >= 0
+        SMT smt = this.daily_smts.get(j)
+        if not na(smt) and smt.invalidated
+            if not smt.used_for_trade and not keep_level and not (keep_reason and not na(smt.filter_reason))
+                this.delete_buffer.push(smt)
+            this.daily_smts.remove(j)
+        j -= 1
+
+    int k = this.intra_smts.size() - 1
+    while k >= 0
+        SMT smt = this.intra_smts.get(k)
+        if not na(smt) and smt.invalidated
+            if not smt.used_for_trade and not keep_intra and not (keep_reason and not na(smt.filter_reason))
+                this.delete_buffer.push(smt)
+            this.intra_smts.set(k, na)
+        k -= 1
+
+
+// §2.2.1 Level Capture Timing — archive snapshots the H/L levels at session close
+// Resets is_consumed=false so intra-session timeout state does not block session-level SMT detection
+// (intra and session-prio use the same SessionLevel, but have independent lifecycles)
+// archive session after close (copy working memory, keep references to chart objects points/lines/labels)
+export method archive(SessionLevel this) =>
+    copy              = this.copy()
+    copy.chart        := this.chart.copy()
+    copy.other        := this.other.copy()
+    copy.chart_smt_tf := this.chart_smt_tf.copy()
+    copy.other_smt_tf := this.other_smt_tf.copy()
+    // archived session starts fresh for session-prio SMT detection
+    copy.smt         := na
+    copy.is_consumed := false
+
+    copy
+
+// §2.2.1 — session archive captures H/L snapshot; resets is_consumed so prior intra consumption
+// does not block session-level detection on the archived copy
+export method archive(Session this) =>
+    copy              = this.copy()
+    copy.h           := this.h.archive()
+    copy.l           := this.l.archive()
+
+    // archived session starts fresh for session-prio SMT detection
+    copy.is_consumed := false
+    copy
+
+// reset working memory buffer after session closed (release references to chart objects, recycle other objects via reset)
+export method reset(SessionLevel this) =>
+    this.chart        := na
+    this.other        := na
+
+    // separate (delayed) tracking for HTF SMTs
+    // so we don't update the reference levels (session H/Ls) mid HTF bar
+    this.chart_smt_tf := na
+    this.other_smt_tf := na
+
+    this.is_consumed  := false
+    this.smt          := na
+
+export method reset (Session this) =>
+    this.start_time        := na
+    this.end_time          := na
+    this.is_active         := false
+    this.is_consumed       := false
+    this.box_chart         := na
+    this.box_other         := na
+    this.mean_sum          := 0
+    this.mean_count        := 0
+    this.mean              := na
+    this.is_any_low_swept  := false
+    this.is_any_high_swept := false
+    this.h.reset()
+    this.l.reset()
+
+
+
+// h.chart/l.chart/h.other/l.other: live session H/L using chart.point.now() — drives session boxes
+// chart_smt_tf/other_smt_tf: confirmed 2m-bar snapshot (smt_h1/smt_l1) — SMT sweep detection threshold
+// chart_smt_tf is updated AFTER detect_smt, so at detection time it holds the value from the
+// previous 2m bar boundary (before the bar being checked for a sweep)
+export method update_levels(Session this, bool is_smt_tf_new_bar, float other_high, float other_low, int smt_t1 = na, float smt_h1 = na, float smt_l1 = na, float smt_other_h1 = na, float smt_other_l1 = na) =>
+    if this.h.chart.price < high
+        this.h.chart := chart.point.now(high)
+        this.h.is_consumed := false
+    if this.h.other.price < other_high
+        this.h.other := chart.point.now(other_high)
+        this.h.is_consumed := false
+
+    if this.l.chart.price > low
+        this.l.chart := chart.point.now(low)
+        this.l.is_consumed := false
+    if this.l.other.price > other_low
+        this.l.other := chart.point.now(other_low)
+        this.l.is_consumed := false
+
+    // tracking the highest high within SMT timeframe live,
+    // so we can invalidate SMT before SMT timeframe bar closes
+    if is_smt_tf_new_bar
+        if this.h.chart_smt_tf.price < smt_h1
+            this.h.chart_smt_tf := chart.point.from_time(smt_t1, smt_h1)
+        if this.h.other_smt_tf.price < smt_other_h1
+            this.h.other_smt_tf := chart.point.from_time(smt_t1, smt_other_h1)
+        if this.l.chart_smt_tf.price > smt_l1
+            this.l.chart_smt_tf := chart.point.from_time(smt_t1, smt_l1)
+        if this.l.other_smt_tf.price > smt_other_l1
+            this.l.other_smt_tf := chart.point.from_time(smt_t1, smt_other_l1)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// session.update_session — session lifecycle management + intra SMT detection
+// §2.2 — drives the three-phase session state machine: START → ACTIVE → END
+// §2.2.1 Level Capture Timing — H/L captured at session start; archived at session end
+// §2.3.3 #2 / §2.3.2 #2 — bulk invalidations triggered on London and NY session start
+// §2.3.4 #1 — intra SMTs cleared on session end via reset_intra()
+// §2.3.4 #3 — intra SMTs cleared on no-trade zone start/end via reset_intra()
+// ─────────────────────────────────────────────────────────────────────────────
+export method update_session(Session this, SessionSignals signals,
+ SMTBuffer smt_buffer, bool new_day,
+ float other_high, float other_low,
+ int smt_t1 = na, float smt_h1 = na, float smt_l1 = na, float smt_c1 = na,
+ float smt_other_h1 = na, float smt_other_l1 = na,
+ bool is_smt_tf_new_bar = false,
+ int smt_min_age = 0,
+ int timeout_intra = 1800000,
+ bool in_any_no_intra_smt_zone = false,
+ bool enable_block_intra_smts_pre_high_prio_sweep = false,
+ Session previous_session = na,
+ int intra_min_swing_age = 0) =>
+
+    var int ONE_BAR = timeframe.in_seconds() * 1000
+
+    bool active      = not na(time(timeframe.period, this.session))
+    bool ending      = na(time(timeframe.period, this.session, -1)) // next bar will not be in session
+    bool started     = not na(this.start_time)
+    bool rotate_day  = new_day and this.is_daily
+    Session archived = na
+
+    // ── ACTIVE: update ────────────────────────────────────────────────────────
+    if started and active and not rotate_day // from bar 2 of session until bar after session
+        this.end_time := time
+
+        // §2.2.3 Intra SMT Detection — only on confirmed bars, only for sessions with enable_intra=true
+        // London has enable_intra=false by default (§2.2.3 "disabled in London session")
+        if not na(this.strategy_config) and this.enable_intra_smts and not in_any_no_intra_smt_zone
+            var bool is_intra = true
+            // §2.2.3 — relaxed gate: ANY previous-session level swept (high OR low) lifts the block.
+            // Original strict rule was directionally asymmetric (bull→prev low, bear→prev high) which
+            // suppressed valid OTHER-led intra setups when only the opposite side of the prev session
+            // had been raided (e.g. NY took out London high, ES then leads a NY-low sweep → bullish).
+            // The intent of the gate is to require *some* HTF context; either-side sweep satisfies that.
+            bool any_prev_level_swept      = previous_session.is_any_low_swept or previous_session.is_any_high_swept
+            bool is_blocked_intra_smt_bull = enable_block_intra_smts_pre_high_prio_sweep and not any_prev_level_swept
+            bool is_blocked_intra_smt_bear = enable_block_intra_smts_pre_high_prio_sweep and not any_prev_level_swept
+            this.detect_smt(smt_h1, smt_l1, smt_c1, smt_other_h1, smt_other_l1, is_smt_tf_new_bar, smt_buffer, this.id, smt_min_age, is_intra, is_blocked_intra_smt_bull, is_blocked_intra_smt_bear, timeout_intra, intra_min_swing_age = intra_min_swing_age)
+
+        // §2.2.3 — update live session H/L; resets is_consumed when new extreme formed
+        // chart_smt_tf/other_smt_tf snapshots are updated on is_smt_tf_new_bar (after detect_smt runs)
+        this.update_levels(is_smt_tf_new_bar, other_high, other_low, smt_t1, smt_h1, smt_l1, smt_other_h1, smt_other_l1)
+
+        // §8.5 Trend Day Detection — cumulative mean of bar midpoints from session open
+        // Reference impl (asiaSessionMeanPrice) accumulates from Asia open (03:00) across all
+        // sessions; spec says "Session" mean, so this implementation resets per session start.
+        if this.is_session
+            this.mean_count += 1
+            this.mean_sum   += hl2
+            this.mean       := this.mean_sum / this.mean_count
+
+        if ending
+            if this.is_session
+                signals.signal_session_ending := this.id
+            if this.is_no_intra_smt_zone
+                signals.signal_no_intra_smt_zone_ending := this.id
+
+    // ── END: archive + reset ──────────────────────────────────────────────────
+    if started and (not active or rotate_day) // the bar after session
+
+        // §2.2.3 — update live session H/L; resets is_consumed when new extreme formed
+        // chart_smt_tf/other_smt_tf snapshots are updated on is_smt_tf_new_bar (after detect_smt runs)
+        this.update_levels(is_smt_tf_new_bar, other_high, other_low, smt_t1, smt_h1, smt_l1, smt_other_h1, smt_other_l1)
+
+        // §2.2.1 Level Capture Timing — snapshot H/L at session close; archived copy enters monitoring
+        this.is_active := false
+        this.end_time  := time_close[1]
+        archived       := this.archive()   // snapshot for history
+
+        // reset working memory
+        this.reset()
+        started    := false
+
+        // §2.3.4 #1 — intra SMTs cleared on session change
+        if this.is_session
+            signals.signal_session_ended := this.id
+            smt_buffer.reset_intra(SMTFilterReason.SessionEnded, this)
+
+        // §2.3.4 #3 — intra SMTs cleared when exiting a no-trade zone
+        else if this.is_no_intra_smt_zone
+            signals.signal_no_intra_smt_zone_ended := this.id
+            smt_buffer.reset_intra(SMTFilterReason.NoIntraSMTZoneEnded)
+
+
+    // ── START ─────────────────────────────────────────────────────────────────
+    if (not started or rotate_day) and active
+        this.is_active  := true
+        this.start_time := time
+        this.end_time   := time + ONE_BAR
+        // cutoff_at: epoch ms of cutoff_hour on this session's day in the configured timezone.
+        // Using timestamp() resolves DST automatically — noon is always noon regardless of offset.
+        this.cutoff_at  := not na(this.strategy_config) and not na(this.strategy_config.cutoff_hour)
+         ? timestamp(this.strategy_config.cutoff_tz,
+            year(time, this.strategy_config.cutoff_tz),
+            month(time, this.strategy_config.cutoff_tz),
+            dayofmonth(time, this.strategy_config.cutoff_tz),
+            this.strategy_config.cutoff_hour, 0, 0)
+         : na
+        // §2.2.1 Level Capture Timing — initial H/L set at first bar of session
+        this.h.chart        := chart.point.now(high)
+        this.l.chart        := chart.point.now(low)
+        this.h.other        := chart.point.now(other_high)
+        this.l.other        := chart.point.now(other_low)
+        this.h.chart_smt_tf := this.h.chart.copy()
+        this.l.chart_smt_tf := this.l.chart.copy()
+        this.h.other_smt_tf := this.h.other.copy()
+        this.l.other_smt_tf := this.l.other.copy()
+        this.mean_count     := 1
+        this.mean_sum       := hl2
+        this.mean           := hl2
+
+        if this.is_session
+            signals.signal_session_started := this.id // allows §10.6 — session lock reset
+            smt_buffer.reset_intra(SMTFilterReason.SessionStarted) // §2.3.4 #1 — any session change clears intra
+
+        // §2.3.4 #3 — intra SMTs cleared when entering a no-trade zone
+        if this.is_no_intra_smt_zone
+            smt_buffer.reset_intra(SMTFilterReason.NoIntraSMTZoneStarted) // §2.3.4 #1 — any session change clears intra
+            signals.signal_no_intra_smt_zone_started := this.id
+
+        // §2.3.3 #2 — ALL daily SMTs invalidated when London opens
+        else if this.id == ID_LONDON
+            smt_buffer.invalidate_all_daily_smts(SMTFilterReason.LondonOpen)
+        // §2.3.2 #2 — London-detected session SMTs invalidated when NY opens
+        else if this.id == ID_NY
+            smt_buffer.invalidate_by_detected_session_id(ID_LONDON, SMTFilterReason.NYOpen)
+
+    archived
+
+
+export method draw_session(Session this, bool show_chart = true, bool show_panel = false) =>
+    if this.is_active
+        if this.start_time == time
+            string role = this.is_daily ? "Daily" : this.is_no_intra_smt_zone ? "No-Trade Zone" : this.is_session ? "Session" : "Zone"
+            string tip  = str.format("{0}\nRole: {1}\nPrio: {2}\nIntra SMTs: {3}\nTradeable: {4}",
+                 this._text != "" ? this._text : "—",
+                 role,
+                 not na(this.prio) ? str.tostring(this.prio) : "—",
+                 this.enable_intra_smts ? "yes" : "no",
+                 not na(this.strategy_config) ? "yes" : "no")
+            if show_chart
+                this.box_chart := box.new(this.start_time, this.h.chart.price, this.end_time, this.l.chart.price, this._border_color, bgcolor = this._fill_color, text = this._text, text_color = this._text_color, text_size = size.normal, text_valign = text.align_bottom, xloc = xloc.bar_time, force_overlay = true)
+                this.tooltip_chart := make_tooltip_anchor(this.box_chart, tip, true)
+            if show_panel
+                this.box_other := box.new(this.start_time, this.h.other.price, this.end_time, this.l.other.price, this._border_color, bgcolor = this._fill_color, text = this._text, text_color = this._text_color, text_size = size.normal, text_valign = text.align_bottom, xloc = xloc.bar_time)
+                this.tooltip_other := make_tooltip_anchor(this.box_other, tip, false)
+        else
+            if show_chart
+                this.box_chart.set_top(this.h.chart.price)
+                this.box_chart.set_rightbottom(this.end_time, this.l.chart.price)
+            if show_panel
+                this.box_other.set_top(this.h.other.price)
+                this.box_other.set_rightbottom(this.end_time, this.l.other.price)
+
+    else if this.end_time == time and barstate.isconfirmed
+        if show_chart
+            this.box_chart.set_right(time)
+        if show_panel
+            this.box_other.set_right(time)
+    this
+
+export method draw_session_consumed(Session this) =>
+    if this.draw_signal_consumed and this.is_consumed and barstate.isconfirmed
+        this.draw_signal_consumed := false
+        this.box_chart.set_border_style(line.style_dashed)
+        this.box_other.set_border_style(line.style_dashed)
+        this.box_chart.set_bgcolor(color.new(this._fill_color, this.is_daily ? 95 : 90))
+        this.box_other.set_bgcolor(color.new(this._fill_color, this.is_daily ? 95 : 90))
+
+export method delete(Session this) =>
+    if not na(this)
+        this.box_chart.delete()
+        this.box_other.delete()
+        this.tooltip_chart.delete()
+        this.tooltip_other.delete()
+
+export method register(Session[] this, bool enabled, string session, color _fill_color, string _text, color _text_color, color _border_color, int prio = na, int id = na, bool is_daily = false, bool is_session = false, bool enable_intra_smts = false, bool is_no_intra_smt_zone = false, int smt_timeout = na, StrategyConfig strategy_config = na) =>
+    if enabled
+        this.push(Session.new(id, prio, smt_timeout, session, SessionLevel.new(), SessionLevel.new(), _fill_color, _text, _text_color, _border_color, is_daily, is_session, is_no_intra_smt_zone, enable_intra_smts, strategy_config))
+        id
+    else
+        na
+
+replace(this, int i, value, remove_buffer) =>
+    removed = array.get(this, i) // let index out of bouds fail
+    array.set(this, i, value)
+    if not na(remove_buffer)
+        array.push(remove_buffer, removed)
+    removed
+
+export method replace(Session[] sess, int idx, Session value, Session[] remove_buffer) => replace(sess, idx, value, remove_buffer)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     Session management
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        SMT draw functions
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+export method delete(SMT[] this) =>
+    for smt in this
+        smt.leader_line.delete()
+        smt.leader_label.delete()
+        smt.follow_intermediate_line.delete()
+        smt.follow_line.delete()
+        smt.follow_label.delete()
+
+// Compact SMT identifier used in strategy order ids (entry_id) so TV's strategy marks
+// show which level / session / priority sourced the trade (e.g. "NY Low", "Asia Intra-Low",
+// "D3 Low"). No ticker prefix, no filter reason, no newlines — TV's auto-generated
+// "+qty" suffix gets appended after this.
+export method short_id(SMT this) =>
+    if na(this)
+        "—"
+    else
+        string level = this.is_bullish ? "Low" : "High"
+        switch this.prio
+            PRIO_4_INTRA =>
+                string sess = this.session_id == ID_ASIA ? "Asia" : this.session_id == ID_LONDON ? "London" : "NY"
+                sess + " Intra-" + level
+            PRIO_3_DAILY =>
+                "D" + str.tostring(this.session_id) + " " + level
+            => // PRIO_1/2 — session level (Asia / London / NY)
+                string sess = this.session_id == ID_ASIA ? "Asia" : this.session_id == ID_LONDON ? "London" : "NY"
+                sess + " " + level
+
+// `include_filter_reason`: when true, appends "(filtered: …)" to the text.
+// Callers always build the tooltip variant with include_filter_reason=true and the visible
+// variant with include_filter_reason=verbose so the hover detail is available regardless.
+export method label_text(SMT this, string other_ticker, bool include_filter_reason = false, bool is_leader = false) =>
+    string leader_instr = is_leader ? '' : ' ' + (this.leader == CHART ? syminfo.ticker : other_ticker) + '\n' // adjust to your chart ticker logic
+    string level = this.is_bullish ? "Low" : "High"
+    string filter = include_filter_reason and not na(this.filter_reason) ? str.format("\n(filtered: {0})", str.tostring(this.filter_reason)) : ""
+    switch this.prio
+        PRIO_4_INTRA =>
+            string sess = this.session_id == ID_ASIA ? "Asia" : this.session_id == ID_LONDON ? "London" : "NY"
+            leader_instr + sess + " Intra-" + level + filter
+        PRIO_3_DAILY =>
+            // session_id for daily needs to encode the day number — see note below
+            leader_instr + "D" + str.tostring(this.session_id) + level + filter
+        => // PRIO_1/2 — session level
+            string sess = this.session_id == ID_ASIA ? "Asia" : this.session_id == ID_LONDON ? "London" : "NY"
+            leader_instr + sess + " " + level + filter
+
+// SMT line fvg_box: three lines per SMT
+// leader_line (dotted): from captured level to sweep bar, on leader's instrument pane
+// follow_intermediate_line (dotted): from level to capture to current bar, on follower's pane — shows the level being watched
+// follow_line (solid): extends from current bar forward — the active threshold for entry (§3 FVG proximity check uses this level)
+//
+// `verbose` (mapped from `show_smt_verbose` input) controls whether filter reason appears
+// inline in the labels. When verbose=false, the filter reason is hidden from the visible
+// label text but always available via the label's hover tooltip.
+export method draw_smt(SMT this, string other_ticker, bool show_label_leader, bool show_label_follower, bool verbose = false) =>
+    if not na(this) and (not this.invalidated or verbose and not na(this.filter_reason))
+
+        if na(this.follow_line) // the line on the swept (leader) instrument
+
+            label_style_leader = this.is_bullish ? label.style_label_upper_right : label.style_label_lower_right
+            label_style_follow = this.is_bullish ? label.style_label_up : label.style_label_down
+
+            // tooltip = always-detailed; visible text follows verbose flag
+            string leader_tip = this.label_text(other_ticker, true, is_leader = true)
+            string follow_tip = this.label_text(other_ticker, true)
+            string leader_txt = this.label_text(other_ticker, verbose, is_leader = true)
+            string follow_txt = this.label_text(other_ticker, verbose)
+
+            if this.leader == CHART
+                this.leader_line := line.new(this.leader_level, chart.point.now(this.leader_level.price), color = this.smt_color, xloc = xloc.bar_time, force_overlay = true, style = line.style_dotted)
+                if show_label_leader or verbose
+                    this.leader_label := label.new(chart.point.now(this.leader_level.price), text = leader_txt, color = color.new(this.smt_color, 70), style = label_style_leader, textcolor = this.smt_color, size = size.tiny, force_overlay = true, tooltip = leader_tip)
+
+                // intermediate dotted
+                this.follow_intermediate_line := line.new(this.follow_level, chart.point.now(this.follow_level.price), color = this.smt_color, xloc = xloc.bar_time, force_overlay = false, style = line.style_dotted)
+
+                // extended threshold
+                this.follow_line := line.new(chart.point.now(this.follow_level.price), chart.point.from_time(time[1], this.follow_level.price), color = this.smt_color, xloc = xloc.bar_time, force_overlay = false)
+
+                if show_label_follower or verbose
+                    this.follow_label := label.new(chart.point.now(this.follow_level.price), text = follow_txt, color = color.new(this.smt_color, 70), style = label_style_follow, textcolor = this.smt_color, size = size.tiny, force_overlay = false, tooltip = follow_tip)
+
+            else
+                this.leader_line := line.new(this.leader_level, chart.point.now(this.leader_level.price), color = this.smt_color, xloc = xloc.bar_time, force_overlay = false, style = line.style_dotted)
+                if show_label_leader or verbose
+                    this.leader_label := label.new(chart.point.now(this.leader_level.price), text = leader_txt, color = color.new(this.smt_color, 70), style = label_style_leader, textcolor = this.smt_color, size = size.tiny, force_overlay = false, tooltip = leader_tip)
+
+                // intermediate dotted
+                this.follow_intermediate_line := line.new(this.follow_level, chart.point.now(this.follow_level.price), color = this.smt_color, xloc = xloc.bar_time, force_overlay = true, style = line.style_dotted)
+
+                // extended threshold
+                this.follow_line := line.new(chart.point.now(this.follow_level.price), chart.point.from_time(time[1], this.follow_level.price), color = this.smt_color, xloc = xloc.bar_time, force_overlay = true)
+                if show_label_follower or verbose
+                    this.follow_label := label.new(chart.point.now(this.follow_level.price), text = follow_txt, color = color.new(this.smt_color, 70), style = label_style_follow, textcolor = this.smt_color, size = size.tiny, force_overlay = true, tooltip = follow_tip)
+
+        else
+            // Extend follow_line to the right edge of the current bar.
+            // Stop at trade_end_time if set (SMT used for a trade).
+            int x2 = not na(this.trade_end_time) ? this.trade_end_time : time
+            this.follow_line.set_x2(x2)
+
+            if this.draw_remove_highlight
+                this.draw_remove_highlight := false // trigger once
+                this.follow_line.set_width(1)
+                this.follow_line.set_color(this.smt_color)
+                this.follow_line.set_extend(extend.none)
+
+            if not na(this.filter_reason) and not na(this.follow_label)
+                if verbose
+                    this.follow_label.set_text(this.label_text(other_ticker, true))
+                this.follow_label.set_tooltip(this.label_text(other_ticker, true))
+
+        this
+
+export method draw_smts(SMT[] this, string other_ticker, bool show_label_leader, bool show_label_follower, bool show_filter_reason = false) =>
+    for smt in this
+        smt.draw_smt(other_ticker, show_label_leader, show_label_follower, show_filter_reason)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     SMT draw functions
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        P/D Zones
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Calculates Zone: 1 (Premium), -1 (Discount), 0 (Equilibrium)
+export get_pd_range(simple bool enable, int bars_lookback, bool new_hour) =>
+    if enable
+        float hh = ta.highest(high, bars_lookback)
+        float ll = ta.lowest(low, bars_lookback)
+
+        var float pd_high    = hh
+        var float pd_low     = ll
+        var float mid        = (hh + ll) / 2
+        var float section    = (hh - ll) / 4
+        var float upper_band = hh - section  // 75% level
+        var float lower_band = ll + section  // 25% level
+        var int   start_idx  = bar_index
+
+        if new_hour // only update every full hour as per example
+            pd_high    := hh
+            pd_low     := ll
+            mid        := (hh + ll) / 2
+            section    := (hh - ll) / 4
+            upper_band := hh - section // 75% level
+            lower_band := ll + section // 25% level
+            start_idx  := math.max(1, bar_index - bars_lookback + 1)
+
+        int zone = upper_band < close ? 1 : lower_band > close ? -1 : 0
+
+        [start_idx, pd_high, upper_band, mid, lower_band, pd_low, zone]
+    else
+        [na, na, na, na, na, na, na]
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     P/D Zones
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        Plots & Drawing - P/D
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// ── PD Zones ──────────────────────────────────────────────────────────────────────────────
+export draw_pd(bool new_hour, int pd_start, float pd_high, float pd_equilibrium, float pd_low) =>
+    var pd_premium_col       = color.red
+    var pd_equilibrium_col   = color.gray
+    var pd_discount_col      = color.teal
+    var pd_premium_bgcol     = color.new(pd_premium_col    , 75)
+    var pd_equilibrium_bgcol = color.new(pd_equilibrium_col, 75)
+    var pd_discount_bgcol    = color.new(pd_discount_col   , 75)
+    var pd_premium_box       = box.new(chart.point.now(), chart.point.now(), pd_premium_col    , bgcolor = pd_premium_bgcol    , force_overlay = true)
+    var pd_equilibrium_box   = box.new(chart.point.now(), chart.point.now(), pd_equilibrium_col, bgcolor = pd_equilibrium_bgcol, force_overlay = true)
+    var pd_discount_box      = box.new(chart.point.now(), chart.point.now(), pd_discount_col   , bgcolor = pd_discount_bgcol   , force_overlay = true)
+    var pd_premium_lbl       = label.new(chart.point.now(), "Premium" , color = pd_premium_bgcol    , textcolor = pd_premium_col    , force_overlay = true, size = size.small, style = label.style_label_down)
+    var pd_equilibrium_lbl   = label.new(chart.point.now(), "EQ"      , color = pd_equilibrium_bgcol, textcolor = pd_equilibrium_col, force_overlay = true, size = size.small, style = label.style_label_left)
+    var pd_discount_lbl      = label.new(chart.point.now(), "Discount", color = pd_discount_bgcol   , textcolor = pd_discount_col   , force_overlay = true, size = size.small, style = label.style_label_up  )
+
+    int end_idx = bar_index + 5
+    int center  = (pd_start + end_idx)/ 2
+    if new_hour
+        float box_height   = (pd_high - pd_low) / 20
+        float box_height2  = box_height/2
+
+        pd_premium_box    .set_lefttop    (pd_start , pd_high)
+        pd_premium_box    .set_rightbottom(end_idx  , pd_high - box_height)
+        pd_equilibrium_box.set_lefttop    (pd_start , pd_equilibrium + box_height2 )
+        pd_equilibrium_box.set_rightbottom(end_idx  , pd_equilibrium - box_height2 )
+        pd_discount_box   .set_lefttop    (pd_start , pd_low + box_height)
+        pd_discount_box   .set_rightbottom(end_idx  , pd_low)
+
+        pd_premium_lbl    .set_xy(center  , pd_high)
+        pd_equilibrium_lbl.set_xy(end_idx , pd_equilibrium)
+        pd_discount_lbl   .set_xy(center  , pd_low)
+    else
+        pd_premium_box    .set_right(end_idx)
+        pd_equilibrium_box.set_right(end_idx)
+        pd_discount_box   .set_right(end_idx)
+
+        pd_premium_lbl    .set_x(center)
+        pd_equilibrium_lbl.set_x(end_idx)
+        pd_discount_lbl   .set_x(center)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                     Plots & Drawing - P/D
+///////////////////////////////////////////////////////////////////////////////////////////////////

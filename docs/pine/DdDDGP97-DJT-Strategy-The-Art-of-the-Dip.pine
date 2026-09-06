@@ -1,0 +1,405 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SpellBook
+
+//@version=6
+
+// =============================================================================
+// DJT Strategy — "The Art of the Dip"
+// =============================================================================
+//
+// A satirical (but mechanically honest) VIX-chaos mean-reversion strategy
+// for index charts (ES1!, SPX, SPY, NQ1!...).
+//
+// THESIS (the "TACO trade" — Trump Always Chickens Out):
+//   1. An Announcement happens. It is the biggest, most beautiful
+//      announcement anyone has ever seen. The VIX disagrees, violently.
+//   2. Markets panic-sell like it's the end of global trade. It is not
+//      the end of global trade. It is Tuesday.
+//   3. Within days there is a "90-day pause", a "great call" with a
+//      foreign leader, or a clarification that the tariff applies only
+//      to penguins (see: Heard & McDonald Islands, April 2025).
+//   4. The dip, having been artisanally manufactured, is bought.
+//
+// MECHANICS (the actually-serious part):
+//   - Entry: VIX spikes ≥ X% above YESTERDAY'S CONFIRMED daily close
+//     (non-repainting: security() pulls close[1] of the "D" feed), or a
+//     fast intraday VIX ROC spike. Optionally require genuine event
+//     panic via vol-curve inversion (VIX9D > VIX — the 9-day scramble
+//     pricing above 30-day vol is the fingerprint of a real scare, not
+//     a slow-drift vol day). Long the index at next bar open.
+//   - Exits, staged like a real walk-back: half off at the first
+//     reassuring headline ("Great Call"), the rest when VIX reverts
+//     ("Concepts of a Plan"), plus a fixed % stop ("You're Fired"), a
+//     fixed % target ("Declare Victory"), and a time stop ("News Cycle
+//     Expiry" — nobody remembers after ~1 session).
+//   - NO LOOKAHEAD: every decision uses only bars up to and including
+//     the decision bar; orders fill next bar open. Yesterday's VIX
+//     close is confirmed data, never the repainting current-day value.
+//
+// PINE v6 GOTCHA: margin_long/margin_short default to 100 in v6 (they
+// were 0 in v5) and will SILENTLY reject every futures entry when the
+// notional exceeds capital — no error, no console output. Explicitly
+// zeroed below. See the official v5→v6 migration guide.
+//
+// DISCLAIMERS:
+//   - This strategy is satire. The VIX spikes are, regrettably, real.
+//   - Past performance is no guarantee of future walk-backs.
+//   - Not financial advice. Frankly, it barely qualifies as advice.
+// =============================================================================
+
+strategy("DJT Strategy — The Art of the Dip",
+     shorttitle = "DJT 🌮",
+     overlay = true,
+     pyramiding = 0,
+     calc_on_order_fills = false,
+     calc_on_every_tick = false,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1,
+     initial_capital = 1000000,
+     commission_type = strategy.commission.cash_per_contract,
+     commission_value = 4.50,
+     slippage = 1,
+     margin_long = 0,           // Pine v6 default is 100; silently rejects futures entries
+     margin_short = 0,
+     max_labels_count = 500)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+string G_CHAOS = "🚨 Chaos Detection (The Tariff Wire)"
+string G_TACO  = "🌮 TACO Protocol (Exits)"
+string G_SIZE  = "💰 Position Sizing (Bigly)"
+string G_FINE  = "🧾 Fine Print"
+
+string vix_sym = input.symbol("CBOE:VIX", "Volatility index", group = G_CHAOS,
+     tooltip = "The market's emotional support number.")
+
+float tantrum_pct = input.float(12.0, "Covfefe Threshold — VIX % above yesterday's close",
+     minval = 1.0, step = 0.5, group = G_CHAOS,
+     tooltip = "How much the VIX must spike vs yesterday's CONFIRMED daily close before we " +
+       "acknowledge that Something Was Posted. 12% = a normal Tuesday. 25% = they " +
+       "tariffed the moon.")
+
+float flash_pct = input.float(8.0, "Flash Tantrum — VIX ROC % (intraday)",
+     minval = 1.0, step = 0.5, group = G_CHAOS,
+     tooltip = "Fast VIX rate-of-change trigger for mid-session Announcements. Catches the " +
+       "2:37 PM post that ends four decades of trade policy in under 280 characters.")
+
+int flash_bars = input.int(6, "Flash Tantrum lookback (bars)", minval = 2, group = G_CHAOS)
+
+float vix_floor = input.float(18.0, "Minimum VIX to care", minval = 0.0, group = G_CHAOS,
+     tooltip = "Below this the market is not scared, it is merely golfing. A 15% spike " +
+       "from VIX 11 to 12.6 is not chaos, it is a light breeze.")
+
+bool use_ts = input.bool(true, "Require vol-curve inversion (VIX9D > VIX)", group = G_CHAOS,
+     tooltip = "Genuine event panic inverts the curve: 9-day vol prices above 30-day. If " +
+       "the curve isn't inverted, even the market doesn't believe the post. Cuts false " +
+       "positives from slow-drift vol days. The quants call this 'backwardation'. We " +
+       "call it 'the market checking whether the post is real'.")
+
+string vix9d_sym = input.symbol("CBOE:VIX9D", "Short-dated vol index", group = G_CHAOS)
+
+// --- TACO Protocol ---
+float first_cool_pct = input.float(8.0, "'Great Call' — first scale-out threshold %",
+     minval = 0.0, step = 0.5, group = G_TACO,
+     tooltip = "VIX Δ% (vs yesterday) at which the first reassuring headline lands — 'had a " +
+       "great call, very productive, tremendous respect'. Take half off. Walk-backs " +
+       "arrive in stages, so should exits. Needs ≥ 2 contracts to have a half.")
+
+float calm_pct = input.float(4.0, "'Deal Announced' — full VIX reversion %",
+     minval = 0.0, step = 0.5, group = G_TACO,
+     tooltip = "When VIX falls back to within this % of yesterday's close, a Framework of a " +
+       "Concept of a Deal has been reached. Close the rest and log off.")
+
+int news_cycle_bars = input.int(78, "News Cycle Expiry (bars)", minval = 1, group = G_TACO,
+     tooltip = "Max holding time. 78 bars ≈ one full RTH session on 5m. After one news " +
+       "cycle a newer, more beautiful crisis replaces this one and the edge is gone.")
+
+float stop_pct = input.float(1.5, "'You're Fired' — stop loss %", minval = 0.1, step = 0.1, group = G_TACO,
+     tooltip = "Sometimes he does not, in fact, chicken out. This is the apology budget.")
+
+float tp_pct = input.float(2.5, "'Declare Victory' — take profit %", minval = 0.1, step = 0.1, group = G_TACO,
+     tooltip = "Exit into strength, hold a press conference, take credit for the bounce " +
+       "you predicted after it happened.")
+
+int cooldown_bars = input.int(24, "Post-trade cooldown (bars)", minval = 0, group = G_TACO,
+     tooltip = "Minimum bars between trades. Announcements arrive in flurries; without a " +
+       "cooldown you will buy every escalating post in a single tweetstorm.")
+
+// --- Sizing ---
+int base_qty = input.int(2, "Base contracts", minval = 1, group = G_SIZE,
+     tooltip = "Default 2 so the 'Great Call' half-off scale-out has a half to take off.")
+
+float bigly_mult = input.float(2.0, "BIGLY multiplier at FULL COVFEFE", minval = 1.0, step = 0.5, group = G_SIZE,
+     tooltip = "Escalation sizing: the more unhinged the volatility event, the bigger the " +
+       "fade. Peak fear is peak walk-back probability. This is either alpha or a " +
+       "margin call — many people are saying both.")
+
+float trump_peg = input.float(75.35, "$TRUMP valuation (USD)", minval = 0.01, group = G_SIZE,
+     tooltip = "Used to denominate strategy P&L in the only currency that matters. Pegged " +
+       "to the all-time high, because in this house we believe in the project.")
+
+// --- Fine print ---
+bool chess_4d = input.bool(false, "♟️ 4D CHESS MODE (reverse all signals)", group = G_FINE,
+     tooltip = "For users who believe there is, in fact, a plan. Longs become shorts. " +
+       "Shorts become longs. Losses become 'strategic'. If this mode outperforms, " +
+       "please do not tell anyone.")
+
+bool believe_me = input.bool(false, "'Believe Me' complacency fade (experimental shorts)", group = G_FINE,
+     tooltip = "When VIX collapses hard in a day (everyone believes The Deal is real this " +
+       "time), short the euphoria. Experimental. Like the deal. Off by default because " +
+       "shorting hope is expensive.")
+
+float crush_pct = input.float(12.0, "'Believe Me' — VIX crush % vs yesterday", minval = 1.0, group = G_FINE)
+
+bool rth_only = input.bool(true, "RTH entries only (0930–1600 ET)", group = G_FINE,
+     tooltip = "Chaos never sleeps, but your fills should. Overnight Announcements get " +
+       "faded at the open like a gentleman.")
+
+bool use_heat_hours = input.bool(false, "Prime Posting Hours filter", group = G_FINE,
+     tooltip = "Only enter during statistically dense posting windows: the cable-news " +
+       "breakfast block and post-lunch Executive Time. Off by default — chaos is " +
+       "technically a 24-hour product.")
+
+string heat_session = input.session("0700-0945,1330-1600", "Prime Posting Hours (ET)", group = G_FINE)
+
+// =============================================================================
+// VIX DATA — lookahead-clean
+// =============================================================================
+
+// Current VIX on the chart's own timeframe. Confirmed at bar close; orders
+// fill next bar open, so no intrabar peeking enters the decision.
+float vix   = request.security(vix_sym, timeframe.period, close)
+float vix9d = request.security(vix9d_sym, timeframe.period, close)
+
+// YESTERDAY'S confirmed daily close. close[1] + lookahead_on is the standard
+// non-repainting pattern: the value is final the moment today starts.
+float vix_yest = request.security(vix_sym, "D", close[1], lookahead = barmerge.lookahead_on)
+
+float daily_chg_pct = 100.0 * (vix - vix_yest) / vix_yest
+float flash_roc     = ta.roc(vix, flash_bars)
+
+bool inverted = not na(vix9d) and not na(vix) and vix9d > vix
+bool term_ok  = not use_ts or inverted
+
+// =============================================================================
+// CHAOS CLASSIFICATION
+// =============================================================================
+
+int chaos = na(daily_chg_pct) ? 0 :
+     daily_chg_pct >= tantrum_pct * 2.0 ? 3 :
+     daily_chg_pct >= tantrum_pct       ? 2 :
+     daily_chg_pct >= tantrum_pct / 2.0 ? 1 : 0
+
+string chaos_txt = switch chaos
+    0 => "🏌️ GOLFING — markets unsupervised"
+    1 => "📱 POSTING DETECTED — mild tremors"
+    2 => "📉 TARIFF TANTRUM — chaos confirmed"
+    => "🚨 FULL COVFEFE — peak entertainment"
+
+color chaos_col = switch chaos
+    0 => color.new(color.green, 0)
+    1 => color.new(color.yellow, 0)
+    2 => color.new(color.orange, 0)
+    => color.new(color.red, 0)
+
+// Safety-record tracking: last time chaos reached tantrum grade.
+var int last_tantrum_ms = na
+if chaos >= 2
+    last_tantrum_ms := time
+
+// 🗽 Liberation Day (April 2) — heightened tantrum risk, observed annually.
+bool lib_day = month(time, "America/New_York") == 4 and dayofmonth(time, "America/New_York") == 2
+if lib_day and not lib_day[1]
+    label.new(bar_index, high, "🗽 HAPPY LIBERATION DAY\nHEIGHTENED TANTRUM RISK",
+         style = label.style_label_down, color = color.new(color.yellow, 0),
+         textcolor = color.black, size = size.normal)
+
+// =============================================================================
+// ENTRY LOGIC
+// =============================================================================
+
+bool tantrum = not na(daily_chg_pct) and not na(flash_roc) and
+     (daily_chg_pct >= tantrum_pct or flash_roc >= flash_pct) and
+     vix >= vix_floor and term_ok
+
+bool crush = believe_me and not na(daily_chg_pct) and daily_chg_pct <= -crush_pct
+
+int last_exit_bar = strategy.closedtrades > 0 ?
+     strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) : -cooldown_bars - 1
+bool cooled = bar_index - last_exit_bar >= cooldown_bars
+
+bool in_session = not rth_only or not na(time(timeframe.period, "0930-1600", "America/New_York"))
+bool in_heat    = not use_heat_hours or not na(time(timeframe.period, heat_session, "America/New_York"))
+bool flat = strategy.position_size == 0
+
+bool taco_signal    = tantrum and flat and cooled and in_session and in_heat
+bool believe_signal = crush and flat and cooled and in_session and in_heat and not tantrum
+
+// Escalation sizing: FULL COVFEFE gets the bigly treatment.
+int qty = chaos >= 3 ? int(math.max(1, math.round(base_qty * bigly_mult))) : base_qty
+
+// Rotating entry commentary — deterministic (bar_index-keyed), because even
+// our jokes must not repaint.
+var array<string> long_quotes = array.from(
+     "BUYING THE DIP. THE BEST DIP. MAYBE EVER. 🌮",
+     "HE'LL FOLD BY FRIDAY. HE ALWAYS FOLDS BY FRIDAY. 🌮",
+     "90-DAY PAUSE INCOMING, BELIEVE ME 🌮",
+     "IT'S NOT A CRASH, IT'S A NEGOTIATING TACTIC 🌮",
+     "MANY PEOPLE ARE SAYING BUY. STRONG PEOPLE. 🌮",
+     "THE PENGUINS GOT TARIFFED. LONG. 🌮")
+
+var array<string> short_quotes = array.from(
+     "EVERYONE BELIEVES THE DEAL. FADE THE BELIEF. 🫱",
+     "VIX SAYS PEACE IN OUR TIME. VIX IS WRONG. 🫱",
+     "COMPLACENCY IS JUST FEAR TAKING A GOLF DAY 🫱")
+
+// Tracks the staged scale-out within the current TACO trade.
+var bool scaled_out = false
+
+string chess_tag = chess_4d ? "♟️4D " : ""
+
+if taco_signal
+    string quote = chess_tag + long_quotes.get(bar_index % long_quotes.size())
+    strategy.entry("TACO", chess_4d ? strategy.short : strategy.long, qty = qty,
+         comment = chess_tag + "TACO x" + str.tostring(qty))
+    scaled_out := false
+    label.new(bar_index, chess_4d ? high : low, quote,
+         style = chess_4d ? label.style_label_down : label.style_label_up,
+         color = chaos_col, textcolor = color.white, size = size.small)
+    alert("🚨 DJT STRATEGY: VIX +" + str.tostring(daily_chg_pct, "#.#") +
+         "%! TOTAL PANIC (the good kind). " + (chess_4d ? "SHORTING" : "BUYING") + " " +
+         str.tostring(qty) + " — HE ALWAYS CHICKENS OUT. THIS TRADE IS GOING VERY WELL, " +
+         "EVERYONE SAYS SO!!!", alert.freq_once_per_bar)
+
+if believe_signal
+    string quote = chess_tag + short_quotes.get(bar_index % short_quotes.size())
+    strategy.entry("BELIEVE ME", chess_4d ? strategy.long : strategy.short, qty = base_qty,
+         comment = chess_tag + "BELIEVE ME")
+    label.new(bar_index, chess_4d ? low : high, quote,
+         style = chess_4d ? label.style_label_up : label.style_label_down,
+         color = color.new(color.purple, 0), textcolor = color.white, size = size.small)
+    alert("🤝 DJT STRATEGY: VIX " + str.tostring(daily_chg_pct, "#.#") +
+         "% — A DEAL HAS BEEN 'REACHED'. " + (chess_4d ? "BUYING" : "SHORTING") +
+         " THE HANDSHAKE.", alert.freq_once_per_bar)
+
+// =============================================================================
+// EXIT LOGIC — the TACO Protocol (direction-aware, so 4D Chess Mode
+// reverses cleanly: exits key off the entry id + position sign)
+// =============================================================================
+
+if strategy.position_size != 0
+    string eid   = strategy.opentrades.entry_id(strategy.opentrades - 1)
+    bool is_long = strategy.position_size > 0
+    float avg    = strategy.position_avg_price
+
+    strategy.exit("You're Fired / Victory", from_entry = eid,
+         stop  = is_long ? avg * (1.0 - stop_pct / 100.0) : avg * (1.0 + stop_pct / 100.0),
+         limit = is_long ? avg * (1.0 + tp_pct / 100.0)   : avg * (1.0 - tp_pct / 100.0))
+
+    int bars_in = bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+
+    if eid == "TACO"
+        int half = int(math.floor(math.abs(strategy.position_size) / 2))
+        // Full reversion supersedes the partial: a Concept of a Plan exists.
+        if not na(daily_chg_pct) and daily_chg_pct <= calm_pct
+            strategy.close("TACO", comment = "CONCEPTS OF A PLAN")
+        // First reassuring headline: half off, stages like the walk-back itself.
+        else if not scaled_out and half >= 1 and not na(daily_chg_pct) and daily_chg_pct <= first_cool_pct
+            strategy.close("TACO", qty = half, comment = "GREAT CALL — 90-DAY PAUSE (half off)")
+            scaled_out := true
+        // One full news cycle elapsed: the market has moved on, so do we.
+        else if bars_in >= news_cycle_bars
+            strategy.close("TACO", comment = "NEWS CYCLE EXPIRED")
+    else
+        if bars_in >= news_cycle_bars or tantrum
+            strategy.close("BELIEVE ME", comment = "NARRATIVE COLLAPSED (on schedule)")
+
+// Post-mortem label when a trade fully closes.
+bool just_closed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if just_closed and strategy.closedtrades > 0
+    float pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    string verdict = pnl >= 0 ?
+         "DECLARED VICTORY. TREMENDOUS. 🏆" :
+         "FAKE NEWS FILL. NOT MY FAULT. 📰"
+    label.new(bar_index, pnl >= 0 ? high : low, verdict,
+         style = pnl >= 0 ? label.style_label_down : label.style_label_up,
+         color = pnl >= 0 ? color.new(color.teal, 0) : color.new(color.gray, 0),
+         textcolor = color.white, size = size.small)
+
+// =============================================================================
+// CHAOS-O-METER (dashboard table)
+// =============================================================================
+
+var table meter = table.new(position.top_right, 2, 11, border_width = 1,
+     bgcolor = color.new(color.black, 20), border_color = color.new(color.gray, 60))
+
+// Deal accounting: profitable exits = "deals made"; stopped out = "fake news".
+var int deals_made = 0
+var int fake_news  = 0
+if just_closed and strategy.closedtrades > 0
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) >= 0
+        deals_made += 1
+    else
+        fake_news += 1
+
+if barstate.islast
+    // Factory-floor safety sign: days since the last tantrum-grade event.
+    string safety_txt = na(last_tantrum_ms) ? "∞ DAYS (A RECORD)" :
+         str.tostring(math.floor((time - last_tantrum_ms) / 86400000.0)) + " DAYS"
+
+    table.cell(meter, 0, 0, "CHAOS-O-METER™", text_color = color.white, text_size = size.small)
+    table.cell(meter, 1, 0, chaos_txt, text_color = chaos_col, text_size = size.small)
+    table.cell(meter, 0, 1, "VIX", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 1, str.tostring(vix, "#.##"), text_color = color.white, text_size = size.small)
+    table.cell(meter, 0, 2, "Δ vs yesterday", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 2, (daily_chg_pct >= 0 ? "+" : "") + str.tostring(daily_chg_pct, "#.#") + "%",
+         text_color = chaos_col, text_size = size.small)
+    table.cell(meter, 0, 3, "Vol curve (9D/30D)", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 3, inverted ? "INVERTED 🔥 (real panic)" : "CALM 😴 (posts unbelieved)",
+         text_color = inverted ? color.orange : color.gray, text_size = size.small)
+    table.cell(meter, 0, 4, "Posture", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 4, chess_tag +
+         (strategy.position_size > 0 ? "LONG THE DIP 🌮" :
+          strategy.position_size < 0 ? "FADING THE HANDSHAKE 🫱" :
+          cooled ? "OBSERVING 👀" : "COOLING OFF 🧊"),
+         text_color = color.white, text_size = size.small)
+    table.cell(meter, 0, 5, "🏗️ SAFETY RECORD", text_color = color.black,
+         bgcolor = color.new(color.yellow, 0), text_size = size.small)
+    table.cell(meter, 1, 5, safety_txt + " SINCE LAST TANTRUM", text_color = color.black,
+         bgcolor = color.new(color.yellow, 0), text_size = size.small)
+    table.cell(meter, 0, 6, "Deals made", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 6, str.tostring(deals_made), text_color = color.teal, text_size = size.small)
+    table.cell(meter, 0, 7, "Fake news", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 7, str.tostring(fake_news), text_color = color.red, text_size = size.small)
+    table.cell(meter, 0, 8, "Deals honored", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 8, "TBD", text_color = color.yellow, text_size = size.small)
+    table.cell(meter, 0, 9, "Net P&L ($TRUMP)", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 9, str.tostring(strategy.netprofit / trump_peg, "#.#") + " $TRUMP",
+         text_color = strategy.netprofit >= 0 ? color.teal : color.red, text_size = size.small)
+    table.cell(meter, 0, 10, "Sharpe ratio", text_color = color.gray, text_size = size.small)
+    table.cell(meter, 1, 10, "THE BEST RATIO. EVERYONE SAYS SO.", text_color = color.teal,
+         text_size = size.small)
+
+// =============================================================================
+// VISUALS
+// =============================================================================
+
+bgcolor(chaos == 3 ? color.new(color.red, 82) :
+     chaos == 2 ? color.new(color.orange, 88) : na,
+     title = "Chaos background")
+
+bgcolor(lib_day ? color.new(color.yellow, 85) : na, title = "🗽 Liberation Day")
+
+plotshape(taco_signal, "TACO trigger", shape.triangleup, location.belowbar,
+     color.new(color.teal, 0), size = size.tiny)
+plotshape(believe_signal, "Believe Me trigger", shape.triangledown, location.abovebar,
+     color.new(color.purple, 0), size = size.tiny)
+
+// Data-window diagnostics (hidden from chart)
+plot(vix, "VIX", display = display.data_window)
+plot(vix9d, "VIX9D", display = display.data_window)
+plot(daily_chg_pct, "VIX Δ% vs yest close", display = display.data_window)
+plot(flash_roc, "VIX flash ROC %", display = display.data_window)
+plot(chaos, "Chaos level", display = display.data_window)

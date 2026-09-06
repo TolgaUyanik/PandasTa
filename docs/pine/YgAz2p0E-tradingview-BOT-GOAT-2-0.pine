@@ -1,0 +1,159 @@
+//@version=6
+// =============================================================
+//  tradingview BOT GOAT  (Pine Script v6)
+//  10x leverage | full-equity sizing | 30-minute timeframe
+//  SL $1 | TP1 $1 (half) | TP2 $3 (runner) | Trail: lag $1, follow $0.5
+//  Draws Entry / SL / TP1 / TP2 / Trailing-stop lines
+// =============================================================
+strategy("tradingview BOT GOAT", shorttitle="BOT GOAT", overlay=true,
+     pyramiding=0, calc_on_every_tick=false, calc_on_order_fills=false,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     initial_capital=10000,
+     margin_long=10.0, margin_short=10.0,
+     commission_type=strategy.commission.percent, commission_value=0.0)
+
+// ---------------- INPUTS ----------------
+emaFastLen = input.int(21, "Fast EMA", minval=1, group="Trend")
+emaSlowLen = input.int(55, "Slow EMA", minval=1, group="Trend")
+
+only30m           = input.bool(true, "Only trade on the 30-minute chart", group="Filters")
+tradeWeekdaysOnly = input.bool(true, "Trade weekdays only (Mon-Fri)",      group="Filters")
+
+slDollars          = input.float(1.0,  "Stop Loss ($)",                  step=0.1, minval=0.0, group="Risk ($)")
+tp1Dollars         = input.float(1.0,  "Take Profit 1 - half ($)",       step=0.1, minval=0.0, group="Risk ($)")
+tp2Dollars         = input.float(3.0,  "Take Profit 2 - full ($)",       step=0.1, minval=0.0, group="Risk ($)")
+tp1Percent         = input.float(50.0, "TP1 size (% of position)", step=5.0, minval=1.0, maxval=99.0, group="Risk ($)")
+trailLagDollars    = input.float(1.0,  "Trailing activation lag ($)",    step=0.1, minval=0.0, group="Risk ($)")
+trailFollowDollars = input.float(0.5,  "Trailing follow distance ($)",   step=0.1, minval=0.0, group="Risk ($)")
+
+showArrows = input.bool(true, "Show entry arrows", group="Display")
+showLines  = input.bool(true, "Show Entry/SL/TP/Trail lines", group="Display")
+
+// ---------------- CALCULATIONS ----------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+emaCrossUp   = ta.crossover(emaFast, emaSlow)
+emaCrossDown = ta.crossunder(emaFast, emaSlow)
+
+isWeekday = dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+tfOk      = not only30m or timeframe.period == "30"
+tradeOk   = tfOk and (not tradeWeekdaysOnly or isWeekday)
+
+// ---------------- DOLLARS -> TICKS ----------------
+slTicks          = math.max(1, math.round(slDollars          / syminfo.mintick))
+tp1Ticks         = math.max(1, math.round(tp1Dollars         / syminfo.mintick))
+tp2Ticks         = math.max(1, math.round(tp2Dollars         / syminfo.mintick))
+trailLagTicks    = math.max(1, math.round(trailLagDollars    / syminfo.mintick))
+trailFollowTicks = math.max(1, math.round(trailFollowDollars / syminfo.mintick))
+
+// ---------------- SIGNALS ----------------
+longSignal  = emaCrossUp   and tradeOk
+shortSignal = emaCrossDown and tradeOk
+
+// ---------------- ENTRIES (full equity, with visible flip exits) ----------------
+if longSignal
+    strategy.close("Short", comment="Flip to Long")
+    strategy.entry("Long", strategy.long)
+
+if shortSignal
+    strategy.close("Long", comment="Flip to Short")
+    strategy.entry("Short", strategy.short)
+
+// ---------------- EXITS: TP1 (half) / TP2 / SL / TRAILING ----------------
+// LONG
+strategy.exit("TP1 Long", from_entry="Long", qty_percent=tp1Percent, profit=tp1Ticks,
+     comment_profit="TP1 Long")
+strategy.exit("Exit Long", from_entry="Long",
+     profit=tp2Ticks, loss=slTicks,
+     trail_points=trailLagTicks, trail_offset=trailFollowTicks,
+     comment_profit="TP2 Long", comment_loss="SL Long", comment_trailing="Trail Long")
+
+// SHORT
+strategy.exit("TP1 Short", from_entry="Short", qty_percent=tp1Percent, profit=tp1Ticks,
+     comment_profit="TP1 Short")
+strategy.exit("Exit Short", from_entry="Short",
+     profit=tp2Ticks, loss=slTicks,
+     trail_points=trailLagTicks, trail_offset=trailFollowTicks,
+     comment_profit="TP2 Short", comment_loss="SL Short", comment_trailing="Trail Short")
+
+// ---------------- LEVEL TRACKING (for plotted lines) ----------------
+trailDist  = trailFollowDollars
+trailArm   = trailLagDollars
+
+var float entryPx   = na
+var float slPx      = na
+var float tp1Px     = na
+var float tp2Px     = na
+var float trailPx   = na
+var bool  trailLive = false
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flat    = strategy.position_size == 0
+
+// Fresh position detected -> set static levels, reset trail
+newLong  = inLong  and strategy.position_size[1] <= 0
+newShort = inShort and strategy.position_size[1] >= 0
+
+if newLong
+    entryPx   := strategy.position_avg_price
+    slPx      := entryPx - slDollars
+    tp1Px     := entryPx + tp1Dollars
+    tp2Px     := entryPx + tp2Dollars
+    trailPx   := na
+    trailLive := false
+
+if newShort
+    entryPx   := strategy.position_avg_price
+    slPx      := entryPx + slDollars
+    tp1Px     := entryPx - tp1Dollars
+    tp2Px     := entryPx - tp2Dollars
+    trailPx   := na
+    trailLive := false
+
+// Trailing stop reconstruction (only while in a position)
+if inLong
+    if high - entryPx >= trailArm
+        trailLive := true
+    if trailLive
+        cand    = high - trailDist
+        trailPx := na(trailPx) ? cand : math.max(trailPx, cand)
+else if inShort
+    if entryPx - low >= trailArm
+        trailLive := true
+    if trailLive
+        cand    = low + trailDist
+        trailPx := na(trailPx) ? cand : math.min(trailPx, cand)
+
+if flat
+    entryPx   := na
+    slPx      := na
+    tp1Px     := na
+    tp2Px     := na
+    trailPx   := na
+    trailLive := false
+
+// ---------------- PLOTS ----------------
+plot(emaFast, "Fast EMA", color=color.new(color.aqua,   0))
+plot(emaSlow, "Slow EMA", color=color.new(color.orange, 0))
+
+plot(showLines ? entryPx : na, "Entry",    color=color.new(color.gray,  0),
+     style=plot.style_linebr, linewidth=2)
+plot(showLines ? slPx : na,    "Stop Loss", color=color.new(color.red,   0),
+     style=plot.style_linebr, linewidth=2)
+plot(showLines ? tp1Px : na,   "TP1 (half)", color=color.new(color.lime, 30),
+     style=plot.style_linebr, linewidth=1)
+plot(showLines ? tp2Px : na,   "TP2 (full)", color=color.new(color.green, 0),
+     style=plot.style_linebr, linewidth=2)
+plot(showLines ? trailPx : na, "Trailing Stop", color=color.new(color.orange, 0),
+     style=plot.style_linebr, linewidth=2)
+
+plotshape(showArrows and longSignal,  title="Long Arrow",  style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.lime,    0), size=size.small)
+plotshape(showArrows and shortSignal, title="Short Arrow", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.fuchsia, 0), size=size.small)
+
+// ---------------- ALERTS ----------------
+alertcondition(longSignal,  title="Long Entry",  message="BOT GOAT LONG {{ticker}} @ {{close}}")
+alertcondition(shortSignal, title="Short Entry", message="BOT GOAT SHORT {{ticker}} @ {{close}}")

@@ -1,0 +1,254 @@
+//@version=6
+indicator("Dynamic N-Day MA (x3)", overlay=true)
+
+// Approximate trading days per week/month, used only on Weekly/Monthly
+// charts. Fixed constants, not user settings — shared calculation logic
+// only, no shared controls.
+TRADING_DAYS_PER_WEEK  = 5.0
+TRADING_DAYS_PER_MONTH = 21.0
+
+// ta.sma() (and most series-lookback functions) hard-cap at 5000 bars back.
+// Keep one bar of headroom below the actual limit.
+MAX_SMA_LOOKBACK = 4999
+
+// ─── SHARED CALCULATION FUNCTIONS (logic only — no shared settings) ─────────
+// session_minutes (intraday trading minutes/day) and calendar minutes are NOT
+// the same unit. Only intraday charts (seconds/minutes) need the
+// session-length conversion, since that's the only case where multiple bars
+// make up one trading day. On Daily-or-coarser charts, bar count comes
+// directly from the trading calendar (1 bar = 1 day on Daily, ~5 trading
+// days per Weekly bar, etc.) — no minutes/seconds conversion involved.
+//
+// Returns [period, was_capped] so callers can surface capping in their info
+// label — a capped line is silently showing a *shorter* average than the
+// "days" setting implies, and that's worth knowing about.
+calc_dynamic_period(session_mins, days) =>
+    float bars_per_day = 1.0
+    if timeframe.isseconds
+        bar_seconds  = timeframe.multiplier
+        bars_per_day := (session_mins * 60) / bar_seconds
+    else if timeframe.isminutes
+        bar_minutes  = timeframe.multiplier
+        bars_per_day := session_mins / bar_minutes
+    else if timeframe.isdaily
+        bars_per_day := 1.0 / timeframe.multiplier
+    else if timeframe.isweekly
+        bars_per_day := 1.0 / (TRADING_DAYS_PER_WEEK * timeframe.multiplier)
+    else if timeframe.ismonthly
+        bars_per_day := 1.0 / (TRADING_DAYS_PER_MONTH * timeframe.multiplier)
+    else
+        bars_per_day := 1.0  // ticks charts: no meaningful time unit, fall back to 1:1
+
+    raw_period = math.max(1, math.round(days * bars_per_day))
+    capped_period = math.min(raw_period, MAX_SMA_LOOKBACK)
+    [capped_period, raw_period > MAX_SMA_LOOKBACK]
+
+// Color mode resolution for one line. A single mode selection (rather than
+// two independent checkboxes) makes "Basic vs Price Position vs Slope"
+// mutually exclusive by construction — there's no ambiguous case where two
+// modes are both enabled at once.
+f_line_color(color_mode, px, ma_now, ma_prev, col_basic, col_up, col_down) =>
+    col = col_basic
+    if color_mode == "By Price Position"
+        col := px >= ma_now ? col_up : col_down
+    else if color_mode == "By Slope"
+        col := ma_now >= ma_prev ? col_up : col_down
+    col
+
+// Alert-frequency check for one line. Purely reads the passed-in cooldown
+// timestamp — doesn't mutate it (the caller updates its own persistent var
+// after this returns true).
+f_should_fire(event_occurred, last_time, freq, cooldown_min) =>
+    result = false
+    if freq == "Every Cross"
+        result := event_occurred
+    else if freq == "Once Every X Minutes"
+        if event_occurred and (na(last_time) or (time - last_time) >= cooldown_min * 60000)
+            result := true
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MA 1 — fully independent settings
+// ═══════════════════════════════════════════════════════════════════════════
+l1_show    = input.bool(true, "Show Line", group="MA 1")
+l1_session = input.int(390, "Session Length (minutes/day)", minval=1, maxval=1440,
+     tooltip="How many MINUTES this market trades per calendar day, on the chart exactly as you have it configured right now.\n     \nDefaults to 1380 (CME Globex ~23hr day), since most retail users of this script are trading ES or NQ futures: Globex trades Sun 6pm–Fri 5pm ET with a daily 1hr maintenance break (~5–6pm ET), i.e. 23 hours = 1380 minutes/day.\n\nThis number should match what your chart actually displays per day — not a generic market fact. Other common values, all assuming REGULAR TRADING HOURS ONLY (RTH) where applicable (pre-market/after-hours excluded):\n  • CME Globex futures (ES, NQ, etc., ~23hr day) = 1380\n  • US equities (NYSE/NASDAQ RTH, 9:30am–4:00pm ET) = 390\n  • ASX (10:00am–4:00pm AEST) = 300\n  • London/LSE (8:00am–4:30pm) = 510\n  • 24H Crypto (trades continuously) = 1440\n\nIf your chart's session setting includes extended hours beyond what a preset above accounts for, your chart shows MORE bars per calendar day than that preset assumes. Using a too-small value will under-count the true bar-per-day rate and make the MA period shorter than intended — increase this value to match what your chart actually covers each day.", group="MA 1")
+l1_days    = input.int(5, "MA Length (trading days)", minval=1, group="MA 1")
+l1_colorBasic = input.color(color.blue, "Basic", group="MA 1")
+l1_colorUp    = input.color(color.green, "Up", group="MA 1")
+l1_colorDown  = input.color(color.red, "Down", group="MA 1")
+l1_colorMode = input.string("By Slope", "Color Mode", options=["Basic", "By Price Position", "By Slope"],
+     tooltip="Basic: static color. By Price Position: green when price is above the MA, red when below. By Slope: green when the MA is rising, red when falling.", group="MA 1")
+l1_alertOnCross = input.bool(false, "Enable Alert: Price Crosses MA", group="MA 1")
+l1_alertOnSlope = input.bool(false, "Enable Alert: MA Slope Sign Change (positive ↔ negative)", group="MA 1")
+l1_alertFreq    = input.string("Every Cross", "Alert Frequency",
+     options=["Every Cross", "Once Every X Minutes", "Never"], group="MA 1")
+l1_alertMinutes = input.int(60, "Cooldown (minutes, 'Once Every X Minutes' only)", minval=1, group="MA 1")
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MA 2 — fully independent settings
+// ═══════════════════════════════════════════════════════════════════════════
+l2_show    = input.bool(true, "Show Line", group="MA 2")
+l2_session = input.int(1380, "Session Length (minutes/day)", minval=1, maxval=1440,
+     tooltip="How many MINUTES this market trades per calendar day, on the chart exactly as you have it configured right now.\n     \nDefaults to 1380 (CME Globex ~23hr day), since most retail users of this script are trading ES or NQ futures: Globex trades Sun 6pm–Fri 5pm ET with a daily 1hr maintenance break (~5–6pm ET), i.e. 23 hours = 1380 minutes/day.\n\nThis number should match what your chart actually displays per day — not a generic market fact. Other common values, all assuming REGULAR TRADING HOURS ONLY (RTH) where applicable (pre-market/after-hours excluded):\n  • CME Globex futures (ES, NQ, etc., ~23hr day) = 1380\n  • US equities (NYSE/NASDAQ RTH, 9:30am–4:00pm ET) = 390\n  • ASX (10:00am–4:00pm AEST) = 300\n  • London/LSE (8:00am–4:30pm) = 510\n  • 24H Crypto (trades continuously) = 1440\n\nIf your chart's session setting includes extended hours beyond what a preset above accounts for, your chart shows MORE bars per calendar day than that preset assumes. Using a too-small value will under-count the true bar-per-day rate and make the MA period shorter than intended — increase this value to match what your chart actually covers each day.", group="MA 2")
+l2_days    = input.int(10, "MA Length (trading days)", minval=1, group="MA 2")
+l2_colorBasic = input.color(color.blue, "Basic", group="MA 2")
+l2_colorUp    = input.color(color.green, "Up", group="MA 2")
+l2_colorDown  = input.color(color.red, "Down", group="MA 2")
+l2_colorMode = input.string("By Slope", "Color Mode", options=["Basic", "By Price Position", "By Slope"],
+     tooltip="Basic: static color. By Price Position: green when price is above the MA, red when below. By Slope: green when the MA is rising, red when falling.", group="MA 2")
+l2_alertOnCross = input.bool(false, "Enable Alert: Price Crosses MA", group="MA 2")
+l2_alertOnSlope = input.bool(false, "Enable Alert: MA Slope Sign Change (positive ↔ negative)", group="MA 2")
+l2_alertFreq    = input.string("Every Cross", "Alert Frequency",
+     options=["Every Cross", "Once Every X Minutes", "Never"], group="MA 2")
+l2_alertMinutes = input.int(60, "Cooldown (minutes, 'Once Every X Minutes' only)", minval=1, group="MA 2")
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MA 3 — fully independent settings
+// ═══════════════════════════════════════════════════════════════════════════
+l3_show    = input.bool(true, "Show Line", group="MA 3")
+l3_session = input.int(1380, "Session Length (minutes/day)", minval=1, maxval=1440,
+     tooltip="How many MINUTES this market trades per calendar day, on the chart exactly as you have it configured right now.\n     \nDefaults to 1380 (CME Globex ~23hr day), since most retail users of this script are trading ES or NQ futures: Globex trades Sun 6pm–Fri 5pm ET with a daily 1hr maintenance break (~5–6pm ET), i.e. 23 hours = 1380 minutes/day.\n\nThis number should match what your chart actually displays per day — not a generic market fact. Other common values, all assuming REGULAR TRADING HOURS ONLY (RTH) where applicable (pre-market/after-hours excluded):\n  • CME Globex futures (ES, NQ, etc., ~23hr day) = 1380\n  • US equities (NYSE/NASDAQ RTH, 9:30am–4:00pm ET) = 390\n  • ASX (10:00am–4:00pm AEST) = 300\n  • London/LSE (8:00am–4:30pm) = 510\n  • 24H Crypto (trades continuously) = 1440\n\nIf your chart's session setting includes extended hours beyond what a preset above accounts for, your chart shows MORE bars per calendar day than that preset assumes. Using a too-small value will under-count the true bar-per-day rate and make the MA period shorter than intended — increase this value to match what your chart actually covers each day.", group="MA 3")
+l3_days    = input.int(50, "MA Length (trading days)", minval=1, group="MA 3")
+l3_colorBasic = input.color(color.blue, "Basic", group="MA 3")
+l3_colorUp    = input.color(color.green, "Up", group="MA 3")
+l3_colorDown  = input.color(color.red, "Down", group="MA 3")
+l3_colorMode = input.string("By Slope", "Color Mode", options=["Basic", "By Price Position", "By Slope"],
+     tooltip="Basic: static color. By Price Position: green when price is above the MA, red when below. By Slope: green when the MA is rising, red when falling.", group="MA 3")
+l3_alertOnCross = input.bool(false, "Enable Alert: Price Crosses MA", group="MA 3")
+l3_alertOnSlope = input.bool(false, "Enable Alert: MA Slope Sign Change (positive ↔ negative)", group="MA 3")
+l3_alertFreq    = input.string("Every Cross", "Alert Frequency",
+     options=["Every Cross", "Once Every X Minutes", "Never"], group="MA 3")
+l3_alertMinutes = input.int(60, "Cooldown (minutes, 'Once Every X Minutes' only)", minval=1, group="MA 3")
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MA 1 — calculation, plot, alerts
+// ═══════════════════════════════════════════════════════════════════════════
+[l1_period, l1_capped] = calc_dynamic_period(l1_session, l1_days)
+l1_ma     = ta.sma(close, l1_period)
+l1_color  = f_line_color(l1_colorMode, close, l1_ma, l1_ma[1], l1_colorBasic, l1_colorUp, l1_colorDown)
+plot(l1_show ? l1_ma : na, title="MA 1", color=l1_color, linewidth=2)
+
+l1_cross_up    = ta.crossover(close, l1_ma)
+l1_cross_dn    = ta.crossunder(close, l1_ma)
+l1_cross_event = l1_cross_up or l1_cross_dn
+
+l1_slope          = l1_ma - l1_ma[1]
+l1_cur_slope_sign = l1_slope > 0 ? 1 : l1_slope < 0 ? -1 : 0
+var int l1_last_nonzero_slope_sign = 0
+l1_slope_flip = false
+if l1_cur_slope_sign != 0
+    if l1_last_nonzero_slope_sign != 0 and l1_cur_slope_sign != l1_last_nonzero_slope_sign
+        l1_slope_flip := true
+    l1_last_nonzero_slope_sign := l1_cur_slope_sign
+
+var int l1_last_alert_time_cross = na
+var int l1_last_alert_time_slope = na
+
+l1_fire_cross = l1_alertOnCross and f_should_fire(l1_cross_event, l1_last_alert_time_cross, l1_alertFreq, l1_alertMinutes)
+l1_fire_slope = l1_alertOnSlope and f_should_fire(l1_slope_flip, l1_last_alert_time_slope, l1_alertFreq, l1_alertMinutes)
+
+if l1_fire_cross
+    l1_last_alert_time_cross := time
+    l1_direction = l1_cross_up ? "above" : "below"
+    alert("MA 1 (" + str.tostring(l1_days) + "-day): price crossed " + l1_direction + " (" + str.tostring(close) + ")", alert.freq_once_per_bar)
+
+if l1_fire_slope
+    l1_last_alert_time_slope := time
+    l1_slope_dir = l1_cur_slope_sign > 0 ? "positive (rising)" : "negative (falling)"
+    alert("MA 1 (" + str.tostring(l1_days) + "-day): slope turned " + l1_slope_dir + " (" + str.tostring(l1_ma) + ")", alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MA 2 — calculation, plot, alerts
+// ═══════════════════════════════════════════════════════════════════════════
+[l2_period, l2_capped] = calc_dynamic_period(l2_session, l2_days)
+l2_ma     = ta.sma(close, l2_period)
+l2_color  = f_line_color(l2_colorMode, close, l2_ma, l2_ma[1], l2_colorBasic, l2_colorUp, l2_colorDown)
+plot(l2_show ? l2_ma : na, title="MA 2", color=l2_color, linewidth=2)
+
+l2_cross_up    = ta.crossover(close, l2_ma)
+l2_cross_dn    = ta.crossunder(close, l2_ma)
+l2_cross_event = l2_cross_up or l2_cross_dn
+
+l2_slope          = l2_ma - l2_ma[1]
+l2_cur_slope_sign = l2_slope > 0 ? 1 : l2_slope < 0 ? -1 : 0
+var int l2_last_nonzero_slope_sign = 0
+l2_slope_flip = false
+if l2_cur_slope_sign != 0
+    if l2_last_nonzero_slope_sign != 0 and l2_cur_slope_sign != l2_last_nonzero_slope_sign
+        l2_slope_flip := true
+    l2_last_nonzero_slope_sign := l2_cur_slope_sign
+
+var int l2_last_alert_time_cross = na
+var int l2_last_alert_time_slope = na
+
+l2_fire_cross = l2_alertOnCross and f_should_fire(l2_cross_event, l2_last_alert_time_cross, l2_alertFreq, l2_alertMinutes)
+l2_fire_slope = l2_alertOnSlope and f_should_fire(l2_slope_flip, l2_last_alert_time_slope, l2_alertFreq, l2_alertMinutes)
+
+if l2_fire_cross
+    l2_last_alert_time_cross := time
+    l2_direction = l2_cross_up ? "above" : "below"
+    alert("MA 2 (" + str.tostring(l2_days) + "-day): price crossed " + l2_direction + " (" + str.tostring(close) + ")", alert.freq_once_per_bar)
+
+if l2_fire_slope
+    l2_last_alert_time_slope := time
+    l2_slope_dir = l2_cur_slope_sign > 0 ? "positive (rising)" : "negative (falling)"
+    alert("MA 2 (" + str.tostring(l2_days) + "-day): slope turned " + l2_slope_dir + " (" + str.tostring(l2_ma) + ")", alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MA 3 — calculation, plot, alerts
+// ═══════════════════════════════════════════════════════════════════════════
+[l3_period, l3_capped] = calc_dynamic_period(l3_session, l3_days)
+l3_ma     = ta.sma(close, l3_period)
+l3_color  = f_line_color(l3_colorMode, close, l3_ma, l3_ma[1], l3_colorBasic, l3_colorUp, l3_colorDown)
+plot(l3_show ? l3_ma : na, title="MA 3", color=l3_color, linewidth=2)
+
+l3_cross_up    = ta.crossover(close, l3_ma)
+l3_cross_dn    = ta.crossunder(close, l3_ma)
+l3_cross_event = l3_cross_up or l3_cross_dn
+
+l3_slope          = l3_ma - l3_ma[1]
+l3_cur_slope_sign = l3_slope > 0 ? 1 : l3_slope < 0 ? -1 : 0
+var int l3_last_nonzero_slope_sign = 0
+l3_slope_flip = false
+if l3_cur_slope_sign != 0
+    if l3_last_nonzero_slope_sign != 0 and l3_cur_slope_sign != l3_last_nonzero_slope_sign
+        l3_slope_flip := true
+    l3_last_nonzero_slope_sign := l3_cur_slope_sign
+
+var int l3_last_alert_time_cross = na
+var int l3_last_alert_time_slope = na
+
+l3_fire_cross = l3_alertOnCross and f_should_fire(l3_cross_event, l3_last_alert_time_cross, l3_alertFreq, l3_alertMinutes)
+l3_fire_slope = l3_alertOnSlope and f_should_fire(l3_slope_flip, l3_last_alert_time_slope, l3_alertFreq, l3_alertMinutes)
+
+if l3_fire_cross
+    l3_last_alert_time_cross := time
+    l3_direction = l3_cross_up ? "above" : "below"
+    alert("MA 3 (" + str.tostring(l3_days) + "-day): price crossed " + l3_direction + " (" + str.tostring(close) + ")", alert.freq_once_per_bar)
+
+if l3_fire_slope
+    l3_last_alert_time_slope := time
+    l3_slope_dir = l3_cur_slope_sign > 0 ? "positive (rising)" : "negative (falling)"
+    alert("MA 3 (" + str.tostring(l3_days) + "-day): slope turned " + l3_slope_dir + " (" + str.tostring(l3_ma) + ")", alert.freq_once_per_bar)
+
+// ─── INFO LABELS (last bar only, one per visible line) ──────────────────────
+if barstate.islast
+    if l1_show
+        label.new(x=bar_index, y=l1_ma,
+             text="MA1: " + str.tostring(l1_days) + "-day" +
+                  "\nPeriod: " + str.tostring(l1_period) + " bars" + (l1_capped ? " (capped, true length exceeds 5000-bar limit)" : "") +
+                  "\nSession: " + str.tostring(l1_session) + " min/day",
+             style=label.style_label_left, color=l1_color, textcolor=color.white, size=size.small)
+    if l2_show
+        label.new(x=bar_index, y=l2_ma,
+             text="MA2: " + str.tostring(l2_days) + "-day" +
+                  "\nPeriod: " + str.tostring(l2_period) + " bars" + (l2_capped ? " (capped, true length exceeds 5000-bar limit)" : "") +
+                  "\nSession: " + str.tostring(l2_session) + " min/day",
+             style=label.style_label_left, color=l2_color, textcolor=color.white, size=size.small)
+    if l3_show
+        label.new(x=bar_index, y=l3_ma,
+             text="MA3: " + str.tostring(l3_days) + "-day" +
+                  "\nPeriod: " + str.tostring(l3_period) + " bars" + (l3_capped ? " (capped, true length exceeds 5000-bar limit)" : "") +
+                  "\nSession: " + str.tostring(l3_session) + " min/day",
+             style=label.style_label_left, color=l3_color, textcolor=color.white, size=size.small)

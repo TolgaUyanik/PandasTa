@@ -1,0 +1,386 @@
+//===========================================================================================================
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © GustavoRubi
+// © BullTradingAM
+//===========================================================================================================
+// ADR RISK PLANNER — Position Sizing and Trade Levels
+//
+// A pre-trade risk planner. It does NOT generate buy/sell signals and it does not predict anything.
+// You choose a direction, an execution mode and (for pending orders) an entry price; the tool derives a
+// stop from the Average Daily Range, projects take-profit levels from your chosen R multiples, and sizes
+// the position for your account — across FX (5- and 3-decimal), crypto, stocks, metals, CFDs and futures.
+//
+// DESIGN PRINCIPLES
+//  · No signals. A planner draws a map; the trader drives.
+//  · Non-repainting data: the ADR uses COMPLETED daily bars only, requested with the lookahead_on + [1]
+//    idiom so historical and realtime values are identical.
+//  · Never show a silently wrong number: if the account-currency conversion is unavailable, the size
+//    reads '—' and the panel says why. Every assumption (units per lot, FX rate, ADR basis) is printed.
+//  · The trader owns the balance. Pine cannot read broker equity; the balance is a session input.
+//===========================================================================================================
+//@version=6
+indicator('Ultimate Risk Manager - ADR Position Sizing and Trade Levels [BullTrading]', shorttitle = 'BT_URM', overlay = true, max_labels_count = 50, max_lines_count = 50)
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+string g_trade = '1. Trade Setup'
+string g_adr   = '2. ADR Engine'
+string g_tp    = '3. Take-Profit Ladder'
+string g_size  = '4. Position Sizing'
+string g_vis   = '5. Appearance'
+
+execMode  = input.string('Market Execution', 'Execution mode', options = ['Market Execution', 'Limit Order', 'Stop Order'], group = g_trade, tooltip = 'Market Execution anchors the plan to the CURRENT price and follows it bar by bar.\nLimit Order plans a pullback entry (long below price, short above).\nStop Order plans a breakout entry (long above price, short below).')
+direction = input.string('Long', 'Direction', options = ['Long', 'Short'], group = g_trade)
+entryIn   = input.price(0.0, 'Entry price (pending orders)', group = g_trade, tooltip = 'Used by Limit and Stop modes. Set it here or type a level from your own analysis — order blocks, session highs/lows, FVGs, whatever your process uses. Leave at 0 to anchor to the current price until you set one. Ignored in Market Execution.')
+freezeMode = input.bool(false, 'Freeze setup until SL / TP', group = g_trade, tooltip = 'Locks the current plan in place: entry, stop, targets and size stop following price and become a tracked setup. The freeze resolves only when price touches the stop or a target, then a fresh plan is captured automatically.\n\nFill, SL and TP alerts exist ONLY in this mode — an unfrozen plan is a moving ruler, and alerting on a moving ruler would be noise.')
+
+adrLen   = input.int(5, 'ADR length (days)', minval = 1, maxval = 30, group = g_adr, tooltip = 'How many completed daily bars build the Average Daily Range. 5 reflects the current week\'s character; 14-20 is steadier.')
+adrBasis = input.string('High-Low range', 'ADR basis', options = ['High-Low range', 'Close-to-Close'], group = g_adr, tooltip = 'High-Low range is the classic ADR — the average full span of the day.\nClose-to-Close measures average daily drift instead and reads much smaller; use it only if your method is calibrated to it.')
+adrPct   = input.float(33.0, 'Stop distance (% of ADR)', minval = 1.0, maxval = 200.0, step = 1.0, group = g_adr, tooltip = 'The stop sits this share of the ADR away from the entry.\n\nCALIBRATION GUIDANCE — the 33% default is tuned for PRECISION trading: limit entries placed at premium/discount extremes of the range, where the location itself absorbs adverse travel. Stop orders and instant market executions enter mid-flow and generally need a LARGER share of the ADR to survive ordinary noise. If your entries are not precision-located, widen this before judging the tool.')
+
+useTp1 = input.bool(true, '', inline = 'tp1', group = g_tp)
+rTp1   = input.float(1.0, 'TP1 · R multiple', minval = 0.1, step = 0.1, inline = 'tp1', group = g_tp, tooltip = 'Each take-profit sits at (R x stop distance) beyond the entry. R = 1 doubles or nothing; R = 2 pays twice the risk.')
+useTp2 = input.bool(true, '', inline = 'tp2', group = g_tp)
+rTp2   = input.float(2.0, 'TP2 · R multiple', minval = 0.1, step = 0.1, inline = 'tp2', group = g_tp)
+useTp3 = input.bool(false, '', inline = 'tp3', group = g_tp)
+rTp3   = input.float(3.0, 'TP3 · R multiple', minval = 0.1, step = 0.1, inline = 'tp3', group = g_tp)
+
+acctBalance   = input.float(10000.0, 'Account balance', minval = 1.0, step = 100.0, group = g_size, tooltip = 'Your balance for THIS session. The script cannot read broker equity — you set the number and you own it.')
+acctCurrency  = input.string('USD', 'Account currency', options = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'NZD', 'MXN', 'AED', 'SGD', 'HKD'], group = g_size, tooltip = 'When it differs from the instrument\'s quote currency the panel converts and shows the rate it used, so you can check it.')
+riskPercent   = input.float(0.5, 'Risk per trade (%)', minval = 0.01, maxval = 100.0, step = 0.05, group = g_size, tooltip = 'Share of the balance at risk between entry and stop. Your choice, not a recommendation.')
+unitsOverride = input.float(0.0, 'Units per lot (0 = auto)', minval = 0.0, step = 1.0, group = g_size, tooltip = 'What ONE lot controls. Auto: 100,000 for FX, point value for futures, 1 for shares/coins. Override when your broker differs (gold is 100 oz at most brokers, 10 at some). The value in use is always shown so you can verify it in seconds.')
+
+showPanel   = input.bool(true, 'Show panel', inline = 'v0', group = g_vis)
+compact     = input.bool(false, 'Compact', inline = 'v0', group = g_vis, tooltip = 'Hides the assumptions row and the range-budget row for a minimal footprint over busy charts.')
+panelPosIn  = input.string('Top right', 'Panel position', options = ['Top right', 'Top left', 'Bottom right', 'Bottom left', 'Middle right'], group = g_vis)
+showZones   = input.bool(true, 'Shade risk / reward zones', group = g_vis)
+longColor   = input.color(#26a69a, 'Long accent', inline = 'v1', group = g_vis)
+shortColor  = input.color(#ef5350, 'Short accent', inline = 'v1', group = g_vis)
+slColor     = input.color(#ff00ff, 'Stop line', inline = 'v2', group = g_vis)
+tpColor     = input.color(#00bcd4, 'Target lines', inline = 'v2', group = g_vis)
+extLeft     = input.int(12, 'Level reach (bars left)', minval = 2, maxval = 100, group = g_vis)
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ADR — completed daily bars only, non-repainting
+// The [1] offset is applied INSIDE the daily context and pairs with lookahead_on: together they return the
+// last COMPLETED day identically on historical and realtime bars. Neither alone achieves that.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+f_adr() =>
+    float span = adrBasis == 'High-Low range' ? high - low : math.abs(close - close[1])
+    float a = ta.sma(span, adrLen)
+    a[1]
+
+adr = request.security(syminfo.tickerid, 'D', f_adr(), lookahead = barmerge.lookahead_on)
+
+tfOk     = timeframe.in_seconds() <= timeframe.in_seconds('D')
+adrOk    = not na(adr) and adr > 0
+adrDist  = adrOk ? adr * adrPct / 100.0 : na
+
+// Range budget — how much of an average day today has already travelled. Chart-native day tracking, so
+// historical values are exact. Above 100% the day is already stretched beyond its recent average.
+var float dayHi = na
+var float dayLo = na
+bool newDay = ta.change(time('D')) != 0
+if newDay or na(dayHi)
+    dayHi := high
+    dayLo := low
+else
+    dayHi := math.max(dayHi, high)
+    dayLo := math.min(dayLo, low)
+
+rangeToday = dayHi - dayLo
+rangeUsed  = adrOk ? rangeToday / adr * 100.0 : na
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// TRADE GEOMETRY
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+int  dir      = direction == 'Long' ? 1 : -1
+bool isMarket = execMode == 'Market Execution'
+bool hasEntry = isMarket or entryIn > 0
+
+float entryPx = isMarket or entryIn <= 0 ? close : entryIn
+float slPx    = not na(adrDist) ? entryPx - dir * adrDist : na
+float tp1Px   = not na(adrDist) and useTp1 ? entryPx + dir * adrDist * rTp1 : na
+float tp2Px   = not na(adrDist) and useTp2 ? entryPx + dir * adrDist * rTp2 : na
+float tp3Px   = not na(adrDist) and useTp3 ? entryPx + dir * adrDist * rTp3 : na
+
+// Pending-order geometry check: a limit buys the pullback, a stop buys the breakout. The wrong side is
+// flagged, not hidden — the plan still draws so the trader can see what they typed.
+bool geomOk = isMarket or not hasEntry ? true : execMode == 'Limit Order' ? (dir == 1 ? entryPx < close : entryPx > close) : (dir == 1 ? entryPx > close : entryPx < close)
+
+string status = not tfOk ? 'Use an intraday or daily chart' : not adrOk ? 'ADR warming up' : not hasEntry ? 'Set an entry price for pending orders' : not geomOk ? (execMode == 'Limit Order' ? 'Limit must be on the pullback side of price' : 'Stop order must be on the breakout side of price') : isMarket ? 'Anchored to current price' : 'Plan ready'
+
+planLive = tfOk and adrOk and hasEntry and geomOk
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// POSITION SIZING — one formula, every asset class
+//     size = (balance x risk%) / (stopDistance x unitsPerLot x quoteToAccountRate)
+// Pip size derives from the QUOTE CURRENCY (any JPY-quoted pair is 0.01), not from a ticker list, so all
+// crosses are covered and broker symbol suffixes are irrelevant.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+isFx        = syminfo.type == 'forex'
+autoUnits   = isFx ? 100000.0 : syminfo.type == 'futures' ? (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0) : 1.0
+unitsPerLot = unitsOverride > 0 ? unitsOverride : autoUnits
+pipSize     = isFx ? (syminfo.currency == 'JPY' ? 0.01 : 0.0001) : na
+
+rawRate = request.currency_rate(syminfo.currency, acctCurrency)
+fxRate  = syminfo.currency == acctCurrency ? 1.0 : rawRate
+convOk  = not na(fxRate) and fxRate > 0
+
+riskCash        = acctBalance * riskPercent / 100.0
+riskPerLotQuote = not na(adrDist) ? adrDist * unitsPerLot : na
+riskPerLotAcct  = convOk and not na(riskPerLotQuote) ? riskPerLotQuote * fxRate : na
+rawSize         = not na(riskPerLotAcct) and riskPerLotAcct > 0 ? riskCash / riskPerLotAcct : na
+
+f_round_size(sz) =>
+    na(sz) ? na : syminfo.type == 'stock' ? math.floor(sz) : syminfo.type == 'crypto' ? math.round(sz * 10000) / 10000 : math.round(sz * 100) / 100
+
+sizeNow   = f_round_size(rawSize)
+unitLabel = isFx ? 'lots' : syminfo.type == 'futures' ? 'contracts' : syminfo.type == 'stock' ? 'shares' : 'units'
+
+f_px(p) =>
+    na(p) ? '—' : str.tostring(p, format.mintick)
+
+f_dist(d) =>
+    na(d) ? '—' : isFx and not na(pipSize) ? str.tostring(d / pipSize, '#.#') + ' pips' : str.tostring(d, format.mintick)
+
+f_size(s) =>
+    na(s) ? '—' : syminfo.type == 'stock' ? str.tostring(s, '0') : syminfo.type == 'crypto' ? str.tostring(s, '#.####') : str.tostring(s, '#.##')
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// FREEZE ENGINE — locks the plan into a tracked setup that resolves only at SL or TP.
+// All transitions run on CONFIRMED bars using that bar's completed OHLC, so the lifecycle is
+// non-repainting. Resolution order is conservative: on a bar whose range spans both levels, the stop is
+// scored first, then the nearest target. After resolution a fresh plan is captured on the next bar.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+var bool  frzArmed  = false
+var bool  frzFilled = false
+var int   frzDir    = 0
+var int   frzBar    = na
+var float frzEntry  = na
+var float frzSl     = na
+var float frzTp1    = na
+var float frzTp2    = na
+var float frzTp3    = na
+var float frzSize   = na
+var float frzDist   = na
+
+bool evFill = false
+bool evSl   = false
+int  evTp   = 0
+
+if barstate.isconfirmed
+    if not freezeMode
+        frzArmed := false
+    else if not frzArmed and planLive
+        frzArmed  := true
+        frzFilled := isMarket
+        frzDir    := dir
+        frzBar    := bar_index
+        frzEntry  := entryPx
+        frzSl     := slPx
+        frzTp1    := tp1Px
+        frzTp2    := tp2Px
+        frzTp3    := tp3Px
+        frzSize   := sizeNow
+        frzDist   := adrDist
+    else if frzArmed
+        if not frzFilled
+            if high >= frzEntry and low <= frzEntry
+                frzFilled := true
+                evFill := true
+                if frzDir == 1 ? low <= frzSl : high >= frzSl
+                    evSl := true
+                    frzArmed := false
+        else
+            bool slHit = frzDir == 1 ? low <= frzSl : high >= frzSl
+            if slHit
+                evSl := true
+                frzArmed := false
+            else if not na(frzTp1) and (frzDir == 1 ? high >= frzTp1 : low <= frzTp1)
+                evTp := 1
+                frzArmed := false
+            else if not na(frzTp2) and (frzDir == 1 ? high >= frzTp2 : low <= frzTp2)
+                evTp := 2
+                frzArmed := false
+            else if not na(frzTp3) and (frzDir == 1 ? high >= frzTp3 : low <= frzTp3)
+                evTp := 3
+                frzArmed := false
+
+// Effective values: the frozen snapshot when armed, the live plan otherwise. Everything downstream —
+// drawings, panel, sizing readout — reads these, so the freeze is honoured everywhere at once.
+bool frozenNow = freezeMode and frzArmed
+int   eDir   = frozenNow ? frzDir : dir
+float eEntry = frozenNow ? frzEntry : entryPx
+float eSl    = frozenNow ? frzSl : slPx
+float eTp1   = frozenNow ? frzTp1 : tp1Px
+float eTp2   = frozenNow ? frzTp2 : tp2Px
+float eTp3   = frozenNow ? frzTp3 : tp3Px
+float eSize  = frozenNow ? frzSize : sizeNow
+float eDist  = frozenNow ? frzDist : adrDist
+
+string statusEff = frozenNow ? (frzFilled ? 'FROZEN · active until SL / TP' : 'FROZEN · waiting for fill') : status
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// DRAWINGS — planner style: levels live at the right edge of the chart, one object each, updated in place
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+color accent = eDir == 1 ? longColor : shortColor
+
+var line  lnEntry = na
+var line  lnSl    = na
+var line  lnTp1   = na
+var line  lnTp2   = na
+var line  lnTp3   = na
+var label lbEntry = na
+var label lbSl    = na
+var label lbTp1   = na
+var label lbTp2   = na
+var label lbTp3   = na
+var linefill zoneRisk   = na
+var linefill zoneRw1    = na
+var linefill zoneRw2    = na
+var linefill zoneRw3    = na
+
+f_level(line ln, label lb, float px, int x1, int x2, color lineCol, color labCol, string txt, string lstyle) =>
+    line lnOut = ln
+    label lbOut = lb
+    if na(px)
+        if not na(lnOut)
+            line.delete(lnOut)
+            lnOut := na
+        if not na(lbOut)
+            label.delete(lbOut)
+            lbOut := na
+    else
+        if na(lnOut)
+            lnOut := line.new(x1, px, x2, px, color = lineCol, width = 1, style = lstyle == 'solid' ? line.style_solid : lstyle == 'dash' ? line.style_dashed : line.style_dotted)
+            lbOut := label.new(x2, px, txt, style = label.style_label_left, color = color.new(labCol, 82), textcolor = labCol, size = size.small)
+        else
+            line.set_xy1(lnOut, x1, px)
+            line.set_xy2(lnOut, x2, px)
+            line.set_color(lnOut, lineCol)
+            line.set_style(lnOut, lstyle == 'solid' ? line.style_solid : lstyle == 'dash' ? line.style_dashed : line.style_dotted)
+            label.set_xy(lbOut, x2, px)
+            label.set_text(lbOut, txt)
+            label.set_textcolor(lbOut, labCol)
+            label.set_color(lbOut, color.new(labCol, 82))
+    [lnOut, lbOut]
+
+if barstate.islast
+    // A frozen setup anchors its lines at the freeze bar, so you can see where the plan was locked.
+    int x1 = frozenNow and not na(frzBar) ? math.min(frzBar, bar_index - 1) : bar_index - extLeft
+    int x2 = bar_index + 3
+
+    bool drawIt = frozenNow or (tfOk and adrOk and hasEntry)
+
+    // Pending entries draw as a discreet dotted grey line — they are intentions, not commitments.
+    // A market anchor or a FILLED frozen setup draws solid in the direction accent.
+    bool  entrySolid   = isMarket or (frozenNow and frzFilled)
+    color entryLineCol = entrySolid ? accent : color.new(color.gray, 25)
+
+    string modeTag = frozenNow ? (frzFilled ? 'FROZEN ACTIVE' : 'FROZEN ' + (execMode == 'Limit Order' ? 'LIMIT' : execMode == 'Stop Order' ? 'STOP' : 'MARKET')) : (isMarket ? 'ENTRY (market)' : execMode == 'Limit Order' ? 'LIMIT' : 'STOP ORDER')
+    string eTxt = modeTag + '  ' + f_px(eEntry) + '  ·  ' + f_size(eSize) + ' ' + unitLabel
+    string sTxt = 'SL  ' + f_px(eSl) + '  ·  ' + f_dist(eDist) + '  ·  -' + str.tostring(riskPercent, '#.##') + '%'
+
+    [e1, e2] = f_level(lnEntry, lbEntry, drawIt ? eEntry : na, x1, x2, entryLineCol, accent, eTxt, entrySolid ? 'solid' : 'dot')
+    lnEntry := e1
+    lbEntry := e2
+    [s1, s2] = f_level(lnSl, lbSl, drawIt ? eSl : na, x1, x2, slColor, slColor, sTxt, 'dash')
+    lnSl := s1
+    lbSl := s2
+    [t1a, t1b] = f_level(lnTp1, lbTp1, drawIt ? eTp1 : na, x1, x2, tpColor, tpColor, 'TP1  ' + f_px(eTp1) + '  ·  ' + str.tostring(rTp1, '#.#') + 'R', 'dot')
+    lnTp1 := t1a
+    lbTp1 := t1b
+    [t2a, t2b] = f_level(lnTp2, lbTp2, drawIt ? eTp2 : na, x1, x2, tpColor, tpColor, 'TP2  ' + f_px(eTp2) + '  ·  ' + str.tostring(rTp2, '#.#') + 'R', 'dot')
+    lnTp2 := t2a
+    lbTp2 := t2b
+    [t3a, t3b] = f_level(lnTp3, lbTp3, drawIt ? eTp3 : na, x1, x2, tpColor, tpColor, 'TP3  ' + f_px(eTp3) + '  ·  ' + str.tostring(rTp3, '#.#') + 'R', 'dot')
+    lnTp3 := t3a
+    lbTp3 := t3b
+
+    // Zones: risk tinted with the stop colour, reward fading out level by level
+    if showZones and drawIt and not na(lnEntry) and not na(lnSl)
+        if na(zoneRisk)
+            zoneRisk := linefill.new(lnEntry, lnSl, color.new(slColor, 88))
+        if not na(lnTp1) and na(zoneRw1)
+            zoneRw1 := linefill.new(lnEntry, lnTp1, color.new(tpColor, 88))
+        if not na(lnTp1) and not na(lnTp2) and na(zoneRw2)
+            zoneRw2 := linefill.new(lnTp1, lnTp2, color.new(tpColor, 92))
+        if not na(lnTp2) and not na(lnTp3) and na(zoneRw3)
+            zoneRw3 := linefill.new(lnTp2, lnTp3, color.new(tpColor, 95))
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// PANEL — one-time merges behind an init flag; a moving merged row or per-tick re-merge can raise a
+// runtime error, so merged rows are static by design
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+panelPos = switch panelPosIn
+    'Top right'    => position.top_right
+    'Top left'     => position.top_left
+    'Bottom right' => position.bottom_right
+    'Bottom left'  => position.bottom_left
+    'Middle right' => position.middle_right
+    => position.top_right
+
+var table pt = table.new(panelPos, 2, 12, bgcolor = color.new(#0b0e14, 10), border_color = color.new(color.gray, 72), border_width = 1, frame_color = color.new(color.gray, 55), frame_width = 1)
+var bool ptMerged = false
+
+if barstate.islast and showPanel
+    if not ptMerged
+        table.merge_cells(pt, 0, 0, 1, 0)
+        table.merge_cells(pt, 0, 10, 1, 10)
+        table.merge_cells(pt, 0, 11, 1, 11)
+        ptMerged := true
+
+    color cHdr = color.new(#1a1f2e, 0)
+    color cLab = color.new(color.gray, 15)
+    color cVal = color.white
+
+    table.cell(pt, 0, 0, 'ULTIMATE RISK MANAGER', text_color = color.new(#00bcd4, 0), text_size = size.small, bgcolor = cHdr)
+
+    table.cell(pt, 0, 1, 'Plan', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 1, (eDir == 1 ? 'Long' : 'Short') + ' · ' + (isMarket ? 'Market' : execMode == 'Limit Order' ? 'Limit' : 'Stop') + (frozenNow ? ' · FROZEN' : ''), text_color = accent, text_size = size.tiny)
+
+    table.cell(pt, 0, 2, 'Status', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 2, statusEff, text_color = frozenNow ? color.new(#00bcd4, 0) : planLive ? cVal : color.orange, text_size = size.tiny)
+
+    table.cell(pt, 0, 3, 'Entry', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 3, f_px(eEntry), text_color = cVal, text_size = size.tiny)
+
+    table.cell(pt, 0, 4, 'Stop (' + str.tostring(adrPct, '#') + '% ADR)', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 4, f_px(eSl) + '  ·  ' + f_dist(eDist), text_color = slColor, text_size = size.tiny)
+
+    string tpTxt = (not na(eTp1) ? 'TP1 ' + f_px(eTp1) : '') + (not na(eTp2) ? '  TP2 ' + f_px(eTp2) : '') + (not na(eTp3) ? '  TP3 ' + f_px(eTp3) : '')
+    table.cell(pt, 0, 5, 'Targets', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 5, tpTxt == '' ? '—' : tpTxt, text_color = tpColor, text_size = size.tiny)
+
+    table.cell(pt, 0, 6, 'Size', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 6, f_size(eSize) + ' ' + unitLabel, text_color = color.yellow, text_size = size.tiny)
+
+    table.cell(pt, 0, 7, 'Risk', text_color = cLab, text_size = size.tiny)
+    table.cell(pt, 1, 7, str.tostring(riskCash, '#,###.##') + ' ' + acctCurrency + '  (' + str.tostring(riskPercent, '#.##') + '%)', text_color = cVal, text_size = size.tiny)
+
+    if not compact
+        table.cell(pt, 0, 8, 'ADR(' + str.tostring(adrLen, '0') + ')', text_color = cLab, text_size = size.tiny)
+        table.cell(pt, 1, 8, f_dist(adr), text_color = cVal, text_size = size.tiny)
+
+        color budgetCol = na(rangeUsed) ? cLab : rangeUsed < 70 ? color.new(#26a69a, 0) : rangeUsed <= 100 ? color.orange : color.new(#ef5350, 0)
+        table.cell(pt, 0, 9, 'Range used today', text_color = cLab, text_size = size.tiny)
+        table.cell(pt, 1, 9, na(rangeUsed) ? '—' : str.tostring(rangeUsed, '#.#') + '%' + (rangeUsed > 100 ? '  · stretched' : ''), text_color = budgetCol, text_size = size.tiny)
+
+        string rateTxt = syminfo.currency == acctCurrency ? 'same currency' : convOk ? syminfo.currency + '→' + acctCurrency + ' ' + str.tostring(fxRate, '#.#####') : 'RATE UNAVAILABLE'
+        table.cell(pt, 0, 10, 'Units/lot ' + str.tostring(unitsPerLot, '#,###.##') + (unitsOverride > 0 ? ' (manual)' : ' (auto)') + '  ·  ' + rateTxt, text_color = convOk ? color.new(color.silver, 20) : color.orange, text_size = size.tiny, bgcolor = cHdr)
+
+    table.cell(pt, 0, 11, 'Planning tool only · verify contract size and rate with your broker', text_color = cLab, text_size = size.tiny, bgcolor = cHdr)
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ALERTS — freeze-mode lifecycle only. An unfrozen plan follows price, and alerting on a moving ruler
+// would be noise; freeze first, then the fill / stop / target events become meaningful. Not trade signals.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+alertcondition(evFill, title = 'Frozen setup: entry filled', message = 'Ultimate Risk Manager {{ticker}}: price filled the frozen entry level. The setup is now active until SL or TP.')
+alertcondition(evSl, title = 'Frozen setup: stop hit', message = 'Ultimate Risk Manager {{ticker}}: price touched the frozen stop level. The setup is resolved; a fresh plan will be captured.')
+alertcondition(evTp > 0, title = 'Frozen setup: target hit', message = 'Ultimate Risk Manager {{ticker}}: price touched a frozen take-profit level. The setup is resolved; a fresh plan will be captured.')
+
+//----------------------------------------------------------------------------------------------------------
+// End of Code
+//----------------------------------------------------------------------------------------------------------

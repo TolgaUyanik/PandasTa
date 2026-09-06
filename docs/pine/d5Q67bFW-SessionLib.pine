@@ -1,0 +1,240 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description SessionLib — timezone, session detection, and timeframe utilities.
+//              Extracted from TaUtilityLib during Step 13 decomposition.
+//              Layer L0 (leaf utility, depends only on Pine builtins).
+//
+// CHANGELOG v1:
+//   - SessionState UDT for US/Asia/EU session detection
+//   - Timeframe navigation: f_get_next_tf, f_get_prev_tf, f_get_lower_tf
+//   - Session parsing: f_sess_part, f_hhmm_to_h, f_hhmm_to_m, f_session_tz
+//   - Symbol activity: f_symbol_activity_1m, f_is_trading_now, f_is_active_symbol
+//   - Status icons: f_status_icon, f_status_icon_from_1m, f_symbol_status_icon
+//   - Utilities: f_tf_ms, f_symbol_base
+//   - v6 fix: added dynamic_requests=true for request.security calls
+//
+library("SessionLib", overlay=false, dynamic_requests=true)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: SESSION STATE UDT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type SessionState — session detection container
+// @field inUS US session active (14:30-22:00 UTC)
+// @field inAsia Asia session active (00:00-07:00 UTC)
+// @field inEU EU session active (07:00-14:30 UTC)
+// @field label Session label string ("US", "Asia", "EU", "Off")
+export type SessionState
+    bool inUS
+    bool inAsia
+    bool inEU
+    string label
+
+// @function Detect RTH session (US/Asia/EU)
+// @returns SessionState with session flags and label
+export f_session_state() =>
+    int h = hour(time, "UTC")
+    int m = minute(time, "UTC")
+    int hm = h * 100 + m
+    bool us = hm >= 1430 and hm < 2200
+    bool asia = hm >= 0 and hm < 700
+    bool eu = hm >= 700 and hm < 1430
+    string lbl = us ? "US" : eu ? "EU" : asia ? "Asia" : "Off"
+    SessionState.new(inUS = us, inAsia = asia, inEU = eu, label = lbl)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: TIMEFRAME UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Convert timeframe to milliseconds
+// @param tf Timeframe string (e.g., "15", "240", "D")
+// @returns Milliseconds as int
+export f_tf_ms(string tf) =>
+    int(timeframe.in_seconds(tf) * 1000)
+
+// @function Gets next higher timeframe(s) from current
+// @param tf Current timeframe string
+// @param steps "1 TF Higher" for next TF, any other value for 2 TFs higher
+// @returns Next timeframe string or na if at maximum
+export f_get_next_tf(string tf, string steps) =>
+    const_timeframes = array.from("15S", "45S", "1", "3", "5", "15", "30", "60", "240", "D", "W", "M")
+    idx = array.indexof(const_timeframes, tf)
+    if idx == -1
+        na
+    else
+        steps == "1 TF Higher" ? array.get(const_timeframes, math.min(idx + 1, array.size(const_timeframes) - 1)) : array.get(const_timeframes, math.min(idx + 2, array.size(const_timeframes) - 1))
+
+// @function Gets previous lower timeframe from current
+// @param tf Current timeframe string
+// @returns Previous timeframe string or na if at minimum
+export f_get_prev_tf(string tf) =>
+    string out = na
+    if tf == "30"
+        out := "5"
+    else if tf == "5"
+        out := "1"
+    else if tf == "3"
+        out := "45S"
+    else if tf == "1"
+        out := "15S"
+    else
+        const_timeframes = array.from("15S", "45S", "1", "3", "5", "15", "30", "60", "240", "D", "W", "M")
+        idx = array.indexof(const_timeframes, tf)
+        out := idx > 0 ? array.get(const_timeframes, idx - 1) : na
+    out
+
+// @function Gets standard lower timeframe mapping
+// @param tf Current timeframe string
+// @returns Lower timeframe string or empty if at minimum
+export f_get_lower_tf(string tf) =>
+    tf == "W" ? "D" :
+     tf == "D" ? "240" :
+     tf == "240" ? "60" :
+     tf == "60" ? "15" :
+     tf == "30" ? "5" :
+     tf == "15" ? "3" :
+     tf == "5" ? "1" :
+     tf == "3" ? "15S" :
+     tf == "1" ? "15S" :
+     ""
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: SESSION PARSING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Extract start or end part from session string
+// @param sess Session string (e.g., "0900-1600")
+// @param want_start true for start, false for end
+// @returns Time part string (HHMM format)
+export f_sess_part(string sess, bool want_start) =>
+    string[] parts = str.split(sess, "-")
+    want_start ? (array.size(parts) >= 1 ? array.get(parts, 0) : "0000") : (array.size(parts) >= 2 ? array.get(parts, 1) : "0000")
+
+// @function Extract hour from HHMM string
+// @param hhmm Time string in HHMM format
+// @returns Hour as int (0-23)
+export f_hhmm_to_h(string hhmm) =>
+    int(str.tonumber(str.substring(hhmm, int(0), int(2))))
+
+// @function Extract minute from HHMM string
+// @param hhmm Time string in HHMM format
+// @returns Minute as int (0-59)
+export f_hhmm_to_m(string hhmm) =>
+    int(str.tonumber(str.substring(hhmm, int(2), int(4))))
+
+// @function Convert session timezone selector to IANA timezone string
+// @param session_tz_sel Session timezone selector
+// @returns IANA timezone string
+export f_session_tz(string session_tz_sel) =>
+    switch session_tz_sel
+        "UTC-12" => "Etc/GMT+12"
+        "UTC-11" => "Etc/GMT+11"
+        "UTC-10" => "Etc/GMT+10"
+        "UTC-9" => "Etc/GMT+9"
+        "UTC-8" => "Etc/GMT+8"
+        "UTC-7" => "Etc/GMT+7"
+        "UTC-6" => "Etc/GMT+6"
+        "UTC-5" => "Etc/GMT+5"
+        "UTC-4" => "Etc/GMT+4"
+        "UTC-3" => "Etc/GMT+3"
+        "UTC-2" => "Etc/GMT+2"
+        "UTC-1" => "Etc/GMT+1"
+        "UTC+0" => "Etc/GMT"
+        "UTC+1" => "Etc/GMT-1"
+        "UTC+2" => "Etc/GMT-2"
+        "UTC+3" => "Etc/GMT-3"
+        "UTC+4" => "Etc/GMT-4"
+        "UTC+5" => "Etc/GMT-5"
+        "UTC+6" => "Etc/GMT-6"
+        "UTC+7" => "Etc/GMT-7"
+        "UTC+8" => "Etc/GMT-8"
+        "UTC+9" => "Etc/GMT-9"
+        "UTC+10" => "Etc/GMT-10"
+        "UTC+11" => "Etc/GMT-11"
+        "UTC+12" => "Etc/GMT-12"
+        => "Etc/GMT"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: SYMBOL ACTIVITY (uses request.security)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Check symbol activity from 1m security data
+// @param s_timeClose_1m 1m bar close time from request.security
+// @param s_inAnySess_1m 1m session status from request.security
+// @param fresh_secs Freshness threshold in seconds
+// @returns [tradingNow, exchangeClosed, sessionOpenButStale]
+export f_symbol_activity_1m(float s_timeClose_1m, bool s_inAnySess_1m, float fresh_secs) =>
+    float nowMs = barstate.isrealtime ? timenow : time_close
+    float ageMs = nowMs - s_timeClose_1m
+    bool fresh = ageMs <= fresh_secs * 1000.0
+    bool tradingNow = s_inAnySess_1m and fresh
+    bool exchangeClosed = not s_inAnySess_1m
+    bool sessionOpenButStale = s_inAnySess_1m and not fresh
+    [tradingNow, exchangeClosed, sessionOpenButStale]
+
+// @function Check if symbol is actively trading
+// @param sym Symbol string
+// @param fresh_secs Freshness threshold in seconds
+// @returns [tradingNow, exchangeClosed, sessionOpenButStale]
+export f_is_trading_now(string sym, float fresh_secs) =>
+    float s_timeClose_1m = request.security(sym, "1", time_close, barmerge.gaps_off, barmerge.lookahead_off)
+    bool s_inAnySess_1m = request.security(sym, "1", session.ismarket or session.ispremarket or session.ispostmarket, barmerge.gaps_off, barmerge.lookahead_off)
+    f_symbol_activity_1m(s_timeClose_1m, s_inAnySess_1m, fresh_secs)
+
+// @function Check if symbol is active (trading now)
+// @param sym Symbol string
+// @param fresh_secs Freshness threshold in seconds
+// @returns true if trading
+export f_is_active_symbol(string sym, float fresh_secs) =>
+    [tradingNow, _, _] = f_is_trading_now(sym, fresh_secs)
+    tradingNow
+
+// @function Get status icon from symbol
+// @param sym Symbol string
+// @param fresh_secs Freshness threshold in seconds
+// @returns Status emoji string
+export f_status_icon(string sym, float fresh_secs) =>
+    [tradingNow, exchangeClosed, sessionOpenButStale] = f_is_trading_now(sym, fresh_secs)
+    tradingNow ? "🟢" : exchangeClosed ? "🔴" : sessionOpenButStale ? "🟠" : "🟠"
+
+// @function Get status icon from boolean flags
+// @param tradingNow Is trading
+// @param exchangeClosed Is exchange closed
+// @param sessionOpenButStale Session open but stale
+// @returns Status emoji string
+export f_symbol_status_icon(bool tradingNow, bool exchangeClosed, bool sessionOpenButStale) =>
+    tradingNow ? "🟢" : exchangeClosed ? "🔴" : sessionOpenButStale ? "🟠" : "🟠"
+
+// @function Get status icon from 1m data
+// @param s_timeClose_1m 1m bar close time
+// @param s_inAnySess_1m 1m session status
+// @param fresh_secs Freshness threshold in seconds
+// @returns Status emoji string
+export f_status_icon_from_1m(float s_timeClose_1m, bool s_inAnySess_1m, float fresh_secs) =>
+    [tradingNow, exchangeClosed, sessionOpenButStale] = f_symbol_activity_1m(s_timeClose_1m, s_inAnySess_1m, fresh_secs)
+    f_symbol_status_icon(tradingNow, exchangeClosed, sessionOpenButStale)
+
+// @function Check if symbol is active (boolean overload)
+// @param tradingNow Trading status boolean
+// @returns Same boolean (passthrough for API consistency)
+export f_is_active_symbol(bool tradingNow) =>
+    tradingNow
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: SYMBOL UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Extract symbol base from ticker (removes USDT suffix)
+// @param ticker_id Ticker ID string (e.g., "BINANCE:BTCUSDT")
+// @returns Base symbol string (e.g., "BTC")
+export f_symbol_base(string ticker_id) =>
+    string base_txt = str.substring(ticker_id, str.pos(ticker_id, ":") + 1)
+    if str.contains(base_txt, "USDT")
+        base_txt := str.replace(base_txt, "USDT", "")
+    base_txt
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

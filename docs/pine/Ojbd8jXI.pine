@@ -1,0 +1,843 @@
+//@version=6
+
+//====================================================
+// FO_Util
+// Utility Library for TradingView Strategies
+//
+// 開発者 : Kabutech Lab
+// サイト : https://kabutech.jp
+//
+// 概要:
+// ・セッション管理
+// ・エントリー制御
+// ・各種フィルター（ADX / DMI / CHOP / 出来高 / ATR）
+// ・ATRベースの利確・損切り
+// ・トレーリングストップ
+// ・制限値幅ガード
+// ・週末/引け決済
+//
+// 本ライブラリはTradingViewストラテジー開発を
+// 効率化するための共通ユーティリティ集です。
+//
+// 詳細/ドキュメント:
+// https://kabutech.jp/lab/product/fo-util
+//====================================================
+
+library("FO_Util", true)
+
+//====================================================
+// ■ SESSION FUNCTIONS（セッション管理）
+//====================================================
+
+/// @function 指定した時間帯に現在時刻が含まれているかを判定します。日付またぎに対応。
+/// @param startHour 開始時刻（時）
+/// @param startMinute 開始時刻（分）
+/// @param endHour 終了時刻（時）
+/// @param endMinute 終了時刻（分）
+/// @returns boolean: セッション内であれば true
+export f_inSession(int startHour, int startMinute, int endHour, int endMinute) =>
+    int _currH = hour(time, syminfo.timezone)
+    int _currM = minute(time, syminfo.timezone)
+    int _currentMinutes = _currH * 60 + _currM
+    int _startMinutes   = startHour * 60 + startMinute
+    int _endMinutes     = endHour * 60 + endMinute
+
+    bool _inSessionNormal =
+         _startMinutes <= _endMinutes and
+         _currentMinutes >= _startMinutes and
+         _currentMinutes < _endMinutes
+
+    bool _inSessionOvernight =
+         _startMinutes > _endMinutes and
+         (_currentMinutes >= _startMinutes or _currentMinutes < _endMinutes)
+
+    _inSessionNormal or _inSessionOvernight
+
+//====================================================
+// ■ PRICE LIMIT CONTROL（制限値幅フィルター）
+//====================================================
+
+/// @function 日本市場の個別株ルールに基づき、基準価格から制限値幅を算出します。
+/// @param basePrice 基準となる価格（前日終値など）
+/// @returns float: 制限値幅（ストップ幅）
+export f_getStopWidth(float basePrice) =>
+    float w = 0.0
+    if basePrice < 100
+        w := 30.0
+    else if basePrice < 200
+        w := 50.0
+    else if basePrice < 500
+        w := 80.0
+    else if basePrice < 700
+        w := 100.0
+    else if basePrice < 1000
+        w := 150.0
+    else if basePrice < 1500
+        w := 300.0
+    else if basePrice < 2000
+        w := 400.0
+    else if basePrice < 3000
+        w := 500.0
+    else if basePrice < 5000
+        w := 700.0
+    else if basePrice < 7000
+        w := 1000.0
+    else if basePrice < 10000
+        w := 1500.0
+    else if basePrice < 15000
+        w := 3000.0
+    else if basePrice < 20000
+        w := 4000.0
+    else
+        w := 5000.0
+    w
+
+/// @function 現在値がストップ高・安付近（制限値幅の境界付近）にいるか判定します。
+/// @param currentPrice 現在の価格
+/// @param prevDayClose 前日終値
+/// @param limitPerc 境界から何％の範囲を「接近」とみなすか（0.5 = 制限幅の0.5%手前）
+/// @returns boolean: 制限値幅付近であれば true
+export f_isNearPriceLimit(float currentPrice, float prevDayClose, float limitPerc = 0.5) =>
+    bool _isNear = false
+    if limitPerc > 0 and not na(prevDayClose)
+        float _stopWidth  = f_getStopWidth(prevDayClose)
+        float _upperLimit = prevDayClose + _stopWidth
+        float _lowerLimit = prevDayClose - _stopWidth
+        float _bufferVal  = _stopWidth * (limitPerc / 100.0)
+        _isNear := currentPrice >= (_upperLimit - _bufferVal) or currentPrice <= (_lowerLimit + _bufferVal)
+    _isNear
+
+//====================================================
+// ■ UTILS（汎用関数）
+//====================================================
+
+/// @function ポジション保有中の最高値・最安値を更新・保持します。
+/// @returns [highestPrice, lowestPrice]
+export f_updatePositionExtremes(bool inLong, bool inShort, float prevHigh, float prevLow, float highestPrev, float lowestPrev) =>
+    float _highest = inLong  ? (na(highestPrev) ? prevHigh : math.max(highestPrev, prevHigh)) : na
+    float _lowest  = inShort ? (na(lowestPrev)  ? prevLow  : math.min(lowestPrev, prevLow))  : na
+    [_highest, _lowest]
+
+/// @function イントラデイにおいて前日のOHLCを取得します。
+/// @returns [prevOpen, prevHigh, prevLow, prevClose]
+export f_getPrevDayOHLC() =>
+    var float _pOpen  = na
+    var float _pHigh  = na
+    var float _pLow   = na
+    var float _pClose = na
+
+    var float _curOpen = na
+    var float _curHigh = na
+    var float _curLow  = na
+
+    // 初期化（確実に現在バー基準で開始）
+    if na(_curOpen)
+        _curOpen := open
+        _curHigh := high
+        _curLow  := low
+
+    if time("D") != time("D")[1]
+        if not na(time[1])
+            _pOpen  := _curOpen
+            _pHigh  := _curHigh
+            _pLow   := _curLow
+            _pClose := close[1]
+
+        _curOpen := open
+        _curHigh := high
+        _curLow  := low
+    else
+        _curHigh := math.max(_curHigh, high)
+        _curLow  := math.min(_curLow, low)
+
+    [_pOpen, _pHigh, _pLow, _pClose]
+
+
+//====================================================
+// ■ EXECUTION BLOCK（発注禁止時間判定）
+//====================================================
+
+// 【JP_STOCK（日本株）】
+// ・11:30～12:30 → 昼休み（発注禁止）
+// ・15:25以降    → 引け前（発注禁止）
+//
+// 【JP_FUT（日経先物）】
+// ・ザラバ時間のみ発注許可
+//   - 日中 : 08:45～15:40
+//   - ナイト : 17:00～翌05:55
+//
+// ・以下は発注禁止:
+//   - ザラバ外（プレ・板寄せ含む）+ バッファ
+//   - 日中引け前   : 15:35～15:45
+//   - ナイト引け前 : 05:50～06:00
+
+/// @function 市場タイプ（株・先物）に応じた発注禁止時間を判定します。
+/// @param marketType "JP_STOCK" または "JP_FUT"
+/// @param prevDayClose 制限値幅判定用の前日終値
+/// @param limitPerc 制限値幅フィルターの感度
+/// @returns boolean: 発注が禁止されるべき時間帯・状態なら true
+export f_isExecutionBlocked(string marketType, float prevDayClose = na, float limitPerc = 0.5) =>
+    int _h = hour(time, syminfo.timezone)
+    int _m = minute(time, syminfo.timezone)
+    int _barSeconds = timeframe.in_seconds(timeframe.period)
+    int _barMinutes = int(_barSeconds / 60)
+    int _t = _h * 60 + _m + _barMinutes
+    
+    // JP STOCK
+    _stockLunch = (_t >= (11*60+30) and _t < (12*60+30))
+    _stockClose = (_t >= (15*60+25))
+    _isNearLimit = f_isNearPriceLimit(close, prevDayClose, limitPerc)
+    _stockBlocked = _stockLunch or _stockClose or _isNearLimit
+
+    // JP FUT
+    _dayStart = 8*60+45
+    _dayEnd   = 15*60+40
+    _nightStart = 17*60
+    _nightEnd   = 5*60+55
+    _inDay = _t >= _dayStart and _t < _dayEnd
+    _inNight = (_t >= _nightStart) or (_t < _nightEnd)
+    _inSession = _inDay or _inNight
+    _dayCloseBlock   = (_t >= (15*60+35) and _t < (15*60+45))
+    _nightCloseBlock = (_t >= (5*60+50)  and _t < (6*60))
+    _futBlocked = not _inSession or _dayCloseBlock or _nightCloseBlock
+
+    marketType == "JP_STOCK" ? _stockBlocked : marketType == "JP_FUT" ? _futBlocked : false
+
+//====================================================
+// ■ ENTRY TIME CONTROL（エントリー制御）
+//====================================================
+
+/// @function セッション制御と発注禁止判定を統合したエントリー許可判定。
+export f_allowEntry(
+     bool   useSessionFilter,
+     int    startHour,
+     int    startMinute,
+     int    endHour,
+     int    endMinute,
+     string marketType   = "JP_STOCK",
+     int    fromDate = 0,
+     int    toDate = 0,
+     float  limitPerc    = 5
+ ) =>
+    // 内製関数から前日データを取得
+    [_, _, _, _prevDayClose] = f_getPrevDayOHLC()
+    bool _inSession    = f_inSession(startHour, startMinute, endHour, endMinute)
+    bool _allowSession = not useSessionFilter or (not timeframe.isintraday or _inSession)
+    bool _notBlocked =
+     not timeframe.isintraday or // 日足以上は時刻制限なし
+     not f_isExecutionBlocked(marketType, _prevDayClose, limitPerc)
+    
+    // バックテスト期間
+    bool _inBacktestPeriod =
+     fromDate == 0 and toDate == 0 ? true :
+     time >= (fromDate == 0 ? timestamp("1970-01-01") : fromDate) and
+     time <= (toDate == 0 ? timestamp("2099-12-31 23:59") : toDate)
+
+    _allowSession and _notBlocked and _inBacktestPeriod
+
+//====================================================
+// ■ DAILY DATA ARRAY （日足配列）
+//====================================================
+
+/// @function 5分足などのイントラデイチャートにおいて、日足のOHLCを配列で管理・更新します。
+/// @param length 保持する日足の最大日数
+/// @returns [float[] highs, float[] lows, float[] closes, bool isNewDay]
+export f_dailyArray(int length = 20) =>
+    var float[] _hArr = array.new_float(0)
+    var float[] _lArr = array.new_float(0)
+    var float[] _cArr = array.new_float(0)
+    
+    // 日付変更の検知
+    bool _isNewDay = ta.change(time("D")) != 0
+
+    if _isNewDay
+        // 前日の確定値を配列の先頭に追加（[0]が昨日、[1]が一昨日...）
+        array.unshift(_hArr, high[1])
+        array.unshift(_lArr, low[1])
+        array.unshift(_cArr, close[1])
+        
+        // メモリ節約のため古いデータを削除
+        if array.size(_hArr) > length
+            array.pop(_hArr)
+            array.pop(_lArr)
+            array.pop(_cArr)
+            
+    [_hArr, _lArr, _cArr, _isNewDay]
+
+//====================================================
+// ■ CHOPPINESS
+//====================================================
+
+/// @function 任意の高値・安値・終値配列からチョピネス・インデックスを算出します。
+/// @param hArr 高値配列
+/// @param lArr 安値配列
+/// @param cArr 終値配列
+/// @param length 計算期間
+/// @returns float: チョピネス・インデックス (0-100)
+export f_calcChopFromArrays(float[] hArr, float[] lArr, float[] cArr, int length = 14) =>
+    float _chop = na
+    // ATR計算のために length + 1 個のデータが必要（前日終値との比較があるため）
+    if array.size(hArr) >= length + 1
+        float _sumTR = 0.0
+        float _maxH = -1.0e10
+        float _minL = 1.0e10
+        
+        for i = 0 to length - 1
+            float _h = array.get(hArr, i)
+            float _l = array.get(lArr, i)
+            float _prevC = array.get(cArr, i + 1)
+            
+            // True Range (TR) の算出
+            float _tr = math.max(_h - _l, math.max(math.abs(_h - _prevC), math.abs(_l - _prevC)))
+            _sumTR := _sumTR + _tr
+            
+            // 期間内の最高値・最安値の更新
+            _maxH := math.max(_maxH, _h)
+            _minL := math.min(_minL, _l)
+            
+        float _range = _maxH - _minL
+        if _range > 0
+            _chop := 100 * math.log10(_sumTR / _range) / math.log10(length)
+    _chop
+
+//====================================================
+// ■ FILTER FUNCTIONS（フィルター）
+//====================================================
+
+/// @function 出来高の移動平均比率に基づくフィルター。
+/// @param length 平均計算期間（0 の場合はフィルター無効）
+/// @param ratioMin 出来高比率の下限（0なら下限なし）
+/// @param ratioMax 出来高比率の上限（0なら上限なし）
+/// @param lookback 遡るバー数（期間内に1回でも条件を満たせばtrue）
+/// @returns bool
+export f_volumeFilter(
+     int length,
+     float ratioMin = 0,
+     float ratioMax = 0,
+     int lookback = 1) =>
+
+    int _safeLen = math.max(length, 1)
+
+    float _ma = ta.sma(volume, _safeLen)
+    float _ratio = _ma > 0 ? volume / _ma : 0
+
+    bool _minOk = ratioMin == 0 or _ratio >= ratioMin
+    bool _maxOk = ratioMax == 0 or _ratio <= ratioMax
+    bool _cond = _minOk and _maxOk
+
+    int _safeLookback = math.max(lookback, 1)
+    float _historyHit = ta.highest(_cond ? 1.0 : 0.0, _safeLookback)
+
+    length == 0 or _historyHit > 0
+
+/// @function ATRに対するローソク足レンジ比率のフィルター。
+/// @param _high 高値
+/// @param _low 安値
+/// @param _atr ATR値
+/// @param atrRatioMin ATR比率の下限（0なら下限なし）
+/// @param atrRatioMax ATR比率の上限（0なら上限なし）
+/// @returns bool
+export f_atrRangeFilter(
+     float _high,
+     float _low,
+     float _atr,
+     float atrRatioMin = 0,
+     float atrRatioMax = 0) =>
+
+    float _safeAtr = math.max(_atr, syminfo.mintick)
+    float _rangeRatio = (_high - _low) / _safeAtr
+
+    bool _minOk = atrRatioMin == 0 or _rangeRatio >= atrRatioMin
+    bool _maxOk = atrRatioMax == 0 or _rangeRatio <= atrRatioMax
+
+    (atrRatioMin == 0 and atrRatioMax == 0) or (_minOk and _maxOk)
+
+
+/// @function ローソク足のヒゲ割合が指定値を超えているか判定します。
+export f_wickCondition(float _open, float _close, float _high, float _low, float _ratio, int _wickSide) =>
+    float _range      = math.max(_high - _low, syminfo.mintick)
+    float _upperWick  = _high - math.max(_open, _close)
+    float _lowerWick  = math.min(_open, _close) - _low
+    float _upperRatio = _upperWick / _range
+    float _lowerRatio = _lowerWick / _range
+    _wickSide == 1 ? _upperRatio > _ratio : _wickSide == -1 ? _lowerRatio > _ratio : false
+
+/// @function 指定期間内にヒゲ条件を満たした足があるか判定します
+/// @param lookback 遡るバーの数（1 なら現在の足のみ）
+export f_wickFilter(float ratio, int side, int lookback = 1) =>
+    bool _cond = f_wickCondition(open, close, high, low, ratio, side)
+    float _historyHit = ta.highest(_cond ? 1.0 : 0.0, lookback)
+
+    ratio == 0 or _historyHit > 0
+
+//====================================================
+// ■ MTF/MA FILTER
+//====================================================
+/// @function 日足終値ベースのMAフィルターを算出し、ロング・ショートの許可を返します
+/// @param length MA期間（0でフィルター無効）
+/// @returns [allowLong, allowShort, maValue]
+export f_dailyMAFilter(int length = 25) =>
+    bool allowLong = true
+    bool allowShort = true
+    float maValue = na
+    int arrLen = math.max(length + 1, 2)
+    
+    [hArr, lArr, cArr, _] = f_dailyArray(arrLen)
+
+    if length > 0 and array.size(cArr) >= length
+        float sum = 0.0
+
+        for i = 0 to length - 1
+            sum += array.get(cArr, i)
+
+        maValue := sum / length
+
+        float latestClose = array.get(cArr, 0)
+
+        allowLong  := latestClose > maValue
+        allowShort := latestClose < maValue
+
+    [allowLong, allowShort, maValue]
+
+//====================================================
+// ■ DMI/ADX FILTER
+//====================================================
+
+/// @function DMIとADXのフィルター判定を一括処理します。
+/// @param diLen 計算期間（0 の場合はDMI・ADXの両方を完全にパス）
+/// @param useDmi DMI方向フィルターを使うか
+/// @param adxThreshMin ADX下限値（0なら下限なし）
+/// @param adxThreshMax ADX上限値（0なら上限なし）
+/// @returns [dmiLong, dmiShort, adxOK]
+export f_dmiAdxFilter(
+     int diLen = 14,
+     bool useDmi = true,
+     float adxThreshMin = 25,
+     float adxThreshMax = 0) =>
+
+    // 初期値はすべてパス
+    bool longTrend  = true
+    bool shortTrend = true
+    bool adxOK      = true
+
+    if diLen > 0
+        [plusDI, minusDI, adxVal] = ta.dmi(diLen, diLen)
+
+        // DMI方向フィルター
+        if useDmi
+            longTrend  := plusDI > minusDI
+            shortTrend := minusDI > plusDI
+
+        // ADXフィルター
+        bool minOk = adxThreshMin == 0 or adxVal >= adxThreshMin
+        bool maxOk = adxThreshMax == 0 or adxVal <= adxThreshMax
+
+        adxOK := minOk and maxOk
+
+    [longTrend, shortTrend, adxOK]
+
+//====================================================
+// ■ SLOPE FILTER（汎用傾きフィルター）
+//====================================================
+
+/// @function 指標の傾きを計算し、トレンド状態を返します。
+/// @param src 傾きを計算する対象（MAやVWAPなど）
+/// @param length 計算期間（0 の場合はフィルター無効）
+/// @param threshold トレンド判定の閾値
+/// @param normBase 正規化の基準値（ATRなど）
+/// @returns [slope, slopeNormalized, isRange, trendUp, trendDown]
+export f_slopeFilter(float src, int length, float threshold, float normBase) =>
+    if length == 0
+        // 0（無効）の時は、一切計算せずにスルーパスの値を返す
+        [0.0, 0.0, true, true, true]
+    else
+        // 1以上の時は安全に通常の計算を行う
+        float slope           = (src - nz(src[length])) / length
+        float safeNorm        = math.max(normBase, syminfo.mintick)
+        float slopeNormalized = math.abs(slope) / safeNorm
+        
+        bool isRange   = slopeNormalized < threshold
+        bool trendUp   = slope > 0 and not isRange
+        bool trendDown = slope < 0 and not isRange
+        
+        [slope, slopeNormalized, isRange, trendUp, trendDown]
+
+//====================================================
+// ■ CHOPPINESS FILTER（チョピネス・フィルター）
+//====================================================
+
+/// @function 内部で日足配列を取得し、チョピネス指標に基づき稼働可否を判定します。
+/// @param length チョピネスの計算期間（0 の場合はフィルター無効）
+/// @param threshMin 許可する最小チョピネス値（0なら下限なし）
+/// @param threshMax 許可する最大チョピネス値（0なら上限なし）
+/// @returns [chopVal, allowTrade]
+export f_chopFilter(
+     int length = 14,
+     float threshMin = 0,
+     float threshMax = 61.8) =>
+    // 日足配列の取得
+    int _arrayLen = length > 0 ? length + 1 : 2
+    [hArr, lArr, cArr, _] = f_dailyArray(_arrayLen)
+    float _chopVal = na
+    bool _allowTrade = true
+    if length > 0
+        _chopVal := f_calcChopFromArrays(hArr, lArr, cArr, length)
+        if not na(_chopVal)
+            bool _minOk = threshMin == 0 or _chopVal >= threshMin
+            bool _maxOk = threshMax == 0 or _chopVal <= threshMax
+            _allowTrade := _minOk and _maxOk
+    [_chopVal, _allowTrade]
+
+//====================================================
+// ■ EXIT LOGIC（出口設計）
+//====================================================
+
+/// @function ATRベースのトレーリングストップ価格を算出します。
+f_calcATRTrailStop(float avgPrice, float highestPrev, float lowestPrev, float atrPrev, float trailAtrMult, float atrLimitMult, float atrStopMult, bool inLong, bool inShort) =>
+    float safeATR = math.max(atrPrev, syminfo.mintick)
+    bool  useTrail = trailAtrMult > 0
+    float trailRange = safeATR * trailAtrMult
+    float longTrigger  = avgPrice + safeATR * atrLimitMult
+    float shortTrigger = avgPrice - safeATR * atrLimitMult
+    bool  longActivate  = useTrail and inLong  and not na(highestPrev) and highestPrev >= longTrigger
+    bool  shortActivate = useTrail and inShort and not na(lowestPrev)  and lowestPrev  <= shortTrigger
+    float longInitial  = avgPrice - safeATR * atrStopMult
+    float shortInitial = avgPrice + safeATR * atrStopMult
+    float longStop  = longActivate  ? math.max(longInitial, highestPrev - trailRange) : longInitial
+    float shortStop = shortActivate ? math.min(shortInitial, lowestPrev + trailRange) : shortInitial
+    [longStop, shortStop]
+
+// ■ extremes更新
+// [hNext, lNext] = f_updatePositionExtremes(inLong, inShort, prevHigh, prevLow, highestPrev, lowestPrev)
+// ポジ無し時はシグナル足終値で仮計算
+// ■ トレーリング
+// [lTrail, sTrail] = f_calcATRTrailStop(avgPrice, hNext, lNext, atr, trailAtrMult, atrLimitMult, atrStopMult, inLong, inShort)
+
+// bool useTrail = trailAtrMult > 0
+// float longStop  = useTrail ? lTrail : lStopF
+// float shortStop = useTrail ? sTrail : sStopF
+// float longLimit  = useTrail ? na : lTP
+// float shortLimit = useTrail ? na : sTP
+
+/// @function ATRベースの固定損切り・利確価格を算出します。
+/// @returns [longStop, shortStop, longLimit, shortLimit]
+export f_calcATRExitLevels(float avgPrice, float atr, float atrStopMult, float atrLimitMult) =>
+    float longStop = avgPrice - atr * atrStopMult
+    float shortStop = avgPrice + atr * atrStopMult
+    float longLimit   = avgPrice + atr * atrLimitMult
+    float shortLimit   = avgPrice - atr * atrLimitMult
+    [longStop, shortStop, longLimit, shortLimit]
+
+/// @function
+/// ATRベースの損切り・利確に加えて、リスク制御（最大損切り）と
+/// 市場構造制限（ストップ高安付近の価格帯制限）を統合した最終決済価格を算出します。
+///
+/// @details
+/// 本関数は以下の3階層でストップ・利確を構築します：
+///
+/// ① ATRベースロジック
+/// 　- ボラティリティ（ATR）を基準とした動的な損切り・利確
+///
+/// ② 最大損切り制御（maxStopPerc）
+/// 　- エントリー価格（basePrice）基準で最大損失幅を制限
+/// 　- 急変動・想定外ギャップに対する保険的ストップ
+///
+/// ③ 価格制限ガード（priceLimitGuardPerc）
+/// 　- 前日レンジ（ストップ高安相当）を基準とした価格帯制限
+/// 　- 極端な価格帯での約定・利確/損切りを抑制
+///
+/// @note
+/// ・avgPrice が na または 0 の場合は close を代替基準とします
+/// ・本関数は毎バー評価前提（strategy.exit 更新用途）
+/// ・優先順位は ATR → maxStop → priceLimitGuard の順で適用されます
+///
+/// @returns
+/// [longStop, shortStop, longLimit, shortLimit]
+export f_calcATRExit(float avgPrice, float atr,  float atrStopMult, float atrLimitMult, float maxStopPerc = 2.0, float priceLimitGuardPerc = 2.0) =>
+    float basePrice = na(avgPrice) or avgPrice == 0 ? close : avgPrice
+    // ■ 固定TP/SL
+    [longStop, shortStop, longLimit, shortLimit] = f_calcATRExitLevels(basePrice, atr, atrStopMult, atrLimitMult)
+    // %ベース最大損切り
+    if maxStopPerc > 0
+        float hardLongStop  = basePrice * (1.0 - maxStopPerc / 100.0)
+        float hardShortStop = basePrice * (1.0 + maxStopPerc / 100.0)
+        longStop  := math.max(longStop, hardLongStop)
+        shortStop := math.min(shortStop, hardShortStop)
+    
+    // ■ 制限値幅ガード：ストップ幅の手前に強制クランプ
+    [_, _, _, pC] = f_getPrevDayOHLC()
+    float _pdc = pC
+    if not na(_pdc) and priceLimitGuardPerc > 0
+        float _w   = f_getStopWidth(_pdc)
+        float _buf = _w * (priceLimitGuardPerc / 100.0)
+        float _up = _pdc + _w - _buf
+        float _dn = _pdc - _w + _buf
+
+        if not na(longLimit)
+            longLimit := math.min(longLimit, _up)
+
+        if not na(shortLimit)
+            shortLimit := math.max(shortLimit, _dn)
+
+        if longStop >= _up
+            longStop := _up
+
+        if shortStop <= _dn
+            shortStop := _dn
+
+    [longStop, shortStop, longLimit, shortLimit]
+
+/// @function
+/// ATRベースのトレーリングストップ決済価格を算出します。
+///
+/// @details
+/// ① ATR初期ストップ
+/// ② 含み益到達後ATRトレーリングへ切替
+/// ③ 最大損切り制御
+/// ④ 価格制限ガード
+///
+/// @returns
+/// [longStop, shortStop]
+export f_calcATRTrailExit(
+    float avgPrice,
+    float highestPrev,
+    float lowestPrev,
+    float prevLongStop,
+    float prevShortStop,
+    float atr,
+    float trailAtrMult,
+    float atrLimitMult,
+    float atrStopMult,
+    bool inLong,
+    bool inShort,
+    float maxStopPerc = 2.0,
+    float priceLimitGuardPerc = 2.0
+) =>
+
+    float basePrice = na(avgPrice) or avgPrice == 0 ? close : avgPrice
+    // ■ ATRトレーリング計算
+    [longStopCalc, shortStopCalc] =
+         f_calcATRTrailStop(
+             basePrice,
+             highestPrev,
+             lowestPrev,
+             atr,
+             trailAtrMult,
+             atrLimitMult,
+             atrStopMult,
+             inLong,
+             inShort
+         )
+
+    float longStop  = longStopCalc
+    float shortStop = shortStopCalc
+
+    // ■ ラチェット
+    if inLong and not na(prevLongStop)
+        longStop := math.max(longStop, prevLongStop)
+
+    if inShort and not na(prevShortStop)
+        shortStop := math.min(shortStop, prevShortStop)
+
+    // ■ 最大損切り制御
+    if maxStopPerc > 0
+        float hardLongStop =
+             basePrice * (1.0 - maxStopPerc / 100)
+
+        float hardShortStop =
+             basePrice * (1.0 + maxStopPerc / 100)
+
+        longStop :=
+             math.max(longStop, hardLongStop)
+
+        shortStop :=
+             math.min(shortStop, hardShortStop)
+
+    // ■ 制限値幅ガード
+    [_, _, _, pC] = f_getPrevDayOHLC()
+
+    if not na(pC) and priceLimitGuardPerc > 0
+        float width =
+             f_getStopWidth(pC)
+
+        float buf =
+             width * priceLimitGuardPerc / 100
+
+        float upper =
+             pC + width - buf
+
+        float lower =
+             pC - width + buf
+
+        if longStop >= upper
+            longStop := upper
+
+        if shortStop <= lower
+            shortStop := lower
+
+    [longStop, shortStop]
+
+//====================================================
+// ■ EXECUTION（実行制御）
+//====================================================
+
+/// @function ストラテジーのエントリーを実行します（ドテン対応）。
+export f_executeEntry(bool longSignal, bool shortSignal, string longId = "LONG", string shortId = "SHORT") =>
+    if longSignal and strategy.position_size <= 0
+        if strategy.position_size < 0
+            strategy.close(shortId, comment="ドテン決済 CLOSE_SHORT")
+        strategy.entry(longId, strategy.long)
+    if shortSignal and strategy.position_size >= 0
+        if strategy.position_size > 0
+            strategy.close(longId, comment="ドテン決済 CLOSE_LONG")
+        strategy.entry(shortId, strategy.short)
+        
+/// @function 逆指値エントリーを配置します
+export f_placeStopEntry(
+     bool allowEntry,
+     bool longSignal,
+     bool shortSignal,
+     float longStopPrice,
+     float shortStopPrice,
+     string longId = "LONG",
+     string shortId = "SHORT"
+     ) =>
+
+    if not allowEntry
+        strategy.cancel(longId)
+        strategy.cancel(shortId)
+    else
+        if longSignal
+            strategy.entry(
+                 longId,
+                 strategy.long,
+                 stop = longStopPrice
+            )
+
+        if shortSignal
+            strategy.entry(
+                 shortId,
+                 strategy.short,
+                 stop = shortStopPrice
+            )
+
+/// @function 特定の時刻が引け間際であるかを判定します。
+export f_isPreClose(int closeHour, int closeMinute) =>
+    int _barSec = timeframe.in_seconds(timeframe.period)
+    int _preTime = timestamp(year(time), month(time), dayofmonth(time), closeHour, closeMinute, 0)
+    bool _isClose = (time >= _preTime - (_barSec * 1000) and time < _preTime) or (hour(time) == closeHour and minute(time) >= closeMinute)
+    timeframe.isintraday and _isClose
+
+/// @function 指定時間でポジションを決済します
+export f_executeSessionClose(
+     bool useSessionClose,
+     int closeHour,
+     int closeMinute) =>
+
+    bool isClose = false
+
+    if useSessionClose
+        isClose := f_isPreClose(closeHour, closeMinute)
+
+    if strategy.position_size != 0 and isClose
+        if strategy.position_size > 0
+            strategy.close(
+                 "LONG",
+                 comment="引け決済(L) CLOSE_LONG"
+             )
+
+        if strategy.position_size < 0
+            strategy.close(
+                 "SHORT",
+                 comment="引け決済(S) CLOSE_SHORT"
+             )
+
+    isClose
+
+/// @function 週末クローズを実行します
+export f_executeWeekendClose(
+     string marketType = "JP_FUT",
+     bool useWeekendClose = true) =>
+
+    bool isClose = false
+    string closeMsg = "週末強制決済"
+
+    if useWeekendClose
+        if marketType == "JP_STOCK"
+            isClose :=
+                 dayofweek(time) == dayofweek.friday and
+                 f_isPreClose(15,0)
+
+        if marketType == "JP_FUT"
+            isClose :=
+                 dayofweek(time) == dayofweek.saturday and
+                 f_isPreClose(5,0)
+
+    if strategy.position_size != 0 and isClose
+        if strategy.position_size > 0
+            strategy.close(
+                 "LONG",
+                 comment=closeMsg+"(L) CLOSE_LONG"
+             )
+
+        if strategy.position_size < 0
+            strategy.close(
+                 "SHORT",
+                 comment=closeMsg+"(S) CLOSE_SHORT"
+             )
+
+    isClose
+
+/// @function 週末決済後のエントリー禁止判定を返します。
+/// @param marketType 市場タイプ ("JP_STOCK" / "JP_FUT")
+/// @param allowStopEntry trueの場合、逆指値エントリー用に最終バーのみブロックを解除します。
+export f_isWeekendCloseBlock(
+     string marketType = "JP_FUT",
+     bool allowStopEntry = false,
+     int fromDate = 0,
+     int toDate = 0) =>
+
+    bool blocked = false
+
+    // バックテスト期間
+    bool inBacktestPeriod =
+         fromDate == 0 and toDate == 0 ? true :
+         time >= (fromDate == 0 ? timestamp("1970-01-01") : fromDate) and
+         time <= (toDate == 0 ? timestamp("2099-12-31 23:59") : toDate)
+
+    int d = dayofweek(time, syminfo.timezone)
+    int h = hour(time, syminfo.timezone)
+    int m = minute(time, syminfo.timezone)
+
+    if marketType == "JP_STOCK"
+
+        // 金曜引け後～月曜寄付前
+        blocked :=
+             (d == dayofweek.friday and h >= 15) or
+             d == dayofweek.saturday or
+             d == dayofweek.sunday
+
+        // 逆指値エントリー時は最終バーで翌営業日分の注文を配置できるよう解除
+        if allowStopEntry and inBacktestPeriod and timeframe.isintraday
+            int tf = timeframe.multiplier
+            int lastMinute = 30 - (tf % 60)
+
+            if d == dayofweek.friday and h == 15 and m == lastMinute
+                blocked := false
+
+    if marketType == "JP_FUT"
+
+        // 土曜5:00決済後～日曜
+        blocked :=
+             (d == dayofweek.saturday and (h > 5 or (h == 5 and m >= 0))) or
+             d == dayofweek.sunday
+
+        // 逆指値エントリー時は最終バーで翌営業日分の注文を配置できるよう解除
+        if allowStopEntry and inBacktestPeriod and timeframe.isintraday
+            int tf = timeframe.multiplier
+            int lastMinute = 60 - tf
+
+            if d == dayofweek.saturday and h == 5 and m == lastMinute
+                blocked := false
+
+    blocked

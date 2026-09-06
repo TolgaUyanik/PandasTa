@@ -1,0 +1,312 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © RAC97
+
+//@version=6
+indicator("Ribbon Concordance [RC Tools]", shorttitle="RCT Ribbon Conc", overlay=false, precision=2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ABOUT
+// ─────────────────────────────────────────────────────────────────────────────
+// Measures trend conviction by RANK CONCORDANCE across a ribbon of moving
+// averages, rather than by averaging the ribbon or measuring path efficiency
+// (see the Regime Classifier for that approach). A cleanly stacked ribbon
+// (every shorter MA above every longer one, or vice versa) scores near
+// +/-100. A tangled, crossed ribbon scores near 0.
+//
+// Built from Kendall's tau (rank concordance) — a public, decades-old
+// statistical measure of agreement between two rankings — implemented
+// independently here. Not derived from, or related in code to, any other
+// author's published script.
+//
+// The concordance score and its band classification update ONLY on
+// confirmed bar close, so nothing there repaints. The MA ribbon itself
+// plots live, same as any moving average on any chart — that is normal,
+// expected behaviour, not repainting.
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Ribbon ─────────────────────────────────────────────────────────────────────
+float  source     = input.source(close, "Source", group="Ribbon")
+string maType     = input.string("EMA", "MA Type", group="Ribbon", options=["SMA", "EMA", "WMA", "RMA", "HMA", "DEMA", "TEMA"])
+int    baseLen    = input.int(5, "Base Period", minval=1, group="Ribbon",
+     tooltip="Period of the shortest MA in the ribbon.")
+int    spacing    = input.int(5, "Period Spacing", minval=1, group="Ribbon",
+     tooltip="Each successive MA in the ribbon adds this many bars to its period.")
+int    ribbonSize = input.int(8, "Ribbon Size (MAs)", minval=3, maxval=10, group="Ribbon",
+     tooltip="How many moving averages make up the ribbon. More = smoother concordance read, but more lag from the longest MA.")
+
+// ── Post-Smoothing ────────────────────────────────────────────────────────────
+int postSmoothLen = input.int(3, "Score Smoothing Length", minval=1, group="Post-Smoothing",
+     tooltip="EMA smoothing applied to the raw concordance score, which is otherwise a somewhat steppy pairwise count. Set to 1 for no smoothing.")
+
+// ── Bands ──────────────────────────────────────────────────────────────────────
+float strongThresh = input.float(60.0, "Strong Threshold", minval=1.0, maxval=99.0, group="Bands",
+     tooltip="Concordance above this (or below its negative) = Strong Bullish/Bearish. Between 0 and this = Weak.")
+
+// ── Base-Rate Statistics ──────────────────────────────────────────────────────
+int    fwdBars   = input.int(20, "Forward Return Window (bars)", minval=1, group="Base-Rate Statistics")
+bool   showTable = input.bool(true, "Show Stats Table", group="Base-Rate Statistics")
+string tablePos  = input.string("Top Right", "Table Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Base-Rate Statistics")
+
+// ── Ribbon Display ─────────────────────────────────────────────────────────────
+bool  showRibbon      = input.bool(true, "Show MA Ribbon on Chart", group="Ribbon Display",
+     tooltip="Toggle off to remove the ribbon overlay and keep only the concordance score pane.")
+color ribbonShortColor = input.color(color.aqua,   "Ribbon Colour — Short End", group="Ribbon Display")
+color ribbonLongColor  = input.color(color.purple, "Ribbon Colour — Long End",  group="Ribbon Display")
+
+// ── Colours ────────────────────────────────────────────────────────────────────
+color colStrongBull = input.color(color.new(color.lime,   60), "Strong Bullish", group="Colours")
+color colWeakBull   = input.color(color.new(color.lime,   85), "Weak Bullish",   group="Colours")
+color colWeakBear   = input.color(color.new(color.red,    85), "Weak Bearish",   group="Colours")
+color colStrongBear = input.color(color.new(color.red,    60), "Strong Bearish", group="Colours")
+bool  paintMainChart = input.bool(true, "Paint Main Chart Background", group="Colours",
+     tooltip="Uses force_overlay so the band background shows on the price chart even though the score lives in its own pane.")
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MOVING AVERAGE HELPER
+// ─────────────────────────────────────────────────────────────────────────────
+f_ma(series float src, simple int len, simple string kind) =>
+    switch kind
+        "SMA" => ta.sma(src, len)
+        "EMA" => ta.ema(src, len)
+        "WMA" => ta.wma(src, len)
+        "RMA" => ta.rma(src, len)
+        "HMA" => ta.hma(src, len)
+        "DEMA" =>
+            float e1 = ta.ema(src, len)
+            float e2 = ta.ema(e1, len)
+            2.0 * e1 - e2
+        "TEMA" =>
+            float e1 = ta.ema(src, len)
+            float e2 = ta.ema(e1, len)
+            float e3 = ta.ema(e2, len)
+            3.0 * (e1 - e2) + e3
+        => ta.sma(src, len)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RIBBON CONSTRUCTION
+// ─────────────────────────────────────────────────────────────────────────────
+int maxRibbon = 10
+
+// NOTE: periods must stay "simple int" for ta.sma/ta.ema/etc. to accept them,
+// but a for-loop's counter is always "series int" in Pine, even when the
+// loop bounds are simple. So each period is computed from literal multipliers
+// (unrolled) rather than from a loop variable — same reason ChartPrime's
+// original code manually unrolled its 34-slot array instead of looping.
+int len0 = baseLen + 0 * spacing
+int len1 = baseLen + 1 * spacing
+int len2 = baseLen + 2 * spacing
+int len3 = baseLen + 3 * spacing
+int len4 = baseLen + 4 * spacing
+int len5 = baseLen + 5 * spacing
+int len6 = baseLen + 6 * spacing
+int len7 = baseLen + 7 * spacing
+int len8 = baseLen + 8 * spacing
+int len9 = baseLen + 9 * spacing
+
+var float[] maVals = array.new_float(maxRibbon, na)
+array.set(maVals, 0, 0 < ribbonSize ? f_ma(source, len0, maType) : na)
+array.set(maVals, 1, 1 < ribbonSize ? f_ma(source, len1, maType) : na)
+array.set(maVals, 2, 2 < ribbonSize ? f_ma(source, len2, maType) : na)
+array.set(maVals, 3, 3 < ribbonSize ? f_ma(source, len3, maType) : na)
+array.set(maVals, 4, 4 < ribbonSize ? f_ma(source, len4, maType) : na)
+array.set(maVals, 5, 5 < ribbonSize ? f_ma(source, len5, maType) : na)
+array.set(maVals, 6, 6 < ribbonSize ? f_ma(source, len6, maType) : na)
+array.set(maVals, 7, 7 < ribbonSize ? f_ma(source, len7, maType) : na)
+array.set(maVals, 8, 8 < ribbonSize ? f_ma(source, len8, maType) : na)
+array.set(maVals, 9, 9 < ribbonSize ? f_ma(source, len9, maType) : na)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RANK CONCORDANCE SCORE
+// For every pair (i, j) with i shorter-period than j: +1 if MA[i] > MA[j]
+// (bullish-consistent ordering), -1 if reversed, 0 if tied. Sum and
+// normalise to -100..+100 by the number of pairs actually compared.
+// ─────────────────────────────────────────────────────────────────────────────
+float concSum   = 0.0
+int   pairCount = 0
+for i = 0 to ribbonSize - 2
+    for j = i + 1 to ribbonSize - 1
+        float vi = array.get(maVals, i)
+        float vj = array.get(maVals, j)
+        if not na(vi) and not na(vj)
+            concSum += vi > vj ? 1.0 : (vi < vj ? -1.0 : 0.0)
+            pairCount += 1
+
+float rawConcordance = pairCount > 0 ? (concSum / pairCount) * 100.0 : na
+
+// ── Post-smoothing ────────────────────────────────────────────────────────────
+float smoothedConcordance = postSmoothLen > 1 ? ta.ema(rawConcordance, postSmoothLen) : rawConcordance
+
+// ── Enough history? ────────────────────────────────────────────────────────────
+int  longestPeriod = baseLen + (ribbonSize - 1) * spacing
+bool warmedUp      = bar_index >= longestPeriod and not na(smoothedConcordance)
+
+// ── Confirmed-close-only display (non-repainting) ─────────────────────────────
+var float dispConcordance = na
+if barstate.isconfirmed
+    dispConcordance := warmedUp ? smoothedConcordance : na
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BANDS
+// Band codes: 0 = Strong Bullish, 1 = Weak Bullish, 2 = Weak Bearish,
+//             3 = Strong Bearish, 4 = Warming up / no data
+// ─────────────────────────────────────────────────────────────────────────────
+bandOf(v) =>
+    na(v) ? 4 :
+     v >=  strongThresh ? 0 :
+     v >=  0.0          ? 1 :
+     v > -strongThresh  ? 2 : 3
+
+bandName(b) =>
+    b == 0 ? "Strong Bullish" :
+     b == 1 ? "Weak Bullish" :
+     b == 2 ? "Weak Bearish" :
+     b == 3 ? "Strong Bearish" : "Warming up…"
+
+bandColor(b) =>
+    b == 0 ? colStrongBull :
+     b == 1 ? colWeakBull :
+     b == 2 ? colWeakBear :
+     b == 3 ? colStrongBear : na
+
+int currentBand = bandOf(dispConcordance)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BAND STREAK
+// ─────────────────────────────────────────────────────────────────────────────
+var int lastBand = na
+var int streak   = 0
+if barstate.isconfirmed
+    if currentBand == lastBand
+        streak := streak + 1
+    else
+        streak := 1
+        lastBand := currentBand
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORICAL BASE RATES
+// Forward N-bar return, attributed back to whichever band was active N bars
+// ago — same approach as the Regime Classifier's base-rate table.
+// ─────────────────────────────────────────────────────────────────────────────
+var float[] sumRet = array.new_float(4, 0.0)
+var int[]   cnt    = array.new_int(4, 0)
+var int[]   winCnt = array.new_int(4, 0)
+
+if barstate.isconfirmed and bar_index >= fwdBars
+    int idxBand = currentBand[fwdBars]
+    if idxBand <= 3
+        float fwdRet = close / close[fwdBars] - 1
+        array.set(sumRet, idxBand, array.get(sumRet, idxBand) + fwdRet)
+        array.set(cnt,    idxBand, array.get(cnt, idxBand) + 1)
+        if fwdRet > 0
+            array.set(winCnt, idxBand, array.get(winCnt, idxBand) + 1)
+
+avgRet(idx) =>
+    int n = array.get(cnt, idx)
+    n > 0 ? array.get(sumRet, idx) / n * 100 : na
+
+winRate(idx) =>
+    int n = array.get(cnt, idx)
+    n > 0 ? array.get(winCnt, idx) / n * 100 : na
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RIBBON PLOTS — live-updating MAs, forced onto the main chart
+// ─────────────────────────────────────────────────────────────────────────────
+gradCol(i) => showRibbon and i < ribbonSize ? color.from_gradient(i, 0, maxRibbon - 1, ribbonShortColor, ribbonLongColor) : na
+
+plot(array.get(maVals, 0), "MA 1",  gradCol(0), 1, force_overlay=true)
+plot(array.get(maVals, 1), "MA 2",  gradCol(1), 1, force_overlay=true)
+plot(array.get(maVals, 2), "MA 3",  gradCol(2), 1, force_overlay=true)
+plot(array.get(maVals, 3), "MA 4",  gradCol(3), 1, force_overlay=true)
+plot(array.get(maVals, 4), "MA 5",  gradCol(4), 1, force_overlay=true)
+plot(array.get(maVals, 5), "MA 6",  gradCol(5), 1, force_overlay=true)
+plot(array.get(maVals, 6), "MA 7",  gradCol(6), 1, force_overlay=true)
+plot(array.get(maVals, 7), "MA 8",  gradCol(7), 1, force_overlay=true)
+plot(array.get(maVals, 8), "MA 9",  gradCol(8), 1, force_overlay=true)
+plot(array.get(maVals, 9), "MA 10", gradCol(9), 1, force_overlay=true)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCORE PLOT & BACKGROUND
+// ─────────────────────────────────────────────────────────────────────────────
+plot(dispConcordance, "Concordance", color=color.new(color.yellow, 0), linewidth=2)
+hline(0,             "Zero",              color=color.gray, linestyle=hline.style_solid)
+hline(strongThresh,  "Strong Threshold",  color=colStrongBull, linestyle=hline.style_dashed)
+hline(-strongThresh, "Strong Threshold -", color=colStrongBear, linestyle=hline.style_dashed)
+
+bgcolor(warmedUp ? bandColor(currentBand) : na, title="Band Background (pane)")
+bgcolor(paintMainChart and warmedUp ? bandColor(currentBand) : na, force_overlay=true, title="Band Background (main chart)")
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATS TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+getPosition(p) =>
+    p == "Top Left"     ? position.top_left :
+     p == "Bottom Right" ? position.bottom_right :
+     p == "Bottom Left"  ? position.bottom_left : position.top_right
+
+fmt(v) => na(v) ? "—" : str.tostring(v, "#.##")
+
+if showTable and barstate.islast
+    var table t = table.new(getPosition(tablePos), 3, 7,
+         bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray,
+         frame_color=color.gray, frame_width=1)
+
+    table.cell(t, 0, 0, "Ribbon Concordance", text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 0))
+    table.cell(t, 1, 0, "", bgcolor=color.new(color.black, 0))
+    table.cell(t, 2, 0, "", bgcolor=color.new(color.black, 0))
+
+    table.cell(t, 0, 1, "Current", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, warmedUp ? bandName(currentBand) : "Warming up…", text_color=warmedUp ? bandColor(currentBand) : color.gray, text_size=size.small)
+    table.cell(t, 2, 1, warmedUp ? str.tostring(streak) + " bars" : "", text_color=color.gray, text_size=size.small)
+
+    table.cell(t, 0, 2, "Band", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 2, "Avg Fwd " + str.tostring(fwdBars) + "-bar %", text_color=color.gray, text_size=size.small)
+    table.cell(t, 2, 2, "Win Rate %", text_color=color.gray, text_size=size.small)
+
+    table.cell(t, 0, 3, "Strong Bullish", text_color=colStrongBull, text_size=size.small)
+    table.cell(t, 1, 3, na(avgRet(0)) ? "—" : str.tostring(avgRet(0), "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 3, na(winRate(0)) ? "—" : str.tostring(winRate(0), "#.#"), text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 4, "Weak Bullish", text_color=colWeakBull, text_size=size.small)
+    table.cell(t, 1, 4, na(avgRet(1)) ? "—" : str.tostring(avgRet(1), "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 4, na(winRate(1)) ? "—" : str.tostring(winRate(1), "#.#"), text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 5, "Weak Bearish", text_color=colWeakBear, text_size=size.small)
+    table.cell(t, 1, 5, na(avgRet(2)) ? "—" : str.tostring(avgRet(2), "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 5, na(winRate(2)) ? "—" : str.tostring(winRate(2), "#.#"), text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 6, "Strong Bearish", text_color=colStrongBear, text_size=size.small)
+    table.cell(t, 1, 6, na(avgRet(3)) ? "—" : str.tostring(avgRet(3), "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 6, na(winRate(3)) ? "—" : str.tostring(winRate(3), "#.#"), text_color=color.white, text_size=size.small)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIMITATIONS (see published description for the full-length version)
+// ─────────────────────────────────────────────────────────────────────────────
+// - This is a ribbon of moving averages — inherently lagging by construction.
+//   It confirms alignment after price has already moved, same as any MA-based
+//   tool. Not removable without curve-fitting.
+// - Near-zero readings are common in choppy, range-bound conditions and do
+//   NOT predict a breakout direction — they only describe the ribbon's
+//   current state of (dis)agreement.
+// - Ribbon size is a real trade-off: more MAs smooth the read but add lag
+//   from the longest included MA. Fewer MAs react faster but are noisier.
+// - The concordance score and band update on confirmed bar close only. The
+//   ribbon MA lines themselves plot live, like any moving average — that is
+//   normal behaviour, not repainting.
+// - Historical base-rate stats need a meaningful sample count (check N in
+//   the table) before being trusted, especially for less common bands.
+// ─────────────────────────────────────────────────────────────────────────────

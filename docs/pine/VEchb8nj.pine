@@ -1,0 +1,375 @@
+// ═══════════════════════════════════════════════════════════════
+// 📦 Lib_Signals - Signal Engine Library
+// Pine Script v6 Library
+// ═══════════════════════════════════════════════════════════════
+// This library includes:
+//   • MACD Signal Engine (fully parametric with UDT)
+//   • Pivot Signal Detection (Instant + Bar Close)
+//   • Signal Blockers (Source/Price/Zone/Line %)
+//   • Hybrid Tick Detection (counter + 0→1)
+//   • BlockPass Combiner (AND / OR mode)
+//
+// ⚠️ v6 LIMITATIONS:
+//   • varip latches are held in the main script
+//   • input.* cannot be used → receives parameters from main script
+//   • ta.crossover/ta.crossunder are usable ✓
+//   • Can be called inside request.security() ✓
+//
+// 📌 USAGE:
+//   import YourTradingViewName/Lib_Sw_Signals/1 as sig
+//   sig.MACDConfig mcfg = sig.MACDConfig.new('EMA', 12, 26, 9, 'EMA', ...)
+// ═══════════════════════════════════════════════════════════════
+
+//@version=6
+library('Lib_Sw_Signals', overlay = true)
+
+// ═══════════════════════════════════════════════════════════════
+// 📐 USER-DEFINED TYPES
+// ═══════════════════════════════════════════════════════════════
+
+// ── MACD Engine Configuration ──
+export type MACDConfig
+    string oscType       // 'SMA' or 'EMA'
+    int    fast          // Fast period
+    int    slow          // Slow period
+    int    sig           // Signal period
+    string sigType       // 'SMA' or 'EMA'
+    float  l1            // Level 1
+    float  l2            // Level 2
+    float  l3            // Level 3
+    float  l4            // Level 4
+    float  l5            // Level 5
+
+// ── MACD Trigger Flags (for one direction) ──
+// 22 booleans: which MACD event triggers a signal
+export type MACDTrigFlags
+    bool crossUP         // MACD-Signal Cross Up
+    bool crossDN         // MACD-Signal Cross Down
+    bool ml1U            // MACD > Level1 crossover
+    bool ml1D            // MACD < Level1 crossunder
+    bool ml2U            // MACD > Level2 crossover
+    bool ml2D            // MACD < Level2 crossunder
+    bool ml3U            // MACD > Level3 crossover
+    bool ml3D            // MACD < Level3 crossunder
+    bool ml4U            // MACD > Level4 crossover
+    bool ml4D            // MACD < Level4 crossunder
+    bool ml5U            // MACD > Level5 crossover
+    bool ml5D            // MACD < Level5 crossunder
+    bool sl1U            // Signal > Level1 crossover
+    bool sl1D            // Signal < Level1 crossunder
+    bool sl2U            // Signal > Level2 crossover
+    bool sl2D            // Signal < Level2 crossunder
+    bool sl3U            // Signal > Level3 crossover
+    bool sl3D            // Signal < Level3 crossunder
+    bool sl4U            // Signal > Level4 crossover
+    bool sl4D            // Signal < Level4 crossunder
+    bool sl5U            // Signal > Level5 crossover
+    bool sl5D            // Signal < Level5 crossunder
+
+// ── Signal Source Structure ──
+// Represents one of the 7 signal slots
+export type SignalSlot
+    bool  use            // Is source active
+    float src            // Source value (input.source)
+    float srcPrice       // Price source at entry (optional)
+
+// ── Blocker Structure ──
+export type BlockerConfig
+    bool   enable        // Blocker active
+    float  src           // Source value
+    float  level         // Block level (for source based)
+    string rule          // 'Altında Engelle' (Block Below) or 'Üstünde Engelle' (Block Above)
+
+// ── Line Blocker Structure ──
+export type LineBlockerConfig
+    bool   enable
+    float  src           // Line level
+    float  pctAbove      // Above % threshold
+    float  pctBelow      // Below % threshold
+    string modeAbove     // 'Eşik İçi' (Inside Threshold) or 'Eşik Dışı' (Outside Threshold)
+    string modeBelow     // 'Eşik İçi' (Inside Threshold) or 'Eşik Dışı' (Outside Threshold)
+
+// ── Zone Blocker Structure ──
+export type ZoneBlocker
+    bool  enable
+    float src            // 0/1 source
+
+// ═══════════════════════════════════════════════════════════════
+// 📡 PIVOT SIGNAL FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Instant (Touch): Did price touch pivot level (including wick)
+// @param sysEn Pivot system active
+// @param lvlEn This level active
+// @param active This pivot active (reactivated)
+// @param inPos Already entered from this pivot
+// @param pVal Pivot price value
+// @param isLong Is Long direction
+// @returns Pivot triggered
+export checkPivotCross_Anlik(bool sysEn, bool lvlEn, bool active, bool inPos, float pVal) =>
+    bool touched = not na(pVal) and low <= pVal and high >= pVal
+    sysEn and lvlEn and active and not inPos and touched
+
+// Bar Close (Crossover/Crossunder): Trigger based on close
+// @returns Pivot triggered
+export checkPivotCross_MumKapanisi(bool sysEn, bool lvlEn, bool active, bool inPos, float pVal, bool isLong) =>
+    bool xUp = ta.crossover(close, pVal)
+    bool xDn = ta.crossunder(close, pVal)
+    sysEn and lvlEn and active and not inPos and not na(pVal) and (isLong ? xUp : xDn)
+
+// Pivot Reactivation: Reactivate when price crosses back below/above pivot
+// @returns Should reactivate
+export checkPivotReactivate(bool sysEn, float pVal, bool isLong) =>
+    sysEn and not na(pVal) and (isLong ? low < pVal : high > pVal)
+
+// Check pivot signal based on Mode (Instant vs Bar Close)
+// @param mode 'Anlık' (Instant) or 'Mum Kapanışı' (Bar Close)
+// @returns Pivot triggered
+export checkPivotCross(string mode, bool sysEn, bool lvlEn, bool active, bool inPos, float pVal, bool isLong) =>
+    bool resAnlik = checkPivotCross_Anlik(sysEn, lvlEn, active, inPos, pVal)
+    bool resMum = checkPivotCross_MumKapanisi(sysEn, lvlEn, active, inPos, pVal, isLong)
+    mode == 'Anlık' or mode == 'Instant' ? resAnlik : resMum
+
+// ═══════════════════════════════════════════════════════════════
+// 🔧 MACD SIGNAL ENGINE
+// ═══════════════════════════════════════════════════════════════
+
+// Custom EMA supporting series length
+f_ema_series(float src, int len) =>
+    float alpha = 2.0 / (len + 1)
+    float sum = 0.0
+    sum := na(sum[1]) ? src : alpha * src + (1.0 - alpha) * nz(sum[1], src)
+    sum
+
+// MACD calculation and signal generation (called inside request.security)
+// @param cfg MACD configuration
+// @param flagsL Long trigger flags
+// @param flagsS Short trigger flags
+// @returns [triggerLong, triggerShort]
+export f_calcMACD(MACDConfig cfg, MACDTrigFlags flagsL, MACDTrigFlags flagsS) =>
+    // Fast Line
+    float fast_sma = ta.sma(close, cfg.fast)
+    float fast_ema = f_ema_series(close, cfg.fast)
+    float _fast = cfg.oscType == 'SMA' ? fast_sma : fast_ema
+
+    // Slow Line
+    float slow_sma = ta.sma(close, cfg.slow)
+    float slow_ema = f_ema_series(close, cfg.slow)
+    float _slow = cfg.oscType == 'SMA' ? slow_sma : slow_ema
+
+    float _macd = _fast - _slow
+
+    // Signal Line
+    float sig_sma = ta.sma(_macd, cfg.sig)
+    float sig_ema = f_ema_series(_macd, cfg.sig)
+    float _sig = cfg.sigType == 'SMA' ? sig_sma : sig_ema
+
+    // MACD-Signal crossover/crossunder
+    bool _crossUP = ta.crossover(_macd, _sig)
+    bool _crossDN = ta.crossunder(_macd, _sig)
+
+    // MACD vs Level crossovers
+    bool _ml1L = ta.crossover(_macd, cfg.l1)
+    bool _ml1S = ta.crossunder(_macd, cfg.l1)
+    bool _ml2L = ta.crossover(_macd, cfg.l2)
+    bool _ml2S = ta.crossunder(_macd, cfg.l2)
+    bool _ml3L = ta.crossover(_macd, cfg.l3)
+    bool _ml3S = ta.crossunder(_macd, cfg.l3)
+    bool _ml4L = ta.crossover(_macd, cfg.l4)
+    bool _ml4S = ta.crossunder(_macd, cfg.l4)
+    bool _ml5L = ta.crossover(_macd, cfg.l5)
+    bool _ml5S = ta.crossunder(_macd, cfg.l5)
+
+    // Signal vs Level crossovers
+    bool _sl1L = ta.crossover(_sig, cfg.l1)
+    bool _sl1S = ta.crossunder(_sig, cfg.l1)
+    bool _sl2L = ta.crossover(_sig, cfg.l2)
+    bool _sl2S = ta.crossunder(_sig, cfg.l2)
+    bool _sl3L = ta.crossover(_sig, cfg.l3)
+    bool _sl3S = ta.crossunder(_sig, cfg.l3)
+    bool _sl4L = ta.crossover(_sig, cfg.l4)
+    bool _sl4S = ta.crossunder(_sig, cfg.l4)
+    bool _sl5L = ta.crossover(_sig, cfg.l5)
+    bool _sl5S = ta.crossunder(_sig, cfg.l5)
+
+    // Long trigger: Any of the selected flag events
+    bool _trigL = (flagsL.crossUP and _crossUP) or (flagsL.crossDN and _crossDN)
+     or (flagsL.ml1U and _ml1L) or (flagsL.ml1D and _ml1S)
+     or (flagsL.ml2U and _ml2L) or (flagsL.ml2D and _ml2S)
+     or (flagsL.ml3U and _ml3L) or (flagsL.ml3D and _ml3S)
+     or (flagsL.ml4U and _ml4L) or (flagsL.ml4D and _ml4S)
+     or (flagsL.ml5U and _ml5L) or (flagsL.ml5D and _ml5S)
+     or (flagsL.sl1U and _sl1L) or (flagsL.sl1D and _sl1S)
+     or (flagsL.sl2U and _sl2L) or (flagsL.sl2D and _sl2S)
+     or (flagsL.sl3U and _sl3L) or (flagsL.sl3D and _sl3S)
+     or (flagsL.sl4U and _sl4L) or (flagsL.sl4D and _sl4S)
+     or (flagsL.sl5U and _sl5L) or (flagsL.sl5D and _sl5S)
+
+    // Short trigger: Any of the selected flag events
+    bool _trigS = (flagsS.crossDN and _crossDN) or (flagsS.crossUP and _crossUP)
+     or (flagsS.ml1D and _ml1S) or (flagsS.ml1U and _ml1L)
+     or (flagsS.ml2D and _ml2S) or (flagsS.ml2U and _ml2L)
+     or (flagsS.ml3D and _ml3S) or (flagsS.ml3U and _ml3L)
+     or (flagsS.ml4D and _ml4S) or (flagsS.ml4U and _ml4L)
+     or (flagsS.ml5D and _ml5S) or (flagsS.ml5U and _ml5L)
+     or (flagsS.sl1D and _sl1S) or (flagsS.sl1U and _sl1L)
+     or (flagsS.sl2D and _sl2S) or (flagsS.sl2U and _sl2L)
+     or (flagsS.sl3D and _sl3S) or (flagsS.sl3U and _sl3L)
+     or (flagsS.sl4D and _sl4S) or (flagsS.sl4U and _sl4L)
+     or (flagsS.sl5D and _sl5S) or (flagsS.sl5U and _sl5L)
+
+    [_trigL, _trigS]
+
+// ═══════════════════════════════════════════════════════════════
+// 🚦 SIGNAL BLOCKER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Source based blocker
+// @param enabled Filter active
+// @param src Source value
+// @param lvl Comparison level
+// @param rule 'Altında Engelle' (Block Below) or 'Üstünde Engelle' (Block Above)
+// @returns true = signal allowed
+export allowSignal(bool enabled, float src, float lvl, string rule) =>
+    if not enabled or na(src)
+        true
+    else
+        bool block = rule == 'Altında Engelle' or rule == 'Block Below' ? src < lvl : src > lvl
+        not block
+
+// Price based blocker (close vs dynamic line)
+// @returns true = signal allowed
+export allowPriceSignal(bool enabled, float line, string rule) =>
+    if not enabled or na(line)
+        true
+    else
+        bool block = rule == 'Altında Engelle' or rule == 'Block Below' ? close < line : close > line
+        not block
+
+// Zone based blocker (0/1 value from SWDestekDirenc)
+// @param zoneSrc >= 0.5 means zone is active (entry allowed)
+// @returns true = signal allowed
+export allowZoneSignal(bool enabled, float zoneSrc) =>
+    if not enabled
+        true
+    else if na(zoneSrc)
+        true
+    else
+        zoneSrc >= 0.5
+
+// Line based dual range control (pivot point logic)
+// @param enabled Filter active
+// @param lineLevel Line price level
+// @param pctAbove Above % threshold
+// @param pctBelow Below % threshold
+// @param modeAbove 'Eşik İçi' (Inside) or 'Eşik Dışı' (Outside)
+// @param modeBelow 'Eşik İçi' (Inside) or 'Eşik Dışı' (Outside)
+// @returns true = signal allowed
+export allowLineRangeDual(bool enabled, float lineLevel, float pctAbove, float pctBelow, string modeAbove, string modeBelow) =>
+    bool filterPassive = not enabled or na(lineLevel) or (pctAbove == 0.0 and pctBelow == 0.0)
+
+    float safeLine = nz(lineLevel, close)
+    float upperBound = safeLine * (1 + pctAbove / 100)
+    float lowerBound = safeLine * (1 - pctBelow / 100)
+
+    bool inCombinedRange = close >= lowerBound and close <= upperBound
+
+    bool aboveInside = modeAbove == 'Eşik İçi' or modeAbove == 'Inside'
+    bool belowInside = modeBelow == 'Eşik İçi' or modeBelow == 'Inside'
+    bool aboveOutside = modeAbove == 'Eşik Dışı' or modeAbove == 'Outside'
+    bool belowOutside = modeBelow == 'Eşik Dışı' or modeBelow == 'Outside'
+    bool sameMode = (aboveInside and belowInside) or (aboveOutside and belowOutside)
+
+    filterPassive ? true :
+     sameMode ?
+      (aboveInside ? inCombinedRange : not inCombinedRange) :
+      (aboveOutside or belowOutside ? not inCombinedRange : inCombinedRange)
+
+// Multi blocker combiner (AND / OR mode)
+// @param mode 'AND' or 'OR'
+// @param e1 Blocker 1 enabled
+// @param p1 Blocker 1 passed
+// @param e2 Blocker 2 enabled
+// @param p2 Blocker 2 passed
+// @param e3 Blocker 3 enabled
+// @param p3 Blocker 3 passed
+// @param eZ Zone enabled
+// @param pZ Zone passed
+// @returns true = signal allowed
+export blockPass(string mode, bool e1, bool p1, bool e2, bool p2, bool e3, bool p3, bool eZ, bool pZ) =>
+    if mode == 'AND'
+        (not e1 or p1) and (not e2 or p2) and (not e3 or p3) and (not eZ or pZ)
+    else
+        (e1 or e2 or e3 or eZ) ?
+         ((e1 and p1) or (e2 and p2) or (e3 and p3) or (eZ and pZ)) : true
+
+// ═══════════════════════════════════════════════════════════════
+// 🎯 SIGNAL DETECTION HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+// Instant signal control (for Force Exit - position protection)
+// @param use Source active
+// @param src Source value (0 = no signal)
+// @returns true = signal exists
+export checkSignalInstant(bool use, float src) =>
+    use and src != 0
+
+// Hybrid tick detection (counter increase OR 0->1 transition)
+// @param use Source active
+// @param currentVal Current source value
+// @param lastVal Last recorded value (held with varip)
+// @param prevBarVal Previous bar value (src[1])
+// @returns true = new signal tick detected
+export detectTick(bool use, float currentVal, float lastVal, float prevBarVal) =>
+    use and (math.round(currentVal) > lastVal or (currentVal != 0 and (prevBarVal == 0 or na(prevBarVal))))
+
+// Combine zone filters with OR logic
+// @param enableArray bool array: Active states
+// @param passArray bool array: Pass results
+// @returns true = all filters passed (or none active)
+export zoneOrCombine(array<bool> enableArray, array<bool> passArray) =>
+    bool anyActive = false
+    bool anyPass = false
+
+    int sz = array.size(enableArray)
+    for i = 0 to sz - 1
+        if array.get(enableArray, i)
+            anyActive := true
+            if array.get(passArray, i)
+                anyPass := true
+
+    not anyActive or anyPass
+
+// PP Zone block control (Zone between PP-R1 and PP-S1)
+// @param blockEnable Block active
+// @param blockMode 'Long', 'Short', 'Her İkisi' (Both)
+// @param inZone Is in zone (src >= 0.5)
+// @param checkSide 'Long' or 'Short' - checked direction
+// @returns true = signal BLOCKED
+export ppZoneBlock(bool blockEnable, string blockMode, bool inZone, string checkSide) =>
+    blockEnable and (blockMode == checkSide or blockMode == 'Her İkisi' or blockMode == 'Both') and inZone
+
+// ═══════════════════════════════════════════════════════════════
+// 🔄 SIGNAL AGGREGATION
+// ═══════════════════════════════════════════════════════════════
+
+// Is any Long signal source active?
+// @param signals array<bool>: 7 signal slots + pivot + MACD latch results
+// @returns true = at least one signal active
+export anySignalActive(array<bool> signals) =>
+    bool result = false
+    for i = 0 to array.size(signals) - 1
+        if array.get(signals, i)
+            result := true
+            break
+    result
+
+// Apply all filters and generate final trigger
+// @param rawTrigger Raw signal (before filters)
+// @param blockPassResult BlockPass result
+// @param zoneCombined Zone OR combination
+// @param pivotDistPass Pivot distance filter
+// @param ppZoneBlocked PP zone blocked
+// @returns true = signal valid (all filters passed)
+export finalTrigger(bool rawTrigger, bool blockPassResult, bool zoneCombined, bool pivotDistPass, bool ppZoneBlocked) =>
+    rawTrigger and blockPassResult and zoneCombined and pivotDistPass and not ppZoneBlocked

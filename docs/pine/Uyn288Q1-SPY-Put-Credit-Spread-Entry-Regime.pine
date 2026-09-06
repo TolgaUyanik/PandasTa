@@ -1,0 +1,163 @@
+//@version=6
+indicator("SPY Put Credit Spread Entry Regime", shorttitle="SPY PCS Regime", overlay=true, max_labels_count=500)
+
+//=============================================================================
+// DAILY TREND REGIME
+//=============================================================================
+
+groupTrend = "Daily Trend Regime"
+sma20Length = input.int(20, "Fast SMA length", minval=1, group=groupTrend)
+sma50Length = input.int(50, "Intermediate SMA length", minval=2, group=groupTrend)
+sma200Length = input.int(200, "Long SMA length", minval=3, group=groupTrend)
+slopeLookback = input.int(5, "50-SMA slope lookback (completed sessions)", minval=1, group=groupTrend)
+
+//=============================================================================
+// 9:35 OPENING FILTER
+//=============================================================================
+
+groupOpening = "9:35 Opening Filter"
+signalTimezone = input.string("America/New_York", "Signal timezone", group=groupOpening)
+rthSession = input.session("0930-1600", "Regular trading session", group=groupOpening)
+maximumGapDown = input.float(-0.75, "Minimum allowed opening gap %", minval=-10.0, maxval=0.0, step=0.05, group=groupOpening, tooltip="A value of -0.75 blocks an entry when SPY opens more than 0.75% below the previous close.")
+requireVwap = input.bool(true, "Require first 5-minute close above RTH VWAP", group=groupOpening)
+requirePriorLow = input.bool(true, "Require opening price at or above previous-day low", group=groupOpening)
+requireGap = input.bool(true, "Apply opening-gap filter", group=groupOpening)
+
+//=============================================================================
+// DISPLAY
+//=============================================================================
+
+groupDisplay = "Display"
+showDailyAverages = input.bool(true, "Plot completed daily SMAs", group=groupDisplay)
+showRthVwap = input.bool(true, "Plot regular-session VWAP", group=groupDisplay)
+showPreviousLow = input.bool(true, "Plot previous-day low", group=groupDisplay)
+showBackground = input.bool(true, "Color background by daily regime", group=groupDisplay)
+backgroundTransparency = input.int(90, "Background transparency", minval=0, maxval=100, group=groupDisplay)
+showEntryLabels = input.bool(true, "Show 9:35 entry-status labels", group=groupDisplay)
+showStatusPanel = input.bool(true, "Show status panel", group=groupDisplay)
+
+//=============================================================================
+// COMPLETED DAILY DATA
+//=============================================================================
+
+[dailyClose, previousDayLow, dailySma20, dailySma50, dailySma200, dailySma50Past, priorDailyClose, priorDailySma20, priorDailySma50, priorDailySma200, priorDailySma50Past] = request.security(syminfo.tickerid, "D", [close[1], low[1], ta.sma(close, sma20Length)[1], ta.sma(close, sma50Length)[1], ta.sma(close, sma200Length)[1], ta.sma(close, sma50Length)[slopeLookback + 1], close[2], ta.sma(close, sma20Length)[2], ta.sma(close, sma50Length)[2], ta.sma(close, sma200Length)[2], ta.sma(close, sma50Length)[slopeLookback + 2]], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+//=============================================================================
+// REGIMES
+//=============================================================================
+
+fiftyRising = dailySma50 > dailySma50Past
+baseEligible = dailyClose > dailySma50 and dailySma50 > dailySma200 and fiftyRising
+greenRegime = baseEligible and dailyClose > dailySma20 and dailySma20 > dailySma50
+cautionRegime = baseEligible and not greenRegime
+severeRiskOffRegime = dailyClose < dailySma200
+riskOffRegime = not baseEligible and not severeRiskOffRegime
+
+priorFiftyRising = priorDailySma50 > priorDailySma50Past
+priorBaseEligible = priorDailyClose > priorDailySma50 and priorDailySma50 > priorDailySma200 and priorFiftyRising
+priorGreenRegime = priorBaseEligible and priorDailyClose > priorDailySma20 and priorDailySma20 > priorDailySma50
+priorSevereRiskOffRegime = priorDailyClose < priorDailySma200
+priorRiskOffRegime = not priorBaseEligible and not priorSevereRiskOffRegime
+
+//=============================================================================
+// SESSION AND 9:35 ENTRY LOGIC
+//=============================================================================
+
+isFiveMinuteChart = timeframe.isminutes and timeframe.multiplier == 5
+inRegularSession = not na(time(timeframe.period, rthSession, signalTimezone))
+isRthOpeningBar = inRegularSession and hour(time, signalTimezone) == 9 and minute(time, signalTimezone) == 30
+is935Close = inRegularSession and hour(time_close, signalTimezone) == 9 and minute(time_close, signalTimezone) == 35
+evaluateEntry = isFiveMinuteChart and is935Close and barstate.isconfirmed
+
+var float cumulativePriceVolume = na
+var float cumulativeVolume = na
+var float rthOpen = na
+
+if isRthOpeningBar
+    cumulativePriceVolume := hlc3 * volume
+    cumulativeVolume := volume
+    rthOpen := open
+else if inRegularSession
+    cumulativePriceVolume := nz(cumulativePriceVolume) + hlc3 * volume
+    cumulativeVolume := nz(cumulativeVolume) + volume
+
+rthVwap = cumulativeVolume > 0 ? cumulativePriceVolume / cumulativeVolume : na
+openingGapPercent = dailyClose != 0 and not na(rthOpen) ? (rthOpen - dailyClose) / dailyClose * 100.0 : na
+
+vwapPass = not requireVwap or close > rthVwap
+priorLowPass = not requirePriorLow or rthOpen >= previousDayLow
+gapPass = not requireGap or openingGapPercent >= maximumGapDown
+openingFilterPass = vwapPass and priorLowPass and gapPass
+
+greenEntry = evaluateEntry and greenRegime and openingFilterPass
+cautionEntry = evaluateEntry and cautionRegime and openingFilterPass
+entryBlocked = evaluateEntry and not greenEntry and not cautionEntry
+
+riskOffBegan = evaluateEntry and riskOffRegime and not priorRiskOffRegime
+greenRecovery = evaluateEntry and greenRegime and not priorGreenRegime
+severeRiskOffBegan = evaluateEntry and severeRiskOffRegime and not priorSevereRiskOffRegime
+
+//=============================================================================
+// NAMES, COLORS, AND DIAGNOSTICS
+//=============================================================================
+
+regimeName = severeRiskOffRegime ? "SEVERE RISK-OFF" : riskOffRegime ? "RISK-OFF" : cautionRegime ? "CAUTION" : "GREEN"
+regimeColor = severeRiskOffRegime ? color.rgb(110, 0, 0) : riskOffRegime ? color.red : cautionRegime ? color.orange : color.lime
+
+blockedReason = severeRiskOffRegime ? "BLOCKED: Close below 200-SMA" : riskOffRegime ? "BLOCKED: Daily trend is risk-off" : not gapPass ? "BLOCKED: Opening gap below limit" : not priorLowPass ? "BLOCKED: Open below previous-day low" : not vwapPass ? "BLOCKED: First 5-minute close below VWAP" : "BLOCKED"
+
+//=============================================================================
+// LABELS AND PLOTS
+//=============================================================================
+
+if showEntryLabels and evaluateEntry
+    if greenEntry
+        label.new(bar_index, high, "GREEN ENTRY\nAuthorize 3 contracts", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+    else if cautionEntry
+        label.new(bar_index, high, "CAUTION ENTRY\nAuthorize 1 contract", style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+    else
+        label.new(bar_index, high, blockedReason, style=label.style_label_down, color=regimeColor, textcolor=color.white, size=size.small)
+
+plot(showDailyAverages ? dailySma20 : na, "Completed Daily 20-SMA", color=color.aqua, linewidth=1)
+plot(showDailyAverages ? dailySma50 : na, "Completed Daily 50-SMA", color=color.blue, linewidth=2)
+plot(showDailyAverages ? dailySma200 : na, "Completed Daily 200-SMA", color=color.purple, linewidth=2)
+plot(showRthVwap and inRegularSession ? rthVwap : na, "RTH VWAP", color=color.yellow, linewidth=2)
+plot(showPreviousLow ? previousDayLow : na, "Previous-Day Low", color=color.gray, linewidth=1, style=plot.style_stepline)
+
+bgcolor(showBackground ? color.new(regimeColor, backgroundTransparency) : na, title="Daily Regime Background")
+
+plotshape(greenEntry, title="Green Entry Marker", text="G", style=shape.triangleup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(cautionEntry, title="Caution Entry Marker", text="C", style=shape.triangleup, location=location.belowbar, color=color.orange, textcolor=color.white, size=size.small)
+plotshape(entryBlocked, title="Blocked Entry Marker", text="X", style=shape.xcross, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
+
+//=============================================================================
+// STATUS PANEL
+//=============================================================================
+
+var table statusPanel = table.new(position.top_right, 2, 7, border_width=1)
+
+if barstate.islast and showStatusPanel
+    table.cell(statusPanel, 0, 0, "SPY PCS", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 0, isFiveMinuteChart ? "5-minute" : "USE 5-MIN", bgcolor=isFiveMinuteChart ? color.black : color.red, text_color=color.white)
+    table.cell(statusPanel, 0, 1, "Regime", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 1, regimeName, bgcolor=regimeColor, text_color=color.white)
+    table.cell(statusPanel, 0, 2, "50-SMA slope", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 2, fiftyRising ? "Rising" : "Flat/Falling", bgcolor=fiftyRising ? color.green : color.red, text_color=color.white)
+    table.cell(statusPanel, 0, 3, "Opening gap", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 3, str.tostring(openingGapPercent, "#.##") + "%", bgcolor=gapPass ? color.green : color.red, text_color=color.white)
+    table.cell(statusPanel, 0, 4, "Prior-day low", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 4, priorLowPass ? "Pass" : "Blocked", bgcolor=priorLowPass ? color.green : color.red, text_color=color.white)
+    table.cell(statusPanel, 0, 5, "RTH VWAP", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 5, vwapPass ? "Pass" : "Blocked", bgcolor=vwapPass ? color.green : color.red, text_color=color.white)
+    table.cell(statusPanel, 0, 6, "9:35 action", bgcolor=color.black, text_color=color.white)
+    table.cell(statusPanel, 1, 6, greenEntry ? "3 CONTRACTS" : cautionEntry ? "1 CONTRACT" : entryBlocked ? "BLOCKED" : "WAITING", bgcolor=greenEntry ? color.green : cautionEntry ? color.orange : entryBlocked ? color.red : color.gray, text_color=color.white)
+
+if barstate.islast and not showStatusPanel
+    table.clear(statusPanel, 0, 0, 1, 6)
+
+//=============================================================================
+// ALERTS
+//=============================================================================
+
+alertcondition(greenEntry, title="SELL PCS - Full", message="SELL PCS - Full")
+alertcondition(cautionEntry, title="SELL PCS - Cautious", message="SELL PCS - Cautious")

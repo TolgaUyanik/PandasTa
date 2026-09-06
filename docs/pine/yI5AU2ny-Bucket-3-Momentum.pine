@@ -1,0 +1,240 @@
+
+//@version=6
+strategy("Bucket 3 Momentum — ASX [Agent 3]",
+     shorttitle              = "B3M-ASX",
+     overlay                 = true,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.fixed,
+     currency                = currency.AUD,
+     calc_on_every_tick      = false,
+     process_orders_on_close = true)
+
+// ══════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpW        = "Weekly Gate"
+wRsiMin     = input.int(50,  "Min Weekly RSI",           minval=1,   maxval=100, group=grpW)
+
+grpD        = "Daily Structure"
+smaFlatBars = input.int(10,  "50DMA flat-check bars",    minval=1,   maxval=50,  group=grpD)
+
+grpT        = "Trigger"
+scoreMin    = input.int(4,   "Min setup score (of 7)",   minval=1,   maxval=7,   group=grpT)
+antiChaseM  = input.float(1.5,"Anti-chase ATR multiple", minval=0.5, maxval=5.0, group=grpT)
+rsiSigLen   = input.int(5,   "RSI signal line length",   minval=2,   maxval=20,  group=grpT)
+pullbackLB  = input.int(10,  "Swing-low lookback (bars)",minval=3,   maxval=30,  group=grpT)
+
+grpLiq      = "Liquidity"
+liqFloor    = input.float(1500000, "Min avg daily $ turnover (AUD)", minval=0, group=grpLiq)
+
+grpRisk     = "Risk"
+riskPct     = input.float(1.5, "Risk per trade (%)",     minval=0.1, maxval=10.0, group=grpRisk)
+atrBuf      = input.float(0.1, "Stop ATR buffer",        minval=0.0, maxval=2.0,  group=grpRisk)
+trailMul    = input.float(1.5, "Trailing ATR multiple",  minval=0.5, maxval=5.0,  group=grpRisk)
+
+grpMA       = "Moving Averages"
+showEma10   = input.bool(true,  "Show EMA 10",  group=grpMA)
+showEma20   = input.bool(true,  "Show EMA 20",  group=grpMA)
+showSma50   = input.bool(true,  "Show SMA 50",  group=grpMA)
+showSma100  = input.bool(true,  "Show SMA 100", group=grpMA)
+showSma150  = input.bool(true,  "Show SMA 150", group=grpMA)
+showSma200  = input.bool(true,  "Show SMA 200", group=grpMA)
+
+// ══════════════════════════════════════════════════════════════════
+// MOVING AVERAGES
+// ══════════════════════════════════════════════════════════════════
+ema10  = ta.ema(close, 10)
+ema20  = ta.ema(close, 20)
+sma50  = ta.sma(close, 50)
+sma100 = ta.sma(close, 100)
+sma150 = ta.sma(close, 150)
+sma200 = ta.sma(close, 200)
+
+plot(showEma10  ? ema10  : na, "EMA 10",  color=color.new(color.purple, 0), linewidth=1)
+plot(showEma20  ? ema20  : na, "EMA 20",  color=color.new(color.blue,   0), linewidth=1)
+plot(showSma50  ? sma50  : na, "SMA 50",  color=color.new(color.orange, 0), linewidth=1)
+plot(showSma100 ? sma100 : na, "SMA 100", color=color.new(color.gray,   0), linewidth=1)
+plot(showSma150 ? sma150 : na, "SMA 150", color=color.new(color.red,    0), linewidth=1)
+plot(showSma200 ? sma200 : na, "SMA 200", color=color.new(color.maroon, 0), linewidth=2)
+
+// ══════════════════════════════════════════════════════════════════
+// LAYER 1 — WEEKLY PERMISSION
+// Anti-repaint: [1] on every expression + lookahead_on
+// ══════════════════════════════════════════════════════════════════
+[wClose, w30, w30_4wAgo, wRsi] = request.security(syminfo.tickerid, "W",
+     [close[1], ta.sma(close, 30)[1], ta.sma(close, 30)[5], ta.rsi(close, 14)[1]],
+     lookahead = barmerge.lookahead_on)
+
+wAbove30   = wClose > w30
+w30Rising  = 100.0 * (w30 / w30_4wAgo - 1.0) > 0
+wRsiOk     = wRsi >= wRsiMin
+weeklyPass = wAbove30 and w30Rising and wRsiOk
+
+// ══════════════════════════════════════════════════════════════════
+// LAYER 2 — DAILY STRUCTURE
+// ══════════════════════════════════════════════════════════════════
+atr14  = ta.atr(14)
+rsi14  = ta.rsi(close, 14)
+rsiSig = ta.sma(rsi14, rsiSigLen)
+
+[diPlus, diMinus, adxVal] = ta.dmi(8, 13)
+
+aboveSma50  = close > sma50
+sma50Flat   = sma50 >= sma50[smaFlatBars]
+aboveSma150 = close > sma150
+aboveEma20  = close > ema20
+
+low20      = ta.lowest(low, 20)
+freshLow20 = low <= low20[1]
+damageDMI  = diMinus > diPlus and adxVal > adxVal[1]
+damageVeto = rsi14 < 42 or freshLow20 or damageDMI
+
+dailyStructure = aboveSma50 and sma50Flat and aboveSma150 and aboveEma20 and not damageVeto
+
+// ══════════════════════════════════════════════════════════════════
+// LAYER 3 — TRIGGER & SETUP SCORE
+// ══════════════════════════════════════════════════════════════════
+xjoClose    = request.security("ASX:XJO", "D", close[1], lookahead=barmerge.lookahead_on)
+rsRatio     = close / xjoClose
+rsPerf20    = (rsRatio - rsRatio[20]) / rsRatio[20] * 100.0
+rsImproving = rsPerf20 > 0
+
+[macdLine, signalLine, histLine] = ta.macd(close, 6, 13, 5)
+macdBull = ta.crossover(macdLine, signalLine) or histLine > histLine[1]
+
+// Pre-compute all historical-series calls unconditionally (v6 requirement)
+crossDMI0    = ta.crossover(diPlus,    diMinus)
+crossDMI1    = ta.crossover(diPlus[1], diMinus[1])
+crossDMI2    = ta.crossover(diPlus[2], diMinus[2])
+high5D       = ta.highest(high, 5)[1]
+rsiLow5      = ta.lowest(rsi14, 5)
+rsiHigh5     = ta.highest(rsi14, 5)
+
+rsiResetZone  = rsiLow5 >= 45 and rsiHigh5 <= 58
+rsiCurledUp   = rsi14 > rsi14[1] and rsi14[1] <= rsi14[2]
+rsiCrossedSig = ta.crossover(rsi14, rsiSig)
+rsiSigRising  = rsiSig >= rsiSig[1]
+dmiOk         = diPlus > diMinus or crossDMI0 or crossDMI1 or crossDMI2
+
+score = (rsiResetZone  ? 1 : 0)
+      + (rsiCurledUp   ? 1 : 0)
+      + (rsiCrossedSig ? 1 : 0)
+      + (rsiSigRising  ? 1 : 0)
+      + (macdBull      ? 1 : 0)
+      + (dmiOk         ? 1 : 0)
+      + (rsImproving   ? 1 : 0)
+
+breakout5D   = close > high5D
+strongClose  = close > open and close >= low + (high - low) * 0.65
+antiChaseOk  = (close - ema20) / atr14 <= antiChaseM
+priceTrigger = breakout5D and strongClose and close > ema20
+
+// ══════════════════════════════════════════════════════════════════
+// LAYER 4 — LIQUIDITY
+// ══════════════════════════════════════════════════════════════════
+dollarVol = close * volume
+avgDolVol = ta.sma(dollarVol, 20)
+liqOk     = avgDolVol >= liqFloor
+
+// ══════════════════════════════════════════════════════════════════
+// POSITION SIZING & ENTRY
+// ══════════════════════════════════════════════════════════════════
+gatesPass   = weeklyPass and dailyStructure
+entrySignal = gatesPass and priceTrigger and antiChaseOk
+              and score >= scoreMin and liqOk
+              and strategy.position_size == 0
+
+swingLow  = ta.lowest(low, pullbackLB)
+stopPrice = swingLow - atrBuf * atr14
+stopDist  = math.max(close - stopPrice, 1.0 * atr14)
+shares    = math.floor((strategy.equity * riskPct / 100.0) / stopDist)
+
+if entrySignal and shares > 0
+    strategy.entry("Long", strategy.long, qty=shares)
+    strategy.exit("HardStop", "Long", stop=stopPrice)
+
+// ══════════════════════════════════════════════════════════════════
+// TRAILING STOP — ratchets up only, never down
+// ══════════════════════════════════════════════════════════════════
+var float trailStop    = na
+var float highestSince = na
+
+inTrade = strategy.position_size > 0
+
+if inTrade
+    highestSince := math.max(nz(highestSince, high), high)
+    newTrail      = highestSince - trailMul * atr14
+    trailStop    := math.max(nz(trailStop, newTrail), newTrail)
+    strategy.exit("TrailStop", "Long", stop=trailStop)
+else
+    trailStop    := na
+    highestSince := na
+
+// ══════════════════════════════════════════════════════════════════
+// TREND-FAILURE EXIT — on close, structural combo required
+// ══════════════════════════════════════════════════════════════════
+trendFail = close < sma50 and rsi14 < 50 and diMinus > diPlus
+
+if inTrade and trendFail
+    strategy.close("Long", comment="TrendFail")
+
+// ══════════════════════════════════════════════════════════════════
+// CHART MARKERS
+// ══════════════════════════════════════════════════════════════════
+plotshape(entrySignal,
+     title="Entry", style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+
+plotshape(trendFail and inTrade,
+     title="TrendFail", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+// ══════════════════════════════════════════════════════════════════
+// STATE STRING
+// ══════════════════════════════════════════════════════════════════
+extendedRsi = rsi14 > 75
+
+stateStr =
+     inTrade and trendFail                                                       ? "EXIT"      :
+     inTrade and extendedRsi                                                     ? "EXTENDED"  :
+     inTrade                                                                     ? "CONFIRMED" :
+     gatesPass and priceTrigger and antiChaseOk and score >= scoreMin and liqOk ? "TRIGGER"   :
+     gatesPass and score >= scoreMin                                             ? "SETUP"     :
+     gatesPass                                                                   ? "EARLY"     :
+     weeklyPass                                                                  ? "WATCH"     :
+                                                                                   "—"
+
+// ══════════════════════════════════════════════════════════════════
+// DIAGNOSTIC TABLE — top-right, 10 rows
+// ══════════════════════════════════════════════════════════════════
+var table diagTable = table.new(position.top_right, 2, 10,
+     border_width  = 1,
+     border_color  = color.new(color.gray, 60),
+     frame_color   = color.new(color.gray, 40),
+     frame_width   = 1)
+
+rowGreen = color.new(color.green, 70)
+rowRed   = color.new(color.red,   70)
+rowGray  = color.new(color.gray,  60)
+txtWhite = color.white
+
+f_row(int row, string lbl, string val, bool pass) =>
+    table.cell(diagTable, 0, row, lbl, text_color=txtWhite, text_size=size.small, bgcolor=pass ? rowGreen : rowRed)
+    table.cell(diagTable, 1, row, val, text_color=txtWhite, text_size=size.small, bgcolor=pass ? rowGreen : rowRed)
+
+if barstate.islast
+    f_row(0, "Weekly gate",  weeklyPass     ? "PASS" : "FAIL",                                   weeklyPass)
+    f_row(1, "Daily struct", dailyStructure ? "PASS" : "FAIL",                                   dailyStructure)
+    f_row(2, "Damage veto",  damageVeto     ? "ACTIVE" : "clear",                                not damageVeto)
+    f_row(3, "Score",        str.tostring(score) + " / 7  (min " + str.tostring(scoreMin) + ")", score >= scoreMin)
+    f_row(4, "Trigger",      priceTrigger   ? "YES" : "NO",                                      priceTrigger)
+    f_row(5, "Anti-chase",   antiChaseOk    ? "OK" : "TOO EXTENDED",                             antiChaseOk)
+    f_row(6, "Liquidity",    liqOk          ? "OK" : "LOW",                                      liqOk)
+    table.cell(diagTable, 0, 7, "State",      text_color=txtWhite, text_size=size.small, bgcolor=rowGray)
+    table.cell(diagTable, 1, 7, stateStr,     text_color=txtWhite, text_size=size.small, bgcolor=rowGray)
+    table.cell(diagTable, 0, 8, "Trail stop", text_color=txtWhite, text_size=size.small, bgcolor=rowGray)
+    table.cell(diagTable, 1, 8, inTrade and not na(trailStop) ? str.tostring(math.round(trailStop, 2)) : "—",
+         text_color=txtWhite, text_size=size.small, bgcolor=rowGray)
+    table.cell(diagTable, 0, 9, "Pos size",   text_color=txtWhite, text_size=size.small, bgcolor=rowGray)
+    table.cell(diagTable, 1, 9, str.tostring(strategy.position_size),
+         text_color=txtWhite, text_size=size.small, bgcolor=rowGray)

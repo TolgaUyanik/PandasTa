@@ -1,0 +1,204 @@
+//@version=6
+library("phx_fvg", overlay=true)
+
+export type FVGState
+    box[]   boxes
+    line[]  top_lines
+    line[]  mid_lines
+    line[]  bot_lines
+    float[] tops
+    float[] bots
+    bool[]  bulls
+    float[] mitigation
+    bool[]  is_htf   // true = 4H, false = RT
+
+export fvg_state_new() =>
+    FVGState.new(  array.new<box>(),  array.new<line>(),  array.new<line>(),  array.new<line>(),  array.new<float>(),  array.new<float>(),  array.new<bool>(),  array.new<float>(),  array.new<bool>())
+
+// ---------- internals ----------
+f_mid(float a, float b) => (a + b) / 2.0
+
+f_detect_generic(series float o, series float h, series float l, series float c, int lookbackBody, float bodyMult, float atr14, float minAtrMult) =>
+    float body = math.abs(c - o)
+    float avg_body = ta.sma(math.abs(c - o)[1], lookbackBody)
+    avg_body := nz(avg_body, body)
+    bool bull = l > h[2] and body[1] > avg_body * bodyMult
+    bool bear = h < l[2] and body[1] > avg_body * bodyMult
+    float top  = bull ? l    : bear ? l[2] : na
+    float bot  = bull ? h[2] : bear ? h    : na
+    float size = na(top) ? na : math.abs(top - bot)
+    bool valid = not na(top) and (minAtrMult <= 0.0 or size >= atr14 * minAtrMult)
+    [valid, bull, top, bot]
+
+f_detect_self_tf_for_security() =>
+    int   LB  = 10
+    float BM  = 0.5
+    float MM  = 0.1
+    float atr = ta.atr(14)
+    [v, b, t, bt] = f_detect_generic(open, high, low, close, LB, BM, atr, MM)
+    [v, b, t, bt]
+
+f_add_fvg(FVGState st, float top, float bot, bool bull, bool as_htf, int extendBars, int offsetBars, color cBox) =>
+    box  b  = box.new(bar_index + offsetBars, top, bar_index + offsetBars + extendBars, bot, bgcolor=cBox, border_color=na)
+    line tl = line.new(bar_index + offsetBars, top,             bar_index + offsetBars + extendBars, top,             color=cBox, width=1)
+    line ml = line.new(bar_index + offsetBars, f_mid(top, bot), bar_index + offsetBars + extendBars, f_mid(top, bot), color=cBox, width=1)
+    line bl = line.new(bar_index + offsetBars, bot,             bar_index + offsetBars + extendBars, bot,             color=cBox, width=1)
+    array.unshift(st.boxes, b)
+    array.unshift(st.top_lines, tl)
+    array.unshift(st.mid_lines, ml)
+    array.unshift(st.bot_lines, bl)
+    array.unshift(st.tops, top)
+    array.unshift(st.bots, bot)
+    array.unshift(st.bulls, bull)
+    array.unshift(st.mitigation, 0.0)
+    array.unshift(st.is_htf, as_htf)
+
+f_delete_idx(FVGState st, int i) =>
+    box.delete(array.get(st.boxes, i))
+    line.delete(array.get(st.top_lines, i))
+    line.delete(array.get(st.mid_lines, i))
+    line.delete(array.get(st.bot_lines, i))
+    array.remove(st.boxes, i)
+    array.remove(st.top_lines, i)
+    array.remove(st.mid_lines, i)
+    array.remove(st.bot_lines, i)
+    array.remove(st.tops, i)
+    array.remove(st.bots, i)
+    array.remove(st.bulls, i)
+    array.remove(st.mitigation, i)
+    array.remove(st.is_htf, i)
+
+// ---------- exported API ----------
+export update_rt(FVGState st, series float o, series float h, series float l, series float c, int lookbackBody, float bodyMult, float atrMultMinSize, int extendBars, int offsetBars, bool removeFilled, float proximityATRmult, float mitigationThreshold, int maxFVG) =>
+
+    float atr14 = ta.atr(14)
+    [valid, bull, top, bot] = f_detect_generic(o, h, l, c, lookbackBody, bodyMult, atr14, atrMultMinSize)
+
+    // add nuovo RT
+    if valid
+        if array.size(st.boxes) >= maxFVG
+            int idxOld = array.size(st.boxes) - 1
+            f_delete_idx(st, idxOld)
+        color cBoxRT = bull ? color.new(color.green, 70) : color.new(color.red, 70)
+        f_add_fvg(st, top, bot, bull, false, extendBars, offsetBars, cBoxRT)
+
+    // update/mitigation — usa MIN size per tenere gli array allineati; loop discendente per delete-safe
+    int cnt = array.size(st.boxes)
+    int c1  = array.size(st.top_lines)
+    int c2  = array.size(st.mid_lines)
+    int c3  = array.size(st.bot_lines)
+    int c4  = array.size(st.tops)
+    int c5  = array.size(st.bots)
+    int c6  = array.size(st.bulls)
+    int c7  = array.size(st.mitigation)
+    int aligned = math.min(cnt, math.min(c1, math.min(c2, math.min(c3, math.min(c4, math.min(c5, math.min(c6, c7)))))))
+
+    if aligned > 0
+        int upto = math.min(aligned - 1, 12)
+        for i = upto to 0
+            box  b  = array.get(st.boxes, i)
+            line tl = array.get(st.top_lines, i)
+            line ml = array.get(st.mid_lines, i)
+            line bl = array.get(st.bot_lines, i)
+            box.set_right(b, bar_index + offsetBars + extendBars)
+            line.set_x2(tl, bar_index + offsetBars + extendBars)
+            line.set_x2(ml, bar_index + offsetBars + extendBars)
+            line.set_x2(bl, bar_index + offsetBars + extendBars)
+
+            float topP = line.get_y2(tl)
+            float botP = line.get_y2(bl)
+            bool isBull = array.get(st.bulls, i)
+
+            bool filled = (isBull and l <= botP) or ((not isBull) and h >= topP)
+            if filled and removeFilled
+                f_delete_idx(st, i)
+            else
+                float mit = isBull ? math.max(0, math.min(100, ((c - botP) / math.max(0.0000001, (topP - botP))) * 100)) : math.max(0, math.min(100, ((topP - c) / math.max(0.0000001, (topP - botP))) * 100))
+                array.set(st.mitigation, i, mit)
+
+    // proximity & dynamic_filled
+    bool prox_support = false, prox_resist = false, dynamic_filled = false
+    float proxThr = atr14 * proximityATRmult
+    int nt = array.size(st.tops)
+    if nt > 0
+        for i = 0 to nt - 1
+            float tp = array.get(st.tops, i)
+            float bp = array.get(st.bots, i)
+            bool isBull = array.get(st.bulls, i)
+            float mit   = array.get(st.mitigation, i)
+            if isBull and math.abs(l - tp) <= proxThr
+                prox_support := true
+            if (not isBull) and math.abs(h - bp) <= proxThr
+                prox_resist := true
+            if mit > mitigationThreshold
+                dynamic_filled := true
+
+    [st, prox_support, prox_resist, dynamic_filled]
+
+export update_rt_and_4h(FVGState st, series float o, series float h, series float l, series float c, int lookbackBody, float bodyMult, float atrMultMinSize, int extendBars, int offsetBars, bool removeFilled, float proximityATRmult, float mitigationThreshold, int maxFVG) =>
+    // prima RT
+    [st_rt, prox_sup_rt, prox_res_rt, dyn_rt] = update_rt(st, o, h, l, c, lookbackBody, bodyMult, atrMultMinSize,  extendBars, offsetBars, removeFilled,  proximityATRmult, mitigationThreshold, maxFVG)
+
+    // 4H via security
+    [valid4h, bull4h, top4h, bot4h] = request.security(syminfo.tickerid, "240", f_detect_self_tf_for_security(), lookahead=barmerge.lookahead_off)
+
+    if valid4h
+        if array.size(st_rt.boxes) >= maxFVG
+            int idxOld = array.size(st_rt.boxes) - 1
+            f_delete_idx(st_rt, idxOld)  // FIX: cancella su st_rt
+        color cBox4h = bull4h ? color.new(color.green, 85) : color.new(color.red, 85)
+        f_add_fvg(st_rt, top4h, bot4h, bull4h, true, extendBars, offsetBars, cBox4h)
+
+    // update dopo inserimento 4H — allineamento e loop discendente
+    int k0 = array.size(st_rt.boxes)
+    int k1 = array.size(st_rt.top_lines)
+    int k2 = array.size(st_rt.mid_lines)
+    int k3 = array.size(st_rt.bot_lines)
+    int k4 = array.size(st_rt.tops)
+    int k5 = array.size(st_rt.bots)
+    int k6 = array.size(st_rt.bulls)
+    int k7 = array.size(st_rt.mitigation)
+    int kaligned = math.min(k0, math.min(k1, math.min(k2, math.min(k3, math.min(k4, math.min(k5, math.min(k6, k7)))))))
+
+    if kaligned > 0
+        int upto = math.min(kaligned - 1, 12)
+        for i = upto to 0
+            box  b  = array.get(st_rt.boxes, i)
+            line tl = array.get(st_rt.top_lines, i)
+            line ml = array.get(st_rt.mid_lines, i)
+            line bl = array.get(st_rt.bot_lines, i)
+            box.set_right(b, bar_index + offsetBars + extendBars)
+            line.set_x2(tl, bar_index + offsetBars + extendBars)
+            line.set_x2(ml, bar_index + offsetBars + extendBars)
+            line.set_x2(bl, bar_index + offsetBars + extendBars)
+
+            float topP = line.get_y2(tl)
+            float botP = line.get_y2(bl)
+            bool isBull = array.get(st_rt.bulls, i)
+
+            bool filled = (isBull and l <= botP) or ((not isBull) and h >= topP)
+            if filled and removeFilled
+                f_delete_idx(st_rt, i)
+            else
+                float mit = isBull ? math.max(0, math.min(100, ((c - botP) / math.max(0.0000001, (topP - botP))) * 100)) : math.max(0, math.min(100, ((topP - c) / math.max(0.0000001, (topP - botP))) * 100))
+                array.set(st_rt.mitigation, i, mit)
+
+    // proximity/dynamic_filled
+    bool prox_support = false, prox_resist = false, dynamic_filled = false
+    float atr14 = ta.atr(14)
+    float proxThr = atr14 * proximityATRmult
+    int mt = array.size(st_rt.tops)
+    if mt > 0
+        for i = 0 to mt - 1
+            float tp = array.get(st_rt.tops, i)
+            float bp = array.get(st_rt.bots, i)
+            bool isBull = array.get(st_rt.bulls, i)
+            float mit   = array.get(st_rt.mitigation, i)
+            if isBull and math.abs(l - tp) <= proxThr
+                prox_support := true
+            if (not isBull) and math.abs(h - bp) <= proxThr
+                prox_resist := true
+            if mit > mitigationThreshold
+                dynamic_filled := true
+
+    [st_rt, prox_support, prox_resist, dynamic_filled]

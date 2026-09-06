@@ -1,0 +1,705 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//@version=6
+
+strategy(
+     "NY Session Trend Retest Strategy",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10
+)
+
+// ─────────────────────────────
+// GROUPS
+// ─────────────────────────────
+string G_TIME  = "Time Settings"
+string G_TREND = "Trend Settings"
+string G_ENTRY = "Entry Settings"
+string G_EXIT  = "Exit Settings"
+string G_MGMT  = "Trade Management"
+string G_VIS   = "Visuals & Dashboard"
+
+// ─────────────────────────────
+// INPUTS
+// ─────────────────────────────
+tradeSession     = input.session("0930-1610", "Trading Session", group = G_TIME)
+premarketSession = input.session("0400-0930", "Premarket Session", group = G_TIME)
+timeZone         = input.string("America/New_York", "Timezone", group = G_TIME)
+
+// TREND
+trendTF     = input.timeframe("60", "Trend Timeframe", group = G_TREND)
+trendEmaLen = input.int(200, "Trend EMA Length", group = G_TREND)
+
+// ENTRY
+srcVwap       = input.source(hlc3, "VWAP Source", group = G_ENTRY)
+useVwapRetest = input.bool(true, "Entry: VWAP Retest", group = G_ENTRY)
+
+usePmBreakout = input.bool(false, "Entry: Premarket Breakout", group = G_ENTRY)
+
+pmBreakoutMode = input.string(
+     "Close",
+     "PM Breakout Mode",
+     options = ["Close", "Retest"],
+     group = G_ENTRY
+)
+
+pmBreakoutPct = input.float(
+     50.0,
+     "PM Breakout Body %",
+     minval = 0.0,
+     maxval = 100.0,
+     group = G_ENTRY
+)
+
+useEmaRetest = input.bool(false, "Entry: EMA Retest", group = G_ENTRY)
+
+vwapFilter = input.bool(
+     true,
+     "Only Long above VWAP / Short below VWAP",
+     group = G_ENTRY
+)
+
+emaFilter = input.bool(
+     false,
+     "Only Long above EMA / Short below EMA",
+     group = G_ENTRY
+)
+
+// --- VWAP REGIME FILTER ---
+useRegimeFilter = input.bool(true, "Use VWAP Regime Filter", group = G_ENTRY, tooltip = "Prevents trades during flat VWAP or low expansion environments.")
+slopePeriod     = input.int(5, "VWAP Slope Period", minval = 1, group = G_ENTRY, tooltip = "Period to measure the slope of the VWAP.")
+minSlopeTicks   = input.float(0.5, "Min VWAP Slope (Ticks)", minval = 0.0, step = 0.1, group = G_ENTRY, tooltip = "Minimum change in VWAP over the period (in ticks) to confirm directional intent.")
+rangeLookback   = input.int(10, "Compression Lookback", minval = 1, group = G_ENTRY, tooltip = "Period used to measure price expansion vs compression.")
+minRangeTicks   = input.float(10.0, "Min Range Expansion (Ticks)", minval = 0.0, group = G_ENTRY, tooltip = "Minimum price range (High-Low) over the lookback period to avoid compressed markets.")
+
+retestBuffer = input.float(
+     0.0,
+     "Retest Sensitivity (Ticks)",
+     minval = 0.0,
+     group = G_ENTRY
+)
+
+entryEmaLen = input.int(20, "Entry EMA Length", group = G_ENTRY)
+
+// EXITS
+exitEmaLen = input.int(20, "Exit EMA Length", group = G_EXIT)
+
+emaExitPct = input.float(
+     100.0,
+     "EMA Exit Body %",
+     minval = 0.0,
+     maxval = 100.0,
+     group = G_EXIT
+)
+
+useVwapExitOverride = input.bool(
+     true,
+     "Use VWAP Exit Override",
+     group = G_EXIT
+)
+
+vwapExitPct = input.float(
+     100.0,
+     "VWAP Exit Body %",
+     minval = 0.0,
+     maxval = 100.0,
+     group = G_EXIT
+)
+
+minProfitTicks = input.int(
+     20,
+     "Min Profit Before EMA Reactivates",
+     group = G_EXIT
+)
+
+slBuffer = input.float(2.0, "Stop Loss Buffer (Ticks)", group = G_EXIT)
+
+// MANAGEMENT
+tpPmLevel  = input.bool(true, "Partial TP at PM High/Low", group = G_MGMT)
+tpDayLevel = input.bool(true, "Partial TP at Day High/Low", group = G_MGMT)
+
+tpPercent = input.float(
+     50.0,
+     "Partial TP %",
+     group = G_MGMT
+)
+
+moveBE = input.bool(
+     true,
+     "Move to Breakeven after Partial",
+     group = G_MGMT
+)
+
+// COOLDOWN
+useCooldown = input.bool(
+     true,
+     "Use Trade Cooldown",
+     group = G_MGMT
+)
+
+cooldownMinutes = input.int(
+     30,
+     "Cooldown Minutes After Trade Close",
+     minval = 1,
+     group = G_MGMT
+)
+
+// VISUALS
+showDashboard = input.bool(true, "Show Dashboard", group = G_VIS)
+showRR        = input.bool(true, "Show R:R Tool", group = G_VIS)
+
+// ─────────────────────────────
+// HELPERS
+// ─────────────────────────────
+is_in_session(sess) =>
+    not na(time(timeframe.period, sess, timeZone))
+
+f_get_body_pct_above(level) =>
+    if na(level)
+        0.0
+    else
+        bodyHigh = math.max(open, close)
+        bodyLow  = math.min(open, close)
+        bodySize = bodyHigh - bodyLow
+
+        portionAbove =
+             math.max(
+                 0,
+                 bodyHigh - math.max(bodyLow, level)
+             )
+
+        pct =
+             bodySize > 0
+             ? (portionAbove / bodySize) * 100
+             : (close > level ? 100.0 : 0.0)
+
+        close > level ? pct : 0.0
+
+f_get_body_pct_below(level) =>
+    if na(level)
+        0.0
+    else
+        bodyHigh = math.max(open, close)
+        bodyLow  = math.min(open, close)
+        bodySize = bodyHigh - bodyLow
+
+        portionBelow =
+             math.max(
+                 0,
+                 math.min(bodyHigh, level) - bodyLow
+             )
+
+        pct =
+             bodySize > 0
+             ? (portionBelow / bodySize) * 100
+             : (close < level ? 100.0 : 0.0)
+
+        close < level ? pct : 0.0
+
+// ─────────────────────────────
+// HTF TREND
+// ─────────────────────────────
+htfEma =
+     request.security(
+         syminfo.tickerid,
+         trendTF,
+         ta.ema(close, trendEmaLen)
+     )
+
+htfTrend = close > htfEma ? 1 : -1
+
+// ─────────────────────────────
+// SESSION LEVELS
+// ─────────────────────────────
+var float pmHigh  = na
+var float pmLow   = na
+var float dayHigh = na
+var float dayLow  = na
+
+isPremarket = is_in_session(premarketSession)
+isSession   = is_in_session(tradeSession)
+
+newDay = ta.change(time("D", timeZone))
+
+if newDay != 0
+    pmHigh  := na
+    pmLow   := na
+    dayHigh := na
+    dayLow  := na
+
+if isPremarket
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow  := na(pmLow) ? low  : math.min(pmLow, low)
+
+sessionStart = isSession and not isSession[1]
+
+if isSession
+    dayHigh := na(dayHigh) ? high : math.max(dayHigh, high)
+    dayLow  := na(dayLow) ? low  : math.min(dayLow, low)
+
+plot(pmHigh, "PM High", color.new(color.teal, 0), 2, plot.style_linebr)
+plot(pmLow, "PM Low", color.new(color.red, 0), 2, plot.style_linebr)
+
+// ─────────────────────────────
+// ANCHORED VWAP
+// ─────────────────────────────
+var float vwapSumSrc = 0.0
+var float vwapSumVol = 0.0
+
+if sessionStart
+    vwapSumSrc := srcVwap * volume
+    vwapSumVol := volume
+else if isSession
+    vwapSumSrc += srcVwap * volume
+    vwapSumVol += volume
+else
+    vwapSumSrc := 0.0
+    vwapSumVol := 0.0
+
+aVwap =
+     vwapSumVol > 0
+     ? vwapSumSrc / vwapSumVol
+     : na
+
+plot(aVwap, "Anchored VWAP", color.new(color.white, 0), 2)
+
+// --- VWAP REGIME CALCULATION ---
+vwapSlope  = (aVwap - aVwap[slopePeriod]) / syminfo.mintick
+priceRange = (ta.highest(high, rangeLookback) - ta.lowest(low, rangeLookback)) / syminfo.mintick
+
+regimeFilterPassed = not useRegimeFilter or (math.abs(vwapSlope) >= minSlopeTicks and priceRange >= minRangeTicks)
+
+// ─────────────────────────────
+// ENTRY EMA
+// ─────────────────────────────
+entryEma = ta.ema(close, entryEmaLen)
+
+plot(entryEma, "Entry EMA", color.new(color.yellow, 70))
+
+// ─────────────────────────────
+// TRADE COOLDOWN SYSTEM
+// ─────────────────────────────
+var int lastTradeCloseTime = na
+
+tradeJustClosed =
+     strategy.position_size == 0 and
+     strategy.position_size[1] != 0
+
+if tradeJustClosed
+    lastTradeCloseTime := time
+
+cooldownActive =
+     useCooldown and
+     not na(lastTradeCloseTime) and
+     (time - lastTradeCloseTime) <
+     (cooldownMinutes * 60 * 1000)
+
+// ─────────────────────────────
+// ENTRY LOGIC
+// ─────────────────────────────
+bool longCondition  = false
+bool shortCondition = false
+
+var bool longPmBreakEntry  = false
+var bool shortPmBreakEntry = false
+
+if isSession and strategy.position_size == 0 and not cooldownActive and regimeFilterPassed
+
+    float buf = retestBuffer * syminfo.mintick
+
+    // VWAP RETEST
+    vwapRetestLong =
+         useVwapRetest and
+         low <= aVwap + buf and
+         close > aVwap and
+         htfTrend == 1
+
+    vwapRetestShort =
+         useVwapRetest and
+         high >= aVwap - buf and
+         close < aVwap and
+         htfTrend == -1
+
+    // PM BREAKOUT
+    pmBreakLong  = false
+    pmBreakShort = false
+
+    if usePmBreakout and not na(pmHigh) and not na(pmLow)
+
+        if pmBreakoutMode == "Close"
+
+            pmBreakLong :=
+                 f_get_body_pct_above(pmHigh) >= pmBreakoutPct and
+                 htfTrend == 1
+
+            pmBreakShort :=
+                 f_get_body_pct_below(pmLow) >= pmBreakoutPct and
+                 htfTrend == -1
+
+        else
+
+            pmBreakLong :=
+                 low <= pmHigh + buf and
+                 close > pmHigh and
+                 htfTrend == 1
+
+            pmBreakShort :=
+                 high >= pmLow - buf and
+                 close < pmLow and
+                 htfTrend == -1
+
+    // EMA RETEST
+    emaRetestLong =
+         useEmaRetest and
+         low <= entryEma + buf and
+         close > entryEma and
+         htfTrend == 1
+
+    emaRetestShort =
+         useEmaRetest and
+         high >= entryEma - buf and
+         close < entryEma and
+         htfTrend == -1
+
+    longCondition :=
+         vwapRetestLong or
+         pmBreakLong or
+         emaRetestLong
+
+    shortCondition :=
+         vwapRetestShort or
+         pmBreakShort or
+         emaRetestShort
+
+    // Track PM breakout entries
+    longPmBreakEntry := pmBreakLong
+    shortPmBreakEntry := pmBreakShort
+
+// FILTERS
+if vwapFilter
+    longCondition  := longCondition and close > aVwap
+    shortCondition := shortCondition and close < aVwap
+
+if emaFilter
+    longCondition  := longCondition and close > entryEma
+    shortCondition := shortCondition and close < entryEma
+
+// ─────────────────────────────
+// EXIT LOGIC
+// ─────────────────────────────
+exitEma = ta.ema(close, exitEmaLen)
+
+// EMA CONDITIONS
+bodyBelowEma =
+     f_get_body_pct_below(exitEma) >= emaExitPct
+
+bodyAboveEma =
+     f_get_body_pct_above(exitEma) >= emaExitPct
+
+// VWAP CONDITIONS
+bodyBelowVwap =
+     f_get_body_pct_below(aVwap) >= vwapExitPct
+
+bodyAboveVwap =
+     f_get_body_pct_above(aVwap) >= vwapExitPct
+
+// VWAP OVERRIDE FLAGS
+var bool longUseVwapExit  = false
+var bool shortUseVwapExit = false
+
+if strategy.position_size == 0
+    longUseVwapExit  := false
+    shortUseVwapExit := false
+
+// DETECT NEW LONG
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+
+    longEnteredBelowEma =
+         strategy.position_avg_price < exitEma
+
+    longUseVwapExit :=
+         useVwapExitOverride and
+         (
+             longEnteredBelowEma or
+             (longPmBreakEntry and longEnteredBelowEma)
+         )
+
+// DETECT NEW SHORT
+if strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+    shortEnteredAboveEma =
+         strategy.position_avg_price > exitEma
+
+    shortUseVwapExit :=
+         useVwapExitOverride and
+         (
+             shortEnteredAboveEma or
+             (shortPmBreakEntry and shortEnteredAboveEma)
+         )
+
+// LONG EXIT
+longExit = false
+
+if strategy.position_size > 0
+
+    if longUseVwapExit
+
+        profitReachedLong =
+             close >
+             strategy.position_avg_price +
+             (minProfitTicks * syminfo.mintick)
+
+        recoveredAboveEma =
+             close > exitEma and
+             profitReachedLong
+
+        if recoveredAboveEma
+            longUseVwapExit := false
+
+        longExit := bodyBelowVwap
+
+    else
+        longExit := bodyBelowEma
+
+// SHORT EXIT
+shortExit = false
+
+if strategy.position_size < 0
+
+    if shortUseVwapExit
+
+        profitReachedShort =
+             close <
+             strategy.position_avg_price -
+             (minProfitTicks * syminfo.mintick)
+
+        recoveredBelowEma =
+             close < exitEma and
+             profitReachedShort
+
+        if recoveredBelowEma
+            shortUseVwapExit := false
+
+        shortExit := bodyAboveVwap
+
+    else
+        shortExit := bodyAboveEma
+
+// ─────────────────────────────
+// EXECUTION
+// ─────────────────────────────
+var float entryPrice = na
+var float stopLoss   = na
+
+if longCondition
+
+    entryPrice := close
+
+    stopLoss :=
+         ta.lowest(low, 5) -
+         slBuffer * syminfo.mintick
+
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+
+    entryPrice := close
+
+    stopLoss :=
+         ta.highest(high, 5) +
+         slBuffer * syminfo.mintick
+
+    strategy.entry("Short", strategy.short)
+
+// ─────────────────────────────
+// LONG MANAGEMENT
+// ─────────────────────────────
+if strategy.position_size > 0
+
+    if tpPmLevel and not na(pmHigh) and high >= pmHigh and entryPrice < pmHigh
+
+        strategy.exit(
+             "Part Long PM",
+             "Long",
+             qty_percent = tpPercent,
+             limit = pmHigh
+        )
+
+        if moveBE
+            strategy.exit(
+                 "BE Long",
+                 "Long",
+                 stop = entryPrice
+            )
+
+    if tpDayLevel and not na(dayHigh) and high >= dayHigh
+
+        strategy.exit(
+             "Part Long Day",
+             "Long",
+             qty_percent = tpPercent,
+             limit = dayHigh
+        )
+
+    if longExit
+        strategy.close("Long", comment = "Exit Logic")
+
+    strategy.exit(
+         "SL Long",
+         "Long",
+         stop = stopLoss
+    )
+
+// ─────────────────────────────
+// SHORT MANAGEMENT
+// ─────────────────────────────
+if strategy.position_size < 0
+
+    // PM PARTIAL
+    if tpPmLevel and not na(pmLow) and low <= pmLow and entryPrice > pmLow
+
+        strategy.exit(
+             "Part Short PM",
+             "Short",
+             qty_percent = tpPercent,
+             limit = pmLow
+        )
+
+        if moveBE
+            strategy.exit(
+                 "BE Short",
+                 "Short",
+                 stop = entryPrice
+            )
+
+    // DAY PARTIAL
+    if tpDayLevel and not na(dayLow) and low <= dayLow
+
+        strategy.exit(
+             "Part Short Day",
+             "Short",
+             qty_percent = tpPercent,
+             limit = dayLow
+        )
+
+        if moveBE
+            strategy.exit(
+                 "BE Short",
+                 "Short",
+                 stop = entryPrice
+            )
+
+    // EXIT LOGIC
+    if shortExit
+        strategy.close("Short", comment = "Exit Logic")
+
+    // STOP LOSS
+    strategy.exit(
+         "SL Short",
+         "Short",
+         stop = stopLoss
+    )
+
+// ─────────────────────────────
+// FORCE SESSION CLOSE
+// ─────────────────────────────
+if not isSession and strategy.position_size != 0
+    strategy.close_all(comment = "Session End")
+
+// ─────────────────────────────
+// R:R TOOL
+// ─────────────────────────────
+var box rrBoxProfit = na
+var box rrBoxLoss   = na
+
+if showRR
+
+    if strategy.position_size != 0 and strategy.position_size[1] == 0
+
+        rrBoxProfit :=
+             box.new(
+                 bar_index,
+                 strategy.position_avg_price,
+                 bar_index + 10,
+                 high,
+                 bgcolor = color.new(color.green, 80),
+                 border_color = color.green
+             )
+
+        rrBoxLoss :=
+             box.new(
+                 bar_index,
+                 strategy.position_avg_price,
+                 bar_index + 10,
+                 stopLoss,
+                 bgcolor = color.new(color.red, 80),
+                 border_color = color.red
+             )
+
+    else if strategy.position_size != 0
+
+        box.set_right(rrBoxProfit, bar_index)
+        box.set_right(rrBoxLoss, bar_index)
+
+    else
+
+        box.delete(rrBoxProfit)
+        box.delete(rrBoxLoss)
+
+// ─────────────────────────────
+// DASHBOARD
+// ─────────────────────────────
+if showDashboard and barstate.islast
+
+    var table dash =
+         table.new(
+             position.top_right,
+             2,
+             7,
+             bgcolor = color.new(chart.fg_color, 90),
+             border_width = 1,
+             border_color = chart.fg_color
+         )
+
+    winRate =
+         strategy.closedtrades > 0
+         ? (strategy.wintrades / strategy.closedtrades) * 100
+         : 0
+
+    pf =
+         strategy.grossprofit /
+         math.max(1, strategy.grossloss)
+
+    table.cell(dash, 0, 0, "Metric")
+    table.cell(dash, 1, 0, "Value")
+
+    table.cell(dash, 0, 1, "Win Rate")
+    table.cell(dash, 1, 1, str.tostring(winRate, "#.##") + "%")
+
+    table.cell(dash, 0, 2, "Profit Factor")
+    table.cell(dash, 1, 2, str.tostring(pf, "#.##"))
+
+    table.cell(dash, 0, 3, "Net Profit")
+    table.cell(dash, 1, 3, str.tostring(strategy.netprofit))
+
+    table.cell(dash, 0, 4, "Trades")
+    table.cell(dash, 1, 4, str.tostring(strategy.closedtrades))
+
+    table.cell(dash, 0, 5, "Trend")
+    table.cell(
+         dash,
+         1,
+         5,
+         htfTrend == 1 ? "Bullish" : "Bearish",
+         text_color = htfTrend == 1 ? color.lime : color.red
+    )
+
+    table.cell(dash, 0, 6, "VWAP Regime")
+    table.cell(
+         dash,
+         1,
+         6,
+         regimeFilterPassed ? "Expansion" : "Compressed",
+         text_color = regimeFilterPassed ? color.lime : color.orange
+    )

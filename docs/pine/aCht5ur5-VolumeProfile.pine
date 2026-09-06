@@ -1,0 +1,188 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © tom-tempest
+
+//@version=6
+
+// @description Analyzes volume and price and calculates a volume profile, in particular the Point Of Control and Value Area values.
+library("VolumeProfile")
+
+
+export type VolumeProfile
+	// Configuration Settings
+	string sessionTime = na
+    string sessionTimezone = na
+	int valueAreaSize = na
+    bool showVP = false
+	// Values we are searching for
+	float pointOfControl = na
+	float valueAreaHigh = na
+	float valueAreaLow = na
+	// Private properties to track internals
+    map<float, float> volumeByPricePoint = na // key is price, value is volume
+    float totalVolume = na
+    float pocVolume = na
+    array<box> profileBoxes = na
+
+
+// @function 				Constructor method that creates a new Volume Profile
+// @param sessionTime       Session time string. Volume Profile will not accept any data outside this timeframe. Default '1800-1659'.
+// @param sessionTimezone   Time zone for session time string. Default 'America/New_York'.
+// @param valueAreaSize 	Percentage of total volume that is considered the Value Area. Default '70'.
+// @param showVP            Whether or not display a representation of the Volume Profile. This is experimental. Default 'false'.
+// @returns 				VolumeProfile object
+export new(
+  string sessionTime = "1800-1659",
+  string sessionTimezone = "America/New_York",
+  int valueAreaSize = 70,
+  bool showVP = false
+  ) =>
+
+	VolumeProfile.new(
+      sessionTime = sessionTime,
+      sessionTimezone = sessionTimezone,
+      valueAreaSize = valueAreaSize,
+      showVP = showVP,
+      volumeByPricePoint = map.new<float, float>(),
+      profileBoxes = array.new<box>()
+	  )
+
+
+// @function    Checks if current time is within the VP's configured session time.
+// @returns     True if yes, false otherwise.
+method insideSession(VolumeProfile vp) =>
+    not na(time(timeframe.period, vp.sessionTime, vp.sessionTimezone))
+
+
+// @function	Calculates current Point Of Control of the VP
+// @returns		void
+method calculatePOC(VolumeProfile vp) =>
+    float newPoc = na
+    for price in vp.volumeByPricePoint.keys()
+        vol = vp.volumeByPricePoint.get(price)
+        if na(vp.pocVolume) or vol > vp.pocVolume
+            vp.pocVolume := vol
+            newPoc := price
+    if not na(newPoc)
+        vp.pointOfControl := newPoc
+
+
+// @function 	Calculates current Value Area High and Low of the VP
+// @returns		void
+method calculateVA(VolumeProfile vp) =>
+    valueAreaVol = vp.totalVolume * vp.valueAreaSize / 100
+    float vahPrice = na
+    float valPrice = na
+    float lastPriceUp = vp.pointOfControl
+    float lastPriceDown = vp.pointOfControl
+    countedVol = vp.volumeByPricePoint.get(vp.pointOfControl)
+    while countedVol <= valueAreaVol
+        oneUp = lastPriceUp + syminfo.mintick
+        twoUp = lastPriceUp + syminfo.mintick * 2
+        oneDown = lastPriceDown - syminfo.mintick
+        twoDown = lastPriceDown - syminfo.mintick * 2
+        volUpwards = vp.volumeByPricePoint.get(oneUp) + vp.volumeByPricePoint.get(twoUp)
+        volDownwards = vp.volumeByPricePoint.get(oneDown) + vp.volumeByPricePoint.get(twoDown)
+        // if volume upwards is bigger, add that to VA and continue above in next iteration
+        if volUpwards > volDownwards or na(volDownwards)
+            countedVol += volUpwards
+            vahPrice := twoUp
+            lastPriceUp := twoUp
+        // if volume downwards is bigger, add that to VA and continue below
+        else if volDownwards > volUpwards or na(volUpwards)
+            countedVol += volDownwards
+            valPrice := twoDown
+            lastPriceDown := twoDown
+        // edge case same volume up and down:
+        // not sure if this is according to spec, but makes only sense to count both upwards and downwards at the same time?
+        else
+            countedVol += volUpwards + volDownwards
+            vahPrice := twoUp
+            valPrice := twoDown
+            lastPriceUp := twoUp
+            lastPriceDown := twoDown
+
+    // save VAH and VAL
+    vp.valueAreaHigh := vahPrice
+    vp.valueAreaLow := valPrice
+
+
+// @function    Draws a representation of the Volume Profile on the chart.
+// @returns     void
+method drawVP(VolumeProfile vp) =>
+    if vp.showVP
+        prices = vp.volumeByPricePoint.keys()
+        prices.sort()
+
+        while vp.profileBoxes.size() > 0
+            box.delete(vp.profileBoxes.shift())
+
+        for price in prices
+            vol = vp.volumeByPricePoint.get(price)
+            length = 100 * vol / vp.pocVolume
+            color = color.new(#4a4a4a, 0)
+            if price > vp.valueAreaHigh or price < vp.valueAreaLow
+                color := color.new(#2e2e2e, 0)
+            vp.profileBoxes.push(box.new(bar_index + math.round(110-length), price+syminfo.mintick, bar_index + 110, price, border_color=color.black, border_width=0, xloc=xloc.bar_index, bgcolor=color))
+
+
+// @function	Processes chart data and sorts volume into rows. Then calls calculatePOC(), calculateVA() and drawVP() to update the VP.
+// @param h		Array of highs
+// @param l		Array of lows
+// @param v		Array of volumes
+// @param t 	Array of candle times
+// @returns		void
+method updateVolumeData(VolumeProfile vp, array<float> h, array<float> l, array<float> v, array<int> t) =>
+    if v.size() > 0
+        for i = 0 to v.size() - 1
+            hi = h.get(i)
+            li = l.get(i)
+            vi = v.get(i)
+            ti = t.get(i)
+
+            // count total volume
+            vp.totalVolume := na(vp.totalVolume) ? vi : vp.totalVolume + vi
+
+            // sort volume data into map
+            numberOfKeys = (hi - li) / syminfo.mintick + 1
+            newVolumePerKey = vi / numberOfKeys
+            for price = li to hi by syminfo.mintick
+                oldVolume = vp.volumeByPricePoint.get(price)
+                newVolume = na(oldVolume) ? newVolumePerKey : oldVolume + newVolumePerKey
+                vp.volumeByPricePoint.put(price, newVolume)
+
+        // recalculate VP
+        vp.calculatePOC()
+        vp.calculateVA()
+        vp.drawVP()
+
+
+// @function    Uses current confirmed bar (if on one minute chart) or requests lower timeframe (if on higher timeframe) and calls updateVolumeData() if inside the VP's session.
+// @returns     void
+export method updateVP(VolumeProfile vp) =>
+    // only interested in current session data and confirmed bars
+    if not na(vp) and vp.insideSession() and barstate.isconfirmed
+        // request 1 minute bars if higher timeframe
+        if timeframe.in_seconds(timeframe.main_period) >= 60
+            [h, l, v, t] = request.security_lower_tf(syminfo.tickerid, "1", [high, low, volume, time], ignore_invalid_timeframe = true)
+            vp.updateVolumeData(h, l, v, t)
+        // use current bar if on 1 minute timeframe
+        else
+            vp.updateVolumeData(array.from(high[0]), array.from(low[0]), array.from(volume[0]), array.from(time[0]))
+
+
+// @function	Gets the current Point Of Control
+// @returns		Point Of Control (float)
+export method getPOC(VolumeProfile vp) =>
+	vp.pointOfControl
+
+
+// @function	Gets the current Value Area High
+// @returns		Value Area High (float)
+export method getVAH(VolumeProfile vp) =>
+	vp.valueAreaHigh
+
+
+// @function	Gets the current Value Area Low
+// @returns		Value Area Low (float)
+export method getVAL(VolumeProfile vp) =>
+	vp.valueAreaLow

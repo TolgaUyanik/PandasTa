@@ -1,0 +1,320 @@
+//@version=6
+strategy(title = "Big Daddy Max ORB Strategy", shorttitle = "BDM ORB Scam or Slam", overlay = true, initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 2.50, slippage = 1, process_orders_on_close = true, calc_on_every_tick = false, calc_on_order_fills = true, margin_long = 1, margin_short = 1, max_lines_count = 500, max_labels_count = 100, max_boxes_count = 200) 
+
+//=============================================================================
+// INPUTS
+//=============================================================================
+
+string groupMain = "⚙️ Strategy Settings"
+string groupORB  = "📦 ORB Settings"
+string groupRisk = "🎯 Risk / Reward Settings"
+string groupCont = "🚀 Continuation Settings"
+string groupRev  = "🔁 Reversal Settings"
+string groupViz  = "👁️ Visual Settings"
+
+string tzInput = input.string("America/New_York", "Session Timezone", group = groupMain, tooltip = "Timezone used for the ORB and trading window. Keep this as America/New_York for NY open ORB testing.")
+string orbSessionInput = input.session("0930-0945", "ORB Window", group = groupORB, tooltip = "The opening range window. Default is the first 15 minutes of NY open: 09:30 to 09:45 New York time. The ORB is calculated using the chart timeframe you are currently viewing.")
+string tradeWindowInput = input.session("0945-1600", "Trade Window", group = groupMain, tooltip = "Breakout and reversal entries are only allowed after the ORB finishes. Default is 09:45 to 16:00 New York time.")
+
+float rrInput = input.float(1.0, "Take Profit RR", minval = 0.1, step = 0.1, group = groupRisk, tooltip = "Reward-to-risk multiple for continuation and reversal take profits. Default is 1R.")
+int qtyInput = input.int(1, "Contracts / Quantity", minval = 1, group = groupRisk, tooltip = "Position size used for the backtest.")
+bool closeAtSessionEndInput = input.bool(true, "Close Open Trade At Session End", group = groupRisk, tooltip = "Closes any open position at the end of the trade window.")
+
+bool enableContinuationInput = input.bool(true, "Enable Continuation Entries", group = groupCont, tooltip = "When enabled, the strategy enters on the first candle close outside the ORB after the ORB window finishes. Turn this off to test reversal-only entries while still using the first breakout direction as the reversal setup.")
+string continuationStopModeInput = input.string("ORB Midpoint", "Continuation Stop Loss", options = ["ORB Midpoint", "Opposite ORB Side"], group = groupCont, tooltip = "Choose where the stop loss goes for continuation trades only. ORB Midpoint uses the middle of the opening range. Opposite ORB Side uses ORB low for longs and ORB high for shorts.")
+
+bool enableReversalsInput = input.bool(true, "Enable Reversal Entries", group = groupRev, tooltip = "When enabled, if the first breakout fails and a candle closes back inside the ORB, the script closes the continuation trade if one exists and enters the opposite direction.")
+bool allowReversalAfterContinuationClosedInput = input.bool(false, "Allow Reversal Even If First Trade Already Closed", group = groupRev, tooltip = "Default is OFF. When enabled, a reversal can still trigger after the first continuation trade hit TP or SL, as long as price later closes back inside the ORB. This also allows reversal-only mode when continuation entries are disabled.")
+
+bool showORBInput = input.bool(true, "Show ORB High / Low / Mid", group = groupViz, tooltip = "Shows the ORB high, low, and midpoint lines. These lines stop at the end of the trading day.")
+bool showTradeBoxInput = input.bool(true, "Show Trade Risk / Reward Box", group = groupViz, tooltip = "Shows a clean red risk box and green reward box for the trade. The box extends to EOD so trades remain visible even if they close quickly.")
+bool showTradeLinesInput = input.bool(true, "Show Entry / SL / TP Lines", group = groupViz, tooltip = "Shows entry, stop loss, and take profit lines for the trade. Lines extend to EOD so every trade day is visible.")
+bool showSignalLabelsInput = input.bool(false, "Show Entry Labels", group = groupViz, tooltip = "Optional. Turn on only if you want small LONG / SHORT labels on the entry candles.")
+
+//=============================================================================
+// SESSION LOGIC
+//=============================================================================
+
+bool inORB = not na(time(timeframe.period, orbSessionInput, tzInput))
+bool inTradeWindow = not na(time(timeframe.period, tradeWindowInput, tzInput))
+bool newDay = ta.change(time("D", "0000-2359", tzInput)) != 0
+bool orbStarted = inORB and not inORB[1]
+bool orbEnded = not inORB and inORB[1]
+bool tradeWindowEnded = not inTradeWindow and inTradeWindow[1]
+
+//=============================================================================
+// ORB VALUES
+//=============================================================================
+
+var float orbHigh = na
+var float orbLow = na
+var float orbMid = na
+var bool orbReady = false
+
+// Trade/setup state.
+var bool firstBreakoutSeenToday = false
+var bool continuationTakenToday = false
+var bool reversalTakenToday = false
+var int firstBreakoutDirection = 0
+var float failedBreakoutSwingHigh = na
+var float failedBreakoutSwingLow = na
+
+// ORB visuals.
+var line orbHighLine = na
+var line orbLowLine = na
+var line orbMidLine = na
+
+// Active/last trade visual variables.
+var line entryLine = na
+var line stopLine = na
+var line targetLine = na
+var box riskBox = na
+var box rewardBox = na
+var bool tradeVisualActive = false
+
+if newDay
+    orbHigh := na
+    orbLow := na
+    orbMid := na
+    orbReady := false
+    firstBreakoutSeenToday := false
+    continuationTakenToday := false
+    reversalTakenToday := false
+    firstBreakoutDirection := 0
+    failedBreakoutSwingHigh := na
+    failedBreakoutSwingLow := na
+    tradeVisualActive := false
+    orbHighLine := na
+    orbLowLine := na
+    orbMidLine := na
+    entryLine := na
+    stopLine := na
+    targetLine := na
+    riskBox := na
+    rewardBox := na
+
+if orbStarted
+    orbHigh := high
+    orbLow := low
+    orbMid := na
+    orbReady := false
+
+if inORB
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow := na(orbLow) ? low : math.min(orbLow, low)
+
+if orbEnded and not na(orbHigh) and not na(orbLow)
+    orbMid := (orbHigh + orbLow) / 2.0
+    orbReady := true
+
+    if showORBInput
+        orbHighLine := line.new(bar_index, orbHigh, bar_index, orbHigh, extend = extend.none, color = color.new(color.green, 0), width = 2)
+        orbLowLine := line.new(bar_index, orbLow, bar_index, orbLow, extend = extend.none, color = color.new(color.red, 0), width = 2)
+        orbMidLine := line.new(bar_index, orbMid, bar_index, orbMid, extend = extend.none, color = color.new(color.gray, 0), width = 1, style = line.style_dashed)
+
+// Extend ORB lines only until EOD / end of trade window.
+if showORBInput and orbReady and inTradeWindow
+    if not na(orbHighLine)
+        line.set_x2(orbHighLine, bar_index)
+    if not na(orbLowLine)
+        line.set_x2(orbLowLine, bar_index)
+    if not na(orbMidLine)
+        line.set_x2(orbMidLine, bar_index)
+
+//=============================================================================
+// FIRST BREAKOUT DETECTION
+//=============================================================================
+
+bool flat = strategy.position_size == 0
+bool canDetectFirstBreakout = orbReady and inTradeWindow and flat and not firstBreakoutSeenToday
+
+// First candle close outside the ORB on the active chart timeframe.
+bool firstLongBreakout = canDetectFirstBreakout and close > orbHigh
+bool firstShortBreakout = canDetectFirstBreakout and close < orbLow
+
+float longEntry = close
+float shortEntry = close
+float longStop = continuationStopModeInput == "ORB Midpoint" ? orbMid : orbLow
+float shortStop = continuationStopModeInput == "ORB Midpoint" ? orbMid : orbHigh
+float longRisk = longEntry - longStop
+float shortRisk = shortStop - shortEntry
+float longTarget = longEntry + longRisk * rrInput
+float shortTarget = shortEntry - shortRisk * rrInput
+
+bool validLongContinuation = firstLongBreakout and enableContinuationInput and longRisk > syminfo.mintick
+bool validShortContinuation = firstShortBreakout and enableContinuationInput and shortRisk > syminfo.mintick
+
+// Save the first breakout direction even if continuation entries are disabled.
+if firstLongBreakout
+    firstBreakoutSeenToday := true
+    firstBreakoutDirection := 1
+    failedBreakoutSwingHigh := high
+    failedBreakoutSwingLow := na
+
+if firstShortBreakout
+    firstBreakoutSeenToday := true
+    firstBreakoutDirection := -1
+    failedBreakoutSwingHigh := na
+    failedBreakoutSwingLow := low
+
+//=============================================================================
+// REVERSAL ENTRY LOGIC
+//=============================================================================
+
+bool closeBackInsideORB = orbReady and close < orbHigh and close > orbLow
+
+// Track the failed breakout extreme after the first breakout happens.
+if firstBreakoutDirection == 1 and inTradeWindow and not reversalTakenToday
+    failedBreakoutSwingHigh := na(failedBreakoutSwingHigh) ? high : math.max(failedBreakoutSwingHigh, high)
+
+if firstBreakoutDirection == -1 and inTradeWindow and not reversalTakenToday
+    failedBreakoutSwingLow := na(failedBreakoutSwingLow) ? low : math.min(failedBreakoutSwingLow, low)
+
+bool longPositionStillOpen = strategy.position_size > 0
+bool shortPositionStillOpen = strategy.position_size < 0
+bool continuationWasDisabled = not enableContinuationInput
+bool allowLongFailureReversal = continuationWasDisabled or allowReversalAfterContinuationClosedInput or longPositionStillOpen
+bool allowShortFailureReversal = continuationWasDisabled or allowReversalAfterContinuationClosedInput or shortPositionStillOpen
+
+bool shortReversalSignal = enableReversalsInput and inTradeWindow and firstBreakoutDirection == 1 and firstBreakoutSeenToday and not reversalTakenToday and closeBackInsideORB and allowLongFailureReversal
+bool longReversalSignal = enableReversalsInput and inTradeWindow and firstBreakoutDirection == -1 and firstBreakoutSeenToday and not reversalTakenToday and closeBackInsideORB and allowShortFailureReversal
+
+float shortRevEntry = close
+float shortRevStop = failedBreakoutSwingHigh
+float shortRevRisk = shortRevStop - shortRevEntry
+float shortRevTarget = shortRevEntry - shortRevRisk * rrInput
+
+float longRevEntry = close
+float longRevStop = failedBreakoutSwingLow
+float longRevRisk = longRevEntry - longRevStop
+float longRevTarget = longRevEntry + longRevRisk * rrInput
+
+bool validShortReversal = shortReversalSignal and not na(shortRevStop) and shortRevRisk > syminfo.mintick
+bool validLongReversal = longReversalSignal and not na(longRevStop) and longRevRisk > syminfo.mintick
+
+//=============================================================================
+// CONTINUATION ORDERS + VISUALS
+//=============================================================================
+
+if validLongContinuation
+    strategy.entry("Long", strategy.long, qty = qtyInput, comment = "First Close Above ORB")
+    strategy.exit("Long TP / SL", from_entry = "Long", stop = longStop, limit = longTarget)
+    continuationTakenToday := true
+    tradeVisualActive := true
+
+    if showTradeLinesInput
+        entryLine := line.new(bar_index, longEntry, bar_index, longEntry, extend = extend.none, color = color.new(color.white, 0), width = 2)
+        stopLine := line.new(bar_index, longStop, bar_index, longStop, extend = extend.none, color = color.new(color.red, 0), width = 2)
+        targetLine := line.new(bar_index, longTarget, bar_index, longTarget, extend = extend.none, color = color.new(color.green, 0), width = 2)
+
+    if showTradeBoxInput
+        rewardBox := box.new(left = bar_index, top = longTarget, right = bar_index, bottom = longEntry, bgcolor = color.new(color.green, 88), border_color = color.new(color.green, 100))
+        riskBox := box.new(left = bar_index, top = longEntry, right = bar_index, bottom = longStop, bgcolor = color.new(color.red, 88), border_color = color.new(color.red, 100))
+
+    if showSignalLabelsInput
+        label.new(bar_index, low, "LONG", style = label.style_label_up, textcolor = color.white, color = color.new(color.green, 0), size = size.tiny)
+
+if validShortContinuation
+    strategy.entry("Short", strategy.short, qty = qtyInput, comment = "First Close Below ORB")
+    strategy.exit("Short TP / SL", from_entry = "Short", stop = shortStop, limit = shortTarget)
+    continuationTakenToday := true
+    tradeVisualActive := true
+
+    if showTradeLinesInput
+        entryLine := line.new(bar_index, shortEntry, bar_index, shortEntry, extend = extend.none, color = color.new(color.white, 0), width = 2)
+        stopLine := line.new(bar_index, shortStop, bar_index, shortStop, extend = extend.none, color = color.new(color.red, 0), width = 2)
+        targetLine := line.new(bar_index, shortTarget, bar_index, shortTarget, extend = extend.none, color = color.new(color.green, 0), width = 2)
+
+    if showTradeBoxInput
+        rewardBox := box.new(left = bar_index, top = shortEntry, right = bar_index, bottom = shortTarget, bgcolor = color.new(color.green, 88), border_color = color.new(color.green, 100))
+        riskBox := box.new(left = bar_index, top = shortStop, right = bar_index, bottom = shortEntry, bgcolor = color.new(color.red, 88), border_color = color.new(color.red, 100))
+
+    if showSignalLabelsInput
+        label.new(bar_index, high, "SHORT", style = label.style_label_down, textcolor = color.white, color = color.new(color.red, 0), size = size.tiny)
+
+//=============================================================================
+// REVERSAL ORDERS + VISUALS
+//=============================================================================
+
+if validShortReversal
+    strategy.close("Long", comment = "Failed Breakout Close")
+    strategy.entry("Reversal Short", strategy.short, qty = qtyInput, comment = "Close Back Inside ORB")
+    strategy.exit("Reversal Short TP / SL", from_entry = "Reversal Short", stop = shortRevStop, limit = shortRevTarget)
+    reversalTakenToday := true
+    tradeVisualActive := true
+
+    if showTradeLinesInput
+        entryLine := line.new(bar_index, shortRevEntry, bar_index, shortRevEntry, extend = extend.none, color = color.new(color.white, 0), width = 2)
+        stopLine := line.new(bar_index, shortRevStop, bar_index, shortRevStop, extend = extend.none, color = color.new(color.red, 0), width = 2)
+        targetLine := line.new(bar_index, shortRevTarget, bar_index, shortRevTarget, extend = extend.none, color = color.new(color.green, 0), width = 2)
+
+    if showTradeBoxInput
+        rewardBox := box.new(left = bar_index, top = shortRevEntry, right = bar_index, bottom = shortRevTarget, bgcolor = color.new(color.green, 88), border_color = color.new(color.green, 100))
+        riskBox := box.new(left = bar_index, top = shortRevStop, right = bar_index, bottom = shortRevEntry, bgcolor = color.new(color.red, 88), border_color = color.new(color.red, 100))
+
+    if showSignalLabelsInput
+        label.new(bar_index, high, "REV SHORT", style = label.style_label_down, textcolor = color.white, color = color.new(color.red, 0), size = size.tiny)
+
+if validLongReversal
+    strategy.close("Short", comment = "Failed Breakdown Close")
+    strategy.entry("Reversal Long", strategy.long, qty = qtyInput, comment = "Close Back Inside ORB")
+    strategy.exit("Reversal Long TP / SL", from_entry = "Reversal Long", stop = longRevStop, limit = longRevTarget)
+    reversalTakenToday := true
+    tradeVisualActive := true
+
+    if showTradeLinesInput
+        entryLine := line.new(bar_index, longRevEntry, bar_index, longRevEntry, extend = extend.none, color = color.new(color.white, 0), width = 2)
+        stopLine := line.new(bar_index, longRevStop, bar_index, longRevStop, extend = extend.none, color = color.new(color.red, 0), width = 2)
+        targetLine := line.new(bar_index, longRevTarget, bar_index, longRevTarget, extend = extend.none, color = color.new(color.green, 0), width = 2)
+
+    if showTradeBoxInput
+        rewardBox := box.new(left = bar_index, top = longRevTarget, right = bar_index, bottom = longRevEntry, bgcolor = color.new(color.green, 88), border_color = color.new(color.green, 100))
+        riskBox := box.new(left = bar_index, top = longRevEntry, right = bar_index, bottom = longRevStop, bgcolor = color.new(color.red, 88), border_color = color.new(color.red, 100))
+
+    if showSignalLabelsInput
+        label.new(bar_index, low, "REV LONG", style = label.style_label_up, textcolor = color.white, color = color.new(color.green, 0), size = size.tiny)
+
+//=============================================================================
+// VISUAL EXTENSION + EOD CLOSE
+//=============================================================================
+
+// Keep trade visuals visible until EOD, not only until TP/SL.
+if tradeVisualActive and (inTradeWindow or tradeWindowEnded)
+    if not na(entryLine)
+        line.set_x2(entryLine, bar_index)
+    if not na(stopLine)
+        line.set_x2(stopLine, bar_index)
+    if not na(targetLine)
+        line.set_x2(targetLine, bar_index)
+    if not na(riskBox)
+        box.set_right(riskBox, bar_index)
+    if not na(rewardBox)
+        box.set_right(rewardBox, bar_index)
+
+if tradeWindowEnded
+    tradeVisualActive := false
+
+if closeAtSessionEndInput and tradeWindowEnded and strategy.position_size != 0
+    strategy.close_all(comment = "EOD Close")
+
+//=============================================================================
+// CLEAN BACKGROUND + STATUS
+//=============================================================================
+
+bgcolor(inORB ? color.new(color.yellow, 90) : na, title = "ORB Window Background")
+
+var table statusTable = table.new(position.top_right, 1, 1)
+
+if barstate.islast
+    string modeText = enableContinuationInput ? "Continuation + Reversal" : "Reversal Only"
+    string statusText = "BDM ORB | " + timeframe.period + " | " + modeText
+    table.cell(statusTable, 0, 0, statusText, text_color = color.white, bgcolor = color.new(color.black, 0))
+
+//=============================================================================
+// ALERT CONDITIONS
+//=============================================================================
+
+alertcondition(validLongContinuation, title = "Long ORB Continuation", message = "First candle close above ORB high. Long continuation entry.")
+alertcondition(validShortContinuation, title = "Short ORB Continuation", message = "First candle close below ORB low. Short continuation entry.")
+alertcondition(validShortReversal, title = "Short ORB Reversal", message = "Failed long breakout: candle closed back inside ORB. Short reversal entry.")
+alertcondition(validLongReversal, title = "Long ORB Reversal", message = "Failed short breakdown: candle closed back inside ORB. Long reversal entry.")

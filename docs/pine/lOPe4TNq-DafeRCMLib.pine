@@ -1,0 +1,838 @@
+//@version=6
+library("DafeRCMLib", overlay=true)
+// ═══════════════════════════════════════════════════════════════════════════════
+// @description DAFE Rolling Confidence Matrix Library - Production-grade structural
+// conviction engine for universal indicator integration. Accumulates directional evidence
+// across 5 stable memory buckets (Impulse, Structure, Exhaustion, Continuation, Compression),
+// computes weighted confidence scores, and drives a 3-state engine (Bull/Transition/Bear)
+// with internal substates for granular regime awareness.
+//
+// Features structural damage detection with integrity scoring, directional permission
+// logic (allow/prefer/forbid per side), regime classification, external evidence injection
+// sockets, and universal modulation outputs for bands, scores, risk, and confidence.
+//
+// Designed to be algorithm-agnostic: the same RCM brain works identically whether driving
+// a Supertrend, Moving Average, Bollinger Band, PSAR, ML model, or pattern engine.
+// The detection is universal. The modulation is bespoke per consumer.
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+// ARCHITECTURE
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ┌──────────────────────────────────────────────────────────────────────────┐
+//  │              ROLLING CONFIDENCE MATRIX ENGINE                            │
+//  │                                                                          │
+//  │   EVIDENCE LAYER           STATE ENGINE           MODULATION LAYER       │
+//  │  ┌──────────────┐    ┌─────────────────┐    ┌────────────────────┐       │
+//  │  │ 5 Buckets    │    │ 3-State Core    │    │ Band Modulation    │       │
+//  │  │ (per side)   │───▸│ Bull/Trans/Bear │───▸│ Score Modulation   │       │
+//  │  │ Decayed +    │    │ + 4 Substates   │    │ Directional Perms  │       │
+//  │  │ Capped       │    └────────┬────────┘    │ Integrity Score    │       │
+//  │  └──────────────┘             │             │ Regime Class       │       │
+//  │                               │             └────────────────────┘       │
+//  │  ┌──────────────┐    ┌────────▼────────┐                                 │
+//  │  │ External     │───▸│ Damage Layer    │    ┌────────────────────┐       │
+//  │  │ Evidence     │    │ Detection +     │───▸│ Dashboard Helpers  │       │
+//  │  │ Sockets      │    │ Response        │    │ conf_bar, text,    │       │
+//  │  └──────────────┘    └─────────────────┘    │ color, formatting  │       │
+//  │                                              └────────────────────┘      │
+//  └──────────────────────────────────────────────────────────────────────────┘
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+// THEORY: WHAT RCM ACTUALLY DOES
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Traditional indicators are structurally blind. A Supertrend doesn't know if
+//  a breakout is backed by impulse volume or exhaustion wicks. A moving average
+//  doesn't know if continuation bars are stacking or if the trend is eroding.
+//
+//  RCM solves this by maintaining rolling evidence buckets that accumulate
+//  structural observations every bar:
+//
+//  1. IMPULSE: Large-body directional bars with high close position and
+//     expanding range. The market is thrusting with conviction.
+//
+//  2. STRUCTURE: Swing breaks, reclaims, sweeps. The market is making and
+//     breaking structural levels — the skeleton of price action.
+//
+//  3. EXHAUSTION: Long wicks, failed follow-through, volume divergence.
+//     The current move is running out of fuel.
+//
+//  4. CONTINUATION: Sequential closes in trend direction, aligned slope,
+//     price holding above/below anchor. The trend is persisting.
+//
+//  5. COMPRESSION: Narrowing ranges, declining ATR ratio. Energy is building
+//     for a potential expansion move.
+//
+//  These buckets decay every bar (configurable rate), accumulate when evidence
+//  appears, and are hard-capped to prevent runaway values. The weighted sum
+//  produces Bull and Bear confidence scores, from which we derive:
+//
+//  - Net Confidence: bullConf - bearConf
+//  - Dominance: net / total (how one-sided the evidence is)
+//  - Pressure: each side's share of total evidence
+//  - State: Bull (1) / Transition (0) / Bear (-1)
+//  - Substates: Early Transition, Contested, Rotational, Pre-Expansion
+//  - Integrity: 0.0 (broken) to 1.0 (fully intact)
+//  - Damage: structural compromise detection with response
+//
+//  The state engine uses hysteresis: entering a state requires strong evidence
+//  (enterNetTh + domTh), but HOLDING a state only requires moderate evidence
+//  (holdNetTh). This prevents flickering.
+//
+//  When damage is detected (opposing evidence accumulates against active state),
+//  the engine degrades the active side's continuation and impulse buckets,
+//  making transition more likely. This creates a natural "structural stop" —
+//  the trend doesn't just flip, it degrades gracefully.
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUBSTATES: TRANSITION IS NOT MONOLITHIC
+// ═══════════════════════════════════════════════════════════════════════════════
+//  When state == 0 (Transition), the internal substate provides granularity:
+//
+//  EARLY (1):       Just lost bull/bear state. Evidence is collapsing.
+//                   → Most signals should be blocked. Wait for clarity.
+//
+//  CONTESTED (2):   Both sides have significant evidence. Neither dominates.
+//                   → Market is fighting. Range-bound strategies may work.
+//
+//  ROTATIONAL (3):  Exhaustion dominates on both sides. Price is chopping.
+//                   → Classic chop zone. Avoid directional trades entirely.
+//
+//  COMPRESSION (4): Compression evidence is high, everything else is low.
+//                   → Energy building. Prepare for breakout. Tighten bands.
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+// USAGE EXAMPLES
+// ═══════════════════════════════════════════════════════════════════════════════
+//  import DskyzInvestments/DafeRCMLib/1 as rcm
+//
+//  // ── BASIC: Supertrend / Band-based indicator ──
+//  var rcm.RCMState  st  = rcm.RCMState.new()
+//  var rcm.RCMConfig cfg = rcm.default_config()
+//  st := rcm.update(st, cfg)
+//  band := band * rcm.get_band_mod(st, 0.45, 1.10)
+//  buy  := buy and rcm.get_permissions(st).allowLong
+//
+//  // ── ADVANCED: Dreamer / Score-based system ──
+//  var rcm.RCMState  st  = rcm.RCMState.new()
+//  var rcm.RCMConfig cfg = rcm.default_config()
+//  st := rcm.update(st, cfg)
+//  fused = comp_score + rcm.get_score_mod(st, comp_score, 0.25)
+//  if rcm.get_permissions(st).preferLong > 0.5 and fused > threshold
+//      // take long with confidence
+//
+//  // ── FULL PACKAGE ──
+//  mod = rcm.get_modulation(st, 0.45, 1.10, score, 0.25, true, bullCol, bearCol, transCol)
+//  band := band * mod.bandMod
+//  score := score + mod.scoreMod
+//  if mod.gatePass and mod.permissions.allowLong
+//      // execute with mod.integrity for position sizing
+//
+//  // ── EXTERNAL EVIDENCE INJECTION ──
+//  ev = rcm.ExternalEvidence.new(bullEvidence=dreamer_bull, source="dreamer")
+//  st := rcm.inject(st, ev)
+
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 1: TYPE DEFINITIONS                               ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @type Directional permission outputs — what sides are allowed and preferred
+export type RCMPermissions
+    bool  allowLong       = true    // Structural permission to go long
+    bool  allowShort      = true    // Structural permission to go short
+    float preferLong      = 0.0     // 0.0-1.0 preference strength for longs
+    float preferShort     = 0.0     // 0.0-1.0 preference strength for shorts
+// @type External evidence injection container — additive inputs from other systems
+export type ExternalEvidence
+    float bullEvidence    = 0.0     // Additive to bull confidence (post-core)
+    float bearEvidence    = 0.0     // Additive to bear confidence (post-core)
+    float integrityMod    = 0.0     // Additive to integrity score (-1.0 to +1.0)
+    string source         = ""      // Source identifier ("dreamer", "footprint", etc.)
+// @type Complete RCM state container — the structural brain
+export type RCMState
+    // Evidence buckets (raw values, per side)
+    float bullImpulse      = 0.0
+    float bearImpulse      = 0.0
+    float bullStructure    = 0.0
+    float bearStructure    = 0.0
+    float bullExhaustion   = 0.0
+    float bearExhaustion   = 0.0
+    float bullContinuation = 0.0
+    float bearContinuation = 0.0
+    float bullCompression  = 0.0
+    float bearCompression  = 0.0
+    // Confidence scores
+    float bullConf         = 0.0
+    float bearConf         = 0.0
+    float netConf          = 0.0
+    float activity         = 0.0
+    float dominance        = 0.0
+    float bullPressure     = 0.0
+    float bearPressure     = 0.0
+    // State engine
+    int   state            = 0      // 1=Bull, 0=Transition, -1=Bear
+    int   prevState        = 0
+    int   substate         = 0      // 0=none, 1=early, 2=contested, 3=rotational, 4=compression
+    bool  bullShift        = false
+    bool  bearShift        = false
+    bool  transShift       = false
+    int   stateBars        = 0      // Bars in current state
+    // Damage layer
+    float bullDamageScore  = 0.0
+    float bearDamageScore  = 0.0
+    bool  bullDamaged      = false
+    bool  bearDamaged      = false
+    // Erosion tracking
+    float bullPeak         = 0.0
+    float bearPeak         = 0.0
+    float bullErosion      = 0.0
+    float bearErosion      = 0.0
+    // Integrity (0.0=broken, 1.0=fully intact)
+    float integrity        = 1.0
+    // External evidence accumulator
+    float extBullEvidence  = 0.0
+    float extBearEvidence  = 0.0
+    float extIntegrityMod  = 0.0
+// @type Configuration container — user passes their tuning parameters
+export type RCMConfig
+    float decayRate        = 0.80
+    float wImpulse         = 1.20
+    float wStructure       = 1.35
+    float wExhaustion      = 1.15
+    float wContinuation    = 1.00
+    float wCompression     = 0.90
+    float enterNetTh       = 12.0
+    float holdNetTh        = 5.0
+    float domTh            = 0.18
+    float flipPressTh      = 0.58
+    bool  enableDamage     = true
+    float damageThreshold  = 4.0
+    float damageDecayMult  = 1.75
+    float damageImpulseCut = 0.88
+    float damageFlipEase   = 0.80
+    float damagePressEase  = 0.92
+// @type Full modulation output package — everything a consumer needs
+export type RCMModulation
+    float         bandMod      = 1.0     // Multiplier for band/width/envelope
+    float         scoreMod     = 0.0     // Additive boost/penalty for scores
+    float         confStrength = 0.0     // 0-1 confidence strength
+    bool          gatePass     = true    // Signal gate (false = block)
+    bool          isDamaged    = false   // Trend integrity flag
+    int           state        = 0       // Direct state access
+    int           substate     = 0       // Substate detail
+    float         integrity    = 1.0     // Structural integrity 0-1
+    RCMPermissions permissions            // Directional allow/prefer
+    color         stateColor   = na      // Pre-computed state color
+    string        regimeLabel  = ""      // Human-readable regime
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 2: INITIALIZATION                                 ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @function Creates a default RCMConfig with proven production values
+// @returns RCMConfig with battle-tested defaults
+export default_config() =>
+    RCMConfig.new()
+// @function Creates a config preset optimized for fast scalping timeframes (1m-5m)
+// @returns RCMConfig with faster decay, lower thresholds
+export scalp_config() =>
+    RCMConfig.new(
+     decayRate        = 0.75,
+     wImpulse         = 1.40,
+     wStructure       = 1.20,
+     wExhaustion      = 1.30,
+     wContinuation    = 0.80,
+     wCompression     = 1.00,
+     enterNetTh       = 8.0,
+     holdNetTh        = 3.0,
+     domTh            = 0.15,
+     flipPressTh      = 0.55,
+     damageThreshold  = 3.0,
+     damageDecayMult  = 2.00,
+     damageImpulseCut = 0.85,
+     damageFlipEase   = 0.75,
+     damagePressEase  = 0.90)
+// @function Creates a config preset optimized for swing/position timeframes (4H-D)
+// @returns RCMConfig with slower decay, higher thresholds
+export swing_config() =>
+    RCMConfig.new(
+     decayRate        = 0.88,
+     wImpulse         = 1.10,
+     wStructure       = 1.50,
+     wExhaustion      = 1.00,
+     wContinuation    = 1.20,
+     wCompression     = 0.80,
+     enterNetTh       = 16.0,
+     holdNetTh        = 7.0,
+     domTh            = 0.22,
+     flipPressTh      = 0.62,
+     damageThreshold  = 5.0,
+     damageDecayMult  = 1.50,
+     damageImpulseCut = 0.90,
+     damageFlipEase   = 0.85,
+     damagePressEase  = 0.95)
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 3: EXTERNAL EVIDENCE INJECTION                    ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// External systems can inject evidence that influences confidence without
+// directly setting state. The state engine always makes the final call.
+// Injection is ADDITIVE — it tips the scales, it doesn't override them.
+// @function Injects external evidence into the RCM state (call BEFORE update)
+// @param st RCMState to inject into
+// @param ev ExternalEvidence containing bull/bear evidence and integrity modifier
+// @returns Modified RCMState with external evidence queued for next update
+export inject(RCMState st, ExternalEvidence ev) =>
+    st.extBullEvidence += ev.bullEvidence
+    st.extBearEvidence += ev.bearEvidence
+    st.extIntegrityMod += math.max(-1.0, math.min(1.0, ev.integrityMod))
+    st
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 4: CORE ENGINE                                    ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// The core update function runs every bar. It:
+// 1. Decays all evidence buckets
+// 2. Detects and accumulates new evidence
+// 3. Computes confidence scores (with external evidence)
+// 4. Runs damage detection and response
+// 5. Executes state transitions with hysteresis
+// 6. Classifies substates and computes integrity
+// 7. Resets external evidence accumulators
+// @function Core RCM update — call once per bar
+// @param st RCMState (persistent, use var)
+// @param cfg RCMConfig with tuning parameters
+// @returns Updated RCMState with all fields current
+export update(RCMState st, RCMConfig cfg) =>
+    // ── Market data ──
+    float rng       = high - low
+    float body      = math.abs(close - open)
+    float bodyAvg   = ta.sma(body, 10)
+    float rngAvg    = ta.sma(rng, 10)
+    float volAvg    = ta.sma(volume, 20)
+    float volR      = volAvg > 0 ? volume / volAvg : 1.0
+    float anchor    = ta.ema(hlc3, 21)
+    float prevAnch  = nz(anchor[1])
+    float slope     = anchor - prevAnch
+    bool  bullBody  = close > open
+    bool  bearBody  = close < open
+    float closePos  = rng > 0 ? (close - low) / rng : 0.5
+    float swHi      = ta.highest(high, 5)
+    float swLo      = ta.lowest(low, 5)
+    bool  brokeUp   = close > swHi[1]
+    bool  brokeDn   = close < swLo[1]
+    bool  reclBull  = low < swLo[1] and close > swLo[1] and bullBody
+    bool  reclBear  = high > swHi[1] and close < swHi[1] and bearBody
+    float lWick     = math.min(open, close) - low
+    float uWick     = high - math.max(open, close)
+    float lWickR    = rng > 0 ? lWick / rng : 0.0
+    float uWickR    = rng > 0 ? uWick / rng : 0.0
+    float atrVal    = ta.atr(14)
+    float atrSlow   = ta.sma(atrVal, 30)
+    float atrComp   = atrSlow > 0 ? atrVal / atrSlow : 1.0
+    bool  narrowBar = rngAvg > 0 ? rng < rngAvg * 0.8 : false
+    bool  aboveA    = close > anchor
+    bool  belowA    = close < anchor
+    bool  crossUp   = close > anchor and close[1] <= prevAnch
+    bool  crossDn   = close < anchor and close[1] >= prevAnch
+    // ── 0) DECAY ──
+    st.bullImpulse      := nz(st.bullImpulse) * cfg.decayRate
+    st.bearImpulse      := nz(st.bearImpulse) * cfg.decayRate
+    st.bullStructure    := nz(st.bullStructure) * cfg.decayRate
+    st.bearStructure    := nz(st.bearStructure) * cfg.decayRate
+    st.bullExhaustion   := nz(st.bullExhaustion) * cfg.decayRate
+    st.bearExhaustion   := nz(st.bearExhaustion) * cfg.decayRate
+    st.bullContinuation := nz(st.bullContinuation) * cfg.decayRate
+    st.bearContinuation := nz(st.bearContinuation) * cfg.decayRate
+    st.bullCompression  := nz(st.bullCompression) * cfg.decayRate
+    st.bearCompression  := nz(st.bearCompression) * cfg.decayRate
+    // ── 1) IMPULSE ──
+    bool bImpC = bullBody and body > nz(bodyAvg, body) * 1.15 and closePos > 0.7 and rng > nz(rngAvg, rng) * 1.05
+    bool sImpC = bearBody and body > nz(bodyAvg, body) * 1.15 and closePos < 0.3 and rng > nz(rngAvg, rng) * 1.05
+    if bImpC
+        st.bullImpulse += 4.0 + (volR > 1.2 ? 1.5 : 0.0)
+    if sImpC
+        st.bearImpulse += 4.0 + (volR > 1.2 ? 1.5 : 0.0)
+    // ── 2) STRUCTURE ──
+    if brokeUp
+        st.bullStructure += 6.0
+    if brokeDn
+        st.bearStructure += 6.0
+    if reclBull
+        st.bullStructure += 5.5
+        st.bullExhaustion += 2.0
+    if reclBear
+        st.bearStructure += 5.5
+        st.bearExhaustion += 2.0
+    if low < swLo[1] and close > swLo[1]
+        st.bullStructure += 4.0
+    if high > swHi[1] and close < swHi[1]
+        st.bearStructure += 4.0
+    // ── 3) EXHAUSTION ──
+    if bearBody and lWickR > 0.45 and volR > 1.2
+        st.bullExhaustion += 4.5
+    if bullBody and uWickR > 0.45 and volR > 1.2
+        st.bearExhaustion += 4.5
+    // ── 4) CONTINUATION ──
+    if slope > 0 and aboveA and close > close[1]
+        st.bullContinuation += 2.0
+    if slope < 0 and belowA and close < close[1]
+        st.bearContinuation += 2.0
+    if belowA and st.bullContinuation > 0
+        st.bullContinuation *= 0.62
+    if aboveA and st.bearContinuation > 0
+        st.bearContinuation *= 0.62
+    if crossDn and st.bullContinuation > 0
+        st.bullContinuation *= 0.50
+    if crossUp and st.bearContinuation > 0
+        st.bearContinuation *= 0.50
+    // ── 5) COMPRESSION ──
+    if narrowBar and atrComp < 0.95 and aboveA
+        st.bullCompression += 1.5
+    if narrowBar and atrComp < 0.95 and belowA
+        st.bearCompression += 1.5
+    // ── CAPS ──
+    st.bullImpulse      := math.min(st.bullImpulse, 25)
+    st.bearImpulse      := math.min(st.bearImpulse, 25)
+    st.bullStructure    := math.min(st.bullStructure, 30)
+    st.bearStructure    := math.min(st.bearStructure, 30)
+    st.bullExhaustion   := math.min(st.bullExhaustion, 20)
+    st.bearExhaustion   := math.min(st.bearExhaustion, 20)
+    st.bullContinuation := math.min(st.bullContinuation, 20)
+    st.bearContinuation := math.min(st.bearContinuation, 20)
+    st.bullCompression  := math.min(st.bullCompression, 15)
+    st.bearCompression  := math.min(st.bearCompression, 15)
+    // ── CONFIDENCE (internal + external evidence) ──
+    st.bullConf := st.bullImpulse * cfg.wImpulse + st.bullStructure * cfg.wStructure + st.bullExhaustion * cfg.wExhaustion + st.bullContinuation * cfg.wContinuation + st.bullCompression * cfg.wCompression
+    st.bearConf := st.bearImpulse * cfg.wImpulse + st.bearStructure * cfg.wStructure + st.bearExhaustion * cfg.wExhaustion + st.bearContinuation * cfg.wContinuation + st.bearCompression * cfg.wCompression
+    // Apply external evidence (additive, post-core)
+    st.bullConf += math.max(0.0, st.extBullEvidence)
+    st.bearConf += math.max(0.0, st.extBearEvidence)
+    st.activity      := st.bullConf + st.bearConf
+    st.netConf       := st.bullConf - st.bearConf
+    st.dominance     := st.activity > 0 ? st.netConf / st.activity : 0.0
+    st.bullPressure  := st.activity > 0 ? st.bullConf / st.activity : 0.0
+    st.bearPressure  := st.activity > 0 ? st.bearConf / st.activity : 0.0
+    // ── EROSION ──
+    st.bullPeak    := st.bullConf > nz(st.bullPeak) ? st.bullConf : nz(st.bullPeak) * 0.985
+    st.bearPeak    := st.bearConf > nz(st.bearPeak) ? st.bearConf : nz(st.bearPeak) * 0.985
+    st.bullErosion := math.max(0.0, st.bullPeak - st.bullConf)
+    st.bearErosion := math.max(0.0, st.bearPeak - st.bearConf)
+    // ── DAMAGE DETECTION ──
+    st.prevState := nz(st.state)
+    st.bullDamageScore := 0.0
+    st.bearDamageScore := 0.0
+    if cfg.enableDamage
+        if st.prevState == 1
+            if belowA
+                st.bullDamageScore += 1.5
+            if sImpC
+                st.bullDamageScore += 1.0
+            if uWickR > 0.35
+                st.bullDamageScore += 0.75
+            if slope < 0
+                st.bullDamageScore += 1.0
+            if st.bearPressure > 0.45
+                st.bullDamageScore += 1.0
+            if close <= close[1] and high <= high[1]
+                st.bullDamageScore += 0.75
+            if crossDn
+                st.bullDamageScore += 1.25
+        if st.prevState == -1
+            if aboveA
+                st.bearDamageScore += 1.5
+            if bImpC
+                st.bearDamageScore += 1.0
+            if lWickR > 0.35
+                st.bearDamageScore += 0.75
+            if slope > 0
+                st.bearDamageScore += 1.0
+            if st.bullPressure > 0.45
+                st.bearDamageScore += 1.0
+            if close >= close[1] and low >= low[1]
+                st.bearDamageScore += 0.75
+            if crossUp
+                st.bearDamageScore += 1.25
+    st.bullDamaged := st.prevState == 1 and st.bullDamageScore >= cfg.damageThreshold
+    st.bearDamaged := st.prevState == -1 and st.bearDamageScore >= cfg.damageThreshold
+    // ── DAMAGE RESPONSE ──
+    if st.bullDamaged
+        st.bullContinuation *= math.max(0.0, 1.0 - (0.25 * cfg.damageDecayMult))
+        st.bullImpulse *= cfg.damageImpulseCut
+        st.bullStructure *= 0.92
+        st.bearExhaustion += 1.5
+        st.bearImpulse += 1.0
+    if st.bearDamaged
+        st.bearContinuation *= math.max(0.0, 1.0 - (0.25 * cfg.damageDecayMult))
+        st.bearImpulse *= cfg.damageImpulseCut
+        st.bearStructure *= 0.92
+        st.bullExhaustion += 1.5
+        st.bullImpulse += 1.0
+    // Re-cap after damage response
+    st.bullImpulse      := math.min(math.max(st.bullImpulse, 0), 25)
+    st.bearImpulse      := math.min(math.max(st.bearImpulse, 0), 25)
+    st.bullStructure    := math.min(math.max(st.bullStructure, 0), 30)
+    st.bearStructure    := math.min(math.max(st.bearStructure, 0), 30)
+    st.bullExhaustion   := math.min(math.max(st.bullExhaustion, 0), 20)
+    st.bearExhaustion   := math.min(math.max(st.bearExhaustion, 0), 20)
+    st.bullContinuation := math.min(math.max(st.bullContinuation, 0), 20)
+    st.bearContinuation := math.min(math.max(st.bearContinuation, 0), 20)
+    st.bullCompression  := math.min(math.max(st.bullCompression, 0), 15)
+    st.bearCompression  := math.min(math.max(st.bearCompression, 0), 15)
+    // ── STATE ENGINE ──
+    bool enterBull = st.netConf > cfg.enterNetTh and st.dominance > cfg.domTh
+    bool enterBear = st.netConf < -cfg.enterNetTh and st.dominance < -cfg.domTh
+    float holdEff  = (st.prevState == 1 and st.bullDamaged) ? cfg.holdNetTh * cfg.damageFlipEase : (st.prevState == -1 and st.bearDamaged) ? cfg.holdNetTh * cfg.damageFlipEase : cfg.holdNetTh
+    float pressEff = (st.prevState == 1 and st.bullDamaged) ? cfg.flipPressTh * cfg.damagePressEase : (st.prevState == -1 and st.bearDamaged) ? cfg.flipPressTh * cfg.damagePressEase : cfg.flipPressTh
+    bool bLosing = st.prevState == 1 and (st.netConf < holdEff or st.bearPressure > pressEff or st.bullErosion > st.bullConf * 0.35)
+    bool sLosing = st.prevState == -1 and (st.netConf > -holdEff or st.bullPressure > pressEff or st.bearErosion > st.bearConf * 0.35)
+    st.state := st.prevState
+    if st.prevState == 0
+        if enterBull
+            st.state := 1
+        else if enterBear
+            st.state := -1
+    else if st.prevState == 1
+        st.state := bLosing ? 0 : 1
+    else if st.prevState == -1
+        st.state := sLosing ? 0 : -1
+    if st.state == 0
+        if enterBull
+            st.state := 1
+        else if enterBear
+            st.state := -1
+    st.bullShift  := st.state == 1 and st.prevState != 1
+    st.bearShift  := st.state == -1 and st.prevState != -1
+    st.transShift := st.state == 0 and st.prevState != 0
+    // State duration tracking
+    if st.state == st.prevState
+        st.stateBars += 1
+    else
+        st.stateBars := 0
+    // ── SUBSTATE CLASSIFICATION ──
+    if st.state == 0
+        float totalExh = st.bullExhaustion + st.bearExhaustion
+        float totalCmp = st.bullCompression + st.bearCompression
+        float totalImp = st.bullImpulse + st.bearImpulse
+        float totalStr = st.bullStructure + st.bearStructure
+        float totalAll = totalExh + totalCmp + totalImp + totalStr + 0.001
+        if st.stateBars <= 3 and st.prevState != 0
+            st.substate := 1  // Early transition
+        else if totalCmp / totalAll > 0.35 and totalImp / totalAll < 0.15
+            st.substate := 4  // Pre-expansion compression
+        else if totalExh / totalAll > 0.35
+            st.substate := 3  // Rotational chop
+        else if st.bullConf > cfg.enterNetTh * 0.5 and st.bearConf > cfg.enterNetTh * 0.5
+            st.substate := 2  // Contested
+        else
+            st.substate := 1  // Default early
+    else
+        st.substate := 0  // Not in transition
+    // ── INTEGRITY SCORE ──
+    float integ = 1.0
+    // Erosion component
+    if st.state == 1 and st.bullPeak > 0
+        integ -= math.min(0.3, (st.bullErosion / st.bullPeak) * 0.3)
+    else if st.state == -1 and st.bearPeak > 0
+        integ -= math.min(0.3, (st.bearErosion / st.bearPeak) * 0.3)
+    // Damage component
+    float dmgMax = cfg.damageThreshold * 1.5
+    if st.state == 1
+        integ -= math.min(0.3, (st.bullDamageScore / dmgMax) * 0.3)
+    else if st.state == -1
+        integ -= math.min(0.3, (st.bearDamageScore / dmgMax) * 0.3)
+    else
+        integ -= 0.15  // Transition inherently reduces integrity
+    // Opposing pressure component
+    if st.state == 1
+        integ -= math.min(0.2, st.bearPressure * 0.3)
+    else if st.state == -1
+        integ -= math.min(0.2, st.bullPressure * 0.3)
+    else
+        integ -= 0.1
+    // Transition duration penalty
+    if st.state == 0
+        integ -= math.min(0.15, st.stateBars * 0.01)
+    // External integrity modifier
+    integ += st.extIntegrityMod * 0.1
+    st.integrity := math.max(0.0, math.min(1.0, integ))
+    // ── RESET EXTERNAL EVIDENCE ──
+    st.extBullEvidence := 0.0
+    st.extBearEvidence := 0.0
+    st.extIntegrityMod := 0.0
+    st
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 5: MODULATION OUTPUTS                             ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @function Returns band width multiplier based on confidence and damage
+// @param st Current RCMState
+// @param confTighten How much dominance compresses width (0-1)
+// @param damageWiden Multiplier when damaged (>1.0)
+// @returns Float multiplier to apply to band/width/envelope
+export get_band_mod(RCMState st, float confTighten, float damageWiden) =>
+    float confStr = st.activity > 0 ? math.min(math.abs(st.dominance), 1.0) : 0.0
+    float mod = 1.0 - confStr * confTighten
+    mod := (st.bullDamaged or st.bearDamaged) ? mod * damageWiden : mod
+    mod
+// @function Returns score boost/penalty based on structural alignment
+// @param st Current RCMState
+// @param score The directional score to evaluate alignment against
+// @param alignBoost Maximum boost factor when aligned (0-1)
+// @returns Float additive modifier to apply to score
+export get_score_mod(RCMState st, float score, float alignBoost) =>
+    float confStr = st.activity > 0 ? math.min(math.abs(st.dominance), 1.0) : 0.0
+    float boost = 0.0
+    if st.state == 1 and score > 0
+        boost := alignBoost * confStr
+    else if st.state == -1 and score < 0
+        boost := alignBoost * confStr
+    else if st.state != 0 and ((st.state == 1 and score < 0) or (st.state == -1 and score > 0))
+        boost := -alignBoost * confStr * 0.5
+    boost * math.abs(score)
+// @function Returns signal gate — should signals be allowed?
+// @param st Current RCMState
+// @param blockTransition If true, blocks all signals during transition state
+// @returns Boolean true if signals are permitted
+export get_gate(RCMState st, bool blockTransition) =>
+    not (blockTransition and st.state == 0)
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 6: DIRECTIONAL PERMISSIONS                        ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @function Returns directional permission struct with allow/prefer per side
+// @param st Current RCMState
+// @returns RCMPermissions with allowLong, allowShort, preferLong, preferShort
+export get_permissions(RCMState st) =>
+    RCMPermissions perms = RCMPermissions.new()
+    float confStr = st.activity > 0 ? math.min(math.abs(st.dominance), 1.0) : 0.0
+    if st.state == 1
+        perms.allowLong  := true
+        perms.allowShort := st.bullDamaged  // Only allow shorts when damaged
+        perms.preferLong := confStr
+        perms.preferShort := st.bullDamaged ? (1.0 - st.integrity) * 0.5 : 0.0
+    else if st.state == -1
+        perms.allowLong  := st.bearDamaged  // Only allow longs when damaged
+        perms.allowShort := true
+        perms.preferLong := st.bearDamaged ? (1.0 - st.integrity) * 0.5 : 0.0
+        perms.preferShort := confStr
+    else  // Transition
+        perms.allowLong  := true
+        perms.allowShort := true
+        // Preference based on which side has more evidence
+        if st.bullConf > st.bearConf
+            perms.preferLong := math.min(0.5, (st.bullConf - st.bearConf) / math.max(st.activity, 1.0))
+            perms.preferShort := 0.0
+        else
+            perms.preferLong := 0.0
+            perms.preferShort := math.min(0.5, (st.bearConf - st.bullConf) / math.max(st.activity, 1.0))
+    perms
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 7: REGIME CLASSIFICATION                          ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @function Classifies current market regime from RCM state
+// @param st Current RCMState
+// @returns String regime label
+export get_regime(RCMState st) =>
+    if st.state != 0
+        // In directional state
+        if st.integrity > 0.8 and math.abs(st.dominance) > 0.5
+            "Strong Trend"
+        else if st.integrity > 0.5
+            "Trend"
+        else
+            "Damaged Trend"
+    else
+        // In transition
+        switch st.substate
+            1 => "Early Transition"
+            2 => "Contested"
+            3 => "Rotation"
+            4 => "Compression"
+            => "Transition"
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 8: FULL MODULATION PACKAGE                        ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @function Returns complete modulation package — all outputs in one call
+// @param st Current RCMState
+// @param confTighten Band tightening factor (0-1)
+// @param damageWiden Damage expansion factor (>1.0)
+// @param score Directional score for alignment check
+// @param alignBoost Max score boost when aligned (0-1)
+// @param blockTransition Block signals in transition?
+// @param bullCol Color for bull state
+// @param bearCol Color for bear state
+// @param transCol Color for transition state
+// @returns RCMModulation with all outputs populated
+export get_modulation(RCMState st, float confTighten, float damageWiden, float score, float alignBoost, bool blockTransition, color bullCol, color bearCol, color transCol) =>
+    float confStr = st.activity > 0 ? math.min(math.abs(st.dominance), 1.0) : 0.0
+    float bMod = get_band_mod(st, confTighten, damageWiden)
+    float sMod = get_score_mod(st, score, alignBoost)
+    bool  gate = get_gate(st, blockTransition)
+    bool  dmgd = st.bullDamaged or st.bearDamaged
+    color sCol = st.state == 1 ? bullCol : st.state == -1 ? bearCol : transCol
+    RCMPermissions perms = get_permissions(st)
+    string regime = get_regime(st)
+    RCMModulation.new(bMod, sMod, confStr, gate, dmgd, st.state, st.substate, st.integrity, perms, sCol, regime)
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 9: DASHBOARD & DISPLAY HELPERS                    ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// @function Generates a visual confidence bar string (e.g. "████░░░░")
+// @param val Current value
+// @param maxVal Maximum value for 100%
+// @param len Number of characters in bar
+// @returns String visual bar
+export conf_bar(float val, float maxVal, int len) =>
+    float pct = math.max(0.0, math.min(100.0, (val / maxVal) * 100))
+    int filled = math.round(pct / 100 * len)
+    string bar = ""
+    for k = 0 to len - 1
+        bar += k < filled ? "█" : "░"
+    bar
+// @function Returns human-readable state text with symbol
+// @param st Current RCMState
+// @returns String like "▲ BULL" or "◆ TRANSITION"
+export state_text(RCMState st) =>
+    st.state == 1 ? "▲ BULL" : st.state == -1 ? "▼ BEAR" : "◆ TRANSITION"
+// @function Returns human-readable substate text
+// @param st Current RCMState
+// @returns String like "Early", "Contested", "Rotation", "Compression"
+export substate_text(RCMState st) =>
+    switch st.substate
+        1 => "Early"
+        2 => "Contested"
+        3 => "Rotation"
+        4 => "Compression"
+        => "—"
+// @function Returns human-readable damage status text
+// @param st Current RCMState
+// @returns String like "BULL DMG", "BEAR DMG", or "Intact"
+export damage_text(RCMState st) =>
+    st.bullDamaged ? "BULL DMG" : st.bearDamaged ? "BEAR DMG" : "Intact"
+// @function Returns appropriate color for current state
+// @param st Current RCMState
+// @param bullCol Color for bull
+// @param bearCol Color for bear
+// @param transCol Color for transition
+// @returns Color matching current state
+export state_color(RCMState st, color bullCol, color bearCol, color transCol) =>
+    st.state == 1 ? bullCol : st.state == -1 ? bearCol : transCol
+// @function Returns integrity as a formatted percentage string
+// @param st Current RCMState
+// @returns String like "87.3%"
+export integrity_text(RCMState st) =>
+    str.tostring(st.integrity * 100, "#.#") + "%"
+// @function Returns color gradient for integrity (green=high, red=low)
+// @param st Current RCMState
+// @param highCol Color for high integrity
+// @param lowCol Color for low integrity
+// @returns Blended color based on integrity value
+export integrity_color(RCMState st, color highCol, color lowCol) =>
+    color.from_gradient(st.integrity, 0.0, 1.0, lowCol, highCol)
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║                  SECTION 10: NARRATIVE TEXT GENERATORS                      ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+// Pre-built human-readable narrative strings for each analytical dimension.
+// Consumers can use these directly in narrative panels without writing
+// their own text logic. Each function returns a [string, color] tuple.
+// @function Returns regime narrative text and appropriate color
+// @param st Current RCMState
+// @param bullCol Color for bullish narratives
+// @param bearCol Color for bearish narratives
+// @param transCol Color for transition narratives
+// @param dimCol Color for neutral/dim narratives
+// @returns [string narrative, color textColor]
+export narrative_regime(RCMState st, color bullCol, color bearCol, color transCol, color dimCol) =>
+    string regime = get_regime(st)
+    string txt = switch regime
+        "Strong Trend"      => "Strong directional conviction"
+        "Trend"             => "Active trend with moderate integrity"
+        "Damaged Trend"     => "Trend compromised — structural caution"
+        "Contested"         => "Both sides fighting — range likely"
+        "Rotation"          => "Exhaustion dominant — classic chop"
+        "Compression"       => "Energy building — breakout imminent"
+        "Early Transition"  => "Structural clarity pending"
+        => "Scanning for structural evidence"
+    color col = switch regime
+        "Strong Trend"      => bullCol
+        "Trend"             => st.state == 1 ? bullCol : bearCol
+        "Damaged Trend"     => transCol
+        "Contested"         => transCol
+        "Rotation"          => bearCol
+        "Compression"       => dimCol
+        => dimCol
+    [txt, col]
+// @function Returns kinetics/pressure narrative text and color
+// @param st Current RCMState
+// @param accentCol Color for high-conviction kinetics
+// @param dimCol Color for low-conviction
+// @returns [string narrative, color textColor]
+export narrative_kinetics(RCMState st, color accentCol, color dimCol) =>
+    float absDom = math.abs(st.dominance)
+    string txt = absDom > 0.6 ? "Heavy directional dominance" :
+                 absDom > 0.4 ? "Strong trend pressure building" :
+                 absDom > 0.2 ? "Moderate trend pressure" :
+                 absDom > 0.1 ? "Mild directional lean" :
+                 "Contested market activity"
+    color col = absDom > 0.4 ? accentCol : dimCol
+    [txt, col]
+// @function Returns structural integrity narrative text and color
+// @param st Current RCMState
+// @param bullCol Color for intact structure
+// @param bearCol Color for broken structure
+// @param transCol Color for degrading structure
+// @param dimCol Color for neutral
+// @returns [string narrative, color textColor]
+export narrative_structure(RCMState st, color bullCol, color bearCol, color transCol) =>
+    string txt = st.bullDamaged ? "Bull structure compromised" :
+                 st.bearDamaged ? "Bear structure compromised" :
+                 st.integrity > 0.8 ? "Structural integrity strong" :
+                 st.integrity > 0.6 ? "Moderate structural health" :
+                 st.integrity > 0.4 ? "Structural degradation in progress" :
+                 st.state == 0 ? "Awaiting structural confirmation" :
+                 "Structural breakdown detected"
+    color col = (st.bullDamaged or st.bearDamaged) ? transCol : st.integrity > 0.7 ? bullCol : st.integrity > 0.4 ? transCol : bearCol
+    [txt, col]
+// @function Returns directional permissions narrative text and color
+// @param perms Current RCMPermissions
+// @param bullCol Color for long-preferred
+// @param bearCol Color for short-preferred
+// @param dimCol Color for neutral
+// @returns [string narrative, color textColor]
+export narrative_permissions(RCMPermissions perms, color bullCol, color bearCol, color dimCol) =>
+    string txt = perms.allowLong and not perms.allowShort ? "Long-only environment" :
+                 not perms.allowLong and perms.allowShort ? "Short-only environment" :
+                 perms.preferLong > 0.5 ? "Longs strongly preferred" :
+                 perms.preferLong > 0.3 ? "Longs structurally preferred" :
+                 perms.preferShort > 0.5 ? "Shorts strongly preferred" :
+                 perms.preferShort > 0.3 ? "Shorts structurally preferred" :
+                 "Both sides permitted — scan for setups"
+    color col = perms.preferLong > 0.3 ? bullCol : perms.preferShort > 0.3 ? bearCol : dimCol
+    [txt, col]
+// @function Returns band modulation narrative text and color
+// @param bandMod Current band modulation value
+// @param bullCol Color for tightened bands
+// @param warnCol Color for widened bands
+// @param dimCol Color for baseline
+// @returns [string narrative, color textColor]
+export narrative_modulation(float bandMod, color bullCol, color warnCol, color dimCol) =>
+    string txt = bandMod < 0.7 ? "Bands compressed — very high conviction" :
+                 bandMod < 0.85 ? "Bands tightened — strong trend confidence" :
+                 bandMod > 1.15 ? "Bands widened — structural damage active" :
+                 bandMod > 1.02 ? "Bands slightly expanded — minor stress" :
+                 "Bands at baseline — normal operation"
+    color col = bandMod < 0.85 ? bullCol : bandMod > 1.05 ? warnCol : dimCol
+    [txt, col]
+// @function Returns full narrative summary combining all dimensions
+// @param st Current RCMState
+// @param perms Current RCMPermissions
+// @param bandMod Current band modulation value
+// @returns string Multi-line narrative summary
+export narrative_full(RCMState st, RCMPermissions perms, float bandMod) =>
+    string regime = get_regime(st)
+    float absDom = math.abs(st.dominance)
+    string stateDir = st.state == 1 ? "bullish" : st.state == -1 ? "bearish" : "neutral"
+    string line1 = "Regime: " + regime + " (" + stateDir + ")"
+    string line2 = absDom > 0.4 ? "Strong " + stateDir + " pressure" :
+                   absDom > 0.2 ? "Moderate directional lean" :
+                   "Market activity contested"
+    string line3 = "Integrity: " + str.tostring(st.integrity * 100, "#") + "% — " +
+                   (st.integrity > 0.7 ? "solid" : st.integrity > 0.4 ? "degrading" : "compromised")
+    string line4 = perms.preferLong > 0.3 ? "Favoring longs" :
+                   perms.preferShort > 0.3 ? "Favoring shorts" :
+                   "No directional preference"
+    string line5 = "Bands: " + str.tostring(bandMod, "#.##") + "x" +
+                   (bandMod < 0.85 ? " (tightened)" : bandMod > 1.05 ? " (widened)" : " (normal)")
+    line1 + "\n" + line2 + "\n" + line3 + "\n" + line4 + "\n" + line5

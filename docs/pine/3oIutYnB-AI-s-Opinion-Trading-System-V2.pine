@@ -1,0 +1,490 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ChalkBoardAnalytics
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ChalkBoardAnalytics
+
+//@version=6
+indicator('AI\'s Opinion Trading System V5', overlay = true, max_labels_count = 500, max_boxes_count = 500)
+
+// === INPUTS ===
+tableLocationInput = input.string('Top Right', 'Table Location', options = ['Top Left', 'Top Center', 'Top Right', 'Middle Left', 'Middle Center', 'Middle Right', 'Bottom Left', 'Bottom Center', 'Bottom Right'])
+decimals = input.int(2, 'Decimal Places', minval = 0, maxval = 10)
+show_lookback = input.bool(true, 'Show Sentiment Lookback?')
+maxBars = 10
+
+aiViewMode = input.string('Majority', 'AI View Mode', options = ['Majority', 'Weighted', 'Custom'])
+w_ai = input.int(3, 'AI Consensus Weight', minval = 1)
+w_delta = input.int(2, 'Vol Delta Weight', minval = 1)
+w_sentiment = input.int(2, 'Sentiment Weight', minval = 1)
+customLogic = input.string('ai==1 and delta>0 and sentiment>0', 'Custom AI View Logic')
+
+use_custom_sl_tp = input.bool(false, 'Use Custom Stop Loss/Take Profit Prices?')
+custom_sl_buy = input.float(0.0, 'Custom Buy Stop Loss Price (0 = auto)', step = 0.01)
+custom_tp_buy = input.float(0.0, 'Custom Buy Take Profit Price (0 = auto)', step = 0.01)
+custom_sl_sell = input.float(0.0, 'Custom Sell Stop Loss Price (0 = auto)', step = 0.01)
+custom_tp_sell = input.float(0.0, 'Custom Sell Take Profit Price (0 = auto)', step = 0.01)
+
+userLookback = input.int(50, 'Sentiment Lookback', minval = 1)
+max_pyramids = input.int(3, 'Max Pyramid Adds', minval = 1, maxval = 10)
+
+// === SIGNAL PRESET SELECTION ===
+signal_preset = input.string('Robust', 'Signal Preset', options=['Robust', 'Standard', 'Freedom', 'Custom'])
+var int default_confirmBars = 2
+var float default_adxThresh = 20
+var int default_atrLen = 14
+var int default_volLookback = 20
+var int default_rsiFlatMin = 45
+var int default_rsiFlatMax = 55
+
+if barstate.isfirst
+    if signal_preset == 'Robust'
+        default_confirmBars := 3
+        default_adxThresh := 25
+        default_atrLen := 14
+        default_volLookback := 20
+        default_rsiFlatMin := 47
+        default_rsiFlatMax := 53
+    else if signal_preset == 'Standard'
+        default_confirmBars := 2
+        default_adxThresh := 20
+        default_atrLen := 14
+        default_volLookback := 15
+        default_rsiFlatMin := 45
+        default_rsiFlatMax := 55
+    else if signal_preset == 'Freedom'
+        default_confirmBars := 1
+        default_adxThresh := 15
+        default_atrLen := 10
+        default_volLookback := 10
+        default_rsiFlatMin := 40
+        default_rsiFlatMax := 60
+
+confirmBars = input.int(2, 'Min Bars for Signal Confirmation (see preset suggestions above)', minval=1, maxval=5)
+adxLen = input.int(14, 'ADX Length')
+adxThresh = input.float(20, 'ADX Trend Threshold (see preset suggestions above)')
+atrLen = input.int(14, 'ATR Length (see preset suggestions above)')
+volLookback = input.int(20, 'Volume Confirmation Lookback (see preset suggestions above)')
+volMultiplier = input.float(1.5, 'Volume Confirmation Multiplier (see preset suggestions above)')
+rsiFlatMin = input.int(45, 'RSI Flat Min')
+rsiFlatMax = input.int(55, 'RSI Flat Max')
+
+signal_mode = signal_preset
+
+tableLocation = tableLocationInput == 'Top Left' ? position.top_left : tableLocationInput == 'Top Center' ? position.top_center : tableLocationInput == 'Top Right' ? position.top_right : tableLocationInput == 'Middle Left' ? position.middle_left : tableLocationInput == 'Middle Center' ? position.middle_center : tableLocationInput == 'Middle Right' ? position.middle_right : tableLocationInput == 'Bottom Left' ? position.bottom_left : tableLocationInput == 'Bottom Center' ? position.bottom_center : position.bottom_right
+f_getFormat(decimals) =>
+    decimals == 0 ? "##0" : "##0." + str.repeat("0", decimals)
+fmt = f_getFormat(decimals)
+
+// === INDICATORS ===
+sma5 = ta.sma(close, 5)
+sma20 = ta.sma(close, 20)
+smaCrossUp = ta.crossover(sma5, sma20)
+smaCrossDn = ta.crossunder(sma5, sma20)
+smaCross = smaCrossUp ? 1 : smaCrossDn ? -1 : 0
+
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+emaCrossUp = ta.crossover(ema9, ema21)
+emaCrossDn = ta.crossunder(ema9, ema21)
+emaCross = emaCrossUp ? 1 : emaCrossDn ? -1 : 0
+
+rsi14 = ta.rsi(close, 14)
+rsiCrossUp = ta.crossover(rsi14, 50)
+rsiCrossDn = ta.crossunder(rsi14, 50)
+rsiCross = rsiCrossUp ? 1 : rsiCrossDn ? -1 : 0
+
+[macdLine, macdSignal, macdHist] = ta.macd(close, 3, 6, 5)
+macdCrossUp = ta.crossover(macdLine, macdSignal)
+macdCrossDn = ta.crossunder(macdLine, macdSignal)
+macdCross = macdCrossUp ? 1 : macdCrossDn ? -1 : 0
+
+// === NEW ADX CALCULATION ===
+upDM = high - high[1] > low[1] - low ? math.max(high - high[1], 0) : 0
+downDM = low[1] - low > high - high[1] ? math.max(low[1] - low, 0) : 0
+trur = math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
+plusDI = 100 * ta.rma(upDM, adxLen) / ta.rma(trur, adxLen)
+minusDI = 100 * ta.rma(downDM, adxLen) / ta.rma(trur, adxLen)
+dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLen)
+adxStrong = adx > adxThresh ? 1 : 0
+
+atr = ta.atr(atrLen)
+atrSMA20 = ta.sma(atr, 20)
+volSMA = ta.sma(volume, volLookback)
+volAboveAvg = volume > volSMA
+
+// === ARRAYS FOR HISTORICAL VALUES ===
+var float[] closeArr = array.new_float()
+var float[] adxArr = array.new_float()
+var float[] atrArr = array.new_float()
+var float[] volumeArr = array.new_float()
+var float[] volSMAArr = array.new_float()
+var float[] rsi14Arr = array.new_float()
+var float[] atrSMA20Arr = array.new_float()
+var float[] highArr = array.new_float()
+var float[] lowArr = array.new_float()
+
+array.unshift(closeArr, close)
+array.unshift(adxArr, adx)
+array.unshift(atrArr, atr)
+array.unshift(volumeArr, volume)
+array.unshift(volSMAArr, volSMA)
+array.unshift(rsi14Arr, rsi14)
+array.unshift(atrSMA20Arr, atrSMA20)
+array.unshift(highArr, high)
+array.unshift(lowArr, low)
+
+if array.size(closeArr) > maxBars + userLookback
+    array.pop(closeArr)
+if array.size(adxArr) > maxBars
+    array.pop(adxArr)
+if array.size(atrArr) > maxBars
+    array.pop(atrArr)
+if array.size(volumeArr) > maxBars
+    array.pop(volumeArr)
+if array.size(volSMAArr) > maxBars
+    array.pop(volSMAArr)
+if array.size(rsi14Arr) > maxBars
+    array.pop(rsi14Arr)
+if array.size(atrSMA20Arr) > maxBars
+    array.pop(atrSMA20Arr)
+if array.size(highArr) > maxBars + userLookback
+    array.pop(highArr)
+if array.size(lowArr) > maxBars + userLookback
+    array.pop(lowArr)
+
+get_array(arr, i) =>
+    i < array.size(arr) ? array.get(arr, i) : na
+
+// === SENTIMENT ===
+sentiment(i, lb) =>
+    sumHigh = 0.0
+    sumLow = 0.0
+    for j = 0 to lb - 1
+        sumHigh := sumHigh + get_array(highArr, i + j)
+        sumLow := sumLow + get_array(lowArr, i + j)
+    avgHigh = sumHigh / lb
+    avgLow = sumLow / lb
+    (avgHigh + avgLow) / 2
+
+sentiment_diff(i, lb) =>
+    get_array(closeArr, i) - sentiment(i, lb)
+
+// === VOLUME DELTA ===
+upVolume(i) =>
+    get_array(closeArr, i) > get_array(closeArr, i + 1) ? get_array(volumeArr, i) : 0
+downVolume(i) =>
+    get_array(closeArr, i) < get_array(closeArr, i + 1) ? get_array(volumeArr, i) : 0
+delta(i) =>
+    upVolume(i) - downVolume(i)
+
+// === AI CONSENSUS ===
+get_ai_signal(_sma, _ema, _rsi, _macd, _adx) =>
+    (_sma == 1 ? 1 : 0) + (_ema == 1 ? 1 : 0) + (_rsi == 1 ? 1 : 0) + (_macd == 1 ? 1 : 0) + (_adx == 1 ? 1 : 0) > (_sma == -1 ? 1 : 0) + (_ema == -1 ? 1 : 0) + (_rsi == -1 ? 1 : 0) + (_macd == -1 ? 1 : 0) + (_adx == -1 ? 1 : 0) ? 1 : (_sma == -1 ? 1 : 0) + (_ema == -1 ? 1 : 0) + (_rsi == -1 ? 1 : 0) + (_macd == -1 ? 1 : 0) + (_adx == -1 ? 1 : 0) > (_sma == 1 ? 1 : 0) + (_ema == 1 ? 1 : 0) + (_rsi == 1 ? 1 : 0) + (_macd == 1 ? 1 : 0) + (_adx == 1 ? 1 : 0) ? -1 : 0
+
+// === FILTERS ===
+isTrending = adx > adxThresh
+isVolatile = atr > atrSMA20
+isNotFlat = rsi14 < rsiFlatMin or rsi14 > rsiFlatMax
+isActive = volAboveAvg
+
+// === SIGNAL CONFIRMATION ===
+signal_persist(sigArr, bars) =>
+    persist = true
+    sig = array.get(sigArr, 0)
+    for j = 0 to bars - 1 by 1
+        persist := persist and array.get(sigArr, j) == sig
+        persist
+    persist ? sig : 0
+
+// === AI VIEW LOGIC ===
+ai_view_majority(ai, d, s) =>
+    (ai == 1 ? 1 : 0) + (d > 0 ? 1 : 0) + (s > 0 ? 1 : 0) > (ai == -1 ? 1 : 0) + (d < 0 ? 1 : 0) + (s < 0 ? 1 : 0) ? 1 : (ai == -1 ? 1 : 0) + (d < 0 ? 1 : 0) + (s < 0 ? 1 : 0) > (ai == 1 ? 1 : 0) + (d > 0 ? 1 : 0) + (s > 0 ? 1 : 0) ? -1 : 0
+ai_view_weighted(ai, d, s) =>
+    w_ai * ai + w_delta * (d > 0 ? 1 : d < 0 ? -1 : 0) + w_sentiment * (s > 0 ? 1 : s < 0 ? -1 : 0) > 0 ? 1 : w_ai * ai + w_delta * (d > 0 ? 1 : d < 0 ? -1 : 0) + w_sentiment * (s > 0 ? 1 : s < 0 ? -1 : 0) < 0 ? -1 : 0
+ai_view_custom(ai, d, s) =>
+    (str.contains(customLogic, 'ai==1') ? ai == 1 : str.contains(customLogic, 'ai==-1') ? ai == -1 : true) and (str.contains(customLogic, 'delta>0') ? d > 0 : str.contains(customLogic, 'delta<0') ? d < 0 : true) and (str.contains(customLogic, 'sentiment>0') ? s > 0 : str.contains(customLogic, 'sentiment<0') ? s < 0 : true) ? 1 : 0
+get_ai_view(ai, d, s) =>
+    aiViewMode == 'Majority' ? ai_view_majority(ai, d, s) : aiViewMode == 'Weighted' ? ai_view_weighted(ai, d, s) : ai_view_custom(ai, d, s)
+
+// === FINAL AI DECISION W/ FILTERS ===
+var ai_raw_arr = array.new_int(maxBars, 0)
+var ai_view_arr = array.new_int(maxBars, 0)
+var float[] sentimentArr = array.new_float(maxBars, 0)
+for i = 0 to maxBars - 1 by 1
+    ai_raw = get_ai_signal(smaCross[i], emaCross[i], rsiCross[i], macdCross[i], adxStrong[i])
+    array.set(ai_raw_arr, i, ai_raw)
+    d = delta(i)
+    senti_val = sentiment_diff(i, userLookback)
+    array.set(sentimentArr, i, senti_val)
+    ai_view = get_ai_view(ai_raw, d, senti_val)
+    array.set(ai_view_arr, i, ai_view)
+
+// === Signal Confirmation and Robustness ===
+ai_signal_conf = signal_persist(ai_view_arr, confirmBars)
+robust_signal = ai_signal_conf == 1 and isTrending and isVolatile and isNotFlat and isActive ? 1 : ai_signal_conf == -1 and isTrending and isVolatile and isNotFlat and isActive ? -1 : 0
+freedom_signal = ai_signal_conf == 1 and (isTrending or isVolatile or isNotFlat or isActive) ? 1 : ai_signal_conf == -1 and (isTrending or isVolatile or isNotFlat or isActive) ? -1 : 0
+chosen_signal =
+     signal_mode == 'Robust'   ? robust_signal :
+     signal_mode == 'Standard' ? ai_signal_conf :
+     signal_mode == 'Freedom'  ? freedom_signal :
+     ai_signal_conf // Custom defaults to Standard logic
+
+// === REASON BUILDER ===
+get_reason(trend, vol, flat, act) =>
+    reason = ''
+    reason := not trend ? reason + 'Weak trend. ' : reason
+    reason := not vol ? reason + 'Low volatility. ' : reason
+    reason := not flat ? reason + 'Flat RSI. ' : reason
+    reason := not act ? reason + 'Low volume. ' : reason
+    str.trim(reason)
+
+// === PYRAMIDING CONDITIONS ===
+var pyramid_long = 0
+var pyramid_short = 0
+
+breakout_long = close > ta.highest(close, 10)[1]
+breakout_short = close < ta.lowest(close, 10)[1]
+adx_rising = adx > adxThresh and adx > adx[1]
+vol_strong = volume > volSMA
+
+ai_view_prev = array.get(ai_view_arr, 1)
+can_add_long = robust_signal == 1 and ai_view_prev == 1 and adx_rising and breakout_long and vol_strong and pyramid_long < max_pyramids
+can_add_short = robust_signal == -1 and ai_view_prev == -1 and adx_rising and breakout_short and vol_strong and pyramid_short < max_pyramids
+
+if robust_signal == 1 and ai_view_prev != 1
+    pyramid_long := 1
+    pyramid_short := 0
+    pyramid_short
+else if robust_signal == -1 and ai_view_prev != -1
+    pyramid_short := 1
+    pyramid_long := 0
+    pyramid_long
+else
+    if can_add_long
+        pyramid_long := pyramid_long + 1
+        pyramid_long
+    if can_add_short
+        pyramid_short := pyramid_short + 1
+        pyramid_short
+
+// === IMPROVED OUTPUT LOGIC WITH PYRAMIDING ===
+improved_output(signal, prev, Pclose, atr, useCustom, slBuy, tpBuy, slSell, tpSell, trend, vol, flat, act, canAddLong, canAddShort) =>
+    reason = get_reason(trend, vol, flat, act), buy_sl = useCustom and slBuy != 0.0 ? slBuy : Pclose - atr, buy_tp = useCustom and tpBuy != 0.0 ? tpBuy : Pclose + 2 * atr, sell_sl = useCustom and slSell != 0.0 ? slSell : Pclose + atr, sell_tp = useCustom and tpSell != 0.0 ? tpSell : Pclose - 2 * atr, signal == 1 and prev != 1 ? 'Buy at $' + str.tostring(Pclose, fmt) + ' with Stop Loss at $' + str.tostring(buy_sl, fmt) + ' and Take Profit at $' + str.tostring(buy_tp, fmt) + '.' : signal == -1 and prev != -1 ? 'Sell at $' + str.tostring(Pclose, fmt) + ' with Stop Loss at $' + str.tostring(sell_sl, fmt) + ' and Take Profit at $' + str.tostring(sell_tp, fmt) + '.' : canAddLong ? 'Add to Long at $' + str.tostring(Pclose, fmt) + ' with Stop Loss at $' + str.tostring(buy_sl, fmt) + ' and Take Profit at $' + str.tostring(buy_tp, fmt) + '.' : canAddShort ? 'Add to Short at $' + str.tostring(Pclose, fmt) + ' with Stop Loss at $' + str.tostring(sell_sl, fmt) + ' and Take Profit at $' + str.tostring(sell_tp, fmt) + '.' : signal == 1 and prev == 1 ? 'Hold Long. No new action.' : signal == -1 and prev == -1 ? 'Hold Short. No new action.' : ai_signal_conf != 0 and (not trend or not vol or not flat or not act) ? 'No Action. Reason: ' + reason : 'No Action. Wait for clear signal.'
+
+// === TRADE INSTRUCTION FUNCTION (NEW, ADDED) ===
+get_trade_instruction(sig, prev, cl, atr, useCustom, slBuy, tpBuy, slSell, tpSell) => buy_sl = useCustom and slBuy != 0.0 ? slBuy : cl - atr, buy_tp = useCustom and tpBuy != 0.0 ? tpBuy : cl + 2 * atr, sell_sl = useCustom and slSell != 0.0 ? slSell : cl + atr, sell_tp = useCustom and tpSell != 0.0 ? tpSell : cl - 2 * atr, sig == 1 and prev != 1 ? 'Buy at $' + str.tostring(cl, fmt) + ' with Stop Loss at $' + str.tostring(buy_sl, fmt) + ' and Take Profit at $' + str.tostring(buy_tp, fmt) + '.' : sig == -1 and prev != -1 ? 'Sell at $' + str.tostring(cl, fmt) + ' with Stop Loss at $' + str.tostring(sell_sl, fmt) + ' and Take Profit at $' + str.tostring(sell_tp, fmt) + '.' : 'No Action.'
+
+// === TABLE SETUP ===
+var table dashTable = na
+if barstate.isfirst or na(dashTable)
+    dashTable := table.new(tableLocation, show_lookback ? 15 : 14, maxBars + 2, border_width = 1)
+    dashTable
+
+headerBg = color.new(color.gray, 0)
+headerText = color.new(color.white, 0)
+table.cell(dashTable, 0, 0, 'Bar', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, 1, 0, 'Raw Consensus', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, 2, 0, 'Up Vol', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, 3, 0, 'Down Vol', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, 4, 0, 'Delta', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, 5, 0, 'Close', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, 6, 0, 'Sentiment Diff', bgcolor = headerBg, text_color = headerText)
+if show_lookback
+    table.cell(dashTable, 7, 0, 'Lookback', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 8 : 7, 0, 'ADX', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 9 : 8, 0, 'ATR', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 10 : 9, 0, 'Vol>Avg', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 11 : 10, 0, 'Confirm', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 12 : 11, 0, 'Logic Output', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 13 : 12, 0, 'Final Action', bgcolor = headerBg, text_color = headerText)
+table.cell(dashTable, show_lookback ? 14 : 13, 0, 'Trade Instruction', bgcolor = headerBg, text_color = headerText)
+
+// === ARRAY TO STORE FINAL SIGNALS FOR EACH BAR (FOR HISTORICAL PLOTTING) ===
+var int[] chosen_signal_arr = array.new_int(maxBars, 0)
+var float[] buy_sl_arr = array.new_float(maxBars, na)
+var float[] buy_tp_arr = array.new_float(maxBars, na)
+var float[] sell_sl_arr = array.new_float(maxBars, na)
+var float[] sell_tp_arr = array.new_float(maxBars, na)
+
+// === TABLE FILL ===
+blueBg = color.new(color.blue, 0)
+for i = 0 to maxBars - 1 by 1
+    bar_label = i == 0 ? 'Now' : 'Bar -' + str.tostring(i)
+    ai_val = array.get(ai_raw_arr, i)
+    ai_txt = ai_val == 1 ? 'Buy' : ai_val == -1 ? 'Sell' : '-'
+    ai_col = ai_val == 1 ? color.green : ai_val == -1 ? color.red : color.gray
+    uv = upVolume(i)
+    dv = downVolume(i)
+    d = delta(i)
+    deltaTextColor = d > 0 ? color.green : d < 0 ? color.red : color.gray
+
+    cl = get_array(closeArr, i)
+    cl_prev = get_array(closeArr, i + 1)
+    closeTextColor = cl > cl_prev ? color.green : cl < cl_prev ? color.red : color.gray
+
+    lbk_val = userLookback
+    senti_val = array.get(sentimentArr, i)
+    sentiCol = senti_val > 0 ? color.green : senti_val < 0 ? color.red : color.gray
+    adx_val = get_array(adxArr, i)
+    atr_val = get_array(atrArr, i)
+    vol_val = get_array(volumeArr, i)
+    volSMA_val = get_array(volSMAArr, i)
+    vol_ok = vol_val > volSMA_val
+    confirm = signal_persist(ai_view_arr, confirmBars)
+    ai_view = array.get(ai_view_arr, i)
+    aiView_txt = ai_view == 1 ? 'Buy' : ai_view == -1 ? 'Sell' : '-'
+    aiView_col = ai_view == 1 ? color.green : ai_view == -1 ? color.red : color.gray
+
+    rsi_val = get_array(rsi14Arr, i)
+    atrSMA20_val = get_array(atrSMA20Arr, i)
+
+    isTrending_i = adx_val > adxThresh
+    isVolatile_i = atr_val > atrSMA20_val
+    isNotFlat_i = rsi_val < rsiFlatMin or rsi_val > rsiFlatMax
+    isActive_i = vol_val > volSMA_val
+    ai_signal_conf_i = signal_persist(ai_view_arr, confirmBars)
+    robust_signal_i = ai_signal_conf_i == 1 and isTrending_i and isVolatile_i and isNotFlat_i and isActive_i ? 1 : ai_signal_conf_i == -1 and isTrending_i and isVolatile_i and isNotFlat_i and isActive_i ? -1 : 0
+    freedom_signal_i = ai_signal_conf_i == 1 and (isTrending_i or isVolatile_i or isNotFlat_i or isActive_i) ? 1 : ai_signal_conf_i == -1 and (isTrending_i or isVolatile_i or isNotFlat_i or isActive_i) ? -1 : 0
+    chosen_signal_i =
+         signal_mode == 'Robust'   ? robust_signal_i :
+         signal_mode == 'Standard' ? ai_signal_conf_i :
+         signal_mode == 'Freedom'  ? freedom_signal_i :
+         ai_signal_conf_i
+
+    prev_ai_view = i < maxBars - 1 ? array.get(ai_view_arr, i + 1) : na
+    canAddLong_i = false
+    canAddShort_i = false
+    useCustom = use_custom_sl_tp
+    slBuy = custom_sl_buy
+    tpBuy = custom_tp_buy
+    slSell = custom_sl_sell
+    tpSell = custom_tp_sell
+    buy_sl = useCustom and slBuy != 0.0 ? slBuy : cl - atr_val
+    buy_tp = useCustom and tpBuy != 0.0 ? tpBuy : cl + 2 * atr_val
+    sell_sl = useCustom and slSell != 0.0 ? slSell : cl + atr_val
+    sell_tp = useCustom and tpSell != 0.0 ? tpSell : cl - 2 * atr_val
+
+    trade_instruction = get_trade_instruction(chosen_signal_i, prev_ai_view, cl, atr_val, useCustom, slBuy, tpBuy, slSell, tpSell)
+
+    table.cell(dashTable, 0, i + 1, bar_label, text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, 1, i + 1, ai_txt, text_color=ai_col, bgcolor=blueBg)
+    table.cell(dashTable, 2, i + 1, str.tostring(uv, fmt), text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, 3, i + 1, str.tostring(dv, fmt), text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, 4, i + 1, str.tostring(d, fmt), text_color=deltaTextColor, bgcolor=blueBg)
+    table.cell(dashTable, 5, i + 1, str.tostring(cl, fmt), text_color=closeTextColor, bgcolor=blueBg)
+    table.cell(dashTable, 6, i + 1, str.tostring(senti_val, fmt), text_color=sentiCol, bgcolor=blueBg)
+    if show_lookback
+        table.cell(dashTable, 7, i + 1, str.tostring(lbk_val), text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 8 : 7, i + 1, str.tostring(adx_val, fmt), text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 9 : 8, i + 1, str.tostring(atr_val, fmt), text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 10 : 9, i + 1, vol_ok ? 'Yes' : 'No', text_color=vol_ok ? color.green : color.red, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 11 : 10, i + 1, str.tostring(confirm), text_color=color.white, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 12 : 11, i + 1, aiView_txt, text_color=aiView_col, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 13 : 12, i + 1, chosen_signal_i == 1 ? 'Buy' : chosen_signal_i == -1 ? 'Sell' : '-', text_color=chosen_signal_i == 1 ? color.green : chosen_signal_i == -1 ? color.red : color.gray, bgcolor=blueBg)
+    table.cell(dashTable, show_lookback ? 14 : 13, i + 1, trade_instruction, text_color=color.white, bgcolor=blueBg)
+
+    array.set(chosen_signal_arr, i, chosen_signal_i)
+    array.set(buy_sl_arr, i, chosen_signal_i == 1 ? buy_sl : na)
+    array.set(buy_tp_arr, i, chosen_signal_i == 1 ? buy_tp : na)
+    array.set(sell_sl_arr, i, chosen_signal_i == -1 ? sell_sl : na)
+    array.set(sell_tp_arr, i, chosen_signal_i == -1 ? sell_tp : na)
+
+// === V2-STYLE PLOTTING: Only on most recent bar ===
+Pclose_now = close
+atr_now = atr
+useCustom = use_custom_sl_tp
+slBuy = custom_sl_buy
+tpBuy = custom_tp_buy
+slSell = custom_sl_sell
+tpSell = custom_tp_sell
+
+buy_sl = useCustom and slBuy != 0.0 ? slBuy : Pclose_now - atr_now
+buy_tp = useCustom and tpBuy != 0.0 ? tpBuy : Pclose_now + 2 * atr_now
+sell_sl = useCustom and slSell != 0.0 ? slSell : Pclose_now + atr_now
+sell_tp = useCustom and tpSell != 0.0 ? tpSell : Pclose_now - 2 * atr_now
+
+plotshape(chosen_signal == 1, style = shape.triangleup, color = color.green, location = location.belowbar, size = size.small, title = 'Buy Signal (V2 Style)')
+plotshape(chosen_signal == -1, style = shape.triangledown, color = color.red, location = location.abovebar, size = size.small, title = 'Sell Signal (V2 Style)')
+
+plot(chosen_signal == 1 ? buy_sl : na, color = color.new(color.red, 0), linewidth = 2, style = plot.style_linebr, title = 'Buy Stop Loss (V2 Style)')
+plot(chosen_signal == 1 ? buy_tp : na, color = color.new(color.green, 0), linewidth = 2, style = plot.style_linebr, title = 'Buy Take Profit (V2 Style)')
+plot(chosen_signal == -1 ? sell_sl : na, color = color.new(color.red, 0), linewidth = 2, style = plot.style_linebr, title = 'Sell Stop Loss (V2 Style)')
+plot(chosen_signal == -1 ? sell_tp : na, color = color.new(color.green, 0), linewidth = 2, style = plot.style_linebr, title = 'Sell Take Profit (V2 Style)')
+
+if chosen_signal == 1
+    label.new(bar_index, buy_sl, 'SL', color = color.red, textcolor = color.white, style = label.style_label_down, size = size.tiny)
+    label.new(bar_index, buy_tp, 'TP', color = color.green, textcolor = color.white, style = label.style_label_up, size = size.tiny)
+if chosen_signal == -1
+    label.new(bar_index, sell_sl, 'SL', color = color.red, textcolor = color.white, style = label.style_label_up, size = size.tiny)
+    label.new(bar_index, sell_tp, 'TP', color = color.green, textcolor = color.white, style = label.style_label_down, size = size.tiny)
+
+// === TRADE TRACKER STATE (NEW FOR V5) ===
+var string trade_status = 'None'
+var float trade_entry = na
+var float trade_sl = na
+var float trade_tp = na
+var int   trade_dir = 0  // 1 = long, -1 = short
+var int   trade_entry_bar = na
+
+new_long  = chosen_signal == 1 and nz(trade_dir) != 1
+new_short = chosen_signal == -1 and nz(trade_dir) != -1
+
+if new_long
+    trade_status := 'Active'
+    trade_entry := close
+    trade_sl := use_custom_sl_tp and custom_sl_buy != 0.0 ? custom_sl_buy : close - atr
+    trade_tp := use_custom_sl_tp and custom_tp_buy != 0.0 ? custom_tp_buy : close + 2 * atr
+    trade_dir := 1
+    trade_entry_bar := bar_index
+    label.new(bar_index, close, 'BUY', color=color.green, style=label.style_label_up, size=size.normal)
+if new_short
+    trade_status := 'Active'
+    trade_entry := close
+    trade_sl := use_custom_sl_tp and custom_sl_sell != 0.0 ? custom_sl_sell : close + atr
+    trade_tp := use_custom_sl_tp and custom_tp_sell != 0.0 ? custom_tp_sell : close - 2 * atr
+    trade_dir := -1
+    trade_entry_bar := bar_index
+    label.new(bar_index, close, 'SELL', color=color.red, style=label.style_label_down, size=size.normal)
+
+if trade_status == 'Active' and trade_dir == 1
+    if low <= trade_sl
+        trade_status := 'Exited SL'
+        label.new(bar_index, trade_sl, 'EXIT SL', color=color.red, style=label.style_label_down, size=size.normal)
+        trade_dir := 0
+    else
+        if high >= trade_tp
+            trade_status := 'Exited TP'
+            label.new(bar_index, trade_tp, 'EXIT TP', color=color.green, style=label.style_label_up, size=size.normal)
+            trade_dir := 0
+if trade_status == 'Active' and trade_dir == -1
+    if high >= trade_sl
+        trade_status := 'Exited SL'
+        label.new(bar_index, trade_sl, 'EXIT SL', color=color.red, style=label.style_label_up, size=size.normal)
+        trade_dir := 0
+    else
+        if low <= trade_tp
+            trade_status := 'Exited TP'
+            label.new(bar_index, trade_tp, 'EXIT TP', color=color.green, style=label.style_label_down, size=size.normal)
+            trade_dir := 0
+
+// Reset trade info if exited
+if trade_status == 'Exited SL' or trade_status == 'Exited TP'
+    trade_entry := na
+    trade_sl := na
+    trade_tp := na
+    trade_entry_bar := na
+
+// === TABLE ENHANCEMENT: Show trade tracker info in last row ===
+trade_col = trade_dir == 1 ? color.green : trade_dir == -1 ? color.red : color.gray
+table.cell(dashTable, show_lookback ? 14 : 13, maxBars + 1, trade_status == 'Active' ? (trade_dir == 1 ? "Long: " : "Short: ") + "Entry " + str.tostring(trade_entry, fmt) + " | SL " + str.tostring(trade_sl, fmt) + " | TP " + str.tostring(trade_tp, fmt) : trade_status == 'Exited SL' ? "Exited (SL)" : trade_status == 'Exited TP' ? "Exited (TP)" : "-", text_color=trade_col, bgcolor=color.new(color.gray, 90))
+
+
+// === V2-STYLE LABELS for SL/TP on live trade ===
+if trade_status == 'Active' and trade_dir == 1
+    label.new(bar_index, trade_sl, 'SL', color=color.red, textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    label.new(bar_index, trade_tp, 'TP', color=color.green, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+if trade_status == 'Active' and trade_dir == -1
+    label.new(bar_index, trade_sl, 'SL', color=color.red, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+    label.new(bar_index, trade_tp, 'TP', color=color.green, textcolor=color.white, style=label.style_label_down, size=size.tiny)

@@ -1,0 +1,211 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © robbatt
+
+//@version=6
+
+// @description a simple helper to create webhook messages for alert webhooks to pickmytrade
+library("lib_pickmytrade", overlay = true)
+
+enum Command
+    BUY = "buy"
+    SELL = "sell"
+    CLOSE = "close"
+
+tp_entry(float tp, int tp_qty, float sl, float be_offset = na) =>
+    fields = array.from(
+     str.format('"tp": "{0}"', str.tostring(tp)),
+     str.format('"quantity": "{0}"', str.tostring(tp_qty)),
+     str.format('"sl": "{0}"', str.tostring(sl)),
+
+     '"percentage_tp": 0',
+     '"dollar_tp": 0',
+     '"percentage_sl": 0',
+     '"dollar_sl": 0',
+     '"trail": 0',
+     '"trail_stop": 0',
+     '"trail_trigger": 0',
+     '"trail_freq": 0'
+     )
+
+    if na(be_offset)
+        fields.push('"breakeven": 0')
+        fields.push('"breakeven_offset": 0')
+    else
+        fields.push('"breakeven": 1')
+        fields.push(str.format('"breakeven_offset": "{0}"', str.tostring(math.max(0, be_offset))))
+
+    '{' + fields.join(',') + '}'
+
+
+account_entry(string account_id, string token) =>
+    fields = array.from(
+     str.format('"token": "{0}"', token),
+     str.format('"account_id": "{0}"', account_id),
+     '"risk_percentage": 0',
+	 '"quantity_multiplier": 1'
+     )
+
+    '{' + fields.join(',') + '}'
+
+
+message(Command command, string account_id, string token, float price, string[] additional_fields = na) =>
+
+     // this is a json object -> do not put through str.format (curly braces will f*ck it up)
+    var account = account_entry(account_id, token)
+	var static_fields = array.from(
+     str.format('"symbol": "{0}"',syminfo.ticker),
+     str.format('"token": "{0}"', token),
+     '"risk_percentage": 0',
+     '"stp_limit_stp_price": 0',
+     '"update_tp": false',
+     '"pyramid": false',
+     '"same_direction_ignore": false',
+     '"reverse_order_close": true',
+     '"breakeven_offset": 0',
+     '"multiple_accounts": [' + account + ']'
+     )
+
+	fields = array.from(
+     str.format('"data": "{0}"' , str.tostring(command)), // from enum
+     str.format('"date" : "{0}"', timenow),
+	 str.format('"price": "{0}"', str.tostring(price)) // limit_price for entries, close for exits/trail updates
+     )
+	 
+	if not na(additional_fields) and array.size(additional_fields) > 0
+		fields := fields.concat(additional_fields)
+
+	fields := fields.concat(static_fields)
+
+    '{' + fields.join(',') + '}'
+	
+
+// @function generates a json formatted EXIT message string for an alert() call, simply closing any open trade
+// @param account_id the pickmytrade account id
+// @param token      the pickmytrade token
+// @returns a json formatted message string for the alert() call
+export alert_msg_exit(string account_id, string token) =>
+    message(Command.CLOSE, account_id, token, close)
+
+
+// @function generates a json formatted TRAIL STOP LOSS message string for an alert() call
+// @param account_id the pickmytrade account id
+// @param token      the pickmytrade token
+// @param is_long    trade direction
+// @param trail_sl   new stop loss level
+// @returns a json formatted message string for the alert() call
+export alert_msg_trail_sl(string account_id, string token, bool is_long, float trail_sl) =>
+    Command command = is_long ? Command.BUY : Command.SELL
+	
+	// trail SL update
+	string[] additional_fields = array.from(
+     	'"update_sl": true',
+		'"quantity": 0', // tells pmt to update an open order
+		str.format('"sl": "{0}"', str.tostring(trail_sl)),
+		'"percentage_sl":0,"dollar_sl":0',
+		'"tp":0',
+		'"percentage_tp":0,"dollar_tp":0'
+		)		
+		 
+    message(command, account_id, token, close, additional_fields)
+
+// @function generates a json formatted ENTRY message string for an alert() call
+// @param account_id 		the pickmytrade account id
+// @param token      		the pickmytrade token
+// @param is_long     		trade direction
+// @param tp1         		tp1 target
+// @param tp1_be_offset		sl to be when hitting tp1, with this offset (optional, must be >= 0)
+// @param tp2         		tp2 target
+// @param tp3         		tp3 target
+// @param sl          		sl stop
+// @param qty1				tp1 quantity (optional)
+// @param qty2				tp2 quantity (optional)
+// @param qty3				tp3 quantity (optional)
+// @param limit_price 		limit entry target (optional)
+// @param limit_cancel_time	limit entry cancel time, if not filled (gtc) (optional)
+// @returns a json formatted message string for the alert() call
+export alert_msg_entry(
+ string account_id       , string token, 
+ bool	is_long		     ,
+ float	tp1         = na , int    qty1              = na,
+ float	tp2         = na , int    qty2              = na,
+ float	tp3         = na , int    qty3              = na,
+ float	sl          = na , float  tp1_be_offset     = na,
+ float  limit_price = na , int    limit_cancel_time = na
+ ) =>
+
+	int qty_total = 0
+	// this is a list of json objects -> do not put through str.format (curly braces will f*ck it up)
+	tp_sl_list = array.new<string>(0)
+	if tp1 > 0 and (qty1 > 0 or tp1_be_offset > 0)
+		if qty1 > 0
+			qty_total += qty1
+		tp_sl_list.push(tp_entry(tp1, qty1, sl, tp1_be_offset))
+	if tp2 > 0 and qty2 > 0
+		qty_total += qty2
+		tp_sl_list.push(tp_entry(tp2, qty2, sl))
+	if tp3 > 0 and qty3 > 0
+		qty_total += qty3
+		tp_sl_list.push(tp_entry(tp3, qty3, sl))
+
+	// entry order
+    Command  command 		   = is_long ? Command.BUY : Command.SELL
+    bool     is_limit 		   = not na(limit_price)
+	int      cancel_in_seconds = is_limit ? math.max(0, int((limit_cancel_time - time_close) / 1000)) : 0
+	string[] additional_fields = array.from(
+		'"update_sl": false',
+		str.format('"order_type": "{0}"', is_limit ? "LMT" : "MKT"),
+		str.format('"quantity": "{0}"', str.tostring(qty_total)),
+		str.format('"gtd_in_second": {0}', str.tostring(cancel_in_seconds)),
+		'"advance_tp_sl": [' + tp_sl_list.join(',') +']'
+		)	
+	 
+    message(command, account_id, token, is_limit ? limit_price : close, additional_fields)
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//#region                        DEMO
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+format_demo_output(string raw) =>
+	string formatted = str.replace_all(raw, ',"', ',\n"') // add line breaks after each fields
+	formatted       := str.replace_all(formatted, '{', '\n{')
+	// formatted       := str.replace_all(formatted, '}', '\n}')
+	// formatted       := str.replace_all(formatted, ']', ']\n')
+	formatted
+
+var string account 	 = input.string("DEMOxxxx"               , "Account Id"        , display = display.none)
+var string token     = input.string("ABCDhxxxxxxxxxxxxxxxxxx", "Alert Token"       , display = display.none)
+
+var bool   is_limit  = input.bool  (false, "limit order")
+var int    qty1 	 = input.int   (1    , "TP1 qty")
+var float  be_offset = input.float (0.5  , "TP1 BE offset")
+var int    one_bar   = timeframe.in_seconds() * 1000
+
+float offset = math.round_to_mintick(ta.atr(100))
+float tp1 = close + offset
+float tp2 = close + offset * 2
+float tp3 = close + offset * 3
+float sl  = close - offset
+float limit = is_limit ? close - offset / 2 : na
+int   gtc = time + 3 * one_bar
+
+string    entry_msg 	= alert_msg_entry   (account, token, is_long = true, tp1 = tp1, qty1 = qty1, tp2 = tp2, qty2 = 2, tp3 = tp3, qty3 = 3, sl = sl, tp1_be_offset = be_offset, limit_price = limit, limit_cancel_time = gtc)
+string    trail_msg 	= alert_msg_trail_sl(account, token, is_long = true, trail_sl = sl)
+string    exit_msg  	= alert_msg_exit    (account, token)
+
+var label entry_lbl 	= label.new(chart.point.now(), '', style = label.style_label_right)
+var label trail_lbl 	= label.new(chart.point.now(), '', style = label.style_label_lower_left)
+var label exit_lbl 		= label.new(chart.point.now(), '', style = label.style_label_upper_left)
+
+// set to prev bar value, so labels don't flicker on every tick
+entry_lbl.set_xy(bar_index, close[1])
+entry_lbl.set_text("ENTRY:\n" + format_demo_output(entry_msg))
+
+trail_lbl.set_xy(bar_index + 1, tp1[1])
+trail_lbl.set_text("TRAIL:\n" + format_demo_output(trail_msg))
+
+exit_lbl.set_xy(bar_index + 2, sl[1])
+exit_lbl.set_text("EXIT:\n" + format_demo_output(exit_msg ))
+
+
+

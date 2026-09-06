@@ -1,0 +1,406 @@
+//@version=5
+strategy("WS30 v5 - Normal SL + Fixed ATR TP",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     process_orders_on_close=false,
+     calc_on_order_fills=true,
+     calc_on_every_tick=false)
+
+//====================================================
+// 1. PineConnector / Symbol
+//====================================================
+groupPC = "1. PineConnector / Symbol"
+
+licenseId    = input.string("123", "Webhook License ID", group=groupPC)
+brokerSymbol = input.string("US30", "Broker Symbol", group=groupPC)
+
+//====================================================
+// 2. Equity-Based Fixed Lot Sizing
+//====================================================
+groupRisk = "2. Equity-Based Fixed Lot Sizing"
+
+lotPer100Dollars = input.float(0.1, "Lots per $100 Equity", step=0.01, group=groupRisk)
+lotStep          = input.float(0.01, "Lot Step", step=0.01, minval=0.01, group=groupRisk)
+minQty           = input.float(0.01, "Minimum Qty", step=0.01, minval=0.01, group=groupRisk)
+
+//====================================================
+// 3. Entry Logic
+//====================================================
+groupEntry = "3. Entry Logic"
+
+rsiLength    = input.int(21, "RSI Length", minval=1, group=groupEntry)
+atrLength    = input.int(5, "ATR Length", minval=1, group=groupEntry)
+minATR       = input.float(10.0, "Minimum ATR to Trade", step=1, group=groupEntry)
+offsetPoints = input.float(3.0, "Entry / Stop Offset Points", step=0.1, group=groupEntry)
+
+//====================================================
+// 4. Initial SL Filter
+//====================================================
+groupSL = "4. Initial SL Filter"
+
+useMaxSLFilter = input.bool(true, "Use Max Initial SL Filter?", group=groupSL)
+maxSLPoints    = input.float(70.0, "Max Initial SL Distance Points", step=1.0, group=groupSL)
+
+//====================================================
+// 5. TP Settings
+//====================================================
+groupTP = "5. TP Settings"
+
+tpATRPercent = input.float(50.0, "Fixed TP % of ATR", step=1.0, group=groupTP)
+
+//====================================================
+// 6. Pending Order Management
+//====================================================
+groupPending = "6. Pending Order Management"
+
+cancelAfterBars = input.int(1, "Cancel Pending Order After N Bars", minval=1, group=groupPending)
+
+//====================================================
+// 7. Trading Sessions
+//====================================================
+groupSession = "7. Trading Sessions"
+
+session1 = input.session("1330-1530", "Main Session", group=groupSession)
+session2 = input.session("2000-2045", "Evening Session", group=groupSession)
+tz       = input.string("Europe/London", "Timezone", group=groupSession)
+
+//====================================================
+// 8. RSI Exit
+//====================================================
+groupRSIExit = "8. RSI Exit"
+
+sendRSIExitAlerts = input.bool(true, "Send RSI Exit Alerts to PineConnector?", group=groupRSIExit)
+
+//====================================================
+// 9. Visuals
+//====================================================
+groupVisuals = "9. Visuals"
+
+showLevels          = input.bool(true, "Show Pending Levels", group=groupVisuals)
+showSignals         = input.bool(true, "Show Signals", group=groupVisuals)
+showFilteredSignals = input.bool(true, "Show Skipped Max SL Signals", group=groupVisuals)
+
+//====================================================
+// Helpers
+//====================================================
+roundDownToStep(val, step) =>
+    math.floor(val / step) * step
+
+fmtPrice(v) =>
+    str.tostring(v, format.mintick)
+
+//====================================================
+// Session Filter
+//====================================================
+inSession1 = not na(time(timeframe.period, session1, tz))
+inSession2 = not na(time(timeframe.period, session2, tz))
+inTradeWindow = inSession1 or inSession2
+
+//====================================================
+// Indicators
+//====================================================
+rsiVal = ta.rsi(close, rsiLength)
+atrVal = ta.atr(atrLength)
+
+atrFilter = atrVal > minATR
+
+fixedQtyRaw = strategy.equity / 100.0 * lotPer100Dollars
+fixedQty    = roundDownToStep(fixedQtyRaw, lotStep)
+
+//====================================================
+// Signal Logic
+//====================================================
+longSignal  = barstate.isconfirmed and inTradeWindow and atrFilter and ta.crossover(rsiVal, 50)
+shortSignal = barstate.isconfirmed and inTradeWindow and atrFilter and ta.crossunder(rsiVal, 50)
+
+//====================================================
+// State Tracking
+//====================================================
+var bool longPending    = false
+var bool shortPending   = false
+var int  longSignalBar  = na
+var int  shortSignalBar = na
+
+var float longEntry = na
+var float longStop  = na
+var float longTP    = na
+var float longQty   = na
+
+var float shortEntry = na
+var float shortStop  = na
+var float shortTP    = na
+var float shortQty   = na
+
+var bool longCloseAlertSent  = false
+var bool shortCloseAlertSent = false
+
+var bool skippedLongMaxSL  = false
+var bool skippedShortMaxSL = false
+
+flat = strategy.position_size == 0
+
+skippedLongMaxSL  := false
+skippedShortMaxSL := false
+
+//====================================================
+// Cancel Opposite Pending Order
+//====================================================
+if longSignal and shortPending and flat
+    strategy.cancel("Short")
+    alert(licenseId + ",cancelshort," + brokerSymbol, alert.freq_all)
+
+    shortPending := false
+    shortSignalBar := na
+    shortEntry := na
+    shortStop := na
+    shortTP := na
+    shortQty := na
+
+if shortSignal and longPending and flat
+    strategy.cancel("Long")
+    alert(licenseId + ",cancellong," + brokerSymbol, alert.freq_all)
+
+    longPending := false
+    longSignalBar := na
+    longEntry := na
+    longStop := na
+    longTP := na
+    longQty := na
+
+//====================================================
+// Long Setup
+//====================================================
+if longSignal and flat and not longPending and not shortPending
+    longEntry := high + offsetPoints
+    longStop  := low - offsetPoints
+    longTP    := longEntry + (atrVal * tpATRPercent / 100.0)
+
+    longStopDist = longEntry - longStop
+    validLongSL  = longStopDist > 0 and (not useMaxSLFilter or longStopDist < maxSLPoints)
+
+    if not validLongSL
+        skippedLongMaxSL := true
+        longEntry := na
+        longStop := na
+        longTP := na
+        longQty := na
+
+    if validLongSL
+        longQty := fixedQty >= minQty ? fixedQty : na
+
+        if not na(longQty)
+            strategy.entry("Long", strategy.long, qty=longQty, stop=longEntry, disable_alert=true)
+
+            alert(
+                 licenseId + ",buystop," + brokerSymbol +
+                 ",entry_price=" + fmtPrice(longEntry) +
+                 ",vol_lots=" + str.tostring(longQty) +
+                 ",sl_price=" + fmtPrice(longStop) +
+                 ",tp_price=" + fmtPrice(longTP),
+                 alert.freq_all)
+
+            longPending := true
+            longSignalBar := bar_index
+
+//====================================================
+// Short Setup
+//====================================================
+if shortSignal and flat and not shortPending and not longPending
+    shortEntry := low - offsetPoints
+    shortStop  := high + offsetPoints
+    shortTP    := shortEntry - (atrVal * tpATRPercent / 100.0)
+
+    shortStopDist = shortStop - shortEntry
+    validShortSL  = shortStopDist > 0 and (not useMaxSLFilter or shortStopDist < maxSLPoints)
+
+    if not validShortSL
+        skippedShortMaxSL := true
+        shortEntry := na
+        shortStop := na
+        shortTP := na
+        shortQty := na
+
+    if validShortSL
+        shortQty := fixedQty >= minQty ? fixedQty : na
+
+        if not na(shortQty)
+            strategy.entry("Short", strategy.short, qty=shortQty, stop=shortEntry, disable_alert=true)
+
+            alert(
+                 licenseId + ",sellstop," + brokerSymbol +
+                 ",entry_price=" + fmtPrice(shortEntry) +
+                 ",vol_lots=" + str.tostring(shortQty) +
+                 ",sl_price=" + fmtPrice(shortStop) +
+                 ",tp_price=" + fmtPrice(shortTP),
+                 alert.freq_all)
+
+            shortPending := true
+            shortSignalBar := bar_index
+
+//====================================================
+// Count Trades When Position Opens
+//====================================================
+newLongOpened  = strategy.position_size > 0 and strategy.position_size[1] == 0
+newShortOpened = strategy.position_size < 0 and strategy.position_size[1] == 0
+
+if newLongOpened
+    longPending := false
+    longSignalBar := na
+    longCloseAlertSent := false
+
+if newShortOpened
+    shortPending := false
+    shortSignalBar := na
+    shortCloseAlertSent := false
+
+if strategy.position_size > 0
+    longPending := false
+    longSignalBar := na
+
+if strategy.position_size < 0
+    shortPending := false
+    shortSignalBar := na
+
+//====================================================
+// Cancel Pending Order If RSI Flips Opposite
+//====================================================
+cancelLongByRSI  = barstate.isconfirmed and longPending and flat and ta.crossunder(rsiVal, 50)
+cancelShortByRSI = barstate.isconfirmed and shortPending and flat and ta.crossover(rsiVal, 50)
+
+if cancelLongByRSI
+    strategy.cancel("Long")
+    alert(licenseId + ",cancellong," + brokerSymbol, alert.freq_all)
+
+    longPending := false
+    longSignalBar := na
+    longEntry := na
+    longStop := na
+    longTP := na
+    longQty := na
+
+if cancelShortByRSI
+    strategy.cancel("Short")
+    alert(licenseId + ",cancelshort," + brokerSymbol, alert.freq_all)
+
+    shortPending := false
+    shortSignalBar := na
+    shortEntry := na
+    shortStop := na
+    shortTP := na
+    shortQty := na
+
+//====================================================
+// Fixed TP / SL Exit Management
+//====================================================
+if strategy.position_size > 0
+    strategy.exit(
+         "Long Fixed TP/SL",
+         from_entry="Long",
+         qty_percent=100,
+         stop=longStop,
+         limit=longTP,
+         disable_alert=true)
+
+if strategy.position_size < 0
+    strategy.exit(
+         "Short Fixed TP/SL",
+         from_entry="Short",
+         qty_percent=100,
+         stop=shortStop,
+         limit=shortTP,
+         disable_alert=true)
+
+//====================================================
+// RSI Exit For Open Trades
+//====================================================
+bearishClose = close < open
+bullishClose = close > open
+
+exitLongEarly =
+     barstate.isconfirmed and
+     strategy.position_size > 0 and
+     bearishClose and
+     ta.crossunder(rsiVal, 50)
+
+exitShortEarly =
+     barstate.isconfirmed and
+     strategy.position_size < 0 and
+     bullishClose and
+     ta.crossover(rsiVal, 50)
+
+if exitLongEarly and strategy.position_size > minQty * 0.5 and not longCloseAlertSent
+    strategy.close("Long", comment="RSI Exit", disable_alert=true)
+
+    if sendRSIExitAlerts
+        alert(licenseId + ",closelong," + brokerSymbol, alert.freq_once_per_bar_close)
+
+    longCloseAlertSent := true
+
+if exitShortEarly and math.abs(strategy.position_size) > minQty * 0.5 and not shortCloseAlertSent
+    strategy.close("Short", comment="RSI Exit", disable_alert=true)
+
+    if sendRSIExitAlerts
+        alert(licenseId + ",closeshort," + brokerSymbol, alert.freq_once_per_bar_close)
+
+    shortCloseAlertSent := true
+
+//====================================================
+// Cancel Stale Pending Orders
+//====================================================
+if longPending and flat and not na(longSignalBar) and (bar_index - longSignalBar >= cancelAfterBars)
+    strategy.cancel("Long")
+    alert(licenseId + ",cancellong," + brokerSymbol, alert.freq_all)
+
+    longPending := false
+    longSignalBar := na
+    longEntry := na
+    longStop := na
+    longTP := na
+    longQty := na
+
+if shortPending and flat and not na(shortSignalBar) and (bar_index - shortSignalBar >= cancelAfterBars)
+    strategy.cancel("Short")
+    alert(licenseId + ",cancelshort," + brokerSymbol, alert.freq_all)
+
+    shortPending := false
+    shortSignalBar := na
+    shortEntry := na
+    shortStop := na
+    shortTP := na
+    shortQty := na
+
+//====================================================
+// Clear Levels Once Fully Flat
+//====================================================
+justClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if justClosed
+    longEntry := na
+    longStop := na
+    longTP := na
+    longQty := na
+    longCloseAlertSent := false
+
+    shortEntry := na
+    shortStop := na
+    shortTP := na
+    shortQty := na
+    shortCloseAlertSent := false
+
+//====================================================
+// Plotting
+//====================================================
+plotshape(showSignals and longSignal, title="Long Signal", style=shape.triangleup, location=location.belowbar, size=size.small, text="LONG")
+plotshape(showSignals and shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, size=size.small, text="SHORT")
+
+plotshape(showFilteredSignals and skippedLongMaxSL, title="Skipped Long - Max SL", style=shape.xcross, location=location.belowbar, size=size.small, text="SKIP SL")
+plotshape(showFilteredSignals and skippedShortMaxSL, title="Skipped Short - Max SL", style=shape.xcross, location=location.abovebar, size=size.small, text="SKIP SL")
+
+plot(showLevels and longPending ? longEntry : na, "Long Entry", style=plot.style_linebr)
+plot(showLevels and longPending ? longStop  : na, "Long Normal Stop", style=plot.style_linebr)
+plot(showLevels and longPending ? longTP    : na, "Long TP", style=plot.style_linebr)
+
+plot(showLevels and shortPending ? shortEntry : na, "Short Entry", style=plot.style_linebr)
+plot(showLevels and shortPending ? shortStop  : na, "Short Normal Stop", style=plot.style_linebr)
+plot(showLevels and shortPending ? shortTP    : na, "Short TP", style=plot.style_linebr)

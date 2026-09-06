@@ -1,0 +1,570 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description kNNLib — hierarchical k-nearest-neighbor tournament over
+//              TrainingBuffer<TBSample>. Distance dispatch (Euclidean,
+//              Manhattan, Cosine, Chebyshev, Mahalanobis), category-A/B
+//              filtering, weighted voting, regression aggregation.
+//              Layer L2. Depends on NumLib + LearningLib.
+//
+//              All math is array-based; no native ta.* simple-required
+//              callouts in inner loops, so UDT config IS safe here (Px+1
+//              rule does not bind).
+//
+// Step 10b of restructuring.
+//
+library("kNNLib", overlay=false)
+
+import cybermediaboy/NumLib/4 as N
+import cybermediaboy/LearningLib/3 as L
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen — P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Aggregation strategy for top-k labels
+export enum AggregateMode
+    MEAN              // arithmetic mean of labels (regression)
+    MEAN_WEIGHTED     // weighted by 1/distance
+    MEDIAN            // robust regression
+    VOTE_MAJORITY     // classification: most frequent label
+    VOTE_WEIGHTED     // classification: weighted vote by 1/distance
+
+// @enum Tournament filter mode
+export enum FilterMode
+    NONE              // search all samples
+    META_A_ONLY       // restrict to samples where sample.meta_a == query.meta_a
+    META_B_ONLY       // restrict to samples where sample.meta_b == query.meta_b
+    META_AB           // both must match (intersection)
+    META_A_THEN_B     // hierarchical: filter by A, fall back to ALL if too few
+
+// @enum Direction filter
+export enum DirectionFilter
+    ANY
+    LONG_ONLY
+    SHORT_ONLY
+    SAME_AS_QUERY
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: CONFIG / QUERY / RESULT UDTs
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type KnnConfig — search hyperparameters
+// @field k                  number of neighbors
+// @field metric             distance metric
+// @field aggregate          how to combine top-k labels
+// @field filter             tournament filter mode
+// @field dir_filter         direction filter
+// @field min_samples        minimum filtered population to use filter (else fallback)
+// @field min_distance       floor for 1/d weighting (avoid singular)
+// @field require_distinct_t require sample.timestamp != query.timestamp (anti-leak)
+export type KnnConfig
+    int k
+    L.DistanceKind metric
+    AggregateMode aggregate
+    FilterMode filter
+    DirectionFilter dir_filter
+    int   min_samples
+    float min_distance
+    bool  require_distinct_t
+
+export f_config_default(int k) =>
+    KnnConfig.new(
+         k = k, metric = L.DistanceKind.EUCLIDEAN,
+         aggregate = AggregateMode.MEAN_WEIGHTED,
+         filter = FilterMode.NONE, dir_filter = DirectionFilter.ANY,
+         min_samples = 3, min_distance = 1e-6, require_distinct_t = true)
+
+// @type KnnQuery — query specification
+// @field features      query feature vector
+// @field meta_a        category-A label (e.g. setup family)
+// @field meta_b        category-B label (e.g. setup code)
+// @field direction     query direction context (used by SAME_AS_QUERY filter)
+// @field timestamp     query bar (used by require_distinct_t)
+// @field sigma_inv_tri  inverse covariance (lower-triangular packed) for Mahalanobis;
+//                       caller-managed; ignored for non-Mahalanobis metrics
+export type KnnQuery
+    array<float> features
+    int meta_a
+    int meta_b
+    L.TradeDirection direction
+    int  timestamp
+    array<float> sigma_inv_tri
+
+export f_query_new(array<float> feats, int meta_a, int meta_b,
+                   L.TradeDirection dir) =>
+    KnnQuery.new(features = feats, meta_a = meta_a, meta_b = meta_b,
+                  direction = dir, timestamp = bar_index,
+                  sigma_inv_tri = na)
+
+// @type KnnNeighbor — single neighbor with distance and sample backref
+export type KnnNeighbor
+    L.TBSample sample
+    float distance
+    float weight     // 1 / max(distance, min_distance) — populated post-rank
+
+// @type KnnResult — aggregated output
+// @field neighbors        top-k sorted ascending by distance
+// @field prediction       aggregated label (na if no neighbors)
+// @field confidence       in [0,1] — fraction of neighbors agreeing on dominant class,
+//                         or 1/(1+spread) for regression
+// @field used_filter      which filter was effectively applied (after fallback)
+// @field n_candidates     number of samples scanned
+// @field n_filtered       number passing filter
+export type KnnResult
+    array<KnnNeighbor> neighbors
+    float prediction
+    float confidence
+    FilterMode used_filter
+    int n_candidates
+    int n_filtered
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: MAHALANOBIS WITH PACKED COVARIANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Mahalanobis distance using lower-triangular packed inverse cov.
+//           Packing convention: sigma_inv_tri[idx] for (i,j) with i>=j is at
+//           idx = i*(i+1)/2 + j. Diagonal at i*(i+1)/2 + i.
+//           Caller-managed packing; sigma_inv_tri size = n*(n+1)/2.
+export f_mahalanobis_packed(array<float> a, array<float> b,
+                             array<float> sigma_inv_tri) =>
+    int n = math.min(array.size(a), array.size(b))
+    float result = 0.0
+    if n > 0 and not na(sigma_inv_tri)
+        // Compute (a-b)' * Sigma_inv * (a-b) with symmetric packed access
+        for i = 0 to n - 1
+            float di = nz(array.get(a, i)) - nz(array.get(b, i))
+            // Diagonal term
+            int diag_idx = i * (i + 1) / 2 + i
+            if diag_idx < array.size(sigma_inv_tri)
+                result += di * di * array.get(sigma_inv_tri, diag_idx)
+            // Off-diagonal (j < i): symmetric, add 2x
+            if i > 0
+                for j = 0 to i - 1
+                    float dj = nz(array.get(a, j)) - nz(array.get(b, j))
+                    int off_idx = i * (i + 1) / 2 + j
+                    if off_idx < array.size(sigma_inv_tri)
+                        result += 2.0 * di * dj * array.get(sigma_inv_tri, off_idx)
+    math.sqrt(math.max(0.0, result))
+
+// @function Distance dispatch, including Mahalanobis when query carries
+//           sigma_inv_tri.
+export f_dist_dispatch(L.DistanceKind kind, array<float> a, array<float> b,
+                       array<float> sigma_inv_tri) =>
+    if kind == L.DistanceKind.MAHALANOBIS and not na(sigma_inv_tri)
+        f_mahalanobis_packed(a, b, sigma_inv_tri)
+    else
+        L.f_distance(kind, a, b)
+
+// @function Shrinkage Mahalanobis distance with L1-median anchor (Cabana et al. 2019)
+// @param x Current observation vector (length d, typically 3)
+// @param X_buffer Matrix of past observations (N rows × d columns)
+// @param alpha Shrinkage weight toward identity [0,1], default 0.1
+// @param weiszfeld_iters Weiszfeld iterations for L1-median [1,10], default 5
+// @returns Robust Mahalanobis distance, or na if invalid inputs
+export f_mahalanobis_shrinkage(array<float> x, matrix<float> X_buffer,
+                                 simple float alpha, simple int weiszfeld_iters) =>
+    int d = array.size(x)
+    int N = matrix.rows(X_buffer)
+    int d_buf = matrix.columns(X_buffer)
+    
+    // Guards
+    if d != d_buf or N < 3 or d < 2
+        float(na)
+    else
+        float alpha_clamped = math.max(0.0, math.min(1.0, alpha))
+        int iters = math.max(1, math.min(10, weiszfeld_iters))
+        
+        // Step 1: Compute L1-median (geometric median) via Weiszfeld iteration
+        array<float> mu = array.new<float>(d, 0.0)
+        // Initialize to column means
+        for j = 0 to d - 1
+            float sum_j = 0.0
+            for i = 0 to N - 1
+                sum_j += matrix.get(X_buffer, i, j)
+            array.set(mu, j, sum_j / N)
+        
+        // Weiszfeld iterations
+        for iter = 0 to iters - 1
+            float sum_weights = 0.0
+            array<float> weighted_sum = array.new<float>(d, 0.0)
+            for i = 0 to N - 1
+                // Compute distance from current mu
+                float dist_sq = 0.0
+                for j = 0 to d - 1
+                    float diff = matrix.get(X_buffer, i, j) - array.get(mu, j)
+                    dist_sq += diff * diff
+                float dist = math.sqrt(dist_sq)
+                float w = dist > 1e-12 ? 1.0 / dist : 1e12  // guard division-by-zero
+                sum_weights += w
+                for j = 0 to d - 1
+                    array.set(weighted_sum, j, array.get(weighted_sum, j) + w * matrix.get(X_buffer, i, j))
+            // Update mu
+            for j = 0 to d - 1
+                array.set(mu, j, array.get(weighted_sum, j) / sum_weights)
+        
+        // Step 2: Compute comedian matrix C[i,j] = median(|X[k,i] - μ_i| · sign(X[k,j] - μ_j))
+        // For d=3, only need 6 unique entries (symmetric)
+        array<float> C_flat = array.new<float>(d * d, 0.0)
+        for i = 0 to d - 1
+            for j = 0 to d - 1
+                array<float> products = array.new<float>(N, 0.0)
+                for k = 0 to N - 1
+                    float dev_i = matrix.get(X_buffer, k, i) - array.get(mu, i)
+                    float dev_j = matrix.get(X_buffer, k, j) - array.get(mu, j)
+                    float prod = math.abs(dev_i) * math.sign(dev_j)
+                    array.set(products, k, prod)
+                // Median of products
+                array<float> sorted_products = array.copy(products)
+                array.sort(sorted_products)
+                bool is_odd_n = N % 2 == 1
+                int mid_idx = N / 2
+                float odd_med = array.get(sorted_products, mid_idx)
+                float even_med = 0.5 * (array.get(sorted_products, mid_idx - 1) + array.get(sorted_products, mid_idx))
+                float med = is_odd_n ? odd_med : even_med
+                array.set(C_flat, i * d + j, med)
+        
+        // Step 3: Shrink toward identity: C_shrunk = (1-alpha)·C + alpha·I
+        for i = 0 to d - 1
+            for j = 0 to d - 1
+                float c_ij = array.get(C_flat, i * d + j)
+                float shrunk = (1.0 - alpha_clamped) * c_ij + (i == j ? alpha_clamped : 0.0)
+                array.set(C_flat, i * d + j, shrunk)
+        
+        // Step 4: Invert C_shrunk (closed-form for d=3 via cofactor expansion)
+        float result = na
+        if d == 3
+            // Extract 3x3 matrix elements
+            float c00 = array.get(C_flat, 0), c01 = array.get(C_flat, 1), c02 = array.get(C_flat, 2)
+            float c10 = array.get(C_flat, 3), c11 = array.get(C_flat, 4), c12 = array.get(C_flat, 5)
+            float c20 = array.get(C_flat, 6), c21 = array.get(C_flat, 7), c22 = array.get(C_flat, 8)
+            
+            // Determinant
+            float det = (c00 * (c11 * c22 - c12 * c21) - 
+                         c01 * (c10 * c22 - c12 * c20) + 
+                         c02 * (c10 * c21 - c11 * c20))
+            
+            if math.abs(det) < 1e-12
+                result := na  // singular matrix
+            else
+                // Cofactor matrix (transposed for inverse)
+                float inv00 = (c11 * c22 - c12 * c21) / det
+                float inv01 = (c02 * c21 - c01 * c22) / det
+                float inv02 = (c01 * c12 - c02 * c11) / det
+                float inv10 = (c12 * c20 - c10 * c22) / det
+                float inv11 = (c00 * c22 - c02 * c20) / det
+                float inv12 = (c02 * c10 - c00 * c12) / det
+                float inv20 = (c10 * c21 - c11 * c20) / det
+                float inv21 = (c01 * c20 - c00 * c21) / det
+                float inv22 = (c00 * c11 - c01 * c10) / det
+                
+                // Step 5: Distance sqrt((x - μ)ᵀ · C_inv · (x - μ))
+                float dx0 = array.get(x, 0) - array.get(mu, 0)
+                float dx1 = array.get(x, 1) - array.get(mu, 1)
+                float dx2 = array.get(x, 2) - array.get(mu, 2)
+                
+                float y0 = inv00 * dx0 + inv01 * dx1 + inv02 * dx2
+                float y1 = inv10 * dx0 + inv11 * dx1 + inv12 * dx2
+                float y2 = inv20 * dx0 + inv21 * dx1 + inv22 * dx2
+                
+                float quad = dx0 * y0 + dx1 * y1 + dx2 * y2
+                result := math.sqrt(math.max(0.0, quad))
+        else if d == 2
+            // 2x2 inverse (simpler)
+            float c00 = array.get(C_flat, 0), c01 = array.get(C_flat, 1)
+            float c10 = array.get(C_flat, 2), c11 = array.get(C_flat, 3)
+            float det = c00 * c11 - c01 * c10
+            
+            if math.abs(det) < 1e-12
+                result := na
+            else
+                float inv00 = c11 / det, inv01 = -c01 / det
+                float inv10 = -c10 / det, inv11 = c00 / det
+                
+                float dx0 = array.get(x, 0) - array.get(mu, 0)
+                float dx1 = array.get(x, 1) - array.get(mu, 1)
+                
+                float y0 = inv00 * dx0 + inv01 * dx1
+                float y1 = inv10 * dx0 + inv11 * dx1
+                
+                float quad = dx0 * y0 + dx1 * y1
+                result := math.sqrt(math.max(0.0, quad))
+        
+        result
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: FILTER PREDICATES
+// ═══════════════════════════════════════════════════════════════════════════
+
+f_passes_dir(L.TradeDirection sample_dir, L.TradeDirection query_dir, DirectionFilter df) =>
+    df == DirectionFilter.ANY ? true : df == DirectionFilter.LONG_ONLY ? sample_dir == L.TradeDirection.LONG : df == DirectionFilter.SHORT_ONLY ? sample_dir == L.TradeDirection.SHORT : df == DirectionFilter.SAME_AS_QUERY ? sample_dir == query_dir : true
+
+f_passes_meta(int sample_a, int sample_b, int q_a, int q_b, FilterMode fm) =>
+    fm == FilterMode.NONE ? true : fm == FilterMode.META_A_ONLY ? sample_a == q_a : fm == FilterMode.META_B_ONLY ? sample_b == q_b : fm == FilterMode.META_AB ? sample_a == q_a and sample_b == q_b : fm == FilterMode.META_A_THEN_B ? sample_a == q_a : true
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: TOP-K EXTRACTION
+// ═══════════════════════════════════════════════════════════════════════════
+// Linear scan + bounded insertion. For k << N this beats sort-all-then-slice.
+
+// @function Insert candidate into top-k array (sorted ascending by distance).
+//           Mutates `top` in-place, capped at size k.
+f_topk_insert(array<KnnNeighbor> top, KnnNeighbor cand, int k) =>
+    int sz = array.size(top)
+    if sz < k
+        // Find insertion index (linear; k is small, e.g. ≤16)
+        int ins = sz
+        if sz > 0
+            for i = 0 to sz - 1
+                if cand.distance < array.get(top, i).distance
+                    ins := i
+                    break
+        array.insert(top, ins, cand)
+    else
+        KnnNeighbor worst = array.get(top, sz - 1)
+        if cand.distance < worst.distance
+            int ins = sz - 1
+            for i = 0 to sz - 1
+                if cand.distance < array.get(top, i).distance
+                    ins := i
+                    break
+            array.insert(top, ins, cand)
+            array.remove(top, sz)
+    top
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: AGGREGATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+f_agg_mean(array<KnnNeighbor> nbrs) =>
+    int n = array.size(nbrs)
+    float s = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            s += array.get(nbrs, i).sample.label
+        s / n
+    else
+        na
+
+f_agg_mean_weighted(array<KnnNeighbor> nbrs) =>
+    int n = array.size(nbrs)
+    float num = 0.0, float den = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            KnnNeighbor nb = array.get(nbrs, i)
+            num += nb.weight * nb.sample.label
+            den += nb.weight
+    den > 0.0 ? num / den : na
+
+f_agg_median(array<KnnNeighbor> nbrs) =>
+    int n = array.size(nbrs)
+    float result = na
+    if n > 0
+        array<float> labels = array.new<float>()
+        for i = 0 to n - 1
+            array.push(labels, array.get(nbrs, i).sample.label)
+        array.sort(labels, order.ascending)
+        result := n % 2 == 0 ? 0.5 * (array.get(labels, n/2 - 1) + array.get(labels, n/2)) : array.get(labels, n/2)
+    result
+
+f_agg_vote_majority(array<KnnNeighbor> nbrs) =>
+    int n = array.size(nbrs)
+    float result = na
+    if n > 0
+        // Tally distinct rounded labels
+        array<float> keys = array.new<float>()
+        array<int>   cnts = array.new<int>()
+        for i = 0 to n - 1
+            float lbl = array.get(nbrs, i).sample.label
+            int found = -1
+            int sz = array.size(keys)
+            if sz > 0
+                for j = 0 to sz - 1
+                    if math.abs(array.get(keys, j) - lbl) < 1e-9
+                        found := j
+                        break
+            if found >= 0
+                array.set(cnts, found, array.get(cnts, found) + 1)
+            else
+                array.push(keys, lbl)
+                array.push(cnts, 1)
+        // Argmax
+        int best = 0
+        int best_n = array.get(cnts, 0)
+        int sz2 = array.size(cnts)
+        if sz2 > 1
+            for j = 1 to sz2 - 1
+                if array.get(cnts, j) > best_n
+                    best_n := array.get(cnts, j)
+                    best := j
+        result := array.get(keys, best)
+    result
+
+f_agg_vote_weighted(array<KnnNeighbor> nbrs) =>
+    int n = array.size(nbrs)
+    float result = na
+    if n > 0
+        array<float> keys = array.new<float>()
+        array<float> wts  = array.new<float>()
+        for i = 0 to n - 1
+            KnnNeighbor nb = array.get(nbrs, i)
+            float lbl = nb.sample.label
+            int found = -1
+            int sz = array.size(keys)
+            if sz > 0
+                for j = 0 to sz - 1
+                    if math.abs(array.get(keys, j) - lbl) < 1e-9
+                        found := j
+                        break
+            if found >= 0
+                array.set(wts, found, array.get(wts, found) + nb.weight)
+            else
+                array.push(keys, lbl)
+                array.push(wts, nb.weight)
+        int best = 0
+        float best_w = array.get(wts, 0)
+        int sz2 = array.size(wts)
+        if sz2 > 1
+            for j = 1 to sz2 - 1
+                if array.get(wts, j) > best_w
+                    best_w := array.get(wts, j)
+                    best := j
+        result := array.get(keys, best)
+    result
+
+// @function Confidence proxy
+//             VOTE_*: dominant_count / total
+//             MEAN/MEDIAN: 1 / (1 + relative_spread)
+f_confidence(array<KnnNeighbor> nbrs, AggregateMode mode, float prediction) =>
+    int n = array.size(nbrs)
+    float c = 0.0
+    if n > 0
+        if mode == AggregateMode.VOTE_MAJORITY or mode == AggregateMode.VOTE_WEIGHTED
+            int matches = 0
+            for i = 0 to n - 1
+                if math.abs(array.get(nbrs, i).sample.label - prediction) < 1e-9
+                    matches += 1
+            c := float(matches) / float(n)
+        else
+            float sum_sq = 0.0
+            for i = 0 to n - 1
+                float d = array.get(nbrs, i).sample.label - prediction
+                sum_sq += d * d
+            float spread = math.sqrt(sum_sq / n)
+            float scale = math.max(1e-6, math.abs(prediction))
+            c := 1.0 / (1.0 + spread / scale)
+    math.max(0.0, math.min(1.0, c))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: MAIN SEARCH
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Hierarchical kNN search with tournament filtering and fallback.
+//
+//           Algorithm:
+//             1. Try requested filter mode.
+//             2. If filtered population < cfg.min_samples, fall back:
+//                META_AB → META_A_ONLY → NONE
+//                META_A_THEN_B / META_A_ONLY → NONE
+//                META_B_ONLY → NONE
+//             3. Compute distances, retain top-k via bounded insertion.
+//             4. Populate weights = 1 / max(d, min_distance).
+//             5. Aggregate per cfg.aggregate.
+//             6. Compute confidence.
+//
+//           Returns KnnResult with effective filter and population counts.
+export f_knn_search(L.TrainingBuffer tb, KnnQuery q, KnnConfig cfg) =>
+    // Pass 1: count filtered population for fallback decision
+    int n_total = tb.filled
+    int n_pass = 0
+    if n_total > 0
+        for i = 0 to n_total - 1
+            L.TBSample s = tb.read_chrono(i)
+            if not na(s)
+                if cfg.require_distinct_t and s.timestamp == q.timestamp
+                    continue
+                if not f_passes_dir(s.direction, q.direction, cfg.dir_filter)
+                    continue
+                if f_passes_meta(s.meta_a, s.meta_b, q.meta_a, q.meta_b, cfg.filter)
+                    n_pass += 1
+
+    // Decide effective filter
+    FilterMode eff = cfg.filter
+    if n_pass < cfg.min_samples
+        eff := cfg.filter == FilterMode.META_AB ? FilterMode.META_A_ONLY : cfg.filter == FilterMode.META_A_THEN_B ? FilterMode.NONE : cfg.filter == FilterMode.META_A_ONLY ? FilterMode.NONE : cfg.filter == FilterMode.META_B_ONLY ? FilterMode.NONE : FilterMode.NONE
+        // Re-count under effective filter
+        int n_pass2 = 0
+        if n_total > 0
+            for i = 0 to n_total - 1
+                L.TBSample s = tb.read_chrono(i)
+                if not na(s)
+                    if cfg.require_distinct_t and s.timestamp == q.timestamp
+                        continue
+                    if not f_passes_dir(s.direction, q.direction, cfg.dir_filter)
+                        continue
+                    if f_passes_meta(s.meta_a, s.meta_b, q.meta_a, q.meta_b, eff)
+                        n_pass2 += 1
+        n_pass := n_pass2
+
+    // Pass 2: distance scan + top-k insertion
+    array<KnnNeighbor> top = array.new<KnnNeighbor>()
+    if n_total > 0 and n_pass > 0
+        for i = 0 to n_total - 1
+            L.TBSample s = tb.read_chrono(i)
+            if not na(s)
+                if cfg.require_distinct_t and s.timestamp == q.timestamp
+                    continue
+                if not f_passes_dir(s.direction, q.direction, cfg.dir_filter)
+                    continue
+                if f_passes_meta(s.meta_a, s.meta_b, q.meta_a, q.meta_b, eff)
+                    float d = f_dist_dispatch(cfg.metric, q.features,
+                                                s.features, q.sigma_inv_tri)
+                    KnnNeighbor cand = KnnNeighbor.new(
+                         sample = s, distance = d, weight = 0.0)
+                    f_topk_insert(top, cand, cfg.k)
+
+    // Populate weights
+    int sz = array.size(top)
+    if sz > 0
+        for i = 0 to sz - 1
+            KnnNeighbor nb = array.get(top, i)
+            nb.weight := 1.0 / math.max(nb.distance, cfg.min_distance)
+            array.set(top, i, nb)
+
+    // Aggregate
+    float pred = na
+    if sz > 0
+        if cfg.aggregate == AggregateMode.MEAN
+            pred := f_agg_mean(top)
+        else if cfg.aggregate == AggregateMode.MEAN_WEIGHTED
+            pred := f_agg_mean_weighted(top)
+        else if cfg.aggregate == AggregateMode.MEDIAN
+            pred := f_agg_median(top)
+        else if cfg.aggregate == AggregateMode.VOTE_MAJORITY
+            pred := f_agg_vote_majority(top)
+        else
+            pred := f_agg_vote_weighted(top)
+
+    float conf = sz > 0 ? f_confidence(top, cfg.aggregate, pred) : 0.0
+
+    KnnResult.new(neighbors = top, prediction = pred, confidence = conf,
+                   used_filter = eff, n_candidates = n_total, n_filtered = n_pass)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_aggregate_str(AggregateMode m) =>
+    m == AggregateMode.MEAN ? "mean" : m == AggregateMode.MEAN_WEIGHTED ? "mean-weighted" : m == AggregateMode.MEDIAN ? "median" : m == AggregateMode.VOTE_MAJORITY ? "vote-majority" : m == AggregateMode.VOTE_WEIGHTED ? "vote-weighted" : "unknown"
+
+export f_filter_str(FilterMode f) =>
+    f == FilterMode.NONE ? "none" : f == FilterMode.META_A_ONLY ? "meta-a" : f == FilterMode.META_B_ONLY ? "meta-b" : f == FilterMode.META_AB ? "meta-ab" : f == FilterMode.META_A_THEN_B ? "meta-a-then-b" : "unknown"
+
+export f_dirfilter_str(DirectionFilter d) =>
+    d == DirectionFilter.ANY ? "any" : d == DirectionFilter.LONG_ONLY ? "long-only" : d == DirectionFilter.SHORT_ONLY ? "short-only" : d == DirectionFilter.SAME_AS_QUERY ? "same-as-query" : "unknown"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

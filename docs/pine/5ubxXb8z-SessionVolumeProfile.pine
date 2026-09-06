@@ -1,0 +1,416 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jmosullivan
+
+//@version=6
+
+// @description Analyzes price & volume during regular trading hours to provide a session volume profile analysis. 
+// To learn more about this library and how you can use it, click on the website link in my profile where you will
+// find a blog post with detailed information. 
+library("SessionVolumeProfile", overlay=true)
+
+import jmosullivan/Table/1
+import jmosullivan/Utils/19
+import jmosullivan/Session/9
+
+export type Object
+	// Configuration Settings
+	int numberOfRows = 24
+	int valueAreaCoverage = 70
+	bool trackDevelopingVa = false
+	// Values we are searching for
+	float valueAreaHigh = na
+	float pointOfControl = na
+	float valueAreaLow = na
+	int startTime = na
+	int endTime = na
+	// Private properties for tracking things
+	float dayHigh = na
+	float dayLow = na
+	float step = na
+	int pointOfControlLevel = na
+	int valueAreaHighLevel = na
+	int valueAreaLowLevel = na
+	int lastTime = na
+    map<int, float> volumeRows = na
+	array<float> ltfSessionHighs = na
+	array<float> ltfSessionLows = na
+	array<float> ltfSessionVols = na
+	
+// @function Helper function to write some information about the supplied SVP object to the screen in a table.
+// @param vp The SVP object to debug
+// @param position The position.* to place the table. Defaults to position.bottom_center
+export debug(Object vp, string position = position.bottom_center) =>
+	if not na(vp)
+		h = str.split('VAH,POC,VAL,Start,End,Now', ',')
+		r = array.from(str.tostring(vp.valueAreaHigh, format.mintick), str.tostring(vp.pointOfControl, format.mintick), str.tostring(vp.valueAreaLow, format.mintick), Utils.getDateTimeString(vp.startTime), Utils.getDateTimeString(vp.endTime), Utils.getDateTimeString(time))
+		m = matrix.new<string>()
+		matrix.add_row(m, 0, h)
+		matrix.add_row(m, 1, r)
+
+		Table.fromMatrix(m, position)
+
+// @function Depending on the timeframe of the chart, determines a lower timeframe to grab volume data from for the analysis
+// @returns The timeframe string to fetch volume for
+export getLowerTimeframe() =>
+	timeframeInSeconds = timeframe.in_seconds()
+	oneMinuteInSeconds = timeframe.in_seconds("1")
+	fiveMinutesInSeconds = timeframe.in_seconds("5")
+	fifteenMinutesInSeconds = timeframe.in_seconds("15")
+	thirtyMinutesInSeconds = timeframe.in_seconds("30")
+	oneHourInSeconds = timeframe.in_seconds("60")
+	twoHoursInSeconds = timeframe.in_seconds("120")
+	fourHoursInSeconds = timeframe.in_seconds("240")
+	oneDayInSeconds = timeframe.in_seconds("1D")
+	switch 
+		timeframeInSeconds >= oneMinuteInSeconds and timeframeInSeconds <= fifteenMinutesInSeconds => "1"
+		timeframeInSeconds > fifteenMinutesInSeconds and timeframeInSeconds <= thirtyMinutesInSeconds => "5"
+		timeframeInSeconds > thirtyMinutesInSeconds and timeframeInSeconds <= oneHourInSeconds => "10"
+		timeframeInSeconds > oneHourInSeconds and timeframeInSeconds <= twoHoursInSeconds => "15"
+		timeframeInSeconds > twoHoursInSeconds and timeframeInSeconds <= fourHoursInSeconds => "30"
+		timeframeInSeconds > fourHoursInSeconds and timeframeInSeconds <= oneDayInSeconds => "60"
+		timeframeInSeconds > oneDayInSeconds => "1D"
+		=> "10s"
+
+// @function Private function used to calculate the volume used across candles.
+getVolumeForRow(rowHigh, rowLow, candleHigh, candleLow, candleVolume) =>
+    rowRange = rowHigh - rowLow
+    candleRange = candleHigh - candleLow
+    pricePortion = 0.
+    
+    if candleHigh > rowHigh and candleLow < rowLow
+        // The candle engulfed the row, so take the entire row range's portion of volume out of the candle
+        pricePortion := rowRange
+    else if candleHigh <= rowHigh and candleLow >= rowLow
+        // The top of the candle is in-or-equal the row, the bottom of the candle is also in-or-equal the row
+        pricePortion := candleRange
+    else if candleHigh > rowHigh and candleLow >= rowLow // and candleLow 
+        // The top of the candle is above the row, and the bottom is in-or-equal the row
+        pricePortion := rowHigh - candleLow
+    else if candleHigh <= rowHigh and candleLow < rowLow
+        // The top of the candle is in-or-equal the row, the bottom of the candle is below the row
+        pricePortion := candleHigh - rowLow
+    else 
+        // The candle didn't intersect with the row at at all
+        pricePortion := 0
+
+    // return the portion of volume from the candle relative to the amount of price intersecting the row
+    nz((pricePortion * candleVolume) / candleRange)
+
+// @function Populated the provided SessionVolumeProfile object with vp data on the session.
+// @param volumeProfile The SessionVolumeProfile object to populate
+// @param lowerTimeframeHigh The lower timeframe high values
+// @param lowerTimeframeLow The lower timeframe low values
+// @param lowerTimeframeVolume The lower timeframe volume values
+// @param lowerTimeframeTime The lower timeframe time values
+// @param lowerTimeframeSessionIsMarket The lower timeframe session.ismarket values (that are futures-friendly)
+export get(Object volumeProfile, array<float> lowerTimeframeHigh, array<float> lowerTimeframeLow, array<float> lowerTimeframeVolume, array<int> lowerTimeframeTime, array<bool> lowerTimeframeSessionIsMarket) =>
+	// Don't do SVP unless the chart is >= 1m and < 1d
+	timeframeInSeconds = timeframe.in_seconds()
+	sessionMap = Session.getSessionMap()
+	if timeframeInSeconds >= timeframe.in_seconds("1") and timeframeInSeconds < timeframe.in_seconds("1D")
+		valueAreaCoveragePercent = volumeProfile.valueAreaCoverage / 100
+
+		// Make sure arrays are defined
+		if na(volumeProfile.ltfSessionHighs)
+			volumeProfile.ltfSessionHighs := array.new<float>()
+		if na(volumeProfile.ltfSessionLows)
+			volumeProfile.ltfSessionLows := array.new<float>()
+		if na(volumeProfile.ltfSessionVols)
+			volumeProfile.ltfSessionVols := array.new<float>()
+
+		// Collect all of the session values into the arrays
+		var lastBarWasInMarketSession = false
+		if barstate.isconfirmed
+			for [i, ltfSessionIsMarket] in lowerTimeframeSessionIsMarket
+				ltfTime = array.get(lowerTimeframeTime, i)
+				dayChange = str.format_time(volumeProfile.lastTime, 'dd') != str.format_time(ltfTime, 'dd')
+				volumeProfile.lastTime := ltfTime
+				newSessionWithExtendedHours = ltfSessionIsMarket and not lastBarWasInMarketSession // If extended hours are on, this will be true when the ismarket changes, but if extended hours are off this will never be true because ismarket will always return true.
+				newSessionWithoutExtendedHours = dayChange and ltfSessionIsMarket // If extended hours are off, this will be true when the day rolls over. But if extended hours are on, this will never be true bc when the day rolls over ismarket will be false.
+
+				// Use lower timeframe bars to get an accurate time when the market session began and ended
+				if newSessionWithExtendedHours or newSessionWithoutExtendedHours
+					// ... Reset things
+					array.clear(volumeProfile.ltfSessionHighs)
+					array.clear(volumeProfile.ltfSessionLows)
+					array.clear(volumeProfile.ltfSessionVols)
+					volumeProfile.startTime := ltfTime
+
+				if lastBarWasInMarketSession and not ltfSessionIsMarket
+					volumeProfile.endTime := ltfTime
+
+				if ltfSessionIsMarket
+					array.push(volumeProfile.ltfSessionHighs, array.get(lowerTimeframeHigh, i))
+					array.push(volumeProfile.ltfSessionLows, array.get(lowerTimeframeLow, i))
+					array.push(volumeProfile.ltfSessionVols, array.get(lowerTimeframeVolume, i))
+
+				// Remember if this bar was in session on the next loop
+				lastBarWasInMarketSession := ltfSessionIsMarket
+
+		// If you don't need the developing VA, you can stop all that processing on every candle by setting it to false (default)
+		// and then only processing the value area on (a) the last bar of the day or (b) the last bar loaded on the chart during 
+		// the regular session (aka session.ismarket)
+		onlyTrackOnLastBar = volumeProfile.trackDevelopingVa == true ? true : barstate.islast or Session.islastbar_regular(sessionMap)
+		if Session.ismarket(sessionMap) and onlyTrackOnLastBar
+			// This is a catch-all in case the end time is not defined correctly...
+			if na(volumeProfile.endTime) or volumeProfile.endTime < volumeProfile.startTime
+				volumeProfile.endTime := time
+			// If we've collected data...
+			sessionCandleCount = array.size(volumeProfile.ltfSessionHighs)
+			if sessionCandleCount > 0
+				volumeProfile.dayHigh := array.max(volumeProfile.ltfSessionHighs)
+				volumeProfile.dayLow := array.min(volumeProfile.ltfSessionLows)
+				volumeProfile.step := (volumeProfile.dayHigh - volumeProfile.dayLow) / volumeProfile.numberOfRows
+				volumeRows = map.new<int, float>() // array.new<float>(volumeProfile.numberOfRows, 0.)
+				priceLevelRows = map.new<int, float>() // array.new<float>(volumeProfile.numberOfRows, 0.)
+				pocLevel = 0
+				vahLevel = 0
+				valLevel = 0
+				highestVol = 0.
+
+				// Loop through all of the collected session values placing them into their appropriate levels
+				level = 0
+				if volumeProfile.step > 0
+					for priceLevel = volumeProfile.dayLow to volumeProfile.dayHigh by volumeProfile.step
+						if (level < volumeProfile.numberOfRows)
+							map.put(priceLevelRows, level, priceLevel)
+							levelVol = map.get(volumeRows, level)
+							levelVol := na(levelVol) ? 0 : levelVol
+
+							for i = 0 to sessionCandleCount - 1
+								h = array.get(volumeProfile.ltfSessionHighs, i) // high
+								l = array.get(volumeProfile.ltfSessionLows, i) // low
+								r = h - l // range
+								v = nz(array.get(volumeProfile.ltfSessionVols, i)) // volume
+								if not na(h) and not na(l) and not na(v)
+									if h >= priceLevel and l < (priceLevel + volumeProfile.step)
+										levelVol += getVolumeForRow(priceLevel + volumeProfile.step, priceLevel, h, l, v)
+
+							if levelVol > highestVol
+								highestVol := levelVol
+								pocLevel := level
+
+							map.put(volumeRows, level, levelVol)
+						level += 1
+
+				// Start building value from the POC upwards and downwards
+				valueAreaTracking = map.get(volumeRows, pocLevel)
+				totalVol = array.sum(map.values(volumeRows))
+				valueAreaVol = totalVol * valueAreaCoveragePercent
+				vahLevel := pocLevel
+				valLevel := pocLevel
+				volumeAbovePoc = 0.
+				volumeBelowPoc = 0.
+				loopCount = 0
+				while valueAreaTracking < valueAreaVol and loopCount <= volumeProfile.numberOfRows // Prevent infinite looping
+					loopCount += 1
+
+					// Break if we've gone below or above the numRows
+					if valLevel <= 0 and vahLevel >= volumeProfile.numberOfRows - 1
+						break
+
+					volumeAbovePoc := vahLevel >= volumeProfile.numberOfRows - 1 ? 0 : map.get(volumeRows, vahLevel + 1)
+					volumeBelowPoc := valLevel <= 0 ? 0 : map.get(volumeRows, valLevel - 1)
+					
+					if volumeAbovePoc >= volumeBelowPoc
+						valueAreaTracking += volumeAbovePoc
+						vahLevel += 1
+					else
+						valueAreaTracking += volumeBelowPoc
+						valLevel -= 1
+
+				if valLevel < 0
+					valLevel := 0
+				if vahLevel >= volumeProfile.numberOfRows - 1
+					vahLevel := volumeProfile.numberOfRows - 1
+
+				// Define the key return values on the volume profile object so library users can do things with them...
+				volumeProfile.volumeRows := volumeRows
+				volumeProfile.pointOfControlLevel := pocLevel
+				volumeProfile.valueAreaHighLevel := vahLevel
+				volumeProfile.valueAreaLowLevel := valLevel
+				volumeProfile.pointOfControl := map.get(priceLevelRows, pocLevel) + (volumeProfile.step / 2)
+				volumeProfile.valueAreaHigh := map.get(priceLevelRows, vahLevel) + volumeProfile.step
+				volumeProfile.valueAreaLow := map.get(priceLevelRows, valLevel)
+
+// @function Given a SessionVolumeProfile Object, will render the historical value areas for that object. 
+// @param todaySessionVolumeProfile The SessionVolumeProfile Object to draw
+// @param extendYesterdayOverToday Defaults to true
+// @param showLabels Defaults to true
+// @param labelSize Defaults to size.small
+// @param pocColor Defaults to #e500a4
+// @param pocStyle Defaults to line.style_solid
+// @param pocWidth Defaults to 1
+// @param vahlColor The color of the value area high/low lines. Defaults to #1592e6
+// @param vahlStyle The style of the value area high/low lines. Defaults to line.style_solid
+// @param vahlWidth The width of the value area high/low lines. Defaults to 1
+// @param vaColor The color of the value area background. Defaults to #00bbf911)
+export drawPriorValueAreas(Object todaySessionVolumeProfile, bool extendYesterdayOverToday = true, bool showLabels = true, string labelSize = size.small, color pocColor = #e500a4, string pocStyle = line.style_solid, int pocWidth=1, color vahlColor = #1592e6, string vahlStyle = line.style_solid, int vahlWidth = 1, color vaColor = #00bbf911) =>
+	var Object yesterdaySVP = na
+
+	// Yesterday drawings
+	var line yesterdayPocLine = line.new(time, 0, time, 0, color=pocColor, style=pocStyle, width=pocWidth, xloc=xloc.bar_time)
+	var line yesterdayVahLine = line.new(time, 0, time, 0, color=vahlColor, style=vahlStyle, width=vahlWidth, xloc=xloc.bar_time)
+	var line yesterdayValLine = line.new(time, 0, time, 0, color=vahlColor, style=vahlStyle, width=vahlWidth, xloc=xloc.bar_time)
+	var label yesterdayPocLabel = label.new(x=0, y=0, text="", xloc=xloc.bar_time, color=#00000000, style=label.style_label_left, textcolor=pocColor, size=labelSize, textalign=text.align_left)
+	var label yesterdayVahLabel = label.new(x=0, y=0, text="", xloc=xloc.bar_time, color=#00000000, style=label.style_label_left, textcolor=vahlColor, size=labelSize, textalign=text.align_left)
+	var label yesterdayValLabel = label.new(x=0, y=0, text="", xloc=xloc.bar_time, color=#00000000, style=label.style_label_left, textcolor=vahlColor, size=labelSize, textalign=text.align_left)
+	var box yesterdayVaBox = box.new(time, 0, time, 0, border_width=0, bgcolor=vaColor, xloc=xloc.bar_time)
+	labelTemplate = '{0} {1}'
+	labelPercentTemplate = '{0} {1} ({2,number,#.##}%)'
+
+	// SessionVolumeProfile.get() completes the configuration of a session on session.islastbar_regular, so 
+	// (assuming it was configured before this was called), at this point you should have everything you 
+	// need for the current day. So, any values already in yesterdaySVP now represent 2 days ago. So 
+	// (a) drop drawings for that day out onto the chart in their "final" state, and (b) then copy the 
+	// current SVP onto yesterdaySVP.
+	if Session.islastbar_regular()
+		if not na(yesterdaySVP)
+			// If we have yesterday's SVP, create drawings for that day
+			histVahLine = line.copy(yesterdayVahLine)
+			histValLine = line.copy(yesterdayValLine)
+			histPocLine = line.copy(yesterdayPocLine)
+			histVaBox = box.copy(yesterdayVaBox)
+			// Update where they end
+			line.set_x2(histVahLine, yesterdaySVP.endTime)
+			line.set_x2(histValLine, yesterdaySVP.endTime)
+			line.set_x2(histPocLine, yesterdaySVP.endTime)
+			box.set_right(histVaBox, yesterdaySVP.endTime)
+			// Do the same for labels if you are showing them
+			if showLabels
+				histVahLabel = label.copy(yesterdayVahLabel)
+				histValLabel = label.copy(yesterdayValLabel)
+				histPocLabel = label.copy(yesterdayPocLabel)
+				label.set_x(histVahLabel, yesterdaySVP.endTime)
+				label.set_x(histValLabel, yesterdaySVP.endTime)
+				label.set_x(histPocLabel, yesterdaySVP.endTime)
+				label.set_text(histVahLabel, str.format(labelTemplate, str.tostring(yesterdaySVP.valueAreaHigh, format.mintick), 'VAH'))
+				label.set_text(histValLabel, str.format(labelTemplate, str.tostring(yesterdaySVP.valueAreaLow, format.mintick), 'VAL'))
+				label.set_text(histPocLabel, str.format(labelTemplate, str.tostring(yesterdaySVP.pointOfControl, format.mintick), 'POC'))
+	
+		// Copy today's volume profile over yesterday's
+		yesterdaySVP := todaySessionVolumeProfile.copy()
+
+		// Update the position of the drawings for yesterday...
+		// Lines
+		line.set_xy1(yesterdayVahLine, yesterdaySVP.startTime, yesterdaySVP.valueAreaHigh)
+		line.set_xy2(yesterdayVahLine, yesterdaySVP.endTime, yesterdaySVP.valueAreaHigh)
+		line.set_xy1(yesterdayValLine, yesterdaySVP.startTime, yesterdaySVP.valueAreaLow)
+		line.set_xy2(yesterdayValLine, yesterdaySVP.endTime, yesterdaySVP.valueAreaLow)
+		line.set_xy1(yesterdayPocLine, yesterdaySVP.startTime, yesterdaySVP.pointOfControl)
+		line.set_xy2(yesterdayPocLine, yesterdaySVP.endTime, yesterdaySVP.pointOfControl)
+
+		// Box
+		box.set_lefttop(yesterdayVaBox, yesterdaySVP.startTime, yesterdaySVP.valueAreaHigh)
+		box.set_rightbottom(yesterdayVaBox, yesterdaySVP.endTime, yesterdaySVP.valueAreaLow)
+		// Labels
+		if showLabels
+			label.set_text(yesterdayVahLabel, str.format(labelPercentTemplate, str.tostring(yesterdaySVP.valueAreaHigh, format.mintick), 'VAH', (yesterdaySVP.valueAreaHigh-close)/close*100))
+			label.set_text(yesterdayValLabel, str.format(labelPercentTemplate, str.tostring(yesterdaySVP.valueAreaLow, format.mintick), 'VAL', (yesterdaySVP.valueAreaLow-close)/close*100))
+			label.set_text(yesterdayPocLabel, str.format(labelPercentTemplate, str.tostring(yesterdaySVP.pointOfControl, format.mintick), 'POC', (yesterdaySVP.pointOfControl-close)/close*100))
+			label.set_xy(yesterdayVahLabel, yesterdaySVP.endTime, yesterdaySVP.valueAreaHigh)
+			label.set_xy(yesterdayValLabel, yesterdaySVP.endTime, yesterdaySVP.valueAreaLow)
+			label.set_xy(yesterdayPocLabel, yesterdaySVP.endTime, yesterdaySVP.pointOfControl)
+
+	// If in regular session... 
+	if not na(yesterdaySVP)
+		// Update the label information (so % from price stays accurate)
+		if showLabels
+			label.set_text(yesterdayVahLabel, str.format(labelPercentTemplate, str.tostring(yesterdaySVP.valueAreaHigh, format.mintick), 'VAH', (yesterdaySVP.valueAreaHigh-close)/close*100))
+			label.set_text(yesterdayValLabel, str.format(labelPercentTemplate, str.tostring(yesterdaySVP.valueAreaLow, format.mintick), 'VAL', (yesterdaySVP.valueAreaLow-close)/close*100))
+			label.set_text(yesterdayPocLabel, str.format(labelPercentTemplate, str.tostring(yesterdaySVP.pointOfControl, format.mintick), 'POC', (yesterdaySVP.pointOfControl-close)/close*100))
+
+		// Update the end location of the lines & labels overtop of today's trading hours
+		if extendYesterdayOverToday
+			// Keep extending yesterday's value area over the current day as it develops
+			line.set_x2(yesterdayVahLine, time)
+			line.set_x2(yesterdayValLine, time)
+			line.set_x2(yesterdayPocLine, time)
+			box.set_right(yesterdayVaBox, time)	
+			if showLabels
+				label.set_x(yesterdayVahLabel, time)
+				label.set_x(yesterdayValLabel, time)
+				label.set_x(yesterdayPocLabel, time)
+
+// @function Given a SessionVolumeProfile object, will render the histogram for that object. 
+// @param volumeProfile The SessionVolumeProfile object to draw
+// @param bgColor The baseline color to use for the histogram. Defaults to #00bbf9
+// @param showVolumeOnHistogram Show the volume amount on the histogram bars. Defaults to false.
+export drawHistogram(Object volumeProfile, color bgColor = #00bbf9, bool showVolumeOnHistogram = false) =>
+	if not na(volumeProfile.volumeRows) and Session.islastbar_regular()
+		histLevel = 0
+		histPrice = volumeProfile.dayLow
+		barRange = volumeProfile.endTime - volumeProfile.startTime
+		stepSpacer = volumeProfile.step * 0.05
+		totalVol = array.sum(map.values(volumeProfile.volumeRows))
+        for [row, vol] in volumeProfile.volumeRows
+			clr = color.new(bgColor, histLevel < volumeProfile.valueAreaLowLevel or histLevel > volumeProfile.valueAreaHighLevel ? 70 : 40)
+			volWidthPercent = vol / totalVol
+			int histWidth = math.round(barRange * volWidthPercent * 2)
+			histRightTime = volumeProfile.startTime + histWidth
+			topLeft = chart.point.from_time(volumeProfile.startTime, histPrice + volumeProfile.step - stepSpacer)
+			bottomRight = chart.point.from_time(histRightTime, histPrice + stepSpacer)
+			histBarText = showVolumeOnHistogram ? str.format("{0}", vol) : ""
+			box.new(topLeft, bottomRight, border_color=#00000000, bgcolor=clr, text=histBarText, text_size=size.auto, text_halign=text.align_left, xloc=xloc.bar_time)
+			histLevel += 1
+			histPrice += volumeProfile.step
+
+		histBgColor = color.new(bgColor, 90)
+		box.new(chart.point.from_time(volumeProfile.startTime, volumeProfile.dayHigh), chart.point.from_time(volumeProfile.endTime, volumeProfile.dayLow), histBgColor, bgcolor=histBgColor, xloc=xloc.bar_time)
+
+// Logic
+
+// Settings
+grp1 = "General Settings"
+numRows = input.int(group=grp1, defval=24, title="Row Size")
+valueAreaCoverage = input.int(group=grp1, defval=70, title="Value Area Volume", minval=1, maxval=100, step=1)
+
+grp2 = "Appearance"
+extendYesterdayOverToday = input.bool(group=grp2, defval=true, title="Extend yesterday's volume profile over today")
+showVa = input.bool(group=grp2, defval=true, title="Show Value Area", inline="vaBox")
+vaColor = input.color(group=grp2, defval=#00bbf911, title="", inline="vaBox")
+pocColor = input.color(group=grp2, defval=#e500a4, title="Point of Control     ", inline="poc")
+pocStyleEnglish = input.string(group=grp2, title="", defval="Solid", options=["Solid", "Dotted", "Dashed"], inline="poc")
+pocStyle = Utils.getLineStyleFromString(pocStyleEnglish)
+pocWidth = input.int(group=grp2, title="", defval=1, minval=1, maxval=6, step=1, inline="poc")
+vahlColor = input.color(group=grp2, defval=#1592e6, title="Value Area High/Low", inline="vahl")
+vahlStyleEnglish = input.string(group=grp2, title="", defval="Solid", options=["Solid", "Dotted", "Dashed"], inline="vahl")
+vahlStyle = Utils.getLineStyleFromString(vahlStyleEnglish)
+vahlWidth = input.int(group=grp2, title="", defval=1, minval=1, maxval=6, step=1, inline="vahl")
+showLabels = input.bool(group=grp2, defval=true, title="Labels", inline="labels")
+labelSize = input.string(group=grp2, defval=size.small, title="", options=[size.auto, size.tiny, size.small, size.normal, size.large, size.huge], inline="labels")
+showHistogram = input.bool(group=grp2, defval=true, title="Show Histogram", inline="histogramBox")
+histColor = input.color(group=grp2, defval=#00bbf9, title="", inline="histogramBox")
+showVolumeOnHistogram = input.bool(group=grp2, defval=false, title="Show Volume on Histogram")
+showDevelopingValueArea = input.bool(group=grp2, defval=false, title="Show Developing Value Area", inline="developing")
+devColor = input.color(group=grp2, defval=color.fuchsia, title="", inline="developing")
+
+// Make sure to account for futures sessions correctly (TV doesn't accurately define market & overnight sessions)
+sessionMap = Session.getSessionMap()
+
+// Request data from lower timeframe to calculate volume profile
+[ltfHigh, ltfLow, ltfVolume, ltfTime, ltfSessionIsMarket] = request.security_lower_tf(syminfo.tickerid, getLowerTimeframe(), [high, low, volume, time, Session.ismarket(sessionMap)])
+
+// Create volume profile to contain developing values
+var Object todaySVP = Object.new(numRows, valueAreaCoverage, showDevelopingValueArea)
+
+// Populate the SVP object
+get(todaySVP, ltfHigh, ltfLow, ltfVolume, ltfTime, ltfSessionIsMarket)
+
+// Render the value area
+if showVa
+	drawPriorValueAreas(todaySVP, extendYesterdayOverToday=extendYesterdayOverToday, showLabels=showLabels, labelSize=labelSize, pocColor=pocColor, pocStyle=pocStyle, pocWidth=pocWidth, vahlColor=vahlColor, vahlStyle=vahlStyle, vahlWidth=vahlWidth, vaColor=vaColor)
+
+// Render a histogram
+if showHistogram
+	drawHistogram(todaySVP, bgColor=histColor, showVolumeOnHistogram=showVolumeOnHistogram)
+
+// Render the developing value area...
+devVah = showDevelopingValueArea ? todaySVP.valueAreaHigh : na
+devVal = showDevelopingValueArea ? todaySVP.valueAreaLow : na
+devPoc = showDevelopingValueArea ? todaySVP.pointOfControl : na
+plot(devVah, "Developing Value Area High", color.new(devColor, 60), 1)
+plot(devPoc, "Developing Point of Control", devColor, 2)
+plot(devVal, "Developing Value Area Low", color.new(devColor, 60), 1)
+
+debug(todaySVP, position.bottom_right)

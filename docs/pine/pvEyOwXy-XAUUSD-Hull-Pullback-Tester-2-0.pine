@@ -1,0 +1,314 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © the_wolf22
+
+//@version=6
+// =====================================================================
+//  XAUUSD STRATEGY TESTER  —  HULL MA PULLBACK + OPTIONAL MACD FILTER
+//  Phase 1 (regime)   : fast Hull MA vs slow Hull MA
+//  Phase 2 (pullback) : price pushes away from a reference Hull by
+//                       sepMult*ATR, then pulls back within tolMult*ATR
+//  Phase 3 (trigger)  : break of prior bar's high/low OR reclaim of the
+//                       reference Hull  (+ optional MACD histogram tick)
+//  Risk   : ATR stop + RR target, risk-% or fixed-lot sizing
+//  Extras : real-fill BUY/SELL labels, alerts, prop-firm tracker panel
+// =====================================================================
+strategy("XAUUSD Hull Pullback Tester",
+     overlay                 = false,
+     initial_capital         = 100000,
+     currency                = currency.USD,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     pyramiding              = 0,
+     commission_type         = strategy.commission.cash_per_order,
+     commission_value        = 0,
+     slippage                = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     max_labels_count        = 500,
+     max_lines_count         = 500)
+
+// ---------------------------- INPUTS ---------------------------------
+gHull = "Hull MA"
+fastLen = input.int(20, "Fast Hull Length", minval=1, group=gHull)
+slowLen = input.int(50, "Slow Hull Length", minval=1, group=gHull)
+refLen  = input.int(20, "Reference Hull Length (pullback line)", minval=1, group=gHull,
+     tooltip="Price pulls back to THIS Hull MA. Often = fast length, but you can tune it independently.")
+hullSrc = input.source(close, "Hull Source", group=gHull)
+
+gPull = "Pullback"
+sepMult   = input.float(1.0, "Push-away distance (x ATR)", minval=0.0, step=0.1, group=gPull,
+     tooltip="Price must first stretch at least this far from the reference Hull before a pullback counts.")
+tolMult   = input.float(0.5, "Pullback tolerance (x ATR)", minval=0.0, step=0.1, group=gPull,
+     tooltip="How close to the reference Hull price must return to arm the entry.")
+triggerMode = input.string("Either", "Resumption trigger", options=["Either","Prior bar break","Reference reclaim"], group=gPull)
+armExpiry = input.int(10, "Arm expiry (bars)", minval=1, group=gPull,
+     tooltip="If the trigger doesn't fire within this many bars of the pullback, the setup is cancelled.")
+
+gMACD = "MACD Filter"
+useMacd  = input.bool(true, "Use MACD histogram filter", group=gMACD,
+     tooltip="When on, longs require the histogram ticking up, shorts ticking down.")
+macdSrc  = input.source(close, "MACD Source", group=gMACD)
+macdFast = input.int(12, "MACD Fast Length", minval=1, group=gMACD)
+macdSlow = input.int(26, "MACD Slow Length", minval=1, group=gMACD)
+macdSig  = input.int(9,  "MACD Signal Length", minval=1, group=gMACD)
+
+gATR = "ATR Risk"
+atrLen    = input.int(14, "ATR Length", minval=1, group=gATR)
+atrSlMult = input.float(1.5, "ATR Stop Multiplier", minval=0.1, step=0.1, group=gATR)
+rr        = input.float(2.0, "Reward : Risk", minval=0.1, step=0.1, group=gATR)
+
+gTF = "Timeframe"
+sigTf = input.timeframe("", "Signal Timeframe (blank = chart)", group=gTF,
+     tooltip="Blank = chart timeframe (recommended for the pullback machine). Or 15, 60, 240, D.")
+
+gSess = "Trading Hours (entries only)"
+useSession   = input.bool(true, "Restrict entry times", group=gSess,
+     tooltip="Only OPENS trades inside the window. Exits (stop / target) still work any time, regardless of the clock.")
+tradeTz      = input.string("America/Denver", "Timezone", group=gSess,
+     tooltip="America/Denver = Mountain Time. It auto-handles Standard vs Daylight, so you don't have to touch it twice a year. Your chart currently shows UTC-6 (MDT).")
+tradeSession = input.session("0100-1400", "Entry window (HHMM-HHMM)", group=gSess,
+     tooltip="24h clock in the timezone above. e.g. 0700-0900 = only open trades 7-9am Mountain. Append day codes if you want, e.g. 0100-1400:23456 for Mon-Fri only.")
+
+gRisk = "Account & Risk"
+accountSize = input.float(100000, "Account Size ($)", minval=1, group=gRisk,
+     tooltip="Keep EQUAL to Initial Capital in the Properties tab.")
+sizingMode  = input.string("Risk %", "Sizing Mode", options=["Risk %","Fixed Lots"], group=gRisk)
+riskPct     = input.float(1.0, "Risk per Trade (%)", minval=0.0, step=0.1, group=gRisk)
+lotSize     = input.float(1.0, "Fixed Lot Size", minval=0.0, step=0.01, group=gRisk)
+ozPerLot    = input.float(100, "Ounces per Lot", minval=1, group=gRisk, tooltip="1 standard gold lot = 100 oz.")
+exitOpp     = input.bool(false, "Flip on opposite signal", group=gRisk)
+
+gProp = "Prop Firm Rules"
+dailyDDpct      = input.float(4.0, "Daily Drawdown (%)", minval=0.1, step=0.1, group=gProp)
+trailDDpct      = input.float(6.0, "Max Trailing Drawdown (%)", minval=0.1, step=0.1, group=gProp)
+lockProfitPct   = input.float(6.0, "Lock trailing DD once profit reaches (%)", minval=0.1, step=0.1, group=gProp)
+lockMode        = input.string("Breakeven", "When locked, floor moves to", options=["Breakeven","Freeze current floor"], group=gProp)
+profitTargetPct = input.float(8.0, "Profit Target to PASS (%)", minval=0.1, step=0.1, group=gProp)
+stopAfterBreach = input.bool(true, "Stop taking trades after a breach", group=gProp)
+
+gDayTgt = "Daily Profit Lock"
+useDayTarget  = input.bool(false, "Stop trading for the day after profit hit", group=gDayTgt,
+     tooltip="When the day's gain reaches the target below, no NEW entries open until the next market day. Open trades keep their stop/target.")
+dayTargetMode = input.string("%", "Daily target measured in", options=["%","$"], group=gDayTgt)
+dayTargetPct  = input.float(2.0, "Daily Profit Target (%)", minval=0.1, step=0.1, group=gDayTgt)
+dayTargetUSD  = input.float(2000, "Daily Profit Target ($)", minval=1, step=50, group=gDayTgt)
+
+gCol = "Colors"
+colFast   = input.color(color.aqua,    "Hull Fast",   group=gCol)
+colSlow   = input.color(color.orange,  "Hull Slow",   group=gCol)
+colRef    = input.color(color.gray,    "Reference Hull", group=gCol)
+colHistUp = input.color(color.new(color.green,0), "MACD Hist Up",   group=gCol)
+colHistDn = input.color(color.new(color.red,0),   "MACD Hist Down", group=gCol)
+colLong   = input.color(color.lime,    "Long Label",  group=gCol)
+colShort  = input.color(color.fuchsia, "Short Label", group=gCol)
+colSL     = input.color(color.red,     "Stop Line",   group=gCol)
+colTP     = input.color(color.green,   "Target Line", group=gCol)
+colBg     = input.color(color.new(color.black,10), "Panel Background", group=gCol)
+colTxt    = input.color(color.white,   "Panel Text",  group=gCol)
+colHdr    = input.color(color.new(color.blue,0), "Panel Header", group=gCol)
+
+// --------------------- PRIMITIVES (single source) --------------------
+hma(src, simple int len) =>
+    int half = math.max(1, int(math.round(len / 2.0)))
+    int sq   = math.max(1, int(math.round(math.sqrt(len))))
+    ta.wma(2 * ta.wma(src, half) - ta.wma(src, len), sq)
+
+calcPrims() =>
+    hf = hma(hullSrc, fastLen)
+    hs = hma(hullSrc, slowLen)
+    rf = hma(hullSrc, refLen)
+    av = ta.atr(atrLen)
+    [_ml, _sg, hist] = ta.macd(macdSrc, macdFast, macdSlow, macdSig)
+    [hf, hs, rf, av, hist, high, low, close]
+
+tfToUse = sigTf == "" ? timeframe.period : sigTf
+[hf, hs, rf, atrVal, hist, sH, sL, sC] = request.security(syminfo.tickerid, tfToUse, calcPrims(), lookahead = barmerge.lookahead_off)
+
+// ---------------------- PULLBACK STATE MACHINE -----------------------
+upReg = hf > hs
+dnReg = hf < hs
+
+macdUpOk = not useMacd or hist > hist[1]
+macdDnOk = not useMacd or hist < hist[1]
+
+brkLong = sC > sH[1]
+rcLong  = ta.crossover(sC, rf)
+brkShort = sC < sL[1]
+rcShort  = ta.crossunder(sC, rf)
+trigLong  = triggerMode == "Prior bar break" ? brkLong  : triggerMode == "Reference reclaim" ? rcLong  : (brkLong  or rcLong)
+trigShort = triggerMode == "Prior bar break" ? brkShort : triggerMode == "Reference reclaim" ? rcShort : (brkShort or rcShort)
+
+// --- LONG ---
+var bool lPushed = false
+var bool lPulled = false
+var int  lBars   = 0
+if not upReg
+    lPushed := false
+    lPulled := false
+    lBars   := 0
+if upReg and (sH - rf) >= sepMult * atrVal
+    lPushed := true
+if upReg and lPushed and (sL - rf) <= tolMult * atrVal
+    lPulled := true
+lBars := lPulled ? lBars + 1 : 0
+if lBars > armExpiry
+    lPushed := false
+    lPulled := false
+    lBars   := 0
+longRaw = upReg and lPushed and lPulled and trigLong and macdUpOk
+
+// --- SHORT ---
+var bool sPushed = false
+var bool sPulled = false
+var int  sBars   = 0
+if not dnReg
+    sPushed := false
+    sPulled := false
+    sBars   := 0
+if dnReg and (rf - sL) >= sepMult * atrVal
+    sPushed := true
+if dnReg and sPushed and (rf - sH) <= tolMult * atrVal
+    sPulled := true
+sBars := sPulled ? sBars + 1 : 0
+if sBars > armExpiry
+    sPushed := false
+    sPulled := false
+    sBars   := 0
+shortRaw = dnReg and sPushed and sPulled and trigShort and macdDnOk
+
+// disarm after a fire so the same pullback can't re-trigger
+if longRaw
+    lPushed := false
+    lPulled := false
+    lBars   := 0
+if shortRaw
+    sPushed := false
+    sPulled := false
+    sBars   := 0
+
+// ----------------------- SIZING & LEVELS -----------------------------
+atrStopDist = atrVal * atrSlMult
+riskUSD     = accountSize * riskPct / 100.0
+qtyRiskOz   = atrStopDist > 0 ? riskUSD / atrStopDist : 0.0
+qtyFixedOz  = lotSize * ozPerLot
+qty         = sizingMode == "Risk %" ? qtyRiskOz : qtyFixedOz
+
+// ----------------------- PROP-FIRM TRACKER ---------------------------
+ic = strategy.initial_capital
+eq = strategy.equity
+
+newDay = ta.change(time("D")) != 0
+var float dayStartEq = ic
+var bool  dayLocked  = false
+if newDay
+    dayStartEq := eq
+    dayLocked  := false
+dailyLossUSD  = dayStartEq - eq
+dailyLimitUSD = accountSize * dailyDDpct / 100.0
+dailyUsedPct  = dailyLimitUSD > 0 ? dailyLossUSD / dailyLimitUSD * 100.0 : 0.0
+
+dailyProfitUSD = eq - dayStartEq
+dayTargetUSDlvl = dayTargetMode == "%" ? accountSize * dayTargetPct / 100.0 : dayTargetUSD
+if useDayTarget and dailyProfitUSD >= dayTargetUSDlvl
+    dayLocked := true
+
+var float peakEq = ic
+peakEq := math.max(peakEq, eq)
+trailLimitUSD = accountSize * trailDDpct / 100.0
+profitPct     = (eq - ic) / accountSize * 100.0
+
+var bool  isLocked    = false
+var float lockedFloor = na
+if (eq - ic) >= accountSize * lockProfitPct / 100.0 and not isLocked
+    isLocked := true
+    lockedFloor := lockMode == "Breakeven" ? ic : (peakEq - trailLimitUSD)
+floorLevel = isLocked ? lockedFloor : (peakEq - trailLimitUSD)
+
+var float maxDD = 0.0
+maxDD := math.max(maxDD, peakEq - eq)
+
+breachTrail = eq < floorLevel
+breachDaily = dailyLossUSD > dailyLimitUSD
+var bool breached = false
+if breachTrail or breachDaily
+    breached := true
+passed   = (eq - ic) >= accountSize * profitTargetPct / 100.0
+canTrade = not (stopAfterBreach and breached) and not (useDayTarget and dayLocked)
+
+// ----------------------------- ORDERS --------------------------------
+inWindow = not useSession or not na(time(timeframe.period, tradeSession, tradeTz))
+flat = strategy.position_size == 0
+goLong  = longRaw  and canTrade and inWindow and qty > 0 and (flat or (exitOpp and strategy.position_size < 0))
+goShort = shortRaw and canTrade and inWindow and qty > 0 and (flat or (exitOpp and strategy.position_size > 0))
+
+if goLong
+    strategy.entry("Long", strategy.long, qty = qty)
+    strategy.exit("Long X", from_entry = "Long", stop = close - atrStopDist, limit = close + atrStopDist * rr)
+if goShort
+    strategy.entry("Short", strategy.short, qty = qty)
+    strategy.exit("Short X", from_entry = "Short", stop = close + atrStopDist, limit = close - atrStopDist * rr)
+
+// --------------------- REAL-FILL LABELS & LINES ----------------------
+posChg    = strategy.position_size - strategy.position_size[1]
+longFill  = posChg > 0 and strategy.position_size > 0
+shortFill = posChg < 0 and strategy.position_size < 0
+
+var float curStop = na
+var float curTP   = na
+if longFill
+    curStop := close - atrStopDist
+    curTP   := close + atrStopDist * rr
+if shortFill
+    curStop := close + atrStopDist
+    curTP   := close - atrStopDist * rr
+if strategy.position_size == 0
+    curStop := na
+    curTP   := na
+
+plotshape(longFill,  "BUY",  shape.triangleup,   location.belowbar, colLong,  size = size.small, text = "BUY",  force_overlay = true)
+plotshape(shortFill, "SELL", shape.triangledown, location.abovebar, colShort, size = size.small, text = "SELL", force_overlay = true)
+
+plot(hf, "Hull Fast", colFast, linewidth = 2, force_overlay = true)
+plot(hs, "Hull Slow", colSlow, linewidth = 2, force_overlay = true)
+plot(rf, "Hull Ref",  colRef,  linewidth = 1, force_overlay = true)
+plot(curStop, "Stop",   colSL, style = plot.style_linebr, force_overlay = true)
+plot(curTP,   "Target", colTP, style = plot.style_linebr, force_overlay = true)
+
+// MACD histogram in the indicator pane
+plot(hist, "MACD Hist", color = hist >= 0 ? colHistUp : colHistDn, style = plot.style_columns)
+hline(0, "Zero", color.new(color.gray, 50))
+
+alertcondition(longFill,  "Long Fill",  "XAUUSD Hull Pullback LONG fill")
+alertcondition(shortFill, "Short Fill", "XAUUSD Hull Pullback SHORT fill")
+
+// ----------------------------- PANEL ---------------------------------
+regimeTxt = hf > hs ? "UP" : hf < hs ? "DOWN" : "FLAT"
+statusTxt = breached ? "BREACHED" : passed ? "PASSED" : "ACTIVE"
+floorTxt  = isLocked ? "LOCKED" : "TRAILING"
+armTxt    = lPulled ? "LONG armed" : sPulled ? "SHORT armed" : "—"
+dayLockTxt = not useDayTarget ? "OFF" : dayLocked ? "LOCKED" : "OPEN"
+
+var table panel = table.new(position.top_right, 2, 15, bgcolor = colBg, border_width = 1)
+if barstate.islast
+    table.cell(panel, 0, 0, "XAUUSD HULL PULLBACK", text_color = color.white, bgcolor = colHdr, text_size = size.small)
+    table.cell(panel, 1, 0, statusTxt, text_color = color.white, bgcolor = breached ? color.red : passed ? color.green : colHdr, text_size = size.small)
+    rows = array.from("Equity", "Net P&L", "Profit %", "Peak Eq", "Max DD", "Daily Used", "Loss Floor", "Floor", "Position (lots)", "Regime", "Setup", "Day P&L", "Day Lock")
+    vals = array.from(
+         str.tostring(eq, "#.##"),
+         str.tostring(eq - ic, "#.##"),
+         str.tostring(profitPct, "#.##") + "%",
+         str.tostring(peakEq, "#.##"),
+         str.tostring(maxDD, "#.##"),
+         str.tostring(dailyUsedPct, "#.#") + "%",
+         str.tostring(floorLevel, "#.##"),
+         floorTxt,
+         str.tostring(strategy.position_size / ozPerLot, "#.##"),
+         regimeTxt,
+         armTxt,
+         str.tostring(dailyProfitUSD, "#.##"),
+         dayLockTxt)
+    for i = 0 to array.size(rows) - 1
+        dlRow = array.get(rows, i) == "Day Lock"
+        table.cell(panel, 0, i + 1, array.get(rows, i), text_color = colTxt, text_size = size.small, text_halign = text.align_left)
+        table.cell(panel, 1, i + 1, array.get(vals, i), text_color = colTxt, text_size = size.small, text_halign = text.align_right,
+             bgcolor = dlRow and dayLocked ? color.new(color.green, 40) : na)

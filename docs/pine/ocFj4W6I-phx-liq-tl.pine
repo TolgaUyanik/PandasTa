@@ -1,0 +1,202 @@
+//@version=6
+library("phx_liq_tl", overlay=true)
+
+// ============================================================================
+//                               EXPORTED STATE
+// ============================================================================
+export type LTState
+    line[] upln      // coppia upper: [0]=top main, [1]=btm shifted
+    line[] dnln      // coppia lower: [0]=btm main, [1]=top shifted
+    bool   upBroken  // flag gating upper
+    bool   dnBroken  // flag gating lower
+
+// costruttore stato vuoto
+export new_state() =>
+    LTState.new(array.new<line>(), array.new<line>(), false, false)
+
+// ============================================================================
+//                                  INTERNALS
+// ============================================================================
+
+// slope metodo
+method slope(line ln) =>
+    float dx = ln.get_x2() - ln.get_x1()
+    float dy = ln.get_y2() - ln.get_y1()
+    dx == 0 ? 0.0 : dy / dx
+
+// offset parallelo “volumetrico”
+vol(float atr, float close) =>
+    math.min(atr * 0.1, close * (0.1/100))
+
+// cancella una coppia di linee
+delete_pair(line[] arr) =>
+    if array.size(arr) > 0
+        for j = array.size(arr) - 1 to 0
+            line.delete(array.get(arr, j))
+        arr.clear()
+
+// ============================================================================
+//                                   API
+// ============================================================================
+//
+// update() costruisce/aggiorna le trendline di liquidità upper/lower,
+// gestisce backtest (breakout reale), estensione continua e proximity.
+// Ritorna: [st, brkUp, brkDn, proximity_upper, proximity_lower]
+//
+export update(  LTState st,  int   len,  color cup,  color cdn,  float space,  float proximity_pct,  bool  shs) =>
+    // segnali base
+    ph = ta.pivothigh(high, len, len)
+    pl = ta.pivotlow (low , len, len)
+    atr200 = ta.atr(200)
+    vshift = vol(atr200, close)
+
+    // ---------------- UPPER ----------------
+    bool brkUp = false
+    if not na(ph)
+        bool remove = false
+        bool valid  = false
+
+        // gating “discendente”
+        bool descending = na(high[2*len]) ? false : (high[len] < high[2*len])
+        // BOOTSTRAP: se non esiste ancora coppia upper, creala
+        if (st.upBroken or descending) or (array.size(st.upln) == 0)
+            valid := true
+
+        if valid
+            delete_pair(st.upln)
+
+            int   x1 = bar_index - len
+            int   x2 = bar_index
+            float y1 = high[len]
+            float y2 = high
+
+            line top = line.new(x1, y1, x2, y2, color=cdn, width=1)
+            line btm = line.new(x1, y1 - vshift * space, x2, y2 - vshift * space, color=cdn, width=1)
+
+            // convenzione upper: [0]=top main, [1]=btm shifted
+            array.unshift(st.upln, btm)
+            array.unshift(st.upln, top)
+
+            // backtest “reale”: low sopra la linea superiore
+            int span = math.max(0, bar_index - x1)
+            line lnTop = array.get(st.upln, 0)
+            for i = 0 to span
+                float sl = lnTop.slope()
+                lnTop.set_x2(bar_index - i)
+                lnTop.set_y2(lnTop.get_y2() - sl)
+                if low[i] > lnTop.get_y2()
+                    remove := true
+                    break
+            if remove
+                delete_pair(st.upln)
+                st.upBroken := true
+                brkUp := true
+            else
+                // ricrea coppia “pulita” all’istante corrente
+                delete_pair(st.upln)
+                line top2 = line.new(x1, y1, x2, y2, color=cdn, width=1)
+                line btm2 = line.new(x1, y1 - vshift * space, x2, y2 - vshift * space, color=cdn, width=1)
+                array.unshift(st.upln, btm2)
+                array.unshift(st.upln, top2)
+                st.upBroken := false
+
+    // estensione continua finché non avviene break reale (upper)
+    if array.size(st.upln) > 1
+        line top = array.get(st.upln, 0)
+        line btm = array.get(st.upln, 1)
+
+        if low > top.get_y2()
+            delete_pair(st.upln)
+            st.upBroken := true
+            brkUp := true
+
+        if array.size(st.upln) > 1
+            float slup = top.slope()
+            float sldn = btm.slope()
+            top.set_x2(bar_index)
+            top.set_y2(top.get_y2() + slup)
+            btm.set_x2(bar_index)
+            btm.set_y2(btm.get_y2() + sldn)
+
+    // ---------------- LOWER ----------------
+    bool brkDn = false
+    if not na(pl)
+        bool remove = false
+        bool valid  = false
+
+        bool ascending = na(low[2*len]) ? false : (low[len] > low[2*len])
+        // BOOTSTRAP: se non esiste ancora coppia lower, creala
+        if (st.dnBroken or ascending) or (array.size(st.dnln) == 0)
+            valid := true
+
+        if valid
+            delete_pair(st.dnln)
+
+            int   x1 = bar_index - len
+            int   x2 = bar_index
+            float y1 = low[len]
+            float y2 = low
+
+            // convenzione lower: [0]=btm main, [1]=top shifted
+            line btm = line.new(x1, y1, x2, y2, color=cup, width=1)
+            line top = line.new(x1, y1 + vshift * space, x2, y2 + vshift * space, color=cup, width=1)
+
+            array.unshift(st.dnln, top)
+            array.unshift(st.dnln, btm)
+
+            // breakdown reale: high sotto la linea inferiore (btm main)
+            int span = math.max(0, bar_index - x1)
+            line lnBtm = array.get(st.dnln, 0)
+            for i = 0 to span
+                float sl = lnBtm.slope()
+                lnBtm.set_x2(bar_index - i)
+                lnBtm.set_y2(lnBtm.get_y2() - sl)
+                if high[i] < lnBtm.get_y2()
+                    remove := true
+                    break
+            if remove
+                delete_pair(st.dnln)
+                st.dnBroken := true
+                brkDn := true
+            else
+                delete_pair(st.dnln)
+                line btm2 = line.new(x1, y1, x2, y2, color=cup, width=1)
+                line top2 = line.new(x1, y1 + vshift * space, x2, y2 + vshift * space, color=cup, width=1)
+                array.unshift(st.dnln, top2)
+                array.unshift(st.dnln, btm2)
+                st.dnBroken := false
+
+    if array.size(st.dnln) > 1
+        line btm = array.get(st.dnln, 0)
+        line top = array.get(st.dnln, 1)
+
+        if high < btm.get_y2()
+            delete_pair(st.dnln)
+            st.dnBroken := true
+            brkDn := true
+
+        if array.size(st.dnln) > 1
+            float slup = top.slope()
+            float sldn = btm.slope()
+            top.set_x2(bar_index)
+            top.set_y2(top.get_y2() + slup)
+            btm.set_x2(bar_index)
+            btm.set_y2(btm.get_y2() + sldn)
+
+    // ---------------- PROXIMITY ----------------
+    bool proximity_upper = false
+    bool proximity_lower = false
+
+    if array.size(st.upln) > 1
+        line top = array.get(st.upln, 0)
+        float yU = top.get_y2()
+        float distU = math.abs(close - yU) / close
+        proximity_upper := distU <= proximity_pct
+
+    if array.size(st.dnln) > 1
+        line btm = array.get(st.dnln, 0)
+        float yL = btm.get_y2()
+        float distL = math.abs(close - yL) / close
+        proximity_lower := distL <= proximity_pct
+
+    [st, (shs and brkUp), (shs and brkDn), proximity_upper, proximity_lower]

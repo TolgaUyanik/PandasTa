@@ -1,0 +1,219 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy("Concordance Execution Model [JOAT]", shorttitle="CEM [JOAT]", overlay=true, pyramiding=0, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, default_qty_type=strategy.percent_of_equity, default_qty_value=10, max_bars_back=1000, max_lines_count=220, max_labels_count=120, max_boxes_count=80)
+
+// Concordance Execution Model [JOAT]
+// Original integrated strategy synthesizing structure, MTF bias, kinetic state, regression confidence, and delta pressure.
+// Entries are confirmed-bar only. HTF requests use closed values to avoid future-data leakage.
+
+string gRegime = "Regime"
+string gEntry = "Entry"
+string gRisk = "Risk"
+string gViz = "Visual System"
+int swingLen = input.int(5, "Structure pivot length", minval=2, maxval=25, group=gRegime)
+string htf = input.timeframe("240", "Bias HTF", group=gRegime)
+int almaLen = input.int(6, "ALMA length", minval=2, maxval=50, group=gRegime)
+int sdLen = input.int(4, "Deviation length", minval=2, maxval=50, group=gRegime)
+float almaFactor = input.float(1.0, "ALMA deviation factor", minval=0.1, maxval=5, step=0.05, group=gRegime)
+int regLen = input.int(80, "Regression confidence window", minval=25, maxval=200, group=gRegime)
+float minR2 = input.float(0.45, "Minimum confidence", minval=0.10, maxval=0.95, step=0.05, group=gRegime)
+float deltaGate = input.float(0.03, "Delta pressure gate", minval=0.0, step=0.01, group=gEntry)
+float rvolGate = input.float(1.05, "Relative volume gate", minval=0.1, step=0.05, group=gEntry)
+int cooldownBars = input.int(8, "Entry cooldown", minval=0, maxval=100, group=gEntry)
+int atrLen = input.int(14, "ATR length", minval=5, maxval=100, group=gRisk)
+float stopAtr = input.float(1.6, "Stop ATR", minval=0.5, maxval=8, step=0.1, group=gRisk)
+float targetAtr = input.float(2.8, "Target ATR", minval=0.5, maxval=12, step=0.1, group=gRisk)
+bool useTrail = input.bool(true, "Use trailing stop", group=gRisk)
+float trailAtr = input.float(1.8, "Trail ATR", minval=0.5, maxval=8, step=0.1, group=gRisk)
+int timeStop = input.int(80, "Time stop bars", minval=5, maxval=500, group=gRisk)
+bool showPanel = input.bool(true, "Show panel", group=gViz)
+bool paintBars = input.bool(true, "Paint regime candles", group=gViz)
+
+color C_BULL = #00ffd5
+color C_BEAR = #ff00f2
+color C_GOLD = #ffb300
+color C_BLUE = #4f7cff
+color C_BG = #080a12
+color C_TEXT = #ffffff
+color C_MUTED = #607d8b
+
+clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+safeDiv(float n, float d) =>
+    d == 0.0 ? 0.0 : n / d
+
+f_alma_sig(float src) =>
+    float alma = ta.alma(src, almaLen, 0.85, 4.0)
+    float dev = ta.stdev(src, sdLen)
+    float upper = alma + almaFactor * dev
+    float lower = alma - almaFactor * dev
+    float prevUpper = nz(upper[1], upper)
+    float prevLower = nz(lower[1], lower)
+    upper := upper < prevUpper or src[1] > prevUpper ? upper : prevUpper
+    lower := lower > prevLower or src[1] < prevLower ? lower : prevLower
+    var int dir = 0
+    dir := src > upper ? 1 : src < lower ? -1 : nz(dir[1], 0)
+    [dir, alma]
+
+float atr = ta.atr(atrLen)
+float ema50 = ta.ema(close, 50)
+float ema200 = ta.ema(close, 200)
+float htfClose = request.security(syminfo.tickerid, htf, close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+float htfEma = request.security(syminfo.tickerid, htf, ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+bool htfBull = htfClose > htfEma
+bool htfBear = htfClose < htfEma
+[almaSig15, alma15] = request.security(syminfo.tickerid, "15", f_alma_sig(close[1]), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[almaSig60, alma60] = request.security(syminfo.tickerid, "60", f_alma_sig(close[1]), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[almaSig240, alma240] = request.security(syminfo.tickerid, "240", f_alma_sig(close[1]), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[almaSigD, almaD] = request.security(syminfo.tickerid, "D", f_alma_sig(close[1]), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+int almaVote = almaSig15 + almaSig60 + almaSig240 + almaSigD
+bool almaBull = almaVote >= 2
+bool almaBear = almaVote <= -2
+
+float ph = ta.pivothigh(high, swingLen, swingLen)
+float pl = ta.pivotlow(low, swingLen, swingLen)
+var float lastPH = na
+var float lastPL = na
+var int structure = 0
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+bool bullBreak = barstate.isconfirmed and not na(lastPH) and close > lastPH + atr * 0.05
+bool bearBreak = barstate.isconfirmed and not na(lastPL) and close < lastPL - atr * 0.05
+if bullBreak
+    structure := 1
+    lastPH := na
+if bearBreak
+    structure := -1
+    lastPL := na
+
+float rng = math.max(high - low, syminfo.mintick)
+float delta = ta.ema((((close - low) / rng) - ((high - close) / rng)) * nz(volume, 0), 7) / math.max(ta.ema(nz(volume, 0), 7), 1)
+float rvol = nz(volume, 0) / math.max(ta.sma(nz(volume, 0), 20), 1)
+float obv = ta.cum(close > close[1] ? volume : close < close[1] ? -volume : 0)
+float obvMa = ta.sma(obv, 20)
+float deltaScore = 50 + (delta > 0 ? 12 : -12) + (obv > obvMa ? 8 : -8) + (close > ta.vwap(hlc3) ? 8 : -8) + (rvol > rvolGate ? 6 : -3)
+deltaScore := clamp(deltaScore, 0, 100)
+
+float lambda = 0.85
+float alpha = 1.0 - math.pow(lambda, 3)
+float beta = 1.5 * math.pow(1.0 - lambda, 2) * (1.0 + lambda)
+float gammaGain = 0.5 * math.pow(1.0 - lambda, 3)
+var float xEst = na
+var float vEst = 0.0
+var float aEst = 0.0
+if na(xEst)
+    xEst := close
+float xPred = xEst + vEst + 0.5 * aEst
+float vPred = vEst + aEst
+float residual = close - xPred
+float boost = math.abs(residual) / math.max(atr, syminfo.mintick) > 3 ? 1.8 : 1.0
+xEst := xPred + alpha * boost * residual
+vEst := vPred + beta * boost * residual
+aEst := aEst + gammaGain * boost * residual
+float kinTrend = safeDiv(vEst, math.max(atr, syminfo.mintick))
+bool kineticBull = kinTrend > 0.10 and aEst >= 0
+bool kineticBear = kinTrend < -0.10 and aEst <= 0
+
+float lr = ta.linreg(close, regLen, 0)
+float err = close - lr
+float varPrice = ta.variance(close, regLen)
+float varErr = ta.variance(err, regLen)
+float r2 = varPrice > 0 ? clamp(1.0 - safeDiv(varErr, varPrice), 0, 1) : 0
+float lrSlope = lr - lr[5]
+bool regBull = r2 >= minR2 and lrSlope > 0
+bool regBear = r2 >= minR2 and lrSlope < 0
+
+bool volatilityOk = atr / close > 0.001
+bool trendStackBull = close > ema50 and ema50 > ema200
+bool trendStackBear = close < ema50 and ema50 < ema200
+float longScore = clamp((structure == 1 ? 18 : 0) + (htfBull ? 12 : 0) + (almaBull ? 18 : 0) + (kineticBull ? 16 : 0) + (regBull ? 16 : 0) + (deltaScore > 55 ? 12 : 0) + (trendStackBull ? 8 : 0), 0, 100)
+float shortScore = clamp((structure == -1 ? 18 : 0) + (htfBear ? 12 : 0) + (almaBear ? 18 : 0) + (kineticBear ? 16 : 0) + (regBear ? 16 : 0) + (deltaScore < 45 ? 12 : 0) + (trendStackBear ? 8 : 0), 0, 100)
+var int lastEntryBar = na
+bool cooled = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+bool longEntry = barstate.isconfirmed and cooled and volatilityOk and longScore >= 72 and delta > deltaGate and rvol >= rvolGate
+bool shortEntry = barstate.isconfirmed and cooled and volatilityOk and shortScore >= 72 and delta < -deltaGate and rvol >= rvolGate
+
+if longEntry and strategy.position_size <= 0
+    strategy.entry("CEM Long", strategy.long)
+    lastEntryBar := bar_index
+if shortEntry and strategy.position_size >= 0
+    strategy.entry("CEM Short", strategy.short)
+    lastEntryBar := bar_index
+
+var float longTrailStop = na
+var float shortTrailStop = na
+if strategy.position_size > 0
+    float candidateLong = close - atr * trailAtr
+    longTrailStop := strategy.position_size[1] <= 0 ? candidateLong : math.max(nz(longTrailStop, candidateLong), candidateLong)
+else
+    longTrailStop := na
+if strategy.position_size < 0
+    float candidateShort = close + atr * trailAtr
+    shortTrailStop := strategy.position_size[1] >= 0 ? candidateShort : math.min(nz(shortTrailStop, candidateShort), candidateShort)
+else
+    shortTrailStop := na
+float longStop = useTrail and not na(longTrailStop) ? math.max(strategy.position_avg_price - atr * stopAtr, longTrailStop) : strategy.position_avg_price - atr * stopAtr
+float longTarget = strategy.position_avg_price + atr * targetAtr
+float shortStop = useTrail and not na(shortTrailStop) ? math.min(strategy.position_avg_price + atr * stopAtr, shortTrailStop) : strategy.position_avg_price + atr * stopAtr
+float shortTarget = strategy.position_avg_price - atr * targetAtr
+if strategy.position_size > 0
+    strategy.exit("CEM Long Exit", "CEM Long", stop=longStop, limit=longTarget)
+if strategy.position_size < 0
+    strategy.exit("CEM Short Exit", "CEM Short", stop=shortStop, limit=shortTarget)
+
+var int entryBar = na
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+if strategy.position_size == 0
+    entryBar := na
+bool timeExit = not na(entryBar) and bar_index - entryBar >= timeStop
+bool invalidateLong = strategy.position_size > 0 and (structure == -1 or shortScore > longScore + 12)
+bool invalidateShort = strategy.position_size < 0 and (structure == 1 or longScore > shortScore + 12)
+if strategy.position_size > 0 and timeExit
+    strategy.close("CEM Long", comment="Time stop")
+if strategy.position_size > 0 and invalidateLong
+    strategy.close("CEM Long", comment="Structure invalidation")
+if strategy.position_size < 0 and timeExit
+    strategy.close("CEM Short", comment="Time stop")
+if strategy.position_size < 0 and invalidateShort
+    strategy.close("CEM Short", comment="Structure invalidation")
+
+color regimeColor = longScore > shortScore ? C_BULL : shortScore > longScore ? C_BEAR : C_BLUE
+plot(ema50, "CEM EMA 50", color=color.new(C_GOLD, 30))
+plot(ema200, "CEM EMA 200", color=color.new(C_TEXT, 55))
+pLr = plot(lr, "CEM regression spine", color=color.new(regimeColor, 15), linewidth=2)
+pXE = plot(xEst, "CEM kinetic estimate", color=color.new(C_TEXT, 30))
+fill(pLr, pXE, color=color.new(regimeColor, 90), title="CEM concordance field")
+plotshape(longEntry, "CEM long entry", shape.labelup, location.belowbar, color=color.new(C_BULL, 8), text="CEM", textcolor=C_BG, size=size.tiny)
+plotshape(shortEntry, "CEM short entry", shape.labeldown, location.abovebar, color=color.new(C_BEAR, 8), text="CEM", textcolor=C_TEXT, size=size.tiny)
+barcolor(paintBars ? color.new(regimeColor, 45) : na)
+
+var table panel = na
+if showPanel and barstate.islast
+    if na(panel)
+        panel := table.new(position.top_right, 2, 9, bgcolor=color.new(C_BG, 5), border_color=color.new(C_TEXT, 82), border_width=1)
+    table.cell(panel, 0, 0, "CONCORDANCE", text_color=C_TEXT, bgcolor=color.new(regimeColor, 72), text_size=size.small)
+    table.cell(panel, 1, 0, "CEM", text_color=C_TEXT, bgcolor=color.new(regimeColor, 72), text_size=size.small)
+    table.cell(panel, 0, 1, "Long score", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 1, str.tostring(longScore, "#"), text_color=C_BULL, text_size=size.small)
+    table.cell(panel, 0, 2, "Short score", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 2, str.tostring(shortScore, "#"), text_color=C_BEAR, text_size=size.small)
+    table.cell(panel, 0, 3, "Delta", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 3, str.tostring(deltaScore, "#"), text_color=deltaScore >= 50 ? C_BULL : C_BEAR, text_size=size.small)
+    table.cell(panel, 0, 4, "ALMA vote", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 4, str.tostring(almaVote), text_color=almaVote >= 0 ? C_BULL : C_BEAR, text_size=size.small)
+    table.cell(panel, 0, 5, "Kinetic", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 5, str.tostring(kinTrend, "#.###"), text_color=kinTrend >= 0 ? C_BULL : C_BEAR, text_size=size.small)
+    table.cell(panel, 0, 6, "R2", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 6, str.tostring(r2, "#.###"), text_color=r2 >= minR2 ? C_GOLD : C_MUTED, text_size=size.small)
+    table.cell(panel, 0, 7, "RVOL", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 7, str.tostring(rvol, "#.##") + "x", text_color=rvol >= rvolGate ? C_GOLD : C_MUTED, text_size=size.small)
+    table.cell(panel, 0, 8, "Position", text_color=color.new(C_TEXT, 25), text_size=size.small)
+    table.cell(panel, 1, 8, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", text_color=strategy.position_size > 0 ? C_BULL : strategy.position_size < 0 ? C_BEAR : C_MUTED, text_size=size.small)
+
+alertcondition(longEntry, "CEM Long Entry [JOAT]", "Concordance Execution Model long entry")
+alertcondition(shortEntry, "CEM Short Entry [JOAT]", "Concordance Execution Model short entry")

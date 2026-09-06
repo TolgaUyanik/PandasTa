@@ -1,0 +1,615 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © CoffeeKiller
+
+//@version=6
+indicator("State Machine Entry Debugger", overlay=true, max_labels_count=500)
+
+//=============================================================================
+// STATE MACHINE ENTRY DEBUGGER
+//=============================================================================
+//
+// PURPOSE
+//-----------------------------------------------------------------------------
+// This indicator helps diagnose why a strategy appears to enter later than
+// expected.
+//
+// It separates the entry process into four observable stages:
+//
+// 1. TOUCH
+// 2. ARM
+// 3. TRIGGER
+// 4. ENTRY SIGNAL
+//
+// Each stage is intentionally limited to one transition per confirmed bar.
+// This makes hidden state-machine delays easier to identify.
+//
+//-----------------------------------------------------------------------------
+// IMPORTANT: CONFIRMED-BAR EXECUTION
+//-----------------------------------------------------------------------------
+// State transitions are gated by:
+//
+//     barstate.isconfirmed
+//
+// This means the debugger advances only when a candle closes.
+//
+// That behavior is appropriate when the strategy being diagnosed also makes
+// decisions at bar close.
+//
+// Without this gate, conditions could become true temporarily while the live
+// candle is forming. Labels, backgrounds, and state values could then appear,
+// disappear, or move before the candle closes.
+//
+// If the strategy being diagnosed intentionally calculates intrabar, this
+// debugger must be modified to reproduce that strategy's exact execution model.
+//
+//-----------------------------------------------------------------------------
+// IMPORTANT: ENTRY SIGNAL IS NOT ALWAYS THE FILL
+//-----------------------------------------------------------------------------
+// The ENTRY SIGNAL marker identifies the bar where all entry requirements
+// become valid.
+//
+// It does not necessarily represent the strategy broker emulator's fill price
+// or fill bar.
+//
+// By default, a strategy.entry() order generated at bar close is normally
+// filled at the next available tick, which is usually the next bar's open.
+//
+// If the strategy uses:
+//
+//     process_orders_on_close=true
+//
+// the order may instead be processed at the close of the signal bar.
+//
+// Therefore:
+//
+// ENTRY SIGNAL on this indicator
+//     versus
+// Strategy fill marker on the chart
+//
+// may show a normal one-bar difference.
+//
+// That offset is not necessarily a strategy bug.
+//
+//-----------------------------------------------------------------------------
+// IMPORTANT: HISTORICAL VERSUS REALTIME RESULTS
+//-----------------------------------------------------------------------------
+// Historical candles are evaluated using their completed OHLC values.
+//
+// Realtime candles update while they are forming. Because transitions are
+// confirmed-bar gated, the debugger waits until the realtime candle closes
+// before committing a new state.
+//
+//-----------------------------------------------------------------------------
+// IMPORTANT: PLACEHOLDER CONDITIONS
+//-----------------------------------------------------------------------------
+// Group B contains demonstration conditions only.
+//
+// Replace those conditions with the exact conditions used by the strategy.
+//
+// For accurate diagnosis, also match:
+//
+// • Signal source
+// • Wick versus close confirmation
+// • Session filters
+// • Time filters
+// • Higher-timeframe data
+// • Entry permission rules
+// • Position-state restrictions
+// • Pyramiding rules
+// • Strategy calculation settings
+// • process_orders_on_close
+// • calc_on_every_tick
+// • calc_on_order_fills
+//
+//-----------------------------------------------------------------------------
+// ONE TRANSITION PER BAR
+//-----------------------------------------------------------------------------
+// This debugger intentionally uses one state transition per confirmed bar.
+//
+// Example:
+//
+// Bar 1: TOUCH
+// Bar 2: ARM
+// Bar 3: TRIGGER
+// Bar 4: ENTRY SIGNAL
+//
+// This exposes strategies where conditions are separated into sequential
+// states and each state must already exist when the next bar begins.
+//
+// If the actual strategy permits multiple transitions on the same bar, this
+// debugger must be adjusted to match that behavior.
+//
+//=============================================================================
+
+//=============================================================================
+// GROUP A — DEBUG SETTINGS
+//=============================================================================
+
+groupDebug = "A. Debug Settings"
+
+showEventLabels = input.bool(true, "Show State Event Labels", group=groupDebug)
+showBlockedLabels = input.bool(true, "Show Blocked-State Labels", group=groupDebug)
+showStateBackground = input.bool(true, "Color Background by State", group=groupDebug)
+showDebugTable = input.bool(true, "Show Debug Table", group=groupDebug)
+showOnlyRecentBars = input.bool(true, "Limit Labels to Recent Bars", group=groupDebug)
+
+recentBars = input.int(500, "Recent Bars to Debug", minval=50, maxval=5000, group=groupDebug)
+maxBarsArmed = input.int(5, "Maximum Bars Allowed in ARM State", minval=1, group=groupDebug)
+maxBarsTouched = input.int(5, "Maximum Bars Allowed After Touch", minval=1, group=groupDebug)
+
+//=============================================================================
+// GROUP B — PLACEHOLDER CONDITIONS
+//=============================================================================
+//
+// Replace these conditions with the exact conditions from the strategy.
+//
+// These examples exist only so the debugger compiles and demonstrates its
+// operation. They are not intended to be used as a trading system.
+//
+// The debugger will only be accurate when its conditions match the strategy's
+// conditions and execution assumptions.
+//=============================================================================
+
+groupExample = "B. Placeholder Conditions"
+
+fastLength = input.int(9, "Fast EMA", minval=1, group=groupExample)
+slowLength = input.int(21, "Slow EMA", minval=1, group=groupExample)
+breakoutLength = input.int(10, "Breakout Length", minval=1, group=groupExample)
+extensionATR = input.float(1.5, "Maximum Extension ATR", minval=0.0, step=0.1, group=groupExample)
+
+fastEMA = ta.ema(close, fastLength)
+slowEMA = ta.ema(close, slowLength)
+atrValue = ta.atr(14)
+
+priorHigh = ta.highest(high, breakoutLength)[1]
+pullbackLevel = fastEMA
+
+//-----------------------------------------------------------------------------
+// REPLACE THESE PLACEHOLDER CONDITIONS
+//-----------------------------------------------------------------------------
+
+bool touchCondition = low <= pullbackLevel and high >= pullbackLevel
+bool trendFilter = fastEMA > slowEMA
+bool qualityFilter = atrValue > 0 and math.abs(fastEMA - slowEMA) / atrValue > 0.10
+
+float extensionDistance = atrValue > 0 ? math.abs(close - fastEMA) / atrValue : 0.0
+
+bool extensionFilter = extensionDistance <= extensionATR
+bool triggerCondition = not na(priorHigh) and close > priorHigh
+bool entryPermission = true
+
+//=============================================================================
+// GROUP C — HELPER FUNCTIONS
+//=============================================================================
+
+yesNo(bool condition) =>
+    condition ? "PASS" : "FAIL"
+
+formatInteger(int value) =>
+    na(value) ? "NA" : str.tostring(value)
+
+stateToText(int stateValue) =>
+    switch stateValue
+        0 => "IDLE"
+        1 => "TOUCHED"
+        2 => "ARMED"
+        3 => "TRIGGERED"
+        4 => "ENTRY SIGNAL"
+        => "UNKNOWN"
+
+//=============================================================================
+// GROUP D — STATE CONSTANTS
+//=============================================================================
+
+const int STATE_IDLE = 0
+const int STATE_TOUCHED = 1
+const int STATE_ARMED = 2
+const int STATE_TRIGGERED = 3
+const int STATE_ENTERED = 4
+
+var int tradeState = STATE_IDLE
+
+//=============================================================================
+// GROUP E — PERSISTENT TIMELINE VALUES
+//=============================================================================
+//
+// These values record the confirmed bar where each state transition occurred.
+//
+// entryPrice records the close of the ENTRY SIGNAL bar. It is not necessarily
+// the strategy's actual broker-emulator fill price.
+//=============================================================================
+
+var int touchBar = na
+var int armBar = na
+var int triggerBar = na
+var int entryBar = na
+
+var float touchPrice = na
+var float armPrice = na
+var float triggerPrice = na
+var float entryPrice = na
+
+var string lastBlockReason = "None"
+var string lastEvent = "Waiting"
+
+//=============================================================================
+// GROUP F — PER-BAR EVENT FLAGS
+//=============================================================================
+//
+// These flags reset to false on each script execution.
+//
+// Because the transition engine is confirmed-bar gated, event flags become true
+// only when a transition is committed at the close of a candle.
+//=============================================================================
+
+bool newTouch = false
+bool newArm = false
+bool newTrigger = false
+bool newEntry = false
+
+bool resetEvent = false
+bool touchExpired = false
+bool armExpired = false
+
+bool trendBlocked = false
+bool qualityBlocked = false
+bool extensionBlocked = false
+bool triggerBlocked = false
+bool permissionBlocked = false
+
+//=============================================================================
+// GROUP G — BAR AGE CALCULATIONS
+//=============================================================================
+//
+// Bar age is measured using bar_index differences.
+//
+// A value of zero means the event occurred on the current confirmed bar.
+//=============================================================================
+
+int barsSinceTouch = not na(touchBar) ? bar_index - touchBar : na
+int barsSinceArm = not na(armBar) ? bar_index - armBar : na
+int barsSinceTrigger = not na(triggerBar) ? bar_index - triggerBar : na
+
+bool touchStillValid = not na(barsSinceTouch) and barsSinceTouch <= maxBarsTouched
+bool armStillValid = not na(barsSinceArm) and barsSinceArm <= maxBarsArmed
+
+//=============================================================================
+// GROUP H — CONFIRMED-BAR STATE TRANSITION LOGIC
+//=============================================================================
+//
+// All state changes are gated by barstate.isconfirmed.
+//
+// This aligns the debugger with a strategy that evaluates its entry logic at
+// candle close.
+//
+// Only one transition is permitted per confirmed bar because the state chain
+// uses if / else if.
+//
+// This is intentional.
+//
+// If the real strategy allows TOUCH, ARM, TRIGGER, and ENTRY to occur on the
+// same bar, this transition structure must be changed to match it.
+//=============================================================================
+
+if barstate.isconfirmed
+    if tradeState == STATE_IDLE
+        if touchCondition
+            tradeState := STATE_TOUCHED
+            touchBar := bar_index
+            touchPrice := close
+            armBar := na
+            triggerBar := na
+            entryBar := na
+            armPrice := na
+            triggerPrice := na
+            entryPrice := na
+            newTouch := true
+            lastEvent := "Touch"
+            lastBlockReason := "None"
+
+    else if tradeState == STATE_TOUCHED
+        if not touchStillValid
+            tradeState := STATE_IDLE
+            touchExpired := true
+            resetEvent := true
+            lastEvent := "Touch Expired"
+            lastBlockReason := "Touch expired before ARM"
+        else if not trendFilter
+            trendBlocked := true
+            lastBlockReason := "Trend filter"
+        else if not qualityFilter
+            qualityBlocked := true
+            lastBlockReason := "Quality filter"
+        else if not extensionFilter
+            extensionBlocked := true
+            lastBlockReason := "Extension filter"
+        else
+            tradeState := STATE_ARMED
+            armBar := bar_index
+            armPrice := close
+            newArm := true
+            lastEvent := "ARM"
+            lastBlockReason := "None"
+
+    else if tradeState == STATE_ARMED
+        if not armStillValid
+            tradeState := STATE_IDLE
+            armExpired := true
+            resetEvent := true
+            lastEvent := "ARM Expired"
+            lastBlockReason := "ARM expired before Trigger"
+        else if not triggerCondition
+            triggerBlocked := true
+            lastBlockReason := "Trigger condition"
+        else
+            tradeState := STATE_TRIGGERED
+            triggerBar := bar_index
+            triggerPrice := close
+            newTrigger := true
+            lastEvent := "Trigger"
+            lastBlockReason := "None"
+
+    else if tradeState == STATE_TRIGGERED
+        if not entryPermission
+            permissionBlocked := true
+            lastBlockReason := "Entry permission"
+        else
+            tradeState := STATE_ENTERED
+            entryBar := bar_index
+            entryPrice := close
+            newEntry := true
+            lastEvent := "Entry Signal"
+            lastBlockReason := "None"
+
+    else if tradeState == STATE_ENTERED
+        tradeState := STATE_IDLE
+        resetEvent := true
+        lastEvent := "Reset"
+
+//=============================================================================
+// GROUP I — TIMELINE MEASUREMENTS
+//=============================================================================
+//
+// These values reveal how many confirmed bars elapsed between state changes.
+//
+// Because only one transition is permitted per bar, each completed transition
+// will normally have a minimum delay of one bar from the prior transition.
+//=============================================================================
+
+int touchToArmBars = not na(touchBar) and not na(armBar) ? armBar - touchBar : na
+int armToTriggerBars = not na(armBar) and not na(triggerBar) ? triggerBar - armBar : na
+int triggerToEntryBars = not na(triggerBar) and not na(entryBar) ? entryBar - triggerBar : na
+int touchToEntryBars = not na(touchBar) and not na(entryBar) ? entryBar - touchBar : na
+
+//=============================================================================
+// GROUP J — SAME-BAR TRANSITION CHECKS
+//=============================================================================
+//
+// With the current one-transition-per-bar structure, these should remain false.
+//
+// They are retained as diagnostic checks in case the state-transition structure
+// is later modified.
+//=============================================================================
+
+bool touchAndArmSameBar = newArm and not na(touchBar) and bar_index == touchBar
+bool armAndTriggerSameBar = newTrigger and not na(armBar) and bar_index == armBar
+bool triggerAndEntrySameBar = newEntry and not na(triggerBar) and bar_index == triggerBar
+
+//=============================================================================
+// GROUP K — LABEL WINDOW
+//=============================================================================
+//
+// Limiting labels does not change the state machine.
+//
+// It only reduces historical chart clutter and label usage.
+//=============================================================================
+
+bool insideDebugWindow = not showOnlyRecentBars or bar_index >= last_bar_index - recentBars
+
+//=============================================================================
+// GROUP L — EVENT LABELS
+//=============================================================================
+//
+// ENTRY SIGNAL marks the logical signal bar.
+//
+// It should not automatically be interpreted as the strategy's fill bar.
+//=============================================================================
+
+if showEventLabels and insideDebugWindow
+    if newTouch
+        label.new(bar_index, low, "TOUCH\nBar: " + str.tostring(bar_index), style=label.style_label_up, textcolor=color.white, color=color.new(color.blue, 0), size=size.tiny)
+    if newArm
+        label.new(bar_index, low, "ARM\nTouch delay: " + formatInteger(touchToArmBars) + " bars", style=label.style_label_up, textcolor=color.white, color=color.new(color.orange, 0), size=size.tiny)
+    if newTrigger
+        label.new(bar_index, high, "TRIGGER\nARM delay: " + formatInteger(armToTriggerBars) + " bars", style=label.style_label_down, textcolor=color.white, color=color.new(color.purple, 0), size=size.tiny)
+    if newEntry
+        label.new(bar_index, high, "ENTRY SIGNAL\nTouch → Signal: " + formatInteger(touchToEntryBars) + " bars", style=label.style_label_down, textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+
+//=============================================================================
+// GROUP M — BLOCKED-CONDITION LABELS
+//=============================================================================
+//
+// Blocked labels identify the first condition preventing the current state from
+// advancing on a confirmed bar.
+//
+// A blocked condition does not necessarily mean the strategy is incorrect.
+// It means the exact requirement was false when that candle closed.
+//=============================================================================
+
+if showBlockedLabels and insideDebugWindow
+    if trendBlocked
+        label.new(bar_index, high, "BLOCKED\nTrend", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 25), size=size.tiny)
+
+    if qualityBlocked
+        label.new(bar_index, high, "BLOCKED\nQuality", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 25), size=size.tiny)
+
+    if extensionBlocked
+        label.new(bar_index, high, "BLOCKED\nExtension\n" + str.tostring(extensionDistance, "#.##") + " ATR", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 25), size=size.tiny)
+
+    if triggerBlocked
+        label.new(bar_index, high, "WAITING\nTrigger", style=label.style_label_down, textcolor=color.white, color=color.new(color.gray, 35), size=size.tiny)
+
+    if permissionBlocked
+        label.new(bar_index, high, "BLOCKED\nEntry Permission", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 25), size=size.tiny)
+
+    if touchExpired
+        label.new(bar_index, high, "RESET\nTouch Expired", style=label.style_label_down, textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+    if armExpired
+        label.new(bar_index, high, "RESET\nARM Expired", style=label.style_label_down, textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+//=============================================================================
+// GROUP N — STATE BACKGROUND
+//=============================================================================
+
+color stateBackground =
+     tradeState == STATE_IDLE ? na :
+     tradeState == STATE_TOUCHED ? color.new(color.blue, 90) :
+     tradeState == STATE_ARMED ? color.new(color.orange, 88) :
+     tradeState == STATE_TRIGGERED ? color.new(color.purple, 88) :
+     tradeState == STATE_ENTERED ? color.new(color.green, 85) :
+     na
+
+bgcolor(showStateBackground ? stateBackground : na)
+
+//=============================================================================
+// GROUP O — VISUAL PLOTS
+//=============================================================================
+//
+// These plots are visual references only.
+//
+// Confirm that the plotted references exactly match the values used by the
+// strategy being diagnosed.
+//=============================================================================
+
+plot(fastEMA, "Fast EMA", color=color.orange)
+plot(slowEMA, "Slow EMA", color=color.blue)
+plot(priorHigh, "Trigger Reference", color=color.new(color.purple, 25), style=plot.style_linebr)
+
+plotshape(newTouch, "Touch Event", shape.circle, location.belowbar, color=color.blue, size=size.tiny, text="T", textcolor=color.white)
+plotshape(newArm, "ARM Event", shape.square, location.belowbar, color=color.orange, size=size.tiny, text="A", textcolor=color.white)
+plotshape(newTrigger, "Trigger Event", shape.diamond, location.abovebar, color=color.purple, size=size.tiny, text="TR", textcolor=color.white)
+plotshape(newEntry, "Entry Signal Event", shape.triangleup, location.belowbar, color=color.green, size=size.small, text="ES", textcolor=color.white)
+
+//=============================================================================
+// GROUP P — DATA WINDOW VALUES
+//=============================================================================
+//
+// These values can be inspected one historical bar at a time through the
+// TradingView Data Window.
+//
+// A value of:
+//
+// 1 = true
+// 0 = false
+//
+// The Bar Confirmed field helps verify that state events only occur on closed
+// candles.
+//=============================================================================
+
+plot(tradeState, "Debug State Number", display=display.data_window)
+
+plot(touchCondition ? 1 : 0, "Touch Condition", display=display.data_window)
+plot(trendFilter ? 1 : 0, "Trend Filter", display=display.data_window)
+plot(qualityFilter ? 1 : 0, "Quality Filter", display=display.data_window)
+plot(extensionFilter ? 1 : 0, "Extension Filter", display=display.data_window)
+plot(triggerCondition ? 1 : 0, "Trigger Condition", display=display.data_window)
+plot(entryPermission ? 1 : 0, "Entry Permission", display=display.data_window)
+
+plot(extensionDistance, "Extension Distance ATR", display=display.data_window)
+
+plot(barsSinceTouch, "Bars Since Touch", display=display.data_window)
+plot(barsSinceArm, "Bars Since ARM", display=display.data_window)
+plot(barsSinceTrigger, "Bars Since Trigger", display=display.data_window)
+
+plot(touchAndArmSameBar ? 1 : 0, "Touch and ARM Same Bar", display=display.data_window)
+plot(armAndTriggerSameBar ? 1 : 0, "ARM and Trigger Same Bar", display=display.data_window)
+plot(triggerAndEntrySameBar ? 1 : 0, "Trigger and Entry Same Bar", display=display.data_window)
+
+plot(barstate.isconfirmed ? 1 : 0, "Bar Confirmed", display=display.data_window)
+plot(barstate.isrealtime ? 1 : 0, "Realtime Bar", display=display.data_window)
+
+//=============================================================================
+// GROUP Q — DEBUG TABLE
+//=============================================================================
+//
+// The table displays current conditions on the chart's latest bar.
+//
+// On a forming realtime candle, condition values may still change before close.
+// The state itself will not advance until the candle is confirmed.
+//=============================================================================
+
+var table debugTable = table.new(position.bottom_left, 2, 17, border_width=1)
+
+string stateText = stateToText(tradeState)
+
+if barstate.islast
+    if showDebugTable
+        table.cell(debugTable, 0, 0, "Debug Item", text_color=color.white, bgcolor=color.new(color.gray, 20))
+        table.cell(debugTable, 1, 0, "Current Value", text_color=color.white, bgcolor=color.new(color.gray, 20))
+
+        table.cell(debugTable, 0, 1, "State")
+        table.cell(debugTable, 1, 1, stateText)
+
+        table.cell(debugTable, 0, 2, "Last Event")
+        table.cell(debugTable, 1, 2, lastEvent)
+
+        table.cell(debugTable, 0, 3, "Last Block")
+        table.cell(debugTable, 1, 3, lastBlockReason)
+
+        table.cell(debugTable, 0, 4, "Touch")
+        table.cell(debugTable, 1, 4, yesNo(touchCondition))
+
+        table.cell(debugTable, 0, 5, "Trend")
+        table.cell(debugTable, 1, 5, yesNo(trendFilter))
+
+        table.cell(debugTable, 0, 6, "Quality")
+        table.cell(debugTable, 1, 6, yesNo(qualityFilter))
+
+        table.cell(debugTable, 0, 7, "Extension")
+        table.cell(debugTable, 1, 7, yesNo(extensionFilter))
+
+        table.cell(debugTable, 0, 8, "Trigger")
+        table.cell(debugTable, 1, 8, yesNo(triggerCondition))
+
+        table.cell(debugTable, 0, 9, "Entry Permission")
+        table.cell(debugTable, 1, 9, yesNo(entryPermission))
+
+        table.cell(debugTable, 0, 10, "Bars Since Touch")
+        table.cell(debugTable, 1, 10, formatInteger(barsSinceTouch))
+
+        table.cell(debugTable, 0, 11, "Bars Since ARM")
+        table.cell(debugTable, 1, 11, formatInteger(barsSinceArm))
+
+        table.cell(debugTable, 0, 12, "Bars Since Trigger")
+        table.cell(debugTable, 1, 12, formatInteger(barsSinceTrigger))
+
+        table.cell(debugTable, 0, 13, "Extension ATR")
+        table.cell(debugTable, 1, 13, str.tostring(extensionDistance, "#.###"))
+
+        table.cell(debugTable, 0, 14, "Confirmed Bar")
+        table.cell(debugTable, 1, 14, barstate.isconfirmed ? "YES" : "NO")
+
+        table.cell(debugTable, 0, 15, "Realtime")
+        table.cell(debugTable, 1, 15, barstate.isrealtime ? "YES" : "NO")
+
+        table.cell(debugTable, 0, 16, "Bar Index")
+        table.cell(debugTable, 1, 16, str.tostring(bar_index))
+
+    else
+        table.clear(debugTable, 0, 0, 1, 16)
+
+//=============================================================================
+// GROUP R — ALERT DEBUGGING
+//=============================================================================
+//
+// Alerts fire from confirmed state-transition events.
+//
+// When creating TradingView alerts, using Once Per Bar Close provides the
+// closest match to this debugger's confirmed-bar transition model.
+//=============================================================================
+
+alertcondition(newTouch, "Debug Touch", "State-machine debug event: Touch")
+alertcondition(newArm, "Debug ARM", "State-machine debug event: ARM")
+alertcondition(newTrigger, "Debug Trigger", "State-machine debug event: Trigger")
+alertcondition(newEntry, "Debug Entry Signal", "State-machine debug event: Entry Signal")

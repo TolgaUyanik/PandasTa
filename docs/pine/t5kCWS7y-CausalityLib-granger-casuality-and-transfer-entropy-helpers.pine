@@ -1,0 +1,969 @@
+//@version=6
+//@description Causality Analysis Library - Transfer Entropy, Granger Causality, and Causality Filtering
+// Version: v17 (2026-04-17) — Added HAR-RV forecast, Durbin-Watson, PCA explained variance
+library("CausalityLib", overlay=false)
+
+import cybermediaboy/TAUtilityLib/27 as TAUtilityLib
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// █ HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Discretize continuous data into bins (for entropy calculations)
+// @param data Array of continuous values
+// @param bins Number of bins
+// @returns Array of bin indices
+export f_discretize(array<float> data, int bins) =>
+    array<int> discretized = array.new<int>()
+    int data_size = array.size(data)
+    if data_size == 0
+        discretized
+    else
+        if bins <= 1
+            for i = 0 to data_size - 1
+                array.push(discretized, 0)
+        else
+            array<float> sorted_copy = array.copy(data)
+            array.sort(sorted_copy)
+            array<float> boundaries = array.new<float>()
+            for b = 1 to bins - 1
+                int idx = int(math.floor(float(b) / float(bins) * float(data_size - 1)))
+                idx := math.max(0, math.min(idx, data_size - 1))
+                array.push(boundaries, array.get(sorted_copy, idx))
+
+            for i = 0 to data_size - 1
+                float val = array.get(data, i)
+                if na(val)
+                    array.push(discretized, 0)
+                else
+                    int assigned_bin = bins - 1
+                    for b = 0 to bins - 2
+                        if val <= array.get(boundaries, b)
+                            assigned_bin := b
+                            break
+                    array.push(discretized, assigned_bin)
+        discretized
+
+// @function Simple correlation function without performance optimization
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @param method Correlation method ("Pearson", "Spearman", "Kendall")
+// @returns Correlation coefficient [-1, 1]
+f_get_correlation_simple(array<float> x, array<float> y, int length, string method) =>
+    float result = 0.0
+    if method == "Pearson"
+        result := TAUtilityLib.f_pearson(x, y, length)
+    else if method == "Spearman"
+        result := TAUtilityLib.f_spearman(x, y, length)
+    else if method == "Kendall"
+        result := TAUtilityLib.f_kendall(x, y, length, 1)
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// █ TRANSFER ENTROPY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Calculate Shannon entropy of data distribution
+// @param data Array of continuous values
+// @param num_bins Number of bins for discretization
+// @returns Entropy value (higher = more randomness)
+export f_shannon_entropy(array<float> data, int num_bins) =>
+    int data_size = array.size(data)
+    if data_size < num_bins * 2
+        0.0
+    else
+        // Calculate fixed boundaries based on global min/max
+        float min_val = array.min(data), max_val = array.max(data), data_range = max_val - min_val
+        
+        if data_range < 0.0001
+            0.0  // All values same = zero entropy
+        else
+            // Count occurrences in fixed bins
+            array<float> counts = array.new<float>(num_bins, 0.0)
+            
+            // First pass: count values in each bin
+            int bin_idx = 0
+            for j = 0 to data_size - 1
+                float val = array.get(data, j)
+                if not na(val)
+                    bin_idx := int(math.floor((val - min_val) / data_range * float(num_bins)))
+                    bin_idx := math.max(0, math.min(bin_idx, num_bins - 1))
+                    float c = array.get(counts, bin_idx)
+                    array.set(counts, bin_idx, c + 1.0)
+            
+            // Second pass: calculate entropy
+            float entropy = 0.0, log2 = math.log(2.0)
+            
+            for k = 0 to num_bins - 1
+                float prob = array.get(counts, k) / float(data_size)
+                if prob > 0.0001
+                    entropy -= prob * math.log(prob) / log2
+            
+            entropy
+
+// @function Calculate Shannon entropy of data distribution using explicit discretize->probability pipeline
+// @param data Array of continuous values
+// @param num_bins Number of bins for discretization
+// @returns Entropy value (higher = more randomness)
+export f_shannon_entropy_v2(array<float> data, int num_bins) =>
+    float entropy = 0.0
+    int data_size = array.size(data)
+    if data_size >= num_bins * 2
+        array<int> discretized = f_discretize(data, num_bins)
+        array<float> probs = array.new<float>()
+        for i = 0 to num_bins - 1
+            array.push(probs, 0.0)
+        for i = 0 to array.size(discretized) - 1
+            int bin = array.get(discretized, i)
+            if bin >= 0 and bin < num_bins
+                float count = array.get(probs, bin)
+                array.set(probs, bin, count + 1.0)
+        for i = 0 to num_bins - 1
+            float count = array.get(probs, i)
+            array.set(probs, i, count / math.max(1.0, data_size))
+        int probs_size = array.size(probs)
+        if probs_size > 0
+            for i = 0 to probs_size - 1
+                float p = array.get(probs, i)
+                if p > 0
+                    entropy -= p * math.log(p) / math.log(2)
+    entropy
+
+// @function Calculate Transfer Entropy from source to target
+// @param primary_arr Target series (e.g., primary ticker returns)
+// @param ticker_arr Source series (e.g., basket ticker returns)
+// @param window Window size for TE calculation
+// @param bins Number of bins for discretization
+// @param lag Lag for source series
+// @returns [te_score, direction] - TE score and direction (-1 or 1)
+export f_calculate_te_score(array<float> primary_arr, array<float> ticker_arr, int window, int bins, int lag) =>
+    // Initialize results with default values (0.0)
+    float te_final = 0.0
+    float dir_final = 0.0
+    
+    int primary_size = array.size(primary_arr), ticker_size = array.size(ticker_arr)
+    
+    // Only proceed if we have enough data
+    if primary_size >= window + lag and ticker_size >= window
+        // Extract relevant windows
+        array<float> primary_window = array.new<float>(), ticker_window = array.new<float>()
+        
+        for i = 0 to window - 1
+            int p_idx = primary_size - window + i, t_idx = ticker_size - window + i
+            if p_idx >= 0 and t_idx >= 0
+                array.push(primary_window, array.get(primary_arr, p_idx))
+                array.push(ticker_window, array.get(ticker_arr, t_idx))
+        
+        // Ensure we have enough data in the window
+        int win_size = array.size(primary_window)
+        if win_size >= 30
+            // Build lagged series for TE calculation
+            array<float> x_past = array.new<float>(), y_past = array.new<float>(), y_future = array.new<float>()
+            
+            int valid_count = 0
+            for i = lag + 1 to win_size - 1
+                float xp = array.get(ticker_window, i - lag), yp = array.get(primary_window, i - 1), yf = array.get(primary_window, i)
+                
+                if not na(xp) and not na(yp) and not na(yf)
+                    array.push(x_past, xp)
+                    array.push(y_past, yp)
+                    array.push(y_future, yf)
+                    valid_count += 1
+            
+            // Only calculate if we have enough valid samples
+            if valid_count >= 20
+                // Discretize all three series
+                array<int> x_disc = f_discretize(x_past, bins), yp_disc = f_discretize(y_past, bins), yf_disc = f_discretize(y_future, bins)
+                
+                // Build 3D contingency table: P(Y_future, Y_past, X_past)
+                int table_size = bins * bins * bins
+                array<float> p_triple = array.new<float>(table_size, 0.0)
+                
+                // Count occurrences
+                for i = 0 to valid_count - 1
+                    int yf_bin = array.get(yf_disc, i), yp_bin = array.get(yp_disc, i), xp_bin = array.get(x_disc, i)
+                    
+                    if yf_bin >= 0 and yf_bin < bins and yp_bin >= 0 and yp_bin < bins and xp_bin >= 0 and xp_bin < bins
+                        int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                        if idx_3d >= 0 and idx_3d < table_size
+                            float cnt = array.get(p_triple, idx_3d)
+                            array.set(p_triple, idx_3d, cnt + 1.0)
+                
+                // Normalize to probabilities with Laplace-style smoothing (alpha=0.001)
+                float total = float(valid_count)
+                float alpha = 0.001
+                float smoothed_total = total + alpha * table_size
+                for k = 0 to table_size - 1
+                    float cnt = array.get(p_triple, k)
+                    array.set(p_triple, k, (cnt + alpha) / smoothed_total)
+                
+                // Calculate marginals: P(Y_past, X_past) and P(Y_past)
+                array<float> p_yp_xp = array.new<float>(), p_yp = array.new<float>(), p_yf_yp = array.new<float>()
+                for k = 0 to bins * bins - 1
+                    array.push(p_yp_xp, 0.0)
+                for k = 0 to bins - 1
+                    array.push(p_yp, 0.0)
+                for k = 0 to bins * bins - 1
+                    array.push(p_yf_yp, 0.0)
+                
+                for yp_bin = 0 to bins - 1
+                    float sum_xp = 0.0
+                    for xp_bin = 0 to bins - 1
+                        float sum_yf = 0.0
+                        for yf_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            sum_yf += array.get(p_triple, idx_3d)
+                        int idx_2d = yp_bin * bins + xp_bin
+                        array.set(p_yp_xp, idx_2d, sum_yf)
+                        sum_xp += sum_yf
+                    array.set(p_yp, yp_bin, sum_xp)
+                
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        float sum_xp = 0.0
+                        for xp_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            sum_xp += array.get(p_triple, idx_3d)
+                        int idx_2d = yf_bin * bins + yp_bin
+                        array.set(p_yf_yp, idx_2d, sum_xp)
+                
+                // Calculate H(Y_future | Y_past) = -Σ P(yf,yp) * log(P(yf,yp)/P(yp))
+                float log2 = math.log(2.0), h_yf_given_yp = 0.0, h_yf_given_both = 0.0
+                
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        int idx_2d = yf_bin * bins + yp_bin
+                        float p_joint = array.get(p_yf_yp, idx_2d), p_marg = array.get(p_yp, yp_bin)
+                        
+                        if p_joint > 0.0001 and p_marg > 0.0001
+                            h_yf_given_yp -= p_joint * (math.log(p_joint) - math.log(p_marg)) / log2
+                
+                // Calculate H(Y_future | Y_past, X_past) = -Σ P(yf,yp,xp) * log(P(yf,yp,xp)/P(yp,xp))
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        for xp_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin, idx_2d = yp_bin * bins + xp_bin
+                            float p_triple_val = array.get(p_triple, idx_3d), p_both_val = array.get(p_yp_xp, idx_2d)
+                            
+                            if p_triple_val > 0.0001 and p_both_val > 0.0001
+                                h_yf_given_both -= p_triple_val * (math.log(p_triple_val) - math.log(p_both_val)) / log2
+                
+                // Transfer Entropy: TE(X→Y) = H(Y_fut|Y_past) - H(Y_fut|Y_past,X_past)
+                float te_raw = h_yf_given_yp - h_yf_given_both
+                float te_score = math.max(0.0, te_raw)
+                
+                // Scale TE to comparable range with Granger (TE is typically 0-0.5 bits)
+                te_final := te_score * 2.0
+                
+                // Direction from correlation (TE doesn't give direction directly)
+                float corr_inst = TAUtilityLib.f_pearson_tail(primary_window, ticker_window, math.min(window, 50))
+                dir_final := corr_inst > 0 ? 1.0 : -1.0
+                
+    // Return single tuple to avoid type mismatch
+    [te_final, dir_final]
+
+// @function Calculate Transfer Entropy with diagnostics for debugging data sufficiency and bin occupancy
+// @param primary_arr Target series (e.g., primary ticker returns)
+// @param ticker_arr Source series (e.g., basket ticker returns)
+// @param window Window size for TE calculation
+// @param bins Number of bins for discretization
+// @param lag Lag for source series
+// @returns [te_score, direction, win_size, valid_count, min_x, max_x, min_y, max_y, b0_share, b1_share, b2_share, b3_share, b4_share, b5_share, b6_share, b7_share]
+export f_calculate_te_score_debug(array<float> primary_arr, array<float> ticker_arr, int window, int bins, int lag) =>
+    float te_final = 0.0
+    float dir_final = 0.0
+    int win_size = 0
+    int valid_count = 0
+    float min_x = na
+    float max_x = na
+    float min_y = na
+    float max_y = na
+    float b0_share = na
+    float b1_share = na
+    float b2_share = na
+    float b3_share = na
+    float b4_share = na
+    float b5_share = na
+    float b6_share = na
+    float b7_share = na
+
+    int primary_size = array.size(primary_arr), ticker_size = array.size(ticker_arr)
+    if primary_size >= window + lag and ticker_size >= window
+        array<float> primary_window = array.new<float>(), ticker_window = array.new<float>()
+        for i = 0 to window - 1
+            int p_idx = primary_size - window + i, t_idx = ticker_size - window + i
+            if p_idx >= 0 and t_idx >= 0
+                array.push(primary_window, array.get(primary_arr, p_idx))
+                array.push(ticker_window, array.get(ticker_arr, t_idx))
+        win_size := array.size(primary_window)
+        if win_size >= 30
+            array<float> x_past = array.new<float>(), y_past = array.new<float>(), y_future = array.new<float>()
+            for i = lag + 1 to win_size - 1
+                float xp = array.get(ticker_window, i - lag), yp = array.get(primary_window, i - 1), yf = array.get(primary_window, i)
+                if not na(xp) and not na(yp) and not na(yf)
+                    array.push(x_past, xp)
+                    array.push(y_past, yp)
+                    array.push(y_future, yf)
+                    valid_count += 1
+                    min_x := na(min_x) ? xp : math.min(min_x, xp)
+                    max_x := na(max_x) ? xp : math.max(max_x, xp)
+                    min_y := na(min_y) ? yp : math.min(min_y, yp)
+                    max_y := na(max_y) ? yp : math.max(max_y, yp)
+            if valid_count > 20
+                array<int> x_disc = f_discretize(x_past, bins)
+                array<int> yp_disc = f_discretize(y_past, bins)
+                array<int> yf_disc = f_discretize(y_future, bins)
+                int table_size = bins * bins * bins
+                array<float> p_triple = array.new<float>(table_size, 0.0)
+                array<float> bin_counts = array.new<float>(8, 0.0)
+                for i = 0 to valid_count - 1
+                    int x_bin = array.get(x_disc, i)
+                    if x_bin >= 0 and x_bin < 8
+                        float prev_cnt = array.get(bin_counts, x_bin)
+                        array.set(bin_counts, x_bin, prev_cnt + 1.0)
+                    int yf_bin = array.get(yf_disc, i), yp_bin = array.get(yp_disc, i), xp_bin = array.get(x_disc, i)
+                    if yf_bin >= 0 and yf_bin < bins and yp_bin >= 0 and yp_bin < bins and xp_bin >= 0 and xp_bin < bins
+                        int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                        if idx_3d >= 0 and idx_3d < table_size
+                            float cnt = array.get(p_triple, idx_3d)
+                            array.set(p_triple, idx_3d, cnt + 1.0)
+                // Normalize to probabilities with Laplace-style smoothing (alpha=0.001)
+                float total = float(valid_count)
+                float alpha = 0.001
+                float smoothed_total = total + alpha * table_size
+                for k = 0 to table_size - 1
+                    float cnt = array.get(p_triple, k)
+                    array.set(p_triple, k, (cnt + alpha) / smoothed_total)
+                array<float> p_yp_xp = array.new<float>(), p_yp = array.new<float>(), p_yf_yp = array.new<float>()
+                for k = 0 to bins * bins - 1
+                    array.push(p_yp_xp, 0.0)
+                for k = 0 to bins - 1
+                    array.push(p_yp, 0.0)
+                for k = 0 to bins * bins - 1
+                    array.push(p_yf_yp, 0.0)
+                for yp_bin = 0 to bins - 1
+                    float sum_xp = 0.0
+                    for xp_bin = 0 to bins - 1
+                        float sum_yf = 0.0
+                        for yf_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            sum_yf += array.get(p_triple, idx_3d)
+                        int idx_2d = yp_bin * bins + xp_bin
+                        array.set(p_yp_xp, idx_2d, sum_yf)
+                        sum_xp += sum_yf
+                    array.set(p_yp, yp_bin, sum_xp)
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        float sum_xp = 0.0
+                        for xp_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            sum_xp += array.get(p_triple, idx_3d)
+                        int idx_2d = yf_bin * bins + yp_bin
+                        array.set(p_yf_yp, idx_2d, sum_xp)
+                float log2 = math.log(2.0)
+                float h_yf_given_yp = 0.0
+                float h_yf_given_both = 0.0
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        int idx_2d = yf_bin * bins + yp_bin
+                        float p_joint = array.get(p_yf_yp, idx_2d)
+                        float p_marg = array.get(p_yp, yp_bin)
+                        if p_joint > 0.0001 and p_marg > 0.0001
+                            h_yf_given_yp -= p_joint * (math.log(p_joint) - math.log(p_marg)) / log2
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        for xp_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            int idx_2d = yp_bin * bins + xp_bin
+                            float p_triple_val = array.get(p_triple, idx_3d)
+                            float p_both_val = array.get(p_yp_xp, idx_2d)
+                            if p_triple_val > 0.0001 and p_both_val > 0.0001
+                                h_yf_given_both -= p_triple_val * (math.log(p_triple_val) - math.log(p_both_val)) / log2
+                float te_raw = h_yf_given_yp - h_yf_given_both
+                te_final := h_yf_given_yp > 0.001 ? te_raw / h_yf_given_yp : 0.0
+                float corr_inst = TAUtilityLib.f_pearson_tail(primary_window, ticker_window, math.min(window, 50))
+                dir_final := corr_inst > 0 ? 1.0 : -1.0
+                b0_share := array.get(bin_counts, 0) / total
+                b1_share := array.get(bin_counts, 1) / total
+                b2_share := array.get(bin_counts, 2) / total
+                b3_share := array.get(bin_counts, 3) / total
+                b4_share := array.get(bin_counts, 4) / total
+                b5_share := array.get(bin_counts, 5) / total
+                b6_share := array.get(bin_counts, 6) / total
+                b7_share := array.get(bin_counts, 7) / total
+    [te_final, dir_final, win_size, valid_count, min_x, max_x, min_y, max_y, b0_share, b1_share, b2_share, b3_share, b4_share, b5_share, b6_share, b7_share]
+
+// @function Calculate Transfer Entropy from source to target using normalized TE formulation
+// @param primary_arr Target series (e.g., primary ticker returns)
+// @param ticker_arr Source series (e.g., basket ticker returns)
+// @param window Window size for TE calculation
+// @param bins Number of bins for discretization
+// @param lag Lag for source series
+// @returns [te_score, direction] - normalized TE score and direction (-1 or 1)
+export f_calculate_te_score_v2(array<float> primary_arr, array<float> ticker_arr, int window, int bins, int lag) =>
+    float te_final = 0.0
+    float dir_final = 0.0
+    int primary_size = array.size(primary_arr)
+    int ticker_size = array.size(ticker_arr)
+    if primary_size > window + lag and ticker_size > window
+        array<float> primary_window = array.new<float>()
+        array<float> ticker_window = array.new<float>()
+        for i = 0 to window - 1
+            int pidx = primary_size - window + i
+            int tidx = ticker_size - window + i
+            if pidx >= 0 and tidx >= 0
+                array.push(primary_window, array.get(primary_arr, pidx))
+                array.push(ticker_window, array.get(ticker_arr, tidx))
+        int win_size = array.size(primary_window)
+        if win_size > 30
+            array<float> x_past = array.new<float>()
+            array<float> y_past = array.new<float>()
+            array<float> y_future = array.new<float>()
+            int valid_count = 0
+            for i = lag + 1 to win_size - 1
+                float xp = array.get(ticker_window, i - lag)
+                float yp = array.get(primary_window, i - 1)
+                float yf = array.get(primary_window, i)
+                if not na(xp) and not na(yp) and not na(yf)
+                    array.push(x_past, xp)
+                    array.push(y_past, yp)
+                    array.push(y_future, yf)
+                    valid_count += 1
+            if valid_count > 20
+                array<int> x_disc = f_discretize(x_past, bins)
+                array<int> yp_disc = f_discretize(y_past, bins)
+                array<int> yf_disc = f_discretize(y_future, bins)
+                int table_size = bins * bins * bins
+                array<float> p_triple = array.new<float>(table_size, 0.0)
+                for i = 0 to valid_count - 1
+                    int yf_bin = array.get(yf_disc, i)
+                    int yp_bin = array.get(yp_disc, i)
+                    int xp_bin = array.get(x_disc, i)
+                    if yf_bin >= 0 and yf_bin < bins and yp_bin >= 0 and yp_bin < bins and xp_bin >= 0 and xp_bin < bins
+                        int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                        float cnt = array.get(p_triple, idx_3d)
+                        array.set(p_triple, idx_3d, cnt + 1.0)
+                // Normalize to probabilities with Laplace-style smoothing (alpha=0.001)
+                float total = float(valid_count)
+                float alpha = 0.001
+                float smoothed_total = total + alpha * table_size
+                for k = 0 to table_size - 1
+                    float cnt = array.get(p_triple, k)
+                    array.set(p_triple, k, (cnt + alpha) / smoothed_total)
+                array<float> p_yp_xp = array.new<float>()
+                array<float> p_yp = array.new<float>()
+                array<float> p_yf_yp = array.new<float>()
+                for k = 0 to bins * bins - 1
+                    array.push(p_yp_xp, 0.0)
+                for k = 0 to bins - 1
+                    array.push(p_yp, 0.0)
+                for k = 0 to bins * bins - 1
+                    array.push(p_yf_yp, 0.0)
+                for yp_bin = 0 to bins - 1
+                    float sum_xp = 0.0
+                    for xp_bin = 0 to bins - 1
+                        float sum_yf = 0.0
+                        for yf_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            sum_yf += array.get(p_triple, idx_3d)
+                        int idx_2d = yp_bin * bins + xp_bin
+                        array.set(p_yp_xp, idx_2d, sum_yf)
+                        sum_xp += sum_yf
+                    array.set(p_yp, yp_bin, sum_xp)
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        float sum_xp = 0.0
+                        for xp_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            sum_xp += array.get(p_triple, idx_3d)
+                        int idx_2d = yf_bin * bins + yp_bin
+                        array.set(p_yf_yp, idx_2d, sum_xp)
+                float log2 = math.log(2.0)
+                float h_yf_given_yp = 0.0
+                float h_yf_given_both = 0.0
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        int idx_2d = yf_bin * bins + yp_bin
+                        float p_joint = array.get(p_yf_yp, idx_2d)
+                        float p_marg = array.get(p_yp, yp_bin)
+                        if p_joint > 0.0001 and p_marg > 0.0001
+                            h_yf_given_yp -= p_joint * (math.log(p_joint) - math.log(p_marg)) / log2
+                for yf_bin = 0 to bins - 1
+                    for yp_bin = 0 to bins - 1
+                        for xp_bin = 0 to bins - 1
+                            int idx_3d = yf_bin * bins * bins + yp_bin * bins + xp_bin
+                            int idx_2d = yp_bin * bins + xp_bin
+                            float p_triple_val = array.get(p_triple, idx_3d)
+                            float p_both_val = array.get(p_yp_xp, idx_2d)
+                            if p_triple_val > 0.0001 and p_both_val > 0.0001
+                                h_yf_given_both -= p_triple_val * (math.log(p_triple_val) - math.log(p_both_val)) / log2
+                float te_raw = h_yf_given_yp - h_yf_given_both
+                float nte = h_yf_given_yp > 0.001 ? te_raw / h_yf_given_yp : 0.0
+                te_final := nte
+                float corr_inst = TAUtilityLib.f_pearson_tail(primary_window, ticker_window, math.min(window, 50))
+                dir_final := corr_inst > 0 ? 1.0 : -1.0
+    [te_final, dir_final]
+
+export f_compute_te_ensemble(array<float> pri_arr, array<float> b1, array<float> b2, array<float> b3, array<float> b4, array<float> b5, int window, int bins, int smoothing, bool self1, bool self2, bool self3, bool self4, bool self5, bool use5) =>
+    float te_score1 = 0.0
+    float te_dir1 = 0.0
+    float te_score2 = 0.0
+    float te_dir2 = 0.0
+    float te_score3 = 0.0
+    float te_dir3 = 0.0
+    float te_score4 = 0.0
+    float te_dir4 = 0.0
+    float te_score5 = 0.0
+    float te_dir5 = 0.0
+    if not self1 and array.size(pri_arr) > window + 1 and array.size(b1) > window + 1
+        [s1, d1] = f_calculate_te_score_v2(pri_arr, b1, window, bins, 1)
+        te_score1 := nz(s1, 0.0)
+        te_dir1 := nz(d1, 0.0)
+    if not self2 and array.size(pri_arr) > window + 1 and array.size(b2) > window + 1
+        [s2, d2] = f_calculate_te_score_v2(pri_arr, b2, window, bins, 1)
+        te_score2 := nz(s2, 0.0)
+        te_dir2 := nz(d2, 0.0)
+    if not self3 and array.size(pri_arr) > window + 1 and array.size(b3) > window + 1
+        [s3, d3] = f_calculate_te_score_v2(pri_arr, b3, window, bins, 1)
+        te_score3 := nz(s3, 0.0)
+        te_dir3 := nz(d3, 0.0)
+    if not self4 and array.size(pri_arr) > window + 1 and array.size(b4) > window + 1
+        [s4, d4] = f_calculate_te_score_v2(pri_arr, b4, window, bins, 1)
+        te_score4 := nz(s4, 0.0)
+        te_dir4 := nz(d4, 0.0)
+    if use5 and not self5 and array.size(pri_arr) > window + 1 and array.size(b5) > window + 1
+        [s5, d5] = f_calculate_te_score_v2(pri_arr, b5, window, bins, 1)
+        te_score5 := nz(s5, 0.0)
+        te_dir5 := nz(d5, 0.0)
+    float te_total_score = 0.0
+    float te_active_count = 0.0
+    if not self1 and math.abs(te_score1) > 1e-10
+        te_total_score += math.abs(te_score1)
+        te_active_count += 1.0
+    if not self2 and math.abs(te_score2) > 1e-10
+        te_total_score += math.abs(te_score2)
+        te_active_count += 1.0
+    if not self3 and math.abs(te_score3) > 1e-10
+        te_total_score += math.abs(te_score3)
+        te_active_count += 1.0
+    if not self4 and math.abs(te_score4) > 1e-10
+        te_total_score += math.abs(te_score4)
+        te_active_count += 1.0
+    if use5 and not self5 and math.abs(te_score5) > 1e-10
+        te_total_score += math.abs(te_score5)
+        te_active_count += 1.0
+    float te_osc_out = 0.0
+    float te_str_out = 0.0
+    float te_dir_out = 0.0
+    if te_active_count > 0 and te_total_score > 0
+        float te_w1 = not self1 and math.abs(te_score1) > 1e-10 ? math.abs(te_score1) / te_total_score : 0.0
+        float te_w2 = not self2 and math.abs(te_score2) > 1e-10 ? math.abs(te_score2) / te_total_score : 0.0
+        float te_w3 = not self3 and math.abs(te_score3) > 1e-10 ? math.abs(te_score3) / te_total_score : 0.0
+        float te_w4 = not self4 and math.abs(te_score4) > 1e-10 ? math.abs(te_score4) / te_total_score : 0.0
+        float te_w5 = use5 and not self5 and math.abs(te_score5) > 1e-10 ? math.abs(te_score5) / te_total_score : 0.0
+        float te_dir_raw = te_w1 * te_dir1 + te_w2 * te_dir2 + te_w3 * te_dir3 + te_w4 * te_dir4 + te_w5 * te_dir5
+        float te_str_raw = te_w1 * math.abs(te_score1) + te_w2 * math.abs(te_score2) + te_w3 * math.abs(te_score3) + te_w4 * math.abs(te_score4) + te_w5 * math.abs(te_score5)
+        float te_signed_score = te_dir_raw * te_str_raw
+        te_osc_out := smoothing > 1 ? ta.ema(te_signed_score, smoothing) : te_signed_score
+        te_str_out := smoothing > 1 ? ta.ema(te_str_raw, smoothing) : te_str_raw
+        te_dir_out := te_osc_out
+    [te_osc_out, te_str_out, te_dir_out]
+
+export f_calculate_te_multilag(array<float> primary_arr, array<float> ticker_arr, int window, int bins, int max_lag) =>
+    float best_te = 0.0
+    float best_dir = 0.0
+    int best_lag = 1
+    if max_lag >= 1 and array.size(primary_arr) >= window + max_lag and array.size(ticker_arr) >= window
+        for test_lag = 1 to max_lag
+            [te_val, dir_val] = f_calculate_te_score_v2(primary_arr, ticker_arr, window, bins, test_lag)
+            if math.abs(te_val) > math.abs(best_te)
+                best_te := te_val
+                best_dir := dir_val
+                best_lag := test_lag
+    [best_te, best_dir, best_lag]
+
+export f_calculate_te_gated(array<float> primary_arr, array<float> ticker_arr, int window, int bins, int max_lag, float coupling_damping, float coupling_floor) =>
+    float gated_te = 0.0
+    float gated_dir = 0.0
+    int best_lag = 1
+    if not na(coupling_damping) and coupling_damping >= coupling_floor
+        [raw_te, raw_dir, raw_lag] = f_calculate_te_multilag(primary_arr, ticker_arr, window, bins, max_lag)
+        float scale = math.max(0.0, math.min(1.0, (coupling_damping - coupling_floor) / math.max(1.0 - coupling_floor, 1e-10)))
+        gated_te := raw_te * scale
+        gated_dir := raw_dir
+        best_lag := raw_lag
+    [gated_te, gated_dir, best_lag]
+
+export f_calculate_net_te(array<float> primary_arr, array<float> ticker_arr, int window, int bins, int lag) =>
+    [te_fwd, _] = f_calculate_te_score_v2(ticker_arr, primary_arr, window, bins, lag)
+    [te_rev, _2] = f_calculate_te_score_v2(primary_arr, ticker_arr, window, bins, lag)
+    [te_fwd - te_rev, te_fwd, te_rev]
+
+export f_kalman_hedge_ratio(float measurement, float observation, float prev_beta, float prev_P, float Q, float R) =>
+    float beta_pred = nz(prev_beta, 0.0)
+    float P_pred = nz(prev_P, 1.0) + Q
+    float innov = measurement - beta_pred * observation
+    float S = observation * observation * P_pred + R
+    float K = S > 0 ? (P_pred * observation) / S : 0.0
+    float beta_new = beta_pred + K * innov
+    float P_new = math.max((1.0 - K * observation) * P_pred, 1e-10)
+    [beta_new, P_new, innov, K]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// █ GRANGER CAUSALITY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Calculate Pearson correlation at specific lag
+// @param primary_arr Primary series
+// @param ticker_arr Ticker series
+// @param lag Lag value (positive = ticker lags primary)
+// @param window Window size for correlation
+// @param correlation_method Correlation method to use ("Pearson", "Spearman", "Kendall")
+// @returns Correlation coefficient [-1, 1]
+export f_correlation_at_lag(array<float> primary_arr, array<float> ticker_arr, int lag, int window, string correlation_method) =>
+    float correlation = 0.0
+    int prim_size = array.size(primary_arr), tick_size = array.size(ticker_arr), required_primary = window + math.max(0, lag)
+    if prim_size >= required_primary and tick_size >= window and window >= 10
+        array<float> aligned_primary = array.new<float>(0), aligned_ticker = array.new<float>(0)
+        // Use TAIL of arrays (newest data)
+        // For lag correlation: primary[t] vs ticker[t-lag]
+        // So we need: primary from end, ticker from end-lag
+        int prim_start = math.max(0, prim_size - window), tick_start = math.max(0, tick_size - window - lag)
+        for i = 0 to window - 1
+            int p_idx = prim_start + i, t_idx = tick_start + i
+            if p_idx >= 0 and p_idx < prim_size and t_idx >= 0 and t_idx < tick_size
+                float p_val = array.get(primary_arr, p_idx), t_val = array.get(ticker_arr, t_idx)
+                if not na(p_val) and not na(t_val)
+                    array.push(aligned_primary, p_val)
+                    array.push(aligned_ticker, t_val)
+        if array.size(aligned_primary) >= 10
+            correlation := f_get_correlation_simple(aligned_primary, aligned_ticker, array.size(aligned_primary), correlation_method)
+    correlation
+
+// @function Calculate Granger causality score with lag testing
+// @param primary_arr Primary series
+// @param ticker_arr Ticker series
+// @param window Window size for correlation
+// @param max_lag Maximum lag to test
+// @param correlation_method Correlation method to use
+// @returns [granger_score, beta_sum, best_lag] - Granger score, directional beta, and best lag (highest |correlation|)
+export f_calculate_granger_score(array<float> primary_arr, array<float> ticker_arr, int window, int max_lag, string correlation_method) =>
+    float total_score = 0.0, total_weight = 0.0, beta_sum = 0.0
+    int best_lag = 1
+    float best_corr = 0.0
+    if array.size(primary_arr) >= window + max_lag and array.size(ticker_arr) >= window
+        for lag = 1 to max_lag
+            float corr_at_lag = f_correlation_at_lag(primary_arr, ticker_arr, lag, window, correlation_method), lag_weight = 1.0 / lag
+            total_score += math.abs(corr_at_lag) * lag_weight
+            total_weight += lag_weight
+            beta_sum += corr_at_lag * lag_weight
+            // Track best lag (highest absolute correlation)
+            if math.abs(corr_at_lag) > best_corr
+                best_corr := math.abs(corr_at_lag)
+                best_lag := lag
+    float granger_score = total_weight > 0 ? total_score / total_weight : 0.0
+    [granger_score, beta_sum, best_lag]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// █ CAUSALITY FILTERING FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Calculate partial correlation between X and Y controlling for Z
+// @param x_arr First series
+// @param y_arr Second series
+// @param z_arr Mediator series
+// @param window Window size for correlation
+// @returns Partial correlation coefficient [-1, 1]
+export f_partial_correlation(array<float> x_arr, array<float> y_arr, array<float> z_arr, int window) =>
+    int min_size = math.min(math.min(array.size(x_arr), array.size(y_arr)), array.size(z_arr))
+    if min_size < window
+        float(0.0)
+    else
+        // Get correlations using tail (most recent data)
+        float r_xy = TAUtilityLib.f_pearson_tail(x_arr, y_arr, window), r_xz = TAUtilityLib.f_pearson_tail(x_arr, z_arr, window), r_yz = TAUtilityLib.f_pearson_tail(y_arr, z_arr, window)
+        
+        // Partial correlation formula
+        float denom_sq = (1.0 - r_xz * r_xz) * (1.0 - r_yz * r_yz)
+        if denom_sq <= 0.0001
+            float(r_xy)  // Can't compute partial, return raw correlation
+        else
+            float partial = (r_xy - r_xz * r_yz) / math.sqrt(denom_sq)
+            math.max(-1.0, math.min(1.0, partial))  // Clamp to [-1, 1]
+
+// @function PCMCI Filter: Adjust Granger score by checking for mediating tickers
+// @param raw_score Original Granger score
+// @param primary_arr Primary series
+// @param ticker_arr Ticker series
+// @param mediator1 First potential mediator series
+// @param mediator2 Second potential mediator series
+// @param mediator3 Third potential mediator series
+// @param mediator4 Fourth potential mediator series
+// @param window Window size for correlation
+// @returns Filtered score (reduced if causality is indirect/spurious)
+export f_pcmci_filter_score(float raw_score, array<float> primary_arr, array<float> ticker_arr, array<float> mediator1, array<float> mediator2, array<float> mediator3, array<float> mediator4, int window) =>
+    // For each mediator, check if it mediates the relationship
+    float max_mediation = 0.0
+    
+    // Check mediator1
+    if array.size(mediator1) >= window
+        float partial_corr1 = f_partial_correlation(primary_arr, ticker_arr, mediator1, window), raw_corr = TAUtilityLib.f_pearson_tail(primary_arr, ticker_arr, window)
+        float mediation1 = math.abs(raw_corr) > 0.01 ? 1.0 - math.abs(partial_corr1) / math.abs(raw_corr) : 0.0
+        mediation1 := math.max(0.0, mediation1)
+        max_mediation := math.max(max_mediation, mediation1)
+    
+    // Check mediator2
+    if array.size(mediator2) >= window
+        float partial_corr2 = f_partial_correlation(primary_arr, ticker_arr, mediator2, window), raw_corr = TAUtilityLib.f_pearson_tail(primary_arr, ticker_arr, window)
+        float mediation2 = math.abs(raw_corr) > 0.01 ? 1.0 - math.abs(partial_corr2) / math.abs(raw_corr) : 0.0
+        mediation2 := math.max(0.0, mediation2)
+        max_mediation := math.max(max_mediation, mediation2)
+    
+    // Check mediator3
+    if array.size(mediator3) >= window
+        float partial_corr3 = f_partial_correlation(primary_arr, ticker_arr, mediator3, window), raw_corr = TAUtilityLib.f_pearson_tail(primary_arr, ticker_arr, window)
+        float mediation3 = math.abs(raw_corr) > 0.01 ? 1.0 - math.abs(partial_corr3) / math.abs(raw_corr) : 0.0
+        mediation3 := math.max(0.0, mediation3)
+        max_mediation := math.max(max_mediation, mediation3)
+    
+    // Check mediator4
+    if array.size(mediator4) >= window
+        float partial_corr4 = f_partial_correlation(primary_arr, ticker_arr, mediator4, window), raw_corr = TAUtilityLib.f_pearson_tail(primary_arr, ticker_arr, window)
+        float mediation4 = math.abs(raw_corr) > 0.01 ? 1.0 - math.abs(partial_corr4) / math.abs(raw_corr) : 0.0
+        mediation4 := math.max(0.0, mediation4)
+        max_mediation := math.max(max_mediation, mediation4)
+    
+    // Reduce score proportionally to mediation (spurious causality)
+    // If max_mediation = 0.8, score is reduced by 80% (it's mostly indirect)
+    float filter_factor = 1.0 - max_mediation * 0.7  // Don't fully eliminate, keep 30% minimum
+    filter_factor := math.max(0.3, filter_factor)
+    float result = raw_score * filter_factor
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// █ TE WRAPPER WITH FALLBACK LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Wrapper for Transfer Entropy calculation with ensemble and fallback logic
+// @param te_primary Primary asset return array
+// @param te_b1 Basket asset 1 return array
+// @param te_b2 Basket asset 2 return array
+// @param te_b3 Basket asset 3 return array
+// @param te_b4 Basket asset 4 return array
+// @param te_win TE window size
+// @param te_b TE bins count
+// @param te_smooth TE smoothing length
+// @param self1 Whether basket 1 is self-reference
+// @param self2 Whether basket 2 is self-reference
+// @param self3 Whether basket 3 is self-reference
+// @param self4 Whether basket 4 is self-reference
+// @param is_hard Whether in hard zone (recent bars)
+// @param bar_idx Current bar index
+// @returns [te_osc, te_strength, te_direction] - TE oscillator, strength, and direction
+export f_compute_te_wrapper(array<float> te_primary, array<float> te_b1, array<float> te_b2, array<float> te_b3, array<float> te_b4, 
+             int te_win, int te_b, int te_smooth, bool self1, bool self2, bool self3, bool self4, bool is_hard, int bar_idx) =>
+    float result_osc = na
+    float result_str = na
+    float result_dir = na
+    
+    if is_hard and bar_idx > te_win + 5
+        // Call ensemble TE calculation
+        [t_osc, t_str, t_dir] = f_compute_te_ensemble(te_primary, te_b1, te_b2, te_b3, te_b4, array.new_float(0), te_win, te_b, te_smooth, self1, self2, self3, self4, false, false)
+        
+        // Fallback calculation for basket 1 if ensemble fails
+        float fb_score = na
+        float fb_dir = na
+        if not self1 and array.size(te_primary) > te_win + 1 and array.size(te_b1) > te_win + 1
+            [fb1_score, fb1_dir, _, _, _, _, _, _, _, _, _, _, _, _, _, _] = f_calculate_te_score_debug(te_primary, te_b1, te_win, te_b, 1)
+            fb_score := fb1_score
+            fb_dir := fb1_dir
+        
+        // Check if ensemble is invalid (NA or exactly 0.0)
+        bool ensemble_invalid = na(t_osc) or na(t_str) or na(t_dir) or (t_osc == 0.0 and t_str == 0.0)
+        
+        if ensemble_invalid
+            result_osc := nz(fb_score, 0.0) * nz(fb_dir, 0.0)
+            result_str := math.abs(nz(fb_score, 0.0))
+            result_dir := nz(fb_dir, 0.0)
+        else
+            result_osc := t_osc
+            result_str := t_str
+            result_dir := t_dir
+    
+    [result_osc, result_str, result_dir]
+
+// ============================================================================
+// CausalityLib v16 — ADDITIONS (append to existing CausalityLib v15)
+// Bump library version to 16 after adding. Existing exports untouched.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// MobiusState: tracks (a, b, c) coefficients of a rational recurrence
+//   delta_{t+1} = (a * delta_t + b) / (c * delta_t + 1)
+// Encodes the *shape of buildup* of a divergence component.
+// Two bars with same current delta but different (a,b,c) have different
+// path-history and are considered distinct in the KNN feature space.
+// Reference: Möbius transformation composition (Hartigan 2026).
+// ----------------------------------------------------------------------------
+export type MobiusState
+    float a
+    float b
+    float c
+
+// Initialize with identity map: delta_{t+1} = delta_t
+export fmobiusnew() =>
+    MobiusState.new(1.0, 0.0, 0.0)
+
+// One-step SGD update of (a,b,c) from observed transition (prev -> cur).
+// alpha: learning rate (0.01-0.05). Lower = more stable coefficients.
+// Guards against division blow-up in denominator.
+export fmobiusupdate(MobiusState st, float cur, float prev, float alpha) =>
+    if na(cur) or na(prev) or na(st.a)
+        st
+    else
+        float denom = st.c * prev + 1.0
+        float safe_denom = math.abs(denom) < 1e-6 ? (denom >= 0 ? 1e-6 : -1e-6) : denom
+        float pred = (st.a * prev + st.b) / safe_denom
+        float err  = cur - pred
+        float g_a  = err * prev / safe_denom
+        float g_b  = err / safe_denom
+        float g_c  = -err * prev * pred / (safe_denom * safe_denom)
+        float new_a = math.max(-10.0, math.min(10.0, st.a + alpha * g_a))
+        float new_b = math.max(-10.0, math.min(10.0, st.b + alpha * g_b))
+        float new_c = math.max(-1.0,  math.min(1.0,  st.c + alpha * g_c))
+        MobiusState.new(new_a, new_b, new_c)
+
+// Compose two Möbius maps via 2x2 matrix multiplication.
+// Used when collapsing a chain of n sequential updates into one (a,b,c).
+export fmobiuscompose(MobiusState s1, MobiusState s2) =>
+    float na_ = s1.a * s2.a + s1.b * s2.c
+    float nb_ = s1.a * s2.b + s1.b
+    float nc_ = s1.c * s2.a + s2.c
+    MobiusState.new(na_, nb_, nc_)
+
+// Apply the transform to a scalar.
+export fmobiusapply(MobiusState st, float x) =>
+    float denom = st.c * x + 1.0
+    denom == 0 ? na : (st.a * x + st.b) / denom
+
+// ----------------------------------------------------------------------------
+// Causation-gated covariance update.
+// Standard EWMA covariance mixes causal + non-causal events.
+// This variant only updates sigma when Net TE exceeds threshold.
+// sigma_tri: 3x3 triangular storage (6 floats) via KalmanEngineLib.
+// ----------------------------------------------------------------------------
+export fcausalcovupdate(array<float> sigma_tri, array<float> state, array<float> mu,
+                        float net_te, float te_threshold, float alpha) =>
+    bool gate = not na(net_te) and net_te > te_threshold
+    if gate and array.size(state) >= 3 and array.size(mu) >= 3
+        float e0 = array.get(state, 0) - array.get(mu, 0)
+        float e1 = array.get(state, 1) - array.get(mu, 1)
+        float e2 = array.get(state, 2) - array.get(mu, 2)
+        float om = 1.0 - alpha
+        // diagonals via index mapping (0,0)->0, (1,1)->3, (2,2)->5 for upper-tri packing
+        array.set(sigma_tri, 0, om * array.get(sigma_tri, 0) + alpha * e0 * e0)
+        array.set(sigma_tri, 1, om * array.get(sigma_tri, 1) + alpha * e0 * e1)
+        array.set(sigma_tri, 2, om * array.get(sigma_tri, 2) + alpha * e0 * e2)
+        array.set(sigma_tri, 3, om * array.get(sigma_tri, 3) + alpha * e1 * e1)
+        array.set(sigma_tri, 4, om * array.get(sigma_tri, 4) + alpha * e1 * e2)
+        array.set(sigma_tri, 5, om * array.get(sigma_tri, 5) + alpha * e2 * e2)
+    gate
+
+// ----------------------------------------------------------------------------
+// Directional TE weight vector: returns per-component weights normalized to sum=1
+// with zero for negative components (non-causal directions excluded).
+// Used as diagonal of causal Mahalanobis metric.
+// ----------------------------------------------------------------------------
+export fcausalweights(float te0, float te1, float te2, float alpha) =>
+    float w0 = math.pow(math.max(te0, 0.0), alpha)
+    float w1 = math.pow(math.max(te1, 0.0), alpha)
+    float w2 = math.pow(math.max(te2, 0.0), alpha)
+    float wsum = math.max(w0 + w1 + w2, 1e-10)
+    array.from(w0 / wsum, w1 / wsum, w2 / wsum)
+
+// ============================================================================
+// CausalityLib v17 — ADDITIONS for HAR-RV forecast, PCA explained variance, Durbin-Watson stationarity
+// Append to existing CausalityLib v16. Existing exports untouched.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// HAR-RV Forecast — Heterogeneous Autoregressive Realized Variance
+// σ²(t+1) = β0 + βd·RV_daily + βw·RV_weekly + βm·RV_monthly
+// rv_buffer — rolling array of realized variance (>=22 elements needed)
+// ----------------------------------------------------------------------------
+export fharrvforecast(array<float> rv_buffer, float beta_d, float beta_w, float beta_m) =>
+    int n = array.size(rv_buffer)
+    float rv_fc = 0.0
+    if n >= 22
+        float rv_daily = array.get(rv_buffer, n - 1)
+        float rv_week = 0.0
+        for i = 1 to 5
+            rv_week += array.get(rv_buffer, n - i)
+        rv_week := rv_week / 5.0
+        float rv_month = 0.0
+        for i = 1 to 22
+            rv_month += array.get(rv_buffer, n - i)
+        rv_month := rv_month / 22.0
+        rv_fc := beta_d * rv_daily + beta_w * rv_week + beta_m * rv_month
+    rv_fc
+
+// ----------------------------------------------------------------------------
+// Durbin-Watson stationarity statistic on a window
+// DW ~ 2 => no autocorrelation (stationary); DW < 1 => strong positive autocorr
+// Returns DW value in [0, 4]. Use threshold ~1.5 to accept as stationary.
+// ----------------------------------------------------------------------------
+export fdurbinwatson(array<float> window) =>
+    int n = array.size(window)
+    float dw = 2.0
+    if n >= 5
+        float num = 0.0
+        float den = 0.0
+        for i = 1 to n - 1
+            float e = array.get(window, i)
+            float e_prev = array.get(window, i - 1)
+            num += math.pow(e - e_prev, 2)
+            den += e * e
+        dw := den > 1e-10 ? num / den : 2.0
+    dw
+
+// ----------------------------------------------------------------------------
+// PCA explained variance for 3x3 covariance via power iteration.
+// cov_tri — upper-triangular 6-element array [c00, c01, c02, c11, c12, c22]
+// Returns (lambda1, explained_pct) where explained_pct = λ1 / (λ1+λ2+λ3).
+// Uses 2 power iterations — stable for EWMA-updated covariances.
+// ----------------------------------------------------------------------------
+export fpcaexplained(array<float> cov_tri, float shrinkage) =>
+    float c00 = array.get(cov_tri, 0) + shrinkage
+    float c01 = array.get(cov_tri, 1)
+    float c02 = array.get(cov_tri, 2)
+    float c11 = array.get(cov_tri, 3) + shrinkage
+    float c12 = array.get(cov_tri, 4)
+    float c22 = array.get(cov_tri, 5) + shrinkage
+    float trace = c00 + c11 + c22
+    // Power iteration initial vector
+    float v0 = 1.0 / math.sqrt(3.0)
+    float v1 = 1.0 / math.sqrt(3.0)
+    float v2 = 1.0 / math.sqrt(3.0)
+    // Iteration 1
+    float u0 = c00*v0 + c01*v1 + c02*v2
+    float u1 = c01*v0 + c11*v1 + c12*v2
+    float u2 = c02*v0 + c12*v1 + c22*v2
+    float mag = math.sqrt(u0*u0 + u1*u1 + u2*u2)
+    if mag > 1e-10
+        v0 := u0 / mag
+        v1 := u1 / mag
+        v2 := u2 / mag
+    // Iteration 2
+    u0 := c00*v0 + c01*v1 + c02*v2
+    u1 := c01*v0 + c11*v1 + c12*v2
+    u2 := c02*v0 + c12*v1 + c22*v2
+    mag := math.sqrt(u0*u0 + u1*u1 + u2*u2)
+    if mag > 1e-10
+        v0 := u0 / mag
+        v1 := u1 / mag
+        v2 := u2 / mag
+    // Rayleigh quotient for eigenvalue
+    float lambda1 = v0*(c00*v0 + c01*v1 + c02*v2) +v1*(c01*v0 + c11*v1 + c12*v2) +v2*(c02*v0 + c12*v1 + c22*v2)
+    float explained_pct = trace > 1e-10 ? math.max(0.0, math.min(1.0, lambda1 / trace)) : 0.0
+    [lambda1, explained_pct]

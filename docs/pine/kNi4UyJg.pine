@@ -1,0 +1,629 @@
+//@version=6
+// =====================================================================
+//  Zone-detection engine ported from "Order Block Detector [LuxAlgo]"
+//  © LuxAlgo — Licensed under CC BY-NC-SA 4.0
+//  https://creativecommons.org/licenses/by-nc-sa/4.0/
+//  งานชิ้นนี้เป็น derivative work จึงคงไลเซนส์เดิม:
+//    ห้ามใช้เชิงพาณิชย์ (NC) · ต้องให้เครดิต (BY) · ต้องเปิดโค้ดแบบเดียวกัน (SA)
+//  ---------------------------------------------------------------------
+//  ส่วนที่พอร์ตจาก LuxAlgo = การหาโซน (volume pivot + breakout state)
+//  ส่วนต่อยอด (TP/SL, ประวัติเทรด, volume grade, trend filter, dashboard)
+//  เป็นของเพิ่มเข้ามา แต่ก็อยู่ใต้ CC BY-NC-SA 4.0 เช่นกัน
+// =====================================================================
+indicator("Order Block Zones [LuxAlgo engine] + TP/SL", "OB Zones", overlay = true,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ═══════════════════ 1) การตรวจจับโซน (LuxAlgo) ═══════════════════
+g1 = "1) การตรวจจับโซน (LuxAlgo)"
+lenPiv     = input.int(5, "Volume Pivot Length", minval = 1, maxval = 50, group = g1, tooltip = "วิธี LuxAlgo: order block เกิดที่ 'volume pivot high' (จุดที่ volume สูงเฉพาะที่) ยืนยันด้วยแท่งซ้าย-ขวาเท่านี้\nค่ามาก = โซนน้อยลงแต่สำคัญขึ้น · ต้องใช้กับสัญลักษณ์ที่มี volume จริง")
+mitigation = input.string("Wick", "วิธีนับว่าโซนถูกทำลาย", options = ["Wick", "Close"], group = g1, tooltip = "Wick = ใช้ราคา high/low\nClose = ใช้ราคาปิด (ทนไส้เทียนกว่า)")
+useDemand  = input.bool(true,  "🟩 หาโซน Demand (Bullish OB)", group = g1)
+useSupply  = input.bool(true,  "🟥 หาโซน Supply (Bearish OB)", group = g1)
+
+// ═══════════════════ 2) Volume Strength ═══════════════════
+g3 = "2) ความแข็งแรงจาก Volume"
+volAvgLen  = input.int(50, "Volume: ค่าเฉลี่ยอ้างอิง (แท่ง)", minval = 5, group = g3, tooltip = "เทียบ volume ของแท่ง pivot กับค่าเฉลี่ย ว่ามากกว่าปกติกี่เท่า")
+gradeAmin  = input.float(2.0, "เกรด A: volume ≥ x เท่าของค่าเฉลี่ย", minval = 1.0, step = 0.1, group = g3)
+gradeBmin  = input.float(1.2, "เกรด B: volume ≥ x เท่าของค่าเฉลี่ย", minval = 0.5, step = 0.1, group = g3)
+minVolRat  = input.float(0.0, "กรองทิ้งถ้า volume < x เท่า (0 = ปิด)", minval = 0.0, step = 0.1, group = g3)
+onlyGradeA = input.bool(false, "เทรดเฉพาะโซนเกรด A", group = g3)
+showVolTxt = input.bool(false, "แสดงค่า volume บนป้ายโซน", group = g3)
+shadeByVol = input.bool(false, "โซน volume สูง = สีเข้มกว่า", group = g3)
+
+// ═══════════════════ 3) แผนเทรด TP / SL ═══════════════════
+g4 = "3) แผนเทรด (Entry / SL / TP)"
+enableTrade = input.bool(true, "เปิดระบบ TP/SL", group = g4)
+atrLen      = input.int(14, "ATR Length (ใช้กับ SL)", minval = 1, group = g4)
+entryMode   = input.string("Trigger Body", "จุด Entry", options = ["Zone Edge", "Confirmation Close", "Trigger Body"], group = g4, tooltip = "Zone Edge = ขอบใกล้ของโซน (ราคา limit)\nConfirmation Close = ราคาปิดแท่งที่แตะโซน\nTrigger Body = ขอบ body ของแท่งที่แตะ (ไม่นับไส้)")
+slMode      = input.string("ATR", "โหมด Stop Loss", options = ["Zone Distal", "ATR"], group = g4, tooltip = "Zone Distal = วางเลยขอบไกลของโซน + buffer\nATR = วางห่างจาก entry ตามระยะ ATR")
+slBufAtr    = input.float(0.2, "SL buffer (x ATR)", minval = 0.0, step = 0.05, group = g4)
+slAtrMult   = input.float(1.5, "SL ระยะ (x ATR) — โหมด ATR", minval = 0.1, step = 0.1, group = g4)
+rrInput     = input.string("2R", "เป้า Take Profit", options = ["1R", "1.5R", "2R", "2.5R", "3R", "4R", "5R", "6R"], group = g4)
+requireRet  = input.bool(true, "ต้องออกจากโซนก่อนถึงนับ retest", group = g4, tooltip = "ราคาต้องปิดพ้นขอบ entry ก่อน (โซนถูก arm) แล้วค่อยกลับมาแตะ จึงนับเป็นการเข้าเทรด")
+showProj    = input.bool(true, "แสดง SL/TP ล่วงหน้าบนโซนที่ยังรอ", group = g4)
+tradeExtend = input.int(10, "ความยาวกล่องเทรด (แท่ง)", minval = 1, maxval = 50, group = g4)
+
+g4c = "3c) Break Even (BE)"
+useBE      = input.bool(false, "เปิดโหมด Break Even", group = g4c, tooltip = "เมื่อกำไรวิ่งไปถึงระยะที่ตั้ง จะเลื่อน SL มาที่จุดเข้า (หรือล็อกกำไรเล็กน้อย) เพื่อกันไม้ที่กำไรแล้วกลับมาขาดทุน")
+beTriggerR = input.float(0.5, "เลื่อน SL เมื่อกำไรถึง (R)", minval = 0.1, step = 0.1, group = g4c, tooltip = "เช่น 1.0 = พอราคาวิ่งทางกำไรเท่ากับระยะ SL เดิม (1R) จึงเลื่อน SL\nควรตั้งน้อยกว่าเป้า TP ไม่งั้น BE ไม่เคยทำงาน")
+beLockR    = input.float(0.0, "ล็อกกำไรไว้ที่ (R)", minval = 0.0, step = 0.1, group = g4c, tooltip = "0 = เลื่อนมาที่จุดเข้าพอดี (เสมอตัว)\n>0 = ล็อกกำไรเล็กน้อย เช่น 0.2R เผื่อสเปรด/ค่าคอม")
+
+g4b = "3b) ประวัติการเทรด"
+showHistory = input.bool(true, "🗂️ เก็บประวัติเทรดไว้บนชาร์ต", group = g4b, tooltip = "ไม้ที่ปิดแล้วถูกแช่ไว้ ให้ย้อนดูว่าเข้า/ออกตรงไหน")
+histBoxes   = input.bool(true, "เก็บกล่อง TP/SL ของไม้เก่าไว้ด้วย", group = g4b)
+maxHistory  = input.int(100, "จำนวนไม้ย้อนหลังสูงสุด", minval = 1, maxval = 200, group = g4b)
+histFade    = input.int(0, "ทำให้ประวัติจางลงเพิ่ม (%)", minval = 0, maxval = 60, group = g4b)
+
+// ═══════════════════ 4) โซนและการแสดงผล ═══════════════════
+g5 = "4) โซนและการแสดงผล"
+extendBars  = input.int(30, "ยืดโซนไปขวา (แท่ง)", minval = 0, group = g5)
+maxZones    = input.int(20, "เก็บโซนล่าสุดสูงสุด/ฝั่ง", minval = 1, maxval = 60, group = g5)
+afterHit    = input.string("Fade", "เมื่อโซนถูกแตะแล้ว", options = ["Delete", "Fade", "Keep"], group = g5)
+delBroken   = input.bool(false, "ลบโซนที่ถูกทำลาย", group = g5)
+showLabel   = input.bool(true,  "แสดงป้ายชื่อโซน", group = g5)
+labelSizeIn = input.string("Small", "ขนาดป้าย", options = ["Tiny", "Small", "Normal"], group = g5)
+demandCol   = input.color(color.new(color.teal, 0), "สี Demand", group = g5)
+supplyCol   = input.color(color.new(color.red,  0), "สี Supply", group = g5)
+brokenCol   = input.color(color.new(color.gray, 88), "สีโซนที่ตายแล้ว", group = g5)
+entryCol    = input.color(color.white, "สีเส้น Entry", group = g5)
+slCol       = input.color(color.rgb(220, 50, 50), "สี SL", group = g5)
+tpCol       = input.color(color.rgb(0, 190, 110), "สี TP", group = g5)
+
+// ═══════════════════ 5) ตัวกรองเทรนด์ (EMA) ═══════════════════
+gT = "5) ตัวกรองเทรนด์ (EMA)"
+useTrend   = input.bool(true, "เปิดตัวกรองเทรนด์", group = gT, tooltip = "Demand เข้าได้เฉพาะขาขึ้น · Supply เข้าได้เฉพาะขาลง")
+emaLen     = input.int(100, "EMA Length", minval = 1, group = gT)
+trendTf    = input.timeframe("", "Timeframe ของ EMA (เว้นว่าง = ตามชาร์ต)", group = gT)
+trendMode  = input.string("ราคาเทียบ EMA", "วิธีวัดเทรนด์", options = ["ราคาเทียบ EMA", "ความชัน EMA", "ทั้งสองอย่าง"], group = gT)
+slopeLen   = input.int(5, "ช่วงวัดความชัน (แท่ง)", minval = 1, group = gT)
+trendStage = input.string("บล็อกตอนเข้าเทรด", "จังหวะที่กรอง", options = ["บล็อกตอนเข้าเทรด", "ไม่สร้างโซนสวนเทรนด์"], group = gT)
+showEma    = input.bool(true, "แสดงเส้น EMA", group = gT)
+
+// ═══════════════════ 6) Dashboard ═══════════════════
+g6 = "6) Dashboard"
+showDash   = input.bool(true, "แสดง Dashboard", group = g6)
+dashPos    = input.string("Top Right", "ตำแหน่ง", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = g6)
+dashSizeIn = input.string("Tiny", "ขนาดตัวอักษร", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = g6)
+dashWide   = input.int(0, "ความกว้างคอลัมน์ซ้าย % (0 = อัตโนมัติ)", minval = 0, maxval = 40, group = g6)
+dashBg     = input.color(color.rgb(12, 12, 16), "สีพื้น", group = g6)
+dashTxt    = input.color(color.white, "สีตัวอักษร", group = g6)
+
+// ═══════════════════ 7) ตัวกรอง Session (เวลาที่อนุญาตให้เข้าเทรด) ═══════════════════
+g7 = "7) ตัวกรอง Session (เวลาเทรด)"
+useSession = input.bool(true, "เปิดตัวกรองช่วงเวลา", group = g7, tooltip = "เข้าเทรดเฉพาะช่วงเวลา (session) ที่เลือกเท่านั้น · โซนยังถูกวาดตามปกติ แต่จะไม่เปิดไม้นอกเวลา")
+useExch    = input.bool(false, "ใช้เวลาตามตลาด (Exchange)", group = g7, tooltip = "ติ๊ก = อ้างอิงโซนเวลาของ exchange · ไม่ติ๊ก = ใช้ค่า UTC ด้านล่าง")
+tzIncr     = input.int(7, "UTC (+/-)", group = g7, tooltip = "ตั้งให้ตรงกับเวลาที่ใช้ในช่อง session ด้านล่าง (ไทย = 7)")
+sesAon = input.bool(false, "", inline = "sA", group = g7)
+sesAnm = input.string("Session A", "", inline = "sA", group = g7)
+sesAt  = input.session("1500-1900", "", inline = "sA", group = g7)
+sesAc  = input.color(color.new(#2157f3, 90), "", inline = "sA", group = g7)
+sesBon = input.bool(false, "", inline = "sB", group = g7)
+sesBnm = input.string("Session B", "", inline = "sB", group = g7)
+sesBt  = input.session("1900-2200", "", inline = "sB", group = g7)
+sesBc  = input.color(color.new(#ff5d00, 90), "", inline = "sB", group = g7)
+sesCon = input.bool(true,  "", inline = "sC", group = g7)
+sesCnm = input.string("Session C", "", inline = "sC", group = g7)
+sesCt  = input.session("0800-1200", "", inline = "sC", group = g7)
+sesCc  = input.color(color.new(#e91e63, 90), "", inline = "sC", group = g7)
+showSessBg = input.bool(true, "แรเงาพื้นหลังช่วง session", group = g7)
+
+// ───────────────────────── Core values ─────────────────────────
+atrV    = ta.atr(atrLen)
+safeAtr = na(atrV) or atrV <= 0.0 ? syminfo.mintick : atrV
+volAvg  = ta.sma(volume, volAvgLen)
+hasVol  = not na(volume) and volume > 0
+
+tpRR = rrInput == "1R" ? 1.0 : rrInput == "1.5R" ? 1.5 : rrInput == "2R" ? 2.0 :
+       rrInput == "2.5R" ? 2.5 : rrInput == "3R" ? 3.0 : rrInput == "4R" ? 4.0 :
+       rrInput == "5R" ? 5.0 : 6.0
+
+f_lblSize() => labelSizeIn == "Tiny" ? size.tiny : labelSizeIn == "Small" ? size.small : size.normal
+f_dashPos() =>
+    dashPos == "Top Left"      ? position.top_left :
+     dashPos == "Bottom Right" ? position.bottom_right :
+     dashPos == "Bottom Left"  ? position.bottom_left :
+     dashPos == "Middle Right" ? position.middle_right : position.top_right
+f_px(float p) => na(p) ? "-" : str.tostring(p, format.mintick)
+f_grade(float vr) => na(vr) ? "-" : vr >= gradeAmin ? "A" : vr >= gradeBmin ? "B" : "C"
+
+f_dsz() =>
+    dashSizeIn == "Tiny"   ? size.tiny  :
+     dashSizeIn == "Small"  ? size.small :
+     dashSizeIn == "Normal" ? size.normal :
+     dashSizeIn == "Large"  ? size.large : size.huge
+f_dhz() =>
+    dashSizeIn == "Tiny"   ? size.small  :
+     dashSizeIn == "Small"  ? size.normal :
+     dashSizeIn == "Normal" ? size.large  : size.huge
+
+// ───────────────────────── Trend filter (EMA) ─────────────────────────
+tfUse   = trendTf == "" ? timeframe.period : trendTf
+emaVal  = request.security(syminfo.tickerid, tfUse, ta.ema(close, emaLen), lookahead = barmerge.lookahead_off)
+emaOk   = not na(emaVal)
+
+bool priceUp = emaOk and close > emaVal
+bool priceDn = emaOk and close < emaVal
+bool slopeUp = emaOk and not na(emaVal[slopeLen]) and emaVal > emaVal[slopeLen]
+bool slopeDn = emaOk and not na(emaVal[slopeLen]) and emaVal < emaVal[slopeLen]
+bool trendUp = trendMode == "ราคาเทียบ EMA" ? priceUp : trendMode == "ความชัน EMA" ? slopeUp : (priceUp and slopeUp)
+bool trendDn = trendMode == "ราคาเทียบ EMA" ? priceDn : trendMode == "ความชัน EMA" ? slopeDn : (priceDn and slopeDn)
+f_trendOK(bool isDem) => not useTrend or not emaOk or (isDem ? trendUp : trendDn)
+
+plot(showEma ? emaVal : na, "Trend EMA",
+     color = not useTrend ? color.new(color.gray, 45) : trendUp ? color.new(color.teal, 25) : trendDn ? color.new(color.red, 25) : color.new(color.gray, 55),
+     linewidth = 2)
+
+// ───────────────────────── Session filter ─────────────────────────
+string sessTz = useExch ? syminfo.timezone : str.format("UTC{0}{1}", tzIncr >= 0 ? "+" : "-", math.abs(tzIncr))
+bool inSesA = sesAon and not na(time(timeframe.period, sesAt, sessTz))
+bool inSesB = sesBon and not na(time(timeframe.period, sesBt, sessTz))
+bool inSesC = sesCon and not na(time(timeframe.period, sesCt, sessTz))
+bool anySesOn  = sesAon or sesBon or sesCon
+bool inSession = inSesA or inSesB or inSesC
+// ผ่านเมื่อ: ปิดตัวกรอง หรือ ไม่ได้เลือก session ไหนเลย หรือ อยู่ในเวลา
+bool sessionOK = not useSession or not anySesOn or inSession
+
+bgcolor(showSessBg and useSession and inSesA ? sesAc : na, title = "Session A")
+bgcolor(showSessBg and useSession and inSesB ? sesBc : na, title = "Session B")
+bgcolor(showSessBg and useSession and inSesC ? sesCc : na, title = "Session C")
+
+// ───────────────────────── Zone type ─────────────────────────
+type Zone
+    box    bx
+    label  lb
+    line   slLn
+    line   tpLn
+    float  prox
+    float  dist
+    float  entry
+    float  sl
+    float  tp
+    bool   isDemand
+    string grade
+    float  volRat
+    bool   armed
+    bool   active
+    bool   broken
+
+var array<Zone> zones = array.new<Zone>()
+
+// ───────────────────────── Trade state ─────────────────────────
+var array<box>   trBoxes  = array.new_box()
+var array<line>  trLines  = array.new_line()
+var array<label> trLabels = array.new_label()
+
+var array<box>   hBoxes  = array.new_box()
+var array<line>  hLines  = array.new_line()
+var array<label> hLabels = array.new_label()
+var array<int>   hFull   = array.new_int()
+
+var bool   tradeOn   = false
+var bool   trIsDem   = true
+var int    trBar     = na
+var float  trEntry   = na
+var float  trSL      = na
+var float  trTP      = na
+var float  trRisk    = 0.0      // ระยะ SL เดิม (ใช้คำนวณ R และจุด BE)
+var bool   beDone    = false    // เลื่อน BE ไปแล้วสำหรับไม้นี้
+var string trGrade   = "-"
+var int    trStatus  = 0        // 0 wait, 1 active, 2 tp, -1 sl, 3 be
+
+var int    nBlocked  = 0
+var int    nFiltered = 0
+var int    nScratch  = 0        // ไม้เสมอตัว (BE พอดี = 0R)
+var int    lossRun   = 0
+var int    maxLossRun= 0
+var float  totalR    = 0.0
+var float  todayR    = 0.0
+// สถิติแยกฝั่ง
+var int    demW = 0, var int demL = 0, var float demR = 0.0
+var int    supW = 0, var int supL = 0, var float supR = 0.0
+
+var int dayAnchor = na
+int dayNow = time("D")
+if not na(dayAnchor) and not na(dayNow) and dayNow != dayAnchor
+    todayR := 0.0
+dayAnchor := na(dayNow) ? dayAnchor : dayNow
+
+bool sigLong    = false
+bool sigShort   = false
+bool retestDem  = false
+bool retestSup  = false
+bool newZoneDem = false
+bool newZoneSup = false
+
+f_clearTrade() =>
+    while array.size(trBoxes) > 0
+        box.delete(array.shift(trBoxes))
+    while array.size(trLines) > 0
+        line.delete(array.shift(trLines))
+    while array.size(trLabels) > 0
+        label.delete(array.shift(trLabels))
+
+f_drawTrade(int b, float ep, float sl, float tp) =>
+    f_clearTrade()
+    int r = b + tradeExtend
+    array.push(trBoxes, box.new(b, math.max(ep, tp), r, math.min(ep, tp), xloc = xloc.bar_index, bgcolor = color.new(tpCol, 84), border_color = color.new(tpCol, 40)))
+    array.push(trBoxes, box.new(b, math.max(ep, sl), r, math.min(ep, sl), xloc = xloc.bar_index, bgcolor = color.new(slCol, 84), border_color = color.new(slCol, 40)))
+    array.push(trLines, line.new(b, ep, r, ep, xloc = xloc.bar_index, color = entryCol, width = 2))
+    array.push(trLines, line.new(b, sl, r, sl, xloc = xloc.bar_index, color = slCol,    width = 2))
+    array.push(trLines, line.new(b, tp, r, tp, xloc = xloc.bar_index, color = tpCol,    width = 2))
+    array.push(trLabels, label.new(r, ep, "ENTRY " + f_px(ep), xloc = xloc.bar_index, style = label.style_label_left, color = entryCol, textcolor = color.black, size = size.tiny))
+    array.push(trLabels, label.new(r, sl, "SL "    + f_px(sl), xloc = xloc.bar_index, style = label.style_label_left, color = slCol,    textcolor = color.white, size = size.tiny))
+    array.push(trLabels, label.new(r, tp, "TP " + rrInput,     xloc = xloc.bar_index, style = label.style_label_left, color = tpCol,    textcolor = color.white, size = size.tiny))
+
+f_stretchTrade(int r) =>
+    if array.size(trBoxes) >= 2 and array.size(trLines) >= 3 and array.size(trLabels) >= 3
+        for i = 0 to 1
+            box.set_right(array.get(trBoxes, i), r)
+        for i = 0 to 2
+            line.set_x2(array.get(trLines, i), r)
+            label.set_x(array.get(trLabels, i), r)
+
+// เลื่อนเส้น/กล่อง/ป้าย SL ของไม้ที่กำลังเปิดอยู่ (ใช้ตอน BE)
+f_moveSL(float newSL) =>
+    if array.size(trBoxes) >= 2 and array.size(trLines) >= 2 and array.size(trLabels) >= 2
+        box slBox = array.get(trBoxes, 1)
+        box.set_top(slBox, math.max(trEntry, newSL))
+        box.set_bottom(slBox, math.min(trEntry, newSL))
+        box.set_bgcolor(slBox, color.new(entryCol, 88))
+        box.set_border_color(slBox, color.new(entryCol, 40))
+        line slLn = array.get(trLines, 1)
+        line.set_y1(slLn, newSL)
+        line.set_y2(slLn, newSL)
+        line.set_color(slLn, entryCol)
+        line.set_style(slLn, line.style_dotted)
+        label slLb = array.get(trLabels, 1)
+        label.set_y(slLb, newSL)
+        label.set_text(slLb, "SL•BE " + f_px(newSL))
+        label.set_color(slLb, entryCol)
+        label.set_textcolor(slLb, color.black)
+
+f_archiveTrade(int cb) =>
+    if array.size(trBoxes) >= 2 and array.size(trLines) >= 3
+        box tb = array.get(trBoxes, 0)
+        box sb = array.get(trBoxes, 1)
+        box.set_right(tb, cb)
+        box.set_right(sb, cb)
+        int bgT  = math.min(95, 84 + histFade)
+        int brdT = math.min(95, 40 + histFade)
+        int lnT  = math.min(95, histFade)
+        box.set_bgcolor(tb, color.new(tpCol, bgT))
+        box.set_bgcolor(sb, color.new(slCol, bgT))
+        box.set_border_color(tb, color.new(tpCol, brdT))
+        box.set_border_color(sb, color.new(slCol, brdT))
+        array.push(hBoxes, tb)
+        array.push(hBoxes, sb)
+        for i = 0 to 2
+            line ln = array.get(trLines, i)
+            line.set_x2(ln, cb)
+            line.set_color(ln, color.new(i == 0 ? entryCol : i == 1 ? slCol : tpCol, lnT))
+            array.push(hLines, ln)
+        array.clear(trBoxes)
+        array.clear(trLines)
+    while array.size(trLabels) > 0
+        label.delete(array.shift(trLabels))
+
+f_closeTrade(int cb, bool win, float lvl, float rVal) =>
+    if showHistory
+        bool neutral = rVal == 0
+        string sd  = trIsDem ? "L" : "S"
+        string mark = win ? "  ✔ +" : neutral ? "  • " : "  ✘ "
+        string txt = sd + mark + str.tostring(rVal, "#.#") + "R"
+        color  lcol = neutral ? color.new(color.gray, 15) : color.new(win ? tpCol : slCol, 20)
+        string tip = (trIsDem ? "Demand / Long" : "Supply / Short") + " · เกรด " + trGrade + "\n" +
+             "Entry: " + f_px(trEntry) + "\nSL: " + f_px(trSL) + "\nTP: " + f_px(trTP) + "\n" +
+             "ผล: " + (neutral ? "BE (เสมอตัว)" : win ? "TP" : "SL") + "  " + (rVal >= 0 ? "+" : "") + str.tostring(rVal, "#.#") + "R"
+        array.push(hLabels, label.new(cb, lvl, txt, xloc = xloc.bar_index,
+             style = win or neutral ? label.style_label_lower_left : label.style_label_upper_left,
+             color = lcol, textcolor = color.white,
+             size = size.tiny, tooltip = tip))
+        if histBoxes
+            f_archiveTrade(cb)
+            array.push(hFull, 1)
+        else
+            f_clearTrade()
+            array.push(hFull, 0)
+        while array.size(hLabels) > maxHistory
+            label.delete(array.shift(hLabels))
+            if array.shift(hFull) == 1
+                box.delete(array.shift(hBoxes))
+                box.delete(array.shift(hBoxes))
+                line.delete(array.shift(hLines))
+                line.delete(array.shift(hLines))
+                line.delete(array.shift(hLines))
+    else
+        f_clearTrade()
+
+// สร้างโซนใหม่ (คืน true ถ้าสร้างสำเร็จ)
+f_makeZone(bool isDem, float top, float btm, int leftBar, float vRat) =>
+    string grade = f_grade(vRat)
+    float prox = isDem ? top : btm
+    float dist = isDem ? btm : top
+    float ep   = prox
+    float sl   = slMode == "Zone Distal" ? (isDem ? dist - slBufAtr * safeAtr : dist + slBufAtr * safeAtr) : (isDem ? ep - slAtrMult * safeAtr : ep + slAtrMult * safeAtr)
+    float rsk  = math.abs(ep - sl)
+    float tp   = isDem ? ep + rsk * tpRR : ep - rsk * tpRR
+
+    color baseCol = isDem ? demandCol : supplyCol
+    int trans = not shadeByVol or na(vRat) ? 84 : grade == "A" ? 74 : grade == "B" ? 82 : 88
+    int rgt = bar_index + extendBars
+
+    box bx = box.new(leftBar, top, rgt, btm, xloc = xloc.bar_index,
+         border_color = color.new(baseCol, 45), bgcolor = color.new(baseCol, trans))
+
+    string lTxt = (isDem ? "Demand" : "Supply") + (showVolTxt and not na(vRat) ? "  " + str.tostring(vRat, "#.#") + "x " + grade : "")
+    string lTip = (isDem ? "Demand — Bullish OB" : "Supply — Bearish OB") + "\n" +
+         "Volume pivot: " + (na(vRat) ? "n/a" : str.tostring(vRat, "#.##") + "x ค่าเฉลี่ย (เกรด " + grade + ")") + "\n" +
+         "Entry: " + f_px(ep) + "\nSL: " + f_px(sl) + "\nTP " + rrInput + ": " + f_px(tp)
+
+    label lb = showLabel ? label.new(leftBar, prox, lTxt, xloc = xloc.bar_index,
+         style = isDem ? label.style_label_up : label.style_label_down,
+         color = color.new(baseCol, 25), textcolor = color.white, size = f_lblSize(), tooltip = lTip) : na
+
+    bool proj = showProj and enableTrade
+    line lnS = proj ? line.new(leftBar, sl, rgt, sl, xloc = xloc.bar_index, color = color.new(slCol, 35), style = line.style_dashed) : na
+    line lnT = proj ? line.new(leftBar, tp, rgt, tp, xloc = xloc.bar_index, color = color.new(tpCol, 35), style = line.style_dashed) : na
+
+    bool armed0 = not requireRet or (isDem ? close > prox : close < prox)
+    array.push(zones, Zone.new(bx, lb, lnS, lnT, prox, dist, ep, sl, tp, isDem, grade, vRat, armed0, true, false))
+
+    // จำกัดจำนวนโซน (นับรวมทั้ง 2 ฝั่ง)
+    if array.size(zones) > maxZones * 2
+        Zone old = array.shift(zones)
+        box.delete(old.bx)
+        label.delete(old.lb)
+        line.delete(old.slLn)
+        line.delete(old.tpLn)
+    true
+
+// ───────────────── Detection — LuxAlgo volume-pivot OB ─────────────────
+// os = 0 → context หมี (Bearish OB / Supply) · os = 1 → context กระทิง (Bullish OB / Demand)
+float upper = ta.highest(high, lenPiv)
+float lower = ta.lowest(low,  lenPiv)
+var int os = 0
+os := high[lenPiv] > upper ? 0 : low[lenPiv] < lower ? 1 : os[1]
+
+float phv = ta.pivothigh(volume, lenPiv, lenPiv)
+bool haveBars = not na(high[lenPiv]) and not na(low[lenPiv]) and not na(open[lenPiv])
+bool bullOB = haveBars and not na(phv) and os == 1
+bool bearOB = haveBars and not na(phv) and os == 0
+
+// พิกัดโซนจากแท่ง pivot (lenPiv แท่งก่อน)
+float demTop = hl2[lenPiv]   // Demand proximal (บน)
+float demBtm = low[lenPiv]   // Demand distal   (ล่าง)
+float supTop = high[lenPiv]  // Supply distal   (บน)
+float supBtm = hl2[lenPiv]   // Supply proximal (ล่าง)
+int   obLeft = bar_index - lenPiv
+float pivVol = volume[lenPiv]
+float vRat   = not hasVol or na(volAvg) or volAvg <= 0 ? na : pivVol / volAvg
+
+if barstate.isconfirmed
+    bool volOK = na(vRat) or minVolRat <= 0.0 or vRat >= minVolRat
+
+    if bullOB and useDemand and volOK
+        if trendStage == "ไม่สร้างโซนสวนเทรนด์" and not f_trendOK(true)
+            na
+        else
+            newZoneDem := f_makeZone(true, demTop, demBtm, obLeft, vRat)
+
+    if bearOB and useSupply and volOK
+        if trendStage == "ไม่สร้างโซนสวนเทรนด์" and not f_trendOK(false)
+            na
+        else
+            newZoneSup := f_makeZone(false, supTop, supBtm, obLeft, vRat)
+
+// ───────────────────────── Zone management + retest ─────────────────────────
+// mitigation: Wick ใช้ high/low, Close ใช้ราคาปิด
+float mitHi = mitigation == "Close" ? close : high
+float mitLo = mitigation == "Close" ? close : low
+
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        int rgt = bar_index + extendBars
+
+        if z.broken
+            continue
+        if not z.active
+            continue
+
+        // โซนถูกทำลาย (ราคาทะลุขอบไกล)
+        bool dead = z.isDemand ? mitLo < z.dist : mitHi > z.dist
+        if dead
+            z.broken := true
+            z.active := false
+            line.delete(z.slLn)
+            line.delete(z.tpLn)
+            if delBroken
+                box.delete(z.bx)
+                label.delete(z.lb)
+                array.remove(zones, i)
+            else
+                box.set_bgcolor(z.bx, brokenCol)
+                box.set_border_color(z.bx, color.new(color.gray, 65))
+                box.set_right(z.bx, bar_index)
+                label.delete(z.lb)
+            continue
+
+        // arm
+        if requireRet and not z.armed and (z.isDemand ? close > z.prox : close < z.prox)
+            z.armed := true
+
+        // retest
+        bool hit = z.armed and (z.isDemand ? low <= z.prox : high >= z.prox)
+        if hit
+            z.active := false
+            if z.isDemand
+                retestDem := true
+            else
+                retestSup := true
+            line.delete(z.slLn)
+            line.delete(z.tpLn)
+            if afterHit == "Delete"
+                box.delete(z.bx)
+                label.delete(z.lb)
+                array.remove(zones, i)
+            else if afterHit == "Fade"
+                box.set_bgcolor(z.bx, color.new(color.gray, 91))
+                box.set_border_color(z.bx, color.new(color.gray, 70))
+                box.set_right(z.bx, bar_index)
+                label.set_color(z.lb, color.new(color.gray, 45))
+
+            if enableTrade
+                if tradeOn
+                    nBlocked := nBlocked + 1
+                else if not sessionOK
+                    nFiltered := nFiltered + 1
+                else if not f_trendOK(z.isDemand)
+                    nFiltered := nFiltered + 1
+                else if onlyGradeA and z.grade != "A"
+                    nFiltered := nFiltered + 1
+                else
+                    float ep = entryMode == "Zone Edge" ? z.entry : entryMode == "Confirmation Close" ? close : (z.isDemand ? math.min(open, close) : math.max(open, close))
+                    float sl = slMode == "Zone Distal" ? (z.isDemand ? z.dist - slBufAtr * safeAtr : z.dist + slBufAtr * safeAtr) : (z.isDemand ? ep - slAtrMult * safeAtr : ep + slAtrMult * safeAtr)
+                    float rsk = math.abs(ep - sl)
+                    if rsk > 0
+                        float tp = z.isDemand ? ep + rsk * tpRR : ep - rsk * tpRR
+                        f_drawTrade(bar_index, ep, sl, tp)
+                        tradeOn  := true
+                        trIsDem  := z.isDemand
+                        trBar    := bar_index
+                        trEntry  := ep
+                        trSL     := sl
+                        trTP     := tp
+                        trRisk   := rsk
+                        beDone   := false
+                        trGrade  := z.grade
+                        trStatus := 1
+                        if z.isDemand
+                            sigLong := true
+                        else
+                            sigShort := true
+        else
+            box.set_right(z.bx, rgt)
+            if showLabel
+                label.set_x(z.lb, bar_index - 1)
+            if showProj and enableTrade
+                line.set_x2(z.slLn, rgt)
+                line.set_x2(z.tpLn, rgt)
+
+// ───────────────────────── Trade result ─────────────────────────
+if tradeOn and not na(trBar)
+    f_stretchTrade(math.max(bar_index, trBar + tradeExtend))
+
+if tradeOn and not na(trBar) and bar_index > trBar
+    bool hitSL = trIsDem ? low  <= trSL : high >= trSL
+    bool hitTP = trIsDem ? high >= trTP : low  <= trTP
+
+    if hitSL or hitTP
+        // โดนทั้งคู่ในแท่งเดียว = นับ SL ก่อน (ระมัดระวัง)
+        float exitPx = hitSL ? trSL : trTP
+        float rR = trRisk > 0 ? (trIsDem ? (exitPx - trEntry) / trRisk : (trEntry - exitPx) / trRisk) : 0.0
+        bool isWin  = rR > 0
+        bool isLoss = rR < 0
+
+        trStatus := hitSL ? (rR == 0 ? 3 : -1) : 2
+        tradeOn  := false
+        totalR   := totalR + rR
+        todayR   := todayR + rR
+        if trIsDem
+            demR := demR + rR
+            demW := demW + (isWin ? 1 : 0)
+            demL := demL + (isLoss ? 1 : 0)
+        else
+            supR := supR + rR
+            supW := supW + (isWin ? 1 : 0)
+            supL := supL + (isLoss ? 1 : 0)
+        if isLoss
+            lossRun := lossRun + 1
+            maxLossRun := math.max(maxLossRun, lossRun)
+        else
+            lossRun := 0
+        if rR == 0
+            nScratch := nScratch + 1
+        f_closeTrade(bar_index, isWin, exitPx, rR)
+
+// เลื่อน SL ไป Break Even เมื่อกำไรถึงระยะที่ตั้ง (ทำหลังเช็ค TP/SL = ไม่ repaint)
+if tradeOn and useBE and not beDone and not na(trBar) and bar_index > trBar and trRisk > 0
+    float fav = trIsDem ? high - trEntry : trEntry - low
+    if fav >= beTriggerR * trRisk
+        float newSL = trIsDem ? trEntry + beLockR * trRisk : trEntry - beLockR * trRisk
+        bool improve = trIsDem ? newSL > trSL : newSL < trSL
+        if improve
+            trSL   := newSL
+            beDone := true
+            f_moveSL(newSL)
+
+// ───────────────────────── Alerts ─────────────────────────
+alertcondition(newZoneDem, "New Demand OB", "OB Zones | เกิดโซน Demand ใหม่ บน {{ticker}} {{interval}}")
+alertcondition(newZoneSup, "New Supply OB", "OB Zones | เกิดโซน Supply ใหม่ บน {{ticker}} {{interval}}")
+alertcondition(retestDem,  "Demand Retest", "OB Zones | ราคาทดสอบโซน Demand บน {{ticker}} {{interval}}")
+alertcondition(retestSup,  "Supply Retest", "OB Zones | ราคาทดสอบโซน Supply บน {{ticker}} {{interval}}")
+alertcondition(sigLong,    "Long Entry",    "OB Zones | LONG entry ที่โซน Demand บน {{ticker}} {{interval}}")
+alertcondition(sigShort,   "Short Entry",   "OB Zones | SHORT entry ที่โซน Supply บน {{ticker}} {{interval}}")
+
+// ───────────────────────── Dashboard ─────────────────────────
+f_row(table t, int r, string k, string v, color vbg) =>
+    table.cell(t, 0, r, k, bgcolor = dashBg, text_color = dashTxt, text_size = f_dsz(), text_halign = text.align_left, width = dashWide)
+    table.cell(t, 1, r, v, bgcolor = vbg,    text_color = color.white, text_size = f_dsz(), text_halign = text.align_right)
+
+f_wr(int w, int l) =>
+    int c = w + l
+    c == 0 ? na : w * 100.0 / c
+f_sideText(int w, int l, float r) =>
+    int c = w + l
+    c == 0 ? "-" : str.tostring(f_wr(w, l), "#") + "%  " + str.tostring(w) + "/" + str.tostring(c) + "  " + (r >= 0 ? "+" : "") + str.tostring(r, "#.#") + "R"
+f_sideBg(int w, int l) =>
+    float wr = f_wr(w, l)
+    na(wr) ? color.new(color.gray, 40) : wr >= 50.0 ? color.new(tpCol, 55) : color.new(slCol, 55)
+
+var table dash = table.new(f_dashPos(), 2, 16, border_width = 1)
+
+if showDash and barstate.islast
+    int actD = 0, int actS = 0
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if z.active
+                if z.isDemand
+                    actD := actD + 1
+                else
+                    actS := actS + 1
+
+    int totW = demW + supW
+    int totL = demL + supL
+    int decided = totW + totL
+    int closed = decided + nScratch
+    float wr = decided > 0 ? totW * 100.0 / decided : na
+    color wrBg = na(wr) ? color.new(color.gray, 40) : wr >= 50.0 ? color.new(tpCol, 55) : color.new(slCol, 55)
+    color rBg  = totalR >= 0 ? color.new(tpCol, 45) : color.new(slCol, 45)
+    string stTxt = trStatus == 1 ? (beDone ? "ACTIVE 🔒BE" : "ACTIVE") : trStatus == 2 ? "TP HIT" : trStatus == -1 ? "SL HIT" : trStatus == 3 ? "BE STOP" : "WAITING"
+    color  stBg  = trStatus == 1 ? color.new(color.orange, 25) : trStatus == 2 ? color.new(tpCol, 30) : trStatus == -1 ? color.new(slCol, 30) : trStatus == 3 ? color.new(color.gray, 25) : color.new(color.gray, 40)
+    string trdTxt = not useTrend ? "ปิดอยู่" : not emaOk ? "n/a" : trendUp ? "▲ UP — เข้า Demand" : trendDn ? "▼ DOWN — เข้า Supply" : "— SIDEWAY (บล็อก)"
+    color  trdBg  = not useTrend ? color.new(color.gray, 70) : trendUp ? color.new(demandCol, 35) : trendDn ? color.new(supplyCol, 35) : color.new(color.gray, 40)
+
+    table.cell(dash, 0, 0, "ORDER BLOCK", bgcolor = dashBg, text_color = dashTxt, text_size = f_dhz(), width = dashWide)
+    table.cell(dash, 1, 0, "LuxAlgo",     bgcolor = dashBg, text_color = dashTxt, text_size = f_dhz())
+
+    f_row(dash, 1,  "เทรนด์ EMA " + str.tostring(emaLen) + (trendTf == "" ? "" : " · " + trendTf), trdTxt, trdBg)
+    f_row(dash, 2,  "โซนที่รออยู่ D / S", str.tostring(actD) + " / " + str.tostring(actS), color.new(dashBg, 25))
+    f_row(dash, 3,  "สถานะเทรด",        stTxt,                                             stBg)
+    f_row(dash, 4,  "เกรดโซนที่เข้า",    trGrade,                                            color.new(dashBg, 25))
+    f_row(dash, 5,  "Entry",            f_px(trEntry),                                      color.new(dashBg, 25))
+    f_row(dash, 6,  "SL",               f_px(trSL) + (trStatus == 1 and beDone ? "  🔒" : ""), trStatus == 1 and beDone ? color.new(entryCol, 70) : color.new(slCol, 70))
+    f_row(dash, 7,  "TP (" + rrInput + ")", f_px(trTP),                                     color.new(tpCol, 65))
+    f_row(dash, 8,  "เทรด / W / L / BE", str.tostring(closed) + " / " + str.tostring(totW) + " / " + str.tostring(totL) + " / " + str.tostring(nScratch), color.new(dashBg, 25))
+    f_row(dash, 9,  "Win rate",         na(wr) ? "-" : str.tostring(wr, "#.#") + "%  (" + str.tostring(decided) + ")", wrBg)
+    f_row(dash, 10, "แพ้ติดกัน / สูงสุด", str.tostring(lossRun) + " / " + str.tostring(maxLossRun), lossRun > 0 ? color.new(slCol, 45) : color.new(color.gray, 40))
+    f_row(dash, 11, "R รวม / วันนี้",    str.tostring(totalR, "#.#") + "R / " + str.tostring(todayR, "#.#") + "R", rBg)
+
+    table.cell(dash, 0, 12, "WIN RATE แยกฝั่ง", bgcolor = dashBg, text_color = dashTxt, text_size = f_dsz(), text_halign = text.align_left, width = dashWide)
+    table.cell(dash, 1, 12, "% · W/T · R",      bgcolor = dashBg, text_color = color.new(dashTxt, 45), text_size = f_dsz(), text_halign = text.align_right)
+    f_row(dash, 13, "🟩 Demand (Long)",  useDemand ? f_sideText(demW, demL, demR) : "ปิดอยู่", useDemand ? f_sideBg(demW, demL) : color.new(color.gray, 70))
+    f_row(dash, 14, "🟥 Supply (Short)", useSupply ? f_sideText(supW, supL, supR) : "ปิดอยู่", useSupply ? f_sideBg(supW, supL) : color.new(color.gray, 70))
+
+    string sessTxt = not useSession ? "ปิดอยู่" : not anySesOn ? "ไม่ได้เลือก" :
+         inSesA ? "🟢 " + sesAnm : inSesB ? "🟢 " + sesBnm : inSesC ? "🟢 " + sesCnm : "🔴 นอกเวลา (บล็อก)"
+    color sessBg = not useSession ? color.new(color.gray, 70) : (not anySesOn or inSession) ? color.new(tpCol, 50) : color.new(slCol, 50)
+    f_row(dash, 15, "Session (เวลาเทรด)", sessTxt, sessBg)

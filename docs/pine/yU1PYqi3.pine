@@ -1,0 +1,442 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy("Opening Reversal - Model B (2R Target)", 
+     overlay=true, 
+     initial_capital=10000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, 
+     commission_value=2.5,
+     slippage=1,
+     currency=currency.USD,
+     calc_on_every_tick=false)
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+i_rthStart      = input.session("0930-1600", "RTH Session", group="Session")
+i_onStart       = input.session("1800-0930", "Overnight Session", group="Session")
+i_timezone      = input.string("America/New_York", "Timezone", group="Session")
+i_maxBars       = input.int(30, "Max Bars After Open (only trade within)", minval=10, maxval=78, group="Session")
+
+i_levelZone     = input.float(2.0, "Key Level Zone (± points)", minval=0.5, maxval=5.0, step=0.25, group="Key Levels")
+
+i_minFailure    = input.int(3, "Min Failure Evidence Count", minval=1, maxval=6, group="Failure Evidence")
+i_minSignalBar  = input.int(4, "Min Signal Bar Score", minval=1, maxval=5, group="Signal Bar")
+
+i_ftBodyPct     = input.float(60.0, "Follow-through Min Body % of Range", minval=30, maxval=80, group="Follow-through")
+i_ftBarsWindow  = input.int(2, "Follow-through Window (bars after Signal)", minval=1, maxval=3, group="Follow-through")
+
+i_pbMaxBars     = input.int(3, "Max Bars to Wait for Pullback", minval=1, maxval=5, group="Pullback")
+i_pbMaxDepth    = input.float(50.0, "Max Pullback Depth % of FT move", minval=20, maxval=80, group="Pullback")
+
+i_maxTrades     = input.int(2, "Max Trades Per Day", minval=1, maxval=4, group="Risk")
+i_tickSize      = input.float(0.25, "Tick Size", group="Risk")
+i_signalMaxBar  = input.int(15, "Signal must appear before bar #", minval=5, maxval=30, group="Time Filter")
+
+// ============================================================
+// SESSION & BAR COUNTING
+// ============================================================
+
+isRTH = not na(time(timeframe.period, i_rthStart, i_timezone))
+isOvernight = not na(time(timeframe.period, i_onStart, i_timezone))
+newRTHDay = isRTH and not isRTH[1]
+
+var int barsSinceOpen = 0
+if newRTHDay
+    barsSinceOpen := 1
+else if isRTH
+    barsSinceOpen += 1
+
+bool inTradeWindow = isRTH and barsSinceOpen >= 1 and barsSinceOpen <= i_maxBars
+bool inSignalWindow = isRTH and barsSinceOpen >= 1 and barsSinceOpen <= i_signalMaxBar
+
+// ============================================================
+// KEY LEVELS CALCULATION
+// ============================================================
+
+var float pdh = na
+var float pdl = na
+var float pdc = na
+var float rthDayHigh = na
+var float rthDayLow = na
+var float rthDayClose = na
+
+if newRTHDay
+    pdh := rthDayHigh
+    pdl := rthDayLow
+    pdc := rthDayClose
+    rthDayHigh := high
+    rthDayLow := low
+    rthDayClose := close
+else if isRTH
+    rthDayHigh := math.max(nz(rthDayHigh, high), high)
+    rthDayLow := math.min(nz(rthDayLow, low), low)
+    rthDayClose := close
+
+var float onh = na
+var float onl = na
+var float onHighBuilding = na
+var float onLowBuilding = na
+
+if isOvernight and not isOvernight[1]
+    onHighBuilding := high
+    onLowBuilding := low
+else if isOvernight
+    onHighBuilding := math.max(nz(onHighBuilding, high), high)
+    onLowBuilding := math.min(nz(onLowBuilding, low), low)
+
+if newRTHDay
+    onh := onHighBuilding
+    onl := onLowBuilding
+
+var float todayOpen = na
+if newRTHDay
+    todayOpen := open
+
+var float first6High = na
+var float first6Low = na
+
+if newRTHDay
+    first6High := high
+    first6Low := low
+else if isRTH and barsSinceOpen <= 6
+    first6High := math.max(nz(first6High, high), high)
+    first6Low := math.min(nz(first6Low, low), low)
+
+// Round numbers removed - not used as key levels
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+f_highInZone(float h, float level) =>
+    not na(level) and h >= (level - i_levelZone) and h <= (level + i_levelZone)
+
+f_lowInZone(float l, float level) =>
+    not na(level) and l >= (level - i_levelZone) and l <= (level + i_levelZone)
+
+// ============================================================
+// FAILURE EVIDENCE SCORING
+// ============================================================
+
+f_bullFailureScore(float levelVal) =>
+    int score = 0
+    if not na(levelVal)
+        if close[1] > open[1] and close[1] < levelVal
+            score += 1
+        if high[1] >= levelVal and close < levelVal
+            score += 1
+        float bRange = high - low
+        float bBody = math.abs(close - open)
+        if close < open and bRange > 0 and (bBody / bRange) >= 0.5
+            score += 1
+        if low < low[1]
+            score += 1
+        if high < high[1]
+            score += 1
+        if high[2] >= (levelVal - i_levelZone) and high[2] <= (levelVal + i_levelZone) and close[2] < levelVal and high >= (levelVal - i_levelZone) and close < levelVal
+            score += 1
+    score
+
+f_bearFailureScore(float levelVal) =>
+    int score = 0
+    if not na(levelVal)
+        if close[1] < open[1] and close[1] > levelVal
+            score += 1
+        if low[1] <= levelVal and close > levelVal
+            score += 1
+        float bRange = high - low
+        float bBody = math.abs(close - open)
+        if close > open and bRange > 0 and (bBody / bRange) >= 0.5
+            score += 1
+        if high > high[1]
+            score += 1
+        if low > low[1]
+            score += 1
+        if low[2] >= (levelVal - i_levelZone) and low[2] <= (levelVal + i_levelZone) and close[2] > levelVal and low <= (levelVal + i_levelZone) and close > levelVal
+            score += 1
+    score
+
+// ============================================================
+// SIGNAL BAR SCORING
+// ============================================================
+
+f_sellSignalScore(float levelVal) =>
+    int score = 0
+    float barMid = (high + low) / 2.0
+    float bBody = math.abs(close - open)
+    float bRange = high - low
+    float upperTail = high - math.max(open, close)
+    if close < barMid
+        score += 1
+    if bBody > 0 and upperTail >= bBody
+        score += 1
+    if close < low[1]
+        score += 1
+    if not na(levelVal) and high[1] >= (levelVal - i_levelZone)
+        score += 1
+    float avgRange = ta.sma(high - low, 10)
+    if bRange >= avgRange * 0.5
+        score += 1
+    score
+
+f_buySignalScore(float levelVal) =>
+    int score = 0
+    float barMid = (high + low) / 2.0
+    float bBody = math.abs(close - open)
+    float bRange = high - low
+    float lowerTail = math.min(open, close) - low
+    if close > barMid
+        score += 1
+    if bBody > 0 and lowerTail >= bBody
+        score += 1
+    if close > high[1]
+        score += 1
+    if not na(levelVal) and low[1] <= (levelVal + i_levelZone)
+        score += 1
+    float avgRange = ta.sma(high - low, 10)
+    if bRange >= avgRange * 0.5
+        score += 1
+    score
+
+// ============================================================
+// CALL ALL SCORING FUNCTIONS UNCONDITIONALLY
+// ============================================================
+
+int sellFailPDH = f_bullFailureScore(pdh)
+int sellFailONH = f_bullFailureScore(onh)
+int sellFailOpen = f_bullFailureScore(todayOpen)
+int sellFailF6H = f_bullFailureScore(first6High)
+int sellFailPDC = f_bullFailureScore(pdc)
+int sellSigPDH = f_sellSignalScore(pdh)
+int sellSigONH = f_sellSignalScore(onh)
+int sellSigOpen = f_sellSignalScore(todayOpen)
+int sellSigF6H = f_sellSignalScore(first6High)
+int sellSigPDC = f_sellSignalScore(pdc)
+
+int buyFailPDL = f_bearFailureScore(pdl)
+int buyFailONL = f_bearFailureScore(onl)
+int buyFailOpen = f_bearFailureScore(todayOpen)
+int buyFailF6L = f_bearFailureScore(first6Low)
+int buyFailPDC = f_bearFailureScore(pdc)
+int buySigPDL = f_buySignalScore(pdl)
+int buySigONL = f_buySignalScore(onl)
+int buySigOpen = f_buySignalScore(todayOpen)
+int buySigF6L = f_buySignalScore(first6Low)
+int buySigPDC = f_buySignalScore(pdc)
+
+// ============================================================
+// SETUP DETECTION
+// ============================================================
+
+f_isSellValid(float levelVal, int failScore, int sigScore) =>
+    bool valid = false
+    if not na(levelVal) and inSignalWindow
+        bool inZone = f_highInZone(high, levelVal)
+        bool closedBack = close < levelVal
+        bool failOK = failScore >= i_minFailure
+        bool sigOK = sigScore >= i_minSignalBar
+        if inZone and closedBack and failOK and sigOK
+            float entryLvl = low - i_tickSize
+            float stopLvl = high + i_tickSize
+            float risk = stopLvl - entryLvl
+            if risk > 0 and risk <= 20
+                valid := true
+    valid
+
+f_isBuyValid(float levelVal, int failScore, int sigScore) =>
+    bool valid = false
+    if not na(levelVal) and inSignalWindow
+        bool inZone = f_lowInZone(low, levelVal)
+        bool closedBack = close > levelVal
+        bool failOK = failScore >= i_minFailure
+        bool sigOK = sigScore >= i_minSignalBar
+        if inZone and closedBack and failOK and sigOK
+            float entryLvl = high + i_tickSize
+            float stopLvl = low - i_tickSize
+            float risk = entryLvl - stopLvl
+            if risk > 0 and risk <= 20
+                valid := true
+    valid
+
+bool vSellPDH = f_isSellValid(pdh, sellFailPDH, sellSigPDH)
+bool vSellONH = f_isSellValid(onh, sellFailONH, sellSigONH)
+bool vSellOpen = f_isSellValid(todayOpen, sellFailOpen, sellSigOpen)
+bool vSellF6H = f_isSellValid(barsSinceOpen > 6 ? first6High : na, sellFailF6H, sellSigF6H)
+bool vSellPDC = f_isSellValid(pdc, sellFailPDC, sellSigPDC)
+
+bool vBuyPDL = f_isBuyValid(pdl, buyFailPDL, buySigPDL)
+bool vBuyONL = f_isBuyValid(onl, buyFailONL, buySigONL)
+bool vBuyOpen = f_isBuyValid(todayOpen, buyFailOpen, buySigOpen)
+bool vBuyF6L = f_isBuyValid(barsSinceOpen > 6 ? first6Low : na, buyFailF6L, buySigF6L)
+bool vBuyPDC = f_isBuyValid(pdc, buyFailPDC, buySigPDC)
+
+bool anySellSignal = vSellPDH or vSellONH or vSellOpen or vSellF6H or vSellPDC
+bool anyBuySignal = vBuyPDL or vBuyONL or vBuyOpen or vBuyF6L or vBuyPDC
+
+// ============================================================
+// STATE MACHINE FOR MODEL B
+// States: 0=Idle, 1=Signal detected/waiting FT, 2=FT confirmed/waiting PB, 3=Done
+// ============================================================
+
+var int state = 0
+var int stateDir = 0
+var int stateBars = 0
+var float stateRevHigh = na
+var float stateRevLow = na
+var float stateFTHigh = na
+var float stateFTLow = na
+var float stateLevel = na
+var int tradesToday = 0
+
+if newRTHDay
+    state := 0
+    stateDir := 0
+    stateBars := 0
+    tradesToday := 0
+
+// ============================================================
+// STATE 0 → 1: Signal Detected
+// ============================================================
+
+if state == 0 and strategy.position_size == 0 and tradesToday < i_maxTrades and inSignalWindow
+    if anySellSignal
+        state := 1
+        stateDir := -1
+        stateBars := 0
+        stateRevHigh := high
+        stateRevLow := low
+        if vSellPDH
+            stateLevel := pdh
+        else if vSellONH
+            stateLevel := onh
+        else if vSellPDC
+            stateLevel := pdc
+        else if vSellOpen
+            stateLevel := todayOpen
+        else if vSellF6H
+            stateLevel := first6High
+    else if anyBuySignal
+        state := 1
+        stateDir := 1
+        stateBars := 0
+        stateRevHigh := high
+        stateRevLow := low
+        if vBuyPDL
+            stateLevel := pdl
+        else if vBuyONL
+            stateLevel := onl
+        else if vBuyPDC
+            stateLevel := pdc
+        else if vBuyOpen
+            stateLevel := todayOpen
+        else if vBuyF6L
+            stateLevel := first6Low
+
+// ============================================================
+// STATE 1 → 2: Follow-through Confirmed
+// ============================================================
+
+if state == 1
+    stateBars += 1
+    float ftR = high - low
+    float ftB = math.abs(close - open)
+    
+    if stateDir == -1
+        bool isBearFT = close < open and ftR > 0 and (ftB / ftR) >= (i_ftBodyPct / 100.0)
+        bool brokeLow = close < stateRevLow
+        if isBearFT or brokeLow
+            state := 2
+            stateBars := 0
+            stateFTLow := low
+            stateFTHigh := math.max(stateRevHigh, high[1])
+            stateRevHigh := math.max(stateRevHigh, high[1])
+        else if stateBars > i_ftBarsWindow
+            state := 0
+            stateDir := 0
+    
+    else if stateDir == 1
+        bool isBullFT = close > open and ftR > 0 and (ftB / ftR) >= (i_ftBodyPct / 100.0)
+        bool brokeHigh = close > stateRevHigh
+        if isBullFT or brokeHigh
+            state := 2
+            stateBars := 0
+            stateFTHigh := high
+            stateFTLow := math.min(stateRevLow, low[1])
+            stateRevLow := math.min(stateRevLow, low[1])
+        else if stateBars > i_ftBarsWindow
+            state := 0
+            stateDir := 0
+
+// ============================================================
+// STATE 2 → Entry: Pullback Detected
+// ============================================================
+
+if state == 2
+    stateBars += 1
+    
+    if stateDir == -1
+        float barMid2 = (high + low) / 2.0
+        bool isPB = close > open or close > barMid2
+        float ftMove = stateRevHigh - stateFTLow
+        float pbDepth = high - stateFTLow
+        bool pbOK = ftMove > 0 and (pbDepth / ftMove) <= (i_pbMaxDepth / 100.0)
+        
+        if isPB and pbOK
+            float entryP = low - i_tickSize
+            float stopP = stateRevHigh + i_tickSize
+            float risk = stopP - entryP
+            float target = entryP - risk * 2.0
+            if risk > 0 and risk <= 20
+                strategy.entry("OR_Sell_B", strategy.short, stop=entryP)
+                strategy.exit("OR_Sell_B2", "OR_Sell_B", stop=stopP, limit=target)
+                tradesToday += 1
+                state := 0
+                stateDir := 0
+        
+        if stateBars > i_pbMaxBars
+            state := 0
+            stateDir := 0
+    
+    else if stateDir == 1
+        float barMid2 = (high + low) / 2.0
+        bool isPB = close < open or close < barMid2
+        float ftMove = stateFTHigh - stateRevLow
+        float pbDepth = stateFTHigh - low
+        bool pbOK = ftMove > 0 and (pbDepth / ftMove) <= (i_pbMaxDepth / 100.0)
+        
+        if isPB and pbOK
+            float entryP = high + i_tickSize
+            float stopP = stateRevLow - i_tickSize
+            float risk = entryP - stopP
+            float target = entryP + risk * 2.0
+            if risk > 0 and risk <= 20
+                strategy.entry("OR_Buy_B", strategy.long, stop=entryP)
+                strategy.exit("OR_Buy_B2", "OR_Buy_B", stop=stopP, limit=target)
+                tradesToday += 1
+                state := 0
+                stateDir := 0
+        
+        if stateBars > i_pbMaxBars
+            state := 0
+            stateDir := 0
+
+// ============================================================
+// END OF DAY
+// ============================================================
+
+if isRTH[1] and not isRTH
+    strategy.close_all(comment="EOD Close")
+    state := 0
+    stateDir := 0
+
+// ============================================================
+// PLOTTING (minimal - no key level lines, no moveable markers)
+// ============================================================
+
+// Only show trade window background (subtle)
+bgcolor(inTradeWindow ? color.new(color.blue, 95) : na, title="Trade Window")

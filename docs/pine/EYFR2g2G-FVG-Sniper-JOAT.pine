@@ -1,0 +1,708 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+indicator("FVG Sniper [JOAT]", shorttitle="FVG [JOAT]", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FVG SNIPER [JOAT]  —  cyberpunk mint / coral / chrome
+// Fair Value Gap engine: graded gap boxes, fill / mitigation / inversion (IFVG)
+// tracking, rejection + flip signals, and a full trade blueprint on every signal
+// (entry line · TP1/TP2/TP3 · green target zone · RED risk zone · level labels).
+// Concept: bullish FVG = low > high[2]  |  bearish FVG = high < low[2]
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ─── 01 · ENGINE ───────────────────────────────────────────────────────────
+g_eng = "01 · Engine"
+
+allowBull  = input.bool(true, "Detect Bullish FVGs", group=g_eng, tooltip="Track and signal bullish (demand) fair value gaps.")
+allowBear  = input.bool(true, "Detect Bearish FVGs", group=g_eng, tooltip="Track and signal bearish (supply) fair value gaps.")
+sigMode    = input.string("Rejection + IFVG", "Signal Source", options=["Rejection Only", "IFVG Flip Only", "Rejection + IFVG"], group=g_eng, tooltip="Rejection = price retraces into a live gap and reacts back out with a directional close. IFVG Flip = a gap is fully traded through and flips role, confirming continuation.")
+maxGaps    = input.int(14, "Max Visible Gaps", minval=3, maxval=120, group=g_eng, tooltip="Oldest gap boxes are removed once this cap is reached (fewer objects = cleaner chart).")
+maxAge     = input.int(220, "Gap Lifetime (bars)", minval=20, maxval=1500, group=g_eng, tooltip="A gap is dropped after this many bars if it has not been mitigated or inverted.")
+extendBars = input.int(12, "Gap Box Extension (bars)", minval=0, maxval=100, group=g_eng, tooltip="How far live gap boxes project to the right of the current bar.")
+
+
+// ─── 02 · FILTERS ──────────────────────────────────────────────────────────
+g_flt = "02 · Filters"
+
+atrLen       = input.int(14, "ATR Length", minval=1, maxval=100, group=g_flt)
+minGapAtr    = input.float(0.25, "Min Gap Size (× ATR)", minval=0.0, maxval=5.0, step=0.05, group=g_flt, tooltip="Rejects tiny imbalances. Gap height must be at least this multiple of ATR.")
+minBodyRat   = input.float(0.45, "Min Displacement Body Ratio", minval=0.0, maxval=1.0, step=0.05, group=g_flt, tooltip="Body/range ratio of the impulse (middle) candle that created the gap.")
+minGrade     = input.float(4.0, "Min Signal Grade (0-10)", minval=0.0, maxval=10.0, step=0.5, group=g_flt, tooltip="Only gaps scoring at least this grade may fire a signal.")
+useHTF       = input.bool(true, "Higher-Timeframe Bias Filter", group=g_flt, tooltip="Require the HTF EMA bias to agree with the signal direction.")
+htfTF        = input.timeframe("240", "HTF Timeframe", group=g_flt, tooltip="Higher timeframe used for the trend/bias filter.")
+htfEma       = input.int(50, "HTF EMA Length", minval=2, maxval=400, group=g_flt)
+reqBullClose = input.bool(true, "Require Directional Rejection Close", group=g_flt, tooltip="Rejection signal also requires a candle that closes with the setup (bullish close for buys, bearish close for sells).")
+
+
+// ─── 03 · TRADE MODEL ──────────────────────────────────────────────────────
+g_trd = "03 · Trade Model"
+
+stopMode    = input.string("Gap-Protected", "Stop Basis", options=["Gap-Protected", "ATR"], group=g_trd, tooltip="Gap-Protected anchors the stop just beyond the triggering gap boundary. ATR measures the stop directly from entry.")
+slBufAtr    = input.float(0.20, "Gap Stop Buffer (× ATR)", minval=0.0, maxval=3.0, step=0.05, group=g_trd, tooltip="Extra ATR clearance beyond the gap boundary (Gap-Protected mode).")
+slAtrMult   = input.float(1.50, "ATR Stop Distance (× ATR)", minval=0.2, maxval=6.0, step=0.1, group=g_trd, tooltip="Stop distance from entry in ATR (ATR mode).")
+minRiskAtr  = input.float(0.40, "Min Risk (× ATR) — floor", minval=0.1, maxval=6.0, step=0.1, group=g_trd)
+maxRiskAtr  = input.float(4.00, "Max Risk (× ATR) — cap", minval=0.5, maxval=12.0, step=0.1, group=g_trd)
+tp1R        = input.float(1.0, "TP1 (R)", minval=0.3, maxval=50, step=0.1, group=g_trd)
+tp2R        = input.float(2.0, "TP2 (R)", minval=0.3, maxval=50, step=0.1, group=g_trd)
+tp3R        = input.float(3.0, "TP3 (R)", minval=0.3, maxval=50, step=0.1, group=g_trd)
+tradeMaxBars= input.int(120, "Max Trade Duration (bars)", minval=5, maxval=1000, group=g_trd, tooltip="A live trade is closed at market after this many bars so it stops blocking new setups.")
+projBars    = input.int(8, "Active Zone Projection (bars)", minval=0, maxval=100, group=g_trd, tooltip="Forward projection of the live trade zones/lines while the trade is active.")
+maxHist     = input.int(20, "Max Drawn Trades", minval=1, maxval=80, group=g_trd, tooltip="Completed trade blueprints kept on the chart (array-capped cleanup).")
+
+
+// ─── 04 · VISUALS ──────────────────────────────────────────────────────────
+g_vis = "04 · Visuals"
+
+showBoxes    = input.bool(true, "Show Gap Boxes", group=g_vis)
+showMid      = input.bool(false, "Show Gap Midline", group=g_vis, tooltip="Dotted 50% consequent-encroachment line inside each gap.")
+hideFilled   = input.bool(false, "Hide Mitigated Gap Boxes", group=g_vis, tooltip="Deletes a gap box once its wick is fully filled — strong declutter.")
+showGrade    = input.bool(true, "Show Grade Spotlight ★", group=g_vis, tooltip="Places a single ★ tier tag on the strongest active gap only — not on every gap.")
+showIFVG     = input.bool(true, "Show Inversion (IFVG) Styling", group=g_vis, tooltip="Recolors a gap with a dashed amber style once it inverts.")
+showSignal   = input.bool(true, "Show BUY / SELL Labels", group=g_vis, tooltip="Clean label pill, ATR-offset from the bar (no arrows).")
+showStars    = input.bool(true, "Include ★ Grade on Label", group=g_vis)
+showZones    = input.bool(true, "Show TP / SL Zone Boxes", group=g_vis)
+showLines    = input.bool(true, "Show Entry / TP / SL Lines", group=g_vis)
+showLevels   = input.bool(true, "Show Level Labels", group=g_vis)
+showExit     = input.bool(true, "Show Result Labels", group=g_vis)
+colorCandles = input.bool(false, "Color Candles (Zone Reader)", group=g_vis, tooltip="Tints candles by which gap zone price is sitting inside, brighter on a live signal.")
+useVwap      = input.bool(false, "Show VWAP + σ Bands", group=g_vis)
+vwapDev      = input.float(1.0, "VWAP Band σ", minval=0.5, maxval=4.0, step=0.5, group=g_vis)
+colBull      = input.color(#26A69A, "Bullish FVG / Long", group=g_vis)
+colBear      = input.color(#EF5350, "Bearish FVG / Short", group=g_vis)
+colIFVG      = input.color(#FFB300, "Inversion Accent", group=g_vis)
+boxTransp    = input.int(86, "Box Transparency", minval=50, maxval=98, group=g_vis)
+lblSize      = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal", "Large"], group=g_vis)
+
+
+// ─── 05 · DASHBOARD ────────────────────────────────────────────────────────
+g_dsh = "05 · Dashboard"
+
+showDash = input.bool(true, "Show Dashboard", group=g_dsh)
+dashPos  = input.string("Top Right", "Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group=g_dsh)
+dashSize = input.string("Normal", "Text Size", options=["Tiny", "Small", "Normal", "Large"], group=g_dsh)
+darkDash = input.bool(true, "Dark Panel", group=g_dsh)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CYBERPUNK PALETTE + HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+color chrome  = color.rgb(198, 214, 224)   // chrome silver-blue — entry / vwap / header
+color redRisk = color.rgb(230, 45, 60)     // hard red risk zone / stop
+
+f_size(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        => size.small
+
+f_pos(string p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        "Middle Right" => position.middle_right
+        => position.top_right
+
+f_stars(float gr) => gr >= 9.0 ? "★★★★★" : gr >= 7.0 ? "★★★★" : gr >= 5.0 ? "★★★" : gr >= 3.0 ? "★★" : "★"
+f_signedR(float v) => (v >= 0 ? "+" : "") + str.tostring(v, "#.##") + "R"
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE VALUES  (ta.* every bar — never conditional)
+// ═══════════════════════════════════════════════════════════════════════════
+atr     = ta.atr(atrLen)
+safeAtr = na(atr) or atr <= 0.0 ? syminfo.mintick : atr
+volAvg  = ta.sma(volume, 20)
+hasVol  = not na(volume) and volume > 0
+
+float vwapV = ta.vwap(hlc3)
+float vwSd  = ta.stdev(close, 100)
+float vwUp  = vwapV + vwapDev * vwSd
+float vwLo  = vwapV - vwapDev * vwSd
+
+// HTF bias (global, non-repainting)
+htfDir  = request.security(syminfo.tickerid, htfTF, close > ta.ema(close, htfEma) ? 1 : -1, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+htfBias = useHTF ? nz(htfDir, 0) : 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FVG TYPE + OBJECT HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+type FVG
+    float top
+    float bot
+    int   dir          // 1 = bullish, -1 = bearish (original role)
+    int   bornBar
+    float grade
+    float ext          // running extreme reached inside the gap
+    float fillPct
+    bool  mitigated    // wick fully traversed the gap
+    bool  inverted     // closed fully through -> role flipped (IFVG)
+    bool  reacted      // already produced a rejection signal
+    box   bx
+    line  mid
+
+var array<FVG> gaps = array.new<FVG>()
+
+f_delFVG(FVG f) =>
+    if not na(f.bx)
+        box.delete(f.bx)
+    if not na(f.mid)
+        line.delete(f.mid)
+
+f_restyleIFVG(FVG f) =>
+    if showIFVG and not na(f.bx)
+        box.set_bgcolor(f.bx, color.new(colIFVG, math.min(boxTransp + 4, 98)))
+        box.set_border_color(f.bx, color.new(colIFVG, 10))
+        box.set_border_style(f.bx, line.style_dashed)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRADE BLUEPRINT TYPE + ACTIVE / HISTORY STATE
+// ═══════════════════════════════════════════════════════════════════════════
+type tViz
+    line  en
+    line  sl
+    line  t1
+    line  t2
+    line  t3
+    box   tb
+    box   sb
+    label sg
+    label le
+    label ls
+    label l1
+    label l2
+    label l3
+    label ex
+
+var array<tViz> trHist = array.new<tViz>()
+
+var bool  tradeActive = false
+var int   tradeSide   = 0
+var int   tradeBar    = na
+var float tEntry      = na
+var float tStop       = na
+var float tTp3        = na
+var float tRisk       = na
+
+var line  aEn = na
+var line  aSl = na
+var line  aT1 = na
+var line  aT2 = na
+var line  aT3 = na
+var box   aTb = na
+var box   aSb = na
+var label aSg = na
+var label aLe = na
+var label aLs = na
+var label aL1 = na
+var label aL2 = na
+var label aL3 = na
+var label aEx = na
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENGINE STATE
+// ═══════════════════════════════════════════════════════════════════════════
+var int lastFlipDir = 0
+var int lastFlipBar = na
+var int totalBull   = 0
+var int totalBear   = 0
+var int totalInv    = 0
+
+var label spotLbl = na
+
+bool   buySignal  = false
+bool   sellSignal = false
+bool   bullFlip   = false
+bool   bearFlip   = false
+string sigTag     = ""
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN ENGINE (confirmed bars only — no repaint)
+// ═══════════════════════════════════════════════════════════════════════════
+float capTop   = na
+float capBot   = na
+float capGrade = na
+
+if barstate.isconfirmed
+    useRej = sigMode == "Rejection Only" or sigMode == "Rejection + IFVG"
+    useInv = sigMode == "IFVG Flip Only" or sigMode == "Rejection + IFVG"
+
+    // ── 1. Update / age / fill / mitigation / inversion of existing gaps ────
+    if array.size(gaps) > 0
+        for i = array.size(gaps) - 1 to 0
+            FVG f = array.get(gaps, i)
+            int age = bar_index - f.bornBar
+            bool drop = false
+
+            if not f.inverted
+                if f.dir == 1
+                    // bullish gap: fills from top downward
+                    f.ext := math.min(f.ext, low)
+                    f.fillPct := math.max(0.0, math.min(1.0, (f.top - f.ext) / math.max(f.top - f.bot, syminfo.mintick)))
+                    if low <= f.bot
+                        f.mitigated := true
+                        if hideFilled and not na(f.bx)
+                            box.delete(f.bx)
+                            f.bx := na
+                            if not na(f.mid)
+                                line.delete(f.mid)
+                                f.mid := na
+                    // inversion: decisive close below the gap
+                    if close < f.bot
+                        f.inverted := true
+                        totalInv += 1
+                        lastFlipDir := -1
+                        lastFlipBar := bar_index
+                        f_restyleIFVG(f)
+                        if useInv
+                            bearFlip := true
+                            if htfBias <= 0 and f.grade >= minGrade
+                                sellSignal := true
+                                sigTag := "IFVG▼"
+                                capTop := f.top
+                                capBot := f.bot
+                                capGrade := f.grade
+                else
+                    // bearish gap: fills from bottom upward
+                    f.ext := math.max(f.ext, high)
+                    f.fillPct := math.max(0.0, math.min(1.0, (f.ext - f.bot) / math.max(f.top - f.bot, syminfo.mintick)))
+                    if high >= f.top
+                        f.mitigated := true
+                        if hideFilled and not na(f.bx)
+                            box.delete(f.bx)
+                            f.bx := na
+                            if not na(f.mid)
+                                line.delete(f.mid)
+                                f.mid := na
+                    if close > f.top
+                        f.inverted := true
+                        totalInv += 1
+                        lastFlipDir := 1
+                        lastFlipBar := bar_index
+                        f_restyleIFVG(f)
+                        if useInv
+                            bullFlip := true
+                            if htfBias >= 0 and f.grade >= minGrade
+                                buySignal := true
+                                sigTag := "IFVG▲"
+                                capTop := f.top
+                                capBot := f.bot
+                                capGrade := f.grade
+
+            // ── Rejection signals from live (unmitigated) gaps ──────────────
+            if useRej and not f.mitigated and not f.inverted and not f.reacted and age >= 1
+                if f.dir == 1 and allowBull
+                    tappedBull = low <= f.top and low >= f.bot and close > f.bot
+                    okClose = not reqBullClose or close > open
+                    if tappedBull and okClose and f.grade >= minGrade and htfBias >= 0
+                        f.reacted := true
+                        buySignal := true
+                        sigTag := "FVG▲"
+                        capTop := f.top
+                        capBot := f.bot
+                        capGrade := f.grade
+                if f.dir == -1 and allowBear
+                    tappedBear = high >= f.bot and high <= f.top and close < f.top
+                    okClose = not reqBullClose or close < open
+                    if tappedBear and okClose and f.grade >= minGrade and htfBias <= 0
+                        f.reacted := true
+                        sellSignal := true
+                        sigTag := "FVG▼"
+                        capTop := f.top
+                        capBot := f.bot
+                        capGrade := f.grade
+
+            // ── extend live boxes / age-out ─────────────────────────────────
+            if age > maxAge
+                drop := true
+            else if showBoxes and not na(f.bx) and not f.inverted and not f.mitigated
+                box.set_right(f.bx, bar_index + extendBars)
+                if not na(f.mid)
+                    line.set_x2(f.mid, bar_index + extendBars)
+
+            if drop
+                f_delFVG(f)
+                array.remove(gaps, i)
+
+    // ── 2. Detect NEW fair value gaps on this bar ───────────────────────────
+    bodyRatio = math.abs(close[1] - open[1]) / math.max(high[1] - low[1], syminfo.mintick)
+    disp3     = (high[1] - low[1]) / safeAtr
+    volScore  = hasVol and not na(volAvg) and volAvg > 0 ? math.min(volume[1] / volAvg, 2.0) / 2.0 : 0.5
+
+    newBull = allowBull and not na(high[2]) and low > high[2]
+    newBear = allowBear and not na(low[2]) and high < low[2]
+
+    if newBull
+        gTop = low
+        gBot = high[2]
+        gapAtr = (gTop - gBot) / safeAtr
+        if gapAtr >= minGapAtr and bodyRatio >= minBodyRat
+            sizeScore = math.min(gapAtr / 1.0, 1.0)
+            dispScore = math.min(disp3 / 2.0, 1.0)
+            grade = math.min(10.0, (sizeScore * 0.40 + dispScore * 0.35 + volScore * 0.25) * 10.0)
+            b = showBoxes ? box.new(bar_index - 2, gTop, bar_index + extendBars, gBot, xloc=xloc.bar_index, bgcolor=color.new(colBull, boxTransp), border_color=color.new(colBull, 35), border_width=1) : na
+            m = showBoxes and showMid ? line.new(bar_index - 2, (gTop + gBot) / 2.0, bar_index + extendBars, (gTop + gBot) / 2.0, xloc=xloc.bar_index, color=color.new(colBull, 45), style=line.style_dotted, width=1) : na
+            array.push(gaps, FVG.new(gTop, gBot, 1, bar_index, grade, gTop, 0.0, false, false, false, b, m))
+            totalBull += 1
+
+    if newBear
+        gTop = low[2]
+        gBot = high
+        gapAtr = (gTop - gBot) / safeAtr
+        if gapAtr >= minGapAtr and bodyRatio >= minBodyRat
+            sizeScore = math.min(gapAtr / 1.0, 1.0)
+            dispScore = math.min(disp3 / 2.0, 1.0)
+            grade = math.min(10.0, (sizeScore * 0.40 + dispScore * 0.35 + volScore * 0.25) * 10.0)
+            b = showBoxes ? box.new(bar_index - 2, gTop, bar_index + extendBars, gBot, xloc=xloc.bar_index, bgcolor=color.new(colBear, boxTransp), border_color=color.new(colBear, 35), border_width=1) : na
+            m = showBoxes and showMid ? line.new(bar_index - 2, (gTop + gBot) / 2.0, bar_index + extendBars, (gTop + gBot) / 2.0, xloc=xloc.bar_index, color=color.new(colBear, 45), style=line.style_dotted, width=1) : na
+            array.push(gaps, FVG.new(gTop, gBot, -1, bar_index, grade, gBot, 0.0, false, false, false, b, m))
+            totalBear += 1
+
+    // ── 3. Cap visible gaps (remove oldest) ─────────────────────────────────
+    while array.size(gaps) > maxGaps
+        FVG old = array.shift(gaps)
+        f_delFVG(old)
+
+    // ── 4. Open a trade blueprint on a fresh, confirmed signal ──────────────
+    bool takeLong  = buySignal  and not tradeActive and not na(atr) and not na(capBot)
+    bool takeShort = sellSignal and not tradeActive and not na(atr) and not na(capTop) and not takeLong
+
+    if takeLong or takeShort
+        bool  isLong = takeLong
+        float entv   = close
+        float rawStop = stopMode == "ATR" ? (isLong ? entv - atr * slAtrMult : entv + atr * slAtrMult) : (isLong ? capBot - atr * slBufAtr : capTop + atr * slBufAtr)
+        float risk0  = math.abs(entv - rawStop)
+        float risk   = math.min(math.max(risk0, atr * minRiskAtr), atr * maxRiskAtr)
+        float stopv  = isLong ? entv - risk : entv + risk
+        float t1     = isLong ? entv + risk * tp1R : entv - risk * tp1R
+        float t2     = isLong ? entv + risk * tp2R : entv - risk * tp2R
+        float t3     = isLong ? entv + risk * tp3R : entv - risk * tp3R
+        color c      = isLong ? colBull : colBear
+        int   xr     = bar_index + projBars
+
+        tradeActive := true
+        tradeSide   := isLong ? 1 : -1
+        tradeBar    := bar_index
+        tEntry      := entv
+        tStop       := stopv
+        tTp3        := t3
+        tRisk       := risk
+
+        // Signal pill (idiom #1) — ATR-offset, no arrows
+        if showSignal
+            float lblY = isLong ? low - safeAtr * 0.6 : high + safeAtr * 0.6
+            string head = isLong ? "BUY" : "SELL"
+            string txt  = showStars ? head + "\n" + f_stars(nz(capGrade, 0.0)) + "  " + str.tostring(nz(capGrade, 0.0), "#.0") + "/10" : head
+            aSg := label.new(bar_index, lblY, txt, xloc=xloc.bar_index, yloc=yloc.price, style=isLong ? label.style_label_up : label.style_label_down, color=color.new(c, 0), textcolor=color.white, size=f_size(lblSize), text_formatting=text.format_bold)
+
+        // Zone boxes — GREEN target zone / RED risk zone at the stop
+        if showZones
+            float tpTop = isLong ? t3 : entv
+            float tpBot = isLong ? entv : t3
+            float slTop = isLong ? entv : stopv
+            float slBot = isLong ? stopv : entv
+            aTb := box.new(bar_index, tpTop, xr, tpBot, xloc=xloc.bar_index, bgcolor=color.new(colBull, 84), border_color=color.new(colBull, 45), border_width=1)
+            aSb := box.new(bar_index, slTop, xr, slBot, xloc=xloc.bar_index, bgcolor=color.new(redRisk, 82), border_color=color.new(redRisk, 55), border_width=1)
+
+        // Entry / SL / TP lines
+        if showLines
+            aEn := line.new(bar_index, entv,  xr, entv,  xloc=xloc.bar_index, color=color.new(chrome, 0), width=2)
+            aSl := line.new(bar_index, stopv, xr, stopv, xloc=xloc.bar_index, color=color.new(redRisk, 10), width=1, style=line.style_dashed)
+            aT1 := line.new(bar_index, t1, xr, t1, xloc=xloc.bar_index, color=color.new(colBull, 12), width=1)
+            aT2 := line.new(bar_index, t2, xr, t2, xloc=xloc.bar_index, color=color.new(colBull, 32), width=1)
+            aT3 := line.new(bar_index, t3, xr, t3, xloc=xloc.bar_index, color=color.new(colBull, 50), width=1)
+
+        // Level labels
+        if showLevels
+            string dw = isLong ? "LONG" : "SHORT"
+            aLe := label.new(xr, entv,  dw + " @ " + str.tostring(entv, format.mintick), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(chrome, 0), textcolor=color.rgb(10, 14, 18), size=f_size(lblSize))
+            aLs := label.new(xr, stopv, "SL @ " + str.tostring(stopv, format.mintick), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(redRisk, 10), textcolor=color.white, size=f_size(lblSize))
+            aL1 := label.new(xr, t1, "TP1 " + str.tostring(tp1R, "#.#") + "R", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(colBull, 12), textcolor=color.white, size=f_size(lblSize))
+            aL2 := label.new(xr, t2, "TP2 " + str.tostring(tp2R, "#.#") + "R", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(colBull, 28), textcolor=color.white, size=f_size(lblSize))
+            aL3 := label.new(xr, t3, "TP3 " + str.tostring(tp3R, "#.#") + "R", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(colBull, 44), textcolor=color.white, size=f_size(lblSize))
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZONE-READER CANDLES (idiom #3 — build var, one global call)
+// ═══════════════════════════════════════════════════════════════════════════
+bool inBullZone = false
+bool inBearZone = false
+if colorCandles and array.size(gaps) > 0
+    for i = 0 to array.size(gaps) - 1
+        FVG zf = array.get(gaps, i)
+        if not zf.inverted and close <= zf.top and close >= zf.bot
+            if zf.dir == 1
+                inBullZone := true
+            else
+                inBearZone := true
+
+color barCol = na
+if colorCandles
+    barCol := buySignal ? color.new(colBull, 20) : sellSignal ? color.new(colBear, 20) : inBullZone ? color.new(colBull, 72) : inBearZone ? color.new(colBear, 72) : na
+barcolor(barCol, title="Zone Reader Candles")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VWAP + σ BANDS (idiom #4 — behind a toggle)
+// ═══════════════════════════════════════════════════════════════════════════
+plot(useVwap ? vwapV : na, "VWAP", color=color.new(chrome, 0), linewidth=2)
+pU = plot(useVwap ? vwUp : na, "VWAP+σ", color=color.new(chrome, 70))
+pL = plot(useVwap ? vwLo : na, "VWAP-σ", color=color.new(chrome, 70))
+fill(pU, pL, color=useVwap ? color.new(chrome, 92) : na, title="VWAP Band")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRADE MANAGEMENT — live-extend then freeze on exit
+// ═══════════════════════════════════════════════════════════════════════════
+if tradeActive and not na(tradeBar)
+    int rr = math.max(tradeBar + 1, bar_index + projBars)
+    if not na(aEn)
+        line.set_x2(aEn, rr)
+    if not na(aSl)
+        line.set_x2(aSl, rr)
+    if not na(aT1)
+        line.set_x2(aT1, rr)
+    if not na(aT2)
+        line.set_x2(aT2, rr)
+    if not na(aT3)
+        line.set_x2(aT3, rr)
+    if not na(aTb)
+        box.set_right(aTb, rr)
+    if not na(aSb)
+        box.set_right(aSb, rr)
+    if not na(aLe)
+        label.set_x(aLe, rr)
+    if not na(aLs)
+        label.set_x(aLs, rr)
+    if not na(aL1)
+        label.set_x(aL1, rr)
+    if not na(aL2)
+        label.set_x(aL2, rr)
+    if not na(aL3)
+        label.set_x(aL3, rr)
+
+if barstate.isconfirmed and tradeActive and not na(tradeBar) and bar_index > tradeBar
+    bool slHit  = tradeSide == 1 ? low <= tStop : high >= tStop
+    bool tpHit  = tradeSide == 1 ? high >= tTp3 : low <= tTp3
+    bool expired = (bar_index - tradeBar) >= tradeMaxBars
+
+    if slHit or tpHit or expired
+        // SL takes priority if both boundaries touch on the same candle
+        float resR = slHit ? -1.0 : tpHit ? tp3R : (tradeSide == 1 ? (close - tEntry) / tRisk : (tEntry - close) / tRisk)
+        int   closeEdge = math.max(tradeBar + 3, bar_index)
+
+        // freeze right edge on every live object
+        if not na(aEn)
+            line.set_x2(aEn, closeEdge)
+        if not na(aSl)
+            line.set_x2(aSl, closeEdge)
+        if not na(aT1)
+            line.set_x2(aT1, closeEdge)
+        if not na(aT2)
+            line.set_x2(aT2, closeEdge)
+        if not na(aT3)
+            line.set_x2(aT3, closeEdge)
+        if not na(aTb)
+            box.set_right(aTb, closeEdge)
+        if not na(aSb)
+            box.set_right(aSb, closeEdge)
+        if not na(aLe)
+            label.set_x(aLe, closeEdge)
+        if not na(aLs)
+            label.set_x(aLs, closeEdge)
+        if not na(aL1)
+            label.set_x(aL1, closeEdge)
+        if not na(aL2)
+            label.set_x(aL2, closeEdge)
+        if not na(aL3)
+            label.set_x(aL3, closeEdge)
+
+        if showExit
+            float resPx = slHit ? tStop : tpHit ? tTp3 : close
+            string resTxt = slHit ? "SL ✘ -1R" : tpHit ? "TP ✔ +" + str.tostring(tp3R, "#.#") + "R" : "EXIT " + f_signedR(resR)
+            color resCol = resR >= 0 ? colBull : colBear
+            bool downStyle = tradeSide == 1 ? resR >= 0 : resR < 0
+            aEx := label.new(closeEdge, resPx, resTxt, xloc=xloc.bar_index, style=downStyle ? label.style_label_down : label.style_label_up, color=color.new(resCol, 0), textcolor=color.white, size=f_size(lblSize), text_formatting=text.format_bold)
+
+        // archive snapshot + array-capped cleanup (idiom #6)
+        tViz tv = tViz.new(aEn, aSl, aT1, aT2, aT3, aTb, aSb, aSg, aLe, aLs, aL1, aL2, aL3, aEx)
+        array.push(trHist, tv)
+        while array.size(trHist) > maxHist
+            tViz od = array.shift(trHist)
+            if not na(od.en)
+                line.delete(od.en)
+            if not na(od.sl)
+                line.delete(od.sl)
+            if not na(od.t1)
+                line.delete(od.t1)
+            if not na(od.t2)
+                line.delete(od.t2)
+            if not na(od.t3)
+                line.delete(od.t3)
+            if not na(od.tb)
+                box.delete(od.tb)
+            if not na(od.sb)
+                box.delete(od.sb)
+            if not na(od.sg)
+                label.delete(od.sg)
+            if not na(od.le)
+                label.delete(od.le)
+            if not na(od.ls)
+                label.delete(od.ls)
+            if not na(od.l1)
+                label.delete(od.l1)
+            if not na(od.l2)
+                label.delete(od.l2)
+            if not na(od.l3)
+                label.delete(od.l3)
+            if not na(od.ex)
+                label.delete(od.ex)
+
+        // release active refs
+        aEn := na
+        aSl := na
+        aT1 := na
+        aT2 := na
+        aT3 := na
+        aTb := na
+        aSb := na
+        aSg := na
+        aLe := na
+        aLs := na
+        aL1 := na
+        aL2 := na
+        aL3 := na
+        aEx := na
+
+        tradeActive := false
+        tradeSide   := 0
+        tradeBar    := na
+        tEntry      := na
+        tStop       := na
+        tTp3        := na
+        tRisk       := na
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GRADE SPOTLIGHT + DASHBOARD (last bar)
+// ═══════════════════════════════════════════════════════════════════════════
+var table dash = table.new(f_pos(dashPos), 2, 11, frame_color=color.new(chrome, 40), frame_width=1, border_width=1, border_color=color.new(chrome, 70))
+
+if barstate.islast and (showDash or showGrade)
+    // aggregate live-gap stats
+    int   actBull  = 0
+    int   actBear  = 0
+    float bestGrade = 0.0
+    int   bestDir  = 0
+    float spotTop  = na
+    float spotBot  = na
+    float nearDist = na
+    float nearFill = na
+    float nearPrice = na
+    int   nearDir  = 0
+
+    if array.size(gaps) > 0
+        for i = 0 to array.size(gaps) - 1
+            FVG gg = array.get(gaps, i)
+            if not gg.inverted and not gg.mitigated
+                if gg.dir == 1
+                    actBull += 1
+                else
+                    actBear += 1
+                if gg.grade > bestGrade
+                    bestGrade := gg.grade
+                    bestDir := gg.dir
+                    spotTop := gg.top
+                    spotBot := gg.bot
+                float refPx = (gg.top + gg.bot) / 2.0
+                float d = math.abs(close - refPx)
+                if na(nearDist) or d < nearDist
+                    nearDist := d
+                    nearFill := gg.fillPct
+                    nearPrice := refPx
+                    nearDir := gg.dir
+
+    // ── single ★ spotlight on the strongest active gap only ─────────────────
+    if showGrade
+        if not na(spotLbl)
+            label.delete(spotLbl)
+            spotLbl := na
+        if bestGrade > 0
+            float sy = bestDir == 1 ? spotBot : spotTop
+            spotLbl := label.new(bar_index, sy, f_stars(bestGrade) + "  " + str.tostring(bestGrade, "#.0"), xloc=xloc.bar_index, yloc=yloc.price, style=bestDir == 1 ? label.style_label_up : label.style_label_down, color=color.new(bestDir == 1 ? colBull : colBear, 15), textcolor=color.white, size=f_size(lblSize), text_formatting=text.format_bold)
+
+    // ── dashboard ───────────────────────────────────────────────────────────
+    if showDash
+        color bg    = darkDash ? color.rgb(16, 18, 24) : color.rgb(244, 246, 248)
+        color bgAlt = darkDash ? color.rgb(26, 29, 37) : color.rgb(230, 233, 238)
+        color txt   = darkDash ? color.rgb(232, 236, 242) : color.rgb(24, 26, 30)
+        color muted = darkDash ? color.rgb(150, 156, 168) : color.rgb(96, 100, 108)
+        sz = f_size(dashSize)
+
+        biasTxt = htfBias > 0 ? "BULLISH" : htfBias < 0 ? "BEARISH" : "NEUTRAL"
+        biasCol = htfBias > 0 ? colBull : htfBias < 0 ? colBear : muted
+
+        activeTxt = buySignal ? "BUY " + sigTag : sellSignal ? "SELL " + sigTag : "—"
+        activeCol = buySignal ? colBull : sellSignal ? colBear : muted
+
+        flipTxt = lastFlipDir == 1 ? "▲ Bull" : lastFlipDir == -1 ? "▼ Bear" : "—"
+        flipAge = na(lastFlipBar) ? "" : "  (" + str.tostring(bar_index - lastFlipBar) + "b)"
+        flipCol = lastFlipDir == 1 ? colBull : lastFlipDir == -1 ? colBear : muted
+
+        trTxt = tradeActive ? (tradeSide == 1 ? "LONG @ " : "SHORT @ ") + str.tostring(tEntry, format.mintick) : "—"
+        trCol = tradeActive ? (tradeSide == 1 ? colBull : colBear) : muted
+
+        // gradient / chrome header, bold-italic (idiom #5)
+        color headHue = color.from_gradient(bestGrade, 0.0, 10.0, color.new(chrome, 0), color.new(colBull, 0))
+        table.cell(dash, 0, 0, "FVG SNIPER", bgcolor=headHue, text_color=color.rgb(10, 12, 16), text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 0, "[JOAT]", bgcolor=color.new(chrome, 0), text_color=color.rgb(10, 12, 16), text_size=sz, text_halign=text.align_center)
+        table.cell_set_text_formatting(dash, 0, 0, text.format_bold + text.format_italic)
+        table.cell_set_text_formatting(dash, 1, 0, text.format_bold + text.format_italic)
+
+        table.cell(dash, 0, 1, "HTF Bias", bgcolor=bg, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 1, biasTxt, bgcolor=bg, text_color=biasCol, text_size=sz)
+
+        table.cell(dash, 0, 2, "Active Bull FVG", bgcolor=bgAlt, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 2, str.tostring(actBull), bgcolor=bgAlt, text_color=colBull, text_size=sz)
+
+        table.cell(dash, 0, 3, "Active Bear FVG", bgcolor=bg, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 3, str.tostring(actBear), bgcolor=bg, text_color=colBear, text_size=sz)
+
+        table.cell(dash, 0, 4, "Nearest Gap", bgcolor=bgAlt, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 4, na(nearPrice) ? "—" : str.tostring(nearPrice, format.mintick) + (nearDir == 1 ? " ▲" : " ▼"), bgcolor=bgAlt, text_color=txt, text_size=sz)
+
+        table.cell(dash, 0, 5, "Nearest Fill %", bgcolor=bg, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 5, na(nearFill) ? "—" : str.tostring(math.round(nearFill * 100)) + "%", bgcolor=bg, text_color=txt, text_size=sz)
+
+        table.cell(dash, 0, 6, "Strongest Gap", bgcolor=bgAlt, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 6, bestGrade > 0 ? f_stars(bestGrade) + " " + str.tostring(bestGrade, "#.0") : "—", bgcolor=bgAlt, text_color=bestDir == 1 ? colBull : bestDir == -1 ? colBear : txt, text_size=sz)
+
+        table.cell(dash, 0, 7, "Last IFVG Flip", bgcolor=bg, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 7, flipTxt + flipAge, bgcolor=bg, text_color=flipCol, text_size=sz)
+
+        table.cell(dash, 0, 8, "Active Signal", bgcolor=bgAlt, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 8, activeTxt, bgcolor=bgAlt, text_color=activeCol, text_size=sz)
+
+        table.cell(dash, 0, 9, "Active Trade", bgcolor=bg, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 9, trTxt, bgcolor=bg, text_color=trCol, text_size=sz)
+
+        table.cell(dash, 0, 10, "Gaps B / Br / Inv", bgcolor=bgAlt, text_color=muted, text_size=sz)
+        table.cell(dash, 1, 10, str.tostring(totalBull) + " / " + str.tostring(totalBear) + " / " + str.tostring(totalInv), bgcolor=bgAlt, text_color=txt, text_size=sz)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+alertcondition(buySignal,  title="FVG Sniper — BUY",             message="FVG Sniper [JOAT] | BUY signal on {{ticker}} / {{interval}}")
+alertcondition(sellSignal, title="FVG Sniper — SELL",            message="FVG Sniper [JOAT] | SELL signal on {{ticker}} / {{interval}}")
+alertcondition(bullFlip,   title="FVG Sniper — Bull IFVG Flip",  message="FVG Sniper [JOAT] | Bullish IFVG inversion on {{ticker}} / {{interval}}")
+alertcondition(bearFlip,   title="FVG Sniper — Bear IFVG Flip",  message="FVG Sniper [JOAT] | Bearish IFVG inversion on {{ticker}} / {{interval}}")

@@ -1,0 +1,1086 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © GoemonYae
+
+//@version=6
+// @description Library with digital signal processing (DSP) filters and related functions that smooth (low-pass filters, moving averages) or detrend (high-pass and band-pass filters as "oscillators") data.
+library("FiltersToolkit", overlay=false)
+
+import GoemonYae/MathTransform/2
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  CONTENT  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+// * John Ehlers (2001)                 - MESA Adaptive Moving Average (MAMA)
+// * Robert Bristow-Johnson (ca 2000)   - BiQuad (high-pass, low-pass and bandpass filters, implemented by @The_Peaceful_Lizard)
+// * John Ehlers (2004)                 - Relative Vigor Index (RVI)
+// * John Ehlers (2004)                 - Cyber Cycle
+// * John Ehlers (2004)                 - Butterworth High Pass Filter (1 and 2-pole)
+// * John Ehlers (2004)                 - Super Smoother (2 and 3-pole)
+// * unknown (pre-2010)                 - Average Directional Volatility Moving Average (ADXvma)
+// * John Ehlers (2019)                 - Ehlers' Combined Bandpass Filter with Truncation and AGC
+// * John Ehlers (2019)                 - Voss Predictive filter
+// * Alex Glover (2019)                 - Adaptive Autonomous Recursive Moving Average (A2RMA)
+// * John Ehlers (2024)                 - Ultimate Smoother (2-pole)
+// * Arthur Nazarian (2025)             - Ultimate Smoother (3-pole)
+// * Simple, Exponential and Weighted Moving Averages (SMA, EMA, WMA) for comparison
+//
+// 
+// -------------[ low pass filters, not shortlisted ] ------------- //
+// * Jurik Moving Average (JMA)                     - Very little lag and pretty smooth. (dynamic) Ultimate/SuperSmoother seems similar with much less complex calculations. https://in.tradingview.com/script/ofu6hRfu-Jurik-MA-lastguru/
+// * Sine Weighted Moving Average                   - Good and smooth, but BiQuad with Q=0.7 is close and often outperforms
+// * Parabolic Weighted MA (PWMA)                   - Good, but BiQuad with Q=0.4 is very close.
+// * McGinley Dynamic                               - Good, but BiQuad with Q=0.6 is very close.
+// * Rational Quadratic Kernel regression           - Good, but computationally intensive and many parameters. Moreover, finetuning BiQuad can get same results but with less parameters and computationally quicker. SuperSmoother also often alike.
+// * Gaussian Kernel regression                     - Similar to Rational Quadratic Kernel     
+// * Double Smoothed EMA (DSEMA)                    - Good but slightly less smooth for the given lag
+// * Integral of Linear Regression Slope (ILRS)     - As espected from LR. Similar behaviour to BiQuad with Q=0.8 but less smooth
+// * Hull MA (HMA)                                  - Good on certain patterns, but tends to overshoot on large changes -- similar to Ultimate Smoother but with more lag
+// * Ehlers' Optimum Elliptic filter                - Good, but SuperSmoother outperforms it; Stocks & Commodities, V.18:7 (July, 2000): "Optimal Detrending"
+// * Ehlers' Instantaneous Trendline                - Adapts well on contramoves but not not good on lower frequencies, might still add it for completeness
+// * Leader EMA                                     - Similar to SuperSmoother but worse performance
+// * Chebyshev type I and IIR                       - Good but slightly less smooth than SuperSmoother. Also not particularly nice roll-off compared to Butterworth: https://en.wikipedia.org/wiki/Butterworth_filter
+// * Kaufmann Moving Average Adaptive (KAMA)        - Interesting flat behaviour but pretty adaptive and quickly becomes flat after large move; but very erratic overall -- Perry J. Kaufman
+// * Fast EMA (FEMA)                                - Good but worse performance than e.g. SuperSmoother; significant lag on lower frequencies
+// * IE/2 Early T3                                  - Somewhat similar to Ultimate Smoother but worse
+// * Alexander Moving Average (ALXMA)               - Set on high frequency it has poor performance; set on lower frequencies it has similar characterstics to SuperSmoother. Overall no added value
+// * Hodrick-Prescott filter                        - Seems non-smooth
+// * Fractal Adaptive MA (FRAMA)                    - Odd patterns. In some cases anticipates temporal moves correctly but is incorrect most of the time
+// * Linear Weighted Moving Average                 - Similar to Super Smoother but less smooth
+// * Laguerre Filter                                - Oscillates too much
+// * Triangular MA                                  - Oscillates too much and significant lag
+// * Ahrens Moving Average                          - On some settings similar to SuperSmoother, but overall less smooth
+// * Recursive Moving Trendline                     - Overestimates a trend
+// * Double EMA (DEMA)                              - Unsmooth for the given lag (also called by Ehlers "Zero Lag EMA")
+//
+// ----------------[ detrenders, not shortlisted ] ---------------- //
+// * Decyler                                        - Generally less smooth than others at equal lag; Ehlers 2013 book, Ch.4 and TASC 2015-09
+// * Centre of Gravity Oscillator                   - Ehlers 2004 book, Ch.5
+// * work in progress...
+// 
+// =============================================================================================================================== //
+//#endregion
+
+
+// ========================================================================= //
+//#region ==================[   MOVING AVERAGES   ]========================= //
+// ========================================================================= //
+
+// @function        Custom Exponential Moving Average (EMA) that circumvents the requirement of a "simple int" period
+//                   -- a "series int" or "series float" is fine too. This will come at the expense of speed.
+// @param source    <series float> The source series.
+// @param period    <float> The lookback period
+// @returns         <float> The EMA value.
+ema(series float source, float period) =>
+    alpha = 2.0 / (period + 1)
+    ema = 0.0
+    ema := alpha * source + (1 - alpha) * nz(ema[1], source)
+    ema
+
+
+// @function          Custom Simple Moving Average (SMA) that circumvents the requirement of a "simple int" period
+//                    -- a "series int" is fine too. This will come at the expense of speed.
+// @param source      <series float> The source series.
+// @param period      <int> The period
+// @returns           <float> The SMA value.
+sma(series float source, int period) =>
+    sum = 0.0
+    for i = 0 to period - 1
+        sum += nz(source[i])
+    sum / period
+
+
+// @function          Custom Weighted Moving Average (WMA) that circumvents the requirement of a "simple int" period
+//                    -- a "series int" is fine too. This will come at the expense of speed.
+// @param source      <series float> The source series.
+// @param period      <int> The period
+// @returns           <float> The WMA value.
+wma(series float source, int period) =>
+    num = 0.0
+    denom = 0.0
+    for i = 0 to period - 1
+        weight = period - i
+        num += weight * nz(source[i])
+        denom += weight
+    num / denom
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ==================[   2003 and earlier   ]======================== //
+// ========================================================================= //
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  MESA ADAPTIVE MOVING AVERAGE (MAMA)  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function        this Hilbert Transform function implements the Hilbert Transform as used by John Ehlers for digital signal processing in financial time series analysis. 
+//                  The Hilbert Transform is a key component in generating complex numbers from a real-valued time series, allowing for the analysis of 
+//                  the analytic signal, including its instantaneous phase and frequency. The coefficients used in the transform are based on Ehlers' work, 
+//                  providing an effective means to smooth and phase shift the input data. The period parameter can be dynamically adjusted
+//                  based on historical data to improve the responsiveness and accuracy of the transform.
+// 
+//                  Source: John Ehlers - "Rocket Science for Traders" (2001), "TASC 2001 V. 19:9 (30-35)", "Cybernetic Analysis for Stocks and Futures" (2004)
+// @param x         <float> The input time series data.
+// @param period    <float> The lookback period for the cycle period correction. If not provided, a default coefficient is applied.
+// @param method    <string> Either '2001' or '2004', referring to John Ehlers' books where he used slightly different parameters for the period correction            
+// @returns         <float> The Hilbert Transform of the input data, adjusted by the given or derived period.
+export hilbert_transform(series float x, float period=na, string method='2001') =>
+    const float a = 0.0962
+    const float b = 0.5769
+    c = switch method
+        '2001' => na(period) ? 1 : 0.075 * nz(period[1]) + 0.54  // referring to "Rocket Science for Traders" (2001)
+        '2004' => na(period) ? 1 : 0.080 * nz(period[1]) + 0.50  // referring to "Cybernetic Analysis for Stocks and Futures" (2004)
+    (a * x + b * nz(x[2]) - b * nz(x[4]) - a * nz(x[6])) * c
+
+
+// @function        Computes the dominant cycle period using a Homodyne Discriminator.// 
+//                  It utilises the Hilbert Transform to extract the in-phase (I1) and quadrature (Q1) components of the input data, then computes phase differences
+//                  via phasor addition and smoothing over several bars. The 'method' parameter selects between two sets of coefficients: '2001' (from "Rocket Science for Traders")
+//                  and '2004' (from "Cybernetic Analysis for Stocks and Futures").
+// 
+//                  Source: John Ehlers - "Rocket Science for Traders" (2001), "TASC 2001 V. 19:9 (30-35)", "Cybernetic Analysis for Stocks and Futures" (2004)
+// @param x :       <series float> The input time series data (e.g. price series).
+// @param method    <string> Specifies the calculation method; use '2001' (default) for the 2001 coefficient set or '2004' for the 2004 version.
+// @param alpha     <float> Smoothing parameter applied in the '2004' method. Default is 0.07.// 
+// @returns         <[float, float, float] A tuple containing:
+//                    * period: The estimated dominant cycle period
+//                    * Q1: The quadrature component of the analytic signal
+//                    * I1: The in-phase component of the analytic signal
+export compute_homodyne_discriminator(series float x, string method='2001', float alpha=0.07) =>
+    var smooth = 0., var detrender = 0.
+    var cycle = 0., var delta_phase = 0.
+    var Q1 = 0., var I1 = 0.
+    var jI = 0., var jQ = 0.
+    var Q2 = 0., var I2 = 0.
+    var Re = 0., var Im = 0.
+    var inst_period = 0., var period = 0.
+
+    if method == '2001'  // referring to "Rocket Science for Traders" (2001)
+        if bar_index > 5
+            smooth    :=  (4 * x + 3 * nz(x[1]) + 2 * nz(x[2]) + nz(x[3])) / 10  // TODO, replace with UltimateSmoother(10)?
+            detrender := hilbert_transform(smooth, period, '2001')
+            
+            // Compute InPhase (cosine) and Quadrature (sine) components. These components represent the real and imaginary parts of the analytic signal. 
+            // These enable efficient computation to find the dominant cycle period, the dominant cycle amplitude, and the phase of the dominant cycle.
+            Q1 := hilbert_transform(detrender, period, '2001')
+            I1 := nz(detrender[3])
+            
+            // // Homodyne Discriminator approach: advance the phase of I1 and Q1 by 90 degrees
+            jI := hilbert_transform(I1, period, '2001')
+            jQ := hilbert_transform(Q1, period, '2001')
+            
+            // Phasor addition for 3 bar averaging
+            I2 := I1 - jQ
+            Q2 := Q1 + jI
+            
+            // Smooth the I and Q components before applying the discriminator
+            I2 := 0.2 * I2 + 0.8 * nz(I2[1])
+            Q2 := 0.2 * Q2 + 0.8 * nz(Q2[1])
+            
+            // // Homodyne Discriminator
+            Re := I2 * nz(I2[1]) + Q2 * nz(Q2[1])
+            Im := I2 * nz(Q2[1]) - Q2 * nz(I2[1])
+            Re := 0.2 * Re      + 0.8 * nz(Re[1])
+            Im := 0.2 * Im      + 0.8 * nz(Im[1])
+            
+            // Update period
+            if Re != 0 and Im != 0
+                period := nz(2 * math.pi / math.atan(Im / Re))
+
+            period := math.max(math.min(period, 1.5 * nz(period[1])), (2./3.) * nz(period[1]))
+            period := math.min(math.max(period, 6), 50)
+
+            period := 0.20 * period + 0.80 * nz(period[1])
+
+            // In TASC 2001 19:11 (14-21): Letters to S&C, Ehlers said that he decided against additional smoothing and introducing more lag
+            // But might be interesting for plotting
+            // smooth_period := 0.33 * period + 0.67 * nz(smooth_period[1])
+
+    else if method == '2004'  // referring to "Cybernetic Analysis for Stocks and Futures" (2004)
+        smooth  :=  (x + 2 * nz(x[1]) + 2 * nz(x[2]) + nz(x[3])) / 6  // TODO, replace with UltimateSmoother(10)?
+        cycle   := (1 - 0.5 * alpha) * (1 - 0.5 * alpha) * (smooth - 2 * nz(smooth[1]) + nz(smooth[2])) + 
+          2 * (1 - alpha) * nz(cycle[1]) - 
+          (1 - alpha) * (1 - alpha) * nz(cycle[2])
+        if bar_index < 7
+            cycle := (nz(x) - 2 * nz(x[1]) + nz(x[2])) / 4
+        
+        Q1 := hilbert_transform(cycle, inst_period, '2004')
+        I1 := cycle[3]
+        
+        if nz(Q1[1]) != 0 and nz(Q1) != 0
+            delta_phase := (I1 / Q1 - I1[1] / Q1[1]) / (1 + I1 * I1[1] / (Q1 * Q1[1]))
+            delta_phase := math.max(0.1, math.min(1.1, delta_phase))
+        
+        median_delta = ta.median(delta_phase, 5)
+        dc = median_delta != 0 ? math.pi * 2 / median_delta + 0.5 : 15
+        
+        inst_period := 0.33 * dc + 0.67 * nz(inst_period[1])
+        period := 0.15 * inst_period + 0.85 * nz(period[1])
+
+    else
+        runtime.error('In `compute_homodyne_discriminator()`, only the follwing is implemented: `method=["2001", "2004"]`.')
+
+    [period, Q1, I1]
+
+
+// @function                    Computes the adaptive alpha for the MESA Adaptive Moving Average (MAMA) method.
+//                              It adapts to the dominant cycle phase to provide a responsive and smooth moving average.
+//                              The function parameters include the source series and fast and slow alpha factors to control the adaptation speed.
+// 
+//                              Source: John Ehlers - "Rocket Science for Traders" (2001), "TASC 2001 V. 19:9 (30-35)", "Cybernetic Analysis for Stocks and Futures" (2004)
+// @param source                <float> source series, such as the "close" price
+// @param fast_limit            <float> Fast alpha factor
+// @param slow_limit            <float> Slow alpha factor
+// @param method                <string> Either '2001' or '2004', referring to John Ehlers' books' publication dates where he uses
+//                              different methods to calculate the cycle periods.
+// @returns                     <float> MAMA series
+compute_mama_alpha(series float source, float fast_limit, float slow_limit, string method = '2001') =>
+    var float alpha         = na
+    var phase = 0., var delta_phase = 0.
+
+    // Get dominant cycle period and InPhase (cosine) and Quadrature (sine) components
+    [period, Q1, I1] = compute_homodyne_discriminator(source, method=method)
+
+    // Compute phase
+    if I1 != 0
+        phase := 180 / math.pi * math.atan(Q1 / I1)
+
+    // Get adaptive alpha
+    delta_phase := math.max(nz(phase[1]) - phase, 1)
+    alpha       := math.max(fast_limit / delta_phase, slow_limit)
+    
+    alpha
+
+
+// @function                    The MESA Adaptive Moving Average (MAMA) dynamically adjusts its smoothing coefficient based on the market's cycle.
+//                              It adapts to the dominant cycle phase to provide a responsive and smooth moving average.
+//                              The function parameters include the source series and fast and slow alpha factors to control the adaptation speed.
+//                              This implementation also includes the Following Adaptive Moving Average (FAMA); by using an α in FAMA that is half the value
+//                              of the α in MAMA, the FAMA is synchronized with MAMA, but the vertical movement is not as great. As a result, MAMA and FAMA do not cross
+//                              unless there has been a major change in market direction.
+// 
+//                              Source: John Ehlers - "Rocket Science for Traders" (2001), "TASC 2001 V. 19:9 (30-35)", "Cybernetic Analysis for Stocks and Futures" (2004)
+// 
+//                              This implementation also adds the Kaufman Adaptive Moving Average (KAMA) using the efficiency ratio (Kaufman, P. J. - "Smarter Trading" (1995))
+//                              which is adapted from @rumpypumpydumpy (2019) -- https://www.tradingview.com/script/KblVyjf3-MAMA-FAMA-KAMA/
+// 
+//                              Did my best to follow proper logic and Ehler's original code, but all TV implementations seem different. I have compared to these, and they are all different:
+//                              * https://www.tradingview.com/script/ja5SxFE9-MESA-Adaptive-Moving-Average-correct-calculations/
+//                              * https://www.tradingview.com/script/d5A31EGo-Ehlers-MESA-Adaptive-Moving-Average-LazyBear-with-ekoronin-fix/
+//                              * https://www.tradingview.com/script/BQ6O9iWs-MESA-Adaptive-Moving-Average-Improved-MTF/
+//                              * https://www.tradingview.com/script/9c4NsVJk-Ehlers-MESA-Adaptive-Moving-Average/ (Seems very wrong)
+//                              * https://www.tradingview.com/script/aaWzn9bK-Ehlers-MESA-Adaptive-Moving-Averages-MAMA-FAMA/
+// @param source                <float> source series, such as the "close" price
+// @param fast_limit            <float> Fast alpha factor
+// @param slow_limit            <float> Slow alpha factor
+// @param lookback_period       <int> If not equal to `na`, the lookback period is used to compute the Kaufman Efficiency Ratio and subsequently
+//                              override of the `fast_limit` and `slow_limit` parameters dynamically
+// @param method                <string> Either '2001' or '2004', referring to John Ehlers' books' publication dates where he uses
+//                              different methods to calculate the cycle periods.
+// @returns                     <[float, float, float]> MAMA, FAMA, KAMA series
+export mesa_adaptive_moving_average(series float source, float fast_limit=0.5, float slow_limit=0.05, int lookback_period=na, string method='2001') =>
+    var float fastlim = fast_limit
+    var float slowlim = slow_limit
+    var float efficiency_ratio = 1
+    if not na(lookback_period)  // using Kaufman Efficiency ratio -- , adapted from @rumpypumpydumpy (2019) -- https://www.tradingview.com/script/KblVyjf3-MAMA-FAMA-KAMA/
+        // Kaufman Efficiency Ratio calculation
+        direction           = math.abs(source - source[lookback_period])
+        volatility          = math.sum(math.abs(ta.change(source)), lookback_period)
+        efficiency_ratio    := direction / volatility
+        // alpha = efficiency_ratio * (fast_limit - slow_limit) + slow_limit  // Kaufman uses it like this
+        fastlim             := efficiency_ratio  // responsive when high ER, more smoothed when low ER
+        slowlim             := 0.1 * efficiency_ratio  // maintain meaningful difference between the fast and slow smoothing factors
+
+    alpha           = compute_mama_alpha(source, fastlim, slowlim, method)
+    beta            = alpha / 2
+    alpha_kama      = math.pow((efficiency_ratio * (beta - alpha)) + alpha, 2)
+
+    var float mama  = 0.
+    var float fama  = 0.
+    var float kama  = 0.
+    mama := alpha * source      + (1 - alpha)       * nz(mama[1])
+    fama := beta * mama         + (1 - beta)        * nz(fama[1])
+    kama := alpha_kama * source + (1 - alpha_kama)  * nz(kama[1])
+
+    [mama, fama, kama]
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  BIQUAD FILTERS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    The BiQuad High Pass Filter is designed to attenuate the low-frequency components of the input signal, allowing the higher-frequency components to pass through.
+//                              This filter is based on digital signal processing techniques, commonly used in audio processing and financial time series analysis to remove long-term trends and highlight short-term cycles.
+//                              The parameters are derived based on the cutoff frequency and quality factor to adjust the filter's responsiveness and selectivity.
+// 
+//                              Source: Adapted from @The_Peaceful_Lizard's scripts, original by Robert Bristow-Johnson - https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+// @param source                <float> Source series, such as the "close" price
+// @param critical_period       <float> Critical period that defines the cutoff frequency
+// @param Q                     <float> Quality factor, determining the selectivity of the filter.
+// @returns                     <float> Filtered, detrended series.
+export hpf_biquad(float source, float critical_period=50, float Q=0.5) =>
+    var float filtered = na
+    var float a1 = na
+    var float a2 = na
+    var float b0 = na
+    var float b1 = na
+    var float b2 = na
+
+    // Calculation of coefficients
+    if barstate.isfirst or critical_period != critical_period[1] or Q != Q[1]
+        float fc = 0.5 / critical_period
+        float omega = 2 * math.pi * fc
+        float cos_omega = math.cos(omega)
+
+        float alpha = math.sin(omega) / (2 * Q)
+        float a0 = 1 / (1 + alpha)
+        float beta = 1 + cos_omega
+        
+        a1 := -2 * cos_omega * a0
+        a2 := (1 - alpha) * a0
+
+        b0 := beta / 2 * a0
+        b1 := -beta * a0
+        b2 := b0
+
+    // Calculation of filtered signal
+    float src1 = nz(source[1], source)
+    float src2 = nz(source[2], src1)
+
+    float out1 = nz(filtered[1], 0)
+    float out2 = nz(filtered[2], out1)
+
+    filtered := b0*source + b1*src1 + b2*src2 - a1*out1 - a2*out2
+
+
+// @function                    The BiQuad Low Pass Filter (LPF) is designed to reduce high-frequency noise while preserving the underlying trends in the data.
+//                              This filter is particularly effective in financial time series analysis to smooth price data with a customizable quality factor.
+//                              The parameters critical_period and Q are used to adjust the filter's cutoff frequency and resonance.
+// 
+//                              Source: Adapted from @The_Peaceful_Lizard's scripts, original by Robert Bristow-Johnson - https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+// @param source                <float> Source series, such as the "close" price
+// @param critical_period       <float> Critical period that defines the cutoff frequency
+// @param Q                     <float> Quality factor, determines the filter's selectivity
+// @returns                     <float> Smoothed series.
+export lpf_biquad(series float source, float critical_period=20, float Q=0.5) =>
+    var float filtered = na
+    var float a1 = na
+    var float a2 = na
+    var float b0 = na
+    var float b1 = na
+    var float b2 = na
+
+    // Calculation of coefficients
+    if barstate.isfirst or critical_period != critical_period[1] or Q != Q[1]
+        float fc = 0.5 / critical_period
+        float omega = 2 * math.pi * fc
+        float cos_omega = math.cos(omega)
+
+        float alpha = math.sin(omega)/(2 * Q)
+        float a0 = 1 / (1 + alpha)
+        float beta = 1 - cos_omega
+        
+        a1 := -2 * cos_omega * a0
+        a2 := (1 - alpha) * a0
+
+        b0 := beta / 2 * a0
+        b1 := beta * a0
+        b2 := b0
+    
+    // Calculation of filtered signal
+    float src1 = nz(source[1], source)
+    float src2 = nz(source[2], src1)
+
+    float out1 = nz(filtered[1], source)
+    float out2 = nz(filtered[2], out1)
+
+    filtered := b0*source + b1*src1 + b2*src2 - a1*out1 - a2*out2
+
+
+// @function                    The BiQuad Bandpass filter is designed to allow signals within a specific frequency range to pass through while attenuating frequencies outside this range.
+//                              This filter is particularly effective in financial time series analysis to extract cyclical components from price data.
+//                              The filter's parameters are dynamically adjusted based on the lookback period and Q factor to fine-tune the frequency response.
+// 
+//                              Source: Adapted from @The_Peaceful_Lizard's scripts, original by Robert Bristow-Johnson - https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+// @param source                <float> Source series, such as the "close" price
+// @param central_period        <float> Central period of the filter
+// @param bandwidth             <float> Relative measure of the filter's bandwidth around the centre frequency.
+// @returns                     <float> Filtered series.
+export bpf_biquad(series float source = close, float central_period=30, float bandwidth=0.4) =>
+    var float filtered = na
+    var float a1 = na
+    var float a2 = na
+    var float b0 = na
+    var float b1 = na
+    var float b2 = na
+
+    if barstate.isfirst or central_period != central_period[1] or bandwidth != bandwidth[1]
+        float fc = 0.5 / central_period
+        float omega = 2 * math.pi * fc
+        float cos_omega = math.cos(omega)
+        float sin_omega = math.sin(omega)
+
+        // Used equation 10 from https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html to convert bandwidth to Q
+        float sinh_arg = (math.log(2) / 2) * bandwidth * (omega / sin_omega)
+        float Q = 1 / (2 * MathTransform.sinh(sinh_arg))
+
+        float alpha = sin_omega * MathTransform.sinh(math.log(2) / 2 * Q * (omega / sin_omega))
+        float a0 = 1 / (1 + alpha)
+
+        a1 := -2 * cos_omega * a0
+        a2 := (1 - alpha) * a0
+        b0 := sin_omega / 2 * a0
+        b1 := 0
+        b2 := -b0
+
+    float src1 = nz(source[1], source)
+    float src2 = nz(source[2], src1)
+    float out1 = nz(filtered[1], 0)
+    float out2 = nz(filtered[2], out1)
+
+    filtered := b0 * source + b1 * src1 + b2 * src2 - a1 * out1 - a2 * out2
+
+
+//#endregion
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ====================[   2004 - 2013   ]=========================== //
+// ========================================================================= //
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  RELATIVE VIGOR INDEX  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                The Relative Vigor Index (RVI) filter is designed as a band-pass-like filter (although technically it doesn't operate on frequency components)
+//                          to measure the strength of a price trend by comparing the closing price to the trading range. It uses the idea that in an uptrend,
+//                          prices tend to close in the upper part of their range, and in a downtrend, they close in the lower part.
+//                          This indicator can be useful for identifying potential trend reversals and overbought/oversold conditions.
+//                          Ehlers uses half the dominant cycle period for the 'critical period' value.
+// 
+//                          Source: John Ehlers = "Cybernetic Analysis for Stocks and Futures" (2004) - Chapter 4 "Trading the Cycle"
+// @param open              <float> Series of opening prices
+// @param high              <float> Series of high prices
+// @param low               <float> Series of low prices
+// @param close             <float> Series of closing prices
+// @param critical_period   <float> Critical period that defines the cutoff frequency
+// @returns filtered        <float> detrended series.
+export relative_vigor_index(series float o=open, series float h=high, series float l=low, series float c=close, float critical_period=10) =>
+    var float numerator = 0.0
+    var float denominator = 0.0
+
+    // Calculate the numerator (closing location value)
+    num = ((c - o) + (c[1] - o[1]) + (c[2] - o[2]) + (c[3] - o[3])) / 4
+
+    // Calculate the denominator (high-low range)
+    denom = ((h - l) + (h[1] - l[1]) + (h[2] - l[2]) + (h[3] - l[3])) / 4
+
+    // Use Simple Moving Average (SMA) for smoothing
+    numerator   := ta.sma(num, int(critical_period))
+    denominator := ta.sma(denom, int(critical_period))
+
+    // Calculate RVI
+    filtered = denominator != 0 ? numerator / denominator : 0
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  CYBER CYCLE  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                The Cyber Cycle indicator is designed as a band-pass-like filter (although technically it doesn't operate on frequency components) to measure market cycles.
+//                          It uses price smoothing techniques  to filter out market noise and highlight the dominant cycle in the price data.
+//                          It aims to provide timely signals for cycle-based trading strategies by detecting changes
+//                          in market direction. This indicator is particularly useful for identifying short-term market reversals and trends.
+//                          When dominant cycle period is known, it can be directly used as the 'critical period'.
+// 
+//                          source: John Ehlers = "Cybernetic Analysis for Stocks and Futures" (2004) - Chapter 4 "Trading the Cycle"
+// @param source            <float> source series, such as the "close" price
+// @param critical_period   <float> Critical period that defines the cutoff frequency
+// @returns filtered        <float> detrended series.
+export cyber_cycle(series float source, float critical_period=40) =>
+    var float filtered = na
+    var float smooth   = source
+
+    // Ehlers originally uses the alpha as an input, but to stay consistent with the rest of the filters, we use lookback periods and convert them to alpha
+    alpha = 2 / (critical_period + 1)
+
+    src1 = nz(source[1], source)
+    src2 = nz(source[2], src1)
+    src3 = nz(source[3], src2)
+    out1 = nz(filtered[1], 0)  // for HPF/BPF, better to initialise to 0
+    out2 = nz(filtered[2], out1)
+
+    // Initialisation for the first few bars
+    if bar_index < 7
+        filtered := (source - 2 * src1 + src2) / 4
+    // Compute filter
+    else
+
+        smooth      := (source + 2 * src1 + 2 * src2 + src3) / 6
+        filtered    := math.pow(1 - 0.5 * alpha, 2) * (smooth - 2 * nz(smooth[1]) + nz(smooth[2])) +
+          2 * (1 - alpha) * out1 -
+          math.pow(1 - alpha, 2) * out2
+    
+    filtered
+
+//#endregion 
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  BUTTERWORTH HIGH PASS FILTER, 1- AND 2-POLE  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                The single-pole Butterworth High Pass Filter is a simplified version of the high pass filter family.
+//                          It provides a frequency response that is relatively flat in the passband but with a gentler roll-off
+//                          than multi-pole versions. This is still a "maximally flat magnitude filter" but with less sharpness in the transition band.
+//                          The Butterworth High Pass Filter is particularly useful for detrending price data in financial time series analysis,
+//                          making it easier to identify shorter-term cycles while removing longer-term trends.
+//                          This 1-pole version provides less lag than the 2-pole version but with less filtering performance.
+// 
+
+// @function                The single-pole Butterworth High Pass Filter is a simplified version 
+//                          of the high pass filter family. It is designed to detrend price data by 
+//                          attenuating low-frequency components while allowing higher frequencies to pass.
+
+//                          Source: Arthur Nazarian (@GoemonYae) (2025) inspired by John F. Ehlers 2004 and 2013 books.
+// @param source            <float> Source series, e.g., the close price.
+// @param critical_period   <float> Critical period that defines the cutoff frequency.
+// @returns filtered        <float> Detrended series.
+export butterworth_1pole(series float source, float critical_period = 40) =>
+    var float filtered = na
+    var float alpha    = 0.0
+    var float k        = 0.0
+
+    // Initialise and only update when there is a change
+    if barstate.isfirst or (critical_period != critical_period[1])
+        // Calculate alpha based on critical period (using standard Butterworth approach)
+        omega  = math.pi / critical_period
+        alpha := math.exp(-omega)
+        k     := (1 - alpha) / 2
+
+    src1 = nz(source[1], source)
+    out1 = nz(filtered[1], 0)  // for HPF, better to initialise to 0
+
+    filtered := k * (source - src1) + alpha * out1
+
+
+// @function                The Butterworth High Pass Filter is designed to have a frequency response that is as flat as possible in the passband,
+//                          also referred to as "maximally flat magnitude filter". It was first described in 1930 by the British engineer and physicist
+//                          Stephen Butterworth in his paper titled "On the Theory of Filter Amplifiers" and used by John Ehlers.
+//                          The Butterworth High Pass Filter is particularly useful for detrending price data in financial time series analysis, 
+//                          making it easier to identify cycles and trends. The parameters alpha and beta are derived based on the lookback period 
+//                          to adjust the filter's responsiveness. This 2-pole version ensures that the oscillator has a zero mean.
+// 
+//                          Source: John Ehlers = "Cybernetic Analysis for Stocks and Futures" (2004), Ch.13
+// @param source            <float> source series, such as the "close" price
+// @param critical_period   <float> Critical period that defines the cutoff frequency
+// @returns filtered        <float> detrended series.
+export butterworth_2pole(series float source, float critical_period=40) =>
+    var float filtered  = na
+    var float c0        = 0 
+    var float c1        = 0
+    var float c2        = 0
+
+    // Initialise and only update when there is a change
+    if barstate.isfirst or (critical_period != critical_period[1])
+        omega   = math.sqrt(2) * math.pi / critical_period
+        a1      = math.exp(-omega)
+        b1      = 2 * a1 * math.cos(omega)
+
+        c2     :=  -math.pow(a1, 2)
+        c1     :=  b1
+        c0     :=  (1 + c1 - c2) / 4
+
+    src1 = nz(source[1], source)
+    src2 = nz(source[2], src1)
+    out1 = nz(filtered[1], 0)  // for HPF, better to initialise to 0
+    out2 = nz(filtered[2], out1)
+
+    filtered        := nz(c0*(source - 2*src1 + src2)  +  c1*out1  +  c2*out2, 0)
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  SUPER SMOOTHER, 2- AND 3-POLE  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    The 2-Pole SuperSmoother filter is designed to reduce high-frequency noise while preserving the underlying trends in the data.
+//                              This filter is particularly effective in financial time series analysis to smooth price data without introducing significant lag.
+//                              The SuperSmoother achieves this by minimising the phase shift and maximising the smoothing effect.
+//                              The parameters alpha and beta are derived based on the lookback period to adjust the filter's responsiveness.
+// 
+//                              source: John Ehlers - "Cybernetic Analysis for Stocks and Futures" (2004)
+//                              Note, in the more recent publications, e.g. 2013 book and Ultimate Smoother (2024), Ehlers pre-smooths the `c0*source` component
+//                              by using the average of latest 2 bars as the source.
+// @param source                <float> source series, such as the "close" price
+// @param critical_period       <float> Critical period that defines the cutoff frequency
+// @returns                     <float> Smoothed series
+export super_smoother_2pole(series float source, float critical_period=10) =>
+    var float filtered  = na
+    var float c0        = 0  // Ehlers starts from c1
+    var float c1        = 0
+    var float c2        = 0
+    
+    if barstate.isfirst or (critical_period != critical_period[1])
+        omega = math.sqrt(2) * math.pi / critical_period 
+        a1    = math.exp(-omega)
+        b1    = 2 * a1 * math.cos(omega)
+
+        c2   := -math.pow(a1, 2)
+        c1   := b1
+        c0   := 1 - c1 - c2
+
+    src1 = nz(source[1], source)
+    src2 = nz(source[2], src1)
+    out1 = nz(filtered[1], src1)
+    out2 = nz(filtered[2], src2)
+
+    filtered := nz(c0*source  +  c1*out1  +  c2*out2, source)
+
+
+// @function                    The 3-Pole SuperSmoother filter is designed to further reduce high-frequency noise while preserving the underlying trends in the data.
+//                              This filter extends the smoothing capabilities of the 2-pole version, offering even greater noise reduction with minimal lag.
+//                              The filter achieves its effectiveness by minimising phase shift and maximising the smoothing effect through an additional pole.
+//                              The parameters alpha and beta are derived based on the cutoff period to adjust the filter's responsiveness.
+// 
+//                              Source: John Ehlers - "Cybernetic Analysis for Stocks and Futures" (2004)
+// @param source                <float> source series, such as the "close" price
+// @param critical_period       <float> Critical period that defines the cutoff frequency
+// @returns                     <float> Smoothed series.
+export super_smoother_3pole(series float source, float critical_period=10) =>    
+    var float filtered  = na
+    var float c0        = 0  // Ehlers starts from c1
+    var float c1        = 0
+    var float c2        = 0
+    var float c3        = 0
+
+    if barstate.isfirst or (critical_period != critical_period[1])
+        a1    = math.exp(-math.pi / critical_period)
+
+        // Ehlers uses 1.738 instead of sqrt(3) (= 1.732) -- don't know why
+        b1    = 2 * a1 * math.cos(math.sqrt(3) * math.pi / critical_period)
+        gamma = math.pow(a1, 2)
+
+        c1   := b1 + gamma
+        c2   := -(gamma + b1 * gamma)
+        c3   := math.pow(gamma, 2)
+        c0   := 1 - c1 - c2 - c3
+
+    src1 = nz(source[1], source)
+    src2 = nz(source[2], src1)
+    src3 = nz(source[3], src2)
+
+    out1 = nz(filtered[1], src1)
+    out2 = nz(filtered[2], src2)
+    out3 = nz(filtered[3], src3)
+
+    filtered := nz(c0*source  +  c1*out1  +  c2*out2  +  c3*out3, source)
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  ADAPTIVE DIRECTIONAL VOLATILITY MOVING AVERAGE (ADXVMA)  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    The Adaptive Directional Volatility Moving Average (ADXVma) is an adaptive moving average that adjusts its smoothing factor based on market conditions. 
+//                              It uses a combination of true range and directional movement to adaptively smooth the price series, making its very flat behaviour during ranging markets pretty unique.
+//                              https://nexusfi.com/articles/trading/ADXVMA
+//                              TradingView by @rstraat:     https://in.tradingview.com/script/waC5RGjN-ADX-Volatility-Moving-Average/
+//                              MetaTrader  by Mladen Rakic: https://www.mql5.com/en/code/20744
+//                              Amibroker by Rajandran R:    https://www.marketcalls.in/amibroker/adxvma-indicator-amibroker-afl-code.html
+//                              Easylanguage by Big Mike:    https://nexusfi.com/showthread.php?t=3549&p=35182#post35182
+//                              Extra info:                  https://www.lizardindicators.com/the-adxvma-indicator-and-adaptive-moving-averages/                            
+// @param source                <float> Source series, such as the "close" price.
+// @param critical_period       <float> The period over which the filter's sensitivity is calculated, determining how quickly the filter adapts to market conditions.
+// @returns                     <float> Filtered series
+export adxvma(series float source, float critical_period=10) =>
+    var float filtered = na
+    var float ups      = na
+    var float downs    = na
+    var float index    = na
+    var float up       = na
+    var float down     = na
+
+    // Calculate the true range
+    up_current      = math.max(source - source[1], 0)
+    down_current    = math.max(source[1] - source, 0)
+
+    // Update smoothed up and down movements
+    k               = 1.0 / critical_period
+    up              := (1 - k) * nz(up)   + k * up_current
+    down            := (1 - k) * nz(down) + k * down_current
+    sum_movements   = up + down
+
+    // Calculate normalized up and down fractions
+    up_fraction     = sum_movements > 0 ? up   / sum_movements : 0
+    down_fraction   = sum_movements > 0 ? down / sum_movements : 0
+    
+    // Smooth the up and down fractions
+    ups             := (1 - k) * nz(ups)   + k * up_fraction
+    downs           := (1 - k) * nz(downs) + k * down_fraction
+
+    // Calculate the normalized difference
+    diff_norm       = math.abs(ups - downs)
+    sum_norm        = ups + downs
+    fraction_norm   = sum_norm > 0.0 ? diff_norm / sum_norm : 0.0
+
+    index           := (1 - k) * nz(index) + k * fraction_norm 
+
+    // Find the highest and lowest index values over the period
+    thi = ta.highest(index, int(critical_period))[1]
+    llp = ta.lowest( index, int(critical_period))[1]
+
+    // Use max/min to include current index value
+    hhv = math.max(index, thi)
+    llv = math.min(index, llp)
+
+    // Determine the value index based on the range
+    v_index = (hhv - llv) > 0.0 ? (index - llv) / (hhv - llv) : 0.0
+
+    // Calculate the final filtered value
+    filtered := (1 - k * v_index) * nz(filtered) + k * v_index * source
+
+//#endregion
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ====================[   2013 - 2018   ]=========================== //
+// ========================================================================= //
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ====================[   2019 - 2023   ]=========================== //
+// ========================================================================= //
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  EHLERS COMBINED BANDPASS FILTER  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function   Ehlers' Combined Bandpass Filter with Truncation and Automated Gain Control (AGC).
+//             This function merges two distinct implementations of John Ehlers’ Bandpass Filter:
+//             one offering a truncated recursive formulation to reduce lag and another that preprocesses the input with a
+//             highpass filter, normalises the bandpass output using Automated Gain Control (AGC) and computes
+//             a trigger line from the normalised signal. The filter operates in three stages:
+//               1. A highpass filter that emphasises short-term changes.
+//               2. A bandpass filter that can be computed using a regular recursive formulation or, if specified,
+//                  a truncated version (reducing the recursive depth).
+//               3. An AGC stage that continuously tracks the signal’s peak amplitude to yield a normalised output
+//                  in the range [-1, 1], alongside a trigger line computed from the normalised signal.
+//             The filter coefficients are recalculated when either the central period or bandwidth changes.
+//             Source: Adaptations from John F. Ehlers’ work in "Truncated Indicators" ("Technical Analysis of Stocks & Commodities",
+//             July 2020) and "Cycle Analytics for Traders" (John Wiley and Sons, 2013)
+// @param source         <series float> The input data series (e.g. close price).
+// @param central_period <float>        The dominant cycle period controlling the centre frequency of the filter.
+// @param bandwidth      <float>        The relative bandwidth determining the width of the passband.
+// @param truncation     <int>          Optional truncation level; if set to na (default), the regular recursive
+//                                      formulation is used. Otherwise, a truncated version is applied.
+// @returns              <[float, float, float]> A tuple comprising:
+//                                      - The bandpass filtered value,
+//                                      - The normalised signal after AGC,
+//                                      - The trigger line derived from the normalised signal.
+export bpf_ehlers(series float source, float central_period=40, float bandwidth=0.4, int truncation=na) =>
+    // ------[  Variable Declarations  ]------ //
+    // Filte states for recursive calculation results
+    var float hp = na            // Output of the highpass filter
+    var float filtered = na      // Output of the bandpass filter
+    var float norm_signal = na   // Normalised signal after AGC
+    var float trigger = na       // Trigger line from normalised signal
+    var float peak = 0.0         // Peak value for AGC normalization
+    
+    // Coefficient state variables
+    var float omega = 0.0        // Center angular frequency (ω = 2π/period)
+    var float cos_center = 0.0   // Cosine of center frequency (β)
+    var float cos_band_inv = 0.0 // Inverse of cosine of bandwidth-scaled center frequency
+    var float alpha = 0.0        // Primary filter coefficient (α)
+    
+    // Filter coefficients for the highpass and trigger computation
+    var float alpha_hp = 0.0     // Highpass filter coefficient
+    var float alpha_trigger = 0.0 // Trigger line filter coefficient
+
+    // Get previous values with safety checks
+    src1 = nz(source[1], 0.0)
+    src2 = nz(source[2], src1)
+    out1 = nz(filtered[1], src1)
+    out2 = nz(filtered[2], src2)
+    
+    // ------[  Coefficient Calculations  ]------ //
+    // Recalculate coefficients when parameters change or on first bar
+    if barstate.isfirst or (central_period != central_period[1]) or (bandwidth != bandwidth[1])
+        // Basic frequency calculations
+        omega := 2 * math.pi / central_period  // Center angular frequency
+        
+        // Bandpass filter coefficients
+        cos_center := math.cos(omega)  // β, used in the recursive formula
+        cos_band_inv := 1 / math.cos(omega * bandwidth)  // Inverse of cosine of bandwidth-modulated frequency
+        
+        // Primary filter coefficient α, derived from the bandwidth relationship:
+        // α = 1/cos(ωb) - sqrt(1/cos²(ωb) - 1)
+        alpha := cos_band_inv - math.sqrt(cos_band_inv * cos_band_inv - 1)
+        
+        // Highpass and trigger coefficients for different bandwidth scales
+        omega_bandwidth_025 = 0.25 * omega * bandwidth  // Narrow bandwidth for highpass
+        omega_bandwidth_150 = 1.50 * omega * bandwidth  // Wide bandwidth for trigger
+        
+        // Highpass coefficient using narrow bandwidth
+        alpha_hp := (math.cos(omega_bandwidth_025) + math.sin(omega_bandwidth_025) - 1) / 
+          math.cos(omega_bandwidth_025)
+        
+        // Trigger coefficient using wide bandwidth
+        alpha_trigger := (math.cos(omega_bandwidth_150) + math.sin(omega_bandwidth_150) - 1) / 
+          math.cos(omega_bandwidth_150)
+
+    // ------[ Stage 1: Highpass Filter ]------
+    // The highpass filter emphasises recent changes in the input series.
+    hp := (1 + alpha_hp / 2) * (source - src1) + (1 - alpha_hp) * nz(hp[1])
+    hp2 = nz(hp[2], hp)
+    
+    // ------[ Stage 2: Bandpass Filter ]------
+    // Note that in the TASC article, Ehlers uses the regular source series instead of the HP output
+    if na(truncation)
+        filtered := 0.5 * (1 - alpha) * (hp - hp2) + 
+                   cos_center * (1 + alpha) * out1 -
+                   alpha * out2
+
+        // Reset filter on first few bars as per Ehlers
+        if barstate.isconfirmed and bar_index <= 3
+            filtered := 0
+
+    else  // Truncated version with reduced recursion depth
+        arr_trunc = array.new<float>(truncation + 3, 0.0)
+        for i = truncation to 1
+            trunc = 0.5 * (1 - alpha) * (nz(source[i - 1]) - nz(source[i + 1])) +
+              cos_center * (1 + alpha) * arr_trunc.get(i + 1) -
+              alpha * arr_trunc.get(i + 2)
+            arr_trunc.set(i, trunc)
+        filtered := arr_trunc.get(1)
+    
+    filtered := nz(filtered, source)
+
+    // ------[ Stage 3: Automated Gain Control ]------
+    // Decay peak value using the 0.991 factor derived from:
+    // 1. Consider 10-bar (shortest useful) to 48-bar (trend threshold) cycle range
+    // 2. Set gain slope to 1.5 dB across this range
+    // 3. Gain ratio = 10^(-1.5/20) = 0.841
+    // 4. Decay factor K: K^19 = 0.841, so K = 0.841^(1/19) ≈ 0.991
+    peak := 0.991 * nz(peak[1])
+    peak := math.max(math.abs(filtered), peak)
+    
+    // Normalise signal when peak exists
+    norm_signal := peak != 0 ? filtered / peak : filtered
+    
+    // Compute trigger line using wider bandwidth
+    trigger := (1 + alpha_trigger / 2) * nz(norm_signal - norm_signal[1]) + 
+      (1 - alpha_trigger) * nz(trigger[1])
+    
+    [filtered, norm_signal, trigger]
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  VOSS PREDICTIVE FILTER  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// Perry Kaufman about Voss PF: "We buy when the Voss filter crosses above the “filt” which we will see as the “signal line.” But when do we exit? The basic rule for a mean-reversion system is to exit
+// when the indicator goes to neutral, in this case zero, and not wait for a reverse signal. Next, even though the filter isn’t bound- ed, trades done when the filter swings are small generally produce losses.
+// So we want to avoid trading during these small-swing periods. We can do that by filtering out any buy signal with a Voss filter greater than -5 and a sell when the filter is less than +5.
+
+// @function                    A filter for universal real-time prediction of band-limited signals is presented. The filter consists of multiple time-delayed feedback terms
+//                              in order to accomplish anticipatory coupling, which again leads to a negative group delay for frequencies in the baseband.
+//                              The universality of the filter arises from its property that it does not rely on a specific model of the signal.
+//                              Specifically, as long as the signal to be predicted is band-limited with a known cutoff frequency, the filter order, the only parameter of the filter,
+//                              follows and the filter predicts the signal in real time up to a prediction horizon that depends on the cutoff frequency, too.
+//                          
+//                              Code adapted from "A Peek Into The Future" (TASC 2019-08) by John F. Ehlers. Note that the input signal must be bandlimited.
+//                              Since a bandpass filter is is also subject to nonlinear group and phase delays, a true overall prediction is impossible.
+// @param source_bpf            <float> Source series, should be bandlimited, e.g. output of a bandpass filter
+// @param predict_horizon       <int> Number of bars in the future to predict. Predicting more than 3 bars is probably too inaccurate.
+// @returns                     <float> Predicted series.
+export voss_predictive_filter(series float source_bpf, int predict_horizon=3) =>
+    var float voss      = na
+    var int order       = na
+    float sum_weighted  = 0.0
+
+    order := 3 * predict_horizon
+
+    for i = 0 to order - 1
+        sum_weighted += ((i + 1) / order) * nz(voss[order - i])
+
+    voss := 0.5 * (3 + order) * source_bpf - sum_weighted
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  ADAPTIVE AUTONOMOUS RECURSIVE MOVING AVERAGE (A2RMA)  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function        A2RMA calculates an adaptive moving average by dynamically adjusting its smoothing based on market volatility.
+//                  First, it computes the Efficiency Ratio (ER) as the ratio between the absolute net change over 'length' bars and the
+//                  sum of absolute changes over the same period. Next, it derives a dynamic threshold (d) from the cumulative absolute
+//                  deviation of the input series from the previous moving average value, scaled by gamma. This threshold is then used to
+//                  conditionally modify the input, curbing overshoots during low volatility periods. Finally, a double application of an
+//                  adaptive moving average (AMA) is performed, using ER as the dynamic smoothing factor, to produce a responsive yet stable
+//                  moving average output that adapts to both trending and ranging markets.
+//                  Original by @alexgrover (2019): https://www.tradingview.com/script/4bI1zjc6-Adaptive-Autonomous-Recursive-Moving-Average/
+// @param source    <series float> The input data series (e.g. close price).
+// @param length    <int> Number of bars used to compute the efficiency ratio.
+// @param gamma     <float> Sensitivity parameter for adjusting the filter in flat market conditions.
+// @returns         <float> The current value of the Adaptive Autonomous Recursive Moving Average (A2RMA).
+export a2rma(series float source, int length=40, float gamma=2.0) =>
+    // ------[  Variable Declarations  ]------ //
+    var float ma    = source     // Current adaptive moving average value
+    var float ama1  = source     // Intermediate value from the first AMA pass
+    var float ama2  = source     // Final smoothed value from the second AMA pass
+    var float d_cum = 0.0        // Cumulative sum of absolute deviations
+    float ma_prev = nz(ma[1], source)
+    
+    // ------[  Efficiency Ratio Calculation  ]------ //
+    //@variable Compute the Efficiency Ratio (ER) with numerator: absolute net change over 'length' bars; denominator: sum of absolute changes over the last 'length' bars.
+    float er = math.abs(ta.change(source, length)) / math.sum(math.abs(ta.change(source)), length)
+
+    // ------[  Dynamic Threshold Computation  ]------ //
+    // Update the cumulative absolute deviation and calculate the dynamic threshold 'd'.
+    // This threshold reflects the average deviation of the source from the moving average scaled by gamma
+    d_cum := d_cum + math.abs(source - ma_prev)
+    d = (d_cum / (bar_index + 1)) * gamma
+    
+    // ------[  Conditional Input Adjustment  ]------ //
+    adjusted = switch
+        source > ma_prev + d => source + d
+        source < ma_prev - d => source - d
+        => ma_prev
+    
+    // ------[  Double Adaptive Smoothing (AMA)  ]------ //
+    // Apply the Adaptive Moving Average (AMA) twice for improved smoothness; uses ER as the dynamic smoothing factor:
+    ama1 := er * adjusted + (1 - er) * nz(ama1[1], adjusted)
+    ama2 := er * ama1 + (1 - er) * nz(ama2[1], ama1)
+    
+    // Update the moving average state with the final smoothed value.
+    ma := ama2
+    ma
+
+//#endregion
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ==================[   2024 and later   ]========================== //
+// ========================================================================= //
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  ULTIMATE SMOOTHER, 2- AND 3-POLE  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    The Ultimate Smoother filter is designed to maintain zero lag in its pass band and minimal lag in its transition band, 
+//                              distinguishing it from other conventional digital filters. It achieves its unique response by subtracting a high-pass response
+//                              from an all-pass response. The subtraction yields a frequency and phase response practically equivalent to the input data
+//                              at very low frequencies (lengthy periods) and achieves filtration through cancellation at other frequencies due to the close
+//                              similarities in response between the high-pass filter and the input data. 
+//                              source: John Ehlers - http://www.mesasoftware.com/papers/UltimateSmoother.pdf and https://traders.com/Documentation/FEEDbk_docs/2024/04/TradersTips.html
+//                              Original TradingView implementation: @PineCoders https://www.tradingview.com/script/X67OSwqc-TASC-2024-04-The-Ultimate-Smoother/
+// @param source                <float> source series, such as the "close" price
+// @param critical_period       <float> Critical period that defines the cutoff frequency
+// @returns                     <float> Smoothed series with zero lag in the pass band
+export ultimate_smoother_2pole(series float source, float critical_period=20) =>
+    var float filtered  = na
+    var float c0        = 0  // Ehlers starts from c1
+    var float c1        = 0
+    var float c2        = 0
+
+    if barstate.isfirst or (critical_period != critical_period[1])
+        omega   = math.sqrt(2) * math.pi / critical_period
+        a1      = math.exp(-omega)
+        c2      := -math.pow(a1, 2)
+        c1      := 2 * a1 * math.cos(omega)
+        c0      := (1 + c1 - c2) / 4
+
+    float src1   = nz(source[1], source)
+    float src2   = nz(source[2], src1)
+    float out1   = nz(filtered[1], src1)
+    float out2   = nz(filtered[2], src2)
+
+    filtered := nz((1-c0)*source + (2*c0-c1)*src1 - (c0+c2)*src2 + c1*out1 + c2*out2, source)
+
+
+// @function                    The 3-Pole Ultimate Smoother filter is  designed as a proxy for price, with controllable smoothness. It retains zero-lag
+//                              at all times, meaning that the output follows each bar's direction instantaneously. The filter achieves its effectiveness
+//                              by subtracting a 3-pole high-pass filter from an all-pass filter (the input data).
+//
+//                              source: Arthur Nazarian (@GoemonYae) (2025) inspired by John F. Ehlers "Ultimate Smoother" (2024) and earlier work
+// @param source                <float> source series, such as the "close" price
+// @param critical_period       <float> Critical period that defines the cutoff frequency
+// @returns                     <float> Smoothed series with zero lag in the pass band
+export ultimate_smoother_3pole(series float source, float critical_period=5) =>
+    var float filtered  = na
+    var float c0        = 0
+    var float c1        = 0
+    var float c2        = 0
+    var float c3        = 0
+
+    if barstate.isfirst or (critical_period != critical_period[1])
+        // Extend the pattern from 2-pole Ultimate Smoother - sqrt(2) → sqrt(3)
+        // This is to match the effective time constant (or lag) to the critical period
+        omega    = math.sqrt(3) * math.pi / critical_period
+        a1       = math.exp(-omega)
+        
+        // Calculate recursive filter coefficients, requiring an extra coefficient for the extra pole
+        c1      := 3 * a1
+        c2      := -3 * math.pow(a1, 2)
+        c3      := math.pow(a1, 3)
+
+        // Using 2^n (n = number of poles) normalisation factor
+        c0      := (1 + c1 + c2 - c3) / 8
+
+    // Get current and previous source and output values
+    float src1   = nz(source[1], source)
+    float src2   = nz(source[2], src1)
+    float src3   = nz(source[3], src2)
+    float out1   = nz(filtered[1], src1)
+    float out2   = nz(filtered[2], src2)
+    float out3   = nz(filtered[3], src3)
+
+    // Derived from subtracting a 3-pole high-pass filter from an all-pass filter, using alternating sign pattern of the binomial expansion
+    filtered := nz((1-c0)*source + (3*c0-c1)*src1 - (3*c0+c2)*src2 + (c0-c3)*src3 + c1*out1 + c2*out2 + c3*out3, source)
+
+//#endregion
+
+
+//#endregion
+
+
+// ========================================================================= //
+//#region =================[   Plotting examples   ]======================== //
+// ========================================================================= //
+
+// ------[  Price chart example  ]------ //
+[mama, fama, _]     = mesa_adaptive_moving_average(close, method='2004')
+
+p_mama              = plot(mama, 'MAMA', color.purple, force_overlay=true)
+p_fama              = plot(fama, 'FAMA', color.green,  force_overlay=true)
+c_mama_fill         = mama >= fama ? color.rgb(20, 187, 143, 80): color.rgb(152, 34, 185, 80)
+fill(p_mama ,p_fama, c_mama_fill, 'MAMA-FAMA fillter')
+
+
+// ------[  Oscillator example  ]------ //
+rvi                 = relative_vigor_index()
+
+p_zero              = plot(0,    'Zero',                 color.rgb(136, 141, 154, 40),  linewidth=2)
+p_rvi               = plot(rvi,  'Relative Vigor Index', color.rgb(20, 122, 200),       linewidth=1)
+fill(p_rvi, p_zero, color.rgb(172, 154, 201, 90), 'RVI fill')
+
+//#endregion

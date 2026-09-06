@@ -1,0 +1,296 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © demeth5D
+
+//@version=6
+strategy(
+     title             = "ICT + Price Action | XAUUSD & EURUSD [v6]",
+     overlay           = true,
+     margin_long       = 0,
+     margin_short      = 0,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 2,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.01,
+     slippage          = 2,
+     max_boxes_count   = 200
+ )
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 1 — USER INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Trend Filter ──────────────────────────────────────────────────────────────
+i_ema_fast    = input.int(50,  "Fast EMA Length",   minval=5,   group="Trend Filter",
+                 tooltip="50 EMA shows medium-term direction")
+i_ema_slow    = input.int(200, "Slow EMA Length",   minval=50,  group="Trend Filter",
+                 tooltip="200 EMA is the main trend filter — only buy above it, sell below it")
+
+// ── Risk Management ───────────────────────────────────────────────────────────
+i_atr_len     = input.int(14,  "ATR Length",                    group="Risk Management",
+                 tooltip="ATR measures how much price moves on average — used to set SL/TP")
+i_sl_mult     = input.float(1.5, "Stop Loss  (× ATR)", step=0.1, minval=0.5, group="Risk Management",
+                 tooltip="Stop loss = entry ± (this number × ATR). Default 1.5x ATR.")
+i_tp_mult     = input.float(2.5, "Take Profit (× ATR)", step=0.1, minval=1.0, group="Risk Management",
+                 tooltip="Take profit = entry ± (this number × ATR). Default 2.5x ATR gives ~1.67 R:R.")
+
+// ── RSI Filter ────────────────────────────────────────────────────────────────
+i_rsi_len     = input.int(14, "RSI Length",         minval=2,   group="RSI Filter")
+i_rsi_ob      = input.int(70, "Overbought Level",   minval=55,  group="RSI Filter",
+                 tooltip="Do NOT buy when RSI is above this level (market is stretched)")
+i_rsi_os      = input.int(30, "Oversold Level",     maxval=45,  group="RSI Filter",
+                 tooltip="Do NOT sell when RSI is below this level (market is stretched)")
+
+// ── ICT Kill Zones (UTC hours) ────────────────────────────────────────────────
+i_lkz_start   = input.int(7,  "London KZ Start (UTC hour)",   group="Kill Zones",
+                 tooltip="02:00 EST = 07:00 UTC. Best time to trade EURUSD & XAUUSD.")
+i_lkz_end     = input.int(10, "London KZ End (UTC hour)",     group="Kill Zones")
+i_nykz_start  = input.int(12, "New York KZ Start (UTC hour)", group="Kill Zones",
+                 tooltip="07:00 EST = 12:00 UTC. Most volatile time for both pairs.")
+i_nykz_end    = input.int(15, "New York KZ End (UTC hour)",   group="Kill Zones")
+
+// ── VWAP ──────────────────────────────────────────────────────────────────────
+i_use_vwap    = input.bool(true, "Enable VWAP Direction Filter", group="VWAP",
+                 tooltip="VWAP = Volume Weighted Average Price. Only long above it, short below it.")
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+i_show_fvg    = input.bool(true,  "Show Fair Value Gap Boxes",  group="Visuals")
+i_show_kz     = input.bool(true,  "Show Kill Zone Shading",     group="Visuals")
+i_show_table  = input.bool(true,  "Show Info Table",            group="Visuals")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 2 — INDICATOR CALCULATIONS
+//   All indicators computed globally (v6 requirement: lazy 'and'/'or'
+//   evaluation means indicators inside conditions may not run every bar,
+//   breaking their internal history. Pre-computing fixes this.)
+// ══════════════════════════════════════════════════════════════════════════════
+
+float ema_fast_val  = ta.ema(close, i_ema_fast)
+float ema_slow_val  = ta.ema(close, i_ema_slow)
+float atr_val       = ta.atr(i_atr_len)
+float rsi_val       = ta.rsi(close, i_rsi_len)
+float vwap_val      = ta.vwap
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 3 — KILL ZONE FILTER (ICT)
+//   London KZ  07:00–10:00 UTC = institutional accumulation for EURUSD/Gold
+//   New York KZ 12:00–15:00 UTC = highest volatility + volume
+// ══════════════════════════════════════════════════════════════════════════════
+
+int  cur_hour    = hour(time, "UTC")
+bool in_london   = cur_hour >= i_lkz_start  and cur_hour < i_lkz_end
+bool in_newyork  = cur_hour >= i_nykz_start and cur_hour < i_nykz_end
+bool in_killzone = in_london or in_newyork
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 4 — TREND DIRECTION (Nial Fuller method)
+//   Both conditions must be true:
+//   • Price is on the correct side of the 200 EMA (overall direction)
+//   • 50 EMA is also aligned (medium-term momentum matches)
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool bullish_trend = close > ema_slow_val and ema_fast_val > ema_slow_val
+bool bearish_trend = close < ema_slow_val and ema_fast_val < ema_slow_val
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 5 — VWAP BIAS FILTER
+//   VWAP = the "fair price" institutions reference for the day.
+//   Price above VWAP → buyers in control → favour longs.
+//   Price below VWAP → sellers in control → favour shorts.
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool vwap_bull = not i_use_vwap or close > vwap_val
+bool vwap_bear = not i_use_vwap or close < vwap_val
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 6 — RSI FILTER
+//   Prevents buying into overbought / selling into oversold conditions.
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool rsi_ok_long  = rsi_val < i_rsi_ob
+bool rsi_ok_short = rsi_val > i_rsi_os
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 7 — FAIR VALUE GAP (ICT)
+//   A 3-candle pattern where price "jumps" and leaves a gap (inefficiency).
+//   Institutions often return to fill these gaps → trade entry zone.
+//
+//   Bullish FVG:  high of 2 bars ago < low of current bar  (upward gap)
+//   Bearish FVG:  low  of 2 bars ago > high of current bar (downward gap)
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool  bull_fvg    = high[2] < low[0]
+bool  bear_fvg    = low[2]  > high[0]
+
+float bull_fvg_hi = low[0]
+float bull_fvg_lo = high[2]
+float bear_fvg_hi = low[2]
+float bear_fvg_lo = high[0]
+
+// Draw FVG boxes (v6: box.new() syntax unchanged)
+if i_show_fvg and bull_fvg
+    box.new(bar_index - 2, bull_fvg_hi, bar_index + 12, bull_fvg_lo,
+            border_color = color.new(color.green, 20),
+            bgcolor      = color.new(color.green, 82),
+            border_width = 1)
+
+if i_show_fvg and bear_fvg
+    box.new(bar_index - 2, bear_fvg_hi, bar_index + 12, bear_fvg_lo,
+            border_color = color.new(color.red, 20),
+            bgcolor      = color.new(color.red, 82),
+            border_width = 1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 8 — ORDER BLOCK (ICT)
+//   The last opposing candle before a strong directional move.
+//   Price often returns to re-test this zone before continuing.
+//
+//   Bullish OB:  previous candle was bearish AND current candle closes
+//                above the previous candle's high (strong bullish displacement)
+//   Bearish OB:  previous candle was bullish AND current candle closes
+//                below the previous candle's low (strong bearish displacement)
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool bull_ob = close[1] < open[1] and close > high[1]
+bool bear_ob = close[1] > open[1] and close < low[1]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 9 — PIN BAR (Nial Fuller Price Action)
+//   A candle with a long rejection wick (≥ 2/3 of total range)
+//   and a small body (≤ 35% of range). Signals a strong level rejection.
+//   We check the PREVIOUS bar for a pin bar (enter on next candle's open).
+// ══════════════════════════════════════════════════════════════════════════════
+
+float total_range  = high - low
+float upper_wick   = high  - math.max(open, close)
+float lower_wick   = math.min(open, close) - low
+float body_size    = math.abs(close - open)
+
+bool bull_pinbar = total_range > 0
+                   and lower_wick  >= total_range * 0.667
+                   and body_size   <= total_range * 0.350
+
+bool bear_pinbar = total_range > 0
+                   and upper_wick  >= total_range * 0.667
+                   and body_size   <= total_range * 0.350
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 10 — COMBINED ENTRY LOGIC
+//   Any ONE of the three setups (FVG, OB, Pin Bar) is enough to trigger entry,
+//   provided ALL the filters above are aligned.
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool ict_long_setup  = bull_fvg or bull_ob or bull_pinbar[1]
+bool ict_short_setup = bear_fvg or bear_ob or bear_pinbar[1]
+
+bool no_position     = strategy.position_size == 0
+
+bool long_signal  = in_killzone and bullish_trend and vwap_bull and rsi_ok_long  and ict_long_setup  and no_position
+bool short_signal = in_killzone and bearish_trend and vwap_bear and rsi_ok_short and ict_short_setup and no_position
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 11 — STRATEGY EXECUTION
+//   v6 change: 'when' parameter removed from strategy.entry().
+//   Must wrap entries in 'if' blocks instead.
+//
+//   Stop Loss  = ATR-based (adapts to current market volatility)
+//   Take Profit = ATR-based (maintains consistent Risk:Reward ratio)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal
+    float sl = close - i_sl_mult * atr_val
+    float tp = close + i_tp_mult * atr_val
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=sl, limit=tp)
+
+if short_signal
+    float sl = close + i_sl_mult * atr_val
+    float tp = close - i_tp_mult * atr_val
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=sl, limit=tp)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 12 — VISUAL OVERLAYS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema_fast_val, "EMA 50",  color=color.new(color.orange, 0),  linewidth=1)
+plot(ema_slow_val, "EMA 200", color=color.new(color.blue,   0),  linewidth=2)
+
+// VWAP
+plot(i_use_vwap ? vwap_val : na, "VWAP",
+     color    = color.new(color.purple, 20),
+     linewidth = 1,
+     style    = plot.style_circles)
+
+// Kill Zone background shading
+bgcolor(i_show_kz and in_london  ? color.new(color.blue,  90) : na, title="London Kill Zone")
+bgcolor(i_show_kz and in_newyork ? color.new(color.teal,  88) : na, title="New York Kill Zone")
+
+// Entry signal arrows
+plotshape(long_signal,  "LONG",  shape.labelup,   location.belowbar,
+          color.new(color.green, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(short_signal, "SHORT", shape.labeldown, location.abovebar,
+          color.new(color.red,   0), text="SELL", textcolor=color.white, size=size.small)
+
+// Pin bar markers on the previous bar
+plotshape(bull_pinbar, "Bull Pin Bar", shape.triangleup,   location.belowbar,
+          color.new(color.lime, 30), size=size.tiny, offset=0)
+plotshape(bear_pinbar, "Bear Pin Bar", shape.triangledown, location.abovebar,
+          color.new(color.orange, 30), size=size.tiny, offset=0)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ▶ SECTION 13 — DASHBOARD TABLE (top-right corner)
+//   Shows live values of each filter so you can see WHY a trade fired
+//   (or didn't fire) at a glance.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 8,
+                            bgcolor      = color.new(color.black, 75),
+                            border_color = color.new(color.gray, 60),
+                            border_width = 1)
+
+if barstate.islast and i_show_table
+    // Header
+    table.cell(dash, 0, 0, "FILTER",    text_color=color.new(color.gray, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "STATUS",    text_color=color.new(color.gray, 0), text_size=size.small, text_halign=text.align_center)
+
+    // Trend
+    string trend_txt   = bullish_trend ? "BULL ▲" : bearish_trend ? "BEAR ▼" : "NEUTRAL"
+    color  trend_color = bullish_trend ? color.green : bearish_trend ? color.red : color.yellow
+    table.cell(dash, 0, 1, "Trend (EMA)", text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 1, trend_txt,     text_color=trend_color,  text_size=size.small, text_halign=text.align_center)
+
+    // Kill Zone
+    string kz_txt   = in_killzone ? (in_london ? "London ✓" : "New York ✓") : "CLOSED"
+    color  kz_color = in_killzone ? color.green : color.new(color.gray, 40)
+    table.cell(dash, 0, 2, "Kill Zone",  text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 2, kz_txt,       text_color=kz_color,   text_size=size.small, text_halign=text.align_center)
+
+    // VWAP
+    string vwap_txt   = close > vwap_val ? "Above ✓" : "Below"
+    color  vwap_color = close > vwap_val ? color.green : color.red
+    table.cell(dash, 0, 3, "VWAP",   text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 3, vwap_txt, text_color=vwap_color,  text_size=size.small, text_halign=text.align_center)
+
+    // RSI
+    string rsi_txt   = str.tostring(rsi_val, "#.0")
+    color  rsi_color = rsi_val > i_rsi_ob ? color.red : rsi_val < i_rsi_os ? color.green : color.white
+    table.cell(dash, 0, 4, "RSI",    text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 4, rsi_txt,  text_color=rsi_color,  text_size=size.small, text_halign=text.align_center)
+
+    // ATR
+    table.cell(dash, 0, 5, "ATR",                                     text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 5, str.tostring(atr_val, "#.00000"),          text_color=color.white, text_size=size.small, text_halign=text.align_center)
+
+    // Setup present
+    string setup_txt   = ict_long_setup ? "LONG SETUP" : ict_short_setup ? "SHORT SETUP" : "None"
+    color  setup_color = ict_long_setup ? color.green  : ict_short_setup ? color.red     : color.new(color.gray, 40)
+    table.cell(dash, 0, 6, "ICT Setup",  text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 6, setup_txt,    text_color=setup_color, text_size=size.small, text_halign=text.align_center)
+
+    // Signal
+    string sig_txt   = long_signal ? "▲ BUY" : short_signal ? "▼ SELL" : "Waiting..."
+    color  sig_color = long_signal ? color.green : short_signal ? color.red : color.new(color.gray, 40)
+    table.cell(dash, 0, 7, "Signal",  text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 7, sig_txt,   text_color=sig_color,  text_size=size.small, text_halign=text.align_center)
+

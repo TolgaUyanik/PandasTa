@@ -1,0 +1,494 @@
+//@version=6
+//=============================================================================
+// TrendPulse: 9 EMA + VWAP Continuation Strategy
+// Published by @waynemarnold
+// Copyright (c) 2026 Wayne Arnold
+// All rights reserved.
+//=============================================================================
+strategy("TrendPulse: 9 EMA + VWAP Continuation Strategy", "TrendPulse",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=2,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     max_labels_count=200)
+
+// Inputs
+grpCore = "Core Engine"
+lenFast = input.int(21, "Fast EMA", minval=2, group=grpCore)
+lenSlow = input.int(55, "Slow EMA", minval=5, group=grpCore)
+lenBase = input.int(34, "Basis EMA", minval=5, group=grpCore)
+lenAtr  = input.int(14, "ATR Length", minval=1, group=grpCore)
+mulCh   = input.float(1.6, "Channel ATR Mult", minval=0.2, step=0.1, group=grpCore)
+
+grpReg  = "Regime Model"
+lenReg  = input.int(21, "Regime Length", minval=5, group=grpReg)
+lenSlp  = input.int(8, "Slope Window", minval=2, group=grpReg)
+chopThr = input.float(61.8, "Chop Threshold", minval=20, maxval=80, step=0.1, group=grpReg)
+expThr  = input.float(1.15, "ATR Expansion Ratio", minval=0.5, step=0.05, group=grpReg)
+
+grpSig  = "Signal Filters"
+entryMode  = input.string("Both", "Entry Mode", options=["Breakout", "Continuation", "Both"], group=grpSig)
+minScore   = input.float(55.0, "Minimum Quality Score", minval=0, maxval=100, step=0.5, group=grpSig)
+useRetest  = input.bool(true, "Require Pullback Hold", group=grpSig)
+useVolFilt = input.bool(true, "Use Relative Volume Filter", group=grpSig)
+volMin     = input.float(0.9, "Min Relative Volume", minval=0.1, maxval=5.0, step=0.1, group=grpSig)
+coolBars   = input.int(3, "Cooldown Bars", minval=0, maxval=100, group=grpSig)
+pbLookback = input.int(4, "Pullback Lookback Bars", minval=1, maxval=20, group=grpSig)
+pbAtrZone  = input.float(0.45, "Pullback Zone ATR", minval=0.1, maxval=3.0, step=0.05, group=grpSig)
+longOnly   = input.bool(false, "Long Only", group=grpSig)
+shortOnly  = input.bool(false, "Short Only", group=grpSig)
+
+grpEq   = "Equity Filters"
+useLiq  = input.bool(true, "Use Dollar Volume Filter", group=grpEq)
+dvLen   = input.int(20, "Dollar Volume Length", minval=2, group=grpEq)
+dvMinM  = input.float(10.0, "Min Avg Dollar Volume ($M)", minval=0.5, step=0.5, group=grpEq)
+useMkt  = input.bool(true, "Use Benchmark Filter", group=grpEq)
+bench   = input.symbol("AMEX:SPY", "Benchmark Symbol", group=grpEq)
+benchTf = input.timeframe("D", "Benchmark TF", group=grpEq)
+benchLen= input.int(200, "Benchmark EMA", minval=20, group=grpEq)
+
+grpRisk = "Risk Engine"
+riskPct = input.float(1.0, "Risk % of Equity", minval=0.1, maxval=5.0, step=0.1, group=grpRisk)
+maxAlloc= input.float(25.0, "Max Allocation %", minval=1.0, maxval=100.0, step=1.0, group=grpRisk)
+stopAtr = input.float(2.0, "Stop ATR", minval=0.2, maxval=10.0, step=0.1, group=grpRisk)
+rrMult  = input.float(1.8, "Reward/Risk", minval=0.5, maxval=10.0, step=0.1, group=grpRisk)
+useBE   = input.bool(true, "Move Stop to Break-even at 1R", group=grpRisk)
+beBuff  = input.float(0.10, "Break-even Buffer %", minval=0.0, maxval=1.0, step=0.05, group=grpRisk)
+useTrail= input.bool(false, "ATR Trail After 1R", group=grpRisk)
+trailAtr= input.float(2.0, "Trail ATR", minval=0.2, maxval=10.0, step=0.1, group=grpRisk)
+timeStop= input.int(20, "Time Stop Bars", minval=0, maxval=300, group=grpRisk)
+allowFrac = input.bool(false, "Allow Fractional Shares", group=grpRisk)
+
+grpTest = "Backtest Window"
+fromT   = input.time(timestamp("2015-01-01"), "From", group=grpTest)
+toT     = input.time(timestamp("2035-01-01"), "To", group=grpTest)
+
+grpVis  = "Visuals"
+showBg  = input.bool(true, "Show Regime Background", group=grpVis)
+showScoreLabels = input.bool(false, "Show Score Labels", group=grpVis)
+scoreLabelAtrOffset = input.float(0.8, "Score Label ATR Offset", minval=0.1, maxval=5.0, step=0.1, group=grpVis)
+scoreLabelSize = input.string("Tiny", "Score Label Size", options=["Tiny","Small","Normal"], group=grpVis)
+
+showBasis   = input.bool(true, "Show Basis", group=grpVis)
+showUpper   = input.bool(true, "Show Upper Channel", group=grpVis)
+showLower   = input.bool(true, "Show Lower Channel", group=grpVis)
+showFastEma = input.bool(true, "Show Fast EMA", group=grpVis)
+showSlowEma = input.bool(true, "Show Slow EMA", group=grpVis)
+showEma9    = input.bool(true, "Show 9 EMA", group=grpVis)
+showVwap    = input.bool(true, "Show VWAP", group=grpVis)
+
+showTradeLevels = input.bool(true, "Show Active Trade Levels", group=grpVis)
+showEntryLine   = input.bool(true, "Show Entry Line", group=grpVis)
+showStopLine    = input.bool(true, "Show Stop Line", group=grpVis)
+showTargetLine  = input.bool(true, "Show Target Line", group=grpVis)
+showBEline      = input.bool(true, "Show Break-even Line", group=grpVis)
+
+colBull      = input.color(color.new(#00c853, 0), "Buy Triangle Color", group=grpVis)
+colBear      = input.color(color.new(#ff5252, 0), "Sell Triangle Color", group=grpVis)
+colBasisBull = input.color(color.new(#00c853, 0), "Basis Bull Color", group=grpVis)
+colBasisBear = input.color(color.new(#ff5252, 0), "Basis Bear Color", group=grpVis)
+colBasisFlat = input.color(color.new(color.gray, 0), "Basis Neutral Color", group=grpVis)
+colUpper     = input.color(color.new(#00c853, 35), "Upper Channel Color", group=grpVis)
+colLower     = input.color(color.new(#ff5252, 35), "Lower Channel Color", group=grpVis)
+colFast      = input.color(color.new(color.teal, 0), "Fast EMA Color", group=grpVis)
+colSlow      = input.color(color.new(color.orange, 0), "Slow EMA Color", group=grpVis)
+colEma9      = input.color(color.new(color.yellow, 0), "9 EMA Color", group=grpVis)
+colVwap      = input.color(color.new(color.aqua, 0), "VWAP Color", group=grpVis)
+
+colEntryLine  = input.color(color.new(color.white, 0), "Entry Line Color", group=grpVis)
+colStopLine   = input.color(color.new(color.red, 0), "Stop Line Color", group=grpVis)
+colTargetLine = input.color(color.new(color.lime, 0), "Target Line Color", group=grpVis)
+colBEline     = input.color(color.new(color.yellow, 0), "Break-even Line Color", group=grpVis)
+
+showDash = input.bool(true, "Show Dashboard", group=grpVis)
+dashPos  = input.string("Top Right", "Dashboard Position",
+     options=["Top Left","Top Center","Top Right","Middle Left","Middle Center","Middle Right","Bottom Left","Bottom Center","Bottom Right"],
+     group=grpVis)
+dashSize = input.string("Medium", "Dashboard Size", options=["Small","Medium","Large","XL"], group=grpVis)
+dashTheme = input.string("Dark Transparent", "Dashboard Theme",
+     options=["Dark Transparent","Dark Solid","Light Transparent","Light Solid"],
+     group=grpVis)
+dashUseStateColors = input.bool(true, "Use Bull/Bear State Colors", group=grpVis)
+dashTitle = input.string("TrendPulse Dashboard", "Dashboard Title", group=grpVis)
+
+// Helpers
+clip(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+scale(float x, float a, float b) =>
+    a == b ? 0.0 : clip((x - a) / (b - a), 0.0, 1.0)
+
+dashPosition(string p) =>
+    p == "Top Left" ? position.top_left :
+     p == "Top Center" ? position.top_center :
+     p == "Top Right" ? position.top_right :
+     p == "Middle Left" ? position.middle_left :
+     p == "Middle Center" ? position.middle_center :
+     p == "Middle Right" ? position.middle_right :
+     p == "Bottom Left" ? position.bottom_left :
+     p == "Bottom Center" ? position.bottom_center :
+     position.bottom_right
+
+dashTextSize(string s) =>
+    s == "Small" ? size.tiny :
+     s == "Medium" ? size.small :
+     s == "Large" ? size.normal :
+     size.large
+
+dashBgColor(string t) =>
+    t == "Dark Transparent" ? color.new(color.black, 85) :
+     t == "Dark Solid" ? color.new(color.black, 20) :
+     t == "Light Transparent" ? color.new(color.white, 80) :
+     color.new(color.white, 15)
+
+dashFrameColor(string t) =>
+    (t == "Dark Transparent" or t == "Dark Solid") ? color.new(color.gray, 70) : color.new(color.gray, 45)
+
+dashTextColor(string t) =>
+    (t == "Dark Transparent" or t == "Dark Solid") ? color.white : color.black
+
+fmtPct(float x) =>
+    str.tostring(math.round(x, 2)) + "%"
+
+labelSizeFromString(string s) =>
+    s == "Tiny" ? size.tiny :
+     s == "Small" ? size.small :
+     size.normal
+
+inWindow = time >= fromT and time <= toT
+bi = bar_index
+
+// Core Engine
+ema9    = ta.ema(close, 9)
+emaFast = ta.ema(close, lenFast)
+emaSlow = ta.ema(close, lenSlow)
+basis   = ta.ema(hlc3, lenBase)
+dayVwap = ta.vwap(hlc3)
+atrNow  = ta.atr(lenAtr)
+safeAtr = math.max(nz(atrNow), syminfo.mintick)
+
+upperCh = basis + atrNow * mulCh
+lowerCh = basis - atrNow * mulCh
+
+bullBias = emaFast > emaSlow and close > basis
+bearBias = emaFast < emaSlow and close < basis
+basisDynColor = bullBias ? colBasisBull : bearBias ? colBasisBear : colBasisFlat
+
+pctVsEma9 = ema9 != 0 ? ((close - ema9) / ema9) * 100.0 : 0.0
+pctVsVwap = dayVwap != 0 ? ((close - dayVwap) / dayVwap) * 100.0 : 0.0
+
+// Regime Model
+hhReg = ta.highest(high, lenReg)
+llReg = ta.lowest(low, lenReg)
+sumTr = math.sum(ta.tr, lenReg)
+chop = hhReg != llReg and sumTr > 0 ? 100 * math.log10(sumTr / (hhReg - llReg)) / math.log10(lenReg) : 50.0
+
+atrMean = ta.sma(atrNow, lenReg)
+atrExp = atrMean > 0 ? atrNow / atrMean : 1.0
+
+basisSlope = basis - basis[lenSlp]
+slopeNorm = basisSlope / safeAtr
+
+upPersist = math.sum(close > basis ? 1.0 : 0.0, lenSlp) / lenSlp
+dnPersist = math.sum(close < basis ? 1.0 : 0.0, lenSlp) / lenSlp
+
+regTrend = chop < chopThr and math.abs(slopeNorm) > 0.15 and (upPersist > 0.65 or dnPersist > 0.65)
+regExpand = atrExp > expThr and chop < chopThr + 5
+regQuiet = chop >= chopThr and atrExp < 1.0
+regNoisy = not regTrend and not regExpand and not regQuiet
+
+regCode = regTrend ? 1 : regExpand ? 2 : regQuiet ? 0 : 3
+
+// Equity Filters
+dollarVol = close * volume
+dollarVolAvg = ta.sma(dollarVol, dvLen)
+passLiq = not useLiq or dollarVolAvg >= dvMinM * 1000000.0
+
+benchClose = request.security(bench, benchTf, close)
+benchEma = request.security(bench, benchTf, ta.ema(close, benchLen))
+passMktLong = not useMkt or benchClose > benchEma
+passMktShort = not useMkt or benchClose < benchEma
+
+volBase = ta.sma(volume, 20)
+volRel = volBase > 0 ? volume / volBase : 1.0
+passVol = not useVolFilt or volRel >= volMin
+
+// Quality Score
+roc5 = ta.roc(close, 5)
+bodyEff = math.abs(close - open) / safeAtr
+stretchUp = (close - upperCh) / safeAtr
+stretchDn = (lowerCh - close) / safeAtr
+trendGapBull = (emaFast - emaSlow) / safeAtr
+trendGapBear = (emaSlow - emaFast) / safeAtr
+
+stateLong = regTrend ? 1.0 : regExpand ? 0.75 : regQuiet ? 0.20 : 0.40
+stateShort = stateLong
+
+longScore = 100 * (0.18 * scale(volRel, 0.8, 2.2) + 0.18 * scale(stretchUp, -0.2, 1.5) + 0.18 * scale(roc5, -1.0, 3.5) + 0.14 * scale(bodyEff, 0.1, 1.2) + 0.12 * scale(trendGapBull, -0.1, 1.2) + 0.20 * stateLong)
+shortScore = 100 * (0.18 * scale(volRel, 0.8, 2.2) + 0.18 * scale(stretchDn, -0.2, 1.5) + 0.18 * scale(-roc5, -1.0, 3.5) + 0.14 * scale(bodyEff, 0.1, 1.2) + 0.12 * scale(trendGapBear, -0.1, 1.2) + 0.20 * stateShort)
+
+// Trigger Logic
+allowLong = not shortOnly
+allowShort = not longOnly
+
+var int lastTradeBar = -1000
+coolOk = (bi - lastTradeBar) > coolBars
+
+breakLong = close > upperCh and close > high[1]
+breakShort = close < lowerCh and close < low[1]
+
+pbLow = ta.lowest(low, pbLookback)
+pbHigh = ta.highest(high, pbLookback)
+low3 = ta.lowest(low, 3)
+high3 = ta.highest(high, 3)
+
+nearFastLong = pbLow <= emaFast + safeAtr * pbAtrZone
+nearBasisLong = pbLow <= basis + safeAtr * pbAtrZone
+nearFastShort = pbHigh >= emaFast - safeAtr * pbAtrZone
+nearBasisShort = pbHigh >= basis - safeAtr * pbAtrZone
+
+pullbackSeenLong = nearFastLong or nearBasisLong
+pullbackSeenShort = nearFastShort or nearBasisShort
+
+prevBullPause = close[1] <= high[1] and close[1] >= low[1]
+prevBearPause = close[1] <= high[1] and close[1] >= low[1]
+
+resumeLong = high > high[1] and close > high[1]
+resumeShort = low < low[1] and close < low[1]
+
+pullbackLongOk = not useRetest or low3 > basis - safeAtr * 0.45
+pullbackShortOk = not useRetest or high3 < basis + safeAtr * 0.45
+
+contLong = bullBias and pullbackSeenLong and pullbackLongOk and prevBullPause and resumeLong and close > emaFast
+contShort = bearBias and pullbackSeenShort and pullbackShortOk and prevBearPause and resumeShort and close < emaFast
+
+useBreakout = entryMode == "Breakout" or entryMode == "Both"
+useCont = entryMode == "Continuation" or entryMode == "Both"
+
+longTrigger = (useBreakout and breakLong) or (useCont and contLong)
+shortTrigger = (useBreakout and breakShort) or (useCont and contShort)
+
+goLong = inWindow and coolOk and allowLong and bullBias and passLiq and passMktLong and passVol and longTrigger and longScore >= minScore
+goShort = inWindow and coolOk and allowShort and bearBias and passLiq and passMktShort and passVol and shortTrigger and shortScore >= minScore
+
+// Position Sizing
+equityBase = strategy.initial_capital + strategy.netprofit
+riskCash = equityBase * riskPct / 100.0
+allocCash = equityBase * maxAlloc / 100.0
+
+qtyFor(float entryPx, float stopPx) =>
+    perUnitRisk = math.abs(entryPx - stopPx)
+    rawQty = perUnitRisk > 0 ? riskCash / perUnitRisk : 0.0
+    capQty = entryPx > 0 ? allocCash / entryPx : 0.0
+    q = math.min(rawQty, capQty)
+    allowFrac ? q : math.floor(q)
+
+longStopSeed = math.min(low, basis) - safeAtr * stopAtr
+shortStopSeed = math.max(high, basis) + safeAtr * stopAtr
+longQty = qtyFor(close, longStopSeed)
+shortQty = qtyFor(close, shortStopSeed)
+
+// Orders
+var float plannedRiskLong = na
+var float plannedRiskShort = na
+var int entryBar = na
+var bool firedLong = false
+var bool firedShort = false
+
+firedLong := false
+firedShort := false
+
+if goLong and longQty > 0 and barstate.isconfirmed
+    if strategy.position_size < 0
+        strategy.close("Short")
+    plannedRiskLong := math.abs(close - longStopSeed)
+    strategy.entry("Long", strategy.long, qty=longQty)
+    lastTradeBar := bi
+    firedLong := true
+
+if goShort and shortQty > 0 and barstate.isconfirmed
+    if strategy.position_size > 0
+        strategy.close("Long")
+    plannedRiskShort := math.abs(shortStopSeed - close)
+    strategy.entry("Short", strategy.short, qty=shortQty)
+    lastTradeBar := bi
+    firedShort := true
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bi
+if strategy.position_size == 0
+    entryBar := na
+
+inLong = strategy.position_size > 0
+inShort = strategy.position_size < 0
+avgPx = strategy.position_avg_price
+
+activeRiskLong = nz(plannedRiskLong, safeAtr * stopAtr)
+activeRiskShort = nz(plannedRiskShort, safeAtr * stopAtr)
+
+if inLong
+    longStop = avgPx - activeRiskLong
+    longTake = avgPx + activeRiskLong * rrMult
+    hit1R = high >= avgPx + activeRiskLong
+    if useBE and hit1R
+        longStop := math.max(longStop, avgPx * (1 + beBuff / 100.0))
+    strategy.exit("Long Exit", "Long", stop=longStop, limit=longTake, trail_points=useTrail and hit1R ? (safeAtr * trailAtr) / syminfo.mintick : na)
+
+if inShort
+    shortStop = avgPx + activeRiskShort
+    shortTake = avgPx - activeRiskShort * rrMult
+    hit1R = low <= avgPx - activeRiskShort
+    if useBE and hit1R
+        shortStop := math.min(shortStop, avgPx * (1 - beBuff / 100.0))
+    strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortTake, trail_points=useTrail and hit1R ? (safeAtr * trailAtr) / syminfo.mintick : na)
+
+if strategy.position_size != 0 and not na(entryBar) and timeStop > 0
+    if (bi - entryBar) >= timeStop
+        strategy.close(inLong ? "Long" : "Short", comment="Time Stop")
+
+// Active trade level calculations
+float activeEntryLine = na
+float activeStopLine = na
+float activeTargetLine = na
+float activeBElinePlot = na
+
+if inLong
+    activeEntryLine := avgPx
+    activeStopLine := avgPx - activeRiskLong
+    activeTargetLine := avgPx + activeRiskLong * rrMult
+    longHit1RPlot = high >= avgPx + activeRiskLong
+    if useBE and longHit1RPlot
+        activeBElinePlot := avgPx * (1 + beBuff / 100.0)
+
+if inShort
+    activeEntryLine := avgPx
+    activeStopLine := avgPx + activeRiskShort
+    activeTargetLine := avgPx - activeRiskShort * rrMult
+    shortHit1RPlot = low <= avgPx - activeRiskShort
+    if useBE and shortHit1RPlot
+        activeBElinePlot := avgPx * (1 - beBuff / 100.0)
+
+// Tiny triangle signals + alerts
+plotshape(firedLong, title="Buy Triangle", style=shape.triangleup, location=location.belowbar, color=colBull, size=size.tiny, text="")
+plotshape(firedShort, title="Sell Triangle", style=shape.triangledown, location=location.abovebar, color=colBear, size=size.tiny, text="")
+
+alertcondition(firedLong, title="Buy Alert", message="TrendPulse Buy signal on {{ticker}} @ {{close}}")
+alertcondition(firedShort, title="Sell Alert", message="TrendPulse Sell signal on {{ticker}} @ {{close}}")
+
+if firedLong
+    alert("TrendPulse Buy signal on " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+if firedShort
+    alert("TrendPulse Sell signal on " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+// Visuals
+plot(showBasis ? basis : na, "Basis", color=basisDynColor, linewidth=2)
+plot(showUpper ? upperCh : na, "Upper Channel", color=colUpper, linewidth=1)
+plot(showLower ? lowerCh : na, "Lower Channel", color=colLower, linewidth=1)
+plot(showFastEma ? emaFast : na, "Fast EMA", color=colFast, linewidth=1)
+plot(showSlowEma ? emaSlow : na, "Slow EMA", color=colSlow, linewidth=1)
+plot(showEma9 ? ema9 : na, "9 EMA", color=colEma9, linewidth=2)
+plot(showVwap ? dayVwap : na, "VWAP", color=colVwap, linewidth=2)
+
+plot(showTradeLevels and showEntryLine ? activeEntryLine : na, "Active Entry", color=colEntryLine, linewidth=2, style=plot.style_linebr)
+plot(showTradeLevels and showStopLine ? activeStopLine : na, "Active Stop", color=colStopLine, linewidth=2, style=plot.style_linebr)
+plot(showTradeLevels and showTargetLine ? activeTargetLine : na, "Active Target", color=colTargetLine, linewidth=2, style=plot.style_linebr)
+plot(showTradeLevels and showBEline ? activeBElinePlot : na, "Active Break-even", color=colBEline, linewidth=2, style=plot.style_linebr)
+
+bgcolor(showBg and regCode == 1 ? color.new(#00c853, 94) : na, title="Trend State")
+bgcolor(showBg and regCode == 2 ? color.new(#2962ff, 94) : na, title="Expansion State")
+bgcolor(showBg and regCode == 0 ? color.new(#9e9e9e, 95) : na, title="Quiet State")
+bgcolor(showBg and regCode == 3 ? color.new(#ffab00, 95) : na, title="Noisy State")
+
+lblSz = labelSizeFromString(scoreLabelSize)
+
+if showScoreLabels and firedLong
+    label.new(bar_index, low - safeAtr * scoreLabelAtrOffset, "B " + str.tostring(math.round(longScore, 1)), style=label.style_label_up, color=color.new(colBull, 0), textcolor=color.white, size=lblSz)
+
+if showScoreLabels and firedShort
+    label.new(bar_index, high + safeAtr * scoreLabelAtrOffset, "S " + str.tostring(math.round(shortScore, 1)), style=label.style_label_down, color=color.new(colBear, 0), textcolor=color.white, size=lblSz)
+
+// Enhanced dashboard
+var table dash = table.new(dashPosition(dashPos), 3, 10, frame_color=dashFrameColor(dashTheme), border_width=1)
+
+dashSz  = dashTextSize(dashSize)
+dashBg  = dashBgColor(dashTheme)
+dashTxt = dashTextColor(dashTheme)
+
+stateTxt = regTrend ? "Trend" : regExpand ? "Expand" : regQuiet ? "Quiet" : "Noisy"
+trendTxt = bullBias ? "Bull" : bearBias ? "Bear" : "Flat"
+
+color stateValColor = dashTxt
+color trendValColor = dashTxt
+color lsValColor = dashTxt
+color ema9ValColor = dashTxt
+color vwapValColor = dashTxt
+
+if dashUseStateColors
+    stateValColor := regTrend ? color.lime : regExpand ? color.aqua : regQuiet ? color.silver : color.orange
+    trendValColor := bullBias ? color.lime : bearBias ? color.red : dashTxt
+    lsValColor := longScore > shortScore ? color.lime : shortScore > longScore ? color.red : dashTxt
+    ema9ValColor := pctVsEma9 > 0 ? color.lime : pctVsEma9 < 0 ? color.red : dashTxt
+    vwapValColor := pctVsVwap > 0 ? color.lime : pctVsVwap < 0 ? color.red : dashTxt
+
+if showDash
+    table.set_position(dash, dashPosition(dashPos))
+
+    table.cell(dash, 0, 0, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 0, dashTitle, bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 2, 0, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 1, "Metric", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 1, "Value", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 2, 1, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 2, "State", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 2, stateTxt, bgcolor=dashBg, text_color=stateValColor, text_size=dashSz)
+    table.cell(dash, 2, 2, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 3, "L / S", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 3, str.tostring(math.round(longScore, 1)) + " / " + str.tostring(math.round(shortScore, 1)), bgcolor=dashBg, text_color=lsValColor, text_size=dashSz)
+    table.cell(dash, 2, 3, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 4, "Chop", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 4, str.tostring(math.round(chop, 1)), bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 2, 4, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 5, "ATR Exp", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 5, str.tostring(math.round(atrExp, 2)), bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 2, 5, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 6, "Trend", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 6, trendTxt, bgcolor=dashBg, text_color=trendValColor, text_size=dashSz)
+    table.cell(dash, 2, 6, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 7, "% vs 9 EMA", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 7, fmtPct(pctVsEma9), bgcolor=dashBg, text_color=ema9ValColor, text_size=dashSz)
+    table.cell(dash, 2, 7, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 8, "% vs VWAP", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 8, fmtPct(pctVsVwap), bgcolor=dashBg, text_color=vwapValColor, text_size=dashSz)
+    table.cell(dash, 2, 8, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+
+    table.cell(dash, 0, 9, "Vol", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 1, 9, str.tostring(math.round(volRel, 2)), bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+    table.cell(dash, 2, 9, "", bgcolor=dashBg, text_color=dashTxt, text_size=dashSz)
+else
+    table.clear(dash, 0, 0, 2, 9)
+
+// Hidden diagnostics
+plot(longScore, "Long Score", display=display.none)
+plot(shortScore, "Short Score", display=display.none)
+plot(chop, "Chop", display=display.none)
+plot(atrExp, "ATR Expansion", display=display.none)
+plot(dollarVolAvg / 1000000.0, "Avg Dollar Vol (M)", display=display.none)
+plot(float(regCode), "Regime Code", display=display.none)
+plot(useCont and contLong ? 1 : 0, "Cont Long", display=display.none)
+plot(useCont and contShort ? 1 : 0, "Cont Short", display=display.none)
+plot(useBreakout and breakLong ? 1 : 0, "Break Long", display=display.none)
+plot(useBreakout and breakShort ? 1 : 0, "Break Short", display=display.none)

@@ -1,0 +1,143 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © xxyuhxxon
+
+//@version=6
+
+//@version=6
+library("HTFStructCore_v2", overlay=false)
+
+// =====================================================
+// 1) Structure memory update from pivot series
+//    inputs: phSeries, plSeries  (이미 HTF request.security로 가져온 시계열)
+//    return: lastHigh, prevHigh, lastLow, prevLow, trendRaw, hasEnough
+// =====================================================
+export f_structure_from_pivots(float phSeries, float plSeries) =>
+    var float lastHigh = na
+    var float prevHigh = na
+    var float lastLow  = na
+    var float prevLow  = na
+
+    if not na(phSeries)
+        prevHigh := lastHigh
+        lastHigh := phSeries
+
+    if not na(plSeries)
+        prevLow := lastLow
+        lastLow := plSeries
+
+    hasEnough = not na(lastHigh) and not na(prevHigh) and not na(lastLow) and not na(prevLow)
+    isUp      = hasEnough and (lastHigh > prevHigh) and (lastLow > prevLow)
+    isDown    = hasEnough and (lastHigh < prevHigh) and (lastLow < prevLow)
+    trendRaw  = isUp ? 1 : isDown ? -1 : 0
+
+    [lastHigh, prevHigh, lastLow, prevLow, trendRaw, hasEnough]
+
+// =====================================================
+// 2) Manual ADX from HTF series (plusDM, minusDM, TR)
+//    inputs: plusDMSeries, minusDMSeries, trSeries (HTF에서 request.security로 가져온 시계열)
+//    return: adx
+// =====================================================
+export f_adx_from_series(float plusDMSeries, float minusDMSeries, float trSeries, int adxLen) =>
+    atr  = ta.rma(trSeries, adxLen)
+    pDM  = ta.rma(plusDMSeries, adxLen)
+    mDM  = ta.rma(minusDMSeries, adxLen)
+
+    plusDI  = atr != 0 ? 100 * (pDM / atr) : 0.0
+    minusDI = atr != 0 ? 100 * (mDM / atr) : 0.0
+
+    denom = plusDI + minusDI
+    dx    = denom != 0 ? 100 * math.abs(plusDI - minusDI) / denom : 0.0
+    ta.rma(dx, adxLen)
+
+// =====================================================
+// 3) Retest triggers (state machine)
+// =====================================================
+export f_retest_triggers(int trendRaw, float lastHigh, float lastLow, float retestTol, bool enableRetest) =>
+    crossUpRaw   = ta.crossover(close, lastHigh)
+    crossDownRaw = ta.crossunder(close, lastLow)
+
+    brokeUp      = (trendRaw == 1)  and not na(lastHigh) and crossUpRaw
+    brokeDown    = (trendRaw == -1) and not na(lastLow)  and crossDownRaw
+
+    var bool  brkActiveUp   = false
+    var float brkLevelUp    = na
+    var bool  brkActiveDown = false
+    var float brkLevelDown  = na
+
+    if brokeUp
+        brkActiveUp := true
+        brkLevelUp  := lastHigh
+
+    if brokeDown
+        brkActiveDown := true
+        brkLevelDown  := lastLow
+
+    retestUpOk =
+         enableRetest and brkActiveUp and not na(brkLevelUp) and
+         low <= (brkLevelUp + retestTol) and close >= brkLevelUp
+
+    retestDownOk =
+         enableRetest and brkActiveDown and not na(brkLevelDown) and
+         high >= (brkLevelDown - retestTol) and close <= brkLevelDown
+
+    // Invalidation
+    if brkActiveUp and not na(brkLevelUp) and close < (brkLevelUp - retestTol)
+        brkActiveUp := false
+        brkLevelUp  := na
+
+    if brkActiveDown and not na(brkLevelDown) and close > (brkLevelDown + retestTol)
+        brkActiveDown := false
+        brkLevelDown  := na
+
+    // One-shot reset
+    if retestUpOk
+        brkActiveUp := false
+        brkLevelUp  := na
+
+    if retestDownOk
+        brkActiveDown := false
+        brkLevelDown  := na
+
+    [retestUpOk, retestDownOk]
+
+// =====================================================
+// 4) Sweep triggers
+// =====================================================
+export f_sweep_triggers(int trendRaw, int sweepLookback, bool enableSweep) =>
+    prevSwingLow  = ta.lowest(low, sweepLookback)[1]
+    prevSwingHigh = ta.highest(high, sweepLookback)[1]
+
+    sweepUpOk =
+         enableSweep and (trendRaw == 1) and
+         low < prevSwingLow and close > prevSwingLow
+
+    sweepDownOk =
+         enableSweep and (trendRaw == -1) and
+         high > prevSwingHigh and close < prevSwingHigh
+
+    [sweepUpOk, sweepDownOk]
+
+// =====================================================
+// 5) Risk model
+// =====================================================
+export f_risk(float lastLow, float lastHigh, int atrLen, float atrStopMult, float atrTpMult, bool preferTightStop) =>
+    entryATR = ta.atr(atrLen)
+
+    atrStopLong   = close - atrStopMult * entryATR
+    atrStopShort  = close + atrStopMult * entryATR
+    tpLong        = close + atrTpMult   * entryATR
+    tpShort       = close - atrTpMult   * entryATR
+
+    structStopLong  = lastLow
+    structStopShort = lastHigh
+
+    tightStopLong  = na(structStopLong)  ? atrStopLong  : math.max(structStopLong, atrStopLong)
+    looseStopLong  = na(structStopLong)  ? atrStopLong  : math.min(structStopLong, atrStopLong)
+
+    tightStopShort = na(structStopShort) ? atrStopShort : math.min(structStopShort, atrStopShort)
+    looseStopShort = na(structStopShort) ? atrStopShort : math.max(structStopShort, atrStopShort)
+
+    recStopLong  = preferTightStop ? tightStopLong  : looseStopLong
+    recStopShort = preferTightStop ? tightStopShort : looseStopShort
+
+    [recStopLong, recStopShort, tpLong, tpShort]

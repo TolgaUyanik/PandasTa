@@ -1,0 +1,307 @@
+// ============================================================
+// ESTRATEGIA SCALPING - SISTEMA DE PUNTUACIÓN PONDERADA v2
+// Pine Script v6 — VERSIÓN FINAL CON WEBHOOK
+// ============================================================
+// ALERTAS:
+//   "🔔 LONG - Abrir Trade"  → action:buy  → abre en MT5 sin TP
+//   "🔔 SHORT - Abrir Trade" → action:sell → abre en MT5 sin TP
+//   "🔔 LONG - Cerrar Trade" → action:close → cierra long en MT5
+//   "🔔 SHORT - Cerrar Trade"→ action:close → cierra short en MT5
+// ============================================================
+
+//@version=6
+strategy(
+     title            = "Scalping - Sistema Ponderado Claude v2 Final",
+     shorttitle       = "SPC v2F",
+     overlay          = true,
+     initial_capital  = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value= 1,
+     commission_type  = strategy.commission.percent,
+     commission_value = 0.05,
+     max_bars_back    = 500
+     )
+
+// ============================================================
+// ── INPUTS CONFIGURABLES ────────────────────────────────────
+// ============================================================
+
+grp_risk       = "⚙️ Gestión de Riesgo"
+riskPct        = input.float(1.0,  "% Riesgo por operación",    minval=0.1, maxval=10,  step=0.1, group=grp_risk)
+rrRatio        = input.float(2.0,  "R:R deseado (referencia)",  minval=0.5, maxval=10,  step=0.5, group=grp_risk)
+maxTrades      = input.int  (2,    "Máx. operaciones abiertas",  minval=1,   maxval=5,             group=grp_risk)
+atrMult        = input.float(2.0,  "Multiplicador ATR para SL",  minval=0.5, maxval=5,   step=0.1, group=grp_risk)
+maxSLatr       = input.float(5.0,  "SL máx. permitido (x ATR)", minval=1,   maxval=10,  step=0.5, group=grp_risk)
+
+grp_score      = "📊 Puntuación"
+threshold      = input.int  (85,   "Umbral mínimo de entrada",   minval=40, maxval=100,            group=grp_score)
+
+grp_sess       = "🕐 Filtro de Sesión"
+useSession     = input.bool (true, "Activar filtro de sesión",                                     group=grp_sess)
+londonOpen     = input.session("0800-1630", "Sesión Londres (UTC)",                                group=grp_sess)
+nyOpen         = input.session("1330-2000", "Sesión Nueva York (UTC)",                             group=grp_sess)
+
+grp_win        = "⏱️ Ventana de señal"
+windowBars     = input.int  (4,    "Velas de ventana deslizante", minval=2,  maxval=8,             group=grp_win)
+cooldown       = input.int  (3,    "Velas de cooldown tras cierre",minval=1, maxval=10,            group=grp_win)
+
+grp_filter     = "🔍 Filtros de Calidad"
+adxMinVal      = input.int  (25,   "ADX mínimo para tendencia",  minval=20, maxval=50,             group=grp_filter)
+pullbackFilter = input.bool (false, "Filtro anti-pullback",                                         group=grp_filter)
+impulseFilter  = input.bool (true, "Filtro vela impulso gigante",                                  group=grp_filter)
+
+// ============================================================
+// ── FILTRO DE SESIÓN ────────────────────────────────────────
+// ============================================================
+
+inLondon  = not useSession or (time(timeframe.period, londonOpen) != 0)
+inNY      = not useSession or (time(timeframe.period, nyOpen)     != 0)
+inSession = inLondon or inNY
+
+// ============================================================
+// ── INDICADORES ─────────────────────────────────────────────
+// ============================================================
+
+atrVal = ta.atr(14)
+
+// 1. ADX (peso 15)
+adxLen                    = 14
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxBull  = adxVal > adxMinVal and diPlus  > diMinus
+adxBear  = adxVal > adxMinVal and diMinus > diPlus
+adxScore = adxBull ? 15 : adxBear ? -15 : 0
+
+// 2. Supertrend (peso 13)
+[stLine, stDir] = ta.supertrend(3.0, 10)
+stBull   = stDir < 0
+stBear   = stDir > 0
+stScore  = stBull ? 13 : stBear ? -13 : 0
+
+// 3. EMA 20 (peso 12)
+emaFast  = ta.ema(close, 20)
+emaScore = close > emaFast ? 12 : close < emaFast ? -12 : 0
+
+// 4. MACD (peso 6)
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+macdBull  = macdLine > signalLine and macdLine > 0
+macdBear  = macdLine < signalLine and macdLine < 0
+macdScore = macdBull ? 6 : macdBear ? -6 : 0
+
+// 5. Ichimoku (peso 4)
+ichConv  = math.avg(ta.highest(9),  ta.lowest(9))
+ichBase  = math.avg(ta.highest(26), ta.lowest(26))
+ichSpanA = math.avg(ichConv, ichBase)
+ichSpanB = math.avg(ta.highest(52), ta.lowest(52))
+ichBull  = close > ichSpanA and close > ichSpanB and ichConv > ichBase
+ichBear  = close < ichSpanA and close < ichSpanB and ichConv < ichBase
+ichScore = ichBull ? 4 : ichBear ? -4 : 0
+
+// 6. ATR expansión (peso 15)
+atrAvg   = ta.sma(atrVal, 20)
+atrScore = atrVal > atrAvg * 1.1 ? 15 : atrVal < atrAvg * 0.9 ? -15 : 0
+
+// 7. VWAP (peso 13)
+vwapVal   = ta.vwap(hlc3)
+vwapScore = close > vwapVal ? 13 : close < vwapVal ? -13 : 0
+
+// 8. Volumen crudo (peso 12)
+volAvg   = ta.sma(volume, 20)
+volScore = volume > volAvg * 1.2 ? 12 : volume < volAvg * 0.8 ? -12 : 0
+
+// 9. OBV (peso 6)
+obvVal   = ta.obv
+obvEma   = ta.ema(obvVal, 10)
+obvScore = obvVal > obvEma ? 6 : obvVal < obvEma ? -6 : 0
+
+// 10. CMF (peso 4)
+cmfMFV   = ((close - low) - (high - close)) / (high - low) * volume
+cmfVal   = ta.sma(cmfMFV, 20) / ta.sma(volume, 20)
+cmfScore = cmfVal > 0.05 ? 4 : cmfVal < -0.05 ? -4 : 0
+
+// ============================================================
+// ── VENTANA DESLIZANTE ───────────────────────────────────────
+// ============================================================
+
+dirBullSum = 0
+dirBearSum = 0
+volBullSum = 0
+volBearSum = 0
+
+for i = 0 to windowBars - 1
+    pastDir = adxScore[i] + stScore[i] + emaScore[i] + macdScore[i] + ichScore[i]
+    pastVol = atrScore[i] + vwapScore[i] + volScore[i] + obvScore[i] + cmfScore[i]
+    if pastDir > 0
+        dirBullSum := dirBullSum + pastDir
+    if pastDir < 0
+        dirBearSum := dirBearSum + math.abs(pastDir)
+    if pastVol > 0
+        volBullSum := volBullSum + pastVol
+    if pastVol < 0
+        volBearSum := volBearSum + math.abs(pastVol)
+
+totalBull = (dirBullSum / windowBars) + (volBullSum / windowBars)
+totalBear = (dirBearSum / windowBars) + (volBearSum / windowBars)
+
+// ============================================================
+// ── FILTROS DE CALIDAD ───────────────────────────────────────
+// ============================================================
+
+antipullLong  = not pullbackFilter or close[1] > open[1]
+antipullShort = not pullbackFilter or close[1] < open[1]
+
+isImpulse  = math.abs(close[1] - open[1]) > atrVal * 2.0
+slLookback = (impulseFilter and isImpulse) ? 5 : 3
+
+slLongRaw  = ta.lowest (low,  slLookback) - atrVal * atrMult
+slShortRaw = ta.highest(high, slLookback) + atrVal * atrMult
+
+slLongDist  = close - slLongRaw
+slShortDist = slShortRaw - close
+
+slLongValid  = slLongDist  > 0 and slLongDist  <= atrVal * maxSLatr
+slShortValid = slShortDist > 0 and slShortDist <= atrVal * maxSLatr
+
+// TP de referencia (solo informativo en Telegram, MT5 no lo usa)
+tpLong  = close + slLongDist  * rrRatio
+tpShort = close - slShortDist * rrRatio
+
+// ============================================================
+// ── COOLDOWN ─────────────────────────────────────────────────
+// ============================================================
+
+var int lastClosedBar = 0
+if strategy.closedtrades > 0 and strategy.closedtrades[1] < strategy.closedtrades
+    lastClosedBar := bar_index
+
+barsAfterClose = bar_index - lastClosedBar
+cooldownOk     = barsAfterClose >= cooldown or lastClosedBar == 0
+
+// ============================================================
+// ── CONDICIONES ──────────────────────────────────────────────
+// ============================================================
+
+canOpenTrade = strategy.opentrades < maxTrades
+
+longCond  = totalBull >= threshold and inSession and canOpenTrade and antipullLong  and cooldownOk
+shortCond = totalBear >= threshold and inSession and canOpenTrade and antipullShort and cooldownOk
+
+closeLong  = totalBear >= threshold and strategy.position_size > 0
+closeShort = totalBull >= threshold and strategy.position_size < 0
+
+// ============================================================
+// ── EJECUCIÓN BACKTESTING ────────────────────────────────────
+// ============================================================
+
+if longCond and slLongValid
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=slLongRaw, limit=tpLong)
+
+if shortCond and slShortValid
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=slShortRaw, limit=tpShort)
+
+if closeLong
+    strategy.close("Long",  comment="Señal Contraria ↓")
+
+if closeShort
+    strategy.close("Short", comment="Señal Contraria ↑")
+
+// ============================================================
+// ── ALERTAS WEBHOOK ──────────────────────────────────────────
+// Formato JSON compatible con el servidor Flask existente
+//
+// INSTRUCCIONES PARA CONFIGURAR EN TRADINGVIEW:
+//   1. Crear alerta con condición "🔔 LONG - Abrir Trade"
+//      Webhook URL: http://TU_IP:5000/webhook
+//      Mensaje: déjalo vacío (Pine lo genera con alert())
+//
+//   2. Crear alerta "🔔 SHORT - Abrir Trade" → mismo webhook
+//   3. Crear alerta "🔔 LONG - Cerrar Trade" → mismo webhook
+//   4. Crear alerta "🔔 SHORT - Cerrar Trade" → mismo webhook
+//   5. Crear alerta "🔔 Revisión Claude" → solo Telegram (NO webhook MT5)
+// ============================================================
+
+// -- Abrir LONG --
+if longCond and slLongValid
+    alert(
+         '{"action":"buy","ticker":"' + syminfo.ticker + '",' +
+         '"price":' + str.tostring(close, '#.####') + ',' +
+         '"sl":'    + str.tostring(slLongRaw, '#.####') + ',' +
+         '"tp":'    + str.tostring(tpLong, '#.####') + ',' +
+         '"score":' + str.tostring(math.round(totalBull)) + ',' +
+         '"risk":'  + str.tostring(riskPct) + '}',
+         alert.freq_once_per_bar_close
+         )
+
+// -- Abrir SHORT --
+if shortCond and slShortValid
+    alert(
+         '{"action":"sell","ticker":"' + syminfo.ticker + '",' +
+         '"price":' + str.tostring(close, '#.####') + ',' +
+         '"sl":'    + str.tostring(slShortRaw, '#.####') + ',' +
+         '"tp":'    + str.tostring(tpShort, '#.####') + ',' +
+         '"score":' + str.tostring(math.round(totalBear)) + ',' +
+         '"risk":'  + str.tostring(riskPct) + '}',
+         alert.freq_once_per_bar_close
+         )
+
+// -- Cerrar LONG por señal contraria --
+if closeLong
+    alert(
+         '{"action":"close","side":"buy","ticker":"' + syminfo.ticker + '",' +
+         '"price":' + str.tostring(close, '#.####') + ',' +
+         '"score":' + str.tostring(math.round(totalBear)) + '}',
+         alert.freq_once_per_bar_close
+         )
+
+// -- Cerrar SHORT por señal contraria --
+if closeShort
+    alert(
+         '{"action":"close","side":"sell","ticker":"' + syminfo.ticker + '",' +
+         '"price":' + str.tostring(close, '#.####') + ',' +
+         '"score":' + str.tostring(math.round(totalBull)) + '}',
+         alert.freq_once_per_bar_close
+         )
+
+// ============================================================
+// ── VISUALIZACIÓN ───────────────────────────────────────────
+// ============================================================
+
+plot(stLine,  "Supertrend", color=stDir < 0 ? color.new(color.green, 0) : color.new(color.red, 0), linewidth=2)
+plot(emaFast, "EMA 20",     color=color.new(color.orange, 20), linewidth=1)
+plot(vwapVal, "VWAP",       color=color.new(color.blue,   20), linewidth=1)
+
+plotshape(longCond  and slLongValid,  title="✅ Long",  location=location.belowbar, style=shape.triangleup,   color=color.new(color.green, 0), size=size.small)
+plotshape(shortCond and slShortValid, title="✅ Short", location=location.abovebar, style=shape.triangledown, color=color.new(color.red,   0), size=size.small)
+
+blockedLong  = totalBull >= threshold and inSession and (not canOpenTrade or not cooldownOk) and antipullLong
+blockedShort = totalBear >= threshold and inSession and (not canOpenTrade or not cooldownOk) and antipullShort
+plotshape(blockedLong,  title="⏸ Long Bloqueado",  location=location.belowbar, style=shape.circle, color=color.new(color.gray, 60), size=size.tiny)
+plotshape(blockedShort, title="⏸ Short Bloqueado", location=location.abovebar, style=shape.circle, color=color.new(color.gray, 60), size=size.tiny)
+
+plotshape(closeLong,  title="⬛ Cierre Long",  location=location.abovebar, style=shape.xcross, color=color.new(color.yellow, 0), size=size.tiny)
+plotshape(closeShort, title="⬛ Cierre Short", location=location.belowbar, style=shape.xcross, color=color.new(color.yellow, 0), size=size.tiny)
+
+// ── PANEL ────────────────────────────────────────────────────
+var table scorePanel = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 70),
+     border_color=color.new(color.gray, 50),
+     border_width=1)
+
+if barstate.islast
+    table.cell(scorePanel, 0, 0, "GRUPO",          text_color=color.white,  text_size=size.small, bgcolor=color.new(color.navy, 30))
+    table.cell(scorePanel, 1, 0, "SCORE",           text_color=color.white,  text_size=size.small, bgcolor=color.new(color.navy, 30))
+    table.cell(scorePanel, 0, 1, "📈 Dir. Bull",    text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 1, str.tostring(math.round(dirBullSum / windowBars)), text_color=dirBullSum/windowBars >= 30 ? color.green : color.gray, text_size=size.small)
+    table.cell(scorePanel, 0, 2, "📉 Dir. Bear",    text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 2, str.tostring(math.round(dirBearSum / windowBars)), text_color=dirBearSum/windowBars >= 30 ? color.red   : color.gray, text_size=size.small)
+    table.cell(scorePanel, 0, 3, "📊 Vol. Bull",    text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 3, str.tostring(math.round(volBullSum / windowBars)), text_color=volBullSum/windowBars >= 30 ? color.green : color.gray, text_size=size.small)
+    table.cell(scorePanel, 0, 4, "📊 Vol. Bear",    text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 4, str.tostring(math.round(volBearSum / windowBars)), text_color=volBearSum/windowBars >= 30 ? color.red   : color.gray, text_size=size.small)
+    table.cell(scorePanel, 0, 5, "🟢 Total Bull",   text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 5, str.tostring(math.round(totalBull)), text_color=totalBull >= threshold ? color.green : color.gray, text_size=size.small)
+    table.cell(scorePanel, 0, 6, "🔴 Total Bear",   text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 6, str.tostring(math.round(totalBear)), text_color=totalBear >= threshold ? color.red   : color.gray, text_size=size.small)
+    table.cell(scorePanel, 0, 7, "🎯 Umbral",       text_color=color.white,  text_size=size.small)
+    table.cell(scorePanel, 1, 7, str.tostring(threshold), text_color=color.yellow, text_size=size.small)

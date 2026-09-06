@@ -1,0 +1,195 @@
+//@version=6
+// ===================================
+// Renko Size Table
+// ===================================
+// Author: Filipe Teixeira Amaral
+// Version: 1.0
+// Last Updated: July 2026
+//
+// Description:
+// A table of suggested Renko brick sizes (half of ATR, in price and in ticks)
+// across four timeframes at once, so you can size a Renko chart without switching
+// timeframes or adding one indicator per interval. Each row computes its own ATR
+// over its own lookback in days.
+//
+// Two reads per timeframe:
+//   • ATR / Half ATR / Ticks — the live, EMA-smoothed average true range. Reacts
+//     to the current session.
+//   • Med ATR / Med Ticks — the median of each recent day's mean true range. It
+//     holds steady through an outlier session (one hot CPI day out of ten barely
+//     moves it), so it is the more stable brick-size pick on volatile instruments.
+//
+// The suggested brick size is the "Ticks" (or "Med Ticks") column: half the ATR,
+// converted to the symbol's ticks.
+//
+// Features:
+// • Four configurable timeframes, each with its own ATR lookback in days
+// • Live EMA ATR and a median-of-days ATR side by side
+// • "Ignore gaps" excludes the session-open gap from the true range
+// • Configurable decimals, table position, text size, and colors
+//
+// Notes:
+// • Place this on a chart timeframe AT OR BELOW the smallest row (a 1-minute chart
+//   for the 1/5/15/60 defaults). TradingView can only feed a higher-or-equal
+//   timeframe reliably into each row; a row whose timeframe is below the chart is
+//   flagged and blanked instead of showing a wrong number.
+// • The ATR period is the row's day count times the bars that timeframe's sessions
+//   actually hold, learned by watching the sessions roll, so the first couple of
+//   sessions after adding it are still settling.
+// • Ticks use the symbol's tick size (syminfo.mintick).
+
+indicator("Renko Size Table", "Renko Size Table", overlay = true)
+
+// ─── Inputs ────────────────────────────────────────────────────────────────
+tf1     = input.timeframe("1",  "Timeframe 1", inline = "r1", group = "Timeframes")
+days1   = input.int(3,  "days", inline = "r1", minval = 1, group = "Timeframes")
+tf2     = input.timeframe("5",  "Timeframe 2", inline = "r2", group = "Timeframes")
+days2   = input.int(5,  "days", inline = "r2", minval = 1, group = "Timeframes")
+tf3     = input.timeframe("15", "Timeframe 3", inline = "r3", group = "Timeframes")
+days3   = input.int(10, "days", inline = "r3", minval = 1, group = "Timeframes")
+tf4     = input.timeframe("60", "Timeframe 4", inline = "r4", group = "Timeframes")
+days4   = input.int(20, "days", inline = "r4", minval = 1, group = "Timeframes")
+
+ignoreGaps = input.bool(true, "Ignore Gaps", group = "Parameters", tooltip = "Exclude the session-open gap from the true range, so an overnight jump does not inflate the ATR.")
+decimals   = input.int(1, "Decimal Places", minval = 0, maxval = 8, group = "Parameters")
+
+tablePos = input.string("top_right", "Position", options = ["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group = "Display")
+textSize = input.string("normal", "Text Size", options = ["tiny", "small", "normal", "large", "huge", "auto"], group = "Display")
+
+bgColor      = input.color(color.new(color.black, 20), "Background",   group = "Colors")
+headerColor  = input.color(color.new(#464646, 30),     "Header",       group = "Colors")
+textColor    = input.color(color.white,                "Label Text",   group = "Colors")
+atrColor     = input.color(#0096ff,                    "ATR Text",     group = "Colors")
+tickColor    = input.color(#00c800,                    "Ticks Text",   group = "Colors")
+warnColor    = input.color(color.orange,               "Warning Text", group = "Colors")
+
+// ─── ATR engine (runs inside each request.security, on that timeframe) ───────
+// A faithful port of the NinjaTrader Renko Size Table: the ATR period is the row's
+// day count times the bars a session holds for that timeframe, which is only known
+// after a session rolls, so a manual EMA (smoothing constant recomputed each bar)
+// carries the moving period. True ranges seen before the first roll are parked and
+// replayed once the period is known, so no wrong-period residue lingers in the EMA.
+// Alongside it, each finished session contributes its mean true range to a day
+// window whose median is the steady "typical day" read.
+f_row(int atrDays, bool ignoreGapsIn) =>
+    newDay = ta.change(time("D")) != 0
+
+    // Bars-per-day census: each roll, the day just finished sizes one day.
+    var int barsInDay = 0
+    var int barsPerDay = 0
+    if newDay
+        if barsInDay > 0
+            barsPerDay := barsInDay
+        barsInDay := 1
+    else
+        barsInDay += 1
+
+    // Finalize the session that just ended before this bar joins the new one, so a
+    // full session's mean lands in the day window exactly once. The gate opens only
+    // on a roll observed inside the data, so the partial session at the left edge
+    // never contributes a skewed day.
+    var float dayTrSum = 0.0
+    var int dayTrCount = 0
+    var bool sessionObserved = false
+    var array<float> dailyAtrs = array.new_float()
+    var float medAtr = na
+    if newDay
+        if sessionObserved and dayTrCount > 0
+            array.push(dailyAtrs, dayTrSum / dayTrCount)
+            while array.size(dailyAtrs) > math.max(1, atrDays)
+                array.shift(dailyAtrs)
+            medAtr := array.median(dailyAtrs)
+        sessionObserved := true
+        dayTrSum := 0.0
+        dayTrCount := 0
+
+    // True range: the session-open bar drops the gap when Ignore Gaps is on.
+    tr = ignoreGapsIn and newDay ? high - low : ta.tr(true)
+
+    if sessionObserved
+        dayTrSum += tr
+        dayTrCount += 1
+
+    // EMA fold. Park until the period is known, then replay the parked ranges and
+    // fold this one, all with the settled smoothing constant.
+    var float emaAtr = na
+    var bool seeded = false
+    var array<float> parked = array.new_float()
+    if barsPerDay == 0
+        array.push(parked, tr)
+    else
+        period = math.max(1, atrDays * barsPerDay)
+        k = 2.0 / (period + 1)
+        if array.size(parked) > 0
+            for i = 0 to array.size(parked) - 1
+                v = array.get(parked, i)
+                emaAtr := seeded ? emaAtr + k * (v - emaAtr) : v
+                seeded := true
+            array.clear(parked)
+        emaAtr := seeded ? emaAtr + k * (tr - emaAtr) : tr
+        seeded := true
+
+    [emaAtr, medAtr]
+
+[atr1, med1] = request.security(syminfo.tickerid, tf1, f_row(days1, ignoreGaps))
+[atr2, med2] = request.security(syminfo.tickerid, tf2, f_row(days2, ignoreGaps))
+[atr3, med3] = request.security(syminfo.tickerid, tf3, f_row(days3, ignoreGaps))
+[atr4, med4] = request.security(syminfo.tickerid, tf4, f_row(days4, ignoreGaps))
+
+// ─── Rendering ───────────────────────────────────────────────────────────────
+f_textSize(string s) =>
+    switch s
+        "tiny"   => size.tiny
+        "small"  => size.small
+        "normal" => size.normal
+        "large"  => size.large
+        "huge"   => size.huge
+        "auto"   => size.auto
+        => size.normal
+txtSize = f_textSize(textSize)
+
+// math.round with a precision, not str.tostring with a format string: the format
+// argument wants a compile-time constant, and the decimals here come from an input.
+f_fmt(float value) =>
+    na(value) ? "—" : str.tostring(math.round(value, decimals))
+
+f_ticks(float atr) =>
+    na(atr) or syminfo.mintick == 0 ? "—" : str.tostring(math.round((atr / 2.0) / syminfo.mintick))
+
+// A row's timeframe must be at or above the chart's, or request.security only
+// advances its state once per chart bar and the numbers are wrong. Flag those.
+f_reliable(string rowTf) =>
+    timeframe.in_seconds(rowTf) >= timeframe.in_seconds(timeframe.period)
+
+var table t = table.new(tablePos, 7, 5, bgcolor = bgColor, border_width = 1, border_color = color.new(color.gray, 40))
+
+f_dataRow(int rowIdx, string rowTf, float atr, float med) =>
+    reliable = f_reliable(rowTf)
+    table.cell(t, 0, rowIdx, str.tostring(rowTf) + "m", text_color = textColor, text_size = txtSize, text_halign = text.align_left)
+    if reliable
+        table.cell(t, 1, rowIdx, f_fmt(atr),        text_color = atrColor,  text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 2, rowIdx, f_fmt(na(atr) ? na : atr / 2.0), text_color = tickColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 3, rowIdx, f_ticks(atr),      text_color = tickColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 4, rowIdx, f_fmt(med),        text_color = atrColor,  text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 5, rowIdx, f_fmt(na(med) ? na : med / 2.0), text_color = tickColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 6, rowIdx, f_ticks(med),      text_color = tickColor, text_size = txtSize, text_halign = text.align_right)
+    else
+        table.cell(t, 1, rowIdx, "chart TF too high", text_color = warnColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 2, rowIdx, "—", text_color = warnColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 3, rowIdx, "—", text_color = warnColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 4, rowIdx, "—", text_color = warnColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 5, rowIdx, "—", text_color = warnColor, text_size = txtSize, text_halign = text.align_right)
+        table.cell(t, 6, rowIdx, "—", text_color = warnColor, text_size = txtSize, text_halign = text.align_right)
+
+if barstate.islast
+    table.cell(t, 0, 0, "TF",           text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    table.cell(t, 1, 0, "ATR",          text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    table.cell(t, 2, 0, "Half ATR",     text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    table.cell(t, 3, 0, "Ticks",        text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    table.cell(t, 4, 0, "Med ATR",      text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    table.cell(t, 5, 0, "Med Half ATR", text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    table.cell(t, 6, 0, "Med Ticks",    text_color = textColor, text_size = txtSize, bgcolor = headerColor)
+    f_dataRow(1, tf1, atr1, med1)
+    f_dataRow(2, tf2, atr2, med2)
+    f_dataRow(3, tf3, atr3, med3)
+    f_dataRow(4, tf4, atr4, med4)

@@ -1,0 +1,253 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © L&L Capital - HTF Trend Cloud Strategy
+
+//@version=6
+strategy("L&L HTF Trend Cloud Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ========================================================================================
+// PARAMÈTRES DE LA STRATÉGIE
+// ========================================================================================
+
+// Paramètres de trading
+float stopLossPercent = input.float(1.0, "Stop Loss (%)", minval=0.1, step=0.1, group="Trading Parameters", tooltip="Stop loss percentage from entry price (optional)")
+float takeProfitPercent = input.float(2.0, "Take Profit (%)", minval=0.1, step=0.1, group="Trading Parameters", tooltip="Take profit percentage from entry price (optional)")
+bool useCloudExit = input.bool(true, "Use Cloud Exit", group="Trading Parameters", tooltip="Exit when price closes below cloud (Long) or above cloud (Short)")
+bool useSLTP = input.bool(false, "Use Stop Loss & Take Profit", group="Trading Parameters", tooltip="Enable traditional SL/TP in addition to cloud exit")
+int pyramidingQty = input.int(1, "Pyramiding Quantity", minval=1, step=1, group="Trading Parameters", tooltip="Number of consecutive entries in same direction")
+
+// ========================================================================================
+// PARAMÈTRES DE L'INDICATEUR
+// ========================================================================================
+
+// Trend Mode Settings
+string TrendMode = input.string("Normal", "Trend Mode", options = ["Tight", "Normal", "Loose", "FOMC", "Net"], 
+     group = "HTF Settings", tooltip = "ATR aggressiveness: Tight/Normal flip often, Loose/FOMC more wiggle room, Net = all modes combined")
+
+// HTF Mode Settings
+string HTFMode = input.string("Auto", "HTF Mode", options = ["Auto", "Manual"], 
+     group = "HTF Settings", tooltip = "Auto = pre-defined timeframes, Manual = your custom timeframe")
+
+// Manual Timeframe (only used if HTF Mode = Manual)
+string TimeFrameM = input.timeframe('60', "HTF Aggregation (Manual)", 
+     options = ['1','2','3','5','10','15','20','30','45','60','120','180','240','D','2D','3D','4D','W','2W','3W','M','2M','3M'], 
+     group = "HTF Settings", tooltip = "Manual timeframe for HTF Trend System")
+
+// Signal Settings
+bool requireTrendAlignment = input.bool(true, "Require Trend Alignment", group = "Signal Settings", tooltip = "Only take signals that align with HTF trend direction")
+string entrySignal = input.string("Both", "Entry Signal", options = ["Both", "Bullish Only", "Bearish Only"], group = "Signal Settings")
+
+
+// ========================================================================================
+// DÉTERMINATION DU TIMEFRAME HTF (AUTO ou MANUEL)
+// ========================================================================================
+
+// Auto timeframe mapping based on current chart timeframe
+TimeFrameA = 
+      timeframe.period == '1' ? '5' : 
+      timeframe.period == '2' ? '5' :
+      timeframe.period == '3' ? '5' : 
+      timeframe.period == '4' ? '5' : 
+      timeframe.period == '5' ? '30' : 
+      timeframe.period == '10' ? '30' : 
+      timeframe.period == '15' ? '30' : 
+      timeframe.period == '30' ? '240' : 
+      timeframe.period == '60' ? '240' : 
+      timeframe.period == '120' ? '240' : 
+      timeframe.period == '180' ? 'D' : 
+      timeframe.period == '240' ? 'D' : 
+      timeframe.period == 'D' ? 'W' :
+      timeframe.period == 'W' ? 'M' : 
+      timeframe.period == 'M' ? '3M' : timeframe.period 
+
+// Final HTF Timeframe
+TimeFrame = HTFMode == "Auto" ? TimeFrameA : TimeFrameM
+
+// ========================================================================================
+// CALCUL DES INDICATEURS SUR LE HTF
+// ========================================================================================
+
+// EMAs for trend direction
+ema8_htf   = request.security(syminfo.tickerid, TimeFrame, ta.ema(close, 8))
+ema13_htf  = request.security(syminfo.tickerid, TimeFrame, ta.ema(close, 13))
+ema21_htf  = request.security(syminfo.tickerid, TimeFrame, ta.ema(close, 21))
+ema34_htf  = request.security(syminfo.tickerid, TimeFrame, ta.ema(close, 34))
+
+// Trend direction based on EMA stacking
+ema_up_htf   = ema8_htf > ema13_htf and ema13_htf > ema21_htf and ema21_htf > ema34_htf
+ema_down_htf = ema8_htf < ema13_htf and ema13_htf < ema21_htf and ema21_htf < ema34_htf
+
+// Trend Line (13 EMA)
+Trend_htf = request.security(syminfo.tickerid, TimeFrame, ta.ema(close, 13))
+
+// Close price on HTF
+close_htf = request.security(syminfo.tickerid, TimeFrame, close)
+
+// ========================================================================================
+// ATR LENGTH BASED ON TREND MODE
+// ========================================================================================
+
+ATRLength = switch TrendMode
+    "Tight"  => 60
+    "Normal" => 80
+    "Loose"  => 100
+    "FOMC"   => 120
+    "Net"    => 140
+
+// Get ATR from HTF
+atr_htf = request.security(syminfo.tickerid, TimeFrame, ta.ema(ta.tr(true), 8))
+
+// Stop Line calculation
+ATR_value = (ATRLength / 100) * atr_htf
+
+// Determine stop line direction
+is_up   = close_htf > (Trend_htf + ATR_value)
+is_down = close_htf < (Trend_htf - ATR_value)
+
+var float stop_direction = 0.0
+stop_direction := is_up ? 1 : is_down ? -1 : stop_direction[1]
+
+// Stop Line value (c'est le cloud)
+var float StopLine_htf = na
+if stop_direction == 1
+    StopLine_htf := Trend_htf - ATR_value  // Cloud bas pour bullish
+else if stop_direction == -1
+    StopLine_htf := Trend_htf + ATR_value  // Cloud haut pour bearish
+else
+    StopLine_htf := stop_direction[1]
+
+// ========================================================================================
+// SIGNAL D'ENTRÉE BASÉ SUR LE CHANGEMENT DE DIRECTION
+// ========================================================================================
+
+// Détection du changement de direction (cross)
+bullish_cross = stop_direction == 1 and stop_direction[1] == -1
+bearish_cross = stop_direction == -1 and stop_direction[1] == 1
+
+// Trend alignment condition
+bool trend_is_bullish = ema_up_htf and close_htf >= Trend_htf
+bool trend_is_bearish = ema_down_htf and close_htf <= Trend_htf
+
+// Conditions d'entrée avec ou sans alignement de tendance
+bool long_condition = false
+bool short_condition = false
+
+if requireTrendAlignment
+    long_condition := bullish_cross and trend_is_bullish
+    short_condition := bearish_cross and trend_is_bearish
+else
+    long_condition := bullish_cross
+    short_condition := bearish_cross
+
+// Filtrage par type de signal
+if entrySignal == "Bullish Only"
+    short_condition := false
+else if entrySignal == "Bearish Only"
+    long_condition := false
+
+// ========================================================================================
+// CONDITIONS DE SORTIE PAR LE CLOUD
+// ========================================================================================
+
+// Sortie Long : prix clôture sous le cloud (Stop Line)
+bool long_exit_cloud = close < StopLine_htf and stop_direction == 1
+
+// Sortie Short : prix clôture au-dessus du cloud (Stop Line)
+bool short_exit_cloud = close > StopLine_htf and stop_direction == -1
+
+// ========================================================================================
+// GESTION DES POSITIONS
+// ========================================================================================
+
+// Calcul du stop loss et take profit traditionnels (optionnels)
+float longStopPrice = 0.0
+float longTargetPrice = 0.0
+float shortStopPrice = 0.0
+float shortTargetPrice = 0.0
+
+if useSLTP
+    longStopPrice := strategy.position_avg_price * (1 - stopLossPercent / 100)
+    longTargetPrice := strategy.position_avg_price * (1 + takeProfitPercent / 100)
+    shortStopPrice := strategy.position_avg_price * (1 + stopLossPercent / 100)
+    shortTargetPrice := strategy.position_avg_price * (1 - takeProfitPercent / 100)
+
+// ========================================================================================
+// EXÉCUTION DES ORDRES
+// ========================================================================================
+
+// Entrées Long
+if long_condition
+    strategy.entry("Long", strategy.long, qty=pyramidingQty)
+    alert("LONG Signal - " + syminfo.ticker, alert.freq_once_per_bar)
+
+// Entrées Short
+if short_condition
+    strategy.entry("Short", strategy.short, qty=pyramidingQty)
+    alert("SHORT Signal - " + syminfo.ticker, alert.freq_once_per_bar)
+
+// Sorties Long par le cloud
+if long_exit_cloud and strategy.position_size > 0
+    strategy.close("Long", comment="Cloud Exit Long")
+    alert("LONG Exit - Price closed below cloud", alert.freq_once_per_bar)
+
+// Sorties Short par le cloud
+if short_exit_cloud and strategy.position_size < 0
+    strategy.close("Short", comment="Cloud Exit Short")
+    alert("SHORT Exit - Price closed above cloud", alert.freq_once_per_bar)
+
+// Sorties avec Stop Loss et Take Profit traditionnels (optionnels)
+if useSLTP
+    if strategy.position_size > 0
+        strategy.exit("Long Exit", "Long", stop=longStopPrice, limit=longTargetPrice)
+        
+    if strategy.position_size < 0
+        strategy.exit("Short Exit", "Short", stop=shortStopPrice, limit=shortTargetPrice)
+
+// ========================================================================================
+// AFFICHAGE (VISUEL)
+// ========================================================================================
+
+// Plot Trend Line
+plot(Trend_htf, title="HTF Trend Line", color=stop_direction == 1 ? color.green : color.red, linewidth=2)
+
+// Plot Stop Line (Cloud)
+plot(StopLine_htf, title="HTF Cloud Line", color=stop_direction == 1 ? color.new(color.green, 50) : color.new(color.red, 50), linewidth=2, style=plot.style_linebr)
+
+// Cloud entre Trend Line et Stop Line
+p1 = plot(Trend_htf, display=display.none)
+p2 = plot(StopLine_htf, display=display.none)
+color cloud_color = stop_direction == 1 ? color.new(color.green, 85) : color.new(color.red, 85)
+fill(p1, p2, title="HTF Trend Cloud", color=cloud_color)
+
+// Affichage des signaux sur le graphique
+plotshape(long_condition, title="Long Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small)
+plotshape(short_condition, title="Short Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small)
+
+// Affichage des sorties cloud
+plotshape(long_exit_cloud and strategy.position_size > 0, title="Long Cloud Exit", location=location.abovebar, color=color.new(color.orange, 0), style=shape.xcross, size=size.small)
+plotshape(short_exit_cloud and strategy.position_size < 0, title="Short Cloud Exit", location=location.belowbar, color=color.new(color.orange, 0), style=shape.xcross, size=size.small)
+
+// ========================================================================================
+// TABLEAU D'INFORMATIONS
+// ========================================================================================
+
+if barstate.islast
+    var info_table = table.new(position.top_right, 2, 7, frame_width=1, frame_color=color.gray)
+    info_table.cell(0, 0, "HTF Timeframe", text_color=color.white, bgcolor=color.gray)
+    info_table.cell(1, 0, TimeFrame, text_color=color.white, bgcolor=color.gray)
+    info_table.cell(0, 1, "Trend Mode", text_color=color.white, bgcolor=color.gray)
+    info_table.cell(1, 1, TrendMode, text_color=color.white, bgcolor=color.gray)
+    info_table.cell(0, 2, "HTF Direction", text_color=color.white, bgcolor=color.gray)
+    info_table.cell(1, 2, stop_direction == 1 ? "🢁 BULLISH" : "🢃 BEARISH", 
+                    text_color=stop_direction == 1 ? color.green : color.red, 
+                    bgcolor=color.gray)
+    info_table.cell(0, 3, "Current Position", text_color=color.white, bgcolor=color.gray)
+    pos_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    pos_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    info_table.cell(1, 3, pos_text, text_color=pos_color, bgcolor=color.gray)
+    info_table.cell(0, 4, "Exit Method", text_color=color.white, bgcolor=color.gray)
+    exit_method = useCloudExit ? "Cloud Exit" : useSLTP ? "SL/TP" : "Manual"
+    info_table.cell(1, 4, exit_method, text_color=color.white, bgcolor=color.gray)
+    info_table.cell(0, 5, "Stop Loss %", text_color=color.white, bgcolor=color.gray)
+    info_table.cell(1, 5, str.tostring(stopLossPercent) + "%", text_color=color.white, bgcolor=color.gray)
+    info_table.cell(0, 6, "Take Profit %", text_color=color.white, bgcolor=color.gray)
+    info_table.cell(1, 6, str.tostring(takeProfitPercent) + "%", text_color=color.white, bgcolor=color.gray)

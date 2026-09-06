@@ -1,0 +1,292 @@
+// Volume & Volatility Time-of-Day — Seasonality Forecast
+// ---------------------------------------------------------------------------
+// NOT a signal generator. It answers one question per instrument: at what TIMES
+// of day does the market typically WAKE UP? It builds a time-of-day profile from
+// loaded intraday history — for each minute-of-day slot (in YOUR timezone) it
+// tracks two things, both measured against their own recent moving average:
+//   • VOLUME     — volume ÷ its trailing volume MA  ("typically X× its MA here")
+//   • VOLATILITY — Bollinger-Band width ÷ its trailing MA  (bands typically expand)
+// They usually rise together; tracking both shows the times they DIVERGE (volume
+// up on quiet bands = churn; bands blowing out on thin volume = a news/stop pop).
+//
+// The heat lights the current bar when its time-of-day is historically elevated —
+// a "get ready, this window usually gets active" heads-up that fires as the bar
+// opens (built from CLOSED prior bars, so it is non-repainting). The panel lists
+// the active windows CHRONOLOGICALLY and points at the current-or-next one with a
+// countdown, so you can be set before it hits.
+//
+// HONEST NOTES
+//   • Uses the intraday history TradingView has loaded — the panel shows the day
+//     count. More history = steadier profile. (Not a true rolling "last N days".)
+//   • MA Scope (Baseline Scope group) sets what each bar is measured against.
+//     Rolling = a trailing MA that spans the session break, so the lingering NY
+//     average can shrink the Asia/London spikes (and the reopen bar reads low).
+//     Session = the running average since the day's open, reset at the futures
+//     boundary, so each region (Asia / London / NY) is judged against its own day.
+//
+//@version=6
+indicator('Volume & Volatility Time-of-Day', 'V+V TOD', overlay = true, max_labels_count = 500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOOLTIPS
+// ═══════════════════════════════════════════════════════════════════════════
+tTz     = 'Timezone the profile is built and displayed in (New York for US index futures).'
+tMa     = 'Length of the trailing moving average each bar is measured against — for BOTH volume (volume ÷ this MA) and volatility (BB width ÷ this MA). Shorter = immediate recent context; longer = a broader baseline.'
+tMetric = 'What the heat reflects:\n• Volume — volume vs its recent MA.\n• Volatility — Bollinger-Band width vs its recent MA (when the bands typically expand).\n• Both (avg) — the average of the two.\n• Both (max) — whichever is higher.\nThe panel always lists BOTH numbers regardless, so you can see where they diverge.'
+tBB     = 'Volatility measure: Bollinger-Band width = (2 × Mult × stdev) ÷ basis over this length, compared to its own trailing MA. Mult only scales the number; the ratio is what matters.'
+tThr    = 'A slot counts as an active WINDOW when its metric is at least this multiple of its MA. 1.3 = 30% above typical.'
+tCap    = 'The ratio at which the heat color is fully saturated. Anything at/above this renders at max intensity, so a huge open does not crush the smaller spikes. Lower it on higher timeframes (smoother = fainter) so the small ones still read.'
+tMinD   = 'A slot needs at least this many days of samples before it is trusted (keeps thin early data from flashing).'
+tExcl   = 'Optional: drop these minutes from the heat AND the window list — e.g. 0930-0935,1555-1600 to remove the RTH open/close so they do not overshadow the smaller intraday pockets. Comma-separate ranges; leave empty for none.'
+tDisp   = 'How the heat is drawn (cool→hot gradient by how elevated the metric is):\n• Dots below/above — SAR-style dot per bar; least obnoxious.\n• Bottom strip — a ribbon along the pane bottom, off the candles.\n• Heat line — a colored line offset under price.\n• Bar color — recolor the candles.\n• Background — full-pane shading.\n• Off — panel only.'
+tOff    = 'Dots / Heat-line modes: offset below the low (or above the high), in ATRs.'
+tMark   = 'Drop a triangle at the first bar of each window as it begins.'
+tTop    = 'How many upcoming windows to list, starting from the current/next one.'
+tScope  = 'What each bar is measured against:\n• Rolling — a trailing MA of the last N bars (the Recent MA Length). Simple, but it spans the session break, so the lingering NY average can overshadow the Asia/London opens.\n• Session — the running average since the current trading day opened (reset at the futures boundary). Each region is judged against its own day, so Tokyo/London spikes stand on their own instead of being dwarfed by NY.'
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1 · METRICS
+// ═══════════════════════════════════════════════════════════════════════════
+g1     = '1 · Metrics'
+tz     = input.string('America/New_York', 'Timezone', group = g1, tooltip = tTz)
+maLen  = input.int(20, 'Recent MA Length', minval = 1, group = g1, tooltip = tMa)
+metric = input.string('Both (avg)', 'Heat Metric', options = ['Volume', 'Volatility', 'Both (avg)', 'Both (max)'], group = g1, tooltip = tMetric)
+bbLen  = input.int(20, 'Volatility BB Length', minval = 2, group = g1, inline = 'bb', tooltip = tBB)
+bbMult = input.float(2.0, 'Mult', minval = 0.1, step = 0.1, group = g1, inline = 'bb')
+spikeThr = input.float(1.3, 'Window Threshold (×)', minval = 1.0, step = 0.05, group = g1, tooltip = tThr)
+heatCap  = input.float(2.0, 'Heat Cap (× for full color)', minval = 1.05, step = 0.05, group = g1, tooltip = tCap)
+minDays  = input.int(5, 'Min Days Per Slot', minval = 1, group = g1, tooltip = tMinD)
+exclSess = input.string('', 'Exclude Times HHMM-HHMM', group = g1, tooltip = tExcl)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2 · DISPLAY
+// ═══════════════════════════════════════════════════════════════════════════
+g2     = '2 · Display'
+dispMode = input.string('Bottom strip', 'Heat Style', options = ['Dots (below)', 'Dots (above)', 'Bottom strip', 'Heat line (below)', 'Bar color', 'Background', 'Off'], group = g2, tooltip = tDisp)
+coolCol = input.color(color.new(#ffd54f, 0), 'Low Heat', group = g2, inline = 'h')
+hotCol  = input.color(color.new(#e53935, 0), 'High Heat', group = g2, inline = 'h')
+heatOff = input.float(0.5, 'Dots / Line Offset (ATR)', minval = 0.0, step = 0.1, group = g2, tooltip = tOff)
+bgMinTp = input.int(72, 'Background Transparency', minval = 0, maxval = 100, group = g2)
+showMark = input.bool(false, 'Mark Window Start', group = g2, tooltip = tMark)
+markCol = input.color(color.new(#ffb300, 0), 'Marker', group = g2)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3 · PANEL
+// ═══════════════════════════════════════════════════════════════════════════
+g3     = '3 · Panel'
+showTbl = input.bool(true, 'Show Panel', group = g3)
+topN   = input.int(8, 'Upcoming Windows To List', minval = 1, maxval = 20, group = g3, tooltip = tTop)
+tblPos = input.string('Top Right', 'Position', options = ['Top Right', 'Middle Right', 'Bottom Right', 'Bottom Left', 'Top Left'], group = g3)
+tblSize = input.string('Normal', 'Size', options = ['Tiny', 'Small', 'Normal', 'Large'], group = g3)
+tblBg  = input.color(color.new(color.black, 15), 'Background', group = g3, inline = 'tc')
+tblHdr = input.color(color.new(color.gray, 0), 'Header', group = g3, inline = 'tc')
+tblVal = input.color(color.new(color.white, 0), 'Value', group = g3, inline = 'tc')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4 · BASELINE SCOPE
+// ═══════════════════════════════════════════════════════════════════════════
+g4      = '4 · Baseline Scope'
+maScope = input.string('Rolling', 'MA Scope', options = ['Rolling', 'Session'], group = g4, tooltip = tScope)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+f_tpos(s)  => s == 'Top Left' ? position.top_left : s == 'Middle Right' ? position.middle_right : s == 'Bottom Right' ? position.bottom_right : s == 'Bottom Left' ? position.bottom_left : position.top_right
+f_tsize(s) => s == 'Tiny' ? size.tiny : s == 'Normal' ? size.normal : s == 'Large' ? size.large : size.small
+f_hhmm(m) =>
+    int hh = math.floor(m / 60) % 24
+    int mm = m % 60
+    (hh < 10 ? '0' : '') + str.tostring(hh) + ':' + (mm < 10 ? '0' : '') + str.tostring(mm)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROFILE ACCUMULATION  (per minute-of-day slot, over closed bars)
+// ═══════════════════════════════════════════════════════════════════════════
+var array<float> rvolSum  = array.new<float>(1440, 0.0)   // Σ (volume / volume MA)
+var array<int>   rvolN    = array.new<int>(1440, 0)
+var array<float> volatSum = array.new<float>(1440, 0.0)   // Σ (BB width / its MA)
+var array<int>   volatN   = array.new<int>(1440, 0)
+var array<bool>  excluded = array.new<bool>(1440, false)
+var int nDays = 0
+
+int  curSlot  = hour(time, tz) * 60 + minute(time, tz)
+bool isNewDay = ta.change(time('1D')) != 0
+float bbBasis  = ta.sma(close, bbLen)
+float bbWidth  = bbBasis != 0 ? (2.0 * bbMult * ta.stdev(close, bbLen)) / bbBasis * 100.0 : na
+
+// session-cumulative sums (reset each trading day) for the Session MA scope
+var float sVolSum = 0.0
+var int   sVolCnt = 0
+var float sBbSum  = 0.0
+var int   sBbCnt  = 0
+if isNewDay
+    sVolSum := 0.0
+    sVolCnt := 0
+    sBbSum  := 0.0
+    sBbCnt  := 0
+sVolSum += volume
+sVolCnt += 1
+if not na(bbWidth)
+    sBbSum += bbWidth
+    sBbCnt += 1
+
+float volMaRoll = ta.sma(volume, maLen)
+float volMaSess = sVolCnt > 0 ? sVolSum / sVolCnt : na
+float volMa     = maScope == 'Session' ? volMaSess : volMaRoll
+float rvolBar   = not na(volMa) and volMa > 0 ? volume / volMa : na
+
+float bbMaRoll  = ta.sma(bbWidth, maLen)
+float bbMaSess  = sBbCnt > 0 ? sBbSum / sBbCnt : na
+float bbWidthMa = maScope == 'Session' ? bbMaSess : bbMaRoll
+float volatBar  = not na(bbWidth) and not na(bbWidthMa) and bbWidthMa > 0 ? bbWidth / bbWidthMa : na
+bool inExcl = false
+if str.length(exclSess) >= 9
+    inExcl := not na(time(timeframe.period, exclSess, tz))
+
+if barstate.isconfirmed
+    if isNewDay
+        nDays += 1
+    if not na(rvolBar)
+        array.set(rvolSum, curSlot, array.get(rvolSum, curSlot) + rvolBar)
+        array.set(rvolN, curSlot, array.get(rvolN, curSlot) + 1)
+    if not na(volatBar)
+        array.set(volatSum, curSlot, array.get(volatSum, curSlot) + volatBar)
+        array.set(volatN, curSlot, array.get(volatN, curSlot) + 1)
+    if inExcl
+        array.set(excluded, curSlot, true)
+
+// per-slot typical ratios + combined metric
+f_slotRvol(m) =>
+    int c = array.get(rvolN, m)
+    c >= minDays ? array.get(rvolSum, m) / c : na
+f_slotVolat(m) =>
+    int c = array.get(volatN, m)
+    c >= minDays ? array.get(volatSum, m) / c : na
+f_combine(v, t) =>
+    float out = na
+    if metric == 'Volume'
+        out := v
+    else if metric == 'Volatility'
+        out := t
+    else if metric == 'Both (max)'
+        out := na(v) ? t : (na(t) ? v : math.max(v, t))
+    else
+        out := na(v) ? t : (na(t) ? v : (v + t) / 2.0)
+    out
+f_metric(m) => f_combine(f_slotRvol(m), f_slotVolat(m))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LIVE HEAT  (current bar's slot vs its history — fires as the bar forms)
+// ═══════════════════════════════════════════════════════════════════════════
+float rNow    = f_metric(curSlot)
+bool  exclNow = array.get(excluded, curSlot)
+float heatNow = not na(rNow) and not exclNow ? math.min(math.max((rNow - 1.0) / math.max(heatCap - 1.0, 0.01), 0.0), 1.0) : na
+bool  hasHeat = not na(heatNow) and heatNow > 0.0
+color heatCol = hasHeat ? color.from_gradient(heatNow, 0.0, 1.0, coolCol, hotCol) : na
+float offPx   = heatOff * ta.atr(14)
+
+plotshape(dispMode == 'Dots (below)' and hasHeat ? low - offPx : na, 'Heat Dot ▼', style = shape.circle, location = location.absolute, color = heatCol, size = size.tiny)
+plotshape(dispMode == 'Dots (above)' and hasHeat ? high + offPx : na, 'Heat Dot ▲', style = shape.circle, location = location.absolute, color = heatCol, size = size.tiny)
+plotshape(dispMode == 'Bottom strip' and hasHeat, 'Heat Strip', style = shape.square, location = location.bottom, color = heatCol, size = size.tiny)
+plot(dispMode == 'Heat line (below)' and hasHeat ? low - offPx : na, 'Heat Line', color = heatCol, style = plot.style_linebr, linewidth = 3)
+barcolor(dispMode == 'Bar color' and hasHeat ? heatCol : na, title = 'Heat Bars')
+int bgTp = hasHeat ? int(math.round(95.0 - heatNow * (95.0 - bgMinTp))) : 100
+bgcolor(dispMode == 'Background' and hasHeat ? color.new(heatCol, bgTp) : na, title = 'Heat Background')
+
+bool spikeNow = not na(rNow) and rNow >= spikeThr and not exclNow
+bool winStart = spikeNow and not (not na(rNow[1]) and rNow[1] >= spikeThr and not exclNow[1])
+plotshape(showMark and winStart, 'Window Start', style = shape.triangleup, location = location.bottom, color = markCol, size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANEL  (windows in chronological order from the current/next one)
+// ═══════════════════════════════════════════════════════════════════════════
+var table tbl = table.new(f_tpos(tblPos), 3, 26, bgcolor = tblBg, border_width = 1, border_color = color.new(color.gray, 60), frame_width = 1, frame_color = color.new(color.gray, 50))
+
+if barstate.islast and showTbl
+    string sz = f_tsize(tblSize)
+    string scopeLbl = maScope == 'Session' ? 'vs Session avg' : 'vs MA(' + str.tostring(maLen) + ')'
+    // merge contiguous spike slots into windows (already chronological)
+    array<int>   wStart = array.new<int>()
+    array<int>   wEnd   = array.new<int>()
+    array<float> wVolPk = array.new<float>()
+    array<float> wVtyPk = array.new<float>()
+    bool inWin = false
+    int  curStart = 0
+    int  curEnd = 0
+    float curVolPk = 0.0
+    float curVtyPk = 0.0
+    for m = 0 to 1439
+        float rv = f_slotRvol(m)
+        float rt = f_slotVolat(m)
+        float mr = f_combine(rv, rt)
+        if not na(mr) and mr >= spikeThr and not array.get(excluded, m)
+            if not inWin
+                inWin := true
+                curStart := m
+                curVolPk := 0.0
+                curVtyPk := 0.0
+            curEnd := m
+            curVolPk := math.max(curVolPk, na(rv) ? 0.0 : rv)
+            curVtyPk := math.max(curVtyPk, na(rt) ? 0.0 : rt)
+        else
+            if inWin
+                array.push(wStart, curStart)
+                array.push(wEnd, curEnd)
+                array.push(wVolPk, curVolPk)
+                array.push(wVtyPk, curVtyPk)
+                inWin := false
+    if inWin
+        array.push(wStart, curStart)
+        array.push(wEnd, curEnd)
+        array.push(wVolPk, curVolPk)
+        array.push(wVtyPk, curVtyPk)
+
+    int nWin = array.size(wStart)
+    int nowSlot = hour(time, tz) * 60 + minute(time, tz)
+    // find the active window (now inside one) or the next upcoming one
+    int targetIdx = -1
+    bool targetActive = false
+    if nWin > 0
+        for i = 0 to nWin - 1
+            if nowSlot >= array.get(wStart, i) and nowSlot <= array.get(wEnd, i)
+                targetIdx := i
+                targetActive := true
+                break
+        if targetIdx < 0
+            for i = 0 to nWin - 1
+                if array.get(wStart, i) > nowSlot
+                    targetIdx := i
+                    break
+        if targetIdx < 0
+            targetIdx := 0   // wrap: first window tomorrow
+
+    table.clear(tbl, 0, 0, 2, 25)
+    int r = 0
+    table.merge_cells(tbl, 0, r, 2, r)
+    table.cell(tbl, 0, r, 'Vol & Volatility TOD  ·  ' + str.tostring(nDays) + 'd', text_color = tblVal, text_size = sz, bgcolor = color.new(color.blue, 55))
+    r += 1
+    table.merge_cells(tbl, 0, r, 2, r)
+    table.cell(tbl, 0, r, scopeLbl + '  ·  ' + metric + '  ·  ' + tz, text_color = tblHdr, text_halign = text.align_left, text_size = sz)
+    r += 1
+    table.cell(tbl, 0, r, 'Window', text_color = tblHdr, text_halign = text.align_left, text_size = sz)
+    table.cell(tbl, 1, r, 'Vol×', text_color = tblHdr, text_halign = text.align_right, text_size = sz)
+    table.cell(tbl, 2, r, 'Vty×', text_color = tblHdr, text_halign = text.align_right, text_size = sz)
+    r += 1
+    if nWin == 0
+        table.cell(tbl, 0, r, nDays < minDays ? 'building… need ' + str.tostring(minDays) + 'd' : 'no active windows', text_color = color.silver, text_halign = text.align_left, text_size = sz)
+    else
+        int cnt = math.min(topN, nWin)
+        for k = 0 to cnt - 1
+            int idx = (targetIdx + k) % nWin
+            int st = array.get(wStart, idx)
+            int en = array.get(wEnd, idx)
+            float vp = array.get(wVolPk, idx)
+            float typ = array.get(wVtyPk, idx)
+            bool isTarget = k == 0
+            int mins = (st - nowSlot + 1440) % 1440
+            string tag = not isTarget ? '' : targetActive ? '  ◀ NOW' : '  ◀ ' + str.tostring(mins) + 'm'
+            color hl = not isTarget ? na : targetActive ? color.new(color.green, 55) : color.new(color.orange, 55)
+            string lbl = (st == en ? f_hhmm(st) : f_hhmm(st) + '–' + f_hhmm(en)) + tag
+            table.cell(tbl, 0, r, lbl, text_color = isTarget ? color.white : tblVal, text_halign = text.align_left, text_size = sz, bgcolor = hl)
+            table.cell(tbl, 1, r, vp > 0.0 ? str.tostring(vp, '#.##') + '×' : '–', text_color = vp >= spikeThr ? color.lime : color.silver, text_halign = text.align_right, text_size = sz, bgcolor = hl)
+            table.cell(tbl, 2, r, typ > 0.0 ? str.tostring(typ, '#.##') + '×' : '–', text_color = typ >= spikeThr ? color.aqua : color.silver, text_halign = text.align_right, text_size = sz, bgcolor = hl)
+            r += 1

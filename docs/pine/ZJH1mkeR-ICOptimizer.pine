@@ -1,0 +1,275 @@
+//@version=5
+// @description Library for IC-based parameter optimization
+library("ICOptimizer")
+
+// =====================================================
+// TYPE DEFINITIONS
+// =====================================================
+
+export type ICOptimizer
+    float currentParam          
+    float currentIC            
+    float metaIC               
+    int totalSignals           
+    int successfulSignals      
+    int goodICSignals          
+    int goodICSuccess          
+    int nonBadICSignals        
+    int nonBadICSuccess        
+    float goodICThreshold      
+    float badICThreshold
+    int updateCounter          // Track update cycles
+
+// =====================================================
+// PARAMETER OPTIMIZATION WITH PRECOMPUTED ICs
+// =====================================================
+
+// @function Find optimal parameter from array of IC values
+// @param testParams Array of parameter values being tested
+// @param icValues Array of IC values for each parameter (same size as testParams)
+// @param currentParam Current parameter value (for smoothing)
+// @param smoothing Smoothing factor (0-1, e.g., 0.2 means 20% new, 80% old)
+// @returns [optimizedParam, bestIC, bestIndex] New parameter value, its IC, and array index
+export findOptimalParam(
+     array<float> testParams,
+     array<float> icValues,
+     float currentParam,
+     simple float smoothing) =>
+    
+    float bestIC = -999.0
+    float bestParam = currentParam
+    int bestIdx = 0
+    
+    // Find best IC
+    for i = 0 to array.size(icValues) - 1
+        ic = array.get(icValues, i)
+        if not na(ic) and ic > bestIC
+            bestIC := ic
+            bestParam := array.get(testParams, i)
+            bestIdx := i
+    
+    // Smooth adaptation
+    newParam = currentParam * (1.0 - smoothing) + bestParam * smoothing
+    
+    [newParam, bestIC, bestIdx]
+
+// @function Adaptive parameter selection with starvation handling
+// @param opt ICOptimizer object
+// @param testParams Array of parameter values
+// @param icValues Array of IC values for each parameter
+// @param smoothing Normal smoothing factor
+// @param starvationThreshold Number of updates before triggering starvation mode
+// @param starvationJumpSize Jump size when in starvation (as fraction of range)
+// @returns [newParam, bestIC] Updated parameter and IC
+export adaptiveParamWithStarvation(
+     ICOptimizer opt,
+     array<float> testParams,
+     array<float> icValues,
+     simple float smoothing,
+     simple int starvationThreshold,
+     simple float starvationJumpSize) =>
+    
+    [newParam, bestIC, bestIdx] = findOptimalParam(testParams, icValues, opt.currentParam, smoothing)
+    
+    // Check for starvation (low signal activity)
+    isStarving = opt.totalSignals > 0 and (opt.updateCounter % starvationThreshold == 0)
+    
+    // If starving, make larger jumps
+    if isStarving
+        minParam = array.min(testParams)
+        maxParam = array.max(testParams)
+        paramRange = maxParam - minParam
+        jumpSize = paramRange * starvationJumpSize
+        
+        // Jump toward extreme based on signal imbalance
+        if opt.successfulSignals < opt.totalSignals / 3  // Poor performance
+            newParam := math.max(newParam + jumpSize, minParam)
+    
+    [newParam, bestIC]
+
+// =====================================================
+// SIGNAL DOMINATION DETECTION
+// =====================================================
+
+// @function Detect signal imbalance and adjust parameters
+// @param longCount Number of long signals in period
+// @param shortCount Number of short signals in period
+// @param currentLongLevel Current long threshold
+// @param currentShortLevel Current short threshold
+// @param dominationRatio Ratio threshold (e.g., 4 = 4:1 imbalance)
+// @param jumpSize Size of adjustment
+// @param minLevel Minimum allowed level
+// @param maxLevel Maximum allowed level
+// @returns [newLongLevel, newShortLevel, isDominated]
+export detectAndAdjustDomination(
+     int longCount,
+     int shortCount,
+     float currentLongLevel,
+     float currentShortLevel,
+     simple int dominationRatio,
+     simple float jumpSize,
+     simple float minLevel,
+     simple float maxLevel) =>
+    
+    float ratio = (longCount == 0 and shortCount > 0) ? 99.0 :
+                  (shortCount == 0 and longCount > 0) ? 0.01 :
+                  (longCount > 0 and shortCount > 0) ? float(shortCount) / float(longCount) : 1.0
+    
+    float newLong = currentLongLevel
+    float newShort = currentShortLevel
+    bool isDominated = false
+    
+    // Short domination - raise short level
+    if ratio >= dominationRatio
+        newShort := math.min(currentShortLevel + jumpSize, maxLevel)
+        isDominated := true
+    
+    // Long domination - lower long level
+    else if ratio <= 1.0 / dominationRatio
+        newLong := math.max(currentLongLevel - jumpSize, minLevel)
+        isDominated := true
+    
+    [newLong, newShort, isDominated]
+
+// =====================================================
+// IC CLASSIFICATION
+// =====================================================
+
+export calcIC(series float signals, series float returns, simple int lookback) =>
+    ta.correlation(signals, returns, lookback)
+
+export classifyIC(
+     series float currentIC,
+     simple int icWindow,
+     simple int goodPercentile,
+     simple int badPercentile) =>
+    
+    goodThresh = ta.percentile_nearest_rank(currentIC, icWindow, goodPercentile)
+    badThresh = ta.percentile_nearest_rank(currentIC, icWindow, badPercentile)
+    
+    isGood = currentIC >= goodThresh
+    isBad = currentIC <= badThresh
+    
+    [isGood, isBad, goodThresh, badThresh]
+
+// =====================================================
+// SIGNAL EVALUATION
+// =====================================================
+
+export evaluateSignal(series float signal, series float forwardReturn) =>
+    result = signal * forwardReturn
+    result > 0
+
+export updateOptimizerState(
+     ICOptimizer opt,
+     series float signal,
+     series float forwardReturn,
+     series float currentIC,
+     simple int metaICPeriod) =>
+    
+    worked = evaluateSignal(signal, forwardReturn)
+    
+    if worked
+        opt.totalSignals += 1
+        opt.successfulSignals += 1
+        
+        if currentIC >= opt.goodICThreshold
+            opt.goodICSignals += 1
+            opt.goodICSuccess += 1
+        
+        if currentIC > opt.badICThreshold
+            opt.nonBadICSignals += 1
+            opt.nonBadICSuccess += 1
+    else if not worked
+        opt.totalSignals += 1
+        
+        if currentIC >= opt.goodICThreshold
+            opt.goodICSignals += 1
+        
+        if currentIC > opt.badICThreshold
+            opt.nonBadICSignals += 1
+    
+    opt.currentIC := currentIC
+    opt.metaIC := ta.sma(currentIC, metaICPeriod)
+    opt.updateCounter += 1
+    
+    opt
+
+// =====================================================
+// STATISTICS
+// =====================================================
+
+export calcSuccessRate(int successful, int total) =>
+    total > 0 ? (successful / total) * 100.0 : 0.0
+
+export createICStatsTable(
+     ICOptimizer opt,
+     string paramName,
+     int normalSuccess,
+     int normalTotal) =>
+    
+    var table infoTable = table.new(position.bottom_right, 2, 9)
+    
+    if barstate.islast
+        table.cell(infoTable, 0, 0, "METRIC", bgcolor=color.new(color.gray, 50), text_color=color.white)
+        table.cell(infoTable, 1, 0, "VALUE", bgcolor=color.new(color.gray, 50), text_color=color.white)
+        
+        table.cell(infoTable, 0, 1, paramName, bgcolor=color.new(color.gray, 70))
+        table.cell(infoTable, 1, 1, str.tostring(opt.currentParam, "#.##"))
+        
+        table.cell(infoTable, 0, 2, "Current IC", bgcolor=color.new(color.gray, 70))
+        table.cell(infoTable, 1, 2, str.tostring(opt.currentIC, "#.###"),
+             bgcolor=opt.currentIC > 0 ? color.new(color.green, 80) : color.new(color.red, 80))
+        
+        table.cell(infoTable, 0, 3, "Meta-IC", bgcolor=color.new(color.gray, 70))
+        table.cell(infoTable, 1, 3, str.tostring(opt.metaIC, "#.###"))
+        
+        adaptiveRate = calcSuccessRate(opt.successfulSignals, opt.totalSignals)
+        table.cell(infoTable, 0, 4, "Adaptive Success", bgcolor=color.new(color.gray, 70))
+        table.cell(infoTable, 1, 4, 
+             str.tostring(opt.successfulSignals) + "/" + str.tostring(opt.totalSignals) + 
+             " (" + str.tostring(adaptiveRate, "#.##") + "%)",
+             bgcolor=color.new(color.green, 80))
+        
+        normalRate = calcSuccessRate(normalSuccess, normalTotal)
+        table.cell(infoTable, 0, 5, "Normal Success", bgcolor=color.new(color.gray, 70))
+        table.cell(infoTable, 1, 5,
+             str.tostring(normalSuccess) + "/" + str.tostring(normalTotal) +
+             " (" + str.tostring(normalRate, "#.##") + "%)",
+             bgcolor=color.new(color.teal, 80))
+        
+        goodRate = calcSuccessRate(opt.goodICSuccess, opt.goodICSignals)
+        table.cell(infoTable, 0, 6, "Good IC Success", bgcolor=color.new(color.gray, 65))
+        table.cell(infoTable, 1, 6,
+             str.tostring(opt.goodICSuccess) + "/" + str.tostring(opt.goodICSignals) +
+             " (" + str.tostring(goodRate, "#.##") + "%)",
+             bgcolor=color.new(color.orange, 80))
+        
+        nonBadRate = calcSuccessRate(opt.nonBadICSuccess, opt.nonBadICSignals)
+        table.cell(infoTable, 0, 7, "Non-bad IC", bgcolor=color.new(color.gray, 65))
+        table.cell(infoTable, 1, 7,
+             str.tostring(opt.nonBadICSuccess) + "/" + str.tostring(opt.nonBadICSignals) +
+             " (" + str.tostring(nonBadRate, "#.##") + "%)",
+             bgcolor=color.new(color.blue, 80))
+        
+        table.cell(infoTable, 0, 8, "IC Thresholds", bgcolor=color.new(color.gray, 65))
+        table.cell(infoTable, 1, 8,
+             "G>" + str.tostring(opt.goodICThreshold, "#.##") +
+             " B<" + str.tostring(opt.badICThreshold, "#.##"))
+    
+    infoTable
+
+export initOptimizer(float initialParam) =>
+    ICOptimizer.new(
+         currentParam = initialParam,
+         currentIC = 0.0,
+         metaIC = 0.0,
+         totalSignals = 0,
+         successfulSignals = 0,
+         goodICSignals = 0,
+         goodICSuccess = 0,
+         nonBadICSignals = 0,
+         nonBadICSuccess = 0,
+         goodICThreshold = 0.0,
+         badICThreshold = 0.0,
+         updateCounter = 0)

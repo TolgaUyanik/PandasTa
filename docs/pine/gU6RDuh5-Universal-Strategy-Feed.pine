@@ -1,0 +1,170 @@
+// Universal Strategy Feed — attach to ANY chart and trade off another
+// indicator's plotted output via input.source(), OR use a built-in mode that
+// needs no external indicator at all (e.g. Volume). Pick a Signal Mode that
+// matches how the signal is expressed, wire the Source dropdown(s), and go.
+// Exits, sizing and a date filter are built in.
+//
+// Note: TradingView can only source actual plot() series. Arrow markers drawn
+// with plotshape/plotchar are NOT connectable — that indicator must expose the
+// signal as a plot (e.g. AI.1X's hidden "Signal Feed" plot).
+//@version=6
+strategy("Universal Strategy Feed", shorttitle = "UNI STRAT", overlay = true,
+     default_qty_type      = strategy.fixed,
+     default_qty_value     = 1,
+     initial_capital       = 1000000,
+     margin_long           = 100,
+     margin_short          = 100,
+     commission_type       = strategy.commission.percent,
+     commission_value      = 0.05,
+     pyramiding            = 0,
+     calc_on_every_tick    = false,
+     process_orders_on_close = true)
+
+ma(s, l, t) =>
+    switch t
+        "SMA" => ta.sma(s, l)
+        "EMA" => ta.ema(s, l)
+        "WMA" => ta.wma(s, l)
+        "RMA" => ta.rma(s, l)
+        => na
+
+// ============================================
+// SIGNAL  — choose the mode that matches the source indicator
+// ============================================
+gSig = "Signal"
+mode = input.string("Pulse (+ long / - short)", "Signal Mode",
+     options = ["Pulse (+ long / - short)", "Sign cross (over level)", "Level cross (up/down)", "Two sources cross", "Two trigger sources", "Three sources", "Volume (magnitude + candle)"],
+     group = gSig,
+     tooltip = "Pulse: Source A is a +1/-1 signal that fires on its bar (AI.1X Signal Feed, histograms).\nSign cross: long when A crosses UP over Level, short DOWN.\nLevel cross: long on cross UP over Up Level, short on cross DOWN under Down Level (RSI 50/50 or 30/70).\nTwo sources cross: long when A crosses over B, short under (MA pairs, MACD vs signal).\nTwo trigger sources: long when A is active (non-na/non-zero), short when B is active.\nThree sources: see the 3-Source Logic selector (KDJ, filtered MACD, stacked MAs).\nVolume (magnitude + candle): no external indicator needed — long when chart volume is above its MA on a green bar, short when above its MA on a red bar.")
+
+srcA   = input.source(ohlc4, "Source A  (primary / long)",            group = gSig)
+srcB   = input.source(ohlc4, "Source B  (two-source modes / short)",  group = gSig)
+src3   = input.source(ohlc4, "Source C  (third source, 3-source mode)", group = gSig)
+
+level  = input.float(0,  "Level / midline (Pulse, Sign cross)",       group = gSig)
+upLvl  = input.float(0,  "Up level (Level cross)",                    group = gSig)
+dnLvl  = input.float(0,  "Down level (Level cross)",                  group = gSig)
+
+t3logic = input.string("A above both B & C", "3-Source Logic",
+     options = ["A above both B & C", "A crosses B, filter C", "A>C long / B>C short"],
+     group = gSig,
+     tooltip = "Three sources mode only.\nA above both B & C: long A>B and A>C, short A<B and A<C — KDJ (A=J,B=K,C=D) or three MAs.\nA crosses B, filter C: long A crosses over B AND C>Filter, short A crosses under B AND C<Filter — MACD (A=MACD,B=Signal,C=MACD,Filter=0).\nA>C long / B>C short: long A>C, short B>C — two split series vs a threshold.")
+filt   = input.float(0,  "3-Source filter level (A crosses B, filter C)", group = gSig)
+
+volMaLen  = input.int(200, "Volume MA Length (Volume mode; 0 = use Source B as threshold)", minval = 0, group = gSig)
+volMaType = input.string("SMA", "Volume MA Type (Volume mode)", options = ["SMA", "EMA", "WMA", "RMA"], group = gSig)
+
+invert = input.bool(false, "Invert long / short", group = gSig)
+
+active(float s) => not na(s) and s != 0
+
+// --- three-source sub-logic ---
+long3 = switch t3logic
+    "A above both B & C"    => srcA > srcB and srcA > src3
+    "A crosses B, filter C" => ta.crossover(srcA, srcB) and src3 > filt
+    "A>C long / B>C short"  => srcA > src3
+    => false
+short3 = switch t3logic
+    "A above both B & C"    => srcA < srcB and srcA < src3
+    "A crosses B, filter C" => ta.crossunder(srcA, srcB) and src3 < filt
+    "A>C long / B>C short"  => srcB > src3
+    => false
+
+// --- volume sub-logic (uses chart volume + candle direction; no add-on needed) ---
+volThresh = volMaLen > 0 ? ma(volume, volMaLen, volMaType) : srcB
+volLong   = volume > volThresh and close >= open
+volShort  = volume > volThresh and close <  open
+
+longRaw = switch mode
+    "Pulse (+ long / - short)"    => srcA > level
+    "Sign cross (over level)"     => ta.crossover(srcA, level)
+    "Level cross (up/down)"       => ta.crossover(srcA, upLvl)
+    "Two sources cross"           => ta.crossover(srcA, srcB)
+    "Two trigger sources"         => active(srcA)
+    "Three sources"               => long3
+    "Volume (magnitude + candle)" => volLong
+    => false
+
+shortRaw = switch mode
+    "Pulse (+ long / - short)"    => srcA < level
+    "Sign cross (over level)"     => ta.crossunder(srcA, level)
+    "Level cross (up/down)"       => ta.crossunder(srcA, dnLvl)
+    "Two sources cross"           => ta.crossunder(srcA, srcB)
+    "Two trigger sources"         => active(srcB)
+    "Three sources"               => short3
+    "Volume (magnitude + candle)" => volShort
+    => false
+
+goLong  = invert ? shortRaw : longRaw
+goShort = invert ? longRaw  : shortRaw
+
+// ============================================
+// SIZING
+// ============================================
+qty = input.float(1, "Contracts per trade", minval = 0.0, step = 0.1, group = "Sizing",
+     tooltip = "1 contract on a large cash account = clean per-unit P/L with no leverage / margin calls. Raise to scale; keep capital well above price, especially for shorts.")
+
+// ============================================
+// EXITS
+// ============================================
+gEx = "Exits"
+levelMode = input.string("Signal", "TP/SL Method", options = ["Percent", "ATR", "Signal", "Feed (external TP/SL)"], group = gEx,
+     tooltip = "Signal = no TP/SL; exit only on the opposite signal (reversal).\nPercent / ATR = compute TP & SL locally from the values below.\nFeed (external TP/SL) = close the position when the TP feed or SL feed source pulses (e.g. AI.1U's Take Profit Hit / Stop Loss Hit alert series). Wire both feed sources below.")
+reverseOnOpp = input.bool(true, "Reverse on opposite signal", group = gEx)
+tpPerc = input.float(10,  "Take Profit %",     step = 0.1, group = gEx) / 100.0
+slPerc = input.float(2.5, "Stop Loss %",       step = 0.1, group = gEx) / 100.0
+atrLen = input.int(14,    "ATR Length",                    group = gEx)
+atrTP  = input.float(3,   "ATR TP Multiplier", step = 0.1, group = gEx)
+atrSL  = input.float(2,   "ATR SL Multiplier", step = 0.1, group = gEx)
+tpFeed = input.source(ohlc4, "TP feed  (Feed mode -> e.g. AI.1U: Take Profit Hit)", group = gEx)
+slFeed = input.source(ohlc4, "SL feed  (Feed mode -> e.g. AI.1U: Stop Loss Hit)",   group = gEx)
+
+// ============================================
+// DATE FILTER  (optional)
+// ============================================
+useDates = input.bool(false, "Limit by date range", group = "Filters")
+startT   = input.time(timestamp("01 Jan 2020 00:00"), "Start", group = "Filters")
+endT     = input.time(timestamp("01 Jan 2099 00:00"), "End",   group = "Filters")
+inWindow = not useDates or (time >= startT and time <= endT)
+
+// ============================================
+// EXECUTE
+// ============================================
+var int lastSig = 0
+buy  = goLong  and inWindow and lastSig != 1
+sell = goShort and inWindow and lastSig != -1 and not buy   // buy wins a same-bar tie
+if buy
+    lastSig := 1
+if sell
+    lastSig := -1
+
+flat = strategy.position_size == 0
+
+var float entryAtr = na
+if buy or sell
+    entryAtr := ta.atr(atrLen)
+
+if buy and (reverseOnOpp or flat)
+    strategy.entry("Long", strategy.long, qty = qty)
+if sell and (reverseOnOpp or flat)
+    strategy.entry("Short", strategy.short, qty = qty)
+
+// Percent / ATR: compute TP & SL locally from the entry fill.
+if (levelMode == "Percent" or levelMode == "ATR") and strategy.position_size != 0
+    avg = strategy.position_avg_price
+    if strategy.position_size > 0
+        tp = levelMode == "Percent" ? avg * (1 + tpPerc) : avg + entryAtr * atrTP
+        sl = levelMode == "Percent" ? avg * (1 - slPerc) : avg - entryAtr * atrSL
+        strategy.exit("L x", "Long",  limit = tp, stop = sl)
+    else
+        tp = levelMode == "Percent" ? avg * (1 - tpPerc) : avg - entryAtr * atrTP
+        sl = levelMode == "Percent" ? avg * (1 + slPerc) : avg + entryAtr * atrSL
+        strategy.exit("S x", "Short", limit = tp, stop = sl)
+
+// Feed: flatten when the TP-hit or SL-hit feed pulses (0 -> non-zero).
+// Edge-detected so a stray "close" source (never 0) can't fire by accident.
+if levelMode == "Feed (external TP/SL)"
+    tpFire = tpFeed != 0 and nz(tpFeed[1]) == 0
+    slFire = slFeed != 0 and nz(slFeed[1]) == 0
+    if (tpFire or slFire) and not buy and not sell and strategy.position_size != 0
+        strategy.close_all(comment = tpFire ? "TP feed" : "SL feed")

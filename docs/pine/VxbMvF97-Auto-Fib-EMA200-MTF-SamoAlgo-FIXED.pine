@@ -1,0 +1,292 @@
+//@version=6
+// ============================================================================
+//  SamoAlgo — Auto Fibonacci Extension + EMA200 MTF Strategy [FIXED]
+//  إصلاحات هاد الإصدار:
+//  1) alert() ما عاد بينطلق إلا بعد تأكيد إنو الصفقة فتحت فعلياً (strategy.position_size تغيّر)
+//  2) alert الإغلاق صار يستخدم سعر/نوع الخروج الفعلي
+//  3) خطوط/لايبلات التريد بتنرسم فقط لصفقة مؤكدة، وبتنحذف فعلياً (line.delete/label.delete)
+//     بدل ما تنفرّغ بس بـ := na (هاد كان سبب اختفاء صفقات من الشارت بسبب max_lines_count)
+//  4) فلتر cooldown (الحد الأدنى من الشموع بين صفقة وصفقة) — قابل للتعديل، تجربو بالباك تيست
+//  5) max_lines_count / max_labels_count تم رفعها صراحة
+//  ملاحظة: ما تم تغيير أي margin/leverage cap بناءً على طلبك — السايزينغ نفس المنطق القديم
+// ============================================================================
+strategy("Auto Fib + EMA200 MTF [SamoAlgo] - FIXED",
+     overlay              = true,
+     initial_capital      = 10000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 10,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.02,
+     pyramiding           = 0,
+     calc_on_every_tick   = false,
+     process_orders_on_close = true,
+     max_lines_count      = 500,
+     max_labels_count     = 500)
+
+// ====================== INPUTS =============================================
+grpSwing = "Swing / Fibonacci Detection"
+pivLen      = input.int(2,   "Pivot strength (bars left/right)", minval=2, maxval=30, group=grpSwing)
+entryFib    = input.float(0.7, "Entry Fib level", minval=0.1, maxval=0.99, step=0.001, group=grpSwing)
+targetFib   = input.float(1.618, "Target Fib extension", minval=1.0, step=0.001, group=grpSwing)
+minSwingATR = input.float(3.8, "Min swing size (x ATR)", minval=0.0, step=0.1, group=grpSwing)
+expiryBars  = input.int(33,  "Setup expiry (bars)", minval=3, maxval=200, group=grpSwing)
+
+grpStop = "Risk / Stop"
+useATRexit  = input.bool(true, "Use ATR stop & target (instead of fib)", group=grpStop)
+stopATR     = input.float(3, "ATR stop distance (x ATR)", minval=0.2, step=0.1, group=grpStop)
+tpATR       = input.float(5, "ATR target distance (x ATR)", minval=0.2, step=0.1, group=grpStop)
+stopBufATR  = input.float(0, "Stop buffer beyond level 0 (x ATR)", minval=0.0, step=0.05, group=grpStop)
+riskPct     = input.float(0.2, "Risk per trade (% equity)", minval=0.1, maxval=10, step=0.1, group=grpStop)
+useRR       = input.bool(false, "Use fixed R:R instead of 1.618 target", group=grpStop)
+rrRatio     = input.float(2.0, "R:R ratio", minval=0.5, step=0.1, group=grpStop)
+
+grpFilter = "Filters"
+useEMAfilter = input.bool(true, "EMA200 multi-timeframe filter", group=grpFilter)
+emaLen       = input.int(457, "EMA length", minval=10, group=grpFilter)
+minTFAgreement = input.int(4, "Min timeframes agreeing (out of 4)", minval=1, maxval=4, group=grpFilter)
+useATRfilter = input.bool(false, "Volatility filter (avoid dead market)", group=grpFilter)
+atrMult      = input.float(0.3, "Min ATR vs its average", minval=0.1, step=0.1, group=grpFilter)
+useSession   = input.bool(true, "Session filter (London + NY only)", group=grpFilter)
+sessTime     = input.session("0800-2100", "Active session (exchange time)", group=grpFilter)
+minBarsBetweenTrades = input.int(7, "Cooldown — min bars between trades", minval=0, maxval=500, group=grpFilter)
+avoidSameSwing = input.bool(true, "Avoid re-trading the same pivot swing", group=grpFilter)
+useRRfilter   = input.bool(true, "Minimum R:R filter", group=grpFilter)
+minRR         = input.float(1.5, "Min R:R ratio required to enter", minval=0.5, step=0.1, group=grpFilter)
+useMaxTradesFilter = input.bool(true, "Max trades per day filter", group=grpFilter)
+maxTradesPerDay    = input.int(2, "Max trades per day", minval=1, maxval=50, group=grpFilter)
+useADXfilter = input.bool(true, "ADX trend-strength filter", group=grpFilter)
+adxLen       = input.int(14, "ADX length", minval=2, group=grpFilter)
+adxThreshold = input.float(20, "Min ADX (trend strength)", minval=5, step=1, group=grpFilter)
+
+grpDir = "Direction"
+allowLong  = input.bool(true,  "Allow Longs", group=grpDir)
+allowShort = input.bool(true,  "Allow Shorts", group=grpDir)
+
+grpViz = "Visuals"
+showTradeLines = input.bool(true, "Show trade lines (entry / SL / TP)", group=grpViz)
+
+// ====================== CORE CALCS =========================================
+atr = ta.atr(14)
+
+f_emaAbove(tf) =>
+    e = request.security(syminfo.tickerid, tf, ta.ema(close, emaLen), lookahead=barmerge.lookahead_off)
+    close > e
+f_emaBelow(tf) =>
+    e = request.security(syminfo.tickerid, tf, ta.ema(close, emaLen), lookahead=barmerge.lookahead_off)
+    close < e
+
+longAboveCount  = (f_emaAbove("1") ? 1 : 0) + (f_emaAbove("5") ? 1 : 0) + (f_emaAbove("15") ? 1 : 0) + (f_emaAbove("60") ? 1 : 0)
+shortBelowCount = (f_emaBelow("1") ? 1 : 0) + (f_emaBelow("5") ? 1 : 0) + (f_emaBelow("15") ? 1 : 0) + (f_emaBelow("60") ? 1 : 0)
+
+longTrendOK  = not useEMAfilter or longAboveCount  >= minTFAgreement
+shortTrendOK = not useEMAfilter or shortBelowCount >= minTFAgreement
+
+atrAvg     = ta.sma(atr, 50)
+volOK      = not useATRfilter or atr > atrAvg * atrMult
+inSession  = not useSession or not na(time(timeframe.period, sessTime))
+
+// ----- ADX (trend strength) -----
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+trendStrongOK = not useADXfilter or adxVal > adxThreshold
+
+// ----- Max trades per day counter -----
+var int tradesToday = 0
+var int lastTradeDay = na
+dayChanged = na(lastTradeDay) or dayofmonth != dayofmonth[1] or month != month[1]
+if dayChanged
+    tradesToday := 0
+    lastTradeDay := dayofmonth
+maxTradesOK = not useMaxTradesFilter or tradesToday < maxTradesPerDay
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+
+var float lastPH = na
+var int   lastPHbar = na
+var float lastPL = na
+var int   lastPLbar = na
+if not na(ph)
+    lastPH := ph
+    lastPHbar := bar_index - pivLen
+if not na(pl)
+    lastPL := pl
+    lastPLbar := bar_index - pivLen
+
+// ====================== COOLDOWN / DEDUP STATE ==============================
+var int   lastTradeBar    = na   // آخر شمعة صار فيها دخول
+var int   lastTradedPHbar = na   // آخر pivot high اتاجرنا عليه
+var int   lastTradedPLbar = na   // آخر pivot low اتاجرنا عليه
+
+cooldownOK = na(lastTradeBar) or (bar_index - lastTradeBar) >= minBarsBetweenTrades
+
+// ====================== SETUP STATE ========================================
+var float L_zero = na, var float L_one = na, var float L_entry = na
+var float L_stop = na, var float L_target = na
+var int   L_age  = na
+var bool  L_active = false
+
+var float S_zero = na, var float S_one = na, var float S_entry = na
+var float S_stop = na, var float S_target = na
+var int   S_age  = na
+var bool  S_active = false
+
+newLongSwingOK  = not avoidSameSwing or na(lastTradedPLbar) or lastPLbar != lastTradedPLbar
+newShortSwingOK = not avoidSameSwing or na(lastTradedPHbar) or lastPHbar != lastTradedPHbar
+
+if allowLong and not na(lastPL) and not na(lastPH) and lastPLbar < lastPHbar and not L_active and strategy.position_size == 0 and newLongSwingOK
+    swing = lastPH - lastPL
+    if swing > atr * minSwingATR and swing > 0
+        L_zero  := lastPL
+        L_one   := lastPH
+        L_entry := lastPL + swing * entryFib
+        L_stop  := lastPL - atr * stopBufATR
+        L_target:= useRR ? na : lastPL + swing * targetFib
+        L_age   := 0
+        L_active:= true
+
+if allowShort and not na(lastPH) and not na(lastPL) and lastPHbar < lastPLbar and not S_active and strategy.position_size == 0 and newShortSwingOK
+    swing = lastPH - lastPL
+    if swing > atr * minSwingATR and swing > 0
+        S_zero  := lastPH
+        S_one   := lastPL
+        S_entry := lastPH - swing * entryFib
+        S_stop  := lastPH + atr * stopBufATR
+        S_target:= useRR ? na : lastPH - swing * targetFib
+        S_age   := 0
+        S_active:= true
+
+if L_active
+    L_age += 1
+    if L_age > expiryBars
+        L_active := false
+if S_active
+    S_age += 1
+    if S_age > expiryBars
+        S_active := false
+
+// ====================== ENTRIES ============================================
+f_qty(entry, stop) =>
+    riskAmt = strategy.equity * riskPct / 100.0
+    dist    = math.abs(entry - stop)
+    dist > 0 ? riskAmt / dist : na
+
+slLong  = useATRexit ? close - atr * stopATR : L_stop
+tpLong  = useATRexit ? close + atr * tpATR   : (useRR ? close + (close - L_stop) * rrRatio : L_target)
+slShort = useATRexit ? close + atr * stopATR : S_stop
+tpShort = useATRexit ? close - atr * tpATR   : (useRR ? close - (S_stop - close) * rrRatio : S_target)
+
+rrLong  = (tpLong - close) / math.abs(close - slLong)
+rrShort = (close - tpShort) / math.abs(slShort - close)
+rrLongOK  = not useRRfilter or rrLong  >= minRR
+rrShortOK = not useRRfilter or rrShort >= minRR
+
+longTrigger  = L_active and longTrendOK  and volOK and inSession and close > L_entry and strategy.position_size == 0 and cooldownOK and trendStrongOK and maxTradesOK and rrLongOK
+shortTrigger = S_active and shortTrendOK and volOK and inSession and close < S_entry and strategy.position_size == 0 and cooldownOK and trendStrongOK and maxTradesOK and rrShortOK
+
+stratName = "Auto Fib + EMA200 MTF [SamoAlgo]"
+
+// متغيرات pending — بنخزّن فيها تفاصيل الصفقة المرسلة، وما منبعت alert إلا لما نتأكد إنها فتحت فعلياً
+var string pendingType = na
+var float  pendingSL   = na
+var float  pendingTP   = na
+var float  pendingEntryFibUsed = na
+
+if longTrigger
+    q = f_qty(close, slLong)
+    strategy.entry("L", strategy.long, qty=q)
+    strategy.exit("L-x", "L", stop=slLong, limit=tpLong)
+    L_active := false
+    lastTradeBar    := bar_index
+    lastTradedPLbar := lastPLbar
+    tradesToday     += 1
+    pendingType := "LONG"
+    pendingSL   := slLong
+    pendingTP   := tpLong
+
+if shortTrigger
+    q = f_qty(close, slShort)
+    strategy.entry("S", strategy.short, qty=q)
+    strategy.exit("S-x", "S", stop=slShort, limit=tpShort)
+    S_active := false
+    lastTradeBar    := bar_index
+    lastTradedPHbar := lastPHbar
+    tradesToday     += 1
+    pendingType := "SHORT"
+    pendingSL   := slShort
+    pendingTP   := tpShort
+
+// ====================== VISUAL STATE (تترسم بس لصفقة مؤكدة) =================
+var line   lnEntry = na
+var line   lnSL    = na
+var line   lnTP    = na
+var label  lbEntry = na
+
+// ملاحظة: ما فينا نستخدم دالة (=>) لتعديل متغيرات var عامة — Pine ما بيسمح بهيك،
+// فبدل f_clearLines() صرنا نكرر نفس السطور مباشرة بمكان الاستدعاء (مرتين تحت)
+
+// ===== تأكيد الفتح الفعلي (الإشعار + الخطوط هون فقط) =====
+justOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
+if justOpened and not na(pendingType)
+    entryPriceActual = strategy.opentrades.entry_price(strategy.opentrades - 1)
+
+    if pendingType == "LONG"
+        alert(
+             "🟢 LONG — " + stratName +
+             "\n📍 دخول مؤكد: " + str.tostring(entryPriceActual, "#.##") +
+             "\n🛑 ستوب: " + str.tostring(pendingSL, "#.##") +
+             "\n🎯 هدف: "  + str.tostring(pendingTP, "#.##") +
+             "\n📊 Fib Entry: " + str.tostring(entryFib) + " | Target: " + str.tostring(targetFib),
+             alert.freq_once_per_bar_close)
+    else if pendingType == "SHORT"
+        alert(
+             "🔴 SHORT — " + stratName +
+             "\n📍 دخول مؤكد: " + str.tostring(entryPriceActual, "#.##") +
+             "\n🛑 ستوب: " + str.tostring(pendingSL, "#.##") +
+             "\n🎯 هدف: "  + str.tostring(pendingTP, "#.##") +
+             "\n📊 Fib Entry: " + str.tostring(entryFib) + " | Target: " + str.tostring(targetFib),
+             alert.freq_once_per_bar_close)
+
+    if showTradeLines
+        lnEntry := line.new(bar_index, entryPriceActual, bar_index, entryPriceActual, color=color.yellow, width=3, style=line.style_solid)
+        lnSL    := line.new(bar_index, pendingSL, bar_index, pendingSL, color=color.red,   width=3, style=line.style_dashed)
+        lnTP    := line.new(bar_index, pendingTP, bar_index, pendingTP, color=color.lime,  width=3, style=line.style_dashed)
+        lbEntry := label.new(bar_index, entryPriceActual,
+             (pendingType == "LONG" ? "▲ LONG" : "▼ SHORT") + "  Entry:" + str.tostring(entryPriceActual, format.mintick) + "\nTP:" + str.tostring(pendingTP, format.mintick) + "  SL:" + str.tostring(pendingSL, format.mintick),
+             style=pendingType == "LONG" ? label.style_label_up : label.style_label_down,
+             color=color.new(pendingType == "LONG" ? color.green : color.red, 10),
+             textcolor=color.white, size=size.normal)
+
+    pendingType := na
+
+// تمديد الخطوط طول مدة الصفقة المفتوحة
+if strategy.position_size != 0 and not na(lnEntry) and showTradeLines
+    line.set_x2(lnEntry, bar_index)
+    line.set_x2(lnSL,    bar_index)
+    line.set_x2(lnTP,    bar_index)
+
+// ===== تأكيد الإغلاق الفعلي (TP أو SL) — بناءً على صفقة مغلقة فعلياً =====
+justClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if justClosed and strategy.closedtrades > strategy.closedtrades[1]
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    exitPriceActual = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    if lastProfit > 0
+        alert(
+             "✅ هدف وصل — " + stratName +
+             "\n📍 سعر الخروج: " + str.tostring(exitPriceActual, "#.##") +
+             "\n💰 ربح: +" + str.tostring(lastProfit, "#.##") + "$",
+             alert.freq_once_per_bar)
+    else
+        alert(
+             "❌ ستوب وصل — " + stratName +
+             "\n📍 سعر الخروج: " + str.tostring(exitPriceActual, "#.##") +
+             "\n📉 خسارة: " + str.tostring(lastProfit, "#.##") + "$",
+             alert.freq_once_per_bar)
+
+    // الخطوط ضلت ثابتة عمداً ولا تنحذف هون — حسب المواصفة (خطوط ولايبلات ثابتة بعد الإغلاق)
+    // التريد الجاي رح يرسم خطوطه الخاصة فوق، وما رح يلمس خطوط هاي الصفقة المغلقة
+
+// ====================== VISUALS (مؤشرات عامة) ===============================
+plot(useEMAfilter ? ta.ema(close, emaLen) : na, "EMA200 (chart TF)", color=color.orange, linewidth=2)
+
+bgcolor(longTrendOK  and useEMAfilter ? color.new(color.green, 92) : na)
+bgcolor(shortTrendOK and useEMAfilter ? color.new(color.red,   92) : na)

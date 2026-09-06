@@ -1,0 +1,625 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © Thembaron
+//@version=6
+indicator("Thembaron Key Levels", shorttitle="TKL", overlay=true,
+          max_lines_count=500, max_labels_count=500, max_boxes_count=500,
+          max_polylines_count=100, max_bars_back=5000)
+// High limits prevent older drawings (e.g. IB Range box) from being evicted
+// once Key Level / VWAP history settings add more lines, labels, and boxes.
+// v1.2: replaced custom OHLC4 ETH/RTH VWAP with ASFX Free Automatic VWAPs engine
+// v30 : renderPolyline live-line rework (array leak + historical-VWAP-deleted-at-anchor
+//       + wrong xloc on historical segments), pair-wise VA expansion + mid-tie POC,
+//       explicit America/Chicago sessions, prev-day VWAP len clamp, f_ray update-in-place,
+//       single VP commit per session, format.mintick labels, polyline cap 9000
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS — Key Levels
+// ═══════════════════════════════════════════════════════════════════════════════
+var string G_ETH = "ETH Levels"
+showETH   = input.bool(true,    "Show ETH High / Low",       group=G_ETH)
+ethCol    = input.color(#FFD700, "ETH Line Color",            group=G_ETH)
+ethTxtCol = input.color(#FFD700, "ETH Text Color",            group=G_ETH)
+
+var string G_RTH = "Prior RTH Levels"
+showVAH   = input.bool(true,    "Show VAH",                   group=G_RTH)
+showPOC   = input.bool(true,    "Show POC",                   group=G_RTH)
+showVAL   = input.bool(true,    "Show VAL",                   group=G_RTH)
+vaPct     = input.float(70.0,   "Value Area %",               group=G_RTH, step=5.0, minval=50, maxval=100)
+nBuckets  = input.int(200,      "VP Buckets",                 group=G_RTH, minval=50, maxval=500)
+vahCol    = input.color(#00E5FF, "VAH / VAL Line Color",      group=G_RTH)
+vahTxtCol = input.color(#00E5FF, "VAH / VAL Text Color",      group=G_RTH)
+pocCol    = input.color(#FF6B35, "POC Line Color",            group=G_RTH)
+pocTxtCol = input.color(#FF6B35, "POC Text Color",            group=G_RTH)
+lineWid   = input.int(2,        "Line Width",                 group=G_RTH, minval=1, maxval=4, inline="LW")
+lineStyle = input.string('Solid', "Line Style", options=['Solid', 'Dashed', 'Dotted'], group=G_RTH, inline="LW")
+lblBg     = input.color(color.new(#131722, 0), "Label Background", group=G_RTH)
+
+var string G_ON = "Prior Overnight Levels"
+// NOTE: this VP needs ETH bars on the chart series to accumulate volume.
+// On the chart, enable "Extended Trading Hours" (clock icon on the time axis)
+// so the overnight (1700-0830) bars are fed to the script. Same requirement
+// as TradingView's built-in Session Volume Profile tool.
+showOvnVAH  = input.bool(true,  "Show Overnight VAH",         group=G_ON)
+showOvnPOC  = input.bool(true,  "Show Overnight POC",         group=G_ON)
+showOvnVAL  = input.bool(true,  "Show Overnight VAL",         group=G_ON)
+ovnVaCol    = input.color(#B388FF, "Overnight VAH / VAL Line Color", group=G_ON)
+ovnVaTxtCol = input.color(#B388FF, "Overnight VAH / VAL Text Color", group=G_ON)
+ovnPocCol   = input.color(#FFEB3B, "Overnight POC Line Color",  group=G_ON)
+ovnPocTxtCol= input.color(#FFEB3B, "Overnight POC Text Color",  group=G_ON)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS — ASFX Free Automatic VWAPs & Key Levels
+// ═══════════════════════════════════════════════════════════════════════════════
+display = display.all - display.status_line
+
+CALC_MODE_TOOLTIP = "Determines the units used to calculate the distance of the bands. When 'Percentage' is selected, a multiplier of 1 means 1%."
+
+vwapSource = input.source(ohlc4, 'VWAP Source', display = display)
+
+groupVwap = 'New York Session VWAPs'
+vwapShow = input.bool(true, 'Start of New York Session', inline = 'NYC', group = groupVwap)
+vwapAnchor = 'Start of New York Session'
+vwapColor = input.color(#0031ff, '', inline = 'NYC', group = groupVwap)
+vwapStyle = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYC', group = groupVwap, display = display)
+vwapHistory = input.int(0, "  Historical VWAPs", minval = 0, group = groupVwap, display = display)
+
+groupVwapP = 'Previous Day’s New York Open'
+vwapShowP = input.bool(true, 'Previous Day’s New York Open', inline = 'NYP', group = groupVwap)
+vwapAnchorP = 'Previous Day’s New York Open'
+vwapSourceP = vwapSource
+vwapColorP = input.color(color.new(#4dd0e1, 60), '', inline = 'NYP', group = groupVwap)
+vwapStyleP = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYP', group = groupVwap, display = display)
+
+groupVwapD = 'Day VWAPs'
+vwapShowD = input.bool(false, 'Start of Day VWAP', inline = 'B1S', group = groupVwapD)
+vwapAnchorD = 'Start of Day'
+vwapSourceD = vwapSource
+vwapColorD = input.color(#000000, '', inline = 'B1S', group = groupVwapD)
+vwapStyleD = input.string('Dotted', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'B1S', group = groupVwapD, display = display)
+
+vwapBand1D  = input.bool(false,"Bands", inline = 'BS', group = groupVwapD)
+vwapMult1D = input.float(1, "", step = .1, inline = 'BS', group = groupVwapD, display = display)
+vwapBand1CD = input.color(#000000, '', inline = 'BS', group = groupVwapD)
+vwapBand1SD = input.string('Dotted', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'BS', group = groupVwapD, display = display)
+
+vwapHistoryD = input.int(0, "  Historical VWAPs", minval = 0, group = groupVwapD, display = display)
+
+groupVwapDH = 'High of Day VWAP'
+vwapShowDH = input.bool(true, 'High of Day VWAP', inline = 'B1H', group = groupVwapD)
+vwapAnchorDH = 'High of Day'
+vwapSourceDH = vwapSource
+vwapColorDH = input.color(#673ab7, '', inline = 'B1H', group = groupVwapD)
+vwapStyleDH = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'B1H', group = groupVwapD, display = display)
+
+vwapBand1DH  = input.bool(false,"Bands", inline = 'BH', group = groupVwapD)
+vwapMult1DH = input.float(1, "", step = .1, inline = 'BH', group = groupVwapD, display = display)
+vwapBand1CDH = input.color(#80008080, '', inline = 'BH', group = groupVwapD)
+vwapBand1SDH = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'BH', group = groupVwapD, display = display)
+
+groupVwapDL = 'Low of Day VWAP'
+vwapShowDL = input.bool(false, 'Low of Day VWAP', inline = 'B1L', group = groupVwapD)
+vwapAnchorDL = 'Low of Day'
+vwapSourceDL = vwapSource
+vwapColorDL = input.color(#673ab7, '', inline = 'B1L', group = groupVwapD)
+vwapStyleDL = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'B1L', group = groupVwapD, display = display)
+
+vwapBand1DL  = input.bool(false,"Bands", inline = 'BL', group = groupVwapD)
+vwapMult1DL = input.float(1, "", step = .1, inline = 'BL', group = groupVwapD, display = display)
+vwapBand1CDL = input.color(#800080, '', inline = 'BL', group = groupVwapD)
+vwapBand1SDL = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'BL', group = groupVwapD, display = display)
+
+groupVwapM = 'Higher Timeframe VWAPs'
+vwapShowM = input.bool(false, 'Start of Month VWAP', inline = 'NYC', group = groupVwapM)
+vwapAnchorM = 'Start of Month'
+vwapSourceM = vwapSource
+vwapColorM = input.color(#000000, '', inline = 'NYC', group = groupVwapM)
+vwapStyleM = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYC', group = groupVwapM, display = display)
+vwapHistoryM = input.int(0, "  Historical VWAPs", minval = 0, group = groupVwapM, display = display)
+
+vwapShowY = input.bool(false, 'Start of Year VWAP', inline = 'NYCy', group = groupVwapM)
+vwapAnchorY = 'Start of Year'
+vwapSourceY = vwapSource
+vwapColorY = input.color(#c8e6c9, '', inline = 'NYCy', group = groupVwapM)
+vwapStyleY = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYCy', group = groupVwapM, display = display)
+vwapHistoryY = input.int(0, "  Historical VWAPs", minval = 0, group = groupVwapM, display = display)
+
+vwapShowH = input.bool(false, 'High of Year VWAP', inline = 'NYCh', group = groupVwapM)
+vwapAnchorH = 'High of Year'
+vwapSourceH = vwapSource
+vwapColorH = input.color(#4caf50, '', inline = 'NYCh', group = groupVwapM)
+vwapStyleH = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYCh', group = groupVwapM, display = display)
+
+group_orbr = 'New York Opening Range'
+
+nyShow = input(true, 'New York Session', group = group_orbr)
+nyRange = input.session('0930-0945', '  Opening Range', inline = 'NY', group = group_orbr, display = display, tooltip = "This window's start time also anchors the 'Start of New York Session' VWAP.")
+nyColor = input.color(#ffeb3b, '  Line Color', inline = 'NYC', group = group_orbr)
+nyLineS = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYC', group = group_orbr, display = display)
+nyTrans = input.int(85, 'Fill Opacity', minval = 0, maxval = 100, inline = 'NYC', group = group_orbr, display = display)
+nyHistory = input.int(0, "  Historical Opening Ranges", minval = 0, group = group_orbr, display = display)
+showNyTxt = input(true, 'Show Text', group = group_orbr)
+
+group_br = 'Day Initial Balance Range'
+
+dayShow = input(true, 'Day Initial Balance Range', group = group_br)
+dayRange = input.session('0930-1030', '  Initial Balance Range', inline = 'DY', group = group_br, display = display)
+dayColor = input.color(#00bcf480, '  Line Color', inline = 'DYC', group = group_br)
+dayLineS = input.string('Dashed', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'DYC', group = group_br, display = display)
+dayTrans = input.int(85, 'Fill Opacity', minval = 0, maxval = 100, inline = 'DYC', group = group_br, display = display)
+dayHistory = input.int(0, "  Historical Balance Ranges", minval = 0, group = group_br, display = display)
+showIbTxt = input(true, 'Show Text', group = group_br)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// Fix #5: removed dead sixAmSGT() function (was never called after ray-coord fix)
+// ═══════════════════════════════════════════════════════════════════════════════
+f_tick(float p) => math.round(p / syminfo.mintick) * syminfo.mintick
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASFX — User Defined Types
+// ═══════════════════════════════════════════════════════════════════════════════
+type VWAP
+    chart.point []  points
+    polyline    []  lines
+
+type VWAPD
+    chart.point []  points
+    polyline        lines
+
+type RANGE
+    line     []  upperLine
+    line     []  lowerLine
+    box      []  BGnTXT
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASFX — Functions / Methods
+// ═══════════════════════════════════════════════════════════════════════════════
+getStyle(style) =>
+    switch style
+        'Solid' => line.style_solid
+        'Dashed' => line.style_dashed
+        'Dotted' => line.style_dotted
+        => line.style_solid   // hardening: never return na for an unknown style
+
+renderPolyline(source, anchor, color, style, historical, width) =>
+
+    var VWAP vwapArray = VWAP.new(array.new<chart.point>(na), array.new<polyline>(na))
+    // v30: dedicated live polyline — old last()/push pattern grew the array every
+    // realtime bar and deleted the newest historical segment on anchor bars
+    var polyline liveLine = na
+
+    if anchor
+        // v30: points are time-based, so historical segments need xloc.bar_time too
+        vwapArray.lines.push(polyline.new(vwapArray.points, false, false, xloc = xloc.bar_time, line_color = color, line_width = width, line_style = getStyle(style)))
+        vwapArray.points.clear()
+        vwapArray.points.push(chart.point.from_time(time, source))
+
+        if vwapArray.lines.size() > historical
+            vwapArray.lines.shift().delete()
+    else
+        vwapArray.points.push(chart.point.from_time(time, source))
+
+        if vwapArray.points.size() >= 9000
+            vwapArray.points.remove(1)
+
+    if barstate.islast
+        polyline.delete(liveLine)
+        liveLine := polyline.new(vwapArray.points, false, false, line_color = color, line_width = width, xloc = xloc.bar_time, line_style = getStyle(style))
+
+
+renderVwap(isVoly, source, anchor, color, style, show1, mult1, color1, style1, historical) =>
+
+    [vwap, upper, _] = ta.vwap(source, anchor, 1)
+
+    if isVoly and not na(vwap)   // v30: was vwap > 0 — broke negative-price instruments
+
+        renderPolyline(vwap, anchor, color, style, historical, 2)
+
+        if show1
+            bandBasis = upper - vwap
+
+            renderPolyline(vwap + bandBasis * mult1, anchor, color1, style1, historical, 1)
+            renderPolyline(vwap - bandBasis * mult1, anchor, color1, style1, historical, 1)
+
+renderVwap(isVoly, source, aIndex, color, style) =>
+    if isVoly and barstate.islast and not na(aIndex)   // hardening: skip when no prior anchor (for-loop bound would be na)
+        var VWAPD vwapType = VWAPD.new(array.new<chart.point>(na))
+        var srcVolArray = array.new_float(na)
+        var volArray = array.new_float(na)
+
+        srcVolArray.clear(), volArray.clear(), vwapType.points.clear(), vwapType.lines.delete()
+        // v30: clamp below max_bars_back=5000 — sub-1m charts can put the prior
+        // NY open anchor beyond the series buffer (runtime error otherwise)
+        len = math.min(bar_index - aIndex, 4900)
+
+        for index = len to 0
+            srcVolArray.push(source[index] * volume[index])
+            volArray.push(volume[index])
+
+            vwapType.points.push(chart.point.from_time(time[index], srcVolArray.sum() / volArray.sum()))
+
+            if vwapType.points.size() >= 9000
+                vwapType.points.remove(1)
+
+        vwapType.lines := polyline.new(vwapType.points, false, false, line_color = color, line_style = getStyle(style), xloc = xloc.bar_time, line_width = 2)
+
+renderRange(_show, _range, _utc, _color, _trans, historical, BGnTXT, style, show_text) =>
+    if _show
+        var RANGE rangeArray = RANGE.new(array.new<line>(na), array.new<line>(na), array.new<box>(na))
+
+        session = not na(time(timeframe.period, _range, _utc))
+
+        if session and session != session[1]
+            rangeArray.upperLine.push(line.new(time, high, time + 1, high, xloc.bar_time, extend.none, _color, getStyle(style), 1))
+            rangeArray.lowerLine.push(line.new(time, low , time + 1, low , xloc.bar_time, extend.none, _color, getStyle(style), 1))
+            rangeArray.BGnTXT.push(box.new(time, high, time + 1, low, xloc = xloc.bar_time, text = show_text ? BGnTXT + ' ' + _range : na, text_size = size.tiny, text_halign = text.align_right, text_valign = BGnTXT == 'Opening Range' ? text.align_center : text.align_top, text_color = color.new(_color, 25), bgcolor = color.new(_color, _trans), border_color = color(na)))
+
+            if rangeArray.upperLine.size() > historical + 1
+                rangeArray.upperLine.shift().delete()
+                rangeArray.lowerLine.shift().delete()
+                rangeArray.BGnTXT.shift().delete()
+
+        if session and rangeArray.upperLine.size() > 0
+            lnh = rangeArray.upperLine.last(), lnh.set_y1(math.max(high, lnh.get_y1())), lnh.set_y2(math.max(high, lnh.get_y2())), lnh.set_x2(time + 1)
+            lnl = rangeArray.lowerLine.last(), lnl.set_y1(math.min(low , lnl.get_y1())), lnl.set_y2(math.min(low, lnl.get_y2())), lnl.set_x2(time + 1)
+            btx = rangeArray.BGnTXT.last(), btx.set_top(math.max(high, lnh.get_y1())), btx.set_bottom(math.min(low, lnl.get_y1())), btx.set_right(time + 1)
+
+        if rangeArray.upperLine.size() > 0
+            lnh = rangeArray.upperLine.last(), lnh.set_x2(time + 1)
+            lnl = rangeArray.lowerLine.last(), lnl.set_x2(time + 1)
+            btx = rangeArray.BGnTXT.last(), btx.set_right(time + 1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SESSION DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+// v30: explicit America/Chicago — without it these track the symbol's exchange
+// timezone and silently shift on non-CME symbols (ctDay below is already Chicago)
+isRTH     = not na(time(timeframe.period, "0830-1700:1234567", "America/Chicago"))
+isETH     = not na(time(timeframe.period, "1700-0830:1234567", "America/Chicago"))
+ctDay     = dayofmonth(time,    "America/Chicago")
+ctDayPrev = dayofmonth(time[1], "America/Chicago")
+newRTH    = isRTH and bar_index > 0 and (not isRTH[1] or ctDay != ctDayPrev)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASFX — Calculations - Ranges
+// ═══════════════════════════════════════════════════════════════════════════════
+if timeframe.isintraday
+    renderRange(dayShow, dayRange, 'America/New_York', dayColor, dayTrans, dayHistory, 'Initial Balance Range', dayLineS, showIbTxt)
+    renderRange(nyShow, nyRange, 'America/New_York', nyColor, nyTrans, nyHistory, 'Opening Range', nyLineS, showNyTxt)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASFX — Calculations - VWAPs
+// ═══════════════════════════════════════════════════════════════════════════════
+isVoly = ta.cum(volume) > 0
+
+if not isVoly
+    var table note = table.new(position.bottom_right, 1, 1)
+    if barstate.islast
+        table.cell(note, 0, 0, 'No volume is provided by the data vendor.      \n\n', text_size = size.normal, text_color = chart.fg_color)
+
+// NY Sessions
+nyAnchor = not na(time(timeframe.period, nyRange, 'America/New_York'))
+full_ny_session = time(timeframe.period, "0930-1600", "America/New_York")
+
+if vwapShow and timeframe.isintraday
+    renderVwap(isVoly, vwapSource, nyAnchor and nyAnchor != nyAnchor[1] , not na(full_ny_session) ? vwapColor : na, vwapStyle, false, 0, color(color.blue), '', vwapHistory)
+
+// v30: split — comma-joined var declarations risk losing persistence (same class
+// as the label-handle bug fixed in v29)
+var int anchorDIndex  = na
+var int anchorPDIndex = na
+if nyAnchor and nyAnchor != nyAnchor[1]
+    anchorPDIndex := anchorDIndex, anchorDIndex := bar_index
+
+if vwapShowP and timeframe.isintraday
+    renderVwap(isVoly, vwapSource, anchorPDIndex, not na(full_ny_session) ? vwapColorP : na, vwapStyleP)
+
+dayAnchor = not na(time(timeframe.period, dayRange, 'America/New_York'))
+
+var float highOfDay = na
+var float lowOfDay = na
+
+if timeframe.change('D')
+    highOfDay := high
+    lowOfDay := low
+else
+    highOfDay := math.max(high, highOfDay)
+    lowOfDay := math.min(low, lowOfDay)
+
+if vwapShowD and timeframe.isintraday
+    renderVwap(isVoly, vwapSourceD, timeframe.change('D'), vwapColorD, vwapStyleD, vwapBand1D, vwapMult1D, vwapBand1CD, vwapBand1SD, vwapHistoryD)
+
+if vwapShowDH and timeframe.isintraday
+    renderVwap(isVoly, vwapSourceDH, highOfDay == high, vwapColorDH, vwapStyleDH, vwapBand1DH, vwapMult1DH, vwapBand1CDH, vwapBand1SDH, 0)
+
+if vwapShowDL and timeframe.isintraday
+    renderVwap(isVoly, vwapSourceDL, lowOfDay == low, vwapColorDL, vwapStyleDL, vwapBand1DL, vwapMult1DL, vwapBand1CDL, vwapBand1SDL, 0)
+
+var float highOfYear = na
+
+if timeframe.change('12M')
+    highOfYear := high
+else
+    highOfYear := math.max(high, highOfYear)
+
+if vwapShowM and (timeframe.isintraday or timeframe.isdwm)
+    renderVwap(isVoly, vwapSourceM, timeframe.change('M'), vwapColorM, vwapStyleM, false, 0, color(color.yellow), '', vwapHistoryM)
+
+if vwapShowY and (timeframe.isintraday or timeframe.isdwm)
+    renderVwap(isVoly, vwapSourceY, timeframe.change('12M'), vwapColorY, vwapStyleY, false, 0, color(color.green), '', vwapHistoryY)
+
+if vwapShowH and (timeframe.isintraday or timeframe.isdwm)
+    renderVwap(isVoly, vwapSourceH, highOfYear == high, vwapColorH, vwapStyleH, false, 0, color(color.red), '', 0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ETH HIGH / LOW — updated only at newRTH (frozen mid-session)
+// ═══════════════════════════════════════════════════════════════════════════════
+extTicker = ticker.modify(syminfo.tickerid, session = session.extended)
+[extDayHi, extDayLo] = request.security(extTicker, "D", [high, low],
+                                         lookahead = barmerge.lookahead_off)
+var float ethHi      = na
+var float ethLo      = na
+var float prevEthHi  = na
+var float prevEthLo  = na
+var int   ethLevelBar = na  // Fix #4: separate anchor bar for ETH lines
+
+if barstate.isconfirmed
+    if isETH
+        ethHi := na(ethHi) or not isETH[1] ? high : math.max(ethHi, high)
+        ethLo := na(ethLo) or not isETH[1] ? low  : math.min(ethLo, low)
+    if newRTH
+        prevEthHi   := f_tick(na(ethHi) ? extDayHi : ethHi)
+        prevEthLo   := f_tick(na(ethLo) ? extDayLo : ethLo)
+        ethLevelBar := bar_index   // ETH levels anchored at RTH open = 6am SGT
+        ethHi       := na
+        ethLo       := na
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRIOR RTH VOLUME PROFILE → VAH / POC / VAL
+// ═══════════════════════════════════════════════════════════════════════════════
+var float[] bHi  = array.new_float(0)
+var float[] bLo  = array.new_float(0)
+var float[] bVol = array.new_float(0)
+
+var float prevVAH    = na
+var float prevPOC    = na
+var float prevVAL    = na
+var int   rthLevelBar = na  // Fix #4: separate anchor bar for RTH lines
+var bool  rthVpDone   = false  // v30: endRTH already committed this session's VP
+
+f_vp(float[] hiA, float[] loA, float[] volA, int nb, float vaPct_) =>
+    float rVAH = na, float rPOC = na, float rVAL = na
+    if array.size(hiA) > 0
+        float sH = array.max(hiA), float sL = array.min(loA)
+        float pr = sH - sL
+        if pr > 0
+            float bktSz = pr / nb
+            float[] vol = array.new_float(nb, 0.0)
+            int n = array.size(hiA)
+            for i = 0 to n - 1
+                int lo_ = math.max(0,      int((array.get(loA, i) - sL) / bktSz))
+                int hi_ = math.min(nb - 1, int((array.get(hiA, i) - sL) / bktSz))
+                float v = array.get(volA, i) / math.max(1, hi_ - lo_ + 1)
+                for b = lo_ to hi_
+                    array.set(vol, b, array.get(vol, b) + v)
+            float maxV = array.max(vol)
+            int   pocB = array.indexof(vol, maxV)
+            // v30: indexof returns the lowest bucket on ties — prefer the tied
+            // bucket nearest the profile mid instead (matches TV's built-in VP)
+            int midB = nb / 2
+            if pocB < nb - 1
+                for b = pocB + 1 to nb - 1
+                    if array.get(vol, b) == maxV and math.abs(b - midB) < math.abs(pocB - midB)
+                        pocB := b
+            rPOC      := f_tick(sL + (pocB + 0.5) * bktSz)
+            float total = array.sum(vol), float target = total * (vaPct_ / 100)
+            float accum = maxV, int vaLo = pocB, int vaHi = pocB
+            // v30: pair-wise VA expansion (compare two buckets up vs two down,
+            // add the heavier pair) — closer to TV's built-in VP than 1-by-1
+            while accum < target and (vaLo > 0 or vaHi < nb - 1)
+                float addHi = 0.0, int upSteps = 0
+                float addLo = 0.0, int dnSteps = 0
+                if vaHi < nb - 1
+                    addHi += array.get(vol, vaHi + 1), upSteps := 1
+                    if vaHi < nb - 2
+                        addHi += array.get(vol, vaHi + 2), upSteps := 2
+                if vaLo > 0
+                    addLo += array.get(vol, vaLo - 1), dnSteps := 1
+                    if vaLo > 1
+                        addLo += array.get(vol, vaLo - 2), dnSteps := 2
+                if upSteps > 0 and (dnSteps == 0 or addHi >= addLo)
+                    vaHi += upSteps, accum += addHi
+                else
+                    vaLo -= dnSteps, accum += addLo
+            rVAH := f_tick(sL + (vaHi + 1) * bktSz)
+            rVAL := f_tick(sL +  vaLo      * bktSz)
+    [rVAH, rPOC, rVAL]
+
+// Fires on the first bar after RTH closes (17:00 CT = 6am SGT)
+// Only active on extended-hours charts where ETH bars exist
+endRTH = not newRTH and isRTH[1] and not isRTH
+
+if barstate.isconfirmed
+    // ① Commit prior session VP at the start of each new RTH session
+    //    v30: skip the recompute when ③ already committed the identical arrays;
+    //    still re-anchor the lines at RTH open (Fix #4 behavior)
+    if newRTH and array.size(bHi) > 0
+        if not rthVpDone
+            [v1, v2, v3] = f_vp(bHi, bLo, bVol, nBuckets, vaPct)
+            prevVAH      := v1, prevPOC := v2, prevVAL := v3
+        rthLevelBar  := bar_index
+        array.clear(bHi), array.clear(bLo), array.clear(bVol)
+        rthVpDone    := false
+
+    // ② Accumulate each RTH bar AFTER possible commit
+    if isRTH
+        array.push(bHi, high), array.push(bLo, low), array.push(bVol, volume)
+
+    // ③ Commit at RTH close (17:00 CT = 6am SGT)
+    //    Extended-hours charts only — arrays cleared at next newRTH
+    if endRTH and array.size(bHi) > 0
+        [v1, v2, v3] = f_vp(bHi, bLo, bVol, nBuckets, vaPct)
+        prevVAH     := v1, prevPOC := v2, prevVAL := v3
+        rthLevelBar := bar_index
+        rthVpDone   := true
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRIOR OVERNIGHT (ETH) VOLUME PROFILE → OVERNIGHT VAH / POC / VAL
+// Overnight session = isETH (1700-0830). Requires extended-hours bars on the
+// chart to accumulate — same data requirement as any bar-level VP.
+// ═══════════════════════════════════════════════════════════════════════════════
+var float[] oHi  = array.new_float(0)
+var float[] oLo  = array.new_float(0)
+var float[] oVol = array.new_float(0)
+
+var float prevOvnVAH  = na
+var float prevOvnPOC  = na
+var float prevOvnVAL  = na
+var int   ovnLevelBar = na
+
+if barstate.isconfirmed
+    if isETH
+        array.push(oHi, high), array.push(oLo, low), array.push(oVol, volume)
+    if newRTH and array.size(oHi) > 0
+        [w1, w2, w3] = f_vp(oHi, oLo, oVol, nBuckets, vaPct)
+        prevOvnVAH   := w1, prevOvnPOC := w2, prevOvnVAL := w3
+        ovnLevelBar  := bar_index
+        array.clear(oHi), array.clear(oLo), array.clear(oVol)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRAW
+// Lines  : rays anchored at their respective commit bar, extending right
+//          Fix #4: ETH and RTH lines now have separate anchor bars so ETH lines
+//          always start from their own commit point (RTH open = 6am SGT) and
+//          RTH lines from theirs (endRTH = 6am SGT, or newRTH on RTH-only charts)
+// Labels : solid background (lblBg) at bar_index+2, follows right edge on scroll
+//          Fix #3: removed redundant outer line.delete calls — f_ray owns the lifecycle
+//          Fix #1: removed unused lineCol parameter from f_lbl
+// ═══════════════════════════════════════════════════════════════════════════════
+var line  lnVAH    = line(na)
+var line  lnPOC    = line(na)
+var line  lnVAL    = line(na)
+var line  lnEHi    = line(na)
+var line  lnELo    = line(na)
+var line  lnOvnVAH = line(na)
+var line  lnOvnPOC = line(na)
+var line  lnOvnVAL = line(na)
+var label lbVAH    = label(na)
+var label lbPOC    = label(na)
+var label lbVAL    = label(na)
+var label lbEHi    = label(na)
+var label lbELo    = label(na)
+var label lbOvnVAH = label(na)
+var label lbOvnPOC = label(na)
+var label lbOvnVAL = label(na)
+
+// Fix #3: f_ray is the sole owner of line lifecycle — no outer delete needed
+// v30: update-in-place — rays extend right, so x2 is inert and delete+new every
+// bar was pure drawing churn
+f_ray(ln, price, anchorBar, col, lw, lstyle) =>
+    int  x1  = na(anchorBar) ? bar_index - 1 : anchorBar
+    line out = ln
+    if na(ln)
+        out := line.new(x1=x1, y1=price, x2=x1 + 1, y2=price,
+                        xloc=xloc.bar_index, extend=extend.right,
+                        color=col, width=lw, style=lstyle)
+    else
+        line.set_xy1(ln, x1, price)
+        line.set_xy2(ln, x1 + 1, price)
+        line.set_color(ln, col)
+        line.set_width(ln, lw)
+        line.set_style(ln, lstyle)
+    out
+
+// Fix #1: removed dead lineCol parameter — label background is always lblBg
+f_lbl(lb, price, name, txtCol) =>
+    string txt = name + "  " + str.tostring(price, format.mintick)   // v30: tick-size aware on any instrument
+    int    lx  = bar_index + 3   // shift labels into empty space right of price action
+    label  out = lb
+    if na(lb)
+        out := label.new(lx, price, txt,
+                         xloc      = xloc.bar_index,
+                         color     = lblBg,
+                         textcolor = txtCol,
+                         style     = label.style_label_left,
+                         size      = size.small)
+    else
+        label.set_x(lb, lx)
+        label.set_y(lb, price)
+        label.set_text(lb, txt)
+        label.set_textcolor(lb, txtCol)
+        label.set_color(lb, lblBg)
+    out
+
+if barstate.isconfirmed
+    // RTH lines — anchored at rthLevelBar
+    if showVAH and not na(prevVAH)
+        lnVAH := f_ray(lnVAH, prevVAH, rthLevelBar, vahCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnVAH), lnVAH := line(na)
+    if showPOC and not na(prevPOC)
+        lnPOC := f_ray(lnPOC, prevPOC, rthLevelBar, pocCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnPOC), lnPOC := line(na)
+    if showVAL and not na(prevVAL)
+        lnVAL := f_ray(lnVAL, prevVAL, rthLevelBar, vahCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnVAL), lnVAL := line(na)
+
+    // ETH lines — anchored at ethLevelBar (Fix #4: separate from RTH anchor)
+    if showETH and not na(prevEthHi)
+        lnEHi := f_ray(lnEHi, prevEthHi, ethLevelBar, ethCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnEHi), lnEHi := line(na)
+    if showETH and not na(prevEthLo)
+        lnELo := f_ray(lnELo, prevEthLo, ethLevelBar, ethCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnELo), lnELo := line(na)
+
+    // Overnight VA/POC lines — anchored at ovnLevelBar
+    if showOvnVAH and not na(prevOvnVAH)
+        lnOvnVAH := f_ray(lnOvnVAH, prevOvnVAH, ovnLevelBar, ovnVaCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnOvnVAH), lnOvnVAH := line(na)
+    if showOvnPOC and not na(prevOvnPOC)
+        lnOvnPOC := f_ray(lnOvnPOC, prevOvnPOC, ovnLevelBar, ovnPocCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnOvnPOC), lnOvnPOC := line(na)
+    if showOvnVAL and not na(prevOvnVAL)
+        lnOvnVAL := f_ray(lnOvnVAL, prevOvnVAL, ovnLevelBar, ovnVaCol, lineWid, getStyle(lineStyle))
+    else
+        line.delete(lnOvnVAL), lnOvnVAL := line(na)
+
+    // Labels
+    if showVAH and not na(prevVAH)
+        lbVAH := f_lbl(lbVAH, prevVAH, "Prior RTH VAH", vahTxtCol)
+    else
+        label.delete(lbVAH), lbVAH := label(na)
+    if showPOC and not na(prevPOC)
+        lbPOC := f_lbl(lbPOC, prevPOC, "Prior RTH POC", pocTxtCol)
+    else
+        label.delete(lbPOC), lbPOC := label(na)
+    if showVAL and not na(prevVAL)
+        lbVAL := f_lbl(lbVAL, prevVAL, "Prior RTH VAL", vahTxtCol)
+    else
+        label.delete(lbVAL), lbVAL := label(na)
+    if showETH and not na(prevEthHi)
+        lbEHi := f_lbl(lbEHi, prevEthHi, "ETH High", ethTxtCol)
+    else
+        label.delete(lbEHi), lbEHi := label(na)
+    if showETH and not na(prevEthLo)
+        lbELo := f_lbl(lbELo, prevEthLo, "ETH Low", ethTxtCol)
+    else
+        label.delete(lbELo), lbELo := label(na)
+    if showOvnVAH and not na(prevOvnVAH)
+        lbOvnVAH := f_lbl(lbOvnVAH, prevOvnVAH, "Prior ON VAH", ovnVaTxtCol)
+    else
+        label.delete(lbOvnVAH), lbOvnVAH := label(na)
+    if showOvnPOC and not na(prevOvnPOC)
+        lbOvnPOC := f_lbl(lbOvnPOC, prevOvnPOC, "Prior ON POC", ovnPocTxtCol)
+    else
+        label.delete(lbOvnPOC), lbOvnPOC := label(na)
+    if showOvnVAL and not na(prevOvnVAL)
+        lbOvnVAL := f_lbl(lbOvnVAL, prevOvnVAL, "Prior ON VAL", ovnVaTxtCol)
+    else
+        label.delete(lbOvnVAL), lbOvnVAL := label(na)

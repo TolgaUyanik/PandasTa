@@ -1,0 +1,181 @@
+//@version=6
+strategy("QQE Trend Strategy [Long/Short]",
+     shorttitle        = "QQE T [L/S]",
+     overlay           = false,
+     margin_long       = 100,
+     margin_short      = 100,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.03,   // 0.03% per side | Adjust via Strategy Properties
+     slippage          = 1)      // 1 tick | Increase to 2–3 for scalping
+
+// ═══════════════════════════════════════════════════════════
+//  ◆ INPUTS
+// ═══════════════════════════════════════════════════════════
+
+g1 = "📊 QQE Settings"
+rsiLen     = input.int  (14,    "RSI Length",          minval=2,   group=g1)
+rsiSmooth  = input.int  (5,     "Smooth EMA Length",   minval=1,   group=g1)
+fastFactor = input.float(2.618, "Fast Band Factor",    minval=0.1, step=0.001, group=g1)
+slowFactor = input.float(4.236, "Slow Band Factor",    minval=0.1, step=0.001, group=g1)
+
+g2 = "⚙️ Strategy"
+sigMode     = input.string("Slow", "Signal Band",
+              options=["Fast","Slow"], group=g2,
+              tooltip="Slow = accuracy / Fast = responsiveness")
+use50Filter = input.bool  (true,  "50-Line Direction Filter",
+              group=g2, tooltip="When ON: above 50 = Long only, below 50 = Short only")
+tradeDir    = input.string("Both", "Trade Direction",
+              options=["Both","Long Only","Short Only"], group=g2)
+qtyFixed    = input.float (1.0,   "Lot Size", minval=0.01, step=0.01, group=g2)
+useStopLoss = input.bool  (false, "Enable Stop Loss", group=g2)
+stopLossPct = input.float (1.0,   "SL (%)",
+              minval=0.1, step=0.1, group=g2,
+              tooltip="Distance from entry price (e.g. 1.0 = 1%)")
+
+g3 = "🎨 Display"
+showFastBand = input.bool(true,  "Show Fast Band",         group=g3)
+showSlowBand = input.bool(true,  "Show Slow Band",         group=g3)
+showHist     = input.bool(true,  "Show Histogram",         group=g3)
+showBgColor  = input.bool(true,  "Show Background Color",  group=g3)
+showBarColor = input.bool(false, "Color Bars",             group=g3,
+              tooltip="Color main chart candles based on trend direction")
+showSignals  = input.bool(true,  "Show Signal Markers",    group=g3)
+
+// ═══════════════════════════════════════════════════════════
+//  ◆ QQE CALCULATION
+//    RSI → EMA smoothing → ATR smoothing → trailing band
+// ═══════════════════════════════════════════════════════════
+qqeCalc(int rsiPeriod, int sf, float factor) =>
+    // Step 1: RSI → Smoothed QQE Line
+    rsi  = ta.rsi(close, rsiPeriod)
+    qqeL = ta.ema(rsi, sf)
+
+    // Step 2: ATR smoothing (double EMA) to calculate band width
+    wp  = sf * 2 - 1
+    dar = ta.ema(ta.ema(math.abs(qqeL - qqeL[1]), wp), wp) * factor
+
+    // Step 3: Trailing band (ratchet mechanism)
+    var float lb = na   // Long Band  (support: active during uptrend)
+    var float sb = na   // Short Band (resistance: active during downtrend)
+    var int   tr = 1    // Trend direction: 1=up, -1=down
+
+    // Long Band: ratchets up below the QQE line
+    lb := qqeL > nz(lb, qqeL - dar)
+         ? math.max(nz(lb, qqeL - dar), qqeL - dar)
+         : qqeL - dar
+
+    // Short Band: ratchets down above the QQE line
+    sb := qqeL < nz(sb, qqeL + dar)
+         ? math.min(nz(sb, qqeL + dar), qqeL + dar)
+         : qqeL + dar
+
+    // Step 4: Detect trend reversal by band crossover
+    tr := ta.crossover (qqeL, sb[1]) ?  1 :   // Cross above Short Band → Bullish
+          ta.crossunder(qqeL, lb[1]) ? -1 :   // Cross below Long Band  → Bearish
+          nz(tr, 1)
+
+    // Return active band (uptrend: LB / downtrend: SB)
+    band = tr == 1 ? lb : sb
+    [qqeL, band, tr]
+
+// ── Dual QQE Calculation ──────────────────────────────────
+[fLine, fBand, fTrend] = qqeCalc(rsiLen, rsiSmooth, fastFactor)
+[sLine, sBand, sTrend] = qqeCalc(rsiLen, rsiSmooth, slowFactor)
+
+// ═══════════════════════════════════════════════════════════
+//  ◆ SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════
+// Select which band's trend reversal to use as signal
+activeTrend = sigMode == "Fast" ? fTrend : sTrend
+
+// Use trend reversal as entry signal
+rawBuy  = activeTrend ==  1 and activeTrend[1] == -1
+rawSell = activeTrend == -1 and activeTrend[1] ==  1
+
+// 50-line direction filter
+f50Buy  = use50Filter ? fLine > 50 : true
+f50Sell = use50Filter ? fLine < 50 : true
+
+buySignal  = rawBuy  and f50Buy  and tradeDir != "Short Only"
+sellSignal = rawSell and f50Sell and tradeDir != "Long Only"
+
+// ═══════════════════════════════════════════════════════════
+//  ◆ STRATEGY EXECUTION
+// ═══════════════════════════════════════════════════════════
+if buySignal
+    strategy.entry("Long",  strategy.long,  qty=qtyFixed)
+
+if sellSignal
+    strategy.entry("Short", strategy.short, qty=qtyFixed)
+
+// Stop Loss (updated on every bar while in position)
+if useStopLoss
+    if strategy.position_size > 0
+        strategy.exit("SL-Long",  from_entry="Long",
+                      stop = strategy.position_avg_price * (1 - stopLossPct / 100))
+    if strategy.position_size < 0
+        strategy.exit("SL-Short", from_entry="Short",
+                      stop = strategy.position_avg_price * (1 + stopLossPct / 100))
+
+// ═══════════════════════════════════════════════════════════
+//  ◆ PLOTS
+// ═══════════════════════════════════════════════════════════
+
+// ── Reference Lines ───────────────────────────────────────
+hline(50, "Mid (50)", color=color.new(color.gray, 40), linestyle=hline.style_dashed)
+hline(70, "OB  (70)", color=color.new(color.red,  70), linestyle=hline.style_dotted)
+hline(30, "OS  (30)", color=color.new(color.lime, 70), linestyle=hline.style_dotted)
+
+// ── Histogram (QQE Line − 50) ─────────────────────────────
+histVal = fLine - 50
+histCol = fLine >= 50 ? color.new(color.teal, 50) : color.new(color.red, 50)
+plot(showHist ? histVal : na, "Histogram",
+     style=plot.style_histogram, color=histCol, linewidth=3)
+
+// ── QQE Line ──────────────────────────────────────────────
+plot(fLine, "QQE Line",
+     color=color.new(color.purple, 0), linewidth=2)
+
+// ── Fast Band (bull=green, bear=red) ─────────────────────
+fBandCol = fTrend == 1 ? color.new(color.lime, 10) : color.new(color.red, 10)
+plot(showFastBand ? fBand : na, "Fast Band",
+     color=fBandCol, linewidth=1, style=plot.style_stepline)
+
+// ── Slow Band (bull=teal, bear=orange) ───────────────────
+sBandCol = sTrend == 1 ? color.new(color.teal, 10) : color.new(color.orange, 10)
+plot(showSlowBand ? sBand : na, "Slow Band",
+     color=sBandCol, linewidth=1, style=plot.style_stepline)
+
+// ── Signal Markers ────────────────────────────────────────
+plotshape(showSignals and buySignal,  "BUY Signal",
+          shape.triangleup,   location.bottom,
+          color.new(color.lime, 0), size=size.small)
+
+plotshape(showSignals and sellSignal, "SELL Signal",
+          shape.triangledown, location.top,
+          color.new(color.red, 0), size=size.small)
+
+// ── Background Color (active trend direction) ─────────────
+bgUpColor   = showBgColor and activeTrend ==  1 ? color.new(color.teal, 90) : na
+bgDownColor = showBgColor and activeTrend == -1 ? color.new(color.red,  90) : na
+bgcolor(bgUpColor,   title="Bull BG")
+bgcolor(bgDownColor, title="Bear BG")
+
+// ── Bar Color (main chart candles) ───────────────────────
+barCol = showBarColor ? (fTrend == 1 ? color.new(color.teal, 30) : color.new(color.red, 30)) : na
+barcolor(barCol, title="Bar Color")
+
+// ═══════════════════════════════════════════════════════════
+//  ◆ ALERT CONDITIONS
+// ═══════════════════════════════════════════════════════════
+alertcondition(buySignal,
+               "🟢 Buy Signal",
+               "QQE T [L/S]: Buy signal triggered | {{ticker}} {{interval}}")
+alertcondition(sellSignal,
+               "🔴 Sell Signal",
+               "QQE T [L/S]: Sell signal triggered | {{ticker}} {{interval}}")
+alertcondition(buySignal or sellSignal,
+               "⚡ Any Signal",
+               "QQE T [L/S]: Signal triggered | {{ticker}} {{interval}}")

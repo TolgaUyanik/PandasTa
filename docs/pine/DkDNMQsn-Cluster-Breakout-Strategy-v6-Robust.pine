@@ -1,0 +1,289 @@
+//@version=6
+// =====================================================================
+//  CLUSTER BREAKOUT STRATEGY v8 — Partial Close + Breakeven SL
+// =====================================================================
+//  EXIT LOGIC (plain English)
+//  --------------------------------------------------------------------
+//  PHASE 1 — First +1% target:
+//    Close 50% of the position at +1% (locks in profit on half).
+//    Simultaneously move the stop-loss to breakeven (entry price) for
+//    the remaining 50% — so the remaining half can no longer lose money
+//    ON PAPER (see honest caveat below).
+//
+//  PHASE 2 — Remaining 50%:
+//    The remaining half trails with a new stop set at 50% below the
+//    first target level (i.e., entry + 0.5%) — so it exits with at
+//    least +0.5% profit if knocked out, rather than going back to zero.
+//    It also has a second target at +2% (2x the first target), and the
+//    hard max-hold bar cap still applies.
+//
+//  INITIAL STOP LOSS:
+//    0.5% below entry (long) / 0.5% above entry (short).
+//    This fires on the FULL position if hit before the first target.
+//
+//
+//  MAX HOLD:
+//    Hard bar cap (default 20 bars) closes everything still open.
+//    EOD flat rule also closes everything at session end.
+//
+//  BACKTEST NOTE:
+//    Pine tracks the partial close and the remaining position as
+//    separate closed trades. Total P&L is still accurate; "percent
+//    profitable" may look slightly different because each half is
+//    counted independently. Look at NET PROFIT + PROFIT FACTOR as
+//    the primary metrics.
+//
+//  Not financial advice. Always forward-test on demo before live.
+// =====================================================================
+strategy("Cluster Breakout Strategy v8 (Partial+BE)", overlay=true, initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=2, process_orders_on_close=true, slippage=2, commission_type=strategy.commission.percent, commission_value=0.02, max_lines_count=100, max_labels_count=300)
+
+// NOTE on default_qty_value=2:
+// The strategy trades 2 units by default so it can close exactly 1
+// (50%) at the first target. If you trade 1 lot, set orderSize=2.
+// If you trade a different size, always set orderSize to an EVEN
+// number so the 50% partial close works in whole units.
+
+// ── INPUTS: CLUSTER ──────────────────────────────────────────────────
+clusterLen   = input.int(10, "Cluster lookback (bars)", group="Cluster Detection")
+atrLenC      = input.int(14, "ATR length (for cluster sizing)", group="Cluster Detection")
+tightnessATR = input.float(2.0, "Cluster tightness (range <= ATR x)", group="Cluster Detection")
+requireContraction  = input.bool(true, "Require volatility to be contracting", group="Cluster Detection")
+contractionLookback = input.int(20, "Contraction comparison lookback", group="Cluster Detection")
+
+// ── INPUTS: BREAKOUT CONFIRMATION ─────────────────────────────────────
+breakBufferATR = input.float(0.1, "Breakout buffer (ATR x)", group="Breakout Confirmation")
+useStrongClose = input.bool(true, "Require strong close on breakout bar", group="Breakout Confirmation")
+strongClosePct = input.float(0.6, "Strong-close threshold (0-1)", group="Breakout Confirmation")
+useVolConfirm  = input.bool(true, "Confirm with volume (auto-off if none)", group="Breakout Confirmation")
+volMult        = input.float(1.3, "Breakout volume x average", group="Breakout Confirmation")
+volAvgLen      = input.int(20, "Volume average length", group="Breakout Confirmation")
+
+// ── INPUTS: SESSION ───────────────────────────────────────────────────
+useSession = input.bool(true, "Restrict entries to session", group="Session")
+sess = input.session("0915-1530", "Session (HHMM-HHMM)", group="Session", tooltip="NSE 0915-1530 | MCX 0900-2330 | Forex 0000-2359")
+tz   = input.string("Asia/Kolkata", "Timezone", group="Session")
+exitEod = input.bool(true, "Close open trade at session end", group="Session")
+maxTradesPerDay = input.int(3, "Max entries per day", group="Session")
+
+// ── INPUTS: EXIT ──────────────────────────────────────────────────────
+orderSize    = input.int(2, "Order size (must be even for 50% partial)", group="Exit Rules", minval=2, tooltip="Use an even number. The strategy closes exactly half at the first target.")
+slPct        = input.float(0.5, "Initial stop-loss %", group="Exit Rules", minval=0.05, tooltip="Applied to the FULL position. If hit before the first target, full loss. For Nifty/Gold this is ~0.5% which is sensible intraday.")
+tp1Pct       = input.float(1.0, "First target % (50% closed here)", group="Exit Rules", minval=0.1, tooltip="Half the position closes here. Stop on remaining half moves to breakeven.")
+tp2Mult      = input.float(2.0, "Second target multiplier (x first target)", group="Exit Rules", tooltip="Default 2.0 means second target = entry + 2%. Remaining 50% aims here.")
+beSlPct      = input.float(0.5, "Breakeven trail SL (% above entry for remaining)", group="Exit Rules", tooltip="After first target, the remaining half's stop is set to entry + this %. Default 0.5% = half of the first target, so remaining half can't close below +0.5%.")
+useMaxHold   = input.bool(true, "Use hard max-hold (bars)", group="Exit Rules")
+maxHoldBars  = input.int(20, "Max hold (bars) — closes everything", group="Exit Rules")
+
+// ── INPUTS: RISK ──────────────────────────────────────────────────────
+cooldownBars = input.int(5, "Re-entry cooldown (bars after an exit)", group="Risk")
+
+// ── INPUTS: TREND FILTER ──────────────────────────────────────────────
+useTrendFilter = input.bool(false, "Use trend filter (200 EMA + ADX)", group="Trend Filter")
+emaLen   = input.int(200, "EMA length", group="Trend Filter")
+adxLen   = input.int(14, "ADX length", group="Trend Filter")
+adxMin   = input.float(20, "Minimum ADX", group="Trend Filter")
+
+// ── CORE CALCS ────────────────────────────────────────────────────────
+atr = ta.atr(atrLenC)
+clusterHigh  = ta.highest(high, clusterLen)
+clusterLow   = ta.lowest(low, clusterLen)
+clusterRange = clusterHigh - clusterLow
+isTight      = clusterRange <= atr * tightnessATR
+contracting  = not requireContraction or (atr < atr[contractionLookback])
+isCluster    = isTight and contracting
+
+// ── VOLUME ────────────────────────────────────────────────────────────
+hasVolume = not na(volume) and volume > 0
+volOk = not useVolConfirm or not hasVolume or (volume > ta.sma(volume, volAvgLen) * volMult)
+
+// ── TREND FILTER ──────────────────────────────────────────────────────
+emaTrend = ta.ema(close, emaLen)
+upMove   = high - high[1]
+downMove = low[1] - low
+plusDM   = (upMove > downMove and upMove > 0) ? upMove : 0.0
+minusDM  = (downMove > upMove and downMove > 0) ? downMove : 0.0
+trRMA    = ta.rma(ta.tr(true), adxLen)
+plusDI   = 100 * ta.rma(plusDM, adxLen) / trRMA
+minusDI  = 100 * ta.rma(minusDM, adxLen) / trRMA
+dx       = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adxVal   = ta.rma(dx, adxLen)
+trendLongOK  = not useTrendFilter or (close > emaTrend and adxVal > adxMin)
+trendShortOK = not useTrendFilter or (close < emaTrend and adxVal > adxMin)
+
+// ── CLUSTER LINES ─────────────────────────────────────────────────────
+var float boxTop    = na
+var float boxBottom = na
+var bool  boxActive = false
+var line  topLine   = na
+var line  botLine   = na
+newCluster = isCluster and (boxTop != clusterHigh or boxBottom != clusterLow or not boxActive)
+if newCluster
+    boxTop    := clusterHigh
+    boxBottom := clusterLow
+    boxActive := true
+    line.delete(topLine)
+    line.delete(botLine)
+    topLine := line.new(bar_index - clusterLen, boxTop,    bar_index, boxTop,    extend=extend.right, color=color.new(color.red, 0), width=2)
+    botLine := line.new(bar_index - clusterLen, boxBottom, bar_index, boxBottom, extend=extend.right, color=color.new(color.red, 0), width=2)
+
+// ── SESSION + COUNTERS ────────────────────────────────────────────────
+sessionNow = not na(time(timeframe.period, sess, tz))
+inSession  = not useSession or sessionNow
+var int tradesToday = 0
+if ta.change(time("D")) != 0
+    tradesToday := 0
+var int lastExitBar = na
+inCooldown = not na(lastExitBar) and (bar_index - lastExitBar) < cooldownBars
+
+// ── STRONG-CLOSE FILTER ───────────────────────────────────────────────
+barRange = high - low
+closePos = barRange > 0 ? (close - low) / barRange : 0.5
+strongLong  = not useStrongClose or closePos >= strongClosePct
+strongShort = not useStrongClose or closePos <= (1 - strongClosePct)
+
+// ── BREAKOUT SIGNALS ──────────────────────────────────────────────────
+buffer = atr * breakBufferATR
+longBreak  = boxActive and close > boxTop + buffer and close[1] <= boxTop[1] + buffer[1]
+shortBreak = boxActive and close < boxBottom - buffer and close[1] >= boxBottom[1] - buffer[1]
+canTrade   = inSession and tradesToday < maxTradesPerDay and not inCooldown
+longSignal  = longBreak  and canTrade and trendLongOK  and volOk and strongLong
+shortSignal = shortBreak and canTrade and trendShortOK and volOk and strongShort
+
+// ── PER-TRADE STATE ───────────────────────────────────────────────────
+var float entryPrice   = na
+var float fullSL       = na   // initial stop (full position)
+var float tp1          = na   // first target (50% close)
+var float tp2          = na   // second target (remaining 50%)
+var float beSL         = na   // breakeven SL for remaining half
+var float currentSL    = na   // current active SL (shown on chart)
+var float currentTP    = na   // current active TP (shown on chart)
+var int   barsInTrade  = 0
+var bool  phase2       = false  // true after 50% has been closed
+var string pendingReason = ""
+
+halfQty = math.floor(orderSize / 2)
+
+// ── ENTRIES ───────────────────────────────────────────────────────────
+if longSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=orderSize)
+    entryPrice := close
+    barsInTrade := 0
+    phase2 := false
+    pendingReason := ""
+    fullSL  := close * (1 - slPct   / 100)
+    tp1     := close * (1 + tp1Pct  / 100)
+    tp2     := close * (1 + tp1Pct * tp2Mult / 100)
+    beSL    := close * (1 + beSlPct / 100)
+    currentSL := fullSL
+    currentTP := tp1
+    tradesToday := tradesToday + 1
+
+    label.new(bar_index, low, "▲ BUY\n" + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(fullSL, format.mintick) + "\nTP1: " + str.tostring(tp1, format.mintick), style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.large)
+    alert("BUY " + syminfo.ticker + " | Entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(fullSL, format.mintick) + " | TP1(50%) " + str.tostring(tp1, format.mintick) + " | TP2 " + str.tostring(tp2, format.mintick), alert.freq_once_per_bar_close)
+
+if shortSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=orderSize)
+    entryPrice := close
+    barsInTrade := 0
+    phase2 := false
+    pendingReason := ""
+    fullSL  := close * (1 + slPct   / 100)
+    tp1     := close * (1 - tp1Pct  / 100)
+    tp2     := close * (1 - tp1Pct * tp2Mult / 100)
+    beSL    := close * (1 - beSlPct / 100)
+    currentSL := fullSL
+    currentTP := tp1
+    tradesToday := tradesToday + 1
+
+    label.new(bar_index, high, "▼ SELL\n" + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(fullSL, format.mintick) + "\nTP1: " + str.tostring(tp1, format.mintick), style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.large)
+    alert("SELL " + syminfo.ticker + " | Entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(fullSL, format.mintick) + " | TP1(50%) " + str.tostring(tp1, format.mintick) + " | TP2 " + str.tostring(tp2, format.mintick), alert.freq_once_per_bar_close)
+
+// ── MANAGE LONG: PHASE 1 → 2 ─────────────────────────────────────────
+if strategy.position_size > 0
+    barsInTrade := barsInTrade + 1
+
+    // Detect TP1 hit (only once, before phase2 is set)
+    if not phase2 and close >= tp1
+        strategy.close("Long", qty=halfQty, comment="TP1-50%")
+        currentSL := beSL     // SL moves up to entry+beSlPct for remaining half
+        currentTP := tp2
+        phase2    := true
+        label.new(bar_index, low, "✓ TP1 50%\n+" + str.tostring(tp1Pct, "#.##") + "%\nNew SL: " + str.tostring(beSL, format.mintick), style=label.style_label_up, color=color.new(#1565c0, 0), textcolor=color.white, size=size.normal)
+        alert("TP1 HIT (50% closed) " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | New SL: " + str.tostring(beSL, format.mintick) + " | TP2: " + str.tostring(tp2, format.mintick), alert.freq_once_per_bar_close)
+
+    // Single exit order re-issued every bar with the correct SL and TP.
+    // Phase 1: SL = fullSL (0.5% below entry), TP = tp1
+    // Phase 2: SL = beSL  (entry + beSlPct),   TP = tp2
+    // This is unambiguous — no cancel/replace gap possible.
+    activeSL = phase2 ? beSL   : fullSL
+    activeTP = phase2 ? tp2    : tp1
+    strategy.exit("Long-exit", from_entry="Long", stop=activeSL, limit=activeTP)
+
+    // Max hold: close everything still open
+    if useMaxHold and barsInTrade >= maxHoldBars
+        pendingReason := "Time"
+        strategy.close("Long", comment="Time exit")
+
+// ── MANAGE SHORT: PHASE 1 → 2 ────────────────────────────────────────
+if strategy.position_size < 0
+    barsInTrade := barsInTrade + 1
+
+    if not phase2 and close <= tp1
+        strategy.close("Short", qty=halfQty, comment="TP1-50%")
+        currentSL := beSL
+        currentTP := tp2
+        phase2    := true
+        label.new(bar_index, high, "✓ TP1 50%\n+" + str.tostring(tp1Pct, "#.##") + "%\nNew SL: " + str.tostring(beSL, format.mintick), style=label.style_label_down, color=color.new(#1565c0, 0), textcolor=color.white, size=size.normal)
+        alert("TP1 HIT (50% closed) " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | New SL: " + str.tostring(beSL, format.mintick) + " | TP2: " + str.tostring(tp2, format.mintick), alert.freq_once_per_bar_close)
+
+    activeSL = phase2 ? beSL   : fullSL
+    activeTP = phase2 ? tp2    : tp1
+    strategy.exit("Short-exit", from_entry="Short", stop=activeSL, limit=activeTP)
+
+    if useMaxHold and barsInTrade >= maxHoldBars
+        pendingReason := "Time"
+        strategy.close("Short", comment="Time exit")
+
+// ── EOD FLAT ──────────────────────────────────────────────────────────
+if exitEod and not sessionNow and strategy.position_size != 0
+    pendingReason := "EOD"
+    strategy.close_all(comment="Session end flat")
+
+// ── EXIT DETECTION → LABEL ────────────────────────────────────────────
+justFlat = strategy.position_size == 0 and strategy.position_size[1] != 0
+if justFlat
+    idx  = strategy.closedtrades - 1
+    pnl  = idx >= 0 ? strategy.closedtrades.profit(idx) : na
+    win  = not na(pnl) and pnl >= 0
+    reason = pendingReason != "" ? pendingReason : (win ? "TP2 ✓" : "SL ✗")
+    lcol = win ? color.new(#00c853, 0) : color.new(#d50000, 0)
+    pnlStr = na(pnl) ? "" : "  P/L " + str.tostring(pnl, "#.##")
+    label.new(bar_index, win ? low : high, "✕ EXIT • " + reason + "\n@ " + str.tostring(close, format.mintick) + pnlStr, style=win ? label.style_label_up : label.style_label_down, color=lcol, textcolor=color.white, size=size.normal)
+    lastExitBar := bar_index
+    pendingReason := ""
+
+// ── RESET WHEN FLAT ───────────────────────────────────────────────────
+if strategy.position_size == 0
+    entryPrice  := na
+    fullSL      := na
+    tp1         := na
+    tp2         := na
+    beSL        := na
+    currentSL   := na
+    currentTP   := na
+    barsInTrade := 0
+    phase2      := false
+
+// ── ON-CHART LINES ────────────────────────────────────────────────────
+// Stop-loss line: red (solid)
+plot(strategy.position_size != 0 ? currentSL : na, "Active Stop", color=color.new(#d50000, 0), style=plot.style_linebr, linewidth=3)
+// Target line: green (solid)
+plot(strategy.position_size != 0 ? currentTP : na, "Active Target", color=color.new(#00c853, 0), style=plot.style_linebr, linewidth=3)
+// Entry line: white dotted
+plot(strategy.position_size != 0 ? entryPrice : na, "Entry price", color=color.new(color.white, 40), style=plot.style_linebr, linewidth=1)
+// Trend EMA (optional)
+plot(useTrendFilter ? emaTrend : na, "Trend EMA", color=color.new(color.gray, 40))
+
+// ── BACKGROUND SHADING ────────────────────────────────────────────────
+bgcolor(strategy.position_size > 0 ? color.new(#00c853, 90) : strategy.position_size < 0 ? color.new(#d50000, 90) : na, title="In-trade shading")
+

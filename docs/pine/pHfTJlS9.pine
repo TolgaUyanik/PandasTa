@@ -1,0 +1,600 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © N_M_
+
+//@version=6
+library("liveTracker", overlay=true)
+
+import N_M_/historicalEngine/5 as he
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📊 TYPES EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export type LiveState
+    int currentHash
+    he.StatePerformance stats
+    bool hasStats
+    bool isValid
+    bool shouldEnter
+    string entryReason
+    float confidence
+    string tier
+    bool hasChanged
+    int previousHash
+
+export type LiveTrade
+    bool isActive
+    int entryBarIndex
+    float entryPrice
+    int entryTime
+    int stateHash
+    string stateTier
+    float tp1Level
+    float tp2Level
+    float slLevel
+    float liqLevel
+    float currentPnL
+    float currentPnLDollar
+    float currentPnLIfCloseNow
+    int barsInTrade
+    string exitReason
+    float exitPrice
+    int exitBarIndex
+    float tradeAmount
+    float remainingSize
+    float realizedPnL
+    float realizedPnLDollar
+    float maxPnL
+    float minPnL
+    float maxPnLNet
+    float minPnLNet
+    bool tp1Touched
+    bool tp2Touched
+    bool partialTPTaken
+    bool earlyExitTriggered
+
+export type LiveConfig
+    bool enableLive
+    bool requireMinConfidence
+    float minConfidence
+    bool requireMinTrades
+    int minTrades
+    bool requireTier
+    array<string> allowedTiers
+    bool requireMinWinRate
+    float minWinRate
+    bool requireMinExpectancy
+    float minExpectancy
+    bool enableMultiTrade
+    int maxSimultaneousTrades
+    bool closeOnStateChange
+    bool enablePartialTP
+    float partialTP1Percent
+    bool moveToBreakeven
+    bool enableTrailingStop
+    float trailingActivationATR
+    float trailingOffsetATR
+
+export type LiveSession
+    LiveState currentState
+    array<LiveTrade> activeTrades
+    array<LiveTrade> closedTrades
+    int totalSignals
+    int entrySignals
+    int exitSignals
+    float sessionPnL
+    float sessionPnLDollar
+    int totalWins
+    int totalLosses
+    float maxSessionPnL
+    float minSessionPnL
+    int lastUpdateBar
+    float currentCapital
+    bool isFirstBar
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🧮 HELPERS PRIVÉS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_calculateLiveTradeAmount(float currentCapital, float positionSizePercent) =>
+    currentCapital * (positionSizePercent / 100)
+
+f_calculateLivePnLDollar(float tradeAmount, float pnlPercent) =>
+    tradeAmount * (pnlPercent / 100)
+
+f_inArrayStr(array<string> arr, string v) =>
+    bool ok = false
+    for i = 0 to array.size(arr) - 1
+        if array.get(arr, i) == v
+            ok := true
+            break
+    ok
+
+f_calculateTrailingStop(LiveTrade trade, float currentPrice, float atr, LiveConfig liveConfig) =>
+    float newSL = trade.slLevel
+    if liveConfig.enableTrailingStop
+        float activationLevel = trade.entryPrice + (atr * liveConfig.trailingActivationATR)
+        if currentPrice >= activationLevel
+            float trailingLevel = currentPrice - (atr * liveConfig.trailingOffsetATR)
+            if trailingLevel > trade.slLevel
+                newSL := trailingLevel
+    newSL
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1️⃣ DÉTECTION DU STATE ACTUEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export getCurrentState(he.BarSnapshot currentBar, int previousHash, he.BacktestResult backtestResult, LiveConfig config) =>
+    LiveState state = LiveState.new()
+    state.currentHash := currentBar.stateHash
+    state.previousHash := previousHash
+    state.hasChanged := currentBar.stateHash != previousHash
+    state.stats := he.StatePerformance.new()
+    state.hasStats := false
+    state.isValid := false
+    state.shouldEnter := false
+    state.entryReason := "No states"
+    state.confidence := 0.0
+    state.tier := "UNKNOWN"
+    
+    if na(backtestResult) or array.size(backtestResult.allStates) == 0
+        state
+    else
+        int foundIdx = he.findStateByHash(backtestResult.allStates, currentBar.stateHash)
+        if foundIdx >= 0 and foundIdx < array.size(backtestResult.allStates)
+            he.StatePerformance sr = array.get(backtestResult.allStates, foundIdx)
+            state.stats := sr
+            state.hasStats := true
+            state.isValid := true
+            state.confidence := sr.confidenceScore
+            state.tier := sr.tier
+            
+            bool passAll = true
+            string reason = ""
+            
+            if config.requireMinConfidence and sr.confidenceScore < config.minConfidence
+                passAll := false
+                reason += "Low confidence | "
+            
+            if config.requireMinTrades and sr.tradeCount < config.minTrades
+                passAll := false
+                reason += "Not enough trades | "
+            
+            if config.requireTier and not f_inArrayStr(config.allowedTiers, sr.tier)
+                passAll := false
+                reason += "Tier not allowed | "
+            
+            if config.requireMinWinRate and sr.winRate < config.minWinRate
+                passAll := false
+                reason += "Low WinRate | "
+            
+            if config.requireMinExpectancy and sr.expectancy < config.minExpectancy
+                passAll := false
+                reason += "Low Expectancy | "
+            
+            state.shouldEnter := passAll
+            state.entryReason := passAll ? "VALID" : "REJECTED: " + reason
+        state
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2️⃣ OUVERTURE D'UN TRADE (SANS liveConfig)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export openTrade(he.BarSnapshot currentBar, float entryPrice, he.BacktestConfig btConfig, LiveState currentState, float currentCapital) =>
+    LiveTrade trade = LiveTrade.new()
+    trade.isActive := true
+    trade.entryBarIndex := currentBar.barIndex
+    trade.entryPrice := entryPrice
+    trade.entryTime := currentBar.barTime
+    trade.stateHash := currentBar.stateHash
+    trade.stateTier := currentState.tier
+    
+    float atr = currentBar.atr
+    trade.tp1Level := btConfig.useTP1 ? entryPrice + (atr * btConfig.tp1ATR) : 0.0
+    trade.tp2Level := btConfig.useTP2 ? entryPrice + (atr * btConfig.tp2ATR) : 0.0
+    
+    float baseSL = btConfig.useFixedSLPercent ? entryPrice * (1 - btConfig.fixedSLPercent / 100) : currentBar.lowPrice * (1 - btConfig.slBuffer / 100)
+    trade.slLevel := baseSL
+    
+    float liqDistPct = math.max((100.0 / btConfig.leverage) - btConfig.liquidationBuffer, 0.05)
+    trade.liqLevel := entryPrice * (1 - liqDistPct / 100)
+    
+    trade.currentPnL := 0.0
+    trade.currentPnLDollar := 0.0
+    trade.barsInTrade := 0
+    trade.exitReason := ""
+    trade.exitPrice := 0.0
+    trade.exitBarIndex := 0
+    trade.tp1Touched := false
+    trade.tp2Touched := false
+    trade.partialTPTaken := false
+    trade.earlyExitTriggered := false
+    trade.remainingSize := 1.0
+    
+    float entryFees = (btConfig.takerFee + btConfig.slippage) * btConfig.leverage
+    trade.realizedPnL := -entryFees
+    trade.tradeAmount := f_calculateLiveTradeAmount(currentCapital, btConfig.positionSizePercent)
+    trade.realizedPnLDollar := f_calculateLivePnLDollar(trade.tradeAmount, trade.realizedPnL)
+    
+    float exitFees = (btConfig.takerFee + btConfig.slippage) * btConfig.leverage
+    float initialPnLIfCloseNow = trade.realizedPnL - exitFees
+    trade.maxPnL := trade.realizedPnL
+    trade.minPnL := trade.realizedPnL
+    trade.maxPnLNet := initialPnLIfCloseNow
+    trade.minPnLNet := initialPnLIfCloseNow
+    trade.currentPnLIfCloseNow := initialPnLIfCloseNow
+    trade
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3️⃣ UPDATE TRADE ACTIF
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export updateTrade(LiveTrade trade, float currentPrice, float currentHigh, float currentLow, float currentATR, he.BacktestConfig btConfig, LiveConfig liveConfig, int currentBarIndex, bool forceClose = false, string forceCloseReason = "") =>
+    if not trade.isActive
+        trade
+    else
+        trade.barsInTrade += 1
+        float exitFees = (btConfig.takerFee + btConfig.slippage) * btConfig.leverage
+        float rawPnL = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100 * btConfig.leverage
+        float unrealizedPnL = rawPnL * trade.remainingSize
+        
+        trade.currentPnL := trade.realizedPnL + unrealizedPnL
+        trade.currentPnLDollar := f_calculateLivePnLDollar(trade.tradeAmount, trade.currentPnL)
+        
+        if trade.currentPnL > trade.maxPnL
+            trade.maxPnL := trade.currentPnL
+        if trade.currentPnL < trade.minPnL
+            trade.minPnL := trade.currentPnL
+        
+        if liveConfig.enablePartialTP and btConfig.useTP1 and currentHigh >= trade.tp1Level and not trade.partialTPTaken
+            trade.tp1Touched := true
+            float tp1RawPnL = ((trade.tp1Level - trade.entryPrice) / trade.entryPrice) * 100 * btConfig.leverage
+            float closePct = math.min(math.max(liveConfig.partialTP1Percent, 0), 100) / 100
+            float tp1NetPnL = (tp1RawPnL * closePct) - (exitFees * closePct)
+            trade.realizedPnL += tp1NetPnL
+            trade.realizedPnLDollar := f_calculateLivePnLDollar(trade.tradeAmount, trade.realizedPnL)
+            trade.remainingSize := 1.0 - closePct
+            trade.partialTPTaken := true
+            
+            if trade.remainingSize <= 0
+                trade.remainingSize := 0.0
+                trade.isActive := false
+                trade.exitReason := "PARTIAL TP1 (100%)"
+                trade.exitPrice := trade.tp1Level
+                trade.exitBarIndex := currentBarIndex
+        
+        if btConfig.useTP2 and currentHigh >= trade.tp2Level and not trade.tp2Touched
+            trade.tp2Touched := true
+        
+        if liveConfig.enableTrailingStop
+            float newSL = f_calculateTrailingStop(trade, currentPrice, currentATR, liveConfig)
+            if newSL > trade.slLevel
+                trade.slLevel := newSL
+        
+        if liveConfig.moveToBreakeven and trade.tp1Touched and trade.slLevel < trade.entryPrice
+            trade.slLevel := trade.entryPrice * 0.999
+        
+        trade.currentPnLIfCloseNow := trade.realizedPnL + unrealizedPnL - (exitFees * trade.remainingSize)
+        
+        if trade.currentPnLIfCloseNow > trade.maxPnLNet
+            trade.maxPnLNet := trade.currentPnLIfCloseNow
+        if trade.currentPnLIfCloseNow < trade.minPnLNet
+            trade.minPnLNet := trade.currentPnLIfCloseNow
+        
+        bool shouldExit = false
+        string exitReason = ""
+        float exitPnL = trade.currentPnL
+        float exitPrice = currentPrice
+        
+        if forceClose
+            shouldExit := true
+            exitReason := forceCloseReason
+            exitPnL := trade.currentPnLIfCloseNow
+        else if currentLow <= trade.liqLevel
+            shouldExit := true
+            exitReason := "LIQUIDATION"
+            exitPrice := trade.liqLevel
+            exitPnL := trade.realizedPnL + (-100.0 * trade.remainingSize)
+        else if currentLow <= trade.slLevel
+            shouldExit := true
+            exitReason := trade.slLevel >= trade.entryPrice * 0.999 ? "BREAKEVEN" : "STOP LOSS"
+            exitPrice := trade.slLevel
+            float slRawPnL = ((trade.slLevel - trade.entryPrice) / trade.entryPrice) * 100 * btConfig.leverage
+            exitPnL := trade.realizedPnL + (slRawPnL * trade.remainingSize) - (exitFees * trade.remainingSize)
+        else if btConfig.enableEarlyExit and trade.barsInTrade >= btConfig.earlyExitBars and trade.currentPnLIfCloseNow < btConfig.earlyExitThreshold
+            shouldExit := true
+            exitReason := "EARLY EXIT"
+            exitPnL := trade.currentPnLIfCloseNow
+            trade.earlyExitTriggered := true
+        else if btConfig.useTP2 and currentHigh >= trade.tp2Level
+            shouldExit := true
+            exitReason := "TAKE PROFIT 2"
+            exitPrice := trade.tp2Level
+            float tp2RawPnL = ((trade.tp2Level - trade.entryPrice) / trade.entryPrice) * 100 * btConfig.leverage
+            exitPnL := trade.realizedPnL + (tp2RawPnL * trade.remainingSize) - (exitFees * trade.remainingSize)
+        else if btConfig.useTP1 and currentHigh >= trade.tp1Level and not liveConfig.enablePartialTP
+            shouldExit := true
+            exitReason := "TAKE PROFIT 1"
+            exitPrice := trade.tp1Level
+            float tp1RawPnL = ((trade.tp1Level - trade.entryPrice) / trade.entryPrice) * 100 * btConfig.leverage
+            exitPnL := trade.realizedPnL + tp1RawPnL - exitFees
+        else if trade.barsInTrade >= btConfig.maxBarsInTrade
+            shouldExit := true
+            exitReason := "TIMEOUT"
+            exitPnL := trade.currentPnLIfCloseNow
+        
+        if shouldExit
+            trade.isActive := false
+            trade.exitReason := exitReason
+            trade.exitPrice := exitPrice
+            trade.exitBarIndex := currentBarIndex
+            trade.currentPnL := exitPnL
+            trade.currentPnLDollar := f_calculateLivePnLDollar(trade.tradeAmount, exitPnL)
+            trade.remainingSize := 0.0
+        
+        trade
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4️⃣ INITIALISATION SESSION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export initSession(float initialCapital) =>
+    LiveSession liveSession = LiveSession.new()
+    liveSession.currentState := LiveState.new()
+    liveSession.currentState.stats := he.StatePerformance.new()
+    liveSession.currentState.hasStats := false
+    liveSession.currentState.isValid := false
+    liveSession.currentState.shouldEnter := false
+    liveSession.currentState.entryReason := "Not initialized"
+    liveSession.currentState.confidence := 0.0
+    liveSession.currentState.tier := "UNKNOWN"
+    liveSession.activeTrades := array.new<LiveTrade>()
+    liveSession.closedTrades := array.new<LiveTrade>()
+    liveSession.totalSignals := 0
+    liveSession.entrySignals := 0
+    liveSession.exitSignals := 0
+    liveSession.sessionPnL := 0.0
+    liveSession.sessionPnLDollar := 0.0
+    liveSession.totalWins := 0
+    liveSession.totalLosses := 0
+    liveSession.maxSessionPnL := 0.0
+    liveSession.minSessionPnL := 0.0
+    liveSession.lastUpdateBar := 0
+    liveSession.currentCapital := initialCapital
+    liveSession.isFirstBar := true
+    liveSession
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5️⃣ UPDATE SESSION (APPEL CORRIGÉ)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export updateSession(LiveSession liveSession, he.BarSnapshot currentBar, float currentPrice, float currentHigh, float currentLow, he.BacktestResult backtestResult, he.BacktestConfig btConfig, LiveConfig liveConfig) =>
+    if na(liveSession) or na(backtestResult) or array.size(backtestResult.allStates) == 0
+        liveSession
+    else
+        int previousHash = liveSession.isFirstBar ? 0 : liveSession.currentState.currentHash
+        liveSession.currentState := getCurrentState(currentBar, previousHash, backtestResult, liveConfig)
+        
+        array<int> tradesToRemove = array.new<int>()
+        
+        if array.size(liveSession.activeTrades) > 0
+            for i = 0 to array.size(liveSession.activeTrades) - 1
+                LiveTrade trade = array.get(liveSession.activeTrades, i)
+                bool forceClose = liveConfig.closeOnStateChange and liveSession.currentState.hasChanged
+                string forceReason = forceClose ? "STATE CHANGE" : ""
+                
+                LiveTrade updatedTrade = updateTrade(trade, currentPrice, currentHigh, currentLow, currentBar.atr, btConfig, liveConfig, currentBar.barIndex, forceClose, forceReason)
+                array.set(liveSession.activeTrades, i, updatedTrade)
+                
+                if not updatedTrade.isActive
+                    liveSession.exitSignals += 1
+                    liveSession.sessionPnL += updatedTrade.currentPnL
+                    liveSession.sessionPnLDollar += updatedTrade.currentPnLDollar
+                    if btConfig.compoundMode
+                        liveSession.currentCapital += updatedTrade.currentPnLDollar
+                    if updatedTrade.currentPnL > 0
+                        liveSession.totalWins += 1
+                    else
+                        liveSession.totalLosses += 1
+                    array.push(liveSession.closedTrades, updatedTrade)
+                    array.push(tradesToRemove, i)
+        
+        if array.size(tradesToRemove) > 0
+            for i = array.size(tradesToRemove) - 1 to 0 by -1
+                int idx = array.get(tradesToRemove, i)
+                if idx >= 0 and idx < array.size(liveSession.activeTrades)
+                    array.remove(liveSession.activeTrades, idx)
+        
+        if liveSession.sessionPnL > liveSession.maxSessionPnL
+            liveSession.maxSessionPnL := liveSession.sessionPnL
+        if liveSession.sessionPnL < liveSession.minSessionPnL
+            liveSession.minSessionPnL := liveSession.sessionPnL
+        
+        bool shouldGenerateSignal = false
+        if liveConfig.enableLive and liveSession.currentState.isValid and liveSession.currentState.shouldEnter and liveSession.currentState.hasChanged
+            int activeCount = 0
+            if array.size(liveSession.activeTrades) > 0
+                for i = 0 to array.size(liveSession.activeTrades) - 1
+                    LiveTrade t = array.get(liveSession.activeTrades, i)
+                    if t.isActive
+                        activeCount += 1
+            
+            bool canOpen = liveConfig.enableMultiTrade ? (activeCount < liveConfig.maxSimultaneousTrades) : (activeCount == 0)
+            if canOpen
+                shouldGenerateSignal := true
+        
+        if shouldGenerateSignal
+            float currentCapital = btConfig.compoundMode ? liveSession.currentCapital : btConfig.initialCapital
+            LiveTrade newTrade = openTrade(currentBar, currentPrice, btConfig, liveSession.currentState, currentCapital)
+            array.push(liveSession.activeTrades, newTrade)
+            liveSession.entrySignals += 1
+            liveSession.totalSignals += 1
+        
+        liveSession.lastUpdateBar := currentBar.barIndex
+        liveSession.isFirstBar := false
+        liveSession
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔍 HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export getActiveTradeCount(LiveSession liveSession) =>
+    int count = 0
+    if not na(liveSession) and array.size(liveSession.activeTrades) > 0
+        for i = 0 to array.size(liveSession.activeTrades) - 1
+            LiveTrade t = array.get(liveSession.activeTrades, i)
+            if t.isActive
+                count += 1
+    count
+
+export getTotalActivePnL(LiveSession liveSession) =>
+    float totalPnL = 0.0
+    if not na(liveSession) and array.size(liveSession.activeTrades) > 0
+        for i = 0 to array.size(liveSession.activeTrades) - 1
+            LiveTrade t = array.get(liveSession.activeTrades, i)
+            if t.isActive
+                totalPnL += t.currentPnL
+    totalPnL
+
+export getTotalActivePnLDollar(LiveSession liveSession) =>
+    float totalPnL = 0.0
+    if not na(liveSession) and array.size(liveSession.activeTrades) > 0
+        for i = 0 to array.size(liveSession.activeTrades) - 1
+            LiveTrade t = array.get(liveSession.activeTrades, i)
+            if t.isActive
+                totalPnL += t.currentPnLDollar
+    totalPnL
+
+export getSessionWinRate(LiveSession liveSession) =>
+    int totalTrades = liveSession.totalWins + liveSession.totalLosses
+    totalTrades > 0 ? (liveSession.totalWins * 100.0) / totalTrades : 0.0
+
+export getFirstActiveTrade(LiveSession liveSession) =>
+    LiveTrade firstTrade = na
+    if not na(liveSession) and array.size(liveSession.activeTrades) > 0
+        for i = 0 to array.size(liveSession.activeTrades) - 1
+            LiveTrade t = array.get(liveSession.activeTrades, i)
+            if t.isActive
+                firstTrade := t
+                break
+    firstTrade
+
+export shouldShowEntrySignal(LiveSession liveSession, int currentBarIndex) =>
+    bool show = false
+    if not na(liveSession)
+        if array.size(liveSession.activeTrades) > 0
+            for i = 0 to array.size(liveSession.activeTrades) - 1
+                LiveTrade t = array.get(liveSession.activeTrades, i)
+                if t.entryBarIndex == currentBarIndex
+                    show := true
+                    break
+        if not show and array.size(liveSession.closedTrades) > 0
+            for i = 0 to array.size(liveSession.closedTrades) - 1
+                LiveTrade t = array.get(liveSession.closedTrades, i)
+                if t.entryBarIndex == currentBarIndex
+                    show := true
+                    break
+    show
+
+export shouldShowExitSignal(LiveSession liveSession, int currentBarIndex) =>
+    bool show = false
+    string reason = ""
+    if not na(liveSession) and array.size(liveSession.closedTrades) > 0
+        for i = 0 to array.size(liveSession.closedTrades) - 1
+            LiveTrade t = array.get(liveSession.closedTrades, i)
+            if t.exitBarIndex == currentBarIndex
+                show := true
+                reason := t.exitReason
+                break
+    [show, reason]
+
+export getRemainingNotional(LiveTrade trade) =>
+    trade.tradeAmount * trade.remainingSize
+
+export getTotalRemainingNotional(LiveSession liveSession) =>
+    float total = 0.0
+    if not na(liveSession) and array.size(liveSession.activeTrades) > 0
+        for i = 0 to array.size(liveSession.activeTrades) - 1
+            LiveTrade t = array.get(liveSession.activeTrades, i)
+            if t.isActive
+                total += getRemainingNotional(t)
+    total
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔍 DEBUG - SIMPLE ET EFFICACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export showDebugTable(LiveSession liveSession, int totalStates, LiveConfig liveConfig) =>
+    if barstate.islast and not na(liveSession)
+        var table debugTable = table.new(position.middle_right, 2, 20, bgcolor=color.new(color.black, 90), border_width=2, frame_color=color.new(color.orange, 0), frame_width=2)
+        
+        // HEADER
+        table.cell(debugTable, 0, 0, "🔍 LIVE TRACKER DEBUG", text_color=color.white, bgcolor=color.new(color.orange, 0), text_size=size.normal)
+        table.merge_cells(debugTable, 0, 0, 1, 0)
+        
+        // SYSTEM
+        table.cell(debugTable, 0, 1, "🔧 SYSTEM", text_color=color.yellow, bgcolor=color.new(color.blue, 70), text_size=size.small)
+        table.merge_cells(debugTable, 0, 1, 1, 1)
+        
+        table.cell(debugTable, 0, 2, "LiveSession", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 2, "✅ OK", text_color=color.lime, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 3, "States Available", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 3, str.tostring(totalStates), text_color=totalStates > 0 ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 4, "First Bar", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 4, liveSession.isFirstBar ? "✅ YES" : "❌ NO", text_color=liveSession.isFirstBar ? color.orange : color.gray, text_size=size.tiny)
+        
+        // LIVE CONFIG
+        table.cell(debugTable, 0, 5, "⚙️ CONFIG", text_color=color.yellow, bgcolor=color.new(color.purple, 70), text_size=size.small)
+        table.merge_cells(debugTable, 0, 5, 1, 5)
+        
+        table.cell(debugTable, 0, 6, "Live Enabled", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 6, liveConfig.enableLive ? "✅ YES" : "❌ NO", text_color=liveConfig.enableLive ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 7, "Min Confidence", text_color=color.gray, text_size=size.tiny)
+        string confStr = liveConfig.requireMinConfidence ? str.tostring(liveConfig.minConfidence, "#") + "%" : "OFF"
+        table.cell(debugTable, 1, 7, confStr, text_color=color.white, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 8, "Min Trades", text_color=color.gray, text_size=size.tiny)
+        string tradesStr = liveConfig.requireMinTrades ? str.tostring(liveConfig.minTrades) : "OFF"
+        table.cell(debugTable, 1, 8, tradesStr, text_color=color.white, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 9, "Multi-Trade", text_color=color.gray, text_size=size.tiny)
+        string multiStr = liveConfig.enableMultiTrade ? "✅ Max:" + str.tostring(liveConfig.maxSimultaneousTrades) : "❌"
+        table.cell(debugTable, 1, 9, multiStr, text_color=liveConfig.enableMultiTrade ? color.lime : color.red, text_size=size.tiny)
+        
+        // CURRENT STATE
+        table.cell(debugTable, 0, 10, "🎯 STATE", text_color=color.yellow, bgcolor=color.new(color.teal, 70), text_size=size.small)
+        table.merge_cells(debugTable, 0, 10, 1, 10)
+        
+        table.cell(debugTable, 0, 11, "Hash", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 11, str.tostring(liveSession.currentState.currentHash), text_color=color.white, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 12, "Valid", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 12, liveSession.currentState.isValid ? "✅ YES" : "❌ NO", text_color=liveSession.currentState.isValid ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 13, "Should Enter", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 13, liveSession.currentState.shouldEnter ? "✅ YES" : "❌ NO", text_color=liveSession.currentState.shouldEnter ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 14, "Tier", text_color=color.gray, text_size=size.tiny)
+        color tierColor = liveSession.currentState.tier == "S" ? color.yellow : liveSession.currentState.tier == "A" ? color.lime : liveSession.currentState.tier == "B" ? color.orange : color.gray
+        table.cell(debugTable, 1, 14, liveSession.currentState.tier, text_color=tierColor, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 15, "Confidence", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 15, str.tostring(liveSession.currentState.confidence, "#") + "%", text_color=color.white, text_size=size.tiny)
+        
+        // SESSION STATS
+        table.cell(debugTable, 0, 16, "📈 STATS", text_color=color.yellow, bgcolor=color.new(color.green, 70), text_size=size.small)
+        table.merge_cells(debugTable, 0, 16, 1, 16)
+        
+        int activeCount = getActiveTradeCount(liveSession)
+        table.cell(debugTable, 0, 17, "Active Trades", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 17, str.tostring(activeCount), text_color=activeCount > 0 ? color.lime : color.gray, text_size=size.tiny)
+        
+        table.cell(debugTable, 0, 18, "Total Signals", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 18, str.tostring(liveSession.totalSignals), text_color=color.white, text_size=size.tiny)
+        
+        float wr = getSessionWinRate(liveSession)
+        table.cell(debugTable, 0, 19, "Session WR", text_color=color.gray, text_size=size.tiny)
+        table.cell(debugTable, 1, 19, str.tostring(wr, "#.#") + "%", text_color=wr >= 50 ? color.lime : color.red, text_size=size.tiny)

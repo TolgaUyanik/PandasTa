@@ -1,0 +1,557 @@
+//@version=6
+library("MirPapa_Lib_Box", overlay = false)
+import goodia/Mirpapa_Lib_HTF/1 as htf
+
+////////////////////////////////////////////////////////////////////////////////
+// 구조체 정의
+////////////////////////////////////////////////////////////////////////////////
+
+// @type BoxType
+// @field 박스 타입 상수
+export type BoxType
+    string FOB = "fob"
+    string FVG = "fvg"
+    string IFVG = "ifvg"
+    string SOB = "sob"
+    string RB = "rb"
+    string BB = "bb"
+    string MB = "mb"
+    string SWEEP = "sweep"
+    string CUSTOM = "custom"
+
+// @type BreachMode
+// @field 돌파 처리 방식 상수
+export type BreachMode
+    string BOTH_HIGH_LOW = "bothHighLow"
+    string BOTH_CLOSE = "bothClose"
+    string DIRECTIONAL_HIGH_LOW = "directionalHighLow"
+    string DIRECTIONAL_CLOSE = "directionalClose"
+    string NEAR_HIGH = "nearHigh"
+    string NEAR_CLOSE = "nearClose"
+    string NEAR_LOW = "nearLow"
+    string FAR_HIGH = "farHigh"
+    string FAR_CLOSE = "farClose"
+    string FAR_LOW = "farLow"
+
+// @type BoxState
+// @field 박스 상태 상수
+export type BoxState
+    string PENDING = "pending"
+    string START = "start"
+    string END = "end"
+    string EXTENSION = "extension"
+
+// 구조체 인스턴스 생성
+var BoxType _boxType = BoxType.new()
+var BreachMode _breachMode = BreachMode.new()
+var BoxState _boxState = BoxState.new()
+
+// @type BoxData
+// @field _type 박스 타입
+// @field _breachModeStart 시작 돌파 처리 방식
+// @field _breachModeEnd 종료 돌파 처리 방식
+// @field _boxState 박스 상태
+// @field _isBull 상승(true) 또는 하락(false) 방향
+export type BoxData
+    string _type
+    string _breachModeStart
+    string _breachModeEnd
+    string _boxState
+    bool   _isBull
+    box    _box
+    line   _line
+    float  _boxTop
+    float  _boxBot
+    float  _boxMid
+    bool   _topBreached
+    bool   _bottomBreached
+    int    _breakCount
+
+export type HTFCache
+    string _timeframe
+    int _lastBarIndex
+    bool _isNewBar
+    int _barIndex
+    float _open
+    float _high
+    float _low
+    float _close
+    float _open1
+    float _close1
+    float _high1
+    float _low1
+    float _open2
+    float _close2
+    float _high2
+    float _low2
+    float _high3
+    float _low3
+    int _time1
+    int _time2
+
+////////////////////////////////////////////////////////////////////////////////
+// 내부 함수 (Private)
+////////////////////////////////////////////////////////////////////////////////
+
+// 조건 체크 내부 함수
+isConditionFOB(bool _isBull, float _pricePrev, float _priceNow) =>
+    _isBull ? _priceNow > _pricePrev : _pricePrev > _priceNow
+
+isConditionFVG(bool _isBull, float _pricePrev, float _priceNow) =>
+    _isBull ? _priceNow > _pricePrev : _pricePrev > _priceNow
+
+isConditionSweep(float _high2, float _high1, float _high0, float _low2, float _low1, float _low0) =>
+    _swingHigh = _high2 < _high1 and _high1 > _high0
+    _swingLow = _low2 > _low1 and _low1 < _low0
+    _swingHigh and _swingLow
+
+isConditionRB(bool _isBull, float _open1, float _close1, float _high1, float _low1, float _open0, float _close0, float _low2, float _low3, float _high2, float _high3) =>
+    if _isBull
+        // 상승 RB: candle1=음봉 and candle0=양봉 and low3>low1 and low2>low1 and close1*1.001>open0 and open1<close0
+        _candle1Bear = _close1 < _open1
+        _candle0Bull = _close0 > _open0
+        _lowFilter = _low3 > _low1 and _low2 > _low1
+        _priceCondition = _close1 * 1.001 > _open0 and _open1 < _close0
+        _candle1Bear and _candle0Bull and _lowFilter and _priceCondition
+    else
+        // 하락 RB: candle1=양봉 and candle0=음봉 and high3<high1 and high2<high1 and close1*0.999<open0 and open1>close0
+        _candle1Bull = _close1 > _open1
+        _candle0Bear = _close0 < _open0
+        _highFilter = _high3 < _high1 and _high2 < _high1
+        _priceCondition = _close1 * 0.999 < _open0 and _open1 > _close0
+        _candle1Bull and _candle0Bear and _highFilter and _priceCondition
+
+isConditionSOB(bool _isBull, float _open2, float _close1, float _open1, float _close0) =>
+    if _isBull
+        // 상승 SOB: 양봉2 => 음봉1 => 양봉0
+        // open2 > close1 (양봉2 open이 음봉1 close보다 높다)
+        // open1 < close0 (음봉1 open이 양봉0 close보다 낮다)
+        _open2 > _close1 and _open1 < _close0
+    else
+        // 하락 SOB: 음봉2 => 양봉1 => 음봉0
+        // open2 < close1 (음봉2 open이 양봉1 close보다 낮다)
+        // open1 > close0 (양봉1 open이 음봉0 close보다 높다)
+        _open2 < _close1 and _open1 > _close0
+
+// 박스 생성 내부 함수
+createBoxInternal(string _type, string _breachModeStart, string _breachModeEnd, string _boxState, bool _isBull, bool _useLine, float _top, float _bot, int _left, int _right, string _xloc, color _colorBG, color _colorBD, color _colorText, string _text) =>
+    if na(_top) or na(_bot)
+        [false, na]
+    else
+        _box = box.new(_left, _top, _right, _bot, xloc = _xloc, border_color = _colorBD, bgcolor = _colorBG, text = _text, text_color = _colorText, text_halign = text.align_right)
+        _line = _useLine ? line.new(_left, (_top + _bot) * 0.5, _right, (_top + _bot) * 0.5, xloc = _xloc, color = _colorBD, width = 1) : na
+        _boxMid = (_top + _bot) * 0.5
+        _data = BoxData.new(_type, _breachModeStart, _breachModeEnd, _boxState, _isBull, _box, _line, _top, _bot, _boxMid, false, false, 0)
+        [true, _data]
+
+// 박스 데이터 계산 내부 함수 (offset 0 - 현재 봉)
+calculateBoxData0(string _tf) =>
+    _isCurrentTF = _tf == timeframe.period
+    if _isCurrentTF
+        [time, time, high, low, bar_index]
+    else
+        [int(request.security(syminfo.tickerid, _tf, time)), time, request.security(syminfo.tickerid, _tf, high), request.security(syminfo.tickerid, _tf, low), int(htf.GetHTFrevised(_tf))]
+
+// 박스 데이터 계산 내부 함수 (offset 1)
+calculateBoxData1(string _tf) =>
+    _isCurrentTF = _tf == timeframe.period
+    if _isCurrentTF
+        [time[1], time, high[1], low[1], bar_index]
+    else
+        [int(request.security(syminfo.tickerid, _tf, time[1])), time, request.security(syminfo.tickerid, _tf, high[1]), request.security(syminfo.tickerid, _tf, low[1]), int(htf.GetHTFrevised(_tf))]
+
+// 박스 데이터 계산 내부 함수 (offset 2)
+calculateBoxData2(string _tf) =>
+    _isCurrentTF = _tf == timeframe.period
+    if _isCurrentTF
+        [time[2], time, high[2], low[2], bar_index]
+    else
+        [int(request.security(syminfo.tickerid, _tf, time[2])), time, request.security(syminfo.tickerid, _tf, high[2]), request.security(syminfo.tickerid, _tf, low[2]), int(htf.GetHTFrevised(_tf))]
+
+// 박스 데이터 계산 내부 함수 (offset 3)
+calculateBoxData3(string _tf) =>
+    _isCurrentTF = _tf == timeframe.period
+    if _isCurrentTF
+        [time[3], time, high[3], low[3], bar_index]
+    else
+        [int(request.security(syminfo.tickerid, _tf, time[3])), time, request.security(syminfo.tickerid, _tf, high[3]), request.security(syminfo.tickerid, _tf, low[3]), int(htf.GetHTFrevised(_tf))]
+
+// 돌파 체크 내부 함수
+updateBoxBreak(BoxData _data, string _breachMode, float _currentHigh, float _currentLow, float _currentClose, int _maxBreakCount) =>
+    _newTopBreached = _data._topBreached or (_currentHigh > _data._boxTop)
+    _newBottomBreached = _data._bottomBreached or (_currentLow < _data._boxBot)
+    
+    var BreachMode bm = BreachMode.new()
+    _mode = str.lower(_breachMode)
+    
+    if _mode == str.lower(bm.DIRECTIONAL_HIGH_LOW)
+        // 방향성 돌파 (High/Low): Bull=top→bottom, Bear=bottom→top
+        if _data._isBull
+            if _currentHigh > _data._boxTop
+                _data._topBreached := true
+            if _data._topBreached and _currentLow < _data._boxBot
+                _data._breakCount := _data._breakCount + 1
+                _data._topBreached := false
+                _data._bottomBreached := false
+        else
+            if _currentLow < _data._boxBot
+                _data._bottomBreached := true
+            if _data._bottomBreached and _currentHigh > _data._boxTop
+                _data._breakCount := _data._breakCount + 1
+                _data._topBreached := false
+                _data._bottomBreached := false
+    else if _mode == str.lower(bm.DIRECTIONAL_CLOSE)
+        // 방향성 돌파 (Close): Bull=top→bottom, Bear=bottom→top
+        if _data._isBull
+            if _currentClose > _data._boxTop
+                _data._topBreached := true
+            if _data._topBreached and _currentClose < _data._boxBot
+                _data._breakCount := _data._breakCount + 1
+                _data._topBreached := false
+                _data._bottomBreached := false
+        else
+            if _currentClose < _data._boxBot
+                _data._bottomBreached := true
+            if _data._bottomBreached and _currentClose > _data._boxTop
+                _data._breakCount := _data._breakCount + 1
+                _data._topBreached := false
+                _data._bottomBreached := false
+    else if _mode == str.lower(bm.FAR_CLOSE)
+        // FAR_CLOSE: 먼 쪽 종가 돌파 (Bull=bottom, Bear=top)
+        if _data._isBull
+            if _currentClose < _data._boxBot
+                _data._breakCount := _data._breakCount + 1
+        else
+            if _currentClose > _data._boxTop
+                _data._breakCount := _data._breakCount + 1
+    else if _mode == str.lower(bm.NEAR_CLOSE)
+        // NEAR_CLOSE: 가까운 쪽 종가 돌파 (Bull=top 진입, Bear=bottom 진입)
+        if _data._isBull
+            if _currentClose > _data._boxBot and _currentClose <= _data._boxTop
+                _data._breakCount := _data._breakCount + 1
+        else
+            if _currentClose < _data._boxTop and _currentClose >= _data._boxBot
+                _data._breakCount := _data._breakCount + 1
+
+    else if _mode == str.lower(bm.BOTH_HIGH_LOW)
+        // BOTH_HIGH_LOW: 양쪽 모두 돌파 (순서 무관)
+        if _newTopBreached and _newBottomBreached and not (_data._topBreached and _data._bottomBreached)
+            _data._breakCount := _data._breakCount + 1
+            _data._topBreached := false
+            _data._bottomBreached := false
+        else
+            _data._topBreached := _newTopBreached
+            _data._bottomBreached := _newBottomBreached
+    else
+        // 기본값: BOTH_HIGH_LOW
+        if _newTopBreached and _newBottomBreached and not (_data._topBreached and _data._bottomBreached)
+            _data._breakCount := _data._breakCount + 1
+            _data._topBreached := false
+            _data._bottomBreached := false
+        else
+            _data._topBreached := _newTopBreached
+            _data._bottomBreached := _newBottomBreached
+    
+    _data._breakCount >= _maxBreakCount
+
+// 박스 종료 처리
+finalizeBox(BoxData _data, color _colorClose) =>
+    if not na(_data._box)
+        box.set_border_color(_data._box, _colorClose)
+        box.set_bgcolor(_data._box, _colorClose)
+        box.set_text_color(_data._box, _colorClose)
+    if not na(_data._line)
+        line.set_color(_data._line, _colorClose)
+    _data
+
+// @function GetHTFrevised
+// @description Retrieve a specific bar value from a Higher Time Frame (HTF) series.
+// @param _tf string    The target HTF string (examples: "60", "1D").
+// @param _case string  Case string determining which OHLC value to request.
+// @return float        Returns the requested HTF value or na if _case does not match.
+export GetHTFrevised(string _tf, string _case) =>
+    htf.GetHTFrevised(_tf, _case)
+
+export GetHTFrevised(string _tf) =>
+    htf.GetHTFrevised(_tf)
+
+// @function GetHTFoffsetToLTFoffset
+// @description Adjust an HTF offset to an LTF offset by calculating the ratio of timeframes.
+// @param _offset int         The HTF bar offset (0 means current HTF bar).
+// @param _chartTf string     The current chart's timeframe (e.g., "5", "15", "1D").
+// @param _htfTf string       The High Time Frame string (e.g., "60", "1D").
+// @return int                The corresponding LTF bar index. Returns 0 if the result is negative.
+export GetHTFoffsetToLTFoffset(int _offset, string _chartTf, string _htfTf) =>
+    htf.GetHTFoffsetToLTFoffset(_offset, _chartTf, _htfTf)
+
+// @function GetHtfFromLabel
+// @description Convert a Korean HTF label into a Pine Script timeframe string.
+// @param _label string    The Korean label (e.g., "5분", "1시간").
+// @return string          Returns the corresponding Pine Script timeframe (e.g., "5", "60").
+export GetHtfFromLabel(string _label) =>
+    htf.GetHTFfromLabel(_label)
+
+// @function IsChartTFcomparisonHTF
+// @description Determine whether a given HTF is greater than or equal to the current chart timeframe.
+// @param _chartTf string  Current chart timeframe (e.g., "5", "15", "1D").
+// @param _htfTf string    HTF timeframe (e.g., "60", "1D").
+// @return bool            True if HTF ≥ chartTF, false otherwise.
+export IsChartTFcomparisonHTF(string _chartTf, string _htfTf) =>
+    htf.IsChartTFcomparisonHTF(_chartTf, _htfTf)
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Public API (5개 함수만 export)
+////////////////////////////////////////////////////////////////////////////////
+
+// @function IsCondition
+// @description FOB, FVG 조건 체크.\
+// _boxType: "fob"(Fair Order Block) 또는 "fvg"(Fair Value Gap).\
+// _isBull: true(상승 패턴), false(하락 패턴).\
+// 상승 시 현재 가격이 이전 가격보다 높으면 true, 하락 시 이전 가격이 현재 가격보다 높으면 true 반환.
+// @param _boxType 박스 타입 ("fob", "fvg")
+// @param _isBull 상승(true) 또는 하락(false)
+// @param _pricePrev 이전 가격
+// @param _priceNow 현재 가격
+// @returns bool 조건 만족 여부
+export IsCondition(string _boxType, bool _isBull, float _pricePrev, float _priceNow) =>
+    var BoxType bt = BoxType.new()
+    switch _boxType
+        bt.FOB => isConditionFOB(_isBull, _pricePrev, _priceNow)
+        bt.FVG => isConditionFVG(_isBull, _pricePrev, _priceNow)
+        => false
+
+// @function IsCondition
+// @description Sweep 조건 체크 (Swing High/Low 동시 발생).\
+// _boxType: "sweep" 또는 "breachBoth".\
+// 조건: high2 < high1 > high0 (Swing High) AND low2 > low1 < low0 (Swing Low).\
+// 중간 캔들이 양쪽보다 높고 낮은 지점을 동시에 형성할 때 true 반환.
+// @param _boxType 박스 타입 ("sweep", "breachBoth")
+// @param _high2, _high1, _high0 최근 3개 캔들의 high
+// @param _low2, _low1, _low0 최근 3개 캔들의 low
+// @returns bool 조건 만족 여부
+export IsCondition(string _boxType, float _high2, float _high1, float _high0, float _low2, float _low1, float _low0) =>
+    var BoxType bt = BoxType.new()
+    (_boxType == bt.SWEEP) ? isConditionSweep(_high2, _high1, _high0, _low2, _low1, _low0) : false
+
+// @function IsCondition
+// @description RB (Rejection Block) 조건 체크.\
+// _boxType: "rb" (Rejection Block).\
+// 상승 RB: candle1=음봉, candle0=양봉, low3>low1 AND low2>low1, close1*1.001>open0, open1<close0.\
+// 하락 RB: candle1=양봉, candle0=음봉, high3<high1 AND high2<high1, close1*0.999<open0, open1>close0.\
+// 이전 캔들의 거부 후 현재 캔들이 반대 방향으로 전환될 때 true 반환.
+// @param _boxType 박스 타입 ("rb")
+// @param _isBull 상승(true) 또는 하락(false)
+// @param _open1, _close1, _high1, _low1 이전 캔들 OHLC
+// @param _open0, _close0 현재 캔들 OC
+// @param _low2, _low3, _high2, _high3 2-3개 이전 캔들의 high/low
+// @returns bool 조건 만족 여부
+export IsCondition(string _boxType, bool _isBull, float _open1, float _close1, float _high1, float _low1, float _open0, float _close0, float _low2, float _low3, float _high2, float _high3) =>
+    var BoxType bt = BoxType.new()
+    _boxType == bt.RB ? isConditionRB(_isBull, _open1, _close1, _high1, _low1, _open0, _close0, _low2, _low3, _high2, _high3) : false
+
+// @function IsCondition
+// @description SOB (Strong Order Block) 조건 체크.\
+// _boxType: "sob" (Strong Order Block).\
+// 상승 SOB: 양봉2 => 음봉1 => 양봉0, open2 > close1 AND open1 < close0.\
+// 하락 SOB: 음봉2 => 양봉1 => 음봉0, open2 < close1 AND open1 > close0.\
+// 3개 캔들 패턴으로 강한 주문 블록 형성 시 true 반환.
+// @param _boxType 박스 타입 ("sob")
+// @param _isBull 상승(true) 또는 하락(false)
+// @param _open2 2개 이전 캔들 open
+// @param _close1 1개 이전 캔들 close
+// @param _open1 1개 이전 캔들 open
+// @param _close0 현재 캔들 close
+// @returns bool 조건 만족 여부
+export IsCondition(string _boxType, bool _isBull, float _open2, float _close1, float _open1, float _close0) =>
+    var BoxType bt = BoxType.new()
+    _boxType == bt.SOB ? isConditionSOB(_isBull, _open2, _close1, _open1, _close0) : false
+
+// @function CreateBox
+// @description 박스 생성 (값 전달 방식 - 모든 좌표 직접 지정).\
+// 호출자가 모든 좌표와 시간을 계산하여 전달.\
+// HTF/LTF 구분 불필요, tf/cache 계산 없음.\
+// @param _boxType 박스 타입 ("sob", "fob", "rb", "custom" 등)
+// @param _boxState 박스 상태 ("pending", "start", "extension")
+// @param _breachModeStart 시작 돌파 처리 방식
+// @param _breachModeEnd 종료 돌파 처리 방식
+// @param _isBull 상승(true) 또는 하락(false)
+// @param _leftTime 박스 시작 시간
+// @param _rightTime 박스 종료 시간
+// @param _top 박스 상단 가격
+// @param _bottom 박스 하단 가격
+// @param _useLine 중간선 표시 여부
+// @param _colorBG 박스 배경색
+// @param _colorBD 박스 테두리색
+// @param _colorText 텍스트 색상
+// @param _customText 커스텀 텍스트
+// @returns [bool, BoxData] 성공 여부와 박스 데이터
+export CreateBox(string _boxType, string _boxState, string _breachModeStart, string _breachModeEnd, bool _isBull, int _leftTime, int _rightTime, float _top, float _bottom, bool _useLine, color _colorBG, color _colorBD, color _colorText, string _customText) =>
+    _text = na(_customText) or _customText == "" ? str.upper(_boxType) : _customText
+    createBoxInternal(_boxType, _breachModeStart, _breachModeEnd, _boxState, _isBull, _useLine, _top, _bottom, _leftTime, _rightTime, xloc.bar_time, _colorBG, _colorBD, _colorText, _text)
+
+// @function CreateBox (자동 계산 방식)
+// @description 박스 생성 (tf/cache 기반 자동 좌표 계산).\
+// 라이브러리가 boxType에 따라 좌표를 자동 계산.\
+// @param _boxType 박스 타입
+// @param _boxState 박스 상태 ("pending", "start", "extension")
+// @param _tf 시간대
+// @param _isBull 상승(true) 또는 하락(false)
+// @param _useLine 중간선 표시 여부
+// @param _colorBG 박스 배경색
+// @param _colorBD 박스 테두리색
+// @param _colorText 텍스트 색상
+// @param _cache HTF 캐시 데이터
+// @returns [bool, BoxData] 성공 여부와 박스 데이터
+export CreateBox(string _boxType, string _boxState, string _tf, bool _isBull, bool _useLine, color _colorBG, color _colorBD, color _colorText, HTFCache _cache) =>
+    _isCurrentTF = _tf == timeframe.period
+    
+    [_leftTime, _rightTime, _top, _bottom] = if _boxType == "fvg"
+        // FVG 특별 처리: candle1 위치, 상승=high2~low / 하락=low2~high
+        if _isCurrentTF
+            [time[1], time, _isBull ? high[2] : high, _isBull ? low : low[2]]
+        else
+            [_cache._time1, time, _isBull ? _cache._high2 : _cache._high, _isBull ? _cache._low : _cache._low2]
+    else if _boxType == "ifvg"
+        // IFVG 특별 처리: FVG와 동일 (추후 구현)
+        if _isCurrentTF
+            [time[1], time, _isBull ? high[2] : high, _isBull ? low : low[2]]
+        else
+            [_cache._time1, time, _isBull ? _cache._high2 : _cache._high, _isBull ? _cache._low : _cache._low2]
+    else if _boxType == "bb"
+        // BB (Breaker Block) 특별 처리 (추후 구현)
+        if _isCurrentTF
+            [time[2], time, high[2], low[2]]
+        else
+            [_cache._time2, time, _cache._high2, _cache._low2]
+    else if _boxType == "mb"
+        // MB (Mitigation Block) 특별 처리 (추후 구현)
+        if _isCurrentTF
+            [time[2], time, high[2], low[2]]
+        else
+            [_cache._time2, time, _cache._high2, _cache._low2]
+    else if _boxType == "sobOC"
+        // SOB 특별 처리: candle1 위치, 박스 크기는 candle1의 몸통
+        if _isCurrentTF
+            [time[2], time, math.max(open[1], close[1]), math.min(open[1], close[1])]
+        else
+            [_cache._time2, time, math.max(_cache._open1, _cache._close1), math.min(_cache._open1, _cache._close1)]
+    else if _boxType == "sobHL"
+        // SOB 특별 처리: candle1 위치, 박스 크기는 candle1의 몸통
+        if _isCurrentTF
+            [time[2], time, high[1], low[1]]
+        else
+            [_cache._time2, time, _cache._high1, _cache._low1]
+    else if _isCurrentTF
+        // CurrentTF는 직접 계산
+        switch _boxType
+            "rb" => [time, time, high, low]
+            "sweep" => [time[1], time, high[1], low[1]]
+            "breachBoth" => [time, time, high, low]
+            "custom" => [time, time, high, low]
+            => [time[2], time, high[2], low[2]]
+    else
+        // HTF는 캐싱된 데이터 사용
+        switch _boxType
+            "rb" => [int(_cache._time1), time, _cache._high, _cache._low]
+            "sweep" => [_cache._time1, time, _cache._high1, _cache._low1]
+            "breachBoth" => [int(_cache._time1), time, _cache._high, _cache._low]
+            "custom" => [int(_cache._time1), time, _cache._high, _cache._low]
+            => [_cache._time2, time, _cache._high2, _cache._low2]
+    
+    // breachMode 자동 결정
+    var BoxType bt = BoxType.new()
+    var BreachMode bm = BreachMode.new()
+    
+    _breachModeStart = switch _boxType
+        bt.FOB => bm.DIRECTIONAL_HIGH_LOW
+        bt.RB => bm.DIRECTIONAL_HIGH_LOW
+        bt.SOB => bm.FAR_CLOSE
+        bt.CUSTOM => bm.DIRECTIONAL_HIGH_LOW
+        => bm.BOTH_HIGH_LOW
+    
+    _breachModeEnd = switch _boxType
+        bt.FOB => bm.DIRECTIONAL_HIGH_LOW
+        bt.RB => bm.DIRECTIONAL_HIGH_LOW
+        bt.SOB => bm.FAR_CLOSE
+        bt.CUSTOM => bm.DIRECTIONAL_HIGH_LOW
+        => bm.BOTH_HIGH_LOW
+    
+    _text = _tf + " " + str.upper(_boxType)
+    createBoxInternal(_boxType, _breachModeStart, _breachModeEnd, _boxState, _isBull, _useLine, _top, _bottom, _leftTime, _rightTime, xloc.bar_time, _colorBG, _colorBD, _colorText, _text)
+
+
+
+// @function ProcessBoxDatas
+// @description 박스 확장 및 상태별 돌파 처리.\
+// 열린 박스들을 현재 bar까지 확장하고, 상태별 돌파 조건 체크.\
+// PENDING: 시작 조건 체크 → START 전환\
+// START: 종료 조건 체크 → END 전환\
+// EXTENSION: 무한 확장\
+// 종료된 박스는 _closedBoxes로 이동하고 _colorClose 색상 적용.\
+// @param _openBoxes 열린 박스 배열
+// @param _closedBoxes 닫힌 박스 배열
+// @param _useMidLine 중간선 표시 여부
+// @param _closeCount 돌파 카운트 (이 횟수만큼 돌파 시 종료)
+// @param _baseColor 기본 색상
+// @param _pendingTransparency 대기 상태 불투명도
+// @param _startTransparency 시작 상태 불투명도
+// @param _endTransparency 종료 상태 불투명도
+// @param _currentBarIndex 현재 bar_index
+// @param _currentLow 현재 low
+// @param _currentHigh 현재 high
+// @param _currentClose 현재 close
+// @param _currentTime 현재 time
+// @returns bool 항상 true
+export ProcessBoxDatas(array<BoxData> _openBoxes, array<BoxData> _closedBoxes, bool _useMidLine, int _closeCount, color _baseColor, int _pendingTransparency, int _startTransparency, int _endTransparency, int _currentBarIndex, float _currentLow, float _currentHigh, float _currentClose, int _currentTime) =>
+    var BoxState bs = BoxState.new()
+    
+    if array.size(_openBoxes) > 0
+        for i = array.size(_openBoxes) - 1 to 0 by 1
+            _data = array.get(_openBoxes, i)
+            
+            // 박스 확장
+            _rightValue = box.get_right(_data._box)
+            _isTimeMode = na(_rightValue) or _rightValue > 1e10
+            box.set_right(_data._box, _isTimeMode ? _currentTime : _currentBarIndex)
+            if _useMidLine and not na(_data._line)
+                line.set_x2(_data._line, _isTimeMode ? _currentTime : _currentBarIndex)
+            
+            // 상태별 처리
+            _shouldTerminate = false
+            _stateChanged = false
+            
+            if _data._boxState == bs.PENDING
+                // PENDING → START 체크
+                if updateBoxBreak(_data, _data._breachModeStart, _currentHigh, _currentLow, _currentClose, 1)
+                    _data._boxState := bs.START
+                    _data._breakCount := 0  // 카운트 리셋
+                    _stateChanged := true
+                    
+            else if _data._boxState == bs.START
+                // START → END 체크
+                if updateBoxBreak(_data, _data._breachModeEnd, _currentHigh, _currentLow, _currentClose, _closeCount)
+                    _data._boxState := bs.END
+                    _shouldTerminate := true
+                    _stateChanged := true
+                    
+            // EXTENSION 상태는 확장만 계속
+            
+            // 색상 변경
+            if _stateChanged
+                _newColor = if _data._boxState == bs.START
+                    color.new(_baseColor, _startTransparency)
+                else if _data._boxState == bs.END
+                    color.new(_baseColor, _endTransparency)
+                else
+                    color.new(_baseColor, _pendingTransparency)
+                
+                box.set_bgcolor(_data._box, _newColor)
+                box.set_border_color(_data._box, _newColor)
+            
+            array.set(_openBoxes, i, _data)
+            
+            if _shouldTerminate
+                array.push(_closedBoxes, _data)
+                array.remove(_openBoxes, i)
+    true

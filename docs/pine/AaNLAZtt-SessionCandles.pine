@@ -1,0 +1,268 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+// © goldfanatic
+
+//@version=6
+
+// @description
+// SessionCandles — A library for building OHLCV candlestick data per market session.
+// Each session (e.g. Sydney, Tokyo, London, New York) is treated as a single candle:
+//   - Open  : first bar's open price when session starts
+//   - High  : highest high seen so far within the session
+//   - Low   : lowest low seen so far within the session
+//   - Close : most recent close (or last close when session ends)
+//   - Volume: accumulated volume for the entire session
+//   - Time  : bar timestamp at session open
+//
+// ── Import ──────────────────────────────────────────────────────────────────
+//   import goldfanatic/SessionCandles/1 as sc
+//
+// ── Quick start ─────────────────────────────────────────────────────────────
+//   sydney  = sc.build("2000-0500", "GMT+0")
+//   tokyo   = sc.build("0000-0900", "GMT+0")
+//   london  = sc.build("0800-1700", "GMT+0")
+//   newyork = sc.build("1300-2200", "GMT+0")
+//
+//   plotcandle(sydney.o, sydney.h, sydney.l, sydney.c)
+//
+// ── SessionCandle fields ─────────────────────────────────────────────────────
+//   .ts      → Unix timestamp (ms) of session open bar
+//   .o       → Open  price
+//   .h       → High  price (running highest)
+//   .l       → Low   price (running lowest)
+//   .c       → Close price (last close when ended)
+//   .v       → Accumulated volume
+//   .started → true on the very first bar of the session
+//   .active  → true on every bar inside the session
+//   .ended   → true on the first bar after session closes
+//   .bars    → number of bars since session started (1-based)
+
+library("SessionCandles", overlay = false)
+
+
+// ─────────────────────────────────────────────
+// TYPES
+// ─────────────────────────────────────────────
+
+// @type          Holds the full OHLCV state of one session candle.
+// @field ts      Unix timestamp (ms) of the session open bar.
+// @field o       Open price — captured on the first bar of the session.
+// @field h       High price — highest high from session open to current bar.
+// @field l       Low price  — lowest low from session open to current bar.
+// @field c       Close price — updates every bar; final value on session end.
+// @field v       Accumulated volume for the session.
+// @field started True only on the very first bar of the session.
+// @field active  True on every bar while inside the session (including start bar).
+// @field ended   True only on the first bar AFTER the session closes.
+// @field bars    Number of bars elapsed since session start (1-based).
+export type SessionCandle
+    int   ts      = na
+    float o       = na
+    float h       = na
+    float l       = na
+    float c       = na
+    float v       = na
+    bool  started = false
+    bool  active  = false
+    bool  ended   = false
+    int   bars    = 0
+
+
+// ─────────────────────────────────────────────
+// PRIVATE HELPERS
+// ─────────────────────────────────────────────
+
+// Detect session transition: not-in → in (first bar of session)
+_is_started(t) =>
+    na(t[1]) and not na(t)
+
+// Detect session transition: in → not-in (first bar after session)
+_is_ended(t) =>
+    not na(t[1]) and na(t)
+
+
+// ─────────────────────────────────────────────
+// CORE EXPORT
+// ─────────────────────────────────────────────
+
+// @function      build
+// @description   Call once per bar. Returns a `SessionCandle` object with the
+//                current OHLCV state of the specified session.
+//                The candle updates in real-time while the session is active.
+//                On `ended == true` the object contains the final completed values.
+// @param sess    Session string in TradingView format, e.g. "0000-0900"
+//                Supports overnight sessions, e.g. "2000-0500"
+// @param tz      Timezone string, e.g. "GMT+0", "GMT+7", "America/New_York"
+//                Pass "" to use the chart's exchange timezone.
+// @returns       A `SessionCandle` object updated for the current bar.
+export build(simple string sess, simple string tz = "GMT+0") =>
+    string resolved_tz = tz == "" ? syminfo.timezone : tz
+
+    // Session time — na when outside session
+    int t = time(timeframe.period, sess, resolved_tz)
+
+    bool started = _is_started(t)
+    bool active  = not na(t)
+    bool ended   = _is_ended(t)
+
+    // Persistent state across bars
+    var int   _ts       = na
+    var float _o        = na
+    var float _h        = na
+    var float _l        = na
+    var float _c        = na
+    var float _v        = na
+    var int   _start_bi = bar_index  // init to current bar — prevents huge lookback on bar 0
+    var int   _bars     = 1
+
+    // ── ta.highest / ta.lowest MUST be called unconditionally every bar ──
+    // Pine Script requires series functions to run on every calculation.
+    // Cap bars_now at 500 to stay within Pine Script's default history buffer.
+    // Sessions longer than 500 bars on the current timeframe are rare in FX.
+    int   bars_now  = math.min(math.max(bar_index - _start_bi + 1, 1), 500)
+    float running_h = ta.highest(high, bars_now)
+    float running_l = ta.lowest (low,  bars_now)
+
+    if started
+        _ts       := time
+        _o        := open
+        _h        := high
+        _l        := low
+        _c        := close
+        _v        := volume
+        _start_bi := bar_index
+        _bars     := 1
+
+    else if active
+        _bars := bars_now
+        _h    := running_h
+        _l    := running_l
+        _c    := close
+        _v    += volume
+
+    else if ended
+        // Seal candle: close[1] is the true last close inside the session
+        _c := close[1]
+
+    SessionCandle.new(
+         ts      = _ts,
+         o       = _o,
+         h       = _h,
+         l       = _l,
+         c       = _c,
+         v       = _v,
+         started = started,
+         active  = active,
+         ended   = ended,
+         bars    = _bars
+     )
+
+
+// ─────────────────────────────────────────────
+// CONVENIENCE EXPORTS
+// ─────────────────────────────────────────────
+
+// @function      is_in_session
+// @description   Returns true when the current bar falls inside the session.
+// @param sess    Session string, e.g. "0800-1700"
+// @param tz      Timezone string, e.g. "GMT+0"
+export is_in_session(simple string sess, simple string tz = "GMT+0") =>
+    string resolved_tz = tz == "" ? syminfo.timezone : tz
+    not na(time(timeframe.period, sess, resolved_tz))
+
+
+// @function      session_high
+// @description   Returns the highest high recorded so far in the current session.
+//                Returns na when not in session.
+// @param sess    Session string
+// @param tz      Timezone string
+export session_high(simple string sess, simple string tz = "GMT+0") =>
+    string resolved_tz = tz == "" ? syminfo.timezone : tz
+    int t = time(timeframe.period, sess, resolved_tz)
+
+    var int _start_bi = bar_index
+    bool started = _is_started(t)
+    bool active  = not na(t)
+
+    if started
+        _start_bi := bar_index
+
+    // Unconditional call — required by Pine Script
+    int   bars_now = math.min(math.max(bar_index - _start_bi + 1, 1), 500)
+    float h        = ta.highest(high, bars_now)
+
+    active ? h : na
+
+
+// @function      session_low
+// @description   Returns the lowest low recorded so far in the current session.
+//                Returns na when not in session.
+// @param sess    Session string
+// @param tz      Timezone string
+export session_low(simple string sess, simple string tz = "GMT+0") =>
+    string resolved_tz = tz == "" ? syminfo.timezone : tz
+    int t = time(timeframe.period, sess, resolved_tz)
+
+    var int _start_bi = bar_index
+    bool started = _is_started(t)
+    bool active  = not na(t)
+
+    if started
+        _start_bi := bar_index
+
+    // Unconditional call — required by Pine Script
+    int   bars_now = math.min(math.max(bar_index - _start_bi + 1, 1), 500)
+    float l        = ta.lowest(low, bars_now)
+
+    active ? l : na
+
+
+// @function      session_volume
+// @description   Returns the accumulated volume for the current session.
+//                Returns na when not in session.
+// @param sess    Session string
+// @param tz      Timezone string
+export session_volume(simple string sess, simple string tz = "GMT+0") =>
+    string resolved_tz = tz == "" ? syminfo.timezone : tz
+    int t = time(timeframe.period, sess, resolved_tz)
+
+    var float _v = na
+    bool started = _is_started(t)
+    bool active  = not na(t)
+
+    if started
+        _v := volume
+    else if active
+        _v += volume
+
+    active ? _v : na
+
+
+// ─────────────────────────────────────────────
+// MULTI-SESSION HELPER
+// ─────────────────────────────────────────────
+
+// @function      which_session
+// @description   Given up to 4 session strings, returns the index (1–4) of
+//                the first session currently active, or 0 if none.
+//                Useful for bar coloring or routing logic.
+// @param s1      Session 1 string (required)
+// @param s2      Session 2 string (optional, pass "" to skip)
+// @param s3      Session 3 string (optional, pass "" to skip)
+// @param s4      Session 4 string (optional, pass "" to skip)
+// @param tz      Shared timezone string
+export which_session(
+     simple string s1,
+     simple string s2 = "",
+     simple string s3 = "",
+     simple string s4 = "",
+     simple string tz = "GMT+0"
+ ) =>
+    string resolved_tz = tz == "" ? syminfo.timezone : tz
+
+    bool in1 = not na(time(timeframe.period, s1, resolved_tz))
+    bool in2 = s2 != "" ? not na(time(timeframe.period, s2, resolved_tz)) : false
+    bool in3 = s3 != "" ? not na(time(timeframe.period, s3, resolved_tz)) : false
+    bool in4 = s4 != "" ? not na(time(timeframe.period, s4, resolved_tz)) : false
+
+    in1 ? 1 : in2 ? 2 : in3 ? 3 : in4 ? 4 : 0

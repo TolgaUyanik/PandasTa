@@ -1,0 +1,285 @@
+//@version=6
+// ============================================================
+// Liquidity Geography Strategy (Swing) -- trading build
+// ----------------------------------------------------------------
+// Publish name : Liquidity Geography Strategy - Sweep & Gap-Fill Swing
+// Short title  : LiqGeo Pool
+// Category     : Trend Analysis
+//
+// Clean strategy version: all trade logic and filters are intact, but
+// the extra drawing (liquidity pool, pivot marks, stop-hunt marks,
+// regime line, terrain) defaults OFF so the chart shows only the
+// entries/exits and the trade levels of the open position. Turn any
+// drawing back on from the inputs if you want the context.
+//
+// Pairs with the "Liquidity Geography (Indicator)" version, which keeps
+// the same signals but draws the full terrain and only marks where it
+// would go long (green dot) / short (red dot) without placing orders.
+//
+// Setups (one position at a time; on a same-bar tie Gap takes priority):
+//   Sweep module (default ON) : reversal after a stop run beyond a
+//     liquidity pool (latest swing pivot, or a rolling N-day high/low),
+//     stop just past the swept extreme, target by risk:reward.
+//   Gap-Fill module (default OFF) : fade an opening gap back to the
+//     prior close inside ranges.
+// Toggleable, literature-driven filters (each can be switched off to
+// A/B test it): Tier 1 regime (fade in balance, follow the higher-TF
+// trend; default ON), Tier 2 confluence, Tier 3 risk-based sizing,
+// Tier 4 higher-timeframe bias.
+//
+// Scope: price data only. Volume profile, order-flow delta, and
+// positioning data are out of scope.
+//
+// Built on public liquidity / ICT-style concepts (sweeps, FVG, order
+// blocks, premium/discount, OTE, BOS/CHoCH), implemented from scratch
+// in original Pine. No third-party script source was used.
+//
+// Backtest note: defaults use 10% of equity per trade, 0.1% commission,
+// and 2 ticks of slippage. Set these to your real costs and re-test on
+// your own symbol and timeframe before trusting any result. Past
+// performance does not guarantee future results. For education and
+// research; not financial advice.
+// ============================================================
+strategy(title="Liquidity Geography Strategy (Swing)", shorttitle="LiqGeo Pool", overlay=true, max_boxes_count=300, max_labels_count=300, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, slippage=2)
+
+// ============================================================
+// 1. INPUTS
+// ============================================================
+groupGeneral = "General"
+atrLength   = input.int(14, "ATR length", group=groupGeneral)
+maxHoldBars = input.int(0, "Max holding bars (0 = off)", minval=0, group=groupGeneral)
+showTradeLevels = input.bool(true, "Show entry / stop-loss / take-profit lines", group=groupGeneral)
+
+groupTerrain = "Terrain (drawing)"
+showTerrain     = input.bool(false, "Show terrain (master switch)", group=groupTerrain)
+showPriorDayHL  = input.bool(false, "Prior-day high/low", group=groupTerrain)
+showRoundLevels = input.bool(false, "Round-number levels", group=groupTerrain)
+autoRoundStep   = input.bool(true,  "Auto round-number step (by price)", group=groupTerrain)
+roundStepManual = input.float(1.0,  "Manual round-number step", group=groupTerrain)
+showFvgBoxes    = input.bool(false, "Fair Value Gap boxes", group=groupTerrain)
+zoneExtendRight = input.int(10,     "Zone box right extension (bars)", minval=0, group=groupTerrain)
+showPremDisc    = input.bool(false, "Premium/Discount + OTE", group=groupTerrain)
+showOrderBlocks = input.bool(false, "Order blocks", group=groupTerrain)
+obDisplaceAtr   = input.float(1.0,  "Order-block displacement (ATR)", group=groupTerrain)
+showStructure   = input.bool(false, "Market structure (BOS/CHoCH)", group=groupTerrain)
+
+groupPools = "Liquidity Pools / Structure"
+poolSource      = input.string("Pivot", "Liquidity pool source", options=["Pivot", "N-day high/low"], group=groupPools)
+ndayLength      = input.int(20, "N-day high/low lookback (bars)", minval=1, group=groupPools)
+pivotLength     = input.int(10, "Pivot length (left/right bars)", group=groupPools)
+showActivePool  = input.bool(false, "Show active liquidity pool (sweep targets)", group=groupPools)
+showPivotMarks  = input.bool(false, "Show pivot markers", group=groupPools)
+showStopHunt    = input.bool(false, "Mark stop hunts (sweep signals)", group=groupPools)
+
+groupGap = "Gap-Fill Module"
+gapEnabled     = input.bool(false, "Enable Gap-Fill module", group=groupGap)
+gapLongs       = input.bool(true,  "Longs (gap-down fill)", group=groupGap)
+gapShorts      = input.bool(true,  "Shorts (gap-up fill)", group=groupGap)
+minGapPercent  = input.float(1.0,  "Min gap size %", minval=0.0, group=groupGap) / 100.0
+useRangeFilter = input.bool(true,  "Range filter (skip trends)", group=groupGap)
+rangeEmaLength = input.int(20,     "Range filter EMA length", group=groupGap)
+maxTrendAtr    = input.float(2.0,  "Max EMA travel in ATR (above = trend, skip)", group=groupGap)
+gapStopAtr     = input.float(1.0,  "Gap stop ATR multiple", group=groupGap)
+
+groupSweep = "Liquidity Sweep Module"
+sweepEnabled  = input.bool(true,  "Enable Sweep module", group=groupSweep)
+sweepLongs    = input.bool(true,  "Longs (sweep low-side)", group=groupSweep)
+sweepShorts   = input.bool(true,  "Shorts (sweep high-side)", group=groupSweep)
+stopBufferAtr = input.float(0.25, "Sweep stop buffer (ATR multiple)", group=groupSweep)
+riskReward    = input.float(2.0,  "Risk:reward (target = RR x risk)", group=groupSweep)
+useOppositeLiquidity = input.bool(false, "Target = opposite liquidity (overrides RR)", group=groupSweep)
+
+groupOpt = "Optimization Filters"
+regimeMode        = input.string("Adaptive (fade in balance, follow trend)", "Sweep regime filter (Tier 1)", options=["Off", "Balance only", "Trend-aligned only", "Adaptive (fade in balance, follow trend)"], group=groupOpt)
+htfBiasTf         = input.timeframe("W", "Higher-timeframe bias", group=groupOpt)
+htfBiasLen        = input.int(20,   "Higher-timeframe EMA length", group=groupOpt)
+regimeEmaLen      = input.int(20,   "Regime EMA length (this timeframe)", group=groupOpt)
+regimeTrendAtr    = input.float(2.0, "Trend threshold: EMA travel in ATR", group=groupOpt)
+requireConfluence = input.bool(false, "Require confluence (Tier 2)", group=groupOpt)
+confluenceTolAtr  = input.float(0.5, "Confluence tolerance (ATR)", group=groupOpt)
+showRegime        = input.bool(false, "Show regime bias line / shading", group=groupOpt)
+
+groupRisk = "Risk Sizing"
+riskBasedSizing = input.bool(false, "Risk-based position sizing (Tier 3)", group=groupRisk)
+riskPercent     = input.float(1.0,  "Risk % of equity per trade", minval=0.0, group=groupRisk) / 100.0
+
+// ============================================================
+// 2. CALCULATIONS
+// ============================================================
+atrValue = ta.atr(atrLength)
+
+pivotHigh = ta.pivothigh(pivotLength, pivotLength)
+pivotLow  = ta.pivotlow(pivotLength, pivotLength)
+var float lastPivotHigh = na
+var float lastPivotLow  = na
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+
+ndayHigh = ta.highest(high, ndayLength)[1]
+ndayLow  = ta.lowest(low, ndayLength)[1]
+
+liqHigh = poolSource == "Pivot" ? lastPivotHigh : ndayHigh
+liqLow  = poolSource == "Pivot" ? lastPivotLow  : ndayLow
+
+bullishSweep = not na(liqLow)  and low  < liqLow  and close > liqLow
+bearishSweep = not na(liqHigh) and high > liqHigh and close < liqHigh
+
+rangeEma = ta.ema(close, rangeEmaLength)
+emaTravelInAtr = math.abs(rangeEma - rangeEma[rangeEmaLength]) / atrValue
+isRanging = not useRangeFilter or emaTravelInAtr < maxTrendAtr
+prevClose = close[1]
+gapUp   = open > prevClose * (1 + minGapPercent)
+gapDown = open < prevClose * (1 - minGapPercent)
+
+roundStep = autoRoundStep ? math.pow(10, math.floor(math.log10(close))) : roundStepManual
+nearestRound = math.round(close / roundStep) * roundStep
+
+[priorDayHigh, priorDayLow] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+bullishFvg = low > high[2]
+bearishFvg = high < low[2]
+
+hasRange    = not na(lastPivotHigh) and not na(lastPivotLow) and lastPivotHigh > lastPivotLow
+swingSpan   = hasRange ? lastPivotHigh - lastPivotLow : na
+equilibrium = hasRange ? lastPivotLow + swingSpan * 0.5  : na
+oteHigh     = hasRange ? lastPivotLow + swingSpan * 0.79 : na
+oteLow      = hasRange ? lastPivotLow + swingSpan * 0.62 : na
+
+var int trendDir = 0
+string structureLabel = ""
+bool structureIsUp = false
+brokeUp   = not na(lastPivotHigh) and close > lastPivotHigh and close[1] <= lastPivotHigh
+brokeDown = not na(lastPivotLow)  and close < lastPivotLow  and close[1] >= lastPivotLow
+if brokeUp
+    structureLabel := trendDir < 0 ? "CHoCH" : "BOS"
+    structureIsUp  := true
+    trendDir := 1
+else if brokeDown
+    structureLabel := trendDir > 0 ? "CHoCH" : "BOS"
+    structureIsUp  := false
+    trendDir := -1
+
+displaceUp   = close > open and (close - open) > obDisplaceAtr * atrValue
+displaceDown = open > close and (open - close) > obDisplaceAtr * atrValue
+bullOB = displaceUp   and close[1] < open[1]
+bearOB = displaceDown and close[1] > open[1]
+
+// ============================================================
+// 2b. OPTIMIZATION FILTERS
+// ============================================================
+biasEma  = request.security(syminfo.tickerid, htfBiasTf, ta.ema(close, htfBiasLen), lookahead=barmerge.lookahead_off)
+biasUp   = not na(biasEma) and close > biasEma
+biasDown = not na(biasEma) and close < biasEma
+
+regimeEma       = ta.ema(close, regimeEmaLen)
+regimeTravelAtr = math.abs(regimeEma - regimeEma[regimeEmaLen]) / atrValue
+isTrending = regimeTravelAtr >= regimeTrendAtr
+isBalance  = not isTrending
+
+longRegimeOK  = regimeMode == "Off" ? true : regimeMode == "Balance only" ? isBalance : regimeMode == "Trend-aligned only" ? biasUp   : (isBalance or biasUp)
+shortRegimeOK = regimeMode == "Off" ? true : regimeMode == "Balance only" ? isBalance : regimeMode == "Trend-aligned only" ? biasDown : (isBalance or biasDown)
+
+confTol = confluenceTolAtr * atrValue
+longConfluence  = (not requireConfluence or na(liqLow))  ? true : (math.abs(liqLow  - priorDayLow)  <= confTol or math.abs(liqLow  - math.round(liqLow  / roundStep) * roundStep) <= confTol)
+shortConfluence = (not requireConfluence or na(liqHigh)) ? true : (math.abs(liqHigh - priorDayHigh) <= confTol or math.abs(liqHigh - math.round(liqHigh / roundStep) * roundStep) <= confTol)
+
+// ============================================================
+// 3. DRAWING (terrain)
+// ============================================================
+plot(showTerrain and showPriorDayHL ? priorDayHigh : na, "Prior Day High", color.new(color.red, 0), style=plot.style_linebr)
+plot(showTerrain and showPriorDayHL ? priorDayLow : na, "Prior Day Low", color.new(color.green, 0), style=plot.style_linebr)
+
+plot(showTerrain and showRoundLevels ? nearestRound : na,             "Round 0", color.new(color.gray, 40), style=plot.style_stepline)
+plot(showTerrain and showRoundLevels ? nearestRound + roundStep : na, "Round +", color.new(color.gray, 60), style=plot.style_stepline)
+plot(showTerrain and showRoundLevels ? nearestRound - roundStep : na, "Round -", color.new(color.gray, 60), style=plot.style_stepline)
+
+plot(showTerrain and showPremDisc ? equilibrium : na, "Equilibrium (50%)", color.new(color.gray, 0), style=plot.style_linebr)
+plot(showTerrain and showPremDisc ? oteHigh : na, "OTE 79%", color.new(color.teal, 30), style=plot.style_linebr)
+plot(showTerrain and showPremDisc ? oteLow : na,  "OTE 62%", color.new(color.teal, 30), style=plot.style_linebr)
+
+if showTerrain and showFvgBoxes and bullishFvg
+    box.new(bar_index[2], low, bar_index + zoneExtendRight, high[2], border_color=color.new(color.green, 0), bgcolor=color.new(color.green, 85))
+if showTerrain and showFvgBoxes and bearishFvg
+    box.new(bar_index[2], low[2], bar_index + zoneExtendRight, high, border_color=color.new(color.red, 0), bgcolor=color.new(color.red, 85))
+
+if showTerrain and showOrderBlocks and bullOB
+    box.new(bar_index[1], high[1], bar_index + zoneExtendRight, low[1], border_color=color.new(color.green, 20), bgcolor=color.new(color.green, 90))
+if showTerrain and showOrderBlocks and bearOB
+    box.new(bar_index[1], high[1], bar_index + zoneExtendRight, low[1], border_color=color.new(color.red, 20), bgcolor=color.new(color.red, 90))
+
+if showTerrain and showStructure and structureLabel != ""
+    lblColor = structureLabel == "CHoCH" ? color.fuchsia : color.gray
+    lblStyle = structureIsUp ? label.style_label_down : label.style_label_up
+    lblY = structureIsUp ? high : low
+    label.new(bar_index, lblY, structureLabel, style=lblStyle, color=color.new(lblColor, 30), textcolor=color.white, size=size.small)
+
+plot(showActivePool ? liqHigh : na, "Pool High (sweep target)", color.new(color.blue, 0),   style=plot.style_stepline, linewidth=2)
+plot(showActivePool ? liqLow : na,  "Pool Low (sweep target)",  color.new(color.orange, 0), style=plot.style_stepline, linewidth=2)
+plotshape(showPivotMarks and not na(pivotHigh), title="Pivot High", style=shape.triangledown, location=location.abovebar, color=color.new(color.blue, 0),   size=size.tiny, offset=-pivotLength)
+plotshape(showPivotMarks and not na(pivotLow),  title="Pivot Low",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.orange, 0), size=size.tiny, offset=-pivotLength)
+
+plotshape(showStopHunt and bullishSweep, title="Stop hunt (low swept)",  style=shape.xcross, location=location.belowbar, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(showStopHunt and bearishSweep, title="Stop hunt (high swept)", style=shape.xcross, location=location.abovebar, color=color.new(color.blue, 0),   size=size.tiny)
+
+plot(showRegime ? biasEma : na, "HTF bias EMA", color.new(color.gray, 40), linewidth=1)
+bgcolor(showRegime and isTrending ? color.new(color.orange, 92) : na, title="Trending regime (sweeps follow, not fade)")
+
+// ============================================================
+// 4. TRADING
+// ============================================================
+var float activeStop   = na
+var float activeTarget = na
+
+tookTradeThisBar = false
+
+if gapEnabled and strategy.position_size == 0
+    if gapDown and isRanging and gapLongs
+        gapStop = close - gapStopAtr * atrValue
+        gapQty  = riskBasedSizing and (close - gapStop) > 0 ? (strategy.equity * riskPercent) / (close - gapStop) : na
+        strategy.entry("Gap Long", strategy.long, qty=gapQty)
+        strategy.exit("Gap Long Exit", from_entry="Gap Long", limit=prevClose, stop=gapStop)
+        activeStop   := gapStop
+        activeTarget := prevClose
+        tookTradeThisBar := true
+    else if gapUp and isRanging and gapShorts
+        gapStop = close + gapStopAtr * atrValue
+        gapQty  = riskBasedSizing and (gapStop - close) > 0 ? (strategy.equity * riskPercent) / (gapStop - close) : na
+        strategy.entry("Gap Short", strategy.short, qty=gapQty)
+        strategy.exit("Gap Short Exit", from_entry="Gap Short", limit=prevClose, stop=gapStop)
+        activeStop   := gapStop
+        activeTarget := prevClose
+        tookTradeThisBar := true
+
+if sweepEnabled and strategy.position_size == 0 and not tookTradeThisBar
+    if bullishSweep and sweepLongs and longRegimeOK and longConfluence
+        stopPrice = low - stopBufferAtr * atrValue
+        riskPerUnit = close - stopPrice
+        targetPrice = useOppositeLiquidity and not na(liqHigh) and liqHigh > close ? liqHigh : close + riskReward * riskPerUnit
+        sweepQty = riskBasedSizing and riskPerUnit > 0 ? (strategy.equity * riskPercent) / riskPerUnit : na
+        strategy.entry("Sweep Long", strategy.long, qty=sweepQty)
+        strategy.exit("Sweep Long Exit", from_entry="Sweep Long", stop=stopPrice, limit=targetPrice)
+        activeStop   := stopPrice
+        activeTarget := targetPrice
+    else if bearishSweep and sweepShorts and shortRegimeOK and shortConfluence
+        stopPrice = high + stopBufferAtr * atrValue
+        riskPerUnit = stopPrice - close
+        targetPrice = useOppositeLiquidity and not na(liqLow) and liqLow < close ? liqLow : close - riskReward * riskPerUnit
+        sweepQty = riskBasedSizing and riskPerUnit > 0 ? (strategy.equity * riskPercent) / riskPerUnit : na
+        strategy.entry("Sweep Short", strategy.short, qty=sweepQty)
+        strategy.exit("Sweep Short Exit", from_entry="Sweep Short", stop=stopPrice, limit=targetPrice)
+        activeStop   := stopPrice
+        activeTarget := targetPrice
+
+barsHeld = strategy.position_size != 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+if maxHoldBars > 0 and strategy.position_size != 0 and barsHeld >= maxHoldBars
+    strategy.close_all(comment="Time stop")
+
+// ============================================================
+// 5. TRADE LEVELS
+// ============================================================
+inPosition = strategy.position_size != 0
+plot(showTradeLevels and inPosition ? strategy.position_avg_price : na, "Entry",       color.new(color.gray, 0),  style=plot.style_linebr, linewidth=1)
+plot(showTradeLevels and inPosition ? activeStop : na,                 "Stop loss",   color.new(color.red, 0),   style=plot.style_linebr, linewidth=1)
+plot(showTradeLevels and inPosition ? activeTarget : na,               "Take profit", color.new(color.green, 0), style=plot.style_linebr, linewidth=1)

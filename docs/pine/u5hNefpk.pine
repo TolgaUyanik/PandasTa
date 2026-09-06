@@ -1,0 +1,595 @@
+// ═══════════════════════════════════════════════════════════════
+// 📦 Lib_Core - Core Calculation and Type Library
+// Pine Script v6 Library
+// ═══════════════════════════════════════════════════════════════
+// This library includes:
+//   • User-Defined Types (UDT) - Position, TP/SL, Settings structures
+//   • Mathematical calculation functions (% and Pip based)
+//   • Fee / PnL / DCA calculations
+//   • Liquidation price calculations
+//   • Forex support: Pip/Lot based calculations
+//
+// ⚠️ v6 LIMITATIONS:
+//   • input.* CANNOT BE USED in Library → Defined in main script
+//   • var/varip CANNOT BE USED in Library → State is held in main script
+//   • plot/plotshape CANNOT BE USED in Library → Drawn in main script
+//   • UDTs are exported and used with 'var' in main script
+//
+// 📌 USAGE:
+//   import YourTradingViewName/Lib_SW_Core/1 as core
+//   core.TPConfig tp_long = core.TPConfig.new(2.0, 60.0, ...)
+//
+//   Crypto:  core.f_pctToPrice(2.0, avgPrice)
+//   Forex:   core.f_pipsToPrice(100, 0.01)
+// ═══════════════════════════════════════════════════════════════
+
+//@version=6
+library('Lib_SW_Core', overlay = true)
+
+// ═══════════════════════════════════════════════════════════════
+// 📐 USER-DEFINED TYPES (UDT)
+// ═══════════════════════════════════════════════════════════════
+
+// ── Take Profit Configuration ──
+// Groups TP settings for one direction (Long or Short)
+export type TPConfig
+    float tp1_pct       // TP1 percentage
+    float tp1_port      // TP1 portfolio %
+    bool  tp1_reverse   // Reverse trade at TP1
+    bool  tp2_active    // Is TP2 active
+    float tp2_pct       // TP2 percentage
+    float tp2_port      // TP2 portfolio %
+    bool  tp3_active    // Is TP3 active
+    float tp3_pct       // TP3 percentage
+    float tp3_port      // TP3 portfolio %
+
+// ── DCA Take Profit Configuration ──
+export type DCATPConfig
+    float tp1_pct
+    float tp1_port
+    float tp2_pct
+    float tp2_port
+    float tp3_pct
+    float tp3_port
+
+// ── Stop Loss Configuration ──
+export type SLConfig
+    float l1_pct          // L1 (initial entry) SL %
+    float dca_pct         // DCA SL %
+    bool  useBE           // Breakeven active
+    float be_act_pct      // BE activation %
+    float be_offset_pct   // BE offset %
+    bool  useTS           // Trailing Stop active
+    float ts_act_pct      // TS activation %
+    float ts_dev_pct      // TS lock offset %
+
+// ── Position Configuration ──
+export type PositionConfig
+    float baseAmount      // Base amount ($)
+    int   leverage        // Leverage
+    int   maxLevel        // Max DCA step
+    string dcaMode        // DCA mode: 'Step', '2x', 'Off', 'Selection Step' (Step, 2x, Off, Selection Step)
+    int   selectionStep   // Selection step count
+    bool  useFee          // Calculate fee
+    float feePercent      // Fee %
+
+// ── Position State ──
+// Held with 'var' in main script, passed as parameter to library functions
+export type PositionState
+    int   level           // Current DCA level (0 = no position)
+    int   signalCounter   // Selection step mode counter
+    float avgPrice        // Weighted average price
+    float lastEntryPrice  // Last entry price
+    float totalNotional   // Total position volume
+    float peakNotional    // Peak volume within position
+    float pctLeft         // Remaining position percentage (1.0 = full)
+    int   tpStage         // Normal TP stage
+    int   tpStageDCA      // DCA TP stage
+    float accumulatedPnL  // Accumulated PnL throughout the trade
+
+// ── Statistics Structure ──
+export type TradeStats
+    int   slCountWin
+    int   slCountLoss
+    int   liqCount
+    int   maxDcaHit
+    float maxVol
+    float maxLoss
+    float grossLoss
+    float totalFees
+    float totalVolume
+    int   tradeCount
+    float peakEquity
+    float maxDrawdown
+    float maxDrawdownPct
+    float currentDrawdownPct
+    int   approachSL
+    int   approachLiq
+
+// ── Visual TP Levels ──
+export type TPVisuals
+    float tp1
+    float tp2
+    float tp3
+
+// ── SL/TS State ──
+export type SLState
+    float slFixed         // Fixed SL price
+    float slTrail         // Trailing SL price
+    float trailExtreme    // Trail High (Long) or Trail Low (Short)
+
+// ── Forex Configuration (Pip/Lot based systems) ──
+export type ForexConfig
+    float pipValue        // Price value of 1 pip (XAUUSD: 0.01, EURUSD: 0.0001)
+    float contractSize    // Contract size (XAUUSD: 100, EURUSD: 100000)
+    float baseLot         // Base lot amount (e.g., 0.01)
+    bool  isForex         // Is Forex mode active (true=pip, false=%)
+
+// ═══════════════════════════════════════════════════════════════
+// 🔧 CORE CALCULATION FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Convert percentage value to price difference (for Crypto)
+// @param pct Percentage value (e.g., 2.0 = 2%)
+// @param basePrice Reference price
+// @returns Price difference
+export f_pctToPrice(float pct, float basePrice) =>
+    basePrice * (pct / 100)
+
+// FOREX: Convert pip value to price difference
+// @param pips Number of pips (e.g., 100 pips)
+// @param pipVal Price value of 1 pip (XAUUSD: 0.01)
+// @returns Price difference
+export f_pipsToPrice(float pips, float pipVal) =>
+    pips * pipVal
+
+// UNIFIED: Calculate distance based on Mode (both Crypto and Forex)
+// @param value Distance value (% or pip)
+// @param basePrice Reference price (for percentage mode)
+// @param isForex Is Forex mode
+// @param pipVal Pip value (for Forex mode)
+// @returns Price difference
+export f_toPrice(float value, float basePrice, bool isForex, float pipVal) =>
+    isForex ? f_pipsToPrice(value, pipVal) : f_pctToPrice(value, basePrice)
+
+// FOREX: Calculate Notional from Lot
+// @param lots Lot amount (e.g., 0.01)
+// @param price Instrument price
+// @param contractSize Contract size (XAUUSD: 100)
+// @returns Position value in Dollars
+export f_lotToNotional(float lots, float price, float contractSize) =>
+    lots * price * contractSize
+
+// FOREX: Calculate Margin from Lot
+// @param lots Lot amount
+// @param price Price
+// @param contractSize Contract size
+// @param leverage Leverage
+// @returns Required margin (USD)
+export f_lotToMargin(float lots, float price, float contractSize, int leverage) =>
+    f_lotToNotional(lots, price, contractSize) / leverage
+
+// Calculate Transaction Fee
+// @param notional Trade volume
+// @param useFee Is fee active
+// @param feePercent Fee percentage
+// @returns Calculated fee
+export f_calcFee(float notional, bool useFee, float feePercent) =>
+    useFee and notional > 0 ? notional * (feePercent / 100) : 0.0
+
+// Calculate Weighted Average Price (for DCA)
+// @param oldAvg Current average price
+// @param oldNotional Current position volume
+// @param newPrice New entry price
+// @param newNotional New entry volume
+// @returns New weighted average price
+export f_calcAvgPrice(float oldAvg, float oldNotional, float newPrice, float newNotional) =>
+    ((na(oldAvg) ? newPrice : oldAvg) * oldNotional + newPrice * newNotional) / (oldNotional + newNotional)
+
+// DCA Multiplier
+// @param lvl Current DCA level
+// @param dcaMode DCA mode ('Adım'/'Step', '2x', 'Kapalı'/'Off', 'Seçim Adımlı'/'Selection Step')
+// @returns Multiplier value
+export f_multiplier(int lvl, string dcaMode) =>
+    if dcaMode == 'Kapalı' or dcaMode == 'Off'
+        1.0
+    else
+        dcaMode == 'Adım' or dcaMode == 'Step' or dcaMode == 'Seçim Adımlı' or dcaMode == 'Selection Step' ? lvl + 1.0 : math.pow(2, lvl)
+
+// Calculate Unrealized PnL (Single Direction)
+// @param isLong Long or Short
+// @param avgPrice Average entry price
+// @param totalNotional Total volume
+// @param currentPrice Current price
+// @returns Unrealized PnL
+export f_unrealizedPnL(bool isLong, float avgPrice, float totalNotional, float currentPrice) =>
+    if totalNotional > 0 and not na(avgPrice) and avgPrice > 0
+        isLong ? (currentPrice - avgPrice) / avgPrice * totalNotional : (avgPrice - currentPrice) / avgPrice * totalNotional
+    else
+        0.0
+
+// Total Unrealized PnL (Long + Short)
+// @returns Total unrealized PnL
+export f_totalUnrealizedPnL(float avgLongPrice, float totalLongNotional, float avgShortPrice, float totalShortNotional, float currentPrice) =>
+    float unreal_L = f_unrealizedPnL(true, avgLongPrice, totalLongNotional, currentPrice)
+    float unreal_S = f_unrealizedPnL(false, avgShortPrice, totalShortNotional, currentPrice)
+    unreal_L + unreal_S
+
+// ═══════════════════════════════════════════════════════════════
+// 💰 LIQUIDATION CALCULATION
+// ═══════════════════════════════════════════════════════════════
+
+// Long Liquidation Price - Cross Margin
+// @param avgPrice Long average price
+// @param totalNotional Long total volume
+// @param availableEquity Available equity (balance + realized PNL - fee - short margin)
+// @returns Estimated liquidation price
+export f_liqPrice_Long(float avgPrice, float totalNotional, float availableEquity) =>
+    if totalNotional > 0 and not na(avgPrice)
+        // If equity <= 0 -> immediate liquidation
+        if availableEquity <= 0
+            avgPrice  // Equity <= 0 -> immediate liquidation
+        else
+            float dropRatio = availableEquity / totalNotional
+            math.max(0.0, avgPrice * (1 - dropRatio))
+    else
+        na
+
+// Short Liquidation Price - Cross Margin
+// @param avgPrice Short average price
+// @param totalNotional Short total volume
+// @param availableEquity Available equity
+// @returns Estimated liquidation price
+export f_liqPrice_Short(float avgPrice, float totalNotional, float availableEquity) =>
+    if totalNotional > 0 and not na(avgPrice)
+        // If equity <= 0 -> immediate liquidation
+        if availableEquity <= 0
+            avgPrice  // Equity <= 0 -> immediate liquidation
+        else
+            float riseRatio = availableEquity / totalNotional
+            avgPrice * (1 + riseRatio)
+    else
+        na
+
+// ═══════════════════════════════════════════════════════════════
+// 📊 TP LEVEL CALCULATION
+// ═══════════════════════════════════════════════════════════════
+
+// Calculate Long TP levels (Crypto: % based)
+// @param avgPrice Average entry price
+// @param tp1_pct TP1 percentage
+// @param tp2_pct TP2 percentage
+// @param tp3_pct TP3 percentage
+// @returns TPVisuals structure
+export f_calcTPLevels_Long(float avgPrice, float tp1_pct, float tp2_pct, float tp3_pct) =>
+    TPVisuals.new(
+     avgPrice + f_pctToPrice(tp1_pct, avgPrice),
+     avgPrice + f_pctToPrice(tp2_pct, avgPrice),
+     avgPrice + f_pctToPrice(tp3_pct, avgPrice))
+
+// Calculate Short TP levels (Crypto: % based)
+// @param avgPrice Average entry price
+// @param tp1_pct TP1 percentage
+// @param tp2_pct TP2 percentage
+// @param tp3_pct TP3 percentage
+// @returns TPVisuals structure
+export f_calcTPLevels_Short(float avgPrice, float tp1_pct, float tp2_pct, float tp3_pct) =>
+    TPVisuals.new(
+     avgPrice - f_pctToPrice(tp1_pct, avgPrice),
+     avgPrice - f_pctToPrice(tp2_pct, avgPrice),
+     avgPrice - f_pctToPrice(tp3_pct, avgPrice))
+
+// UNIFIED: Long TP levels (% or pip mode)
+// @param avgPrice Average entry price
+// @param tp1_val TP1 distance (% or pip)
+// @param tp2_val TP2 distance
+// @param tp3_val TP3 distance
+// @param isForex Is Forex (pip) mode
+// @param pipVal Pip value (for Forex)
+// @returns TPVisuals structure
+export f_calcTPLevels_Long_Unified(float avgPrice, float tp1_val, float tp2_val, float tp3_val, bool isForex, float pipVal) =>
+    TPVisuals.new(
+     avgPrice + f_toPrice(tp1_val, avgPrice, isForex, pipVal),
+     avgPrice + f_toPrice(tp2_val, avgPrice, isForex, pipVal),
+     avgPrice + f_toPrice(tp3_val, avgPrice, isForex, pipVal))
+
+// UNIFIED: Short TP levels (% or pip mode)
+export f_calcTPLevels_Short_Unified(float avgPrice, float tp1_val, float tp2_val, float tp3_val, bool isForex, float pipVal) =>
+    TPVisuals.new(
+     avgPrice - f_toPrice(tp1_val, avgPrice, isForex, pipVal),
+     avgPrice - f_toPrice(tp2_val, avgPrice, isForex, pipVal),
+     avgPrice - f_toPrice(tp3_val, avgPrice, isForex, pipVal))
+
+// ═══════════════════════════════════════════════════════════════
+// 🛡️ STOP LOSS / BREAKEVEN / TRAILING STOP CALCULATION
+// ═══════════════════════════════════════════════════════════════
+
+// Long SL calculation (including BE + TS)
+// @returns [sl_fixed, sl_trail] tuple
+export f_calcSL_Long(float avgPrice, int level, SLConfig cfg, float trailHigh) =>
+    float stopPct = level <= 1 ? cfg.l1_pct : cfg.dca_pct
+    float slFixed = avgPrice - f_pctToPrice(stopPct, avgPrice)
+
+    // Breakeven
+    if cfg.useBE and trailHigh >= avgPrice + f_pctToPrice(cfg.be_act_pct, avgPrice)
+        float bePriceL = avgPrice + f_pctToPrice(cfg.be_offset_pct, avgPrice)
+        slFixed := math.max(slFixed, bePriceL)
+
+    // Trailing Stop
+    float slTrail = na
+    if cfg.useTS
+        if trailHigh >= avgPrice + f_pctToPrice(cfg.ts_act_pct, avgPrice)
+            float callbackPct = math.max(0.1, cfg.ts_act_pct - cfg.ts_dev_pct)
+            slTrail := trailHigh - f_pctToPrice(callbackPct, avgPrice)
+
+    [slFixed, slTrail]
+
+// Short SL calculation (including BE + TS)
+// @returns [sl_fixed, sl_trail] tuple
+export f_calcSL_Short(float avgPrice, int level, SLConfig cfg, float trailLow) =>
+    float stopPct = level <= 1 ? cfg.l1_pct : cfg.dca_pct
+    float slFixed = avgPrice + f_pctToPrice(stopPct, avgPrice)
+
+    // Breakeven
+    if cfg.useBE and trailLow <= avgPrice - f_pctToPrice(cfg.be_act_pct, avgPrice)
+        float bePriceS = avgPrice - f_pctToPrice(cfg.be_offset_pct, avgPrice)
+        slFixed := math.min(slFixed, bePriceS)
+
+    // Trailing Stop
+    float slTrail = na
+    if cfg.useTS
+        if trailLow <= avgPrice - f_pctToPrice(cfg.ts_act_pct, avgPrice)
+            float callbackPct = math.max(0.1, cfg.ts_act_pct - cfg.ts_dev_pct)
+            slTrail := trailLow + f_pctToPrice(callbackPct, avgPrice)
+
+    [slFixed, slTrail]
+
+// UNIFIED: Long SL calculation (% or pip mode)
+// Values in SLConfig can be pip or %
+// @param isForex if true pip based, else % based
+// @param pipVal Forex pip value (for Forex mode)
+// @returns [sl_fixed, sl_trail] tuple
+export f_calcSL_Long_Unified(float avgPrice, int level, SLConfig cfg, float trailHigh, bool isForex, float pipVal) =>
+    float stopVal = level <= 1 ? cfg.l1_pct : cfg.dca_pct
+    float stopDist = f_toPrice(stopVal, avgPrice, isForex, pipVal)
+    float slFixed = avgPrice - stopDist
+
+    // Breakeven
+    float beDist = f_toPrice(cfg.be_act_pct, avgPrice, isForex, pipVal)
+    if cfg.useBE and trailHigh >= avgPrice + beDist
+        float beOffset = f_toPrice(cfg.be_offset_pct, avgPrice, isForex, pipVal)
+        float bePriceL = avgPrice + beOffset
+        slFixed := math.max(slFixed, bePriceL)
+
+    // Trailing Stop
+    float slTrail = na
+    if cfg.useTS
+        float tsActDist = f_toPrice(cfg.ts_act_pct, avgPrice, isForex, pipVal)
+        if trailHigh >= avgPrice + tsActDist
+            float callbackVal = math.max(isForex ? 1.0 : 0.1, cfg.ts_act_pct - cfg.ts_dev_pct)
+            float callbackDist = f_toPrice(callbackVal, avgPrice, isForex, pipVal)
+            slTrail := trailHigh - callbackDist
+
+    [slFixed, slTrail]
+
+// UNIFIED: Short SL calculation (% or pip mode)
+export f_calcSL_Short_Unified(float avgPrice, int level, SLConfig cfg, float trailLow, bool isForex, float pipVal) =>
+    float stopVal = level <= 1 ? cfg.l1_pct : cfg.dca_pct
+    float stopDist = f_toPrice(stopVal, avgPrice, isForex, pipVal)
+    float slFixed = avgPrice + stopDist
+
+    // Breakeven
+    float beDist = f_toPrice(cfg.be_act_pct, avgPrice, isForex, pipVal)
+    if cfg.useBE and trailLow <= avgPrice - beDist
+        float beOffset = f_toPrice(cfg.be_offset_pct, avgPrice, isForex, pipVal)
+        float bePriceS = avgPrice - beOffset
+        slFixed := math.min(slFixed, bePriceS)
+
+    // Trailing Stop
+    float slTrail = na
+    if cfg.useTS
+        float tsActDist = f_toPrice(cfg.ts_act_pct, avgPrice, isForex, pipVal)
+        if trailLow <= avgPrice - tsActDist
+            float callbackVal = math.max(isForex ? 1.0 : 0.1, cfg.ts_act_pct - cfg.ts_dev_pct)
+            float callbackDist = f_toPrice(callbackVal, avgPrice, isForex, pipVal)
+            slTrail := trailLow + callbackDist
+
+    [slFixed, slTrail]
+
+// Effective SL (Best of Fixed + Trail)
+// @param isLong True if Long
+// @param slFixed Fixed SL
+// @param slTrail Trailing SL (can be na)
+// @returns Effective SL price
+export f_effectiveSL(bool isLong, float slFixed, float slTrail) =>
+    if na(slTrail)
+        slFixed
+    else
+        isLong ? math.max(slFixed, slTrail) : math.min(slFixed, slTrail)
+
+// ═══════════════════════════════════════════════════════════════
+// 💵 MARGIN AND EQUITY CALCULATIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Calculate current equity
+// @returns Equity value
+export f_calcEquity(float walletBalance, float totalRealizedPnL, float latchedPnL_L, float latchedPnL_S, float unrealizedTotal) =>
+    math.max(0.0, walletBalance + totalRealizedPnL + latchedPnL_L + latchedPnL_S + unrealizedTotal)
+
+// Calculate free margin
+// @returns Free margin
+export f_calcFreeMargin(float equity, float totalLongNotional, float totalShortNotional, int leverage) =>
+    float usedMargin = (totalLongNotional + totalShortNotional) / leverage
+    equity - usedMargin
+
+// Available equity for liquidation (Cross Margin)
+// @param isLong Is Long account
+// @returns Available equity
+export f_availableEquityForLiq(float walletBalance, float totalRealizedPnL, float latchedPnL_L, float latchedPnL_S, float totalFees, bool useFee, float otherSideNotional, int leverage) =>
+    float feeDeduction = useFee ? totalFees : 0.0
+    float usedMarginByOther = otherSideNotional / leverage
+    math.max(0.0, walletBalance + totalRealizedPnL + latchedPnL_L + latchedPnL_S - feeDeduction - usedMarginByOther)
+
+// ═══════════════════════════════════════════════════════════════
+// 🔄 MP (Min Position) CONTROL
+// ═══════════════════════════════════════════════════════════════
+
+// Is remaining margin below min threshold? (Is full close required?)
+// @param posNotional Current position volume
+// @param exitAmount Amount to exit
+// @param leverage Leverage
+// @param minThreshold Minimum position size (USDT)
+// @returns true if full close required
+export f_shouldForceFullExit(float posNotional, float exitAmount, int leverage, float minThreshold) =>
+    float remaining = posNotional - exitAmount
+    float remainingMargin = remaining / leverage
+    remainingMargin > 0 and remainingMargin < minThreshold
+
+// Calculate Exit PnL
+// @param isLong Is Long
+// @param avgPrice Average price
+// @param exitPrice Exit price
+// @param exitAmount Exit amount
+// @returns PnL value
+export f_calcExitPnL(bool isLong, float avgPrice, float exitPrice, float exitAmount) =>
+    if not na(avgPrice) and avgPrice > 0
+        isLong ? (exitPrice - avgPrice) / avgPrice * exitAmount : (avgPrice - exitPrice) / avgPrice * exitAmount
+    else
+        0.0
+
+// ═══════════════════════════════════════════════════════════════
+// 📏 APPROACH CONTROL
+// ═══════════════════════════════════════════════════════════════
+
+// SL approach control
+// @param isLong Is Long
+// @param priceExtreme Low (Long) or High (Short)
+// @param slPrice SL price
+// @param avgPrice Average price
+// @param approachPct Approach threshold percentage
+// @returns true if approaching
+export f_isApproachingSL(bool isLong, float priceExtreme, float slPrice, float avgPrice, float approachPct) =>
+    float dist = isLong ? priceExtreme - slPrice : slPrice - priceExtreme
+    dist <= f_pctToPrice(approachPct, avgPrice) and dist > 0
+
+// Liquidation approach control
+export f_isApproachingLiq(bool isLong, float priceExtreme, float liqPrice, float avgPrice, float approachPct) =>
+    if na(liqPrice) or liqPrice <= 0
+        false
+    else
+        float dist = isLong ? priceExtreme - liqPrice : liqPrice - priceExtreme
+        dist <= f_pctToPrice(approachPct, avgPrice) and dist > 0
+
+// UNIFIED: SL approach (% or pip mode)
+export f_isApproachingSL_Unified(bool isLong, float priceExtreme, float slPrice, float avgPrice, float approachVal, bool isForex, float pipVal) =>
+    float dist = isLong ? priceExtreme - slPrice : slPrice - priceExtreme
+    float threshold = f_toPrice(approachVal, avgPrice, isForex, pipVal)
+    dist <= threshold and dist > 0
+
+// UNIFIED: Liquidation approach (% or pip mode)
+export f_isApproachingLiq_Unified(bool isLong, float priceExtreme, float liqPrice, float avgPrice, float approachVal, bool isForex, float pipVal) =>
+    if na(liqPrice) or liqPrice <= 0
+        false
+    else
+        float dist = isLong ? priceExtreme - liqPrice : liqPrice - priceExtreme
+        float threshold = f_toPrice(approachVal, avgPrice, isForex, pipVal)
+        dist <= threshold and dist > 0
+
+// ═══════════════════════════════════════════════════════════════
+// 💹 FOREX MARGIN CALCULATIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Forex: Used margin (Lot × Price × Contract / Leverage)
+// @param lots Lot amount
+// @param price Price
+// @param contractSize Contract size
+// @param leverage Leverage
+// @returns Used margin (USD)
+export f_forexUsedMargin(float lots, float price, float contractSize, int leverage) =>
+    lots > 0 ? (lots * price * contractSize) / leverage : 0.0
+
+// Forex: Free margin
+export f_forexFreeMargin(float equity, float usedMarginL, float usedMarginS) =>
+    equity - usedMarginL - usedMarginS
+
+// Forex: PnL calculation (pip based)
+// @param isLong Is Long
+// @param entryPrice Entry price
+// @param exitPrice Exit price
+// @param lots Lot amount
+// @param contractSize Contract size
+// @param pipVal Pip value
+// @returns PnL (USD)
+export f_forexPnL(bool isLong, float entryPrice, float exitPrice, float lots, float contractSize, float pipVal) =>
+    float priceDiff = isLong ? exitPrice - entryPrice : entryPrice - exitPrice
+    float pips = priceDiff / pipVal
+    float pipValuePerLot = pipVal * contractSize
+    pips * pipValuePerLot * lots
+
+// ═══════════════════════════════════════════════════════════════
+// 🔢 PIVOT POINT CALCULATION
+// ═══════════════════════════════════════════════════════════════
+
+// Calculate pivot points
+// @param method Pivot method ('Geleneksel', 'Fibonacci', 'Woodie', 'Camarilla')
+// @param h Previous High
+// @param l Previous Low
+// @param c Previous Close
+// @returns [PP, R1, R2, R3, S1, S2, S3]
+export f_calcPivots(string method, float h, float l, float c) =>
+    float pp = na
+    float r1 = na
+    float r2 = na
+    float r3 = na
+    float s1 = na
+    float s2 = na
+    float s3 = na
+
+    // Method strings: 'Geleneksel' (Traditional), 'Fibonacci', 'Woodie', 'Camarilla'
+    if method == 'Geleneksel' or method == 'Traditional'
+        pp := (h + l + c) / 3
+        r1 := 2 * pp - l
+        s1 := 2 * pp - h
+        r2 := pp + h - l
+        s2 := pp - (h - l)
+        r3 := h + 2 * (pp - l)
+        s3 := l - 2 * (h - pp)
+    else if method == 'Fibonacci'
+        pp := (h + l + c) / 3
+        r1 := pp + 0.382 * (h - l)
+        s1 := pp - 0.382 * (h - l)
+        r2 := pp + 0.618 * (h - l)
+        s2 := pp - 0.618 * (h - l)
+        r3 := pp + 1.000 * (h - l)
+        s3 := pp - 1.000 * (h - l)
+    else if method == 'Woodie'
+        pp := (h + l + 2 * c) / 4
+        r1 := 2 * pp - l
+        s1 := 2 * pp - h
+        r2 := pp + h - l
+        s2 := pp - (h - l)
+        r3 := h + 2 * (pp - l)
+        s3 := l - 2 * (h - pp)
+    else if method == 'Camarilla'
+        pp := (h + l + c) / 3
+        r1 := c + 1.1 / 12 * (h - l)
+        s1 := c - 1.1 / 12 * (h - l)
+        r2 := c + 1.1 / 6 * (h - l)
+        s2 := c - 1.1 / 6 * (h - l)
+        r3 := c + 1.1 / 4 * (h - l)
+        s3 := c - 1.1 / 4 * (h - l)
+
+    [pp, r1, r2, r3, s1, s2, s3]
+
+// ═══════════════════════════════════════════════════════════════
+// 🎯 HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Select signal price (inline price vs close)
+export f_getPrice(float inlinePrice, float currentClose) =>
+    inlinePrice != currentClose and not na(inlinePrice) ? inlinePrice : currentClose
+
+// Stack offset calculation (for label stacking)
+export f_stackOffset(float h, float l) =>
+    float offset = h - l
+    offset == 0 ? syminfo.mintick * 50 : offset

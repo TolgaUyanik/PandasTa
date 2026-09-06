@@ -1,0 +1,243 @@
+//@version=6
+strategy("", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0, currency = currency.USD, initial_capital = 7500, pyramiding = 0, calc_on_order_fills = true, calc_on_every_tick = true, process_orders_on_close = true)
+
+// ===== Risk controls =====
+leverage = input.float(1.0, "Base Leverage", minval = 0.1, step = 0.1)
+hardStopLossPerc = input.float(5.0, "Hard Stop Loss (%)", minval = 0.1, step = 0.1) / 100
+maxPeakEquityDrawdownPerc = input.float(4.0, "Maximum Loss From Peak Equity (%)", minval = 0.1, step = 0.1) / 100
+
+// ===== Market timing controls =====
+crashTriggerPerc = input.float(20.0, "Crash Trigger Drop From SPX ATH (%)", minval = 1.0, step = 0.5) / 100
+athStaleBars = input.int(116, "No SPX ATH Bars Before 200 EMA Extension Filter", minval = 1)
+emaExtensionPerc = input.float(5.0, "Required Extension Above SPX 200 EMA (%)", minval = 0.0, step = 0.25) / 100
+
+// ===== SPY daily data =====
+spxClose = request.security("SPY", "D", close)
+spxLow = request.security("SPY", "D", low)
+
+spxShortMA = ta.sma(spxClose, 7)
+spxLongMA = ta.sma(spxClose, 107)
+spx21ema = ta.ema(spxClose, 21)
+spx200ema = ta.ema(spxClose, 200)
+
+// ===== QQQ daily data =====
+qqqClose = request.security("QQQ", "D", close)
+qqqLow = request.security("QQQ", "D", low)
+
+qqq14ema = ta.ema(qqqClose, 10)
+qqq21ema = ta.ema(qqqClose, 21)
+qqq50sma = ta.sma(qqqClose, 50)
+
+// ===== BTC daily data =====
+btcClose = request.security("INDEX:BTCUSD", "D", close)
+btcLow = request.security("INDEX:BTCUSD", "D", low)
+
+btc10ema = ta.ema(btcClose, 10)
+btc21ema = ta.ema(btcClose, 21)
+btc50sma = ta.sma(btcClose, 50)
+
+btcTrendFlip = btc10ema > btc21ema
+btcHoldingStructure = btcLow > btc21ema
+btcMomentum = btcClose > btcClose[1]
+
+btcBullish = btcTrendFlip and btcHoldingStructure and btcMomentum
+btcAssist = btcBullish and spxClose > spxShortMA
+
+// ===== Current-chart averages =====
+shortMA = ta.sma(close, 7)
+longMA = ta.sma(close, 107)
+_14ema = ta.ema(close, 14)
+_21ema = ta.ema(close, 21)
+_50sma = ta.sma(close, 50)
+_200sma = ta.sma(close, 200)
+
+// ===== Persistent strategy state =====
+var float qqqPriceAtEntry = na
+var float spxAllTimeHigh = na
+var int spxBarsSinceAth = 0
+var bool crashArmed = false
+var bool recoveryHoldActive = false
+var float recoveryAthTarget = na
+var float peakEquityDuringTrade = na
+
+// ===== SPX all-time-high tracking =====
+spxNewAthNow = na(spxAllTimeHigh) or spxClose >= spxAllTimeHigh
+
+if spxNewAthNow
+    spxBarsSinceAth := 0
+else
+    spxBarsSinceAth += 1
+
+spxNoAthSixMonths = spxBarsSinceAth >= athStaleBars
+spxExtendedAbove200Ema = spxClose > spx200ema * (1 + emaExtensionPerc)
+athStaleEntryFilter = not spxNoAthSixMonths or spxExtendedAbove200Ema
+
+spxPriorAth = nz(spxAllTimeHigh, spxClose)
+spxDrawdownFromAth = spxPriorAth > 0 ? 1 - spxClose / spxPriorAth : 0
+spxCrash20Plus = not na(spxAllTimeHigh) and spxDrawdownFromAth >= crashTriggerPerc
+
+if spxCrash20Plus
+    crashArmed := true
+
+if strategy.position_size > 0 and spxCrash20Plus and not recoveryHoldActive
+    recoveryHoldActive := true
+    recoveryAthTarget := spxPriorAth
+
+// ===== Original QQQ stop control =====
+longLossPerc = input.float(3.5, "QQQ Weakness Stop (%)", minval = 0.0, step = 0.1) / 100
+
+// ===== New-position detection =====
+newLongPosition = strategy.position_size > 0 and nz(strategy.position_size[1]) <= 0
+
+if newLongPosition
+    qqqPriceAtEntry := qqqClose
+    peakEquityDuringTrade := strategy.equity
+
+    if crashArmed
+        recoveryHoldActive := true
+        recoveryAthTarget := spxPriorAth
+
+// ===== Update peak equity while position is open =====
+if strategy.position_size > 0
+    peakEquityDuringTrade := na(peakEquityDuringTrade) ? strategy.equity : math.max(peakEquityDuringTrade, strategy.equity)
+
+// ===== Peak-equity drawdown calculation =====
+equityDrawdownFromPeak = strategy.position_size > 0 and not na(peakEquityDuringTrade) and peakEquityDuringTrade > 0 ? (peakEquityDuringTrade - strategy.equity) / peakEquityDuringTrade : 0.0
+peakEquityStopHit = strategy.position_size > 0 and equityDrawdownFromPeak >= maxPeakEquityDrawdownPerc
+
+// ===== Crash recovery logic =====
+spxReachedRecoveryAth = recoveryHoldActive and not na(recoveryAthTarget) and spxClose >= recoveryAthTarget
+
+if spxReachedRecoveryAth
+    recoveryHoldActive := false
+    recoveryAthTarget := na
+    crashArmed := false
+
+if not recoveryHoldActive and not na(spxAllTimeHigh) and spxClose >= spxAllTimeHigh
+    crashArmed := false
+
+spxAllTimeHigh := na(spxAllTimeHigh) ? spxClose : math.max(spxAllTimeHigh, spxClose)
+
+// ===== Existing QQQ-based stop =====
+longStopPrice = nz(qqqPriceAtEntry) * (1 - longLossPerc)
+
+// ===== ADX helper =====
+getADX() =>
+    [p, m, a] = ta.dmi(13, 13)
+    a
+
+// ===== Entry conditions =====
+spxLowAbove21Ema4daysInARow = spxLow > spx21ema and spxLow[1] > spx21ema[1] and spxLow[2] > spx21ema[2] and spxLow[3] > spx21ema[3]
+qqqLowAboveKeyEmas = qqqLow > qqq14ema and qqqLow > qqq21ema
+qqqNotShowingWeakness = not (qqqClose < qqqClose[1] and qqqClose < qqqClose[2] and qqqClose < qqqClose[3])
+
+spxAdxValue = request.security("SPX", "D", getADX())
+isTrending = spxAdxValue > 16
+
+longCondition = spxLowAbove21Ema4daysInARow and qqqLowAboveKeyEmas and qqqNotShowingWeakness and isTrending
+enhancedLongCondition = longCondition or btcAssist
+
+// ===== Normal exit conditions =====
+spxBearishCross = spxShortMA < spxLongMA[1]
+spxPriceWeak = spxClose < spxShortMA
+qqqPriceWeak = qqqClose < qqq21ema
+trendEstablishedLooseStop = spxBearishCross and spxPriceWeak and qqqPriceWeak
+
+stopLevelHit = qqqLow < longStopPrice
+belowFiftySMA = qqqLow < qqq50sma
+initialBuyTightStop = not na(qqqPriceAtEntry) and stopLevelHit and belowFiftySMA
+
+inLosingTrade = strategy.position_size > 0 and not na(qqqPriceAtEntry) and qqqClose < qqqPriceAtEntry
+inWinningTrade = strategy.position_size > 0 and not na(qqqPriceAtEntry) and qqqClose >= qqqPriceAtEntry
+
+losingTradeFastExit = inLosingTrade and qqqClose < qqq21ema and spxClose < spxShortMA
+winningTradeNormalExit = inWinningTrade and (trendEstablishedLooseStop or initialBuyTightStop)
+
+forceRecoveryHold = recoveryHoldActive and not spxReachedRecoveryAth
+exitCondition = not forceRecoveryHold and (losingTradeFastExit or winningTradeNormalExit)
+
+// ===== Backtest date =====
+startDate = input.int(10, "Start Date", minval = 1, maxval = 31)
+startMonth = input.int(3, "Start Month", minval = 1, maxval = 12)
+startYear = input.int(2006, "Start Year", minval = 1920, maxval = 2500)
+
+inDateRange = time >= timestamp(syminfo.timezone, startYear, startMonth, startDate, 0, 0)
+
+// ===== Position sizing =====
+entryQty = close > 0 ? strategy.equity * leverage / close : 0.0
+
+// ===== Entry =====
+if enhancedLongCondition and athStaleEntryFilter and inDateRange and strategy.position_size <= 0 and entryQty > 0
+    strategy.entry("Buy", strategy.long, qty = entryQty)
+
+// ============================================================================
+// HARD 1% STOP LOSS FROM ENTRY PRICE
+//
+// Entry price = $100
+// Hard stop   = $99
+//
+// At 1.2x leverage, a 1% price loss is approximately a 1.2% equity loss.
+// This stop overrides the crash-recovery holding rule.
+// ============================================================================
+hardStopPrice = strategy.position_size > 0 ? strategy.position_avg_price * (1 - hardStopLossPerc) : na
+
+if strategy.position_size > 0
+    strategy.exit("Hard 1% Stop", from_entry = "Buy", stop = hardStopPrice, comment_loss = "Hard 1% Stop")
+
+// ===== Peak-equity and normal exits =====
+if peakEquityStopHit
+    strategy.close_all(comment = "4% Loss From Peak Equity", immediately = true)
+else if exitCondition and inDateRange
+    strategy.close_all(comment = "Normal Exit")
+
+// ===== Reset state after position closes =====
+if strategy.position_size == 0
+    qqqPriceAtEntry := na
+    peakEquityDuringTrade := na
+    recoveryHoldActive := false
+    recoveryAthTarget := na
+
+// ===== Chart colors =====
+r = color.r(chart.bg_color)
+g = color.g(chart.bg_color)
+b = color.b(chart.bg_color)
+
+bool darkMode = r < 80 and g < 80 and b < 80
+
+color color21ema = color.green
+color colorShortMA = color.new(color.purple, 30)
+color colorLongMA = color.new(color.blue, 35)
+color buyBackground = color.new(#5fe9f3, 50)
+
+// ===== Plots =====
+plot(_14ema, color = color.new(color.black, 0), title = "14 EMA")
+plot(_21ema, color = color21ema, title = "21 EMA")
+plot(_50sma, color = color.new(color.red, 0), title = "50 SMA")
+plot(_200sma, color = color.new(color.gray, 0), title = "200 SMA")
+plot(shortMA, color = colorShortMA, title = "7 SMA")
+plot(longMA, color = colorLongMA, title = "107 SMA")
+plot(hardStopPrice, title = "Hard 1% Stop", color = color.orange, linewidth = 2, style = plot.style_linebr)
+
+bgcolor(strategy.position_size > 0 ? buyBackground : na)
+
+// ===== Equity drawdown information table =====
+var table equityTable = table.new(position.top_right, 2, 6, border_width = 1)
+
+if barstate.islast
+    table.cell(equityTable, 0, 0, "Current Equity")
+    table.cell(equityTable, 1, 0, "$" + str.tostring(strategy.equity, "#.##"))
+
+    table.cell(equityTable, 0, 1, "Trade Peak Equity")
+    table.cell(equityTable, 1, 1, na(peakEquityDuringTrade) ? "No Position" : "$" + str.tostring(peakEquityDuringTrade, "#.##"))
+
+    table.cell(equityTable, 0, 2, "Drawdown From Peak")
+    table.cell(equityTable, 1, 2, str.tostring(equityDrawdownFromPeak * 100, "#.##") + "%")
+
+    table.cell(equityTable, 0, 3, "Maximum Peak DD")
+    table.cell(equityTable, 1, 3, str.tostring(maxPeakEquityDrawdownPerc * 100, "#.##") + "%")
+
+    table.cell(equityTable, 0, 4, "Hard Stop")
+    table.cell(equityTable, 1, 4, str.tostring(hardStopLossPerc * 100, "#.##") + "%")
+
+    table.cell(equityTable, 0, 5, "Hard Stop Price")
+    table.cell(equityTable, 1, 5, na(hardStopPrice) ? "No Position" : "$" + str.tostring(hardStopPrice, "#.##"))

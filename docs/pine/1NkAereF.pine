@@ -1,0 +1,341 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © grizzlyinvestment
+//@version=6
+strategy("Auto Fibonacci [Grizzly] v4",
+     shorttitle        = "FibGrz v4",
+     overlay           = true,
+     max_boxes_count   = 0,
+     max_labels_count  = 500,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 33.33,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     initial_capital   = 10000,
+     pyramiding        = 0)
+
+// ══════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ══════════════════════════════════════════════════════════════════════
+G_SW = "Swings"
+G_TF = "Tendencia"
+G_BT = "Backtesting / SL-TP"
+G_MT = "Multi-Timeframe"
+
+lookbackMain = input.int(50,  "Ventana Swing (barras)", minval=10, maxval=300, group=G_SW)
+emaSlowLen   = input.int(100, "EMA Tendencia (4h)",        minval=1,  maxval=500, group=G_TF)
+trendEnabled = input.bool(true, "Filtro de tendencia EMA", group=G_TF)
+emaHTFLen    = input.int(50,  "EMA Diaria (filtro HTF)",   minval=5,  maxval=200, group=G_TF)
+
+signalMode = input.string("Sniper+CC", "Señales activas",
+     options=["All","Sniper only","CC only","CC2 only","CC+CC2","Sniper+CC","Sniper+CC2"],
+     group=G_BT)
+slMode  = input.string("Fib 0.91", "Modo Stop Loss",
+     options=["Fib 0.91","Fib 1.10","Fijo %"], group=G_BT)
+slPct   = input.float(1.5, "SL fijo (%, solo modo Fijo)",
+     minval=0.1, maxval=10, step=0.1, group=G_BT)
+rrRatio = input.float(3.0, "Ratio RR (1:N)",
+     minval=1.0, maxval=10.0, step=0.5, group=G_BT)
+minBars = input.int(3, "Mín. barras entre entradas",
+     minval=1, maxval=100, group=G_BT)
+
+htfSignal = input.string("None", "TF Señal (HTF)",
+     options=["None","15","60","240","D","W"],
+     tooltip="None = señal en TF del gráfico. Cualquier otro = señal desde ese TF superior.", group=G_MT)
+htfValid  = input.string("None", "TF Validación (intermedio)",
+     options=["None","15","60","240","D"],
+     tooltip="Solo relevante en combinaciones 3-TF. Requiere HTF Señal activo.", group=G_MT)
+
+// ══════════════════════════════════════════════════════════════════════
+//  FUNCIÓN CORE: CÁLCULO FIBONACCI + SEÑALES SNIPER
+//  Diseñada para ser usada tanto en TF actual como via request.security()
+// ══════════════════════════════════════════════════════════════════════
+f_fib(src_h, src_l, src_c, ema_len, lb, use_trend) =>
+    ema_s  = ta.ema(src_c, ema_len)
+    mHiAgo = -ta.highestbars(src_h, lb)
+    mLoAgo = -ta.lowestbars(src_l,  lb)
+    mHi    = src_h[mHiAgo]
+    mLo    = src_l[mLoAgo]
+    rng    = mHi - mLo
+    // Dirección por EMA — sin restricción de estructura (Opción C)
+    bull   = (bar_index - mLoAgo) < (bar_index - mHiAgo)
+    bear   = (bar_index - mHiAgo) < (bar_index - mLoAgo)
+    bTrend = use_trend ? src_c > ema_s : true
+    bTrear = use_trend ? src_c < ema_s : true
+
+    // Zonas Fibonacci siempre activas en ambas direcciones
+    r618b = rng > 0 ? mHi - rng * 0.618 : na
+    r786b = rng > 0 ? mHi - rng * 0.786 : na
+    sl91b = rng > 0 ? mHi - rng * 0.910 : na
+    sl11b = rng > 0 ? mHi - rng * 1.100 : na
+    r618s = rng > 0 ? mLo + rng * 0.618 : na
+    r786s = rng > 0 ? mLo + rng * 0.786 : na
+    sl91s = rng > 0 ? mLo + rng * 0.910 : na
+    sl11s = rng > 0 ? mLo + rng * 1.100 : na
+
+    // Solo EMA define la dirección — sin restricción de estructura
+    bOk   = bTrend
+    sOk   = bTrear
+    // Sniper: primer toque del low a la zona de reversión
+    bSnip = bOk and (
+         (not na(r618b) and src_l <= r618b and src_l[1] > r618b) or
+         (not na(r786b) and src_l <= r786b and src_l[1] > r786b))
+    sSnip = sOk and (
+         (not na(r618s) and src_h >= r618s and src_h[1] < r618s) or
+         (not na(r786s) and src_h >= r786s and src_h[1] < r786s))
+
+    [bSnip, sSnip, mHi, mLo, rng, bull, bear,
+     r618b, r786b, sl91b, sl11b,
+     r618s, r786s, sl91s, sl11s, ema_s]
+
+// EMA diaria para filtro de tendencia HTF
+dailyEma = request.security(syminfo.tickerid, "D",
+     ta.ema(close, emaHTFLen), lookahead=barmerge.lookahead_off)
+
+// ══════════════════════════════════════════════════════════════════════
+//  TF ACTUAL — sin filtro interno, la dirección la da la EMA diaria
+// ══════════════════════════════════════════════════════════════════════
+[bSnip0, sSnip0, mHi0, mLo0, mRng0, bull0, bear0,
+ r618b0, r786b0, sl91b0, sl11b0,
+ r618s0, r786s0, sl91s0, sl11s0, ema0] =
+     f_fib(high, low, close, emaSlowLen, lookbackMain, false)
+
+// ══════════════════════════════════════════════════════════════════════
+//  HTF (via request.security — mismo cálculo, TF diferente)
+// ══════════════════════════════════════════════════════════════════════
+htfTF = htfSignal == "None" ? timeframe.period : htfSignal
+
+[htfBSnip, htfSSnip, htfMHi, htfMLo, htfRng, htfBull, htfBear,
+ htfR618b, htfR786b, htfSl91b, htfSl11b,
+ htfR618s, htfR786s, htfSl91s, htfSl11s, htfEma] =
+     request.security(syminfo.tickerid, htfTF,
+          f_fib(high, low, close, emaSlowLen, lookbackMain, false),
+          lookahead=barmerge.lookahead_off)
+
+// Validación opcional (3er TF intermedio)
+validTF    = htfValid == "None" ? timeframe.period : htfValid
+useValidTF = htfSignal != "None" and htfValid != "None"
+[valBull, valBear, _vm1, _vm2, _vm3, _vm4, _vm5,
+ _vm6, _vm7, _vm8, _vm9, _vm10, _vm11, _vm12, _vm13, _vm14] =
+     request.security(syminfo.tickerid, validTF,
+          f_fib(high, low, close, emaSlowLen, lookbackMain, false),
+          lookahead=barmerge.lookahead_off)
+
+// ── Selección de fuente según configuración MTF ──────────────────────
+useMTF        = htfSignal != "None"
+anyBullSniper = useMTF ? htfBSnip  : bSnip0
+anyBearSniper = useMTF ? htfSSnip  : sSnip0
+mHi           = useMTF ? htfMHi   : mHi0
+mLo           = useMTF ? htfMLo   : mLo0
+mRng          = useMTF ? htfRng   : mRng0
+r618b         = useMTF ? htfR618b : r618b0
+r786b         = useMTF ? htfR786b : r786b0
+sl91b         = useMTF ? htfSl91b : sl91b0
+sl11b         = useMTF ? htfSl11b : sl11b0
+r618s         = useMTF ? htfR618s : r618s0
+r786s         = useMTF ? htfR786s : r786s0
+sl91s         = useMTF ? htfSl91s : sl91s0
+sl11s         = useMTF ? htfSl11s : sl11s0
+
+// Filtro de tendencia: EMA diaria reemplaza a la EMA de 4h como gate de dirección
+validOk_bull  = not useValidTF or valBull
+validOk_bear  = not useValidTF or valBear
+dailyOk_bull  = not trendEnabled or close > dailyEma
+dailyOk_bear  = not trendEnabled or close < dailyEma
+anyBullSniper := anyBullSniper and validOk_bull and dailyOk_bull
+anyBearSniper := anyBearSniper and validOk_bear and dailyOk_bear
+
+// ══════════════════════════════════════════════════════════════════════
+//  CC TRACKING — instancias coexistentes (bull)
+//  Cada sniper registra: signalLow + mainHigh → calcula niveles 0.236/0.382
+// ══════════════════════════════════════════════════════════════════════
+var float[] bcc_sl = array.new_float()
+var float[] bcc_mh = array.new_float()
+var int[]   bcc_bi = array.new_int()
+var bool[]  bcc_d1 = array.new_bool()
+var bool[]  bcc_d2 = array.new_bool()
+
+var float[] scc_sh = array.new_float()
+var float[] scc_ml = array.new_float()
+var int[]   scc_bi = array.new_int()
+var bool[]  scc_d1 = array.new_bool()
+var bool[]  scc_d2 = array.new_bool()
+
+if anyBullSniper
+    array.push(bcc_sl, low)
+    array.push(bcc_mh, mHi)
+    array.push(bcc_bi, bar_index)
+    array.push(bcc_d1, false)
+    array.push(bcc_d2, false)
+
+if anyBearSniper
+    array.push(scc_sh, high)
+    array.push(scc_ml, mLo)
+    array.push(scc_bi, bar_index)
+    array.push(scc_d1, false)
+    array.push(scc_d2, false)
+
+b_buyCC  = false
+b_buyCC2 = false
+if array.size(bcc_sl) > 0
+    for i = array.size(bcc_sl) - 1 to 0
+        if bar_index <= array.get(bcc_bi, i)
+            continue
+        sl_  = array.get(bcc_sl, i)
+        mh_  = array.get(bcc_mh, i)
+        rng_ = mh_ - sl_
+        if rng_ <= 0
+            continue
+        cc1 = sl_ + rng_ * 0.236
+        cc2 = sl_ + rng_ * 0.382
+        d1  = array.get(bcc_d1, i)
+        d2  = array.get(bcc_d2, i)
+        if not d1 and close >= cc1 and close[1] < cc1
+            b_buyCC := true
+            array.set(bcc_d1, i, true)
+            d1 := true
+        if not d2 and close >= cc2 and close[1] < cc2
+            b_buyCC2 := true
+            array.set(bcc_d2, i, true)
+            d2 := true
+        if d1 and d2
+            array.remove(bcc_sl, i)
+            array.remove(bcc_mh, i)
+            array.remove(bcc_bi, i)
+            array.remove(bcc_d1, i)
+            array.remove(bcc_d2, i)
+
+s_sellCC  = false
+s_sellCC2 = false
+if array.size(scc_sh) > 0
+    for i = array.size(scc_sh) - 1 to 0
+        if bar_index <= array.get(scc_bi, i)
+            continue
+        sh_  = array.get(scc_sh, i)
+        ml_  = array.get(scc_ml, i)
+        rng_ = sh_ - ml_
+        if rng_ <= 0
+            continue
+        cc1 = sh_ - rng_ * 0.236
+        cc2 = sh_ - rng_ * 0.382
+        d1  = array.get(scc_d1, i)
+        d2  = array.get(scc_d2, i)
+        if not d1 and close <= cc1 and close[1] > cc1
+            s_sellCC := true
+            array.set(scc_d1, i, true)
+            d1 := true
+        if not d2 and close <= cc2 and close[1] > cc2
+            s_sellCC2 := true
+            array.set(scc_d2, i, true)
+            d2 := true
+        if d1 and d2
+            array.remove(scc_sh, i)
+            array.remove(scc_ml, i)
+            array.remove(scc_bi, i)
+            array.remove(scc_d1, i)
+            array.remove(scc_d2, i)
+
+// ══════════════════════════════════════════════════════════════════════
+//  PLOTSHAPES — SEÑALES
+// ══════════════════════════════════════════════════════════════════════
+plotshape(b_buyCC2, title="BUY CC2",
+     style=shape.labelup, location=location.belowbar,
+     color=color.new(color.green, 0), textcolor=color.white,
+     text="BUY", size=size.large)
+
+plotshape(s_sellCC2, title="SELL CC2",
+     style=shape.labeldown, location=location.abovebar,
+     color=color.new(color.red, 0), textcolor=color.white,
+     text="SELL", size=size.large)
+
+// ══════════════════════════════════════════════════════════════════════
+//  ALERTAS
+// ══════════════════════════════════════════════════════════════════════
+alert(anyBullSniper ? "⚡ BUY Sniper | Zona reversal Fib"   : na)
+alert(b_buyCC       ? "✅ BUY CC | Confirmación 0.236"      : na)
+alert(b_buyCC2      ? "✅✅ BUY CC2 | Confirmación 0.382"   : na)
+alert(anyBearSniper ? "⚡ SELL Sniper | Zona reversal Fib"  : na)
+alert(s_sellCC      ? "✅ SELL CC | Confirmación 0.236"     : na)
+alert(s_sellCC2     ? "✅✅ SELL CC2 | Confirmación 0.382"  : na)
+
+// ══════════════════════════════════════════════════════════════════════
+//  CÁLCULO SL / TP FIBONACCI 1:RR
+// ══════════════════════════════════════════════════════════════════════
+f_buySL(entry_px) =>
+    sl_fib = slMode == "Fib 0.91" ? sl91b :
+             slMode == "Fib 1.10" ? sl11b : na
+    // Fallback a % fijo si el nivel fib no está disponible o está por encima de la entrada
+    valid = not na(sl_fib) and sl_fib < entry_px
+    valid ? sl_fib : entry_px * (1.0 - slPct / 100.0)
+
+f_sellSL(entry_px) =>
+    sl_fib = slMode == "Fib 0.91" ? sl91s :
+             slMode == "Fib 1.10" ? sl11s : na
+    valid = not na(sl_fib) and sl_fib > entry_px
+    valid ? sl_fib : entry_px * (1.0 + slPct / 100.0)
+
+f_buyTP(entry_px, sl_px)  => entry_px + rrRatio * (entry_px - sl_px)
+f_sellTP(entry_px, sl_px) => entry_px - rrRatio * (sl_px - entry_px)
+
+// ══════════════════════════════════════════════════════════════════════
+//  BACKTESTING
+// ══════════════════════════════════════════════════════════════════════
+useSniper = signalMode == "All" or signalMode == "Sniper only" or
+     signalMode == "Sniper+CC" or signalMode == "Sniper+CC2"
+useCC  = signalMode == "All" or signalMode == "CC only" or
+     signalMode == "CC+CC2" or signalMode == "Sniper+CC"
+useCC2 = signalMode == "All" or signalMode == "CC2 only" or
+     signalMode == "CC+CC2" or signalMode == "Sniper+CC2"
+
+var int lastEntryBar = na
+canTrade = na(lastEntryBar) or (bar_index - lastEntryBar) >= minBars
+
+// ── BUY entries ──────────────────────────────────────────────────────
+if useSniper and anyBullSniper and canTrade and strategy.position_size == 0
+    ep  = close
+    slv = f_buySL(ep)
+    tpv = f_buyTP(ep, slv)
+    strategy.entry("L", strategy.long)
+    strategy.exit("Lx", from_entry="L", limit=tpv, stop=slv)
+    lastEntryBar := bar_index
+
+if useCC and b_buyCC and canTrade and strategy.position_size == 0
+    ep  = close
+    slv = f_buySL(ep)
+    tpv = f_buyTP(ep, slv)
+    strategy.entry("L_cc", strategy.long)
+    strategy.exit("Lx_cc", from_entry="L_cc", limit=tpv, stop=slv)
+    lastEntryBar := bar_index
+
+if useCC2 and b_buyCC2 and canTrade and strategy.position_size == 0
+    ep  = close
+    slv = f_buySL(ep)
+    tpv = f_buyTP(ep, slv)
+    strategy.entry("L_cc2", strategy.long)
+    strategy.exit("Lx_cc2", from_entry="L_cc2", limit=tpv, stop=slv)
+    lastEntryBar := bar_index
+
+// ── SELL entries ─────────────────────────────────────────────────────
+if useSniper and anyBearSniper and canTrade and strategy.position_size == 0
+    ep  = close
+    slv = f_sellSL(ep)
+    tpv = f_sellTP(ep, slv)
+    strategy.entry("S", strategy.short)
+    strategy.exit("Sx", from_entry="S", limit=tpv, stop=slv)
+    lastEntryBar := bar_index
+
+if useCC and s_sellCC and canTrade and strategy.position_size == 0
+    ep  = close
+    slv = f_sellSL(ep)
+    tpv = f_sellTP(ep, slv)
+    strategy.entry("S_cc", strategy.short)
+    strategy.exit("Sx_cc", from_entry="S_cc", limit=tpv, stop=slv)
+    lastEntryBar := bar_index
+
+if useCC2 and s_sellCC2 and canTrade and strategy.position_size == 0
+    ep  = close
+    slv = f_sellSL(ep)
+    tpv = f_sellTP(ep, slv)
+    strategy.entry("S_cc2", strategy.short)
+    strategy.exit("Sx_cc2", from_entry="S_cc2", limit=tpv, stop=slv)
+    lastEntryBar := bar_index

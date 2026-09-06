@@ -1,0 +1,498 @@
+//@version=6
+//@description AutoTrader Web alert builder by Stocks Developer — turn TradingView alerts into real broker orders across many accounts and brokers. Ready-made functions for single orders, options the easy way, 8 option structures (straddle/strangle/spreads/iron condor/iron fly), custom multi-leg, account or group targeting, and your own risk limits. No alert-text typing. https://stocksdeveloper.in
+library("StocksDeveloperAlerts", overlay = true)
+
+// ============================================================================
+//  StocksDeveloperAlerts — TradingView Alert Builder for AutoTrader Web
+//  By Stocks Developer  ·  https://stocksdeveloper.in
+//  Guide: https://stocksdeveloper.in/documentation/alert-automation/
+//
+//  WHAT THIS IS
+//  Turn your TradingView alerts into real broker orders — placed across many
+//  accounts and many brokers — without hand-writing any alert text. You point a
+//  TradingView webhook at your own private link; when your alert fires, the
+//  order is placed in the account (or the whole group of accounts) you name.
+//
+//  AutoTrader Web is a multi-account, multi-broker order-automation tool for
+//  Indian markets. This library gives you ready-made functions that build the
+//  exact alert message for you, so you never touch the raw alert syntax:
+//    - single stock / futures / option orders (market, limit, stop-loss)
+//    - options the easy way: give the underlier, pick ATM / OTM / ITM + expiry
+//    - 8 ready-made option structures, one function each: straddle, strangle,
+//      bull-call, bear-put, bull-put, bear-call, iron condor, iron fly
+//    - your own custom multi-leg (up to 10 legs)
+//    - send one alert to a single account or a whole group of accounts
+//    - attach your own risk limit (for example, a maximum daily loss)
+//
+//  You bring the strategy and the signal. The tool only places the orders you
+//  set up, and you can stop it any time. Your API credentials never appear in
+//  the alert or in the link.
+//
+//  HOW TO USE
+//    1. In your script:   import <your-handle>/StocksDeveloperAlerts/1 as atw
+//    2. Call a function to get the alert text, then fire it yourself:
+//
+//         if longSignal
+//             alert(atw.option(symbol="NIFTY", exchange="NFO",
+//                   producttype="NORMAL", tradetype="BUY", optiontype="CE",
+//                   strike="ATM", expiry="weekly", account="MY_ACC", lots=1),
+//                   alert.freq_once_per_bar_close)
+//
+//       Or, inside a strategy, hand it to the order's alert_message:
+//         strategy.entry("L", strategy.long,
+//                        alert_message = atw.equity(symbol="SBIN",
+//                        exchange="NSE", producttype="INTRADAY",
+//                        tradetype="BUY", account="MY_ACC", lots=1))
+//
+//    3. Create the alert in TradingView, turn on "Webhook URL", and paste your
+//       own private link from AutoTrader Web (Alert Auto. -> Tokens).
+//
+//  Get started (free trial): https://stocksdeveloper.in
+// ============================================================================
+
+
+// ============================================================================
+//  Private helpers (not exported)
+// ============================================================================
+
+// Build one "key=value" line, or "" when the value is empty (so unset fields
+// are simply left out of the message).
+kv(string key, string val) =>
+    val == "" ? "" : key + "=" + val + "\n"
+
+// Append a raw, pre-built block (risk lines or a free-form passthrough). A
+// trailing blank line is harmless — the server collapses consecutive line
+// breaks — so we never have to worry about whether the block ends in a newline.
+appendBlock(string block) =>
+    block == "" ? "" : block + "\n"
+
+// Validate + canonicalise the target (account OR group — exactly one). Errors
+// show up in the Pine editor, before any alert is ever created.
+target(string account, string group) =>
+    bool hasAcc = account != ""
+    bool hasGrp = group != ""
+    if hasAcc and hasGrp
+        runtime.error("StocksDeveloperAlerts: set 'account' OR 'group', not both.")
+    if not hasAcc and not hasGrp
+        runtime.error("StocksDeveloperAlerts: missing target — set account=\"NAME\" for one account or group=\"NAME\" for a group.")
+    hasGrp ? kv("group", group) : kv("account", account)
+
+// Validate + build the size line (lots OR quantity — exactly one, positive).
+sizeLine(int lots, int quantity) =>
+    bool hasLots = lots > 0
+    bool hasQty = quantity > 0
+    if hasLots and hasQty
+        runtime.error("StocksDeveloperAlerts: set 'lots' OR 'quantity', not both.")
+    if not hasLots and not hasQty
+        runtime.error("StocksDeveloperAlerts: missing size — set lots=N or quantity=N (a positive whole number).")
+    hasLots ? kv("lots", str.tostring(lots)) : kv("quantity", str.tostring(quantity))
+
+reqProduct(string p) =>
+    string u = str.upper(p)
+    if u != "INTRADAY" and u != "DELIVERY" and u != "NORMAL" and u != "MTF"
+        runtime.error("StocksDeveloperAlerts: producttype must be INTRADAY, DELIVERY, NORMAL or MTF (got '" + p + "').")
+    u
+
+reqTrade(string t) =>
+    string u = str.upper(t)
+    string r = (u == "BUY" or u == "B" or u == "LONG") ? "BUY" : (u == "SELL" or u == "S" or u == "SHORT") ? "SELL" : ""
+    if r == ""
+        runtime.error("StocksDeveloperAlerts: tradetype must be BUY or SELL (got '" + t + "').")
+    r
+
+reqOption(string o) =>
+    string u = str.upper(o)
+    string r = (u == "CE" or u == "C" or u == "CALL") ? "CE" : (u == "PE" or u == "P" or u == "PUT") ? "PE" : ""
+    if r == ""
+        runtime.error("StocksDeveloperAlerts: optiontype must be CE (call) or PE (put) (got '" + o + "').")
+    r
+
+reqOrderType(string o) =>
+    string u = str.upper(o)
+    if u != "MARKET" and u != "LIMIT" and u != "STOP_LOSS" and u != "SL_MARKET"
+        runtime.error("StocksDeveloperAlerts: ordertype must be MARKET, LIMIT, STOP_LOSS or SL_MARKET (got '" + o + "').")
+    u
+
+reqValidity(string v) =>
+    string u = str.upper(v)
+    if u != "DAY" and u != "IOC" and u != "GTC" and u != "GTD" and u != "GFD" and u != "TTL" and u != "EOS" and u != "COL"
+        runtime.error("StocksDeveloperAlerts: validity must be DAY or IOC (got '" + v + "').")
+    u
+
+// Common opening lines shared by every order: target, symbol, exchange, product.
+base(string account, string group, string symbol, string exchange, string producttype) =>
+    string m = target(account, group)
+    m += kv("symbol", symbol)
+    m += kv("exchange", str.upper(exchange))
+    m += kv("producttype", reqProduct(producttype))
+    m
+
+
+// ============================================================================
+//  Universal single-leg order — covers every field for one order.
+// ============================================================================
+
+//@function Build an alert message for a single order (stock, futures or one option leg). This is the full builder; equity() and option() are shorter wrappers over it. Set exactly one of account/group and exactly one of lots/quantity. Add optiontype to make it an option order.
+//@param symbol (series string) Broker-independent symbol, e.g. "NIFTY", "BANKNIFTY", "SBIN". For options, pass the underlier (e.g. "NIFTY"), not a full contract.
+//@param exchange (series string) Exchange code, e.g. "NSE"/"BSE" for stocks, "NFO" for options and futures.
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param tradetype (series string) BUY or SELL.
+//@param account (series string) Place in this single account. Set this OR group.
+//@param group (series string) Place in every live account in this group. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param ordertype (series string) MARKET (default), LIMIT, STOP_LOSS or SL_MARKET.
+//@param price (series float) Limit price (required for LIMIT).
+//@param triggerprice (series float) Trigger price (for stop-loss orders).
+//@param validity (series string) DAY (default) or IOC.
+//@param amo (series bool) true for an after-market order.
+//@param optiontype (series string) CE for a call, PE for a put. Adding this makes it an option order.
+//@param strike (series string) ATM (default), ATM+1 / ATM-2, OTM / OTM2, ITM / ITM2, or an exact strike like "24500". Requires optiontype.
+//@param expiry (series string) weekly (default), next, monthly, or an exact date like "10-JUL-2026". Requires optiontype.
+//@param spothint (series string) Advanced: a spot price to help option-strike selection.
+//@param usespot (series bool) Advanced: use the spot hint for strike selection.
+//@param onslicefailure (series string) Advanced: continue (default), alert or retry, if a large order that was auto-split has a slice fail.
+//@param risk (series string) A risk block from risk() — for example risk=atw.risk(maxloss=5000).
+//@param extra (series string) Advanced: any extra "key=value" lines to pass through unchanged (one per line).
+//@returns (series string) The ready-to-send alert message.
+export order(string symbol, string exchange, string producttype, string tradetype, string account = "", string group = "", int lots = 0, int quantity = 0, string ordertype = "MARKET", float price = 0, float triggerprice = 0, string validity = "DAY", bool amo = false, string optiontype = "", string strike = "", string expiry = "", string spothint = "", bool usespot = false, string onslicefailure = "", string risk = "", string extra = "") =>
+    string ot = str.upper(ordertype)
+    if ot == "LIMIT" and price <= 0
+        runtime.error("StocksDeveloperAlerts: ordertype=LIMIT needs a price.")
+    if (ot == "STOP_LOSS" or ot == "SL_MARKET") and triggerprice <= 0
+        runtime.error("StocksDeveloperAlerts: a stop-loss ordertype needs a triggerprice.")
+    string m = base(account, group, symbol, exchange, producttype)
+    m += kv("tradetype", reqTrade(tradetype))
+    m += sizeLine(lots, quantity)
+    if optiontype != ""
+        m += kv("optiontype", reqOption(optiontype))
+        m += kv("strike", strike == "" ? "ATM" : strike)
+        m += kv("expiry", expiry == "" ? "weekly" : expiry)
+    m += kv("ordertype", reqOrderType(ordertype))
+    m += price > 0 ? kv("price", str.tostring(price)) : ""
+    m += triggerprice > 0 ? kv("triggerprice", str.tostring(triggerprice)) : ""
+    m += validity != "" ? kv("validity", reqValidity(validity)) : ""
+    m += amo ? kv("amo", "true") : ""
+    m += kv("spothint", spothint)
+    m += usespot ? kv("spotuse", "true") : ""
+    m += onslicefailure != "" ? kv("onslicefailure", str.lower(onslicefailure)) : ""
+    m += appendBlock(risk)
+    m += appendBlock(extra)
+    m
+
+
+// ============================================================================
+//  Convenience wrappers for the two everyday cases
+// ============================================================================
+
+//@function Build an alert for a single stock or futures order (no option fields). Set exactly one of account/group and exactly one of lots/quantity.
+//@param symbol (series string) Broker-independent symbol, e.g. "SBIN".
+//@param exchange (series string) Exchange code, e.g. "NSE" or "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param tradetype (series string) BUY or SELL.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param ordertype (series string) MARKET (default), LIMIT, STOP_LOSS or SL_MARKET.
+//@param price (series float) Limit price (required for LIMIT).
+//@param triggerprice (series float) Trigger price (for stop-loss orders).
+//@param validity (series string) DAY (default) or IOC.
+//@param amo (series bool) true for an after-market order.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export equity(string symbol, string exchange, string producttype, string tradetype, string account = "", string group = "", int lots = 0, int quantity = 0, string ordertype = "MARKET", float price = 0, float triggerprice = 0, string validity = "DAY", bool amo = false, string risk = "", string extra = "") =>
+    order(symbol = symbol, exchange = exchange, producttype = producttype, tradetype = tradetype, account = account, group = group, lots = lots, quantity = quantity, ordertype = ordertype, price = price, triggerprice = triggerprice, validity = validity, amo = amo, risk = risk, extra = extra)
+
+//@function Build an option order the easy way — give the underlier and pick the strike + expiry; no need to type the full option symbol. Set exactly one of account/group and exactly one of lots/quantity.
+//@param symbol (series string) The underlier, e.g. "NIFTY", "BANKNIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param tradetype (series string) BUY or SELL.
+//@param optiontype (series string) CE for a call, PE for a put.
+//@param strike (series string) ATM (default), ATM+1 / ATM-2, OTM / OTM2, ITM / ITM2, or an exact strike like "24500".
+//@param expiry (series string) weekly (default), next, monthly, or an exact date like "10-JUL-2026".
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param ordertype (series string) MARKET (default), LIMIT, STOP_LOSS or SL_MARKET.
+//@param price (series float) Limit price (required for LIMIT).
+//@param triggerprice (series float) Trigger price (for stop-loss orders).
+//@param validity (series string) DAY (default) or IOC.
+//@param amo (series bool) true for an after-market order.
+//@param spothint (series string) Advanced: a spot price to help strike selection.
+//@param usespot (series bool) Advanced: use the spot hint for strike selection.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export option(string symbol, string exchange, string producttype, string tradetype, string optiontype, string strike = "ATM", string expiry = "weekly", string account = "", string group = "", int lots = 0, int quantity = 0, string ordertype = "MARKET", float price = 0, float triggerprice = 0, string validity = "DAY", bool amo = false, string spothint = "", bool usespot = false, string risk = "", string extra = "") =>
+    order(symbol = symbol, exchange = exchange, producttype = producttype, tradetype = tradetype, optiontype = optiontype, strike = strike, expiry = expiry, account = account, group = group, lots = lots, quantity = quantity, ordertype = ordertype, price = price, triggerprice = triggerprice, validity = validity, amo = amo, spothint = spothint, usespot = usespot, risk = risk, extra = extra)
+
+
+// ============================================================================
+//  Ready-made option structures — one function each.
+//  The server builds each leg for you and places the protective BUY legs first.
+//  direction "BUY" builds the structure as named; "SELL" flips every leg.
+// ============================================================================
+
+// Shared structure assembler.
+structIt(string strat, string symbol, string exchange, string producttype, string account, string group, int lots, int quantity, string expiry, string direction, int width, int wing, string ordertype, float price, string onlegfailure, string risk, string extra) =>
+    string ot = str.upper(ordertype)
+    if ot == "LIMIT" and price <= 0
+        runtime.error("StocksDeveloperAlerts: ordertype=LIMIT needs a price.")
+    string m = base(account, group, symbol, exchange, producttype)
+    m += kv("strategy", strat)
+    m += sizeLine(lots, quantity)
+    m += kv("expiry", expiry)
+    m += kv("tradetype", reqTrade(direction))
+    m += width > 0 ? kv("width", str.tostring(width)) : ""
+    m += wing > 0 ? kv("wing", str.tostring(wing)) : ""
+    m += kv("ordertype", reqOrderType(ordertype))
+    m += price > 0 ? kv("price", str.tostring(price)) : ""
+    m += onlegfailure != "" ? kv("onlegfailure", str.lower(onlegfailure)) : ""
+    m += appendBlock(risk)
+    m += appendBlock(extra)
+    m
+
+//@function Straddle — buy (or sell) a call and a put at the money. direction "BUY" = long straddle, "SELL" = short straddle.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) builds the structure as named; SELL flips every leg.
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue, if one leg cannot be placed.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export straddle(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("straddle", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, 0, 0, ordertype, price, onlegfailure, risk, extra)
+
+//@function Strangle — buy (or sell) an out-of-the-money call and put, each 'width' strikes out. direction "BUY" = long strangle, "SELL" = short strangle.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param width (series int) How far out of the money the legs sit, in strike steps (default 2).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export strangle(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int width = 2, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("strangle", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, width, 0, ordertype, price, onlegfailure, risk, extra)
+
+//@function Bull call spread — buy a call at the money and sell a call 'width' strikes out. Use direction "SELL" to reverse.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param width (series int) Distance between the two strikes, in strike steps (default 2).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export bullCall(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int width = 2, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("bull-call", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, width, 0, ordertype, price, onlegfailure, risk, extra)
+
+//@function Bear put spread — buy a put at the money and sell a put 'width' strikes out. Use direction "SELL" to reverse.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param width (series int) Distance between the two strikes, in strike steps (default 2).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export bearPut(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int width = 2, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("bear-put", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, width, 0, ordertype, price, onlegfailure, risk, extra)
+
+//@function Bull put spread (credit) — sell a put at the money and buy a put 'width' strikes out. Use direction "SELL" to reverse.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param width (series int) Distance between the two strikes, in strike steps (default 2).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export bullPut(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int width = 2, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("bull-put", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, width, 0, ordertype, price, onlegfailure, risk, extra)
+
+//@function Bear call spread (credit) — sell a call at the money and buy a call 'width' strikes out. Use direction "SELL" to reverse.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param width (series int) Distance between the two strikes, in strike steps (default 2).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export bearCall(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int width = 2, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("bear-call", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, width, 0, ordertype, price, onlegfailure, risk, extra)
+
+//@function Iron condor — sell a call and a put 'width' strikes out, and buy a call and a put 'width'+'wing' strikes out as protection. direction "BUY" builds this credit condor; "SELL" reverses it.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param width (series int) How far out the sold legs sit, in strike steps (default 2).
+//@param wing (series int) Extra distance out to the protective legs, in strike steps (defaults to width).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export ironCondor(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int width = 2, int wing = 0, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("iron-condor", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, width, wing, ordertype, price, onlegfailure, risk, extra)
+
+//@function Iron fly — sell a call and a put at the money, and buy a call and a put 'wing' strikes out as protection. direction "BUY" builds this credit fly; "SELL" reverses it.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param wing (series int) How far out the protective legs sit, in strike steps (default 2).
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param direction (series string) BUY (default) or SELL (flips every leg).
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export ironFly(string symbol, string exchange, string producttype, string account = "", string group = "", int lots = 0, int quantity = 0, int wing = 2, string expiry = "weekly", string direction = "BUY", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    structIt("iron-fly", symbol, exchange, producttype, account, group, lots, quantity, expiry, direction, 0, wing, ordertype, price, onlegfailure, risk, extra)
+
+
+// ============================================================================
+//  Custom multi-leg — build your own exact set of legs (up to 10).
+// ============================================================================
+
+//@function Build one option leg string for use with multiLeg(), e.g. atw.leg("CE", "ATM+2", "SELL", 2) -> "CE ATM+2 SELL x2".
+//@param optiontype (series string) CE for a call, PE for a put.
+//@param strike (series string) ATM, ATM+2, OTM2, ITM1, or an exact strike like "24500".
+//@param tradetype (series string) BUY or SELL for this leg.
+//@param multiplier (series int) Size multiplier for this leg (default 1).
+//@returns (series string) The leg descriptor.
+export leg(string optiontype, string strike, string tradetype, int multiplier = 1) =>
+    string s = reqOption(optiontype) + " " + strike + " " + reqTrade(tradetype)
+    multiplier > 1 ? s + " x" + str.tostring(multiplier) : s
+
+//@function Build an alert for a fully custom multi-leg order from a list of legs (1 to 10) made with leg(). Set exactly one of account/group and exactly one of lots/quantity.
+//@param symbol (series string) The underlier, e.g. "NIFTY".
+//@param exchange (series string) Options exchange code, e.g. "NFO".
+//@param producttype (series string) INTRADAY, DELIVERY, NORMAL or MTF.
+//@param legs (array<string>) The legs, e.g. array.from(atw.leg("PE","ATM-2","SELL"), atw.leg("PE","ATM-6","BUY")).
+//@param account (series string) Single account. Set this OR group.
+//@param group (series string) Group of accounts. Set this OR account.
+//@param lots (series int) Number of lots. Set this OR quantity.
+//@param quantity (series int) Exact quantity. Set this OR lots.
+//@param expiry (series string) weekly (default), next, monthly, or an exact date.
+//@param ordertype (series string) MARKET (default) or LIMIT.
+//@param price (series float) Limit price (required for LIMIT).
+//@param onlegfailure (series string) alert (default), cancel or continue.
+//@param risk (series string) A risk block from risk().
+//@param extra (series string) Extra "key=value" lines to pass through unchanged.
+//@returns (series string) The ready-to-send alert message.
+export multiLeg(string symbol, string exchange, string producttype, array<string> legs, string account = "", string group = "", int lots = 0, int quantity = 0, string expiry = "weekly", string ordertype = "MARKET", float price = 0, string onlegfailure = "alert", string risk = "", string extra = "") =>
+    int n = array.size(legs)
+    if n < 1 or n > 10
+        runtime.error("StocksDeveloperAlerts: multiLeg needs 1 to 10 legs (got " + str.tostring(n) + ").")
+    string ot = str.upper(ordertype)
+    if ot == "LIMIT" and price <= 0
+        runtime.error("StocksDeveloperAlerts: ordertype=LIMIT needs a price.")
+    string m = base(account, group, symbol, exchange, producttype)
+    m += sizeLine(lots, quantity)
+    m += kv("expiry", expiry)
+    m += kv("ordertype", reqOrderType(ordertype))
+    m += price > 0 ? kv("price", str.tostring(price)) : ""
+    m += onlegfailure != "" ? kv("onlegfailure", str.lower(onlegfailure)) : ""
+    for i = 0 to n - 1
+        m += kv("Leg" + str.tostring(i + 1), array.get(legs, i))
+    m += appendBlock(risk)
+    m += appendBlock(extra)
+    m
+
+
+// ============================================================================
+//  Risk limits (attach to any order via the risk= parameter).
+// ============================================================================
+
+//@function Build a risk-limits block to attach to any order via risk=. Example: risk=atw.riskLimits(maxloss=5000). These are your own limits; see the Alert Automation guide for exactly how each one behaves.
+//@param maxloss (series float) Maximum day loss for the account, in your account currency.
+//@param forceexit (series string) A square-off time as "HH:mm", e.g. "15:15".
+//@param entrywindow (series string) An allowed entry-time window "HH:mm-HH:mm", e.g. "09:30-14:30".
+//@param blockExpiry (series bool) Block new entries on the instrument's expiry day.
+//@returns (series string) The risk lines, ready to pass as risk=.
+export riskLimits(float maxloss = 0, string forceexit = "", string entrywindow = "", bool blockExpiry = false) =>
+    string m = ""
+    m += maxloss > 0 ? "maxloss=" + str.tostring(maxloss) + "\n" : ""
+    m += forceexit != "" ? "forceexit=" + forceexit + "\n" : ""
+    m += entrywindow != "" ? "entrywindow=" + entrywindow + "\n" : ""
+    m += blockExpiry ? "blockonexpiryday=true\n" : ""
+    m
+
+
+// ============================================================================
+//  Demo / self-check (runs only in the Pine editor when you Add-to-chart this
+//  library; consumers importing the library never run this).
+// ============================================================================
+plot(na, "StocksDeveloperAlerts", display = display.none)
+if barstate.islastconfirmedhistory
+    string demoOption = option(symbol = "NIFTY", exchange = "NFO", producttype = "NORMAL", tradetype = "BUY", optiontype = "CE", strike = "ATM", expiry = "weekly", account = "MY_ACC", lots = 1)
+    string demoCondor = ironCondor(symbol = "NIFTY", exchange = "NFO", producttype = "NORMAL", group = "MY_GROUP", lots = 1, width = 8, wing = 4, risk = riskLimits(maxloss = 10000))
+    string demoCustom = multiLeg(symbol = "NIFTY", exchange = "NFO", producttype = "NORMAL", account = "MY_ACC", lots = 1, legs = array.from(leg("PE", "ATM-2", "SELL"), leg("PE", "ATM-6", "BUY"), leg("CE", "ATM+2", "SELL"), leg("CE", "ATM+6", "BUY")))
+    label.new(bar_index, high, demoOption + "\n----\n" + demoCondor + "\n----\n" + demoCustom, style = label.style_label_down, textalign = text.align_left)

@@ -1,0 +1,213 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+strategy("Pure Structure & S/D Strategy - Backtest", 
+     overlay = true, 
+     max_boxes_count = 500, 
+     max_labels_count = 500,
+     initial_capital = 10000,
+     currency = currency.USD,
+     margin_long = 10,  // Allows 10x Leverage for Futures
+     margin_short = 10, 
+     commission_type = strategy.commission.percent,
+     commission_value = 0.05)
+
+// =========================================
+// INPUTS
+// =========================================
+// --- Backtest Window ---
+int startTime = input.time(timestamp("2023-01-01 00:00:00"), "Start Date", group = "Backtest Window")
+int endTime = input.time(timestamp("2099-01-01 00:00:00"), "End Date", group = "Backtest Window")
+bool inWindow = time >= startTime and time <= endTime
+
+// --- Market Structure ---
+int msLen = input.int(10, "Pivot Lookback", minval = 1, group = "Market Structure")
+float minRR = input.float(1.5, "Minimum Risk:Reward", minval = 0.1, step = 0.1, group = "Market Structure")
+
+// --- Filters & Confirmation ---
+bool useFilter = input.bool(true, "Use Macro Trend Filter", group = "Filters")
+int emaLenFilter = input.int(200, "Macro EMA Length", minval = 1, group = "Filters")
+bool useConfirmation = input.bool(true, "Wait for Confirmation Candle", group = "Filters")
+
+// --- Strategy Settings ---
+string qtyMode = input.string("Risk %", "Quantity Mode", options = ["Risk %", "Fixed Contracts"], group = "Strategy Logic")
+float riskPerTrade = input.float(1.0, "Risk % Per Trade", minval = 0.1, maxval = 10.0, group = "Strategy Logic")
+float fixedQty = input.float(1.0, "Fixed Contracts/Units", minval = 0.1, group = "Strategy Logic")
+
+// --- Style ---
+color bullColor = input.color(#089981, "Bullish/Demand Color", group = "Style")
+color bearColor = input.color(#f23645, "Bearish/Supply Color", group = "Style")
+string tablePos = input.string("Top Right", "Info Table Position", options = ["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group = "Style")
+
+// =========================================
+// STEP 1: TREND & FILTER ENGINE
+// =========================================
+float macroEMA = ta.ema(close, emaLenFilter)
+bool macroBull = close > macroEMA
+bool macroBear = close < macroEMA
+
+float ph = ta.pivothigh(msLen, msLen)
+float pl = ta.pivotlow(msLen, msLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var float validHigh = na
+var float validLow = na
+var bool structureBullish = false
+
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    lastSwingLow := pl
+
+bool bosBull = ta.crossover(close, lastSwingHigh)
+bool bosBear = ta.crossunder(close, lastSwingLow)
+
+if bosBull
+    validLow := lastSwingLow
+    structureBullish := true
+if bosBear
+    validHigh := lastSwingHigh
+    structureBullish := false
+
+bool trendBull = structureBullish and (na(validLow) or close > validLow)
+bool trendBear = not structureBullish and (na(validHigh) or close < validHigh)
+
+plot(validLow, "Valid Low", color.new(bullColor, 50), 1, plot.style_linebr)
+plot(validHigh, "Valid High", color.new(bearColor, 50), 1, plot.style_linebr)
+plot(macroEMA, "Macro Trend Filter", useFilter ? color.new(chart.fg_color, 70) : na, 2, plot.style_line)
+
+// =========================================
+// STEP 2: SUPPLY & DEMAND ZONES
+// =========================================
+type SDZone
+    float top
+    float bottom
+    int startBar
+
+var SDZone activeDemand = na
+var SDZone activeSupply = na
+
+if bosBull and trendBull
+    int searchIdx = 0
+    for i = 1 to 30
+        if open[i] > close[i]
+            searchIdx := i
+            break
+    activeDemand := SDZone.new(high[searchIdx], low[searchIdx], bar_index[searchIdx])
+
+if bosBear and trendBear
+    int searchIdx = 0
+    for i = 1 to 30
+        if open[i] < close[i]
+            searchIdx := i
+            break
+    activeSupply := SDZone.new(high[searchIdx], low[searchIdx], bar_index[searchIdx])
+
+// Draw Active Zones
+if barstate.islast
+    if not na(activeDemand) and structureBullish
+        box.new(activeDemand.startBar, activeDemand.top, bar_index + 10, activeDemand.bottom,
+             bgcolor = color.new(bullColor, 85), border_color = bullColor, text = "DEMAND", text_size = size.tiny, text_color = bullColor)
+    if not na(activeSupply) and not structureBullish
+        box.new(activeSupply.startBar, activeSupply.top, bar_index + 10, activeSupply.bottom,
+             bgcolor = color.new(bearColor, 85), border_color = bearColor, text = "SUPPLY", text_size = size.tiny, text_color = bearColor)
+
+// =========================================
+// STEP 3: STRATEGY EXECUTION
+// =========================================
+var bool waitingLong = false
+var bool waitingShort = false
+var string lastDir = "None"
+var float lastEntry = na
+var float lastSL = na
+var float lastTP = na
+var float lastRR = na
+
+bool touchingDemand = not na(activeDemand) and low <= activeDemand.top and high >= activeDemand.bottom
+bool touchingSupply = not na(activeSupply) and high >= activeSupply.bottom and low <= activeSupply.top
+
+if trendBull and touchingDemand and (not useFilter or macroBull)
+    waitingLong := true
+if not trendBull or (not na(activeDemand) and close < activeDemand.bottom)
+    waitingLong := false
+
+if trendBear and touchingSupply and (not useFilter or macroBear)
+    waitingShort := true
+if not trendBear or (not na(activeSupply) and close > activeSupply.top)
+    waitingShort := false
+
+bool triggerLong = not useConfirmation ? touchingDemand : (waitingLong and close > open and close > high[1])
+bool triggerShort = not useConfirmation ? touchingSupply : (waitingShort and close < open and close < low[1])
+
+// Position Size Calculation for Futures/Forex/Crypto
+f_get_qty(risk_p, sl_dist) =>
+    float qty = 0.0
+    if qtyMode == "Fixed Contracts"
+        qty := fixedQty
+    else
+        risk_val = strategy.equity * (risk_p / 100)
+        // Adjust for point value (e.g., $2 for MNQ)
+        qty := risk_val / (sl_dist * syminfo.pointvalue)
+    
+    // Safety: Round to nearest whole number if it's a futures contract
+    qty := syminfo.type == "futures" ? math.floor(qty) : qty
+    math.max(qty, 0)
+
+// Long Entry
+if inWindow and triggerLong and waitingLong and strategy.position_size == 0
+    float sl = activeDemand.bottom
+    float tp = lastSwingHigh
+    float riskDist = math.abs(close - sl)
+    float rr = riskDist > 0 ? math.abs(tp - close) / riskDist : 0
+    if rr >= minRR
+        float q = f_get_qty(riskPerTrade, riskDist)
+        if q > 0
+            strategy.entry("Long", strategy.long, qty = q)
+            strategy.exit("Exit", "Long", stop = sl, limit = tp)
+            lastEntry := close, lastSL := sl, lastTP := tp, lastRR := rr, lastDir := "LONG", waitingLong := false
+            box.new(bar_index, close, bar_index + 15, sl, bgcolor = color.new(bearColor, 70), border_color = na)
+            box.new(bar_index, close, bar_index + 15, tp, bgcolor = color.new(bullColor, 70), border_color = na)
+
+// Short Entry
+if inWindow and triggerShort and waitingShort and strategy.position_size == 0
+    float sl = activeSupply.top
+    float tp = lastSwingLow
+    float riskDist = math.abs(sl - close)
+    float rr = riskDist > 0 ? math.abs(close - tp) / riskDist : 0
+    if rr >= minRR
+        float q = f_get_qty(riskPerTrade, riskDist)
+        if q > 0
+            strategy.entry("Short", strategy.short, qty = q)
+            strategy.exit("Exit", "Short", stop = sl, limit = tp)
+            lastEntry := close, lastSL := sl, lastTP := tp, lastRR := rr, lastDir := "SHORT", waitingShort := false
+            box.new(bar_index, close, bar_index + 15, sl, bgcolor = color.new(bearColor, 70), border_color = na)
+            box.new(bar_index, close, bar_index + 15, tp, bgcolor = color.new(bullColor, 70), border_color = na)
+
+// =========================================
+// VISUALS & TABLE
+// =========================================
+plotshape(waitingLong, "Waiting Long", shape.circle, location.belowbar, color.new(bullColor, 80), size = size.tiny)
+plotshape(waitingShort, "Waiting Short", shape.circle, location.abovebar, color.new(bearColor, 80), size = size.tiny)
+
+var table infoTable = table.new(
+     tablePos == "Top Right" ? position.top_right : 
+     tablePos == "Bottom Right" ? position.bottom_right : 
+     tablePos == "Top Left" ? position.top_left : position.bottom_left, 
+     2, 6, frame_color = chart.fg_color, frame_width = 1, border_color = chart.fg_color, border_width = 1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "LAST TRADE", text_color = chart.fg_color, bgcolor = color.new(chart.fg_color, 90), text_size = size.small)
+    table.cell(infoTable, 1, 0, lastDir, text_color = lastDir == "LONG" ? bullColor : lastDir == "SHORT" ? bearColor : chart.fg_color, bgcolor = color.new(chart.fg_color, 90), text_size = size.small)
+    table.cell(infoTable, 0, 1, "ENTRY", text_color = chart.fg_color, text_size = size.small)
+    table.cell(infoTable, 1, 1, str.tostring(lastEntry, format.mintick), text_color = chart.fg_color, text_size = size.small)
+    table.cell(infoTable, 0, 2, "STOP LOSS", text_color = bearColor, text_size = size.small)
+    table.cell(infoTable, 1, 2, str.tostring(lastSL, format.mintick), text_color = bearColor, text_size = size.small)
+    table.cell(infoTable, 0, 3, "TAKE PROFIT", text_color = bullColor, text_size = size.small)
+    table.cell(infoTable, 1, 3, str.tostring(lastTP, format.mintick), text_color = bullColor, text_size = size.small)
+    table.cell(infoTable, 0, 4, "R:R RATIO", text_color = chart.fg_color, text_size = size.small)
+    table.cell(infoTable, 1, 4, str.tostring(lastRR, "#.##"), text_color = lastRR >= minRR ? bullColor : bearColor, text_size = size.small)
+    table.cell(infoTable, 0, 5, "MACRO TREND", text_color = chart.fg_color, text_size = size.small)
+    table.cell(infoTable, 1, 5, macroBull ? "BULLISH" : "BEARISH", text_color = macroBull ? bullColor : bearColor, text_size = size.small)
+
+plotshape(bosBull, "BOS Bull", shape.circle, location.abovebar, color.new(bullColor, 50), 0, "BOS", bullColor, size = size.tiny)
+plotshape(bosBear, "BOS Bear", shape.circle, location.belowbar, color.new(bearColor, 50), 0, "BOS", bearColor, size = size.tiny)

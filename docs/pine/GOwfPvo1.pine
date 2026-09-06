@@ -1,0 +1,242 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org
+// © Arkck | LuxAlgo (Upgraded to 500x HTF Trend Plot Mode v9.1 by Pro BTC Trader)
+
+//@version=6
+strategy("Ultimate RSI Pro Strategy (Master v9.1)", "URSI Pro v9.1", overlay=true, initial_capital=100, default_qty_type=strategy.cash, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.05)
+
+//------------------------------------------------------------------------------
+// 1. 資金管理與 Telegram 設定
+//-----------------------------------------------------------------------------{
+group_lev = "槓桿與資金管理設定"
+position_risk_percent = input.float(5.0, "每筆交易承擔風險比例 (%)", minval=0.1, maxval=10.0, group=group_lev, tooltip="當打到初始止損時，預期虧損佔總淨值的百分比")
+leverage_val = input.float(500.0, "最大允許槓桿倍數", minval=1.0, maxval=1000.0, group=group_lev, tooltip="利用高槓桿放大購買力上限，但開倉量仍受風險控制")
+
+group_tg = "Telegram 通知設定"
+tg_chat_id = input.string("8896485812", "TG Chat ID", group=group_tg, tooltip="輸入你的 Telegram 個人 ID 或群組 ID (群組開頭通常有負號 -)")
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 2. 非對稱高時區過濾與插針過濾
+//-----------------------------------------------------------------------------{
+group_filter = "趨勢與波動度過濾器"
+use_filter = input.bool(true, "啟用高時區 EMA 趨勢過濾", group=group_filter)
+htf_res_long = input.timeframe("60", "做多高時區 (1H)", group=group_filter) 
+htf_res_short = input.timeframe("240", "做空高時區 (4H)", group=group_filter) 
+htf_ema_len = input.int(200, "高時區 EMA 週期", group=group_filter)
+
+use_needle_flt = input.bool(true, "啟用影線插針過濾器 (Anti-Wick)", group=group_filter)
+use_vol_filter = input.bool(true, "啟用 ATR 波動度過濾", group=group_filter)
+vol_ma_len = input.int(30, "ATR MA 週期", group=group_filter)
+
+rsi_long_max = input.float(60.0, "做多 RSI 上限限制", group=group_filter)
+rsi_short_min = input.float(40.0, "做空 RSI 下限限制", group=group_filter)
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 3. 風險管理與冷卻設定
+//-----------------------------------------------------------------------------{
+group_sl = "風險管理設定"
+atr_len = input.int(14, "ATR 週期", group=group_sl)
+atr_mult = input.float(2.0, "初始止損 ATR 倍數", group=group_sl)
+
+use_trail = input.bool(true, "啟用完整 ATR 移動止損", group=group_sl)
+trail_mult = input.float(9.0, "移動止損 ATR 倍數", group=group_sl)
+
+use_be = input.bool(true, "啟用動態保本出場功能", group=group_sl)
+be_trigger = input.float(1.0, "觸發保本的獲利 ATR 倍數", group=group_sl)
+
+max_loss_strike = input.int(5, "冷卻前最大連續虧損次數", group=group_sl)
+cool_down_bars = input.int(24, "冷卻持續 K 線數", group=group_sl)
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 4. 量化核心計算區塊
+//-----------------------------------------------------------------------------{
+ma(x, len, maType)=>
+    switch maType
+        'EMA' => ta.ema(x, len)
+        'SMA' => ta.sma(x, len) 
+        'RMA' => ta.rma(x, len) 
+        'TMA' => ta.sma(ta.sma(x, len), len)
+
+length = 10
+smooth = 10
+src = close
+
+upper = ta.highest(src, length)
+lower = ta.lowest(src, length)
+r = upper - lower
+diff = upper > upper[1] ? r : lower < lower[1] ? -r : src - src[1]
+
+num = ma(diff, length, 'RMA')
+den = ma(math.abs(diff), length, 'RMA')
+arsi = num / den * 50 + 50
+signal = ma(arsi, smooth, 'EMA')
+
+htf_close_long = request.security(syminfo.tickerid, htf_res_long, close[1], barmerge.gaps_off, barmerge.lookahead_off)
+htf_close_short = request.security(syminfo.tickerid, htf_res_short, close[1], barmerge.gaps_off, barmerge.lookahead_off)
+htf_ema_long = ta.ema(htf_close_long, htf_ema_len)
+htf_ema_short = ta.ema(htf_close_short, htf_ema_len)
+
+atr = ta.atr(atr_len)
+atr_ma = ta.sma(atr, vol_ma_len)
+market_active = not use_vol_filter or (atr > atr_ma)
+
+body_size = math.abs(close - open)
+total_size = high - low
+needle_ok = not use_needle_flt or (total_size <= body_size * 2.5)
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 5. 連續虧損與冷卻計數器
+//-----------------------------------------------------------------------------{
+var int consecutive_losses = 0
+var int cool_down_timer = 0
+
+if (strategy.position_size[1] != 0 and strategy.position_size == 0)
+    if (strategy.netprofit < strategy.netprofit[1])
+        consecutive_losses := consecutive_losses + 1
+    else
+        consecutive_losses := 0
+
+if consecutive_losses >= max_loss_strike
+    cool_down_timer := cool_down_bars
+    consecutive_losses := 0 
+
+if cool_down_timer > 0
+    cool_down_timer := cool_down_timer - 1
+
+cooling_ok = cool_down_timer == 0
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 6. 交易邏輯與 500 倍槓桿防爆盾算倉機制 (完美合體版 + TG 動態 JSON 封裝)
+//-----------------------------------------------------------------------------{
+trend_long = not use_filter or (close > htf_ema_long)
+trend_short = not use_filter or (close < htf_ema_short)
+rsi_long_ok = arsi <= rsi_long_max
+rsi_short_min_val = rsi_short_min
+rsi_short_ok = arsi >= rsi_short_min_val
+
+longCondition = ta.crossover(arsi, signal) and trend_long and rsi_long_ok and market_active and needle_ok and cooling_ok and strategy.position_size <= 0
+shortCondition = ta.crossunder(arsi, signal) and trend_short and rsi_short_ok and market_active and needle_ok and cooling_ok and strategy.position_size >= 0
+
+var float initial_sl = na
+var float ts_price = na
+var float entry_price = na
+var bool be_triggered = false
+
+in_long_entry = strategy.position_size > 0 and strategy.position_size[1] <= 0
+in_short_entry = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+// ====== 動態防爆盾算倉公式 ======
+stop_distance = atr * atr_mult
+risk_cash = strategy.equity * (position_risk_percent / 100.0)
+
+t_qty = stop_distance > 0 ? (risk_cash / stop_distance) : 0
+max_allowed_qty = (strategy.equity * leverage_val) / close
+order_qty = math.min(t_qty, max_allowed_qty)
+
+// 動態建構符合 Telegram API 規範的進場 JSON 字串
+msg_long_entry = '{"chat_id": "' + tg_chat_id + '", "text": "🚨【URSI Pro 500x 訊號觸發】\\n━━━━━━━━━━━━━━━━━\\n📈 動作指令：做多 (Long Entry)\\n🪙 交易商品：' + syminfo.ticker + '\\n💰 執行價格：' + str.tostring(close) + ' USD\\n📊 開倉數量：' + str.tostring(order_qty) + '"}'
+msg_short_entry = '{"chat_id": "' + tg_chat_id + '", "text": "🚨【URSI Pro 500x 訊號觸發】\\n━━━━━━━━━━━━━━━━━\\n📉 動作指令：做空 (Short Entry)\\n🪙 交易商品：' + syminfo.ticker + '\\n💰 執行價格：' + str.tostring(close) + ' USD\\n📊 開倉數量：' + str.tostring(order_qty) + '"}'
+
+// 執行開倉
+if (longCondition)
+    strategy.entry("Long", strategy.long, qty=order_qty, alert_message=msg_long_entry)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short, qty=order_qty, alert_message=msg_short_entry)
+
+// 紀錄進場狀態
+if (in_long_entry)
+    entry_price := close
+    initial_sl := close - stop_distance
+    ts_price := close - (atr * trail_mult)
+    be_triggered := false
+
+if (in_short_entry)
+    entry_price := close
+    initial_sl := close + stop_distance
+    ts_price := close + (atr * trail_mult)
+    be_triggered := false
+
+// 追蹤止損與保本邏輯
+if (strategy.position_size > 0)
+    if (use_be and not be_triggered and (high - entry_price) >= (atr * be_trigger))
+        be_triggered := true
+    if (be_triggered)
+        initial_sl := entry_price + (entry_price * 0.0015) 
+    if (use_trail)
+        ts_price := math.max(ts_price, close - (atr * trail_mult))
+
+if (strategy.position_size < 0)
+    if (use_be and not be_triggered and (entry_price - low) >= (atr * be_trigger))
+        be_triggered := true
+    if (be_triggered)
+        initial_sl := entry_price - (entry_price * 0.0015) 
+    if (use_trail)
+        ts_price := math.min(ts_price, close + (atr * trail_mult))
+
+if (strategy.position_size == 0)
+    initial_sl := na
+    ts_price := na
+    entry_price := na
+    be_triggered := false
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 7. 訂單執行與出場管理
+//-----------------------------------------------------------------------------{
+final_long_stop = use_trail ? (be_triggered ? math.max(initial_sl, ts_price) : math.max(initial_sl, ts_price)) : initial_sl
+final_short_stop = use_trail ? (be_triggered ? math.min(initial_sl, ts_price) : math.min(initial_sl, ts_price)) : initial_sl
+
+// 動態建構符合 Telegram API 規範的出場 JSON 字串
+msg_long_exit = '{"chat_id": "' + tg_chat_id + '", "text": "🏁【URSI Pro 500x 倉位出場】\\n━━━━━━━━━━━━━━━━━\\n🏹 動作指令：多單平倉 (Close Long)\\n🪙 交易商品：' + syminfo.ticker + '\\n💰 觸發當前價：' + str.tostring(close) + ' USD"}'
+msg_short_exit = '{"chat_id": "' + tg_chat_id + '", "text": "🏁【URSI Pro 500x 倉位出場】\\n━━━━━━━━━━━━━━━━━\\n🏹 動作指令：空單平倉 (Close Short)\\n🪙 交易商品：' + syminfo.ticker + '\\n💰 觸發當前價：' + str.tostring(close) + ' USD"}'
+
+if (strategy.position_size > 0)
+    strategy.exit("Exit Long", from_entry="Long", stop=final_long_stop, alert_message=msg_long_exit)
+
+if (strategy.position_size < 0)
+    strategy.exit("Exit Short", from_entry="Short", stop=final_short_stop, alert_message=msg_short_exit)
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 8. 圖表視覺化與樣式控制區
+//-----------------------------------------------------------------------------{
+// 倉位止損與移動止損繪製
+plot(strategy.position_size > 0 ? initial_sl : na, "Stop Loss / BE", color=be_triggered ? color.blue : color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size > 0 and use_trail and not be_triggered ? ts_price : na, "Trailing Stop", color=color.fuchsia, style=plot.style_linebr)
+
+plot(strategy.position_size < 0 ? initial_sl : na, "Stop Loss / BE", color=be_triggered ? color.blue : color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size < 0 and use_trail and not be_triggered ? ts_price : na, "Trailing Stop", color=color.fuchsia, style=plot.style_linebr)
+
+// 高時區 EMA 趨勢線（已修正 title 參數重複傳入的 Bug）
+plot(use_filter ? htf_ema_long : na, title="做多高時區 EMA 趨勢過濾", color=color.new(color.green, 20), linewidth=2)
+plot(use_filter ? htf_ema_short : na, title="做空高時區 EMA 趨勢過濾", color=color.new(color.orange, 20), linewidth=2)
+//-----------------------------------------------------------------------------}
+
+//------------------------------------------------------------------------------
+// 擴充：時間與分批止盈邏輯
+//------------------------------------------------------------------------------
+// 1. 週末過濾器 (不允許在週末開新倉)
+is_weekend = (dayofweek == dayofweek.saturday) or (dayofweek == dayofweek.sunday)
+allowed_trading_time = not is_weekend
+
+// 修改你的進場條件 (加上 allowed_trading_time)
+longCondition_mod  = longCondition and allowed_trading_time
+shortCondition_mod = shortCondition and allowed_trading_time
+
+// 2. 分批止盈邏輯變數
+var bool take_profit_half = false
+
+if (strategy.position_size[1] <= 0 and strategy.position_size > 0) or (strategy.position_size[1] >= 0 and strategy.position_size < 0)
+    take_profit_half := false // 新開倉時重置
+
+// 以做多為例：當利潤達到進場價 + 3倍 ATR 時，平倉一半
+tp_target_long = entry_price + (atr * 3.0)
+
+if strategy.position_size > 0 and not take_profit_half and high >= tp_target_long
+    strategy.order("TP Half Long", strategy.short, qty=strategy.position_size * 0.5, comment="分批止盈 50%")
+    take_profit_half := true

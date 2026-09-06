@@ -1,0 +1,679 @@
+//@version=6
+// @description Algebra & 2D geometry utilities absent from Pine built-ins.
+// Rigorous, no-repaint, export-ready: vectors, robust roots, linear solvers, 2x2/3x3 det/inverse,
+// symmetric 2x2 eigensystem, orthogonal regression (TLS), affine transforms, intersections,
+// distances, projections, polygon metrics, point-in-polygon, convex hull (monotone chain),
+// Bezier/Catmull-Rom/Barycentric tools.
+library("AlgebraGeometryLab", true)
+
+//=========================
+// 0) Constants & helpers
+//=========================
+const float PI  = math.pi
+const float TAU = 2.0 * math.pi
+const float EPS = 1e-10
+
+//@function clamp to [lo, hi]
+export clamp(series float x, series float lo, series float hi) =>
+    math.max(lo, math.min(hi, x))
+
+//@function approximately equal with relative+absolute tolerance
+export near(series float a, series float b, series float atol, series float rtol) =>
+    math.abs(a - b) <= (atol + rtol * math.max(math.abs(a), math.abs(b)))
+
+//@function sign as {-1,0,1}
+export sgn(series float x) =>
+    x > 0 ? 1 : x < 0 ? -1 : 0
+
+//@function stable hypot (sqrt(x^2+y^2))
+export hypot(series float x, series float y) =>
+    // Avoid overflow/underflow in naive sqrt(x*x+y*y).
+    ax = math.abs(x), ay = math.abs(y)
+    m = math.max(ax, ay)
+    m == 0 ? 0 : m * math.sqrt((x/m)*(x/m) + (y/m)*(y/m))
+
+//=========================
+// 1) UDTs: 2D primitives
+//=========================
+// Exported UDTs are allowed in libraries; creation via Vec2.new(x,y), etc. :contentReference[oaicite:5]{index=5}
+export type Vec2
+    float x
+    float y
+
+export type Line2   // infinite line through (p) with direction (d)
+    Vec2 p
+    Vec2 d
+
+export type Segment2 // closed segment [a,b]
+    Vec2 a
+    Vec2 b
+
+export type Circle2
+    Vec2 c
+    float r
+
+export type Affine2 // 2x3 matrix: [a b tx; c d ty]
+    float a
+    float b
+    float c
+    float d
+    float tx
+    float ty
+
+//---------------------------
+// 1a) Vec2 methods & ops
+//---------------------------
+// Methods use the `method` keyword and a typed first parameter. :contentReference[oaicite:6]{index=6}
+
+//@method length of vector
+export method length(Vec2 v) =>
+    hypot(v.x, v.y)
+
+//@method squared length
+export method length2(Vec2 v) =>
+    v.x*v.x + v.y*v.y
+
+//@method normalized (returns Vec2; returns zero vector if near zero)
+export method normalized(Vec2 v) =>
+    L = v.length()
+    L <= EPS ? Vec2.new(0.0, 0.0) : Vec2.new(v.x/L, v.y/L)
+
+//@method add
+export method add(Vec2 a, Vec2 b) =>
+    Vec2.new(a.x + b.x, a.y + b.y)
+
+//@method sub
+export method sub(Vec2 a, Vec2 b) =>
+    Vec2.new(a.x - b.x, a.y - b.y)
+
+//@method scalar multiply
+export method muls(Vec2 v, series float s) =>
+    Vec2.new(v.x*s, v.y*s)
+
+//@method dot product
+export method dot(Vec2 a, Vec2 b) =>
+    a.x*b.x + a.y*b.y
+
+//@method 2D cross "z" component (a x b)
+export method crossz(Vec2 a, Vec2 b) =>
+    a.x*b.y - a.y*b.x
+
+//@method rotate by angle (radians) about origin
+export method rotate(Vec2 v, series float ang) =>
+    ca = math.cos(ang), sa = math.sin(ang)
+    Vec2.new(ca*v.x - sa*v.y, sa*v.x + ca*v.y)
+
+//@method apply affine transform
+export method apply(Vec2 v, Affine2 T) =>
+    Vec2.new(T.a*v.x + T.b*v.y + T.tx, T.c*v.x + T.d*v.y + T.ty)
+
+//--------------------------------------
+// 1b) Affine2 constructors & compose
+//--------------------------------------
+
+//@function identity transform
+export affine_identity() =>
+    Affine2.new(1,0,0,1,0,0)
+
+//@function translation
+export affine_translate(series float tx, series float ty) =>
+    Affine2.new(1,0,0,1,tx,ty)
+
+//@function rotation about origin
+export affine_rotate(series float ang) =>
+    ca = math.cos(ang), sa = math.sin(ang)
+    Affine2.new(ca,-sa, sa,ca, 0,0)
+
+//@function scaling about origin
+export affine_scale(series float sx, series float sy) =>
+    Affine2.new(sx,0,0,sy, 0,0)
+
+//@function rotation about pivot (px,py)
+export affine_rotate_about(series float ang, series float px, series float py) =>
+    ca = math.cos(ang), sa = math.sin(ang)
+    tx = px - ca*px + sa*py
+    ty = py - sa*px - ca*py
+    Affine2.new(ca,-sa, sa,ca, tx,ty)
+
+//@function compose T2∘T1 (apply T1 then T2)
+export affine_compose(Affine2 T2, Affine2 T1) =>
+    // [A2|t2] * [A1|t1] = [A2*A1 | A2*t1 + t2]
+    a = T2.a*T1.a + T2.b*T1.c
+    b = T2.a*T1.b + T2.b*T1.d
+    c = T2.c*T1.a + T2.d*T1.c
+    d = T2.c*T1.b + T2.d*T1.d
+    tx = T2.a*T1.tx + T2.b*T1.ty + T2.tx
+    ty = T2.c*T1.tx + T2.d*T1.ty + T2.ty
+    Affine2.new(a,b,c,d,tx,ty)
+
+//=====================
+// 2) Algebra toolbox
+//=====================
+
+//---------------------
+// 2a) Robust roots
+//---------------------
+
+//@function Real roots of ax^2 + bx + c = 0 (numerically stable)
+//@returns [int n, float r1, float r2] with n∈{0,1,2}; r1<=r2 when n=2.
+export quadratic_roots(series float a, series float b, series float c) =>
+    if near(a, 0.0, EPS, 0.0)
+        // Linear bx + c = 0
+        if near(b, 0.0, EPS, 0.0)
+            [0, na, 0]
+        else
+            [1, -c/b, na]
+    else
+        disc = b*b - 4.0*a*c
+        if disc < 0
+            [0, na, na]
+        else if near(disc, 0.0, EPS, 0.0)
+            r = -b / (2.0*a)
+            [1, r, na]
+        else
+            s = math.sqrt(disc)
+            q = -0.5 * (b + (b >= 0 ? s : -s))  // avoids cancellation
+            r1 = q / a
+            r2 = c / q
+            // order ascending
+            [ r1 <= r2 ? 2 : 2, r1 <= r2 ? r1 : r2, r1 <= r2 ? r2 : r1 ]
+
+//@function Real roots of ax^3+bx^2+cx+d=0 (Cardano; returns up to 3 real roots)
+//@returns [int n, float r1, float r2, float r3] (valid r2/r3 only if n>=2/n>=3)
+export cubic_roots(series float a, series float b, series float c, series float d) =>
+    // Handle degenerate to quadratic
+    if near(a, 0.0, EPS, 0.0)
+        [nq, q1, q2] = quadratic_roots(b, c, d)
+        [nq, q1, q2, na]
+    else
+        // Depressed cubic t^3 + pt + q with x = t - b/(3a)
+        inva = 1.0 / a
+        bb = b*inva
+        p = (3.0*a*c - b*b) * (inva*inva) / 3.0
+        q = (2.0*b*b*b - 9.0*a*b*c + 27.0*a*a*d) * (inva*inva*inva) / 27.0
+        disc = (q*q)/4.0 + (p*p*p)/27.0
+        shift = bb/3.0
+        if disc > EPS
+            // one real
+            s = -q/2.0
+            A = s + math.sqrt(disc)
+            B = s - math.sqrt(disc)
+            // real cubic roots with sign handling
+            u = (A >= 0 ? math.pow(A, 1.0/3.0) : -math.pow(-A, 1.0/3.0))
+            v = (B >= 0 ? math.pow(B, 1.0/3.0) : -math.pow(-B, 1.0/3.0))
+            t1 = u + v
+            r1 = t1 - shift
+            [1, r1, na, na]
+        else if math.abs(disc) <= EPS
+            // multiple roots
+            u = ( -q/2.0 )
+            u := u >= 0 ? math.pow(u, 1.0/3.0) : -math.pow(-u, 1.0/3.0)
+            t1 = 2.0*u
+            t2 = -u
+            r1 = t1 - shift
+            r2 = t2 - shift
+            [2, math.min(r1,r2), math.max(r1,r2), na]
+        else
+            // three real roots
+            m = 2.0 * math.sqrt(-p/3.0)
+            phi = math.acos( (-q/2.0) / math.sqrt(-(p*p*p)/27.0) )
+            t1 = m * math.cos(phi/3.0)
+            t2 = m * math.cos((phi + TAU)/3.0)
+            t3 = m * math.cos((phi + 2.0*TAU)/3.0)
+            r1 = t1 - shift
+            r2 = t2 - shift
+            r3 = t3 - shift
+            // order ascending
+            a1 = math.min(r1, math.min(r2, r3))
+            a3 = math.max(r1, math.max(r2, r3))
+            a2 = r1 + r2 + r3 - a1 - a3
+            [3, a1, a2, a3]
+
+//---------------------------
+// 2b) Linear algebra (small)
+//---------------------------
+
+//@function det2 of [a b; c d]
+export det2(series float a, series float b, series float c, series float d) =>
+    a*d - b*c
+
+//@function inverse of 2x2; returns [ok, ia, ib, ic, id]
+export inv2(series float a, series float b, series float c, series float d) =>
+    det = a*d - b*c
+    if math.abs(det) <= EPS
+        [false, na, na, na, na]
+    else
+        invdet = 1.0/det
+        [true,  d*invdet, -b*invdet, -c*invdet, a*invdet]
+
+//@function solve 2x2 * [x;y] = [e;f] via Cramer
+export solve2(series float a, series float b, series float c, series float d, series float e, series float f) =>
+    det = a*d - b*c
+    if math.abs(det) <= EPS
+        [false, na, na]
+    else
+        x = ( e*d - b*f ) / det
+        y = ( a*f - e*c ) / det
+        [true, x, y]
+
+//@function det3 of 3x3
+export det3(series float a11, series float a12, series float a13,
+             series float a21, series float a22, series float a23,
+             series float a31, series float a32, series float a33) =>
+    a11*(a22*a33 - a23*a32) - a12*(a21*a33 - a23*a31) + a13*(a21*a32 - a22*a31)
+
+//@function inverse 3x3; returns [ok, i11..i33]
+export inv3(series float a11, series float a12, series float a13,
+             series float a21, series float a22, series float a23,
+             series float a31, series float a32, series float a33) =>
+    det = a11*(a22*a33 - a23*a32) - a12*(a21*a33 - a23*a31) + a13*(a21*a32 - a22*a31)
+    if math.abs(det) <= EPS
+        [false, na, na, na, na, na, na, na, na, na]
+    else
+        c11 =  (a22*a33 - a23*a32)
+        c12 = -(a21*a33 - a23*a31)
+        c13 =  (a21*a32 - a22*a31)
+        c21 = -(a12*a33 - a13*a32)
+        c22 =  (a11*a33 - a13*a31)
+        c23 = -(a11*a32 - a12*a31)
+        c31 =  (a12*a23 - a13*a22)
+        c32 = -(a11*a23 - a13*a21)
+        c33 =  (a11*a22 - a12*a21)
+        invdet = 1.0 / det
+        [true,
+         c11*invdet, c21*invdet, c31*invdet,
+         c12*invdet, c22*invdet, c32*invdet,
+         c13*invdet, c23*invdet, c33*invdet]
+
+//@function symmetric 2x2 eigensystem: [[a,b],[b,d]]
+//@returns [lambda_max, v1x, v1y, lambda_min, v2x, v2y] with unit eigenvectors
+export eig2_symmetric(series float a, series float b, series float d) =>
+    tr = a + d
+    det = a*d - b*b
+    disc = tr*tr*0.25 - det
+    disc := disc < 0 ? 0 : disc
+    s = math.sqrt(disc)
+    l1 = tr*0.5 + s
+    l2 = tr*0.5 - s
+    // eigenvector for l1
+    vx1 = math.abs(b) > math.abs(l1 - a) ? b : (l1 - d)
+    vy1 = math.abs(b) > math.abs(l1 - a) ? (l1 - a) : b
+    n1 = hypot(vx1, vy1)
+    vx1 := n1 <= EPS ? 1 : vx1/n1
+    vy1 := n1 <= EPS ? 0 : vy1/n1
+    // second is orthogonal
+    vx2 = -vy1
+    vy2 =  vx1
+    [l1, vx1, vy1, l2, vx2, vy2]
+
+//@function Orthogonal (total least squares) regression line through point cloud
+// Input arrays must be same length N>=2. Returns line in normal form n•x + c = 0
+// @returns [ok, nx, ny, c, cx, cy] where (nx,ny) unit normal; (cx,cy) centroid.
+export tls_line(array<float> xs, array<float> ys) =>
+    N = math.min(array.size(xs), array.size(ys))
+    if N < 2
+        [false, na, na, na, na, na]
+    else
+        // means
+        sumx = 0.0, sumy = 0.0
+        for i = 0 to N-1
+            sumx += array.get(xs, i)
+            sumy += array.get(ys, i)
+        mx = sumx / N, my = sumy / N
+        // centered covariances
+        Sxx = 0.0, Sxy = 0.0, Syy = 0.0
+        for i = 0 to N-1
+            dx = array.get(xs, i) - mx
+            dy = array.get(ys, i) - my
+            Sxx += dx*dx
+            Sxy += dx*dy
+            Syy += dy*dy
+        // eigensystem of [[Sxx,Sxy],[Sxy,Syy]]
+        [l1, vx1, vy1, l2, vx2, vy2] = eig2_symmetric(Sxx, Sxy, Syy)
+        // normal is eigenvector of smaller eigenvalue (direction of minimal variance)
+        useSecond = l2 <= l1
+        nx = useSecond ? vx2 : vx1
+        ny = useSecond ? vy2 : vy1
+        nrm = hypot(nx, ny)
+        if nrm <= EPS
+            [false, na, na, na, na, na]
+        else
+            nx := nx/nrm, ny := ny/nrm
+            c  = -(nx*mx + ny*my)
+            [true, nx, ny, c, mx, my]
+
+//=========================
+// 3) Geometry primitives
+//=========================
+
+//@function orientation (signed area*2): >0 CCW, <0 CW, 0 collinear
+export orient(Vec2 a, Vec2 b, Vec2 c) =>
+    ab = b.sub(a)
+    ac = c.sub(a)
+    ab.crossz(ac)
+
+//@function project point p onto infinite line through a with direction d
+//@returns [projVec2, t] where proj = a + t*d
+export project_point_line(Vec2 p, Vec2 a, Vec2 d) =>
+    denom = d.length2()
+    if denom <= EPS
+        [a, 0.0]
+    else
+        t = (p.sub(a)).dot(d) / denom
+        [a.add(d.muls(t)), t]
+
+//@function closest point on segment [a,b] to p
+//@returns [closestVec2, t] where t∈[0,1] on segment
+export closest_point_segment(Vec2 p, Vec2 a, Vec2 b) =>
+    d = b.sub(a)
+    denom = d.length2()
+    if denom <= EPS
+        [a, 0.0]
+    else
+        t = (p.sub(a)).dot(d) / denom
+        t := clamp(t, 0.0, 1.0)
+        [a.add(d.muls(t)), t]
+
+//@function distance from point to line (infinite)
+export dist_point_line(Vec2 p, Vec2 a, Vec2 d) =>
+    [q, _] = project_point_line(p, a, d)
+    (p.sub(q)).length()
+
+//@function distance from point to segment [a,b]
+export dist_point_segment(Vec2 p, Vec2 a, Vec2 b) =>
+    [q, _] = closest_point_segment(p, a, b)
+    (p.sub(q)).length()
+
+//-------------------------------
+// 3a) Lines and intersections
+//-------------------------------
+
+//@function line-line intersection: L1: p1+d1*t, L2: p2+d2*u
+//@returns [ok, ix, iy, t, u]
+export intersect_lines(Vec2 p1, Vec2 d1, Vec2 p2, Vec2 d2) =>
+    // Solve p1 + d1 t = p2 + d2 u
+    // Cross both sides with d2 to eliminate u
+    den = d1.crossz(d2)
+    if math.abs(den) <= EPS
+        [false, na, na, na, na]
+    else
+        r = p2.sub(p1)
+        t = r.crossz(d2) / den
+        u = r.crossz(d1) / den
+        ip = p1.add(d1.muls(t))
+        [true, ip.x, ip.y, t, u]
+
+//@function segment-segment intersection (closed segments)
+// @returns [kind, ix, iy] where kind: 0=no, 1=proper point, 2=overlap (ix/iy=na)
+export intersect_segments(Segment2 s1, Segment2 s2) =>
+    p = s1.a, r = s1.b.sub(s1.a)
+    q = s2.a, s = s2.b.sub(s2.a)
+    rxs = r.crossz(s)
+    q_p = q.sub(p)
+    qpxr = q_p.crossz(r)
+    if math.abs(rxs) <= EPS and math.abs(qpxr) <= EPS
+        // collinear: test overlap in 1D along r
+        rr = r.length2()
+        if rr <= EPS
+            [0, 0, 0]  // degenerate
+        else
+            t0 = q_p.dot(r) / rr
+            t1 = t0 + s.dot(r) / rr
+            lo = math.min(t0, t1), hi = math.max(t0, t1)
+            if hi < 0 or lo > 1
+                [0, 0, 0]
+            else
+                [2, na, na] // overlapping
+    else if math.abs(rxs) <= EPS and math.abs(qpxr) > EPS
+        [0, na, na] // parallel, disjoint
+    else
+        t = q_p.crossz(s) / rxs
+        u = q_p.crossz(r) / rxs
+        if t < -EPS or t > 1+EPS or u < -EPS or u > 1+EPS
+            [0, 0, 0]
+        else
+            ip = p.add(r.muls(t))
+            [1, ip.x, ip.y]
+
+//---------------------------
+// 3b) Circles and triangles
+//---------------------------
+
+//@function circle through 3 non-collinear points
+export circumcircle(Vec2 a, Vec2 b, Vec2 c) =>
+    d = 2.0 * (a.x*(b.y - c.y) + b.x*(c.y - a.y) + c.x*(a.y - b.y))
+    if math.abs(d) <= EPS
+        [false, Circle2.new(Vec2.new(na,na), na)]
+    else
+        ux = ((a.x*a.x + a.y*a.y)*(b.y - c.y) + (b.x*b.x + b.y*b.y)*(c.y - a.y) + (c.x*c.x + c.y*c.y)*(a.y - b.y)) / d
+        uy = ((a.x*a.x + a.y*a.y)*(c.x - b.x) + (b.x*b.x + b.y*b.y)*(a.x - c.x) + (c.x*c.x + c.y*c.y)*(b.x - a.x)) / d
+        cc = Vec2.new(ux, uy)
+        r  = (cc.sub(a)).length()
+        [true, Circle2.new(cc, r)]
+
+//@function intersections of circle and line (param p + d t)
+//@returns [n, x1,y1, x2,y2] with n∈{0,1,2}
+export intersect_circle_line(Circle2 C, Vec2 p, Vec2 d) =>
+    // Solve |p + d t - c|^2 = r^2 => (d·d)t^2 + 2 d·(p-c) t + |p-c|^2 - r^2 = 0
+    m = p.sub(C.c)
+    A = d.dot(d)
+    B = 2.0 * d.dot(m)
+    Cq = m.dot(m) - C.r*C.r
+    [n, r1, r2] = quadratic_roots(A, B, Cq)
+    if n == 0
+        [0, na, na, na, na]
+    else if n == 1
+        q1 = p.add(d.muls(r1))
+        [1, q1.x, q1.y, na, na]
+    else
+        q1 = p.add(d.muls(r1))
+        q2 = p.add(d.muls(r2))
+        [2, q1.x, q1.y, q2.x, q2.y]
+
+//@function circle-circle intersection
+//@returns [n, x1,y1, x2,y2] with n∈{0,1,2}
+export intersect_circles(Circle2 A, Circle2 B) =>
+    d = (B.c.sub(A.c)).length()
+    if d <= EPS
+        // concentric
+        if near(A.r, B.r, EPS, 0.0)
+            [2, 0, 0, 0, 0] // infinite intersections (coincident)
+        else
+            [0, na, na, na, na]
+    else if d > A.r + B.r + EPS or d < math.abs(A.r - B.r) - EPS
+        [0, na, na, na, na] // separate or one inside the other
+    else
+        // distance from A.c to chord center
+        a = (A.r*A.r - B.r*B.r + d*d) / (2.0*d)
+        h2 = A.r*A.r - a*a
+        h2 := h2 < 0 ? 0 : h2
+        h  = math.sqrt(h2)
+        ex = (B.c.x - A.c.x) / d
+        ey = (B.c.y - A.c.y) / d
+        x0 = A.c.x + a*ex
+        y0 = A.c.y + a*ey
+        if h <= EPS
+            [1, x0, y0, na, na]
+        else
+            rx = -ey * h
+            ry =  ex * h
+            [2, x0 + rx, y0 + ry, x0 - rx, y0 - ry]
+
+//-------------------------------
+// 3c) Polygons & point tests
+//-------------------------------
+
+// All polygon functions expect arrays xs, ys with N vertices, closed implicitly (vN is v0)
+
+//@function signed area (shoelace). Positive if CCW.
+export polygon_area(array<float> xs, array<float> ys) =>
+    N = math.min(array.size(xs), array.size(ys))
+    if N < 3
+        0.0
+    else
+        s = 0.0
+        for i = 0 to N-1
+            j = (i + 1) % N
+            s += array.get(xs,i) * array.get(ys,j) - array.get(xs,j) * array.get(ys,i)
+        0.5 * s
+
+//@function polygon centroid (for non-self-intersecting). Fallback to vertex mean if area≈0.
+export polygon_centroid(array<float> xs, array<float> ys) =>
+    N = math.min(array.size(xs), array.size(ys))
+    if N == 0
+        [false, na, na]
+    else if N == 1
+        [true, array.get(xs,0), array.get(ys,0)]
+    else
+        A2 = 0.0
+        Cx = 0.0
+        Cy = 0.0
+        for i = 0 to N-1
+            j = (i + 1) % N
+            cross = array.get(xs,i) * array.get(ys,j) - array.get(xs,j) * array.get(ys,i)
+            A2 += cross
+            Cx += (array.get(xs,i) + array.get(xs,j)) * cross
+            Cy += (array.get(ys,i) + array.get(ys,j)) * cross
+        if math.abs(A2) <= EPS
+            sx = 0.0, sy = 0.0
+            for i = 0 to N-1
+                sx += array.get(xs,i)
+                sy += array.get(ys,i)
+            [true, sx/N, sy/N]
+        else
+            A = A2 * 0.5
+            [true, Cx/(6.0*A), Cy/(6.0*A)]
+
+//@function point-in-polygon test (ray casting). Returns true if inside; boundary counts as inside.
+export point_in_polygon(series float px, series float py, array<float> xs, array<float> ys) =>
+    N = math.min(array.size(xs), array.size(ys))
+    if N < 3
+        false
+    else
+        inside = false
+        for i = 0 to N-1
+            j = (i + N - 1) % N
+            xi = array.get(xs,i), yi = array.get(ys,i)
+            xj = array.get(xs,j), yj = array.get(ys,j)
+            // Check boundary (point on segment)
+            minx = math.min(xi, xj)
+            maxx = math.max(xi, xj)
+            miny = math.min(yi, yj)
+            maxy = math.max(yi, yj)
+            cross = (xj - xi)*(py - yi) - (yj - yi)*(px - xi)
+            onSeg = math.abs(cross) <= 1e-9 and px >= minx - 1e-12 and px <= maxx + 1e-12 and py >= miny - 1e-12 and py <= maxy + 1e-12
+            if onSeg
+                inside := true
+            cond = ((yi > py) != (yj > py)) and (px < (xj - xi)*(py - yi)/(yj - yi + 0.0) + xi)
+            inside := cond ? not inside : inside
+        inside
+
+//@function convex hull (monotone chain). Returns array<int> of hull vertex indices in CCW order.
+// Uses array.sort_indices(xs) (ascending by x). Ties on x are handled; result is deterministic.
+export convex_hull(array<float> xs, array<float> ys) =>
+    N = math.min(array.size(xs), array.size(ys))
+    out = array.new<int>(0)
+    if N == 0
+        out
+    else if N == 1
+        array.push(out, 0), out
+    else
+        idx = array.sort_indices(xs)   // ascending by x
+        // Lower hull
+        lower = array.new<int>(0)
+        for k = 0 to array.size(idx)-1
+            i = array.get(idx, k)
+            while array.size(lower) >= 2
+                i2 = array.get(lower, array.size(lower)-1)
+                i1 = array.get(lower, array.size(lower)-2)
+                ax = array.get(xs, i1), ay = array.get(ys, i1)
+                bx = array.get(xs, i2), yb = array.get(ys, i2)
+                cx = array.get(xs, i),  cy = array.get(ys, i)
+                cross = (bx-ax)*(cy-ay) - (yb-ay)*(cx-ax)
+                if cross <= 0
+                    array.pop(lower)
+                else
+                    break
+            array.push(lower, i)
+        // Upper hull
+        upper = array.new<int>(0)
+        for k = array.size(idx)-1 to 0
+            i = array.get(idx, k)
+            while array.size(upper) >= 2
+                i2 = array.get(upper, array.size(upper)-1)
+                i1 = array.get(upper, array.size(upper)-2)
+                ax = array.get(xs, i1), ay = array.get(ys, i1)
+                bx = array.get(xs, i2), yb = array.get(ys, i2)
+                cx = array.get(xs, i),  cy = array.get(ys, i)
+                cross = (bx-ax)*(cy-ay) - (yb-ay)*(cx-ax)
+                if cross <= 0
+                    array.pop(upper)
+                else
+                    break
+            array.push(upper, i)
+        // Concatenate without duplicating endpoints
+        for t = 0 to array.size(lower)-1
+            array.push(out, array.get(lower, t))
+        for t = 1 to array.size(upper)-2
+            array.push(out, array.get(upper, t))
+        out
+
+//=================================
+// 4) Interpolation & curve tools
+//=================================
+
+//@function linear interpolate between a and b
+export lerp(series float a, series float b, series float t) =>
+    a + (b - a) * t
+
+//@function quadratic Bezier B(t) for points p0,p1,p2
+export bezier2(Vec2 p0, Vec2 p1, Vec2 p2, series float t) =>
+    u = 1.0 - t
+    p = p0.muls(u*u).add(p1.muls(2.0*u*t)).add(p2.muls(t*t))
+    p
+
+//@function cubic Bezier B(t) for p0,p1,p2,p3
+export bezier3(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, series float t) =>
+    u = 1.0 - t
+    uu = u*u
+    tt = t*t
+    p = p0.muls(uu*u).add(p1.muls(3.0*uu*t)).add(p2.muls(3.0*u*tt)).add(p3.muls(tt*t))
+    p
+
+//@function Catmull-Rom interpolation (centripetal form when alpha=0.5)
+// t∈[0,1], returns point between p1 and p2
+export catmull_rom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, series float t, series float alpha) =>
+    // compute parameterized tangents
+    dt01 = math.pow(p1.sub(p0).length(), alpha) + EPS
+    dt12 = math.pow(p2.sub(p1).length(), alpha) + EPS
+    dt23 = math.pow(p3.sub(p2).length(), alpha) + EPS
+    m1 = p2.sub(p1).muls(1.0/dt12) .sub( p1.sub(p0).muls(1.0/dt01) ) .muls(dt12)
+    m2 = p3.sub(p2).muls(1.0/dt23) .sub( p2.sub(p1).muls(1.0/dt12) ) .muls(dt12)
+    t2 = t*t, t3 = t2*t
+    h00 =  2.0*t3 - 3.0*t2 + 1.0
+    h10 =        t3 - 2.0*t2 + t
+    h01 = -2.0*t3 + 3.0*t2
+    h11 =        t3 -       t2
+    p = p1.muls(h00).add(m1.muls(h10)).add(p2.muls(h01)).add(m2.muls(h11))
+    p
+
+//@function barycentric coordinates of P wrt triangle ABC
+//@returns [ok, wA, wB, wC]
+export barycentric(Vec2 A, Vec2 B, Vec2 C, Vec2 P) =>
+    v0 = B.sub(A)
+    v1 = C.sub(A)
+    v2 = P.sub(A)
+    den = v0.crossz(v1)
+    if math.abs(den) <= EPS
+        [false, na, na, na]
+    else
+        // area ratios using oriented areas
+        wB = v2.crossz(v1) / den
+        wC = v0.crossz(v2) / den
+        wA = 1.0 - wB - wC
+        [true, wA, wB, wC]
+
+//@function point-in-triangle using barycentric (boundary included)
+export point_in_triangle(Vec2 A, Vec2 B, Vec2 C, Vec2 P) =>
+    [ok, wA, wB, wC] = barycentric(A,B,C,P)
+    ok and wA >= -1e-12 and wB >= -1e-12 and wC >= -1e-12

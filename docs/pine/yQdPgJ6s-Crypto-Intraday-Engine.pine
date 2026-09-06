@@ -1,0 +1,1489 @@
+//@version=6
+indicator(
+     "MarketStructureLab - Crypto Intraday Engine",
+     shorttitle = "Crypto Intraday",
+     overlay = true,
+     max_bars_back = 5000,
+     max_labels_count = 10,
+     max_boxes_count = 5
+)
+
+//=============================================================================
+// CRYPTO INTRADAY ENGINE v2.1
+//
+// Educational market-structure indicator for crypto.
+//
+// Displays:
+// - UTC Daily VWAP
+// - UTC Opening Range
+// - Nearest Support zone
+// - Nearest Resistance zone
+// - Context
+// - Location
+// - Status
+//
+// Does not create:
+// - Buy or Sell signals
+// - Entry levels
+// - Stop levels
+// - Target levels
+// - Risk/Reward calculations
+// - Trade plans
+//=============================================================================
+
+
+//=============================================================================
+// INPUTS
+//=============================================================================
+
+string GROUP_MAIN = "Main"
+
+int openingRangeMinutes = input.int(
+     30,
+     "Opening Range, minutes",
+     options = [15, 30, 60],
+     group = GROUP_MAIN
+)
+
+int atrLength = input.int(
+     14,
+     "ATR Length",
+     minval = 1,
+     group = GROUP_MAIN
+)
+
+bool showVWAP = input.bool(
+     true,
+     "Show UTC Daily VWAP",
+     group = GROUP_MAIN
+)
+
+bool showOpeningRange = input.bool(
+     true,
+     "Show Opening Range",
+     group = GROUP_MAIN
+)
+
+bool showZones = input.bool(
+     true,
+     "Show Support and Resistance",
+     group = GROUP_MAIN
+)
+
+bool showDashboard = input.bool(
+     true,
+     "Show Dashboard",
+     group = GROUP_MAIN
+)
+
+
+string GROUP_ZONES = "Zones"
+
+int pivotLeft = input.int(
+     8,
+     "Pivot Left",
+     minval = 1,
+     maxval = 100,
+     group = GROUP_ZONES
+)
+
+int pivotRight = input.int(
+     5,
+     "Pivot Right",
+     minval = 1,
+     maxval = 100,
+     group = GROUP_ZONES
+)
+
+float zoneDepthATR = input.float(
+     0.60,
+     "Zone Depth, ATR",
+     minval = 0.05,
+     step = 0.05,
+     group = GROUP_ZONES
+)
+
+float invalidationBufferATR = input.float(
+     0.10,
+     "Zone Invalidation Buffer, ATR",
+     minval = 0.0,
+     step = 0.05,
+     group = GROUP_ZONES
+)
+
+float minimumZoneGapATR = input.float(
+     0.25,
+     "Minimum Gap Between Zones, ATR",
+     minval = 0.0,
+     step = 0.05,
+     tooltip = "Marks the area as compressed when Support and Resistance are too close.",
+     group = GROUP_ZONES
+)
+
+
+string GROUP_CONTEXT = "Context"
+
+float neutralDistanceATR = input.float(
+     0.20,
+     "VWAP Neutral Distance, ATR",
+     minval = 0.0,
+     step = 0.05,
+     group = GROUP_CONTEXT
+)
+
+int reactionWindowBars = input.int(
+     3,
+     "Reaction Observation Window",
+     minval = 1,
+     maxval = 10,
+     tooltip = "Number of closed candles used to observe a reaction after price reaches a zone.",
+     group = GROUP_CONTEXT
+)
+
+
+//=============================================================================
+// INTERNAL SETTINGS
+//=============================================================================
+
+int MAX_STORED_ZONES = 40
+int ZONE_FORWARD_BARS = 20
+int ZONE_LABEL_FORWARD_BARS = 2
+
+int ZONE_SUPPORT = 1
+int ZONE_RESISTANCE = -1
+
+int WATCH_NONE = 0
+int WATCH_SUPPORT = 1
+int WATCH_RESISTANCE = -1
+
+int EVENT_NONE = 0
+int EVENT_SUPPORT_REACTION = 1
+int EVENT_RESISTANCE_REACTION = 2
+int EVENT_CONTEXT_CHANGED = 3
+int EVENT_ZONE_INVALIDATED = 4
+int EVENT_WINDOW_EXPIRED = 5
+
+
+//=============================================================================
+// COLORS
+//=============================================================================
+
+color COLOR_BULLISH = color.rgb(16, 185, 129)
+color COLOR_BEARISH = color.rgb(240, 93, 94)
+color COLOR_INFORMATION = color.rgb(56, 189, 248)
+color COLOR_WARNING = color.rgb(245, 158, 11)
+color COLOR_NEUTRAL = color.rgb(148, 163, 184)
+
+color COLOR_VWAP = color.rgb(250, 204, 21)
+color COLOR_OPENING_RANGE = color.rgb(245, 158, 11)
+
+color COLOR_PANEL = color.rgb(18, 22, 30)
+color COLOR_HEADER = color.rgb(28, 33, 43)
+
+
+//=============================================================================
+// ZONE STORAGE
+//
+// Arrays must be declared before findZoneIndex().
+//=============================================================================
+
+var float[] zoneTops = array.new_float()
+var float[] zoneBottoms = array.new_float()
+
+var int[] zoneTypes = array.new_int()
+var int[] zoneIds = array.new_int()
+var int[] zoneCreatedBars = array.new_int()
+
+var bool[] zoneEvaluated = array.new_bool()
+
+var int nextZoneId = 1
+
+
+//=============================================================================
+// HELPER FUNCTION
+//=============================================================================
+
+findZoneIndex(int requestedZoneId) =>
+    int result = -1
+
+    if not na(requestedZoneId)
+        int zoneCount = array.size(zoneIds)
+
+        if zoneCount > 0
+            for index = 0 to zoneCount - 1
+                if array.get(zoneIds, index) == requestedZoneId
+                    result := index
+                    break
+
+    result
+
+
+//=============================================================================
+// UTC DAY
+//=============================================================================
+
+string UTC_TIMEZONE = "Etc/UTC"
+
+int utcDateKey = (
+     year(time, UTC_TIMEZONE) * 10000 +
+     month(time, UTC_TIMEZONE) * 100 +
+     dayofmonth(time, UTC_TIMEZONE)
+)
+
+int utcMinuteOfDay = (
+     hour(time, UTC_TIMEZONE) * 60 +
+     minute(time, UTC_TIMEZONE)
+)
+
+bool newUtcDay = (
+     na(utcDateKey[1]) or
+     utcDateKey != utcDateKey[1]
+)
+
+
+//=============================================================================
+// ATR
+//=============================================================================
+
+float atr = ta.atr(atrLength)
+
+
+//=============================================================================
+// UTC DAILY VWAP
+//=============================================================================
+
+var float cumulativePriceVolume = 0.0
+var float cumulativeVolume = 0.0
+
+if newUtcDay
+    cumulativePriceVolume := 0.0
+    cumulativeVolume := 0.0
+
+float currentVolume = nz(volume, 0.0)
+
+cumulativePriceVolume += hlc3 * currentVolume
+cumulativeVolume += currentVolume
+
+float dailyVWAP = (
+     cumulativeVolume > 0
+     ? cumulativePriceVolume / cumulativeVolume
+     : na
+)
+
+float displayedVWAP = (
+     newUtcDay
+     ? na
+     : dailyVWAP
+)
+
+
+//=============================================================================
+// UTC OPENING RANGE
+//=============================================================================
+
+var float openingRangeHigh = na
+var float openingRangeLow = na
+
+if newUtcDay
+    openingRangeHigh := na
+    openingRangeLow := na
+
+bool insideOpeningRange = utcMinuteOfDay < openingRangeMinutes
+bool openingRangeComplete = utcMinuteOfDay >= openingRangeMinutes
+
+if insideOpeningRange
+    openingRangeHigh := (
+         na(openingRangeHigh)
+         ? high
+         : math.max(openingRangeHigh, high)
+    )
+
+    openingRangeLow := (
+         na(openingRangeLow)
+         ? low
+         : math.min(openingRangeLow, low)
+    )
+
+float displayedOpeningRangeHigh = (
+     newUtcDay
+     ? na
+     : openingRangeHigh
+)
+
+float displayedOpeningRangeLow = (
+     newUtcDay
+     ? na
+     : openingRangeLow
+)
+
+
+//=============================================================================
+// CONFIRMED PIVOTS
+//=============================================================================
+
+float confirmedPivotHigh = ta.pivothigh(
+     high,
+     pivotLeft,
+     pivotRight
+)
+
+float confirmedPivotLow = ta.pivotlow(
+     low,
+     pivotLeft,
+     pivotRight
+)
+
+
+//=============================================================================
+// CREATE ZONES
+//=============================================================================
+
+if barstate.isconfirmed
+
+    if not na(confirmedPivotHigh) and not na(atr[pivotRight])
+
+        float resistanceTop = confirmedPivotHigh
+
+        float resistanceBottom = (
+             confirmedPivotHigh -
+             atr[pivotRight] * zoneDepthATR
+        )
+
+        array.push(zoneTops, resistanceTop)
+        array.push(zoneBottoms, resistanceBottom)
+
+        array.push(zoneTypes, ZONE_RESISTANCE)
+        array.push(zoneIds, nextZoneId)
+        array.push(zoneCreatedBars, bar_index - pivotRight)
+
+        array.push(zoneEvaluated, false)
+
+        nextZoneId += 1
+
+    if not na(confirmedPivotLow) and not na(atr[pivotRight])
+
+        float supportBottom = confirmedPivotLow
+
+        float supportTop = (
+             confirmedPivotLow +
+             atr[pivotRight] * zoneDepthATR
+        )
+
+        array.push(zoneTops, supportTop)
+        array.push(zoneBottoms, supportBottom)
+
+        array.push(zoneTypes, ZONE_SUPPORT)
+        array.push(zoneIds, nextZoneId)
+        array.push(zoneCreatedBars, bar_index - pivotRight)
+
+        array.push(zoneEvaluated, false)
+
+        nextZoneId += 1
+
+    while array.size(zoneIds) > MAX_STORED_ZONES
+        array.shift(zoneTops)
+        array.shift(zoneBottoms)
+
+        array.shift(zoneTypes)
+        array.shift(zoneIds)
+        array.shift(zoneCreatedBars)
+
+        array.shift(zoneEvaluated)
+
+
+//=============================================================================
+// REMOVE INVALIDATED ZONES
+//=============================================================================
+
+if barstate.isconfirmed and array.size(zoneIds) > 0
+
+    float zoneInvalidationBuffer = atr * invalidationBufferATR
+    int removalIndex = array.size(zoneIds) - 1
+
+    while removalIndex >= 0
+
+        int zoneType = array.get(
+             zoneTypes,
+             removalIndex
+        )
+
+        float zoneTop = array.get(
+             zoneTops,
+             removalIndex
+        )
+
+        float zoneBottom = array.get(
+             zoneBottoms,
+             removalIndex
+        )
+
+        bool supportInvalidated = (
+             zoneType == ZONE_SUPPORT and
+             close < zoneBottom - zoneInvalidationBuffer
+        )
+
+        bool resistanceInvalidated = (
+             zoneType == ZONE_RESISTANCE and
+             close > zoneTop + zoneInvalidationBuffer
+        )
+
+        if supportInvalidated or resistanceInvalidated
+
+            array.remove(zoneTops, removalIndex)
+            array.remove(zoneBottoms, removalIndex)
+
+            array.remove(zoneTypes, removalIndex)
+            array.remove(zoneIds, removalIndex)
+            array.remove(zoneCreatedBars, removalIndex)
+
+            array.remove(zoneEvaluated, removalIndex)
+
+        removalIndex -= 1
+
+
+//=============================================================================
+// FIND NEAREST SUPPORT AND RESISTANCE
+//=============================================================================
+
+int nearestSupportIndex = -1
+int nearestResistanceIndex = -1
+
+float bestSupportDistance = na
+float bestResistanceDistance = na
+
+if array.size(zoneIds) > 0
+
+    for index = 0 to array.size(zoneIds) - 1
+
+        int zoneType = array.get(
+             zoneTypes,
+             index
+        )
+
+        float zoneTop = array.get(
+             zoneTops,
+             index
+        )
+
+        float zoneBottom = array.get(
+             zoneBottoms,
+             index
+        )
+
+        if zoneType == ZONE_SUPPORT and close >= zoneBottom
+
+            float supportDistance = (
+                 close > zoneTop
+                 ? close - zoneTop
+                 : 0.0
+            )
+
+            if na(bestSupportDistance) or supportDistance < bestSupportDistance
+                bestSupportDistance := supportDistance
+                nearestSupportIndex := index
+
+        if zoneType == ZONE_RESISTANCE and close <= zoneTop
+
+            float resistanceDistance = (
+                 close < zoneBottom
+                 ? zoneBottom - close
+                 : 0.0
+            )
+
+            if na(bestResistanceDistance) or resistanceDistance < bestResistanceDistance
+                bestResistanceDistance := resistanceDistance
+                nearestResistanceIndex := index
+
+
+//=============================================================================
+// CURRENT ZONE VALUES
+//=============================================================================
+
+int nearestSupportId = (
+     nearestSupportIndex >= 0
+     ? array.get(zoneIds, nearestSupportIndex)
+     : na
+)
+
+int nearestResistanceId = (
+     nearestResistanceIndex >= 0
+     ? array.get(zoneIds, nearestResistanceIndex)
+     : na
+)
+
+
+float nearestSupportTop = (
+     nearestSupportIndex >= 0
+     ? array.get(zoneTops, nearestSupportIndex)
+     : na
+)
+
+float nearestSupportBottom = (
+     nearestSupportIndex >= 0
+     ? array.get(zoneBottoms, nearestSupportIndex)
+     : na
+)
+
+
+float nearestResistanceTop = (
+     nearestResistanceIndex >= 0
+     ? array.get(zoneTops, nearestResistanceIndex)
+     : na
+)
+
+float nearestResistanceBottom = (
+     nearestResistanceIndex >= 0
+     ? array.get(zoneBottoms, nearestResistanceIndex)
+     : na
+)
+
+
+bool supportAlreadyEvaluated = (
+     nearestSupportIndex >= 0
+     ? array.get(zoneEvaluated, nearestSupportIndex)
+     : false
+)
+
+bool resistanceAlreadyEvaluated = (
+     nearestResistanceIndex >= 0
+     ? array.get(zoneEvaluated, nearestResistanceIndex)
+     : false
+)
+
+
+//=============================================================================
+// PRICE LOCATION
+//=============================================================================
+
+bool atSupport = (
+     nearestSupportIndex >= 0 and
+     low <= nearestSupportTop and
+     high >= nearestSupportBottom
+)
+
+bool atResistance = (
+     nearestResistanceIndex >= 0 and
+     high >= nearestResistanceBottom and
+     low <= nearestResistanceTop
+)
+
+
+//=============================================================================
+// COMPRESSED AREA
+//=============================================================================
+
+bool hasSupportAndResistance = (
+     nearestSupportIndex >= 0 and
+     nearestResistanceIndex >= 0
+)
+
+float distanceBetweenZones = (
+     hasSupportAndResistance
+     ? nearestResistanceBottom - nearestSupportTop
+     : na
+)
+
+float minimumAllowedZoneGap = atr * minimumZoneGapATR
+
+bool zonesCloseTogether = (
+     hasSupportAndResistance and
+     distanceBetweenZones <= minimumAllowedZoneGap
+)
+
+
+//=============================================================================
+// MARKET CONTEXT
+//=============================================================================
+
+float neutralVWAPBand = atr * neutralDistanceATR
+
+bool nearVWAP = (
+     not na(dailyVWAP) and
+     math.abs(close - dailyVWAP) <= neutralVWAPBand
+)
+
+bool bullishContext = (
+     not nearVWAP and
+     not na(dailyVWAP) and
+     close > dailyVWAP + neutralVWAPBand
+)
+
+bool bearishContext = (
+     not nearVWAP and
+     not na(dailyVWAP) and
+     close < dailyVWAP - neutralVWAPBand
+)
+
+bool strongBullishContext = (
+     bullishContext and
+     openingRangeComplete and
+     not na(openingRangeHigh) and
+     close > openingRangeHigh
+)
+
+bool strongBearishContext = (
+     bearishContext and
+     openingRangeComplete and
+     not na(openingRangeLow) and
+     close < openingRangeLow
+)
+
+
+//=============================================================================
+// REACTION OBSERVATION
+//
+// This logic observes reactions only.
+// It does not create a trade plan.
+//=============================================================================
+
+var int watchState = WATCH_NONE
+var int watchedZoneId = na
+var int watchStartedBar = na
+
+bool eventSupportObservationStarted = false
+bool eventResistanceObservationStarted = false
+
+bool eventSupportReaction = false
+bool eventResistanceReaction = false
+
+bool eventContextChanged = false
+bool eventZoneInvalidated = false
+bool eventWindowExpired = false
+
+bool eventCompressedArea = (
+     barstate.isconfirmed and
+     zonesCloseTogether and
+     not zonesCloseTogether[1]
+)
+
+int currentEvent = EVENT_NONE
+
+
+//=============================================================================
+// RESET OBSERVATION
+//=============================================================================
+
+if newUtcDay
+    watchState := WATCH_NONE
+    watchedZoneId := na
+    watchStartedBar := na
+
+
+//=============================================================================
+// PROCESS OBSERVATION
+//=============================================================================
+
+if barstate.isconfirmed
+
+    currentEvent := EVENT_NONE
+
+    //---------------------------------------------------------------------
+    // Observe Support
+    //---------------------------------------------------------------------
+
+    if watchState == WATCH_SUPPORT
+
+        int watchedSupportIndex = findZoneIndex(
+             watchedZoneId
+        )
+
+        int watchAge = (
+             not na(watchStartedBar)
+             ? bar_index - watchStartedBar
+             : reactionWindowBars + 1
+        )
+
+        if watchedSupportIndex < 0
+
+            currentEvent := EVENT_ZONE_INVALIDATED
+            eventZoneInvalidated := true
+
+            watchState := WATCH_NONE
+            watchedZoneId := na
+            watchStartedBar := na
+
+        else
+
+            float watchedSupportTop = array.get(
+                 zoneTops,
+                 watchedSupportIndex
+            )
+
+            bool supportReactionDetected = (
+                 watchAge >= 1 and
+                 close > watchedSupportTop and
+                 close > dailyVWAP
+            )
+
+            if not bullishContext
+
+                array.set(
+                     zoneEvaluated,
+                     watchedSupportIndex,
+                     true
+                )
+
+                currentEvent := EVENT_CONTEXT_CHANGED
+                eventContextChanged := true
+
+                watchState := WATCH_NONE
+                watchedZoneId := na
+                watchStartedBar := na
+
+            else if supportReactionDetected
+
+                array.set(
+                     zoneEvaluated,
+                     watchedSupportIndex,
+                     true
+                )
+
+                currentEvent := EVENT_SUPPORT_REACTION
+                eventSupportReaction := true
+
+                watchState := WATCH_NONE
+                watchedZoneId := na
+                watchStartedBar := na
+
+            else if watchAge > reactionWindowBars
+
+                array.set(
+                     zoneEvaluated,
+                     watchedSupportIndex,
+                     true
+                )
+
+                currentEvent := EVENT_WINDOW_EXPIRED
+                eventWindowExpired := true
+
+                watchState := WATCH_NONE
+                watchedZoneId := na
+                watchStartedBar := na
+
+    //---------------------------------------------------------------------
+    // Observe Resistance
+    //---------------------------------------------------------------------
+
+    else if watchState == WATCH_RESISTANCE
+
+        int watchedResistanceIndex = findZoneIndex(
+             watchedZoneId
+        )
+
+        int watchAge = (
+             not na(watchStartedBar)
+             ? bar_index - watchStartedBar
+             : reactionWindowBars + 1
+        )
+
+        if watchedResistanceIndex < 0
+
+            currentEvent := EVENT_ZONE_INVALIDATED
+            eventZoneInvalidated := true
+
+            watchState := WATCH_NONE
+            watchedZoneId := na
+            watchStartedBar := na
+
+        else
+
+            float watchedResistanceBottom = array.get(
+                 zoneBottoms,
+                 watchedResistanceIndex
+            )
+
+            bool resistanceReactionDetected = (
+                 watchAge >= 1 and
+                 close < watchedResistanceBottom and
+                 close < dailyVWAP
+            )
+
+            if not bearishContext
+
+                array.set(
+                     zoneEvaluated,
+                     watchedResistanceIndex,
+                     true
+                )
+
+                currentEvent := EVENT_CONTEXT_CHANGED
+                eventContextChanged := true
+
+                watchState := WATCH_NONE
+                watchedZoneId := na
+                watchStartedBar := na
+
+            else if resistanceReactionDetected
+
+                array.set(
+                     zoneEvaluated,
+                     watchedResistanceIndex,
+                     true
+                )
+
+                currentEvent := EVENT_RESISTANCE_REACTION
+                eventResistanceReaction := true
+
+                watchState := WATCH_NONE
+                watchedZoneId := na
+                watchStartedBar := na
+
+            else if watchAge > reactionWindowBars
+
+                array.set(
+                     zoneEvaluated,
+                     watchedResistanceIndex,
+                     true
+                )
+
+                currentEvent := EVENT_WINDOW_EXPIRED
+                eventWindowExpired := true
+
+                watchState := WATCH_NONE
+                watchedZoneId := na
+                watchStartedBar := na
+
+    //---------------------------------------------------------------------
+    // Start new observation
+    //---------------------------------------------------------------------
+
+    if watchState == WATCH_NONE and currentEvent == EVENT_NONE
+
+        bool canObserveSupport = (
+             not zonesCloseTogether and
+             bullishContext and
+             atSupport and
+             nearestSupportIndex >= 0 and
+             not supportAlreadyEvaluated
+        )
+
+        bool canObserveResistance = (
+             not zonesCloseTogether and
+             bearishContext and
+             atResistance and
+             nearestResistanceIndex >= 0 and
+             not resistanceAlreadyEvaluated
+        )
+
+        if canObserveSupport
+
+            watchState := WATCH_SUPPORT
+            watchedZoneId := nearestSupportId
+            watchStartedBar := bar_index
+
+            eventSupportObservationStarted := true
+
+        else if canObserveResistance
+
+            watchState := WATCH_RESISTANCE
+            watchedZoneId := nearestResistanceId
+            watchStartedBar := bar_index
+
+            eventResistanceObservationStarted := true
+
+
+//=============================================================================
+// DASHBOARD SNAPSHOT
+//
+// Values update only after a candle closes.
+//=============================================================================
+
+var string dashboardContext = "Neutral"
+var string dashboardLocation = "No Zone"
+var string dashboardStatus = "Monitoring Market"
+
+var color dashboardContextColor = COLOR_NEUTRAL
+var color dashboardLocationColor = COLOR_NEUTRAL
+var color dashboardStatusColor = COLOR_NEUTRAL
+
+
+if barstate.isconfirmed
+
+    //---------------------------------------------------------------------
+    // Context
+    //---------------------------------------------------------------------
+
+    if strongBullishContext
+        dashboardContext := "Strong Bullish"
+        dashboardContextColor := COLOR_BULLISH
+
+    else if strongBearishContext
+        dashboardContext := "Strong Bearish"
+        dashboardContextColor := COLOR_BEARISH
+
+    else if bullishContext
+        dashboardContext := "Bullish"
+        dashboardContextColor := COLOR_BULLISH
+
+    else if bearishContext
+        dashboardContext := "Bearish"
+        dashboardContextColor := COLOR_BEARISH
+
+    else
+        dashboardContext := "Neutral"
+        dashboardContextColor := COLOR_NEUTRAL
+
+    //---------------------------------------------------------------------
+    // Location
+    //---------------------------------------------------------------------
+
+    if zonesCloseTogether
+        dashboardLocation := "Compressed Area"
+        dashboardLocationColor := COLOR_WARNING
+
+    else if atSupport and not atResistance
+        dashboardLocation := "At Support"
+        dashboardLocationColor := COLOR_BULLISH
+
+    else if atResistance and not atSupport
+        dashboardLocation := "At Resistance"
+        dashboardLocationColor := COLOR_BEARISH
+
+    else if nearestSupportIndex < 0 and nearestResistanceIndex < 0
+        dashboardLocation := "No Zone"
+        dashboardLocationColor := COLOR_NEUTRAL
+
+    else
+        dashboardLocation := "Between Zones"
+        dashboardLocationColor := COLOR_NEUTRAL
+
+    //---------------------------------------------------------------------
+    // Status: completed event
+    //---------------------------------------------------------------------
+
+    if currentEvent == EVENT_SUPPORT_REACTION
+        dashboardStatus := "Support Reaction Detected"
+        dashboardStatusColor := COLOR_INFORMATION
+
+    else if currentEvent == EVENT_RESISTANCE_REACTION
+        dashboardStatus := "Resistance Reaction Detected"
+        dashboardStatusColor := COLOR_INFORMATION
+
+    else if currentEvent == EVENT_CONTEXT_CHANGED
+        dashboardStatus := "Context Changed"
+        dashboardStatusColor := COLOR_WARNING
+
+    else if currentEvent == EVENT_ZONE_INVALIDATED
+        dashboardStatus := "Zone Invalidated"
+        dashboardStatusColor := COLOR_WARNING
+
+    else if currentEvent == EVENT_WINDOW_EXPIRED
+        dashboardStatus := "Reaction Window Expired"
+        dashboardStatusColor := COLOR_WARNING
+
+    //---------------------------------------------------------------------
+    // Status: observation in progress
+    //---------------------------------------------------------------------
+
+    else if watchState == WATCH_SUPPORT
+        dashboardStatus := "Observing Support Reaction"
+        dashboardStatusColor := COLOR_INFORMATION
+
+    else if watchState == WATCH_RESISTANCE
+        dashboardStatus := "Observing Resistance Reaction"
+        dashboardStatusColor := COLOR_INFORMATION
+
+    //---------------------------------------------------------------------
+    // Status: current structure
+    //---------------------------------------------------------------------
+
+    else if zonesCloseTogether
+        dashboardStatus := "Zones Close Together"
+        dashboardStatusColor := COLOR_WARNING
+
+    else if bullishContext and atResistance
+        dashboardStatus := "Bullish Context at Resistance"
+        dashboardStatusColor := COLOR_WARNING
+
+    else if bearishContext and atSupport
+        dashboardStatus := "Bearish Context at Support"
+        dashboardStatusColor := COLOR_WARNING
+
+    else if bullishContext and atSupport and supportAlreadyEvaluated
+        dashboardStatus := "Support Already Evaluated"
+        dashboardStatusColor := COLOR_NEUTRAL
+
+    else if bearishContext and atResistance and resistanceAlreadyEvaluated
+        dashboardStatus := "Resistance Already Evaluated"
+        dashboardStatusColor := COLOR_NEUTRAL
+
+    else if bullishContext
+        dashboardStatus := "Monitoring Support"
+        dashboardStatusColor := COLOR_NEUTRAL
+
+    else if bearishContext
+        dashboardStatus := "Monitoring Resistance"
+        dashboardStatusColor := COLOR_NEUTRAL
+
+    else
+        dashboardStatus := "Monitoring Market"
+        dashboardStatusColor := COLOR_NEUTRAL
+
+
+//=============================================================================
+// VWAP AND OPENING RANGE
+//=============================================================================
+
+vwapPlot = plot(
+     showVWAP ? displayedVWAP : na,
+     title = "UTC Daily VWAP",
+     color = COLOR_VWAP,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+openingRangeHighPlot = plot(
+     showOpeningRange ? displayedOpeningRangeHigh : na,
+     title = "Opening Range High",
+     color = color.new(COLOR_OPENING_RANGE, 25),
+     linewidth = 1,
+     style = plot.style_linebr
+)
+
+openingRangeLowPlot = plot(
+     showOpeningRange ? displayedOpeningRangeLow : na,
+     title = "Opening Range Low",
+     color = color.new(COLOR_OPENING_RANGE, 25),
+     linewidth = 1,
+     style = plot.style_linebr
+)
+
+fill(
+     openingRangeHighPlot,
+     openingRangeLowPlot,
+     color = showOpeningRange
+          ? color.new(COLOR_OPENING_RANGE, 96)
+          : na,
+     title = "Opening Range"
+)
+
+
+//=============================================================================
+// ZONE VISUAL OBJECTS
+//=============================================================================
+
+var box supportBox = na
+var box resistanceBox = na
+
+var label supportLabel = na
+var label resistanceLabel = na
+
+var int displayedSupportId = na
+var int displayedResistanceId = na
+
+
+bool supportObservationActive = (
+     watchState == WATCH_SUPPORT and
+     watchedZoneId == nearestSupportId
+)
+
+bool resistanceObservationActive = (
+     watchState == WATCH_RESISTANCE and
+     watchedZoneId == nearestResistanceId
+)
+
+
+//=============================================================================
+// SUPPORT VISUAL
+//=============================================================================
+
+if showZones and nearestSupportIndex >= 0
+
+    int supportCreatedBar = array.get(
+         zoneCreatedBars,
+         nearestSupportIndex
+    )
+
+    int supportLeft = math.max(
+         supportCreatedBar,
+         bar_index - 5000
+    )
+
+    color supportFill = color.new(
+         COLOR_BULLISH,
+         supportObservationActive ? 78 : 88
+    )
+
+    color supportBorder = color.new(
+         COLOR_BULLISH,
+         supportObservationActive ? 10 : 45
+    )
+
+    bool createNewSupportBox = (
+         na(supportBox) or
+         displayedSupportId != nearestSupportId
+    )
+
+    if createNewSupportBox
+
+        if not na(supportBox)
+            box.delete(supportBox)
+
+        if not na(supportLabel)
+            label.delete(supportLabel)
+
+        supportBox := box.new(
+             left = supportLeft,
+             top = nearestSupportTop,
+             right = bar_index + ZONE_FORWARD_BARS,
+             bottom = nearestSupportBottom,
+             xloc = xloc.bar_index,
+             bgcolor = supportFill,
+             border_color = supportBorder
+        )
+
+        supportLabel := label.new(
+             x = bar_index + ZONE_LABEL_FORWARD_BARS,
+             y = (nearestSupportTop + nearestSupportBottom) * 0.5,
+             text = "Support",
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             style = label.style_label_left,
+             size = size.tiny,
+             color = color.new(COLOR_BULLISH, 70),
+             textcolor = color.white
+        )
+
+        displayedSupportId := nearestSupportId
+
+    else
+
+        box.set_left(
+             supportBox,
+             supportLeft
+        )
+
+        box.set_right(
+             supportBox,
+             bar_index + ZONE_FORWARD_BARS
+        )
+
+        box.set_top(
+             supportBox,
+             nearestSupportTop
+        )
+
+        box.set_bottom(
+             supportBox,
+             nearestSupportBottom
+        )
+
+        box.set_bgcolor(
+             supportBox,
+             supportFill
+        )
+
+        box.set_border_color(
+             supportBox,
+             supportBorder
+        )
+
+        label.set_xy(
+             supportLabel,
+             bar_index + ZONE_LABEL_FORWARD_BARS,
+             (nearestSupportTop + nearestSupportBottom) * 0.5
+        )
+
+else
+
+    if not na(supportBox)
+        box.delete(supportBox)
+        supportBox := na
+
+    if not na(supportLabel)
+        label.delete(supportLabel)
+        supportLabel := na
+
+    displayedSupportId := na
+
+
+//=============================================================================
+// RESISTANCE VISUAL
+//=============================================================================
+
+if showZones and nearestResistanceIndex >= 0
+
+    int resistanceCreatedBar = array.get(
+         zoneCreatedBars,
+         nearestResistanceIndex
+    )
+
+    int resistanceLeft = math.max(
+         resistanceCreatedBar,
+         bar_index - 5000
+    )
+
+    color resistanceFill = color.new(
+         COLOR_BEARISH,
+         resistanceObservationActive ? 78 : 88
+    )
+
+    color resistanceBorder = color.new(
+         COLOR_BEARISH,
+         resistanceObservationActive ? 10 : 45
+    )
+
+    bool createNewResistanceBox = (
+         na(resistanceBox) or
+         displayedResistanceId != nearestResistanceId
+    )
+
+    if createNewResistanceBox
+
+        if not na(resistanceBox)
+            box.delete(resistanceBox)
+
+        if not na(resistanceLabel)
+            label.delete(resistanceLabel)
+
+        resistanceBox := box.new(
+             left = resistanceLeft,
+             top = nearestResistanceTop,
+             right = bar_index + ZONE_FORWARD_BARS,
+             bottom = nearestResistanceBottom,
+             xloc = xloc.bar_index,
+             bgcolor = resistanceFill,
+             border_color = resistanceBorder
+        )
+
+        resistanceLabel := label.new(
+             x = bar_index + ZONE_LABEL_FORWARD_BARS + 2,
+             y = (nearestResistanceTop + nearestResistanceBottom) * 0.5,
+             text = "Resistance",
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             style = label.style_label_left,
+             size = size.tiny,
+             color = color.new(COLOR_BEARISH, 70),
+             textcolor = color.white
+        )
+
+        displayedResistanceId := nearestResistanceId
+
+    else
+
+        box.set_left(
+             resistanceBox,
+             resistanceLeft
+        )
+
+        box.set_right(
+             resistanceBox,
+             bar_index + ZONE_FORWARD_BARS
+        )
+
+        box.set_top(
+             resistanceBox,
+             nearestResistanceTop
+        )
+
+        box.set_bottom(
+             resistanceBox,
+             nearestResistanceBottom
+        )
+
+        box.set_bgcolor(
+             resistanceBox,
+             resistanceFill
+        )
+
+        box.set_border_color(
+             resistanceBox,
+             resistanceBorder
+        )
+
+        label.set_xy(
+             resistanceLabel,
+             bar_index + ZONE_LABEL_FORWARD_BARS + 2,
+             (nearestResistanceTop + nearestResistanceBottom) * 0.5
+        )
+
+else
+
+    if not na(resistanceBox)
+        box.delete(resistanceBox)
+        resistanceBox := na
+
+    if not na(resistanceLabel)
+        label.delete(resistanceLabel)
+        resistanceLabel := na
+
+    displayedResistanceId := na
+
+
+//=============================================================================
+// DASHBOARD
+//=============================================================================
+
+float chartTimeframeSeconds = timeframe.in_seconds()
+
+bool recommendedTimeframe = (
+     timeframe.isintraday and
+     chartTimeframeSeconds >= 180 and
+     chartTimeframeSeconds <= 900
+)
+
+bool cryptoSymbol = syminfo.type == "crypto"
+
+var table dashboard = table.new(
+     position.top_right,
+     2,
+     4,
+     border_width = 1
+)
+
+if barstate.islast
+
+    table.clear(
+         dashboard,
+         0,
+         0,
+         1,
+         3
+    )
+
+    if showDashboard
+
+        string headerNote = "Structure View"
+        color headerNoteColor = COLOR_NEUTRAL
+
+        if not cryptoSymbol
+            headerNote := "Crypto Only"
+            headerNoteColor := COLOR_WARNING
+
+        else if not recommendedTimeframe
+            headerNote := "TF 3-15m"
+            headerNoteColor := COLOR_WARNING
+
+        table.cell(
+             dashboard,
+             0,
+             0,
+             "Crypto Intraday Engine",
+             text_color = color.white,
+             bgcolor = COLOR_HEADER,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             0,
+             headerNote,
+             text_color = headerNoteColor,
+             bgcolor = COLOR_HEADER,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             0,
+             1,
+             "Context",
+             text_color = color.white,
+             bgcolor = COLOR_PANEL,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             1,
+             dashboardContext,
+             text_color = dashboardContextColor,
+             bgcolor = COLOR_PANEL,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             0,
+             2,
+             "Location",
+             text_color = color.white,
+             bgcolor = COLOR_PANEL,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             2,
+             dashboardLocation,
+             text_color = dashboardLocationColor,
+             bgcolor = COLOR_PANEL,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             0,
+             3,
+             "Status",
+             text_color = color.white,
+             bgcolor = COLOR_PANEL,
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             3,
+             dashboardStatus,
+             text_color = dashboardStatusColor,
+             bgcolor = COLOR_PANEL,
+             text_size = size.small
+        )
+
+
+//=============================================================================
+// INFORMATIONAL ALERTS
+//=============================================================================
+
+alertcondition(
+     eventSupportObservationStarted,
+     "Support Observation Started",
+     "Crypto Intraday Engine: price reached a Support zone."
+)
+
+alertcondition(
+     eventResistanceObservationStarted,
+     "Resistance Observation Started",
+     "Crypto Intraday Engine: price reached a Resistance zone."
+)
+
+alertcondition(
+     eventSupportReaction,
+     "Support Reaction Detected",
+     "Crypto Intraday Engine: a reaction from Support was detected."
+)
+
+alertcondition(
+     eventResistanceReaction,
+     "Resistance Reaction Detected",
+     "Crypto Intraday Engine: a reaction from Resistance was detected."
+)
+
+alertcondition(
+     eventContextChanged,
+     "Context Changed",
+     "Crypto Intraday Engine: market context changed during zone observation."
+)
+
+alertcondition(
+     eventZoneInvalidated,
+     "Zone Invalidated",
+     "Crypto Intraday Engine: the observed zone was invalidated."
+)
+
+alertcondition(
+     eventWindowExpired,
+     "Reaction Window Expired",
+     "Crypto Intraday Engine: the observation window expired."
+)
+
+alertcondition(
+     eventCompressedArea,
+     "Zones Close Together",
+     "Crypto Intraday Engine: Support and Resistance are located close together."
+)

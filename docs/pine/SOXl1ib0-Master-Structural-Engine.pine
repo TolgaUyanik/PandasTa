@@ -1,0 +1,273 @@
+//@version=6
+strategy("TOTORO Master Structural Engine v24 (Single Mode)", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, margin_long=10, margin_short=10)
+
+// ==========================================
+// INPUTS & SETTINGS
+// ==========================================
+// Indicator Settings
+var string G_INDI = "=== Indicator Settings ==="
+fastEmaPeriod     = input.int(5, title="Fast EMA Period (White Channel)", group=G_INDI)
+midEmaPeriod      = input.int(100, title="Mid EMA Period (Channel Filter)", group=G_INDI)
+slowEmaPeriod     = input.int(200, title="Slow Macro Trend EMA (Orange Line)", group=G_INDI)
+rsiPeriod         = input.int(14, title="RSI Period", group=G_INDI)
+atrPeriod         = input.int(14, title="ATR Period", group=G_INDI)
+
+// Strategy Filters
+var string G_FILT = "=== Strategy Filters ==="
+useFilterMomentum   = input.bool(true, title="Filter 1: Strict Momentum (RSI > 55 / < 45)", group=G_FILT)
+useFilterCleanWick  = input.bool(true, title="Filter 2: Clean Heikin Ashi Wick Filter", group=G_FILT)
+useFilterCompress   = input.bool(true, title="Filter 3: Dynamic Compression Gap", group=G_FILT)
+useFilterDoji       = input.bool(true, title="Filter 4: Indecision Doji Filter (Absolute)", group=G_FILT)
+useFilterNewsSpike  = input.bool(true, title="Filter 5: News Spike/ATR Protection", group=G_FILT)
+
+// Volatility & Thresholds
+var string G_THRESH = "=== Filter Thresholds ==="
+useAtrFilter        = input.bool(false, title="Filter 6: Min/Max ATR Filter Active", group=G_THRESH)
+minAtrValue         = input.float(8.0, title="Minimum ATR (Pips/Points)", group=G_THRESH)
+maxAtrValue         = input.float(22.0, title="Maximum ATR (Pips/Points)", group=G_THRESH)
+compressionGapPoints= input.int(30, title="Filter 3: Compression Gap (Points)", group=G_THRESH)
+dojiBodyPct         = input.float(40.0, title="Filter 4: Min Body % of Candle Range", group=G_THRESH)
+atrMultiplier       = input.float(2.5, title="Filter 5: ATR Spike Multiplier", group=G_THRESH)
+
+// Institutional Overrides
+var string G_OVER = "=== Institutional Overrides ==="
+useMomentumOverride = input.bool(true, title="Smart Override: Deep Pullbacks & Engulfing", group=G_OVER)
+
+// Session Time Filter
+var string G_TIME = "=== Session Time Filter ==="
+timeSession         = input.session("0900-2200", title="Trading Session Time", group=G_TIME)
+timeZone            = input.string("UTC+3", title="Session Timezone", tooltip="Adjust to match your operational timezone", group=G_TIME)
+
+// Risk Management (Stops & Targets)
+var string G_RISK = "=== Risk Management ==="
+rrRatio             = input.float(3.0, title="Reward/Risk Ratio", step=0.5, group=G_RISK)
+slBufferPoints      = input.int(10, title="SL Buffer from EMA 100 (Points)", group=G_RISK)
+
+// Visuals
+var string G_VIS = "=== Visual Settings ==="
+showHACandles       = input.bool(false, title="Paint Internal HA Candles on Chart", group=G_VIS)
+
+// ==========================================
+// INDICATOR ENGINE CALCULATION
+// ==========================================
+// Core Indicators
+ema5High  = ta.ema(high, fastEmaPeriod)
+ema5Low   = ta.ema(low, fastEmaPeriod)
+ema100High= ta.ema(high, midEmaPeriod)
+ema100Low = ta.ema(low, midEmaPeriod)
+ema200    = ta.ema(close, slowEmaPeriod)
+rsiVal    = ta.rsi(close, rsiPeriod)
+rawAtr    = ta.atr(atrPeriod)
+
+// Universal ATR Normalizer
+getUniversalATR() =>
+    var float normalizedAtr = rawAtr
+    string assetName = syminfo.ticker
+    if str.contains(assetName, "XAU") or str.contains(assetName, "GOLD")
+        normalizedAtr := rawAtr / 0.1
+    else if str.contains(assetName, "XAG") or str.contains(assetName, "SILVER")
+        normalizedAtr := rawAtr / 0.01
+    else if syminfo.mintick <= 0.001 and str.contains(assetName, "JPY")
+        normalizedAtr := rawAtr / 0.01
+    else if syminfo.mintick == 0.0001
+        normalizedAtr := rawAtr / 0.0001
+    else
+        normalizedAtr := rawAtr
+    normalizedAtr
+
+univAtr = getUniversalATR()
+
+// Heikin Ashi Engine Calculations
+var float haOpen = na
+haClose = (open + high + low + close) / 4.0
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
+haHigh  = math.max(high, math.max(haOpen, haClose))
+haLow   = math.min(low, math.min(haOpen, haClose))
+
+// ==========================================
+// CONDITIONAL PROCESSING PIPELINE
+// ==========================================
+// Time Session Check
+inSession = not na(time(timeframe.period, timeSession + ":1234567", timeZone))
+
+// Smart Struct Identifiers
+isEngulfingLong  = (close > high[1])
+isEngulfingShort = (close < low[1])
+
+isDeepPullbackLong  = false
+isDeepPullbackShort = false
+for i = 1 to 6
+    if low[i] <= ema100Low[i]
+        isDeepPullbackLong := true
+    if high[i] >= ema100High[i]
+        isDeepPullbackShort := true
+
+// 1. Volatility Limits
+atrPass = true
+if useAtrFilter
+    if univAtr < minAtrValue or univAtr > maxAtrValue
+        atrPass := false
+
+// 2. News Spike Protection
+newsSpikePass = true
+if useFilterNewsSpike
+    if (high[2] - low[2]) > (rawAtr[2] * atrMultiplier)
+        newsSpikePass := false
+
+// 3. Doji Compression
+dojiPassLong = true
+dojiPassShort = true
+if useFilterDoji
+    haRange = haHigh - haLow
+    bodySize = math.abs(haClose - haOpen)
+    if haRange == 0 or ((bodySize / haRange) * 100.0) < dojiBodyPct
+        dojiPassLong := false
+        dojiPassShort := false
+
+// 4. Momentum Boundaries
+momentumPassLong = true
+momentumPassShort = true
+if useFilterMomentum
+    overrideRsiLong = useMomentumOverride and (isEngulfingLong or isDeepPullbackLong)
+    rsiTargetLong = overrideRsiLong ? 50.0 : 55.0
+    if rsiVal < rsiTargetLong or rsiVal < 50.0 or close <= ema5High or close <= ema100High or haClose <= ema5High or haClose <= ema100High
+        momentumPassLong := false
+        
+    overrideRsiShort = useMomentumOverride and (isEngulfingShort or isDeepPullbackShort)
+    rsiTargetShort = overrideRsiShort ? 50.0 : 45.0
+    if rsiVal > rsiTargetShort or rsiVal > 50.0 or close >= ema5Low or close >= ema100Low or haClose >= ema5Low or haClose >= ema100Low
+        momentumPassShort := false
+
+// 5. Clean Wicks
+wickPassLong = true
+wickPassShort = true
+if useFilterCleanWick and not (useMomentumOverride and isEngulfingLong)
+    if haLow < haOpen
+        wickPassLong := false
+if useFilterCleanWick and not (useMomentumOverride and isEngulfingShort)
+    if haHigh > haOpen
+        wickPassShort := false
+
+// 6. Pullback Validations
+validPullbackLong = false
+for k = 1 to 6
+    if low[k] <= ema100High[k]
+        unbrokenTrend = true
+        for check = 0 to k
+            if close[check] <= ema200[check] or haClose[check] <= ema200[check]
+                unbrokenTrend := false
+        if unbrokenTrend
+            validPullbackLong := true
+
+validPullbackShort = false
+for k = 1 to 6
+    if high[k] >= ema100Low[k]
+        unbrokenTrend = true
+        for check = 0 to k
+            if close[check] >= ema200[check] or haClose[check] >= ema200[check]
+                unbrokenTrend := false
+        if unbrokenTrend
+            validPullbackShort := true
+
+// 7. Compression Gaps
+compressionPassLong = true
+compressionPassShort = true
+if useFilterCompress
+    if math.abs(ema100High - ema200) < (compressionGapPoints * syminfo.mintick)
+        compressionPassLong := false
+    if math.abs(ema100Low - ema200) < (compressionGapPoints * syminfo.mintick)
+        compressionPassShort := false
+
+// ==========================================
+// ENGINE SIGNAL COMPILING
+// ==========================================
+setupLong = (ema5High > ema100High) and atrPass and newsSpikePass and dojiPassLong and momentumPassLong and wickPassLong and validPullbackLong and compressionPassLong
+setupShort = (ema5Low < ema100Low) and atrPass and newsSpikePass and dojiPassShort and momentumPassShort and wickPassShort and validPullbackShort and compressionPassShort
+
+buySignal  = setupLong and close > ema200 and haClose > ema200
+sellSignal = setupShort and close < ema200 and haClose < ema200
+
+// ==========================================
+// STATE EXECUTION & RISK ENGINE
+// ==========================================
+var bool blockLong = false
+var bool blockShort = false
+
+// Track active SL and TP prices securely
+var float activeSL = na
+var float activeTP = na
+
+if low <= ema100High or close < ema200
+    blockLong := false
+if high >= ema100Low or close > ema200
+    blockShort := false
+
+// Setup trigger booleans
+bool isEnteringLong = buySignal and not blockLong and inSession
+bool isEnteringShort = sellSignal and not blockShort and inSession
+
+// Core Strategy Execution (Only enters during the defined time session window)
+if isEnteringLong
+    if strategy.position_size < 0
+        strategy.close("Totoro Short") // Reverse logic: clear opposing trades
+        
+    // Calculate Risk based on EMA 100 Low
+    activeSL := ema100Low - (slBufferPoints * syminfo.mintick)
+    float tradeRisk = close - activeSL
+    activeTP := close + (tradeRisk * rrRatio)
+    
+    strategy.entry("Totoro Long", strategy.long)
+    blockLong := true
+
+if isEnteringShort
+    if strategy.position_size > 0
+        strategy.close("Totoro Long") // Reverse logic: clear opposing trades
+        
+    // Calculate Risk based on EMA 100 High
+    activeSL := ema100High + (slBufferPoints * syminfo.mintick)
+    float tradeRisk = activeSL - close
+    activeTP := close - (tradeRisk * rrRatio)
+    
+    strategy.entry("Totoro Short", strategy.short)
+    blockShort := true
+
+// Manage Exits using the calculated SL & TP (Persists through the entry bar!)
+if strategy.position_size > 0 or isEnteringLong
+    strategy.exit("Exit Long", from_entry="Totoro Long", stop=activeSL, limit=activeTP)
+
+if strategy.position_size < 0 or isEnteringShort
+    strategy.exit("Exit Short", from_entry="Totoro Short", stop=activeSL, limit=activeTP)
+
+// ONLY Clear Visual SL/TP lines when completely flat AND not entering a new trade
+if strategy.position_size == 0 and not isEnteringLong and not isEnteringShort
+    activeSL := na
+    activeTP := na
+
+// Session Closing Engine: Force exit flat outside trading hours
+if not inSession
+    strategy.close_all(comment="End of Session Flat Override")
+    blockLong := false
+    blockShort := false
+    activeSL := na
+    activeTP := na
+
+// ==========================================
+// VISUAL LAYER ARCHITECTURE
+// ==========================================
+// Optional: Plot Internal HA Candles over Standard Chart
+haColor = haClose >= haOpen ? color.new(color.teal, 0) : color.new(color.red, 0)
+plotcandle(showHACandles ? haOpen : na, showHACandles ? haHigh : na, showHACandles ? haLow : na, showHACandles ? haClose : na, title="Internal HA Candles", color=haColor, wickcolor=haColor, bordercolor=haColor)
+
+plot(ema5High, color=color.new(color.white, 30), title="EMA 5 High Channel")
+plot(ema5Low, color=color.new(color.white, 30), title="EMA 5 Low Channel")
+plot(ema100High, color=color.new(color.blue, 40), title="EMA 100 High Filter")
+plot(ema100Low, color=color.new(color.blue, 40), title="EMA 100 Low Filter")
+plot(ema200, color=color.orange, linewidth=2, title="Macro Trend Line (EMA 200)")
+
+// Map structural confirmation triangles on charts
+plotshape(buySignal and not blockLong[1] and inSession, title="Confirmed BUY Trigger", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small)
+plotshape(sellSignal and not blockShort[1] and inSession, title="Confirmed SELL Trigger", style=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.small)
+
+// Visualize active SL and TP levels securely during a live trade
+plot(not na(activeSL) ? activeSL : na, color=color.red, style=plot.style_linebr, linewidth=2, title="Active Stop Loss")
+plot(not na(activeTP) ? activeTP : na, color=color.green, style=plot.style_linebr, linewidth=2, title="Active Take Profit")

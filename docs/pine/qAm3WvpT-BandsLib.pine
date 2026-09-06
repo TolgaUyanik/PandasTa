@@ -1,0 +1,249 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description BandsLib — Bollinger / Keltner / Percentile bands + squeeze state machine.
+//              Replaces BandsLib v? + TaUtilityLib SqzState slice.
+//              Layer L1. Depends on NumLib + SignalLib.
+//
+// Step 7 of restructuring.
+//
+// REPLACES from prior versions:
+//   - Custom BB rolling stdev → ta.bb (native v6)
+//   - Custom KC ATR-based bands → ta.kc (native v6)
+//   - SqzState UDT scattered → unified SqueezeState UDT with enum
+//   - Custom percentile bands → ta.percentile_linear_interpolation + NumLib helper
+//
+library("BandsLib", overlay=false)
+
+import cybermediaboy/NumLib/1 as N
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen — P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Squeeze regime state
+export enum SqueezeState
+    OFF                  // BB outside KC, no squeeze
+    LOW_COMPRESSION      // BB inside KC, mild
+    MID_COMPRESSION      // BB inside KC × tighter mult
+    HIGH_COMPRESSION     // BB inside KC × tighter still
+    FIRED_UP             // squeeze released with positive momentum
+    FIRED_DOWN           // squeeze released with negative momentum
+
+// @enum Band envelope kind
+export enum BandKind
+    BOLLINGER
+    KELTNER
+    PERCENTILE
+    DONCHIAN
+
+// @enum Breakout direction
+export enum BreakoutDir
+    NONE
+    UP
+    DOWN
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: BANDSET UDT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type BandSet — generic band envelope descriptor
+// @field kind   BandKind enum
+// @field upper  upper boundary
+// @field mid    midline / basis
+// @field lower  lower boundary
+// @field width  upper - lower (cached)
+export type BandSet
+    BandKind kind
+    float upper
+    float mid
+    float lower
+    float width
+
+// @function Compute Bollinger band set
+export f_bollinger(float src, simple int len, simple float mult) =>
+    [mid, up, lo] = ta.bb(src, len, mult)
+    BandSet.new(kind = BandKind.BOLLINGER, upper = up, mid = mid,
+                 lower = lo, width = up - lo)
+
+// @function Compute Keltner band set (ATR-based)
+export f_keltner(float src, simple int len, simple float mult, simple bool use_tr) =>
+    [mid, up, lo] = ta.kc(src, len, mult, use_tr)
+    BandSet.new(kind = BandKind.KELTNER, upper = up, mid = mid,
+                 lower = lo, width = up - lo)
+
+// @function Compute percentile band set [p_low, 50, p_high]
+export f_percentile(float src, simple int len, simple int p_low, simple int p_high) =>
+    [lo, md, hi] = N.f_percentile_bands(src, len, p_low, p_high)
+    BandSet.new(kind = BandKind.PERCENTILE, upper = hi, mid = md,
+                 lower = lo, width = hi - lo)
+
+// @function Donchian channel
+export f_donchian(simple int len) =>
+    float hi = ta.highest(high, len)
+    float lo = ta.lowest(low, len)
+    float mid = (hi + lo) * 0.5
+    BandSet.new(kind = BandKind.DONCHIAN, upper = hi, mid = mid,
+                 lower = lo, width = hi - lo)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: BANDSET METHODS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Test whether value is inside [lower, upper]
+export method contains(BandSet b, float val) =>
+    val >= b.lower and val <= b.upper
+
+// @function Position of val in band as fraction in [0,1] (0=lower, 1=upper)
+//           Returns na for zero-width or na inputs.
+export method position(BandSet b, float val) =>
+    if b.width <= 0.0 or na(val)
+        na
+    else
+        math.max(0.0, math.min(1.0, (val - b.lower) / b.width))
+
+// @function Z-score-like distance from mid in stdev-units (uses width/4 as proxy SD)
+export method z_distance(BandSet b, float val) =>
+    float sd_proxy = b.width / 4.0
+    sd_proxy > 0.0 ? (val - b.mid) / sd_proxy : 0.0
+
+// @function Detect breakout — caller must pass current and previous values
+export method breakout_dir(BandSet b, float val, float val_prev) =>
+    if val > b.upper and val_prev <= b.upper
+        BreakoutDir.UP
+    else if val < b.lower and val_prev >= b.lower
+        BreakoutDir.DOWN
+    else
+        BreakoutDir.NONE
+
+// @function Test whether outer band b1 fully encloses inner band b2
+export method encloses(BandSet b1, BandSet b2) =>
+    b1.upper >= b2.upper and b1.lower <= b2.lower
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: SQUEEZE STATE MACHINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// NOTE: SqzConfig UDT removed per CE10297 fix — UDT fields cannot be simple,
+//       but ta.bb/ta.kc require simple params. Callers must pass params directly.
+
+// @type SqueezeStatus — output bundle from one squeeze evaluation
+export type SqueezeStatus
+    SqueezeState state
+    BandSet bb
+    BandSet kc_low
+    BandSet kc_mid
+    BandSet kc_high
+    float momentum
+    int   bars_in_state    // duration of current state
+    bool  state_changed    // true on first bar of new state
+
+// ─── Internal state tracker (var in caller) ──────────────────────────────
+
+// @type SqueezeTracker — persistent state across bars
+export type SqueezeTracker
+    SqueezeState last_state
+    int   bars_in_state
+    int   last_change_bar
+
+export f_sqz_tracker_new() =>
+    SqueezeTracker.new(last_state = SqueezeState.OFF,
+                        bars_in_state = 0, last_change_bar = 0)
+
+// ─── Main evaluator ───────────────────────────────────────────────────────
+
+// @function Evaluate squeeze status for current bar
+//           Caller maintains SqueezeTracker via var.
+//           All params must be simple (const/input) per CE10297 fix.
+export f_sqz_eval(float src, simple int bb_len, simple float bb_mult, simple int kc_len, simple float kc_mult_low, simple float kc_mult_mid, simple float kc_mult_high, simple bool kc_use_tr, simple int momentum_len, SqueezeTracker tr) =>
+    // Direct native calls with simple params
+    [bb_mid, bb_up, bb_lo] = ta.bb(src, bb_len, bb_mult)
+    BandSet bb = BandSet.new(kind = BandKind.BOLLINGER, upper = bb_up, mid = bb_mid, lower = bb_lo, width = bb_up - bb_lo)
+    
+    [kc_low_mid, kc_low_up, kc_low_lo] = ta.kc(src, kc_len, kc_mult_low, kc_use_tr)
+    BandSet kc_low = BandSet.new(kind = BandKind.KELTNER, upper = kc_low_up, mid = kc_low_mid, lower = kc_low_lo, width = kc_low_up - kc_low_lo)
+    
+    [kc_mid_mid, kc_mid_up, kc_mid_lo] = ta.kc(src, kc_len, kc_mult_mid, kc_use_tr)
+    BandSet kc_mid = BandSet.new(kind = BandKind.KELTNER, upper = kc_mid_up, mid = kc_mid_mid, lower = kc_mid_lo, width = kc_mid_up - kc_mid_lo)
+    
+    [kc_high_mid, kc_high_up, kc_high_lo] = ta.kc(src, kc_len, kc_mult_high, kc_use_tr)
+    BandSet kc_high = BandSet.new(kind = BandKind.KELTNER, upper = kc_high_up, mid = kc_high_mid, lower = kc_high_lo, width = kc_high_up - kc_high_lo)
+
+    // Compression state — narrowest containing KC defines depth
+    SqueezeState raw_state = SqueezeState.OFF
+    if kc_high.encloses(bb)
+        raw_state := SqueezeState.HIGH_COMPRESSION
+    else if kc_mid.encloses(bb)
+        raw_state := SqueezeState.MID_COMPRESSION
+    else if kc_low.encloses(bb)
+        raw_state := SqueezeState.LOW_COMPRESSION
+
+    // Momentum oscillator: linreg of (src - mid_of(highest+lowest+sma))
+    float avg_hl  = (ta.highest(high, momentum_len) + ta.lowest(low, momentum_len)) * 0.5
+    float avg_sma = ta.sma(close, momentum_len)
+    float mom_src = src - (avg_hl + avg_sma) * 0.5
+    float mom = ta.linreg(mom_src, momentum_len, 0)
+
+    // Fired detection — was compressing, now off, with momentum sign
+    bool was_compressing = tr.last_state == SqueezeState.LOW_COMPRESSION or
+                           tr.last_state == SqueezeState.MID_COMPRESSION or
+                           tr.last_state == SqueezeState.HIGH_COMPRESSION
+    SqueezeState final_state = raw_state
+    if was_compressing and raw_state == SqueezeState.OFF
+        final_state := mom >= 0.0 ? SqueezeState.FIRED_UP : SqueezeState.FIRED_DOWN
+
+    bool changed = final_state != tr.last_state
+    if changed
+        tr.last_state := final_state
+        tr.bars_in_state := 1
+        tr.last_change_bar := bar_index
+    else
+        tr.bars_in_state += 1
+
+    SqueezeStatus.new(state = final_state, bb = bb,
+                       kc_low = kc_low, kc_mid = kc_mid, kc_high = kc_high,
+                       momentum = mom, bars_in_state = tr.bars_in_state,
+                       state_changed = changed)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: BANDWIDTH NORMALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Bollinger %B  — (val - lower) / (upper - lower)
+//           Identical to BandSet.position but kept as named alias for callers
+//           expecting %B convention (returns na on zero width vs clamp to [0,1]).
+export f_bb_percent_b(BandSet b, float val) =>
+    b.width > 0.0 ? (val - b.lower) / b.width : na
+
+// @function Bollinger BandWidth — (upper - lower) / mid
+//           Returns na for non-positive mid.
+export f_bb_bandwidth(BandSet b) =>
+    b.mid > 0.0 ? b.width / b.mid : na
+
+// @function Historical Bandwidth percentile rank in [0,100]
+//           Useful for "low BBW" regime detection.
+export f_bbw_rank(BandSet b, simple int len) =>
+    float bw = f_bb_bandwidth(b)
+    na(bw) ? na : ta.percentrank(bw, len)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_state_str(SqueezeState s) =>
+    s == SqueezeState.OFF ? "off" : s == SqueezeState.LOW_COMPRESSION ? "low-compress" : s == SqueezeState.MID_COMPRESSION ? "mid-compress" : s == SqueezeState.HIGH_COMPRESSION ? "high-compress" : s == SqueezeState.FIRED_UP ? "fired-up" : s == SqueezeState.FIRED_DOWN ? "fired-down" : "unknown"
+
+export f_kind_str(BandKind k) =>
+    k == BandKind.BOLLINGER ? "BB" : k == BandKind.KELTNER ? "KC" : k == BandKind.PERCENTILE ? "PCTL" : k == BandKind.DONCHIAN ? "DC" : "unknown"
+
+export f_breakout_str(BreakoutDir d) =>
+    d == BreakoutDir.UP ? "up" : d == BreakoutDir.DOWN ? "down" : "none"
+
+// @function Squeeze state → color (for visualization via VisLib)
+export f_state_color(SqueezeState s) =>
+    s == SqueezeState.HIGH_COMPRESSION ? color.red : s == SqueezeState.MID_COMPRESSION ? color.orange : s == SqueezeState.LOW_COMPRESSION ? color.yellow : s == SqueezeState.FIRED_UP ? color.lime : s == SqueezeState.FIRED_DOWN ? color.fuchsia : color.gray
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

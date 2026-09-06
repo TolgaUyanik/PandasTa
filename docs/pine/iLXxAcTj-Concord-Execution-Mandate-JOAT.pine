@@ -1,0 +1,327 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy("Concord Execution Mandate [JOAT]", shorttitle="CEM [JOAT]", overlay=true, pyramiding=0, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=5, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, calc_on_every_tick=false, process_orders_on_close=true, max_labels_count=120, max_lines_count=120, max_boxes_count=80)
+
+//==============================================================================
+// INPUTS
+//==============================================================================
+grp_regime = "Regime Engine"
+regime_source = input.source(close, "Regime Source", group=grp_regime)
+range_length = input.int(18, "Range Length", minval=5, group=grp_regime)
+range_multiplier = input.float(1.25, "Range Multiplier", minval=0.2, step=0.05, group=grp_regime)
+efficiency_length = input.int(14, "Efficiency Length", minval=5, group=grp_regime)
+confirm_base = input.int(2, "Base Confirm Bars", minval=1, maxval=6, group=grp_regime)
+
+grp_filters = "Trend And Context"
+adx_length = input.int(14, "ADX Length", minval=5, group=grp_filters)
+adx_floor = input.float(18.0, "ADX Floor", minval=5.0, step=0.5, group=grp_filters)
+chop_length = input.int(14, "Choppiness Length", minval=5, group=grp_filters)
+chop_ceiling = input.float(61.8, "Choppiness Ceiling", minval=35.0, maxval=80.0, step=0.5, group=grp_filters)
+htf_timeframe = input.timeframe("240", "HTF Timeframe", group=grp_filters)
+htf_ema_length = input.int(55, "HTF EMA Length", minval=5, group=grp_filters)
+use_htf_gate = input.bool(false, "Use HTF As Hard Gate", group=grp_filters)
+
+grp_structure = "Structure Trigger"
+swing_length = input.int(9, "Swing Length", minval=2, group=grp_structure)
+require_displacement = input.bool(true, "Require Displacement With Break", group=grp_structure)
+displacement_factor = input.float(1.0, "Displacement Threshold (ATR)", minval=0.2, step=0.1, group=grp_structure)
+continuation_entries = input.bool(true, "Allow Continuation Entries", group=grp_structure)
+
+grp_reversion = "Execution Refinement"
+reversion_length = input.int(20, "Reversion Length", minval=5, group=grp_reversion)
+reversion_mult = input.float(1.6, "Reversion Deviation", minval=0.5, step=0.1, group=grp_reversion)
+require_reclaim = input.bool(true, "Require Intrabar Reclaim", group=grp_reversion)
+aggressive_entries = input.bool(true, "Allow Aggressive Rotation Entries", group=grp_reversion)
+
+grp_div = "Divergence Safety"
+rsi_length = input.int(14, "RSI Length", minval=5, group=grp_div)
+div_pivot_length = input.int(3, "Divergence Pivot Length", minval=2, maxval=8, group=grp_div)
+div_window = input.int(50, "Divergence Window", minval=10, maxval=120, group=grp_div)
+div_block_bars = input.int(20, "Divergence Block Bars", minval=1, maxval=80, group=grp_div)
+use_divergence_block = input.bool(false, "Use Divergence Block Filter", group=grp_div)
+
+grp_risk = "Risk Controls"
+atr_stop_multiple = input.float(1.6, "ATR Stop Multiple", minval=0.5, step=0.1, group=grp_risk)
+reward_multiple = input.float(2.2, "Reward Multiple", minval=0.5, step=0.1, group=grp_risk)
+trail_after_r = input.float(1.0, "Start Trail After R", minval=0.5, step=0.1, group=grp_risk)
+trail_multiple = input.float(1.2, "ATR Trail Multiple", minval=0.5, step=0.1, group=grp_risk)
+
+grp_visual = "Visuals"
+show_dashboard = input.bool(true, "Show Dashboard", group=grp_visual)
+show_context = input.bool(true, "Show Context Layer", group=grp_visual)
+
+//==============================================================================
+// PALETTE
+//==============================================================================
+panel_bg = color.rgb(10, 16, 24)
+panel_header = color.rgb(22, 31, 42)
+panel_cell = color.rgb(16, 23, 35)
+panel_grid = color.rgb(40, 56, 74)
+text_main = color.rgb(228, 234, 241)
+text_dim = color.rgb(145, 160, 178)
+
+bull_core = color.rgb(0, 214, 145)
+bear_core = color.rgb(255, 95, 129)
+neutral_core = color.rgb(123, 153, 255)
+accent_gold = color.rgb(229, 182, 80)
+
+//==============================================================================
+// FUNCTIONS
+//==============================================================================
+f_er(_source, _length) =>
+    float net_move = math.abs(_source - _source[_length])
+    float path = 0.0
+    for i = 0 to _length - 1
+        path += math.abs(_source[i] - _source[i + 1])
+    path > 0 ? net_move / path : 0.0
+
+f_adx(_length) =>
+    float up_move = high - high[1]
+    float down_move = low[1] - low
+    float plus_dm = up_move > down_move and up_move > 0 ? up_move : 0.0
+    float minus_dm = down_move > up_move and down_move > 0 ? down_move : 0.0
+    float tr = ta.atr(1)
+    float plus_di = 100 * ta.rma(plus_dm, _length) / ta.rma(tr, _length)
+    float minus_di = 100 * ta.rma(minus_dm, _length) / ta.rma(tr, _length)
+    float dx = (plus_di + minus_di) > 0 ? math.abs(plus_di - minus_di) / (plus_di + minus_di) * 100 : 0.0
+    float adx_val = ta.rma(dx, _length)
+    [adx_val, plus_di, minus_di]
+
+f_range_state(_source, _atr_length, _multiplier) =>
+    float atr_val = ta.atr(_atr_length)
+    float buffer = atr_val * _multiplier
+    var float filtered = _source
+    var int trend = 0
+    filtered := _source > filtered + buffer ? _source - buffer : _source < filtered - buffer ? _source + buffer : filtered
+    trend := filtered > filtered[1] ? 1 : filtered < filtered[1] ? -1 : trend[1]
+    [filtered, trend, atr_val]
+
+//==============================================================================
+// REGIME ENGINE
+//==============================================================================
+er_raw = f_er(regime_source, efficiency_length)
+er_value = ta.ema(er_raw, 3)
+adaptive_confirm = er_value < 0.22 ? math.max(confirm_base + 2, 4) : er_value < 0.42 ? confirm_base + 1 : er_value < 0.68 ? confirm_base : math.max(confirm_base - 1, 1)
+adaptive_range_mult = range_multiplier * (er_value < 0.25 ? 1.15 : er_value > 0.70 ? 0.85 : 1.0)
+[regime_filter, raw_regime, atr_value] = f_range_state(regime_source, range_length, adaptive_range_mult)
+
+var int locked_regime = 0
+var int candidate_bars = 0
+
+if barstate.isfirst
+    locked_regime := raw_regime == 0 ? 1 : raw_regime
+
+candidate_bars := raw_regime != locked_regime ? candidate_bars + 1 : 0
+confirmed_regime_shift = barstate.isconfirmed and raw_regime != 0 and raw_regime != locked_regime and candidate_bars >= adaptive_confirm
+if confirmed_regime_shift
+    locked_regime := raw_regime
+    candidate_bars := 0
+
+[adx_value, plus_di, minus_di] = f_adx(adx_length)
+chop_range = ta.highest(high, chop_length) - ta.lowest(low, chop_length)
+chop_sum = math.sum(ta.atr(1), chop_length)
+chop_value = chop_range > 0 ? 100 * math.log10(chop_sum / chop_range) / math.log10(chop_length) : 50.0
+
+htf_close = request.security(syminfo.tickerid, htf_timeframe, close[1], lookahead=barmerge.lookahead_on)
+htf_ema = request.security(syminfo.tickerid, htf_timeframe, ta.ema(close, htf_ema_length)[1], lookahead=barmerge.lookahead_on)
+htf_bias = htf_close > htf_ema ? 1 : -1
+
+regime_open = adx_value >= adx_floor and chop_value <= chop_ceiling and htf_bias == locked_regime
+regime_quality = (adx_value >= adx_floor ? 1 : 0) + (chop_value <= chop_ceiling ? 1 : 0) + (htf_bias == locked_regime ? 1 : 0)
+regime_soft_open = (regime_quality >= 1 or aggressive_entries) and (not use_htf_gate or htf_bias == locked_regime)
+
+//==============================================================================
+// LEVEL WEAVE BIAS
+//==============================================================================
+[prev_day_high, prev_day_low, prev_day_close] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+day_pivot = (prev_day_high + prev_day_low + prev_day_close) / 3.0
+
+ema_21 = ta.ema(close, 21)
+ema_55 = ta.ema(close, 55)
+ema_89 = ta.ema(close, 89)
+weave_center = (ema_21 + ema_55 + ema_89) / 3.0
+weave_bias = close > day_pivot and ema_21 > ema_55 and weave_center > weave_center[2] ? 1 : close < day_pivot and ema_21 < ema_55 and weave_center < weave_center[2] ? -1 : 0
+
+//==============================================================================
+// STRUCTURE TRIGGER
+//==============================================================================
+last_pivot_high = ta.valuewhen(not na(ta.pivothigh(high, swing_length, swing_length)), ta.pivothigh(high, swing_length, swing_length), 0)
+last_pivot_low = ta.valuewhen(not na(ta.pivotlow(low, swing_length, swing_length)), ta.pivotlow(low, swing_length, swing_length), 0)
+
+bull_fvg = low > high[2]
+bear_fvg = high < low[2]
+displacement_ok = not require_displacement or math.abs(close - open) >= atr_value * displacement_factor
+
+bull_bos = barstate.isconfirmed and not na(last_pivot_high) and close > last_pivot_high and close[1] <= last_pivot_high and displacement_ok
+bear_bos = barstate.isconfirmed and not na(last_pivot_low) and close < last_pivot_low and close[1] >= last_pivot_low and displacement_ok
+
+//==============================================================================
+// GEOMETRY FILTER
+//==============================================================================
+recent_low_1 = ta.valuewhen(not na(ta.pivotlow(low, swing_length, swing_length)), ta.pivotlow(low, swing_length, swing_length), 0)
+recent_low_2 = ta.valuewhen(not na(ta.pivotlow(low, swing_length, swing_length)), ta.pivotlow(low, swing_length, swing_length), 1)
+recent_high_1 = ta.valuewhen(not na(ta.pivothigh(high, swing_length, swing_length)), ta.pivothigh(high, swing_length, swing_length), 0)
+recent_high_2 = ta.valuewhen(not na(ta.pivothigh(high, swing_length, swing_length)), ta.pivothigh(high, swing_length, swing_length), 1)
+
+geometry_bias = not na(recent_low_1) and not na(recent_low_2) and recent_low_1 > recent_low_2 ? 1 : not na(recent_high_1) and not na(recent_high_2) and recent_high_1 < recent_high_2 ? -1 : 0
+
+//==============================================================================
+// REVERSION REFINEMENT
+//==============================================================================
+reversion_basis = ta.ema(close, reversion_length)
+reversion_dev = ta.stdev(close, reversion_length) * reversion_mult
+reversion_upper = reversion_basis + reversion_dev
+reversion_lower = reversion_basis - reversion_dev
+
+long_reclaim = not require_reclaim or (low < reversion_basis and close > reversion_basis)
+short_reclaim = not require_reclaim or (high > reversion_basis and close < reversion_basis)
+
+//==============================================================================
+// DIVERGENCE SAFETY
+//==============================================================================
+rsi_value = ta.rsi(close, rsi_length)
+div_high = ta.pivothigh(high, div_pivot_length, div_pivot_length)
+div_low = ta.pivotlow(low, div_pivot_length, div_pivot_length)
+
+var int last_bear_div_bar = na
+var int last_bull_div_bar = na
+var float prev_div_high_price = na
+var float prev_div_high_rsi = na
+var int prev_div_high_bar = na
+var float prev_div_low_price = na
+var float prev_div_low_rsi = na
+var int prev_div_low_bar = na
+
+if not na(div_high)
+    float current_price = div_high
+    float current_rsi = rsi_value[div_pivot_length]
+    int current_bar = bar_index - div_pivot_length
+    if not na(prev_div_high_price)
+        bool within_window = current_bar - prev_div_high_bar <= div_window
+        if within_window and current_price > prev_div_high_price and current_rsi < prev_div_high_rsi
+            last_bear_div_bar := current_bar
+    prev_div_high_price := current_price
+    prev_div_high_rsi := current_rsi
+    prev_div_high_bar := current_bar
+
+if not na(div_low)
+    float current_price = div_low
+    float current_rsi = rsi_value[div_pivot_length]
+    int current_bar = bar_index - div_pivot_length
+    if not na(prev_div_low_price)
+        bool within_window = current_bar - prev_div_low_bar <= div_window
+        if within_window and current_price < prev_div_low_price and current_rsi > prev_div_low_rsi
+            last_bull_div_bar := current_bar
+    prev_div_low_price := current_price
+    prev_div_low_rsi := current_rsi
+    prev_div_low_bar := current_bar
+
+bear_div_block = not na(last_bear_div_bar) and (bar_index - last_bear_div_bar) <= div_block_bars
+bull_div_block = not na(last_bull_div_bar) and (bar_index - last_bull_div_bar) <= div_block_bars
+
+bull_continuation = continuation_entries and barstate.isconfirmed and locked_regime == 1 and ta.crossover(close, regime_filter) and close > day_pivot and close > reversion_basis
+bear_continuation = continuation_entries and barstate.isconfirmed and locked_regime == -1 and ta.crossunder(close, regime_filter) and close < day_pivot and close < reversion_basis
+
+bull_rotation = aggressive_entries and barstate.isconfirmed and (locked_regime == 1 or close > regime_filter) and (ta.crossover(close, day_pivot) or ta.crossover(close, reversion_basis) or ta.crossover(close, ema_21))
+bear_rotation = aggressive_entries and barstate.isconfirmed and (locked_regime == -1 or close < regime_filter) and (ta.crossunder(close, day_pivot) or ta.crossunder(close, reversion_basis) or ta.crossunder(close, ema_21))
+
+long_context_soft = locked_regime == 1 or close > regime_filter or ema_21 > ema_55
+short_context_soft = locked_regime == -1 or close < regime_filter or ema_21 < ema_55
+
+//==============================================================================
+// ENTRY STACK
+//==============================================================================
+long_trigger = (bull_bos and (bull_fvg or bull_fvg[1] or bull_fvg[2])) or bull_continuation or bull_rotation
+short_trigger = (bear_bos and (bear_fvg or bear_fvg[1] or bear_fvg[2])) or bear_continuation or bear_rotation
+
+long_alignment = (weave_bias >= 0 ? 1 : 0) + (geometry_bias >= 0 ? 1 : 0) + (close > regime_filter ? 1 : 0) + (close > day_pivot ? 1 : 0)
+short_alignment = (weave_bias <= 0 ? 1 : 0) + (geometry_bias <= 0 ? 1 : 0) + (close < regime_filter ? 1 : 0) + (close < day_pivot ? 1 : 0)
+
+long_reclaim_gate = long_reclaim or bull_rotation or bull_continuation
+short_reclaim_gate = short_reclaim or bear_rotation or bear_continuation
+
+long_stack = barstate.isconfirmed and long_context_soft and regime_soft_open and long_trigger and long_reclaim_gate and long_alignment >= 1 and (not use_divergence_block or not bear_div_block)
+short_stack = barstate.isconfirmed and short_context_soft and regime_soft_open and short_trigger and short_reclaim_gate and short_alignment >= 1 and (not use_divergence_block or not bull_div_block)
+
+//==============================================================================
+// POSITION SIZING
+//==============================================================================
+long_stop_base = math.min(nz(last_pivot_low, close - atr_value * atr_stop_multiple), close - atr_value * atr_stop_multiple)
+short_stop_base = math.max(nz(last_pivot_high, close + atr_value * atr_stop_multiple), close + atr_value * atr_stop_multiple)
+
+long_risk = math.max(close - long_stop_base, syminfo.mintick)
+short_risk = math.max(short_stop_base - close, syminfo.mintick)
+
+//==============================================================================
+// ORDERS
+//==============================================================================
+if long_stack and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+
+if short_stack and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+live_long_risk = strategy.position_size > 0 ? math.max(strategy.position_avg_price - long_stop_base, syminfo.mintick) : long_risk
+live_short_risk = strategy.position_size < 0 ? math.max(short_stop_base - strategy.position_avg_price, syminfo.mintick) : short_risk
+
+long_target = strategy.position_avg_price + live_long_risk * reward_multiple
+short_target = strategy.position_avg_price - live_short_risk * reward_multiple
+
+long_trail_ready = strategy.position_size > 0 and high >= strategy.position_avg_price + live_long_risk * trail_after_r
+short_trail_ready = strategy.position_size < 0 and low <= strategy.position_avg_price - live_short_risk * trail_after_r
+
+long_stop_live = long_trail_ready ? math.max(long_stop_base, close - atr_value * trail_multiple) : long_stop_base
+short_stop_live = short_trail_ready ? math.min(short_stop_base, close + atr_value * trail_multiple) : short_stop_base
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=long_stop_live, limit=long_target)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=short_stop_live, limit=short_target)
+
+if strategy.position_size > 0 and (locked_regime == -1 or weave_bias == -1)
+    strategy.close("Long", comment="Context Flip")
+
+if strategy.position_size < 0 and (locked_regime == 1 or weave_bias == 1)
+    strategy.close("Short", comment="Context Flip")
+
+//==============================================================================
+// VISUALS
+//==============================================================================
+plot(show_context ? regime_filter : na, "Regime Filter", color=locked_regime == 1 ? bull_core : bear_core, linewidth=2)
+plot(show_context ? day_pivot : na, "Daily Pivot", color=neutral_core, linewidth=1)
+plot(show_context ? reversion_basis : na, "Reversion Basis", color=color.new(accent_gold, 0), linewidth=1)
+
+bgcolor(show_context ? (long_stack ? color.new(bull_core, 93) : short_stack ? color.new(bear_core, 93) : na) : na)
+barcolor(show_context ? (locked_regime == 1 ? color.new(bull_core, 60) : color.new(bear_core, 60)) : na)
+
+//==============================================================================
+// DASHBOARD
+//==============================================================================
+var table dash = table.new(position.top_right, 2, 8, bgcolor=panel_bg, border_width=1, border_color=panel_grid, frame_color=panel_grid, frame_width=1)
+
+f_dash_row(_row, _label, _value, _color, _bg) =>
+    table.cell(dash, 0, _row, _label, text_color=text_dim, bgcolor=_bg, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, _row, _value, text_color=_color, bgcolor=_bg, text_size=size.small, text_halign=text.align_right)
+
+if show_dashboard and barstate.islast
+    string regime_text = locked_regime == 1 ? "Bull Regime" : "Bear Regime"
+    color regime_color = locked_regime == 1 ? bull_core : bear_core
+    string entry_text = long_stack ? "Long Armed" : short_stack ? "Short Armed" : "No Stack"
+    color entry_color = long_stack ? bull_core : short_stack ? bear_core : text_dim
+    table.cell(dash, 0, 0, "CONCORD EXECUTION", text_color=text_main, bgcolor=panel_header, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, regime_text, text_color=regime_color, bgcolor=panel_header, text_size=size.small, text_halign=text.align_right)
+    f_dash_row(1, "ADX / Chop", str.tostring(adx_value, "#.#") + " / " + str.tostring(chop_value, "#.#"), regime_soft_open ? accent_gold : text_dim, panel_cell)
+    f_dash_row(2, "Bias", weave_bias == 1 ? "Bullish" : weave_bias == -1 ? "Bearish" : "Mixed", weave_bias == 1 ? bull_core : weave_bias == -1 ? bear_core : accent_gold, panel_bg)
+    f_dash_row(3, "Geometry", geometry_bias == 1 ? "Ascending" : geometry_bias == -1 ? "Descending" : "Flat", geometry_bias == 1 ? bull_core : geometry_bias == -1 ? bear_core : text_dim, panel_cell)
+    f_dash_row(4, "Structure", bull_bos ? "Bull BOS" : bear_bos ? "Bear BOS" : "Idle", bull_bos ? bull_core : bear_bos ? bear_core : text_dim, panel_bg)
+    f_dash_row(5, "Divergence Block", bear_div_block ? "Bear Block" : bull_div_block ? "Bull Block" : "Clear", bear_div_block ? bear_core : bull_div_block ? bull_core : text_dim, panel_cell)
+    f_dash_row(6, "Armed", entry_text + "  " + str.tostring(long_alignment) + "/" + str.tostring(short_alignment), entry_color, panel_bg)
+    f_dash_row(7, "Position", strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", strategy.position_size > 0 ? bull_core : strategy.position_size < 0 ? bear_core : text_dim, panel_cell)
+
+//==============================================================================
+// ALERTS
+//==============================================================================
+alertcondition(long_stack, "Long Stack Ready", "Concord Execution Mandate [JOAT] armed a long entry stack on {{ticker}} {{interval}}.")
+alertcondition(short_stack, "Short Stack Ready", "Concord Execution Mandate [JOAT] armed a short entry stack on {{ticker}} {{interval}}.")

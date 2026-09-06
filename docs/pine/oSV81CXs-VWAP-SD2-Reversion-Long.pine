@@ -1,0 +1,312 @@
+//@version=6
+// =====================================================================
+//  VWAP SD2 Mean-Reversion (Long) — sequential 3-step confirmation
+// ---------------------------------------------------------------------
+//  Setup (all must occur IN ORDER, each within `confirmWindow` bars of
+//  the previous one):
+//    Condition 1 (filter): distance between lower SD2 band and VWAP >= 10 pips
+//    Step 1 : price CLOSES below the lower SD2 band
+//    Step 2 : plain RSI ↗ 30 (default)   [or StochRSI %K ↗ 20]
+//    Step 3 : MACD crosses up (MACD line over signal line)
+//  Optional : HTF ADX (e.g. 1H) regime filter gates the whole setup
+//  Entry  : market long, filled at the OPEN of the bar AFTER Step 3 confirms
+//           (standard next-bar fill; the ▲ marker prints on the confirm bar)
+//  Exit   : TP = VWAP (mean) or ATR-based; SL = fixed pips or k×ATR
+// =====================================================================
+
+strategy(
+     title              = "VWAP SD2 Reversion (Long)",
+     shorttitle         = "VWAP-SD2-L",
+     overlay            = true,
+     pyramiding         = 0,
+     calc_on_every_tick = false,
+     default_qty_type   = strategy.fixed,        // fixed lot size (not % of equity)
+     default_qty_value  = 100000,                // 1 standard lot = 100,000 units
+     initial_capital    = 10000,                 // your account size
+     margin_long        = 0.2,                   // 0.2% = up to 500:1 leverage (broker max)
+     margin_short       = 0.2,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.0)
+
+// ----------------------------- Inputs --------------------------------
+grpSetup   = "Setup"
+sdMult     = input.float(2.0,  "SD band multiplier",          minval = 0.1, group = grpSetup)
+minDistPip = input.float(10.0, "Min VWAP↔SD2 distance (pips)", minval = 0.0, group = grpSetup)
+confWin    = input.int(5,      "Confirmation window (bars)",   minval = 1,   group = grpSetup)
+strictCross = input.bool(false, "Strict: require cross on a bar AFTER prior step", group = grpSetup)
+
+grpS2       = "Step 2 — Oscillator"
+useStoch    = input.bool(false, "Use StochRSI (off = plain RSI, the default)", group = grpS2)
+rsiLen      = input.int(14,    "RSI length",                    minval = 1, group = grpS2)
+rsiLevel    = input.float(30,  "Plain-RSI cross level",                     group = grpS2)
+stochLen    = input.int(14,    "StochRSI length",               minval = 1, group = grpS2)
+smoothK     = input.int(3,     "StochRSI %K smoothing",         minval = 1, group = grpS2)
+smoothD     = input.int(3,     "StochRSI %D smoothing",         minval = 1, group = grpS2)
+stochOS     = input.float(20,  "StochRSI oversold threshold",               group = grpS2)
+stochKDmode = input.bool(false, "Confirm on %K↗%D cross (off = %K↗threshold)", group = grpS2)
+
+grpMacd    = "MACD"
+macdFast   = input.int(12, "MACD fast", minval = 1, group = grpMacd)
+macdSlow   = input.int(26, "MACD slow", minval = 1, group = grpMacd)
+macdSig    = input.int(9,  "MACD signal", minval = 1, group = grpMacd)
+macdZero   = input.bool(false, "Use MACD zero-line cross instead of signal cross", group = grpMacd)
+
+grpRisk    = "Risk / Pips"
+tpToVwap   = input.bool(true,  "TP at VWAP (mean) instead of fixed pips", group = grpRisk)
+vwapBufPip = input.float(1.0,  "VWAP target buffer (pips, front-run)", minval = 0.0, group = grpRisk)
+minProfit  = input.float(1.0,  "Min profit floor for VWAP target (pips)", minval = 0.0, group = grpRisk)
+tpPips     = input.float(5.0,  "Take profit (pips, fixed mode)", minval = 0.1, group = grpRisk)
+slPips     = input.float(5.0,  "Stop loss (pips)",   minval = 0.1, group = grpRisk)
+autoPip    = input.bool(true,  "Auto pip size (10 × mintick)",  group = grpRisk)
+pipManual  = input.float(0.0001, "Manual pip size", minval = 0.0000001, group = grpRisk)
+
+grpBE      = "Breakeven stop"
+useBE      = input.bool(true, "Move stop to breakeven after trigger", group = grpBE)
+beTrigPip  = input.float(3.0, "Breakeven trigger (pips in profit)", minval = 0.1, group = grpBE)
+beLockPip  = input.float(0.3, "Breakeven lock (pips above entry)",  minval = 0.0, group = grpBE)
+
+grpCost    = "Costs"
+spreadPips = input.float(0.6, "Spread (pips) — modeled on every exit fill", minval = 0.0, group = grpCost)
+
+grpATR     = "ATR stop/target (alt risk model)"
+useATR     = input.bool(false, "Use ATR-based stop & target",      group = grpATR)
+atrLen     = input.int(14,    "ATR length",         minval = 1,    group = grpATR)
+atrStopK   = input.float(1.5, "Stop  = k × ATR",    minval = 0.1,  group = grpATR)
+atrTgtM    = input.float(2.0, "Target = max(VWAP, m × ATR)", minval = 0.1, group = grpATR)
+
+grpADX     = "ADX regime filter (HTF)"
+useADX     = input.bool(false, "Require ADX filter (your manual 1H check)", group = grpADX)
+adxTF      = input.timeframe("60", "ADX timeframe",            group = grpADX)
+adxDiLen   = input.int(14,    "ADX DI length",      minval = 1, group = grpADX)
+adxSmooth  = input.int(14,    "ADX smoothing",      minval = 1, group = grpADX)
+adxThresh  = input.float(20,  "ADX threshold",                  group = grpADX)
+adxAbove   = input.bool(true, "Pass when ADX is ABOVE threshold (off = below)", group = grpADX)
+
+// ----------------------------- Pip size ------------------------------
+// Guard against a zero/garbage manual pip → division by zero would silently
+// turn pip-based filters/stops into na and disable the strategy without error.
+pipRaw = autoPip ? syminfo.mintick * 10 : pipManual
+pip    = pipRaw > 0 ? pipRaw : syminfo.mintick * 10
+
+// ------------------------- VWAP + SD2 bands --------------------------
+anchor = timeframe.change("1D")                       // session/daily reset
+[vwapVal, _upper2, lower2] = ta.vwap(hlc3, anchor, sdMult)
+
+bandDistPips = (vwapVal - lower2) / pip                // = sdMult * stdev, in pips
+cond1Filter  = bandDistPips >= minDistPip
+
+// ------------------------ Indicator signals --------------------------
+rsiVal = ta.rsi(close, rsiLen)
+
+// StochRSI (%K / %D), 0–100. It normalises RSI to its own recent range, so it
+// reaches oversold and turns up earlier than plain RSI(14) — which on tight
+// pairs often never hits 30, leaving Step 2 to time out. This is the default,
+// and a genuinely different lens from MACD (less collinear gates).
+stochK = ta.sma(ta.stoch(rsiVal, rsiVal, rsiVal, stochLen), smoothK)
+stochD = ta.sma(stochK, smoothD)
+
+// Step 2 trigger (fresh up-cross) + recovered-state, per selected oscillator.
+s2CrossUp = useStoch ? (stochKDmode ? ta.crossover(stochK, stochD) : ta.crossover(stochK, stochOS)) : ta.crossover(rsiVal, rsiLevel)
+s2Bull    = useStoch ? (stochKDmode ? (stochK > stochD)            : (stochK > stochOS))            : (rsiVal > rsiLevel)
+
+[macdLine, sigLine, _hist] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdCrossUp = macdZero ? ta.crossover(macdLine, 0) : ta.crossover(macdLine, sigLine)  // fresh MACD up-cross
+macdBull    = macdZero ? (macdLine > 0)              : (macdLine > sigLine)            // MACD currently bullish
+
+// ATR (in price units) for the alternative stop/target model.
+atrVal = ta.atr(atrLen)
+
+// HTF ADX regime filter (default 1H), computed via DMI.
+// No-repaint: we request f_adx()[1] with lookahead_on — the canonical idiom that
+// returns the value of the PREVIOUS, fully-CLOSED HTF bar. This guarantees the
+// 1H ADX can't tick mid-hour as the developing HTF bar updates, so historical
+// and realtime behaviour match. Trade-off: the gate reacts one HTF bar late.
+f_adx() =>
+    [_dip, _dim, a] = ta.dmi(adxDiLen, adxSmooth)
+    a
+adxVal = request.security(syminfo.tickerid, adxTF, f_adx()[1], lookahead = barmerge.lookahead_on)
+adxOK  = not useADX or (adxAbove ? adxVal > adxThresh : adxVal < adxThresh)
+
+step1 = close < lower2 and cond1Filter and adxOK      // price below SD2 + regime OK
+
+// Bars since each up-cross. Computed in GLOBAL scope every bar — ta.barssince
+// kept inside an `if` would desync its internal counter and return wrong values.
+s2BarsSince   = ta.barssince(s2CrossUp)
+macdBarsSince = ta.barssince(macdCrossUp)
+
+// --------------------- Sequential state machine ----------------------
+//  state 0: idle, waiting for Step 1 (price below SD2 = the "dip")
+//  state 1: armed, waiting for Step 2 confirm (RSI or StochRSI)
+//  state 2: waiting for MACD confirm (Step 3) -> entry
+var int state    = 0
+var int stateBar = na     // timeout clock (refreshed while price hugs the band)
+var int dipBar   = na     // FIRST bar of the current setup — the cross anchor (#3)
+
+longTrigger = false
+s2fire      = false
+
+// Keep the setup ALIVE while price is still closing below the band:
+// every fresh Step 1 refreshes the timeout clock. dipBar is NOT refreshed —
+// it stays pinned to the first dip so confirmations anchor to it.
+if state == 1 and step1
+    stateBar := bar_index
+
+// Expire a stalled setup: the next step never confirmed within the window.
+if state != 0 and (bar_index - stateBar) > confWin
+    state := 0
+    stateBar := na
+    dipBar := na
+
+// Step 1: arm on the first close below the band.
+if state == 0 and step1
+    state := 1
+    stateBar := bar_index
+    dipBar := bar_index
+
+// Step 2 confirm. Relaxed = oscillator recovered out of oversold, AND its
+// up-cross was both recent (<= confWin) AND at/after the dip bar (#3).
+s2Confirm = strictCross ? s2CrossUp : (s2Bull and s2BarsSince <= confWin and s2BarsSince <= bar_index - dipBar)
+if state == 1 and s2Confirm
+    state := 2
+    stateBar := bar_index
+    s2fire := true
+
+// Step 3 confirm, same anchoring. MACD may cross before RSI, but both crosses
+// must be at/after the dip bar.
+macdConfirm = strictCross ? macdCrossUp : (macdBull and macdBarsSince <= confWin and macdBarsSince <= bar_index - dipBar)
+if state == 2 and macdConfirm
+    longTrigger := true
+    state := 0
+    stateBar := na
+    dipBar := na
+
+// Don't stack signals while already in a position
+canEnter = strategy.position_size == 0
+entered  = longTrigger and canEnter        // an order is actually placed
+blocked  = longTrigger and not canEnter     // signal fired but a position is already open
+
+// --- Fill-failure detector --------------------------------------------------
+// strategy.entry() was called, but one bar later NO new trade exists (open or
+// closed). That means the broker emulator REJECTED the order — almost always an
+// order-size / margin problem in Strategy Properties, not the script logic.
+var int  totalAtEntry = na
+var bool waitingFill  = false
+tradeTotal = strategy.opentrades + strategy.closedtrades
+fillFailed = false
+if waitingFill
+    fillFailed  := tradeTotal == totalAtEntry
+    waitingFill := false
+if entered
+    waitingFill  := true
+    totalAtEntry := tradeTotal
+
+// ----------------------------- Orders --------------------------------
+if longTrigger and canEnter
+    strategy.entry("Long", strategy.long)
+
+// Freeze the ATR-derived stop/target DISTANCES at the moment of entry. ATR is
+// volatility-scaled at the time the trade is taken, then held constant for the
+// trade's life — so a later volatility spike can't widen the stop or a lull
+// tighten it mid-trade (that would silently change risk per trade). The VWAP
+// target leg stays dynamic by design (it tracks the moving mean).
+var float slDist  = na    // stop distance in price units, fixed at entry
+var float tpAtr   = na    // ATR target distance in price units, fixed at entry
+var bool  beArmed = false // breakeven latched once price reached the trigger
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    slDist := useATR ? atrStopK * atrVal : slPips * pip
+    tpAtr  := atrTgtM * atrVal
+
+if strategy.position_size > 0
+    entryPx = strategy.position_avg_price
+
+    // Safety net: if the entry-bar freeze was somehow missed (e.g. a future
+    // change to pyramiding / process_orders_on_close), recompute now so the
+    // stop/target can never ship as na → a naked, stopless position.
+    if na(slDist)
+        slDist := useATR ? atrStopK * atrVal : slPips * pip
+    if na(tpAtr)
+        tpAtr  := atrTgtM * atrVal
+
+    // Re-issuing strategy.exit() every bar REPLACES the resting order, so the
+    // VWAP target tracks as the mean moves. VWAP read from the closed bar (no repaint).
+    vwapTgt = vwapVal - vwapBufPip * pip               // front-run the mean by a buffer
+
+    // --- Breakeven latch -------------------------------------------
+    // Once this bar's high reaches entry + trigger, arm breakeven for the rest
+    // of the trade. Latched (never un-arms) so a later pullback can't re-widen.
+    if useBE and high >= entryPx + beTrigPip * pip
+        beArmed := true
+
+    // --- Stop ------------------------------------------------------
+    // Frozen-distance stop, OR breakeven+lock once armed. math.max keeps the
+    // stop monotonic — it can only ratchet UP, never loosen, even if the
+    // breakeven level sits below the original (it won't, but defensive).
+    origStop = entryPx - slDist
+    beStop   = entryPx + beLockPip * pip
+    slPx     = beArmed ? math.max(origStop, beStop) : origStop
+
+    // --- Target ----------------------------------------------------
+    //  ATR mode  : greater of VWAP or (entry + frozen m×ATR), floored to min profit
+    //  VWAP mode : VWAP − buffer, floored to a small guaranteed profit
+    //  Fixed mode: fixed pips
+    floorPx = entryPx + minProfit * pip
+    tpPx = useATR ? math.max(vwapTgt, entryPx + tpAtr, floorPx) : tpToVwap ? math.max(vwapTgt, floorPx) : (entryPx + tpPips * pip)
+
+    // --- Spread cost ----------------------------------------------------------
+    // A long buys at the ask and sells at the bid, so each round trip gives up
+    // the spread. Chart prices are ~bid; lowering BOTH exit fills by the spread
+    // makes realized P&L = (exit − entry − spread), i.e. charges the spread once
+    // per trade. Scales with size automatically (it's price-based).
+    spreadPx = spreadPips * pip
+    strategy.exit("Exit", from_entry = "Long", limit = tpPx - spreadPx, stop = slPx - spreadPx)
+else
+    beArmed := false      // reset latch when flat, ready for the next trade
+
+// ------------------------------ Plots --------------------------------
+plot(vwapVal, "VWAP",      color = color.new(color.orange, 0), linewidth = 2)
+plot(lower2,  "Lower SD2", color = color.new(color.red,    0))
+plot(_upper2, "Upper SD2", color = color.new(color.green,  0))
+
+plotchar(step1,   "Step1 (below SD2)", "1", location.belowbar, color.aqua, size = size.tiny)
+plotchar(s2fire,  "Step2 (RSI/StochRSI up)", "2", location.belowbar, color.blue, size = size.tiny)
+plotchar(entered, "Entry placed",      "▲", location.belowbar, color.lime, size = size.small)
+plotchar(blocked, "Signal blocked (already in a trade)", "✕", location.belowbar, color.red, size = size.small)
+plotchar(fillFailed, "ORDER REJECTED (no trade — check order size/margin)", "R", location.abovebar, color.fuchsia, size = size.normal)
+plotchar(beArmed and not beArmed[1], "Breakeven armed", "B", location.abovebar, color.orange, size = size.tiny)
+
+// Shade the background while a position is open — makes blocked signals obvious.
+bgcolor(strategy.position_size > 0 ? color.new(color.teal, 92) : na, title = "In position")
+
+// ----------------------- Readout (data window) -----------------------
+// Hover any bar to read these in the Data Window (right-hand panel).
+plot(atrVal / pip,               "ATR (pips)",      display = display.data_window)
+plot(adxVal,                     "ADX (HTF)",       display = display.data_window)
+plot(bandDistPips,               "VWAP↔SD2 (pips)", display = display.data_window)
+plot(useStoch ? stochK : rsiVal, "Step2 osc",       display = display.data_window)
+
+// ----------------------- Live info table -----------------------------
+showTbl = input.bool(true, "Show info table", group = "Display")
+tblPos  = input.string("Top Right", "Table position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = "Display")
+posSel  = tblPos == "Top Right" ? position.top_right : tblPos == "Top Left" ? position.top_left : tblPos == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+var table tbl = table.new(posSel, 2, 7, border_width = 1, frame_color = color.gray, frame_width = 1)
+if barstate.islast and showTbl
+    s2name = useStoch ? "StochRSI %K" : "RSI"
+    s2v    = useStoch ? stochK : rsiVal
+    s2th   = useStoch ? stochOS : rsiLevel
+    stName = state == 0 ? "idle" : state == 1 ? "armed (1)" : "wait MACD (2)"
+    table.cell(tbl, 0, 0, "VWAP-SD2",            text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 40))
+    table.cell(tbl, 1, 0, useATR ? "ATR mode" : "VWAP mode", text_color = color.white, text_size = size.small, bgcolor = color.new(color.blue, 40))
+    table.cell(tbl, 0, 1, "ATR (pips)",          text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, 1, str.tostring(atrVal / pip, "#.0"), text_color = color.aqua, text_size = size.small)
+    adxPass = adxAbove ? adxVal > adxThresh : adxVal < adxThresh   // mirrors adxOK direction
+    table.cell(tbl, 0, 2, "ADX " + adxTF,        text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, 2, str.tostring(adxVal, "#.0"), text_color = adxPass ? color.lime : color.red, text_size = size.small)
+    table.cell(tbl, 0, 3, "VWAP↔SD2 (pips)",     text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, 3, str.tostring(bandDistPips, "#.0"), text_color = cond1Filter ? color.lime : color.red, text_size = size.small)
+    table.cell(tbl, 0, 4, s2name,                text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, 4, str.tostring(s2v, "#.0") + " / " + str.tostring(s2th, "#"), text_color = color.white, text_size = size.small)
+    table.cell(tbl, 0, 5, "Setup state",         text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, 5, stName,                text_color = color.yellow, text_size = size.small)
+    table.cell(tbl, 0, 6, "Position",            text_color = color.silver, text_size = size.small)
+    table.cell(tbl, 1, 6, strategy.position_size > 0 ? "LONG" : "flat", text_color = strategy.position_size > 0 ? color.lime : color.gray, text_size = size.small)

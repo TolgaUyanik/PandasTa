@@ -1,0 +1,1237 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © mayb1dayy
+// PO3 Matrix+ (M1D) — higher-timeframe PO3 candle matrix.
+// Projects the selected HTF's recent candles beside price with time dividers, per-candle high/low levels,
+// candle equilibrium, current-range quadrants, swing-liquidity sweeps, market structure shifts, MTF fair
+// value gaps, previous-day levels, cross-market SMT divergence, and a trade-context dashboard.
+// The HTF candles are read from a single snapshot and drawn on the last bar from those arrays, so the
+// dividers and the high/low lines share identical source times and cannot drift out of sync.
+
+//@version=6
+indicator('PO3 Matrix+ (M1D)', 'PO3 Matrix+', overlay = true, max_lines_count = 500, max_boxes_count = 150, max_labels_count = 200)
+
+// Only time, high and low take a historical offset in chart context — f_extremeTime walks them. The
+// max_bars_back parameter of indicator() sizes EVERY series instead, including the request.security tuple
+// elements, which are read at offset 0 only. 5000 spans a previous-day extreme from a Monday on a
+// 1-minute chart: the current session plus the weekend gap.
+max_bars_back(time, 5000)
+max_bars_back(high, 5000)
+max_bars_back(low, 5000)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+string GRP_HTF = 'PO3 Candle Matrix'
+string htfTf     = input.timeframe('60', 'HTF Timeframe', group = GRP_HTF, tooltip = 'The single higher timeframe projected as PO3 range candles. Must be above the chart timeframe.')
+int    htfCount  = input.int(15, 'PO3 Candles Shown', minval = 1, maxval = 20, group = GRP_HTF, tooltip = 'How many recent HTF candles to project (max 20).')
+int    htfOffset = input.int(25, 'Offset From Price', minval = 1, group = GRP_HTF, tooltip = 'Horizontal gap between the live chart and the projected candle block.')
+string htfSize   = input.string('Small', 'Candle Size', options = ['Small', 'Medium', 'Large'], group = GRP_HTF)
+int    htfGap    = input.int(1, 'Candle Spacing', minval = 1, maxval = 4, group = GRP_HTF)
+bool   showHtfTimer = input.bool(true, 'Candle Close Timer', group = GRP_HTF, tooltip = 'Timeframe in use and a live countdown to the forming HTF candle close, shown above the projected block.')
+color  htfTimerCol  = input.color(color.black, 'Timer Colour', inline = 'tmr', group = GRP_HTF)
+int    htfTimerSize = input.int(11, 'Timer Size', minval = 7, maxval = 24, inline = 'tmr', group = GRP_HTF)
+bool   mirrorBlock  = input.bool(true, 'Mirror PD Arrays Onto Block', group = GRP_HTF, tooltip = 'Draw the PD arrays — FVG zones, and any order block / breaker added later — across the projected block as well as the live chart, condensed to the block\'s own horizontal scale, so the block reads as a standalone view of what the HTF chart would show. Only PD arrays mirror. Horizontal levels (PDH / PDL / PD EQ) and the quadrant midlines are not mirrored: they already read at their own price across the whole chart, so a second copy over the block would be clutter.')
+
+string GRP_STYLE = 'Candle Style'
+color bullBody   = input.color(color.new(#ffffff, 0), 'Bull Body',   inline = 'body',   group = GRP_STYLE)
+color bearBody   = input.color(color.new(#4b4b4b, 0), 'Bear Body',   inline = 'body',   group = GRP_STYLE)
+color bullBorder = input.color(color.new(#000000, 0), 'Bull Border', inline = 'border', group = GRP_STYLE)
+color bearBorder = input.color(color.new(#000000, 0), 'Bear Border', inline = 'border', group = GRP_STYLE)
+color bullWick   = input.color(color.new(#000000, 0), 'Bull Wick',   inline = 'wick',   group = GRP_STYLE)
+color bearWick   = input.color(color.new(#000000, 0), 'Bear Wick',   inline = 'wick',   group = GRP_STYLE)
+
+string GRP_DIV = 'PO3 Dividers'
+bool  showDividers = input.bool(true, 'Show Dividers', group = GRP_DIV)
+color divColor     = input.color(color.new(color.black, 55), 'Color', inline = 'div', group = GRP_DIV)
+int   divWidth     = input.int(1, 'Width', minval = 1, maxval = 4, inline = 'div', group = GRP_DIV)
+
+string GRP_HL = 'Candle High/Low Lines'
+bool  showHL  = input.bool(true, 'Show High/Low Lines', group = GRP_HL)
+color hlHigh  = input.color(color.new(color.black, 55), 'High', inline = 'hl', group = GRP_HL)
+color hlLow   = input.color(color.new(color.black, 55), 'Low', inline = 'hl', group = GRP_HL)
+int   hlWidth = input.int(1, 'Width', minval = 1, maxval = 4, group = GRP_HL)
+
+string GRP_SWEEP = 'PO3 Sweeps'
+bool  showSweeps      = input.bool(true, 'Show Sweeps', group = GRP_SWEEP, tooltip = 'Swing liquidity only: a swing high or swing low that a later candle raids and then CLOSES back inside — wick beyond the level, body back within. A candle that merely trades past its neighbour is not a sweep and is not marked.')
+bool  showSweepLabels = input.bool(true, 'Sweep Labels', group = GRP_SWEEP)
+color sweepColor      = input.color(color.new(#000000, 0), 'Color', inline = 'sw', group = GRP_SWEEP)
+int   sweepWidth      = input.int(1, 'Width', minval = 1, maxval = 4, inline = 'sw', group = GRP_SWEEP)
+int    maxSweeps      = input.int(6, 'Max Sweeps Shown', minval = 1, maxval = 20, group = GRP_SWEEP, tooltip = 'How many of the most-recent swept candles to mark.')
+int    sweepLblSize   = input.int(11, 'Label Size', minval = 7, maxval = 24, group = GRP_SWEEP, tooltip = 'Sweep label text size in points.')
+
+string GRP_EQ = 'Candle Equilibrium'
+bool  showEq  = input.bool(true, 'Show EQ Line (formed candles)', group = GRP_EQ, tooltip = 'Marks the true 50% (equilibrium) of each FORMED HTF candle on the projected block, as a reference the next candle can retrace into. Not drawn on the live/forming candle.')
+color eqColor = input.color(color.black, 'Color', inline = 'eq', group = GRP_EQ)
+int   eqWidth = input.int(1, 'Width', minval = 1, maxval = 4, inline = 'eq', group = GRP_EQ)
+
+string GRP_QUAD = 'Current-Range Quadrants'
+bool   showQuad       = input.bool(true, 'Show Quadrant Levels', group = GRP_QUAD, tooltip = 'H / 75% / EQ / 25% / L of the CURRENT (forming) HTF candle, projected across price as a live premium/discount reference.')
+color  quadColor      = input.color(color.new(#000000, 0), 'Color', inline = 'q', group = GRP_QUAD)
+int    quadWidth      = input.int(1, 'Width', minval = 1, maxval = 4, inline = 'q', group = GRP_QUAD)
+bool   showQuadLabels = input.bool(true, 'Labels', group = GRP_QUAD)
+int    quadLblSize    = input.int(10, 'Label Size', minval = 7, maxval = 24, group = GRP_QUAD, tooltip = 'Level label text size in points.')
+int    quadExtend     = input.int(12, 'Extend Right (bars)', minval = 0, maxval = 50, group = GRP_QUAD, tooltip = 'How far past the current bar to extend the level lines and labels.')
+
+string GRP_SMT = 'SMT Divergence'
+bool   smtOn      = input.bool(true, 'Show SMT', group = GRP_SMT, tooltip = 'Cross-market divergence on the PO3 candles: our HTF candle sweeps a swing high/low but the correlated peer fails to take its matching swing — the move lacked participation. NOT AVAILABLE IN BAR REPLAY: replay rewinds the chart symbol only, so the correlated symbol keeps returning its live data and the two no longer line up. The dashboard reports Misaligned and no divergence is drawn. Every other feature here reads from the chart symbol and replays normally.')
+string smtSymbol  = input.symbol('', 'Correlated Symbol', group = GRP_SMT, tooltip = 'Leave EMPTY to auto-pair — NQ↔ES, YM→ES, GC→SI (and their micros), so the same divergence reads identically from either side of the pair. Set a symbol to override.')
+color  smtBullCol = input.color(#126301, 'Bullish', inline = 'sm', group = GRP_SMT)
+color  smtBearCol = input.color(#f23645, 'Bearish', inline = 'sm', group = GRP_SMT)
+int    smtWidth   = input.int(2, 'Width', minval = 1, maxval = 4, inline = 'sm', group = GRP_SMT)
+bool   smtLabels  = input.bool(true, 'SMT Labels', group = GRP_SMT)
+int    smtLblSize = input.int(11, 'Label Size', minval = 7, maxval = 24, group = GRP_SMT)
+float  smtLblClear = input.float(0.0, 'Label Clearance (× avg HTF range)', minval = 0.0, step = 0.05, group = GRP_SMT, tooltip = 'Extra lift for the SMT label above the sweep label that shares its level. Leave at 0: a one-line spacer inside the label already stacks it exactly one text line clear of the sweep label, and holds that spacing at any zoom. Raise this only if you want visibly more air between the two.')
+bool   smtBlockMark = input.bool(true, 'Block Marker', group = GRP_SMT, tooltip = 'Direction glyph for this feature on the PO3 block. Style and size are set under Labels & Markers.')
+int    smtMax     = input.int(4, 'Max SMTs Shown', minval = 1, maxval = 20, group = GRP_SMT)
+bool   smtHideBrk = input.bool(false, 'Remove Broken SMTs', group = GRP_SMT, tooltip = 'An SMT is broken once price trades back through the extreme that formed it — the divergence has since been violated. ON removes it entirely. OFF keeps it drawn dotted and dimmed, following the solid = live / dotted = mitigated convention.')
+
+string GRP_MSS = 'Market Structure Shift'
+bool   showMss     = input.bool(true, 'Show MSS', group = GRP_MSS, tooltip = 'A TRUE swing broken by a body close. A swing is a level price actually TURNED at: a swing low sits at the change from a down candle to an up candle, a swing high at the change from an up candle to a down one — a low that merely sits under its neighbours while price kept running the same way is not a swing. The FIRST candle to CLOSE (body, not wick) beyond the swing\'s full wick extreme marks the shift; later closes past the same level are continuation and are not marked.')
+bool   mssReqRaid  = input.bool(false, 'Require Raid First', group = GRP_MSS, tooltip = 'The classic 2022-model sequencing as an optional gate: the shift only counts when a liquidity raid came before it — a buyside raid before a bearish shift, a sellside raid before a bullish one. OFF by default so every true-swing break marks on its own.')
+bool   mssReqDisp  = input.bool(false, 'Require Displacement', group = GRP_MSS, tooltip = 'Optional extra tightening. When ON, the candle that closes through the swing must also displace — range at least the multiple below, OR opening a fresh FVG in the shift direction. OFF by default so the shift marks on the close alone.')
+float  mssDispAtr  = input.float(1.5, 'Displacement (× avg HTF range)', minval = 0.0, step = 0.1, group = GRP_MSS, tooltip = 'Only applies when Require Displacement is ON.')
+color  mssBullCol  = input.color(#126301, 'Bullish', inline = 'ms', group = GRP_MSS)
+color  mssBearCol  = input.color(#f23645, 'Bearish', inline = 'ms', group = GRP_MSS)
+int    mssWidth    = input.int(2, 'Width', minval = 1, maxval = 4, inline = 'ms', group = GRP_MSS)
+bool   mssLabels   = input.bool(true, 'MSS Labels', group = GRP_MSS)
+int    mssLblSize  = input.int(11, 'Label Size', minval = 7, maxval = 24, group = GRP_MSS)
+bool   mssBlockMark = input.bool(true, 'Block Marker', group = GRP_MSS, tooltip = 'Direction glyph for this feature on the PO3 block. Style and size are set under Labels & Markers.')
+int    mssMax      = input.int(1, 'Max MSS Shown', minval = 1, maxval = 20, group = GRP_MSS)
+
+string GRP_PD = 'Previous-Day Levels'
+bool   showPD       = input.bool(true, 'Show PDH / PDL', group = GRP_PD, tooltip = 'The previous day\'s completed high and low, live from session start. Solid while unswept; dotted + dimmed the instant price trades through it today.')
+string pdSource     = input.string('Daily Bar', 'Previous Day Source', options = ['Daily Bar', 'Midnight (True Day)', 'RTH Session'], group = GRP_PD, tooltip = 'Which definition of "day" produces the level. Daily Bar — the symbol\'s own daily candle; on futures that spans the full electronic session (18:00-17:00 NY), so the high may have printed the evening before, and after a weekend the previous daily bar is Friday\'s, which makes a Monday level correctly several days old. Midnight (True Day) — midnight to midnight New York, the day boundary the Midnight Open marks. RTH Session — the previous regular-hours range only, using the instrument\'s own session. ON 24/7 MARKETS use Midnight: their daily candle rolls at 00:00 UTC, which does not line up with the New York day the rest of this tool is built on. RTH is unavailable there and falls back to Midnight automatically. The label shows the source date whichever is chosen.')
+bool   showPdEq     = input.bool(true, 'Show PD EQ', group = GRP_PD, tooltip = 'The midpoint of yesterday\'s range, as a dotted reference line.')
+bool   showPdLabels = input.bool(true, 'Labels', group = GRP_PD)
+color  pdColor      = input.color(color.new(#000000, 0), 'Color', inline = 'pd', group = GRP_PD)
+int    pdWidth      = input.int(1, 'Width', minval = 1, maxval = 4, inline = 'pd', group = GRP_PD)
+int    pdLblSize    = input.int(13, 'Label Size', minval = 7, maxval = 24, group = GRP_PD, tooltip = 'Level label text size in points.')
+int    pdExtend     = input.int(15, 'Extend Right (bars)', minval = 0, maxval = 100, group = GRP_PD)
+
+string GRP_FVG = 'MTF Fair Value Gaps'
+bool   showFvg       = input.bool(true, 'Show FVGs', group = GRP_FVG, tooltip = 'BISI+ (buyside imbalance) and SIBI- (sellside imbalance): a 3-candle gap on the HTF snapshot — the current candle\'s extreme fails to reach the extreme from 2 candles back, and the candle between them displaced hard enough to open real space. Detected on the same HTF array that drives the rest of this script, so it is inherently multi-timeframe against the chart.')
+float  fvgMinAtr     = input.float(0.15, 'Min Gap Height (× avg HTF range)', minval = 0.0, step = 0.05, group = GRP_FVG, tooltip = 'Higher = only larger, more significant gaps register. Measured against the average high-low range of the visible HTF candles.')
+float  fvgDispMult   = input.float(0.5, 'Min Displacement (× avg HTF range)', minval = 0.0, step = 0.1, group = GRP_FVG, tooltip = 'The middle candle that opens the gap must have a body at least this large, in the gap\'s direction — filters routine 3-bar gaps down to real displacement.')
+bool   showFvgLabels = input.bool(true, 'Labels', group = GRP_FVG)
+color  fvgBullColor  = input.color(color.new(#126301, 65), 'BISI+', inline = 'fv', group = GRP_FVG)
+color  fvgBearColor  = input.color(color.new(#f23645, 65), 'SIBI-', inline = 'fv', group = GRP_FVG)
+color  fvgInvColor   = input.color(color.new(#ff5600, 65), 'Inverted', inline = 'fv', group = GRP_FVG)
+bool   fvgInvert     = input.bool(true, 'Inversion (IFVG)', group = GRP_FVG, tooltip = 'A gap closed clean through has inverted — the old support is now resistance, or the reverse. It stays inverted for as long as that break holds, and no retest is required: a retest is where the level gets traded, not what makes it valid. Closing back through in the original direction takes the gap back and the zone is spent. An inverted zone is redrawn in the inversion colour, flips direction, and counts as live context. OFF leaves every filled gap consumed.')
+int    fvgExtend     = input.int(10, 'Extend Right (bars)', minval = 0, maxval = 100, group = GRP_FVG)
+int    maxFvg        = input.int(5, 'Max Zones Shown', minval = 1, maxval = 20, group = GRP_FVG, tooltip = 'How many of the most-recent live gaps to keep drawn — the newest win, the oldest drop off.')
+bool   fvgHideMit    = input.bool(false, 'Remove Touched Gaps', group = GRP_FVG, tooltip = 'A touched gap has been entered but not fully closed. ON removes it once touched. OFF keeps it drawn dotted and dimmed.')
+bool   fvgDeclutter  = input.bool(true, 'Declutter Overlap', group = GRP_FVG, tooltip = 'Two translucent zones stacked on the same prices multiply into a muddy block and neither edge stays readable. With this on, a zone that overlaps one already drawn by more than the tolerance below is skipped. Zones are taken newest first, so the most recent gap in a price band is the one kept.')
+float  fvgOverlapPct = input.float(50, 'Overlap Tolerance (%)', minval = 0, maxval = 100, step = 5, group = GRP_FVG, tooltip = 'How much of a zone may sit inside one already drawn before it is skipped. Lower keeps the chart cleaner; 100 disables the skip while leaving the setting on.')
+bool   fvgNearOn     = input.bool(true, 'Remove Stacked Zones', group = GRP_FVG, tooltip = 'Two same-direction zones separated by only a thin seam are one inefficiency wearing two boxes. With this on, a zone that lands within the distance below of one already drawn is skipped — the scan runs newest first, so the most recent zone in the stack is the one kept. Opposite-direction neighbours are never removed; two zones facing different ways are genuinely different reads, however close they sit.')
+float  fvgNearMult   = input.float(0.2, 'Stack Distance (× avg HTF range)', minval = 0.0, step = 0.05, group = GRP_FVG, tooltip = 'How thin the seam between two same-direction zones must be before the older one is dropped. Scaled by the average HTF candle range because clutter is a visual problem: what reads as "practically touching" grows with the size of the candles on screen.')
+bool   fvgKeepFill   = input.bool(true, 'Keep Spent Gaps', group = GRP_FVG, tooltip = 'A spent gap was closed through and then taken back the other way, so it is neither a live gap nor a standing inversion. ON keeps it on the chart heavily faded and marked (reclaimed), so a zone fades through its lifecycle rather than vanishing. OFF deletes it outright. Spent gaps never consume a Max Zones slot, so they can never push a live zone off.')
+color  fvgLblColor   = input.color(color.black, 'Label Colour', group = GRP_FVG, tooltip = 'Zone text and block marker colour. Black by default — the zone fill already carries the direction, so the label only has to stay readable over it.')
+int    fvgLblSize    = input.int(10, 'Label Size', minval = 7, maxval = 24, group = GRP_FVG, tooltip = 'Zone label text size in points.')
+bool   fvgBlockMark  = input.bool(true, 'Block Marker', group = GRP_FVG, tooltip = 'Direction glyph for this zone on the PO3 block. Style and size are set under Labels & Markers.')
+
+string GRP_LBL = 'Labels & Markers'
+string lblAnchorX   = input.string('Centre', 'Label Anchor', options = ['Right (line end)', 'Centre', 'Left (origin)'], group = GRP_LBL, tooltip = 'Where along its own line a label sits. Applies to sweeps and SMT; MSS labels always sit at the right end of their line. Centre by default: both ends of a level line have a candle standing on them — the origin formed it and the raid or shift ended it — so an end-anchored label sits under a candle body, while the middle of the line is the one stretch always clear of both.')
+string lblConv      = input.string('Bull below / Bear above', 'Label Side', options = ['Bull below / Bear above', 'Bull above / Bear below', 'On the line'], group = GRP_LBL, tooltip = 'Which side of its own line a label sits on. The text is placed in PIXEL space, so it hugs the line by the same visible amount on every timeframe rather than drifting with the instrument\'s range.')
+float  lblOffMult   = input.float(0.0, 'Extra Clearance (× avg HTF range)', minval = 0.0, step = 0.02, group = GRP_LBL, tooltip = 'Optional EXTRA gap on top of the pixel-space placement, as a fraction of the average HTF candle range. Leave at 0 — labels already sit tight against their line. Raise it only if you want them pushed further away.')
+bool   blockMarkOn  = input.bool(true, 'Block Markers', group = GRP_LBL, tooltip = 'Master switch for the single-glyph direction markers on the PO3 block. Each feature can also be switched off on its own in its section.')
+string blockMarkSty = input.string('Triangle', 'Marker Style', options = ['Triangle', 'Arrow', 'Plus / Minus'], group = GRP_LBL)
+int    blockMarkSz  = input.int(12, 'Marker Size', minval = 7, maxval = 32, group = GRP_LBL)
+
+string GRP_DASH = 'Dashboard'
+bool   showDash = input.bool(true, 'Show Dashboard', group = GRP_DASH)
+string dashPos  = input.string('Top Right', 'Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = GRP_DASH)
+string dashSize = input.string(size.normal, 'Text Size', options = [size.small, size.normal, size.large], group = GRP_DASH)
+color  dashText = input.color(color.black, 'Text', inline = 'dc', group = GRP_DASH)
+color  dashBg   = input.color(color.new(#ffffff, 0), 'Background', inline = 'dc', group = GRP_DASH)
+color  dashBull = input.color(#126301, 'Bull', inline = 'dcv', group = GRP_DASH)
+color  dashBear = input.color(#f23645, 'Bear', inline = 'dcv', group = GRP_DASH)
+color  dashBlue = input.color(#1d4ed8, 'Neutral', inline = 'dcv', group = GRP_DASH, tooltip = 'Used where a state is directional but not bullish or bearish — accumulation, and a buyside raid.')
+color  dashFrame = input.color(color.black, 'Frame', inline = 'dcf', group = GRP_DASH)
+color  dashBorder = input.color(color.black, 'Cell Border', inline = 'dcf', group = GRP_DASH)
+string accSess  = input.session('1800-0100', 'AMD · Accumulation', group = GRP_DASH, tooltip = 'NY-time window shown as Accumulation in the AMD Phase row (overnight Asian range).')
+string manSess  = input.session('0200-0600', 'AMD · Manipulation', group = GRP_DASH, tooltip = 'NY-time window shown as Manipulation (London / pre-NY judas).')
+string disSess  = input.session('0930-1615', 'AMD · Distribution', group = GRP_DASH, tooltip = 'NY-time window shown as Distribution (NY RTH). Anything outside all three = Off-Hours.')
+
+// ============================================================================
+// VALIDITY — the projection is only meaningful when the HTF is above the chart TF.
+// ============================================================================
+bool htfValid = timeframe.in_seconds(htfTf) > timeframe.in_seconds(timeframe.period)
+
+// AMD phase by NY-time window (Distribution → Manipulation → Accumulation priority; else Off-Hours).
+// Computed every bar so the session tests stay consistent; read on the last bar by the dashboard.
+bool amdAcc = not na(time(timeframe.period, accSess, 'America/New_York'))
+bool amdMan = not na(time(timeframe.period, manSess, 'America/New_York'))
+bool amdDis = not na(time(timeframe.period, disSess, 'America/New_York'))
+
+// ============================================================================
+// HTF SNAPSHOT — one security call.
+// Index 0 is the live/forming candle, accumulated from chart bars so it never repaints on recalculation.
+// Indices 1-19 are the confirmed closed candles, pinned with lookahead_on so they hold their value
+// through a recalculation instead of flashing to na.
+// ============================================================================
+bool newHtfBar = timeframe.change(htfTf)
+var float o0 = na
+var float h0 = na
+var float l0 = na
+var float c0 = na
+var int   t0 = na
+if newHtfBar or na(o0)
+    o0 := open
+    h0 := high
+    l0 := low
+    c0 := close
+    t0 := time(htfTf)
+else
+    h0 := math.max(h0, high)
+    l0 := math.min(l0, low)
+    c0 := close
+
+[o1,h1,l1,c1,t1, o2,h2,l2,c2,t2, o3,h3,l3,c3,t3, o4,h4,l4,c4,t4, o5,h5,l5,c5,t5,
+ o6,h6,l6,c6,t6, o7,h7,l7,c7,t7, o8,h8,l8,c8,t8, o9,h9,l9,c9,t9, o10,h10,l10,c10,t10,
+ o11,h11,l11,c11,t11, o12,h12,l12,c12,t12, o13,h13,l13,c13,t13, o14,h14,l14,c14,t14, o15,h15,l15,c15,t15,
+ o16,h16,l16,c16,t16, o17,h17,l17,c17,t17, o18,h18,l18,c18,t18, o19,h19,l19,c19,t19] =
+     request.security(syminfo.tickerid, htfTf,
+     [open[1],high[1],low[1],close[1],time[1], open[2],high[2],low[2],close[2],time[2], open[3],high[3],low[3],close[3],time[3], open[4],high[4],low[4],close[4],time[4], open[5],high[5],low[5],close[5],time[5],
+      open[6],high[6],low[6],close[6],time[6], open[7],high[7],low[7],close[7],time[7], open[8],high[8],low[8],close[8],time[8], open[9],high[9],low[9],close[9],time[9], open[10],high[10],low[10],close[10],time[10],
+      open[11],high[11],low[11],close[11],time[11], open[12],high[12],low[12],close[12],time[12], open[13],high[13],low[13],close[13],time[13], open[14],high[14],low[14],close[14],time[14], open[15],high[15],low[15],close[15],time[15],
+      open[16],high[16],low[16],close[16],time[16], open[17],high[17],low[17],close[17],time[17], open[18],high[18],low[18],close[18],time[18], open[19],high[19],low[19],close[19],time[19]],
+      lookahead = barmerge.lookahead_on)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+//@function Short TF tag for labels, e.g. '15m', '90m', '1H', '1D'. Periods that do not divide evenly
+//          into the larger unit keep the smaller one — 90 minutes reads 90m, never a rounded 2H.
+f_tfLabel(string tf) =>
+    int s = timeframe.in_seconds(tf)
+    s < 60 ? str.tostring(s) + 's' : s < 86400 ? (s % 3600 == 0 ? str.tostring(s / 3600) + 'H' : str.tostring(math.round(s / 60.0)) + 'm') : s % 604800 == 0 ? str.tostring(s / 604800) + 'W' : s % 86400 == 0 ? str.tostring(s / 86400) + 'D' : tf
+
+//@function Exact chart-bar time inside [winStart, winEnd) whose high/low equals `level`, so a raided-level
+//          line anchors to the bar that actually formed it rather than the candle's open (origin-anchoring).
+f_extremeTime(bool isHigh, float level, int winStart, int winEnd) =>
+    int found = winStart
+    // time[] decreases monotonically with the offset, so the window start is binary-searched rather than
+    // walked to: ~13 steps instead of stepping over every newer bar. The linear scan below then covers
+    // only the window itself.
+    int lo = 0
+    int hi = 4999
+    while lo < hi
+        int mid = int((lo + hi) / 2)
+        int tm  = time[mid]
+        // na means beyond loaded history, which is older than any window, so it moves the bound the same
+        // way an in-range older bar would.
+        if na(tm) or tm < winEnd
+            hi := mid
+        else
+            lo := mid + 1
+    for k = lo to 4999
+        int kt = time[k]
+        if na(kt) or kt < winStart
+            break
+        if (isHigh and high[k] == level) or (not isHigh and low[k] == level)
+            found := kt
+            break
+    found
+
+//@function HH:MM:SS remaining until the forming HTF candle closes. Counts down live on a realtime
+//          bar; shows a --:-- placeholder when the market is closed (no live tick to count against).
+f_htfCountdown(int openTime, string tf) =>
+    string result = '--:--'
+    if barstate.isrealtime and not na(openTime)
+        int remainingSec = math.round((openTime + timeframe.in_seconds(tf) * 1000 - timenow) / 1000)
+        if remainingSec > 0
+            int hrs  = math.floor(remainingSec / 3600)
+            int mins = math.floor((remainingSec % 3600) / 60)
+            int secs = remainingSec % 60
+            result := (hrs > 0 ? str.tostring(hrs, '00') + ':' : '') + str.tostring(mins, '00') + ':' + str.tostring(secs, '00')
+    result
+
+//@function HH:MM:SS remaining until the symbol's OWN regular-session close. The close time is supplied by
+//          the caller from the symbol's session-restricted series, so this is correct for index futures,
+//          metals and anything else without a per-product table. Reports n/a for instruments that have no
+//          regular session at all, and --:-- when there is no live tick to count against.
+f_rthCountdown(int closeMs, bool noSession) =>
+    string result = noSession ? 'n/a' : '--:--'
+    if not noSession and barstate.isrealtime and not na(closeMs)
+        int remainingSec = math.round((closeMs - timenow) / 1000)
+        if remainingSec <= 0
+            result := 'Closed'
+        else
+            int hrs  = math.floor(remainingSec / 3600)
+            int mins = math.floor((remainingSec % 3600) / 60)
+            int secs = remainingSec % 60
+            result := str.tostring(hrs, '00') + ':' + str.tostring(mins, '00') + ':' + str.tostring(secs, '00')
+    result
+
+//@function The single-glyph block marker for a direction, in the user's chosen style.
+//@returns  (string) The glyph.
+f_mark(bool isBull) =>
+    switch blockMarkSty
+        'Arrow'        => isBull ? '↑' : '↓'
+        'Plus / Minus' => isBull ? '+' : '−'
+        =>                isBull ? '▲' : '▼'
+
+//@function Vertical placement for a directional label, per the chosen convention. Normally returns the
+//          line's own price — f_lblStyle does the hugging in pixel space — and only shifts when the user
+//          has asked for extra clearance.
+//@returns  (float) The price the label should sit at.
+f_lblY(float lineY, bool isBull, float off) =>
+    switch lblConv
+        'Bull above / Bear below' => lineY + (isBull ? off : -off)
+        'On the line'             => lineY
+        =>                           lineY + (isBull ? -off : off)
+
+//@function Label style that makes text hug its line. label_up puts the text BELOW the anchor, label_down
+//          ABOVE, both offset in PIXEL space so the gap holds at any HTF range. Paired with a transparent
+//          background so only the text shows.
+//@returns  (string) The label style constant.
+f_lblStyle(bool isBull) =>
+    switch lblConv
+        'Bull above / Bear below' => isBull ? label.style_label_down : label.style_label_up
+        'On the line'             => label.style_none
+        =>                           isBull ? label.style_label_up : label.style_label_down
+
+//@function Pads a label's text with a blank line on its anchor side, stacking it one full text line
+//          clear of a label already hugging the same level — a SMT shares its level with the sweep that
+//          produced it, so without the spacer the two labels print on top of each other. The spacer is a
+//          text line, so the separation is pixel-true at any zoom and any timeframe.
+//@returns  (string) The padded text.
+f_lblStack(string txt, string sty) =>
+    // The trailing spacer line carries a space: a line that is entirely empty can be trimmed off the end
+    // of a label's text, which silently removes the above-side separation.
+    sty == label.style_label_down ? txt + '\n ' : sty == label.style_label_up ? '\n' + txt : txt
+
+//@function Horizontal anchor for a label belonging to a line that spans x1 (origin) to x2 (end).
+//@returns  (int) The x the label should sit at.
+f_lblX(int x1, int x2) =>
+    switch lblAnchorX
+        'Centre'        => int(math.avg(x1, x2))
+        'Left (origin)' => x1
+        =>                 x2
+
+// The geometric pivot alone is not enough — two candles running the SAME way can bracket a low that price
+// never actually turned at, and a level price did not turn at is not structure. The turn may straddle the
+// pivot either way round: the pivot is whichever of the pair holds the extreme, so it qualifies as the up
+// candle following a down one, or as the down candle preceded by an up one.
+//@function Whether the candle at `idx` completes a TRUE swing: a swing LOW sits at the turn from a DOWN
+//          candle to an UP candle, a swing HIGH at the turn from an UP candle to a DOWN one.
+//@returns  (bool) True when idx is a swing of the requested type.
+f_isSwing(array<float> sO, array<float> sH, array<float> sL, array<float> sC, int idx, bool wantLow) =>
+    bool ok = false
+    if idx >= 1 and idx + 1 <= sL.size() - 1
+        float lv  = wantLow ? sL.get(idx) : sH.get(idx)
+        bool  geo = wantLow ? (lv < sL.get(idx - 1) and lv < sL.get(idx + 1)) : (lv > sH.get(idx - 1) and lv > sH.get(idx + 1))
+        if geo
+            bool up    = sC.get(idx)     > sO.get(idx)
+            bool dn    = sC.get(idx)     < sO.get(idx)
+            bool upOld = sC.get(idx + 1) > sO.get(idx + 1)
+            bool dnOld = sC.get(idx + 1) < sO.get(idx + 1)
+            bool upNew = sC.get(idx - 1) > sO.get(idx - 1)
+            bool dnNew = sC.get(idx - 1) < sO.get(idx - 1)
+            ok := wantLow ? ((up and dnOld) or (dn and upNew)) : ((dn and upOld) or (up and dnNew))
+    ok
+
+//@function Auto-pairs the SMT peer from the chart symbol, so the same divergence reads identically from
+//          either side of a pair.
+//@returns  (string) The paired symbol, or na when the symbol has no known pairing.
+f_smtAutoPeer() =>
+    // Covers equity indices, precious metals and BTC/ETH. Energy, rates, FX and grains are left unpaired:
+    // the correlation is too loose for a divergence to carry meaning. With no pairing the caller falls back
+    // to the chart itself, which yields no divergence.
+    string t = syminfo.ticker
+    string res = na
+    // Equity indices — ES and NQ pair with each other, YM and RTY both read against ES. Micros stay micro,
+    // so an MNQ chart pairs to MES rather than crossing contract sizes.
+    string m = str.match(t, "^M?(ES|NQ)[1\\w][!\\d]+$")
+    if m != ''
+        int off = str.startswith(m, 'M') ? 1 : 0
+        string prefix = str.substring(m, off, 2 + off)
+        string suffix = str.substring(m, 2 + off)
+        res := 'CME_MINI:' + (off == 1 ? 'M' : '') + (prefix == 'NQ' ? 'ES' : 'NQ') + suffix
+    else if str.contains(t, 'MYM')
+        res := 'CME_MINI:MES1!'
+    else if str.contains(t, 'YM')
+        res := 'CME_MINI:ES1!'
+    else if str.contains(t, 'M2K')
+        res := 'CME_MINI:MES1!'
+    else if str.contains(t, 'RTY')
+        res := 'CME_MINI:ES1!'
+    // Precious metals — gold against silver, sizes kept consistent.
+    else if str.contains(t, 'MGC')
+        res := 'COMEX:SIL1!'
+    else if str.contains(t, 'GC')
+        res := 'COMEX:SI1!'
+    else if str.contains(t, 'SIL')
+        res := 'COMEX:MGC1!'
+    else if str.contains(t, 'SI')
+        res := 'COMEX:GC1!'
+    // Crypto — BTC against ETH only. CME micros (MBT/MET) and full-size futures pair within their own size,
+    // and spot tickers pair to spot so the quote currency carries across.
+    else if str.contains(t, 'MBT')
+        res := 'CME:MET1!'
+    else if str.contains(t, 'MET')
+        res := 'CME:MBT1!'
+    else if str.startswith(t, 'BTC')
+        res := syminfo.prefix + ':' + str.replace(t, 'BTC', 'ETH', 0)
+    else if str.startswith(t, 'ETH')
+        res := syminfo.prefix + ':' + str.replace(t, 'ETH', 'BTC', 0)
+    res
+
+// ============================================================================
+// SMT PEER SNAPSHOT — the second security, on the SAME HTF grid as the main snapshot, so peer candle i
+// lines up with chart candle i and the two can be compared index-for-index with no time matching.
+// Only highs and lows are required — the peer is queried for one thing: whether it took its matching swing.
+// ============================================================================
+var string smtAuto = f_smtAutoPeer()
+var string smtPeer = smtSymbol != '' ? smtSymbol : (not na(smtAuto) ? smtAuto : syminfo.tickerid)
+var array<string> smtParts = str.split(smtPeer, ':')
+string smtName = smtParts.size() > 0 ? smtParts.get(smtParts.size() - 1) : smtPeer
+
+// Peer's forming HTF candle — no lookahead, current bar only. The OPEN TIME comes back with it: the
+// index-for-index comparison holds only while both symbols start their HTF candles at the same moment.
+// Auto-pairs share an exchange and session; a manual override across asset classes may not, so it is checked.
+[ph0, pl0, pt0] = request.security(smtPeer, htfTf, [high, low, time])
+// Peer's confirmed closed HTF candles, pinned with lookahead_on to match the main snapshot.
+[ph1,pl1, ph2,pl2, ph3,pl3, ph4,pl4, ph5,pl5, ph6,pl6, ph7,pl7, ph8,pl8, ph9,pl9, ph10,pl10,
+ ph11,pl11, ph12,pl12, ph13,pl13, ph14,pl14, ph15,pl15, ph16,pl16, ph17,pl17, ph18,pl18, ph19,pl19] =
+     request.security(smtPeer, htfTf,
+     [high[1],low[1], high[2],low[2], high[3],low[3], high[4],low[4], high[5],low[5], high[6],low[6], high[7],low[7], high[8],low[8], high[9],low[9], high[10],low[10],
+      high[11],low[11], high[12],low[12], high[13],low[13], high[14],low[14], high[15],low[15], high[16],low[16], high[17],low[17], high[18],low[18], high[19],low[19]],
+      lookahead = barmerge.lookahead_on)
+
+// ============================================================================
+// PREVIOUS-DAY LEVELS
+// The level is read from its source on every bar rather than latched at the day roll: a latched value
+// survives a missed roll and keeps drawing a level that is days old. Only the swept flags and the
+// session-start bar persist between bars.
+//
+// Two definitions of "previous day" are offered because they legitimately differ on futures:
+//   Daily Bar   — the symbol's own daily candle, which spans the whole electronic session (18:00-17:00 NY).
+//                 A session's high can therefore have printed the evening before, and after a weekend the
+//                 previous daily bar is Friday's, so a Monday level being days old is correct, not a bug.
+//   RTH Session — the previous regular-hours range only, taken from the SYMBOL'S OWN session, accumulated
+//                 from chart bars. Index futures, metals and every other product each get their own hours.
+// The label carries the source date either way, so which day produced the level is never a guess.
+// ============================================================================
+
+// ── Session awareness — taken from the SYMBOL, never from a hardcoded clock ──
+// Requesting the chart symbol restricted to its own regular session returns na outside those hours, which
+// covers index futures (09:30-16:15), metals (08:20-13:30) and the rest without a per-product table.
+// Instruments trading around the clock have no regular session and are reported as such.
+string rthTicker = ticker.new(syminfo.prefix, syminfo.ticker, session = session.regular)
+float  rthProbe  = request.security(rthTicker, timeframe.period, close, gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off)
+int    rthCloseT = request.security(rthTicker, 'D', time_close, lookahead = barmerge.lookahead_on)
+bool   noSession = syminfo.type == 'crypto'
+bool   inRth     = not noSession and not na(rthProbe)
+
+// An instrument with no regular session cannot supply a RTH range. It falls through to the TRUE-DAY
+// definition rather than the daily candle: a 24/7 symbol's daily bar rolls at 00:00 UTC, which is an
+// arbitrary boundary for a tool framed on New York time everywhere else. Midnight New York keeps the day
+// boundary identical across every instrument. An explicit Daily Bar choice is still honoured as given.
+bool usePdRth = pdSource == 'RTH Session' and not noSession
+bool usePdMid = pdSource == 'Midnight (True Day)' or (noSession and pdSource == 'RTH Session')
+
+// Daily-candle source.
+// time_close, not time, for the DATE: a futures daily bar OPENS at 18:00 the previous calendar day, so its
+// open time formats as the day before the session it actually belongs to. The close (17:00) carries the
+// right date. The open is still pulled separately — it bounds the window the origin bar is searched within.
+[pdHday, pdLday, pdTday, pdOpenDay] = request.security(syminfo.tickerid, 'D', [high[1], low[1], time_close[1], time[1]], lookahead = barmerge.lookahead_on)
+
+// Regular-hours source — the running session is accumulated, then handed over as "previous" at the next open.
+bool rthOpen = inRth and not inRth[1]
+// The bar that PRINTED each extreme is recorded as it happens, so the level can be drawn from its true
+// origin rather than from the session boundary. Captured this way it is exact and costs no search.
+var float rthHi   = na
+var float rthLo   = na
+var int   rthT    = na
+var int   rthHiT  = na
+var int   rthLoT  = na
+var float pdHrth  = na
+var float pdLrth  = na
+var int   pdTrth  = na
+var int   pdHrthT = na
+var int   pdLrthT = na
+if rthOpen
+    pdHrth  := rthHi
+    pdLrth  := rthLo
+    pdTrth  := rthT
+    pdHrthT := rthHiT
+    pdLrthT := rthLoT
+    rthHi   := high
+    rthLo   := low
+    rthT    := time
+    rthHiT  := time
+    rthLoT  := time
+else if inRth
+    // Seeded on first touch: a chart beginning mid-session would otherwise feed na into the running extreme
+    // and hand na across at the next open.
+    if na(rthHi) or high > rthHi
+        rthHi  := high
+        rthHiT := time
+    if na(rthLo) or low < rthLo
+        rthLo  := low
+        rthLoT := time
+    rthT := na(rthT) ? time : rthT
+
+// True-day source — midnight New York to midnight New York. Unlike RTH there is no out-of-session gap, so
+// the range accumulates on every bar. The boundary is the NY calendar date turning over — the same one the
+// Midnight Open marks. Not timeframe.change('D'), which fires at 18:00 NY on futures.
+int  nyDay        = dayofmonth(time, 'America/New_York')
+bool midnightRoll = not na(nyDay[1]) and nyDay != nyDay[1]
+var float midHi   = na
+var float midLo   = na
+var int   midT    = na
+var int   midHiT  = na
+var int   midLoT  = na
+var float pdHmid  = na
+var float pdLmid  = na
+var int   pdTmid  = na
+var int   pdHmidT = na
+var int   pdLmidT = na
+if midnightRoll
+    pdHmid  := midHi
+    pdLmid  := midLo
+    pdTmid  := midT
+    pdHmidT := midHiT
+    pdLmidT := midLoT
+    midHi   := high
+    midLo   := low
+    midT    := time
+    midHiT  := time
+    midLoT  := time
+else
+    if na(midHi) or high > midHi
+        midHi  := high
+        midHiT := time
+    if na(midLo) or low < midLo
+        midLo  := low
+        midLoT := time
+    midT := na(midT) ? time : midT
+
+float pdH  = usePdRth ? pdHrth : usePdMid ? pdHmid : pdHday
+float pdL  = usePdRth ? pdLrth : usePdMid ? pdLmid : pdLday
+int   pdT  = usePdRth ? pdTrth : usePdMid ? pdTmid : pdTday
+float pdEq = not na(pdH) and not na(pdL) ? (pdH + pdL) / 2.0 : na
+// Origin bar of each level. The two accumulated sources captured it exactly as the extreme printed; the
+// daily source has to locate its bar by searching the previous session, which is done at draw time only —
+// that search is a bar walk, so it is kept off the historical bars.
+int pdHOrigin = usePdRth ? pdHrthT : usePdMid ? pdHmidT : na
+int pdLOrigin = usePdRth ? pdLrthT : usePdMid ? pdLmidT : na
+
+// Sweep state resets on the roll, detected from the level VALUE changing as well as the session event, so a
+// missed event cannot carry yesterday's flags into today.
+var bool pdHSwept   = false
+var bool pdLSwept   = false
+var int  pdDayStart = bar_index
+bool pdRolled = (usePdRth ? rthOpen : usePdMid ? midnightRoll : timeframe.change('D')) or (not na(pdH) and not na(pdH[1]) and pdH != pdH[1]) or (not na(pdL) and not na(pdL[1]) and pdL != pdL[1])
+if pdRolled
+    pdHSwept   := false
+    pdLSwept   := false
+    pdDayStart := bar_index
+if not na(pdH) and high >= pdH
+    pdHSwept := true
+if not na(pdL) and low <= pdL
+    pdLSwept := true
+
+// ============================================================================
+// DRAW OBJECT STORES
+// ============================================================================
+var array<box>  ovBoxes  = array.new<box>()
+var array<line> ovWicks  = array.new<line>()
+var array<line> divLines = array.new<line>()
+var array<line> hlLines  = array.new<line>()
+var array<line>  swLines  = array.new<line>()
+var array<label> swLabels = array.new<label>()
+var array<line>  eqLines  = array.new<line>()
+var array<line>  quadLines = array.new<line>()
+var array<label> quadLabs  = array.new<label>()
+var array<line>  smtLines  = array.new<line>()
+var array<label> smtLabs   = array.new<label>()
+var array<line>  pdLines   = array.new<line>()
+var array<label> pdLabs    = array.new<label>()
+var array<box>   fvgBoxes  = array.new<box>()
+var array<label> fvgLabs   = array.new<label>()
+var array<line>  mssLines  = array.new<line>()
+var array<label> mssLabs   = array.new<label>()
+var label       warnLbl  = na
+var label       htfTimerLbl = na
+var table       dashTbl  = na
+
+// ============================================================================
+// RENDER — clear + redraw on the last bar from the snapshot arrays.
+// ============================================================================
+if barstate.islast
+    for _b in ovBoxes
+        box.delete(_b)
+    ovBoxes.clear()
+    for _w in ovWicks
+        line.delete(_w)
+    ovWicks.clear()
+    for _d in divLines
+        line.delete(_d)
+    divLines.clear()
+    for _h in hlLines
+        line.delete(_h)
+    hlLines.clear()
+    for _s in swLines
+        line.delete(_s)
+    swLines.clear()
+    for _sl in swLabels
+        label.delete(_sl)
+    swLabels.clear()
+    for _e in eqLines
+        line.delete(_e)
+    eqLines.clear()
+    for _q in quadLines
+        line.delete(_q)
+    quadLines.clear()
+    for _ql in quadLabs
+        label.delete(_ql)
+    quadLabs.clear()
+    for _sm in smtLines
+        line.delete(_sm)
+    smtLines.clear()
+    for _sml in smtLabs
+        label.delete(_sml)
+    smtLabs.clear()
+    for _pl in pdLines
+        line.delete(_pl)
+    pdLines.clear()
+    for _pll in pdLabs
+        label.delete(_pll)
+    pdLabs.clear()
+    for _fb in fvgBoxes
+        box.delete(_fb)
+    fvgBoxes.clear()
+    for _fl in fvgLabs
+        label.delete(_fl)
+    fvgLabs.clear()
+    for _ms in mssLines
+        line.delete(_ms)
+    mssLines.clear()
+    for _msl in mssLabs
+        label.delete(_msl)
+    mssLabs.clear()
+    if not na(htfTimerLbl)
+        label.delete(htfTimerLbl)
+        htfTimerLbl := na
+    if not na(dashTbl)
+        table.delete(dashTbl)
+        dashTbl := na
+
+    if not htfValid
+        // HTF at or below the chart TF — nothing meaningful to project. Surface it instead of drawing garbage.
+        if na(warnLbl)
+            warnLbl := label.new(bar_index, high, 'M1D PO3 — set HTF above the chart timeframe', xloc = xloc.bar_index, style = label.style_label_down, color = color.new(#f23645, 0), textcolor = color.white, size = size.small, text_font_family = font.family_monospace)
+        else
+            label.set_xy(warnLbl, bar_index, high)
+    else
+        if not na(warnLbl)
+            label.delete(warnLbl)
+            warnLbl := na
+
+        array<float> aO = array.from(o0,o1,o2,o3,o4,o5,o6,o7,o8,o9,o10,o11,o12,o13,o14,o15,o16,o17,o18,o19)
+        array<float> aH = array.from(h0,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10,h11,h12,h13,h14,h15,h16,h17,h18,h19)
+        array<float> aL = array.from(l0,l1,l2,l3,l4,l5,l6,l7,l8,l9,l10,l11,l12,l13,l14,l15,l16,l17,l18,l19)
+        array<float> aC = array.from(c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16,c17,c18,c19)
+        array<int>   aT = array.from(t0,t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19)
+        // Peer highs/lows on the same index grid — used only to answer "did the peer take its swing too?".
+        array<float> pH = array.from(ph0,ph1,ph2,ph3,ph4,ph5,ph6,ph7,ph8,ph9,ph10,ph11,ph12,ph13,ph14,ph15,ph16,ph17,ph18,ph19)
+        array<float> pL = array.from(pl0,pl1,pl2,pl3,pl4,pl5,pl6,pl7,pl8,pl9,pl10,pl11,pl12,pl13,pl14,pl15,pl16,pl17,pl18,pl19)
+
+        int num = math.min(htfCount, 20)
+
+        // ── Projected-block geometry ────────────────────────────────────────────────
+        // Resolved up front: several sections need it, and the block's PD-array zones must be created BEFORE
+        // the candles. Pine has no z-index — same-type drawings stack in creation order, so the candles are
+        // drawn last to sit on top of the zones.
+        int candleW = htfSize == 'Large' ? 5 : htfSize == 'Medium' ? 3 : 1
+        int step    = candleW + htfGap
+        int baseX   = bar_index + htfOffset
+        int half    = math.max(1, math.round(candleW / 2.0))
+        // Outer edges of the block. Oldest candle sits at baseX (index num-1), newest at the right edge
+        // (index 0) — the same mapping the candle loop uses.
+        int blockL  = baseX - half
+        int blockR  = baseX + (num - 1) * step + half + 2
+
+        // Average high-low range of the visible HTF candles — a stand-in for ATR at the HTF's own resolution,
+        // since a snapshot array has no incremental ta.atr() series. Both the FVG size/displacement gates and
+        // the MSS displacement gate measure against this one value, so "significant" means the same thing
+        // to every layer of the tool.
+        float sumRange = 0.0
+        int   rangeN   = 0
+        for k = 0 to num - 1
+            float hk = aH.get(k)
+            float lk = aL.get(k)
+            if not na(hk) and not na(lk)
+                sumRange += hk - lk
+                rangeN += 1
+        float htfAtr = rangeN > 0 ? sumRange / rangeN : na
+        // Optional extra vertical clearance for labels, scaled to the HTF range. f_lblStyle does the base
+        // placement in pixel space; this only applies when the user raises it above 0.
+        float lblOff = na(htfAtr) ? 0.0 : htfAtr * lblOffMult
+        // SMT labels take extra clearance on top: a SMT rides a swept level by construction, so its label
+        // and the sweep label share a line unless the SMT is lifted away from it.
+        float smtOff = lblOff + (na(htfAtr) ? 0.0 : htfAtr * smtLblClear)
+
+        // ── PO3 dividers + per-candle high/low, straight from the snapshot ──────────
+        // Candle i spans [aT[i], aT[i-1]] (the live candle i=0 runs to the current bar), so its high/low
+        // lines sit exactly between its own opening divider and the next one — same source, no drift.
+        for i = 0 to num - 1
+            int   t = aT.get(i)
+            float h = aH.get(i)
+            float l = aL.get(i)
+            if na(t) or na(h) or na(l)
+                continue
+            if showDividers
+                divLines.push(line.new(t, l, t, h, xloc = xloc.bar_time, color = divColor, width = divWidth, style = line.style_solid, extend = extend.both))
+            if showHL
+                int rightT = i == 0 ? time : aT.get(i - 1)
+                hlLines.push(line.new(t, h, rightT, h, xloc = xloc.bar_time, color = hlHigh, width = hlWidth, style = line.style_solid))
+                hlLines.push(line.new(t, l, rightT, l, xloc = xloc.bar_time, color = hlLow,  width = hlWidth, style = line.style_solid))
+
+        // ── MTF fair value gaps (on the HTF snapshot array) ────────────────────────────
+        // A 3-candle gap walked across HTF array indices i (newest), i+1 (middle/displacement), i+2 (oldest) —
+        // the same structure as a chart-bar FVG, just applied to the HTF candles instead. Because the HTF
+        // array is already a higher timeframe than the chart, this is multi-timeframe without a second
+        // chart-bar engine. Gap size and displacement measure against the average high-low range of the
+        // visible HTF candles, standing in for ATR at the HTF's own resolution.
+        // Mitigation is recomputed each redraw by scanning indices 0..i-1 (candles newer than the gap) for
+        // penetration, so no zone objects persist between bars.
+        // The scan starts at i = 1: index 0 is the live candle, and a triplet including it is a forming gap
+        // whose edges move every tick. Mitigation still reads index 0 — a zone being tested now must register.
+        string lastFvgDir = '-'
+        if showFvg and num >= 4
+            if not na(htfAtr) and htfAtr > 0
+                string fTag = f_tfLabel(htfTf)
+                int fvgShown    = 0
+                int fvgInvShown = 0
+                // Price bands already occupied by a drawn zone, used to keep stacked zones off each other,
+                // and each band's current direction (inversion flips it) for the same-direction stack test.
+                array<float> drawnTop = array.new<float>()
+                array<float> drawnBot = array.new<float>()
+                array<bool>  drawnUp  = array.new<bool>()
+                for i = 1 to num - 3
+                    float hiI = aH.get(i)
+                    float loI = aL.get(i)
+                    float oM  = aO.get(i + 1)
+                    float cM  = aC.get(i + 1)
+                    float hiO = aH.get(i + 2)
+                    float loO = aL.get(i + 2)
+                    int   tM  = aT.get(i + 1)
+                    if na(hiI) or na(loI) or na(oM) or na(cM) or na(hiO) or na(loO) or na(tM)
+                        continue
+                    bool dispBull = cM > oM and (cM - oM) >= htfAtr * fvgDispMult
+                    bool dispBear = cM < oM and (oM - cM) >= htfAtr * fvgDispMult
+                    bool bullGap  = loI > hiO and (loI - hiO) >= htfAtr * fvgMinAtr and dispBull
+                    bool bearGap  = hiI < loO and (loO - hiI) >= htfAtr * fvgMinAtr and dispBear
+                    if not bullGap and not bearGap
+                        continue
+                    float zTop = bullGap ? loI : loO
+                    float zBot = bullGap ? hiO : hiI
+                    // The lifecycle is resolved by walking the newer candles in CHRONOLOGICAL order rather
+                    // than aggregating their extremes. Inversion is order-dependent — the zone must be
+                    // filled FIRST, then returned to and rejected — and a max/min aggregate cannot express
+                    // sequence, only whether a price was ever reached.
+                    bool touched   = false
+                    bool filled    = false
+                    bool reclaimed = false
+                    if i > 0
+                        for w = 0 to i - 1
+                            int   q  = i - 1 - w        // oldest-newer first, so events resolve in order
+                            float hq = aH.get(q)
+                            float lq = aL.get(q)
+                            float cq = aC.get(q)
+                            if na(hq) or na(lq) or na(cq)
+                                continue
+                            bool inZone  = lq <= zTop and hq >= zBot
+                            bool through = bullGap ? cq < zBot : cq > zTop
+                            // Closing back through in the ORIGINAL direction takes the gap back — the
+                            // inversion is undone and the zone is spent.
+                            bool back    = bullGap ? cq > zTop : cq < zBot
+                            if not filled
+                                if inZone
+                                    touched := true
+                                if through
+                                    filled := true
+                            else if back
+                                reclaimed := true
+                    // A gap closed clean through has inverted: the old support is now resistance, or the
+                    // reverse. It stays inverted for as long as that break holds; no retest is required.
+                    bool inverted = fvgInvert and filled and not reclaimed
+                    // Filled, then taken back the other way: neither a live gap nor a standing inversion.
+                    bool consumed = filled and not inverted
+                    // Four states:
+                    //   live     — untouched: solid, full colour
+                    //   active   — entered but not closed through: dotted + dimmed
+                    //   inverted — closed through, break holding: solid, inversion colour
+                    //   spent    — closed through then reclaimed: heavily faded, kept as history
+                    if consumed and not fvgKeepFill
+                        continue
+                    if touched and not filled and fvgHideMit
+                        continue
+                    // Live, active and inverted zones set the dashboard read and take a Max Zones slot.
+                    // A spent zone takes neither.
+                    if not consumed
+                        if lastFvgDir == '-'
+                            lastFvgDir := ((inverted ? not bullGap : bullGap) ? 'Bullish' : 'Bearish') + (inverted ? ' (inv)' : '')
+                        // Inversions carry their own budget. The scan runs newest-first and an inversion is
+                        // always older than the live gaps around it, so a shared allowance would starve it.
+                        if inverted ? fvgInvShown >= maxFvg : fvgShown >= maxFvg
+                            continue
+                    // Overlap declutter + stack removal. Two translucent zones on the same prices multiply
+                    // into a solid block, and two same-direction zones split by a thin seam are one
+                    // inefficiency wearing two boxes — so a candidate more than the tolerance inside an
+                    // already-drawn zone, or within the stack distance of a same-direction one, is skipped.
+                    // The scan is newest-first, so the most recent zone in a band or stack is the one kept.
+                    // Opposite-direction neighbours never stack-remove each other: however close they sit,
+                    // they are different reads. Spent zones sit at 95 transparency and neither muddy a live
+                    // zone nor deserve to block one, so they take no part in this.
+                    bool zUp = inverted ? not bullGap : bullGap
+                    if (fvgDeclutter or fvgNearOn) and not consumed
+                        if drawnTop.size() > 0
+                            bool  clash = false
+                            float zH    = zTop - zBot
+                            for z = 0 to drawnTop.size() - 1
+                                // Positive = shared height; negative = the seam between the two zones.
+                                float ovl = math.min(zTop, drawnTop.get(z)) - math.max(zBot, drawnBot.get(z))
+                                if fvgDeclutter and ovl > 0 and zH > 0 and (ovl / zH) * 100.0 > fvgOverlapPct
+                                    clash := true
+                                    break
+                                if fvgNearOn and ovl <= 0 and -ovl <= htfAtr * fvgNearMult and drawnUp.get(z) == zUp
+                                    clash := true
+                                    break
+                            if clash
+                                continue
+                        drawnTop.push(zTop)
+                        drawnBot.push(zBot)
+                        drawnUp.push(zUp)
+                    color  zBase  = inverted ? fvgInvColor : bullGap ? fvgBullColor : fvgBearColor
+                    color  zCol   = consumed ? color.new(zBase, 95) : zBase
+                    // color.new SETS transparency on the base colour rather than compounding it, so the
+                    // border hue tracks the fill input.
+                    color  bCol   = color.new(zBase, consumed ? 88 : touched ? 70 : 0)
+                    string bSty   = (inverted or (not touched and not consumed)) ? line.style_solid : line.style_dotted
+                    // BISI / SIBI name how the imbalance was BUILT — a buyside or a sellside imbalance — and
+                    // inverting does not rebuild it. An inverted BISI+ is still a BISI+; it is the zone's
+                    // BEHAVIOUR that flipped, not its construction, so the name is kept and IFVG is appended.
+                    // Which way it now trades is carried by the block arrow and the dashboard read, both of
+                    // which do flip.
+                    string fName  = (bullGap ? ' BISI+' : ' SIBI-') + (inverted ? ' IFVG' : '')
+                    string fState = consumed ? ' (reclaimed)' : (touched and not inverted) ? ' (active)' : ''
+                    int    fRight = time + fvgExtend * timeframe.in_seconds(timeframe.period) * 1000
+                    fvgBoxes.push(box.new(tM, zTop, fRight, zBot, xloc = xloc.bar_time, border_color = bCol, border_width = 1, border_style = bSty, bgcolor = zCol))
+                    if showFvgLabels
+                        fvgLabs.push(label.new(int(math.avg(tM, fRight)), math.avg(zTop, zBot), fTag + fName + fState, xloc = xloc.bar_time, style = label.style_none, textcolor = fvgLblColor, size = fvgLblSize, text_font_family = font.family_monospace))
+                    // Mirrored onto the block, anchored to the displacement candle (i+1) that opened the gap
+                    // and running to the right edge — the condensed equivalent of extending right on the chart.
+                    if mirrorBlock
+                        int fxL = baseX + (num - 1 - (i + 1)) * step - half
+                        fvgBoxes.push(box.new(fxL, zTop, blockR, zBot, xloc = xloc.bar_index, border_color = bCol, border_width = 1, border_style = bSty, bgcolor = zCol))
+                        if blockMarkOn and fvgBlockMark
+                            // The glyph follows the zone's CURRENT direction, so an inverted zone flips.
+                            fvgLabs.push(label.new(int(math.avg(fxL, blockR)), math.avg(zTop, zBot), f_mark(inverted ? not bullGap : bullGap), xloc = xloc.bar_index, style = label.style_none, textcolor = fvgLblColor, size = blockMarkSz, text_font_family = font.family_monospace))
+                    if inverted
+                        fvgInvShown += 1
+                    else if not consumed
+                        fvgShown += 1
+
+        // ── Projected HTF candle block, right of live price ─────────────────────────
+        // Drawn AFTER the PD-array zones above so the candles sit on top of them rather than under a tint.
+        for i = 0 to num - 1
+            float o = aO.get(i)
+            float h = aH.get(i)
+            float l = aL.get(i)
+            float c = aC.get(i)
+            if na(o) or na(h) or na(l) or na(c)
+                continue
+            bool  bull = c >= o
+            int   x    = baseX + (num - 1 - i) * step
+            int   xl   = x - half
+            int   xr   = x + half
+            float bt   = math.max(o, c)
+            float bb   = math.min(o, c)
+            if bt == bb
+                bt := bt + syminfo.mintick
+            ovBoxes.push(box.new(xl, bt, xr, bb, xloc = xloc.bar_index, bgcolor = bull ? bullBody : bearBody, border_color = bull ? bullBorder : bearBorder, border_width = 1))
+            ovWicks.push(line.new(x, h, x, bt, xloc = xloc.bar_index, color = bull ? bullWick : bearWick, width = 1))
+            ovWicks.push(line.new(x, bb, x, l, xloc = xloc.bar_index, color = bull ? bullWick : bearWick, width = 1))
+            // EQ = the true 50% (H+L)/2, marked on each FORMED candle only (i >= 1; the live candle i = 0 is
+            // skipped) as a dotted line across the candle body — the reference the next candle retraces into.
+            if showEq and i >= 1
+                float eqp = (h + l) / 2.0
+                eqLines.push(line.new(xl, eqp, xr, eqp, xloc = xloc.bar_index, color = eqColor, width = eqWidth, style = line.style_dotted))
+
+        // ── Candle close timer — countdown to the forming HTF candle close, centred above the block ──
+        if showHtfTimer
+            string tmr = f_htfCountdown(t0, htfTf)
+            float blockTop = na
+            for i = 0 to num - 1
+                float hh = aH.get(i)
+                if not na(hh) and (na(blockTop) or hh > blockTop)
+                    blockTop := hh
+            if not na(blockTop)
+                int xC = baseX + (num - 1) * step / 2
+                // Timeframe above the countdown, so the block states which HTF it reads.
+                htfTimerLbl := label.new(xC, blockTop, f_tfLabel(htfTf) + '\n' + tmr, xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.white, 100), textcolor = htfTimerCol, size = htfTimerSize, text_font_family = font.family_monospace)
+
+        // ── PO3 sweeps (swing-liquidity only) ─────────────────────────────────────────
+        // A sweep requires a SWING high / SWING low — a 1-candle pivot in the HTF array — that a later candle
+        // raids and then CLOSES back inside: wick beyond the swing, body back within. The candle nearest the
+        // swing takes it, and nothing between the two may have taken the level already. The swept level draws
+        // dotted from the bar that formed it and solid across the block. Newest first, capped by maxSweeps.
+        string lastSweepDir = '-'
+        // The peer reads correctly only while its HTF candles open at the same moment as the chart's.
+        // Otherwise the comparison spans different periods, so SMT is withheld and the dashboard reports it.
+        bool   smtAligned  = not na(pt0) and not na(t0) and pt0 == t0
+        string lastSmtDir  = smtOn and not smtAligned ? 'Misaligned' : '-'
+        string lastMssDir   = '-'
+        if num >= 3
+            string tfTag = f_tfLabel(htfTf)
+            int sweepsShown = 0
+            int smtShown    = 0
+            int mssShown    = 0
+            // Candles that raided liquidity this window, by side — read by the MSS raid gate below.
+            array<int> raidHCands = array.new<int>()
+            array<int> raidLCands = array.new<int>()
+            for i = 0 to num - 1
+                float hi = aH.get(i)
+                float li = aL.get(i)
+                float ci = aC.get(i)
+                int   ti = aT.get(i)
+                if na(hi) or na(li) or na(ci) or na(ti)
+                    continue
+                // The raid happens INSIDE the sweeping candle, so a swept level has to run through that
+                // candle to reach it — stopping at ti (its opening edge) leaves the line short of the candle
+                // that actually took the liquidity. tiEnd is the candle's closing boundary.
+                int tiEnd = i == 0 ? time : aT.get(i - 1)
+                // Nearest still-unraided pivot high above / pivot low below that candle i takes.
+                // TWO strengths are recorded, because the sweep display and the MSS need different things:
+                //   raid*  — the level was simply TAKEN (wick beyond). This is the MSS prerequisite: in a
+                //            real shift the leg often CLOSES through the liquidity and only reverses later,
+                //            so demanding same-candle rejection here would rule out most genuine setups.
+                //   swept* — a raid that ALSO closed back inside, i.e. the failed raid drawn as a sweep and
+                //            fed to the SMT comparison. Every swept level is a raid; the reverse is not true.
+                int sweptHIdx = na
+                int sweptLIdx = na
+                int raidHIdx  = na
+                int raidLIdx  = na
+                if i + 2 <= num - 2
+                    for p = i + 2 to num - 2
+                        float hp = aH.get(p)
+                        if na(raidHIdx) and not na(hp) and hp > aH.get(p - 1) and hp > aH.get(p + 1) and hi > hp
+                            bool firstH = true
+                            for m = i + 1 to p - 1
+                                if aH.get(m) > hp
+                                    firstH := false
+                                    break
+                            if firstH
+                                raidHIdx := p
+                                if ci < hp
+                                    sweptHIdx := p
+                        float lp = aL.get(p)
+                        if na(raidLIdx) and not na(lp) and lp < aL.get(p - 1) and lp < aL.get(p + 1) and li < lp
+                            bool firstL = true
+                            for m = i + 1 to p - 1
+                                if aL.get(m) < lp
+                                    firstL := false
+                                    break
+                            if firstL
+                                raidLIdx := p
+                                if ci > lp
+                                    sweptLIdx := p
+                        if not na(raidHIdx) and not na(raidLIdx)
+                            break
+                bool got = not na(sweptHIdx) or not na(sweptLIdx)
+                if not na(raidHIdx)
+                    raidHCands.push(i)
+                if not na(raidLIdx)
+                    raidLCands.push(i)
+                if got and lastSweepDir == '-'
+                    lastSweepDir := not na(sweptHIdx) ? 'Buyside' : 'Sellside'
+                if showSweeps and got and sweepsShown < maxSweeps
+                    int xSweep = baseX + (num - 1 - i) * step
+                    if not na(sweptHIdx)
+                        float hp   = aH.get(sweptHIdx)
+                        int   oT   = f_extremeTime(true, hp, aT.get(sweptHIdx), aT.get(sweptHIdx - 1))
+                        int   xSwp = baseX + (num - 1 - sweptHIdx) * step
+                        swLines.push(line.new(oT, hp, tiEnd, hp, xloc = xloc.bar_time, color = sweepColor, width = sweepWidth, style = line.style_dotted))
+                        if showSweepLabels
+                            // A buyside raid reads bearish, so its label hugs ABOVE the level it took.
+                            swLabels.push(label.new(f_lblX(oT, tiEnd), f_lblY(hp, false, lblOff), tfTag + ' Sweep', xloc = xloc.bar_time, color = color.new(color.white, 100), style = f_lblStyle(false), textcolor = sweepColor, size = sweepLblSize, text_font_family = font.family_monospace))
+                        swLines.push(line.new(xSwp, hp, xSweep + half, hp, xloc = xloc.bar_index, color = sweepColor, width = sweepWidth, style = line.style_solid))
+                    if not na(sweptLIdx)
+                        float lp   = aL.get(sweptLIdx)
+                        int   oT   = f_extremeTime(false, lp, aT.get(sweptLIdx), aT.get(sweptLIdx - 1))
+                        int   xSwp = baseX + (num - 1 - sweptLIdx) * step
+                        swLines.push(line.new(oT, lp, tiEnd, lp, xloc = xloc.bar_time, color = sweepColor, width = sweepWidth, style = line.style_dotted))
+                        if showSweepLabels
+                            // A sellside raid reads bullish, so its label hugs UNDER the level — the mirror of
+                            // the buyside case above, which keeps the two apart when raids stack up.
+                            swLabels.push(label.new(f_lblX(oT, tiEnd), f_lblY(lp, true, lblOff), tfTag + ' Sweep', xloc = xloc.bar_time, color = color.new(color.white, 100), style = f_lblStyle(true), textcolor = sweepColor, size = sweepLblSize, text_font_family = font.family_monospace))
+                        swLines.push(line.new(xSwp, lp, xSweep + half, lp, xloc = xloc.bar_index, color = sweepColor, width = sweepWidth, style = line.style_solid))
+                    sweepsShown += 1
+
+                // ── SMT divergence: the swing was taken here, but not on the peer ─────────
+                // Peer candle i is chart candle i (same HTF grid), so the comparison needs no time matching:
+                // if the chart candle raided the swing but the peer's matching candle stayed short of ITS matching
+                // swing, the move lacked cross-market participation. The line joins the two diverging extremes,
+                // each anchored to the bar that actually formed it, and is mirrored on the projected block.
+                if smtOn and smtAligned and got
+                    int endT    = i == 0 ? time + 1 : aT.get(i - 1)
+                    int xSweepS = baseX + (num - 1 - i) * step
+                    // Invalidation — a SMT dies once price trades back through the extreme that formed it.
+                    // Candles newer than the raiding candle are indices i-1 … 0, and index 0 is the live candle
+                    // whose running high/low is accumulated from chart bars, so this re-evaluates on every tick
+                    // rather than only on a confirmed bar. An HTF candle's high IS the max of its chart bars,
+                    // so scanning the array loses no resolution against walking the chart directly.
+                    float postHi = na
+                    float postLo = na
+                    if i > 0
+                        for j = 0 to i - 1
+                            float hj = aH.get(j)
+                            float lj = aL.get(j)
+                            if not na(hj) and (na(postHi) or hj > postHi)
+                                postHi := hj
+                            if not na(lj) and (na(postLo) or lj < postLo)
+                                postLo := lj
+                    if not na(sweptHIdx) and smtShown < smtMax
+                        float pNowH = pH.get(i)
+                        float pRefH = pH.get(sweptHIdx)
+                        if not na(pNowH) and not na(pRefH) and pNowH <= pRefH
+                            bool broken = not na(postHi) and postHi > hi
+                            if not (broken and smtHideBrk)
+                                float  shp   = aH.get(sweptHIdx)
+                                int    sOTp  = f_extremeTime(true, shp, aT.get(sweptHIdx), aT.get(sweptHIdx - 1))
+                                int    sOTi  = f_extremeTime(true, hi, aT.get(i), endT)
+                                int    sxSwp = baseX + (num - 1 - sweptHIdx) * step
+                                color  sCol  = broken ? color.new(smtBearCol, 55) : smtBearCol
+                                string sSty  = broken ? line.style_dotted : line.style_solid
+                                smtLines.push(line.new(sOTp, shp, sOTi, hi, xloc = xloc.bar_time, color = sCol, width = smtWidth, style = sSty))
+                                smtLines.push(line.new(sxSwp, shp, xSweepS, hi, xloc = xloc.bar_index, color = sCol, width = smtWidth, style = sSty))
+                                // Chart text and block glyph are gated separately.
+                                if smtLabels
+                                    smtLabs.push(label.new(f_lblX(sOTp, sOTi), f_lblY(math.avg(shp, hi), false, smtOff), f_lblStack(tfTag + ' SMT vs ' + smtName + (broken ? ' (broken)' : ''), f_lblStyle(false)), xloc = xloc.bar_time, color = color.new(color.white, 100), style = f_lblStyle(false), textcolor = sCol, size = smtLblSize, text_font_family = font.family_monospace))
+                                if blockMarkOn and smtBlockMark
+                                    smtLabs.push(label.new(int(math.avg(sxSwp, xSweepS)), f_lblY(math.avg(shp, hi), false, lblOff), f_mark(false), xloc = xloc.bar_index, style = label.style_none, textcolor = sCol, size = blockMarkSz, text_font_family = font.family_monospace))
+                                if not broken and lastSmtDir == '-'
+                                    lastSmtDir := 'Bearish'
+                                smtShown += 1
+                    if not na(sweptLIdx) and smtShown < smtMax
+                        float pNowL = pL.get(i)
+                        float pRefL = pL.get(sweptLIdx)
+                        if not na(pNowL) and not na(pRefL) and pNowL >= pRefL
+                            bool broken = not na(postLo) and postLo < li
+                            if not (broken and smtHideBrk)
+                                float  slp   = aL.get(sweptLIdx)
+                                int    sOTp  = f_extremeTime(false, slp, aT.get(sweptLIdx), aT.get(sweptLIdx - 1))
+                                int    sOTi  = f_extremeTime(false, li, aT.get(i), endT)
+                                int    sxSwp = baseX + (num - 1 - sweptLIdx) * step
+                                color  sCol  = broken ? color.new(smtBullCol, 55) : smtBullCol
+                                string sSty  = broken ? line.style_dotted : line.style_solid
+                                smtLines.push(line.new(sOTp, slp, sOTi, li, xloc = xloc.bar_time, color = sCol, width = smtWidth, style = sSty))
+                                smtLines.push(line.new(sxSwp, slp, xSweepS, li, xloc = xloc.bar_index, color = sCol, width = smtWidth, style = sSty))
+                                if smtLabels
+                                    smtLabs.push(label.new(f_lblX(sOTp, sOTi), f_lblY(math.avg(slp, li), true, smtOff), f_lblStack(tfTag + ' SMT vs ' + smtName + (broken ? ' (broken)' : ''), f_lblStyle(true)), xloc = xloc.bar_time, color = color.new(color.white, 100), style = f_lblStyle(true), textcolor = sCol, size = smtLblSize, text_font_family = font.family_monospace))
+                                if blockMarkOn and smtBlockMark
+                                    smtLabs.push(label.new(int(math.avg(sxSwp, xSweepS)), f_lblY(math.avg(slp, li), true, lblOff), f_mark(true), xloc = xloc.bar_index, style = label.style_none, textcolor = sCol, size = blockMarkSz, text_font_family = font.family_monospace))
+                                if not broken and lastSmtDir == '-'
+                                    lastSmtDir := 'Bullish'
+                                smtShown += 1
+
+            // ── Market Structure Shift ─────────────────────────────────────────────────────
+            // A TRUE swing broken by a body close. A swing is a level price actually TURNED at
+            // (f_isSwing): a swing low sits at the change from a DOWN candle to an UP candle, a swing
+            // high at the change from an UP candle to a DOWN one — a low that merely sits under its
+            // neighbours while price kept running the same way is not structure. The FIRST candle to
+            // CLOSE beyond the swing's full wick extreme marks the shift — body, not wick: a wick back
+            // through is just another raid. Later closes past the same level are continuation.
+            // The break candle sits no closer than two candles after the swing: a candle closing through
+            // the level beside it would have disqualified that level as a swing in the first place.
+            // Require Raid First layers the classic 2022-model sequencing on top — a buyside raid before
+            // a bearish shift, a sellside raid before a bullish one.
+            if showMss
+                for s = 2 to num - 2
+                    if mssShown >= mssMax
+                        break
+                    for d = 0 to 1
+                        bool mssBear = d == 0
+                        if mssShown >= mssMax
+                            break
+                        if not f_isSwing(aO, aH, aL, aC, s, mssBear)
+                            continue
+                        float refLvl = mssBear ? aL.get(s) : aH.get(s)
+                        int   bj     = na
+                        for j = s - 2 to 0
+                            float cj = aC.get(j)
+                            if na(cj)
+                                continue
+                            if mssBear ? cj < refLvl : cj > refLvl
+                                bj := j
+                                break
+                        if na(bj)
+                            continue
+                        if mssReqRaid
+                            array<int> rc = mssBear ? raidHCands : raidLCands
+                            bool raided = false
+                            for r in rc
+                                if r > bj
+                                    raided := true
+                                    break
+                            if not raided
+                                continue
+                        // Optional extra tightening: the shifting candle must also displace, by range or
+                        // by opening a fresh gap in the shift's direction.
+                        bool disp = true
+                        if mssReqDisp and not na(htfAtr) and htfAtr > 0
+                            bool dispRange = (aH.get(bj) - aL.get(bj)) >= htfAtr * mssDispAtr
+                            bool dispFvg   = false
+                            if bj + 2 <= num - 1
+                                float hj2 = aH.get(bj + 2)
+                                float lj2 = aL.get(bj + 2)
+                                if not na(hj2) and not na(lj2)
+                                    dispFvg := mssBear ? aH.get(bj) < lj2 : aL.get(bj) > hj2
+                            disp := dispRange or dispFvg
+                        if not disp
+                            continue
+                        color mCol  = mssBear ? mssBearCol : mssBullCol
+                        int   mOT   = f_extremeTime(not mssBear, refLvl, aT.get(s), aT.get(s - 1))
+                        int   mEnd  = bj == 0 ? time : aT.get(bj - 1)
+                        int   xRef  = baseX + (num - 1 - s) * step
+                        int   xMss  = baseX + (num - 1 - bj) * step
+                        mssLines.push(line.new(mOT, refLvl, mEnd, refLvl, xloc = xloc.bar_time, color = mCol, width = mssWidth, style = line.style_solid))
+                        // Runs a full candle-step past the shifting candle on the block so the shift stands
+                        // clear of the candle that made it rather than stopping flush against it.
+                        mssLines.push(line.new(xRef, refLvl, xMss + half + step, refLvl, xloc = xloc.bar_index, color = mCol, width = mssWidth, style = line.style_solid))
+                        // MSS labels sit at the RIGHT end of their line regardless of the shared anchor
+                        // setting — the line spans left to right, so the label reads at its conclusion.
+                        if mssLabels
+                            mssLabs.push(label.new(mEnd, f_lblY(refLvl, not mssBear, lblOff), tfTag + ' MSS', xloc = xloc.bar_time, color = color.new(color.white, 100), style = f_lblStyle(not mssBear), textcolor = mCol, size = mssLblSize, text_font_family = font.family_monospace))
+                        if blockMarkOn and mssBlockMark
+                            mssLabs.push(label.new(int(math.avg(xRef, xMss)), f_lblY(refLvl, not mssBear, lblOff), f_mark(not mssBear), xloc = xloc.bar_index, style = label.style_none, textcolor = mCol, size = blockMarkSz, text_font_family = font.family_monospace))
+                        if lastMssDir == '-'
+                            lastMssDir := mssBear ? 'Bearish' : 'Bullish'
+                        mssShown += 1
+
+        // ── Current-range quadrants (H / 75% / EQ / 25% / L of the forming HTF candle) ──
+        // Projected across price as a live premium/discount reference. Extremes (H/L) solid = live levels; the
+        // inner 75/EQ/25 dotted = midlines (solid-live / dotted-midline convention). Recomputed from the forming
+        // candle's running H/L each redraw, so they track it live.
+        if showQuad and not na(t0) and not na(h0) and not na(l0) and h0 > l0
+            float  qR     = h0 - l0
+            int    qRight = time + quadExtend * timeframe.in_seconds(timeframe.period) * 1000
+            array<float>  qPrices = array.from(h0, l0 + qR * 0.75, l0 + qR * 0.5, l0 + qR * 0.25, l0)
+            array<string> qTexts  = array.from('H', '75%', 'EQ', '25%', 'L')
+            array<bool>   qSolid  = array.from(true, false, false, false, true)
+            for qi = 0 to 4
+                float qp = qPrices.get(qi)
+                // The H and L are LIQUIDITY, so they anchor to the bar that printed them, like every other
+                // level in this tool. The inner 75 / EQ / 25 are derived midlines with no originating bar,
+                // so they run from the candle's open — there is nothing for them to be anchored to.
+                bool qIsLiq = qi == 0 or qi == 4
+                int  qLeft  = qIsLiq ? f_extremeTime(qi == 0, qp, t0, time + 1) : t0
+                quadLines.push(line.new(qLeft, qp, qRight, qp, xloc = xloc.bar_time, color = quadColor, width = quadWidth, style = qSolid.get(qi) ? line.style_solid : line.style_dotted))
+                if showQuadLabels
+                    quadLabs.push(label.new(qRight, qp, qTexts.get(qi), xloc = xloc.bar_time, style = label.style_none, textcolor = quadColor, size = quadLblSize, text_font_family = font.family_monospace))
+                // Not mirrored onto the block: these are reference midlines of the forming candle, which is
+                // already drawn there.
+
+        // ── Previous-day levels (PDH / PDL / PD EQ) ────────────────────────────────────
+        // Solid = live/unswept; dotted + dimmed the instant price trades through it today (swept), matching
+        // every other level convention in this script. EQ is always a dotted midline. Runs from the first
+        // bar of today's session, tracked globally above so the state covers the whole day, not one bar.
+        if showPD and not na(pdH) and not na(pdL)
+            int   pdRight = bar_index + pdExtend
+            color pdHCol  = pdHSwept ? color.new(pdColor, 60) : pdColor
+            color pdLCol  = pdLSwept ? color.new(pdColor, 60) : pdColor
+            // Origin-anchored: each level starts at the bar that printed it, not at the session roll. The
+            // accumulated sources already know
+            // their origin bar; the daily source resolves it here by walking the previous session's window,
+            // and degrades to the session open if the extreme sits beyond the search budget.
+            int pdHOrig = pdHOrigin
+            int pdLOrig = pdLOrigin
+            if not na(pdOpenDay) and not na(pdTday)
+                if na(pdHOrig)
+                    pdHOrig := f_extremeTime(true, pdH, pdOpenDay, pdTday)
+                if na(pdLOrig)
+                    pdLOrig := f_extremeTime(false, pdL, pdOpenDay, pdTday)
+            int pdRightT = time + pdExtend * timeframe.in_seconds(timeframe.period) * 1000
+            if na(pdHOrig)
+                pdHOrig := pdTday
+            if na(pdLOrig)
+                pdLOrig := pdTday
+            pdLines.push(line.new(pdHOrig, pdH, pdRightT, pdH, xloc = xloc.bar_time, color = pdHCol, width = pdWidth, style = pdHSwept ? line.style_dotted : line.style_solid))
+            pdLines.push(line.new(pdLOrig, pdL, pdRightT, pdL, xloc = xloc.bar_time, color = pdLCol, width = pdWidth, style = pdLSwept ? line.style_dotted : line.style_solid))
+            // The source date is part of the label: after a weekend or a holiday the previous daily bar is
+            // several calendar days back, and showing the date makes that legible instead of looking wrong.
+            string pdDate = na(pdT) ? '' : ' ' + str.format_time(pdT, 'dd/MM', 'America/New_York')
+            if showPdLabels
+                pdLabs.push(label.new(pdRight, pdH, 'PDH' + pdDate + (pdHSwept ? ' ✓' : ''), xloc = xloc.bar_index, style = label.style_none, textcolor = pdHCol, size = pdLblSize, text_font_family = font.family_monospace))
+                pdLabs.push(label.new(pdRight, pdL, 'PDL' + pdDate + (pdLSwept ? ' ✓' : ''), xloc = xloc.bar_index, style = label.style_none, textcolor = pdLCol, size = pdLblSize, text_font_family = font.family_monospace))
+            if showPdEq and not na(pdEq)
+                color pdEqCol = color.new(pdColor, 20)
+                pdLines.push(line.new(pdDayStart, pdEq, pdRight, pdEq, xloc = xloc.bar_index, color = pdEqCol, width = pdWidth, style = line.style_dotted))
+                if showPdLabels
+                    pdLabs.push(label.new(pdRight, pdEq, 'PD EQ', xloc = xloc.bar_index, style = label.style_none, textcolor = pdEqCol, size = pdLblSize, text_font_family = font.family_monospace))
+            // Not mirrored onto the block: PDH / PDL / PD EQ are chart-wide horizontal levels, already read
+            // at their own price across the whole chart. Only PD arrays mirror (see the FVG section).
+
+
+        // ── Dashboard / Trade Context ──────────────────────────────────────────────────
+        // The forming HTF candle read (bias, zone, last sweep) plus context from the same snapshot: trading
+        // day, AMD phase by NY-time window, recent HTF direction, and the session-close countdown.
+        if showDash
+            string dPos = switch dashPos
+                'Top Left'     => position.top_left
+                'Bottom Right' => position.bottom_right
+                'Bottom Left'  => position.bottom_left
+                =>                position.top_right
+            string dayName = switch dayofweek(time, 'America/New_York')
+                dayofweek.monday    => 'Monday'
+                dayofweek.tuesday   => 'Tuesday'
+                dayofweek.wednesday => 'Wednesday'
+                dayofweek.thursday  => 'Thursday'
+                dayofweek.friday    => 'Friday'
+                dayofweek.saturday  => 'Saturday'
+                =>                     'Sunday'
+            string dAmd  = amdDis ? 'Distribution' : amdMan ? 'Manipulation' : amdAcc ? 'Accumulation' : 'Off-Hours'
+            bool   dBull = c0 >= o0
+            string dBias = dBull ? 'Bullish' : 'Bearish'
+            float  dEq   = (h0 + l0) / 2.0
+            string dZone = close >= dEq ? 'Premium' : 'Discount'
+            // Recent HTF direction: last closed HTF candle's close vs the one three back (skips the forming bar).
+            string dDir  = 'Neutral'
+            if num >= 4 and not na(aC.get(1)) and not na(aC.get(3))
+                dDir := aC.get(1) > aC.get(3) ? 'Bull' : aC.get(1) < aC.get(3) ? 'Bear' : 'Neutral'
+            // Premium reads red and discount green: the colour marks where price is expensive or cheap to
+            // buy, not whether it is rising.
+            color  dirCol  = dDir == 'Bull' ? dashBull : dDir == 'Bear' ? dashBear : dashText
+            color  amdCol  = dAmd == 'Manipulation' ? dashBear : dAmd == 'Accumulation' ? dashBlue : dAmd == 'Distribution' ? dashBull : dashText
+            color  zoneCol = dZone == 'Premium' ? dashBear : dZone == 'Discount' ? dashBull : dashText
+            color  swpCol  = lastSweepDir == 'Sellside' ? dashBear : lastSweepDir == 'Buyside' ? dashBlue : dashText
+            // startswith, not equality: an inverted zone reads "Bullish (inv)".
+            color  fvgCol  = str.startswith(lastFvgDir, 'Bullish') ? dashBull : str.startswith(lastFvgDir, 'Bearish') ? dashBear : dashText
+            color  mssCol  = lastMssDir == 'Bullish' ? dashBull : lastMssDir == 'Bearish' ? dashBear : dashText
+            string dPdh    = na(pdH) ? '-' : 'PDH ' + (pdHSwept ? '✓' : '⏳')
+            string dPdl    = na(pdL) ? '-' : 'PDL ' + (pdLSwept ? '✓' : '⏳')
+            dashTbl := table.new(dPos, 2, 10, bgcolor = dashBg, border_color = dashBorder, frame_color = dashFrame, frame_width = 1, border_width = 1)
+            table.cell(dashTbl, 0, 0, 'PO3 ' + f_tfLabel(htfTf), text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 0, dayName,             text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 1, 'Phase',             text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 1, dAmd,               text_color = amdCol, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 2, 'Bias',             text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 2, dBias,             text_color = dBull ? dashBull : dashBear, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 3, 'Zone',             text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 3, dZone,             text_color = zoneCol, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 4, 'Direction',        text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 4, dDir,              text_color = dirCol, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 5, 'Last Sweep',       text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 5, lastSweepDir,      text_color = swpCol, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 6, 'MSS',              text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 6, lastMssDir,        text_color = mssCol, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 7, 'FVG',              text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 7, lastFvgDir,        text_color = fvgCol, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 8, dPdh,               text_color = pdHSwept ? color.new(dashText, 45) : dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 8, dPdl,               text_color = pdLSwept ? color.new(dashText, 45) : dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 0, 9, 'RTH Close',       text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)
+            table.cell(dashTbl, 1, 9, f_rthCountdown(rthCloseT, noSession), text_color = dashText, text_size = dashSize, text_font_family = font.family_monospace)

@@ -1,0 +1,1488 @@
+//@version=6
+
+// @description
+// This is my library is for calculating non-repainting swings for further calculation on them.
+library("swinglibrary")
+
+// constants
+int SWING_NO_ACTION         = 0
+int SWING_FLIP              = 1
+int SWING_FLIP_NEW_SWING    = 2
+int SWING_FLIP_UPDATED      = 3
+
+int RELATION_HIGHER         = 1
+int RELATION_EQUAL          = 0
+int RELATION_LOWER          = -1
+
+float std_atr = ta.atr(length = 14)
+
+// types
+export type swingPointLDR
+    int x // bar index
+    float y // price
+    int hilo // 1 -> high, -1 -> low
+    int length // price difference to the previous swing point in ticks
+    int duration // duration difference to the previous swing point in number of bars
+    int relation // see constants RELATION_HIGHER, RELATION_EQUAL, RELATION_LOWER: reelation to the previous swing points of the same type (previous high or previous low respectively)
+
+export type swingPointLDRTPVC
+    int     x
+    float   y
+    int     hilo
+    int     relation
+    int   length
+    int     duration
+    int     timeStamp
+    float   percent
+    float   vol
+    float   cumDelta 
+
+export type swingReturnLDR
+    array<swingPointLDR> swings // array of the last x swing points
+    int newSwingHigh // this is flag to detect changes for swing highs see constants (SWING_NO_ACTION, SWING_FLIP_NEW_SWING, SWING_FLIP_UPDATED)
+    int newSwingLow // this is flag to detect changes for swing lows see constants (SWING_NO_ACTION, SWING_FLIP_NEW_SWING, SWING_FLIP_UPDATED)
+    float avSwLength // this is the average swing length for the last x swings (depending on the max number of swings)
+    float avSwingDuration // this is the average swing duration for the last x swings (depending on the max number of swings)
+
+export type swingReturnLDRTPVC
+    array<swingPointLDRTPVC> swings
+    int newSwingHigh
+    int newSwingLow
+    float avSwLength
+    float avSwingDuration
+
+// utility functions
+getRelation(float strength, float priceDiff) =>
+    if math.abs(priceDiff) < std_atr * strength
+        RELATION_EQUAL
+    else if priceDiff > 0
+        RELATION_HIGHER
+    else if priceDiff < 0
+        RELATION_LOWER
+    else
+        RELATION_EQUAL
+
+avSwingLength(swings) =>
+    int i = 0
+    float dsl = 0.0
+    while i < swings.size()
+        dsl += swings.get(i).length
+        i += 1
+    // divide bythe number of entries
+    dsl / i
+
+avSwingDuration(swings) =>
+    int i = 0
+    float dsd = 0.0
+    while i < swings.size()
+        dsd += swings.get(i).duration
+        i += 1
+    // divide bythe number of entries
+    dsd / i
+
+get_time_at_bar_index(int bar_idx) =>
+    // first of calculate the offset
+    offset = bar_index - bar_idx
+    time("", offset)
+
+// functions to use
+export swingsLDRTyped(string swingStyleType, float swingSizeFloat, int dtbStrength, bool init, bool ignoreInsideBars, bool useBreakouts, int SWING_HISTORY_NUM) =>
+    // set the max bars back
+    max_bars_back(high, 300)
+    max_bars_back(low, 300)
+    //#region variables
+    var int     swingSize       = na
+    varip int   newSwing        = 0  
+    int         newSwingHigh    = SWING_NO_ACTION
+    int         newSwingLow     = SWING_NO_ACTION
+    var float   avSwLength      = 0.0
+    var float   avSwDuration    = 0.0
+    var float   dtbOffset       = 0
+
+    var array<swingPointLDR>   swings  = array.new<swingPointLDR>()
+    var swingPointLDR          cur     = swingPointLDR.new(x = bar_index, y = high, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+
+    // Features
+    var int     swingType           = na
+    var float   tickThreshold       = na
+    var float   percentThreshold    = na
+
+    var int     consecutiveBars     = 0
+    var int     consecutiveBarNumber= 0
+    var float   consecutiveBarValue = 0
+
+    varip   bool    stopOutsideBarCalc  = false
+    varip   int     calculationStartBar = 0
+    //#endregion
+
+    if barstate.isnew
+        stopOutsideBarCalc := false
+        newSwing := 0
+
+    if barstate.isfirst or init
+        switch swingStyleType
+            "Standard" =>
+                swingType := 1
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                calculationStartBar := swingSize + 1
+            "Gann" =>
+                swingType := 2
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+            "Ticks" =>
+                swingType := 3
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                tickThreshold := swingSize * syminfo.mintick
+            "Percent" =>
+                swingType := 4
+                percentThreshold := swingSizeFloat / 100
+                
+        //#region init
+        dtbOffset := dtbStrength / 100
+        // Add a symbolic high
+        cur := swingPointLDR.new(x = bar_index, y = high, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.push(cur)
+        // Add a smbolic low
+        cur := swingPointLDR.new(x = bar_index, y = low, hilo = -1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.unshift(cur)
+        //#endregion
+    else
+        if (swingType == 2)
+            //#region Gann Swing
+            // Bar type
+            // Represents the bar type. -1 = Down | 0 = Inside | 1 = Up | 2 = Outside
+            int barType = na
+            if (high[0] > high[1])
+                if (low[0] < low[1])
+                    barType := 2
+                else
+                    barType := 1
+            else
+                if (low[0] < low[1])
+                    barType := -1
+                else
+                    barType := 0
+
+            // Up swing
+            if (cur.hilo == 1)
+                switch barType
+                    // Up bar
+                    1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (high[0] > cur.y)
+                            newSwingHigh := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Down bar
+                    -1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := low[0]
+                            else if (low[0] < consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := low[0]
+                        else if (low[0] < consecutiveBarValue)
+                            consecutiveBarValue := low[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and low[0] < swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingLow := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (high[0] > cur.y)
+                            newSwingHigh := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := low[0]
+                                else if (low[0] < consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := low[0]
+                            else if (low[0] < consecutiveBarValue)
+                                consecutiveBarValue := low[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and low[0] < swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingLow := 1
+            // Down swing
+            else
+                switch barType
+                    // Down bar
+                    -1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (low[0] < cur.y)
+                            newSwingLow := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Up bar
+                    1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := high[0]
+                            else if (high[0] > consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := high[0]
+                        else if (high[0] > consecutiveBarValue)
+                            consecutiveBarValue := high[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and high[0] > swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingHigh := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (low[0] < cur.y)
+                            newSwingLow := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := high[0]
+                                else if (high[0] > consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := high[0]
+                            else if (high[0] > consecutiveBarValue)
+                                consecutiveBarValue := high[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and high[0] > swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingHigh := 1
+            //#endregion
+        else
+            //#region Check for new swings
+            if (cur.hilo == -1 or high > cur.y)
+                // No swing or an up swing is found
+                if (newSwing != -1)
+                    switch swingType
+                        1 => 
+                            newSwingHigh := SWING_FLIP
+                            if (bar_index > calculationStartBar)
+                                // test if high[0] is higher than the last 
+                                // calculationSize high = new swing high
+                                for int i = 1 to swingSize            
+                                    if (high[0] <= high[i])                        
+                                        newSwingHigh := SWING_NO_ACTION
+                                        break
+                            else
+                                newSwingHigh := SWING_NO_ACTION
+                        3 => 
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y 
+                            if (high[0] > (lowPrice + tickThreshold))
+                                newSwingHigh := SWING_FLIP
+                        4 =>
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y                           
+                            if (high[0] > lowPrice + (lowPrice * percentThreshold))
+                                newSwingHigh := SWING_FLIP
+
+                    // Found a swing high
+                    newSwing := (newSwingHigh != SWING_NO_ACTION) ? 1 : newSwing
+
+            if (cur.hilo == 1 or low < cur.y)
+                // No swing or an down swing is found
+                if (newSwing != 1)
+                    switch swingType
+                        1 => 
+                            newSwingLow := SWING_FLIP
+                            if (bar_index > calculationStartBar)
+                                // test if low[0] is lower than the last 
+                                // calculationSize low = new swing low
+                                for i = 1 to swingSize
+                                    if (low[0] >= low[i])
+                                        newSwingLow := SWING_NO_ACTION
+                                        break
+                            else
+                                newSwingLow := SWING_NO_ACTION
+                        3 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (low[0] < (highPrice - tickThreshold))
+                                newSwingLow := SWING_FLIP
+                        4 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (low[0] < highPrice - (highPrice * percentThreshold))
+                                newSwingLow := SWING_FLIP
+                                            
+                    // Found a swing low
+                    newSwing := (newSwingLow != SWING_NO_ACTION) ? -1 : newSwing
+            
+            // make sure that only one swing is attached to a bar 
+            // Set newLow back to false
+            newSwingLow := (newSwing == 1) ? SWING_NO_ACTION : newSwingLow
+            // Set newHigh back to false
+            newSwingHigh := (newSwing == -1) ? SWING_NO_ACTION : newSwingHigh
+            //#endregion
+            
+        //#region New high swing
+        // setting values for swing high
+        if newSwingHigh != SWING_NO_ACTION
+            // entirely new swing high
+            if cur.hilo == -1
+                // Compute price and bar index of the new swing
+                newSwingHigh    := SWING_FLIP_NEW_SWING  
+                highestHigh     = high[0]
+                highestHighIndex= bar_index
+                highestBarOffset= 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if high[barsAgo] > highestHigh
+                            highestHigh     := high[barsAgo]
+                            highestHighIndex:= bar_index - barsAgo
+                            highestBarOffset:= barsAgo
+                
+                // set a new swing point
+                cur := swingPointLDR.new(x = highestHighIndex, y = highestHigh, hilo = 1) // we do not need to set the other values here, because they will get updated anyway
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing high
+                newSwingHigh    := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := high        
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / syminfo.mintick)))
+            cur.duration    := cur.x - swings.get(1).x
+            // Compute statistics
+            avSwLength      := avSwingLength(swings)
+            avSwDuration    := avSwingDuration(swings)
+        //#endregion
+        
+        //#region New low swing
+        if newSwingLow != SWING_NO_ACTION
+            // entirely new swing low
+            if cur.hilo == 1
+                // Compute price and bar index of the new swing
+                newSwingLow     := SWING_FLIP_NEW_SWING 
+                lowestLow       = low[0]
+                lowestLowIndex  = bar_index
+                lowestBarOffset = 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if low[barsAgo] < lowestLow
+                            lowestLow      := low[barsAgo]
+                            lowestLowIndex := bar_index - barsAgo
+                            lowestBarOffset:= barsAgo
+
+                // set a new swing point
+                cur := swingPointLDR.new(x = lowestLowIndex, y = lowestLow, hilo = -1) // we do not need to set the other values here, because they will get updated anyway
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing low
+                newSwingLow     := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := low
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / syminfo.mintick)))
+            cur.duration    := cur.x - swings.get(1).x
+            // Compute statistics
+            avSwLength      := avSwingLength(swings)
+            avSwDuration    := avSwingDuration(swings)
+        //#endregion
+
+    // return the values
+    swingReturnLDR.new(swings, newSwingHigh, newSwingLow, avSwLength, avSwDuration)
+
+export swingsLDRTypedCustom(string swingStyleType, float swingSizeFloat, int dtbStrength, bool init, bool ignoreInsideBars, bool useBreakouts, int SWING_HISTORY_NUM, float highs, float lows, float mintick) =>
+    // set the max bars back
+    max_bars_back(high, 300)
+    max_bars_back(low, 300)
+    //#region variables
+    var int     swingSize       = na
+    varip int   newSwing        = 0  
+    int         newSwingHigh    = SWING_NO_ACTION
+    int         newSwingLow     = SWING_NO_ACTION
+    var float   avSwLength      = 0.0
+    var float   avSwDuration    = 0.0
+    var float   dtbOffset       = 0
+
+    var array<swingPointLDR>   swings  = array.new<swingPointLDR>()
+    var swingPointLDR          cur     = swingPointLDR.new(x = bar_index, y = highs, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+
+    // Features
+    var int     swingType           = na
+    var float   tickThreshold       = na
+    var float   percentThreshold    = na
+
+    var int     consecutiveBars     = 0
+    var int     consecutiveBarNumber= 0
+    var float   consecutiveBarValue = 0
+
+    varip   bool    stopOutsideBarCalc  = false
+    varip   int     calculationStartBar = 0
+    //#endregion
+
+    if barstate.isnew
+        stopOutsideBarCalc := false
+        newSwing := 0
+
+    if barstate.isfirst or init
+        switch swingStyleType
+            "Standard" =>
+                swingType := 1
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                calculationStartBar := swingSize + 1
+            "Gann" =>
+                swingType := 2
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+            "Ticks" =>
+                swingType := 3
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                tickThreshold := swingSize * mintick
+            "Percent" =>
+                swingType := 4
+                percentThreshold := swingSizeFloat / 100
+                
+        //#region init
+        dtbOffset := dtbStrength / 100
+        // Add a symbolic high
+        cur := swingPointLDR.new(x = bar_index, y = highs, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.push(cur)
+        // Add a smbolic low
+        cur := swingPointLDR.new(x = bar_index, y = lows, hilo = -1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.unshift(cur)
+        //#endregion
+    else
+        if (swingType == 2)
+            //#region Gann Swing
+            // Bar type
+            // Represents the bar type. -1 = Down | 0 = Inside | 1 = Up | 2 = Outside
+            int barType = na
+            if (highs[0] > highs[1])
+                if (lows[0] < lows[1])
+                    barType := 2
+                else
+                    barType := 1
+            else
+                if (lows[0] < lows[1])
+                    barType := -1
+                else
+                    barType := 0
+
+            // Up swing
+            if (cur.hilo == 1)
+                switch barType
+                    // Up bar
+                    1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (highs[0] > cur.y)
+                            newSwingHigh := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Down bar
+                    -1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := lows[0]
+                            else if (lows[0] < consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := lows[0]
+                        else if (lows[0] < consecutiveBarValue)
+                            consecutiveBarValue := lows[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and lows[0] < swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingLow := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (highs[0] > cur.y)
+                            newSwingHigh := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := lows[0]
+                                else if (lows[0] < consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := lows[0]
+                            else if (lows[0] < consecutiveBarValue)
+                                consecutiveBarValue := lows[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and lows[0] < swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingLow := 1
+            // Down swing
+            else
+                switch barType
+                    // Down bar
+                    -1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (lows[0] < cur.y)
+                            newSwingLow := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Up bar
+                    1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := highs[0]
+                            else if (highs[0] > consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := highs[0]
+                        else if (highs[0] > consecutiveBarValue)
+                            consecutiveBarValue := highs[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and highs[0] > swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingHigh := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (lows[0] < cur.y)
+                            newSwingLow := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := highs[0]
+                                else if (highs[0] > consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := highs[0]
+                            else if (highs[0] > consecutiveBarValue)
+                                consecutiveBarValue := highs[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and highs[0] > swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingHigh := 1
+            //#endregion
+        else
+            //#region Check for new swings
+            if (cur.hilo == -1 or highs > cur.y)
+                // No swing or an up swing is found
+                if (newSwing != -1)
+                    switch swingType
+                        1 => 
+                            newSwingHigh := SWING_FLIP
+                            if (bar_index > calculationStartBar)
+                                // test if highs[0] is higher than the last 
+                                // calculationSize highs = new swing highs
+                                for int i = 1 to swingSize            
+                                    if (highs[0] <= highs[i])                        
+                                        newSwingHigh := SWING_NO_ACTION
+                                        break
+                            else
+                                newSwingHigh := SWING_NO_ACTION
+                        3 => 
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y 
+                            if (highs[0] > (lowPrice + tickThreshold))
+                                newSwingHigh := SWING_FLIP
+                        4 =>
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y                           
+                            if (highs[0] > lowPrice + (lowPrice * percentThreshold))
+                                newSwingHigh := SWING_FLIP
+
+                    // Found a swing high
+                    newSwing := (newSwingHigh != SWING_NO_ACTION) ? 1 : newSwing
+
+            if (cur.hilo == 1 or lows < cur.y)
+                // No swing or an down swing is found
+                if (newSwing != 1)
+                    switch swingType
+                        1 => 
+                            newSwingLow := SWING_FLIP
+                            if (bar_index > calculationStartBar)
+                                // test if low[0] is lower than the last 
+                                // calculationSize low = new swing low
+                                for i = 1 to swingSize
+                                    if (lows[0] >= lows[i])
+                                        newSwingLow := SWING_NO_ACTION
+                                        break
+                            else
+                                newSwingLow := SWING_NO_ACTION
+                        3 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (lows[0] < (highPrice - tickThreshold))
+                                newSwingLow := SWING_FLIP
+                        4 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (lows[0] < highPrice - (highPrice * percentThreshold))
+                                newSwingLow := SWING_FLIP
+                                            
+                    // Found a swing low
+                    newSwing := (newSwingLow != SWING_NO_ACTION) ? -1 : newSwing
+            
+            // make sure that only one swing is attached to a bar 
+            // Set newLow back to false
+            newSwingLow := (newSwing == 1) ? SWING_NO_ACTION : newSwingLow
+            // Set newHigh back to false
+            newSwingHigh := (newSwing == -1) ? SWING_NO_ACTION : newSwingHigh
+            //#endregion
+            
+        //#region New high swing
+        // setting values for swing highs
+        if newSwingHigh != SWING_NO_ACTION
+            // entirely new swing high
+            if cur.hilo == -1
+                // Compute price and bar index of the new swing
+                newSwingHigh    := SWING_FLIP_NEW_SWING  
+                highestHigh     = highs[0]
+                highestHighIndex= bar_index
+                highestBarOffset= 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if highs[barsAgo] > highestHigh
+                            highestHigh     := highs[barsAgo]
+                            highestHighIndex:= bar_index - barsAgo
+                            highestBarOffset:= barsAgo
+                
+                // set a new swing point
+                cur := swingPointLDR.new(x = highestHighIndex, y = highestHigh, hilo = 1) // we do not need to set the other values here, because they will get updated anyway
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing high
+                newSwingHigh    := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := highs        
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / mintick)))
+            cur.duration    := cur.x - swings.get(1).x
+            // Compute statistics
+            avSwLength      := avSwingLength(swings)
+            avSwDuration    := avSwingDuration(swings)
+        //#endregion
+        
+        //#region New low swing
+        if newSwingLow != SWING_NO_ACTION
+            // entirely new swing low
+            if cur.hilo == 1
+                // Compute price and bar index of the new swing
+                newSwingLow     := SWING_FLIP_NEW_SWING 
+                lowestLow       = lows[0]
+                lowestLowIndex  = bar_index
+                lowestBarOffset = 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if lows[barsAgo] < lowestLow
+                            lowestLow      := lows[barsAgo]
+                            lowestLowIndex := bar_index - barsAgo
+                            lowestBarOffset:= barsAgo
+
+                // set a new swing point
+                cur := swingPointLDR.new(x = lowestLowIndex, y = lowestLow, hilo = -1) // we do not need to set the other values here, because they will get updated anyway
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing low
+                newSwingLow     := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := lows
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / mintick)))
+            cur.duration    := cur.x - swings.get(1).x
+            // Compute statistics
+            avSwLength      := avSwingLength(swings)
+            avSwDuration    := avSwingDuration(swings)
+        //#endregion
+
+    // return the values
+    swingReturnLDR.new(swings, newSwingHigh, newSwingLow, avSwLength, avSwDuration)
+
+export swingsLDRTPVCTyped(string swingStyleType, float swingSizeFloat, int dtbStrength, bool init, bool ignoreInsideBars, bool useBreakouts, int SWING_HISTORY_NUM, float cdHigh, float cdLow, bool useNewSwingCloseConfirmation) =>
+    // set the max bars back
+    max_bars_back(high, 300)
+    max_bars_back(low, 300)
+    //#region variables
+    var int     swingSize       = na
+    varip int   newSwing        = 0  
+    int         newSwingHigh    = SWING_NO_ACTION
+    int         newSwingLow     = SWING_NO_ACTION  
+    var float   avSwLength      = 0.0
+    var float   avSwDuration    = 0.0
+    var float   dtbOffset       = 0
+
+    var array<swingPointLDRTPVC>   swings  = array.new<swingPointLDRTPVC>()
+    var swingPointLDRTPVC          cur     = swingPointLDRTPVC.new(x = bar_index, y = high, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+
+    // Features
+    var int     swingType           = na
+    var float   tickSize            = syminfo.mintick
+    var float   tickThreshold       = na
+    var float   percentThreshold    = na
+
+    var int     consecutiveBars     = 0
+    var int     consecutiveBarNumber= 0
+    var float   consecutiveBarValue = 0
+
+    varip   bool    stopOutsideBarCalc  = false
+    varip   int     calculationStartBar = 0
+    //#endregion
+
+    //#region Convert string enums to integer values
+    if barstate.isfirst or init
+        switch swingStyleType
+            "Standard" =>
+                swingType := 1
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                calculationStartBar := swingSize + 1
+            "Gann" =>
+                swingType := 2
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+            "Ticks" =>
+                swingType := 3
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                tickThreshold := swingSize * syminfo.mintick
+            "Percent" =>
+                swingType := 4
+                percentThreshold := swingSizeFloat / 100
+
+    //#endregion
+
+    if barstate.isnew
+        stopOutsideBarCalc := false
+        newSwing := 0
+
+    if barstate.isfirst or init
+        //#region init
+        dtbOffset := dtbStrength / 100
+        // Add a symbolic high
+        cur := swingPointLDRTPVC.new(x = bar_index, y = high, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.push(cur)
+        // Add a smbolic low
+        cur := swingPointLDRTPVC.new(x = bar_index, y = low, hilo = -1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.unshift(cur)
+        //#endregion
+    else
+        if (swingType == 2)
+            //#region Gann Swing
+            // Bar type
+            // Represents the bar type. -1 = Down | 0 = Inside | 1 = Up | 2 = Outside
+            int barType = na
+            if (high[0] > high[1])
+                if (low[0] < low[1])
+                    barType := 2
+                else
+                    barType := 1
+            else
+                if (low[0] < low[1])
+                    barType := -1
+                else
+                    barType := 0
+
+            // Up swing
+            if (cur.hilo == 1)
+                switch barType
+                    // Up bar
+                    1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (high[0] > cur.y)
+                            newSwingHigh := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Down bar
+                    -1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := low[0]
+                            else if (low[0] < consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := low[0]
+                        else if (low[0] < consecutiveBarValue)
+                            consecutiveBarValue := low[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and low[0] < swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingLow := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (high[0] > cur.y)
+                            newSwingHigh := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := low[0]
+                                else if (low[0] < consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := low[0]
+                            else if (low[0] < consecutiveBarValue)
+                                consecutiveBarValue := low[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and low[0] < swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingLow := 1
+            // Down swing
+            else
+                switch barType
+                    // Down bar
+                    -1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (low[0] < cur.y)
+                            newSwingLow := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Up bar
+                    1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := high[0]
+                            else if (high[0] > consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := high[0]
+                        else if (high[0] > consecutiveBarValue)
+                            consecutiveBarValue := high[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and high[0] > swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingHigh := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (low[0] < cur.y)
+                            newSwingLow := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := high[0]
+                                else if (high[0] > consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := high[0]
+                            else if (high[0] > consecutiveBarValue)
+                                consecutiveBarValue := high[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and high[0] > swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingHigh := 1
+            //#endregion
+        else
+            //#region Check for new swings
+            if (cur.hilo == -1 or high > cur.y)
+                // No swing or an up swing is found
+                if (newSwing != -1)
+                    switch swingType
+                        1 => 
+                            if (bar_index > calculationStartBar)
+                                newSwingHigh := SWING_FLIP
+                                // test if high[0] is higher than the last 
+                                // calculationSize highs = new swing high
+                                if useNewSwingCloseConfirmation
+                                    for int i = 1 to swingSize            
+                                        if (close[0] <= high[i])                        
+                                            newSwingHigh := SWING_NO_ACTION
+                                            break
+                                else
+                                    for int i = 1 to swingSize            
+                                        if (high[0] <= high[i])                        
+                                            newSwingHigh := SWING_NO_ACTION
+                                            break
+                            else
+                                newSwingHigh := SWING_NO_ACTION
+                        3 => 
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y 
+                            if (high[0] > (lowPrice + tickThreshold))
+                                newSwingHigh := SWING_FLIP
+                        4 =>
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y                           
+                            if (high[0] > lowPrice + (lowPrice * percentThreshold))
+                                newSwingHigh := SWING_FLIP
+
+                    // Found a swing high
+                    newSwing := (newSwingHigh != SWING_NO_ACTION) ? 1 : newSwing
+
+            if (cur.hilo == 1 or low < cur.y)
+                // No swing or an down swing is found
+                if (newSwing != 1)
+                    switch swingType
+                        1 => 
+                            if (bar_index > calculationStartBar)
+                                newSwingLow := SWING_FLIP
+                                // test if low[0] is lower than the last 
+                                // calculationSize low = new swing low
+                                if useNewSwingCloseConfirmation
+                                    for int i = 1 to swingSize
+                                        if (close[0] >= low[i])
+                                            newSwingLow := SWING_NO_ACTION
+                                            break
+                                else
+                                    for int i = 1 to swingSize
+                                        if (low[0] >= low[i])
+                                            newSwingLow := SWING_NO_ACTION
+                                            break
+                            else
+                                newSwingLow := SWING_NO_ACTION
+                        3 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (low[0] < (highPrice - tickThreshold))
+                                newSwingLow := SWING_FLIP
+                        4 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (low[0] < highPrice - (highPrice * percentThreshold))
+                                newSwingLow := SWING_FLIP
+                                            
+                    // Found a swing low
+                    newSwing := (newSwingLow != SWING_NO_ACTION) ? -1 : newSwing
+            
+            // make sure that only one swing is attached to a bar 
+            // Set newLow back to false
+            newSwingLow := (newSwing == 1) ? SWING_NO_ACTION : newSwingLow
+            // Set newHigh back to false
+            newSwingHigh := (newSwing == -1) ? SWING_NO_ACTION : newSwingHigh
+            //#endregion
+            
+        //#region New high swing
+        // setting values for swing highs
+        if newSwingHigh != SWING_NO_ACTION
+            // entirely new swing high
+            color swingColor = color.lime
+            if cur.hilo == -1
+                // Compute price and bar index of the new swing
+                newSwingHigh    := SWING_FLIP_NEW_SWING  
+                highestHigh     = high[0]
+                highestHighIndex= bar_index
+                highestBarOffset= 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if high[barsAgo] > highestHigh
+                            highestHigh     := high[barsAgo]
+                            highestHighIndex:= bar_index - barsAgo
+                            highestBarOffset:= barsAgo
+                
+                // set a new swing point
+                cur := swingPointLDRTPVC.new(x     = highestHighIndex, 
+                                      y     = highestHigh, 
+                                      hilo  = 1)
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing high
+                newSwingHigh    := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := high        
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / tickSize)))
+            cur.duration    := cur.x - swings.get(1).x
+            cur.timeStamp   := get_time_at_bar_index(cur.x)
+            cur.percent     := swings.size() > 0 ? math.round(100.0 / math.abs(swings.get(1).length) * cur.length, 1) : -1
+            cur.cumDelta    := cdHigh
+
+            // Compute statistics
+            avSwLength  := avSwingLength(swings)
+            avSwDuration:= avSwingDuration(swings)
+
+            // Compute volume
+            float swingVolume = 0.0
+            for int i = bar_index - cur.x to bar_index - swings.get(1).x - 1
+                swingVolume += volume[i]
+            if (barstate.isrealtime)
+                swingVolume += volume[bar_index - swings.get(1).x] - volume[0]
+            cur.vol         := swingVolume
+
+        //#endregion
+        
+        //#region New low swing
+        if newSwingLow != SWING_NO_ACTION
+            // entirely new swing low
+            color swingColor = color.red
+            if cur.hilo == 1
+                // Compute price and bar index of the new swing
+                newSwingLow     := SWING_FLIP_NEW_SWING 
+                lowestLow       = low[0]
+                lowestLowIndex  = bar_index
+                lowestBarOffset = 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if low[barsAgo] < lowestLow
+                            lowestLow      := low[barsAgo]
+                            lowestLowIndex := bar_index - barsAgo
+                            lowestBarOffset:= barsAgo
+
+                // set a new swing point
+                cur := swingPointLDRTPVC.new(x     = lowestLowIndex, 
+                                      y     = lowestLow, 
+                                      hilo  = -1)
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing low
+                newSwingLow     := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := low
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / tickSize)))
+            cur.duration    := cur.x - swings.get(1).x
+            cur.timeStamp   := get_time_at_bar_index(cur.x)
+            cur.percent     := swings.size() > 0 ? math.round(100.0 / math.abs(swings.get(1).length) * cur.length, 1) : -1
+            cur.cumDelta    := cdLow
+            // Compute statistics
+            avSwLength  := avSwingLength(swings)
+            avSwDuration:= avSwingDuration(swings)
+
+            // Compute volume
+            float swingVolume = 0.0
+            for int i = bar_index - cur.x to bar_index - swings.get(1).x - 1
+                swingVolume += volume[i]
+            if (barstate.isrealtime)
+                swingVolume += volume[bar_index - swings.get(1).x] - volume[0]
+            cur.vol         := swingVolume
+        //#endregion
+
+    // return the values
+    swingReturnLDRTPVC.new(swings, newSwingHigh, newSwingLow, avSwLength, avSwDuration)
+
+export swingsLDRTPVCTypedCustom(string swingStyleType, float swingSizeFloat, int dtbStrength, bool init, bool ignoreInsideBars, bool useBreakouts, int SWING_HISTORY_NUM, float highs, float lows, float mintick, float cdHigh, float cdLow) =>
+    // set the max bars back
+    max_bars_back(high, 300)
+    max_bars_back(low, 300)
+    //#region variables
+    var int     swingSize       = na
+    varip int   newSwing        = 0  
+    int         newSwingHigh    = SWING_NO_ACTION
+    int         newSwingLow     = SWING_NO_ACTION  
+    var float   avSwLength      = 0.0
+    var float   avSwDuration    = 0.0
+    var float   dtbOffset       = 0
+
+    var array<swingPointLDRTPVC>   swings  = array.new<swingPointLDRTPVC>()
+    var swingPointLDRTPVC          cur     = swingPointLDRTPVC.new(x = bar_index, y = highs, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+
+    // Features
+    var int     swingType           = na
+    var float   tickThreshold       = na
+    var float   percentThreshold    = na
+
+    var int     consecutiveBars     = 0
+    var int     consecutiveBarNumber= 0
+    var float   consecutiveBarValue = 0
+
+    varip   bool    stopOutsideBarCalc  = false
+    varip   int     calculationStartBar = 0
+    //#endregion
+
+    //#region Convert string enums to integer values
+    if barstate.isfirst or init
+        switch swingStyleType
+            "Standard" =>
+                swingType := 1
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                calculationStartBar := swingSize + 1
+            "Gann" =>
+                swingType := 2
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+            "Ticks" =>
+                swingType := 3
+                swingSize := swingSizeFloat < 1 ? 1 : math.round(swingSizeFloat)
+                tickThreshold := swingSize * mintick
+            "Percent" =>
+                swingType := 4
+                percentThreshold := swingSizeFloat / 100
+
+    //#endregion
+
+    if barstate.isnew
+        stopOutsideBarCalc := false
+        newSwing := 0
+
+    if barstate.isfirst or init
+        //#region init
+        dtbOffset := dtbStrength / 100
+        // Add a symbolic highs
+        cur := swingPointLDRTPVC.new(x = bar_index, y = highs, hilo = 1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.push(cur)
+        // Add a smbolic low
+        cur := swingPointLDRTPVC.new(x = bar_index, y = lows, hilo = -1, relation = RELATION_EQUAL, length = 0, duration = 0)
+        swings.unshift(cur)
+        //#endregion
+    else
+        if (swingType == 2)
+            //#region Gann Swing
+            // Bar type
+            // Represents the bar type. -1 = Down | 0 = Inside | 1 = Up | 2 = Outside
+            int barType = na
+            if (highs[0] > highs[1])
+                if (lows[0] < lows[1])
+                    barType := 2
+                else
+                    barType := 1
+            else
+                if (lows[0] < lows[1])
+                    barType := -1
+                else
+                    barType := 0
+
+            // Up swing
+            if (cur.hilo == 1)
+                switch barType
+                    // Up bar
+                    1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (highs[0] > cur.y)
+                            newSwingHigh := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Down bar
+                    -1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := lows[0]
+                            else if (lows[0] < consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := lows[0]
+                        else if (lows[0] < consecutiveBarValue)
+                            consecutiveBarValue := lows[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and lows[0] < swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingLow := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (highs[0] > cur.y)
+                            newSwingHigh := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := lows[0]
+                                else if (lows[0] < consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := lows[0]
+                            else if (lows[0] < consecutiveBarValue)
+                                consecutiveBarValue := lows[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and lows[0] < swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingLow := 1
+            // Down swing
+            else
+                switch barType
+                    // Down bar
+                    -1 =>
+                        consecutiveBars := 0
+                        consecutiveBarValue := 0.0
+                        if (lows[0] < cur.y)
+                            newSwingLow := 1
+                            if ((consecutiveBars + 1) == swingSize)
+                                stopOutsideBarCalc := true
+                    // Up bar
+                    1 =>
+                        if (consecutiveBarNumber != bar_index)
+                            if (consecutiveBarValue == 0.0)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := highs[0]
+                            else if (highs[0] > consecutiveBarValue)
+                                consecutiveBars += 1
+                                consecutiveBarNumber := bar_index
+                                consecutiveBarValue := highs[0]
+                        else if (highs[0] > consecutiveBarValue)
+                            consecutiveBarValue := highs[0]
+
+                        if (consecutiveBars == swingSize or (useBreakouts and highs[0] > swings.get(1).y))
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                            newSwingHigh := 1
+                    // Inside bar
+                    0 =>
+                        if (ignoreInsideBars == false)
+                            consecutiveBars := 0
+                            consecutiveBarValue := 0.0
+                    // Outside bar
+                    2 =>
+                        if (lows[0] < cur.y)
+                            newSwingLow := 1
+                        else if (stopOutsideBarCalc == false)
+                            if (consecutiveBarNumber != bar_index)
+                                if (consecutiveBarValue == 0.0)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := highs[0]
+                                else if (highs[0] > consecutiveBarValue)
+                                    consecutiveBars += 1
+                                    consecutiveBarNumber := bar_index
+                                    consecutiveBarValue := highs[0]
+                            else if (highs[0] > consecutiveBarValue)
+                                consecutiveBarValue := highs[0]
+
+                            if (consecutiveBars == swingSize or (useBreakouts and highs[0] > swings.get(1).y))
+                                consecutiveBars := 0
+                                consecutiveBarValue := 0.0
+                                newSwingHigh := 1
+            //#endregion
+        else
+            //#region Check for new swings
+            if (cur.hilo == -1 or highs > cur.y)
+                // No swing or an up swing is found
+                if (newSwing != -1)
+                    switch swingType
+                        1 => 
+                            newSwingHigh := SWING_FLIP
+                            if (bar_index > calculationStartBar)
+                                // test if high[0] is higher than the last 
+                                // calculationSize highs = new swing high
+                                for int i = 1 to swingSize            
+                                    if (highs[0] <= highs[i])                        
+                                        newSwingHigh := SWING_NO_ACTION
+                                        break
+                            else
+                                newSwingHigh := SWING_NO_ACTION
+                        3 => 
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y 
+                            if (highs[0] > (lowPrice + tickThreshold))
+                                newSwingHigh := SWING_FLIP
+                        4 =>
+                            lowPrice = cur.hilo == -1 ? cur.y : swings.get(1).y                           
+                            if (highs[0] > lowPrice + (lowPrice * percentThreshold))
+                                newSwingHigh := SWING_FLIP
+
+                    // Found a swing high
+                    newSwing := (newSwingHigh != SWING_NO_ACTION) ? 1 : newSwing
+
+            if (cur.hilo == 1 or lows < cur.y)
+                // No swing or an down swing is found
+                if (newSwing != 1)
+                    switch swingType
+                        1 => 
+                            newSwingLow := SWING_FLIP
+                            if (bar_index > calculationStartBar)
+                                // test if low[0] is lower than the last 
+                                // calculationSize low = new swing low
+                                for i = 1 to swingSize
+                                    if (lows[0] >= lows[i])
+                                        newSwingLow := SWING_NO_ACTION
+                                        break
+                            else
+                                newSwingLow := SWING_NO_ACTION
+                        3 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (lows[0] < (highPrice - tickThreshold))
+                                newSwingLow := SWING_FLIP
+                        4 => 
+                            highPrice = cur.hilo == 1 ? cur.y : swings.get(1).y
+                            if (lows[0] < highPrice - (highPrice * percentThreshold))
+                                newSwingLow := SWING_FLIP
+                                            
+                    // Found a swing low
+                    newSwing := (newSwingLow != SWING_NO_ACTION) ? -1 : newSwing
+            
+            // make sure that only one swing is attached to a bar 
+            // Set newLow back to false
+            newSwingLow := (newSwing == 1) ? SWING_NO_ACTION : newSwingLow
+            // Set newHigh back to false
+            newSwingHigh := (newSwing == -1) ? SWING_NO_ACTION : newSwingHigh
+            //#endregion
+            
+        //#region New high swing
+        // setting values for swing highs
+        if newSwingHigh != SWING_NO_ACTION
+            // entirely new swing high
+            color swingColor = color.lime
+            if cur.hilo == -1
+                // Compute price and bar index of the new swing
+                newSwingHigh    := SWING_FLIP_NEW_SWING  
+                highestHigh     = highs[0]
+                highestHighIndex= bar_index
+                highestBarOffset= 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if highs[barsAgo] > highestHigh
+                            highestHigh     := highs[barsAgo]
+                            highestHighIndex:= bar_index - barsAgo
+                            highestBarOffset:= barsAgo
+                
+                // set a new swing point
+                cur := swingPointLDRTPVC.new(x     = highestHighIndex, 
+                                      y     = highestHigh, 
+                                      hilo  = 1)
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing high
+                newSwingHigh    := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := highs        
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / mintick)))
+            cur.duration    := cur.x - swings.get(1).x
+            cur.timeStamp   := get_time_at_bar_index(cur.x)
+            cur.percent     := swings.size() > 0 ? math.round(100.0 / math.abs(swings.get(1).length) * cur.length, 1) : -1
+            cur.cumDelta    := cdHigh
+
+            // Compute statistics
+            avSwLength  := avSwingLength(swings)
+            avSwDuration:= avSwingDuration(swings)
+
+            // Compute volume
+            float swingVolume = 0.0
+            for int i = bar_index - cur.x to bar_index - swings.get(1).x - 1
+                swingVolume += volume[i]
+            if (barstate.isrealtime)
+                swingVolume += volume[bar_index - swings.get(1).x] - volume[0]
+            cur.vol         := swingVolume
+
+        //#endregion
+        
+        //#region New low swing
+        if newSwingLow != SWING_NO_ACTION
+            // entirely new swing low
+            color swingColor = color.red
+            if cur.hilo == 1
+                // Compute price and bar index of the new swing
+                newSwingLow     := SWING_FLIP_NEW_SWING 
+                lowestLow       = lows[0]
+                lowestLowIndex  = bar_index
+                lowestBarOffset = 0
+                // Check the current bar is that marked the new swing is not actually the extreme value since the last swing
+                if swingType == 1
+                    for int barsAgo = swingSize to bar_index - cur.x - 1
+                        if lows[barsAgo] < lowestLow
+                            lowestLow      := lows[barsAgo]
+                            lowestLowIndex := bar_index - barsAgo
+                            lowestBarOffset:= barsAgo
+
+                // set a new swing point
+                cur := swingPointLDRTPVC.new(x     = lowestLowIndex, 
+                                      y     = lowestLow, 
+                                      hilo  = -1)
+                // and push it into the queue
+                swings.unshift(cur)
+                if swings.size() >= SWING_HISTORY_NUM + 1
+                    swings.pop()
+            else
+                // update the current swing low
+                newSwingLow     := SWING_FLIP_UPDATED
+                cur.x           := bar_index
+                cur.y           := lows
+
+            // Set swing values
+            cur.relation    := swings.size() > 2 ? getRelation(dtbOffset, cur.y - swings.get(2).y) : RELATION_HIGHER
+            cur.length      := math.abs(int(math.round_to_mintick((cur.y - swings.get(1).y) / mintick)))
+            cur.duration    := cur.x - swings.get(1).x
+            cur.timeStamp   := get_time_at_bar_index(cur.x)
+            cur.percent     := swings.size() > 0 ? math.round(100.0 / math.abs(swings.get(1).length) * cur.length, 1) : -1
+            cur.cumDelta    := cdLow
+            // Compute statistics
+            avSwLength  := avSwingLength(swings)
+            avSwDuration:= avSwingDuration(swings)
+
+            // Compute volume
+            float swingVolume = 0.0
+            for int i = bar_index - cur.x to bar_index - swings.get(1).x - 1
+                swingVolume += volume[i]
+            if (barstate.isrealtime)
+                swingVolume += volume[bar_index - swings.get(1).x] - volume[0]
+            cur.vol         := swingVolume
+        //#endregion
+
+    // return the values
+    swingReturnLDRTPVC.new(swings, newSwingHigh, newSwingLow, avSwLength, avSwDuration)

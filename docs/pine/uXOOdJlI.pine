@@ -1,0 +1,138 @@
+//@version=6
+strategy("IOVE Pro - Institutional Risk Edition", overlay=true, precision=2, initial_capital=100000, default_qty_type=strategy.cash, default_qty_value=100000, commission_type=strategy.commission.percent, commission_value=0.03)
+
+// ==========================================
+// 1. INPUT DI CONFIGURAZIONE
+// ==========================================
+gp_vwap    = "1. Configurazione VWAP"
+vwapAnchor = input.string("Session", title="Ancoraggio VWAP", options=["Session", "Week", "Month", "Year"], group=gp_vwap)
+numDevs    = input.float(2.0, title="Deviazione Standard Bande", minval=0.5, step=0.1, group=gp_vwap)
+
+gp_vol     = "2. Filtro Volatilità e Volumi"
+atrLength  = input.int(14, title="Periodo ATR", group=gp_vol)
+multATR    = input.float(1.5, title="Moltiplicatore ATR (Filtro)", group=gp_vol)
+minVolMult = input.float(1.2, title="Moltiplicatore Volume Medio", group=gp_vol)
+
+gp_risk    = "3. Gestione Rischio Istituzionale"
+riskPercent = input.float(1.0, title="Rischio % Portafoglio per Trade", minval=0.1, maxval=5.0, step=0.1, group=gp_risk)
+rrRatio     = input.float(2.0, title="Rapporto Rischio/Rendimento (R:R)", group=gp_risk)
+maxBars     = input.int(25, title="Time Stop (Max Candele in Trade)", minval=5, group=gp_risk)
+
+// ==========================================
+// 2. CALCOLO REGIME DI MERCATO (EMA 200)
+// ==========================================
+ema200 = ta.ema(close, 200)
+plot(ema200, title="Trend Filter (EMA 200)", color=color.orange, linewidth=2)
+
+// ==========================================
+// 3. CALCOLO VWAP E BANDE
+// ==========================================
+string anchorMap = switch vwapAnchor
+    "Session" => "D"
+    "Week"    => "W"
+    "Month"   => "M"
+    => "12M"
+
+vwapValue = ta.vwap(close)
+float dev = ta.stdev(close, 20)
+float upperBand = vwapValue + (dev * numDevs)
+float lowerBand = vwapValue - (dev * numDevs)
+
+// ==========================================
+// 4. ANALISI ORDINI E VOLUMI
+// ==========================================
+float volMean = ta.sma(volume, 20)
+bool isInstitutionalVolume = volume > (volMean * minVolMult)
+float candleRange = high - low
+float volumeDelta = candleRange > 0 ? volume * ((close - low) - (high - close)) / candleRange : 0.0
+
+bool isStrongBuying  = volumeDelta > 0 and isInstitutionalVolume
+bool isStrongSelling = volumeDelta < 0 and isInstitutionalVolume
+
+// ==========================================
+// 5. GENERAZIONE SEGNALI CON FILTRO MACRO
+// ==========================================
+float atr = ta.atr(atrLength)
+float shortSma = ta.sma(close, 5)
+
+// SEGNALE BUY: Solo se siamo SOPRA la EMA 200 (Trend rialzista)
+bool buySignal = ta.crossunder(low, lowerBand) or (close < lowerBand and isStrongBuying)
+bool confirmedBuy = buySignal and close > shortSma and isStrongBuying and (close - low) > (atr * multATR) and close > ema200
+
+// SEGNALE SELL: Solo se siamo SOTTO la EMA 200 (Trend ribassista)
+bool sellSignal = ta.crossover(high, upperBand) or (close > upperBand and isStrongSelling)
+bool confirmedSell = sellSignal and close < shortSma and isStrongSelling and (high - close) > (atr * multATR) and close < ema200
+
+// ==========================================
+// 6. POSITION SIZING DINAMICO & LOGICA ORDINI
+// ==========================================
+var float longStop = na
+var float longTarget = na
+var float shortStop = na
+var float shortTarget = na
+var int entryBar = na
+
+// Calcolo del capitale a rischio
+float equity = strategy.equity
+float riskAmount = equity * (riskPercent / 100.0)
+
+// Logica d'ingresso Long
+if confirmedBuy and strategy.position_size == 0
+    longStop := low - (atr * 1.5)
+    float stopDistance = close - longStop
+    
+    // Calcoliamo la dimensione esatta della posizione in azioni (floor arrotonda per difetto)
+    float positionSize = stopDistance > 0 ? math.floor(riskAmount / stopDistance) : 0.0
+    
+    if positionSize > 0
+        longTarget := close + (stopDistance * rrRatio)
+        entryBar := bar_index
+        strategy.entry("IOVE Long", strategy.long, qty=positionSize)
+
+// Logica d'ingresso Short
+if confirmedSell and strategy.position_size == 0
+    shortStop := high + (atr * 1.5)
+    float stopDistance = shortStop - close
+    
+    float positionSize = stopDistance > 0 ? math.floor(riskAmount / stopDistance) : 0.0
+    
+    if positionSize > 0
+        shortTarget := close - (stopDistance * rrRatio)
+        entryBar := bar_index
+        strategy.entry("IOVE Short", strategy.short, qty=positionSize)
+
+// ==========================================
+// 7. GESTIONE DELLE USCITE (STOP LOSS, TARGET & TIME STOP)
+// ==========================================
+int barsInTrade = strategy.position_size != 0 ? bar_index - entryBar : 0
+
+// Chiusura automatica se scatta il TIME STOP (Max Candele)
+bool timeStopTriggered = barsInTrade >= maxBars
+
+if strategy.position_size > 0
+    if timeStopTriggered
+        strategy.close("IOVE Long", comment="Time Stop")
+    else
+        strategy.exit("Exit Long", "IOVE Long", stop=longStop, limit=longTarget)
+
+if strategy.position_size < 0
+    if timeStopTriggered
+        strategy.close("IOVE Short", comment="Time Stop")
+    else
+        strategy.exit("Exit Short", "IOVE Short", stop=shortStop, limit=shortTarget)
+
+// ==========================================
+// 8. GRAFICA, CANDELE & FRECCE (VISUALIZATION)
+// ==========================================
+// Disegno del VWAP e delle bande
+plot(vwapValue, title="VWAP", color=color.blue, linewidth=2)
+p_upper = plot(upperBand, title="Banda Superiore", color=color.red, linewidth=1)
+p_lower = plot(lowerBand, title="Banda Inferiore", color=color.green, linewidth=1)
+fill(p_upper, p_lower, color=color.new(color.blue, 96))
+
+// Frecce Operative Istituzionali sul grafico (Puntatori con etichetta testuale)
+plotshape(confirmedBuy, title="BUY IOVE Arrow", style=shape.arrowup, location=location.belowbar, color=color.green, size=size.normal, text="BUY IOVE", textcolor=color.green)
+plotshape(confirmedSell, title="SELL IOVE Arrow", style=shape.arrowdown, location=location.abovebar, color=color.red, size=size.normal, text="SELL IOVE", textcolor=color.red)
+
+// Colorazione delle candele per evidenziare l'Order Flow istituzionale in corso
+barcolor(isStrongBuying ? color.lime : isStrongSelling ? color.maroon : na)

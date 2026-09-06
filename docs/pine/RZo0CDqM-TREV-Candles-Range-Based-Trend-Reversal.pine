@@ -1,0 +1,1552 @@
+//@version=6
+indicator('TREV Candles - Range-Based Trend Reversal', shorttitle = 'TREV', overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// =========================================================================================================
+//                                           TREV CANDLES 
+//          Range-Based Trend Reversal Candles - True TREV Chart Implementation
+//
+// TREV candles form based on price movement thresholds (not time):
+// • Trend candles: Continue current direction when trend threshold is hit
+// • Reversal candles: Change direction when reversal threshold is hit  
+// • Direction changes ONLY through reversal candles (enforced TREV rules)
+// • Wicks only appear on open side of candle (no impossible wicks)
+// • Multiple candles can form per bar when price moves significantly
+// =========================================================================================================
+
+// ========================================
+// INPUTS
+// ========================================
+
+// Allowed pairs input
+allowed_pairs = input.text_area('MES,MNQ,M2K,MYM,ES,NQ,RTY,YM,MGC,GC,MES1!,MNQ1!,M2K1!,MYM1!,ES1!,NQ1!,RTY1!,YM1!,MGC1!,GC1!', 'Allowed Trading Pairs', tooltip = 'Enter trading pairs separated by commas. Leave empty to allow all pairs. Includes rolling 1! versions.')
+
+// Manual size settings (used when Calculation Mode is set to Manual ATR)
+manual_trend_ticks = input.int(840, 'Manual Trend Size (ticks)', minval = 1, tooltip = 'Used when Calculation Mode is set to Manual ATR')
+manual_reversal_ticks = input.int(500, 'Manual Reversal Size (ticks)', minval = 1, tooltip = 'Used when Calculation Mode is set to Manual ATR')
+
+tick_size_mode = input.string('auto', 'Tick Size Mode', options = ['auto', 'manual', 'appropriate'])
+manual_tick_size = input.float(0.25, 'Manual Tick Size', minval = 0.01)
+run_only_on_confirmed_bars = input.bool(true, 'Run Only on Confirmed Bars', tooltip = 'Run TREV logic only on confirmed bars. This is useful for backtesting.')
+
+
+
+// Auto size calculation settings
+use_range_chart = input.bool(false, 'Use Range Chart', tooltip = 'When enabled, uses range chart mode instead of directional movement')
+use_locked_values = input.bool(true, 'Use Locked Renko-Style Values', tooltip = 'When enabled, uses locked values from previous candle completion (Renko-style). When disabled, uses current calculated values to replicate standalone range chart behavior.')
+auto_size_divisor = input.float(3.0, 'ATR Divisor for Auto Size', minval = 0.1, maxval = 10.0)
+reversal_mode = input.string('Fibonacci Division', 'Reversal Calculation Mode', options = ['Fibonacci Division', 'Equal to Trend', 'Multiple of Trend'], tooltip = 'How to calculate reversal size: Fibonacci Division (trend ÷ 1.68), Equal to Trend (same as trend), or Multiple of Trend (trend × multiplier)')
+reversal_multiple = input.float(2.0, 'Reversal Multiple', minval = 1.0, maxval = 10.0, tooltip = 'Multiplier for reversal size when Multiple of Trend mode is selected (e.g., 2.0 = double the trend size)')
+enableAutoDivisorAdjustment = input.bool(false, 'Auto Adjust Divisor', tooltip = 'When enabled, automatically adjusts divisor to ensure reversal is at least 2x the chart ATR')
+
+// HTF Reset Settings
+string GRP_HTF_RESET = 'HTF Reset Settings'
+enableHTFReset = input.bool(false, 'Reset on HTF Candle Open', group = GRP_HTF_RESET, tooltip = 'Reset TREV candles when higher timeframe candle opens')
+htfTimeframe = input.string('auto', 'HTF Timeframe', options = ['auto', '5', '15', '30', '60', '240', '1D', '1W'], group = GRP_HTF_RESET, tooltip = 'Higher timeframe to reset on. "Auto" uses the same logic as auto size mode.')
+
+// HTF Line Settings (independent of reset)
+string GRP_HTF_LINE = 'HTF Open Line'
+showHTFOpenLine = input.bool(false, 'Show HTF Open Line', group = GRP_HTF_LINE, tooltip = 'Draw line at HTF candle open price (independent of reset functionality)')
+htfLineExtendMode = input.string('To Current', 'HTF Line Extension', options = ['To Current', 'Right'], group = GRP_HTF_LINE, tooltip = 'How to extend the HTF open line')
+htfLineColor = input.color(color.yellow, 'HTF Line Color', group = GRP_HTF_LINE)
+htfLineStyle = input.string('solid', 'HTF Line Style', options = ['solid', 'dashed', 'dotted'], group = GRP_HTF_LINE)
+htfLineWidth = input.int(2, 'HTF Line Width', minval = 1, maxval = 5, group = GRP_HTF_LINE)
+
+// Calculation Mode Settings
+calculation_mode = input.string('Auto ATR', 'Calculation Mode', options=['Auto ATR', 'ASPR (Traditional)', 'Quant Mode (Historical)', 'Appropriate HTF ATR', 'Chart ATR'], tooltip='Auto ATR: Uses 30min ATR with auto periods. ASPR: Previous session ASPR for traditional markets. Quant Mode: Historical same-day/time analysis. Appropriate HTF: Higher timeframe ATR based on chart timeframe. Chart ATR: Uses current chart ATR directly.')
+chart_atr_periods = input.int(200, 'Chart ATR Periods', minval=1, maxval=10000, tooltip='Periods for Chart ATR calculation and Chart ATR display')
+quant_lookback_weeks = 3  // Fixed to 3 weeks
+
+// Calculation Info Table Settings
+string GRP_AUTO_TABLE = 'Calculation Info Table'
+show_auto_info = input.bool(true, 'Show Calculation Info', group = GRP_AUTO_TABLE, tooltip = 'Display table with calculated values and settings')
+auto_table_position = input.string('Top Right', 'Table Position', options = ['Top Left', 'Top Center', 'Top Right', 'Middle Left', 'Middle Center', 'Middle Right', 'Bottom Left', 'Bottom Center', 'Bottom Right'], group = GRP_AUTO_TABLE)
+auto_table_text_size = input.string('tiny', 'Table Text Size', options = ['tiny', 'small', 'normal', 'large', 'huge'], group = GRP_AUTO_TABLE)
+
+// Table Content Settings
+string GRP_AUTO_TABLE_CONTENT = 'Table Content'
+show_market_type = input.bool(false, 'Show Market Type', group = GRP_AUTO_TABLE_CONTENT)
+show_atr_30min = input.bool(false, 'Show ATR (30min)', group = GRP_AUTO_TABLE_CONTENT)
+show_locked_atr = input.bool(true, 'Show Locked ATR (Renko-style)', group = GRP_AUTO_TABLE_CONTENT, tooltip = 'Shows the Fibonacci-rounded ATR in ticks locked from the last completed candle. This is the ATR value used for calculating the current forming candle.')
+show_atr_ticks = input.bool(false, 'Show ATR (ticks)', group = GRP_AUTO_TABLE_CONTENT)
+show_atr_divisor = input.bool(false, 'Show ATR ÷ Divisor', group = GRP_AUTO_TABLE_CONTENT)
+show_trend_size = input.bool(true, 'Show Trend Size', group = GRP_AUTO_TABLE_CONTENT)
+show_reversal_calc = input.bool(false, 'Show Reversal Calculation', group = GRP_AUTO_TABLE_CONTENT)
+show_reversal_size = input.bool(false, 'Show Reversal Size', group = GRP_AUTO_TABLE_CONTENT)
+show_tick_size = input.bool(false, 'Show Tick Size', group = GRP_AUTO_TABLE_CONTENT)
+show_chart_atr_ticks = input.bool(false, 'Show Chart ATR (ticks)', group = GRP_AUTO_TABLE_CONTENT)
+
+// Table Styling
+string GRP_AUTO_TABLE_STYLE = 'Table Styling'
+auto_table_bg_color = input.color(color.new(color.white, 80), 'Table Background', group = GRP_AUTO_TABLE_STYLE)
+auto_table_text_color = input.color(color.black, 'Table Text Color', group = GRP_AUTO_TABLE_STYLE)
+auto_table_header_bg_color = input.color(color.new(color.blue, 70), 'Header Background', group = GRP_AUTO_TABLE_STYLE)
+auto_table_header_text_color = input.color(color.black, 'Header Text Color', group = GRP_AUTO_TABLE_STYLE)
+auto_table_border_width = input.int(1, 'Border Width', minval = 0, maxval = 3, group = GRP_AUTO_TABLE_STYLE)
+auto_table_border_color = input.color(color.gray, 'Border Color', group = GRP_AUTO_TABLE_STYLE)
+auto_table_frame_width = input.int(2, 'Frame Width', minval = 0, maxval = 5, group = GRP_AUTO_TABLE_STYLE)
+auto_table_frame_color = input.color(color.black, 'Frame Color', group = GRP_AUTO_TABLE_STYLE)
+auto_table_frame_style = input.string('solid', 'Frame Style', options = ['solid', 'dashed', 'dotted'], group = GRP_AUTO_TABLE_STYLE)
+
+// ========================================
+// CHART CANDLE PAINTING OPTIONS
+// ========================================
+
+// Chart Candle Painting Settings
+string GRP_CHART_PAINTING = 'Chart Candle Painting'
+enable_chart_painting = input.bool(false, 'Enable Chart Candle Painting', group = GRP_CHART_PAINTING, tooltip = 'Paint underlying chart candles based on completed TREV range colors. Painting is delayed until range completion.')
+show_trev_boxes = input.bool(true, 'Show TREV Boxes', group = GRP_CHART_PAINTING, tooltip = 'Show/hide the TREV range boxes')
+
+// ========================================
+// STYLING OPTIONS
+// ========================================
+
+// Bullish Trend Styling
+bullish_trend_body_color = input.color(color.new(color.green, 70), 'Bullish Trend Body Color')
+bullish_trend_border_color = input.color(color.green, 'Bullish Trend Border Color')
+bullish_trend_border_style = input.string('solid', 'Bullish Trend Border Style', options = ['solid', 'dashed', 'dotted'])
+bullish_trend_wick_color = input.color(color.green, 'Bullish Trend Wick Color')
+
+// Bullish Reversal Styling  
+bullish_reversal_body_color = input.color(color.new(color.blue, 70), 'Bullish Reversal Body Color')
+bullish_reversal_border_color = input.color(color.blue, 'Bullish Reversal Border Color')
+bullish_reversal_border_style = input.string('solid', 'Bullish Reversal Border Style', options = ['solid', 'dashed', 'dotted'])
+bullish_reversal_wick_color = input.color(color.blue, 'Bullish Reversal Wick Color')
+
+// Bearish Trend Styling
+bearish_trend_body_color = input.color(color.new(color.red, 70), 'Bearish Trend Body Color')
+bearish_trend_border_color = input.color(color.red, 'Bearish Trend Border Color')
+bearish_trend_border_style = input.string('solid', 'Bearish Trend Border Style', options = ['solid', 'dashed', 'dotted'])
+bearish_trend_wick_color = input.color(color.red, 'Bearish Trend Wick Color')
+
+// Bearish Reversal Styling
+bearish_reversal_body_color = input.color(color.new(color.orange, 70), 'Bearish Reversal Body Color')
+bearish_reversal_border_color = input.color(color.orange, 'Bearish Reversal Border Color')
+bearish_reversal_border_style = input.string('solid', 'Bearish Reversal Border Style', options = ['solid', 'dashed', 'dotted'])
+bearish_reversal_wick_color = input.color(color.orange, 'Bearish Reversal Wick Color')
+
+// ========================================
+// TREV STATE VARIABLES
+// ========================================
+
+var float trev_close = na // Current TREV close price
+var bool trev_direction = true // true = bullish, false = bearish
+var int candle_start_bar = na // When current forming candle started
+var float forming_high = na // Track highest price during current candle formation
+var float forming_low = na // Track lowest price during current candle formation
+
+// HTF Reset Variables
+var float htf_open_price = na // HTF candle open price
+var int htf_open_bar = na // Bar when HTF candle opened
+var line htf_open_line = na // HTF open line object
+
+// Chart ATR Variables
+var float chart_atr_ticks = na // Chart ATR in ticks
+
+// Renko-style locked ATR variables
+var float locked_atr_value = na // Raw ATR value locked when last candle completed
+var int locked_atr_fib_ticks = na // ATR in Fibonacci ticks locked when last candle completed
+var int locked_trend_ticks = na // Trend size (Fibonacci) locked when last candle completed
+var int locked_reversal_ticks = na // Reversal size (Fibonacci) locked when last candle completed
+
+// Last completed range data for painting
+var int last_range_start_bar = na
+var int last_range_end_bar = na
+var string last_range_type = na
+
+// ========================================
+// RTH ASPR CALCULATION (for traditional markets)
+// ========================================
+
+// Simple ASPR calculation for RTH sessions (following SPA.pine pattern)
+var array<float> rth_ranges = array.new<float>()
+var float prev_rth_aspr = na
+var bool in_rth_session = false
+
+// ========================================
+// HELPER FUNCTIONS
+// ========================================
+
+// Convert border style string to PineScript constant
+get_border_style(style) =>
+    switch style
+        'solid' => line.style_solid
+        'dashed' => line.style_dashed
+        'dotted' => line.style_dotted
+        => line.style_solid
+
+// Global tick size calculation (calculated once and used throughout)
+// Get 1-minute ATR for appropriate tick size calculation (fixed 2000 periods internally)
+atr_1min = request.security(syminfo.tickerid, "1", ta.atr(390), lookahead = barmerge.lookahead_off)
+
+// Calculate appropriate tick size (ATR/4 rounded to mintick precision)
+get_appropriate_tick_size() =>
+    if not na(atr_1min) and atr_1min > 0
+        // Calculate ATR divided by 4
+        raw_tick_size = atr_1min / 4
+        
+        // Get the decimal precision of syminfo.mintick
+        auto_tick = syminfo.mintick > 0 ? syminfo.mintick : 0.25
+        
+        // Calculate number of decimal places in auto_tick
+        tick_str = str.tostring(auto_tick)
+        decimal_pos = str.pos(tick_str, ".")
+        decimal_places = decimal_pos >= 0 ? str.length(tick_str) - decimal_pos - 1 : 0
+        
+        // Round to same precision as auto tick size
+        multiplier = math.pow(10, decimal_places)
+        math.round(raw_tick_size * multiplier) / multiplier
+    else
+        // Fallback to auto tick size if ATR not available
+        syminfo.mintick > 0 ? syminfo.mintick : 0.25
+
+// Get tick size based on mode setting
+get_tick_size() =>
+    if tick_size_mode == 'auto'
+        if syminfo.mintick > 0
+            syminfo.mintick
+        else
+            0.25
+    else if tick_size_mode == 'appropriate'
+        get_appropriate_tick_size()
+    else
+        manual_tick_size
+
+// Global tick size variable (calculated once and used throughout)
+global_tick_size = get_tick_size()
+
+// Check if current symbol is in allowed pairs list
+is_symbol_allowed() =>
+    if str.length(allowed_pairs) == 0
+        true // If no pairs specified, allow all
+    else
+        // Get current symbol ticker (remove exchange prefix if present)
+        current_symbol = syminfo.ticker
+        
+        // Split allowed pairs by comma and check each one
+        pairs_array = str.split(allowed_pairs, ",")
+        is_allowed = false
+        
+        for pair in pairs_array
+            clean_pair = str.replace_all(str.replace_all(pair, " ", ""), "\n", "")
+            if str.upper(current_symbol) == str.upper(clean_pair)
+                is_allowed := true
+                break
+        
+        is_allowed
+
+// ========================================
+// AUTO TABLE HELPER FUNCTIONS
+// ========================================
+
+// Get auto table position
+get_auto_table_position() =>
+    switch auto_table_position
+        'Top Left' => position.top_left
+        'Top Center' => position.top_center
+        'Top Right' => position.top_right
+        'Middle Left' => position.middle_left
+        'Middle Center' => position.middle_center
+        'Middle Right' => position.middle_right
+        'Bottom Left' => position.bottom_left
+        'Bottom Center' => position.bottom_center
+        'Bottom Right' => position.bottom_right
+        => position.top_right
+
+// Get auto table text size
+get_auto_table_text_size() =>
+    switch auto_table_text_size
+        'tiny' => size.tiny
+        'small' => size.small
+        'normal' => size.normal
+        'large' => size.large
+        'huge' => size.huge
+        => size.tiny
+
+// ========================================
+// AUTO SIZE CALCULATION FUNCTIONS
+// ========================================
+
+// Fibonacci values table (extended for larger values like BTC)
+fibonacci_values = array.from<int>(1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368, 75025, 121393, 196418, 317811, 514229, 832040)
+
+// Check if current symbol is a crypto pair
+is_crypto_pair() =>
+    syminfo.type == "crypto"
+
+// Check if current time is within Regular Trading Hours (RTH)
+// Use America/New_York timezone for US markets
+is_rth() =>
+    // Get current time in NY timezone (EST/EDT)
+    current_hour_val = hour(time, "America/New_York")
+    current_minute_val = minute(time, "America/New_York")
+    current_time_minutes = current_hour_val * 60 + current_minute_val
+    
+    // RTH: 9:30 AM to 4:00 PM (570 minutes to 960 minutes from midnight)
+    rth_start = 9 * 60 + 30  // 9:30 AM = 570 minutes
+    rth_end = 16 * 60        // 4:00 PM = 960 minutes
+    
+    // Check if it's a weekday (Monday = 2, Friday = 6)
+    is_weekday = dayofweek(time, "America/New_York") >= 2 and dayofweek(time, "America/New_York") <= 6
+    
+    is_weekday and current_time_minutes >= rth_start and current_time_minutes <= rth_end
+
+// Convert timeframe string to minutes for comparison
+timeframe_to_minutes(tf) =>
+    if tf == "1"
+        1
+    else if tf == "3"
+        3
+    else if tf == "5"
+        5
+    else if tf == "15"
+        15
+    else if tf == "30"
+        30
+    else if tf == "45"
+        45
+    else if tf == "60" or tf == "1H"
+        60
+    else if tf == "120" or tf == "2H"
+        120
+    else if tf == "180" or tf == "3H"
+        180
+    else if tf == "240" or tf == "4H"
+        240
+    else if tf == "360" or tf == "6H"
+        360
+    else if tf == "720" or tf == "12H"
+        720
+    else if tf == "1D"
+        1440
+    else if tf == "2D"
+        2880
+    else if tf == "3D"
+        4320
+    else if tf == "1W"
+        10080
+    else if tf == "2W"
+        20160
+    else if tf == "1M"
+        43200
+    else
+        30 // Default fallback
+
+// Get appropriate higher timeframe based on current chart timeframe (only for ≥5m charts)
+get_appropriate_timeframe() =>
+    // Use automatic logic based on current chart timeframe
+    current_timeframe = timeframe.period
+    current_minutes = timeframe_to_minutes(current_timeframe)
+        
+
+    if current_minutes == 1
+        "15"
+    // 3 minutes -> 30 minutes
+    else if current_minutes == 3
+        "30"
+    // 5 minutes -> 1 hour
+    else if current_minutes == 5
+        "60"
+    // 15 minutes -> 4 hours
+    else if current_minutes == 15
+        "240"
+    // 30 minutes -> 1 day
+    else if current_minutes == 30
+        "1D"
+    // 1 hour -> 1 day
+    else if current_minutes == 60
+        "1D"
+    // 4 hours -> 1 week
+    else if current_minutes == 240
+        "1W"
+    // 1 day -> 1 month
+    else if current_minutes == 1440
+        "1M"
+    // 1 week -> 6 months
+    else if current_minutes == 10080
+        "6M"
+    // Default fallback
+    else
+        "1D"
+
+// Get auto ATR periods based on chart timeframe and market type
+get_auto_atr_periods() =>
+    current_timeframe = timeframe.period
+    
+    // Check if it's a daily or higher timeframe by checking if it contains "D", "W", or "M"
+    is_daily_or_higher = str.contains(current_timeframe, "D") or str.contains(current_timeframe, "W") or str.contains(current_timeframe, "M")
+    
+    if is_daily_or_higher
+        // For daily and higher timeframes, use day-based logic
+        if str.contains(current_timeframe, "D")
+            // Daily chart: 3 months (90 days)
+            90
+        else if str.contains(current_timeframe, "W")
+            // Weekly chart: 1 period
+            1
+        else if str.contains(current_timeframe, "M")
+            // Monthly chart: 1 period
+            1
+        else
+            // Default fallback
+            1
+    else
+        // For intraday timeframes, use minute-based logic
+        current_minutes = timeframe_to_minutes(current_timeframe)
+        
+        if current_minutes == 5
+            // 5 minute chart: 6 periods
+            6
+        else if current_minutes >= 15 and current_minutes <= 60
+            // 15 to 1 hour: 5 periods for traditional markets, 7 for crypto
+            is_crypto_pair() ? 7 : 5
+        else if current_minutes == 240
+            // 4h chart: 4 periods
+            4
+        else
+            // Default fallback - use 48 periods as the default
+            48
+
+// Quant Mode storage - multi-week dictionary approach
+// Separate arrays for keys (timestamps) and values (ranges)
+// Each entry includes the actual timestamp for cleanup purposes
+var array<int> quant_timestamps = array.new<int>()
+var array<float> quant_ranges = array.new<float>()
+var array<int> quant_actual_timestamps = array.new<int>()
+
+// Get time slot index (0-47) for 30-minute intervals
+get_time_slot(hour, minute) =>
+    slot = hour * 2 + (minute >= 30 ? 1 : 0)
+    math.min(slot, 47)  // Ensure we don't exceed array bounds
+
+// Generate timestamp key for a specific day and time slot
+// This creates a key that represents the same day and time slot
+generate_timestamp_key(dow, time_slot) =>
+    // Create a key that represents the same day and time slot
+    // We'll use a simple formula: (day_of_week * 100) + time_slot
+    // This gives us unique keys like: Monday 14:30 = 2*100 + 29 = 229
+    dow * 100 + time_slot
+
+// Clean up old data to keep only recent weeks
+cleanup_old_data() =>
+    if array.size(quant_timestamps) > 0
+        current_time = time
+        cutoff_time = current_time - (quant_lookback_weeks * 7 * 24 * 60 * 60 * 1000)  // Convert weeks to milliseconds
+        
+        // Remove entries older than cutoff_time
+        i = 0
+        while i < array.size(quant_timestamps)
+            if i < array.size(quant_actual_timestamps)
+                entry_timestamp = array.get(quant_actual_timestamps, i)
+                if entry_timestamp < cutoff_time
+                    // Remove this entry from all three arrays
+                    array.remove(quant_timestamps, i)
+                    array.remove(quant_ranges, i)
+                    array.remove(quant_actual_timestamps, i)
+                    // Don't increment i since we removed elements
+                else
+                    i := i + 1
+            else
+                i := i + 1
+
+// Store higher timeframe range data for Quant Mode
+store_quant_data() =>
+    if calculation_mode == 'Quant Mode (Historical)'
+        // Get current day and time
+        current_dow = dayofweek(time)
+        current_hour_val = hour(time)
+        current_minute_val = minute(time)
+        current_timestamp = time
+        
+        // Determine the appropriate higher timeframe for data collection
+        current_timeframe = timeframe.period
+        current_minutes = timeframe_to_minutes(current_timeframe)
+        
+        // Get the higher timeframe we should collect data from
+        higher_timeframe = ""
+        collection_interval_minutes = 0
+        
+    // Use automatic logic (same as get_appropriate_timeframe)
+        if current_minutes == 1
+            // For 1-minute charts, collect 15-minute data
+            higher_timeframe := "15"
+            collection_interval_minutes := 15
+        else if current_minutes == 3
+            // For 3-minute charts, collect 30-minute data
+            higher_timeframe := "30"
+            collection_interval_minutes := 30
+        else if current_minutes == 5
+            // For 5-minute charts, collect 1-hour data
+            higher_timeframe := "60"
+            collection_interval_minutes := 60
+        else if current_minutes == 15
+            // For 15-minute charts, collect 4-hour data
+            higher_timeframe := "240"
+            collection_interval_minutes := 240
+        else if current_minutes == 30 or current_minutes == 60
+            // For 30m to 1h charts, collect daily data
+            higher_timeframe := "1D"
+            collection_interval_minutes := 1440
+        else if current_minutes == 240
+            // For 4-hour charts, collect weekly data
+            higher_timeframe := "1W"
+            collection_interval_minutes := 10080
+        else if current_minutes == 1440
+            // For daily charts, collect monthly data
+            higher_timeframe := "1M"
+            collection_interval_minutes := 43200
+        else
+            // Default fallback
+            higher_timeframe := "1D"
+            collection_interval_minutes := 1440
+    
+        // Determine if we should collect data based on the higher timeframe interval
+        should_collect = false
+        collection_time_slot = 0
+        
+        if collection_interval_minutes == 30
+            // 30-minute intervals: collect at XX:00 and XX:30
+            if current_minute_val == 0  // At the top of the hour (XX:00)
+                collection_time_slot := get_time_slot(current_hour_val, 0)
+                should_collect := true
+            else if current_minute_val == 30  // At the half hour (XX:30)
+                collection_time_slot := get_time_slot(current_hour_val, 30)
+                should_collect := true
+        else if collection_interval_minutes == 240
+            // 4-hour intervals: collect at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
+            if current_minute_val == 0 and current_hour_val % 4 == 0
+                collection_time_slot := get_time_slot(current_hour_val, 0)
+                should_collect := true
+        else if collection_interval_minutes == 1440
+            // Daily intervals: collect at 00:00
+            if current_minute_val == 0 and current_hour_val == 0
+                collection_time_slot := 0  // Use 0 for daily data
+                should_collect := true
+        else if collection_interval_minutes == 10080
+            // Weekly intervals: collect on Monday at 00:00
+            if current_minute_val == 0 and current_hour_val == 0 and current_dow == 2  // Monday = 2
+                collection_time_slot := 0  // Use 0 for weekly data
+                should_collect := true
+        else if collection_interval_minutes == 43200
+            // Monthly intervals: collect on first day of month at 00:00
+            if current_minute_val == 0 and current_hour_val == 0 and dayofmonth(time) == 1
+                collection_time_slot := 0  // Use 0 for monthly data
+                should_collect := true
+        
+        if should_collect
+            // Get the higher timeframe candle that just closed
+            [high_htf, low_htf] = request.security(syminfo.tickerid, higher_timeframe, [high, low], lookahead = barmerge.lookahead_off)
+            
+            if not na(high_htf) and not na(low_htf)
+                range_htf = high_htf - low_htf
+                if range_htf > 0
+                    // Generate timestamp key for this day and time slot
+                    timestamp_key = generate_timestamp_key(current_dow, collection_time_slot)
+                    
+                    // Always add new entry (allow multiple entries for same day/time from different weeks)
+                    array.push(quant_timestamps, timestamp_key)
+                    array.push(quant_ranges, range_htf)
+                    array.push(quant_actual_timestamps, current_timestamp)
+                    
+                    // Clean up old data to keep only recent weeks
+                    cleanup_old_data()
+
+// Get Quant Mode ATR (historical same-day/time analysis for all timeframes)
+get_quant_mode_atr() =>
+    current_timeframe = timeframe.period
+    current_minutes = timeframe_to_minutes(current_timeframe)
+    
+    // Apply Quant Mode on all timeframes
+    if calculation_mode == 'Quant Mode (Historical)'
+        // Get current day and time
+        current_dow = dayofweek(time)
+        current_hour_val = hour(time)
+        current_minute_val = minute(time)
+        
+        // Determine the appropriate higher timeframe for data lookup
+        higher_timeframe = ""
+        collection_interval_minutes = 0
+        
+    // Use automatic logic (same as get_appropriate_timeframe)
+        if current_minutes == 1
+            // For 1-minute charts, use 15-minute data
+            higher_timeframe := "15"
+            collection_interval_minutes := 15
+        else if current_minutes == 3
+            // For 3-minute charts, use 30-minute data
+            higher_timeframe := "30"
+            collection_interval_minutes := 30
+        else if current_minutes == 5
+            // For 5-minute charts, use 1-hour data
+            higher_timeframe := "60"
+            collection_interval_minutes := 60
+        else if current_minutes == 15
+            // For 15-minute charts, use 4-hour data
+            higher_timeframe := "240"
+            collection_interval_minutes := 240
+        else if current_minutes == 30 or current_minutes == 60
+            // For 30m to 1h charts, use daily data
+            higher_timeframe := "1D"
+            collection_interval_minutes := 1440
+        else if current_minutes == 240
+            // For 4-hour charts, use weekly data
+            higher_timeframe := "1W"
+            collection_interval_minutes := 10080
+        else if current_minutes == 1440
+            // For daily charts, use monthly data
+            higher_timeframe := "1M"
+            collection_interval_minutes := 43200
+        else
+            // Default fallback
+            higher_timeframe := "1D"
+            collection_interval_minutes := 1440
+        
+        // Determine target time slot based on the higher timeframe interval
+        target_time_slot = 0
+        
+        if collection_interval_minutes == 30
+            // For 30-minute data: determine which 30-minute period we're currently in
+            if current_minute_val < 30
+                // We're in the first half of the hour (XX:00-XX:30)
+                // This period closes at XX:30, so we need historical data for XX:30
+                target_time_slot := get_time_slot(current_hour_val, 30)
+            else
+                // We're in the second half of the hour (XX:30-XX:59)
+                // This period closes at the next hour's XX:00, so we need historical data for XX+1:00
+                target_time_slot := get_time_slot(current_hour_val + 1, 0)
+        else if collection_interval_minutes == 240
+            // For 4-hour data: determine which 4-hour period we're currently in
+            current_4h_slot = math.floor(current_hour_val / 4)
+            target_time_slot := get_time_slot(current_4h_slot * 4, 0)
+        else if collection_interval_minutes == 1440
+            // For daily data: use 0 as the time slot
+            target_time_slot := 0
+        else if collection_interval_minutes == 10080
+            // For weekly data: use 0 as the time slot
+            target_time_slot := 0
+        else if collection_interval_minutes == 43200
+            // For monthly data: use 0 as the time slot
+            target_time_slot := 0
+        
+        // Generate the target timestamp key
+        target_key = generate_timestamp_key(current_dow, target_time_slot)
+        
+        // Find all historical data for this day/time slot and calculate average
+        total_range = 0.0
+        count = 0
+        
+        i = 0
+        while i < array.size(quant_timestamps)
+            if array.get(quant_timestamps, i) == target_key
+                total_range := total_range + array.get(quant_ranges, i)
+                count := count + 1
+            i := i + 1
+        
+        if count > 0
+            // Calculate average and return
+            avg_range = total_range / count
+            avg_range
+        else
+            // No historical data found, fallback to regular ATR based on timeframe
+            if current_minutes <= 1
+                // For 1-minute charts, fallback to 48-period 30-minute ATR
+                request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+            else
+                // For other timeframes, use appropriate higher timeframe ATR
+                atr_periods = get_auto_atr_periods()
+                request.security(syminfo.tickerid, higher_timeframe, ta.atr(atr_periods), lookahead = barmerge.lookahead_off)
+    else
+        // Not in Quant Mode conditions, return regular ATR based on timeframe
+        if current_minutes <= 1
+            request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+        else
+            atr_periods = get_auto_atr_periods()
+            higher_timeframe = get_appropriate_timeframe()
+            request.security(syminfo.tickerid, higher_timeframe, ta.atr(atr_periods), lookahead = barmerge.lookahead_off)
+
+// Get 30-minute ATR with appropriate filtering (uses ASPR for traditional markets)
+get_30min_atr() =>
+    current_timeframe = timeframe.period
+    current_minutes = timeframe_to_minutes(current_timeframe)
+    
+    // For 1-minute charts, check calculation mode
+    if current_minutes == 1
+        if calculation_mode == 'ASPR (Traditional)'
+            // Use previous session ASPR for traditional markets
+            if is_crypto_pair()
+                // For crypto: use 48-period 30-minute ATR as fallback
+                request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+            else
+                // For traditional markets: use previous RTH ASPR
+                if not na(prev_rth_aspr) and prev_rth_aspr > 0
+                    prev_rth_aspr
+                else
+                    // Fallback to regular ATR if no RTH ASPR available yet
+                    request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+        else if calculation_mode == 'Quant Mode (Historical)'
+            // Use Quant Mode for 1-minute charts
+            get_quant_mode_atr()
+        else
+            // For Auto ATR and Manual ATR modes, use 48-period 30-minute ATR for 1-minute charts
+            request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+    else
+        // For non-1-minute charts, check calculation mode
+        if calculation_mode == 'Quant Mode (Historical)'
+            // Use Quant Mode for all timeframes
+            get_quant_mode_atr()
+        else
+            // Use original logic for non-Quant Mode
+            if is_crypto_pair()
+                // For crypto: use all 30-minute candles
+                request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+            else
+                // For traditional markets: use previous RTH ASPR
+                if not na(prev_rth_aspr) and prev_rth_aspr > 0
+                    prev_rth_aspr
+                else
+                    // Fallback to regular ATR if no RTH ASPR available yet
+                    request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+
+// Get ATR based on calculation mode setting
+get_appropriate_atr() =>
+    current_timeframe = timeframe.period
+    current_minutes = timeframe_to_minutes(current_timeframe)
+    
+    // Determine ATR based on single calculation mode dropdown
+    if calculation_mode == 'Quant Mode (Historical)'
+        // Use Quant Mode for all timeframes
+        get_quant_mode_atr()
+    else if calculation_mode == 'ASPR (Traditional)'
+        // Use ASPR for traditional markets (1m charts only)
+        if current_minutes == 1 and not is_crypto_pair()
+            if not na(prev_rth_aspr) and prev_rth_aspr > 0
+                prev_rth_aspr
+            else
+                request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+        else
+            request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+    else if calculation_mode == 'Appropriate HTF ATR'
+        // Use higher timeframe ATR based on chart timeframe
+        atr_periods = get_auto_atr_periods()
+        higher_timeframe = get_appropriate_timeframe()
+        request.security(syminfo.tickerid, higher_timeframe, ta.atr(atr_periods), lookahead = barmerge.lookahead_off)
+    else if calculation_mode == 'Chart ATR'
+        // Use current chart ATR directly
+        chart_atr_value = ta.atr(chart_atr_periods)
+        if not na(chart_atr_value) and chart_atr_value > 0
+            chart_atr_value
+        else
+            // Fallback to 30min ATR if chart ATR not available yet
+            request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+    else
+        // Default: Auto ATR (30min with auto periods)
+        get_30min_atr()
+
+
+
+// Find closest Fibonacci value to target value
+find_fibonacci_value_min(target_value) =>
+    if target_value <= 0
+        1 // Return minimum fibonacci value
+    else
+        closest_fib = 1
+        min_distance = math.abs(1 - target_value)
+        
+        for i = 0 to array.size(fibonacci_values) - 1
+            fib_val = array.get(fibonacci_values, i)
+            distance = math.abs(fib_val - target_value)
+            if distance < min_distance
+                min_distance := distance
+                closest_fib := fib_val
+        
+        closest_fib
+
+// Find closest Fibonacci value to target (for reversal calculation)
+find_closest_fibonacci_value(target_value) =>
+    if target_value <= 0
+        1 // Return minimum fibonacci value
+    else
+        closest_fib = 1
+        min_distance = math.abs(1 - target_value)
+        
+        for i = 0 to array.size(fibonacci_values) - 1
+            fib_val = array.get(fibonacci_values, i)
+            distance = math.abs(fib_val - target_value)
+            if distance < min_distance
+                min_distance := distance
+                closest_fib := fib_val
+        
+        closest_fib
+
+// Calculate auto trend and reversal sizes using fixed Fibonacci table approach
+get_auto_sizes() =>
+    atr_30min = get_appropriate_atr()
+    
+    if not na(atr_30min) and atr_30min > 0 and global_tick_size > 0
+        // Convert ATR to ticks using global tick size
+        atr_in_ticks = atr_30min / global_tick_size
+        
+        // Calculate initial values with base divisor
+        initial_target_ticks = atr_in_ticks / auto_size_divisor
+        initial_trend = find_fibonacci_value_min(initial_target_ticks)
+        
+        // Calculate initial reversal size
+        initial_reversal = if reversal_mode == 'Equal to Trend'
+            initial_trend
+        else if reversal_mode == 'Multiple of Trend'
+            // Use multiple of trend size
+            reversal_target = initial_trend * reversal_multiple
+            find_closest_fibonacci_value(reversal_target)
+        else
+            // Fibonacci Division (default)
+            reversal_target = initial_trend / 1.68
+            find_closest_fibonacci_value(reversal_target)
+        
+        // Auto adjust divisor if enabled and reversal < 2x chart ATR
+        // Use the Fibonacci chart ATR ticks that's already calculated
+        min_reversal_ticks = not na(chart_atr_ticks) ? chart_atr_ticks * 2.0 : atr_in_ticks * 2.0
+        adjusted_divisor = if enableAutoDivisorAdjustment and initial_reversal < min_reversal_ticks
+            // Calculate required divisor to get reversal >= 2x chart ATR
+            required_divisor = atr_in_ticks / min_reversal_ticks
+            // Use the smaller of required divisor or original divisor (can be below 1.0)
+            math.min(required_divisor, auto_size_divisor)
+        else
+            auto_size_divisor
+        
+        // Recalculate with adjusted divisor
+        final_target_ticks = atr_in_ticks / adjusted_divisor
+        auto_trend = find_fibonacci_value_min(final_target_ticks)
+        
+        // Calculate final reversal size
+        auto_reversal = 0  // Initialize variable
+        if reversal_mode == 'Equal to Trend'
+            // Use same Fibonacci value for both trend and reversal
+            auto_reversal := auto_trend
+        else if reversal_mode == 'Multiple of Trend'
+            // Use multiple of trend size
+            reversal_target = auto_trend * reversal_multiple
+            auto_reversal := find_closest_fibonacci_value(reversal_target)
+        else
+            // Calculate reversal size: trend ÷ 1.68, then find closest Fibonacci
+            reversal_target = auto_trend / 1.68
+            auto_reversal := find_closest_fibonacci_value(reversal_target)
+        
+        // Ensure minimum values
+        auto_trend := math.max(auto_trend, 1)
+        auto_reversal := math.max(auto_reversal, 1)
+        
+        [auto_trend, auto_reversal]
+    else
+        // Fallback to default values if ATR not available
+        [1, 1]
+
+// Get final trend and reversal tick values
+get_trend_reversal_ticks() =>
+    get_auto_sizes()
+
+// Get locked sizes (uses locked values from last completed candle)
+get_locked_sizes() =>
+    // If no locked values yet, return current calculated values
+    if na(locked_trend_ticks) or na(locked_reversal_ticks)
+        get_auto_sizes()
+    else
+        [locked_trend_ticks, locked_reversal_ticks]
+
+// ========================================
+// HTF RESET HELPER FUNCTIONS
+// ========================================
+
+// Get HTF timeframe for reset
+get_htf_timeframe() => htfTimeframe == 'auto' ? get_appropriate_timeframe() : htfTimeframe
+
+// Convert line style string to PineScript constant (reuses get_border_style)
+get_htf_line_style(style) => get_border_style(style)
+
+// Check if HTF candle just opened
+is_htf_candle_open() =>
+    if enableHTFReset or showHTFOpenLine
+        htf_tf = get_htf_timeframe()
+        htf_time = time(htf_tf)
+        ta.change(htf_time) != 0
+    else
+        false
+
+
+
+// ========================================
+// RTH ASPR SESSION LOGIC (for traditional markets)
+// ========================================
+
+// Simple RTH ASPR calculation (only for non-crypto pairs)
+if not is_crypto_pair()
+    // Check if we're in RTH session (9:30 AM - 4:00 PM NY time, Monday-Friday)
+    current_in_rth = is_rth()
+    
+    // RTH session start
+    if current_in_rth and not in_rth_session
+        array.clear(rth_ranges)
+        in_rth_session := true
+    
+    // RTH session end - calculate ASPR
+    if not current_in_rth and in_rth_session
+        // Calculate ASPR from collected ranges
+        if array.size(rth_ranges) > 0
+            prev_rth_aspr := array.avg(rth_ranges)
+        in_rth_session := false
+    
+    // During RTH session - collect 30-minute ranges
+    if in_rth_session
+        // Get 30-minute range data
+        [high_30m, low_30m] = request.security(syminfo.tickerid, "30", [high, low], lookahead = barmerge.lookahead_off)
+        
+        // Check for new 30-minute bar and collect range
+        if not na(high_30m) and not na(low_30m) and (high_30m != high_30m[1] or low_30m != low_30m[1])
+            range_30m = high_30m - low_30m
+            if range_30m > 0
+                array.push(rth_ranges, range_30m)
+
+// ========================================
+// MAIN TREV LOGIC
+// ========================================
+
+can_run = not run_only_on_confirmed_bars or barstate.isconfirmed
+
+// Only run TREV logic if symbol is allowed
+if can_run and is_symbol_allowed()
+
+    // Store Quant Mode data
+    store_quant_data()
+    
+    // Get trend and reversal tick values (locked from last completed candle, Renko-style)
+    [trend_ticks, reversal_ticks] = get_locked_sizes()
+
+    if use_range_chart and (barstate.isconfirmed or not run_only_on_confirmed_bars)
+        var float range_forming_high = -9999999999999999
+        var float range_forming_low = 9999999999999999
+        var float range_range_close = na
+        var int range_last_range_close_bar = na
+        var int range_direction = 0
+        
+        
+        // Use locked values or current calculated values based on toggle
+        range_min_range = if use_locked_values
+            // Use locked Renko-style values (original behavior)
+            trend_ticks * global_tick_size
+        else
+            // Use current calculated values to replicate standalone range chart behavior
+            if calculation_mode == 'Chart ATR'
+                // Replicate standalone range chart behavior - use current Chart ATR with Fibonacci conversion
+                chart_atr_value = ta.atr(chart_atr_periods)
+                if not na(chart_atr_value) and chart_atr_value > 0 and global_tick_size > 0
+                    // Convert ATR to ticks
+                    atr_in_ticks = chart_atr_value / global_tick_size
+                    
+                    // Calculate initial target ticks with base divisor
+                    initial_target_ticks = atr_in_ticks / auto_size_divisor
+                    initial_fib_ticks = find_closest_fibonacci_value(initial_target_ticks)
+                    
+                    // Auto adjust divisor if enabled and range < 2x chart ATR
+                    min_range_ticks = atr_in_ticks * 2.0
+                    adjusted_divisor = if enableAutoDivisorAdjustment and initial_fib_ticks < min_range_ticks
+                        // Calculate required divisor to get range >= 2x chart ATR
+                        required_divisor = atr_in_ticks / min_range_ticks
+                        // Use the smaller of required divisor or original divisor (can be below 1.0)
+                        math.min(required_divisor, auto_size_divisor)
+                    else
+                        auto_size_divisor
+                    
+                    // Recalculate with adjusted divisor
+                    final_target_ticks = atr_in_ticks / adjusted_divisor
+                    final_fib_ticks = find_closest_fibonacci_value(final_target_ticks)
+                    
+                    // Ensure minimum value
+                    final_fib_ticks := math.max(final_fib_ticks, 1)
+                    
+                    // Convert back to price
+                    final_fib_ticks * global_tick_size
+                else
+                    // Fallback to 30min ATR if chart ATR not available yet
+                    request.security(syminfo.tickerid, "30", ta.atr(48), lookahead = barmerge.lookahead_off)
+            else
+                // For other calculation modes, use current calculated trend size
+                [current_trend, current_reversal] = get_auto_sizes()
+                current_trend * global_tick_size
+        
+        if high > range_forming_high
+            range_forming_high := high
+        if low < range_forming_low
+            range_forming_low := low
+        
+        if range_forming_high - range_forming_low >= range_min_range
+            // Determine direction: up (bullish) or down (bearish)
+            range_is_up = close > range_range_close
+        
+            // Calculate box body levels
+            range_box_top = range_is_up ? range_forming_low + range_min_range : range_forming_high
+            range_box_bottom = range_is_up ? range_forming_low : range_forming_high - range_min_range
+        
+            // Cosmetic fix: avoid same start/end bar
+            range_box_end = range_last_range_close_bar == bar_index ? bar_index + 1 : bar_index
+        
+            // Draw the box body (NO wicks), using user-selected trend colors and borders (single line)
+            if show_trev_boxes
+                box.new(range_last_range_close_bar, range_box_top, range_box_end, range_box_bottom, bgcolor = range_is_up ? bullish_trend_body_color : bearish_trend_body_color, border_color = range_is_up ? bullish_trend_border_color : bearish_trend_border_color, border_width = 1, border_style = range_is_up ? get_border_style(bullish_trend_border_style) : get_border_style(bearish_trend_border_style)) 
+        
+            // Store last completed range data for painting
+            if enable_chart_painting
+                last_range_start_bar := range_last_range_close_bar
+                last_range_end_bar := range_box_end
+                last_range_type := range_is_up ? 'bullish_trend' : 'bearish_trend'
+        
+            new_range_direction = range_is_up ? 1 : -1
+            if new_range_direction != range_direction
+                // Correct string concatenation and inline ternary logic
+                old_dir_str = range_direction == 1 ? "Bullish" : "Bearish"
+                new_dir_str = new_range_direction == 1 ? "Bullish" : "Bearish"
+                alert("Range Chart: Direction Changed from " + old_dir_str + " to " + new_dir_str + " - Range: " + str.tostring(range_min_range, "#.####"), alert.freq_once_per_bar)
+                range_direction := new_range_direction
+            range_range_close := range_is_up ? range_forming_low + range_min_range : range_forming_high - range_min_range
+            range_last_range_close_bar := bar_index
+            
+            // Check if we can create another range from the box extreme to the forming extreme
+            remaining_extreme = range_is_up ? range_forming_high : range_forming_low
+            remaining_distance = math.abs(remaining_extreme - range_range_close)
+            
+            // If remaining distance is >= range_min_range, we can create another range
+            if remaining_distance >= range_min_range
+                // Create additional range(s) until remaining distance < range_min_range
+                while remaining_distance >= range_min_range
+                    // Determine direction for additional range
+                    additional_range_is_up = remaining_extreme > range_range_close
+                    
+                    // Calculate additional box body levels
+                    additional_range_box_top = additional_range_is_up ? range_range_close + range_min_range : range_range_close
+                    additional_range_box_bottom = additional_range_is_up ? range_range_close : range_range_close - range_min_range
+                    
+                    // Cosmetic fix: avoid same start/end bar
+                    additional_range_box_end = range_last_range_close_bar == bar_index ? bar_index + 1 : bar_index
+                    
+                    // Draw the additional box body
+                    if show_trev_boxes
+                        box.new(range_last_range_close_bar, additional_range_box_top, additional_range_box_end, additional_range_box_bottom, bgcolor = additional_range_is_up ? bullish_trend_body_color : bearish_trend_body_color, border_color = additional_range_is_up ? bullish_trend_border_color : bearish_trend_border_color, border_width = 1, border_style = additional_range_is_up ? get_border_style(bullish_trend_border_style) : get_border_style(bearish_trend_border_style)) 
+                    
+                    // Store last completed range data for painting (additional range)
+                    if enable_chart_painting
+                        last_range_start_bar := range_last_range_close_bar
+                        last_range_end_bar := additional_range_box_end
+                        last_range_type := additional_range_is_up ? 'bullish_trend' : 'bearish_trend'
+                    
+                    // Update direction and alert for additional range
+                    new_range_direction = additional_range_is_up ? 1 : -1
+                    if new_range_direction != range_direction
+                        old_dir_str = range_direction == 1 ? "Bullish" : "Bearish"
+                        new_dir_str = new_range_direction == 1 ? "Bullish" : "Bearish"
+                        alert("Range Chart: Direction Changed from " + old_dir_str + " to " + new_dir_str + " - Range: " + str.tostring(range_min_range, "#.####"), alert.freq_once_per_bar)
+                        range_direction := new_range_direction
+                    
+                    // Update range close for next iteration
+                    range_range_close := additional_range_is_up ? range_range_close + range_min_range : range_range_close - range_min_range
+                    
+                    // Recalculate remaining distance
+                    remaining_distance := math.abs(remaining_extreme - range_range_close)
+            
+            // Reset forming levels to preserve the unused extreme
+            if range_is_up
+                // Bullish range: keep the high extreme, reset low to the close
+                range_forming_high := range_forming_high
+                range_forming_low := range_range_close
+            else
+                // Bearish range: keep the low extreme, reset high to the close
+                range_forming_high := range_range_close
+                range_forming_low := range_forming_low
+            
+            // Update locked sizes for next candle (Renko-style) - same as TREV logic
+            fresh_atr = get_appropriate_atr()
+            [fresh_trend, fresh_reversal] = get_auto_sizes()
+            locked_atr_value := fresh_atr
+            locked_atr_fib_ticks := not na(fresh_atr) and global_tick_size > 0 ? find_closest_fibonacci_value(fresh_atr / global_tick_size) : na
+            locked_trend_ticks := fresh_trend
+            locked_reversal_ticks := fresh_reversal    
+    
+    // Calculate chart ATR in ticks globally
+    chart_atr = ta.atr(chart_atr_periods)
+    if not na(chart_atr) and chart_atr > 0 and global_tick_size > 0
+        raw_chart_atr_ticks = chart_atr / global_tick_size
+        chart_atr_ticks := find_closest_fibonacci_value(raw_chart_atr_ticks)
+    else
+        chart_atr_ticks := na
+    
+    // Check for HTF candle open (for reset and/or line drawing)
+    if is_htf_candle_open()
+        // HTF Reset functionality
+        if enableHTFReset
+            // Only reset the close price - everything else handles itself
+            trev_close := open
+            
+            // Update locked sizes on HTF reset (Renko-style)
+            fresh_atr = get_appropriate_atr()
+            [fresh_trend, fresh_reversal] = get_auto_sizes()
+            locked_atr_value := fresh_atr
+            locked_atr_fib_ticks := not na(fresh_atr) and global_tick_size > 0 ? find_closest_fibonacci_value(fresh_atr / global_tick_size) : na
+            locked_trend_ticks := fresh_trend
+            locked_reversal_ticks := fresh_reversal
+        
+        // HTF Line functionality (independent of reset)
+        if showHTFOpenLine
+            htf_open_bar := bar_index
+            
+            // Delete previous line if exists
+            if not na(htf_open_line)
+                line.delete(htf_open_line)
+            
+            // Create new line
+            line_end = htfLineExtendMode == 'To Current' ? bar_index : bar_index + 1
+            line_extend = htfLineExtendMode == 'Right' ? extend.right : extend.none
+            htf_open_line := line.new(htf_open_bar, open, line_end, open, color = htfLineColor, width = htfLineWidth, style = get_htf_line_style(htfLineStyle), extend = line_extend)
+
+    // Initialize TREV system on first bar
+    if na(trev_close) and not use_range_chart
+        trev_close := open
+        trev_direction := true
+        candle_start_bar := bar_index
+        forming_high := high
+        forming_low := low
+        forming_low
+
+    // Update extremes during current candle formation
+    if high > forming_high and not use_range_chart
+        forming_high := high
+        forming_high
+    if low < forming_low and not use_range_chart
+        forming_low := low
+        forming_low
+
+// Check price movement from current TREV close
+// We need to check the path the price took during this bar
+
+    // For bullish bars: check low first, then high, then close
+    // For bearish bars: check high first, then low, then close
+    bullish_bar = close >= open
+
+    price_levels = array.new<float>()
+    if bullish_bar and not use_range_chart
+        // Process path: low → high → close
+        array.push(price_levels, low)
+        array.push(price_levels, high)
+        array.push(price_levels, close)
+    else if not use_range_chart // Process path: high → low → close  
+        array.push(price_levels, high)
+        array.push(price_levels, low)
+        array.push(price_levels, close)
+
+    // Check each price level for threshold breach
+    i = 0
+    while i < array.size(price_levels)
+        price = array.get(price_levels, i)
+
+        // Update extremes for current forming candle
+        if price > forming_high and not use_range_chart
+            forming_high := price
+            forming_high
+        if price < forming_low and not use_range_chart
+            forming_low := price
+            forming_low
+
+        // Calculate movement from CURRENT TREV close
+        price_diff = price - trev_close
+        ticks_moved = math.abs(price_diff) / global_tick_size
+        price_went_up = price_diff > 0
+
+        candle_formed = false
+
+        // Check thresholds in CORRECT order based on current direction
+        if trev_direction // Currently bullish
+            if price_went_up and ticks_moved >= trend_ticks and not use_range_chart
+                // Continue bullish trend
+                new_trev_close = trev_close + trend_ticks * global_tick_size
+                body_top = math.max(trev_close, new_trev_close)
+                body_bottom = math.min(trev_close, new_trev_close)
+
+                // Cosmetic fix: avoid same start/end bar
+                candle_end = candle_start_bar == bar_index ? bar_index + 1 : bar_index
+
+                if show_trev_boxes
+                    box.new(candle_start_bar, body_top, candle_end, body_bottom, bgcolor = bullish_trend_body_color, border_color = bullish_trend_border_color, border_width = 1, border_style = get_border_style(bullish_trend_border_style))
+
+                // Store last completed range data for painting
+                if enable_chart_painting
+                    last_range_start_bar := candle_start_bar
+                    last_range_end_bar := candle_end
+                    last_range_type := 'bullish_trend'
+
+                // Only bottom wick possible (if price dipped below open)
+                if forming_low < trev_close
+                    wick_center = math.round((candle_start_bar + candle_end) / 2)
+                    line.new(wick_center, trev_close, wick_center, forming_low, color = bullish_trend_wick_color, width = 2)
+
+                // Reset for next candle (stay bullish)
+                trev_close := new_trev_close
+                trev_direction := true
+                candle_start_bar := bar_index
+                forming_high := new_trev_close
+                forming_low := new_trev_close
+                
+                // Update locked sizes for next candle (Renko-style)
+                fresh_atr = get_appropriate_atr()
+                [fresh_trend, fresh_reversal] = get_auto_sizes()
+                locked_atr_value := fresh_atr
+                locked_atr_fib_ticks := not na(fresh_atr) and global_tick_size > 0 ? find_closest_fibonacci_value(fresh_atr / global_tick_size) : na
+                locked_trend_ticks := fresh_trend
+                locked_reversal_ticks := fresh_reversal
+                
+                candle_formed := true
+                candle_formed
+
+            else if not price_went_up and ticks_moved >= reversal_ticks and not use_range_chart
+                // Bearish reversal (ONLY way to change from bullish to bearish)
+                new_trev_close = trev_close - reversal_ticks * global_tick_size
+                body_top = math.max(trev_close, new_trev_close)
+                body_bottom = math.min(trev_close, new_trev_close)
+
+                // Cosmetic fix: avoid same start/end bar
+                candle_end = candle_start_bar == bar_index ? bar_index + 1 : bar_index
+
+                if show_trev_boxes
+                    box.new(candle_start_bar, body_top, candle_end, body_bottom, bgcolor = bearish_reversal_body_color, border_color = bearish_reversal_border_color, border_width = 1, border_style = get_border_style(bearish_reversal_border_style))
+
+                // Store last completed range data for painting
+                if enable_chart_painting
+                    last_range_start_bar := candle_start_bar
+                    last_range_end_bar := candle_end
+                    last_range_type := 'bearish_reversal'
+
+                // Only top wick possible (if price spiked above open)
+                if forming_high > trev_close
+                    wick_center = math.round((candle_start_bar + candle_end) / 2)
+                    line.new(wick_center, trev_close, wick_center, forming_high, color = bearish_reversal_wick_color, width = 2)
+
+                // Alert for bearish reversal
+                alert("TREV: Bearish Reversal Candle - Price: " + str.tostring(new_trev_close, "#.##") + " | Ticks: " + str.tostring(ticks_moved, "#") + " | From: " + str.tostring(trev_close, "#.##"), alert.freq_once_per_bar)
+
+                // Reset for next candle (now bearish)
+                trev_close := new_trev_close
+                trev_direction := false
+                candle_start_bar := bar_index
+                forming_high := new_trev_close
+                forming_low := new_trev_close
+                
+                // Update locked sizes for next candle (Renko-style)
+                fresh_atr = get_appropriate_atr()
+                [fresh_trend, fresh_reversal] = get_auto_sizes()
+                locked_atr_value := fresh_atr
+                locked_atr_fib_ticks := not na(fresh_atr) and global_tick_size > 0 ? find_closest_fibonacci_value(fresh_atr / global_tick_size) : na
+                locked_trend_ticks := fresh_trend
+                locked_reversal_ticks := fresh_reversal
+                
+                candle_formed := true
+                candle_formed
+
+        else // Currently bearish
+            if not price_went_up and ticks_moved >= trend_ticks and not use_range_chart
+                // Continue bearish trend
+                new_trev_close = trev_close - trend_ticks * global_tick_size
+                body_top = math.max(trev_close, new_trev_close)
+                body_bottom = math.min(trev_close, new_trev_close)
+
+                // Cosmetic fix: avoid same start/end bar
+                candle_end = candle_start_bar == bar_index ? bar_index + 1 : bar_index
+
+                if show_trev_boxes
+                    box.new(candle_start_bar, body_top, candle_end, body_bottom, bgcolor = bearish_trend_body_color, border_color = bearish_trend_border_color, border_width = 1, border_style = get_border_style(bearish_trend_border_style))
+
+                // Store last completed range data for painting
+                if enable_chart_painting
+                    last_range_start_bar := candle_start_bar
+                    last_range_end_bar := candle_end
+                    last_range_type := 'bearish_trend'
+
+                // Only top wick possible (if price spiked above open)
+                if forming_high > trev_close
+                    wick_center = math.round((candle_start_bar + candle_end) / 2)
+                    line.new(wick_center, trev_close, wick_center, forming_high, color = bearish_trend_wick_color, width = 2)
+
+                // Reset for next candle (stay bearish)
+                trev_close := new_trev_close
+                trev_direction := false
+                candle_start_bar := bar_index
+                forming_high := new_trev_close
+                forming_low := new_trev_close
+                
+                // Update locked sizes for next candle (Renko-style)
+                fresh_atr = get_appropriate_atr()
+                [fresh_trend, fresh_reversal] = get_auto_sizes()
+                locked_atr_value := fresh_atr
+                locked_atr_fib_ticks := not na(fresh_atr) and global_tick_size > 0 ? find_closest_fibonacci_value(fresh_atr / global_tick_size) : na
+                locked_trend_ticks := fresh_trend
+                locked_reversal_ticks := fresh_reversal
+                
+                candle_formed := true
+                candle_formed
+
+            else if price_went_up and ticks_moved >= reversal_ticks and not use_range_chart
+                // Bullish reversal (ONLY way to change from bearish to bullish)
+                new_trev_close = trev_close + reversal_ticks * global_tick_size
+                body_top = math.max(trev_close, new_trev_close)
+                body_bottom = math.min(trev_close, new_trev_close)
+
+                // Cosmetic fix: avoid same start/end bar
+                candle_end = candle_start_bar == bar_index ? bar_index + 1 : bar_index
+
+                if show_trev_boxes
+                    box.new(candle_start_bar, body_top, candle_end, body_bottom, bgcolor = bullish_reversal_body_color, border_color = bullish_reversal_border_color, border_width = 1, border_style = get_border_style(bullish_reversal_border_style))
+
+                // Store last completed range data for painting
+                if enable_chart_painting
+                    last_range_start_bar := candle_start_bar
+                    last_range_end_bar := candle_end
+                    last_range_type := 'bullish_reversal'
+
+                // Only bottom wick possible (if price dipped below open)
+                if forming_low < trev_close
+                    wick_center = math.round((candle_start_bar + candle_end) / 2)
+                    line.new(wick_center, trev_close, wick_center, forming_low, color = bullish_reversal_wick_color, width = 2)
+
+                // Alert for bullish reversal
+                alert("TREV: Bullish Reversal Candle - Price: " + str.tostring(new_trev_close, "#.##") + " | Ticks: " + str.tostring(ticks_moved, "#") + " | From: " + str.tostring(trev_close, "#.##"), alert.freq_once_per_bar)
+
+                // Reset for next candle (now bullish)
+                trev_close := new_trev_close
+                trev_direction := true
+                candle_start_bar := bar_index
+                forming_high := new_trev_close
+                forming_low := new_trev_close
+                
+                // Update locked sizes for next candle (Renko-style)
+                fresh_atr = get_appropriate_atr()
+                [fresh_trend, fresh_reversal] = get_auto_sizes()
+                locked_atr_value := fresh_atr
+                locked_atr_fib_ticks := not na(fresh_atr) and global_tick_size > 0 ? find_closest_fibonacci_value(fresh_atr / global_tick_size) : na
+                locked_trend_ticks := fresh_trend
+                locked_reversal_ticks := fresh_reversal
+                
+                candle_formed := true
+                candle_formed
+
+        // If candle formed, restart from current price level with new TREV close
+        if candle_formed and not use_range_chart
+            i := i // Process this price level again with new TREV close
+            i
+        else
+            i := i + 1 // Move to next price level
+            i
+
+// Update HTF line extension if set to "To Current" (only needed for "To Current" mode)
+if showHTFOpenLine and not na(htf_open_line) and htfLineExtendMode == 'To Current'
+    line.set_x2(htf_open_line, bar_index)
+
+// Apply chart candle painting for last completed range
+color paint_color = na
+if enable_chart_painting and not na(last_range_start_bar) and not na(last_range_end_bar) and not na(last_range_type)
+    // Check if current bar falls within the last completed range
+    if bar_index >= last_range_start_bar and bar_index <= last_range_end_bar
+        paint_color := switch last_range_type
+            'bullish_trend' => bullish_trend_body_color
+            'bullish_reversal' => bullish_reversal_body_color
+            'bearish_trend' => bearish_trend_body_color
+            'bearish_reversal' => bearish_reversal_body_color
+            => na
+
+barcolor(paint_color, title = "TREV Range Paint")
+
+// ========================================
+// AUTO MODE INFORMATION DISPLAY
+// ========================================
+
+// Display calculation information
+if show_auto_info and barstate.islast
+    atr_30min = get_appropriate_atr()
+    [auto_trend, auto_reversal] = get_auto_sizes()
+    
+    if not na(atr_30min) and atr_30min > 0 and global_tick_size > 0
+        atr_in_ticks = atr_30min / global_tick_size
+        target_ticks = atr_in_ticks / auto_size_divisor
+        // Calculate reversal target for display (same logic as in get_auto_sizes)
+        reversal_target = if reversal_mode == 'Equal to Trend'
+            auto_trend
+        else if reversal_mode == 'Multiple of Trend'
+            auto_trend * reversal_multiple
+        else
+            auto_trend / 1.68
+        
+        // Count enabled rows to determine table size
+        enabled_rows = 1 // Always have header
+        if show_market_type
+            enabled_rows += 1
+        if show_atr_30min
+            enabled_rows += 1
+        if show_locked_atr
+            enabled_rows += 1
+        if show_atr_ticks
+            enabled_rows += 1
+        if show_atr_divisor
+            enabled_rows += 1
+        if show_trend_size
+            enabled_rows += 1
+        if show_reversal_calc
+            enabled_rows += 1
+        if show_reversal_size
+            enabled_rows += 1
+        if show_tick_size
+            enabled_rows += 1
+        if show_chart_atr_ticks
+            enabled_rows += 1
+        
+        // Create dynamic table with correct number of rows
+        var table info_table = table.new(get_auto_table_position(), 2, enabled_rows, 
+                                       bgcolor = auto_table_bg_color, 
+                                       border_width = auto_table_border_width, 
+                                       border_color = auto_table_border_color,
+                                       frame_width = auto_table_frame_width,
+                                       frame_color = auto_table_frame_color)
+        
+        // Clear table
+        table.clear(info_table, 0, 0)
+        
+        // Header
+        table.cell(info_table, 0, 0, "Calculation Info", text_color = auto_table_header_text_color, text_size = get_auto_table_text_size(), bgcolor = auto_table_header_bg_color, text_font_family = font.family_monospace)
+        table.cell(info_table, 1, 0, "Value", text_color = auto_table_header_text_color, text_size = get_auto_table_text_size(), bgcolor = auto_table_header_bg_color, text_font_family = font.family_monospace)
+        
+        // Dynamic row counter
+        current_row = 1
+        
+        // Market type
+        if show_market_type
+            market_type = is_crypto_pair() ? "Crypto" : "Traditional"
+            table.cell(info_table, 0, current_row, "Market Type", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            table.cell(info_table, 1, current_row, market_type, text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // ATR display
+        if show_atr_30min
+            current_timeframe = timeframe.period
+            current_minutes = timeframe_to_minutes(current_timeframe)
+            atr_label = "ATR"  // Initialize variable
+            
+            // Determine ATR label based on calculation mode
+            if calculation_mode == 'ASPR (Traditional)'
+                atr_label := "ASPR (Prev Session)"
+            else if calculation_mode == 'Quant Mode (Historical)'
+                atr_label := "Quant Mode (" + str.tostring(quant_lookback_weeks) + " weeks)"
+            else if calculation_mode == 'Appropriate HTF ATR'
+                higher_timeframe = get_appropriate_timeframe()
+                atr_periods = get_auto_atr_periods()
+                atr_label := "ATR (" + higher_timeframe + ", " + str.tostring(atr_periods) + ")"
+            else if calculation_mode == 'Chart ATR'
+                atr_label := "ATR (Chart, " + str.tostring(chart_atr_periods) + ")"
+            else
+                // Default: Auto ATR
+                if current_minutes <= 1
+                    atr_label := "ATR (30min, 48)"
+                else
+                    atr_periods = get_auto_atr_periods()
+                    atr_label := "ATR (30min, " + str.tostring(atr_periods) + ")"
+            
+            table.cell(info_table, 0, current_row, atr_label, text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            table.cell(info_table, 1, current_row, str.tostring(atr_30min, "#.####"), text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Locked ATR (Renko-style)
+        if show_locked_atr
+            locked_label = "Locked ATR (Fib ticks)"
+            if not na(locked_atr_fib_ticks)
+                locked_display = str.tostring(locked_atr_fib_ticks) + " (" + str.tostring(locked_atr_value, "#.####") + ")"
+                table.cell(info_table, 0, current_row, locked_label, text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, locked_display, text_color = color.blue, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            else
+                table.cell(info_table, 0, current_row, locked_label, text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, "Initializing...", text_color = color.gray, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // ATR in ticks
+        if show_atr_ticks
+            table.cell(info_table, 0, current_row, "ATR (ticks)", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            table.cell(info_table, 1, current_row, str.tostring(atr_in_ticks, "#.##"), text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Target calculation
+        if show_atr_divisor
+            // Calculate if divisor was adjusted
+            initial_target_ticks = atr_in_ticks / auto_size_divisor
+            initial_trend = find_fibonacci_value_min(initial_target_ticks)
+            initial_reversal = if reversal_mode == 'Equal to Trend'
+                initial_trend
+            else if reversal_mode == 'Multiple of Trend'
+                reversal_target = initial_trend * reversal_multiple
+                find_closest_fibonacci_value(reversal_target)
+            else
+                reversal_target = initial_trend / 1.68
+                find_closest_fibonacci_value(reversal_target)
+            
+            chart_atr_ticks_for_adj = not na(chart_atr_ticks) ? chart_atr_ticks : atr_in_ticks
+            min_reversal_ticks = chart_atr_ticks_for_adj * 2.0
+            adjusted_divisor = if enableAutoDivisorAdjustment and initial_reversal < min_reversal_ticks
+                // Calculate required divisor to get reversal >= 2x chart ATR
+                required_divisor = atr_in_ticks / min_reversal_ticks
+                // Use the smaller of required divisor or original divisor (but not below 1.0)
+                math.max(math.min(required_divisor, auto_size_divisor), 1.0)
+            else
+                auto_size_divisor
+            
+            divisor_text = "ATR ÷ " + str.tostring(adjusted_divisor, "#.##")
+            if enableAutoDivisorAdjustment and initial_reversal < min_reversal_ticks
+                divisor_text := divisor_text + " (Auto Adj)"
+            
+            table.cell(info_table, 0, current_row, divisor_text, text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            table.cell(info_table, 1, current_row, str.tostring(atr_in_ticks / adjusted_divisor, "#.##"), text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Auto trend size
+        if show_trend_size
+            table.cell(info_table, 0, current_row, "Trend Size (Fib ≥)", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            table.cell(info_table, 1, current_row, str.tostring(auto_trend), text_color = color.green, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Reversal calculation
+        if show_reversal_calc
+            if reversal_mode == 'Equal to Trend'
+                table.cell(info_table, 0, current_row, "Equal to Trend", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, "Same Value", text_color = color.gray, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            else if reversal_mode == 'Multiple of Trend'
+                table.cell(info_table, 0, current_row, "Trend × " + str.tostring(reversal_multiple, "#.##"), text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, str.tostring(reversal_target, "#.##"), text_color = color.gray, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            else
+                table.cell(info_table, 0, current_row, "Trend ÷ 1.68", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, str.tostring(reversal_target, "#.##"), text_color = color.gray, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Auto reversal size
+        if show_reversal_size
+            if reversal_mode == 'Equal to Trend'
+                table.cell(info_table, 0, current_row, "Reversal Size (Equal)", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, str.tostring(auto_reversal), text_color = color.red, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            else if reversal_mode == 'Multiple of Trend'
+                table.cell(info_table, 0, current_row, "Reversal Size (×" + str.tostring(reversal_multiple, "#.##") + ")", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, str.tostring(auto_reversal), text_color = color.red, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            else
+                table.cell(info_table, 0, current_row, "Reversal Size (Fib)", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+                table.cell(info_table, 1, current_row, str.tostring(auto_reversal), text_color = color.red, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Tick size
+        if show_tick_size
+            table.cell(info_table, 0, current_row, "Tick Size", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            table.cell(info_table, 1, current_row, str.tostring(global_tick_size, "#.####"), text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1
+        
+        // Chart ATR in ticks
+        if show_chart_atr_ticks
+            table.cell(info_table, 0, current_row, "Chart ATR (ticks)", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            if not na(chart_atr_ticks)
+                table.cell(info_table, 1, current_row, str.tostring(chart_atr_ticks, "#.##"), text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            else
+                table.cell(info_table, 1, current_row, "N/A", text_color = auto_table_text_color, text_size = get_auto_table_text_size(), text_font_family = font.family_monospace)
+            current_row += 1

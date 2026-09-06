@@ -1,0 +1,583 @@
+//@version=6
+indicator("Liquidity Compression Box", overlay=true)
+
+// --- USER INPUT PARAMETERS ---
+window_size = input.int(5, "Window Size (Candles)", minval=5, maxval=50)
+max_box_atr_mult = input.float(3.0, "Max Box Height (ATR Multiplier)", step=0.1, minval=0.5, maxval=5.0)
+min_wick_touches = input.int(3, "Min Wick Touches", minval=2, maxval=15)
+max_body_percent = input.float(95.0, "Max Average Body Ratio (%)", step=1.0, minval=20, maxval=95)
+box_transparency = input.int(50, "Box Transparency", minval=0, maxval=100, group="BOX SETTINGS")
+show_box = input.bool(true, "Show Box")
+show_signal = input.bool(true, "Show Breakout Signals")
+show_debug_table = input.bool(true, "Show Debug Table")
+use_alerts = input.bool(true, "Enable Alerts")
+
+// --- TRAILING TP PARAMETERS ---
+use_trailing_tp = input.bool(true, "Use Trailing TP")
+trailing_percent = input.float(0.5, "Trailing Percentage (%)", step=0.1, minval=0.1, maxval=10.0, group="TRAILING TP SETTINGS")
+trailing_activation = input.float(0.1, "Activation Percentage (%)", step=0.1, minval=0.1, maxval=5.0, group="TRAILING TP SETTINGS")
+show_trailing_lines = input.bool(true, "Show Trailing TP Lines", group="TRAILING TP SETTINGS")
+show_tp_hit = input.bool(true, "Show TP Hit Signals", group="TRAILING TP SETTINGS")
+
+// --- SL PARAMETERS ---
+sl_enabled = input.bool(true, "Enable Stop Loss", group="STOP LOSS SETTINGS")
+sl_type = input.string("Percentage", "Stop Loss Type", options=["Percentage", "ATR"], group="STOP LOSS SETTINGS")
+sl_percent = input.float(2.0, "Stop Loss (%)", step=0.1, minval=0.1, maxval=20.0, group="STOP LOSS SETTINGS")
+sl_atr_length = input.int(14, "ATR Length", minval=1, maxval=50, group="STOP LOSS SETTINGS")
+sl_atr_mult = input.float(1.5, "ATR Multiplier", step=0.1, minval=0.5, maxval=5.0, group="STOP LOSS SETTINGS")
+show_sl_line = input.bool(true, "Show SL Line", group="STOP LOSS SETTINGS")
+show_sl_hit = input.bool(true, "Show SL Hit Label", group="STOP LOSS SETTINGS")
+show_sl_label = input.bool(true, "Show SL Label", group="STOP LOSS SETTINGS")
+
+// --- SIGNAL SIZE SETTINGS ---
+signal_size = input.string("normal", "Signal Size", options=["tiny", "small", "normal", "large", "huge"])
+
+label_size = switch signal_size
+    "tiny" => size.tiny
+    "small" => size.small
+    "normal" => size.normal
+    "large" => size.large
+    "huge" => size.huge
+    => size.normal
+
+// --- VARIABLES ---
+atr_val = ta.atr(14)
+
+// CURRENT WINDOW HIGH/LOW
+current_highest = ta.highest(high, window_size)
+current_lowest = ta.lowest(low, window_size)
+box_height = current_highest - current_lowest
+
+// --- AVERAGE BODY RATIO ---
+float avg_body_ratio = 0.0
+float total_body_ratio = 0.0
+int valid_candles = 0
+
+for i = 0 to window_size - 1
+    float candle_range = high[i] - low[i]
+    if candle_range > 0
+        float body_ratio = math.abs(close[i] - open[i]) / candle_range
+        total_body_ratio := total_body_ratio + body_ratio
+        valid_candles := valid_candles + 1
+
+if valid_candles > 0
+    avg_body_ratio := total_body_ratio / valid_candles
+else
+    avg_body_ratio := 100.0
+
+// --- WICK TOUCH COUNT ---
+int upper_wick_count = 0
+int lower_wick_count = 0
+float tolerance = box_height * 0.03
+
+for i = 0 to window_size - 1
+    float candle_high = high[i]
+    float candle_low = low[i]
+    float candle_range = high[i] - low[i]
+    
+    if candle_high >= current_highest - tolerance and candle_range > 0
+        upper_wick_count := upper_wick_count + 1
+    if candle_low <= current_lowest + tolerance and candle_range > 0
+        lower_wick_count := lower_wick_count + 1
+
+total_wick_touches = upper_wick_count + lower_wick_count
+
+// --- BOX FORMATION CHECK ---
+bool is_compressed = box_height <= (atr_val * max_box_atr_mult)
+bool is_body_small = avg_body_ratio <= (max_body_percent / 100.0)
+bool enough_touches = total_wick_touches >= min_wick_touches
+bool box_formed_now = is_compressed and is_body_small and enough_touches
+
+// --- STATE VARIABLES ---
+var bool waiting_breakout = false
+var float frozen_high = na
+var float frozen_low = na
+var int frozen_start_index = 0
+var int frozen_end_index = 0
+var box my_box = na
+
+// --- TRADE MANAGEMENT STATE VARIABLES ---
+// TP State
+var bool tp_active = false
+var float tp_entry_price = na
+var float tp_price = na
+var float tp_trailing_high = na
+var float tp_trailing_low = na
+var line tp_line = na
+var bool tp_hit = false
+var string tp_direction = na
+var label tp_label = na
+
+// SL State
+var bool sl_active = false
+var float sl_entry_price = na
+var float sl_stop_price = na
+var line sl_line = na
+var bool sl_hit = false
+var string sl_direction = na
+var label sl_label = na
+
+// Trade State
+var bool in_trade = false
+var string trade_direction = na  // "BUY" or "SELL"
+var int trade_start_bar = 0
+
+// --- EVENT VARIABLES (Reset every bar - NOT VAR) ---
+bool buy_tp_event = false
+bool sell_tp_event = false
+bool buy_sl_event = false
+bool sell_sl_event = false
+
+// SIGNAL VARIABLES - NON-VAR (reset every bar)
+bool buy_signal = false
+bool sell_signal = false
+
+// --- TABLE ---
+var table debugTable = table.new(position.bottom_right, 2, 19, bgcolor=color.new(color.black, 85), border_color=color.new(color.gray, 50), border_width=1)
+
+// --- BOX FORMED? ---
+if box_formed_now and not waiting_breakout
+    frozen_high := current_highest
+    frozen_low := current_lowest
+    frozen_start_index := bar_index - window_size + 1
+    frozen_end_index := bar_index
+    waiting_breakout := true
+    
+    if show_box
+        if not na(my_box)
+            box.delete(my_box)
+        my_box := box.new(left=frozen_start_index, top=frozen_high, right=frozen_end_index, bottom=frozen_low, bgcolor=color.new(color.yellow, box_transparency), border_color=color.new(color.yellow, 80), border_width=1, extend=extend.none)
+
+// --- UPDATE BOX ---
+if waiting_breakout and show_box and not na(my_box)
+    box.set_right(my_box, bar_index)
+    box.set_bgcolor(my_box, color.new(color.rgb(250, 47, 189), box_transparency))
+    box.set_border_color(my_box, color.new(color.yellow, 80))
+
+// --- TP UPDATE ---
+if use_trailing_tp and tp_active and not tp_hit
+    if trade_direction == "BUY"
+        if high > tp_trailing_high
+            tp_trailing_high := high
+            tp_price := tp_trailing_high * (1 - trailing_percent / 100)
+            
+            if show_trailing_lines and not na(tp_line)
+                line.set_y1(tp_line, tp_price)
+                line.set_y2(tp_line, tp_price)
+                line.set_x2(tp_line, bar_index)
+        
+        // TP Hit Check - BUY
+        if low <= tp_price
+            tp_hit := true
+            tp_active := false
+            in_trade := false
+            
+            // EVENT TETİKLE - BUY TP
+            buy_tp_event := true
+            
+            // SL'i kapat
+            if sl_active
+                sl_active := false
+                if show_sl_line and not na(sl_line)
+                    line.delete(sl_line)
+                    sl_line := na
+                if show_sl_label and not na(sl_label)
+                    label.delete(sl_label)
+                    sl_label := na
+            
+            if show_tp_hit
+                label.new(x=bar_index, y=high, text="✅ BUY TP HIT", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_down, size=label_size)
+                line.new(x1=bar_index-1, y1=tp_price, x2=bar_index, y2=tp_price, color=color.new(color.green, 80), width=2, style=line.style_solid)
+            
+            if show_trailing_lines and not na(tp_line)
+                line.delete(tp_line)
+                tp_line := na
+            if not na(tp_label)
+                label.delete(tp_label)
+                tp_label := na
+    
+    else if trade_direction == "SELL"
+        if low < tp_trailing_low
+            tp_trailing_low := low
+            tp_price := tp_trailing_low * (1 + trailing_percent / 100)
+            
+            if show_trailing_lines and not na(tp_line)
+                line.set_y1(tp_line, tp_price)
+                line.set_y2(tp_line, tp_price)
+                line.set_x2(tp_line, bar_index)
+        
+        // TP Hit Check - SELL
+        if high >= tp_price
+            tp_hit := true
+            tp_active := false
+            in_trade := false
+            
+            // EVENT TETİKLE - SELL TP
+            sell_tp_event := true
+            
+            // SL'i kapat
+            if sl_active
+                sl_active := false
+                if show_sl_line and not na(sl_line)
+                    line.delete(sl_line)
+                    sl_line := na
+                if show_sl_label and not na(sl_label)
+                    label.delete(sl_label)
+                    sl_label := na
+            
+            if show_tp_hit
+                label.new(x=bar_index, y=low, text="✅ SELL TP HIT", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_up, size=label_size)
+                line.new(x1=bar_index-1, y1=tp_price, x2=bar_index, y2=tp_price, color=color.new(color.red, 80), width=2, style=line.style_solid)
+            
+            if show_trailing_lines and not na(tp_line)
+                line.delete(tp_line)
+                tp_line := na
+            if not na(tp_label)
+                label.delete(tp_label)
+                tp_label := na
+
+// --- SL UPDATE ---
+if sl_enabled and sl_active and not sl_hit
+    // SL Hit Check - BUY
+    if sl_direction == "BUY" and low <= sl_stop_price
+        sl_hit := true
+        sl_active := false
+        in_trade := false
+        
+        // EVENT TETİKLE - BUY SL
+        buy_sl_event := true
+        
+        // TP'i kapat
+        if tp_active
+            tp_active := false
+            if show_trailing_lines and not na(tp_line)
+                line.delete(tp_line)
+                tp_line := na
+            if not na(tp_label)
+                label.delete(tp_label)
+                tp_label := na
+        
+        if show_sl_hit
+            label.new(x=bar_index, y=high, text="🛑 BUY SL HIT", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=label_size)
+            line.new(x1=bar_index-1, y1=sl_stop_price, x2=bar_index, y2=sl_stop_price, color=color.new(color.red, 80), width=2, style=line.style_solid)
+        
+        if show_sl_line and not na(sl_line)
+            line.delete(sl_line)
+            sl_line := na
+        if show_sl_label and not na(sl_label)
+            label.delete(sl_label)
+            sl_label := na
+    
+    // SL Hit Check - SELL
+    if sl_direction == "SELL" and high >= sl_stop_price
+        sl_hit := true
+        sl_active := false
+        in_trade := false
+        
+        // EVENT TETİKLE - SELL SL
+        sell_sl_event := true
+        
+        // TP'i kapat
+        if tp_active
+            tp_active := false
+            if show_trailing_lines and not na(tp_line)
+                line.delete(tp_line)
+                tp_line := na
+            if not na(tp_label)
+                label.delete(tp_label)
+                tp_label := na
+        
+        if show_sl_hit
+            label.new(x=bar_index, y=low, text="🛑 SELL SL HIT", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_up, size=label_size)
+            line.new(x1=bar_index-1, y1=sl_stop_price, x2=bar_index, y2=sl_stop_price, color=color.new(color.red, 80), width=2, style=line.style_solid)
+        
+        if show_sl_line and not na(sl_line)
+            line.delete(sl_line)
+            sl_line := na
+        if show_sl_label and not na(sl_label)
+            label.delete(sl_label)
+            sl_label := na
+
+// --- TP LINE UPDATE ---
+if tp_active and show_trailing_lines and not na(tp_line) and not tp_hit
+    line.set_x2(tp_line, bar_index)
+
+// --- SL LINE UPDATE ---
+if sl_active and show_sl_line and not na(sl_line) and not sl_hit
+    line.set_x2(sl_line, bar_index)
+
+// --- SL LABEL UPDATE ---
+if sl_active and show_sl_label and not na(sl_label) and not sl_hit
+    label.set_x(sl_label, bar_index)
+
+// --- BREAKOUT CHECK ---
+if waiting_breakout and show_signal
+    // UP BREAKOUT (LONG)
+    if high > frozen_high and close > frozen_high
+        buy_signal := true
+        sell_signal := false
+        
+        // Önceki trade'i temizle
+        if in_trade
+            // TP temizle
+            if tp_active
+                tp_active := false
+                if show_trailing_lines and not na(tp_line)
+                    line.delete(tp_line)
+                    tp_line := na
+                if not na(tp_label)
+                    label.delete(tp_label)
+                    tp_label := na
+            
+            // SL temizle
+            if sl_active
+                sl_active := false
+                if show_sl_line and not na(sl_line)
+                    line.delete(sl_line)
+                    sl_line := na
+                if show_sl_label and not na(sl_label)
+                    label.delete(sl_label)
+                    sl_label := na
+        
+        // Yeni trade - BUY
+        in_trade := true
+        trade_direction := "BUY"
+        trade_start_bar := bar_index
+        
+        // TP Başlat
+        if use_trailing_tp
+            tp_active := true
+            tp_entry_price := close
+            tp_trailing_high := high
+            tp_price := high * (1 - trailing_percent / 100)
+            tp_hit := false  // TP hit reset
+            tp_direction := "BUY"
+            
+            if show_trailing_lines
+                if not na(tp_line)
+                    line.delete(tp_line)
+                // Uzunluğu 1 bar olacak şekilde başlat, sonra uzat
+                tp_line := line.new(x1=bar_index, y1=tp_price, x2=bar_index+1, y2=tp_price, color=color.new(color.green, 70), width=2, style=line.style_dashed)
+            
+            // TP Label
+            if not na(tp_label)
+                label.delete(tp_label)
+            tp_label := label.new(x=bar_index, y=tp_price, text="TP", color=color.new(color.green, 50), textcolor=color.white, style=label.style_label_left, size=label_size)
+        
+        // SL Başlat
+        if sl_enabled
+            sl_active := true
+            sl_direction := "BUY"
+            sl_entry_price := close
+            
+            // SL hesapla
+            if sl_type == "Percentage"
+                sl_stop_price := sl_entry_price * (1 - sl_percent / 100)
+            else // ATR
+                sl_stop_price := sl_entry_price - (ta.atr(sl_atr_length) * sl_atr_mult)
+            
+            sl_hit := false  // SL hit reset
+            
+            if show_sl_line
+                if not na(sl_line)
+                    line.delete(sl_line)
+                // Uzunluğu 1 bar olacak şekilde başlat, sonra uzat
+                sl_line := line.new(x1=bar_index, y1=sl_stop_price, x2=bar_index+1, y2=sl_stop_price, color=color.new(color.red, 70), width=2, style=line.style_dashed)
+            
+            // SL Label - BUY için SL fiyatının altına
+            if show_sl_label
+                if not na(sl_label)
+                    label.delete(sl_label)
+                sl_label := label.new(x=bar_index, y=sl_stop_price, text="SL", color=color.new(color.red, 50), textcolor=color.white, style=label.style_label_left, size=label_size)
+        
+        // Label ve Box
+        label.new(x=bar_index, y=low, text="🟢 BUY", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=label_size)
+        line.new(x1=frozen_start_index, y1=frozen_high, x2=bar_index, y2=frozen_high, color=color.new(color.green, 0), width=3, style=line.style_solid)
+        if not na(my_box)
+            box.set_bgcolor(my_box, color.new(color.green, box_transparency))
+            box.set_border_color(my_box, color.new(color.green, 80))
+        waiting_breakout := false
+    
+    // DOWN BREAKOUT (SHORT)
+    if low < frozen_low and close < frozen_low
+        sell_signal := true
+        buy_signal := false
+        
+        // Önceki trade'i temizle
+        if in_trade
+            // TP temizle
+            if tp_active
+                tp_active := false
+                if show_trailing_lines and not na(tp_line)
+                    line.delete(tp_line)
+                    tp_line := na
+                if not na(tp_label)
+                    label.delete(tp_label)
+                    tp_label := na
+            
+            // SL temizle
+            if sl_active
+                sl_active := false
+                if show_sl_line and not na(sl_line)
+                    line.delete(sl_line)
+                    sl_line := na
+                if show_sl_label and not na(sl_label)
+                    label.delete(sl_label)
+                    sl_label := na
+        
+        // Yeni trade - SELL
+        in_trade := true
+        trade_direction := "SELL"
+        trade_start_bar := bar_index
+        
+        // TP Başlat
+        if use_trailing_tp
+            tp_active := true
+            tp_entry_price := close
+            tp_trailing_low := low
+            tp_price := low * (1 + trailing_percent / 100)
+            tp_hit := false  // TP hit reset
+            tp_direction := "SELL"
+            
+            if show_trailing_lines
+                if not na(tp_line)
+                    line.delete(tp_line)
+                // Uzunluğu 1 bar olacak şekilde başlat, sonra uzat
+                tp_line := line.new(x1=bar_index, y1=tp_price, x2=bar_index+1, y2=tp_price, color=color.new(color.red, 70), width=2, style=line.style_dashed)
+            
+            // TP Label
+            if not na(tp_label)
+                label.delete(tp_label)
+            tp_label := label.new(x=bar_index, y=tp_price, text="TP", color=color.new(color.red, 50), textcolor=color.white, style=label.style_label_left, size=label_size)
+        
+        // SL Başlat
+        if sl_enabled
+            sl_active := true
+            sl_direction := "SELL"
+            sl_entry_price := close
+            
+            // SL hesapla
+            if sl_type == "Percentage"
+                sl_stop_price := sl_entry_price * (1 + sl_percent / 100)
+            else // ATR
+                sl_stop_price := sl_entry_price + (ta.atr(sl_atr_length) * sl_atr_mult)
+            
+            sl_hit := false  // SL hit reset
+            
+            if show_sl_line
+                if not na(sl_line)
+                    line.delete(sl_line)
+                // Uzunluğu 1 bar olacak şekilde başlat, sonra uzat
+                sl_line := line.new(x1=bar_index, y1=sl_stop_price, x2=bar_index+1, y2=sl_stop_price, color=color.new(color.red, 70), width=2, style=line.style_dashed)
+            
+            // SL Label - SELL için SL fiyatının üstüne
+            if show_sl_label
+                if not na(sl_label)
+                    label.delete(sl_label)
+                sl_label := label.new(x=bar_index, y=sl_stop_price, text="SL", color=color.new(color.red, 50), textcolor=color.white, style=label.style_label_left, size=label_size)
+        
+        // Label ve Box
+        label.new(x=bar_index, y=high, text="🔴 SELL", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=label_size)
+        line.new(x1=frozen_start_index, y1=frozen_low, x2=bar_index, y2=frozen_low, color=color.new(color.red, 0), width=3, style=line.style_solid)
+        if not na(my_box)
+            box.set_bgcolor(my_box, color.new(color.red, box_transparency))
+            box.set_border_color(my_box, color.new(color.red, 80))
+        waiting_breakout := false
+
+// --- PLOT FOR DEBUGGING SL ---
+// SL seviyesini doğrulamak için plot
+plot(sl_enabled and sl_active ? sl_stop_price : na, title="SL Price", color=color.new(color.red, 0), linewidth=1, style=plot.style_circles, display=display.none)
+
+// --- ALERTCONDITION (EVENT TABANLI) ---
+// BUY Signal Alert
+alertcondition(condition=use_alerts and buy_signal, title="🟢 BUY Signal", message="Consolidation box broken up! Open BUY position.")
+
+// SELL Signal Alert
+alertcondition(condition=use_alerts and sell_signal, title="🔴 SELL Signal", message="Consolidation box broken down! Open SELL position.")
+
+// BUY TP HIT Alert (EVENT tabanlı - sadece tek mumda tetiklenir)
+alertcondition(condition=use_alerts and buy_tp_event, title="✅ BUY TP HIT", message="BUY position Trailing TP reached! Take profit.")
+
+// SELL TP HIT Alert (EVENT tabanlı - sadece tek mumda tetiklenir)
+alertcondition(condition=use_alerts and sell_tp_event, title="✅ SELL TP HIT", message="SELL position Trailing TP reached! Take profit.")
+
+// BUY SL HIT Alert (EVENT tabanlı - sadece tek mumda tetiklenir)
+alertcondition(condition=use_alerts and buy_sl_event, title="🛑 BUY SL HIT", message="BUY position Stop Loss hit! Position closed.")
+
+// SELL SL HIT Alert (EVENT tabanlı - sadece tek mumda tetiklenir)
+alertcondition(condition=use_alerts and sell_sl_event, title="🛑 SELL SL HIT", message="SELL position Stop Loss hit! Position closed.")
+
+// --- DEBUG TABLE UPDATE ---
+if show_debug_table and barstate.islast
+    
+    table.cell(debugTable, 0, 0, "📊 BOX", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
+    table.cell(debugTable, 1, 0, "INFO", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
+    
+    table.cell(debugTable, 0, 1, "Window:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 1, str.tostring(window_size), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 2, "Box Height:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 2, str.tostring(box_height, "#.##"), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 3, "ATR x" + str.tostring(max_box_atr_mult) + ":", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 3, str.tostring(atr_val * max_box_atr_mult, "#.##"), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 4, "Body Ratio:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 4, "%" + str.tostring(avg_body_ratio * 100, "#.#"), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 5, "Upper Touch:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 5, str.tostring(upper_wick_count), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 6, "Lower Touch:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 6, str.tostring(lower_wick_count), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 7, "Total Touch:", text_color=color.gray, text_size=size.small)
+    string touchText = str.tostring(total_wick_touches) + "/" + str.tostring(min_wick_touches)
+    color touchColor = enough_touches ? color.green : color.red
+    table.cell(debugTable, 1, 7, touchText, text_color=touchColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 8, "Compressed:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 8, is_compressed ? "✅" : "❌", text_color=is_compressed ? color.green : color.red, text_size=size.small)
+    
+    table.cell(debugTable, 0, 9, "Body Filter:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 9, is_body_small ? "✅" : "❌", text_color=is_body_small ? color.green : color.red, text_size=size.small)
+    
+    table.cell(debugTable, 0, 10, "Touch Enough:", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 10, enough_touches ? "✅" : "❌", text_color=enough_touches ? color.green : color.red, text_size=size.small)
+    
+    table.cell(debugTable, 0, 11, "BOX:", text_color=color.gray, text_size=size.small)
+    string statusText = box_formed_now ? "✅ FORMED" : (waiting_breakout ? "🟡 WAITING" : "❌ NONE")
+    color statusColor = box_formed_now ? color.green : (waiting_breakout ? color.yellow : color.red)
+    table.cell(debugTable, 1, 11, statusText, text_color=statusColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 12, "Trade:", text_color=color.gray, text_size=size.small)
+    string tradeText = in_trade ? trade_direction : "NONE"
+    color tradeColor = in_trade ? (trade_direction == "BUY" ? color.green : color.red) : color.gray
+    table.cell(debugTable, 1, 12, tradeText, text_color=tradeColor, text_size=size.small)
+    
+    table.cell(debugTable, 0, 13, "TP Status:", text_color=color.gray, text_size=size.small)
+    string tpStatus = tp_active ? "✅ ACTIVE" : (tp_hit ? "💥 HIT" : "⏳ WAIT")
+    color tpColor = tp_active ? color.green : (tp_hit ? color.orange : color.gray)
+    table.cell(debugTable, 1, 13, tpStatus, text_color=tpColor, text_size=size.small)
+    
+    if tp_active
+        table.cell(debugTable, 0, 14, "TP Price:", text_color=color.gray, text_size=size.small)
+        table.cell(debugTable, 1, 14, str.tostring(tp_price, "#.##"), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 15, "SL Status:", text_color=color.gray, text_size=size.small)
+    string slStatus = sl_active ? "✅ ACTIVE" : (sl_hit ? "💥 HIT" : (sl_enabled ? "⏳ WAIT" : "❌ OFF"))
+    color slColor = sl_active ? color.green : (sl_hit ? color.red : (sl_enabled ? color.yellow : color.gray))
+    table.cell(debugTable, 1, 15, slStatus, text_color=slColor, text_size=size.small)
+    
+    if sl_active
+        table.cell(debugTable, 0, 16, "SL Price:", text_color=color.gray, text_size=size.small)
+        table.cell(debugTable, 1, 16, str.tostring(sl_stop_price, "#.##"), text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 17, "Entry Price:", text_color=color.gray, text_size=size.small)
+    string entryText = in_trade ? str.tostring(tp_active ? tp_entry_price : sl_entry_price, "#.##") : "N/A"
+    table.cell(debugTable, 1, 17, entryText, text_color=color.white, text_size=size.small)
+    
+    table.cell(debugTable, 0, 18, "SL Visible:", text_color=color.gray, text_size=size.small)
+    string visibleText = (sl_active and not na(sl_line)) ? "✅ LINE EXISTS" : "❌ NO LINE"
+    color visibleColor = (sl_active and not na(sl_line)) ? color.green : color.red
+    table.cell(debugTable, 1, 18, visibleText, text_color=visibleColor, text_size=size.small)

@@ -1,0 +1,1330 @@
+// This Pine Script(R) code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// @description SSMT (Smart Money Tool) detection engine library. Handles normal and hidden SMT detection,
+//              QCISD level creation/management, PSP (Price Sync Pattern) calculation, multi-condition alert logic,
+//              status bar color computation, and all session/quarter math.
+//              Extracted from qt-ultimate-enigma.pine to avoid TradingView compiler timeout.
+library("EKSSMT", overlay=true)
+
+// =============================================================================
+// EXPORTED TYPES
+// =============================================================================
+
+// @type Configuration settings for SSMT detection, drawing, alerts, and QCISD engine.
+//       All fields correspond to values that were previously input.*() variables.
+// @field hidelines Whether to hide SSMT divergence lines on chart
+// @field hidelabels Whether to hide SSMT divergence labels on chart
+// @field normstyle Line style for normal SSMT lines (line.style_solid, etc.)
+// @field hiddstyle Line style for hidden SSMT lines
+// @field i_font Text size for SSMT labels ("tiny", "small", "normal", "large", "huge")
+// @field alerttype Type of SSMT to show/alert ("All", "Normal", "Hidden")
+// @field ssmt_history_limit Maximum number of SSMT lines/labels to keep
+// @field show_qcisd Whether QCISD engine is enabled
+// @field bias_input Market bias for QCISD ("Bullish", "Bearish", "Neutral")
+// @field qcisd_bull_clr Color for bullish QCISD levels
+// @field qcisd_bear_clr Color for bearish QCISD levels
+// @field qcisd_pend_clr Color for pending (threatened) QCISD levels
+// @field qcisd_text_clr Color for QCISD label text
+// @field qcisd_width Line width for QCISD levels
+// @field qcisd_lbl_size Text size for QCISD labels (size.tiny, size.small, size.normal)
+// @field qcisd_mono Whether to use monospace font for QCISD labels
+// @field qcisd_max_limit Maximum number of QCISD lines to draw
+// @field qcisd_trigger HP-QCISD alert trigger mode ("All", "Confirmation", "Invalidation", "Retest", "Off")
+// @field qcisd_norm_trigger Normal QCISD alert trigger mode
+export type SSMTConfig
+    bool   hidelines         = false
+    bool   hidelabels        = false
+    string normstyle         = "Solid"
+    string hiddstyle         = "Dashed"
+    string i_font            = "small"
+    string alerttype         = "All"
+    int    ssmt_history_limit = 50
+    bool   show_qcisd        = false
+    string bias_input        = "Bullish"
+    color  qcisd_bull_clr    = #00E676
+    color  qcisd_bear_clr    = #FF5252
+    color  qcisd_pend_clr    = #FFEA00
+    color  qcisd_text_clr    = #615e5e
+    int    qcisd_width       = 2
+    string qcisd_lbl_size    = "small"
+    bool   qcisd_mono        = false
+    int    qcisd_max_limit   = 10
+    string qcisd_trigger     = "Off"
+    string qcisd_norm_trigger = "Off"
+
+// @type Holds the global QCISD state arrays. Passed by reference so library functions can modify in place.
+// @field g_q_lines Array of QCISD line drawings
+// @field g_q_lbls Array of QCISD label drawings
+// @field g_q_dirs Array of directions (1=bullish, -1=bearish)
+// @field g_q_hp Array of high-probability flags
+// @field g_q_conf Array of confirmation flags
+// @field g_q_names Array of SSMT source names (e.g. "90m", "Daily")
+// @field g_q_pairs Array of pair names
+export type QCISDState
+    array<line>   g_q_lines
+    array<label>  g_q_lbls
+    array<int>    g_q_dirs
+    array<bool>   g_q_hp
+    array<bool>   g_q_conf
+    array<string> g_q_names
+    array<string> g_q_pairs
+
+// @type Holds all computed session and quarter values for the current bar.
+// @field val_sesm Micro session index (0-63)
+// @field val_ses 90m session index (0-15)
+// @field val_sesD Daily session index (0-3)
+// @field val_sesW Weekly session index (0-6)
+// @field val_sesMo Monthly session index (0-4)
+// @field val_sesQ Quarterly session index (0-3)
+// @field val_sesY Yearly session index (0-3)
+// @field newMo Whether monthly session just changed
+// @field newW Whether weekly session just changed
+// @field newD Whether daily session just changed
+// @field newN Whether 90m session just changed
+// @field newm Whether micro session just changed
+// @field newQ Whether quarterly session just changed
+// @field newY Whether yearly session just changed
+// @field dayStart Timestamp of the current day start
+export type SessionState
+    int  val_sesm  = -1
+    int  val_ses   = -1
+    int  val_sesD  = -1
+    int  val_sesW  = -1
+    int  val_sesMo = -1
+    int  val_sesQ  = -1
+    int  val_sesY  = -1
+    bool newMo     = false
+    bool newW      = false
+    bool newD      = false
+    bool newN      = false
+    bool newm      = false
+    bool newQ      = false
+    bool newY      = false
+    int  dayStart  = 0
+
+// =============================================================================
+// INTERNAL HELPER FUNCTIONS (not exported)
+// =============================================================================
+
+f_leap_year(y) =>
+    y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+
+f_month_length(is_leap, m) =>
+    if m == 2
+        is_leap ? 29 : 28
+    else if (m == 4 or m == 6 or m == 9 or m == 11)
+        30
+    else
+        31
+
+// =============================================================================
+// EXPORTED FUNCTIONS
+// =============================================================================
+
+// @function Creates and returns an initialized QCISDState with empty arrays.
+// @returns QCISDState with all arrays initialized
+export init_qcisd_state() =>
+    QCISDState.new(
+     array.new_line(),
+     array.new_label(),
+     array.new_int(),
+     array.new_bool(),
+     array.new_bool(),
+     array.new_string(),
+     array.new_string())
+
+// @function Adds a line to a managed array, deleting the oldest if over the limit.
+// @param arr The line array to manage
+// @param value The new line to add
+// @param limit Maximum array size
+export add_to_line_array(array<line> arr, line value, int limit) =>
+    array.unshift(arr, value)
+    if array.size(arr) > limit
+        line.delete(array.pop(arr))
+
+// @function Adds a label to a managed array, deleting the oldest if over the limit.
+// @param arr The label array to manage
+// @param value The new label to add
+// @param limit Maximum array size
+export add_to_label_array(array<label> arr, label value, int limit) =>
+    array.unshift(arr, value)
+    if array.size(arr) > limit
+        label.delete(array.pop(arr))
+
+// @function Computes all session and quarter values for the current bar.
+//           Calculates micro, 90m, daily, weekly, monthly, quarterly, and yearly session indices,
+//           plus change flags for each.
+// @param t The current bar time
+// @param tz Timezone string (e.g. "UTC-4")
+// @param dayStartHour Hour of day start in the given timezone (e.g. 18)
+// @returns SessionState with all computed session/quarter values
+export compute_sessions(int t, string tz, int dayStartHour) =>
+    int msDay   = 24 * 60 * 60 * 1000
+    int msWeek  = 7  * 24 * 60 * 60 * 1000
+    int ms90m   = 90 * 60 * 1000
+    int msMicro = 1350000  // 22.5 minutes in ms
+    int yy  = year(t, tz)
+    int mo  = month(t, tz)
+    int dom = dayofmonth(t, tz)
+    int dow = dayofweek(t, tz)
+
+    int dayStartToday = timestamp(tz, yy, mo, dom, dayStartHour, 0)
+    int _dayStart     = t >= dayStartToday ? dayStartToday : (dayStartToday - msDay)
+    int minsFromDayStart = int(((t - _dayStart) % msDay) / (60 * 1000))  // 0..1439
+
+    int yy_c  = year(_dayStart, tz)
+    int mo_c  = month(_dayStart, tz)
+    int dom_c = dayofmonth(_dayStart, tz)
+    int dow_c = dayofweek(_dayStart, tz)
+
+    int qYear = mo_c <= 3 ? 1 : mo_c <= 6 ? 2 : mo_c <= 9 ?
+      3 : 4
+    bool is_year1 = qYear == 1
+    bool is_year2 = qYear == 2
+    bool is_year3 = qYear == 3
+    bool is_year4 = qYear == 4
+
+    int q2Month = ((mo_c - 1) % 3) + 1
+
+    bool is_quarter1 = q2Month == 1
+    bool is_quarter2 = q2Month == 2
+    bool is_quarter3 = q2Month == 3
+    bool is_quarter4 = q2Month == 4
+    int curr_week  = weekofyear(_dayStart + msDay, tz)
+    int days_in_mo = f_month_length(f_leap_year(yy_c), mo_c)
+    int day_end_mo = days_in_mo - dom_c
+    int iso_year = yy_c
+    if mo_c == 12 and curr_week == 1
+        iso_year := yy_c + 1
+    else if mo_c == 1 and curr_week >= 52
+        iso_year := yy_c - 1
+    int t_jan1 = timestamp(tz, iso_year, 1, 1, 0, 0)
+    int d_jan1 = dayofweek(t_jan1, tz)
+    bool is_leap_iso = (iso_year % 4 == 0 and (iso_year % 100 != 0 or iso_year % 400 == 0))
+    int weeks_in_year = (d_jan1 == dayofweek.thursday or (d_jan1 == dayofweek.wednesday and is_leap_iso)) ? 53 : 52
+
+    int qMonth = weeks_in_year == 53 ? (curr_week == 1 ? 5 : ((curr_week - 2) % 4) + 1) : ((curr_week - 1) % 4) + 1
+    int Full_Week_Count = curr_week
+    int qWeek = dow_c == dayofweek.sunday ? 1 : dow_c == dayofweek.monday ? 2 : dow_c == dayofweek.tuesday ?
+      3 : dow_c == dayofweek.wednesday ? 4 : dow_c == dayofweek.thursday ? 5 : dow_c == dayofweek.friday ?
+      6 : dow_c == dayofweek.saturday ? 7 : na
+    int qDay = int(math.floor(minsFromDayStart / 360)) + 1  // 1..4
+    int minsIn6H = minsFromDayStart % 360
+    int q90 = int(math.floor(minsIn6H / 90)) + 1 // 1..4
+    int msInto90 = int((t - _dayStart) % ms90m)
+    int qMicro = int(math.floor(msInto90 / msMicro)) + 1
+    qMicro := qMicro < 1 ? 1 : qMicro > 4 ? 4 : qMicro
+
+    // --- Micro session booleans (64 slots) ---
+    bool is_sesa1 = qDay==1 and q90==1 and qMicro==1
+    bool is_sesa2 = qDay==1 and q90==1 and qMicro==2
+    bool is_sesa3 = qDay==1 and q90==1 and qMicro==3
+    bool is_sesa4 = qDay==1 and q90==1 and qMicro==4
+    bool is_sesb1 = qDay==1 and q90==2 and qMicro==1
+    bool is_sesb2 = qDay==1 and q90==2 and qMicro==2
+    bool is_sesb3 = qDay==1 and q90==2 and qMicro==3
+    bool is_sesb4 = qDay==1 and q90==2 and qMicro==4
+    bool is_sesc1 = qDay==1 and q90==3 and qMicro==1
+    bool is_sesc2 = qDay==1 and q90==3 and qMicro==2
+    bool is_sesc3 = qDay==1 and q90==3 and qMicro==3
+    bool is_sesc4 = qDay==1 and q90==3 and qMicro==4
+    bool is_sesd1 = qDay==1 and q90==4 and qMicro==1
+    bool is_sesd2 = qDay==1 and q90==4 and qMicro==2
+    bool is_sesd3 = qDay==1 and q90==4 and qMicro==3
+    bool is_sesd4 = qDay==1 and q90==4 and qMicro==4
+    bool is_sese1 = qDay==2 and q90==1 and qMicro==1
+    bool is_sese2 = qDay==2 and q90==1 and qMicro==2
+    bool is_sese3 = qDay==2 and q90==1 and qMicro==3
+    bool is_sese4 = qDay==2 and q90==1 and qMicro==4
+    bool is_sesf1 = qDay==2 and q90==2 and qMicro==1
+    bool is_sesf2 = qDay==2 and q90==2 and qMicro==2
+    bool is_sesf3 = qDay==2 and q90==2 and qMicro==3
+    bool is_sesf4 = qDay==2 and q90==2 and qMicro==4
+    bool is_sesg1 = qDay==2 and q90==3 and qMicro==1
+    bool is_sesg2 = qDay==2 and q90==3 and qMicro==2
+    bool is_sesg3 = qDay==2 and q90==3 and qMicro==3
+    bool is_sesg4 = qDay==2 and q90==3 and qMicro==4
+    bool is_sesh1 = qDay==2 and q90==4 and qMicro==1
+    bool is_sesh2 = qDay==2 and q90==4 and qMicro==2
+    bool is_sesh3 = qDay==2 and q90==4 and qMicro==3
+    bool is_sesh4 = qDay==2 and q90==4 and qMicro==4
+    bool is_sesi1 = qDay==3 and q90==1 and qMicro==1
+    bool is_sesi2 = qDay==3 and q90==1 and qMicro==2
+    bool is_sesi3 = qDay==3 and q90==1 and qMicro==3
+    bool is_sesi4 = qDay==3 and q90==1 and qMicro==4
+    bool is_sesj1 = qDay==3 and q90==2 and qMicro==1
+    bool is_sesj2 = qDay==3 and q90==2 and qMicro==2
+    bool is_sesj3 = qDay==3 and q90==2 and qMicro==3
+    bool is_sesj4 = qDay==3 and q90==2 and qMicro==4
+    bool is_sesk1 = qDay==3 and q90==3 and qMicro==1
+    bool is_sesk2 = qDay==3 and q90==3 and qMicro==2
+    bool is_sesk3 = qDay==3 and q90==3 and qMicro==3
+    bool is_sesk4 = qDay==3 and q90==3 and qMicro==4
+    bool is_sesl1 = qDay==3 and q90==4 and qMicro==1
+    bool is_sesl2 = qDay==3 and q90==4 and qMicro==2
+    bool is_sesl3 = qDay==3 and q90==4 and qMicro==3
+    bool is_sesl4 = qDay==3 and q90==4 and qMicro==4
+    bool is_sesm1 = qDay==4 and q90==1 and qMicro==1
+    bool is_sesm2 = qDay==4 and q90==1 and qMicro==2
+    bool is_sesm3 = qDay==4 and q90==1 and qMicro==3
+    bool is_sesm4 = qDay==4 and q90==1 and qMicro==4
+    bool is_sesn1 = qDay==4 and q90==2 and qMicro==1
+    bool is_sesn2 = qDay==4 and q90==2 and qMicro==2
+    bool is_sesn3 = qDay==4 and q90==2 and qMicro==3
+    bool is_sesn4 = qDay==4 and q90==2 and qMicro==4
+    bool is_seso1 = qDay==4 and q90==3 and qMicro==1
+    bool is_seso2 = qDay==4 and q90==3 and qMicro==2
+    bool is_seso3 = qDay==4 and q90==3 and qMicro==3
+    bool is_seso4 = qDay==4 and q90==3 and qMicro==4
+    bool is_sesp1 = qDay==4 and q90==4 and qMicro==1
+    bool is_sesp2 = qDay==4 and q90==4 and qMicro==2
+    bool is_sesp3 = qDay==4 and q90==4 and qMicro==3
+    bool is_sesp4 = qDay==4 and q90==4 and qMicro==4
+
+    // --- 90m session booleans (16 slots) ---
+    bool is_sesa = qDay==1 and q90==1
+    bool is_sesb = qDay==1 and q90==2
+    bool is_sesc = qDay==1 and q90==3
+    bool is_sesd = qDay==1 and q90==4
+    bool is_sese = qDay==2 and q90==1
+    bool is_sesf = qDay==2 and q90==2
+    bool is_sesg = qDay==2 and q90==3
+    bool is_sesh = qDay==2 and q90==4
+    bool is_sesi = qDay==3 and q90==1
+    bool is_sesj = qDay==3 and q90==2
+    bool is_sesk = qDay==3 and q90==3
+    bool is_sesl = qDay==3 and q90==4
+    bool is_sesm = qDay==4 and q90==1
+    bool is_sesn = qDay==4 and q90==2
+    bool is_seso = qDay==4 and q90==3
+    bool is_sesp = qDay==4 and q90==4
+
+    // --- Daily session booleans (4 slots) ---
+    bool is_sesq = qDay==1
+    bool is_sesr = qDay==2
+    bool is_sess = qDay==3
+    bool is_sest = qDay==4
+
+    // --- Weekly session booleans (7 slots) ---
+    bool is_week1 = qWeek == 1
+    bool is_week2 = qWeek == 2
+    bool is_week3 = qWeek == 3
+    bool is_week4 = qWeek == 4
+    bool is_week5 = qWeek == 5
+    bool is_week6 = qWeek == 6
+    bool is_week7 = qWeek == 7
+
+    // --- Monthly session booleans (5 slots) ---
+    bool is_month1 = qMonth == 1
+    bool is_month2 = qMonth == 2
+    bool is_month3 = qMonth == 3
+    bool is_month4 = qMonth == 4
+    bool is_month5 = qMonth == 5
+
+    // --- Build arrays and find indices ---
+    array<bool> arr_sesm_a   = array.from(
+      is_sesa1,is_sesa2,is_sesa3,is_sesa4,is_sesb1,is_sesb2,is_sesb3,is_sesb4,
+      is_sesc1,is_sesc2,is_sesc3,is_sesc4,is_sesd1,is_sesd2,is_sesd3,is_sesd4,
+      is_sese1,is_sese2,is_sese3,is_sese4,is_sesf1,is_sesf2,is_sesf3,is_sesf4,
+      is_sesg1,is_sesg2,is_sesg3,is_sesg4,is_sesh1,is_sesh2,is_sesh3,is_sesh4,
+      is_sesi1,is_sesi2,is_sesi3,is_sesi4,is_sesj1,is_sesj2,is_sesj3,is_sesj4,
+      is_sesk1,is_sesk2,is_sesk3,is_sesk4,is_sesl1,is_sesl2,is_sesl3,is_sesl4,
+      is_sesm1,is_sesm2,is_sesm3,is_sesm4,is_sesn1,is_sesn2,is_sesn3,is_sesn4,
+      is_seso1,is_seso2,is_seso3,is_seso4,is_sesp1,is_sesp2,is_sesp3,is_sesp4)
+    int _val_sesm   = array.indexof(arr_sesm_a, true)
+    array<bool> arr_ses_a   = array.from(is_sesa,is_sesb,is_sesc,is_sesd,is_sese,is_sesf,is_sesg,is_sesh,is_sesi,is_sesj,is_sesk,is_sesl,is_sesm,is_sesn,is_seso,is_sesp)
+    int _val_ses   = array.indexof(arr_ses_a, true)
+    array<bool> arr_sesD_a  = array.from(is_sesq,is_sesr,is_sess,is_sest)
+    int _val_sesD  = array.indexof(arr_sesD_a, true)
+    array<bool> arr_sesW_a  = array.from(is_week1, is_week2, is_week3, is_week4, is_week5, is_week6, is_week7)
+    int _val_sesW  = array.indexof(arr_sesW_a, true)
+    array<bool> arr_sesMo_a = array.from(is_month1, is_month2, is_month3, is_month4, is_month5)
+    int _val_sesMo = array.indexof(arr_sesMo_a, true)
+    array<bool> arr_sesQ_a  = array.from(is_quarter1, is_quarter2, is_quarter3, is_quarter4)
+    int _val_sesQ  = array.indexof(arr_sesQ_a, true)
+    array<bool> arr_sesY_a  = array.from(is_year1, is_year2, is_year3, is_year4)
+    int _val_sesY  = array.indexof(arr_sesY_a, true)
+    bool _newMo = _val_sesMo != _val_sesMo[1]
+    bool _newW  = _val_sesW  != _val_sesW[1]
+    bool _newD  = _val_sesD  != _val_sesD[1]
+    bool _newN  = _val_ses   != _val_ses[1]
+    bool _newm  = _val_sesm  != _val_sesm[1]
+    bool _newQ  = _val_sesQ  != _val_sesQ[1]
+    bool _newY  = _val_sesY  != _val_sesY[1]
+
+    SessionState.new(_val_sesm, _val_ses, _val_sesD, _val_sesW, _val_sesMo, _val_sesQ, _val_sesY,
+     _newMo, _newW, _newD, _newN, _newm, _newQ, _newY, _dayStart)
+
+// @function Tracks H/L/close extremes per session period. Core price tracking for SSMT detection.
+// @param _tf_ok Whether the current timeframe is within the valid range
+// @param _val_ses The current session index value
+// @param op Open price (chart or correlated asset)
+// @param cls Close price
+// @param hi High price
+// @param lo Low price
+// @param ti Time value
+// @returns Tuple of 18 values: [hmaxt, lmint, hmax2, lmin2, hmax1, lmin1, hmax, lmin, hmaxt1, lmint1, clsmax, clsmax1, clsmaxt1, clsmin, clsmin1, clsmint1, clsmaxt, clsmint]
+export f_main_process(bool _tf_ok, int _val_ses, float op, float cls, float hi, float lo, int ti) =>
+    var float hmax   = hi , var float hmax1 = hi , var float hmax2 = hi
+    var float lmin   = lo , var float lmin1 = lo , var float lmin2 = lo
+    var int hmaxt  = ti,  var int lmint   = ti
+    var int hmaxt1 = ti,  var int lmint1  = ti
+    var float clsmax  = math.max(cls,op), var int clsmaxt = ti
+    var float clsmin  = math.min(cls,op), var int clsmint = ti
+    var float clsmax1 = math.max(cls,op), var int clsmaxt1 = ti
+    var float clsmin1 = math.min(cls,op), var int clsmint1 = ti
+    if _tf_ok
+        if _val_ses  !=  _val_ses[1]
+            hmax  := hi
+            lmin  := lo
+            hmaxt := ti
+            lmint := ti
+            clsmax  := math.max(cls,op)
+            clsmaxt := ti
+            clsmin  := math.min(cls,op)
+            clsmint := ti
+
+        if _val_ses == _val_ses[1]
+            if hi >= hmax
+                hmax  := hi
+                hmaxt := ti
+            if lo <= lmin
+                lmin  := lo
+                lmint := ti
+            if math.max(cls,op) >= clsmax
+                clsmax := math.max(cls,op)
+                clsmaxt:= ti
+            if math.min(cls,op) <= clsmin
+                clsmin := math.min(cls,op)
+                clsmint:= ti
+
+        if _val_ses  !=  _val_ses[1]
+            hmax1 := hmax[1]
+            lmin1 := lmin[1]
+            hmax2 := hmax1[1]
+            lmin2 := lmin1[1]
+            hmaxt1 := hmaxt[1]
+            lmint1 := lmint[1]
+            clsmax1  := clsmax[1]
+            clsmaxt1 := clsmaxt[1]
+            clsmin1  := clsmin[1]
+            clsmint1 := clsmint[1]
+
+    [hmaxt, lmint, hmax2, lmin2, hmax1, lmin1, hmax, lmin, hmaxt1, lmint1, clsmax, clsmax1, clsmaxt1, clsmin, clsmin1, clsmint1, clsmaxt, clsmint]
+
+// @function Normal SMT detection with line/label drawing and QCISD level creation.
+// @param cfg SSMTConfig settings
+// @param qcisd_state QCISDState arrays for QCISD level management
+// @param ah2 Chart asset high 2 periods ago
+// @param ah1 Chart asset high 1 period ago
+// @param ah0 Chart asset current high
+// @param al2 Chart asset low 2 periods ago
+// @param al1 Chart asset low 1 period ago
+// @param al0 Chart asset current low
+// @param bh2 Correlated asset high 2 periods ago
+// @param bh1 Correlated asset high 1 period ago
+// @param bh0 Correlated asset current high
+// @param bl2 Correlated asset low 2 periods ago
+// @param bl1 Correlated asset low 1 period ago
+// @param bl0 Correlated asset current low
+// @param _hmaxt Time of current high maximum
+// @param _lmint Time of current low minimum
+// @param _hmaxt1 Time of previous high maximum
+// @param _lmint1 Time of previous low minimum
+// @param _tfok Whether timeframe is valid for this SSMT level
+// @param _val_ses Current session index
+// @param showon Whether to show this SSMT level on chart
+// @param _smt_clr Color for SSMT lines
+// @param _smt_txt_clr Color for SSMT label text
+// @param _tf_ok_V Whether timeframe is valid for visibility
+// @param lbl Label text string
+// @param name SSMT timeframe name ("90m", "Daily", "Weekly", etc.)
+// @param pair Pair number (2=secondary, 3=tertiary)
+// @param _inv Whether this pair is inverse correlated
+// @param _time_limit Time limit for active status checking (dayStart or 0)
+// @param ssmt_pair Name string of secondary pair
+// @param ssmt_pair2 Name string of tertiary pair
+// @returns Tuple: [_bear1, _bear0, _bull1, _bull0, ret_smtbe, ret_smtbu, _is_act_beh, _is_act_bul]
+export f_ssmt(SSMTConfig cfg, QCISDState qcisd_state,
+  float ah2, float ah1, float ah0, float al2, float al1, float al0,
+  float bh2, float bh1, float bh0, float bl2, float bl1, float bl0,
+  int _hmaxt, int _lmint, int _hmaxt1, int _lmint1,
+  bool _tfok, int _val_ses, bool showon, color _smt_clr, color _smt_txt_clr,
+  bool _tf_ok_V, string lbl, string name, int pair, bool _inv, int _time_limit,
+  string ssmt_pair, string ssmt_pair2) =>
+
+    bool _bear1 = ((ah2 >= ah1 and bh2 <= bh1) or (ah2 <= ah1 and bh2 >= bh1) ) and not(ah2 == ah1 and bh2 == bh1) and not _inv
+    bool _bear0 = ((ah1 >= ah0 and bh1 <= bh0) or (ah1 <= ah0 and bh1 >= bh0) ) and not(ah1 == ah0 and bh1 == bh0) and not _inv
+    bool _bull1 = ((al2 <= al1 and bl2 >= bl1) or (al2 >= al1 and bl2 <= bl1) ) and not(al2 == al1 and bl2 == bl1) and not _inv
+    bool _bull0 = ((al1 <= al0 and bl1 >= bl0) or (al1 >= al0 and bl1 <= bl0) ) and not(al1 == al0 and bl1 == bl0) and not _inv
+
+    if _inv
+        _bear1 := ((ah2 >= ah1 and bl2 >= bl1) or (ah2 <= ah1 and bl2 <= bl1) ) and not(ah2 == ah1 and bl2 == bl1)
+        _bear0 := ((ah1 >= ah0 and bl1 >= bl0) or (ah1 <= ah0 and bl1 <= bl0) ) and not(ah1 == ah0 and bl1 == bl0)
+        _bull1 := ((al2 <= al1 and bh2 <= bh1) or (al2 >= al1 and bh2 >= bh1) ) and not(al2 == al1 and bh2 == bh1)
+        _bull0 := ((al1 <= al0 and bh1 <= bh0) or (al1 >= al0 and bh1 >= bh0) ) and not(al1 == al0 and bh1 == bh0)
+
+    string tooltiplbl = pair == 2 ? name +" " + ssmt_pair  :name +" " + ssmt_pair2
+    string lblstyleh = label.style_label_down
+    string lblstylel = label.style_label_up
+    var line smtbeh = line.new(na,na,na,na)
+    var line smtbul = line.new(na,na,na,na)
+    var label smtbe  = label.new(na,na)
+    var label smtbu  = label.new(na,na)
+    label ret_smtbe = na
+    label ret_smtbu = na
+
+    var array<line>  arr_beh = array.new_line()
+    var array<label> arr_lbh = array.new_label()
+    var array<line>  arr_bul = array.new_line()
+    var array<label> arr_lbl = array.new_label()
+
+    color _draw_clr = _tf_ok_V ? (cfg.hidelines ? color.new(_smt_clr, 100) : _smt_clr) : color.new(_smt_clr, 100)
+    color _draw_txt_clr = _tf_ok_V ? _smt_txt_clr : color.new(color.white, 100)
+
+    if (_bull0 or _bear0 )and showon and _tfok
+        if (_val_ses[1] != _val_ses or not _bear0[1] or _hmaxt != _hmaxt[1] ) and  _bear0
+            smtbeh   := line.new(x1 = _hmaxt1 , y1 = ah1 , x2 = _hmaxt , y2 = ah0 , xloc=xloc.bar_time,color= _draw_clr,width = 1,style=cfg.normstyle)
+            if not cfg.hidelabels
+                smtbe    := label.new(x=math.round(_hmaxt+_hmaxt1)/2, y = math.round_to_mintick(ah1+ah0)/2,text = lbl ,xloc = xloc.bar_time,yloc = yloc.price,color = color.new(color.white, 100),
+                  style=lblstyleh,textcolor = _draw_txt_clr, size = cfg.i_font,tooltip = tooltiplbl)
+                ret_smtbe := smtbe
+                add_to_label_array(arr_lbh,smtbe, cfg.ssmt_history_limit)
+            add_to_line_array(arr_beh,smtbeh, cfg.ssmt_history_limit)
+
+        if (_val_ses[1] != _val_ses or not _bull0[1] or _lmint != _lmint[1] ) and  _bull0
+            smtbul := line.new(x1 = _lmint1 , y1 = al1 , x2 = _lmint , y2 = al0 , xloc=xloc.bar_time,color= _draw_clr,width = 1,style = cfg.normstyle)
+            if not cfg.hidelabels
+                smtbu  := label.new(x=math.round(_lmint+_lmint1)/2, y = math.round_to_mintick(al1+al0)/2,text = lbl ,xloc = xloc.bar_time,yloc = yloc.price,color = color.new(color.white, 100),
+                  style=lblstylel,textcolor = _draw_txt_clr, size = cfg.i_font,tooltip = tooltiplbl)
+                ret_smtbu := smtbu
+                add_to_label_array(arr_lbl,smtbu, cfg.ssmt_history_limit)
+            add_to_line_array(arr_bul,smtbul, cfg.ssmt_history_limit)
+
+    if array.size(arr_beh) > 0 and showon and _tfok
+        if _val_ses == _val_ses[1] and _bear0[1] and not _bear0
+            line.delete(smtbeh)
+            array.remove(arr_beh,0)
+            if not cfg.hidelabels and array.size(arr_lbh) > 0
+                label.delete(smtbe)
+                array.remove(arr_lbh,0)
+        if array.size(arr_beh) > 0 and showon
+            for i = array.size(arr_beh) -1 to 0
+                line dline = array.get(arr_beh,i)
+                float top    = line.get_y2(dline)
+                int tme    = line.get_x2(dline)
+                if time > tme and high >= top
+                    line.delete(dline)
+                    array.remove(arr_beh,i)
+                    if not cfg.hidelabels and array.size(arr_lbh) > 0
+                        label dlbl   = array.get(arr_lbh,i)
+                        label.delete(dlbl)
+                        array.remove(arr_lbh,i)
+
+    if array.size(arr_bul) > 0 and showon and _tfok
+        if _val_ses == _val_ses[1] and _bull0[1] and not _bull0
+            line.delete(smtbul)
+            array.remove(arr_bul,0)
+            if not cfg.hidelabels and array.size(arr_lbl) > 0
+                label.delete(smtbu)
+                array.remove(arr_lbl,0)
+        if array.size(arr_bul) > 0 and showon and _tfok
+            for i = array.size(arr_bul) -1 to 0
+                line dline = array.get(arr_bul,i)
+                float bot    = line.get_y2(dline)
+                int tme    = line.get_x2(dline)
+                if time > tme and low <= bot
+                    line.delete(dline)
+                    array.remove(arr_bul,i)
+                    if not cfg.hidelabels and array.size(arr_lbl) > 0
+                        label dlbl   = array.get(arr_lbl,i)
+                        label.delete(dlbl)
+                        array.remove(arr_lbl,i)
+
+    bool _is_act_beh = false
+    if array.size(arr_beh) > 0
+        if _time_limit > 0
+            for i = 0 to array.size(arr_beh) - 1
+                if line.get_x2(array.get(arr_beh, i)) >= _time_limit
+                    _is_act_beh := true
+                    break
+        else
+            _is_act_beh := true
+
+    bool _is_act_bul = false
+    if array.size(arr_bul) > 0
+        if _time_limit > 0
+            for i = 0 to array.size(arr_bul) - 1
+                if line.get_x2(array.get(arr_bul, i)) >= _time_limit
+                    _is_act_bul := true
+                    break
+        else
+            _is_act_bul := true
+
+    float h_c  = ta.valuewhen(time == _hmaxt, close, 0)
+    float h_o  = ta.valuewhen(time == _hmaxt, open, 0)
+    float h_po = ta.valuewhen(time == _hmaxt, open[1], 0)
+    float l_c  = ta.valuewhen(time == _lmint, close, 0)
+    float l_o  = ta.valuewhen(time == _lmint, open, 0)
+    float l_po = ta.valuewhen(time == _lmint, open[1], 0)
+
+    int tfs = timeframe.in_seconds(timeframe.period)
+    bool qcisd_vis = false
+    string ssmt_src = ""
+
+    if name == "Micro"
+        qcisd_vis := tfs >= 60 and tfs <= 120
+        ssmt_src := "Mic"
+    else if name == "90m"
+        qcisd_vis := tfs >= 180 and tfs <= 600
+        ssmt_src := "90m"
+    else if name == "Daily"
+        qcisd_vis := tfs >= 900 and tfs <= 1800
+        ssmt_src := "D"
+    else if name == "Weekly"
+        qcisd_vis := tfs >= 3600 and tfs <= 10800
+        ssmt_src := "W"
+    else if name == "Monthly"
+        qcisd_vis := tfs >= 14400 and tfs <= 21600
+        ssmt_src := "M"
+    else if name == "Quarterly"
+        qcisd_vis := tfs == 86400
+        ssmt_src := "Q"
+    else if name == "Yearly"
+        qcisd_vis := tfs >= 604800 and tfs <= timeframe.in_seconds("1M")
+        ssmt_src := "Y"
+
+    bool new_bear_signal  = _bear0 and not _bear0[1]
+    bool bear_pivot_moved = _bear0 and _hmaxt != _hmaxt[1]
+    bool new_bull_signal  = _bull0 and not _bull0[1]
+    bool bull_pivot_moved = _bull0 and _lmint != _lmint[1]
+
+    int ext_len_qcisd = timeframe.in_seconds(timeframe.period) * 1000 * 10
+    int bar_ms = timeframe.in_seconds(timeframe.period) * 1000
+    string font_fam = cfg.qcisd_mono ? font.family_monospace : font.family_default
+    string p_name = pair == 2 ? ssmt_pair : ssmt_pair2
+
+    if showon and _tfok and cfg.show_qcisd and qcisd_vis
+
+        if new_bear_signal or bear_pivot_moved
+            float lvl = (h_c > h_o) ? h_o : h_po
+            bool is_hp = cfg.bias_input == "Bearish"
+
+            if not na(lvl)
+                bool skip_creation = false
+
+                if array.size(qcisd_state.g_q_dirs) > 0
+                    for i = array.size(qcisd_state.g_q_dirs) - 1 to 0
+                        if array.get(qcisd_state.g_q_dirs, i) == -1 and array.get(qcisd_state.g_q_names, i) == name
+                            float ex_x1 = line.get_x1(array.get(qcisd_state.g_q_lines, i))
+                            if ex_x1 == _hmaxt or ex_x1 == (_hmaxt - bar_ms)
+                                if array.get(qcisd_state.g_q_hp, i) == is_hp
+                                    skip_creation := true
+                                else
+                                    line.delete(array.remove(qcisd_state.g_q_lines, i))
+                                    label.delete(array.remove(qcisd_state.g_q_lbls, i))
+                                    array.remove(qcisd_state.g_q_dirs, i)
+                                    array.remove(qcisd_state.g_q_hp, i)
+                                    array.remove(qcisd_state.g_q_conf, i)
+                                    array.remove(qcisd_state.g_q_names, i)
+                                    array.remove(qcisd_state.g_q_pairs, i)
+                            else if bear_pivot_moved
+                                line.delete(array.remove(qcisd_state.g_q_lines, i))
+                                label.delete(array.remove(qcisd_state.g_q_lbls, i))
+                                array.remove(qcisd_state.g_q_dirs, i)
+                                array.remove(qcisd_state.g_q_hp, i)
+                                array.remove(qcisd_state.g_q_conf, i)
+                                array.remove(qcisd_state.g_q_names, i)
+                                array.remove(qcisd_state.g_q_pairs, i)
+
+                if not skip_creation
+                    bool is_conf = close < lvl
+                    string style_to_use = is_conf ? line.style_solid : line.style_dashed
+                    string hp_txt = is_hp ? "HP " : ""
+                    string bear_lbl_text = "(-) " + hp_txt + ssmt_src + "_QCISD"
+
+                    line l = na
+                    label lb = na
+                    if h_c > h_o
+                        l := line.new(x1=_hmaxt, y1=lvl, x2=time + ext_len_qcisd, y2=lvl, xloc=xloc.bar_time, color=cfg.qcisd_bear_clr, style=style_to_use, width=cfg.qcisd_width)
+                        lb := label.new(x=time + ext_len_qcisd, y=lvl, text=bear_lbl_text, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=cfg.qcisd_text_clr, size=cfg.qcisd_lbl_size, text_font_family=font_fam)
+                    else
+                        l := line.new(x1=_hmaxt - bar_ms, y1=lvl, x2=time + ext_len_qcisd, y2=lvl, xloc=xloc.bar_time, color=cfg.qcisd_bear_clr, style=style_to_use, width=cfg.qcisd_width)
+                        lb := label.new(x=time + ext_len_qcisd, y=lvl, text=bear_lbl_text, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=cfg.qcisd_text_clr, size=cfg.qcisd_lbl_size, text_font_family=font_fam)
+
+                    array.unshift(qcisd_state.g_q_lines, l)
+                    array.unshift(qcisd_state.g_q_lbls, lb)
+                    array.unshift(qcisd_state.g_q_dirs, -1)
+                    array.unshift(qcisd_state.g_q_hp, is_hp)
+                    array.unshift(qcisd_state.g_q_conf, is_conf)
+                    array.unshift(qcisd_state.g_q_names, name)
+                    array.unshift(qcisd_state.g_q_pairs, p_name)
+
+        if new_bull_signal or bull_pivot_moved
+            float lvl = (l_c < l_o) ? l_o : l_po
+            bool is_hp = cfg.bias_input == "Bullish"
+
+            if not na(lvl)
+                bool skip_creation = false
+
+                if array.size(qcisd_state.g_q_dirs) > 0
+                    for i = array.size(qcisd_state.g_q_dirs) - 1 to 0
+                        if array.get(qcisd_state.g_q_dirs, i) == 1 and array.get(qcisd_state.g_q_names, i) == name
+                            float ex_x1 = line.get_x1(array.get(qcisd_state.g_q_lines, i))
+                            if ex_x1 == _lmint or ex_x1 == (_lmint - bar_ms)
+                                if array.get(qcisd_state.g_q_hp, i) == is_hp
+                                    skip_creation := true
+                                else
+                                    line.delete(array.remove(qcisd_state.g_q_lines, i))
+                                    label.delete(array.remove(qcisd_state.g_q_lbls, i))
+                                    array.remove(qcisd_state.g_q_dirs, i)
+                                    array.remove(qcisd_state.g_q_hp, i)
+                                    array.remove(qcisd_state.g_q_conf, i)
+                                    array.remove(qcisd_state.g_q_names, i)
+                                    array.remove(qcisd_state.g_q_pairs, i)
+                            else if bull_pivot_moved
+                                line.delete(array.remove(qcisd_state.g_q_lines, i))
+                                label.delete(array.remove(qcisd_state.g_q_lbls, i))
+                                array.remove(qcisd_state.g_q_dirs, i)
+                                array.remove(qcisd_state.g_q_hp, i)
+                                array.remove(qcisd_state.g_q_conf, i)
+                                array.remove(qcisd_state.g_q_names, i)
+                                array.remove(qcisd_state.g_q_pairs, i)
+
+                if not skip_creation
+                    bool is_conf = close > lvl
+                    string style_to_use = is_conf ? line.style_solid : line.style_dashed
+                    string hp_txt = is_hp ? "HP " : ""
+                    string bull_lbl_text = "(+) " + hp_txt + ssmt_src + "_QCISD"
+
+                    line l = na
+                    label lb = na
+                    if l_c < l_o
+                        l := line.new(x1=_lmint, y1=lvl, x2=time + ext_len_qcisd, y2=lvl, xloc=xloc.bar_time, color=cfg.qcisd_bull_clr, style=style_to_use, width=cfg.qcisd_width)
+                        lb := label.new(x=time + ext_len_qcisd, y=lvl, text=bull_lbl_text, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=cfg.qcisd_text_clr, size=cfg.qcisd_lbl_size, text_font_family=font_fam)
+                    else
+                        l := line.new(x1=_lmint - bar_ms, y1=lvl, x2=time + ext_len_qcisd, y2=lvl, xloc=xloc.bar_time, color=cfg.qcisd_bull_clr, style=style_to_use, width=cfg.qcisd_width)
+                        lb := label.new(x=time + ext_len_qcisd, y=lvl, text=bull_lbl_text, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=cfg.qcisd_text_clr, size=cfg.qcisd_lbl_size, text_font_family=font_fam)
+
+                    array.unshift(qcisd_state.g_q_lines, l)
+                    array.unshift(qcisd_state.g_q_lbls, lb)
+                    array.unshift(qcisd_state.g_q_dirs, 1)
+                    array.unshift(qcisd_state.g_q_hp, is_hp)
+                    array.unshift(qcisd_state.g_q_conf, is_conf)
+                    array.unshift(qcisd_state.g_q_names, name)
+                    array.unshift(qcisd_state.g_q_pairs, p_name)
+
+    [_bear1,_bear0,_bull1,_bull0, ret_smtbe, ret_smtbu, _is_act_beh, _is_act_bul]
+
+// @function Hidden SMT detection with line/label drawing.
+// @param cfg SSMTConfig settings
+// @param _clsmax Current close max
+// @param _clsmax1 Previous close max
+// @param _clsmin Current close min
+// @param _clsmin1 Previous close min
+// @param _clsmaxt Time of current close max
+// @param _clsmaxt1 Time of previous close max
+// @param _clsmint Time of current close min
+// @param _clsmint1 Time of previous close min
+// @param _cclsmax Correlated asset current close max
+// @param _cclsmax1 Correlated asset previous close max
+// @param _cclsmin Correlated asset current close min
+// @param _cclsmin1 Correlated asset previous close min
+// @param _tfok Whether timeframe is valid
+// @param showon Whether to show on chart
+// @param _smt_clr Color for hidden SSMT lines
+// @param _smt_txt_clr Color for hidden SSMT label text
+// @param _val_ses Current session index
+// @param _tf_ok_V Whether timeframe is within visibility range
+// @param lbl Label text string
+// @param name SSMT timeframe name
+// @param pair Pair number (2=secondary, 3=tertiary)
+// @param _inv Whether pair is inverse correlated
+// @param _time_limit Time limit for active status checking
+// @param ssmt_pair Name string of secondary pair
+// @param ssmt_pair2 Name string of tertiary pair
+// @returns Tuple: [_hbear0, _lbull0, ret_hsmtbe, ret_hsmtbu, _is_act_hbeh, _is_act_hbul]
+export f_hidden_ssmt(SSMTConfig cfg,
+  float _clsmax, float _clsmax1, float _clsmin, float _clsmin1,
+  int _clsmaxt, int _clsmaxt1, int _clsmint, int _clsmint1,
+  float _cclsmax, float _cclsmax1, float _cclsmin, float _cclsmin1,
+  bool _tfok, bool showon, color _smt_clr, color _smt_txt_clr,
+  int _val_ses, bool _tf_ok_V, string lbl, string name, int pair, bool _inv, int _time_limit,
+  string ssmt_pair, string ssmt_pair2) =>
+
+    bool _hbear0 = ( (_clsmax >= _clsmax1 and _cclsmax <= _cclsmax1) or (_clsmax <= _clsmax1 and _cclsmax >= _cclsmax1) ) and
+      not (_clsmax == _clsmax1 and _cclsmax == _cclsmax1) and not _inv
+    bool _lbull0 = ( (_clsmin >= _clsmin1 and _cclsmin <= _cclsmin1) or (_clsmin <= _clsmin1 and _cclsmin >= _cclsmin1) ) and
+      not (_clsmin == _clsmin1 and _cclsmin == _cclsmin1) and not _inv
+
+    if _inv
+        _hbear0 := ( (_clsmax >= _clsmax1 and _cclsmin >= _cclsmin1) or (_clsmax <= _clsmax1 and _cclsmin <= _cclsmin1) ) and
+          not (_clsmax == _clsmax1 and _cclsmin == _cclsmin1)
+        _lbull0 := ( (_clsmin >= _clsmin1 and _cclsmax >= _cclsmax1) or (_clsmin <= _clsmin1 and _cclsmax <= _cclsmax1) ) and
+          not (_clsmin == _clsmin1 and _cclsmax == _cclsmax1)
+
+    string tooltiplbl = pair == 2 ? name +" hd " + ssmt_pair  :name +" hd " + ssmt_pair2
+    string lblstyleh = label.style_label_down
+    string lblstylel = label.style_label_up
+
+    var line hsmtbeh = line.new(na,na,na,na)
+    var line hsmtbul = line.new(na,na,na,na)
+    var label hsmtbe  = label.new(na,na)
+    var label hsmtbu  = label.new(na,na)
+    label ret_hsmtbe = na
+    label ret_hsmtbu = na
+
+    var array<line>  harr_beh = array.new_line()
+    var array<label> harr_lbh = array.new_label()
+    var array<line>  harr_bul = array.new_line()
+    var array<label> harr_lbl = array.new_label()
+
+    color _draw_clr = _tf_ok_V ? (cfg.hidelines ? color.new(_smt_clr, 100) : _smt_clr) : color.new(_smt_clr, 100)
+    color _draw_txt_clr = _tf_ok_V ? _smt_txt_clr : color.new(color.white, 100)
+
+    if showon and _tfok
+        if (_val_ses[1] != _val_ses or not _hbear0[1] or _clsmaxt != _clsmaxt[1] ) and  _hbear0
+            hsmtbeh := line.new(x1 = _clsmaxt1 , y1 = _clsmax1 , x2 = _clsmaxt , y2 = _clsmax , xloc=xloc.bar_time,color= _draw_clr,width = 1,style=cfg.hiddstyle)
+            add_to_line_array(harr_beh,hsmtbeh, cfg.ssmt_history_limit)
+            if not cfg.hidelabels
+                hsmtbe    := label.new(x=math.round(_clsmaxt+_clsmaxt1)/2, y = math.round_to_mintick(_clsmax1+_clsmax)/2,text = lbl ,xloc = xloc.bar_time,yloc = yloc.price,color = color.new(color.white, 100),
+                  style=lblstyleh,textcolor = _draw_txt_clr, size = cfg.i_font,tooltip = tooltiplbl)
+                ret_hsmtbe := hsmtbe
+                add_to_label_array(harr_lbh,hsmtbe, cfg.ssmt_history_limit)
+
+        if (_val_ses[1] != _val_ses or not _lbull0[1] or _clsmint != _clsmint[1] ) and  _lbull0
+            hsmtbul := line.new(x1 = _clsmint1 , y1 = _clsmin1 , x2 = _clsmint , y2 = _clsmin , xloc=xloc.bar_time,color= _draw_clr,width = 1,style = cfg.hiddstyle)
+            add_to_line_array(harr_bul,hsmtbul, cfg.ssmt_history_limit)
+            if not cfg.hidelabels
+                hsmtbu  := label.new(x=math.round(_clsmint+_clsmint1)/2, y = math.round_to_mintick(_clsmin1+_clsmin)/2,text = lbl ,xloc = xloc.bar_time,yloc = yloc.price,color = color.new(color.white, 100),
+                  style=lblstylel,textcolor = _draw_txt_clr, size = cfg.i_font,tooltip = tooltiplbl)
+                ret_hsmtbu := hsmtbu
+                add_to_label_array(harr_lbl,hsmtbu, cfg.ssmt_history_limit)
+
+    if array.size(harr_beh) > 0 and showon and _tfok
+        if _val_ses == _val_ses[1] and _hbear0[1] and not _hbear0
+            line.delete(hsmtbeh)
+            array.remove(harr_beh,0)
+            if not cfg.hidelabels and array.size(harr_lbh) > 0
+                label.delete(hsmtbe)
+                array.remove(harr_lbh,0)
+        if array.size(harr_beh) > 0 and showon and _tfok
+            for i = array.size(harr_beh) -1 to 0
+                line dline = array.get(harr_beh,i)
+                float top    = line.get_y2(dline)
+                int tme    = line.get_x2(dline)
+                if time > tme and math.max(open,close) >= top
+                    line.delete(dline)
+                    array.remove(harr_beh,i)
+                    if not cfg.hidelabels and array.size(harr_lbh) > 0
+                        label dlbl   = array.get(harr_lbh,i)
+                        label.delete(dlbl)
+                        array.remove(harr_lbh,i)
+
+    if array.size(harr_bul) > 0 and showon and _tfok
+        if _val_ses == _val_ses[1] and _lbull0[1] and not _lbull0
+            line.delete(hsmtbul)
+            array.remove(harr_bul,0)
+            if not cfg.hidelabels and array.size(harr_lbl) > 0
+                label.delete(hsmtbu)
+                array.remove(harr_lbl,0)
+        if array.size(harr_bul) > 0 and showon and _tfok
+            for i = array.size(harr_bul) -1 to 0
+                line dline = array.get(harr_bul,i)
+                float bot    = line.get_y2(dline)
+                int tme    = line.get_x2(dline)
+                if time > tme and math.min(open,close) <= bot
+                    line.delete(dline)
+                    array.remove(harr_bul,i)
+                    if not cfg.hidelabels and array.size(harr_lbl) > 0
+                        label dlbl   = array.get(harr_lbl,i)
+                        label.delete(dlbl)
+                        array.remove(harr_lbl,i)
+
+    bool _is_act_hbeh = false
+    if array.size(harr_beh) > 0
+        if _time_limit > 0
+            for i = 0 to array.size(harr_beh) - 1
+                if line.get_x2(array.get(harr_beh, i)) >= _time_limit
+                    _is_act_hbeh := true
+                    break
+        else
+            _is_act_hbeh := true
+
+    bool _is_act_hbul = false
+    if array.size(harr_bul) > 0
+        if _time_limit > 0
+            for i = 0 to array.size(harr_bul) - 1
+                if line.get_x2(array.get(harr_bul, i)) >= _time_limit
+                    _is_act_hbul := true
+                    break
+        else
+            _is_act_hbul := true
+
+    [_hbear0,_lbull0, ret_hsmtbe, ret_hsmtbu, _is_act_hbeh, _is_act_hbul]
+
+// @function Orchestrator that calls f_main_process + f_ssmt + f_hidden_ssmt for each timeframe.
+//           This replaces f_allrun from the monolithic indicator.
+// @param cfg SSMTConfig settings
+// @param qcisd_state QCISDState arrays
+// @param _tf_ok Whether timeframe is within valid range
+// @param _tf_ok_V Whether timeframe is within visibility range
+// @param _val_ses Current session index value
+// @param name SSMT timeframe name ("90m", "Daily", "Weekly", etc.)
+// @param _show_smt Whether to show normal SSMT
+// @param _smt_clr Color for normal SSMT lines
+// @param _hsmt_clr Color for hidden SSMT lines
+// @param _smt_txt_clr Color for SSMT label text
+// @param _show_hsmt Whether to show hidden SSMT
+// @param X_SSMT The bool array (size 14) for this timeframe's SSMT state
+// @param shortname Short name for labels (e.g. "90m", "D", "W")
+// @param _time_limit Time limit for active status (dayStart or 0)
+// @param xo0 Secondary asset open
+// @param xc0 Secondary asset close
+// @param xh0 Secondary asset high
+// @param xl0 Secondary asset low
+// @param xt0 Secondary asset time
+// @param yo0 Tertiary asset open
+// @param yc0 Tertiary asset close
+// @param yh0 Tertiary asset high
+// @param yl0 Tertiary asset low
+// @param yt0 Tertiary asset time
+// @param ssmt_pair Name of secondary pair
+// @param ssmt_pair2 Name of tertiary pair
+// @param arr_inv Array of inversion flags [inv_secondary, inv_tertiary]
+// @param triad_ok Whether triad mode is active
+// @param showsmt2 Whether to show SMT pair 2
+export run_ssmt(SSMTConfig cfg, QCISDState qcisd_state,
+  bool _tf_ok, bool _tf_ok_V, int _val_ses,
+  string name, bool _show_smt, color _smt_clr, color _hsmt_clr, color _smt_txt_clr,
+  bool _show_hsmt, array<bool> X_SSMT, string shortname, int _time_limit,
+  float xo0, float xc0, float xh0, float xl0, int xt0,
+  float yo0, float yc0, float yh0, float yl0, int yt0,
+  string ssmt_pair, string ssmt_pair2,
+  array<bool> arr_inv, bool triad_ok, bool showsmt2) =>
+
+    [hmaxt,lmint,hmax2,lmin2,hmax1,lmin1,hmax,lmin,hmaxt1,lmint1,clsmax,clsmax1,clsmaxt1,clsmin,clsmin1,clsmint1,clsmaxt,clsmint] = f_main_process(_tf_ok, _val_ses,open,close,high,low,time)
+    [chmaxt,clmint,chmax2,clmin2,chmax1,clmin1,chmax,clmin,chmaxt1,clmint1,cclsmax,cclsmax1,cclsmaxt1,cclsmin,cclsmin1,cclsmint1,cclsmaxt,cclsmint] = f_main_process(_tf_ok, _val_ses,xo0,xc0,xh0,xl0,xt0)
+
+    string nm1 = ssmt_pair
+    string nm2 = ssmt_pair2
+    label l_be1 = na, label l_bu1 = na
+    label l_hbe1 = na, label l_hbu1 = na
+    label l_be2 = na, label l_bu2 = na
+    label l_hbe2 = na, label l_hbu2 = na
+
+    if cfg.alerttype != "Hidden"
+        [bear1,bear0,bull1,bull0, l_be1_t, l_bu1_t, has_act_be1, has_act_bu1] = f_ssmt(cfg, qcisd_state, hmax2,hmax1,hmax,lmin2,lmin1,lmin,
+          chmax2,chmax1,chmax,clmin2,clmin1,clmin,
+          hmaxt,lmint,hmaxt1,lmint1,_tf_ok,_val_ses,_show_smt, _smt_clr,_smt_txt_clr,
+          _tf_ok_V,shortname +" "+ nm1 ,name,2,array.get(arr_inv,0), _time_limit,
+          ssmt_pair, ssmt_pair2)
+        l_be1 := l_be1_t
+        l_bu1 := l_bu1_t
+        array.set(X_SSMT,0,bear1)
+        array.set(X_SSMT,1,bear0)
+        array.set(X_SSMT,2,bull1)
+        array.set(X_SSMT,3,bull0)
+        array.set(X_SSMT,10,has_act_be1)
+        array.set(X_SSMT,11,has_act_bu1)
+    if cfg.alerttype != "Normal"
+        [hidbear2,hidbull2, l_hbe1_t, l_hbu1_t, has_act_hbe1, has_act_hbu1] = f_hidden_ssmt(cfg, clsmax,clsmax1,clsmin,clsmin1,clsmaxt,clsmaxt1,
+          clsmint,clsmint1,cclsmax,cclsmax1,cclsmin,cclsmin1,_tf_ok,_show_hsmt,_hsmt_clr,_smt_txt_clr,
+          _val_ses,_tf_ok_V,shortname +" (hd) "+ nm1,name,2,array.get(arr_inv,0), _time_limit,
+          ssmt_pair, ssmt_pair2)
+        l_hbe1 := l_hbe1_t
+        l_hbu1 := l_hbu1_t
+        array.set(X_SSMT,4,hidbear2)
+        array.set(X_SSMT,5,hidbull2)
+        array.set(X_SSMT,12,has_act_hbe1)
+        array.set(X_SSMT,13,has_act_hbu1)
+    if triad_ok and showsmt2 and _tf_ok
+        [dhmaxt,dlmint,dhmax2,dlmin2,dhmax1,dlmin1,dhmax,dlmin,dhmaxt1,dlmint1,dclsmax,dclsmax1,dclsmaxt1,dclsmin,dclsmin1,dclsmint1,dclsmaxt,dclsmint] = f_main_process(_tf_ok, _val_ses,yo0,yc0,yh0,yl0,yt0)
+        if cfg.alerttype != "Hidden"
+            [bear13,bear03,bull13,bull03, l_be2_t, l_bu2_t, has_act_be2, has_act_bu2] = f_ssmt(cfg, qcisd_state, hmax2,hmax1,hmax,lmin2,lmin1,lmin,
+              dhmax2,dhmax1,dhmax,dlmin2,dlmin1,dlmin,
+              hmaxt,lmint,hmaxt1,lmint1,_tf_ok,_val_ses,_show_smt, _smt_clr,_smt_txt_clr,
+              _tf_ok_V,shortname +" "+ nm2,name,3,array.get(arr_inv,1), _time_limit,
+              ssmt_pair, ssmt_pair2)
+            l_be2 := l_be2_t
+            l_bu2 := l_bu2_t
+            if bear03
+                array.set(X_SSMT,6,bear03)
+            if bull03
+                array.set(X_SSMT,7,bull03)
+            array.set(X_SSMT,10, array.get(X_SSMT,10) or has_act_be2)
+            array.set(X_SSMT,11, array.get(X_SSMT,11) or has_act_bu2)
+        if cfg.alerttype != "Normal"
+            [hidbear3,hidbull3, l_hbe2_t, l_hbu2_t, has_act_hbe2, has_act_hbu2] = f_hidden_ssmt(cfg, clsmax,clsmax1,clsmin,clsmin1,clsmaxt,clsmaxt1,
+              clsmint,clsmint1,dclsmax,dclsmax1,dclsmin,dclsmin1,_tf_ok,_show_hsmt,_hsmt_clr,_smt_txt_clr,
+              _val_ses,_tf_ok_V,shortname +" (hd) "+ nm2,name,3,array.get(arr_inv,1), _time_limit,
+              ssmt_pair, ssmt_pair2)
+            l_hbe2 := l_hbe2_t
+            l_hbu2 := l_hbu2_t
+            if hidbear3
+                array.set(X_SSMT,8,true)
+            if hidbull3
+                array.set(X_SSMT,9,true)
+            array.set(X_SSMT,12, array.get(X_SSMT,12) or has_act_hbe2)
+            array.set(X_SSMT,13, array.get(X_SSMT,13) or has_act_hbu2)
+    if not na(l_be1) and not na(l_be2)
+        label.set_text(l_be1, shortname + " " + nm1 + " + " + nm2)
+        label.delete(l_be2)
+    if not na(l_bu1) and not na(l_bu2)
+        label.set_text(l_bu1, shortname + " " + nm1 + " + " + nm2)
+        label.delete(l_bu2)
+    if not na(l_hbe1) and not na(l_hbe2)
+        label.set_text(l_hbe1, shortname + " (hd) " + nm1 + " + " + nm2)
+        label.delete(l_hbe2)
+    if not na(l_hbu1) and not na(l_hbu2)
+        label.set_text(l_hbu1, shortname + " (hd) " + nm1 + " + " + nm2)
+        label.delete(l_hbu2)
+
+// @function Multi-condition alert logic for SSMT signals.
+// @param cfg SSMTConfig settings
+// @param a_con1 First alert condition string (e.g. "W Bull SSMT")
+// @param a_con3 Second alert condition string
+// @param number Alert number string ("1", "2", "3", "4")
+// @param M_SSMT Monthly SSMT state array (size 14)
+// @param W_SSMT Weekly SSMT state array
+// @param D_SSMT Daily SSMT state array
+// @param Q_SSMT Quarterly SSMT state array
+// @param Y_SSMT Yearly SSMT state array
+// @param N_SSMT 90m SSMT state array
+// @param m_SSMT Micro SSMT state array
+// @param newMo Whether monthly session just changed
+// @param newW Whether weekly session just changed
+// @param newD Whether daily session just changed
+// @param newN Whether 90m session just changed
+// @param newm Whether micro session just changed
+// @param newQ Whether quarterly session just changed
+// @param newY Whether yearly session just changed
+export run_alert(SSMTConfig cfg, string a_con1, string a_con3, string number,
+  array<bool> M_SSMT, array<bool> W_SSMT, array<bool> D_SSMT,
+  array<bool> Q_SSMT, array<bool> Y_SSMT, array<bool> N_SSMT, array<bool> m_SSMT,
+  bool newMo, bool newW, bool newD, bool newN, bool newm, bool newQ, bool newY) =>
+
+    string Mobu = "M Bull SSMT" , string Mobe = "M Bear SSMT"
+    string Wbu = "W Bull SSMT" ,  string Wbe = "W Bear SSMT"
+    string Dbu = "D Bull SSMT"  , string Dbe = "D Bear SSMT"
+    string Qbu = "Q Bull SSMT"  , string Qbe = "Q Bear SSMT"
+    string Ybu = "Y Bull SSMT"  , string Ybe = "Y Bear SSMT"
+    string Nbu = "90m Bull SSMT", string Nbe = "90m Bear SSMT"
+    string mbu = "Mic Bull SSMT", string mbe = "Mic Bear SSMT"
+
+    var bool bull_alert_trigger = false
+    var bool bear_alert_trigger = false
+
+    bool nbull_control_con1 =
+      a_con1 == Mobu ? array.get(M_SSMT,3) or array.get(M_SSMT,7) :
+      a_con1 == Wbu ? array.get(W_SSMT,3) or array.get(W_SSMT,7) :
+      a_con1 == Dbu ? array.get(D_SSMT,3) or array.get(D_SSMT,7) :
+      a_con1 == Qbu ? array.get(Q_SSMT,3) or array.get(Q_SSMT,7) :
+      a_con1 == Ybu ? array.get(Y_SSMT,3) or array.get(Y_SSMT,7) :
+      a_con1 == Nbu ? array.get(N_SSMT,3) or array.get(N_SSMT,7) :
+      a_con1 == mbu ? array.get(m_SSMT,3) or array.get(m_SSMT,7):
+      a_con1 == "none" ? true : false
+    bool nbear_control_con1 =
+      a_con1 == Mobe ? array.get(M_SSMT,1) or array.get(M_SSMT,6):
+      a_con1 == Wbe ? array.get(W_SSMT,1) or array.get(W_SSMT,6):
+      a_con1 == Dbe ? array.get(D_SSMT,1) or array.get(D_SSMT,6):
+      a_con1 == Qbe ? array.get(Q_SSMT,1) or array.get(Q_SSMT,6):
+      a_con1 == Ybe ? array.get(Y_SSMT,1) or array.get(Y_SSMT,6):
+      a_con1 == Nbe ? array.get(N_SSMT,1) or array.get(N_SSMT,6):
+      a_con1 == mbe ? array.get(m_SSMT,1) or array.get(m_SSMT,6):
+      a_con1 == "none" ? true : false
+
+    bool nbull_control_con3 =
+      a_con3 == Mobu ? array.get(M_SSMT,3) or array.get(M_SSMT,7) :
+      a_con3 == Wbu ? array.get(W_SSMT,3) or array.get(W_SSMT,7) :
+      a_con3 == Dbu ? array.get(D_SSMT,3) or array.get(D_SSMT,7) :
+      a_con3 == Qbu ? array.get(Q_SSMT,3) or array.get(Q_SSMT,7) :
+      a_con3 == Ybu ? array.get(Y_SSMT,3) or array.get(Y_SSMT,7) :
+      a_con3 == Nbu ? array.get(N_SSMT,3) or array.get(N_SSMT,7):
+      a_con3 == mbu ? array.get(m_SSMT,3) or array.get(m_SSMT,7):
+      a_con3 == "none" ? true : false
+    bool nbear_control_con3 =
+      a_con3 == Mobe ? array.get(M_SSMT,1) or array.get(M_SSMT,6) :
+      a_con3 == Wbe  ? array.get(W_SSMT,1) or array.get(W_SSMT,6) :
+      a_con3 == Dbe  ? array.get(D_SSMT,1) or array.get(D_SSMT,6) :
+      a_con3 == Qbe  ? array.get(Q_SSMT,1) or array.get(Q_SSMT,6) :
+      a_con3 == Ybe  ? array.get(Y_SSMT,1) or array.get(Y_SSMT,6) :
+      a_con3 == Nbe  ? array.get(N_SSMT,1) or array.get(N_SSMT,6):
+      a_con3 == mbe  ? array.get(m_SSMT,1) or array.get(m_SSMT,6):
+      a_con3 == "none" ? true : false
+
+    bool hbull_control_con1 =
+      a_con1 == Mobu ? array.get(M_SSMT,5) or array.get(M_SSMT,9) :
+      a_con1 == Wbu ? array.get(W_SSMT,5) or array.get(W_SSMT,9) :
+      a_con1 == Dbu ? array.get(D_SSMT,5) or array.get(D_SSMT,9):
+      a_con1 == Qbu ? array.get(Q_SSMT,5) or array.get(Q_SSMT,9):
+      a_con1 == Ybu ? array.get(Y_SSMT,5) or array.get(Y_SSMT,9):
+      a_con1 == Nbu ? array.get(N_SSMT,5) or array.get(N_SSMT,9):
+      a_con1 == mbu ? array.get(m_SSMT,5) or array.get(m_SSMT,9):
+      a_con1 == "none" ? true : false
+    bool hbear_control_con1 =
+      a_con1 == Mobe ? array.get(M_SSMT,4) or array.get(M_SSMT,8):
+      a_con1 == Wbe ? array.get(W_SSMT,4) or array.get(W_SSMT,8):
+      a_con1 == Dbe ? array.get(D_SSMT,4) or array.get(D_SSMT,8):
+      a_con1 == Qbe ? array.get(Q_SSMT,4) or array.get(Q_SSMT,8):
+      a_con1 == Ybe ? array.get(Y_SSMT,4) or array.get(Y_SSMT,8):
+      a_con1 == Nbe ? array.get(N_SSMT,4) or array.get(N_SSMT,8):
+      a_con1 == mbe ? array.get(m_SSMT,4) or array.get(m_SSMT,8):
+      a_con1 == "none" ? true : false
+    bool hbull_control_con3 =
+      a_con3 == Mobu ? array.get(M_SSMT,5) or array.get(M_SSMT,9) :
+      a_con3 == Wbu ? array.get(W_SSMT,5) or array.get(W_SSMT,9) :
+      a_con3 == Dbu ? array.get(D_SSMT,5) or array.get(D_SSMT,9):
+      a_con3 == Qbu ? array.get(Q_SSMT,5) or array.get(Q_SSMT,9):
+      a_con3 == Ybu ? array.get(Y_SSMT,5) or array.get(Y_SSMT,9):
+      a_con3 == Nbu ? array.get(N_SSMT,5) or array.get(N_SSMT,9):
+      a_con3 == mbu ? array.get(m_SSMT,5) or array.get(m_SSMT,9):
+      a_con3 == "none" ? true : false
+    bool hbear_control_con3 =
+      a_con3 == Mobe ? array.get(M_SSMT,4) or array.get(M_SSMT,8):
+      a_con3 == Wbe  ? array.get(W_SSMT,4) or array.get(W_SSMT,8):
+      a_con3 == Dbe  ? array.get(D_SSMT,4) or array.get(D_SSMT,8):
+      a_con3 == Qbe  ? array.get(Q_SSMT,4) or array.get(Q_SSMT,8):
+      a_con3 == Ybe  ? array.get(Y_SSMT,4) or array.get(Y_SSMT,8):
+      a_con3 == Nbe  ? array.get(N_SSMT,4) or array.get(N_SSMT,8):
+      a_con3 == mbe  ? array.get(m_SSMT,4) or array.get(m_SSMT,8):
+      a_con3 == "none" ? true : false
+
+    bool newcyc1 = str.contains(a_con1,"Y") ? newY : str.contains(a_con1,"Q") ? newQ : str.contains(a_con1,"M") ? newMo : str.contains(a_con1,"W") ? newW : str.contains(a_con1,"D") ?
+      newD : str.contains(a_con1,"N") ? newN : str.contains(a_con1,"m") ? newm : false
+    bool newcyc3 = str.contains(a_con3,"Y") ? newY : str.contains(a_con3,"Q") ? newQ : str.contains(a_con3,"M") ? newMo : str.contains(a_con3,"W") ? newW : str.contains(a_con3,"D") ?
+      newD : str.contains(a_con3,"N") ? newN : str.contains(a_con3,"m") ? newm : false
+    bool newcyc  = newcyc1 or newcyc3
+    if newcyc
+        bull_alert_trigger := false
+        bear_alert_trigger := false
+
+    bool bull_control_con1 =
+      cfg.alerttype == "All" ? nbull_control_con1 or hbull_control_con1 :
+      cfg.alerttype == "Normal" ? nbull_control_con1 : hbull_control_con1
+    bool bear_control_con1 =
+      cfg.alerttype == "All" ? nbear_control_con1 or hbear_control_con1 :
+      cfg.alerttype == "Normal" ? nbear_control_con1 : hbear_control_con1
+    bool bull_control_con3 =
+      cfg.alerttype == "All" ? nbull_control_con1 or hbull_control_con1 :
+      cfg.alerttype == "Normal" ? nbull_control_con1 : hbull_control_con1
+    bool bear_control_con3 =
+      cfg.alerttype == "All" ? nbear_control_con3 or hbear_control_con3 :
+      cfg.alerttype == "Normal" ? nbear_control_con3 : hbear_control_con3
+
+    bool bull_alert = bull_control_con1 and bull_control_con3  and not (a_con1 == "none" and a_con3 == "none" )
+    if bull_alert and bull_alert_trigger == false
+        alert(number+" Bullish Selection Active " + '\n' + a_con1 +" " + a_con3  + '\n'+ " " ,alert.freq_once_per_bar)
+        bull_alert_trigger := true
+
+    bool bear_alert = bear_control_con1 and bear_control_con3   and not (a_con1 == "none" and a_con3 == "none" )
+    if bear_alert and bear_alert_trigger == false
+        alert(number+" Bearish Selection Active "+ '\n' + a_con1 +" " + a_con3 + " " + '\n'+ " ",alert.freq_once_per_bar)
+        bear_alert_trigger := true
+
+    if bull_alert[1] and bull_alert == false
+        bull_alert_trigger := false
+    if bear_alert[1] and bear_alert == false
+        bear_alert_trigger := false
+
+// @function PSP (Price Sync Pattern) adaptive bar-by-bar divergence calculation.
+// @param _show Whether PSP is enabled and visible
+// @param xc0 Secondary asset close
+// @param xo0 Secondary asset open
+// @param xt0 Secondary asset time
+// @param yc0 Tertiary asset close
+// @param yo0 Tertiary asset open
+// @param yt0 Tertiary asset time
+// @param arr_inv Inversion flags array [inv_secondary, inv_tertiary]
+// @param triad_ok Whether triad mode is active
+// @param dyad_ok Whether dyad mode is active
+// @param showsmt1 Whether SMT pair 1 is shown
+// @param showsmt2 Whether SMT pair 2 is shown
+// @returns Tuple: [bull_signal, bear_signal]
+export calc_psp_adaptive(bool _show,
+  float xc0, float xo0, int xt0,
+  float yc0, float yo0, int yt0,
+  array<bool> arr_inv, bool triad_ok, bool dyad_ok,
+  bool showsmt1, bool showsmt2) =>
+    bool _bull_signal = false
+    bool _bear_signal = false
+
+    if _show
+        float m_c = close
+        float m_o = open
+        float c1_c = xc0
+        float c1_o = xo0
+        float c2_c = yc0
+        float c2_o = yo0
+
+        bool c1_sync = (xt0 == time)
+        bool c2_sync = (yt0 == time)
+
+        int m_dir  = m_c > m_o ? 1 : m_c < m_o ? -1 : 0
+        int c1_dir = c1_sync ? (c1_c > c1_o ? 1 : c1_c < c1_o ? -1 : 0) : 0
+        int c2_dir = c2_sync ? (c2_c > c2_o ? 1 : c2_c < c2_o ? -1 : 0) : 0
+
+        bool inv_1 = array.get(arr_inv, 0)
+        bool inv_2 = array.get(arr_inv, 1)
+
+        if inv_1
+            c1_dir := -c1_dir
+        if inv_2
+            c2_dir := -c2_dir
+
+        bool is_valid_correlation = triad_ok or dyad_ok
+        bool crack_1 = is_valid_correlation and showsmt1 and not na(c1_c) and (m_dir != 0) and (c1_dir != 0) and (m_dir != c1_dir)
+        bool crack_2 = triad_ok and showsmt2 and not na(c2_c) and (m_dir != 0) and (c2_dir != 0) and (m_dir != c2_dir)
+
+        if crack_1 or crack_2
+            _bull_signal := (m_dir == 1)
+            _bear_signal := (m_dir == -1)
+
+    [_bull_signal, _bear_signal]
+
+// @function Computes the status bar color for a given SSMT timeframe array.
+// @param _arr The SSMT bool array (size 14) for this timeframe
+// @param _c_bull Bullish color
+// @param _c_bear Bearish color
+// @param _c_sand Sandwich/conflict color
+// @param _c_neut Neutral color
+// @returns The computed color for the status bar cell
+export get_sb_color_norm(array<bool> _arr, color _c_bull, color _c_bear, color _c_sand, color _c_neut) =>
+    bool _act_n_bear = array.size(_arr) > 13 ? array.get(_arr, 10) : false
+    bool _act_n_bull = array.size(_arr) > 13 ? array.get(_arr, 11) : false
+    bool _act_h_bear = array.size(_arr) > 13 ? array.get(_arr, 12) : false
+    bool _act_h_bull = array.size(_arr) > 13 ? array.get(_arr, 13) : false
+
+    bool _run_bull = _act_h_bull and (array.size(_arr) > 9 ? array.get(_arr, 5) : false)
+    bool _run_bear = _act_h_bear and (array.size(_arr) > 9 ? array.get(_arr, 4) : false)
+    bool _div_bull = _act_n_bull and (array.size(_arr) > 9 ? (array.get(_arr, 3) or array.get(_arr, 2) or array.get(_arr, 7)) : false)
+    bool _div_bear = _act_n_bear and (array.size(_arr) > 9 ? (array.get(_arr, 1) or array.get(_arr, 0) or array.get(_arr, 6)) : false)
+
+    color _c_out = _c_neut
+
+    bool _conflict_runs = _run_bull and _run_bear
+    bool _conflict_bear_run_bull_div = _run_bear and _div_bull
+    bool _conflict_bull_run_bear_div = _run_bull and _div_bear
+    bool _conflict_divs = _div_bull and _div_bear
+
+    if _conflict_runs or _conflict_bear_run_bull_div or _conflict_bull_run_bear_div or _conflict_divs
+        _c_out := _c_sand
+    else if _run_bull
+        _c_out := _c_bull
+    else if _run_bear
+        _c_out := _c_bear
+    else if _div_bull
+        _c_out := _c_bull
+    else if _div_bear
+        _c_out := _c_bear
+    _c_out
+
+// @function QCISD global processor and mitigation loop. Handles confirmation, invalidation,
+//           retest detection, and cleanup of QCISD levels.
+// @param qcisd_state QCISDState arrays to process
+// @param cfg SSMTConfig settings
+export process_qcisd(QCISDState qcisd_state, SSMTConfig cfg) =>
+    bool qcisd_alert_active = cfg.qcisd_trigger != "Off"
+    bool trig_confirm = (cfg.qcisd_trigger == "All" or cfg.qcisd_trigger == "Confirmation") and qcisd_alert_active
+    bool trig_inval   = (cfg.qcisd_trigger == "All" or cfg.qcisd_trigger == "Invalidation") and qcisd_alert_active
+    bool trig_retest  = (cfg.qcisd_trigger == "All" or cfg.qcisd_trigger == "Retest") and qcisd_alert_active
+
+    bool qcisd_norm_active = cfg.qcisd_norm_trigger != "Off"
+    bool trig_confirm_norm = (cfg.qcisd_norm_trigger == "All" or cfg.qcisd_norm_trigger == "Confirmation") and qcisd_norm_active
+    bool trig_inval_norm   = (cfg.qcisd_norm_trigger == "All" or cfg.qcisd_norm_trigger == "Invalidation") and qcisd_norm_active
+    bool trig_retest_norm  = (cfg.qcisd_norm_trigger == "All" or cfg.qcisd_norm_trigger == "Retest") and qcisd_norm_active
+
+    while array.size(qcisd_state.g_q_lines) > cfg.qcisd_max_limit
+        line.delete(array.pop(qcisd_state.g_q_lines))
+        label.delete(array.pop(qcisd_state.g_q_lbls))
+        array.pop(qcisd_state.g_q_dirs)
+        array.pop(qcisd_state.g_q_hp)
+        array.pop(qcisd_state.g_q_conf)
+        array.pop(qcisd_state.g_q_names)
+        array.pop(qcisd_state.g_q_pairs)
+
+    if array.size(qcisd_state.g_q_lines) > 0
+        for i = array.size(qcisd_state.g_q_lines) - 1 to 0
+            line l_curr = array.get(qcisd_state.g_q_lines, i)
+            label lb_curr = array.get(qcisd_state.g_q_lbls, i)
+            int dir = array.get(qcisd_state.g_q_dirs, i)
+            bool is_hp_line = array.get(qcisd_state.g_q_hp, i)
+            bool is_conf_line = array.get(qcisd_state.g_q_conf, i)
+            string p_name = array.get(qcisd_state.g_q_pairs, i)
+            string c_name = array.get(qcisd_state.g_q_names, i)
+            float lvl = line.get_y1(l_curr)
+
+            bool delete_it = false
+
+            if dir == 1 // Bullish
+                if close > lvl
+                    line.set_style(l_curr, line.style_solid)
+                    if not is_conf_line
+                        array.set(qcisd_state.g_q_conf, i, true)
+                        if is_hp_line and trig_confirm
+                            alert("Bullish HP-QCISD Confirm on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+                        else if not is_hp_line and trig_confirm_norm
+                            alert("Bullish QCISD Confirm on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+
+                bool body_below_0 = (close < lvl and open < lvl)
+                bool body_below_1 = (close[1] < lvl and open[1] < lvl)
+                bool body_below_2 = (close[2] < lvl and open[2] < lvl)
+
+                if body_below_0
+                    line.set_color(l_curr, cfg.qcisd_pend_clr)
+                else
+                    line.set_color(l_curr, cfg.qcisd_bull_clr)
+
+                if body_below_0 and body_below_1 and body_below_2
+                    delete_it := true
+                    if is_hp_line and trig_inval
+                        alert("Bullish HP-QCISD Invalidated on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+                    else if not is_hp_line and trig_inval_norm
+                        alert("Bullish QCISD Invalidated on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+
+                if not delete_it and low <= lvl and close > lvl
+                    if is_hp_line and trig_retest
+                        alert("Bullish HP-QCISD Retest on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+                    else if not is_hp_line and trig_retest_norm
+                        alert("Bullish QCISD Retest on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+
+            else if dir == -1 // Bearish
+                if close < lvl
+                    line.set_style(l_curr, line.style_solid)
+                    if not is_conf_line
+                        array.set(qcisd_state.g_q_conf, i, true)
+                        if is_hp_line and trig_confirm
+                            alert("Bearish HP-QCISD Confirm on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+                        else if not is_hp_line and trig_confirm_norm
+                            alert("Bearish QCISD Confirm on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+
+                bool body_above_0 = (close > lvl and open > lvl)
+                bool body_above_1 = (close[1] > lvl and open[1] > lvl)
+                bool body_above_2 = (close[2] > lvl and open[2] > lvl)
+
+                if body_above_0
+                    line.set_color(l_curr, cfg.qcisd_pend_clr)
+                else
+                    line.set_color(l_curr, cfg.qcisd_bear_clr)
+
+                if body_above_0 and body_above_1 and body_above_2
+                    delete_it := true
+                    if is_hp_line and trig_inval
+                        alert("Bearish HP-QCISD Invalidated on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+                    else if not is_hp_line and trig_inval_norm
+                        alert("Bearish QCISD Invalidated on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+
+                if not delete_it and high >= lvl and close < lvl
+                    if is_hp_line and trig_retest
+                        alert("Bearish HP-QCISD Retest on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+                    else if not is_hp_line and trig_retest_norm
+                        alert("Bearish QCISD Retest on " + p_name + " " + c_name, freq = alert.freq_once_per_bar_close)
+
+            if delete_it
+                line.delete(array.remove(qcisd_state.g_q_lines, i))
+                label.delete(array.remove(qcisd_state.g_q_lbls, i))
+                array.remove(qcisd_state.g_q_dirs, i)
+                array.remove(qcisd_state.g_q_hp, i)
+                array.remove(qcisd_state.g_q_conf, i)
+                array.remove(qcisd_state.g_q_names, i)
+                array.remove(qcisd_state.g_q_pairs, i)

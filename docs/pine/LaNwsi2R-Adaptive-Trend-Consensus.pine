@@ -1,0 +1,314 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © KironKavanagh
+
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADAPTIVE TREND CONSENSUS  (ATC)
+//  Efficiency-weighted, multi-timeframe trend engine with regime gating
+//  License: Mozilla Public License 2.0
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("Adaptive Trend Consensus", "ATC", overlay = true, max_labels_count = 500)
+
+const string G_CORE = "1 · Core engine (Efficiency Ratio spine)"
+const string G_MTF  = "2 · Multi-timeframe alignment"
+const string G_MOM  = "3 · Momentum quality"
+const string G_VOL  = "4 · Participation (volume)"
+const string G_EXH  = "5 · Exhaustion / maturity"
+const string G_SIG  = "6 · Signals & session"
+const string G_VIS  = "7 · Visuals & dashboard"
+
+// ───────────────────────────────────────────────────────── CORE INPUTS ─────
+erLen   = input.int(20, "Efficiency Ratio length", minval = 2, group = G_CORE, tooltip = "Kaufman's Efficiency Ratio = |net move| / sum of |bar moves| over N bars. 1.0 = a perfectly straight move, 0.0 = pure noise. This one number drives baseline speed, band width AND the chop gate.")
+fastLen = input.int(2,  "Adaptive baseline · fast constant", minval = 1, group = G_CORE, tooltip = "Effective EMA length the baseline collapses to when efficiency = 1.")
+slowLen = input.int(30, "Adaptive baseline · slow constant", minval = 2, group = G_CORE, tooltip = "Effective EMA length the baseline expands to when efficiency = 0.")
+atrLen  = input.int(14, "ATR length", minval = 1, group = G_CORE)
+minMult = input.float(1.6, "ATR multiplier · efficient trend", minval = 0.2, step = 0.1, group = G_CORE, tooltip = "Trail distance when efficiency is high. Tighter = more responsive exits in clean trends.")
+maxMult = input.float(4.0, "ATR multiplier · choppy regime", minval = 0.5, step = 0.1, group = G_CORE, tooltip = "Trail distance when efficiency is low. Wider = the trail stops flipping in noise.")
+erGate  = input.float(0.28, "Chop gate · minimum Efficiency Ratio", minval = 0.0, maxval = 1.0, step = 0.01, group = G_CORE, tooltip = "Below this the script declares a non-trending regime, greys out and suppresses signals. Raise to trade less and cleaner.")
+slopeNorm = input.float(0.6, "Baseline slope normaliser (ATR)", minval = 0.05, step = 0.05, group = G_CORE)
+slopeLen  = input.int(5, "Baseline slope lookback", minval = 1, group = G_CORE)
+
+// ────────────────────────────────────────────────────────── MTF INPUTS ─────
+mtfOn    = input.bool(true, "Enable multi-timeframe alignment", group = G_MTF)
+mtfAuto  = input.bool(true, "Auto-derive higher timeframes", group = G_MTF, tooltip = "ON: higher timeframes are multiples of the chart timeframe. OFF: use the manual fields below.")
+mtfMult1 = input.int(4,  "Auto · HTF-1 multiple", minval = 2, group = G_MTF)
+mtfMult2 = input.int(12, "Auto · HTF-2 multiple", minval = 3, group = G_MTF)
+mtfManual1 = input.timeframe("60",  "Manual · HTF-1", group = G_MTF)
+mtfManual2 = input.timeframe("240", "Manual · HTF-2", group = G_MTF)
+
+// ─────────────────────────────────────────────────────── MOMENTUM INPUTS ───
+momOn   = input.bool(true, "Enable momentum quality", group = G_MOM)
+momLen  = input.int(14, "Rate-of-change length", minval = 1, group = G_MOM)
+momZLen = input.int(120, "Z-score lookback", minval = 20, group = G_MOM, tooltip = "Momentum is standardised against its own recent distribution, so the reading is comparable across symbols and volatility regimes.")
+momFull = input.float(2.0, "Z-score for full score", minval = 0.5, step = 0.1, group = G_MOM)
+
+// ─────────────────────────────────────────────────────── VOLUME INPUTS ─────
+volOn   = input.bool(true, "Enable participation filter", group = G_VOL, tooltip = "Chaikin Money Flow measures whether volume transacts toward the highs or the lows of each bar. Automatically disabled and its weight redistributed on symbols with no volume feed.")
+volLen  = input.int(20, "Money-flow length", minval = 2, group = G_VOL)
+volFull = input.float(0.15, "CMF value for full score", minval = 0.02, step = 0.01, group = G_VOL)
+
+// ─────────────────────────────────────────────────── EXHAUSTION INPUTS ─────
+exhOn   = input.bool(true, "Enable exhaustion damping", group = G_EXH, tooltip = "When price is stretched far from the adaptive baseline the trend is late rather than absent. This damps the score toward neutral instead of flipping it — discouraging fresh entries without forcing an exit.")
+exhAtr  = input.float(3.0, "Stretch threshold (ATR from baseline)", minval = 0.5, step = 0.25, group = G_EXH)
+exhRate = input.float(0.20, "Damping per extra ATR", minval = 0.0, maxval = 1.0, step = 0.05, group = G_EXH)
+exhMax  = input.float(0.60, "Maximum damping", minval = 0.0, maxval = 0.95, step = 0.05, group = G_EXH)
+exhBars = input.int(0, "Also warn after N bars in trend (0 = off)", minval = 0, group = G_EXH)
+
+// ─────────────────────────────────────────────────────── SIGNAL INPUTS ─────
+wStruct = input.float(40, "Weight · structure",     minval = 0, maxval = 100, step = 5, group = G_SIG)
+wMtf    = input.float(25, "Weight · MTF alignment", minval = 0, maxval = 100, step = 5, group = G_SIG)
+wMom    = input.float(20, "Weight · momentum",      minval = 0, maxval = 100, step = 5, group = G_SIG)
+wVol    = input.float(15, "Weight · participation", minval = 0, maxval = 100, step = 5, group = G_SIG)
+entryTh = input.float(45, "Entry score threshold", minval = 5, maxval = 100, step = 5, group = G_SIG)
+exitTh  = input.float(15, "Exit score threshold",  minval = 0, maxval = 100, step = 5, group = G_SIG)
+useTrailExit = input.bool(true, "Exit on adaptive trail flip", group = G_SIG)
+sessOn  = input.bool(false, "Restrict signals to a session", group = G_SIG, tooltip = "Recommended for intraday index and futures work — keeps signals inside cash / RTH hours.")
+sessStr = input.session("0930-1600", "Session", group = G_SIG)
+sessTz  = input.string("America/New_York", "Session timezone", group = G_SIG, options = ["America/New_York", "America/Chicago", "Europe/London", "Europe/Berlin", "Asia/Tokyo", "Asia/Singapore", "Australia/Sydney", "GMT"])
+
+// ─────────────────────────────────────────────────────── VISUAL INPUTS ─────
+showBaseline = input.bool(true, "Show adaptive baseline", group = G_VIS)
+showTrail    = input.bool(true, "Show adaptive trail",    group = G_VIS)
+showFill     = input.bool(true, "Shade trend channel",    group = G_VIS)
+colorBars    = input.bool(true, "Colour bars by score",   group = G_VIS)
+showSignals  = input.bool(true, "Show entry / exit markers", group = G_VIS)
+showDash     = input.bool(true, "Show dashboard",         group = G_VIS)
+dashPos      = input.string("Top right", "Dashboard position", group = G_VIS, options = ["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"])
+dashSize     = input.string("Normal", "Dashboard text size", group = G_VIS, options = ["Tiny", "Small", "Normal"])
+cBull = input.color(#26A69A, "Bullish", inline = "col", group = G_VIS)
+cBear = input.color(#EF5350, "Bearish", inline = "col", group = G_VIS)
+cChop = input.color(#787B86, "No-trade", inline = "col", group = G_VIS)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Kaufman's Efficiency Ratio — the spine of the whole script.
+f_er(int len) =>
+    float netMove   = math.abs(close - close[len])
+    float pathTaken = math.sum(math.abs(close - close[1]), len)
+    pathTaken > 0 ? netMove / pathTaken : 0.0
+
+// Efficiency-adaptive baseline: fast when the market is efficient, near-frozen when it is not.
+f_baseline(float er, int fl, int sl, int len) =>
+    float fastSC = 2.0 / (fl + 1)
+    float slowSC = 2.0 / (sl + 1)
+    float sc   = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    float seed = ta.sma(close, len)
+    var float bl = na
+    bl := na(bl[1]) ? seed : bl[1] + sc * (close - bl[1])
+    bl
+
+// Trend engine: a ratcheting ATR trail around the adaptive baseline, where the
+// ATR multiplier is itself scaled by efficiency.
+f_engine(int _erLen, int _fl, int _sl, int _atrLen, float _minM, float _maxM) =>
+    float er   = f_er(_erLen)
+    float bl   = f_baseline(er, _fl, _sl, _erLen)
+    float atr  = ta.atr(_atrLen)
+    float mult = _maxM - (_maxM - _minM) * er
+    float ub = bl + mult * atr
+    float lb = bl - mult * atr
+    float pUb = nz(ub[1])
+    float pLb = nz(lb[1])
+    lb := lb > pLb or close[1] < pLb ? lb : pLb
+    ub := ub < pUb or close[1] > pUb ? ub : pUb
+    int   dir = na
+    float trail = na
+    float pTrail = trail[1]
+    if na(atr[1])
+        dir := 1
+    else if pTrail == pUb
+        dir := close > ub ? 1 : -1
+    else
+        dir := close < lb ? -1 : 1
+    trail := dir == 1 ? lb : ub
+    [dir, trail, er, bl, atr, mult]
+
+[dir, trail, er, baseline, atr, dynMult] = f_engine(erLen, fastLen, slowLen, atrLen, minMult, maxMult)
+
+// ───────────────────────────────────────────────── MULTI-TIMEFRAME ─────────
+// Non-repainting: the engine runs inside the higher-timeframe context and is
+// offset by one bar, so only closed higher-timeframe bars are ever read.
+f_htfString(int mult) =>
+    float chartMin = timeframe.in_seconds(timeframe.period) / 60.0
+    float t = chartMin * mult
+    t < 1 ? str.tostring(math.max(1, math.round(t * 60))) + "S" : t < 1440 ? str.tostring(math.round(t)) : t < 10080 ? str.tostring(math.round(t / 1440)) + "D" : str.tostring(math.round(t / 10080)) + "W"
+
+string tf1 = mtfAuto ? f_htfString(mtfMult1) : mtfManual1
+string tf2 = mtfAuto ? f_htfString(mtfMult2) : mtfManual2
+
+f_htfPack() =>
+    [d, t, e, b, a, m] = f_engine(erLen, fastLen, slowLen, atrLen, minMult, maxMult)
+    [d[1], e[1]]
+
+[h1DirRaw, h1ErRaw] = request.security(syminfo.tickerid, tf1, f_htfPack(), lookahead = barmerge.lookahead_on)
+[h2DirRaw, h2ErRaw] = request.security(syminfo.tickerid, tf2, f_htfPack(), lookahead = barmerge.lookahead_on)
+
+int   h1Dir = nz(h1DirRaw, 0)
+int   h2Dir = nz(h2DirRaw, 0)
+float h1Er  = nz(h1ErRaw, 0.0)
+float h2Er  = nz(h2ErRaw, 0.0)
+
+// ─────────────────────────────────────────────────────── COMPONENTS ────────
+// 1 · Structure — trail direction plus normalised baseline slope.
+float slopeRaw   = atr > 0 ? (baseline - baseline[slopeLen]) / atr : 0.0
+float slopeScore = math.max(-1.0, math.min(1.0, slopeRaw / slopeNorm))
+float sStruct    = 0.55 * dir + 0.45 * slopeScore
+
+// 2 · MTF alignment — each higher timeframe weighted by its own efficiency, so a
+//     higher timeframe that is itself chopping contributes little.
+float w1   = math.min(1.0, h1Er / math.max(erGate, 0.01))
+float w2   = math.min(1.0, h2Er / math.max(erGate, 0.01))
+float sMtf = mtfOn ? (h1Dir * w1 + h2Dir * w2) / 2.0 : 0.0
+
+// 3 · Momentum quality — rate of change standardised into a z-score.
+float roc     = ta.roc(close, momLen)
+float rocMean = ta.sma(roc, momZLen)
+float rocSd   = ta.stdev(roc, momZLen)
+float rocZ    = rocSd > 0 ? (roc - rocMean) / rocSd : 0.0
+float sMom    = momOn ? math.max(-1.0, math.min(1.0, rocZ / momFull)) : 0.0
+
+// 4 · Participation — Chaikin Money Flow, bounded and volume-aware.
+float rng    = high - low
+float mfm    = rng > 0 ? ((close - low) - (high - close)) / rng : 0.0
+float volSum = math.sum(volume, volLen)
+float mfvSum = math.sum(mfm * volume, volLen)
+float cmf    = volSum > 0 ? mfvSum / volSum : 0.0
+float avgVol = nz(ta.sma(volume, 20))
+bool  volOk  = volOn and avgVol > 0
+float sVol   = volOk ? math.max(-1.0, math.min(1.0, cmf / volFull)) : 0.0
+
+// 5 · Exhaustion — damps magnitude, never flips sign.
+float stretch      = atr > 0 ? (close - baseline) / atr : 0.0
+float stretchAbs   = math.abs(stretch)
+int   barsInTrend  = nz(ta.barssince(dir != dir[1]), 0)
+bool  barStretched = exhBars > 0 and barsInTrend >= exhBars
+float damp = 0.0
+if exhOn
+    float overshoot = math.max(0.0, stretchAbs - exhAtr)
+    damp := math.min(exhMax, overshoot * exhRate + (barStretched ? 0.15 : 0.0))
+bool exhausted = exhOn and (stretchAbs > exhAtr or barStretched)
+
+// ─────────────────────────────────────────────────── CONSENSUS SCORE ───────
+float useMtfW  = mtfOn ? wMtf : 0.0
+float useMomW  = momOn ? wMom : 0.0
+float useVolW  = volOk ? wVol : 0.0
+float wTotal   = wStruct + useMtfW + useMomW + useVolW
+float rawScore = wTotal > 0 ? (wStruct * sStruct + useMtfW * sMtf + useMomW * sMom + useVolW * sVol) / wTotal : 0.0
+float score    = 100.0 * rawScore * (1.0 - damp)
+
+bool trending = er >= erGate
+bool inSess   = not sessOn or not na(time(timeframe.period, sessStr, sessTz))
+bool active   = trending and inSess
+
+// ─────────────────────────────────────────────────────────── SIGNALS ───────
+var int pos = 0
+bool goLong    = active and dir ==  1 and score >=  entryTh
+bool goShort   = active and dir == -1 and score <= -entryTh
+bool dropLong  = pos ==  1 and (score <  exitTh or (useTrailExit and dir == -1))
+bool dropShort = pos == -1 and (score > -exitTh or (useTrailExit and dir ==  1))
+
+if goLong
+    pos := 1
+else if goShort
+    pos := -1
+else if dropLong or dropShort
+    pos := 0
+
+bool longSig  = pos ==  1 and nz(pos[1]) !=  1
+bool shortSig = pos == -1 and nz(pos[1]) != -1
+bool exitSig  = pos ==  0 and nz(pos[1]) !=  0
+
+// ────────────────────────────────────────────────────────── VISUALS ────────
+color scoreCol = not trending ? cChop : score >= 0 ? color.from_gradient(score, 0, 100, color.new(cBull, 70), cBull) : color.from_gradient(score, -100, 0, cBear, color.new(cBear, 70))
+color trendCol = not trending ? cChop : dir == 1 ? cBull : cBear
+
+plot(showBaseline ? baseline : na, "Adaptive baseline", scoreCol, 2)
+plot(showTrail ? trail : na, "Adaptive trail", color.new(trendCol, 20), 1, plot.style_linebr)
+pTrailF = plot(showFill ? trail : na, "", display = display.none)
+pPriceF = plot(showFill ? close : na, "", display = display.none)
+fill(pTrailF, pPriceF, color.new(trendCol, 90), "Trend channel")
+
+barcolor(colorBars ? (not trending ? cChop : scoreCol) : na)
+
+plotshape(showSignals and longSig,  "Long",  shape.labelup,   location.belowbar, cBull, text = "▲", textcolor = color.white, size = size.tiny)
+plotshape(showSignals and shortSig, "Short", shape.labeldown, location.abovebar, cBear, text = "▼", textcolor = color.white, size = size.tiny)
+plotshape(showSignals and exitSig,  "Exit",  shape.xcross,    location.absolute, cChop, size = size.tiny)
+plotchar(showSignals and exhausted and pos != 0, "Exhaustion warning", "!", location.abovebar, color.new(color.orange, 20), size = size.tiny)
+
+// ──────────────────────────────────────────────────────── DASHBOARD ────────
+f_gauge(float v) =>
+    int filled = int(math.round(math.min(5.0, math.abs(v) * 5.0)))
+    string s = ""
+    for i = 0 to 4
+        s := s + (i < filled ? "▮" : "▯")
+    s
+
+f_pos(simple string p) =>
+    switch p
+        "Top right"    => position.top_right
+        "Middle right" => position.middle_right
+        "Bottom right" => position.bottom_right
+        "Top left"     => position.top_left
+        => position.bottom_left
+
+f_size(simple string s) =>
+    switch s
+        "Tiny"  => size.tiny
+        "Small" => size.small
+        => size.normal
+
+var table dash = table.new(f_pos(dashPos), 3, 9, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+if showDash and barstate.islast
+    string tsize = f_size(dashSize)
+    color hdrBg = not trending ? color.new(cChop, 70) : dir == 1 ? color.new(cBull, 70) : color.new(cBear, 70)
+    table.cell(dash, 0, 0, "ADAPTIVE TREND CONSENSUS", text_color = color.white, bgcolor = color.new(color.black, 20), text_size = tsize)
+    table.cell(dash, 1, 0, "", bgcolor = color.new(color.black, 20))
+    table.cell(dash, 2, 0, "", bgcolor = color.new(color.black, 20))
+    table.cell(dash, 0, 1, "Regime", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 1, trending ? "TRENDING" : "NO TRADE", text_color = trending ? trendCol : cChop, text_size = tsize)
+    table.cell(dash, 2, 1, "ER " + str.tostring(er, "#.00"), text_color = color.gray, text_size = tsize)
+    table.cell(dash, 0, 2, "Structure", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 2, f_gauge(sStruct), text_color = sStruct >= 0 ? cBull : cBear, text_size = tsize)
+    table.cell(dash, 2, 2, str.tostring(sStruct * 100, "#") + "%", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 0, 3, "MTF " + (mtfOn ? tf1 + "/" + tf2 : "off"), text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 3, mtfOn ? f_gauge(sMtf) : "—", text_color = sMtf >= 0 ? cBull : cBear, text_size = tsize)
+    table.cell(dash, 2, 3, mtfOn ? (h1Dir == 1 ? "▲" : "▼") + (h2Dir == 1 ? "▲" : "▼") : "—", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 0, 4, "Momentum", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 4, momOn ? f_gauge(sMom) : "—", text_color = sMom >= 0 ? cBull : cBear, text_size = tsize)
+    table.cell(dash, 2, 4, momOn ? "z " + str.tostring(rocZ, "#.0") : "—", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 0, 5, "Participation", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 5, volOk ? f_gauge(sVol) : "n/a", text_color = sVol >= 0 ? cBull : cBear, text_size = tsize)
+    table.cell(dash, 2, 5, volOk ? str.tostring(cmf, "#.00") : "—", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 0, 6, "Stretch", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 6, str.tostring(stretchAbs, "#.0") + " ATR", text_color = exhausted ? color.orange : color.gray, text_size = tsize)
+    table.cell(dash, 2, 6, exhausted ? "EXTENDED" : str.tostring(barsInTrend) + " bars", text_color = exhausted ? color.orange : color.gray, text_size = tsize)
+    table.cell(dash, 0, 7, "CONSENSUS", text_color = color.white, bgcolor = hdrBg, text_size = tsize)
+    table.cell(dash, 1, 7, str.tostring(score, "#"), text_color = color.white, bgcolor = hdrBg, text_size = tsize)
+    table.cell(dash, 2, 7, damp > 0 ? "damped " + str.tostring(damp * 100, "#") + "%" : "clean", text_color = color.white, bgcolor = hdrBg, text_size = tsize)
+    table.cell(dash, 0, 8, "State", text_color = color.gray, text_size = tsize)
+    table.cell(dash, 1, 8, pos == 1 ? "LONG" : pos == -1 ? "SHORT" : "FLAT", text_color = pos == 1 ? cBull : pos == -1 ? cBear : cChop, text_size = tsize)
+    table.cell(dash, 2, 8, "trail " + str.tostring(trail, format.mintick), text_color = color.gray, text_size = tsize)
+
+// ─────────────────────────────────────────────────────────── ALERTS ────────
+alertcondition(longSig,  "ATC · Long entry",  "ATC long on {{ticker}} {{interval}} — consensus above threshold, trend regime confirmed.")
+alertcondition(shortSig, "ATC · Short entry", "ATC short on {{ticker}} {{interval}} — consensus below threshold, trend regime confirmed.")
+alertcondition(exitSig,  "ATC · Exit",        "ATC exit on {{ticker}} {{interval}} — consensus decayed or adaptive trail flipped.")
+alertcondition(not trending and trending[1], "ATC · Regime lost",   "ATC regime turned choppy on {{ticker}} {{interval}} — signals suppressed.")
+alertcondition(trending and not trending[1], "ATC · Regime gained", "ATC regime turned trending on {{ticker}} {{interval}}.")
+alertcondition(exhausted and not exhausted[1], "ATC · Exhaustion",  "ATC trend extended on {{ticker}} {{interval}} — score damped, avoid fresh entries.")
+
+if longSig
+    alert("ATC LONG " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | score " + str.tostring(score, "#") + " | ER " + str.tostring(er, "#.00"), alert.freq_once_per_bar_close)
+if shortSig
+    alert("ATC SHORT " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | score " + str.tostring(score, "#") + " | ER " + str.tostring(er, "#.00"), alert.freq_once_per_bar_close)
+if exitSig
+    alert("ATC EXIT " + syminfo.ticker + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
+// ──────────────────────────────────────────────── DATA WINDOW EXPORTS ──────
+plot(score, "Consensus score",  display = display.data_window)
+plot(er,    "Efficiency Ratio", display = display.data_window)
+plot(dir,   "Trail direction",  display = display.data_window)
+plot(pos,   "Position state",   display = display.data_window)
+

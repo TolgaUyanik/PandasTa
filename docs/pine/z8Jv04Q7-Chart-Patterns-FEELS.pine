@@ -1,0 +1,438 @@
+//@version=6
+indicator("Chart Patterns [FEELS]", "Chart Patterns", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100, max_bars_back = 5000)
+
+//--- inputs
+pivLen   = input.int(8, "Swing size", minval = 3, maxval = 40, tooltip = "Pivot width on each side. Bigger = fewer, larger patterns")
+tolIn    = input.float(0.5, "Level tolerance, ATR", minval = 0.1, maxval = 2, step = 0.1, tooltip = "How close two tops, two bottoms or two shoulders must be to count as equal")
+bufIn    = input.float(0.15, "Break buffer, ATR", minval = 0, maxval = 1, step = 0.05, tooltip = "Price must clear the neckline by this much to confirm the pattern")
+confMode = input.string("Close", "Neckline break", options = ["Close", "Wick"], tooltip = "Close: the bar must CLOSE beyond the neckline (strict, fewer but cleaner signals). Wick: an intrabar pierce of the neckline confirms (looser, surfaces more patterns such as inverse H&S that spike through the neckline but close back)")
+voidTol  = input.float(0.0, "Extra invalidation room, ATR", minval = 0, maxval = 3, step = 0.25, tooltip = "How far past the head/apex price may travel before a forming pattern is discarded. Higher = patterns survive deeper shakeouts (more inverse H&S and double bottoms)")
+maxWait  = input.int(60, "Confirm within, bars", minval = 10, maxval = 300, tooltip = "A forming pattern that does not break its neckline within this many bars is dropped")
+trackBars = input.int(120, "Track outcome for, bars", minval = 20, maxval = 500, tooltip = "How long to follow a confirmed pattern to see if it reached its measured target")
+maxKeep  = input.int(12, "Patterns kept", minval = 1, maxval = 30, tooltip = "Oldest confirmed patterns beyond this are removed to keep the chart clean")
+tgtLen   = input.int(30, "Target line length, bars", minval = 5, maxval = 100)
+
+grpP = "Patterns"
+showDT  = input.bool(true, "Double Top",       group = grpP)
+showDB  = input.bool(true, "Double Bottom",    group = grpP)
+showHS  = input.bool(true, "Head & Shoulders", group = grpP)
+showIHS = input.bool(true, "Inverse H&S",      group = grpP)
+dblMode = input.string("Any", "Second peak / bottom", options = ["Any", "Weaker"], group = grpP, tooltip = "Weaker: only take a Double Top whose second peak is not higher than the first, and a Double Bottom whose second bottom is not lower than the first. This is the classic momentum-failure form and tends to give cleaner reversals")
+
+grpS = "Style"
+bearCol = input.color(#f23645, "Bearish", group = grpS)
+bullCol = input.color(#089981, "Bullish", group = grpS)
+showTgt = input.bool(true, "Show target line", group = grpS)
+showOutcome = input.bool(true, "Outcome labels", group = grpS, tooltip = "Prints a small tag where each pattern resolved. Alerts and the table work regardless")
+hitTxt  = input.string("target", "Target-reached text", group = grpS, tooltip = "Label printed where a confirmed pattern reached its measured target. A check mark is prefixed automatically")
+failTxt = input.string("failed", "Invalidated text", group = grpS, tooltip = "Label printed where a confirmed pattern was invalidated before reaching target. A cross is prefixed automatically")
+outSizeS = input.string("Small", "Outcome text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpS)
+showStats = input.bool(true, "Hit-rate table", group = grpS, tooltip = "Shows how many confirmed patterns historically reached their measured target before being invalidated")
+minStat = input.int(1, "Min samples for table", minval = 1, maxval = 20, group = grpS, tooltip = "A pattern type appears in the table once it has this many resolved samples")
+txtSizeS = input.string("Small", "Text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpS)
+
+txtSize = txtSizeS == "Tiny" ? size.tiny : txtSizeS == "Normal" ? size.normal : txtSizeS == "Large" ? size.large : size.small
+resSize = outSizeS == "Tiny" ? size.tiny : outSizeS == "Normal" ? size.normal : outSizeS == "Large" ? size.large : size.small
+
+//--- state
+type Pat
+    int   kind
+    int   dir
+    float neck
+    float neckSlope
+    int   neckX
+    float apex
+    int   apexBar
+    float target
+    float invalid
+    float ext
+    int   confBar
+    int   bornBar
+    int   coreS
+    int   trailB
+    bool  confirmed
+    int   result
+    array<int>   px
+    array<float> py
+    array<line>  segs
+    line  neckLn
+    line  tgtLn
+    box   zone
+    label tag
+    label resTag
+
+var pats  = array.new<Pat>()
+var zzB = array.new<int>()
+var zzP = array.new<float>()
+var zzD = array.new<int>()
+var hits = array.new<int>(4, 0)
+var res  = array.new<int>(4, 0)
+
+atr = ta.atr(14)
+tol = atr * tolIn
+buf = atr * bufIn
+
+ph = ta.pivothigh(pivLen, pivLen)
+pl = ta.pivotlow(pivLen, pivLen)
+
+f_name(int k) =>
+    k == 1 ? "Double Top" : k == 2 ? "Double Bottom" : k == 3 ? "Head & Shoulders" : "Inverse Head & Shoulders"
+
+f_enabled(int k) =>
+    k == 1 ? showDT : k == 2 ? showDB : k == 3 ? showHS : showIHS
+
+f_neckAt(Pat p, int b) =>
+    p.neck + p.neckSlope * (b - p.neckX)
+
+//--- zigzag push, returns true only when a genuinely new pivot is appended
+f_zzPush(int b, float pr, int d) =>
+    n = array.size(zzD)
+    appended = false
+    if n == 0
+        array.push(zzB, b)
+        array.push(zzP, pr)
+        array.push(zzD, d)
+        appended := true
+    else
+        li = n - 1
+        if array.get(zzD, li) == d
+            lp = array.get(zzP, li)
+            if (d == 1 and pr > lp) or (d == -1 and pr < lp)
+                array.set(zzP, li, pr)
+                array.set(zzB, li, b)
+        else
+            array.push(zzB, b)
+            array.push(zzP, pr)
+            array.push(zzD, d)
+            appended := true
+    while array.size(zzD) > 20
+        array.shift(zzB)
+        array.shift(zzP)
+        array.shift(zzD)
+    appended
+
+f_newPat(int kind, int dir, float neck, float neckSlope, int neckX, float apex, int apexBar, float invalid, float ext) =>
+    p = Pat.new()
+    p.kind := kind
+    p.dir := dir
+    p.neck := neck
+    p.neckSlope := neckSlope
+    p.neckX := neckX
+    p.apex := apex
+    p.apexBar := apexBar
+    p.invalid := invalid
+    p.ext := ext
+    p.bornBar := bar_index
+    p.confirmed := false
+    p.result := 0
+    p.px := array.new<int>()
+    p.py := array.new<float>()
+    p.segs := array.new<line>()
+    array.push(pats, p)
+    p
+
+f_addPt(Pat p, int b, float v) =>
+    array.push(p.px, b)
+    array.push(p.py, v)
+
+//--- one pattern per region: reject a new span that overlaps an existing one
+f_regionTaken(int s, int e) =>
+    taken = false
+    sp = e - s
+    i = 0
+    while i < array.size(pats) and not taken
+        p = array.get(pats, i)
+        m = array.size(p.px)
+        if m >= 2
+            ps = array.get(p.px, 0)
+            pe = array.get(p.px, m - 1)
+            ov = math.min(e, pe) - math.max(s, ps)
+            if ov > 0.15 * math.min(sp, pe - ps)
+                taken := true
+        i += 1
+    taken
+
+//--- bar where price actually crosses the neckline level, walking back from the first peak
+f_crossBar(int fromBar, int toBar, float level, bool bear, int maxBack, float slp) =>
+    cb = -1
+    done = false
+    lim = math.max(1, math.min(maxBack, fromBar - toBar))
+    for k = 1 to lim
+        o = bar_index - fromBar + k
+        lv = level - slp * k
+        if not done and o >= 0 and o <= 4990 and ((bear and low[o] <= lv) or ((not bear) and high[o] >= lv))
+            cb := fromBar - k
+            done := true
+    cb
+
+//--- match the newest pivots against templates (dirs alternate by construction)
+f_matchHigh() =>
+    n = array.size(zzD)
+    matched5 = false
+    if n >= 5 and showHS
+        ls = array.get(zzP, n - 5)
+        t1 = array.get(zzP, n - 4)
+        hd = array.get(zzP, n - 3)
+        t2 = array.get(zzP, n - 2)
+        rs = array.get(zzP, n - 1)
+        lsBar = array.get(zzB, n - 5)
+        legW = math.max(3, int((array.get(zzB, n - 1) - lsBar) / 4))
+        b1 = array.get(zzB, n - 4)
+        b2 = array.get(zzB, n - 2)
+        slope = (t2 - t1) / (b2 - b1)
+        crossB = f_crossBar(lsBar, array.get(zzB, math.max(0, n - 6)), t1 + slope * (lsBar - b1), true, 2 * legW, slope)
+        startB = crossB >= 0 ? crossB : (n >= 6 ? array.get(zzB, n - 6) : lsBar)
+        trailBar = array.get(zzB, n - 1) + legW
+        if hd > ls + tol and hd > rs + tol and math.abs(ls - rs) <= 2 * tol and math.abs(t1 - t2) <= 0.35 * (hd - math.min(t1, t2)) and not f_regionTaken(startB, trailBar)
+            p = f_newPat(3, -1, t1, slope, b1, hd, array.get(zzB, n - 3), rs, hd)
+            p.coreS := startB
+            p.trailB := trailBar
+            if crossB >= 0
+                f_addPt(p, crossB, t1 + slope * (crossB - b1))
+            else if n >= 6
+                f_addPt(p, array.get(zzB, n - 6), array.get(zzP, n - 6))
+            f_addPt(p, lsBar, ls)
+            f_addPt(p, b1, t1)
+            f_addPt(p, array.get(zzB, n - 3), hd)
+            f_addPt(p, b2, t2)
+            f_addPt(p, array.get(zzB, n - 1), rs)
+            matched5 := true
+    if n >= 3 and showDT and not matched5
+        h1 = array.get(zzP, n - 3)
+        l1 = array.get(zzP, n - 2)
+        h2 = array.get(zzP, n - 1)
+        h1Bar = array.get(zzB, n - 3)
+        legW = math.max(3, int((array.get(zzB, n - 1) - h1Bar) / 2))
+        crossB = f_crossBar(h1Bar, array.get(zzB, math.max(0, n - 4)), l1, true, 2 * legW, 0.0)
+        startB = crossB >= 0 ? crossB : (n >= 4 ? array.get(zzB, n - 4) : h1Bar)
+        trailBar = array.get(zzB, n - 1) + legW
+        if math.abs(h1 - h2) <= tol and (dblMode == "Any" or h2 <= h1 + tol * 0.25) and math.min(h1, h2) - l1 > 1.5 * tol and not f_regionTaken(startB, trailBar)
+            ex = math.max(h1, h2)
+            p = f_newPat(1, -1, l1, 0.0, array.get(zzB, n - 2), (h1 + h2) / 2, array.get(zzB, n - 1), ex, ex)
+            p.coreS := startB
+            p.trailB := trailBar
+            if crossB >= 0
+                f_addPt(p, crossB, l1)
+            else if n >= 4
+                f_addPt(p, array.get(zzB, n - 4), array.get(zzP, n - 4))
+            f_addPt(p, h1Bar, h1)
+            f_addPt(p, array.get(zzB, n - 2), l1)
+            f_addPt(p, array.get(zzB, n - 1), h2)
+
+f_matchLow() =>
+    n = array.size(zzD)
+    matched5 = false
+    if n >= 5 and showIHS
+        ls = array.get(zzP, n - 5)
+        t1 = array.get(zzP, n - 4)
+        hd = array.get(zzP, n - 3)
+        t2 = array.get(zzP, n - 2)
+        rs = array.get(zzP, n - 1)
+        lsBar = array.get(zzB, n - 5)
+        legW = math.max(3, int((array.get(zzB, n - 1) - lsBar) / 4))
+        b1 = array.get(zzB, n - 4)
+        b2 = array.get(zzB, n - 2)
+        slope = (t2 - t1) / (b2 - b1)
+        crossB = f_crossBar(lsBar, array.get(zzB, math.max(0, n - 6)), t1 + slope * (lsBar - b1), false, 2 * legW, slope)
+        startB = crossB >= 0 ? crossB : (n >= 6 ? array.get(zzB, n - 6) : lsBar)
+        trailBar = array.get(zzB, n - 1) + legW
+        if hd < ls - tol and hd < rs - tol and math.abs(ls - rs) <= 2 * tol and math.abs(t1 - t2) <= 0.35 * (math.max(t1, t2) - hd) and not f_regionTaken(startB, trailBar)
+            p = f_newPat(4, 1, t1, slope, b1, hd, array.get(zzB, n - 3), rs, hd)
+            p.coreS := startB
+            p.trailB := trailBar
+            if crossB >= 0
+                f_addPt(p, crossB, t1 + slope * (crossB - b1))
+            else if n >= 6
+                f_addPt(p, array.get(zzB, n - 6), array.get(zzP, n - 6))
+            f_addPt(p, lsBar, ls)
+            f_addPt(p, b1, t1)
+            f_addPt(p, array.get(zzB, n - 3), hd)
+            f_addPt(p, b2, t2)
+            f_addPt(p, array.get(zzB, n - 1), rs)
+            matched5 := true
+    if n >= 3 and showDB and not matched5
+        l1 = array.get(zzP, n - 3)
+        h1 = array.get(zzP, n - 2)
+        l2 = array.get(zzP, n - 1)
+        l1Bar = array.get(zzB, n - 3)
+        legW = math.max(3, int((array.get(zzB, n - 1) - l1Bar) / 2))
+        crossB = f_crossBar(l1Bar, array.get(zzB, math.max(0, n - 4)), h1, false, 2 * legW, 0.0)
+        startB = crossB >= 0 ? crossB : (n >= 4 ? array.get(zzB, n - 4) : l1Bar)
+        trailBar = array.get(zzB, n - 1) + legW
+        if math.abs(l1 - l2) <= tol and (dblMode == "Any" or l2 >= l1 - tol * 0.25) and h1 - math.max(l1, l2) > 1.5 * tol and not f_regionTaken(startB, trailBar)
+            ex = math.min(l1, l2)
+            p = f_newPat(2, 1, h1, 0.0, array.get(zzB, n - 2), (l1 + l2) / 2, array.get(zzB, n - 1), ex, ex)
+            p.coreS := startB
+            p.trailB := trailBar
+            if crossB >= 0
+                f_addPt(p, crossB, h1)
+            else if n >= 4
+                f_addPt(p, array.get(zzB, n - 4), array.get(zzP, n - 4))
+            f_addPt(p, l1Bar, l1)
+            f_addPt(p, array.get(zzB, n - 2), h1)
+            f_addPt(p, array.get(zzB, n - 1), l2)
+
+//--- first bar after the last pivot where a candle actually crosses the neckline
+f_crossFwd(Pat p) =>
+    mm = array.size(p.px)
+    lastB = array.get(p.px, mm - 1)
+    tb = p.confBar
+    done = false
+    lim = math.max(1, p.confBar - lastB)
+    for k = 1 to lim
+        b = lastB + k
+        o = bar_index - b
+        lv = f_neckAt(p, b)
+        if not done and o >= 0 and ((p.dir == -1 and low[o] <= lv) or (p.dir == 1 and high[o] >= lv))
+            tb := b
+            done := true
+    tb
+
+f_draw(Pat p) =>
+    col = p.dir == -1 ? bearCol : bullCol
+    tb = f_crossFwd(p)
+    f_addPt(p, tb, f_neckAt(p, tb))
+    p.trailB := math.max(p.trailB, tb)
+    m = array.size(p.px)
+    pmin = array.get(p.py, 0)
+    pmax = pmin
+    for k = 0 to m - 1
+        v = array.get(p.py, k)
+        pmin := math.min(pmin, v)
+        pmax := math.max(pmax, v)
+    if m >= 2
+        for k = 0 to m - 2
+            ln = line.new(array.get(p.px, k), array.get(p.py, k), array.get(p.px, k + 1), array.get(p.py, k + 1), color = col, width = 3)
+            array.push(p.segs, ln)
+    p.neckLn := line.new(p.coreS, f_neckAt(p, p.coreS), p.trailB, f_neckAt(p, p.trailB), color = col, style = line.style_dashed, width = 2)
+    if showTgt
+        p.tgtLn := line.new(p.confBar, p.target, p.confBar + tgtLen, p.target, color = color.new(col, 40), style = line.style_dotted, width = 1)
+    tagY = p.dir == -1 ? pmax : pmin
+    p.tag := label.new(p.apexBar, tagY, f_name(p.kind), style = p.dir == -1 ? label.style_label_down : label.style_label_up, color = color.new(col, 15), textcolor = color.white, size = txtSize)
+
+f_delete(Pat p) =>
+    if array.size(p.segs) > 0
+        for k = 0 to array.size(p.segs) - 1
+            line.delete(array.get(p.segs, k))
+    line.delete(p.neckLn)
+    line.delete(p.tgtLn)
+    box.delete(p.zone)
+    label.delete(p.tag)
+    label.delete(p.resTag)
+
+//--- engine, state mutates on closed bars only
+bearConf = false
+bullConf = false
+tgtHit   = false
+patFail  = false
+
+if barstate.isconfirmed
+    if not na(ph)
+        if f_zzPush(bar_index - pivLen, ph, 1)
+            f_matchHigh()
+    if not na(pl)
+        if f_zzPush(bar_index - pivLen, pl, -1)
+            f_matchLow()
+
+    i = 0
+    while i < array.size(pats)
+        p = array.get(pats, i)
+        gone = false
+        if not p.confirmed
+            neckNow = f_neckAt(p, bar_index)
+            vtol = tol + atr * voidTol
+            if p.dir == -1
+                if high > p.ext + vtol
+                    gone := true
+                else if (confMode == "Wick" ? low : close) < neckNow - buf
+                    p.confirmed := true
+            else
+                if low < p.ext - vtol
+                    gone := true
+                else if (confMode == "Wick" ? high : close) > neckNow + buf
+                    p.confirmed := true
+            if not gone and not p.confirmed and bar_index - p.bornBar > maxWait
+                gone := true
+            if p.confirmed
+                p.confBar := bar_index
+                neckC = f_neckAt(p, bar_index)
+                height = p.dir == -1 ? p.apex - f_neckAt(p, p.apexBar) : f_neckAt(p, p.apexBar) - p.apex
+                p.target := p.dir == -1 ? neckC - height : neckC + height
+                f_draw(p)
+                if p.dir == -1
+                    bearConf := true
+                else
+                    bullConf := true
+        else if p.result == 0
+            if p.dir == -1
+                if low <= p.target
+                    p.result := 1
+                else if close >= p.invalid
+                    p.result := 2
+            else
+                if high >= p.target
+                    p.result := 1
+                else if close <= p.invalid
+                    p.result := 2
+            if p.result == 0 and bar_index - p.confBar > trackBars
+                p.result := 3
+            if p.result == 1 or p.result == 2 or p.result == 3
+                ki = p.kind - 1
+                array.set(res, ki, array.get(res, ki) + 1)
+                if p.result == 1
+                    array.set(hits, ki, array.get(hits, ki) + 1)
+                    col = p.dir == -1 ? bearCol : bullCol
+                    if showTgt and not na(p.tgtLn)
+                        line.set_x2(p.tgtLn, bar_index)
+                    if showOutcome
+                        p.resTag := label.new(bar_index, p.target, "✓ " + hitTxt, style = p.dir == -1 ? label.style_label_up : label.style_label_down, color = color.new(col, 100), textcolor = col, size = resSize)
+                    tgtHit := true
+                else if p.result == 2
+                    if showOutcome
+                        p.resTag := label.new(bar_index, p.invalid, "✕ " + failTxt, style = p.dir == -1 ? label.style_label_down : label.style_label_up, color = color.new(color.gray, 100), textcolor = color.gray, size = resSize)
+                    patFail := true
+        if gone
+            f_delete(p)
+            array.remove(pats, i)
+        else
+            i += 1
+
+    //--- cap confirmed patterns, oldest first
+    cnt = 0
+    if array.size(pats) > 0
+        for k = 0 to array.size(pats) - 1
+            if array.get(pats, k).confirmed
+                cnt += 1
+    while cnt > maxKeep
+        idx = -1
+        j = 0
+        while j < array.size(pats) and idx < 0
+            if array.get(pats, j).confirmed
+                idx := j
+            j += 1
+        if idx >= 0
+            f_delete(array.get(pats, idx))
+            array.remove(pats, idx)
+        cnt -= 1
+
+//--- hit-rate table
+var table stat = table.new(position.top_right, 2, 5, border_width = 1)
+if barstate.islast and showStats
+    table.clear(stat, 0, 0, 1, 4)
+    table.cell(stat, 0, 0, "Pattern", text_color = color.gray, text_size = txtSize, bgcolor = color.new(color.gray, 90))
+    table.cell(stat, 1, 0, "reached target", text_color = color.gray, text_size = txtSize, bgcolor = color.new(color.gray, 90))
+    row = 1
+    for k = 1 to 4
+        r = array.get(res, k - 1)
+        if f_enabled(k) and r >= minStat and row <= 4
+            h = array.get(hits, k - 1)
+            pct = math.round(100.0 * h / r)
+            col = (k == 1 or k == 3) ? bearCol : bullCol
+            table.cell(stat, 0, row, f_name(k), text_color = col, text_size = txtSize)
+            table.cell(stat, 1, row, str.tostring(h) + "/" + str.tostring(r) + "  " + str.tostring(pct) + "%", text_color = col, text_size = txtSize)
+            row += 1
+
+alertcondition(bearConf, "Bearish pattern confirmed", "A bearish reversal pattern broke its neckline")
+alertcondition(bullConf, "Bullish pattern confirmed", "A bullish reversal pattern broke its neckline")
+alertcondition(tgtHit, "Target reached", "A confirmed pattern reached its measured target")
+alertcondition(patFail, "Pattern invalidated", "A confirmed pattern was invalidated before reaching target")

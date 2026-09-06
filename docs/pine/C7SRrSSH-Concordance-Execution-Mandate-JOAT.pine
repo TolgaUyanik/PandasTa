@@ -1,0 +1,469 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy("Concordance Execution Mandate [JOAT]", shorttitle="CEM [JOAT]", overlay=true, pyramiding=0, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=2, calc_on_every_tick=false, process_orders_on_close=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+groupCrossframe = "Crossframe Bias"
+primaryTf = input.timeframe("240", "Primary Bias Timeframe", group=groupCrossframe)
+secondaryTf = input.timeframe("1D", "Secondary Bias Timeframe", group=groupCrossframe)
+crossFastLen = input.int(21, "Crossframe Fast EMA", minval=2, maxval=100, group=groupCrossframe)
+crossSlowLen = input.int(55, "Crossframe Slow EMA", minval=3, maxval=200, group=groupCrossframe)
+crossThreshold = input.float(18.0, "Crossframe Threshold", minval=5.0, step=1.0, group=groupCrossframe)
+
+groupAuction = "Auction Engine"
+auctionLookback = input.int(120, "Auction Lookback", minval=50, maxval=300, group=groupAuction)
+auctionBins = input.int(24, "Auction Bins", minval=16, maxval=40, group=groupAuction)
+auctionValuePct = input.float(70.0, "Value Area %", minval=50.0, maxval=95.0, step=0.5, group=groupAuction)
+auctionFastVol = input.int(8, "Auction Fast Volume", minval=1, maxval=60, group=groupAuction)
+auctionSlowVol = input.int(34, "Auction Slow Volume", minval=5, maxval=200, group=groupAuction)
+
+groupStructure = "Structure Corridor"
+stepBasisLen = input.int(21, "Step Basis Length", minval=5, maxval=120, group=groupStructure)
+stepAtrLen = input.int(14, "Structure ATR Length", minval=2, maxval=100, group=groupStructure)
+innerAtrMult = input.float(1.4, "Inner ATR Multiplier", minval=0.2, step=0.1, group=groupStructure)
+pivotLeft = input.int(8, "Pivot Left", minval=2, maxval=30, group=groupStructure)
+pivotRight = input.int(8, "Pivot Right", minval=2, maxval=30, group=groupStructure)
+
+groupMomentum = "Momentum Covenant"
+wtChannelLen = input.int(10, "Wave Channel", minval=2, maxval=50, group=groupMomentum)
+wtAverageLen = input.int(21, "Wave Average", minval=2, maxval=80, group=groupMomentum)
+wtSignalLen = input.int(4, "Wave Signal", minval=2, maxval=20, group=groupMomentum)
+rsiLen = input.int(14, "RSI Length", minval=2, maxval=60, group=groupMomentum)
+rsiSmoothLen = input.int(9, "RSI Smooth", minval=2, maxval=40, group=groupMomentum)
+momentumThreshold = input.float(12.0, "Momentum Threshold", minval=4.0, step=1.0, group=groupMomentum)
+
+groupAbsorption = "Absorption Filter"
+absorptionVolLen = input.int(34, "Absorption Volume Baseline", minval=5, maxval=150, group=groupAbsorption)
+absorptionMult = input.float(1.8, "Absorption Trigger Multiplier", minval=1.0, step=0.1, group=groupAbsorption)
+absorptionLifeBars = input.int(120, "Absorption Life Bars", minval=20, maxval=300, group=groupAbsorption)
+
+groupVol = "Volatility Filter"
+volAtrLen = input.int(14, "Volatility ATR Length", minval=2, maxval=80, group=groupVol)
+volPercentileLookback = input.int(120, "Volatility Percentile Lookback", minval=30, maxval=300, group=groupVol)
+volDirectionLen = input.int(21, "Directional Range Length", minval=5, maxval=80, group=groupVol)
+maxAtrPercentile = input.float(92.0, "Max ATR Percentile", minval=55.0, maxval=100.0, step=1.0, group=groupVol)
+minAtrPercentile = input.float(18.0, "Min ATR Percentile", minval=0.0, maxval=45.0, step=1.0, group=groupVol)
+
+groupRisk = "Risk Management"
+stopAtrMult = input.float(1.8, "Stop ATR Multiplier", minval=0.5, step=0.1, group=groupRisk)
+tpOneR = input.float(1.2, "TP1 R", minval=0.4, step=0.1, group=groupRisk)
+tpTwoR = input.float(2.4, "TP2 R", minval=0.8, step=0.1, group=groupRisk)
+useStructureStop = input.bool(true, "Use Structure Stop Anchor", group=groupRisk)
+
+groupVisual = "Visual"
+showDashboard = input.bool(true, "Show Dashboard", group=groupVisual)
+showClouds = input.bool(true, "Show Context Clouds", group=groupVisual)
+showCandles = input.bool(true, "Color Candles", group=groupVisual)
+showTradeRails = input.bool(true, "Show Trade Rails", group=groupVisual)
+
+//------------------------------------------------------------------------------
+// Palette
+//------------------------------------------------------------------------------
+bullCore = color.rgb(0, 201, 166)
+bearCore = color.rgb(255, 92, 118)
+neutralCore = color.rgb(148, 163, 184)
+accentCore = color.rgb(255, 204, 92)
+panelBg = color.rgb(11, 18, 32)
+panelFrame = color.rgb(58, 76, 109)
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+f_clamp(float value, float minValue, float maxValue) =>
+    math.max(minValue, math.min(maxValue, value))
+
+f_percent_rank(series float source, int length) =>
+    float count = 0.0
+    for i = 0 to length - 1
+        count += source >= source[i] ? 1.0 : 0.0
+    100.0 * count / length
+
+f_wave(series float src, int channelLen, int averageLen, int signalLen) =>
+    float esa = ta.ema(src, channelLen)
+    float deviation = ta.ema(math.abs(src - esa), channelLen)
+    float ci = deviation != 0 ? (src - esa) / (0.015 * deviation) : 0.0
+    float wave = ta.ema(ci, averageLen)
+    float signal = ta.sma(wave, signalLen)
+    [wave, signal]
+
+f_secure_ema(string tf, int length, int idxHigher, int idxCurrent) =>
+    request.security(syminfo.tickerid, tf, ta.ema(close, length)[idxHigher])[idxCurrent]
+
+f_state_text(float score) =>
+    score >= 25 ? "Positive" :
+     score <= -25 ? "Negative" : "Mixed"
+
+f_clear_trade_drawings(line a, line b, line c, line d, line e, label la, label lb, label lc, label ld, label le, linefill rf, linefill pf) =>
+    if not na(a)
+        line.delete(a)
+    if not na(b)
+        line.delete(b)
+    if not na(c)
+        line.delete(c)
+    if not na(d)
+        line.delete(d)
+    if not na(e)
+        line.delete(e)
+    if not na(la)
+        label.delete(la)
+    if not na(lb)
+        label.delete(lb)
+    if not na(lc)
+        label.delete(lc)
+    if not na(ld)
+        label.delete(ld)
+    if not na(le)
+        label.delete(le)
+    if not na(rf)
+        linefill.delete(rf)
+    if not na(pf)
+        linefill.delete(pf)
+
+//------------------------------------------------------------------------------
+// Crossframe bias
+//------------------------------------------------------------------------------
+idxHigher = barstate.isrealtime ? 1 : 0
+idxCurrent = barstate.isrealtime ? 0 : 1
+
+primaryFast = f_secure_ema(primaryTf, crossFastLen, idxHigher, idxCurrent)
+primarySlow = f_secure_ema(primaryTf, crossSlowLen, idxHigher, idxCurrent)
+secondaryFast = f_secure_ema(secondaryTf, crossFastLen, idxHigher, idxCurrent)
+secondarySlow = f_secure_ema(secondaryTf, crossSlowLen, idxHigher, idxCurrent)
+crossAtr = ta.atr(stepAtrLen)
+
+primaryScore = (primaryFast - primarySlow) / math.max(crossAtr, syminfo.mintick) * 40.0
+secondaryScore = (secondaryFast - secondarySlow) / math.max(crossAtr, syminfo.mintick) * 45.0
+localCrossScore = (ta.ema(close, crossFastLen) - ta.ema(close, crossSlowLen)) / math.max(crossAtr, syminfo.mintick) * 12.0
+crossframeScore = f_clamp(primaryScore + secondaryScore + localCrossScore, -100.0, 100.0)
+
+//------------------------------------------------------------------------------
+// Auction engine
+//------------------------------------------------------------------------------
+var array<float> profile = array.new_float(auctionBins, 0.0)
+if array.size(profile) != auctionBins
+    profile := array.new_float(auctionBins, 0.0)
+
+auctionReady = bar_index >= auctionLookback
+float auctionLow = na
+float auctionHigh = na
+float auctionSpan = na
+float auctionBin = na
+float auctionPoc = na
+float auctionVaHigh = na
+float auctionVaLow = na
+int auctionPocBin = na
+float auctionTotalVol = na
+
+if auctionReady
+    auctionLow := low
+    auctionHigh := high
+    for i = 0 to auctionLookback - 1
+        auctionLow := math.min(auctionLow, low[i])
+        auctionHigh := math.max(auctionHigh, high[i])
+    auctionSpan := math.max(auctionHigh - auctionLow, syminfo.mintick)
+    auctionBin := math.max(auctionSpan / auctionBins, syminfo.mintick)
+    array.fill(profile, 0.0)
+    auctionTotalVol := 0.0
+
+    for i = 0 to auctionLookback - 1
+        float localLow = low[i]
+        float localHigh = high[i]
+        float localVolume = volume[i]
+        float candleSpan = math.max(localHigh - localLow, syminfo.mintick)
+        int firstBin = math.max(0, math.min(auctionBins - 1, math.floor((localLow - auctionLow) / auctionBin)))
+        int lastBin = math.max(0, math.min(auctionBins - 1, math.floor((localHigh - auctionLow) / auctionBin)))
+        auctionTotalVol += localVolume
+        for b = firstBin to lastBin
+            float edgeLow = auctionLow + auctionBin * b
+            float edgeHigh = edgeLow + auctionBin
+            float overlap = math.max(0.0, math.min(localHigh, edgeHigh) - math.max(localLow, edgeLow))
+            if overlap > 0
+                float alloc = localVolume * overlap / candleSpan
+                array.set(profile, b, array.get(profile, b) + alloc)
+
+    float maxBucket = 0.0
+    auctionPocBin := 0
+    for b = 0 to auctionBins - 1
+        float bucket = array.get(profile, b)
+        if bucket > maxBucket
+            maxBucket := bucket
+            auctionPocBin := b
+
+    auctionPoc := auctionLow + (auctionPocBin + 0.5) * auctionBin
+    float targetVol = auctionTotalVol * auctionValuePct * 0.01
+    float captured = array.get(profile, auctionPocBin)
+    int leftBin = auctionPocBin
+    int rightBin = auctionPocBin
+    while captured < targetVol and (leftBin > 0 or rightBin < auctionBins - 1)
+        float leftVol = leftBin > 0 ? array.get(profile, leftBin - 1) : -1.0
+        float rightVol = rightBin < auctionBins - 1 ? array.get(profile, rightBin + 1) : -1.0
+        if rightVol > leftVol
+            rightBin += 1
+            captured += rightVol
+        else
+            leftBin -= 1
+            captured += leftVol
+    auctionVaLow := auctionLow + leftBin * auctionBin
+    auctionVaHigh := auctionLow + (rightBin + 1.0) * auctionBin
+
+auctionFastVolValue = ta.sma(volume, auctionFastVol)
+auctionSlowVolValue = ta.sma(volume, auctionSlowVol)
+auctionVolRatio = auctionFastVolValue / math.max(auctionSlowVolValue, syminfo.mintick)
+auctionTrend = (ta.ema(close, 34) - ta.ema(close, 89)) / math.max(crossAtr, syminfo.mintick)
+auctionDistance = auctionReady and not na(auctionPoc) ? (close - auctionPoc) / math.max(crossAtr, syminfo.mintick) : 0.0
+auctionScore = auctionReady ? f_clamp((auctionVolRatio - 1.0) * 55.0 + auctionTrend * 30.0 + auctionDistance * 22.0, -100.0, 100.0) : 0.0
+auctionAbove = auctionReady and close > auctionVaHigh
+auctionBelow = auctionReady and close < auctionVaLow
+auctionInside = auctionReady and close <= auctionVaHigh and close >= auctionVaLow
+auctionConstructive = auctionReady and (auctionAbove or (auctionInside and close > auctionPoc))
+auctionDefensive = auctionReady and (auctionBelow or (auctionInside and close < auctionPoc))
+
+//------------------------------------------------------------------------------
+// Structure corridor
+//------------------------------------------------------------------------------
+stepAtr = ta.atr(stepAtrLen)
+baseStep = ta.sma(close, stepBasisLen)
+var float stepMid = na
+if na(stepMid)
+    stepMid := baseStep
+
+prevUpper = stepMid + stepAtr * innerAtrMult
+prevLower = stepMid - stepAtr * innerAtrMult
+if close > prevUpper or close < prevLower
+    stepMid := baseStep
+else
+    stepMid := nz(stepMid[1], baseStep)
+
+innerUpper = stepMid + stepAtr * innerAtrMult
+innerLower = stepMid - stepAtr * innerAtrMult
+stepSlope = stepMid - nz(stepMid[1], stepMid)
+
+ph = ta.pivothigh(high, pivotLeft, pivotRight)
+pl = ta.pivotlow(low, pivotLeft, pivotRight)
+var float lastPivotHigh = na
+var float lastPivotLow = na
+if not na(ph)
+    lastPivotHigh := ph
+if not na(pl)
+    lastPivotLow := pl
+
+structureLong = close > stepMid and stepSlope >= 0 and (na(lastPivotHigh) or close > lastPivotHigh)
+structureShort = close < stepMid and stepSlope <= 0 and (na(lastPivotLow) or close < lastPivotLow)
+
+//------------------------------------------------------------------------------
+// Momentum covenant
+//------------------------------------------------------------------------------
+[wtMain, wtSignal] = f_wave(hlc3, wtChannelLen, wtAverageLen, wtSignalLen)
+rsiValue = ta.rsi(close, rsiLen)
+rsiMean = ta.ema(rsiValue, rsiSmoothLen)
+rsiScore = (rsiValue - rsiMean) + ((rsiValue - 50.0) / 10.0)
+momentumTrend = (ta.ema(close, 34) - ta.ema(close, 89)) / math.max(crossAtr, syminfo.mintick) * 8.0
+momentumScore = f_clamp((wtMain - wtSignal) * 1.2 + rsiScore + momentumTrend, -100.0, 100.0)
+momentumSignal = ta.ema(momentumScore, 8)
+
+//------------------------------------------------------------------------------
+// Absorption filter
+//------------------------------------------------------------------------------
+absorptionBaseline = ta.sma(volume, absorptionVolLen)
+absorptionTrigger = volume > absorptionBaseline * absorptionMult
+var float rangeTop = na
+var float rangeBottom = na
+var float rangeEq = na
+var float rangeBullBalance = na
+var int rangeStart = na
+
+if absorptionTrigger
+    float bullShare = close >= open ? 0.65 : 0.35
+    if na(rangeTop) or bar_index - nz(rangeStart, bar_index) > absorptionLifeBars or close > rangeTop or close < rangeBottom
+        rangeTop := high
+        rangeBottom := low
+        rangeEq := hlc3
+        rangeBullBalance := bullShare
+        rangeStart := bar_index
+    else
+        float totalWeight = 2.0
+        rangeTop := math.max(rangeTop, high)
+        rangeBottom := math.min(rangeBottom, low)
+        rangeEq := ((rangeEq * (totalWeight - 1.0)) + hlc3) / totalWeight
+        rangeBullBalance := ((rangeBullBalance * (totalWeight - 1.0)) + bullShare) / totalWeight
+
+if not na(rangeStart) and bar_index - rangeStart > absorptionLifeBars
+    rangeTop := na
+    rangeBottom := na
+    rangeEq := na
+    rangeBullBalance := na
+    rangeStart := na
+
+absorptionLong = na(rangeEq) or (close >= rangeEq and nz(rangeBullBalance, 0.5) >= 0.50)
+absorptionShort = na(rangeEq) or (close <= rangeEq and nz(rangeBullBalance, 0.5) <= 0.50)
+
+//------------------------------------------------------------------------------
+// Volatility filter
+//------------------------------------------------------------------------------
+volAtr = ta.atr(volAtrLen)
+atrPercentile = bar_index >= volPercentileLookback ? f_percent_rank(volAtr, volPercentileLookback) : 50.0
+dirBullRange = ta.ema(close > open ? high - low : 0.0, volDirectionLen)
+dirBearRange = ta.ema(close < open ? high - low : 0.0, volDirectionLen)
+dirImbalance = (dirBullRange - dirBearRange) / math.max(volAtr, syminfo.mintick)
+volatilityScore = f_clamp((atrPercentile - 50.0) + dirImbalance * 20.0, -100.0, 100.0)
+volatilityPass = atrPercentile >= minAtrPercentile and atrPercentile <= maxAtrPercentile
+
+//------------------------------------------------------------------------------
+// Entry logic
+//------------------------------------------------------------------------------
+longPermission = barstate.isconfirmed and crossframeScore > crossThreshold and auctionScore > 10 and structureLong and absorptionLong and volatilityPass and volatilityScore > -15
+shortPermission = barstate.isconfirmed and crossframeScore < -crossThreshold and auctionScore < -10 and structureShort and absorptionShort and volatilityPass and volatilityScore < 15
+longPermission := longPermission and auctionConstructive
+shortPermission := shortPermission and auctionDefensive
+
+longTrigger = longPermission and ta.crossover(momentumScore, momentumSignal) and momentumScore > momentumThreshold
+shortTrigger = shortPermission and ta.crossunder(momentumScore, momentumSignal) and momentumScore < -momentumThreshold
+
+//------------------------------------------------------------------------------
+// Risk management
+//------------------------------------------------------------------------------
+var float longStop = na
+var float longTp1 = na
+var float longTp2 = na
+var float shortStop = na
+var float shortTp1 = na
+var float shortTp2 = na
+var float longTp3 = na
+var float shortTp3 = na
+
+var line entryLine = na
+var line stopLine = na
+var line tpOneLine = na
+var line tpTwoLine = na
+var line tpThreeLine = na
+var label entryLabel = na
+var label stopLabel = na
+var label tpOneLabel = na
+var label tpTwoLabel = na
+var label tpThreeLabel = na
+var linefill riskFill = na
+var linefill rewardFill = na
+
+if longTrigger and strategy.position_size <= 0
+    float rawStop = close - volAtr * stopAtrMult
+    float structureStop = useStructureStop and not na(rangeBottom) ? math.min(rawStop, rangeBottom) : rawStop
+    float risk = math.max(close - structureStop, syminfo.mintick * 5.0)
+    longStop := close - risk
+    longTp1 := close + risk * tpOneR
+    longTp2 := close + risk * tpTwoR
+    longTp3 := close + risk * (tpTwoR + (tpTwoR - tpOneR))
+    strategy.entry("Long", strategy.long)
+    if showTradeRails
+        f_clear_trade_drawings(entryLine, stopLine, tpOneLine, tpTwoLine, tpThreeLine, entryLabel, stopLabel, tpOneLabel, tpTwoLabel, tpThreeLabel, riskFill, rewardFill)
+        entryLine := line.new(bar_index, close, bar_index + 1, close, color=color.new(bullCore, 0), width=2, extend=extend.right)
+        stopLine := line.new(bar_index, longStop, bar_index + 1, longStop, color=color.new(bearCore, 0), width=1, style=line.style_dashed, extend=extend.right)
+        tpOneLine := line.new(bar_index, longTp1, bar_index + 1, longTp1, color=color.new(bullCore, 20), width=1, extend=extend.right)
+        tpTwoLine := line.new(bar_index, longTp2, bar_index + 1, longTp2, color=color.new(bullCore, 20), width=1, extend=extend.right)
+        tpThreeLine := line.new(bar_index, longTp3, bar_index + 1, longTp3, color=color.new(bullCore, 20), width=1, style=line.style_dotted, extend=extend.right)
+        entryLabel := label.new(bar_index, close, "Long " + str.tostring(close, format.mintick), style=label.style_label_left, color=color.new(bullCore, 0), textcolor=color.white, size=size.small)
+        stopLabel := label.new(bar_index, longStop, "SL " + str.tostring(longStop, format.mintick), style=label.style_label_left, color=color.new(bearCore, 0), textcolor=color.white, size=size.small)
+        tpOneLabel := label.new(bar_index, longTp1, "TP1 " + str.tostring(longTp1, format.mintick), style=label.style_label_left, color=color.new(bullCore, 20), textcolor=color.white, size=size.small)
+        tpTwoLabel := label.new(bar_index, longTp2, "TP2 " + str.tostring(longTp2, format.mintick), style=label.style_label_left, color=color.new(bullCore, 20), textcolor=color.white, size=size.small)
+        tpThreeLabel := label.new(bar_index, longTp3, "TP3 " + str.tostring(longTp3, format.mintick), style=label.style_label_left, color=color.new(bullCore, 20), textcolor=color.white, size=size.small)
+        riskFill := linefill.new(entryLine, stopLine, color.new(bearCore, 90))
+        rewardFill := linefill.new(entryLine, tpTwoLine, color.new(bullCore, 90))
+
+if shortTrigger and strategy.position_size >= 0
+    float rawStop = close + volAtr * stopAtrMult
+    float structureStop = useStructureStop and not na(rangeTop) ? math.max(rawStop, rangeTop) : rawStop
+    float risk = math.max(structureStop - close, syminfo.mintick * 5.0)
+    shortStop := close + risk
+    shortTp1 := close - risk * tpOneR
+    shortTp2 := close - risk * tpTwoR
+    shortTp3 := close - risk * (tpTwoR + (tpTwoR - tpOneR))
+    strategy.entry("Short", strategy.short)
+    if showTradeRails
+        f_clear_trade_drawings(entryLine, stopLine, tpOneLine, tpTwoLine, tpThreeLine, entryLabel, stopLabel, tpOneLabel, tpTwoLabel, tpThreeLabel, riskFill, rewardFill)
+        entryLine := line.new(bar_index, close, bar_index + 1, close, color=color.new(bearCore, 0), width=2, extend=extend.right)
+        stopLine := line.new(bar_index, shortStop, bar_index + 1, shortStop, color=color.new(bearCore, 0), width=1, style=line.style_dashed, extend=extend.right)
+        tpOneLine := line.new(bar_index, shortTp1, bar_index + 1, shortTp1, color=color.new(bullCore, 20), width=1, extend=extend.right)
+        tpTwoLine := line.new(bar_index, shortTp2, bar_index + 1, shortTp2, color=color.new(bullCore, 20), width=1, extend=extend.right)
+        tpThreeLine := line.new(bar_index, shortTp3, bar_index + 1, shortTp3, color=color.new(bullCore, 20), width=1, style=line.style_dotted, extend=extend.right)
+        entryLabel := label.new(bar_index, close, "Short " + str.tostring(close, format.mintick), style=label.style_label_left, color=color.new(bearCore, 0), textcolor=color.white, size=size.small)
+        stopLabel := label.new(bar_index, shortStop, "SL " + str.tostring(shortStop, format.mintick), style=label.style_label_left, color=color.new(bearCore, 0), textcolor=color.white, size=size.small)
+        tpOneLabel := label.new(bar_index, shortTp1, "TP1 " + str.tostring(shortTp1, format.mintick), style=label.style_label_left, color=color.new(bullCore, 20), textcolor=color.white, size=size.small)
+        tpTwoLabel := label.new(bar_index, shortTp2, "TP2 " + str.tostring(shortTp2, format.mintick), style=label.style_label_left, color=color.new(bullCore, 20), textcolor=color.white, size=size.small)
+        tpThreeLabel := label.new(bar_index, shortTp3, "TP3 " + str.tostring(shortTp3, format.mintick), style=label.style_label_left, color=color.new(bullCore, 20), textcolor=color.white, size=size.small)
+        riskFill := linefill.new(entryLine, stopLine, color.new(bearCore, 90))
+        rewardFill := linefill.new(entryLine, tpTwoLine, color.new(bullCore, 90))
+
+if strategy.position_size > 0
+    strategy.exit("Long TP1", "Long", stop=longStop, limit=longTp1, qty_percent=50)
+    strategy.exit("Long TP2", "Long", stop=longStop, limit=longTp2, qty_percent=50)
+    if crossframeScore < 0 or momentumScore < 0 or auctionScore < 0 or close < stepMid
+        strategy.close("Long", comment="Bias Lost")
+
+if strategy.position_size < 0
+    strategy.exit("Short TP1", "Short", stop=shortStop, limit=shortTp1, qty_percent=50)
+    strategy.exit("Short TP2", "Short", stop=shortStop, limit=shortTp2, qty_percent=50)
+    if crossframeScore > 0 or momentumScore > 0 or auctionScore > 0 or close > stepMid
+        strategy.close("Short", comment="Bias Lost")
+
+//------------------------------------------------------------------------------
+// Visual context
+//------------------------------------------------------------------------------
+plotAuctionPoc = plot(auctionPoc, "Auction POC", color=color.new(accentCore, 0), linewidth=2, style=plot.style_linebr)
+plotAuctionVaHigh = plot(auctionVaHigh, "Auction VA High", color=color.new(bullCore, 35), linewidth=1)
+plotAuctionVaLow = plot(auctionVaLow, "Auction VA Low", color=color.new(bearCore, 35), linewidth=1)
+plotStepMid = plot(stepMid, "Structure Mid", color=color.new(neutralCore, 0), linewidth=2, style=plot.style_stepline)
+plotStepUpper = plot(showClouds ? innerUpper : na, "Structure Upper", color=color.new(bullCore, 55), linewidth=1)
+plotStepLower = plot(showClouds ? innerLower : na, "Structure Lower", color=color.new(bearCore, 55), linewidth=1)
+plotCrossBasis = plot(showClouds ? ((primaryFast + primarySlow) * 0.5) : na, "Crossframe Basis", color=color.new(accentCore, 65), linewidth=1)
+plotRangeEq = plot(rangeEq, "Absorption Eq", color=color.new(accentCore, 15), linewidth=2, style=plot.style_linebr)
+
+fill(plotAuctionVaHigh, plotAuctionPoc, color=showClouds and auctionReady ? color.new(bullCore, 90) : na, title="Auction Upper Cloud")
+fill(plotAuctionPoc, plotAuctionVaLow, color=showClouds and auctionReady ? color.new(bearCore, 90) : na, title="Auction Lower Cloud")
+fill(plotStepUpper, plotStepMid, color=showClouds ? color.new(bullCore, 92) : na, title="Structure Upper Cloud")
+fill(plotStepMid, plotStepLower, color=showClouds ? color.new(bearCore, 92) : na, title="Structure Lower Cloud")
+
+barcolor(showCandles ? color.new(crossframeScore > 0 ? bullCore : crossframeScore < 0 ? bearCore : neutralCore, strategy.position_size == 0 ? 40 : 10) : na)
+bgcolor(longPermission ? color.new(bullCore, 95) : shortPermission ? color.new(bearCore, 95) : na, title="Execution Permission")
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+var table dashboard = table.new(position.top_right, 2, 9, bgcolor=color.new(panelBg, 0), border_width=1, border_color=panelFrame, frame_width=1, frame_color=panelFrame)
+
+if barstate.islast and showDashboard
+    color stateColor = crossframeScore > 0 ? bullCore : crossframeScore < 0 ? bearCore : neutralCore
+    string regimeText = crossframeScore > 0 ? "Long Bias" : crossframeScore < 0 ? "Short Bias" : "Mixed"
+    string permissionText = longPermission ? "Long Ready" : shortPermission ? "Short Ready" : "Filtered"
+    string auctionText = auctionAbove ? "Above Value" : auctionBelow ? "Below Value" : auctionInside ? "Inside Value" : "Warming"
+    string absorptionText = na(rangeEq) ? "No Active Range" : absorptionLong and not absorptionShort ? "Bid Support" : absorptionShort and not absorptionLong ? "Offer Pressure" : "Two Way"
+
+    table.cell(dashboard, 0, 0, "Mandate", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 0, regimeText, text_color=stateColor, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 1, "Permission", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 1, permissionText, text_color=longPermission ? bullCore : shortPermission ? bearCore : neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 2, "Auction", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 2, auctionText, text_color=auctionScore > 0 ? bullCore : auctionScore < 0 ? bearCore : neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 3, "Structure", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 3, structureLong ? "Positive" : structureShort ? "Negative" : "Mixed", text_color=structureLong ? bullCore : structureShort ? bearCore : neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 4, "Momentum", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 4, str.tostring(momentumScore, "#.0"), text_color=momentumScore > 0 ? bullCore : bearCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 5, "Absorption", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 5, absorptionText, text_color=na(rangeEq) ? neutralCore : rangeBullBalance >= 0.5 ? bullCore : bearCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 6, "ATR %", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 6, str.tostring(atrPercentile, "#.0"), text_color=accentCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 7, "Position", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 7, strategy.position_size > 0 ? "Long Active" : strategy.position_size < 0 ? "Short Active" : "Flat", text_color=strategy.position_size > 0 ? bullCore : strategy.position_size < 0 ? bearCore : neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 0, 8, "Risk Rail", text_color=neutralCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+    table.cell(dashboard, 1, 8, strategy.position_size > 0 ? str.tostring(longStop, format.mintick) : strategy.position_size < 0 ? str.tostring(shortStop, format.mintick) : "Idle", text_color=accentCore, bgcolor=color.new(panelBg, 0), text_size=size.normal)
+else if barstate.islast
+    for col = 0 to 1
+        for row = 0 to 8
+            table.cell(dashboard, col, row, "", text_color=color.new(neutralCore, 100), bgcolor=color.new(panelBg, 100), text_size=size.normal)
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertcondition(longTrigger, "Mandate Long", "Concordance Execution Mandate [JOAT]: confirmed long trigger")
+alertcondition(shortTrigger, "Mandate Short", "Concordance Execution Mandate [JOAT]: confirmed short trigger")

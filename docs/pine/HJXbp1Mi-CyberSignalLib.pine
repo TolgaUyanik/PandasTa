@@ -1,0 +1,545 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 1
+// @tw_status twPublishDenied (moderation review required)
+// Last published: cybermediaboy/SignalLib/1
+// @description CyberSignalLib — Kalman + Entropy + Changepoint + Microstructure unified.
+//              Merges KalmanEngineLib + EntropyLib + chainaggrLib microstructure parts.
+//              Layer L1. Depends only on NumLib.
+//
+// Step 5 of restructuring. Monolithic file by user choice.
+//
+// REPLACES:
+//   - KalmanEngineLib (entire file)
+//   - EntropyLib (entire file: entropy + changepoint + Kalman duplicates)
+//   - chainaggrLib MicroState + get_micro_state + get_scientific_delta + get_aggregated_volume
+//
+// REMOVED DUPLICATES:
+//   - TaUtilityLib.KalmanState (price/velocity 2D) → use KalmanStateN with nfeat=2
+//   - TaUtilityLib f_kalman_update / f_kalman_update_te / f_kalman_robust / f_kalman_control
+//     → all subsumed by KalmanStateN methods
+//   - EntropyLib f_sequential_kalman_update → KalmanStateN.update_scalar
+//
+library("CyberSignalLib", overlay=false, dynamic_requests=true)
+import cybermediaboy/CyberNumLib/1 as N
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen ordering — P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Kalman concept identifier
+export enum KalmanConcept
+    PRICE
+    VELOCITY
+    ZSCORE
+    MAHALANOBIS
+    GAMMA
+    PHI
+
+// @enum Changepoint detector type
+export enum ChangepointKind
+    NONE
+    NIS
+    CUSUM
+    BOCPD
+
+// @enum Entropy aggregation mode
+export enum EntropyMode
+    BINARY
+    TERNARY
+    COMBO
+    COMPOSITE
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: KALMAN STATE (N-DIMENSIONAL, TRI-PACKED P)
+// ═══════════════════════════════════════════════════════════════════════════
+// State vector x of length nfeat. Covariance P stored as upper-triangular
+// packed array of length nfeat*(nfeat+1)/2 row-major:
+//   P[i,j] for i<=j is P_packed[i*(2*nfeat-i+1)/2 + (j-i)]
+// Adaptive Q/R via innovation tracking. NIS gating optional.
+
+// @type KalmanStateN — N-dimensional Kalman filter state
+export type KalmanStateN
+    int nfeat                    // dimension of x
+    array<float> x               // state vector
+    array<float> Ptri             // packed upper-triangular covariance (length n(n+1)/2)
+    array<float> Qdiag            // process noise diagonal (length n)
+    float R                      // measurement noise (scalar; per-step possibly mutated)
+    array<float> innovbuf         // recent innovations for adaptive Q
+    int innovhead                 // circular write head
+    int innovsize                 // capacity
+    int barsrun                  // bars since init
+    float lastnis                 // last NIS value (for gating)
+    bool ready                   // true after warmup
+
+// ─── Helper: triangular index ─────────────────────────────────────────────
+f_tri_idx(int i, int j, int n) =>
+    int a = math.min(i, j)
+    int b = math.max(i, j)
+    a * (2 * n - a + 1) / 2 + (b - a)
+
+// @function Get covariance element P[i,j]
+export method P_get(KalmanStateN st, int i, int j) =>
+    array.get(st.Ptri, f_tri_idx(i, j, st.nfeat))
+
+// @function Set covariance element P[i,j]
+export method P_set(KalmanStateN st, int i, int j, float val) =>
+    array.set(st.Ptri, f_tri_idx(i, j, st.nfeat), val)
+    st
+
+// ─── Factory ──────────────────────────────────────────────────────────────
+
+// @function Create N-dim Kalman with diagonal P0, Q, scalar R
+export f_kalman_init(int nfeat, float P0, float Q0, float R0, int innov_window) =>
+    int trisz = nfeat * (nfeat + 1) / 2
+    array<float> x = array.new<float>(nfeat, 0.0)
+    array<float> Ptri = array.new<float>(trisz, 0.0)
+    array<float> Qd = array.new<float>(nfeat, Q0)
+    // diagonal P0
+    for i = 0 to nfeat - 1
+        array.set(Ptri, f_tri_idx(i, i, nfeat), P0)
+    array<float> ibuf = array.new<float>(math.max(1, innov_window), 0.0)
+    KalmanStateN.new(nfeat = nfeat, x = x, Ptri = Ptri, Qdiag = Qd, R = R0, innovbuf = ibuf, innovhead = 0, innovsize = math.max(1, innov_window), barsrun = 0, lastnis = 0.0, ready = false)
+
+// @function Convenience: 2D price+velocity (replaces TaUtilityLib KalmanState)
+export f_kalman_init_pricevel(float P0_price, float P0_vel,
+                               float Q_price, float Q_vel, float R0) =>
+    KalmanStateN st = f_kalman_init(2, P0_price, Q_price, R0, 32)
+    st.P_set(0, 0, P0_price)
+    st.P_set(1, 1, P0_vel)
+    array.set(st.Qdiag, 0, Q_price)
+    array.set(st.Qdiag, 1, Q_vel)
+    st
+
+// ─── Methods: predict / update / sanitize ─────────────────────────────────
+
+// @function Predict step: x = F·x, P = F·P·F' + Q. Identity-F variant (default).
+//           For non-identity F, caller pre-applies x ← F·x and modifies P externally.
+export method predict(KalmanStateN st) =>
+    int n = st.nfeat
+    // Add Qdiag to P diagonal
+    for i = 0 to n - 1
+        float pii = st.P_get(i, i)
+        st.P_set(i, i, pii + array.get(st.Qdiag, i))
+    st
+
+// @function Scalar measurement update.
+//           z = scalar measurement, Hrow = 1×nfeat row vector, R override per-step.
+//           Innovation y = z - H·x; S = H·P·H' + R; K = P·H'/S; x += K·y;
+//           Joseph-form covariance update for numerical stability.
+export method update_scalar(KalmanStateN st, float z, array<float> Hrow, float Rstep) =>
+    int n = st.nfeat
+    if array.size(Hrow) != n
+        st  // shape mismatch — no-op
+    else
+        // Predicted measurement: H·x
+        float zpred = 0.0
+        for i = 0 to n - 1
+            zpred += array.get(Hrow, i) * array.get(st.x, i)
+        float innov = z - zpred
+
+        // S = H·P·H' + R
+        float S = Rstep
+        for i = 0 to n - 1
+            for j = 0 to n - 1
+                S += array.get(Hrow, i) * st.P_get(i, j) * array.get(Hrow, j)
+        S := math.max(S, 1e-12)
+
+        // K[i] = sum_j P[i,j] · H[j] / S
+        array<float> K = array.new<float>(n, 0.0)
+        for i = 0 to n - 1
+            float ki = 0.0
+            for j = 0 to n - 1
+                ki += st.P_get(i, j) * array.get(Hrow, j)
+            array.set(K, i, ki / S)
+
+        // x += K · innov
+        for i = 0 to n - 1
+            array.set(st.x, i, array.get(st.x, i) + array.get(K, i) * innov)
+
+        // P = (I - K·H) P (I - K·H)' + K·R·K'  (Joseph form)
+        // Compact diag-update version (suitable for n≤6): P_ij -= K_i·(H·P)_j (one-sided)
+        // followed by symmetric correction. Practical compromise vs full Joseph.
+        for i = 0 to n - 1
+            for j = i to n - 1
+                float HPj = 0.0
+                for k = 0 to n - 1
+                    HPj += array.get(Hrow, k) * st.P_get(k, j)
+                float pij = st.P_get(i, j)
+                st.P_set(i, j, pij - array.get(K, i) * HPj)
+
+        // NIS = innov² / S
+        st.lastnis := innov * innov / S
+
+        // Push to innovation buffer (circular)
+        array.set(st.innovbuf, st.innovhead, innov)
+        st.innovhead := (st.innovhead + 1) % st.innovsize
+
+        st.barsrun += 1
+        if st.barsrun >= st.innovsize
+            st.ready := true
+        st
+
+// @function Sanitize state — guard against numerical degradation
+//           Replaces na/inf in x and P with safe defaults; clamps P diagonal positive.
+export method sanitize(KalmanStateN st, float P_floor) =>
+    int n = st.nfeat
+    for i = 0 to n - 1
+        float xi = array.get(st.x, i)
+        if na(xi) or math.abs(xi) > 1e15
+            array.set(st.x, i, 0.0)
+        for j = i to n - 1
+            float pij = st.P_get(i, j)
+            if na(pij) or math.abs(pij) > 1e15
+                st.P_set(i, j, i == j ? P_floor : 0.0)
+            else if i == j and pij < P_floor
+                st.P_set(i, j, P_floor)
+    st
+
+// ─── Adaptive Q / R ──────────────────────────────────────────────────────
+
+// @function Adaptive Q based on rolling innovation variance (replaces fadaptiveQfrominnov)
+export method adapt_Q(KalmanStateN st, float Q_min, float Q_max, float gain) =>
+    if st.ready
+        // Mean of innovations (should be ≈0)
+        float sum = 0.0
+        for i = 0 to st.innovsize - 1
+            sum += array.get(st.innovbuf, i)
+        float mu = sum / st.innovsize
+        float ssq = 0.0
+        for i = 0 to st.innovsize - 1
+            float d = array.get(st.innovbuf, i) - mu
+            ssq += d * d
+        float var_innov = ssq / st.innovsize
+        float Q_new = math.max(Q_min, math.min(Q_max, var_innov * gain))
+        for i = 0 to st.nfeat - 1
+            array.set(st.Qdiag, i, Q_new)
+    st
+
+// @function Adaptive R from outliers (replaces fadaptiveRfromoutliers)
+export method adapt_R(KalmanStateN st, float high_thresh, float low_thresh, float R_step) =>
+    if st.ready
+        if st.lastnis > high_thresh
+            st.R := st.R * (1.0 + R_step)
+        else if st.lastnis < low_thresh
+            st.R := math.max(1e-9, st.R * (1.0 - R_step))
+    st
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: TRANSITION CONFIG (F matrix presets)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type TransitionConfig — diagonal transition factors per dimension
+export type TransitionConfig
+    array<float> F_diag           // length nfeat
+    array<float> F_off            // off-diagonal couplings (sparse)
+
+export f_transition_identity(int nfeat) =>
+    array<float> fd = array.new<float>(nfeat, 1.0)
+    TransitionConfig.new(F_diag = fd, F_off = array.new<float>())
+
+// Apply F to state vector (in-place)
+export method apply_F(KalmanStateN st, TransitionConfig tc) =>
+    int n = math.min(st.nfeat, array.size(tc.F_diag))
+    for i = 0 to n - 1
+        array.set(st.x, i, array.get(st.x, i) * array.get(tc.F_diag, i))
+    st
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: TRAJECTORY STORE (lookback ring buffer for Kalman snapshots)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type TrajectoryStore
+    array<float> buf              // flat: barCount × snap_dim
+    int snap_dim
+    int capacity
+    int writehead
+    int filled
+
+export f_trajectory_new(int snap_dim, int capacity) =>
+    TrajectoryStore.new(buf = array.new<float>(snap_dim * capacity, na), snap_dim = snap_dim, capacity = capacity, writehead = 0, filled = 0)
+
+export method push(TrajectoryStore tr, array<float> snap) =>
+    int n = math.min(array.size(snap), tr.snap_dim)
+    int base = tr.writehead * tr.snap_dim
+    for i = 0 to n - 1
+        array.set(tr.buf, base + i, array.get(snap, i))
+    tr.writehead := (tr.writehead + 1) % tr.capacity
+    tr.filled := math.min(tr.capacity, tr.filled + 1)
+    tr
+
+// @function Read snapshot at offset (0 = most recent, 1 = previous, ...)
+export method read(TrajectoryStore tr, int offset) =>
+    array<float> out = array.new<float>(tr.snap_dim, na)
+    if offset >= 0 and offset < tr.filled
+        int idx = (tr.writehead - 1 - offset + tr.capacity) % tr.capacity
+        int base = idx * tr.snap_dim
+        for i = 0 to tr.snap_dim - 1
+            array.set(out, i, array.get(tr.buf, base + i))
+    out
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: MAHALANOBIS DISTANCE (3D analytic, tri-packed)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function 3D Mahalanobis using tri-packed covariance + shrinkage to identity
+//           sqrt((z - mu)' Σ⁻¹ (z - mu)) where Σ = (1-λ)·S + λ·I
+export f_mahalanobis_3d(array<float> z, array<float> mu, array<float> sigma_tri,
+                        float shrinkage) =>
+    float d0 = array.get(z, 0) - array.get(mu, 0)
+    float d1 = array.get(z, 1) - array.get(mu, 1)
+    float d2 = array.get(z, 2) - array.get(mu, 2)
+    // Tri layout for n=3: [s00, s01, s02, s11, s12, s22]
+    float s00 = (1.0 - shrinkage) * array.get(sigma_tri, 0) + shrinkage
+    float s11 = (1.0 - shrinkage) * array.get(sigma_tri, 3) + shrinkage
+    float s22 = (1.0 - shrinkage) * array.get(sigma_tri, 5) + shrinkage
+    float s01 = (1.0 - shrinkage) * array.get(sigma_tri, 1)
+    float s02 = (1.0 - shrinkage) * array.get(sigma_tri, 2)
+    float s12 = (1.0 - shrinkage) * array.get(sigma_tri, 4)
+    // det and cofactors
+    float det = s00 * (s11 * s22 - s12 * s12)
+              - s01 * (s01 * s22 - s12 * s02)
+              + s02 * (s01 * s12 - s11 * s02)
+    if math.abs(det) < 1e-15
+        0.0
+    else
+        float i00 = (s11 * s22 - s12 * s12) / det
+        float i11 = (s00 * s22 - s02 * s02) / det
+        float i22 = (s00 * s11 - s01 * s01) / det
+        float i01 = -(s01 * s22 - s12 * s02) / det
+        float i02 =  (s01 * s12 - s11 * s02) / det
+        float i12 = -(s00 * s12 - s01 * s02) / det
+        float q = i00*d0*d0 + i11*d1*d1 + i22*d2*d2
+              + 2.0*(i01*d0*d1 + i02*d0*d2 + i12*d1*d2)
+        math.sqrt(math.max(0.0, q))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: ENTROPY PRIMITIVES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Binary entropy H(p) = -p·log₂(p) - (1-p)·log₂(1-p)
+export f_binary_entropy(float p) =>
+    if na(p) or p <= 0.0 or p >= 1.0
+        0.0
+    else
+        -(p * math.log(p) + (1.0 - p) * math.log(1.0 - p)) / math.log(2.0)
+
+// @function Ternary entropy from 3 probabilities (na-safe; renormalizes)
+export f_ternary_entropy(float p0, float p1, float p2) =>
+    float s = nz(p0) + nz(p1) + nz(p2)
+    if s <= 0.0
+        0.0
+    else
+        float q0 = nz(p0) / s
+        float q1 = nz(p1) / s
+        float q2 = nz(p2) / s
+        float h = 0.0
+        if q0 > 0.0
+            h -= q0 * math.log(q0)
+        if q1 > 0.0
+            h -= q1 * math.log(q1)
+        if q2 > 0.0
+            h -= q2 * math.log(q2)
+        h / math.log(3.0)
+
+// @function Sample entropy of binary signal over rolling window
+//           Returns p̂ = fraction of 1's, H(p̂)
+export f_binary_sample_entropy(int signal01, int len) =>
+    float p = ta.sma(float(signal01), len)
+    [p, f_binary_entropy(p)]
+
+// @function Combo entropy — weighted blend of binary + ternary
+export f_combo_entropy(float h_bin, float h_ter, float w_bin) =>
+    float w = math.max(0.0, math.min(1.0, w_bin))
+    w * nz(h_bin) + (1.0 - w) * nz(h_ter)
+
+// @function Composite entropy across N components with normalized weights
+export f_composite_entropy(array<float> components, array<float> weights) =>
+    int n = math.min(array.size(components), array.size(weights))
+    float sw = 0.0, float swh = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float w = nz(array.get(weights, i))
+            float h = nz(array.get(components, i))
+            sw += w
+            swh += w * h
+    sw > 0.0 ? swh / sw : 0.0
+
+// @function Silverman's rule for KDE bandwidth
+export f_silverman_bandwidth(float stdev_, int n) =>
+    n > 1 ? 1.06 * stdev_ * math.pow(float(n), -0.2) : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: CHANGEPOINT STATE (NIS / CUSUM / BOCPD merged)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type ChangepointState — unified change detector
+// @field kind  detector type (NIS/CUSUM/BOCPD)
+// @field cusum_pos / cusum_neg   one-sided CUSUM accumulators
+// @field bocpd_runlen            current run length (BOCPD)
+// @field bocpd_logp              log-probability mass (BOCPD)
+// @field nis_running             rolling mean of NIS for outlier flag
+// @field hazard                  BOCPD hazard rate (1/expected_segment_length)
+// @field threshold               trigger threshold
+// @field flagged                 last-step boolean output
+export type ChangepointState
+    ChangepointKind kind
+    float cusum_pos
+    float cusum_neg
+    int   bocpd_runlen
+    float bocpd_logp
+    float nis_running
+    float hazard
+    float threshold
+    bool  flagged
+
+export f_changepoint_init(ChangepointKind kind, float threshold, float hazard) =>
+    ChangepointState.new(kind = kind, cusum_pos = 0.0, cusum_neg = 0.0, bocpd_runlen = 0, bocpd_logp = 0.0, nis_running = 0.0, hazard = hazard, threshold = threshold, flagged = false)
+
+// @function NIS-based outlier flag (chi² test on innovation)
+// NOTE: Currently uses simple threshold comparison. Future enhancement may require
+//       NISLib for formal chi-squared CDF evaluation with dof parameter.
+export method nis_step(ChangepointState cp, float nis) =>
+    cp.nis_running := 0.95 * cp.nis_running + 0.05 * nis
+    cp.flagged := nis > cp.threshold
+    cp
+
+// @function CUSUM step (one-sided, shifted by half-threshold drift k)
+export method cusum_step(ChangepointState cp, float val, float reference, float k) =>
+    float dev = val - reference
+    cp.cusum_pos := math.max(0.0, cp.cusum_pos + dev - k)
+    cp.cusum_neg := math.max(0.0, cp.cusum_neg - dev - k)
+    cp.flagged := cp.cusum_pos > cp.threshold or cp.cusum_neg > cp.threshold
+    if cp.flagged
+        cp.cusum_pos := 0.0
+        cp.cusum_neg := 0.0
+    cp
+
+// @function BOCPD step (simplified — returns growth probability)
+//           Uses Gaussian likelihood; tracks run-length expectation.
+export method bocpd_step(ChangepointState cp, float innov, float S) =>
+    float ll = -0.5 * (innov * innov / math.max(S, 1e-9) + math.log(2.0 * math.pi * math.max(S, 1e-9)))
+    float growth = math.log(1.0 - cp.hazard) + ll
+    float change = math.log(cp.hazard) + ll
+    cp.bocpd_logp := growth
+    if change > growth + cp.threshold
+        cp.flagged := true
+        cp.bocpd_runlen := 0
+        cp.bocpd_logp := 0.0
+    else
+        cp.flagged := false
+        cp.bocpd_runlen += 1
+    cp
+
+// @function Reset gate — used on confirmed changepoint to re-prior Kalman
+export method reset_gate(ChangepointState cp) =>
+    cp.cusum_pos := 0.0
+    cp.cusum_neg := 0.0
+    cp.bocpd_runlen := 0
+    cp.bocpd_logp := 0.0
+    cp.flagged := false
+    cp
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: MICROSTRUCTURE — HYBRID DELTA / KYLE LAMBDA / VPIN
+// ═══════════════════════════════════════════════════════════════════════════
+// Replaces chainaggrLib MicroState. Per-symbol normalization state.
+
+// @type MicroState — output bundle from microstructure engine
+export type MicroState
+    float volume_total           // total aggregated volume
+    float delta_aggressor        // signed delta (tick rule + BVC for flat bars)
+    float delta_absorb           // passive absorption proxy
+    float market_impact          // normalized Kyle's lambda (z-scored per symbol)
+    float flow_toxicity          // VPIN proxy
+    float efficiency_ratio       // |close-open| / (high-low)
+
+// @type LambdaState — per-symbol rolling stats for lambda normalization
+export type LambdaState
+    float sum
+    float sumsq
+    float n
+
+export f_lambda_state_new() =>
+    LambdaState.new(sum = 0.0, sumsq = 0.0, n = 0.0)
+
+export method update(LambdaState ls, float lambda_raw) =>
+    ls.sum   += lambda_raw
+    ls.sumsq += lambda_raw * lambda_raw
+    ls.n     += 1.0
+    ls
+
+export method zscore(LambdaState ls, float lambda_raw) =>
+    if ls.n < 2.0
+        0.0
+    else
+        float mu = ls.sum / ls.n
+        float var_ = (ls.sumsq / ls.n) - mu * mu
+        float sd = math.sqrt(math.max(0.0, var_))
+        sd > 0.0 ? (lambda_raw - mu) / sd : 0.0
+
+// @function Pick best LTF for microstructure resolution
+export f_best_micro_ltf() =>
+    int sec = timeframe.in_seconds(timeframe.period)
+    sec <= 15 ? "1S" : sec <= 60 ? "5S" : sec <= 300 ? "15S" : sec <= 3600 ? "1" : "5"
+
+// @function Process LTF arrays into hybrid delta + impact components
+//           Returns [vol, delta, abs_price_chg]
+f_process_ltf(array<float> ltf_o, array<float> ltf_c, array<float> ltf_v) =>
+    float t_vol = 0.0, float t_delta = 0.0, float t_abs_chg = 0.0
+    int n = array.size(ltf_c)
+    if n > 0
+        float prev_close = array.get(ltf_o, 0)
+        for i = 0 to n - 1
+            float c = array.get(ltf_c, i)
+            float o = array.get(ltf_o, i)
+            float v = nz(array.get(ltf_v, i))
+            float price_diff = c - o
+            float tick_sz = syminfo.mintick
+            float d = 0.0
+            if math.abs(price_diff) > tick_sz
+                d := v * math.sign(price_diff)
+            else
+                float drift = c - prev_close
+                float vol_proxy = math.max(tick_sz, math.abs(drift))
+                float z = drift / (vol_proxy > 0.0 ? vol_proxy : tick_sz)
+                d := v * N.f_tanh(z)
+            t_delta += d
+            t_vol += v
+            t_abs_chg += math.abs(c - prev_close)
+            prev_close := c
+    [t_vol, t_delta, t_abs_chg]
+
+// @function Compute MicroState for given symbol with per-symbol lambda normalization.
+//           Caller maintains LambdaState per target_sym (single-symbol case: use module-level var).
+export f_micro_state(simple string target_sym, LambdaState lstate) =>
+    string ltf = f_best_micro_ltf()
+    array<float> ltf_o = request.security_lower_tf(target_sym, ltf, open,   ignore_invalid_symbol=true)
+    array<float> ltf_c = request.security_lower_tf(target_sym, ltf, close,  ignore_invalid_symbol=true)
+    array<float> ltf_v = request.security_lower_tf(target_sym, ltf, volume, ignore_invalid_symbol=true)
+    [d_o, d_h, d_l, d_c] = request.security(target_sym, timeframe.period, [open, high, low, close], ignore_invalid_symbol=true)
+    [t_vol, t_delta, t_abs_chg] = f_process_ltf(ltf_o, ltf_c, ltf_v)
+    float raw_lambda = t_vol > 0.0 ? t_abs_chg / t_vol : 0.0
+    if t_vol > 0.0
+        lstate.update(raw_lambda)
+    float norm_lambda = lstate.zscore(raw_lambda)
+    float efficiency = (d_h - d_l) > 0.0 ? math.abs(d_c - d_o) / (d_h - d_l) : 0.0
+    float absorb = t_vol * (1.0 - efficiency)
+    float toxicity = t_vol > 0.0 ? math.abs(t_delta) / t_vol : 0.0
+    MicroState.new(volume_total = t_vol, delta_aggressor = t_delta, delta_absorb = absorb, market_impact = norm_lambda, flow_toxicity = toxicity, efficiency_ratio = efficiency)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_concept_str(KalmanConcept c) =>
+    c == KalmanConcept.PRICE ? "price" : c == KalmanConcept.VELOCITY ? "velocity" : c == KalmanConcept.ZSCORE ? "zscore" : c == KalmanConcept.MAHALANOBIS ? "mahalanobis" : c == KalmanConcept.GAMMA ? "gamma" : c == KalmanConcept.PHI ? "phi" : "unknown"
+
+export f_changepoint_str(ChangepointKind k) =>
+    k == ChangepointKind.NIS ? "nis" : k == ChangepointKind.CUSUM ? "cusum" : k == ChangepointKind.BOCPD ? "bocpd" : "none"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

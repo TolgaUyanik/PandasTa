@@ -1,0 +1,260 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Quant
+
+//@version=6
+strategy("Tomukas Elite SMC", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// =================================================================================================
+// INPUTS
+// =================================================================================================
+string G_TREND   = "Trend & Filter Settings"
+int    emaLen    = input.int(200, "EMA Length", group=G_TREND)
+int    adxLen    = input.int(14, "ADX Length", group=G_TREND)
+int    adxThresh = input.int(20, "ADX Threshold", group=G_TREND)
+
+string G_SMC     = "SMC Settings"
+int    swingLen  = input.int(5, "Swing Length", group=G_SMC)
+float  fvgMinPct = input.float(0.1, "Min FVG Size (%)", step=0.05, group=G_SMC)
+
+string G_TIME    = "Session Settings"
+string sessionT  = input.session("0800-1700", "Trading Session (London + NY)", group=G_TIME)
+string tzOffset  = input.string("UTC-4", "Timezone", group=G_TIME)
+
+string G_RISK    = "Risk Management"
+float  riskReward= input.float(1.0, "TP1 Risk/Reward", group=G_RISK)
+
+string G_STYLE   = "Style"
+color  colorBull = input.color(#089981, "Bullish Color", group=G_STYLE)
+color  colorBear = input.color(#f23645, "Bearish Color", group=G_STYLE)
+
+// =================================================================================================
+// CORE CALCULATIONS
+// =================================================================================================
+// 1. Trend & Filters
+float ema200 = ta.ema(close, emaLen)
+int   trend  = close > ema200 ? 1 : close < ema200 ? -1 : 0
+
+float tr = ta.rma(ta.tr, adxLen)
+float plus = ta.rma(math.max(high - high[1], 0), adxLen)
+float minus = ta.rma(math.max(low[1] - low, 0), adxLen)
+float plusDi = 100 * plus / tr
+float minusDi = 100 * minus / tr
+float dx = 100 * math.abs(plusDi - minusDi) / (plusDi + minusDi == 0 ? 1 : plusDi + minusDi)
+float adx = ta.rma(dx, adxLen)
+bool  isTrending = adx > adxThresh
+
+bool inSession = not na(time(timeframe.period, sessionT, tzOffset))
+
+// 2. Swings
+float ph = ta.pivothigh(high, swingLen, swingLen)
+float pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastPh = na
+var int   lastPhIndex = na
+if not na(ph)
+    lastPh := ph
+    lastPhIndex := bar_index[swingLen]
+
+var float lastPl = na
+var int   lastPlIndex = na
+if not na(pl)
+    lastPl := pl
+    lastPlIndex := bar_index[swingLen]
+
+// 3. Liquidity Sweeps (Rejection Candles)
+// Bullish Sweep: Price wicks below last PL but closes above it, strong rejection.
+bool isBullishRejection = (close > (high + low) / 2) and ((close - low) > (high - close) * 1.5)
+bool sweepLow = not na(lastPl) and low < lastPl and close > lastPl and isBullishRejection
+
+// Bearish Sweep: Price wicks above last PH but closes below it, strong rejection.
+bool isBearishRejection = (close < (high + low) / 2) and ((high - close) > (close - low) * 1.5)
+bool sweepHigh = not na(lastPh) and high > lastPh and close < lastPh and isBearishRejection
+
+var int sweepType = 0 // 1 = Bullish, -1 = Bearish
+var float sweepPrice = na
+var float sweepExtremum = na
+
+if sweepLow
+    sweepType := 1
+    sweepPrice := lastPl
+    sweepExtremum := low
+    label.new(bar_index, low, "✖\nSSL Sweep", style=label.style_label_up, color=color.new(colorBull, 100), textcolor=colorBull, size=size.tiny)
+
+if sweepHigh
+    sweepType := -1
+    sweepPrice := lastPh
+    sweepExtremum := high
+    label.new(bar_index, high, "BSL Sweep\n✖", style=label.style_label_down, color=color.new(colorBear, 100), textcolor=colorBear, size=size.tiny)
+
+// 4. MSS (Market Structure Shift)
+var bool mssConfirmed = false
+var float mssLevel = na
+var float fvgTop = na
+var float fvgBot = na
+var box fvgBox = na
+
+// Reset on new sweep
+if sweepLow or sweepHigh
+    mssConfirmed := false
+    fvgTop := na
+    fvgBot := na
+    if not na(fvgBox)
+        box.delete(fvgBox)
+
+// Confirm MSS
+if sweepType == 1 and not mssConfirmed
+    if close > lastPh and lastPh > sweepExtremum // Close above recent swing high
+        mssConfirmed := true
+        mssLevel := lastPh
+        line.new(lastPhIndex, lastPh, bar_index, lastPh, color=colorBull, style=line.style_dashed)
+        label.new(bar_index, lastPh, "MSS", style=label.style_label_down, color=color.new(colorBull, 100), textcolor=colorBull, size=size.tiny)
+        
+        // Find Bullish FVG in the last 3 candles
+        if low > high[2]
+            fvgTop := low
+            fvgBot := high[2]
+            if (fvgTop - fvgBot) / fvgBot * 100 >= fvgMinPct
+                fvgBox := box.new(bar_index - 2, fvgTop, bar_index + 10, fvgBot, bgcolor=color.new(colorBull, 80), border_color=color.new(colorBull, 50))
+
+if sweepType == -1 and not mssConfirmed
+    if close < lastPl and lastPl < sweepExtremum // Close below recent swing low
+        mssConfirmed := true
+        mssLevel := lastPl
+        line.new(lastPlIndex, lastPl, bar_index, lastPl, color=colorBear, style=line.style_dashed)
+        label.new(bar_index, lastPl, "MSS", style=label.style_label_up, color=color.new(colorBear, 100), textcolor=colorBear, size=size.tiny)
+        
+        // Find Bearish FVG in the last 3 candles
+        if high < low[2]
+            fvgTop := low[2]
+            fvgBot := high
+            if (fvgTop - fvgBot) / fvgBot * 100 >= fvgMinPct
+                fvgBox := box.new(bar_index - 2, fvgTop, bar_index + 10, fvgBot, bgcolor=color.new(colorBear, 80), border_color=color.new(colorBear, 50))
+
+// Extend FVG box
+if not na(fvgBox)
+    box.set_right(fvgBox, bar_index + 5)
+
+// 5. Entry Logic (FVG Retest)
+bool setupValid = mssConfirmed and not na(fvgTop) and isTrending and inSession
+bool longEntry = setupValid and sweepType == 1 and trend == 1 and low <= fvgTop and low >= fvgBot
+bool shortEntry = setupValid and sweepType == -1 and trend == -1 and high >= fvgBot and high <= fvgTop
+
+// FVG Mitigation (Invalidation)
+if not na(fvgTop)
+    if sweepType == 1 and close < fvgBot
+        fvgTop := na
+        fvgBot := na
+        if not na(fvgBox)
+            box.set_bgcolor(fvgBox, color.new(color.gray, 90))
+            box.set_border_color(fvgBox, color.new(color.gray, 90))
+    if sweepType == -1 and close > fvgTop
+        fvgTop := na
+        fvgBot := na
+        if not na(fvgBox)
+            box.set_bgcolor(fvgBox, color.new(color.gray, 90))
+            box.set_border_color(fvgBox, color.new(color.gray, 90))
+
+// =================================================================================================
+// TRADE MANAGEMENT
+// =================================================================================================
+var float entryPrice = na
+var float slPrice = na
+var float tp1Price = na
+var bool  tp1Hit = false
+
+// Entry
+if longEntry and strategy.position_size == 0
+    entryPrice := close
+    slPrice := sweepExtremum
+    tp1Price := entryPrice + (entryPrice - slPrice) * riskReward
+    strategy.entry("Buy", strategy.long)
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=colorBull, textcolor=color.white, size=size.small)
+    fvgTop := na // Reset to avoid duplicate entries
+
+if shortEntry and strategy.position_size == 0
+    entryPrice := close
+    slPrice := sweepExtremum
+    tp1Price := entryPrice - (slPrice - entryPrice) * riskReward
+    strategy.entry("Sell", strategy.short)
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=colorBear, textcolor=color.white, size=size.small)
+    fvgTop := na
+
+// Exits & Trade Management
+if strategy.position_size > 0
+    // Long Management
+    if not tp1Hit and high >= tp1Price
+        tp1Hit := true
+        slPrice := entryPrice // Move SL to BE
+        strategy.exit("TP1", "Buy", qty_percent=50, limit=tp1Price)
+    
+    strategy.exit("SL/BE", "Buy", stop=slPrice)
+    
+    // Runner Exit Conditions
+    if sweepType == -1 or close < ema200 // Opp sweep or EMA cross
+        strategy.close("Buy", comment="Runner Exit")
+
+if strategy.position_size < 0
+    // Short Management
+    if not tp1Hit and low <= tp1Price
+        tp1Hit := true
+        slPrice := entryPrice // Move SL to BE
+        strategy.exit("TP1", "Sell", qty_percent=50, limit=tp1Price)
+    
+    strategy.exit("SL/BE", "Sell", stop=slPrice)
+    
+    // Runner Exit Conditions
+    if sweepType == 1 or close > ema200
+        strategy.close("Sell", comment="Runner Exit")
+
+if strategy.position_size == 0
+    tp1Hit := false
+    entryPrice := na
+
+// =================================================================================================
+// DASHBOARD
+// =================================================================================================
+var table dash = table.new(position.top_right, 2, 7, bgcolor=color.new(chart.bg_color, 20), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Tomukas Elite SMC", text_color=color.white, bgcolor=color.new(color.blue, 30))
+    table.cell(dash, 1, 0, "", bgcolor=color.new(color.blue, 30))
+    
+    table.cell(dash, 0, 1, "Trend", text_color=chart.fg_color)
+    table.cell(dash, 1, 1, trend == 1 ? "Bullish" : trend == -1 ? "Bearish" : "Flat", text_color=trend == 1 ? colorBull : trend == -1 ? colorBear : color.gray)
+    
+    table.cell(dash, 0, 2, "Session", text_color=chart.fg_color)
+    table.cell(dash, 1, 2, inSession ? "Active" : "Inactive", text_color=inSession ? colorBull : color.gray)
+    
+    table.cell(dash, 0, 3, "ATR/ADX Filter", text_color=chart.fg_color)
+    table.cell(dash, 1, 3, isTrending ? "Trending" : "Ranging", text_color=isTrending ? colorBull : colorBear)
+    
+    table.cell(dash, 0, 4, "FVG Status", text_color=chart.fg_color)
+    table.cell(dash, 1, 4, na(fvgTop) ? "None/Mitigated" : "Active", text_color=na(fvgTop) ? color.gray : color.blue)
+    
+    table.cell(dash, 0, 5, "MSS Confirmed", text_color=chart.fg_color)
+    table.cell(dash, 1, 5, mssConfirmed ? "Yes" : "No", text_color=mssConfirmed ? colorBull : color.gray)
+    
+    int signalQ = 0
+    if isTrending
+        signalQ += 30
+    if inSession
+        signalQ += 20
+    if mssConfirmed
+        signalQ += 25
+    if not na(fvgTop)
+        signalQ += 25
+    
+    table.cell(dash, 0, 6, "Signal Quality", text_color=chart.fg_color)
+    table.cell(dash, 1, 6, str.tostring(signalQ) + "%", text_color=color.from_gradient(signalQ, 0, 100, colorBear, colorBull))
+
+// =================================================================================================
+// ALERTS
+// =================================================================================================
+if longEntry and strategy.position_size == 0
+    alert("BUY Signal - FVG Retest", alert.freq_once_per_bar_close)
+if shortEntry and strategy.position_size == 0
+    alert("SELL Signal - FVG Retest", alert.freq_once_per_bar_close)
+if strategy.position_size > 0 and tp1Hit and not tp1Hit[1]
+    alert("TP1 Reached - Stop moved to BE", alert.freq_once_per_bar_close)
+if strategy.position_size < 0 and tp1Hit and not tp1Hit[1]
+    alert("TP1 Reached - Stop moved to BE", alert.freq_once_per_bar_close)

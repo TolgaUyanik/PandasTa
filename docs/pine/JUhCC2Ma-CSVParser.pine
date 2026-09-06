@@ -1,0 +1,1194 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © moebius1977
+
+
+//@version=5
+
+// @description Reads a CSV configuration text into an objProps object according to simple syntax rules. 
+// Principles: 
+//          - all values read from config text are stored as strings
+//          - opbjProps of each level have 
+//              - child array<string> arS for storing values without names (e.g. "12,23" --> array [12,23]) 
+//              - map<string, string> mpS for storing items with names (e.g. "key = value") "kew=value" --> <key,value> map pair)
+//              - and map<string, objPropsN> for storing nested objects. Nested brackets create nested ObjProps objects.
+//                   (e.g. "TF1(tf=60)" creates a <"TF1, objProps0Obj> pair in mpObj, and "tf=60" is added to 
+//                  objProps1Obj.mpS as <"tf", "60">)
+//             - Supports 10 level deep nested brackets which are imported int objProp (top level), objProps0, objProps1,.. objProp9 object types.
+
+// FUNCTIONS: 
+// - objProps.parseConfig(string config) - imports CSV configuration text (config) into objProps object
+// - objProps.getPropAr() (exists for all levels of objProps) - returnes objProps.arS array for `prop` property if found 
+//      (as a key in mpObj map)
+// - objProps.toT() - displays a table with the contents of the objProps object (for config debug)
+
+// --- SYNTAX ---- 
+// Example: "TF1=60: Length(13,21,31,50) Type(EMA, EMA, SMA, EMA) Width(1,1,1) Color (#aaff9933, #00FF0000)"
+// After property names in brackets go up to 6 values for the 6 mas. If less are given they are set to the first ma's 
+// and the remaining get their values from normal script settings.
+//
+// NB: 
+//          - If objects or properties with duplicate names are encountered only the latest is imported 
+//                (e.g. for "TF1(length(12,22)), TF1(tf=240)" only "TF1(tf=240)" will be imported
+//          - Line breakes are not regarded as part of syntax (i.e. values are imported with line breaks, you can supply
+//              but multi level lines containing separator symbols ")" or "," will cause errors (parser stops reading property value at them) 
+//          - In multilne key names only first non space line (trimmed) is taken as a key.
+//          - ")," (or ") ," and similar) does not create an na array item while ",," does. (",)" creates an na array item) 
+//
+// You can play around and test your config text using demo in this library, just edit your text in script settings
+// and see how it is parsed into objProps objects.
+
+
+library("CSVParser")
+import moebius1977/ToS/1 as TOSTRING
+import moebius1977/ToStringAr/1 as TOSTRINGAR
+import moebius1977/Autotable/1 as AT
+import moebius1977/RegexLib/1
+
+
+// --- CSV config constants ---{ 
+
+// --- keys --- 
+// names of all possible properties in config, looks for parts like "Length(1,1,1,1) "
+const string P_TYPE = "type"
+const string P_LENGTH = "length"
+const string P_WIDTH = "width"
+const string P_CLR = "color"
+
+// --- regex --- 
+const string RG_TF_PFX = "TF\\d="
+const string RG_PROPS =          "(?i)("            // case insensitive
+                              + P_LENGTH + "|"
+                              + P_WIDTH + "|"
+                              + P_TYPE + "|"
+                              + P_CLR   
+                              + ")\\([^\\()]*\\)"  
+
+
+
+
+//}
+
+
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃                   PARSER HELPER FUNCTIONS                                    ┃{
+
+// ━━━━━ trim2() ━━━━━ {
+// @function Like str.trim() but also trims line breaks ("\n" and "\r")
+method trim2(string s) =>
+    s1 = str.trim(str.match(s,"\\S(.|\\s)*"))
+    while str.length(s1) > 0 
+        i = str.length(s1) - 1
+        lastChar = str.substring(s1, i)
+        if lastChar == "\n" // or lastChar == "\r"  \r has no special meaning in pine
+            s1 := str.trim(str.substring(s1, 0, i))
+        else
+            break
+    s1
+// END OF trim2 }
+
+// --------- method firstNonSpaceGroup()--------- {
+// @function Like srr.trim() but also trims line breaks. Used to trim map keys in parseConfig()
+// functions. For multiline keys returns just the first part.
+method firstNonSpaceGroup(string this) => str.match(this, "\\S+")
+// END OF firstNonSpaceGroup() }
+
+// --- feedTillQuote() ---{
+// @function Feeds text until next unescaped quotation mark. Unescapes quotation marks in the feeded part if `unescape` is true
+// @returns a tuple [read text (with unescaped quotation marks by default), quotation mark if found or na if not, end of the string]
+method feedTillQuote(string this, bool unescape = true) =>
+    _s = str.replace_all(this, "\\\"", "〟")
+    [b, m, e] = _s.feedRgx("\"")
+
+    _b = str.replace_all(b, "〟", unescape ? "\"" : "\\\"")
+    _e = str.replace_all(e, "〟", "\\\"")
+
+    [_b, m, _e]
+
+// END OF _feedTillQuote}
+
+// --------- nzs()--------- {
+// @function Like nz() but for strings. Returns `nz` arg (default = "") if _s is na.
+export nzs(string _s, string nz = "") => na(_s) ? nz : _s
+// END OF nzs() }
+
+// ^^^ END OF HELPER METHODS }
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ 
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃                   PARSER TYPE AND METHODS                                    ┃{
+
+
+// ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ objProps TYPE GROUP ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ {
+
+// --- +++ objProps types +++ ---{
+
+// +++ objProps9 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps9
+    map<string, string>         mpS
+    string[]                    arS
+// END OF objProps9 type}
+
+// +++ objProps8 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps8
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps9>      mpObj
+// END OF objProps8 type}
+
+// +++ objProps7 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps7
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps8>      mpObj
+// END OF objProps7 type}
+
+// +++ objProps6 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps6
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps7>      mpObj
+// END OF objProps6 type}
+
+// +++ objProps5 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps5
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps6>      mpObj
+// END OF objProps5 type}
+
+// +++ objProps4 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps4
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps5>      mpObj
+// END OF objProps4 type}
+
+// +++ objProps3 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps3
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps4>      mpObj
+// END OF objProps3 type}
+
+// +++ objProps2 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps2
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps3>      mpObj
+// END OF objProps2 type}
+
+// +++ objProps1 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps1
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps2>      mpObj
+// END OF objProps1 type}
+
+// +++ objProps0 +++ {
+// @type  Object for storing values read from CSV relating to a particular object or property name.
+// @field mpS (map(<string, string>) Stores property values as <key, value> pairs 
+// @field arS (string[])  Array of values 
+// @field mpObj (map(<string, objProps... >) Stores objProps objects containing properties's data as <property name, objProp...> pairs   
+export type objProps0
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps1>      mpObj
+// END OF objProp0 types}
+
+// +++ objProps type +++ {
+// @type  Object properties (i.e. values of its fields)
+// @field mapSimple  Enables collection of the OB data from HTF
+// @field objProps0 Child collection's or object's properies
+export type objProps
+    map<string, string>         mpS
+    string[]                    arS
+    map<string, objProps0>      mpObj
+// END OF objProp0 types}
+
+// END OF objProps types}
+
+// --- +++ BASIC METHODS +++ --- {
+
+// --- init() ---{
+// @function Initializes objProps obj (creates child maps and arrays)
+export method init(objProps this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps1 >() , this 
+method init(objProps0 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps1 >() , this 
+method init(objProps1 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps2 >() , this 
+method init(objProps2 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps3 >() , this 
+method init(objProps3 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps4 >() , this 
+method init(objProps4 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps5 >() , this 
+method init(objProps5 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps6 >() , this 
+method init(objProps6 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps7 >() , this 
+method init(objProps7 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps8 >() , this 
+method init(objProps8 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this.mpObj := map.new<string,objProps9 >() , this 
+method init(objProps9 this) => this.mpS := map.new<string,string>(), this.arS := array.new<string>(), this 
+//}
+
+// END OF BASIC METHODS }
+
+
+// ━━━━━━ toT(objProps) ━━━━━━ {
+BG_CLR1 = color.rgb(248, 255, 156, 12)
+BG_CLR2 = color.rgb(255, 228, 50, 16)
+BG_HIGHL1 = color.rgb(255, 228, 50, 16)
+
+_bgC(N) =>  N%2 == 0 ? BG_CLR1 : BG_CLR2
+
+// --- _toT(objPropsN, ...) --- {
+// @function Outputs arS and mpS to matrices for autotable(). 
+_toT(this, N, nz) =>
+    _nz = na(nz) ? "--" : nz
+
+    
+    mxS         = matrix.new<string > (0, N, "") 
+    mxMerge     = matrix.new<string > (0, N, "") 
+    mxBgClr     = matrix.new<color  > (0, N, _bgC(N)) 
+    _ar         = array.new<string  > (N,"")
+    _arMerge    = array.concat(array.new<string> (2,""), array.new<string> (N-2,"L"))
+    _arBgClr    = array.new<color   > (N, _bgC(N))
+
+    for [k,v] in this.mpS
+        _ar.set(0, k)
+        _ar.set(1, v)
+        mxS.add_row(array_id = _ar)
+        mxMerge.add_row(array_id = _arMerge)
+        mxBgClr.add_row(array_id = _arBgClr)
+
+    _ar.set(0, "arS\nsz=" + str.tostring(this.arS.size()))
+    _ar.set(1, this.arS.toS(separator = "; ", nz = _nz))
+    mxS.add_row(array_id = _ar)
+    mxMerge.add_row(array_id = _arMerge)
+    mxBgClr.add_row(array_id = _arBgClr)
+
+    [mxS, mxMerge, mxBgClr]
+
+// END OF _toT}
+
+// --- addMxObj() ---{
+// @function  Concatenates output matrices prepared by _toT for arS and mpS with output matrices for mpObj
+// (prepared by child objProps.toT())
+// @param k Key (for mpObj)
+_addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N) =>
+    r = mxObjS.rows()
+    _arC = array.new<string>(r, "")
+    _arC.set(0, k)
+    _arMergeC = array.new<string>(r, "U")
+    _arMergeC.set(0, "")
+    _arBgClrC = array.new<color>(r, _bgC(N))
+    _arBgClrC.set(0, BG_HIGHL1) // highlight obj name
+
+    mxObjS.add_col(0, _arC)
+    mxObjMerge.add_col(0, _arMergeC)
+    mxObjBgClr.add_col(0, _arBgClrC)
+
+    mxS.concat(mxObjS)
+    mxMerge.concat(mxObjMerge)
+    mxBgClr.concat(mxObjBgClr)
+
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps9, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps9 this, string nz = "--") => _toT(this, 2, nz)
+//}
+
+// --- toT(objProps8, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps8 this, string nz = "--") =>
+    const int N = 3
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps7, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps7 this, string nz = "--") =>
+    const int N = 4
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps6, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps6 this, string nz = "--") =>
+    const int N = 5
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps5, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps5 this, string nz = "--") =>
+    const int N = 6
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps4, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps4 this, string nz = "--") =>
+    const int N = 7
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps3, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps3 this, string nz = "--") =>
+    const int N = 8
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps2, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps2 this, string nz = "--") =>
+    const int N = 9
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps1, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps1 this, string nz = "--") =>
+    const int N = 10
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps0, ...) --- {
+// @function Outputs objProps0 to matrices for autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr]
+export method toT(objProps0 this, string nz = "--") =>
+    const int N = 11
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// --- toT(objProps, ...) --- {
+// @function Outputs objProps to string matrices for further display using autotable().
+// @returns A tuple [mxS, mxMerge, mxBgClr] - value, merge and color matrix (autotable() parameters)
+export method toT(objProps this, string nz = "--") =>
+    const int N = 12
+    [mxS, mxMerge, mxBgClr] = _toT(this, N, nz)
+
+    for [k,v] in this.mpObj
+        [mxObjS, mxObjMerge, mxObjBgClr] = v.toT(nz = nz)
+        _addMxObj(mxS, mxMerge, mxBgClr, mxObjS, mxObjMerge, mxObjBgClr, k, N)
+    [mxS, mxMerge, mxBgClr]
+//}
+
+// END OF toT(objProps) }
+
+// ━━━━━━ parseConfig() ━━━━━━ {
+// @function Reads config text into objProps0. Config syntax:
+//  objLvl1(1,2,3,prop1=val1, prop2 = val2, 4, objLvl2-1(prop11 = val11, 22, prop22 = val22, objLvl3(222,333)))
+// i.e.
+// - text before brackets - obj name 
+// - brackets - new child obj
+// - values within brackets without "=" - array values 
+// - values within brackets with "=" - property values (go to mpS map)
+// - values within brackets with brackets - child objects
+// These symbols cannot be used for names or values: =,()
+// Quotes are not interpreted, processed in the same way as any normal letter
+
+// Unlike _parseConfig() function, methods objProps.parseConfig() are always called with last_separator = "("
+// so no `last_separator` param needed for them
+
+
+const string rgxNAME    = "[A-Za-z0-9-\._]+\s*\(" // name with optional spaces and opening bracket, e.g. "TF1.2 ("
+const string rgxNEWVAL  = "[\)\(\,=]" // "(" - new obj, "," - new val
+const string rgxNEWVAL_OR_QUOTE  = "[\)\(\,=\"]" // "(" - new obj, "," - new val
+const string rgxVAL     = "\s*(['\"A-Za-z0-9-\._]+\s*(,|\))|(,|\)))" // part between = and , or )
+
+
+method l25(string s) => str.substring(s,0,math.min(str.length(s),25)) + (str.length(s) > 25 ? "..." : "")
+
+// --- _parseConfig() ---{
+// @function Parses for arS and mpS values, populates arS and mpS with read values and returns remainder and _last_separator. 
+// (parsing for child objProps remains outside since no recursion in PineScript). Quotation marks are ignored unless 
+// they occur within mpS values (i.e. after "=" sign.) In that case quoted text is imported as a property value and all 
+// surrounding text is ignored. E.g. `msg = buy "milk" (a=15,  length(21,31)` ) 
+// @param last_separator Last separator before s or a special value ">" meaning  ignore next value if empty 
+// (e.g. "))" and ")," should lead to adding na to arS). Normally _parseConfig() is called upon encountering "(" meaning 
+// child objProps object, but in cases like "OBJ1(arItem11, OBJ2(arItem21, arItem22), arItem12)" parser imports 
+// first item of OBJ1.arS, then creates <"OBJ2', OBJ2> pair in OBJ1.mpObj then continues parsing adding arItem12 as 
+// second item to OBJ1.arS, last_separator will be "," in on this last step.  
+// @returns tuple [parsed value , _lastSeparator, remainder of the string]
+_parseConfig(this, s, last_separator) =>
+    finish = false
+    b = ""
+    m = last_separator
+    _lastSeparator = switch last_separator 
+        ")" => ">" // means ignore next value if empty
+        "(" => "<" 
+        => last_separator 
+    e = s // remainder of the string to parse
+
+    while e != "" and _lastSeparator != "(" and _lastSeparator != ")" //  "" or ")" - finished parsing current object, going up to parent, "(" - going down (i.e. new child objProps)
+        [b1, m1, e1] = e.feedRgx(rgxNEWVAL)
+        // log.info("\n--- FEED --- \nls>>> {3}\nb1>>> {0}\nm1>>> <{1}>\ne1>>> {2}...", b1, m1, e1.l25(), _lastSeparator)
+        _b1 = b1.trim2()
+        e := e1
+
+        // --- arS item "" or ")" ---
+        if m1 == "" or m1 == ")" 
+            if  not( _lastSeparator == ">" and _b1 == "")  // ignore if empty 
+                this.arS.push(_b1) // if found no separator the whole string is imported as an array item
+            _lastSeparator := ")" // ticket to exit....
+            ["", ")", e1] // exiting loop, do not care of e or  _lastSeparator
+
+        // --- mpS item ---
+        else if m1 == "="
+            _b1 := _b1.firstNonSpaceGroup()
+            if _b1 == "" 
+                runtime.error("parseConfig objProps0:\nSyntax error, property name is empty, before \"" 
+                              + m1 + str.substring(e1,0,20) + "...\""
+                              )
+
+            [b2, m2, e2] = e1.feedRgx(rgxNEWVAL_OR_QUOTE)
+            if m2 != "," and m2 != ")" and m2 != "\""
+                runtime.error(str.format("CSVParser: Started reading a pair <{0}, {1}> and found \"{2}\" before closing 
+                                  separator (comma or closing bracket) and outside quotation", _b1, b2.trim2().l25(), m2 ))
+            // log.info("\n--- FEED1 --- \n<b2>>> {0}\nm2>>> <{1}>\ne2>>> {2}...", b2, m2, e2.l25())
+
+            // if quoted text found - store it as value and ignore surroundings from "=" till "," or ")" 
+            if m2 == "\""
+                [b3, m3, e3] = e2.feedTillQuote() // only quoted text (b3) will be stored as porperty value
+                [b4, m4, e4] = e3.feedRgx(rgxNEWVAL)  // not looking for quotations anymore, b4 will be ignored 
+                if m4 != "," and m4 != ")"
+                    runtime.error(str.format("CSVParser: after a <{0}, {1}> pair expecting ','or ')', but found `{2}`", _b1, b3.trim2().l25(), m4 ))
+                this.mpS.put(_b1, b3.trim2()) 
+                e := e4
+                _lastSeparator := m4
+                ["", m4, e4] 
+
+            else // no quotations
+                this.mpS.put(_b1, b2.trim2())
+                e := e2
+                _lastSeparator := m2
+                ["", _lastSeparator, e2] // _b1 and b2 are already processed, no need to return
+
+        // --- arS item "," ---
+        else if m1 == ","
+            if  not( _lastSeparator == ">" and _b1 == "")  // ignore if empty 
+                this.arS.push(_b1)
+            _lastSeparator := ","
+            e := e1 
+            ["", ",", e1] // continue looping, no need to return anything
+
+        else if m1 == "("
+            e := e1 
+            b:= _b1
+            _lastSeparator := "(" // loop exit ticket....
+            [_b1, m1, e1] // _b1 will be used as key for new child objProps
+
+// }
+
+ 
+// --- parseConfig9() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps9 this, string s) =>  _parseConfig(this, s, "(")
+// }
+
+// --- parseConfig8() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps8 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps9.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o) 
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+
+// --- parseConfig7() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps7 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps8.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o) 
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+
+// --- parseConfig6() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps6 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps7.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+
+// --- parseConfig5() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps5 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps6.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+
+// --- parseConfig4() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps4 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps5.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+
+// --- parseConfig3() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps3 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    tStart = timenow
+    while e != "" and _lastSeparator != ""  // and timenow - tStart < 400
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps4.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+
+// --- parseConfig2() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps2 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    tStart = timenow
+    while e != "" and _lastSeparator != ""  // and timenow - tStart < 400
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps3.new().init()
+            [b2, m2, e3] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e3
+    ["", ")", e]
+// }
+
+
+// --- parseConfig1() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps1 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    tStart = timenow
+    while e != "" and _lastSeparator != ""  // and timenow - tStart < 20
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps2.new().init()
+            [b2, m2, e4] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e4
+    ["", ")", e]
+// }
+
+
+// --- parseConfig0() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+method parseConfig(objProps0 this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps1.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e2
+    ["", ")", e]
+// }
+
+// --- parseConfig() ---{
+// @function Reads config text into objProps (unnamed values into arS, named into mpS, sub-levels into mpObj)
+export method parseConfig(objProps this, string s) =>
+    _lastSeparator = "("
+    e = s
+    while e != "" and _lastSeparator != ""  
+        // parse for array (arS) item and map pairs (mpS)
+        [b1, m1, e1] = _parseConfig(this, e, _lastSeparator) 
+        _lastSeparator := m1
+        e := e1
+        if _lastSeparator == ")"
+            break
+
+        if m1 == "("
+            // populate child objProps 
+            _o = objProps0.new().init()
+            [b2, m2, e2] = _o.parseConfig(e1) 
+            this.mpObj.put(b1, _o)  
+            _lastSeparator := ")"
+            e := e2
+    // ["", ")", e]
+    this
+// }
+
+// END OF parseConfig() }
+
+// --- +++ GET VALUES METHODS +++ --- {
+
+// ━━━━━━  getPropArS(objProp, prop) ━━━━━━ {
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+_getPropArS(obj, prop) =>
+    if not na(obj)
+        objP = obj.mpObj.get(prop) // not checking existense of child mpS, mpObj, arS. Obj must  be initialised 
+        if not na(objP)
+            objP.arS
+        else 
+            na
+
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps  this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps0 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps1 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps2 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps3 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps4 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps5 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps6 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps7 this, string prop) => _getPropArS(this, prop)
+// @function Returns a string array of values for a given property name `prop`. Looks for a key `prop` in objProps.mpObj 
+// if finds <prop, obj> pair returns obj.arS, otherwise returns na. Returns a reference to the original, not a copy.
+export method getPropArS(objProps8 this, string prop) => _getPropArS(this, prop)
+ // END OF getPropArS }
+
+// ━━━━━━  getPropVal(objProp, prop) ━━━━━━ {
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+_getPropVal(objProps, prop, id) =>
+    _propObj = objProps.mpObj.get(prop)
+    if not na(_propObj)
+        if _propObj.arS.size() > id
+            _val  = _propObj.arS.get(id)
+
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps  this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps0 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps1 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps2 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps3 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps4 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps5 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps6 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps7 this, string prop, int id) => _getPropVal(this, prop, id)
+// @function Checks if there is an array of values for property `prop` and returns its `id`'s  element or na if not found
+// @param this (objProps) objProps object containing array of property values in a child objProp object corresponding to propertty name.
+// @param prop (string) Name of the property 
+// @param id (int) Id of the element to be returned from the array pf property values
+export method getPropVal(objProps8 this, string prop, int id) => _getPropVal(this, prop, id)
+// END OF getPropVal() }
+
+// // ━━━━━━  getArS(objProp) ━━━━━━ {
+// // @function Returns objProp.arS array (not a copy, but a reference to the original)
+// export method getArS(objProps this) => this.arS
+// export method getArS(objProps0 this) => this.arS
+// export method getArS(objProps1 this) => this.arS
+// export method getArS(objProps2 this) => this.arS
+// export method getArS(objProps3 this) => this.arS
+// export method getArS(objProps4 this) => this.arS
+// export method getArS(objProps5 this) => this.arS
+// export method getArS(objProps6 this) => this.arS
+// export method getArS(objProps7 this) => this.arS
+// export method getArS(objProps8 this) => this.arS
+// export method getArS(objProps9 this) => this.arS
+//  // END OF getArS }
+
+// END OF GET VALUES METHODS }
+
+
+// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ END OF HTFMAs GROUP  ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ }
+
+// ^^^ END OF objProps TYPE GROUP }
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ 
+
+
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║                                DEMO                                          ║ {
+
+// --- CONFIG PARSER INPUTS --- {
+i_rg = input.string(".*TF\d=", "Regex")
+i_s3 = input.text_area("
+                       1,2,3
+                       , enable=true
+                       , quote1 = ignored \"The quote with special chars ,=() and an \\\"inner quote\\\" inside.\" text after is also ignored
+                       , quote2 =  \"Band of chart TF's MAs (on TF1 and TF2) plus some 1H, D and W.\"  
+                      \n, O1 (a11, a12,
+                      \n     O12(a121,
+                      \n         O121(a1211, a1212)
+                      \n         , a122, p121=v121, p122=v122, O122()
+                      \n         )
+                      \n    )
+                      \n, O2 (tf=, a21, a22,
+                      \n     O22(a221,
+                      \n         O221 (a2211, a2212)
+                      \n         , a222
+                      \n         , p221=v221, p222=v222
+                      \n         , O222()
+                      \n         )
+                       "
+                       , title = "Sample MA settings"
+                       )
+               
+
+
+
+// i_s3 = input.text_area("
+//                       1,2,3, 
+//                       \nO1-1(22, o11p1=v1, o11p2 = \"w\", 
+//                       \n    O2-1(pp1==vv, pp2 = ww,
+//                       \n        O3-1(p31-1=311, p32-2=q322
+//                       \n        ), 
+//                       \n        340, 350, 360,
+//                       \n        O3-2(p32-1=q, 111,
+//                       \n            O4-1(a = 12,1,2,3,4,5, O5-1(3,4,))
+//                       \n        ),
+//                       \n        34, 55
+//                       \n    )
+//                       \n),
+//                       \nO1-2(44, o12p1=v1, o12p2 = \"w\", 
+//                       \n    O2-2(pp1==33, pp2 = 44, 
+//                       \n        O3-3(p=q, p=q2) 34, 55
+//                       \n        )
+//                       \n    )
+//                       \n)                      
+//                      "
+//                      , title = "Sample MA settings"
+//                      )
+//}
+
+
+
+
+
+// ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ TABLE INPUT ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ {
+
+// --- input text constants ---{
+
+const string IG_TBL_SZPOS        = "▓▓▓▓▓ CONFIG TABLE SIZE AND POSITION  ▓▓▓▓▓"
+const string IG_TBL_CLRS         = "▓▓▓▓▓ COLORS AND BORDERS ▓▓▓▓▓"
+const string IG_TBL_FRMT         = "▓▓▓▓▓ FORMAT  ▓▓▓▓▓"
+const string IG_MX_DATA         = "▓▓▓▓▓ DATA MATRICES  ▓▓▓▓▓"
+const string IG_MX_CLRS         = "▓▓▓▓▓ COLOR MATRICES  ▓▓▓▓▓"
+const string IG_AR_HeaderS         = "▓▓▓▓▓ HEADER ARRAYS  ▓▓▓▓▓"
+const string IG_MX_CELSZ         = "▓▓▓▓▓ CELL SIZE MATRICES  ▓▓▓▓▓"
+const string IG_MX_ALIGN        = "▓▓▓▓▓ ALIGN MATRICES  ▓▓▓▓▓"
+const string IG_MX_TXTSZ        = "▓▓▓▓▓ TEXT SIZE MATRIX  ▓▓▓▓▓"
+const string IG_MX_FONT         = "▓▓▓▓▓ FONT FAMILY MATRIX  ▓▓▓▓▓"
+const string IG_MX_TT           = "▓▓▓▓▓ TOOLTIP MATRIX  ▓▓▓▓▓"
+const string IG_MX_MERGE        = "▓▓▓▓▓ MERGE MATRIX  ▓▓▓▓▓"
+
+
+
+const string TT_TBL_HEIGHT        = "(for width similarly) Overrides table height if cell heights are non zero. E.g. if there are four rows 
+  and cell heights are 20 (either as set via cellH or via mxHeight) then if tableHeigh is set to e.g. 50 then cell 
+  heights will be 50 * (20 / 80), where 80 is 20*4 = total height of all cells. Works simialar for heights set via 
+  mxHeight - determines max sum of heights across all cloumns of mxHeight and adjusts cell heights proportionally to it.
+  If cell heights are 0 (i.e. auto-adjust) tableHeight has no effect. "
+
+
+//}
+
+// --- TABLE SIZE AND POSITION --- {
+// i_rows                          = input.int     (group = IG_TBL_SZPOS, inline = "rc", defval = 3            , title = "Size: Rows")    
+// i_cols                          = input.int     (group = IG_TBL_SZPOS, inline = "rc", defval = 5            , title = "Columns")    
+i_cfgTblShow                    = input.bool	(group = IG_TBL_SZPOS, inline = "show", defval = true	    , title = "Show config debug table")
+i_Ypos							= input.string	(group = IG_TBL_SZPOS, inline = "pos", defval = "bottom"	, title = "Position: Y", options= ["bottom", "top", "middle"])
+i_Xpos							= input.string	(group = IG_TBL_SZPOS, inline = "pos", defval = "right"	    , title = "X", options= ["right", "left", "center"])
+i_tableWidth                    = input.float	(group = IG_TBL_SZPOS, inline = "twh", defval = 0			, title = "Table width")
+i_tableHeight                   = input.float	(group = IG_TBL_SZPOS, inline = "twh", defval = 0			, title = "Table height", tooltip=TT_TBL_HEIGHT)
+i_width							= input.float	(group = IG_TBL_SZPOS, inline = "cwh", defval = 0			, title = "Cell width")
+i_height						= input.float	(group = IG_TBL_SZPOS, inline = "cwh", defval = 0			, title = "Cell height")
+i_force_overlay					= input.bool	(group = IG_TBL_SZPOS, inline = "ovl",	defval = false		, title = "force_overlay")
+//}
+
+// --- TABLE COLORS --- {
+i_bgcolor				= input.color	(group = IG_TBL_CLRS, inline = "1", defval =     #fdfd6b			, title = "bgcolor")
+i_text_color				= input.color	(group = IG_TBL_CLRS, inline = "1", defval =     #514242			, title = "text_color")
+i_colHeadersTxtColor				= input.color	(group = IG_TBL_CLRS, inline = "2", defval =     #514242			, title = "colHeadersTxtColor")
+i_colHeadersBgColor				= input.color	(group = IG_TBL_CLRS, inline = "2", defval =     #ecc504			, title = "colHeadersBgColor")
+i_rowHeadersTxtColor				= input.color	(group = IG_TBL_CLRS, inline = "3", defval =     #514242			, title = "rowHeadersTxtColor")
+i_rowHeadersBgColor				= input.color	(group = IG_TBL_CLRS, inline = "3", defval =     #ecc504			, title = "rowHeadersBgColor")
+i_cornerBgClr					= input.color	(group = IG_TBL_CLRS, inline = "4", defval =     #ecc504			, title = "cornerBgClr")
+i_cornerTxtClr					= input.color	(group = IG_TBL_CLRS, inline = "4", defval =     #514242			, title = "cornerTxtClr")
+i_frame_color					= input.color	(group = IG_TBL_CLRS, inline = "5", defval =     color.black		, title = "frame_color")
+i_frame_width					= input.int		(group = IG_TBL_CLRS, inline = "5", defval =     1					 , title = "frame_width")
+i_border_color					= input.color	(group = IG_TBL_CLRS, inline = "6", defval =     color.black	    , title = "border_color")
+i_border_width					= input.int		(group = IG_TBL_CLRS, inline = "6", defval =     1					 , title = "border_width")
+//}
+
+// --- TABLE FORMAT --- {
+i_text_size						= input.string	(group = IG_TBL_FRMT, inline = "1",	defval = size.auto			, title = "text_size", options = [size.auto, size.tiny, size.small, size.normal, size.large, size.huge])
+i_font_family					= input.string	(group = IG_TBL_FRMT, inline = "1",	defval = font.family_default    , title = "font_family", options = [font.family_default, font.family_monospace])
+i_halign						= input.string	(group = IG_TBL_FRMT, inline = "2",	defval = text.align_left        , title = "halign", options=[text.align_left, text.align_right, text.align_center])
+i_valign						= input.string	(group = IG_TBL_FRMT, inline = "2",	defval = text.align_top         , title = "valign", options=[text.align_top, text.align_bottom, text.align_center])
+i_string_float_separator		= input.string	(group = IG_TBL_FRMT, inline = "3",	defval = "\n"      			    , title = "string_float_separator")
+i_nz							= input.string	(group = IG_TBL_FRMT, inline = "3",	defval = "--"					, title = "nz")
+i_format						= input.string	(group = IG_TBL_FRMT, inline = "4",	defval = ""					    , title = "format")
+//}
+
+
+
+// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ END OF TABLE INPUT  ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ }
+
+
+
+
+var lbS = ""
+
+// if barstate.islast
+if barstate.islastconfirmedhistory and i_cfgTblShow
+    obj = objProps.new().init()
+    obj.parseConfig(i_s3)
+
+
+    // --- DRAW TABLE ---{
+
+    [mxS, mxMerge, mxBgClr] = obj.toT()
+
+
+
+	AT.autotable(
+                   mxValS                       = mxS
+                  , mxBgColor                  = mxBgClr                   
+                  , mxMerge                    = mxMerge
+                  )                   
+
+
+	// mxS.autotable(
+    //               mxValF                     = na                   
+    //             //   , tbl                        = tbl               
+    //               , mxBgColor                  = mxBgClr                   
+    //             //   , mxTextColor                = mxTextColor                       
+    //             //   , mxTt                       = mxTt               
+    //               , mxMerge                    = mxMerge                   
+    //             //   , mxWidth                    = mxWidth                   
+    //             //   , mxHeight                   = mxHeight                   
+    //             //   , mxHalign                   = mxHalign                   
+    //             //   , mxValign                   = mxValign                   
+    //             //   , mxTextSize                 = mxTextSize                       
+    //             //   , mxFontFamily               = mxFontFamily                       
+    //             //   , arColHeaders               = arColHeaders                       
+    //             //   , arRowHeaders               = arRowHeaders                       
+    //             //   , cornerTitle                = cornerTitle                       
+    //             //   , mergeAllColHeaders         = mergeAllColHeaders                               
+    //             //   , mergeAllRowHeaders         = mergeAllRowHeaders                               
+    //               , bgcolor                    = i_bgcolor                   
+    //               , text_color                 = i_text_color                      
+    //               , colHeadersBgColor          = i_colHeadersBgColor                           
+    //               , colHeadersTxtColor         = i_colHeadersTxtColor                               
+    //               , rowHeadersBgColor          = i_rowHeadersBgColor                           
+    //               , rowHeadersTxtColor         = i_rowHeadersTxtColor                               
+    //               , cornerBgClr                = i_cornerBgClr                       
+    //               , cornerTxtClr               = i_cornerTxtClr                       
+    //               , frame_color                = i_frame_color                       
+    //               , frame_width                = i_frame_width                       
+    //               , border_color               = i_border_color                       
+    //               , border_width               = i_border_width                       
+    //               , text_size                  = i_text_size                   
+    //               , Ypos                       = i_Ypos               
+    //               , Xpos                       = i_Xpos               
+    //               , tableWidth                 = i_tableWidth                       
+    //               , tableHeight                = i_tableHeight                       
+    //               , cellW                      = i_width               
+    //               , cellH                      = i_height               
+    //             //   , colHeadersHeight           = colHeadersHeight                           
+    //             //   , rowHeadersWidth            = rowHeadersWidth                           
+    //               , halign                     = i_halign                   
+    //               , valign                     = i_valign                   
+    //               , font_family                = i_font_family                       
+    //             //   , string_float_separator     = i_string_float_separator                                   
+    //             //   , format                     = i_format                   
+    //               , nz                         = i_nz               
+    //               , force_overlay              = i_force_overlay                       
+    //               , dbgS                       = "MAIN table"               
+    //               )
+
+
+    // END OF TABLE DRAW }
+
+
+
+
+
+
+
+
+plotchar(false, "--- BAR INDEX ---",  "", location = location.bottom)
+plotchar(bar_index, "bar_index",  "", location = location.bottom)
+
+// ║                 END OF DEMO                                                  ║ }
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃                          DEBUG PRINTS                                        ┃ {
+
+
+// if barstate.islastconfirmedhistory
+//     log.info("{0}", bar_index)
+
+
+plotchar(display = display.data_window, location = location.top, char = "",  series = false                         , title =  "--- BAR INDEX ---"              )
+plotchar(display = display.data_window, location = location.top, char = "",  series = bar_index                     , title =  "bar_index"                      )
+plotchar(display = display.data_window, location = location.top, char = "",  series = barstate.isrealtime           , title =  "barstate.isrealtime"            )
+
+
+plotchar(display = display.data_window, location = location.top, char = "",  series = false                         , title =  "--- PINE's ARRAY SIZES ---"     )
+plotchar(display = display.data_window, location = location.top, char = "",  series = array.size(line.all)          , title =  "line.all size"                  )
+plotchar(display = display.data_window, location = location.top, char = "",  series = array.size(box.all)           , title =  "box.all size"                   )
+plotchar(display = display.data_window, location = location.top, char = "",  series = array.size(label.all)        , title =  "label.all size"                 )
+plotchar(display = display.data_window, location = location.top, char = "",  series = array.size(table.all)         , title =  "table.all size"                 )
+
+
+
+
+// ┃                 END OF DEBUG PRINTS                                          ┃ }
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ 

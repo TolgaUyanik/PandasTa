@@ -1,0 +1,112 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © PhenLabs
+
+//@version=6
+indicator(title = 'Liquidity Trap Zones [PhenLabs]', shorttitle = 'TLP - PhenLabs', overlay = true)
+
+// Inputs
+smoothLength = input.int(15, title = 'Smoothing Length (EMA)', minval = 1, tooltip = 'Length for EMA smoothing of the mirage score. Shorter = more sensitive.')
+mirageThreshold = input.float(7.0, title = 'Mirage Threshold', minval = 0.1, step = 0.1, tooltip = 'Score above this flags high mirage risk (potential fakeout). Adjust based on asset volatility.')
+atrLength = input.int(10, title = 'ATR Length for Range Filter', minval = 1, tooltip = 'Filters out bars with range < ATR multiplier. Set to 0 to disable.')
+atrMultiplier = input.float(1.0, title = 'ATR Multiplier', minval = 0.0, step = 0.1, tooltip = 'Only calculate score if bar range > ATR * this value.')
+zoneHeightMultiplier = input.float(0.5, title = 'Zone Height Multiplier (x ATR)', minval = 0.1, step = 0.1, tooltip = 'Determines the height of the trap zones based on ATR.')
+alertOnCross = true
+max_zones = input.int(5, title = 'Max Trap Zones', minval = 1, tooltip = 'Maximum number of recent trap zones to display before cleaning up oldest.')
+gradient_steps = 4
+max_opacity = 40
+min_opacity = 20
+// Define Colors (adapted for trap zones; using 'sell' style for red/risk)
+var color sellBoxColor = color.rgb(114, 82, 255)
+var color sellBorderColor = color.rgb(81, 14, 136)
+
+// === Trap Zone Management (using flat arrays to avoid nesting) ===
+var array<box> allBoxes = array.new<box>()
+var array<float> trapLevels = array.new_float()
+var array<int> zoneSizes = array.new_int()
+var int totalZonesCreated = 0
+
+// Core Calculations
+// Calculate wicks
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+totalWick = upperWick + lowerWick
+
+// Volume (uses tick_volume if available, else regular volume)
+vol = volume > 0 ? volume : 1 // Fallback to 1 to avoid div/0
+
+// Mirage Score: Higher = larger wicks per volume unit (thin liquidity "mirage")
+// Normalize by average bar size to make it scale-invariant across assets
+avgBarSize = ta.sma(high - low, 20) // Rough normalization factor
+// Protect against division by zero
+safeAvgBarSize = avgBarSize > 0 ? avgBarSize : 0.0001
+mirageRaw = totalWick / safeAvgBarSize / vol * 10000 // Scale for visibility (adjust if needed)
+mirageScore = ta.ema(mirageRaw, smoothLength)
+
+// ATR-based filter: Only flag if bar has significant range (potential move)
+atrVal = ta.atr(atrLength)
+isSignificantBar = high - low > atrVal * atrMultiplier
+
+// === Box Management Functions (adapted to avoid nested arrays) ===
+updateExistingBoxes() =>
+    if array.size(allBoxes) > 0
+        for i = 0 to array.size(allBoxes) - 1 by 1
+            box currentBox = array.get(allBoxes, i)
+            if not na(currentBox)
+                box.set_right(currentBox, bar_index + 2)
+
+cleanupOldZones() =>
+    while array.size(zoneSizes) > max_zones and array.size(zoneSizes) > 0
+        int oldSize = array.shift(zoneSizes)
+        array.shift(trapLevels)
+        for i = 0 to oldSize - 1 by 1
+            if array.size(allBoxes) > 0
+                box oldBox = array.shift(allBoxes)
+                if not na(oldBox)
+                    box.delete(oldBox)
+
+// === Create Gradient Boxes (directly from provided example) ===
+createGradientBoxes(float level, float zoneHeight, bool isBuy) =>
+    color baseColor = sellBoxColor
+    color borderColor = sellBorderColor
+    array<box> boxes = array.new_box()
+    float stepSize = zoneHeight / gradient_steps
+
+    for i = 0 to gradient_steps - 1 by 1
+        float opacity = max_opacity - (max_opacity - min_opacity) * i / (gradient_steps - 1)
+
+        if i > 0
+            // Upper gradient box  
+            box upperBox = box.new(bar_index, level + stepSize * (i + 1), bar_index + 2, level + stepSize * i, bgcolor = color.new(baseColor, 100 - opacity), border_color = color.new(borderColor, 95))
+            array.push(boxes, upperBox)
+
+            // Lower gradient box  
+            box lowerBox = box.new(bar_index, level - stepSize * i, bar_index + 2, level - stepSize * (i + 1), bgcolor = color.new(baseColor, 100 - opacity), border_color = color.new(borderColor, 95))
+            array.push(boxes, lowerBox)
+
+    // Create main zone box  
+    box mainBox = box.new(bar_index, level + stepSize, bar_index + 2, level - stepSize, bgcolor = color.new(baseColor, 100 - max_opacity), border_color = color.new(borderColor, 90))
+    array.push(boxes, mainBox)
+    boxes
+
+// Update all existing boxes FIRST (before any cleanup)
+updateExistingBoxes()
+
+// Check for new trap zone (create on crossover into high risk)
+if ta.crossover(mirageScore, mirageThreshold) and isSignificantBar
+    float level = (high + low) / 2 // Center of the bar as the zone level
+    float zoneHeight = atrVal * zoneHeightMultiplier // Dynamic height based on ATR
+    array<box> newZoneBoxes = createGradientBoxes(level, zoneHeight, false) // false for 'sell' colors (red/risk)
+    int numBoxes = array.size(newZoneBoxes)
+    array.push(zoneSizes, numBoxes)
+    array.push(trapLevels, level)
+    for i = 0 to numBoxes - 1 by 1
+        array.push(allBoxes, array.get(newZoneBoxes, i))
+    totalZonesCreated := totalZonesCreated + 1
+    totalZonesCreated
+
+// Cleanup old zones AFTER creating new ones
+cleanupOldZones()
+
+// Plot the mirage score line for reference
+plot(mirageScore, title = 'Mirage Score', color = color.new(color.orange, 0), linewidth = 1, display = display.status_line)
+plot(mirageThreshold, title = 'Threshold', color = color.new(color.gray, 50), linewidth = 1, style = plot.style_line, display = display.status_line)

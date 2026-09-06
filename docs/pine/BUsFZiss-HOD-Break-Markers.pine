@@ -1,0 +1,171 @@
+//@version=6
+indicator("HOD Break Markers", shorttitle = "HOD Markers", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// A high of day becomes "confirmed" after the following candle prints a lower high.
+// The marker uses an outline glyph while pending and a filled glyph after the break.
+// Keeping the marker and HOD text in separate labels allows independent sizing.
+
+const string WINDOW_GROUP = "Tracking window"
+const string FLAG_GROUP   = "HOD marker and text"
+const string LINE_GROUP   = "HOD level lines"
+
+string trackingMode = input.string(
+     "Exchange day",
+     "Reset HOD by",
+     options = ["Exchange day", "Custom session"],
+     tooltip = "Exchange day uses every bar visible on the chart and resets on each new exchange day. Custom session ignores bars outside the chosen session.",
+     group = WINDOW_GROUP)
+
+string trackingSession = input.session(
+     "0400-2000",
+     "Custom session",
+     tooltip = "Interpreted in the symbol's exchange time zone. For US stocks, 0400-2000 tracks premarket through after-hours; 0930-1600 tracks the regular session.",
+     group = WINDOW_GROUP)
+
+string markerShape    = input.string("Diamond", "Marker shape", options = ["Diamond", "Square", "Circle", "Triangle", "None"], group = FLAG_GROUP)
+int markerSize        = input.int(16, "Marker size", minval = 6, maxval = 50, tooltip = "Size of the outline/filled marker in points.", group = FLAG_GROUP)
+string hodLabelText   = input.string("HOD", "HOD text", tooltip = "Change this to High of Day, or any short label you prefer.", group = FLAG_GROUP)
+int hodTextSize       = input.int(10, "HOD text size", minval = 6, maxval = 50, tooltip = "Size of the HOD text in points, independent of the marker size.", group = FLAG_GROUP)
+color pendingFlagColor = input.color(color.aqua, "Pending outline and text", group = FLAG_GROUP)
+color brokenFlagColor  = input.color(color.lime, "Broken marker fill", group = FLAG_GROUP)
+color brokenTextColor  = input.color(color.black, "Broken HOD text", group = FLAG_GROUP)
+
+bool showLevelLines       = input.bool(true, "Show horizontal levels", group = LINE_GROUP)
+bool extendAcrossDays     = input.bool(false, "Extend levels across days", tooltip = "Off: each line ends with its tracking window. On: every HOD line extends indefinitely to the right.", group = LINE_GROUP)
+color pendingLineColor    = input.color(color.new(color.aqua, 25), "Pending level", group = LINE_GROUP)
+color brokenLineColor     = input.color(color.new(color.lime, 20), "Broken level", group = LINE_GROUP)
+string levelLineStyleText = input.string("Solid", "Line style", options = ["Solid", "Dashed", "Dotted"], group = LINE_GROUP)
+int levelLineWidth        = input.int(1, "Line width", minval = 1, maxval = 4, group = LINE_GROUP)
+
+lineStyleFromInput(string choice) =>
+    switch choice
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+markerGlyph(string shape, bool isFilled) =>
+    switch shape
+        "Diamond"  => isFilled ? "◆" : "◇"
+        "Square"   => isFilled ? "■" : "□"
+        "Circle"   => isFilled ? "●" : "○"
+        "Triangle" => isFilled ? "▲" : "△"
+        => ""
+
+bool isNewExchangeDay = timeframe.change("1D")
+bool isInCustomSession = not na(time(timeframe.period, trackingSession))
+bool isInWindow = trackingMode == "Exchange day" or isInCustomSession
+bool isNewWindow = isInWindow and (barstate.isfirst or (trackingMode == "Exchange day" ? isNewExchangeDay : (not isInWindow[1] or isNewExchangeDay)))
+
+var float windowHigh = na
+var int windowHighBar = na
+var float lastConfirmedHod = na
+
+var bool activeIsPending = false
+var float activeHodPrice = na
+var label activeHodMarkerLabel = na
+var label activeHodTextLabel = na
+var line activeHodLine = na
+
+// Only lines created in the current tracking window need their right edge updated.
+// Clearing this array does not delete the drawings from earlier windows.
+var array<line> currentWindowLines = array.new<line>()
+
+bool newHodEvent = false
+bool hodBreakEvent = false
+
+if isNewWindow
+    windowHigh := high
+    windowHighBar := bar_index
+    lastConfirmedHod := na
+    activeIsPending := false
+    activeHodPrice := na
+    activeHodMarkerLabel := na
+    activeHodTextLabel := na
+    activeHodLine := na
+    array.clear(currentWindowLines)
+
+// Non-extended lines advance only while their own tracking window is active.
+if isInWindow and not extendAcrossDays and array.size(currentWindowLines) > 0
+    for i = 0 to array.size(currentWindowLines) - 1
+        line.set_x2(array.get(currentWindowLines, i), bar_index)
+
+if isInWindow and not isNewWindow
+    // A wick above the active level counts immediately as a break. This makes the
+    // state change useful on fast momentum charts without waiting for a bar close.
+    if activeIsPending and high > activeHodPrice
+        if not na(activeHodMarkerLabel)
+            label.set_text(activeHodMarkerLabel, markerGlyph(markerShape, true))
+            label.set_textcolor(activeHodMarkerLabel, brokenFlagColor)
+            label.set_tooltip(activeHodMarkerLabel, "Broken HOD: " + str.tostring(activeHodPrice, format.mintick))
+        label.set_textcolor(activeHodTextLabel, brokenTextColor)
+        label.set_tooltip(activeHodTextLabel, "Broken HOD: " + str.tostring(activeHodPrice, format.mintick))
+        if not na(activeHodLine)
+            line.set_color(activeHodLine, brokenLineColor)
+        hodBreakEvent := true
+        activeIsPending := false
+
+    // HOD candidates are finalized only after the next candle closes with a lower
+    // high. This prevents a temporary intrabar dip from leaving a false marker.
+    if barstate.isconfirmed
+        bool previousBarConfirmedHod = isInWindow[1] and not na(windowHigh) and high[1] == windowHigh and high < high[1]
+
+        if previousBarConfirmedHod and (na(lastConfirmedHod) or high[1] > lastConfirmedHod)
+            float confirmedPrice = high[1]
+            int confirmedBar = windowHighBar
+            string pendingTooltip = "Confirmed HOD: " + str.tostring(confirmedPrice, format.mintick) + "\nWaiting for a break above this price."
+
+            if markerShape != "None"
+                activeHodMarkerLabel := label.new(
+                     confirmedBar,
+                     confirmedPrice,
+                     markerGlyph(markerShape, false),
+                     xloc = xloc.bar_index,
+                     yloc = yloc.price,
+                     color = na,
+                     style = label.style_none,
+                     textcolor = pendingFlagColor,
+                     size = markerSize,
+                     tooltip = pendingTooltip)
+            else
+                activeHodMarkerLabel := na
+
+            activeHodTextLabel := label.new(
+                 confirmedBar,
+                 confirmedPrice,
+                 hodLabelText,
+                 xloc = xloc.bar_index,
+                 yloc = yloc.abovebar,
+                 color = na,
+                 style = label.style_none,
+                 textcolor = pendingFlagColor,
+                 size = hodTextSize,
+                 tooltip = pendingTooltip)
+
+            if showLevelLines
+                activeHodLine := line.new(
+                     x1 = confirmedBar,
+                     y1 = confirmedPrice,
+                     x2 = bar_index,
+                     y2 = confirmedPrice,
+                     xloc = xloc.bar_index,
+                     extend = extendAcrossDays ? extend.right : extend.none,
+                     color = pendingLineColor,
+                     style = lineStyleFromInput(levelLineStyleText),
+                     width = levelLineWidth)
+                array.push(currentWindowLines, activeHodLine)
+            else
+                activeHodLine := na
+
+            activeHodPrice := confirmedPrice
+            activeIsPending := true
+            lastConfirmedHod := confirmedPrice
+            newHodEvent := true
+
+        // Use >= so a flat double top is anchored to its most recent candle, but
+        // lastConfirmedHod prevents duplicate markers at the same price.
+        if na(windowHigh) or high >= windowHigh
+            windowHigh := high
+            windowHighBar := bar_index
+
+alertcondition(newHodEvent, "New confirmed HOD", "{{ticker}} formed a new confirmed high of day on {{interval}}.")
+alertcondition(hodBreakEvent, "HOD broken", "{{ticker}} broke its confirmed high of day on {{interval}}.")

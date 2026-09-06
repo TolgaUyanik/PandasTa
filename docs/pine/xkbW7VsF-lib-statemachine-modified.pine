@@ -1,0 +1,748 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © dcrypt based on robbatt
+
+//@version=6
+library("lib_statemachine_modified", overlay=true)
+
+//----------------------------------------------------
+// 1) DEFINE THE STATE MACHINE TYPES
+//----------------------------------------------------
+// Updated StateRecord now includes a 'before' field to record the previous state.
+export type StateRecord
+    int before      // The state before the transition occurred
+    int state       // The state after the transition
+    int barIndex   // The bar index when the state transition was recorded
+
+// Define a tuple type to store overlapping states and the bar index
+export type StateOverlap
+    int state1   // First state in overlap
+    int state2   // Second state in overlap
+    int barIndex // The bar where the overlap occurred
+
+const int INVALID_STATE = -999
+
+export type StateMachine
+    int state = 0                      // Current state of the machine
+    int neutral = 0                    // Neutral (default) state
+    bool enabled = true                // Flag to enable or disable state transitions
+    int reset_counter = 0              // Counter for tracking reset condition occurrences
+    int last_processed_bar = -1        // Stores the bar index when the last time the state machine was called  
+    int last_change_bar = -1           // Stores the bar index when the last state change occurred
+    int last_condition_bar = -1        // Stores the bar index when the condition was last true
+    int prior_bar_state = 0                 // Most recent previous state before the state conditon was last triggered Since the condtion can be triggered without a state change the prev_state may == state 
+    int previous_distinct_state = 0  // Stores the last distinct state before the current state change
+    int transitions_this_bar = 0       // Count of transitions made on the current bar
+    StateRecord[] stateHistory = na    // History array to store state transitions as StateRecord objects
+    string[] stateNames = na           // Array mapping state integers to descriptive names
+    StateOverlap[] overlapList = na    // Array containing all overlapping (states simultaneously existing on the same bar_index)
+    bool just_changed_flag = false
+    int lastTrueConditionState = -999    // to track the state whose conditions were true most recently    
+    int offset = 0                      //offset is required when states use negative values, the offset allows for state name lookups
+
+
+// Function to format the timestamp as "Tue 12 Mar 16:30"
+f_formatTimestamp(t) =>
+    tz = "UTC"
+    // Array of weekday names
+    weekdays = array.new_string(8, "")
+    array.set(weekdays, 1, "Sun")
+    array.set(weekdays, 2, "Mon")
+    array.set(weekdays, 3, "Tue")
+    array.set(weekdays, 4, "Wed")
+    array.set(weekdays, 5, "Thu")
+    array.set(weekdays, 6, "Fri")
+    array.set(weekdays, 7, "Sat")
+    
+    // Array of month names
+    months = array.new_string(13, "")
+    array.set(months, 1, "Jan")
+    array.set(months, 2, "Feb")
+    array.set(months, 3, "Mar")
+    array.set(months, 4, "Apr")
+    array.set(months, 5, "May")
+    array.set(months, 6, "Jun")
+    array.set(months, 7, "Jul")
+    array.set(months, 8, "Aug")
+    array.set(months, 9, "Sep")
+    array.set(months, 10, "Oct")
+    array.set(months, 11, "Nov")
+    array.set(months, 12, "Dec")
+    
+    // Extract components from the timestamp
+    dayOfWeek = dayofweek(t,tz)
+    dayOfMonth = dayofmonth(t,tz)
+    monthOfYear = month(t,tz)
+    hourOfDay = hour(t,tz)
+    minuteOfHour = minute(t,tz)
+    
+    // Get weekday and month names from arrays
+    weekdayName = array.get(weekdays, dayOfWeek)
+    monthName = array.get(months, monthOfYear)
+    
+    // Format the time as "HH:MM"
+    timeFormatted = str.tostring(hourOfDay, "00") + ":" + str.tostring(minuteOfHour, "00")
+    
+    // Combine into the final format
+    weekdayName + " " + str.tostring(dayOfMonth) + " " + monthName + " " + timeFormatted
+
+//----------------------------------------------------
+// 2) IMPLEMENT THE `step` METHODS
+//----------------------------------------------------
+
+// Transitions from one state to another based on a condition.
+// Records the transition in stateHistory if the new state differs from the current state.
+// @param before (int): Expected current state before transition
+// @param after (int): Target state to transition to
+// @param condition (bool): Condition that triggers the transition
+// @returns (bool): True if the state transition occurred, else False.
+export method step(StateMachine this, int before, int after, bool condition = true) =>
+    
+     // Check if we're on a new bar
+    if this.last_processed_bar != bar_index
+        // We're on a new bar, so save the previous bar's final state
+        this.prior_bar_state := this.state
+        this.last_processed_bar := bar_index
+        this.transitions_this_bar := 0
+        this.just_changed_flag := false  // Reset change flag on new bar 
+        this.lastTrueConditionState := INVALID_STATE //Reset at start of Bar
+
+    // If we're on a new bar relative to the last change, reset the transitions counter.
+    if not na(this.last_change_bar) and bar_index != this.last_change_bar
+        this.transitions_this_bar := 0
+
+    // Update previous state with the most current state.
+    // the priorBarState is the state active on the previous bar it is not the same as the previousState
+    //this.prior_bar_state := this.state
+    if condition
+        this.lastTrueConditionState := after
+
+    if condition and this.enabled and this.state == before
+
+
+        // Record the bar index when the condition was met.
+        this.last_condition_bar := bar_index
+      
+        // Initialize stateHistory if not already done.
+        if na(this.stateHistory)
+            this.stateHistory := array.new<StateRecord>()
+            
+        // Record the state transition only if the new state is different.
+        if after != this.state
+
+            // Set immediate state change flag
+            this.just_changed_flag := true
+            // Limit the history array to 100 entries.
+            if array.size(this.stateHistory) >= 100
+                array.shift(this.stateHistory)
+            
+            // Create and push a new record for the transition.
+            newRecord = StateRecord.new(this.state, after, bar_index)
+            array.push(this.stateHistory, newRecord)
+            
+            // Update last distinct prior state.
+            this.previous_distinct_state := this.state
+
+            // Update transitions_this_bar: if the current bar equals last_change_bar then increment; otherwise, set to 1.
+            if not na(this.last_change_bar) and bar_index == this.last_change_bar
+                this.transitions_this_bar += 1
+            else
+                this.transitions_this_bar := 1
+
+            // Record the bar index when the state changed.
+            this.last_change_bar := bar_index
+
+            // Transition to the new state.
+            this.state := after
+
+            // Reset the reset counter.
+            this.reset_counter := 0
+
+           
+    this
+    // No state transition occurred. Event if potentially the condition was true
+// Overloaded step method to transition to a new state without specifying the 'before' state.
+// Uses the current state as the expected 'before' state.
+// @param after (int): Target state to transition to
+// @param condition (bool): Condition that triggers the transition
+// @returns (bool): True if the state changed, else False
+export method step(StateMachine this, int after, bool condition = true) =>
+    this.step(this.state, after, condition)
+
+//----------------------------------------------------
+// 3) IMPLEMENT CURRENT AND PREVIOUS STATE METHODS
+//----------------------------------------------------
+
+// Retrieves the current state.
+// @returns (int): The current state
+export method currentState(StateMachine this) =>
+    this.state
+
+
+//----------------------------------------------------
+// 4) IMPLEMENT STATE CHANGE CHECK METHODS
+//----------------------------------------------------
+
+// Checks if the state changed in a previous bar (not the current bar) within a specified number of bars.
+// @param within_bars (int): Number of bars to look back for a state change
+// @returns (bool): True if a state change occurred within that timeframe (excluding the current bar), else False
+export method changedPriorToCurrentBar(StateMachine this, int within_bars = 1) =>
+    not na(this.last_change_bar) and bar_index - this.last_change_bar > 0 and bar_index - this.last_change_bar <= within_bars
+
+// Checks if a state change occurred exactly on the current bar.
+// @returns (bool): True if the state changed on the current bar, else False
+export method didWeJustChangeThisBar(StateMachine this) =>
+    this.just_changed_flag
+
+// Checks if the state transitioned from a specific state to another within a specified number of bars.
+// @param fromState (int): The state expected before the transition
+// @param toState (int): The state expected after the transition
+// @param within_bars (int): Number of bars within which the transition must have occurred
+// @returns (bool): True if the specific transition occurred recently, else False
+// Enhanced version of didWeChangeFromTo with more robust checking
+export method didWeChangeFromTo(StateMachine this, int fromState, int toState, int within_bars = 1) =>
+    
+    var bool fromStateMatched = false
+    var bool toStateMatched = false
+
+    fromStateMatched := false
+    toStateMatched := false
+    // Check state history for the transition
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 0
+        // Iterate through state history in reverse to find the most recent transition
+        for i = array.size(this.stateHistory) - 1 to 0 by 1
+            StateRecord rec = array.get(this.stateHistory, i)
+            
+            // Check if we've gone back too far (beyond the specified bar limit)
+            if bar_index - rec.barIndex > within_bars
+                break
+            
+            // Check for matching 'from' state
+            if not fromStateMatched and rec.before == fromState
+                fromStateMatched := true
+            
+            // Check for matching 'to' state
+            if fromStateMatched and rec.state == toState
+                toStateMatched := true
+                break
+    
+    // Fallback to current state machine properties if no history found
+    if not fromStateMatched
+        fromStateMatched := this.previous_distinct_state == fromState
+    
+    if not toStateMatched
+        toStateMatched := this.state == toState
+    
+    fromStateMatched and toStateMatched
+
+//----------------------------------------------------
+// 5) IMPLEMENT THE `reset` METHOD
+//----------------------------------------------------
+
+// Resets the state machine to the neutral state if the condition is met enough times.
+// Increments a counter until the minimum number of occurrences is reached before resetting.
+// @param condition (bool): Condition that may trigger the reset
+// @param min_occurrences (int): Number of times the condition must be met to trigger a reset
+// @returns (bool): True if the state was reset to neutral, else False
+export method reset(StateMachine this, bool condition = true, int min_occurrences = 1) =>
+    if condition and this.enabled and this.reset_counter + 1 == min_occurrences and this.state != this.neutral
+        // Force a transition from the current state to neutral
+        this.step(this.state, this.neutral, true)
+        this.reset_counter := 0
+        
+    else if condition and this.enabled and this.reset_counter + 1 < min_occurrences
+        this.reset_counter += 1
+        
+    this
+//----------------------------------------------------
+// 6) IMPLEMENT METHODS TO RETRIEVE STATE HISTORY
+//----------------------------------------------------
+
+// Retrieves the most recent state recorded in stateHistory.
+// @returns (int): The latest state from history, or na if no history exists
+export method getLatestState(StateMachine this) =>
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 0
+        r = array.last(this.stateHistory)
+        r.state
+    else
+        na
+
+// Retrieves the bar index of the most recent state recorded in stateHistory.
+// @returns (int): The bar index of the latest state record, or na if no history exists
+export method getLatestIndexOfState(StateMachine this) =>
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 0
+        r = array.last(this.stateHistory)
+        r.barIndex
+    else
+        na
+
+//----------------------------------------------------
+// 7) IMPLEMENT METHOD TO GET BARS SINCE A SPECIFIED STATE WAS ACTIVE
+//----------------------------------------------------
+// Returns the number of bars since the specified state was active.
+// The function searches through the stateHistory records, which store both the state before and after each transition.
+// If isLast is true, the function returns the bars elapsed since the most recent record where the state was active
+// (i.e. where record.state equals searchState).
+// If isLast is false, it returns the bars elapsed since the record where the state was first triggered in the most recent contiguous block
+// (i.e. where record.before equals searchState).
+// If the state is active on the current bar, returns 0.
+// If the state has never been active, returns na.
+// @param searchState (int): The state to search for.
+// @param isLast (bool): (Optional, default = true) If true, returns the bars elapsed since the most recent record with state == searchState;
+//                     if false, returns the bars elapsed since the record where the state was first triggered (record.before == searchState).
+// @returns (int): Number of bars since the state was active, or na if never active.
+export method barsSinceState(StateMachine this, int searchState, bool isLast = true) =>
+    var int diff = na
+    if not na(this.stateHistory)
+        sz = array.size(this.stateHistory)
+        if isLast
+            // Look for the most recent record where we left searchState (record.before equals searchState)
+            for i = 0 to sz - 1
+                rec = array.get(this.stateHistory, sz - i - 1)
+                if rec.state == searchState
+                    diff := bar_index - rec.barIndex
+                    break
+        else
+            // Look for the most recent record where the state became searchState.
+            // That record’s bar_index is the first bar of the most recent contiguous block.
+            for i = 0 to sz - 1
+                rec = array.get(this.stateHistory, sz - i - 1)
+                if rec.before == searchState
+                    diff := bar_index - rec.barIndex
+                    break
+    diff
+
+//----------------------------------------------------
+// 8) IMPLEMENT METHOD TO PRINT LAST N STATE TRANSITIONS
+//----------------------------------------------------
+// Returns a log string of the last N state transitions recorded in stateHistory.
+// Each transition is formatted as: "Bar X: before -> state".
+// If there are fewer than N transitions, all available transitions are included.
+// @param n (int): The number of most recent transitions to include in the log.
+// @returns (string): A log of the last N state transitions.
+export method print_transitions(StateMachine this, int n = 2) =>
+    var string log = ""   // Local variable, not persistent
+    log := ""
+    if not na(this.stateHistory)
+        sz = array.size(this.stateHistory)
+        start = math.max(0, sz - n)
+        for i = start to sz - 1
+            rec = array.get(this.stateHistory, i)
+            log := log + str.tostring(rec.before) + ">" + str.tostring(rec.state)
+            if i < sz - 1
+                log := log + " > "
+        //log := log + " > " + str.tostring(this.state)
+    log
+
+// Helper method to retrieve a state's name.
+// If a mapping exists and the state index is within bounds, returns the corresponding name;
+// otherwise, returns "UNKNOWN".
+export method getStateName(StateMachine this, int s) =>
+    idx = s + this.offset
+    if not na(this.stateNames) and idx >= 0 and idx < array.size(this.stateNames)
+        array.get(this.stateNames, idx)
+    else
+        "UNKNOWN"
+
+//----------------------------------------------------
+// Converts an array of state integers to a formatted string.
+// Each state's descriptive name is appended on a new line.
+// @param states (int[]): An array of state integers.
+// @returns (string): A string with each state name on a separate line.
+export method statesArrayToText(StateMachine this, int[] states) =>
+    var string txt = ""
+    if array.size(states) > 0
+        for i = 0 to array.size(states) - 1
+            int s = array.get(states, i)
+            txt := txt + this.getStateName(s) + "\n"
+    txt
+//----------------------------------------------------
+// Returns an array of integers representing the states from the last n transitions.
+// Each element in the array is the 'state' field from a StateRecord in stateHistory.
+// This array can be iterated to call getStateName(s) for descriptive state names.
+// If fewer than n transitions exist, all available transitions are returned.
+// @param n (int): The number of most recent transitions to include in the array (default is 2).
+// @returns (int[]): An array of state integers from the last n transitions.
+
+export method print_transitions_array(StateMachine this, int n = 2) =>
+    var int[] transArr = na
+    transArr := array.new_int(0)
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 0
+        sz = array.size(this.stateHistory)
+        start = math.max(0, sz - n)
+        for i = start to sz - 1
+            rec = array.get(this.stateHistory, i)
+            array.push(transArr, rec.state)
+    transArr
+
+//----------------------------------------------------
+// Returns a formatted string of state names for the last n transitions.
+// It first retrieves an array of state integers via print_transitions_array()
+// and then converts that array to text using statesArrayToText().
+// @param n (int): The number of most recent transitions to include (default is 2).
+// @returns (string): A formatted string where each state's name is on a new line.
+export method print_transitions_names(StateMachine this, int n = 2) =>
+    this.statesArrayToText(this.print_transitions_array(n))
+//----------------------------------------------------
+// 9) IMPLEMENT METHOD TO CHECK IF THE CONDITION WAS MET ON THE CURRENT BAR
+//----------------------------------------------------
+// Returns true if the condition of the current State was met on the prior bar, i.e. if last_condition_bar equals the current bar index.
+// @returns (bool): True if the condition was met on the current bar, else False.
+export method wasConditionMetOnBar(StateMachine this) =>
+    bar_index == this.last_condition_bar
+
+
+// Retrieves the previous state (prior to the most recent transition).
+// @returns (int): The previous state
+export method previousState(StateMachine this) =>
+    this.previous_distinct_state
+
+// Retrieves the state from the previous bar.
+// If the current bar is the first one, returns the current state's value (since no previous bar exists).
+// Otherwise, returns the state value from the previous bar by referencing the state machine's history.
+// @returns (int): The state from the previous bar.
+export method previousBarState(StateMachine this) =>
+    barstate.isfirst or na(this.prior_bar_state) ? this.state : this.prior_bar_state
+    //barstate.isfirst or na(this[1]) ? this.state : (this[1]).prior_bar_state
+
+    //barstate.isfirst or na(this[1]) ? this.state : (this[1]).state
+
+// Method to set the state names mapping. The array index should correspond to the state int.
+export method setStateNames(StateMachine this, string[] mapping) =>
+    this.stateNames := mapping
+
+
+//----------------------------------------------------
+// Returns an array of TransitionTuple representing overlapping transitions.
+// Each tuple contains the two state values for overlapping transitions (transitions occurring on the same bar).
+// @returns (overlapList[]): An array of overlapping transitions (empty if none found).
+export method getOverlappingTransitions(StateMachine this) =>
+    if na(this.overlapList)
+        this.overlapList := array.new<StateOverlap>()
+    else
+        array.clear(this.overlapList)
+ 
+    
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 1
+        sz = array.size(this.stateHistory)
+        
+        // Iterate through stateHistory starting from the second record
+        for i = 1 to sz - 1
+            rec_prev = array.get(this.stateHistory, i - 1)
+            rec_curr = array.get(this.stateHistory, i)
+            
+            // Check if the two consecutive records occurred on the same bar
+            if rec_prev.barIndex == rec_curr.barIndex
+                overlap = StateOverlap.new(rec_prev.state, rec_curr.state, rec_curr.barIndex)
+                array.push(this.overlapList, overlap)
+
+    this.overlapList  // Return the list of overlapping transitions
+
+//----------------------------------------------------
+// 10) IMPLEMENT METHOD TO PRINT OVERLAPPING TRANSITIONS
+//----------------------------------------------------
+// This function retrieves the overlapping transitions (i.e. consecutive state changes that occurred on the same bar)
+// and constructs a formatted string showing each overlap with its descriptive state names and the timestamp of the bar where it occurred.
+// The string is then displayed on the chart as a label (only on the last bar).
+// @returns (string): The constructed overlap log text.
+export method printOverlappingTransitions(StateMachine this) =>
+    // Retrieve overlapping transitions from stateHistory.
+    StateOverlap[] overlaps = this.getOverlappingTransitions()
+    var string txt = ""
+    txt := ""
+    // Only print on the last bar to avoid duplicate labels.
+    if array.size(overlaps) > 0 and barstate.islast
+        int sizeOverlaps = array.size(overlaps)
+        // Iterate in reverse order (most recent first)
+        for i = 0 to sizeOverlaps - 1
+            int currentIndex = sizeOverlaps - 1 - i
+            StateOverlap overlap = array.get(overlaps, currentIndex)
+            // Calculate how many bars ago this overlap occurred.
+            int barsSince = bar_index - overlap.barIndex
+            // Use historical reference to get the timestamp of that bar.
+            // (Make sure f_formatTimestamp() is defined in your library or accessible in your environment.)
+            string timeStmp = f_formatTimestamp(time[barsSince])
+            // Retrieve descriptive state names from the mapping.
+            string stateName1 = this.getStateName(overlap.state1)
+            string stateName2 = this.getStateName(overlap.state2)
+            // Build a log line for this overlap.
+            string overlapTxt = str.tostring(currentIndex) + " Overlap: " + stateName1 + " -> " + stateName2 + " at " + timeStmp
+            txt := txt + (i == 0 ? overlapTxt : "\n" + overlapTxt)
+        // Append total count.
+        txt := txt + "\nTotal overlaps: " + str.tostring(sizeOverlaps)
+        label.new(bar_index, high, text = txt, style = label.style_label_left)
+    txt
+
+//----------------------------------------------------
+// 11) IMPLEMENT METHOD TO SHOW STATE HISTORY
+//----------------------------------------------------
+// This function iterates over stateHistory and creates labels for every record where
+// the state equals the specified state s. Each label shows the descriptive state name
+// and the bar at which the state was active. The label is colored green if the condition
+// was met on that bar (i.e. if rec.barIndex equals last_condition_bar), otherwise lime.
+// @param s (int): The state to search for in the state history.
+// @returns (string): A summary message indicating how many labels were created.
+export method showStateHistory(StateMachine this, int s) =>
+    var int count = 0
+    count := 0
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 0
+        for i = 0 to array.size(this.stateHistory) - 1
+            rec = array.get(this.stateHistory, i)
+            if rec.state == s
+                // Determine label color: green if the condition was met on that bar, otherwise lime.
+                color labelColor = rec.barIndex == this.last_condition_bar ? color.green : color.lime
+                // For simplicity, we display the bar index as the timestamp.
+                string ts = "bar " + str.tostring(rec.barIndex)
+                // Create a label at the historical bar. Note: label.new works if the barIndex is valid.
+                label.new(rec.barIndex, high, text = "State " + this.getStateName(s) + " at " + ts, color = labelColor, style = label.style_label_left)
+                count += 1
+    "Labels created: " + str.tostring(count)
+
+
+// Visualization helper for tracking state transitions
+export method visualizeStateTransition(StateMachine this, string labelPrefix = "") =>
+    if this.didWeJustChangeThisBar()
+        label.new(bar_index, high + (2 * syminfo.mintick * 100), 
+                 text = labelPrefix + "State Change\n" +
+                 "From: " + this.getStateName(this.previousState()) + 
+                 "\nTo: " + this.getStateName(this.currentState()) + 
+                 "\nBar: " + str.tostring(bar_index),
+                 color = color.new(color.blue, 50),
+                 textcolor = color.white,
+                 style = label.style_label_down)
+
+// Debugging method for state machine transitions
+export method debugStateTransition(StateMachine this, int expectedFromState, int expectedToState) =>
+    var string debugMessage = na
+    debugMessage := ""
+    
+    // Collect detailed transition information
+    debugMessage += "State Transition Debug:\n"
+    debugMessage += "Expected From State: " + str.tostring(expectedFromState) + 
+                     " (" + this.getStateName(expectedFromState) + ")\n"
+    debugMessage += "Expected To State: " + str.tostring(expectedToState) + 
+                     " (" + this.getStateName(expectedToState) + ")\n"
+    
+    // Check state history
+    if not na(this.stateHistory) and array.size(this.stateHistory) > 0
+        StateRecord lastTransition = array.last(this.stateHistory)
+        
+        debugMessage += "\nLast Recorded Transition:\n"
+        debugMessage += "Previous State: " + str.tostring(lastTransition.before) + 
+                         " (" + this.getStateName(lastTransition.before) + ")\n"
+        debugMessage += "Current State: " + str.tostring(lastTransition.state) + 
+                         " (" + this.getStateName(lastTransition.state) + ")\n"
+        debugMessage += "Bar Index of Transition: " + str.tostring(lastTransition.barIndex) + "\n"
+    
+    // Additional state machine properties
+    debugMessage += "\nCurrent State Machine Properties:\n"
+    debugMessage += "Current State: " + str.tostring(this.state) + 
+                     " (" + this.getStateName(this.state) + ")\n"
+    debugMessage += "Previous Distinct State: " + str.tostring(this.previous_distinct_state) + 
+                     " (" + this.getStateName(this.previous_distinct_state) + ")\n"
+    debugMessage += "Last Processed Bar: " + str.tostring(this.last_processed_bar) + "\n"
+    debugMessage += "Last Change Bar: " + str.tostring(this.last_change_bar) + "\n"
+    
+    // Transition validation
+    var label debugLabel = na
+    debugLabel := na
+    var bool isExpectedTransition = false
+    isExpectedTransition := (this.previous_distinct_state == expectedFromState 
+     or (not na(this.stateHistory) 
+     and array.last(this.stateHistory).before == expectedFromState)) 
+     and this.state == expectedToState 
+     and this.didWeJustChangeThisBar()
+    
+    debugMessage += "\nExpected Transition Validity: " + str.tostring(isExpectedTransition) + "\n"
+    
+    // Add logging or visualization only when the specific transition occurs
+    if isExpectedTransition
+        debugLabel := label.new(bar_index, high, 
+                 text=debugMessage, 
+                 color=color.new(color.green, 50), 
+                 style=label.style_label_down, 
+                 size=size.small)
+    
+    debugLabel
+    
+//----------------------------------------------------
+// TESTING THE STATE MACHINE (ALL FUNCTIONS)
+//----------------------------------------------------
+// Usage Example:
+// 1. Import the library:
+//      import decrypt_capital/lib_statemachine_modified/15 as modSM
+// 2. Create a new state machine instance:
+//      var modSM.StateMachine mySM = modSM.StateMachine.new()
+// 3. (Optional) Define and set a custom state names mapping:
+//      stateNames = array.new_string(7)
+//      array.set(stateNames, 0, "STATE_IDLE")
+//      array.set(stateNames, 1, "MA_SHORT_ABOVE_OVERBOUGHT")
+//      array.set(stateNames, 2, "MA_SHORT_CROSSUNDER_MID")
+//      array.set(stateNames, 3, "MA_SHORT_CROSSUNDER_BIG")
+//      array.set(stateNames, 4, "MA_SHORT_BELOW_OVERSOLD")
+//      array.set(stateNames, 5, "MA_SHORT_CROSSOVER_MID")
+//      array.set(stateNames, 6, "MA_SHORT_CROSSOVER_BIG")
+//      mySM.setStateNames(stateNames)
+// 4. Use mySM.step() to perform state transitions, then retrieve and verify state information,
+//    print logs, check overlapping transitions, etc.
+//
+// The test code below verifies that all key functions of the StateMachine work as expected.
+//
+// Uncomment the code block below to run tests:
+//
+// import robbatt/lib_log/2 as LOG
+// import robbatt/lib_unit/3 as UNIT
+//
+// var UNIT.Test assert = UNIT.Test.new(strict = true, verbose = true)
+// assert.init()
+//
+// // Create a new state machine instance and set state names mapping.
+// var s = StateMachine.new()
+// stateNames = array.new_string(7)
+// array.set(stateNames, 0, "STATE_IDLE")
+// array.set(stateNames, 1, "MA_SHORT_ABOVE_OVERBOUGHT")
+// array.set(stateNames, 2, "MA_SHORT_CROSSUNDER_MID")
+// array.set(stateNames, 3, "MA_SHORT_CROSSUNDER_BIG")
+// array.set(stateNames, 4, "MA_SHORT_BELOW_OVERSOLD")
+// array.set(stateNames, 5, "MA_SHORT_CROSSOVER_MID")
+// array.set(stateNames, 6, "MA_SHORT_CROSSOVER_BIG")
+// s.setStateNames(stateNames)
+//
+// // 1. Test initial state and enabled flag.
+// assert.equals(s.state, 0, "Initial state should be 0")
+// assert.is_true(s.enabled, "State machine should be enabled initially")
+// assert.equals(s.currentState(), 0, "currentState() should return 0")
+// assert.equals(s.previousState(), 0, "previousState() should return 0 at start")
+//
+// // 2. Test step() method (variant 1): Transition from state 0 to 1.
+// s.step(0, 1)
+// assert.equals(s.state, 1, "step(0, 1) should change state from 0 to 1")
+// assert.equals(s.previousState(), 0, "previousState() should now be 0")
+// assert.equals(s.currentState(), 1, "currentState() should now be 1")
+// // Verify state name for state 1.
+// assert.equals(s.getStateName(1), "MA_SHORT_ABOVE_OVERBOUGHT", "State name for 1 should be MA_SHORT_ABOVE_OVERBOUGHT")
+//
+// // 3. Test overloaded step() method (variant 2): Transition from state 1 to 5.
+// s.step(1, 5)
+// assert.equals(s.state, 5, "Overloaded step(5) should change state from 1 to 5")
+// assert.equals(s.previousState(), 1, "previousState() should now be 1")
+// assert.equals(s.currentState(), 5, "currentState() should now be 5")
+// assert.equals(s.getStateName(5), "MA_SHORT_CROSSOVER_MID", "State name for 5 should be MA_SHORT_CROSSOVER_MID")
+//
+// // 4. Test didWeJustChangeThisBar: Should be true immediately after a state change.
+// assert.is_true(s.didWeJustChangeThisBar(), "didWeJustChangeThisBar() should be true immediately after a state change")
+//
+// // 5. Test didWeChangeFromTo: Verify that a transition from 1 to 5 occurred within 1 bar.
+// assert.is_true(s.didWeChangeFromTo(1, 5, 1), "didWeChangeFromTo(1, 5) should be true after transitioning from 1 to 5")
+//
+// // 6. Test getLatestState and getLatestIndexOfState.
+// var latestState = s.getLatestState()
+// var latestIndex = s.getLatestIndexOfState()
+// assert.equals(latestState, 5, "Latest recorded state should be 5")
+// assert.equals(latestIndex, bar_index, "Latest recorded index should equal current bar index")
+//
+// // 7. Test reset() method: Require 2 calls to reset when min_occurrences = 2.
+// s.step(5, -1)
+// assert.equals(s.state, -1, "State should transition from 5 to -1")
+// s.reset(min_occurrences = 2)
+// assert.equals(s.state, -1, "After first reset call with min_occurrences=2, state should remain -1")
+// s.reset(min_occurrences = 2)
+// assert.equals(s.state, s.neutral, "After second reset call, state should reset to neutral (0)")
+// assert.equals(s.previousState(), -1, "previousState() should record the state before reset (-1)")
+//
+// // 8. Test step() with a false condition: No state change should occur.
+// var prevState = s.state
+// s.step(s.state, 10, false)
+// assert.equals(s.state, prevState, "step() with false condition should not change state")
+//
+// // 9. Test barsSinceState() method:
+// // If the current state is 10, barsSinceState(10) should return 0.
+// s.step(s.state, 10)
+// assert.equals(s.barsSinceState(10), 0, "barsSinceState() should return 0 when the state is active")
+// s.step(10, 20)
+// // Assuming state 10 was active previously, barsSinceState(10) should return a positive number.
+// assert.not_equals(s.barsSinceState(10), 0, "barsSinceState() should return a positive value if state 10 was active in the past")
+//
+// // 10. Test print_transitions(): Retrieve a log of the last 3 state transitions.
+// var transitionLog = s.print_transitions(3)
+// assert.not_equals(str.length(transitionLog), 0, "print_transitions() should produce a non-empty log")
+// // Optionally, display the transitions log in a label for visual confirmation:
+// label.new(bar_index, high, text = transitionLog, style = label.style_label_left)
+//
+// // 11. Test print_transitions_array(): Retrieve an array of the last 3 state transitions as state ints.
+// var transArr = s.print_transitions_array(3)
+// assert.is_true(array.size(transArr) > 0, "print_transitions_array() should return a non-empty array")
+//
+// // 12. Test print_transitions_names(): Retrieve a formatted string of state names for the last 3 transitions.
+// var namesLog = s.print_transitions_names(3)
+// assert.not_equals(str.length(namesLog), 0, "print_transitions_names() should produce a non-empty log")
+// // Optionally, display the state names log in a label for visual confirmation:
+// label.new(bar_index, low, text = namesLog, style = label.style_label_left)
+//
+// // 13. Test getOverlappingTransitions() and printOverlappingTransitions():
+// // To properly test overlapping transitions, force multiple state changes on the same bar.
+// // For example, simulate two overlapping transitions by calling step() twice on the same bar.
+// // (This may require manual verification based on how your strategy executes.)
+// s.step(10, 11)
+// s.step(11, 12)
+// var overlaps = s.getOverlappingTransitions()
+// // Optionally, display the overlapping transitions using the built-in printOverlappingTransitions() method:
+// var overlapLog = s.printOverlappingTransitions()
+// // You can also check that overlapLog is non-empty if overlaps exist.
+// assert.not_equals(str.length(overlapLog), 0, "printOverlappingTransitions() should produce a non-empty log")
+//
+// // End of tests.
+// // Optionally, plot the current state for visual confirmation:
+// // plot(s.state, "State")
+
+//----------------------------------------------------
+// BEST PRACTICES & TIPS FOR DESIGNING STATE MACHINES
+//----------------------------------------------------
+// 1) Ensure All States Are Unique and Non-Overlapping
+//    - Each state should be mutually exclusive unless hierarchical states are needed.
+//    - Overlapping states might introduce conflicting logic.
+//
+// 2) Define Clear State Transitions
+//    - Avoid jumping between unrelated states without a logical progression.
+//    - Ensure transitions are documented and follow a clear flow.
+//
+// 3) Use Meaningful State Names
+//    - Instead of magic numbers (1,2,3), use descriptive constants (e.g., STATE_IDLE, STATE_BUY_SETUP).
+//    - Improves readability and debugging.
+//
+// 4) Prevent Unreachable or "Zombie" States
+//    - Ensure every state has a way to transition forward or reset to neutral.
+//    - Avoid states that can be entered but never exited unless intentional.
+//
+// 5) Use a Neutral or Default State
+//    - A fallback/reset state helps recover from unexpected conditions.
+//
+// 6) Handle Errors Gracefully
+//    - Detect invalid transitions and log issues for debugging.
+//    - Use assertion functions or transition logs to validate correctness.
+//
+// 7) Ensure Logical Transition Timing
+//    - Avoid reacting to noisy or single-bar conditions.
+//    - Consider requiring multiple confirmations before changing state.
+//
+// 8) Use `printOverlappingTransitions()` for Debugging
+//    - Helps detect unintended state changes occurring on the same bar.
+//    - Useful for identifying high-speed execution conflicts.
+//
+// 9) Document Your State Machine
+//    - Maintain a transition table describing state behavior and possible transitions.
+//    - Helps ensure long-term maintainability.
+//
+// 10) Test Your State Machine Extensively
+//    - Run unit tests and assertions to verify expected transitions.
+//    - Perform backtesting and live logging to validate state behavior.
+//
+// Example Transition Table:
+// | State                 | Description                | Transitions To          |
+// |-----------------------|--------------------------|------------------------|
+// | STATE_IDLE           | Waiting for a signal      | STATE_BUY_SETUP        |
+// | STATE_BUY_SETUP      | Buy conditions forming    | STATE_BUY_EXECUTED     |
+// | STATE_BUY_EXECUTED   | Buy executed             | STATE_SELL_SETUP, IDLE |
+// | STATE_SELL_SETUP     | Sell conditions forming  | STATE_SELL_EXECUTED    |
+//
+// Following these best practices ensures a structured, reliable, and maintainable state machine design.
+//----------------------------------------------------

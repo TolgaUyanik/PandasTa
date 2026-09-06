@@ -1,0 +1,532 @@
+//@version=6
+strategy("Post-Absorption VWAP Reversal Engine V9.1 (Live-Ready)", overlay=true, pyramiding=0, process_orders_on_close=false, calc_on_every_tick=false, commission_type=strategy.commission.cash_per_contract, commission_value=0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V9.1 IS LIVE-CAPABLE. READ THIS BEFORE ENABLING:
+//
+// 1. The script defaults to SIM/PAPER. To go live you must explicitly flip
+//    `executionMode` to "Live" AND `webhookMode` to "live". Both gates exist
+//    so a typo in one input doesn't accidentally send live orders.
+//
+// 2. The strategy is NOT_VALIDATED in strict cross-instrument holdout per
+//    the original research repo. Recent ES/YM backtests are promising but
+//    represent one market regime. You are accepting that risk by going live.
+//
+// 3. The webhook router on your automation side remains the final execution
+//    gate. Even when this script sends "execution_allowed":true, your router
+//    should still enforce rate limits, position-size limits, idempotency keys,
+//    and a manual kill switch.
+//
+// 4. Always start at 1 contract on a Topstep Combine — never on a funded
+//    account directly. Run 5 trading days minimum on Combine before live size.
+//
+// 5. The alert format is configurable. Pick the format your router accepts:
+//    - "JSON detailed": full schema with all telemetry fields (V9 default)
+//    - "JSON compact":  minimal fields {action, side, qty, symbol, price, key}
+//    - "Plain text":    pipe-delimited "action|side|qty|symbol|price|key"
+//
+// 6. TradingView alert setup — exactly:
+//      Condition:    this strategy (its name in the dropdown)
+//      Dropdown:     "Order fills only"   ← NOT "Order fills and alert() ..."
+//      Message:      {{strategy.order.alert_message}}
+//      Webhook URL:  your automation endpoint
+//      Notifications: Webhook on
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Input groups ─────────────────────────────────────────────────────────────
+groupGeneral   = "01 General"
+groupExec      = "02 Execution Mode"
+groupPresets   = "03 Strategy Presets"
+groupAbsorb    = "04 Absorption Detection"
+groupTrade     = "05 Trading Behavior"
+groupSession   = "06 Session Filter"
+groupRisk2     = "07 Risk Gates (opt-in)"
+groupExit      = "08 Exit / EOD"
+groupAlerts    = "09 Webhook Alerts"
+groupVisuals   = "10 Visuals / Debug"
+
+// ── General ──────────────────────────────────────────────────────────────────
+enableAbsorptionModule = input.bool(true,  "Enable absorption module", group=groupGeneral)
+useRthOnly             = input.bool(true,  "Use RTH only", group=groupGeneral)
+rthSession             = input.session("0930-1600", "RTH session", group=groupGeneral)
+rthTimezone            = input.string("America/New_York", "RTH timezone", group=groupGeneral)
+
+// ── Execution mode (gate for live) ───────────────────────────────────────────
+executionMode = input.string("Sim/Paper", "Execution mode  (Live requires webhookMode='live' too)", options=["Backtest only", "Sim/Paper", "Live"], group=groupExec)
+enablePaperStrategy = input.bool(true, "Place strategy orders (must be ON for any alert to fire)", group=groupExec)
+
+// ── Presets ──────────────────────────────────────────────────────────────────
+presetMode = input.string("ES V9 Balanced", "Active preset", options=["ES V9 Balanced", "ES Paper Candidate", "Manual", "Default setup", "Candidate 1: VL75 / VP97.5 / ATR60 / Disp0.5 / Near0.5 / H20", "Candidate 4: VL100 / VP97.5 / ATR60 / Disp0.2 / Near0.1 / H10", "Candidate 8: VL100 / VP97.5 / ATR20 / Disp0.3 / Near0.25 / H5"], group=groupPresets)
+
+manualVolumeLookback                = input.int(100, "Manual volume lookback", minval=5, group=groupAbsorb)
+manualHighVolumePercentileThreshold = input.float(95.0, "Manual high volume percentile", minval=50, maxval=100, step=0.5, group=groupAbsorb)
+manualAtrLength                     = input.int(60, "Manual ATR length", minval=1, group=groupAbsorb)
+manualMaxDisplacementAtr            = input.float(0.30, "Manual max displacement / ATR", minval=0.0, step=0.05, group=groupAbsorb)
+manualNearVwapThresholdAtr          = input.float(0.25, "Manual near VWAP threshold / ATR", minval=0.0, step=0.05, group=groupAbsorb)
+manualReversalHorizonBars           = input.int(15, "Manual horizon bars", minval=1, group=groupAbsorb)
+
+// ── Trading ──────────────────────────────────────────────────────────────────
+allowFadeAboveVwap  = input.bool(true,  "Allow above-VWAP short fades", group=groupTrade)
+allowFadeBelowVwap  = input.bool(true,  "Allow below-VWAP long fades", group=groupTrade)
+paperDirectionMode  = input.string("Both", "Direction mode", options=["Both", "Longs only", "Shorts only"], group=groupTrade)
+exitMode            = input.string("VWAP target + ATR stop + time stop", "Exit mode", options=["VWAP target + ATR stop + time stop", "Fixed horizon only", "VWAP target only", "ATR stop only"], group=groupTrade)
+nextBarEntryOnly    = input.bool(true,  "Next-bar entry only", group=groupTrade)
+allowSameBarExit    = input.bool(false, "Allow same-bar exit", group=groupTrade)
+pendingEntryMaxBars = input.int(1, "Pending entry max bars", minval=1, maxval=5, group=groupTrade)
+stopAtrMultiple     = input.float(1.0, "Stop ATR multiple beyond signal bar", minval=0.1, step=0.1, group=groupTrade)
+maxTradesPerDay     = input.int(3, "Max trades per day", minval=0, maxval=20, group=groupTrade)
+
+// ── Session ──────────────────────────────────────────────────────────────────
+useSessionFilter   = input.bool(true,  "Use session filter", group=groupSession)
+blockHour11        = input.bool(true,  "Block 11am NY hour", group=groupSession)
+blockMidday        = input.bool(true,  "Block midday window  (V9.1 default ON — recent data supports 10-13 block)", group=groupSession)
+middayStartHour    = input.int(10, "Midday block start hour NY", minval=0, maxval=23, group=groupSession)
+middayStartMin     = input.int(0,  "Midday block start minute NY", minval=0, maxval=59, group=groupSession)
+middayEndHour      = input.int(13, "Midday block end hour NY", minval=0, maxval=23, group=groupSession)
+middayEndMin       = input.int(0,  "Midday block end minute NY", minval=0, maxval=59, group=groupSession)
+allowedDays        = input.string("Mon-Fri", "Allowed days", options=["Mon-Fri", "Mon-Thu", "Tue-Thu"], group=groupSession)
+blockLongsHour12   = input.bool(false, "Block longs during 12pm NY hour (opt-in)", group=groupSession)
+blockShortsHour14  = input.bool(false, "Block shorts during 2pm NY hour (opt-in)", group=groupSession)
+blockFridayShorts  = input.bool(false, "Block Friday shorts (opt-in)", group=groupSession)
+useEntryCutoff     = input.bool(false, "Stop new entries before close (opt-in)", group=groupSession)
+entryCutoffHour    = input.int(15, "Last new-entry hour NY", minval=0, maxval=23, group=groupSession)
+entryCutoffMin     = input.int(50, "Last new-entry minute NY", minval=0, maxval=59, group=groupSession)
+
+// ── Risk gates (opt-in) ──────────────────────────────────────────────────────
+useDailyLossStop      = input.bool(false, "Daily loss stop", group=groupRisk2)
+dailyLossStopDollar   = input.float(800.0, "Daily loss stop $", minval=0.0, step=25.0, group=groupRisk2)
+useDailyProfitLock    = input.bool(false, "Daily profit lock", group=groupRisk2)
+dailyProfitLockDollar = input.float(800.0, "Daily profit lock $", minval=0.0, step=25.0, group=groupRisk2)
+useConsecLossKill     = input.bool(false, "Consecutive-loss halt", group=groupRisk2)
+consecLossLimit       = input.int(2, "Consecutive loss limit", minval=1, maxval=10, group=groupRisk2)
+useHardDollarStop     = input.bool(false, "Per-trade hard $ stop", group=groupRisk2)
+hardDollarStopAmount  = input.float(750.0, "Per-trade hard $ stop $", minval=50.0, step=25.0, group=groupRisk2)
+useAccountLossKill    = input.bool(false, "Account loss kill switch (LIVE — persistent halt)", group=groupRisk2)
+maxAccountLossDollar  = input.float(1500.0, "Max total strategy loss $", minval=0.0, step=50.0, group=groupRisk2)
+usePeakDdKill         = input.bool(false, "Peak drawdown kill switch (LIVE — persistent halt)", group=groupRisk2)
+maxPeakDrawdownDollar = input.float(2500.0, "Max drawdown from peak $", minval=0.0, step=50.0, group=groupRisk2)
+forceCloseOnHardRisk  = input.bool(true,  "Force close on hard risk halt", group=groupRisk2)
+useCushionLock        = input.bool(false, "Lock entries until equity cushion reached", group=groupRisk2)
+cushionLockTarget     = input.float(0.0,  "Cushion target $", group=groupRisk2)
+
+// ── EOD ──────────────────────────────────────────────────────────────────────
+useEodFlatten     = input.bool(true,  "EOD flatten", group=groupExit)
+eodFlattenHour    = input.int(15, "EOD flatten hour NY", minval=0, maxval=23, group=groupExit)
+eodFlattenMinute  = input.int(55, "EOD flatten minute NY", minval=0, maxval=59, group=groupExit)
+
+// ── Webhook / alerts ─────────────────────────────────────────────────────────
+webhookMode      = input.string("live", "Webhook mode  ('live' requires executionMode='Live')", options=["disabled", "internal_paper", "projectx_sim", "live"], group=groupAlerts)
+alertFormat      = input.string("JSON compact", "Alert message format", options=["JSON detailed", "JSON compact", "Plain text"], group=groupAlerts)
+alertTag         = input.string("ABS_VWAP_V9_1", "Alert tag", group=groupAlerts)
+brokerName       = input.string("projectx", "Broker name", group=groupAlerts)
+brokerRootOverride = input.string("YM", "Broker root override", group=groupAlerts)
+tvSymbolOverride = input.string("CBOT_MINI_DL:YM1!", "TV symbol override", group=groupAlerts)
+paperQty         = input.int(1, "Quantity", minval=1, maxval=10, group=groupAlerts)
+acceptLiveRisk   = input.bool(false, "I accept full live-trading risk  (must be true for executionMode=Live)", group=groupAlerts)
+
+// ── Visuals ──────────────────────────────────────────────────────────────────
+showVwap           = input.bool(true,  "Show VWAP", group=groupVisuals)
+showSmallMarkers   = input.bool(true,  "Show small markers", group=groupVisuals)
+showDebugTable     = input.bool(true,  "Show dashboard", group=groupVisuals)
+debugTablePosition = input.string("Bottom right", "Dashboard position", options=["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group=groupVisuals)
+debugTableBgTransp = input.int(85, "Dashboard transparency", minval=0, maxval=100, group=groupVisuals)
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+f_volume_percentile(src, lookback) =>
+    float count = 0.0
+    float valid = 0.0
+    for i = 0 to lookback - 1
+        if not na(src[i])
+            valid += 1.0
+            if src[i] <= src
+                count += 1.0
+    valid > 0 ? 100.0 * count / valid : na
+f_num(x) => na(x) ? "null" : str.tostring(x, "#.#####")
+f_bool(x) => x ? "true" : "false"
+f_fmt(x, fmt) => na(x) ? "n/a" : str.tostring(x, fmt)
+f_table_pos(t) => t == "Top right" ? position.top_right : t == "Middle right" ? position.middle_right : t == "Bottom right" ? position.bottom_right : t == "Top left" ? position.top_left : position.bottom_left
+
+// ── Execution gates ──────────────────────────────────────────────────────────
+liveAuthorized = executionMode == "Live" and webhookMode == "live" and acceptLiveRisk
+liveAllowedJson = liveAuthorized
+simAllowedJson  = executionMode == "Sim/Paper" or executionMode == "Live"
+
+// ── Session / time ───────────────────────────────────────────────────────────
+inRth = not na(time(timeframe.period, rthSession, rthTimezone))
+rthSessionStart = inRth and not inRth[1]
+dailySessionStart = timeframe.change("D")
+newSession = useRthOnly ? rthSessionStart : dailySessionStart
+vwapActiveBar = useRthOnly ? inRth : true
+
+nyHour   = hour(time, rthTimezone)
+nyMinute = minute(time, rthTimezone)
+nyMin    = nyHour * 60 + nyMinute
+middayStart   = middayStartHour * 60 + middayStartMin
+middayEnd     = middayEndHour   * 60 + middayEndMin
+entryCutoff   = entryCutoffHour * 60 + entryCutoffMin
+eodFlattenMin = eodFlattenHour  * 60 + eodFlattenMinute
+
+nyDow = dayofweek(time, rthTimezone)
+allowedDayPass = allowedDays == "Mon-Fri" ? (nyDow >= dayofweek.monday and nyDow <= dayofweek.friday) : allowedDays == "Mon-Thu" ? (nyDow >= dayofweek.monday and nyDow <= dayofweek.thursday) : (nyDow >= dayofweek.tuesday and nyDow <= dayofweek.thursday)
+
+inMiddayBlock   = useSessionFilter and blockMidday and nyMin >= middayStart and nyMin < middayEnd
+inHour11Block   = useSessionFilter and blockHour11 and nyHour == 11
+pastEntryCutoff = useSessionFilter and useEntryCutoff and nyMin >= entryCutoff
+sessionFilterPass = not useSessionFilter or (allowedDayPass and not inMiddayBlock and not inHour11Block and not pastEntryCutoff)
+
+inEodWindow = useEodFlatten and inRth and nyMin >= eodFlattenMin
+eodFlattenTrigger = inEodWindow and not inEodWindow[1]
+nearEodFlatten = inEodWindow
+
+// ── VWAP ─────────────────────────────────────────────────────────────────────
+var float cumPV = na
+var float cumVol = na
+typicalPrice = (high + low + close) / 3.0
+if newSession or na(cumPV) or na(cumVol)
+    cumPV := vwapActiveBar ? typicalPrice * volume : na
+    cumVol := vwapActiveBar ? volume : na
+else if vwapActiveBar
+    cumPV += typicalPrice * volume
+    cumVol += volume
+sessionVwap = vwapActiveBar and cumVol > 0 ? cumPV / cumVol : na
+
+// ── Preset effective values ──────────────────────────────────────────────────
+isPresetV9      = presetMode == "ES V9 Balanced"
+isPresetES      = presetMode == "ES Paper Candidate"
+isPresetManual  = presetMode == "Manual"
+isPresetDefault = presetMode == "Default setup"
+isPresetCand1   = presetMode == "Candidate 1: VL75 / VP97.5 / ATR60 / Disp0.5 / Near0.5 / H20"
+isPresetCand4   = presetMode == "Candidate 4: VL100 / VP97.5 / ATR60 / Disp0.2 / Near0.1 / H10"
+isPresetCand8   = presetMode == "Candidate 8: VL100 / VP97.5 / ATR20 / Disp0.3 / Near0.25 / H5"
+
+effVolumeLookback                = isPresetV9 or isPresetES ? 50 : isPresetCand1 ? 75 : isPresetManual ? manualVolumeLookback : 100
+effHighVolumePercentileThreshold = isPresetV9 or isPresetES ? 90.0 : isPresetManual ? manualHighVolumePercentileThreshold : isPresetDefault ? 95.0 : 97.5
+effAtrLength                     = isPresetV9 or isPresetES ? 80 : isPresetCand8 ? 20 : isPresetManual ? manualAtrLength : 60
+effMaxDisplacementAtr            = isPresetV9 or isPresetES ? 0.30 : isPresetCand1 ? 0.50 : isPresetCand4 ? 0.20 : isPresetManual ? manualMaxDisplacementAtr : 0.30
+effNearVwapThresholdAtr          = isPresetV9 or isPresetES ? 0.25 : isPresetCand1 ? 0.50 : isPresetCand4 ? 0.10 : isPresetManual ? manualNearVwapThresholdAtr : 0.25
+effReversalHorizonBars           = isPresetV9 or isPresetES ? 15 : isPresetCand1 ? 20 : isPresetCand4 ? 10 : isPresetCand8 ? 5 : isPresetManual ? manualReversalHorizonBars : 15
+
+atr20 = ta.atr(20)
+atr60 = ta.atr(60)
+atr80 = ta.atr(80)
+manualAtr = ta.atr(manualAtrLength)
+atr = isPresetV9 or isPresetES ? atr80 : isPresetCand8 ? atr20 : isPresetManual ? manualAtr : atr60
+
+volPct50  = f_volume_percentile(volume, 50)
+volPct75  = f_volume_percentile(volume, 75)
+volPct100 = f_volume_percentile(volume, 100)
+manualVolumePercentile = f_volume_percentile(volume, manualVolumeLookback)
+volumePercentile = isPresetV9 or isPresetES ? volPct50 : isPresetCand1 ? volPct75 : isPresetManual ? manualVolumePercentile : volPct100
+
+bodyDisplacement = math.abs(close - open)
+displacementAtr  = atr > 0 ? bodyDisplacement / atr : na
+vwapDistanceAtr  = atr > 0 and not na(sessionVwap) ? (close - sessionVwap) / atr : na
+nearVwap         = not na(vwapDistanceAtr) and math.abs(vwapDistanceAtr) <= effNearVwapThresholdAtr
+aboveVwap        = not nearVwap and not na(sessionVwap) and close > sessionVwap
+belowVwap        = not nearVwap and not na(sessionVwap) and close < sessionVwap
+locationLabel    = nearVwap ? "near_vwap" : aboveVwap ? "above_vwap" : belowVwap ? "below_vwap" : "unknown"
+
+validForSignal      = enableAbsorptionModule and barstate.isconfirmed and vwapActiveBar and not na(sessionVwap) and not na(atr) and not na(volumePercentile)
+highVolumePass      = validForSignal and volumePercentile >= effHighVolumePercentileThreshold
+lowDisplacementPass = validForSignal and displacementAtr <= effMaxDisplacementAtr
+isAbsorptionBar     = validForSignal and highVolumePass and lowDisplacementPass
+
+absorptionWarning      = isAbsorptionBar
+aboveVwapAbsorption    = absorptionWarning and aboveVwap
+belowVwapAbsorption    = absorptionWarning and belowVwap
+nearVwapAbsorption     = absorptionWarning and nearVwap
+vwapReversionCandidate = aboveVwapAbsorption or belowVwapAbsorption
+
+directionAllowsShort  = paperDirectionMode != "Longs only"
+directionAllowsLong   = paperDirectionMode != "Shorts only"
+rawShortCandidate     = aboveVwapAbsorption and allowFadeAboveVwap and directionAllowsShort
+rawLongCandidate      = belowVwapAbsorption and allowFadeBelowVwap and directionAllowsLong
+sideSessionBlockShort = useSessionFilter and ((blockShortsHour14 and nyHour == 14) or (blockFridayShorts and nyDow == dayofweek.friday))
+sideSessionBlockLong  = useSessionFilter and blockLongsHour12 and nyHour == 12
+shortCandidate        = rawShortCandidate and not sideSessionBlockShort
+longCandidate         = rawLongCandidate and not sideSessionBlockLong
+
+// ── Risk state ───────────────────────────────────────────────────────────────
+var int    tradesToday          = 0
+var float  dayPnl               = 0.0
+var int    dayConsecLosses      = 0
+var bool   dayHalted            = false
+var string dayHaltReason        = "NONE"
+var int    previousClosedTrades = 0
+var int    sameBarExitCount     = 0
+var float  peakNetProfit        = 0.0
+
+if newSession
+    tradesToday := 0
+    dayPnl := 0.0
+    dayConsecLosses := 0
+    dayHalted := false
+    dayHaltReason := "NONE"
+
+if strategy.closedtrades > previousClosedTrades
+    for tradeIndex = previousClosedTrades to strategy.closedtrades - 1
+        p = strategy.closedtrades.profit(tradeIndex)
+        dayPnl += p
+        dayConsecLosses := p > 0 ? 0 : dayConsecLosses + 1
+        entryIdx = strategy.closedtrades.entry_bar_index(tradeIndex)
+        exitIdx  = strategy.closedtrades.exit_bar_index(tradeIndex)
+        if entryIdx == exitIdx
+            sameBarExitCount += 1
+    previousClosedTrades := strategy.closedtrades
+
+peakNetProfit := math.max(peakNetProfit, strategy.netprofit)
+drawdownFromPeak = strategy.netprofit - peakNetProfit
+
+accountLossHard    = useAccountLossKill and strategy.netprofit <= -maxAccountLossDollar
+peakDdHard         = usePeakDdKill and drawdownFromPeak <= -maxPeakDrawdownDollar
+dailyLossHard      = useDailyLossStop and dayPnl <= -dailyLossStopDollar
+dailyProfitLockHit = useDailyProfitLock and dayPnl >= dailyProfitLockDollar
+consecLossHit      = useConsecLossKill and dayConsecLosses >= consecLossLimit
+cushionLocked      = useCushionLock and strategy.netprofit < cushionLockTarget
+riskHaltNow        = accountLossHard or peakDdHard or dailyLossHard or dailyProfitLockHit or consecLossHit
+
+if riskHaltNow and not dayHalted
+    dayHalted := true
+    dayHaltReason := accountLossHard ? "ACCOUNT_LOSS_KILL" : peakDdHard ? "PEAK_DD_KILL" : dailyLossHard ? "DAILY_LOSS_STOP" : dailyProfitLockHit ? "DAILY_PROFIT_LOCK" : "CONSEC_LOSS_KILL"
+
+riskState = accountLossHard or peakDdHard ? "DISABLED_HARD" : dayHalted ? "DISABLED_DAY" : cushionLocked ? "CUSHION_LOCK" : useDailyLossStop and dayPnl <= -dailyLossStopDollar * 0.5 ? "CAUTION" : "NORMAL"
+
+blockReasonSignal = not enableAbsorptionModule ? "MODULE_DISABLED" : not vwapActiveBar ? "OUTSIDE_RTH" : na(sessionVwap) ? "VWAP_UNAVAILABLE" : na(atr) ? "ATR_UNAVAILABLE" : na(volumePercentile) ? "VOLUME_LOOKBACK_UNAVAILABLE" : isAbsorptionBar ? "PASS" : not highVolumePass ? "HIGH_VOLUME_FAIL" : not lowDisplacementPass ? "DISPLACEMENT_FAIL" : "NOT_ABSORPTION"
+
+tradeBlockReason = strategy.position_size != 0 ? "POSITION_OPEN" : not sessionFilterPass ? "SESSION_BLOCK" : nearEodFlatten ? "EOD_FLATTEN_WINDOW" : dayHalted ? dayHaltReason : cushionLocked ? "CUSHION_LOCK" : tradesToday >= maxTradesPerDay ? "MAX_TRADES_DAY" : "NONE"
+
+// ── Alert message builder ────────────────────────────────────────────────────
+f_alert_json_detailed(eventName, side, action, reason) =>
+    key = syminfo.ticker + "_" + str.tostring(time) + "_" + eventName + "_" + side
+    string s = "{"
+    s += "\"schema\":\"ABS_VWAP_V9_1\","
+    s += "\"tag\":\"" + alertTag + "\","
+    s += "\"event\":\"" + eventName + "\","
+    s += "\"action\":\"" + action + "\","
+    s += "\"side\":\"" + side + "\","
+    s += "\"qty\":" + str.tostring(paperQty) + ","
+    s += "\"symbol\":\"" + tvSymbolOverride + "\","
+    s += "\"ticker\":\"" + syminfo.ticker + "\","
+    s += "\"broker_root\":\"" + brokerRootOverride + "\","
+    s += "\"broker\":\"" + brokerName + "\","
+    s += "\"order_type\":\"market\","
+    s += "\"price\":" + f_num(close) + ","
+    s += "\"vwap\":" + f_num(sessionVwap) + ","
+    s += "\"timeframe\":\"" + timeframe.period + "\","
+    s += "\"bar_time\":" + str.tostring(time) + ","
+    s += "\"idempotency_key\":\"" + key + "\","
+    s += "\"webhook_mode\":\"" + webhookMode + "\","
+    s += "\"execution_mode\":\"" + executionMode + "\","
+    s += "\"execution_allowed\":" + f_bool(liveAuthorized or simAllowedJson) + ","
+    s += "\"live_allowed\":" + f_bool(liveAllowedJson) + ","
+    s += "\"sim_only\":" + f_bool(not liveAllowedJson) + ","
+    s += "\"risk_state\":\"" + riskState + "\","
+    s += "\"block_reason\":\"" + tradeBlockReason + "\","
+    s += "\"reason\":\"" + reason + "\""
+    s += "}"
+    s
+
+f_alert_json_compact(eventName, side, action) =>
+    key = syminfo.ticker + "_" + str.tostring(time) + "_" + eventName + "_" + side
+    string s = "{"
+    s += "\"action\":\"" + action + "\","
+    s += "\"side\":\"" + side + "\","
+    s += "\"qty\":" + str.tostring(paperQty) + ","
+    s += "\"symbol\":\"" + tvSymbolOverride + "\","
+    s += "\"broker_root\":\"" + brokerRootOverride + "\","
+    s += "\"price\":" + f_num(close) + ","
+    s += "\"key\":\"" + key + "\","
+    s += "\"live\":" + f_bool(liveAllowedJson)
+    s += "}"
+    s
+
+f_alert_plain(eventName, side, action) =>
+    key = syminfo.ticker + "_" + str.tostring(time) + "_" + eventName + "_" + side
+    action + "|" + side + "|" + str.tostring(paperQty) + "|" + tvSymbolOverride + "|" + brokerRootOverride + "|" + f_num(close) + "|" + key + "|live=" + f_bool(liveAllowedJson)
+
+f_alert(eventName, side, action, reason) =>
+    alertFormat == "JSON detailed" ? f_alert_json_detailed(eventName, side, action, reason) : alertFormat == "JSON compact" ? f_alert_json_compact(eventName, side, action) : f_alert_plain(eventName, side, action)
+
+// ── Plots / markers ──────────────────────────────────────────────────────────
+plot(showVwap ? sessionVwap : na, "Session VWAP", color=color.new(color.blue, 0), linewidth=2)
+plotshape(showSmallMarkers and aboveVwapAbsorption, title="Above VWAP absorption", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="ABS↓")
+plotshape(showSmallMarkers and belowVwapAbsorption, title="Below VWAP absorption", style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="ABS↑")
+plotshape(showSmallMarkers and nearVwapAbsorption,  title="Near VWAP absorption",  style=shape.diamond,       location=location.top,      color=color.new(color.gray, 0), size=size.tiny, text="ABS")
+
+blockedDirectionalSignal = (rawShortCandidate or rawLongCandidate) and not (shortCandidate or longCandidate)
+plotshape(showSmallMarkers and blockedDirectionalSignal, title="Blocked by session", style=shape.xcross, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="BLK")
+
+// ── Trading engine ───────────────────────────────────────────────────────────
+var int   pendingDir       = 0
+var int   pendingSignalBar = na
+var float pendingStop      = na
+var float pendingLimit     = na
+var float activeStop       = na
+var float activeLimit      = na
+var int   positionEntryBar = na
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    positionEntryBar := bar_index
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    positionEntryBar := na
+    activeStop := na
+    activeLimit := na
+
+orderExecutionOk = (executionMode == "Sim/Paper" or executionMode == "Live") and enablePaperStrategy
+
+hardRiskRequiresClose = forceCloseOnHardRisk and (accountLossHard or peakDdHard) and strategy.position_size != 0
+if orderExecutionOk and hardRiskRequiresClose
+    hardSide   = strategy.position_size > 0 ? "long" : "short"
+    hardAction = strategy.position_size > 0 ? "CLOSE_LONG" : "CLOSE_SHORT"
+    strategy.close_all(comment="RISK", alert_message=f_alert("hard_risk_flatten", hardSide, hardAction, dayHaltReason))
+
+if orderExecutionOk and useEodFlatten and eodFlattenTrigger and strategy.position_size != 0
+    eodSide   = strategy.position_size > 0 ? "long" : "short"
+    eodAction = strategy.position_size > 0 ? "CLOSE_LONG" : "CLOSE_SHORT"
+    strategy.close_all(comment="EOD", alert_message=f_alert("eod_flatten", eodSide, eodAction, "eod_flatten_window"))
+
+hardDollarTriggered = false
+if useHardDollarStop and strategy.position_size != 0 and not na(strategy.position_avg_price)
+    pv = syminfo.pointvalue
+    if strategy.position_size > 0
+        unrealized_per_ct = (close - strategy.position_avg_price) * pv
+        hardDollarTriggered := unrealized_per_ct <= -hardDollarStopAmount
+    else
+        unrealized_per_ct = (strategy.position_avg_price - close) * pv
+        hardDollarTriggered := unrealized_per_ct <= -hardDollarStopAmount
+if orderExecutionOk and useHardDollarStop and hardDollarTriggered and strategy.position_size != 0
+    hsSide   = strategy.position_size > 0 ? "long" : "short"
+    hsAction = strategy.position_size > 0 ? "CLOSE_LONG" : "CLOSE_SHORT"
+    strategy.close_all(comment="HS", alert_message=f_alert("hard_dollar_stop", hsSide, hsAction, "per_trade_dollar_stop_hit"))
+
+canTradeNow = orderExecutionOk and vwapActiveBar and sessionFilterPass and not nearEodFlatten and not dayHalted and not cushionLocked and tradesToday < maxTradesPerDay and strategy.position_size == 0
+
+if canTradeNow and (shortCandidate or longCandidate)
+    sigDir = shortCandidate ? -1 : 1
+    sigSide = sigDir == -1 ? "short" : "long"
+    sigStop = shortCandidate ? high + atr * stopAtrMultiple : low - atr * stopAtrMultiple
+    sigLimit = sessionVwap
+    if nextBarEntryOnly
+        pendingDir := sigDir
+        pendingSignalBar := bar_index
+        pendingStop := sigStop
+        pendingLimit := sigLimit
+    else
+        activeStop := sigStop
+        activeLimit := sigLimit
+        entryMsg = f_alert("entry", sigSide, sigDir == -1 ? "SELL_SHORT" : "BUY", "same_bar_entry")
+        if sigDir == -1
+            strategy.entry("ABS_S", strategy.short, qty=paperQty, comment="S", alert_message=entryMsg)
+        else
+            strategy.entry("ABS_L", strategy.long, qty=paperQty, comment="L", alert_message=entryMsg)
+        tradesToday += 1
+
+pendingExpired = pendingDir != 0 and not na(pendingSignalBar) and bar_index - pendingSignalBar > pendingEntryMaxBars
+if pendingExpired or not vwapActiveBar or dayHalted or not sessionFilterPass or nearEodFlatten or cushionLocked
+    pendingDir := 0
+    pendingSignalBar := na
+    pendingStop := na
+    pendingLimit := na
+
+if nextBarEntryOnly and canTradeNow and pendingDir != 0 and not na(pendingSignalBar) and bar_index > pendingSignalBar and bar_index - pendingSignalBar <= pendingEntryMaxBars
+    activeStop := pendingStop
+    activeLimit := pendingLimit
+    pendingSide = pendingDir == -1 ? "short" : "long"
+    entryMsg = f_alert("entry", pendingSide, pendingDir == -1 ? "SELL_SHORT" : "BUY", "next_bar_entry")
+    if pendingDir == -1
+        strategy.entry("ABS_S", strategy.short, qty=paperQty, comment="S", alert_message=entryMsg)
+    else
+        strategy.entry("ABS_L", strategy.long, qty=paperQty, comment="L", alert_message=entryMsg)
+    tradesToday += 1
+    pendingDir := 0
+    pendingSignalBar := na
+    pendingStop := na
+    pendingLimit := na
+
+exitEligible = strategy.position_size != 0 and not na(positionEntryBar) and (allowSameBarExit or bar_index > positionEntryBar)
+useStopExit  = exitMode == "VWAP target + ATR stop + time stop" or exitMode == "ATR stop only"
+useLimitExit = exitMode == "VWAP target + ATR stop + time stop" or exitMode == "VWAP target only"
+useTimeStop  = exitMode == "VWAP target + ATR stop + time stop" or exitMode == "Fixed horizon only"
+
+if orderExecutionOk and exitEligible and (useStopExit or useLimitExit)
+    if strategy.position_size > 0
+        exitMsg = f_alert("exit", "long", "CLOSE_LONG", exitMode)
+        strategy.exit("ABS_L_X", "ABS_L", stop = useStopExit and not na(activeStop) ? activeStop : na, limit = useLimitExit and not na(activeLimit) ? activeLimit : na, comment="XL", alert_message=exitMsg)
+    if strategy.position_size < 0
+        exitMsg = f_alert("exit", "short", "CLOSE_SHORT", exitMode)
+        strategy.exit("ABS_S_X", "ABS_S", stop = useStopExit and not na(activeStop) ? activeStop : na, limit = useLimitExit and not na(activeLimit) ? activeLimit : na, comment="XS", alert_message=exitMsg)
+
+if orderExecutionOk and useTimeStop and strategy.position_size != 0 and not na(positionEntryBar) and bar_index - positionEntryBar >= effReversalHorizonBars
+    closeSide = strategy.position_size > 0 ? "long" : "short"
+    strategy.close_all(comment="T", alert_message=f_alert("time_stop", closeSide, closeSide == "long" ? "CLOSE_LONG" : "CLOSE_SHORT", "horizon_reached"))
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+cellBg   = color.new(color.black, debugTableBgTransp)
+headerBg = color.new(color.gray, math.max(debugTableBgTransp - 10, 0))
+var table dash = table.new(f_table_pos(debugTablePosition), 4, 13, border_width=1)
+if showDebugTable and barstate.islast
+    table.cell(dash, 0, 0, "V9.1", bgcolor=headerBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 0, "Value", bgcolor=headerBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 0, "Detail", bgcolor=headerBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 0, "Notes", bgcolor=headerBg, text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 1, "Exec mode")
+    table.cell(dash, 1, 1, executionMode, text_color=liveAuthorized ? color.red : color.white)
+    table.cell(dash, 2, 1, webhookMode)
+    table.cell(dash, 3, 1, liveAuthorized ? "LIVE AUTH" : "sim/paper")
+
+    table.cell(dash, 0, 2, "Preset / fmt")
+    table.cell(dash, 1, 2, presetMode)
+    table.cell(dash, 2, 2, alertFormat)
+    table.cell(dash, 3, 2, alertTag)
+
+    table.cell(dash, 0, 3, "Session")
+    table.cell(dash, 1, 3, sessionFilterPass ? "PASS" : "BLOCK")
+    table.cell(dash, 2, 3, tradeBlockReason)
+    table.cell(dash, 3, 3, blockMidday ? "10-13 blocked" : (blockHour11 ? "11am blocked" : "no blocks"))
+
+    table.cell(dash, 0, 4, "Day PnL")
+    table.cell(dash, 1, 4, str.tostring(dayPnl, "#.##"))
+    table.cell(dash, 2, 4, "Trades " + str.tostring(tradesToday) + "/" + str.tostring(maxTradesPerDay))
+    table.cell(dash, 3, 4, "Consec L " + str.tostring(dayConsecLosses))
+
+    table.cell(dash, 0, 5, "Net/DD")
+    table.cell(dash, 1, 5, str.tostring(strategy.netprofit, "#.##"))
+    table.cell(dash, 2, 5, str.tostring(drawdownFromPeak, "#.##"))
+    table.cell(dash, 3, 5, dayHaltReason)
+
+    table.cell(dash, 0, 6, "Risk state")
+    table.cell(dash, 1, 6, riskState)
+    table.cell(dash, 2, 6, useDailyLossStop ? "DLS$" + str.tostring(dailyLossStopDollar) : "no DLS")
+    table.cell(dash, 3, 6, useHardDollarStop ? "HS$" + str.tostring(hardDollarStopAmount) : "no HS")
+
+    table.cell(dash, 0, 7, "Vol/Disp")
+    table.cell(dash, 1, 7, f_fmt(volumePercentile, "#.##"))
+    table.cell(dash, 2, 7, f_fmt(displacementAtr, "#.####"))
+    table.cell(dash, 3, 7, blockReasonSignal)
+
+    table.cell(dash, 0, 8, "Location")
+    table.cell(dash, 1, 8, locationLabel)
+    table.cell(dash, 2, 8, f_fmt(vwapDistanceAtr, "#.####"))
+    table.cell(dash, 3, 8, vwapActiveBar ? "RTH" : "outside")
+
+    table.cell(dash, 0, 9, "Candidate")
+    table.cell(dash, 1, 9, shortCandidate ? "SHORT" : longCandidate ? "LONG" : blockedDirectionalSignal ? "BLOCKED" : "none")
+    table.cell(dash, 2, 9, canTradeNow ? "can trade" : "blocked")
+    table.cell(dash, 3, 9, tradeBlockReason)
+
+    table.cell(dash, 0, 10, "Webhook")
+    table.cell(dash, 1, 10, webhookMode)
+    table.cell(dash, 2, 10, brokerRootOverride + " qty " + str.tostring(paperQty))
+    table.cell(dash, 3, 10, alertFormat)
+
+    table.cell(dash, 0, 11, "Fill audit")
+    table.cell(dash, 1, 11, "nextBar " + f_bool(nextBarEntryOnly))
+    table.cell(dash, 2, 11, "sameExit " + f_bool(allowSameBarExit))
+    table.cell(dash, 3, 11, "same " + str.tostring(sameBarExitCount))
+
+    table.cell(dash, 0, 12, "Live gate")
+    table.cell(dash, 1, 12, executionMode == "Live" ? "MODE=LIVE" : "MODE=" + executionMode, text_color=executionMode == "Live" ? color.red : color.white)
+    table.cell(dash, 2, 12, webhookMode == "live" ? "WH=LIVE" : "WH=" + webhookMode, text_color=webhookMode == "live" ? color.red : color.white)
+    table.cell(dash, 3, 12, acceptLiveRisk ? "RISK ACCEPTED" : "risk not accepted", text_color=acceptLiveRisk ? color.red : color.yellow)

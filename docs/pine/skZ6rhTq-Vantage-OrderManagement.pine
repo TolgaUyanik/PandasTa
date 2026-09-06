@@ -1,0 +1,211 @@
+//@version=6
+// @description Helpers to convert Pine's strategy.closedtrades array into a
+// series of order events your handlers can react to. Reusable across any
+// Pine Script strategy that needs per-fill event semantics.
+library("Vantage_OrderManagement")
+
+// ─────────────────────────────────────────────────────────────────────────
+// USAGE — copy this detection block into your strategy.
+// Pine libraries cannot read strategy.closedtrades / strategy.opentrades, so
+// the detection loop must live in the caller. Paste as-is, then feed each
+// event into OnEventProcessed() and your own handler.
+// ─────────────────────────────────────────────────────────────────────────
+//
+//   import Vantage-Stack/Vantage_OrderManagement/1 as om
+//
+//   var om.OrderSystem orderSys = om.OrderSystem.new()
+//
+//   DetectEvents(om.OrderSystem os) =>
+//       var array<om.OrderEvent> events = array.new<om.OrderEvent>(0)
+//       array.clear(events)
+//       int  closedNow = strategy.closedtrades
+//       int  newClosed = closedNow - os.prevClosedCount
+//       bool wasInPos  = os.trackedDirection != 0
+//       if newClosed > 0
+//           for i = os.prevClosedCount to closedNow - 1
+//               float size   = strategy.closedtrades.size(i)
+//               int   dir    = size > 0 ? 1 : -1
+//               int   qty    = int(math.abs(size))
+//               float entry  = strategy.closedtrades.entry_price(i)
+//               float exitPx = strategy.closedtrades.exit_price(i)
+//               string id    = strategy.closedtrades.entry_id(i)
+//               float profit = strategy.closedtrades.profit(i)
+//               bool enteredThisBar = (i != os.prevClosedCount) or not wasInPos
+//               if enteredThisBar
+//                   array.push(events, om.OrderEvent.new(dir, entry, entry, qty, id, na))
+//               array.push(events, om.OrderEvent.new(dir, exitPx, entry, qty, id, profit))
+//       if (not wasInPos or newClosed > 0) and strategy.opentrades > 0
+//           float size  = strategy.opentrades.size(0)
+//           int   dir   = size > 0 ? 1 : -1
+//           int   qty   = int(math.abs(size))
+//           float entry = strategy.opentrades.entry_price(0)
+//           string id   = strategy.opentrades.entry_id(0)
+//           array.push(events, om.OrderEvent.new(dir, entry, entry, qty, id, na))
+//       os.prevClosedCount := closedNow
+//       events
+//
+//   // Per bar, after your strategy.entry / strategy.exit calls:
+//   array<om.OrderEvent> events = DetectEvents(orderSys)
+//   for ev in events
+//       om.OnEventProcessed(orderSys, ev)
+//       // your handler — e.g. if na(ev.profit) handle entry, else handle exit
+//
+// ─────────────────────────────────────────────────────────────────────────
+
+// ── UDTs ──
+
+// @type Fill event record — one per entry or exit. Transient; construct fresh per detection cycle.
+export type OrderEvent
+    int direction          // 1=long, -1=short
+    float fillPrice        // fill price (exit price on exits, entry price on entries)
+    float entryPrice       // entry price (always present)
+    int fillQty            // quantity filled
+    string entryId         // TradingView entry ID
+    float profit           // realized P&L on exits (na for entries)
+
+// @type Position tracking state. Pass the same instance to event helpers each bar. All fields varip — order detection is not idempotent.
+export type OrderSystem
+    varip int prevClosedCount
+    varip int prevOpenCount
+    varip int trackedDirection       // 0=flat, 1=long, -1=short
+    varip float trackedQty
+
+// ── Position Queries ──
+
+// @function Returns true if the tracked position is currently open.
+// @param os OrderSystem instance
+// @returns True if a position is tracked in either direction
+export IsInPosition(OrderSystem os) => os.trackedDirection != 0
+
+// @function Returns the direction of the current tracked position.
+// @param os OrderSystem instance
+// @returns 1 for long, -1 for short, 0 for flat
+export PositionDirection(OrderSystem os) => os.trackedDirection
+
+// @function Returns the quantity of the current tracked position.
+// @param os OrderSystem instance
+// @returns Position size in contracts (0.0 when flat)
+export PositionQty(OrderSystem os) => os.trackedQty
+
+// ── Event Processing ──
+
+// @function Updates tracked position state from a fill event. Entry events (profit=na) set direction and qty; exit events clear them.
+// @param os OrderSystem instance (updated in place)
+// @param ev OrderEvent describing the fill
+// @returns True (always)
+export OnEventProcessed(OrderSystem os, OrderEvent ev) =>
+    if na(ev.profit)
+        os.trackedDirection := ev.direction
+        os.trackedQty := float(ev.fillQty)
+    else
+        os.trackedDirection := 0
+        os.trackedQty := 0.0
+    true
+
+// @function Validates that the tracked position direction matches strategy.position_size. Logs an error and optionally draws a label if they diverge.
+// @param os OrderSystem instance
+// @param stratPosSize Current strategy.position_size value
+// @param currentState Current state machine state (for error log context)
+// @param showLabel Whether to draw a chart label on mismatch
+// @returns True if tracked direction matches TV direction; false on divergence
+export Reconcile(OrderSystem os, float stratPosSize, int currentState, bool showLabel) =>
+    int tvDir = stratPosSize > 0 ? 1 : stratPosSize < 0 ? -1 : 0
+    bool ok = os.trackedDirection == tvDir
+    if not ok
+        string _msg = "tracked=" + str.tostring(os.trackedDirection) + " qty=" + str.tostring(os.trackedQty) + " vs TV dir=" + str.tostring(tvDir) + " pos=" + str.tostring(stratPosSize)
+        string _ts = str.tostring(year) + "-" + str.tostring(month, "00") + "-" + str.tostring(dayofmonth, "00") + " " + str.tostring(hour, "00") + ":" + str.tostring(minute, "00")
+        log.error("ASSERT [RECONCILE] bar=" + str.tostring(bar_index) + " state=" + str.tostring(currentState) + " " + _ts + " | " + _msg)
+        if showLabel
+            label.new(bar_index, high + syminfo.mintick * 120, "ASSERT: RECONCILE\n" + _msg, style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+    ok
+
+// ── Core Logging ──
+
+// @function Gated diagnostic log — emits only in realtime or within the WH-SIM log window.
+// @param msg Log message to emit
+// @param realtimeEffective True if the bar is currently executing in realtime
+// @param withinSimLogWindow True if within the configured webhook simulation log window
+// @param versionTag Strategy version tag prefixed on simulated log entries (e.g., "v22")
+export SimLog(string msg, bool realtimeEffective, bool withinSimLogWindow, string versionTag) =>
+    if realtimeEffective or withinSimLogWindow
+        string tag = realtimeEffective ? "" : "[WH-SIM " + versionTag + "] "
+        log.info(tag + msg)
+
+// @function Assertion helper — logs an error and optionally draws a chart label if condition is false.
+// @param condition Assertion condition; false triggers the error
+// @param category Short category label for the log entry (e.g., "RECONCILE")
+// @param message Detailed message describing the assertion failure
+// @param currentState Current state machine state (for error log context)
+// @param showLabel Whether to draw a red label on the chart at the failure bar
+// @returns True (always — allows use in expression chains)
+export Assert(bool condition, string category, string message, int currentState, bool showLabel) =>
+    if not condition
+        string _ts = str.tostring(year) + "-" + str.tostring(month, "00") + "-" + str.tostring(dayofmonth, "00") + " " + str.tostring(hour, "00") + ":" + str.tostring(minute, "00")
+        string _logMsg = "ASSERT [" + category + "] bar=" + str.tostring(bar_index) + " state=" + str.tostring(currentState) + " " + _ts + " | " + message
+        log.error(_logMsg)
+        if showLabel
+            label.new(bar_index, high + syminfo.mintick * 120, "ASSERT: " + category + "\n" + message, style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+    true
+
+// ── OE Diagnostic Log Wrappers ──
+// Each embeds the simLog gating pattern to avoid double function call overhead.
+
+// @function Logs an OE-Detect diagnostic line showing closed trade counts and current position size.
+// @param realtimeEffective True if executing in realtime
+// @param withinSimLogWindow True if within the WH-SIM log window
+// @param versionTag Strategy version tag for log prefix
+// @param barIdx Current bar index
+// @param state Current state machine state
+// @param closedNow Total closed trades on this bar
+// @param prevClosed Closed trade count from previous bar
+// @param newClosed Net new closes detected this bar
+// @param openTrades Current open trade count
+// @param posSize Current strategy position size
+export LogOeDetect(bool realtimeEffective, bool withinSimLogWindow, string versionTag, int barIdx, int state, int closedNow, int prevClosed, int newClosed, int openTrades, float posSize) =>
+    if realtimeEffective or withinSimLogWindow
+        string tag = realtimeEffective ? "" : "[WH-SIM " + versionTag + "] "
+        log.info(tag + "OE-Detect • bar=" + str.tostring(barIdx) + " • state=" + str.tostring(state) + " • closedNow=" + str.tostring(closedNow) + " • prevClosed=" + str.tostring(prevClosed) + " • newClosed=" + str.tostring(newClosed) + " • openTrades=" + str.tostring(openTrades) + " • posSize=" + str.tostring(posSize))
+
+// @function Logs an OE-Dispatch diagnostic line showing the fill details for a detected order event.
+// @param realtimeEffective True if executing in realtime
+// @param withinSimLogWindow True if within the WH-SIM log window
+// @param versionTag Strategy version tag for log prefix
+// @param barIdx Current bar index
+// @param dir Fill direction: 1=long, -1=short
+// @param fillPx Fill price
+// @param entryPx Entry price for the position
+// @param profit Realized P&L (na for entry events)
+// @param state Current state machine state
+// @param exitCleanupDone Current exitCleanupDone flag value
+export LogOeDispatch(bool realtimeEffective, bool withinSimLogWindow, string versionTag, int barIdx, int dir, float fillPx, float entryPx, float profit, int state, bool exitCleanupDone) =>
+    if realtimeEffective or withinSimLogWindow
+        string tag = realtimeEffective ? "" : "[WH-SIM " + versionTag + "] "
+        log.info(tag + "OE-Dispatch • bar=" + str.tostring(barIdx) + " • dir=" + str.tostring(dir) + " • fillPx=" + str.tostring(fillPx) + " • entryPx=" + str.tostring(entryPx) + " • profit=" + str.tostring(profit) + " • state=" + str.tostring(state) + " • exitCleanupDone=" + str.tostring(exitCleanupDone))
+
+// @function Logs a CancelSweep diagnostic line for a cancel-all webhook signal dispatch.
+// @param realtimeEffective True if executing in realtime
+// @param withinSimLogWindow True if within the WH-SIM log window
+// @param versionTag Strategy version tag for log prefix
+// @param simPrefix WH-SIM prefix string for the log entry
+// @param target Target label (e.g., "CHART" or "PROXY")
+// @param ticker Ticker symbol being cancelled
+// @param tradeSet Current trade set index
+// @param responseMsg The JSON payload string being sent
+export LogCancelSweep(bool realtimeEffective, bool withinSimLogWindow, string versionTag, string simPrefix, string target, string ticker, int tradeSet, string responseMsg) =>
+    if realtimeEffective or withinSimLogWindow
+        string tag = realtimeEffective ? "" : "[WH-SIM " + versionTag + "] "
+        log.info(tag + simPrefix + "CancelSweep • " + target + " • " + ticker + " • tradeSet=" + str.tostring(tradeSet) + " • " + responseMsg)
+
+// @function Logs a SupertrendFilter diagnostic line showing direction, strength, threshold, and filter outcomes.
+// @param realtimeEffective True if executing in realtime
+// @param withinSimLogWindow True if within the WH-SIM log window
+// @param versionTag Strategy version tag for log prefix
+// @param bullish True if supertrend direction is bullish
+// @param strength Supertrend strength value
+// @param threshold Minimum strength threshold for filtering
+// @param filteredLong True if the long entry is being filtered out
+// @param filteredShort True if the short entry is being filtered out
+export LogSupertrendFilter(bool realtimeEffective, bool withinSimLogWindow, string versionTag, bool bullish, float strength, float threshold, bool filteredLong, bool filteredShort) =>
+    if realtimeEffective or withinSimLogWindow
+        string tag = realtimeEffective ? "" : "[WH-SIM " + versionTag + "] "
+        log.info(tag + "SupertrendFilter • direction=" + (bullish ? "bullish" : "bearish") + " • strength=" + str.tostring(strength, "#.##") + " • threshold=" + str.tostring(threshold) + " • filteredLong=" + str.tostring(filteredLong) + " • filteredShort=" + str.tostring(filteredShort))

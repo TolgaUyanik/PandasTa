@@ -1,0 +1,357 @@
+//@version=5
+strategy("Katana V5 Pro FVG 50% Model [SietzeKlaas]",
+     overlay=true,
+     initial_capital=10000,
+     pyramiding=0,
+     process_orders_on_close=true,
+     calc_on_every_tick=false,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.0)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Inputs
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+tradeMode = input.string("Risk Based", "Position sizing mode", options=["Fixed Qty", "Risk Based"])
+
+fixedQty = input.float(1.0, "Fixed qty/contracts", minval=0.01, step=0.01)
+
+useCompounding = input.bool(true, "Use compounding")
+riskPercent = input.float(1.0, "Risk % per trade", minval=0.01, maxval=20.0, step=0.1)
+
+swingLookback = input.int(20, "Swing lookback", minval=3, maxval=200)
+setupExpireBars = input.int(10, "Setup expires after candles", minval=1, maxval=100)
+
+useAtrDisplacement = input.bool(true, "Use ATR displacement filter")
+atrLength = input.int(14, "ATR length", minval=1)
+atrMultiplier = input.float(1.0, "Minimum displacement ATR multiplier", minval=0.1, step=0.1)
+
+useTrendFilter = input.bool(true, "Use EMA trend filter")
+emaLength = input.int(200, "EMA length", minval=1)
+
+useRsiFilter = input.bool(true, "Use RSI filter")
+rsiLength = input.int(14, "RSI length", minval=1)
+longRsiMin = input.float(50.0, "Long RSI minimum", minval=1, maxval=99, step=0.5)
+shortRsiMax = input.float(50.0, "Short RSI maximum", minval=1, maxval=99, step=0.5)
+
+useSessionFilter = input.bool(true, "Use session filter")
+tradeSession = input.session("0800-1800", "Trading session")
+sessionTimezone = input.string("Etc/UTC", "Session timezone")
+
+useMinStopFilter = input.bool(true, "Use minimum stop distance filter")
+minStopDistance = input.float(3.0, "Minimum stop distance in price", minval=0.0, step=0.1)
+
+tpMode = input.string("Katana Original", "Take profit mode", options=["Katana Original", "1R", "1.5R", "2R"])
+
+allowLongs = input.bool(true, "Allow longs")
+allowShorts = input.bool(true, "Allow shorts")
+
+showSetupLabels = input.bool(false, "Show setup labels")
+showTriggerLabels = input.bool(true, "Show trigger labels")
+showFvgBoxes = input.bool(false, "Show FVG boxes")
+showLevels = input.bool(true, "Show active levels")
+showDashboard = input.bool(true, "Show dashboard")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Indicators
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+atr = ta.atr(atrLength)
+ema = ta.ema(close, emaLength)
+rsi = ta.rsi(close, rsiLength)
+
+plot(useTrendFilter ? ema : na, "EMA Trend Filter", color=color.orange, linewidth=2)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Session filter
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+inSession = not na(time(timeframe.period, tradeSession, sessionTimezone))
+sessionOk = not useSessionFilter or inSession
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FVG detection
+// Bullish FVG: current low is above high from 2 candles ago
+// Bearish FVG: current high is below low from 2 candles ago
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+bullFvg = low > high[2]
+bearFvg = high < low[2]
+
+candleRange = high - low
+validDisplacement = not useAtrDisplacement or candleRange >= atr * atrMultiplier
+
+bullSignalRaw = bullFvg and close > open and validDisplacement
+bearSignalRaw = bearFvg and close < open and validDisplacement
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Trend and RSI filters
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+longTrendOk = not useTrendFilter or close > ema
+shortTrendOk = not useTrendFilter or close < ema
+
+longRsiOk = not useRsiFilter or rsi >= longRsiMin
+shortRsiOk = not useRsiFilter or rsi <= shortRsiMax
+
+bullSignal = bullSignalRaw and longTrendOk and longRsiOk and sessionOk
+bearSignal = bearSignalRaw and shortTrendOk and shortRsiOk and sessionOk
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Setup state
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var bool setupActive = false
+var string setupSide = ""
+var int setupBar = na
+
+var float setupEntry = na
+var float setupStop = na
+var float setupTp = na
+var float setupQty = na
+
+var line entryLine = na
+var line stopLine = na
+var line tpLine = na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Expire setup
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if setupActive and strategy.position_size == 0 and not na(setupBar)
+    if bar_index - setupBar > setupExpireBars
+        setupActive := false
+        setupSide := ""
+        setupEntry := na
+        setupStop := na
+        setupTp := na
+        setupQty := na
+
+// Clear setup after position opens
+if strategy.position_size != 0
+    setupActive := false
+
+canCreateSetup = strategy.position_size == 0 and not setupActive
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Range logic
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Long range
+longRangeLow = ta.lowest(low, swingLookback)
+longRangeHigh = high
+longRange = longRangeHigh - longRangeLow
+
+longEntry = longRangeLow + longRange * 0.50
+longStop = longRangeLow + longRange * 0.25
+longKatanaTp = longRangeLow + longRange * 0.75
+
+longRiskDistance = math.abs(longEntry - longStop)
+
+longTp1R = longEntry + longRiskDistance * 1.0
+longTp15R = longEntry + longRiskDistance * 1.5
+longTp2R = longEntry + longRiskDistance * 2.0
+
+longTp = tpMode == "Katana Original" ? longKatanaTp :
+     tpMode == "1R" ? longTp1R :
+     tpMode == "1.5R" ? longTp15R :
+     longTp2R
+
+validLongRange = longRange > syminfo.mintick and longStop < longEntry and longTp > longEntry
+
+// Short range
+shortRangeHigh = ta.highest(high, swingLookback)
+shortRangeLow = low
+shortRange = shortRangeHigh - shortRangeLow
+
+shortEntry = shortRangeHigh - shortRange * 0.50
+shortStop = shortRangeHigh - shortRange * 0.25
+shortKatanaTp = shortRangeHigh - shortRange * 0.75
+
+shortRiskDistance = math.abs(shortStop - shortEntry)
+
+shortTp1R = shortEntry - shortRiskDistance * 1.0
+shortTp15R = shortEntry - shortRiskDistance * 1.5
+shortTp2R = shortEntry - shortRiskDistance * 2.0
+
+shortTp = tpMode == "Katana Original" ? shortKatanaTp :
+     tpMode == "1R" ? shortTp1R :
+     tpMode == "1.5R" ? shortTp15R :
+     shortTp2R
+
+validShortRange = shortRange > syminfo.mintick and shortStop > shortEntry and shortTp < shortEntry
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Minimum stop distance filter
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+longStopOk = not useMinStopFilter or longRiskDistance >= minStopDistance
+shortStopOk = not useMinStopFilter or shortRiskDistance >= minStopDistance
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Position sizing
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+equityForSizing = useCompounding ? strategy.equity : strategy.initial_capital
+
+longRiskCash = equityForSizing * (riskPercent / 100.0)
+shortRiskCash = equityForSizing * (riskPercent / 100.0)
+
+longRiskPerContract = longRiskDistance * syminfo.pointvalue
+shortRiskPerContract = shortRiskDistance * syminfo.pointvalue
+
+longRiskQty = longRiskPerContract > 0 ? longRiskCash / longRiskPerContract : na
+shortRiskQty = shortRiskPerContract > 0 ? shortRiskCash / shortRiskPerContract : na
+
+longQty = tradeMode == "Fixed Qty" ? fixedQty : longRiskQty
+shortQty = tradeMode == "Fixed Qty" ? fixedQty : shortRiskQty
+
+validLongQty = not na(longQty) and longQty > 0
+validShortQty = not na(shortQty) and shortQty > 0
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Create long setup
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if allowLongs and canCreateSetup and bullSignal and validLongRange and longStopOk and validLongQty
+    setupActive := true
+    setupSide := "LONG"
+    setupBar := bar_index
+    setupEntry := longEntry
+    setupStop := longStop
+    setupTp := longTp
+    setupQty := longQty
+
+    if showSetupLabels
+        label.new(bar_index, setupEntry,
+             "Katana LONG setup\nEntry 50%\nSL 25%\nTP " + tpMode,
+             style=label.style_label_up,
+             textcolor=color.white,
+             color=color.new(color.green, 0))
+
+    if showFvgBoxes
+        box.new(bar_index - 2, low, bar_index + setupExpireBars, high[2],
+             bgcolor=color.new(color.green, 85),
+             border_color=color.new(color.green, 40))
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Create short setup
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if allowShorts and canCreateSetup and bearSignal and validShortRange and shortStopOk and validShortQty
+    setupActive := true
+    setupSide := "SHORT"
+    setupBar := bar_index
+    setupEntry := shortEntry
+    setupStop := shortStop
+    setupTp := shortTp
+    setupQty := shortQty
+
+    if showSetupLabels
+        label.new(bar_index, setupEntry,
+             "Katana SHORT setup\nEntry 50%\nSL 75%\nTP " + tpMode,
+             style=label.style_label_down,
+             textcolor=color.white,
+             color=color.new(color.red, 0))
+
+    if showFvgBoxes
+        box.new(bar_index - 2, low[2], bar_index + setupExpireBars, high,
+             bgcolor=color.new(color.red, 85),
+             border_color=color.new(color.red, 40))
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Entry trigger when price touches 50%
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+longTouch = setupActive and setupSide == "LONG" and strategy.position_size == 0 and low <= setupEntry and high >= setupEntry
+shortTouch = setupActive and setupSide == "SHORT" and strategy.position_size == 0 and low <= setupEntry and high >= setupEntry
+
+if longTouch
+    strategy.entry("Katana Long", strategy.long, qty=setupQty)
+    strategy.exit("Katana Long TP/SL", from_entry="Katana Long", stop=setupStop, limit=setupTp)
+
+    if showTriggerLabels
+        label.new(bar_index, low,
+             "LONG triggered\nQty: " + str.tostring(setupQty, "#.##"),
+             style=label.style_label_up,
+             textcolor=color.white,
+             color=color.new(color.green, 0))
+
+    setupActive := false
+
+if shortTouch
+    strategy.entry("Katana Short", strategy.short, qty=setupQty)
+    strategy.exit("Katana Short TP/SL", from_entry="Katana Short", stop=setupStop, limit=setupTp)
+
+    if showTriggerLabels
+        label.new(bar_index, high,
+             "SHORT triggered\nQty: " + str.tostring(setupQty, "#.##"),
+             style=label.style_label_down,
+             textcolor=color.white,
+             color=color.new(color.red, 0))
+
+    setupActive := false
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Active level lines
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if showLevels and setupActive and not na(setupEntry)
+    line.delete(entryLine)
+    line.delete(stopLine)
+    line.delete(tpLine)
+
+    entryLine := line.new(bar_index, setupEntry, bar_index + setupExpireBars, setupEntry,
+         color=color.white,
+         width=2)
+
+    stopLine := line.new(bar_index, setupStop, bar_index + setupExpireBars, setupStop,
+         color=color.red,
+         width=2)
+
+    tpLine := line.new(bar_index, setupTp, bar_index + setupExpireBars, setupTp,
+         color=color.green,
+         width=2)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Dashboard
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var table dash = table.new(position.top_right, 2, 8, border_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "Katana V5", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, "Pro", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(dash, 0, 1, "Sizing", text_color=color.white)
+    table.cell(dash, 1, 1, tradeMode, text_color=color.white)
+
+    table.cell(dash, 0, 2, "Compounding", text_color=color.white)
+    table.cell(dash, 1, 2, useCompounding ? "ON" : "OFF", text_color=useCompounding ? color.lime : color.red)
+
+    table.cell(dash, 0, 3, "Risk %", text_color=color.white)
+    table.cell(dash, 1, 3, str.tostring(riskPercent, "#.##") + "%", text_color=color.white)
+
+    table.cell(dash, 0, 4, "TP Mode", text_color=color.white)
+    table.cell(dash, 1, 4, tpMode, text_color=color.white)
+
+    table.cell(dash, 0, 5, "EMA Filter", text_color=color.white)
+    table.cell(dash, 1, 5, useTrendFilter ? "ON" : "OFF", text_color=useTrendFilter ? color.lime : color.red)
+
+    table.cell(dash, 0, 6, "RSI", text_color=color.white)
+    table.cell(dash, 1, 6, str.tostring(rsi, "#.##"), text_color=color.white)
+
+    table.cell(dash, 0, 7, "Session", text_color=color.white)
+    table.cell(dash, 1, 7, sessionOk ? "OPEN" : "CLOSED", text_color=sessionOk ? color.lime : color.red)
+
+if not showDashboard
+    table.clear(dash, 0, 0)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Alerts
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+alertcondition(bullSignal and validLongRange and longStopOk, "Katana Long Setup", "Katana Long setup detected")
+alertcondition(bearSignal and validShortRange and shortStopOk, "Katana Short Setup", "Katana Short setup detected")
+alertcondition(longTouch, "Katana Long Triggered", "Katana Long entry triggered")
+alertcondition(shortTouch, "Katana Short Triggered", "Katana Short entry triggered")

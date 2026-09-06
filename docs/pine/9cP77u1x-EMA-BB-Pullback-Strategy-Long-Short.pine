@@ -1,0 +1,151 @@
+//@version=6
+strategy("EMA + BB Pullback Strategy (Long & Short)", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// =========================================================================
+// INPUTS
+// =========================================================================
+
+// --- General Settings ---
+grp_gen = "General Settings"
+tradeDir = input.string("Both", title="Trade Direction", options=["Long Only", "Short Only", "Both"], group=grp_gen)
+waitForCandle = input.bool(false, title="Require Bullish/Bearish Confirmation Candle?", group=grp_gen)
+
+// --- Master Trend Filter Settings ---
+grp_trend = "Master Trend Filter"
+useTrendFilter = input.bool(false, title="Enable Trend Filter?", group=grp_trend)
+trendEmaLen    = input.int(200, title="Trend EMA Length", step=10, group=grp_trend)
+
+// --- Williams %R Filter Settings ---
+grp_wpr = "Williams %R Filter"
+useWprFilter   = input.bool(false, title="Enable Williams %R Filter?", group=grp_wpr)
+wprLen         = input.int(14, title="Williams %R Length", group=grp_wpr)
+wprLongThresh  = input.float(-80.0, title="Long Threshold (<)", group=grp_wpr)
+wprShortThresh = input.float(-20.0, title="Short Threshold (>)", group=grp_wpr)
+
+// --- EMA Settings ---
+grp_ema = "Entry EMA Settings"
+emaFastLen = input.int(14, title="Fast EMA Length", group=grp_ema)
+emaSlowLen = input.int(34, title="Slow EMA Length", group=grp_ema)
+
+// --- Bollinger Bands Settings ---
+grp_bb = "Bollinger Bands Settings"
+bbLen  = input.int(20, title="BB Length", group=grp_bb)
+bbMult = input.float(2.0, title="BB Multiplier", step=0.1, group=grp_bb)
+
+// --- Risk & Exit Settings ---
+grp_risk = "Risk Management & Exits"
+slPerc = input.float(3.0, title="Fixed Stop Loss %", step=0.1, group=grp_risk)
+exitMethod = input.string("Whichever occurs first", title="Take Profit Method", options=["Middle Band Only", "Fixed % Only", "Whichever occurs first"], group=grp_risk)
+tpPerc = input.float(5.0, title="Fixed Take Profit % (if applicable)", step=0.1, group=grp_risk)
+
+// --- Alert Messages ---
+grp_alerts = "Custom Alert Messages (For Webhooks/Bots)"
+longEntryMsg  = input.string("Long Entry Triggered", title="Long Entry Message", group=grp_alerts)
+longExitMsg   = input.string("Long Exit Triggered",  title="Long Exit Message", group=grp_alerts)
+shortEntryMsg = input.string("Short Entry Triggered", title="Short Entry Message", group=grp_alerts)
+shortExitMsg  = input.string("Short Exit Triggered",  title="Short Exit Message", group=grp_alerts)
+
+
+// =========================================================================
+// CALCULATIONS
+// =========================================================================
+
+// Calculate Master Trend EMA
+emaTrend = ta.ema(close, trendEmaLen)
+
+// Calculate Williams %R
+wpr = ta.wpr(wprLen)
+
+// Calculate Entry EMAs
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// Calculate Bollinger Bands
+basis     = ta.sma(close, bbLen)
+dev       = bbMult * ta.stdev(close, bbLen)
+upperBand = basis + dev
+lowerBand = basis - dev
+
+// Candle Directions
+isBullish = close > open
+isBearish = close < open
+
+
+// =========================================================================
+// STRATEGY LOGIC
+// =========================================================================
+
+// 1. Entry Conditions Base
+longCondBase  = (emaFast > emaSlow) and (low < lowerBand)
+shortCondBase = (emaFast < emaSlow) and (high > upperBand)
+
+// 2. Additional Filters Logic
+// Trend Filter
+longTrendCond  = useTrendFilter ? (close > emaTrend) : true
+shortTrendCond = useTrendFilter ? (close < emaTrend) : true 
+
+// Williams %R Filter
+longWprCond  = useWprFilter ? (wpr < wprLongThresh) : true
+shortWprCond = useWprFilter ? (wpr > wprShortThresh) : true
+
+// Apply all filters to final condition
+longCond  = longCondBase  and (waitForCandle ? isBullish : true) and longTrendCond  and longWprCond
+shortCond = shortCondBase and (waitForCandle ? isBearish : true) and shortTrendCond and shortWprCond
+
+// Filter by user direction choice
+canLong  = (tradeDir == "Long Only"  or tradeDir == "Both")
+canShort = (tradeDir == "Short Only" or tradeDir == "Both")
+
+if (longCond and canLong and strategy.position_size == 0)
+    strategy.entry("Long Entry", strategy.long, alert_message=longEntryMsg)
+
+if (shortCond and canShort and strategy.position_size == 0)
+    strategy.entry("Short Entry", strategy.short, alert_message=shortEntryMsg)
+
+
+// 3. Exit Conditions
+if (strategy.position_size != 0)
+    // Identify if the current position is a Long or Short
+    isLong = strategy.position_size > 0
+    
+    // Get exact entry price
+    entryPrice = strategy.position_avg_price
+    
+    // Calculate Fixed % Prices based on direction
+    slLevel = isLong ? entryPrice * (1 - (slPerc / 100)) : entryPrice * (1 + (slPerc / 100))
+    tpLevel = isLong ? entryPrice * (1 + (tpPerc / 100)) : entryPrice * (1 - (tpPerc / 100))
+    
+    // Determine dynamic take profit level based on user selection
+    float targetPrice = na
+    
+    if exitMethod == "Middle Band Only"
+        targetPrice := basis
+    else if exitMethod == "Fixed % Only"
+        targetPrice := tpLevel
+    else if exitMethod == "Whichever occurs first"
+        // For Longs: Take the lower of the two prices
+        // For Shorts: Take the higher of the two prices
+        targetPrice := isLong ? math.min(tpLevel, basis) : math.max(tpLevel, basis)
+    
+    // Submit Exit Order
+    if isLong
+        strategy.exit("Exit Long", from_entry="Long Entry", stop=slLevel, limit=targetPrice, alert_message=longExitMsg)
+    else
+        strategy.exit("Exit Short", from_entry="Short Entry", stop=slLevel, limit=targetPrice, alert_message=shortExitMsg)
+
+
+// =========================================================================
+// PLOTTING (For Visual Confirmation)
+// =========================================================================
+
+// Master Trend EMA (only plots if enabled)
+plot(useTrendFilter ? emaTrend : na, color=color.new(color.white, 0), title="Trend EMA", linewidth=3)
+
+plot(emaFast, color=color.new(color.blue, 0), title="Fast EMA", linewidth=2)
+plot(emaSlow, color=color.new(color.orange, 0), title="Slow EMA", linewidth=2)
+
+p_upper = plot(upperBand, color=color.new(color.gray, 60), title="Upper BB")
+p_basis = plot(basis,     color=color.new(color.red, 20),  title="Middle BB", linewidth=1, style=plot.style_cross)
+p_lower = plot(lowerBand, color=color.new(color.gray, 60), title="Lower BB")
+
+fill(p_upper, p_lower, color=color.new(color.blue, 95), title="BB Fill")

@@ -1,0 +1,2066 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © @SimpleCryptoLife
+
+//@version=6
+//@description The brain of the Chess script: a small chess opponent built on the ChessCore rules engine. It is not a search engine. It is a ladder of ten rules that looks at one position, tries the rules in order, and plays the first that fires: mate in one, opening book, avoid checkmate, defence, win material, safe check, exchange when ahead, endgame, develop, then any other safe move. Before the ladder runs, a foresee stage scores every legal move by its most likely material outcome. That score works mostly as a veto, so no rule plays a move that walks into a mate. The picking rules take a seed from the consumer, so nothing flickers between ticks. Import ChessCore alongside this.
+library("Public_Library_ChessAI", overlay = true)
+
+import SimpleCryptoLife/Public_Library_ChessCore/1 as Core  // The rules engine. Bump this version number whenever ChessCore is republished.
+
+
+//#region 🟩🟩🟩🟩🟩🟩  SEED AND RANDOMNESS  🟩🟩🟩🟩🟩🟩
+
+// We fold the whole record string down to one number, the engine's only source of "randomness". The same record always gives the same seed, and so the same suggestion, across any number of reloads.
+// Pine has no str.ord(), so we score each character by its position in a fixed charset (SEED_CHARSET below) and fold it into a running number.
+
+// Shorthand for str.tostring(). It's just shorter, for readability.
+s(_thing) => string _string = str.tostring(_thing)
+
+const string SEED_CHARSET = "abcdefgh12345678qrbn "  // Every character a canonical record can hold. Index gives each a value.
+
+//@function Makes a repeatable integer seed from a canonical record string. The same record always gives the same number back.
+// Multiplying the running total before adding each character's charset position makes the ORDER of characters matter ("ab" and "ba" differ). The "% 1000000007" keeps it in range.
+// An empty record still gets a fixed non-zero seed, so even the first position is stable.
+//@param    _record The canonical record string (lowercase, single-spaced), as ChessCore produces it.
+//@returns  A non-negative int seed, stable for a given record.
+export seedFromRecord(string _record) =>
+    int _hash = 7  // Non-zero start so the empty record still gets a usable, fixed seed.
+    int _len = str.length(_record)
+    int _i = 0
+    while _i < _len  // One pass over the record. Bounded by its length.
+        string _char = str.substring(_record, _i, _i + 1)
+        int _pos = str.pos(SEED_CHARSET, _char)
+        int _value = na(_pos) ? 0 : _pos + 1  // +1 so the leading 'a' (pos 0) still contributes.
+        _hash := ((_hash * 31) + _value) % 1000000007  // Dividing by a large prime and keeping the remainder keeps the number bounded and well spread.
+        _i += 1
+    int _seed = math.abs(_hash)  // math.abs guards the (vanishingly unlikely) negative from the remainder maths.
+
+//@function Mixes an extra number (usually a clock reading) into a record seed, so a record-derived value can also depend on WHEN it was computed.
+// With Replies set to Random the consumer mixes the clock in so two games started minutes apart differ. Deterministic uses the pure record seed everywhere for identical replays.
+//@param    _seed The record-derived seed to mix into.
+//@param    _timeMs Any whole number that varies from game to game. In practice the wall clock (timenow) captured once at bar zero of the consumer's recalculation -- NOT a per-tick or per-bar value, or the mixed result wanders.
+//@returns  A non-negative int seed that depends on both the record and the extra number.
+export mixSeedWithTime(int _seed, int _timeMs) =>
+    int _mixed = ((_seed * 31) + (math.abs(_timeMs) % 1000000007)) % 1000000007
+
+//@function Picks a pseudo-random index 0.._count-1 from a seed, using math.random(). Pine gotcha: math.random(min, max, seed) treats BOTH bounds as EXCLUSIVE, so int(math.random(0, _count, _seed)) is a valid index 0.._count-1 with no edge cases.
+// Returns 0 for _count 1 (the only index) and 0 as a safe fallback below 1.
+// HISTORICAL RECALCULATION BARS ONLY. Never call this on the live bar. A seeded math.random() keeps its sequence position across intrabar executions, so each live update draws the next value and the result flickers.
+//@param    _count How many candidates there are (the array size).
+//@param    _seed The integer seed.
+//@returns  An index in 0.._count-1.
+export randomIndex(int _count, int _seed) =>
+    int _index = _count <= 1 ? 0 : int(math.random(0, _count, _seed))
+
+//#endregion SEED AND RANDOMNESS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  MOVE ANNOTATION  🟩🟩🟩🟩🟩🟩
+
+// The consumer calls annotateMoves() ONCE for the whole legal list before the ladder, so each rule just reads the stored destination counts instead of re-scanning.
+// Almost every rule needs to know the same thing about a move: will the piece be safe on the square it lands on? These three numbers are what answers that.
+
+//@function Fills in attackersOnDest, defendersOnDest and cheapestAttackerOnDest for every move in _a_moves, measured on a scratch board after the move is applied.
+// defendersOnDest excludes the moved piece itself (it sits on the square), so it is the recapture count.
+// cheapestAttackerOnDest (100 when none) is what lets the ladder's safety tests be value-aware, not bare head-counts. This is the one scan-heavy step per position, and we do it once.
+//@param    _position The position the moves are made from (side to move is the mover).
+//@param    _a_moves The legal moves to annotate. Written onto in place.
+//@returns  Nothing. Each o_move in _a_moves gets its three destination fields filled.
+export annotateMoves(Core.o_position _position, array<Core.o_move> _a_moves) =>
+    Core.Side _mover = _position.sideToMove
+    Core.Side _enemy = _mover == Core.Side.white ? Core.Side.black : Core.Side.white
+    for [_i, _move] in _a_moves
+        Core.o_position _scratch = Core.copyPosition(_position)
+        Core.applyMove(_scratch, _move)
+        matrix<Core.Piece> _board = _scratch.mat_board
+        // One combined scan gives attacker count and cheapest attacker.
+        // The second count is our recapturers (the moved piece sits ON the square and cannot attack itself, so it is not counted).
+        [_attackers, _cheapest] = Core.attackersInfo(_board, _move.toRow, _move.toCol, _enemy)
+        int _defenders = Core.countAttackers(_board, _move.toRow, _move.toCol, _mover)
+        _move.attackersOnDest := _attackers
+        _move.defendersOnDest := _defenders
+        _move.cheapestAttackerOnDest := _cheapest
+
+//#endregion MOVE ANNOTATION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  LADDER HELPERS  🟩🟩🟩🟩🟩🟩
+
+// These small tests and pickers serve the ladder rules and the classify stage.
+// They sit up here because the house rules say a function must be declared before it is called.
+
+//@function Returns the king-move (Chebyshev) distance between two squares, the larger of the rows apart and the columns apart. That is how many steps a king needs to walk between them. The advance tier uses it to measure how close a move gets to the enemy king.
+//@param    _row1 First square's row.
+//@param    _col1 First square's column.
+//@param    _row2 Second square's row.
+//@param    _col2 Second square's column.
+//@returns  The Chebyshev distance (>= 0).
+f_chebyshev(int _row1, int _col1, int _row2, int _col2) =>
+    int _distance = math.max(math.abs(_row1 - _row2), math.abs(_col1 - _col2))
+
+//@function True when the two squares are exactly a knight's move apart (row/column gaps of (1,2) or (2,1)). The promotion filter uses it to spot a knight that would fork the enemy queen from its promotion square.
+//@param    _row1 First square's row.
+//@param    _col1 First square's column.
+//@param    _row2 Second square's row.
+//@param    _col2 Second square's column.
+//@returns  True when a knight on the first square attacks the second.
+f_knightHops(int _row1, int _col1, int _row2, int _col2) =>
+    int _dRow = math.abs(_row1 - _row2)
+    int _dCol = math.abs(_col1 - _col2)
+    bool _hops = (_dRow == 1 and _dCol == 2) or (_dRow == 2 and _dCol == 1)
+
+//@function True when applying _move to _position gives check to the opponent, tested on a scratch board. The mate-in-one and safe-check rules and the promotion filter use it.
+//@param    _position The position the move is made from.
+//@param    _move The move to test.
+//@returns  True when the move delivers check.
+export moveGivesCheck(Core.o_position _position, Core.o_move _move) =>
+    Core.Side _enemy = _position.sideToMove == Core.Side.white ? Core.Side.black : Core.Side.white
+    Core.o_position _scratch = Core.copyPosition(_position)
+    Core.applyMove(_scratch, _move)
+    bool _givesCheck = Core.isInCheck(_scratch, _enemy)
+
+//@function True when _move is a capture in _position: an enemy piece sits on the destination, or it is an en passant capture.
+//@param    _position The position the move is made from.
+//@param    _move The move to test.
+//@returns  True when the move captures.
+export moveIsCapture(Core.o_position _position, Core.o_move _move) =>
+    Core.Piece _target = _position.mat_board.get(_move.toRow, _move.toCol)
+    bool _isCapture = _target != Core.Piece.empty or _move.isEnPassant
+
+//@function The point value of the piece _move captures, or 0 for a non-capture. En passant always captures a pawn, so it is worth 1. We use it to rank captures and to judge profitable trades.
+//@param    _position The position the move is made from.
+//@param    _move The move to weigh.
+//@returns  The victim's value as a float, 0 when nothing is captured.
+export capturedValue(Core.o_position _position, Core.o_move _move) =>
+    float _value = _move.isEnPassant ? 1.0 : Core.pieceValue(_position.mat_board.get(_move.toRow, _move.toCol))
+
+//@function The point value of the piece that makes _move (the piece on the from-square). We use it to compare the mover's value against a victim's, and to prefer moving the cheaper of two pieces out of danger.
+//@param    _position The position the move is made from.
+//@param    _move The move to weigh.
+//@returns  The moving piece's value as a float.
+export moverValue(Core.o_position _position, Core.o_move _move) =>
+    float _value = Core.pieceValue(_position.mat_board.get(_move.fromRow, _move.fromCol))
+
+//@function A cheap one-capture-deep price for a move: an undefended victim gains its full value, a defended victim dearer than the mover gains the difference, anything else 0.
+// We use it only to RANK options (the best-check pick in foreseePrepare()). It cannot see how an exchange several pieces contest really plays out, so do NOT use it to decide anything.
+// Real foresee decisions use f_exchangeGain() (the played-out exchange value).
+//@param    _position The position the move is made from.
+//@param    _move The annotated move to weigh. Reads attackersOnDest.
+//@returns  The gain in points (a float), 0 when the capture does not qualify or the move is no capture.
+export captureGain(Core.o_position _position, Core.o_move _move) =>
+    float _gain = 0.0
+    if moveIsCapture(_position, _move)
+        float _victim = capturedValue(_position, _move)
+        float _mover = moverValue(_position, _move)
+        bool _undefended = _move.attackersOnDest == 0  // Nothing recaptures on the destination.
+        if _undefended
+            _gain := _victim
+        else if _victim > _mover
+            _gain := _victim - _mover
+    _gain
+
+//@function True when _move's destination is safe in the value-aware sense the ladder uses: nothing attacks it, OR defenders at least match attackers AND the cheapest attacker is worth at least the piece that lands.
+// The value clause is the point -- a bare head-count would call a knight defended once but attacked by a PAWN safe, though that trade still loses a knight for a pawn.
+// The landing piece is the promoted piece on a promotion, else the mover.
+//@param    _position The position the move is made from (needed for the mover's and promotion's value).
+//@param    _move The annotated move to judge. Reads its three destination fields.
+//@returns  True when the destination is safe by the value-aware rule.
+export moveDestIsSafe(Core.o_position _position, Core.o_move _move) =>
+    float _landedValue = _move.promotion != Core.Piece.empty ? Core.pieceValue(_move.promotion) : moverValue(_position, _move)
+    bool _safe = _move.attackersOnDest == 0 or (_move.defendersOnDest >= _move.attackersOnDest and _move.cheapestAttackerOnDest >= _landedValue)
+
+//@function Totals both sides' material from _side's point of view, returned as a [ours, theirs] tuple in points.
+// One board scan. Kings score 0 so they never tip the count.
+//@param    _position The position to weigh.
+//@param    _side The side to score for ("ours").
+//@returns  A tuple [_ourTotal, _theirTotal], in points.
+export sideTotals(Core.o_position _position, Core.Side _side) =>
+    matrix<Core.Piece> _board = _position.mat_board
+    float _ourTotal = 0.0
+    float _theirTotal = 0.0
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Core.Piece _piece = _board.get(_row, _col)
+            if _piece != Core.Piece.empty
+                float _value = Core.pieceValue(_piece)
+                if Core.pieceBelongsTo(_piece, _side)
+                    _ourTotal += _value
+                else
+                    _theirTotal += _value
+    [_ourTotal, _theirTotal]
+
+//@function The material balance of _position from _side's point of view, meaning our total minus their total, using the P/N/B/R/Q values.
+// Positive means _side is ahead. A thin wrapper over sideTotals().
+//@param    _position The position to weigh.
+//@param    _side The side to score for.
+//@returns  Our material minus the opponent's, in points (a float).
+export materialLead(Core.o_position _position, Core.Side _side) =>
+    [_ourTotal, _theirTotal] = sideTotals(_position, _side)
+    float _lead = _ourTotal - _theirTotal
+
+//@function Picks the highest-scoring move from a scored list, breaking ties with the seed. _a_moves and _a_scores line up entry for entry. Returns na for an empty list.
+//@param    _a_moves The candidate moves.
+//@param    _a_scores Their scores, in the same order as the moves. Floats, but they are whole-number sums of piece values, exactly representable, so the equality tie-test stays exact.
+//@param    _seed The seed for tie-breaking.
+//@returns  The chosen o_move, or na when the list is empty.
+export pickBestScored(array<Core.o_move> _a_moves, array<float> _a_scores, int _seed) =>
+    Core.o_move _chosen = na
+    if _a_moves.size() > 0
+        // Best score by hand, not array.max() (which returns a float needing a cast). A plain scan keeps types clean.
+        float _bestScore = _a_scores.get(0)
+        for [_i, _score] in _a_scores
+            if _score > _bestScore
+                _bestScore := _score
+        array<Core.o_move> _a_ties = array.new<Core.o_move>()
+        for [_i, _move] in _a_moves
+            if _a_scores.get(_i) == _bestScore
+                _a_ties.push(_move)
+        _chosen := _a_ties.get(randomIndex(_a_ties.size(), _seed))
+    _chosen
+
+//@function Random-picks one move from a list using the seed, or na when empty. The picker rules 6-10 use it once they have gathered their qualifying moves.
+// Historical recalculation bars only -- see the warning on randomIndex.
+//@param    _a_moves The qualifying moves.
+//@param    _seed The seed.
+//@returns  A chosen o_move, or na when the list is empty.
+export pickRandom(array<Core.o_move> _a_moves, int _seed) =>
+    Core.o_move _chosen = _a_moves.size() > 0 ? _a_moves.get(randomIndex(_a_moves.size(), _seed)) : na
+
+//@function Splits candidates into four pools using two demotion signals, the foresee score (does the move lose material within the horizon?) and the shield flag, then picks from the best non-empty pool. Pool 1 keeps material and keeps the shield, pool 2 keeps material but thins the shield, pool 3 loses material and keeps the shield, pool 4 loses both.
+// The healthy pools (1,2) keep the seeded variety. The losing pools (3,4) pick by best score.
+// Material outranks the cosmetic shield, so a losing-but-unflagged move ranks below a flagged one that holds material.
+// This is demotion, never veto. A losing move still gets played when it is all on offer. na only when _a_candidates is empty.
+//@param    _a_candidates The candidate moves.
+//@param    _seed The seed for the random pick.
+//@returns  A chosen o_move, or na when _a_candidates is empty.
+f_pickPreferred(array<Core.o_move> _a_candidates, int _seed) =>
+    array<Core.o_move> _a_p1 = array.new<Core.o_move>()
+    array<Core.o_move> _a_p2 = array.new<Core.o_move>()
+    array<Core.o_move> _a_p3 = array.new<Core.o_move>()
+    array<float> _a_p3Scores = array.new<float>()
+    array<Core.o_move> _a_p4 = array.new<Core.o_move>()
+    array<float> _a_p4Scores = array.new<float>()
+    for [_i, _move] in _a_candidates
+        bool _losing = _move.foreseeScore < 0
+        if not _losing and not _move.isShield
+            _a_p1.push(_move)
+        else if not _losing
+            _a_p2.push(_move)
+        else if not _move.isShield
+            _a_p3.push(_move)
+            _a_p3Scores.push(_move.foreseeScore)
+        else
+            _a_p4.push(_move)
+            _a_p4Scores.push(_move.foreseeScore)
+    // Losing pools pick by best score (a one-point loss is not a walked-into mate). Healthy pools keep the variety.
+    Core.o_move _chosen = _a_p1.size() > 0 ? pickRandom(_a_p1, _seed) : _a_p2.size() > 0 ? pickRandom(_a_p2, _seed) : _a_p3.size() > 0 ? pickBestScored(_a_p3, _a_p3Scores, _seed) : pickBestScored(_a_p4, _a_p4Scores, _seed)
+
+//#endregion LADDER HELPERS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  DEVELOP-TIER HELPERS  🟩🟩🟩🟩🟩🟩
+
+// These small non-exported tests serve ruleDevelop()'s tiers. Each is a board scan or table lookup, kept out of the tier loop so the rule reads as a list of tiers rather than a wall of geometry.
+// They sit before the ladder that uses them.
+
+const float MATE_SCORE = 100.0  // Mate outranks any material sum. +/- by who delivers it. Declared here (not in foresee) because Pine needs it before its first use, the rescue-slot mate exclusion below.
+
+// --- The worst-placed-piece rescue. ---
+// A census over our knights, bishops, rooks and queen measures each piece's STUCKNESS: its safe legal moves as a share of its type's empty-board maximum, whole percent rounded down.
+// A rescue move is a safe, quiet, non-undo move by a stuck piece to a square that STRICTLY increases its real-board reach (board-aware, because the empty-board count is flat for rooks and blind to pawns that bury a bishop).
+// Two slots share one calculation: a GATED slot before the advance tier, and an UNGATED slot after it (improve the worst-placed piece).
+
+const int RESCUE_GATE_PERCENT = 25  // Slot A fires only for pieces at or below this stuckness percent (knight <= 2 safe moves, bishop/rook <= 3, queen <= 7).
+const int OPENING_PLIES = 20        // The phase clock, in half-moves: before this, knights outrank bishops in the rescue walks and the queen sits out the census entirely.
+
+//@function Returns the empty-board maximum move count for a piece type, the stuckness denominator. Knight 8, bishop 13, rook 14 (from anywhere), queen 27.
+// King and pawn return 0. They are never in the census.
+//@param    _pieceType The piece type.
+//@returns  The maximum as an int, 0 for types outside the census.
+f_typeMaxMoves(Core.PieceType _pieceType) =>
+    int _max = switch _pieceType
+        Core.PieceType.knight => 8
+        Core.PieceType.bishop => 13
+        Core.PieceType.rook => 14
+        Core.PieceType.queen => 27
+        => 0  // King and pawn: never census candidates.
+
+//@function Counts how many squares the given piece type could reach from (_row, _col) on the CURRENT board. An empty square counts and a slider ray continues. An enemy square counts (capturable) and blocks. A friendly square blocks without counting.
+// We treat (_ignoreRow, _ignoreCol) as empty. Pass the piece's own from-square when measuring a DESTINATION, so it does not block its own new lines. Pass (-1, -1) for no ignore.
+// This is a placement measure, not a legal-move count. It runs no check or pin tests, so it stays a pure board read with no scratch position.
+//@param    _board The board to read.
+//@param    _pieceType The piece type (knight, bishop, rook or queen).
+//@param    _side The piece's side (whose pieces block as friendly).
+//@param    _row The square's row to measure from.
+//@param    _col The square's column to measure from.
+//@param    _ignoreRow Row of a square to treat as empty, or -1.
+//@param    _ignoreCol Column of a square to treat as empty, or -1.
+//@returns  The reachable-square count as an int.
+f_reachableCount(matrix<Core.Piece> _board, Core.PieceType _pieceType, Core.Side _side, int _row, int _col, int _ignoreRow, int _ignoreCol) =>
+    int _count = 0
+    if _pieceType == Core.PieceType.knight
+        array<int> _a_dRow = array.from(-2, -2, -1, -1, 1, 1, 2, 2)
+        array<int> _a_dCol = array.from(-1, 1, -2, 2, -2, 2, -1, 1)
+        for [_d, _dRow] in _a_dRow
+            int _r = _row + _dRow
+            int _c = _col + _a_dCol.get(_d)
+            if Core.onBoard(_r, _c)
+                Core.Piece _p = _r == _ignoreRow and _c == _ignoreCol ? Core.Piece.empty : _board.get(_r, _c)
+                if _p == Core.Piece.empty or not Core.pieceBelongsTo(_p, _side)
+                    _count += 1
+    else
+        // Slider rays. The catch-all empty arrays make a bad type fail soft to a count of 0 rather than crash.
+        array<int> _a_dRow = _pieceType == Core.PieceType.bishop ? array.from(-1, -1, 1, 1) : _pieceType == Core.PieceType.rook ? array.from(-1, 1, 0, 0) : _pieceType == Core.PieceType.queen ? array.from(-1, -1, -1, 0, 0, 1, 1, 1) : array.new<int>()
+        array<int> _a_dCol = _pieceType == Core.PieceType.bishop ? array.from(-1, 1, -1, 1) : _pieceType == Core.PieceType.rook ? array.from(0, 0, -1, 1) : _pieceType == Core.PieceType.queen ? array.from(-1, 0, 1, -1, 1, -1, 0, 1) : array.new<int>()
+        for [_d, _dRow] in _a_dRow
+            int _dCol = _a_dCol.get(_d)
+            int _r = _row + _dRow
+            int _c = _col + _dCol
+            bool _blocked = false
+            while not _blocked and Core.onBoard(_r, _c)
+                Core.Piece _p = _r == _ignoreRow and _c == _ignoreCol ? Core.Piece.empty : _board.get(_r, _c)
+                if _p == Core.Piece.empty
+                    _count += 1
+                else if not Core.pieceBelongsTo(_p, _side)
+                    _count += 1  // An enemy piece is reachable (capturable), then blocks the ray.
+                    _blocked := true
+                else
+                    _blocked := true  // A friendly piece blocks without being reachable.
+                _r += _dRow
+                _c += _dCol
+    _count
+
+//@function True when census piece _a walks BEFORE census piece _b in a rescue slot's order.
+// Slot A (gated) walks by VALUE, highest first. Slot B (ungated) by STUCKNESS, lowest percent first, value as the second key.
+// Bishop/knight value ties break on the phase clock (knight first in the first OPENING_PLIES half-moves, bishop after). Any tie surviving every key keeps board-scan order, stable across recalculations.
+//@param    _gated True for slot A's order, false for slot B's.
+//@param    _pliesPlayed Half-moves played so far in the game.
+//@param    _a Census index of the first piece.
+//@param    _b Census index of the second piece.
+//@param    _a_pct The stuckness percents, census-indexed.
+//@param    _a_resValue The piece values, census-indexed.
+//@param    _a_resType The piece types, census-indexed.
+//@returns  True when _a goes first.
+f_rescueOrderBefore(bool _gated, int _pliesPlayed, int _a, int _b, array<int> _a_pct, array<float> _a_resValue, array<Core.PieceType> _a_resType) =>
+    int _pctA = _a_pct.get(_a)
+    int _pctB = _a_pct.get(_b)
+    float _valueA = _a_resValue.get(_a)
+    float _valueB = _a_resValue.get(_b)
+    bool _before = false
+    bool _decided = false
+    if _gated
+        if _valueA != _valueB  // Slot A primary key: value, highest first.
+            _before := _valueA > _valueB
+            _decided := true
+    else
+        if _pctA != _pctB  // Slot B primary key: stuckness, lowest percent first.
+            _before := _pctA < _pctB
+            _decided := true
+        else if _valueA != _valueB  // Slot B secondary key: value, highest first.
+            _before := _valueA > _valueB
+            _decided := true
+    if not _decided
+        // Bishop/knight tie (equal value, both worth 3): the phase clock decides.
+        Core.PieceType _typeA = _a_resType.get(_a)
+        Core.PieceType _typeB = _a_resType.get(_b)
+        bool _knightVsBishop = (_typeA == Core.PieceType.knight and _typeB == Core.PieceType.bishop) or (_typeA == Core.PieceType.bishop and _typeB == Core.PieceType.knight)
+        if _knightVsBishop
+            bool _knightFirst = _pliesPlayed < OPENING_PLIES
+            _before := _knightFirst ? _typeA == Core.PieceType.knight : _typeA == Core.PieceType.bishop
+            _decided := true
+    if not _decided and _gated
+        if _pctA != _pctB  // Slot A's remaining key: the more stuck piece first.
+            _before := _pctA < _pctB
+            _decided := true
+    _before
+
+//@function Makes the rescue pick that ruleDevelop()'s two firing slots share. It orders the census (gate-filtered for slot A) and walks it: a piece's rescue candidates are its safe, quiet, non-undo moves whose destination strictly increases its reachable-square count.
+// The first piece with a candidate wins. We play the biggest gain, seed breaking ties.
+// We demote a shield-flagged candidate to _a_discouraged (pass a throwaway array from slot A so it is not pushed twice when slot B re-walks) and exclude a negative-foresee candidate (the stand-down).
+// A fully entombed piece can only be freed by another piece's move, which needs look-ahead, so we leave it alone.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves.
+//@param    _seed The seed for the pick.
+//@param    _gated True for slot A (gate-passers only, value order), false for slot B (everyone, stuckness order).
+//@param    _a_resRow Census rows.
+//@param    _a_resCol Census columns.
+//@param    _a_resType Census piece types.
+//@param    _a_resValue Census piece values.
+//@param    _a_resMax Census empty-board maximums.
+//@param    _a_resSafe Census safe-move counts (tallied by ruleDevelop's tier loop).
+//@param    _pliesPlayed Half-moves played so far in the game.
+//@param    _a_discouraged The discouraged pool to receive shield-flagged candidates. Added to in place.
+//@returns  A tuple [_chosen, _detail]: the rescue move or na, and a debug string ("rescue h3 12% +4" style, "improve" for slot B) or "".
+f_rescuePick(Core.o_position _position, array<Core.o_move> _a_moves, int _seed, bool _gated, array<int> _a_resRow, array<int> _a_resCol, array<Core.PieceType> _a_resType, array<float> _a_resValue, array<int> _a_resMax, array<int> _a_resSafe, int _pliesPlayed, array<Core.o_move> _a_discouraged) =>
+    matrix<Core.Piece> _board = _position.mat_board
+    Core.Side _mover = _position.sideToMove
+    // Stuckness per census piece: safe moves over the type maximum, whole percent, rounded down.
+    array<int> _a_pct = array.new<int>()
+    for [_i, _safe] in _a_resSafe
+        _a_pct.push(math.floor(100.0 * _safe / _a_resMax.get(_i)))
+    // The walk order: gate-filter for slot A, then selection-sort by f_rescueOrderBefore (a handful of pieces).
+    array<int> _a_order = array.new<int>()
+    for [_i, _pct] in _a_pct
+        if not _gated or _pct <= RESCUE_GATE_PERCENT
+            _a_order.push(_i)
+    int _n = _a_order.size()
+    if _n > 1
+        for _i = 0 to _n - 2
+            int _bestPos = _i
+            for _j = _i + 1 to _n - 1
+                if f_rescueOrderBefore(_gated, _pliesPlayed, _a_order.get(_j), _a_order.get(_bestPos), _a_pct, _a_resValue, _a_resType)
+                    _bestPos := _j
+            if _bestPos != _i
+                int _tmp = _a_order.get(_i)
+                _a_order.set(_i, _a_order.get(_bestPos))
+                _a_order.set(_bestPos, _tmp)
+    // Walk the ordered pieces. The first with an improving move fires.
+    Core.o_move _chosen = na
+    string _detail = ""
+    for [_o, _pieceIndex] in _a_order
+        int _fromRow = _a_resRow.get(_pieceIndex)
+        int _fromCol = _a_resCol.get(_pieceIndex)
+        Core.PieceType _pieceType = _a_resType.get(_pieceIndex)
+        int _reachBefore = f_reachableCount(_board, _pieceType, _mover, _fromRow, _fromCol, -1, -1)
+        array<Core.o_move> _a_cands = array.new<Core.o_move>()
+        array<float> _a_gains = array.new<float>()
+        for [_m, _move] in _a_moves
+            if _move.fromRow == _fromRow and _move.fromCol == _fromCol and not _move.isUndo and not moveIsCapture(_position, _move) and moveDestIsSafe(_position, _move)
+                // Board-aware improvement: reach from the destination (from-square treated as empty) must STRICTLY beat the count from where it stands.
+                // This sends a rook to the open file, not the knight to a corner.
+                int _reachAfter = f_reachableCount(_board, _pieceType, _mover, _move.toRow, _move.toCol, _fromRow, _fromCol)
+                if _reachAfter > _reachBefore and _move.foreseeScore >= 0 and not _move.repeatsPosition  // Stand-down: a rescue that loses material by its score, or recreates a seen position while winning, is not offered (also covers the foreseen-mate exclusion).
+                    if _move.isShield
+                        _a_discouraged.push(_move)  // Demoted, as in every quiet tier: played only when nothing else exists.
+                    else
+                        _a_cands.push(_move)
+                        _a_gains.push(_reachAfter - _reachBefore)
+        if _a_cands.size() > 0
+            _chosen := pickBestScored(_a_cands, _a_gains, _seed)
+            _detail := (_gated ? "rescue " : "improve ") + Core.squareName(_fromRow, _fromCol) + " " + s(_a_pct.get(_pieceIndex)) + "% +" + s(int(_a_gains.max()))
+            break
+    [_chosen, _detail]
+
+//@function True when the pawn on (_fromRow, _fromCol) has a SAFE double push available in _a_moves. T3 takes a single centre-pawn push only when no safe double push by that pawn exists (the single is the double's fallback).
+//@param    _position The position (for the safe-dest test).
+//@param    _a_moves The annotated legal moves.
+//@param    _fromRow The pawn's row.
+//@param    _fromCol The pawn's column.
+//@returns  True when a safe two-square push by that pawn is in the list.
+f_hasSafeDoublePush(Core.o_position _position, array<Core.o_move> _a_moves, int _fromRow, int _fromCol) =>
+    bool _found = false
+    for [_i, _move] in _a_moves
+        if _move.fromRow == _fromRow and _move.fromCol == _fromCol and math.abs(_move.toRow - _move.fromRow) == 2 and moveDestIsSafe(_position, _move)
+            _found := true
+            break
+    _found
+
+//@function True when (_fromRow, _fromCol) is one of the two diagonal-front squares of a friendly bishop still on its HOME square, so a pawn leaving it opens the bishop's diagonal.
+// Mirrors the starting layout. White's c1 bishop (7,2) is freed from b2/d2 and its f1 bishop (7,5) from e2/g2. Black's c8 (0,2) is freed from b7/d7 and its f8 (0,5) from e7/g7.
+// Only when the matching bishop actually sits home now.
+//@param    _board The board to read.
+//@param    _side The moving side (whose bishops we look at).
+//@param    _fromRow The pawn's from-row.
+//@param    _fromCol The pawn's from-column.
+//@returns  True when the pawn's departure opens a home bishop's diagonal.
+f_opensBishopLine(matrix<Core.Piece> _board, Core.Side _side, int _fromRow, int _fromCol) =>
+    Core.Piece _bishop = _side == Core.Side.white ? Core.Piece.whiteBishop : Core.Piece.blackBishop
+    bool _opens = false
+    if _side == Core.Side.white
+        if (_fromRow == 6 and (_fromCol == 1 or _fromCol == 3)) and _board.get(7, 2) == _bishop
+            _opens := true
+        else if (_fromRow == 6 and (_fromCol == 4 or _fromCol == 6)) and _board.get(7, 5) == _bishop
+            _opens := true
+    else
+        if (_fromRow == 1 and (_fromCol == 1 or _fromCol == 3)) and _board.get(0, 2) == _bishop
+            _opens := true
+        else if (_fromRow == 1 and (_fromCol == 4 or _fromCol == 6)) and _board.get(0, 5) == _bishop
+            _opens := true
+    _opens
+
+//@function True when a friendly pawn of _side stands on file _col. The name is literal: the caller flips the answer for "open or semi-open file" (no friendly pawn).
+// One 8-row scan of the column.
+//@param    _board The board to read.
+//@param    _side The moving side (whose pawns count as "friendly").
+//@param    _col The file to scan.
+//@returns  True when a friendly pawn stands on that file.
+f_fileHasFriendlyPawn(matrix<Core.Piece> _board, Core.Side _side, int _col) =>
+    Core.Piece _pawn = _side == Core.Side.white ? Core.Piece.whitePawn : Core.Piece.blackPawn
+    bool _hasPawn = false
+    for _row = 0 to 7
+        if _board.get(_row, _col) == _pawn
+            _hasPawn := true
+            break
+    _hasPawn
+
+//@function True when _move connects our two rooks: both sit on our back rank, the from-square is on the back rank strictly between them and is the ONLY piece there, and the destination does not stay between them (so we clear the gap rather than shuffle inside it).
+//@param    _board The board to read.
+//@param    _side The moving side (whose rooks we look at).
+//@param    _backRank Our back rank row (7 for White, 0 for Black).
+//@param    _move The move to test.
+//@returns  True when the move vacates the last square between our two back-rank rooks.
+f_connectsRooks(matrix<Core.Piece> _board, Core.Side _side, int _backRank, Core.o_move _move) =>
+    Core.Piece _rook = _side == Core.Side.white ? Core.Piece.whiteRook : Core.Piece.blackRook
+    // Find our rooks on the back rank. We only handle the two-rook case. Anything else is not "connecting".
+    int _rookCol1 = -1
+    int _rookCol2 = -1
+    int _rookCount = 0
+    for _col = 0 to 7
+        if _board.get(_backRank, _col) == _rook
+            if _rookCount == 0
+                _rookCol1 := _col
+            else if _rookCount == 1
+                _rookCol2 := _col
+            _rookCount += 1
+    bool _connects = false
+    if _rookCount == 2  // Exactly two rooks on the back rank: only then is "connecting" meaningful.
+        int _lo = math.min(_rookCol1, _rookCol2)
+        int _hi = math.max(_rookCol1, _rookCol2)
+        // The from-square must be on the back rank strictly between the rooks.
+        if _move.fromRow == _backRank and _move.fromCol > _lo and _move.fromCol < _hi
+            // Count pieces strictly between the rooks: the from-square must be the ONLY one.
+            int _between = 0
+            for _col = _lo + 1 to _hi - 1
+                if _board.get(_backRank, _col) != Core.Piece.empty
+                    _between += 1
+            // The destination must not itself be a back-rank square still between the rooks (no shuffle).
+            bool _destStaysBetween = _move.toRow == _backRank and _move.toCol > _lo and _move.toCol < _hi
+            if _between == 1 and not _destStaysBetween
+                _connects := true
+    _connects
+
+//@function Measures the interlock score for one side, the sum over its NON-KING pieces of how many friendly pieces defend each, uncapped (a doubly-defended piece counts twice).
+// We exclude the king as a beneficiary (uncapturable) but it still counts as a defender of others. One countAttackers() scan per piece.
+//@param    _board The board to read.
+//@param    _side The side whose knit we measure.
+//@returns  The total defence-link count as an int.
+f_interlockCount(matrix<Core.Piece> _board, Core.Side _side) =>
+    int _total = 0
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Core.Piece _piece = _board.get(_row, _col)
+            if _piece != Core.Piece.empty and Core.pieceBelongsTo(_piece, _side) and Core.pieceTypeOf(_piece) != Core.PieceType.king
+                _total += Core.countAttackers(_board, _row, _col, _side)
+    _total
+
+//@function How much _move changes our interlock score: the count on a scratch board with the move made, minus the count before (passed in, computed once per turn).
+// A positive delta means the move knits the army together. A negative one means it loosens it.
+//@param    _position The position to move in.
+//@param    _move The move to weigh.
+//@param    _interlockBefore The current position's interlock count for the mover.
+//@returns  The delta as an int.
+f_interlockDelta(Core.o_position _position, Core.o_move _move, int _interlockBefore) =>
+    Core.o_position _scratch = Core.copyPosition(_position)
+    Core.applyMove(_scratch, _move)
+    int _delta = f_interlockCount(_scratch.mat_board, _position.sideToMove) - _interlockBefore
+
+//@function Makes the develop-tier pick. It ranks candidates by interlock delta, so the move that best knits the army wins its tier, seeded ties.
+// Most quiet moves leave the knit unchanged, so the variety survives. Returns the move plus its delta for the debug detail.
+//@param    _position The position to move in.
+//@param    _a_tier The firing tier's candidates.
+//@param    _seed The seed for tie-breaks.
+//@param    _interlockBefore The current interlock count (computed once by the caller).
+//@returns  A tuple [_chosen, _delta]: the picked move (na for an empty tier) and its interlock delta.
+f_pickByInterlock(Core.o_position _position, array<Core.o_move> _a_tier, int _seed, int _interlockBefore) =>
+    array<float> _a_scores = array.new<float>()
+    for [_i, _move] in _a_tier
+        _a_scores.push(f_interlockDelta(_position, _move, _interlockBefore))
+    Core.o_move _chosen = pickBestScored(_a_tier, _a_scores, _seed)
+    int _delta = na(_chosen) ? 0 : f_interlockDelta(_position, _chosen, _interlockBefore)
+    [_chosen, _delta]
+
+//@function The debug suffix for an interlock delta: "" when zero, " knit +2" / " knit -1" style otherwise. Keeps the develop detail line quiet in the common no-change case.
+//@param    _delta The interlock delta.
+//@returns  The suffix string.
+f_knitSuffix(int _delta) =>
+    string _suffix = _delta == 0 ? "" : " knit " + (_delta > 0 ? "+" : "") + s(_delta)
+
+//#endregion DEVELOP-TIER HELPERS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  CLASSIFY STAGE  🟩🟩🟩🟩🟩🟩
+
+// This is a short pass after annotateMoves(), before the ladder. filterPromotions() deletes the underpromotions we never want, which is every rook and bishop one, plus any knight one that neither checks nor forks the enemy queen.
+// classifyMoves() marks two demotion flags per move (isShield, isUndo) that steer but never veto the quiet rules.
+// It sits after the ladder helpers because it leans on moveGivesCheck(), moveIsCapture() and f_knightHops().
+
+//@function Removes non-queen promotions from _a_moves IN PLACE, with one exception: a knight promotion is a KEEPER when it gives check or when its promotion square is a knight's hop from the enemy queen (a real underpromotion fork).
+// We always remove rook and bishop promotions.
+// Safe to delete because the queen promotion on the same from/to squares is always legal too, so a rule's candidate list can never be emptied, and no mate is lost (a queen dominates a rook/bishop. The only true underpromotion mates are knight ones, which check by definition).
+// Decrementing while loop because we remove while walking (a forward walk would skip the element sliding into the freed slot).
+//@param    _position The position the moves are made from (side to move is the mover). Needed to find the enemy queen and to test check on a scratch board.
+//@param    _a_moves The annotated legal moves. Changed in place. Some promotion moves are removed.
+//@returns  Nothing. _a_moves is shortened.
+export filterPromotions(Core.o_position _position, array<Core.o_move> _a_moves) =>
+    Core.Side _mover = _position.sideToMove
+    Core.Piece _enemyQueen = _mover == Core.Side.white ? Core.Piece.blackQueen : Core.Piece.whiteQueen
+    int _i = _a_moves.size() - 1
+    while _i >= 0  // Walk DOWNWARDS: removing at _i only shifts indices above _i, which we have already visited.
+        Core.o_move _move = _a_moves.get(_i)
+        bool _isPromotion = _move.promotion != Core.Piece.empty
+        // Test the piece TYPE, not value: a rook and a knight both fail "value != 9" but need different handling.
+        bool _isUnderpromotion = _isPromotion and Core.pieceTypeOf(_move.promotion) != Core.PieceType.queen
+        bool _keep = true
+        if _isUnderpromotion
+            // A knight underpromotion may be a keeper. A rook or bishop one never is.
+            bool _isKnightPromo = Core.pieceTypeOf(_move.promotion) == Core.PieceType.knight
+            bool _keepKnight = false
+            if _isKnightPromo
+                // Keeper test 1: the promotion gives check (covers every underpromotion mate).
+                if moveGivesCheck(_position, _move)
+                    _keepKnight := true
+                else
+                    // Keeper test 2: on the after-move board, the promotion square is a knight's hop from the enemy queen (a knight fork).
+                    // False when the enemy has no queen.
+                    Core.o_position _scratch = Core.copyPosition(_position)
+                    Core.applyMove(_scratch, _move)
+                    matrix<Core.Piece> _board = _scratch.mat_board
+                    int _queenRow = -1
+                    int _queenCol = -1
+                    for _row = 0 to 7
+                        for _col = 0 to 7
+                            if _board.get(_row, _col) == _enemyQueen
+                                _queenRow := _row
+                                _queenCol := _col
+                                break
+                        if _queenRow != -1
+                            break
+                    if _queenRow != -1 and f_knightHops(_move.toRow, _move.toCol, _queenRow, _queenCol)
+                        _keepKnight := true
+            _keep := _isKnightPromo and _keepKnight  // Rook/bishop: _isKnightPromo false, so _keep false -> removed.
+        if not _keep
+            _a_moves.remove(_i)
+        _i -= 1
+
+//@function Marks the two classify-stage flags on every move: isShield (thins the king's cover) and isUndo (reverses or repeats our own last move).
+// Both DEMOTE rather than delete in the quiet rules -- a flagged move is still played when nothing better exists. The luft carve-out lives in ruleDevelop()'s dedicated tier.
+//
+// isUndo fires when the move exactly reverses our last move (B->A after A->B) or exactly equals our second-to-last move (the A->B->A->B oscillation), with an na guard per test for a move that does not exist yet.
+//
+// isShield has two tests. Test (a), for a "castled-ish" king (back rank, king on or beyond the c- or f-file): a QUIET pawn move from one of the king's front squares (pushing irreversible cover forward).
+// Test (b), general: the departure strictly worsens the king zone (the king's square plus neighbours) -- more enemy attackers or fewer friendly defenders after the move.
+// King moves are EXEMPT from (b) (a king move relocates the zone, so the delta is meaningless. Castling is thus never flagged).
+// A cheap pre-filter runs (b) only when the from-square is inside the zone or shares a rank, file or diagonal with the king.
+//@param    _position The position the moves are made from (side to move is the mover).
+//@param    _a_moves The annotated legal moves to classify.
+//@param    _aiLastMove The AI's last move, or na when it has not moved yet.
+//@param    _aiPrevMove The AI's second-to-last move, or na.
+//@returns  Nothing. Each o_move in _a_moves gets its isShield and isUndo fields set.
+export classifyMoves(Core.o_position _position, array<Core.o_move> _a_moves, Core.o_move _aiLastMove, Core.o_move _aiPrevMove) =>
+    Core.Side _mover = _position.sideToMove
+    Core.Side _enemy = _mover == Core.Side.white ? Core.Side.black : Core.Side.white
+    // King square and back rank, once. "Castled-ish" = back rank with king on or past the c-file or the f-file.
+    [_kingRow, _kingCol] = Core.findKing(_position, _mover)
+    int _backRank = _mover == Core.Side.white ? 7 : 0
+    bool _kingCastledIsh = _kingRow == _backRank and (_kingCol >= 6 or _kingCol <= 2)
+    // The king zone: the king's square plus its up-to-8 on-board neighbours. Collected once as (row, column) pairs.
+    array<int> _a_zoneRow = array.new<int>()
+    array<int> _a_zoneCol = array.new<int>()
+    if _kingRow != -1
+        for _dRow = -1 to 1
+            for _dCol = -1 to 1
+                int _zr = _kingRow + _dRow
+                int _zc = _kingCol + _dCol
+                if Core.onBoard(_zr, _zc)
+                    _a_zoneRow.push(_zr)
+                    _a_zoneCol.push(_zc)
+    // The king's front row (test (a)): one rank towards the enemy. White faces smaller rows, Black larger.
+    int _frontRow = _mover == Core.Side.white ? _kingRow - 1 : _kingRow + 1
+    for [_i, _move] in _a_moves
+        // --- The undo / oscillation flag. ---
+        bool _reversesLast = not na(_aiLastMove) and _move.fromRow == _aiLastMove.toRow and _move.fromCol == _aiLastMove.toCol and _move.toRow == _aiLastMove.fromRow and _move.toCol == _aiLastMove.fromCol
+        bool _repeatsPrev = not na(_aiPrevMove) and _move.fromRow == _aiPrevMove.fromRow and _move.fromCol == _aiPrevMove.fromCol and _move.toRow == _aiPrevMove.toRow and _move.toCol == _aiPrevMove.toCol
+        bool _isUndo = _reversesLast or _repeatsPrev
+        // --- The king-shield flag. ---
+        bool _isShield = false
+        Core.Piece _piece = _position.mat_board.get(_move.fromRow, _move.fromCol)
+        bool _isKingMove = Core.pieceTypeOf(_piece) == Core.PieceType.king
+        // Test (a): a quiet pawn move from one of the castled king's front squares (standing offence).
+        if _kingCastledIsh and not _isShield
+            bool _isPawn = Core.pieceTypeOf(_piece) == Core.PieceType.pawn
+            bool _fromFront = _move.fromRow == _frontRow and (_move.fromCol == _kingCol - 1 or _move.fromCol == _kingCol or _move.fromCol == _kingCol + 1)
+            if _isPawn and _fromFront and not moveIsCapture(_position, _move)
+                _isShield := true
+        // Test (b): the departure strictly worsens the king zone. King moves are exempt (they relocate the zone).
+        if not _isShield and not _isKingMove and _kingRow != -1
+            // Pre-filter: compute the delta only when the from-square is in the zone or shares a rank, file or diagonal with the king -- a departure elsewhere cannot change any attack line through the zone.
+            bool _fromInZone = false
+            for [_z, _zr] in _a_zoneRow
+                if _move.fromRow == _zr and _move.fromCol == _a_zoneCol.get(_z)
+                    _fromInZone := true
+                    break
+            bool _sharesLine = _move.fromRow == _kingRow or _move.fromCol == _kingCol or math.abs(_move.fromRow - _kingRow) == math.abs(_move.fromCol - _kingCol)
+            if _fromInZone or _sharesLine
+                // Count enemy attackers and friendly defenders over the zone squares, before and after the move.
+                int _enemyBefore = 0
+                int _friendBefore = 0
+                matrix<Core.Piece> _boardBefore = _position.mat_board
+                for [_z, _zr] in _a_zoneRow
+                    int _zc = _a_zoneCol.get(_z)
+                    _enemyBefore += Core.countAttackers(_boardBefore, _zr, _zc, _enemy)
+                    _friendBefore += Core.countAttackers(_boardBefore, _zr, _zc, _mover)
+                Core.o_position _scratch = Core.copyPosition(_position)
+                Core.applyMove(_scratch, _move)
+                matrix<Core.Piece> _boardAfter = _scratch.mat_board
+                int _enemyAfter = 0
+                int _friendAfter = 0
+                for [_z, _zr] in _a_zoneRow
+                    int _zc = _a_zoneCol.get(_z)
+                    _enemyAfter += Core.countAttackers(_boardAfter, _zr, _zc, _enemy)
+                    _friendAfter += Core.countAttackers(_boardAfter, _zr, _zc, _mover)
+                if _enemyAfter > _enemyBefore or _friendAfter < _friendBefore
+                    _isShield := true
+        _move.isShield := _isShield
+        _move.isUndo := _isUndo
+
+//#endregion CLASSIFY STAGE
+
+
+//#region 🟩🟩🟩🟩🟩🟩  FORESEE (SHALLOW LOOK-AHEAD)  🟩🟩🟩🟩🟩🟩
+
+// THE SWAP-OFF TEST (engine programmers call it a static exchange evaluation). "Hanging" is chess slang for a piece in danger of being taken at a profit.
+// A bare head-count cannot price a take-take-take sequence, so the swap-off plays the whole exchange out on the contested square and asks whether starting it pays at all.
+
+//@function How much _firstMover really gains by starting the capture exchange on the piece at (_row, _col), played out on a scratch board.
+// Each side captures with its CHEAPEST attacker first. We then delete the capturing piece, which un-blocks any attacker hiding behind it on the same line.
+// Folding the taken-value list backwards, each side may DECLINE a losing continuation, so the result is never negative for the starter.
+// The king may only join once the square is uncovered (he cannot be recaptured), and ends the sequence when he takes.
+// We accept two blind spots to stay cheap: we ignore pins (a pinned defender still counts), and en passant is out of scope.
+//@param    _mat_board  The board to read. Never modified -- we work on a copy.
+//@param    _row        The contested square's row.
+//@param    _col        The contested square's column.
+//@param    _firstMover The side that captures first (the enemy, when we test one of OUR pieces for a hang).
+//@returns  _firstMover's net gain from starting the exchange. Above 0 means the piece really is hanging. A result of 0, or an empty square, means starting the exchange wins him nothing.
+f_swapOffGain(matrix<Core.Piece> _mat_board, int _row, int _col, Core.Side _firstMover) =>
+    float _gain = 0.0
+    Core.Piece _victim = _mat_board.get(_row, _col)
+    if _victim != Core.Piece.empty
+        matrix<Core.Piece> _mat_scratch = _mat_board.copy()
+        Core.Side _second = _firstMover == Core.Side.white ? Core.Side.black : Core.Side.white
+        array<float> _a_capturedValues = array.new<float>()  // The value taken by each capture, in sequence order.
+        float _standingValue = Core.pieceValue(_victim)  // The value currently standing on the contested square.
+        Core.Side _turn = _firstMover
+        bool _finished = false
+        while not _finished and _a_capturedValues.size() < 32  // Belt and braces. A real exchange is far shorter.
+            [_count, _cheapest] = Core.attackersInfo(_mat_scratch, _row, _col, _turn)
+            Core.Side _other = _turn == _firstMover ? _second : _firstMover
+            if _count == 0
+                _finished := true  // No attacker left: the side to move stops by force.
+            else if _cheapest >= 99.0  // Only the king remains (attackersInfo prices him at 99).
+                if Core.countAttackers(_mat_scratch, _row, _col, _other) > 0
+                    _finished := true  // The square is still covered: the king can never legally join in.
+                else
+                    _a_capturedValues.push(_standingValue)  // The king takes the last piece standing...
+                    _finished := true  // ...and nothing can answer, so the sequence ends with him.
+            else
+                // Delete the cheapest attacker that REALLY attacks the square (pieceAttacksSquare).
+                // Testing the attack directly avoids an x-ray trap: deleting a pawn can reveal a battery bishop behind it, so a delete-and-recount probe would read the count as level and wrongly price the exchange at zero.
+                // While loops because we stop at the first hit.
+                bool _removed = false
+                int _r = 0
+                while _r <= 7 and not _removed
+                    int _c = 0
+                    while _c <= 7 and not _removed
+                        Core.Piece _p = _mat_scratch.get(_r, _c)
+                        if _p != Core.Piece.empty and Core.pieceBelongsTo(_p, _turn) and Core.pieceValue(_p) == _cheapest and not (_r == _row and _c == _col) and Core.pieceAttacksSquare(_mat_scratch, _r, _c, _row, _col)
+                            _mat_scratch.set(_r, _c, Core.Piece.empty)
+                            _removed := true
+                        _c += 1
+                    _r += 1
+                if not _removed
+                    _finished := true  // Should not happen (the count said an attacker exists). Fail soft by stopping.
+                else
+                    _a_capturedValues.push(_standingValue)  // The capture lands: whatever stood there is taken...
+                    _standingValue := _cheapest  // ...and the capturer stands there now, up for the recapture.
+                    _turn := _other
+        // Fold backwards with each side free to stop: at every step the side to move takes the piece standing only when that beats declining, so a losing continuation is never forced on either side.
+        float _running = 0.0
+        int _i = _a_capturedValues.size() - 1
+        while _i >= 0
+            _running := math.max(0.0, _a_capturedValues.get(_i) - _running)
+            _i -= 1
+        _gain := _running
+    _gain
+
+// This region holds the look-ahead machinery. A "ply" is a half-move.
+// The three exported stages foreseePrepare(), foreseeFinishCaptures() and foreseeFinishRest() run on consecutive bars, carrying half-done work in an o_foresee, and together they score one candidate by the material outcome of its story: our move, the opponent's best answers, and the capture chains that follow (four plies in Quick, six in Deep, which also follows his second-best capture and his best quiet threats).
+// We test ply 2 against his FULL reply list (the ply that catches moves leaving our own pieces to be taken). Plies 3+ follow a single greedy line, cheaper than every branch at the price of the occasional wrong guess.
+// Mate ends any line, for either side. f_exchangeGain() (the played-out exchange value) prices every capture DECISION.
+// One accounting rule keeps it honest: CHOOSE and FILTER by true exchange price, but ADD UP the line in plain victim values -- the exchange price already includes the recaptures the chain plays out itself, and counting them twice would double every swing.
+// This is all pure material counting. The interlock preference lives in the develop tiers, so it can never argue against a winning exchange.
+
+// MATE_SCORE also belongs to this family but is declared up in DEVELOP-TIER HELPERS, ahead of its first use.
+const float TACTIC_CAPTURE_MIN = 1.0  // Rule 5 fires a capture/promotion whose score clears a clean pawn.
+const float TACTIC_QUIET_MIN = 2.0    // A QUIET move needs a stiffer score. Its story leans harder on the greedy-chain guesses.
+const int TRUE_PRICE_SHORTLIST = 3    // How many captures (by raw victim) get the full swap-off price per decision. The hot-square recapture is always priced on top. Bounds the added cost of the true pricing.
+const int MENACE_SHORTLIST = 3        // How many top-scoring quiet menaces line C prices per candidate. More than one because the biggest TARGET is not always the biggest THREAT: a decoy could hide a standing fork from a single-slot score.
+const int RESIGN_COIN_SALT = 271828   // Stirred into the seed for rule 10's resign coin, so it is independent of the other picks. Any fixed number would do.
+
+//@function The immediate material change _move makes for the mover: victim value plus, on a promotion, the pawn-to-piece upgrade.
+// This is the chain's ply-1 term, plain victim value, not discounted. Recapture risk is the next ply's job.
+//@param    _position The position the move is made from.
+//@param    _move The move to weigh.
+//@returns  The immediate gain in points (0 for a plain quiet move).
+f_moveMaterialGain(Core.o_position _position, Core.o_move _move) =>
+    float _gain = capturedValue(_position, _move)
+    if _move.promotion != Core.Piece.empty
+        _gain += Core.pieceValue(_move.promotion) - 1.0
+    _gain
+
+//@function What _move REALLY nets the mover: the immediate raw gain MINUS whatever the opponent's best play of the exchange on the destination takes back (f_swapOffGain on the after-move board).
+// The played-out truth captureGain() only pretends to be. We use it at every foresee DECISION point.
+//@param    _position The position the move is made from.
+//@param    _move The move to price.
+//@returns  The mover's net gain in points. <= 0 means the move wins nothing (or loses) once the opponent answers the destination square optimally.
+f_exchangeGain(Core.o_position _position, Core.o_move _move) =>
+    Core.o_position _after = Core.copyPosition(_position)
+    Core.applyMove(_after, _move)
+    Core.Side _them = _position.sideToMove == Core.Side.white ? Core.Side.black : Core.Side.white
+    float _gain = f_moveMaterialGain(_position, _move) - f_swapOffGain(_after.mat_board, _move.toRow, _move.toCol, _them)
+
+//@function Finds the side to move's best capture OR QUEEN PROMOTION judged by TRUE price, under the shortlist cap. We price the top TRUE_PRICE_SHORTLIST captures by raw victim value with f_exchangeGain(), PLUS any capture landing on the hot square (the recapture the cap must never skip, where a one-deep model goes blind. Pass -1,-1 for none).
+// Captures outside the shortlist stay unpriced. A queen promotion counts as a capture-class move (queen only -- under-promotions are dominated copies that would crowd the shortlist).
+//@param    _position The position to move in.
+//@param    _a_moves The side to move's annotated legal moves.
+//@param    _hotRow The row of the square the chain just fought over, or -1 for none.
+//@param    _hotCol Its column, or -1 for none.
+//@returns  A tuple [_best, _bestRaw, _bestGain, _second, _secondRaw, _secondGain]: the best truly-profitable capture (na when nothing prices above zero), its raw victim value and its exchangeGain, then the same three for the SECOND-best.
+// The runner-up is free to track (the same scan prices it) and Deep follows it as its own reply line -- insurance against the badly-ordered exchange where the second take is the one that hurts.
+f_bestTrueCapture(Core.o_position _position, array<Core.o_move> _a_moves, int _hotRow, int _hotCol) =>
+    array<Core.o_move> _a_captures = array.new<Core.o_move>()
+    array<float> _a_raws = array.new<float>()
+    array<bool> _a_priced = array.new<bool>()
+    for [_i, _move] in _a_moves
+        if moveIsCapture(_position, _move) or (_move.promotion != Core.Piece.empty and Core.pieceTypeOf(_move.promotion) == Core.PieceType.queen)  // Queen promotion priced like a capture.
+            _a_captures.push(_move)
+            _a_raws.push(f_moveMaterialGain(_position, _move))
+            _a_priced.push(false)
+    Core.o_move _best = na
+    float _bestRaw = 0.0
+    float _bestGain = 0.0
+    Core.o_move _second = na
+    float _secondRaw = 0.0
+    float _secondGain = 0.0
+    // The hot-square recaptures first: always priced, whatever their raw rank.
+    // A new best demotes the old best to the runner-up slot. A miss can still claim the runner-up slot on its own merit.
+    for [_i, _move] in _a_captures
+        if _move.toRow == _hotRow and _move.toCol == _hotCol
+            _a_priced.set(_i, true)
+            float _gainH = f_exchangeGain(_position, _move)
+            if _gainH > _bestGain
+                _second := _best
+                _secondRaw := _bestRaw
+                _secondGain := _bestGain
+                _bestGain := _gainH
+                _bestRaw := _a_raws.get(_i)
+                _best := _move
+            else if _gainH > _secondGain
+                _second := _move
+                _secondRaw := _a_raws.get(_i)
+                _secondGain := _gainH
+    // Then the top TRUE_PRICE_SHORTLIST unpriced captures, dearest raw victim first.
+    int _pricedCount = 0
+    while _pricedCount < TRUE_PRICE_SHORTLIST
+        int _dearest = -1
+        float _dearestRaw = 0.0
+        for [_i, _raw] in _a_raws
+            if not _a_priced.get(_i) and _raw > _dearestRaw
+                _dearestRaw := _raw
+                _dearest := _i
+        if _dearest == -1
+            break  // Nothing left to price.
+        _a_priced.set(_dearest, true)
+        float _gainS = f_exchangeGain(_position, _a_captures.get(_dearest))
+        if _gainS > _bestGain
+            _second := _best
+            _secondRaw := _bestRaw
+            _secondGain := _bestGain
+            _bestGain := _gainS
+            _bestRaw := _dearestRaw
+            _best := _a_captures.get(_dearest)
+        else if _gainS > _secondGain
+            _second := _a_captures.get(_dearest)
+            _secondRaw := _dearestRaw
+            _secondGain := _gainS
+        _pricedCount += 1
+    [_best, _bestRaw, _bestGain, _second, _secondRaw, _secondGain]
+
+//@function Finds our two best TRULY-profitable capture (or queen-promotion) threats on a position where it is NOT our turn, against DISTINCT victim squares. This is the raw material of the double-attack test.
+// We flip the side to move on a copy and price each shortlisted threat by f_exchangeGain() (a threat to start a losing exchange is no threat).
+// _threat1 is the best. _threat2 the best against a DIFFERENT square. Both 0 when we threaten nothing.
+// The stale en-passant square on the copy is harmless (it can only add a phantom pawn threat, one ply).
+// A queen promotion counts too. A promotion threat has no victim piece to flee, so the save-the-dearest model cannot dodge it -- correct, since you parry a promotion by covering the square, which the exchange price tests.
+//@param    _position The position after our candidate move (opponent to move).
+//@param    _ourSide Our side (the side that just moved).
+//@returns  A tuple [_threat1, _threat2, _victim1Row, _victim1Col]: the two true capture gains in points, then the square of the best threat's victim (-1, -1 when there is no threat) -- line C deletes that piece to model it fleeing, which unmasks a skewer's second target.
+f_bestTwoThreats(Core.o_position _position, Core.Side _ourSide) =>
+    Core.o_position _flipped = Core.copyPosition(_position)
+    _flipped.sideToMove := _ourSide
+    array<Core.o_move> _a_moves = Core.generateLegalMoves(_flipped)
+    annotateMoves(_flipped, _a_moves)
+    // Shortlist by raw victim value, price the dearest few, and remember each priced threat's victim square.
+    array<float> _a_raws = array.new<float>()
+    array<bool> _a_priced = array.new<bool>()
+    for [_i, _move] in _a_moves
+        bool _tactical = moveIsCapture(_flipped, _move) or (_move.promotion != Core.Piece.empty and Core.pieceTypeOf(_move.promotion) == Core.PieceType.queen)  // A queen promotion is a capture-class threat.
+        _a_raws.push(_tactical ? f_moveMaterialGain(_flipped, _move) : 0.0)
+        _a_priced.push(not _tactical)  // Non-tactical moves count as already done: never priced.
+    float _threat1 = 0.0
+    int _victim1Row = -1
+    int _victim1Col = -1
+    float _threat2 = 0.0
+    int _pricedCount = 0
+    while _pricedCount <= TRUE_PRICE_SHORTLIST  // One more than the shortlist, so both threat slots get a fair fill.
+        int _dearest = -1
+        float _dearestRaw = 0.0
+        for [_i, _raw] in _a_raws
+            if not _a_priced.get(_i) and _raw > _dearestRaw
+                _dearestRaw := _raw
+                _dearest := _i
+        if _dearest == -1
+            break
+        _a_priced.set(_dearest, true)
+        Core.o_move _move = _a_moves.get(_dearest)
+        float _gainT = f_exchangeGain(_flipped, _move)
+        if _gainT > _threat1
+            if _victim1Row != _move.toRow or _victim1Col != _move.toCol  // The old best drops to slot 2 only when it targeted a DIFFERENT square.
+                _threat2 := math.max(_threat2, _threat1)
+            _threat1 := _gainT
+            _victim1Row := _move.toRow
+            _victim1Col := _move.toCol
+        else if _gainT > _threat2 and (_move.toRow != _victim1Row or _move.toCol != _victim1Col)
+            _threat2 := _gainT
+        _pricedCount += 1
+    [_threat1, _threat2, _victim1Row, _victim1Col]
+
+//@function Plays out plies 3 and 4 of a foresee line and, in Deep, plies 5 and 6 too. From a position where WE are to move (after the ply-2 reply), we take our best truly-profitable capture then his, each gated by f_exchangeGain() under the shortlist cap (hot square = where the previous capture landed).
+// Accounting: we charge every step the chain plays on from at RAW victim value (the continuation is the next step's, so raw avoids double-counting), and the FINAL step at its TRUE exchange price (nothing follows, so its swap-off IS the remaining game).
+// Charging the horizon at raw would overcharge lines ending in a recapturable capture. In Deep the same rule applies two half-moves later.
+// A mate WE can give at ply 3 wins the line (+MATE_SCORE). We do not test deeper mates (the chain is captures only).
+//@param    _position The position after ply 2, our side to move.
+//@param    _hotRow The row the ply-2 reply landed on (-1 when there was no capture to inherit).
+//@param    _hotCol Its column, or -1.
+//@param    _deep True for the six-half-move read (Deep thinking), false for the original four.
+//@returns  The net material change over the tail, in points from our side.
+f_foreseeTail(Core.o_position _position, int _hotRow, int _hotCol, bool _deep) =>
+    float _tail = 0.0
+    array<Core.o_move> _a_ours = Core.generateLegalMoves(_position)
+    if _a_ours.size() > 0
+        annotateMoves(_position, _a_ours)
+        // A mate we can deliver at ply 3 ends the line. Only checking moves can mate, so only they get the test.
+        bool _weMate = false
+        for [_i, _move] in _a_ours
+            if moveGivesCheck(_position, _move)
+                Core.o_position _scratch = Core.copyPosition(_position)
+                Core.applyMove(_scratch, _move)
+                if not Core.hasAnyLegalMove(_scratch)
+                    _weMate := true
+                    break
+        if _weMate
+            _tail := MATE_SCORE
+        else
+            [_best3, _raw3, _gain3, _second3, _second3Raw, _second3Gain] = f_bestTrueCapture(_position, _a_ours, _hotRow, _hotCol)
+            if not na(_best3)
+                _tail := _raw3  // Account the raw taking. The gain only decided WHETHER and WHAT to take.
+                Core.o_position _p3 = Core.copyPosition(_position)
+                Core.applyMove(_p3, _best3)
+                array<Core.o_move> _a_his = Core.generateLegalMoves(_p3)
+                if _a_his.size() > 0
+                    annotateMoves(_p3, _a_his)
+                    [_reply4, _raw4, _gain4, _second4, _second4Raw, _second4Gain] = f_bestTrueCapture(_p3, _a_his, _best3.toRow, _best3.toCol)
+                    if not na(_reply4)
+                        if not _deep
+                            _tail -= _gain4  // The horizon step, charged at TRUE exchange price (see the doc above).
+                        else
+                            // Deep: look one exchange further before deciding how to charge ply 4.
+                            Core.o_position _p4 = Core.copyPosition(_p3)
+                            Core.applyMove(_p4, _reply4)
+                            Core.o_move _best5 = na
+                            float _raw5 = 0.0
+                            array<Core.o_move> _a_ours5 = Core.generateLegalMoves(_p4)
+                            if _a_ours5.size() > 0
+                                annotateMoves(_p4, _a_ours5)
+                                [_b5, _r5, _g5, _second5, _second5Raw, _second5Gain] = f_bestTrueCapture(_p4, _a_ours5, _reply4.toRow, _reply4.toCol)
+                                _best5 := _b5
+                                _raw5 := _r5
+                            if na(_best5)
+                                _tail -= _gain4  // No ply-5 capture worth playing: ply 4 IS the horizon after all, charged exactly as Quick thinking charges it.
+                            else
+                                _tail -= _raw4  // The chain continues, so ply 4 is an intermediate step: raw, like ply 3.
+                                _tail += _raw5  // Our ply-5 taking, raw for the same reason.
+                                Core.o_position _p5 = Core.copyPosition(_p4)
+                                Core.applyMove(_p5, _best5)
+                                array<Core.o_move> _a_his6 = Core.generateLegalMoves(_p5)
+                                if _a_his6.size() > 0
+                                    annotateMoves(_p5, _a_his6)
+                                    [_reply6, _raw6, _gain6, _second6, _second6Raw, _second6Gain] = f_bestTrueCapture(_p5, _a_his6, _best5.toRow, _best5.toCol)
+                                    if not na(_reply6)
+                                        _tail -= _gain6  // The Deep horizon, charged at TRUE exchange price.
+    _tail
+
+//@type The half-done foresee work carried between a candidate's PREPARE bar and its two finish bars (captures, then check-and-quiet).
+// The consumer holds one in var state. The staging keeps the worst single bar cheap.
+//@field resolved       True when prepare already wrote the score (mate/stalemate), so we skip the finish bars.
+//@field p1             The position after our candidate move.
+//@field net1           The candidate's raw immediate gain (the ply-1 term).
+//@field bestCapture    His best truly-profitable capture reply, or na when he has none.
+//@field bestCaptureRaw The raw victim value of that capture (what he takes at ply 2).
+//@field bestCapture2   His SECOND-best truly-profitable capture reply, or na. Followed as its own line only in Deep. Always carried (prepare finds it free).
+//@field bestCapture2Raw The raw victim value of that second capture.
+//@field bestCheck      His best checking reply, or na.
+//@field bestCheckRaw   The raw victim value of that check (0 for a quiet check).
+//@field bestCheck2     His best QUIET check, or na -- line B2's nomination. Prefers a landing that keeps the checker. na when it duplicates bestCheck. Deep only.
+//@field bestCheck2Raw  The raw material gain of that quiet check (non-zero only for a checking promotion).
+//@field a_checkReplies EVERY checking reply he has (none mates outright, or prepare would have resolved the score). The check extension walks it at both depths.
+//@field a_quietThreats His most menacing QUIET replies -- the top MENACE_SHORTLIST by menace score, best first, or na. Deep only. Line C prices every entry and keeps the worst, because the biggest TARGET is not always the biggest THREAT.
+//@field partialStamp   The running worst-line result after the captures bar.
+//@field capturesDone   True once the captures bar has run: the next bar is the check-and-quiet bar.
+//@field canDecline     True when he has MORE than one legal reply, so his best capture is a choice, not a force. Line D runs only then.
+export type o_foresee
+    bool resolved = false
+    Core.o_position p1
+    float net1 = 0.0
+    Core.o_move bestCapture
+    float bestCaptureRaw = 0.0
+    Core.o_move bestCapture2
+    float bestCapture2Raw = 0.0
+    Core.o_move bestCheck
+    float bestCheckRaw = 0.0
+    Core.o_move bestCheck2
+    float bestCheck2Raw = 0.0
+    array<Core.o_move> a_checkReplies
+    array<Core.o_move> a_quietThreats
+    float partialStamp = 0.0
+    bool capturesDone = false
+    bool canDecline = false
+
+//@function Runs the prepare bar of a candidate's foresee. It applies the candidate, handles the immediate mate/stalemate ends, scans the opponent's replies for mate and checks, and picks his best (and second-best) capture at TRUE price (shortlist-capped, hot square = the candidate's own destination).
+// In Deep the same reply pass runs the MENACE SCAN: we make each quiet, non-checking, non-king reply on the board and test its new attacks against our knight-or-better pieces.
+// It stays honest two ways. We skip a reply whose landing loses the mover as HOLLOW, and we score each survivor by the SUM of the top two dear pieces it attacks, so a fork outranks a single poke.
+// We keep all of the top MENACE_SHORTLIST for line C. A piece re-attacking THROUGH its own from-square reads as blocked, but that threat already existed from that square, so the miss is benign.
+// The pass also remembers EVERY checking reply for the check extension and nominates his best QUIET check (bestCheck2) -- the capture ranking could never surface a sacrificial or repositioning check.
+// We do not scan discovered quiet threats or quiet promotions (documented boundaries). resolved = true means we skip both finish bars.
+//@param    _position The position to move in (the mover's side is _position.sideToMove).
+//@param    _move The annotated legal move to score. Written onto ONLY when the score resolves early.
+//@param    _deep True for Deep thinking: runs the menace scan for line C.
+//@returns  The o_foresee state for the finish bars (resolved = true means foreseeScore is already written).
+export foreseePrepare(Core.o_position _position, Core.o_move _move, bool _deep) =>
+    o_foresee _state = o_foresee.new()
+    Core.Side _us = _position.sideToMove
+    Core.Side _them = _us == Core.Side.white ? Core.Side.black : Core.Side.white
+    _state.net1 := f_moveMaterialGain(_position, _move)
+    Core.o_position _p1 = Core.copyPosition(_position)
+    Core.applyMove(_p1, _move)
+    _state.p1 := _p1
+    if not Core.hasAnyLegalMove(_p1)
+        // We mate (+MATE on top of anything banked), or we STALEMATE: a draw is worth MINUS the lead we would hold after the move, so the winning side avoids it (-24 for stalemating a bare king while +24) and the losing side, correctly, steers toward it.
+        // No reply ever happens. The game is over.
+        _move.foreseeScore := Core.isInCheck(_p1, _them) ? _state.net1 + MATE_SCORE : -(materialLead(_position, _position.sideToMove) + _state.net1)
+        _state.resolved := true
+    else
+        array<Core.o_move> _a_replies = Core.generateLegalMoves(_p1)
+        annotateMoves(_p1, _a_replies)
+        _state.canDecline := _a_replies.size() > 1  // With two or more legal replies he can always play something OTHER than his best capture. Line D prices that choice.
+        // Deep only: the menace scan's target list, our knight-or-better pieces (the king is uncapturable, and checks are line B's business).
+        array<int> _a_dearRow = array.new<int>()
+        array<int> _a_dearCol = array.new<int>()
+        array<float> _a_dearValue = array.new<float>()
+        if _deep
+            for _r = 0 to 7
+                for _c = 0 to 7
+                    Core.Piece _dearPiece = _p1.mat_board.get(_r, _c)
+                    if _dearPiece != Core.Piece.empty and Core.pieceSide(_dearPiece) == _us and Core.pieceValue(_dearPiece) >= 3.0 and Core.pieceTypeOf(_dearPiece) != Core.PieceType.king
+                        _a_dearRow.push(_r)
+                        _a_dearCol.push(_c)
+                        _a_dearValue.push(Core.pieceValue(_dearPiece))
+        // His checking replies: any that MATES us decides the score. Otherwise remember his best check for line B, ranked by the cheap captureGain() (ranking only -- the finish bar plays it out).
+        // The same pass runs the Deep menace scan on the quiet replies.
+        bool _theyMate = false
+        Core.o_move _bestCheck = na
+        float _bestCheckRank = -1.0  // Below zero so even a gain-0 check registers as the best check.
+        Core.o_move _bestCheck2 = na  // His best QUIET check -- line B2's nomination.
+        bool _bestCheck2Safe = false  // Whether that quiet check's landing square keeps the checker safe.
+        array<Core.o_move> _a_checkReplies = array.new<Core.o_move>()  // Every checking reply, for the check extension.
+        array<Core.o_move> _a_menaceReplies = array.new<Core.o_move>()  // The top MENACE_SHORTLIST quiet menaces by score, best first.
+        array<float> _a_menaceScores = array.new<float>()               // Their scores, same order. The score is the SUM of the reply's top two dear targets, so a fork outranks any single poke.
+        for [_i, _reply] in _a_replies
+            if moveGivesCheck(_p1, _reply)
+                Core.o_position _scratch = Core.copyPosition(_p1)
+                Core.applyMove(_scratch, _reply)
+                if not Core.hasAnyLegalMove(_scratch) and Core.isInCheck(_scratch, _us)
+                    _theyMate := true
+                    break
+                _a_checkReplies.push(_reply)  // We keep it for the check extension. A mating check never reaches here (the break above).
+                float _checkRank = captureGain(_p1, _reply)
+                if _checkRank > _bestCheckRank
+                    _bestCheckRank := _checkRank
+                    _bestCheck := _reply
+                if not moveIsCapture(_p1, _reply)  // Track the best QUIET check for line B2: prefer a landing square that doesn't lose the checker. First come wins otherwise.
+                    bool _replySafe = moveDestIsSafe(_p1, _reply)
+                    if na(_bestCheck2) or (_replySafe and not _bestCheck2Safe)
+                        _bestCheck2 := _reply
+                        _bestCheck2Safe := _replySafe
+            else if _deep and _a_dearRow.size() > 0 and not moveIsCapture(_p1, _reply) and _reply.promotion == Core.Piece.empty
+                Core.Piece _mover = _p1.mat_board.get(_reply.fromRow, _reply.fromCol)
+                // HOLLOW FILTER: a "menace" from a landing where we simply win the mover threatens nothing -- skip it, using the ladder's value-aware safety test (the reply list is already annotated).
+                if Core.pieceTypeOf(_mover) != Core.PieceType.king and moveDestIsSafe(_p1, _reply)  // King moves carry no menace, and skipping them also skips castling's two-piece shuffle, which the make/unmake below cannot represent.
+                    // Make the quiet move on the real board, test what the piece attacks from its new square, unmake.
+                    _p1.mat_board.set(_reply.fromRow, _reply.fromCol, Core.Piece.empty)
+                    _p1.mat_board.set(_reply.toRow, _reply.toCol, _mover)
+                    // FORK-AWARE RANK: score by the SUM of the top TWO dear pieces the reply attacks from its new square, so a genuine double attack outranks any single-target poke (ranking by one target would let scan order decide, pricing the same fork into one candidate's score and missing it in another's).
+                    float _dearBest = 0.0
+                    float _dearSecond = 0.0
+                    for [_di, _dearRow] in _a_dearRow
+                        if Core.pieceAttacksSquare(_p1.mat_board, _reply.toRow, _reply.toCol, _dearRow, _a_dearCol.get(_di))
+                            float _dearHit = _a_dearValue.get(_di)
+                            if _dearHit > _dearBest
+                                _dearSecond := _dearBest
+                                _dearBest := _dearHit
+                            else if _dearHit > _dearSecond
+                                _dearSecond := _dearHit
+                    float _menaceScore = _dearBest + _dearSecond
+                    // Keep the top MENACE_SHORTLIST, ordered insert best-first: line C prices every kept entry and the worst governs, so a flashy decoy cannot hide a standing fork.
+                    // The <= keeps earlier-scanned equal scores ahead (stable first-wins). While loop, not for-to (empty start, and for-to auto-reverses on inverted bounds).
+                    if _menaceScore > 0
+                        int _insertPos = 0
+                        while _insertPos < _a_menaceScores.size() and _menaceScore <= _a_menaceScores.get(_insertPos)
+                            _insertPos += 1
+                        if _insertPos < MENACE_SHORTLIST
+                            _a_menaceReplies.insert(_insertPos, _reply)
+                            _a_menaceScores.insert(_insertPos, _menaceScore)
+                            if _a_menaceReplies.size() > MENACE_SHORTLIST
+                                _a_menaceReplies.pop()
+                                _a_menaceScores.pop()
+                    _p1.mat_board.set(_reply.toRow, _reply.toCol, Core.Piece.empty)
+                    _p1.mat_board.set(_reply.fromRow, _reply.fromCol, _mover)
+        if _theyMate
+            _move.foreseeScore := -MATE_SCORE
+            _state.resolved := true
+        else
+            _state.bestCheck := _bestCheck
+            _state.bestCheckRaw := na(_bestCheck) ? 0.0 : f_moveMaterialGain(_p1, _bestCheck)
+            if not na(_bestCheck2) and not na(_bestCheck) and _bestCheck2.fromRow == _bestCheck.fromRow and _bestCheck2.fromCol == _bestCheck.fromCol and _bestCheck2.toRow == _bestCheck.toRow and _bestCheck2.toCol == _bestCheck.toCol
+                _bestCheck2 := na  // Line B already follows this exact move: one line, one read.
+            _state.bestCheck2 := _bestCheck2
+            _state.bestCheck2Raw := na(_bestCheck2) ? 0.0 : f_moveMaterialGain(_p1, _bestCheck2)
+            _state.a_checkReplies := _a_checkReplies
+            _state.a_quietThreats := _a_menaceReplies
+            [_bestCapture, _bestCaptureRaw, _bestCaptureGain, _bestCapture2, _bestCapture2Raw, _bestCapture2Gain] = f_bestTrueCapture(_p1, _a_replies, _move.toRow, _move.toCol)
+            _state.bestCapture := _bestCapture
+            _state.bestCaptureRaw := _bestCaptureRaw
+            _state.bestCapture2 := _bestCapture2
+            _state.bestCapture2Raw := _bestCapture2Raw
+    _state
+
+//@function Runs the CAPTURES bar, the first of a candidate's (up to) two finish bars.
+// Plays out line A (his best true capture down the tail, or the threat-cash model when he has none), in Deep line A2 (his SECOND-best true capture, insurance against the badly-ordered exchange), and line D (both depths: the threat-cash model too when he has a capture, since he is never obliged to play it), keeps the worst, and parks it on the carry state.
+// When nothing remains for the second bar (no check, no Deep quiet threat) we write the score HERE and the candidate is done. Accounting: subtract his RAW ply-2 taking, then let the tail play the continuation.
+// We model his no-capture reply as saving his dearest piece and cashing our SECOND-best true threat (the double-attack formula that lets rule 5 see forks). When he is IN CHECK he cannot attend to threats, so it cashes our best.
+// Call only when foreseePrepare() returned resolved = false.
+//@param    _state The o_foresee from this candidate's foreseePrepare(). `partialStamp` and `capturesDone` are written.
+//@param    _move The same candidate move. Written onto ONLY when this bar finishes the candidate.
+//@param    _deep True for Deep thinking: line A2 and the six-half-move tails.
+//@returns  True when the score is written and the candidate needs no second finish bar.
+export foreseeFinishCaptures(o_foresee _state, Core.o_move _move, bool _deep) =>
+    Core.o_position _p1 = _state.p1
+    Core.Side _them = _p1.sideToMove  // After our candidate move it is the opponent's turn by construction.
+    Core.Side _us = _them == Core.Side.white ? Core.Side.black : Core.Side.white
+    float _net1 = _state.net1
+    // Line A: his best true capture, followed down the chain. When he has none, we use the threat-cash model instead.
+    float _lineA = _net1
+    if not na(_state.bestCapture)
+        Core.o_position _p2 = Core.copyPosition(_p1)
+        Core.applyMove(_p2, _state.bestCapture)
+        _lineA := _net1 - _state.bestCaptureRaw + f_foreseeTail(_p2, _state.bestCapture.toRow, _state.bestCapture.toCol, _deep)
+    else
+        [_threat1, _threat2, _victim1Row, _victim1Col] = f_bestTwoThreats(_p1, _us)
+        _lineA := _net1 + (Core.isInCheck(_p1, _them) ? _threat1 : _threat2)
+    float _partial = _lineA
+    // Line A2, Deep only: his second-best true capture, followed the same way.
+    // If it happens to be the same move as line B's check, the duplicate work is harmless -- the same value goes through the same min.
+    if _deep and not na(_state.bestCapture2)
+        Core.o_position _p2b = Core.copyPosition(_p1)
+        Core.applyMove(_p2b, _state.bestCapture2)
+        float _lineA2 = _net1 - _state.bestCapture2Raw + f_foreseeTail(_p2b, _state.bestCapture2.toRow, _state.bestCapture2.toCol, _deep)
+        if _lineA2 < _partial
+            _partial := _lineA2
+    // Line D: a capture is an offer, not a force.
+    // When declining our candidate suits him better he keeps what he has, so the same threat-cash model that prices the no-capture case (dearest piece saved, our SECOND-best threat cashed -- our best when he is in check) also caps every capture story, and the score keeps the worse.
+    // Without it a score could bank a capture he is never obliged to make. Skipped when his capture is his ONLY legal reply (canDecline false): then the capture line really is forced.
+    if not na(_state.bestCapture) and _state.canDecline
+        [_threatD1, _threatD2, _victimDRow, _victimDCol] = f_bestTwoThreats(_p1, _us)
+        float _lineD = _net1 + (Core.isInCheck(_p1, _them) ? _threatD1 : _threatD2)
+        if _lineD < _partial
+            _partial := _lineD
+    _state.partialStamp := _partial
+    _state.capturesDone := true
+    bool _finished = na(_state.bestCheck) and (not _deep or na(_state.a_quietThreats) or _state.a_quietThreats.size() == 0)
+    if _finished
+        _move.foreseeScore := _partial
+    _finished
+
+//@function Runs the CHECK-AND-QUIET bar, the second finish bar. It plays line B (his best check down its tail) and, in Deep, line C (his best quiet threats -- the prepare bar's whole menace shortlist, each priced, the worst kept).
+// Line C models the position after his quiet move with the save-the-dearest reply, plus one trick: we DELETE the threatened piece before recounting his threats, so a quiet skewer's hidden second target appears the moment the front piece steps off the line.
+// He cashes the better of his second threat and that recount. We ignore our own counter-threats (the same asymmetry as the threat-cash model). It keeps the worst of everything.
+// We accept three blind spots: his quiet DEFENSIVE replies, discovered quiet threats, and tactics paying off beyond the read. Call only after foreseeFinishCaptures() returned false.
+// Also here: line B2 (Deep only: his best quiet check) and the CHECK EXTENSION (both depths) -- see the comment at the extension.
+//@param    _state The o_foresee from this candidate's prepare, after its captures bar.
+//@param    _move The same candidate move. Written onto: foreseeScore is filled in.
+//@param    _deep True for Deep thinking: line C and the six-half-move tails.
+//@returns  Nothing. _move.foreseeScore is filled.
+export foreseeFinishRest(o_foresee _state, Core.o_move _move, bool _deep) =>
+    Core.o_position _p1 = _state.p1
+    Core.Side _them = _p1.sideToMove  // After our candidate move it is the opponent's turn by construction.
+    float _net1 = _state.net1
+    float _stamp = _state.partialStamp
+    // Line B: follow his best check too (unless it IS line A's capture, already played on the captures bar).
+    if not na(_state.bestCheck)
+        bool _sameMove = not na(_state.bestCapture) and _state.bestCheck.fromRow == _state.bestCapture.fromRow and _state.bestCheck.fromCol == _state.bestCapture.fromCol and _state.bestCheck.toRow == _state.bestCapture.toRow and _state.bestCheck.toCol == _state.bestCapture.toCol
+        if not _sameMove
+            Core.o_position _pB = Core.copyPosition(_p1)
+            Core.applyMove(_pB, _state.bestCheck)
+            float _lineB = _net1 - _state.bestCheckRaw + f_foreseeTail(_pB, _state.bestCheck.toRow, _state.bestCheck.toCol, _deep)
+            if _lineB < _stamp
+                _stamp := _lineB
+    // Line B2, Deep only: his best QUIET check down the same tail.
+    // The capture ranking could only nominate a material-grabbing check. The repositioning check that slides in with tempo was invisible to the score.
+    if _deep and not na(_state.bestCheck2)
+        Core.o_position _pB2 = Core.copyPosition(_p1)
+        Core.applyMove(_pB2, _state.bestCheck2)
+        float _lineB2 = _net1 - _state.bestCheck2Raw + f_foreseeTail(_pB2, _state.bestCheck2.toRow, _state.bestCheck2.toCol, _deep)
+        if _lineB2 < _stamp
+            _stamp := _lineB2
+    // Line C, Deep only: his best quiet threats. A quiet move captures nothing at ply 2. What he gets is whatever threat survives our save-the-dearest reply.
+    // We price EVERY shortlisted menace and the WORST governs, so a candidate's own exposed piece cannot out-score and hide a standing fork. Bounded by MENACE_SHORTLIST.
+    if _deep and not na(_state.a_quietThreats)
+        for [_qi, _quietThreat] in _state.a_quietThreats
+            Core.o_position _pC = Core.copyPosition(_p1)
+            Core.applyMove(_pC, _quietThreat)
+            [_threatC1, _threatC2, _victimRow, _victimCol] = f_bestTwoThreats(_pC, _them)
+            if _threatC1 > 0
+                Core.o_position _pFled = Core.copyPosition(_pC)
+                _pFled.mat_board.set(_victimRow, _victimCol, Core.Piece.empty)  // The dearest flees "somewhere safe": deleting it is what unmasks the line behind it. Never a king (threats are capture gains, and the king is never capturable).
+                [_threatFled1, _threatFled2, _fledRow, _fledCol] = f_bestTwoThreats(_pFled, _them)
+                float _cash = math.max(_threatC2, _threatFled1)
+                if _cash > 0
+                    float _lineC = _net1 - _cash
+                    if _lineC < _stamp
+                        _stamp := _lineC
+    // THE CHECK EXTENSION, both depths -- the king-hunt detector. The capture chains bank a sacrificed queen and never see the mate behind it, so this walk follows nothing but FORCE: each of his checking replies, answered by EVERY evasion we have.
+    // Only when every evasion walks into an immediate mating check is the mate real, and the score falls to the foreseen-mate value. We count no material, so no sacrifice can bribe it.
+    // Two checks deep by construction (the nesting below IS the depth. Prepare catches the one-check mate). Mates needing three or more checks stay invisible, the documented boundary.
+    Core.Side _us = _them == Core.Side.white ? Core.Side.black : Core.Side.white
+    if _stamp > -MATE_SCORE and not na(_state.a_checkReplies) and _state.a_checkReplies.size() > 0
+        bool _mateForced = false
+        for [_ci, _check1] in _state.a_checkReplies
+            Core.o_position _pc1 = Core.copyPosition(_p1)
+            Core.applyMove(_pc1, _check1)
+            array<Core.o_move> _a_evasions = Core.generateLegalMoves(_pc1)
+            bool _allEvasionsMated = _a_evasions.size() > 0  // Prepare proved this check is not mate itself, so evasions exist. Belt and braces.
+            for [_ei, _evasion] in _a_evasions
+                Core.o_position _pe = Core.copyPosition(_pc1)
+                Core.applyMove(_pe, _evasion)
+                bool _mateHere = false
+                array<Core.o_move> _a_his2 = Core.generateLegalMoves(_pe)
+                for [_hi, _reply2] in _a_his2
+                    if moveGivesCheck(_pe, _reply2)
+                        Core.o_position _ps = Core.copyPosition(_pe)
+                        Core.applyMove(_ps, _reply2)
+                        if not Core.hasAnyLegalMove(_ps) and Core.isInCheck(_ps, _us)
+                            _mateHere := true
+                            break
+                if not _mateHere
+                    _allEvasionsMated := false
+                    break  // One evasion survives: this check forces nothing.
+            if _allEvasionsMated
+                _mateForced := true
+                break  // One forcing check is all a mate needs.
+        if _mateForced
+            _stamp := -MATE_SCORE
+    _move.foreseeScore := _stamp
+
+//#endregion FORESEE (SHALLOW LOOK-AHEAD)
+
+
+//#region 🟩🟩🟩🟩🟩🟩  THE TEN-RULE LADDER  🟩🟩🟩🟩🟩🟩
+
+// One function per rule so the consumer can run exactly one per tick. Each returns the chosen o_move, or na for "did not fire, try the next".
+// Rules 1-5 always give the same answer for a position. Rules 6-10 collect all qualifying moves and pick one with the seed.
+// Every pool in rules 4-9 excludes a move whose score says the opponent MATES us (`foreseeScore` <= -MATE_SCORE). Rule 10 keeps those doomed moves in one last pool behind a resign coin.
+// Every rule reads the annotated counts rather than re-scanning. "Safe" throughout means moveDestIsSafe(): no attackers, or defenders matching attackers AND the cheapest attacker worth at least the piece that lands (so a knight defended once but attacked by a pawn is UNsafe).
+//
+// The classify stage has already run: non-queen promotions (bar the keeper knight) are gone, and the shield/undo flags ride on each move.
+// The four QUIET rules (6-9) demote a flagged candidate rather than deleting it. Rules 1-5 ignore the flags.
+//
+// THE STAND-DOWN, the ladder's one cross-rule invariant: no rule plays a NEGATIVE-scoring move while any material-keeping move exists anywhere in the legal list.
+// Rules 6, 7 and 8 refuse such moves (return na rather than dip into a losing pool of their own). Rule 9, whose pools order EVERY legal move clean-first and losing-last, is the single safety net.
+// So a foreseen threat that scores every ignoring move negative makes the ladder fall through to the move that parries, not shrug and shuffle. The shield flag stays a within-rule demotion: cosmetic, not material.
+
+//@function Rule 1, mate in one. Among CHECKING moves only (filtering to checks first is what keeps this cheap), return one that leaves the opponent with zero legal replies.
+// Always the same answer: the first mate found. na when no move mates.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves.
+//@returns  A mating move, or na.
+export ruleMateInOne(Core.o_position _position, array<Core.o_move> _a_moves) =>
+    Core.o_move _chosen = na
+    for [_i, _move] in _a_moves
+        if moveGivesCheck(_position, _move)  // Only checks can be mate. Skip the rest cheaply.
+            Core.o_position _scratch = Core.copyPosition(_position)
+            Core.applyMove(_scratch, _move)
+            if not Core.hasAnyLegalMove(_scratch)  // Opponent has no legal reply: checkmate.
+                _chosen := _move
+                break
+    _chosen
+
+//@function Rule 2, opening book. Looks the canonical record up in _map_book. The value holds one reply token or several "|"-separated (a candidate list).
+// We parse each token, match it against the legal list, and return the legal ones as _a_candidates.
+// A token that fails to parse or match is a book bug: we set _bookWasIllegal (for the debug table) but still return the matching tokens.
+// The pick AMONG candidates happens in the consumer on this same bar (its seed mod the candidate count), so it is stable, not a dice roll. This rule only narrows to the replies legal right now.
+//@param    _a_moves The annotated legal moves (used to validate the book tokens). Matching against this list is why the rule needs no position argument (legality was decided at generation. Pine forbids unused exported parameters, CE10237).
+//@param    _map_book The opening book: canonical record -> reply token, or "|"-separated candidate tokens.
+//@param    _record The canonical record string so far (the book key).
+//@returns  A tuple [_a_candidates, _bookWasIllegal]: the (possibly empty) list of legal book replies, and true when at least one token did not parse or was not legal here.
+export ruleOpeningBook(array<Core.o_move> _a_moves, map<string, string> _map_book, string _record) =>
+    array<Core.o_move> _a_candidates = array.new<Core.o_move>()
+    bool _bookWasIllegal = false
+    if _map_book.contains(_record)
+        string _value = _map_book.get(_record)
+        array<string> _a_tokens = str.split(_value, "|")  // One or more candidate replies for this position.
+        for [_t, _token] in _a_tokens
+            // Parse each book token into squares and a promotion letter (one pass), then match it against the legal list.
+            [_a_squares, _a_promos] = Core.parseMoves(_token)
+            if _a_squares.size() >= 4
+                string _promo = _a_promos.size() > 0 ? _a_promos.get(0) : ""
+                Core.o_move _match = Core.matchLegalMove(_a_moves, _a_squares.get(0), _a_squares.get(1), _a_squares.get(2), _a_squares.get(3), _promo)
+                if na(_match)
+                    _bookWasIllegal := true  // The book named a move that is not legal here: surface it, keep the rest.
+                else
+                    _a_candidates.push(_match)
+            else
+                _bookWasIllegal := true  // The book token did not even parse. Treat as a book bug.
+    [_a_candidates, _bookWasIllegal]
+
+//@function Rule 3, avoid mate. Stops an engine forced to lose material from rescuing a doomed pawn into mate-in-one instead of conceding an exchange.
+// Fires ONLY in a crisis: at least one candidate's score says the opponent mates us (<= -MATE_SCORE) AND every candidate's score is negative.
+// It then plays the best-scoring move over ALL candidates (least-bad by the engine's numbers), seeded ties.
+// Returns na outside a crisis, and also when EVERY candidate walks into the mate -- then the play-on-or-resign choice belongs to rule 10's coin.
+// No position parameter, because it reads only the scores (Pine forbids unused exported parameters, CE10237).
+//@param    _a_moves The annotated, foresee-scored legal moves.
+//@param    _seed The seed for tie-breaks.
+//@returns  The least-bad move, or na when this is not a crisis position.
+export ruleAvoidMate(array<Core.o_move> _a_moves, int _seed) =>
+    bool _mateSeen = false
+    bool _allNegative = _a_moves.size() > 0
+    bool _anyAlive = false
+    for [_i, _move] in _a_moves
+        if _move.foreseeScore <= -MATE_SCORE
+            _mateSeen := true
+        else
+            _anyAlive := true  // At least one candidate escapes the foreseen mate, so there is an escape to pick.
+        if _move.foreseeScore >= 0
+            _allNegative := false
+    Core.o_move _chosen = na
+    if _mateSeen and _allNegative and _anyAlive
+        array<float> _a_scores = array.new<float>()
+        for [_i, _move] in _a_moves
+            _a_scores.push(_move.foreseeScore)
+        _chosen := pickBestScored(_a_moves, _a_scores, _seed)
+    _chosen
+
+//@function Rule 4, defence. Finds our most valuable REALLY-hanging piece by three arms, cheapest first. The piece is attacked and undefended, or it is attacked by something cheaper than itself (he profits even after our recapture), or it is merely OUTNUMBERED, in which case it hangs only when f_swapOffGain() confirms the exchange pays him.
+// Before saving it comes the YIELD TEST: when the best capture rule 5 would play gains STRICTLY more than the hanging piece is worth, this rule stands aside (defending a pawn must not outrank recapturing a free bishop). Ties defend.
+// Then option A: capture an attacker profitably if that fixes the hang. Otherwise escapes and reinforcements share ONE seeded pool (both save the piece with no swing. A fixed order would starve reinforcements).
+// Every rescue is read against its score: a rescue that still loses is held back, and when EVERY rescue loses, rule 4 stands down so the scored ladder can find a material-keeping non-rescue -- UNLESS nothing anywhere keeps material (a true double attack), when it plays the least-bad losing rescue by best score.
+// na when nothing hangs, the yield test stands aside, no rescue works, or standing down is right.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves.
+//@param    _seed The seed for tie-breaks and the rescue pick.
+//@returns  A defensive move, or na.
+export ruleDefence(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    matrix<Core.Piece> _board = _position.mat_board
+    Core.Side _mover = _position.sideToMove
+    Core.Side _enemy = _mover == Core.Side.white ? Core.Side.black : Core.Side.white
+    // Find our most valuable hanging piece.
+    // Three arms, cheapest first. The piece is undefended and attacked, or it is attacked by something cheaper than us (he profits after our recapture), or it is merely OUTNUMBERED, which we confirm with f_swapOffGain() because a head-count cannot price the exchange.
+    int _worstRow = -1
+    int _worstCol = -1
+    float _worstValue = 0.0
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Core.Piece _piece = _board.get(_row, _col)
+            if _piece != Core.Piece.empty and Core.pieceBelongsTo(_piece, _mover) and Core.pieceTypeOf(_piece) != Core.PieceType.king
+                float _value = Core.pieceValue(_piece)
+                if _value > _worstValue  // Only a piece dearer than the current worst can displace it. Cheaper ones skip the scans.
+                    [_attackers, _cheapestAttacker] = Core.attackersInfo(_board, _row, _col, _enemy)  // One scan: count and cheapest (100 when unattacked).
+                    int _defenders = Core.countAttackers(_board, _row, _col, _mover)  // Our other pieces defending it.
+                    bool _isHanging = false
+                    if _attackers > 0
+                        if _defenders == 0
+                            _isHanging := true  // Free to take.
+                        else if _cheapestAttacker < _value
+                            _isHanging := true  // A cheaper piece takes us. Our recapture cannot make him whole.
+                        else if _attackers > _defenders
+                            _isHanging := f_swapOffGain(_board, _row, _col, _enemy) > 0.0  // Outnumbered: hanging only if the exchange truly pays him.
+                    if _isHanging
+                        _worstValue := _value
+                        _worstRow := _row
+                        _worstCol := _col
+    Core.o_move _chosen = na
+    if _worstRow != -1
+        // The yield test: find the best capture SCORE (rule 5's firing currency, already written), so rule 4 yields to exactly what rule 5 would really take, true swap-off price included.
+        float _bestCaptureGain = 0.0
+        for [_i, _move] in _a_moves
+            if moveIsCapture(_position, _move) and _move.foreseeScore > _bestCaptureGain
+                _bestCaptureGain := _move.foreseeScore
+        if _bestCaptureGain <= _worstValue  // Defence proceeds only when saving the piece is worth at least the best capture's gain.
+            // Option A: capture an attacker profitably (safe destination or a favourable trade).
+            // It only counts as DEFENCE if it resolves the hang -- the hanging piece itself captures, or the square is no longer attacked more than defended afterwards -- else a free pawn across the board would "defend" a queen.
+            array<Core.o_move> _a_captures = array.new<Core.o_move>()
+            array<float> _a_captureScores = array.new<float>()
+            array<Core.o_move> _a_capturesLosing = array.new<Core.o_move>()  // Foresee says the "rescue" still loses material: held back.
+            array<float> _a_captureLosingScores = array.new<float>()
+            array<Core.o_move> _a_rescuesLosing = array.new<Core.o_move>()   // Escapes/reinforcements whose own score still loses material. Declared here so the last-ditch pick below can see both losing pools.
+            for [_i, _move] in _a_moves
+                if moveIsCapture(_position, _move)
+                    float _victim = capturedValue(_position, _move)
+                    float _mover2 = moverValue(_position, _move)
+                    bool _safeDest = moveDestIsSafe(_position, _move)
+                    if (_safeDest or _victim >= _mover2) and _move.foreseeScore > -MATE_SCORE  // Safe capture or at least an equal trade -- and never a move that walks into a foreseen mate.
+                        bool _hangingPieceMoves = _move.fromRow == _worstRow and _move.fromCol == _worstCol
+                        bool _resolvesHang = _hangingPieceMoves  // The hanging piece escaping by capturing resolves it by definition.
+                        if not _resolvesHang
+                            Core.o_position _scratchA = Core.copyPosition(_position)
+                            Core.applyMove(_scratchA, _move)
+                            // Resolved = the same swap-off definition that flagged the hang, on the after-move board: one definition, so "hanging" and "resolved" can never disagree.
+                            _resolvesHang := f_swapOffGain(_scratchA.mat_board, _worstRow, _worstCol, _enemy) <= 0.0
+                        if _resolvesHang
+                            float _rescueScore = _victim - (_safeDest ? 0 : _mover2)  // Net gain, penalising an unsafe recapture.
+                            if _move.foreseeScore < 0  // The score says this capture backfires within the horizon, so we demote it.
+                                _a_capturesLosing.push(_move)
+                                _a_captureLosingScores.push(_rescueScore)
+                            else
+                                _a_captures.push(_move)
+                                _a_captureScores.push(_rescueScore)
+            _chosen := pickBestScored(_a_captures, _a_captureScores, _seed)  // Non-losing captures only. The losing pool is a last resort, decided below.
+            // Options B and C merged: escapes (the hanging piece steps to a safe square) and reinforcements (any other safe move that resolves the hang without landing on the hanging square) share ONE seeded pool.
+            if na(_chosen)
+                array<Core.o_move> _a_rescues = array.new<Core.o_move>()
+                for [_i, _move] in _a_moves
+                    if moveDestIsSafe(_position, _move) and _move.foreseeScore > -MATE_SCORE  // A move that walks into a foreseen mate is no rescue at all: excluded from every pool.
+                        bool _isEscape = _move.fromRow == _worstRow and _move.fromCol == _worstCol
+                        if _isEscape
+                            if _move.foreseeScore < 0
+                                _a_rescuesLosing.push(_move)
+                            else
+                                _a_rescues.push(_move)  // The hanging piece steps to a safe square.
+                        else if _move.toRow != _worstRow or _move.toCol != _worstCol  // A reinforcement never lands ON the hanging square (that would be an escape's job).
+                            Core.o_position _scratch = Core.copyPosition(_position)
+                            Core.applyMove(_scratch, _move)
+                            // Does the mover resolve the hang? Same swap-off definition as the hang test and option A.
+                            if f_swapOffGain(_scratch.mat_board, _worstRow, _worstCol, _enemy) <= 0.0
+                                if _move.foreseeScore < 0
+                                    _a_rescuesLosing.push(_move)
+                                else
+                                    _a_rescues.push(_move)
+                _chosen := pickRandom(_a_rescues, _seed)  // Non-losing rescues only. The losing pools are the last-ditch case below.
+            // The last-ditch case: EVERY rescue loses material by its score.
+            // Rule 4 stands down while any non-rescue keeps material (a counter-threat or a parried mate the rescue pools cannot see). Only when NO move anywhere keeps material do we fire the least-bad losing rescue by best score.
+            if na(_chosen) and (_a_capturesLosing.size() > 0 or _a_rescuesLosing.size() > 0)
+                bool _anyKeeps = false
+                for [_i, _move] in _a_moves
+                    if _move.foreseeScore >= 0
+                        _anyKeeps := true
+                        break
+                if not _anyKeeps
+                    array<Core.o_move> _a_lastDitch = array.new<Core.o_move>()
+                    array<float> _a_lastDitchScores = array.new<float>()
+                    for [_i, _move] in _a_capturesLosing
+                        _a_lastDitch.push(_move)
+                        _a_lastDitchScores.push(_move.foreseeScore)
+                    for [_i, _move] in _a_rescuesLosing
+                        _a_lastDitch.push(_move)
+                        _a_lastDitchScores.push(_move.foreseeScore)
+                    // Fire only when the best losing rescue is also the least-bad move on the WHOLE board -- else (rescuing a doomed pawn allows mate at -100 while a concession costs -3) stand down.
+                    float _bestOverall = -2.0 * MATE_SCORE
+                    for [_i, _move] in _a_moves
+                        if _move.foreseeScore > _bestOverall
+                            _bestOverall := _move.foreseeScore
+                    if _a_lastDitchScores.size() > 0 and _a_lastDitchScores.max() >= _bestOverall
+                        _chosen := pickBestScored(_a_lastDitch, _a_lastDitchScores, _seed)
+    _chosen
+
+//@function Rule 5, win material within everything the look-ahead can see. ANY move whose foresee score clears a threshold qualifies, and that same score ranks it.
+// Three things fall out at once. A poisoned free pawn scores negative, so we refuse it. A quiet FORK fires like a capture. A SACRIFICE whose follow-up nets positive fires here too, so sacrifices need no rule of their own.
+// The threshold is stiffer for quiet moves than for captures/promotions (a quiet move leans harder on the greedy-chain guesses).
+// We break ties bird-in-hand: among moves sharing the BEST score, the one taking the most material IMMEDIATELY wins (a banked gain beats a promised one that leans on the story's guesses), the seed only separating genuine twins. na when nothing clears its threshold.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated, foresee-scored legal moves.
+//@param    _seed The seed for tie-breaks among equal best scores.
+//@returns  A material-winning move (capture, fork or sacrifice), or na.
+export ruleWinMaterial(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    array<Core.o_move> _a_candidates = array.new<Core.o_move>()
+    array<float> _a_gains = array.new<float>()  // Each candidate's IMMEDIATE raw gain, for the bird-in-hand tie-break.
+    float _bestStamp = -2.0 * MATE_SCORE  // Sentinel below any real score.
+    for [_i, _move] in _a_moves
+        bool _isMaterialMove = moveIsCapture(_position, _move) or _move.promotion != Core.Piece.empty
+        float _threshold = _isMaterialMove ? TACTIC_CAPTURE_MIN : TACTIC_QUIET_MIN
+        if _move.foreseeScore >= _threshold
+            _a_candidates.push(_move)
+            _a_gains.push(f_moveMaterialGain(_position, _move))
+            if _move.foreseeScore > _bestStamp
+                _bestStamp := _move.foreseeScore
+    // Bird-in-hand: keep the best-scoring candidates, then rank THEM by immediate raw gain (seeded ties beyond).
+    // Exact float compare is safe: stored scores against the max of the same stored values, no fresh arithmetic.
+    array<Core.o_move> _a_best = array.new<Core.o_move>()
+    array<float> _a_bestGains = array.new<float>()
+    for [_i, _move] in _a_candidates
+        if _move.foreseeScore == _bestStamp
+            _a_best.push(_move)
+            _a_bestGains.push(_a_gains.get(_i))
+    Core.o_move _chosen = pickBestScored(_a_best, _a_bestGains, _seed)
+
+//@function Rule 6, safe check. It gathers checking moves whose destination is safe (moveDestIsSafe()). The rule never offers a negative-scoring check -- it STANDS DOWN rather than play a known-losing move, leaving rule 10 the safety net.
+// Only the shield flag still demotes here (f_pickPreferred()'s two losing pools are unreachable from this rule). na when no material-keeping safe check exists.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves.
+//@param    _seed The seed for the pick.
+//@returns  A safe checking move, or na.
+export ruleSafeCheck(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    array<Core.o_move> _a_checks = array.new<Core.o_move>()
+    for [_i, _move] in _a_moves
+        if moveDestIsSafe(_position, _move) and moveGivesCheck(_position, _move) and _move.foreseeScore >= 0 and not _move.repeatsPosition  // Stand-down: only material-keeping checks (covers the foreseen-mate exclusion). repeatsPosition kills the two-square check shuttle -- checking forever leaks a won game as a threefold draw.
+            _a_checks.push(_move)
+    Core.o_move _chosen = f_pickPreferred(_a_checks, _seed)
+
+// Rule 7's gate: trade down when our material lead is at least this fraction of the opponent's remaining total.
+// 0.08 keeps the middlegame feel (up a minor on a full board fires at 3/36 = 8.3%. Up two pawns does not) and adds endgame eagerness a flat "lead >= 3" would miss (up two in a rook ending is a 40% relative lead).
+const float REL_LEAD_TO_TRADE = 0.08
+
+//@function Rule 7, exchange when ahead, in RELATIVE piece values. Gate: our material lead must be at least REL_LEAD_TO_TRADE of the opponent's remaining total.
+// Candidates are equal-value PIECE trades (victim worth the mover, and worth more than a pawn -- pawn-for-pawn spends the winning potential a lead wants to keep. Rule 5 already took the winning captures).
+// We score each by RELATIVE gain (victim's share of their army minus mover's share of ours), so the biggest mutual piece comes off first.
+// We demote shield-flagged trades to a fallback pool and never offer a negative-scoring trade (the rule STANDS DOWN, rule 9 is the safety net. No losing pool here). na when the gate does not open or no material-keeping trade exists.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves.
+//@param    _seed The seed for tie-breaks.
+//@returns  An equal-trade capture, or na.
+export ruleExchangeWhenAhead(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    Core.o_move _chosen = na
+    [_ourTotal, _theirTotal] = sideTotals(_position, _position.sideToMove)
+    // The relative gate. _theirTotal > 0 also guards the division -- a bare king has nothing to trade.
+    if _theirTotal > 0 and (_ourTotal - _theirTotal) / _theirTotal >= REL_LEAD_TO_TRADE
+        array<Core.o_move> _a_trades = array.new<Core.o_move>()  // Unflagged candidates...
+        array<float> _a_tradeScores = array.new<float>()         // ...and their relative-gain scores.
+        array<Core.o_move> _a_flagged = array.new<Core.o_move>()  // Shield-flagged candidates, the demoted pool.
+        array<float> _a_flaggedScores = array.new<float>()
+        for [_i, _move] in _a_moves
+            if moveIsCapture(_position, _move)
+                float _victimValue = capturedValue(_position, _move)
+                float _moverValue = moverValue(_position, _move)
+                // Equal PIECE trades only: value equality keeps it a true trade, and > 1 excludes pawn-for-pawn (values 1/3/5/9, so "more than a pawn" is "not a pawn". Also covers en passant).
+                if _victimValue == _moverValue and _victimValue > 1.0 and _move.foreseeScore >= 0 and not _move.repeatsPosition  // Stand-down: only material-keeping trades (covers the foreseen-mate exclusion), never one recreating a seen position while winning.
+                    float _relGain = _victimValue / _theirTotal - _moverValue / _ourTotal  // Their loss share minus ours. Bigger piece = bigger score.
+                    if _move.isShield
+                        _a_flagged.push(_move)
+                        _a_flaggedScores.push(_relGain)
+                    else
+                        _a_trades.push(_move)
+                        _a_tradeScores.push(_relGain)
+        _chosen := _a_trades.size() > 0 ? pickBestScored(_a_trades, _a_tradeScores, _seed) : _a_flagged.size() > 0 ? pickBestScored(_a_flagged, _a_flaggedScores, _seed) : na
+    _chosen
+
+//#region 🟩🟩🟩  RULE 8: ENDGAME (CONVERT OR HOLD)  🟩🟩🟩
+
+// The endgame rung. It gives the ladder its one "make progress" move so it stops shuffling a developed piece and drawing won games.
+// Fires only once nothing above it did -- exactly the shuffle situation.
+//
+// Two gates, measuring two different things:
+//   ENDGAME? -- the OPPONENT's non-pawn material (Q/R/B/N only) is <= ENDGAME_NONPAWN_MAX.
+//     Opponent-only: if WE still have pieces the rungs above grab the tactics first, so this fires only in the genuine shuffle, where a pawn push is a fresh threat that breaks the repetition.
+//     Pawns never count.
+//   WINNING? -- our signed material lead (pawns included). At -2 or better we still fight. At -3 or worse we hold for the draw.
+//     Absolute pawn counts, not a percentage, which would vanish exactly when the endgame is deepest.
+//
+// AGGRESSIVE branch: score every safe, material-keeping move by a progress sum and play the best, seeded ties.
+// Components (strongest first): push a passed pawn (5 one square from promotion, 3 two, 2 three, 1 further), rook/queen to the 7th (+3), rook behind our passer (+2), king activity toward the right target (~2 a step), safe attack on an enemy piece (+1). A move can score several at once.
+// DEFENSIVE branch: offer only non-pushing safe moves, prefer the king near its own pawns, else na and let develop/fallback shuffle toward the draw. na (falls through to develop) whenever it is not an endgame or nothing safe makes progress.
+
+// COST SPLIT: the one expensive component, the safe-attack scan (an applyMove() copy plus a 64-square sweep per candidate), does NOT run on the ladder bar.
+// The consumer writes it during the foresee phase, GATED on isEndgame(), onto `o_move.endgameAttackBonus` (default 0, the Core-declares/AI-fills pattern), so ruleEndgame() just reads it and its own bar is pure coordinate maths.
+
+const float ENDGAME_NONPAWN_MAX = 13.0  // Opponent's non-pawn material at or below this = endgame. Q9+minor, or 2R, or R+2minor. "Queens basically off". Max per side is 31.
+const float ENDGAME_FIGHT_FLOOR = -2.0  // Signed material lead at or above this stays AGGRESSIVE. Below it (<= -3) we turn DEFENSIVE. Down two pawns is still a fight vs weak bots.
+const float ENDGAME_MATING_LEAD = 5.0   // At or above this lead (a rook up) the king hunts the enemy king. Otherwise it escorts a passer or centralises.
+
+//@function The opponent's total NON-PAWN material from _side's point of view (enemy Q/R/B/N, pawns and kings excluded).
+// One board scan. This is the endgame trigger -- a board full of pawns is not an endgame.
+//@param    _position The position to weigh.
+//@param    _side "Our" side. We sum the OTHER side's non-pawn pieces.
+//@returns  The opponent's non-pawn material in points (a float).
+f_enemyNonPawnMaterial(Core.o_position _position, Core.Side _side) =>
+    matrix<Core.Piece> _board = _position.mat_board
+    float _total = 0.0
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Core.Piece _piece = _board.get(_row, _col)
+            if _piece != Core.Piece.empty and not Core.pieceBelongsTo(_piece, _side)
+                Core.PieceType _type = Core.pieceTypeOf(_piece)
+                if _type != Core.PieceType.pawn and _type != Core.PieceType.king
+                    _total += Core.pieceValue(_piece)
+    _total
+
+//@function True when _position is an ENDGAME for the side to move: the opponent's non-pawn material is at or below ENDGAME_NONPAWN_MAX.
+// The consumer calls this on its prepare bar to decide whether to spend the foresee bars filling in each move's `endgameAttackBonus`. ruleEndgame() applies the same gate internally, so the two agree.
+//@param    _position The position to test.
+//@returns  True when the opponent is thinned to an endgame.
+export isEndgame(Core.o_position _position) =>
+    bool _endgame = f_enemyNonPawnMaterial(_position, _position.sideToMove) <= ENDGAME_NONPAWN_MAX
+
+//@function Writes the endgame rung's SAFE-ATTACK bonus onto one candidate in place. `endgameAttackBonus` becomes 1 when the move is not a capture, lands safely (moveDestIsSafe()), and from its landing attacks at least one enemy piece worth more than a pawn. Else 0.
+// This is the rung's one expensive component (an applyMove() copy plus a 64-square sweep), so we export it separately for the consumer to run on the foresee bars, gated on isEndgame().
+// The field defaults to 0, so moves never scored contribute nothing.
+//@param    _position The position the move is made from.
+//@param    _move The annotated candidate move. Its endgameAttackBonus field is written.
+//@returns  The bonus that was written (the write is the point. The return is for convenience and tests).
+export stampEndgameAttackBonus(Core.o_position _position, Core.o_move _move) =>
+    float _bonus = 0.0
+    if not moveIsCapture(_position, _move) and moveDestIsSafe(_position, _move)
+        Core.Side _side = _position.sideToMove
+        Core.Side _enemy = _side == Core.Side.white ? Core.Side.black : Core.Side.white
+        Core.o_position _after = Core.copyPosition(_position)  // applyMove() mutates in place, so work on a copy.
+        Core.applyMove(_after, _move)
+        bool _hitsPiece = false
+        for _r = 0 to 7
+            for _c = 0 to 7
+                Core.Piece _target = _after.mat_board.get(_r, _c)
+                if _target != Core.Piece.empty and Core.pieceBelongsTo(_target, _enemy)
+                    Core.PieceType _tType = Core.pieceTypeOf(_target)
+                    if _tType != Core.PieceType.pawn and _tType != Core.PieceType.king
+                        if Core.pieceAttacksSquare(_after.mat_board, _move.toRow, _move.toCol, _r, _c)
+                            _hitsPiece := true
+        if _hitsPiece
+            _bonus := 1.0
+    _move.endgameAttackBonus := _bonus
+    _bonus
+
+//@function True when the pawn of _side on (_row, _col) is PASSED: no enemy pawn on its own or either adjacent file, on any row between it and promotion.
+// The standard test. "Ahead" is smaller rows for White, larger for Black.
+//@param    _board The board to read.
+//@param    _row The pawn's row.
+//@param    _col The pawn's column.
+//@param    _side The pawn's side.
+//@returns  True when no enemy pawn can block or capture the pawn on its way to promotion.
+f_pawnIsPassed(matrix<Core.Piece> _board, int _row, int _col, Core.Side _side) =>
+    int _dir = _side == Core.Side.white ? -1 : 1  // Marching direction: White toward row 0, Black toward row 7.
+    Core.Piece _enemyPawn = _side == Core.Side.white ? Core.Piece.blackPawn : Core.Piece.whitePawn
+    bool _passed = true
+    for _dCol = -1 to 1  // Own file and the two adjacent files.
+        int _c = _col + _dCol
+        if _c >= 0 and _c <= 7
+            int _r = _row + _dir
+            while _r >= 0 and _r <= 7  // Every square from just ahead of the pawn to the promotion rank.
+                if _board.get(_r, _c) == _enemyPawn
+                    _passed := false
+                _r += _dir
+    _passed
+
+//@function Counts the rows this move's mover would be FROM promotion after it lands, if it is a passed pawn of _side. 0 = on the promotion rank, -1 when not a passed-pawn advance.
+// Recomputes passedness on the AFTER board so a push that CREATES a passer scores too.
+//@param    _position The position the move is made from.
+//@param    _move The candidate move.
+//@param    _side The mover's side.
+//@returns  Rows to promotion after the move (0..6) for a passed-pawn advance, else -1.
+f_passedPushDistance(Core.o_position _position, Core.o_move _move, Core.Side _side) =>
+    int _result = -1
+    Core.Piece _mover = _position.mat_board.get(_move.fromRow, _move.fromCol)
+    if Core.pieceTypeOf(_mover) == Core.PieceType.pawn
+        Core.o_position _after = Core.copyPosition(_position)  // applyMove() mutates in place, so work on a copy.
+        Core.applyMove(_after, _move)
+        // On a promotion the pawn is gone (it became a queen). Count it as distance 0, the maximum push.
+        if _move.promotion != Core.Piece.empty
+            _result := 0
+        else if f_pawnIsPassed(_after.mat_board, _move.toRow, _move.toCol, _side)
+            int _promoRow = _side == Core.Side.white ? 0 : 7
+            _result := math.abs(_move.toRow - _promoRow)
+    _result
+
+//@function Scores one endgame move for the AGGRESSIVE branch: the sum of the four CHEAP components (passed-pawn push, rook/queen on the 7th, rook behind our passer, king activity), all coordinate maths.
+// The consumer scores the fifth (safe-attack) and ruleEndgame() adds it. See the region header for weights. Higher is better. 0 makes no progress.
+//@param    _position The position the move is made from.
+//@param    _move The candidate move (already known safe by the caller).
+//@param    _side The mover's side.
+//@param    _lead Our signed material lead, for the king-target choice.
+//@returns  The progress score as a float.
+f_endgameProgressScore(Core.o_position _position, Core.o_move _move, Core.Side _side, float _lead) =>
+    matrix<Core.Piece> _board = _position.mat_board
+    Core.Piece _mover = _board.get(_move.fromRow, _move.fromCol)
+    Core.PieceType _moverType = Core.pieceTypeOf(_mover)
+    float _score = 0.0
+    // (a) Passed-pawn push, scored by rows-from-promotion after the move.
+    int _pushDist = f_passedPushDistance(_position, _move, _side)
+    if _pushDist == 0
+        _score += 5.0
+    else if _pushDist == 1
+        _score += 5.0
+    else if _pushDist == 2
+        _score += 3.0
+    else if _pushDist == 3
+        _score += 2.0
+    else if _pushDist >= 4
+        _score += 1.0
+    // (c) Rook or queen landing on the opponent's 2nd rank (the 7th from our side): row 1 for White, row 6 for Black.
+    int _seventhRow = _side == Core.Side.white ? 1 : 6
+    if (_moverType == Core.PieceType.rook or _moverType == Core.PieceType.queen) and _move.toRow == _seventhRow
+        _score += 3.0
+    // (b) Rook or queen landing on the same file as one of our passed pawns, BEHIND it (further from promotion): higher row for White, lower row for Black.
+    // One scan of our pawns on the destination file.
+    if _moverType == Core.PieceType.rook or _moverType == Core.PieceType.queen
+        Core.Piece _ownPawn = _side == Core.Side.white ? Core.Piece.whitePawn : Core.Piece.blackPawn
+        bool _behindPasser = false
+        for _r = 0 to 7
+            if _board.get(_r, _move.toCol) == _ownPawn and f_pawnIsPassed(_board, _r, _move.toCol, _side)
+                bool _behind = _side == Core.Side.white ? _move.toRow > _r : _move.toRow < _r
+                if _behind
+                    _behindPasser := true
+        if _behindPasser
+            _score += 2.0
+    // (d) King activity: score a king move by how much closer it gets to its target (Chebyshev, the king's metric).
+    if _moverType == Core.PieceType.king
+        Core.Side _enemy = _side == Core.Side.white ? Core.Side.black : Core.Side.white
+        int _targetRow = na
+        int _targetCol = na
+        if _lead >= ENDGAME_MATING_LEAD  // We are mating: drive toward the enemy king.
+            [_ekRow, _ekCol] = Core.findKing(_position, _enemy)
+            _targetRow := _ekRow
+            _targetCol := _ekCol
+        else  // Escort our most advanced passer, or centralise if none.
+            int _bestPasserRow = na
+            int _bestPasserCol = na
+            int _bestDistToPromo = 99
+            Core.Piece _ownPawn = _side == Core.Side.white ? Core.Piece.whitePawn : Core.Piece.blackPawn
+            int _promoRow = _side == Core.Side.white ? 0 : 7
+            for _r = 0 to 7
+                for _c = 0 to 7
+                    if _board.get(_r, _c) == _ownPawn and f_pawnIsPassed(_board, _r, _c, _side)
+                        int _d = math.abs(_r - _promoRow)
+                        if _d < _bestDistToPromo
+                            _bestDistToPromo := _d
+                            _bestPasserRow := _r
+                            _bestPasserCol := _c
+            if not na(_bestPasserRow)
+                _targetRow := _bestPasserRow
+                _targetCol := _bestPasserCol
+            else  // Centralise: aim at the nearer central square (rows/columns 3-4).
+                _targetRow := _move.toRow <= 3 ? 3 : 4
+                _targetCol := _move.toCol <= 3 ? 3 : 4
+        int _distBefore = math.max(math.abs(_move.fromRow - _targetRow), math.abs(_move.fromCol - _targetCol))
+        int _distAfter = math.max(math.abs(_move.toRow - _targetRow), math.abs(_move.toCol - _targetCol))
+        _score += (_distBefore - _distAfter) * 2.0  // ~2 a step closer. A step away scores negative, discouraging drift.
+    // (e) We do NOT compute the safe-attack component here, because it is the one expensive test. The consumer scores it on the foresee bars with stampEndgameAttackBonus() and ruleEndgame() reads it.
+    // This function stays coordinate maths.
+    _score
+
+//@function Rule 8, the endgame rung. Fires only when the opponent is thinned to an endgame. Then it CONVERTS a winning/equal position (push passers, rook to the 7th, active king, safe attacks) or HOLDS a losing one (no pawn pushes, king near its pawns, else stand down for the draw).
+// na (falls through to develop) when not an endgame or nothing safe makes progress. Every offered move passed the foresee safety filter. Seeded ties.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves, each carrying its `endgameAttackBonus` (0 when it was never scored).
+//@param    _seed The seed for the pick.
+//@returns  A move or na.
+export ruleEndgame(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    Core.o_move _chosen = na
+    Core.Side _side = _position.sideToMove
+    if f_enemyNonPawnMaterial(_position, _side) <= ENDGAME_NONPAWN_MAX  // Endgame gate: opponent thinned out.
+        float _lead = materialLead(_position, _side)
+        if _lead >= ENDGAME_FIGHT_FLOOR
+            // AGGRESSIVE: score every safe, material-keeping move. Play the best, seeded ties.
+            // We exclude a negative score (the same stand-down), so a progress move can never hang.
+            array<Core.o_move> _a_progress = array.new<Core.o_move>()
+            array<float> _a_scores = array.new<float>()
+            for [_i, _move] in _a_moves
+                if _move.foreseeScore >= 0 and not _move.repeatsPosition  // No hanging moves, and no re-entry loops: the state bonuses (7th rank, behind-passer, attack) would pay again for leaving a good square and coming back, so a move recreating a seen position is refused.
+                    float _s = f_endgameProgressScore(_position, _move, _side, _lead) + _move.endgameAttackBonus  // The safe-attack nudge rides in from the foresee bars.
+                    if _s > 0.0
+                        _a_progress.push(_move)
+                        _a_scores.push(_s)
+            _chosen := _a_progress.size() > 0 ? pickBestScored(_a_progress, _a_scores, _seed) : na
+        else
+            // DEFENSIVE (down >= 3): hold. Only non-pushing safe moves, preferring the king nearest its own pawns.
+            // If none qualifies, na and let develop/fallback shuffle toward the draw.
+            array<Core.o_move> _a_hold = array.new<Core.o_move>()
+            array<float> _a_holdScores = array.new<float>()
+            Core.Piece _ownPawn = _side == Core.Side.white ? Core.Piece.whitePawn : Core.Piece.blackPawn
+            for [_i, _move] in _a_moves
+                Core.Piece _mover = _position.mat_board.get(_move.fromRow, _move.fromCol)
+                bool _isPawnPush = Core.pieceTypeOf(_mover) == Core.PieceType.pawn and not moveIsCapture(_position, _move)
+                if _move.foreseeScore >= 0 and not _isPawnPush and moveDestIsSafe(_position, _move)
+                    // Score: king moves prefer proximity to our nearest own pawn (negated distance).
+                    // Other moves score a flat 0, so a defensive king move outranks an aimless piece move but any safe non-push still qualifies.
+                    float _hs = 0.0
+                    if Core.pieceTypeOf(_mover) == Core.PieceType.king
+                        int _nearest = 99
+                        for _r = 0 to 7
+                            for _c = 0 to 7
+                                if _position.mat_board.get(_r, _c) == _ownPawn
+                                    int _d = math.max(math.abs(_move.toRow - _r), math.abs(_move.toCol - _c))
+                                    if _d < _nearest
+                                        _nearest := _d
+                        _hs := _nearest == 99 ? 0.0 : -1.0 * _nearest  // Closer to a pawn = higher (less negative). Float throughout to keep the ternary types consistent.
+                    _a_hold.push(_move)
+                    _a_holdScores.push(_hs)
+            _chosen := _a_hold.size() > 0 ? pickBestScored(_a_hold, _a_holdScores, _seed) : na
+    _chosen
+
+//#endregion RULE 8: ENDGAME
+
+//@function Rule 9, develop. It collects an ordered ladder of tiers in one pass, then picks from the FIRST non-empty tier (T1 highest), seeded.
+// A shield-flagged candidate goes to the discouraged pool instead of its tier -- except T5 (luft), the shield carve-out. Every tier requires a safe destination unless stated.
+//   T1 castle, T2 minors to the middle, T3 the rest of the opening moves, T4 rook activity, T5 luft, T6 advance.
+// The worst-placed-piece rescue interleaves two slots: a GATED rescue between luft and advance (a piece at or under RESCUE_GATE_PERCENT stuckness gets fixed before another advance), and an UNGATED one between advance and the discouraged pool.
+// The tier loop also tallies the rescue census's safe-move counts, so the census costs no extra pass. Returns the move plus a debug detail naming the firing tier/slot.
+// Every tier, both rescue slots and the discouraged pool EXCLUDE a negative-scoring candidate OUTRIGHT -- the STAND-DOWN, so when every developing move loses material the rule returns na and rule 10 finds a clean non-developing move.
+// The discouraged pool thus holds only shield-flagged, material-keeping moves.
+// Within the firing tier the pick prefers the candidate that best KNITS the army (interlock delta), seeded ties. The two rescue slots keep their own reachable-squares scoring.
+//@param    _position The position to move in.
+//@param    _a_moves The annotated legal moves.
+//@param    _seed The seed for the pick.
+//@returns  A tuple [_chosen, _detail]: a developing move or na, and the firing tier's debug name or "".
+export ruleDevelop(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    matrix<Core.Piece> _board = _position.mat_board
+    Core.Side _mover = _position.sideToMove
+    Core.Side _enemy = _mover == Core.Side.white ? Core.Side.black : Core.Side.white
+    int _backRank = _mover == Core.Side.white ? 7 : 0
+    int _pawnStartRow = _mover == Core.Side.white ? 6 : 1
+    // The enemy king's square, for the T6 advance test. Found once before the loop.
+    [_enemyKingRow, _enemyKingCol] = Core.findKing(_position, _enemy)
+    // Our king's square and whether it is castled-ish, for the T5 luft test. Found once before the loop.
+    [_kingRow, _kingCol] = Core.findKing(_position, _mover)
+    bool _kingCastledIsh = _kingRow == _backRank and (_kingCol >= 6 or _kingCol <= 2)
+    // Luft only when the king needs air: if ANY forward neighbour off the back rank is already empty, a back-rank check has an answer and a luft push would loosen the shield for nothing.
+    // Side squares on the back rank do not count. This also makes luft one-shot -- the push vacates a forward square, closing the tier.
+    int _frontRow = _backRank + (_mover == Core.Side.white ? -1 : 1)  // Rows count from rank 8 down, so White's "forward" is the smaller row.
+    bool _kingHasAir = false
+    if _kingCastledIsh
+        for _dCol = -1 to 1
+            int _airCol = _kingCol + _dCol
+            if Core.onBoard(_frontRow, _airCol) and _board.get(_frontRow, _airCol) == Core.Piece.empty
+                _kingHasAir := true
+    // Does the enemy still have a rook or queen? The luft tier only matters against heavy pieces. Scanned once.
+    Core.Piece _enemyRook = _enemy == Core.Side.white ? Core.Piece.whiteRook : Core.Piece.blackRook
+    Core.Piece _enemyQueen = _enemy == Core.Side.white ? Core.Piece.whiteQueen : Core.Piece.blackQueen
+    bool _enemyHasHeavy = false
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Core.Piece _p = _board.get(_row, _col)
+            if _p == _enemyRook or _p == _enemyQueen
+                _enemyHasHeavy := true
+                break
+        if _enemyHasHeavy
+            break
+    // The rescue census: every friendly knight, bishop and rook, plus the queen once past OPENING_PLIES (an early "rescue" is how queens get dragged out and trapped, so she sits out the opening).
+    // The king is never a candidate (he would "improve" into the centre). Pawns never are. Safe-move counts are tallied by the tier loop below, which computes each move's safety anyway.
+    int _pliesPlayed = (_position.fullmoveCount - 1) * 2 + (_mover == Core.Side.black ? 1 : 0)
+    array<int> _a_resRow = array.new<int>()
+    array<int> _a_resCol = array.new<int>()
+    array<Core.PieceType> _a_resType = array.new<Core.PieceType>()
+    array<float> _a_resValue = array.new<float>()
+    array<int> _a_resMax = array.new<int>()
+    array<int> _a_resSafe = array.new<int>()
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Core.Piece _p = _board.get(_row, _col)
+            if _p != Core.Piece.empty and Core.pieceBelongsTo(_p, _mover)
+                Core.PieceType _pt = Core.pieceTypeOf(_p)
+                bool _inCensus = _pt == Core.PieceType.knight or _pt == Core.PieceType.bishop or _pt == Core.PieceType.rook or (_pt == Core.PieceType.queen and _pliesPlayed >= OPENING_PLIES)
+                if _inCensus
+                    _a_resRow.push(_row)
+                    _a_resCol.push(_col)
+                    _a_resType.push(_pt)
+                    _a_resValue.push(Core.pieceValue(_p))
+                    _a_resMax.push(f_typeMaxMoves(_pt))
+                    _a_resSafe.push(0)
+    // The six tiers plus the discouraged pool.
+    array<Core.o_move> _a_t1 = array.new<Core.o_move>()  // Castle.
+    array<Core.o_move> _a_t2 = array.new<Core.o_move>()  // Minors to the middle.
+    array<Core.o_move> _a_t3 = array.new<Core.o_move>()  // Rest of the opening moves.
+    array<Core.o_move> _a_t4 = array.new<Core.o_move>()  // Rook activity.
+    array<Core.o_move> _a_t5 = array.new<Core.o_move>()  // Luft (ignores the shield flag by design).
+    array<Core.o_move> _a_t6 = array.new<Core.o_move>()  // Advance towards the enemy king.
+    array<Core.o_move> _a_discouraged = array.new<Core.o_move>()  // Shield-flagged candidates demoted out of their tier.
+    for [_i, _move] in _a_moves
+        Core.Piece _piece = _board.get(_move.fromRow, _move.fromCol)
+        bool _safeDest = moveDestIsSafe(_position, _move)
+        // Census tally: a safe move (captures included) counts towards its piece's mobility.
+        if _safeDest
+            for [_ci, _censusRow] in _a_resRow
+                if _censusRow == _move.fromRow and _a_resCol.get(_ci) == _move.fromCol
+                    _a_resSafe.set(_ci, _a_resSafe.get(_ci) + 1)
+                    break
+        if _move.foreseeScore < 0 or _move.repeatsPosition
+            continue  // Stand-down: we exclude any move that loses material by its score, or recreates a seen position while winning, from every tier AND the discouraged pool, so rule 10 finds a clean non-developing move instead. The census tally above still counted it -- mobility is a placement measure, not survival.
+        bool _isShield = _move.isShield
+        bool _isUndo = _move.isUndo
+        Core.PieceType _pieceType = Core.pieceTypeOf(_piece)
+        bool _isKnight = _pieceType == Core.PieceType.knight
+        bool _isBishop = _pieceType == Core.PieceType.bishop
+        bool _isRook = _pieceType == Core.PieceType.rook
+        bool _isQueen = _pieceType == Core.PieceType.queen
+        bool _isPawn = _pieceType == Core.PieceType.pawn
+        // T1: castle. A castle is never shield-flagged (test (b) exempts king moves). The flag check is uniformity.
+        if _move.isCastle
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t1.push(_move)
+        // T2: a minor (knight or bishop) leaving the back rank for a middle column (not the a- or h-file).
+        else if (_isKnight or _isBishop) and _move.fromRow == _backRank and _move.toCol != 0 and _move.toCol != 7 and _safeDest
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t2.push(_move)
+        // T3 (3a): a minor off the back rank to a RIM column (a- or h-file).
+        else if (_isKnight or _isBishop) and _move.fromRow == _backRank and (_move.toCol == 0 or _move.toCol == 7) and _safeDest
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t3.push(_move)
+        // T3 (3b, double): a centre d- or e-pawn (fromCol 3 or 4) double push from its start row to a safe square.
+        else if _isPawn and (_move.fromCol == 3 or _move.fromCol == 4) and _move.fromRow == _pawnStartRow and math.abs(_move.toRow - _move.fromRow) == 2 and _safeDest
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t3.push(_move)
+        // T3 (3b, single): the SINGLE centre-pawn push, only when safe AND that pawn has no safe double push in the list ("single when the double fails the safe-dest test").
+        else if _isPawn and (_move.fromCol == 3 or _move.fromCol == 4) and _move.fromRow == _pawnStartRow and math.abs(_move.toRow - _move.fromRow) == 1 and _safeDest and not f_hasSafeDoublePush(_position, _a_moves, _move.fromRow, _move.fromCol)
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t3.push(_move)
+        // T3 (3c): a line-opening pawn move -- a quiet, safe pawn move whose from-square is one of the two diagonal-front squares of a friendly bishop still on its HOME square.
+        // This is the exit that frees a boxed-in bishop.
+        else if _isPawn and _safeDest and not moveIsCapture(_position, _move) and f_opensBishopLine(_board, _mover, _move.fromRow, _move.fromCol)
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t3.push(_move)
+        // T4 (4a): a rook changing file to an open or semi-open file (no FRIENDLY pawn on the destination file).
+        else if _isRook and _move.toCol != _move.fromCol and _safeDest and not f_fileHasFriendlyPawn(_board, _mover, _move.toCol)
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t4.push(_move)
+        // T4 (4b): connecting rooks -- the move vacates the last piece between our two back-rank rooks.
+        else if _safeDest and f_connectsRooks(_board, _mover, _backRank, _move)
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t4.push(_move)
+        // T5: luft. IGNORES the shield flag -- this tier IS the shield carve-out.
+        // A quiet, safe single-step push of a g/h pawn in front of a kingside castled king (or a/b in front of a queenside one) when the enemy still has a rook or queen, and the king has NO air yet (_kingHasAir false, so the tier is one-shot).
+        else if _isPawn and not moveIsCapture(_position, _move) and _safeDest and _move.fromRow == _pawnStartRow and math.abs(_move.toRow - _move.fromRow) == 1 and _kingCastledIsh and not _kingHasAir and _enemyHasHeavy and ((_kingCol >= 6 and (_move.fromCol == 6 or _move.fromCol == 7)) or (_kingCol <= 2 and (_move.fromCol == 0 or _move.fromCol == 1)))
+            _a_t5.push(_move)  // No shield branch: luft is exempt (but not from losing material -- the stand-down above excluded any negative-scoring push).
+        // T6: advance a piece (never a pawn or king) to a safe, non-capture square strictly closer to the enemy king in Chebyshev distance.
+        // We EXCLUDE an undo-flagged move OUTRIGHT (not even the discouraged pool): re-suggesting the shuffle is what the flag exists to stop.
+        else if (_isKnight or _isBishop or _isRook or _isQueen) and not _isUndo and _safeDest and not moveIsCapture(_position, _move) and _enemyKingRow != -1 and f_chebyshev(_move.toRow, _move.toCol, _enemyKingRow, _enemyKingCol) < f_chebyshev(_move.fromRow, _move.fromCol, _enemyKingRow, _enemyKingCol)
+            if _isShield
+                _a_discouraged.push(_move)
+            else
+                _a_t6.push(_move)
+    // Pick from the highest non-empty tier, the two rescue slots interleaved: GATED rescue outranks advance (fix a stuck piece while still looking aggressive), UNGATED runs when advance is empty too (improve the worst-placed piece), discouraged pool last.
+    // Slot A passes a throwaway discouraged array so a flagged candidate is not pushed twice when slot B re-walks. Slot B runs before the pool is consulted.
+    Core.o_move _chosen = na
+    string _detail = ""
+    int _interlockBefore = f_interlockCount(_board, _mover)  // Computed once. Every tier pick reads it.
+    if _a_t1.size() > 0
+        [_tierMove, _tierKnit] = f_pickByInterlock(_position, _a_t1, _seed, _interlockBefore)
+        _chosen := _tierMove
+        _detail := "castle" + f_knitSuffix(_tierKnit)
+    else if _a_t2.size() > 0
+        [_tierMove, _tierKnit] = f_pickByInterlock(_position, _a_t2, _seed, _interlockBefore)
+        _chosen := _tierMove
+        _detail := "minor out" + f_knitSuffix(_tierKnit)
+    else if _a_t3.size() > 0
+        [_tierMove, _tierKnit] = f_pickByInterlock(_position, _a_t3, _seed, _interlockBefore)
+        _chosen := _tierMove
+        _detail := "opening" + f_knitSuffix(_tierKnit)
+    else if _a_t4.size() > 0
+        [_tierMove, _tierKnit] = f_pickByInterlock(_position, _a_t4, _seed, _interlockBefore)
+        _chosen := _tierMove
+        _detail := "rook activity" + f_knitSuffix(_tierKnit)
+    else if _a_t5.size() > 0
+        [_tierMove, _tierKnit] = f_pickByInterlock(_position, _a_t5, _seed, _interlockBefore)
+        _chosen := _tierMove
+        _detail := "luft" + f_knitSuffix(_tierKnit)
+    else
+        [_rescueMove, _rescueDetail] = f_rescuePick(_position, _a_moves, _seed, true, _a_resRow, _a_resCol, _a_resType, _a_resValue, _a_resMax, _a_resSafe, _pliesPlayed, array.new<Core.o_move>())
+        if not na(_rescueMove)
+            _chosen := _rescueMove
+            _detail := _rescueDetail
+        else if _a_t6.size() > 0
+            [_tierMove, _tierKnit] = f_pickByInterlock(_position, _a_t6, _seed, _interlockBefore)
+            _chosen := _tierMove
+            _detail := "advance" + f_knitSuffix(_tierKnit)
+        else
+            [_improveMove, _improveDetail] = f_rescuePick(_position, _a_moves, _seed, false, _a_resRow, _a_resCol, _a_resType, _a_resValue, _a_resMax, _a_resSafe, _pliesPlayed, _a_discouraged)
+            if not na(_improveMove)
+                _chosen := _improveMove
+                _detail := _improveDetail
+            else if _a_discouraged.size() > 0
+                array<float> _a_discScores = array.new<float>()
+                for [_i, _move] in _a_discouraged
+                    _a_discScores.push(_move.foreseeScore)
+                _chosen := pickBestScored(_a_discouraged, _a_discScores, _seed)  // Every discouraged move keeps material (shield-flagged only). Best score still orders them.
+                _detail := "discouraged"
+    [_chosen, _detail]
+
+//@function Rule 10, fallback -- and the resign decision.
+// Five pools, and the first non-empty one wins. Pool 1 is safe, unflagged and non-negative, picked by INTERLOCK delta so even the last-resort shuffle knits the army. Pool 2 is safe and non-negative with the flags allowed, picked by seed. Pool 3 is safe but losing by the score, best score first. Pool 4 is any move that does NOT walk into a foreseen mate, best score first. Pool 5 is the case where every legal move walks into a foreseen mate, and a seeded coin either plays the least-bad doomed move or RESIGNS (na returned, consumer announces it).
+// The replay ruled out game-end before the ladder, so a live position always returns either a move or a resignation.
+//@param    _position The position to move in. Needed by moveDestIsSafe() to value the piece that lands.
+//@param    _a_moves The annotated, foresee-scored legal moves.
+//@param    _seed The seed for the picks and the coin.
+//@returns  A tuple [_chosen, _resigned]: the move (na when resigning), and true when the engine resigns.
+export ruleFallback(Core.o_position _position, array<Core.o_move> _a_moves, int _seed) =>
+    array<Core.o_move> _a_clean = array.new<Core.o_move>()   // Safe, unflagged, keeps material.
+    array<Core.o_move> _a_keeps = array.new<Core.o_move>()   // Safe, keeps material (flags allowed).
+    array<Core.o_move> _a_safe = array.new<Core.o_move>()    // Safe but losing by the score (never mate-doomed).
+    array<float> _a_safeScores = array.new<float>()
+    array<Core.o_move> _a_alive = array.new<Core.o_move>()   // Any legal move that avoids the foreseen mate.
+    array<float> _a_aliveScores = array.new<float>()
+    array<Core.o_move> _a_doomed = array.new<Core.o_move>()  // Every one of these walks into a foreseen mate.
+    array<float> _a_doomedScores = array.new<float>()
+    for [_i, _move] in _a_moves
+        if _move.foreseeScore <= -MATE_SCORE
+            _a_doomed.push(_move)
+            _a_doomedScores.push(_move.foreseeScore)
+        else
+            _a_alive.push(_move)
+            _a_aliveScores.push(_move.foreseeScore)
+            if moveDestIsSafe(_position, _move)
+                if _move.foreseeScore < 0
+                    _a_safe.push(_move)
+                    _a_safeScores.push(_move.foreseeScore)
+                else
+                    _a_keeps.push(_move)
+                    if not _move.isShield and not _move.isUndo
+                        _a_clean.push(_move)
+    Core.o_move _chosen = na
+    bool _resigned = false
+    if _a_clean.size() > 0
+        int _interlockBefore = f_interlockCount(_position.mat_board, _position.sideToMove)
+        [_cleanMove, _cleanKnit] = f_pickByInterlock(_position, _a_clean, _seed, _interlockBefore)
+        _chosen := _cleanMove
+    else if _a_keeps.size() > 0
+        _chosen := pickRandom(_a_keeps, _seed)
+    else if _a_safe.size() > 0
+        _chosen := pickBestScored(_a_safe, _a_safeScores, _seed)  // Losing either way: lose the least.
+    else if _a_alive.size() > 0
+        _chosen := pickBestScored(_a_alive, _a_aliveScores, _seed)
+    else
+        // Every legal move walks into a foreseen mate. The coin: heads plays the least-bad doomed move and makes the opponent prove it, tails resigns.
+        // Seeded, so a given position always lands the same side.
+        _resigned := randomIndex(2, mixSeedWithTime(_seed, RESIGN_COIN_SALT)) == 1
+        if not _resigned
+            _chosen := pickBestScored(_a_doomed, _a_doomedScores, _seed)
+    [_chosen, _resigned]
+
+//#endregion THE TEN-RULE LADDER

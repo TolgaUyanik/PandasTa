@@ -1,0 +1,593 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © julzALGO
+
+//@version=6
+strategy(
+     "Smart Trend Strategy | julzALGO",
+     shorttitle=" STS",
+     overlay=true,
+     fill_orders_on_standard_ohlc=true,
+     pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0,
+     slippage=15,
+     process_orders_on_close=true,
+     max_lines_count=250,
+     max_labels_count=250,
+     max_boxes_count=50,
+     max_bars_back=5000
+)
+
+// -----------------------------------------------------------------------------
+// Inputs
+// -----------------------------------------------------------------------------
+groupSmooth = "KAMA Kalman"
+src = input.source(close, "Source", group=groupSmooth)
+erLen = input.int(20, "ER Length", minval=1, group=groupSmooth)
+fastLen = input.int(5, "Fast Length", minval=1, group=groupSmooth)
+slowLen = input.int(30, "Slow Length", minval=2, group=groupSmooth)
+processNoise = input.float(0.0001, "Kalman Process Noise", minval=0.0, step=0.0001, group=groupSmooth)
+measurementNoise = input.float(0.01, "Kalman Measurement Noise", minval=0.000001, step=0.001, group=groupSmooth)
+
+groupStructure = "BOS / CHoCH Confirmation"
+pivotLen = input.int(10, "Structure Pivot Length", minval=2, group=groupStructure)
+breakMode = input.string("Close", "Break Confirmation", options=["Close", "Wick"], group=groupStructure)
+entryConfirm = input.string("BOS or CHoCH", "Entry Confirmation", options=["BOS or CHoCH", "BOS Only", "CHoCH Only", "BOS and CHoCH Recent"], group=groupStructure)
+syncBars = input.int(10, "KAMA/Structure Sync Bars", minval=0, maxval=100, group=groupStructure)
+showStructureLines = input.bool(true, "Show BOS / CHoCH Lines", group=groupStructure)
+showStructureMarks = input.bool(true, "Show BOS / CHoCH Marks", group=groupStructure)
+maxStructureMarks = input.int(50, "Max Structure Marks", minval=5, maxval=200, group=groupStructure)
+
+groupRR = "Split RR"
+slMode = input.string("ATR", "Stop Loss Type", options=["Structure", "ATR", "Percent"], group=groupRR)
+longRR = input.float(2.0, "Long Risk:Reward", minval=0.1, step=0.1, group=groupRR)
+shortRR = input.float(1.0, "Short Risk:Reward", minval=0.1, step=0.1, group=groupRR)
+atrLen = input.int(14, "ATR Length", minval=1, group=groupRR)
+atrMult = input.float(3.0, "ATR Multiplier", minval=0.1, step=0.1, group=groupRR)
+slPercent = input.float(1.0, "Percent Stop", minval=0.01, step=0.1, group=groupRR)
+structureBufferTicks = input.int(0, "Structure Stop Buffer (ticks)", minval=0, maxval=500, group=groupRR)
+fallbackToAtr = input.bool(true, "Fallback To ATR If Structure SL Invalid", group=groupRR)
+
+groupTrade = "Strategy"
+allowLong = input.bool(true, "Allow Long", group=groupTrade)
+allowShort = input.bool(true, "Allow Short", group=groupTrade)
+closeOnOppositeSignal = input.bool(true, "Close On Opposite Signal", group=groupTrade)
+useBacktestWindow = input.bool(true, "Limit Backtest Window", group=groupTrade)
+backtestDays = input.int(7, "Backtest Days", minval=1, maxval=3650, group=groupTrade)
+
+groupDisplay = "Display"
+showSignals = input.bool(true, "Show Entry Signals", group=groupDisplay)
+showTradeLevels = input.bool(true, "Show RR Box / Labels", group=groupDisplay)
+rrLabelOffset = input.int(10, "RR Label Offset Bars", minval=1, maxval=100, group=groupDisplay)
+tpBoxAtrPad = input.float(0.20, "TP Box ATR Padding", minval=0.0, step=0.05, group=groupDisplay)
+showDashboard = input.bool(true, "Show Dashboard", group=groupDisplay)
+colorBars = input.bool(false, "Color Bars", group=groupDisplay)
+
+groupColors = "Colors"
+bullCol = input.color(color.rgb(0, 176, 230), "Bull", group=groupColors)
+bearCol = input.color(color.rgb(137, 82, 255), "Bear", group=groupColors)
+neutralCol = input.color(color.rgb(145, 152, 170), "Neutral", group=groupColors)
+kamaCol = input.color(color.rgb(255, 196, 87), "KAMA", group=groupColors)
+entryCol = input.color(color.white, "Entry", group=groupColors)
+stopCol = input.color(color.rgb(255, 75, 85), "Stop", group=groupColors)
+targetCol = input.color(color.rgb(80, 220, 140), "RR Target", group=groupColors)
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+withinBars(int a, int b, int bars) =>
+    not na(a) and not na(b) and math.abs(a - b) <= bars
+
+int backtestMs = backtestDays * 24 * 60 * 60 * 1000
+bool inBacktestWindow = not useBacktestWindow or time >= timenow - backtestMs
+
+// -----------------------------------------------------------------------------
+// KAMA
+// -----------------------------------------------------------------------------
+float change = math.abs(src - nz(src[erLen], src))
+float volatility = 0.0
+
+for i = 0 to erLen - 1
+    volatility += math.abs(nz(src[i], src) - nz(src[i + 1], src[i]))
+
+float er = volatility != 0.0 ? change / volatility : 0.0
+float fastSC = 2.0 / (fastLen + 1.0)
+float slowSC = 2.0 / (slowLen + 1.0)
+float sc = math.pow(er * (fastSC - slowSC) + slowSC, 2.0)
+
+var float kama = na
+kama := na(kama[1]) ? src : kama[1] + sc * (src - kama[1])
+
+// -----------------------------------------------------------------------------
+// Kalman Smoothing
+// -----------------------------------------------------------------------------
+var float kalman = na
+var float p = 1.0
+
+p += processNoise
+float k = p / (p + measurementNoise)
+kalman := na(kalman[1]) ? kama : kalman[1] + k * (kama - kalman[1])
+p := (1.0 - k) * p
+
+// -----------------------------------------------------------------------------
+// KAMA/Kalman Direction
+// -----------------------------------------------------------------------------
+var int signalTrend = 0
+signalTrend :=
+     kalman > nz(kalman[1], kalman) ? 1 :
+     kalman < nz(kalman[1], kalman) ? -1 :
+     nz(signalTrend[1], 0)
+
+bool bullFlip = signalTrend == 1 and nz(signalTrend[1], 0) != 1
+bool bearFlip = signalTrend == -1 and nz(signalTrend[1], 0) != -1
+
+// -----------------------------------------------------------------------------
+// BOS / CHoCH Structure
+// -----------------------------------------------------------------------------
+float pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+float pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastHighPivot = na
+var float lastLowPivot = na
+var int lastHighPivotBar = na
+var int lastLowPivotBar = na
+var bool highTaken = false
+var bool lowTaken = false
+var int structureTrend = 0
+
+if not na(pivotHigh)
+    lastHighPivot := pivotHigh
+    lastHighPivotBar := bar_index - pivotLen
+    highTaken := false
+
+if not na(pivotLow)
+    lastLowPivot := pivotLow
+    lastLowPivotBar := bar_index - pivotLen
+    lowTaken := false
+
+float highBreakSource = breakMode == "Close" ? close : high
+float lowBreakSource = breakMode == "Close" ? close : low
+
+bool bullBreak =
+     not na(lastHighPivot) and
+     not highTaken and
+     highBreakSource > lastHighPivot and
+     nz(highBreakSource[1], highBreakSource) <= lastHighPivot
+
+bool bearBreak =
+     not na(lastLowPivot) and
+     not lowTaken and
+     lowBreakSource < lastLowPivot and
+     nz(lowBreakSource[1], lowBreakSource) >= lastLowPivot
+
+bool bullChoch = bullBreak and structureTrend == -1
+bool bearChoch = bearBreak and structureTrend == 1
+bool bullBos = bullBreak and not bullChoch
+bool bearBos = bearBreak and not bearChoch
+
+var line[] structureLines = array.new<line>()
+
+drawStructure(int x1, float y, bool isBull, bool isChoch) =>
+    color css = isBull ? bullCol : bearCol
+    int lineWidth = isChoch ? 1 : 2
+
+    line ln = line.new(
+         x1,
+         y,
+         bar_index,
+         y,
+         xloc=xloc.bar_index,
+         color=css,
+         style=isChoch ? line.style_dashed : line.style_solid,
+         width=lineWidth
+    )
+
+    array.push(structureLines, ln)
+
+    while array.size(structureLines) > maxStructureMarks
+        line.delete(array.shift(structureLines))
+
+if bullBreak
+    highTaken := true
+
+    if showStructureLines and not na(lastHighPivotBar)
+        drawStructure(lastHighPivotBar, lastHighPivot, true, bullChoch)
+
+    structureTrend := 1
+
+if bearBreak
+    lowTaken := true
+
+    if showStructureLines and not na(lastLowPivotBar)
+        drawStructure(lastLowPivotBar, lastLowPivot, false, bearChoch)
+
+    structureTrend := -1
+
+// -----------------------------------------------------------------------------
+// Entry Confirmation
+// -----------------------------------------------------------------------------
+var int lastBullFlipBar = na
+var int lastBearFlipBar = na
+var int lastBullBosBar = na
+var int lastBearBosBar = na
+var int lastBullChochBar = na
+var int lastBearChochBar = na
+var int lastLongSignalBar = na
+var int lastShortSignalBar = na
+
+if bullFlip
+    lastBullFlipBar := bar_index
+
+if bearFlip
+    lastBearFlipBar := bar_index
+
+if bullBos
+    lastBullBosBar := bar_index
+
+if bearBos
+    lastBearBosBar := bar_index
+
+if bullChoch
+    lastBullChochBar := bar_index
+
+if bearChoch
+    lastBearChochBar := bar_index
+
+bool recentBullBos = withinBars(lastBullFlipBar, lastBullBosBar, syncBars)
+bool recentBearBos = withinBars(lastBearFlipBar, lastBearBosBar, syncBars)
+bool recentBullChoch = withinBars(lastBullFlipBar, lastBullChochBar, syncBars)
+bool recentBearChoch = withinBars(lastBearFlipBar, lastBearChochBar, syncBars)
+
+bool longStructureOk =
+     entryConfirm == "BOS Only" ? recentBullBos :
+     entryConfirm == "CHoCH Only" ? recentBullChoch :
+     entryConfirm == "BOS and CHoCH Recent" ? recentBullBos and recentBullChoch :
+     recentBullBos or recentBullChoch
+
+bool shortStructureOk =
+     entryConfirm == "BOS Only" ? recentBearBos :
+     entryConfirm == "CHoCH Only" ? recentBearChoch :
+     entryConfirm == "BOS and CHoCH Recent" ? recentBearBos and recentBearChoch :
+     recentBearBos or recentBearChoch
+
+bool longTriggerBar = bullFlip or bullBos or bullChoch
+bool shortTriggerBar = bearFlip or bearBos or bearChoch
+
+// -----------------------------------------------------------------------------
+// Split RR Risk Model
+// -----------------------------------------------------------------------------
+float atrNow = nz(ta.atr(atrLen), ta.tr(true))
+float atrRisk = atrNow * atrMult
+float structureBuffer = syminfo.mintick * structureBufferTicks
+
+float longStructureStop = not na(lastLowPivot) ? lastLowPivot - structureBuffer : na
+float shortStructureStop = not na(lastHighPivot) ? lastHighPivot + structureBuffer : na
+float longAtrStop = close - atrRisk
+float shortAtrStop = close + atrRisk
+float longPercentStop = close * (1.0 - slPercent / 100.0)
+float shortPercentStop = close * (1.0 + slPercent / 100.0)
+
+bool validLongStructureStop = not na(longStructureStop) and longStructureStop < close
+bool validShortStructureStop = not na(shortStructureStop) and shortStructureStop > close
+
+float longStop =
+     slMode == "Structure" ?
+     validLongStructureStop ? longStructureStop : fallbackToAtr ? longAtrStop : na :
+     slMode == "ATR" ? longAtrStop :
+     longPercentStop
+
+float shortStop =
+     slMode == "Structure" ?
+     validShortStructureStop ? shortStructureStop : fallbackToAtr ? shortAtrStop : na :
+     slMode == "ATR" ? shortAtrStop :
+     shortPercentStop
+
+float longRisk = not na(longStop) ? close - longStop : na
+float shortRisk = not na(shortStop) ? shortStop - close : na
+
+string longStopMode = slMode == "Structure" and validLongStructureStop ? "STRUCT" : slMode == "Structure" ? "ATR" : slMode
+string shortStopMode = slMode == "Structure" and validShortStructureStop ? "STRUCT" : slMode == "Structure" ? "ATR" : slMode
+
+bool validLongSignal =
+     allowLong and
+     inBacktestWindow and
+     signalTrend == 1 and
+     longStructureOk and
+     longTriggerBar and
+     not na(longRisk) and
+     longRisk > 0.0 and
+     strategy.position_size <= 0 and
+     bar_index != nz(lastLongSignalBar, -1)
+
+bool validShortSignal =
+     allowShort and
+     inBacktestWindow and
+     signalTrend == -1 and
+     shortStructureOk and
+     shortTriggerBar and
+     not na(shortRisk) and
+     shortRisk > 0.0 and
+     strategy.position_size >= 0 and
+     bar_index != nz(lastShortSignalBar, -1)
+
+if validLongSignal
+    lastLongSignalBar := bar_index
+
+if validShortSignal
+    lastShortSignalBar := bar_index
+
+// -----------------------------------------------------------------------------
+// Strategy Orders
+// -----------------------------------------------------------------------------
+var float activeEntry = na
+var float activeStop = na
+var float activeTarget = na
+var float activeRisk = na
+var float activeRR = na
+var float activeTpPad = na
+var string activeStopMode = ""
+var int activeEntryBar = na
+var int activeSide = 0
+
+var line entryLine = na
+var line stopLine = na
+var box targetBox = na
+var label entryLbl = na
+var label stopLbl = na
+var label targetLbl = na
+var linefill riskFill = na
+
+clearRrObjects() =>
+    if not na(riskFill)
+        linefill.delete(riskFill)
+
+    if not na(entryLine)
+        line.delete(entryLine)
+
+    if not na(stopLine)
+        line.delete(stopLine)
+
+    if not na(targetBox)
+        box.delete(targetBox)
+
+    if not na(entryLbl)
+        label.delete(entryLbl)
+
+    if not na(stopLbl)
+        label.delete(stopLbl)
+
+    if not na(targetLbl)
+        label.delete(targetLbl)
+
+if closeOnOppositeSignal and validLongSignal
+    strategy.close("Short")
+
+if closeOnOppositeSignal and validShortSignal
+    strategy.close("Long")
+
+if validLongSignal
+    clearRrObjects()
+    entryLine := na
+    stopLine := na
+    targetBox := na
+    entryLbl := na
+    stopLbl := na
+    targetLbl := na
+    riskFill := na
+
+    activeEntry := close
+    activeStop := longStop
+    activeRisk := longRisk
+    activeRR := longRR
+    activeTarget := close + activeRisk * activeRR
+    activeTpPad := math.max(atrNow * tpBoxAtrPad, syminfo.mintick)
+    activeStopMode := longStopMode
+    activeEntryBar := bar_index
+    activeSide := 1
+
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=activeStop, limit=activeTarget)
+
+if validShortSignal
+    clearRrObjects()
+    entryLine := na
+    stopLine := na
+    targetBox := na
+    entryLbl := na
+    stopLbl := na
+    targetLbl := na
+    riskFill := na
+
+    activeEntry := close
+    activeStop := shortStop
+    activeRisk := shortRisk
+    activeRR := shortRR
+    activeTarget := close - activeRisk * activeRR
+    activeTpPad := math.max(atrNow * tpBoxAtrPad, syminfo.mintick)
+    activeStopMode := shortStopMode
+    activeEntryBar := bar_index
+    activeSide := -1
+
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=activeStop, limit=activeTarget)
+
+if strategy.position_size > 0 and activeSide == 1 and not na(activeStop) and not na(activeTarget)
+    strategy.exit("Long Exit", "Long", stop=activeStop, limit=activeTarget)
+
+if strategy.position_size < 0 and activeSide == -1 and not na(activeStop) and not na(activeTarget)
+    strategy.exit("Short Exit", "Short", stop=activeStop, limit=activeTarget)
+
+bool longTargetHit = strategy.position_size > 0 and activeSide == 1 and not na(activeTarget) and high >= activeTarget
+bool shortTargetHit = strategy.position_size < 0 and activeSide == -1 and not na(activeTarget) and low <= activeTarget
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeEntry := na
+    activeStop := na
+    activeTarget := na
+    activeRisk := na
+    activeRR := na
+    activeTpPad := na
+    activeStopMode := ""
+    activeEntryBar := na
+    activeSide := 0
+
+if not showTradeLevels or activeSide == 0 or na(activeEntry) or na(activeStop) or na(activeTarget)
+    clearRrObjects()
+    entryLine := na
+    stopLine := na
+    targetBox := na
+    entryLbl := na
+    stopLbl := na
+    targetLbl := na
+    riskFill := na
+else
+    int rrLeft = nz(activeEntryBar, bar_index)
+    int rrLabelX = bar_index + rrLabelOffset
+    color rrSideCol = activeSide == 1 ? bullCol : bearCol
+    float rrPad = nz(activeTpPad, math.max(atrNow * tpBoxAtrPad, syminfo.mintick))
+
+    if na(entryLine)
+        entryLine := line.new(rrLeft, activeEntry, bar_index, activeEntry, xloc=xloc.bar_index, color=color.new(rrSideCol, 0), width=1)
+    else
+        line.set_xy1(entryLine, rrLeft, activeEntry)
+        line.set_xy2(entryLine, bar_index, activeEntry)
+        line.set_color(entryLine, color.new(rrSideCol, 0))
+
+    if na(stopLine)
+        stopLine := line.new(rrLeft, activeStop, bar_index, activeStop, xloc=xloc.bar_index, color=color.new(stopCol, 0), width=1)
+    else
+        line.set_xy1(stopLine, rrLeft, activeStop)
+        line.set_xy2(stopLine, bar_index, activeStop)
+        line.set_color(stopLine, color.new(stopCol, 0))
+
+    if na(targetBox)
+        targetBox := box.new(
+             rrLeft,
+             activeTarget + rrPad,
+             bar_index,
+             activeTarget - rrPad,
+             xloc=xloc.bar_index,
+             bgcolor=color.new(targetCol, 85),
+             border_color=color.new(targetCol, 45),
+             border_width=1
+        )
+    else
+        box.set_lefttop(targetBox, rrLeft, activeTarget + rrPad)
+        box.set_rightbottom(targetBox, bar_index, activeTarget - rrPad)
+        box.set_bgcolor(targetBox, color.new(targetCol, 85))
+        box.set_border_color(targetBox, color.new(targetCol, 45))
+
+    if na(riskFill) and not na(entryLine) and not na(stopLine)
+        riskFill := linefill.new(entryLine, stopLine, color.new(stopCol, 85))
+
+    string entryText = "Entry: " + str.tostring(activeEntry, format.mintick)
+    string stopText = "SL: " + str.tostring(activeStop, format.mintick)
+    string targetText = "TP: " + str.tostring(activeTarget, format.mintick) + " (1:" + str.tostring(activeRR, "#.##") + ")"
+
+    if na(entryLbl)
+        entryLbl := label.new(rrLabelX, activeEntry, entryText, xloc=xloc.bar_index, style=label.style_label_left, color=color.new(rrSideCol, 40), textcolor=color.white)
+    else
+        label.set_xy(entryLbl, rrLabelX, activeEntry)
+        label.set_text(entryLbl, entryText)
+        label.set_color(entryLbl, color.new(rrSideCol, 40))
+        label.set_textcolor(entryLbl, color.white)
+
+    if na(stopLbl)
+        stopLbl := label.new(rrLabelX, activeStop, stopText, xloc=xloc.bar_index, style=label.style_label_left, color=color.new(stopCol, 40), textcolor=color.white)
+    else
+        label.set_xy(stopLbl, rrLabelX, activeStop)
+        label.set_text(stopLbl, stopText)
+        label.set_color(stopLbl, color.new(stopCol, 40))
+        label.set_textcolor(stopLbl, color.white)
+
+    if na(targetLbl)
+        targetLbl := label.new(rrLabelX, activeTarget, targetText, xloc=xloc.bar_index, style=label.style_label_left, color=color.new(targetCol, 40), textcolor=color.white)
+    else
+        label.set_xy(targetLbl, rrLabelX, activeTarget)
+        label.set_text(targetLbl, targetText)
+        label.set_color(targetLbl, color.new(targetCol, 40))
+        label.set_textcolor(targetLbl, color.white)
+
+// -----------------------------------------------------------------------------
+// Plots
+// -----------------------------------------------------------------------------
+plot(kama, "KAMA", color=kamaCol, linewidth=1)
+plot(kalman, "Kalman", color=signalTrend == 1 ? bullCol : signalTrend == -1 ? bearCol : neutralCol, linewidth=3)
+
+plotshape(showStructureMarks and bullBos, title="Bull BOS", location=location.belowbar, color=color.new(bullCol, 20), style=shape.triangleup, size=size.tiny)
+plotshape(showStructureMarks and bearBos, title="Bear BOS", location=location.abovebar, color=color.new(bearCol, 20), style=shape.triangledown, size=size.tiny)
+plotshape(showStructureMarks and bullChoch, title="Bull CHoCH", location=location.belowbar, color=bullCol, style=shape.diamond, size=size.tiny)
+plotshape(showStructureMarks and bearChoch, title="Bear CHoCH", location=location.abovebar, color=bearCol, style=shape.diamond, size=size.tiny)
+
+plotshape(showSignals and validLongSignal, title="Long Entry", location=location.belowbar, color=bullCol, style=shape.triangleup, size=size.small)
+plotshape(showSignals and validShortSignal, title="Short Entry", location=location.abovebar, color=bearCol, style=shape.triangledown, size=size.small)
+plotshape(showSignals and longTargetHit, title="Long RR Target", location=location.abovebar, color=targetCol, style=shape.labeldown, size=size.tiny, text="TP", textcolor=color.white)
+plotshape(showSignals and shortTargetHit, title="Short RR Target", location=location.belowbar, color=targetCol, style=shape.labelup, size=size.tiny, text="TP", textcolor=color.white)
+
+barcolor(colorBars ? signalTrend == 1 ? color.new(bullCol, 65) : signalTrend == -1 ? color.new(bearCol, 65) : na : na)
+
+// -----------------------------------------------------------------------------
+// Dashboard
+// -----------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 8, frame_color=color.new(color.white, 85), frame_width=1, border_width=1)
+
+if barstate.islast and showDashboard
+    color rowBg = color.new(color.black, 78)
+    string trendTxt = signalTrend == 1 ? "BULL" : signalTrend == -1 ? "BEAR" : "WAIT"
+    color trendCol = signalTrend == 1 ? bullCol : signalTrend == -1 ? bearCol : neutralCol
+    string structureTxt = bullChoch ? "BULL CHoCH" : bearChoch ? "BEAR CHoCH" : bullBos ? "BULL BOS" : bearBos ? "BEAR BOS" : "WAIT"
+    color structureCol = (bullBos or bullChoch) ? bullCol : (bearBos or bearChoch) ? bearCol : neutralCol
+    string posTxt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    string riskTxt = na(activeRisk) ? "-" : str.tostring(activeRisk, format.mintick)
+    string rrTxt = na(activeRR) ? "L 1:" + str.tostring(longRR, "#.##") + " / S 1:" + str.tostring(shortRR, "#.##") : "1:" + str.tostring(activeRR, "#.##")
+    string backtestTxt = useBacktestWindow ? str.tostring(backtestDays) + "D" : "ALL"
+
+    table.cell(dash, 0, 0, "KALMAN", text_color=color.white, bgcolor=color.new(trendCol, 45))
+    table.cell(dash, 1, 0, trendTxt, text_color=color.white, bgcolor=color.new(trendCol, 45))
+    table.cell(dash, 0, 1, "STRUCT", text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 1, 1, structureTxt, text_color=structureCol, bgcolor=rowBg)
+    table.cell(dash, 0, 2, "CONFIRM", text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 1, 2, entryConfirm, text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 0, 3, "SYNC", text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 1, 3, str.tostring(syncBars), text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 0, 4, "SL", text_color=stopCol, bgcolor=rowBg)
+    table.cell(dash, 1, 4, activeStopMode == "" ? slMode : activeStopMode, text_color=stopCol, bgcolor=rowBg)
+    table.cell(dash, 0, 5, "TP", text_color=targetCol, bgcolor=rowBg)
+    table.cell(dash, 1, 5, rrTxt + " | R " + riskTxt, text_color=targetCol, bgcolor=rowBg)
+    table.cell(dash, 0, 6, "BT", text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 1, 6, backtestTxt, text_color=inBacktestWindow ? color.white : neutralCol, bgcolor=rowBg)
+    table.cell(dash, 0, 7, "POS", text_color=color.white, bgcolor=rowBg)
+    table.cell(dash, 1, 7, posTxt, text_color=color.white, bgcolor=rowBg)
+
+if barstate.islast and not showDashboard
+    table.clear(dash, 0, 0, 1, 7)
+
+// -----------------------------------------------------------------------------
+// Alerts
+// -----------------------------------------------------------------------------
+if validLongSignal
+    alert("Long Smart Trend Strategy on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if validShortSignal
+    alert("Short Smart Trend Strategy on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if bullBos
+    alert("Bull BOS on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if bearBos
+    alert("Bear BOS on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if bullChoch
+    alert("Bull CHoCH on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if bearChoch
+    alert("Bear CHoCH on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if longTargetHit
+    alert("Long RR target reached on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if shortTargetHit
+    alert("Short RR target reached on " + syminfo.ticker, alert.freq_once_per_bar_close)

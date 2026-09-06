@@ -1,0 +1,1149 @@
+//@version=6
+// @description TCD Scoring Library - Scoring engine for TCD (Trade Consistent & Disciplined).
+// Produces bull/bear scores, CT exhaustion scores, and trade recommendations
+// with entry/SL/target levels. Pure functions, no request.security calls.
+library("TCD_scoring_lib", overlay=true)
+
+// ============================================================================
+// EXPORTED TYPES
+// ============================================================================
+
+// Per-timeframe metrics (RSI + SMAs)
+export type MetricsData
+    float rsi
+    float sma20
+    float sma50
+    float sma89
+    float sma200
+
+// Per-timeframe data collected from security calls
+export type TFData
+    float bb_type       // 0=none, 1=bull break, 2=bear break, 3=poss bull, 4=poss bear
+    float bb_high       // Big bar high
+    float bb_low        // Big bar low
+    float bb_mid        // Big bar midpoint
+    float bb_atrx       // Big bar ATR multiple
+    float trend         // 1.0=BUY, 0.0=SELL
+    float sl            // Trend stop loss level
+    float entry         // Trend entry level
+    float t1            // Target 1
+    float t2            // Target 2
+    float t3            // Target 3
+    float t1_hit        // 1.0=hit, 0.0=not
+    float t2_hit        // 1.0=hit
+    float t3_hit        // 1.0=hit
+    float failed_bd     // 1.0=failed breakdown detected
+    float failed_bo     // 1.0=failed breakout detected
+    float pa_bear_fail  // 1.0=bears broke below prior low but recovered
+    float pa_bull_fail  // 1.0=bulls broke above prior high but failed
+    float sup           // Nearest exhaustion support level
+    float res           // Nearest exhaustion resistance level
+    float prev_high     // Previous period high (trend TF only)
+    float prev_low      // Previous period low (trend TF only)
+    float atr14         // ATR(14) (signal TF only, for nearby levels filter)
+    float stdev20       // Stdev(close, 20) (base TF only, for Bollinger Band)
+    float rb_type       // Recent strong big bar: 1=BULL BREAK, 2=BEAR BREAK (trend/base only)
+    float rb_high       // Recent strong big bar: high
+    float rb_low        // Recent strong big bar: low
+    float rb_atrx       // Recent strong big bar: ATR multiple
+    float rb_time       // Recent strong big bar: bar timestamp
+    float rsi           // RSI(14)
+    float sma20         // SMA 20
+    float sma50         // SMA 50
+    float sma89         // SMA 89
+    float sma200        // SMA 200
+    float bars_from_sma89   // Bars since price last crossed SMA89 (retest detection)
+    float bars_from_sma20   // Bars since price last crossed SMA20 (retest detection, trend TF)
+    float murrey_zone       // Murrey zone (-2 to +2), na if not computed
+
+// Trade recommendation
+export type TradeRec
+    bool active         // Is this trade viable?
+    bool counter_trend  // Is this a counter-trend trade?
+    float entry_price
+    float sl_price
+    float t1_price
+    float t2_price
+    string entry_reason
+    string sl_reason
+    string t1_reason
+    string t2_reason
+    string status_text  // WAIT message when not active
+
+// Complete scoring result
+export type ScoreResult
+    int bull_score          // Core trend score (max 10)
+    int bear_score          // Core trend score (max 10)
+    int bull_reversal       // Bullish reversal risk (max 6) - warns trend may flip UP
+    int bear_reversal       // Bearish reversal risk (max 7) - warns trend may flip DOWN
+    string bull_reasons
+    string bear_reasons
+    string bull_rev_reasons // Bullish reversal reasons
+    string bear_rev_reasons // Bearish reversal reasons
+    string metrics_text     // Neutral metrics commentary (RSI, SMAs, approaching)
+    string pa_text          // Price action commentary
+    string debug_text       // Debug info (FBD levels, RSI, stops, etc.)
+    TradeRec scalp_long
+    TradeRec scalp_short
+    TradeRec swing_long
+    TradeRec swing_short
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+is_buy(float v) => nz(v) > 0.5
+
+is_hit(float v) => nz(v) > 0.5
+
+all_hit(float h1, float h2, float h3) => is_hit(h1) and is_hit(h2) and is_hit(h3)
+
+// Find the first unhit target from a TF's T1→T2→T3
+// Returns [price, suffix] where suffix is "T1", "T2", or "T3"
+next_target(float t1, float t1_hit, float t2, float t2_hit, float t3, float t3_hit) =>
+    float tp = na
+    string ts = ""
+    if not is_hit(t1_hit) and not na(t1)
+        tp := t1
+        ts := "T1"
+    else if not is_hit(t2_hit) and not na(t2)
+        tp := t2
+        ts := "T2"
+    else if not is_hit(t3_hit) and not na(t3)
+        tp := t3
+        ts := "T3"
+    [tp, ts]
+
+has_fbd(float v) => nz(v) > 0.5
+
+has_fbo(float v) => nz(v) > 0.5
+
+// --- Metrics commentary helpers ---
+
+// RSI summary line across timeframes (signal/trend/base)
+rsi_line(MetricsData d_met, MetricsData w_met, MetricsData m_met, string lbl_signal, string lbl_trend, string lbl_base) =>
+    "RSI  " + lbl_signal + ":" + str.tostring(math.round(nz(d_met.rsi), 0)) + "  " + lbl_trend + ":" + str.tostring(math.round(nz(w_met.rsi), 0)) + "  " + lbl_base + ":" + str.tostring(math.round(nz(m_met.rsi), 0))
+
+// SMA stack label for a single timeframe
+sma_stack_label(string tf, MetricsData met) =>
+    float s20 = nz(met.sma20)
+    float s50 = nz(met.sma50)
+    float s89 = nz(met.sma89)
+    float s200 = nz(met.sma200)
+    if na(met.sma200)
+        ""
+    else if s20 > s50 and s50 > s89 and s89 > s200
+        tf + ": 20>50>89>200 (bull stack)"
+    else if s20 < s50 and s50 < s89 and s89 < s200
+        tf + ": 20<50<89<200 (bear stack)"
+    else
+        string brk = s20 < s50 ? "20<50" : s50 < s89 ? "50<89" : "89<200"
+        tf + ": mixed (" + brk + ")"
+
+// Price position relative to SMAs
+price_position(string tf, float price, MetricsData met) =>
+    float s20 = nz(met.sma20)
+    float s50 = nz(met.sma50)
+    float s89 = nz(met.sma89)
+    float s200 = nz(met.sma200)
+    if na(met.sma200)
+        ""
+    else if price > s20 and price > s50 and price > s89 and price > s200
+        "Above all " + tf + " SMAs"
+    else if price < s20 and price < s50 and price < s89 and price < s200
+        "Below all " + tf + " SMAs"
+    else if price > s89 and price < s50
+        "Between SMA50-SMA89 " + tf
+    else if price > s200 and price < s89
+        "Between SMA89-SMA200 " + tf
+    else
+        ""
+
+// % distance from SMA200
+sma200_pct(string tf, float price, MetricsData met) =>
+    if na(met.sma200) or met.sma200 == 0
+        ""
+    else
+        float pct = (price - met.sma200) / met.sma200 * 100
+        tf + (pct >= 0 ? " +" : " ") + str.tostring(math.round(pct, 1)) + "%"
+
+// Check if a single level is within ATR threshold, return formatted line or ""
+check_level(string label, float price, float level, float thresh) =>
+    if not na(level) and math.abs(price - level) <= thresh
+        float dist = math.round(price - level, 0)
+        "  " + label + ": " + str.tostring(math.round(level, 0)) + " (" + (dist >= 0 ? "+" : "") + str.tostring(dist) + ")\n"
+    else
+        ""
+
+// Nearby key levels within 2x signal-TF ATR (signal/trend/base SMAs + Murrey levels)
+nearby_levels(float price, float d_atr, MetricsData d_met, MetricsData w_met, MetricsData m_met, float m88, float m08, string lbl_signal, string lbl_trend, string lbl_base) =>
+    float thresh = 2.0 * nz(d_atr)
+    if thresh <= 0 or na(d_atr)
+        ""
+    else
+        string lines = ""
+        // Signal TF SMAs
+        lines += check_level(lbl_signal + " SMA20", price, d_met.sma20, thresh)
+        lines += check_level(lbl_signal + " SMA50", price, d_met.sma50, thresh)
+        lines += check_level(lbl_signal + " SMA89", price, d_met.sma89, thresh)
+        lines += check_level(lbl_signal + " SMA200", price, d_met.sma200, thresh)
+        // Trend TF SMAs
+        lines += check_level(lbl_trend + " SMA20", price, w_met.sma20, thresh)
+        lines += check_level(lbl_trend + " SMA50", price, w_met.sma50, thresh)
+        lines += check_level(lbl_trend + " SMA89", price, w_met.sma89, thresh)
+        lines += check_level(lbl_trend + " SMA200", price, w_met.sma200, thresh)
+        // Base TF SMAs
+        lines += check_level(lbl_base + " SMA20", price, m_met.sma20, thresh)
+        lines += check_level(lbl_base + " SMA50", price, m_met.sma50, thresh)
+        lines += check_level(lbl_base + " SMA89", price, m_met.sma89, thresh)
+        lines += check_level(lbl_base + " SMA200", price, m_met.sma200, thresh)
+        // Murrey levels (computed from 8/8 and 0/8)
+        if not na(m88) and not na(m08)
+            float inc = (m88 - m08) / 8.0
+            lines += check_level("Murrey +2/8", price, m88 + 2 * inc, thresh)
+            lines += check_level("Murrey +1/8", price, m88 + inc, thresh)
+            lines += check_level("Murrey 8/8", price, m88, thresh)
+            lines += check_level("Murrey 4/8", price, (m88 + m08) / 2, thresh)
+            lines += check_level("Murrey 0/8", price, m08, thresh)
+            lines += check_level("Murrey -1/8", price, m08 - inc, thresh)
+            lines += check_level("Murrey -2/8", price, m08 - 2 * inc, thresh)
+        if str.length(lines) > 0
+            "NEARBY LEVELS (2x " + lbl_signal + " ATR = " + str.tostring(math.round(thresh, 0)) + ")\n" + lines
+        else
+            ""
+
+// Format bar timestamp to date string (M/D)
+format_bar_date(float t) =>
+    if na(t)
+        "--"
+    else
+        int tv = int(t)
+        // Futures open evening before calendar date (5-6 PM CT)
+        // Shift to next day to show correct trading date
+        int adj = hour(tv, "America/Chicago") >= 17 ? tv + 86400000 : tv
+        str.tostring(month(adj, "America/Chicago")) + "/" + str.tostring(dayofmonth(adj, "America/Chicago"))
+
+// --- Price Action helpers ---
+
+// Big bar event label for a timeframe
+bb_label(string tf, float bb_type, float bb_atrx) =>
+    string lbl = switch int(nz(bb_type))
+        1 => "BULL BREAK"
+        2 => "BEAR BREAK"
+        3 => "POSS BULL"
+        4 => "POSS BEAR"
+        => ""
+    if str.length(lbl) > 0
+        string atr_str = nz(bb_atrx) > 0 ? " (" + str.tostring(bb_atrx, "#.#") + "x ATR)" : ""
+        tf + ": " + lbl + atr_str + "\n"
+    else
+        ""
+
+// Failed period break attempts
+failed_break_label(string tf, TFData data) =>
+    string result = ""
+    if nz(data.pa_bear_fail) > 0.5
+        result += "Bears broke below prior " + tf + " low but recovered\n"
+    if nz(data.pa_bull_fail) > 0.5
+        result += "Bulls broke above prior " + tf + " high but failed\n"
+    result
+
+// ============================================================================
+// MAIN SCORING FUNCTION
+// ============================================================================
+
+// Calculate bull/bear scores and trade recommendations.
+// h4/d/w/m: per-timeframe data (entry/signal/trend/base roles),
+// mo: base TF open, pct_mo: % from base open,
+// above_mo: price > base open,
+// price: current close, tp_4h/tp_d/tp_w: Two Poles filter bullish booleans,
+// lbl_entry/signal/trend/base: display labels for each TF role
+// Murrey zone now in TFData.murrey_zone per TF
+export calculate(TFData h4, TFData d, TFData w, TFData m,
+                 float mo, float pct_mo, bool above_mo,
+                 float price,
+                 bool tp_4h, bool tp_d, bool tp_w,
+                 bool debug,
+                 string lbl_entry, string lbl_signal, string lbl_trend, string lbl_base,
+                 float overext_atr_mult,
+                 float sl_atr_mult,
+                 bool build_strings) =>
+
+    // Build MetricsData from TFData for commentary helpers
+    MetricsData d_met = MetricsData.new(rsi=d.rsi, sma20=d.sma20, sma50=d.sma50, sma89=d.sma89, sma200=d.sma200)
+    MetricsData w_met = MetricsData.new(rsi=w.rsi, sma20=w.sma20, sma50=w.sma50, sma89=w.sma89, sma200=w.sma200)
+    MetricsData m_met = MetricsData.new(rsi=m.rsi, sma20=m.sma20, sma50=m.sma50, sma89=m.sma89, sma200=m.sma200)
+
+    // === BULL CORE SCORE (max 10) ===
+    int bsc = 0
+    string br = ""
+    string pct_str = str.tostring(math.round(pct_mo, 1))
+
+    // 1. Above base TF open
+    if above_mo
+        bsc += 1
+        if build_strings
+            br += "+ Above " + lbl_base + " Open (+" + pct_str + "%)\n"
+
+    // 2. Price > trend TF SMA20
+    float w_sma20 = w_met.sma20
+    if not na(w_sma20) and price > w_sma20
+        bsc += 1
+        if build_strings
+            br += "+ Price > " + lbl_trend + " SMA20\n"
+
+    // 3. Entry TF BUY mode
+    if is_buy(h4.trend)
+        bsc += 1
+        if build_strings
+            br += "+ " + lbl_entry + " BUY mode\n"
+
+    // 4. Signal TF BUY mode
+    if is_buy(d.trend)
+        bsc += 1
+        if build_strings
+            br += "+ " + lbl_signal + " BUY mode\n"
+
+    // 5. Trend TF BUY mode
+    if is_buy(w.trend)
+        bsc += 1
+        if build_strings
+            br += "+ " + lbl_trend + " BUY mode\n"
+
+    // 6. Two Poles trend filter bullish (2 of 3 TFs)
+    int tp_bull = (tp_4h ? 1 : 0) + (tp_d ? 1 : 0) + (tp_w ? 1 : 0)
+    if tp_bull >= 2
+        bsc += 1
+        if build_strings
+            br += "+ Trend Filter bullish\n"
+
+    // 7. Signal TF SMA bull stack (20>50>89>200)
+    float d_s20 = nz(d_met.sma20)
+    float d_s50 = nz(d_met.sma50)
+    float d_s89 = nz(d_met.sma89)
+    float d_s200 = nz(d_met.sma200)
+    if not na(d_met.sma200) and d_s20 > d_s50 and d_s50 > d_s89 and d_s89 > d_s200
+        bsc += 1
+        if build_strings
+            br += "+ " + lbl_signal + " SMA bull stack\n"
+
+    // 8. All 3 TFs aligned BUY (entry + signal + trend)
+    if is_buy(h4.trend) and is_buy(d.trend) and is_buy(w.trend)
+        bsc += 1
+        if build_strings
+            br += "+ All TFs aligned BUY\n"
+
+    // 9. Price > Previous trend TF High
+    if not na(w.prev_high) and price > w.prev_high
+        bsc += 1
+        if build_strings
+            br += "+ Price > Prev " + lbl_trend + " High\n"
+
+    // 10. Value Zone - price between Signal TF SMA20 and SMA50 (pullback entry)
+    // Bull: SMA20 > SMA50 (bullish order), price pulling back into zone
+    bool bull_value = not na(d_met.sma20) and not na(d_met.sma50) and d_s20 > d_s50 and price >= d_s50 and price <= d_s20
+    if bull_value
+        bsc += 1
+        if build_strings
+            br += "+ " + lbl_signal + " Value Zone (SMA20-SMA50)\n"
+
+    // === BEAR CORE SCORE (max 10) ===
+    int besc = 0
+    string ber = ""
+
+    // 1. Below base TF open
+    if not above_mo
+        besc += 1
+        if build_strings
+            ber += "+ Below " + lbl_base + " Open (" + pct_str + "%)\n"
+
+    // 2. Price < trend TF SMA20
+    if not na(w_sma20) and price < w_sma20
+        besc += 1
+        if build_strings
+            ber += "+ Price < " + lbl_trend + " SMA20\n"
+
+    // 3. Entry TF SELL mode
+    if not is_buy(h4.trend)
+        besc += 1
+        if build_strings
+            ber += "+ " + lbl_entry + " SELL mode\n"
+
+    // 4. Signal TF SELL mode
+    if not is_buy(d.trend)
+        besc += 1
+        if build_strings
+            ber += "+ " + lbl_signal + " SELL mode\n"
+
+    // 5. Trend TF SELL mode
+    if not is_buy(w.trend)
+        besc += 1
+        if build_strings
+            ber += "+ " + lbl_trend + " SELL mode\n"
+
+    // 6. Two Poles trend filter bearish (2 of 3 TFs)
+    if tp_bull <= 1
+        besc += 1
+        if build_strings
+            ber += "+ Trend Filter bearish\n"
+
+    // 7. Signal TF SMA bear stack (20<50<89<200)
+    if not na(d_met.sma200) and d_s20 < d_s50 and d_s50 < d_s89 and d_s89 < d_s200
+        besc += 1
+        if build_strings
+            ber += "+ " + lbl_signal + " SMA bear stack\n"
+
+    // 8. All 3 TFs aligned SELL (entry + signal + trend)
+    if not is_buy(h4.trend) and not is_buy(d.trend) and not is_buy(w.trend)
+        besc += 1
+        if build_strings
+            ber += "+ All TFs aligned SELL\n"
+
+    // 9. Price < Previous trend TF Low
+    if not na(w.prev_low) and price < w.prev_low
+        besc += 1
+        if build_strings
+            ber += "+ Price < Prev " + lbl_trend + " Low\n"
+
+    // 10. Value Zone - price between Signal TF SMA20 and SMA50 (pullback entry)
+    // Bear: SMA20 < SMA50 (bearish order), price bouncing up into zone
+    bool bear_value = not na(d_met.sma20) and not na(d_met.sma50) and d_s20 < d_s50 and price >= d_s20 and price <= d_s50
+    if bear_value
+        besc += 1
+        if build_strings
+            ber += "+ " + lbl_signal + " Value Zone (SMA20-SMA50)\n"
+
+    // === BULLISH REVERSAL RISK (max 18) - warns trend may flip UP ===
+    // Used to qualify counter-trend LONG entries
+    // Per-TF scoring: more TFs confirming = stronger reversal signal
+    int bull_rev = 0
+    string bull_rev_r = ""
+
+    // Murrey oversold per TF (Signal + Trend + Base, max 3)
+    if nz(d.murrey_zone) <= -1.0
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_signal + " Murrey OVERSOLD\n"
+    if nz(w.murrey_zone) <= -1.0
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_trend + " Murrey OVERSOLD\n"
+    if nz(m.murrey_zone) <= -1.0
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_base + " Murrey OVERSOLD\n"
+
+    // Failed Breakdown per TF (Entry + Signal + Trend, max 3) — structural signal
+    bool bull_has_structural = false
+    if has_fbd(h4.failed_bd)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_entry + " Failed Breakdown\n"
+        bull_has_structural := true
+    if has_fbd(d.failed_bd)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_signal + " Failed Breakdown\n"
+        bull_has_structural := true
+    if has_fbd(w.failed_bd)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_trend + " Failed Breakdown\n"
+        bull_has_structural := true
+
+    // RSI oversold per TF (Signal + Trend + Base, max 3)
+    if nz(d.rsi) < 30
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_signal + " RSI oversold (" + str.tostring(math.round(nz(d.rsi), 0)) + ")\n"
+    if nz(w.rsi) < 30
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_trend + " RSI oversold (" + str.tostring(math.round(nz(w.rsi), 0)) + ")\n"
+    if nz(m.rsi) < 30
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_base + " RSI oversold (" + str.tostring(math.round(nz(m.rsi), 0)) + ")\n"
+
+    // Bollinger Band 2.5 SD (Trend TF: 1 pt, Base TF: 2 pts — max 3)
+    if not na(w.stdev20) and not na(w.sma20) and w.stdev20 > 0
+        float lower_bb_w = w.sma20 - 2.5 * w.stdev20
+        if price <= lower_bb_w
+            bull_rev += 1
+            if build_strings
+                bull_rev_r += "+ Near " + lbl_trend + " lower BB (2.5 SD)\n"
+    if not na(m.stdev20) and not na(m.sma20) and m.stdev20 > 0
+        float lower_bb_m = m.sma20 - 2.5 * m.stdev20
+        if price <= lower_bb_m
+            bull_rev += 2
+            if build_strings
+                bull_rev_r += "+ Near " + lbl_base + " lower BB (2.5 SD) [2 pts]\n"
+
+    // Note: Near SELL stop removed from CT scoring — shown in Key Signals only
+    // (approaching a stop could be continuation, not reversal)
+
+    // Overextended below SMA per TF (Signal + Trend + Base, max 3)
+    float d_atr_val = nz(d.atr14)
+    if d_atr_val > 0 and (not na(d_met.sma89) and d_met.sma89 - price >= overext_atr_mult * d_atr_val or not na(d_met.sma200) and d_met.sma200 - price >= overext_atr_mult * d_atr_val)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ Overextended below " + lbl_signal + " SMA\n"
+    float w_atr_val = nz(w.atr14)
+    if w_atr_val > 0 and (not na(w_met.sma89) and w_met.sma89 - price >= overext_atr_mult * w_atr_val or not na(w_met.sma200) and w_met.sma200 - price >= overext_atr_mult * w_atr_val)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ Overextended below " + lbl_trend + " SMA\n"
+    float m_atr_val = nz(m.atr14)
+    if m_atr_val > 0 and (not na(m_met.sma89) and m_met.sma89 - price >= overext_atr_mult * m_atr_val or not na(m_met.sma200) and m_met.sma200 - price >= overext_atr_mult * m_atr_val)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ Overextended below " + lbl_base + " SMA\n"
+
+    // SELL targets exhausted per TF (Signal + Trend + Base, max 3) — completion signal
+    if not is_buy(d.trend) and all_hit(d.t1_hit, d.t2_hit, d.t3_hit)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_signal + " SELL targets exhausted\n"
+        bull_has_structural := true
+    if not is_buy(w.trend) and all_hit(w.t1_hit, w.t2_hit, w.t3_hit)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_trend + " SELL targets exhausted\n"
+        bull_has_structural := true
+    if not is_buy(m.trend) and all_hit(m.t1_hit, m.t2_hit, m.t3_hit)
+        bull_rev += 1
+        if build_strings
+            bull_rev_r += "+ " + lbl_base + " SELL targets exhausted\n"
+        bull_has_structural := true
+
+    // === BEARISH REVERSAL RISK (max 18) - warns trend may flip DOWN ===
+    // Used to qualify counter-trend SHORT entries
+    int bear_rev = 0
+    string bear_rev_r = ""
+
+    // Murrey overbought per TF (Signal + Trend + Base, max 3)
+    if nz(d.murrey_zone) >= 1.0
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_signal + " Murrey OVERBOUGHT\n"
+    if nz(w.murrey_zone) >= 1.0
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_trend + " Murrey OVERBOUGHT\n"
+    if nz(m.murrey_zone) >= 1.0
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_base + " Murrey OVERBOUGHT\n"
+
+    // Failed Breakout per TF (Entry + Signal + Trend, max 3) — structural signal
+    bool bear_has_structural = false
+    if has_fbo(h4.failed_bo)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_entry + " Failed Breakout\n"
+        bear_has_structural := true
+    if has_fbo(d.failed_bo)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_signal + " Failed Breakout\n"
+        bear_has_structural := true
+    if has_fbo(w.failed_bo)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_trend + " Failed Breakout\n"
+        bear_has_structural := true
+
+    // RSI overbought per TF (Signal: >75, Trend/Base: >70, max 3)
+    if nz(d.rsi) > 75
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_signal + " RSI overbought (" + str.tostring(math.round(nz(d.rsi), 0)) + ")\n"
+    if nz(w.rsi) > 70
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_trend + " RSI overbought (" + str.tostring(math.round(nz(w.rsi), 0)) + ")\n"
+    if nz(m.rsi) > 70
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_base + " RSI overbought (" + str.tostring(math.round(nz(m.rsi), 0)) + ")\n"
+
+    // Bollinger Band 2.5 SD (Trend TF: 1 pt, Base TF: 2 pts — max 3)
+    if not na(w.stdev20) and not na(w.sma20) and w.stdev20 > 0
+        float upper_bb_w = w.sma20 + 2.5 * w.stdev20
+        if price >= upper_bb_w
+            bear_rev += 1
+            if build_strings
+                bear_rev_r += "+ Near " + lbl_trend + " upper BB (2.5 SD)\n"
+    if not na(m.stdev20) and not na(m.sma20) and m.stdev20 > 0
+        float upper_bb_m = m.sma20 + 2.5 * m.stdev20
+        if price >= upper_bb_m
+            bear_rev += 2
+            if build_strings
+                bear_rev_r += "+ Near " + lbl_base + " upper BB (2.5 SD) [2 pts]\n"
+
+    // Note: Near BUY stop removed from CT scoring — shown in Key Signals only
+    // (approaching a stop could be continuation, not reversal)
+
+    // Overextended above SMA per TF (Signal + Trend + Base, max 3)
+    if d_atr_val > 0 and (not na(d_met.sma89) and price - d_met.sma89 >= overext_atr_mult * d_atr_val or not na(d_met.sma200) and price - d_met.sma200 >= overext_atr_mult * d_atr_val)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ Overextended above " + lbl_signal + " SMA\n"
+    if w_atr_val > 0 and (not na(w_met.sma89) and price - w_met.sma89 >= overext_atr_mult * w_atr_val or not na(w_met.sma200) and price - w_met.sma200 >= overext_atr_mult * w_atr_val)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ Overextended above " + lbl_trend + " SMA\n"
+    if m_atr_val > 0 and (not na(m_met.sma89) and price - m_met.sma89 >= overext_atr_mult * m_atr_val or not na(m_met.sma200) and price - m_met.sma200 >= overext_atr_mult * m_atr_val)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ Overextended above " + lbl_base + " SMA\n"
+
+    // BUY targets exhausted per TF (Signal + Trend + Base, max 3) — completion signal
+    if is_buy(d.trend) and all_hit(d.t1_hit, d.t2_hit, d.t3_hit)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_signal + " BUY targets exhausted\n"
+        bear_has_structural := true
+    if is_buy(w.trend) and all_hit(w.t1_hit, w.t2_hit, w.t3_hit)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_trend + " BUY targets exhausted\n"
+        bear_has_structural := true
+    if is_buy(m.trend) and all_hit(m.t1_hit, m.t2_hit, m.t3_hit)
+        bear_rev += 1
+        if build_strings
+            bear_rev_r += "+ " + lbl_base + " BUY targets exhausted\n"
+        bear_has_structural := true
+
+    // === METRICS COMMENTARY (stored separately, shown in its own table row) ===
+    string met_section = ""
+    if build_strings
+        met_section := "METRICS\n"
+        // Nearby levels now shown in KEY SIGNALS row (TCC)
+        // % from SMA200
+        string d_pct = sma200_pct(lbl_signal, price, d_met)
+        string w_pct = sma200_pct(lbl_trend, price, w_met)
+        if str.length(d_pct) > 0 or str.length(w_pct) > 0
+            met_section += "% from SMA200: " + d_pct + "  " + w_pct + "\n"
+        // RSI + SMA stack + price position
+        met_section += rsi_line(d_met, w_met, m_met, lbl_signal, lbl_trend, lbl_base) + "\n"
+        string d_stack = sma_stack_label(lbl_signal, d_met)
+        string w_stack = sma_stack_label(lbl_trend, w_met)
+        string m_stack = sma_stack_label(lbl_base, m_met)
+        if str.length(d_stack) > 0
+            met_section += d_stack + "\n"
+        if str.length(w_stack) > 0
+            met_section += w_stack + "\n"
+        if str.length(m_stack) > 0
+            met_section += m_stack + "\n"
+        string d_pos = price_position(lbl_signal, price, d_met)
+        if str.length(d_pos) > 0
+            met_section += d_pos + "\n"
+
+    // === PRICE ACTION COMMENTARY (previous completed trend/base bars only) ===
+    string pa = ""
+    if build_strings
+        pa := "PRICE ACTION\n"
+        // Most recent strong big bar (trend TF)
+        if not na(w.rb_high)
+            string w_dir = nz(w.rb_type) == 1.0 ? "Bull" : "Bear"
+            float w_mid = (w.rb_high + w.rb_low) / 2
+            pa += lbl_trend + " " + w_dir + " Bar (" + format_bar_date(w.rb_time) + ", " + str.tostring(w.rb_atrx, "#.#") + "x ATR)"
+            pa += "  H:" + str.tostring(math.round(w.rb_high, 0)) + "  L:" + str.tostring(math.round(w.rb_low, 0))
+            pa += "  Mid:" + str.tostring(math.round(w_mid, 0)) + "\n"
+        // Most recent strong big bar (base TF)
+        if not na(m.rb_high)
+            string m_dir = nz(m.rb_type) == 1.0 ? "Bull" : "Bear"
+            float m_mid = (m.rb_high + m.rb_low) / 2
+            pa += lbl_base + " " + m_dir + " Bar (" + format_bar_date(m.rb_time) + ", " + str.tostring(m.rb_atrx, "#.#") + "x ATR)"
+            pa += "  H:" + str.tostring(math.round(m.rb_high, 0)) + "  L:" + str.tostring(math.round(m.rb_low, 0))
+            pa += "  Mid:" + str.tostring(math.round(m_mid, 0)) + "\n"
+        // Previous completed bar failed break attempts
+        string w_fb = failed_break_label("Prev " + lbl_trend, w)
+        string m_fb = failed_break_label("Prev " + lbl_base, m)
+        if str.length(w_fb) > 0 or str.length(m_fb) > 0
+            pa += w_fb + m_fb
+    // Retest/stop signals moved to KEY SIGNALS row in trade_command_center.pine
+
+    // === TRADE RECOMMENDATIONS ===
+    bool w_buy = is_buy(w.trend)
+    bool d_buy = is_buy(d.trend)
+    bool m_buy = is_buy(m.trend)
+    float d_sma89 = d_met.sma89
+
+    // --- SCALP LONG ---
+    TradeRec sl_rec = TradeRec.new(active=false, counter_trend=false,
+         entry_price=na, sl_price=na, t1_price=na, t2_price=na,
+         entry_reason="", sl_reason="", t1_reason="", t2_reason="", status_text="")
+
+    // WITH-TREND long (always computed)
+    sl_rec.active := true
+    sl_rec.counter_trend := false
+    // Entry: use mode-aligned TF's SL as entry (buying at support)
+    if is_buy(h4.trend) and not na(h4.sl)
+        sl_rec.entry_price := h4.sl
+        sl_rec.entry_reason := lbl_entry + " SL"
+    else if not na(d.sl)
+        sl_rec.entry_price := d.sl
+        sl_rec.entry_reason := lbl_signal + " SL"
+    else
+        sl_rec.entry_price := price
+        sl_rec.entry_reason := "Current price"
+    // SL: ATR below entry
+    sl_rec.sl_price := nz(sl_rec.entry_price, price) - sl_atr_mult * nz(d.atr14, nz(h4.atr14, 0))
+    sl_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR"
+    // Validate: long entry must be at or below current price
+    if not na(sl_rec.entry_price) and sl_rec.entry_price > price
+        sl_rec.entry_price := price
+        sl_rec.entry_reason := "Current price"
+    // Targets: cascade TFs, within each TF check T1→T2→T3 for first unhit
+    [h4_tp, h4_ts] = next_target(h4.t1, h4.t1_hit, h4.t2, h4.t2_hit, h4.t3, h4.t3_hit)
+    [d_tp, d_ts]   = next_target(d.t1, d.t1_hit, d.t2, d.t2_hit, d.t3, d.t3_hit)
+    [w_tp, w_ts]   = next_target(w.t1, w.t1_hit, w.t2, w.t2_hit, w.t3, w.t3_hit)
+    if is_buy(h4.trend)
+        // T1: Entry TF → Signal TF → Trend TF
+        if not na(h4_tp)
+            sl_rec.t1_price := h4_tp
+            sl_rec.t1_reason := lbl_entry + " " + h4_ts
+        else if not na(d_tp)
+            sl_rec.t1_price := d_tp
+            sl_rec.t1_reason := lbl_signal + " " + d_ts
+        else if not na(w_tp)
+            sl_rec.t1_price := w_tp
+            sl_rec.t1_reason := lbl_trend + " " + w_ts
+        // T2: next TF after T1's source
+        if not na(sl_rec.t1_price)
+            if not na(h4_tp) and sl_rec.t1_reason == lbl_entry + " " + h4_ts
+                if not na(d_tp)
+                    sl_rec.t2_price := d_tp
+                    sl_rec.t2_reason := lbl_signal + " " + d_ts
+                else if not na(w_tp)
+                    sl_rec.t2_price := w_tp
+                    sl_rec.t2_reason := lbl_trend + " " + w_ts
+            else if not na(d_tp) and sl_rec.t1_reason == lbl_signal + " " + d_ts
+                if not na(w_tp)
+                    sl_rec.t2_price := w_tp
+                    sl_rec.t2_reason := lbl_trend + " " + w_ts
+    else
+        // Entry TF not BUY: start from Signal TF
+        if not na(d_tp)
+            sl_rec.t1_price := d_tp
+            sl_rec.t1_reason := lbl_signal + " " + d_ts
+        else if not na(w_tp)
+            sl_rec.t1_price := w_tp
+            sl_rec.t1_reason := lbl_trend + " " + w_ts
+        // T2: Trend TF if not already used as T1
+        if not na(d_tp) and sl_rec.t1_reason == lbl_signal + " " + d_ts and not na(w_tp)
+            sl_rec.t2_price := w_tp
+            sl_rec.t2_reason := lbl_trend + " " + w_ts
+    // Validate: long SL must be below entry, targets above entry
+    if not na(sl_rec.sl_price) and sl_rec.sl_price >= nz(sl_rec.entry_price, price)
+        sl_rec.sl_price := nz(sl_rec.entry_price, price) - nz(d.atr14, 0) * sl_atr_mult
+        sl_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (adjusted)"
+    if not na(sl_rec.t1_price) and sl_rec.t1_price <= nz(sl_rec.entry_price, price)
+        sl_rec.t1_price := na
+        sl_rec.t1_reason := ""
+    if not na(sl_rec.t2_price) and sl_rec.t2_price <= nz(sl_rec.entry_price, price)
+        sl_rec.t2_price := na
+        sl_rec.t2_reason := ""
+    // Proximity filter: if T1 too close to entry (< 0.5x Entry ATR), promote T2 to T1
+    float _min_tgt_l = 0.5 * nz(h4.atr14, 0)
+    if not na(sl_rec.t1_price) and _min_tgt_l > 0 and sl_rec.t1_price - nz(sl_rec.entry_price, price) < _min_tgt_l
+        sl_rec.t1_price := sl_rec.t2_price
+        sl_rec.t1_reason := sl_rec.t2_reason
+        sl_rec.t2_price := na
+        sl_rec.t2_reason := ""
+    // T2 must be above T1 for longs
+    if not na(sl_rec.t2_price) and not na(sl_rec.t1_price) and sl_rec.t2_price <= sl_rec.t1_price
+        sl_rec.t2_price := na
+        sl_rec.t2_reason := ""
+    if bull_rev >= 5 and bull_has_structural
+        // COUNTER-TREND long: overrides WT levels when CT conditions met
+        // (Failed BD or Targets Exhausted — stretched indicators alone don't qualify)
+        sl_rec.counter_trend := true
+        // Entry: exhaustion support (Entry TF → Signal TF → Trend TF → current price)
+        if not na(h4.sup) and h4.sup > 0 and h4.sup <= price
+            sl_rec.entry_price := h4.sup
+            sl_rec.entry_reason := lbl_entry + " exh support"
+        else if not na(d.sup) and d.sup > 0 and d.sup <= price
+            sl_rec.entry_price := d.sup
+            sl_rec.entry_reason := lbl_signal + " exh support"
+        else if not na(w.sup) and w.sup > 0 and w.sup <= price
+            sl_rec.entry_price := w.sup
+            sl_rec.entry_reason := lbl_trend + " exh support"
+        else
+            sl_rec.entry_price := price
+            sl_rec.entry_reason := "Current price"
+        // SL: ATR below entry
+        sl_rec.sl_price := nz(sl_rec.entry_price, price) - sl_atr_mult * nz(h4.atr14, nz(d.atr14, 0))
+        sl_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (CT)"
+        sl_rec.t1_price := mo
+        sl_rec.t1_reason := lbl_base + " Open"
+        // T2: find a BUY-mode TF's first unhit target
+        [h4_tcp, h4_tcs] = next_target(h4.t1, h4.t1_hit, h4.t2, h4.t2_hit, h4.t3, h4.t3_hit)
+        [d_tcp, d_tcs]   = next_target(d.t1, d.t1_hit, d.t2, d.t2_hit, d.t3, d.t3_hit)
+        [w_tcp, w_tcs]   = next_target(w.t1, w.t1_hit, w.t2, w.t2_hit, w.t3, w.t3_hit)
+        if is_buy(h4.trend) and not na(h4_tcp)
+            sl_rec.t2_price := h4_tcp
+            sl_rec.t2_reason := lbl_entry + " " + h4_tcs
+        else if is_buy(d.trend) and not na(d_tcp)
+            sl_rec.t2_price := d_tcp
+            sl_rec.t2_reason := lbl_signal + " " + d_tcs
+        else if is_buy(w.trend) and not na(w_tcp)
+            sl_rec.t2_price := w_tcp
+            sl_rec.t2_reason := lbl_trend + " " + w_tcs
+        // Validate: long SL must be below entry, targets above entry
+        if not na(sl_rec.sl_price) and sl_rec.sl_price >= nz(sl_rec.entry_price, price)
+            sl_rec.sl_price := nz(sl_rec.entry_price, price) - nz(d.atr14, 0) * sl_atr_mult
+            sl_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (adjusted)"
+        if not na(sl_rec.t1_price) and sl_rec.t1_price <= nz(sl_rec.entry_price, price)
+            sl_rec.t1_price := na
+            sl_rec.t1_reason := ""
+        if not na(sl_rec.t2_price) and sl_rec.t2_price <= nz(sl_rec.entry_price, price)
+            sl_rec.t2_price := na
+            sl_rec.t2_reason := ""
+        // Proximity filter: if T1 too close to entry (< 0.5x Entry ATR), promote T2 to T1
+        float _min_tgt_cl = 0.5 * nz(h4.atr14, 0)
+        if not na(sl_rec.t1_price) and _min_tgt_cl > 0 and sl_rec.t1_price - nz(sl_rec.entry_price, price) < _min_tgt_cl
+            sl_rec.t1_price := sl_rec.t2_price
+            sl_rec.t1_reason := sl_rec.t2_reason
+            sl_rec.t2_price := na
+            sl_rec.t2_reason := ""
+        // T2 must be above T1 for longs
+        if not na(sl_rec.t2_price) and not na(sl_rec.t1_price) and sl_rec.t2_price <= sl_rec.t1_price
+            sl_rec.t2_price := na
+            sl_rec.t2_reason := ""
+
+    // --- SCALP SHORT ---
+    TradeRec ss_rec = TradeRec.new(active=false, counter_trend=false,
+         entry_price=na, sl_price=na, t1_price=na, t2_price=na,
+         entry_reason="", sl_reason="", t1_reason="", t2_reason="", status_text="")
+
+    // WITH-TREND short (always computed)
+    ss_rec.active := true
+    ss_rec.counter_trend := false
+    // Entry: use mode-aligned TF's SL as entry (selling at resistance)
+    if not is_buy(h4.trend) and not na(h4.sl)
+        ss_rec.entry_price := h4.sl
+        ss_rec.entry_reason := lbl_entry + " SL"
+    else if not na(d.sl)
+        ss_rec.entry_price := d.sl
+        ss_rec.entry_reason := lbl_signal + " SL"
+    else
+        ss_rec.entry_price := price
+        ss_rec.entry_reason := "Current price"
+    // SL: ATR above entry
+    ss_rec.sl_price := nz(ss_rec.entry_price, price) + sl_atr_mult * nz(d.atr14, nz(h4.atr14, 0))
+    ss_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR"
+    // Validate: short entry must be at or above current price
+    if not na(ss_rec.entry_price) and ss_rec.entry_price < price
+        ss_rec.entry_price := price
+        ss_rec.entry_reason := "Current price"
+    // Targets: cascade TFs, within each TF check T1→T2→T3 for first unhit
+    [h4_tps, h4_tss] = next_target(h4.t1, h4.t1_hit, h4.t2, h4.t2_hit, h4.t3, h4.t3_hit)
+    [d_tps, d_tss]   = next_target(d.t1, d.t1_hit, d.t2, d.t2_hit, d.t3, d.t3_hit)
+    [w_tps, w_tss]   = next_target(w.t1, w.t1_hit, w.t2, w.t2_hit, w.t3, w.t3_hit)
+    if not is_buy(h4.trend)
+        if not na(h4_tps)
+            ss_rec.t1_price := h4_tps
+            ss_rec.t1_reason := lbl_entry + " " + h4_tss
+        else if not na(d_tps)
+            ss_rec.t1_price := d_tps
+            ss_rec.t1_reason := lbl_signal + " " + d_tss
+        else if not na(w_tps)
+            ss_rec.t1_price := w_tps
+            ss_rec.t1_reason := lbl_trend + " " + w_tss
+        if not na(ss_rec.t1_price)
+            if not na(h4_tps) and ss_rec.t1_reason == lbl_entry + " " + h4_tss
+                if not na(d_tps)
+                    ss_rec.t2_price := d_tps
+                    ss_rec.t2_reason := lbl_signal + " " + d_tss
+                else if not na(w_tps)
+                    ss_rec.t2_price := w_tps
+                    ss_rec.t2_reason := lbl_trend + " " + w_tss
+            else if not na(d_tps) and ss_rec.t1_reason == lbl_signal + " " + d_tss
+                if not na(w_tps)
+                    ss_rec.t2_price := w_tps
+                    ss_rec.t2_reason := lbl_trend + " " + w_tss
+    else
+        if not na(d_tps)
+            ss_rec.t1_price := d_tps
+            ss_rec.t1_reason := lbl_signal + " " + d_tss
+        else if not na(w_tps)
+            ss_rec.t1_price := w_tps
+            ss_rec.t1_reason := lbl_trend + " " + w_tss
+        if not na(d_tps) and ss_rec.t1_reason == lbl_signal + " " + d_tss and not na(w_tps)
+            ss_rec.t2_price := w_tps
+            ss_rec.t2_reason := lbl_trend + " " + w_tss
+    // Validate: short SL must be above entry, targets below entry
+    if not na(ss_rec.sl_price) and ss_rec.sl_price <= nz(ss_rec.entry_price, price)
+        ss_rec.sl_price := nz(ss_rec.entry_price, price) + nz(d.atr14, 0) * sl_atr_mult
+        ss_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (adjusted)"
+    if not na(ss_rec.t1_price) and ss_rec.t1_price >= nz(ss_rec.entry_price, price)
+        ss_rec.t1_price := na
+        ss_rec.t1_reason := ""
+    if not na(ss_rec.t2_price) and ss_rec.t2_price >= nz(ss_rec.entry_price, price)
+        ss_rec.t2_price := na
+        ss_rec.t2_reason := ""
+    // Proximity filter: if T1 too close to entry (< 0.5x Entry ATR), promote T2 to T1
+    float _min_tgt_s = 0.5 * nz(h4.atr14, 0)
+    if not na(ss_rec.t1_price) and _min_tgt_s > 0 and nz(ss_rec.entry_price, price) - ss_rec.t1_price < _min_tgt_s
+        ss_rec.t1_price := ss_rec.t2_price
+        ss_rec.t1_reason := ss_rec.t2_reason
+        ss_rec.t2_price := na
+        ss_rec.t2_reason := ""
+    // T2 must be below T1 for shorts
+    if not na(ss_rec.t2_price) and not na(ss_rec.t1_price) and ss_rec.t2_price >= ss_rec.t1_price
+        ss_rec.t2_price := na
+        ss_rec.t2_reason := ""
+    if bear_rev >= 5 and bear_has_structural
+        // COUNTER-TREND short: overrides WT levels when CT conditions met
+        // (Failed BO or Targets Exhausted — stretched indicators alone don't qualify)
+        ss_rec.counter_trend := true
+        // Entry: exhaustion resistance (Entry TF → Signal TF → Trend TF → current price)
+        if not na(h4.res) and h4.res > 0 and h4.res >= price
+            ss_rec.entry_price := h4.res
+            ss_rec.entry_reason := lbl_entry + " exh resistance"
+        else if not na(d.res) and d.res > 0 and d.res >= price
+            ss_rec.entry_price := d.res
+            ss_rec.entry_reason := lbl_signal + " exh resistance"
+        else if not na(w.res) and w.res > 0 and w.res >= price
+            ss_rec.entry_price := w.res
+            ss_rec.entry_reason := lbl_trend + " exh resistance"
+        else
+            ss_rec.entry_price := price
+            ss_rec.entry_reason := "Current price"
+        // SL: ATR above entry
+        ss_rec.sl_price := nz(ss_rec.entry_price, price) + sl_atr_mult * nz(h4.atr14, nz(d.atr14, 0))
+        ss_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (CT)"
+        ss_rec.t1_price := mo
+        ss_rec.t1_reason := lbl_base + " Open"
+        // T2: find a SELL-mode TF's first unhit target
+        [h4_tcps, h4_tcss] = next_target(h4.t1, h4.t1_hit, h4.t2, h4.t2_hit, h4.t3, h4.t3_hit)
+        [d_tcps, d_tcss]   = next_target(d.t1, d.t1_hit, d.t2, d.t2_hit, d.t3, d.t3_hit)
+        [w_tcps, w_tcss]   = next_target(w.t1, w.t1_hit, w.t2, w.t2_hit, w.t3, w.t3_hit)
+        if not is_buy(h4.trend) and not na(h4_tcps)
+            ss_rec.t2_price := h4_tcps
+            ss_rec.t2_reason := lbl_entry + " " + h4_tcss
+        else if not is_buy(d.trend) and not na(d_tcps)
+            ss_rec.t2_price := d_tcps
+            ss_rec.t2_reason := lbl_signal + " " + d_tcss
+        else if not is_buy(w.trend) and not na(w_tcps)
+            ss_rec.t2_price := w_tcps
+            ss_rec.t2_reason := lbl_trend + " " + w_tcss
+        // Validate: short SL must be above entry, targets below entry
+        if not na(ss_rec.sl_price) and ss_rec.sl_price <= nz(ss_rec.entry_price, price)
+            ss_rec.sl_price := nz(ss_rec.entry_price, price) + nz(d.atr14, 0) * sl_atr_mult
+            ss_rec.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (adjusted)"
+        if not na(ss_rec.t1_price) and ss_rec.t1_price >= nz(ss_rec.entry_price, price)
+            ss_rec.t1_price := na
+            ss_rec.t1_reason := ""
+        if not na(ss_rec.t2_price) and ss_rec.t2_price >= nz(ss_rec.entry_price, price)
+            ss_rec.t2_price := na
+            ss_rec.t2_reason := ""
+        // Proximity filter: if T1 too close to entry (< 0.5x Entry ATR), promote T2 to T1
+        float _min_tgt_cs = 0.5 * nz(h4.atr14, 0)
+        if not na(ss_rec.t1_price) and _min_tgt_cs > 0 and nz(ss_rec.entry_price, price) - ss_rec.t1_price < _min_tgt_cs
+            ss_rec.t1_price := ss_rec.t2_price
+            ss_rec.t1_reason := ss_rec.t2_reason
+            ss_rec.t2_price := na
+            ss_rec.t2_reason := ""
+        // T2 must be below T1 for shorts
+        if not na(ss_rec.t2_price) and not na(ss_rec.t1_price) and ss_rec.t2_price >= ss_rec.t1_price
+            ss_rec.t2_price := na
+            ss_rec.t2_reason := ""
+
+    // --- SWING LONG ---
+    TradeRec swl = TradeRec.new(active=false, counter_trend=false,
+         entry_price=na, sl_price=na, t1_price=na, t2_price=na,
+         entry_reason="", sl_reason="", t1_reason="", t2_reason="", status_text="")
+
+    swl.active := true
+    // Entry: use Trend/Base TF BUY-mode SL as entry (buying at support)
+    if not na(w.sl)
+        swl.entry_price := w.sl
+        swl.entry_reason := lbl_trend + " SL"
+    else if not na(m.sl)
+        swl.entry_price := m.sl
+        swl.entry_reason := lbl_base + " SL"
+    else
+        swl.entry_price := price
+        swl.entry_reason := "Current price"
+    // SL: ATR below entry
+    swl.sl_price := nz(swl.entry_price, price) - sl_atr_mult * nz(w.atr14, nz(d.atr14, 0))
+    swl.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR"
+    // Targets: cascade Trend→Base, within each TF check T1→T2→T3
+    [w_tpswl, w_tsswl] = next_target(w.t1, w.t1_hit, w.t2, w.t2_hit, w.t3, w.t3_hit)
+    [m_tpswl, m_tsswl] = next_target(m.t1, m.t1_hit, m.t2, m.t2_hit, m.t3, m.t3_hit)
+    if not na(w_tpswl)
+        swl.t1_price := w_tpswl
+        swl.t1_reason := lbl_trend + " " + w_tsswl
+    else if not na(m_tpswl)
+        swl.t1_price := m_tpswl
+        swl.t1_reason := lbl_base + " " + m_tsswl
+    // T2: Base TF if not already used as T1
+    if not na(w_tpswl) and not na(m_tpswl)
+        swl.t2_price := m_tpswl
+        swl.t2_reason := lbl_base + " " + m_tsswl
+    // Validate: long SL must be below entry, targets above entry
+    if not na(swl.sl_price) and swl.sl_price >= nz(swl.entry_price, price)
+        swl.sl_price := nz(swl.entry_price, price) - nz(d.atr14, 0) * sl_atr_mult
+        swl.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (adjusted)"
+    if not na(swl.t1_price) and swl.t1_price <= nz(swl.entry_price, price)
+        swl.t1_price := na
+        swl.t1_reason := ""
+    if not na(swl.t2_price) and swl.t2_price <= nz(swl.entry_price, price)
+        swl.t2_price := na
+        swl.t2_reason := ""
+    // Proximity filter: if T1 too close to entry (< 0.5x Trend ATR), promote T2 to T1
+    float _min_tgt_swl = 0.5 * nz(w.atr14, 0)
+    if not na(swl.t1_price) and _min_tgt_swl > 0 and swl.t1_price - nz(swl.entry_price, price) < _min_tgt_swl
+        swl.t1_price := swl.t2_price
+        swl.t1_reason := swl.t2_reason
+        swl.t2_price := na
+        swl.t2_reason := ""
+    // T2 must be above T1 for longs
+    if not na(swl.t2_price) and not na(swl.t1_price) and swl.t2_price <= swl.t1_price
+        swl.t2_price := na
+        swl.t2_reason := ""
+
+    // --- SWING SHORT ---
+    TradeRec sws = TradeRec.new(active=false, counter_trend=false,
+         entry_price=na, sl_price=na, t1_price=na, t2_price=na,
+         entry_reason="", sl_reason="", t1_reason="", t2_reason="", status_text="")
+
+    sws.active := true
+    // Entry: use Trend/Base TF SELL-mode SL as entry (selling at resistance)
+    if not na(w.sl)
+        sws.entry_price := w.sl
+        sws.entry_reason := lbl_trend + " SL"
+    else if not na(m.sl)
+        sws.entry_price := m.sl
+        sws.entry_reason := lbl_base + " SL"
+    else
+        sws.entry_price := price
+        sws.entry_reason := "Current price"
+    // SL: ATR above entry
+    sws.sl_price := nz(sws.entry_price, price) + sl_atr_mult * nz(w.atr14, nz(d.atr14, 0))
+    sws.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR"
+    // Targets: cascade Trend→Base, within each TF check T1→T2→T3
+    [w_tpsws, w_tssws] = next_target(w.t1, w.t1_hit, w.t2, w.t2_hit, w.t3, w.t3_hit)
+    [m_tpsws, m_tssws] = next_target(m.t1, m.t1_hit, m.t2, m.t2_hit, m.t3, m.t3_hit)
+    if not na(w_tpsws)
+        sws.t1_price := w_tpsws
+        sws.t1_reason := lbl_trend + " " + w_tssws
+    else if not na(m_tpsws)
+        sws.t1_price := m_tpsws
+        sws.t1_reason := lbl_base + " " + m_tssws
+    // T2: Base TF if not already used as T1
+    if not na(w_tpsws) and not na(m_tpsws)
+        sws.t2_price := m_tpsws
+        sws.t2_reason := lbl_base + " " + m_tssws
+    // Validate: short SL must be above entry, targets below entry
+    if not na(sws.sl_price) and sws.sl_price <= nz(sws.entry_price, price)
+        sws.sl_price := nz(sws.entry_price, price) + nz(d.atr14, 0) * sl_atr_mult
+        sws.sl_reason := str.tostring(sl_atr_mult, "#.#") + "x ATR (adjusted)"
+    if not na(sws.t1_price) and sws.t1_price >= nz(sws.entry_price, price)
+        sws.t1_price := na
+        sws.t1_reason := ""
+    if not na(sws.t2_price) and sws.t2_price >= nz(sws.entry_price, price)
+        sws.t2_price := na
+        sws.t2_reason := ""
+    // Proximity filter: if T1 too close to entry (< 0.5x Trend ATR), promote T2 to T1
+    float _min_tgt_sws = 0.5 * nz(w.atr14, 0)
+    if not na(sws.t1_price) and _min_tgt_sws > 0 and nz(sws.entry_price, price) - sws.t1_price < _min_tgt_sws
+        sws.t1_price := sws.t2_price
+        sws.t1_reason := sws.t2_reason
+        sws.t2_price := na
+        sws.t2_reason := ""
+    // T2 must be below T1 for shorts
+    if not na(sws.t2_price) and not na(sws.t1_price) and sws.t2_price >= sws.t1_price
+        sws.t2_price := na
+        sws.t2_reason := ""
+
+    // === DEBUG TEXT (built only when debug=true AND build_strings) ===
+    string dbg = ""
+    if debug and build_strings
+        dbg += "=== DEBUG INFO ===\n"
+        // FBD/FBO status per TF with sup/res levels
+        dbg += "FAILED BREAKDOWN / BREAKOUT\n"
+        dbg += "  " + lbl_entry + ": FBD=" + (has_fbd(h4.failed_bd) ? "YES" : "no") + "  FBO=" + (has_fbo(h4.failed_bo) ? "YES" : "no")
+        dbg += "  sup=" + str.tostring(math.round(nz(h4.sup), 2)) + "  res=" + str.tostring(math.round(nz(h4.res), 2)) + "\n"
+        dbg += "  " + lbl_signal + ": FBD=" + (has_fbd(d.failed_bd) ? "YES" : "no") + "  FBO=" + (has_fbo(d.failed_bo) ? "YES" : "no")
+        dbg += "  sup=" + str.tostring(math.round(nz(d.sup), 2)) + "  res=" + str.tostring(math.round(nz(d.res), 2)) + "\n"
+        dbg += "  " + lbl_trend + ": FBD=" + (has_fbd(w.failed_bd) ? "YES" : "no") + "  FBO=" + (has_fbo(w.failed_bo) ? "YES" : "no")
+        dbg += "  sup=" + str.tostring(math.round(nz(w.sup), 2)) + "  res=" + str.tostring(math.round(nz(w.res), 2)) + "\n"
+        // RSI per TF
+        dbg += "RSI\n"
+        dbg += "  " + lbl_entry + ":" + str.tostring(math.round(nz(h4.rsi), 1))
+        dbg += "  " + lbl_signal + ":" + str.tostring(math.round(nz(d.rsi), 1))
+        dbg += "  " + lbl_trend + ":" + str.tostring(math.round(nz(w.rsi), 1))
+        dbg += "  " + lbl_base + ":" + str.tostring(math.round(nz(m.rsi), 1)) + "\n"
+        // Signal TF ATR
+        dbg += lbl_signal + " ATR(14): " + str.tostring(math.round(d_atr_val, 2)) + "\n"
+        // SMA distances (in ATR multiples)
+        if d_atr_val > 0
+            dbg += "SMA DISTANCE (xATR)\n"
+            if not na(d_met.sma89)
+                float dist89 = (price - d_met.sma89) / d_atr_val
+                dbg += "  " + lbl_signal + " SMA89: " + str.tostring(math.round(dist89, 1)) + "x"
+                dbg += " (" + str.tostring(math.round(d_met.sma89, 2)) + ")\n"
+            if not na(d_met.sma200)
+                float dist200 = (price - d_met.sma200) / d_atr_val
+                dbg += "  " + lbl_signal + " SMA200: " + str.tostring(math.round(dist200, 1)) + "x"
+                dbg += " (" + str.tostring(math.round(d_met.sma200, 2)) + ")\n"
+        // Stop levels per TF
+        dbg += "STOP LEVELS\n"
+        string d_mode = is_buy(d.trend) ? "BUY" : "SELL"
+        string w_mode = is_buy(w.trend) ? "BUY" : "SELL"
+        string m_mode = is_buy(m.trend) ? "BUY" : "SELL"
+        dbg += "  " + lbl_signal + " (" + d_mode + "): SL=" + str.tostring(math.round(nz(d.sl), 2))
+        if not na(d.sl) and price != 0
+            float d_sl_pct = (price - d.sl) / price * 100
+            dbg += " (" + (d_sl_pct >= 0 ? "+" : "") + str.tostring(math.round(d_sl_pct, 1)) + "%)\n"
+        else
+            dbg += "\n"
+        dbg += "  " + lbl_trend + " (" + w_mode + "): SL=" + str.tostring(math.round(nz(w.sl), 2))
+        if not na(w.sl) and price != 0
+            float w_sl_pct = (price - w.sl) / price * 100
+            dbg += " (" + (w_sl_pct >= 0 ? "+" : "") + str.tostring(math.round(w_sl_pct, 1)) + "%)\n"
+        else
+            dbg += "\n"
+        dbg += "  " + lbl_base + " (" + m_mode + "): SL=" + str.tostring(math.round(nz(m.sl), 2))
+        if not na(m.sl) and price != 0
+            float m_sl_pct = (price - m.sl) / price * 100
+            dbg += " (" + (m_sl_pct >= 0 ? "+" : "") + str.tostring(math.round(m_sl_pct, 1)) + "%)\n"
+        else
+            dbg += "\n"
+        // Bollinger Band values
+        if not na(w.stdev20) and not na(w.sma20)
+            float w_upper_bb_dbg = w.sma20 + 2.5 * w.stdev20
+            float w_lower_bb_dbg = w.sma20 - 2.5 * w.stdev20
+            dbg += lbl_trend + " BOLLINGER (2.5 SD) [1 pt]\n"
+            dbg += "  Upper: " + str.tostring(math.round(w_upper_bb_dbg, 2)) + "  Lower: " + str.tostring(math.round(w_lower_bb_dbg, 2)) + "\n"
+        if not na(m.stdev20) and not na(m.sma20)
+            float upper_bb_dbg = m.sma20 + 2.5 * m.stdev20
+            float lower_bb_dbg = m.sma20 - 2.5 * m.stdev20
+            dbg += lbl_base + " BOLLINGER (2.5 SD) [2 pts]\n"
+            dbg += "  Upper: " + str.tostring(math.round(upper_bb_dbg, 2)) + "  Lower: " + str.tostring(math.round(lower_bb_dbg, 2)) + "\n"
+        // Previous trend TF High/Low
+        if not na(w.prev_high)
+            dbg += "PREV " + lbl_trend + "  Hi: " + str.tostring(math.round(w.prev_high, 2)) + "  Lo: " + str.tostring(math.round(nz(w.prev_low), 2)) + "\n"
+
+    // === BUILD RESULT ===
+    ScoreResult.new(
+         bull_score       = bsc,
+         bear_score       = besc,
+         bull_reversal    = bull_rev,
+         bear_reversal    = bear_rev,
+         bull_reasons     = br,
+         bear_reasons     = ber,
+         bull_rev_reasons = bull_rev_r,
+         bear_rev_reasons = bear_rev_r,
+         metrics_text     = met_section,
+         pa_text          = pa,
+         debug_text       = dbg,
+         scalp_long       = sl_rec,
+         scalp_short      = ss_rec,
+         swing_long       = swl,
+         swing_short      = sws)

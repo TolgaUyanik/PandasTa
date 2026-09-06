@@ -1,0 +1,123 @@
+//@version=6
+strategy("Whale Force",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     process_orders_on_close=false,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false)
+
+// ===== 입력 =====
+sigTf        = input.timeframe("240", "Signal calculation timeframe")
+volLen       = input.int(50,  "Volume Z-Score Length", minval=10)
+zThrust      = input.float(2.2, "Z-Score Threshold", step=0.1)
+donLen       = input.int(24,  "Donchian High Length", minval=5)
+vwmaLen      = input.int(24,  "VWMA Length", minval=5)
+quietAtrLen  = input.int(14,  "Quiet Zone ATR Length", minval=5)
+quietRefLen  = input.int(50,  "Quiet Zone Reference Length", minval=20)
+quietRatio   = input.float(0.75, "Quiet Zone ATR Ratio", minval=0.1, maxval=2.0)
+useAbsorp    = input.bool(true, "Allow Absorption Pattern")
+signalOnly   = input.bool(false, "Signal Only - No Orders")
+
+// ===== 확정봉 옵션 =====
+buyConfirmedOnly  = input.bool(true, "BUY only on confirmed signal candle")
+exitConfirmedOnly = input.bool(true, "EXIT only on confirmed signal candle")
+minExitVotes      = input.int(2, "Required EXIT Votes", minval=1, maxval=4)
+exitVWMAEpsPct    = input.float(0.15, "VWMA Breakdown Buffer (%)", step=0.05)
+
+// ===== 상위 타임프레임 시리즈 / lookahead_off 명시 =====
+vol_tf   = request.security(syminfo.tickerid, sigTf, volume, lookahead=barmerge.lookahead_off)
+close_tf = request.security(syminfo.tickerid, sigTf, close,  lookahead=barmerge.lookahead_off)
+open_tf  = request.security(syminfo.tickerid, sigTf, open,   lookahead=barmerge.lookahead_off)
+high_tf  = request.security(syminfo.tickerid, sigTf, high,   lookahead=barmerge.lookahead_off)
+low_tf   = request.security(syminfo.tickerid, sigTf, low,    lookahead=barmerge.lookahead_off)
+time_tf  = request.security(syminfo.tickerid, sigTf, time,   lookahead=barmerge.lookahead_off)
+
+confirmed_tf = request.security(syminfo.tickerid, sigTf, barstate.isconfirmed ? 1 : 0, lookahead=barmerge.lookahead_off)
+bool htfConfirmed = confirmed_tf == 1
+
+// ===== 거래량 Z-Score =====
+volSma_tf   = request.security(syminfo.tickerid, sigTf, ta.sma(volume, volLen), lookahead=barmerge.lookahead_off)
+volStdev_tf = request.security(syminfo.tickerid, sigTf, ta.stdev(volume, volLen), lookahead=barmerge.lookahead_off)
+volZ_tf     = volStdev_tf > 0 ? (vol_tf - volSma_tf) / volStdev_tf : 0.0
+
+// ===== VWMA =====
+vwma_tf  = request.security(syminfo.tickerid, sigTf, ta.vwma(close, vwmaLen), lookahead=barmerge.lookahead_off)
+vwma2_tf = request.security(syminfo.tickerid, sigTf, ta.vwma(close, vwmaLen * 2), lookahead=barmerge.lookahead_off)
+
+// ===== 조용한 구간 =====
+atrNow_tf = request.security(syminfo.tickerid, sigTf, ta.atr(quietAtrLen), lookahead=barmerge.lookahead_off)
+atrRef_tf = request.security(syminfo.tickerid, sigTf, ta.sma(ta.atr(quietAtrLen), quietRefLen), lookahead=barmerge.lookahead_off)
+isQuiet_tf = atrRef_tf > 0 ? (atrNow_tf / atrRef_tf) <= quietRatio : false
+
+// ===== Donchian 돌파 =====
+donHighPrev_tf = request.security(syminfo.tickerid, sigTf, ta.highest(high, donLen)[1], lookahead=barmerge.lookahead_off)
+isBreak_tf = close_tf > donHighPrev_tf
+
+// ===== 캔들 특성 =====
+range_tf   = math.max(high_tf - low_tf, 0.0)
+clv_tf     = range_tf > 0 ? (close_tf - low_tf) / range_tf : 0.5
+body_tf    = math.abs(close_tf - open_tf)
+bodyPct_tf = range_tf > 0 ? body_tf / range_tf : 0.0
+
+// ===== 추세 / 수급 필터 =====
+trendOK_tf = close_tf > vwma_tf and vwma_tf > vwma2_tf
+
+// ===== BUY 로직 =====
+absorp_tf      = volZ_tf >= zThrust and bodyPct_tf <= 0.4 and clv_tf >= 0.6
+thrustBreak_tf = isQuiet_tf and isBreak_tf and volZ_tf >= zThrust and clv_tf >= 0.6 and trendOK_tf
+absorbBreak_tf = useAbsorp ? absorp_tf and close_tf > high_tf[1] and trendOK_tf : false
+
+whaleBuy_raw = thrustBreak_tf or absorbBreak_tf
+whaleBuy_tf  = whaleBuy_raw and (buyConfirmedOnly ? htfConfirmed : true)
+
+// ===== EXIT 로직 =====
+exit_trend_strong = close_tf < vwma_tf * (1 - exitVWMAEpsPct / 100.0)
+exit_momo_strong  = clv_tf <= 0.3 and close_tf < low_tf[1]
+exit_vol_strong   = nz(volZ_tf[1]) >= zThrust and volZ_tf < 0.0
+bearEngulf_tf     = open_tf > close_tf and open_tf >= close_tf[1] and close_tf <= open_tf[1]
+
+exitVotes = 
+     (exit_trend_strong ? 1 : 0) +
+     (exit_momo_strong  ? 1 : 0) +
+     (exit_vol_strong   ? 1 : 0) +
+     (bearEngulf_tf     ? 1 : 0)
+
+whaleSell_tf = exitVotes >= minExitVotes and (exitConfirmedOnly ? htfConfirmed : true)
+
+// ===== 시그널 표시 =====
+plotshape(whaleBuy_tf,  title="Whale Buy",  style=shape.triangleup,   size=size.tiny, color=color.new(color.lime, 0), location=location.belowbar, text="WH")
+plotshape(whaleSell_tf, title="Whale Exit", style=shape.triangledown, size=size.tiny, color=color.new(color.red, 0),  location=location.abovebar, text="EXIT")
+
+// ===== 롱 사이드 =====
+var int lastLongEntryBar = na
+
+if whaleBuy_tf and not signalOnly and strategy.position_size == 0
+    strategy.entry("WH-L", strategy.long)
+    lastLongEntryBar := bar_index
+
+canCloseLong = strategy.position_size > 0 and bar_index > nz(lastLongEntryBar, -1)
+
+if whaleSell_tf and not signalOnly and canCloseLong
+    strategy.close("WH-L")
+
+// ===== 가이드 라인 =====
+plot(donHighPrev_tf, "Donchian High Previous", color=color.new(color.orange, 0))
+plot(vwma_tf,        "VWMA",                   color=color.new(color.aqua, 0))
+plot(vwma2_tf,       "VWMA x2",                color=color.new(color.blue, 50))
+
+// ===== 알림 =====
+var int lastBuyAlertHtfTime  = na
+var int lastSellAlertHtfTime = na
+
+if whaleBuy_tf and barstate.isnew and time_tf != lastBuyAlertHtfTime
+    alert('{"action":"buy","symbol":"{{ticker}}","tf":"signal"}')
+    lastBuyAlertHtfTime := time_tf
+
+if whaleSell_tf and barstate.isnew and time_tf != lastSellAlertHtfTime
+    alert('{"action":"sell","reason":"exit","symbol":"{{ticker}}","tf":"signal"}')
+    lastSellAlertHtfTime := time_tf

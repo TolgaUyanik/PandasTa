@@ -1,0 +1,154 @@
+//@version=6
+// =====================================================================
+//  HAR-Parkinson Volatility Forecast
+//
+//  Forecasts the EXPECTED RANGE of the next bar using a HAR regression
+//  on Parkinson range-based volatility.
+//
+//  *** VOLATILITY / CONTEXT TOOL - NOT A DIRECTION SIGNAL ***
+//  It tells you HOW FAR price may travel, never WHICH WAY.
+//
+// =====================================================================
+indicator('HAR-Parkinson Vol Forecast', 'HAR-Park', overlay = false, precision = 1)
+
+// ---------------- Inputs ----------------
+grpH = 'HAR Lookbacks (bars)'
+shortLB = input.int(1,  'Short component (daily-eq)',   minval = 1, group = grpH)
+medLB   = input.int(5,  'Medium component (weekly-eq)', minval = 2, group = grpH)
+longLB  = input.int(22, 'Long component (monthly-eq)',  minval = 5, group = grpH)
+
+grpR = 'Regression'
+fitWindow = input.int(500, 'Rolling OLS window (bars)', minval = 100, group = grpR)
+
+grpP = 'Regime Shading'
+pctWindow = input.int(500,  'Percentile lookback', minval = 50, group = grpP)
+highPct   = input.float(70, 'High-vol percentile', minval = 50, maxval = 99, group = grpP)
+lowPct    = input.float(30, 'Low-vol percentile',  minval = 1,  maxval = 50, group = grpP)
+
+grpD = 'Display'
+showActual = input.bool(true,  'Show actual range',      group = grpD)
+showTable  = input.bool(true,  'Show info table',        group = grpD)
+
+// ---------------- Parkinson volatility ----------------
+parkPct = high > 0 and low > 0 and high >= low ? math.sqrt(math.pow(math.log(high / low), 2) / (4 * math.log(2))) * 100 : 0.0
+
+// HAR components (all on closed data at current bar)
+x1 = ta.sma(parkPct, shortLB)
+x2 = ta.sma(parkPct, medLB)
+x3 = ta.sma(parkPct, longLB)
+
+// ---------------- Rolling OLS (4 coefficients) ----------------
+// Normal equations built from rolling sums; solved by Gaussian elimination.
+// Target is NEXT bar's parkPct, so we regress parkPct against components
+// lagged by one bar - this keeps the fit strictly causal.
+y  = parkPct
+p1 = x1[1]
+p2 = x2[1]
+p3 = x3[1]
+
+valid = not na(p1) and not na(p2) and not na(p3) and not na(y)
+v1 = valid ? p1 : 0.0
+v2 = valid ? p2 : 0.0
+v3 = valid ? p3 : 0.0
+vy = valid ? y  : 0.0
+vc = valid ? 1.0 : 0.0
+
+// Rolling sums for the 4x4 system
+s00 = math.sum(vc,       fitWindow)
+s01 = math.sum(v1,       fitWindow)
+s02 = math.sum(v2,       fitWindow)
+s03 = math.sum(v3,       fitWindow)
+s0y = math.sum(vy,       fitWindow)
+s11 = math.sum(v1 * v1,  fitWindow)
+s12 = math.sum(v1 * v2,  fitWindow)
+s13 = math.sum(v1 * v3,  fitWindow)
+s1y = math.sum(v1 * vy,  fitWindow)
+s22 = math.sum(v2 * v2,  fitWindow)
+s23 = math.sum(v2 * v3,  fitWindow)
+s2y = math.sum(v2 * vy,  fitWindow)
+s33 = math.sum(v3 * v3,  fitWindow)
+s3y = math.sum(v3 * vy,  fitWindow)
+
+// Solve 4x4 augmented system with partial pivoting
+solveHAR(a00, a01, a02, a03, b0v, a11, a12, a13, b1v, a22, a23, b2v, a33, b3v) =>
+    var float[] M = array.new_float(20, 0.0)
+    // row 0
+    array.set(M, 0,  a00), array.set(M, 1,  a01), array.set(M, 2,  a02), array.set(M, 3,  a03), array.set(M, 4,  b0v)
+    // row 1 (symmetric)
+    array.set(M, 5,  a01), array.set(M, 6,  a11), array.set(M, 7,  a12), array.set(M, 8,  a13), array.set(M, 9,  b1v)
+    // row 2
+    array.set(M, 10, a02), array.set(M, 11, a12), array.set(M, 12, a22), array.set(M, 13, a23), array.set(M, 14, b2v)
+    // row 3
+    array.set(M, 15, a03), array.set(M, 16, a13), array.set(M, 17, a23), array.set(M, 18, a33), array.set(M, 19, b3v)
+
+    ok = true
+    for i = 0 to 3
+        // partial pivot - fixed range 0..3, guarded by r > i (avoids Pine's
+        // auto-reverse when a variable-bound loop like "i+1 to 3" has i=3)
+        piv = i
+        for r = 0 to 3
+            if r > i
+                if math.abs(array.get(M, r * 5 + i)) > math.abs(array.get(M, piv * 5 + i))
+                    piv := r
+        if math.abs(array.get(M, piv * 5 + i)) < 1e-12
+            ok := false
+        if ok
+            if piv != i
+                for j = 0 to 4
+                    tmp = array.get(M, i * 5 + j)
+                    array.set(M, i * 5 + j, array.get(M, piv * 5 + j))
+                    array.set(M, piv * 5 + j, tmp)
+            for r = 0 to 3
+                if r != i
+                    f = array.get(M, r * 5 + i) / array.get(M, i * 5 + i)
+                    for j = i to 4
+                        array.set(M, r * 5 + j, array.get(M, r * 5 + j) - f * array.get(M, i * 5 + j))
+
+    c0 = ok ? array.get(M, 4)  / array.get(M, 0)  : na
+    c1 = ok ? array.get(M, 9)  / array.get(M, 6)  : na
+    c2 = ok ? array.get(M, 14) / array.get(M, 12) : na
+    c3 = ok ? array.get(M, 19) / array.get(M, 18) : na
+    [c0, c1, c2, c3]
+
+[b0, b1, b2, b3] = solveHAR(s00, s01, s02, s03, s0y, s11, s12, s13, s1y, s22, s23, s2y, s33, s3y)
+
+// ---------------- Forecast ----------------
+fitReady = bar_index > longLB + fitWindow / 2 + 60 and not na(b0)
+fpctRaw  = fitReady ? b0 + b1 * x1 + b2 * x2 + b3 * x3 : na
+fpct     = na(fpctRaw) ? na : math.max(fpctRaw, 0.0)
+
+// Convert % sigma to expected RANGE in price points
+expRange = na(fpct) ? na : (fpct / 100) * close * math.sqrt(4 * math.log(2))
+actRange = high - low
+
+// ---------------- Percentile rank of current forecast ----------------
+pctRank = na(expRange) ? na : ta.percentrank(expRange, pctWindow)
+
+regimeHigh = not na(pctRank) and pctRank >= highPct
+regimeLow  = not na(pctRank) and pctRank <= lowPct
+
+regimeCol = regimeHigh ? color.new(color.orange, 30) : regimeLow ? color.new(color.blue, 40) : color.new(color.gray, 60)
+
+// ---------------- Plots ----------------
+plot(expRange, 'Forecast Range', color = color.new(color.blue, 0), linewidth = 2)
+plot(showActual ? actRange : na, 'Actual Range', color = color.new(color.gray, 40), linewidth = 1)
+plot(expRange, 'Regime', color = regimeCol, style = plot.style_columns, linewidth = 1, display = display.pane)
+
+// ---------------- Info table ----------------
+if showTable and barstate.islast and not na(expRange)
+    regimeTxt = regimeHigh ? 'HIGH' : regimeLow ? 'LOW' : 'NORMAL'
+    var table t = table.new(position.top_right, 2, 5, border_width = 1)
+    table.cell(t, 0, 0, 'HAR-Parkinson', text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(t, 1, 0, '', bgcolor = color.new(color.blue, 20))
+    table.cell(t, 0, 1, 'Next-bar range', text_size = size.small)
+    table.cell(t, 1, 1, str.tostring(expRange, '#.#') + ' pts', text_size = size.small)
+    table.cell(t, 0, 2, 'Percentile', text_size = size.small)
+    table.cell(t, 1, 2, str.tostring(pctRank, '#') , text_size = size.small)
+    table.cell(t, 0, 3, 'Regime', text_size = size.small)
+    table.cell(t, 1, 3, regimeTxt, text_size = size.small, text_color = regimeHigh ? color.orange : regimeLow ? color.blue : color.gray)
+    table.cell(t, 0, 4, 'Stop ref 1.0x / 1.5x', text_size = size.small)
+    table.cell(t, 1, 4, str.tostring(expRange, '#.#') + ' / ' + str.tostring(expRange * 1.5, '#.#'), text_size = size.small)
+
+// ---------------- Alerts (regime changes only - NOT trade signals) ----------------
+alertcondition(regimeHigh and not regimeHigh[1], 'Vol regime -> HIGH', 'HAR-Parkinson: expected range entered HIGH regime')
+alertcondition(regimeLow  and not regimeLow[1],  'Vol regime -> LOW',  'HAR-Parkinson: expected range entered LOW regime')

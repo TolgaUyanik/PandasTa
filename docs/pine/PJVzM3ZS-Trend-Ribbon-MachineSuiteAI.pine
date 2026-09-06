@@ -1,0 +1,1016 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © MachineSuiteAI
+
+//@version=6
+indicator("Trend Ribbon [MachineSuiteAI]", overlay = true, max_labels_count = 500)
+// Five-average trend ribbon (8/21/50/100/200 default; EMA/WMA/SMA/HMA/VWMA)
+// with a stack-based trend state, 50/100 cross markers, per-average
+// touch/hold ("respect") statistics, a 0–100 trend-health score, cross
+// outcome win rates, an MTF cross strip, stepped higher-timeframe anchor
+// levels, and squeeze/expansion measurement. Stats use confirmed bars only.
+
+// ─────────────────────────────── INPUTS ─────────────────────────────────────
+grpM = "Averages"
+maType = input.string("EMA", "Average type", options = ["EMA", "WMA", "SMA", "HMA", "VWMA"], group = grpM)
+len1 = input.int(8,   "Length 1 (fastest)", minval = 1, group = grpM)
+len2 = input.int(21,  "Length 2", minval = 1, group = grpM)
+len3 = input.int(50,  "Length 3 — primary cross", minval = 1, group = grpM)
+len4 = input.int(100, "Length 4 — primary cross", minval = 1, group = grpM)
+len5 = input.int(200, "Length 5 (slowest)", minval = 1, group = grpM)
+srcSel = input.string("Close", "Price source", options = ["Close", "Open", "HL2", "HLC3", "OHLC4"], group = grpM,
+     tooltip = "The price series the averages are computed from. Close is the default. Curated on purpose: TradingView's raw source picker also lists every other indicator on the chart as a selectable source, which clutters the menu and invites accidental cross-wiring.")
+float src = srcSel == "Open" ? open : srcSel == "HL2" ? hl2 : srcSel == "HLC3" ? hlc3 : srcSel == "OHLC4" ? ohlc4 : close
+use6 = input.bool(false, "Extra average A", inline = "x6", group = grpM)
+len6 = input.int(13,  "", minval = 1, inline = "x6", group = grpM,
+     tooltip = "Optional extra averages (off by default — the ribbon's identity is legibility, not line count). Extras join the respect ranking but do not change the 5-line stack/width model.")
+use7 = input.bool(false, "Extra average B", inline = "x7", group = grpM)
+len7 = input.int(34,  "", minval = 1, inline = "x7", group = grpM)
+use8 = input.bool(false, "Extra average C", inline = "x8", group = grpM)
+len8 = input.int(150, "", minval = 1, inline = "x8", group = grpM)
+
+grpR = "Respect engine"
+showResp = input.bool(true, "Gold halo on the most-respected average", group = grpR,
+     tooltip = "Counts every touch of every average and measures whether it held. The average with the best hold rate over its last 12 touches (min 5) earns a soft gold halo UNDER its own line — line identities never change. Gold must be earned: below the hold-rate bar nothing is celebrated. Definitions: TOUCH = prior close beyond the average, bar penetrates the ±tolerance band, close finishes back on the original side; consecutive contacts merge; HOLD = no close across the far tolerance edge within the resolve window.")
+showDots = input.bool(true, "Numbered touch dots (auditable)", group = grpR,
+     tooltip = "Tiny dots marking the counted touches of the current most-respected average — gold = held, grey = failed — so every number in the record can be checked on the chart. A small grey ✕ marks a clean PASS-THROUGH: price crossed the average decisively with no qualifying touch pending — nothing was tested, so nothing enters the record.")
+tolAtr   = input.float(0.25, "Touch tolerance × ATR(14)", minval = 0.05, maxval = 1.0, step = 0.05, group = grpR)
+holdK    = input.int(5, "Hold window (bars after last contact)", minval = 1, maxval = 20, group = grpR)
+respN    = input.int(12, "Ranking window (touch events)", minval = 5, maxval = 30, group = grpR)
+respMin  = input.int(5,  "Minimum touches to qualify", minval = 3, maxval = 15, group = grpR)
+respGoldMin = input.float(50, "Gold requires hold rate ≥ %", minval = 0, maxval = 90, step = 5, group = grpR,
+     tooltip = "Gold is earned, not relative: the best average only gets its halo when its hold rate clears this bar. Below it the record chip reads LOW RESPECT — price has been slicing through every average, which is itself information.")
+respDecay = input.float(0.85, "Recency weighting — per-touch decay", minval = 0.5, maxval = 1.0, step = 0.05, group = grpR,
+     tooltip = "The newest touch weighs 1; each older touch multiplies by this factor. Ranking and the gold gate use the weighted hold rate — respect should reflect the CURRENT market, not three months ago. The panel shows the raw record beside the weighted rate. 1.0 = flat window.")
+// respMin may legally exceed the ranking window (respMin max 15 > respN min 5);
+// unclamped, no average could ever qualify and the engine would sit at
+// "collecting" forever with no hint why
+int respMinEff = math.min(respMin, respN)
+
+grpH = "Health score"
+showHealth = input.bool(true, "Health row in the panel", group = grpH,
+     tooltip = "0–100, transparent formula: 40% stack alignment + 25% slope consistency + 20% price position + 15% width behaviour. The row tooltip decomposes the live score and reports the measured meaning: after health first crosses 80, how often the primary side survived N bars later on this chart.")
+healthLook = input.int(20, "Health outcome window (bars)", minval = 5, maxval = 100, group = grpH)
+
+grpS = "Cross odds engine"
+lookC = input.int(10, "Cross outcome measured after N bars", minval = 1, maxval = 100, group = grpS,
+     tooltip = "Win = the close N bars after a 50/100 cross has moved in the cross's direction. Measured on this symbol/timeframe, split by volume confirmation, higher-timeframe agreement and cluster membership — the machine-verified answer to which crosses are worth taking here.")
+minSample = input.int(20, "Minimum sample (greyed below)", minval = 1, group = grpS)
+gateMode = input.string("Where it helps", "Chip evidence marks (✓ / ⚠)", options = ["Where it helps", "Always", "Off"], group = grpS,
+     tooltip = "Where it helps (default): the ✓ volume mark and the ⚠ counter-HTF warning print on cross chips only when the measured split beats the base cross win rate by the margin below (both samples ≥ minimum) on THIS symbol/timeframe. Filters that don't help here don't decorate the chart. Stats are collected either way.")
+helpPts = input.float(3, "…minimum improvement (win-rate points)", minval = 0, step = 0.5, group = grpS)
+showOdds = input.bool(true, "Cross odds rows in the panel", group = grpS)
+
+grpT = "MTF cross strip"
+showMtf = input.bool(true, "Show MTF cross strip", group = grpT,
+     tooltip = "50/100 cross state on five timeframes in the chart's own chip language, read repaint-safe from the last COMPLETED bar of each timeframe. ▶ marks this chart's timeframe — its crosses are the chips on this chart; the other rows never print here.")
+mtfPos = input.string("Bottom left", "Strip position", options = ["Bottom left", "Top left", "Top right", "Bottom right"], group = grpT,
+     tooltip = "Default bottom-left: the top-left corner is occupied by TradingView's own symbol legend and buy/sell buttons.")
+tfA = input.timeframe("15",  "TF 1", inline = "t1", group = grpT)
+tfB = input.timeframe("60",  "TF 2", inline = "t1", group = grpT)
+tfC = input.timeframe("240", "TF 3", inline = "t2", group = grpT)
+tfD = input.timeframe("D",   "TF 4", inline = "t2", group = grpT)
+tfE = input.timeframe("W",   "TF 5", inline = "t3", group = grpT)
+
+grpA = "HTF anchors"
+anchTfMode = input.string("Auto", "Anchor timeframe", options = ["Auto", "Fixed"], group = grpA,
+     tooltip = "Auto (default): the anchors follow the chart, always one regime up — 1–5m charts anchor to the 1h, up to 45m to the 4h, 1h–8h to the DAILY, 12h–1D to the WEEKLY, 2D–1W to the MONTHLY, monthly and above to the YEARLY. It never anchors to the chart's own timeframe (which would just re-draw the ribbon's averages). On the highest rungs long anchors appear only where the anchor timeframe has enough history (a monthly 200 needs ~17 years). Fixed: use the per-anchor timeframe pickers below. Lengths and colors apply in both modes.")
+useAnchA = input.bool(true, "Anchor A", inline = "a1", group = grpA,
+     tooltip = "Plot a higher-timeframe average on this chart as a stepped level line (e.g. the daily EMA 50 on a 4h chart). Read repaint-safe from the last COMPLETED bar of its timeframe — it can appear one HTF bar late, never rewrites. The MTF strip tells the state; anchors show the levels. Anchors do not join the respect ranking (their hold rates sit below the gold bar).")
+tfAnchA  = input.timeframe("D", "", inline = "a1", group = grpA)
+lenAnchA = input.int(50, "", minval = 1, inline = "a1", group = grpA)
+cAnchA   = input.color(#5C7A99, "", inline = "a1", group = grpA)
+useAnchB = input.bool(true, "Anchor B", inline = "a2", group = grpA)
+tfAnchB  = input.timeframe("D", "", inline = "a2", group = grpA)
+lenAnchB = input.int(100, "", minval = 1, inline = "a2", group = grpA)
+cAnchB   = input.color(#A0895A, "", inline = "a2", group = grpA)
+useAnchC = input.bool(true, "Anchor C", inline = "a3", group = grpA,
+     tooltip = "A third higher-timeframe level OUTSIDE the corridor — by default the 200 one regime up, the HTF twin of the chart's lone grey structure line. Anchors A and B form the corridor (the HTF primary pair, 50/100 one regime up by default — the same pair this script's crosses, strip and odds all key on); C stands alone.")
+tfAnchC  = input.timeframe("D", "", inline = "a3", group = grpA)
+lenAnchC = input.int(200, "", minval = 1, inline = "a3", group = grpA)
+cAnchC   = input.color(#8A6D9B, "", inline = "a3", group = grpA)
+anchVis  = input.string("Corridor", "Anchor visuals", options = ["Corridor", "Lines only"], group = grpA,
+     tooltip = "Corridor (default): the space between anchors A and B fills as a translucent stepped band — the higher-timeframe primary pair (50/100 one regime up by default), tinted by where price trades: trend colors above/below it, neutral grey inside. Anchor C plots as a lone structure line outside the corridor. Each level carries a small end tag (e.g. D 50) so the stepped lines identify themselves without a legend. Lines only: the plain stepped lines without the corridor fill or end tags.")
+
+grpV = "Visuals"
+showLines  = input.bool(true,  "Show average lines", group = grpV)
+axisLabels = input.string("All averages", "Price-scale labels", options = ["All averages", "Primary pair only", "None"], group = grpV,
+     tooltip = "Which averages tag the price scale with their last value. The fast pair (8/21) carries the state color, so its two tags sit together in the current trend color — switch to Primary pair only for a thinner scale. Lines always stay on the chart.")
+showFill   = input.bool(true,  "Show ribbon fill", group = grpV)
+markerStyle = input.string("Chips", "Cross markers", options = ["Chips", "Dots", "Off"], group = grpV,
+     tooltip = "Chips are the classic labeled markers. Dots are small direction-colored circles at the crossing price — the low-ink choice for intraday charts where months of crosses stack chips. Alerts fire regardless.")
+showBeads  = input.bool(true,  "Touch beads on the respected average", group = grpV,
+     tooltip = "A small gold circle at every touch of the most-respected average as it happens — the live companion to the numbered audit dots (which remain the last-12 resolved record).")
+dampMarkers = input.bool(true, "De-emphasize markers inside cross clusters", group = grpV,
+     tooltip = "Several 50/100 crosses within a short window = whipsaw, the crosses least worth full-size marking. The first cross of a cluster prints normally; the rapid re-crosses after it shrink to small dimmed dots — never erased, so the ▲/▼ sequence on the chart always alternates. Alerts fire regardless.")
+clusK   = input.int(2,  "…crosses within", minval = 2, inline = "cl", group = grpV)
+clusWin = input.int(30, "bars", minval = 5, inline = "cl", group = grpV,
+     tooltip = "Window used to classify whipsaw chains: this many crosses inside it counts as a cluster.")
+crossBg    = input.bool(false, "Vertical tint on cross bars", group = grpV,
+     tooltip = "OFF by default — the original ribbon look is the default look. Turn on for a faint full-height column at every 50/100 cross, useful when reading years of history fully zoomed out.")
+colorMode  = input.string("Stack state", "Line coloring", options = ["Stack state", "Per-line slope"], group = grpV,
+     tooltip = "Stack state (default): the original identities — fast pair in the trend color, WHITE 50, AMBER 100, grey 200. Per-line slope: every average colored by its OWN rising/falling, trading the identity colors for per-line momentum at a glance.")
+colorBars  = input.bool(false, "Color candles by trend state", group = grpV)
+showTable  = input.bool(true,  "Show state panel", group = grpV)
+panelPos   = input.string("Top right", "State panel position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = grpV)
+cBull = input.color(#00E5FF, "Bull ", inline = "c", group = grpV)
+cBear = input.color(#E040FB, "Bear ", inline = "c", group = grpV)
+cChop = input.color(#8F9BB3, "Chop",  inline = "c", group = grpV)
+cGold = input.color(#FFD54F, "Respect halo", inline = "c2", group = grpV)
+
+grpX = "Extras"
+regimeBg = input.bool(false, "Mark state flips (background tint)", group = grpX,
+     tooltip = "Paints a subtle background column on the bar where the trend state changes. OFF by default — on lower timeframes state flips are frequent and the columns add noise.")
+convFill = input.bool(true, "Conviction-scaled fill", group = grpX,
+     tooltip = "Ribbon fill gets more opaque as more of the stack aligns (0–4 pairs). A pale ribbon = mixed stack, a vivid ribbon = full alignment.")
+sqzLen = input.int(250, "Squeeze lookback (bars)", minval = 50, group = grpX,
+     tooltip = "Ribbon width (widest minus narrowest core average, as % of price) is ranked against this many bars. Low percentile = compressed ribbon — squeezes tend to precede the big crosses.")
+sqzThr = input.float(15, "Squeeze threshold (percentile)", minval = 1, maxval = 50, group = grpX)
+sqzBg  = input.bool(true, "Squeeze shading (background)", group = grpX,
+     tooltip = "A faint amber background wash across squeeze periods — compression zones stay visible at any zoom. Matches the panel's amber SQUEEZE accent; switch off for the leanest chart.")
+expLook = input.int(20, "Expansion outcome window (bars)", minval = 5, maxval = 100, group = grpX,
+     tooltip = "After every expansion out of a squeeze the engine measures the move this many bars later: median move, direction agreement with the ribbon state at the expansion, sample size.")
+volX   = input.float(1.2, "Volume confirmation — × 20-bar average", minval = 0.5, step = 0.1, group = grpX,
+     tooltip = "Crosses on volume above this multiple of the 20-bar average are marked CONFIRMED (✓ on the chip); also gates the volume-confirmed alerts and the expansion diamond.")
+
+// ─────────────────────────────── ENGINE ─────────────────────────────────────
+f_ma(float s, simple int l) =>
+    int lHalf = int(math.max(1, math.round(l / 2.0)))
+    int lSqrt = int(math.max(1, math.round(math.sqrt(l))))
+    maType == "EMA" ? ta.ema(s, l) :
+     maType == "WMA" ? ta.wma(s, l) :
+     maType == "SMA" ? ta.sma(s, l) :
+     maType == "VWMA" ? ta.vwma(s, l) :
+     ta.wma(2 * ta.wma(s, lHalf) - ta.wma(s, l), lSqrt)   // HMA
+
+ma1 = f_ma(src, len1)
+ma2 = f_ma(src, len2)
+ma3 = f_ma(src, len3)   // primary
+ma4 = f_ma(src, len4)   // primary
+ma5 = f_ma(src, len5)
+ma6 = f_ma(src, len6)
+ma7 = f_ma(src, len7)
+ma8 = f_ma(src, len8)
+
+// stack alignment: number of adjacent CORE pairs in bull order (0–4)
+int alignUp = (ma1 > ma2 ? 1 : 0) + (ma2 > ma3 ? 1 : 0) + (ma3 > ma4 ? 1 : 0) + (ma4 > ma5 ? 1 : 0)
+int alignDn = (ma1 < ma2 ? 1 : 0) + (ma2 < ma3 ? 1 : 0) + (ma3 < ma4 ? 1 : 0) + (ma4 < ma5 ? 1 : 0)
+
+// trend state: primary pair decides the side, alignment decides conviction
+bool primaryBull = ma3 > ma4
+int  state = primaryBull and alignUp >= 3 ? 1 : not primaryBull and alignDn >= 3 ? -1 : 0
+color cState = state == 1 ? cBull : state == -1 ? cBear : cChop
+
+// primary + fast crosses
+bool crossUp  = ta.crossover(ma3, ma4)
+bool crossDn  = ta.crossunder(ma3, ma4)
+bool fastUp   = ta.crossover(ma1, ma2)
+bool fastDn   = ta.crossunder(ma1, ma2)
+bool stackUp  = alignUp == 4 and alignUp[1] < 4
+bool stackDn  = alignDn == 4 and alignDn[1] < 4
+
+var int lastCrossBar = na
+if crossUp or crossDn
+    lastCrossBar := bar_index
+
+// cross clustering: N crosses inside the window = whipsaw (marker suppression)
+float crossCnt = math.sum(crossUp or crossDn ? 1.0 : 0.0, clusWin)
+bool  crossCluster = crossCnt >= clusK
+
+bool stateFlip = state != state[1]
+
+// ribbon compression: width of the CORE stack as % of price, percentile-ranked
+float ribbonW  = (math.max(ma1, ma2, ma3, ma4, ma5) - math.min(ma1, ma2, ma3, ma4, ma5)) / close * 100
+float sqzPct   = ta.percentrank(ribbonW, sqzLen)
+bool  squeezed = sqzPct <= sqzThr
+bool  sqzStart = squeezed and not squeezed[1]
+bool  sqzEnd   = not squeezed and squeezed[1]
+int   sqzBars  = ta.barssince(not squeezed)   // duration of the current squeeze (0 when not squeezed)
+
+// conviction: aligned pairs (0–4) → fill opacity boost
+int conv    = math.max(alignUp, alignDn)
+int convOff = convFill ? (4 - conv) * 4 - 6 : 0
+
+// volume confirmation
+float volSMA = ta.sma(nz(volume), 20)
+bool  volOk  = not na(volume) and volSMA > 0 and volume > volSMA * volX
+float volRatio = volSMA > 0 ? nz(volume) / volSMA : na
+bool  sqzExpVol = sqzEnd and volOk   // expansion out of squeeze on live volume
+
+// ───────────────────── MTF READS (repaint-safe) ─────────────────────────────
+// Encoded single float per TF, read from the last COMPLETED HTF bar
+// (offset [1] + lookahead_on = confirmed value, no repaint).
+f_mtfEnc() =>
+    float m3 = f_ma(src, len3)
+    float m4 = f_ma(src, len4)
+    bool bull = m3 > m4
+    int  bs = ta.barssince(bull != bull[1])
+    (bull ? 1.0 : 0.0) * 1000000.0 + math.min(nz(bs, 999999), 999999)
+
+float encA = request.security(syminfo.tickerid, tfA, f_mtfEnc()[1], lookahead = barmerge.lookahead_on)
+float encB = request.security(syminfo.tickerid, tfB, f_mtfEnc()[1], lookahead = barmerge.lookahead_on)
+float encC = request.security(syminfo.tickerid, tfC, f_mtfEnc()[1], lookahead = barmerge.lookahead_on)
+float encD = request.security(syminfo.tickerid, tfD, f_mtfEnc()[1], lookahead = barmerge.lookahead_on)
+float encE = request.security(syminfo.tickerid, tfE, f_mtfEnc()[1], lookahead = barmerge.lookahead_on)
+
+f_decBull(float e) => not na(e) and e >= 1000000.0
+f_decBars(float e) => na(e) ? int(na) : int(e % 1000000.0)
+
+// higher timeframe for the odds engines: auto-mapped one regime up
+float tfMin = timeframe.in_seconds(timeframe.period) / 60.0
+string htfAuto = tfMin <= 15 ? "240" : tfMin <= 60 ? "D" : tfMin <= 240 ? "3D" : tfMin <= 1440 ? "W" : tfMin <= 10080 ? "M" : "12M"
+float encH = request.security(syminfo.tickerid, htfAuto, f_mtfEnc()[1], lookahead = barmerge.lookahead_on)
+bool  htfBull = f_decBull(encH)
+
+// HTF anchor levels — last COMPLETED bar of their timeframe (repaint-safe).
+// Anchor timeframe Auto: one regime up from the chart, on the same ladder
+// spirit as htfAuto above but for LEVELS — never the chart's own timeframe
+// (that would just re-draw the ribbon's averages under themselves), and
+// never a near-self step either (a 12h chart anchoring to the daily is only
+// 2× up — that's the same regime wearing a different period). Full ladder:
+//   1–5m → 1h · 10–45m → 4h · 1h–8h → DAILY ·
+//   12h–1D → WEEKLY · 2D–1W → MONTHLY · above → YEARLY
+// On very high rungs, long anchors render only where enough anchor-TF
+// history exists (a monthly 200 needs ~17 years of monthly bars).
+string tfAnchAuto = tfMin <= 5 ? "60" : tfMin < 60 ? "240" : tfMin <= 480 ? "D" : tfMin < 2880 ? "W" : tfMin <= 10080 ? "M" : "12M"
+string tfAnchAEff = anchTfMode == "Auto" ? tfAnchAuto : tfAnchA
+string tfAnchBEff = anchTfMode == "Auto" ? tfAnchAuto : tfAnchB
+string tfAnchCEff = anchTfMode == "Auto" ? tfAnchAuto : tfAnchC
+// WARMUP GATE: an anchor renders only once its timeframe has a full LENGTH
+// of completed bars. Without it, an average "computed" on fewer bars than
+// its length is statistically meaningless (a monthly 100 on a symbol with
+// 82 monthly bars) — on young symbols the high rungs draw bands that look
+// authoritative and mean nothing. No level is better than a false level.
+// (The MA is computed unconditionally and the RESULT is gated — calling
+// f_ma inside a ternary branch would promote its length to series, which
+// the underlying built-ins reject.)
+f_anchExpr(int len) =>
+    float m = f_ma(src, len)
+    bar_index + 1 >= len ? m : na
+float anchA = request.security(syminfo.tickerid, tfAnchAEff, f_anchExpr(lenAnchA)[1], lookahead = barmerge.lookahead_on)
+float anchB = request.security(syminfo.tickerid, tfAnchBEff, f_anchExpr(lenAnchB)[1], lookahead = barmerge.lookahead_on)
+float anchC = request.security(syminfo.tickerid, tfAnchCEff, f_anchExpr(lenAnchC)[1], lookahead = barmerge.lookahead_on)
+
+// ───────────────────── CROSS ODDS ENGINE ────────────────────────────────────
+// The ribbon's primary signal measures itself: every 50/100 cross's outcome
+// is resolved lookC bars later, split by volume, HTF agreement and cluster
+// membership. Evidence marks on chips are gated by what actually helps HERE.
+bool crossSig   = crossUp or crossDn
+int  crossDir   = crossUp ? 1 : crossDn ? -1 : 0
+bool crossAgree = crossUp ? htfBull : crossDn ? not htfBull : false
+var int cTot = 0
+var int cWin = 0
+var int caTot = 0
+var int caWin = 0
+var int cvTot = 0
+var int cvWin = 0
+var int ckTot = 0
+var int ckWin = 0
+if barstate.isconfirmed and crossSig[lookC]
+    bool winC = crossDir[lookC] * (close - close[lookC]) > 0
+    cTot += 1
+    cWin += winC ? 1 : 0
+    if crossAgree[lookC]
+        caTot += 1
+        caWin += winC ? 1 : 0
+    if volOk[lookC]
+        cvTot += 1
+        cvWin += winC ? 1 : 0
+    if crossCluster[lookC]
+        ckTot += 1
+        ckWin += winC ? 1 : 0
+
+f_pct(int w, int t) => t > 0 ? str.tostring(100.0 * w / t, "#") + "% (" + str.tostring(t) + ")" : "—"
+
+float wrBase  = cTot > 0 ? 100.0 * cWin / cTot : na
+bool htfHelps = cTot >= minSample and caTot >= minSample and not na(wrBase) and 100.0 * caWin / caTot >= wrBase + helpPts
+bool volHelps = cTot >= minSample and cvTot >= minSample and not na(wrBase) and 100.0 * cvWin / cvTot >= wrBase + helpPts
+bool gateVol  = gateMode == "Always" or (gateMode == "Where it helps" and volHelps)
+bool gateHtf  = gateMode == "Always" or (gateMode == "Where it helps" and htfHelps)
+
+
+// ───────────────────── RESPECT ENGINE ───────────────────────────────────────
+// Counts touch events per average and measures whether each one HELD.
+// All bookkeeping runs on CONFIRMED bars only — nothing here repaints.
+float tol = ta.atr(14) * tolAtr
+
+var array<bool>  maOn   = array.new_bool(8, true)
+if barstate.isfirst
+    array.set(maOn, 5, use6)
+    array.set(maOn, 6, use7)
+    array.set(maOn, 7, use8)
+array<float> maArr = array.from(ma1, ma2, ma3, ma4, ma5, ma6, ma7, ma8)
+var array<float> maPrev = array.new_float(8, na)
+
+// per-MA touch state machine: 0 idle · 1 touching · 2 resolving
+var array<int>   tState  = array.new_int(8, 0)
+var array<int>   tSide   = array.new_int(8, 0)      // +1 touch from above · −1 from below
+var array<int>   tCnt    = array.new_int(8, 0)      // bars since last contact (resolving)
+var array<int>   tBar    = array.new_int(8, 0)      // last contact bar
+var array<float> tPrice  = array.new_float(8, na)   // MA value at last contact (dot anchor)
+
+// rolling outcomes, flattened ring buffers: slot = m*30 + ptr
+var array<int> outBuf = array.new_int(8 * 30, -1)   // stride 30 must stay >= respN's input maxval — raising one without the other corrupts neighboring MAs' slots
+var array<int> outPtr = array.new_int(8, 0)
+var array<int> outCnt = array.new_int(8, 0)
+var array<int> lifeCnt = array.new_int(8, 0)   // lifetime touches resolved per average
+
+// audited event log (for the numbered dots), capped
+var array<int>   evtBar = array.new_int()
+var array<float> evtY   = array.new_float()
+var array<int>   evtMa  = array.new_int()
+var array<int>   evtOut = array.new_int()   // 1 hold · 0 fail
+// pass-through log: price crossed an average decisively with NO qualifying
+// touch pending — nothing was tested, so nothing enters the record; the
+// grey ✕ annotates the non-event so the chart never looks like it missed one
+var array<int>   pasBar = array.new_int()
+var array<float> pasY   = array.new_float()
+var array<int>   pasMa  = array.new_int()
+var array<int>   pSide  = array.new_int(8, 0)   // last established side vs far edges: 1 above · -1 below · 0 unknown
+
+f_pushOutcome(int m, int outcome, int side, int atBar, float atY) =>
+    // encode outcome + role: 0 fail-support · 1 hold-support · 2 fail-resistance · 3 hold-resistance
+    array.set(outBuf, m * 30 + array.get(outPtr, m), outcome + (side == 1 ? 0 : 2))
+    array.set(outPtr, m, (array.get(outPtr, m) + 1) % respN)
+    array.set(outCnt, m, math.min(array.get(outCnt, m) + 1, respN))
+    array.set(lifeCnt, m, array.get(lifeCnt, m) + 1)
+    array.push(evtBar, atBar)
+    array.push(evtY, atY)
+    array.push(evtMa, m)
+    array.push(evtOut, outcome)
+    if array.size(evtBar) > 400
+        array.shift(evtBar)
+        array.shift(evtY)
+        array.shift(evtMa)
+        array.shift(evtOut)
+
+if barstate.isconfirmed
+    for m = 0 to 7
+        if array.get(maOn, m)
+            float maV  = array.get(maArr, m)
+            float maP  = array.get(maPrev, m)
+            int   st   = array.get(tState, m)
+            int   sd   = array.get(tSide, m)
+            bool contactUp = not na(maP) and close[1] > maP and low  <= maV + tol and close > maV
+            bool contactDn = not na(maP) and close[1] < maP and high >= maV - tol and close < maV
+            bool breakUp   = close < maV - tol   // far-edge break for a from-above touch
+            bool breakDn   = close > maV + tol   // far-edge break for a from-below touch
+            bool eventNow = false
+            if st == 0
+                if contactUp or contactDn
+                    array.set(tState, m, 1)
+                    array.set(tSide, m, contactUp ? 1 : -1)
+                    array.set(tBar, m, bar_index)
+                    array.set(tPrice, m, maV)
+                    eventNow := true
+            else
+                bool failed = sd == 1 ? breakUp : breakDn
+                bool contactAgain = sd == 1 ? (low <= maV + tol and close > maV) : (high >= maV - tol and close < maV)
+                if failed
+                    f_pushOutcome(m, 0, sd, array.get(tBar, m), array.get(tPrice, m))
+                    array.set(tState, m, 0)
+                    eventNow := true
+                else if contactAgain
+                    array.set(tState, m, 1)   // merge: same touch event continues
+                    array.set(tCnt, m, 0)
+                    array.set(tBar, m, bar_index)
+                    array.set(tPrice, m, maV)
+                    eventNow := true
+                else
+                    if st == 1
+                        array.set(tState, m, 2)
+                        array.set(tCnt, m, 1)
+                    else
+                        array.set(tCnt, m, array.get(tCnt, m) + 1)
+                    if array.get(tState, m) == 2 and array.get(tCnt, m) >= holdK
+                        f_pushOutcome(m, 1, sd, array.get(tBar, m), array.get(tPrice, m))
+                        array.set(tState, m, 0)
+                        eventNow := true
+            // PASS-THROUGH tracker: which side of the FAR tolerance edges is
+            // price established on? When that side flips with no touch event
+            // involved (no contact, no fail, no hold — nothing was tested),
+            // the cross gets a grey ✕ instead of silently showing nothing.
+            // Catches both the single-close jump and the multi-bar creep
+            // through the band that never registers a contact.
+            int ps = array.get(pSide, m)
+            int ns = close > maV + tol ? 1 : close < maV - tol ? -1 : ps
+            if ps != 0 and ns != ps and not eventNow and array.get(tState, m) == 0
+                array.push(pasBar, bar_index)
+                array.push(pasY, maV)
+                array.push(pasMa, m)
+                if array.size(pasBar) > 400
+                    array.shift(pasBar)
+                    array.shift(pasY)
+                    array.shift(pasMa)
+            array.set(pSide, m, ns)
+
+f_maName(int m) =>
+    int L = m == 0 ? len1 : m == 1 ? len2 : m == 2 ? len3 : m == 3 ? len4 : m == 4 ? len5 : m == 5 ? len6 : m == 6 ? len7 : len8
+    maType + " " + str.tostring(L)
+
+f_stats(int m) =>
+    int tot = 0
+    int win = 0
+    int supT = 0
+    int supW = 0
+    int resT = 0
+    int resW = 0
+    float wSum = 0.0
+    float wWin = 0.0
+    int cn  = array.get(outCnt, m)
+    int start = cn == respN ? array.get(outPtr, m) : 0
+    if cn > 0
+        for i = 0 to cn - 1
+            int v = array.get(outBuf, m * 30 + (start + i) % respN)
+            if v >= 0
+                int o = v % 2
+                bool sup = v < 2
+                tot += 1
+                win += o
+                if sup
+                    supT += 1
+                    supW += o
+                else
+                    resT += 1
+                    resW += o
+                float w = math.pow(respDecay, cn - 1 - i)
+                wSum += w
+                wWin += w * o
+    float wr = wSum > 0 ? wWin / wSum : 0.0
+    [win, tot, wr, supW, supT, resW, resT]
+
+var int respIdx = -1
+var int runIdx  = -1
+// var: the ranking runs on confirmed executions only — these must HOLD their
+// committed values through the live bar's ticks (as plain locals they would
+// reset every tick and the panel/halo would read empty values intra-bar)
+var float bestRate = -1.0   // recency-weighted hold rate — ranking + gold gate
+var float runRate  = -1.0
+var int   bestCnt  = 0
+var int   runCnt   = 0
+var int   bestWin  = 0
+var int   runWin   = 0
+var int   bestSupW = 0
+var int   bestSupT = 0
+var int   bestResW = 0
+var int   bestResT = 0
+// confirmed executions only: the ring buffers feeding f_stats change only on
+// confirmed bars, so re-ranking on every realtime tick recomputed identical
+// values (8 × ≤30 buffer reads per tick) — pure main-thread waste; committed
+// var values persist through the live bar's ticks
+if barstate.isconfirmed
+    int bi = -1
+    int ri = -1
+    float br = -1.0
+    float rr = -1.0
+    int bc = 0
+    int rc = 0
+    int bw = 0
+    int rw = 0
+    int bsw = 0
+    int bst = 0
+    int brw = 0
+    int brt = 0
+    for m = 0 to 7
+        if array.get(maOn, m)
+            [w, t, wr, sw, sT, rsw, rst] = f_stats(m)
+            if t >= respMinEff
+                bool better = wr > br or (wr == br and t > bc)
+                if better
+                    ri := bi
+                    rr := br
+                    rc := bc
+                    rw := bw
+                    bi := m
+                    br := wr
+                    bc := t
+                    bw := w
+                    bsw := sw
+                    bst := sT
+                    brw := rsw
+                    brt := rst
+                else if wr > rr or (wr == rr and t > rc)
+                    ri := m
+                    rr := wr
+                    rc := t
+                    rw := w
+    respIdx := bi
+    runIdx  := ri
+    bestRate := br
+    runRate := rr
+    bestCnt := bc
+    runCnt := rc
+    bestWin := bw
+    runWin := rw
+    bestSupW := bsw
+    bestSupT := bst
+    bestResW := brw
+    bestResT := brt
+
+// gold requires BOTH: the raw record (has it actually worked?) and the
+// recency-weighted recent form (is it working NOW?) — either alone misleads
+float bestRawPct = bestCnt > 0 ? 100.0 * bestWin / bestCnt : 0.0
+bool respQual = respIdx >= 0 and bestRate * 100.0 >= respGoldMin and bestRawPct >= respGoldMin
+bool respGold = showResp and respQual
+bool respChanged = respIdx != respIdx[1] and respIdx >= 0 and respIdx[1] >= 0
+float respMaV  = respIdx >= 0 ? array.get(maArr, respIdx) : na
+float respPrev = respIdx >= 0 ? nz(array.get(maPrev, respIdx), respMaV) : na
+// live touch of the respected average (for the pullback alert)
+bool respTouch = respIdx >= 0 and not na(respMaV) and not na(respPrev) and
+     ((close[1] > respPrev and low <= respMaV + tol and close > respMaV) or
+      (close[1] < respPrev and high >= respMaV - tol and close < respMaV))
+// maPrev commits AFTER the respTouch read: both the touch machine above and
+// the live respTouch/bead/alert must see the PREVIOUS bar's averages.
+// (Committing inside the state-machine block made respPrev equal the CURRENT
+// bar's value on confirmed bars — a different touch definition at the close
+// than intra-bar, i.e. beads that could repaint at bar close.)
+if barstate.isconfirmed
+    for m = 0 to 7
+        array.set(maPrev, m, array.get(maArr, m))
+
+// ───────────────────── HEALTH SCORE ─────────────────────────────────────────
+int dir = primaryBull ? 1 : -1
+float hAlign = (primaryBull ? alignUp : alignDn) / 4.0
+int slopeAgree = 0
+slopeAgree += math.sign(ma1 - ma1[3]) == dir ? 1 : 0
+slopeAgree += math.sign(ma2 - ma2[3]) == dir ? 1 : 0
+slopeAgree += math.sign(ma3 - ma3[3]) == dir ? 1 : 0
+slopeAgree += math.sign(ma4 - ma4[3]) == dir ? 1 : 0
+slopeAgree += math.sign(ma5 - ma5[3]) == dir ? 1 : 0
+float hSlope = slopeAgree / 5.0
+float coreMax = math.max(ma1, ma2, ma3, ma4, ma5)
+float coreMin = math.min(ma1, ma2, ma3, ma4, ma5)
+float hPos = primaryBull ? (close > coreMax ? 1.0 : close > coreMin ? 0.5 : 0.0) : (close < coreMin ? 1.0 : close < coreMax ? 0.5 : 0.0)
+float hWidth = state != 0 ? (ribbonW > ribbonW[5] ? 1.0 : 0.35) : 0.0
+float health = 100.0 * (0.40 * hAlign + 0.25 * hSlope + 0.20 * hPos + 0.15 * hWidth)
+bool healthHi = health >= 80 and health[1] < 80
+bool healthLo = health < 40 and health[1] >= 40
+color cHealth = health >= 80 ? cBull : health >= 60 ? #FFFFFF : health >= 40 ? cChop : #FFB300
+
+int hzShort = int(math.max(5, math.round(healthLook / 2.0)))
+int hzLong  = healthLook * 2
+var array<int> hPendBar  = array.new_int()
+var array<int> hPendSide = array.new_int()
+var array<int> h1PendBar  = array.new_int()
+var array<int> h1PendSide = array.new_int()
+var array<int> h3PendBar  = array.new_int()
+var array<int> h3PendSide = array.new_int()
+var int hiTot = 0
+var int hiWin = 0
+var int hi1T = 0
+var int hi1W = 0
+var int hi3T = 0
+var int hi3W = 0
+if barstate.isconfirmed
+    if healthHi
+        array.push(hPendBar, bar_index)
+        array.push(hPendSide, dir)
+        array.push(h1PendBar, bar_index)
+        array.push(h1PendSide, dir)
+        array.push(h3PendBar, bar_index)
+        array.push(h3PendSide, dir)
+    while array.size(hPendBar) > 0 and bar_index - array.get(hPendBar, 0) >= healthLook
+        hiTot += 1
+        hiWin += (primaryBull ? 1 : -1) == array.get(hPendSide, 0) ? 1 : 0
+        array.shift(hPendBar)
+        array.shift(hPendSide)
+    while array.size(h1PendBar) > 0 and bar_index - array.get(h1PendBar, 0) >= hzShort
+        hi1T += 1
+        hi1W += (primaryBull ? 1 : -1) == array.get(h1PendSide, 0) ? 1 : 0
+        array.shift(h1PendBar)
+        array.shift(h1PendSide)
+    while array.size(h3PendBar) > 0 and bar_index - array.get(h3PendBar, 0) >= hzLong
+        hi3T += 1
+        hi3W += (primaryBull ? 1 : -1) == array.get(h3PendSide, 0) ? 1 : 0
+        array.shift(h3PendBar)
+        array.shift(h3PendSide)
+
+// ───────────────────── EXPANSION OUTCOMES ───────────────────────────────────
+var array<int>   ePendBar   = array.new_int()
+var array<float> ePendClose = array.new_float()
+var array<int>   ePendSide  = array.new_int()
+var array<int>   ePendAgr   = array.new_int()
+var array<int>   ePendVol   = array.new_int()
+var array<float> eMoves     = array.new_float()
+var int eDirTot = 0
+var int eDirWin = 0
+var int eATot   = 0
+var int eAWin   = 0
+if barstate.isconfirmed
+    if sqzEnd
+        array.push(ePendBar, bar_index)
+        array.push(ePendClose, close)
+        array.push(ePendSide, state)
+        array.push(ePendAgr, state != 0 and ((state == 1 and htfBull) or (state == -1 and not htfBull)) ? 1 : 0)
+        array.push(ePendVol, volOk ? 1 : 0)
+    if array.size(ePendBar) > 0
+        while array.size(ePendBar) > 0 and bar_index - array.get(ePendBar, 0) >= expLook
+            float c0 = array.get(ePendClose, 0)
+            int   s0 = array.get(ePendSide, 0)
+            float mv = (close / c0 - 1.0) * 100.0
+            array.push(eMoves, mv)
+            if array.size(eMoves) > 200
+                array.shift(eMoves)
+            if s0 != 0
+                eDirTot += 1
+                eDirWin += math.sign(mv) == s0 ? 1 : 0
+                if array.get(ePendAgr, 0) == 1 and array.get(ePendVol, 0) == 1
+                    eATot += 1
+                    eAWin += math.sign(mv) == s0 ? 1 : 0
+            array.shift(ePendBar)
+            array.shift(ePendClose)
+            array.shift(ePendSide)
+            array.shift(ePendAgr)
+            array.shift(ePendVol)
+float eMed = array.size(eMoves) >= 5 ? array.median(eMoves) : na
+bool eaHelps = eDirTot >= minSample and eATot >= minSample and 100.0 * eAWin / math.max(eATot, 1) >= 100.0 * eDirWin / math.max(eDirTot, 1) + helpPts
+
+f_pos(simple string s) =>
+    s == "Top right" ? position.top_right :
+     s == "Top left" ? position.top_left :
+     s == "Bottom left" ? position.bottom_left :
+     s == "Middle right" ? position.middle_right :
+     position.bottom_right
+
+// ─────────────────────────────── RENDER ─────────────────────────────────────
+// Line identity: the two PRIMARY averages
+// keep fixed, recognizable colors (50 = white, 100 = amber) so the pair that
+// generates the signal is always findable; the fast pair carries the state
+// color as texture; the 200 is a thick neutral "structure" line behind.
+// The respect halo is an UNDERLAY: a soft gold band beneath the respected
+// average's own line — the line itself never changes color or width.
+// style_linebr is REQUIRED here: the halo series is na outside qualified
+// stretches, and the default style_line would bridge those gaps with long
+// straight segments across the chart.
+// respect halo — ONE plot instead of eight (TradingView budgets 64 output
+// series per script; the eight per-MA halos spent 8 of them on what is by
+// definition a single glowing line). The value selects the respected average;
+// linebr breaks at na. On the rare ranking HANDOFF (respIdx changes while
+// gold) one deliberate na bar is inserted so linebr cannot draw a bridge
+// segment between two different averages — the straight-gold-line contract.
+float haloV = not respGold ? na :
+     respIdx == 0 ? ma1 : respIdx == 1 ? ma2 : respIdx == 2 ? ma3 :
+     respIdx == 3 ? ma4 : respIdx == 4 ? ma5 :
+     respIdx == 5 and use6 ? ma6 : respIdx == 6 and use7 ? ma7 :
+     respIdx == 7 and use8 ? ma8 : na
+plot(respIdx == respIdx[1] ? haloV : na, "Respect halo", color = color.new(cGold, 72),
+     linewidth = 4, style = plot.style_linebr, display = display.pane)
+
+dispAll  = axisLabels == "All averages" ? display.all : display.pane
+dispPrim = axisLabels != "None" ? display.all : display.pane
+// line coloring: Stack state (original identities) or per-line slope
+// (each average by its OWN rising/falling over 3 bars)
+bool slopeMode = colorMode == "Per-line slope"
+color cl1 = slopeMode ? color.new(ma1 > ma1[3] ? cBull : cBear, 45) : color.new(cState, 45)
+color cl2 = slopeMode ? color.new(ma2 > ma2[3] ? cBull : cBear, 55) : color.new(cState, 55)
+color cl3 = slopeMode ? color.new(ma3 > ma3[3] ? cBull : cBear, 0)  : color.new(#FFFFFF, 0)
+color cl4 = slopeMode ? color.new(ma4 > ma4[3] ? cBull : cBear, 0)  : color.new(#FFB300, 0)
+color cl5 = slopeMode ? color.new(ma5 > ma5[3] ? cBull : cBear, 15) : color.new(#6B7280, 15)
+color cl6 = slopeMode ? color.new(ma6 > ma6[3] ? cBull : cBear, 65) : color.new(cState, 65)
+color cl7 = slopeMode ? color.new(ma7 > ma7[3] ? cBull : cBear, 65) : color.new(cState, 65)
+color cl8 = slopeMode ? color.new(ma8 > ma8[3] ? cBull : cBear, 60) : color.new(cState, 60)
+
+// HTF anchor levels — stepped, beneath the ribbon lines. In Corridor mode
+// (default) the two levels enclose a translucent band — the HTF decision
+// zone — tinted by where price trades: trend colors outside, neutral inside.
+bool corrOn = anchVis == "Corridor"
+// (colors are plain input colors, not ternaries — a series color doubles a
+// plot's cost against the 64-output budget; the value is already na when off)
+pAnA = plot(useAnchA ? anchA : na, "HTF anchor A", color = color.new(cAnchA, 20),
+     linewidth = 2, style = plot.style_stepline, display = dispPrim)
+pAnB = plot(useAnchB ? anchB : na, "HTF anchor B", color = color.new(cAnchB, 20),
+     linewidth = 2, style = plot.style_stepline, display = dispPrim)
+plot(useAnchC ? anchC : na, "HTF anchor C (structure)", color = color.new(cAnchC, 20),
+     linewidth = 2, style = plot.style_stepline, display = dispPrim)
+color cCorr = corrOn and useAnchA and useAnchB and not na(anchA) and not na(anchB) ?
+     (close > math.max(anchA, anchB) ? color.new(cBull, 88) :
+      close < math.min(anchA, anchB) ? color.new(cBear, 88) : color.new(cChop, 90)) : na
+fill(pAnA, pAnB, color = cCorr, title = "HTF corridor (primary pair)")
+
+// anchor end tags — the stepped levels identify themselves ("D 50") without
+// a legend; redrawn on the last bar only, like every other last-bar chrome
+f_tfTag(string tf) =>
+    // months/years first by threshold — a month is not a clean multiple of
+    // weeks or days, so modulo checks fall through and would print garbage
+    // (a monthly anchor once tagged itself "43800.05m")
+    int s = timeframe.in_seconds(tf)
+    s >= 28857600 ? (s < 47336054 ? "Y" : str.tostring(math.round(s / 31536036.0)) + "Y") :
+     s >= 2419200 ? (s < 5000000 ? "M" : str.tostring(math.round(s / 2628003.0)) + "M") :
+     s % 604800 == 0 ? (s == 604800 ? "W" : str.tostring(s / 604800) + "W") :
+     s % 86400 == 0 ? (s == 86400 ? "D" : str.tostring(s / 86400) + "D") :
+     s % 3600 == 0 ? str.tostring(s / 3600) + "h" : str.tostring(s / 60) + "m"
+var label anchTagA = na
+var label anchTagB = na
+var label anchTagC = na
+// Last-bar chrome (anchor tags + audit dots below) redraws only on COMMITTED
+// executions: the last confirmed historical bar at load, then every realtime
+// bar CLOSE. A per-tick guard via a var flag cannot work here — Pine rolls
+// var values AND uncommitted drawings back before each realtime tick, so the
+// flag re-fires every tick and the labels churn anyway. Committed executions
+// persist through the live bar's ticks, so this draws exactly once per bar —
+// per-tick delete/recreate of chart-coordinate labels forces TradingView to
+// recompute drawing bounds mid-gesture, which snaps the viewport back while
+// dragging or resizing. Tables are exempt (viewport-anchored, they cannot
+// move the chart; their content may update per tick).
+bool redrawChrome = barstate.islastconfirmedhistory or (barstate.islast and barstate.isconfirmed)
+if redrawChrome
+    label.delete(anchTagA)
+    label.delete(anchTagB)
+    label.delete(anchTagC)
+    if corrOn and useAnchA and not na(anchA)
+        anchTagA := label.new(bar_index + 3, anchA, f_tfTag(tfAnchAEff) + " " + str.tostring(lenAnchA),
+             style = label.style_label_left, color = color.new(cAnchA, 15), textcolor = #FFFFFF,
+             size = size.small, tooltip = "HTF anchor A — the last COMPLETED " + tfAnchAEff + "-bar value of its average (repaint-safe)")
+    if corrOn and useAnchB and not na(anchB)
+        anchTagB := label.new(bar_index + 3, anchB, f_tfTag(tfAnchBEff) + " " + str.tostring(lenAnchB),
+             style = label.style_label_left, color = color.new(cAnchB, 15), textcolor = #FFFFFF,
+             size = size.small, tooltip = "HTF anchor B — the last COMPLETED " + tfAnchBEff + "-bar value of its average (repaint-safe)")
+    if corrOn and useAnchC and not na(anchC)
+        anchTagC := label.new(bar_index + 3, anchC, f_tfTag(tfAnchCEff) + " " + str.tostring(lenAnchC),
+             style = label.style_label_left, color = color.new(cAnchC, 15), textcolor = #FFFFFF,
+             size = size.small, tooltip = "HTF anchor C (structure) — the last COMPLETED " + tfAnchCEff + "-bar value of its average (repaint-safe)")
+
+p1 = plot(ma1, "MA 8 (fast)",     color = showLines ? cl1 : na, linewidth = 1, display = dispAll)
+p2 = plot(ma2, "MA 21 (fast)",    color = showLines ? cl2 : na, linewidth = 1, display = dispAll)
+p5 = plot(ma5, "MA 200 (structure)", color = showLines ? cl5 : na, linewidth = 3, display = dispAll)
+p3 = plot(ma3, "MA 50 (primary)",  color = showLines ? cl3 : na, linewidth = 2, display = dispPrim)
+p4 = plot(ma4, "MA 100 (primary)", color = showLines ? cl4 : na, linewidth = 2, display = dispPrim)
+plot(use6 ? ma6 : na, "Extra A", color = showLines and use6 ? cl6 : na, linewidth = 1, display = dispAll)
+plot(use7 ? ma7 : na, "Extra B", color = showLines and use7 ? cl7 : na, linewidth = 1, display = dispAll)
+plot(use8 ? ma8 : na, "Extra C", color = showLines and use8 ? cl8 : na, linewidth = 2, display = dispAll)
+
+// each band colored by its own pair — the ribbon "peels" as a trend turns;
+// the primary 50/100 band is deliberately the most saturated
+f_tr(int base) => math.min(95, math.max(45, base + convOff))
+fill(p1, p2, color = showFill ? color.new(ma1 > ma2 ? cBull : cBear, f_tr(84)) : na, title = "Band 8/21")
+fill(p2, p3, color = showFill ? color.new(ma2 > ma3 ? cBull : cBear, f_tr(88)) : na, title = "Band 21/50")
+fill(p3, p4, color = showFill ? color.new(ma3 > ma4 ? cBull : cBear, f_tr(72)) : na, title = "Band 50/100 (primary)")
+fill(p4, p5, color = showFill ? color.new(ma4 > ma5 ? cBull : cBear, f_tr(90)) : na, title = "Band 100/200")
+
+bgcolor(regimeBg and stateFlip ? color.new(cState, 76) : na, title = "State flip marker")
+bgcolor(markerStyle != "Off" and crossBg and (crossUp or crossDn) and not (dampMarkers and crossCluster) ? color.new(crossUp ? cBull : cBear, 82) : na, title = "Cross column (optional)")
+
+// cross dots: full-size in Dots mode; cluster-suppressed crosses in ANY mode
+// render as dimmed dots — de-emphasized, never erased, so the visible ▲/▼
+// sequence always alternates (a deleted cross reads as a logical error)
+bool crossSupp = dampMarkers and crossCluster
+plot((crossUp or crossDn) and markerStyle != "Off" and (markerStyle == "Dots" or crossSupp) ? (ma3 + ma4) / 2.0 : na, "Cross dots",
+     style = plot.style_circles, color = color.new(crossUp ? cBull : cBear, crossSupp ? 30 : 0),
+     linewidth = 3, display = display.pane)
+plot(showResp and showBeads and respTouch ? respMaV : na, "Respected touch beads",
+     style = plot.style_circles, color = color.new(cGold, 20), linewidth = 2, display = display.pane)
+bgcolor(sqzBg and squeezed ? color.new(#FFB300, 93) : na, title = "Squeeze shading")
+barcolor(colorBars and (barstate.ishistory or barstate.isconfirmed) ? color.new(cState, 0) : na, title = "Trend state candles")
+
+// expansion diamond — tiny, amber, matching the panel's squeeze accent
+plotshape(sqzExpVol and barstate.isconfirmed, "Expansion (volume-confirmed)", style = shape.diamond,
+     location = location.belowbar, color = color.new(#FFB300, 0), size = size.tiny)
+
+// cross chips — anchored at the crossing price (at the cross bar the 50 and
+// 100 meet, so their midpoint IS the spot)
+f_chip(int x, float y, int d, bool vOk, bool agr, bool settled) =>
+    string volTag  = vOk and gateVol ? " ✓" : ""
+    string warnTag = gateHtf and not agr ? " ⚠" : ""
+    string oddsTt  = cTot > 0 ? " · crosses here resolve favourably +" + str.tostring(lookC) + "b: " + f_pct(cWin, cTot) : ""
+    string settleTt = settled ? " · printed after its cross cluster settled (" + str.tostring(clusWin) + " bars with no re-cross)" : ""
+    string base = str.tostring(len3) + "/" + str.tostring(len4) + volTag + warnTag
+    string tt = " cross" + (vOk ? " on above-average volume" : "") + (warnTag != "" ? " · ⚠ against the " + htfAuto + " ribbon" : "") + oddsTt + settleTt
+    if d == 1
+        label.new(x, y, "▲ " + base, style = label.style_label_up,
+             color = color.new(cBull, 10), textcolor = #0A0E14, size = size.small, tooltip = "Bullish " + tt)
+    else
+        label.new(x, y, "▼ " + base, style = label.style_label_down,
+             color = color.new(cBear, 10), textcolor = #FFFFFF, size = size.small, tooltip = "Bearish " + tt)
+
+// chip printing with settled-cluster recovery: printed chips always alternate
+// and always reflect the regime the market actually settled on
+var int   lastPrintDir = 0
+var int   pendBar = na
+var float pendY   = na
+var int   pendDir = 0
+var bool  pendVol = false
+var bool  pendAgr = false
+if markerStyle == "Chips" and barstate.isconfirmed
+    if crossUp or crossDn
+        float crossY = (ma3 + ma4) / 2.0
+        if not crossSupp
+            // flush a still-pending suppressed cross first (reachable when
+            // clusK ≥ 3 lets a later cross print unsuppressed inside the
+            // window) — printed chips must keep alternating ▲/▼
+            if not na(pendBar) and pendDir != lastPrintDir
+                f_chip(pendBar, pendY, pendDir, pendVol, pendAgr, true)
+                lastPrintDir := pendDir
+            f_chip(bar_index, crossY, crossUp ? 1 : -1, volOk, crossAgree, false)
+            lastPrintDir := crossUp ? 1 : -1
+            pendBar := na
+        else
+            pendBar := bar_index
+            pendY   := crossY
+            pendDir := crossUp ? 1 : -1
+            pendVol := volOk
+            pendAgr := crossAgree
+    else if not na(pendBar) and bar_index - pendBar >= clusWin
+        if pendDir != lastPrintDir
+            f_chip(pendBar, pendY, pendDir, pendVol, pendAgr, true)
+            lastPrintDir := pendDir
+        pendBar := na
+
+// ───────────── RESPECT TOUCH DOTS (redrawn on last bar) ─────────────────────
+// No record chips of any color: the panel's Respected row carries the record.
+var array<label> dotLbls = array.new<label>()
+if redrawChrome
+    while array.size(dotLbls) > 0
+        label.delete(array.pop(dotLbls))
+    // audit dots are independent of the chip: in LOW-respect conditions they
+    // are exactly the evidence for the LOW verdict, so they stay
+    if showResp and showDots and respIdx >= 0
+        int total = array.size(evtBar)
+        if total > 0
+            array<int> idxs = array.new_int()
+            for i = 0 to total - 1
+                if array.get(evtMa, i) == respIdx
+                    array.push(idxs, i)
+            int k = array.size(idxs)
+            // k CAN be 0 even with a valid respIdx: the leader's events may
+            // all have been evicted from the 400-cap audit log by other MAs'
+            // churn. Without this guard the loop below runs "0 to -1" (Pine
+            // infers a NEGATIVE step when to < from) and array.get throws —
+            // an intermittent runtime error that restarts the script and
+            // resets the user's viewport.
+            if k > 0
+                int startJ = math.max(0, k - respN)
+                int num = 0
+                for j = startJ to k - 1
+                    num += 1
+                    int ev = array.get(idxs, j)
+                    bool held = array.get(evtOut, ev) == 1
+                    label d = label.new(array.get(evtBar, ev), array.get(evtY, ev), str.tostring(num),
+                         style = label.style_label_center, size = size.tiny,
+                         color = color.new(held ? cGold : #3A4356, held ? 15 : 30),
+                         textcolor = held ? #0A0E14 : #B7C0CE,
+                         tooltip = (held ? "touch HELD" : "touch FAILED") + " · resolved over " + str.tostring(holdK) + " bars")
+                    array.push(dotLbls, d)
+        // grey ✕ — clean pass-throughs of the respected average (last 12):
+        // price crossed decisively with no qualifying touch pending. Nothing
+        // was tested, so nothing enters the record — the ✕ says so on-chart
+        int pTot = array.size(pasBar)
+        if pTot > 0
+            array<int> pidx = array.new_int()
+            for i = 0 to pTot - 1
+                if array.get(pasMa, i) == respIdx
+                    array.push(pidx, i)
+            int pk = array.size(pidx)
+            if pk > 0
+                for j = math.max(0, pk - respN) to pk - 1
+                    int pv = array.get(pidx, j)
+                    label px = label.new(array.get(pasBar, pv), array.get(pasY, pv), "✕",
+                         style = label.style_none, size = size.tiny,
+                         textcolor = color.new(cChop, 10),
+                         tooltip = "passed through without a qualifying touch — nothing was tested, so nothing enters the record")
+                    array.push(dotLbls, px)
+
+// ─────────────────────────── STATE PANEL ────────────────────────────────────
+var table tb = table.new(f_pos(panelPos), 2, 16, bgcolor = #0D1117,
+     border_width = 1, border_color = #161B26, frame_color = #2A3140, frame_width = 1)
+// full rebuild (heavy tooltip strings, ~32 cells) on COMMITTED executions
+// only — once per bar instead of every realtime tick. The browser re-renders
+// a table whenever any cell changes, and rebuilding these on every BTC tick
+// was the main client-side render load. The few values that genuinely move
+// intra-bar refresh in the small live block below.
+if showTable and redrawChrome
+    table.clear(tb, 0, 0, 1, 15)
+    table.cell(tb, 0, 0, "  MSAI RIBBON  ", text_color = cBull, text_size = size.small,
+         bgcolor = #161B26, text_halign = text.align_left,
+         tooltip = "Trend state = " + str.tostring(len3) + "/" + str.tostring(len4) + " side + at least 3 of 4 stack pairs aligned. White line = " + str.tostring(len3) + ", amber = " + str.tostring(len4) + " (the primary pair), grey = " + str.tostring(len5) + "; a soft gold halo marks the average the market measurably respects. Educational — not investment advice. · v1.5")
+    table.cell(tb, 1, 0, "  " + timeframe.period + "  ", text_color = #B7C0CE, text_size = size.small, bgcolor = #161B26, text_halign = text.align_right)
+    table.cell(tb, 0, 1, "  State", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, 1, state == 1 ? "  BULL  " : state == -1 ? "  BEAR  " : "  CHOP  ",
+         text_color = state == -1 ? #FFFFFF : #0A0E14, text_size = size.small, bgcolor = cState)
+    if showHealth
+        table.cell(tb, 0, 2, "  Health", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "0–100 = 40% stack (" + str.tostring(hAlign * 40, "#") + ") + 25% slope (" + str.tostring(hSlope * 25, "#") +
+                 ") + 20% price position (" + str.tostring(hPos * 20, "#") + ") + 15% width (" + str.tostring(hWidth * 15, "#") +
+                 "). Measured on this chart after 80-crossings — primary side still intact: +" + str.tostring(hzShort) + "b " + f_pct(hi1W, hi1T) +
+                 " · +" + str.tostring(healthLook) + "b " + f_pct(hiWin, hiTot) + " · +" + str.tostring(hzLong) + "b " + f_pct(hi3W, hi3T) + ".")
+        table.cell(tb, 1, 2, "  " + str.tostring(health, "#") + " / 100  ", text_color = health >= 80 ? #0A0E14 : cHealth,
+             text_size = size.small, bgcolor = health >= 80 ? cHealth : na, text_halign = text.align_right)
+    table.cell(tb, 0, 3, "  Stack", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, 3, "  " + str.tostring(math.max(alignUp, alignDn)) + "/4 " + (alignUp >= alignDn ? "▲  " : "▼  "),
+         text_color = #FFFFFF, text_size = size.small, text_halign = text.align_right)
+    if showResp
+        table.cell(tb, 0, 4, "  Respected", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "The average with the best record over its last " + str.tostring(respN) + " touches (min " + str.tostring(respMinEff) + "). This row is the RAW record; the next row is its recent form. GOLD requires BOTH ≥ " + str.tostring(respGoldMin, "#") + "%." +
+                 (respIdx >= 0 ? " ROLE SPLIT — as support (tested from above): " + str.tostring(bestSupW) + "/" + str.tostring(bestSupT) + " held · as resistance: " + str.tostring(bestResW) + "/" + str.tostring(bestResT) + ". Lifetime here: " + str.tostring(array.get(lifeCnt, respIdx)) + " touches on " + f_maName(respIdx) + "." : "") +
+                 " TOUCH: prior close beyond the average, bar penetrates ±" + str.tostring(tolAtr, "#.##") + "×ATR(14), close back on the original side (contacts merge). HOLD: no close across the far edge within " + str.tostring(holdK) + " bars.")
+        table.cell(tb, 1, 4, respIdx >= 0 ? "  " + f_maName(respIdx) + " · " + str.tostring(bestWin) + "/" + str.tostring(bestCnt) + " · " + str.tostring(bestRawPct, "#") + "%" + (respQual ? "" : " · LOW") + "  " : "  — collecting  ",
+             text_color = respIdx < 0 ? #6B7280 : respQual ? cGold : #FFB300, text_size = size.small, text_halign = text.align_right)
+        table.cell(tb, 0, 5, "  · recent form", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "The same last-" + str.tostring(respN) + " touches, recency-weighted (decay " + str.tostring(respDecay, "#.##") + " — the newest touch weighs most). ↑ = holding better lately than the raw record · ↓ = fading. GOLD requires BOTH the raw record and recent form ≥ " + str.tostring(respGoldMin, "#") + "%.")
+        table.cell(tb, 1, 5, respIdx >= 0 ? "  " + str.tostring(bestRate * 100.0, "#") + "%" + (bestRate * 100.0 - bestRawPct >= 2 ? " ↑" : bestRawPct - bestRate * 100.0 >= 2 ? " ↓" : "") + "  " : "  —  ",
+             text_color = respIdx < 0 ? #6B7280 : respQual ? cGold : #FFB300, text_size = size.small, text_halign = text.align_right)
+        table.cell(tb, 0, 6, "  Runner-up", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left)
+        table.cell(tb, 1, 6, runIdx >= 0 ? "  " + f_maName(runIdx) + " · " + str.tostring(runWin) + "/" + str.tostring(runCnt) + "  " : "  —  ",
+             text_color = #B7C0CE, text_size = size.small, text_halign = text.align_right)
+    table.cell(tb, 0, 7, "  " + str.tostring(len3) + "/" + str.tostring(len4) + " cross", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, 7, na(lastCrossBar) ? "  —  " : "  " + str.tostring(bar_index - lastCrossBar) + " bars ago  ",
+         text_color = #FFFFFF, text_size = size.small, text_halign = text.align_right)
+    if showOdds
+        color cSb = cTot >= minSample ? #FFFFFF : #6B7280
+        color cSa = caTot >= minSample ? cBull : #6B7280
+        color cSv = cvTot >= minSample ? cBull : #6B7280
+        color cSk = ckTot >= minSample ? #FFB300 : #6B7280
+        table.cell(tb, 0, 8, "  Crosses +" + str.tostring(lookC) + "b", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "Win rate of all " + str.tostring(len3) + "/" + str.tostring(len4) + " crosses, measured " + str.tostring(lookC) + " bars later on this symbol/timeframe. Grey = sample below " + str.tostring(minSample) + ".")
+        table.cell(tb, 1, 8, "  " + f_pct(cWin, cTot) + "  ", text_color = cSb, text_size = size.small, text_halign = text.align_right)
+        table.cell(tb, 0, 9, "  · HTF-aligned", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "Crosses that agreed with the " + htfAuto + " ribbon side. ↑ = beats the base rate by ≥" + str.tostring(helpPts, "#.#") + " points → the ⚠ counter-HTF warning is active on chips. No ↑ = filter unproven here, marker suppressed.")
+        table.cell(tb, 1, 9, "  " + f_pct(caWin, caTot) + (htfHelps ? " ↑" : "") + "  ", text_color = cSa, text_size = size.small, text_halign = text.align_right)
+        table.cell(tb, 0, 10, "  · vol-confirmed", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "Crosses on volume ≥ " + str.tostring(volX, "#.#") + "× the 20-bar average. ↑ = beats the base rate by ≥" + str.tostring(helpPts, "#.#") + " points → the ✓ volume mark is active on chips. No ↑ = filter unproven here, marker suppressed.")
+        table.cell(tb, 1, 10, "  " + f_pct(cvWin, cvTot) + (volHelps ? " ↑" : "") + "  ", text_color = cSv, text_size = size.small, text_halign = text.align_right)
+        table.cell(tb, 0, 11, "  · clustered", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+             tooltip = "Crosses that printed inside a cluster (" + str.tostring(clusK) + "+ within " + str.tostring(clusWin) + " bars) — the measured case for suppressing their markers.")
+        table.cell(tb, 1, 11, "  " + f_pct(ckWin, ckTot) + "  ", text_color = cSk, text_size = size.small, text_halign = text.align_right)
+    table.cell(tb, 0, 12, "  Price", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, 12, close > coreMax ? "  above ribbon  " : close < coreMin ? "  below ribbon  " : "  inside ribbon  ",
+         text_color = #FFFFFF, text_size = size.small, text_halign = text.align_right)
+    table.cell(tb, 0, 13, "  Width", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+         tooltip = "Ribbon width as a percentile of the last " + str.tostring(sqzLen) + " bars. SQUEEZE below the " + str.tostring(sqzThr, "#") + "th percentile — compression tends to precede the big crosses.")
+    table.cell(tb, 1, 13, squeezed ? "  SQUEEZE · p" + str.tostring(sqzPct, "#") + " · " + str.tostring(sqzBars) + "b  " : na(sqzPct) ? "  —  " : "  p" + str.tostring(sqzPct, "#") + "  ",
+         text_color = squeezed ? #0A0E14 : #FFFFFF, text_size = size.small,
+         bgcolor = squeezed ? #FFB300 : na, text_halign = text.align_right)
+    table.cell(tb, 0, 14, "  Expansion", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+         tooltip = "After every expansion out of a squeeze: direction agreement with the ribbon state " + str.tostring(expLook) + " bars later. A-grade = expansion while the ribbon state agreed with the " + htfAuto + " ribbon AND volume cleared " + str.tostring(volX, "#.#") + "× — pooled stats regress to coin flips; the A slice is the tradable one. ↑ = A beats pooled by ≥" + str.tostring(helpPts, "#.#") + " pts. Median pooled move: " + (na(eMed) ? "—" : (eMed >= 0 ? "+" : "") + str.tostring(eMed, "#.#") + "%") + ".")
+    table.cell(tb, 1, 14, eDirTot == 0 ? "  — collecting  " :
+         "  dir " + f_pct(eDirWin, eDirTot) + " · A " + (eATot >= 5 ? f_pct(eAWin, eATot) + (eaHelps ? " ↑" : "") : "—") + "  ",
+         text_color = eDirTot == 0 ? #6B7280 : #FFFFFF, text_size = size.small, text_halign = text.align_right)
+    table.cell(tb, 0, 15, "  Volume", text_color = #B7C0CE, text_size = size.small, text_halign = text.align_left,
+         tooltip = "Current bar volume vs its 20-bar average. Above " + str.tostring(volX, "#.#") + "× counts as move confirmation. On a live, unfinished bar this ratio is naturally low — judge it near the close.")
+    table.cell(tb, 1, 15, na(volRatio) ? "  —  " : "  " + str.tostring(volRatio, "#.##") + "× avg" + (volOk ? " ✓  " : "  "),
+         text_color = volOk ? cBull : #FFFFFF, text_size = size.small, text_halign = text.align_right)
+
+// ── live cells: the only panel values that move intra-bar. Tiny strings, no
+// tooltips — the heavy strings above rebuild once per bar. Rows whose data
+// changes only on confirmed bars (respect, odds, expansion, cross age) are
+// covered by the committed rebuild.
+if showTable and barstate.islast
+    table.cell(tb, 1, 1, state == 1 ? "  BULL  " : state == -1 ? "  BEAR  " : "  CHOP  ",
+         text_color = state == -1 ? #FFFFFF : #0A0E14, text_size = size.small, bgcolor = cState)
+    if showHealth
+        table.cell(tb, 1, 2, "  " + str.tostring(health, "#") + " / 100  ", text_color = health >= 80 ? #0A0E14 : cHealth,
+             text_size = size.small, bgcolor = health >= 80 ? cHealth : na, text_halign = text.align_right)
+    table.cell(tb, 1, 3, "  " + str.tostring(math.max(alignUp, alignDn)) + "/4 " + (alignUp >= alignDn ? "▲  " : "▼  "),
+         text_color = #FFFFFF, text_size = size.small, text_halign = text.align_right)
+    table.cell(tb, 1, 12, close > coreMax ? "  above ribbon  " : close < coreMin ? "  below ribbon  " : "  inside ribbon  ",
+         text_color = #FFFFFF, text_size = size.small, text_halign = text.align_right)
+    table.cell(tb, 1, 13, squeezed ? "  SQUEEZE · p" + str.tostring(sqzPct, "#") + " · " + str.tostring(sqzBars) + "b  " : na(sqzPct) ? "  —  " : "  p" + str.tostring(sqzPct, "#") + "  ",
+         text_color = squeezed ? #0A0E14 : #FFFFFF, text_size = size.small,
+         bgcolor = squeezed ? #FFB300 : na, text_halign = text.align_right)
+    table.cell(tb, 1, 15, na(volRatio) ? "  —  " : "  " + str.tostring(volRatio, "#.##") + "× avg" + (volOk ? " ✓  " : "  "),
+         text_color = volOk ? cBull : #FFFFFF, text_size = size.small, text_halign = text.align_right)
+
+// ───────────────────── MTF CROSS STRIP (render) ─────────────────────────────
+// written in the chart's own chip language (▲/▼ 50/100)
+// committed executions only: for rows at or above the chart TF the [1]+
+// lookahead reads cannot change intra-bar, so per-tick rebuilds repainted
+// identical content; committed table cells persist through live ticks
+if showMtf and redrawChrome
+    var table mt = table.new(f_pos(mtfPos), 3, 6, bgcolor = #0D1117,
+         border_width = 1, border_color = #161B26, frame_color = #2A3140, frame_width = 1)
+    table.clear(mt, 0, 0, 2, 5)
+    table.cell(mt, 0, 0, "  " + str.tostring(len3) + "/" + str.tostring(len4) + " CROSS  ", text_color = cBull, text_size = size.small, bgcolor = #161B26, text_halign = text.align_left,
+         tooltip = "Cross state per timeframe, read from the last COMPLETED bar of that timeframe (repaint-safe; can appear one HTF bar late, never rewrites). ▶ marks THIS chart's timeframe — its crosses are the ▲/▼ chips on this chart; the other rows live on their own timeframes and never print here.")
+    table.merge_cells(mt, 0, 0, 2, 0)
+    for r = 1 to 5
+        string tf_ = r == 1 ? tfA : r == 2 ? tfB : r == 3 ? tfC : r == 4 ? tfD : tfE
+        float  en  = r == 1 ? encA : r == 2 ? encB : r == 3 ? encC : r == 4 ? encD : encE
+        bool bl = f_decBull(en)
+        int  bs = f_decBars(en)
+        bool isChart = timeframe.in_seconds(tf_) == timeframe.in_seconds(timeframe.period)
+        // rows BELOW the chart's timeframe cannot deliver the promised
+        // repaint-safe read (a lower-TF security call returns one intrabar
+        // sample) — show an honest dash instead of an unreliable state
+        bool tooLow  = timeframe.in_seconds(tf_) < timeframe.in_seconds(timeframe.period)
+        table.cell(mt, 0, r, (isChart ? " ▶" : "  ") + tf_, text_color = isChart ? #FFFFFF : #B7C0CE,
+             text_size = size.small, text_halign = text.align_left, bgcolor = isChart ? #1C2432 : na,
+             tooltip = tooLow ? "Below the chart's timeframe — no reliable repaint-safe read from here. Set this row to the chart's timeframe or above." :
+                 isChart ? "This chart's timeframe — its crosses print on this chart as the ▲/▼ chips." : na)
+        table.cell(mt, 1, r, tooLow or na(en) ? "  —  " : (bl ? "  ▲ " : "  ▼ ") + str.tostring(len3) + "/" + str.tostring(len4) + "  ",
+             text_color = tooLow or na(en) ? #6B7280 : bl ? #0A0E14 : #FFFFFF, text_size = size.small,
+             bgcolor = tooLow or na(en) ? na : bl ? cBull : cBear)
+        table.cell(mt, 2, r, tooLow or na(bs) ? "" : "  " + str.tostring(bs) + "b  ", text_color = #6B7280, text_size = size.tiny, text_halign = text.align_right)
+
+// ─────────────────────────────── ALERTS ─────────────────────────────────────
+alertcondition(crossUp,  "Primary bull cross (50/100)",  "MSAI Ribbon: bullish 50/100 cross")
+alertcondition(crossDn,  "Primary bear cross (50/100)",  "MSAI Ribbon: bearish 50/100 cross")
+alertcondition(fastUp,   "Fast bull cross (8/21)",       "MSAI Ribbon: bullish 8/21 cross")
+alertcondition(fastDn,   "Fast bear cross (8/21)",       "MSAI Ribbon: bearish 8/21 cross")
+alertcondition(stackUp,  "Full bull stack aligned",      "MSAI Ribbon: all averages aligned bullish")
+alertcondition(stackDn,  "Full bear stack aligned",      "MSAI Ribbon: all averages aligned bearish")
+alertcondition(sqzStart, "Ribbon squeeze",               "MSAI Ribbon: ribbon compressed below squeeze threshold — watch for expansion")
+alertcondition(crossUp and volOk,  "Bull cross + volume",  "MSAI Ribbon: bullish 50/100 cross on above-average volume — confirmed move")
+alertcondition(crossDn and volOk,  "Bear cross + volume",  "MSAI Ribbon: bearish 50/100 cross on above-average volume — confirmed move")
+alertcondition(sqzExpVol, "Squeeze expansion + volume",   "MSAI Ribbon: ribbon expanding out of squeeze on above-average volume")
+alertcondition(respTouch,   "Respected-average touch",   "MSAI Ribbon: price is testing the most-respected average — check its live record")
+alertcondition(respChanged, "Respected average changed", "MSAI Ribbon: the most-respected average changed — see panel for the new leader")
+alertcondition(healthHi,    "Health crossed 80",         "MSAI Ribbon: trend health crossed above 80")
+alertcondition(healthLo,    "Health dropped below 40",   "MSAI Ribbon: trend health dropped below 40 — trend quality deteriorating")

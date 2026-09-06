@@ -1,0 +1,866 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 6
+// @tw_status published
+// Single source of truth: cybermediaboy/CyberLearningLib/6
+// @description CyberLearningLib — online learning primitives split from MLLib + kNNLib.
+//              Training buffers (circular), feature scaling (EWMA), SGD updates,
+//              hinge/log loss, gradient clipping. Stateless distance/kernel
+//              functions for downstream kNN consumers.
+//              Layer L2. Depends on NumLib + SignalLib.
+//
+// Step 10a of restructuring. kNNLib is Step 10b (separate file).
+//
+// CHANGELOG v2:
+//   - Added f_sgd_update_gated (gated SGD update from TaUtilityLib)
+//   Total exports: 20 → 21
+//
+
+library("CyberLearningLib", overlay=false)
+import cybermediaboy/CyberNumLib/2 as N
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen — P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Sample type / lineage label
+//       FROZEN: enum order (0=LIVE, 1=SIMULATED, 2=SHADOW, 3=BACKFILL) persists in kNN history; do not reorder.
+export enum SampleType
+    LIVE        // real signal that fired
+    SIMULATED   // synthetic / what-if sample
+    SHADOW      // tracked but not traded
+    BACKFILL    // historical seed sample
+
+// @enum Trade direction (0=LONG, 1=SHORT, 2=FLAT in enum order)
+export enum TradeDirection
+    LONG
+    SHORT
+    FLAT
+
+// @enum Loss function
+export enum LossKind
+    SQUARED       // 0.5 * (y - ŷ)²
+    HINGE         // max(0, 1 - y·ŷ)  with y ∈ {-1, +1}
+    LOGISTIC      // log(1 + exp(-y·ŷ))
+    HUBER         // squared if |err| ≤ δ else linear
+
+// @enum Distance metric (used by kNNLib Step 10b)
+export enum DistanceKind
+    EUCLIDEAN
+    MANHATTAN
+    COSINE        // 1 - cosine_similarity
+    MAHALANOBIS   // requires inverse covariance
+    CHEBYSHEV
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: TBSAMPLE — TRAINING BUFFER ELEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type TBSample — one training observation
+// @field features      flat feature vector (length = nfeat declared in buffer)
+// @field label         primary label (regression target or classification {-1,+1})
+// @field weight        sample weight for loss aggregation
+// @field timestamp     bar_index of generation
+// @field sample_type   lineage label (enum int for kNN history compatibility)
+// @field direction     LONG/SHORT/FLAT
+// @field meta_a        free int meta (e.g. category-A in kNN: family id)
+// @field meta_b        free int meta (e.g. category-B: setup code)
+export type TBSample
+    array<float> features
+    float label
+    float weight
+    int   timestamp
+    SampleType sample_type
+    TradeDirection direction
+    int   meta_a
+    int   meta_b
+
+export f_sample_new(array<float> features, float label, SampleType st,
+                    TradeDirection dir, int meta_a, int meta_b) =>
+    TBSample.new(features = features, label = label, weight = 1.0, timestamp = bar_index, sample_type = st, direction = dir, meta_a = meta_a, meta_b = meta_b)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: TRAINING BUFFER (CIRCULAR — P6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type TrainingBuffer — circular ring of TBSample
+// @field samples       fixed-cap array (size == capacity); slots may hold na before fill
+// @field capacity      max samples
+// @field writehead     next write index
+// @field filled        actual number of valid samples (≤ capacity)
+// @field nfeat         declared feature dimension
+export type TrainingBuffer
+    array<TBSample> samples
+    int capacity
+    int writehead
+    int filled
+    int nfeat
+
+// @function Create empty buffer with fixed capacity
+export f_buffer_new(int capacity, int nfeat) =>
+    array<TBSample> arr = array.new<TBSample>(capacity, na)
+    TrainingBuffer.new(samples = arr, capacity = capacity, writehead = 0,
+                        filled = 0, nfeat = nfeat)
+
+// @function Push sample (overwrites oldest at capacity — O(1))
+export method push(TrainingBuffer tb, TBSample s) =>
+    array.set(tb.samples, tb.writehead, s)
+    tb.writehead := (tb.writehead + 1) % tb.capacity
+    tb.filled := math.min(tb.capacity, tb.filled + 1)
+    tb
+
+// @function Read sample at offset (0 = most recent, 1 = previous, ...)
+export method read(TrainingBuffer tb, int offset) =>
+    if offset < 0 or offset >= tb.filled
+        na
+    else
+        int idx = (tb.writehead - 1 - offset + tb.capacity) % tb.capacity
+        array.get(tb.samples, idx)
+
+// @function Read sample at chronological position (0 = oldest, filled-1 = newest)
+export method read_chrono(TrainingBuffer tb, int pos) =>
+    if pos < 0 or pos >= tb.filled
+        na
+    else
+        int start = tb.filled < tb.capacity ? 0 : tb.writehead
+        int idx = (start + pos) % tb.capacity
+        array.get(tb.samples, idx)
+
+// @function Drop oldest n samples (logical — moves filled count, no array op)
+export method drop_oldest(TrainingBuffer tb, int n) =>
+    tb.filled := math.max(0, tb.filled - n)
+    tb
+
+// @function Filter samples by SampleType into new flat list (read-only view)
+export method by_type(TrainingBuffer tb, SampleType st) =>
+    array<TBSample> out = array.new<TBSample>()
+    if tb.filled > 0
+        for i = 0 to tb.filled - 1
+            TBSample s = tb.read_chrono(i)
+            if not na(s) and s.sample_type == st
+                array.push(out, s)
+    out
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: FEATURE SCALER (EWMA-based per-feature stats)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type FeatureScaler — per-feature running mean/variance via EWMA
+// @field nfeat         dimension
+// @field mu            current mean per feature
+// @field variance      current variance per feature
+// @field alpha         EWMA decay (0..1)
+// @field samples_seen  count of update calls (warmup)
+// @field warmup_n      bars before scaler considered ready
+export type FeatureScaler
+    int nfeat
+    array<float> mu
+    array<float> variance
+    float alpha
+    int samples_seen
+    int warmup_n
+
+export f_scaler_new(int nfeat, float alpha, int warmup_n) =>
+    FeatureScaler.new(nfeat = nfeat, mu  = array.new<float>(nfeat, 0.0), variance = array.new<float>(nfeat, 1.0), alpha = alpha, samples_seen = 0, warmup_n = warmup_n)
+
+// @function Update with new feature vector (mutates state)
+export method update(FeatureScaler fs, array<float> features) =>
+    int n = math.min(array.size(features), fs.nfeat)
+    if n > 0
+        for i = 0 to n - 1
+            float x = nz(array.get(features, i))
+            float prev_mu = array.get(fs.mu, i)
+            float diff = x - prev_mu
+            float new_mu = prev_mu + fs.alpha * diff
+            float prev_var = array.get(fs.variance, i)
+            float new_var = (1.0 - fs.alpha) * (prev_var + fs.alpha * diff * diff)
+            array.set(fs.mu, i, new_mu)
+            array.set(fs.variance, i, math.max(new_var, 1e-9))
+        fs.samples_seen += 1
+    fs
+
+// @function Transform features using current stats (no mutation)
+//           Returns new array of standardized values.
+export method transform(FeatureScaler fs, array<float> features) =>
+    int n = math.min(array.size(features), fs.nfeat)
+    array<float> out = array.new<float>(n, 0.0)
+    if n > 0
+        for i = 0 to n - 1
+            float x = nz(array.get(features, i))
+            float mu = array.get(fs.mu, i)
+            float sd = math.sqrt(array.get(fs.variance, i))
+            array.set(out, i, sd > 0.0 ? (x - mu) / sd : 0.0)
+    out
+
+export method ready(FeatureScaler fs) => fs.samples_seen >= fs.warmup_n
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: SGD STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type SGDState — linear model with momentum
+// @field weights       parameter vector (length = nfeat)
+// @field bias          scalar intercept
+// @field velocity      momentum buffer (length = nfeat)
+// @field velocity_b    momentum for bias
+// @field lr            learning rate
+// @field momentum      momentum coefficient (0 = vanilla SGD)
+// @field weight_decay  L2 regularization coefficient
+// @field grad_clip     per-coord gradient clip threshold (0 = off)
+// @field updates       count of update() calls
+export type SGDState
+    int nfeat
+    array<float> weights
+    float bias
+    array<float> velocity
+    float velocity_b
+    float lr
+    float momentum
+    float weight_decay
+    float grad_clip
+    int updates
+
+export f_sgd_new(int nfeat, float lr, float momentum, float weight_decay, float grad_clip) =>
+    SGDState.new(nfeat = nfeat, weights = array.new<float>(nfeat, 0.0), bias = 0.0, velocity = array.new<float>(nfeat, 0.0), velocity_b = 0.0, lr = lr, momentum = momentum, weight_decay = weight_decay, grad_clip = grad_clip, updates = 0)
+
+// @function Predict: w · x + b
+export method predict(SGDState m, array<float> features) =>
+    int n = math.min(array.size(features), m.nfeat)
+    float dot = m.bias
+    if n > 0
+        for i = 0 to n - 1
+            dot += array.get(m.weights, i) * nz(array.get(features, i))
+    dot
+
+// ─── Loss derivatives (returns gradient_factor on prediction error) ──────
+
+f_grad_squared(float y, float yhat) => yhat - y                 // d/dŷ of 0.5(y-ŷ)²
+f_grad_hinge(float y, float yhat) =>
+    float margin = y * yhat
+    margin < 1.0 ? -y : 0.0
+f_grad_logistic(float y, float yhat) =>
+    float exp_neg = math.exp(-y * yhat)
+    -y * exp_neg / (1.0 + exp_neg)
+f_grad_huber(float y, float yhat, float delta) =>
+    float err = yhat - y
+    math.abs(err) <= delta ? err : delta * math.sign(err)
+
+// @function Compute scalar gradient factor for given loss kind
+export f_loss_grad(LossKind loss, float y, float yhat, float huber_delta) =>
+    if loss == LossKind.SQUARED
+        f_grad_squared(y, yhat)
+    else if loss == LossKind.HINGE
+        f_grad_hinge(y, yhat)
+    else if loss == LossKind.LOGISTIC
+        f_grad_logistic(y, yhat)
+    else
+        f_grad_huber(y, yhat, huber_delta)
+
+// @function One SGD update step.
+//           Caller pre-computes ŷ via predict() for diagnostics; then calls update.
+//           Internally re-predicts (cheap) — caller can skip if unused elsewhere.
+export method update(SGDState m, array<float> features, float y, LossKind loss,
+                     float huber_delta, bool gated_skip) =>
+    if gated_skip
+        m
+    else
+        float yhat = m.predict(features)
+        float g = f_loss_grad(loss, y, yhat, huber_delta)
+        // Optional gradient clip on aggregate factor
+        if m.grad_clip > 0.0
+            g := math.max(-m.grad_clip, math.min(m.grad_clip, g))
+        int n = math.min(array.size(features), m.nfeat)
+        if n > 0
+            for i = 0 to n - 1
+                float xi = nz(array.get(features, i))
+                float wi = array.get(m.weights, i)
+                float grad_w = g * xi + m.weight_decay * wi
+                float v = m.momentum * array.get(m.velocity, i) - m.lr * grad_w
+                array.set(m.velocity, i, v)
+                array.set(m.weights, i, wi + v)
+        // bias update (no decay)
+        float vb = m.momentum * m.velocity_b - m.lr * g
+        m.velocity_b := vb
+        m.bias := m.bias + vb
+        m.updates += 1
+        m
+
+// @function Zero out weights and momentum (preserves config)
+export method reset_weights(SGDState m) =>
+    if m.nfeat > 0
+        for i = 0 to m.nfeat - 1
+            array.set(m.weights, i, 0.0)
+            array.set(m.velocity, i, 0.0)
+    m.bias := 0.0
+    m.velocity_b := 0.0
+    m.updates := 0
+    m
+
+
+
+// @function Compute L2 weight norm (for diagnostics/regularization tracking)
+export method weight_norm(SGDState m) =>
+    float s = 0.0
+    if m.nfeat > 0
+        for i = 0 to m.nfeat - 1
+            float w = array.get(m.weights, i)
+            s += w * w
+    math.sqrt(s)
+
+// @function Decay learning rate by factor every N updates (step-based LR schedule)
+export method decay_lr(SGDState m, float factor, int every_n) =>
+    if every_n > 0 and m.updates > 0 and m.updates % every_n == 0
+        m.lr := m.lr * factor
+    m
+
+// @function Create weight snapshot (returns copy of weights array)
+export method snapshot(SGDState m) =>
+    array<float> snap = array.new<float>(m.nfeat, 0.0)
+    if m.nfeat > 0
+        for i = 0 to m.nfeat - 1
+            array.set(snap, i, array.get(m.weights, i))
+    snap
+
+// @function Restore weights from snapshot (also clears momentum to avoid jumps)
+export method restore(SGDState m, array<float> snap) =>
+    int n = math.min(m.nfeat, array.size(snap))
+    if n > 0
+        for i = 0 to n - 1
+            array.set(m.weights, i, array.get(snap, i))
+    // Clear momentum to prevent velocity carry-over from pre-restoration state
+    if m.nfeat > 0
+        for i = 0 to m.nfeat - 1
+            array.set(m.velocity, i, 0.0)
+    m.velocity_b := 0.0
+    m
+
+// @function Health check: clip weights, detect inversion, reset if starving
+// @param lo          lower bound for weight clipping
+// @param hi          upper bound for weight clipping
+// @param floor       reset value when all weights negative (inversion recovery)
+// @param barssince   bars since last fire (starvation detection)
+// @param cooldown    min bars between resets (prevents thrashing)
+// @returns [inverted, reset_done] — inverted=true if all weights negative; reset_done=true if reset triggered
+export method health_check(SGDState m, float lo, float hi, float floor, int barssince, int cooldown) =>
+    // 1. Clip all weights to bounds
+    if m.nfeat > 0
+        for i = 0 to m.nfeat - 1
+            float w = array.get(m.weights, i)
+            array.set(m.weights, i, math.max(lo, math.min(w, hi)))
+    // 2. Count negative weights (inversion detection)
+    int negcount = 0
+    if m.nfeat > 0
+        for i = 0 to m.nfeat - 1
+            if array.get(m.weights, i) < 0.0
+                negcount += 1
+    // 3. Determine inversion state (all weights negative after warmup)
+    bool inverted = negcount >= m.nfeat and m.updates > 100
+    // 4. Reset if inverted AND starving (cooldown prevents thrashing)
+    bool reset_done = false
+    if inverted and barssince > cooldown
+        if m.nfeat > 0
+            for i = 0 to m.nfeat - 1
+                array.set(m.weights, i, floor)
+        m.bias := floor
+        // Clear momentum to prevent velocity carry-over
+        for i = 0 to m.nfeat - 1
+            array.set(m.velocity, i, 0.0)
+        m.velocity_b := 0.0
+        reset_done := true
+    [inverted, reset_done]
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: DISTANCE METRICS (consumed by kNNLib Step 10b)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Squared Euclidean distance (no sqrt — for ranking)
+export f_sq_euclidean(array<float> a, array<float> b) =>
+    int n = math.min(array.size(a), array.size(b))
+    float s = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float d = nz(array.get(a, i)) - nz(array.get(b, i))
+            s += d * d
+    s
+
+// @function Manhattan distance
+export f_manhattan(array<float> a, array<float> b) =>
+    int n = math.min(array.size(a), array.size(b))
+    float s = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            s += math.abs(nz(array.get(a, i)) - nz(array.get(b, i)))
+    s
+
+// @function Cosine distance (1 - cosine_similarity)
+export f_cosine(array<float> a, array<float> b) =>
+    int n = math.min(array.size(a), array.size(b))
+    float dot = 0.0, float na2 = 0.0, float nb2 = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float av = nz(array.get(a, i))
+            float bv = nz(array.get(b, i))
+            dot += av * bv
+            na2 += av * av
+            nb2 += bv * bv
+    float denom = math.sqrt(na2 * nb2)
+    denom > 0.0 ? 1.0 - dot / denom : 1.0
+
+// @function Chebyshev (L∞) distance
+export f_chebyshev(array<float> a, array<float> b) =>
+    int n = math.min(array.size(a), array.size(b))
+    float m = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float d = math.abs(nz(array.get(a, i)) - nz(array.get(b, i)))
+            m := math.max(m, d)
+    m
+
+// @function Dispatch by DistanceKind enum (Mahalanobis requires extra arg
+//           handled in kNNLib Step 10b)
+export f_distance(DistanceKind kind, array<float> a, array<float> b) =>
+    if kind == DistanceKind.EUCLIDEAN
+        math.sqrt(f_sq_euclidean(a, b))
+    else if kind == DistanceKind.MANHATTAN
+        f_manhattan(a, b)
+    else if kind == DistanceKind.COSINE
+        f_cosine(a, b)
+    else if kind == DistanceKind.CHEBYSHEV
+        f_chebyshev(a, b)
+    else
+        // Mahalanobis without covariance — fallback to Euclidean
+        math.sqrt(f_sq_euclidean(a, b))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: GATING HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Gate update if scaler not ready (warmup) or feature variance too low
+export f_should_skip_update(FeatureScaler fs, array<float> features,
+                             float min_variance) =>
+    if not fs.ready()
+        true
+    else
+        int n = math.min(array.size(features), fs.nfeat)
+        float total_var = 0.0
+        if n > 0
+            for i = 0 to n - 1
+                float vi = array.get(fs.variance, i)
+                if not na(vi)
+                    total_var += vi
+        total_var / n < min_variance
+
+export f_cov3_from_stats_shrink(float n_eff, float sx0, float sx1, float sx2, float sxx00, float sxx11, float sxx22, float sxx01, float sxx02, float sxx12, float mu0, float mu1, float mu2, float ridge, float shrinkage) =>
+    float inv_n = 1.0 / math.max(n_eff, 1e-12)
+    float em0 = sx0 * inv_n
+    float em1 = sx1 * inv_n
+    float em2 = sx2 * inv_n
+    float d0 = em0 - mu0
+    float d1 = em1 - mu1
+    float d2 = em2 - mu2
+    float a_fit = sxx00 * inv_n - em0 * em0 + d0 * d0 + ridge
+    float d_fit = sxx11 * inv_n - em1 * em1 + d1 * d1 + ridge
+    float f_fit = sxx22 * inv_n - em2 * em2 + d2 * d2 + ridge
+    float b_fit = sxx01 * inv_n - em0 * em1 + d0 * d1
+    float c_fit = sxx02 * inv_n - em0 * em2 + d0 * d2
+    float e_fit = sxx12 * inv_n - em1 * em2 + d1 * d2
+    float rho = math.max(0.0, math.min(1.0, shrinkage))
+    float a = math.max(ridge, (1.0 - rho) * a_fit + rho)
+    float d = math.max(ridge, (1.0 - rho) * d_fit + rho)
+    float f = math.max(ridge, (1.0 - rho) * f_fit + rho)
+    float b = (1.0 - rho) * b_fit
+    float c = (1.0 - rho) * c_fit
+    float e = (1.0 - rho) * e_fit
+    [a, b, c, d, e, f]
+
+export f_var_from_stats_shrink(float n_eff, float sx, float sxx, float mu, float ridge, float shrinkage) =>
+    float inv_n = 1.0 / math.max(n_eff, 1e-12)
+    float em = sx * inv_n
+    float dm = em - mu
+    float fit = sxx * inv_n - em * em + dm * dm + ridge
+    float rho = math.max(0.0, math.min(1.0, shrinkage))
+    math.max(ridge, (1.0 - rho) * fit + rho)
+
+export f_inv_sym3_tri(float a, float b, float c, float d, float e, float f, float eps) =>
+    float c00 = d * f - e * e
+    float c01 = e * c - b * f
+    float c02 = b * e - d * c
+    float c11 = a * f - c * c
+    float c12 = b * c - a * e
+    float c22 = a * d - b * b
+    float det = a * c00 + b * c01 + c * c02
+    bool ok = math.abs(det) > eps
+    float idet = ok ? 1.0 / det : 0.0
+    float i00 = ok ? c00 * idet : 1.0
+    float i01 = ok ? c01 * idet : 0.0
+    float i02 = ok ? c02 * idet : 0.0
+    float i11 = ok ? c11 * idet : 1.0
+    float i12 = ok ? c12 * idet : 0.0
+    float i22 = ok ? c22 * idet : 1.0
+    [ok, i00, i01, i02, i11, i12, i22]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_sampletype_str(SampleType s) =>
+    s == SampleType.LIVE ? "live" : s == SampleType.SIMULATED ? "simulated" : s == SampleType.SHADOW ? "shadow" : s == SampleType.BACKFILL ? "backfill" : "unknown"
+
+export f_direction_str(TradeDirection d) =>
+    d == TradeDirection.LONG ? "long" : d == TradeDirection.SHORT ? "short" : d == TradeDirection.FLAT ? "flat" : "unknown"
+
+export f_loss_str(LossKind l) =>
+    l == LossKind.SQUARED ? "squared" : l == LossKind.HINGE ? "hinge" : l == LossKind.LOGISTIC ? "logistic" : l == LossKind.HUBER ? "huber" : "unknown"
+
+export f_distance_str(DistanceKind k) =>
+    k == DistanceKind.EUCLIDEAN ? "euclidean" : k == DistanceKind.MANHATTAN ? "manhattan" : k == DistanceKind.COSINE ? "cosine" : k == DistanceKind.MAHALANOBIS ? "mahalanobis" : k == DistanceKind.CHEBYSHEV ? "chebyshev" : "unknown"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: SGD UPDATES (from TaUtilityLib)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Gated SGD parameter update — only updates when coupling_damping >= gate_thresh
+// @param current_param Current parameter value
+// @param gradient Computed gradient
+// @param learning_rate Base learning rate
+// @param param_min Minimum clamp value
+// @param param_max Maximum clamp value
+// @param coupling_damping Damping factor (usually 0..1 from external gate)
+// @param gate_thresh Threshold below which update is skipped
+// @returns Updated parameter (clamped to [param_min, param_max])
+export f_sgd_update_gated(float current_param, float gradient, float learning_rate, float param_min, float param_max, float coupling_damping, float gate_thresh) =>
+    if na(coupling_damping) or coupling_damping < gate_thresh
+        current_param
+    else
+        float eff_lr = learning_rate * math.min(1.0, coupling_damping)
+        float new_val = current_param - eff_lr * gradient
+        math.max(param_min, math.min(new_val, param_max))
+
+f_metric_distance4(float dx, float dy, float dz, float dv, bool use_v, bool use_lorentzian) =>
+    use_lorentzian ? math.log(1.0 + math.abs(dx)) + math.log(1.0 + math.abs(dy)) + math.log(1.0 + math.abs(dz)) + (use_v ? math.log(1.0 + math.abs(dv)) : 0.0) : dx * dx + dy * dy + dz * dz + (use_v ? dv * dv : 0.0)
+
+export f_weighted_kmeans4_stats_metric(array<float> x_in, array<float> y_in, array<float> z_in, array<float> v_in, array<float> w_in, int k_count, bool use_v, bool use_lorentzian, int seed_base, int iterations, int min_admitted, float clip_abs) =>
+    int n = math.min(array.size(x_in), math.min(array.size(y_in), math.min(array.size(z_in), math.min(array.size(v_in), array.size(w_in)))))
+    int k_lim = math.max(1, math.min(k_count, n))
+    float clip_v = math.max(clip_abs, 1e-6)
+    array<float> xs = array.new<float>(n, 0.0)
+    array<float> ys = array.new<float>(n, 0.0)
+    array<float> zs = array.new<float>(n, 0.0)
+    array<float> vs = array.new<float>(n, 0.0)
+    array<float> ws = array.new<float>(n, 1.0)
+    int admitted = 0
+    for i = 0 to n - 1
+        float wi = math.max(nz(array.get(w_in, i), 1.0), 0.0)
+        array.set(xs, i, math.max(-clip_v, math.min(clip_v, nz(array.get(x_in, i)))))
+        array.set(ys, i, math.max(-clip_v, math.min(clip_v, nz(array.get(y_in, i)))))
+        array.set(zs, i, math.max(-clip_v, math.min(clip_v, nz(array.get(z_in, i)))))
+        array.set(vs, i, use_v ? math.max(-clip_v, math.min(clip_v, nz(array.get(v_in, i)))) : 0.0)
+        array.set(ws, i, wi)
+        admitted += wi > 0.0 ? 1 : 0
+    if admitted < min_admitted
+        for i = 0 to n - 1
+            array.set(ws, i, 1.0)
+    array<float> cx = array.new<float>(k_lim, 0.0)
+    array<float> cy = array.new<float>(k_lim, 0.0)
+    array<float> cz = array.new<float>(k_lim, 0.0)
+    array<float> cv = array.new<float>(k_lim, 0.0)
+    float r0 = math.sin(float(seed_base) * 12.9898) * 43758.5453
+    r0 -= math.floor(r0)
+    int first = math.max(0, math.min(int(math.min(r0 * float(n), float(n - 1))), n - 1))
+    array.set(cx, 0, array.get(xs, first))
+    array.set(cy, 0, array.get(ys, first))
+    array.set(cz, 0, array.get(zs, first))
+    array.set(cv, 0, array.get(vs, first))
+    if k_lim > 1
+        for k = 1 to k_lim - 1
+            array<float> d2s = array.new<float>(n, 0.0)
+            float total_d2 = 0.0
+            for i = 0 to n - 1
+                float best_d2 = 1e20
+                for j = 0 to k - 1
+                    float dx = array.get(xs, i) - array.get(cx, j)
+                    float dy = array.get(ys, i) - array.get(cy, j)
+                    float dz = array.get(zs, i) - array.get(cz, j)
+                    float dv = array.get(vs, i) - array.get(cv, j)
+                    best_d2 := math.min(best_d2, f_metric_distance4(dx, dy, dz, dv, use_v, use_lorentzian))
+                float wd2 = best_d2 * array.get(ws, i)
+                array.set(d2s, i, wd2)
+                total_d2 += wd2
+            float rk = math.sin(float(seed_base + k) * 12.9898 + float(k) * 31.4159) * 43758.5453
+            rk -= math.floor(rk)
+            float target = rk * total_d2
+            float cumulative = 0.0
+            int pick = n - 1
+            bool found = false
+            for i = 0 to n - 1
+                if not found
+                    cumulative += array.get(d2s, i)
+                    if cumulative >= target
+                        pick := i
+                        found := true
+            array.set(cx, k, array.get(xs, pick))
+            array.set(cy, k, array.get(ys, pick))
+            array.set(cz, k, array.get(zs, pick))
+            array.set(cv, k, array.get(vs, pick))
+    array<int> assignment = array.new<int>(n, 0)
+    for iteration = 0 to math.max(iterations, 1) - 1
+        array<float> sum_x = array.new<float>(k_lim, 0.0)
+        array<float> sum_y = array.new<float>(k_lim, 0.0)
+        array<float> sum_z = array.new<float>(k_lim, 0.0)
+        array<float> sum_v = array.new<float>(k_lim, 0.0)
+        array<float> sum_w = array.new<float>(k_lim, 0.0)
+        for i = 0 to n - 1
+            int best = 0
+            float best_d2 = 1e20
+            for j = 0 to k_lim - 1
+                float dx = array.get(xs, i) - array.get(cx, j)
+                float dy = array.get(ys, i) - array.get(cy, j)
+                float dz = array.get(zs, i) - array.get(cz, j)
+                float dv = array.get(vs, i) - array.get(cv, j)
+                float d2 = f_metric_distance4(dx, dy, dz, dv, use_v, use_lorentzian)
+                if d2 < best_d2
+                    best_d2 := d2
+                    best := j
+            array.set(assignment, i, best)
+            float wi = array.get(ws, i)
+            array.set(sum_w, best, array.get(sum_w, best) + wi)
+            array.set(sum_x, best, array.get(sum_x, best) + wi * array.get(xs, i))
+            array.set(sum_y, best, array.get(sum_y, best) + wi * array.get(ys, i))
+            array.set(sum_z, best, array.get(sum_z, best) + wi * array.get(zs, i))
+            array.set(sum_v, best, array.get(sum_v, best) + wi * array.get(vs, i))
+        for j = 0 to k_lim - 1
+            float wj = array.get(sum_w, j)
+            if wj > 1e-10
+                array.set(cx, j, array.get(sum_x, j) / wj)
+                array.set(cy, j, array.get(sum_y, j) / wj)
+                array.set(cz, j, array.get(sum_z, j) / wj)
+                array.set(cv, j, use_v ? array.get(sum_v, j) / wj : 0.0)
+    array<float> cn = array.new<float>(k_lim, 0.0)
+    array<float> sx = array.new<float>(k_lim, 0.0)
+    array<float> sy = array.new<float>(k_lim, 0.0)
+    array<float> sz = array.new<float>(k_lim, 0.0)
+    array<float> sv = array.new<float>(k_lim, 0.0)
+    array<float> sxx = array.new<float>(k_lim, 0.0)
+    array<float> syy = array.new<float>(k_lim, 0.0)
+    array<float> szz = array.new<float>(k_lim, 0.0)
+    array<float> svv = array.new<float>(k_lim, 0.0)
+    array<float> sxy = array.new<float>(k_lim, 0.0)
+    array<float> sxz = array.new<float>(k_lim, 0.0)
+    array<float> syz = array.new<float>(k_lim, 0.0)
+    float sil_sum = 0.0
+    float sil_w = 0.0
+    float expl_w = 0.0
+    for i = 0 to n - 1
+        int g = array.get(assignment, i)
+        float xi = array.get(xs, i)
+        float yi = array.get(ys, i)
+        float zi = array.get(zs, i)
+        float vi = array.get(vs, i)
+        float wi = array.get(ws, i)
+        array.set(cn, g, array.get(cn, g) + wi)
+        array.set(sx, g, array.get(sx, g) + wi * xi)
+        array.set(sy, g, array.get(sy, g) + wi * yi)
+        array.set(sz, g, array.get(sz, g) + wi * zi)
+        array.set(sv, g, array.get(sv, g) + wi * vi)
+        array.set(sxx, g, array.get(sxx, g) + wi * xi * xi)
+        array.set(syy, g, array.get(syy, g) + wi * yi * yi)
+        array.set(szz, g, array.get(szz, g) + wi * zi * zi)
+        array.set(svv, g, array.get(svv, g) + wi * vi * vi)
+        array.set(sxy, g, array.get(sxy, g) + wi * xi * yi)
+        array.set(sxz, g, array.get(sxz, g) + wi * xi * zi)
+        array.set(syz, g, array.get(syz, g) + wi * yi * zi)
+        float dx = xi - array.get(cx, g)
+        float dy = yi - array.get(cy, g)
+        float dz = zi - array.get(cz, g)
+        float dv = vi - array.get(cv, g)
+        float intra = use_lorentzian ? f_metric_distance4(dx, dy, dz, dv, use_v, true) : math.sqrt(f_metric_distance4(dx, dy, dz, dv, use_v, false))
+        float inter = na
+        if k_lim > 1
+            for j = 0 to k_lim - 1
+                if j != g
+                    float ex = xi - array.get(cx, j)
+                    float ey = yi - array.get(cy, j)
+                    float ez = zi - array.get(cz, j)
+                    float ev = vi - array.get(cv, j)
+                    float dist = use_lorentzian ? f_metric_distance4(ex, ey, ez, ev, use_v, true) : math.sqrt(f_metric_distance4(ex, ey, ez, ev, use_v, false))
+                    inter := na(inter) ? dist : math.min(inter, dist)
+        float sil_i = not na(inter) and math.max(intra, inter) > 1e-10 ? (inter - intra) / math.max(intra, inter) : na
+        if not na(sil_i) and wi > 0.0
+            sil_sum += wi * sil_i
+            sil_w += wi
+            expl_w += sil_i >= 0.0 ? wi : 0.0
+    float silhouette = sil_w > 1e-10 ? sil_sum / sil_w : na
+    float explainability = sil_w > 1e-10 ? expl_w / sil_w : na
+    [cx, cy, cz, cv, assignment, ws, cn, sx, sy, sz, sv, sxx, syy, szz, svv, sxy, sxz, syz, silhouette, explainability]
+
+export f_weighted_kmeans4_stats(array<float> x_in, array<float> y_in, array<float> z_in, array<float> v_in, array<float> w_in, int k_count, bool use_v, int seed_base, int iterations, int min_admitted, float clip_abs) =>
+    f_weighted_kmeans4_stats_metric(x_in, y_in, z_in, v_in, w_in, k_count, use_v, false, seed_base, iterations, min_admitted, clip_abs)
+
+f_i16_u(float x, float scale) =>
+    int q = int(math.round(math.max(-32768.0, math.min(32767.0, x * scale))))
+    q < 0 ? q + 65536 : q
+
+f_u16_hex4(int u) =>
+    string h = ""
+    int t = u
+    for i = 0 to 3
+        int d = t % 16
+        h := str.substring("0123456789ABCDEF", d, d + 1) + h
+        t := int(math.floor(float(t) / 16.0))
+    h
+
+f_hex4_u16(string h4) =>
+    int u = 0
+    for i = 0 to 3
+        string ch = str.substring(h4, i, i + 1)
+        int d = str.pos("0123456789ABCDEF", str.upper(ch))
+        u := u * 16 + d
+    u
+
+f_u16_i16f(int u, float scale) =>
+    int signed = u >= 32768 ? u - 65536 : u
+    float(signed) / scale
+
+export f_pack_gaussian5_i16(array<float> mu, matrix<float> sigma, float n_eff, float prior, float scale) =>
+    string out = ""
+    for d = 0 to 4
+        out += f_u16_hex4(f_i16_u(array.get(mu, d), scale))
+    for r = 0 to 4
+        for c = r to 4
+            out += f_u16_hex4(f_i16_u(matrix.get(sigma, r, c), scale))
+    out += f_u16_hex4(f_i16_u(n_eff / 100.0, scale)) + f_u16_hex4(f_i16_u(prior, scale))
+    out
+
+export f_unpack_gaussian5_i16(string data, int base, float scale) =>
+    bool ok = base >= 0 and str.length(data) >= base + 88 and scale > 0.0
+    array<float> mu = array.new<float>(5, 0.0)
+    matrix<float> sigma = matrix.new<float>(5, 5, 0.0)
+    float n_eff = na
+    float prior = na
+    if ok
+        for d = 0 to 4
+            array.set(mu, d, f_u16_i16f(f_hex4_u16(str.substring(data, base + d * 4, base + d * 4 + 4)), scale))
+        int off = base + 20
+        int k = 0
+        for r = 0 to 4
+            for c = r to 4
+                float val = f_u16_i16f(f_hex4_u16(str.substring(data, off + k * 4, off + k * 4 + 4)), scale)
+                matrix.set(sigma, r, c, val)
+                matrix.set(sigma, c, r, val)
+                k += 1
+        n_eff := math.max(f_u16_i16f(f_hex4_u16(str.substring(data, off + 60, off + 64)), scale) * 100.0, 1e-6)
+        prior := f_u16_i16f(f_hex4_u16(str.substring(data, off + 64, off + 68)), scale)
+    [mu, sigma, n_eff, prior, ok]
+
+export f_probability_floor_normalize(array<float> probabilities, int count, float floor_value) =>
+    int n = math.min(math.max(count, 0), array.size(probabilities))
+    array<float> normalized = array.new<float>(n, 0.0)
+    float total = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float value = math.max(array.get(probabilities, i), floor_value)
+            array.set(normalized, i, value)
+            total += value
+        total := math.max(total, 1e-12)
+        for i = 0 to n - 1
+            array.set(normalized, i, array.get(normalized, i) / total)
+    normalized
+
+export f_hmm_transition_em_step(matrix<float> transition, array<float> previous, array<float> filtered, array<float> predicted, int count, float eta, float diagonal_prior, float off_diagonal_prior) =>
+    int n = math.min(count, math.min(matrix.rows(transition), matrix.columns(transition)))
+    if n > 0
+        for i = 0 to n - 1
+            float previous_i = array.get(previous, i)
+            float row_total = 0.0
+            for j = 0 to n - 1
+                float ratio = array.get(filtered, j) / math.max(array.get(predicted, j), 1e-12)
+                float xi = previous_i * matrix.get(transition, i, j) * ratio
+                float prior = i == j ? diagonal_prior : off_diagonal_prior
+                float value = (1.0 - eta) * matrix.get(transition, i, j) + eta * (xi + prior / float(n))
+                matrix.set(transition, i, j, value)
+                row_total += value
+            row_total := math.max(row_total, 1e-12)
+            for j = 0 to n - 1
+                matrix.set(transition, i, j, matrix.get(transition, i, j) / row_total)
+
+export f_gaussian_stats_ewma(array<float> sum_x, matrix<float> sum_xx, float n_eff, array<float> observation, float responsibility, float lambda_eff, float admission_weight, bool prior_weighted, int full_cov_dims) =>
+    int n = math.min(array.size(observation), math.min(array.size(sum_x), math.min(matrix.rows(sum_xx), matrix.columns(sum_xx))))
+    float weight = prior_weighted ? responsibility * admission_weight : lambda_eff * responsibility * admission_weight
+    float decay = prior_weighted ? 1.0 : 1.0 - lambda_eff * admission_weight
+    float next_n_eff = decay * n_eff + weight
+    if n > 0
+        for i = 0 to n - 1
+            float xi = array.get(observation, i)
+            array.set(sum_x, i, decay * array.get(sum_x, i) + weight * xi)
+            matrix.set(sum_xx, i, i, decay * matrix.get(sum_xx, i, i) + weight * xi * xi)
+        int block_n = math.min(math.max(full_cov_dims, 0), n)
+        if block_n >= 2
+            for i = 0 to block_n - 2
+                float xi = array.get(observation, i)
+                for j = i + 1 to block_n - 1
+                    float xj = array.get(observation, j)
+                    float cross = decay * matrix.get(sum_xx, i, j) + weight * xi * xj
+                    matrix.set(sum_xx, i, j, cross)
+                    matrix.set(sum_xx, j, i, cross)
+    next_n_eff
+
+export f_gaussian_stats_seed(array<float> mean, matrix<float> covariance, float n_eff) =>
+    int n = math.min(array.size(mean), math.min(matrix.rows(covariance), matrix.columns(covariance)))
+    array<float> sum_x = array.new<float>(n, 0.0)
+    matrix<float> sum_xx = matrix.new<float>(n, n, 0.0)
+    if n > 0
+        for i = 0 to n - 1
+            array.set(sum_x, i, array.get(mean, i) * n_eff)
+            for j = 0 to n - 1
+                float exx = matrix.get(covariance, i, j) + array.get(mean, i) * array.get(mean, j)
+                matrix.set(sum_xx, i, j, n_eff * exx)
+    [sum_x, sum_xx]
+
+export f_gaussian_mstep3_diag(array<float> mean, array<float> seed_mean, matrix<float> covariance, matrix<float> inverse, array<float> sum_x, matrix<float> sum_xx, float n_eff, array<bool> active_dims, float ridge_main, float ridge_aux, float shrinkage, float min_n_eff, float anchor) =>
+    bool updated = false
+    int n = math.min(array.size(mean), math.min(array.size(sum_x), math.min(matrix.rows(covariance), matrix.columns(covariance))))
+    if n_eff > min_n_eff and n >= 3
+        float inv_n = 1.0 / n_eff
+        array<float> fitted_mean = array.new<float>(n, 0.0)
+        for i = 0 to n - 1
+            float em_mean = array.get(sum_x, i) * inv_n
+            bool anchored = anchor > 0.0 and not na(seed_mean) and i < array.size(seed_mean)
+            float value = anchored ? (1.0 - anchor) * em_mean + anchor * array.get(seed_mean, i) : em_mean
+            bool active = i < array.size(active_dims) ? array.get(active_dims, i) : true
+            array.set(fitted_mean, i, value)
+            array.set(mean, i, active ? value : 0.0)
+        [a, b, c, d, e, f] = f_cov3_from_stats_shrink(n_eff, array.get(sum_x, 0), array.get(sum_x, 1), array.get(sum_x, 2), matrix.get(sum_xx, 0, 0), matrix.get(sum_xx, 1, 1), matrix.get(sum_xx, 2, 2), matrix.get(sum_xx, 0, 1), matrix.get(sum_xx, 0, 2), matrix.get(sum_xx, 1, 2), array.get(fitted_mean, 0), array.get(fitted_mean, 1), array.get(fitted_mean, 2), ridge_main, shrinkage)
+        [inv_ok, i00, i01, i02, i11, i12, i22] = f_inv_sym3_tri(a, b, c, d, e, f, 1e-10)
+        matrix.set(covariance, 0, 0, a)
+        matrix.set(covariance, 1, 1, d)
+        matrix.set(covariance, 2, 2, f)
+        matrix.set(covariance, 0, 1, b)
+        matrix.set(covariance, 1, 0, b)
+        matrix.set(covariance, 0, 2, c)
+        matrix.set(covariance, 2, 0, c)
+        matrix.set(covariance, 1, 2, e)
+        matrix.set(covariance, 2, 1, e)
+        matrix.set(inverse, 0, 0, i00)
+        matrix.set(inverse, 0, 1, i01)
+        matrix.set(inverse, 1, 0, i01)
+        matrix.set(inverse, 0, 2, i02)
+        matrix.set(inverse, 2, 0, i02)
+        matrix.set(inverse, 1, 1, i11)
+        matrix.set(inverse, 1, 2, i12)
+        matrix.set(inverse, 2, 1, i12)
+        matrix.set(inverse, 2, 2, i22)
+        if n > 3
+            for i = 3 to n - 1
+                bool active = i < array.size(active_dims) ? array.get(active_dims, i) : true
+                float variance = f_var_from_stats_shrink(n_eff, array.get(sum_x, i), matrix.get(sum_xx, i, i), array.get(fitted_mean, i), ridge_aux, shrinkage)
+                matrix.set(covariance, i, i, variance)
+                matrix.set(inverse, i, i, active ? 1.0 / math.max(variance, 1e-6) : 1.0)
+        updated := true
+    updated
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

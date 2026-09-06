@@ -1,0 +1,552 @@
+//@version=6
+// @library_status draft-adaptive-input-protocol
+// Generic semantic-input facade for causal, direction-conditioned MAE/MFE bands.
+// The parent packs existing values; this library interprets and learns them.
+// online link import cybermediaboy/TargetExcursionLib/2
+library("TargetExcursionLib", overlay = false)
+import cybermediaboy/CyberNumLib/2 as N
+import cybermediaboy/CyberLearningLib/7 as L
+import cybermediaboy/TargetExcursionStatsLib/1 as S
+import cybermediaboy/TargetExcursionQueueLib/1 as Q
+
+export enum SignalKind
+    DIRECTION
+    SIGNED_SCORE
+    RAW_CONTINUOUS
+    LONG_PROBABILITY
+    Z_SCORE
+    BOUNDED_OSCILLATOR
+    EXPECTED_RETURN
+    TARGET_LEVEL
+    FLAGS
+    CATEGORY
+
+export enum Polarity
+    FOLLOW
+    CONTRARIAN
+
+export enum ScaleMode
+    PROVIDED
+    AUTO_TRUE_RANGE
+    AUTO_ABS_CHANGE
+    FIXED
+
+export enum DomainKind
+    PRICE
+    OSCILLATOR
+    CUSTOM
+
+export enum StatusCode
+    ADAPTER_WARMUP
+    SCALE_WARMUP
+    STATS_WARMUP
+    INVALID_INPUT
+    NEUTRAL_SIGNAL
+    READY
+
+export enum DensityFamily
+    POOLED
+    DIRECTION
+    DIRECTION_SHRUNK
+
+// positiveThreshold and negativeThreshold delimit signed neutral zones.
+// Oscillator thresholds are separate from the declared oscillator domain.
+export type AdapterSpec
+    SignalKind signalKind
+    Polarity polarity
+    float positiveThreshold
+    float negativeThreshold
+    float oscillatorMin
+    float oscillatorMax
+    float oscillatorLower
+    float oscillatorUpper
+    float scalerAlpha
+    int scalerWarmup
+    array<int> categoryDirections
+
+// A canonical packet of values already calculated by the parent.
+export type SignalFrame
+    float scalarValue
+    int categoryValue
+    bool longFlag
+    bool shortFlag
+    bool valid
+    float explicitProbability
+    float externalReliability
+
+// All path series are supplied explicitly. The engine never reads chart OHLC.
+export type Observation
+    float origin
+    float pathHigh
+    float pathLow
+    float pathClose
+    float suppliedScale
+    bool valid
+
+export type Request
+    SignalFrame signal
+    Observation observation
+
+export type EngineConfig
+    int horizon
+    ScaleMode scaleMode
+    int scaleLength
+    float fixedScale
+    DomainKind domain
+    int gridSize
+    float outcomeCap
+    float smoothing
+    float halfLife
+    DensityFamily densityFamily
+    float shrinkageAlpha
+    float minSupport
+    float supportScale
+    int minTransparency
+    int maxTransparency
+    float transparencyGamma
+
+export type Engine
+    EngineConfig config
+    AdapterSpec adapter
+    S.DensityState density
+    Q.PendingQueue queue
+    L.FeatureScaler scaler
+    array<float> scalerInput
+    float autoScale
+    int scaleSamples
+    float previousClose
+    int lastConfirmedBar
+
+// q/mode fields are normalized excursion distances. Level fields are the same
+// distances oriented around Observation.origin in the supplied path domain.
+export type Bands
+    bool ready
+    bool statsReady
+    string status
+    StatusCode statusCode
+    SignalKind signalKind
+    DomainKind domain
+    int direction
+    float signalStrength
+    float directionProbability
+    float origin
+    float scale
+    float mfeQ10
+    float mfeQ50
+    float mfeQ80
+    float mfeQ90
+    float mfeMode
+    float maeQ10
+    float maeQ50
+    float maeQ80
+    float maeQ90
+    float maeMode
+    float mfeLevelQ10
+    float mfeLevelQ50
+    float mfeLevelQ80
+    float mfeLevelQ90
+    float mfeLevelMode
+    float maeLevelQ10
+    float maeLevelQ50
+    float maeLevelQ80
+    float maeLevelQ90
+    float maeLevelMode
+    float mfeModeProbability
+    float maeModeProbability
+    float effectiveSupport
+    float longSupport
+    float shortSupport
+    float reliability
+    int transparency
+    int pendingCount
+    int resolvedCount
+    int longResolvedCount
+    int shortResolvedCount
+    int lastResolvedBar
+
+type InterpretedSignal
+    bool valid
+    bool adapterReady
+    int direction
+    float strength
+    float directionProbability
+    float reliability
+
+// Deprecated scalar compatibility records.
+export type TargetInput
+    int direction
+    float originPrice
+    float originScale
+    bool predictionValid
+    float directionProbability
+    float externalReliability
+
+export type TargetBands
+    bool ready
+    string status
+    int direction
+    float originPrice
+    float originScale
+    float mfeQ10
+    float mfeQ50
+    float mfeQ80
+    float mfeQ90
+    float mfeMode
+    float maeQ10
+    float maeQ50
+    float maeQ80
+    float maeQ90
+    float maeMode
+    float mfePriceQ10
+    float mfePriceQ50
+    float mfePriceQ80
+    float mfePriceQ90
+    float mfePriceMode
+    float maePriceQ10
+    float maePriceQ50
+    float maePriceQ80
+    float maePriceQ90
+    float maePriceMode
+    float effectiveSupport
+    float intervalCoverageEstimate
+    float reliability
+    int transparency
+    int pendingCount
+    int resolvedCount
+    int lastResolvedBar
+
+export type TargetModel
+    Engine engine
+    bool horizonInitialized
+
+// ── Constructors ──────────────────────────────────────────────────────────
+
+export f_adapter_spec(SignalKind signalKind, Polarity polarity, float positiveThreshold, float negativeThreshold, float oscillatorMin, float oscillatorMax, float oscillatorLower, float oscillatorUpper, float scalerAlpha, int scalerWarmup, array<int> categoryDirections) =>
+    AdapterSpec.new(
+         signalKind = signalKind, polarity = polarity,
+         positiveThreshold = math.abs(positiveThreshold),
+         negativeThreshold = negativeThreshold < 0.0 ? negativeThreshold : -math.abs(positiveThreshold),
+         oscillatorMin = oscillatorMin, oscillatorMax = oscillatorMax,
+         oscillatorLower = oscillatorLower, oscillatorUpper = oscillatorUpper,
+         scalerAlpha = math.max(1e-6, math.min(1.0, scalerAlpha)),
+         scalerWarmup = math.max(1, scalerWarmup),
+         categoryDirections = categoryDirections)
+
+export f_engine_config(int horizon, ScaleMode scaleMode, int scaleLength, float fixedScale, DomainKind domain, int gridSize, float outcomeCap, float smoothing, float halfLife, DensityFamily densityFamily, float shrinkageAlpha, float minSupport, float supportScale, int minTransparency, int maxTransparency, float transparencyGamma) =>
+    EngineConfig.new(
+         horizon = math.max(1, math.min(198, horizon)), scaleMode = scaleMode,
+         scaleLength = math.max(1, scaleLength), fixedScale = fixedScale, domain = domain,
+         gridSize = math.max(2, gridSize), outcomeCap = math.max(outcomeCap, 1e-6),
+         smoothing = math.max(0.0, smoothing), halfLife = math.max(1.0, halfLife),
+         densityFamily = densityFamily, shrinkageAlpha = math.max(0.0, shrinkageAlpha),
+         minSupport = math.max(0.0, minSupport), supportScale = math.max(1.0, supportScale),
+         minTransparency = int(math.max(0, math.min(100, minTransparency))),
+         maxTransparency = int(math.max(0, math.min(100, maxTransparency))),
+         transparencyGamma = math.max(1e-6, transparencyGamma))
+
+f_family_code(DensityFamily family) =>
+    family == DensityFamily.POOLED ? 0 : family == DensityFamily.DIRECTION ? 1 : 2
+
+export f_engine_new(EngineConfig config, AdapterSpec adapterSpec) =>
+    Engine.new(
+         config = config, adapter = adapterSpec,
+         density = S.f_density_new(config.gridSize, config.outcomeCap, config.smoothing, config.halfLife, f_family_code(config.densityFamily), config.shrinkageAlpha),
+         queue = Q.f_queue_new(config.horizon),
+         scaler = L.f_scaler_new(1, adapterSpec.scalerAlpha, adapterSpec.scalerWarmup),
+         scalerInput = array.new<float>(1, 0.0),
+         autoScale = na, scaleSamples = 0, previousClose = na, lastConfirmedBar = na)
+
+export f_scalar(float existingValue, bool existingValid, float existingReliability, float explicitProbability = na) =>
+    SignalFrame.new(scalarValue = existingValue, categoryValue = 0, longFlag = false, shortFlag = false,
+         valid = existingValid, explicitProbability = explicitProbability, externalReliability = existingReliability)
+
+export f_direction(int existingDirection, bool existingValid, float explicitProbability, float existingReliability) =>
+    SignalFrame.new(scalarValue = existingDirection, categoryValue = 0, longFlag = false, shortFlag = false,
+         valid = existingValid, explicitProbability = explicitProbability, externalReliability = existingReliability)
+
+export f_flags(bool existingLongFlag, bool existingShortFlag, bool existingValid, float explicitProbability, float existingReliability) =>
+    SignalFrame.new(scalarValue = na, categoryValue = 0, longFlag = existingLongFlag, shortFlag = existingShortFlag,
+         valid = existingValid, explicitProbability = explicitProbability, externalReliability = existingReliability)
+
+export f_category(int existingCategory, bool existingValid, float explicitProbability, float existingReliability) =>
+    SignalFrame.new(scalarValue = na, categoryValue = existingCategory, longFlag = false, shortFlag = false,
+         valid = existingValid, explicitProbability = explicitProbability, externalReliability = existingReliability)
+
+export f_observation(float origin, float pathHigh, float pathLow, float pathClose, float suppliedScale, bool valid) =>
+    Observation.new(origin = origin, pathHigh = pathHigh, pathLow = pathLow, pathClose = pathClose, suppliedScale = suppliedScale, valid = valid)
+
+export f_request(SignalFrame signal, Observation observation) =>
+    Request.new(signal = signal, observation = observation)
+
+// ── Scale and adapter interpretation ─────────────────────────────────────
+
+f_update_auto_scale(Engine engine, Observation observation) =>
+    bool pathValid = observation.valid and not na(observation.pathHigh) and not na(observation.pathLow) and not na(observation.pathClose) and observation.pathHigh >= observation.pathLow
+    if pathValid
+        float sample = na
+        if engine.config.scaleMode == ScaleMode.AUTO_TRUE_RANGE
+            float previous = engine.previousClose
+            sample := na(previous) ? observation.pathHigh - observation.pathLow : math.max(observation.pathHigh - observation.pathLow, math.max(math.abs(observation.pathHigh - previous), math.abs(observation.pathLow - previous)))
+        else if engine.config.scaleMode == ScaleMode.AUTO_ABS_CHANGE and not na(engine.previousClose)
+            sample := math.abs(observation.pathClose - engine.previousClose)
+        if not na(sample) and sample > 0.0
+            float alphaDenominator = engine.config.scaleLength + 1.0
+            float alpha = 1.0
+            if alphaDenominator > 0.0
+                alpha := 2.0 / alphaDenominator
+            engine.autoScale := na(engine.autoScale) ? sample : engine.autoScale + alpha * (sample - engine.autoScale)
+            engine.scaleSamples += 1
+        engine.previousClose := observation.pathClose
+
+f_current_scale(Engine engine, Observation observation) =>
+    float result = na
+    if engine.config.scaleMode == ScaleMode.PROVIDED
+        result := observation.suppliedScale
+    else if engine.config.scaleMode == ScaleMode.FIXED
+        result := engine.config.fixedScale
+    else if engine.scaleSamples >= engine.config.scaleLength
+        result := engine.autoScale
+    not na(result) and result > 0.0 ? result : na
+
+f_apply_polarity(int direction, Polarity polarity) =>
+    polarity == Polarity.CONTRARIAN ? -direction : direction
+
+f_evidence_strength(float evidence, float threshold) =>
+    float denominator = math.max(math.abs(threshold), 1e-6)
+    float ratio = 0.0
+    if denominator > 0.0
+        ratio := math.abs(evidence) / denominator
+    N.f_tanh(ratio)
+
+f_interpret(Engine engine, Request packet, float originScale) =>
+    SignalFrame signal = packet.signal
+    Observation observation = packet.observation
+    bool explicitProbabilityValid = na(signal.explicitProbability) or (signal.explicitProbability >= 0.0 and signal.explicitProbability <= 1.0)
+    bool valid = signal.valid and explicitProbabilityValid
+    bool adapterReady = true
+    int direction = 0
+    float strength = 0.0
+    float probability = signal.explicitProbability
+    float value = signal.scalarValue
+    float positive = engine.adapter.positiveThreshold
+    float negative = engine.adapter.negativeThreshold
+    SignalKind kind = engine.adapter.signalKind
+    if valid
+        if kind == SignalKind.DIRECTION
+            valid := not na(value) and (value == -1.0 or value == 0.0 or value == 1.0)
+            if valid
+                direction := int(value)
+            strength := math.abs(nz(value, 0.0))
+        else if kind == SignalKind.SIGNED_SCORE or kind == SignalKind.Z_SCORE
+            valid := not na(value) and positive >= 0.0 and negative <= 0.0
+            direction := valid ? (value > positive ? 1 : value < negative ? -1 : 0) : 0
+            direction := f_apply_polarity(direction, engine.adapter.polarity)
+            strength := valid ? f_evidence_strength(value, math.max(positive, math.abs(negative))) : 0.0
+        else if kind == SignalKind.RAW_CONTINUOUS
+            valid := not na(value) and positive >= 0.0 and negative <= 0.0
+            adapterReady := engine.scaler.ready()
+            if valid and adapterReady
+                array.set(engine.scalerInput, 0, value)
+                array<float> standardized = engine.scaler.transform(engine.scalerInput)
+                float z = N.f_safe_get_f(standardized, 0, 0.0)
+                direction := z > positive ? 1 : z < negative ? -1 : 0
+                direction := f_apply_polarity(direction, engine.adapter.polarity)
+                strength := f_evidence_strength(z, math.max(positive, math.abs(negative)))
+        else if kind == SignalKind.LONG_PROBABILITY
+            valid := not na(value) and value >= 0.0 and value <= 1.0 and positive >= 0.0 and positive < 0.5
+            direction := valid ? (value > 0.5 + positive ? 1 : value < 0.5 - positive ? -1 : 0) : 0
+            direction := f_apply_polarity(direction, engine.adapter.polarity)
+            probability := valid and direction != 0 ? (direction > 0 ? value : 1.0 - value) : na
+            strength := valid ? math.max(0.0, math.min(1.0, 2.0 * math.abs(value - 0.5))) : 0.0
+        else if kind == SignalKind.BOUNDED_OSCILLATOR
+            bool schemaValid = engine.adapter.oscillatorMax > engine.adapter.oscillatorMin and engine.adapter.oscillatorLower >= engine.adapter.oscillatorMin and engine.adapter.oscillatorUpper <= engine.adapter.oscillatorMax and engine.adapter.oscillatorUpper > engine.adapter.oscillatorLower
+            valid := schemaValid and not na(value) and value >= engine.adapter.oscillatorMin and value <= engine.adapter.oscillatorMax
+            int rawDirection = valid ? (value > engine.adapter.oscillatorUpper ? 1 : value < engine.adapter.oscillatorLower ? -1 : 0) : 0
+            direction := f_apply_polarity(rawDirection, engine.adapter.polarity)
+            if rawDirection > 0
+                strength := N.f_normalize(value, engine.adapter.oscillatorUpper, engine.adapter.oscillatorMax)
+            else if rawDirection < 0
+                strength := N.f_normalize(value, engine.adapter.oscillatorLower, engine.adapter.oscillatorMin)
+            strength := math.max(0.0, math.min(1.0, strength))
+        else if kind == SignalKind.EXPECTED_RETURN
+            valid := not na(value) and not na(observation.origin) and not na(originScale) and originScale > 0.0
+            float returnEvidence = 0.0
+            if valid and originScale > 0.0
+                returnEvidence := value * observation.origin / originScale
+            direction := returnEvidence > positive ? 1 : returnEvidence < negative ? -1 : 0
+            direction := f_apply_polarity(direction, engine.adapter.polarity)
+            if valid
+                strength := f_evidence_strength(returnEvidence, math.max(positive, math.abs(negative)))
+        else if kind == SignalKind.TARGET_LEVEL
+            valid := not na(value) and not na(observation.origin) and not na(originScale) and originScale > 0.0
+            float targetEvidence = 0.0
+            if valid and originScale > 0.0
+                targetEvidence := (value - observation.origin) / originScale
+            direction := targetEvidence > positive ? 1 : targetEvidence < negative ? -1 : 0
+            direction := f_apply_polarity(direction, engine.adapter.polarity)
+            if valid
+                strength := f_evidence_strength(targetEvidence, math.max(positive, math.abs(negative)))
+        else if kind == SignalKind.FLAGS
+            valid := not (signal.longFlag and signal.shortFlag)
+            direction := valid ? (signal.longFlag ? 1 : signal.shortFlag ? -1 : 0) : 0
+            strength := direction == 0 ? 0.0 : 1.0
+        else
+            bool categoryInRange = signal.categoryValue >= 0 and signal.categoryValue < array.size(engine.adapter.categoryDirections)
+            valid := categoryInRange
+            if valid
+                direction := N.f_safe_get_i(engine.adapter.categoryDirections, signal.categoryValue, 0)
+            valid := valid and (direction == -1 or direction == 0 or direction == 1)
+            strength := direction == 0 ? 0.0 : 1.0
+    float reliability = na(signal.externalReliability) ? 1.0 : math.max(0.0, math.min(1.0, signal.externalReliability))
+    InterpretedSignal.new(valid = valid, adapterReady = adapterReady, direction = direction,
+         strength = strength, directionProbability = probability, reliability = reliability)
+
+f_update_raw_scaler(Engine engine, SignalFrame signal) =>
+    if engine.adapter.signalKind == SignalKind.RAW_CONTINUOUS and signal.valid and not na(signal.scalarValue)
+        array.set(engine.scalerInput, 0, signal.scalarValue)
+        engine.scaler.update(engine.scalerInput)
+
+// ── Output assembly ──────────────────────────────────────────────────────
+
+f_transparency(Engine engine, float reliability, bool ready) =>
+    int result = 100
+    if ready
+        float shaped = math.pow(math.max(0.0, math.min(1.0, reliability)), engine.config.transparencyGamma)
+        result := int(math.round(engine.config.maxTransparency - (engine.config.maxTransparency - engine.config.minTransparency) * shaped))
+    result
+
+f_make_bands(Engine engine, Request packet, InterpretedSignal interpreted, float originScale) =>
+    int direction = interpreted.direction
+    float longSupport = engine.density.directionSupport(1)
+    float shortSupport = engine.density.directionSupport(-1)
+    float support = direction > 0 ? longSupport : direction < 0 ? shortSupport : math.min(longSupport, shortSupport)
+    bool statsReady = support >= engine.config.minSupport
+    bool pathValid = packet.observation.valid and not na(packet.observation.origin)
+    bool scaleReady = not na(originScale) and originScale > 0.0
+    bool active = direction == -1 or direction == 1
+    bool ready = statsReady and interpreted.adapterReady and interpreted.valid and pathValid and scaleReady and active
+    StatusCode statusCode = StatusCode.STATS_WARMUP
+    string status = "band stats not ready yet"
+    if statsReady
+        if not interpreted.adapterReady
+            statusCode := StatusCode.ADAPTER_WARMUP
+            status := "adapter warmup"
+        else if not interpreted.valid or not pathValid
+            statusCode := StatusCode.INVALID_INPUT
+            status := "invalid input"
+        else if not scaleReady
+            statusCode := StatusCode.SCALE_WARMUP
+            status := "scale warmup"
+        else if not active
+            statusCode := StatusCode.NEUTRAL_SIGNAL
+            status := "no active prediction"
+        else
+            statusCode := StatusCode.READY
+            status := "bands ready"
+    else
+        statusCode := not interpreted.adapterReady ? StatusCode.ADAPTER_WARMUP : not scaleReady ? StatusCode.SCALE_WARMUP : StatusCode.STATS_WARMUP
+    S.DensityEstimate mfe = na
+    S.DensityEstimate mae = na
+    if direction == -1 or direction == 1
+        mfe := engine.density.estimate(direction, false)
+        mae := engine.density.estimate(direction, true)
+    float supportReliability = 1.0 - math.exp(-support / engine.config.supportScale)
+    float probabilityReliability = na(interpreted.directionProbability) ? 1.0 : interpreted.directionProbability
+    float reliability = ready ? supportReliability * interpreted.reliability * probabilityReliability : 0.0
+    float sign = direction > 0 ? 1.0 : -1.0
+    float origin = packet.observation.origin
+    Bands.new(
+         ready = ready, statsReady = statsReady, status = status, statusCode = statusCode,
+         signalKind = engine.adapter.signalKind, domain = engine.config.domain,
+         direction = direction, signalStrength = interpreted.strength,
+         directionProbability = interpreted.directionProbability, origin = origin, scale = originScale,
+         mfeQ10 = ready ? mfe.q10 : na, mfeQ50 = ready ? mfe.q50 : na,
+         mfeQ80 = ready ? mfe.q80 : na, mfeQ90 = ready ? mfe.q90 : na, mfeMode = ready ? mfe.mode : na,
+         maeQ10 = ready ? mae.q10 : na, maeQ50 = ready ? mae.q50 : na,
+         maeQ80 = ready ? mae.q80 : na, maeQ90 = ready ? mae.q90 : na, maeMode = ready ? mae.mode : na,
+         mfeLevelQ10 = ready ? origin + sign * originScale * mfe.q10 : na,
+         mfeLevelQ50 = ready ? origin + sign * originScale * mfe.q50 : na,
+         mfeLevelQ80 = ready ? origin + sign * originScale * mfe.q80 : na,
+         mfeLevelQ90 = ready ? origin + sign * originScale * mfe.q90 : na,
+         mfeLevelMode = ready ? origin + sign * originScale * mfe.mode : na,
+         maeLevelQ10 = ready ? origin - sign * originScale * mae.q10 : na,
+         maeLevelQ50 = ready ? origin - sign * originScale * mae.q50 : na,
+         maeLevelQ80 = ready ? origin - sign * originScale * mae.q80 : na,
+         maeLevelQ90 = ready ? origin - sign * originScale * mae.q90 : na,
+         maeLevelMode = ready ? origin - sign * originScale * mae.mode : na,
+         mfeModeProbability = ready ? mfe.modeProbability : na,
+         maeModeProbability = ready ? mae.modeProbability : na,
+         effectiveSupport = support, longSupport = longSupport, shortSupport = shortSupport,
+         reliability = reliability, transparency = f_transparency(engine, reliability, ready),
+         pendingCount = engine.queue.count, resolvedCount = engine.density.resolvedCount,
+         longResolvedCount = engine.density.longResolvedCount, shortResolvedCount = engine.density.shortResolvedCount,
+         lastResolvedBar = engine.density.lastResolvedBar)
+
+// @function Advance one semantic channel. All state changes are confirmed-bar only.
+export method update(Engine engine, Request packet, int currentBar, bool confirmed) =>
+    bool newConfirmedBar = confirmed and (na(engine.lastConfirmedBar) or currentBar != engine.lastConfirmedBar)
+    if newConfirmedBar
+        f_update_auto_scale(engine, packet.observation)
+    float originScale = f_current_scale(engine, packet.observation)
+    InterpretedSignal interpreted = f_interpret(engine, packet, originScale)
+    if newConfirmedBar
+        engine.density.advance(currentBar)
+        Q.ResolvedExcursion resolved = engine.queue.advance(
+             packet.observation.pathHigh, packet.observation.pathLow, packet.observation.pathClose,
+             packet.observation.valid, currentBar)
+        if resolved.resolved and resolved.valid
+            engine.density.observe(resolved.direction, resolved.mae, resolved.mfe, currentBar)
+        bool queueValid = interpreted.adapterReady and interpreted.valid and (interpreted.direction == -1 or interpreted.direction == 1) and packet.observation.valid and not na(packet.observation.origin) and not na(originScale) and originScale > 0.0
+        if queueValid
+            engine.queue.enqueue(interpreted.direction, packet.observation.origin, originScale, currentBar)
+        f_update_raw_scaler(engine, packet.signal)
+        engine.lastConfirmedBar := currentBar
+    f_make_bands(engine, packet, interpreted, originScale)
+
+// ── Deprecated scalar API ────────────────────────────────────────────────
+
+export f_input(int direction, float originPrice, float originScale, bool predictionValid, float directionProbability, float externalReliability) =>
+    TargetInput.new(direction = direction, originPrice = originPrice, originScale = originScale,
+         predictionValid = predictionValid, directionProbability = directionProbability,
+         externalReliability = externalReliability)
+
+export f_model_new(int gridSize, float outcomeCap, float smoothing, float halfLife, DensityFamily family, float shrinkageAlpha, float minSupport, float supportScale, int minTransparency, int maxTransparency, float transparencyGamma) =>
+    EngineConfig config = f_engine_config(3, ScaleMode.PROVIDED, 1, na, DomainKind.PRICE,
+         gridSize, outcomeCap, smoothing, halfLife, family, shrinkageAlpha, minSupport,
+         supportScale, minTransparency, maxTransparency, transparencyGamma)
+    AdapterSpec adapter = f_adapter_spec(SignalKind.DIRECTION, Polarity.FOLLOW, 0.0, 0.0,
+         -1.0, 1.0, -0.5, 0.5, 0.05, 2, array.new<int>())
+    TargetModel.new(engine = f_engine_new(config, adapter), horizonInitialized = false)
+
+f_legacy_bands(Bands bands) =>
+    TargetBands.new(
+         ready = bands.ready, status = bands.status, direction = bands.direction,
+         originPrice = bands.origin, originScale = bands.scale,
+         mfeQ10 = bands.mfeQ10, mfeQ50 = bands.mfeQ50, mfeQ80 = bands.mfeQ80,
+         mfeQ90 = bands.mfeQ90, mfeMode = bands.mfeMode,
+         maeQ10 = bands.maeQ10, maeQ50 = bands.maeQ50, maeQ80 = bands.maeQ80,
+         maeQ90 = bands.maeQ90, maeMode = bands.maeMode,
+         mfePriceQ10 = bands.mfeLevelQ10, mfePriceQ50 = bands.mfeLevelQ50,
+         mfePriceQ80 = bands.mfeLevelQ80, mfePriceQ90 = bands.mfeLevelQ90,
+         mfePriceMode = bands.mfeLevelMode,
+         maePriceQ10 = bands.maeLevelQ10, maePriceQ50 = bands.maeLevelQ50,
+         maePriceQ80 = bands.maeLevelQ80, maePriceQ90 = bands.maeLevelQ90,
+         maePriceMode = bands.maeLevelMode,
+         effectiveSupport = bands.effectiveSupport, intervalCoverageEstimate = na,
+         reliability = bands.reliability, transparency = bands.transparency,
+         pendingCount = bands.pendingCount, resolvedCount = bands.resolvedCount,
+         lastResolvedBar = bands.lastResolvedBar)
+
+// This wrapper keeps the old scalar call usable while directing all learning
+// through the same queue and density implementation as the adaptive API.
+export f_update(TargetModel model, TargetInput signal, float pathHigh, float pathLow, float pathClose, int horizon, int currentBar, bool confirmed) =>
+    if not model.horizonInitialized and model.engine.queue.count == 0
+        int safeHorizon = math.max(1, math.min(198, horizon))
+        model.engine.config.horizon := safeHorizon
+        model.engine.queue := Q.f_queue_new(safeHorizon)
+        model.horizonInitialized := true
+    SignalFrame frame = f_direction(signal.direction, signal.predictionValid, signal.directionProbability, signal.externalReliability)
+    bool pathValid = not na(pathHigh) and not na(pathLow) and not na(pathClose) and pathHigh >= pathLow
+    Observation observation = f_observation(signal.originPrice, pathHigh, pathLow, pathClose, signal.originScale, pathValid)
+    Bands bands = model.engine.update(f_request(frame, observation), currentBar, confirmed)
+    f_legacy_bands(bands)

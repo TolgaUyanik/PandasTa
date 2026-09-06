@@ -1,0 +1,413 @@
+//@version=6
+// @description Position sizing library for LO1 breakout box strategy.
+// Extracts pure-computation functions to reduce compiled token count in the main script.
+library("Vantage_LO1_Sizing", overlay=false)
+
+// @type Holds the complete output of the 8-step recoup sizing pipeline: micro/YM quantities, risk gate results, worst-case projections, and recoup-scenario P&L.
+export type RecoupSizingResult
+    // Micro-level quantities (Steps 1-2)
+    int microQtyRaw             // Step 1: Before any capping (CEILING)
+    int microCapByDLL           // Step 2: DLL-derived micro cap
+    int microQtyCapped          // Step 2: After DLL cap (MIN)
+    // YM-level quantities (Steps 3-5)
+    int ymQtyPre                // Step 3: Before min-1-YM (FLOOR)
+    int ymQtyFinal              // Steps 4-5: Final YM quantity (after min-1 and caps)
+    // Risk gating values (Steps 6-8)
+    int microEqForGate          // Step 6: Micro-equivalent for risk calc
+    float projectedLossRecoup   // Step 7: Expected recoup loss dollars
+    float dllRemaining          // Budget remaining for recoup
+    float totalWorstCase        // Step 7: Full worst-case scenario
+    bool riskOK                 // Step 8: Passes DLL gate?
+    float oppMYMLoss            // Step 7: Opposite MYM emergency flatten loss
+    // Status flags
+    bool didMinOneOverride      // Min-1-YM was forced (risk-gated or legacy bypass)
+    bool dllForcedZero          // DLL capped micro to zero before min-1
+    // Per-micro values (for partial exit scan)
+    float riskPerMicroRecoup    // Per-micro recoup risk
+    float profitPerMicroRecoup  // Per-micro recoup profit
+    // Part 2: Green days optimization
+    float recoupScenarioNet     // P&L if T1 stops, recoup wins
+    float t1WinProfit           // What T1 would have made
+
+// @type Holds the result of the partial exit optimizer: how many opposing MYM to keep and the adjusted recoup configuration.
+export type PartialExitResult
+    int keptMYM              // MYM contracts to keep (0 = full removal, current behavior)
+    int exitMYM              // MYM contracts to exit (q - k)
+    int ymQtyFinal           // YM contracts for recoup (reduced when k > 0)
+    float totalWorstCase     // Worst-case DLL draw for this configuration
+    float recoupScenarioNet  // Net P&L if T1 stops and recoup wins
+    bool found               // True if at least one passing configuration exists
+
+// @type Input bundle for f_scanPartialExitUpward. Packs 14 level fields (8 bracket + 6 recoup-adjusted) into a single UDT. Bracket levels are the T1 entry/stop/TP pairs; recoup-adjusted levels are the re* values used when computing recoup sizing inside the scan.
+export type PeScanInputs
+    float longEntry
+    float longStop
+    float longTP
+    float longTPOpp
+    float shortEntry
+    float shortStop
+    float shortTP
+    float shortTPOpp
+    float reLongEntry
+    float reLongStop
+    float reLongTP
+    float reShortEntry
+    float reShortStop
+    float reShortTP
+
+// @function Calculates projected risk in dollars for a position (qty × |entry−stop| in ticks × pointvalue).
+// @param _entry Entry price
+// @param _stop Stop-loss price
+// @param _qty Position quantity (contracts)
+// @returns Risk in dollars
+export f_calcTradeRiskDollars(float _entry, float _stop, float _qty) =>
+    float priceDiff = math.abs(_entry - _stop), float ticks = syminfo.mintick != 0 ? priceDiff / syminfo.mintick : priceDiff, float riskPer = ticks * syminfo.pointvalue, float tot = riskPer * _qty, tot
+
+// @function Calculates projected profit in dollars for a position (qty × |tp−entry| in ticks × pointvalue).
+// @param _entry Entry price
+// @param _tp Take-profit price
+// @param _qty Position quantity (contracts)
+// @returns Profit in dollars
+export f_calcTradeProfitDollars(float _entry, float _tp, float _qty) =>
+    float priceDiff = math.abs(_tp - _entry), float ticks = syminfo.mintick != 0 ? priceDiff / syminfo.mintick : priceDiff, float profitPer = ticks * syminfo.pointvalue, float tot = profitPer * _qty, tot
+
+// @function Computes recoup (opposite-add) position sizing through an 8-step pipeline: raw micro qty, DLL cap, micro-to-YM conversion, min-1-YM policy, proxy cap, risk gating, worst-case projection, and recoup scenario P&L.
+// @param baseQtyMicro T1 micro-contract quantity
+// @param baseEntry T1 entry price
+// @param baseStop T1 stop-loss price
+// @param recoupEntry Recoup entry price
+// @param recoupStop Recoup stop-loss price
+// @param recoupTP Recoup take-profit price
+// @param oppositeMultiplier Target risk multiplier for recoup vs T1 (e.g., 4.0)
+// @param proxyQtyMul Micro-to-YM conversion factor (0 = no proxy)
+// @param minOneYMEnabled Force minimum 1 YM contract when proxy is active
+// @param currentLossDollars Running session loss in dollars (0 for estimate mode)
+// @param maxDailyLossLimit Daily loss limit in dollars (-1 = disabled)
+// @param maxProxyCap Maximum proxy contracts cap (0 = unlimited)
+// @param t1TPPrice T1 take-profit price (for scenario P&L calculation)
+// @param oppTPPrice Opposing MYM TP price when T1 stops (for scenario profit calc)
+// @param oppAddStopFrac Fraction of base risk for opposite MYM emergency flatten
+// @param opposingRemovalEnabled Whether opposing removal entry mode is active
+// @param t1AlreadyClosed Reserved for future use. All current call sites use false (default). Would be true only if recoup were re-sized after T1 close, which no current code path does.
+// @returns RecoupSizingResult with quantities, risk values, and scenario P&L
+export f_computeRecoupSizing(int baseQtyMicro, float baseEntry, float baseStop, float recoupEntry, float recoupStop, float recoupTP, float oppositeMultiplier, float proxyQtyMul, bool minOneYMEnabled, float currentLossDollars, float maxDailyLossLimit, int maxProxyCap, float t1TPPrice, float oppTPPrice, float oppAddStopFrac, bool opposingRemovalEnabled, bool t1AlreadyClosed = false, bool useRoundUp = false, float commPerContract = 0.0, int slippageTicks = 0) =>
+    RecoupSizingResult result = RecoupSizingResult.new()
+
+    // === STEP 1: Compute raw micro quantity using CEILING ===
+    float baseRisk = f_calcTradeRiskDollars(baseEntry, baseStop, baseQtyMicro)
+    float targetRisk = baseRisk * oppositeMultiplier
+    float addRisk = targetRisk - baseRisk
+    float riskPerMicroRecoup = f_calcTradeRiskDollars(recoupEntry, recoupStop, 1)
+
+    result.riskPerMicroRecoup := riskPerMicroRecoup
+
+    int microQtyRaw = 0
+    if addRisk > 0 and riskPerMicroRecoup > 0
+        microQtyRaw := int(math.ceil(addRisk / riskPerMicroRecoup))
+    result.microQtyRaw := microQtyRaw
+
+    // === STEP 2: Apply DLL cap at MICRO level ===
+    float dllRemaining = na
+    int microCapByDLL = 999999  // Unlimited if DLL disabled
+    bool dllForcedZero = false
+
+    float oppMYMLoss = opposingRemovalEnabled ? 0.0 : baseRisk * oppAddStopFrac
+
+    if maxDailyLossLimit >= 0 and microQtyRaw > 0
+        // Reserve outstanding position risk. baseRisk covers the open T1 position's stop-loss risk.
+        // t1AlreadyClosed defaults to false — all current call sites run at T1 entry time (not after close).
+        float reserveBaseStopRisk = (t1AlreadyClosed ? 0.0 : baseRisk) + oppMYMLoss
+        dllRemaining := math.max(0.0, maxDailyLossLimit - currentLossDollars - reserveBaseStopRisk)
+
+        if dllRemaining <= 0
+            microCapByDLL := 0
+        else
+            // Use adjusted (tighter) stop for cap calculation
+            microCapByDLL := int(math.floor(dllRemaining / riskPerMicroRecoup))
+
+    result.microCapByDLL := microCapByDLL
+    result.dllRemaining := dllRemaining
+
+    int microQtyCapped = math.min(microQtyRaw, microCapByDLL)
+    dllForcedZero := microQtyRaw > 0 and microQtyCapped == 0
+    result.microQtyCapped := microQtyCapped
+    result.dllForcedZero := dllForcedZero
+
+    // === STEP 3: Convert micro to YM (floor by default, round when useRoundUp=true) ===
+    bool usingProxy = proxyQtyMul > 0
+    int ymQtyPre = 0
+    int ymFloor = 0
+    if usingProxy
+        ymFloor := int(math.floor(microQtyCapped * proxyQtyMul))
+        ymQtyPre := useRoundUp ? int(math.round(microQtyCapped * proxyQtyMul)) : ymFloor
+    else
+        ymQtyPre := microQtyCapped
+        ymFloor := microQtyCapped
+    result.ymQtyPre := ymQtyPre
+
+    // === STEP 4: Guarantee minimum 1 YM when budget allows ===
+    // The range cap formula reserves room for 1 T1 + 1 YM recoup within DLL.
+    // But when target micro is small (e.g., 4 at T1=1), round(0.4)=0 wastes that budget.
+    // Fix: if rounding produced 0 YM but the target was >0, try 1 YM and check risk gate.
+    int ymQtyAfterMin = ymQtyPre
+    bool didMinOneOverride = false
+
+    if usingProxy and microQtyRaw > 0 and ymQtyPre == 0
+        // Rounding gap: target exists but rounds to 0 YM. Try 1 YM with risk gate check.
+        float riskFor1YM = proxyQtyMul > 0 ? (riskPerMicroRecoup / proxyQtyMul) : riskPerMicroRecoup
+        int _testContracts = (t1AlreadyClosed ? 0 : baseQtyMicro) + 1
+        float _testFees = _testContracts * 2 * (commPerContract + slippageTicks * syminfo.pointvalue)
+        float testWorstCase = currentLossDollars + (t1AlreadyClosed ? 0.0 : baseRisk) + oppMYMLoss + riskFor1YM + _testFees
+        if maxDailyLossLimit < 0 or testWorstCase <= maxDailyLossLimit
+            ymQtyAfterMin := 1
+            didMinOneOverride := true
+
+    // Legacy toggle: if minOneYMEnabled, also force min-1 for capped-but-nonzero micro
+    if minOneYMEnabled and usingProxy and not didMinOneOverride
+        if microQtyRaw > 0 and ymQtyPre == 0
+            ymQtyAfterMin := 1
+            didMinOneOverride := true
+        else if microQtyCapped > 0
+            ymQtyAfterMin := math.max(1, ymQtyPre)
+
+    result.didMinOneOverride := didMinOneOverride
+
+    // === STEP 5: Apply proxy capacity cap ===
+    int ymQtyFinal = ymQtyAfterMin
+    if maxProxyCap > 0
+        ymQtyFinal := math.min(ymQtyFinal, maxProxyCap)
+    result.ymQtyFinal := ymQtyFinal
+
+    // === STEP 6: Compute micro-equivalent for risk gating ===
+    int microEqForGate = 0
+    if usingProxy and proxyQtyMul > 0
+        microEqForGate := int(math.floor(ymQtyFinal / proxyQtyMul))
+    else
+        microEqForGate := ymQtyFinal
+    result.microEqForGate := microEqForGate
+
+    // === STEP 7: Compute projected loss and total worst case ===
+    float riskPerFullRecoup = usingProxy and proxyQtyMul > 0 ? (riskPerMicroRecoup / proxyQtyMul) : riskPerMicroRecoup
+    float projectedLossRecoup = ymQtyFinal * riskPerFullRecoup
+    result.projectedLossRecoup := projectedLossRecoup
+
+    result.oppMYMLoss := oppMYMLoss
+    int _wcContracts = (t1AlreadyClosed ? 0 : baseQtyMicro) + microQtyCapped
+    float _wcFees = _wcContracts * 2 * (commPerContract + slippageTicks * syminfo.pointvalue)
+    float totalWorstCase = currentLossDollars + (t1AlreadyClosed ? 0.0 : baseRisk) + oppMYMLoss + projectedLossRecoup + _wcFees
+    result.totalWorstCase := totalWorstCase
+
+    // === STEP 8: Determine if placement passes risk gate ===
+    // didMinOneOverride from the new Step 4 path already verified risk gate,
+    // so it will naturally pass here. Legacy minOneYMEnabled path still bypasses.
+    bool riskOK = true
+    if maxDailyLossLimit >= 0
+        riskOK := (totalWorstCase <= maxDailyLossLimit) or (didMinOneOverride and minOneYMEnabled)
+    result.riskOK := riskOK
+
+    // === STEP 8b: Round-to-floor fallback — if round failed risk gate, retry with floor ===
+    if not riskOK and not didMinOneOverride and usingProxy and ymQtyPre > ymFloor and ymFloor > 0
+        int ymFallback = ymFloor
+        if maxProxyCap > 0
+            ymFallback := math.min(ymFallback, maxProxyCap)
+        float fallbackLoss = ymFallback * riskPerFullRecoup
+        int _fbMicroEq = proxyQtyMul > 0 ? int(math.floor(ymFallback / proxyQtyMul)) : ymFallback
+        float _fbFees = ((t1AlreadyClosed ? 0 : baseQtyMicro) + _fbMicroEq) * 2 * (commPerContract + slippageTicks * syminfo.pointvalue)
+        float fallbackWorstCase = currentLossDollars + (t1AlreadyClosed ? 0.0 : baseRisk) + oppMYMLoss + fallbackLoss + _fbFees
+        if fallbackWorstCase <= maxDailyLossLimit
+            result.ymQtyFinal := ymFallback
+            result.projectedLossRecoup := fallbackLoss
+            result.totalWorstCase := fallbackWorstCase
+            result.riskOK := true
+            if proxyQtyMul > 0
+                result.microEqForGate := int(math.floor(ymFallback / proxyQtyMul))
+            ymQtyFinal := ymFallback
+
+    // === Part 2: Recoup scenario calculation ===
+    // T1 loss when T1 stops (we already have baseRisk)
+    float t1Loss = baseRisk
+
+    // Opposing MYM profit when T1 stops (the pending MYM order that was waiting)
+    // (opposing removal mode: no opposing MYM position, so no profit contribution)
+    float oppMYMProfit = 0.0
+    if not opposingRemovalEnabled
+        float oppMYMProfitPerMicro = f_calcTradeProfitDollars(baseEntry, oppTPPrice, 1)
+        oppMYMProfit := oppMYMProfitPerMicro * baseQtyMicro
+
+    // Recoup YM profit when recoup wins
+    float recoupProfitPerYM = usingProxy and proxyQtyMul > 0 ? f_calcTradeProfitDollars(recoupEntry, recoupTP, 1) / proxyQtyMul : f_calcTradeProfitDollars(recoupEntry, recoupTP, 1)
+    float recoupYMProfit = recoupProfitPerYM * ymQtyFinal
+    result.profitPerMicroRecoup := usingProxy and proxyQtyMul > 0 ? recoupProfitPerYM * proxyQtyMul : recoupProfitPerYM
+
+    result.recoupScenarioNet := -t1Loss + oppMYMProfit + recoupYMProfit
+
+    // T1 win profit (for MatchT1Profit mode)
+    float t1WinProfitPerMicro = f_calcTradeProfitDollars(baseEntry, t1TPPrice, 1)
+    result.t1WinProfit := t1WinProfitPerMicro * baseQtyMicro
+
+    result
+
+// @function Finds the best partial exit configuration (how many opposing MYM to keep) that passes both risk and profit gates.
+// Scans k from 0 upward — first passing config wins (prefers full removal when it works).
+// @param baseQtyMicro T1 qty (q)
+// @param baseRisk T1 total risk in dollars
+// @param riskPerMicroRecoup Recoup risk per micro contract
+// @param profitPerMicroRecoup Recoup profit per micro contract
+// @param proxyQtyMul Micro-to-YM conversion factor (0.10)
+// @param currentLossDollars Running session loss in dollars
+// @param maxDailyLossLimit Daily loss limit in dollars
+// @param maxProxyCap Maximum proxy contracts cap (0 = unlimited)
+// @param oppMYMLoss Opposing MYM emergency flatten loss per micro
+// @param t1AlreadyClosed Reserved for future use. All current call sites use false (recoup is sized at T1 entry time, not after close).
+// @param oppositeMultiplier Target risk multiplier for recoup vs T1
+// @returns PartialExitResult with best k, adjusted YM qty, and gate results
+export f_findBestPartialExit(int baseQtyMicro, float baseRisk, float riskPerMicroRecoup, float profitPerMicroRecoup, float proxyQtyMul, float currentLossDollars, float maxDailyLossLimit, int maxProxyCap, float oppMYMLoss, bool t1AlreadyClosed, float oppositeMultiplier, bool useRoundUp = false) =>
+    PartialExitResult result = PartialExitResult.new(0, baseQtyMicro, 0, na, na, false)
+
+    float targetRisk = baseRisk * oppositeMultiplier
+    float addRisk = targetRisk - baseRisk
+    int target = addRisk > 0 and riskPerMicroRecoup > 0 ? int(math.ceil(addRisk / riskPerMicroRecoup)) : 0
+
+    float riskPerFullRecoup = proxyQtyMul > 0 ? riskPerMicroRecoup / proxyQtyMul : riskPerMicroRecoup
+    float profitPerFullRecoup = proxyQtyMul > 0 ? profitPerMicroRecoup / proxyQtyMul : profitPerMicroRecoup
+    float reserveBase = t1AlreadyClosed ? 0.0 : baseRisk
+
+    for k = 0 to baseQtyMicro
+        int remainder = math.max(0, target - k)
+        int ymFloorPE = proxyQtyMul > 0 ? int(math.floor(remainder * proxyQtyMul)) : remainder
+        int ymRound = useRoundUp ? (proxyQtyMul > 0 ? int(math.round(remainder * proxyQtyMul)) : remainder) : ymFloorPE
+
+        for ymIdx = 0 to 1
+            int ym = ymIdx == 0 ? ymRound : ymFloorPE
+            if ym < 0
+                continue
+            if ymIdx == 1 and ym == ymRound
+                continue
+            if maxProxyCap > 0
+                ym := math.min(ym, maxProxyCap)
+
+            float keptRisk = k * riskPerMicroRecoup
+            float ymRisk = ym * riskPerFullRecoup
+            float worstCase = currentLossDollars + reserveBase + oppMYMLoss + keptRisk + ymRisk
+
+            float keptProfit = k * profitPerMicroRecoup
+            float ymProfit = ym * profitPerFullRecoup
+            float recoupNet = -baseRisk + keptProfit + ymProfit
+
+            if worstCase <= maxDailyLossLimit and recoupNet >= 0
+                result := PartialExitResult.new(k, baseQtyMicro - k, ym, worstCase, recoupNet, true)
+                break
+
+        if result.found
+            break
+
+    result
+
+// @type Holds the result of the partial exit auto-sizer scan: updated best quantities for Green and Match modes.
+export type PartialExitScanResult
+    int bestQtyGreen        // Updated green qty (or original if no improvement)
+    int bestQtyMatch        // Updated match qty (or original if no improvement)
+    bool greenImproved      // True if green was bumped beyond baseline
+    bool matchImproved      // True if match was bumped beyond baseline
+
+// @function Scans upward from baseline quantities to find larger T1 sizes enabled by partial exit.
+// Replaces inline loops in the main script to reduce compiled token count.
+// Level params are packed into a PeScanInputs UDT for a compact call signature.
+// @param baseGreen Baseline bestQtyGreen from normal scan
+// @param baseMatch Baseline bestQtyMatch from normal scan
+// @param maxScanQty Maximum quantity to scan up to
+// @param inputs PeScanInputs UDT holding all bracket and recoup-adjusted levels (14 fields)
+// @param oppositeMultiplier Recoup qty multiplier
+// @param proxyQtyMul Micro-to-YM conversion factor
+// @param minOneYMEnabled Min-1-YM toggle
+// @param maxDailyLossLimit Daily loss limit
+// @param maxProxyCap Max proxy contracts
+// @param oppAddStopFrac Opposing stop fraction
+// @param opposingRemovalEnabled Whether opposing removal is active
+// @param matchPct Match T1 profit percentage
+// @param commBuffer Commission buffer dollars
+// @returns PartialExitScanResult with updated quantities and improvement flags
+export f_scanPartialExitUpward(int baseGreen, int baseMatch, int maxScanQty, PeScanInputs inputs, float oppositeMultiplier, float proxyQtyMul, bool minOneYMEnabled, float maxDailyLossLimit, int maxProxyCap, float oppAddStopFrac, bool opposingRemovalEnabled, float matchPct, float commBuffer, bool useRoundUp = false) =>
+    // Unpack UDT into local vars so the function body stays unchanged
+    float longEntry = inputs.longEntry
+    float longStop = inputs.longStop
+    float longTP = inputs.longTP
+    float longTPOpp = inputs.longTPOpp
+    float shortEntry = inputs.shortEntry
+    float shortStop = inputs.shortStop
+    float shortTP = inputs.shortTP
+    float shortTPOpp = inputs.shortTPOpp
+    float reLongEntry = inputs.reLongEntry
+    float reLongStop = inputs.reLongStop
+    float reLongTP = inputs.reLongTP
+    float reShortEntry = inputs.reShortEntry
+    float reShortStop = inputs.reShortStop
+    float reShortTP = inputs.reShortTP
+
+    int _bestGreen = baseGreen
+    int _bestMatch = baseMatch
+
+    if baseGreen > 0
+        for qTry = baseGreen + 1 to maxScanQty
+            float _baseRisk = f_calcTradeRiskDollars(longEntry, longStop, qTry)
+            RecoupSizingResult _resL = f_computeRecoupSizing(qTry, longEntry, longStop, reShortEntry, reShortStop, reShortTP, oppositeMultiplier, proxyQtyMul, minOneYMEnabled, 0.0, maxDailyLossLimit, maxProxyCap, longTP, shortTPOpp, oppAddStopFrac, opposingRemovalEnabled, false, useRoundUp)
+            RecoupSizingResult _resS = f_computeRecoupSizing(qTry, shortEntry, shortStop, reLongEntry, reLongStop, reLongTP, oppositeMultiplier, proxyQtyMul, minOneYMEnabled, 0.0, maxDailyLossLimit, maxProxyCap, shortTP, longTPOpp, oppAddStopFrac, opposingRemovalEnabled, false, useRoundUp)
+            PartialExitResult _peL = f_findBestPartialExit(qTry, _baseRisk, _resL.riskPerMicroRecoup, _resL.profitPerMicroRecoup, proxyQtyMul, 0.0, maxDailyLossLimit, maxProxyCap, _resL.oppMYMLoss, false, oppositeMultiplier, useRoundUp)
+            PartialExitResult _peS = f_findBestPartialExit(qTry, _baseRisk, _resS.riskPerMicroRecoup, _resS.profitPerMicroRecoup, proxyQtyMul, 0.0, maxDailyLossLimit, maxProxyCap, _resS.oppMYMLoss, false, oppositeMultiplier, useRoundUp)
+            if _peL.found and _peS.found
+                float _risk = math.max(_peL.totalWorstCase, _peS.totalWorstCase)
+                float _net = math.min(_peL.recoupScenarioNet, _peS.recoupScenarioNet) - commBuffer
+                if _risk <= maxDailyLossLimit and _net >= 0
+                    _bestGreen := qTry
+                else
+                    break
+            else
+                break
+
+    if baseMatch > 0
+        for qTry = baseMatch + 1 to maxScanQty
+            float _baseRisk2 = f_calcTradeRiskDollars(longEntry, longStop, qTry)
+            RecoupSizingResult _resL2 = f_computeRecoupSizing(qTry, longEntry, longStop, reShortEntry, reShortStop, reShortTP, oppositeMultiplier, proxyQtyMul, minOneYMEnabled, 0.0, maxDailyLossLimit, maxProxyCap, longTP, shortTPOpp, oppAddStopFrac, opposingRemovalEnabled, false, useRoundUp)
+            RecoupSizingResult _resS2 = f_computeRecoupSizing(qTry, shortEntry, shortStop, reLongEntry, reLongStop, reLongTP, oppositeMultiplier, proxyQtyMul, minOneYMEnabled, 0.0, maxDailyLossLimit, maxProxyCap, shortTP, longTPOpp, oppAddStopFrac, opposingRemovalEnabled, false, useRoundUp)
+            PartialExitResult _peL2 = f_findBestPartialExit(qTry, _baseRisk2, _resL2.riskPerMicroRecoup, _resL2.profitPerMicroRecoup, proxyQtyMul, 0.0, maxDailyLossLimit, maxProxyCap, _resL2.oppMYMLoss, false, oppositeMultiplier, useRoundUp)
+            PartialExitResult _peS2 = f_findBestPartialExit(qTry, _baseRisk2, _resS2.riskPerMicroRecoup, _resS2.profitPerMicroRecoup, proxyQtyMul, 0.0, maxDailyLossLimit, maxProxyCap, _resS2.oppMYMLoss, false, oppositeMultiplier, useRoundUp)
+            if _peL2.found and _peS2.found
+                float _tr2 = math.max(_peL2.totalWorstCase, _peS2.totalWorstCase)
+                float _t1p2 = math.min(f_calcTradeProfitDollars(longEntry, longTP, 1) * qTry, f_calcTradeProfitDollars(shortEntry, shortTP, 1) * qTry)
+                float _rn2 = math.min(_peL2.recoupScenarioNet, _peS2.recoupScenarioNet) - commBuffer
+                float _matchTgt = _t1p2 * (matchPct / 100.0)
+                if _tr2 <= maxDailyLossLimit and _rn2 >= _matchTgt
+                    _bestMatch := qTry
+                else
+                    break
+            else
+                break
+
+    PartialExitScanResult.new(_bestGreen, _bestMatch, _bestGreen != baseGreen, _bestMatch != baseMatch)
+
+// @function Runs recoup sizing and partial exit optimization in one call.
+// Combines f_computeRecoupSizing + f_findBestPartialExit to reduce token count at call sites.
+// @param baseQtyMicro T1 micro quantity
+// @param baseEntry T1 entry price
+// @param baseStop T1 stop price
+// @param recoupEntry Recoup entry price
+// @param recoupStop Recoup stop price
+// @param recoupTP Recoup TP price
+// @param oppositeMultiplier Recoup qty multiplier
+// @param proxyQtyMul Micro-to-YM conversion factor
+// @param minOneYMEnabled Min-1-YM toggle
+// @param currentLossDollars Running session loss
+// @param maxDailyLossLimit Daily loss limit
+// @param maxProxyCap Max proxy contracts
+// @param t1TPPrice T1 TP price
+// @param oppTPPrice Opposing TP price
+// @param oppAddStopFrac Opposing stop fraction
+// @param opposingRemovalEnabled Whether opposing removal is active
+// @returns [RecoupSizingResult, PartialExitResult] — PE result has found=false if not applicable
+export f_sizingWithPartialExit(int baseQtyMicro, float baseEntry, float baseStop, float recoupEntry, float recoupStop, float recoupTP, float oppositeMultiplier, float proxyQtyMul, bool minOneYMEnabled, float currentLossDollars, float maxDailyLossLimit, int maxProxyCap, float t1TPPrice, float oppTPPrice, float oppAddStopFrac, bool opposingRemovalEnabled, bool useRoundUp = false) =>
+    RecoupSizingResult sizing = f_computeRecoupSizing(baseQtyMicro, baseEntry, baseStop, recoupEntry, recoupStop, recoupTP, oppositeMultiplier, proxyQtyMul, minOneYMEnabled, currentLossDollars, maxDailyLossLimit, maxProxyCap, t1TPPrice, oppTPPrice, oppAddStopFrac, opposingRemovalEnabled, false, useRoundUp)
+    PartialExitResult pe = PartialExitResult.new(0, baseQtyMicro, 0, na, na, false)
+    if opposingRemovalEnabled and sizing.riskOK and baseQtyMicro > 0
+        float _baseRisk = f_calcTradeRiskDollars(baseEntry, baseStop, baseQtyMicro)
+        pe := f_findBestPartialExit(baseQtyMicro, _baseRisk, sizing.riskPerMicroRecoup, sizing.profitPerMicroRecoup, proxyQtyMul, currentLossDollars, maxDailyLossLimit, maxProxyCap, sizing.oppMYMLoss, false, oppositeMultiplier, useRoundUp)
+    [sizing, pe]

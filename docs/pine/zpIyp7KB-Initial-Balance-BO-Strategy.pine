@@ -1,0 +1,306 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © MIKMani
+
+//@version=6
+strategy("Initial Balance BO Strategy", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ─── SETTINGS ────────────────────────────────────────────────────────────────
+grp_ib = "═══ Initial Balance Settings ═══"
+ib_days = input.int(30, "IB History (days to show)", minval=1, maxval=100, group=grp_ib)
+
+grp_box = "═══ IB Box & Lines ═══"
+bars_per_day = input.int(75, "Bars per day (adjust per timeframe: 75=5min, 25=15min, 13=30min)", minval=1, maxval=500, group=grp_box)
+box_col  = input.color(color.new(color.gray, 75), "IB Box Fill Color",     group=grp_box)
+line_col = input.color(color.black,               "IBH / IBL Line Color",  group=grp_box)
+line_w   = input.int(2, "IBH / IBL Line Width", minval=1, maxval=4, group=grp_box)
+
+grp_ext = "═══ Extension Level Lines ═══"
+ext_up_col = input.color(color.new(color.green, 20), "Extension Up Color",   group=grp_ext)
+ext_dn_col = input.color(color.new(color.red,   20), "Extension Down Color", group=grp_ext)
+ext_lw     = input.int(1, "Extension Line Width", minval=1, maxval=3, group=grp_ext)
+show_1_5   = input.bool(true, "Show ×1.5 Level", group=grp_ext)
+show_2_0   = input.bool(true, "Show ×2   Level", group=grp_ext)
+show_2_5   = input.bool(true, "Show ×2.5 Level", group=grp_ext)
+show_3_0   = input.bool(true, "Show ×3   Level", group=grp_ext)
+
+grp_entry = "═══ Entry / SL / Target ═══"
+sl_mult   = input.float(0.75, "SL Multiplier (× IB range)", minval=0.1, maxval=2.0, step=0.05, group=grp_entry)
+buy_col   = input.color(color.green, "Buy Arrow/Label Color",  group=grp_entry)
+sell_col  = input.color(color.red,   "Sell Arrow/Label Color", group=grp_entry)
+sl_col2   = input.color(color.red,   "SL Line Color",          group=grp_entry)
+tgt_col   = input.color(color.teal,  "Target Line Color",      group=grp_entry)
+
+// ─── TIME CONSTANTS ───────────────────────────────────────────────────────────
+ib_duration_ms = 55 * 60 * 1000
+ms_915         = (9 * 60 + 15) * 60 * 1000
+ms_1430        = (14 * 60 + 30) * 60 * 1000
+
+is_ib_start = hour == 9  and minute == 15
+is_new_day  = is_ib_start and not (hour[1] == 9 and minute[1] == 15)
+is_eod      = hour == 15 and minute >= 25
+
+// ─── SESSION TRACKING ─────────────────────────────────────────────────────────
+var int session_start_ms = na
+var int ib_start_t       = na
+
+if is_new_day
+    session_start_ms := time
+    ib_start_t       := time
+
+ib_elapsed = na(session_start_ms) ? int(na) : time - session_start_ms
+is_in_ib   = not na(ib_elapsed) and ib_elapsed < ib_duration_ms
+is_ib_end  = not na(ib_elapsed) and ib_elapsed >= ib_duration_ms and (na(ib_elapsed[1]) or (time[1] - session_start_ms) < ib_duration_ms)
+
+// ─── IB TRACKING ──────────────────────────────────────────────────────────────
+var float ib_high      = na
+var float ib_low       = na
+var int   ib_start_bar = na
+var bool  ib_formed    = false
+var bool  buy_taken    = false
+var int   buy_count    = 0
+var bool  sell_taken   = false
+var float cur_ibh      = na
+var float cur_ibl      = na
+var float cur_ibr      = na
+
+// ─── OBJECT TRACKING ARRAYS ───────────────────────────────────────────────────
+var array<line>  all_lines   = array.new<line>()
+var array<box>   all_boxes   = array.new<box>()
+var array<label> all_labels  = array.new<label>()
+var array<line>  prev_lines  = array.new<line>()
+var array<label> prev_labels = array.new<label>()
+var array<line>  cur_lines   = array.new<line>()
+var array<label> cur_labels  = array.new<label>()
+var array<int>   day_line_n  = array.new<int>()
+var array<int>   day_label_n = array.new<int>()
+var label lb = na
+var line  ln = na
+
+// ─── NEW DAY: archive previous, reset state ───────────────────────────────────
+if is_new_day
+    array.clear(prev_lines)
+    array.clear(prev_labels)
+
+    int pls = array.size(cur_lines)
+    for idx = 0 to pls > 0 ? pls - 1 : na
+        array.push(prev_lines, array.get(cur_lines, idx))
+
+    int pls2 = array.size(cur_labels)
+    for idx = 0 to pls2 > 0 ? pls2 - 1 : na
+        array.push(prev_labels, array.get(cur_labels, idx))
+
+    array.push(day_line_n,  array.size(cur_lines))
+    array.push(day_label_n, array.size(cur_labels))
+    array.clear(cur_lines)
+    array.clear(cur_labels)
+
+    if array.size(day_line_n) > ib_days
+        old_n_lines  = array.shift(day_line_n)
+        old_n_labels = array.shift(day_label_n)
+        for i = 1 to old_n_lines
+            line.delete(array.shift(all_lines))
+        for i = 1 to old_n_labels
+            label.delete(array.shift(all_labels))
+        if array.size(all_boxes) > 0
+            box.delete(array.shift(all_boxes))
+
+    ib_high      := high
+    ib_low       := low
+    ib_start_bar := bar_index
+    ib_formed    := false
+    buy_taken    := false
+    sell_taken   := false
+    buy_count    := 0
+    cur_ibh      := na
+    cur_ibl      := na
+    cur_ibr      := na
+
+// ─── IB HIGH/LOW TRACKING ─────────────────────────────────────────────────────
+if is_in_ib and not is_ib_end and not na(ib_high)
+    ib_high := math.max(ib_high, high)
+    ib_low  := math.min(ib_low,  low)
+
+if is_ib_end and not na(ib_high)
+    ib_high   := math.max(ib_high, high)
+    ib_low    := math.min(ib_low,  low)
+    ib_formed := true
+    cur_ibh   := ib_high
+    cur_ibl   := ib_low
+    cur_ibr   := ib_high - ib_low
+
+// ─── EOD CLOSE ────────────────────────────────────────────────────────────────
+if is_eod
+    strategy.close_all(comment="EOD")
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+add_line(src) =>
+    array.push(all_lines, src)
+    array.push(cur_lines, src)
+
+add_label(src) =>
+    array.push(all_labels, src)
+    array.push(cur_labels, src)
+
+day_cutoff_t() =>
+    int(ib_start_t) - ms_915 + ms_1430
+
+// ─── DRAW IB BOX + LINES + LEVELS ────────────────────────────────────────────
+if is_ib_end and not na(ib_high)
+    ibr        = ib_high - ib_low
+    ib_end_bar = bar_index
+    ct         = day_cutoff_t()
+
+    // IB Gray Box
+    array.push(all_boxes, box.new(ib_start_bar, ib_high, ib_end_bar, ib_low,
+         border_color=color.gray, border_width=1, bgcolor=box_col))
+
+    // IBH / IBL solid (bar_index, 9:15 to 10:15 only)
+    line.new(ib_start_bar, ib_high, ib_end_bar, ib_high, style=line.style_solid, color=line_col, width=line_w)
+    line.new(ib_start_bar, ib_low,  ib_end_bar, ib_low,  style=line.style_solid, color=line_col, width=line_w)
+
+    // IBH dashed
+    ln := line.new(x1=ib_start_t, y1=ib_high, x2=ct, y2=ib_high, xloc=xloc.bar_time, style=line.style_dashed, color=line_col, width=1)
+    add_line(ln)
+    lb := label.new(x=ct, y=ib_high, text="IBH  " + str.tostring(ib_high, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray,85), textcolor=color.gray, size=size.small)
+    add_label(lb)
+
+    // IBL dashed
+    ln := line.new(x1=ib_start_t, y1=ib_low, x2=ct, y2=ib_low, xloc=xloc.bar_time, style=line.style_dashed, color=line_col, width=1)
+    add_line(ln)
+    lb := label.new(x=ct, y=ib_low, text="IBL  " + str.tostring(ib_low, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray,85), textcolor=color.gray, size=size.small)
+    add_label(lb)
+
+    // 50% midpoint
+    ib_mid = (ib_high + ib_low) / 2
+    ln := line.new(x1=ib_start_t, y1=ib_mid, x2=ct, y2=ib_mid, xloc=xloc.bar_time, style=line.style_dotted, color=color.blue, width=1)
+    add_line(ln)
+    lb := label.new(x=ct, y=ib_mid, text="50%  " + str.tostring(ib_mid, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.blue,85), textcolor=color.blue, size=size.small)
+    add_label(lb)
+
+    // UP T1
+    if show_1_5
+        p = ib_high + ibr * 0.5
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_up_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T1  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.green,85), textcolor=color.green, size=size.small)
+        add_label(lb)
+
+    // UP T2
+    if show_2_0
+        p = ib_high + ibr * 1.0
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_up_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T2  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.green,85), textcolor=color.green, size=size.small)
+        add_label(lb)
+
+    // UP T3
+    if show_2_5
+        p = ib_high + ibr * 1.5
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_up_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T3  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.green,85), textcolor=color.green, size=size.small)
+        add_label(lb)
+
+    // UP T4
+    if show_3_0
+        p = ib_high + ibr * 2.0
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_up_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T4  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.green,85), textcolor=color.green, size=size.small)
+        add_label(lb)
+
+    // DOWN T1
+    if show_1_5
+        p = ib_low - ibr * 0.5
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_dn_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T1  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.red,85), textcolor=color.red, size=size.small)
+        add_label(lb)
+
+    // DOWN T2
+    if show_2_0
+        p = ib_low - ibr * 1.0
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_dn_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T2  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.red,85), textcolor=color.red, size=size.small)
+        add_label(lb)
+
+    // DOWN T3
+    if show_2_5
+        p = ib_low - ibr * 1.5
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_dn_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T3  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.red,85), textcolor=color.red, size=size.small)
+        add_label(lb)
+
+    // DOWN T4
+    if show_3_0
+        p = ib_low - ibr * 2.0
+        ln := line.new(x1=ib_start_t, y1=p, x2=ct, y2=p, xloc=xloc.bar_time, style=line.style_dotted, color=ext_dn_col, width=ext_lw)
+        add_line(ln)
+        lb := label.new(x=ct, y=p, text="T4  " + str.tostring(p, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.red,85), textcolor=color.red, size=size.small)
+        add_label(lb)
+
+// ─── ENTRY LOGIC ──────────────────────────────────────────────────────────────
+is_session  = not na(ib_elapsed) and ib_elapsed >= ib_duration_ms and (hour < 15 or (hour == 15 and minute < 25))
+
+buy_signal  = ib_formed and is_session and buy_count < 3 and not na(cur_ibh) and close > cur_ibh and close[1] <= cur_ibh and strategy.position_size == 0
+sell_signal = ib_formed and is_session and not sell_taken and not na(cur_ibl) and close < cur_ibl
+sell_signal := sell_signal and not buy_signal
+
+var float sl_price   = na
+var line  l_sl_buy   = na
+var line  l_sl_sell  = na
+var label lb_sl_buy  = na
+var label lb_sl_sell = na
+
+if buy_signal
+    buy_taken  := true
+    buy_count  += 1
+    sl_price   := close - cur_ibr * sl_mult
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("X Buy", "Buy", stop=sl_price, limit=cur_ibh + cur_ibr * 2.0)
+
+    ct_b        = day_cutoff_t()
+    sl_up_price = cur_ibh - cur_ibr * sl_mult
+    l_sl_buy   := line.new(x1=time, y1=sl_up_price, x2=ct_b, y2=sl_up_price, xloc=xloc.bar_time, style=line.style_dashed, color=sl_col2, width=1)
+    lb_sl_buy  := label.new(x=ct_b, y=sl_up_price, text="SL  " + str.tostring(sl_up_price, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(sl_col2,85), textcolor=sl_col2, size=size.small)
+    add_line(l_sl_buy)
+    add_label(lb_sl_buy)
+
+if sell_signal
+    sell_taken := true
+    sl_price   := close + cur_ibr * sl_mult
+    strategy.entry("Sell", strategy.short)
+    strategy.exit("X Sell", "Sell", stop=sl_price, limit=cur_ibl - cur_ibr * 2.0)
+
+    ct_s        = day_cutoff_t()
+    sl_dn_price = cur_ibl + cur_ibr * sl_mult
+    l_sl_sell  := line.new(x1=time, y1=sl_dn_price, x2=ct_s, y2=sl_dn_price, xloc=xloc.bar_time, style=line.style_dashed, color=sl_col2, width=1)
+    lb_sl_sell := label.new(x=ct_s, y=sl_dn_price, text="SL  " + str.tostring(sl_dn_price, "#.##"), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(sl_col2,85), textcolor=sl_col2, size=size.small)
+    add_line(l_sl_sell)
+    add_label(lb_sl_sell)
+
+// ─── ENTRY SIGNAL LABELS ──────────────────────────────────────────────────────
+if buy_signal
+    label.new(bar_index, low, "BUY",
+         style=label.style_label_up, color=color.new(buy_col, 0),
+         textcolor=color.white, size=size.normal, yloc=yloc.belowbar)
+    label.new(bar_index, low, str.tostring(close, "#.##"),
+         style=label.style_label_down, color=color.new(color.white, 0),
+         textcolor=buy_col, size=size.small, yloc=yloc.belowbar)
+
+if sell_signal
+    label.new(bar_index, high, "SELL",
+         style=label.style_label_down, color=color.new(sell_col, 0),
+         textcolor=color.white, size=size.normal, yloc=yloc.abovebar)
+    label.new(bar_index, high, str.tostring(close, "#.##"),
+         style=label.style_label_up, color=color.new(color.white, 0),
+         textcolor=sell_col, size=size.small, yloc=yloc.abovebar)
+
+// ─── ENTRY ARROWS ─────────────────────────────────────────────────────────────
+plotshape(buy_signal,  title="Buy",  style=shape.triangleup,   location=location.belowbar, color=buy_col,  size=size.small)
+plotshape(sell_signal, title="Sell", style=shape.triangledown, location=location.abovebar, color=sell_col, size=size.small)
+
+// ─── IB ZONE BACKGROUND ───────────────────────────────────────────────────────
+bgcolor(is_in_ib ? color.new(color.gray, 93) : na, title="IB Zone Background")

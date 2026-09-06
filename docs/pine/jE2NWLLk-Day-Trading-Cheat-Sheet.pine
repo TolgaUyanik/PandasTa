@@ -1,0 +1,607 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// =============================================================================
+//  DAY TRADING CHEAT SHEET  —  Index Futures (ES / NQ / YM / RTY)
+// =============================================================================
+//  A single-panel session dashboard that answers, in one glance, the handful of
+//  questions worth asking before taking an intraday trade in index futures.
+//
+//    OR5         Has price accepted above, below, or on both sides of the
+//                first 5-minute candle of the cash session?
+//    OD30        Three consecutive up (or down) 5-minute bars inside the first
+//                30 minutes -> directional lean for the session.
+//    GAP         Cash open vs the PRIOR cash close: size, direction, and
+//                whether the gap has been filled.
+//    PDH / PDL   Prior cash session high and low, and whether either has been
+//                taken out today.
+//    AVWAP/EMA   Two anchored VWAPs (cash open and electronic open) plus an
+//                EMA, each with slope and signed distance from price.
+//    Value Area  Developing VAH/VPOC/VAL from a 1-minute volume profile; is
+//                price inside value or outside it?
+//
+//  Everything is session-aware and resets daily. All distances are in points.
+// =============================================================================
+
+indicator("Day Trading Cheat Sheet", shorttitle="Cheat Sheet", overlay=true, max_lines_count=500, max_labels_count=100, max_polylines_count=20, max_bars_back=5000)
+
+// ---------------------------------------------------------------- INPUTS ----
+grpS = "Session"
+tz          = input.string("America/New_York", "Timezone",            group=grpS)
+rthSess     = input.session("0930-1600",       "RTH session",         group=grpS)
+openSess    = input.session("0930-1000",       "Opening window (Rule 2)", group=grpS)
+
+grpV = "Volume Profile"
+ltf         = input.timeframe("1",   "Intrabar resolution",           group=grpV, tooltip="Lower timeframe used to distribute volume into price bins. '1' = 1 minute.")
+binTicks    = input.int(4, "Bin size (ticks)", minval=1,              group=grpV, tooltip="4 ticks = 1 point on ES/NQ. Smaller = finer profile, heavier calc.")
+vaPct       = input.float(70.0, "Value Area %", minval=50, maxval=95, step=1, group=grpV)  / 100.0
+
+grpA = "Anchored VWAP — RTH"
+showAV      = input.bool(true, "Show RTH anchored VWAP",              group=grpA)
+anchorSess  = input.session("0925-0930", "Anchor bar",                group=grpA, tooltip="The 5-min candle immediately before the US cash open. Re-anchors here each day, so only one anchor is ever live.")
+// Deliberately NOT input.source: source inputs are bound by plot index, and
+// TradingView silently remaps them when a script's plot list changes, which
+// can point the VWAP at an unrelated series (even one of this script's own).
+avSrcName   = input.string("hlc3", "VWAP source", options=["hlc3","close","hl2","ohlc4"], group=grpA)
+avCol       = input.color(color.new(#9c27b0, 0), "VWAP color",        group=grpA)
+avWidth     = input.int(1, "VWAP line width", minval=1, maxval=4,     group=grpA)
+
+grpE = "Anchored VWAP — ETH"
+showEV      = input.bool(true, "Show ETH anchored VWAP",              group=grpE)
+ethSess     = input.session("1800-1805", "Anchor bar",                group=grpE, tooltip="First 5-min candle of the electronic/overnight session (18:00 ET for CME index futures). Re-anchors each evening.")
+evCol       = input.color(color.new(#26a69a, 0), "VWAP color",        group=grpE)
+evWidth     = input.int(1, "VWAP line width", minval=1, maxval=4,     group=grpE)
+
+grpM = "Moving Average"
+showEMA     = input.bool(true, "Show EMA",                            group=grpM)
+emaLen      = input.int(21, "EMA length", minval=1,                   group=grpM)
+// Deliberately NOT input.source: that lets the series be bound to another
+// indicator's plot, which silently changes what the EMA is calculated on.
+emaSrcName  = input.string("close", "EMA source", options=["close","open","hl2","hlc3","ohlc4"], group=grpM)
+emaCol      = input.color(color.new(#e53935, 0), "EMA color",         group=grpM)
+emaWidth    = input.int(1, "EMA line width", minval=1, maxval=4,      group=grpM)
+
+grpR = "Rule 2 — Opening Drive"
+barMode     = input.string("Close > previous close", "Up-bar definition", options=["Close > previous close", "Green bar (close > open)", "Both"], group=grpR)
+streakLen   = input.int(3, "Consecutive bars required", minval=2, maxval=6, group=grpR)
+
+grpL = "Level Labels"
+showPDLbl   = input.bool(true, "Show prior session high/low labels",  group=grpL)
+showPDLine  = input.bool(true, "Draw leader lines to labels",         group=grpL)
+sweepETH    = input.bool(false, "Count overnight sweeps",             group=grpL, tooltip="Off = only today's cash session can take out PDH/PDL. On = overnight trade counts too.")
+lblOffset   = input.int(10, "Label offset (bars)", minval=0, maxval=100, group=grpL, tooltip="Bars to the right of the last candle. Increase to line these up with labels from your other indicators.")
+
+grpO = "Rule 3 — Opening Range"
+orSess      = input.session("0930-0935", "Opening range bar",         group=grpO, tooltip="The first 5-min candle of the cash session. Its high/low define the opening range.")
+orUseClose  = input.bool(false, "Require closes beyond the range",    group=grpO, tooltip="Off = any wick beyond the range counts as trading through it. On = only bar closes count (fewer false flips).")
+
+grpG = "Gap"
+gapFlatPts = input.float(0.5, "Flat threshold (points)", minval=0, step=0.25, group=grpG, tooltip="Opens within this distance of the prior cash close are treated as no gap.")
+
+grpD = "Diagnostics"
+showDebug   = input.bool(false, "Show prior-session debug rows",       group=grpD, tooltip="Adds two rows: today's developing high/low, and how many session-opens have fired today. The open count should read 1 during a session — 2 or more means the prior-session roll is firing twice and PDH/PDL are being overwritten.")
+
+grpSl = "Slope"
+slopeLb     = input.int(3, "Slope lookback (bars)", minval=1,         group=grpSl)
+slopeThr    = input.float(0.25, "Neutral threshold (points)", minval=0, step=0.25, group=grpSl, tooltip="Change smaller than this over the lookback is treated as flat.")
+
+grpT = "Table"
+theme       = input.string("Auto", "Theme", options=["Auto","Light","Dark"], group=grpT, tooltip="Auto reads the chart background and picks a matching palette.")
+tblPos      = input.string("Top Right", "Position", options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right"], group=grpT)
+txtSize     = input.string("Normal", "Text size", options=["Tiny","Small","Normal","Large"], group=grpT)
+panelOpacity = input.int(12, "Panel opacity", minval=0, maxval=100, group=grpT, tooltip="0 = solid panel, 100 = fully transparent.")
+
+// ------------------------------------------------------------- CONSTANTS ----
+tick    = syminfo.mintick
+binSize = tick * binTicks
+
+// ------------------------------------------------------------- THEMING ------
+// "Auto" samples the chart background luminance so the panel sits on either a
+// light or dark chart without hand-tuning.
+bgLum   = 0.299 * color.r(chart.bg_color) + 0.587 * color.g(chart.bg_color) + 0.114 * color.b(chart.bg_color)
+isLight = theme == "Light" or (theme == "Auto" and bgLum > 140)
+
+cGreen  = #26a69a
+cRed    = isLight ? #c0392b : #ef5350
+cGrey   = isLight ? #7a8290 : #787b86
+cTxt    = isLight ? #2f333c : #d1d4dc
+cPanel  = isLight ? color.new(#ffffff, panelOpacity) : color.new(#1a1e27, panelOpacity)
+cLine   = isLight ? color.new(#000000, 88)           : color.new(#ffffff, 86)
+cSlate  = isLight ? #55636e : #90a4ae
+tintPct = isLight ? 90 : 82
+
+// Trend state of a line, from its slope over the lookback
+f_trendTxt(float v) =>
+    d = v - v[slopeLb]
+    na(d) ? "—" : d > slopeThr ? "Uptrend" : d < -slopeThr ? "Downtrend" : "Neutral"
+
+f_trendCol(float v) =>
+    d = v - v[slopeLb]
+    na(d) ? cGrey : d > slopeThr ? cGreen : d < -slopeThr ? cRed : cGrey
+
+// --------------------------------------------------------- SESSION STATE ----
+inRTH      = not na(time(timeframe.period, rthSess, tz))
+// Day change is included so this still fires on regular-session-only charts,
+// where there is no ETH bar between one cash close and the next cash open.
+// dayofmonth is a plain built-in: unlike time("D") it involves no higher-
+// timeframe request, so it cannot resolve a bar late and fire a second,
+// spurious session-open in the middle of the session.
+newSession = inRTH and (not inRTH[1] or dayofmonth != dayofmonth[1])
+
+// ============================================================================
+//  DEVELOPING VOLUME PROFILE
+// ============================================================================
+var map<int, float> bins   = map.new<int, float>()
+var float           totVol = 0.0
+
+if newSession
+    map.clear(bins)
+    totVol := 0.0
+
+f_add(int k, float v) =>
+    prev = map.contains(bins, k) ? map.get(bins, k) : 0.0
+    map.put(bins, k, prev + v)
+
+if inRTH
+    [lH, lL, lV] = request.security_lower_tf(syminfo.tickerid, ltf, [high, low, volume])
+    n = array.size(lV)
+    if n > 0
+        for i = 0 to n - 1
+            h = array.get(lH, i)
+            l = array.get(lL, i)
+            v = nz(array.get(lV, i))
+            if v > 0
+                kHi = int(math.round(h / binSize))
+                kLo = int(math.round(l / binSize))
+                cnt = kHi - kLo + 1
+                per = v / cnt
+                for k = kLo to kHi
+                    f_add(k, per)
+                totVol += v
+    else
+        // fallback if the chart timeframe is at/below the intrabar resolution
+        v = nz(volume)
+        if v > 0
+            kHi = int(math.round(high / binSize))
+            kLo = int(math.round(low  / binSize))
+            cnt = kHi - kLo + 1
+            per = v / cnt
+            for k = kLo to kHi
+                f_add(k, per)
+            totVol += v
+
+// ------------------------------------------------- VAH / VPOC / VAL CALC ----
+f_profile() =>
+    float vpoc = na
+    float vah  = na
+    float val  = na
+    keys = map.keys(bins)
+    if array.size(keys) > 0 and totVol > 0
+        array.sort(keys, order.ascending)
+        int   sz   = array.size(keys)
+        vols       = array.new<float>(0)
+        for i = 0 to sz - 1
+            array.push(vols, map.get(bins, array.get(keys, i)))
+
+        pocIdx = array.indexof(vols, array.max(vols))
+        vpoc  := array.get(keys, pocIdx) * binSize
+
+        float target = totVol * vaPct
+        float accum  = array.get(vols, pocIdx)
+        int   up     = pocIdx
+        int   dn     = pocIdx
+
+        while accum < target and (up < sz - 1 or dn > 0)
+            float upV = 0.0
+            float dnV = 0.0
+            if up < sz - 1
+                upV := array.get(vols, up + 1) + (up + 2 <= sz - 1 ? array.get(vols, up + 2) : 0.0)
+            if dn > 0
+                dnV := array.get(vols, dn - 1) + (dn - 2 >= 0 ? array.get(vols, dn - 2) : 0.0)
+
+            if upV >= dnV and up < sz - 1
+                int stepsU = math.min(2, sz - 1 - up)
+                for su = 1 to stepsU
+                    accum += array.get(vols, up + su)
+                up += stepsU
+            else if dn > 0
+                int stepsD = math.min(2, dn)
+                for sd = 1 to stepsD
+                    accum += array.get(vols, dn - sd)
+                dn -= stepsD
+
+        vah := array.get(keys, up) * binSize
+        val := array.get(keys, dn) * binSize
+    [vpoc, vah, val]
+
+[vpoc, vah, val] = f_profile()
+
+// ============================================================================
+//  RULE 2 — OPENING DRIVE  (evaluated on 5-minute bars)
+// ============================================================================
+f_openDrive() =>
+    inWin  = not na(time(timeframe.period, openSess, tz))
+    inR    = not na(time(timeframe.period, rthSess,  tz))
+    reset  = inR and not inR[1]
+
+    var int  upS  = 0
+    var int  dnS  = 0
+    var bool bull = false
+    var bool bear = false
+    var int  best = 0
+
+    if reset
+        upS  := 0
+        dnS  := 0
+        bull := false
+        bear := false
+        best := 0
+
+    if inWin
+        isUp = barMode == "Close > previous close" ? close > close[1] : barMode == "Green bar (close > open)" ? close > open : (close > close[1] and close > open)
+        isDn = barMode == "Close > previous close" ? close < close[1] : barMode == "Green bar (close > open)" ? close < open : (close < close[1] and close < open)
+        upS := isUp ? upS + 1 : 0
+        dnS := isDn ? dnS + 1 : 0
+        best := math.max(best, math.max(upS, dnS))
+        if upS >= streakLen
+            bull := true
+        if dnS >= streakLen
+            bear := true
+
+    [bull, bear, math.max(upS, dnS), best, inWin]
+
+[odBull, odBear, odCur, odBest, odInWin] = request.security(syminfo.tickerid, "5", f_openDrive(), lookahead=barmerge.lookahead_off)
+
+// ============================================================================
+//  RULE 3 — 5-MIN OPENING RANGE ACCEPTANCE
+//  Trades on both sides  -> neutral, expect two-way trade, defer to HTF bias
+//  Only above the range  -> early bullish lean (be patient buying dips)
+//  Only below the range  -> early bearish lean
+// ============================================================================
+inOR = not na(time(timeframe.period, orSess, tz))
+
+var float orH     = na
+var float orL     = na
+var bool  orSet   = false
+var bool  orAbove = false
+var bool  orBelow = false
+
+if newSession
+    orH     := na
+    orL     := na
+    orSet   := false
+    orAbove := false
+    orBelow := false
+
+if inOR
+    orH   := na(orH) ? high : math.max(orH, high)
+    orL   := na(orL) ? low  : math.min(orL, low)
+    orSet := true
+else if orSet and inRTH
+    hiRef = orUseClose ? close : high
+    loRef = orUseClose ? close : low
+    if hiRef > orH
+        orAbove := true
+    if loRef < orL
+        orBelow := true
+
+r3Both    = orAbove and orBelow
+r3BullOnly = orAbove and not orBelow
+r3BearOnly = orBelow and not orAbove
+r3Inside  = orSet and not orAbove and not orBelow
+
+r3Pass = r3BullOnly or r3BearOnly
+r3Text = not orSet ? "Waiting for open" : r3Both ? "Two-way  ·  neutral, defer to HTF" : r3BullOnly ? "Above OR only  ·  bullish lean" : r3BearOnly ? "Below OR only  ·  bearish lean" : "Inside OR  ·  undecided"
+r3Col  = r3BullOnly ? cGreen : r3BearOnly ? cRed : cGrey
+
+// ============================================================================
+//  GAP — cash open vs the prior cash session's close
+//  Tracks size, direction, and whether the gap has been filled today.
+// ============================================================================
+// Prior session high/low/close, accumulated bar by bar across the RTH window
+// defined in the Session group. This is the only source: session.regular does
+// NOT reliably exclude globex on futures feeds, so a daily-bar request returns
+// overnight extremes and was giving an ETH low rather than the cash low.
+var float curHigh      = na   // developing, current session
+var float curLow       = na
+var float lastRthClose = na
+var float pdh          = na   // completed, prior session
+var float pdl          = na
+var float prevRthClose = na
+
+// counts session-opens since the calendar day began — should read 1 intraday.
+// If this ever shows 2+, the roll is firing more than once and PDH/PDL will be
+// overwritten with part of the current session.
+var int openCount = 0
+if dayofmonth != dayofmonth[1]
+    openCount := 0
+if newSession
+    openCount := openCount + 1
+
+if newSession
+    // roll: whatever the accumulators hold is the session that just finished
+    pdh          := curHigh
+    pdl          := curLow
+    prevRthClose := lastRthClose
+    // then start today's accumulators from this bar
+    curHigh      := high
+    curLow       := low
+else if inRTH
+    curHigh := na(curHigh) ? high : math.max(curHigh, high)
+    curLow  := na(curLow)  ? low  : math.min(curLow,  low)
+
+// tracked after the roll, so at a session open it still holds yesterday's close
+if inRTH
+    lastRthClose := close
+
+var float gapPts    = na
+var bool  gapFilled = false
+
+if newSession
+    gapPts    := na(prevRthClose) ? na : open - prevRthClose
+    gapFilled := false
+
+// gap is filled once price trades back through the prior close
+if inRTH and not na(prevRthClose) and not na(gapPts) and not gapFilled
+    if low <= prevRthClose and high >= prevRthClose
+        gapFilled := true
+
+gapUp   = not na(gapPts) and gapPts >  gapFlatPts
+gapDn   = not na(gapPts) and gapPts < -gapFlatPts
+gapFlat = not na(gapPts) and not gapUp and not gapDn
+
+gapPass = gapUp or gapDn
+gapText = na(gapPts) ? "—" : gapFlat ? "None" : (gapUp ? "Up " : "Down ") + str.tostring(math.abs(gapPts), "#.##") + " pt  ·  " + (gapFilled ? "filled" : "open")
+gapCol  = gapUp ? cGreen : gapDn ? cRed : cGrey
+
+// have the prior session's extremes been taken out yet today?
+var bool pdhTaken = false
+var bool pdlTaken = false
+var int  sessStartTime = na
+
+if newSession
+    pdhTaken      := false
+    pdlTaken      := false
+    sessStartTime := time
+
+sweepWindow = sweepETH ? true : inRTH
+if sweepWindow
+    if not na(pdh) and high > pdh
+        pdhTaken := true
+    if not na(pdl) and low < pdl
+        pdlTaken := true
+
+pdSweep = pdhTaken and pdlTaken ? "both swept" : pdhTaken ? "PDH swept" : pdlTaken ? "PDL swept" : "intact"
+pdText  = na(pdh) or na(pdl) ? "—" : str.tostring(pdh, format.mintick) + "  /  " + str.tostring(pdl, format.mintick) + "  ·  " + pdSweep
+pdCol   = pdhTaken and pdlTaken ? cGrey : pdhTaken ? cGreen : pdlTaken ? cRed : cGrey
+
+// ============================================================================
+//  RULE 1 — VALUE AREA LOCATION
+// ============================================================================
+aboveVA = not na(vah) and close > vah
+belowVA = not na(val) and close < val
+inVA    = not na(vah) and not na(val) and not aboveVA and not belowVA
+
+r1Pass  = aboveVA or belowVA
+r1Text  = na(vah)  ? "—" : aboveVA ? "Above VAH" : belowVA ? "Below VAL" : "Inside"
+r1Col   = na(vah)  ? cGrey : belowVA ? cGreen : aboveVA ? cRed : cGrey
+
+// first target on a reversion, then VPOC
+tgt1    = belowVA ? val : aboveVA ? vah : na
+tgtText = na(tgt1) ? "—" : str.tostring(tgt1, format.mintick) + "  →  " + str.tostring(vpoc, format.mintick)
+
+r2Pass  = odBull
+r2Text  = odBull  ? "Bullish bias  ·  " + str.tostring(streakLen) + " up bars" : odBear ? "Bearish bias  ·  " + str.tostring(streakLen) + " down bars" : odInWin ? "Forming…  ·  " + str.tostring(int(nz(odBest))) + "/" + str.tostring(streakLen) : "No drive  ·  best " + str.tostring(int(nz(odBest))) + "/" + str.tostring(streakLen)
+r2Col   = odBull  ? cGreen : odBear ? cRed : cGrey
+
+// ============================================================================
+//  ANCHORED VWAP  —  anchored to the 5-min bar before the US cash open,
+//  re-anchored once every 24h so only one AVWAP is ever active.
+// ============================================================================
+avSrc = avSrcName == "close" ? close : avSrcName == "hl2" ? hl2 : avSrcName == "ohlc4" ? ohlc4 : hlc3
+
+inAnchor  = not na(time(timeframe.period, anchorSess, tz))
+newAnchor = inAnchor and not inAnchor[1]
+
+var float avPV      = 0.0
+var float avV       = 0.0
+var bool  avActive  = false
+float     avwap     = na
+
+if newAnchor
+    avPV     := 0.0
+    avV      := 0.0
+    avActive := true
+
+if avActive
+    avPV += avSrc * nz(volume)
+    avV  += nz(volume)
+
+avwap := avActive and avV > 0 ? avPV / avV : na
+
+// Drawn as a polyline (not a plot) so that the previous session's line can be
+// erased — only the run from the most recent anchor is ever on the chart.
+var array<chart.point> avPts = array.new<chart.point>()
+var polyline           avPl  = na
+
+if newAnchor
+    array.clear(avPts)
+
+if avActive and not na(avwap) and barstate.isconfirmed
+    array.push(avPts, chart.point.from_time(time, avwap))
+
+if barstate.islast
+    polyline.delete(avPl)
+    if showAV and array.size(avPts) > 0
+        pts = array.copy(avPts)
+        if not barstate.isconfirmed and not na(avwap)
+            array.push(pts, chart.point.from_time(time, avwap))
+        avPl := polyline.new(pts, curved=false, closed=false, xloc=xloc.bar_time, line_color=avCol, line_width=avWidth)
+
+// hidden plot keeps the value available in the Data Window and for alerts
+plot(avwap, "AVWAP RTH", color=avCol, display=display.data_window)
+
+avText = na(avwap) ? "—" : f_trendTxt(avwap)
+avCell = f_trendCol(avwap)
+
+// ---------------------------------------------------------------------------
+//  ETH anchored VWAP — anchored to the first 5-min candle of the electronic
+//  session (18:00 ET), re-anchored each evening. Same erase-on-reanchor logic.
+// ---------------------------------------------------------------------------
+inEth     = not na(time(timeframe.period, ethSess, tz))
+newEth    = inEth and not inEth[1]
+
+var float evPV     = 0.0
+var float evV      = 0.0
+var bool  evActive = false
+float     evwap    = na
+
+if newEth
+    evPV     := 0.0
+    evV      := 0.0
+    evActive := true
+
+if evActive
+    evPV += avSrc * nz(volume)
+    evV  += nz(volume)
+
+evwap := evActive and evV > 0 ? evPV / evV : na
+
+var array<chart.point> evPts = array.new<chart.point>()
+var polyline           evPl  = na
+
+if newEth
+    array.clear(evPts)
+
+if evActive and not na(evwap) and barstate.isconfirmed
+    array.push(evPts, chart.point.from_time(time, evwap))
+
+if barstate.islast
+    polyline.delete(evPl)
+    if showEV and array.size(evPts) > 0
+        epts = array.copy(evPts)
+        if not barstate.isconfirmed and not na(evwap)
+            array.push(epts, chart.point.from_time(time, evwap))
+        evPl := polyline.new(epts, curved=false, closed=false, xloc=xloc.bar_time, line_color=evCol, line_width=evWidth)
+
+plot(evwap, "AVWAP ETH", color=evCol, display=display.data_window)
+
+evText = na(evwap) ? "—" : f_trendTxt(evwap)
+evCell = f_trendCol(evwap)
+
+// ---------------------------------------------------------------------------
+//  EMA
+// ---------------------------------------------------------------------------
+emaSrc = emaSrcName == "open" ? open : emaSrcName == "hl2" ? hl2 : emaSrcName == "hlc3" ? hlc3 : emaSrcName == "ohlc4" ? ohlc4 : close
+emaVal = ta.ema(emaSrc, emaLen)
+plot(showEMA ? emaVal : na, "EMA", color=emaCol, linewidth=emaWidth)
+
+
+// ============================================================================
+//  CHECKLIST TABLE
+// ============================================================================
+f_pos() =>
+    tblPos == "Top Right" ? position.top_right : tblPos == "Top Left" ? position.top_left : tblPos == "Bottom Right" ? position.bottom_right : tblPos == "Bottom Left" ? position.bottom_left : position.middle_right
+
+f_size() =>
+    txtSize == "Tiny" ? size.tiny : txtSize == "Small" ? size.small : txtSize == "Large" ? size.large : size.normal
+
+// ---------------------------------------------------------- LEVEL LABELS ----
+// Opening range high/low are shown as floating labels against the price axis.
+// right-hand anchor, in chart time, lblOffset bars past the last candle
+f_anchorTime() =>
+    time + lblOffset * timeframe.in_seconds(timeframe.period) * 1000
+
+f_lbl(label lb, float y, string txt, color col) =>
+    label out = lb
+    if na(out)
+        out := label.new(time, close, "", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.black, 100), textcolor=col, size=f_size(), textalign=text.align_left)
+    label.set_xy(out, f_anchorTime(), na(y) ? close : y)
+    label.set_text(out, na(y) ? "" : txt + "  " + str.tostring(y, format.mintick))
+    label.set_textcolor(out, col)
+    out
+
+f_leader(line ln, float y, color col) =>
+    line out = ln
+    if na(out)
+        out := line.new(time, close, time, close, xloc=xloc.bar_time, style=line.style_dashed, color=col, width=1)
+    x0 = na(sessStartTime) ? time : sessStartTime
+    line.set_xy1(out, x0, na(y) ? close : y)
+    line.set_xy2(out, f_anchorTime(), na(y) ? close : y)
+    line.set_color(out, na(y) ? color.new(col, 100) : col)
+    out
+
+var label lblPDH = na
+var label lblPDL = na
+var line  lnPDH  = na
+var line  lnPDL  = na
+
+// swept levels are struck through with a check and dimmed
+pdhCol = pdhTaken ? color.new(cSlate, 45) : cSlate
+pdlCol = pdlTaken ? color.new(cSlate, 45) : cSlate
+
+if barstate.islast and showPDLbl
+    lblPDH := f_lbl(lblPDH, pdh, pdhTaken ? "PDH ✓" : "PDH", pdhCol)
+    lblPDL := f_lbl(lblPDL, pdl, pdlTaken ? "PDL ✓" : "PDL", pdlCol)
+
+if barstate.islast and showPDLine
+    lnPDH := f_leader(lnPDH, pdh, pdhCol)
+    lnPDL := f_leader(lnPDL, pdl, pdlCol)
+
+var table t = table.new(f_pos(), 2, 9, border_width=1, border_color=cLine, frame_width=1, frame_color=cLine)
+
+// name cell (left column) / value cell (right column)
+f_nameCell(int row, string txt, color col) =>
+    table.cell(t, 0, row, "  " + txt + "  ", bgcolor=na, text_color=col, text_size=f_size(), text_halign=text.align_left)
+
+f_ruleCell(int row, bool pass, string txt, color col) =>
+    table.cell(t, 1, row, "  " + (pass ? "✔" : "✖") + "  " + txt + "  ", bgcolor=color.new(col, tintPct), text_color=col, text_size=f_size(), text_halign=text.align_left)
+
+f_valCell(int row, string txt, color col) =>
+    table.cell(t, 1, row, "  " + txt + "  ", bgcolor=cPanel, text_color=col, text_size=f_size(), text_halign=text.align_left)
+
+if barstate.islast
+    // 1 — opening range
+    f_nameCell(0, "OR5", cTxt)
+    f_ruleCell(0, r3Pass, r3Text, r3Col)
+
+    // 2 — opening drive
+    f_nameCell(1, "OD30", cTxt)
+    f_ruleCell(1, r2Pass, r2Text, r2Col)
+
+    // 3 — gap vs prior cash close
+    f_nameCell(2, "GAP", cTxt)
+    f_ruleCell(2, gapPass, gapText, gapCol)
+
+    // 4 — prior cash session range
+    f_nameCell(3, "PDH / PDL", cTxt)
+    f_valCell( 3, pdText, pdCol)
+
+    // 5 — trend lines
+    f_nameCell(4, "AVWAP RTH", avCol)
+    f_valCell( 4, avText, avCell)
+
+    f_nameCell(5, "AVWAP ETH", evCol)
+    f_valCell( 5, evText, evCell)
+
+    // 6 — value area
+    f_nameCell(6, "Value Area", cTxt)
+    f_ruleCell(6, r1Pass, r1Text, r1Col)
+
+    // diagnostics: today's developing range, and how many session-opens fired
+    if showDebug
+        f_nameCell(7, "dbg today H/L", cSlate)
+        f_valCell( 7, (na(curHigh) ? "na" : str.tostring(curHigh, format.mintick)) + "  /  " + (na(curLow) ? "na" : str.tostring(curLow, format.mintick)), cSlate)
+        f_nameCell(8, "dbg opens today", cSlate)
+        f_valCell( 8, str.tostring(openCount), cSlate)
+
+// ============================================================================
+//  ALERTS
+// ============================================================================
+alertcondition(belowVA and not belowVA[1], "Price dropped below VAL", "Price below VAL — reversion long setup toward VAL/VPOC")
+alertcondition(aboveVA and not aboveVA[1], "Price rose above VAH",    "Price above VAH — reversion short setup toward VAH/VPOC")
+alertcondition(odBull and not odBull[1],   "Opening drive bullish",   "3 consecutive up 5m bars in the opening window — bullish bias")
+alertcondition(odBear and not odBear[1],   "Opening drive bearish",   "3 consecutive down 5m bars in the opening window — bearish bias")
+alertcondition(r3Both and not r3Both[1],   "Opening range two-way",   "Price has now traded both sides of the 5m opening range — neutral, defer to higher timeframe bias")
+alertcondition(gapFilled and not gapFilled[1], "Gap filled",          "Opening gap has been filled — price traded back to the prior cash close")
+alertcondition(pdhTaken and not pdhTaken[1],   "PDH taken out",       "Prior cash session high has been taken out")
+alertcondition(pdlTaken and not pdlTaken[1],   "PDL taken out",       "Prior cash session low has been taken out")

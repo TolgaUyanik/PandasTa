@@ -1,0 +1,987 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © cybermediaboy
+//@version=6
+// @published_version 7
+// @tw_status pending-publish
+// Single source of truth: cybermediaboy/KalmanEngineLib/7
+
+// @description KalmanEngineLib — 14-state Kalman filter engine for Pine Script v6.
+// Provides symmetric triangle packing for covariance matrices, block-diagonal state
+// prediction, sequential measurement updates, 3-D Mahalanobis gating (Concept 2),
+// innovation-based adaptive noise (Concept 1), online Γ_lag coupling estimation
+// (Concept 3), skip-bar trajectory storage, KMEMA, trend-adaptive bands, execution
+// scoring, OLS beta learning, and multi-step projection.
+//
+// Architecture: all functions are stateless transforms that operate on UDTs passed
+// by the caller.  No `var` declarations inside library functions — persistent state
+// lives in KalmanState_N UDTs owned by the indicator.
+//
+// Element budget: ~3,600 for core engine; ~1,800 for TrajectoryStore at depth=100,
+// n_feat=6.  Total ~22K elements leaving ample headroom under Pine's 100K limit.
+
+library("KalmanEngineLib", overlay=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 1 — UDT DEFINITIONS
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @type Generic N-state Kalman filter.  Covariance P stored as packed upper triangle
+// (n*(n+1)/2 elements) to avoid allocating full N×N matrices.
+export type KalmanState_N
+    // Core filter state
+    array<float> x             // State vector [n]
+    array<float> P_tri         // Packed upper-triangle of posterior P  [n*(n+1)/2]
+    array<float> P_pred_tri    // Packed upper-triangle of prior P_pred [n*(n+1)/2]
+    array<float> Q_diag        // Process noise diagonal [n]
+    float        R_ewma        // Primary adaptive measurement noise scalar
+    int          bars_run      // Bars processed since init (warmup counter)
+    // Concept 1 — Adaptive Covariance Learning
+    array<float> innov_window  // Circular buffer: recent scalar innovations [win_depth]
+    int          innov_ptr     // Ring-buffer write pointer into innov_window
+    float        nis_current   // Latest Normalized Innovation Squared statistic
+    // Concept 2 — Mahalanobis Gating
+    array<float> sigma_z_tri   // Packed 3×3 feature covariance Σ_z [6]
+    array<float> mu_z          // EWMA feature centroid [3]
+    float        d_tri         // Current trivariate Mahalanobis distance (sqrt of d²)
+    float        d_tri_dot     // Rate of change of d_tri (finite difference)
+    // Concept 3 — State Augmentation Latency
+    array<float> gamma_lag     // Online Γ_lag coupling coefficients [n_couplings]
+
+// @type Block-diagonal transition matrix stored as separate sub-blocks.
+// Full F would be n×n but is mostly zeros; storing only non-zero blocks saves
+// 67% of elements and reduces multiply cost proportionally.
+export type TransitionConfig
+    array<float> phi_diag      // Per-state decay scalars [n]  (diagonal F fast path)
+    array<float> F_kinem       // 3×3 price-kinematics block, row-major [9]
+    array<float> F_zscore      // 6×6 z-score dynamics block, row-major [36]
+    array<float> F_mah         // 5×5 Mahalanobis block, row-major [25]
+    array<float> gamma_matrix  // 3×5 cross-coupling Γ_lag (kinem ← mah), row-major [15]
+
+// @type Skip-bar circular buffer matrices for multi-scale trajectory analysis.
+// Stores feature snapshots at Δ={3,5,7} bar intervals in circular row buffers.
+export type TrajectoryStore
+    matrix<float> traj_3       // Δ=3 bar snapshots [depth × n_feat]
+    matrix<float> traj_5       // Δ=5 bar snapshots [depth × n_feat]
+    matrix<float> traj_7       // Δ=7 bar snapshots [depth × n_feat]
+    int           ptr_3        // Current write row for traj_3
+    int           ptr_5        // Current write row for traj_5
+    int           ptr_7        // Current write row for traj_7
+    int           depth        // Fixed depth D (rows per matrix)
+    int           n_feat       // Fixed feature count (columns per matrix)
+
+// @type Active concept flags and associated thresholds.
+// The indicator constructs this from the concept_mode input and passes it to
+// its own branching logic — library functions themselves are concept-agnostic.
+export type ConceptConfig
+    bool  c1_active            // Concept 1: Adaptive Covariance Learning
+    bool  c2_active            // Concept 2: Mahalanobis Gating
+    bool  c3_active            // Concept 3: State Augmentation Latency
+    float chi2_threshold       // Concept 2 gate threshold (7.815 = χ²_{3,0.95})
+    float shrinkage            // Concept 2 Ledoit-Wolf shrinkage intensity [0..1]
+    float gamma_alpha          // Concept 3 online learning rate for Γ_lag elements
+    float q_min                // Concept 1 minimum Q floor
+    float q_max                // Concept 1 maximum Q cap
+    int   innov_window_depth   // Concept 1 innovation window length
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 2 — SYMMETRIC TRIANGLE PACK PRIMITIVES
+// ═══════════════════════════════════════════════════════════════════════════════════
+// A symmetric n×n matrix has n*(n+1)/2 unique elements.  We store only the upper
+// triangle (including diagonal) in a flat array using the index mapping below.
+// This saves 47% versus a full matrix.new<float>(n,n) at n=14.
+
+// @function Compute the flat array index for element (i, j) of a packed upper-triangle
+//           symmetric matrix of dimension n.  Automatically handles i > j by swapping.
+// @param i  Row index (0-based)
+// @param j  Column index (0-based)
+// @param n  Matrix dimension
+// @returns  Linear index into the packed array
+export f_tri_idx(int i, int j, int n) =>
+    int r = math.min(i, j)
+    int c = math.max(i, j)
+    // Upper-triangle row-offset formula: row r starts at r*(2n - r - 1)/2
+    // Pine integer arithmetic note: r*(2*n - r - 1) is always even so no rounding needed
+    int(r * (2 * n - r - 1) / 2) + c
+
+// @function Retrieve element (i, j) from a packed symmetric matrix.
+// @param tri  Packed upper-triangle array  [n*(n+1)/2]
+// @param i    Row index (0-based)
+// @param j    Column index (0-based)
+// @param n    Matrix dimension
+// @returns    Value at (i, j) — same as (j, i) by symmetry
+export f_tri_get(array<float> tri, int i, int j, int n) =>
+    array.get(tri, f_tri_idx(i, j, n))
+
+// @function Set element (i, j) in a packed symmetric matrix.  Because the matrix is
+//           symmetric, only one element is written (at the canonical upper-triangle
+//           position).  Do NOT call this with different values for (i,j) and (j,i).
+// @param tri  Packed upper-triangle array  [n*(n+1)/2]  — modified in place
+// @param i    Row index (0-based)
+// @param j    Column index (0-based)
+// @param n    Matrix dimension
+// @param val  Value to write
+export f_tri_set(array<float> tri, int i, int j, int n, float val) =>
+    array.set(tri, f_tri_idx(i, j, n), val)
+
+// @function Allocate a zero-filled packed symmetric matrix of dimension n.
+// @param n  Matrix dimension
+// @returns  New array<float> of length n*(n+1)/2, all zeros
+export f_tri_new(int n) =>
+    array.new<float>(int(n * (n + 1) / 2), 0.0)
+
+// WARNING: Pine can misparse direct UDT constructor returns here and then emit
+// false downstream errors in importing scripts. Keep this function returning a
+// typed local `KalmanState_N` variable instead of returning `KalmanState_N.new(...)`
+// inline, and prefer explicit field names in the constructor call.
+export f_init_regression(int n_features, float P0_init, float Q_init, float R_init) =>
+    array<float> x      = array.new<float>(n_features, 0.0)
+    array<float> P_tri  = f_tri_new(n_features)
+    array<float> Q_diag = array.new<float>(n_features, Q_init)
+    array<float> innovw = array.new<float>(50, 0.0)
+    array<float> sz_tri = f_tri_new(3)
+    array<float> mu_z   = array.new<float>(3, 0.0)
+    array<float> gam    = array.new<float>(1, 0.0)
+    for i = 0 to n_features - 1
+        f_tri_set(P_tri, i, i, n_features, P0_init)
+    KalmanState_N st = KalmanState_N.new(
+        x = x,
+        P_tri = P_tri,
+        P_pred_tri = f_tri_new(n_features),
+        Q_diag = Q_diag,
+        R_ewma = R_init,
+        bars_run = 0,
+        innov_window = innovw,
+        innov_ptr = 0,
+        nis_current = 0.0,
+        sigma_z_tri = sz_tri,
+        mu_z = mu_z,
+        d_tri = 0.0,
+        d_tri_dot = 0.0,
+        gamma_lag = gam)
+    st
+
+// @function Allocate a diagonal packed symmetric matrix from a diagonal values array.
+//           Off-diagonal entries are zero.
+// @param diag_vals  Array of n diagonal values [n]
+// @param n          Matrix dimension
+// @returns          New packed symmetric array [n*(n+1)/2]
+export f_tri_diag(array<float> diag_vals, int n) =>
+    array<float> tri = f_tri_new(n)
+    for i = 0 to n - 1
+        f_tri_set(tri, i, i, n, array.get(diag_vals, i))
+    tri
+
+// @function Rank-1 update: tri += scale * vec * vec^T
+//           Computes the outer product of vec with itself, scales it, and adds to tri.
+//           Used for innovation covariance accumulation in Concept 1.
+// @param tri    Packed symmetric matrix [n*(n+1)/2]  — modified in place
+// @param vec    Vector [n]
+// @param n      Matrix / vector dimension
+// @param scale  Scaling factor (positive for addition, negative for subtraction)
+export f_tri_add_outer_product(array<float> tri, array<float> vec, int n, float scale) =>
+    for i = 0 to n - 1
+        float vi = array.get(vec, i)
+        for j = i to n - 1
+            float vj = array.get(vec, j)
+            int   k  = f_tri_idx(i, j, n)
+            array.set(tri, k, array.get(tri, k) + scale * vi * vj)
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 3 — STATE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Self-healing: scan state vector x and covariance diagonal P_tri for
+//           na or overflow values and reset to defaults.  Generalises the manual
+//           if-na/overflow blocks from paste.txt lines 196-260 and 483-501.
+//           P off-diagonal entries are NOT reset (non-na overflow there is very rare);
+//           add a second pass if needed.
+// @param x        State vector [n]  — modified in place
+// @param P_tri    Packed covariance [n*(n+1)/2]  — modified in place (diagonals only)
+// @param n        State dimension
+// @param defaults Default value array [n]: x[i] is reset to defaults[i] when bad
+export f_state_sanitize(array<float> x, array<float> P_tri, int n, array<float> defaults) =>
+    for i = 0 to n - 1
+        float xi = array.get(x, i)
+        if na(xi) or math.abs(xi) > 1e300
+            array.set(x, i, array.get(defaults, i))
+        // Covariance diagonal must be positive
+        int   k  = f_tri_idx(i, i, n)
+        float pii = array.get(P_tri, k)
+        if na(pii) or pii <= 0.0 or pii > 1e300
+            array.set(P_tri, k, math.max(1e-6, array.get(defaults, i) * 0.01))
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 4 — PREDICTION STEP
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Block-diagonal state prediction: x_pred = F_block * x + Γ_lag coupling.
+//           Slot layout assumed: [0..2 = kinematics | 3..8 = z-scores | 9..10 = absorb |
+//           11..15 = Mahalanobis].  The function uses tc.F_kinem (3×3),
+//           tc.F_zscore (6×6), tc.F_mah (5×5), tc.gamma_matrix (3×5) for the
+//           kinematics←Mahalanobis cross-coupling.  Remaining slots (indices 3-10)
+//           use tc.phi_diag for simple scalar decay.
+//           Row-major storage: F_kinem[row*3+col], F_zscore[row*6+col], etc.
+// @param x   Current state vector [n]
+// @param tc  TransitionConfig with populated blocks
+// @param n   Total state dimension
+// @returns   Predicted state vector x_pred [n]
+export f_predict_block(array<float> x, TransitionConfig tc, int n) =>
+    array<float> xp = array.new<float>(n, 0.0)
+
+    // Block 1: kinematics (slots 0-2), 3×3 F_kinem + Γ_lag from Mahalanobis (slots 11-15)
+    for i = 0 to 2
+        float s = 0.0
+        for j = 0 to 2
+            s += array.get(tc.F_kinem, i * 3 + j) * array.get(x, j)
+        // Γ_lag coupling: 3×5 matrix, Mahalanobis block occupies n-5 to n-1
+        int mah_start = n - 5
+        for j = 0 to 4
+            s += array.get(tc.gamma_matrix, i * 5 + j) * array.get(x, mah_start + j)
+        array.set(xp, i, s)
+
+    // Block 2: z-score dynamics (slots 3-8), 6×6 F_zscore
+    for i = 0 to 5
+        float s = 0.0
+        for j = 0 to 5
+            s += array.get(tc.F_zscore, i * 6 + j) * array.get(x, 3 + j)
+        array.set(xp, 3 + i, s)
+
+    // Block 3: remaining slots (9 to n-6), simple scalar phi decay
+    // These are absorption states or any inserted states between z-scores and Mahalanobis
+    for i = 9 to n - 6
+        float phi_i = array.get(tc.phi_diag, i)
+        array.set(xp, i, phi_i * array.get(x, i))
+
+    // Block 4: Mahalanobis dynamics (last 5 slots), 5×5 F_mah
+    int mah0 = n - 5
+    for i = 0 to 4
+        float s = 0.0
+        for j = 0 to 4
+            s += array.get(tc.F_mah, i * 5 + j) * array.get(x, mah0 + j)
+        array.set(xp, mah0 + i, s)
+
+    xp
+
+export f_predict_identity(array<float> x, array<float> P_tri, array<float> Q_diag, int n) =>
+    for i = 0 to n - 1
+        int k = f_tri_idx(i, i, n)
+        array.set(P_tri, k, array.get(P_tri, k) + array.get(Q_diag, i))
+    x
+
+// @function Diagonal-dominant P prediction fast path.
+//           Computes the diagonal entries of P_pred = F·P·F^T + Q using
+//           the scalar phi factors: P_pred[i,i] = phi_i^2 * P[i,i] + Q[i].
+//           Does NOT compute off-diagonal entries — use f_P_predict_cross for those.
+//           For the kinematics block where P12/P13 cross-covariances matter, the
+//           caller should compute those explicitly with f_P_predict_cross.
+// @param P_tri     Posterior packed covariance [n*(n+1)/2]
+// @param phi_array Per-state decay scalars [n]  (from TransitionConfig.phi_diag)
+// @param Q_diag    Process noise diagonal [n]
+// @param n         State dimension
+// @returns         New array<float> [n] of predicted diagonal P values
+export f_P_predict_diag(array<float> P_tri, array<float> phi_array, array<float> Q_diag, int n) =>
+    array<float> diag_pred = array.new<float>(n, 0.0)
+    for i = 0 to n - 1
+        float phi_i = array.get(phi_array, i)
+        float Pii   = f_tri_get(P_tri, i, i, n)
+        float Qi    = array.get(Q_diag, i)
+        array.set(diag_pred, i, phi_i * phi_i * Pii + Qi)
+    diag_pred
+
+// @function Predict a single cross-covariance element.
+//           P_pred[i,j] = phi_i * phi_j * P[i,j]
+//           Call this for every tracked cross-covariance pair after f_P_predict_diag.
+// @param P_ij_prev  Current posterior P[i,j]
+// @param phi_i      Decay for state i
+// @param phi_j      Decay for state j
+// @returns          Predicted P_pred[i,j]
+export f_P_predict_cross(float P_ij_prev, float phi_i, float phi_j) =>
+    phi_i * phi_j * P_ij_prev
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 5 — KALMAN UPDATE (SEQUENTIAL SCALAR MEASUREMENT)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Single scalar measurement update (Joseph form for numerics).
+//           Implements the standard Kalman update for one scalar observation z_k
+//           with observation vector H_row (length n, typically one-hot).
+//           Updates x and P_tri in place.  Returns [innovation, S] for diagnostics.
+//
+//           Sequential processing: calling this function once per measurement is
+//           equivalent to a batch update but avoids allocating an m×n H matrix.
+//           This is the generalised form of all z1/z3/z4/.../z10 updates in paste.txt.
+//
+// @param x      State vector [n]        — modified in place
+// @param P_tri  Packed covariance [n*(n+1)/2] — modified in place
+// @param z      Scalar measurement value
+// @param H_row  Observation row vector [n] — which states are observed
+// @param R      Scalar measurement noise variance (positive)
+// @param n      State dimension
+// @returns      [innovation, S]  where innovation = z - H·x,  S = H·P·H^T + R
+export f_sequential_update(array<float> x, array<float> P_tri, float z, array<float> H_row, float R, int n) =>
+    // Innovation: ν = z - H·x
+    float Hx = 0.0
+    for j = 0 to n - 1
+        Hx += array.get(H_row, j) * array.get(x, j)
+    float innov = z - Hx
+
+    // Innovation covariance: S = H·P·H^T + R  (scalar, since H is a row vector)
+    float S = R
+    for i = 0 to n - 1
+        float hi = array.get(H_row, i)
+        if hi != 0.0
+            for j = 0 to n - 1
+                float hj = array.get(H_row, j)
+                if hj != 0.0
+                    S += hi * f_tri_get(P_tri, i, j, n) * hj
+    S := math.max(1e-10, S)
+
+    // Kalman gain vector: K = P·H^T / S  (n×1 vector)
+    array<float> K_vec = array.new<float>(n, 0.0)
+    for i = 0 to n - 1
+        float PHi = 0.0
+        for j = 0 to n - 1
+            PHi += f_tri_get(P_tri, i, j, n) * array.get(H_row, j)
+        array.set(K_vec, i, PHi / S)
+
+    // State update: x += K * ν
+    for i = 0 to n - 1
+        array.set(x, i, array.get(x, i) + array.get(K_vec, i) * innov)
+
+    // Covariance update: P = (I - K·H)·P·(I - K·H)^T + K·R·K^T  (Joseph form)
+    // Compute (I - K·H): call it A_mat, stored implicitly as A[i,j] = delta_ij - K[i]*H[j]
+    // P_new[i,j] = Σ_k Σ_l A[i,k] * P[k,l] * A[j,l]  + K[i]*R*K[j]
+    // Efficient: exploit that only K[i]*H[j] perturbs identity
+    // P_new[i,j] = P[i,j] - K[i]*(H·P)[j] - (P·H^T)[i]*K[j] + K[i]*S*K[j]
+    //            = P[i,j] - K[i]*S*H_row_dot_P_row_j - K[j]*S*H_row_dot_P_row_i + K[i]*S*K[j]
+    // Simplified (for packed storage, only update upper triangle):
+    array<float> PH = array.new<float>(n, 0.0)   // P·H^T
+    for i = 0 to n - 1
+        float val = 0.0
+        for j = 0 to n - 1
+            val += f_tri_get(P_tri, i, j, n) * array.get(H_row, j)
+        array.set(PH, i, val)
+
+    for i = 0 to n - 1
+        float Ki  = array.get(K_vec, i)
+        float PHi = array.get(PH, i)
+        for j = i to n - 1
+            float Kj   = array.get(K_vec, j)
+            float PHj  = array.get(PH, j)
+            int   k    = f_tri_idx(i, j, n)
+            float Pij  = array.get(P_tri, k)
+            // Joseph form diagonal term adds K[i]*R*K[j]
+            float Pij_new = Pij - Ki * PHj - Kj * PHi + Ki * S * Kj
+            // Floor diagonal to prevent negative definite collapse
+            float Pij_out = i == j ? math.max(1e-10, Pij_new) : Pij_new
+            array.set(P_tri, k, Pij_out)
+
+    [innov, S]
+
+export f_sequential_update_metric(array<float> x, array<float> P_tri, float z, array<float> H_row, float R, int n, bool use_lorentzian, float bandwidth, float max_r_multiplier) =>
+    float Hx = 0.0
+    for j = 0 to n - 1
+        Hx += array.get(H_row, j) * array.get(x, j)
+    float innovation = z - Hx
+    float innovation_variance = math.max(R, 1e-10)
+    for i = 0 to n - 1
+        float hi = array.get(H_row, i)
+        if hi != 0.0
+            for j = 0 to n - 1
+                float hj = array.get(H_row, j)
+                if hj != 0.0
+                    innovation_variance += hi * f_tri_get(P_tri, i, j, n) * hj
+    float normalized = math.abs(innovation) / math.sqrt(math.max(innovation_variance, 1e-10))
+    float trust = use_lorentzian ? math.exp(-math.log(1.0 + normalized) / math.max(bandwidth, 1e-6)) : 1.0
+    float r_cap = math.max(max_r_multiplier, 1.0)
+    float r_multiplier = math.min(r_cap, 1.0 / math.max(trust, 1.0 / r_cap))
+    f_sequential_update(x, P_tri, z, H_row, math.max(R, 1e-10) * r_multiplier, n)
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 6 — MAHALANOBIS AND NIS (CONCEPT 2)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Compute squared 3-D Mahalanobis distance with Ledoit-Wolf shrinkage.
+//           Uses analytic 3×3 inverse (Cramer's rule) — zero allocations, ~30 FLOPs.
+//           Falls back to diagonal Mahalanobis if determinant is near-singular.
+// @param z          Current 3-D feature vector [3]  e.g. [z_OI, z_FR, z_dVol]
+// @param mu         Rolling centroid vector [3]
+// @param sigma_tri  Packed 3×3 feature covariance Σ_z [6]
+// @param shrinkage  Ledoit-Wolf intensity: 0.0 = sample Σ, 1.0 = scaled identity
+// @returns          Squared Mahalanobis distance d²(z, μ | Σ)
+export f_mahalanobis_3d(array<float> z, array<float> mu, array<float> sigma_tri, float shrinkage) =>
+    // Deviation vector
+    float d0 = array.get(z, 0) - array.get(mu, 0)
+    float d1 = array.get(z, 1) - array.get(mu, 1)
+    float d2 = array.get(z, 2) - array.get(mu, 2)
+
+    // Extract raw covariance elements
+    float s00 = f_tri_get(sigma_tri, 0, 0, 3)
+    float s11 = f_tri_get(sigma_tri, 1, 1, 3)
+    float s22 = f_tri_get(sigma_tri, 2, 2, 3)
+    float s01 = f_tri_get(sigma_tri, 0, 1, 3)
+    float s02 = f_tri_get(sigma_tri, 0, 2, 3)
+    float s12 = f_tri_get(sigma_tri, 1, 2, 3)
+
+    // Ledoit-Wolf shrinkage toward scaled identity: Σ_shrunk = (1-ρ)Σ + ρ·(tr/3)·I
+    float trace_avg = (s00 + s11 + s22) / 3.0
+    float rho       = math.max(0.0, math.min(1.0, shrinkage))
+    float a00 = (1.0 - rho) * s00 + rho * trace_avg
+    float a11 = (1.0 - rho) * s11 + rho * trace_avg
+    float a22 = (1.0 - rho) * s22 + rho * trace_avg
+    float a01 = (1.0 - rho) * s01
+    float a02 = (1.0 - rho) * s02
+    float a12 = (1.0 - rho) * s12
+
+    // 3×3 determinant via cofactor expansion
+    float det = a00 * (a11 * a22 - a12 * a12) -
+         a01 * (a01 * a22 - a12 * a02) +
+         a02 * (a01 * a12 - a11 * a02)
+
+    float result = 0.0
+    if math.abs(det) < 1e-12
+        // Near-singular: diagonal fallback
+        result := d0 * d0 / math.max(a00, 1e-10) +
+             d1 * d1 / math.max(a11, 1e-10) +
+             d2 * d2 / math.max(a22, 1e-10)
+    else
+        float inv_det = 1.0 / det
+        // Inverse via cofactor matrix (symmetric)
+        float i00 = (a11 * a22 - a12 * a12) * inv_det
+        float i11 = (a00 * a22 - a02 * a02) * inv_det
+        float i22 = (a00 * a11 - a01 * a01) * inv_det
+        float i01 = (a02 * a12 - a01 * a22) * inv_det
+        float i02 = (a01 * a12 - a02 * a11) * inv_det
+        float i12 = (a01 * a02 - a00 * a12) * inv_det
+        // d^T · Σ^{-1} · d
+        result := d0 * (i00 * d0 + i01 * d1 + i02 * d2) +
+             d1 * (i01 * d0 + i11 * d1 + i12 * d2) +
+             d2 * (i02 * d0 + i12 * d1 + i22 * d2)
+    result
+
+// @function Normalized Innovation Squared (NIS) test statistic.
+//           NIS = ν² / S.  Under correct model assumptions, NIS ~ χ²(dof).
+//           Values consistently above dof indicate Q or R underestimation.
+// @param innovation  Scalar innovation ν = z - H·x_pred
+// @param S           Innovation variance S = H·P·H^T + R  (must be > 0)
+// @param dof         Degrees of freedom (number of simultaneous measurements)
+// @returns           NIS statistic normalized by dof (values near 1.0 = correct model)
+export f_nis_test(float innovation, float S, int dof) =>
+    float safe_S = math.max(1e-12, S)
+    float safe_dof = math.max(1.0, float(dof))
+    (innovation * innovation / safe_S) / safe_dof
+
+// @function Concept 2 gain modulation.  Returns a gain multiplier > 1.0 when the
+//           trivariate Mahalanobis distance exceeds the chi-squared threshold,
+//           amplifying the Kalman gain on price-kinematic states to react faster
+//           during regime divergence events.
+// @param d_tri       Current Mahalanobis distance (not squared)
+// @param d_tri_dot   Rate of change of d_tri (positive = diverging)
+// @param chi2_thresh Chi-squared threshold (e.g. sqrt(7.815) ≈ 2.795 for distance)
+// @param gain_base   Baseline gain multiplier when not triggered (typically 1.0)
+// @returns           Gain multiplier >= gain_base
+export f_gating_gain_mod(float d_tri, float d_tri_dot, float chi2_thresh, float gain_base) =>
+    // Soft activation: exponential onset above threshold
+    float excess    = math.max(0.0, d_tri - chi2_thresh)
+    float dot_boost = math.max(0.0, d_tri_dot) * 0.1    // velocity of divergence adds urgency
+    float amp       = 1.0 + (excess + dot_boost) / math.max(chi2_thresh, 1e-6)
+    math.max(gain_base, amp)
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 7 — ADAPTIVE NOISE ESTIMATION (CONCEPT 1)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Scalar adaptive process noise Q estimation from an innovation window.
+//           Implements the windowed MLE: Q̂ = (K/N) × Σ ν_i²
+//           The caller maintains a circular buffer (innov_window) and updates it
+//           each bar before calling this function.
+// @param innov_hist  Circular buffer of recent scalar innovations [window_depth]
+// @param window      Window length N (must be >= 1)
+// @param K           Kalman gain scalar for this state (K = P_pred / S)
+// @param min_Q       Minimum Q floor
+// @param max_Q       Maximum Q cap
+// @returns           Updated scalar Q estimate
+export f_adaptive_Q_scalar(array<float> innov_hist, int window, float K, float min_Q, float max_Q) =>
+    int   sz      = math.min(array.size(innov_hist), math.max(1, window))
+    int   n_hist  = array.size(innov_hist)
+    float sum_sq  = 0.0
+    // Sum from most recent sz entries
+    for k = 0 to sz - 1
+        float v = array.get(innov_hist, n_hist - 1 - k)
+        sum_sq += v * v
+    float q_hat = (K * K * sum_sq) / float(sz)
+    math.max(min_Q, math.min(max_Q, q_hat))
+
+// @function Scalar adaptive measurement noise R via innovation z-score ratchet.
+//           Generalises lines 696-701 of paste.txt: if |ν/√S| > high_thresh, R grows;
+//           if |ν/√S| < low_thresh, R contracts toward floor.
+// @param R_current   Current adaptive R value
+// @param innov_z     Innovation z-score: |ν| / sqrt(S)
+// @param R_base      Base (minimum) R value
+// @param floor_mult  Floor multiplier: R cannot fall below R_base * floor_mult
+// @returns           Updated R_current
+export f_adaptive_R_scalar(float R_current, float innov_z, float R_base, float floor_mult) =>
+    float R_out = R_current
+    if innov_z > 2.5
+        R_out := math.min(R_base * 5.0, R_current * 1.1)
+    else if innov_z < 0.5
+        R_out := math.max(R_base * floor_mult, R_current * 0.99)
+    R_out
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 8 — LAG COUPLING ESTIMATION (CONCEPT 3)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Online Γ_lag element update via recursive least-squares (scalar 1-D
+//           Kalman β-tracker).  Pattern from CausalityLib.f_kalman_hedge_ratio:
+//           y = gamma * x + ε.  Updates gamma in the direction of the current
+//           residual, scaled by the learning rate alpha.
+// @param gamma      Current coupling coefficient estimate
+// @param x_cause    Current value of the cause variable (divergence state)
+// @param x_effect   Current value of the effect variable (price kinematic state)
+// @param alpha      Learning rate (EMA decay, e.g. 0.01 = ~100 bar memory)
+// @param min_val    Minimum allowed gamma (clamp)
+// @param max_val    Maximum allowed gamma (clamp)
+// @returns          Updated gamma estimate
+export f_gamma_lag_update(float gamma, float x_cause, float x_effect, float alpha, float min_val, float max_val) =>
+    float pred   = gamma * x_cause
+    float resid  = x_effect - pred
+    float g_new  = gamma + alpha * x_cause * resid
+    math.max(min_val, math.min(max_val, g_new))
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 8B — TRAJECTORY STORE (CONCEPT 3 MULTI-SCALE MEMORY)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Initialise a TrajectoryStore with three zero-filled matrices.
+// @param depth   Number of snapshot slots D (circular row depth)
+// @param n_feat  Feature dimension per snapshot
+// @returns       Initialised TrajectoryStore
+export f_traj_init(int depth, int n_feat) =>
+    TrajectoryStore.new(
+        traj_3  = matrix.new<float>(depth, n_feat, 0.0),
+        traj_5  = matrix.new<float>(depth, n_feat, 0.0),
+        traj_7  = matrix.new<float>(depth, n_feat, 0.0),
+        ptr_3   = 0,
+        ptr_5   = 0,
+        ptr_7   = 0,
+        depth   = depth,
+        n_feat  = n_feat)
+
+// @function Write a feature snapshot into the appropriate circular buffer(s) based
+//           on bar_idx modulo.  Writes at Δ=3, Δ=5, and Δ=7 intervals.
+// @param ts        TrajectoryStore — modified in place
+// @param features  Current feature vector [n_feat]
+// @param bar_idx   Current bar_index (for modulo gating)
+export f_traj_update(TrajectoryStore ts, array<float> features, int bar_idx) =>
+    if bar_idx % 3 == 0
+        for col = 0 to ts.n_feat - 1
+            matrix.set(ts.traj_3, ts.ptr_3, col, array.get(features, col))
+        ts.ptr_3 := (ts.ptr_3 + 1) % ts.depth
+    if bar_idx % 5 == 0
+        for col = 0 to ts.n_feat - 1
+            matrix.set(ts.traj_5, ts.ptr_5, col, array.get(features, col))
+        ts.ptr_5 := (ts.ptr_5 + 1) % ts.depth
+    if bar_idx % 7 == 0
+        for col = 0 to ts.n_feat - 1
+            matrix.set(ts.traj_7, ts.ptr_7, col, array.get(features, col))
+        ts.ptr_7 := (ts.ptr_7 + 1) % ts.depth
+
+// @function Compute Pearson cross-correlation between two trajectory columns at
+//           a selected skip distance Δ.  col_cause leads col_effect by one row
+//           (one snapshot slot = Δ bars of lag in real time).
+//           Used to calibrate Γ_lag online — the Δ that maximises this correlation
+//           is the empirical lag transfer horizon.
+// @param ts          TrajectoryStore (read-only)
+// @param col_cause   Column index of the cause variable
+// @param col_effect  Column index of the effect variable
+// @param delta_sel   Skip distance selector: must be 3, 5, or 7
+// @returns           Pearson correlation coefficient in [-1, 1]
+export f_traj_xcorr(TrajectoryStore ts, int col_cause, int col_effect, int delta_sel) =>
+    matrix<float> traj = delta_sel == 3 ? ts.traj_3 : (delta_sel == 5 ? ts.traj_5 : ts.traj_7)
+    int ptr  = delta_sel == 3 ? ts.ptr_3  : (delta_sel == 5 ? ts.ptr_5  : ts.ptr_7)
+    int D    = ts.depth
+    int n_used = D - 1   // one row reserved for the lag shift
+
+    // Accumulate sums for Pearson correlation (shifted by 1 row: cause[t-1], effect[t])
+    float sum_x  = 0.0
+    float sum_y  = 0.0
+    float sum_xx = 0.0
+    float sum_yy = 0.0
+    float sum_xy = 0.0
+    for k = 0 to n_used - 1
+        // Circular read: cause at row (ptr - 2 - k) mod D, effect at (ptr - 1 - k) mod D
+        int row_cause  = (ptr - 2 - k + D * 4) % D
+        int row_effect = (ptr - 1 - k + D * 4) % D
+        float xv = matrix.get(traj, row_cause,  col_cause)
+        float yv = matrix.get(traj, row_effect, col_effect)
+        sum_x  += xv
+        sum_y  += yv
+        sum_xx += xv * xv
+        sum_yy += yv * yv
+        sum_xy += xv * yv
+    float n_f   = float(n_used)
+    float mean_x = sum_x / n_f
+    float mean_y = sum_y / n_f
+    float var_x  = sum_xx / n_f - mean_x * mean_x
+    float var_y  = sum_yy / n_f - mean_y * mean_y
+    float cov_xy = sum_xy / n_f - mean_x * mean_y
+    float denom  = math.sqrt(math.max(0.0, var_x * var_y))
+    denom > 1e-12 ? cov_xy / denom : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 8C — CONFIDENCE BANDS (KALMAN COVARIANCE-DERIVED)
+// ═══════════════════════════════════════════════════════════════════════════════════
+// The Kalman filter's covariance matrix P encodes the posterior uncertainty of every
+// state.  The effective "spread variance" — which determines band width — is a
+// function of the joint uncertainty across price, basket, and spread states.
+// This section provides:
+// 1) f_covariance_band_width: extract band half-width from P, generalising paste.txt L751-756
+// 2) f_confidence_envelope: full inner/outer band set with trend-adaptive asymmetry
+// 3) f_k_step_cov_propagation: propagate P forward k steps for projection confidence cone
+
+// @function Compute raw Kalman band half-width from covariance cross-terms.
+//           Generalises the formula from paste.txt lines 751-756:
+//             eff_spread_var = P[price,price] + P[basket,basket] + P[spread,spread]
+//                            - 2*P[price,basket] + 2*P[price,spread] - 2*P[basket,spread]
+//             uncertainty    = sqrt(eff_spread_var)
+//             band_width     = atr_base * mult * (1 + uncertainty * scale)
+//
+//           For the 14/16-state engine, the slot indices are parameters (not hardcoded 0,3,4).
+//           The ATR base is computed externally (EWMA TR).
+//
+// @param P_tri       Packed posterior covariance [n*(n+1)/2]
+// @param n           State dimension
+// @param slot_price  Index of price return state (typically 0)
+// @param slot_basket Index of basket return state (typically 3)
+// @param slot_spread Index of spread state (typically 4)
+// @param atr_base    ATR-derived base band width (e.g. EWMA of TR)
+// @param mult        Band multiplier (inner or outer)
+// @param unc_scale   Uncertainty scaling factor (default 5.0 in paste.txt)
+// @returns           Raw band half-width (unsigned, apply as ± from center)
+export f_covariance_band_width(array<float> P_tri, int n, int slot_price, int slot_basket, int slot_spread, float atr_base, float mult, float unc_scale) =>
+    float Ppp = f_tri_get(P_tri, slot_price,  slot_price,  n)
+    float Pbb = f_tri_get(P_tri, slot_basket, slot_basket, n)
+    float Pss = f_tri_get(P_tri, slot_spread, slot_spread, n)
+    float Ppb = f_tri_get(P_tri, slot_price,  slot_basket, n)
+    float Pps = f_tri_get(P_tri, slot_price,  slot_spread, n)
+    float Pbs = f_tri_get(P_tri, slot_basket, slot_spread, n)
+    // Effective spread variance = Var(price - basket + spread)
+    float eff_var = math.max(1e-8, Ppp + Pbb + Pss - 2.0 * Ppb + 2.0 * Pps - 2.0 * Pbs)
+    float uncertainty = math.sqrt(eff_var)
+    float safe_atr = math.max(1e-10, atr_base)
+    safe_atr * mult * (1.0 + uncertainty * unc_scale)
+
+// @function Compute complete inner/outer confidence envelope with trend-adaptive asymmetry.
+//           Combines f_covariance_band_width for inner/outer with f_trend_adaptive_bands
+//           for asymmetric tightening.  Returns all 8 band levels: 4 from Kalman-center,
+//           4 from EMA-center (matching paste.txt's dual-center approach).
+//
+// @param P_tri          Packed posterior covariance [n*(n+1)/2]
+// @param n              State dimension
+// @param slot_price     Price return state slot
+// @param slot_basket    Basket return state slot
+// @param slot_spread    Spread state slot
+// @param atr_base       ATR-derived base band width
+// @param mult_inner     Inner band multiplier (e.g. 0.8)
+// @param mult_outer     Outer band multiplier (e.g. 1.2)
+// @param unc_scale      Uncertainty scale (e.g. 5.0)
+// @param kalman_center  Kalman median price
+// @param ema_center     EMA band center price
+// @param velocity       Smoothed velocity state (x2) for trend detection
+// @param trend_strength Asymmetry strength [0..1]
+// @param use_trend      Whether to apply trend-adaptive tightening
+// @returns              [ui_kal, li_kal, uo_kal, lo_kal, ui_ema, li_ema, uo_ema, lo_ema]
+//                       (upper_inner, lower_inner, upper_outer, lower_outer) × 2 centers
+export f_confidence_envelope(array<float> P_tri, int n, int slot_price, int slot_basket, int slot_spread, float atr_base, float mult_inner, float mult_outer, float unc_scale, float kalman_center, float ema_center, float velocity, float trend_strength, bool use_trend) =>
+    float bw_inner = f_covariance_band_width(P_tri, n, slot_price, slot_basket, slot_spread, atr_base, mult_inner, unc_scale)
+    float bw_outer = f_covariance_band_width(P_tri, n, slot_price, slot_basket, slot_spread, atr_base, mult_outer, unc_scale)
+
+    // Trend-adaptive tightening factors
+    float trend_vel     = math.max(-1.0, math.min(1.0, velocity * 1000.0))
+    float tighten_upper = use_trend and trend_vel < 0.0 ? (1.0 - trend_strength * math.abs(trend_vel)) : 1.0
+    float tighten_lower = use_trend and trend_vel > 0.0 ? (1.0 - trend_strength * math.abs(trend_vel)) : 1.0
+
+    // Kalman-centered bands
+    float ui_kal = kalman_center + bw_inner * tighten_upper
+    float li_kal = kalman_center - bw_inner * tighten_lower
+    float uo_kal = kalman_center + bw_outer * tighten_upper
+    float lo_kal = kalman_center - bw_outer * tighten_lower
+
+    // EMA-centered bands
+    float ui_ema = ema_center + bw_inner * tighten_upper
+    float li_ema = ema_center - bw_inner * tighten_lower
+    float uo_ema = ema_center + bw_outer * tighten_upper
+    float lo_ema = ema_center - bw_outer * tighten_lower
+
+    [ui_kal, li_kal, uo_kal, lo_kal, ui_ema, li_ema, uo_ema, lo_ema]
+
+// @function Propagate covariance diagonal k steps ahead for projection confidence cone.
+//           Computes P_{t+k|t}[i,i] by iterating the scalar approximation:
+//             P_{t+s|t}[i,i] = phi_i² × P_{t+s-1|t}[i,i] + Q_i
+//           The square root of each diagonal entry gives the 1-σ prediction interval
+//           for that state at horizon s.  The price-slot standard deviation, converted
+//           to price units, defines the confidence cone width at each step.
+//
+// @param P_tri       Packed posterior covariance at time t [n*(n+1)/2]
+// @param phi_array   Per-state decay scalars [n]
+// @param Q_diag      Process noise diagonal [n]
+// @param n           State dimension
+// @param slot_price  Price return state slot (for extracting the cone width)
+// @param k_steps     Number of forward steps to propagate
+// @param base_price  Current base price (for converting return-space σ to price-space)
+// @returns           Array of k_steps floats: 1-σ confidence half-width in price units
+//                    at each step ahead [1..k_steps]
+export f_k_step_cov_propagation(array<float> P_tri, array<float> phi_array, array<float> Q_diag, int n, int slot_price, int k_steps, float base_price) =>
+    array<float> cone_widths = array.new<float>(k_steps, 0.0)
+    // Start from current posterior variance at price slot
+    float P_price = f_tri_get(P_tri, slot_price, slot_price, n)
+    float phi_p   = array.get(phi_array, slot_price)
+    float Q_p     = array.get(Q_diag, slot_price)
+
+    float P_step = P_price
+    for s = 0 to k_steps - 1
+        // Propagate one step: P_{s+1} = phi² × P_s + Q
+        P_step := phi_p * phi_p * P_step + Q_p
+        // 1-σ half-width in price units
+        float sigma_ret = math.sqrt(math.max(0.0, P_step))
+        float sigma_price = sigma_ret * math.abs(base_price)
+        array.set(cone_widths, s, sigma_price)
+
+    cone_widths
+
+// @function Compute the z_spread (normalized spread) from covariance.
+//           Extracted from paste.txt lines 867-868:
+//             spread_std = sqrt(max(0.0001, P[spread,spread]))
+//             z_spread = x[spread] / spread_std
+//           Used for execution score, extreme detection, and divergence display.
+// @param x_spread  Current spread state value
+// @param P_tri     Packed covariance
+// @param n         State dimension
+// @param slot_spread  Spread state slot index
+// @returns         z_spread (normalized)
+export f_z_spread(float x_spread, array<float> P_tri, int n, int slot_spread) =>
+    float spread_var = f_tri_get(P_tri, slot_spread, slot_spread, n)
+    float spread_std = math.sqrt(math.max(1e-8, spread_var))
+    spread_std > 1e-8 ? x_spread / spread_std : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 9 — DERIVED OUTPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Kalman-modified EMA (KMEMA) — adaptive EMA whose effective learning rate
+//           is modulated by three factors: TE confidence, velocity, and innovation shock.
+//           Extracted from paste.txt lines 722-746 with generalised parameter names.
+// @param prev_kmema   Previous KMEMA value
+// @param price        Current price to track (plot_price in paste.txt)
+// @param alpha_base   Baseline EMA alpha = 2/(len+1)
+// @param shock        Innovation shock intensity [0..1]  (from NIS or innovation z-score)
+// @param conf         TE confidence x7 [0..1]
+// @param vel_norm     Normalised velocity magnitude [0..1]  (|x2| scaled to [0,1])
+// @param k_shock      Shock strength multiplier (kmema_k_shock)
+// @param k_conf       Confidence strength multiplier (kmema_k_conf)
+// @param k_vel        Velocity strength multiplier (kmema_k_vel)
+// @param regime       "Shock-Reactive" or "Noise-Filtering"
+// @returns            Updated KMEMA value
+export f_kmema(float prev_kmema, float price, float alpha_base, float shock, float conf, float vel_norm, float k_shock, float k_conf, float k_vel, string regime) =>
+    // Confidence boost: higher TE → faster tracking
+    float conf_boost = math.max(0.2, 1.0 + k_conf * (conf - 0.5))
+    // Velocity boost: high velocity → faster tracking
+    float vel_boost  = 1.0 + k_vel * vel_norm
+    // Shock multiplier: Shock-Reactive amplifies on shock, Noise-Filtering suppresses
+    float shock_mult = regime == "Shock-Reactive" ? (1.0 + k_shock * shock) : (1.0 / (1.0 + k_shock * shock))
+    // Effective alpha
+    float alpha_eff  = math.max(0.001, math.min(1.0, alpha_base * conf_boost * vel_boost * shock_mult))
+    float safe_price = nz(price, nz(prev_kmema, price))
+    float safe_prev  = nz(prev_kmema, safe_price)
+    safe_prev + alpha_eff * (safe_price - safe_prev)
+
+// @function Trend-adaptive asymmetric bands.  Tightens the counter-trend side:
+//           upper band in downtrend, lower band in uptrend.  Extracted from paste.txt
+//           lines 761-777 with generalised inputs.
+// @param center       Band center price (kalman_median or EMA)
+// @param band_width   Raw band half-width (e.g. ATR × multiplier × uncertainty_scale)
+// @param velocity     Smoothed velocity state x2 (or trend proxy in [-1,1] already)
+// @param strength     Asymmetry strength [0..1]; 0 = symmetric, 1 = max tightening
+// @returns            [upper, lower] band levels as a tuple of 4: [upper, lower, upper_tight, lower_tight]
+//                     where upper_tight/lower_tight are the asymmetrically-narrowed sides
+export f_trend_adaptive_bands(float center, float band_width, float velocity, float strength) =>
+    // Normalise velocity to [-1, 1] for trend direction
+    float trend_vel     = math.max(-1.0, math.min(1.0, velocity * 1000.0))
+    // Tighten upper in downtrend (trend_vel < 0), lower in uptrend (trend_vel > 0)
+    float tighten_upper = trend_vel < 0.0 ? (1.0 - strength * math.abs(trend_vel)) : 1.0
+    float tighten_lower = trend_vel > 0.0 ? (1.0 - strength * math.abs(trend_vel)) : 1.0
+    float upper = center + band_width * tighten_upper
+    float lower = center - band_width * tighten_lower
+    [upper, lower, tighten_upper, tighten_lower]
+
+// @function Execution score: TE confidence × spread direction.
+//           A positive score indicates upside potential with TE confirmation.
+//           Extracted from paste.txt line 870-872.
+// @param x7_te_conf  TE confidence state [0..1]
+// @param x4_spread   Spread state (signed float; positive = price > basket)
+// @returns           Execution score in approximately [-1, 1]
+export f_execution_score(float x7_te_conf, float x4_spread) =>
+    float spread_sign = x4_spread > 0.0001 ? 1.0 : x4_spread < -0.0001 ? -1.0 : 0.0
+    x7_te_conf * spread_sign
+
+// @function Multi-step price projection using trend-smoothed state components.
+//           Projects `steps` bars ahead by iterating the return → velocity → momentum
+//           dynamics.  Extracted and generalised from paste.txt lines 926-984.
+//           Uses beta_mom, beta_delta, beta_abs learned from f_ols_beta_update.
+// @param x          State vector [n] — read-only; slots 0=price_ret, 1=vel, 6=mom
+// @param phi_array  Per-state decay scalars [n]
+// @param beta_mom   OLS coefficient: momentum contribution to return
+// @param beta_delta OLS coefficient: delta (order flow) contribution to return
+// @param beta_abs   OLS coefficient: absorption contribution to return
+// @param steps      Number of forward projection steps
+// @returns          Projected price return after `steps` iterations (as a multiplier
+//                   relative to the base price — caller applies: price * (1 + result))
+export f_projection_step(array<float> x, array<float> phi_array, float beta_mom, float beta_delta, float beta_abs, int steps) =>
+    // Extract and trend-smooth the relevant states (alpha=0.1 → ~19 bar lag)
+    float alpha_trend = 0.1
+    float tx1 = nz(array.get(x, 0), 0.0)   // price return
+    float tx2 = nz(array.get(x, 1), 0.0)   // velocity
+    // Momentum at slot 6, delta at slot 8, absorption at slots 9-10
+    float tx6  = array.size(x) > 6  ? array.get(x,  6) : 0.0
+    float tx8  = array.size(x) > 8  ? array.get(x,  8) : 0.0
+    float tx9  = array.size(x) > 9  ? array.get(x,  9) : 0.0
+    float tx10 = array.size(x) > 10 ? array.get(x, 10) : 0.0
+
+    float phi_vel = array.get(phi_array, 1)
+    float phi_mom = array.size(phi_array) > 6 ? array.get(phi_array, 6) : 0.9
+    float phi_abs = array.size(phi_array) > 9 ? array.get(phi_array, 9) : 0.85
+
+    float cum_return = 0.0  // Accumulated return over projection horizon
+
+    for _k = 1 to steps
+        float abs_spread = tx10 - tx9
+        float tx1_next = tx1 + tx2 + beta_mom * tx6 + beta_delta * tx8 + beta_abs * abs_spread
+        float tx2_next = phi_vel * tx2
+        float tx6_next = phi_mom * tx6
+        float tx8_next = phi_abs * tx8
+        float tx9_next = phi_abs * tx9
+        float tx10_next = phi_abs * tx10
+        cum_return += nz(tx1_next, 0.0)
+        tx1  := tx1_next
+        tx2  := tx2_next
+        tx6  := tx6_next
+        tx8  := tx8_next
+        tx9  := tx9_next
+        tx10 := tx10_next
+
+    nz(cum_return, 0.0)
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 10 — ONLINE OLS BETA ESTIMATION
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Online OLS beta update (exponential forgetting).
+//           Implements the EMA-based recursive least squares pattern used at
+//           paste.txt lines 530-546 for beta_mom, beta_delta, beta_abs.
+//           Updates var_x and cov_xy in place and returns the new beta.
+//           Pattern: var_x  ← (1-α)·var_x  + α·x_val²
+//                    cov_xy ← (1-α)·cov_xy + α·x_val·resid
+//                    beta   ← clamp(cov_xy / var_x, -clamp, clamp)
+// @param var_x    Running variance of x (EWMA of x²)   — modified in place
+// @param cov_xy   Running covariance of (x, resid)     — modified in place
+// @param x_val    Current x factor value
+// @param resid    Current residual (y - other_terms)
+// @param alpha_ols  Forgetting factor (e.g. 0.02 ≈ 50-bar memory)
+// @param clamp    Symmetric clamp on beta output (e.g. 5.0)
+// @returns        [updated_var_x, updated_cov_xy, new_beta]
+export f_ols_beta_update(float var_x, float cov_xy, float x_val, float resid, float alpha_ols, float clamp) =>
+    float new_var  = (1.0 - alpha_ols) * math.max(1e-10, var_x) + alpha_ols * x_val * x_val
+    float new_cov  = (1.0 - alpha_ols) * cov_xy                 + alpha_ols * x_val * resid
+    float beta_raw = new_cov / math.max(1e-10, new_var)
+    float beta_out = math.max(-clamp, math.min(clamp, beta_raw))
+    [new_var, new_cov, beta_out]
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SECTION 14 — 1D KALMAN FILTER WRAPPER (v4 addition)
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @type Simple 1D Kalman filter for scalar smoothing (ergonomic wrapper over N-dim API)
+export type KalmanState1D
+    float x    // smoothed value
+    float P    // estimate variance
+    float Q    // process noise
+    float R    // measurement noise
+
+// @function Initialize 1D Kalman filter
+// @param P0  Initial estimate variance
+// @param Q   Process noise variance
+// @param R   Measurement noise variance
+// @returns   Initialized KalmanState1D
+export f_kalman1d_init(float P0, float Q, float R) =>
+    KalmanState1D.new(x = 0.0, P = P0, Q = Q, R = R)
+
+// @function Update 1D Kalman filter with new measurement
+// @param s   KalmanState1D to update (mutated in-place)
+// @param z   New measurement
+// @returns   Updated state (same reference as input)
+export method update(KalmanState1D s, float z) =>
+    s.P := s.P + s.Q
+    float K = s.P / (s.P + s.R)
+    s.x := s.x + K * (z - s.x)
+    s.P := (1.0 - K) * s.P
+    s
+export method update_value(KalmanState1D s, float z, float Q, float R) =>
+    float x_pred = s.x
+    float P_pred = s.P + Q
+    float gain = P_pred / (P_pred + R)
+    s.x := x_pred + gain * (nz(z, x_pred) - x_pred)
+    s.P := (1.0 - gain) * P_pred
+    s.Q := Q
+    s.R := R
+    s.x
+
+export f_inverse_covariance3_diag(matrix<float> sigma, array<bool> active_dims, float variance_floor, float determinant_floor) =>
+    int n = math.min(matrix.rows(sigma), matrix.columns(sigma))
+    matrix<float> inverse = matrix.new<float>(n, n, 0.0)
+    if n >= 3
+        float a = math.max(matrix.get(sigma, 0, 0), variance_floor)
+        float d = math.max(matrix.get(sigma, 1, 1), variance_floor)
+        float f = math.max(matrix.get(sigma, 2, 2), variance_floor)
+        float b = matrix.get(sigma, 0, 1)
+        float c = matrix.get(sigma, 0, 2)
+        float e = matrix.get(sigma, 1, 2)
+        float c00 = d * f - e * e
+        float c01 = e * c - b * f
+        float c02 = b * e - d * c
+        float c11 = a * f - c * c
+        float c12 = b * c - a * e
+        float c22 = a * d - b * b
+        float det = a * c00 + b * c01 + c * c02
+        if math.abs(det) > determinant_floor
+            float idet = 1.0 / det
+            matrix.set(inverse, 0, 0, c00 * idet)
+            matrix.set(inverse, 1, 1, c11 * idet)
+            matrix.set(inverse, 2, 2, c22 * idet)
+            matrix.set(inverse, 0, 1, c01 * idet)
+            matrix.set(inverse, 1, 0, c01 * idet)
+            matrix.set(inverse, 0, 2, c02 * idet)
+            matrix.set(inverse, 2, 0, c02 * idet)
+            matrix.set(inverse, 1, 2, c12 * idet)
+            matrix.set(inverse, 2, 1, c12 * idet)
+        else
+            for i = 0 to 2
+                matrix.set(inverse, i, i, 1.0)
+    if n > 3
+        for i = 3 to n - 1
+            bool active = i < array.size(active_dims) ? array.get(active_dims, i) : true
+            matrix.set(inverse, i, i, active ? 1.0 / math.max(matrix.get(sigma, i, i), variance_floor) : 1.0)
+    inverse
+
+export f_sep_pair5(array<float> mu_a, matrix<float> sigma_a, array<float> mu_b, matrix<float> sigma_b, bool use_f4, bool use_f5, float var_floor) =>
+    float mdx = array.get(mu_a, 0) - array.get(mu_b, 0)
+    float mdy = array.get(mu_a, 1) - array.get(mu_b, 1)
+    float mdz = array.get(mu_a, 2) - array.get(mu_b, 2)
+    float mdw = array.get(mu_a, 3) - array.get(mu_b, 3)
+    float mdv = array.get(mu_a, 4) - array.get(mu_b, 4)
+    float v0 = math.max(var_floor, 0.5 * (matrix.get(sigma_a, 0, 0) + matrix.get(sigma_b, 0, 0)))
+    float v1 = math.max(var_floor, 0.5 * (matrix.get(sigma_a, 1, 1) + matrix.get(sigma_b, 1, 1)))
+    float v2 = math.max(var_floor, 0.5 * (matrix.get(sigma_a, 2, 2) + matrix.get(sigma_b, 2, 2)))
+    float v3 = math.max(var_floor, 0.5 * (matrix.get(sigma_a, 3, 3) + matrix.get(sigma_b, 3, 3)))
+    float v4 = math.max(var_floor, 0.5 * (matrix.get(sigma_a, 4, 4) + matrix.get(sigma_b, 4, 4)))
+    math.sqrt(mdx * mdx / v0 + mdy * mdy / v1 + mdz * mdz / v2 + (use_f4 ? mdw * mdw / v3 : 0.0) + (use_f5 ? mdv * mdv / v4 : 0.0))

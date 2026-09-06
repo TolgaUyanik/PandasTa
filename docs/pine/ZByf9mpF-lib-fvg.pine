@@ -1,0 +1,344 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © robbatt
+
+//@version=6
+
+import robbatt/lib_plot_objects/56 as D
+
+// @description further expansion of my object oriented library toolkit. This lib detects Fair Value Gaps and returns them as objects. 
+// Drawing them is a separate step so the lib can be used with securities. It also allows for usage of current/close price to detect fill/invalidation of a gap and to adjust the fill level dynamically. FVGs can be detected while forming and extended indefinitely while they're unfilled.
+library("lib_fvg", overlay = true)
+
+
+// ----------------------
+//#region    HELPERS
+// ----------------------
+
+linestyle(string input_style) =>
+    switch input_style
+        'dashed' => line.style_dashed
+        'dotted' => line.style_dotted
+        => line.style_solid
+
+array_rotate (arr, value, max_len, precondition = true) =>
+    if precondition
+        array.unshift(arr, value)
+        if array.size(arr) > max_len
+            array.pop(arr)
+
+// ----------------------
+//#endregion HELPERS
+// ----------------------
+
+// ----------------------
+//#region      FVGS
+// ----------------------
+export type FVGConfig    
+    D.BoxArgs box_args
+    D.LineArgs line_args
+
+    bool box_show = true
+    bool line_show = true
+    bool keep_filled = true
+    bool extend = true
+
+
+export enum FVGFillMode
+    CLOSE = 'close (confirmed)'
+    HIGHLOW = 'high/low (live)'
+
+export type FVG
+
+    // static FVG
+    int idx
+    int mode
+    float top
+    float btm
+    
+    // static Fill
+    float fill_size
+    float fill_lvl_target
+
+    // dynamic Fill
+    float fill_lvl_current = na
+    float fill_size_current = 0
+    float filled_pc = 0
+    bool filled = false
+    int filled_time = na
+    int filled_idx = na
+    int last_touch_time = na
+    int last_touch_idx = na
+
+    // fill mode
+    FVGFillMode filled_by = FVGFillMode.HIGHLOW
+
+    // plotting
+    D.Box plot = na
+    D.Line plot_fill_lvl = na
+
+
+//@function converts object to json representation
+//@param date_format optional date format for str.format'ing point bar_time coordinates (default: 'dd-MM-y HH:mm')
+export method tostring(FVG this) =>
+    na(this) ? 'null' : '{' + str.format('"idx": {0}, "mode": {1}, "top": {2}, "btm": {3}, "center": {4}, "size": {5}, "fill_size": {6}, "fill_lvl_target": {7}, "fill_lvl_current": {8}, "filled_idx": {9}, "filled": {10}', this.idx, this.mode, this.top, this.btm, math.avg(this.top, this.btm), this.top - this.btm, this.fill_size, this.fill_lvl_target, this.fill_lvl_current, this.filled_idx, this.filled) + '}'
+
+
+//@description will plot the FVG with pine script's builtin box and line objects onto the chart
+export method draw(FVG this, FVGConfig config) =>
+    if na(this) ? false : not na(config)
+        if na(this.plot)
+            if config.box_show
+                this.plot := D.Box.new(chart.point.from_index(this.idx-1, this.top), chart.point.from_index(bar_index, this.btm), '')
+                this.plot.draw(config.box_args)
+
+                if config.line_show
+                    this.plot_fill_lvl := D.Line.new(chart.point.from_index(this.idx-1, this.fill_lvl_target), chart.point.from_index(bar_index, this.fill_lvl_target))
+                    this.plot_fill_lvl.draw(config.line_args)
+
+        else if config.extend
+            // extend all non dynamic plots
+            if config.box_show
+                this.plot.right_bottom.index := bar_index
+                this.plot.plot.set_right(bar_index)                
+                if config.line_show
+                    this.plot_fill_lvl.end.index := bar_index
+                    this.plot_fill_lvl.plot.set_x2(bar_index)
+
+    this
+
+//@description basic detection of an FVG, internally used by detect_fvg.
+//@param mode switch for detection 1 for bullish FVGs, -1 for bearish FVGs
+//@param precondition allows for other confluences to block/enable detection
+//@param filter_insignificant allows to ignore small gaps
+//@param filter_insignificant_atr_factor allows to adjust how small (compared to a 50 period ATR)
+//@param live allows to detect FVGs while the third bar is forming -> will cause repainting
+//@returns a tuple of (bar_index of gap bar, gap top, gap bottom)
+export is_fvg(int mode, bool precondition = true, bool filter_insignificant = true, float filter_insignificant_atr_factor = 0.5, simple int insignificant_atr_len = 50, bool live = false) =>
+    var idx_bar1 = live ? 2 : 3
+    var idx_bar2 = live ? 1 : 2
+    var idx_bar3 = live ? 0 : 1
+    var idx_high = mode == 1 ? idx_bar1 : idx_bar3
+    var idx_low = mode == 1 ? idx_bar3 : idx_bar1
+
+    idx = bar_index - idx_bar2
+    btm = high[idx_high]
+    top = low[idx_low]
+
+    atr = ta.atr(insignificant_atr_len)
+
+    // fake atr while bar_index < insignificant_atr_len and ta.atr() would return na
+    var atr_start_buffer = array.new<float>(0)
+    if bar_index < insignificant_atr_len
+        atr_start_buffer.push(ta.tr)
+        atr := array.avg(atr_start_buffer)
+    else if bar_index == insignificant_atr_len
+        atr_start_buffer := na
+
+    // filter insignificant fvg sizes    
+    if precondition and (top - btm) > (filter_insignificant ? atr * filter_insignificant_atr_factor : 0)
+        [idx, top, btm]
+    else
+        [na,na,na]
+    
+
+//@description instantiation of an FVG
+//@param mode switch for detection 1 for bullish FVGs, -1 for bearish FVGs
+//@param idx the bar_index of the FVG gap bar
+//@param top the top level of the FVG
+//@param btm the bottom level of the FVG
+//@param filled_at_pc the ratio (0-1) that the fill source needs to retrace into the gap to consider it filled/invalidated/ready for removal
+//@param config the plot configuration/styles for the FVG
+//@returns a new FVG object if there was a new FVG, else na
+export create_fvg(int mode, int idx, float top, float btm, float filled_at_pc) =>
+
+    if idx > 0 and top > 0 and btm > 0 and math.abs(mode) == 1 and filled_at_pc >= 0
+
+        size                = math.abs(top - btm)
+        fill_size           = math.round_to_mintick(size * filled_at_pc)
+        fill_lvl_target     = mode == 1 ? top - fill_size : btm + fill_size
+        fill_lvl_current    = mode == 1 ? top : btm
+
+        // return
+        FVG.new(idx, mode, top, btm, fill_size, fill_lvl_target, fill_lvl_current)
+    else
+        na
+
+//@description detection and instantiation of an FVG (combines is_fvg and create_fvg).
+//@param mode switch for detection 1 for bullish FVGs, -1 for bearish FVGs
+//@param precondition allows for other confluences to block/enable detection
+//@param filter_insignificant allows to ignore small gaps
+//@param filter_insignificant_atr_factor allows to adjust how small (compared to a 50 period ATR)
+//@param live allows to detect FVGs while the third bar is forming -> will cause repainting
+//@returns a new FVG object if there was a new FVG, else na
+export detect_fvg(int mode, float filled_at_pc, bool precondition = true, bool filter_insignificant = true, float filter_insignificant_atr_factor = 0.5, simple int insignificant_atr_len = 50, bool live = false) =>
+    [idx, top, btm] = is_fvg(mode, precondition, filter_insignificant, filter_insignificant_atr_factor, insignificant_atr_len, live)
+    create_fvg(mode, idx, top, btm, filled_at_pc)
+
+//@description update of the FVG to detect if it was filled
+//@param fill_src allows for usage of different fill source series, e.g. high for bearish FVGs, low vor bullish FVGs or close for both
+export method update(FVG this, FVGFillMode fill_mode = FVGFillMode.HIGHLOW, float fill_src = na) =>
+    if not na(this)
+        src = not na(fill_src) ? fill_src : fill_mode == FVGFillMode.CLOSE ? close : this.mode == 1 ? low : high 
+
+        if this.mode == 1 ? low < this.top : high > this.btm
+            this.last_touch_time := time
+            this.last_touch_idx  := bar_index
+
+        // not filled, update (fvgs are always drawn as a single extending box)
+        this.fill_lvl_current := this.mode == 1
+         ? math.min(this.top, src) // math.min(this.fill_lvl_current, math.max(this.fill_lvl_target, 
+         : math.max(src, this.btm) // math.max(this.fill_lvl_current, math.min(this.fill_lvl_target, 
+        
+        this.fill_size_current := this.mode == 1
+         ? this.top - this.fill_lvl_current
+         : this.fill_lvl_current - this.btm
+        
+        this.filled_pc := this.fill_size_current / this.fill_size
+
+        // filled, remove
+        this.filled := this.mode == 1
+         ? this.fill_lvl_current <= this.fill_lvl_target
+         : this.fill_lvl_current >= this.fill_lvl_target
+
+        if this.filled and na(this.filled_idx)
+            this.filled_idx := bar_index
+            this.filled_time := time_close
+
+    this
+
+// @description see update() of single FVG for description
+export method update(FVG[] all, FVGFillMode fill_mode = FVGFillMode.HIGHLOW, float fill_src = na) =>
+    for i in all
+        i.update(fill_mode, fill_src)
+    all
+
+//@description removes all FVGs from the array that have 'filled' set to true (done by update)
+//@returns an array of the filled/removed FVGs
+export method remove_filled(FVG[] unfilled_fvgs) =>
+    filled_fvgs = array.new<FVG>()
+    size = unfilled_fvgs.size()
+
+    if size > 0
+        for i = size -1 to 0 // go through reverse, so indexes of untouched elements won't change when removing them on the fly
+            fvg = unfilled_fvgs.get(i)
+            if fvg.filled
+                filled_fvgs.push(unfilled_fvgs.remove(i)) // storing in same (reverse) order to fill delete buffer with oldest fvg first
+                continue
+
+    filled_fvgs
+
+//@description removes the plotted FVG from the chart, the object still exists and can be re-drawn after this until all references to it were removed.
+export method delete(FVG this) =>
+    if not na(this)
+        if not na(this.plot)
+            this.plot.delete()
+        if not na(this.plot_fill_lvl)
+            this.plot_fill_lvl.delete()
+    this
+
+//@description see draw() for single FVG for description
+export method draw(FVG[] fvgs, FVGConfig config) =>
+    for fvg in fvgs
+        fvg.draw(config)
+    fvgs
+
+
+//@description see delete() for single FVG for description. Additionally this function will buffer deleted FVGs before deleting them, so the 'max_keep' latest filled FVGs will remain on the chart.
+//@param max_keep the number of filled, latest FVGs to retain on the chart.
+export method delete_filled_fvgs_buffered(FVG[] filled_fvgs, int max_keep = 0) =>
+    var FVG[] buffer = array.new<FVG>(max_keep)
+
+    for fvg in filled_fvgs // assuming oldest first
+        // buffered delete
+        if max_keep > 0
+            array_rotate(buffer, fvg, max_keep).delete() // buffer overflow deleted immediately
+        else
+            fvg.delete()
+            
+    filled_fvgs
+
+//@description generates Candle objects for the 3 candles forming this FVG
+//@returns a tuple of 3 Candle objects [candle1, candle2, candle3]
+export method get_candles(FVG this) =>
+    if not na(this)
+        bar1 = bar_index - (this.idx - 1)
+        bar2 = bar_index - this.idx
+        bar3 = bar_index - (this.idx + 1)
+
+        candle1 = D.create_candle(time[bar1], time_close[bar1], bar_index[bar1], open[bar1], high[bar1], low[bar1], close[bar1], volume[bar1])
+        candle2 = D.create_candle(time[bar2], time_close[bar2], bar_index[bar2], open[bar2], high[bar2], low[bar2], close[bar2], volume[bar2])
+        candle3 = D.create_candle(time[bar3], time_close[bar3], bar_index[bar3], open[bar3], high[bar3], low[bar3], close[bar3], volume[bar3])
+
+        [candle1, candle2, candle3]
+    else
+        [na, na, na]
+
+
+////////////////////////////////////////////////////////////////////////
+//#region                     DEMO
+////////////////////////////////////////////////////////////////////////
+
+// SETTINGS
+
+var group_fvgs = "Fair Value Gaps"
+var fvg_dir_input                        = input.string  ('Up & Down'          , 'Mode'        , ['Up & Down', 'Up', 'Down'], inline = 'mode', group = group_fvgs)
+var fvg_fill_mode                        = input.enum    (FVGFillMode.HIGHLOW  , 'Filled by'                                , inline = 'mode', group = group_fvgs)
+var fvg_fill_pc                          = input.float   (50                   , 'at %  '      , [50, 100]                  , inline = 'mode', group = group_fvgs) / 100
+var fvg_dir_up                           = str.contains  (fvg_dir_input        , 'Up')
+var fvg_dir_dn                           = str.contains  (fvg_dir_input        , 'Down')
+fvg_fill_src_up                          = fvg_fill_mode == FVGFillMode.HIGHLOW ? low : close
+fvg_fill_src_dn                          = fvg_fill_mode == FVGFillMode.HIGHLOW ? high : close
+
+var keep_max_unfilled_fvgs               = input.int     (30                , 'Max unfilled FVGs to keep'   , 0,100  , inline = 'limits', group = group_fvgs)
+var fvg_fill_col_up                      = input.color   (#4caf5080       , 'Box Color'                            , inline = 'boxcolor', group = group_fvgs)
+var fvg_fill_col_dn                      = input.color   (#ff525280       , ''                                     , inline = 'boxcolor', group = group_fvgs)
+
+var fvg_filter_insignificant             = input.bool    (true              , 'Filter insignificant'                  , inline = 'filter', group = group_fvgs)
+var fvg_filter_insignificant_atr_factor  = input.float   (0.05              , ' ATR threshold factor', 0.0, 3.0, 0.1  , inline = 'filter', group = group_fvgs)
+var fvg_show_fvg_lines                   = input.bool    (true              , 'Show fill level'                       , inline = 'filllvl', group = group_fvgs)
+var fvg_fill_style_lvl                   = linestyle (input.string('dashed' , '' , ['solid', 'dotted', 'dashed']      , inline = 'filllvl', group = group_fvgs))
+
+var fvg_extend                           = input.bool    (true              , 'Extend Boxes'                          , inline = 'boxes', group = group_fvgs)
+var fvg_keep_boxes                       = input.bool    (false             , 'Keep filled max'                       , inline = 'boxes', group = group_fvgs)
+var fvg_max_keep                         = input.int     (100               , ''                           , 1, 200   , inline = 'boxes', group = group_fvgs)
+
+
+// SETUP
+
+D.BoxArgs fvg_box_args_up = D.BoxArgs.new(#00000000, bg_color = fvg_fill_col_up)
+D.BoxArgs fvg_box_args_dn = D.BoxArgs.new(#00000000, bg_color = fvg_fill_col_dn)
+D.LineArgs fvg_fill_line_args_up = D.LineArgs.new(fvg_fill_col_up, fvg_fill_style_lvl)
+D.LineArgs fvg_fill_line_args_dn = D.LineArgs.new(fvg_fill_col_dn, fvg_fill_style_lvl)
+FVGConfig fvg_config_up = FVGConfig.new(fvg_box_args_up, fvg_fill_line_args_up, true, fvg_show_fvg_lines, fvg_keep_boxes, fvg_extend)
+FVGConfig fvg_config_dn = FVGConfig.new(fvg_box_args_dn, fvg_fill_line_args_dn, true, fvg_show_fvg_lines, fvg_keep_boxes, fvg_extend)
+
+// is_new_fvg_up = is_fvg(1,live = false)
+fvg_up = detect_fvg( 1, fvg_fill_pc, fvg_dir_up, fvg_filter_insignificant, fvg_filter_insignificant_atr_factor, live = true)
+fvg_dn = detect_fvg(-1, fvg_fill_pc, fvg_dir_dn, fvg_filter_insignificant, fvg_filter_insignificant_atr_factor, live = true)
+
+var fvgs_up = array.new<FVG>()
+var fvgs_dn = array.new<FVG>()
+array_rotate(fvgs_up, fvg_up, 10, precondition = not na(fvg_up))
+array_rotate(fvgs_dn, fvg_dn, 10, precondition = not na(fvg_dn))
+
+// store fvgs if there have been new ones
+var fvgs_up_unfilled = array.new<FVG>()
+var fvgs_dn_unfilled = array.new<FVG>()
+array_rotate(fvgs_up_unfilled, fvg_up, keep_max_unfilled_fvgs, precondition = not na(fvg_up))
+array_rotate(fvgs_dn_unfilled, fvg_dn, keep_max_unfilled_fvgs, precondition = not na(fvg_dn))
+
+// update and plot fvgs
+fvgs_up_unfilled.update(fvg_fill_mode, fvg_fill_src_up).draw(fvg_config_up)
+fvgs_dn_unfilled.update(fvg_fill_mode, fvg_fill_src_dn).draw(fvg_config_dn)
+
+// remove filled fvgs
+fvgs_up_filled = fvgs_up_unfilled.remove_filled()
+fvgs_dn_filled = fvgs_dn_unfilled.remove_filled()
+
+// delete the boxes of filled fvgs, but keep recent ones
+fvgs_up_filled.delete_filled_fvgs_buffered(fvg_max_keep)
+fvgs_dn_filled.delete_filled_fvgs_buffered(fvg_max_keep)
+    
+////////////////////////////////////////////////////////////////////////
+//#endregion                     DEMO
+////////////////////////////////////////////////////////////////////////

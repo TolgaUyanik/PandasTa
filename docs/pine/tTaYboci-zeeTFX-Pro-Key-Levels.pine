@@ -1,0 +1,1536 @@
+// zeeTFX Key Levels.pine
+// Weekly & Daily Imbalances + Key Levels
+// v3.28 — Eliminated flicker / object ghosting and improved performance.
+//         The previous build deleted and recreated EVERY box, line and label
+//         on every `barstate.islast` execution — which on a live market fires
+//         on every tick (several times a second on XAUUSD). The brief gap
+//         between tearing the objects down and rebuilding them is what made
+//         the levels flicker and ghost while scrolling, zooming or just
+//         sitting on a live chart.
+//         Fixes:
+//           • Change-detection gate: the full delete+recreate pass now runs
+//             only when a compact signature of the drawing inputs changes (new
+//             bar, new HTF/monthly/prior-year value, or a new FVG/OG zone).
+//             Throughout scrolling, zooming and idle ticks nothing relevant
+//             changes, so the pass is skipped and the on-chart objects are
+//             left in place — no more blinking, and far less per-tick work.
+//           • MA price labels are now created once and MOVED in place
+//             (set_xy/set_text) instead of being deleted and recreated each
+//             tick, so they no longer flicker either.
+//         Behaviour and all levels are unchanged; only the rendering path is
+//         smoother and lighter.
+//
+// v3.27 — Added Previous-Year Monthly Close Levels (collision-free).
+//         For each of the 12 months, draws the SECOND-most-recent
+//         occurrence's highest/lowest daily close — i.e. one year before the
+//         most recent occurrence of that month.
+//
+// v3.26 — Fixed monthly + historical-monthly close levels disappearing on
+//         lower timeframes (1m/5m), and fixed the whole indicator failing
+//         to fully render on LTF.
+//
+// ════════════════════════════════════════════════════════════════════
+//  WHAT WAS BROKEN IN v3.25 (and earlier) ON LOWER TIMEFRAMES
+// ════════════════════════════════════════════════════════════════════
+//  ROOT CAUSE 1 — Monthly engine built from CHART bars:
+//   The monthly close engine (curHighV / prevHighV / histMonKeys ...) only
+//   updated inside `if timeframe.change("D")`, which fires once per chart
+//   day. To walk back 6–12 months of daily closes on a 1-minute chart you
+//   would need ~250 (1 yr) → but expressed in 1-min bars that is ~360,000
+//   bars. TradingView only loads a few thousand intraday bars, so on 1m
+//   the daily-change events for older months NEVER occurred → historical
+//   (and even current/previous) monthly levels silently vanished.
+//
+//   FIX: The monthly highest-close / lowest-close is now computed INSIDE a
+//   request.security(..., "D", ...) context. The daily series only needs
+//   ~250 bars per year and TradingView loads HTF security history
+//   independently of the chart's bar count. The current & previous month
+//   extremes are returned via a single user-defined type (one tuple
+//   element). Monthly rollover is detected cheaply on the chart to snapshot
+//   finalized months into the persistent history arrays. Result: identical
+//   behaviour on 1m, 5m, 1h, 1D — the levels are always present.
+//
+//  ROOT CAUSE 2 — `f_clearPool()` ran but draw pass partially aborted:
+//   On LTF, several `f_monBarTime(t)` anchors pointed to a bar TIME older
+//   than the oldest loaded chart bar. With xloc.bar_time, line.new() then
+//   clamped/failed for those objects, and because they were created mid
+//   draw-pass the later sections (NWOG/NDOG/etc.) could be skipped on some
+//   ticks → "indicator doesn't fully work on LTF".
+//
+//   FIX: Added f_safeAnchorTime() which clamps every level's left anchor to
+//   the first visible/loaded bar time (chart.left_visible_bar_time-aware
+//   fallback to the first bar's time). No anchor can now precede loaded
+//   data, so every object draws and the full pass always completes.
+//
+//  All v3.25 fixes (month-name integer division, VWAP Dash/Dot line style)
+//  are retained unchanged.
+
+//@version=6
+indicator("zeeTFX Pro Key Levels v3.28", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// ════════════════════════════════════════════════════════════════════
+//  ENUM-EQUIVALENT CONSTANTS
+// ════════════════════════════════════════════════════════════════════
+THEME_AUTO  = "Auto (detect from chart background)"
+THEME_DARK  = "Dark Theme"
+THEME_LIGHT = "Light Theme"
+
+MA_SMA  = "SMA — Simple"
+MA_EMA  = "EMA — Exponential"
+MA_WMA  = "WMA — Weighted"
+MA_SMMA = "SMMA — Smoothed (RMA)"
+MA_DEMA = "DEMA — Double Exponential"
+MA_TEMA = "TEMA — Triple Exponential"
+
+MAP_CLOSE = "Close"
+MAP_OPEN  = "Open"
+MAP_HIGH  = "High"
+MAP_LOW   = "Low"
+MAP_HL2   = "HL2  (High+Low)/2"
+MAP_HLC3  = "HLC3 (High+Low+Close)/3"
+MAP_OHLC4 = "OHLC4 (Open+High+Low+Close)/4"
+
+// ════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ════════════════════════════════════════════════════════════════════
+InpTheme = input.string(THEME_AUTO, "Chart Theme", options=[THEME_AUTO, THEME_DARK, THEME_LIGHT], group="Theme")
+
+// === WEEKLY LEVELS ===
+InpShowWeeklyHigh   = input.bool(true,  "Show Weekly High",  group="Weekly Levels")
+InpShowWeeklyLow    = input.bool(true,  "Show Weekly Low",   group="Weekly Levels")
+InpShowWeeklyClose  = input.bool(true,  "Show Weekly Close", group="Weekly Levels")
+InpWeeklyHighColor  = input.color(color.yellow, "Weekly High Color",  group="Weekly Levels")
+InpWeeklyLowColor   = input.color(color.yellow, "Weekly Low Color",   group="Weekly Levels")
+InpWeeklyCloseColor = input.color(color.aqua,   "Weekly Close Color", group="Weekly Levels")
+InpWeeklyLineStyle  = input.string("Solid", "Weekly Line Style", options=["Solid","Dash","Dot"], group="Weekly Levels")
+InpWeeklyLineWidth  = input.int(1, "Weekly Line Width", minval=1, group="Weekly Levels")
+InpWeeklyFontSize   = input.string("Small", "Weekly Font Size", options=["Tiny","Small","Normal"], group="Weekly Levels")
+InpShowWeeklyLabels = input.bool(true, "Show Weekly Labels", group="Weekly Levels")
+
+// === DAILY LEVELS ===
+InpShowDailyHigh   = input.bool(true,  "Show Daily High",  group="Daily Levels")
+InpShowDailyLow    = input.bool(true,  "Show Daily Low",   group="Daily Levels")
+InpShowDailyClose  = input.bool(true,  "Show Daily Close", group="Daily Levels")
+InpDailyHighColor  = input.color(color.white, "Daily High Color",  group="Daily Levels")
+InpDailyLowColor   = input.color(color.white, "Daily Low Color",   group="Daily Levels")
+InpDailyCloseColor = input.color(color.lime, "Daily Close Color", group="Daily Levels")
+InpDailyLineStyle  = input.string("Solid", "Daily Line Style", options=["Solid","Dash","Dot"], group="Daily Levels")
+InpDailyLineWidth  = input.int(1, "Daily Line Width", minval=1, group="Daily Levels")
+InpDailyFontSize   = input.string("Small", "Daily Font Size", options=["Tiny","Small","Normal"], group="Daily Levels")
+InpShowDailyLabels = input.bool(true, "Show Daily Labels", group="Daily Levels")
+
+// === WEEKLY IMBALANCE (FVG) ===
+InpShowWeeklyImbalance     = input.bool(false, "Show Weekly Imbalance", group="Weekly Imbalance (FVG)")
+InpWeeklyImbalanceBull     = input.color(color.rgb(70,70,70), "Weekly Imbalance Bull", group="Weekly Imbalance (FVG)")
+InpWeeklyImbalanceBear     = input.color(color.rgb(70,70,70), "Weekly Imbalance Bear", group="Weekly Imbalance (FVG)")
+InpWeeklyImbalanceAlpha    = input.int(40, "Weekly Imbalance Alpha (0-255)", minval=0, maxval=255, group="Weekly Imbalance (FVG)")
+InpShowWeeklyMidpoint      = input.bool(true, "Show Weekly Midpoint", group="Weekly Imbalance (FVG)")
+InpWeeklyMidColor          = input.color(color.rgb(214,130,8), "Weekly Mid Color", group="Weekly Imbalance (FVG)")
+InpWeeklyMidStyle          = input.string("Dot", "Weekly Mid Style", options=["Solid","Dash","Dot"], group="Weekly Imbalance (FVG)")
+InpWeeklyMidWidth          = input.int(1, "Weekly Mid Width", minval=1, group="Weekly Imbalance (FVG)")
+InpWeeklyImbalanceFontSize = input.string("Normal", "Weekly Imbalance Font Size", options=["Tiny","Small","Normal"], group="Weekly Imbalance (FVG)")
+
+// === DAILY IMBALANCE (FVG) ===
+InpShowDailyImbalance     = input.bool(false, "Show Daily Imbalance", group="Daily Imbalance (FVG)")
+InpDailyImbalanceBull     = input.color(color.rgb(135,149,83), "Daily Imbalance Bull", group="Daily Imbalance (FVG)")
+InpDailyImbalanceBear     = input.color(color.rgb(135,149,83), "Daily Imbalance Bear", group="Daily Imbalance (FVG)")
+InpDailyImbalanceAlpha    = input.int(20, "Daily Imbalance Alpha (0-255)", minval=0, maxval=255, group="Daily Imbalance (FVG)")
+InpShowDailyMidpoint      = input.bool(true, "Show Daily Midpoint", group="Daily Imbalance (FVG)")
+InpDailyMidColor          = input.color(color.rgb(135,149,83), "Daily Mid Color", group="Daily Imbalance (FVG)")
+InpDailyMidStyle          = input.string("Dot", "Daily Mid Style", options=["Solid","Dash","Dot"], group="Daily Imbalance (FVG)")
+InpDailyMidWidth          = input.int(1, "Daily Mid Width", minval=1, group="Daily Imbalance (FVG)")
+InpDailyImbalanceFontSize = input.string("Normal", "Daily Imbalance Font Size", options=["Tiny","Small","Normal"], group="Daily Imbalance (FVG)")
+
+// === MONTHLY CLOSE LEVELS ===
+InpShowMonthlyCloseLevels = input.bool(true, "Show Monthly Closing Levels", group="Monthly Close Levels")
+InpHCOMColor  = input.color(color.rgb(227,166,106), "Highest Close, Current Month",  group="Monthly Close Levels")
+InpLCOMColor  = input.color(color.rgb(135,150,83),  "Lowest Close, Current Month",   group="Monthly Close Levels")
+InpPHCOMColor = input.color(color.rgb(217,0,254),   "Highest Close, Previous Month", group="Monthly Close Levels")
+InpPLCOMColor = input.color(color.rgb(234,30,99),   "Lowest Close, Previous Month",  group="Monthly Close Levels")
+InpMonthlyLineStyle = input.string("Dash", "Monthly Line Style", options=["Solid","Dash","Dot"], group="Monthly Close Levels")
+InpMonthlyLineWidth = input.int(1, "Monthly Line Width", minval=1, group="Monthly Close Levels")
+InpMonthlyFontSize  = input.string("Small", "Monthly Font Size", options=["Tiny","Small","Normal"], group="Monthly Close Levels")
+
+// ════════════════════════════════════════════════════════════════════
+//  HISTORICAL MONTHLY CLOSE LEVELS
+// ════════════════════════════════════════════════════════════════════
+InpShowHistMonthly      = input.bool(true,  "Show Historical Monthly Levels", group="Historical Monthly Close Levels")
+InpHistMonthsBack       = input.int(6,      "Months Back (max 12)",  minval=1, maxval=12, group="Historical Monthly Close Levels")
+InpHistHCOMColor        = input.color(color.rgb(255, 100, 150), "Hist HCOM Color",  group="Historical Monthly Close Levels")
+InpHistLCOMColor        = input.color(color.rgb(180, 100, 255), "Hist LCOM Color",  group="Historical Monthly Close Levels")
+InpHistMonthlyLineStyle = input.string("Dot",  "Hist Line Style",   options=["Solid","Dash","Dot"], group="Historical Monthly Close Levels")
+InpHistMonthlyLineWidth = input.int(1,  "Hist Line Width",  minval=1, group="Historical Monthly Close Levels")
+InpHistMonthlyFontSize  = input.string("Small", "Hist Font Size",    options=["Tiny","Small","Normal"], group="Historical Monthly Close Levels")
+
+// ════════════════════════════════════════════════════════════════════
+//  PREVIOUS YEAR MONTHLY CLOSE LEVELS
+//  Shows last calendar year's monthly highest/lowest DAILY CLOSE for each
+//  of the 12 months. Labels are prefixed with "P " + month, e.g.
+//  "P AUG LCOM", "P JAN HCOM".
+// ════════════════════════════════════════════════════════════════════
+InpShowPYMonthly      = input.bool(false, "Show Previous Year Monthly Levels", group="Previous Year Monthly Close Levels")
+InpPYShowHCOM         = input.bool(true,  "Show Previous Year HCOM", group="Previous Year Monthly Close Levels")
+InpPYShowLCOM         = input.bool(true,  "Show Previous Year LCOM", group="Previous Year Monthly Close Levels")
+InpPYHCOMColor        = input.color(color.rgb(0, 188, 212),  "Prev Year HCOM Color", group="Previous Year Monthly Close Levels")
+InpPYLCOMColor        = input.color(color.rgb(255, 152, 0),  "Prev Year LCOM Color", group="Previous Year Monthly Close Levels")
+InpPYMonthlyLineStyle = input.string("Dot",  "Prev Year Line Style",  options=["Solid","Dash","Dot"], group="Previous Year Monthly Close Levels")
+InpPYMonthlyLineWidth = input.int(1,  "Prev Year Line Width",  minval=1, group="Previous Year Monthly Close Levels")
+InpPYMonthlyFontSize  = input.string("Small", "Prev Year Font Size",   options=["Tiny","Small","Normal"], group="Previous Year Monthly Close Levels")
+
+// ════════════════════════════════════════════════════════════════════
+//  NEW WEEKLY OPENING GAP (NWOG)
+// ════════════════════════════════════════════════════════════════════
+InpShowNWOG         = input.bool(false,  "Show NWOG",                      group="New Weekly Opening Gap (NWOG)")
+InpNWOGCount        = input.int(3,      "NWOGs to Show",       minval=1, maxval=20, group="New Weekly Opening Gap (NWOG)")
+InpNWOGFillColor    = input.color(color.rgb(41,98,255),  "Fill Color",    group="New Weekly Opening Gap (NWOG)")
+InpNWOGFillAlpha    = input.int(20,     "Fill Alpha (0-255)",  minval=0, maxval=255, group="New Weekly Opening Gap (NWOG)")
+InpNWOGBorderColor  = input.color(color.rgb(41,98,255),  "Border Color",  group="New Weekly Opening Gap (NWOG)")
+InpNWOGBorderStyle  = input.string("Solid", "Border Style",   options=["Solid","Dash","Dot"], group="New Weekly Opening Gap (NWOG)")
+InpNWOGBorderWidth  = input.int(1,      "Border Width",        minval=1,  group="New Weekly Opening Gap (NWOG)")
+InpNWOGExtend       = input.bool(false, "Extend Box to Right", group="New Weekly Opening Gap (NWOG)")
+InpNWOGShowMid      = input.bool(true,  "Show Midpoint Line",  group="New Weekly Opening Gap (NWOG)")
+InpNWOGMidColor     = input.color(color.rgb(100,149,255),"Mid Color",     group="New Weekly Opening Gap (NWOG)")
+InpNWOGMidStyle     = input.string("Dash", "Mid Line Style",  options=["Solid","Dash","Dot"], group="New Weekly Opening Gap (NWOG)")
+InpNWOGMidWidth     = input.int(1,      "Mid Line Width",      minval=1,  group="New Weekly Opening Gap (NWOG)")
+InpNWOGMidExtend    = input.bool(false, "Extend Mid Line",     group="New Weekly Opening Gap (NWOG)")
+InpNWOGFontSize     = input.string("Small", "Font Size",       options=["Tiny","Small","Normal"], group="New Weekly Opening Gap (NWOG)")
+
+// ════════════════════════════════════════════════════════════════════
+//  NEW DAILY OPENING GAP (NDOG)
+// ════════════════════════════════════════════════════════════════════
+InpShowNDOG         = input.bool(false,  "Show NDOG",                      group="New Daily Opening Gap (NDOG)")
+InpNDOGCount        = input.int(5,      "NDOGs to Show",       minval=1, maxval=20, group="New Daily Opening Gap (NDOG)")
+InpNDOGFillColor    = input.color(color.rgb(41,98,255),  "Fill Color",    group="New Daily Opening Gap (NDOG)")
+InpNDOGFillAlpha    = input.int(20,     "Fill Alpha (0-255)",  minval=0, maxval=255, group="New Daily Opening Gap (NDOG)")
+InpNDOGBorderColor  = input.color(color.rgb(41,98,255),  "Border Color",  group="New Daily Opening Gap (NDOG)")
+InpNDOGBorderStyle  = input.string("Solid", "Border Style",   options=["Solid","Dash","Dot"], group="New Daily Opening Gap (NDOG)")
+InpNDOGBorderWidth  = input.int(1,      "Border Width",        minval=1,  group="New Daily Opening Gap (NDOG)")
+InpNDOGExtend       = input.bool(false, "Extend Box to Right", group="New Daily Opening Gap (NDOG)")
+InpNDOGShowMid      = input.bool(true,  "Show Midpoint Line",  group="New Daily Opening Gap (NDOG)")
+InpNDOGMidColor     = input.color(color.rgb(100,149,255),"Mid Color",     group="New Daily Opening Gap (NDOG)")
+InpNDOGMidStyle     = input.string("Dash", "Mid Line Style",  options=["Solid","Dash","Dot"], group="New Daily Opening Gap (NDOG)")
+InpNDOGMidWidth     = input.int(1,      "Mid Line Width",      minval=1,  group="New Daily Opening Gap (NDOG)")
+InpNDOGMidExtend    = input.bool(false, "Extend Mid Line",     group="New Daily Opening Gap (NDOG)")
+InpNDOGFontSize     = input.string("Small", "Font Size",       options=["Tiny","Small","Normal"], group="New Daily Opening Gap (NDOG)")
+
+// === GENERAL SETTINGS ===
+InpWeeksBack          = input.int(15, "Weeks Back", minval=1, group="General Settings")
+InpDaysBack           = input.int(15, "Days Back", minval=1, group="General Settings")
+InpMaxImbalances      = input.int(10, "Max Imbalances", minval=1, group="General Settings")
+InpExtendLines        = input.bool(false, "Extend Lines To Right", group="General Settings")
+InpExtendBars         = input.int(5, "Extend Bars (past last bar)", minval=1, group="General Settings")
+InpLabelShiftBars     = input.int(3, "Label Shift Bars", minval=0, group="General Settings")
+InpLabelOverlapPoints = input.int(10, "Label Overlap Points (tolerance)", minval=0, group="General Settings")
+
+// ════════════════════════════════════════════════════════════════════
+//  VWAP SETTINGS
+// ════════════════════════════════════════════════════════════════════
+
+// --- Session VWAP ---
+InpShowSessionVWAP      = input.bool(false,  "Show Session VWAP",        group="VWAP Settings")
+InpSessionVWAPColor     = input.color(color.rgb(150, 150, 150), "Session VWAP Color",   group="VWAP Settings")
+InpSessionVWAPStyle     = input.string("Solid", "Session VWAP Style",   options=["Solid","Dash","Dot"], group="VWAP Settings")
+InpSessionVWAPWidth     = input.int(1, "Session VWAP Width",            minval=1, maxval=4, group="VWAP Settings")
+
+// --- Daily VWAP ---
+InpShowDailyVWAP        = input.bool(false,  "Show Daily VWAP",          group="VWAP Settings")
+InpDailyVWAPColor       = input.color(color.rgb(0, 200, 255),   "Daily VWAP Color",     group="VWAP Settings")
+InpDailyVWAPStyle       = input.string("Solid", "Daily VWAP Style",      options=["Solid","Dash","Dot"], group="VWAP Settings")
+InpDailyVWAPWidth       = input.int(1, "Daily VWAP Width",              minval=1, maxval=4, group="VWAP Settings")
+
+// --- Weekly VWAP ---
+InpShowWeeklyVWAP       = input.bool(true,  "Show Weekly VWAP",         group="VWAP Settings")
+InpWeeklyVWAPColor      = input.color(color.rgb(255, 160, 0),   "Weekly VWAP Color",    group="VWAP Settings")
+InpWeeklyVWAPStyle      = input.string("Solid", "Weekly VWAP Style",     options=["Solid","Dash","Dot"], group="VWAP Settings")
+InpWeeklyVWAPWidth      = input.int(1, "Weekly VWAP Width",             minval=1, maxval=4, group="VWAP Settings")
+
+// === MOVING AVERAGE 1 ===
+InpMA1Enable = input.bool(true, "Enable MA 1", group="Moving Average 1")
+InpMA1Type   = input.string(MA_EMA,  "MA 1 Type",   options=[MA_SMA,MA_EMA,MA_WMA,MA_SMMA,MA_DEMA,MA_TEMA], group="Moving Average 1")
+InpMA1Period = input.int(5,   "MA 1 Period", minval=1, group="Moving Average 1")
+InpMA1Price  = input.string(MAP_CLOSE, "MA 1 Applied Price", options=[MAP_CLOSE,MAP_OPEN,MAP_HIGH,MAP_LOW,MAP_HL2,MAP_HLC3,MAP_OHLC4], group="Moving Average 1")
+InpMA1Color  = input.color(color.rgb(150,150,150), "MA 1 Color", group="Moving Average 1")
+InpMA1Style  = input.string("Solid", "MA 1 Line Style", options=["Solid","Dash","Dot"], group="Moving Average 1")
+InpMA1Width  = input.int(1, "MA 1 Line Width", minval=1, group="Moving Average 1")
+InpMA1Label  = input.bool(false, "MA 1 Show Label", group="Moving Average 1")
+
+// === MOVING AVERAGE 2 ===
+InpMA2Enable = input.bool(false, "Enable MA 2", group="Moving Average 2")
+InpMA2Type   = input.string(MA_SMA,  "MA 2 Type",   options=[MA_SMA,MA_EMA,MA_WMA,MA_SMMA,MA_DEMA,MA_TEMA], group="Moving Average 2")
+InpMA2Period = input.int(20,  "MA 2 Period", minval=1, group="Moving Average 2")
+InpMA2Price  = input.string(MAP_CLOSE, "MA 2 Applied Price", options=[MAP_CLOSE,MAP_OPEN,MAP_HIGH,MAP_LOW,MAP_HL2,MAP_HLC3,MAP_OHLC4], group="Moving Average 2")
+InpMA2Color  = input.color(color.rgb(184,134,11), "MA 2 Color", group="Moving Average 2")
+InpMA2Style  = input.string("Solid", "MA 2 Line Style", options=["Solid","Dash","Dot"], group="Moving Average 2")
+InpMA2Width  = input.int(1, "MA 2 Line Width", minval=1, group="Moving Average 2")
+InpMA2Label  = input.bool(false, "MA 2 Show Label", group="Moving Average 2")
+
+// === MOVING AVERAGE 3 ===
+InpMA3Enable = input.bool(false, "Enable MA 3", group="Moving Average 3")
+InpMA3Type   = input.string(MA_TEMA, "MA 3 Type",   options=[MA_SMA,MA_EMA,MA_WMA,MA_SMMA,MA_DEMA,MA_TEMA], group="Moving Average 3")
+InpMA3Period = input.int(50,  "MA 3 Period", minval=1, group="Moving Average 3")
+InpMA3Price  = input.string(MAP_CLOSE, "MA 3 Applied Price", options=[MAP_CLOSE,MAP_OPEN,MAP_HIGH,MAP_LOW,MAP_HL2,MAP_HLC3,MAP_OHLC4], group="Moving Average 3")
+InpMA3Color  = input.color(color.red, "MA 3 Color", group="Moving Average 3")
+InpMA3Style  = input.string("Solid", "MA 3 Line Style", options=["Solid","Dash","Dot"], group="Moving Average 3")
+InpMA3Width  = input.int(1, "MA 3 Line Width", minval=1, group="Moving Average 3")
+InpMA3Label  = input.bool(false, "MA 3 Show Label", group="Moving Average 3")
+
+// === MOVING AVERAGE 4 ===
+InpMA4Enable = input.bool(false, "Enable MA 4", group="Moving Average 4")
+InpMA4Type   = input.string(MA_SMA,  "MA 4 Type",   options=[MA_SMA,MA_EMA,MA_WMA,MA_SMMA,MA_DEMA,MA_TEMA], group="Moving Average 4")
+InpMA4Period = input.int(200, "MA 4 Period", minval=1, group="Moving Average 4")
+InpMA4Price  = input.string(MAP_CLOSE, "MA 4 Applied Price", options=[MAP_CLOSE,MAP_OPEN,MAP_HIGH,MAP_LOW,MAP_HL2,MAP_HLC3,MAP_OHLC4], group="Moving Average 4")
+InpMA4Color  = input.color(color.rgb(107,142,35), "MA 4 Color", group="Moving Average 4")
+InpMA4Style  = input.string("Solid", "MA 4 Line Style", options=["Solid","Dash","Dot"], group="Moving Average 4")
+InpMA4Width  = input.int(1, "MA 4 Line Width", minval=1, group="Moving Average 4")
+InpMA4Label  = input.bool(false, "MA 4 Show Label", group="Moving Average 4")
+
+// ════════════════════════════════════════════════════════════════════
+//  STYLE / SIZE HELPERS
+// ════════════════════════════════════════════════════════════════════
+f_lineStyle(string s) =>
+    s == "Dash" ? line.style_dashed : s == "Dot" ? line.style_dotted : line.style_solid
+
+f_textSize(string s) =>
+    s == "Small" ? size.small : s == "Normal" ? size.normal : size.tiny
+
+// ════════════════════════════════════════════════════════════════════
+//  MONTH NAME HELPER
+// ════════════════════════════════════════════════════════════════════
+f_monthName(int m) =>
+    m == 1  ? "Jan" : m == 2  ? "Feb" : m == 3  ? "Mar" :
+     m == 4  ? "Apr" : m == 5  ? "May" : m == 6  ? "Jun" :
+     m == 7  ? "Jul" : m == 8  ? "Aug" : m == 9  ? "Sep" :
+     m == 10 ? "Oct" : m == 11 ? "Nov" : "Dec"
+
+// ════════════════════════════════════════════════════════════════════
+//  THEME
+// ════════════════════════════════════════════════════════════════════
+f_detectTheme() =>
+    bg = chart.bg_color
+    r  = color.r(bg)
+    g  = color.g(bg)
+    b  = color.b(bg)
+    y  = 0.299 * r + 0.587 * g + 0.114 * b
+    y >= 128.0 ? THEME_LIGHT : THEME_DARK
+
+effTheme = InpTheme == THEME_AUTO ? f_detectTheme() : InpTheme
+isLight  = effTheme == THEME_LIGHT
+
+g_WeeklyHighColor     = isLight ? color.orange           : InpWeeklyHighColor
+g_WeeklyLowColor      = isLight ? color.orange           : InpWeeklyLowColor
+g_WeeklyCloseColor    = isLight ? color.blue             : InpWeeklyCloseColor
+g_DailyHighColor      = isLight ? color.rgb(35,35,35) : InpDailyHighColor
+g_DailyLowColor       = isLight ? color.rgb(35,35,35) : InpDailyLowColor
+g_DailyCloseColor     = isLight ? color.green            : InpDailyCloseColor
+g_WeeklyImbalanceBull = isLight ? color.new(color.rgb(214, 130, 8),   85) : InpWeeklyImbalanceBull
+g_WeeklyImbalanceBear = isLight ? color.new(color.rgb(214, 130, 8),   85) : InpWeeklyImbalanceBear
+g_WeeklyMidColor      = isLight ? color.orange : InpWeeklyMidColor
+g_DailyImbalanceBull  = isLight ? color.new(color.rgb(30,  144, 255), 85) : InpDailyImbalanceBull
+g_DailyImbalanceBear  = isLight ? color.new(color.rgb(30,  144, 255), 85) : InpDailyImbalanceBear
+g_DailyMidColor       = isLight ? color.rgb(151,210,255) : InpDailyMidColor
+
+f_fillColor(color c, int alpha) =>
+    transp = 100 - math.round(alpha / 255.0 * 100)
+    transp := math.max(0, math.min(95, transp))
+    color.new(c, transp)
+
+// ════════════════════════════════════════════════════════════════════
+//  BAR DURATION IN MS
+// ════════════════════════════════════════════════════════════════════
+g_barMs = timeframe.in_seconds() * 1000
+
+// ════════════════════════════════════════════════════════════════════
+//  FIRST-LOADED-BAR TIME (for LTF safe anchoring)
+//  Tracks the time of the oldest bar actually loaded on the chart so no
+//  level can be anchored before loaded data (which breaks xloc.bar_time
+//  rendering on lower timeframes).
+// ════════════════════════════════════════════════════════════════════
+var int g_firstBarTime = na
+if na(g_firstBarTime)
+    g_firstBarTime := time
+
+f_safeAnchorTime(int t) =>
+    // Clamp any anchor time to the first loaded bar's time.
+    int base = na(g_firstBarTime) ? time : g_firstBarTime
+    na(t) ? base : math.max(t, base)
+
+// ════════════════════════════════════════════════════════════════════
+//  HTF DATA via request.security()
+// ════════════════════════════════════════════════════════════════════
+wHigh     = request.security(syminfo.tickerid, "W", high[1],  lookahead=barmerge.lookahead_off)
+wLow      = request.security(syminfo.tickerid, "W", low[1],   lookahead=barmerge.lookahead_off)
+wClose    = request.security(syminfo.tickerid, "W", close[1], lookahead=barmerge.lookahead_off)
+wTimePrev = request.security(syminfo.tickerid, "W", time[1],  lookahead=barmerge.lookahead_off)
+wOGOpen   = request.security(syminfo.tickerid, "W", open,     lookahead=barmerge.lookahead_on)
+wOGPrevC  = request.security(syminfo.tickerid, "W", close[1], lookahead=barmerge.lookahead_on)
+wOGTime   = request.security(syminfo.tickerid, "W", time,     lookahead=barmerge.lookahead_on)
+
+dHigh     = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_off)
+dLow      = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_off)
+dClose    = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_off)
+dTimePrev = request.security(syminfo.tickerid, "D", time[1],  lookahead=barmerge.lookahead_off)
+dOGOpen   = request.security(syminfo.tickerid, "D", open,     lookahead=barmerge.lookahead_on)
+dOGPrevC  = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+dOGTime   = request.security(syminfo.tickerid, "D", time,     lookahead=barmerge.lookahead_on)
+
+// ════════════════════════════════════════════════════════════════════
+//  TIMEFRAME-INDEPENDENT MONTHLY CLOSE EXTREMES  (THE LTF FIX)
+//
+//  We compute the highest / lowest DAILY CLOSE per calendar month inside a
+//  DAILY (`"D"`) request.security() context. Because the calc runs in the
+//  daily series, only ~250 bars/year are needed and TradingView loads that
+//  HTF history independently of how many 1-minute bars are on the chart.
+//  Each daily bar we emit, via a single user-defined type:
+//     • the month key for that daily bar
+//     • the running highest-close & its bar time for that month
+//     • the running lowest-close  & its bar time for that month
+//  On the chart we then detect month rollover and snapshot completed months
+//  into persistent var arrays — identical on every chart timeframe.
+// ════════════════════════════════════════════════════════════════════
+type MonClose
+    int   monKey   = na
+    float hiV      = na
+    float loV      = na
+    int   hiT      = na
+    int   loT      = na
+
+// Runs INSIDE the daily context. Uses var accumulators that reset on a new
+// calendar month, tracking the extreme DAILY CLOSE for the month so far.
+f_dailyMonthState() =>
+    // confirmed daily values (offset [1] is applied by the request below)
+    float c  = close
+    int   t  = time
+    int   mk = year(t, syminfo.timezone) * 12 + month(t, syminfo.timezone)
+
+    var int   _mk  = na
+    var float _hiV = na
+    var float _loV = na
+    var int   _hiT = na
+    var int   _loT = na
+
+    bool newMonth = na(_mk) or mk != _mk
+    if newMonth
+        _mk  := mk
+        _hiV := c
+        _loV := c
+        _hiT := t
+        _loT := t
+    else
+        if c > _hiV
+            _hiV := c
+            _hiT := t
+        if c < _loV
+            _loV := c
+            _loT := t
+
+    MonClose.new(_mk, _hiV, _loV, _hiT, _loT)
+
+// Request the per-daily-bar month state from the daily context.
+// close[1] semantics are preserved because f_dailyMonthState reads `close`
+// in the requested series and we offset the whole call with lookahead_off.
+monState = request.security(syminfo.tickerid, "D", f_dailyMonthState(), lookahead=barmerge.lookahead_off)
+
+// ════════════════════════════════════════════════════════════════════
+//  PREVIOUS-CALENDAR-YEAR MONTHLY ENGINE  (dedicated, TF-independent)
+//
+//  The general "Historical Monthly Levels" store is populated by walking
+//  the chart's bars forward, so on a 1-minute chart (where only a few days
+//  of intraday history load) it never sees last year's months, and on
+//  higher timeframes it overlaps with whatever recent months are in the
+//  store. To show LAST CALENDAR YEAR's 12 months reliably and independently
+//  on ANY timeframe, we source them straight from the DAILY feed.
+//
+//  For each target month (1..12) we run one request.security("D", ...) that,
+//  inside the daily context, tracks the highest / lowest DAILY CLOSE for the
+//  TWO most recent years in which that month occurred, and returns the OLDER
+//  (second-most-recent) one — i.e. one year before the most recent occurrence
+//  of that month. This is exactly one year behind whatever the "Historical
+//  Monthly Levels" feature shows for the same month, so the two never collide.
+//
+//  Examples when the chart is in June 2026:
+//    • Most recent Dec is Dec 2025 → P Dec returns Dec 2024
+//    • Most recent Nov is Nov 2025 → P Nov returns Nov 2024
+//    • Most recent Jan is Jan 2026 → P Jan returns Jan 2025
+//  Twelve such calls (well within the 40-request budget) return {hi, lo, yr}
+//  each — no nested requests, no chart-bar dependency.
+// ════════════════════════════════════════════════════════════════════
+type PYMonth
+    float hiV = na
+    float loV = na
+    int   yr  = na
+
+// Runs INSIDE the daily context. For calendar month tMonth (1..12) it keeps
+// the hi/lo of daily close for the two most recent YEARS that contain that
+// month, and returns the second-most-recent (the older of the two).
+f_priorYearMonth(int tMonth) =>
+    int   y  = year(time,  syminfo.timezone)
+    int   mo = month(time, syminfo.timezone)
+    float c  = close
+
+    // Newest occurrence (y1*) and second-newest occurrence (y2*).
+    var int   _y1   = na
+    var float _y1hi = na
+    var float _y1lo = na
+    var int   _y2   = na
+    var float _y2hi = na
+    var float _y2lo = na
+
+    if mo == tMonth
+        if na(_y1)
+            // first ever occurrence of this month
+            _y1 := y
+            _y1hi := c
+            _y1lo := c
+        else if y == _y1
+            // same (newest) year — keep extending its hi/lo
+            if c > _y1hi
+                _y1hi := c
+            if c < _y1lo
+                _y1lo := c
+        else if y > _y1
+            // a newer year started — demote current newest to second-newest
+            _y2   := _y1
+            _y2hi := _y1hi
+            _y2lo := _y1lo
+            _y1   := y
+            _y1hi := c
+            _y1lo := c
+        else if na(_y2) or y == _y2
+            // belongs to the second-newest year
+            if na(_y2)
+                _y2   := y
+                _y2hi := c
+                _y2lo := c
+            else
+                if c > _y2hi
+                    _y2hi := c
+                if c < _y2lo
+                    _y2lo := c
+        // years older than the second-newest are ignored
+
+    // Return the second-most-recent occurrence (na if it doesn't exist yet).
+    PYMonth.new(_y2hi, _y2lo, _y2)
+
+// Twelve daily-context requests — one per calendar month of last year.
+pyJan = request.security(syminfo.tickerid, "D", f_priorYearMonth(1),  lookahead=barmerge.lookahead_off)
+pyFeb = request.security(syminfo.tickerid, "D", f_priorYearMonth(2),  lookahead=barmerge.lookahead_off)
+pyMar = request.security(syminfo.tickerid, "D", f_priorYearMonth(3),  lookahead=barmerge.lookahead_off)
+pyApr = request.security(syminfo.tickerid, "D", f_priorYearMonth(4),  lookahead=barmerge.lookahead_off)
+pyMay = request.security(syminfo.tickerid, "D", f_priorYearMonth(5),  lookahead=barmerge.lookahead_off)
+pyJun = request.security(syminfo.tickerid, "D", f_priorYearMonth(6),  lookahead=barmerge.lookahead_off)
+pyJul = request.security(syminfo.tickerid, "D", f_priorYearMonth(7),  lookahead=barmerge.lookahead_off)
+pyAug = request.security(syminfo.tickerid, "D", f_priorYearMonth(8),  lookahead=barmerge.lookahead_off)
+pySep = request.security(syminfo.tickerid, "D", f_priorYearMonth(9),  lookahead=barmerge.lookahead_off)
+pyOct = request.security(syminfo.tickerid, "D", f_priorYearMonth(10), lookahead=barmerge.lookahead_off)
+pyNov = request.security(syminfo.tickerid, "D", f_priorYearMonth(11), lookahead=barmerge.lookahead_off)
+pyDec = request.security(syminfo.tickerid, "D", f_priorYearMonth(12), lookahead=barmerge.lookahead_off)
+
+// Pack into fixed-order arrays for the draw loop (index 0 = Jan … 11 = Dec).
+var PYMonth[] g_pyMonths = array.new<PYMonth>(0)
+if barstate.islast
+    array.clear(g_pyMonths)
+    array.push(g_pyMonths, pyJan)
+    array.push(g_pyMonths, pyFeb)
+    array.push(g_pyMonths, pyMar)
+    array.push(g_pyMonths, pyApr)
+    array.push(g_pyMonths, pyMay)
+    array.push(g_pyMonths, pyJun)
+    array.push(g_pyMonths, pyJul)
+    array.push(g_pyMonths, pyAug)
+    array.push(g_pyMonths, pySep)
+    array.push(g_pyMonths, pyOct)
+    array.push(g_pyMonths, pyNov)
+    array.push(g_pyMonths, pyDec)
+
+
+// ════════════════════════════════════════════════════════════════════
+//  HTF NEW-BAR DETECTION
+// ════════════════════════════════════════════════════════════════════
+wNew = timeframe.change("W")
+dNew = timeframe.change("D")
+
+// ════════════════════════════════════════════════════════════════════
+//  HTF CAPTURE — HIGH / LOW arrays
+// ════════════════════════════════════════════════════════════════════
+f_pushHTF(int[] arrT, float[] arrH, float[] arrL, bool isNew, int htfT, float h, float l, int cap) =>
+    if isNew and not na(h) and not na(l) and not na(htfT)
+        array.push(arrT, htfT)
+        array.push(arrH, h)
+        array.push(arrL, l)
+        if array.size(arrT) > cap
+            array.shift(arrT)
+            array.shift(arrH)
+            array.shift(arrL)
+
+var int[]   wBT = array.new_int(0)
+var float[] wHa = array.new_float(0)
+var float[] wLa = array.new_float(0)
+var int[]   dBT = array.new_int(0)
+var float[] dHa = array.new_float(0)
+var float[] dLa = array.new_float(0)
+
+f_pushHTF(wBT, wHa, wLa, wNew, wTimePrev, wHigh, wLow, 64)
+f_pushHTF(dBT, dHa, dLa, dNew, dTimePrev, dHigh, dLow, 64)
+
+// ════════════════════════════════════════════════════════════════════
+//  OPENING GAP CAPTURE
+// ════════════════════════════════════════════════════════════════════
+f_pushOG(int[] arrT, float[] arrO, float[] arrC, bool isNew, int htfT, float openPrice, float prevClose, int cap) =>
+    if isNew and not na(openPrice) and not na(prevClose) and not na(htfT)
+        if openPrice != prevClose
+            array.push(arrT, htfT)
+            array.push(arrO, openPrice)
+            array.push(arrC, prevClose)
+            if array.size(arrT) > cap
+                array.shift(arrT)
+                array.shift(arrO)
+                array.shift(arrC)
+
+var int[]   wOGT = array.new_int(0)
+var float[] wOGO = array.new_float(0)
+var float[] wOGC = array.new_float(0)
+var int[]   dOGT = array.new_int(0)
+var float[] dOGO = array.new_float(0)
+var float[] dOGC = array.new_float(0)
+
+f_pushOG(wOGT, wOGO, wOGC, wNew, wOGTime, wOGOpen, wOGPrevC, 64)
+f_pushOG(dOGT, dOGO, dOGC, dNew, dOGTime, dOGOpen, dOGPrevC, 64)
+
+// ════════════════════════════════════════════════════════════════════
+//  RIGHT EDGE
+// ════════════════════════════════════════════════════════════════════
+f_rightEdgeTime() =>
+    int extMs = InpExtendLines ? g_barMs * 5000 : g_barMs * InpExtendBars
+    time + g_barMs + extMs
+
+// ════════════════════════════════════════════════════════════════════
+//  VWAP CALCULATIONS
+// ════════════════════════════════════════════════════════════════════
+
+// ── Session VWAP ──────────────────────────────────────────────────
+sessionVwap = ta.vwap(hlc3)
+
+// ── Daily VWAP ────────────────────────────────────────────────────
+var float dvPvSum  = 0.0
+var float dvVolSum = 0.0
+
+if timeframe.change("D")
+    dvPvSum  := 0.0
+    dvVolSum := 0.0
+
+dvPvSum  += hlc3 * volume
+dvVolSum += volume
+dailyVwap = dvVolSum > 0 ? dvPvSum / dvVolSum : na
+
+// ── Weekly VWAP ───────────────────────────────────────────────────
+var float wvPvSum  = 0.0
+var float wvVolSum = 0.0
+
+if timeframe.change("W")
+    wvPvSum  := 0.0
+    wvVolSum := 0.0
+
+wvPvSum  += hlc3 * volume
+wvVolSum += volume
+weeklyVwap = wvVolSum > 0 ? wvPvSum / wvVolSum : na
+
+// ════════════════════════════════════════════════════════════════════
+//  VWAP ARRAY ACCUMULATORS (for Dash / Dot line-object rendering)
+// ════════════════════════════════════════════════════════════════════
+VWAP_SAMPLE = 3   // store one point every N bars to save line objects
+
+var float[] svValArr = array.new_float(0)   // Session VWAP values
+var int[]   svIdxArr = array.new_int(0)     // Session VWAP bar indices
+var float[] dvValArr = array.new_float(0)   // Daily   VWAP values
+var int[]   dvIdxArr = array.new_int(0)
+var float[] wvValArr = array.new_float(0)   // Weekly  VWAP values
+var int[]   wvIdxArr = array.new_int(0)
+
+// Reset session array when a new session/day begins
+if timeframe.change("D")
+    array.clear(svValArr)
+    array.clear(svIdxArr)
+
+// Accumulate every VWAP_SAMPLE bars
+if bar_index % VWAP_SAMPLE == 0
+    if not na(sessionVwap)
+        array.push(svValArr, sessionVwap)
+        array.push(svIdxArr, bar_index)
+    if not na(dailyVwap)
+        array.push(dvValArr, dailyVwap)
+        array.push(dvIdxArr, bar_index)
+    if not na(weeklyVwap)
+        array.push(wvValArr, weeklyVwap)
+        array.push(wvIdxArr, bar_index)
+
+// Cap arrays so they don't grow unbounded
+MAX_VWAP_PTS = 150
+if array.size(svValArr) > MAX_VWAP_PTS
+    array.shift(svValArr)
+    array.shift(svIdxArr)
+if array.size(dvValArr) > MAX_VWAP_PTS
+    array.shift(dvValArr)
+    array.shift(dvIdxArr)
+if array.size(wvValArr) > MAX_VWAP_PTS
+    array.shift(wvValArr)
+    array.shift(wvIdxArr)
+
+// ── plot() — used ONLY for Solid style (live real-time rendering) ──
+plot(InpShowSessionVWAP and InpSessionVWAPStyle == "Solid" ? sessionVwap : na,
+     title     = "Session VWAP",
+     color     = InpSessionVWAPColor,
+     linewidth = InpSessionVWAPWidth,
+     style     = plot.style_line)
+
+plot(InpShowDailyVWAP and InpDailyVWAPStyle == "Solid" ? dailyVwap : na,
+     title     = "Daily VWAP",
+     color     = InpDailyVWAPColor,
+     linewidth = InpDailyVWAPWidth,
+     style     = plot.style_line)
+
+plot(InpShowWeeklyVWAP and InpWeeklyVWAPStyle == "Solid" ? weeklyVwap : na,
+     title     = "Weekly VWAP",
+     color     = InpWeeklyVWAPColor,
+     linewidth = InpWeeklyVWAPWidth,
+     style     = plot.style_line)
+
+// ════════════════════════════════════════════════════════════════════
+//  MOVING AVERAGE ENGINE
+// ════════════════════════════════════════════════════════════════════
+f_appliedPrice(string ap) =>
+    ap == MAP_OPEN  ? open  :
+     ap == MAP_HIGH  ? high  :
+     ap == MAP_LOW   ? low   :
+     ap == MAP_HL2   ? (high + low) / 2.0 :
+     ap == MAP_HLC3  ? (high + low + close) / 3.0 :
+     ap == MAP_OHLC4 ? (open + high + low + close) / 4.0 :
+     close
+
+f_ma(string maType, int period, float src) =>
+    float result = na
+    if maType == MA_SMA
+        result := ta.sma(src, period)
+    else if maType == MA_EMA
+        result := ta.ema(src, period)
+    else if maType == MA_WMA
+        result := ta.wma(src, period)
+    else if maType == MA_SMMA
+        result := ta.rma(src, period)
+    else if maType == MA_DEMA
+        e1 = ta.ema(src, period)
+        e2 = ta.ema(e1, period)
+        result := 2.0 * e1 - e2
+    else if maType == MA_TEMA
+        e1 = ta.ema(src, period)
+        e2 = ta.ema(e1, period)
+        e3 = ta.ema(e2, period)
+        result := 3.0 * e1 - 3.0 * e2 + e3
+    result
+
+f_maTypeName(string t) =>
+    t == MA_EMA  ? "EMA"  :
+     t == MA_WMA  ? "WMA"  :
+     t == MA_SMMA ? "SMMA" :
+     t == MA_DEMA ? "DEMA" :
+     t == MA_TEMA ? "TEMA" :
+     "SMA"
+
+ma1 = InpMA1Enable ? f_ma(InpMA1Type, InpMA1Period, f_appliedPrice(InpMA1Price)) : na
+ma2 = InpMA2Enable ? f_ma(InpMA2Type, InpMA2Period, f_appliedPrice(InpMA2Price)) : na
+ma3 = InpMA3Enable ? f_ma(InpMA3Type, InpMA3Period, f_appliedPrice(InpMA3Price)) : na
+ma4 = InpMA4Enable ? f_ma(InpMA4Type, InpMA4Period, f_appliedPrice(InpMA4Price)) : na
+
+plot(ma1, "MA 1", color=InpMA1Color, linewidth=InpMA1Width, style=plot.style_line)
+plot(ma2, "MA 2", color=InpMA2Color, linewidth=InpMA2Width, style=plot.style_line)
+plot(ma3, "MA 3", color=InpMA3Color, linewidth=InpMA3Width, style=plot.style_line)
+plot(ma4, "MA 4", color=InpMA4Color, linewidth=InpMA4Width, style=plot.style_line)
+
+var label ma1Lbl = na
+var label ma2Lbl = na
+var label ma3Lbl = na
+var label ma4Lbl = na
+
+// MA labels: create each label ONCE, then move/update it in place with
+// set_* on subsequent ticks. Recreating them every tick (the old approach)
+// made them flicker; moving a persistent object does not.
+f_updateMaLabel(label lb, bool enabled, float v, string txt, color c) =>
+    label out = lb
+    if enabled and not na(v)
+        if na(out)
+            out := label.new(time + g_barMs * InpLabelShiftBars, v, txt, xloc=xloc.bar_time, yloc=yloc.price, color=color.new(color.white,100), style=label.style_label_left, textcolor=c, size=size.small)
+        else
+            label.set_xy(out, time + g_barMs * InpLabelShiftBars, v)
+            label.set_text(out, txt)
+            label.set_textcolor(out, c)
+    else
+        if not na(out)
+            label.delete(out)
+            out := na
+    out
+
+if barstate.islast
+    ma1Lbl := f_updateMaLabel(ma1Lbl, InpMA1Enable and InpMA1Label, ma1, f_maTypeName(InpMA1Type) + " " + str.tostring(InpMA1Period), InpMA1Color)
+    ma2Lbl := f_updateMaLabel(ma2Lbl, InpMA2Enable and InpMA2Label, ma2, f_maTypeName(InpMA2Type) + " " + str.tostring(InpMA2Period), InpMA2Color)
+    ma3Lbl := f_updateMaLabel(ma3Lbl, InpMA3Enable and InpMA3Label, ma3, f_maTypeName(InpMA3Type) + " " + str.tostring(InpMA3Period), InpMA3Color)
+    ma4Lbl := f_updateMaLabel(ma4Lbl, InpMA4Enable and InpMA4Label, ma4, f_maTypeName(InpMA4Type) + " " + str.tostring(InpMA4Period), InpMA4Color)
+
+// ════════════════════════════════════════════════════════════════════
+//  LABEL-OVERLAP / COINCIDENCE TRACKER
+// ════════════════════════════════════════════════════════════════════
+CHARS_PER_BAR = 1.5
+
+var float[] g_lblPrice  = array.new_float(0)
+var int[]   g_lblXEnd   = array.new_int(0)
+var label[] g_lblHandle = array.new_label(0)
+
+f_resetLabelTracker() =>
+    array.clear(g_lblPrice)
+    array.clear(g_lblXEnd)
+    array.clear(g_lblHandle)
+
+f_findCoincidentLabel(float price) =>
+    tol = InpLabelOverlapPoints * syminfo.mintick
+    int found = -1
+    n = array.size(g_lblPrice)
+    if n > 0
+        for i = 0 to n - 1
+            if math.abs(array.get(g_lblPrice, i) - price) <= tol
+                found := i
+                break
+    found
+
+f_appendToLabel(int idx, string newTxt) =>
+    lb      = array.get(g_lblHandle, idx)
+    oldTxt  = label.get_text(lb)
+    label.set_text(lb, oldTxt + "  " + newTxt)
+
+f_nextLabelX(float price, string txt, int xBase) =>
+    tol        = InpLabelOverlapPoints * syminfo.mintick
+    int xStart = xBase
+    n = array.size(g_lblPrice)
+    if n > 0
+        for i = 0 to n - 1
+            if math.abs(array.get(g_lblPrice, i) - price) <= tol
+                xe = array.get(g_lblXEnd, i)
+                if xe > xStart
+                    xStart := xe
+    charCount = str.length(txt)
+    xEnd = xStart + math.round(charCount * CHARS_PER_BAR * g_barMs) + g_barMs
+    array.push(g_lblPrice, price)
+    array.push(g_lblXEnd,  xEnd)
+    xStart
+
+// ════════════════════════════════════════════════════════════════════
+//  PERSISTENT DRAWING OBJECTS
+// ════════════════════════════════════════════════════════════════════
+var line  wH_ln    = na
+var label wH_lb    = na
+var line  wL_ln    = na
+var label wL_lb    = na
+var line  wC_ln    = na
+var label wC_lb    = na
+var line  dH_ln    = na
+var label dH_lb    = na
+var line  dL_ln    = na
+var label dL_lb    = na
+var line  dC_ln    = na
+var label dC_lb    = na
+var line  hcom_ln  = na
+var label hcom_lb  = na
+var line  lcom_ln  = na
+var label lcom_lb  = na
+var line  phcom_ln = na
+var label phcom_lb = na
+var line  plcom_ln = na
+var label plcom_lb = na
+
+var box[]   g_boxes    = array.new_box(0)
+var line[]  g_midLines = array.new_line(0)
+var label[] g_midLbls  = array.new_label(0)
+
+var box[]   g_ogBoxes    = array.new_box(0)
+var line[]  g_ogMidLines = array.new_line(0)
+var label[] g_ogLabels   = array.new_label(0)
+
+// ── Historical monthly close level drawing objects ─────────────────
+var line[]  g_histLines  = array.new_line(0)
+var label[] g_histLabels = array.new_label(0)
+
+// ── Previous-year monthly close level drawing objects ──────────────
+var line[]  g_pyLines  = array.new_line(0)
+var label[] g_pyLabels = array.new_label(0)
+
+// ── VWAP line-object pool (for Dash / Dot styles) ─────────────────
+var line[] g_vwapLines = array.new_line(0)
+
+f_clearPool() =>
+    sz = array.size(g_boxes)
+    if sz > 0
+        for i = 0 to sz - 1
+            box.delete(array.get(g_boxes, i))
+        array.clear(g_boxes)
+    sz2 = array.size(g_midLines)
+    if sz2 > 0
+        for i = 0 to sz2 - 1
+            line.delete(array.get(g_midLines, i))
+        array.clear(g_midLines)
+    sz3 = array.size(g_midLbls)
+    if sz3 > 0
+        for i = 0 to sz3 - 1
+            label.delete(array.get(g_midLbls, i))
+        array.clear(g_midLbls)
+    sz4 = array.size(g_ogBoxes)
+    if sz4 > 0
+        for i = 0 to sz4 - 1
+            box.delete(array.get(g_ogBoxes, i))
+        array.clear(g_ogBoxes)
+    sz5 = array.size(g_ogMidLines)
+    if sz5 > 0
+        for i = 0 to sz5 - 1
+            line.delete(array.get(g_ogMidLines, i))
+        array.clear(g_ogMidLines)
+    sz6 = array.size(g_ogLabels)
+    if sz6 > 0
+        for i = 0 to sz6 - 1
+            label.delete(array.get(g_ogLabels, i))
+        array.clear(g_ogLabels)
+    sz7 = array.size(g_histLines)
+    if sz7 > 0
+        for i = 0 to sz7 - 1
+            line.delete(array.get(g_histLines, i))
+        array.clear(g_histLines)
+    sz8 = array.size(g_histLabels)
+    if sz8 > 0
+        for i = 0 to sz8 - 1
+            label.delete(array.get(g_histLabels, i))
+        array.clear(g_histLabels)
+    // Clear previous-year line/label objects
+    szPyL = array.size(g_pyLines)
+    if szPyL > 0
+        for i = 0 to szPyL - 1
+            line.delete(array.get(g_pyLines, i))
+        array.clear(g_pyLines)
+    szPyB = array.size(g_pyLabels)
+    if szPyB > 0
+        for i = 0 to szPyB - 1
+            label.delete(array.get(g_pyLabels, i))
+        array.clear(g_pyLabels)
+    // Clear VWAP line objects
+    sz9 = array.size(g_vwapLines)
+    if sz9 > 0
+        for i = 0 to sz9 - 1
+            line.delete(array.get(g_vwapLines, i))
+        array.clear(g_vwapLines)
+
+// ════════════════════════════════════════════════════════════════════
+//  PRIMITIVE HELPERS
+// ════════════════════════════════════════════════════════════════════
+f_setHLine(line ln, int x1, int x2, float price, color clr, string styleStr, int width) =>
+    line.delete(ln)
+    line.new(x1, price, x2, price, xloc=xloc.bar_time, extend=extend.none, color=clr, style=f_lineStyle(styleStr), width=width)
+
+f_setLevelLabel(label lb, int xEdge, float price, string txt, color clr, string sizeStr) =>
+    label.delete(lb)
+    coinIdx = f_findCoincidentLabel(price)
+    label result = na
+    if coinIdx >= 0
+        f_appendToLabel(coinIdx, txt)
+        result := array.get(g_lblHandle, coinIdx)
+    else
+        xStart = f_nextLabelX(price, txt, xEdge)
+        newLb  = label.new(xStart, price, txt, xloc=xloc.bar_time, yloc=yloc.price, color=color.new(color.white,100), style=label.style_label_left, textcolor=clr, size=f_textSize(sizeStr))
+        array.push(g_lblHandle, newLb)
+        result := newLb
+    result
+
+// ════════════════════════════════════════════════════════════════════
+//  FVG IMBALANCE DRAW
+// ════════════════════════════════════════════════════════════════════
+f_drawImbalances(int[] arrT, float[] arrH, float[] arrL, bool show, bool showMid, color cBull, color cBear, int alpha, color cMid, string midStyle, int midWidth, string midSizeStr, int barsBack, string tag) =>
+    if show
+        n = array.size(arrT)
+        if n >= 3
+            start = n - 2
+            stop  = math.max(1, n - 1 - barsBack)
+            if stop <= start
+                x2    = f_rightEdgeTime()
+                drawn = 0
+                for j = 0 to (start - stop)
+                    if drawn >= InpMaxImbalances
+                        break
+                    idx = start - j
+                    if idx < 1 or idx > n - 2
+                        continue
+                    h1 = array.get(arrH, idx - 1)
+                    l1 = array.get(arrL, idx - 1)
+                    h3 = array.get(arrH, idx + 1)
+                    l3 = array.get(arrL, idx + 1)
+                    x1 = f_safeAnchorTime(array.get(arrT, idx))
+                    if l3 > h1
+                        mid    = (l3 + h1) * 0.5
+                        bx     = box.new(x1, l3, x2, h1, xloc=xloc.bar_time, border_color=color.new(color.white,100), bgcolor=f_fillColor(cBull, alpha))
+                        array.push(g_boxes, bx)
+                        if showMid
+                            ml     = line.new(x1, mid, x2, mid, xloc=xloc.bar_time, extend=extend.none, color=cMid, style=f_lineStyle(midStyle), width=midWidth)
+                            array.push(g_midLines, ml)
+                            midTxt = tag + "-Mid"
+                            xLbl   = f_nextLabelX(mid, midTxt, x2)
+                            mlb    = label.new(xLbl, mid, midTxt, xloc=xloc.bar_time, yloc=yloc.price, color=color.new(color.white,100), style=label.style_label_left, textcolor=cMid, size=f_textSize(midSizeStr))
+                            array.push(g_midLbls, mlb)
+                            array.push(g_lblHandle, mlb)
+                        drawn += 1
+                    if h3 < l1
+                        mid    = (l1 + h3) * 0.5
+                        bx     = box.new(x1, h3, x2, l1, xloc=xloc.bar_time, border_color=color.new(color.white,100), bgcolor=f_fillColor(cBear, alpha))
+                        array.push(g_boxes, bx)
+                        if showMid
+                            ml     = line.new(x1, mid, x2, mid, xloc=xloc.bar_time, extend=extend.none, color=cMid, style=f_lineStyle(midStyle), width=midWidth)
+                            array.push(g_midLines, ml)
+                            midTxt = tag + "-Mid"
+                            xLbl   = f_nextLabelX(mid, midTxt, x2)
+                            mlb    = label.new(xLbl, mid, midTxt, xloc=xloc.bar_time, yloc=yloc.price, color=color.new(color.white,100), style=label.style_label_left, textcolor=cMid, size=f_textSize(midSizeStr))
+                            array.push(g_midLbls, mlb)
+                            array.push(g_lblHandle, mlb)
+                        drawn += 1
+
+// ════════════════════════════════════════════════════════════════════
+//  OPENING GAP DRAW
+// ════════════════════════════════════════════════════════════════════
+f_drawOG(int[] arrT, float[] arrO, float[] arrC, bool show, int count, color fillClr, int fillAlpha, color borderClr, string borderStyle, int borderWidth, bool extendBox, bool showMid, color midClr, string midStyle, int midWidth, bool extendMid, string fontSize, string labelTxt) =>
+    if show
+        n = array.size(arrT)
+        if n > 0
+            int x2box = extendBox ? time + g_barMs * 5000 : f_rightEdgeTime()
+            int x2mid = extendMid ? time + g_barMs * 5000 : f_rightEdgeTime()
+
+            drawn = 0
+            startIdx = n - 1
+            for i = 0 to n - 1
+                if drawn >= count
+                    break
+                idx = startIdx - i
+                if idx < 0
+                    break
+                x1   = f_safeAnchorTime(array.get(arrT, idx))
+                ogO  = array.get(arrO, idx)
+                ogC  = array.get(arrC, idx)
+                hi   = math.max(ogO, ogC)
+                lo   = math.min(ogO, ogC)
+                mid  = (hi + lo) * 0.5
+
+                bx = box.new(
+                     x1, hi, x2box, lo,
+                     xloc         = xloc.bar_time,
+                     border_color = borderClr,
+                     border_style = f_lineStyle(borderStyle),
+                     border_width = borderWidth,
+                     bgcolor      = f_fillColor(fillClr, fillAlpha))
+                array.push(g_ogBoxes, bx)
+
+                if showMid
+                    ml = line.new(x1, mid, x2mid, mid,
+                         xloc   = xloc.bar_time,
+                         extend = extend.none,
+                         color  = midClr,
+                         style  = f_lineStyle(midStyle),
+                         width  = midWidth)
+                    array.push(g_ogMidLines, ml)
+
+                    coinIdx = f_findCoincidentLabel(mid)
+                    if coinIdx >= 0
+                        f_appendToLabel(coinIdx, labelTxt)
+                    else
+                        xLbl = f_nextLabelX(mid, labelTxt, x2mid)
+                        lb = label.new(
+                             xLbl, mid, labelTxt,
+                             xloc      = xloc.bar_time,
+                             yloc      = yloc.price,
+                             color     = color.new(color.white, 100),
+                             style     = label.style_label_left,
+                             textcolor = midClr,
+                             size      = f_textSize(fontSize))
+                        array.push(g_ogLabels, lb)
+                        array.push(g_lblHandle, lb)
+
+                drawn += 1
+
+// ════════════════════════════════════════════════════════════════════
+//  MONTHLY CLOSE STATE  (driven by TF-independent monState)
+// ════════════════════════════════════════════════════════════════════
+var int   curMonKey  = na
+var int   prevMonKey = -1
+var float curHighV   = na
+var float curLowV    = na
+var int   curHighT   = na
+var int   curLowT    = na
+var float prevHighV  = na
+var float prevLowV   = na
+var int   prevHighT  = na
+var int   prevLowT   = na
+
+// Historical month ring buffer.
+// 14 slots cover the current month plus the 12-month maximum the Historical
+// Monthly Levels feature can display, with a small buffer. (The separate
+// Previous-Year feature sources its data from the dedicated daily engine,
+// not from this store, so no extra capacity is needed here.)
+var int[]   histMonKeys = array.new_int(0)
+var float[] histHighV   = array.new_float(0)
+var float[] histLowV    = array.new_float(0)
+var int[]   histHighT   = array.new_int(0)
+var int[]   histLowT    = array.new_int(0)
+
+MAX_HIST_SLOTS = 14
+
+f_histPush(int monKey, float hv, float lv, int ht, int lt) =>
+    bool found = false
+    n = array.size(histMonKeys)
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(histMonKeys, i) == monKey
+                found := true
+                break
+    if not found
+        array.push(histMonKeys, monKey)
+        array.push(histHighV,   hv)
+        array.push(histLowV,    lv)
+        array.push(histHighT,   ht)
+        array.push(histLowT,    lt)
+        if array.size(histMonKeys) > MAX_HIST_SLOTS
+            array.shift(histMonKeys)
+            array.shift(histHighV)
+            array.shift(histLowV)
+            array.shift(histHighT)
+            array.shift(histLowT)
+
+// ── Consume the TF-independent monthly state ──────────────────────
+// monState carries the running daily-close extremes for the month that the
+// most recent confirmed daily bar belongs to. We update current-month live,
+// and on a month-key change we roll current → previous → history. This runs
+// on EVERY chart bar but is idempotent (only acts when monState changes or
+// a new month is detected), so it is identical on 1m and 1D.
+if not na(monState) and not na(monState.monKey)
+    int   mk = monState.monKey
+    float hv = monState.hiV
+    float lv = monState.loV
+    int   ht = monState.hiT
+    int   lt = monState.loT
+
+    if na(curMonKey)
+        curMonKey := mk
+        curHighV  := hv
+        curLowV   := lv
+        curHighT  := ht
+        curLowT   := lt
+
+    if mk > curMonKey
+        // month rolled over — archive the just-completed current month
+        if prevMonKey >= 0 and not na(prevHighV) and not na(prevLowV)
+            f_histPush(prevMonKey, prevHighV, prevLowV, prevHighT, prevLowT)
+        prevMonKey := curMonKey
+        prevHighV  := curHighV
+        prevLowV   := curLowV
+        prevHighT  := curHighT
+        prevLowT   := curLowT
+        curMonKey  := mk
+        curHighV   := hv
+        curLowV    := lv
+        curHighT   := ht
+        curLowT    := lt
+    else if mk == curMonKey
+        // live-update current month extremes
+        curHighV := hv
+        curLowV  := lv
+        curHighT := ht
+        curLowT  := lt
+
+f_monBarTime(int t) =>
+    f_safeAnchorTime(t)
+
+// ════════════════════════════════════════════════════════════════════
+//  REDRAW CHANGE-DETECTION  (anti-flicker / performance)
+//
+//  The previous build deleted and recreated EVERY box/line/label on every
+//  `barstate.islast` execution. On a live market that fires on every tick
+//  (several times per second on XAUUSD), so the whole level set was torn
+//  down and rebuilt constantly — the brief gap between delete and recreate
+//  is what produced the visible flicker/ghosting while scrolling or zooming.
+//
+//  Fix: compute a compact signature of everything that actually affects the
+//  drawn output. The expensive delete+recreate pass now runs ONLY when that
+//  signature changes (a new bar, new HTF/monthly value, or a new FVG/OG zone)
+//  instead of on every tick. When nothing relevant has changed — which is the
+//  case throughout scrolling, zooming and most realtime ticks — the pass is
+//  skipped and the existing on-chart objects are left untouched, so they no
+//  longer blink. (Pine inputs restart the script on change, so they need not
+//  be part of the signature.)
+// ════════════════════════════════════════════════════════════════════
+f_arrLastInt(int[] a) =>
+    int n = array.size(a)
+    n > 0 ? array.get(a, n - 1) : 0
+
+f_arrLastFloat(float[] a) =>
+    int n = array.size(a)
+    n > 0 ? array.get(a, n - 1) : 0.0
+
+// Build the signature only on the last bar (where drawing happens).
+var string g_lastSig = ""
+string g_sig = ""
+bool   g_needRedraw = false
+if barstate.islast
+    // Latest values + array sizes/tails capture every geometry/content driver.
+    // Right edge depends on `time`, so include the last bar time + bar_index
+    // so the extension updates once per new bar (not per tick).
+    // NOTE: deliberately EXCLUDES the MAs — they are computed from the live
+    // `close` and fluctuate on every realtime tick, which would force a redraw
+    // every tick and defeat the anti-flicker gate. The MA *lines* are native
+    // plot() (always smooth) and the MA *labels* update every tick via their
+    // own ungated set_xy block, so neither needs to drive this signature. All
+    // values below are intra-bar stable (HTF-confirmed via [1]/lookahead_off
+    // or pushed only on an HTF/new-bar event), so on a forming bar with no new
+    // HTF data the signature is constant across ticks and the pass is skipped.
+    g_sig := str.tostring(bar_index) + "|" + str.tostring(time) + "|" +
+             str.tostring(wHigh) + "," + str.tostring(wLow) + "," + str.tostring(wClose) + "|" +
+             str.tostring(dHigh) + "," + str.tostring(dLow) + "," + str.tostring(dClose) + "|" +
+             str.tostring(curHighV) + "," + str.tostring(curLowV) + "," +
+             str.tostring(prevHighV) + "," + str.tostring(prevLowV) + "|" +
+             str.tostring(array.size(histMonKeys)) + "," + str.tostring(f_arrLastInt(histMonKeys)) + "|" +
+             str.tostring(array.size(wBT)) + "," + str.tostring(f_arrLastInt(wBT)) + "," +
+             str.tostring(f_arrLastFloat(wHa)) + "," + str.tostring(f_arrLastFloat(wLa)) + "|" +
+             str.tostring(array.size(dBT)) + "," + str.tostring(f_arrLastInt(dBT)) + "," +
+             str.tostring(f_arrLastFloat(dHa)) + "," + str.tostring(f_arrLastFloat(dLa)) + "|" +
+             str.tostring(array.size(wOGT)) + "," + str.tostring(f_arrLastInt(wOGT)) + "|" +
+             str.tostring(array.size(dOGT)) + "," + str.tostring(f_arrLastInt(dOGT)) + "|" +
+             str.tostring(pyJan.hiV) + "," + str.tostring(pyJun.hiV) + "," + str.tostring(pyDec.hiV) + "," +
+             str.tostring(pyJan.loV) + "," + str.tostring(pyJun.loV) + "," + str.tostring(pyDec.loV)
+    g_needRedraw := g_sig != g_lastSig
+    g_lastSig := g_sig
+
+// ════════════════════════════════════════════════════════════════════
+//  MAIN DRAW PASS  (runs only when the signature changed — no per-tick churn)
+// ════════════════════════════════════════════════════════════════════
+if barstate.islast and g_needRedraw
+    f_resetLabelTracker()
+    f_clearPool()
+
+    xEdge = f_rightEdgeTime()
+
+    // ── 0. VWAP — Dash / Dot rendering via line.new() segments ────
+    if InpShowSessionVWAP and InpSessionVWAPStyle != "Solid"
+        svN = array.size(svIdxArr)
+        if svN >= 2
+            for si = 1 to svN - 1
+                x1v = array.get(svIdxArr, si - 1)
+                x2v = array.get(svIdxArr, si)
+                y1v = array.get(svValArr, si - 1)
+                y2v = array.get(svValArr, si)
+                if not na(y1v) and not na(y2v)
+                    ln = line.new(x1v, y1v, x2v, y2v,
+                         xloc  = xloc.bar_index,
+                         color = InpSessionVWAPColor,
+                         style = f_lineStyle(InpSessionVWAPStyle),
+                         width = InpSessionVWAPWidth)
+                    array.push(g_vwapLines, ln)
+
+    if InpShowDailyVWAP and InpDailyVWAPStyle != "Solid"
+        dvN = array.size(dvIdxArr)
+        if dvN >= 2
+            for di = 1 to dvN - 1
+                x1v = array.get(dvIdxArr, di - 1)
+                x2v = array.get(dvIdxArr, di)
+                y1v = array.get(dvValArr, di - 1)
+                y2v = array.get(dvValArr, di)
+                if not na(y1v) and not na(y2v)
+                    ln = line.new(x1v, y1v, x2v, y2v,
+                         xloc  = xloc.bar_index,
+                         color = InpDailyVWAPColor,
+                         style = f_lineStyle(InpDailyVWAPStyle),
+                         width = InpDailyVWAPWidth)
+                    array.push(g_vwapLines, ln)
+
+    if InpShowWeeklyVWAP and InpWeeklyVWAPStyle != "Solid"
+        wvN = array.size(wvIdxArr)
+        if wvN >= 2
+            for wi = 1 to wvN - 1
+                x1v = array.get(wvIdxArr, wi - 1)
+                x2v = array.get(wvIdxArr, wi)
+                y1v = array.get(wvValArr, wi - 1)
+                y2v = array.get(wvValArr, wi)
+                if not na(y1v) and not na(y2v)
+                    ln = line.new(x1v, y1v, x2v, y2v,
+                         xloc  = xloc.bar_index,
+                         color = InpWeeklyVWAPColor,
+                         style = f_lineStyle(InpWeeklyVWAPStyle),
+                         width = InpWeeklyVWAPWidth)
+                    array.push(g_vwapLines, ln)
+
+    // ── 1. WEEKLY LEVELS ───────────────────────────────────────────
+    wSz     = array.size(wBT)
+    wStartT = f_safeAnchorTime(wSz >= 1 ? array.get(wBT, wSz - 1) : time)
+
+    line.delete(wH_ln)
+    wH_ln := na
+    label.delete(wH_lb)
+    wH_lb := na
+    line.delete(wL_ln)
+    wL_ln := na
+    label.delete(wL_lb)
+    wL_lb := na
+    line.delete(wC_ln)
+    wC_ln := na
+    label.delete(wC_lb)
+    wC_lb := na
+
+    if InpShowWeeklyHigh and not na(wHigh)
+        wH_ln := f_setHLine(na, wStartT, xEdge, wHigh, g_WeeklyHighColor, InpWeeklyLineStyle, InpWeeklyLineWidth)
+        if InpShowWeeklyLabels
+            wH_lb := f_setLevelLabel(na, xEdge, wHigh, "PWH", g_WeeklyHighColor, InpWeeklyFontSize)
+    if InpShowWeeklyLow and not na(wLow)
+        wL_ln := f_setHLine(na, wStartT, xEdge, wLow, g_WeeklyLowColor, InpWeeklyLineStyle, InpWeeklyLineWidth)
+        if InpShowWeeklyLabels
+            wL_lb := f_setLevelLabel(na, xEdge, wLow, "PWL", g_WeeklyLowColor, InpWeeklyFontSize)
+    if InpShowWeeklyClose and not na(wClose)
+        wC_ln := f_setHLine(na, wStartT, xEdge, wClose, g_WeeklyCloseColor, InpWeeklyLineStyle, InpWeeklyLineWidth)
+        if InpShowWeeklyLabels
+            wC_lb := f_setLevelLabel(na, xEdge, wClose, "PWC", g_WeeklyCloseColor, InpWeeklyFontSize)
+
+    // ── 2. DAILY LEVELS ────────────────────────────────────────────
+    dSz     = array.size(dBT)
+    dStartT = f_safeAnchorTime(dSz >= 1 ? array.get(dBT, dSz - 1) : time)
+
+    line.delete(dH_ln)
+    dH_ln := na
+    label.delete(dH_lb)
+    dH_lb := na
+    line.delete(dL_ln)
+    dL_ln := na
+    label.delete(dL_lb)
+    dL_lb := na
+    line.delete(dC_ln)
+    dC_ln := na
+    label.delete(dC_lb)
+    dC_lb := na
+
+    if InpShowDailyHigh and not na(dHigh)
+        dH_ln := f_setHLine(na, dStartT, xEdge, dHigh, g_DailyHighColor, InpDailyLineStyle, InpDailyLineWidth)
+        if InpShowDailyLabels
+            dH_lb := f_setLevelLabel(na, xEdge, dHigh, "PDH", g_DailyHighColor, InpDailyFontSize)
+    if InpShowDailyLow and not na(dLow)
+        dL_ln := f_setHLine(na, dStartT, xEdge, dLow, g_DailyLowColor, InpDailyLineStyle, InpDailyLineWidth)
+        if InpShowDailyLabels
+            dL_lb := f_setLevelLabel(na, xEdge, dLow, "PDL", g_DailyLowColor, InpDailyFontSize)
+    if InpShowDailyClose and not na(dClose)
+        dC_ln := f_setHLine(na, dStartT, xEdge, dClose, g_DailyCloseColor, InpDailyLineStyle, InpDailyLineWidth)
+        if InpShowDailyLabels
+            dC_lb := f_setLevelLabel(na, xEdge, dClose, "PDC", g_DailyCloseColor, InpDailyFontSize)
+
+    // ── 3. MONTHLY CLOSE LEVELS ────────────────────────────────────
+    line.delete(hcom_ln)
+    hcom_ln := na
+    label.delete(hcom_lb)
+    hcom_lb := na
+    line.delete(lcom_ln)
+    lcom_ln := na
+    label.delete(lcom_lb)
+    lcom_lb := na
+    line.delete(phcom_ln)
+    phcom_ln := na
+    label.delete(phcom_lb)
+    phcom_lb := na
+    line.delete(plcom_ln)
+    plcom_ln := na
+    label.delete(plcom_lb)
+    plcom_lb := na
+
+    if InpShowMonthlyCloseLevels
+        if not na(curHighV)
+            hcom_ln := f_setHLine(na, f_monBarTime(curHighT), xEdge, curHighV, InpHCOMColor, InpMonthlyLineStyle, InpMonthlyLineWidth)
+            hcom_lb := f_setLevelLabel(na, xEdge, curHighV, "HCOM", InpHCOMColor, InpMonthlyFontSize)
+        if not na(curLowV)
+            lcom_ln := f_setHLine(na, f_monBarTime(curLowT), xEdge, curLowV, InpLCOMColor, InpMonthlyLineStyle, InpMonthlyLineWidth)
+            lcom_lb := f_setLevelLabel(na, xEdge, curLowV, "LCOM", InpLCOMColor, InpMonthlyFontSize)
+        if not na(prevHighV)
+            phcom_ln := f_setHLine(na, f_monBarTime(prevHighT), xEdge, prevHighV, InpPHCOMColor, InpMonthlyLineStyle, InpMonthlyLineWidth)
+            phcom_lb := f_setLevelLabel(na, xEdge, prevHighV, "PHCOM", InpPHCOMColor, InpMonthlyFontSize)
+        if not na(prevLowV)
+            plcom_ln := f_setHLine(na, f_monBarTime(prevLowT), xEdge, prevLowV, InpPLCOMColor, InpMonthlyLineStyle, InpMonthlyLineWidth)
+            plcom_lb := f_setLevelLabel(na, xEdge, prevLowV, "PLCOM", InpPLCOMColor, InpMonthlyFontSize)
+
+    // ── 3b. HISTORICAL MONTHLY CLOSE LEVELS ────────────────────────
+    if InpShowHistMonthly
+        hSz = array.size(histMonKeys)
+        if hSz > 0
+            drawnHist = 0
+            for hi = hSz - 1 to 0
+                if drawnHist >= InpHistMonthsBack
+                    break
+                hMonKey = array.get(histMonKeys, hi)
+                hHV     = array.get(histHighV, hi)
+                hLV     = array.get(histLowV, hi)
+                hHT     = array.get(histHighT, hi)
+                hLT     = array.get(histLowT, hi)
+
+                // FIXED month extraction (true integer division)
+                hMonNum = math.round(hMonKey - math.floor(hMonKey / 12) * 12)
+                if hMonNum == 0
+                    hMonNum := 12
+                hMonLabel = f_monthName(hMonNum)
+
+                if not na(hHV)
+                    ln = line.new(
+                         f_monBarTime(hHT), hHV, xEdge, hHV,
+                         xloc   = xloc.bar_time,
+                         extend = extend.none,
+                         color  = InpHistHCOMColor,
+                         style  = f_lineStyle(InpHistMonthlyLineStyle),
+                         width  = InpHistMonthlyLineWidth)
+                    array.push(g_histLines, ln)
+                    hTxt   = hMonLabel + " HCOM"
+                    coinH  = f_findCoincidentLabel(hHV)
+                    if coinH >= 0
+                        f_appendToLabel(coinH, hTxt)
+                    else
+                        xLbl = f_nextLabelX(hHV, hTxt, xEdge)
+                        lb   = label.new(
+                             xLbl, hHV, hTxt,
+                             xloc      = xloc.bar_time,
+                             yloc      = yloc.price,
+                             color     = color.new(color.white, 100),
+                             style     = label.style_label_left,
+                             textcolor = InpHistHCOMColor,
+                             size      = f_textSize(InpHistMonthlyFontSize))
+                        array.push(g_histLabels, lb)
+                        array.push(g_lblHandle,  lb)
+
+                if not na(hLV)
+                    ln = line.new(
+                         f_monBarTime(hLT), hLV, xEdge, hLV,
+                         xloc   = xloc.bar_time,
+                         extend = extend.none,
+                         color  = InpHistLCOMColor,
+                         style  = f_lineStyle(InpHistMonthlyLineStyle),
+                         width  = InpHistMonthlyLineWidth)
+                    array.push(g_histLines, ln)
+                    lTxt   = hMonLabel + " LCOM"
+                    coinL  = f_findCoincidentLabel(hLV)
+                    if coinL >= 0
+                        f_appendToLabel(coinL, lTxt)
+                    else
+                        xLbl = f_nextLabelX(hLV, lTxt, xEdge)
+                        lb   = label.new(
+                             xLbl, hLV, lTxt,
+                             xloc      = xloc.bar_time,
+                             yloc      = yloc.price,
+                             color     = color.new(color.white, 100),
+                             style     = label.style_label_left,
+                             textcolor = InpHistLCOMColor,
+                             size      = f_textSize(InpHistMonthlyFontSize))
+                        array.push(g_histLabels, lb)
+                        array.push(g_lblHandle,  lb)
+
+                drawnHist += 1
+
+    // ── 3c. PREVIOUS YEAR MONTHLY CLOSE LEVELS ─────────────────────
+    // Draw, for each of the 12 months, the SECOND-most-recent occurrence's
+    // HCOM/LCOM — i.e. one year before the most recent occurrence of that
+    // month, which is exactly one year behind whatever the Historical feature
+    // shows, so the two never collide. Sourced from the dedicated prior-year
+    // daily engine (g_pyMonths): index 0 = Jan … 11 = Dec, each carrying that
+    // month's hi/lo of daily close plus the year it came from (pm.yr). Labels
+    // are prefixed "P " + month, e.g. "P DEC HCOM". Independent of the chart's
+    // loaded bars, so it is correct on 1m through 1D.
+    if InpShowPYMonthly and array.size(g_pyMonths) == 12
+        for mi = 0 to 11
+            int     mNum = mi + 1
+            PYMonth pm   = array.get(g_pyMonths, mi)
+            float   pHV  = pm.hiV
+            float   pLV  = pm.loV
+            int     pYr  = pm.yr
+            string  pMonLabel = f_monthName(mNum)
+            // Anchor each line at the start of that specific month/year,
+            // clamped to the first loaded bar so xloc.bar_time always renders.
+            int mAnchor = na(pYr) ? f_safeAnchorTime(time) : f_safeAnchorTime(timestamp(syminfo.timezone, pYr, mNum, 1, 0, 0))
+
+            if InpPYShowHCOM and not na(pHV)
+                ln = line.new(
+                     mAnchor, pHV, xEdge, pHV,
+                     xloc   = xloc.bar_time,
+                     extend = extend.none,
+                     color  = InpPYHCOMColor,
+                     style  = f_lineStyle(InpPYMonthlyLineStyle),
+                     width  = InpPYMonthlyLineWidth)
+                array.push(g_pyLines, ln)
+                pTxt  = "P " + pMonLabel + " HCOM"
+                coinP = f_findCoincidentLabel(pHV)
+                if coinP >= 0
+                    f_appendToLabel(coinP, pTxt)
+                else
+                    xLbl = f_nextLabelX(pHV, pTxt, xEdge)
+                    lb   = label.new(
+                         xLbl, pHV, pTxt,
+                         xloc      = xloc.bar_time,
+                         yloc      = yloc.price,
+                         color     = color.new(color.white, 100),
+                         style     = label.style_label_left,
+                         textcolor = InpPYHCOMColor,
+                         size      = f_textSize(InpPYMonthlyFontSize))
+                    array.push(g_pyLabels,  lb)
+                    array.push(g_lblHandle, lb)
+
+            if InpPYShowLCOM and not na(pLV)
+                ln = line.new(
+                     mAnchor, pLV, xEdge, pLV,
+                     xloc   = xloc.bar_time,
+                     extend = extend.none,
+                     color  = InpPYLCOMColor,
+                     style  = f_lineStyle(InpPYMonthlyLineStyle),
+                     width  = InpPYMonthlyLineWidth)
+                array.push(g_pyLines, ln)
+                pTxt  = "P " + pMonLabel + " LCOM"
+                coinP = f_findCoincidentLabel(pLV)
+                if coinP >= 0
+                    f_appendToLabel(coinP, pTxt)
+                else
+                    xLbl = f_nextLabelX(pLV, pTxt, xEdge)
+                    lb   = label.new(
+                         xLbl, pLV, pTxt,
+                         xloc      = xloc.bar_time,
+                         yloc      = yloc.price,
+                         color     = color.new(color.white, 100),
+                         style     = label.style_label_left,
+                         textcolor = InpPYLCOMColor,
+                         size      = f_textSize(InpPYMonthlyFontSize))
+                    array.push(g_pyLabels,  lb)
+                    array.push(g_lblHandle, lb)
+
+    // ── 4 & 5. FVG IMBALANCES ─────────────────────────────────────
+    f_drawImbalances(wBT, wHa, wLa, InpShowWeeklyImbalance, InpShowWeeklyMidpoint, g_WeeklyImbalanceBull, g_WeeklyImbalanceBear, InpWeeklyImbalanceAlpha, g_WeeklyMidColor, InpWeeklyMidStyle, InpWeeklyMidWidth, InpWeeklyImbalanceFontSize, InpWeeksBack, "W")
+    f_drawImbalances(dBT, dHa, dLa, InpShowDailyImbalance,  InpShowDailyMidpoint,  g_DailyImbalanceBull,  g_DailyImbalanceBear,  InpDailyImbalanceAlpha,  g_DailyMidColor,  InpDailyMidStyle,  InpDailyMidWidth,  InpDailyImbalanceFontSize,  InpDaysBack,  "D")
+
+    // ── 6. NWOG — New Weekly Opening Gaps ─────────────────────────
+    f_drawOG(
+         wOGT, wOGO, wOGC,
+         InpShowNWOG,
+         InpNWOGCount,
+         InpNWOGFillColor,   InpNWOGFillAlpha,
+         InpNWOGBorderColor, InpNWOGBorderStyle, InpNWOGBorderWidth,
+         InpNWOGExtend,
+         InpNWOGShowMid,
+         InpNWOGMidColor, InpNWOGMidStyle, InpNWOGMidWidth,
+         InpNWOGMidExtend,
+         InpNWOGFontSize,
+         "NWOG")
+
+    // ── 7. NDOG — New Daily Opening Gaps ──────────────────────────
+    f_drawOG(
+         dOGT, dOGO, dOGC,
+         InpShowNDOG,
+         InpNDOGCount,
+         InpNDOGFillColor,   InpNDOGFillAlpha,
+         InpNDOGBorderColor, InpNDOGBorderStyle, InpNDOGBorderWidth,
+         InpNDOGExtend,
+         InpNDOGShowMid,
+         InpNDOGMidColor, InpNDOGMidStyle, InpNDOGMidWidth,
+         InpNDOGMidExtend,
+         InpNDOGFontSize,
+         "NDOG")
+

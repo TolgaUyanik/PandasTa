@@ -1,0 +1,213 @@
+//@version=6
+strategy("Tomukas Wave VWAP DCA Scalper PRO Clean Confirmed", overlay=true, pyramiding=4, process_orders_on_close=true, default_qty_type=strategy.percent_of_equity)
+
+//━━━━━━━━━━ INPUTS ━━━━━━━━━━
+emaLen      = input.int(200, "EMA Trend Length")
+tpPerc      = input.float(0.6, "Basket TP %", step=0.1)
+ddStopPerc  = input.float(4.0, "Basket DD Stop %", step=0.1)
+addStepPerc = input.float(1.0, "DCA Add Every % Against", step=0.1)
+
+useSession  = input.bool(false, "Use Session Filter")
+tradeSess   = input.session("0930-1600", "Trade Session")
+tz          = input.string("America/New_York", "Timezone")
+
+useVWAP     = input.bool(true, "Use VWAP Filter")
+useMomentum = input.bool(true, "Use Momentum Confirm")
+useVolZone  = input.bool(true, "Use Volume Profile Zone")
+
+//━━━━━━━━━━ CORE FILTERS ━━━━━━━━━━
+ema200  = ta.ema(close, emaLen)
+ema50   = ta.ema(close, 50)
+ema20   = ta.ema(close, 20)
+vwapVal = ta.vwap(hlc3)
+
+trendUp   = ema50 > ema200
+trendDown = ema50 < ema200
+
+inSession = not useSession or not na(time(timeframe.period, tradeSess, tz))
+
+//━━━━━━━━━━ RANGE FILTER ━━━━━━━━━━
+smoothLen = input.int(27, "Range Smooth Length")
+sens      = input.float(1.8, "Range Sensitivity", step=0.1)
+
+rangeBase   = ta.ema(math.abs(close - close[1]), smoothLen)
+rangeSmooth = ta.ema(rangeBase, smoothLen * 2 - 1) * sens
+
+var float rangeFilter = na
+prevRange = nz(rangeFilter[1], close)
+
+rangeFilter := close > prevRange ? close - rangeSmooth < prevRange ? prevRange : close - rangeSmooth : close + rangeSmooth > prevRange ? prevRange : close + rangeSmooth
+
+rangeBull = close > rangeFilter
+rangeBear = close < rangeFilter
+
+//━━━━━━━━━━ WAVE MOMENTUM ━━━━━━━━━━
+wtFastLen = input.int(9, "Wave Fast")
+wtSlowLen = input.int(6, "Wave Slow")
+
+esa = ta.ema(hlc3, wtFastLen)
+dev = ta.ema(math.abs(hlc3 - esa), wtFastLen)
+wave = ta.ema((hlc3 - esa) / (0.015 * dev), wtSlowLen)
+waveSignal = ta.sma(wave, 3)
+
+waveBullCross = ta.crossover(wave, waveSignal)
+waveBearCross = ta.crossunder(wave, waveSignal)
+
+//━━━━━━━━━━ MOMENTUM CONFIRM ━━━━━━━━━━
+rsi = ta.rsi(close, 14)
+
+macdFast = ta.ema(close, 12)
+macdSlow = ta.ema(close, 26)
+macd = macdFast - macdSlow
+macdSignal = ta.ema(macd, 9)
+
+momBull = not useMomentum or (rsi > 50 and macd > macdSignal and close > ema20)
+momBear = not useMomentum or (rsi < 50 and macd < macdSignal and close < ema20)
+
+//━━━━━━━━━━ VOLUME PROFILE STYLE ZONE ━━━━━━━━━━
+volMA = ta.sma(volume, 20)
+volOK = volume > volMA
+
+vpLookback = input.int(80, "Volume Profile Lookback")
+highVolBar = volume == ta.highest(volume, vpLookback)
+
+var float volumeNode = na
+
+if highVolBar
+    volumeNode := hlc3
+
+nearVolNode = not na(volumeNode) and math.abs(close - volumeNode) / close < 0.003
+
+volZoneLong  = not useVolZone or na(volumeNode) or close > volumeNode or nearVolNode
+volZoneShort = not useVolZone or na(volumeNode) or close < volumeNode or nearVolNode
+
+//━━━━━━━━━━ VWAP FILTER ━━━━━━━━━━
+vwapLong  = not useVWAP or close > vwapVal
+vwapShort = not useVWAP or close < vwapVal
+
+//━━━━━━━━━━ PRESSURE FILTER ━━━━━━━━━━
+bullPressure = rsi > 50 and volOK
+bearPressure = rsi < 50 and volOK
+
+//━━━━━━━━━━ CONFIRMED SIGNALS ONLY ━━━━━━━━━━
+confirmedLong =
+     close > ema200 and
+     trendUp and
+     rangeBull and
+     waveBullCross and
+     bullPressure and
+     vwapLong and
+     momBull and
+     volZoneLong and
+     close > high[1]
+
+confirmedShort =
+     close < ema200 and
+     trendDown and
+     rangeBear and
+     waveBearCross and
+     bearPressure and
+     vwapShort and
+     momBear and
+     volZoneShort and
+     close < low[1]
+
+longSignal =
+     inSession and
+     strategy.position_size == 0 and
+     strategy.opentrades == 0 and
+     confirmedLong
+
+shortSignal =
+     inSession and
+     strategy.position_size == 0 and
+     strategy.opentrades == 0 and
+     confirmedShort
+
+//━━━━━━━━━━ DCA STATE ━━━━━━━━━━
+var int dcaCount = 0
+var float firstEntry = na
+
+if strategy.position_size == 0
+    dcaCount := 0
+    firstEntry := na
+
+//━━━━━━━━━━ FIRST ENTRY ━━━━━━━━━━
+if longSignal
+    strategy.entry("L1", strategy.long, qty=0.5)
+    firstEntry := close
+    dcaCount := 1
+
+if shortSignal
+    strategy.entry("S1", strategy.short, qty=0.5)
+    firstEntry := close
+    dcaCount := 1
+
+//━━━━━━━━━━ DCA CONDITIONS ━━━━━━━━━━
+longAdd1  = strategy.position_size > 0 and dcaCount == 1 and close <= firstEntry * (1 - addStepPerc * 1 / 100)
+longAdd2  = strategy.position_size > 0 and dcaCount == 2 and close <= firstEntry * (1 - addStepPerc * 2 / 100)
+longAdd3  = strategy.position_size > 0 and dcaCount == 3 and close <= firstEntry * (1 - addStepPerc * 3 / 100)
+longAdd4  = strategy.position_size > 0 and dcaCount == 4 and close <= firstEntry * (1 - addStepPerc * 4 / 100)
+
+shortAdd1 = strategy.position_size < 0 and dcaCount == 1 and close >= firstEntry * (1 + addStepPerc * 1 / 100)
+shortAdd2 = strategy.position_size < 0 and dcaCount == 2 and close >= firstEntry * (1 + addStepPerc * 2 / 100)
+shortAdd3 = strategy.position_size < 0 and dcaCount == 3 and close >= firstEntry * (1 + addStepPerc * 3 / 100)
+shortAdd4 = strategy.position_size < 0 and dcaCount == 4 and close >= firstEntry * (1 + addStepPerc * 4 / 100)
+
+//━━━━━━━━━━ DCA ENTRIES ━━━━━━━━━━
+if longAdd1
+    strategy.entry("L2", strategy.long, qty=0.5)
+    dcaCount := 2
+
+if longAdd2
+    strategy.entry("L3", strategy.long, qty=1)
+    dcaCount := 3
+
+if longAdd3
+    strategy.entry("L4", strategy.long, qty=2)
+    dcaCount := 4
+
+if longAdd4
+    strategy.entry("L5", strategy.long, qty=4)
+    dcaCount := 5
+
+if shortAdd1
+    strategy.entry("S2", strategy.short, qty=0.5)
+    dcaCount := 2
+
+if shortAdd2
+    strategy.entry("S3", strategy.short, qty=1)
+    dcaCount := 3
+
+if shortAdd3
+    strategy.entry("S4", strategy.short, qty=2)
+    dcaCount := 4
+
+if shortAdd4
+    strategy.entry("S5", strategy.short, qty=4)
+    dcaCount := 5
+
+//━━━━━━━━━━ EXITS ━━━━━━━━━━
+longTP  = strategy.position_size > 0 and close >= strategy.position_avg_price * (1 + tpPerc / 100)
+shortTP = strategy.position_size < 0 and close <= strategy.position_avg_price * (1 - tpPerc / 100)
+
+longDD  = strategy.position_size > 0 and close <= strategy.position_avg_price * (1 - ddStopPerc / 100)
+shortDD = strategy.position_size < 0 and close >= strategy.position_avg_price * (1 + ddStopPerc / 100)
+
+if longTP
+    strategy.close_all("Long Basket TP")
+
+if shortTP
+    strategy.close_all("Short Basket TP")
+
+if longDD
+    strategy.close_all("Long DD Stop")
+
+if shortDD
+    strategy.close_all("Short DD Stop")
+
+//━━━━━━━━━━ CLEAN CHART ONLY ━━━━━━━━━━
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na)
+
+plotshape(longSignal, title="BUY", location=location.belowbar, style=shape.triangleup, color=color.lime, size=size.small, text="BUY")
+plotshape(shortSignal, title="SELL", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.small, text="SELL")

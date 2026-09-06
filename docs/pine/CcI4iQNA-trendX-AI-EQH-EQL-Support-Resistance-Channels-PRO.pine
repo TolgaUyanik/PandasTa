@@ -1,0 +1,391 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue (moteur S/R d'origine)
+// ─────────────────────────────────────────────────────────────────────────────
+// Version "PRO+"  ✦  améliorations :
+//   • Force des zones S/R pondérée par le VOLUME des touches
+//   • INTENSITÉ dynamique : plus une zone est forte, plus la bande est marquée
+//     (avec option "Inverser l'intensité" si vous voulez l'effet inverse)
+//   • Note de force ★ sur chaque zone
+//   • Détection EQH / EQL (Equal Highs / Equal Lows = poches de liquidité)
+//   • Tableau de bord : résistance/support les plus proches, distance %, biais...
+//   • Palette épurée + alertes enrichies
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@version=6
+indicator('Support Resistance Channels PRO+ [Vol • EQH/EQL]', 'trendX-AI SR PRO+', overlay = true, max_bars_back = 501, max_boxes_count = 50, max_lines_count = 200, max_labels_count = 300)
+
+// ─────────────────────────────────────────────
+//  ENTRÉES
+// ─────────────────────────────────────────────
+gEntry = "Gestion Affichage"
+uiSize    = input.string("normal", "Taille du texte (panneau et plan)", options = ["tiny", "small", "normal", "large"], group = gEntry)
+szUI = uiSize == "tiny" ? size.tiny : uiSize == "small" ? size.small : uiSize == "large" ? size.large : size.normal
+
+gS = 'Réglages S/R 🔨'
+prd         = input.int(10, 'Période des pivots', minval = 4, maxval = 30, group = gS, tooltip = 'Barres à gauche/droite pour valider un pivot')
+ppsrc       = input.string('High/Low', 'Source', options = ['High/Low', 'Close/Open'], group = gS)
+ChannelW    = input.int(5, 'Largeur max. du canal %', minval = 1, maxval = 8, group = gS, tooltip = 'Calculée sur les plus hauts/bas des 300 dernières barres')
+minstrength = input.int(1, 'Force minimale', minval = 1, group = gS)
+maxnumsr    = input.int(6, 'Nombre max. de zones S/R', minval = 1, maxval = 10, group = gS) - 1
+loopback    = input.int(290, 'Période d\'analyse', minval = 100, maxval = 400, group = gS)
+
+gV = 'Volume & Intensité 🔊'
+useVol    = input.bool(true,  'Pondérer la force par le volume', group = gV, tooltip = 'Une touche sur fort volume renforce davantage la zone')
+volWeight = input.float(1.0, 'Poids du volume', minval = 0, maxval = 5, step = 0.1, group = gV)
+volMaLen  = input.int(50, 'Moyenne de volume', minval = 5, group = gV)
+tpStrong  = input.int(35, 'Transparence — zone FORTE', minval = 0, maxval = 95, group = gV, tooltip = 'Valeur basse = zone plus visible/marquée')
+tpWeak    = input.int(88, 'Transparence — zone FAIBLE', minval = 0, maxval = 95, group = gV)
+invertInt = input.bool(false, 'Inverser l\'intensité', group = gV, tooltip = 'Coché : la zone la plus forte devient la plus claire/transparente')
+showStars = input.bool(true, 'Afficher la note de force (★)', group = gV)
+
+gE = 'Liquidité EQH / EQL 💧'
+eqEnable   = input.bool(true, 'Détecter EQH / EQL', group = gE, tooltip = 'Equal Highs / Equal Lows : sommets/creux quasi égaux = liquidité')
+eqAtrMult  = input.float(0.10, 'Tolérance (× ATR)', minval = 0.01, maxval = 2.0, step = 0.01, group = gE)
+eqLookback = input.int(150, 'Distance max. entre deux égalités (barres)', minval = 10, group = gE)
+atrLen     = input.int(200, 'Longueur ATR', minval = 1, group = gE)
+
+gC = 'Couleurs 🎨'
+res_col  = input.color(#ef5350, 'Résistance', group = gC)
+sup_col  = input.color(#26a69a, 'Support', group = gC)
+inch_col = input.color(#787b86, 'Prix dans le canal', group = gC)
+eqhCol   = input.color(#ff9800, 'EQH (liquidité haute)', group = gC)
+eqlCol   = input.color(#42a5f5, 'EQL (liquidité basse)', group = gC)
+
+gX = 'Extras ⏶⏷'
+showpp       = input.bool(false, 'Afficher les pivots', group = gX)
+showsrbroken = input.bool(true,  'Afficher les cassures S/R', group = gX)
+showDash     = input.bool(true,  'Tableau de bord', group = gX)
+dashLoc      = input.string('Haut droite', 'Position du tableau', options = ['Haut droite','Haut gauche','Bas droite','Bas gauche'], group = gX)
+
+gM = 'Moyennes mobiles'
+showthema1en   = input.bool(false, 'MM 1', inline = 'ma1', group = gM)
+showthema1len  = input.int(50, '', inline = 'ma1', group = gM)
+showthema1type = input.string('SMA', '', options = ['SMA','EMA'], inline = 'ma1', group = gM)
+showthema2en   = input.bool(false, 'MM 2', inline = 'ma2', group = gM)
+showthema2len  = input.int(200, '', inline = 'ma2', group = gM)
+showthema2type = input.string('SMA', '', options = ['SMA','EMA'], inline = 'ma2', group = gM)
+
+// ─────────────────────────────────────────────
+//  MOYENNES MOBILES
+// ─────────────────────────────────────────────
+ma1 = showthema1en ? (showthema1type == 'SMA' ? ta.sma(close, showthema1len) : ta.ema(close, showthema1len)) : na
+ma2 = showthema2en ? (showthema2type == 'SMA' ? ta.sma(close, showthema2len) : ta.ema(close, showthema2len)) : na
+plot(ma1, 'MM1', color = not na(ma1) ? color.new(#2962ff, 0) : na, linewidth = 2)
+plot(ma2, 'MM2', color = not na(ma2) ? color.new(#e040fb, 0) : na, linewidth = 2)
+
+biasSma = ta.sma(close, 50)
+
+// ─────────────────────────────────────────────
+//  VOLUME RELATIF (par rapport à sa moyenne)
+// ─────────────────────────────────────────────
+volBasis = ta.sma(nz(volume), volMaLen)
+relVol   = volBasis > 0 ? nz(volume) / volBasis : 1.0
+
+// ─────────────────────────────────────────────
+//  PIVOTS
+// ─────────────────────────────────────────────
+float src1 = ppsrc == 'High/Low' ? high : math.max(close, open)
+float src2 = ppsrc == 'High/Low' ? low  : math.min(close, open)
+float ph = ta.pivothigh(src1, prd, prd)
+float pl = ta.pivotlow(src2, prd, prd)
+
+plotshape(bool(ph) and showpp, text = 'H', style = shape.labeldown, color = na, textcolor = color.new(res_col, 0), location = location.abovebar, offset = -prd)
+plotshape(bool(pl) and showpp, text = 'L', style = shape.labelup,   color = na, textcolor = color.new(sup_col, 0), location = location.belowbar, offset = -prd)
+
+// largeur max. d'un canal
+prdhighest = ta.highest(300)
+prdlowest  = ta.lowest(300)
+cwidth     = (prdhighest - prdlowest) * ChannelW / 100
+
+// stockage des pivots (mélangés) pour la construction des canaux
+var pivotvals = array.new_float(0)
+var pivotlocs = array.new_float(0)
+if bool(ph) or bool(pl)
+    array.unshift(pivotvals, bool(ph) ? ph : pl)
+    array.unshift(pivotlocs, bar_index)
+    for x = array.size(pivotvals) - 1 to 0 by 1
+        if bar_index - array.get(pivotlocs, x) > loopback
+            array.pop(pivotvals)
+            array.pop(pivotlocs)
+            continue
+        break
+
+// ─────────────────────────────────────────────
+//  CONSTRUCTION D'UN CANAL S/R AUTOUR D'UN PIVOT
+// ─────────────────────────────────────────────
+get_sr_vals(ind) =>
+    float lo = array.get(pivotvals, ind)
+    float hi = lo
+    float numpp = 0
+    for y = 0 to array.size(pivotvals) - 1 by 1
+        float cpp = array.get(pivotvals, y)
+        float wdth = cpp <= hi ? hi - cpp : cpp - lo
+        if wdth <= cwidth
+            if cpp <= hi
+                lo := math.min(lo, cpp)
+            else
+                hi := math.max(hi, cpp)
+            numpp += 20
+    [hi, lo, numpp]
+
+var suportresistance = array.new_float(20, 0) // paires haut/bas
+var stren            = array.new_float(10, 0) // force de chaque zone
+
+changeit(x, y) =>
+    tmp = array.get(suportresistance, y * 2)
+    array.set(suportresistance, y * 2, array.get(suportresistance, x * 2))
+    array.set(suportresistance, x * 2, tmp)
+    tmp := array.get(suportresistance, y * 2 + 1)
+    array.set(suportresistance, y * 2 + 1, array.get(suportresistance, x * 2 + 1))
+    array.set(suportresistance, x * 2 + 1, tmp)
+
+if bool(ph) or bool(pl)
+    supres = array.new_float(0)
+    array.fill(stren, 0)
+
+    // 1) force initiale = nombre de pivots regroupés
+    for x = 0 to array.size(pivotvals) - 1 by 1
+        [hi, lo, strength] = get_sr_vals(x)
+        array.push(supres, strength)
+        array.push(supres, hi)
+        array.push(supres, lo)
+
+    // 2) ajout des touches du prix, PONDÉRÉES par le volume
+    for x = 0 to array.size(pivotvals) - 1 by 1
+        h = array.get(supres, x * 3 + 1)
+        l = array.get(supres, x * 3 + 2)
+        float s = 0
+        for y = 0 to loopback by 1
+            if (high[y] <= h and high[y] >= l) or (low[y] <= h and low[y] >= l)
+                contrib = useVol ? math.max(0.0, 1.0 + volWeight * (relVol[y] - 1.0)) : 1.0
+                s += contrib
+        array.set(supres, x * 3, array.get(supres, x * 3) + s)
+
+    // 3) sélection des zones les plus fortes (sans recouvrement)
+    array.fill(suportresistance, 0)
+    int srcnt = 0
+    for x = 0 to array.size(pivotvals) - 1 by 1
+        float stv = -1.0
+        int stl = -1
+        for y = 0 to array.size(pivotvals) - 1 by 1
+            if array.get(supres, y * 3) > stv and array.get(supres, y * 3) >= minstrength * 20
+                stv := array.get(supres, y * 3)
+                stl := y
+        if stl >= 0
+            hh = array.get(supres, stl * 3 + 1)
+            ll = array.get(supres, stl * 3 + 2)
+            array.set(suportresistance, srcnt * 2, hh)
+            array.set(suportresistance, srcnt * 2 + 1, ll)
+            array.set(stren, srcnt, array.get(supres, stl * 3))
+            for y = 0 to array.size(pivotvals) - 1 by 1
+                if (array.get(supres, y * 3 + 1) <= hh and array.get(supres, y * 3 + 1) >= ll) or (array.get(supres, y * 3 + 2) <= hh and array.get(supres, y * 3 + 2) >= ll)
+                    array.set(supres, y * 3, -1)
+            srcnt += 1
+            if srcnt >= 10
+                break
+
+    // 4) tri décroissant par force
+    for x = 0 to 8 by 1
+        for y = x + 1 to 9 by 1
+            if array.get(stren, y) > array.get(stren, x)
+                tmp = array.get(stren, y)
+                array.set(stren, y, array.get(stren, x))
+                changeit(x, y)
+
+// ─────────────────────────────────────────────
+//  HELPERS D'AFFICHAGE
+// ─────────────────────────────────────────────
+get_level(ind) =>
+    float ret = na
+    if ind < array.size(suportresistance) and array.get(suportresistance, ind) != 0
+        ret := array.get(suportresistance, ind)
+    ret
+
+get_base_color(ind) =>
+    color ret = na
+    if ind < array.size(suportresistance) and array.get(suportresistance, ind) != 0
+        top = array.get(suportresistance, ind)
+        bot = array.get(suportresistance, ind + 1)
+        ret := (top > close and bot > close) ? res_col : (top < close and bot < close) ? sup_col : inch_col
+    ret
+
+maxStren = array.max(stren)
+
+// ─────────────────────────────────────────────
+//  DESSIN DES CANAUX — intensité proportionnelle à la force
+// ─────────────────────────────────────────────
+var srchannels = array.new_box(10)
+var srlabels   = array.new_label(10)
+for x = 0 to math.min(9, maxnumsr) by 1
+    box.delete(array.get(srchannels, x))
+    label.delete(array.get(srlabels, x))
+    base = get_base_color(x * 2)
+    if not na(base)
+        rel = maxStren > 0 ? array.get(stren, x) / maxStren : 0.0
+        rel := math.max(0.0, math.min(1.0, rel))
+        // zone forte -> transparence basse (très visible) ; option inverse possible
+        normalTp = tpWeak - (tpWeak - tpStrong) * rel
+        invTp    = tpStrong + (tpWeak - tpStrong) * rel
+        tp = math.round(math.max(0.0, math.min(95.0, invertInt ? invTp : normalTp)))
+        borderTp = math.max(0, tp - 25)
+        top = get_level(x * 2)
+        bot = get_level(x * 2 + 1)
+        array.set(srchannels, x, box.new(left = bar_index, top = top, right = bar_index + 1, bottom = bot, border_color = color.new(base, borderTp), border_width = rel > 0.66 ? 2 : 1, extend = extend.both, bgcolor = color.new(base, tp)))
+        if showStars and barstate.islast
+            int nst = math.max(1, math.round(rel * 5))
+            array.set(srlabels, x, label.new(bar_index + 3, math.avg(top, bot), str.repeat('★', nst), xloc = xloc.bar_index, style = label.style_none, textcolor = color.new(base, 0), size = size.small))
+
+// ─────────────────────────────────────────────
+//  NIVEAUX LES PLUS PROCHES / POSITION
+// ─────────────────────────────────────────────
+float nearRes = na
+float nearSup = na
+bool  inChannel = false
+for x = 0 to 9 by 1
+    t = array.get(suportresistance, x * 2)
+    b = array.get(suportresistance, x * 2 + 1)
+    if t == 0 and b == 0
+        continue
+    if b > close
+        nearRes := na(nearRes) ? b : math.min(nearRes, b)
+    else if t < close
+        nearSup := na(nearSup) ? t : math.max(nearSup, t)
+    else
+        inChannel := true
+
+// ─────────────────────────────────────────────
+//  CASSURES DE S/R
+// ─────────────────────────────────────────────
+resistancebroken = false
+supportbroken    = false
+not_in_a_channel = true
+for x = 0 to math.min(9, maxnumsr) by 1
+    if close <= array.get(suportresistance, x * 2) and close >= array.get(suportresistance, x * 2 + 1)
+        not_in_a_channel := false
+if not_in_a_channel
+    for x = 0 to math.min(9, maxnumsr) by 1
+        if close[1] <= array.get(suportresistance, x * 2) and close > array.get(suportresistance, x * 2)
+            resistancebroken := true
+        if close[1] >= array.get(suportresistance, x * 2 + 1) and close < array.get(suportresistance, x * 2 + 1)
+            supportbroken := true
+
+// ─────────────────────────────────────────────
+//  EQH / EQL — poches de liquidité
+// ─────────────────────────────────────────────
+var phval = array.new_float(0)
+var phloc = array.new_int(0)
+var plval = array.new_float(0)
+var plloc = array.new_int(0)
+histWin = math.max(loopback, eqLookback) + prd + 5
+eqTol   = nz(ta.atr(atrLen)) * eqAtrMult
+
+bool eqhNew = false
+bool eqlNew = false
+
+if bool(ph)
+    int pbar = bar_index - prd
+    if eqEnable and array.size(phval) > 0
+        for i = 0 to array.size(phval) - 1 by 1
+            if pbar - array.get(phloc, i) <= eqLookback and math.abs(ph - array.get(phval, i)) <= eqTol
+                lvl = math.avg(ph, array.get(phval, i))
+                line.new(array.get(phloc, i), lvl, pbar, lvl, xloc = xloc.bar_index, color = color.new(eqhCol, 0), style = line.style_dashed, width = 1)
+                label.new(pbar, lvl, 'EQH', xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(eqhCol, 80), textcolor = eqhCol, size = size.tiny)
+                eqhNew := true
+                break
+    array.unshift(phval, ph)
+    array.unshift(phloc, pbar)
+    for i = array.size(phloc) - 1 to 0 by 1
+        if bar_index - array.get(phloc, i) > histWin
+            array.pop(phval)
+            array.pop(phloc)
+            continue
+        break
+
+if bool(pl)
+    int pbar = bar_index - prd
+    if eqEnable and array.size(plval) > 0
+        for i = 0 to array.size(plval) - 1 by 1
+            if pbar - array.get(plloc, i) <= eqLookback and math.abs(pl - array.get(plval, i)) <= eqTol
+                lvl = math.avg(pl, array.get(plval, i))
+                line.new(array.get(plloc, i), lvl, pbar, lvl, xloc = xloc.bar_index, color = color.new(eqlCol, 0), style = line.style_dashed, width = 1)
+                label.new(pbar, lvl, 'EQL', xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = color.new(eqlCol, 80), textcolor = eqlCol, size = size.tiny)
+                eqlNew := true
+                break
+    array.unshift(plval, pl)
+    array.unshift(plloc, pbar)
+    for i = array.size(plloc) - 1 to 0 by 1
+        if bar_index - array.get(plloc, i) > histWin
+            array.pop(plval)
+            array.pop(plloc)
+            continue
+        break
+
+// ─────────────────────────────────────────────
+//  TABLEAU DE BORD
+// ─────────────────────────────────────────────
+dashPosition = dashLoc == 'Haut droite' ? position.top_right : dashLoc == 'Haut gauche' ? position.top_left : dashLoc == 'Bas droite' ? position.bottom_right : position.bottom_left
+var table dash    = na
+var string lastPos = ''
+if showDash
+    if na(dash) or lastPos != dashLoc
+        if not na(dash)
+            table.delete(dash)
+        dash := table.new(dashPosition, 2, 7, bgcolor = color.new(#1e222d, 8), border_color = color.new(#363a45, 0), border_width = 1, frame_color = color.new(#363a45, 0), frame_width = 1)
+        lastPos := dashLoc
+else
+    if not na(dash)
+        table.delete(dash)
+        dash := na
+
+if showDash and barstate.islast and not na(dash)
+    int eqhAbove = 0
+    int eqlBelow = 0
+    if array.size(phval) > 0
+        for i = 0 to array.size(phval) - 1 by 1
+            if array.get(phval, i) > close
+                eqhAbove += 1
+    if array.size(plval) > 0
+        for i = 0 to array.size(plval) - 1 by 1
+            if array.get(plval, i) < close
+                eqlBelow += 1
+
+    resTxt = na(nearRes) ? '—' : str.tostring(nearRes, format.mintick) + '  (+' + str.tostring((nearRes - close) / close * 100, '#.##') + '%)'
+    supTxt = na(nearSup) ? '—' : str.tostring(nearSup, format.mintick) + '  (-' + str.tostring((close - nearSup) / close * 100, '#.##') + '%)'
+    posTxt = inChannel ? 'Dans un canal' : 'Hors canal'
+    biasTxt = close > biasSma ? '▲ Haussier' : '▼ Baissier'
+    biasCol = close > biasSma ? sup_col : res_col
+
+    cLbl = color.new(#d1d4dc, 0)
+    cBg  = color.new(#1e222d, 8)
+
+    table.cell(dash, 0, 0, '📊 SR PRO+', text_color = color.white, bgcolor = color.new(#2a2e39, 0), text_size = szUI)
+    table.cell(dash, 1, 0, str.tostring(timeframe.period), text_color = color.new(#9598a1, 0), bgcolor = color.new(#2a2e39, 0), text_size = szUI)
+
+    table.cell(dash, 0, 1, 'Prix',        text_color = cLbl, bgcolor = cBg, text_size = szUI)
+    table.cell(dash, 1, 1, str.tostring(close, format.mintick), text_color = color.white, bgcolor = cBg, text_size = szUI)
+
+    table.cell(dash, 0, 2, 'Résistance',  text_color = cLbl, bgcolor = cBg, text_size = szUI)
+    table.cell(dash, 1, 2, resTxt,        text_color = res_col, bgcolor = cBg, text_size = szUI)
+
+    table.cell(dash, 0, 3, 'Support',     text_color = cLbl, bgcolor = cBg, text_size = szUI)
+    table.cell(dash, 1, 3, supTxt,        text_color = sup_col, bgcolor = cBg, text_size = szUI)
+
+    table.cell(dash, 0, 4, 'Position',    text_color = cLbl, bgcolor = cBg, text_size = szUI)
+    table.cell(dash, 1, 4, posTxt,        text_color = color.new(#d1d4dc, 0), bgcolor = cBg, text_size = szUI)
+
+    table.cell(dash, 0, 5, 'Biais (MM50)',text_color = cLbl, bgcolor = cBg, text_size = szUI)
+    table.cell(dash, 1, 5, biasTxt,       text_color = biasCol, bgcolor = cBg, text_size = szUI)
+
+    table.cell(dash, 0, 6, 'Liquidité',   text_color = cLbl, bgcolor = cBg, text_size = szUI)
+    table.cell(dash, 1, 6, '↑ ' + str.tostring(eqhAbove) + '   ↓ ' + str.tostring(eqlBelow), text_color = color.new(#d1d4dc, 0), bgcolor = cBg, text_size = szUI)
+
+// ─────────────────────────────────────────────
+//  CASSURES — marqueurs & alertes
+// ─────────────────────────────────────────────
+plotshape(showsrbroken and resistancebroken, style = shape.triangleup,   location = location.belowbar, color = color.new(sup_col, 0), size = size.tiny)
+plotshape(showsrbroken and supportbroken,    style = shape.triangledown, location = location.abovebar, color = color.new(res_col, 0), size = size.tiny)
+
+alertcondition(resistancebroken, 'Résistance cassée', 'Résistance cassée sur {{ticker}}')
+alertcondition(supportbroken,    'Support cassé',      'Support cassé sur {{ticker}}')
+alertcondition(eqhNew,           'EQH détecté',        'Equal Highs (liquidité haute) sur {{ticker}}')
+alertcondition(eqlNew,           'EQL détecté',        'Equal Lows (liquidité basse) sur {{ticker}}')

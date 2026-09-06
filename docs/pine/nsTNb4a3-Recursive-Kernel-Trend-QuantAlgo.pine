@@ -1,0 +1,245 @@
+// This script is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © QuantAlgo
+
+//@version=6
+indicator('Recursive Kernel Trend [QuantAlgo]', overlay = true)
+
+//              ╔════════════════════════════════╗
+//              ║      USER-DEFINED SETTINGS     ║
+//              ╚════════════════════════════════╝
+
+var string recursion_settings = '════════ Recursion Core ════════'
+var string rate_settings      = '════════ Rate Scheduling ════════'
+var string bias_settings      = '════════ Directional Bias ════════'
+var string state_settings     = '════════ State Detection ════════'
+var string visual_settings    = '════════ Visual Settings ════════'
+
+tooltip_preset        = 'Select a predefined configuration optimized for different trading styles and timeframes.'
+tooltip_preset_det    = 'Default (Rate 0.12, Eff 10, Confirm 2): Balanced configuration for swing trading on 1H to daily charts. Moderate responsiveness with stable state confirmation.\n\nFast Response (Rate 0.20, Eff 7, Confirm 1): Aggressive configuration for intraday trading on 5min to 1H charts. Higher rate and shorter confirmation react quickly to shorter-duration moves.\n\nSmooth Trend (Rate 0.08, Eff 18, Confirm 3): Conservative configuration for position trading on daily and weekly charts. Lower rate and longer confirmation establish a stable directional baseline with minimal whipsaw.'
+tooltip_src           = 'Price data used as the measurement input for the estimator. Close is standard and works well in most conditions. hl2 incorporates the bar range and can reduce wick-driven noise. hlc3 adds further stability by averaging high, low, and close equally.'
+tooltip_kernel        = 'Selects the recursive filter structure used for the residual correction. All structures accept the live scheduled rate, so volatility and efficiency weighting remains active.'
+tooltip_kernel_det    = 'Standard: single-pass exponential recursion. Baseline behavior and the reference for all parameter defaults.\n\nWilder: half-rate recursion. Noticeably smoother and slower to change state, suited to higher timeframes.\n\nDouble: two-pass with lag compensation. Tracks trends more tightly and reverses sooner, at the cost of extra sensitivity in chop.\n\nTriple: three-pass lag compensation. The most reactive option, best reserved for clean trending instruments.\n\nGaussian: four-pole cascade with no lag compensation. Heaviest suppression of noise, expect meaningful delay. Consider raising Recursion Rate to offset.\n\nHull: fast and slow passes combined then re-smoothed. Balances low lag against reasonable smoothness.'
+tooltip_rate          = 'Base fraction of the residual corrected on each bar, before efficiency, volatility, and bias weighting are applied. This is the primary responsiveness control. Higher values pull the estimate toward price faster and produce more frequent state changes.'
+tooltip_corr_gain     = 'Weight applied to the accumulated residual history. This closes the persistent offset that any single-rate recursion carries through a sustained trend, without raising the raw recursion rate. Set to zero to run the estimator on the recursion term alone.'
+tooltip_corr_decay    = 'Rate at which older residuals fade from the accumulator. Values near 1.0 retain a long memory and produce stronger correction during extended trends. Lower values discard history faster and keep behavior closer to a conventional recursive average.'
+tooltip_limiter       = 'Optional ceiling on the residual accumulator, measured in volatility units. The accumulator works in raw price terms, so on high-priced instruments it can build a large charge through gaps or parabolic runs, causing the estimate to overshoot and then lag the reversal. Leave DISABLED to reproduce baseline output exactly. Enable only if you want that overshoot suppressed and are prepared to re-validate signals.'
+tooltip_limit_cap     = 'Maximum accumulator charge when the limiter is active, expressed in ATR. Lower values suppress overshoot more aggressively. Has no effect while the limiter is disabled.'
+
+tooltip_eff_on        = 'Enable/disable efficiency weighting. Measures what proportion of total price travel over the lookback converted into net directional progress. Efficient trending conditions raise the rate, choppy conditions suppress it.'
+tooltip_eff_len       = 'Lookback window for the efficiency measurement. Shorter windows react quickly to regime shifts but produce a noisier rate profile. Longer windows give a more stable read on whether directional movement is genuine.'
+tooltip_eff_floor     = 'Weight applied when efficiency reads zero. Lower values drive the estimate close to flat during chop, filtering aggressively. Higher values keep it responsive even in ranging conditions.'
+tooltip_vol_on        = 'Enable/disable volatility weighting. Compares current volatility against its own longer baseline and reduces rate while volatility is expanded, preventing the estimate from chasing outsized bars.'
+tooltip_vol_len       = 'Lookback for the current volatility reading used in the expansion ratio.'
+tooltip_vol_base      = 'Lookback for the baseline that current volatility is measured against. Longer values define the regime more stably and shift the weighting less often.'
+tooltip_rate_lim      = 'Hard floor and ceiling on the scheduled rate, applied both before and after directional bias. The floor prevents the estimate from freezing entirely in dead markets. The ceiling prevents the recursion from becoming unstable during volatility collapse.'
+
+tooltip_bias_on       = 'Enable/disable directional bias. Applies a different rate depending on whether price sits above or below the estimate, reflecting the tendency of most instruments to advance gradually and decline abruptly.'
+tooltip_bias_up       = 'Rate multiplier applied while price is above the estimate. Values above 1.0 make the estimate track advances more tightly.'
+tooltip_bias_dn       = 'Rate multiplier applied while price is below the estimate. Values below 1.0 make the estimate hold its level through pullbacks rather than rolling over on the first down bar.'
+
+tooltip_slope_len     = 'Smoothing applied to the bar-over-bar change in the estimate before direction is assessed. Higher values suppress single-bar wobble and reduce state flicker, at the cost of a slower directional read.'
+tooltip_flip_bars     = 'Consecutive same-direction slope bars required before the state officially flips. Higher values demand sustained directional commitment and cut whipsaw reversals, at the cost of delaying the color change.'
+
+tooltip_preset_col    = 'Pre-configured color schemes optimized for different chart themes and visual preferences. Classic uses traditional green/red. Aqua provides ocean-inspired tones. Cosmic offers futuristic cyan and purple. Cyber features warm orange and cool cyan contrast. Neon delivers high-contrast yellow and magenta for maximum visibility. Custom allows full color control.'
+tooltip_bullish       = 'Color applied to the estimate line and gradient layers while the state is bullish.'
+tooltip_bearish       = 'Color applied to the estimate line and gradient layers while the state is bearish.'
+tooltip_field         = 'Enable/disable the multi-layer gradient field surrounding the trend estimate. The field visualizes the adaptive influence zone of the recursive filter.'
+tooltip_field_width   = 'Controls the overall width of the gradient layers relative to ATR. Higher values expand the field for greater visibility on the chart.'
+tooltip_field_opacity = 'Controls the intensity of the gradient layers. Lower values produce a more transparent, subtle field. Higher values make the layers more solid and prominent.'
+tooltip_candles       = 'Enable/disable bar coloring based on current state, providing instant visual confirmation without reading the estimate line directly.'
+tooltip_bar_trans     = 'Transparency of the bar coloring overlay. Lower values produce vivid bars. Higher values apply a subtle tint that preserves price action visibility.'
+
+preset      = input.string('Default', 'Preset Configuration', options = ['Default', 'Fast Response', 'Smooth Trend'], group = recursion_settings, tooltip = tooltip_preset + '\n\n' + tooltip_preset_det)
+src         = input.source(close, 'Price Source', group = recursion_settings, tooltip = tooltip_src)
+kernel      = input.string('Standard', 'Filter Structure', options = ['Standard', 'Wilder', 'Double', 'Triple', 'Gaussian', 'Hull'], group = recursion_settings, tooltip = tooltip_kernel + '\n\n' + tooltip_kernel_det)
+gain_base   = input.float(0.12,  'Recursion Rate', step = 0.01,  group = recursion_settings, tooltip = tooltip_rate)
+corr_gain   = input.float(0.008, 'Correction Weight', step = 0.001, group = recursion_settings, tooltip = tooltip_corr_gain)
+corr_decay  = input.float(0.98,  'Correction Decay', step = 0.005, group = recursion_settings, tooltip = tooltip_corr_decay)
+use_limiter = input.bool(false,  'Correction Limiter', group = recursion_settings, tooltip = tooltip_limiter)
+limit_cap   = input.float(0.75,  'Limiter Ceiling (ATR)', step = 0.05, group = recursion_settings, tooltip = tooltip_limit_cap)
+
+use_eff     = input.bool(true,  'Enable Efficiency Weighting', group = rate_settings, tooltip = tooltip_eff_on)
+eff_len     = input.int(10,     'Efficiency Lookback', group = rate_settings, tooltip = tooltip_eff_len)
+eff_floor   = input.float(0.35, 'Efficiency Floor', step = 0.05, group = rate_settings, tooltip = tooltip_eff_floor)
+use_vol     = input.bool(true,  'Enable Volatility Weighting', group = rate_settings, tooltip = tooltip_vol_on)
+vol_len     = input.int(14,     'Volatility Length', group = rate_settings, tooltip = tooltip_vol_len)
+vol_baselen = input.int(50,     'Volatility Baseline Length', group = rate_settings, tooltip = tooltip_vol_base)
+gain_floor  = input.float(0.02, 'Rate Floor', step = 0.005, group = rate_settings, tooltip = tooltip_rate_lim)
+gain_ceil   = input.float(0.40, 'Rate Ceiling', step = 0.01,  group = rate_settings)
+
+use_bias  = input.bool(true,  'Enable Directional Bias', group = bias_settings, tooltip = tooltip_bias_on)
+bias_up   = input.float(1.25, 'Upside Rate Bias',   step = 0.05, group = bias_settings, tooltip = tooltip_bias_up)
+bias_dn   = input.float(0.85, 'Downside Rate Bias', step = 0.05, group = bias_settings, tooltip = tooltip_bias_dn)
+
+slope_len = input.int(3, 'State Filter Length',     group = state_settings, tooltip = tooltip_slope_len)
+flip_bars = input.int(2, 'State Confirmation Bars', group = state_settings, tooltip = tooltip_flip_bars)
+
+color_preset  = input.string('Custom', 'Color Preset', options = ['Classic', 'Aqua', 'Cosmic', 'Cyber', 'Neon', 'Custom'], group = visual_settings, tooltip = tooltip_preset_col)
+bullish_input = input.color(#00ffaa, 'Bullish Color', group = visual_settings, tooltip = tooltip_bullish)
+bearish_input = input.color(#ff0000, 'Bearish Color', group = visual_settings, tooltip = tooltip_bearish)
+line_width    = input.int(3, 'Line Width', minval = 1, maxval = 5, group = visual_settings)
+show_field    = input.bool(true, 'Show Gradient Layer', group = visual_settings, tooltip = tooltip_field)
+field_width   = input.float(0.5, 'Gradient Width', minval = 0.15, maxval = 1.20, step = 0.05, group = visual_settings, tooltip = tooltip_field_width)
+field_opacity = input.int(30, 'Gradient Opacity', minval = 15, maxval = 100, group = visual_settings, tooltip = tooltip_field_opacity)
+show_candles  = input.bool(false, 'Enable Bar Coloring',  group = visual_settings, tooltip = tooltip_candles)
+bar_trans     = input.int(0, 'Bar Color Transparency', minval = 0, maxval = 100, group = visual_settings, tooltip = tooltip_bar_trans)
+
+if preset == 'Fast Response'
+    gain_base  := 0.20
+    eff_len    := 7
+    eff_floor  := 0.25
+    slope_len  := 2
+    flip_bars  := 1
+else if preset == 'Smooth Trend'
+    gain_base  := 0.08
+    eff_len    := 18
+    eff_floor  := 0.45
+    slope_len  := 5
+    flip_bars  := 3
+
+[bullish_color, bearish_color] = switch color_preset
+    'Classic' => [#00ff00, #ff0000]
+    'Aqua'    => [#00d4ff, #ff8c00]
+    'Cosmic'  => [#49ffce, #9932cc]
+    'Cyber'   => [#00cccc, #ff6600]
+    'Neon'    => [#ffff00, #ff00ff]
+    => [bullish_input, bearish_input]
+
+//              ╔════════════════════════════════╗
+//              ║        CORE CALCULATION        ║
+//              ╚════════════════════════════════╝
+
+float vol_now = ta.atr(vol_len)
+float vol_ref = math.max(nz(vol_now, ta.tr(true)), syminfo.mintick)
+
+float path       = math.sum(math.abs(src - src[1]), eff_len)
+float net        = math.abs(src - src[eff_len])
+float eff_ratio  = path == 0.0 ? 0.0 : math.min(net / path, 1.0)
+float eff_weight = use_eff ? eff_floor + (1.0 - eff_floor) * eff_ratio : 1.0
+
+float vol_base   = ta.sma(vol_now, vol_baselen)
+float vol_ratio  = vol_base == 0.0 ? 1.0 : vol_now / vol_base
+float vol_weight = use_vol ? math.min(math.max(1.0 / math.max(vol_ratio, 1e-6), 0.50), 1.75) : 1.0
+
+float gain_sched = math.min(math.max(gain_base * eff_weight * vol_weight, gain_floor), gain_ceil)
+
+var float estimate = na
+var float corr_acc = 0.0
+
+if na(estimate)
+    estimate := src
+
+float bias     = use_bias ? (src >= estimate ? bias_up : bias_dn) : 1.0
+float gain_eff = math.min(math.max(gain_sched * bias, gain_floor), gain_ceil)
+
+float kern_gain = kernel == 'Wilder' ? gain_eff * 0.5 : gain_eff
+
+float resid = src - estimate
+corr_acc := corr_acc * corr_decay + resid
+
+if use_limiter and corr_gain > 0.0
+    float charge_cap = limit_cap * vol_ref / corr_gain
+    corr_acc := math.max(math.min(corr_acc, charge_cap), -charge_cap)
+
+float base = estimate + kern_gain * resid
+
+var float c2 = na
+var float c3 = na
+var float c4 = na
+c2 := na(c2) ? base : c2 + kern_gain * (base - c2)
+c3 := na(c3) ? c2   : c3 + kern_gain * (c2   - c3)
+c4 := na(c4) ? c3   : c4 + kern_gain * (c3   - c4)
+
+var float h_fast = na
+var float h_out  = na
+float g_fast = math.min(kern_gain * 2.0, 0.99)
+h_fast := na(h_fast) ? src : h_fast + g_fast * (src - h_fast)
+float h_raw  = 2.0 * h_fast - base
+float len_eq = 2.0 / math.max(kern_gain, 1e-6) - 1.0
+float g_hull = 2.0 / (math.sqrt(math.max(len_eq, 1.0)) + 1.0)
+h_out := na(h_out) ? h_raw : h_out + g_hull * (h_raw - h_out)
+
+float kern_out = switch kernel
+    'Double'   => 2.0 * base - c2
+    'Triple'   => 3.0 * base - 3.0 * c2 + c3
+    'Gaussian' => c4
+    'Hull'     => h_out
+    => base
+
+estimate := kern_out + corr_gain * corr_acc
+
+float slope_f = ta.sma(estimate - estimate[1], slope_len)
+
+var int run_up = 0
+var int run_dn = 0
+if slope_f > 0
+    run_up += 1
+    run_dn := 0
+else if slope_f < 0
+    run_dn += 1
+    run_up := 0
+
+var int state_dir = 1
+if run_up >= flip_bars
+    state_dir := 1
+else if run_dn >= flip_bars
+    state_dir := -1
+
+bool state_bull   = state_dir == 1
+bool turned_bull  = state_bull and not state_bull[1]
+bool turned_bear  = not state_bull and state_bull[1]
+bool state_change = turned_bull or turned_bear
+
+//              ╔════════════════════════════════╗
+//              ║         VISUALIZATION          ║
+//              ╚════════════════════════════════╝
+
+color state_color = state_bull ? bullish_color : bearish_color
+
+float field = show_field ? ta.atr(20) * field_width : 0.0
+
+u1 = plot(estimate + field * 0.38, display = display.none)
+u2 = plot(estimate + field * 0.72, display = display.none)
+u3 = plot(estimate + field * 1.00, display = display.none)
+
+l1 = plot(estimate - field * 0.38, display = display.none)
+l2 = plot(estimate - field * 0.72, display = display.none)
+l3 = plot(estimate - field * 1.00, display = display.none)
+
+core = plot(estimate, display = display.none)
+
+int t_outer = math.min(96, 100 - field_opacity + 28)
+int t_mid   = math.min(90, 100 - field_opacity + 12)
+int t_inner = math.max(25, 100 - field_opacity - 18)
+
+fill(u3, u2, color.new(state_color, t_outer), title = 'Gradient Outer')
+fill(u2, u1, color.new(state_color, t_mid),   title = 'Gradient Mid')
+fill(u1, core, color.new(state_color, t_inner), title = 'Gradient Inner')
+
+fill(l3, l2, color.new(state_color, t_outer))
+fill(l2, l1, color.new(state_color, t_mid))
+fill(l1, core, color.new(state_color, t_inner))
+
+plot(estimate, 'Trend Estimate', color = state_color, linewidth = line_width)
+
+barcolor(show_candles ? color.new(state_color, bar_trans) : na, title = 'State Bar Color')
+
+//              ╔════════════════════════════════╗
+//              ║             ALERTS             ║
+//              ╚════════════════════════════════╝
+
+alertcondition(turned_bull,  title = 'Bullish State Signal', message = 'Recursive Kernel Trend: BULLISH state confirmed on {{exchange}}:{{ticker}} - {{interval}}')
+alertcondition(turned_bear,  title = 'Bearish State Signal', message = 'Recursive Kernel Trend: BEARISH state confirmed on {{exchange}}:{{ticker}} - {{interval}}')
+alertcondition(state_change, title = 'Any State Change',     message = 'Recursive Kernel Trend: Trend state changed on {{exchange}}:{{ticker}} - {{interval}}')
+
+//              ╔════════════════════════════════╗
+//              ║           CREATED BY           ║
+//              ╚════════════════════════════════╝
+
+// ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗     █████╗ ██╗      ██████╗  ██████╗ 
+//██╔═══██╗██║   ██║██╔══██╗████╗  ██║╚══██╔══╝    ██╔══██╗██║     ██╔════╝ ██╔═══██╗
+//██║   ██║██║   ██║███████║██╔██╗ ██║   ██║       ███████║██║     ██║  ███╗██║   ██║
+//██║▄▄ ██║██║   ██║██╔══██║██║╚██╗██║   ██║       ██╔══██║██║     ██║   ██║██║   ██║
+//╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║       ██║  ██║███████╗╚██████╔╝╚██████╔╝
+// ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝       ╚═╝  ╚═╝╚══════╝ ╚═════╝  ╚═════╝

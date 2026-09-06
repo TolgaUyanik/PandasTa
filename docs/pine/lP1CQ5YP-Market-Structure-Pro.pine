@@ -1,0 +1,789 @@
+// =============================================================================
+// MARKET STRUCTURE PRO
+// Breakout method: Wick / Body (Close) / Confirmed (2 closes)
+// Trend structure and trailing-stop workflow
+// =============================================================================
+// Recommended Length settings per timeframe (SMC standard):
+//   5M  -> Length 5-10   (intraday entries, liquidity sweeps)
+//   15M -> Length 7-12   (intraday structure)
+//   30M -> Length 10-15  (intraday -> swing transition)
+//   1H  -> Length 12-20  (swing entries, BOS/CHoCH)
+//   4H  -> Length 15-25  (swing structure, order blocks)
+//   1D  -> Length 25-40  (positional structure, major OBs)
+//   1W  -> Length 30-50  (long-term structure, HTF bias)
+// =============================================================================
+//@version=6
+indicator("Market Structure Pro", "MS Pro",
+          overlay = true, max_lines_count = 500, max_labels_count = 500,
+          max_bars_back = 3000)
+
+// =============================================================================
+// GROUP 1 - CORE STRUCTURE SETTINGS
+// =============================================================================
+length_auto_by_tf = input.bool(true, "Auto Length by timeframe", group = "Core settings",
+     tooltip = "ON: swing period is picked automatically for the current timeframe (middle of the recommended range).\nOFF: uses the manual value below.")
+length_manual = input.int(15, "Swing period (Length), manual", minval = 2, maxval = 50,
+     group = "Core settings",
+     tooltip = "Used only when Auto Length is OFF.\nSMC reference: 5M=5-10, 15M=7-12, 30M=10-15, 1H=12-20, 4H=15-25, 1D=25-40, 1W=30-50.\nSmaller = more swings; larger = fewer but stricter structure.")
+
+breakout_method = input.string("Body (Close)", "Breakout detection method",
+     options = ["Wick (High/Low)", "Body (Close)", "Confirmed (2 closes)"],
+     group = "Core settings",
+     tooltip = "What it does: the rule for confirming a swing-level breakout.\n" +
+       "Applied both to the main structure on the chart and to the multi-TF rows in the summary table.\n\n" +
+       "Wick: earliest entry, higher false-break risk.\n" +
+       "Body: default working standard for intraday/swing.\n" +
+       "Confirmed (2 closes): conservative, better suited for higher timeframes.\n\n" +
+       "Table format: 'UP (C+N)' / 'DOWN (C)' / 'Neutral'.\n" +
+       "  C       - phase start (CHoCH, first breakout after direction flip).\n" +
+       "  C+1..N  - trend continuations (BOS, sequential breakouts in the same direction).\n" +
+       "  Higher N = more mature phase, higher trend-exhaustion risk.")
+
+show_swing_labels = input.bool(false, "Show HH / HL / LH / LL labels",
+     group = "Core settings",
+     tooltip = "Marks swing-pivot classification on the chart (AlgoAlpha method):\n" +
+       "  HH - Higher High (current swing-high above previous) - bullish context\n" +
+       "  LH - Lower High (current swing-high below previous) - bullish momentum fading\n" +
+       "  HL - Higher Low (current swing-low above previous) - bearish momentum fading\n" +
+       "  LL - Lower Low (current swing-low below previous) - bearish context\n\n" +
+       "Structure link:\n" +
+       "  - HH + HL - healthy uptrend (buyers control both extremes).\n" +
+       "  - LH + LL - healthy downtrend.\n" +
+       "  - LH after HH (without breakout confirmation) - early sign of trend exhaustion.\n" +
+       "  - HL after LL - early sign of upside reversal.\n\n" +
+       "OFF by default - labels are dense and may obscure the main structure (BOS/CHoCH).\n" +
+       "Enable when you need micro-annotation of move character.")
+
+stop_only_last_two_ranges = input.bool(true, "Show only last 2 trailing-stop ranges",
+     group = "Core settings",
+     tooltip = "ON: only the last 2 trend ranges of the trailing stop are shown (current + previous).\nOFF: the last 10 ranges are shown.")
+
+// =============================================================================
+// GROUP 2 - TRAILING STOP
+// =============================================================================
+// Visibility: stop line is controlled by TV: Style -> 'Lines'; fill -> 'Line fills'.
+stop_auto_by_tf = input.bool(true, "Auto stop parameters by timeframe", group = "Trailing stop",
+     tooltip = "ON (default): both ATR multiplier and EMA basis length are auto-picked for the chart timeframe using established TA-school standards.\n\n" +
+       "PER-TF STANDARDS (source in brackets):\n" +
+       "<= 5M:  EMA 20 + 1.5xATR (Linda Raschke / Connors RSI-2 - scalping)\n" +
+       "<= 15M: EMA 20 + 1.75xATR (Raschke intraday)\n" +
+       "<= 30M: EMA 34 + 2.0xATR (Carter Fib intraday)\n" +
+       "<= 1H:  EMA 50 + 2.0xATR (John Carter / Simpler Trading - day trading)\n" +
+       "<= 4H:  EMA 50 + 2.25xATR (intraday -> swing bridge)\n" +
+       "<= 1D:  EMA 50 + 2.5xATR (Minervini VCP / Le Beau Chandelier - swing)\n" +
+       "<= 1W:  EMA 30 + 3.0xATR (Wilder Volatility Stop 1978 / Weinstein 30W - position)\n" +
+       "> 1W:   EMA 30 + 3.5xATR (Weinstein Stage Analysis - long-term)\n\n" +
+       "OFF: uses the manual values (multiplier / length) below.")
+stop_atr_mult = input.float(2.5, "Stop ATR multiplier (manual)", minval = 0.5, maxval = 10.0, step = 0.1, group = "Trailing stop",
+     tooltip = "Used only when 'Auto stop parameters' is OFF.\nWhat it does: stop distance from the basis in ATR units.\nSmaller = more sensitive, more frequent stop-outs.\nLarger = more stable, but wider risk.\nReference: 1.5-4.0.")
+stop_basis_len = input.int(50, "Stop basis EMA (length, manual)", minval = 5, maxval = 200, group = "Trailing stop",
+     tooltip = "Used only when 'Auto stop parameters' is OFF.\nWhat it does: base EMA used to build the ATR stop.\nSmaller = faster reaction, more false flips.\nLarger = more stable trend line.")
+
+// =============================================================================
+// GROUP 3 - SUMMARY TABLE
+// =============================================================================
+// Table visibility is controlled by TV: Style -> 'Tables'.
+atr_auto_by_tf  = input.bool(true, "ATR auto by timeframe", group = "Table",
+     tooltip = "What it does: auto ATR length selection for the current timeframe.\nON: adaptive to the timeframe.\nOFF: uses the manual length below.")
+atr_len_manual  = input.int(14, "ATR length (manual)", minval = 5, maxval = 100, group = "Table",
+     tooltip = "What it does: ATR period when auto is OFF.\nReference (custom build): 10-20 for intraday, 14-30 for swing.")
+atr_range_lookback = input.int(300, "ATR range: history (bars)", minval = 100, maxval = 3000, group = "Table",
+     tooltip = "What it does: history window for the dynamic ATR% range calculation.\nReference (custom build): 252-500 bars.")
+atr_range_p_low = input.int(20, "ATR range: low percentile", minval = 5, maxval = 45, group = "Table",
+     tooltip = "What it does: lower bound of the 'normal' ATR% regime.\nStandard: 20 or 25.")
+atr_range_p_high = input.int(80, "ATR range: high percentile", minval = 55, maxval = 95, group = "Table",
+     tooltip = "What it does: upper bound of the 'normal' ATR% regime.\nStandard: 75 or 80.")
+
+// =============================================================================
+// GROUP 4 - COLORS
+// =============================================================================
+col_up = input.color(#1d7d6a, "Uptrend color", group = "Colors", inline = "col",
+     tooltip = "What it does: color for all bullish elements (lines, labels).")
+col_dn = input.color(#f23645, "Downtrend color", group = "Colors", inline = "col",
+     tooltip = "What it does: color for all bearish elements (lines, labels).")
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+// Style constants (hardcoded to keep the Inputs panel clean).
+LINE_WIDTH = 1
+LINE_STYLE = line.style_solid
+LABEL_SIZE = size.small
+TABLE_SIZE = size.small
+FILL_TRANSP = 92
+
+// Breakout check depending on the selected method.
+f_breakout_up(src_high, src_close, level) =>
+    switch breakout_method
+        "Wick (High/Low)"       => ta.crossover(src_high, level)
+        "Body (Close)"          => ta.crossover(src_close, level)
+        "Confirmed (2 closes)"  => src_close > level and src_close[1] > level and not (src_close[2] > level)
+        => ta.crossover(src_close, level)
+
+f_breakout_dn(src_low, src_close, level) =>
+    switch breakout_method
+        "Wick (High/Low)"       => ta.crossunder(src_low, level)
+        "Body (Close)"          => ta.crossunder(src_close, level)
+        "Confirmed (2 closes)"  => src_close < level and src_close[1] < level and not (src_close[2] < level)
+        => ta.crossunder(src_close, level)
+
+// ATR with a fallback for instruments where ta.atr() can return na on early bars.
+// Skipping the second SMA: ta.rma over TR is practically never na after `len` bars;
+// the (high-low) fallback removes early NA bars via nz.
+f_atr_safe(len) =>
+    prev_close = close[1]
+    tr = na(prev_close) ? (high - low) : math.max(high - low, math.max(math.abs(high - prev_close), math.abs(low - prev_close)))
+    nz(ta.rma(tr, len), high - low)
+
+// Universal timeframe-driven functions via timeframe.in_seconds() -
+// work for ANY timeframe (1M, 3M, 30M, 2H, 6H, 12H, 3D, MN etc.), not only listed ones.
+
+f_atr_len_by_tf() =>
+    s = timeframe.in_seconds()
+    s <= 300    ? 10 :   // <= 5M
+     s <= 900    ? 12 :   // <= 15M
+     s <= 3600   ? 14 :   // <= 1H
+     s <= 14400  ? 18 :   // <= 4H
+     s <= 86400  ? 20 :   // <= 1D
+     20                   // >= 1W
+
+// ATR multiplier by timeframe - actual TA-school standards:
+//   5M    1.5x  - Linda Raschke, Connors RSI-2 (scalping)
+//   15M   1.75x - Raschke intraday
+//   30M   2.0x  - Carter intraday
+//   1H    2.0x  - John Carter / Simpler Trading
+//   4H    2.25x - intraday -> swing bridge
+//   1D    2.5x  - Le Beau Chandelier Exit / Minervini VCP (swing standard)
+//   1W    3.0x  - Wilder Volatility Stop (1978, original)
+//   >1W   3.5x  - Weinstein Stage Analysis (position)
+f_stop_mult_by_tf() =>
+    s = timeframe.in_seconds()
+    s <= 300    ? 1.5  :   // <= 5M
+     s <= 900    ? 1.75 :   // <= 15M
+     s <= 1800   ? 2.0  :   // <= 30M
+     s <= 3600   ? 2.0  :   // <= 1H
+     s <= 14400  ? 2.25 :   // <= 4H
+     s <= 86400  ? 2.5  :   // <= 1D
+     s <= 604800 ? 3.0  :   // <= 1W
+     3.5                    // > 1W
+
+// Stop basis EMA by timeframe - actual standards:
+//   5M / 15M     - EMA 20 (Linda Raschke intraday standard)
+//   30M          - EMA 34 (Fibonacci, Carter)
+//   1H / 4H / 1D - EMA 50 (Minervini 'life-of-trend line', CANSLIM)
+//   1W / >1W     - EMA 30 (Weinstein 30-week MA, original Stage Analysis)
+f_stop_basis_by_tf() =>
+    s = timeframe.in_seconds()
+    s <= 300    ? 20 :    // <= 5M
+     s <= 900    ? 20 :    // <= 15M
+     s <= 1800   ? 34 :    // <= 30M
+     s <= 3600   ? 50 :    // <= 1H
+     s <= 14400  ? 50 :    // <= 4H
+     s <= 86400  ? 50 :    // <= 1D
+     s <= 604800 ? 30 :    // <= 1W (Weinstein 30W)
+     30                    // > 1W
+
+f_atr_range_min_pct_by_tf() =>
+    s = timeframe.in_seconds()
+    s <= 300    ? 0.20 :
+     s <= 900    ? 0.35 :
+     s <= 1800   ? 0.50 :
+     s <= 3600   ? 0.70 :
+     s <= 14400  ? 1.00 :
+     s <= 86400  ? 1.50 :
+     3.00
+
+f_atr_range_max_pct_by_tf() =>
+    s = timeframe.in_seconds()
+    s <= 300    ? 0.90 :
+     s <= 900    ? 1.30 :
+     s <= 1800   ? 1.80 :
+     s <= 3600   ? 2.40 :
+     s <= 14400  ? 3.80 :
+     s <= 86400  ? 6.00 :
+     12.00
+
+// Middle of the SMC Length range for any timeframe. Grows logarithmically with bar length.
+f_length_eff_mid_by_tf() =>
+    s = timeframe.in_seconds()
+    s <= 60     ? 5  :   // 1M  - ultra scalping
+     s <= 180    ? 6  :   // 3M
+     s <= 300    ? 7  :   // 5M
+     s <= 600    ? 8  :   // 10M
+     s <= 900    ? 10 :   // 15M
+     s <= 1800   ? 12 :   // 30M
+     s <= 2700   ? 13 :   // 45M
+     s <= 3600   ? 15 :   // 1H
+     s <= 7200   ? 17 :   // 2H
+     s <= 14400  ? 20 :   // 4H
+     s <= 21600  ? 23 :   // 6H
+     s <= 28800  ? 25 :   // 8H
+     s <= 43200  ? 28 :   // 12H
+     s <= 86400  ? 30 :   // 1D
+     s <= 172800 ? 32 :   // 2D
+     s <= 259200 ? 35 :   // 3D
+     s <= 604800 ? 40 :   // 1W
+     50                   // 2W, MN and above
+
+length_eff = length_auto_by_tf ? f_length_eff_mid_by_tf() : length_manual
+
+// Indicator is disabled on timeframes below 5 minutes (1S-30S, 1M, 2M, 3M).
+// On those TFs nothing is drawn except an info label in place of the summary table.
+tf_below_5m = timeframe.in_seconds() < 300
+
+// Structure detection for multi-TF summary-table rows.
+// Method: pivot-based direction + BOS/CHoCH counter (Trend Dashboard-style).
+//   - Pivot HH/LL: ta.pivothigh / ta.pivotlow with equal left/right window.
+//   - Breakout is confirmed by the same method as the main structure (Wick / Body / 2 closes).
+//   - dir = +1 (bullish) / -1 (bearish) / 0 (structure not started yet).
+//   - bos counts CONTINUATIONS after the last CHoCH (character change):
+//       First break  = CHoCH (start), bos = 0.
+//       Same-direction break = BOS, bos += 1.
+//       Opposite-direction break = CHoCH, bos := 0.
+// Returns tuple [dir, bos] where bos >= 0 is the length of the current trend phase in breakouts.
+compute_dir_bos(simple int len) =>
+    var float prevHigh   = na
+    var float prevLow    = na
+    var bool  highActive = false
+    var bool  lowActive  = false
+    var int   breakDir   = 0
+    var int   bosCount   = 0
+    ph_local = ta.pivothigh(len, len)
+    pl_local = ta.pivotlow(len, len)
+    if not na(ph_local)
+        prevHigh   := ph_local
+        highActive := true
+    if not na(pl_local)
+        prevLow    := pl_local
+        lowActive  := true
+    // Reuse the same breakout method (Wick / Body / Confirmed) as the main structure.
+    // Eager-evaluate: Pine v6 warns (CW10002) when a function is called inside a
+    // short-circuit conditional expression - it may skip bars and break ta.crossover.
+    // Compute first, then filter by activity flags.
+    brk_up_now_l = f_breakout_up(high, close, prevHigh)
+    brk_dn_now_l = f_breakout_dn(low,  close, prevLow)
+    brkUp = highActive and not na(prevHigh) and brk_up_now_l
+    brkDn = lowActive  and not na(prevLow)  and brk_dn_now_l
+    if brkUp
+        highActive := false
+        if breakDir == 1
+            bosCount += 1
+        else
+            bosCount := 0
+        breakDir := 1
+    if brkDn
+        lowActive := false
+        if breakDir == -1
+            bosCount += 1
+        else
+            bosCount := 0
+        breakDir := -1
+    [breakDir, bosCount]
+
+// =============================================================================
+// SWINGS
+// =============================================================================
+series float ph = ta.pivothigh(length_eff, length_eff)
+series float pl = ta.pivotlow(length_eff, length_eff)
+
+// Structure objects
+var label[] ms_labels = array.new_label(0)
+var int[] ms_label_bars = array.new_int(0)
+var line[] ms_level_lines = array.new_line(0)
+var int[] ms_level_bars = array.new_int(0)
+
+// Object limits (Length changes or long history would otherwise exhaust the TV quota).
+MAX_MS_LEVEL_LINES = 120
+MAX_MS_LABELS = 250
+
+f_trim_level_lines() =>
+    while array.size(ms_level_lines) > MAX_MS_LEVEL_LINES
+        line.delete(array.shift(ms_level_lines))
+        array.shift(ms_level_bars)
+
+f_trim_ms_labels() =>
+    while array.size(ms_labels) > MAX_MS_LABELS
+        label.delete(array.shift(ms_labels))
+        array.shift(ms_label_bars)
+
+// =============================================================================
+// MAIN MARKET STRUCTURE
+// =============================================================================
+// Returns extra tuple values [up_break_count, dn_break_count, started] -
+// used by the current-TF row in the summary table (Pine v6 forbids mutating
+// global vars from inside functions, so state is passed via tuple).
+market_structure() =>
+    var float upper = na
+    var float lower = na
+    var int upper_index = na
+    var int lower_index = na
+    var int up_break_count = 0
+    var int dn_break_count = 0
+    var float up_break_base = na
+    var float dn_break_base = na
+    var bool trend = false
+    var bool started = false
+    // HH/HL/LH/LL state is kept SEPARATE from upper/lower because upper/lower
+    // are cleared after each breakout, while every new pivot must be compared
+    // to the PREVIOUS pivot of the same type (without reset).
+    var float prev_pivot_high = na
+    var float prev_pivot_low  = na
+
+    float source     = ta.sma(high - low, 50) * 2
+    float source1    = ta.sma(ta.median(close, 40), 10)
+    float volatility = math.avg(ta.highest(source, 200), ta.lowest(source, 200))
+    float trend_line = float(na)
+
+    var line line_h = na
+    var line line_l = na
+    prev_trend = trend
+
+    breakout_up_now = f_breakout_up(high, close, upper)
+    breakout_dn_now = f_breakout_dn(low, close, lower)
+
+    // HH/HL/LH/LL classification (AlgoAlpha method):
+    //   HH - pivot high >= previous pivot high (or first pivot) -> bullish context
+    //   LH - pivot high <  previous pivot high                  -> momentum fading
+    //   HL - pivot low  >= previous pivot low                   -> downside momentum fading
+    //   LL - pivot low  <  previous pivot low                   -> bearish context
+    bool hh = false
+    bool lh = false
+    bool hl = false
+    bool ll = false
+    if not na(ph)
+        hh := na(prev_pivot_high) or ph >= prev_pivot_high
+        lh := not hh
+        prev_pivot_high := ph
+    if not na(pl)
+        hl := na(prev_pivot_low) or pl >= prev_pivot_low
+        ll := not hl
+        prev_pivot_low := pl
+
+    if not na(ph)
+        upper_index := bar_index - length_eff
+        upper := ph
+        if not tf_below_5m
+            line_h := line.new(upper_index, upper, upper_index, upper,
+                 color = col_up, width = LINE_WIDTH, style = LINE_STYLE)
+            array.push(ms_level_lines, line_h)
+            array.push(ms_level_bars, bar_index)
+
+    if not na(pl)
+        lower_index := bar_index - length_eff
+        lower := pl
+        if not tf_below_5m
+            line_l := line.new(lower_index, lower, lower_index, lower,
+                 color = col_dn, width = LINE_WIDTH, style = LINE_STYLE)
+            array.push(ms_level_lines, line_l)
+            array.push(ms_level_bars, bar_index)
+
+    // HH / HL / LH / LL labels - optional (OFF by default).
+    //   HH/HL - col_up color (bullish)
+    //   LH/LL - col_dn color (bearish)
+    // Labels are pushed to ms_labels -> obey the MAX_MS_LABELS auto-trim.
+    if show_swing_labels and not tf_below_5m
+        col_hh_text = color.new(col_up, 30)
+        col_ll_text = color.new(col_dn, 30)
+        clear_bg    = color.new(color.black, 100)
+        if hh
+            lbl_hh = label.new(bar_index - length_eff, ph, "HH",
+                 style = label.style_label_down, textcolor = col_hh_text, color = clear_bg, size = size.small)
+            array.push(ms_labels, lbl_hh)
+            array.push(ms_label_bars, bar_index)
+        if lh
+            lbl_lh = label.new(bar_index - length_eff, ph, "LH",
+                 style = label.style_label_down, textcolor = col_ll_text, color = clear_bg, size = size.small)
+            array.push(ms_labels, lbl_lh)
+            array.push(ms_label_bars, bar_index)
+        if hl
+            lbl_hl = label.new(bar_index - length_eff, pl, "HL",
+                 style = label.style_label_up, textcolor = col_hh_text, color = clear_bg, size = size.small)
+            array.push(ms_labels, lbl_hl)
+            array.push(ms_label_bars, bar_index)
+        if ll
+            lbl_ll = label.new(bar_index - length_eff, pl, "LL",
+                 style = label.style_label_up, textcolor = col_ll_text, color = clear_bg, size = size.small)
+            array.push(ms_labels, lbl_ll)
+            array.push(ms_label_bars, bar_index)
+
+    // Upward break - draw a counter on repeated same-trend breaks (2, 3, ...).
+    if not na(upper) and breakout_up_now
+        up_break_count += 1
+        dn_break_count := 0
+        if up_break_count == 1 or na(up_break_base)
+            up_break_base := upper
+        if up_break_count > 1 and not tf_below_5m
+            int idx_lbl = na(upper_index) ? bar_index : bar_index - (bar_index - upper_index) / 2
+            lbl = label.new(idx_lbl, upper, str.tostring(up_break_count),
+                 textcolor = chart.fg_color, color = color(na), size = LABEL_SIZE)
+            array.push(ms_labels, lbl)
+            array.push(ms_label_bars, bar_index)
+        if not na(line_h)
+            line_h.set_x2(bar_index)
+        upper := na
+        up_break_base := na
+        trend := true
+        started := true
+
+    // Downward break - draw a counter on repeated same-trend breaks (2, 3, ...).
+    if not na(lower) and breakout_dn_now
+        dn_break_count += 1
+        up_break_count := 0
+        if dn_break_count == 1 or na(dn_break_base)
+            dn_break_base := lower
+        if dn_break_count > 1 and not tf_below_5m
+            int idx_lbl = na(lower_index) ? bar_index : bar_index - (bar_index - lower_index) / 2
+            lbl = label.new(idx_lbl, lower, str.tostring(dn_break_count),
+                 textcolor = chart.fg_color, color = color(na),
+                 style = label.style_label_up, size = LABEL_SIZE)
+            array.push(ms_labels, lbl)
+            array.push(ms_label_bars, bar_index)
+        if not na(line_l)
+            line_l.set_x2(bar_index)
+        lower := na
+        dn_break_base := na
+        trend := false
+        started := true
+
+    trend_line := trend ? source1 - volatility : source1 + volatility
+
+    color trend_color = trend ? col_up : col_dn
+
+    if trend and not prev_trend and not tf_below_5m
+        lbl = label.new(bar_index, trend_line, "△",
+             textcolor = trend_color, style = label.style_label_center,
+             color = color(na), size = size.large)
+        array.push(ms_labels, lbl)
+        array.push(ms_label_bars, bar_index)
+    if not trend and prev_trend and not tf_below_5m
+        lbl = label.new(bar_index, trend_line, "▽",
+             textcolor = trend_color, style = label.style_label_center,
+             color = color(na), size = size.large)
+        array.push(ms_labels, lbl)
+        array.push(ms_label_bars, bar_index)
+
+    [trend_color, trend_line, trend, up_break_count, dn_break_count, started]
+
+[trend_color, trend_line, trend, up_break_count_pub, dn_break_count_pub, ms_started] = market_structure()
+f_trim_level_lines()
+f_trim_ms_labels()
+
+// Multi-TF structure for the summary table (Trend Dashboard-style).
+//   Detection method matches the main structure:
+//     pivot HH/LL -> breakout (Wick / Body / Confirmed) -> BOS/CHoCH counter.
+//   Each TF returns [dir, bos] - direction (-1/0/+1) + continuations after CHoCH.
+//
+//   Auto Length ON  -> each TF gets its recommended mid (from f_length_eff_mid_by_tf()).
+//   Auto Length OFF -> ALL table rows use the user's length_manual so every multi-TF
+//                      value is computed with the same length as the on-chart structure.
+// No calc_bars_count - calculation runs over full chart history (default behaviour).
+len_tbl_d1 = length_auto_by_tf ? 30 : length_manual
+len_tbl_h4 = length_auto_by_tf ? 20 : length_manual
+len_tbl_h1 = length_auto_by_tf ? 15 : length_manual
+len_tbl_m5 = length_auto_by_tf ? 7  : length_manual
+
+[dir_d1_mtf, bos_d1_mtf] = request.security(syminfo.tickerid, "D",   compute_dir_bos(len_tbl_d1), lookahead = barmerge.lookahead_off)
+[dir_h4_mtf, bos_h4_mtf] = request.security(syminfo.tickerid, "240", compute_dir_bos(len_tbl_h4), lookahead = barmerge.lookahead_off)
+[dir_h1_mtf, bos_h1_mtf] = request.security(syminfo.tickerid, "60",  compute_dir_bos(len_tbl_h1), lookahead = barmerge.lookahead_off)
+[dir_m5_mtf, bos_m5_mtf] = request.security(syminfo.tickerid, "5",   compute_dir_bos(len_tbl_m5), lookahead = barmerge.lookahead_off)
+
+// Helpers for multi-TF trend rows in the table (Pine v6 requires functions at top level).
+// Format: 'UP (C+N)' / 'DOWN (C)' / 'Neutral' - direction + BOS counter.
+//   C       - phase start (CHoCH, first breakout after a direction flip).
+//   C+1..N  - trend continuations (BOS, sequential same-direction breakouts).
+//   Higher N = more mature phase, higher trend-exhaustion risk.
+f_trend_txt(dir, bos) =>
+    base = dir == 1 ? "▲ UP" : dir == -1 ? "▼ DOWN" : "● Neutral"
+    dir == 0 ? base : base + " (C" + (bos > 0 ? "+" + str.tostring(bos) : "") + ")"
+f_trend_col(dir) => dir == 1 ? col_up : dir == -1 ? col_dn : color.new(chart.fg_color, 30)
+
+// Current-timeframe marker for the summary table.
+_tf_p = timeframe.period
+is_d1_current = _tf_p == "D" or _tf_p == "1D"
+is_h4_current = _tf_p == "240"
+is_h1_current = _tf_p == "60"
+is_m5_current = _tf_p == "5"
+is_current_in_list = is_d1_current or is_h4_current or is_h1_current or is_m5_current
+
+// Short label for the current timeframe (for the 'Trend {TF}' row when the chart is outside D1/H4/H1/M5).
+current_tf_label = switch _tf_p
+    "1"   => "M1"
+    "3"   => "M3"
+    "5"   => "M5"
+    "15"  => "M15"
+    "30"  => "M30"
+    "45"  => "M45"
+    "60"  => "H1"
+    "120" => "H2"
+    "180" => "H3"
+    "240" => "H4"
+    "D"   => "D1"
+    "1D"  => "D1"
+    "W"   => "W1"
+    "1W"  => "W1"
+    "M"   => "MN"
+    "1M"  => "MN"
+    => _tf_p
+
+// ATR is computed on every bar to avoid consistency warnings.
+atr_len = atr_auto_by_tf ? f_atr_len_by_tf() : atr_len_manual
+atr_val = nz(f_atr_safe(atr_len), nz(high - low, 0.0))
+atr_pct = close != 0 ? (atr_val / close) * 100 : 0.0
+atr_range_min_dyn = ta.percentile_linear_interpolation(atr_pct, atr_range_lookback, atr_range_p_low)
+atr_range_max_dyn = ta.percentile_linear_interpolation(atr_pct, atr_range_lookback, atr_range_p_high)
+atr_range_min = nz(atr_range_min_dyn, f_atr_range_min_pct_by_tf())
+atr_range_max = nz(atr_range_max_dyn, f_atr_range_max_pct_by_tf())
+
+// =============================================================================
+// TRAILING STOP
+// =============================================================================
+var line[] stop_flip_lines = array.new_line(0)
+var line[] stop_recent_segments_fg = array.new_line(0)
+var line[] stop_recent_segments_bg = array.new_line(0)
+var line[] stop_recent_fill_price_lines = array.new_line(0)
+var linefill[] stop_recent_fill_links = array.new_linefill(0)
+
+float stop_loss = na
+trend_changed = ta.change(trend)
+flip_bar_0 = ta.valuewhen(trend_changed, bar_index, 0)
+flip_bar_1 = ta.valuewhen(trend_changed, bar_index, 1)  // for '2 ranges' mode
+flip_bar_9 = ta.valuewhen(trend_changed, bar_index, 9)  // for '10 ranges' mode (checkbox off)
+// Render window width depends on the checkbox: 2 ranges -> flip_bar_1, otherwise -> flip_bar_9.
+// If there are fewer flips, fall back to flip_bar_0 or 0.
+flip_window_oldest = stop_only_last_two_ranges ? flip_bar_1 : flip_bar_9
+window_start_bar = int(na(flip_bar_0) ? 0 : nz(flip_window_oldest, flip_bar_0))
+// ATR trailing stop: EMA basis +/- ATR*multiplier with one-directional ratcheting.
+// Effective parameters - either TF-adaptive or manual (see f_stop_basis_by_tf, f_stop_mult_by_tf).
+eff_stop_basis_len = stop_auto_by_tf ? f_stop_basis_by_tf() : stop_basis_len
+eff_stop_atr_mult  = stop_auto_by_tf ? f_stop_mult_by_tf()  : stop_atr_mult
+basis = ta.ema(close, eff_stop_basis_len)
+raw_stop = trend ? basis - atr_val * eff_stop_atr_mult : basis + atr_val * eff_stop_atr_mult
+var float atr_trail = na
+atr_trail := trend_changed ? raw_stop : trend ? math.max(nz(atr_trail, raw_stop), raw_stop) : math.min(nz(atr_trail, raw_stop), raw_stop)
+// On the flip bar the stop is set directly to raw_stop - without na, otherwise plot.linebr would break.
+stop_loss := trend_changed ? raw_stop : atr_trail
+
+stop_cross_dn = ta.crossunder(low, stop_loss)
+stop_cross_up = ta.crossover(high, stop_loss)
+// Touch markers removed - variables kept only for alerts.
+
+// Stop render: both modes use the custom block below (only window size differs).
+// Perf gate: cleanup only when the window changes (window is stable between flips).
+// On timeframes < 5M the entire render block is skipped - the indicator is 'disabled'.
+var int last_cleaned_wsb = -1
+if barstate.islast and not tf_below_5m
+    if window_start_bar != last_cleaned_wsb
+        last_cleaned_wsb := window_start_bar
+        wsb_clean = window_start_bar
+        if not na(wsb_clean) and array.size(ms_labels) > 0
+            i = array.size(ms_labels) - 1
+            while i >= 0
+                lb_bar = array.get(ms_label_bars, i)
+                if lb_bar < wsb_clean
+                    label.delete(array.get(ms_labels, i))
+                    array.remove(ms_labels, i)
+                    array.remove(ms_label_bars, i)
+                i -= 1
+        if not na(wsb_clean) and array.size(ms_level_lines) > 0
+            j = array.size(ms_level_lines) - 1
+            while j >= 0
+                ln = array.get(ms_level_lines, j)
+                ln_bar = array.get(ms_level_bars, j)
+                ln_x1 = line.get_x1(ln)
+                ln_x2 = line.get_x2(ln)
+                if ln_bar < wsb_clean and math.max(ln_x1, ln_x2) < wsb_clean
+                    line.delete(array.get(ms_level_lines, j))
+                    array.remove(ms_level_lines, j)
+                    array.remove(ms_level_bars, j)
+                j -= 1
+        if not na(wsb_clean) and array.size(stop_flip_lines) > 0
+            k = array.size(stop_flip_lines) - 1
+            while k >= 0
+                fl = array.get(stop_flip_lines, k)
+                if line.get_x1(fl) < wsb_clean or line.get_x2(fl) < wsb_clean
+                    line.delete(fl)
+                    array.remove(stop_flip_lines, k)
+                k -= 1
+
+    if array.size(stop_recent_segments_fg) > 0
+        for i = 0 to array.size(stop_recent_segments_fg) - 1
+            line.delete(array.get(stop_recent_segments_fg, i))
+    array.clear(stop_recent_segments_fg)
+    if array.size(stop_recent_segments_bg) > 0
+        for i = 0 to array.size(stop_recent_segments_bg) - 1
+            line.delete(array.get(stop_recent_segments_bg, i))
+    array.clear(stop_recent_segments_bg)
+    if array.size(stop_recent_fill_links) > 0
+        for i = 0 to array.size(stop_recent_fill_links) - 1
+            linefill.delete(array.get(stop_recent_fill_links, i))
+    array.clear(stop_recent_fill_links)
+    if array.size(stop_recent_fill_price_lines) > 0
+        for i = 0 to array.size(stop_recent_fill_price_lines) - 1
+            line.delete(array.get(stop_recent_fill_price_lines, i))
+    array.clear(stop_recent_fill_price_lines)
+
+    // Custom render for both modes:
+    //   checkbox ON  -> window_start_bar = flip_bar_1 (last 2 ranges)
+    //   checkbox OFF -> window_start_bar = flip_bar_9 (last 10 ranges)
+    rsb_draw = window_start_bar
+    if not na(rsb_draw)
+        window_bars = math.max(1, bar_index - rsb_draw)
+        seg_budget = 120
+        step = math.max(1, int(math.ceil(window_bars / seg_budget)))
+        // max_back = window_bars: the first segment starts exactly at window_start_bar (the flip candle).
+        max_back = math.min(3000, window_bars)
+        for back = max_back to 1 by step
+            b1 = bar_index - back
+            b2 = b1 + step
+            prev_back = math.max(back - step, 0)
+            if b2 >= rsb_draw and not na(stop_loss[back]) and not na(stop_loss[prev_back])
+                seg_col = trend[prev_back] ? col_up : col_dn
+                lbg = line.new(b1, stop_loss[back], b2, stop_loss[prev_back],
+                     xloc = xloc.bar_index, color = color.new(seg_col, 80), width = 5, style = line.style_solid)
+                array.push(stop_recent_segments_bg, lbg)
+                lfg = line.new(b1, stop_loss[back], b2, stop_loss[prev_back],
+                     xloc = xloc.bar_index, color = color.new(seg_col, 0), width = 1, style = line.style_solid)
+                array.push(stop_recent_segments_fg, lfg)
+                lp = line.new(b1, hl2[back], b2, hl2[prev_back],
+                     xloc = xloc.bar_index, color = color(na), width = 1, style = line.style_solid)
+                array.push(stop_recent_fill_price_lines, lp)
+                lf = linefill.new(lfg, lp, color.new(seg_col, FILL_TRANSP))
+                array.push(stop_recent_fill_links, lf)
+
+alert_stop_hit_up = ta.crossunder(low, stop_loss)
+alert_stop_hit_dn = ta.crossover(high, stop_loss)
+
+// =============================================================================
+// INFO TABLE
+// =============================================================================
+if barstate.islast and tf_below_5m
+    // On timeframes < 5M we show a compact info notice instead of the summary table.
+    var table t_off = table.new(position.top_right, 1, 1,
+         border_width = 1, border_color = color.new(#f0a500, 30),
+         bgcolor = color.new(color.black, 50))
+    table.cell(t_off, 0, 0,
+         "MS PRO disabled\n\nCurrent timeframe is below 5 minutes.\nSwitch to 5M or higher.",
+         text_color = color.new(#f0a500, 0),
+         text_size = TABLE_SIZE,
+         text_halign = text.align_left)
+
+if barstate.islast and not tf_below_5m
+    var table t = table.new(position.top_right, 2, 12,
+         border_width = 1, border_color = color.new(color.gray, 50),
+         bgcolor = color.new(color.black, 65))
+
+    ts = TABLE_SIZE
+
+    // Unified highlight palette:
+    //   col_label    - all field names (col 0)
+    //   col_value    - neutral numeric values (stop, ATR without issues, Length OK)
+    //   col_up/col_dn - directional / qualitative states (trend, danger, plus/minus)
+    //   col_warn     - warning, non-critical (low ATR%, Length mismatch)
+    //   col_info     - informational captions (recommendations)
+    //   dot_col      - 'current TF' marker (●)
+    col_label = color.new(color.white, 25)
+    col_value = color.new(color.white, 0)
+    col_warn  = color.new(#f0a500, 0)
+    col_info  = color.new(color.gray, 0)
+    dot_col   = col_warn   // same orange used by the ATR% range
+    dot       = "●  "
+
+    // Dynamic row counter (allows collapsing the current-TF row if it coincides with D1/H4/H1/M5).
+    int r = 0
+
+    // 0. Header
+    table.cell(t, 0, r, "MS PRO", text_color = col_info, text_size = ts,
+         bgcolor = color.new(color.black, 40), text_halign = text.align_center)
+    table.cell(t, 1, r, "STATUS", text_color = col_info, text_size = ts,
+         bgcolor = color.new(color.black, 40), text_halign = text.align_center)
+    r += 1
+
+    // Trend D1 (with dot when current)
+    table.cell(t, 0, r, (is_d1_current ? dot : "") + "Trend D1",
+         text_color = is_d1_current ? dot_col : col_label, text_size = ts)
+    table.cell(t, 1, r, f_trend_txt(dir_d1_mtf, bos_d1_mtf), text_color = f_trend_col(dir_d1_mtf), text_size = ts)
+    r += 1
+
+    // Trend H4
+    table.cell(t, 0, r, (is_h4_current ? dot : "") + "Trend H4",
+         text_color = is_h4_current ? dot_col : col_label, text_size = ts)
+    table.cell(t, 1, r, f_trend_txt(dir_h4_mtf, bos_h4_mtf), text_color = f_trend_col(dir_h4_mtf), text_size = ts)
+    r += 1
+
+    // Trend H1
+    table.cell(t, 0, r, (is_h1_current ? dot : "") + "Trend H1",
+         text_color = is_h1_current ? dot_col : col_label, text_size = ts)
+    table.cell(t, 1, r, f_trend_txt(dir_h1_mtf, bos_h1_mtf), text_color = f_trend_col(dir_h1_mtf), text_size = ts)
+    r += 1
+
+    // Trend M5
+    table.cell(t, 0, r, (is_m5_current ? dot : "") + "Trend M5",
+         text_color = is_m5_current ? dot_col : col_label, text_size = ts)
+    table.cell(t, 1, r, f_trend_txt(dir_m5_mtf, bos_m5_mtf), text_color = f_trend_col(dir_m5_mtf), text_size = ts)
+    r += 1
+
+    // Trend (current TF) - shown only when the chart is OUTSIDE D1/H4/H1/M5.
+    // For the current TF direction + BOS come from the main market_structure():
+    //   trend (bool) + up_break_count_pub / dn_break_count_pub (breakout counters).
+    if not is_current_in_list
+        cur_dir = ms_started ? (trend ? 1 : -1) : 0
+        int cur_bos = cur_dir == 1 ? math.max(0, up_break_count_pub - 1) : (cur_dir == -1 ? math.max(0, dn_break_count_pub - 1) : 0)
+        table.cell(t, 0, r, dot + "Trend " + current_tf_label,
+             text_color = dot_col, text_size = ts)
+        table.cell(t, 1, r, f_trend_txt(cur_dir, cur_bos), text_color = f_trend_col(cur_dir), text_size = ts)
+        r += 1
+
+    // Trailing stop
+    sl_txt = not na(stop_loss) ? str.tostring(stop_loss, "#.####") : "-"
+    table.cell(t, 0, r, "Trailing stop", text_color = col_label, text_size = ts)
+    table.cell(t, 1, r, sl_txt, text_color = col_value, text_size = ts)
+    r += 1
+
+    // Distance to trailing stop %
+    dist_pct = not na(stop_loss) ? math.abs((close - stop_loss) / close * 100) : float(na)
+    dist_txt = not na(dist_pct) ? str.tostring(dist_pct, "#.##") + "%" : "-"
+    dist_col = not na(dist_pct) ? (dist_pct < 1.0 ? col_dn : dist_pct > 3.0 ? col_up : col_value) : col_info
+    table.cell(t, 0, r, "Distance to stop", text_color = col_label, text_size = ts)
+    table.cell(t, 1, r, dist_txt, text_color = dist_col, text_size = ts)
+    r += 1
+
+    // ATR%
+    atr_col = atr_pct < atr_range_min ? col_warn : atr_pct > atr_range_max ? col_dn : col_up
+    atr_txt = str.tostring(atr_pct, "#.##") + "% (" + str.tostring(atr_range_min, "#.##") + "-" + str.tostring(atr_range_max, "#.##") + ")"
+    table.cell(t, 0, r, "ATR% (" + str.tostring(atr_len) + ")", text_color = col_label, text_size = ts)
+    table.cell(t, 1, r, atr_txt, text_color = atr_col, text_size = ts)
+    r += 1
+
+    // Recommended Length - universal SMC range = mid x 0.7..1.4.
+    smc_mid = f_length_eff_mid_by_tf()
+    smc_min = int(math.round(smc_mid * 0.7))
+    smc_max = int(math.round(smc_mid * 1.4))
+    rec_length = str.tostring(smc_min) + "-" + str.tostring(smc_max)
+    table.cell(t, 0, r, "Rec. Length", text_color = col_label, text_size = ts)
+    table.cell(t, 1, r, rec_length, text_color = col_info, text_size = ts)
+    r += 1
+
+    // Current Length - matches the SMC range in green, otherwise orange.
+    len_match = length_eff >= smc_min and length_eff <= smc_max
+    table.cell(t, 0, r, "Current Length", text_color = col_label, text_size = ts)
+    table.cell(t, 1, r, str.tostring(length_eff) + (length_auto_by_tf ? " (auto)" : ""),
+         text_color = len_match ? col_up : col_warn, text_size = ts)
+
+// =============================================================================
+// ALERTS
+// =============================================================================
+alertcondition(trend and not trend[1],
+     "Trend flip -> UP",
+     "MS PRO: trend flipped to bullish ▲")
+
+alertcondition(not trend and trend[1],
+     "Trend flip -> DOWN",
+     "MS PRO: trend flipped to bearish ▼")
+
+alertcondition(not na(stop_loss) and trend and alert_stop_hit_up,
+     "Stop touch (uptrend)",
+     "MS PRO: trailing-stop touched - uptrend")
+
+alertcondition(not na(stop_loss) and not trend and alert_stop_hit_dn,
+     "Stop touch (downtrend)",
+     "MS PRO: trailing-stop touched - downtrend")

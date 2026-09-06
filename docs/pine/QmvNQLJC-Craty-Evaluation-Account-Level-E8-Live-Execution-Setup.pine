@@ -1,0 +1,541 @@
+//@version=6
+strategy("Craty Evaluation Account Level E8 - Live Execution Setup", overlay=true, pyramiding=0, process_orders_on_close=true, max_labels_count=500)
+
+// =====================================================
+// CRATY EVALUATION E8 - LIVE EXECUTION SETUP
+// Same trading logic as E7.
+// Added: alerts, entry labels, SL/TP labels, dashboard.
+// =====================================================
+
+// =====================================================
+// INPUTS
+// =====================================================
+
+entryLondonSession = input.session("0700-1000", "London Entry Session")
+entryNYSession = input.session("1330-1600", "NY AM Entry Session")
+
+manageLondonSession = input.session("0700-1000", "London Manage Session")
+manageNYSession = input.session("1330-1600", "NY AM Manage Session")
+
+tz = "Europe/London"
+
+profitTarget = input.float(3000, "Evaluation Profit Target", step=100)
+trailingDrawLimit = input.float(2000, "Trailing Draw Limit", step=100)
+drawSafetyBuffer = input.float(300, "Draw Safety Buffer", step=50)
+
+maxProfitPerTrade = input.float(1400, "Max Profit Per Trade", step=100)
+
+riskPerTradeDollars = input.float(400, "Risk Per Trade", step=50)
+maxRiskPerTradeDollars = input.float(500, "Hard Max Risk Per Trade", step=50)
+
+openingRangeBars = input.int(15, "Opening Range Bars", minval=5)
+delayBars = input.int(3, "Human Delay Bars", minval=1)
+
+minRRTarget = input.float(2.0, "Minimum Target RR", step=0.25)
+targetRR = input.float(5.0, "Aggressive Target RR", step=0.25)
+
+maxChaseR = input.float(0.80, "Max Chase After Delay in R", step=0.10)
+
+atrLen = input.int(14, "ATR Length")
+stopBufferATR = input.float(0.10, "Stop Buffer ATR", step=0.05)
+
+minStopPoints = input.float(4.0, "Minimum Stop Points")
+maxStopPoints = input.float(80.0, "Maximum Stop Points")
+
+breakoutCloseStrength = input.float(0.65, "Breakout Close Strength", step=0.05)
+minBodyATR = input.float(0.25, "Minimum Breakout Body ATR", step=0.05)
+
+useVWAPFilter = input.bool(true, "Use VWAP Filter")
+
+beOffsetTicks = input.int(1, "Breakeven Offset Ticks", minval=0)
+
+// Same stronger dollar lock as E7
+useDollarLock = input.bool(true, "Use Dollar Profit Lock")
+
+dollarTrigger1 = input.float(350, "Dollar Lock Trigger 1", step=50)
+dollarLock1 = input.float(250, "Dollar Lock Amount 1", step=50)
+
+dollarTrigger2 = input.float(700, "Dollar Lock Trigger 2", step=50)
+dollarLock2 = input.float(450, "Dollar Lock Amount 2", step=50)
+
+dollarTrigger3 = input.float(1000, "Dollar Lock Trigger 3", step=50)
+dollarLock3 = input.float(750, "Dollar Lock Amount 3", step=50)
+
+// Live execution tools
+showLabels = input.bool(true, "Show Entry SL TP Labels")
+showDashboard = input.bool(true, "Show Live Dashboard")
+sendAlerts = input.bool(true, "Send Alert Messages")
+
+// =====================================================
+// SESSION FILTERS
+// =====================================================
+
+inEntryLondon = not na(time(timeframe.period, entryLondonSession, tz))
+inEntryNY = not na(time(timeframe.period, entryNYSession, tz))
+inEntrySession = inEntryLondon or inEntryNY
+
+inManageLondon = not na(time(timeframe.period, manageLondonSession, tz))
+inManageNY = not na(time(timeframe.period, manageNYSession, tz))
+inManageSession = inManageLondon or inManageNY
+
+sessionId = inEntryLondon ? 1 : inEntryNY ? 2 : 0
+newSession = inEntrySession and (not inEntrySession[1] or sessionId != sessionId[1])
+
+// =====================================================
+// EVALUATION DRAWDOWN / PROFIT LOCK
+// =====================================================
+
+currentEvalPnL = strategy.netprofit + strategy.openprofit
+
+var float peakEvalPnL = na
+var bool evalLocked = false
+
+if na(peakEvalPnL)
+    peakEvalPnL := currentEvalPnL
+
+peakEvalPnL := math.max(peakEvalPnL, currentEvalPnL)
+
+drawFromPeak = peakEvalPnL - currentEvalPnL
+remainingDraw = trailingDrawLimit - drawFromPeak
+
+if currentEvalPnL >= profitTarget
+    evalLocked := true
+
+if drawFromPeak >= trailingDrawLimit - drawSafetyBuffer
+    evalLocked := true
+
+canTrade = not evalLocked and remainingDraw > maxRiskPerTradeDollars + drawSafetyBuffer
+
+// =====================================================
+// OPENING RANGE
+// =====================================================
+
+var int sessionBars = 0
+var float orHigh = na
+var float orLow = na
+
+var bool longArmed = true
+var bool shortArmed = true
+
+if newSession
+    sessionBars := 1
+    orHigh := high
+    orLow := low
+    longArmed := true
+    shortArmed := true
+else if inEntrySession
+    sessionBars += 1
+
+    if sessionBars <= openingRangeBars
+        orHigh := math.max(orHigh, high)
+        orLow := math.min(orLow, low)
+else
+    sessionBars := 0
+    orHigh := na
+    orLow := na
+    longArmed := true
+    shortArmed := true
+
+orComplete = inEntrySession and sessionBars > openingRangeBars and not na(orHigh) and not na(orLow)
+
+insideOR = orComplete and close < orHigh and close > orLow
+
+if insideOR and strategy.position_size == 0
+    longArmed := true
+    shortArmed := true
+
+plot(orHigh, title="Opening Range High", color=color.new(color.green, 50), style=plot.style_linebr)
+plot(orLow, title="Opening Range Low", color=color.new(color.red, 50), style=plot.style_linebr)
+
+// =====================================================
+// BREAKOUT QUALITY
+// =====================================================
+
+atr = ta.atr(atrLen)
+body = math.abs(close - open)
+candleRange = high - low
+closeLocation = candleRange > 0 ? (close - low) / candleRange : 0.5
+
+vwapValue = ta.vwap(hlc3)
+
+longVWAPOk = useVWAPFilter ? close > vwapValue : true
+shortVWAPOk = useVWAPFilter ? close < vwapValue : true
+
+strongBullBreakout = close > open and closeLocation >= breakoutCloseStrength and body >= atr * minBodyATR
+strongBearBreakout = close < open and closeLocation <= 1.0 - breakoutCloseStrength and body >= atr * minBodyATR
+
+longBreakoutSignal = orComplete and longArmed and close > orHigh and high > orHigh and strongBullBreakout and longVWAPOk
+shortBreakoutSignal = orComplete and shortArmed and close < orLow and low < orLow and strongBearBreakout and shortVWAPOk
+
+plotshape(longBreakoutSignal, title="Long OR Breakout Signal", location=location.belowbar, color=color.lime, style=shape.triangleup, size=size.small)
+plotshape(shortBreakoutSignal, title="Short OR Breakout Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// =====================================================
+// PENDING SIGNAL STORAGE
+// =====================================================
+
+var bool pendingLong = false
+var bool pendingShort = false
+
+var int longSignalBar = na
+var int shortSignalBar = na
+
+var float longSignalClose = na
+var float shortSignalClose = na
+
+var float longBreakoutLevel = na
+var float shortBreakoutLevel = na
+
+// =====================================================
+// STORE SIGNALS
+// =====================================================
+
+if inEntrySession and canTrade and strategy.position_size == 0
+    if longBreakoutSignal
+        pendingLong := true
+        pendingShort := false
+
+        longSignalBar := bar_index
+        longSignalClose := close
+        longBreakoutLevel := orHigh
+
+        longArmed := false
+
+    if shortBreakoutSignal
+        pendingShort := true
+        pendingLong := false
+
+        shortSignalBar := bar_index
+        shortSignalClose := close
+        shortBreakoutLevel := orLow
+
+        shortArmed := false
+
+// =====================================================
+// EXACT HUMAN DELAY ENTRY
+// =====================================================
+
+longDelayReady = pendingLong and not na(longSignalBar) and bar_index - longSignalBar == delayBars
+shortDelayReady = pendingShort and not na(shortSignalBar) and bar_index - shortSignalBar == delayBars
+
+// =====================================================
+// STRUCTURAL STOPS BEHIND BREAKOUT LEVEL
+// =====================================================
+
+longStopCandidate = not na(longBreakoutLevel) ? longBreakoutLevel - atr * stopBufferATR : na
+shortStopCandidate = not na(shortBreakoutLevel) ? shortBreakoutLevel + atr * stopBufferATR : na
+
+longStopPoints = not na(longStopCandidate) ? close - longStopCandidate : na
+shortStopPoints = not na(shortStopCandidate) ? shortStopCandidate - close : na
+
+longStopValid = not na(longStopPoints) and longStopPoints >= minStopPoints and longStopPoints <= maxStopPoints
+shortStopValid = not na(shortStopPoints) and shortStopPoints >= minStopPoints and shortStopPoints <= maxStopPoints
+
+// =====================================================
+// POSITION SIZE BY RISK
+// =====================================================
+
+riskBudget = math.min(riskPerTradeDollars, maxRiskPerTradeDollars)
+
+longOneContractRisk = not na(longStopPoints) ? longStopPoints * syminfo.pointvalue : na
+shortOneContractRisk = not na(shortStopPoints) ? shortStopPoints * syminfo.pointvalue : na
+
+longQtyRaw = not na(longOneContractRisk) and longOneContractRisk > 0 ? math.floor(riskBudget / longOneContractRisk) : 0
+shortQtyRaw = not na(shortOneContractRisk) and shortOneContractRisk > 0 ? math.floor(riskBudget / shortOneContractRisk) : 0
+
+longQty = math.max(longQtyRaw, 0)
+shortQty = math.max(shortQtyRaw, 0)
+
+longActualRisk = not na(longOneContractRisk) ? longOneContractRisk * longQty : na
+shortActualRisk = not na(shortOneContractRisk) ? shortOneContractRisk * shortQty : na
+
+longRiskOk = longQty >= 1 and longActualRisk <= maxRiskPerTradeDollars and longActualRisk < remainingDraw - drawSafetyBuffer
+shortRiskOk = shortQty >= 1 and shortActualRisk <= maxRiskPerTradeDollars and shortActualRisk < remainingDraw - drawSafetyBuffer
+
+// =====================================================
+// DELAY VALIDITY / NO CHASING
+// =====================================================
+
+longStillValid = not na(longBreakoutLevel) and close > longBreakoutLevel and close > longStopCandidate
+shortStillValid = not na(shortBreakoutLevel) and close < shortBreakoutLevel and close < shortStopCandidate
+
+longChaseOk = not na(longSignalClose) and not na(longStopCandidate) and close <= longSignalClose + ((longSignalClose - longStopCandidate) * maxChaseR)
+shortChaseOk = not na(shortSignalClose) and not na(shortStopCandidate) and close >= shortSignalClose - ((shortStopCandidate - shortSignalClose) * maxChaseR)
+
+// =====================================================
+// TARGET
+// =====================================================
+
+longRiskPoints = not na(longStopCandidate) ? close - longStopCandidate : na
+shortRiskPoints = not na(shortStopCandidate) ? shortStopCandidate - close : na
+
+longMaxProfitPoints = longQty > 0 ? maxProfitPerTrade / (longQty * syminfo.pointvalue) : na
+shortMaxProfitPoints = shortQty > 0 ? maxProfitPerTrade / (shortQty * syminfo.pointvalue) : na
+
+longRRTargetPoints = not na(longRiskPoints) ? longRiskPoints * targetRR : na
+shortRRTargetPoints = not na(shortRiskPoints) ? shortRiskPoints * targetRR : na
+
+longFinalTargetPoints = not na(longRRTargetPoints) and not na(longMaxProfitPoints) ? math.min(longRRTargetPoints, longMaxProfitPoints) : na
+shortFinalTargetPoints = not na(shortRRTargetPoints) and not na(shortMaxProfitPoints) ? math.min(shortRRTargetPoints, shortMaxProfitPoints) : na
+
+longTargetValid = not na(longFinalTargetPoints) and not na(longRiskPoints) and longFinalTargetPoints >= longRiskPoints * minRRTarget
+shortTargetValid = not na(shortFinalTargetPoints) and not na(shortRiskPoints) and shortFinalTargetPoints >= shortRiskPoints * minRRTarget
+
+longTargetCandidate = longTargetValid ? close + longFinalTargetPoints : na
+shortTargetCandidate = shortTargetValid ? close - shortFinalTargetPoints : na
+
+// =====================================================
+// ACTIVE TRADE STORAGE
+// =====================================================
+
+var float activeLongStopOriginal = na
+var float activeLongStopLive = na
+var float activeLongTarget = na
+
+var float activeShortStopOriginal = na
+var float activeShortStopLive = na
+var float activeShortTarget = na
+
+// =====================================================
+// EXECUTION
+// =====================================================
+
+if inEntrySession and canTrade and strategy.position_size == 0
+    if longDelayReady and longStopValid and longRiskOk and longStillValid and longChaseOk and longTargetValid
+        activeLongStopOriginal := longStopCandidate
+        activeLongStopLive := longStopCandidate
+        activeLongTarget := longTargetCandidate
+
+        activeShortStopOriginal := na
+        activeShortStopLive := na
+        activeShortTarget := na
+
+        strategy.entry("Long", strategy.long, qty=longQty)
+        strategy.exit("Long SL/TP", from_entry="Long", stop=activeLongStopLive, limit=activeLongTarget)
+
+        if showLabels
+            longLabelText = "LONG ENTRY\nQty: " + str.tostring(longQty) + "\nEntry: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(activeLongStopLive, format.mintick) + "\nTP: " + str.tostring(activeLongTarget, format.mintick)
+            label.new(bar_index, low, longLabelText, style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
+
+        if sendAlerts
+            longAlertText = "CRATY E8 LONG ENTRY\nSymbol: " + syminfo.ticker + "\nQty: " + str.tostring(longQty) + "\nEntry: " + str.tostring(close, format.mintick) + "\nStop Loss: " + str.tostring(activeLongStopLive, format.mintick) + "\nTake Profit: " + str.tostring(activeLongTarget, format.mintick) + "\nRisk: $" + str.tostring(longActualRisk, "#.##") + "\nDelay Used: " + str.tostring(delayBars) + " bars"
+            alert(longAlertText, alert.freq_once_per_bar_close)
+
+        pendingLong := false
+
+    if shortDelayReady and shortStopValid and shortRiskOk and shortStillValid and shortChaseOk and shortTargetValid
+        activeShortStopOriginal := shortStopCandidate
+        activeShortStopLive := shortStopCandidate
+        activeShortTarget := shortTargetCandidate
+
+        activeLongStopOriginal := na
+        activeLongStopLive := na
+        activeLongTarget := na
+
+        strategy.entry("Short", strategy.short, qty=shortQty)
+        strategy.exit("Short SL/TP", from_entry="Short", stop=activeShortStopLive, limit=activeShortTarget)
+
+        if showLabels
+            shortLabelText = "SHORT ENTRY\nQty: " + str.tostring(shortQty) + "\nEntry: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(activeShortStopLive, format.mintick) + "\nTP: " + str.tostring(activeShortTarget, format.mintick)
+            label.new(bar_index, high, shortLabelText, style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+
+        if sendAlerts
+            shortAlertText = "CRATY E8 SHORT ENTRY\nSymbol: " + syminfo.ticker + "\nQty: " + str.tostring(shortQty) + "\nEntry: " + str.tostring(close, format.mintick) + "\nStop Loss: " + str.tostring(activeShortStopLive, format.mintick) + "\nTake Profit: " + str.tostring(activeShortTarget, format.mintick) + "\nRisk: $" + str.tostring(shortActualRisk, "#.##") + "\nDelay Used: " + str.tostring(delayBars) + " bars"
+            alert(shortAlertText, alert.freq_once_per_bar_close)
+
+        pendingShort := false
+
+// =====================================================
+// CANCEL PENDING SIGNALS AFTER DELAY WINDOW
+// =====================================================
+
+if pendingLong and not na(longSignalBar)
+    if bar_index - longSignalBar > delayBars
+        pendingLong := false
+
+if pendingShort and not na(shortSignalBar)
+    if bar_index - shortSignalBar > delayBars
+        pendingShort := false
+
+// =====================================================
+// PROFIT LOCK LADDER: R-BASED + DOLLAR-BASED
+// =====================================================
+
+if strategy.position_size > 0 and not na(activeLongStopOriginal) and not na(activeLongTarget)
+    longEntryAvg = strategy.position_avg_price
+    longQtyLive = math.abs(strategy.position_size)
+    longR = longEntryAvg - activeLongStopOriginal
+
+    longBEStop = longEntryAvg + beOffsetTicks * syminfo.mintick
+    longLock1R = longEntryAvg + longR
+    longLock2R = longEntryAvg + longR * 2.0
+
+    if high >= longEntryAvg + longR * 1.0
+        activeLongStopLive := math.max(activeLongStopLive, longBEStop)
+
+    if high >= longEntryAvg + longR * 2.0
+        activeLongStopLive := math.max(activeLongStopLive, longLock1R)
+
+    if high >= longEntryAvg + longR * 3.0
+        activeLongStopLive := math.max(activeLongStopLive, longLock2R)
+
+    longOpenProfitAtHigh = (high - longEntryAvg) * syminfo.pointvalue * longQtyLive
+
+    longDollarLock1Stop = longEntryAvg + (dollarLock1 / (syminfo.pointvalue * longQtyLive))
+    longDollarLock2Stop = longEntryAvg + (dollarLock2 / (syminfo.pointvalue * longQtyLive))
+    longDollarLock3Stop = longEntryAvg + (dollarLock3 / (syminfo.pointvalue * longQtyLive))
+
+    if useDollarLock and longOpenProfitAtHigh >= dollarTrigger1
+        activeLongStopLive := math.max(activeLongStopLive, longDollarLock1Stop)
+
+    if useDollarLock and longOpenProfitAtHigh >= dollarTrigger2
+        activeLongStopLive := math.max(activeLongStopLive, longDollarLock2Stop)
+
+    if useDollarLock and longOpenProfitAtHigh >= dollarTrigger3
+        activeLongStopLive := math.max(activeLongStopLive, longDollarLock3Stop)
+
+    strategy.exit("Long SL/TP", from_entry="Long", stop=activeLongStopLive, limit=activeLongTarget)
+
+if strategy.position_size < 0 and not na(activeShortStopOriginal) and not na(activeShortTarget)
+    shortEntryAvg = strategy.position_avg_price
+    shortQtyLive = math.abs(strategy.position_size)
+    shortR = activeShortStopOriginal - shortEntryAvg
+
+    shortBEStop = shortEntryAvg - beOffsetTicks * syminfo.mintick
+    shortLock1R = shortEntryAvg - shortR
+    shortLock2R = shortEntryAvg - shortR * 2.0
+
+    if low <= shortEntryAvg - shortR * 1.0
+        activeShortStopLive := math.min(activeShortStopLive, shortBEStop)
+
+    if low <= shortEntryAvg - shortR * 2.0
+        activeShortStopLive := math.min(activeShortStopLive, shortLock1R)
+
+    if low <= shortEntryAvg - shortR * 3.0
+        activeShortStopLive := math.min(activeShortStopLive, shortLock2R)
+
+    shortOpenProfitAtLow = (shortEntryAvg - low) * syminfo.pointvalue * shortQtyLive
+
+    shortDollarLock1Stop = shortEntryAvg - (dollarLock1 / (syminfo.pointvalue * shortQtyLive))
+    shortDollarLock2Stop = shortEntryAvg - (dollarLock2 / (syminfo.pointvalue * shortQtyLive))
+    shortDollarLock3Stop = shortEntryAvg - (dollarLock3 / (syminfo.pointvalue * shortQtyLive))
+
+    if useDollarLock and shortOpenProfitAtLow >= dollarTrigger1
+        activeShortStopLive := math.min(activeShortStopLive, shortDollarLock1Stop)
+
+    if useDollarLock and shortOpenProfitAtLow >= dollarTrigger2
+        activeShortStopLive := math.min(activeShortStopLive, shortDollarLock2Stop)
+
+    if useDollarLock and shortOpenProfitAtLow >= dollarTrigger3
+        activeShortStopLive := math.min(activeShortStopLive, shortDollarLock3Stop)
+
+    strategy.exit("Short SL/TP", from_entry="Short", stop=activeShortStopLive, limit=activeShortTarget)
+
+// =====================================================
+// EVAL TARGET / DRAWDOWN LOCK CLOSE
+// =====================================================
+
+if evalLocked and strategy.position_size != 0
+    strategy.close_all(comment="Eval Lock")
+
+    if sendAlerts
+        evalAlertText = "CRATY E8 EVAL LOCK\nTarget or drawdown lock reached.\nCurrent PnL: $" + str.tostring(currentEvalPnL, "#.##") + "\nStop trading now."
+        alert(evalAlertText, alert.freq_once_per_bar_close)
+
+// =====================================================
+// SESSION FLAT / NO OVERNIGHT
+// =====================================================
+
+if not inManageSession and strategy.position_size != 0
+    strategy.close_all(comment="Session Flat")
+
+    if sendAlerts
+        sessionAlertText = "CRATY E8 SESSION FLAT\nSession ended. Position closed.\nNo overnight holding."
+        alert(sessionAlertText, alert.freq_once_per_bar_close)
+
+// =====================================================
+// CLEAR AFTER CLOSE
+// =====================================================
+
+positionJustClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if positionJustClosed
+    activeLongStopOriginal := na
+    activeLongStopLive := na
+    activeLongTarget := na
+
+    activeShortStopOriginal := na
+    activeShortStopLive := na
+    activeShortTarget := na
+
+// =====================================================
+// DASHBOARD
+// =====================================================
+
+var table dash = table.new(position.top_right, 2, 10, border_width=1)
+
+if showDashboard and barstate.islast
+    statusText = evalLocked ? "EVAL LOCKED" : canTrade ? "CAN TRADE" : "WAIT / PROTECTED"
+    positionText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+
+    liveStopText = "NA"
+    liveTargetText = "NA"
+
+    if strategy.position_size > 0 and not na(activeLongStopLive)
+        liveStopText := str.tostring(activeLongStopLive, format.mintick)
+
+    if strategy.position_size < 0 and not na(activeShortStopLive)
+        liveStopText := str.tostring(activeShortStopLive, format.mintick)
+
+    if strategy.position_size > 0 and not na(activeLongTarget)
+        liveTargetText := str.tostring(activeLongTarget, format.mintick)
+
+    if strategy.position_size < 0 and not na(activeShortTarget)
+        liveTargetText := str.tostring(activeShortTarget, format.mintick)
+
+    table.cell(dash, 0, 0, "CRATY E8", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 1, 0, statusText, bgcolor=evalLocked ? color.new(color.red, 0) : color.new(color.green, 0), text_color=color.white)
+
+    table.cell(dash, 0, 1, "Position")
+    table.cell(dash, 1, 1, positionText)
+
+    table.cell(dash, 0, 2, "Current PnL")
+    table.cell(dash, 1, 2, "$" + str.tostring(currentEvalPnL, "#.##"))
+
+    table.cell(dash, 0, 3, "Peak PnL")
+    table.cell(dash, 1, 3, "$" + str.tostring(peakEvalPnL, "#.##"))
+
+    table.cell(dash, 0, 4, "Draw From Peak")
+    table.cell(dash, 1, 4, "$" + str.tostring(drawFromPeak, "#.##"))
+
+    table.cell(dash, 0, 5, "Remaining Draw")
+    table.cell(dash, 1, 5, "$" + str.tostring(remainingDraw, "#.##"))
+
+    table.cell(dash, 0, 6, "Live Stop")
+    table.cell(dash, 1, 6, liveStopText)
+
+    table.cell(dash, 0, 7, "Live Target")
+    table.cell(dash, 1, 7, liveTargetText)
+
+    table.cell(dash, 0, 8, "Delay")
+    table.cell(dash, 1, 8, str.tostring(delayBars) + " bars")
+
+    table.cell(dash, 0, 9, "Rule")
+    table.cell(dash, 1, 9, "Stop at +3000")
+
+// =====================================================
+// VISUALS
+// =====================================================
+
+plot(vwapValue, title="VWAP", color=color.new(color.blue, 0))
+
+plot(strategy.position_size > 0 ? activeLongStopLive : na, title="Long Live Stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? activeLongTarget : na, title="Long Target", color=color.green, style=plot.style_linebr)
+
+plot(strategy.position_size < 0 ? activeShortStopLive : na, title="Short Live Stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? activeShortTarget : na, title="Short Target", color=color.green, style=plot.style_linebr)
+
+plot(currentEvalPnL, title="Current Eval PnL", display=display.data_window)
+plot(peakEvalPnL, title="Peak Eval PnL", display=display.data_window)
+plot(drawFromPeak, title="Draw From Peak", display=display.data_window)
+plot(remainingDraw, title="Remaining Draw", display=display.data_window)

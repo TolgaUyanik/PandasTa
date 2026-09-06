@@ -1,0 +1,150 @@
+//@version=6
+strategy(title="Optimized Keltner Channels Strategy [NIFTY]", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ==========================================
+// 1. ORIGINAL CORE INPUTS (Exact Defaults)
+// ==========================================
+group_core     = "Original Keltner Settings"
+length         = input.int(20, minval=1, title="KC Length", group=group_core)
+mult           = input.float(2.0, "Multiplier", group=group_core)
+src            = input.source(close, title="Source", group=group_core)
+exp            = input.bool(true, "Use Exponential MA", group=group_core)
+BandsStyle     = input.string("Average True Range", options = ["Average True Range", "True Range", "Range"], title="Bands Style", group=group_core)
+atrlength      = input.int(10, "ATR Length", group=group_core)
+
+// ==========================================
+// 2. OPTIONAL GENTLE OPTIMIZATIONS (Disabled by Default)
+// ==========================================
+group_opt      = "Optional Trend & Time Filters"
+useTrendFilter = input.bool(false, "Use 200 EMA Trend Filter", tooltip="Only takes longs above 200 EMA, and shorts below 200 EMA.", group=group_opt)
+emaPeriod      = input.int(200, "EMA Filter Period", group=group_opt)
+
+useTimeFilter  = input.bool(false, "Use Time Session Filter", tooltip="Restricts entries to specific session hours.", group=group_opt)
+sessionHours   = input.string("0930-1445", "Trading Session (Exchange Time)", tooltip="Format: HHMM-HHMM. Monday-Friday only.", group=group_opt)
+
+group_stops    = "Optional Exits & Stops"
+exitOnMidBand  = input.bool(false, "Exit on Mid-Band Close", tooltip="Exits long when close crosses under Middle Band, and short when close crosses over Middle Band. Helps cut losses much earlier than opposite band crossover.", group=group_stops)
+useAtrStop     = input.bool(false, "Use Wide ATR Stop Loss", tooltip="Protects against unexpected macro events. Must be set wide (e.g. 2.5 - 3.5) to avoid shaking out of trends.", group=group_stops)
+atrStopMult    = input.float(3.0, "ATR Stop Multiplier", group=group_stops)
+
+// ==========================================
+// 3. INDICATOR CALCULATIONS
+// ==========================================
+
+esma(source, len, useExp) =>
+    s = ta.sma(source, len)
+    e = ta.ema(source, len)
+    useExp ? e : s
+
+ma = esma(src, length, exp)
+rangema = BandsStyle == "True Range" ? ta.tr(true) : BandsStyle == "Average True Range" ? ta.atr(atrlength) : ta.rma(high - low, length)
+upper = ma + rangema * mult
+lower = ma - rangema * mult
+
+// 200 EMA Filter
+emaFilter = ta.ema(close, emaPeriod)
+trendLongAllowed  = not useTrendFilter or (close > emaFilter)
+trendShortAllowed = not useTrendFilter or (close < emaFilter)
+
+// Time Filter
+sessionString = sessionHours + ":23456" // Monday to Friday
+timeAllowed = not useTimeFilter or not na(time(timeframe.period, sessionString))
+
+// Combined Filters
+longAllowed  = trendLongAllowed and timeAllowed
+shortAllowed = trendShortAllowed and timeAllowed
+
+// ==========================================
+// 4. CORE ENTRY LOGIC (PRESERVES THE ORIGINAL)
+// ==========================================
+
+crossUpper = ta.crossover(src, upper)
+crossLower = ta.crossunder(src, lower)
+
+// Store dynamic breakout trigger prices using 'var' to auto-retain state across bars
+var float bprice = 0.0
+if (crossUpper and longAllowed)
+    bprice := high + syminfo.mintick
+
+var float sprice = 0.0
+if (crossLower and shortAllowed)
+    sprice := low - syminfo.mintick
+
+// Store breakout state using 'var' to auto-retain state across bars
+var bool crossBcond = false
+if (crossUpper and longAllowed)
+    crossBcond := true
+
+var bool crossScond = false
+if (crossLower and shortAllowed)
+    crossScond := true
+
+cancelBcond = crossBcond and (src < ma or high >= bprice)
+cancelScond = crossScond and (src > ma or low <= sprice)
+
+// If order is canceled or successfully filled, reset condition to false
+if (cancelBcond)
+    strategy.cancel("KltChLE")
+    crossBcond := false
+
+if (crossUpper and longAllowed)
+    strategy.entry("KltChLE", strategy.long, stop=bprice, comment="KltChLE")
+
+if (cancelScond)
+    strategy.cancel("KltChSE")
+    crossScond := false
+
+if (crossLower and shortAllowed)
+    strategy.entry("KltChSE", strategy.short, stop=sprice, comment="KltChSE")
+
+// ==========================================
+// 5. OPTIONAL EXITS & STOP LOSSES
+// ==========================================
+
+// Track Stop Loss Price based on actual Entry Price
+var float longStopPrice = na
+var float shortStopPrice = na
+
+atrVal = ta.atr(atrlength)
+
+isNewLong  = (strategy.position_size > 0 and strategy.position_size[1] <= 0)
+isNewShort = (strategy.position_size < 0 and strategy.position_size[1] >= 0)
+
+if (strategy.position_size > 0)
+    if (isNewLong or na(longStopPrice))
+        entryPrice = strategy.opentrades.entry_price(0) > 0 ? strategy.opentrades.entry_price(0) : close
+        longStopPrice := entryPrice - (atrVal * atrStopMult)
+else
+    longStopPrice := na
+
+if (strategy.position_size < 0)
+    if (isNewShort or na(shortStopPrice))
+        entryPrice = strategy.opentrades.entry_price(0) > 0 ? strategy.opentrades.entry_price(0) : close
+        shortStopPrice := entryPrice + (atrVal * atrStopMult)
+else
+    shortStopPrice := na
+
+// Wide ATR Stop Loss Exits (If Enabled)
+if (useAtrStop)
+    if (strategy.position_size > 0)
+        strategy.exit("SL Long", from_entry="KltChLE", stop=longStopPrice, comment="ATR Stop Loss")
+    if (strategy.position_size < 0)
+        strategy.exit("SL Short", from_entry="KltChSE", stop=shortStopPrice, comment="ATR Stop Loss")
+
+// Mid-Band Close Exits (If Enabled)
+if (exitOnMidBand)
+    if (strategy.position_size > 0 and ta.crossunder(close, ma))
+        strategy.close("KltChLE", comment="Exit Mid-Band")
+    if (strategy.position_size < 0 and ta.crossover(close, ma))
+        strategy.close("KltChSE", comment="Exit Mid-Band")
+
+// ==========================================
+// 6. VISUALIZATIONS
+// ==========================================
+
+plot(ma, color=color.blue, title="Keltner Middle Band")
+plot(upper, color=color.teal, title="Keltner Upper Band")
+plot(lower, color=color.teal, title="Keltner Lower Band")
+plot(useTrendFilter ? emaFilter : na, color=color.orange, title="200 EMA Filter")
+plot(strategy.position_size > 0 and useAtrStop ? longStopPrice : na, style=plot.style_linebr, color=color.red, title="Stop Loss Price")
+plot(strategy.position_size < 0 and useAtrStop ? shortStopPrice : na, style=plot.style_linebr, color=color.red, title="Stop Loss Price")

@@ -1,0 +1,201 @@
+//@version=6
+// Developed by CuriousMacroX
+// Silver Always Long + Macro Exit + Flush Protection
+// Conservative test settings
+// Commission 0.10%
+// Slippage 2
+// Own Buy & Hold benchmark included from same start date
+
+strategy("Silver Always Long + Macro Exit + Flush Protection v2",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.10,
+     slippage=2,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// Inputs
+startDate             = input.time(timestamp("2021-01-01 00:00 +0000"), "Start date")
+useDateFilter         = input.bool(true, "Use start date filter")
+
+silverSlowLen         = input.int(150, "Silver EMA slow", minval=1)
+silverRecoveryLen     = input.int(75, "Silver recovery EMA", minval=1)
+useSilverTrendExit    = input.bool(true, "Use silver trend exit")
+silverExitBufferPct   = input.float(0.0, "Silver exit buffer % under EMA", minval=0.0, step=0.1)
+
+dxySymbol             = input.symbol("TVC:DXY", "DXY symbol")
+useDxyExit            = input.bool(false, "Use DXY exit")
+dxyLen                = input.int(50, "DXY EMA length", minval=1)
+dxyBreakoutLookback   = input.int(20, "DXY breakout lookback", minval=2)
+dxyMaxAboveEmaPct     = input.float(1.0, "DXY % above EMA for exit", minval=0.0, step=0.1)
+
+us10ySymbol           = input.symbol("TVC:US10Y", "US10Y symbol")
+useUs10yExit          = input.bool(true, "Use US10Y exit")
+us10yLen              = input.int(50, "US10Y EMA length", minval=1)
+us10yBreakoutLookback = input.int(20, "US10Y breakout lookback", minval=2)
+us10yMaxAboveEmaPct   = input.float(1.35, "US10Y % above EMA for exit", minval=0.0, step=0.05)
+
+macroExitBars         = input.int(3, "Bars macro stress before exit", minval=1)
+reEntryBars           = input.int(1, "Bars calm before re entry", minval=1)
+
+useFlushExit          = input.bool(true, "Use silver flush exit")
+oneDayFlushPct        = input.float(4.5, "One day flush %", minval=0.1, step=0.1)
+twoDayFlushPct        = input.float(8.0, "Two day flush %", minval=0.1, step=0.1)
+atrLen                = input.int(14, "ATR length", minval=1)
+atrShockMult          = input.float(1.8, "ATR shock multiplier", minval=0.1, step=0.1)
+flushCooldownBars     = input.int(3, "Bars after flush before normal entry", minval=1)
+volCalmBars           = input.int(2, "Bars volatility calm before re entry", minval=1)
+
+showTable             = input.bool(true, "Show status table")
+showBenchmark         = input.bool(true, "Show own Buy & Hold benchmark")
+showBenchmarkPlot     = input.bool(false, "Plot Buy & Hold % in data window")
+
+// Helper
+f_persist(cond, bars) =>
+    ok = true
+    for i = 0 to bars - 1
+        ok := ok and cond[i] == true
+    ok
+
+// Date filter
+inTradeWindow = not useDateFilter or time >= startDate
+
+// Silver structure
+silverEmaSlow     = ta.ema(close, silverSlowLen)
+silverRecoveryEma = ta.ema(close, silverRecoveryLen)
+silverBelowSlow   = close < silverEmaSlow * (1.0 - silverExitBufferPct / 100.0)
+silverTrendExit   = useSilverTrendExit and silverBelowSlow
+
+// External macro series
+dxyClose    = request.security(dxySymbol, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+dxyEma      = request.security(dxySymbol, timeframe.period, ta.ema(close, dxyLen), barmerge.gaps_off, barmerge.lookahead_off)
+dxyHighPrev = request.security(dxySymbol, timeframe.period, ta.highest(high[1], dxyBreakoutLookback), barmerge.gaps_off, barmerge.lookahead_off)
+
+us10yClose    = request.security(us10ySymbol, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+us10yEma      = request.security(us10ySymbol, timeframe.period, ta.ema(close, us10yLen), barmerge.gaps_off, barmerge.lookahead_off)
+us10yHighPrev = request.security(us10ySymbol, timeframe.period, ta.highest(high[1], us10yBreakoutLookback), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Macro stress
+dxyAbovePct   = dxyEma != 0 ? (dxyClose - dxyEma) / dxyEma * 100.0 : 0.0
+us10yAbovePct = us10yEma != 0 ? (us10yClose - us10yEma) / us10yEma * 100.0 : 0.0
+
+dxyStress   = useDxyExit and dxyClose > dxyEma and dxyAbovePct > dxyMaxAboveEmaPct and dxyClose > dxyHighPrev
+us10yStress = useUs10yExit and us10yClose > us10yEma and us10yAbovePct > us10yMaxAboveEmaPct and us10yClose > us10yHighPrev
+
+macroStressNow     = dxyStress or us10yStress
+macroStressPersist = f_persist(macroStressNow, macroExitBars)
+
+// Macro calm
+dxyCalm      = not useDxyExit or dxyClose <= dxyEma or dxyAbovePct <= dxyMaxAboveEmaPct
+us10yCalm    = not useUs10yExit or us10yClose <= us10yEma or us10yAbovePct <= us10yMaxAboveEmaPct
+macroCalmNow = dxyCalm and us10yCalm
+macroCalmPersist = f_persist(macroCalmNow, reEntryBars)
+
+// Silver flush logic
+oneDayMovePct = close[1] != 0 ? (close / close[1] - 1.0) * 100.0 : 0.0
+twoDayMovePct = close[2] != 0 ? (close / close[2] - 1.0) * 100.0 : 0.0
+
+silverAtr    = ta.atr(atrLen)
+silverAtrPct = close != 0 ? silverAtr / close * 100.0 : 0.0
+rangePct     = close != 0 ? (high - low) / close * 100.0 : 0.0
+
+oneDayFlush = oneDayMovePct <= -oneDayFlushPct
+twoDayFlush = twoDayMovePct <= -twoDayFlushPct
+atrShock    = rangePct > silverAtrPct * atrShockMult and close < open
+
+flushShockNow = useFlushExit and (oneDayFlush or twoDayFlush or atrShock)
+
+barsSinceFlush = ta.barssince(flushShockNow)
+flushRecently  = useFlushExit and not na(barsSinceFlush) and barsSinceFlush <= flushCooldownBars
+
+volCalmNow     = not useFlushExit or rangePct <= silverAtrPct * atrShockMult
+volCalmPersist = f_persist(volCalmNow, volCalmBars)
+
+flushRecoveryReady = not useFlushExit or not flushRecently or (close > silverRecoveryEma and volCalmPersist)
+
+// Final exit and entry
+exitCondition = inTradeWindow and (silverTrendExit or macroStressPersist or flushShockNow)
+
+entryCondition = inTradeWindow and strategy.position_size == 0 and not silverTrendExit and macroCalmPersist and flushRecoveryReady
+
+if strategy.position_size > 0 and exitCondition
+    strategy.close("Long")
+
+if entryCondition
+    strategy.entry("Long", strategy.long)
+
+// Own Buy & Hold benchmark from same start date
+var float bhStartPrice = na
+var int   bhStartTime  = na
+
+if inTradeWindow and na(bhStartPrice)
+    bhStartPrice := close
+    bhStartTime  := time
+
+buyHoldReturnPct = not na(bhStartPrice) ? (close / bhStartPrice - 1.0) * 100.0 : na
+
+strategyReturnPct = (strategy.equity / strategy.initial_capital - 1.0) * 100.0
+strategyVsHoldPct = not na(buyHoldReturnPct) ? strategyReturnPct - buyHoldReturnPct : na
+
+// Plots
+plot(silverEmaSlow, "Silver EMA slow", color=color.blue, linewidth=2)
+plot(silverRecoveryEma, "Silver recovery EMA", color=color.orange, linewidth=1)
+
+plotshape(entryCondition, title="Long entry", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="Long")
+plotshape(exitCondition and strategy.position_size > 0, title="Exit", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="Exit")
+
+plotshape(flushShockNow, title="Silver flush shock", style=shape.diamond, location=location.abovebar, color=color.yellow, size=size.small, text="Flush")
+
+bgcolor(macroStressNow ? color.new(color.red, 88) : na, title="Macro stress background")
+bgcolor(flushRecently ? color.new(color.orange, 88) : na, title="Flush cooldown background")
+
+plot(showBenchmarkPlot ? buyHoldReturnPct : na, "Own Buy & Hold %", color=color.gray, display=display.data_window)
+plot(showBenchmarkPlot ? strategyReturnPct : na, "Strategy return %", color=color.green, display=display.data_window)
+plot(showBenchmarkPlot ? strategyVsHoldPct : na, "Strategy minus Buy & Hold %", color=color.orange, display=display.data_window)
+
+// Status table
+var table statusTable = table.new(position.top_right, 2, 13, border_width=1)
+
+if showTable and barstate.islast
+    table.cell(statusTable, 0, 0, "Status", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 0, strategy.position_size > 0 ? "Long" : "Flat", text_color=color.white, bgcolor=strategy.position_size > 0 ? color.green : color.red)
+
+    table.cell(statusTable, 0, 1, "Strategy return", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 1, str.tostring(strategyReturnPct, "#.##") + "%", text_color=color.white, bgcolor=color.black)
+
+    table.cell(statusTable, 0, 2, "Own Buy & Hold", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 2, showBenchmark and not na(buyHoldReturnPct) ? str.tostring(buyHoldReturnPct, "#.##") + "%" : "na", text_color=color.white, bgcolor=color.black)
+
+    table.cell(statusTable, 0, 3, "Strategy vs Hold", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 3, showBenchmark and not na(strategyVsHoldPct) ? str.tostring(strategyVsHoldPct, "#.##") + "%" : "na", text_color=color.white, bgcolor=not na(strategyVsHoldPct) and strategyVsHoldPct >= 0 ? color.green : color.red)
+
+    table.cell(statusTable, 0, 4, "BH start", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 4, not na(bhStartTime) ? str.format("{0,date,yyyy-MM-dd}", bhStartTime) : "na", text_color=color.white, bgcolor=color.black)
+
+    table.cell(statusTable, 0, 5, "Silver trend", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 5, silverTrendExit ? "Weak" : "OK", text_color=color.white, bgcolor=silverTrendExit ? color.red : color.green)
+
+    table.cell(statusTable, 0, 6, "Macro stress", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 6, macroStressNow ? "Yes" : "No", text_color=color.white, bgcolor=macroStressNow ? color.red : color.green)
+
+    table.cell(statusTable, 0, 7, "DXY stress", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 7, dxyStress ? "Yes" : "No", text_color=color.white, bgcolor=dxyStress ? color.red : color.green)
+
+    table.cell(statusTable, 0, 8, "US10Y stress", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 8, us10yStress ? "Yes" : "No", text_color=color.white, bgcolor=us10yStress ? color.red : color.green)
+
+    table.cell(statusTable, 0, 9, "Flush shock", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 9, flushShockNow ? "Yes" : "No", text_color=color.white, bgcolor=flushShockNow ? color.orange : color.green)
+
+    table.cell(statusTable, 0, 10, "Flush cooldown", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 10, flushRecently ? "Active" : "No", text_color=color.white, bgcolor=flushRecently ? color.orange : color.green)
+
+    table.cell(statusTable, 0, 11, "Re entry ready", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 11, flushRecoveryReady and macroCalmPersist ? "Yes" : "No", text_color=color.white, bgcolor=flushRecoveryReady and macroCalmPersist ? color.green : color.red)
+
+    table.cell(statusTable, 0, 12, "US10Y above EMA", text_color=color.white, bgcolor=color.black)
+    table.cell(statusTable, 1, 12, str.tostring(us10yAbovePct, "#.##") + "%", text_color=color.white, bgcolor=color.black)

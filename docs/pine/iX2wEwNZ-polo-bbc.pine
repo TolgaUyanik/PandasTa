@@ -1,0 +1,477 @@
+//@version=6
+// =====================================================================================
+//  3-SIGNAL UNION STRATEGY  —  Fib Retracement + Order Block Rejection + Trend Pullback
+// =====================================================================================
+//  Pine port of the locked-in Python research strategy saved in SAVED_union3_v1/
+//  (FINAL_holdout_union3.py / union_3signal_volume_test.py). This is a UNION (OR) of
+//  three independent signals — any one firing on its own generates a trade. There is
+//  no volume filter (it was tested in the Python research and rejected).
+//
+//  RECOMMENDED CHART SETUP:
+//    - Timeframe: 5-minute (all lookbacks below are expressed in 5-min bars, matching
+//      the Python backtest).
+//    - Chart timezone: set to America/New_York (or match the "Session Timezone" input)
+//      for the day-boundary detection below to line up cleanly with the 08:30-16:00
+//      session window.
+//
+//  KNOWN FIDELITY NOTES (read before trusting this 1:1 against the Python backtest):
+//    1) The Python backtest resets the Fibonacci swing-lookback buffer and the Order
+//       Block watch-list at the start of every session day (it processes each day as
+//       an isolated slice). This script replicates that with its own day-boundary
+//       reset logic below (see "SESSION & DAY TRACKING") — it does NOT rely on your
+//       chart being pre-filtered to Regular Trading Hours, though using an RTH-only
+//       chart is still recommended for the cleanest match.
+//    2) The 5-min ATR (used by the Order Block signal) and the EMA20 (used by Trend
+//       Pullback) are continuous series, NOT reset daily — this matches the Python
+//       code exactly (those columns are computed once on the full continuous data,
+//       before the per-day loop).
+//    3) The Python backtest has a 40-bar (5-min) time-based fallback exit when neither
+//       stop nor target is hit. That is reproduced below via a generic "max bars in
+//       trade" close using strategy.opentrades.
+//    4) Entries assume a fill at the signal bar's own close (as the Python backtest
+//       does). In live trading this means orders execute at/near the 5-min bar close;
+//       actual fills may differ slightly by a tick or two from a real broker.
+// =====================================================================================
+
+strategy("Union3: Fib + OrderBlock + TrendPullback", shorttitle="Union3",
+     overlay=true, initial_capital=50000, currency=currency.USD,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=6,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.5,
+     process_orders_on_close=true, max_bars_back=1000,
+     max_lines_count=500, max_labels_count=500)
+
+// =====================================================================================
+// SECTION 1 — INPUTS
+// =====================================================================================
+// --- Session ---
+sessionStr   = input.session("0830-1600", "RTH Session Window", group="Session")
+sessionTZ    = input.string("America/New_York", "Session Timezone", group="Session")
+
+// --- Signal on/off switches ---
+enableFib = input.bool(true, "Enable Fib Retracement signal", group="Signals On/Off")
+enableOB  = input.bool(true, "Enable Order Block signal",      group="Signals On/Off")
+enableTP  = input.bool(true, "Enable Trend Pullback signal",   group="Signals On/Off")
+
+// --- HTF trend filter (1H EMA50), shared by all 3 signals ---
+htfTF = input.timeframe("60", "HTF Trend Timeframe", group="Trend Filter")
+
+// --- Signal 1: Fibonacci Retracement (78.6%) ---
+swingLookback  = input.int(20, "Fib: swing lookback (bars)", group="Fib Retracement")
+fibLevel       = input.float(0.786, "Fib: retracement level", step=0.001, group="Fib Retracement")
+fibToleranceFr = input.float(0.10, "Fib: entry-zone tolerance (fraction of swing range)", step=0.01, group="Fib Retracement")
+fibTargetMult  = input.float(1.0, "Fib: target multiple (R)", step=0.1, group="Fib Retracement")
+
+// --- Signal 2: Order Block Rejection ---
+obAtrPeriod     = input.int(14, "OB: ATR period", group="Order Block")
+impulseMult     = input.float(2.0, "OB: impulse size (x ATR)", step=0.1, group="Order Block")
+retestWindow    = input.int(30, "OB: retest window (bars)", group="Order Block")
+obTargetMult    = input.float(2.0, "OB: target multiple (R)", step=0.1, group="Order Block")
+requireHtfTrend = input.bool(true, "OB: require HTF trend agreement", group="Order Block")
+
+// --- Signal 3: Trend Pullback ---
+tpAtrPeriod  = input.int(14, "TP: warmup/ATR period (bars into session)", group="Trend Pullback")
+tpCutoff     = input.float(0.25, "TP: trend-strength cutoff (abs, must be below)", step=0.01, group="Trend Pullback")
+tpTargetMult = input.float(2.0, "TP: target multiple (R)", step=0.1, group="Trend Pullback")
+
+// --- Position sizing (this is the knob you asked for: $500 eval vs $210 funded) ---
+riskDollars    = input.float(500, "Risk per trade ($) — use 500 for EVAL, 210 for FUNDED", group="Position Sizing")
+dollarPerPoint = input.float(2.0, "$ per point per contract (MNQ=2, NQ=20)", group="Position Sizing")
+maxContracts   = input.int(50, "Max contracts per trade (cap)", group="Position Sizing")
+
+// --- Trade management ---
+maxHoldBars = input.int(40, "Max bars in trade (time-stop fallback, matches Python max_bars=40)", group="Trade Management")
+
+// --- Visuals ---
+showSessionShade = input.bool(true, "Shade RTH session on chart", group="Visuals")
+showRefLines      = input.bool(true, "Plot EMA20 / swing high-low reference lines", group="Visuals")
+
+// =====================================================================================
+// SECTION 2 — SESSION & DAY TRACKING
+// =====================================================================================
+// inSession: true only for bars inside the 08:30-16:00 window (matches SESSION_START/
+// SESSION_END in the Python code). All signal logic below is gated on this.
+inSession = not na(time(timeframe.period, sessionStr, sessionTZ))
+
+// Day-boundary detector (in the session timezone) — used to reset the Fib buffer and
+// the Order Block watch-list at the start of each new session day, exactly like the
+// Python code's per-day `groupby("date")` loop.
+curDayNum    = dayofmonth(time, sessionTZ)
+isNewCalDay  = curDayNum != curDayNum[1]
+
+// sessI = the current bar's zero-based index WITHIN today's session (Python's "i").
+// -1 whenever we're outside the session. Resets to 0 on the first bar of each new day.
+var int sessI = -1
+if inSession
+    sessI := isNewCalDay ? 0 : sessI[1] + 1
+else
+    sessI := -1
+
+// bgcolor() must be called unconditionally from the global scope (not inside an
+// `if`), so the on/off toggle and the inSession check are both baked into the
+// color expression itself instead.
+bgcolor(showSessionShade and inSession ? color.new(color.blue, 95) : na, title="RTH Session Shading")
+
+// =====================================================================================
+// SECTION 3 — HTF TREND FILTER (1H EMA50 + trend strength)
+// =====================================================================================
+// Computed on the HTF timeframe (default 1H): trend = up if HTF Close > HTF EMA50.
+// trend_strength = (EMA50 slope over 5 HTF bars) / (14-period SMA-of-true-range on HTF).
+// This mirrors the Python code's ema50_slope / 1h_atr calculation exactly, and (like
+// the Python version) is continuous — it is NOT reset at session/day boundaries.
+// Returns raw floats only (HTF close + HTF EMA50 + trend strength) rather than a
+// bool — na() has no "series bool" overload, so trend-up/down and "is trend defined"
+// are derived locally below from these floats instead of from a bool round-tripped
+// through request.security.
+f_htfCalc() =>
+    e50   = ta.ema(close, 50)
+    slope = e50 - e50[5]
+    tr1h  = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+    atr1h = ta.sma(tr1h, 14)
+    tstr  = atr1h != 0 ? slope / atr1h : na
+    [close, e50, tstr]
+
+[htfClose, htfEma50, htfTrendStrength] = request.security(syminfo.tickerid, htfTF, f_htfCalc(), lookahead=barmerge.lookahead_off)
+// Note: like any Pine HTF request, the value for the still-forming HTF bar can update
+// intrabar until that HTF bar closes. This is a standard, accepted Pine limitation.
+
+htfTrendUp = htfClose > htfEma50   // plain bool: true=up, false=down (never na — see below)
+// "Is the HTF trend defined yet" is checked against the underlying float (htfEma50),
+// not the bool, since na() only supports numeric/color types, not bool.
+htfTrendDefined = not na(htfEma50)
+
+// =====================================================================================
+// SECTION 4 — SIGNAL 1: FIBONACCI RETRACEMENT (78.6%)
+// =====================================================================================
+// Swing high/low computed from a rolling buffer of the last `swingLookback` SESSION
+// bars, EXCLUDING the current bar (matches Python's `session.iloc[i-20:i]`). The
+// buffer is cleared at the start of each new session day so the swing never blends
+// across a day boundary, exactly like the Python per-day loop.
+var array<float> fibHiBuf = array.new_float(0)
+var array<float> fibLoBuf = array.new_float(0)
+
+if inSession and isNewCalDay
+    array.clear(fibHiBuf)
+    array.clear(fibLoBuf)
+
+fibBufReady = inSession and array.size(fibHiBuf) >= swingLookback
+float swingHigh = fibBufReady ? array.max(fibHiBuf) : na
+float swingLow  = fibBufReady ? array.min(fibLoBuf) : na
+float fibRange  = fibBufReady ? swingHigh - swingLow : na
+
+fibPriceUp   = fibBufReady ? swingHigh - fibLevel * fibRange : na
+fibPriceDown = fibBufReady ? swingLow  + fibLevel * fibRange : na
+fibTol       = fibBufReady ? fibToleranceFr * fibRange : na
+
+inZoneUp   = fibBufReady and ((fibPriceUp   - fibTol <= low  and low  <= fibPriceUp   + fibTol) or (low  <= fibPriceUp   and fibPriceUp   <= high))
+inZoneDown = fibBufReady and ((fibPriceDown - fibTol <= high and high <= fibPriceDown + fibTol) or (low  <= fibPriceDown and fibPriceDown <= high))
+
+fibLongCond  = enableFib and fibBufReady and htfTrendDefined and     htfTrendUp  and fibRange > 0 and inZoneUp   and close > open
+fibShortCond = enableFib and fibBufReady and htfTrendDefined and not htfTrendUp  and fibRange > 0 and inZoneDown and close < open
+
+fibRiskLong  = fibLongCond  ? math.abs(close - swingLow)  : na
+fibRiskShort = fibShortCond ? math.abs(close - swingHigh) : na
+
+fibLongValid  = fibLongCond  and fibRiskLong  > 0 and fibRiskLong  <= 1.5 * fibRange
+fibShortValid = fibShortCond and fibRiskShort > 0 and fibRiskShort <= 1.5 * fibRange
+
+fibStopLong    = swingLow
+fibStopShort   = swingHigh
+fibTargetLong  = fibLongValid  ? close + fibTargetMult * fibRiskLong  : na
+fibTargetShort = fibShortValid ? close - fibTargetMult * fibRiskShort : na
+
+// Push the current bar into the buffer AFTER computing the signal, so the window used
+// above always excludes the current bar (matches Python ordering).
+if inSession
+    array.push(fibHiBuf, high)
+    array.push(fibLoBuf, low)
+    if array.size(fibHiBuf) > swingLookback
+        array.shift(fibHiBuf)
+        array.shift(fibLoBuf)
+
+// =====================================================================================
+// SECTION 5 — SIGNAL 2: ORDER BLOCK REJECTION
+// =====================================================================================
+// ATR is a continuous 5-min SMA-of-true-range (NOT Wilder RMA — the Python code uses
+// `.rolling(n).mean()`, a plain SMA, so we replicate that exactly rather than using
+// Pine's built-in ta.atr(), which uses Wilder smoothing).
+tr5m  = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+atr5m = ta.sma(tr5m, obAtrPeriod)
+
+var array<float> obLow      = array.new_float(0)
+var array<float> obHigh     = array.new_float(0)
+var array<int>   obDir      = array.new_int(0)   // 1 = long OB, -1 = short OB
+var array<int>   obCreatedI = array.new_int(0)   // sessI at time of creation
+
+if inSession and isNewCalDay
+    array.clear(obLow)
+    array.clear(obHigh)
+    array.clear(obDir)
+    array.clear(obCreatedI)
+
+// Matches Python's per-day loop starting at i = atr_period.
+obWarmed = inSession and sessI >= obAtrPeriod
+atrOKob  = not na(atr5m) and atr5m > 0
+
+// --- Step 1: impulse detection -> mark a new order block -------------------------
+// 3-bar net move = current Close - Open two bars back. If it's a big enough impulse,
+// the OPPOSITE-colored bar two bars back becomes the order block zone.
+netMove = close - open[2]
+
+if enableOB and obWarmed and atrOKob and netMove > impulseMult * atr5m and close[2] < open[2]
+    array.push(obLow, low[2])
+    array.push(obHigh, high[2])
+    array.push(obDir, 1)
+    array.push(obCreatedI, sessI - 2)
+
+if enableOB and obWarmed and atrOKob and netMove < -impulseMult * atr5m and close[2] > open[2]
+    array.push(obLow, low[2])
+    array.push(obHigh, high[2])
+    array.push(obDir, -1)
+    array.push(obCreatedI, sessI - 2)
+
+// --- Step 2: scan open order blocks for a retest + trigger, and expire old ones ---
+obLongFire   = false
+obShortFire  = false
+float obLongStop  = na
+float obShortStop = na
+
+if obWarmed and array.size(obLow) > 0
+    for k = array.size(obLow) - 1 to 0
+        age  = sessI - array.get(obCreatedI, k)
+        dirK = array.get(obDir, k)
+        loK  = array.get(obLow, k)
+        hiK  = array.get(obHigh, k)
+        if age > retestWindow
+            // Expired: Python leaves these dormant forever rather than deleting them,
+            // which is behaviorally identical to removing them (they can never fire
+            // again either way) — removing here just keeps the array small.
+            array.remove(obLow, k)
+            array.remove(obHigh, k)
+            array.remove(obDir, k)
+            array.remove(obCreatedI, k)
+        else if age >= 2
+            trendOK = not requireHtfTrend or (dirK == 1 ? (htfTrendDefined and htfTrendUp) : (htfTrendDefined and not htfTrendUp))
+            touched = low <= hiK and high >= loK
+            if touched and trendOK
+                if dirK == 1 and close > hiK and not obLongFire
+                    obLongFire := true
+                    obLongStop := loK
+                    array.remove(obLow, k)
+                    array.remove(obHigh, k)
+                    array.remove(obDir, k)
+                    array.remove(obCreatedI, k)
+                else if dirK == -1 and close < loK and not obShortFire
+                    obShortFire := true
+                    obShortStop := hiK
+                    array.remove(obLow, k)
+                    array.remove(obHigh, k)
+                    array.remove(obDir, k)
+                    array.remove(obCreatedI, k)
+        // else (age < 2): too young to trigger yet — leave it open, do nothing.
+
+obRiskLong    = obLongFire  ? math.abs(close - obLongStop)  : na
+obRiskShort   = obShortFire ? math.abs(close - obShortStop) : na
+obLongValid   = obLongFire  and obRiskLong  > 0
+obShortValid  = obShortFire and obRiskShort > 0
+obTargetLong  = obLongValid  ? close + obTargetMult * obRiskLong  : na
+obTargetShort = obShortValid ? close - obTargetMult * obRiskShort : na
+
+// =====================================================================================
+// SECTION 6 — SIGNAL 3: TREND PULLBACK (trend_strength < 0.25)
+// =====================================================================================
+// EMA20 is continuous (not reset daily), matching the Python code exactly.
+ema20 = ta.ema(close, 20)
+
+// Setup bar = previous bar (bar[1]); confirm bar = current bar. Pine evaluates one
+// closed bar at a time, so the Python pair (setup bar i, confirm bar i+1) becomes
+// (previous bar, current bar) here — this is a non-repainting, faithful translation.
+tpWarmed = inSession and not isNewCalDay and sessI[1] >= tpAtrPeriod   // matches Python's i = atr_period start
+
+touchedEmaSetup   = low[1] <= ema20[1] and ema20[1] <= high[1]
+trendUpSetup      = htfTrendUp[1]
+trendDefinedSetup = not na(htfEma50[1])
+tstrSetup         = htfTrendStrength[1]
+tstrOKSetup       = not na(tstrSetup) and math.abs(tstrSetup) < tpCutoff
+
+tpSetupOK = tpWarmed and trendDefinedSetup and tstrOKSetup and touchedEmaSetup
+
+tpLongCond  = enableTP and tpSetupOK and     trendUpSetup  and close > ema20 and close > high[1]
+tpShortCond = enableTP and tpSetupOK and not trendUpSetup  and close < ema20 and close < low[1]
+
+tpStopLong  = low[1]
+tpStopShort = high[1]
+tpRiskLong  = tpLongCond  ? math.abs(close - tpStopLong)  : na
+tpRiskShort = tpShortCond ? math.abs(close - tpStopShort) : na
+
+tpLongValid   = tpLongCond  and tpRiskLong  > 0
+tpShortValid  = tpShortCond and tpRiskShort > 0
+tpTargetLong  = tpLongValid  ? close + tpTargetMult * tpRiskLong  : na
+tpTargetShort = tpShortValid ? close - tpTargetMult * tpRiskShort : na
+
+// =====================================================================================
+// SECTION 7 — POSITION SIZING
+// =====================================================================================
+// contracts = round(risk_dollars / (risk_points * dollars_per_point)), clamped to
+// [1, maxContracts] — this is an exact port of the Python `contracts_for_risk()`.
+// Set riskDollars = 500 for EVAL-stage sizing, or 210 for FUNDED-stage sizing (the
+// locked-in flat funded size from SAVED_fib_v1 / SAVED_union3_v1 — no ramping).
+f_qty(riskPts) =>
+    raw = riskPts <= 0 ? 1.0 : riskDollars / (riskPts * dollarPerPoint)
+    capped = math.min(float(maxContracts), math.round(raw))
+    int(math.max(1.0, capped))
+
+// =====================================================================================
+// SECTION 8 — STRATEGY ENTRIES & EXITS
+// =====================================================================================
+// Each signal gets its own entry ID so stop/target levels never get mixed up between
+// signals. Stops/targets are OCO via strategy.exit (whichever level is hit first).
+
+var float fibLStop = na
+var float fibLTarget = na
+var float fibSStop = na
+var float fibSTarget = na
+var float obLStop = na
+var float obLTarget = na
+var float obSStop = na
+var float obSTarget = na
+var float tpLStop = na
+var float tpLTarget = na
+var float tpSStop = na
+var float tpSTarget = na
+
+if fibLongValid
+    strategy.entry("FibL", strategy.long, qty=f_qty(fibRiskLong))
+    fibLStop := fibStopLong
+    fibLTarget := fibTargetLong
+if fibShortValid
+    strategy.entry("FibS", strategy.short, qty=f_qty(fibRiskShort))
+    fibSStop := fibStopShort
+    fibSTarget := fibTargetShort
+strategy.exit("FibL_X", from_entry="FibL", stop=fibLStop, limit=fibLTarget)
+strategy.exit("FibS_X", from_entry="FibS", stop=fibSStop, limit=fibSTarget)
+
+if obLongValid
+    strategy.entry("ObL", strategy.long, qty=f_qty(obRiskLong))
+    obLStop := obLongStop
+    obLTarget := obTargetLong
+if obShortValid
+    strategy.entry("ObS", strategy.short, qty=f_qty(obRiskShort))
+    obSStop := obShortStop
+    obSTarget := obTargetShort
+strategy.exit("ObL_X", from_entry="ObL", stop=obLStop, limit=obLTarget)
+strategy.exit("ObS_X", from_entry="ObS", stop=obSStop, limit=obSTarget)
+
+if tpLongValid
+    strategy.entry("TpL", strategy.long, qty=f_qty(tpRiskLong))
+    tpLStop := tpStopLong
+    tpLTarget := tpTargetLong
+if tpShortValid
+    strategy.entry("TpS", strategy.short, qty=f_qty(tpRiskShort))
+    tpSStop := tpStopShort
+    tpSTarget := tpTargetShort
+strategy.exit("TpL_X", from_entry="TpL", stop=tpLStop, limit=tpLTarget)
+strategy.exit("TpS_X", from_entry="TpS", stop=tpSStop, limit=tpSTarget)
+
+// =====================================================================================
+// SECTION 8B — TRADE DETAIL LABELS (Entry / Stop / Target)
+// =====================================================================================
+// Three separate labels are placed directly AT their own price level (not bunched at
+// the bar's high/low): one at the entry price, one at the stop price, one at the
+// target price — each readable straight off the price axis. Dashed projection lines
+// (red = stop, green = target) still extend a few bars to the right for a quick
+// visual read of the risk/reward.
+showTradeDetails = input.bool(true, "Show Entry/SL/TP labels + lines", group="Visuals")
+slTpLineLen      = input.int(15, "SL/TP line length (bars)", minval=1, group="Visuals")
+
+// Instead of drawing a brand-new label/line every time a signal fires (which piles up
+// into an unreadable mess when several signals fire close together), we keep ONE
+// persistent label for Entry, one for SL, one for TP, and one line each for SL/TP — and
+// just MOVE them to the new price/bar each time a signal fires. The chart always shows
+// only the most recent signal's levels, never a growing stack of old ones.
+var label gEntryLbl = na
+var label gSlLbl    = na
+var label gTpLbl    = na
+var line  gSlLine   = na
+var line  gTpLine   = na
+
+// Create-or-move helpers: if the id doesn't exist yet, create it; otherwise just
+// reposition/relabel the existing object. Returns the (possibly new) id.
+f_updateLabel(id, x, y, txt, col) =>
+    newId = na(id) ? label.new(x, y, text=txt, style=label.style_label_right, color=col, textcolor=color.white, size=size.small) : id
+    label.set_xy(newId, x, y)
+    label.set_text(newId, txt)
+    label.set_color(newId, col)
+    newId
+
+f_updateLine(id, x1, y1, x2, y2, col) =>
+    newId = na(id) ? line.new(x1, y1, x2, y2, color=col, width=1, style=line.style_dashed) : id
+    line.set_xy1(newId, x1, y1)
+    line.set_xy2(newId, x2, y2)
+    newId
+
+// Global var reassignment (gEntryLbl := ...) has to happen here at the top level, not
+// inside a function — Pine functions can call .set_*() on an object they're given
+// (that mutates the object itself), but they can't reassign an outer-scope variable.
+// Pick exactly ONE "winning" signal for this bar (priority order below) so tag /
+// isLong / stopPx / targetPx are always drawn from the SAME signal — otherwise, on
+// the rare bar where two different signals fire in opposite directions, the label
+// could show one signal's direction with a different signal's stop/target.
+winFibL = fibLongValid
+winFibS = not winFibL and fibShortValid
+winObL  = not winFibL and not winFibS and obLongValid
+winObS  = not winFibL and not winFibS and not winObL and obShortValid
+winTpL  = not winFibL and not winFibS and not winObL and not winObS and tpLongValid
+winTpS  = not winFibL and not winFibS and not winObL and not winObS and not winTpL and tpShortValid
+
+if showTradeDetails and (winFibL or winFibS or winObL or winObS or winTpL or winTpS)
+    tag      = winFibL or winFibS ? "Fib" : winObL or winObS ? "OB" : "TP"
+    isLong   = winFibL or winObL or winTpL
+    entryPx  = close
+    stopPx   = winFibL ? fibStopLong : winFibS ? fibStopShort : winObL ? obLongStop : winObS ? obShortStop : winTpL ? tpStopLong : tpStopShort
+    targetPx = winFibL ? fibTargetLong : winFibS ? fibTargetShort : winObL ? obTargetLong : winObS ? obTargetShort : winTpL ? tpTargetLong : tpTargetShort
+    dirTxt   = isLong ? "LONG" : "SHORT"
+    entryColor = color.new(color.blue, 0)
+    slColor    = color.new(color.red, 0)
+    tpColor    = color.new(color.green, 0)
+    gEntryLbl := f_updateLabel(gEntryLbl, bar_index, entryPx, tag + " " + dirTxt + " Entry: " + str.tostring(entryPx, format.mintick), entryColor)
+    gSlLbl    := f_updateLabel(gSlLbl, bar_index, stopPx, "SL: " + str.tostring(stopPx, format.mintick), slColor)
+    gTpLbl    := f_updateLabel(gTpLbl, bar_index, targetPx, "TP: " + str.tostring(targetPx, format.mintick), tpColor)
+    gSlLine   := f_updateLine(gSlLine, bar_index, stopPx, bar_index + slTpLineLen, stopPx, slColor)
+    gTpLine   := f_updateLine(gTpLine, bar_index, targetPx, bar_index + slTpLineLen, targetPx, tpColor)
+
+// =====================================================================================
+// SECTION 9 — TIME-BASED MAX-HOLD EXIT (matches Python's 40-bar fallback exit)
+// =====================================================================================
+if strategy.opentrades > 0
+    for ti = 0 to strategy.opentrades - 1
+        if bar_index - strategy.opentrades.entry_bar_index(ti) >= maxHoldBars
+            strategy.close(strategy.opentrades.entry_id(ti), comment="TimeStop")
+
+// =====================================================================================
+// SECTION 10 — VISUAL MARKERS
+// =====================================================================================
+// No text= here on purpose — the shape + color alone is enough to spot a signal at a
+// glance, and the exact numbers live on the Entry/SL/TP labels above instead of
+// stacking duplicate text on every historical marker.
+plotshape(fibLongValid,  title="Fib Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0),   size=size.tiny)
+plotshape(fibShortValid, title="Fib Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),    size=size.tiny)
+plotshape(obLongValid,   title="OB Long",   style=shape.labelup,      location=location.belowbar, color=color.new(color.blue, 0),   size=size.tiny)
+plotshape(obShortValid,  title="OB Short",  style=shape.labeldown,    location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(tpLongValid,   title="TP Long",   style=shape.circle,       location=location.belowbar, color=color.new(color.teal, 0),   size=size.tiny)
+plotshape(tpShortValid,  title="TP Short",  style=shape.circle,       location=location.abovebar, color=color.new(color.maroon, 0), size=size.tiny)
+
+plot(showRefLines ? ema20 : na, title="EMA20 (Trend Pullback ref)", color=color.new(color.yellow, 40))
+plot(showRefLines and fibBufReady ? swingHigh : na, title="Fib Swing High", color=color.new(color.gray, 60), style=plot.style_circles)
+plot(showRefLines and fibBufReady ? swingLow  : na, title="Fib Swing Low",  color=color.new(color.gray, 60), style=plot.style_circles)
+
+// =====================================================================================
+// SECTION 11 — ALERT CONDITIONS
+// =====================================================================================
+alertcondition(fibLongValid,  title="Fib Retracement — LONG",  message="Union3: Fib 78.6% LONG on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(fibShortValid, title="Fib Retracement — SHORT", message="Union3: Fib 78.6% SHORT on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(obLongValid,   title="Order Block — LONG",      message="Union3: Order Block rejection LONG on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(obShortValid,  title="Order Block — SHORT",     message="Union3: Order Block rejection SHORT on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(tpLongValid,   title="Trend Pullback — LONG",   message="Union3: Trend Pullback LONG on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(tpShortValid,  title="Trend Pullback — SHORT",  message="Union3: Trend Pullback SHORT on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(fibLongValid or obLongValid or tpLongValid,   title="ANY Union3 Signal — LONG",  message="Union3: a LONG signal fired on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(fibShortValid or obShortValid or tpShortValid, title="ANY Union3 Signal — SHORT", message="Union3: a SHORT signal fired on {{ticker}} {{interval}} @ {{close}}")

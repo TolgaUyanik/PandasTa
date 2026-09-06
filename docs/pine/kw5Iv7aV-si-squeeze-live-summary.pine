@@ -1,0 +1,776 @@
+//@version=6
+//@description Lane-owned live summary entrypoint for the squeeze / expansion prototype. Staged for future host wiring without moving squeeze logic into the meta layer.
+library("si_squeeze_live_summary", false)
+
+enum RegimeState
+    bullish_trend = "Bullish Trend"
+    bearish_trend = "Bearish Trend"
+    compression = "Compression"
+    expansion = "Expansion"
+    ranging = "Range"
+    neutral = "Neutral"
+
+enum StructureState
+    bullish = "Bullish"
+    bearish = "Bearish"
+    transition_up = "Transition Up"
+    transition_down = "Transition Down"
+    ranging = "Range"
+    neutral = "Neutral"
+
+enum DirectionalBias
+    bullish = "Bullish"
+    bearish = "Bearish"
+    neutral = "Neutral"
+
+enum CompressionState
+    none = "None"
+    buildup = "Compression Buildup"
+    mature = "Compression Mature"
+    frozen = "Compression Frozen"
+
+enum BoundaryPressureState
+    none = "None"
+    upper_pressure = "Upper Pressure"
+    lower_pressure = "Lower Pressure"
+    balanced = "Balanced"
+
+enum ValueAnchorAlignment
+    above_vwap = "Above VWAP"
+    below_vwap = "Below VWAP"
+    balanced_vwap = "Balanced VWAP"
+    reclaiming_vwap = "Reclaiming VWAP"
+    rejecting_vwap = "Rejecting VWAP"
+
+enum SqueezeLaneState
+    none = "None"
+    compression_buildup = "Compression Buildup"
+    release_readiness = "Release Readiness"
+    soft_release = "Soft Release"
+    release_attempt = "Release Attempt"
+    accepted_expansion = "Accepted Expansion"
+    failed_expansion = "Failed Expansion"
+    expansion_exhaustion = "Expansion Exhaustion"
+
+int V1_MIN_COMPRESSION_BARS = 8
+int V1_MAX_COMPRESSION_BARS = 24
+int V1_VALIDATION_BARS = 3
+int V1_RELEASE_CONFIRM_BARS = 2
+int V1_SOFT_RELEASE_BARS_REQUIRED = 2
+int V1_ARMED_BOX_GRACE_BARS = 3
+float V1_VALUE_ZONE_BUFFER_ATR = 0.35
+float V1_RELEASE_ATTEMPT_BUFFER_ATR = 0.07
+float V1_RELEASE_PERSISTENCE_BUFFER_ATR = 0.03
+float V1_RELEASE_WICK_BUFFER_ATR = 0.02
+float V1_INVALIDATION_BUFFER_ATR = 0.10
+float V1_STRONG_BREAKOUT_BUFFER_ATR = 0.20
+float V1_RELEASE_ATTEMPT_BODY_RATIO_MIN = 0.38
+float V1_STRONG_BODY_RATIO_MIN = 0.60
+float V1_RELEASE_ATTEMPT_CLOSE_QUALITY_MIN = 0.55
+float V1_STRONG_CLOSE_QUALITY_MIN = 0.70
+int V1_ACCEPTED_MEMORY_BARS = 8
+
+clamp_signed(float value) =>
+    na(value) ? na : math.max(-100.0, math.min(100.0, value))
+
+clamp_unsigned(float value) =>
+    na(value) ? na : math.max(0.0, math.min(100.0, value))
+
+negative_component(float score) =>
+    na(score) ? na : math.max(-score, 0.0)
+
+positive_component(float score) =>
+    na(score) ? na : math.max(score, 0.0)
+
+score_magnitude(float value) =>
+    na(value) ? na : math.abs(value)
+
+bias_to_text(DirectionalBias bias) =>
+    str.tostring(bias)
+
+lane_summary_setup_tier(float lane_confidence) =>
+    float normalized_confidence = na(lane_confidence) ? 0.0 : clamp_unsigned(lane_confidence)
+    normalized_confidence >= 75.0 ? "A-tier" : normalized_confidence >= 55.0 ? "B-tier" : "Informational"
+
+lane_summary_actionability(string lane_actionability_text, float fallback_confidence) =>
+    string normalized = str.length(lane_actionability_text) > 0 ? lane_actionability_text : ""
+    normalized == "Strong" ? "Strong" : normalized == "Actionable" ? "Actionable" : normalized == "Watch" ? "Watch" : normalized == "Informational" ? "Informational" : fallback_confidence >= 35.0 ? "Informational" : "No Action"
+
+lane_summary_handoff_hint(string lane_handoff_hint_text) =>
+    string normalized = str.length(lane_handoff_hint_text) > 0 ? lane_handoff_hint_text : "None"
+    normalized == "Continuation" ? "Continuation" : normalized == "Reversal/Trap" ? "Reversal/Trap" : "None"
+
+lane_summary_trigger_state(string lane_trigger_state_text) =>
+    str.length(lane_trigger_state_text) > 0 ? lane_trigger_state_text : "None"
+
+squeeze_lane_state_text(SqueezeLaneState lane_state) =>
+    str.tostring(lane_state)
+
+opposite_bias(DirectionalBias bias) =>
+    bias == DirectionalBias.bullish ? DirectionalBias.bearish : bias == DirectionalBias.bearish ? DirectionalBias.bullish : DirectionalBias.neutral
+
+dominant_of_counts(float bullish_votes, float bearish_votes, float minimum_votes) =>
+    bullish_votes >= minimum_votes and bullish_votes >= bearish_votes + 1.0 ? DirectionalBias.bullish : bearish_votes >= minimum_votes and bearish_votes >= bullish_votes + 1.0 ? DirectionalBias.bearish : DirectionalBias.neutral
+
+build_blended_fair_value_reference(float session_vwap, float local_mean) =>
+    na(session_vwap) ? local_mean : na(local_mean) ? session_vwap : session_vwap * 0.65 + local_mean * 0.35
+
+score_extension_ladder(float signed_extension_value, float extreme_atr_multiple) =>
+    if na(signed_extension_value)
+        na
+    else
+        float absolute_extension = math.abs(signed_extension_value)
+        float pullback_band = 0.35
+        float moderate_band = math.max(0.85, extreme_atr_multiple * 0.55)
+        float overextension_band = math.max(moderate_band + 0.15, extreme_atr_multiple)
+        float direction = math.sign(signed_extension_value)
+        float extension_score = 0.0
+        if absolute_extension <= pullback_band
+            extension_score := direction * (absolute_extension / pullback_band) * 12.0
+        else if absolute_extension <= moderate_band
+            extension_score := direction * (12.0 + (absolute_extension - pullback_band) / math.max(moderate_band - pullback_band, 0.1) * 23.0)
+        else if absolute_extension <= overextension_band
+            extension_score := direction * (35.0 + (absolute_extension - moderate_band) / math.max(overextension_band - moderate_band, 0.1) * 30.0)
+        else
+            extension_score := direction * (65.0 + math.min((absolute_extension - overextension_band) / math.max(overextension_band, 0.1), 1.0) * 35.0)
+        extension_score
+
+calc_regime(int fast_length, int slow_length, int compression_length, int atr_length, float compression_threshold) =>
+    float fast_ema = ta.ema(close, fast_length)
+    float slow_ema = ta.ema(close, slow_length)
+    float atr_value = ta.atr(atr_length)
+    float compression_raw = ta.stdev(close, compression_length)
+    float atr_percent = close != 0.0 ? atr_value / close * 100.0 : 0.0
+    float compression_proxy = close != 0.0 ? compression_raw / close * 100.0 : 0.0
+    float trend_spread_pct = close != 0.0 ? (fast_ema - slow_ema) / close * 100.0 : 0.0
+    bool bullish_stack = close > fast_ema and fast_ema > slow_ema
+    bool bearish_stack = close < fast_ema and fast_ema < slow_ema
+    bool in_compression = compression_proxy <= compression_threshold
+    bool in_expansion = atr_percent >= compression_threshold * 2.0
+    RegimeState regime_state = RegimeState.neutral
+    DirectionalBias regime_bias = DirectionalBias.neutral
+    float regime_score = 0.0
+
+    if in_compression
+        regime_state := RegimeState.compression
+        regime_score := 0.0
+    else if bullish_stack
+        regime_state := in_expansion ? RegimeState.expansion : RegimeState.bullish_trend
+        regime_bias := DirectionalBias.bullish
+        regime_score := clamp_signed(trend_spread_pct * 350.0)
+    else if bearish_stack
+        regime_state := in_expansion ? RegimeState.expansion : RegimeState.bearish_trend
+        regime_bias := DirectionalBias.bearish
+        regime_score := clamp_signed(trend_spread_pct * 350.0)
+    else if math.abs(trend_spread_pct) <= 0.05
+        regime_state := RegimeState.ranging
+        regime_score := 0.0
+
+    [regime_state, regime_score, regime_bias]
+
+calc_structure(int pivot_left, int pivot_right, int basis_length, float displacement_atr_multiple) =>
+    float pivot_high = ta.pivothigh(high, pivot_left, pivot_right)
+    float pivot_low = ta.pivotlow(low, pivot_left, pivot_right)
+    float last_pivot_high = ta.valuewhen(not na(pivot_high), pivot_high, 0)
+    float previous_pivot_high = ta.valuewhen(not na(pivot_high), pivot_high, 1)
+    float last_pivot_low = ta.valuewhen(not na(pivot_low), pivot_low, 0)
+    float previous_pivot_low = ta.valuewhen(not na(pivot_low), pivot_low, 1)
+    bool pivots_ready = not na(last_pivot_high) and not na(last_pivot_low) and not na(previous_pivot_high) and not na(previous_pivot_low)
+    float atr_value = ta.atr(math.max(5, basis_length))
+    float break_buffer = atr_value * 0.10
+    float structure_basis = ta.ema(close, basis_length)
+    float pullback_allowance = atr_value * 0.35
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float close_location = candle_range > 0 ? (close - low) / candle_range : 0.5
+    bool basis_rising = structure_basis >= structure_basis[1]
+    bool basis_falling = structure_basis <= structure_basis[1]
+    bool bullish_swing_context = pivots_ready and last_pivot_high > previous_pivot_high and last_pivot_low > previous_pivot_low
+    bool bearish_swing_context = pivots_ready and last_pivot_high < previous_pivot_high and last_pivot_low < previous_pivot_low
+    bool weak_bos_up = pivots_ready and close > last_pivot_high and close[1] <= last_pivot_high
+    bool weak_bos_down = pivots_ready and close < last_pivot_low and close[1] >= last_pivot_low
+    bool strong_bos_up = pivots_ready and close > last_pivot_high + break_buffer and close[1] <= last_pivot_high
+    bool strong_bos_down = pivots_ready and close < last_pivot_low - break_buffer and close[1] >= last_pivot_low
+    bool displacement_up = strong_bos_up and close > open and atr_value > 0 and body_size >= atr_value * displacement_atr_multiple and body_ratio >= 0.60 and close_location >= 0.70
+    bool displacement_down = strong_bos_down and close < open and atr_value > 0 and body_size >= atr_value * displacement_atr_multiple and body_ratio >= 0.60 and close_location <= 0.30
+    bool bullish_pullback = bullish_swing_context and close >= structure_basis - pullback_allowance and low <= structure_basis + break_buffer and not strong_bos_down
+    bool bearish_pullback = bearish_swing_context and close <= structure_basis + pullback_allowance and high >= structure_basis - break_buffer and not strong_bos_up
+
+    StructureState structure_state = StructureState.neutral
+    float structure_score = na
+
+    if not pivots_ready
+        structure_score := na
+    else
+        float raw_score = 0.0
+        raw_score += bullish_swing_context ? 18.0 : 0.0
+        raw_score -= bearish_swing_context ? 18.0 : 0.0
+        raw_score += basis_rising ? 6.0 : 0.0
+        raw_score -= basis_falling ? 6.0 : 0.0
+        raw_score += strong_bos_up ? 32.0 : weak_bos_up ? 18.0 : 0.0
+        raw_score -= strong_bos_down ? 32.0 : weak_bos_down ? 18.0 : 0.0
+        raw_score += displacement_up ? 16.0 : 0.0
+        raw_score -= displacement_down ? 16.0 : 0.0
+        raw_score -= bullish_pullback ? 8.0 : 0.0
+        raw_score += bearish_pullback ? 8.0 : 0.0
+
+        if (strong_bos_up or displacement_up or (bullish_swing_context and basis_rising and close >= structure_basis - pullback_allowance)) and not strong_bos_down
+            structure_state := bullish_pullback ? StructureState.transition_down : StructureState.bullish
+        else if (strong_bos_down or displacement_down or (bearish_swing_context and basis_falling and close <= structure_basis + pullback_allowance)) and not strong_bos_up
+            structure_state := bearish_pullback ? StructureState.transition_up : StructureState.bearish
+        else if bullish_swing_context
+            structure_state := StructureState.transition_down
+        else if bearish_swing_context
+            structure_state := StructureState.transition_up
+        else
+            structure_state := StructureState.ranging
+
+        if structure_state == StructureState.bullish
+            structure_score := math.max(raw_score, 25.0)
+        else if structure_state == StructureState.bearish
+            structure_score := math.min(raw_score, -25.0)
+        else
+            structure_score := clamp_signed(raw_score)
+
+    [structure_state, structure_score, last_pivot_high, last_pivot_low, structure_basis]
+
+calc_fair_value_extension(int atr_length, float extreme_atr_multiple) =>
+    float session_vwap = ta.vwap(hlc3)
+    float atr_value = ta.atr(atr_length)
+    int local_mean_length = math.max(5, atr_length * 2)
+    float local_mean = ta.ema(hlc3, local_mean_length)
+    float blended_fair_value = build_blended_fair_value_reference(session_vwap, local_mean)
+    float vwap_extension_atr = not na(session_vwap) and atr_value > 0 ? (close - session_vwap) / atr_value : na
+    float blended_extension_atr = not na(blended_fair_value) and atr_value > 0 ? (close - blended_fair_value) / atr_value : na
+    float signed_extension_value = na(vwap_extension_atr) and na(blended_extension_atr) ? na : na(vwap_extension_atr) ? blended_extension_atr : na(blended_extension_atr) ? vwap_extension_atr : vwap_extension_atr * 0.65 + blended_extension_atr * 0.35
+    float extension_score = clamp_signed(score_extension_ladder(signed_extension_value, extreme_atr_multiple))
+    [session_vwap, extension_score]
+
+calc_dynamic_window_extremes(int bars_count) =>
+    float highest_value = na
+    float lowest_value = na
+    for i = 0 to V1_MAX_COMPRESSION_BARS - 1
+        if i < bars_count
+            highest_value := na(highest_value) ? high[i] : math.max(highest_value, high[i])
+            lowest_value := na(lowest_value) ? low[i] : math.min(lowest_value, low[i])
+    [highest_value, lowest_value]
+
+calc_dynamic_inner_body_extremes(int bars_count) =>
+    float highest_body_value = na
+    float lowest_body_value = na
+    for i = 0 to V1_MAX_COMPRESSION_BARS - 1
+        if i < bars_count
+            float body_high = math.max(open[i], close[i])
+            float body_low = math.min(open[i], close[i])
+            highest_body_value := na(highest_body_value) ? body_high : math.max(highest_body_value, body_high)
+            lowest_body_value := na(lowest_body_value) ? body_low : math.min(lowest_body_value, body_low)
+    [highest_body_value, lowest_body_value]
+
+calc_squeeze_compression_context(RegimeState regime_state_input, StructureState structure_state_input, float structure_score_input, float structure_basis_input, float session_vwap_input, float atr_value_input, bool boundaries_frozen_input) =>
+    bool structure_trend_confirmed = (structure_state_input == StructureState.bullish or structure_state_input == StructureState.bearish) and score_magnitude(structure_score_input) >= 25.0
+    bool compression_candidate_bar = regime_state_input == RegimeState.compression and not structure_trend_confirmed
+    var int compression_run_bars = 0
+    compression_run_bars := compression_candidate_bar ? compression_run_bars + 1 : 0
+    int capped_window_bars = math.min(compression_run_bars, V1_MAX_COMPRESSION_BARS)
+    bool compression_window_valid = compression_run_bars >= V1_MIN_COMPRESSION_BARS
+    [window_high, window_low] = calc_dynamic_window_extremes(capped_window_bars)
+    [inner_high, inner_low] = calc_dynamic_inner_body_extremes(capped_window_bars)
+    float compression_mid = compression_window_valid and not na(window_high) and not na(window_low) ? (window_high + window_low) * 0.5 : na
+    float compression_width = compression_window_valid and not na(window_high) and not na(window_low) ? window_high - window_low : na
+    float compression_width_atr = compression_window_valid and atr_value_input > 0 and not na(compression_width) ? compression_width / atr_value_input : na
+    float duration_quality = compression_window_valid ? clamp_unsigned(42.0 + math.min(math.max(compression_run_bars - V1_MIN_COMPRESSION_BARS, 0), V1_MAX_COMPRESSION_BARS - V1_MIN_COMPRESSION_BARS) / math.max(V1_MAX_COMPRESSION_BARS - V1_MIN_COMPRESSION_BARS, 1) * 34.0) : 0.0
+    float width_quality = compression_window_valid and not na(compression_width_atr) ? clamp_unsigned(100.0 - math.max(compression_width_atr - 1.0, 0.0) * 34.0) : 0.0
+    float value_containment = compression_window_valid and not na(compression_mid) and atr_value_input > 0 and not na(session_vwap_input) ? clamp_unsigned(100.0 - math.abs(compression_mid - session_vwap_input) / atr_value_input * 40.0) : 50.0
+    float compression_quality = compression_window_valid ? clamp_unsigned(duration_quality * 0.35 + width_quality * 0.45 + value_containment * 0.20) : 0.0
+    float compression_score = compression_window_valid ? clamp_unsigned(compression_quality * 0.85 + (regime_state_input == RegimeState.compression ? 15.0 : 0.0)) : 0.0
+    CompressionState compression_state = CompressionState.none
+    if boundaries_frozen_input and compression_window_valid
+        compression_state := CompressionState.frozen
+    else if compression_window_valid
+        compression_state := compression_quality >= 70.0 ? CompressionState.mature : CompressionState.buildup
+
+    [compression_state, compression_score, compression_quality, compression_window_valid, compression_run_bars, window_high, window_low, inner_high, inner_low, compression_mid, compression_width_atr]
+
+calc_squeeze_release_context(bool compression_window_valid_input, float compression_quality_input, float compression_boundary_high_input, float compression_boundary_low_input, float compression_mid_input, float structure_basis_input, float session_vwap_input, float atr_value_input) =>
+    float compression_width = compression_window_valid_input and not na(compression_boundary_high_input) and not na(compression_boundary_low_input) ? compression_boundary_high_input - compression_boundary_low_input : na
+    float pressure_tolerance = not na(compression_width) ? math.max(nz(atr_value_input, syminfo.mintick) * 0.10, compression_width * 0.15) : na
+    bool upper_pressure_now = compression_window_valid_input and not na(pressure_tolerance) and (high >= compression_boundary_high_input - pressure_tolerance or close >= compression_mid_input + compression_width * 0.20)
+    bool lower_pressure_now = compression_window_valid_input and not na(pressure_tolerance) and (low <= compression_boundary_low_input + pressure_tolerance or close <= compression_mid_input - compression_width * 0.20)
+    float upper_pressure_hits = (upper_pressure_now ? 1.0 : 0.0) + (upper_pressure_now[1] ? 1.0 : 0.0) + (upper_pressure_now[2] ? 1.0 : 0.0) + (upper_pressure_now[3] ? 1.0 : 0.0) + (upper_pressure_now[4] ? 1.0 : 0.0)
+    float lower_pressure_hits = (lower_pressure_now ? 1.0 : 0.0) + (lower_pressure_now[1] ? 1.0 : 0.0) + (lower_pressure_now[2] ? 1.0 : 0.0) + (lower_pressure_now[3] ? 1.0 : 0.0) + (lower_pressure_now[4] ? 1.0 : 0.0)
+    BoundaryPressureState boundary_pressure_state = BoundaryPressureState.none
+    if compression_window_valid_input
+        if upper_pressure_hits >= lower_pressure_hits + 1.0 and upper_pressure_hits >= 2.0
+            boundary_pressure_state := BoundaryPressureState.upper_pressure
+        else if lower_pressure_hits >= upper_pressure_hits + 1.0 and lower_pressure_hits >= 2.0
+            boundary_pressure_state := BoundaryPressureState.lower_pressure
+        else
+            boundary_pressure_state := BoundaryPressureState.balanced
+
+    ValueAnchorAlignment value_anchor_alignment = ValueAnchorAlignment.balanced_vwap
+    if compression_window_valid_input and not na(session_vwap_input) and atr_value_input > 0
+        float anchor_buffer = atr_value_input * 0.05
+        bool vwap_reclaim = close > session_vwap_input + anchor_buffer and close[1] <= session_vwap_input
+        bool vwap_reject = close < session_vwap_input - anchor_buffer and close[1] >= session_vwap_input
+        if vwap_reclaim
+            value_anchor_alignment := ValueAnchorAlignment.reclaiming_vwap
+        else if vwap_reject
+            value_anchor_alignment := ValueAnchorAlignment.rejecting_vwap
+        else if close > session_vwap_input + anchor_buffer
+            value_anchor_alignment := ValueAnchorAlignment.above_vwap
+        else if close < session_vwap_input - anchor_buffer
+            value_anchor_alignment := ValueAnchorAlignment.below_vwap
+
+    float bullish_votes = 0.0
+    float bearish_votes = 0.0
+    if compression_window_valid_input and not na(compression_mid_input)
+        bullish_votes += close > compression_mid_input ? 1.0 : 0.0
+        bearish_votes += close < compression_mid_input ? 1.0 : 0.0
+    bullish_votes += structure_basis_input >= structure_basis_input[1] ? 1.0 : 0.0
+    bearish_votes += structure_basis_input <= structure_basis_input[1] ? 1.0 : 0.0
+    bullish_votes += not na(session_vwap_input) and close > session_vwap_input ? 1.0 : 0.0
+    bearish_votes += not na(session_vwap_input) and close < session_vwap_input ? 1.0 : 0.0
+    bullish_votes += boundary_pressure_state == BoundaryPressureState.upper_pressure ? 1.0 : 0.0
+    bearish_votes += boundary_pressure_state == BoundaryPressureState.lower_pressure ? 1.0 : 0.0
+    DirectionalBias release_bias = compression_window_valid_input ? dominant_of_counts(bullish_votes, bearish_votes, 2.0) : DirectionalBias.neutral
+
+    float pressure_quality = boundary_pressure_state == BoundaryPressureState.upper_pressure or boundary_pressure_state == BoundaryPressureState.lower_pressure ? 62.0 : boundary_pressure_state == BoundaryPressureState.balanced ? 35.0 : 0.0
+    float anchor_quality = value_anchor_alignment == ValueAnchorAlignment.reclaiming_vwap or value_anchor_alignment == ValueAnchorAlignment.rejecting_vwap ? 60.0 : value_anchor_alignment == ValueAnchorAlignment.above_vwap or value_anchor_alignment == ValueAnchorAlignment.below_vwap ? 45.0 : 30.0
+    float bias_quality = release_bias != DirectionalBias.neutral ? 62.0 : 18.0
+    float release_readiness_score = compression_window_valid_input ? clamp_unsigned(compression_quality_input * 0.55 + pressure_quality * 0.20 + anchor_quality * 0.10 + bias_quality * 0.15) : 0.0
+
+    [release_readiness_score, release_bias, boundary_pressure_state, value_anchor_alignment]
+
+calc_armed_compression_box(bool compression_window_valid_input, float candidate_boundary_high_input, float candidate_boundary_low_input, float candidate_inner_high_input, float candidate_inner_low_input, float candidate_boundary_mid_input, float candidate_width_atr_input, float compression_quality_input, DirectionalBias release_bias_input, float release_readiness_score_input) =>
+    var bool armed_box_valid = false
+    var float armed_box_high = na
+    var float armed_box_low = na
+    var float armed_box_inner_high = na
+    var float armed_box_inner_low = na
+    var float armed_box_mid = na
+    var float armed_box_width_atr = na
+    var int armed_box_last_valid_bar = na
+    var float armed_box_quality = na
+    var DirectionalBias armed_release_bias = DirectionalBias.neutral
+    var float armed_release_readiness_score = na
+
+    bool prior_compression_window_valid = bar_index > 0 ? compression_window_valid_input[1] : false
+    if prior_compression_window_valid and not na(candidate_boundary_high_input[1]) and not na(candidate_boundary_low_input[1])
+        armed_box_valid := true
+        armed_box_high := candidate_boundary_high_input[1]
+        armed_box_low := candidate_boundary_low_input[1]
+        armed_box_inner_high := candidate_inner_high_input[1]
+        armed_box_inner_low := candidate_inner_low_input[1]
+        armed_box_mid := candidate_boundary_mid_input[1]
+        armed_box_width_atr := candidate_width_atr_input[1]
+        armed_box_last_valid_bar := bar_index - 1
+        armed_box_quality := compression_quality_input[1]
+        armed_release_bias := release_bias_input[1]
+        armed_release_readiness_score := release_readiness_score_input[1]
+
+    bool armed_box_grace_valid = armed_box_valid and not na(armed_box_last_valid_bar) and bar_index - armed_box_last_valid_bar <= V1_ARMED_BOX_GRACE_BARS
+    if not armed_box_grace_valid
+        armed_box_valid := false
+        armed_box_high := na
+        armed_box_low := na
+        armed_box_inner_high := na
+        armed_box_inner_low := na
+        armed_box_mid := na
+        armed_box_width_atr := na
+        armed_box_last_valid_bar := na
+        armed_box_quality := na
+        armed_release_bias := DirectionalBias.neutral
+        armed_release_readiness_score := na
+
+    [armed_box_valid, armed_box_high, armed_box_low, armed_box_inner_high, armed_box_inner_low, armed_box_mid, armed_box_width_atr, armed_box_last_valid_bar, armed_box_quality, armed_release_bias, armed_release_readiness_score]
+
+calc_squeeze_expansion_event(bool armed_box_valid_input, float armed_box_high_input, float armed_box_low_input, float armed_box_inner_high_input, float armed_box_inner_low_input, float armed_box_mid_input, float armed_box_width_atr_input, float armed_box_quality_input, DirectionalBias armed_release_bias_input, float armed_release_readiness_score_input, float session_vwap_input, float atr_value_input, float extension_score_input) =>
+    var bool boundaries_frozen = false
+    var float frozen_boundary_high = na
+    var float frozen_boundary_low = na
+    var float frozen_boundary_mid = na
+    var float frozen_width_atr = na
+    var int pending_direction = 0
+    var int pending_start_bar = na
+    var int pending_confirmation_deadline = na
+    var int pending_outside_close_count = 0
+    var int pending_soft_escape_count = 0
+    var int pending_value_hold_count = 0
+    var string pending_release_trigger_path = "None"
+    var bool pending_strong_close_seen = false
+    var bool pending_inside_close_seen = false
+    var float pending_boundary_high = na
+    var float pending_boundary_low = na
+    var float pending_inner_high = na
+    var float pending_inner_low = na
+    var float pending_boundary_mid = na
+    var float pending_width_atr = na
+    var int attempt_direction = 0
+    var int attempt_start_bar = na
+    var int attempt_validation_deadline = na
+    var string active_release_trigger_path = "None"
+    var int outside_close_count = 0
+    var int value_departure_hold_count = 0
+    var bool strong_close_seen = false
+    var bool had_inside_close = false
+    var bool decisive_reentry_seen = false
+    var bool value_reversion_seen = false
+    var int accepted_direction = 0
+    var int accepted_bar = na
+    var float accepted_boundary_high = na
+    var float accepted_boundary_low = na
+    var float accepted_boundary_mid = na
+    var float accepted_width_atr = na
+    var float accepted_value_zone_high = na
+    var float accepted_value_zone_low = na
+
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float bullish_close_quality = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float bearish_close_quality = candle_range > 0 ? (high - close) / candle_range : 0.5
+    float release_attempt_buffer = atr_value_input * V1_RELEASE_ATTEMPT_BUFFER_ATR
+    float release_persistence_buffer = atr_value_input * V1_RELEASE_PERSISTENCE_BUFFER_ATR
+    float release_wick_buffer = atr_value_input * V1_RELEASE_WICK_BUFFER_ATR
+    float invalidation_buffer = atr_value_input * V1_INVALIDATION_BUFFER_ATR
+    float strong_breakout_buffer = atr_value_input * V1_STRONG_BREAKOUT_BUFFER_ATR
+    bool accepted_active = not na(accepted_bar) and bar_index - accepted_bar <= V1_ACCEPTED_MEMORY_BARS
+
+    bool can_evaluate_release = armed_box_valid_input and not na(armed_box_high_input) and not na(armed_box_low_input) and atr_value_input > 0
+    float value_zone_center = na(session_vwap_input) ? armed_box_mid_input : session_vwap_input
+    float value_zone_buffer = atr_value_input * V1_VALUE_ZONE_BUFFER_ATR
+    float value_zone_high = can_evaluate_release and not na(value_zone_center) ? value_zone_center + value_zone_buffer : na
+    float value_zone_low = can_evaluate_release and not na(value_zone_center) ? value_zone_center - value_zone_buffer : na
+    bool release_attempt_flag = false
+    bool accepted_expansion_flag = false
+    bool failed_expansion_flag = false
+    bool expansion_exhaustion_flag = false
+    SqueezeLaneState squeeze_lane_state = SqueezeLaneState.none
+    float expansion_quality_score = 0.0
+    DirectionalBias expansion_bias = armed_release_bias_input
+
+    if accepted_active
+        bool accepted_direction_bullish = accepted_direction == 1
+        bool accepted_value_held = accepted_direction_bullish ? (na(accepted_value_zone_high) ? close >= accepted_boundary_high : close >= accepted_value_zone_high - release_persistence_buffer) : (na(accepted_value_zone_low) ? close <= accepted_boundary_low : close <= accepted_value_zone_low + release_persistence_buffer)
+        bool accepted_vwap_held = na(session_vwap_input) or (accepted_direction_bullish ? close >= session_vwap_input : close <= session_vwap_input)
+        if not (accepted_value_held and accepted_vwap_held)
+            accepted_bar := na
+            accepted_direction := 0
+            accepted_boundary_high := na
+            accepted_boundary_low := na
+            accepted_boundary_mid := na
+            accepted_width_atr := na
+            accepted_value_zone_high := na
+            accepted_value_zone_low := na
+            accepted_active := false
+
+    bool bullish_close_outside_now = not boundaries_frozen and can_evaluate_release and close > armed_box_high_input
+    bool bearish_close_outside_now = not boundaries_frozen and can_evaluate_release and close < armed_box_low_input
+    bool bullish_hard_breach_now = not boundaries_frozen and can_evaluate_release and close > armed_box_high_input + release_attempt_buffer
+    bool bearish_hard_breach_now = not boundaries_frozen and can_evaluate_release and close < armed_box_low_input - release_attempt_buffer
+    bool bullish_value_departure_now = not boundaries_frozen and can_evaluate_release and not na(value_zone_high) and close > value_zone_high + release_persistence_buffer
+    bool bearish_value_departure_now = not boundaries_frozen and can_evaluate_release and not na(value_zone_low) and close < value_zone_low - release_persistence_buffer
+    bool bullish_value_hold_now = not boundaries_frozen and can_evaluate_release and not na(value_zone_high) and low > value_zone_high - release_persistence_buffer
+    bool bearish_value_hold_now = not boundaries_frozen and can_evaluate_release and not na(value_zone_low) and high < value_zone_low + release_persistence_buffer
+    bool bullish_soft_escape_now = not boundaries_frozen and can_evaluate_release and not na(armed_box_inner_high_input) and close > armed_box_inner_high_input + release_persistence_buffer and (na(value_zone_high) or close >= value_zone_high - release_persistence_buffer)
+    bool bearish_soft_escape_now = not boundaries_frozen and can_evaluate_release and not na(armed_box_inner_low_input) and close < armed_box_inner_low_input - release_persistence_buffer and (na(value_zone_low) or close <= value_zone_low + release_persistence_buffer)
+    bool bullish_edge_probe_now = not boundaries_frozen and can_evaluate_release and high > armed_box_high_input - release_wick_buffer and close <= armed_box_high_input + release_persistence_buffer and (na(armed_box_inner_high_input) or close >= armed_box_inner_high_input - release_persistence_buffer)
+    bool bearish_edge_probe_now = not boundaries_frozen and can_evaluate_release and low < armed_box_low_input + release_wick_buffer and close >= armed_box_low_input - release_persistence_buffer and (na(armed_box_inner_low_input) or close <= armed_box_inner_low_input + release_persistence_buffer)
+    bool bullish_quality_ok_now = body_ratio >= V1_RELEASE_ATTEMPT_BODY_RATIO_MIN and bullish_close_quality >= V1_RELEASE_ATTEMPT_CLOSE_QUALITY_MIN
+    bool bearish_quality_ok_now = body_ratio >= V1_RELEASE_ATTEMPT_BODY_RATIO_MIN and bearish_close_quality >= V1_RELEASE_ATTEMPT_CLOSE_QUALITY_MIN
+    bool bullish_attempt_now = (bullish_hard_breach_now or (bullish_value_departure_now and bullish_value_hold_now)) and bullish_quality_ok_now
+    bool bearish_attempt_now = (bearish_hard_breach_now or (bearish_value_departure_now and bearish_value_hold_now)) and bearish_quality_ok_now
+
+    if pending_direction != 0 and not boundaries_frozen
+        bool pending_bullish = pending_direction == 1
+        bool pending_value_departure_now = pending_bullish ? not na(value_zone_high) and close > value_zone_high + release_persistence_buffer : not na(value_zone_low) and close < value_zone_low - release_persistence_buffer
+        bool pending_value_hold_now = pending_bullish ? not na(value_zone_high) and low > value_zone_high - release_persistence_buffer : not na(value_zone_low) and high < value_zone_low + release_persistence_buffer
+        bool pending_outside_now = pending_bullish ? pending_value_departure_now or pending_value_hold_now or (high > pending_boundary_high + release_wick_buffer and close > nz(pending_inner_high, pending_boundary_mid)) : pending_value_departure_now or pending_value_hold_now or (low < pending_boundary_low - release_wick_buffer and close < nz(pending_inner_low, pending_boundary_mid))
+        bool pending_soft_escape_now = pending_bullish ? not na(pending_inner_high) and close > pending_inner_high + release_persistence_buffer and (na(value_zone_high) or close > value_zone_high - release_persistence_buffer) : not na(pending_inner_low) and close < pending_inner_low - release_persistence_buffer and (na(value_zone_low) or close < value_zone_low + release_persistence_buffer)
+        bool pending_quality_ok_now = pending_bullish ? (pending_soft_escape_now or pending_value_departure_now) and bullish_close_quality >= V1_RELEASE_ATTEMPT_CLOSE_QUALITY_MIN * 0.95 and body_ratio >= V1_RELEASE_ATTEMPT_BODY_RATIO_MIN * 0.85 : (pending_soft_escape_now or pending_value_departure_now) and bearish_close_quality >= V1_RELEASE_ATTEMPT_CLOSE_QUALITY_MIN * 0.95 and body_ratio >= V1_RELEASE_ATTEMPT_BODY_RATIO_MIN * 0.85
+        bool pending_strong_close_now = pending_bullish ? close > pending_boundary_high + strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bullish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN : close < pending_boundary_low - strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bearish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN
+        bool pending_decisive_invalidation = pending_bullish ? close < pending_boundary_mid - invalidation_buffer : close > pending_boundary_mid + invalidation_buffer
+
+        if bar_index > pending_start_bar
+            pending_outside_close_count += pending_outside_now ? 1 : 0
+            pending_soft_escape_count := pending_soft_escape_now ? pending_soft_escape_count + 1 : 0
+            pending_value_hold_count += pending_value_departure_now or pending_value_hold_now ? 1 : 0
+            pending_strong_close_seen := pending_strong_close_seen or pending_strong_close_now
+            pending_inside_close_seen := pending_inside_close_seen or not pending_outside_now
+
+        bool confirm_pending_attempt_from_breakout = bar_index > pending_start_bar and ((pending_outside_close_count >= 1 and pending_quality_ok_now) or pending_outside_close_count >= 2 or pending_strong_close_now)
+        bool confirm_pending_attempt_from_accumulation = bar_index > pending_start_bar and pending_soft_escape_count >= V1_SOFT_RELEASE_BARS_REQUIRED and (pending_quality_ok_now or pending_outside_close_count >= 1 or pending_soft_escape_count >= V1_SOFT_RELEASE_BARS_REQUIRED + 1)
+        bool confirm_pending_attempt_now = confirm_pending_attempt_from_breakout or confirm_pending_attempt_from_accumulation
+        bool pending_expired = bar_index > pending_confirmation_deadline
+
+        if confirm_pending_attempt_now
+            boundaries_frozen := true
+            frozen_boundary_high := pending_boundary_high
+            frozen_boundary_low := pending_boundary_low
+            frozen_boundary_mid := pending_boundary_mid
+            frozen_width_atr := pending_width_atr
+            attempt_direction := pending_direction
+            attempt_start_bar := pending_start_bar
+            attempt_validation_deadline := pending_start_bar + V1_VALIDATION_BARS - 1
+            active_release_trigger_path := confirm_pending_attempt_from_accumulation ? "Accumulation" : pending_release_trigger_path
+            outside_close_count := pending_outside_close_count
+            value_departure_hold_count := pending_value_hold_count
+            strong_close_seen := pending_strong_close_seen
+            had_inside_close := pending_inside_close_seen
+            decisive_reentry_seen := false
+            value_reversion_seen := false
+            pending_direction := 0
+            pending_start_bar := na
+            pending_confirmation_deadline := na
+            pending_outside_close_count := 0
+            pending_soft_escape_count := 0
+            pending_value_hold_count := 0
+            pending_release_trigger_path := "None"
+            pending_strong_close_seen := false
+            pending_inside_close_seen := false
+            pending_boundary_high := na
+            pending_boundary_low := na
+            pending_inner_high := na
+            pending_inner_low := na
+            pending_boundary_mid := na
+            pending_width_atr := na
+        else if pending_decisive_invalidation or pending_expired
+            pending_direction := 0
+            pending_start_bar := na
+            pending_confirmation_deadline := na
+            pending_outside_close_count := 0
+            pending_soft_escape_count := 0
+            pending_value_hold_count := 0
+            pending_release_trigger_path := "None"
+            pending_strong_close_seen := false
+            pending_inside_close_seen := false
+            pending_boundary_high := na
+            pending_boundary_low := na
+            pending_inner_high := na
+            pending_inner_low := na
+            pending_boundary_mid := na
+            pending_width_atr := na
+
+    if not boundaries_frozen and (bullish_attempt_now or bearish_attempt_now)
+        boundaries_frozen := true
+        frozen_boundary_high := armed_box_high_input
+        frozen_boundary_low := armed_box_low_input
+        frozen_boundary_mid := armed_box_mid_input
+        frozen_width_atr := armed_box_width_atr_input
+        attempt_direction := bullish_attempt_now ? 1 : -1
+        attempt_start_bar := bar_index
+        attempt_validation_deadline := bar_index + V1_VALIDATION_BARS - 1
+        active_release_trigger_path := bullish_hard_breach_now or bearish_hard_breach_now ? "Breakout" : "Value Departure"
+        outside_close_count := 1
+        value_departure_hold_count := (bullish_attempt_now and (bullish_value_departure_now or bullish_value_hold_now)) or (bearish_attempt_now and (bearish_value_departure_now or bearish_value_hold_now)) ? 1 : 0
+        strong_close_seen := (bullish_attempt_now and close > armed_box_high_input + strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bullish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN) or (bearish_attempt_now and close < armed_box_low_input - strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bearish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN)
+        had_inside_close := false
+        decisive_reentry_seen := false
+        value_reversion_seen := false
+        accepted_bar := na
+        accepted_direction := 0
+        accepted_boundary_high := na
+        accepted_boundary_low := na
+        accepted_boundary_mid := na
+        accepted_width_atr := na
+        accepted_value_zone_high := na
+        accepted_value_zone_low := na
+        pending_direction := 0
+        pending_start_bar := na
+        pending_confirmation_deadline := na
+        pending_outside_close_count := 0
+        pending_soft_escape_count := 0
+        pending_value_hold_count := 0
+        pending_release_trigger_path := "None"
+        pending_strong_close_seen := false
+        pending_inside_close_seen := false
+        pending_boundary_high := na
+        pending_boundary_low := na
+        pending_inner_high := na
+        pending_inner_low := na
+        pending_boundary_mid := na
+        pending_width_atr := na
+    else if not boundaries_frozen and pending_direction == 0 and (bullish_close_outside_now or bearish_close_outside_now or bullish_value_departure_now or bearish_value_departure_now or bullish_edge_probe_now or bearish_edge_probe_now or bullish_soft_escape_now or bearish_soft_escape_now)
+        pending_direction := bullish_close_outside_now or bullish_value_departure_now or bullish_edge_probe_now or bullish_soft_escape_now ? 1 : -1
+        pending_start_bar := bar_index
+        pending_confirmation_deadline := bar_index + V1_RELEASE_CONFIRM_BARS
+        pending_outside_close_count := bullish_value_departure_now or bearish_value_departure_now or bullish_close_outside_now or bearish_close_outside_now ? 1 : 0
+        pending_soft_escape_count := bullish_soft_escape_now or bearish_soft_escape_now ? 1 : 0
+        pending_value_hold_count := (bullish_value_departure_now or bearish_value_departure_now or bullish_value_hold_now or bearish_value_hold_now) ? 1 : 0
+        pending_release_trigger_path := bullish_close_outside_now or bearish_close_outside_now ? "Breakout" : bullish_value_departure_now or bearish_value_departure_now ? "Value Departure" : bullish_soft_escape_now or bearish_soft_escape_now ? "Accumulation" : "Probe"
+        pending_strong_close_seen := (bullish_close_outside_now and close > armed_box_high_input + strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bullish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN) or (bearish_close_outside_now and close < armed_box_low_input - strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bearish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN)
+        pending_inside_close_seen := not (bullish_close_outside_now or bearish_close_outside_now or bullish_value_departure_now or bearish_value_departure_now or bullish_soft_escape_now or bearish_soft_escape_now)
+        pending_boundary_high := armed_box_high_input
+        pending_boundary_low := armed_box_low_input
+        pending_inner_high := armed_box_inner_high_input
+        pending_inner_low := armed_box_inner_low_input
+        pending_boundary_mid := armed_box_mid_input
+        pending_width_atr := armed_box_width_atr_input
+
+    if boundaries_frozen and attempt_direction != 0
+        bool bullish_attempt = attempt_direction == 1
+        bool close_outside_boundary = bullish_attempt ? close > frozen_boundary_high : close < frozen_boundary_low
+        bool close_outside_value_zone = bullish_attempt ? not na(value_zone_high) and close > value_zone_high : not na(value_zone_low) and close < value_zone_low
+        bool holds_value_departure = bullish_attempt ? not na(value_zone_high) and low > value_zone_high - release_persistence_buffer : not na(value_zone_low) and high < value_zone_low + release_persistence_buffer
+        bool strong_close_now = bullish_attempt ? close > frozen_boundary_high + strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bullish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN : close < frozen_boundary_low - strong_breakout_buffer and body_ratio >= V1_STRONG_BODY_RATIO_MIN and bearish_close_quality >= V1_STRONG_CLOSE_QUALITY_MIN
+        bool decisive_boundary_loss = bullish_attempt ? close < frozen_boundary_high - invalidation_buffer or low < frozen_boundary_high - strong_breakout_buffer : close > frozen_boundary_low + invalidation_buffer or high > frozen_boundary_low + strong_breakout_buffer
+        bool decisive_value_reversion = bullish_attempt ? not na(value_zone_high) and close < value_zone_high - invalidation_buffer : not na(value_zone_low) and close > value_zone_low + invalidation_buffer
+        bool lost_vwap = not na(session_vwap_input) and (bullish_attempt ? close < session_vwap_input : close > session_vwap_input)
+
+        if bar_index > attempt_start_bar and close_outside_boundary
+            outside_close_count += 1
+        if bar_index > attempt_start_bar and (close_outside_value_zone or holds_value_departure)
+            value_departure_hold_count += 1
+        strong_close_seen := strong_close_seen or strong_close_now
+        had_inside_close := had_inside_close or (bar_index > attempt_start_bar and not close_outside_value_zone and not holds_value_departure)
+        decisive_reentry_seen := decisive_reentry_seen or decisive_boundary_loss
+        value_reversion_seen := value_reversion_seen or decisive_value_reversion
+
+        if bar_index <= attempt_validation_deadline and (decisive_boundary_loss or decisive_value_reversion or lost_vwap)
+            failed_expansion_flag := true
+            squeeze_lane_state := SqueezeLaneState.failed_expansion
+            expansion_bias := opposite_bias(bullish_attempt ? DirectionalBias.bullish : DirectionalBias.bearish)
+            expansion_quality_score := clamp_unsigned(armed_release_readiness_score_input * 0.35 + (strong_close_seen ? 10.0 : 0.0))
+            boundaries_frozen := false
+            frozen_boundary_high := na
+            frozen_boundary_low := na
+            frozen_boundary_mid := na
+            frozen_width_atr := na
+            attempt_direction := 0
+            attempt_start_bar := na
+            attempt_validation_deadline := na
+            active_release_trigger_path := "None"
+            outside_close_count := 0
+            value_departure_hold_count := 0
+            strong_close_seen := false
+            had_inside_close := false
+            decisive_reentry_seen := false
+            value_reversion_seen := false
+        else if bar_index >= attempt_validation_deadline
+            bool holds_correct_vwap_side = na(session_vwap_input) or (bullish_attempt ? close >= session_vwap_input : close <= session_vwap_input)
+            bool accepted_now = not decisive_reentry_seen and not value_reversion_seen and holds_correct_vwap_side and (value_departure_hold_count >= 2 or strong_close_seen)
+            if accepted_now
+                accepted_expansion_flag := true
+                squeeze_lane_state := SqueezeLaneState.accepted_expansion
+                expansion_bias := bullish_attempt ? DirectionalBias.bullish : DirectionalBias.bearish
+                expansion_quality_score := clamp_unsigned(armed_release_readiness_score_input * 0.48 + (value_departure_hold_count >= 2 ? 16.0 : value_departure_hold_count >= 1 ? 8.0 : 0.0) + (outside_close_count >= 2 ? 8.0 : outside_close_count >= 1 ? 4.0 : 0.0) + (strong_close_seen ? 14.0 : 0.0) + clamp_unsigned(60.0 - score_magnitude(extension_score_input) * 0.30) * 0.18)
+                accepted_direction := bullish_attempt ? 1 : -1
+                accepted_bar := bar_index
+                accepted_boundary_high := frozen_boundary_high
+                accepted_boundary_low := frozen_boundary_low
+                accepted_boundary_mid := frozen_boundary_mid
+                accepted_width_atr := frozen_width_atr
+                accepted_value_zone_high := value_zone_high
+                accepted_value_zone_low := value_zone_low
+            else
+                failed_expansion_flag := true
+                squeeze_lane_state := SqueezeLaneState.failed_expansion
+                expansion_bias := opposite_bias(bullish_attempt ? DirectionalBias.bullish : DirectionalBias.bearish)
+                expansion_quality_score := clamp_unsigned(armed_release_readiness_score_input * 0.35 + (strong_close_seen ? 10.0 : 0.0))
+            boundaries_frozen := false
+            frozen_boundary_high := na
+            frozen_boundary_low := na
+            frozen_boundary_mid := na
+            frozen_width_atr := na
+            attempt_direction := 0
+            attempt_start_bar := na
+            attempt_validation_deadline := na
+            active_release_trigger_path := "None"
+            outside_close_count := 0
+            value_departure_hold_count := 0
+            strong_close_seen := false
+            had_inside_close := false
+            decisive_reentry_seen := false
+            value_reversion_seen := false
+        else
+            release_attempt_flag := true
+            squeeze_lane_state := SqueezeLaneState.release_attempt
+            expansion_bias := bullish_attempt ? DirectionalBias.bullish : DirectionalBias.bearish
+            expansion_quality_score := clamp_unsigned(armed_release_readiness_score_input * 0.55 + (value_departure_hold_count >= 2 ? 8.0 : value_departure_hold_count >= 1 ? 4.0 : 0.0) + (outside_close_count >= 2 ? 4.0 : 0.0) + (strong_close_seen ? 10.0 : 0.0))
+    else if accepted_active
+        bool bullish_accepted = accepted_direction == 1
+        float directional_extension = bullish_accepted ? positive_component(extension_score_input) : negative_component(extension_score_input)
+        bool weakening_body = body_ratio < 0.35
+        bool weakening_close_quality = bullish_accepted ? bullish_close_quality < 0.55 : bearish_close_quality < 0.55
+        bool exhausted_extension = nz(directional_extension, 0.0) >= 60.0
+        expansion_exhaustion_flag := exhausted_extension and (weakening_body or weakening_close_quality)
+        squeeze_lane_state := expansion_exhaustion_flag ? SqueezeLaneState.expansion_exhaustion : SqueezeLaneState.accepted_expansion
+        expansion_bias := bullish_accepted ? DirectionalBias.bullish : DirectionalBias.bearish
+        expansion_quality_score := clamp_unsigned(72.0 + math.min(nz(directional_extension, 0.0), 30.0) * 0.25 - (expansion_exhaustion_flag ? 12.0 : 0.0))
+    else if pending_direction != 0 and not boundaries_frozen
+        squeeze_lane_state := SqueezeLaneState.soft_release
+        expansion_bias := pending_direction == 1 ? DirectionalBias.bullish : DirectionalBias.bearish
+        expansion_quality_score := clamp_unsigned(armed_release_readiness_score_input * 0.52 + pending_soft_escape_count * 6.0 + pending_outside_close_count * 8.0 + (pending_strong_close_seen ? 8.0 : 0.0))
+
+    [squeeze_lane_state, release_attempt_flag, accepted_expansion_flag, failed_expansion_flag, expansion_exhaustion_flag, expansion_quality_score, expansion_bias, boundaries_frozen, frozen_boundary_high, frozen_boundary_low, frozen_boundary_mid, frozen_width_atr]
+
+calc_squeeze_lane_summary(CompressionState compression_state_input, float compression_quality_input, float release_readiness_score_input, DirectionalBias release_bias_input, SqueezeLaneState squeeze_lane_state_input, DirectionalBias squeeze_lane_bias_input, float expansion_quality_score_input, BoundaryPressureState boundary_pressure_state_input, bool release_attempt_flag_input, bool accepted_expansion_flag_input, bool failed_expansion_flag_input, bool expansion_exhaustion_flag_input, float pdh_input, float pdl_input, float compression_boundary_high_input, float compression_boundary_low_input, float atr_value_input) =>
+    string lane_name = "Squeeze / Expansion"
+    string lane_bias = bias_to_text(squeeze_lane_state_input == SqueezeLaneState.release_attempt or squeeze_lane_state_input == SqueezeLaneState.accepted_expansion or squeeze_lane_state_input == SqueezeLaneState.expansion_exhaustion or squeeze_lane_state_input == SqueezeLaneState.failed_expansion ? squeeze_lane_bias_input : release_bias_input)
+    float lane_confidence = 0.0
+    if squeeze_lane_state_input == SqueezeLaneState.accepted_expansion
+        lane_confidence := expansion_quality_score_input
+    else if squeeze_lane_state_input == SqueezeLaneState.expansion_exhaustion
+        lane_confidence := clamp_unsigned(expansion_quality_score_input - 10.0)
+    else if squeeze_lane_state_input == SqueezeLaneState.failed_expansion
+        lane_confidence := clamp_unsigned(math.max(expansion_quality_score_input, release_readiness_score_input * 0.70))
+    else if squeeze_lane_state_input == SqueezeLaneState.release_attempt
+        lane_confidence := expansion_quality_score_input
+    else if squeeze_lane_state_input == SqueezeLaneState.soft_release
+        lane_confidence := clamp_unsigned(math.max(expansion_quality_score_input, release_readiness_score_input * 0.72))
+    else if squeeze_lane_state_input == SqueezeLaneState.release_readiness
+        lane_confidence := clamp_unsigned(release_readiness_score_input)
+    else if squeeze_lane_state_input == SqueezeLaneState.compression_buildup
+        lane_confidence := clamp_unsigned(compression_quality_input)
+    string lane_setup_tier = lane_summary_setup_tier(lane_confidence)
+    string lane_actionability = lane_summary_actionability(lane_confidence >= 58.0 and (accepted_expansion_flag_input or failed_expansion_flag_input or release_attempt_flag_input or expansion_exhaustion_flag_input) ? "Watch" : lane_confidence >= 35.0 ? "Informational" : "No Action", lane_confidence)
+    string lane_lead_state = squeeze_lane_state_text(squeeze_lane_state_input)
+    bool near_pdh = not na(pdh_input) and not na(compression_boundary_high_input) and atr_value_input > 0 and math.abs(compression_boundary_high_input - pdh_input) <= atr_value_input * 0.25
+    bool near_pdl = not na(pdl_input) and not na(compression_boundary_low_input) and atr_value_input > 0 and math.abs(compression_boundary_low_input - pdl_input) <= atr_value_input * 0.25
+    string lane_runner_up_context = squeeze_lane_state_input == SqueezeLaneState.accepted_expansion ? "Continuation handoff favored" : squeeze_lane_state_input == SqueezeLaneState.failed_expansion ? "Reversal/Trap handoff favored" : squeeze_lane_state_input == SqueezeLaneState.release_attempt ? "Validation still open" : squeeze_lane_state_input == SqueezeLaneState.soft_release ? "Soft escape still unconfirmed" : release_bias_input == DirectionalBias.neutral ? "Need cleaner directional pressure" : boundary_pressure_state_input == BoundaryPressureState.balanced ? "Pressure still balanced" : "Context still coiling"
+    string lane_trigger_state = lane_summary_trigger_state("None")
+    string lane_market_fit = squeeze_lane_state_input == SqueezeLaneState.accepted_expansion ? "Expansion accepted" : squeeze_lane_state_input == SqueezeLaneState.failed_expansion ? "Expansion failed back to balance" : squeeze_lane_state_input == SqueezeLaneState.expansion_exhaustion ? "Accepted expansion with caution" : squeeze_lane_state_input == SqueezeLaneState.soft_release ? "Soft release probing outside value" : compression_state_input == CompressionState.mature ? "Mature compression" : compression_state_input == CompressionState.buildup ? "Developing compression" : "No clean squeeze context"
+    lane_market_fit := near_pdh ? lane_market_fit + " / PDH nearby" : near_pdl ? lane_market_fit + " / PDL nearby" : lane_market_fit
+    string lane_handoff_hint = lane_summary_handoff_hint(squeeze_lane_state_input == SqueezeLaneState.accepted_expansion or squeeze_lane_state_input == SqueezeLaneState.expansion_exhaustion ? "Continuation" : squeeze_lane_state_input == SqueezeLaneState.failed_expansion ? "Reversal/Trap" : "None")
+    [lane_name, lane_bias, lane_confidence, lane_setup_tier, lane_actionability, lane_lead_state, lane_runner_up_context, lane_trigger_state, lane_market_fit, lane_handoff_hint]
+
+// @function Public host-callable live squeeze summary surface. Returns the standardized 10-field primitive tuple.
+export calc_squeeze_live_summary(
+    int regime_fast_length,
+    int regime_slow_length,
+    int regime_compression_length,
+    int regime_atr_length,
+    float regime_compression_threshold,
+    int structure_pivot_left,
+    int structure_pivot_right,
+    int structure_basis_length,
+    float structure_displacement_atr,
+    int fair_value_atr_length,
+    float fair_value_extreme_atr) =>
+    [regime_state, _, _] = calc_regime(regime_fast_length, regime_slow_length, regime_compression_length, regime_atr_length, regime_compression_threshold)
+    [structure_state, structure_score, _, _, structure_basis_value] = calc_structure(structure_pivot_left, structure_pivot_right, structure_basis_length, structure_displacement_atr)
+    [session_vwap_value, extension_score] = calc_fair_value_extension(fair_value_atr_length, fair_value_extreme_atr)
+    [pdh_value, pdl_value] = request.security(syminfo.tickerid, "D", [high[1], low[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+    float atr_value = ta.atr(fair_value_atr_length)
+
+    [pre_event_state, pre_event_score, pre_event_quality, compression_window_valid, _, candidate_boundary_high, candidate_boundary_low, candidate_inner_high, candidate_inner_low, candidate_mid, candidate_width_atr] = calc_squeeze_compression_context(regime_state, structure_state, structure_score, structure_basis_value, session_vwap_value, atr_value, false)
+    [release_readiness_score, release_bias, boundary_pressure_state, _] = calc_squeeze_release_context(compression_window_valid, pre_event_quality, candidate_boundary_high, candidate_boundary_low, candidate_mid, structure_basis_value, session_vwap_value, atr_value)
+    [armed_box_valid, armed_box_high, armed_box_low, armed_box_inner_high, armed_box_inner_low, armed_box_mid, armed_box_width_atr, _, armed_box_quality, armed_release_bias, armed_release_readiness_score] = calc_armed_compression_box(compression_window_valid, candidate_boundary_high, candidate_boundary_low, candidate_inner_high, candidate_inner_low, candidate_mid, candidate_width_atr, pre_event_quality, release_bias, release_readiness_score)
+    [squeeze_lane_state_raw, release_attempt_flag, accepted_expansion_flag, failed_expansion_flag, expansion_exhaustion_flag, expansion_quality_score, squeeze_lane_bias, boundaries_frozen, frozen_boundary_high, frozen_boundary_low, frozen_boundary_mid, frozen_width_atr] = calc_squeeze_expansion_event(armed_box_valid, armed_box_high, armed_box_low, armed_box_inner_high, armed_box_inner_low, armed_box_mid, armed_box_width_atr, armed_box_quality, armed_release_bias, armed_release_readiness_score, session_vwap_value, atr_value, extension_score)
+
+    float active_release_readiness_score = compression_window_valid ? release_readiness_score : armed_box_valid and not na(armed_release_readiness_score) ? armed_release_readiness_score : 0.0
+    DirectionalBias active_release_bias = compression_window_valid ? release_bias : armed_box_valid ? armed_release_bias : DirectionalBias.neutral
+    CompressionState compression_state = boundaries_frozen ? CompressionState.frozen : compression_window_valid ? pre_event_state : armed_box_valid ? nz(armed_box_quality, 0.0) >= 70.0 ? CompressionState.mature : CompressionState.buildup : pre_event_state
+    float compression_score = compression_window_valid ? pre_event_score : armed_box_valid and not na(armed_box_quality) ? clamp_unsigned(armed_box_quality * 0.85) : pre_event_score
+    float compression_quality = compression_window_valid ? pre_event_quality : armed_box_valid ? armed_box_quality : pre_event_quality
+    float compression_boundary_high = boundaries_frozen ? frozen_boundary_high : compression_window_valid ? candidate_boundary_high : armed_box_valid ? armed_box_high : na
+    float compression_boundary_low = boundaries_frozen ? frozen_boundary_low : compression_window_valid ? candidate_boundary_low : armed_box_valid ? armed_box_low : na
+    float compression_width_atr = boundaries_frozen ? frozen_width_atr : compression_window_valid ? candidate_width_atr : armed_box_valid ? armed_box_width_atr : na
+
+    SqueezeLaneState squeeze_lane_state = squeeze_lane_state_raw
+    if squeeze_lane_state == SqueezeLaneState.none
+        if compression_window_valid or armed_box_valid
+            squeeze_lane_state := active_release_readiness_score >= 62.0 and active_release_bias != DirectionalBias.neutral ? SqueezeLaneState.release_readiness : SqueezeLaneState.compression_buildup
+
+    calc_squeeze_lane_summary(compression_state, compression_quality, active_release_readiness_score, active_release_bias, squeeze_lane_state, squeeze_lane_bias, expansion_quality_score, boundary_pressure_state, release_attempt_flag, accepted_expansion_flag, failed_expansion_flag, expansion_exhaustion_flag, pdh_value, pdl_value, compression_boundary_high, compression_boundary_low, atr_value)

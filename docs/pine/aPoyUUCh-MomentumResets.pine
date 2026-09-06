@@ -1,0 +1,674 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © SimpleCryptoLife
+//@version=6
+
+// @description Library for momentum reset detection using FSM logic.
+library("MomentumResets", overlay = false)
+const string LIBRARY_NAME = "MomentumResets Library"  // Used for runtime error reporting.
+
+
+//#region 🟢🟢🟢🟢🟢🟢  EXPORTED ENUMS  🟢🟢🟢🟢🟢🟢
+
+// We export this enum because this is what we return to callers.
+export enum Signal
+    none    // No reset signal this bar.
+    bullish // Bullish reset signal this bar.
+    bearish // Bearish reset signal this bar.
+
+//#endregion EXPORTED CONSTANTS, ENUMS, AND TYPES
+
+
+//#region 🔵🔵🔵🔵🔵🔵  INTERNAL FSM TYPES  🔵🔵🔵🔵🔵🔵
+
+// This state is the S in FSM. Used for Stoch resets.
+enum InStoch
+    stochNeutral      // No Stoch setup is active.
+    stochTrackingLow  // Bullish Stoch setup is active after a lower-threshold entry.
+    stochTrackingHigh // Bearish Stoch setup is active after an upper-threshold entry.
+    stochSuppressed   // Cooldown Stoch state after a reset signal, until a fresh threshold entry.
+
+// Internal phase states for static-level single-series resets.
+enum InStaticLevelPhase
+    waitingPrime // Waiting for the series to first move beyond the buffer zone.
+    primed       // FSM is primed now; now waiting for the threshold touch.
+    crossed      // Threshold touch happened; now waiting for re-break beyond tolerance.
+
+// Internal state for pivot resets.
+enum InPivotReset
+    neutral      // No directional setup is currently active.
+    trackingHigh // Bearish setup active; trailing the highest value.
+    trackingLow  // Bullish setup active; trailing the lowest value.
+
+// Internal state for channel-based momentum resets.
+enum InChannelBias
+    neutral // No directional bias is currently active.
+    bullish // Bias is bullish and we watch for bearish breaks.
+    bearish // Bias is bearish and we watch for bullish breaks.
+
+//#endregion INTERNAL FSM TYPES
+
+
+//#region 🔵🔵🔵🔵🔵🔵  INTERNAL VALIDATION  🔵🔵🔵🔵🔵🔵
+
+// @function Throws a runtime error with the library and function name so you can tell where it came from.
+// @param _functionName  Name of the function raising the error.
+// @param _message       Error message body.
+// @returns Nuffin'.
+f_throwError(string _functionName, string _message) =>
+    runtime.error(LIBRARY_NAME + "." + _functionName + "(): " + _message)
+
+// @function Validates that both threshold inputs are not na. Range and order checks are in the calling functions 'cos they appear only once.
+// @param _lowerThreshold  Lower threshold value to validate.
+// @param _upperThreshold  Upper threshold value to validate.
+// @returns float(na) so callers can run this as a guard step.
+f_validateThresholds(float _lowerThreshold, float _upperThreshold) =>
+    const string _functionName = "f_validateThresholds"
+    if na(_lowerThreshold) or na(_upperThreshold)
+        f_throwError(_functionName=_functionName, _message="Thresholds cannot be na.")
+    if _lowerThreshold >= _upperThreshold
+        f_throwError(_functionName=_functionName, _message="Lower threshold must be lower than upper threshold.")
+    float(na)
+
+// @function Validates channel width.
+// @param _width  Absolute trail distance used for channel candidates.
+// @returns float(na) so callers can run this as a guard step.
+f_validateWidth(float _width) =>
+    const string _functionName = "f_validateWidth"
+    if na(_width)
+        f_throwError(_functionName=_functionName, _message="Width cannot be na.")
+    if _width <= 0
+        f_throwError(_functionName=_functionName, _message="Width must be greater than 0.")
+    float(na)
+
+// @function Validates pivot-reset inputs before we initialise anchor and trail state.
+// @param _leftShoulder   Relative move needed to prime a setup.
+// @param _rightShoulder  Relative retrace/bounce needed to confirm a pivot.
+// @param _bearMinHeight  Optional absolute minimum high for bearish resets.
+// @param _bullMaxDepth   Optional absolute maximum low for bullish resets.
+// @param _functionName   Exported function name for clearer runtime errors.
+// @returns float(na) so callers can run this as a guard step.
+f_validatePivotResetInputs(float _leftShoulder, float _rightShoulder, float _bearMinHeight, float _bullMaxDepth, string _functionName) =>
+    if na(_leftShoulder) or na(_rightShoulder)
+        f_throwError(_functionName=_functionName, _message="Shoulders cannot be na.")
+    if _leftShoulder <= 0
+        f_throwError(_functionName=_functionName, _message="Left shoulder must be greater than 0.")
+    if _rightShoulder <= 0
+        f_throwError(_functionName=_functionName, _message="Right shoulder must be greater than 0.")
+    if not na(_bearMinHeight) and not na(_bullMaxDepth) and _bullMaxDepth >= _bearMinHeight
+        f_throwError(_functionName=_functionName, _message="When both optional levels are used, _bullMaxDepth must be lower than _bearMinHeight.")
+    float(na)
+
+//#endregion INTERNAL VALIDATION
+
+
+//#region 🟢🟢🟢🟢🟢🟢  EXPORTED FUNCTIONS  🟢🟢🟢🟢🟢🟢
+
+// @function Generates a reset signal for Stoch recovering from >80 or < 20, with some extra conditions for reducing false positives. 
+// @param _stochK          Current Stoch %K value.
+// @param _stochD          Current Stoch %D value.
+// @param _lowerThreshold  Lower threshold used for tracking and reset logic.
+// @param _upperThreshold  Upper threshold used for tracking and reset logic.
+// @param _skipValidation  If true, input validation checks are skipped.
+// @returns Stoch reset signal for the current bar. Uses a custom enum type, which is also exported. Possible values: Signal.bullish, Signal.bearish, or Signal.none (default). The calling script does not need to define this type explicitly; you get it for free by importing the library. You do need to know the enum name and values so you can work with it.
+export getStochResetSignal(float _stochK, float _stochD, float _lowerThreshold = 20.0, float _upperThreshold = 80.0, bool _skipValidation = false) =>
+    // The function name so we can output a useful error message.
+    const string _functionName = "getStochResetSignal"
+    // The caller can skip validation, e.g., if some values are dynamic or not present on some bars, to avoid crashing the script if we get a stray `na` value.
+    if not _skipValidation
+        // Validate the thresholds for `na` values and upper vs lower being the wrong way round.
+        f_validateThresholds(_lowerThreshold=_lowerThreshold, _upperThreshold=_upperThreshold)
+        // We can hardcode the bounds because this is only for Stoch.
+        if _lowerThreshold < 0 or _lowerThreshold > 100
+            f_throwError(_functionName=_functionName, _message="Lower threshold must be in range 0 to 100 inclusive.")
+        if _upperThreshold < 0 or _upperThreshold > 100
+            f_throwError(_functionName=_functionName, _message="Upper threshold must be in range 0 to 100 inclusive.")
+
+    // Design choice: state lives inside the function so the caller only deals with Signal.
+    // This means the function is not loop-safe because all calls share one internal state.
+    var InStoch _currentState = InStoch.stochNeutral
+    float _stochD_1 = _stochD[1]  // This function is not HTF-safe because we use the historical operator.
+    bool _hasValidInputs = not na(_stochK) and not na(_stochD) and not na(_stochD_1)  // Need all the Stochs all the time.
+    bool _isBullishReset = false  // Reset signals are only valid for the current bar.
+    bool _isBearishReset = false  // Reset signals are only valid for the current bar.
+
+    if _hasValidInputs
+        // We use these more than once.
+        bool _isKBelowLower = _stochK < _lowerThreshold
+        bool _isKAboveUpper = _stochK > _upperThreshold
+        // We use this once but don't calulate them inline just to be neat.
+        bool _isKDBullish = _stochK > _stochD and _stochD > _lowerThreshold and _stochD > _stochD_1
+        bool _isKDBearish = _stochK < _stochD and _stochD < _upperThreshold and _stochD < _stochD_1
+
+        // State transitions. For simplicity and lower overhead (and probably speed but I'm too lazy to measure it rn), we hardcoded this. 
+        // It's still a Finite State Machine because each transition is limited by the current state.
+        // Using conditional blocks like this is more brittle and less easy to inspect than using more human-readable rules formats.
+        // For a generalised FSM framework, which you could also use to build something similar, see my FiniteStateMachine library.
+        // In this condition-based FSM, the transitions are enforced by the order in which the branches are written. 
+        // In my rules-based FSM, priority is enforced by the order in which rules are loaded (and therefore is easier to change).
+        if _currentState == InStoch.stochNeutral
+            if _isKBelowLower
+                _currentState := InStoch.stochTrackingLow
+            else if _isKAboveUpper
+                _currentState := InStoch.stochTrackingHigh
+        else if _currentState == InStoch.stochTrackingLow
+            if _isKAboveUpper
+                _isBullishReset := true
+                _currentState := InStoch.stochTrackingHigh
+            else if _isKDBullish
+                _isBullishReset := true
+                _currentState := InStoch.stochSuppressed
+        else if _currentState == InStoch.stochTrackingHigh
+            if _isKBelowLower
+                _isBearishReset := true
+                _currentState := InStoch.stochTrackingLow
+            else if _isKDBearish
+                _isBearishReset := true
+                _currentState := InStoch.stochSuppressed
+        else if _currentState == InStoch.stochSuppressed
+            if _isKAboveUpper
+                _currentState := InStoch.stochTrackingHigh
+            else if _isKBelowLower
+                _currentState := InStoch.stochTrackingLow
+
+    Signal _signal = switch
+        // We don't need to guard against both signals at the same time because the mechanics of our Stoch rules make this impossible.
+        _isBullishReset => Signal.bullish
+        _isBearishReset => Signal.bearish
+        => Signal.none
+    _signal  // Return the custom enum type that represents the signal.
+
+
+// @function Generates a reset signal for Static Level crossings using a two-path FSM with a configurable buffer zone around each threshold.
+// @param _value          Current value of the series being evaluated.
+// @param _lowerThreshold Lower Static Level threshold used by the bullish reset path.
+// @param _upperThreshold Upper Static Level threshold used by the bearish reset path.
+// @param _tolerance      Optional buffer zone around thresholds; if specified,must be 0 or greater.
+// @param _skipValidation If true, input validation checks are skipped.
+// @returns Static Level reset signal for the current bar. Uses a custom enum type, which is also exported. Possible values: Signal.bullish, Signal.bearish, or Signal.none (default). The calling script does not need to define this type explicitly; you get it for free by importing the library. You do need to know the enum name and values so you can work with it.
+export getStaticLevelResetSignal(float _value, float _lowerThreshold, float _upperThreshold, float _tolerance = 0.0, bool _skipValidation = false) =>
+    // The function name so we can output a useful error message.
+    const string _functionName = "f_stepStaticLevelResetFSM"
+    // The caller can skip validation, e.g., if some values are dynamic or not present on some bars, to avoid crashing the script if we get a stray `na` value.
+    if not _skipValidation
+        // Validate the thresholds for `na` values and upper vs lower being the wrong way round.
+        f_validateThresholds(_lowerThreshold=_lowerThreshold, _upperThreshold=_upperThreshold)
+        // Validate the buffer zone input before using it in trigger levels.
+        if na(_tolerance)
+            f_throwError(_functionName=_functionName, _message="Tolerance cannot be na.")
+        if _tolerance < 0
+            f_throwError(_functionName=_functionName, _message="Tolerance must be 0 or greater.")
+
+    // Design choice: this function keeps internal state, so it is not loop-safe.
+    var InStaticLevelPhase _bullPhase = InStaticLevelPhase.waitingPrime
+    var InStaticLevelPhase _bearPhase = InStaticLevelPhase.waitingPrime
+    // Add the buffer zone to the thresholds.
+    float _lowerPrime = _lowerThreshold + _tolerance
+    float _upperPrime = _upperThreshold - _tolerance
+    // Reset vars are reset each execution.
+    bool _bullishReset = false
+    bool _bearishReset = false
+
+    // State transitions are hardcoded in conditional blocks here for simplicity and performance.
+    if not na(_value)
+        if _bullPhase == InStaticLevelPhase.waitingPrime
+            if _value > _lowerPrime
+                _bullPhase := InStaticLevelPhase.primed
+        else if _bullPhase == InStaticLevelPhase.primed
+            if _value <= _lowerThreshold
+                _bullPhase := InStaticLevelPhase.crossed
+        else if _bullPhase == InStaticLevelPhase.crossed
+            if _value > _lowerPrime
+                _bullishReset := true
+                _bullPhase := InStaticLevelPhase.waitingPrime
+
+        if _bearPhase == InStaticLevelPhase.waitingPrime
+            if _value < _upperPrime
+                _bearPhase := InStaticLevelPhase.primed
+        else if _bearPhase == InStaticLevelPhase.primed
+            if _value >= _upperThreshold
+                _bearPhase := InStaticLevelPhase.crossed
+        else if _bearPhase == InStaticLevelPhase.crossed
+            if _value < _upperPrime
+                _bearishReset := true
+                _bearPhase := InStaticLevelPhase.waitingPrime
+
+    Signal _signal = switch
+        _bullishReset => Signal.bullish
+        _bearishReset => Signal.bearish
+        => Signal.none
+    _signal  // Return the custom enum type that represents the signal.
+
+
+// @function Generates a confirmed pivot reset and returns the actual momentum extreme as it was on the bar where it formed. In the bearish case, the series first rises a certain distance (the "left shoulder") and then falls a certain distance (the "right shoulder") to trigger a reset. Like price pivot lengths, the shoulder values don't have to match (but often do). 
+// @param _value          Current value of the series being evaluated, for example, RSI.
+// @param _leftShoulder   Relative move needed from wherever we start/wherever we are to prime a setup.
+// @param _rightShoulder  Relative retrace/bounce needed from the trailed extreme to trigger a reset.
+// @param _bearMinHeight  Optional absolute minimum high required for bearish resets.
+// @param _bullMaxDepth   Optional absolute maximum low required for bullish resets.
+// @param _skipValidation If true, input validation checks are skipped.
+// @returns [Signal, pivotValue, pivotBarIndex]. The signal tells you whether the confirmed pivot is bullish or bearish, so the value is the actual trailed extreme, and the bar index is where that extreme formed.
+export getPivotReset(float _value, float _leftShoulder, float _rightShoulder, float _bearMinHeight = na, float _bullMaxDepth = na, bool _skipValidation = false) =>
+    const string _functionName = "getPivotReset"
+    if not _skipValidation
+        f_validatePivotResetInputs(_leftShoulder=_leftShoulder, _rightShoulder=_rightShoulder, _bearMinHeight=_bearMinHeight, _bullMaxDepth=_bullMaxDepth, _functionName=_functionName)
+
+    // Design choice: this function keeps internal state, so it is not loop-safe.
+    var InPivotReset _state = InPivotReset.neutral
+    // Anchor is the baseline we measure the first shoulder move from.
+    var float _anchor = na
+    // Running extremes are trailed while a setup is active.
+    var float _runningHigh = na
+    var float _runningLow = na
+    var int _runningHighBarIndex = na
+    var int _runningLowBarIndex = na
+    Signal _signal = Signal.none
+    float _pivotValue = na
+    int _pivotBarIndex = na
+
+    // Initialise anchor on first usable value.
+    if na(_anchor) and not na(_value)
+        _anchor := _value
+
+    // State transitions are hardcoded in conditional blocks here instead of using an FSM engine - it ain't pretty but it's simple and performant.
+    if not na(_value) and not na(_anchor)
+        if _state == InPivotReset.neutral
+            // Prime the bearish tracking after a sufficient rise from the anchor.
+            if _value >= _anchor + _leftShoulder
+                _state := InPivotReset.trackingHigh
+                _runningHigh := _value
+                _runningHighBarIndex := bar_index
+                _runningLow := na
+                _runningLowBarIndex := na
+            // Prime the bullish tracking after a sufficient drop from the anchor.
+            else if _value <= _anchor - _leftShoulder
+                _state := InPivotReset.trackingLow
+                _runningLow := _value
+                _runningLowBarIndex := bar_index
+                _runningHigh := na
+                _runningHighBarIndex := na
+        else if _state == InPivotReset.trackingHigh
+            // Keep trailing the highest value and the bar where it actually formed.
+            bool _isNewRunningHigh = na(_runningHigh) or _value > _runningHigh
+            _runningHigh := na(_runningHigh) ? _value : math.max(_runningHigh, _value)
+            if _isNewRunningHigh
+                _runningHighBarIndex := bar_index
+            bool _heightOK = na(_bearMinHeight) or _runningHigh >= _bearMinHeight
+            if _heightOK and _runningHigh - _value >= _rightShoulder
+                _signal := Signal.bearish
+                _pivotValue := _runningHigh
+                _pivotBarIndex := _runningHighBarIndex
+                _state := InPivotReset.neutral
+                _anchor := _value
+                _runningHigh := na
+                _runningLow := na
+                _runningHighBarIndex := na
+                _runningLowBarIndex := na
+        else if _state == InPivotReset.trackingLow
+            // Keep trailing the lowest value and the bar where it actually formed.
+            bool _isNewRunningLow = na(_runningLow) or _value < _runningLow
+            _runningLow := na(_runningLow) ? _value : math.min(_runningLow, _value)
+            if _isNewRunningLow
+                _runningLowBarIndex := bar_index
+            bool _depthOK = na(_bullMaxDepth) or _runningLow <= _bullMaxDepth
+            if _depthOK and _value - _runningLow >= _rightShoulder
+                _signal := Signal.bullish
+                _pivotValue := _runningLow
+                _pivotBarIndex := _runningLowBarIndex
+                _state := InPivotReset.neutral
+                _anchor := _value
+                _runningHigh := na
+                _runningLow := na
+                _runningHighBarIndex := na
+                _runningLowBarIndex := na
+
+    [_signal, _pivotValue, _pivotBarIndex]
+
+
+// @function Generates a reset signal from breaks of a ratcheting momentum channel.
+// @param _value          The momentum value to evaluate. This can be any momentum metric like RSI etc.
+// @param _width          Absolute channel width from the momentum value. The momentum series starts out in the centre of the channel.
+// @param _skipValidation If true, input validation checks are skipped.
+// @returns Channel reset signal for the current bar. Uses our standard Signal.bullish, Signal.bearish, or Signal.none.
+export getChannelResetSignal(float _value, float _width, bool _skipValidation = false) =>
+    // The function name so we can output a useful error message.
+    const string _functionName = "getChannelResetSignal"
+    // The caller can skip validation, e.g., if some values are dynamic or not present on some bars, to avoid crashing the script if we get a stray `na` value.
+    if not _skipValidation
+        f_validateWidth(_width=_width)
+
+    // Design choice: this function keeps internal state, so it is not loop-safe.
+    var InChannelBias _state = InChannelBias.neutral
+    var float _bullishBreakTrail = na
+    var float _bearishBreakTrail = na
+    bool _bullishReset = false
+    bool _bearishReset = false
+
+    bool _hasValidValue = not na(_value)
+    if not _hasValidValue
+        _state := InChannelBias.neutral
+        _bullishBreakTrail := na
+        _bearishBreakTrail := na
+    else if _state == InChannelBias.neutral
+        float _value_1 = _value[1]  // This function is not HTF-safe because we use the historical operator.
+        if not na(_value_1)
+            if _value >= _value_1
+                _state := InChannelBias.bullish
+                _bearishBreakTrail := _value - _width
+                _bullishBreakTrail := na
+            else if _value < _value_1
+                _state := InChannelBias.bearish
+                _bullishBreakTrail := _value + _width
+                _bearishBreakTrail := na
+    else if _state == InChannelBias.bullish
+        float _bearishBreakCandidate = _value - _width
+        float _bearishBreakTrailPrev = _bearishBreakTrail[1]
+        // In bullish bias we only trail the lower opposing side that can break bearish.
+        _bearishBreakTrail := na(_bearishBreakTrailPrev) ? _bearishBreakCandidate : na(_bearishBreakCandidate) ? _bearishBreakTrailPrev : math.max(_bearishBreakTrailPrev, _bearishBreakCandidate)
+        _bullishBreakTrail := na
+
+        bool _brokeBearishBreakTrail = not na(_bearishBreakTrailPrev) and _value < _bearishBreakTrailPrev
+        if _brokeBearishBreakTrail
+            _bearishReset := true
+            _state := InChannelBias.bearish
+            _bearishBreakTrail := na
+            _bullishBreakTrail := _value + _width
+    else if _state == InChannelBias.bearish
+        float _bullishBreakCandidate = _value + _width
+        float _bullishBreakTrailPrev = _bullishBreakTrail[1]
+        // In bearish bias we only trail the upper opposing side that can break bullish.
+        _bullishBreakTrail := na(_bullishBreakTrailPrev) ? _bullishBreakCandidate : na(_bullishBreakCandidate) ? _bullishBreakTrailPrev : math.min(_bullishBreakTrailPrev, _bullishBreakCandidate)
+        _bearishBreakTrail := na
+
+        bool _brokeBullishBreakTrail = not na(_bullishBreakTrailPrev) and _value > _bullishBreakTrailPrev
+        if _brokeBullishBreakTrail
+            _bullishReset := true
+            _state := InChannelBias.bullish
+            _bearishBreakTrail := _value - _width
+            _bullishBreakTrail := na
+
+    Signal _signal = switch
+        _bullishReset => Signal.bullish
+        _bearishReset => Signal.bearish
+        => Signal.none
+    _signal  // Return the custom enum type that represents the signal.
+
+//#endregion EXPORTED FUNCTIONS
+
+
+//#region 🟧🟧🟧🟧🟧🟧  EXAMPLE USAGE  🟧🟧🟧🟧🟧🟧
+
+// Input group names for the example sections.
+const string G_EXAMPLE_STOCH = "Stoch Reset"
+const string G_EXAMPLE_STATIC_LEVEL = "Static Level Reset"
+const string G_EXAMPLE_PIVOT = "Pivot Reset"
+const string G_EXAMPLE_CHANNEL = "Channel Reset"
+
+// Select which reset model the demo should use.
+enum ExampleMode
+    stoch        = "Stoch"               // Uses getStochResetSignal().
+    staticLevel  = "Static Level"  // Uses getStaticLevelResetSignal().
+    pivotReset   = "Pivot Reset"    // Uses getPivotReset().
+    channelReset = "Channel Reset" // Uses getChannelResetSignal().
+
+
+ExampleMode in_exampleMode = input.enum(defval=ExampleMode.pivotReset, title="Example Mode", tooltip="Choose which reset function to demonstrate.")
+
+int in_exampleStochLength = input.int(defval=14, title="Stoch Length", minval=1, group=G_EXAMPLE_STOCH, inline="STOCH_A", tooltip="Length for example Stoch %K.")
+int in_exampleStochSmooth = input.int(defval=3, title="Stoch %D", minval=1, group=G_EXAMPLE_STOCH, inline="STOCH_A", tooltip="Set the length and smoothing for the Stochastic line.")
+float in_exampleStochLower = input.float(defval=20.0, title="Lower", minval=0, maxval=100, step=0.5, group=G_EXAMPLE_STOCH, inline="STOCH_B", tooltip="Lower threshold for Stoch reset.")
+float in_exampleStochUpper = input.float(defval=80.0, title="Upper", minval=0, maxval=100, step=0.5, group=G_EXAMPLE_STOCH, inline="STOCH_B", tooltip="Set the lower and upper reset thresholds for the Stochastic example.")
+
+float in_exampleStaticLower = input.float(defval=30.0, title="Lower Level", step=0.5, group=G_EXAMPLE_STATIC_LEVEL, inline="STATIC_A", tooltip="Lower static level for reset.")
+float in_exampleStaticUpper = input.float(defval=70.0, title="Upper Level", step=0.5, group=G_EXAMPLE_STATIC_LEVEL, inline="STATIC_A", tooltip="Set the lower and upper levels for the Static Level reset.")
+float in_exampleStaticTolerance = input.float(defval=5.0, title="Tolerance", minval=0, step=0.5, group=G_EXAMPLE_STATIC_LEVEL, inline="STATIC_B", tooltip="Set the tolerance buffer for the Static Level reset.")
+
+float in_exampleLeftShoulder = input.float(defval=5.0, title="Left Shoulder", minval=0.1, step=0.5, group=G_EXAMPLE_PIVOT, inline="ABS_A", tooltip="Relative move from anchor required to prime pivot reset setup.")
+float in_exampleRightShoulder = input.float(defval=10.0, title="Right Shoulder", minval=0.1, step=0.5, group=G_EXAMPLE_PIVOT, inline="ABS_A", tooltip="Set the left and right shoulder distances for the Pivot Reset example.")
+bool in_exampleUseBearMin = input.bool(defval=false, title="Use Minimum Level for Bearish Resets: ", group=G_EXAMPLE_PIVOT, inline="ABS_B", tooltip="Enable an absolute minimum high requirement for bearish resets.")
+float in_exampleBearMinInput = input.float(defval=60.0, title="", step=0.5, group=G_EXAMPLE_PIVOT, inline="ABS_B", tooltip="Enable and set the minimum level required before bearish pivot resets can trigger.")
+bool in_exampleUseBullMax = input.bool(defval=false, title="Use Maximum Level for Bullish Resets: ", group=G_EXAMPLE_PIVOT, inline="ABS_C", tooltip="Enable an absolute maximum low requirement for bullish resets.")
+float in_exampleBullMaxInput = input.float(defval=40.0, title="", step=0.5, group=G_EXAMPLE_PIVOT, inline="ABS_C", tooltip="Enable and set the maximum level required before bullish pivot resets can trigger.")
+float in_exampleChannelWidth = input.float(defval=2.5, title="Channel Width", minval=0.0001, step=0.1, group=G_EXAMPLE_CHANNEL, tooltip="Absolute width of the ratcheting momentum channel used for channel resets.")
+// Convert optional toggles into optional numeric constraints.
+float in_exampleBearMinHeight = in_exampleUseBearMin ? in_exampleBearMinInput : na
+float in_exampleBullMaxDepth = in_exampleUseBullMax ? in_exampleBullMaxInput : na
+
+// Build demo series.
+// The static-level example uses RSI(close, 14). Pivot reset uses SMA(RSI(close, 14), 3).
+float exampleStochK = ta.stoch(source=close, high=high, low=low, length=in_exampleStochLength)
+float exampleStochD = ta.sma(source=exampleStochK, length=in_exampleStochSmooth)
+float exampleStaticSource = ta.rsi(source=close, length=14)
+float examplePivotSource = ta.sma(source=exampleStaticSource, length=3)
+float exampleChannelSource = ta.ema(source=ta.rsi(source=close, length=14), length=45)
+
+// Call only the selected reset model to avoid unnecessary work.
+Signal exampleSignal = Signal.none
+float examplePivotEventValue = na
+int examplePivotEventBarIndex = na
+string exampleFunctionName = switch in_exampleMode
+    ExampleMode.stoch => "getStochResetSignal()"
+    ExampleMode.staticLevel => "getStaticLevelResetSignal()"
+    ExampleMode.pivotReset => "getPivotReset()"
+    ExampleMode.channelReset => "getChannelResetSignal()"
+switch in_exampleMode
+    ExampleMode.stoch => exampleSignal := getStochResetSignal(_stochK=exampleStochK, _stochD=exampleStochD, _lowerThreshold=in_exampleStochLower, _upperThreshold=in_exampleStochUpper)
+    ExampleMode.staticLevel => exampleSignal := getStaticLevelResetSignal(_value=exampleStaticSource, _lowerThreshold=in_exampleStaticLower, _upperThreshold=in_exampleStaticUpper, _tolerance=in_exampleStaticTolerance)
+    ExampleMode.pivotReset =>
+        [_exampleSignal, _examplePivotValue, _examplePivotBarIndex] = getPivotReset(_value=examplePivotSource, _leftShoulder=in_exampleLeftShoulder, _rightShoulder=in_exampleRightShoulder, _bearMinHeight=in_exampleBearMinHeight, _bullMaxDepth=in_exampleBullMaxDepth)
+        exampleSignal := _exampleSignal
+        examplePivotEventValue := _examplePivotValue
+        examplePivotEventBarIndex := _examplePivotBarIndex
+    ExampleMode.channelReset => exampleSignal := getChannelResetSignal(_value=exampleChannelSource, _width=in_exampleChannelWidth)
+
+// Shared plot buffers. Each mode fills only the fields it needs.
+float plotSeriesA = na
+float plotSeriesB = na
+float plotLower = na
+float plotUpper = na
+float plotStaticLowerPrime = na
+float plotStaticUpperPrime = na
+float plotStaticLowerLevel = na
+float plotStaticUpperLevel = na
+float plotBullMarker = na
+float plotBearMarker = na
+float plotTrailHigh = na
+float plotTrailLow = na
+float plotPivotTrigger = na
+float plotPivotEventValue = na
+float plotStaticGlowSeries = na
+float plotPivotGlowSeries = na
+float plotChannelGlowSeries = na
+float plotChannelUpperTrail = na
+float plotChannelLowerTrail = na
+
+var float exampleTrailHigh = na
+var float exampleTrailLow = na
+var float exampleAbsAnchor = na
+var InPivotReset exampleAbsState = InPivotReset.neutral
+var InChannelBias exampleChannelState = InChannelBias.neutral
+var float exampleChannelBullishBreakTrail = na
+var float exampleChannelBearishBreakTrail = na
+var table t_exampleFunction = table.new(position=position.top_center, columns=1, rows=1, bgcolor=color.new(chart.bg_color, 10), frame_color=color.new(chart.fg_color, 60), frame_width=1)
+
+// Example visuals are always on in this library demo.
+if true
+    if in_exampleMode == ExampleMode.stoch
+        // Stoch mode plots %K, %D, and both thresholds.
+        plotSeriesA := exampleStochK
+        plotSeriesB := exampleStochD
+        plotLower := in_exampleStochLower
+        plotUpper := in_exampleStochUpper
+    else if in_exampleMode == ExampleMode.staticLevel
+        // Static Level mode plots source, hard levels, and prime levels.
+        plotSeriesA := exampleStaticSource
+        plotLower := in_exampleStaticLower
+        plotUpper := in_exampleStaticUpper
+        plotStaticLowerLevel := in_exampleStaticLower
+        plotStaticUpperLevel := in_exampleStaticUpper
+        plotStaticLowerPrime := in_exampleStaticLower + in_exampleStaticTolerance
+        plotStaticUpperPrime := in_exampleStaticUpper - in_exampleStaticTolerance
+        plotStaticGlowSeries := exampleStaticSource
+    else if in_exampleMode == ExampleMode.pivotReset
+        // Pivot mode plots source and optional absolute constraints, and surfaces the confirmed pivot value returned this bar.
+        plotSeriesA := examplePivotSource
+        plotLower := in_exampleBearMinHeight
+        plotUpper := in_exampleBullMaxDepth
+        plotPivotGlowSeries := examplePivotSource
+        plotPivotEventValue := examplePivotEventValue
+
+        // Demo-only tracker mirrors the library pivot logic for helper overlays.
+        if na(exampleAbsAnchor) and not na(examplePivotSource)
+            exampleAbsAnchor := examplePivotSource
+
+        if not na(examplePivotSource) and not na(exampleAbsAnchor)
+            if exampleAbsState == InPivotReset.neutral
+                if examplePivotSource >= exampleAbsAnchor + in_exampleLeftShoulder
+                    exampleAbsState := InPivotReset.trackingHigh
+                    exampleTrailHigh := examplePivotSource
+                    exampleTrailLow := na
+                else if examplePivotSource <= exampleAbsAnchor - in_exampleLeftShoulder
+                    exampleAbsState := InPivotReset.trackingLow
+                    exampleTrailLow := examplePivotSource
+                    exampleTrailHigh := na
+            else if exampleAbsState == InPivotReset.trackingHigh
+                exampleTrailHigh := na(exampleTrailHigh) ? examplePivotSource : math.max(exampleTrailHigh, examplePivotSource)
+            else if exampleAbsState == InPivotReset.trackingLow
+                exampleTrailLow := na(exampleTrailLow) ? examplePivotSource : math.min(exampleTrailLow, examplePivotSource)
+
+            // Reset demo tracker when the library function emits a reset signal.
+            if exampleSignal == Signal.bearish or exampleSignal == Signal.bullish
+                exampleAbsState := InPivotReset.neutral
+                exampleAbsAnchor := examplePivotSource
+                exampleTrailHigh := na
+                exampleTrailLow := na
+
+        // Plot trailing levels and trigger helper line for the active pivot side.
+        plotTrailHigh := exampleTrailHigh
+        plotTrailLow := exampleTrailLow
+        if exampleAbsState == InPivotReset.trackingHigh and not na(exampleTrailHigh)
+            plotPivotTrigger := exampleTrailHigh - in_exampleRightShoulder
+        else if exampleAbsState == InPivotReset.trackingLow and not na(exampleTrailLow)
+            plotPivotTrigger := exampleTrailLow + in_exampleRightShoulder
+    else if in_exampleMode == ExampleMode.channelReset
+        // Channel mode plots momentum source and demo-only channel trails.
+        plotSeriesA := exampleChannelSource
+        plotChannelGlowSeries := exampleChannelSource
+
+        float _exampleChannelHighCandidate = exampleChannelSource - in_exampleChannelWidth
+        float _exampleChannelLowCandidate = exampleChannelSource + in_exampleChannelWidth
+
+        if not na(exampleChannelSource)
+            if exampleChannelState == InChannelBias.neutral
+                float _exampleChannelSource_1 = exampleChannelSource[1]
+                if not na(_exampleChannelSource_1)
+                    if exampleChannelSource >= _exampleChannelSource_1
+                        exampleChannelState := InChannelBias.bullish
+                        exampleChannelBearishBreakTrail := _exampleChannelHighCandidate
+                        exampleChannelBullishBreakTrail := na
+                    else if exampleChannelSource < _exampleChannelSource_1
+                        exampleChannelState := InChannelBias.bearish
+                        exampleChannelBullishBreakTrail := _exampleChannelLowCandidate
+                        exampleChannelBearishBreakTrail := na
+            else
+                // Reset demo tracker when the library function emits a reset signal so overlays match emitted events.
+                if exampleSignal == Signal.bullish
+                    exampleChannelState := InChannelBias.bullish
+                    exampleChannelBearishBreakTrail := _exampleChannelHighCandidate
+                    exampleChannelBullishBreakTrail := na
+                else if exampleSignal == Signal.bearish
+                    exampleChannelState := InChannelBias.bearish
+                    exampleChannelBearishBreakTrail := na
+                    exampleChannelBullishBreakTrail := _exampleChannelLowCandidate
+                else if exampleSignal == Signal.none
+                    if exampleChannelState == InChannelBias.bullish
+                        exampleChannelBearishBreakTrail := na(exampleChannelBearishBreakTrail) ? _exampleChannelHighCandidate : na(_exampleChannelHighCandidate) ? exampleChannelBearishBreakTrail : math.max(exampleChannelBearishBreakTrail, _exampleChannelHighCandidate)
+                        exampleChannelBullishBreakTrail := na
+                    else if exampleChannelState == InChannelBias.bearish
+                        exampleChannelBullishBreakTrail := na(exampleChannelBullishBreakTrail) ? _exampleChannelLowCandidate : na(_exampleChannelLowCandidate) ? exampleChannelBullishBreakTrail : math.min(exampleChannelBullishBreakTrail, _exampleChannelLowCandidate)
+                        exampleChannelBearishBreakTrail := na
+
+        // Show only the active opposing trail, matching the channel reset model.
+        plotChannelUpperTrail := exampleChannelState == InChannelBias.bearish ? exampleChannelBullishBreakTrail : na
+        plotChannelLowerTrail := exampleChannelState == InChannelBias.bullish ? exampleChannelBearishBreakTrail : na
+
+    // Marker positions follow the active series in each mode.
+    // Pivot Reset markers use the returned pivot value so you can inspect the confirmed extreme directly.
+    float _markerValue = in_exampleMode == ExampleMode.pivotReset and not na(examplePivotEventValue) ? examplePivotEventValue :
+      in_exampleMode != ExampleMode.pivotReset ? plotSeriesA :
+      na
+    int _labelBarIndex = in_exampleMode == ExampleMode.pivotReset and not na(examplePivotEventBarIndex) ? examplePivotEventBarIndex : bar_index
+    if exampleSignal == Signal.bullish
+        plotBullMarker := _markerValue
+        if in_exampleMode == ExampleMode.pivotReset and not na(_markerValue)
+            label.new(
+              x=_labelBarIndex,
+              y=_markerValue,
+              text="Bullish Pivot\nBar " + str.tostring(_labelBarIndex),
+              xloc=xloc.bar_index,
+              style=label.style_label_up,
+              color=color.lime,
+              textcolor=color.black,
+              size=size.small)  // We let old labels age out. Libraries have a limit of ~50 labels so this demo isn't exactly how it will look if the consuming script has a higher value set in the `max_labels_count` parameter.
+    if exampleSignal == Signal.bearish
+        plotBearMarker := _markerValue
+        if in_exampleMode == ExampleMode.pivotReset and not na(_markerValue)
+            label.new(
+              x=_labelBarIndex,
+              y=_markerValue,
+              text="Bearish Pivot\nBar " + str.tostring(_labelBarIndex),
+              xloc=xloc.bar_index,
+              style=label.style_label_down,
+              color=color.red,
+              textcolor=color.white,
+              size=size.small)
+
+if barstate.islast
+    table.cell(table_id=t_exampleFunction, column=0, row=0,
+      text="Example Function: " + exampleFunctionName,
+      text_color=chart.fg_color,
+      text_size=size.small,
+      text_halign=text.align_center)
+
+// Primary series plots.
+plot(series=plotSeriesA, title="Example Series A", color=color.blue, linewidth=2)
+plot(series=plotSeriesB, title="Example Series B", color=color.orange, linewidth=2)
+
+// Constant transparencies for the plots.
+const int GLOW_BASE_TRANSP = 80
+const int GLOW_CORE_TRANSP = 35
+const int STATIC_PRIME_LINE_TRANSP = 50
+const int STATIC_LEVEL_LINE_TRANSP = 80
+const int STATIC_BAND_FILL_TRANSP = 90
+
+// Luminous overlays for static-level and pivot series.
+plot(series=plotSeriesB, title="Stoch %D Glow Base", color=color.new(color.orange, GLOW_BASE_TRANSP), linewidth=6)
+plot(series=plotSeriesB, title="Stoch %D Glow Core", color=color.new(color.orange, GLOW_CORE_TRANSP), linewidth=2)
+plot(series=plotStaticGlowSeries, title="Static Level Glow Base", color=color.new(color.aqua, GLOW_BASE_TRANSP), linewidth=6)
+plot(series=plotStaticGlowSeries, title="Static Level Glow Core", color=color.new(color.aqua, GLOW_CORE_TRANSP), linewidth=2)
+plot(series=plotPivotGlowSeries, title="Pivot Reset Glow Base", color=color.new(color.fuchsia, GLOW_BASE_TRANSP), linewidth=6)
+plot(series=plotPivotGlowSeries, title="Pivot Reset Glow Core", color=color.new(color.fuchsia, GLOW_CORE_TRANSP), linewidth=2)
+plot(series=plotPivotEventValue, title="Pivot Event Value", color=color.yellow, linewidth=3, style=plot.style_circles)
+plot(series=plotChannelGlowSeries, title="Channel Reset Glow Base", color=color.new(color.teal, GLOW_BASE_TRANSP), linewidth=6)
+plot(series=plotChannelGlowSeries, title="Channel Reset Glow Core", color=color.new(color.teal, GLOW_CORE_TRANSP), linewidth=2)
+
+
+// Level and threshold helper lines.
+plot(series=plotLower, title="Example Lower / Bear Min", color=color.gray, style=plot.style_linebr)
+plot(series=plotUpper, title="Example Upper / Bull Max", color=color.gray, style=plot.style_linebr)
+p_staticLowerPrime = plot(series=plotStaticLowerPrime, title="Static Lower Prime", color=color.new(color.lime, STATIC_PRIME_LINE_TRANSP), style=plot.style_linebr)
+p_staticUpperPrime = plot(series=plotStaticUpperPrime, title="Static Upper Prime", color=color.new(color.red, STATIC_PRIME_LINE_TRANSP), style=plot.style_linebr)
+p_staticLowerLevel = plot(series=plotStaticLowerLevel, title="Static Lower Level", color=color.new(color.lime, STATIC_LEVEL_LINE_TRANSP), style=plot.style_linebr)
+p_staticUpperLevel = plot(series=plotStaticUpperLevel, title="Static Upper Level", color=color.new(color.red, STATIC_LEVEL_LINE_TRANSP), style=plot.style_linebr)
+fill(plot1=p_staticLowerPrime, plot2=p_staticLowerLevel, color=color.new(color.lime, STATIC_BAND_FILL_TRANSP), title="Static Lower Tolerance Band")
+fill(plot1=p_staticUpperLevel, plot2=p_staticUpperPrime, color=color.new(color.red, STATIC_BAND_FILL_TRANSP), title="Static Upper Tolerance Band")
+plot(series=plotTrailHigh, title="Pivot Trail High", color=color.red, style=plot.style_linebr)
+plot(series=plotTrailLow, title="Pivot Trail Low", color=color.lime, style=plot.style_linebr)
+plot(series=plotPivotTrigger, title="Pivot Trigger Level", color=color.orange, style=plot.style_linebr, linewidth=2, linestyle=plot.linestyle_dotted)
+plot(series=plotChannelUpperTrail, title="Channel Upper Trail", color=color.red, style=plot.style_linebr)
+plot(series=plotChannelLowerTrail, title="Channel Lower Trail", color=color.lime, style=plot.style_linebr)
+
+// Simple signal markers for functions that do not return a pivot bar index.
+plotshape(series=in_exampleMode != ExampleMode.pivotReset ? plotBullMarker : na, title="Example Bullish Reset", style=shape.triangleup, location=location.absolute, color=color.lime, size=size.small)
+plotshape(series=in_exampleMode != ExampleMode.pivotReset ? plotBearMarker : na, title="Example Bearish Reset", style=shape.triangledown, location=location.absolute, color=color.red, size=size.small)
+
+//#endregion EXAMPLE USAGE

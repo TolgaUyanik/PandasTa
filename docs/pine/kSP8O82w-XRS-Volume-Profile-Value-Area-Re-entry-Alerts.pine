@@ -1,0 +1,388 @@
+//@version=6
+indicator("XRS Volume Profile + Re-entry Alerts", shorttitle = "XRS SVP Engine", overlay = true, max_boxes_count = 500, max_lines_count = 500)
+
+//=============================================================================
+// INPUTS & CONFIGURATION
+//=============================================================================
+groupSvp      = "Volume Profile Engine"
+ticksPerRow   = input.int(1, "Ticks Per Row (1 = Max Precision)", minval = 1, maxval = 200, group = groupSvp, tooltip = "Granularity of histogram rows in minimum tick increments. Auto-scales if range exceeds box limits.")
+vaPercent     = input.float(70.0, "Value Area Volume %", minval = 10.0, maxval = 100.0, step = 5.0, group = groupSvp) / 100.0
+profileWidth  = input.int(80, "Right Profile Max Width (Bars)", minval = 10, maxval = 300, group = groupSvp, tooltip = "Maximum horizontal expansion (in bars) when anchored to the right scale.")
+profileAnchor = input.string("Right Margin", "Profile Placement / Mount", options = ["Left", "Right Margin"], group = groupSvp, tooltip = "Left mounts to session start. Right Margin places profile flush against the right price axis scale.")
+
+groupSessions = "Session Windows (EST)"
+globexSession = input.session("1800-1700:1234567", "Full Globex Day Window", group = groupSessions)
+
+groupCurrentLines = "Active Session Levels"
+showActiveLabels  = input.bool(true, "Show Active Price Scale Badges", group = groupCurrentLines)
+pocColor          = input.color(#FFEB3B, "Active POC Color", group = groupCurrentLines)
+pocWidth          = input.int(2, "Active POC Line Width", minval = 1, maxval = 4, group = groupCurrentLines)
+
+vahColor          = input.color(#00E676, "Active VAH Color", group = groupCurrentLines)
+vahWidth          = input.int(2, "Active VAH Line Width", minval = 1, maxval = 4, group = groupCurrentLines)
+
+valColor          = input.color(#FF2352, "Active VAL Color", group = groupCurrentLines)
+valWidth          = input.int(2, "Active VAL Line Width", minval = 1, maxval = 4, group = groupCurrentLines)
+
+// Developing POC Setting
+showDpoc          = input.bool(false, "Show Developing POC (dPOC)", group = groupCurrentLines)
+dpocColor         = input.color(color.new(#FFEB3B, 40), "Developing POC Color", group = groupCurrentLines)
+
+groupPrevLines    = "Previous Session Levels (pdVAH / pdVAL / pdPOC)"
+showPrevLevels    = input.bool(true, "Show Previous Session Levels", group = groupPrevLines)
+pdVahColor        = input.color(#9C27B0, "pdVAH Color (Purple)", group = groupPrevLines)
+pdValColor        = input.color(#9C27B0, "pdVAL Color (Purple)", group = groupPrevLines)
+pdPocColor        = input.color(#2196F3, "pdPOC Color (Blue)", group = groupPrevLines)
+pdLineWidth       = input.int(1, "Previous Level Line Width", minval = 1, maxval = 4, group = groupPrevLines)
+
+groupBadgeStyle   = "Scale Badges & Labels"
+badgeSizeInput    = input.string("Small", "Badge Label Size", options = ["Tiny", "Small", "Large"], group = groupBadgeStyle)
+badgeSize         = badgeSizeInput == "Tiny" ? size.tiny : badgeSizeInput == "Small" ? size.small : size.normal
+
+groupFailedAuction = "Failed Auction Detection & Re-entry"
+enableReentryAlerts= input.bool(false, "Enable Re-entry Alerts", group = groupFailedAuction)
+showReentryTags   = input.bool(false, "Show On-Chart Re-entry Tags", group = groupFailedAuction)
+tagSizeInput      = input.string("Tiny", "Re-entry Tag Size", options = ["Tiny", "Small", "Large"], group = groupFailedAuction, tooltip = "Controls the size of the temporary on-chart re-entry tags.")
+tagSize           = tagSizeInput == "Tiny" ? size.tiny : tagSizeInput == "Small" ? size.small : size.normal
+tagDurationBars   = input.int(5, "Tag Display Duration (Bars)", minval = 1, maxval = 50, group = groupFailedAuction, tooltip = "Number of bars tag remains visible on chart before auto-removing.")
+tagVahColor       = input.color(#00E676, "VAH Re-entry Tag Color", group = groupFailedAuction)
+tagValColor       = input.color(#FF2352, "VAL Re-entry Tag Color", group = groupFailedAuction)
+
+groupStyle        = "Visual Styling"
+drawOnTop         = input.bool(false, "Draw Profile On Top of Price Bars", group = groupStyle)
+profileOnTop      = input.bool(false, "Profile On Top of Everything", group = groupStyle, tooltip = "When enabled, forces the volume profile histogram bars to render on top of all chart drawings and candlesticks.")
+vaBoxColor        = input.color(color.new(#2962FF, 60), "Value Area Histogram", group = groupStyle)
+nvaBoxColor       = input.color(color.new(#787B86, 80), "Out-of-Value Histogram", group = groupStyle)
+
+//=============================================================================
+// HELPER FUNCTIONS
+//=============================================================================
+f_createLine(int x1, float y1, int x2, float y2, string xlocVal, color col, int w, bool onTop) =>
+    if onTop
+        line.new(x1 = x1, y1 = y1, x2 = x2, y2 = y2, xloc = xlocVal, color = col, width = w, style = line.style_solid, force_overlay = true)
+    else
+        line.new(x1 = x1, y1 = y1, x2 = x2, y2 = y2, xloc = xlocVal, color = col, width = w, style = line.style_solid, force_overlay = false)
+
+f_createBox(int leftVal, float topVal, int rightVal, float bottomVal, string xlocVal, color bg, color border, bool onTop) =>
+    if onTop
+        box.new(left = leftVal, top = topVal, right = rightVal, bottom = bottomVal, xloc = xlocVal, bgcolor = bg, border_color = border, force_overlay = true)
+    else
+        box.new(left = leftVal, top = topVal, right = rightVal, bottom = bottomVal, xloc = xlocVal, bgcolor = bg, border_color = border, force_overlay = false)
+
+f_createScaleBadge(int xVal, float yVal, string txt, color bgCol, color textCol, string sz) =>
+    label.new(x = xVal, y = yVal, text = txt, xloc = xloc.bar_index, yloc = yloc.price, color = bgCol, textcolor = textCol, style = label.style_label_left, size = sz)
+
+// Dynamic Tag Structure for Auto-Removal
+type ReentryTag
+    label tagLabel
+    int   createdBar
+
+var array<ReentryTag> activeTags = array.new<ReentryTag>()
+
+//=============================================================================
+// SESSION BOUNDARY DETECTION
+//=============================================================================
+inGlobex        = not na(time(timeframe.period, globexSession))
+isGlobexStart   = inGlobex and not inGlobex[1]
+
+isNewSession    = isGlobexStart
+isSessionActive = inGlobex
+
+//=============================================================================
+// 1-MINUTE INTRABAR RECOVERY
+//=============================================================================
+ltfHigh   = request.security_lower_tf(syminfo.tickerid, "1", high)
+ltfLow    = request.security_lower_tf(syminfo.tickerid, "1", low)
+ltfVolume = request.security_lower_tf(syminfo.tickerid, "1", volume)
+
+//=============================================================================
+// TYPES & DATA STRUCTURES
+//=============================================================================
+type ProfileSession
+    line pocLine
+    line vahLine
+    line valLine
+    label pocBadge
+    label vahBadge
+    label valBadge
+    array<box> histogramBoxes
+
+var ProfileSession activeSession = na
+
+// Current Session Bounds & Tracking
+var float currSessionHigh = na
+var float currSessionLow  = na
+var int currStartTime    = na
+var int currStartBar     = na
+
+// Active Level Tracking Variables
+var float activePocPrice = na
+var float activeVahPrice = na
+var float activeValPrice = na
+
+// Previous Session Saved Level Variables
+var float prevPocPrice = na
+var float prevVahPrice = na
+var float prevValPrice = na
+
+var line prevPocLine = na
+var line prevVahLine = na
+var line prevValLine = na
+
+var label prevPocBadge = na
+var label prevVahBadge = na
+var label prevValBadge = na
+
+// Arrays to store 1m intrabar ranges
+var array<float> activeHighs = array.new<float>()
+var array<float> activeLows  = array.new<float>()
+var array<float> activeVols  = array.new<float>()
+
+//=============================================================================
+// CLEANUP & STATE MANAGEMENT
+//=============================================================================
+f_cleanVisuals(ProfileSession ps) =>
+    if not na(ps)
+        if not na(ps.pocLine)
+            line.delete(ps.pocLine)
+        if not na(ps.vahLine)
+            line.delete(ps.vahLine)
+        if not na(ps.valLine)
+            line.delete(ps.valLine)
+        if not na(ps.pocBadge)
+            label.delete(ps.pocBadge)
+        if not na(ps.vahBadge)
+            label.delete(ps.vahBadge)
+        if not na(ps.valBadge)
+            label.delete(ps.valBadge)
+        if not na(ps.histogramBoxes) and array.size(ps.histogramBoxes) > 0
+            for i = 0 to array.size(ps.histogramBoxes) - 1
+                box.delete(array.get(ps.histogramBoxes, i))
+
+if isNewSession
+    // Lock last session's final metrics into "Previous Session" variables
+    if not na(activePocPrice)
+        prevPocPrice := activePocPrice
+        prevVahPrice := activeVahPrice
+        prevValPrice := activeValPrice
+
+    // Wipe current active profile visuals
+    f_cleanVisuals(activeSession)
+    activeSession := na
+
+    currSessionHigh := high
+    currSessionLow  := low
+    currStartTime   := time
+    currStartBar    := bar_index
+    array.clear(activeHighs)
+    array.clear(activeLows)
+    array.clear(activeVols)
+
+if isSessionActive
+    currSessionHigh := math.max(nz(currSessionHigh, high), high)
+    currSessionLow  := math.min(nz(currSessionLow, low), low)
+
+    if array.size(ltfHigh) > 0
+        for i = 0 to array.size(ltfHigh) - 1
+            array.push(activeHighs, array.get(ltfHigh, i))
+            array.push(activeLows, array.get(ltfLow, i))
+            array.push(activeVols, array.get(ltfVolume, i))
+    else
+        array.push(activeHighs, high)
+        array.push(activeLows, low)
+        array.push(activeVols, volume)
+
+//=============================================================================
+// PROFILE BUILDER
+//=============================================================================
+f_buildPrecisionProfile() =>
+    ProfileSession ps = ProfileSession.new()
+    ps.histogramBoxes := array.new<box>()
+    
+    float resPoc = na
+    float resVah = na
+    float resVal = na
+
+    if array.size(activeHighs) > 0 and currSessionHigh > currSessionLow
+        // Calculate raw step size based on user input
+        float rawStep = syminfo.mintick * ticksPerRow
+        int rawRowCount = int(math.ceil((currSessionHigh - currSessionLow) / rawStep))
+        
+        // Dynamic Box Limit Guard: Auto-adjust step size if rows exceed max box capacity (NQ/MNQ Guard)
+        int maxAllowedRows = 450 // Leaves safety margin below Pine Script's 500 box limit
+        float stepSize = rawStep
+        int rowCount = rawRowCount
+        
+        if rawRowCount > maxAllowedRows
+            rowCount := maxAllowedRows
+            stepSize := (currSessionHigh - currSessionLow) / rowCount
+
+        array<float> bins = array.new_float(rowCount, 0.0)
+        float totalVol = 0.0
+
+        for i = 0 to array.size(activeHighs) - 1
+            float h = array.get(activeHighs, i)
+            float l = array.get(activeLows, i)
+            float v = array.get(activeVols, i)
+
+            int startBin = math.min(rowCount - 1, math.max(0, int(math.floor((l - currSessionLow) / stepSize))))
+            int endBin   = math.min(rowCount - 1, math.max(0, int(math.floor((h - currSessionLow) / stepSize))))
+            int spanBins = (endBin - startBin) + 1
+
+            float volPerBin = v / spanBins
+            for b = startBin to endBin
+                array.set(bins, b, array.get(bins, b) + volPerBin)
+                totalVol += volPerBin
+
+        int pocIndex = 0
+        float maxBinVol = 0.0
+        for i = 0 to rowCount - 1
+            float bVol = array.get(bins, i)
+            if bVol > maxBinVol
+                maxBinVol := bVol
+                pocIndex := i
+
+        resPoc := currSessionLow + (pocIndex + 0.5) * stepSize
+
+        float targetVaVol = totalVol * vaPercent
+        float currentVaVol = maxBinVol
+        int upperIdx = pocIndex
+        int lowerIdx = pocIndex
+
+        while currentVaVol < targetVaVol and (upperIdx < rowCount - 1 or lowerIdx > 0)
+            float nextUpperVol = upperIdx < rowCount - 1 ? array.get(bins, upperIdx + 1) : 0.0
+            float nextLowerVol = lowerIdx > 0 ? array.get(bins, lowerIdx - 1) : 0.0
+
+            if nextUpperVol >= nextLowerVol and upperIdx < rowCount - 1
+                upperIdx += 1
+                currentVaVol += nextUpperVol
+            else if lowerIdx > 0
+                lowerIdx -= 1
+                currentVaVol += nextLowerVol
+            else if upperIdx < rowCount - 1
+                upperIdx += 1
+                currentVaVol += nextUpperVol
+
+        resVah := currSessionLow + (upperIdx + 1) * stepSize
+        resVal := currSessionLow + (lowerIdx) * stepSize
+
+        // Bar-index calculations for solid extension directly to the margin
+        int rightMarginOffsetBars = profileWidth + 10
+        int lineEndBar = profileAnchor == "Right Margin" ? bar_index + rightMarginOffsetBars : bar_index
+
+        // Active Session Solid Level Lines
+        ps.pocLine := f_createLine(currStartBar, resPoc, lineEndBar, resPoc, xloc.bar_index, pocColor, pocWidth, drawOnTop)
+        ps.vahLine := f_createLine(currStartBar, resVah, lineEndBar, resVah, xloc.bar_index, vahColor, vahWidth, drawOnTop)
+        ps.valLine := f_createLine(currStartBar, resVal, lineEndBar, resVal, xloc.bar_index, valColor, valWidth, drawOnTop)
+
+        // Price Badges on the right margin scale
+        if showActiveLabels
+            ps.pocBadge := f_createScaleBadge(lineEndBar, resPoc, "POC: " + str.tostring(resPoc, "#.2f"), pocColor, color.black, badgeSize)
+            ps.vahBadge := f_createScaleBadge(lineEndBar, resVah, "VAH: " + str.tostring(resVah, "#.2f"), vahColor, color.black, badgeSize)
+            ps.valBadge := f_createScaleBadge(lineEndBar, resVal, "VAL: " + str.tostring(resVal, "#.2f"), valColor, color.white, badgeSize)
+
+        // Draw Live Histogram Boxes
+        if profileAnchor == "Left"
+            int sessionBars = math.max(1, bar_index - currStartBar)
+            int maxHistogramWidthBars = int(math.floor(sessionBars * (profileWidth / 100.0)))
+
+            for i = 0 to rowCount - 1
+                float bVol = array.get(bins, i)
+                if bVol > 0
+                    float bTop = currSessionLow + (i + 1) * stepSize
+                    float bBottom = currSessionLow + i * stepSize
+                    bool inValueArea = i >= lowerIdx and i <= upperIdx
+                    color boxBg = inValueArea ? vaBoxColor : nvaBoxColor
+
+                    int barWidth = maxBinVol > 0 ? int(math.floor((bVol / maxBinVol) * maxHistogramWidthBars)) : 0
+                    if barWidth > 0
+                        int bLeft  = currStartBar
+                        int bRight = currStartBar + barWidth
+                        box b = f_createBox(bLeft, bTop, bRight, bBottom, xloc.bar_index, boxBg, color.new(color.white, 100), profileOnTop)
+                        array.push(ps.histogramBoxes, b)
+        else
+            int rightFlushBar = bar_index + rightMarginOffsetBars
+
+            for i = 0 to rowCount - 1
+                float bVol = array.get(bins, i)
+                if bVol > 0
+                    float bTop = currSessionLow + (i + 1) * stepSize
+                    float bBottom = currSessionLow + i * stepSize
+                    bool inValueArea = i >= lowerIdx and i <= upperIdx
+                    color boxBg = inValueArea ? vaBoxColor : nvaBoxColor
+
+                    int boxWidth = maxBinVol > 0 ? int(math.floor((bVol / maxBinVol) * profileWidth)) : 0
+                    if boxWidth > 0
+                        int bRight = rightFlushBar
+                        int bLeft  = rightFlushBar - boxWidth
+                        box b = f_createBox(bLeft, bTop, bRight, bBottom, xloc.bar_index, boxBg, color.new(color.white, 100), profileOnTop)
+                        array.push(ps.histogramBoxes, b)
+
+    [ps, resPoc, resVah, resVal]
+
+//=============================================================================
+// RENDER LOOP & PREVIOUS LEVEL LINES
+//=============================================================================
+if isSessionActive
+    f_cleanVisuals(activeSession)
+    [newPs, p, vh, vl] = f_buildPrecisionProfile()
+    activeSession := newPs
+    if not na(p)
+        activePocPrice := p
+        activeVahPrice := vh
+        activeValPrice := vl
+
+// Project Developing POC Line Across Chart
+plot(showDpoc and isSessionActive ? activePocPrice : na, "Developing POC", color = dpocColor, linewidth = 2, style = plot.style_linebr)
+
+// Project Previous Day Solid Lines All The Way Through Margin
+int lineProjEndBar = profileAnchor == "Right Margin" ? bar_index + (profileWidth + 10) : bar_index
+if showPrevLevels and not na(prevPocPrice)
+    if not na(prevPocLine)
+        line.delete(prevPocLine)
+    if not na(prevVahLine)
+        line.delete(prevVahLine)
+    if not na(prevValLine)
+        line.delete(prevValLine)
+
+    if not na(prevPocBadge)
+        label.delete(prevPocBadge)
+    if not na(prevVahBadge)
+        label.delete(prevVahBadge)
+    if not na(prevValBadge)
+        label.delete(prevValBadge)
+
+    prevPocLine := f_createLine(currStartBar, prevPocPrice, lineProjEndBar, prevPocPrice, xloc.bar_index, pdPocColor, pdLineWidth, drawOnTop)
+    prevVahLine := f_createLine(currStartBar, prevVahPrice, lineProjEndBar, prevVahPrice, xloc.bar_index, pdVahColor, pdLineWidth, drawOnTop)
+    prevValLine := f_createLine(currStartBar, prevValPrice, lineProjEndBar, prevValPrice, xloc.bar_index, pdValColor, pdLineWidth, drawOnTop)
+
+    prevPocBadge := f_createScaleBadge(lineProjEndBar, prevPocPrice, "pdPOC: " + str.tostring(prevPocPrice, "#.2f"), pdPocColor, color.white, badgeSize)
+    prevVahBadge := f_createScaleBadge(lineProjEndBar, prevVahPrice, "pdVAH: " + str.tostring(prevVahPrice, "#.2f"), pdVahColor, color.white, badgeSize)
+    prevValBadge := f_createScaleBadge(lineProjEndBar, prevValPrice, "pdVAL: " + str.tostring(prevValPrice, "#.2f"), pdValColor, color.white, badgeSize)
+
+//=============================================================================
+// FAILED AUCTION DETECTION, TAG EXPIRATION, & ALERTS
+//=============================================================================
+bool reentryVah = isSessionActive and not na(activeVahPrice) and ta.crossunder(close, activeVahPrice)
+bool reentryVal = isSessionActive and not na(activeValPrice) and ta.crossover(close, activeValPrice)
+
+// Manage On-Chart Re-entry Tags Expiration
+if array.size(activeTags) > 0
+    for i = array.size(activeTags) - 1 to 0
+        ReentryTag tagObj = array.get(activeTags, i)
+        if bar_index >= tagObj.createdBar + tagDurationBars
+            label.delete(tagObj.tagLabel)
+            array.remove(activeTags, i)
+
+// Create New Re-entry Tags
+if showReentryTags
+    if reentryVah
+        label lVah = label.new(x = bar_index, y = high, text = "VAH Re-entry", style = label.style_label_down, color = tagVahColor, textcolor = color.black, size = tagSize)
+        array.push(activeTags, ReentryTag.new(lVah, bar_index))
+    if reentryVal
+        label lVal = label.new(x = bar_index, y = low, text = "VAL Re-entry", style = label.style_label_up, color = tagValColor, textcolor = color.white, size = tagSize)
+        array.push(activeTags, ReentryTag.new(lVal, bar_index))
+
+// TradingView Alert Triggers
+alertcondition(enableReentryAlerts and reentryVah, title = "Failed Auction: VAH Re-entry", message = "Price is reentering VAH at {{close}}")
+alertcondition(enableReentryAlerts and reentryVal, title = "Failed Auction: VAL Re-entry", message = "Price is reentering VAL at {{close}}")

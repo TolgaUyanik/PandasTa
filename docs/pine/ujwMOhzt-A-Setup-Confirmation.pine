@@ -1,0 +1,989 @@
+//@version=6
+// ============================================================================
+//  A+ SETUP CONFIRMATION — a checklist dashboard, not an execution system.
+//
+//  Evaluates a fixed 13-point checklist on every bar and shows, in a table,
+//  whether the current bar qualifies as an "A+ setup" long, short, or
+//  no-trade. Draws the supporting levels/structure so each row can be
+//  verified visually.
+//
+//  How to read the table:
+//    BIAS row  — composite daily bias (chart 200EMA, structure, VWAP, HTF
+//                aggregate). Bias picks WHICH checklist (long or short) is
+//                evaluated. Neutral bias greys the whole checklist.
+//    Rows 1-13 — ✅ pass, ❌ fail, — not applicable.
+//    SCORE     — passes out of 13 (red <9, amber 9-12, green 13).
+//    VERDICT   — A+ LONG / A+ SHORT only when ALL 13 rows pass.
+//                Session (11), News (12) and Daily Limit (13) are hard
+//                gates: if one fails the verdict names that reason.
+//
+//  Sessions use America/Chicago (CT). Intended: NQ/MNQ, ES/MES on 1m-5m.
+//  Non-repainting: all request.security calls use lookahead_off and [1]
+//  (completed HTF bars only); signals/alerts confirm on bar close.
+// ============================================================================
+indicator("A+ Setup Confirmation", shorttitle="A+ SETUP", overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+const string TZ = "America/Chicago"
+
+// ============================================================================
+// SECTION A — INPUTS
+// ============================================================================
+grpSess = "Sessions (CT)"
+premarketSess            = input.session("0730-0820", "Premarket",                 group=grpSess)
+mainSess                 = input.session("0830-1030", "Main session",              group=grpSess)
+secondSess               = input.session("1300-1430", "Second session",            group=grpSess)
+useSecondSess            = input.bool(false,          "Use second session",        group=grpSess)
+overnightSess            = input.session("1700-0830", "Overnight (ONH/ONL)",      group=grpSess)
+orMinutes                = input.int(15,   "Opening Range minutes", minval=1,      group=grpSess)
+restrictSignalsToSession = input.bool(true, "Restrict signals to session",         group=grpSess)
+
+grpTrend = "Trend & EMAs"
+emaFastLen    = input.int(9,    "EMA fast",  minval=1, group=grpTrend)
+emaMidLen     = input.int(20,   "EMA mid",   minval=1, group=grpTrend)
+emaSlowLen    = input.int(50,   "EMA slow",  minval=1, group=grpTrend)
+emaTrendLen   = input.int(200,  "EMA trend", minval=1, group=grpTrend)
+htf1          = input.timeframe("60",  "HTF 1", group=grpTrend)
+htf2          = input.timeframe("240", "HTF 2", group=grpTrend)
+htf3          = input.timeframe("D",   "HTF 3", group=grpTrend)
+requireAllHTF = input.bool(false, "Require ALL HTFs agree (else 2 of 3)", group=grpTrend)
+useSupertrend = input.bool(false, "Also require Supertrend agreement",   group=grpTrend)
+stAtrLen      = input.int(10,    "Supertrend ATR length", minval=1,      group=grpTrend)
+stFactor      = input.float(3.0, "Supertrend factor", minval=0.1, step=0.1, group=grpTrend)
+
+grpStruct = "Structure"
+pivotLen      = input.int(5,     "Pivot left/right bars", minval=1,  group=grpStruct)
+sweepLookback = input.int(20,    "Sweep lookback bars",   minval=1,  group=grpStruct)
+sweepValidBars= input.int(10,    "Sweep/BOS fresh bars",  minval=1,  group=grpStruct)
+fvgMinTicks   = input.float(2.0, "FVG min size (ticks)",  minval=0.0, group=grpStruct)
+fvgValidBars  = input.int(50,    "FVG valid bars",        minval=1,  group=grpStruct)
+obValidBars   = input.int(50,    "Order block valid bars",minval=1,  group=grpStruct)
+levelProxTicks= input.float(8.0, "Level proximity (ticks)", minval=0.0, group=grpStruct)
+
+grpVol = "Volume"
+volMaLen = input.int(20,    "Volume SMA length", minval=1, group=grpVol)
+volMult  = input.float(1.3, "Volume multiple",   minval=0.1, step=0.1, group=grpVol)
+
+grpRisk = "Risk"
+minRR           = input.float(2.0, "Minimum R:R", minval=0.1, step=0.1, group=grpRisk)
+stopBufferTicks = input.float(4.0, "Stop buffer (ticks)", minval=0.0,   group=grpRisk)
+targetMode      = input.string("Nearest Opposing Level", "Target mode",
+     options=["Fixed R Multiple", "Nearest Opposing Level"], group=grpRisk)
+
+grpNews = "News Blackout"
+useNewsFilter = input.bool(true, "Use news blackout filter", group=grpNews)
+newsWindows   = input.string("0730-0745,0930-0940", "Blackout windows CT (HHMM-HHMM, comma sep)", group=grpNews)
+blackoutDays  = input.string("", "Blackout dates (YYYY-MM-DD, comma sep)", group=grpNews)
+
+grpGov = "Signal Governor"
+maxSignalsPerDay = input.int(3, "Max signals per day", minval=1, group=grpGov)
+
+grpDisp = "Display"
+showEmas       = input.bool(true,  "Show EMAs",                group=grpDisp)
+showVwap       = input.bool(true,  "Show VWAP",                group=grpDisp)
+showLevels     = input.bool(true,  "Show key levels",          group=grpDisp)
+showOR         = input.bool(true,  "Show opening range",       group=grpDisp)
+showFvg        = input.bool(true,  "Show FVG boxes",           group=grpDisp)
+showOb         = input.bool(true,  "Show order blocks",        group=grpDisp)
+showStructure  = input.bool(true,  "Show pivots / BOS labels", group=grpDisp)
+showSessBg     = input.bool(true,  "Show session shading",     group=grpDisp)
+showChecklist  = input.bool(true,  "Show checklist table",     group=grpDisp)
+compactMode    = input.bool(false, "Compact checklist (bias + score + verdict only)", group=grpDisp)
+tablePos       = input.string("Top Right", "Checklist position",
+     options=["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group=grpDisp)
+tableSize      = input.string("Small", "Table size", options=["Tiny", "Small", "Normal"], group=grpDisp)
+showLevelsTable= input.bool(true,  "Show levels table",        group=grpDisp)
+
+// ============================================================================
+// SHARED HELPERS / CONSTANTS
+// ============================================================================
+float tick = syminfo.mintick
+float prox = levelProxTicks * tick
+
+f_pad2(int n) =>
+    n < 10 ? "0" + str.tostring(n) : str.tostring(n)
+
+f_fmtHHMM(string t) =>
+    str.length(t) == 4 ? str.substring(t, 0, 2) + ":" + str.substring(t, 2, 4) : t
+
+f_fmtSess(string s) =>
+    string core = array.get(str.split(s, ":"), 0)
+    array<string> p = str.split(core, "-")
+    array.size(p) == 2 ? f_fmtHHMM(array.get(p, 0)) + "–" + f_fmtHHMM(array.get(p, 1)) : core
+
+f_arrow(int b) =>
+    b == 1 ? "↑" : b == -1 ? "↓" : "→"
+
+f_tfLabel(string tf) =>
+    tf == "60" ? "1H" : tf == "240" ? "4H" : tf == "D" ? "D" : tf == "W" ? "W" : tf
+
+// ============================================================================
+// SECTION B13 (part) — SESSION FLAGS  (needed early by other modules)
+// ============================================================================
+bool inPremarket = not na(time(timeframe.period, premarketSess, TZ))
+bool inMain      = not na(time(timeframe.period, mainSess,      TZ))
+bool inSecond    = not na(time(timeframe.period, secondSess,    TZ))
+bool inOvernight = not na(time(timeframe.period, overnightSess, TZ))
+
+int  ctDay    = dayofmonth(time, TZ)
+bool newCTDay = ctDay != ctDay[1]
+
+// ============================================================================
+// SECTION B1 — EMAs & VWAP
+// ============================================================================
+float ema9   = ta.ema(close, emaFastLen)
+float ema20  = ta.ema(close, emaMidLen)
+float ema50  = ta.ema(close, emaSlowLen)
+float ema200 = ta.ema(close, emaTrendLen)
+float vwapVal = ta.vwap
+
+[stVal, stDir] = ta.supertrend(stFactor, stAtrLen)
+// Supertrend agreement is folded into the EMA Alignment check when enabled
+// (judgment call: the spec declares the inputs but no dedicated module/row).
+bool emaAlignLong  = ema9 > ema20 and ema20 > ema50 and close > ema200 and (not useSupertrend or stDir < 0)
+bool emaAlignShort = ema9 < ema20 and ema20 < ema50 and close < ema200 and (not useSupertrend or stDir > 0)
+
+// ============================================================================
+// SECTION B7 — MARKET STRUCTURE & BOS (chart TF; also feeds B3 daily bias)
+// ============================================================================
+float ph = ta.pivothigh(high, pivotLen, pivotLen)
+float pl = ta.pivotlow(low,  pivotLen, pivotLen)
+
+var float lastSwingHigh    = na
+var float prevSwingHigh    = na
+var int   lastSwingHighBar = na
+var float lastSwingLow     = na
+var float prevSwingLow     = na
+var int   lastSwingLowBar  = na
+// BOS tracking levels: armed by each new pivot, disarmed once broken
+var float bosTrackHigh   = na
+var float bosTrackLow    = na
+var float brokenLevelBull= na
+var float brokenLevelBear= na
+var int   lastBosBullBar = na
+var int   lastBosBearBar = na
+
+if not na(ph)
+    prevSwingHigh    := lastSwingHigh
+    lastSwingHigh    := ph
+    lastSwingHighBar := bar_index - pivotLen
+    bosTrackHigh     := ph
+if not na(pl)
+    prevSwingLow    := lastSwingLow
+    lastSwingLow    := pl
+    lastSwingLowBar := bar_index - pivotLen
+    bosTrackLow     := pl
+
+bool bosBull = not na(bosTrackHigh) and close > bosTrackHigh
+bool bosBear = not na(bosTrackLow)  and close < bosTrackLow
+if bosBull
+    brokenLevelBull := bosTrackHigh
+    lastBosBullBar  := bar_index
+    bosTrackHigh    := na
+if bosBear
+    brokenLevelBear := bosTrackLow
+    lastBosBearBar  := bar_index
+    bosTrackLow     := na
+
+bool bosBullFresh = not na(lastBosBullBar) and bar_index - lastBosBullBar <= sweepValidBars
+bool bosBearFresh = not na(lastBosBearBar) and bar_index - lastBosBearBar <= sweepValidBars
+
+// Chart-TF structure state from last four confirmed pivots (2 highs, 2 lows)
+bool structKnown = not na(lastSwingHigh) and not na(prevSwingHigh) and not na(lastSwingLow) and not na(prevSwingLow)
+int chartStruct = structKnown and lastSwingHigh > prevSwingHigh and lastSwingLow > prevSwingLow ? 1 :
+     structKnown and lastSwingHigh < prevSwingHigh and lastSwingLow < prevSwingLow ? -1 : 0
+
+plotshape(showStructure and not na(ph), "Pivot High", style=shape.circle, location=location.abovebar,
+     color=color.new(color.red, 40), size=size.tiny, offset=-5)
+plotshape(showStructure and not na(pl), "Pivot Low", style=shape.circle, location=location.belowbar,
+     color=color.new(color.green, 40), size=size.tiny, offset=-5)
+if showStructure and bosBull
+    label.new(bar_index, high, "BOS ▲", style=label.style_label_down,
+         color=color.new(color.green, 70), textcolor=color.lime, size=size.tiny)
+if showStructure and bosBear
+    label.new(bar_index, low, "BOS ▼", style=label.style_label_up,
+         color=color.new(color.red, 70), textcolor=color.red, size=size.tiny)
+
+// ============================================================================
+// SECTION B2 — HIGHER-TIMEFRAME TREND (one security call per TF, tuple)
+// ============================================================================
+f_htfTuple() =>
+    float e200 = ta.ema(close, 200)
+    float hph  = ta.pivothigh(high, pivotLen, pivotLen)
+    float hpl  = ta.pivotlow(low,  pivotLen, pivotLen)
+    var float lph = na
+    var float pph = na
+    var float lpl = na
+    var float ppl = na
+    if not na(hph)
+        pph := lph
+        lph := hph
+    if not na(hpl)
+        ppl := lpl
+        lpl := hpl
+    bool known = not na(lph) and not na(pph) and not na(lpl) and not na(ppl)
+    int st = known and lph > pph and lpl > ppl ? 1 : known and lph < pph and lpl < ppl ? -1 : 0
+    [close[1], e200[1], st[1]]
+
+[h1c, h1e, h1s] = request.security(syminfo.tickerid, htf1, f_htfTuple(), lookahead=barmerge.lookahead_off)
+[h2c, h2e, h2s] = request.security(syminfo.tickerid, htf2, f_htfTuple(), lookahead=barmerge.lookahead_off)
+[h3c, h3e, h3s] = request.security(syminfo.tickerid, htf3, f_htfTuple(), lookahead=barmerge.lookahead_off)
+
+f_htfBias(float c, float e, int s) =>
+    not na(c) and not na(e) and c > e and s == 1 ? 1 :
+     not na(c) and not na(e) and c < e and s == -1 ? -1 : 0
+
+int htfB1 = f_htfBias(h1c, h1e, h1s)
+int htfB2 = f_htfBias(h2c, h2e, h2s)
+int htfB3 = f_htfBias(h3c, h3e, h3s)
+
+int htfBullCnt = (htfB1 == 1 ? 1 : 0) + (htfB2 == 1 ? 1 : 0) + (htfB3 == 1 ? 1 : 0)
+int htfBearCnt = (htfB1 == -1 ? 1 : 0) + (htfB2 == -1 ? 1 : 0) + (htfB3 == -1 ? 1 : 0)
+int htfBias = requireAllHTF ?
+     (htfBullCnt == 3 ? 1 : htfBearCnt == 3 ? -1 : 0) :
+     (htfBullCnt >= 2 ? 1 : htfBearCnt >= 2 ? -1 : 0)
+
+// ============================================================================
+// SECTION B3 — DAILY BIAS (four factors scored -1/0/+1, summed)
+// ============================================================================
+int biasF1 = close > ema200 ? 1 : close < ema200 ? -1 : 0
+int biasF2 = chartStruct
+int biasF3 = not na(vwapVal) ? (close > vwapVal ? 1 : close < vwapVal ? -1 : 0) : 0
+int biasF4 = htfBias
+int biasScore = biasF1 + biasF2 + biasF3 + biasF4
+int dailyBias = biasScore >= 2 ? 1 : biasScore <= -2 ? -1 : 0
+
+// ============================================================================
+// SECTION B4 — KEY LEVELS
+// ============================================================================
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+[pwh, pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+
+// Overnight H/L — accumulate during overnight session, freeze at its end
+var float onRunHigh    = na
+var float onRunLow     = na
+var float onHighFrozen = na
+var float onLowFrozen  = na
+if inOvernight and not inOvernight[1]
+    onRunHigh := high
+    onRunLow  := low
+else if inOvernight
+    onRunHigh := na(onRunHigh) ? high : math.max(onRunHigh, high)
+    onRunLow  := na(onRunLow)  ? low  : math.min(onRunLow,  low)
+if not inOvernight and inOvernight[1]
+    onHighFrozen := onRunHigh
+    onLowFrozen  := onRunLow
+
+// Current main-session H/L — running during mainSess, then frozen naturally
+var float sessHigh = na
+var float sessLow  = na
+bool mainStart = inMain and not inMain[1]
+if mainStart
+    sessHigh := high
+    sessLow  := low
+else if inMain
+    sessHigh := na(sessHigh) ? high : math.max(sessHigh, high)
+    sessLow  := na(sessLow)  ? low  : math.min(sessLow,  low)
+
+// Opening Range — first orMinutes after mainSess open, frozen thereafter
+var int   mainOpenTime = na
+var float orHigh = na
+var float orLow  = na
+var bool  orActive = false
+if mainStart
+    mainOpenTime := time
+    orHigh   := high
+    orLow    := low
+    orActive := true
+else if orActive and inMain and time < mainOpenTime + orMinutes * 60000
+    orHigh := math.max(orHigh, high)
+    orLow  := math.min(orLow,  low)
+else if orActive
+    orActive := false
+
+// Level lines + right-aligned labels (each call site owns its line/label)
+f_level(float price, string name, color col, bool show) =>
+    var line  ln = line.new(bar_index, close, bar_index + 1, close, extend=extend.right, width=1)
+    var label lb = label.new(bar_index, close, "", style=label.style_label_left, size=size.small)
+    if barstate.islast
+        bool vis = show and not na(price)
+        float y = vis ? price : close
+        line.set_xy1(ln, math.max(bar_index - 200, 0), y)
+        line.set_xy2(ln, bar_index, y)
+        line.set_color(ln, vis ? col : color.new(col, 100))
+        label.set_xy(lb, bar_index + 3, y)
+        label.set_text(lb, vis ? name + "  " + str.tostring(price, format.mintick) : "")
+        label.set_color(lb, vis ? color.new(col, 30) : color.new(col, 100))
+        label.set_textcolor(lb, vis ? color.white : color.new(color.white, 100))
+
+color COL_PD  = color.orange
+color COL_PW  = color.purple
+color COL_ON  = color.teal
+color COL_SES = color.gray
+color COL_OR  = color.yellow
+f_level(pdh,          "PDH",  COL_PD,  showLevels)
+f_level(pdl,          "PDL",  COL_PD,  showLevels)
+f_level(pwh,          "PWH",  COL_PW,  showLevels)
+f_level(pwl,          "PWL",  COL_PW,  showLevels)
+f_level(onHighFrozen, "ONH",  COL_ON,  showLevels)
+f_level(onLowFrozen,  "ONL",  COL_ON,  showLevels)
+f_level(sessHigh,     "SES H",COL_SES, showLevels)
+f_level(sessLow,      "SES L",COL_SES, showLevels)
+f_level(orHigh,       "ORH",  COL_OR,  showOR)
+f_level(orLow,        "ORL",  COL_OR,  showOR)
+
+// ============================================================================
+// SECTION B5 — FAIR VALUE GAPS
+// ============================================================================
+var array<box>   fvgBoxes = array.new<box>()
+var array<float> fvgTop   = array.new<float>()
+var array<float> fvgBot   = array.new<float>()
+var array<int>   fvgDir   = array.new<int>()
+var array<int>   fvgBarIx = array.new<int>()
+
+// Cleanup: mitigation (price through 50%) checked on confirmed bars; expiry any bar
+if array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        float t  = array.get(fvgTop, i)
+        float b  = array.get(fvgBot, i)
+        int   d  = array.get(fvgDir, i)
+        int   bi = array.get(fvgBarIx, i)
+        float mid = (t + b) / 2
+        bool expired   = bar_index - bi > fvgValidBars
+        bool mitigated = barstate.isconfirmed and (d == 1 ? low <= mid : high >= mid)
+        if expired or mitigated
+            box.delete(array.get(fvgBoxes, i))
+            array.remove(fvgBoxes, i)
+            array.remove(fvgTop, i)
+            array.remove(fvgBot, i)
+            array.remove(fvgDir, i)
+            array.remove(fvgBarIx, i)
+
+bool bullFvgNew = barstate.isconfirmed and low > high[2] and (low - high[2]) >= fvgMinTicks * tick
+bool bearFvgNew = barstate.isconfirmed and high < low[2] and (low[2] - high) >= fvgMinTicks * tick
+if bullFvgNew
+    array.push(fvgBoxes, box.new(bar_index - 2, low, bar_index, high[2],
+         border_color=color.new(color.green, showFvg ? 60 : 100),
+         bgcolor=color.new(color.green, showFvg ? 88 : 100)))
+    array.push(fvgTop, low)
+    array.push(fvgBot, high[2])
+    array.push(fvgDir, 1)
+    array.push(fvgBarIx, bar_index)
+if bearFvgNew
+    array.push(fvgBoxes, box.new(bar_index - 2, low[2], bar_index, high,
+         border_color=color.new(color.red, showFvg ? 60 : 100),
+         bgcolor=color.new(color.red, showFvg ? 88 : 100)))
+    array.push(fvgTop, low[2])
+    array.push(fvgBot, high)
+    array.push(fvgDir, -1)
+    array.push(fvgBarIx, bar_index)
+// Prune: keep at most 100 tracked FVGs
+if array.size(fvgBoxes) > 100
+    box.delete(array.shift(fvgBoxes))
+    array.shift(fvgTop)
+    array.shift(fvgBot)
+    array.shift(fvgDir)
+    array.shift(fvgBarIx)
+
+// Overlap flags (strict: creation bar does not count as "in" its own gap)
+bool inBullFVG = false
+bool inBearFVG = false
+if array.size(fvgBoxes) > 0
+    for i = 0 to array.size(fvgBoxes) - 1
+        box.set_right(array.get(fvgBoxes, i), bar_index)
+        float t = array.get(fvgTop, i)
+        float b = array.get(fvgBot, i)
+        if low < t and high > b
+            if array.get(fvgDir, i) == 1
+                inBullFVG := true
+            else
+                inBearFVG := true
+
+// ============================================================================
+// SECTION B6 — ORDER BLOCKS
+// Zone = full candle range (wick to wick) of the last down-close (bull OB) /
+// up-close (bear OB) candle before the BOS impulse. Wick-to-wick chosen over
+// body-only: on 1m futures the wick frequently IS the reaction point.
+// ============================================================================
+var array<box>   obBoxes = array.new<box>()
+var array<float> obTop   = array.new<float>()
+var array<float> obBot   = array.new<float>()
+var array<int>   obDir   = array.new<int>()
+var array<int>   obBarIx = array.new<int>()
+
+if array.size(obBoxes) > 0
+    for i = array.size(obBoxes) - 1 to 0
+        float t  = array.get(obTop, i)
+        float b  = array.get(obBot, i)
+        int   d  = array.get(obDir, i)
+        int   bi = array.get(obBarIx, i)
+        float mid = (t + b) / 2
+        bool expired   = bar_index - bi > obValidBars
+        bool mitigated = barstate.isconfirmed and (d == 1 ? low <= mid : high >= mid)
+        if expired or mitigated
+            box.delete(array.get(obBoxes, i))
+            array.remove(obBoxes, i)
+            array.remove(obTop, i)
+            array.remove(obBot, i)
+            array.remove(obDir, i)
+            array.remove(obBarIx, i)
+
+if bosBull and barstate.isconfirmed and bar_index > sweepLookback
+    for j = 1 to sweepLookback
+        if close[j] < open[j]
+            array.push(obBoxes, box.new(bar_index - j, high[j], bar_index, low[j],
+                 border_color=color.new(color.blue, showOb ? 55 : 100),
+                 bgcolor=color.new(color.blue, showOb ? 88 : 100)))
+            array.push(obTop, high[j])
+            array.push(obBot, low[j])
+            array.push(obDir, 1)
+            array.push(obBarIx, bar_index)
+            break
+if bosBear and barstate.isconfirmed and bar_index > sweepLookback
+    for j = 1 to sweepLookback
+        if close[j] > open[j]
+            array.push(obBoxes, box.new(bar_index - j, high[j], bar_index, low[j],
+                 border_color=color.new(color.maroon, showOb ? 55 : 100),
+                 bgcolor=color.new(color.maroon, showOb ? 88 : 100)))
+            array.push(obTop, high[j])
+            array.push(obBot, low[j])
+            array.push(obDir, -1)
+            array.push(obBarIx, bar_index)
+            break
+if array.size(obBoxes) > 100
+    box.delete(array.shift(obBoxes))
+    array.shift(obTop)
+    array.shift(obBot)
+    array.shift(obDir)
+    array.shift(obBarIx)
+
+bool inBullOB = false
+bool inBearOB = false
+if array.size(obBoxes) > 0
+    for i = 0 to array.size(obBoxes) - 1
+        box.set_right(array.get(obBoxes, i), bar_index)
+        float t = array.get(obTop, i)
+        float b = array.get(obBot, i)
+        if low <= t and high >= b
+            if array.get(obDir, i) == 1
+                inBullOB := true
+            else
+                inBearOB := true
+
+// ============================================================================
+// SECTION B8 — LIQUIDITY SWEEP
+// Wick beyond a liquidity level, close back inside. Latched for sweepValidBars.
+// ============================================================================
+var int    sweepBullBar  = na
+var string sweepBullName = "—"
+var int    sweepBearBar  = na
+var string sweepBearName = "—"
+
+f_swBull(float lvl) => not na(lvl) and low < lvl and close > lvl
+f_swBear(float lvl) => not na(lvl) and high > lvl and close < lvl
+
+float sessLowPrev  = sessLow[1]
+float sessHighPrev = sessHigh[1]
+bool  swingLowValid  = not na(lastSwingLow)  and not na(lastSwingLowBar)  and bar_index - lastSwingLowBar  <= sweepLookback
+bool  swingHighValid = not na(lastSwingHigh) and not na(lastSwingHighBar) and bar_index - lastSwingHighBar <= sweepLookback
+
+if barstate.isconfirmed
+    if f_swBull(pdl)
+        sweepBullBar  := bar_index
+        sweepBullName := "PDL"
+    else if f_swBull(onLowFrozen)
+        sweepBullBar  := bar_index
+        sweepBullName := "ONL"
+    else if f_swBull(sessLowPrev)
+        sweepBullBar  := bar_index
+        sweepBullName := "Session Low"
+    else if swingLowValid and f_swBull(lastSwingLow)
+        sweepBullBar  := bar_index
+        sweepBullName := "Swing Low"
+    if f_swBear(pdh)
+        sweepBearBar  := bar_index
+        sweepBearName := "PDH"
+    else if f_swBear(onHighFrozen)
+        sweepBearBar  := bar_index
+        sweepBearName := "ONH"
+    else if f_swBear(sessHighPrev)
+        sweepBearBar  := bar_index
+        sweepBearName := "Session High"
+    else if swingHighValid and f_swBear(lastSwingHigh)
+        sweepBearBar  := bar_index
+        sweepBearName := "Swing High"
+
+bool sweepBullFresh = not na(sweepBullBar) and bar_index - sweepBullBar <= sweepValidBars
+bool sweepBearFresh = not na(sweepBearBar) and bar_index - sweepBearBar <= sweepValidBars
+
+// ============================================================================
+// SECTION B9 — REJECTION AT LEVEL
+// ============================================================================
+f_near(float p, float lvl) => not na(lvl) and math.abs(p - lvl) <= prox
+
+f_nearName(float p) =>
+    string nm = "—"
+    if f_near(p, pdh)
+        nm := "PDH"
+    else if f_near(p, pdl)
+        nm := "PDL"
+    else if f_near(p, onHighFrozen)
+        nm := "ONH"
+    else if f_near(p, onLowFrozen)
+        nm := "ONL"
+    else if f_near(p, sessHighPrev)
+        nm := "Session High"
+    else if f_near(p, sessLowPrev)
+        nm := "Session Low"
+    else if f_near(p, orHigh)
+        nm := "ORH"
+    else if f_near(p, orLow)
+        nm := "ORL"
+    else if f_near(p, pwh)
+        nm := "PWH"
+    else if f_near(p, pwl)
+        nm := "PWL"
+    else if f_near(p, vwapVal)
+        nm := "VWAP"
+    nm
+
+float barRange  = high - low
+float lowerWick = math.min(open, close) - low
+float upperWick = high - math.max(open, close)
+
+string nearNameLow  = f_nearName(low)
+string nearNameHigh = f_nearName(high)
+
+bool zoneLong  = nearNameLow != "—" or inBullFVG or inBullOB
+bool zoneShort = nearNameHigh != "—" or inBearFVG or inBearOB
+bool rejectionLong  = barRange > 0 and lowerWick >= 0.5 * barRange and close >= low + barRange * 2 / 3 and zoneLong
+bool rejectionShort = barRange > 0 and upperWick >= 0.5 * barRange and close <= high - barRange * 2 / 3 and zoneShort
+string rejLongName  = nearNameLow  != "—" ? nearNameLow  : inBullFVG ? "Bull FVG" : inBullOB ? "Bull OB" : "—"
+string rejShortName = nearNameHigh != "—" ? nearNameHigh : inBearFVG ? "Bear FVG" : inBearOB ? "Bear OB" : "—"
+
+// ============================================================================
+// SECTION B10 — VOLUME
+// ============================================================================
+float volSma = ta.sma(volume, volMaLen)
+float relVol = volSma > 0 ? volume / volSma : na
+bool  volOK  = not na(relVol) and relVol > volMult
+
+// ============================================================================
+// SECTION B11 — ENTRY TRIGGER
+// ============================================================================
+bool bullEngulf = close > open and close[1] < open[1] and close >= open[1] and open <= close[1] and close > high[1]
+bool bearEngulf = close < open and close[1] > open[1] and close <= open[1] and open >= close[1] and close < low[1]
+bool brLong  = bosBullFresh and not bosBull and not na(brokenLevelBull) and low <= brokenLevelBull + prox and close > brokenLevelBull
+bool brShort = bosBearFresh and not bosBear and not na(brokenLevelBear) and high >= brokenLevelBear - prox and close < brokenLevelBear
+bool fvgLong  = inBullFVG and rejectionLong
+bool fvgShort = inBearFVG and rejectionShort
+bool obLong   = inBullOB and rejectionLong
+bool obShort  = inBearOB and rejectionShort
+bool swRevLong  = sweepBullFresh and close > open and close > high[1]
+bool swRevShort = sweepBearFresh and close < open and close < low[1]
+
+bool triggerLong  = bullEngulf or brLong or fvgLong or obLong or swRevLong or bosBull
+bool triggerShort = bearEngulf or brShort or fvgShort or obShort or swRevShort or bosBear
+string trigLongTxt = bullEngulf ? "Engulfing" : brLong ? "Break+Retest" : fvgLong ? "FVG+Reject" :
+     obLong ? "OB React" : swRevLong ? "Sweep+Rev" : bosBull ? "Fresh BOS" : "waiting"
+string trigShortTxt = bearEngulf ? "Engulfing" : brShort ? "Break+Retest" : fvgShort ? "FVG+Reject" :
+     obShort ? "OB React" : swRevShort ? "Sweep+Rev" : bosBear ? "Fresh BOS" : "waiting"
+
+// ============================================================================
+// SECTION B12 — RISK / REWARD
+// ============================================================================
+f_bestAbove(float best, float c, float floorP) =>
+    not na(c) and c > floorP and (na(best) or c < best) ? c : best
+f_bestBelow(float best, float c, float capP) =>
+    not na(c) and c < capP and (na(best) or c > best) ? c : best
+
+float longStop  = not na(lastSwingLow)  ? lastSwingLow  - stopBufferTicks * tick : na
+float shortStop = not na(lastSwingHigh) ? lastSwingHigh + stopBufferTicks * tick : na
+float longRisk  = not na(longStop)  ? close - longStop  : na
+float shortRisk = not na(shortStop) ? shortStop - close : na
+
+float longTarget = na
+if not na(longRisk) and longRisk > 0
+    if targetMode == "Nearest Opposing Level"
+        float floorP = close + longRisk
+        longTarget := f_bestAbove(longTarget, pdh, floorP)
+        longTarget := f_bestAbove(longTarget, onHighFrozen, floorP)
+        longTarget := f_bestAbove(longTarget, sessHighPrev, floorP)
+        longTarget := f_bestAbove(longTarget, pwh, floorP)
+        longTarget := f_bestAbove(longTarget, orHigh, floorP)
+    else
+        longTarget := close + minRR * longRisk
+
+float shortTarget = na
+if not na(shortRisk) and shortRisk > 0
+    if targetMode == "Nearest Opposing Level"
+        float capP = close - shortRisk
+        shortTarget := f_bestBelow(shortTarget, pdl, capP)
+        shortTarget := f_bestBelow(shortTarget, onLowFrozen, capP)
+        shortTarget := f_bestBelow(shortTarget, sessLowPrev, capP)
+        shortTarget := f_bestBelow(shortTarget, pwl, capP)
+        shortTarget := f_bestBelow(shortTarget, orLow, capP)
+    else
+        shortTarget := close - minRR * shortRisk
+
+float longRR  = not na(longTarget)  and not na(longRisk)  and longRisk > 0  ? (longTarget - close) / longRisk   : na
+float shortRR = not na(shortTarget) and not na(shortRisk) and shortRisk > 0 ? (close - shortTarget) / shortRisk : na
+bool rrOKLong  = not na(longRR)  and longRR  >= minRR
+bool rrOKShort = not na(shortRR) and shortRR >= minRR
+
+// ============================================================================
+// SECTION B13 — SESSION, NEWS, GOVERNOR
+// ============================================================================
+bool sessionOK = not restrictSignalsToSession or inMain or (useSecondSess and inSecond)
+
+// News windows: parsed once; malformed entries are silently skipped
+var array<int> newsStartArr = array.new<int>()
+var array<int> newsEndArr   = array.new<int>()
+var array<string> blackoutArr = array.new<string>()
+if barstate.isfirst
+    array<string> winParts = str.split(str.replace_all(newsWindows, " ", ""), ",")
+    if array.size(winParts) > 0
+        for i = 0 to array.size(winParts) - 1
+            array<string> se = str.split(array.get(winParts, i), "-")
+            if array.size(se) == 2
+                float s = str.tonumber(array.get(se, 0))
+                float e = str.tonumber(array.get(se, 1))
+                if not na(s) and not na(e) and s >= 0 and s <= 2359 and e >= 0 and e <= 2359
+                    array.push(newsStartArr, int(s))
+                    array.push(newsEndArr, int(e))
+    array<string> dayParts = str.split(str.replace_all(blackoutDays, " ", ""), ",")
+    if array.size(dayParts) > 0
+        for i = 0 to array.size(dayParts) - 1
+            string dstr = array.get(dayParts, i)
+            if str.length(dstr) == 10
+                array.push(blackoutArr, dstr)
+
+int nowHHMM = hour(time, TZ) * 100 + minute(time, TZ)
+bool inNewsWin = false
+string newsWinTxt = ""
+if useNewsFilter and array.size(newsStartArr) > 0
+    for i = 0 to array.size(newsStartArr) - 1
+        int s = array.get(newsStartArr, i)
+        int e = array.get(newsEndArr, i)
+        bool hit = s <= e ? (nowHHMM >= s and nowHHMM < e) : (nowHHMM >= s or nowHHMM < e)
+        if hit
+            inNewsWin  := true
+            newsWinTxt := f_pad2(int(s / 100)) + ":" + f_pad2(s % 100) + "–" + f_pad2(int(e / 100)) + ":" + f_pad2(e % 100)
+
+string todayStr = str.tostring(year(time, TZ)) + "-" + f_pad2(month(time, TZ)) + "-" + f_pad2(dayofmonth(time, TZ))
+bool isBlackoutDay = useNewsFilter and array.size(blackoutArr) > 0 and array.includes(blackoutArr, todayStr)
+bool newsOK = not useNewsFilter or (not inNewsWin and not isBlackoutDay)
+
+var int signalsToday = 0
+if newCTDay
+    signalsToday := 0
+bool governorOK = signalsToday < maxSignalsPerDay
+
+// ============================================================================
+// CHECKLIST EVALUATION & SIGNALS
+// ============================================================================
+bool c1L  = htfBias == 1
+bool c2L  = sweepBullFresh
+bool c3L  = inBullFVG
+bool c4L  = rejectionLong
+bool c5L  = volOK
+bool c6L  = not na(vwapVal) and close > vwapVal
+bool c7L  = emaAlignLong
+bool c8L  = rrOKLong
+bool c9L  = bosBullFresh
+bool c10L = triggerLong
+
+bool c1S  = htfBias == -1
+bool c2S  = sweepBearFresh
+bool c3S  = inBearFVG
+bool c4S  = rejectionShort
+bool c5S  = volOK
+bool c6S  = not na(vwapVal) and close < vwapVal
+bool c7S  = emaAlignShort
+bool c8S  = rrOKShort
+bool c9S  = bosBearFresh
+bool c10S = triggerShort
+
+bool c11 = sessionOK
+bool c12 = newsOK
+bool c13 = governorOK
+
+bool allLong  = c1L and c2L and c3L and c4L and c5L and c6L and c7L and c8L and c9L and c10L and c11 and c12 and c13
+bool allShort = c1S and c2S and c3S and c4S and c5S and c6S and c7S and c8S and c9S and c10S and c11 and c12 and c13
+
+bool aPlusLong  = dailyBias == 1  and allLong  and barstate.isconfirmed
+bool aPlusShort = dailyBias == -1 and allShort and barstate.isconfirmed
+
+if aPlusLong or aPlusShort
+    signalsToday += 1
+    string dirTxt = aPlusLong ? "LONG" : "SHORT"
+    float sigStop = aPlusLong ? longStop : shortStop
+    float sigTgt  = aPlusLong ? longTarget : shortTarget
+    float sigRR   = aPlusLong ? longRR : shortRR
+    string sigTrig = aPlusLong ? trigLongTxt : trigShortTxt
+    alert("A+ " + dirTxt + " | " + syminfo.ticker + " " + timeframe.period +
+         " | entry " + str.tostring(close, format.mintick) +
+         " stop " + str.tostring(sigStop, format.mintick) +
+         " target " + str.tostring(sigTgt, format.mintick) +
+         " | " + str.tostring(sigRR, "#.##") + "R | trigger: " + sigTrig,
+         alert.freq_once_per_bar_close)
+    label.new(bar_index, aPlusLong ? low : high,
+         str.tostring(sigRR, "#.#") + "R",
+         style=aPlusLong ? label.style_label_up : label.style_label_down,
+         color=color.new(aPlusLong ? color.lime : color.red, 30),
+         textcolor=color.black, size=size.small)
+
+plotshape(aPlusLong, "A+ Long", style=shape.triangleup, location=location.belowbar,
+     color=color.lime, size=size.small)
+plotshape(aPlusShort, "A+ Short", style=shape.triangledown, location=location.abovebar,
+     color=color.red, size=size.small)
+
+alertcondition(aPlusLong,  "A+ Long",  "A+ LONG setup confirmed")
+alertcondition(aPlusShort, "A+ Short", "A+ SHORT setup confirmed")
+
+// ============================================================================
+// SECTION D — PLOTS & SESSION SHADING
+// ============================================================================
+plot(showEmas ? ema9   : na, "EMA 9",   color=color.new(color.aqua,   30), linewidth=1)
+plot(showEmas ? ema20  : na, "EMA 20",  color=color.new(color.yellow, 30), linewidth=1)
+plot(showEmas ? ema50  : na, "EMA 50",  color=color.new(color.orange, 30), linewidth=1)
+plot(showEmas ? ema200 : na, "EMA 200", color=color.new(color.red,    20), linewidth=2)
+plot(showVwap ? vwapVal : na, "VWAP",   color=color.new(color.fuchsia, 20), linewidth=2)
+
+bgcolor(showSessBg ? (inMain ? color.new(color.blue, 92) : inSecond and useSecondSess ? color.new(color.purple, 93) : inPremarket ? color.new(color.blue, 96) : na) : na, title="Session shading")
+
+// Proposed stop/target for the active bias direction — last bar only
+var line stopLn = line.new(bar_index, close, bar_index + 1, close, style=line.style_dashed, width=1)
+var line tgtLn  = line.new(bar_index, close, bar_index + 1, close, style=line.style_dashed, width=1)
+if barstate.islast
+    float spY = dailyBias == 1 ? longStop : dailyBias == -1 ? shortStop : na
+    float tgY = dailyBias == 1 ? longTarget : dailyBias == -1 ? shortTarget : na
+    bool showSp = not na(spY)
+    bool showTg = not na(tgY)
+    line.set_xy1(stopLn, bar_index - 8, showSp ? spY : close)
+    line.set_xy2(stopLn, bar_index + 8, showSp ? spY : close)
+    line.set_color(stopLn, showSp ? color.new(color.red, 20) : color.new(color.red, 100))
+    line.set_xy1(tgtLn, bar_index - 8, showTg ? tgY : close)
+    line.set_xy2(tgtLn, bar_index + 8, showTg ? tgY : close)
+    line.set_color(tgtLn, showTg ? color.new(color.green, 20) : color.new(color.green, 100))
+
+// ============================================================================
+// SECTION C — CONFIRMATION TABLE
+// ============================================================================
+f_tablePos(string p) =>
+    p == "Top Right" ? position.top_right : p == "Top Left" ? position.top_left :
+     p == "Bottom Right" ? position.bottom_right : p == "Bottom Left" ? position.bottom_left :
+     position.middle_right
+
+string txtSz = tableSize == "Tiny" ? size.tiny : tableSize == "Small" ? size.small : size.normal
+
+var table tbl = table.new(f_tablePos(tablePos), 3, 17,
+     bgcolor=color.new(#101418, 10), frame_width=1, frame_color=color.new(#2a2f36, 0),
+     border_width=1, border_color=color.new(#2a2f36, 40))
+
+color cPass = color.new(color.green, 72)
+color cFail = color.new(color.red, 72)
+color cNa   = color.new(color.gray, 82)
+color cText = color.new(#d8dee6, 0)
+color cDim  = color.new(#8a939e, 0)
+
+f_row(int row, string name, int state, string detail) =>
+    string stTxt = state == 1 ? "✅" : state == -1 ? "❌" : "—"
+    color  stBg  = state == 1 ? cPass : state == -1 ? cFail : cNa
+    table.cell(tbl, 0, row, name,   text_color=cText, text_size=txtSz, text_halign=text.align_left)
+    table.cell(tbl, 1, row, stTxt,  bgcolor=stBg, text_color=cText, text_size=txtSz, text_halign=text.align_center)
+    table.cell(tbl, 2, row, detail, text_color=cDim, text_size=txtSz, text_halign=text.align_left)
+
+f_st(bool pass, int evalDir) =>
+    evalDir == 0 ? 0 : pass ? 1 : -1
+
+if barstate.islast and showChecklist
+    int evalDir = dailyBias
+
+    // ---- detail strings -----------------------------------------------
+    string htfDet = f_tfLabel(htf1) + f_arrow(htfB1) + " " + f_tfLabel(htf2) + f_arrow(htfB2) + " " + f_tfLabel(htf3) + f_arrow(htfB3)
+    string biasTxt = dailyBias == 1 ? "BULLISH" : dailyBias == -1 ? "BEARISH" : "NEUTRAL"
+    color  biasCol = dailyBias == 1 ? color.new(color.green, 55) : dailyBias == -1 ? color.new(color.red, 55) : cNa
+    string biasDet = "HTF " + str.tostring(dailyBias == -1 ? htfBearCnt : htfBullCnt) + "/3 · " +
+         (close > ema200 ? ">" : "<") + "200EMA · " + (not na(vwapVal) and close > vwapVal ? ">" : "<") + "VWAP"
+
+    string sweepDet = evalDir == -1 ?
+         (sweepBearFresh ? sweepBearName + " swept " + str.tostring(bar_index - sweepBearBar) + " bars ago" : "none") :
+         (sweepBullFresh ? sweepBullName + " swept " + str.tostring(bar_index - sweepBullBar) + " bars ago" : "none")
+
+    // nearest unmitigated FVG in eval direction
+    string fvgDet = "none"
+    if array.size(fvgBoxes) > 0 and evalDir != 0
+        float bestD = na
+        for i = 0 to array.size(fvgBoxes) - 1
+            if array.get(fvgDir, i) == evalDir
+                float t = array.get(fvgTop, i)
+                float b = array.get(fvgBot, i)
+                float d = math.abs((t + b) / 2 - close)
+                if na(bestD) or d < bestD
+                    bestD := d
+                    fvgDet := (evalDir == 1 ? "Bull FVG " : "Bear FVG ") +
+                         str.tostring(b, format.mintick) + "–" + str.tostring(t, format.mintick)
+
+    string rejDet = evalDir == -1 ? rejShortName : rejLongName
+    string volDet = not na(relVol) ? str.tostring(relVol, "#.##") + "× avg" : "no data"
+    string vwapDet = not na(vwapVal) ?
+         (close > vwapVal ? "+" : "−") + str.tostring(math.abs(close - vwapVal), "#.##") + " pts " + (close > vwapVal ? "above" : "below") + " VWAP" :
+         "no VWAP"
+    string emaDet = evalDir == -1 ?
+         (emaAlignShort ? "9<20<50, <200" : "not aligned") :
+         (emaAlignLong ? "9>20>50, >200" : "not aligned")
+    float  rrShow  = evalDir == -1 ? shortRR : longRR
+    float  tgtShow = evalDir == -1 ? shortTarget : longTarget
+    string rrDet = not na(rrShow) ? str.tostring(rrShow, "#.#") + "R → " + str.tostring(tgtShow, format.mintick) : "no valid stop/target"
+    string bosDet = evalDir == -1 ?
+         (bosBearFresh ? "Bear BOS " + str.tostring(bar_index - lastBosBearBar) + " bars ago" : "none") :
+         (bosBullFresh ? "Bull BOS " + str.tostring(bar_index - lastBosBullBar) + " bars ago" : "none")
+    string trigDet = evalDir == -1 ? trigShortTxt : trigLongTxt
+    string sessDet = inMain ? "MAIN " + f_fmtSess(mainSess) :
+         useSecondSess and inSecond ? "2ND " + f_fmtSess(secondSess) :
+         inPremarket ? "PREMARKET" : "CLOSED"
+    string newsDet = not useNewsFilter ? "filter off" :
+         isBlackoutDay ? "BLACKOUT DAY" :
+         inNewsWin ? "BLACKOUT " + newsWinTxt : "OK"
+    string govDet = str.tostring(signalsToday) + " / " + str.tostring(maxSignalsPerDay)
+
+    // ---- states --------------------------------------------------------
+    int s1  = f_st(evalDir == -1 ? c1S  : c1L,  evalDir)
+    int s2  = f_st(evalDir == -1 ? c2S  : c2L,  evalDir)
+    int s3  = f_st(evalDir == -1 ? c3S  : c3L,  evalDir)
+    int s4  = f_st(evalDir == -1 ? c4S  : c4L,  evalDir)
+    int s5  = f_st(evalDir == -1 ? c5S  : c5L,  evalDir)
+    int s6  = f_st(evalDir == -1 ? c6S  : c6L,  evalDir)
+    int s7  = f_st(evalDir == -1 ? c7S  : c7L,  evalDir)
+    int s8  = f_st(evalDir == -1 ? c8S  : c8L,  evalDir)
+    int s9  = f_st(evalDir == -1 ? c9S  : c9L,  evalDir)
+    int s10 = f_st(evalDir == -1 ? c10S : c10L, evalDir)
+    int s11 = f_st(c11, evalDir)
+    int s12 = f_st(c12, evalDir)
+    int s13 = f_st(c13, evalDir)
+
+    int score = (s1 == 1 ? 1 : 0) + (s2 == 1 ? 1 : 0) + (s3 == 1 ? 1 : 0) + (s4 == 1 ? 1 : 0) +
+         (s5 == 1 ? 1 : 0) + (s6 == 1 ? 1 : 0) + (s7 == 1 ? 1 : 0) + (s8 == 1 ? 1 : 0) +
+         (s9 == 1 ? 1 : 0) + (s10 == 1 ? 1 : 0) + (s11 == 1 ? 1 : 0) + (s12 == 1 ? 1 : 0) + (s13 == 1 ? 1 : 0)
+
+    string verdict = evalDir == 0 ? "NO TRADE — NO BIAS" :
+         not c11 ? "NO TRADE — SESSION CLOSED" :
+         not c12 ? "NO TRADE — NEWS" :
+         not c13 ? "NO TRADE — DAILY LIMIT" :
+         score == 13 ? (evalDir == 1 ? "A+ LONG" : "A+ SHORT") :
+         "WAIT — " + str.tostring(13 - score) + " MISSING"
+    color verdictBg = verdict == "A+ LONG" ? color.new(color.green, 20) :
+         verdict == "A+ SHORT" ? color.new(color.red, 20) :
+         str.startswith(verdict, "WAIT") ? color.new(color.orange, 55) : color.new(color.gray, 55)
+    color scoreBg = evalDir == 0 ? cNa : score == 13 ? color.new(color.green, 40) :
+         score >= 9 ? color.new(color.orange, 45) : color.new(color.red, 45)
+
+    // ---- render --------------------------------------------------------
+    table.cell(tbl, 0, 0, "A+ SETUP CHECKLIST", text_color=cText, text_size=txtSz,
+         text_halign=text.align_center, bgcolor=color.new(#1b2733, 0))
+    table.cell(tbl, 1, 0, "", bgcolor=color.new(#1b2733, 0))
+    table.cell(tbl, 2, 0, "", bgcolor=color.new(#1b2733, 0))
+
+    table.cell(tbl, 0, 1, "BIAS", text_color=cText, text_size=txtSz, text_halign=text.align_left)
+    table.cell(tbl, 1, 1, biasTxt, bgcolor=biasCol, text_color=cText, text_size=txtSz, text_halign=text.align_center)
+    table.cell(tbl, 2, 1, biasDet, text_color=cDim, text_size=txtSz, text_halign=text.align_left)
+
+    if not compactMode
+        f_row(2,  "1  HTF Trend Agrees", s1,  htfDet)
+        f_row(3,  "2  Liquidity Swept",  s2,  sweepDet)
+        f_row(4,  "3  Fair Value Gap",   s3,  fvgDet)
+        f_row(5,  "4  Level Rejection",  s4,  rejDet)
+        f_row(6,  "5  Volume Increase",  s5,  volDet)
+        f_row(7,  "6  VWAP Side",        s6,  vwapDet)
+        f_row(8,  "7  EMA Alignment",    s7,  emaDet)
+        f_row(9,  "8  R:R ≥ " + str.tostring(minRR, "#.#") + ":1", s8, rrDet)
+        f_row(10, "9  BOS Confirmed",    s9,  bosDet)
+        f_row(11, "10 Entry Trigger",    s10, trigDet)
+        f_row(12, "11 Session Window",   s11, sessDet)
+        f_row(13, "12 News Clear",       s12, newsDet)
+        f_row(14, "13 Signals Today",    s13, govDet)
+
+    table.cell(tbl, 0, 15, "SCORE", text_color=cText, text_size=txtSz, text_halign=text.align_left)
+    table.cell(tbl, 1, 15, str.tostring(score) + " / 13", bgcolor=scoreBg, text_color=cText, text_size=txtSz, text_halign=text.align_center)
+    table.cell(tbl, 2, 15, "", text_size=txtSz)
+
+    table.cell(tbl, 0, 16, "VERDICT", text_color=cText, text_size=txtSz, text_halign=text.align_left)
+    table.cell(tbl, 1, 16, verdict, bgcolor=verdictBg, text_color=color.white,
+         text_size=tableSize == "Tiny" ? size.small : size.normal, text_halign=text.align_center)
+    table.cell(tbl, 2, 16, "", text_size=txtSz)
+
+// ============================================================================
+// SECTION C (optional) — LEVELS TABLE, sorted by proximity to price
+// ============================================================================
+var table tbl2 = table.new(position.bottom_right, 3, 11,
+     bgcolor=color.new(#101418, 15), frame_width=1, frame_color=color.new(#2a2f36, 0),
+     border_width=1, border_color=color.new(#2a2f36, 40))
+
+if barstate.islast and showLevelsTable
+    array<string> lvlN = array.new<string>()
+    array<float>  lvlP = array.new<float>()
+    if not na(pdh)
+        array.push(lvlN, "PDH")
+        array.push(lvlP, pdh)
+    if not na(pdl)
+        array.push(lvlN, "PDL")
+        array.push(lvlP, pdl)
+    if not na(onHighFrozen)
+        array.push(lvlN, "ONH")
+        array.push(lvlP, onHighFrozen)
+    if not na(onLowFrozen)
+        array.push(lvlN, "ONL")
+        array.push(lvlP, onLowFrozen)
+    if not na(pwh)
+        array.push(lvlN, "PWH")
+        array.push(lvlP, pwh)
+    if not na(pwl)
+        array.push(lvlN, "PWL")
+        array.push(lvlP, pwl)
+    if not na(orHigh)
+        array.push(lvlN, "ORH")
+        array.push(lvlP, orHigh)
+    if not na(orLow)
+        array.push(lvlN, "ORL")
+        array.push(lvlP, orLow)
+    if not na(vwapVal)
+        array.push(lvlN, "VWAP")
+        array.push(lvlP, vwapVal)
+    if not na(sessHigh)
+        array.push(lvlN, "SES H")
+        array.push(lvlP, sessHigh)
+    if not na(sessLow)
+        array.push(lvlN, "SES L")
+        array.push(lvlP, sessLow)
+    // selection sort by |price - close|
+    int n = array.size(lvlP)
+    if n > 1
+        for i = 0 to n - 2
+            int minIdx = i
+            for j = i + 1 to n - 1
+                if math.abs(array.get(lvlP, j) - close) < math.abs(array.get(lvlP, minIdx) - close)
+                    minIdx := j
+            if minIdx != i
+                float tmpP = array.get(lvlP, i)
+                string tmpN = array.get(lvlN, i)
+                array.set(lvlP, i, array.get(lvlP, minIdx))
+                array.set(lvlN, i, array.get(lvlN, minIdx))
+                array.set(lvlP, minIdx, tmpP)
+                array.set(lvlN, minIdx, tmpN)
+
+    table.cell(tbl2, 0, 0, "LEVEL", text_color=cText, text_size=txtSz, bgcolor=color.new(#1b2733, 0))
+    table.cell(tbl2, 1, 0, "PRICE", text_color=cText, text_size=txtSz, bgcolor=color.new(#1b2733, 0))
+    table.cell(tbl2, 2, 0, "Δ PTS", text_color=cText, text_size=txtSz, bgcolor=color.new(#1b2733, 0))
+    int rows = math.min(n, 10)
+    if rows > 0
+        for r = 1 to rows
+            float p = array.get(lvlP, r - 1)
+            table.cell(tbl2, 0, r, array.get(lvlN, r - 1), text_color=cText, text_size=txtSz, text_halign=text.align_left)
+            table.cell(tbl2, 1, r, str.tostring(p, format.mintick), text_color=cDim, text_size=txtSz)
+            table.cell(tbl2, 2, r, (p >= close ? "+" : "") + str.tostring(p - close, "#.##"), text_color=p >= close ? color.new(color.green, 20) : color.new(color.red, 20), text_size=txtSz)
+    if rows < 10
+        for r = rows + 1 to 10
+            table.cell(tbl2, 0, r, "", text_size=txtSz)
+            table.cell(tbl2, 1, r, "", text_size=txtSz)
+            table.cell(tbl2, 2, r, "", text_size=txtSz)

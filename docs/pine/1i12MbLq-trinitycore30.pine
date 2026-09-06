@@ -1,0 +1,1002 @@
+//@version=5
+// @description TRINITY CORE LIBRARY v44.0 (Production Master)
+library("TrinityCore30", overlay=false, dynamic_requests=true)
+
+const int READY_OK          = 0
+const int NOT_ENOUGH_BARS   = 1
+const int NA_INPUTS         = 2
+const int SUM_FAIL          = 3
+const int CASH_FAIL         = 4
+
+const int DROP_OK           = 0
+const int DROP_DISABLED     = 1
+const int DROP_INVALID      = 2
+const int DROP_BASELINE     = 3
+const int DROP_NOT_TOPK     = 4
+const int DROP_SHOCK        = 5
+const int DROP_ZEROPOOL     = 6
+
+const float EPS_SUM   = 1e-6
+const float EPS_PRICE = 1e-9
+
+const float ANNUAL_VOL_SCALAR = 1587.45 // ~sqrt(252) * 100
+
+const int   CORE_BUILD = 440000
+
+export type TrinityWeights
+    float stock
+    float safe1
+    float safe2
+    float safe3
+    float safe4
+    float safe5
+    float cash
+
+export type TrinityDiagLite
+    bool  is_ready
+    int   ready_code
+    int   core_build
+    bool  risk_gate
+    float wroc_stock
+    int   valid_safe_count
+    int   passed_safe_count
+    bool  sum_ok
+
+export type TrinityDiagFull
+    float raw_stock
+    float mvol_stock
+    float mdecel_stock
+    float gov_stock
+    float safe_budget
+    int   top1_id
+    int   top2_id
+    float sum_weights
+
+export type SafeDiag
+    bool  enabled
+    bool  valid
+    float sqs
+    float final_w
+    float decel_mult
+    int   drop_code
+
+export type TrinityConfig
+    bool  enabled = true
+    int   len_20  = 20
+    float w_20    = 12.0
+    int   len_63  = 63
+    float w_63    = 4.0
+    int   len_126 = 126
+    float w_126   = 2.0
+    int   len_252 = 252
+    float w_252   = 1.0
+    float risk_floor  = 0.0
+    float risk_factor = 1.0
+    float target_vol_stock = 15.0 
+    float target_vol_safe  = 8.0  
+    float gov_min_mult     = 0.1
+    int   k_len   = 63
+    float k_decay = 0.99
+    float k_scale = 1.0 
+    bool  use_k_safe = false 
+    int   top_k = 2
+    float baseline = 0.5
+    float w_cp  = 0.3
+    float w_cd  = 0.2
+    float w_vs  = 0.2
+    float w_ddg = 0.3
+    float shock_price = 5.0
+    float shock_vol   = 50.0 
+    float fall_thr    = 3.0
+    float rate_fall   = 5.0
+    float rate_accel  = 2.0
+    float penalty_val = 0.5 
+    float range_cp    = 5.0  
+    float range_dd    = 10.0
+    int   ready_bars = 252
+    float cash_rate_override = -1.0
+
+type SafeCalcState
+    int   id
+    float sqs
+    bool  passed
+    int   drop_code
+    float weight_share
+    float vol_gov
+    float mdec 
+
+_k_raw() => [close, open, time]
+
+_sdiv(float n, float d) => (na(n) or na(d) or d == 0) ? 0.0 : n / d
+_gov_calc(float vol, float tgt, float min_m) => (na(vol) or vol <= EPS_PRICE) ? 1.0 : math.min(1.0, math.max(min_m, tgt / vol))
+
+_score_cp(float roc, float range_val) =>
+    float den = 2.0 * range_val / 100.0
+    den == 0 ? 0.5 : (math.min(math.max(roc, -range_val/100.0), range_val/100.0) + range_val/100.0) / den
+
+_score_ddg(float dd, float thr_val) =>
+    float den = thr_val / 100.0
+    den == 0 ? 0.0 : math.min(math.max(1.0 + (dd / den), 0.0), 1.0)
+
+_get_val(float[] arr, int idx) => (array.size(arr) > idx) ? array.get(arr, idx) : na
+
+_arr_vol(float[] logs, int len) =>
+    int sz = array.size(logs)
+    if sz < len
+        0.0
+    else
+        float sum = 0.0
+        float sum_sq = 0.0
+        for i = 0 to len - 1
+            float val = array.get(logs, i)
+            sum += val
+            sum_sq += val * val
+        float mean = sum / len
+        float variance = (sum_sq / len) - (mean * mean)
+        math.sqrt(math.max(0.0, variance)) * ANNUAL_VOL_SCALAR 
+
+_arr_k(float[] ln_p, int len) =>
+    int sz = array.size(ln_p)
+    if sz < len
+        0.0
+    else
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        float n = float(len)
+        for i = 0 to len - 1
+            float val = array.get(ln_p, i)
+            float x = float(len - 1 - i)
+            sum_x += x
+            sum_y += val
+            sum_xy += x * val
+            sum_x2 += x * x
+            sum_y2 += val * val
+        float slope_num = n * sum_xy - sum_x * sum_y
+        float slope_den = n * sum_x2 - sum_x * sum_x
+        float slope = slope_den != 0 ? slope_num / slope_den : 0.0
+        float intercept = (sum_y - slope * sum_x) / n
+        float sum_err_sq = 0.0
+        for i = 0 to len - 1
+            float val = array.get(ln_p, i)
+            float x = float(len - 1 - i)
+            float pred = slope * x + intercept
+            float err = val - pred
+            sum_err_sq += err * err
+        float rmse = math.sqrt(sum_err_sq / n)
+        float k = (rmse > 0 and slope != 0) ? (slope / rmse) * math.sqrt(n) : 0.0
+        k * 15.87
+
+_arr_corr(float[] arr1, float[] arr2, int len) =>
+    int sz1 = array.size(arr1)
+    int sz2 = array.size(arr2)
+    int lim = math.min(len, math.min(sz1, sz2))
+    if lim < 2
+        0.0
+    else
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to lim - 1
+            float x = nz(array.get(arr1, i))
+            float y = nz(array.get(arr2, i))
+            sum_x += x
+            sum_y += y
+            sum_xy += x * y
+            sum_x2 += x * x
+            sum_y2 += y * y
+        float n = float(lim)
+        float num = n * sum_xy - sum_x * sum_y
+        float den = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        den == 0 ? 0.0 : num / den
+
+_core_compute(string sym_stk, string cp, string cs, string s1, string s2, string s3, string s4, string s5, TrinityConfig cfg) =>
+    string stk_sym = str.length(sym_stk) > 0 ? sym_stk : syminfo.tickerid
+    [stk_c, stk_o, stk_t] = request.security(stk_sym, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    
+    string csh_raw = str.length(cp) > 0 ? cp : cs
+    string csh_sym = str.length(csh_raw) > 0 ? csh_raw : syminfo.tickerid
+    [csh_c, csh_o, csh_t] = request.security(csh_sym, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    
+    string DUMMY = "X_DISABLED_X"
+    [sf1_c, sf1_o, sf1_t] = request.security(str.length(s1)>0 ? s1 : DUMMY, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf2_c, sf2_o, sf2_t] = request.security(str.length(s2)>0 ? s2 : DUMMY, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf3_c, sf3_o, sf3_t] = request.security(str.length(s3)>0 ? s3 : DUMMY, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf4_c, sf4_o, sf4_t] = request.security(str.length(s4)>0 ? s4 : DUMMY, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf5_c, sf5_o, sf5_t] = request.security(str.length(s5)>0 ? s5 : DUMMY, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    
+    bool new_day = na(stk_t[1]) or (stk_t != stk_t[1])
+    
+    var float csh_synth = 100.0
+    var float csh_ref = na
+    var float csh_val = 0.0
+    var bool cash_inited = false
+    
+    int max_mom = math.max(cfg.len_20, math.max(cfg.len_63, math.max(cfg.len_126, cfg.len_252)))
+    int hist_len = math.max(cfg.k_len, math.max(252, math.max(cfg.ready_bars, max_mom)))
+    
+    var float[] h_stk_c = array.new_float(0)
+    var float[] h_csh_c = array.new_float(0)
+    var float[] h_sf1_c = array.new_float(0)
+    var float[] h_sf2_c = array.new_float(0)
+    var float[] h_sf3_c = array.new_float(0)
+    var float[] h_sf4_c = array.new_float(0)
+    var float[] h_sf5_c = array.new_float(0)
+    
+    var float[] h_stk_ln = array.new_float(0) 
+    var float[] h_sf1_ln = array.new_float(0)
+    var float[] h_sf2_ln = array.new_float(0)
+    var float[] h_sf3_ln = array.new_float(0)
+    var float[] h_sf4_ln = array.new_float(0)
+    var float[] h_sf5_ln = array.new_float(0)
+    
+    var float[] h_stk_lret = array.new_float(0) 
+    var float[] h_r_stk = array.new_float(0)
+    var float[] h_r_sf1 = array.new_float(0)
+    var float[] h_r_sf2 = array.new_float(0)
+    var float[] h_r_sf3 = array.new_float(0)
+    var float[] h_r_sf4 = array.new_float(0)
+    var float[] h_r_sf5 = array.new_float(0)
+    
+    var float[] h_r_stk_chg = array.new_float(0)
+    var float[] h_r_sf1_chg = array.new_float(0)
+    var float[] h_r_sf2_chg = array.new_float(0)
+    var float[] h_r_sf3_chg = array.new_float(0)
+    var float[] h_r_sf4_chg = array.new_float(0)
+    var float[] h_r_sf5_chg = array.new_float(0)
+    
+    var float stk_k_peak = 0.0
+    var float s1_k_peak = 0.0
+    var float s2_k_peak = 0.0
+    var float s3_k_peak = 0.0
+    var float s4_k_peak = 0.0
+    var float s5_k_peak = 0.0
+    
+    if new_day
+        cash_inited := true
+        
+        float r = 16.0 
+        if cfg.cash_rate_override >= 0
+            r := cfg.cash_rate_override
+        else
+            int y = year(stk_t)
+            if y <= 2014
+                r := 9.0
+            else if y == 2015
+                r := 12.0
+            else if y >= 2016 and y <= 2019
+                r := 7.5
+            else if y == 2020
+                r := 5.0
+            else if y == 2021
+                r := 7.0
+            else if y == 2022
+                r := 14.0
+            else if y == 2023
+                r := 12.0
+            else if y == 2024
+                r := 16.0
+            else 
+                r := 21.0
+            
+        csh_synth := csh_synth * (1.0 + (r / 100.0) / 365.0)
+        
+        if na(csh_ref) and not na(csh_c) and csh_c > EPS_PRICE
+            csh_ref := csh_synth / csh_c
+            
+        csh_val := (not na(csh_c) and csh_c > EPS_PRICE) ? csh_c * nz(csh_ref, 1.0) : csh_synth
+        
+        array.unshift(h_stk_c, stk_c)
+        array.unshift(h_csh_c, csh_val)
+        array.unshift(h_sf1_c, sf1_c)
+        array.unshift(h_sf2_c, sf2_c)
+        array.unshift(h_sf3_c, sf3_c)
+        array.unshift(h_sf4_c, sf4_c)
+        array.unshift(h_sf5_c, sf5_c)
+        
+        array.unshift(h_stk_ln, stk_c > EPS_PRICE ? math.log(stk_c) : 0.0)
+        array.unshift(h_sf1_ln, sf1_c > EPS_PRICE ? math.log(sf1_c) : 0.0)
+        array.unshift(h_sf2_ln, sf2_c > EPS_PRICE ? math.log(sf2_c) : 0.0)
+        array.unshift(h_sf3_ln, sf3_c > EPS_PRICE ? math.log(sf3_c) : 0.0)
+        array.unshift(h_sf4_ln, sf4_c > EPS_PRICE ? math.log(sf4_c) : 0.0)
+        array.unshift(h_sf5_ln, sf5_c > EPS_PRICE ? math.log(sf5_c) : 0.0)
+        
+        float prev_stk = array.size(h_stk_c) > 1 ? array.get(h_stk_c, 1) : na
+        array.unshift(h_stk_lret, (stk_c > EPS_PRICE and prev_stk > EPS_PRICE) ? math.log(stk_c/prev_stk) : 0.0)
+        
+        float r_stk = _sdiv(stk_c, csh_val)
+        float r_sf1 = _sdiv(sf1_c, csh_val)
+        float r_sf2 = _sdiv(sf2_c, csh_val)
+        float r_sf3 = _sdiv(sf3_c, csh_val)
+        float r_sf4 = _sdiv(sf4_c, csh_val)
+        float r_sf5 = _sdiv(sf5_c, csh_val)
+        
+        array.unshift(h_r_stk, r_stk)
+        array.unshift(h_r_sf1, r_sf1)
+        array.unshift(h_r_sf2, r_sf2)
+        array.unshift(h_r_sf3, r_sf3)
+        array.unshift(h_r_sf4, r_sf4)
+        array.unshift(h_r_sf5, r_sf5)
+        
+        float prev_r_stk = array.size(h_r_stk) > 1 ? array.get(h_r_stk, 1) : r_stk
+        float prev_r_sf1 = array.size(h_r_sf1) > 1 ? array.get(h_r_sf1, 1) : r_sf1
+        float prev_r_sf2 = array.size(h_r_sf2) > 1 ? array.get(h_r_sf2, 1) : r_sf2
+        float prev_r_sf3 = array.size(h_r_sf3) > 1 ? array.get(h_r_sf3, 1) : r_sf3
+        float prev_r_sf4 = array.size(h_r_sf4) > 1 ? array.get(h_r_sf4, 1) : r_sf4
+        float prev_r_sf5 = array.size(h_r_sf5) > 1 ? array.get(h_r_sf5, 1) : r_sf5
+        
+        array.unshift(h_r_stk_chg, r_stk - prev_r_stk)
+        array.unshift(h_r_sf1_chg, r_sf1 - prev_r_sf1)
+        array.unshift(h_r_sf2_chg, r_sf2 - prev_r_sf2)
+        array.unshift(h_r_sf3_chg, r_sf3 - prev_r_sf3)
+        array.unshift(h_r_sf4_chg, r_sf4 - prev_r_sf4)
+        array.unshift(h_r_sf5_chg, r_sf5 - prev_r_sf5)
+        
+        float cur_k_stk = _arr_k(h_stk_ln, math.max(2, cfg.k_len))
+        stk_k_peak := math.max(stk_k_peak * cfg.k_decay, math.max(cur_k_stk, EPS_PRICE))
+        
+        if cfg.use_k_safe
+            float cur_k_s1 = _arr_k(h_sf1_ln, math.max(2, cfg.k_len))
+            s1_k_peak := math.max(s1_k_peak * cfg.k_decay, math.max(cur_k_s1, EPS_PRICE))
+            
+            float cur_k_s2 = _arr_k(h_sf2_ln, math.max(2, cfg.k_len))
+            s2_k_peak := math.max(s2_k_peak * cfg.k_decay, math.max(cur_k_s2, EPS_PRICE))
+            
+            float cur_k_s3 = _arr_k(h_sf3_ln, math.max(2, cfg.k_len))
+            s3_k_peak := math.max(s3_k_peak * cfg.k_decay, math.max(cur_k_s3, EPS_PRICE))
+            
+            float cur_k_s4 = _arr_k(h_sf4_ln, math.max(2, cfg.k_len))
+            s4_k_peak := math.max(s4_k_peak * cfg.k_decay, math.max(cur_k_s4, EPS_PRICE))
+            
+            float cur_k_s5 = _arr_k(h_sf5_ln, math.max(2, cfg.k_len))
+            s5_k_peak := math.max(s5_k_peak * cfg.k_decay, math.max(cur_k_s5, EPS_PRICE))
+        
+        if array.size(h_stk_c) > hist_len
+            array.pop(h_stk_c)
+            array.pop(h_csh_c)
+            array.pop(h_sf1_c)
+            array.pop(h_sf2_c)
+            array.pop(h_sf3_c)
+            array.pop(h_sf4_c)
+            array.pop(h_sf5_c)
+            array.pop(h_stk_ln)
+            array.pop(h_sf1_ln)
+            array.pop(h_sf2_ln)
+            array.pop(h_sf3_ln)
+            array.pop(h_sf4_ln)
+            array.pop(h_sf5_ln)
+            array.pop(h_stk_lret)
+            array.pop(h_r_stk)
+            array.pop(h_r_sf1)
+            array.pop(h_r_sf2)
+            array.pop(h_r_sf3)
+            array.pop(h_r_sf4)
+            array.pop(h_r_sf5)
+            array.pop(h_r_stk_chg)
+            array.pop(h_r_sf1_chg)
+            array.pop(h_r_sf2_chg)
+            array.pop(h_r_sf3_chg)
+            array.pop(h_r_sf4_chg)
+            array.pop(h_r_sf5_chg)
+            
+    TrinityWeights w = TrinityWeights.new(0,0,0,0,0,0,1)
+    TrinityDiagFull df = TrinityDiagFull.new(0,0,0,0,0,0,0,0)
+    SafeDiag sd_null = SafeDiag.new(false, false, 0, 0, 1.0, DROP_INVALID)
+    
+    SafeDiag sd1 = sd_null
+    SafeDiag sd2 = sd_null
+    SafeDiag sd3 = sd_null
+    SafeDiag sd4 = sd_null
+    SafeDiag sd5 = sd_null
+    
+    float final_stock = 0.0
+    float final_cash = 1.0 
+    float w1=0.0
+    float w2=0.0
+    float w3=0.0
+    float w4=0.0
+    float w5=0.0
+    float raw_stk=0.0
+    float mvol=0.0
+    float mdec=1.0
+    float gov_final=0.0
+    float safe_budget=0.0
+    float used_safe_alloc = 0.0
+    
+    int t1_id = 0
+    int t2_id = 0
+    int valid_cnt = 0
+    int valid_pass = 0
+    bool sum_check = false
+    float wroc = 0.0
+    bool risk_gate = false
+    
+    bool inputs_ok = not na(stk_c) and stk_c > EPS_PRICE
+    
+    // P0 FIX: Strict Cash Verification
+    bool cash_sym_ok = not na(csh_c) and csh_c > EPS_PRICE and not na(csh_t)
+    bool cash_bad = cash_inited and not cash_sym_ok
+    
+    // P1 FIX: Flexible History Gate
+    bool hist_ok = (array.size(h_stk_c) >= hist_len)
+    
+    int rc = READY_OK
+    if not inputs_ok
+        rc := NA_INPUTS
+    else if cash_bad
+        rc := CASH_FAIL
+    else if not hist_ok
+        rc := NOT_ENOUGH_BARS
+        
+    bool is_ready = (rc == READY_OK) and cfg.enabled
+    
+    if is_ready
+        float r_stk_now = _get_val(h_r_stk, 0)
+        float roc20  = _sdiv(r_stk_now, _get_val(h_r_stk, cfg.len_20)) - 1.0
+        float roc63  = _sdiv(r_stk_now, _get_val(h_r_stk, cfg.len_63)) - 1.0
+        float roc126 = _sdiv(r_stk_now, _get_val(h_r_stk, cfg.len_126)) - 1.0
+        float roc252 = _sdiv(r_stk_now, _get_val(h_r_stk, cfg.len_252)) - 1.0
+        float w_sum = cfg.w_20 + cfg.w_63 + cfg.w_126 + cfg.w_252
+        wroc := (roc20*cfg.w_20 + roc63*cfg.w_63 + roc126*cfg.w_126 + roc252*cfg.w_252) / (w_sum == 0 ? 1.0 : w_sum)
+        
+        float stk_vol = _arr_vol(h_stk_lret, 20)
+        mvol := _gov_calc(stk_vol, cfg.target_vol_stock, cfg.gov_min_mult)
+        
+        float eval_k_stk = _arr_k(h_stk_ln, math.max(2, cfg.k_len))
+        if eval_k_stk < 0
+            mdec := 0.0
+        else
+            float k_div = eval_k_stk == 0 ? EPS_PRICE : eval_k_stk
+            mdec := math.max(0.0, math.min(1.0, (stk_k_peak * cfg.k_scale) / k_div))
+            
+        gov_final := mvol * mdec
+        float rf_safe = cfg.risk_factor == 0 ? 1.0 : cfg.risk_factor
+        
+        if cfg.risk_floor > 0
+            raw_stk := math.max(cfg.risk_floor, math.min(1.0, wroc / rf_safe))
+        else
+            raw_stk := wroc <= 0 ? 0.0 : math.min(1.0, wroc / rf_safe)
+            
+        final_stock := raw_stk * gov_final
+        safe_budget := 1.0 - raw_stk
+        risk_gate := raw_stk > 0
+        float sqs_div = (cfg.w_cp + cfg.w_vs + cfg.w_ddg + cfg.w_cd)
+        sqs_div := sqs_div == 0 ? 1.0 : sqs_div
+        
+        SafeCalcState sc1 = SafeCalcState.new(1, -999, false, DROP_INVALID, 0, 0, 1.0)
+        SafeCalcState sc2 = SafeCalcState.new(2, -999, false, DROP_INVALID, 0, 0, 1.0)
+        SafeCalcState sc3 = SafeCalcState.new(3, -999, false, DROP_INVALID, 0, 0, 1.0)
+        SafeCalcState sc4 = SafeCalcState.new(4, -999, false, DROP_INVALID, 0, 0, 1.0)
+        SafeCalcState sc5 = SafeCalcState.new(5, -999, false, DROP_INVALID, 0, 0, 1.0)
+        
+        // --- SAFE 1 ---
+        if str.length(s1) > 0 and array.size(h_sf1_c) > 0 and not na(sf1_c) and sf1_c > EPS_PRICE
+            valid_cnt += 1
+            float r_now = _get_val(h_r_sf1, 0)
+            float r_l20 = _get_val(h_r_sf1, cfg.len_20)
+            float r_l5 = _get_val(h_r_sf1, 5)
+            float rc20 = _sdiv(r_now, r_l20) - 1.0
+            float r5 = _sdiv(r_now, r_l5) - 1.0
+            float val_cp = _score_cp(rc20, cfg.range_cp) 
+            float s_sum=0.0
+            float s_sq=0.0
+            for i=0 to 19
+                float p0 = _get_val(h_sf1_c, i)
+                float p1 = _get_val(h_sf1_c, i+1)
+                float lr = (p0>0 and p1>0) ? math.log(p0/p1) : 0.0
+                s_sum += lr
+                s_sq += lr*lr
+            float s_vol = math.sqrt(math.max(0.0, (s_sq/20.0)-(s_sum/20.0)*(s_sum/20.0))) * ANNUAL_VOL_SCALAR
+            float vs = _gov_calc(s_vol, cfg.target_vol_safe, 0.0) 
+            float r_hh = -1.0
+            for i=0 to 125
+                float v = _get_val(h_r_sf1, i)
+                if v > r_hh
+                    r_hh := v
+            float dd = _score_ddg(r_hh > 0 ? (r_now / r_hh - 1.0) : 0.0, cfg.range_dd)
+            float cd_norm = (1.0 - _arr_corr(h_r_sf1_chg, h_r_stk_chg, 20)) / 2.0
+            float sqs = (val_cp*cfg.w_cp + vs*cfg.w_vs + dd*cfg.w_ddg + cd_norm*cfg.w_cd) / sqs_div
+            
+            float pen = 1.0
+            bool is_shock = false
+            if (math.abs(r5) > cfg.shock_price/100.0) or (stk_vol > cfg.shock_vol)
+                if wroc < 0 and rc20 < -cfg.fall_thr/100.0
+                    pen := cfg.penalty_val
+                    is_shock := true
+            if rc20 < -cfg.rate_fall/100.0 and math.abs(r5) > cfg.rate_accel/100.0
+                pen := cfg.penalty_val
+                is_shock := true
+                
+            float s1_mdec = 1.0
+            if cfg.use_k_safe
+                float eval_k_s1 = _arr_k(h_sf1_ln, math.max(2, cfg.k_len))
+                if eval_k_s1 < 0
+                    s1_mdec := 0.0
+                else
+                    float k_div = eval_k_s1 == 0 ? EPS_PRICE : eval_k_s1
+                    s1_mdec := math.max(0.0, math.min(1.0, (s1_k_peak * cfg.k_scale) / k_div))
+
+            sc1.mdec := s1_mdec
+            sc1.sqs := sqs * pen * s1_mdec
+            sc1.vol_gov := vs
+            if sc1.sqs >= cfg.baseline
+                sc1.passed := true
+                sc1.drop_code := DROP_OK
+            else
+                sc1.drop_code := is_shock ? DROP_SHOCK : DROP_BASELINE
+                
+        // --- SAFE 2 ---
+        if str.length(s2) > 0 and array.size(h_sf2_c) > 0 and not na(sf2_c) and sf2_c > EPS_PRICE
+            valid_cnt += 1
+            float r_now = _get_val(h_r_sf2, 0)
+            float r_l20 = _get_val(h_r_sf2, cfg.len_20)
+            float r_l5 = _get_val(h_r_sf2, 5)
+            float rc20 = _sdiv(r_now, r_l20) - 1.0
+            float r5 = _sdiv(r_now, r_l5) - 1.0
+            float val_cp = _score_cp(rc20, cfg.range_cp)
+            float s_sum=0.0
+            float s_sq=0.0
+            for i=0 to 19
+                float p0 = _get_val(h_sf2_c, i)
+                float p1 = _get_val(h_sf2_c, i+1)
+                float lr = (p0>0 and p1>0) ? math.log(p0/p1) : 0.0
+                s_sum += lr
+                s_sq += lr*lr
+            float s_vol = math.sqrt(math.max(0.0, (s_sq/20.0)-(s_sum/20.0)*(s_sum/20.0))) * ANNUAL_VOL_SCALAR
+            float vs = _gov_calc(s_vol, cfg.target_vol_safe, 0.0)
+            float r_hh = -1.0
+            for i=0 to 125
+                float v = _get_val(h_r_sf2, i)
+                if v > r_hh
+                    r_hh := v
+            float dd = _score_ddg(r_hh > 0 ? (r_now / r_hh - 1.0) : 0.0, cfg.range_dd)
+            float cd_norm = (1.0 - _arr_corr(h_r_sf2_chg, h_r_stk_chg, 20)) / 2.0
+            float sqs = (val_cp*cfg.w_cp + vs*cfg.w_vs + dd*cfg.w_ddg + cd_norm*cfg.w_cd) / sqs_div
+            
+            float pen = 1.0
+            bool is_shock = false
+            if (math.abs(r5) > cfg.shock_price/100.0) or (stk_vol > cfg.shock_vol)
+                if wroc < 0 and rc20 < -cfg.fall_thr/100.0
+                    pen := cfg.penalty_val
+                    is_shock := true
+            if rc20 < -cfg.rate_fall/100.0 and math.abs(r5) > cfg.rate_accel/100.0
+                pen := cfg.penalty_val
+                is_shock := true
+                
+            float s2_mdec = 1.0
+            if cfg.use_k_safe
+                float eval_k_s2 = _arr_k(h_sf2_ln, math.max(2, cfg.k_len))
+                if eval_k_s2 < 0
+                    s2_mdec := 0.0
+                else
+                    float k_div = eval_k_s2 == 0 ? EPS_PRICE : eval_k_s2
+                    s2_mdec := math.max(0.0, math.min(1.0, (s2_k_peak * cfg.k_scale) / k_div))
+
+            sc2.mdec := s2_mdec
+            sc2.sqs := sqs * pen * s2_mdec
+            sc2.vol_gov := vs
+            if sc2.sqs >= cfg.baseline
+                sc2.passed := true
+                sc2.drop_code := DROP_OK
+            else
+                sc2.drop_code := is_shock ? DROP_SHOCK : DROP_BASELINE
+                
+        // --- SAFE 3 ---
+        if str.length(s3) > 0 and array.size(h_sf3_c) > 0 and not na(sf3_c) and sf3_c > EPS_PRICE
+            valid_cnt += 1
+            float r_now = _get_val(h_r_sf3, 0)
+            float r_l20 = _get_val(h_r_sf3, cfg.len_20)
+            float r_l5 = _get_val(h_r_sf3, 5)
+            float rc20 = _sdiv(r_now, r_l20) - 1.0
+            float r5 = _sdiv(r_now, r_l5) - 1.0
+            float val_cp = _score_cp(rc20, cfg.range_cp)
+            float s_sum=0.0
+            float s_sq=0.0
+            for i=0 to 19
+                float p0 = _get_val(h_sf3_c, i)
+                float p1 = _get_val(h_sf3_c, i+1)
+                float lr = (p0>0 and p1>0) ? math.log(p0/p1) : 0.0
+                s_sum += lr
+                s_sq += lr*lr
+            float s_vol = math.sqrt(math.max(0.0, (s_sq/20.0)-(s_sum/20.0)*(s_sum/20.0))) * ANNUAL_VOL_SCALAR
+            float vs = _gov_calc(s_vol, cfg.target_vol_safe, 0.0)
+            float r_hh = -1.0
+            for i=0 to 125
+                float v = _get_val(h_r_sf3, i)
+                if v > r_hh
+                    r_hh := v
+            float dd = _score_ddg(r_hh > 0 ? (r_now / r_hh - 1.0) : 0.0, cfg.range_dd)
+            float cd_norm = (1.0 - _arr_corr(h_r_sf3_chg, h_r_stk_chg, 20)) / 2.0
+            float sqs = (val_cp*cfg.w_cp + vs*cfg.w_vs + dd*cfg.w_ddg + cd_norm*cfg.w_cd) / sqs_div
+            
+            float pen = 1.0
+            bool is_shock = false
+            if (math.abs(r5) > cfg.shock_price/100.0) or (stk_vol > cfg.shock_vol)
+                if wroc < 0 and rc20 < -cfg.fall_thr/100.0
+                    pen := cfg.penalty_val
+                    is_shock := true
+            if rc20 < -cfg.rate_fall/100.0 and math.abs(r5) > cfg.rate_accel/100.0
+                pen := cfg.penalty_val
+                is_shock := true
+                
+            float s3_mdec = 1.0
+            if cfg.use_k_safe
+                float eval_k_s3 = _arr_k(h_sf3_ln, math.max(2, cfg.k_len))
+                if eval_k_s3 < 0
+                    s3_mdec := 0.0
+                else
+                    float k_div = eval_k_s3 == 0 ? EPS_PRICE : eval_k_s3
+                    s3_mdec := math.max(0.0, math.min(1.0, (s3_k_peak * cfg.k_scale) / k_div))
+
+            sc3.mdec := s3_mdec
+            sc3.sqs := sqs * pen * s3_mdec
+            sc3.vol_gov := vs
+            if sc3.sqs >= cfg.baseline
+                sc3.passed := true
+                sc3.drop_code := DROP_OK
+            else
+                sc3.drop_code := is_shock ? DROP_SHOCK : DROP_BASELINE
+                
+        // --- SAFE 4 ---
+        if str.length(s4) > 0 and array.size(h_sf4_c) > 0 and not na(sf4_c) and sf4_c > EPS_PRICE
+            valid_cnt += 1
+            float r_now = _get_val(h_r_sf4, 0)
+            float r_l20 = _get_val(h_r_sf4, cfg.len_20)
+            float r_l5 = _get_val(h_r_sf4, 5)
+            float rc20 = _sdiv(r_now, r_l20) - 1.0
+            float r5 = _sdiv(r_now, r_l5) - 1.0
+            float val_cp = _score_cp(rc20, cfg.range_cp)
+            float s_sum=0.0
+            float s_sq=0.0
+            for i=0 to 19
+                float p0 = _get_val(h_sf4_c, i)
+                float p1 = _get_val(h_sf4_c, i+1)
+                float lr = (p0>0 and p1>0) ? math.log(p0/p1) : 0.0
+                s_sum += lr
+                s_sq += lr*lr
+            float s_vol = math.sqrt(math.max(0.0, (s_sq/20.0)-(s_sum/20.0)*(s_sum/20.0))) * ANNUAL_VOL_SCALAR
+            float vs = _gov_calc(s_vol, cfg.target_vol_safe, 0.0)
+            float r_hh = -1.0
+            for i=0 to 125
+                float v = _get_val(h_r_sf4, i)
+                if v > r_hh
+                    r_hh := v
+            float dd = _score_ddg(r_hh > 0 ? (r_now / r_hh - 1.0) : 0.0, cfg.range_dd)
+            float cd_norm = (1.0 - _arr_corr(h_r_sf4_chg, h_r_stk_chg, 20)) / 2.0
+            float sqs = (val_cp*cfg.w_cp + vs*cfg.w_vs + dd*cfg.w_ddg + cd_norm*cfg.w_cd) / sqs_div
+            
+            float pen = 1.0
+            bool is_shock = false
+            if (math.abs(r5) > cfg.shock_price/100.0) or (stk_vol > cfg.shock_vol)
+                if wroc < 0 and rc20 < -cfg.fall_thr/100.0
+                    pen := cfg.penalty_val
+                    is_shock := true
+            if rc20 < -cfg.rate_fall/100.0 and math.abs(r5) > cfg.rate_accel/100.0
+                pen := cfg.penalty_val
+                is_shock := true
+                
+            float s4_mdec = 1.0
+            if cfg.use_k_safe
+                float eval_k_s4 = _arr_k(h_sf4_ln, math.max(2, cfg.k_len))
+                if eval_k_s4 < 0
+                    s4_mdec := 0.0
+                else
+                    float k_div = eval_k_s4 == 0 ? EPS_PRICE : eval_k_s4
+                    s4_mdec := math.max(0.0, math.min(1.0, (s4_k_peak * cfg.k_scale) / k_div))
+
+            sc4.mdec := s4_mdec
+            sc4.sqs := sqs * pen * s4_mdec
+            sc4.vol_gov := vs
+            if sc4.sqs >= cfg.baseline
+                sc4.passed := true
+                sc4.drop_code := DROP_OK
+            else
+                sc4.drop_code := is_shock ? DROP_SHOCK : DROP_BASELINE
+                
+        // --- SAFE 5 ---
+        if str.length(s5) > 0 and array.size(h_sf5_c) > 0 and not na(sf5_c) and sf5_c > EPS_PRICE
+            valid_cnt += 1
+            float r_now = _get_val(h_r_sf5, 0)
+            float r_l20 = _get_val(h_r_sf5, cfg.len_20)
+            float r_l5 = _get_val(h_r_sf5, 5)
+            float rc20 = _sdiv(r_now, r_l20) - 1.0
+            float r5 = _sdiv(r_now, r_l5) - 1.0
+            float val_cp = _score_cp(rc20, cfg.range_cp)
+            float s_sum=0.0
+            float s_sq=0.0
+            for i=0 to 19
+                float p0 = _get_val(h_sf5_c, i)
+                float p1 = _get_val(h_sf5_c, i+1)
+                float lr = (p0>0 and p1>0) ? math.log(p0/p1) : 0.0
+                s_sum += lr
+                s_sq += lr*lr
+            float s_vol = math.sqrt(math.max(0.0, (s_sq/20.0)-(s_sum/20.0)*(s_sum/20.0))) * ANNUAL_VOL_SCALAR
+            float vs = _gov_calc(s_vol, cfg.target_vol_safe, 0.0)
+            float r_hh = -1.0
+            for i=0 to 125
+                float v = _get_val(h_r_sf5, i)
+                if v > r_hh
+                    r_hh := v
+            float dd = _score_ddg(r_hh > 0 ? (r_now / r_hh - 1.0) : 0.0, cfg.range_dd)
+            float cd_norm = (1.0 - _arr_corr(h_r_sf5_chg, h_r_stk_chg, 20)) / 2.0
+            float sqs = (val_cp*cfg.w_cp + vs*cfg.w_vs + dd*cfg.w_ddg + cd_norm*cfg.w_cd) / sqs_div
+            
+            float pen = 1.0
+            bool is_shock = false
+            if (math.abs(r5) > cfg.shock_price/100.0) or (stk_vol > cfg.shock_vol)
+                if wroc < 0 and rc20 < -cfg.fall_thr/100.0
+                    pen := cfg.penalty_val
+                    is_shock := true
+            if rc20 < -cfg.rate_fall/100.0 and math.abs(r5) > cfg.rate_accel/100.0
+                pen := cfg.penalty_val
+                is_shock := true
+                
+            float s5_mdec = 1.0
+            if cfg.use_k_safe
+                float eval_k_s5 = _arr_k(h_sf5_ln, math.max(2, cfg.k_len))
+                if eval_k_s5 < 0
+                    s5_mdec := 0.0
+                else
+                    float k_div = eval_k_s5 == 0 ? EPS_PRICE : eval_k_s5
+                    s5_mdec := math.max(0.0, math.min(1.0, (s5_k_peak * cfg.k_scale) / k_div))
+
+            sc5.mdec := s5_mdec
+            sc5.sqs := sqs * pen * s5_mdec
+            sc5.vol_gov := vs
+            if sc5.sqs >= cfg.baseline
+                sc5.passed := true
+                sc5.drop_code := DROP_OK
+            else
+                sc5.drop_code := is_shock ? DROP_SHOCK : DROP_BASELINE
+                
+        SafeCalcState[] arr = array.new<SafeCalcState>()
+        array.push(arr, sc1)
+        array.push(arr, sc2)
+        array.push(arr, sc3)
+        array.push(arr, sc4)
+        array.push(arr, sc5)
+        
+        int n_arr = array.size(arr)
+        for i = 0 to n_arr - 2
+            for j = 0 to n_arr - i - 2
+                SafeCalcState a = array.get(arr, j)
+                SafeCalcState b = array.get(arr, j + 1)
+                if a.sqs < b.sqs
+                    array.set(arr, j, b)
+                    array.set(arr, j + 1, a)
+                    
+        float sum_sqs = 0.0
+        int k_cnt = 0
+        for i = 0 to n_arr - 1
+            SafeCalcState s = array.get(arr, i)
+            if s.passed
+                if k_cnt < cfg.top_k
+                    sum_sqs += s.sqs
+                    k_cnt += 1
+                else
+                    s.passed := false
+                    s.drop_code := DROP_NOT_TOPK
+                    array.set(arr, i, s)
+                    
+        k_cnt := 0
+        used_safe_alloc := 0.0 
+        valid_pass := 0 
+        
+        for i = 0 to n_arr - 1
+            SafeCalcState s = array.get(arr, i)
+            if s.passed
+                if sum_sqs > 0 and k_cnt < cfg.top_k
+                    float share = s.sqs / sum_sqs
+                    float alloc = safe_budget * share * s.vol_gov
+                    s.weight_share := alloc
+                    used_safe_alloc := used_safe_alloc + alloc
+                    array.set(arr, i, s)
+                    k_cnt += 1
+                    if alloc > EPS_SUM 
+                        valid_pass += 1 
+                else if sum_sqs <= 0
+                    s.passed := false
+                    s.drop_code := DROP_ZEROPOOL
+                    s.weight_share := 0.0
+                    array.set(arr, i, s)
+                else
+                    s.passed := false
+                    s.drop_code := DROP_NOT_TOPK
+                    s.weight_share := 0.0
+                    array.set(arr, i, s)
+                    
+        float saved_stk = math.max(0.0, raw_stk - final_stock)
+        float saved_safe = math.max(0.0, safe_budget - used_safe_alloc)
+        final_cash := saved_stk + saved_safe
+        
+        float check_sum = final_stock + used_safe_alloc + final_cash
+        if final_cash < -EPS_SUM or check_sum > 1.0 + EPS_SUM
+            rc := SUM_FAIL
+            is_ready := false
+            risk_gate := false
+            final_stock := 0.0
+            final_cash := 1.0
+            used_safe_alloc := 0.0
+            for i = 0 to n_arr - 1
+                SafeCalcState s = array.get(arr, i)
+                s.weight_share := 0.0
+                array.set(arr, i, s)
+        else if check_sum < 1.0 - EPS_SUM
+            final_cash := final_cash + (1.0 - check_sum)
+        
+        for i = 0 to n_arr - 1
+            SafeCalcState s = array.get(arr, i)
+            if s.id == 1
+                w1 := s.weight_share
+                sd1 := SafeDiag.new(str.length(s1)>0, (str.length(s1)>0 and not na(sf1_c) and sf1_c > EPS_PRICE), s.sqs, w1, s.mdec, s.drop_code)
+            if s.id == 2
+                w2 := s.weight_share
+                sd2 := SafeDiag.new(str.length(s2)>0, (str.length(s2)>0 and not na(sf2_c) and sf2_c > EPS_PRICE), s.sqs, w2, s.mdec, s.drop_code)
+            if s.id == 3
+                w3 := s.weight_share
+                sd3 := SafeDiag.new(str.length(s3)>0, (str.length(s3)>0 and not na(sf3_c) and sf3_c > EPS_PRICE), s.sqs, w3, s.mdec, s.drop_code)
+            if s.id == 4
+                w4 := s.weight_share
+                sd4 := SafeDiag.new(str.length(s4)>0, (str.length(s4)>0 and not na(sf4_c) and sf4_c > EPS_PRICE), s.sqs, w4, s.mdec, s.drop_code)
+            if s.id == 5
+                w5 := s.weight_share
+                sd5 := SafeDiag.new(str.length(s5)>0, (str.length(s5)>0 and not na(sf5_c) and sf5_c > EPS_PRICE), s.sqs, w5, s.mdec, s.drop_code)
+        
+        int got = 0
+        for i = 0 to n_arr - 1
+            SafeCalcState s = array.get(arr, i)
+            if s.passed and s.weight_share > EPS_SUM
+                if got == 0
+                    t1_id := s.id
+                else if got == 1
+                    t2_id := s.id
+                got += 1
+                if got >= 2
+                    break
+            
+    w := TrinityWeights.new(final_stock, w1, w2, w3, w4, w5, final_cash)
+    df := TrinityDiagFull.new(raw_stk, mvol, mdec, gov_final, safe_budget, t1_id, t2_id, final_stock+used_safe_alloc+final_cash)
+    sum_check := math.abs((w.stock+w.safe1+w.safe2+w.safe3+w.safe4+w.safe5+w.cash) - 1.0) < EPS_SUM
+    TrinityDiagLite dl = TrinityDiagLite.new(is_ready, rc, CORE_BUILD, risk_gate, wroc, valid_cnt, valid_pass, sum_check)
+    
+    [w, dl, df, sd1, sd2, sd3, sd4, sd5]
+
+export calc_weights_flat(string sym, string cp, string cs, string s1, string s2, string s3, string s4, string s5, bool en, int l20, float w20, int l63, float w63, int l126, float w126, int l252, float w252, float rf, float fac, float tvs, float tvsf, float gmm, int kl, float kd, float ks, bool en_ksafe, int tk, float bl, float wcp, float wcd, float wvs, float wdd, float sp, float sv, float ft, float rf2, float ra, float r_cp, float r_dd, float pen_v, int rb, float cro) =>
+    TrinityConfig cfg = TrinityConfig.new()
+    cfg.enabled := en
+    cfg.len_20 := l20
+    cfg.w_20 := w20
+    cfg.len_63 := l63
+    cfg.w_63 := w63
+    cfg.len_126 := l126
+    cfg.w_126 := w126
+    cfg.len_252 := l252
+    cfg.w_252 := w252
+    cfg.risk_floor := rf
+    cfg.risk_factor := fac
+    cfg.target_vol_stock := tvs
+    cfg.target_vol_safe := tvsf
+    cfg.gov_min_mult := gmm
+    cfg.k_len := kl
+    cfg.k_decay := kd
+    cfg.k_scale := ks
+    cfg.use_k_safe := en_ksafe
+    cfg.top_k := tk
+    cfg.baseline := bl
+    cfg.w_cp := wcp
+    cfg.w_cd := wcd
+    cfg.w_vs := wvs
+    cfg.w_ddg := wdd
+    cfg.shock_price := sp
+    cfg.shock_vol := sv
+    cfg.fall_thr := ft
+    cfg.rate_fall := rf2
+    cfg.rate_accel := ra
+    cfg.range_cp := r_cp
+    cfg.range_dd := r_dd
+    cfg.penalty_val := pen_v
+    cfg.ready_bars := rb
+    cfg.cash_rate_override := cro
+    
+    [w, dl, df, sd1, sd2, sd3, sd4, sd5] = _core_compute(sym, cp, cs, s1, s2, s3, s4, s5, cfg)
+    [w, dl]
+
+export calc_monitor_flat(string sym, string cp, string cs, string s1, string s2, string s3, string s4, string s5, bool en, int l20, float w20, int l63, float w63, int l126, float w126, int l252, float w252, float rf, float fac, float tvs, float tvsf, float gmm, int kl, float kd, float ks, bool en_ksafe, int tk, float bl, float wcp, float wcd, float wvs, float wdd, float sp, float sv, float ft, float rf2, float ra, float r_cp, float r_dd, float pen_v, int rb, float cro) =>
+    TrinityConfig cfg = TrinityConfig.new()
+    cfg.enabled := en
+    cfg.len_20 := l20
+    cfg.w_20 := w20
+    cfg.len_63 := l63
+    cfg.w_63 := w63
+    cfg.len_126 := l126
+    cfg.w_126 := w126
+    cfg.len_252 := l252
+    cfg.w_252 := w252
+    cfg.risk_floor := rf
+    cfg.risk_factor := fac
+    cfg.target_vol_stock := tvs
+    cfg.target_vol_safe := tvsf
+    cfg.gov_min_mult := gmm
+    cfg.k_len := kl
+    cfg.k_decay := kd
+    cfg.k_scale := ks
+    cfg.use_k_safe := en_ksafe
+    cfg.top_k := tk
+    cfg.baseline := bl
+    cfg.w_cp := wcp
+    cfg.w_cd := wcd
+    cfg.w_vs := wvs
+    cfg.w_ddg := wdd
+    cfg.shock_price := sp
+    cfg.shock_vol := sv
+    cfg.fall_thr := ft
+    cfg.rate_fall := rf2
+    cfg.rate_accel := ra
+    cfg.range_cp := r_cp
+    cfg.range_dd := r_dd
+    cfg.penalty_val := pen_v
+    cfg.ready_bars := rb
+    cfg.cash_rate_override := cro
+    
+    [w, dl, df, sd1, sd2, sd3, sd4, sd5] = _core_compute(sym, cp, cs, s1, s2, s3, s4, s5, cfg)
+    [w, dl, df, sd1, sd2, sd3, sd4, sd5]
+
+export get_simulation_snapshot(string sym, string cp, string cs, string s1, string s2, string s3, string s4, string s5, bool en, int l20, float w20, int l63, float w63, int l126, float w126, int l252, float w252, float rf, float fac, float tvs, float tvsf, float gmm, int kl, float kd, float ks, bool en_ksafe, int tk, float bl, float wcp, float wcd, float wvs, float wdd, float sp, float sv, float ft, float rf2, float ra, float r_cp, float r_dd, float pen_v, int rb, float cro) =>
+    TrinityConfig cfg = TrinityConfig.new()
+    cfg.enabled := en
+    cfg.len_20 := l20
+    cfg.w_20 := w20
+    cfg.len_63 := l63
+    cfg.w_63 := w63
+    cfg.len_126 := l126
+    cfg.w_126 := w126
+    cfg.len_252 := l252
+    cfg.w_252 := w252
+    cfg.risk_floor := rf
+    cfg.risk_factor := fac
+    cfg.target_vol_stock := tvs
+    cfg.target_vol_safe := tvsf
+    cfg.gov_min_mult := gmm
+    cfg.k_len := kl
+    cfg.k_decay := kd
+    cfg.k_scale := ks
+    cfg.use_k_safe := en_ksafe
+    cfg.top_k := tk
+    cfg.baseline := bl
+    cfg.w_cp := wcp
+    cfg.w_cd := wcd
+    cfg.w_vs := wvs
+    cfg.w_ddg := wdd
+    cfg.shock_price := sp
+    cfg.shock_vol := sv
+    cfg.fall_thr := ft
+    cfg.rate_fall := rf2
+    cfg.rate_accel := ra
+    cfg.range_cp := r_cp
+    cfg.range_dd := r_dd
+    cfg.penalty_val := pen_v
+    cfg.ready_bars := rb
+    cfg.cash_rate_override := cro
+    
+    [w, dl, df, sd1, sd2, sd3, sd4, sd5] = _core_compute(sym, cp, cs, s1, s2, s3, s4, s5, cfg)
+    
+    [stk_c, stk_o, stk_t] = request.security(str.length(sym) > 0 ? sym : syminfo.tickerid, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    
+    string csh_raw2 = str.length(cp) > 0 ? cp : cs
+    string csh_sym2 = str.length(csh_raw2) > 0 ? csh_raw2 : syminfo.tickerid
+    [csh_c, csh_o, csh_t] = request.security(csh_sym2, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    
+    string D = "X_DIS_X"
+    [sf1_c, sf1_o, sf1_t] = request.security(str.length(s1)>0 ? s1 : D, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf2_c, sf2_o, sf2_t] = request.security(str.length(s2)>0 ? s2 : D, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf3_c, sf3_o, sf3_t] = request.security(str.length(s3)>0 ? s3 : D, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf4_c, sf4_o, sf4_t] = request.security(str.length(s4)>0 ? s4 : D, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    [sf5_c, sf5_o, sf5_t] = request.security(str.length(s5)>0 ? s5 : D, "D", _k_raw(), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+    [w.stock, w.safe1, w.safe2, w.safe3, w.safe4, w.safe5, w.cash, dl.ready_code, dl.core_build, stk_o, csh_o, sf1_o, sf2_o, sf3_o, sf4_o, sf5_o, stk_t]
+
+export core_build() => CORE_BUILD

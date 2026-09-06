@@ -1,0 +1,135 @@
+//@version=6
+library("phx_kro", overlay=true)
+
+// =====================
+// EXPORTED TYPE
+// =====================
+export type KROFeed
+    // Wave + colori logici
+    float Wave
+    bool  is_green
+    bool  is_red
+    // Band width e iper-larghezza
+    float band_width
+    float band_width_sma
+    float band_width_std
+    bool  is_hyper_wide
+    // OB/OS dinamici su Wave
+    float wave_sma
+    float wave_std
+    float wave_ob_threshold
+    float wave_os_threshold
+    bool  is_overbought
+    bool  is_oversold
+    // Conferme base (reversal immediato)
+    bool  is_oversold_confirmed
+    bool  is_overbought_confirmed
+    // Conferme potenziate (MACD/RSI/Sto/ADX/BB/Vol)
+    bool  enhanced_os_confirmed
+    bool  enhanced_ob_confirmed
+    // Transizioni & start-waves
+    bool  triple_green_transition
+    bool  triple_red_transition
+    bool  startwave_bull
+    bool  startwave_bear
+
+// =====================
+// INTERNALS
+// =====================
+kernel_val(float x, string kernel_type) =>
+    switch kernel_type
+        "Epanechnikov" => math.abs(x) <= 1 ? 0.75 * (1 - x * x) : 0.0
+        "Logistic"     => 1 / math.exp(x + 2 + math.exp(-x))
+        "Wave"         => math.abs(x) <= 0.5 ? (1 - math.abs(x)) * math.cos(math.pi * x) : 0.0
+
+kernelRegression(series float src, int bandwidth, string kernel_type) =>
+    float sumWeightedY = 0.0
+    float sumKernels   = 0.0
+    float bw2 = bandwidth * bandwidth
+    for i = 0 to bandwidth - 1
+        float base = (i * i) / bw2
+        float kv   = kernel_val(base, kernel_type)
+        sumWeightedY += kv * src[i]
+        sumKernels   += kv
+    (src - (sumKernels == 0 ? src : sumWeightedY / sumKernels)) / src
+
+waveCalculation(series float source, int bandwidth, float bbwidth) =>
+    float sum  = 0.0
+    float sumw = 0.0
+    float bw2  = bandwidth * bandwidth
+    for i = 0 to bandwidth
+        float v = (i * i) / bw2 / bbwidth
+        float w = v <= 0.5 ? (1 - v) * math.cos(math.pi * v) : 0.0
+        sum  += source[i] * w
+        sumw += w
+    sum / (sumw == 0 ? 1 : sumw)
+
+// =====================
+// EXPORTED API
+// =====================
+export compute(series float src, int bandwidth, float bbwidth, int sdLook, float sdMult, float obos_mult) =>
+    // Wave
+    float Wave = waveCalculation(src, bandwidth, bbwidth)
+    bool  is_green = Wave > Wave[1]
+    bool  is_red   = Wave < Wave[1]
+
+    // Band width (usa sdLook/sdMult per evitare “unused args”)
+    float band_width      = math.abs(Wave - hl2)
+    float band_width_sma  = ta.sma(band_width, sdLook)
+    float band_width_std  = ta.stdev(band_width, sdLook)
+    float band_width_thr  = band_width_sma + sdMult * band_width_std
+    bool  is_hyper_wide   = band_width > band_width_thr
+
+    // OB/OS dinamici
+    float wave_sma = ta.sma(Wave, 50)
+    float wave_std = ta.stdev(Wave, 50)
+    float wave_ob_threshold = wave_sma + obos_mult * wave_std
+    float wave_os_threshold = wave_sma - obos_mult * wave_std
+    bool  is_overbought = Wave > wave_ob_threshold
+    bool  is_oversold   = Wave < wave_os_threshold
+
+    // Conferme base
+    bool is_oversold_confirmed   = is_oversold   and is_red[1]   and Wave > Wave[1]
+    bool is_overbought_confirmed = is_overbought and is_green[1] and Wave < Wave[1]
+
+    // Indicatori di supporto
+    [macdL, macdS, _] = ta.macd(close, 12, 26, 9)
+    [dip, dim, adx]   = ta.dmi(14, 14)
+    [bb_mid, bb_upper, bb_lower] = ta.bb(close, 20, 2)
+
+    bool macd_up      = ta.crossover(macdL, macdS)
+    bool macd_dn      = ta.crossunder(macdL, macdS)
+    float rsi_val     = ta.rsi(close, 14)
+    bool  rsi_ob      = rsi_val > 70
+    bool  rsi_os      = rsi_val < 30
+    float sto_k       = ta.stoch(close, high, low, 14)
+    float sto_d       = ta.sma(sto_k, 3)
+    bool  sto_ob      = sto_k > 80
+    bool  sto_os      = sto_k < 20
+    float vol_sma     = ta.sma(volume, 20)
+    bool  vol_spike   = volume > vol_sma * 1.5
+    bool  strong_trend = adx > 25
+    bool  bb_squeeze   = (bb_upper - bb_lower) / bb_mid < 0.015
+
+    // Conferme potenziate
+    bool enhanced_os_confirmed = is_oversold_confirmed   and (rsi_os or sto_os) and macd_up and vol_spike and strong_trend and bb_squeeze
+    bool enhanced_ob_confirmed = is_overbought_confirmed and (rsi_ob or sto_ob) and macd_dn and vol_spike and strong_trend and bb_squeeze
+
+    // Start waves
+    bool startwave_bull = Wave > Wave[1] and Wave[1] <= Wave[2]
+    bool startwave_bear = Wave < Wave[1] and Wave[1] >= Wave[2]
+
+    // Transitions
+    bool triple_green_transition = enhanced_os_confirmed
+    bool triple_red_transition   = enhanced_ob_confirmed
+
+    KROFeed.new( Wave, is_green, is_red, band_width, band_width_sma, band_width_std, is_hyper_wide, wave_sma, wave_std, wave_ob_threshold, wave_os_threshold, is_overbought, is_oversold, is_oversold_confirmed, is_overbought_confirmed, enhanced_os_confirmed, enhanced_ob_confirmed, triple_green_transition, triple_red_transition, startwave_bull, startwave_bear )
+
+// Helper MTF (per request.security() nel chiamante)
+export start_flags(series float src, int bandwidth, float bbwidth) =>
+    float W  = waveCalculation(src, bandwidth, bbwidth)
+    float W1 = waveCalculation(src[1], bandwidth, bbwidth)
+    float W2 = waveCalculation(src[2], bandwidth, bbwidth)
+    bool gs = W > W1 and W1 <= W2
+    bool rs = W < W1 and W1 >= W2
+    [gs, rs]

@@ -1,0 +1,881 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   Velocity Profile (Flow Rate) Analysis.
+//                This library implements a sophisticated framework for measuring 
+//                the physical speed of trading (Contracts per Second) at specific 
+//                price levels by relating volume to the time spent at those levels.
+//
+//                ## Core Concept: Market Velocity
+//
+//                Unlike Volume Profiles, which only answer "how much" traded, 
+//                Velocity Profiles answer "how fast" it traded.
+//                It is calculated as: `Velocity = Volume / Duration`
+//
+//                This metric reveals hidden market dynamics invisible to pure 
+//                Volume or TPO profiles:
+//
+//                1.  **High Velocity (Fast Flow):**
+//                    * **Aggression:** Initiative buyers/sellers hitting market
+//                      orders rapidly.
+//                    * **Liquidity Vacuum:** Price slips through a level because
+//                      order book depth is thin (low resistance).
+//
+//                2.  **Low Velocity (Slow Flow):**
+//                    * **Absorption:** High volume but very slow price movement.
+//                      Indicates massive passive limit orders ("Icebergs").
+//                    * **Apathy:** Little volume over a long time. Lack of
+//                      interest from major participants.
+//
+//                ## Architecture: Hybrid Triple-Engine Composition
+//
+//                To ensure maximum performance while offering full statistical
+//                depth for all metrics, this library utilizes a **Hybrid 
+//                Architecture** combining high-level logic with low-level math cores:
+//
+//                #### Engine A: The Master (`vpVol`) -> `LibVPrf`
+//                * **Role:** Business Logic Wrapper.
+//                * **Purpose:** Manages the complex logic of volume ingestion, 
+//                  including Buy/Sell splitting (Classic/Dynamic) and CVD tracking.
+//                  It maintains the "ground truth" of price bins and ranges.
+//
+//                #### Engine B: The Time Container (`vpTime`) -> `LibProf`
+//                * **Role:** Lightweight Math Core.
+//                * **Purpose:** Serves as the denominator in the velocity equation.
+//                  It abstracts "Time" (ms) as generic mass, storing it efficiently 
+//                  without the overhead of trading logic.
+//
+//                #### Engine C: The Calculator (`vpVelo`) -> `LibProf`
+//                * **Role:** Scratchpad / JIT Compiler.
+//                * **Purpose:** When complex statistics (like Value Area or Skewness)
+//                  are requested for **Velocity**, this engine is assembled 
+//                  on-demand ("Just-In-Time"). It leverages the full statistical 
+//                  power of the core engine without persistent memory overhead.
+//
+//                ## Unified API
+//                Access to all metrics (Volume, Time, Velocity) is standardized via
+//                the `Metric` enum, allowing for polymorphic data retrieval logic
+//                in indicators.
+//
+//                ## Key Features
+//
+//                1.  **Dual-Mode Geometry (Linear & Logarithmic):**
+//                    Fully inherits the capabilities of the underlying engines.
+//                    - **Linear:** Measures velocity as "Contracts per Second per Tick".
+//                    - **Logarithmic:** Measures velocity relative to percentage moves.
+//                      Crucial for analyzing flow rates in assets with extreme ranges 
+//                      (e.g., Crypto), ensuring that "fast flow" is defined physically 
+//                      correct relative to the scale of the move.
+//
+//                2.  **Unified API (Polymorphism):**
+//                    Access to all metrics is standardized via the `Metric` enum:
+//                    - `Metric.volume`: Standard Volume Profile.
+//                    - `Metric.time`: Time-at-Price Profile (TPO-like).
+//                    - `Metric.velocity`: The derived Flow Rate Profile.
+//
+//                3.  **High-Fidelity Resampling:**
+//                    Uses the core engine's linear interpolation model to accurately 
+//                    redistribute Time and Volume when the grid resolution changes,
+//                    preserving the calculated flow rates without aliasing artifacts.
+//
+//                4.  **Just-In-Time (JIT) Assembly:**
+//                    Velocity data is derived lazily. The heavy calculation of 
+//                    combining Volume and Time arrays happens only when a getter 
+//                    (e.g., `getBins`, `getPoc`) for `Metric.velocity` is called, 
+//                    keeping the library extremely performant during data ingestion.
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibVelo")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.2.0
+// (Ref) Architecture: Decoupled Time and Velocity engines (`_vpTime`,
+//       `_vpVelo`) from the heavy `LibVPrf` wrapper. They now utilize the
+//       lightweight `LibProf` core directly to reduce memory footprint.
+// (Mod) API: Renamed all "Bucket" related methods to "Bin" (e.g., `getBuckets`
+//       -> `getBins`) and "Ranges" to "Bounds" to align with the `LibProf`
+//       nomenclature.
+// (Mod) API: Renamed `Metric` enum keys (`vol` -> `volume`, `velo` ->
+//       `velocity`) and reordered `create()` arguments (mandatory `valueArea`
+//       moved before optional `dynamic`).
+// (Fix) Math: Implemented global `EPSILON` (1e-9) safety checks in velocity
+//       calculations to prevent division-by-zero errors and floating-point
+//       jitter.
+// (Opt) Performance: Optimized `_assemble` method using bulk array retrieval
+//       instead of repeated getter calls inside loops.
+// (Add) Config: Added `gapSize` parameter to `create()` to control segmentation
+//       sensitivity.
+// (Add) Feature: Added `isLog` support to `create` and new `setLog` method.
+//
+// 2025-11-13 0.1.0
+// (New) Initial release of library.
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibVelo"
+const string VERSION = "0.2.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── IMPORTS ──────────────────────────────────────────────────────────────────
+import AustrianTradingMachine/LibBrSt/2 as LibBrSt
+import AustrianTradingMachine/LibProf/1 as LibProf
+import AustrianTradingMachine/LibVPrf/3 as LibVPrf
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const float EPSILON = 1e-9
+
+// ── ENUM ─────────────────────────────────────────────────────────────────────
+// @enum AllotMode  Internal data allocation mode (mirrors LibVPrf).
+// @field classic   Assign the entire bar duration/volume to the close bin.
+//                  Fast but imprecise for time distribution.
+// @field pdf       Distribute data across bins proportionally to the
+//                  price residence probability (recommended for Velocity).
+export enum AllotMode
+    classic = "Classic"
+    pdf     = "PDF"
+
+// @enum SplitMode  Internal buy/sell split mode (mirrors LibVPrf).
+// @field classic   Classic split based on close >= open.
+// @field dynamic   Dynamic split based on candle body and trend.
+export enum SplitMode
+    classic = "Classic"
+    dynamic = "Dynamic"
+
+// @enum Metric Selects which data aspect to analyse.
+// @field volume    Target the Volume Profile (Relevance).
+// @field time      Target the Time Profile (Duration).
+// @field velocity  Target the derived Velocity Profile (Character/Flow Rate).
+export enum Metric
+    volume   = "Volume"
+    time     = "Time"
+    velocity = "Velocity"
+
+// ── UDT ──────────────────────────────────────────────────────────────────────
+// @type Velo Composite Velocity Profile Controller.
+// @field _vpVol       LibVPrf.VPrf     Engine A: Master Volume (Wrapper Logic).
+// @field _vpTime      LibProf.Prof     Engine B: Time container (Core Logic).
+// @field _vpVelo      LibProf.Prof     Engine C: Stats Scratchpad (Core Logic).
+// @field _estimator   LibBrSt.RealEst  PDF model for distribution attribution.
+// @field _allot       AllotMode        Attribution model (Classic or PDF).
+// @field _isDirty     bool             Lazy evaluation flag for vpVelo.
+export type Velo
+    LibVPrf.VPrf    _vpVol
+    LibProf.Prof    _vpTime
+    LibProf.Prof     _vpVelo
+  
+    LibBrSt.RealEst _estimator
+    AllotMode       _allot
+
+    bool            _isDirty
+
+// ── PRIVATE ──────────────────────────────────────────────────────────────────
+// @function Maps local AllotMode to LibVPrf AllotMode.
+// @param   mode AllotMode          Local allocation mode.
+// @returns      LibVPrf.AllotMode  Mapped LibVPrf allocation mode.
+_mapAllot(
+  AllotMode mode
+  ) =>
+    switch mode
+        AllotMode.pdf     => LibVPrf.AllotMode.pdf
+        AllotMode.classic => LibVPrf.AllotMode.classic
+        => runtime.error("Unknown AllotMode for LibVPrf"), na
+
+// @function Maps local SplitMode to LibVPrf SplitMode.
+// @param   mode SplitMode          Local split mode.
+// @returns      LibVPrf.SplitMode  Mapped LibVPrf split mode.
+_mapSplit(
+  SplitMode mode
+  ) =>
+    switch mode
+        SplitMode.dynamic => LibVPrf.SplitMode.dynamic
+        SplitMode.classic => LibVPrf.SplitMode.classic
+        => runtime.error("Unknown SplitMode for LibVPrf"), na
+
+// @function Checks if engines match the master structure.
+// @param   self        Velo  The profile object.
+// @returns      series bool  Flag (true) if bins and bounds of vpVol and vpTime are similar
+method _isSimilar(
+  Velo self
+  ) =>
+    volBins = self._vpVol.getBins()
+    [volUp, volLo] = self._vpVol.getBounds()
+
+    timeBins = self._vpTime.getBins()
+    [timeUp, timeLo] = self._vpTime.getBounds()
+
+    volBins == timeBins  and
+     math.abs(volUp - timeUp) < EPSILON and
+      math.abs(volLo - timeLo) < EPSILON
+
+// @function Synchronises the time engine with the master volume engine.
+//           Critical when dynamic bounds change to keep bins aligned.
+// @param   self Velo  The profile object.
+// @returns      Velo  `self` (chaining).
+method _sync(
+  Velo self
+  ) =>
+    if not self._isSimilar()
+        [up, lo] = self._vpVol.getBounds()
+        bins = self._vpVol.getBins()
+
+        self._vpTime.setBounds(up, lo)
+        self._vpTime.setBins(bins)
+
+        self._isDirty := true
+  
+    self
+
+// @function Accumulates time duration into a specific bin.
+// @param   self      Velo         The profile object.
+// @param   idx       series int   Bin index.
+// @param   duration  series float Duration value (ms) to add.
+// @returns      Velo  `self` (chaining).
+method _addTime(
+  Velo self,
+  series int idx,
+  series float duration
+  ) =>
+    if duration > EPSILON
+        self._vpTime.addMass(idx, duration, true)
+
+    self._isDirty := true
+  
+    self
+
+// @function Just-In-Time assembly of Velocity data into the calculator engine.
+//           Calculates both Buy and Sell Velocity separately.
+// @param   self Velo  The profile object.
+// @returns      Velo  `self` (chaining).
+method _assemble(
+  Velo self
+  ) =>
+    if self._isDirty
+        [up, lo] = self._vpVol.getBounds()
+        series int bins = self._vpVol.getBins()
+
+        self._vpVelo.setBounds(up, lo)
+        self._vpVelo.setBins(bins)
+        self._vpVelo.clear()
+
+        array<float> timeArr = self._vpTime.getMassA()
+        series int timeSize = array.size(timeArr) 
+        
+        array<float> buyArr  = self._vpVol.getBuyVol()
+        array<float> sellArr = self._vpVol.getSellVol()
+
+        for idx = 0 to bins - 1
+            series float tMs = idx < timeSize ? array.get(timeArr, idx) : 0.0
+            
+            if tMs > EPSILON
+                series float factor = 1000.0 / tMs
+                
+                series float buyVol  = array.get(buyArr, idx)
+                series float sellVol = array.get(sellArr, idx)
+
+                if buyVol > EPSILON
+                    self._vpVelo.addMass(idx, buyVol * factor, true)
+                if sellVol > EPSILON
+                    self._vpVelo.addMass(idx, sellVol * factor, false)
+        
+        self._isDirty := false
+    
+    self
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function Construct a new `Velo` controller, initializing its engines.
+// @param   bins       series int        Number of price bins ≥ 1.
+// @param   upper      series float      Upper price bound (absolute).
+// @param   lower      series float      Lower price bound (absolute).
+// @param   valueArea  series int        Percentage for Value Area (1..100).
+// @param   dynamic    series bool       Flag for dynamic adaption of profile bounds.
+// @param   isLog      series bool       Flag to enable Logarithmic bin scaling.
+// @param   gapSize    series int        Noise filter for segmentation. Number of allowed bins against trend (default 1).
+// @param   allot      series AllotMode  Allocation mode `Classic` or `PDF` (default `PDF`).
+// @param   estimator  series RealEst    PDF model for distribution attribution (default `Uniform`).
+// @param   split      series SplitMode  Buy/Sell split for the master volume engine (default `Classic`).
+// @param   trendLen   series int        Look‑back for trend factor in dynamic split (default 3).
+// @returns            Velo              Freshly initialised velocity profile.
+export create(
+  series int bins,
+  series float upper,
+  series float lower,
+  series int valueArea,
+  series bool dynamic = false,
+  series bool isLog = false,
+  series int gapSize = 1,
+  series AllotMode allot = AllotMode.pdf,
+  series LibBrSt.RealEst estimator = LibBrSt.RealEst.uniform,
+  series SplitMode split = SplitMode.classic,
+  series int trendLen = 3
+  ) =>
+    LibVPrf.VPrf vpVol = LibVPrf.create(
+      bins      = bins,
+      upper     = upper,
+      lower     = lower,
+      valueArea = valueArea,
+
+      dynamic   = dynamic,
+      isLog     = isLog,
+      gapSize   = gapSize,
+
+      allot     = _mapAllot(allot),
+      estimator = estimator,
+
+      split     = _mapSplit(split),
+      trendLen  = trendLen)
+
+    LibProf.Prof vpTime = LibProf.create(
+      bins       = bins,
+      upper      = upper,
+      lower      = lower,
+
+      resolution = syminfo.mintick,
+      dynamic    = dynamic,
+      isLog      = isLog,
+
+      coverage   = valueArea,
+      gapSize    = gapSize)
+    
+    LibProf.Prof vpVelo = LibProf.create(
+      bins       = bins,
+      upper      = upper,
+      lower      = lower,
+
+      resolution = syminfo.mintick,
+      dynamic    = dynamic,
+      isLog      = isLog,
+
+      coverage   = valueArea,
+      gapSize    = gapSize)
+ 
+    Velo.new(
+      _vpVol     = vpVol,
+      _vpTime    = vpTime,
+      _vpVelo    = vpVelo,
+
+      _estimator = estimator,
+      _allot     = allot,
+
+      _isDirty   = true)
+
+// @function Create a deep copy of the composite profile.
+// @param    self Velo  Profile object to copy.
+// @returns       Velo  A completely independent clone.
+export method clone(
+  Velo self
+  ) =>
+    Velo.new(
+      _vpVol     = self._vpVol.clone(),
+      _vpTime    = self._vpTime.clone(),
+      _vpVelo    = self._vpVelo.clone(),
+
+      _estimator = self._estimator,
+      _allot     = self._allot,
+
+      _isDirty   = self._isDirty)
+
+// @function Merges external data (Volume and Time) into the current profile.
+//           Automatically handles resizing and re-binning if bounds differ.
+// @param   self     Velo          The profile object.
+// @param   buyVol   array<float>  Source Buy Volume bin array.
+// @param   sellVol  array<float>  Source Sell Volume bin array.
+// @param   totTime  array<float>  Source Time bin array (ms).
+// @param   upper    series float  Upper price bound of the source data.
+// @param   lower    series float  Lower price bound of the source data.
+// @param   cvd      series float  Source Volume CVD final value.
+// @param   cvdHi    series float  Source Volume CVD High watermark.
+// @param   cvdLo    series float  Source Volume CVD Low watermark.
+// @returns          Velo          `self` (chaining).
+export method merge(
+  Velo self,
+  array<float> buyVol,
+  array<float> sellVol,
+  array<float> totTime,
+  series float upper,
+  series float lower,
+  series float cvd,
+  series float cvdHi,
+  series float cvdLo
+  ) =>
+    self._vpVol.merge(
+      buyVol  = buyVol,
+      sellVol = sellVol,
+      upper   = upper,
+      lower   = lower,
+
+      cvd     = cvd,
+      cvdHi   = cvdHi,
+      cvdLo   = cvdLo)
+
+    self._vpTime.merge(
+      massA = totTime,
+      massB = array.new_float(array.size(totTime), 0.0),
+      upper = upper,
+      lower = lower)
+
+    self._sync()
+    self._isDirty := true
+
+    self
+
+// @function Reset all engines and accumulators.
+// @param    self Velo  Profile object to clear.
+// @returns       Velo  Cleared profile (chaining).
+export method clear(
+  Velo self
+  ) =>
+    self._vpVol.clear()
+    self._vpTime.clear()
+    self._vpVelo.clear()
+
+    self._isDirty := true
+
+    self
+
+// @function Main data ingestion. Distributes Volume and Time to bins.
+// @param    self   Velo        The profile object.
+// @param    offset series int  Offset of the bar to add (default 0).
+// @returns         Velo        `self` (chaining).
+export method addBar(
+  Velo self,
+  series int offset = 0
+  ) =>
+    if not na(open[offset])   and
+       not na(high[offset])   and
+       not na(low[offset])    and
+       not na(close[offset])  and
+       not na(volume[offset]) and
+       volume[offset] > EPSILON
+
+        self._vpVol.addBar(offset)
+        self._sync()
+
+        series float duration = (time_close[offset] - time[offset])
+
+        if self._allot == AllotMode.classic or high[offset] == low[offset]
+            self._addTime(self._vpVol.getBinIdx(close[offset]), duration)
+        else if self._allot == AllotMode.pdf
+            series bool isLog = self._vpTime._isLog
+            
+            series int idxLo = self._vpVol.getBinIdx(low[offset])
+            series int idxUp = self._vpVol.getBinIdx(high[offset])
+
+            for idx = idxLo to idxUp
+                [bUp, bLo] = self._vpVol.getBinBnds(idx)
+                series float share = LibBrSt.realCdf(
+                  estimator = self._estimator,
+                  upper     = math.min(high[offset], bUp),
+                  lower     = math.max(low[offset], bLo),
+                  logSpace  = isLog,
+                  offset    = offset)
+                
+                if share > EPSILON
+                    self._addTime(idx, duration * share)
+    
+    self
+
+// @function Sets the number of bins for the profile.
+// @param    self    Velo        The profile object.
+// @param    bins    series int  New number of bins.
+// @returns          Velo        `self` (chaining).
+export method setBins(
+  Velo self,
+  series int bins
+  ) =>
+    if self._vpVol.getBins() != bins
+        self._vpVol.setBins(bins = bins)
+        
+        self._sync()
+    
+    self
+
+// @function Sets the price bounds for the profile.
+// @param    self    Velo          The profile object.
+// @param    upper   series float  New upper price bound.
+// @param    lower   series float  New lower price bound.
+// @returns          Velo          `self` (chaining).
+export method setBounds(
+  Velo self,
+  series float upper,
+  series float lower
+  ) =>
+    [rUp, rLo] = self._vpVol.getBounds()
+    if math.abs(rUp - upper) > EPSILON or math.abs(rLo - lower) > EPSILON
+        self._vpVol.setBounds(upper = upper, lower = lower)
+
+        self._sync()
+    
+    self
+
+// @function Sets the minimum step size (granularity limit) for the underlying engines.
+//           Propagates the limit to Volume, Time, and Velocity engines.
+// @param   self       Velo         Profile object
+// @param   resolution series float The new smallest allowed bin size.
+// @returns            Velo         `self` (chaining)
+export method setResolution(
+  Velo self,
+  series float resolution
+  ) =>
+    self._vpVol.setResolution(resolution = resolution)
+    self._vpTime.setResolution(resolution = resolution)
+    self._vpVelo.setResolution(resolution = resolution)
+
+    self._sync()
+
+    self
+
+// @function Toggles the geometry of all engines between Linear and Logarithmic.
+//           Propagates the state to Volume, Time, and Velocity engines.
+// @param   self   Velo        Profile object
+// @param   isLog  series bool True for Logarithmic, False for Linear.
+// @returns        Velo       `self` (chaining)
+export method setLog(
+  Velo self,
+  series bool isLog
+  ) =>
+    self._vpVol.setLog(isLog = isLog)
+    self._vpTime.setLog(isLog = isLog)
+    self._vpVelo.setLog(isLog = isLog)
+
+    self._sync()
+    self._isDirty := true
+
+    self
+
+// @function Set the percentage of volume/time for the Value Area.
+// @param    self        Velo        The profile object.
+// @param    valueArea   series int  New Value Area percentage (0..100).
+// @returns              Velo        `self` (chaining).
+export method setValueArea(
+  Velo self,
+  series int valueArea
+  ) =>
+    self._vpVol.setValueArea(valueArea = valueArea)
+    self._vpTime.setCoverage(coverage = valueArea)
+    self._vpVelo.setCoverage(coverage = valueArea)
+    
+    self
+
+// @function Sets the gap size (noise filter) for segmentation across all engines.
+// @param   self     Velo        The profile object.
+// @param   gapSize  series int  Number of bins allowed to violate monotonicity.
+// @returns          Velo        `self` (chaining)
+export method setGapSize(
+  Velo self,
+  series int gapSize
+  ) =>
+    self._vpVol.setGapSize(gapSize = gapSize)
+    self._vpTime.setGapSize(gapSize = gapSize)
+    self._vpVelo.setGapSize(gapSize = gapSize)
+
+    self
+
+// @function Returns the current number of bins in the profile.
+// @param    self Velo      The profile object.
+// @returns       series int The number of bins.
+export method getBins(
+  Velo self
+  ) =>
+    self._vpVol.getBins()
+
+// @function Returns the current price bounds of the profile.
+// @param    self Velo        The profile object.
+// @returns [upper, lower]
+//          upper  series float The upper price bound of the profile.
+//          lower  series float The lower price bound of the profile.
+export method getBounds(
+  Velo self
+  ) =>
+    self._vpVol.getBounds()
+
+// @function Get Width of a bin.
+// @param   self Velo        The profile object.
+// @returns      series float The width of a bin
+export method getBinWidth(
+  Velo self
+  ) =>
+    self._vpVol.getBinWidth()
+
+// @function Get Index of a bin.
+// @param   self Velo        The profile object.
+// @param   price  series float The price to find the bin index for
+// @returns        series int   bin index 0…bins‑1 (clamped)
+export method getBinIdx(
+  Velo self,
+  series float price
+  ) =>
+    self._vpVol.getBinIdx(price = price)
+
+// @function Get Bounds of a bin.
+// @param   self Velo        The profile object.
+// @param   idx  series int  Bin index
+// @returns [up, lo]
+//          up  series float  The upper price bound of the bin.
+//          lo  series float  The lower price bound of the bin.
+export method getBinBnds(
+  Velo self,
+  series int idx
+  ) =>
+    self._vpVol.getBinBnds(idx = idx)
+
+// @function Get Mid price of a bin.
+// @param   self Velo        The profile object.
+// @param   idx  series int  Bin index
+// @returns      series float  Mid price
+export method getBinMid(
+  Velo self,
+  series int idx
+  ) =>
+    self._vpVol.getBinMid(idx = idx)
+
+// @function Returns a copy the internal raw data array for the 'Buy' side (Array A).
+//           - Volume: Buy Volume
+//           - Time:   Duration (ms)
+//           - Velo:   Buy Velocity
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         array<float> The internal array.
+export method getArrayBuy(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getBuyVol()
+        Metric.time     => self._vpTime.getMassA()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getMassA()
+
+// @function Returns a copy the internal raw data array for the 'Sell' side (Array B).
+//           - Volume: Sell Volume
+//           - Time:   Zero (Empty)
+//           - Velo:   Sell Velocity
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         array<float> The internal array.
+export method getArraySell(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getSellVol()
+        Metric.time     => self._vpTime.getMassB()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getMassB()
+
+// @function Returns value of a specific bin for the 'Buy' side.
+// @param    self   Velo    The profile object.
+// @param    idx    int     The bin index.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         float   The value of the bin.
+export method getBinBuy(
+  Velo self,
+  series int idx,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getBinBuyVol(idx)
+        Metric.time     => self._vpTime.getBinMassA(idx)
+        Metric.velocity =>
+            self._assemble()
+            self._vpVelo.getBinMassA(idx)
+
+// @function Returns value of a specific bin for the 'Sell' side.
+// @param    self   Velo    The profile object.
+// @param    idx    int     The bin index.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         float   The value of the bin.
+export method getBinSell(
+  Velo self,
+  series int idx,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getBinSellVol(idx)
+        Metric.time     => self._vpTime.getBinMassB(idx)
+        Metric.velocity =>
+            self._assemble()
+            self._vpVelo.getBinMassB(idx)
+
+// @function Returns Point of Control (POC) information for the specified target metric.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns [pocIdx, pocPrice]
+//          pocIdx   series int    The index of the POC bin.
+//          pocPrice series float  The mid-price of the POC bin.
+export method getPoc(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getPoc()
+        Metric.time     => self._vpTime.getPeak()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getPeak()
+
+// @function Returns Value Area (VA) information for the specified target metric.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns [vaUpIdx, vaUpPrice, vaLoIdx, vaLoPrice]
+//          vaUpIdx   series int    The index of the upper VA bin.
+//          vaUpPrice series float  The upper price bound of the VA.
+//          vaLoIdx   series int    The index of the lower VA bin.
+//          vaLoPrice series float  The lower price bound of the VA.
+export method getValueArea(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getValueArea()
+        Metric.time     => self._vpTime.getCoverage()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getCoverage()
+
+// @function Returns the Median price for the specified target metric distribution.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns [medianIdx, medianPrice]
+//          medianIdx   series int    The index of the bin containing the median.
+//          medianPrice series float  The median price.
+export method getMedian(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getMedian()
+        Metric.time     => self._vpTime.getMedian()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getMedian()
+
+// @function Returns the weighted average price (VWAP/TWAP) for the specified target.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns [avgIdx, avgPrice]
+//          avgIdx   series int    The index of the bin containing the average.
+//          avgPrice series float  The weighted average price.
+export method getAverage(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getVwap()
+        Metric.time     => self._vpTime.getMean()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getMean()
+
+// @function Returns the standard deviation for the specified target distribution.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         series float  The standard deviation.
+export method getStdDev(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getStdDev()
+        Metric.time     => self._vpTime.getStdDev()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getStdDev()
+
+// @function Returns the skewness for the specified target distribution.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         series float  The skewness.
+export method getSkewness(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getSkewness()
+        Metric.time     => self._vpTime.getSkewness()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getSkewness()
+
+// @function Returns the excess kurtosis for the specified target distribution.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         series float  The excess kurtosis.
+export method getKurtosis(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getKurtosis()
+        Metric.time     => self._vpTime.getKurtosis()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getKurtosis()
+
+// @function Returns the fundamental unimodal segments for the specified target metric.
+//           Calculates on-demand if the target is 'Velocity' and data changed.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns         matrix<int>   A 2-column matrix where each row is an [startIndex, endIndex] pair.
+export method getSegments(
+  Velo self,
+  Metric target
+  ) =>
+    switch target
+        Metric.volume   => self._vpVol.getSegments()
+        Metric.time     => self._vpTime.getSegments()
+        Metric.velocity => 
+            self._assemble()
+            self._vpVelo.getSegments()
+
+// @function Returns Cumulative Volume Delta (CVD) information.
+//           Note: Only available for Metric.volume.
+// @param    self   Velo    The profile object.
+// @param    target Metric  The data aspect to analyse (Volume, Time, Velocity).
+// @returns [cvd, cvdHi, cvdLo]
+//          cvd    series float  The final delta value.
+//          cvdHi  series float  The historical high-water mark of the delta.
+//          cvdLo  series float  The historical low-water mark of the delta.
+export method getCvd(
+  Velo self,
+  Metric target
+  ) =>
+    if target != Metric.volume
+        runtime.error("CVD is only available for Volume metric.")
+
+    self._vpVol.getCvd()

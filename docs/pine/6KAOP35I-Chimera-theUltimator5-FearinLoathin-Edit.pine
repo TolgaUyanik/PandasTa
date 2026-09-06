@@ -1,0 +1,984 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TheUltimator5
+//   FIXES:  MACD inputs now wired to user settings (was hard-coded 12/26/9).
+//           Stochastic %K smoothing (stoch_smooth) now applied.
+//           ADX variable shadowing resolved — uses ta.dmi() directly.
+//           Dead calculate_adx_components() function removed.
+//           Hard-coded bb_multiplier deduplicated with bb_mult input.
+//           Duplicate tolerance variables consolidated.
+//   NEW:    Oscillator sub-style selector (DNA Candles / Line / Lines+Fill).
+//           HTF gap-line enable toggle.
+//           Volume Voids colour inputs moved to their own group.
+//           ADX settings (High Threshold, Consolidation Background) given own group.
+//           Corrected all tooltip typos and grammar.
+//           Gap-fill state machine consolidated into a single reusable function.
+
+//@version=6
+indicator("Chimera [theUltimator5] FearinLoathin Edit", overlay=false)
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const string OPT_A         = "Oscillator"
+const string OPT_B         = "ADX"
+const string OSC_BARS      = "Candle 'DNA' Style"
+const string OSC_LINE      = "Line"
+const string OSC_LINE_FILL = "Lines with Fill"
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+// ── Visual Mode ───────────────────────────────────────────────────────────────
+mode = input.string(OPT_A, "Visual Style",
+     options = [OPT_A, OPT_B],
+     tooltip = "Oscillator: a five-component sentiment oscillator.\nADX: trend-strength and directional-movement view.")
+showA = mode == OPT_A
+showB = mode == OPT_B
+
+// ── Oscillator Settings ────────────────────────────────────────────────────────
+oscillator_visual = input.string(OSC_BARS, "Oscillator Display Style",
+     options = [OSC_BARS, OSC_LINE, OSC_LINE_FILL],
+     group   = "Oscillator Settings",
+     tooltip = "How the oscillator signal is drawn.\n• Candle 'DNA' Style: Wick-free candles spanning the fast and slow MAs.\n• Line: Fast MA line only.\n• Lines with Fill: Both MAs with a shaded fill between them.")
+show_osc_bars      = oscillator_visual == OSC_BARS
+show_osc_line      = oscillator_visual == OSC_LINE
+show_osc_line_fill = oscillator_visual == OSC_LINE_FILL
+
+show_slow_ma = input.bool(true, "Show Slow MA",
+     group   = "Oscillator Settings",
+     tooltip = "In DNA mode: shows the candle body spanning the slow MA. In Lines with Fill: shows the second line.")
+show_fast_line = input.bool(true, "Show Fast MA Line",
+     group   = "Oscillator Settings",
+     tooltip = "Show the fast-MA line. Visible in all oscillator display styles.")
+selected_component = input.string("None", "Show Individual Component",
+     options = ["None", "RSI", "MACD", "Bollinger Bands", "Stochastic", "ATR"],
+     group   = "Oscillator Settings",
+     tooltip = "Overlay one normalised component value on the pane for closer inspection. Does not affect the combined sentiment.")
+
+// ── Crossover Signals ──────────────────────────────────────────────────────────
+show_crossover = input.bool(false, "Show Buy and Sell Overlay Signals",
+     tooltip = "Show triangle arrows on the price chart when the oscillator exits an overbought or oversold extreme.")
+
+// ── Color Settings ─────────────────────────────────────────────────────────────
+fear_color  = input.color(color.maroon, "Oversold Color",
+     group   = "Color Settings",
+     tooltip = "Color applied to bearish/oversold oscillator candles and the lower sentiment band.")
+greed_color = input.color(color.aqua, "Overbought Color",
+     group   = "Color Settings",
+     tooltip = "Color applied to bullish/overbought oscillator candles and the upper sentiment band.")
+
+// ── General Settings ───────────────────────────────────────────────────────────
+lookback_period = input.int(252, "Lookback Period",
+     minval  = 50, maxval = 500,
+     group   = "General Settings",
+     tooltip = "Bars used to compute dynamic mean and standard-deviation bands. Higher values produce smoother, slower-moving bands.")
+short_smoothing = input.int(1, "Short Smoothing Period",
+     minval  = 1,
+     group   = "General Settings",
+     tooltip = "SMA length for the fast sentiment line. Set to 1 for no smoothing (raw signal).")
+long_smoothing = input.int(12, "Long Smoothing Period",
+     minval  = 2,
+     group   = "General Settings",
+     tooltip = "SMA length for the slow sentiment line. Crossovers between fast and slow signal trend changes.")
+stdev_value = input.float(1.8, "Standard Deviation Multiplier",
+     step    = 0.1,
+     group   = "General Settings",
+     tooltip = "Width of the overbought/oversold bands in standard deviations. Higher = fewer but stronger signals.")
+
+// ── Oscillator Signal Component Settings ──────────────────────────────────────
+rsi_length_oscillator = input.int(14, "1 - RSI Length",
+     group   = "Oscillator Signal Settings",
+     tooltip = "RSI lookback period. Default: 14.")
+macd_fast = input.int(12, "2 - MACD Fast Length",
+     group   = "Oscillator Signal Settings",
+     tooltip = "MACD fast EMA period. Default: 12.")
+macd_slow = input.int(26, "2 - MACD Slow Length",
+     group   = "Oscillator Signal Settings",
+     tooltip = "MACD slow EMA period. Default: 26.")
+macd_signal_len = input.int(9, "2 - MACD Signal Length",
+     group   = "Oscillator Signal Settings",
+     tooltip = "MACD signal line period. Default: 9.")
+bb_length = input.int(20, "3 - Bollinger Bands Length",
+     group   = "Oscillator Signal Settings",
+     tooltip = "Bollinger Bands SMA period. Also controls the breakout VFX detection. Default: 20.")
+bb_mult = input.float(2.0, "3 - Bollinger Bands StdDev Multiplier",
+     step    = 0.1,
+     group   = "Oscillator Signal Settings",
+     tooltip = "Bollinger Bands standard deviation multiplier. Also scales the breakout VFX detection. Default: 2.0.")
+stoch_k_period = input.int(14, "4 - Stochastic %K Period",
+     group   = "Oscillator Signal Settings",
+     tooltip = "Stochastic raw %K lookback period. Default: 14.")
+stoch_smooth = input.int(3, "4 - Stochastic %K Smoothing",
+     group   = "Oscillator Signal Settings",
+     tooltip = "SMA smoothing applied to raw %K before computing %D. Default: 3.")
+stoch_d_period = input.int(3, "4 - Stochastic %D Smoothing",
+     group   = "Oscillator Signal Settings",
+     tooltip = "SMA length applied to smoothed %K to produce %D. Default: 3.")
+atr_length_oscillator = input.int(14, "5 - ATR Length",
+     group   = "Oscillator Signal Settings",
+     tooltip = "ATR and DMI period for the directional-volatility component. Default: 14.")
+
+// ── Table Settings ─────────────────────────────────────────────────────────────
+show_table = input.bool(true, "Show Information Table",
+     group   = "Table Settings",
+     tooltip = "Display a summary table showing each component's normalised value and current sentiment label. Oscillator mode only.")
+table_position = input.string("Middle Left", "Table Position",
+     options = ["Top Left", "Top Right", "Bottom Left", "Bottom Right", "Middle Left", "Middle Right"],
+     group   = "Table Settings",
+     tooltip = "Position of the information table within the oscillator pane.")
+
+// ── ADX Settings ───────────────────────────────────────────────────────────────
+adx_high_threshold = input.int(40, "High Threshold",
+     minval  = 25, maxval = 100,
+     group   = "ADX Settings",
+     tooltip = "ADX level above which the market is considered strongly trending. Activates the directional gradient fill and fire/ice visual effects.")
+show_highlights = input.bool(false, "Show Consolidation Background",
+     group   = "ADX Settings",
+     tooltip = "Tint the chart background when ADX is below the low threshold, indicating a weak or consolidating market. ADX mode only.")
+
+// ── HTF Settings ───────────────────────────────────────────────────────────────
+htf_enabled = input.bool(true, "Enable Higher-Timeframe Gap Lines",
+     group   = "HTF Settings",
+     tooltip = "Calculate and display gap lines from up to three automatically selected higher timeframes. Disabling saves resources.")
+gap_line_color = input.color(color.blue, "Gap Line Color (Current TF)",
+     group   = "HTF Settings",
+     tooltip = "Color of the current-timeframe gap line drawn on the price chart.")
+htf_gap_line_color = input.color(color.purple, "Gap Line Color (HTF 1)",
+     group   = "HTF Settings",
+     tooltip = "Color of the first higher-timeframe gap line.")
+htf2_gap_line_color = input.color(color.fuchsia, "Gap Line Color (HTF 2)",
+     group   = "HTF Settings",
+     tooltip = "Color of the second higher-timeframe gap line.")
+htf3_gap_line_color = input.color(color.rgb(199, 21, 133), "Gap Line Color (HTF 3)",
+     group   = "HTF Settings",
+     tooltip = "Color of the third higher-timeframe gap line.")
+show_gap_labels = input.bool(true, "Show Gap Labels",
+     group   = "HTF Settings",
+     tooltip = "Show a price label at each active gap line, annotated with the originating timeframe.")
+
+// ── Visual FX ──────────────────────────────────────────────────────────────────
+show_vfx = input.bool(true, "Show Visual Overlay Flame Effects",
+     tooltip = "Show fire (bullish breakout) and ice (bearish breakout) glow effects on the price chart when price breaks out of Bollinger Bands during a strong trend.")
+
+// ── Volume Voids ───────────────────────────────────────────────────────────────
+showVoid = input.bool(false, "Show Low and Zero Volume Zones",
+     group   = "Volume Voids",
+     tooltip = "Highlight zero-volume gaps and low-volume zones on the price chart using a volume-by-price profile.")
+lookbackPeriod = input.int(500, "Lookback Period",
+     maxval  = 1000,
+     group   = "Volume Voids",
+     tooltip = "Bars used to build the volume-by-price profile for void detection.")
+numberOfBins = input.int(50, "Number of Volume Bins",
+     group   = "Volume Voids",
+     tooltip = "Profile resolution. More bins = finer detail, heavier computation.")
+showPointOfControl = input.bool(false, "Show Point of Control (PoC)",
+     group   = "Volume Voids",
+     tooltip = "Draw a horizontal line at the price level with the highest traded volume in the lookback window.")
+zeroVolumeBoxColor = input.color(color.orange, "Zero-Volume Zone Color",
+     group   = "Volume Voids",
+     tooltip = "Fill color for price zones where no volume was traded.")
+lowVolumeBoxColor = input.color(color.blue, "Low-Volume Zone Color",
+     group   = "Volume Voids",
+     tooltip = "Fill color for price zones with volume below the dynamic low-volume threshold.")
+pointOfControlColor = input.color(color.gray, "PoC Line Color",
+     group   = "Volume Voids",
+     tooltip = "Color of the Point of Control horizontal line.")
+showLowVolumeBorders = input.bool(false, "Show Low-Volume Zone Borders",
+     group   = "Volume Voids",
+     tooltip = "Draw visible borders around zero- and low-volume boxes. May add visual clutter.")
+lowVolumeThresholdDivisor = input.float(4.0, "Low-Volume Threshold Divisor",
+     minval  = 1.0, maxval = 20.0, step = 0.1,
+     group   = "Volume Voids",
+     tooltip = "A bin is labelled low-volume when its volume < total_volume / (divisor × bins). Higher values flag more bins as low-volume.")
+
+// =============================================================================
+// INTERNAL CONSTANTS
+// =============================================================================
+
+adx_length        = 14  // Wilder's RMA smoothing length for ADX/DI calculation
+di_ma_length      = 10  // EMA length for the ADX moving-average overlay line
+adx_low_threshold = 14  // ADX below this = weak/consolidating market
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+get_table_position() =>
+    switch table_position
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        "Middle Left"  => position.middle_left
+        "Middle Right" => position.middle_right
+        => position.top_right
+
+// Normalises src to [0,100] using z-score. Mean → 50; each σ shifts ±15 pts.
+normalize_std_dev(src, len) =>
+    if na(src)
+        50.0
+    else
+        m = ta.sma(src, len)
+        s = ta.stdev(src, len)
+        if na(s) or s == 0.0 or na(m)
+            50.0
+        else
+            math.max(0.0, math.min(100.0, 50.0 + (src - m) / s * 15.0))
+
+// Converts raw TF strings (e.g. "60", "240") to readable labels for gap-line annotations.
+fmt_tf(tf) =>
+    switch tf
+        "60"  => "1H"
+        "120" => "2H"
+        "180" => "3H"
+        "240" => "4H"
+        "480" => "8H"
+        "720" => "12H"
+        => tf
+
+// =============================================================================
+// AUTOMATIC HTF TIMEFRAME SELECTION
+// =============================================================================
+
+// Converts a TF period string to approximate minutes for comparison.
+tf_to_minutes(tf) =>
+    if str.contains(tf, "S")
+        math.round(str.tonumber(str.replace(tf, "S", "")) / 60)
+    else if str.contains(tf, "D")
+        str.tonumber(str.replace(tf, "D", "")) * 1440
+    else if str.contains(tf, "W")
+        str.tonumber(str.replace(tf, "W", "")) * 10080
+    else if str.contains(tf, "M")
+        str.tonumber(str.replace(tf, "M", "")) * 43200
+    else
+        str.tonumber(tf)
+
+// Returns the timeframe one step above the current chart TF.
+get_next_timeframe() =>
+    m = tf_to_minutes(timeframe.period)
+    switch
+        m <= 1    => "2"
+        m <= 2    => "3"
+        m <= 3    => "5"
+        m <= 5    => "10"
+        m <= 10   => "15"
+        m <= 15   => "30"
+        m <= 30   => "45"
+        m <= 45   => "60"
+        m <= 60   => "120"
+        m <= 120  => "180"
+        m <= 180  => "240"
+        m <= 240  => "480"
+        m <= 480  => "720"
+        m <= 720  => "1D"
+        m < 1440  => "1D"
+        m <= 1440 => "2D"
+        m <= 2880 => "W"
+        m <= 10080 => "M"
+        => "3M"
+
+// Returns the timeframe two steps above the current chart TF.
+get_htf2_timeframe() =>
+    m = tf_to_minutes(timeframe.period)
+    switch
+        m <= 1    => "3"
+        m <= 2    => "5"
+        m <= 3    => "10"
+        m <= 5    => "15"
+        m <= 10   => "30"
+        m <= 15   => "45"
+        m <= 30   => "60"
+        m <= 45   => "120"
+        m <= 60   => "180"
+        m <= 120  => "240"
+        m <= 180  => "480"
+        m <= 240  => "720"
+        m <= 480  => "1D"
+        m <= 720  => "2D"
+        m < 1440  => "2D"
+        m <= 1440 => "W"
+        m <= 2880 => "M"
+        m <= 10080 => "3M"
+        => "6M"
+
+// Returns the timeframe three steps above the current chart TF.
+get_htf3_timeframe() =>
+    m = tf_to_minutes(timeframe.period)
+    switch
+        m <= 1    => "5"
+        m <= 2    => "10"
+        m <= 3    => "15"
+        m <= 5    => "30"
+        m <= 10   => "45"
+        m <= 15   => "60"
+        m <= 30   => "120"
+        m <= 45   => "180"
+        m <= 180  => "720"
+        m <= 240  => "1D"
+        m <= 480  => "2D"
+        m <= 720  => "W"
+        m < 1440  => "W"
+        m <= 1440 => "M"
+        m <= 2880 => "3M"
+        m <= 10080 => "6M"
+        => "12M"
+htf_timeframe  = get_next_timeframe()
+htf2_timeframe = get_htf2_timeframe()
+htf3_timeframe = get_htf3_timeframe()
+
+
+// =============================================================================
+// OSCILLATOR COMPONENTS
+// =============================================================================
+
+var color invisible_line = color.new(color.white, 100)
+
+// 1. Relative Strength Index (RSI)
+rsi_val  = ta.rsi(close, rsi_length_oscillator)
+rsi_norm = normalize_std_dev(rsi_val, lookback_period)
+
+// 2. MACD  ★ Fix: now correctly uses macd_fast / macd_slow / macd_signal_len inputs
+[macd_line, sig_line, _hist] = ta.macd(close, macd_fast, macd_slow, macd_signal_len)
+macd_osc  = macd_line - sig_line
+macd_norm = normalize_std_dev(macd_osc, lookback_period)
+
+// 3. Bollinger Bands — position of close within the band (0 = lower band, 100 = upper band)
+bb_basis = ta.sma(close, bb_length)
+bb_dev   = bb_mult * ta.stdev(close, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+bb_pos   = na(bb_upper) or na(bb_lower) or (bb_upper - bb_lower) == 0 ? 50.0 :
+           100.0 * (close - bb_lower) / (bb_upper - bb_lower)
+bb_norm  = normalize_std_dev(bb_pos, lookback_period)
+
+// 4. Stochastic — raw %K → smoothed %K → %D  ★ Fix: stoch_smooth now applied
+sk_raw     = ta.stoch(close, high, low, stoch_k_period)
+sk         = ta.sma(sk_raw, stoch_smooth)
+sd         = ta.sma(sk, stoch_d_period)
+stoch_norm = na(sd) ? 50.0 : sd
+
+// 5. ATR + Directional Volatility — DI divergence weighted by relative ATR.
+//    A high ATR amplifies the DI+/DI- divergence, producing a score that
+//    reflects both how volatile and how directional the market currently is.
+atr_val            = ta.atr(atr_length_oscillator)
+[dip_o, dim_o, _a] = ta.dmi(atr_length_oscillator, atr_length_oscillator)
+di_diff            = dip_o - dim_o
+atr_pct            = na(close) or close == 0 ? 0.0 : atr_val / close * 100.0
+v_factor           = atr_pct / ta.sma(atr_pct, lookback_period)
+dir_vol            = di_diff * v_factor
+dv_hi              = ta.highest(dir_vol, lookback_period)
+dv_lo              = ta.lowest( dir_vol, lookback_period)
+atr_norm           = na(dv_hi) or na(dv_lo) or (dv_hi - dv_lo) == 0 ? 50.0 :
+                     50.0 + 50.0 * (dir_vol - (dv_hi + dv_lo) / 2.0) / ((dv_hi - dv_lo) / 2.0)
+
+// =============================================================================
+// COMBINED SENTIMENT
+// =============================================================================
+
+sent_raw   = (rsi_norm + macd_norm + bb_norm + stoch_norm + atr_norm) / 5.0
+sent_short = ta.sma(sent_raw, short_smoothing)
+sent_long  = ta.sma(sent_raw, long_smoothing)
+
+bull_xo = ta.crossover( sent_short, sent_long)
+bear_xo = ta.crossunder(sent_short, sent_long)
+
+var bool is_bull = true
+if bull_xo
+    is_bull := true
+else if bear_xo
+    is_bull := false
+
+avg_sent   = (sent_short + sent_long) / 2.0
+mid_line   = ta.sma(ta.sma(avg_sent, lookback_period), lookback_period)
+sent_stdev = ta.stdev(avg_sent, lookback_period * 2)
+top_band   = mid_line + stdev_value * sent_stdev
+bot_band   = mid_line - stdev_value * sent_stdev
+
+neutral_lo(v_mid, v_bot) => v_mid - (v_mid - v_bot) / 2.0
+neutral_hi(v_mid, v_top) => v_mid + (v_top - v_mid) / 2.0
+
+getSentimentText(v) =>
+    nl = neutral_lo(mid_line, bot_band)
+    nh = neutral_hi(mid_line, top_band)
+    if v <= bot_band
+        "Oversold"
+    else if v <= nl
+        "Bearish"
+    else if v <= nh
+        "Neutral"
+    else if v <= top_band
+        "Bullish"
+    else
+        "Overbought"
+
+getSentimentColor(v) =>
+    nl = neutral_lo(mid_line, bot_band)
+    nh = neutral_hi(mid_line, top_band)
+    if v <= bot_band
+        color.new(color.red, 0)
+    else if v <= nl
+        color.new(color.orange, 0)
+    else if v <= nh
+        color.new(color.yellow, 0)
+    else if v <= top_band
+        color.new(color.lime, 0)
+    else
+        color.new(color.green, 0)
+
+is_overbought = avg_sent > top_band
+is_oversold   = avg_sent < bot_band
+
+bullCross = is_oversold[1]   and not is_oversold[0]   and is_bull
+bearCross = is_overbought[1] and not is_overbought[0] and not is_bull
+
+// =============================================================================
+// ADX AND DIRECTIONAL MOVEMENT (CURRENT TIMEFRAME)
+// ★ Fix: uses ta.dmi() directly — removes the manual smoothing chain and the
+//   unreferenced directional_index variable that was shadowing adx from ta.dmi.
+// =============================================================================
+
+[di_plus, di_minus, adx] = ta.dmi(adx_length, adx_length)
+adx_ma  = ta.ema(adx, di_ma_length)   // ADX trend line (EMA of ADX)
+dip_chg = di_plus  - di_plus[1]
+dim_chg = di_minus - di_minus[1]
+
+// Gap-fill detection (current TF)
+_min_jump       = 10
+adx_weak        = adx < adx_low_threshold
+di_spike        = dip_chg > _min_jump or dim_chg > _min_jump
+is_consolidating = adx_weak and math.abs(di_plus[1] - di_minus[1]) < 5 and di_plus < 25 and di_minus < 25
+gap_detected     = adx[1] < adx_low_threshold and di_spike
+gap_yellow       = gap_detected and is_consolidating[1]
+
+// =============================================================================
+// HIGHER TIMEFRAME ADX (CONDITIONAL ON htf_enabled)
+// =============================================================================
+
+htf_adx     = htf_enabled ? request.security(syminfo.tickerid, htf_timeframe,  adx)     : na
+htf_dip     = htf_enabled ? request.security(syminfo.tickerid, htf_timeframe,  di_plus)  : na
+htf_dim     = htf_enabled ? request.security(syminfo.tickerid, htf_timeframe,  di_minus) : na
+htf_dip_chg = htf_enabled ? request.security(syminfo.tickerid, htf_timeframe,  dip_chg)  : na
+htf_dim_chg = htf_enabled ? request.security(syminfo.tickerid, htf_timeframe,  dim_chg)  : na
+
+htf2_adx     = htf_enabled ? request.security(syminfo.tickerid, htf2_timeframe, adx)     : na
+htf2_dip     = htf_enabled ? request.security(syminfo.tickerid, htf2_timeframe, di_plus)  : na
+htf2_dim     = htf_enabled ? request.security(syminfo.tickerid, htf2_timeframe, di_minus) : na
+htf2_dip_chg = htf_enabled ? request.security(syminfo.tickerid, htf2_timeframe, dip_chg)  : na
+htf2_dim_chg = htf_enabled ? request.security(syminfo.tickerid, htf2_timeframe, dim_chg)  : na
+
+htf3_adx     = htf_enabled ? request.security(syminfo.tickerid, htf3_timeframe, adx)     : na
+htf3_dip     = htf_enabled ? request.security(syminfo.tickerid, htf3_timeframe, di_plus)  : na
+htf3_dim     = htf_enabled ? request.security(syminfo.tickerid, htf3_timeframe, di_minus) : na
+htf3_dip_chg = htf_enabled ? request.security(syminfo.tickerid, htf3_timeframe, dip_chg)  : na
+htf3_dim_chg = htf_enabled ? request.security(syminfo.tickerid, htf3_timeframe, dim_chg)  : na
+
+// HTF gap conditions — pure function, no var state
+htf_gap_cond(en, adxv, dip, dim, dip_c, dim_c) =>
+    weak   = en and not na(adxv)  ? adxv < adx_low_threshold : false
+    spike  = en and not na(dip_c) and not na(dim_c) ? dip_c > _min_jump or dim_c > _min_jump : false
+    consol = en and not na(dip)   and not na(dim) ?
+             weak and math.abs(dip[1] - dim[1]) < 5 and dip < 25 and dim < 25 : false
+    gap    = en and not na(adxv)  ? adxv[1] < adx_low_threshold and spike : false
+    [gap, gap and consol[1]]
+
+[htf_gap_det,  htf_yellow]  = htf_gap_cond(htf_enabled, htf_adx,  htf_dip,  htf_dim,  htf_dip_chg,  htf_dim_chg)
+[htf2_gap_det, htf2_yellow] = htf_gap_cond(htf_enabled, htf2_adx, htf2_dip, htf2_dim, htf2_dip_chg, htf2_dim_chg)
+[htf3_gap_det, htf3_yellow] = htf_gap_cond(htf_enabled, htf3_adx, htf3_dip, htf3_dim, htf3_dip_chg, htf3_dim_chg)
+
+// =============================================================================
+// BOLLINGER BAND BREAKOUT CONDITIONS (used by VFX)
+// ★ Fix: show_vfx now fully controls fire/ice; hard-coded show_bb_effects removed.
+// =============================================================================
+
+bb_trend_cond  = adx > 30 and (di_plus > 30 or di_minus > 30)
+candle_range   = high - low
+avg_vol        = ta.sma(candle_range, 10)
+upper_breakout = high > bb_upper and show_vfx and bb_trend_cond
+lower_breakout = low  < bb_lower and show_vfx and bb_trend_cond
+
+// =============================================================================
+// SENTIMENT COLORS
+// =============================================================================
+
+candle_color = if is_consolidating
+    color.white
+else if is_bull
+    d  = math.abs(avg_sent - mid_line)
+    mx = math.max(top_band - mid_line, mid_line - bot_band)
+    color.from_gradient(mx > 0 ? d / mx : 0.0, 0, 1, color.new(color.yellow, 70), greed_color)
+else
+    d  = math.abs(avg_sent - mid_line)
+    mx = math.max(top_band - mid_line, mid_line - bot_band)
+    color.from_gradient(mx > 0 ? d / mx : 0.0, 0, 1, color.new(color.yellow, 70), fear_color)
+
+fast_clr = is_bull ? color.new(color.lime, 0) : color.new(color.red, 0)
+slow_clr = color.from_gradient(sent_long, 0, 100, color.fuchsia, color.aqua)
+
+// =============================================================================
+// GAP FILL STATE MACHINE
+// Single reusable function — each call site gets independent var-state (Pine v6).
+// Returns: [fills_active, show_line, price_level, new_gap_event]
+// =============================================================================
+
+track_gap(yellow_cond, gap_det) =>
+    var bool  active    = false
+    var int   bar_cnt   = 0
+    var int   last_idx  = -1
+    var float gap_price = na
+    var int   gap_start = na
+    var bool  broken    = false
+
+    new_gap = yellow_cond and not yellow_cond[1]
+    new_hl  = gap_det      and not gap_det[1]
+
+    if new_gap
+        active   := true
+        bar_cnt  := 0
+        last_idx := bar_index
+
+    if new_hl
+        gap_price := open
+        gap_start := bar_index
+        broken    := false
+
+    if active and bar_index > last_idx
+        bar_cnt += 1
+
+    if bar_cnt > 5000
+        active   := false
+        bar_cnt  := 0
+        last_idx := -1
+
+    filled      = active and bar_index > last_idx
+    has_level   = not na(gap_price)
+    after_start = has_level and not na(gap_start) and bar_index > gap_start
+    tol         = syminfo.mintick * 0.25
+    touched     = after_start and low  <= gap_price + tol and high >= gap_price - tol
+    jumped      = after_start and not na(close[1]) and (close[1] - gap_price) * (open - gap_price) < 0
+
+    if touched or jumped
+        broken := true
+
+    [filled, filled and has_level and after_start and not broken, gap_price, new_gap]
+
+[fills_ok, show_gap, cur_gap_price, new_gap_ev] = track_gap(gap_yellow, gap_detected)
+[htf_ok, show_htf, htf_gap_price, htf_new_ev] = track_gap(htf_enabled ? htf_yellow : false, htf_enabled ? htf_gap_det : false)
+[htf2_ok, show_htf2, htf2_gap_price, htf2_new_ev] = track_gap(htf_enabled ? htf2_yellow : false, htf_enabled ? htf2_gap_det : false)
+[htf3_ok, show_htf3, htf3_gap_price, htf3_new_ev] = track_gap(htf_enabled ? htf3_yellow : false, htf_enabled ? htf3_gap_det : false)
+
+// =============================================================================
+// FIRE AND ICE CONDITIONS (momentum state signals)
+// fire_cond = strong bullish setup; ice_cond = strong bearish setup.
+// =============================================================================
+
+fire_cond = fills_ok and adx > di_minus and di_minus < 15 and (adx - di_minus) >= 25 and di_minus < 14 and adx - adx_ma > 5 and di_plus > di_plus[1]
+
+ice_cond = fills_ok and adx > di_plus and di_plus < 15 and (adx - di_plus) >= 20 and di_plus < 14 and adx - adx_ma > 5 and di_minus > di_minus[1]
+
+// =============================================================================
+// GAP LINE OVERLAP FILTERING — highest priority = current TF
+// =============================================================================
+
+_tol = syminfo.mintick * 2
+near(p1, p2) => not na(p1) and not na(p2) and math.abs(p1 - p2) <= _tol
+
+draw_cur = show_gap
+draw_htf = show_htf and not near(htf_gap_price, cur_gap_price)
+draw_htf2 = show_htf2 and not near(htf2_gap_price, cur_gap_price) and not near(htf2_gap_price, htf_gap_price)
+draw_htf3 = show_htf3 and not near(htf3_gap_price, cur_gap_price) and not near(htf3_gap_price, htf_gap_price) and not near(htf3_gap_price, htf2_gap_price)
+
+// =============================================================================
+// ADX TRANSPARENCY AND COLOR
+// =============================================================================
+
+_rng      = float(adx_high_threshold - adx_low_threshold)
+_mid_thr  = adx_low_threshold + _rng / 2.0
+adx_transp = adx > adx_high_threshold or adx < adx_low_threshold ? 0 :
+              adx > _mid_thr ? 3 * (adx_high_threshold - adx) :
+              3 * (adx - adx_low_threshold)
+dip_transp = di_plus  > adx_high_threshold ? 0 : di_plus  < adx_low_threshold ? 80 :
+              80 * (adx_high_threshold - di_plus)  / _rng
+dim_transp = di_minus > adx_high_threshold ? 0 : di_minus < adx_low_threshold ? 80 :
+              80 * (adx_high_threshold - di_minus) / _rng
+
+adx_clr = adx < adx_low_threshold     ? color.new(color.rgb(182, 229, 247), adx_transp) :
+           adx < 19                    ? color.new(color.blue,               adx_transp) :
+           adx < 25                    ? color.new(color.aqua,               adx_transp) :
+           adx < adx_high_threshold    ? color.new(color.orange,             adx_transp) :
+           color.new(color.red, adx_transp)
+
+
+// =============================================================================
+// PLOTTING — OSCILLATOR MODE
+// =============================================================================
+
+// Individual component inspector line
+comp_val = switch selected_component
+    "RSI"             => rsi_norm
+    "MACD"            => macd_norm
+    "Bollinger Bands" => bb_norm
+    "Stochastic"      => stoch_norm
+    "ATR"             => atr_norm
+    => na
+
+comp_clr = switch selected_component
+    "RSI"             => color.blue
+    "MACD"            => color.purple
+    "Bollinger Bands" => color.orange
+    "Stochastic"      => color.silver
+    "ATR"             => color.fuchsia
+    => color.gray
+
+plot(showA ? comp_val : na, "Selected Component", color=comp_clr, linewidth=1,
+     display=selected_component == "None" ? display.none : display.all)
+
+// ── DNA Candle body (slow MA open/high → fast MA close/low, no wicks) ─────────
+plotcandle(
+     showA and (show_osc_bars or show_osc_line_fill) ? sent_long  : na,
+     showA and (show_osc_bars or show_osc_line_fill) ? sent_long  : na,
+     showA and (show_osc_bars or show_osc_line_fill) ? sent_short : na,
+     showA and (show_osc_bars or show_osc_line_fill) ? sent_short : na,
+     title        = "Level (DNA Body)",
+     color        = candle_color,
+     wickcolor    = invisible_line,
+     bordercolor  = candle_color,
+     display      = show_slow_ma ? display.all : display.none)
+
+// ── Fast MA line (shown in all sub-styles) ────────────────────────────────────
+fast_plot = plot(showA ? sent_short : na, "Fast MA",
+     color   = fast_clr,
+     linewidth = 2,
+     display = show_fast_line ? display.all : display.none)
+
+// ── Slow MA line (Line and Lines+Fill styles only) ────────────────────────────
+slow_plot = plot(
+     showA and (show_osc_line or show_osc_line_fill) ? sent_long : na,
+     "Slow MA",
+     color   = slow_clr,
+     linewidth = 2,
+     display = (show_osc_line or show_osc_line_fill) and show_slow_ma ? display.all : display.none)
+
+// ── Fill between fast and slow lines (Lines+Fill only) ────────────────────────
+fill(fast_plot, slow_plot,
+     color   = color.new(candle_color, 40),
+     title   = "Oscillator Fill",
+     display = show_osc_line_fill and showA ? display.all : display.none)
+
+// ── Dynamic sentiment bands ────────────────────────────────────────────────────
+plot(showA ? mid_line : na, "Mid Line",        color=color.gray,  display=display.pane)
+plot(showA ? top_band : na, "Overbought Band", color=greed_color, display=display.pane)
+plot(showA ? bot_band : na, "Oversold Band",   color=fear_color,  display=display.pane)
+
+// =============================================================================
+// PLOTTING — ADX MODE
+// =============================================================================
+
+hline(showB ? adx_low_threshold  : na, "Low Threshold",  color=color.gray, linestyle=hline.style_dashed)
+hline(showB ? adx_high_threshold : na, "High Threshold", color=color.gray, linestyle=hline.style_dashed)
+
+plot(showB ? adx      : na, "ADX", color=adx_clr,                                                        linewidth=2)
+plot(showB ? di_plus  : na, "DI+", color=color.new(color.rgb(190, 235, 123), dip_transp))
+plot(showB ? di_minus : na, "DI-", color=color.new(color.rgb(223, 129, 202), dim_transp))
+
+// Directional gradient fill — fire color (DI+ > DI-) or ice color when strongly trending
+_fire_color = color.rgb(255, 140, 0)
+_ice_color  = color.rgb(0, 191, 255)
+adx_strong  = adx > adx_high_threshold
+adx_fading  = adx < adx_low_threshold
+dir_color   = adx_strong ? (di_plus > di_minus ? color.new(_fire_color, 0) : color.new(_ice_color, 0)) : na
+
+fill(plot(showB and adx_strong ? adx_high_threshold : na, color=invisible_line, display=display.none),
+     plot(showB and adx_strong ? adx                : na, color=invisible_line, display=display.none),
+     top_value    = adx,
+     bottom_value = adx_high_threshold,
+     top_color    = dir_color,
+     bottom_color = invisible_line,
+     title        = "ADX Directional Gradient")
+
+// White fade below low threshold — visual cue for consolidation zone
+fill(plot(showB and adx_fading ? adx               : na, color=invisible_line, display=display.none),
+     plot(showB and adx_fading ? adx_low_threshold : na, color=invisible_line, display=display.none),
+     top_value    = adx,
+     bottom_value = adx_low_threshold,
+     top_color    = color.new(color.white, 0),
+     bottom_color = invisible_line,
+     title        = "ADX Consolidation Fade")
+
+// =============================================================================
+// INFORMATION TABLE (OSCILLATOR MODE)
+// =============================================================================
+
+if barstate.islast and show_table and showA
+    var table t = table.new(get_table_position(), 3, 6,
+         bgcolor=color.new(color.navy, 20), border_width=1)
+
+    table.cell(t, 0, 0, "Component", text_color=color.white, text_size=size.small, bgcolor=color.navy)
+    table.cell(t, 1, 0, "Value",     text_color=color.white, text_size=size.small, bgcolor=color.navy)
+    table.cell(t, 2, 0, "Status",    text_color=color.white, text_size=size.small, bgcolor=color.navy)
+
+    comp_names = array.from("RSI", "MACD", "Bollinger Bands", "Stochastic", "ATR")
+    comp_vals  = array.from(rsi_norm, macd_norm, bb_norm, stoch_norm, atr_norm)
+
+    for i = 0 to 4
+        row   = i + 1
+        cname = array.get(comp_names, i)
+        cval  = array.get(comp_vals, i)
+        sel   = selected_component == cname
+
+        hi_bg = switch cname
+            "RSI"             => color.new(color.blue,    60)
+            "MACD"            => color.new(color.purple,  60)
+            "Bollinger Bands" => color.new(color.orange,  60)
+            "Stochastic"      => color.new(color.silver,  60)
+            "ATR"             => color.new(color.fuchsia, 60)
+            => color.new(color.navy, 90)
+
+        row_bg  = sel ? hi_bg            : color.new(color.navy, 90)
+        row_txt = sel ? color.white      : color.silver
+
+        table.cell(t, 0, row, cname,                      text_color=row_txt,               text_size=size.tiny, bgcolor=row_bg)
+        table.cell(t, 1, row, str.tostring(cval, "#.0"),  text_color=row_txt,               text_size=size.tiny, bgcolor=row_bg)
+        table.cell(t, 2, row, getSentimentText(cval),     text_color=getSentimentColor(cval), text_size=size.tiny, bgcolor=row_bg)
+
+// =============================================================================
+// OVERLAY ELEMENTS — BOTH MODES
+// =============================================================================
+
+// Consolidation background tint (ADX mode)
+bgcolor(is_consolidating and show_highlights and showB ? color.new(color.white, 90) : na, force_overlay=true)
+
+// White candle overlay for consolidation bars (ADX mode)
+plotcandle(is_consolidating ? open : na, is_consolidating ? high : na,
+           is_consolidating ? low  : na, is_consolidating ? close : na,
+           color=na, wickcolor=color.white, bordercolor=color.white,
+           force_overlay=true, display=display.pane)
+
+// ── Gap lines (drawn on price chart) ─────────────────────────────────────────
+plot(draw_cur  ? cur_gap_price  : na, "", color=gap_line_color,      style=plot.style_linebr, linewidth=1, force_overlay=true, display=display.pane)
+plot(draw_htf  ? htf_gap_price  : na, "", color=htf_gap_line_color,  style=plot.style_linebr, linewidth=1, force_overlay=true, display=display.pane)
+plot(draw_htf2 ? htf2_gap_price : na, "", color=htf2_gap_line_color, style=plot.style_linebr, linewidth=1, force_overlay=true, display=display.pane)
+plot(draw_htf3 ? htf3_gap_price : na, "", color=htf3_gap_line_color, style=plot.style_linebr, linewidth=1, force_overlay=true, display=display.pane)
+
+// ── Gap labels (appear once at line creation) ─────────────────────────────────
+if show_gap_labels and draw_cur  and not draw_cur[1]
+    above = cur_gap_price > close
+    label.new(bar_index, cur_gap_price,
+         str.tostring(cur_gap_price,  "#.##") + " (" + fmt_tf(timeframe.period) + ")",
+         style=above ? label.style_label_down : label.style_label_up,
+         color=color.new(color.white, 100), textcolor=gap_line_color, size=size.small, force_overlay=true)
+
+if show_gap_labels and draw_htf  and not draw_htf[1]
+    above = htf_gap_price > close
+    label.new(bar_index, htf_gap_price,
+         str.tostring(htf_gap_price,  "#.##") + " (" + fmt_tf(htf_timeframe) + ")",
+         style=above ? label.style_label_down : label.style_label_up,
+         color=color.new(color.white, 100), textcolor=htf_gap_line_color, size=size.small, force_overlay=true)
+
+if show_gap_labels and draw_htf2 and not draw_htf2[1]
+    above = htf2_gap_price > close
+    label.new(bar_index, htf2_gap_price,
+         str.tostring(htf2_gap_price, "#.##") + " (" + fmt_tf(htf2_timeframe) + ")",
+         style=above ? label.style_label_down : label.style_label_up,
+         color=color.new(color.white, 100), textcolor=htf2_gap_line_color, size=size.small, force_overlay=true)
+
+if show_gap_labels and draw_htf3 and not draw_htf3[1]
+    above = htf3_gap_price > close
+    label.new(bar_index, htf3_gap_price,
+         str.tostring(htf3_gap_price, "#.##") + " (" + fmt_tf(htf3_timeframe) + ")",
+         style=above ? label.style_label_down : label.style_label_up,
+         color=color.new(color.white, 100), textcolor=htf3_gap_line_color, size=size.small, force_overlay=true)
+
+// =============================================================================
+// BOLLINGER BAND BREAKOUT VFX (FIRE AND ICE)
+// =============================================================================
+
+_neon_orange = color.rgb(255, 140, 0)
+_transparent = color.new(color.blue, 100)
+_icy_blue    = color.rgb(0, 191, 255)
+
+// Fire — upward glow above upper breakout bars
+flame_h   = avg_vol * 2.0
+flame_gap = avg_vol * 0.05
+flame_top = upper_breakout ? high + flame_h   : na
+flame_bot = upper_breakout ? high + flame_gap : na
+
+fill(plot(show_vfx ? flame_top : na, color=_transparent, display=display.none, force_overlay=true),
+     plot(show_vfx ? flame_bot : na, color=_transparent, display=display.none, force_overlay=true),
+     top_value=flame_top, bottom_value=flame_bot,
+     top_color=_transparent, bottom_color=color.new(_neon_orange, 50))
+
+// Ice — downward glow below lower breakout bars
+ice_depth = avg_vol * 0.8
+ice_gap   = avg_vol * 0.02
+ice_top   = lower_breakout ? low - ice_gap   : na
+ice_bot   = lower_breakout ? low - ice_depth : na
+
+fill(plot(show_vfx ? ice_top : na, color=_transparent, display=display.none, force_overlay=true),
+     plot(show_vfx ? ice_bot : na, color=_transparent, display=display.none, force_overlay=true),
+     top_value=ice_top, bottom_value=ice_bot,
+     top_color=color.new(_icy_blue, 50), bottom_color=_transparent)
+
+// ── Buy / Sell Signal Arrows ───────────────────────────────────────────────────
+plotshape(bullCross and show_crossover, "Bull Cross",
+     style=shape.triangleup,   location=location.belowbar,
+     color=color.lime, size=size.tiny, force_overlay=true)
+plotshape(bearCross and show_crossover, "Bear Cross",
+     style=shape.triangledown, location=location.abovebar,
+     color=color.red,  size=size.tiny, force_overlay=true)
+
+// =============================================================================
+// VOLUME VOIDS
+// =============================================================================
+
+var histBoxes  = array.new<box>()
+var voidBoxes  = array.new<box>()
+var lvBoxes    = array.new<box>()
+var volLabels  = array.new<label>()
+var line  pocLine  = na
+var label pocLabel = na
+
+if barstate.islast and showVoid
+    // Clear previous drawings
+    for b in histBoxes
+        box.delete(b)
+    for b in voidBoxes
+        box.delete(b)
+    for b in lvBoxes
+        box.delete(b)
+    for l in volLabels
+        label.delete(l)
+    array.clear(histBoxes)
+    array.clear(histBoxes)
+    array.clear(voidBoxes)
+    array.clear(lvBoxes)
+    array.clear(volLabels)
+    line.delete(pocLine)
+    label.delete(pocLabel)
+
+    // Collect price range over lookback
+    priceArr = array.new<float>()
+    for i = 0 to lookbackPeriod - 1
+        priceArr.push(high[i])
+        priceArr.push(low[i])
+    rHigh = priceArr.max()
+    rLow  = priceArr.min()
+    binSz = (rHigh - rLow) / numberOfBins
+
+    volBins = array.new<float>(numberOfBins, 0.0)
+    dltBins = array.new<float>(numberOfBins, 0.0)
+
+    // Populate bins
+    for bi = 0 to numberOfBins - 1
+        bLo = rLow + binSz * bi
+        bHi = bLo  + binSz
+        for bari = 0 to lookbackPeriod - 1
+            bc = close[bari]
+            if bc >= bLo - binSz and bc < bHi + binSz
+                array.set(volBins, bi, array.get(volBins, bi) + volume[bari])
+                d = close[bari] > open[bari] ? volume[bari] : -volume[bari]
+                array.set(dltBins, bi, array.get(dltBins, bi) + d)
+
+    // Totals and thresholds
+    totalVol = 0.0
+    for i = 0 to numberOfBins - 1
+        totalVol += array.get(volBins, i)
+    lvThresh = totalVol / (lowVolumeThresholdDivisor * numberOfBins)
+    maxVol   = volBins.max()
+
+    // Point of Control
+    for bi = 0 to numberOfBins - 1
+        bLo  = rLow + binSz * bi
+        bHi  = bLo  + binSz
+        bMid = math.avg(bLo, bHi)
+        bv   = array.get(volBins, bi)
+        if bv > 0 and bv / maxVol * 100 == 100 and showPointOfControl
+            pocLine := line.new(bar_index - lookbackPeriod, bMid, bar_index, bMid,
+                                width=2, color=pointOfControlColor, force_overlay=true)
+
+    // Find occupied range
+    firstBin = -1
+    lastBin  = -1
+    for i = 0 to numberOfBins - 1
+        if array.get(volBins, i) > 0
+            if firstBin == -1
+                firstBin := i
+            lastBin := i
+
+    if firstBin != -1
+        // Zero-volume gaps
+        inVoid    = false
+        voidStart = -1
+        for i = firstBin to lastBin
+            v = array.get(volBins, i)
+            if v == 0 and not inVoid
+                inVoid    := true
+                voidStart := i
+            else if v > 0 and inVoid
+                inVoid := false
+                vb = box.new(bar_index - lookbackPeriod,
+                             rLow + binSz * i,
+                             bar_index,
+                             rLow + binSz * voidStart,
+                             bgcolor=color.new(zeroVolumeBoxColor, 90),
+                             border_color=showLowVolumeBorders ? zeroVolumeBoxColor : color.new(color.orange, 100),
+                             border_width=1, border_style=line.style_dashed, force_overlay=true)
+                voidBoxes.push(vb)
+
+        // Low-volume zones
+        inLow    = false
+        lowStart = -1
+        for i = firstBin to lastBin + 1
+            v     = i <= lastBin ? array.get(volBins, i) : -1.0
+            isLow = v > 0 and v < lvThresh
+            if isLow and not inLow
+                inLow    := true
+                lowStart := i
+            else if not isLow and inLow
+                inLow := false
+                lb = box.new(bar_index - lookbackPeriod,
+                             rLow + binSz * i,
+                             bar_index,
+                             rLow + binSz * lowStart,
+                             bgcolor=color.new(lowVolumeBoxColor, 90),
+                             border_color=showLowVolumeBorders ? lowVolumeBoxColor : color.new(color.navy, 100),
+                             border_width=1, border_style=line.style_solid, force_overlay=true)
+                lvBoxes.push(lb)
+
+// =============================================================================
+// ALERT CONDITIONS
+// =============================================================================
+
+alertcondition(bullCross,
+     title   = "Buy Signal — Oversold Exit",
+     message = "BUY SIGNAL: Oversold crossover on {{ticker}} {{interval}} at {{close}}")
+
+alertcondition(bearCross,
+     title   = "Sell Signal — Overbought Exit",
+     message = "SELL SIGNAL: Overbought crossover on {{ticker}} {{interval}} at {{close}}")
+
+alertcondition(new_gap_ev or htf_new_ev or htf2_new_ev or htf3_new_ev,
+     title   = "Gap Fill Line Created (Any TF)",
+     message = "Gap fill line created on {{ticker}} at {{close}}")
+
+alertcondition((show_gap[1] and not show_gap) or
+               (show_htf[1] and not show_htf) or
+               (show_htf2[1] and not show_htf2) or
+               (show_htf3[1] and not show_htf3),
+     title   = "Gap Fill Line Terminated (Any TF)",
+     message = "Gap fill line terminated on {{ticker}} at {{close}}")
+
+adx_xu_lo = ta.crossover( adx, adx_low_threshold)
+adx_xd_lo = ta.crossunder(adx, adx_low_threshold)
+adx_xu_hi = ta.crossover( adx, adx_high_threshold)
+adx_xd_hi = ta.crossunder(adx, adx_high_threshold)
+
+alertcondition(adx_xu_lo, title="ADX Crossed ABOVE Low Threshold",  message="ADX crossed ABOVE low threshold on {{ticker}} {{interval}} at {{close}}")
+alertcondition(adx_xd_lo, title="ADX Crossed BELOW Low Threshold",  message="ADX crossed BELOW low threshold on {{ticker}} {{interval}} at {{close}}")
+alertcondition(adx_xu_hi, title="ADX Crossed ABOVE High Threshold", message="ADX crossed ABOVE high threshold on {{ticker}} {{interval}} at {{close}}")
+alertcondition(adx_xd_hi, title="ADX Crossed BELOW High Threshold", message="ADX crossed BELOW high threshold on {{ticker}} {{interval}} at {{close}}")
+
+alertcondition(is_consolidating and not is_consolidating[1],
+     title   = "Consolidation Started",
+     message = "Market entered consolidation on {{ticker}} {{interval}} at {{close}}")

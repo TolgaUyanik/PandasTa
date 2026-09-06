@@ -1,0 +1,326 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy("Aureate Market Architecture Strategy [JOAT]", shorttitle = "AMA[JOAT]", overlay = true, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, commission_type = strategy.commission.percent, commission_value = 0.01, calc_on_order_fills = true, calc_on_every_tick = false, max_labels_count = 200, max_lines_count = 300, max_boxes_count = 200)
+
+//==================================================================================================
+// Aureate Market Architecture Strategy [JOAT]
+//--------------------------------------------------------------------------------------------------
+// Purpose:
+// Execute only when structure, regime, momentum, and liquidity context agree on a confirmed bar.
+// The strategy avoids predictive pivots, unfinished HTF data, and intrabar assumptions. It uses
+// confirmed structure bias, volatility-normalized breakout pressure, liquidity confirmation, and
+// adaptive stop/target management.
+//==================================================================================================
+
+//==================================================================================================
+// Palette
+//==================================================================================================
+color STRAT_BULL   = #14B67D
+color STRAT_BEAR   = #EC6568
+color STRAT_NEUTRAL= #8190A7
+color STRAT_GOLD   = #D7B15B
+color STRAT_BLUE   = #73A8FF
+color PANEL_BG     = #0F1722
+color PANEL_EDGE   = #223247
+color PANEL_TEXT   = #D7DFEA
+color PANEL_MUTE   = #8090A6
+
+//==================================================================================================
+// Inputs
+//==================================================================================================
+string GROUP_REGIME = "Regime Engine"
+int regimeAtrLenInput = input.int(14, "Regime ATR Length", minval = 5, group = GROUP_REGIME)
+int regimeBaseLenInput = input.int(55, "Regime Baseline Length", minval = 10, group = GROUP_REGIME)
+int balanceWindowInput = input.int(21, "Balance Window", minval = 5, group = GROUP_REGIME)
+float accumulationThresholdInput = input.float(0.98, "Accumulation Volatility Threshold", minval = 0.2, step = 0.01, group = GROUP_REGIME)
+float expansionThresholdInput = input.float(1.02, "Expansion Volatility Threshold", minval = 0.5, step = 0.01, group = GROUP_REGIME)
+int persistenceBarsInput = input.int(1, "Regime Persistence Bars", minval = 1, maxval = 10, group = GROUP_REGIME)
+
+string GROUP_STRUCTURE = "Structure Bias"
+int shortPivotInput = input.int(5, "Short Pivot", minval = 2, group = GROUP_STRUCTURE)
+int mediumPivotInput = input.int(13, "Medium Pivot", minval = 3, group = GROUP_STRUCTURE)
+int emaFastInput = input.int(21, "Fast EMA", minval = 2, group = GROUP_STRUCTURE)
+int emaSlowInput = input.int(55, "Slow EMA", minval = 5, group = GROUP_STRUCTURE)
+bool useHtfBiasInput = input.bool(false, "Use Confirmed HTF Bias Filter", group = GROUP_STRUCTURE)
+string htfBiasInput = input.timeframe("240", "HTF Bias Timeframe", group = GROUP_STRUCTURE)
+
+string GROUP_BREAKOUT = "Breakout Pressure"
+int rocFastInput = input.int(5, "Fast ROC", minval = 1, group = GROUP_BREAKOUT)
+int rocMediumInput = input.int(13, "Medium ROC", minval = 1, group = GROUP_BREAKOUT)
+int rocSlowInput = input.int(21, "Slow ROC", minval = 1, group = GROUP_BREAKOUT)
+int rocMacroInput = input.int(34, "Macro ROC", minval = 1, group = GROUP_BREAKOUT)
+int pressureSmoothInput = input.int(5, "Pressure Smoothing", minval = 1, group = GROUP_BREAKOUT)
+float pressureThresholdInput = input.float(1.4, "Pressure Threshold Multiplier", minval = 0.2, step = 0.1, group = GROUP_BREAKOUT)
+
+string GROUP_LIQUIDITY = "Liquidity Context"
+int liquidityWindowInput = input.int(20, "Liquidity Window", minval = 5, group = GROUP_LIQUIDITY)
+float liquidityShelfAtrInput = input.float(0.15, "Sweep Depth ATR", minval = 0.05, step = 0.01, group = GROUP_LIQUIDITY)
+float volumeLiftInput = input.float(0.95, "Relative Volume Floor", minval = 0.5, step = 0.05, group = GROUP_LIQUIDITY)
+
+string GROUP_RISK = "Risk Management"
+float stopAtrInput = input.float(1.35, "Initial Stop ATR", minval = 0.2, step = 0.1, group = GROUP_RISK)
+float targetRiskMultipleInput = input.float(1.6, "Take Profit R Multiple", minval = 0.5, step = 0.25, group = GROUP_RISK)
+float trailAtrInput = input.float(1.05, "Trail ATR Multiple", minval = 0.2, step = 0.05, group = GROUP_RISK)
+float dailyLossLimitInput = input.float(1.5, "Daily Lockout %", minval = 0.1, step = 0.1, group = GROUP_RISK)
+int cooldownBarsInput = input.int(1, "Cooldown Bars After Exit", minval = 0, maxval = 50, group = GROUP_RISK)
+
+string GROUP_DISPLAY = "Display"
+bool showCloudInput = input.bool(true, "Show Bias Cloud", group = GROUP_DISPLAY)
+bool showTrailInput = input.bool(true, "Show Active Trail", group = GROUP_DISPLAY)
+bool showDashboardInput = input.bool(true, "Show Dashboard", group = GROUP_DISPLAY)
+string dashboardPositionInput = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Bottom Right", "Bottom Left"], group = GROUP_DISPLAY)
+string dashboardSizeInput = input.string("Medium", "Dashboard Size", options = ["Tiny", "Small", "Medium", "Large"], group = GROUP_DISPLAY)
+
+//==================================================================================================
+// Helpers
+//==================================================================================================
+f_panel_position(string pos) =>
+    switch pos
+        "Top Right" => position.top_right
+        "Bottom Right" => position.bottom_right
+        => position.bottom_left
+
+f_panel_size(string sizeName) =>
+    switch sizeName
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Medium" => size.normal
+        => size.large
+
+f_regime_label(int stateValue) =>
+    stateValue == 0 ? "Accumulation" : stateValue == 1 ? "Expansion" : "Exhaustion"
+
+f_regime_color(int stateValue) =>
+    stateValue == 0 ? STRAT_BLUE : stateValue == 1 ? STRAT_BULL : STRAT_GOLD
+
+f_bias_color(float score) =>
+    score >= 0 ? color.from_gradient(math.min(score, 100.0), 0.0, 100.0, STRAT_NEUTRAL, STRAT_BULL) : color.from_gradient(math.max(score, -100.0), -100.0, 0.0, STRAT_BEAR, STRAT_NEUTRAL)
+
+//==================================================================================================
+// Regime Calculation
+//==================================================================================================
+float atrValue = ta.atr(regimeAtrLenInput)
+float atrBaseline = ta.sma(atrValue, regimeBaseLenInput)
+float volRatio = atrValue / math.max(atrBaseline, syminfo.mintick)
+float balanceWidth = ta.highest(high, balanceWindowInput) - ta.lowest(low, balanceWindowInput)
+float balanceRatio = balanceWidth / math.max(atrValue * balanceWindowInput, syminfo.mintick)
+
+float rocFast = ta.roc(close, rocFastInput)
+float rocMedium = ta.roc(close, rocMediumInput)
+float rocSlow = ta.roc(close, rocSlowInput)
+float rocMacro = ta.roc(close, rocMacroInput)
+float pressureComposite = (rocFast + rocMedium + rocSlow + rocMacro) * 0.25
+float pressureSignal = ta.ema(pressureComposite, pressureSmoothInput)
+float pressureVolatility = math.max(ta.stdev(pressureSignal, 100), syminfo.mintick)
+float pressureUpper = pressureVolatility * pressureThresholdInput
+float pressureLower = -pressureVolatility * pressureThresholdInput
+
+int regimeCandidate = volRatio < accumulationThresholdInput and balanceRatio < 1.25 ? 0 : volRatio > expansionThresholdInput and math.abs(pressureSignal) > math.abs(pressureUpper) * 0.65 ? 1 : 2
+var int regimeState = 0
+var int regimeHold = 0
+var int pendingRegime = 0
+if barstate.isconfirmed
+    if regimeCandidate == regimeState
+        pendingRegime := regimeState
+        regimeHold := 0
+    else
+        if regimeCandidate == pendingRegime
+            regimeHold += 1
+        else
+            pendingRegime := regimeCandidate
+            regimeHold := 1
+        if regimeHold >= persistenceBarsInput
+            regimeState := regimeCandidate
+
+bool allowTrading = regimeState != 2
+
+//==================================================================================================
+// Structure Bias
+//==================================================================================================
+float emaFast = ta.ema(close, emaFastInput)
+float emaSlow = ta.ema(close, emaSlowInput)
+float pivotHigh = ta.pivothigh(high, mediumPivotInput, mediumPivotInput)
+float pivotLow = ta.pivotlow(low, mediumPivotInput, mediumPivotInput)
+float microPivotHigh = ta.pivothigh(high, shortPivotInput, shortPivotInput)
+float microPivotLow = ta.pivotlow(low, shortPivotInput, shortPivotInput)
+
+var float lastHighLevel = na
+var float lastLowLevel = na
+var float lastMicroHigh = na
+var float lastMicroLow = na
+var int structureBias = 0
+var string lastBos = "None"
+
+if not na(pivotHigh)
+    lastHighLevel := pivotHigh
+if not na(pivotLow)
+    lastLowLevel := pivotLow
+if not na(microPivotHigh)
+    lastMicroHigh := microPivotHigh
+if not na(microPivotLow)
+    lastMicroLow := microPivotLow
+
+bool bullBos = barstate.isconfirmed and not na(lastHighLevel) and close > lastHighLevel
+bool bearBos = barstate.isconfirmed and not na(lastLowLevel) and close < lastLowLevel
+
+if bullBos
+    structureBias := 1
+    lastBos := "Bullish BOS"
+if bearBos
+    structureBias := -1
+    lastBos := "Bearish BOS"
+
+[htfOpen, htfClose] = request.security(syminfo.tickerid, htfBiasInput, [open[1], close[1]])
+int htfBias = htfClose > htfOpen ? 1 : htfClose < htfOpen ? -1 : 0
+
+float biasScore = (emaFast > emaSlow ? 40.0 : -40.0) + (structureBias == 1 ? 35.0 : structureBias == -1 ? -35.0 : 0.0) + (close > emaFast ? 15.0 : -15.0)
+if useHtfBiasInput
+    biasScore += htfBias * 20.0
+float clippedBias = math.max(-100.0, math.min(100.0, biasScore))
+
+bool bullishBias = structureBias == 1 and emaFast > emaSlow and close > emaFast and (not useHtfBiasInput or htfBias >= 0)
+bool bearishBias = structureBias == -1 and emaFast < emaSlow and close < emaFast and (not useHtfBiasInput or htfBias <= 0)
+
+//==================================================================================================
+// Liquidity Context
+//==================================================================================================
+float bodyHigh = math.max(open, close)
+float bodyLow = math.min(open, close)
+float maxBody = ta.highest(bodyHigh, liquidityWindowInput)
+float minBody = ta.lowest(bodyLow, liquidityWindowInput)
+float upperAnchor = na
+float lowerAnchor = na
+
+for i = 0 to liquidityWindowInput - 1
+    if high[i] >= maxBody
+        upperAnchor := na(upperAnchor) ? high[i] : math.min(upperAnchor, high[i])
+    if low[i] <= minBody
+        lowerAnchor := na(lowerAnchor) ? low[i] : math.max(lowerAnchor, low[i])
+
+int upperTouches = 0
+int lowerTouches = 0
+for i = 0 to liquidityWindowInput - 1
+    upperTouches += not na(upperAnchor) and high[i] >= upperAnchor ? 1 : 0
+    lowerTouches += not na(lowerAnchor) and low[i] <= lowerAnchor ? 1 : 0
+
+float relativeVolume = volume / math.max(ta.sma(volume, 20), 1.0)
+bool bearSweepFailure = barstate.isconfirmed and not na(lowerAnchor) and low < lowerAnchor - atrValue * liquidityShelfAtrInput and close > lowerAnchor
+bool bullSweepFailure = barstate.isconfirmed and not na(upperAnchor) and high > upperAnchor + atrValue * liquidityShelfAtrInput and close < upperAnchor
+bool liquidityBull = lowerTouches + 1 >= upperTouches and (bearSweepFailure or pressureSignal > pressureLower * 0.25 or close > emaFast) and relativeVolume >= volumeLiftInput
+bool liquidityBear = upperTouches + 1 >= lowerTouches and (bullSweepFailure or pressureSignal < pressureUpper * 0.25 or close < emaFast) and relativeVolume >= volumeLiftInput
+
+//==================================================================================================
+// Entry and Risk Stack
+//==================================================================================================
+bool longTrigger = barstate.isconfirmed and allowTrading and bullishBias and pressureSignal > pressureUpper * 0.60 and liquidityBull and strategy.position_size == 0
+bool shortTrigger = barstate.isconfirmed and allowTrading and bearishBias and pressureSignal < pressureLower * 0.60 and liquidityBear and strategy.position_size == 0
+
+strategy.risk.max_intraday_loss(dailyLossLimitInput, strategy.percent_of_equity)
+
+bool newDay = ta.change(time("D")) != 0
+var float dayStartEquity = na
+if newDay or na(dayStartEquity)
+    dayStartEquity := strategy.equity
+float dayDrawdown = dayStartEquity > 0 ? (dayStartEquity - strategy.equity) / dayStartEquity * 100.0 : 0.0
+bool dailyLockout = dayDrawdown >= dailyLossLimitInput
+
+var int cooldownCounter = 0
+if barstate.isconfirmed and cooldownCounter > 0
+    cooldownCounter -= 1
+
+var float activeStop = na
+var float activeTarget = na
+var float activeTrail = na
+var int activeDirection = 0
+
+if longTrigger and not dailyLockout and cooldownCounter == 0
+    float structuralStop = not na(lastMicroLow) ? lastMicroLow - atrValue * 0.25 : close - atrValue * stopAtrInput
+    float atrStop = close - atrValue * stopAtrInput
+    activeStop := math.min(structuralStop, atrStop)
+    float riskUnit = math.max(close - activeStop, syminfo.mintick)
+    activeTarget := close + riskUnit * targetRiskMultipleInput
+    activeTrail := close - atrValue * trailAtrInput
+    activeDirection := 1
+    strategy.entry("Long", strategy.long)
+
+if shortTrigger and not dailyLockout and cooldownCounter == 0
+    float structuralStop = not na(lastMicroHigh) ? lastMicroHigh + atrValue * 0.25 : close + atrValue * stopAtrInput
+    float atrStop = close + atrValue * stopAtrInput
+    activeStop := math.max(structuralStop, atrStop)
+    float riskUnit = math.max(activeStop - close, syminfo.mintick)
+    activeTarget := close - riskUnit * targetRiskMultipleInput
+    activeTrail := close + atrValue * trailAtrInput
+    activeDirection := -1
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size > 0
+    activeTrail := math.max(nz(activeTrail, close - atrValue * trailAtrInput), close - atrValue * trailAtrInput)
+    strategy.exit("Long Risk", "Long", stop = activeStop, limit = activeTarget)
+    if barstate.isconfirmed and (close < activeTrail or regimeState == 2 or bearBos)
+        strategy.close("Long", comment = "Dynamic Exit")
+        cooldownCounter := cooldownBarsInput
+        activeDirection := 0
+
+if strategy.position_size < 0
+    activeTrail := math.min(nz(activeTrail, close + atrValue * trailAtrInput), close + atrValue * trailAtrInput)
+    strategy.exit("Short Risk", "Short", stop = activeStop, limit = activeTarget)
+    if barstate.isconfirmed and (close > activeTrail or regimeState == 2 or bullBos)
+        strategy.close("Short", comment = "Dynamic Exit")
+        cooldownCounter := cooldownBarsInput
+        activeDirection := 0
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeStop := na
+    activeTarget := na
+    activeTrail := na
+    activeDirection := 0
+
+//==================================================================================================
+// Plot Layer
+//==================================================================================================
+plotFast = plot(emaFast, "Fast EMA", color = color.new(STRAT_BLUE, 25), linewidth = 2)
+plotSlow = plot(emaSlow, "Slow EMA", color = color.new(STRAT_GOLD, 35), linewidth = 2)
+plotTop = plot(showCloudInput and not na(lastHighLevel) ? lastHighLevel : na, "Structure Ceiling", color = color.new(STRAT_BEAR, 80), linewidth = 1, style = plot.style_linebr)
+plotLow = plot(showCloudInput and not na(lastLowLevel) ? lastLowLevel : na, "Structure Floor", color = color.new(STRAT_BULL, 80), linewidth = 1, style = plot.style_linebr)
+fill(plotTop, plotLow, color = showCloudInput ? color.new(clippedBias >= 0 ? STRAT_BULL : STRAT_BEAR, 90) : na, title = "Bias Cloud")
+plot(showTrailInput ? activeTrail : na, "Active Trail", color = activeDirection == 1 ? STRAT_BULL : activeDirection == -1 ? STRAT_BEAR : STRAT_NEUTRAL, linewidth = 2, style = plot.style_linebr)
+
+bgcolor(allowTrading ? color.new(STRAT_BULL, 95) : regimeState == 0 ? color.new(STRAT_BLUE, 95) : color.new(STRAT_GOLD, 95))
+
+//==================================================================================================
+// Dashboard
+//==================================================================================================
+var table dash = table.new(f_panel_position(dashboardPositionInput), 2, 9, bgcolor = PANEL_BG, frame_color = PANEL_EDGE, frame_width = 1)
+var dashSize = f_panel_size(dashboardSizeInput)
+
+f_dash_cell(int c, int r, string txt, color txtColor, color bgColor, alignMode) =>
+    table.cell(dash, c, r, txt, text_color = txtColor, bgcolor = bgColor, text_halign = alignMode, text_size = dashSize)
+
+if barstate.islast and showDashboardInput
+    f_dash_cell(0, 0, "Aureate Market Architecture", PANEL_TEXT, PANEL_EDGE, text.align_left)
+    f_dash_cell(1, 0, "AMA", PANEL_TEXT, PANEL_EDGE, text.align_right)
+
+    f_dash_cell(0, 1, "Regime", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 1, f_regime_label(regimeState), f_regime_color(regimeState), PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 2, "Bias", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 2, bullishBias ? "Bullish" : bearishBias ? "Bearish" : "Neutral", bullishBias ? STRAT_BULL : bearishBias ? STRAT_BEAR : PANEL_TEXT, PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 3, "Pressure", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 3, str.tostring(pressureSignal, "#.00"), pressureSignal >= 0 ? STRAT_BULL : STRAT_BEAR, PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 4, "Liquidity", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 4, liquidityBull ? "Bullish" : liquidityBear ? "Bearish" : "Balanced", liquidityBull ? STRAT_BULL : liquidityBear ? STRAT_BEAR : PANEL_TEXT, PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 5, "Daily Drawdown", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 5, str.tostring(dayDrawdown, "#.00") + "%", dailyLockout ? STRAT_BEAR : PANEL_TEXT, PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 6, "Position", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 6, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", strategy.position_size > 0 ? STRAT_BULL : strategy.position_size < 0 ? STRAT_BEAR : PANEL_TEXT, PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 7, "Protective Stop", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 7, na(activeStop) ? "N/A" : str.tostring(activeStop, format.mintick), STRAT_GOLD, PANEL_BG, text.align_right)
+
+    f_dash_cell(0, 8, "Target", PANEL_MUTE, PANEL_BG, text.align_left)
+    f_dash_cell(1, 8, na(activeTarget) ? "N/A" : str.tostring(activeTarget, format.mintick), STRAT_GOLD, PANEL_BG, text.align_right)

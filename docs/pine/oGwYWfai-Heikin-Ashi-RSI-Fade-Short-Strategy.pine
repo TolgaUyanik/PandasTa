@@ -1,0 +1,180 @@
+//@version=6
+// =============================================================================
+//  Heikin Ashi RSI Fade — Short Strategy
+//  Short-only strategy that fades extended Heikin Ashi bullish streaks
+//  confirmed by an RSI bias filter on a lower timeframe. Single base order,
+//  no averaging, fixed Take Profit and Stop Loss — no trailing by design.
+// =============================================================================
+strategy("Heikin Ashi RSI Fade — Short Strategy", shorttitle = "HA-RSI-S", overlay = true, initial_capital = 10000, default_qty_type = strategy.cash, default_qty_value = 100, pyramiding = 1, commission_type = strategy.commission.percent, commission_value = 0.06, slippage = 3, process_orders_on_close = true, calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+grpBase = "Base Order"
+baseOrderSize = input.float(100.0, "Base Order Size (USDT)", minval = 1, group = grpBase, tooltip = "1% of default 10k capital.")
+useLimitBase  = input.bool(false, "Use LIMIT for Base (else Market)", group = grpBase, tooltip = "Source bot used LIMIT; in practice fills near-instantly, so Market is the more honest backtest default.")
+
+grpRSI = "RSI Filter"
+rsiTF        = input.timeframe("60", "RSI Timeframe", group = grpRSI)
+rsiLen       = input.int(100, "RSI Length", minval = 2, group = grpRSI)
+rsiCondition = input.string("Greater Than", "RSI Condition", options = ["Greater Than", "Less Than"], group = grpRSI)
+rsiLevel     = input.float(46.0, "RSI Level", minval = 1, maxval = 100, group = grpRSI)
+
+grpHA = "Heikin Ashi Filter"
+haTF        = input.timeframe("15", "HA Timeframe", group = grpHA)
+haStreak    = input.int(7, "Consecutive Candles", minval = 2, maxval = 30, group = grpHA, tooltip = "Number of consecutive same-direction HA candles required to confirm entry.")
+haDirection = input.string("Bullish", "HA Streak Direction", options = ["Bullish", "Bearish"], group = grpHA, tooltip = "For fade-the-strength Short: Bullish (default). For trend-follow Short: Bearish.")
+
+grpExit = "Exit"
+tpPct = input.float(2.1, "Take Profit (%)", minval = 0.1, step = 0.1, group = grpExit, tooltip = "Distance below avg entry where the position closes for profit.")
+slPct = input.float(2.5, "Stop Loss (%)",   minval = 0.1, step = 0.1, group = grpExit, tooltip = "Distance above avg entry where the position is stopped out.")
+
+grpDate = "Backtest Window"
+useDateFilter = input.bool(false, "Limit Backtest Period", group = grpDate)
+fromDate      = input.time(timestamp("01 Jan 2024 00:00 +0000"), "From", group = grpDate)
+toDate        = input.time(timestamp("01 Jan 2030 00:00 +0000"), "To", group = grpDate)
+
+grpHook = "DCA Bot Webhook"
+botId       = input.string("YOUR_BOT_ID",      "Bot ID",            group = grpHook)
+emailToken  = input.string("YOUR_EMAIL_TOKEN", "Email Token",       group = grpHook)
+pairWebhook = input.string("USDT_XRP",         "Pair (QUOTE_BASE)", group = grpHook)
+
+grpViz = "Visualization"
+showEntryLines = input.bool(true, "Plot Avg Entry / TP / SL", group = grpViz)
+showFillLabels = input.bool(true, "Show Fill Labels", group = grpViz)
+showTable      = input.bool(true, "Show Status Table", group = grpViz)
+
+grpWM = "Brand Watermark"
+showWM    = input.bool(true,        "Show Watermark", group = grpWM)
+wmText    = input.string("3Commas", "Watermark Text", group = grpWM)
+wmPosStr  = input.string("Bottom Right", "Position", options = ["Top Left","Top Center","Top Right","Middle Left","Middle Center","Middle Right","Bottom Left","Bottom Center","Bottom Right"], group = grpWM)
+wmSizeStr = input.string("Large",   "Text Size", options = ["Tiny","Small","Normal","Large","Huge"], group = grpWM)
+wmAlpha   = input.int(70,           "Transparency (0–100)", minval = 0, maxval = 100, group = grpWM)
+
+inWindow = not useDateFilter or (time >= fromDate and time <= toDate)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+f_pos(string s) =>
+    switch s
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Bottom Right"  => position.bottom_right
+        => position.bottom_right
+
+f_size(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        => size.normal
+
+f_msgEntry() => '{"message_type":"bot","bot_id":' + botId + ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairWebhook + '"}'
+f_msgClose() => '{"action":"close_at_market_price","message_type":"bot","bot_id":' + botId + ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairWebhook + '"}'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOWER-TIMEFRAME DATA (no repaint)
+// ─────────────────────────────────────────────────────────────────────────────
+haTicker = ticker.heikinashi(syminfo.tickerid)
+
+// RSI on host symbol at LTF
+rsiLTF = request.security(syminfo.tickerid, rsiTF, ta.rsi(close, rsiLen), lookahead = barmerge.lookahead_off)
+
+// HA streak counters: bars since last opposite-direction HA candle on LTF
+// (HA ticker returns HA OHLC inside the security call; close>open = bullish HA)
+haBullCount = request.security(haTicker, haTF, ta.barssince(close <= open), lookahead = barmerge.lookahead_off)
+haBearCount = request.security(haTicker, haTF, ta.barssince(close >= open), lookahead = barmerge.lookahead_off)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+condRSI = rsiCondition == "Greater Than" ? rsiLTF > rsiLevel : rsiLTF < rsiLevel
+haCount = haDirection == "Bullish" ? haBullCount : haBearCount
+condHA  = haCount >= haStreak
+
+entrySignal = condRSI and condHA
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY — SHORT
+// ─────────────────────────────────────────────────────────────────────────────
+inPosition = strategy.position_size != 0
+
+openEntry = inWindow and not inPosition and strategy.opentrades == 0 and entrySignal
+if openEntry
+    qty = baseOrderSize / close
+    if useLimitBase
+        strategy.entry("Short_Base", strategy.short, qty = qty, limit = close, comment = "Short_Base")
+    else
+        strategy.entry("Short_Base", strategy.short, qty = qty, comment = "Short_Base")
+    alert(f_msgEntry(), alert.freq_once_per_bar_close)
+    if showFillLabels
+        label.new(bar_index, high, "SHORT ▼", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white, size = size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXIT — Fixed TP and SL via OCO limit/stop (no trailing)
+// ─────────────────────────────────────────────────────────────────────────────
+if inPosition
+    avgPx = strategy.position_avg_price
+    tpPx  = avgPx * (1.0 - tpPct / 100.0)
+    slPx  = avgPx * (1.0 + slPct / 100.0)
+    strategy.exit("Exit", from_entry = "Short_Base", limit = tpPx, stop = slPx, comment_profit = "TP", comment_loss = "SL")
+
+// Detect just-closed for alerts and labels
+prevSize   = nz(strategy.position_size[1])
+nowSize    = strategy.position_size
+justClosed = prevSize != 0 and nowSize == 0
+if justClosed
+    alert(f_msgClose(), alert.freq_once_per_bar_close)
+    if showFillLabels
+        label.new(bar_index, low, "CLOSE ▲", style = label.style_label_up, color = color.new(color.green, 20), textcolor = color.white, size = size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALIZATION — Avg Entry / TP / SL plot lines
+// ─────────────────────────────────────────────────────────────────────────────
+avgPxNow = strategy.position_size != 0 ? strategy.position_avg_price : na
+tpPxNow  = strategy.position_size != 0 ? avgPxNow * (1.0 - tpPct / 100.0) : na
+slPxNow  = strategy.position_size != 0 ? avgPxNow * (1.0 + slPct / 100.0) : na
+
+plot(showEntryLines ? avgPxNow : na, title = "Avg Entry", color = color.new(color.orange, 0), linewidth = 2, style = plot.style_linebr)
+plot(showEntryLines ? tpPxNow  : na, title = "TP",        color = color.new(color.green, 0),  linewidth = 1, style = plot.style_linebr)
+plot(showEntryLines ? slPxNow  : na, title = "SL",        color = color.new(color.red, 0),    linewidth = 1, style = plot.style_linebr)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATUS TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+if showTable and barstate.islast
+    var table tbl = table.new(position = position.top_right, columns = 2, rows = 7, border_width = 1)
+    bg  = color.new(color.gray, 30)
+    bgH = color.new(color.gray, 0)
+    table.cell(tbl, 0, 0, "Status",         text_color = color.white, bgcolor = bgH)
+    table.cell(tbl, 1, 0, inPosition ? "In Short" : "Flat", text_color = color.white, bgcolor = bgH)
+    table.cell(tbl, 0, 1, "Avg Entry",      text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 1, inPosition ? str.tostring(strategy.position_avg_price, "#.####") : "—", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 2, "TP Target",      text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 2, inPosition ? str.tostring(strategy.position_avg_price * (1.0 - tpPct / 100.0), "#.####") : "—", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 3, "SL Level",       text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 3, inPosition ? str.tostring(strategy.position_avg_price * (1.0 + slPct / 100.0), "#.####") : "—", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 4, rsiTF + " RSI(" + str.tostring(rsiLen) + ")", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 4, str.tostring(rsiLTF, "#.#"), text_color = condRSI ? color.green : color.white, bgcolor = bg)
+    table.cell(tbl, 0, 5, haTF + " HA Streak (" + haDirection + ")", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 5, str.tostring(haCount), text_color = condHA ? color.green : color.white, bgcolor = bg)
+    table.cell(tbl, 0, 6, "Entry Armed",    text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 6, entrySignal ? "YES" : "no", text_color = entrySignal ? color.green : color.gray, bgcolor = bg)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BRAND WATERMARK
+// ─────────────────────────────────────────────────────────────────────────────
+var table wm = na
+if showWM and barstate.islast
+    if na(wm)
+        wm := table.new(f_pos(wmPosStr), 1, 1, bgcolor = color.new(color.black, 100), border_width = 0)
+    table.cell(wm, 0, 0, wmText, text_color = color.new(color.white, wmAlpha), text_size = f_size(wmSizeStr), bgcolor = color.new(color.black, 100))

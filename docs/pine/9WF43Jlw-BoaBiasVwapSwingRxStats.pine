@@ -1,0 +1,207 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// BoaBias · shared reaction statistics for swing-anchored VWAP (K/M, ATR pierce, FE marginal, no-touch).
+//@version=6
+library("BoaBiasVwapSwingRxStats", overlay=false)
+
+// ---- rxCounts[] indices ----
+// 0 nSupTouchBreak, 1 nSupTouchBounce, 2 nSupNoTouch, 3 nResTouchBreak, 4 nResTouchBounce, 5 nResNoTouch
+// 6 nSupAtrBreak, 7 nSupAtrBounce, 8 nResAtrBreak, 9 nResAtrBounce
+// 10 nSupMgSwing, 11 nSupMgOpp, 12 nSupMgBeyond, 13 nSupMgAny, 14 nSupMgNone
+// 15 nResMgSwing, 16 nResMgOpp, 17 nResMgBeyond, 18 nResMgAny, 19 nResMgNone
+// 20 nCompleted
+// RX_SZ = 21, FE_UNSET = NO_TOUCH_SENT = -1 (use literals at call site if needed)
+
+export reset_slot_rx(int idx, array<int> slotTouched, array<int> firstTouchBar, array<int> cohortConsec, array<bool> kMetInWindow, array<bool> atrMetInWindow, array<int> feFirstSwingBar, array<int> feFirstOppBar, array<int> feFirstBeyondBar, int noTouchSent, int feUnset) =>
+    array.set(slotTouched, idx, 0)
+    array.set(firstTouchBar, idx, noTouchSent)
+    array.set(cohortConsec, idx, 0)
+    array.set(kMetInWindow, idx, false)
+    array.set(atrMetInWindow, idx, false)
+    array.set(feFirstSwingBar, idx, feUnset)
+    array.set(feFirstOppBar, idx, feUnset)
+    array.set(feFirstBeyondBar, idx, feUnset)
+
+export chart_cum_pass(array<int> anchorBars, array<float> cumTPVs, array<float> cumVols, array<int> tested, int maxLines, int bar_index, float high, float low, float close, float volume) =>
+    for ci = 0 to maxLines - 1
+        if array.get(tested, ci) == 0
+            _ab = array.get(anchorBars, ci)
+            if bar_index >= _ab
+                _vol = math.max(volume, 1e-10)
+                array.set(cumTPVs, ci, array.get(cumTPVs, ci) + (high + low + close) / 3.0 * _vol)
+                array.set(cumVols, ci, array.get(cumVols, ci) + _vol)
+
+export chart_build_snap(array<float> snapVwap, array<int> anchorBars, array<float> cumTPVs, array<float> cumVols, array<int> tested, int maxLines, int bar_index) =>
+    for sj = 0 to maxLines - 1
+        if array.get(tested, sj) == 0
+            _ab = array.get(anchorBars, sj)
+            if bar_index >= _ab
+                _cv = array.get(cumVols, sj)
+                array.set(snapVwap, sj, _cv > 0 ? array.get(cumTPVs, sj) / _cv : na)
+            else
+                array.set(snapVwap, sj, na)
+        else
+            array.set(snapVwap, sj, na)
+
+// One active slot: touch/K/ATR/FE, invalidation, counters; sets tested=1 and returns true when line closes.
+export chart_slot_rx_close(
+     int i,
+     array<float> snapVwap,
+     array<int> anchorBars,
+     array<int> fromHigh,
+     array<int> tested,
+     array<int> consecBars,
+     array<int> slotTouched,
+     array<int> firstTouchBar,
+     array<int> cohortConsec,
+     array<bool> kMetInWindow,
+     array<bool> atrMetInWindow,
+     array<int> feFirstSwingBar,
+     array<int> feFirstOppBar,
+     array<int> feFirstBeyondBar,
+     array<int> rxCounts,
+     array<float> sumLifeHolder,
+     int bar_index,
+     float high,
+     float low,
+     float close,
+     float swingHighPx,
+     float swingLowPx,
+     float lastSwingHighPx,
+     float lastSwingLowPx,
+     int pivotLen,
+     string confirmMode,
+     int confirmBars,
+     int kHoldBars,
+     int mBarsAfterTouch,
+     float atrVal,
+     float atrRMult,
+     int mAtrWindow,
+     int noTouchSent,
+     int feUnset,
+     int maxLines) =>
+    bool closedLine = false
+    if array.get(tested, i) == 0
+        _anchor = array.get(anchorBars, i)
+        if bar_index >= _anchor
+            _vwap = array.get(snapVwap, i)
+            _isHigh = array.get(fromHigh, i) == 1
+            if not na(_vwap)
+                _breakoutClose = _isHigh ? close > _vwap : close < _vwap
+                _ft = array.get(firstTouchBar, i)
+                _touchedNow = low <= _vwap and high >= _vwap
+                if _touchedNow
+                    array.set(slotTouched, i, 1)
+                if _touchedNow and _ft == noTouchSent
+                    array.set(firstTouchBar, i, bar_index)
+                    _cc0 = _breakoutClose ? 1 : 0
+                    array.set(cohortConsec, i, _cc0)
+                    if _cc0 >= kHoldBars
+                        array.set(kMetInWindow, i, true)
+                    _thr0 = _isHigh ? _vwap + atrRMult * atrVal : _vwap - atrRMult * atrVal
+                    if _isHigh ? high >= _thr0 : low <= _thr0
+                        array.set(atrMetInWindow, i, true)
+                else if _ft != noTouchSent
+                    if bar_index > _ft and bar_index <= _ft + mBarsAfterTouch
+                        _cc = array.get(cohortConsec, i)
+                        _cc := _breakoutClose ? _cc + 1 : 0
+                        array.set(cohortConsec, i, _cc)
+                        if _cc >= kHoldBars
+                            array.set(kMetInWindow, i, true)
+                    if bar_index > _ft and bar_index <= _ft + mAtrWindow
+                        _thr = _isHigh ? _vwap + atrRMult * atrVal : _vwap - atrRMult * atrVal
+                        if _isHigh ? high >= _thr : low <= _thr
+                            array.set(atrMetInWindow, i, true)
+                _ftNow = array.get(firstTouchBar, i)
+                if _ftNow != noTouchSent and bar_index >= _ftNow
+                    _feSwingFavourable = _isHigh ? not na(swingLowPx) : not na(swingHighPx)
+                    if _feSwingFavourable and array.get(feFirstSwingBar, i) == feUnset
+                        array.set(feFirstSwingBar, i, bar_index)
+                    if array.get(feFirstOppBar, i) == feUnset
+                        for jx = 0 to maxLines - 1
+                            if jx != i and array.get(tested, jx) == 0
+                                _opp = _isHigh ? array.get(fromHigh, jx) == 0 : array.get(fromHigh, jx) == 1
+                                if _opp
+                                    _vj = array.get(snapVwap, jx)
+                                    if not na(_vj) and low <= _vj and high >= _vj
+                                        array.set(feFirstOppBar, i, bar_index)
+                                        break
+                    if array.get(feFirstBeyondBar, i) == feUnset
+                        if not _isHigh and not na(lastSwingHighPx) and close > lastSwingHighPx
+                            array.set(feFirstBeyondBar, i, bar_index)
+                        if _isHigh and not na(lastSwingLowPx) and close < lastSwingLowPx
+                            array.set(feFirstBeyondBar, i, bar_index)
+                _minBarsAfterAnchor = pivotLen + 2
+                _closedAbove = close > _vwap
+                _closedBelow = close < _vwap
+                _onCorrectSide = (_isHigh and _closedAbove) or (not _isHigh and _closedBelow)
+                _confirmed = false
+                if bar_index > _anchor + _minBarsAfterAnchor
+                    if confirmMode == "One bar"
+                        _confirmed := _onCorrectSide
+                    else
+                        _cnt = _onCorrectSide ? array.get(consecBars, i) + 1 : 0
+                        array.set(consecBars, i, _cnt)
+                        _confirmed := _cnt >= confirmBars
+                if _confirmed
+                    _life = bar_index - _anchor + 1
+                    array.set(sumLifeHolder, 0, array.get(sumLifeHolder, 0) + _life)
+                    array.set(rxCounts, 20, array.get(rxCounts, 20) + 1)
+                    _hadTouch = array.get(slotTouched, i) == 1
+                    _ftEnd = array.get(firstTouchBar, i)
+                    _kMet = array.get(kMetInWindow, i)
+                    _kmBreak = not _hadTouch ? false : bar_index <= _ftEnd + mBarsAfterTouch or _kMet
+                    _atrMet = array.get(atrMetInWindow, i)
+                    _atrBreak = not _hadTouch ? false : bar_index <= _ftEnd + mAtrWindow or _atrMet
+                    if not _hadTouch
+                        if _isHigh
+                            array.set(rxCounts, 5, array.get(rxCounts, 5) + 1)
+                        else
+                            array.set(rxCounts, 2, array.get(rxCounts, 2) + 1)
+                    else
+                        if _isHigh
+                            if _kmBreak
+                                array.set(rxCounts, 3, array.get(rxCounts, 3) + 1)
+                            else
+                                array.set(rxCounts, 4, array.get(rxCounts, 4) + 1)
+                            if _atrBreak
+                                array.set(rxCounts, 8, array.get(rxCounts, 8) + 1)
+                            else
+                                array.set(rxCounts, 9, array.get(rxCounts, 9) + 1)
+                            _mgS = array.get(feFirstSwingBar, i)
+                            _mgO = array.get(feFirstOppBar, i)
+                            _mgB = array.get(feFirstBeyondBar, i)
+                            if _mgS != feUnset
+                                array.set(rxCounts, 15, array.get(rxCounts, 15) + 1)
+                            if _mgO != feUnset
+                                array.set(rxCounts, 16, array.get(rxCounts, 16) + 1)
+                            if _mgB != feUnset
+                                array.set(rxCounts, 17, array.get(rxCounts, 17) + 1)
+                            if _mgS != feUnset or _mgO != feUnset or _mgB != feUnset
+                                array.set(rxCounts, 18, array.get(rxCounts, 18) + 1)
+                            else
+                                array.set(rxCounts, 19, array.get(rxCounts, 19) + 1)
+                        else
+                            if _kmBreak
+                                array.set(rxCounts, 0, array.get(rxCounts, 0) + 1)
+                            else
+                                array.set(rxCounts, 1, array.get(rxCounts, 1) + 1)
+                            if _atrBreak
+                                array.set(rxCounts, 6, array.get(rxCounts, 6) + 1)
+                            else
+                                array.set(rxCounts, 7, array.get(rxCounts, 7) + 1)
+                            _mgS = array.get(feFirstSwingBar, i)
+                            _mgO = array.get(feFirstOppBar, i)
+                            _mgB = array.get(feFirstBeyondBar, i)
+                            if _mgS != feUnset
+                                array.set(rxCounts, 10, array.get(rxCounts, 10) + 1)
+                            if _mgO != feUnset
+                                array.set(rxCounts, 11, array.get(rxCounts, 11) + 1)
+                            if _mgB != feUnset
+                                array.set(rxCounts, 12, array.get(rxCounts, 12) + 1)
+                            if _mgS != feUnset or _mgO != feUnset or _mgB != feUnset
+                                array.set(rxCounts, 13, array.get(rxCounts, 13) + 1)
+                            else
+                                array.set(rxCounts, 14, array.get(rxCounts, 14) + 1)
+                    array.set(tested, i, 1)
+                    closedLine := true
+    closedLine

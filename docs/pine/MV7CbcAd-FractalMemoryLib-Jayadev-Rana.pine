@@ -1,0 +1,122 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © bluealgocapital
+
+//@version=6
+// @description Pattern-memory toolkit: find the historical window most similar to recent price action, replay it forward as a projected path, and size targets adaptively by volatility regime. Engine behind the Fractal Memory Projection indicator and Fractal Memory Strategy.
+library("FractalMemoryLib", overlay = true)
+
+// @function        Normalized log return of a series (1-bar).
+// @param src       Source series (e.g. close).
+// @returns         Log return series.
+export logRet(series float src) =>
+    math.log(src / src[1])
+
+// @function        Find the past window most similar to the latest `winLen` returns.
+//                  Similarity is mean squared distance between stdev-normalized returns,
+//                  so it compares the SHAPE of movement, not price level.
+// @param src       Source series (e.g. close).
+// @param winLen    Pattern window length in bars (e.g. 30).
+// @param scanDepth How many bars back to scan (e.g. 300-750). Caller must have history.
+// @param gapAhead  Bars that must exist AFTER the match (your forecast length).
+// @returns         [offset, quality] — offset = bars back where the best window ENDS
+//                  (na if none), quality = 0-100 similarity score.
+export bestMatch(series float src, int winLen, int scanDepth, int gapAhead) =>
+    r = math.log(src / src[1])
+    sd = ta.stdev(r, winLen)
+    int   bestOff = na
+    float quality = na
+    maxScan = math.min(scanDepth, bar_index - winLen - gapAhead - 1)
+    if maxScan > winLen + gapAhead
+        curSd = nz(sd, 1e-10) + 1e-10
+        bestErr = 1e20
+        off = -1
+        for j = gapAhead + 1 to maxScan
+            err = 0.0
+            for k = 0 to winLen - 1
+                d = nz(r[k]) / curSd - nz(r[j + k]) / curSd
+                err := err + d * d
+            if err < bestErr
+                bestErr := err
+                off := j
+        if off > 0
+            bestOff := off
+            quality := math.max(0, 100 - math.sqrt(bestErr / winLen) * 100)
+    [bestOff, quality]
+
+// @function        Replay the `fcLen` bars that followed a matched window as a projected
+//                  close path starting from the current price, returns rescaled by
+//                  `scaleF` (e.g. currentATR / matchATR).
+// @param src       Source series used for the match (e.g. close).
+// @param offset    Bars back where the matched window ends (from bestMatch).
+// @param fcLen     Projection length in bars.
+// @param scaleF    Volatility rescale factor (1.0 = raw analog returns).
+// @returns         array<float> of projected closes (size fcLen; empty if offset invalid).
+export analogPath(series float src, int offset, int fcLen, float scaleF) =>
+    path = array.new<float>()
+    if not na(offset) and offset > fcLen
+        r = math.log(src / src[1])
+        pc = src
+        for i = 1 to fcLen
+            pc := pc * math.exp(nz(r[offset - i]) * scaleF)
+            array.push(path, pc)
+    path
+
+// @function        Volatility-adaptive unit risk: ATR scaled by its own percentile rank,
+//                  so the unit widens in volatile regimes and tightens in quiet ones.
+//                  Call on every bar for ta.* consistency.
+// @param atrLen    ATR length (e.g. 14).
+// @param rankLen   Lookback for the percentile rank (e.g. 200).
+// @param base      Base multiplier added to the 0-1 rank (e.g. 0.8 → 0.8x-1.8x ATR).
+// @returns         [unitR, volRank] — unit risk in price units, rank 0-1.
+export adaptiveR(simple int atrLen, simple int rankLen, float base) =>
+    a = ta.atr(atrLen)
+    rank = ta.percentrank(a, rankLen) / 100
+    [a * (base + rank), rank]
+
+// @function        Volatility regime label from a 0-1 rank.
+// @param volRank   Percentile rank 0-1 (from adaptiveR).
+// @returns         "Low", "Normal" or "High".
+export volRegime(float volRank) =>
+    volRank > 0.7 ? "High" : volRank < 0.3 ? "Low" : "Normal"
+
+// @function        Stop and three R-multiple targets from an entry.
+// @param entry     Entry price.
+// @param dirSign   +1 long, -1 short.
+// @param unitR     Unit risk in price units (from adaptiveR).
+// @param slMult    Stop distance in R (e.g. 1.2).
+// @returns         [sl, tp1, tp2, tp3].
+export targets(float entry, int dirSign, float unitR, float slMult) =>
+    sl  = entry - dirSign * unitR * slMult
+    tp1 = entry + dirSign * unitR
+    tp2 = entry + dirSign * unitR * 2
+    tp3 = entry + dirSign * unitR * 3
+    [sl, tp1, tp2, tp3]
+
+// ---------------------------------------------------------------------------
+//  Demo (renders when the library itself is on a chart): projected path line
+//  from the best analog. Heavy scan runs on the last bar only.
+// ---------------------------------------------------------------------------
+demoWin   = 30
+demoDepth = 300
+demoFc    = 50
+
+// adaptiveR uses ta.* internally, so the demo calls it on every bar; the heavy
+// bestMatch scan runs on the last bar only (rank-order of matches is unaffected).
+[demoR, demoRank] = adaptiveR(14, 200, 0.8)
+
+var line[] demoSegs = array.new<line>()
+if barstate.islast
+    for l in demoSegs
+        line.delete(l)
+    array.clear(demoSegs)
+    [off, q] = bestMatch(close, demoWin, demoDepth, demoFc)
+    if not na(off)
+        path = analogPath(close, off, demoFc, 1.0)
+        if array.size(path) > 0
+            prev = close
+            for i = 0 to array.size(path) - 1
+                cur = array.get(path, i)
+                array.push(demoSegs, line.new(bar_index + i, prev, bar_index + i + 1, cur, color = color.new(#c9a227, 30), width = 2))
+                prev := cur
+
+plot(na, "anchor", display = display.none)

@@ -1,0 +1,750 @@
+//@version=6
+// Version: 1.0.0 (2026-07-25)
+//
+// Rebound V-Board: multi-timeframe V-Ladder step scoreboard. Runs both Rebound
+// V-Fib engines (RT long / Closer short) with support/resistance detection on
+// five timeframes chosen by preset (Swing 15/1H/4H/1D/1W default, Day trade
+// 5S/15S/1/5/15, or Custom). The on-chart table shows each timeframe's latest
+// ladder step as baseball emojis (RT / CL rows) with a weather cell (net
+// up/down-expected count) and the representative Sup%/d; the status line shows
+// the Up-Down count and VL Score A / B (-3..+3 ladder-zone readiness over the
+// A-C / C-E triplets, 1:1:1). Data window / Pine Screener columns carry the
+// signed steps (+1..+5 = long hit..run, -1..-5 = short catch..lock, 0 = no
+// ladder), ages, Sup%, and LFib per slot A-E. Values compute on the last bars
+// of each timeframe ("Calc on every bar" recomputes history so the status line
+// follows the cursor — heavy, default off). Keep the chart on the lowest
+// configured timeframe: lower-than-chart timeframes are unreliable on history.
+
+indicator("Rebound V-Board", "V-Board", overlay = true, max_bars_back = 500)
+
+max_bars_back(high, 500)   // dynamic high[i] / low[i] lookback defeats buffer auto-sizing; force full depth
+max_bars_back(low, 500)
+
+// ==================== Inputs ====================
+
+lookback_bars      = input.int(240, "Lookback bars",      minval = 10, group = "General",         tooltip = "Lookback bars for trend detection, in bars of each slot's timeframe. Pine Screener is capped at 500 bars, so larger values can be inaccurate there.")
+calc_every_bar     = input.bool(false, "Calc on every bar", group = "General", tooltip = "Compute steps / Sup% / LFib on every bar so the status line and data window show values at the cursor bar. Heavy: support detection runs on all bars of all five timeframes — leave off for live use.")
+min_downtrend_bars = input.int(20,  "Min downtrend bars", minval = 1,  group = "Trend detection", tooltip = "Minimum downtrend/run-up bars before the pivot")
+min_uptrend_bars   = input.int(5,   "Min uptrend bars",   minval = 1,  group = "Trend detection", tooltip = "Minimum uptrend/breakdown bars after the pivot")
+
+// Five analysis timeframes in slots A-E (fast to slow), chosen by preset; the
+// VL Scores use two overlapping triplets: VL Score A = slots A-C, VL Score B =
+// slots C-E. The suffix names the slot, not the timeframe.
+tf_preset = input.string("Swing", "Timeframe preset", options = ["Swing", "Day trade", "Custom"], group = "Timeframes", tooltip = "Swing = 15/1H/4H/1D/1W. Day trade = 5S/15S/1/5/15. Custom = the five Timeframe inputs below.")
+tf_a_in = input.timeframe("5S",  "Timeframe A", group = "Timeframes", tooltip = "Slot A (fastest) when the preset is Custom.")
+tf_b_in = input.timeframe("15S", "Timeframe B", group = "Timeframes", tooltip = "Slot B when the preset is Custom.")
+tf_c_in = input.timeframe("1",   "Timeframe C", group = "Timeframes", tooltip = "Slot C when the preset is Custom.")
+tf_d_in = input.timeframe("5",   "Timeframe D", group = "Timeframes", tooltip = "Slot D when the preset is Custom.")
+tf_e_in = input.timeframe("15",  "Timeframe E", group = "Timeframes", tooltip = "Slot E (slowest) when the preset is Custom.")
+session_mode = input.string("24h", "Session", options = ["regular", "extended", "24h"], group = "Timeframes", tooltip = "Session for the A-E timeframes; affects intraday timeframes only.")
+
+string tf_a = tf_preset == "Day trade" ? "5S"  : tf_preset == "Swing" ? "15"  : tf_a_in
+string tf_b = tf_preset == "Day trade" ? "15S" : tf_preset == "Swing" ? "60"  : tf_b_in
+string tf_c = tf_preset == "Day trade" ? "1"   : tf_preset == "Swing" ? "240" : tf_c_in
+string tf_d = tf_preset == "Day trade" ? "5"   : tf_preset == "Swing" ? "D"   : tf_d_in
+string tf_e = tf_preset == "Day trade" ? "15"  : tf_preset == "Swing" ? "W"   : tf_e_in
+
+show_table = input.bool(true, "Show step table", group = "Display", tooltip = "On-chart table with the weather/count cell, representative Sup%/d, and each slot's RT / CL steps as baseball emojis.")
+table_pos  = input.string("Top right", "Table position", options = ["Top right", "Middle right", "Bottom right", "Top left", "Middle left", "Bottom left"], group = "Display", tooltip = "Board anchor on the chart. Use different positions to run two instances side by side (e.g. Swing top right, Day trade middle right).")
+
+
+// ==================== Geometric helpers ====================
+// Linear price space: slopes are price-units/bar.
+
+max_high_above_line(int x_a, float y_a, int x_b, float y_b) =>
+    float max_diff = na
+    if not na(y_a) and not na(y_b) and x_a != x_b
+        float slope = (y_b - y_a) / float(x_b - x_a)
+        int i_from = math.min(bar_index - x_a, bar_index - x_b)
+        int i_to   = math.max(bar_index - x_a, bar_index - x_b)
+        for i = i_from to i_to
+            if not na(high[i])
+                float d = high[i] - (y_a + slope * float((bar_index - i) - x_a))
+                if na(max_diff) or d > max_diff
+                    max_diff := d
+    max_diff
+
+max_low_below_line(int x_a, float y_a, int x_b, float y_b) =>
+    float max_diff = na
+    if not na(y_a) and not na(y_b) and x_a != x_b
+        float slope = (y_b - y_a) / float(x_b - x_a)
+        int i_from = math.min(bar_index - x_a, bar_index - x_b)
+        int i_to   = math.max(bar_index - x_a, bar_index - x_b)
+        for i = i_from to i_to
+            if not na(low[i])
+                float d = (y_a + slope * float((bar_index - i) - x_a)) - low[i]
+                if na(max_diff) or d > max_diff
+                    max_diff := d
+    max_diff
+
+line_intersect_x(int x_a, float y_a, float sa, int x_b, float y_b, float sb) =>
+    int result = na
+    if not na(y_a) and not na(y_b)
+        float denom = sb - sa
+        if denom != 0
+            result := math.round((y_a - sa * float(x_a) - y_b + sb * float(x_b)) / denom)
+    result
+
+
+// ==================== TrendFinder (long / RT) ====================
+// Detects the V-shape anchors (downtrend top, V-bottom, uptrend) and the current
+// support line. Same engine as Rebound V-Fib RT with drawing, entry, and rate
+// readouts removed; support detection runs on the last bars only (every bar
+// when Calc on every bar is on).
+
+type TrendFinder
+    int    down_x2 = na
+    float  down_y2 = na
+    int    x1 = na
+    float  y1 = na
+    float  down_diff = na   // max distance of mid-top above base line
+    int    up_x2 = na
+    float  up_y2 = na
+    float  up_slope = na
+    int    sup_x1 = na
+    float  sup_y1 = na
+    float  sup_slope = na
+    array<int>   sup_cand_x1 = na
+    array<float> sup_cand_y1 = na
+    array<float> sup_cand_slope = na
+    int    support_basis_x1 = na
+    int    support_basis_up_x2 = na
+    int    btm_abs = na          // incremental V-bottom tracker: absolute bar_index of lowest low since the top
+    int    btm_left = na         // previous bar's scan-window left edge (absolute), to detect window changes
+
+method isValid(TrendFinder self) =>
+    not na(self.down_diff)
+
+method update(TrendFinder self) =>
+    // top_i: highest-high offset, clamped to available bars (length is bar_index + const, which Pine bounds
+    // statically, so its buffer is replay-safe). Lets detection work before lookback_bars of history exists.
+    top_i = -ta.highestbars(high, math.min(lookback_bars, bar_index + 1))
+    // btm_i: lowest low since the top, tracked incrementally over low[] (O(1) amortized). NOT ta.lowestbars:
+    // a "since-top" length must depend on top_i (a price-derived series) which Pine can't statically bound,
+    // so ta.lowestbars' internal buffer under-allocates and overflows in Bar Replay (max_bars_back can't fix
+    // it; toggling visibility temporarily clears it). Direct low[] access uses low's 500-bar buffer instead.
+    int n        = math.max(nz(top_i, 5), 5)   // scan window length (offsets 0..n-1)
+    int left_now = bar_index - n + 1           // window left edge, absolute bar_index
+    int btm_i    = 0
+    if not na(self.btm_abs) and not na(low) and left_now >= self.btm_left and self.btm_abs >= left_now
+        // window grew at the front only: fold in the current bar (ties keep the newer bar)
+        if low <= low[bar_index - self.btm_abs]
+            self.btm_abs := bar_index
+        btm_i := bar_index - self.btm_abs
+    else
+        // rescan: first bar, window changed, or running min aged out
+        for i = 1 to n - 1
+            if low[i] < low[btm_i]
+                btm_i := i
+        self.btm_abs := bar_index - btm_i
+    self.btm_left := left_now
+
+    if low < self.y1 or (top_i >= min_downtrend_bars + min_uptrend_bars) and (btm_i >= min_uptrend_bars)
+        // ---- top of downtrend
+        if na(self.down_x2) or bar_index - top_i > self.down_x2
+            self.down_x2   := bar_index - top_i
+            self.down_y2   := high[top_i]
+            self.x1        := na
+            self.y1        := na
+            self.down_diff := na
+            self.up_x2     := na
+            self.up_y2     := na
+            self.up_slope  := na
+
+        // ---- bottom of downtrend
+        if not na(self.down_x2) and (na(self.x1) or self.down_x2 != self.x1)
+            if (na(self.x1) or bar_index - btm_i > self.x1) and bar_index - btm_i != self.down_x2
+                self.x1        := bar_index - btm_i
+                self.y1        := low[btm_i]
+                self.up_x2     := na
+                self.up_y2     := na
+                self.up_slope  := na
+
+                // ---- middle top of downtrend (max distance above base line)
+                self.down_diff := max_high_above_line(self.x1, self.y1, self.down_x2, self.down_y2)
+
+    // ---- middle bottom of uptrend (min slope from x1 to any later low)
+    if not na(self.x1) and not na(self.y1) and bar_index > self.x1
+        int start = na(self.up_slope) ? bar_index - self.x1 - 1 : 0
+        for j = start to 0
+            if not na(low[j])
+                float s = (low[j] - self.y1) / (bar_index - j - self.x1)
+                if na(self.up_slope) or s <= self.up_slope
+                    self.up_x2    := bar_index - j
+                    self.up_y2    := low[j]
+                    self.up_slope := s
+
+method find_support(TrendFinder self) =>
+    self.sup_x1    := na
+    self.sup_y1    := na
+    self.sup_slope := na
+    if na(self.sup_cand_x1)
+        self.sup_cand_x1    := array.new_int()
+        self.sup_cand_y1    := array.new_float()
+        self.sup_cand_slope := array.new_float()
+
+    if not na(self.x1) and not na(self.up_slope) and not na(self.y1)
+        int n_bars = math.min(bar_index - self.x1, lookback_bars - 1)
+        if n_bars >= 2
+            bool basis_changed = na(self.support_basis_x1) or (self.support_basis_x1 != self.x1 or self.support_basis_up_x2 != self.up_x2)
+            if basis_changed
+                array.clear(self.sup_cand_x1)
+                array.clear(self.sup_cand_y1)
+                array.clear(self.sup_cand_slope)
+                self.support_basis_x1    := self.x1
+                self.support_basis_up_x2 := self.up_x2
+
+            int   j_from       = basis_changed ? n_bars - 1 : 1
+            float up_x1        = float(self.x1)
+            float up_intercept = self.up_slope * up_x1 - self.y1
+
+            for j = j_from to 1
+                if not na(low[j])
+                    for i = n_bars to j + 1
+                        if not na(low[i])
+                            float slope = (low[j] - low[i]) / float(i - j)
+                            if slope <= self.up_slope
+                                continue
+                            float denom = self.up_slope - slope
+                            float xi    = denom == 0 ? up_x1 : (low[i] - slope * float(bar_index - i) + up_intercept) / denom
+                            int start   = math.max(i - 1, bar_index - math.round(xi))
+                            if start > n_bars
+                                continue
+                            bool broken = false
+                            for k = 1 to start
+                                if not na(low[k]) and low[k] < low[i] + slope * float(i - k)
+                                    broken := true
+                                    break
+                            if not broken
+                                array.push(self.sup_cand_x1,    bar_index - i)
+                                array.push(self.sup_cand_y1,    low[i])
+                                array.push(self.sup_cand_slope, slope)
+
+            int n = array.size(self.sup_cand_x1)
+            if n > 0
+                for idx = n - 1 to 0
+                    int   x1c     = array.get(self.sup_cand_x1, idx)
+                    float y1c     = array.get(self.sup_cand_y1, idx)
+                    float slope   = array.get(self.sup_cand_slope, idx)
+                    int   i       = bar_index - x1c
+                    bool  invalid = i > lookback_bars - 1
+                    if not invalid and not na(low[1]) and low[1] < y1c + slope * float(i - 1)
+                        invalid := true
+                    if invalid
+                        array.remove(self.sup_cand_x1,    idx)
+                        array.remove(self.sup_cand_y1,    idx)
+                        array.remove(self.sup_cand_slope, idx)
+                n := array.size(self.sup_cand_x1)
+
+            if n > 0
+                for idx = 0 to n - 1
+                    float slope = array.get(self.sup_cand_slope, idx)
+                    if na(self.sup_slope) or slope > self.sup_slope
+                        self.sup_x1    := array.get(self.sup_cand_x1, idx)
+                        self.sup_y1    := array.get(self.sup_cand_y1, idx)
+                        self.sup_slope := slope
+    else
+        array.clear(self.sup_cand_x1)
+        array.clear(self.sup_cand_y1)
+        array.clear(self.sup_cand_slope)
+        self.support_basis_x1    := na
+        self.support_basis_up_x2 := na
+
+
+// ==================== TrendFinderS (short / Closer) ====================
+// Price-axis mirror of TrendFinder: detects an inverted-V peak (run-up then
+// breakdown) and the current resistance line. Same engine as Rebound V-Fib RT
+// Closer with drawing, entry, and rate readouts removed. Internal names are kept
+// from the long version; "support" = resistance ceiling. Unique method names (no
+// overload with TrendFinder): Pine forbids overloaded functions from reading
+// global variables like high / bar_index (CE10182).
+
+type TrendFinderS
+    int    down_x2 = na
+    float  down_y2 = na
+    int    x1 = na
+    float  y1 = na
+    float  down_diff = na   // max distance of mid-bottom below base line
+    int    up_x2 = na
+    float  up_y2 = na
+    float  up_slope = na
+    int    sup_x1 = na
+    float  sup_y1 = na
+    float  sup_slope = na
+    array<int>   sup_cand_x1 = na
+    array<float> sup_cand_y1 = na
+    array<float> sup_cand_slope = na
+    int    support_basis_x1 = na
+    int    support_basis_up_x2 = na
+    int    btm_abs = na          // incremental peak tracker: absolute bar_index of highest high since the bottom
+    int    btm_left = na
+
+method isValidS(TrendFinderS self) =>
+    not na(self.down_diff)
+
+method updateS(TrendFinderS self) =>
+    // top_i: lowest-low offset, clamped to available bars (length is bar_index + const, replay-safe).
+    top_i = -ta.lowestbars(low, math.min(lookback_bars, bar_index + 1))
+    // btm_i: highest high since the bottom, tracked incrementally over high[] (O(1) amortized). NOT
+    // ta.highestbars (since-bottom length depends on top_i, which Pine can't statically bound, so its
+    // buffer overflows in Bar Replay). Direct high[] access uses high's 500-bar buffer instead.
+    int n        = math.max(nz(top_i, 5), 5)
+    int left_now = bar_index - n + 1
+    int btm_i    = 0
+    if not na(self.btm_abs) and not na(high) and left_now >= self.btm_left and self.btm_abs >= left_now
+        if high >= high[bar_index - self.btm_abs]
+            self.btm_abs := bar_index
+        btm_i := bar_index - self.btm_abs
+    else
+        for i = 1 to n - 1
+            if high[i] > high[btm_i]
+                btm_i := i
+        self.btm_abs := bar_index - btm_i
+    self.btm_left := left_now
+
+    if high > self.y1 or (top_i >= min_downtrend_bars + min_uptrend_bars) and (btm_i >= min_uptrend_bars)
+        // ---- bottom of prior leg
+        if na(self.down_x2) or bar_index - top_i > self.down_x2
+            self.down_x2   := bar_index - top_i
+            self.down_y2   := low[top_i]
+            self.x1        := na
+            self.y1        := na
+            self.down_diff := na
+            self.up_x2     := na
+            self.up_y2     := na
+            self.up_slope  := na
+
+        // ---- peak of run-up
+        if not na(self.down_x2) and (na(self.x1) or self.down_x2 != self.x1)
+            if (na(self.x1) or bar_index - btm_i > self.x1) and bar_index - btm_i != self.down_x2
+                self.x1        := bar_index - btm_i
+                self.y1        := high[btm_i]
+                self.up_x2     := na
+                self.up_y2     := na
+                self.up_slope  := na
+
+                // ---- middle bottom of run-up (max distance below base line)
+                self.down_diff := max_low_below_line(self.x1, self.y1, self.down_x2, self.down_y2)
+
+    // ---- middle top of breakdown (max slope from x1 to any later high)
+    if not na(self.x1) and not na(self.y1) and bar_index > self.x1
+        int start = na(self.up_slope) ? bar_index - self.x1 - 1 : 0
+        for j = start to 0
+            if not na(high[j])
+                float s = (high[j] - self.y1) / (bar_index - j - self.x1)
+                if na(self.up_slope) or s >= self.up_slope
+                    self.up_x2    := bar_index - j
+                    self.up_y2    := high[j]
+                    self.up_slope := s
+
+method find_supportS(TrendFinderS self) =>
+    self.sup_x1    := na
+    self.sup_y1    := na
+    self.sup_slope := na
+    if na(self.sup_cand_x1)
+        self.sup_cand_x1    := array.new_int()
+        self.sup_cand_y1    := array.new_float()
+        self.sup_cand_slope := array.new_float()
+
+    if not na(self.x1) and not na(self.up_slope) and not na(self.y1)
+        int n_bars = math.min(bar_index - self.x1, lookback_bars - 1)
+        if n_bars >= 2
+            bool basis_changed = na(self.support_basis_x1) or (self.support_basis_x1 != self.x1 or self.support_basis_up_x2 != self.up_x2)
+            if basis_changed
+                array.clear(self.sup_cand_x1)
+                array.clear(self.sup_cand_y1)
+                array.clear(self.sup_cand_slope)
+                self.support_basis_x1    := self.x1
+                self.support_basis_up_x2 := self.up_x2
+
+            int   j_from       = basis_changed ? n_bars - 1 : 1
+            float up_x1        = float(self.x1)
+            float up_intercept = self.up_slope * up_x1 - self.y1
+
+            for j = j_from to 1
+                if not na(high[j])
+                    for i = n_bars to j + 1
+                        if not na(high[i])
+                            float slope = (high[j] - high[i]) / float(i - j)
+                            if slope >= self.up_slope
+                                continue
+                            float denom = self.up_slope - slope
+                            float xi    = denom == 0 ? up_x1 : (high[i] - slope * float(bar_index - i) + up_intercept) / denom
+                            int start   = math.max(i - 1, bar_index - math.round(xi))
+                            if start > n_bars
+                                continue
+                            bool broken = false
+                            for k = 1 to start
+                                if not na(high[k]) and high[k] > high[i] + slope * float(i - k)
+                                    broken := true
+                                    break
+                            if not broken
+                                array.push(self.sup_cand_x1,    bar_index - i)
+                                array.push(self.sup_cand_y1,    high[i])
+                                array.push(self.sup_cand_slope, slope)
+
+            int n = array.size(self.sup_cand_x1)
+            if n > 0
+                for idx = n - 1 to 0
+                    int   x1c     = array.get(self.sup_cand_x1, idx)
+                    float y1c     = array.get(self.sup_cand_y1, idx)
+                    float slope   = array.get(self.sup_cand_slope, idx)
+                    int   i       = bar_index - x1c
+                    bool  invalid = i > lookback_bars - 1
+                    if not invalid and not na(high[1]) and high[1] > y1c + slope * float(i - 1)
+                        invalid := true
+                    if invalid
+                        array.remove(self.sup_cand_x1,    idx)
+                        array.remove(self.sup_cand_y1,    idx)
+                        array.remove(self.sup_cand_slope, idx)
+                n := array.size(self.sup_cand_x1)
+
+            if n > 0
+                for idx = 0 to n - 1
+                    float slope = array.get(self.sup_cand_slope, idx)
+                    if na(self.sup_slope) or slope < self.sup_slope
+                        self.sup_x1    := array.get(self.sup_cand_x1, idx)
+                        self.sup_y1    := array.get(self.sup_cand_y1, idx)
+                        self.sup_slope := slope
+    else
+        array.clear(self.sup_cand_x1)
+        array.clear(self.sup_cand_y1)
+        array.clear(self.sup_cand_slope)
+        self.support_basis_x1    := na
+        self.support_basis_up_x2 := na
+
+
+// ==================== V-Ladder Fib anchors ====================
+// Anchors for the V-Ladder Fib (origin, base-line end, unit source), drawn off the
+// immediately-previous support/resistance line; falls back to the V-bottom / peak
+// origin when no previous line exists. Same selection as Rebound V-Fib RT / Closer
+// with the drawing-only right-edge anchors dropped.
+
+support_fib_anchors_l(TrendFinder trend) =>
+    int   sx1 = na
+    float sy1 = na
+    float sld = na
+    int   sdx2 = trend.down_x2
+    float sdy2 = trend.down_y2
+    if not na(trend.sup_cand_x1) and not na(trend.sup_slope) and not na(trend.down_x2) and not na(trend.down_y2)
+        // Previous support = candidate with the largest slope strictly below sup_slope
+        float prev_slope = na
+        int   prev_x1    = na
+        float prev_y1    = na
+        for idx = 0 to trend.sup_cand_x1.size() - 1
+            float s = trend.sup_cand_slope.get(idx)
+            if s < trend.sup_slope and (na(prev_slope) or s > prev_slope)
+                prev_slope := s
+                prev_x1    := trend.sup_cand_x1.get(idx)
+                prev_y1    := trend.sup_cand_y1.get(idx)
+
+        if not na(prev_slope) and not na(prev_y1) and trend.down_x2 != prev_x1
+            float new_diff = max_high_above_line(prev_x1, prev_y1, trend.down_x2, trend.down_y2)
+            int   x4 = line_intersect_x(prev_x1, prev_y1, prev_slope, trend.sup_x1, trend.sup_y1, trend.sup_slope)
+            if not na(new_diff) and not na(x4) and x4 != prev_x1
+                sx1 := prev_x1
+                sy1 := prev_y1
+                sld := new_diff
+        // Fallback: no previous support — use the V-bottom origin so the ladder still exists
+        if na(sx1) and trend.isValid()
+            sx1 := trend.x1
+            sy1 := trend.y1
+            sld := trend.down_diff
+    [sx1, sy1, sdx2, sdy2, sld]
+
+support_fib_anchors_s(TrendFinderS trend) =>
+    int   sx1 = na
+    float sy1 = na
+    float sld = na
+    int   sdx2 = trend.down_x2
+    float sdy2 = trend.down_y2
+    if not na(trend.sup_cand_x1) and not na(trend.sup_slope) and not na(trend.down_x2) and not na(trend.down_y2)
+        // Previous resistance = candidate with the smallest slope strictly above sup_slope
+        float prev_slope = na
+        int   prev_x1    = na
+        float prev_y1    = na
+        for idx = 0 to trend.sup_cand_x1.size() - 1
+            float s = trend.sup_cand_slope.get(idx)
+            if s > trend.sup_slope and (na(prev_slope) or s < prev_slope)
+                prev_slope := s
+                prev_x1    := trend.sup_cand_x1.get(idx)
+                prev_y1    := trend.sup_cand_y1.get(idx)
+
+        if not na(prev_slope) and not na(prev_y1) and trend.down_x2 != prev_x1
+            float new_diff = max_low_below_line(prev_x1, prev_y1, trend.down_x2, trend.down_y2)
+            int   x4 = line_intersect_x(prev_x1, prev_y1, prev_slope, trend.sup_x1, trend.sup_y1, trend.sup_slope)
+            if not na(new_diff) and not na(x4) and x4 != prev_x1
+                sx1 := prev_x1
+                sy1 := prev_y1
+                sld := new_diff
+        // Fallback: no previous resistance — use the peak origin so the ladder still exists
+        if na(sx1) and trend.isValidS()
+            sx1 := trend.x1
+            sy1 := trend.y1
+            sld := trend.down_diff
+    [sx1, sy1, sdx2, sdy2, sld]
+
+
+// ==================== V-Ladder step scan ====================
+// Latest ladder step from the first bar whose high (long) / low (short) crossed
+// each key level (0.5 / 1.0 / 1.618 / 2.272 / 3.0), scanned once from the ladder
+// origin. Levels cross in order, so step = count of crossed levels and step_x =
+// the bar of the most recent crossing. Same crossing rule as the baseball emojis
+// in Rebound V-Fib RT / Closer.
+
+ladder_step_long(int x1, float y1, int down_x2, float down_y2, float diff) =>
+    int step   = 0
+    int step_x = na
+    if not na(x1) and not na(y1) and not na(down_y2) and not na(diff) and down_x2 != x1
+        float unit  = diff / 0.236
+        float slope = (down_y2 - y1) / float(down_x2 - x1)
+        array<float> ratios = array.from(0.5, 1.0, 1.618, 2.272, 3.0)
+        for bar_x = math.max(x1 + 1, bar_index - 499) to bar_index   // skip bars beyond history buffer
+            if step == 5
+                break
+            float h = high[bar_index - bar_x]
+            if not na(h)
+                float base = y1 + slope * float(bar_x - x1)
+                while step < 5 and h >= base + unit * array.get(ratios, step)
+                    step   += 1
+                    step_x := bar_x
+    [step, step_x]
+
+ladder_step_short(int x1, float y1, int down_x2, float down_y2, float diff) =>
+    int step   = 0
+    int step_x = na
+    if not na(x1) and not na(y1) and not na(down_y2) and not na(diff) and down_x2 != x1
+        float unit  = diff / 0.236
+        float slope = (down_y2 - y1) / float(down_x2 - x1)
+        array<float> ratios = array.from(0.5, 1.0, 1.618, 2.272, 3.0)
+        for bar_x = math.max(x1 + 1, bar_index - 499) to bar_index
+            if step == 5
+                break
+            float l = low[bar_index - bar_x]
+            if not na(l)
+                float base = y1 + slope * float(bar_x - x1)
+                while step < 5 and l <= base - unit * array.get(ratios, step)
+                    step   += 1
+                    step_x := bar_x
+    [step, step_x]
+
+// Current V-Ladder Fib value: where price sits on the ladder Fib (same ratio math
+// as V-Fib but on the ladder anchors; long measures up from the base, short down)
+ladder_fib_long(int x1, float y1, int down_x2, float down_y2, float diff, float price) =>
+    float r = na
+    if not na(price) and not na(y1) and not na(down_y2) and not na(diff) and not na(x1) and not na(down_x2)
+        int dx = down_x2 - x1
+        if dx != 0
+            float unit = diff / 0.236
+            float base_y = y1 + (down_y2 - y1) / dx * (bar_index - x1)
+            float raw = (price - base_y) / unit
+            r := na(raw) ? 0 : raw
+    r
+
+ladder_fib_short(int x1, float y1, int down_x2, float down_y2, float diff, float price) =>
+    float r = na
+    if not na(price) and not na(y1) and not na(down_y2) and not na(diff) and not na(x1) and not na(down_x2)
+        int dx = down_x2 - x1
+        if dx != 0
+            float unit = diff / 0.236
+            float base_y = y1 + (down_y2 - y1) / dx * (bar_index - x1)
+            float raw = (base_y - price) / unit
+            r := na(raw) ? 0 : raw
+    r
+
+
+// ==================== Per-timeframe calc wrapper (runs inside request.security) ====================
+// Returns [rt_step, rt_age, rt_sup, rt_lfib, cl_step, cl_age, cl_sup, cl_lfib]
+// for one timeframe: each ladder's latest step (long 0..5, short 0..-5), minutes
+// since its crossing (na while that ladder has no step), the support / resistance
+// line slope (linear %/day; na without a line), and the current V-Ladder Fib
+// value. Engine state lives in the secondary context; support detection and the
+// step scan run on its last and last-confirmed bars only (the confirmed bar is
+// what Pine Screener cell colors sample; every bar when Calc on every bar is on).
+
+// Measured bars per day (runs inside request.security): count bars per calendar day and
+// keep a ~5-day average, so omitted no-trade bars / extended sessions / each symbol's
+// liquidity all scale %/day correctly; daily and above keep the calendar ladder.
+bpd_measured() =>
+    bool new_day = nz(ta.change(dayofmonth)) != 0
+    float s = timeframe.in_seconds(timeframe.period)
+    if s >= 86400
+        s >= 86400 * 20 ? 1.0 / 20 : s >= 86400 * 5 ? 1.0 / 5 : 1.0
+    else
+        var int   count = 0
+        var float avg   = na
+        if new_day and count > 0
+            avg   := na(avg) ? count : (avg * 4 + count) / 5   // EMA-style ~5-day average
+            count := 0
+        count += 1
+        nz(avg, math.max(count, 1))   // before the first full day, fall back to the running count
+
+calc_ladder() =>
+    float bpd = bpd_measured()
+    var trend_l = TrendFinder.new()
+    var trend_s = TrendFinderS.new()
+    trend_l.update()
+    trend_s.updateS()
+    float rt_step = na
+    float rt_age  = na
+    float rt_sup  = na
+    float rt_lfib = na
+    float cl_step = na
+    float cl_age  = na
+    float cl_sup  = na
+    float cl_lfib = na
+    if calc_every_bar or barstate.islast or barstate.islastconfirmedhistory
+        trend_l.find_support()
+        trend_s.find_supportS()
+        [lx1, ly1, ldx2, ldy2, lld] = support_fib_anchors_l(trend_l)
+        [sx1, sy1, sdx2, sdy2, sld] = support_fib_anchors_s(trend_s)
+        [l_step, l_x] = ladder_step_long(lx1, ly1, ldx2, ldy2, lld)
+        [s_step, s_x] = ladder_step_short(sx1, sy1, sdx2, sdy2, sld)
+        float bar_min = timeframe.in_seconds(timeframe.period) / 60.0
+        rt_step := l_step
+        rt_age  := l_step > 0 ? (bar_index - l_x) * bar_min : na
+        rt_sup  := not na(trend_l.sup_slope) and trend_l.sup_y1 != 0 ? 100.0 * trend_l.sup_slope / trend_l.sup_y1 * bpd : na
+        rt_lfib := ladder_fib_long(lx1, ly1, ldx2, ldy2, lld, high)
+        cl_step := -s_step
+        cl_age  := s_step > 0 ? (bar_index - s_x) * bar_min : na
+        cl_sup  := not na(trend_s.sup_slope) and trend_s.sup_y1 != 0 ? 100.0 * trend_s.sup_slope / trend_s.sup_y1 * bpd : na
+        cl_lfib := ladder_fib_short(sx1, sy1, sdx2, sdy2, sld, low)
+    [rt_step, rt_age, rt_sup, rt_lfib, cl_step, cl_age, cl_sup, cl_lfib]
+
+
+// ==================== Per-timeframe requests (A-E = the chosen timeframes) ====================
+// 5 calc_ladder calls = 5 request.security calls, exactly at the Screener's limit.
+
+string req_ticker = ticker.modify(syminfo.tickerid, session_mode)
+
+[rt_step_a, rt_age_a, rt_sup_a, rt_lfib_a, cl_step_a, cl_age_a, cl_sup_a, cl_lfib_a] = request.security(req_ticker, tf_a, calc_ladder())
+[rt_step_b, rt_age_b, rt_sup_b, rt_lfib_b, cl_step_b, cl_age_b, cl_sup_b, cl_lfib_b] = request.security(req_ticker, tf_b, calc_ladder())
+[rt_step_c, rt_age_c, rt_sup_c, rt_lfib_c, cl_step_c, cl_age_c, cl_sup_c, cl_lfib_c] = request.security(req_ticker, tf_c, calc_ladder())
+[rt_step_d, rt_age_d, rt_sup_d, rt_lfib_d, cl_step_d, cl_age_d, cl_sup_d, cl_lfib_d] = request.security(req_ticker, tf_d, calc_ladder())
+[rt_step_e, rt_age_e, rt_sup_e, rt_lfib_e, cl_step_e, cl_age_e, cl_sup_e, cl_lfib_e] = request.security(req_ticker, tf_e, calc_ladder())
+
+
+// ==================== Output ====================
+// Status line: Up-Down count, then VL Score A / B (sets A-C / C-E). Everything
+// else — representative RT / CL Sup% and the per-slot Step / Age / Sup% / LFib
+// columns — stays data window / Screener only. Colors follow the expected
+// direction: early steps continue, late steps warn of the reversal.
+
+disp      = display.pine_screener + display.data_window
+disp_stat = disp + display.status_line
+
+// Expected direction per step: +1 = upside (long hit/1st, short out 3/lock), -1 = downside (long 3rd/run, short catch/out 1)
+step_dir(float s) =>
+    s == 1 or s == 2 or s == -4 or s == -5 ? 1 : s == 4 or s == 5 or s == -1 or s == -2 ? -1 : 0
+
+// Net up/down-expected cell count across all RT / CL steps; |count| <= 1 reads as cloudy
+int updown = step_dir(rt_step_a) + step_dir(rt_step_b) + step_dir(rt_step_c) + step_dir(rt_step_d) + step_dir(rt_step_e) + step_dir(cl_step_a) + step_dir(cl_step_b) + step_dir(cl_step_c) + step_dir(cl_step_d) + step_dir(cl_step_e)
+bool updown_up = updown >= 2
+bool updown_dn = updown <= -2
+
+// One bad color spec anywhere turns ALL Pine Screener colors default blue: every
+// color (plots and table cells) must be an inline ternary of constants — never
+// stored in a variable, returned from a function, or passed through one
+// (color.new and chart.fg_color included); transparent constants use hex literals
+plot(updown, "Up-Down", display = disp_stat, color = updown_up ? color.teal : updown_dn ? color.red : color.gray, precision = 0)
+
+// Ladder zone in [0,1]: the V-Score zone curve on the V-Ladder Fib value — rises
+// toward hit (0.5), full between hit and 1st (0.5..1.0), decays to 0 by run (3.0)
+lzone(float lfib) =>
+    na(lfib) ? 0.0 : lfib < 0.5 ? math.max(0.0, lfib / 0.5) : lfib <= 1.0 ? 1.0 : math.max(0.0, (3.0 - lfib) / 2.0)
+
+// VL Score per set (1:1:1, -3..+3): long ladder zone minus short ladder zone summed over the triplet
+float vl_score_a = lzone(rt_lfib_a) + lzone(rt_lfib_b) + lzone(rt_lfib_c) - lzone(cl_lfib_a) - lzone(cl_lfib_b) - lzone(cl_lfib_c)
+float vl_score_b = lzone(rt_lfib_c) + lzone(rt_lfib_d) + lzone(rt_lfib_e) - lzone(cl_lfib_c) - lzone(cl_lfib_d) - lzone(cl_lfib_e)
+
+plot(vl_score_a, "VL Score A", display = disp_stat, color = vl_score_a < 0 ? color.red : color.teal, precision = 3)
+plot(vl_score_b, "VL Score B", display = disp_stat, color = vl_score_b < 0 ? color.red : color.teal, precision = 3)
+
+// Sup% of the longest slot (first arg pair = longest) whose ladder has a step
+sup_pick(float st5, float sp5, float st4, float sp4, float st3, float sp3, float st2, float sp2, float st1, float sp1) =>
+    nz(st5) != 0 ? sp5 : nz(st4) != 0 ? sp4 : nz(st3) != 0 ? sp3 : nz(st2) != 0 ? sp2 : nz(st1) != 0 ? sp1 : na
+
+float rt_sup_pick = sup_pick(rt_step_e, rt_sup_e, rt_step_d, rt_sup_d, rt_step_c, rt_sup_c, rt_step_b, rt_sup_b, rt_step_a, rt_sup_a)
+float cl_sup_pick = sup_pick(cl_step_e, cl_sup_e, cl_step_d, cl_sup_d, cl_step_c, cl_sup_c, cl_step_b, cl_sup_b, cl_step_a, cl_sup_a)
+
+plot(rt_sup_pick, "RT Sup%", display = disp, color = color.teal, precision = 3)
+plot(cl_sup_pick, "CL Sup%", display = disp, color = color.red,  precision = 3)
+
+plot(rt_step_a, "RT Step A", display = disp, color = step_dir(rt_step_a) > 0 ? color.teal : step_dir(rt_step_a) < 0 ? color.red : color.gray, precision = 0)
+plot(rt_step_b, "RT Step B", display = disp, color = step_dir(rt_step_b) > 0 ? color.teal : step_dir(rt_step_b) < 0 ? color.red : color.gray, precision = 0)
+plot(rt_step_c, "RT Step C", display = disp, color = step_dir(rt_step_c) > 0 ? color.teal : step_dir(rt_step_c) < 0 ? color.red : color.gray, precision = 0)
+plot(rt_step_d, "RT Step D", display = disp, color = step_dir(rt_step_d) > 0 ? color.teal : step_dir(rt_step_d) < 0 ? color.red : color.gray, precision = 0)
+plot(rt_step_e, "RT Step E", display = disp, color = step_dir(rt_step_e) > 0 ? color.teal : step_dir(rt_step_e) < 0 ? color.red : color.gray, precision = 0)
+plot(cl_step_a, "CL Step A", display = disp, color = step_dir(cl_step_a) > 0 ? color.teal : step_dir(cl_step_a) < 0 ? color.red : color.gray, precision = 0)
+plot(cl_step_b, "CL Step B", display = disp, color = step_dir(cl_step_b) > 0 ? color.teal : step_dir(cl_step_b) < 0 ? color.red : color.gray, precision = 0)
+plot(cl_step_c, "CL Step C", display = disp, color = step_dir(cl_step_c) > 0 ? color.teal : step_dir(cl_step_c) < 0 ? color.red : color.gray, precision = 0)
+plot(cl_step_d, "CL Step D", display = disp, color = step_dir(cl_step_d) > 0 ? color.teal : step_dir(cl_step_d) < 0 ? color.red : color.gray, precision = 0)
+plot(cl_step_e, "CL Step E", display = disp, color = step_dir(cl_step_e) > 0 ? color.teal : step_dir(cl_step_e) < 0 ? color.red : color.gray, precision = 0)
+
+plot(rt_age_a, "RT Age A [min]", display = disp, precision = 1)
+plot(rt_age_b, "RT Age B [min]", display = disp, precision = 1)
+plot(rt_age_c, "RT Age C [min]", display = disp, precision = 1)
+plot(rt_age_d, "RT Age D [min]", display = disp, precision = 1)
+plot(rt_age_e, "RT Age E [min]", display = disp, precision = 1)
+plot(cl_age_a, "CL Age A [min]", display = disp, precision = 1)
+plot(cl_age_b, "CL Age B [min]", display = disp, precision = 1)
+plot(cl_age_c, "CL Age C [min]", display = disp, precision = 1)
+plot(cl_age_d, "CL Age D [min]", display = disp, precision = 1)
+plot(cl_age_e, "CL Age E [min]", display = disp, precision = 1)
+
+plot(rt_sup_a, "RT Sup% A", display = disp, color = color.teal, precision = 3)
+plot(rt_sup_b, "RT Sup% B", display = disp, color = color.teal, precision = 3)
+plot(rt_sup_c, "RT Sup% C", display = disp, color = color.teal, precision = 3)
+plot(rt_sup_d, "RT Sup% D", display = disp, color = color.teal, precision = 3)
+plot(rt_sup_e, "RT Sup% E", display = disp, color = color.teal, precision = 3)
+plot(cl_sup_a, "CL Sup% A", display = disp, color = color.red,  precision = 3)
+plot(cl_sup_b, "CL Sup% B", display = disp, color = color.red,  precision = 3)
+plot(cl_sup_c, "CL Sup% C", display = disp, color = color.red,  precision = 3)
+plot(cl_sup_d, "CL Sup% D", display = disp, color = color.red,  precision = 3)
+plot(cl_sup_e, "CL Sup% E", display = disp, color = color.red,  precision = 3)
+
+plot(rt_lfib_a, "RT LFib A", display = disp, color = color.teal, precision = 3)
+plot(rt_lfib_b, "RT LFib B", display = disp, color = color.teal, precision = 3)
+plot(rt_lfib_c, "RT LFib C", display = disp, color = color.teal, precision = 3)
+plot(rt_lfib_d, "RT LFib D", display = disp, color = color.teal, precision = 3)
+plot(rt_lfib_e, "RT LFib E", display = disp, color = color.teal, precision = 3)
+plot(cl_lfib_a, "CL LFib A", display = disp, color = color.red,  precision = 3)
+plot(cl_lfib_b, "CL LFib B", display = disp, color = color.red,  precision = 3)
+plot(cl_lfib_c, "CL LFib C", display = disp, color = color.red,  precision = 3)
+plot(cl_lfib_d, "CL LFib D", display = disp, color = color.red,  precision = 3)
+plot(cl_lfib_e, "CL LFib E", display = disp, color = color.red,  precision = 3)
+
+// Step emoji per side (RT: hit/1st/2nd/3rd/run; CL: catch/out 1-3/lock); values from the other side render as none
+step_text_rt(float s) =>
+    s == 1 ? "🏏" : s == 2 ? "1️⃣" : s == 3 ? "2️⃣" : s == 4 ? "3️⃣" : s == 5 ? "🏃" : "—"
+
+step_text_cl(float s) =>
+    s == -1 ? "🧤" : s == -2 ? "🔴1" : s == -3 ? "🔴2" : s == -4 ? "🔴3" : s == -5 ? "🔒" : "—"
+
+// Table timeframe label (minute counts >= 60 shown as hours)
+tf_label(string tf) =>
+    tf == "60" ? "1H" : tf == "240" ? "4H" : tf
+
+// Step table: weather + count cell, representative Sup%/d column, then slot
+// columns with RT / CL rows
+if show_table and barstate.islast
+    string tb_pos = table_pos == "Middle right" ? position.middle_right : table_pos == "Bottom right" ? position.bottom_right : table_pos == "Top left" ? position.top_left : table_pos == "Middle left" ? position.middle_left : table_pos == "Bottom left" ? position.bottom_left : position.top_right
+    var table tb = table.new(tb_pos, 7, 3)
+    array<float>  rt_steps = array.from(rt_step_a, rt_step_b, rt_step_c, rt_step_d, rt_step_e)
+    array<float>  cl_steps = array.from(cl_step_a, cl_step_b, cl_step_c, cl_step_d, cl_step_e)
+    array<string> tfs      = array.from(tf_label(tf_a), tf_label(tf_b), tf_label(tf_c), tf_label(tf_d), tf_label(tf_e))
+    tb.cell(0, 0, "Up-Down", text_color = color.gray, text_size = size.small)
+    tb.cell(0, 1, (updown_up ? "☀️" : updown_dn ? "☔" : "☁️") + (updown > 0 ? "+" : "") + str.tostring(updown), text_color = updown_up ? color.teal : updown_dn ? color.red : color.gray, text_size = size.large)
+    var bool merged = false   // merge the weather cell across the RT / CL rows once
+    if not merged
+        tb.merge_cells(0, 1, 0, 2)
+        merged := true
+    tb.cell(1, 0, "Sup%/d", text_color = color.gray, text_size = size.small)
+    tb.cell(1, 1, na(rt_sup_pick) ? "—" : str.tostring(rt_sup_pick, "#.##"), text_color = color.teal, text_size = size.small)
+    tb.cell(1, 2, na(cl_sup_pick) ? "—" : str.tostring(cl_sup_pick, "#.##"), text_color = color.red,  text_size = size.small)
+    for i = 0 to 4
+        tb.cell(i + 2, 0, array.get(tfs, i), text_color = color.gray, text_size = size.small)
+        float r = array.get(rt_steps, i)
+        tb.cell(i + 2, 1, step_text_rt(r), text_color = color.white, bgcolor = step_dir(r) > 0 ? #00808040 : step_dir(r) < 0 ? #F2364540 : #80808040, text_size = size.normal)
+        float c = array.get(cl_steps, i)
+        tb.cell(i + 2, 2, step_text_cl(c), text_color = color.white, bgcolor = step_dir(c) > 0 ? #00808040 : step_dir(c) < 0 ? #F2364540 : #80808040, text_size = size.normal)

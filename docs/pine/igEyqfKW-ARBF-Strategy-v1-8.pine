@@ -1,0 +1,1067 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © Hunters Trades
+
+//@version=6
+strategy("ARBF Strategy v1.8", shorttitle="ARBF Strat v1.8", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500,
+     initial_capital=20000,
+     currency=currency.USD,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=2,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     pyramiding=0,
+     margin_long=1,
+     margin_short=1)
+
+// ══════════════════════════════════════════════════════════════════
+//  ARBF STRATEGY v1.8
+//
+//  ADDED:
+//  - Fixed day filter timezone issue.
+//  - Day filter now defaults to Asia/Bangkok.
+//  - Optional entry time filter.
+//  - Scaled TP engine.
+//  - SL mode after TP1:
+//      Keep Initial / Break Even / Lock TP1
+//  - SL mode after TP2:
+//      Keep Current / Break Even / Lock TP1 / Lock TP2
+//  - Optional TP3 trailing runner.
+//  - TP3 can be Fixed TP3 or Trailing Runner.
+//  - Start testing default = 01 Jan 2022.
+//  - BTC/Crypto profile uses percent-based Asia range gate.
+//  - Gold profile uses dollar-based Asia range gate.
+// ══════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════
+//  BACKTEST INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpBacktest = "Backtest Window"
+
+startTesting = input.time(
+     defval=timestamp("01 Jan 2022 00:00 +0000"),
+     title="Start Testing From",
+     group=grpBacktest
+)
+
+useEndDate = input.bool(false, "Use End Date", group=grpBacktest)
+
+endTesting = input.time(
+     defval=timestamp("01 Jan 2030 00:00 +0000"),
+     title="End Testing At",
+     group=grpBacktest
+)
+
+inDateRange = time >= startTesting and (not useEndDate or time <= endTesting)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  STRATEGY INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpStrat = "Strategy Engine"
+
+tradeMode    = input.string("A: Break", "Trade Mode", options=["A: Break", "B: ABLC", "Both (compare)"], group=grpStrat)
+riskPerc     = input.float(1.0, "Risk % Per Trade", minval=0.1, maxval=10, step=0.1, group=grpStrat)
+oneTradeDay  = input.bool(true, "Max One Trade Per Day", group=grpStrat)
+longsOn      = input.bool(true, "Allow Longs", group=grpStrat)
+shortsOn     = input.bool(true, "Allow Shorts", group=grpStrat)
+
+useTimeExit  = input.bool(true, "Time Exit at 16:00 ET", group=grpStrat)
+timeExitHour = input.int(16, "Time Exit Hour ET", minval=0, maxval=23, group=grpStrat)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  EXIT ENGINE
+// ══════════════════════════════════════════════════════════════════
+grpExit = "Exit Engine"
+
+exitMode = input.string("Scaled TP", "Exit Mode", options=["Single TP", "Scaled TP"], group=grpExit)
+
+singleTPRR = input.float(1.0, "Single TP R:R", minval=0.25, maxval=10.0, step=0.25, group=grpExit)
+singleMoveBE = input.bool(true, "Single Mode: Move SL to BE at +1R", group=grpExit)
+
+scaleTP1R = input.float(1.0, "TP1 R Multiple", minval=0.25, maxval=10.0, step=0.25, group=grpExit)
+scaleTP2R = input.float(1.5, "TP2 R Multiple", minval=0.25, maxval=10.0, step=0.25, group=grpExit)
+scaleTP3R = input.float(2.0, "TP3 R Multiple", minval=0.25, maxval=20.0, step=0.25, group=grpExit)
+
+scaleTP1QtyPct = input.float(70.0, "TP1 Qty %", minval=1, maxval=100, step=5, group=grpExit)
+scaleTP2QtyPct = input.float(20.0, "TP2 Qty %", minval=0, maxval=100, step=5, group=grpExit)
+
+afterTP1SLMode = input.string("Break Even", "After TP1 SL Mode", options=["Keep Initial", "Break Even", "Lock TP1"], group=grpExit)
+afterTP2SLMode = input.string("Keep Current", "After TP2 SL Mode", options=["Keep Current", "Break Even", "Lock TP1", "Lock TP2"], group=grpExit)
+
+tp3Mode = input.string("Fixed TP3", "TP3 Mode", options=["Fixed TP3", "Trailing Runner"], group=grpExit)
+
+trailStartMode = input.string("After TP2", "Trailing Starts", options=["After TP1", "After TP2"], group=grpExit)
+trailMode = input.string("R Multiple", "Trailing Distance Mode", options=["R Multiple", "ATR"], group=grpExit)
+trailR = input.float(0.75, "Trailing Distance R", minval=0.10, maxval=5.0, step=0.05, group=grpExit)
+trailATRLen = input.int(14, "Trailing ATR Length", minval=2, group=grpExit)
+trailATRMult = input.float(1.5, "Trailing ATR Multiplier", minval=0.1, maxval=10, step=0.1, group=grpExit)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  WEEKDAY FILTER
+// ══════════════════════════════════════════════════════════════════
+grpDays = "Weekday Filter"
+
+useDayFilter = input.bool(false, "Use Weekday Filter", group=grpDays)
+dayFilterTZ = input.string("Asia/Bangkok", "Day Filter Timezone", group=grpDays)
+
+tradeMonday = input.bool(true, "Trade Monday", group=grpDays)
+tradeTuesday = input.bool(true, "Trade Tuesday", group=grpDays)
+tradeWednesday = input.bool(true, "Trade Wednesday", group=grpDays)
+tradeThursday = input.bool(true, "Trade Thursday", group=grpDays)
+tradeFriday = input.bool(true, "Trade Friday", group=grpDays)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ENTRY TIME FILTER
+// ══════════════════════════════════════════════════════════════════
+grpEntryTime = "Entry Time Filter"
+
+useEntryTimeFilter = input.bool(false, "Use Entry Time Filter", group=grpEntryTime)
+entryFilterTZ = input.string("Asia/Bangkok", "Entry Timezone", group=grpEntryTime)
+
+entryStartHour = input.int(12, "Entry Start Hour", minval=0, maxval=23, group=grpEntryTime)
+entryStartMin  = input.int(50, "Entry Start Minute", minval=0, maxval=59, group=grpEntryTime)
+
+entryEndHour = input.int(14, "Entry End Hour", minval=0, maxval=23, group=grpEntryTime)
+entryEndMin  = input.int(0, "Entry End Minute", minval=0, maxval=59, group=grpEntryTime)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  MARKET PROFILE
+// ══════════════════════════════════════════════════════════════════
+grpProfile = "Market Profile"
+
+marketProfile = input.string("Auto", "Market Profile", options=["Auto", "Gold", "BTC/Crypto", "Custom"], group=grpProfile)
+
+btcMinPct = input.float(0.10, "BTC/Crypto Min Asia Range %", step=0.05, group=grpProfile)
+btcMaxPct = input.float(3.00, "BTC/Crypto Max Asia Range %", step=0.25, group=grpProfile)
+
+goldMinUsd = input.float(3.0, "Gold Min Asia Range $", step=0.5, group=grpProfile)
+goldMaxUsd = input.float(40.0, "Gold Max Asia Range $", step=0.5, group=grpProfile)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  BREAK MODE INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpBreak = "Break Mode (A) Stop-Loss"
+
+breakSLMode         = input.string("Opposite Asia Edge", "Break SL Type", options=["Opposite Asia Edge", "ATR"], group=grpBreak)
+breakATRlen         = input.int(14, "Break ATR Length", minval=2, group=grpBreak)
+breakATRmult        = input.float(1.0, "Break ATR Multiplier", minval=0.1, step=0.1, group=grpBreak)
+breakEntryWindowEnd = input.int(8, "Break Entry Window End ET", minval=1, maxval=23, group=grpBreak)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  SESSION INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpSession = "Session Settings"
+
+asiaTZ          = input.string("Asia/Bangkok", "Asia Range Timezone", group=grpSession)
+asiaStartHour   = input.int(8,  "Asia Start Hour", minval=0, maxval=23, group=grpSession)
+asiaStartMin    = input.int(0,  "Asia Start Minute", minval=0, maxval=59, group=grpSession)
+asiaEndHour     = input.int(12, "Asia End Hour", minval=0, maxval=23, group=grpSession)
+asiaEndMin      = input.int(0,  "Asia End Minute", minval=0, maxval=59, group=grpSession)
+
+nyTZ            = input.string("America/New_York", "London/NY Logic Timezone", group=grpSession)
+biasFollowAsia  = input.bool(true, "Bias Scan Starts At Asia End", group=grpSession)
+signalStartHour = input.int(3,  "Signal Window Start ET", minval=0, maxval=23, group=grpSession)
+signalEndHour   = input.int(12, "Signal Window End ET", minval=0, maxval=23, group=grpSession)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ASIA RANGE INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpAsia = "Asia Range"
+
+showAsiaRange        = input.bool(true, "Show Asia Range Box", group=grpAsia)
+asiaBoxColor         = input.color(color.new(color.purple, 85), "Asia Box Color", group=grpAsia)
+asiaBorderColor      = input.color(color.new(color.purple, 40), "Asia Border Color", group=grpAsia)
+
+projectAsiaBox       = input.bool(false, "Project Asia Box After Session", group=grpAsia)
+projectAsiaBoxBars   = input.int(60, "Projected Asia Box Bars", minval=5, maxval=500, group=grpAsia)
+
+extendAsiaRange      = input.bool(true, "Extend Asia Levels Into London/NY", group=grpAsia)
+asiaLineStyle        = input.string("Dashed", "Extended Line Style", options=["Solid", "Dashed", "Dotted"], group=grpAsia)
+
+useRangeGate         = input.bool(true, "Apply Asia Range Size Gate", group=grpAsia)
+rangeGateMin         = input.float(3.0, "Custom Min Asia Range", step=0.5, group=grpAsia)
+rangeGateMax         = input.float(40.0, "Custom Max Asia Range", step=0.5, group=grpAsia)
+gateIsPctCustom      = input.bool(false, "Custom Range Gate As % Of Price", group=grpAsia)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  BIAS INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpBias = "Bias Detection"
+
+showBiasLabel   = input.bool(true, "Show Bias Label", group=grpBias)
+showBiasArrow   = input.bool(true, "Show Bias Arrow on Signal Bar", group=grpBias)
+biasLongColor   = input.color(color.new(color.green, 0), "Bullish Bias Color", group=grpBias)
+biasShortColor  = input.color(color.new(color.red, 0), "Bearish Bias Color", group=grpBias)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ABLC INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpABLC = "ABLC Signal (London Continuation)"
+
+showLondonOR    = input.bool(true, "Show London Opening Range Box", group=grpABLC)
+orBoxColor      = input.color(color.new(color.aqua, 85), "London OR Box Color", group=grpABLC)
+orBorderColor   = input.color(color.new(color.aqua, 30), "London OR Border Color", group=grpABLC)
+
+useHTF4H        = input.bool(true, "Require 4H EMA20 Alignment", group=grpABLC)
+useHTF1D        = input.bool(true, "Require 1D EMA20 Alignment", group=grpABLC)
+htfEmaLen       = input.int(20, "HTF EMA Length", minval=5, maxval=100, group=grpABLC)
+
+slBufferGold    = input.float(1.0, "Gold ABLC SL Buffer", step=0.5, group=grpABLC)
+slBufferCrypto  = input.float(50.0, "BTC/Crypto ABLC SL Buffer", step=10.0, group=grpABLC)
+slBufferCustom  = input.float(1.0, "Custom ABLC SL Buffer", step=0.5, group=grpABLC)
+
+entryMaxBars    = input.int(120, "Max Bars To Wait For OR Break", minval=10, maxval=300, group=grpABLC)
+showTradeLines  = input.bool(true, "Show Entry/SL/TP Lines", group=grpABLC)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  FVG INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpFVG = "Fair Value Gaps Visual"
+
+showFVGs        = input.bool(false, "Show FVGs", group=grpFVG)
+fvgMinSize      = input.float(2.0, "Min FVG Size", step=0.1, group=grpFVG)
+maxFVGAge       = input.int(200, "Max FVG Age", minval=10, maxval=1000, group=grpFVG)
+minSizesArePct  = input.bool(false, "FVG Min Size As % Of Price", group=grpFVG)
+bullFVGColor    = input.color(color.new(color.green, 80), "Bullish FVG", group=grpFVG)
+bearFVGColor    = input.color(color.new(color.red, 80), "Bearish FVG", group=grpFVG)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  DASHBOARD INPUTS
+// ══════════════════════════════════════════════════════════════════
+grpDash = "Dashboard"
+
+showDash = input.bool(true, "Show Dashboard", group=grpDash)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  MARKET DETECTION
+// ══════════════════════════════════════════════════════════════════
+tickerUpper = str.upper(syminfo.ticker)
+descUpper   = str.upper(syminfo.description)
+
+isCryptoAuto = syminfo.type == "crypto" or str.contains(tickerUpper, "BTC") or str.contains(tickerUpper, "ETH") or str.contains(tickerUpper, "USDT") or str.contains(descUpper, "BITCOIN")
+isGoldAuto   = str.contains(tickerUpper, "XAU") or str.contains(descUpper, "GOLD")
+
+useCryptoProfile = marketProfile == "BTC/Crypto" or (marketProfile == "Auto" and isCryptoAuto)
+useGoldProfile   = marketProfile == "Gold" or (marketProfile == "Auto" and isGoldAuto)
+
+effectiveGateIsPct = useCryptoProfile ? true : useGoldProfile ? false : gateIsPctCustom
+effectiveMinRaw    = useCryptoProfile ? btcMinPct : useGoldProfile ? goldMinUsd : rangeGateMin
+effectiveMaxRaw    = useCryptoProfile ? btcMaxPct : useGoldProfile ? goldMaxUsd : rangeGateMax
+
+slBuffer = useCryptoProfile ? slBufferCrypto : useGoldProfile ? slBufferGold : slBufferCustom
+
+profileText = useCryptoProfile ? "BTC/Crypto" : useGoldProfile ? "Gold" : "Custom"
+
+
+// ══════════════════════════════════════════════════════════════════
+//  TIME CALCULATIONS
+// ══════════════════════════════════════════════════════════════════
+asiaHourNow  = hour(time, asiaTZ)
+asiaMinNow   = minute(time, asiaTZ)
+asiaHourPrev = hour(time[1], asiaTZ)
+asiaMinPrev  = minute(time[1], asiaTZ)
+
+asiaCurrentMin = asiaHourNow * 60 + asiaMinNow
+asiaPrevMin    = asiaHourPrev * 60 + asiaMinPrev
+
+asiaStartM = asiaStartHour * 60 + asiaStartMin
+asiaEndM   = asiaEndHour * 60 + asiaEndMin
+
+nyHourNow  = hour(time, nyTZ)
+nyMinNow   = minute(time, nyTZ)
+nyHourPrev = hour(time[1], nyTZ)
+nyMinPrev  = minute(time[1], nyTZ)
+
+nyCurrentMin = nyHourNow * 60 + nyMinNow
+nyPrevMin    = nyHourPrev * 60 + nyMinPrev
+
+sigStartM = signalStartHour * 60
+sigEndM   = signalEndHour * 60
+
+isAsia = asiaStartM > asiaEndM ? (asiaCurrentMin >= asiaStartM or asiaCurrentMin < asiaEndM) : (asiaCurrentMin >= asiaStartM and asiaCurrentMin < asiaEndM)
+wasAsia = asiaStartM > asiaEndM ? (asiaPrevMin >= asiaStartM or asiaPrevMin < asiaEndM) : (asiaPrevMin >= asiaStartM and asiaPrevMin < asiaEndM)
+
+newAsiaSession = isAsia and not wasAsia
+wasInAsia      = isAsia[1] and not isAsia
+
+lonORStartM = 3 * 60
+lonOREndM   = 3 * 60 + 15
+
+isLondonOR  = nyCurrentMin >= lonORStartM and nyCurrentMin < lonOREndM
+wasLondonOR = nyPrevMin >= lonORStartM and nyPrevMin < lonOREndM
+
+newLondonOR  = isLondonOR and not wasLondonOR
+londonORDone = not isLondonOR and wasLondonOR
+
+isTimeExit = nyHourNow == timeExitHour and nyHourPrev != timeExitHour
+
+
+// ══════════════════════════════════════════════════════════════════
+//  WEEKDAY FILTER ... TIMEZONE-SAFE SESSION METHOD
+// ══════════════════════════════════════════════════════════════════
+// TradingView session day numbers:
+// 1 = Sunday, 2 = Monday, 3 = Tuesday, 4 = Wednesday, 5 = Thursday, 6 = Friday, 7 = Saturday
+
+isMon = not na(time(timeframe.period, "0000-2359:2", dayFilterTZ))
+isTue = not na(time(timeframe.period, "0000-2359:3", dayFilterTZ))
+isWed = not na(time(timeframe.period, "0000-2359:4", dayFilterTZ))
+isThu = not na(time(timeframe.period, "0000-2359:5", dayFilterTZ))
+isFri = not na(time(timeframe.period, "0000-2359:6", dayFilterTZ))
+
+dayAllowed = not useDayFilter or
+     (isMon and tradeMonday) or
+     (isTue and tradeTuesday) or
+     (isWed and tradeWednesday) or
+     (isThu and tradeThursday) or
+     (isFri and tradeFriday)
+
+dayText = isMon ? "Mon" : isTue ? "Tue" : isWed ? "Wed" : isThu ? "Thu" : isFri ? "Fri" : "Other"
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ENTRY TIME FILTER
+// ══════════════════════════════════════════════════════════════════
+entryHourNow = hour(time, entryFilterTZ)
+entryMinNow  = minute(time, entryFilterTZ)
+entryCurrentMin = entryHourNow * 60 + entryMinNow
+
+entryStartM = entryStartHour * 60 + entryStartMin
+entryEndM   = entryEndHour * 60 + entryEndMin
+
+entryTimeOKRaw = entryStartM > entryEndM ? (entryCurrentMin >= entryStartM or entryCurrentMin < entryEndM) : (entryCurrentMin >= entryStartM and entryCurrentMin < entryEndM)
+entryTimeAllowed = not useEntryTimeFilter or entryTimeOKRaw
+
+entryTimeText = str.tostring(entryHourNow, "00") + ":" + str.tostring(entryMinNow, "00")
+
+
+// ══════════════════════════════════════════════════════════════════
+//  HTF FILTER
+// ══════════════════════════════════════════════════════════════════
+htf4hBull = request.security(syminfo.tickerid, "240", close[1] > ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_off)
+htf1dBull = request.security(syminfo.tickerid, "D", close[1] > ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_off)
+
+atrBreak = ta.atr(breakATRlen)
+atrTrail = ta.atr(trailATRLen)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ASIA RANGE TRACKING
+// ══════════════════════════════════════════════════════════════════
+var float asiaHigh     = na
+var float asiaLow      = na
+var bool  asiaComplete = false
+var int   asiaStartBar = na
+var int   asiaEndBar   = na
+
+if newAsiaSession
+    asiaHigh     := high
+    asiaLow      := low
+    asiaComplete := false
+    asiaStartBar := bar_index
+    asiaEndBar   := na
+
+if isAsia
+    asiaHigh := math.max(nz(asiaHigh, high), high)
+    asiaLow  := math.min(nz(asiaLow, low), low)
+
+if wasInAsia
+    asiaComplete := true
+    asiaEndBar   := bar_index - 1
+
+asiaRangeSize = not na(asiaHigh) and not na(asiaLow) ? asiaHigh - asiaLow : na
+
+gateMinEff = effectiveGateIsPct ? close * effectiveMinRaw / 100 : effectiveMinRaw
+gateMaxEff = effectiveGateIsPct ? close * effectiveMaxRaw / 100 : effectiveMaxRaw
+
+rangeGateOK = not useRangeGate or (not na(asiaRangeSize) and asiaRangeSize >= gateMinEff and asiaRangeSize <= gateMaxEff)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ASIA RANGE DRAWING
+// ══════════════════════════════════════════════════════════════════
+var box  asiaBox      = na
+var line asiaHighLine = na
+var line asiaLowLine  = na
+
+lineStyleVal = asiaLineStyle == "Solid" ? line.style_solid : asiaLineStyle == "Dashed" ? line.style_dashed : line.style_dotted
+
+if showAsiaRange and wasInAsia and not na(asiaHigh) and not na(asiaLow)
+    gateCol = rangeGateOK ? asiaBorderColor : color.new(color.gray, 55)
+    gateBg  = rangeGateOK ? asiaBoxColor : color.new(color.gray, 90)
+
+    boxLeft  = projectAsiaBox ? bar_index : asiaStartBar
+    boxRight = projectAsiaBox ? bar_index + projectAsiaBoxBars : asiaEndBar
+
+    asiaBox := box.new(
+         left=boxLeft,
+         top=asiaHigh,
+         right=boxRight,
+         bottom=asiaLow,
+         border_color=gateCol,
+         bgcolor=gateBg,
+         border_width=1
+    )
+
+    if extendAsiaRange
+        asiaHighLine := line.new(
+             x1=bar_index,
+             y1=asiaHigh,
+             x2=bar_index + 1,
+             y2=asiaHigh,
+             color=gateCol,
+             style=lineStyleVal,
+             width=1,
+             extend=extend.right
+        )
+
+        asiaLowLine := line.new(
+             x1=bar_index,
+             y1=asiaLow,
+             x2=bar_index + 1,
+             y2=asiaLow,
+             color=gateCol,
+             style=lineStyleVal,
+             width=1,
+             extend=extend.right
+        )
+
+deadZoneStartM = 17 * 60
+deadZoneEndM   = 21 * 60
+
+isDeadZone  = nyCurrentMin >= deadZoneStartM and nyCurrentMin < deadZoneEndM
+wasDeadZone = nyPrevMin >= deadZoneStartM and nyPrevMin < deadZoneEndM
+
+if isDeadZone and not wasDeadZone
+    if not na(asiaHighLine)
+        line.set_extend(asiaHighLine, extend.none)
+        line.set_x2(asiaHighLine, bar_index)
+
+    if not na(asiaLowLine)
+        line.set_extend(asiaLowLine, extend.none)
+        line.set_x2(asiaLowLine, bar_index)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  BIAS DETECTION
+// ══════════════════════════════════════════════════════════════════
+var int    dailyBias        = 0
+var bool   biasTriggered    = false
+var int    biasBar          = na
+var bool   htfAlignedAtBias = false
+var bool   tradedToday      = false
+
+if newAsiaSession
+    dailyBias        := 0
+    biasTriggered    := false
+    biasBar          := na
+    htfAlignedAtBias := false
+    tradedToday      := false
+
+biasScanActive = asiaComplete and nyCurrentMin <= sigEndM and (biasFollowAsia or nyCurrentMin >= sigStartM)
+
+if biasScanActive and not biasTriggered and not na(asiaHigh) and not na(asiaLow) and rangeGateOK and barstate.isconfirmed
+    if close > asiaHigh
+        dailyBias     := 1
+        biasTriggered := true
+        biasBar       := bar_index
+
+    else if close < asiaLow
+        dailyBias     := -1
+        biasTriggered := true
+        biasBar       := bar_index
+
+    if biasTriggered and biasBar == bar_index
+        align4h = not useHTF4H or (dailyBias == 1 ? htf4hBull : not htf4hBull)
+        align1d = not useHTF1D or (dailyBias == 1 ? htf1dBull : not htf1dBull)
+        htfAlignedAtBias := align4h and align1d
+
+if showBiasLabel and biasTriggered and biasBar == bar_index
+    biasText = (dailyBias == 1 ? "BULLISH BIAS" : "BEARISH BIAS") + (htfAlignedAtBias ? " ✓HTF" : " ✗HTF")
+    biasCol  = htfAlignedAtBias ? (dailyBias == 1 ? biasLongColor : biasShortColor) : color.new(color.gray, 30)
+
+    labelPrice = dailyBias == 1 ? low - asiaRangeSize * 0.3 : high + asiaRangeSize * 0.3
+
+    label.new(
+         x=bar_index,
+         y=labelPrice,
+         text=biasText,
+         color=biasCol,
+         textcolor=color.white,
+         style=dailyBias == 1 ? label.style_label_up : label.style_label_down,
+         size=size.small
+    )
+
+if showBiasArrow and biasTriggered and biasBar == bar_index
+    if dailyBias == 1
+        label.new(
+             x=bar_index,
+             y=low,
+             text="▲",
+             color=color.new(color.green, 100),
+             textcolor=biasLongColor,
+             style=label.style_label_up,
+             size=size.large
+        )
+    else
+        label.new(
+             x=bar_index,
+             y=high,
+             text="▼",
+             color=color.new(color.red, 100),
+             textcolor=biasShortColor,
+             style=label.style_label_down,
+             size=size.large
+        )
+
+
+// ══════════════════════════════════════════════════════════════════
+//  LONDON OR TRACKING
+// ══════════════════════════════════════════════════════════════════
+var float lonORHigh     = na
+var float lonORLow      = na
+var bool  lonORComplete = false
+var int   lonORStartBar = na
+var int   lonOREndBar   = na
+var box   lonORBox      = na
+
+if newAsiaSession
+    lonORHigh     := na
+    lonORLow      := na
+    lonORComplete := false
+    lonORStartBar := na
+    lonOREndBar   := na
+
+if newLondonOR
+    lonORHigh     := high
+    lonORLow      := low
+    lonORStartBar := bar_index
+
+if isLondonOR
+    lonORHigh := math.max(nz(lonORHigh, high), high)
+    lonORLow  := math.min(nz(lonORLow, low), low)
+
+if londonORDone and not na(lonORHigh) and not na(lonORLow)
+    lonORComplete := true
+    lonOREndBar   := bar_index - 1
+
+    if showLondonOR
+        lonORBox := box.new(
+             left=lonORStartBar,
+             top=lonORHigh,
+             right=lonOREndBar,
+             bottom=lonORLow,
+             border_color=orBorderColor,
+             bgcolor=orBoxColor,
+             border_width=1
+        )
+
+
+// ══════════════════════════════════════════════════════════════════
+//  ENTRY SIGNAL GENERATION
+// ══════════════════════════════════════════════════════════════════
+wantA = tradeMode == "A: Break" or tradeMode == "Both (compare)"
+wantB = tradeMode == "B: ABLC" or tradeMode == "Both (compare)"
+
+allEntryFiltersOK = inDateRange and dayAllowed and entryTimeAllowed
+
+var bool aFired = false
+
+if newAsiaSession
+    aFired := false
+
+breakWindowOK = nyCurrentMin <= breakEntryWindowEnd * 60
+
+sigA_long  = false
+sigA_short = false
+
+if allEntryFiltersOK and wantA and biasTriggered and biasBar == bar_index and breakWindowOK and not aFired and barstate.isconfirmed
+    if dailyBias == 1
+        sigA_long := true
+
+    if dailyBias == -1
+        sigA_short := true
+
+var bool ablcFired = false
+
+if newAsiaSession
+    ablcFired := false
+
+ablcWindowOpen = lonORComplete and not ablcFired and not na(lonOREndBar) and (bar_index - lonOREndBar) <= entryMaxBars and nyCurrentMin < timeExitHour * 60
+
+sigB_long  = false
+sigB_short = false
+
+if allEntryFiltersOK and wantB and ablcWindowOpen and biasTriggered and htfAlignedAtBias and barstate.isconfirmed
+    if dailyBias == 1 and close > lonORHigh
+        sigB_long := true
+
+    else if dailyBias == -1 and close < lonORLow
+        sigB_short := true
+
+
+// ══════════════════════════════════════════════════════════════════
+//  TRADE STATE + EXECUTION
+// ══════════════════════════════════════════════════════════════════
+var float  entryPrice  = na
+var float  stopPrice   = na
+var float  initialStop = na
+var float  tpPrice     = na
+var float  tp1Price    = na
+var float  tp2Price    = na
+var float  tp3Price    = na
+var float  initialRisk = na
+var int    posDir      = 0
+var bool   beMoved     = false
+var bool   tp1Hit      = false
+var bool   tp2Hit      = false
+var bool   trailActive = false
+var float  trailStop   = na
+var string activeMode  = ""
+
+var string lastSignalText = "..."
+var float  lastQty        = na
+var float  lastRiskDist   = na
+var float  lastRiskCash   = na
+var int    lastEntryBar   = na
+
+canTradeToday = not (oneTradeDay and tradedToday)
+flat = strategy.position_size == 0
+
+takeLong  = false
+takeShort = false
+mode      = ""
+
+float eEntry = na
+float eStop  = na
+
+if allEntryFiltersOK and flat and canTradeToday and barstate.isconfirmed
+
+    if sigA_long or sigA_short
+        dirA = sigA_long ? 1 : -1
+
+        slA = 0.0
+
+        if breakSLMode == "Opposite Asia Edge"
+            slA := dirA == 1 ? asiaLow : asiaHigh
+        else
+            slA := dirA == 1 ? close - atrBreak * breakATRmult : close + atrBreak * breakATRmult
+
+        if (dirA == 1 and longsOn) or (dirA == -1 and shortsOn)
+            takeLong  := dirA == 1
+            takeShort := dirA == -1
+            mode      := "A"
+            eEntry    := close
+            eStop     := slA
+            aFired    := true
+
+    if not takeLong and not takeShort and (sigB_long or sigB_short)
+        dirB = sigB_long ? 1 : -1
+
+        slB = dirB == 1 ? lonORLow - slBuffer : lonORHigh + slBuffer
+
+        if (dirB == 1 and longsOn) or (dirB == -1 and shortsOn)
+            takeLong  := dirB == 1
+            takeShort := dirB == -1
+            mode      := "B"
+            eEntry    := close
+            eStop     := slB
+            ablcFired := true
+
+
+// ─────────────────────────────────────────────────────────────────
+//  OPEN POSITION
+// ─────────────────────────────────────────────────────────────────
+submittedEntryThisBar = false
+
+if allEntryFiltersOK and (takeLong or takeShort) and not na(eEntry) and not na(eStop)
+    dir  = takeLong ? 1 : -1
+    risk = math.abs(eEntry - eStop)
+
+    pointValue = syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
+
+    if risk > 0
+        singleTP = takeLong ? eEntry + risk * singleTPRR : eEntry - risk * singleTPRR
+
+        t1 = takeLong ? eEntry + risk * scaleTP1R : eEntry - risk * scaleTP1R
+        t2 = takeLong ? eEntry + risk * scaleTP2R : eEntry - risk * scaleTP2R
+        t3 = takeLong ? eEntry + risk * scaleTP3R : eEntry - risk * scaleTP3R
+
+        riskCash = strategy.equity * riskPerc / 100
+        qty      = riskCash / (risk * pointValue)
+
+        if qty > 0
+            if takeLong
+                strategy.entry("L", strategy.long, qty=qty)
+            else
+                strategy.entry("S", strategy.short, qty=qty)
+
+            submittedEntryThisBar := true
+
+            entryPrice  := eEntry
+            stopPrice   := eStop
+            initialStop := eStop
+            tpPrice     := singleTP
+            tp1Price    := t1
+            tp2Price    := t2
+            tp3Price    := t3
+            initialRisk := risk
+            posDir      := dir
+            beMoved     := false
+            tp1Hit      := false
+            tp2Hit      := false
+            trailActive := false
+            trailStop   := na
+            activeMode  := mode
+            tradedToday := true
+            lastEntryBar := bar_index
+
+            lastSignalText := (mode == "A" ? "A " : "ABLC ") + (takeLong ? "LONG" : "SHORT")
+            lastQty        := qty
+            lastRiskDist   := risk
+            lastRiskCash   := riskCash
+
+            if showTradeLines
+                line.new(bar_index, eEntry, bar_index + 40, eEntry, color=color.new(color.white, 20), width=1)
+                line.new(bar_index, eStop, bar_index + 40, eStop, color=color.new(color.red, 20), style=line.style_dashed, width=1)
+
+                if exitMode == "Single TP"
+                    line.new(bar_index, singleTP, bar_index + 40, singleTP, color=color.new(color.green, 20), style=line.style_dashed, width=1)
+                else
+                    line.new(bar_index, t1, bar_index + 40, t1, color=color.new(color.green, 45), style=line.style_dashed, width=1)
+                    line.new(bar_index, t2, bar_index + 40, t2, color=color.new(color.green, 30), style=line.style_dashed, width=1)
+                    line.new(bar_index, t3, bar_index + 40, t3, color=color.new(color.green, 15), style=line.style_dashed, width=1)
+
+                tradeText = lastSignalText + "\nQty: " + str.tostring(qty, "#.####") + "\nRisk: " + str.tostring(risk, "#.##")
+
+                label.new(
+                     x=bar_index,
+                     y=takeLong ? low : high,
+                     text=tradeText,
+                     color=takeLong ? biasLongColor : biasShortColor,
+                     textcolor=color.white,
+                     style=takeLong ? label.style_label_up : label.style_label_down,
+                     size=size.small
+                )
+
+
+// ─────────────────────────────────────────────────────────────────
+//  EXIT MANAGEMENT
+// ─────────────────────────────────────────────────────────────────
+tp1QtyUse = math.min(scaleTP1QtyPct, 100.0)
+tp2QtyUse = math.min(scaleTP2QtyPct, math.max(0.0, 100.0 - tp1QtyUse))
+tp3QtyUse = math.max(0.0, 100.0 - tp1QtyUse - tp2QtyUse)
+
+if strategy.position_size != 0 and not na(entryPrice) and not na(stopPrice) and not na(initialRisk)
+    if exitMode == "Single TP"
+        if singleMoveBE and not beMoved
+            reached1R = posDir == 1 ? high >= entryPrice + initialRisk : low <= entryPrice - initialRisk
+
+            if reached1R
+                stopPrice := entryPrice
+                beMoved   := true
+
+        if posDir == 1
+            strategy.exit("xL", from_entry="L", stop=stopPrice, limit=tpPrice)
+
+        else if posDir == -1
+            strategy.exit("xS", from_entry="S", stop=stopPrice, limit=tpPrice)
+
+    else
+        reachedTP1 = posDir == 1 ? high >= tp1Price : low <= tp1Price
+        reachedTP2 = posDir == 1 ? high >= tp2Price : low <= tp2Price
+
+        if reachedTP1
+            tp1Hit := true
+
+        if reachedTP2
+            tp2Hit := true
+
+        if tp1Hit
+            candidateStop1 = stopPrice
+
+            if afterTP1SLMode == "Break Even"
+                candidateStop1 := entryPrice
+
+            else if afterTP1SLMode == "Lock TP1"
+                candidateStop1 := tp1Price
+
+            if posDir == 1
+                stopPrice := math.max(stopPrice, candidateStop1)
+            else if posDir == -1
+                stopPrice := math.min(stopPrice, candidateStop1)
+
+            if afterTP1SLMode != "Keep Initial"
+                beMoved := true
+
+        if tp2Hit
+            candidateStop2 = stopPrice
+
+            if afterTP2SLMode == "Break Even"
+                candidateStop2 := entryPrice
+
+            else if afterTP2SLMode == "Lock TP1"
+                candidateStop2 := tp1Price
+
+            else if afterTP2SLMode == "Lock TP2"
+                candidateStop2 := tp2Price
+
+            if posDir == 1
+                stopPrice := math.max(stopPrice, candidateStop2)
+            else if posDir == -1
+                stopPrice := math.min(stopPrice, candidateStop2)
+
+        // TP3 trailing runner
+        runnerStop = stopPrice
+
+        if tp3Mode == "Trailing Runner"
+            trailShouldStart = trailStartMode == "After TP1" ? tp1Hit : tp2Hit
+
+            if trailShouldStart
+                trailActive := true
+
+                trailDistance = trailMode == "ATR" ? atrTrail * trailATRMult : initialRisk * trailR
+
+                if posDir == 1
+                    newTrailStop = high - trailDistance
+                    trailStop := na(trailStop) ? newTrailStop : math.max(trailStop, newTrailStop)
+                    runnerStop := math.max(stopPrice, trailStop)
+
+                else if posDir == -1
+                    newTrailStop = low + trailDistance
+                    trailStop := na(trailStop) ? newTrailStop : math.min(trailStop, newTrailStop)
+                    runnerStop := math.min(stopPrice, trailStop)
+
+        if posDir == 1
+            strategy.exit("xL1", from_entry="L", qty_percent=tp1QtyUse, stop=stopPrice, limit=tp1Price)
+
+            if tp2QtyUse > 0
+                strategy.exit("xL2", from_entry="L", qty_percent=tp2QtyUse, stop=stopPrice, limit=tp2Price)
+
+            if tp3QtyUse > 0
+                if tp3Mode == "Fixed TP3"
+                    strategy.exit("xL3", from_entry="L", qty_percent=tp3QtyUse, stop=stopPrice, limit=tp3Price)
+                else
+                    strategy.exit("xL3", from_entry="L", qty_percent=tp3QtyUse, stop=runnerStop)
+
+        else if posDir == -1
+            strategy.exit("xS1", from_entry="S", qty_percent=tp1QtyUse, stop=stopPrice, limit=tp1Price)
+
+            if tp2QtyUse > 0
+                strategy.exit("xS2", from_entry="S", qty_percent=tp2QtyUse, stop=stopPrice, limit=tp2Price)
+
+            if tp3QtyUse > 0
+                if tp3Mode == "Fixed TP3"
+                    strategy.exit("xS3", from_entry="S", qty_percent=tp3QtyUse, stop=stopPrice, limit=tp3Price)
+                else
+                    strategy.exit("xS3", from_entry="S", qty_percent=tp3QtyUse, stop=runnerStop)
+
+    if useTimeExit and isTimeExit
+        strategy.close_all("timeExit")
+
+if useEndDate and time > endTesting and strategy.position_size != 0
+    strategy.close_all("End of Backtest Window")
+
+if strategy.position_size == 0 and not submittedEntryThisBar
+    entryPrice  := na
+    stopPrice   := na
+    initialStop := na
+    tpPrice     := na
+    tp1Price    := na
+    tp2Price    := na
+    tp3Price    := na
+    initialRisk := na
+    posDir      := 0
+    beMoved     := false
+    tp1Hit      := false
+    tp2Hit      := false
+    trailActive := false
+    trailStop   := na
+    activeMode  := ""
+
+
+// ══════════════════════════════════════════════════════════════════
+//  FVG VISUAL ONLY
+// ══════════════════════════════════════════════════════════════════
+var array<box> fvgBoxes = array.new<box>()
+var array<int> fvgBirth = array.new<int>()
+
+effFvgMin = minSizesArePct ? close * fvgMinSize / 100 : fvgMinSize
+
+if showFVGs and barstate.isconfirmed
+
+    if (low - high[2]) > effFvgMin
+        b = box.new(
+             left=bar_index - 2,
+             top=low,
+             right=bar_index + 8,
+             bottom=high[2],
+             border_color=color.new(color.green, 40),
+             bgcolor=bullFVGColor,
+             border_width=1
+        )
+
+        array.push(fvgBoxes, b)
+        array.push(fvgBirth, bar_index)
+
+    if (low[2] - high) > effFvgMin
+        b = box.new(
+             left=bar_index - 2,
+             top=low[2],
+             right=bar_index + 8,
+             bottom=high,
+             border_color=color.new(color.red, 40),
+             bgcolor=bearFVGColor,
+             border_width=1
+        )
+
+        array.push(fvgBoxes, b)
+        array.push(fvgBirth, bar_index)
+
+    if array.size(fvgBoxes) > 0
+        for i = array.size(fvgBoxes) - 1 to 0
+            if i < array.size(fvgBirth) and bar_index - array.get(fvgBirth, i) > maxFVGAge
+                box.delete(array.get(fvgBoxes, i))
+                array.remove(fvgBoxes, i)
+                array.remove(fvgBirth, i)
+
+
+// ══════════════════════════════════════════════════════════════════
+//  DASHBOARD
+// ══════════════════════════════════════════════════════════════════
+var table dash = table.new(
+     position=position.top_right,
+     columns=2,
+     rows=30,
+     bgcolor=color.new(color.black, 80),
+     border_width=1,
+     border_color=color.new(color.gray, 60)
+)
+
+if showDash and barstate.islast
+    modeStr = tradeMode
+
+    biasStr = dailyBias == 1 ? "BULLISH ▲" : dailyBias == -1 ? "BEARISH ▼" : "..."
+    biasCol = dailyBias == 1 ? color.lime : dailyBias == -1 ? color.red : color.gray
+
+    htfStr = biasTriggered ? (htfAlignedAtBias ? "ALIGNED ✓" : "OPPOSED ✗") : "..."
+    htfCol = biasTriggered ? (htfAlignedAtBias ? color.lime : color.red) : color.gray
+
+    posStr = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posCol = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
+
+    asiaTimeStr = str.tostring(asiaHourNow, "00") + ":" + str.tostring(asiaMinNow, "00") + " BKK"
+    nyTimeStr   = str.tostring(nyHourNow, "00") + ":" + str.tostring(nyMinNow, "00") + " ET"
+
+    dateRangeStr = inDateRange ? "ACTIVE" : "OFF"
+    gateModeStr = effectiveGateIsPct ? "%" : "$"
+    gateStatusStr = rangeGateOK ? "OK" : "FAIL"
+
+    scaleText = str.tostring(tp1QtyUse, "#") + "% / " + str.tostring(tp2QtyUse, "#") + "% / " + str.tostring(tp3QtyUse, "#") + "%"
+
+    table.cell(dash, 0, 0, "Mode", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, modeStr, text_color=color.aqua, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Exit Mode", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, exitMode, text_color=color.lime, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Scale", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, scaleText, text_color=color.lime, text_size=size.small)
+
+    table.cell(dash, 0, 3, "After TP1 SL", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, afterTP1SLMode, text_color=color.yellow, text_size=size.small)
+
+    table.cell(dash, 0, 4, "After TP2 SL", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, afterTP2SLMode, text_color=color.yellow, text_size=size.small)
+
+    table.cell(dash, 0, 5, "TP3 Mode", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, tp3Mode, text_color=tp3Mode == "Trailing Runner" ? color.orange : color.lime, text_size=size.small)
+
+    table.cell(dash, 0, 6, "Profile", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, profileText, text_color=useCryptoProfile ? color.orange : color.aqua, text_size=size.small)
+
+    table.cell(dash, 0, 7, "Backtest", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, dateRangeStr, text_color=inDateRange ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Day", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, dayText, text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 9, "Day Filter", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 9, dayAllowed ? "OK" : "BLOCKED", text_color=dayAllowed ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 10, "Entry Time", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 10, entryTimeText, text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 11, "Time Filter", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 11, entryTimeAllowed ? "OK" : "BLOCKED", text_color=entryTimeAllowed ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 12, "Asia H", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 12, not na(asiaHigh) ? str.tostring(asiaHigh, "#.##") : "...", text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 13, "Asia L", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 13, not na(asiaLow) ? str.tostring(asiaLow, "#.##") : "...", text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 14, "Range", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 14, not na(asiaRangeSize) ? str.tostring(asiaRangeSize, "#.##") : "...", text_color=rangeGateOK ? color.white : color.orange, text_size=size.small)
+
+    table.cell(dash, 0, 15, "Gate", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 15, gateStatusStr, text_color=rangeGateOK ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 16, "Gate Mode", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 16, gateModeStr, text_color=effectiveGateIsPct ? color.orange : color.aqua, text_size=size.small)
+
+    table.cell(dash, 0, 17, "Gate Min/Max", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 17, str.tostring(gateMinEff, "#.##") + " / " + str.tostring(gateMaxEff, "#.##"), text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 18, "Bias", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 18, biasStr, text_color=biasCol, text_size=size.small)
+
+    table.cell(dash, 0, 19, "HTF", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 19, htfStr, text_color=htfCol, text_size=size.small)
+
+    table.cell(dash, 0, 20, "Position", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 20, posStr, text_color=posCol, text_size=size.small)
+
+    table.cell(dash, 0, 21, "Asia Time", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 21, asiaTimeStr, text_color=color.yellow, text_size=size.small)
+
+    table.cell(dash, 0, 22, "ET Time", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 22, nyTimeStr, text_color=color.yellow, text_size=size.small)
+
+    table.cell(dash, 0, 23, "Traded today", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 23, tradedToday ? "YES" : "no", text_color=tradedToday ? color.orange : color.gray, text_size=size.small)
+
+    table.cell(dash, 0, 24, "Last Signal", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 24, lastSignalText, text_color=color.aqua, text_size=size.small)
+
+    table.cell(dash, 0, 25, "Last Qty", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 25, not na(lastQty) ? str.tostring(lastQty, "#.####") : "...", text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 26, "Risk Dist", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 26, not na(lastRiskDist) ? str.tostring(lastRiskDist, "#.##") : "...", text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 27, "SL", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 27, not na(stopPrice) ? str.tostring(stopPrice, "#.##") : "...", text_color=color.red, text_size=size.small)
+
+    table.cell(dash, 0, 28, "TP1/2/3", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 28, not na(tp1Price) ? str.tostring(tp1Price, "#.##") + " / " + str.tostring(tp2Price, "#.##") + " / " + str.tostring(tp3Price, "#.##") : "...", text_color=color.lime, text_size=size.small)
+
+    table.cell(dash, 0, 29, "Trail", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 29, trailActive ? str.tostring(trailStop, "#.##") : "OFF", text_color=trailActive ? color.orange : color.gray, text_size=size.small)

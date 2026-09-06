@@ -1,0 +1,764 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// (c) BullByte - Smart MTF S/R Levels v2.0
+// Author: BullByte
+// Version: 2.0
+// Description: Multi-timeframe support/resistance level detection with intelligent clustering.
+// Features: MTF Swings, Floor Pivots, Fibonacci, Order Blocks, VWAP with confluence scoring.
+// Default Configuration: 15m/60m/240m timeframe combination.
+
+//@version=6
+indicator("Smart MTF S/R Levels 2.0 [BullByte]", shorttitle="Smart S/R 2.0", overlay=true, 
+     max_lines_count=500, max_labels_count=200, max_boxes_count=100, max_bars_back=500)
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+int MAX_SAFE_HISTORY = 500
+int TOUCH_THRESHOLD_MULT = 15
+int BREAK_THRESHOLD_MULT = 50
+int TOUCH_COOLDOWN_BARS = 20
+int MAX_REALISTIC_TESTS = 50
+
+// =============================================================================
+// USER INPUTS - Timeframe Configuration
+// =============================================================================
+
+grpTF = "=== Timeframe Settings ==="
+showTF1 = input.bool(true, "Enable TF1", inline="tf1", group=grpTF)
+tf1 = input.timeframe("15", "", inline="tf1", group=grpTF)
+tf1Color = input.color(color.new(color.yellow, 0), "", inline="tf1", group=grpTF)
+
+showTF2 = input.bool(true, "Enable TF2", inline="tf2", group=grpTF)
+tf2 = input.timeframe("60", "", inline="tf2", group=grpTF)
+tf2Color = input.color(color.new(color.orange, 0), "", inline="tf2", group=grpTF)
+
+showTF3 = input.bool(true, "Enable TF3", inline="tf3", group=grpTF)
+tf3 = input.timeframe("240", "", inline="tf3", group=grpTF)
+tf3Color = input.color(color.new(color.fuchsia, 0), "", inline="tf3", group=grpTF)
+
+// =============================================================================
+// USER INPUTS - Level Detection
+// =============================================================================
+
+grpLevels = "=== Level Detection ==="
+showSwings = input.bool(true, "Swing Highs/Lows", group=grpLevels)
+showPivots = input.bool(false, "Floor Pivots (PP, S1, R1)", group=grpLevels)
+showFibonacci = input.bool(false, "Fibonacci Retracements", group=grpLevels)
+showOrderBlocks = input.bool(false, "Order Blocks (SMC)", group=grpLevels)
+showVWAP = input.bool(false, "Session VWAP", group=grpLevels)
+
+// =============================================================================
+// USER INPUTS - Detection Parameters
+// =============================================================================
+
+grpDetect = "=== Detection Parameters ==="
+swingStrength = input.int(5, "Swing Strength (left/right bars)", minval=2, maxval=15, group=grpDetect, 
+     tooltip="Higher values detect stronger swings with fewer levels. Lower values detect weaker swings with more levels.")
+maxLevelsPerTF = input.int(6, "Max Swing Levels per TF", minval=2, maxval=20, group=grpDetect)
+
+grpCluster = "=== Cluster Settings ==="
+clusterSwing = input.float(0.25, "Swing Cluster Distance %", minval=0.05, maxval=1.0, step=0.05, group=grpCluster,
+     tooltip="Swing levels within this percentage merge into a single zone.")
+clusterFib = input.float(0.08, "Fibonacci Cluster Distance %", minval=0.02, maxval=0.5, step=0.02, group=grpCluster,
+     tooltip="Fibonacci levels within this percentage merge. Lower values keep fibs separate.")
+clusterPivot = input.float(0.10, "Pivot Cluster Distance %", minval=0.02, maxval=0.5, step=0.02, group=grpCluster,
+     tooltip="Pivot levels within this percentage merge. Lower values keep pivots separate.")
+clusterOB = input.float(0.20, "Order Block Cluster Distance %", minval=0.05, maxval=1.0, step=0.05, group=grpCluster,
+     tooltip="Order block levels within this percentage merge.")
+clusterVWAP = input.float(0.05, "VWAP Cluster Distance %", minval=0.02, maxval=0.3, step=0.01, group=grpCluster,
+     tooltip="VWAP levels within this percentage merge. Keep low for precision.")
+
+// =============================================================================
+// USER INPUTS - Display Settings
+// =============================================================================
+
+grpDisplay = "=== Display Settings ==="
+showWithinPct = input.float(5.0, "Show Levels Within % of Price", minval=1.0, maxval=20.0, step=0.5, group=grpDisplay)
+lineExtendBars = input.int(30, "Extend Lines (bars right)", minval=10, maxval=100, group=grpDisplay)
+showZoneBoxes = input.bool(true, "Show Zone Boxes", group=grpDisplay)
+showBrokenLvls = input.bool(false, "Show Broken Levels (faded)", group=grpDisplay)
+labelSize = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal"], group=grpDisplay)
+
+// =============================================================================
+// USER INPUTS - Dashboard
+// =============================================================================
+
+grpDash = "=== Dashboard ==="
+showDashboard = input.bool(true, "Show Dashboard", group=grpDash)
+dashLocation = input.string("Top Right", "Location", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpDash)
+topNZones = input.int(8, "Top N Zones to Display", minval=3, maxval=20, group=grpDash)
+sortMethod = input.string("Confluence", "Sort By", options=["Confluence", "Distance", "Strength"], group=grpDash)
+
+// =============================================================================
+// USER INPUTS - Alerts
+// =============================================================================
+
+grpAlert = "=== Alerts ==="
+alertMinConfl = input.int(3, "Alert Min Confluence", minval=2, maxval=10, group=grpAlert)
+alertProximity = input.float(0.3, "Alert Proximity %", minval=0.1, maxval=1.0, step=0.1, group=grpAlert)
+
+// =============================================================================
+// TYPE DEFINITIONS
+// =============================================================================
+
+type SRLevel
+    float price
+    int barCreated
+    int barLastTest
+    string method
+    string tf
+    string levelType
+    string extra
+    int tests
+    bool isActive
+    int strength
+
+type ClusterZone
+    float avgPrice
+    float top
+    float bottom
+    int confluence
+    int totalTests
+    int barCreated
+    string levelType
+    string methodsList
+    string tfsList
+    bool isActive
+    int strengthScore
+    string primaryMethod
+
+// =============================================================================
+// GLOBAL STORAGE
+// =============================================================================
+
+var array<SRLevel> storedLevels = array.new<SRLevel>()
+var array<ClusterZone> activeZones = array.new<ClusterZone>()
+var array<line> drawnLines = array.new<line>()
+var array<label> drawnLabels = array.new<label>()
+var array<box> drawnBoxes = array.new<box>()
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+formatTF(string tf) =>
+    result = switch tf
+        "1" => "1m"
+        "3" => "3m"
+        "5" => "5m"
+        "15" => "15m"
+        "30" => "30m"
+        "60" => "1H"
+        "120" => "2H"
+        "240" => "4H"
+        "D" => "D"
+        "W" => "W"
+        "M" => "M"
+        => tf
+    result
+
+getTFColor(string tf) =>
+    result = tf == tf1 ? tf1Color : tf == tf2 ? tf2Color : tf == tf3 ? tf3Color : color.gray
+    result
+
+getClusterDistance(string method) =>
+    result = switch method
+        "SwingH" => clusterSwing
+        "SwingL" => clusterSwing
+        "Fib" => clusterFib
+        "Pivot" => clusterPivot
+        "R1" => clusterPivot
+        "S1" => clusterPivot
+        "BullOB" => clusterOB
+        "BearOB" => clusterOB
+        "VWAP" => clusterVWAP
+        => clusterSwing
+    result
+
+getMethodCategory(string method) =>
+    result = switch method
+        "SwingH" => "Swing"
+        "SwingL" => "Swing"
+        "Fib" => "Fib"
+        "Pivot" => "Pivot"
+        "R1" => "Pivot"
+        "S1" => "Pivot"
+        "BullOB" => "OB"
+        "BearOB" => "OB"
+        "VWAP" => "VWAP"
+        => "Other"
+    result
+
+isWithinClusterDynamic(float p1, float p2, string method1, string method2) =>
+    cat1 = getMethodCategory(method1)
+    cat2 = getMethodCategory(method2)
+    if cat1 != cat2
+        false
+    else
+        clusterDist = getClusterDistance(method1)
+        math.abs(p1 - p2) / math.avg(p1, p2) * 100 < clusterDist
+
+isNearCurrentPrice(float lvlPrice) =>
+    math.abs(lvlPrice - close) / close * 100 <= showWithinPct
+
+getLabelSize() =>
+    result = switch labelSize
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        => size.small
+    result
+
+getMaxSafeHistory() =>
+    math.min(bar_index, MAX_SAFE_HISTORY)
+
+getSafeLeftBar(int originalBar) =>
+    maxBack = getMaxSafeHistory()
+    earliestAllowed = bar_index - maxBack
+    math.max(math.max(originalBar, earliestAllowed), 0)
+
+checkIfBroken(float lvlPrice, string lvlType) =>
+    breakThreshold = lvlPrice * BREAK_THRESHOLD_MULT / 10000
+    result = false
+    if lvlType == "Support"
+        result := close < lvlPrice - breakThreshold
+    else if lvlType == "Resistance"
+        result := close > lvlPrice + breakThreshold
+    result
+
+// =============================================================================
+// DATA FETCHING FUNCTIONS
+// =============================================================================
+
+fetchSwingData(string tf) =>
+    request.security(syminfo.tickerid, tf, [ta.pivothigh(high, swingStrength, swingStrength), ta.pivotlow(low, swingStrength, swingStrength)], lookahead=barmerge.lookahead_off)
+
+fetchPivotData(string tf) =>
+    [prevH, prevL, prevC] = request.security(syminfo.tickerid, tf, [high[1], low[1], close[1]], lookahead=barmerge.lookahead_off)
+    pp = (prevH + prevL + prevC) / 3
+    r1 = pp * 2 - prevL
+    s1 = pp * 2 - prevH
+    [pp, r1, s1]
+
+fetchFibData(string tf) =>
+    [hi, lo] = request.security(syminfo.tickerid, tf, [ta.highest(high, 50), ta.lowest(low, 50)], lookahead=barmerge.lookahead_off)
+    rng = hi - lo
+    fib236 = lo + rng * 0.236
+    fib382 = lo + rng * 0.382
+    fib500 = lo + rng * 0.5
+    fib618 = lo + rng * 0.618
+    fib786 = lo + rng * 0.786
+    [fib236, fib382, fib500, fib618, fib786]
+
+fetchOrderBlockData(string tf) =>
+    [tfOpen, tfClose, tfHigh, tfLow, tfOpen1, tfClose1, tfHigh1, tfLow1] = request.security(syminfo.tickerid, tf, [open, close, high, low, open[1], close[1], high[1], low[1]], lookahead=barmerge.lookahead_off)
+    isBullishOB = tfClose1 < tfOpen1 and tfClose > tfOpen and tfClose > tfHigh1 and tfLow < tfLow1
+    bullOBLevel = isBullishOB ? tfLow1 : na
+    isBearishOB = tfClose1 > tfOpen1 and tfClose < tfOpen and tfClose < tfLow1 and tfHigh > tfHigh1
+    bearOBLevel = isBearishOB ? tfHigh1 : na
+    [bullOBLevel, bearOBLevel]
+
+fetchVWAPData(string tf) =>
+    request.security(syminfo.tickerid, tf, ta.vwap, lookahead=barmerge.lookahead_off)
+
+// =============================================================================
+// LEVEL STORAGE FUNCTIONS
+// =============================================================================
+
+isNewSwing(float current, float previous) =>
+    not na(current) and na(previous)
+
+storeLevel(float price, string method, string tf, string lvlType, string extra) =>
+    if na(price) or price <= 0
+        false
+    else
+        isDuplicate = false
+        levelCount = array.size(storedLevels)
+        if levelCount > 0
+            for i = 0 to levelCount - 1
+                existing = array.get(storedLevels, i)
+                if existing.tf == tf and existing.method == method
+                    clusterDist = getClusterDistance(method)
+                    if math.abs(existing.price - price) / math.avg(existing.price, price) * 100 < clusterDist
+                        isDuplicate := true
+                        break
+        
+        if not isDuplicate
+            creationBar = bar_index - swingStrength
+            safeCreationBar = math.max(creationBar, 0)
+            newLevel = SRLevel.new(
+                 price = price,
+                 barCreated = safeCreationBar,
+                 barLastTest = safeCreationBar,
+                 method = method,
+                 tf = tf,
+                 levelType = lvlType,
+                 extra = extra,
+                 tests = 0,
+                 isActive = true,
+                 strength = 1)
+            array.push(storedLevels, newLevel)
+            true
+        else
+            false
+
+// =============================================================================
+// SWING DETECTION
+// =============================================================================
+
+processSwings(string tf, bool showTF) =>
+    if showSwings and showTF
+        [swingH, swingL] = fetchSwingData(tf)
+        if isNewSwing(swingH, swingH[1])
+            storeLevel(swingH, "SwingH", tf, "Resistance", "")
+        if isNewSwing(swingL, swingL[1])
+            storeLevel(swingL, "SwingL", tf, "Support", "")
+
+processSwings(tf1, showTF1)
+processSwings(tf2, showTF2)
+processSwings(tf3, showTF3)
+
+// =============================================================================
+// PIVOT POINTS DETECTION
+// =============================================================================
+
+isNewSession = ta.change(time("D")) != 0
+
+processPivots(string tf, bool showTF) =>
+    if showPivots and showTF and isNewSession
+        [pp, r1, s1] = fetchPivotData(tf)
+        storeLevel(pp, "Pivot", tf, "Neutral", "PP")
+        storeLevel(r1, "R1", tf, "Resistance", "R1")
+        storeLevel(s1, "S1", tf, "Support", "S1")
+
+processPivots(tf1, showTF1)
+processPivots(tf2, showTF2)
+processPivots(tf3, showTF3)
+
+// =============================================================================
+// FIBONACCI DETECTION
+// =============================================================================
+
+processFibs(string tf, bool showTF) =>
+    if showFibonacci and showTF and isNewSession
+        [f236, f382, f500, f618, f786] = fetchFibData(tf)
+        storeLevel(f236, "Fib", tf, "Neutral", "23.6%")
+        storeLevel(f382, "Fib", tf, "Neutral", "38.2%")
+        storeLevel(f500, "Fib", tf, "Neutral", "50%")
+        storeLevel(f618, "Fib", tf, "Neutral", "61.8%")
+        storeLevel(f786, "Fib", tf, "Neutral", "78.6%")
+
+processFibs(tf1, showTF1)
+processFibs(tf2, showTF2)
+processFibs(tf3, showTF3)
+
+// =============================================================================
+// ORDER BLOCK DETECTION
+// =============================================================================
+
+processOBs(string tf, bool showTF) =>
+    if showOrderBlocks and showTF
+        [bullOB, bearOB] = fetchOrderBlockData(tf)
+        if not na(bullOB)
+            storeLevel(bullOB, "BullOB", tf, "Support", "OB")
+        if not na(bearOB)
+            storeLevel(bearOB, "BearOB", tf, "Resistance", "OB")
+
+processOBs(tf1, showTF1)
+processOBs(tf2, showTF2)
+processOBs(tf3, showTF3)
+
+// =============================================================================
+// VWAP DETECTION
+// =============================================================================
+
+processVWAP(string tf, bool showTF) =>
+    if showVWAP and showTF
+        vwapVal = fetchVWAPData(tf)
+        if not na(vwapVal) and isNewSession
+            storeLevel(vwapVal, "VWAP", tf, "Neutral", "")
+
+processVWAP(tf1, showTF1)
+processVWAP(tf2, showTF2)
+processVWAP(tf3, showTF3)
+
+// =============================================================================
+// LEVEL MAINTENANCE
+// =============================================================================
+
+levelCount = array.size(storedLevels)
+if levelCount > 0 and bar_index > 10
+    for i = levelCount - 1 to 0
+        lvl = array.get(storedLevels, i)
+        
+        if lvl.barCreated > bar_index
+            continue
+        
+        if bar_index <= lvl.barCreated
+            continue
+        
+        touchThreshold = lvl.price * TOUCH_THRESHOLD_MULT / 10000
+        zoneTop = lvl.price + touchThreshold
+        zoneBottom = lvl.price - touchThreshold
+        
+        validTouch = false
+        cooldownPassed = bar_index >= lvl.barLastTest + TOUCH_COOLDOWN_BARS
+        
+        if cooldownPassed
+            if lvl.levelType == "Support"
+                wickedInto = low <= zoneTop and low >= zoneBottom
+                closedAbove = close > zoneTop
+                showedStrength = close > open
+                validTouch := wickedInto and closedAbove and showedStrength
+            else if lvl.levelType == "Resistance"
+                wickedInto = high >= zoneBottom and high <= zoneTop
+                closedBelow = close < zoneBottom
+                showedWeakness = close < open
+                validTouch := wickedInto and closedBelow and showedWeakness
+            else
+                lowWick = low <= zoneTop and low >= zoneBottom
+                highWick = high >= zoneBottom and high <= zoneTop
+                closedOutside = close > zoneTop or close < zoneBottom
+                validTouch := (lowWick or highWick) and closedOutside
+        
+        if validTouch and lvl.tests < MAX_REALISTIC_TESTS
+            lvl.tests += 1
+            lvl.barLastTest := bar_index
+            array.set(storedLevels, i, lvl)
+        
+        if lvl.isActive and checkIfBroken(lvl.price, lvl.levelType)
+            lvl.isActive := false
+            array.set(storedLevels, i, lvl)
+        
+        if bar_index - lvl.barCreated > 2000 and not lvl.isActive
+            array.remove(storedLevels, i)
+
+// =============================================================================
+// LEVEL LIMITING PER TIMEFRAME
+// =============================================================================
+
+limitLevelsPerTF(string tf, int maxLevels) =>
+    count = 0
+    levelCount = array.size(storedLevels)
+    if levelCount > 0
+        for i = levelCount - 1 to 0
+            lvl = array.get(storedLevels, i)
+            if lvl.tf == tf and (lvl.method == "SwingH" or lvl.method == "SwingL")
+                count += 1
+                if count > maxLevels
+                    array.remove(storedLevels, i)
+
+limitLevelsPerTF(tf1, maxLevelsPerTF)
+limitLevelsPerTF(tf2, maxLevelsPerTF)
+limitLevelsPerTF(tf3, maxLevelsPerTF)
+
+// =============================================================================
+// CLUSTERING ALGORITHM WITH METHOD-AWARE MERGING
+// =============================================================================
+
+if barstate.islast
+    array.clear(activeZones)
+    
+    var array<SRLevel> tempLevels = array.new<SRLevel>()
+    array.clear(tempLevels)
+    
+    storedCount = array.size(storedLevels)
+    if storedCount > 0
+        for i = 0 to storedCount - 1
+            lvl = array.get(storedLevels, i)
+            if isNearCurrentPrice(lvl.price) and (lvl.isActive or showBrokenLvls)
+                array.push(tempLevels, lvl)
+    
+    tempCount = array.size(tempLevels)
+    if tempCount > 0
+        for i = 0 to tempCount - 1
+            lvl = array.get(tempLevels, i)
+            merged = false
+            
+            zoneCount = array.size(activeZones)
+            if zoneCount > 0
+                for j = 0 to zoneCount - 1
+                    zone = array.get(activeZones, j)
+                    
+                    if isWithinClusterDynamic(zone.avgPrice, lvl.price, zone.primaryMethod, lvl.method)
+                        newTotal = zone.confluence + 1
+                        zone.avgPrice := (zone.avgPrice * zone.confluence + lvl.price) / newTotal
+                        zone.top := math.max(zone.top, lvl.price)
+                        zone.bottom := math.min(zone.bottom, lvl.price)
+                        zone.confluence := newTotal
+                        zone.totalTests := math.max(zone.totalTests, lvl.tests)
+                        zone.barCreated := math.min(zone.barCreated, lvl.barCreated)
+                        zone.methodsList := zone.methodsList + "+" + lvl.method
+                        zone.tfsList := zone.tfsList + "+" + lvl.tf
+                        zone.isActive := zone.isActive and lvl.isActive
+                        zone.strengthScore := zone.strengthScore + lvl.strength
+                        
+                        if zone.levelType != lvl.levelType and lvl.levelType != "Neutral"
+                            zone.levelType := "Mixed"
+                        else if zone.levelType == "Neutral"
+                            zone.levelType := lvl.levelType
+                        
+                        array.set(activeZones, j, zone)
+                        merged := true
+                        break
+            
+            if not merged
+                cappedTests = math.min(lvl.tests, MAX_REALISTIC_TESTS)
+                newZone = ClusterZone.new(
+                     avgPrice = lvl.price,
+                     top = lvl.price,
+                     bottom = lvl.price,
+                     confluence = 1,
+                     totalTests = cappedTests,
+                     barCreated = lvl.barCreated,
+                     levelType = lvl.levelType,
+                     methodsList = lvl.method,
+                     tfsList = lvl.tf,
+                     isActive = lvl.isActive,
+                     strengthScore = lvl.strength,
+                     primaryMethod = lvl.method)
+                array.push(activeZones, newZone)
+
+// =============================================================================
+// ZONE SORTING
+// =============================================================================
+
+sortZones() =>
+    n = array.size(activeZones)
+    if n > 1
+        for i = 0 to n - 2
+            for j = i + 1 to n - 1
+                zi = array.get(activeZones, i)
+                zj = array.get(activeZones, j)
+                shouldSwap = switch sortMethod
+                    "Confluence" => zj.confluence > zi.confluence
+                    "Distance" => math.abs(zj.avgPrice - close) < math.abs(zi.avgPrice - close)
+                    "Strength" => zj.strengthScore + zj.totalTests > zi.strengthScore + zi.totalTests
+                    => false
+                if shouldSwap
+                    array.set(activeZones, i, zj)
+                    array.set(activeZones, j, zi)
+
+if barstate.islast
+    sortZones()
+
+// =============================================================================
+// DRAWING CLEANUP
+// =============================================================================
+
+if barstate.islast
+    lineCount = array.size(drawnLines)
+    if lineCount > 0
+        for i = 0 to lineCount - 1
+            line.delete(array.get(drawnLines, i))
+    array.clear(drawnLines)
+    
+    labelCount = array.size(drawnLabels)
+    if labelCount > 0
+        for i = 0 to labelCount - 1
+            label.delete(array.get(drawnLabels, i))
+    array.clear(drawnLabels)
+    
+    boxCount = array.size(drawnBoxes)
+    if boxCount > 0
+        for i = 0 to boxCount - 1
+            box.delete(array.get(drawnBoxes, i))
+    array.clear(drawnBoxes)
+
+// =============================================================================
+// DRAWING ZONES
+// =============================================================================
+
+if barstate.islast
+    zoneCount = array.size(activeZones)
+    if zoneCount > 0
+        displayCount = math.min(zoneCount, topNZones)
+        
+        for i = 0 to displayCount - 1
+            zone = array.get(activeZones, i)
+            
+            safeLeftBar = getSafeLeftBar(zone.barCreated)
+            rightBar = bar_index + lineExtendBars
+            
+            if na(zone.avgPrice) or zone.avgPrice <= 0
+                continue
+            
+            baseColor = switch zone.levelType
+                "Support" => color.lime
+                "Resistance" => color.red
+                "Mixed" => color.yellow
+                => color.blue
+            
+            alphaFill = zone.isActive ? math.max(90 - zone.confluence * 10, 40) : 95
+            alphaLine = zone.isActive ? 0 : 60
+            
+            zoneCol = color.new(baseColor, alphaFill)
+            lineCol = color.new(baseColor, alphaLine)
+            lineW = math.min(1 + zone.confluence, 5)
+            lineStyle = zone.isActive ? line.style_solid : line.style_dashed
+            
+            if showZoneBoxes and zone.top != zone.bottom
+                bx = box.new(
+                     left = safeLeftBar,
+                     top = zone.top,
+                     right = rightBar,
+                     bottom = zone.bottom,
+                     bgcolor = zoneCol,
+                     border_color = lineCol,
+                     border_width = 1)
+                array.push(drawnBoxes, bx)
+            
+            ln = line.new(
+                 x1 = safeLeftBar,
+                 y1 = zone.avgPrice,
+                 x2 = rightBar,
+                 y2 = zone.avgPrice,
+                 color = lineCol,
+                 width = lineW,
+                 style = lineStyle)
+            array.push(drawnLines, ln)
+            
+            priceTxt = str.tostring(zone.avgPrice, format.mintick)
+            conflTxt = "[" + str.tostring(zone.confluence) + "]"
+            
+            methodCategory = getMethodCategory(zone.primaryMethod)
+            
+            tfs = str.split(zone.tfsList, "+")
+            uniqueTFs = array.new_string()
+            tfsCount = array.size(tfs)
+            if tfsCount > 0
+                for j = 0 to tfsCount - 1
+                    tf = array.get(tfs, j)
+                    if tf != "" and not array.includes(uniqueTFs, tf)
+                        array.push(uniqueTFs, formatTF(tf))
+            tfTxt = array.size(uniqueTFs) > 0 ? array.join(uniqueTFs, ",") : ""
+            
+            labelTxt = priceTxt + " " + conflTxt + " " + methodCategory
+            if tfTxt != ""
+                labelTxt := labelTxt + " " + tfTxt
+            
+            displayTests = math.min(zone.totalTests, MAX_REALISTIC_TESTS)
+            if displayTests > 0
+                labelTxt := labelTxt + " T:" + str.tostring(displayTests)
+            
+            lb = label.new(
+                 x = rightBar + 2,
+                 y = zone.avgPrice,
+                 text = labelTxt,
+                 style = label.style_label_left,
+                 color = color.new(baseColor, 30),
+                 textcolor = color.white,
+                 size = getLabelSize())
+            array.push(drawnLabels, lb)
+
+// =============================================================================
+// DASHBOARD
+// =============================================================================
+
+var table dashboard = na
+
+getDashPosition() =>
+    result = switch dashLocation
+        "Top Right" => position.top_right
+        "Top Left" => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left" => position.bottom_left
+        => position.top_right
+    result
+
+if showDashboard and barstate.islast
+    if not na(dashboard)
+        table.delete(dashboard)
+    
+    zoneCount = array.size(activeZones)
+    displayCount = math.min(zoneCount, topNZones)
+    
+    dashboard := table.new(getDashPosition(), 8, displayCount + 2, 
+         border_width=1, border_color=color.gray, frame_width=2, frame_color=color.white)
+    
+    headerBg = color.rgb(30, 30, 40)
+    table.cell(dashboard, 0, 0, "Price", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 0, "Type", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 2, 0, "Method", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 0, "TFs", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 4, 0, "Conf", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 5, 0, "Tests", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 6, 0, "Dist%", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 7, 0, "Status", bgcolor=headerBg, text_color=color.white, text_size=size.small)
+    
+    if displayCount > 0
+        for i = 0 to displayCount - 1
+            zone = array.get(activeZones, i)
+            row = i + 1
+            
+            rowBg = switch zone.levelType
+                "Support" => color.new(color.lime, 80)
+                "Resistance" => color.new(color.red, 80)
+                "Mixed" => color.new(color.yellow, 80)
+                => color.new(color.blue, 80)
+            
+            distPct = math.abs(zone.avgPrice - close) / close * 100
+            methodCategory = getMethodCategory(zone.primaryMethod)
+            
+            tfs = str.split(zone.tfsList, "+")
+            uniqueTFs = array.new_string()
+            tfsCount = array.size(tfs)
+            if tfsCount > 0
+                for j = 0 to tfsCount - 1
+                    tf = array.get(tfs, j)
+                    if tf != "" and not array.includes(uniqueTFs, tf)
+                        array.push(uniqueTFs, formatTF(tf))
+            
+            displayTests = math.min(zone.totalTests, MAX_REALISTIC_TESTS)
+            
+            table.cell(dashboard, 0, row, str.tostring(zone.avgPrice, format.mintick), 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 1, row, zone.levelType, 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 2, row, methodCategory, 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 3, row, array.join(uniqueTFs, ","), 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 4, row, str.tostring(zone.confluence), 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 5, row, str.tostring(displayTests), 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 6, row, str.tostring(distPct, "#.##") + "%", 
+                 bgcolor=rowBg, text_color=color.white, text_size=size.small)
+            table.cell(dashboard, 7, row, zone.isActive ? "Active" : "Broken", 
+                 bgcolor=rowBg, text_color=zone.isActive ? color.lime : color.red, text_size=size.small)
+    else
+        table.cell(dashboard, 0, 1, "No zones near price", bgcolor=color.rgb(40, 40, 40), 
+             text_color=color.orange, text_size=size.small)
+    
+    table.cell(dashboard, 0, displayCount + 1, "Total Levels: " + str.tostring(array.size(storedLevels)), 
+         bgcolor=color.rgb(20, 20, 30), text_color=color.gray, text_size=size.tiny)
+
+// =============================================================================
+// ALERTS
+// =============================================================================
+
+zoneAlertCount = array.size(activeZones)
+if zoneAlertCount > 0
+    maxAlertCheck = math.min(zoneAlertCount - 1, 5)
+    for i = 0 to maxAlertCheck
+        zone = array.get(activeZones, i)
+        if zone.isActive and zone.confluence >= alertMinConfl
+            distPct = math.abs(close - zone.avgPrice) / close * 100
+            if distPct <= alertProximity
+                alertMsg = "Price near " + zone.levelType + " zone at " + str.tostring(zone.avgPrice, format.mintick) + " | Confluence: " + str.tostring(zone.confluence) + " | Tests: " + str.tostring(zone.totalTests)
+                alert(alertMsg, alert.freq_once_per_bar_close)
+
+// =============================================================================
+// PLOT OUTPUTS FOR ALERT CONDITIONS
+// =============================================================================
+
+closestZoneConfl = array.size(activeZones) > 0 ? array.get(activeZones, 0).confluence : 0
+closestZonePrice = array.size(activeZones) > 0 ? array.get(activeZones, 0).avgPrice : na
+closestZoneDist = not na(closestZonePrice) ? math.abs(close - closestZonePrice) / close * 100 : na
+
+plot(closestZoneConfl, "Closest Zone Confluence", display=display.none)
+plot(closestZoneDist, "Closest Zone Distance Pct", display=display.none)
+
+alertcondition(closestZoneConfl >= alertMinConfl and closestZoneDist <= alertProximity, "High Confluence Zone Proximity", "Price approaching high-confluence S/R zone")

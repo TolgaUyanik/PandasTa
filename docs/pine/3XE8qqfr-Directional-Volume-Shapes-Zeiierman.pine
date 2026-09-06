@@ -1,0 +1,281 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © Zeiierman {
+//@version=6
+indicator("Directional Volume Shapes (Zeiierman)", overlay=false, max_labels_count=500, precision=1)
+//}
+
+// ~~ Tooltips {
+var const string t1  = "Controls whether volume influences shape detection. ON multiplies candle-direction pressure by volume, giving high-volume bars more influence. OFF uses candle-direction pressure alone, while volume still controls the plotted column height."
+var const string t2  = "Sets the number of recent bars used to detect the distribution shape. Higher values produce slower, smoother, and more stable classifications but require more processing. Lower values react faster and may switch shape more often."
+var const string t3  = "Sets the EMA length used to determine bullish or bearish polarity from candle-direction pressure. Higher values produce steadier polarity with fewer flips. Lower values respond faster to direction changes."
+var const string t4  = "Sets how many bars are used to traverse one generated shape template. Lower values create faster and tighter shape cycles. Higher values stretch each template across more bars."
+var const string t5  = "Shows or hides a moving average of the final plotted directional-volume output. This setting is visual only and does not affect shape detection, polarity, or the column values."
+var const string t6  = "Selects the smoothing method for the moving average. SMA uses equal weighting, EMA emphasizes recent values, RMA applies Wilder smoothing, and WMA applies linearly increasing weight to recent values."
+var const string t7  = "Sets the number of output bars used by the moving average. Lower values follow the columns more closely. Higher values create a smoother and slower line."
+var const string t8  = "Sets the display color of the moving-average line. This setting changes appearance only and does not affect any calculations."
+var const string t9  = "Sets the thickness of the moving-average line. Higher values produce a thicker line. This setting changes appearance only."
+var const string t10 = "Sets the maximum transparency applied to the distribution columns. Higher values make the low portions of each template more transparent. A value of 0 disables the template-based transparency fade."
+var const string t11 = "Shows a label when a newly detected distribution shape is confirmed and becomes active."
+var const string t12 = "Sets the display size of the confirmed shape labels."
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Inputs {
+vw  = input.bool(true, "Use Volume Weighting", group="Shape Detection", tooltip=t1)
+len = input.int(20, "Detection Window", minval=6, maxval=60, group="Shape Detection", tooltip=t2)
+
+pl = input.int(20, "Polarity Smoothing", minval=1, maxval=50, group="Direction & Timing", tooltip=t3)
+cl = input.int(3, "Template Cycle Length", minval=3, maxval=7, group="Direction & Timing", tooltip=t4)
+
+showMa  = input.bool(false, "Show Moving Average", group="Moving Average", tooltip=t5)
+maType  = input.string("EMA", "Type", options=["SMA", "EMA", "RMA", "WMA"], group="Moving Average", tooltip=t6)
+maLen   = input.int(20, "Length", minval=1, maxval=200, group="Moving Average", tooltip=t7)
+maCol   = input.color(color.blue, "Color", group="Moving Average", tooltip=t8)
+maWidth = input.int(1, "Width", minval=1, maxval=5, group="Moving Average", tooltip=t9)
+
+showLabels = input.bool(false, "Show Shape Labels", group="Shape Labels", tooltip=t11)
+labelSizeInput = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="Shape Labels", tooltip=t12)
+
+mt = input.float(45.0, "Maximum Transparency", minval=0, maxval=100, step=1.0, group="Style", tooltip=t10)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Label size mapping {
+labelSize = labelSizeInput == "Tiny" ? size.tiny :
+     labelSizeInput == "Small" ? size.small :
+     labelSizeInput == "Large" ? size.large :
+     labelSizeInput == "Huge" ? size.huge :
+     size.normal
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Triangular candle-direction score {
+scr(o, h, l, c) =>
+    rng = h - l
+    float cdf = na
+    if rng == 0
+        cdf := c > o ? 0.0 : (c < o ? 1.0 : 0.5)
+    else
+        op = math.max(math.min(o, h), l)
+        md = math.max(math.min(c, h), l)
+        if md == l
+            cdf := op <= l ? 0.0 : 1.0 - math.pow((h - op) / rng, 2)
+        else if md == h
+            cdf := op >= h ? 1.0 : math.pow((op - l) / rng, 2)
+        else
+            lw = md - l
+            rw = h - md
+            if op <= l
+                cdf := 0.0
+            else if op <= md
+                cdf := math.pow(op - l, 2) / (rng * lw)
+            else if op < h
+                cdf := 1.0 - math.pow(h - op, 2) / (rng * rw)
+            else
+                cdf := 1.0
+    1.0 - cdf
+
+dm  = scr(open, high, low, close)
+ps  = 2.0 * dm - 1.0
+src = vw ? volume * ps : ps
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Cache Gaussian weights once {
+var array<float> ker = array.new_float(len, 0.0)
+
+if barstate.isfirst
+    bw0 = math.max(len / 2.0, 1.0)
+    for d = 0 to len - 1
+        ker.set(d, math.exp(-(d * d) / (2 * bw0 * bw0)))
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Shape classifier {
+cls(a, k) =>
+    n   = a.size()
+    avg = a.avg()
+    sd  = a.stdev()
+    float m3 = 0.0
+
+    for i = 0 to n - 1
+        d = a.get(i) - avg
+        m3 += math.pow(d, 3)
+
+    skew = sd == 0 ? 0.0 : (m3 / n) / math.pow(sd, 3)
+
+    env = array.new_float(n)
+
+    for i = 0 to n - 1
+        float sw = 0.0
+        float sv = 0.0
+
+        for j = 0 to n - 1
+            dx = i - j
+            w  = k.get(math.abs(dx))
+            sw += w
+            sv += w * a.get(j)
+
+        env.set(i, sv / sw)
+
+    mx = env.max()
+
+    int peaks = 0
+
+    for i = 1 to n - 2
+        v = env.get(i)
+
+        if v > env.get(i - 1) and v > env.get(i + 1) and v > mx * 0.1
+            peaks += 1
+
+    mi = (n - 1) / 2.0
+    me = env.avg()
+    float cov = 0.0
+    float vx  = 0.0
+    float vy  = 0.0
+
+    for i = 0 to n - 1
+        x = i - mi
+        y = env.get(i) - me
+        cov += x * y
+        vx += x * x
+        vy += y * y
+
+    corr = vx > 0 and vy > 0 ? cov / math.sqrt(vx * vy) : 0.0
+
+    string out = "Bell"
+
+    if peaks >= 2
+        out := peaks == 2 ? "Bimodal" : "Multimodal"
+    else if corr > 0.5
+        out := "J-shaped"
+    else if corr < -0.5
+        out := "Reverse-J"
+    else if skew > 0.1
+        out := "Right-skewed"
+    else if skew < -0.1
+        out := "Left-skewed"
+    else
+        out := "Bell"
+
+    out
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Template generator {
+tpl(sh, p) =>
+    float v = 0.0
+
+    if sh == "Bell"
+        v := math.exp(-math.pow(p - 0.5, 2) / (2 * math.pow(0.15, 2)))
+    else if sh == "Right-skewed"
+        v := (p * math.exp(-p * 5)) / 0.0736
+    else if sh == "Left-skewed"
+        v := ((1 - p) * math.exp(-(1 - p) * 5)) / 0.0736
+    else if sh == "J-shaped"
+        v := p * p
+    else if sh == "Reverse-J"
+        v := math.exp(-3 * p)
+    else if sh == "Bimodal"
+        v := math.exp(-math.pow(p - 0.3, 2) / (2 * math.pow(0.06, 2))) + math.exp(-math.pow(p - 0.7, 2) / (2 * math.pow(0.06, 2)))
+    else
+        v := math.exp(-math.pow(p - 0.2, 2) / (2 * math.pow(0.05, 2))) + 0.8 * math.exp(-math.pow(p - 0.5, 2) / (2 * math.pow(0.05, 2))) + 0.6 * math.exp(-math.pow(p - 0.8, 2) / (2 * math.pow(0.05, 2)))
+
+    math.min(v, 1.2)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Moving average {
+avg(x, n, t) =>
+    t == "SMA" ? ta.sma(x, n) : t == "EMA" ? ta.ema(x, n) : t == "RMA" ? ta.rma(x, n) : ta.wma(x, n)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Color {
+col(sh, pol) =>
+    color c = na
+
+    if pol == "Bull"
+        c := sh == "Bell" ? color.new(#00e676, 0) : sh == "Right-skewed" ? color.new(#1de9b6, 0) : sh == "Left-skewed" ? color.new(#76ff03, 0) : sh == "J-shaped" ? color.new(#00c853, 0) : sh == "Reverse-J" ? color.new(#64dd17, 0) : color.new(#00bfa5, 0)
+    else
+        c := sh == "Bell" ? color.new(#ff5252, 0) : sh == "Right-skewed" ? color.new(#ff6e40, 0) : sh == "Left-skewed" ? color.new(#ff4081, 0) : sh == "J-shaped" ? color.new(#d50000, 0) : sh == "Reverse-J" ? color.new(#c51162, 0) : color.new(#aa00ff, 0)
+
+    c
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ State machines {
+var string sh = "Bell"
+var int sc = 0
+var float ph = 0.0
+var array<float> buf = array.new_float(0)
+var string pol = "Bull"
+var int pc = 0
+
+bool shapeChanged = false
+
+buf.push(src)
+
+if buf.size() > len
+    buf.shift()
+
+mag = array.new_float(buf.size())
+
+for i = 0 to buf.size() - 1
+    mag.set(i, math.abs(buf.get(i)))
+
+string ns = buf.size() >= len ? cls(mag, ker) : sh
+
+if ns != sh
+    sc += 1
+else
+    sc := 0
+
+if sc >= 5
+    sh := ns
+    ph := 0.0
+    sc := 0
+    shapeChanged := true
+
+pr = ta.ema(ps, pl)
+string np = pr >= 0 ? "Bull" : "Bear"
+
+if np != pol
+    pc += 1
+else
+    pc := 0
+
+if pc >= 1
+    pol := np
+    pc := 0
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Output {
+p   = pol == "Bull" ? ph : 1.0 - ph
+tv  = tpl(sh, p)
+sgn = pol == "Bull" ? 1.0 : -1.0
+amp = ta.sma(volume, 3) * 1.8
+raw = volume * (close >= open ? 1.0 : -1.0)
+y   = raw * (1.0 - 1.0) + amp * tv * sgn * 1.0
+ma  = avg(y, maLen, maType)
+
+ph += 1.0 / cl
+
+if ph > 1.0
+    ph -= 1.0
+
+bc = color.new(col(sh, pol), mt - mt * math.min(tv, 1.0))
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Shape labels {
+if showLabels and shapeChanged
+    labelY = pol == "Bull" ? amp * 1.35 : -amp * 1.35
+
+    label.new(
+         bar_index,
+         labelY,
+         sh,
+         style=pol == "Bull" ? label.style_label_down : label.style_label_up,
+         color=col(sh, pol),
+         textcolor=color.white,
+         size=labelSize
+     )
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Plots {
+plot(y, title="Directional Volume Shape", style=plot.style_columns, color=bc)
+plot(showMa ? ma : na, title="Directional Volume Shape MA", color=maCol, linewidth=maWidth)
+hline(0, "Zero", color=color.new(color.gray, 70))
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}

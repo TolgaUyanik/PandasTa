@@ -1,0 +1,1328 @@
+// ╔═══════════════════════════════════════════════════════════════════════════════════════╗
+// ║                                                                                       ║
+// ║   ██████╗ █████╗ ███████╗ ██████╗ █████╗ ██████╗ ███████╗    ██████╗  ██████╗ █████╗  ║
+// ║  ██╔════╝██╔══██╗██╔════╝██╔════╝██╔══██╗██╔══██╗██╔════╝    ██╔══██╗██╔════╝██╔══██╗ ║
+// ║  ██║     ███████║███████╗██║     ███████║██║  ██║█████╗      ██║  ██║██║     ███████║ ║
+// ║  ██║     ██╔══██║╚════██║██║     ██╔══██║██║  ██║██╔══╝      ██║  ██║██║     ██╔══██║ ║
+// ║  ╚██████╗██║  ██║███████║╚██████╗██║  ██║██████╔╝███████╗    ██████╔╝╚██████╗██║  ██║ ║
+// ║   ╚═════╝╚═╝  ╚═╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═════╝ ╚══════╝    ╚═════╝  ╚═════╝╚═╝  ╚═╝ ║
+// ║                         🌊  S P O T   L O N G  🌊                                     ║
+// ╚═══════════════════════════════════════════════════════════════════════════════════════╝
+//
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  NOVEDADES V1.4                                                            │
+// ├─────────────────────────────────────────────────────────────────────────────┤
+// │  · 🚀 RE-ENTRADA POR TENDENCIA: tras vender, si el precio entra en         │
+// │    tendencia alcista clara (Supertrend + ADX + +DI/-DI + EMA + pendiente),  │
+// │    se abre UNA nueva entrada para no perder la subida. Entra como nivel 0   │
+// │    normal: si después corrige, el cascade DCA sigue funcionando igual.      │
+// │                                                                             │
+// │  HISTORIAL V1.1                                                            │
+// │  · 🎯 CONFIRMACIÓN DE REBOTE: los DCA ya no compran en plena caída.        │
+// │  · ⚖️ MODO RESCATE + BREAKEVEN.                                            │
+// │  · 🔧 FIX CRÍTICO: cada nivel usa su distancia real get_drop(n).           │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// @version=6
+// Autor: Jesús Nicolás Astorga
+// Versión: 1.4
+// Licencia: Mozilla Public License 2.0
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@version=6
+strategy(
+     title             = "CASCADE DCA 🌊 — Spot Long 1.4",
+     shorttitle        = "CASCADE DCA",
+     overlay           = true,
+     pyramiding        = 50,           // Permite hasta 50 entradas simultáneas
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     initial_capital   = 10000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.1,          // 0.1% comisión típica de exchanges spot
+     slippage          = 1             // 1 tick de slippage para backtests realistas
+     )
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  💰  GRUPO 1 — MONTOS DCA
+//  FÓRMULA:  USD(nivel) = min( Base × (1 + Incremento × nivel) , Techo )
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string G1 = "💰 DCA Amounts"
+
+base_usd = input.float(
+     defval  = 50,
+     title   = "Base Amount (USD) — entrada inicial",
+     group   = G1,
+     minval  = 1.0,
+     step    = 1.0,
+     tooltip = "Monto USD invertido en la entrada inicial (nivel 0).\n" +"Es el monto más pequeño de toda la operación — actúa como 'scouting entry'.\n" + "Los niveles DCA posteriores se calculan como: Base × (1 + Incremento × nivel).")
+
+amt_inc = input.float(
+     defval  = 4,
+     title   = "Amount Increment per level (×Base)",
+     group   = G1,
+     minval  = 0.0,
+     step    = 0.1,
+     tooltip = "Multiplicador de crecimiento por nivel.\n" +
+               "Con Base=5 e Incremento=10:\n" +
+               "  Nivel 0 (Entry): 5 × (1 + 10×0) = $5\n" +
+               "  Nivel 1 (DCA-1): 5 × (1 + 10×1) = $55\n" +
+               "  Nivel 2 (DCA-2): 5 × (1 + 10×2) = $105\n" +
+               "  Nivel 3 (DCA-3): 5 × (1 + 10×3) = $155\n" +
+               "⚠️ Valores altos escalan rápidamente — usa el Techo para limitar.")
+
+max_usd_cap = input.float(
+     defval  = 5000.0,
+     title   = "Max USD per level — techo de seguridad 🔒",
+     group   = G1,
+     minval  = 1.0,
+     step    = 10.0,
+     tooltip = "Límite máximo de USD que puede invertirse en cualquier nivel individual.\n" +
+               "PROPÓSITO: Evitar que una configuración accidental del Incremento\n" +
+               "genere posiciones demasiado grandes para tu capital.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  📉  GRUPO 2 — PROGRESIÓN DE DISTANCIAS DCA
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string G2 = "📉 DCA Drop Progression"
+
+drop_init = input.float(
+     defval  = 10,
+     title   = "Initial Entry — drop from swing high (%)",
+     group   = G2,
+     minval  = 0.1,
+     step    = 0.5,
+     tooltip = "Caída mínima desde el swing high reciente para abrir la primera posición.\n" +
+               "Valores bajos (2-5%): más operaciones, entradas más tempranas.\n" +
+               "Valores altos (10-20%): menos operaciones, entradas en caídas más pronunciadas.")
+
+max_levels = input.int(
+     defval  = 50,
+     title   = "Number of DCA levels (1–50)",
+     group   = G2,
+     minval  = 1,
+     maxval  = 50,
+     tooltip = "Cantidad total de compras adicionales después de la entrada inicial.\n" +
+               "Los niveles que no se activen no consumen capital.")
+
+dca_base_pct = input.float(
+     defval  = 1.0,
+     title   = "First DCA drop % (from initial entry)",
+     group   = G2,
+     minval  = 0.5,
+     step    = 0.5,
+     tooltip = "Porcentaje de caída desde ep1 (precio de entrada inicial) para activar DCA-1.\n" +
+               "Este es el ancla de toda la progresión matemática.")
+
+progression = input.string(
+     defval  = "Linear (+)",
+     title   = "Progression type",
+     group   = G2,
+     options = ["Linear (+)", "Geometric (×)"],
+     tooltip = "▶ Linear (+): cada nivel suma un % fijo al anterior.\n" +
+               "▶ Geometric (×): cada nivel multiplica el anterior por un factor.")
+
+lin_inc = input.float(
+     defval  = 3,
+     title   = "  ↳ Linear: increment per level (%)",
+     group   = G2,
+     minval  = 0.1,
+     step    = 0.5,
+     tooltip = "Solo aplica cuando Progression = Linear (+).\n" +
+               "drop(n) = First DCA drop + (n-1) × este valor")
+
+geo_mult = input.float(
+     defval  = 10,
+     title   = "  ↳ Geometric: multiplier per level (×)",
+     group   = G2,
+     minval  = 1.01,
+     step    = 0.05,
+     tooltip = "Solo aplica cuando Progression = Geometric (×).\n" +
+               "drop(n) = First DCA drop × multiplicador^(n-1)\n" +
+               "⚠️ Valores > 2.0 generan niveles muy profundos rápidamente.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🎯  GRUPO NUEVO — CONFIRMACIÓN DE REBOTE (ANTI-SUPERPOSICIÓN)
+//
+//  Problema que resuelve: en caídas violentas el precio atraviesa varios
+//  triggers de golpe y los DCA compran en barras consecutivas al mismo precio.
+//
+//  Solución en dos fases:
+//    1. ARMADO: cuando el fondo del ciclo (mínimo desde el último fill)
+//       toca el trigger del nivel actual Y queda por debajo del último fill.
+//    2. DISPARO: cuando el precio rebota un % configurable desde ese fondo
+//       (opcionalmente con vela verde). La compra ocurre en la recuperación,
+//       no en plena caída libre.
+//
+//  Después de cada compra el ciclo se resetea: hace falta un nuevo fondo
+//  para armar el siguiente nivel → imposible comprar dos veces en el mismo punto.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string GR = "🎯 Rebound Confirmation — Anti-Stacking"
+
+use_rebound = input.bool(
+     defval  = true,
+     title   = "Comprar DCA solo en rebote (anti-stacking)",
+     group   = GR,
+     tooltip = "ON: el nivel se ARMA al tocar su trigger pero la compra se ejecuta\n" +
+               "recién cuando el precio deja de caer y rebota desde el fondo.\n" +
+               "OFF: comportamiento clásico (compra apenas el close toca el trigger).")
+
+rebound_pct = input.float(
+     defval  = 2.5,
+     title   = "  ↳ Rebote mínimo desde el fondo (%)",
+     group   = GR,
+     minval  = 0.1,
+     step    = 0.1,
+     tooltip = "Cuánto debe recuperar el precio desde el mínimo del ciclo para\n" +
+               "confirmar la compra. Subilo (1.5–2%) para separar más las compras.")
+
+require_green = input.bool(
+     defval  = true,
+     title   = "  ↳ Exigir vela verde (close > open)",
+     group   = GR,
+     tooltip = "Confirmación extra: la vela que ejecuta la compra debe cerrar en positivo.")
+
+min_gap_pct = input.float(
+     defval  = 5,
+     title   = "  ↳ Separación mínima entre compras (%)",
+     group   = GR,
+     minval  = 0.1,
+     step    = 0.5,
+     tooltip = "Para armar el siguiente nivel, el fondo del ciclo debe estar al menos\n" +
+               "este % POR DEBAJO del último fill. Es el candado duro contra la\n" +
+               "superposición: garantiza que dos compras nunca queden pegadas.\n" +
+               "Subilo (3–5%) si todavía ves compras muy juntas en tu par/timeframe.")
+
+confirm_bars = input.int(
+     defval  = 20,
+     title   = "  ↳ Velas de confirmación del fondo",
+     group   = GR,
+     minval  = 1,
+     maxval  = 20,
+     tooltip = "Cantidad de velas SIN nuevo mínimo antes de poder comprar.\n" +
+               "Evita que la misma vela que hace el fondo (martillo en plena caída)\n" +
+               "dispare la compra con su propio rebote intrabar.\n" +
+               "1 = el fondo debe ser de una vela anterior (recomendado).\n" +
+               "2-3 = confirmación más fuerte de que la caída terminó.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ⚖️  GRUPO NUEVO — MODO RESCATE: BREAKEVEN EXIT
+//
+//  Si la posición acumula muchos DCAs (caída profunda), al recuperar una
+//  pequeña ganancia se ARMA un breakeven: si el P&L USD abierto vuelve a 0,
+//  se cierra TODO. Una posición rescatada nunca vuelve al rojo.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string GB = "⚖️ Rescue Mode — Breakeven Exit"
+
+rescue_levels = input.int(
+     defval  = 10,
+     title   = "DCAs llenados para activar Modo Rescate",
+     group   = GB,
+     minval  = 1,
+     maxval  = 50,
+     tooltip = "Si la posición acumula esta cantidad de DCAs o más,\n" +
+               "se activa el modo rescate (fondo naranja en el gráfico).")
+
+be_arm_pct = input.float(
+     defval  = 0.5,
+     title   = "  ↳ Ganancia % que ARMA el breakeven",
+     group   = GB,
+     minval  = 0.1,
+     step    = 0.1,
+     tooltip = "En modo rescate, cuando el precio supera el avg cost por este %,\n" +
+               "el breakeven queda armado. Si luego el P&L USD abierto cae a 0,\n" +
+               "se cierra toda la posición con comment '⚖️ BE Exit'.\n" +
+               "La salida normal por VWM/Supertrend sigue funcionando igual.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🚀  GRUPO NUEVO — RE-ENTRADA POR TENDENCIA (no perder la subida)
+//
+//  Problema que resuelve: la entrada clásica (ini_cond) exige caída desde el
+//  swing high + zona lateral. En una subida franca tras vender, eso NUNCA se
+//  cumple, así que la estrategia se queda mirando cómo el precio sube sin ella.
+//
+//  Solución: una segunda puerta de entrada que se ARMA recién después de vender
+//  (await_reentry) y dispara UNA sola vez cuando la tendencia es claramente
+//  alcista. Entra como nivel 0 normal → si luego corrige, el cascade DCA
+//  arranca como siempre desde ese ep1.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string GT = "🚀 Trend Re-Entry"
+
+use_trend_reentry = input.bool(
+     defval  = true,
+     title   = "Re-entrar en tendencia alcista tras vender",
+     group   = GT,
+     tooltip = "ON: si después de cerrar una posición el precio entra en tendencia\n" +
+               "alcista clara, se abre UNA nueva entrada para no perder la subida.\n" +
+               "OFF: solo se reentra con la lógica clásica (caída + zona lateral).")
+
+tr_adx_min = input.float(
+     defval  = 25.0,
+     title   = "  ↳ ADX mínimo (fuerza de tendencia)",
+     group   = GT,
+     minval  = 1.0,
+     step    = 1.0,
+     tooltip = "El ADX debe superar este valor para considerar la tendencia 'fuerte'.\n" +
+               "20–25 = incipiente, 30+ = fuerte.")
+
+tr_ema_len = input.int(
+     defval  = 50,
+     title   = "  ↳ EMA de filtro de tendencia",
+     group   = GT,
+     minval  = 2,
+     tooltip = "El precio debe estar por encima de esta EMA para confirmar sesgo alcista.")
+
+tr_slope = input.int(
+     defval  = 10,
+     title   = "  ↳ Pendiente: barras de comparación",
+     group   = GT,
+     minval  = 1,
+     tooltip = "El close actual debe ser mayor que el close de hace N barras (pendiente positiva).")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🔲  GRUPO 3 — DETECCIÓN DE ZONA LATERAL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string G3 = "🔲 Lateral Zone Detection"
+
+swing_lb = input.int(
+     defval  = 20,
+     title   = "Swing High Lookback (bars)",
+     group   = G3,
+     minval  = 5,
+     tooltip = "Barras hacia atrás para calcular el swing high de referencia.\n" +
+               "Este high se usa para medir la caída inicial (drop_init %).")
+
+bb_len = input.int(
+     defval  = 20,
+     title   = "Bollinger Band Length",
+     group   = G3,
+     tooltip = "Período de la media móvil de las Bandas de Bollinger. Estándar: 20.")
+
+bb_dev = input.float(
+     defval  = 2.0,
+     title   = "Bollinger Band Multiplier (StdDev)",
+     group   = G3,
+     tooltip = "Desviación estándar para calcular el ancho de las bandas. Estándar: 2.0.")
+
+bbw_max = input.float(
+     defval  = 4.0,
+     title   = "Max BBW % — lateral threshold",
+     group   = G3,
+     tooltip = "Umbral máximo de BBW para considerar el precio en zona lateral.\n" +
+               "BBW por debajo de este valor = bandas comprimidas = consolidación.")
+
+adx_len = input.int(
+     defval  = 19,
+     title   = "ADX Length",
+     group   = G3,
+     tooltip = "Período del ADX. Valor estándar: 14.")
+
+adx_max = input.float(
+     defval  = 35.0,
+     title   = "Max ADX — no-trend threshold",
+     group   = G3,
+     tooltip = "ADX por debajo de este valor = mercado sin tendencia definida.\n" +
+               "Recomendado: 20–25.")
+
+require_both = input.bool(
+     defval  = false,
+     title   = "Require BOTH BBW and ADX conditions",
+     group   = G3,
+     tooltip = "FALSE (OR): cualquiera de los dos indicadores es suficiente.\n" +
+               "TRUE (AND): ambos deben confirmarse simultáneamente.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🚀  GRUPO 4 — SALIDA: MOTOR VWM (Volume-Weighted Momentum)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string G4 = "🚀 Exit — VWM Impulse Exhaustion"
+
+min_profit = input.float(
+     defval  = 2.0,
+     title   = "Min profit % to enable exit",
+     group   = G4,
+     minval  = 0.1,
+     step    = 0.5,
+     tooltip = "La señal de salida solo se activa si la posición está en ganancia\n" +
+               "por al menos este porcentaje sobre el costo promedio.")
+
+roc_len = input.int(
+     defval  = 10,
+     title   = "Momentum ROC length",
+     group   = G4,
+     minval  = 2,
+     tooltip = "Período del Rate of Change para medir la velocidad del precio.")
+
+roc_sm = input.int(
+     defval  = 5,
+     title   = "Momentum EMA smooth",
+     group   = G4,
+     minval  = 1,
+     tooltip = "Suavizado EMA aplicado al VWM final.")
+
+vol_sm_len = input.int(
+     defval  = 10,
+     title   = "Volume MA length",
+     group   = G4,
+     minval  = 2,
+     tooltip = "Período de la media del volumen usada para el volumen relativo.")
+
+decay_req = input.int(
+     defval  = 2,
+     title   = "Decay bars required for exit",
+     group   = G4,
+     minval  = 1,
+     tooltip = "Cuántas barras consecutivas debe estar cayendo el VWM para la salida.")
+
+use_st_exit = input.bool(
+     defval  = true,
+     title   = "Enable Supertrend safety exit",
+     group   = G4,
+     tooltip = "Si el Supertrend gira BAJISTA con la posición en ganancia mínima,\n" +
+               "también se cierra la posición.")
+
+st_atr_len = input.int(
+     defval  = 10,
+     title   = "  ↳ Supertrend ATR length",
+     group   = G4,
+     tooltip = "Período del ATR usado por el Supertrend.")
+
+st_factor = input.float(
+     defval  = 3.0,
+     title   = "  ↳ Supertrend factor",
+     group   = G4,
+     tooltip = "Multiplicador del ATR para las bandas del Supertrend. Estándar: 3.0.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🧮  FÓRMULA DE DISTANCIAS DCA
+//  Lineal:     drop(n) = dca_base_pct + (n-1) × lin_inc
+//  Geométrica: drop(n) = dca_base_pct × geo_mult^(n-1)
+// ══════════════════════════════════════════════════════════════════════════════
+
+get_drop(n) =>
+    progression == "Linear (+)" ? dca_base_pct + (n - 1) * lin_inc : dca_base_pct * math.pow(geo_mult, n - 1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🔲  CÁLCULO DE ZONA LATERAL
+// ══════════════════════════════════════════════════════════════════════════════
+
+[bb_up, bb_mid, bb_lo] = ta.bb(close, bb_len, bb_dev)
+bbw = (bb_up - bb_lo) / bb_mid * 100   // Ancho normalizado como % del precio
+
+[dip, dim, adx_val] = ta.dmi(adx_len, adx_len)
+
+is_lateral = require_both
+             ? (bbw < bbw_max and adx_val < adx_max)
+             : (bbw < bbw_max or  adx_val < adx_max)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  📊  SWING HIGH DE REFERENCIA
+// ══════════════════════════════════════════════════════════════════════════════
+
+swing_high = ta.highest(high, swing_lb)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  💨  VWM — Volume-Weighted Momentum (indicador propio de salida)
+// ══════════════════════════════════════════════════════════════════════════════
+
+roc_raw = ta.roc(close, roc_len)                    // Velocidad del precio
+vol_ma  = ta.sma(volume, vol_sm_len)                // Volumen promedio
+rel_vol = volume / math.max(vol_ma, 1)              // Volumen relativo (>1 = activo)
+vwm     = ta.ema(roc_raw * rel_vol, roc_sm)         // VWM final suavizado
+
+var int decay_count = 0
+decay_count := vwm < vwm[1] ? decay_count + 1 : 0  // Contador de barras en declive
+
+impulse_dead = decay_count >= decay_req and vwm[decay_req] > 0.3
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ⚡  SUPERTREND (salida de seguridad)
+// ══════════════════════════════════════════════════════════════════════════════
+
+[st_line, st_dir]  = ta.supertrend(st_factor, st_atr_len)
+st_bear_flip       = ta.crossover(st_dir, 0)   // Cruza de -1 a 1 = giro bajista
+
+// ── Re-entrada por tendencia: ¿la tendencia es claramente alcista? ────────────
+// Reutiliza st_dir, adx_val, dip, dim ya calculados. Solo agrega la EMA de filtro.
+ema_trend     = ta.ema(close, tr_ema_len)
+trend_bullish = (st_dir < 0)               // Supertrend alcista
+              and adx_val >= tr_adx_min    // tendencia con fuerza
+              and dip > dim                // +DI por encima de -DI → dirección alcista
+              and close > ema_trend        // precio sobre su media
+              and close > close[tr_slope]  // pendiente positiva
+              and not is_lateral           // descartar consolidaciones
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  💼  MÁQUINA DE ESTADOS
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int   level        = 0      // Estado actual del ciclo DCA
+var float ep1          = na     // Precio de entrada inicial (ancla de todos los DCAs)
+var float total_inv    = 0.0    // Total USD invertido en la operación activa
+var bool  was_in_trade = false  // Detecta cierre real de posición
+
+// ── Estado nuevo V1.1: rebote y rescate ──────────────────────────────────────
+var float cycle_low      = na     // Mínimo del ciclo actual (desde el último fill)
+var float last_fill      = na     // Precio del último fill (entrada o DCA)
+var bool  dca_armed      = false  // El nivel actual tocó su trigger y espera rebote
+var bool  be_armed       = false  // Breakeven armado en modo rescate
+var int   bars_since_low = 0      // Velas transcurridas sin hacer nuevo mínimo
+
+// ── Estado nuevo V1.4: re-entrada por tendencia ───────────────────────────────
+var bool  await_reentry  = false  // Se vendió → esperando tendencia para reentrar UNA vez
+
+if strategy.position_size > 0
+    was_in_trade := true
+
+// Reset completo cuando la posición se cierra (y previamente estuvo abierta)
+if strategy.position_size == 0 and was_in_trade
+    was_in_trade := false
+    level        := 0
+    ep1          := na
+    total_inv    := 0.0
+    cycle_low    := na
+    last_fill    := na
+    dca_armed    := false
+    be_armed     := false
+    bars_since_low := 0
+    await_reentry := true          // ← acabamos de vender: habilitar re-entrada por tendencia
+
+// ── Función USD con techo de seguridad ─────────────────────────────────────
+usd(n) => math.min(base_usd * (1.0 + amt_inc * n), max_usd_cap)
+
+// ── Precomputar precios de activación de cada nivel ────────────────────────
+// 🔧 FIX V1.1: cada nivel usa su distancia real get_drop(n).
+// (Antes t10–t50 reusaban get_drop(1..9) → los DCA 10+ disparaban todos
+//  juntos en el mismo punto. Ese era el bug de superposición.)
+t1 = not na(ep1) and max_levels >= 1 ? ep1 * (1.0 - get_drop(1) / 100.0) : na
+t2 = not na(ep1) and max_levels >= 2 ? ep1 * (1.0 - get_drop(2) / 100.0) : na
+t3 = not na(ep1) and max_levels >= 3 ? ep1 * (1.0 - get_drop(3) / 100.0) : na
+t4 = not na(ep1) and max_levels >= 4 ? ep1 * (1.0 - get_drop(4) / 100.0) : na
+t5 = not na(ep1) and max_levels >= 5 ? ep1 * (1.0 - get_drop(5) / 100.0) : na
+t6 = not na(ep1) and max_levels >= 6 ? ep1 * (1.0 - get_drop(6) / 100.0) : na
+t7 = not na(ep1) and max_levels >= 7 ? ep1 * (1.0 - get_drop(7) / 100.0) : na
+t8 = not na(ep1) and max_levels >= 8 ? ep1 * (1.0 - get_drop(8) / 100.0) : na
+t9 = not na(ep1) and max_levels >= 9 ? ep1 * (1.0 - get_drop(9) / 100.0) : na
+t10 = not na(ep1) and max_levels >= 10 ? ep1 * (1.0 - get_drop(10) / 100.0) : na
+t11 = not na(ep1) and max_levels >= 11 ? ep1 * (1.0 - get_drop(11) / 100.0) : na
+t12 = not na(ep1) and max_levels >= 12 ? ep1 * (1.0 - get_drop(12) / 100.0) : na
+t13 = not na(ep1) and max_levels >= 13 ? ep1 * (1.0 - get_drop(13) / 100.0) : na
+t14 = not na(ep1) and max_levels >= 14 ? ep1 * (1.0 - get_drop(14) / 100.0) : na
+t15 = not na(ep1) and max_levels >= 15 ? ep1 * (1.0 - get_drop(15) / 100.0) : na
+t16 = not na(ep1) and max_levels >= 16 ? ep1 * (1.0 - get_drop(16) / 100.0) : na
+t17 = not na(ep1) and max_levels >= 17 ? ep1 * (1.0 - get_drop(17) / 100.0) : na
+t18 = not na(ep1) and max_levels >= 18 ? ep1 * (1.0 - get_drop(18) / 100.0) : na
+t19 = not na(ep1) and max_levels >= 19 ? ep1 * (1.0 - get_drop(19) / 100.0) : na
+t20 = not na(ep1) and max_levels >= 20 ? ep1 * (1.0 - get_drop(20) / 100.0) : na
+t21 = not na(ep1) and max_levels >= 21 ? ep1 * (1.0 - get_drop(21) / 100.0) : na
+t22 = not na(ep1) and max_levels >= 22 ? ep1 * (1.0 - get_drop(22) / 100.0) : na
+t23 = not na(ep1) and max_levels >= 23 ? ep1 * (1.0 - get_drop(23) / 100.0) : na
+t24 = not na(ep1) and max_levels >= 24 ? ep1 * (1.0 - get_drop(24) / 100.0) : na
+t25 = not na(ep1) and max_levels >= 25 ? ep1 * (1.0 - get_drop(25) / 100.0) : na
+t26 = not na(ep1) and max_levels >= 26 ? ep1 * (1.0 - get_drop(26) / 100.0) : na
+t27 = not na(ep1) and max_levels >= 27 ? ep1 * (1.0 - get_drop(27) / 100.0) : na
+t28 = not na(ep1) and max_levels >= 28 ? ep1 * (1.0 - get_drop(28) / 100.0) : na
+t29 = not na(ep1) and max_levels >= 29 ? ep1 * (1.0 - get_drop(29) / 100.0) : na
+t30 = not na(ep1) and max_levels >= 30 ? ep1 * (1.0 - get_drop(30) / 100.0) : na
+t31 = not na(ep1) and max_levels >= 31 ? ep1 * (1.0 - get_drop(31) / 100.0) : na
+t32 = not na(ep1) and max_levels >= 32 ? ep1 * (1.0 - get_drop(32) / 100.0) : na
+t33 = not na(ep1) and max_levels >= 33 ? ep1 * (1.0 - get_drop(33) / 100.0) : na
+t34 = not na(ep1) and max_levels >= 34 ? ep1 * (1.0 - get_drop(34) / 100.0) : na
+t35 = not na(ep1) and max_levels >= 35 ? ep1 * (1.0 - get_drop(35) / 100.0) : na
+t36 = not na(ep1) and max_levels >= 36 ? ep1 * (1.0 - get_drop(36) / 100.0) : na
+t37 = not na(ep1) and max_levels >= 37 ? ep1 * (1.0 - get_drop(37) / 100.0) : na
+t38 = not na(ep1) and max_levels >= 38 ? ep1 * (1.0 - get_drop(38) / 100.0) : na
+t39 = not na(ep1) and max_levels >= 39 ? ep1 * (1.0 - get_drop(39) / 100.0) : na
+t40 = not na(ep1) and max_levels >= 40 ? ep1 * (1.0 - get_drop(40) / 100.0) : na
+t41 = not na(ep1) and max_levels >= 41 ? ep1 * (1.0 - get_drop(41) / 100.0) : na
+t42 = not na(ep1) and max_levels >= 42 ? ep1 * (1.0 - get_drop(42) / 100.0) : na
+t43 = not na(ep1) and max_levels >= 43 ? ep1 * (1.0 - get_drop(43) / 100.0) : na
+t44 = not na(ep1) and max_levels >= 44 ? ep1 * (1.0 - get_drop(44) / 100.0) : na
+t45 = not na(ep1) and max_levels >= 45 ? ep1 * (1.0 - get_drop(45) / 100.0) : na
+t46 = not na(ep1) and max_levels >= 46 ? ep1 * (1.0 - get_drop(46) / 100.0) : na
+t47 = not na(ep1) and max_levels >= 47 ? ep1 * (1.0 - get_drop(47) / 100.0) : na
+t48 = not na(ep1) and max_levels >= 48 ? ep1 * (1.0 - get_drop(48) / 100.0) : na
+t49 = not na(ep1) and max_levels >= 49 ? ep1 * (1.0 - get_drop(49) / 100.0) : na
+t50 = not na(ep1) and max_levels >= 50 ? ep1 * (1.0 - get_drop(50) / 100.0) : na
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🎯  LÓGICA DE REBOTE (ANTI-STACKING) — compartida por todos los niveles
+//
+//  CANDADOS (todos deben cumplirse para comprar):
+//   1. Trigger: el fondo del ciclo tocó el precio del nivel pendiente.
+//   2. Separación: el fondo está al menos min_gap_pct% DEBAJO del último fill.
+//      → garantiza distancia mínima real entre compras consecutivas.
+//   3. Fondo confirmado: pasaron confirm_bars velas SIN nuevo mínimo.
+//      → la vela que hizo el fondo no puede dispararse a sí misma.
+//   4. Rebote: el close recuperó rebound_pct% desde el fondo.
+//   5. Vela verde (opcional) + zona lateral (filtro original).
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Tracking del mínimo del ciclo y de las velas transcurridas sin nuevo mínimo
+if strategy.position_size > 0
+    made_new_low = na(cycle_low) or low < cycle_low
+    cycle_low := na(cycle_low) ? low : math.min(cycle_low, low)
+    bars_since_low := made_new_low ? 0 : bars_since_low + 1
+
+// Trigger del nivel DCA actualmente pendiente
+cur_trigger = not na(ep1) and level >= 1 and level <= max_levels ? ep1 * (1.0 - get_drop(level) / 100.0) : na
+
+// CANDADO 1: el fondo tocó el trigger del nivel
+trigger_ok = not na(cycle_low) and not na(cur_trigger) and cycle_low <= cur_trigger
+
+// CANDADO 2: separación mínima — el fondo perforó el último fill por min_gap_pct%
+gap_ok = na(last_fill) or (not na(cycle_low) and cycle_low <= last_fill * (1.0 - min_gap_pct / 100.0))
+
+if strategy.position_size > 0 and use_rebound and not dca_armed and trigger_ok and gap_ok
+    dca_armed := true
+
+// CANDADO 3: el fondo no es de esta vela (pasaron N velas sin nuevo mínimo)
+hold_ok = bars_since_low >= confirm_bars
+
+// CANDADO 4: el precio rebota desde el fondo del ciclo
+rebound_ok   = not na(cycle_low) and close >= cycle_low * (1.0 + rebound_pct / 100.0)
+
+// CANDADO 5: vela verde (opcional)
+green_ok     = not require_green or close > open
+
+rebound_fire = dca_armed and hold_ok and rebound_ok and green_ok
+
+// Capturar el nivel antes de las entradas para detectar fills de esta barra
+level_before = level
+
+// 🔒 CANDADO ANTI-CASCADA (clave): solo UNA compra puede ejecutarse por vela.
+// Sin esto, los 50 bloques if se encadenan en la misma barra (level 1→2→3…→50)
+// y todas las flechas quedan apiladas en un único punto.
+bought_this_bar = false
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🟢  ENTRADAS
+//  Con rebote ON, la condición de precio (close <= tN) se reemplaza por
+//  rebound_fire (armado + rebote confirmado). El filtro lateral se mantiene.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── ENTRADA INICIAL (clásica: caída desde swing high + zona lateral) ─────────
+ini_cond = level == 0
+         and not na(swing_high)
+         and close <= swing_high * (1.0 - drop_init / 100.0)  // Caída desde swing high
+         and is_lateral                                         // En zona consolidación
+         and close > 0                                          // Protección precio inválido
+         and not bought_this_bar
+
+if ini_cond
+    strategy.entry("Entry", strategy.long, qty=usd(0)/close, comment="🟢 Entry")
+    bought_this_bar := true
+    level     := 1
+    ep1       := close
+    total_inv := usd(0)
+    last_fill := close
+    cycle_low := na
+    dca_armed := false
+    bars_since_low := 0
+    await_reentry := false        // ← entrada clásica consume el flag de re-entrada
+
+// ── RE-ENTRADA POR TENDENCIA (UNA sola vez tras vender) ───────────────────────
+// Segunda puerta de entrada: se arma al vender (await_reentry) y dispara cuando
+// la tendencia es claramente alcista. Entra como nivel 0 normal.
+tr_cond = use_trend_reentry and level == 0  and await_reentry    and trend_bullish  and close > 0  and not bought_this_bar
+
+if tr_cond
+    strategy.entry("Entry", strategy.long, qty=usd(0)/close, comment="🚀 Re-Entry")
+    bought_this_bar := true
+    level     := 1
+    ep1       := close
+    total_inv := usd(0)
+    last_fill := close
+    cycle_low := na
+    dca_armed := false
+    bars_since_low := 0
+    await_reentry := false        // ← una sola re-entrada por venta
+
+// ── DCA 1 ─────────────────────────────────────────────────────────────────
+if level == 1 and max_levels >= 1 and not na(t1) and (use_rebound ? rebound_fire : close <= t1) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-1", strategy.long, qty=usd(1)/close, comment="DCA-1")
+    bought_this_bar := true
+    level     := 2
+    total_inv += usd(1)
+
+// ── DCA 2 ─────────────────────────────────────────────────────────────────
+if level == 2 and max_levels >= 2 and not na(t2) and (use_rebound ? rebound_fire : close <= t2) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-2", strategy.long, qty=usd(2)/close, comment="DCA-2")
+    bought_this_bar := true
+    level     := 3
+    total_inv += usd(2)
+
+// ── DCA 3 ─────────────────────────────────────────────────────────────────
+if level == 3 and max_levels >= 3 and not na(t3) and (use_rebound ? rebound_fire : close <= t3) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-3", strategy.long, qty=usd(3)/close, comment="DCA-3")
+    bought_this_bar := true
+    level     := 4
+    total_inv += usd(3)
+
+// ── DCA 4 ─────────────────────────────────────────────────────────────────
+if level == 4 and max_levels >= 4 and not na(t4) and (use_rebound ? rebound_fire : close <= t4) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-4", strategy.long, qty=usd(4)/close, comment="DCA-4")
+    bought_this_bar := true
+    level     := 5
+    total_inv += usd(4)
+
+// ── DCA 5 ─────────────────────────────────────────────────────────────────
+if level == 5 and max_levels >= 5 and not na(t5) and (use_rebound ? rebound_fire : close <= t5) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-5", strategy.long, qty=usd(5)/close, comment="DCA-5")
+    bought_this_bar := true
+    level     := 6
+    total_inv += usd(5)
+
+// ── DCA 6 ─────────────────────────────────────────────────────────────────
+if level == 6 and max_levels >= 6 and not na(t6) and (use_rebound ? rebound_fire : close <= t6) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-6", strategy.long, qty=usd(6)/close, comment="DCA-6")
+    bought_this_bar := true
+    level     := 7
+    total_inv += usd(6)
+
+// ── DCA 7 ─────────────────────────────────────────────────────────────────
+if level == 7 and max_levels >= 7 and not na(t7) and (use_rebound ? rebound_fire : close <= t7) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-7", strategy.long, qty=usd(7)/close, comment="DCA-7")
+    bought_this_bar := true
+    level     := 8
+    total_inv += usd(7)
+
+// ── DCA 8 ─────────────────────────────────────────────────────────────────
+if level == 8 and max_levels >= 8 and not na(t8) and (use_rebound ? rebound_fire : close <= t8) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-8", strategy.long, qty=usd(8)/close, comment="DCA-8")
+    bought_this_bar := true
+    level     := 9
+    total_inv += usd(8)
+
+// ── DCA 9 ─────────────────────────────────────────────────────────────────
+if level == 9 and max_levels >= 9 and not na(t9) and (use_rebound ? rebound_fire : close <= t9) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-9", strategy.long, qty=usd(9)/close, comment="DCA-9")
+    bought_this_bar := true
+    level     := 10
+    total_inv += usd(9)
+
+// ── DCA 10 ─────────────────────────────────────────────────────────────────
+if level == 10 and max_levels >= 10 and not na(t10) and (use_rebound ? rebound_fire : close <= t10) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-10", strategy.long, qty=usd(10)/close, comment="DCA-10")
+    bought_this_bar := true
+    level     := 11
+    total_inv += usd(10)
+
+// ── DCA 11 ─────────────────────────────────────────────────────────────────
+if level == 11 and max_levels >= 11 and not na(t11) and (use_rebound ? rebound_fire : close <= t11) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-11", strategy.long, qty=usd(11)/close, comment="DCA-11")
+    bought_this_bar := true
+    level     := 12
+    total_inv += usd(11)
+
+// ── DCA 12 ─────────────────────────────────────────────────────────────────
+if level == 12 and max_levels >= 12 and not na(t12) and (use_rebound ? rebound_fire : close <= t12) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-12", strategy.long, qty=usd(12)/close, comment="DCA-12")
+    bought_this_bar := true
+    level     := 13
+    total_inv += usd(12)
+
+// ── DCA 13 ─────────────────────────────────────────────────────────────────
+if level == 13 and max_levels >= 13 and not na(t13) and (use_rebound ? rebound_fire : close <= t13) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-13", strategy.long, qty=usd(13)/close, comment="DCA-13")
+    bought_this_bar := true
+    level     := 14
+    total_inv += usd(13)
+
+// ── DCA 14 ─────────────────────────────────────────────────────────────────
+if level == 14 and max_levels >= 14 and not na(t14) and (use_rebound ? rebound_fire : close <= t14) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-14", strategy.long, qty=usd(14)/close, comment="DCA-14")
+    bought_this_bar := true
+    level     := 15
+    total_inv += usd(14)
+
+// ── DCA 15 ─────────────────────────────────────────────────────────────────
+if level == 15 and max_levels >= 15 and not na(t15) and (use_rebound ? rebound_fire : close <= t15) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-15", strategy.long, qty=usd(15)/close, comment="DCA-15")
+    bought_this_bar := true
+    level     := 16
+    total_inv += usd(15)
+
+// ── DCA 16 ─────────────────────────────────────────────────────────────────
+if level == 16 and max_levels >= 16 and not na(t16) and (use_rebound ? rebound_fire : close <= t16) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-16", strategy.long, qty=usd(16)/close, comment="DCA-16")
+    bought_this_bar := true
+    level     := 17
+    total_inv += usd(16)
+
+// ── DCA 17 ─────────────────────────────────────────────────────────────────
+if level == 17 and max_levels >= 17 and not na(t17) and (use_rebound ? rebound_fire : close <= t17) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-17", strategy.long, qty=usd(17)/close, comment="DCA-17")
+    bought_this_bar := true
+    level     := 18
+    total_inv += usd(17)
+
+// ── DCA 18 ─────────────────────────────────────────────────────────────────
+if level == 18 and max_levels >= 18 and not na(t18) and (use_rebound ? rebound_fire : close <= t18) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-18", strategy.long, qty=usd(18)/close, comment="DCA-18")
+    bought_this_bar := true
+    level     := 19
+    total_inv += usd(18)
+
+// ── DCA 19 ─────────────────────────────────────────────────────────────────
+if level == 19 and max_levels >= 19 and not na(t19) and (use_rebound ? rebound_fire : close <= t19) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-19", strategy.long, qty=usd(19)/close, comment="DCA-19")
+    bought_this_bar := true
+    level     := 20
+    total_inv += usd(19)
+
+// ── DCA 20 ─────────────────────────────────────────────────────────────────
+if level == 20 and max_levels >= 20 and not na(t20) and (use_rebound ? rebound_fire : close <= t20) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-20", strategy.long, qty=usd(20)/close, comment="DCA-20")
+    bought_this_bar := true
+    level     := 21
+    total_inv += usd(20)
+
+// ── DCA 21 ─────────────────────────────────────────────────────────────────
+if level == 21 and max_levels >= 21 and not na(t21) and (use_rebound ? rebound_fire : close <= t21) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-21", strategy.long, qty=usd(21)/close, comment="DCA-21")
+    bought_this_bar := true
+    level     := 22
+    total_inv += usd(21)
+
+// ── DCA 22 ─────────────────────────────────────────────────────────────────
+if level == 22 and max_levels >= 22 and not na(t22) and (use_rebound ? rebound_fire : close <= t22) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-22", strategy.long, qty=usd(22)/close, comment="DCA-22")
+    bought_this_bar := true
+    level     := 23
+    total_inv += usd(22)
+
+// ── DCA 23 ─────────────────────────────────────────────────────────────────
+if level == 23 and max_levels >= 23 and not na(t23) and (use_rebound ? rebound_fire : close <= t23) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-23", strategy.long, qty=usd(23)/close, comment="DCA-23")
+    bought_this_bar := true
+    level     := 24
+    total_inv += usd(23)
+
+// ── DCA 24 ─────────────────────────────────────────────────────────────────
+if level == 24 and max_levels >= 24 and not na(t24) and (use_rebound ? rebound_fire : close <= t24) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-24", strategy.long, qty=usd(24)/close, comment="DCA-24")
+    bought_this_bar := true
+    level     := 25
+    total_inv += usd(24)
+
+// ── DCA 25 ─────────────────────────────────────────────────────────────────
+if level == 25 and max_levels >= 25 and not na(t25) and (use_rebound ? rebound_fire : close <= t25) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-25", strategy.long, qty=usd(25)/close, comment="DCA-25")
+    bought_this_bar := true
+    level     := 26
+    total_inv += usd(25)
+
+// ── DCA 26 ─────────────────────────────────────────────────────────────────
+if level == 26 and max_levels >= 26 and not na(t26) and (use_rebound ? rebound_fire : close <= t26) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-26", strategy.long, qty=usd(26)/close, comment="DCA-26")
+    bought_this_bar := true
+    level     := 27
+    total_inv += usd(26)
+
+// ── DCA 27 ─────────────────────────────────────────────────────────────────
+if level == 27 and max_levels >= 27 and not na(t27) and (use_rebound ? rebound_fire : close <= t27) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-27", strategy.long, qty=usd(27)/close, comment="DCA-27")
+    bought_this_bar := true
+    level     := 28
+    total_inv += usd(27)
+
+// ── DCA 28 ─────────────────────────────────────────────────────────────────
+if level == 28 and max_levels >= 28 and not na(t28) and (use_rebound ? rebound_fire : close <= t28) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-28", strategy.long, qty=usd(28)/close, comment="DCA-28")
+    bought_this_bar := true
+    level     := 29
+    total_inv += usd(28)
+
+// ── DCA 29 ─────────────────────────────────────────────────────────────────
+if level == 29 and max_levels >= 29 and not na(t29) and (use_rebound ? rebound_fire : close <= t29) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-29", strategy.long, qty=usd(29)/close, comment="DCA-29")
+    bought_this_bar := true
+    level     := 30
+    total_inv += usd(29)
+
+// ── DCA 30 ─────────────────────────────────────────────────────────────────
+if level == 30 and max_levels >= 30 and not na(t30) and (use_rebound ? rebound_fire : close <= t30) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-30", strategy.long, qty=usd(30)/close, comment="DCA-30")
+    bought_this_bar := true
+    level     := 31
+    total_inv += usd(30)
+
+// ── DCA 31 ─────────────────────────────────────────────────────────────────
+if level == 31 and max_levels >= 31 and not na(t31) and (use_rebound ? rebound_fire : close <= t31) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-31", strategy.long, qty=usd(31)/close, comment="DCA-31")
+    bought_this_bar := true
+    level     := 32
+    total_inv += usd(31)
+
+// ── DCA 32 ─────────────────────────────────────────────────────────────────
+if level == 32 and max_levels >= 32 and not na(t32) and (use_rebound ? rebound_fire : close <= t32) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-32", strategy.long, qty=usd(32)/close, comment="DCA-32")
+    bought_this_bar := true
+    level     := 33
+    total_inv += usd(32)
+
+// ── DCA 33 ─────────────────────────────────────────────────────────────────
+if level == 33 and max_levels >= 33 and not na(t33) and (use_rebound ? rebound_fire : close <= t33) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-33", strategy.long, qty=usd(33)/close, comment="DCA-33")
+    bought_this_bar := true
+    level     := 34
+    total_inv += usd(33)
+
+// ── DCA 34 ─────────────────────────────────────────────────────────────────
+if level == 34 and max_levels >= 34 and not na(t34) and (use_rebound ? rebound_fire : close <= t34) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-34", strategy.long, qty=usd(34)/close, comment="DCA-34")
+    bought_this_bar := true
+    level     := 35
+    total_inv += usd(34)
+
+// ── DCA 35 ─────────────────────────────────────────────────────────────────
+if level == 35 and max_levels >= 35 and not na(t35) and (use_rebound ? rebound_fire : close <= t35) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-35", strategy.long, qty=usd(35)/close, comment="DCA-35")
+    bought_this_bar := true
+    level     := 36
+    total_inv += usd(35)
+
+// ── DCA 36 ─────────────────────────────────────────────────────────────────
+if level == 36 and max_levels >= 36 and not na(t36) and (use_rebound ? rebound_fire : close <= t36) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-36", strategy.long, qty=usd(36)/close, comment="DCA-36")
+    bought_this_bar := true
+    level     := 37
+    total_inv += usd(36)
+
+// ── DCA 37 ─────────────────────────────────────────────────────────────────
+if level == 37 and max_levels >= 37 and not na(t37) and (use_rebound ? rebound_fire : close <= t37) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-37", strategy.long, qty=usd(37)/close, comment="DCA-37")
+    bought_this_bar := true
+    level     := 38
+    total_inv += usd(37)
+
+// ── DCA 38 ─────────────────────────────────────────────────────────────────
+if level == 38 and max_levels >= 38 and not na(t38) and (use_rebound ? rebound_fire : close <= t38) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-38", strategy.long, qty=usd(38)/close, comment="DCA-38")
+    bought_this_bar := true
+    level     := 39
+    total_inv += usd(38)
+
+// ── DCA 39 ─────────────────────────────────────────────────────────────────
+if level == 39 and max_levels >= 39 and not na(t39) and (use_rebound ? rebound_fire : close <= t39) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-39", strategy.long, qty=usd(39)/close, comment="DCA-39")
+    bought_this_bar := true
+    level     := 40
+    total_inv += usd(39)
+
+// ── DCA 40 ─────────────────────────────────────────────────────────────────
+if level == 40 and max_levels >= 40 and not na(t40) and (use_rebound ? rebound_fire : close <= t40) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-40", strategy.long, qty=usd(40)/close, comment="DCA-40")
+    bought_this_bar := true
+    level     := 41
+    total_inv += usd(40)
+
+// ── DCA 41 ─────────────────────────────────────────────────────────────────
+if level == 41 and max_levels >= 41 and not na(t41) and (use_rebound ? rebound_fire : close <= t41) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-41", strategy.long, qty=usd(41)/close, comment="DCA-41")
+    bought_this_bar := true
+    level     := 42
+    total_inv += usd(41)
+
+// ── DCA 42 ─────────────────────────────────────────────────────────────────
+if level == 42 and max_levels >= 42 and not na(t42) and (use_rebound ? rebound_fire : close <= t42) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-42", strategy.long, qty=usd(42)/close, comment="DCA-42")
+    bought_this_bar := true
+    level     := 43
+    total_inv += usd(42)
+
+// ── DCA 43 ─────────────────────────────────────────────────────────────────
+if level == 43 and max_levels >= 43 and not na(t43) and (use_rebound ? rebound_fire : close <= t43) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-43", strategy.long, qty=usd(43)/close, comment="DCA-43")
+    bought_this_bar := true
+    level     := 44
+    total_inv += usd(43)
+
+// ── DCA 44 ─────────────────────────────────────────────────────────────────
+if level == 44 and max_levels >= 44 and not na(t44) and (use_rebound ? rebound_fire : close <= t44) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-44", strategy.long, qty=usd(44)/close, comment="DCA-44")
+    bought_this_bar := true
+    level     := 45
+    total_inv += usd(44)
+
+// ── DCA 45 ─────────────────────────────────────────────────────────────────
+if level == 45 and max_levels >= 45 and not na(t45) and (use_rebound ? rebound_fire : close <= t45) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-45", strategy.long, qty=usd(45)/close, comment="DCA-45")
+    bought_this_bar := true
+    level     := 46
+    total_inv += usd(45)
+
+// ── DCA 46 ─────────────────────────────────────────────────────────────────
+if level == 46 and max_levels >= 46 and not na(t46) and (use_rebound ? rebound_fire : close <= t46) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-46", strategy.long, qty=usd(46)/close, comment="DCA-46")
+    bought_this_bar := true
+    level     := 47
+    total_inv += usd(46)
+
+// ── DCA 47 ─────────────────────────────────────────────────────────────────
+if level == 47 and max_levels >= 47 and not na(t47) and (use_rebound ? rebound_fire : close <= t47) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-47", strategy.long, qty=usd(47)/close, comment="DCA-47")
+    bought_this_bar := true
+    level     := 48
+    total_inv += usd(47)
+
+// ── DCA 48 ─────────────────────────────────────────────────────────────────
+if level == 48 and max_levels >= 48 and not na(t48) and (use_rebound ? rebound_fire : close <= t48) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-48", strategy.long, qty=usd(48)/close, comment="DCA-48")
+    bought_this_bar := true
+    level     := 49
+    total_inv += usd(48)
+
+// ── DCA 49 ─────────────────────────────────────────────────────────────────
+if level == 49 and max_levels >= 49 and not na(t49) and (use_rebound ? rebound_fire : close <= t49) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-49", strategy.long, qty=usd(49)/close, comment="DCA-49")
+    bought_this_bar := true
+    level     := 50
+    total_inv += usd(49)
+
+// ── DCA 50 ─────────────────────────────────────────────────────────────────
+if level == 50 and max_levels >= 50 and not na(t50) and (use_rebound ? rebound_fire : close <= t50) and is_lateral and not bought_this_bar
+    strategy.entry("DCA-50", strategy.long, qty=usd(50)/close, comment="DCA-50")
+    bought_this_bar := true
+    level     := 51
+    total_inv += usd(50)
+
+// ── Post-fill: si un DCA se ejecutó en esta barra, resetear el ciclo de rebote ──
+// (hace falta un NUEVO fondo para armar el próximo nivel)
+if level > level_before and level_before >= 1
+    last_fill := close
+    dca_armed := false
+    cycle_low := na
+    bars_since_low := 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🏁  SALIDA NORMAL (VWM + Supertrend) + ⚖️ MODO RESCATE BREAKEVEN
+// ══════════════════════════════════════════════════════════════════════════════
+
+avg_cost  = strategy.position_avg_price
+in_profit = strategy.position_size > 0
+          and close > avg_cost * (1.0 + min_profit / 100.0)
+
+exit_signal = in_profit and (impulse_dead or (use_st_exit and st_bear_flip))
+
+// ── MODO RESCATE: breakeven tras acumulación profunda de DCAs ────────────────
+// P&L USD abierto = strategy.openprofit (lo mismo que muestra el dashboard)
+filled_dcas = level > 0 ? level - 1 : 0
+rescue_mode = strategy.position_size > 0 and filled_dcas >= rescue_levels
+
+// Armar el breakeven cuando la posición rescatada supera una pequeña ganancia
+if rescue_mode and close >= avg_cost * (1.0 + be_arm_pct / 100.0)
+    be_armed := true
+
+// Disparo: el P&L USD abierto vuelve a 0 → cerrar todo, no volver al rojo
+be_exit = strategy.position_size > 0 and be_armed and strategy.openprofit <= 0.0
+
+if exit_signal
+    strategy.close_all(comment="🏁 Exit")
+else if be_exit
+    strategy.close_all(comment="⚖️ BE Exit")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  🎨  VISUALIZACIÓN EN EL GRÁFICO
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Paleta de colores para los niveles DCA ───────────────────────────────────
+c(n) => n == 1 ? color.new(color.orange,  30) :  n == 2 ? color.new(color.red,     30) :  n == 3 ? color.new(color.purple,  30) :   n == 4 ? color.new(color.maroon,  30) :   n == 5 ? color.new(color.fuchsia, 30) :  n == 6 ? color.new(color.teal,    30) :   n == 7 ? color.new(color.olive,   30) :  n == 8 ? color.new(color.navy,    30) :           color.new(color.silver,  30)
+plot(level >= 1 and max_levels >= 1 and not na(t1) ? t1 : na, "DCA-1", color=c(1), style=plot.style_linebr, linewidth=1)
+plot(level >= 2 and max_levels >= 2 and not na(t2) ? t2 : na, "DCA-2", color=c(2), style=plot.style_linebr, linewidth=1)
+plot(level >= 3 and max_levels >= 3 and not na(t3) ? t3 : na, "DCA-3", color=c(3), style=plot.style_linebr, linewidth=1)
+plot(level >= 4 and max_levels >= 4 and not na(t4) ? t4 : na, "DCA-4", color=c(4), style=plot.style_linebr, linewidth=1)
+plot(level >= 5 and max_levels >= 5 and not na(t5) ? t5 : na, "DCA-5", color=c(5), style=plot.style_linebr, linewidth=1)
+plot(level >= 6 and max_levels >= 6 and not na(t6) ? t6 : na, "DCA-6", color=c(6), style=plot.style_linebr, linewidth=1)
+plot(level >= 7 and max_levels >= 7 and not na(t7) ? t7 : na, "DCA-7", color=c(7), style=plot.style_linebr, linewidth=1)
+plot(level >= 8 and max_levels >= 8 and not na(t8) ? t8 : na, "DCA-8", color=c(8), style=plot.style_linebr, linewidth=1)
+plot(level >= 9 and max_levels >= 9 and not na(t9) ? t9 : na, "DCA-9", color=c(9), style=plot.style_linebr, linewidth=1)
+plot(level >= 10 and max_levels >= 10 and not na(t10) ? t10 : na, "DCA-10", color=c(10), style=plot.style_linebr, linewidth=1)
+plot(level >= 11 and max_levels >= 11 and not na(t11) ? t11 : na, "DCA-11", color=c(11), style=plot.style_linebr, linewidth=1)
+plot(level >= 12 and max_levels >= 12 and not na(t12) ? t12 : na, "DCA-12", color=c(12), style=plot.style_linebr, linewidth=1)
+plot(level >= 13 and max_levels >= 13 and not na(t13) ? t13 : na, "DCA-13", color=c(13), style=plot.style_linebr, linewidth=1)
+plot(level >= 14 and max_levels >= 14 and not na(t14) ? t14 : na, "DCA-14", color=c(14), style=plot.style_linebr, linewidth=1)
+plot(level >= 15 and max_levels >= 15 and not na(t15) ? t15 : na, "DCA-15", color=c(15), style=plot.style_linebr, linewidth=1)
+plot(level >= 16 and max_levels >= 16 and not na(t16) ? t16 : na, "DCA-16", color=c(16), style=plot.style_linebr, linewidth=1)
+plot(level >= 17 and max_levels >= 17 and not na(t17) ? t17 : na, "DCA-17", color=c(17), style=plot.style_linebr, linewidth=1)
+plot(level >= 18 and max_levels >= 18 and not na(t18) ? t18 : na, "DCA-18", color=c(18), style=plot.style_linebr, linewidth=1)
+plot(level >= 19 and max_levels >= 19 and not na(t19) ? t19 : na, "DCA-19", color=c(19), style=plot.style_linebr, linewidth=1)
+plot(level >= 20 and max_levels >= 20 and not na(t20) ? t20 : na, "DCA-20", color=c(20), style=plot.style_linebr, linewidth=1)
+plot(level >= 21 and max_levels >= 21 and not na(t21) ? t21 : na, "DCA-21", color=c(21), style=plot.style_linebr, linewidth=1)
+plot(level >= 22 and max_levels >= 22 and not na(t22) ? t22 : na, "DCA-22", color=c(22), style=plot.style_linebr, linewidth=1)
+plot(level >= 23 and max_levels >= 23 and not na(t23) ? t23 : na, "DCA-23", color=c(23), style=plot.style_linebr, linewidth=1)
+plot(level >= 24 and max_levels >= 24 and not na(t24) ? t24 : na, "DCA-24", color=c(24), style=plot.style_linebr, linewidth=1)
+plot(level >= 25 and max_levels >= 25 and not na(t25) ? t25 : na, "DCA-25", color=c(25), style=plot.style_linebr, linewidth=1)
+plot(level >= 26 and max_levels >= 26 and not na(t26) ? t26 : na, "DCA-26", color=c(26), style=plot.style_linebr, linewidth=1)
+plot(level >= 27 and max_levels >= 27 and not na(t27) ? t27 : na, "DCA-27", color=c(27), style=plot.style_linebr, linewidth=1)
+plot(level >= 28 and max_levels >= 28 and not na(t28) ? t28 : na, "DCA-28", color=c(28), style=plot.style_linebr, linewidth=1)
+plot(level >= 29 and max_levels >= 29 and not na(t29) ? t29 : na, "DCA-29", color=c(29), style=plot.style_linebr, linewidth=1)
+plot(level >= 30 and max_levels >= 30 and not na(t30) ? t30 : na, "DCA-30", color=c(30), style=plot.style_linebr, linewidth=1)
+plot(level >= 31 and max_levels >= 31 and not na(t31) ? t31 : na, "DCA-31", color=c(31), style=plot.style_linebr, linewidth=1)
+plot(level >= 32 and max_levels >= 32 and not na(t32) ? t32 : na, "DCA-32", color=c(32), style=plot.style_linebr, linewidth=1)
+plot(level >= 33 and max_levels >= 33 and not na(t33) ? t33 : na, "DCA-33", color=c(33), style=plot.style_linebr, linewidth=1)
+plot(level >= 34 and max_levels >= 34 and not na(t34) ? t34 : na, "DCA-34", color=c(34), style=plot.style_linebr, linewidth=1)
+plot(level >= 35 and max_levels >= 35 and not na(t35) ? t35 : na, "DCA-35", color=c(35), style=plot.style_linebr, linewidth=1)
+plot(level >= 36 and max_levels >= 36 and not na(t36) ? t36 : na, "DCA-36", color=c(36), style=plot.style_linebr, linewidth=1)
+plot(level >= 37 and max_levels >= 37 and not na(t37) ? t37 : na, "DCA-37", color=c(37), style=plot.style_linebr, linewidth=1)
+plot(level >= 38 and max_levels >= 38 and not na(t38) ? t38 : na, "DCA-38", color=c(38), style=plot.style_linebr, linewidth=1)
+plot(level >= 39 and max_levels >= 39 and not na(t39) ? t39 : na, "DCA-39", color=c(39), style=plot.style_linebr, linewidth=1)
+plot(level >= 40 and max_levels >= 40 and not na(t40) ? t40 : na, "DCA-40", color=c(40), style=plot.style_linebr, linewidth=1)
+plot(level >= 41 and max_levels >= 41 and not na(t41) ? t41 : na, "DCA-41", color=c(41), style=plot.style_linebr, linewidth=1)
+plot(level >= 42 and max_levels >= 42 and not na(t42) ? t42 : na, "DCA-42", color=c(42), style=plot.style_linebr, linewidth=1)
+plot(level >= 43 and max_levels >= 43 and not na(t43) ? t43 : na, "DCA-43", color=c(43), style=plot.style_linebr, linewidth=1)
+plot(level >= 44 and max_levels >= 44 and not na(t44) ? t44 : na, "DCA-44", color=c(44), style=plot.style_linebr, linewidth=1)
+plot(level >= 45 and max_levels >= 45 and not na(t45) ? t45 : na, "DCA-45", color=c(45), style=plot.style_linebr, linewidth=1)
+plot(level >= 46 and max_levels >= 46 and not na(t46) ? t46 : na, "DCA-46", color=c(46), style=plot.style_linebr, linewidth=1)
+plot(level >= 47 and max_levels >= 47 and not na(t47) ? t47 : na, "DCA-47", color=c(47), style=plot.style_linebr, linewidth=1)
+plot(level >= 48 and max_levels >= 48 and not na(t48) ? t48 : na, "DCA-48", color=c(48), style=plot.style_linebr, linewidth=1)
+plot(level >= 49 and max_levels >= 49 and not na(t49) ? t49 : na, "DCA-49", color=c(49), style=plot.style_linebr, linewidth=1)
+plot(level >= 50 and max_levels >= 50 and not na(t50) ? t50 : na, "DCA-50", color=c(50), style=plot.style_linebr, linewidth=1)
+
+// ── Línea de costo promedio (amarilla) ───────────────────────────────────────
+plot(strategy.position_size > 0 ? avg_cost : na,
+     "Avg Cost", color=color.yellow, style=plot.style_linebr, linewidth=2)
+
+// ── Fondo teal en zonas laterales / naranja en modo rescate ──────────────────
+bgcolor(is_lateral ? color.new(color.teal, 90) : na, title="Lateral Zone BG")
+bgcolor(rescue_mode ? color.new(color.orange, 90) : na, title="Rescue Mode BG")
+
+// ── Flechas de entrada y salida ──────────────────────────────────────────────
+plotshape(ini_cond,    title="▲ Entry", location=location.belowbar,
+          style=shape.triangleup,   color=color.lime, size=size.normal)
+plotshape(tr_cond,     title="🚀 Trend Re-Entry", location=location.belowbar,
+          style=shape.triangleup,   color=color.aqua, size=size.small)
+plotshape(exit_signal, title="▼ Exit",  location=location.abovebar,
+          style=shape.triangledown, color=color.red,  size=size.normal)
+plotshape(be_exit and not exit_signal, title="⚖ BE Exit", location=location.abovebar,
+          style=shape.xcross, color=color.orange, size=size.normal)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  📊  DASHBOARD — TABLERO DE CONTROL COMPLETO (con sección Rescate/Rebote)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    var table dash = table.new(position.top_right, 4, 17, bgcolor=#0d1117, border_width=1, border_color=#30363d)
+
+    pos = strategy.position_size
+    avg = strategy.position_avg_price
+
+    open_pnl_pct = pos > 0 ? (close / avg - 1.0) * 100.0 : 0.0
+    open_pnl_usd = strategy.openprofit
+    closed_pnl   = strategy.netprofit
+    total_pnl    = closed_pnl + open_pnl_usd
+
+    open_col  = open_pnl_pct >= 0.0 ? color.new(#00e676, 0) : color.new(#ff1744, 0)
+    total_col = total_pnl    >= 0.0 ? color.new(#00e676, 0) : color.new(#ff1744, 0)
+    st_bull   = st_dir < 0
+
+    // ── ROW 0: ENCABEZADO ─────────────────────────────────────────────────────
+    table.cell(dash, 0, 0, "  CASCADE DCA 🌊",
+               text_color=color.white, text_size=size.normal,
+               bgcolor=#1565c0, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "", bgcolor=#1565c0)
+    table.cell(dash, 2, 0, "", bgcolor=#1565c0)
+    table.cell(dash, 3, 0, pos > 0 ? "● ACTIVA" : "○ EN ESPERA",
+               text_color=pos > 0 ? color.new(#00e676, 0) : color.new(#90a4ae, 0),
+               text_size=size.small, bgcolor=#1565c0)
+
+    // ── ROW 1: SEP POSICIÓN ───────────────────────────────────────────────────
+    table.cell(dash, 0, 1, "◈ POSICIÓN",
+               text_color=color.new(#80cbc4, 0), text_size=size.small,
+               bgcolor=#0a1628, text_halign=text.align_left)
+    table.cell(dash, 1, 1, "", bgcolor=#0a1628)
+    table.cell(dash, 2, 1, "", bgcolor=#0a1628)
+    table.cell(dash, 3, 1, "", bgcolor=#0a1628)
+
+    // ── ROW 2: NIVEL / INVERTIDO ──────────────────────────────────────────────
+    table.cell(dash, 0, 2, "⚡ Nivel DCA",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 2,
+               level == 0 ? "—" : str.tostring(level - 1) + " / " + str.tostring(max_levels),
+               text_color=color.new(#e0e0e0, 0), text_size=size.normal)
+    table.cell(dash, 2, 2, "💵 Invertido",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 2,
+               pos > 0 ? "$ " + str.tostring(math.round(total_inv, 2)) : "—",
+               text_color=color.new(#80deea, 0), text_size=size.normal)
+
+    // ── ROW 3: AVG COST / P&L % (abierto) ────────────────────────────────────
+    table.cell(dash, 0, 3, "📍 Avg Cost",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 3,
+               pos > 0 ? str.tostring(math.round(avg, 6)) : "—",
+               text_color=color.new(#ffeb3b, 0), text_size=size.normal)
+    table.cell(dash, 2, 3, "📈 P&L % abierto",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 3,
+               pos > 0 ? str.tostring(math.round(open_pnl_pct, 2)) + " %" : "—",
+               text_color=open_col, text_size=size.normal)
+
+    // ── ROW 4: ENTRY / P&L USD (abierto) ─────────────────────────────────────
+    table.cell(dash, 0, 4, "🎯 Entry price",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 4,
+               not na(ep1) ? str.tostring(math.round(ep1, 6)) : "—",
+               text_color=color.new(#ce93d8, 0), text_size=size.normal)
+    table.cell(dash, 2, 4, "💰 P&L USD abierto",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 4,
+               pos > 0 ? "$ " + str.tostring(math.round(open_pnl_usd, 4)) : "—",
+               text_color=open_col, text_size=size.normal)
+
+    // ── ROW 5: PNL CERRADO + TOTAL (= backtest) ───────────────────────────────
+    table.cell(dash, 0, 5, "✔ PnL cerrado",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 5,
+               "$ " + str.tostring(math.round(closed_pnl, 2)),
+               text_color=closed_pnl >= 0 ? color.new(#69f0ae, 0) : color.new(#ff5252, 0),
+               text_size=size.normal)
+    table.cell(dash, 2, 5, "🏆 PnL TOTAL",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 5,
+               "$ " + str.tostring(math.round(total_pnl, 2)),
+               text_color=total_col, text_size=size.normal)
+
+    // ── ROW 6: SEP SEÑALES ────────────────────────────────────────────────────
+    table.cell(dash, 0, 6, "◈ SEÑALES",
+               text_color=color.new(#80cbc4, 0), text_size=size.small,
+               bgcolor=#0a1628, text_halign=text.align_left)
+    table.cell(dash, 1, 6, "", bgcolor=#0a1628)
+    table.cell(dash, 2, 6, "", bgcolor=#0a1628)
+    table.cell(dash, 3, 6, "", bgcolor=#0a1628)
+
+    // ── ROW 7: VWM / IMPULSO ──────────────────────────────────────────────────
+    table.cell(dash, 0, 7, "〰 VWM Score",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 7, str.tostring(math.round(vwm, 3)),
+               text_color=vwm > 0 ? color.new(#00e676, 0) : color.new(#ff5252, 0), text_size=size.normal)
+    table.cell(dash, 2, 7, "💨 Impulso",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 7,
+               impulse_dead ? "AGOTADO 🔴" : "ACTIVO  ⚡",
+               text_color=impulse_dead ? color.new(#ff5252, 0) : color.new(#69f0ae, 0), text_size=size.small)
+
+    // ── ROW 8: LATERAL / SUPERTREND ───────────────────────────────────────────
+    table.cell(dash, 0, 8, "📐 Lateral",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 8,
+               is_lateral ? "SÍ  ✅" : "NO  ❌",
+               text_color=is_lateral ? color.new(#00e5ff, 0) : color.new(#ffa726, 0), text_size=size.small)
+    table.cell(dash, 2, 8, "🔰 Supertrend",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 8,
+               st_bull ? "ALCISTA 🟢" : "BAJISTA 🔴",
+               text_color=st_bull ? color.new(#69f0ae, 0) : color.new(#ff5252, 0), text_size=size.small)
+
+    // ── ROW 9: BBW / ADX ──────────────────────────────────────────────────────
+    table.cell(dash, 0, 9, "📊 BBW",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 9,
+               str.tostring(math.round(bbw, 2)) + "% " + (bbw < bbw_max ? "✅" : "❌"),
+               text_color=bbw < bbw_max ? color.new(#00e5ff, 0) : color.new(#78909c, 0), text_size=size.small)
+    table.cell(dash, 2, 9, "📊 ADX",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 9,
+               str.tostring(math.round(adx_val, 1)) + " " + (adx_val < adx_max ? "✅" : "❌"),
+               text_color=adx_val < adx_max ? color.new(#00e5ff, 0) : color.new(#78909c, 0), text_size=size.small)
+
+    // ── ROW 10: MODO RESCATE / BREAKEVEN ──────────────────────────────────────
+    table.cell(dash, 0, 10, "⚖️ Modo Rescate",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 10,
+               rescue_mode ? "ACTIVO ⚠️" : "—",
+               text_color=rescue_mode ? color.new(#ffa726, 0) : color.new(#e0e0e0, 0), text_size=size.small)
+    table.cell(dash, 2, 10, "🛡️ Breakeven",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 10,
+               be_armed ? "ARMADO 🛡️" : "—",
+               text_color=be_armed ? color.new(#00e5ff, 0) : color.new(#e0e0e0, 0), text_size=size.small)
+
+    // ── ROW 11: ESTADO REBOTE DCA / RE-ENTRADA TENDENCIA ──────────────────────
+    table.cell(dash, 0, 11, "🎯 DCA Rebote",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 11,
+               not use_rebound ? "OFF" : dca_armed ? "ESPERA REBOTE ⏳" : "VIGILANDO 👁",
+               text_color=dca_armed ? color.new(#ffeb3b, 0) : color.new(#e0e0e0, 0), text_size=size.small)
+    table.cell(dash, 2, 11, "🚀 Re-Entrada",
+               text_color=color.new(#b0bec5, 0), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 3, 11,
+               not use_trend_reentry ? "OFF" : await_reentry ? (trend_bullish ? "LISTA 🚀" : "ESPERA TENDENCIA ⏳") : "—",
+               text_color=await_reentry ? (trend_bullish ? color.new(#00e5ff, 0) : color.new(#ffeb3b, 0)) : color.new(#e0e0e0, 0),
+               text_size=size.small)
+
+    // ── ROW 11.5 (usa ROW 11 espacio extra para fondo ciclo) — se omite, ver abajo
+    // (Mantenemos la estructura de 17 filas; el fondo de ciclo se muestra implícito)
+
+    // ── ROW 12: SEP NIVELES DCA ───────────────────────────────────────────────
+    table.cell(dash, 0, 12, "◈ CICLO DCA",
+               text_color=color.new(#80cbc4, 0), text_size=size.small,
+               bgcolor=#0a1628, text_halign=text.align_left)
+    table.cell(dash, 1, 12, "", bgcolor=#0a1628)
+    table.cell(dash, 2, 12, "", bgcolor=#0a1628)
+    table.cell(dash, 3, 12,
+               not na(cycle_low) ? "fondo " + str.tostring(math.round(cycle_low, 6)) + " (" + str.tostring(bars_since_low) + "v)" : "",
+               text_color=color.new(#80deea, 0), text_size=size.small, bgcolor=#0a1628)
+
+    // ── ROW 13: HEADERS TABLA ─────────────────────────────────────────────────
+    table.cell(dash, 0, 13, "  #",      text_color=color.new(#90a4ae, 0), text_size=size.small)
+    table.cell(dash, 1, 13, "Drop %",   text_color=color.new(#90a4ae, 0), text_size=size.small)
+    table.cell(dash, 2, 13, "Trigger",  text_color=color.new(#90a4ae, 0), text_size=size.small)
+    table.cell(dash, 3, 13, "USD (cap)",text_color=color.new(#90a4ae, 0), text_size=size.small)
+
+    // ── ROWS 14-16: VENTANA MÓVIL — ANTERIOR / CORRIENDO / PRÓXIMO ────────────
+    // "Corriendo" = el DCA que la estrategia está esperando ahora mismo (= level).
+    // La ventana se desplaza sola a medida que se van llenando niveles.
+    // Antes de abrir posición (level 0) se previsualizan DCA-1/2/3.
+    cur_lvl = level == 0 ? 1 : level
+
+    for slot = 0 to 2
+        row      = 14 + slot
+        i        = cur_lvl - 1 + slot          // slot 0=anterior, 1=actual, 2=próximo
+        is_valid = i >= 1 and i <= max_levels   // dentro del rango real de niveles
+
+        is_run    = slot == 1                   // fila central = corriendo
+        is_prev   = slot == 0                   // fila superior = anterior
+        is_filled = pos > 0 and i <= level - 1  // ya comprado en esta operación
+
+        d          = is_valid ? get_drop(i) : 0.0
+        usd_i      = is_valid ? usd(i) : 0.0
+        trig_price = not na(ep1) and is_valid ? ep1 * (1.0 - d / 100.0) : 0.0
+
+        // Etiqueta de rol a la derecha del nombre del nivel
+        role_txt = is_prev ? "  ◂ Anterior" : is_run ? "  ◂ CORRIENDO" : "  ◂ Próximo"
+
+        // Ícono de estado del nivel
+        status_icon = is_filled ? "✓ " : is_run ? "► " : "  "
+
+        row_label = is_valid ? status_icon + "DCA-" + str.tostring(i) + role_txt : "  —"
+
+        // Color: la fila que corre se resalta en amarillo; lo llenado en verde;
+        // el próximo en gris claro; el anterior tenue.
+        label_col = not is_valid ? color.new(#455a64, 0) : is_run       ? color.new(#ffeb3b, 0) :  is_filled    ? color.new(#69f0ae, 0) :    is_prev      ? color.new(#90a4ae, 0) : color.new(#e0e0e0, 0)
+
+        // Fondo sutil para destacar la fila que está corriendo
+        row_bg = is_run ? #1f2a1f : #0d1117
+
+        table.cell(dash, 0, row, row_label,
+                   text_color=label_col, text_size=size.small, text_halign=text.align_left, bgcolor=row_bg)
+        table.cell(dash, 1, row,
+                   is_valid ? str.tostring(math.round(d, 1)) + "%" : "—",
+                   text_color=is_valid ? (is_run ? color.new(#ffeb3b, 0) : color.new(#ef9a9a, 0)) : color.new(#455a64, 0),
+                   text_size=size.small, bgcolor=row_bg)
+        table.cell(dash, 2, row,
+                   is_valid and not na(ep1) ? str.tostring(math.round(trig_price, 6)) : "—",
+                   text_color=is_valid ? (is_run ? color.new(#fff9c4, 0) : color.new(#fff9c4, 30)) : color.new(#455a64, 0),
+                   text_size=size.small, bgcolor=row_bg)
+        table.cell(dash, 3, row,
+                   is_valid ? "$ " + str.tostring(math.round(usd_i, 1)) : "—",
+                   text_color=is_valid ? color.new(#80deea, 0) : color.new(#455a64, 0),
+                   text_size=size.small, bgcolor=row_bg)

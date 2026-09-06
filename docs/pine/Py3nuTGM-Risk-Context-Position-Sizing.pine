@@ -1,0 +1,242 @@
+//@version=6
+indicator("Risk Context + Position Sizing", shorttitle="Risk & Size", overlay=false)
+
+// ===== USER INPUTS ===== //
+riskPct = input.float(1.0, "Risk % per Trade", minval=0.1, maxval=5.0, step=0.1, group="Position Sizing")
+baseSize = input.float(10000, "Base Position Size", minval=1, group="Position Sizing")
+atrLength = input.int(20, "ATR Length", minval=5, maxval=50, group="Risk Calculation")
+lookbackPeriod = input.int(100, "Volatility Percentile Lookback", minval=50, maxval=500, group="Risk Calculation")
+showTable = input.bool(true, "Show Position Sizing Table", group="Display")
+tablePosition = input.string("Middle Right", "Table Position", options=["Top Left", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Right"], group="Display")
+
+// ===== VOLATILITY ANALYSIS ===== //
+atr = ta.atr(atrLength)
+volPercentile = ta.percentrank(atr, lookbackPeriod)
+
+// Dynamic volatility thresholds
+atrMedian = ta.median(atr, 200)
+atrStdDev = ta.stdev(atr, 200)
+highVolThreshold = atrMedian + atrStdDev
+lowVolThreshold = math.max(atrMedian - atrStdDev, 0)
+
+// ===== RISK ZONES (DISCRETE) ===== //
+getRiskZone() =>
+    if volPercentile > 90
+        "EXTREME"
+    else if volPercentile > 75
+        "HIGH"
+    else if volPercentile < 25
+        "LOW"
+    else
+        "NORMAL"
+
+riskZone = getRiskZone()
+
+// ===== POSITION SIZING - CONTINUOUS FUNCTIONS ===== //
+// Legacy discrete approach (kept for comparison)
+getPositionMultiplierDiscrete() =>
+    switch
+        volPercentile > 90 => 0.4    // Extreme volatility - significantly reduce size
+        volPercentile > 75 => 0.7    // High volatility - reduce size
+        volPercentile < 15 => 1.4    // Very low volatility - increase size
+        volPercentile < 25 => 1.2    // Low volatility - slightly increase size
+        => 1.0                       // Normal volatility
+
+// Continuous function - Exponential decay approach
+getPositionMultiplierExponential() =>
+    // Exponential decay from volatility percentile
+    // Formula: multiplier = baseMax * exp(-decay * (volPercentile - centerPoint)^2)
+    centerPoint = 30.0  // Sweet spot percentile (low-normal volatility)
+    baseMax = 1.25      // Maximum multiplier at center point
+    decay = 0.0008      // Controls how fast multiplier decreases
+    
+    multiplier = baseMax * math.exp(-decay * math.pow(volPercentile - centerPoint, 2))
+    
+    // Apply minimum floor
+    math.max(multiplier, 0.65)
+
+// Continuous function - Inverse polynomial approach  
+getPositionMultiplierPolynomial() =>
+    // Inverse relationship with volatility percentile
+    // More intuitive: higher vol = lower multiplier, lower vol = higher multiplier
+    
+    // Normalize percentile to 0-1 range
+    normalizedVol = volPercentile / 100.0
+    
+    // Polynomial curve: creates smooth S-curve
+    // Formula: multiplier = maxMult - (maxMult - minMult) * vol^power
+    maxMultiplier = 1.30
+    minMultiplier = 0.70  
+    power = 1.8  // Controls curve steepness (higher = more aggressive reduction)
+    
+    multiplier = maxMultiplier - (maxMultiplier - minMultiplier) * math.pow(normalizedVol, power)
+    
+    // Ensure bounds
+    math.max(math.min(multiplier, maxMultiplier), minMultiplier)
+
+// Continuous function - Logistic (Sigmoid) approach
+getPositionMultiplierLogistic() =>
+    // Logistic function for smooth transitions
+    // Formula: multiplier = minMult + (maxMult - minMult) / (1 + exp(steepness * (volPercentile - midpoint)))
+    
+    maxMultiplier = 1.25
+    minMultiplier = 0.75
+    midpoint = 60.0      // Volatility percentile where multiplier = 1.0
+    steepness = 0.08     // Controls transition smoothness (lower = smoother)
+    
+    ranges = maxMultiplier - minMultiplier
+    multiplier = minMultiplier + ranges / (1 + math.exp(steepness * (volPercentile - midpoint)))
+    
+    multiplier
+
+// Choose multiplier based on user preference
+functionType = input.string("Logistic", "Position Sizing Function", 
+     options=["Discrete", "Exponential", "Polynomial", "Logistic"], group="Position Sizing")
+
+positionMultiplier = switch functionType
+    "Discrete" => getPositionMultiplierDiscrete()
+    "Exponential" => getPositionMultiplierExponential() 
+    "Polynomial" => getPositionMultiplierPolynomial()
+    "Logistic" => getPositionMultiplierLogistic()
+    => getPositionMultiplierLogistic()  // Default
+
+// ===== CLEARER RISK CALCULATIONS ===== //
+scaledSize = baseSize * positionMultiplier
+
+// Risk calculations with proper labels
+dollarRisk = (baseSize * riskPct) / 100           // Actual dollars at risk
+percentRisk = riskPct                             // Risk percentage
+
+// Legacy calculation for backward compatibility
+riskAmount = scaledSize * riskPct  // This is the old calculation (kept for alerts)
+
+// ===== TABLE DISPLAY ===== //
+getTablePosition() =>
+    switch tablePosition
+        "Top Left" => position.top_left
+        "Top Right" => position.top_right
+        "Middle Left" => position.middle_left
+        "Middle Right" => position.middle_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.middle_right
+
+if barstate.islast and showTable
+    var table sizingTable = table.new(getTablePosition(), 2, 8, 
+         bgcolor=color.new(#1e293b, 85), 
+         border_width=2, 
+         border_color=color.new(#475569, 0),
+         frame_width=1,
+         frame_color=color.new(#64748b, 0))
+    
+    // Header
+    table.cell(sizingTable, 0, 0, "Risk & Position", 
+         text_color=color.new(#f1f5f9, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#505050, 0))
+    table.cell(sizingTable, 1, 0, "Value", 
+         text_color=color.new(#f1f5f9, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#505050, 0))
+    
+    // Position Size
+    table.cell(sizingTable, 0, 1, "Position Size", 
+         text_color=color.new(#e2e8f0, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    table.cell(sizingTable, 1, 1, str.tostring(math.round(scaledSize, 1)), 
+         text_color=color.new(#60a5fa, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    
+    // Size Multiplier
+    table.cell(sizingTable, 0, 2, "Size Multiplier", 
+         text_color=color.new(#e2e8f0, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    multiplierColor = positionMultiplier > 1 ? color.new(#10b981, 0) : 
+                     positionMultiplier < 1 ? color.new(#f59e0b, 0) : 
+                     color.new(#e2e8f0, 0)
+    table.cell(sizingTable, 1, 2, str.tostring(positionMultiplier, "#.##") + "x", 
+         text_color=multiplierColor, 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    
+    // Volatility Percentile
+    table.cell(sizingTable, 0, 3, "Volatility %ile", 
+         text_color=color.new(#e2e8f0, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    volColor = volPercentile > 75 ? color.new(#ef4444, 0) : 
+               volPercentile < 25 ? color.new(#10b981, 0) : 
+               color.new(#e2e8f0, 0)
+    table.cell(sizingTable, 1, 3, str.tostring(math.round(volPercentile, 1)) + "%", 
+         text_color=volColor, 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    
+    // Risk Zone
+    table.cell(sizingTable, 0, 4, "Risk Zone", 
+         text_color=color.new(#e2e8f0, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    zoneColor = str.contains(riskZone, "HIGH") or riskZone == "EXTREME" ? color.new(#ef4444, 0) : riskZone == "LOW" ? color.new(#10b981, 0) : color.new(#e2e8f0, 0)
+    table.cell(sizingTable, 1, 4, riskZone, 
+         text_color=zoneColor, 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    
+    // Dollar Risk (NEW - clearer calculation)
+    table.cell(sizingTable, 0, 5, "Dollar Risk", 
+         text_color=color.new(#e2e8f0, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    table.cell(sizingTable, 1, 5, str.tostring(math.round(dollarRisk, 2)), 
+         text_color=color.new(#f59e0b, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    
+    
+    // Function Type (NEW)
+    table.cell(sizingTable, 0, 7, "Function", 
+         text_color=color.new(#e2e8f0, 0), 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+    functionColor = functionType == "Discrete" ? color.new(#6b7280, 0) : color.new(#10b981, 0)
+    table.cell(sizingTable, 1, 7, functionType, 
+         text_color=functionColor, 
+         text_size=size.normal,
+         bgcolor=color.new(#2d3748, 0))
+
+// ===== CHART VISUALS ===== //
+// Volatility percentile plot
+plot(volPercentile, "Volatility Percentile", color=color.white)
+
+// Position multiplier plot for comparison (scaled to 0-100 range)
+multiplierScaled = (positionMultiplier - 0.2) / (1.5 - 0.2) * 100  // Scale 0.2-1.5 to 0-100
+plot(multiplierScaled, "Position Multiplier (Scaled)", color=color.new(color.blue, 30), display = display.none)
+
+// Reference lines
+hline(90, "Extreme Vol", color=color.new(#dc2626, 50), linestyle=hline.style_dashed)
+hline(75, "High Vol", color=color.new(#ef4444, 0), linestyle=hline.style_solid)
+hline(25, "Low Vol", color=color.new(#10b981, 0), linestyle=hline.style_solid)
+hline(10, "Very Low Vol", color=color.new(#059669, 50), linestyle=hline.style_dashed)
+
+// Background colors for risk zones
+extremeVolBg = volPercentile > 90 ? color.new(#dc2626, 85) : na
+highVolBg = volPercentile > 75 and volPercentile <= 85 ? color.new(#ef4444, 90) : na
+lowVolBg = volPercentile < 25 ? color.new(#10b981, 85) : na
+
+bgcolor(extremeVolBg, title="Extreme Volatility")
+bgcolor(highVolBg, title="High Volatility") 
+bgcolor(lowVolBg, title="Low Volatility")
+
+// ===== ALERTS ===== //
+// Volatility alerts (using legacy riskAmount for backward compatibility)
+alertcondition(ta.crossover(volPercentile, 90), "Extreme Volatility Alert", "Volatility percentile crossed above 90% - Consider reducing position sizes significantly")
+alertcondition(ta.crossover(volPercentile, 75), "High Volatility Alert", "Volatility percentile crossed above 75% - Consider reducing position sizes")
+alertcondition(ta.crossunder(volPercentile, 25), "Low Volatility Alert", "Volatility percentile dropped below 25% - Consider increasing position sizes")
+alertcondition(ta.crossunder(volPercentile, 15), "Very Low Volatility Alert", "Volatility percentile dropped below 15% - Low risk environment detected")
+
+// New function change alerts
+alertcondition(math.abs(ta.change(positionMultiplier)) > 0.05, "Position Size Change", "Position multiplier changed significantly due to volatility shift")

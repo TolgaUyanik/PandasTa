@@ -1,0 +1,276 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © cybermediaboy
+//@version=6
+
+// @description TPOLib — Classical Time Price Opportunity (TPO) primitives.
+// Provides tick/row conversion, POC/Value Area calculation, TPO letter encoding,
+// Initial Balance tracking, and profile shape classification.
+//
+// Note: Function bodies for f_price_to_tick, f_tick_to_row, f_row_to_price,
+// f_calc_row_ticks, f_poc_from_vals, f_value_area, and f_find_key_sorted are
+// copied from TPOSmartMoneyLib/3 (immutable on TradingView). No extraction or
+// migration - legacy consumers unaffected.
+//
+// Architecture: L0 (no library dependencies, uses ta.* and math.* primitives only)
+
+library("TPOLib", overlay=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// TYPES
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @type TPO bracket (single time period at a price level)
+// @field letter Letter identifier (A-Z for 30min brackets in RTH session)
+// @field row Row index (price level)
+// @field volume Volume accumulated in this bracket
+export type TPOBracket
+    string letter
+    int row
+    float volume
+
+// @type Value Area calculation result
+// @field poc Point of Control (row with highest volume)
+// @field val Value Area Low (row)
+// @field vah Value Area High (row)
+// @field poc_volume Volume at POC
+// @field va_volume Total volume in Value Area
+export type ValueArea
+    int poc
+    int val
+    int vah
+    float poc_volume
+    float va_volume
+
+// @type Initial Balance (first hour of RTH session)
+// @field ib_high Highest price in IB period
+// @field ib_low Lowest price in IB period
+// @field ib_range IB range (high - low)
+// @field extended_up IB extended upward
+// @field extended_down IB extended downward
+export type InitialBalance
+    float ib_high
+    float ib_low
+    float ib_range
+    bool extended_up
+    bool extended_down
+
+// @type Profile shape classification
+// @field shape "normal", "b_shape", "p_shape", "d_shape", "neutral"
+// @field poc_position POC position relative to range (0.0=low, 1.0=high)
+// @field va_width Value Area width as % of total range
+export type ProfileShape
+    string shape
+    float poc_position
+    float va_width
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// TICK/ROW CONVERSION
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Convert price to tick
+// @param p Price value
+// @returns Tick value
+export f_price_to_tick(float p) =>
+    int(math.round(p / syminfo.mintick))
+
+// @function Convert tick to row
+// @param t Tick value
+// @param row_ticks_in Number of ticks per row
+// @returns Row index
+export f_tick_to_row(int t, int row_ticks_in) =>
+    int(math.floor(t / row_ticks_in))
+
+// @function Convert row to price (midpoint)
+// @param row Row index
+// @param row_ticks_in Number of ticks per row
+// @returns Price at row midpoint
+export f_row_to_price(int row, int row_ticks_in) =>
+    (row + 0.5) * row_ticks_in * syminfo.mintick
+
+// @function Calculate dynamic row size based on normalized ATR
+// @param natr_ref Daily normalized ATR reference value
+// @param row_gran_mult Row granularity multiplier
+// @returns Number of ticks per row
+export f_calc_row_ticks(float natr_ref, float row_gran_mult) =>
+    float _natr = nz(natr_ref, 1.0)
+    float _trp = math.max(0.001, math.min((_natr / 100.0) * row_gran_mult, 1.0))
+    float _rh = close * (_trp / 100.0)
+    int _rt = int(math.round(_rh / syminfo.mintick))
+    math.max(1, math.min(_rt, 10000))
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// POC AND VALUE AREA
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Calculate Point of Control from volume distribution
+// @param keys Sorted array of row keys
+// @param vals Array of volume values
+// @returns POC row key
+export f_poc_from_vals(int[] keys, float[] vals) =>
+    int poc_key = na
+    float best = 0.0
+    int n = math.min(array.size(keys), array.size(vals))
+    for i = 0 to n - 1
+        float v = array.get(vals, i)
+        if v > best
+            best := v
+            poc_key := array.get(keys, i)
+    poc_key
+
+// @function Calculate Value Area from volume distribution
+// @param keys Sorted array of row keys
+// @param vals Array of volume values
+// @param poc_key POC row key
+// @param va_pct Value Area percentage (typically 0.70)
+// @returns Tuple of [VAL_key, VAH_key]
+export f_value_area(int[] keys, float[] vals, int poc_key, float va_pct) =>
+    int n = math.min(array.size(keys), array.size(vals))
+    float total_vol = 0.0
+    for i = 0 to n - 1
+        total_vol += array.get(vals, i)
+    
+    float target_vol = total_vol * va_pct
+    float acc_vol = 0.0
+    int poc_idx = -1
+    
+    for i = 0 to n - 1
+        if array.get(keys, i) == poc_key
+            poc_idx := i
+            acc_vol += array.get(vals, i)
+            break
+    
+    if poc_idx < 0
+        [na, na]
+    else
+        int lo_idx = poc_idx
+        int hi_idx = poc_idx
+        
+        while acc_vol < target_vol and (lo_idx > 0 or hi_idx < n - 1)
+            float vol_below = lo_idx > 0 ? array.get(vals, lo_idx - 1) : 0.0
+            float vol_above = hi_idx < n - 1 ? array.get(vals, hi_idx + 1) : 0.0
+            
+            if vol_below >= vol_above and lo_idx > 0
+                lo_idx -= 1
+                acc_vol += vol_below
+            else if hi_idx < n - 1
+                hi_idx += 1
+                acc_vol += vol_above
+            else if lo_idx > 0
+                lo_idx -= 1
+                acc_vol += vol_below
+            else
+                break
+        
+        int val_key = array.get(keys, lo_idx)
+        int vah_key = array.get(keys, hi_idx)
+        [val_key, vah_key]
+
+// @function Find key in sorted array using binary search
+// @param keys Sorted array of keys
+// @param target Target key to find
+// @returns Index of key, or -1 if not found
+export f_find_key_sorted(int[] keys, int target) =>
+    int n = array.size(keys)
+    int out = -1
+    if n > 0
+        int lo = 0
+        int hi = n - 1
+        while lo <= hi
+            int mid = int((lo + hi) / 2)
+            int k = array.get(keys, mid)
+            if k == target
+                out := mid
+                break
+            else if k < target
+                lo := mid + 1
+            else
+                hi := mid - 1
+    out
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// TPO LETTER ENCODING
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Get TPO letter for bracket index (A-Z, then AA-AZ, etc.)
+// @param bracket_idx Bracket index (0-based)
+// @returns Letter string
+export f_tpo_letter_idx(int bracket_idx) =>
+    int idx = math.max(0, bracket_idx)
+    int first = int(idx / 26)
+    int second = idx % 26
+    string letter = str.substring("ABCDEFGHIJKLMNOPQRSTUVWXYZ", second, second + 1)
+    first > 0 ? str.substring("ABCDEFGHIJKLMNOPQRSTUVWXYZ", first - 1, first) + letter : letter
+
+// @function Calculate Initial Balance from first N brackets
+// @param brackets Array of TPOBracket (sorted by time)
+// @param ib_bracket_count Number of brackets in IB period (typically 2 for 1hr)
+// @param row_ticks Number of ticks per row
+// @returns InitialBalance
+export f_initial_balance_from_brackets(array<TPOBracket> brackets, int ib_bracket_count, int row_ticks) =>
+    int n = math.min(array.size(brackets), ib_bracket_count)
+    if n == 0
+        InitialBalance.new(na, na, na, false, false)
+    else
+        int min_row = na
+        int max_row = na
+        for i = 0 to n - 1
+            TPOBracket b = array.get(brackets, i)
+            min_row := na(min_row) ? b.row : math.min(min_row, b.row)
+            max_row := na(max_row) ? b.row : math.max(max_row, b.row)
+        
+        float ib_high = f_row_to_price(max_row, row_ticks)
+        float ib_low = f_row_to_price(min_row, row_ticks)
+        float ib_range = ib_high - ib_low
+        InitialBalance.new(ib_high, ib_low, ib_range, false, false)
+
+// @function Detect TPO singles (rows with only one TPO print)
+// @param brackets Array of TPOBracket
+// @returns Array of row indices that are singles
+export f_detect_tpo_singles(array<TPOBracket> brackets) =>
+    array<int> row_counts = array.new<int>()
+    array<int> row_keys = array.new<int>()
+    
+    int n = array.size(brackets)
+    for i = 0 to n - 1
+        TPOBracket b = array.get(brackets, i)
+        int idx = f_find_key_sorted(row_keys, b.row)
+        if idx >= 0
+            array.set(row_counts, idx, array.get(row_counts, idx) + 1)
+        else
+            array.push(row_keys, b.row)
+            array.push(row_counts, 1)
+    
+    array<int> singles = array.new<int>()
+    int m = array.size(row_keys)
+    for i = 0 to m - 1
+        if array.get(row_counts, i) == 1
+            array.push(singles, array.get(row_keys, i))
+    singles
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// PROFILE SHAPE CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+// @function Classify profile shape based on POC position and VA width
+// @param poc POC row
+// @param val VAL row
+// @param vah VAH row
+// @param range_low Lowest row in profile
+// @param range_high Highest row in profile
+// @returns ProfileShape
+export f_classify_profile(int poc, int val, int vah, int range_low, int range_high) =>
+    float total_range = math.max(1.0, float(range_high - range_low))
+    float poc_pos = (float(poc - range_low)) / total_range
+    float va_width = (float(vah - val)) / total_range
+    
+    string shape_type = "neutral"
+    if poc_pos >= 0.4 and poc_pos <= 0.6 and va_width >= 0.5
+        shape_type := "normal"
+    else if poc_pos < 0.3
+        shape_type := "b_shape"
+    else if poc_pos > 0.7
+        shape_type := "p_shape"
+    else if va_width < 0.3
+        shape_type := "d_shape"
+    
+    ProfileShape.new(shape_type, poc_pos, va_width)

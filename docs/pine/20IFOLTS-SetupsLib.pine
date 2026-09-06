@@ -1,0 +1,357 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description SetupsLib — core domain layer for setup lifecycle management.
+//              v30: BREAKING CHANGE - SetupSpec and SetupSignal gain oscillator metadata fields.
+//              Legacy /29 stays current for existing consumers. New indicators should use /30.
+//
+//              Provides ActivePosition state machine, SetupSpec descriptors with typed
+//              oscillator arrays (OscSpec + parallel periods/zscore_lens/weights),
+//              SetupSignal with per-fire oscillator snapshots (OscReading + feature_names),
+//              SetupAggregator (multi-position container), event hooks, TPSL evaluation,
+//              and 7-branch composite oscillator dispatcher (f_compose_setup_value).
+//
+//              Layer L1. Depends on NumLib/4 + OscLib/2.
+//
+// DESIGN DECISIONS (v30 additions):
+//   1. OscSpec arrays in SetupSpec describe oscillator stack (kind + behavior).
+//      Parallel arrays (osc_periods, osc_zscore_lens) hold sizing params.
+//      These are INTROSPECTION-ONLY (series int cannot pass to ta.* length params).
+//      Live computation receives lengths via input.* (simple int) in indicator caller.
+//
+//   2. SetupSignal gains array<OscReading> osc_readings (parallel to osc_specs),
+//      float composite_value (from 7-branch dispatcher), and array<string> feature_names
+//      (parallel to features[] for ML introspection).
+//
+//   3. composition_kind routes 7 OSC_COMP_* branches: NONE, SINGLE, WEIGHTED_SUM,
+//      PAIR_DIVERGENCE, GS_ORTHOGONAL, MAHALANOBIS_3D, GRANGER_BASKET.
+//
+//   4. Length contracts (strict equality enforced by f_validate_setup_spec):
+//        osc_readings.length    == spec.osc_specs.length
+//        osc_periods.length     == spec.osc_specs.length
+//        osc_zscore_lens.length == spec.osc_specs.length
+//        feature_names.length   == features.length
+//      osc_weights: length matches osc_specs OR is 0 (uniform fallback).
+//
+//   5. Empty osc_specs (length 0) → /29-shaped legacy SetupSpec, still valid.
+//
+library("SetupsLib", overlay=false)
+
+import cybermediaboy/NumLib/4 as N
+import cybermediaboy/OscLib/2 as O
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen from /29)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Position lifecycle state
+export enum LifecycleState
+    PENDING
+    ARMED
+    TRIGGERED
+    ACTIVE
+    CLOSING
+    CLOSED
+    INVALIDATED
+    TIMED_OUT
+
+// @enum Exit reason classification
+export enum ExitReason
+    NONE
+    TP_HIT
+    SL_HIT
+    TRAIL_HIT
+    TIME_STOP
+    OPPOSITE_SIGNAL
+    STRUCTURE_BREAK
+    MANUAL
+    SESSION_FORCED
+
+// @enum Setup categorization
+export enum SetupKind
+    ENTRY_LONG
+    ENTRY_SHORT
+    ENTRY_EITHER
+    EXIT_ONLY
+    SCALP
+    SWING
+    POSITION
+
+// @enum Order trigger mode
+export enum TriggerMode
+    MARKET
+    LIMIT
+    STOP
+    STOP_LIMIT
+
+// @enum TPSL pricing mode
+export enum TPSLMode
+    FIXED_PCT
+    FIXED_RR
+    ATR_MULT
+    STRUCTURE_BASED
+    DYNAMIC
+
+// @enum Event type emitted by aggregator
+export enum EventKind
+    POS_PENDING
+    POS_ARMED
+    POS_TRIGGERED
+    POS_TP_HIT
+    POS_SL_HIT
+    POS_TRAIL_UPDATE
+    POS_CLOSED
+    POS_INVALIDATED
+    POS_TIMED_OUT
+
+// @enum Trade direction (re-export from LearningLib for convenience)
+export enum TradeDirection
+    LONG
+    SHORT
+    FLAT
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: TPSL LEVEL UDTS (unchanged from /29)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type TP level configuration
+// @field price Target price
+// @field fraction Position fraction to close (0.0-1.0)
+// @field hit Whether level was hit
+// @field hit_bar Bar index when hit
+export type TPLevel
+    float price
+    float fraction
+    bool hit
+    int hit_bar
+
+// @type SL level configuration
+// @field price Current SL price
+// @field initial_price Original SL price
+// @field is_trailing Whether SL trails
+// @field trail_distance Trailing distance
+// @field trail_activate_at Price level to activate trailing
+// @field trail_high_water Highest favorable price seen (for trailing logic)
+// @field hit Whether SL was hit
+// @field hit_bar Bar index when hit
+export type SLLevel
+    float price
+    float initial_price
+    bool is_trailing
+    float trail_distance
+    float trail_activate_at
+    float trail_high_water
+    bool hit
+    int hit_bar
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: SETUP SPEC (v30 additions: oscillator metadata)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type SetupSpec — descriptor / metadata for a setup
+// @field id            integer dispatch id (unique per indicator)
+// @field name          human-readable
+// @field version       monotonic versioning
+// @field kind          SetupKind classification
+// @field family_id     meta_a — family/category (used by kNN tournaments)
+// @field code_id       meta_b — specific code within family
+// @field default_rr    default reward:risk ratio
+// @field default_tp_mode TPSLMode for TP defaults
+// @field default_sl_mode TPSLMode for SL defaults
+// @field max_bars_in_state cap for TIMED_OUT detection
+// @field enabled       master enable flag
+// ─── v30 additions ───
+// @field osc_specs         array<OscSpec> oscillator descriptors (length 0..N)
+// @field osc_periods       array<int> periods (parallel, introspection-only, series int)
+// @field osc_zscore_lens   array<int> z-score windows (parallel, introspection-only)
+// @field osc_weights       array<float> weights (length 0 or matches osc_specs)
+// @field composition_kind  string from OSC_COMP_* constants
+export type SetupSpec
+    int id
+    string name
+    int version
+    SetupKind kind
+    int family_id
+    int code_id
+    float default_rr
+    TPSLMode default_tp_mode
+    TPSLMode default_sl_mode
+    int max_bars_in_state
+    bool enabled
+    array<O.OscSpec> osc_specs
+    array<int> osc_periods
+    array<int> osc_zscore_lens
+    array<float> osc_weights
+    string composition_kind
+
+// @function Create SetupSpec with oscillator metadata
+// @param id Setup ID
+// @param name Setup name
+// @param version Setup version
+// @param kind SetupKind
+// @param family_id Family ID
+// @param code_id Code ID
+// @param default_rr Default R:R ratio
+// @param max_bars_in_state Max bars before timeout
+// @param osc_specs Oscillator specs (empty array for legacy /29 shape)
+// @param osc_periods Oscillator periods (parallel to osc_specs)
+// @param osc_zscore_lens Z-score windows (parallel to osc_specs)
+// @param osc_weights Oscillator weights (length 0 or matches osc_specs)
+// @param composition_kind Composition kind from OSC_COMP_*
+// @returns SetupSpec
+export f_spec_new(int id, string name, int version, SetupKind kind,
+                   int family_id, int code_id, float default_rr,
+                   int max_bars_in_state,
+                   array<O.OscSpec> osc_specs, array<int> osc_periods,
+                   array<int> osc_zscore_lens, array<float> osc_weights,
+                   string composition_kind) =>
+    SetupSpec.new(
+         id = id, name = name, version = version, kind = kind,
+         family_id = family_id, code_id = code_id,
+         default_rr = default_rr,
+         default_tp_mode = TPSLMode.FIXED_RR,
+         default_sl_mode = TPSLMode.ATR_MULT,
+         max_bars_in_state = max_bars_in_state, enabled = true,
+         osc_specs = osc_specs, osc_periods = osc_periods,
+         osc_zscore_lens = osc_zscore_lens, osc_weights = osc_weights,
+         composition_kind = composition_kind)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: SETUP SIGNAL (v30 additions: oscillator snapshots + feature_names)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type SetupSignal — atomic signal record produced by indicator
+// @field setup_id       which setup emitted this
+// @field bar_index      emission bar
+// @field direction      LONG / SHORT / FLAT (FLAT = exit-only)
+// @field entry_price    intended entry
+// @field tp_prices      array of TP prices (parallel with tp_fractions)
+// @field tp_fractions   sizes
+// @field sl_price       SL price (initial or trailing anchor)
+// @field sl_trailing    trail flag
+// @field sl_trail_dist  trail distance
+// @field confidence     [0,1]
+// @field features       feature vector (for ML logging)
+// @field meta           free-form integer (setup-specific encoding)
+// @field valid          set true to indicate live signal; false = no-op heartbeat
+// ─── v30 additions ───
+// @field osc_readings   array<OscReading> oscillator snapshots (parallel to spec.osc_specs)
+// @field composite_value float composite oscillator value (na when composition_kind=NONE)
+// @field feature_names  array<string> feature names (parallel to features[])
+export type SetupSignal
+    int setup_id
+    int bar_index
+    TradeDirection direction
+    float entry_price
+    array<float> tp_prices
+    array<float> tp_fractions
+    float sl_price
+    bool sl_trailing
+    float sl_trail_dist
+    float confidence
+    array<float> features
+    int meta
+    bool valid
+    array<O.OscReading> osc_readings
+    float composite_value
+    array<string> feature_names
+
+// @function Create empty SetupSignal
+// @returns Empty SetupSignal
+export f_signal_empty() =>
+    SetupSignal.new(
+         setup_id = -1, bar_index = -1,
+         direction = TradeDirection.FLAT,
+         entry_price = na, tp_prices = array.new<float>(),
+         tp_fractions = array.new<float>(), sl_price = na,
+         sl_trailing = false, sl_trail_dist = 0.0,
+         confidence = 0.0, features = array.new<float>(),
+         meta = 0, valid = false,
+         osc_readings = array.new<O.OscReading>(),
+         composite_value = na,
+         feature_names = array.new<string>())
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: COMPOSITE OSCILLATOR DISPATCHER (7 branches)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Compose setup value from oscillator readings
+// @param spec SetupSpec with composition_kind
+// @param readings array<OscReading> oscillator snapshots
+// @returns Composite value (na when composition_kind=NONE)
+export f_compose_setup_value(SetupSpec spec, array<O.OscReading> readings) =>
+    float result = na
+    int n = array.size(readings)
+    
+    if spec.composition_kind == O.OSC_COMP_NONE
+        result := na
+    else if spec.composition_kind == O.OSC_COMP_SINGLE and n > 0
+        result := array.get(readings, 0).normalized_value
+    else if spec.composition_kind == O.OSC_COMP_WEIGHTED_SUM and n > 0
+        float sum = 0.0
+        int n_weights = array.size(spec.osc_weights)
+        bool uniform = n_weights == 0
+        for i = 0 to n - 1
+            float w = uniform ? 1.0 / n : array.get(spec.osc_weights, i)
+            sum += w * array.get(readings, i).normalized_value
+        result := sum
+    else if spec.composition_kind == O.OSC_COMP_PAIR_DIVERGENCE and n >= 2
+        float div_sum = 0.0
+        for i = 0 to n - 2
+            div_sum += array.get(readings, i).normalized_value - array.get(readings, i + 1).normalized_value
+        result := div_sum
+    else if spec.composition_kind == O.OSC_COMP_GS_ORTHOGONAL and n >= 2
+        // Gram-Schmidt orthogonalization stub (full impl requires window buffer)
+        // For now: simple residual chain
+        float residual = array.get(readings, 0).normalized_value
+        for i = 1 to n - 1
+            residual -= array.get(readings, i).normalized_value
+        result := residual
+    else if spec.composition_kind == O.OSC_COMP_MAHALANOBIS_3D and n == 3
+        // Mahalanobis distance stub (requires covariance matrix from KalmanEngineLib)
+        // For now: Euclidean distance placeholder
+        float v0 = array.get(readings, 0).normalized_value
+        float v1 = array.get(readings, 1).normalized_value
+        float v2 = array.get(readings, 2).normalized_value
+        result := math.sqrt(v0 * v0 + v1 * v1 + v2 * v2)
+    else if spec.composition_kind == O.OSC_COMP_GRANGER_BASKET and n > 0
+        // Granger basket stub (requires beta weights from osc_weights)
+        float basket = 0.0
+        int n_weights = array.size(spec.osc_weights)
+        for i = 0 to n - 1
+            float beta = i < n_weights ? array.get(spec.osc_weights, i) : 1.0
+            basket += beta * array.get(readings, i).normalized_value
+        result := basket
+    
+    result
+
+// @function Validate SetupSpec length contracts
+// @param spec SetupSpec to validate
+// @returns true if valid, false otherwise
+export f_validate_setup_spec(SetupSpec spec) =>
+    int n_specs = array.size(spec.osc_specs)
+    int n_periods = array.size(spec.osc_periods)
+    int n_zlens = array.size(spec.osc_zscore_lens)
+    int n_weights = array.size(spec.osc_weights)
+    
+    bool valid = true
+    valid := valid and (n_periods == n_specs)
+    valid := valid and (n_zlens == n_specs)
+    valid := valid and (n_weights == 0 or n_weights == n_specs)
+    valid
+
+// @function Validate SetupSignal length contracts
+// @param signal SetupSignal to validate
+// @param spec SetupSpec for contract reference
+// @returns true if valid, false otherwise
+export f_validate_setup_signal(SetupSignal signal, SetupSpec spec) =>
+    int n_readings = array.size(signal.osc_readings)
+    int n_specs = array.size(spec.osc_specs)
+    int n_features = array.size(signal.features)
+    int n_names = array.size(signal.feature_names)
+    
+    bool valid = true
+    valid := valid and (n_readings == n_specs)
+    valid := valid and (n_names == n_features)
+    valid

@@ -1,0 +1,620 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+indicator("Market Structure Shift [JOAT]", shorttitle = "MSS [JOAT]", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+//══════════════════════════════════════════════════════════════════════
+// MARKET STRUCTURE SHIFT [JOAT]
+// Smart Money Concepts — BOS / CHoCH structure engine
+// Swing + Internal structure state machine, liquidity (EQH/EQL),
+// premium / discount zones, ATR SL/TP, live dashboard.
+//══════════════════════════════════════════════════════════════════════
+
+//──────────────────────────────────────────────────────────────────────
+// 01 · STRUCTURE ENGINE
+//──────────────────────────────────────────────────────────────────────
+string G_ENG = "01 · Structure Engine"
+int   swingLen   = input.int(25, "Swing Pivot Length", minval = 2, maxval = 100, group = G_ENG, tooltip = "Bars each side for confirmed SWING pivots. Larger = more significant, slower structure.")
+bool  useInt     = input.bool(true, "Track Internal Structure", group = G_ENG, tooltip = "Adds a faster inner structure layer using the short pivot length below.")
+int   intLen     = input.int(5, "Internal Pivot Length", minval = 1, maxval = 50, group = G_ENG, tooltip = "Bars each side for confirmed INTERNAL pivots.")
+string breakSrc  = input.string("Close", "Break Confirmation", options = ["Close", "Wick"], group = G_ENG, tooltip = "Close = a candle must CLOSE beyond the level (cleaner). Wick = any high/low penetration breaks structure.")
+int   atrLen     = input.int(14, "ATR Length", minval = 1, maxval = 200, group = G_ENG, tooltip = "ATR normalises label spacing, liquidity tolerance and SL/TP distance.")
+
+//──────────────────────────────────────────────────────────────────────
+// 02 · SIGNALS
+//──────────────────────────────────────────────────────────────────────
+string G_SIG = "02 · Signals"
+string sigSrc    = input.string("Swing Only", "Signal Source", options = ["Swing Only", "Internal Only", "Swing + Internal"], group = G_SIG, tooltip = "Which structure layer fires BUY / SELL labels. Swing is the highest-conviction layer.")
+bool  sigChoch   = input.bool(true, "Signal on CHoCH (reversal)", group = G_SIG, tooltip = "Fire on Change of Character — first break against the prevailing trend.")
+bool  sigBos     = input.bool(true, "Signal on BOS (continuation)", group = G_SIG, tooltip = "Fire on Break of Structure — trend-aligned continuation break.")
+bool  showSignals= input.bool(true, "Show BUY / SELL Labels", group = G_SIG)
+
+//──────────────────────────────────────────────────────────────────────
+// 03 · LIQUIDITY & ZONES
+//──────────────────────────────────────────────────────────────────────
+string G_ZON = "03 · Liquidity & Zones"
+bool  showEq     = input.bool(true, "Show Equal Highs / Lows (Liquidity)", group = G_ZON, tooltip = "Marks equal swing pivots (EQH/EQL) — resting liquidity pools.")
+float eqTol      = input.float(0.10, "Equal-Level Tolerance (ATR)", minval = 0.01, maxval = 2.0, step = 0.01, group = G_ZON, tooltip = "Two consecutive pivots within this ATR distance are treated as equal.")
+bool  showPD     = input.bool(true, "Show Premium / Discount Zones", group = G_ZON, tooltip = "Premium (red-tint) / Equilibrium / Discount (green-tint) of the current swing range.")
+float eqBand     = input.float(0.05, "Equilibrium Band", minval = 0.0, maxval = 0.25, step = 0.01, group = G_ZON, tooltip = "Half-width of the neutral equilibrium band around the range midpoint (fraction of range).")
+bool  showZoneLabel = input.bool(true, "Show Price-Zone Label", group = G_ZON, tooltip = "Floating Premium / Equilibrium / Discount tag pinned at the current price on the right edge.")
+
+//──────────────────────────────────────────────────────────────────────
+// 04 · RISK MODEL (structure-anchored SL / TP)
+//──────────────────────────────────────────────────────────────────────
+string G_TRD = "04 · Risk Model"
+bool   showSLTP  = input.bool(true, "Show SL / TP Zones on Signals", group = G_TRD, tooltip = "Projects a structure-anchored Stop-Loss and an R-multiple Take-Profit ZONE from each fresh signal.")
+string slMode    = input.string("Structure + Buffer", "Stop Basis", options = ["Structure + Buffer", "ATR Multiple"], group = G_TRD, tooltip = "Structure + Buffer anchors the stop just BEYOND the swing that would invalidate the shift. ATR Multiple uses a fixed volatility distance from entry.")
+float slBufAtr   = input.float(0.5, "Structure Buffer (× ATR)", minval = 0.0, maxval = 5.0, step = 0.1, group = G_TRD, tooltip = "Extra ATR distance placed BEYOND the protective swing so normal wicks don't stop you out.")
+float slAtrMult  = input.float(1.5, "ATR Stop Distance (× ATR)", minval = 0.2, maxval = 10.0, step = 0.1, group = G_TRD, tooltip = "Stop distance used ONLY when Stop Basis = ATR Multiple.")
+float rrMult     = input.float(2.0, "Reward : Risk", minval = 0.5, maxval = 10.0, step = 0.25, group = G_TRD, tooltip = "Take-Profit sits at this multiple of the risk distance. 2.0 = the target zone is TWICE the height of the risk zone.")
+float minRiskAtr = input.float(0.5, "Min Risk (× ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = G_TRD, tooltip = "Floor on stop distance so a very tight structure can't create a micro-stop.")
+float maxRiskAtr = input.float(5.0, "Max Risk (× ATR)", minval = 0.5, maxval = 20.0, step = 0.5, group = G_TRD, tooltip = "Cap on stop distance so a far structure can't create an oversized stop.")
+int   projLen    = input.int(40, "Projection Length (bars)", minval = 5, maxval = 300, group = G_TRD)
+int   maxTrades  = input.int(6, "Max Drawn SL/TP", minval = 1, maxval = 30, group = G_TRD)
+
+//──────────────────────────────────────────────────────────────────────
+// 05 · VWAP
+//──────────────────────────────────────────────────────────────────────
+string G_VWAP = "05 · VWAP"
+bool  useVwap    = input.bool(true, "Show VWAP + σ Bands", group = G_VWAP, tooltip = "Session-anchored VWAP with gradient standard-deviation bands. MSS treats VWAP as the fair-value magnet / target for the shift.")
+float vwapDev    = input.float(1.0, "Inner Band σ", minval = 0.5, maxval = 4.0, step = 0.5, group = G_VWAP, tooltip = "Standard-deviation multiple for the inner VWAP band.")
+float vwapDev2   = input.float(2.0, "Outer Band σ", minval = 0.5, maxval = 6.0, step = 0.5, group = G_VWAP, tooltip = "Standard-deviation multiple for the outer VWAP band.")
+int   vwapLen    = input.int(100, "σ Lookback", minval = 10, maxval = 500, group = G_VWAP, tooltip = "Lookback window for the deviation estimate.")
+
+//──────────────────────────────────────────────────────────────────────
+// 06 · VISUALS
+//──────────────────────────────────────────────────────────────────────
+string G_VIS = "06 · Visuals"
+bool  showSwing  = input.bool(true, "Show Swing Structure Breaks", group = G_VIS)
+bool  showIntBrk = input.bool(true, "Show Internal Structure Breaks", group = G_VIS)
+bool  showPivots = input.bool(false, "Show Pivot Markers", group = G_VIS, tooltip = "Small dots at confirmed swing pivots.")
+bool  colorCandles = input.bool(false, "Color Candles by Zone", group = G_VIS, tooltip = "Tints candles Premium (red) / Discount (green) / Equilibrium (neutral) — a quick fair-value reader. Off by default.")
+int   maxBreaks  = input.int(24, "Max Drawn Structure Breaks", minval = 4, maxval = 100, group = G_VIS)
+int   maxLiq     = input.int(20, "Max Drawn Liquidity Levels", minval = 2, maxval = 80, group = G_VIS)
+color bullCol    = input.color(#2962FF, "Bullish Color", group = G_VIS, tooltip = "Bull structure / signals.")
+color bearCol    = input.color(#B388FF, "Bearish Color", group = G_VIS, tooltip = "Bear structure / signals (violet).")
+color strCol     = input.color(#787B86, "Neutral Structure Color", group = G_VIS)
+int   lineWidth  = input.int(1, "Structure Line Width", minval = 1, maxval = 4, group = G_VIS)
+
+//──────────────────────────────────────────────────────────────────────
+// 07 · DASHBOARD
+//──────────────────────────────────────────────────────────────────────
+string G_DASH = "07 · Dashboard"
+bool  showDash   = input.bool(true, "Show Dashboard", group = G_DASH)
+string dashPosOpt= input.string("Top Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = G_DASH)
+string dashSizeOpt=input.string("Small", "Text Size", options = ["Tiny", "Small", "Normal"], group = G_DASH)
+
+//──────────────────────────────────────────────────────────────────────
+// PALETTE (sleek dark)
+//──────────────────────────────────────────────────────────────────────
+color premCol   = color.rgb(239, 83, 80)     // premium red-tint
+color discCol   = color.rgb(38, 166, 154)    // discount green-tint
+color chrome    = color.rgb(199, 203, 214)   // cyber-chrome accent (VWAP)
+color panelBg   = #0b0e11
+color panelAlt  = #12161c
+color panelHdr  = #101826
+color panelBrd  = color.new(#2962FF, 40)
+color txtHi     = #eaecef
+color txtLo     = #8b93a1
+color goodCol   = #26a69a
+color badCol    = #ef5350
+
+//──────────────────────────────────────────────────────────────────────
+// HELPERS
+//──────────────────────────────────────────────────────────────────────
+f_pos(string p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        "Middle Right" => position.middle_right
+        => position.top_right
+
+f_row(table t, int r, string k, string v, color vc, color kc, color bg, string sz) =>
+    table.cell(t, 0, r, k, text_color = kc, text_size = sz, text_halign = text.align_left, bgcolor = bg)
+    table.cell(t, 1, r, v, text_color = vc, text_size = sz, text_halign = text.align_right, bgcolor = bg)
+
+//──────────────────────────────────────────────────────────────────────
+// CORE SERIES
+//──────────────────────────────────────────────────────────────────────
+float atr = ta.atr(atrLen)
+float atrz = nz(atr, 0.0)
+
+// Pivots (evaluated every bar for correct state)
+float phS = ta.pivothigh(swingLen, swingLen)
+float plS = ta.pivotlow(swingLen, swingLen)
+float phI = ta.pivothigh(intLen, intLen)
+float plI = ta.pivotlow(intLen, intLen)
+
+// Break source
+float breakUp = breakSrc == "Wick" ? high : close
+float breakDn = breakSrc == "Wick" ? low  : close
+
+// VWAP + σ bands (ta.* called EVERY bar for correct state)
+float vwapV = ta.vwap(hlc3)
+float vwSd  = ta.stdev(close, vwapLen)
+float vwUp1 = vwapV + vwapDev  * vwSd
+float vwLo1 = vwapV - vwapDev  * vwSd
+float vwUp2 = vwapV + vwapDev2 * vwSd
+float vwLo2 = vwapV - vwapDev2 * vwSd
+
+//──────────────────────────────────────────────────────────────────────
+// DRAWING TYPES + HISTORY ARRAYS
+//──────────────────────────────────────────────────────────────────────
+type sBreak
+    line  ln
+    label lb
+
+type liqMark
+    line  ln
+    label lb
+
+type mssTrade
+    box   tpb
+    box   slb
+    line  enl
+    line  sll
+    line  tpl
+    label sllb
+    label tplb
+    label rtag
+    label wtag
+
+var array<sBreak>  brkHist   = array.new<sBreak>()
+var array<liqMark> liqHist   = array.new<liqMark>()
+var array<mssTrade> trHist   = array.new<mssTrade>()
+
+f_pushBreak(line ln, label lb) =>
+    array.push(brkHist, sBreak.new(ln, lb))
+    while array.size(brkHist) > maxBreaks
+        sBreak o = array.shift(brkHist)
+        if not na(o.ln)
+            line.delete(o.ln)
+        if not na(o.lb)
+            label.delete(o.lb)
+
+f_pushLiq(line ln, label lb) =>
+    array.push(liqHist, liqMark.new(ln, lb))
+    while array.size(liqHist) > maxLiq
+        liqMark o = array.shift(liqHist)
+        if not na(o.ln)
+            line.delete(o.ln)
+        if not na(o.lb)
+            label.delete(o.lb)
+
+f_delTrade(mssTrade o) =>
+    if not na(o.tpb)
+        box.delete(o.tpb)
+    if not na(o.slb)
+        box.delete(o.slb)
+    if not na(o.enl)
+        line.delete(o.enl)
+    if not na(o.sll)
+        line.delete(o.sll)
+    if not na(o.tpl)
+        line.delete(o.tpl)
+    if not na(o.sllb)
+        label.delete(o.sllb)
+    if not na(o.tplb)
+        label.delete(o.tplb)
+    if not na(o.rtag)
+        label.delete(o.rtag)
+    if not na(o.wtag)
+        label.delete(o.wtag)
+
+//──────────────────────────────────────────────────────────────────────
+// SWING STRUCTURE STATE MACHINE
+//──────────────────────────────────────────────────────────────────────
+var float swTop = na          // last swing high price
+var int   swTopBar = na
+var bool  swTopBroken = true
+var float swBtm = na          // last swing low price
+var int   swBtmBar = na
+var bool  swBtmBroken = true
+var int   osSwing = 0         // +1 bull / -1 bear / 0 range
+
+var float swRangeHi = na      // current structural range extremes
+var float swRangeLo = na
+
+// Sequence classification
+var float lastPHv = na
+var float lastPLv = na
+var int   lastPHbar = na
+var int   lastPLbar = na
+var string highTxt = "—"
+var string lowTxt  = "—"
+
+// Alternating label offset to avoid overlap
+var int altSign = 1
+
+// Event / counters
+var int   bosCount = 0
+var int   chochCount = 0
+var int   liqCount = 0
+var string lastEvent = "—"
+var color lastEventCol = txtLo
+
+// New swing pivots
+if not na(phS)
+    // sequence + equal-high (liquidity) detection
+    string t = na(lastPHv) ? "H" : (phS > lastPHv + eqTol * atrz ? "HH" : phS < lastPHv - eqTol * atrz ? "LH" : "EQ")
+    int b1 = bar_index - swingLen
+    bool isEqH = showEq and not na(lastPHv) and math.abs(phS - lastPHv) <= eqTol * atrz
+    if isEqH
+        line eln = line.new(nz(lastPHbar, b1), phS, b1, phS, xloc = xloc.bar_index, color = color.new(strCol, 20), style = line.style_dotted, width = 1)
+        label elb = label.new(b1, phS, "EQH", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(premCol, 20), textcolor = txtHi, size = size.tiny)
+        f_pushLiq(eln, elb)
+        liqCount += 1
+    highTxt := t == "EQ" ? "EQH" : t
+    lastPHv := phS
+    lastPHbar := b1
+    swTop := phS
+    swTopBar := bar_index - swingLen
+    swTopBroken := false
+    swRangeHi := phS
+
+if not na(plS)
+    string t = na(lastPLv) ? "L" : (plS > lastPLv + eqTol * atrz ? "HL" : plS < lastPLv - eqTol * atrz ? "LL" : "EQ")
+    int b1 = bar_index - swingLen
+    bool isEqL = showEq and not na(lastPLv) and math.abs(plS - lastPLv) <= eqTol * atrz
+    if isEqL
+        line eln = line.new(nz(lastPLbar, b1), plS, b1, plS, xloc = xloc.bar_index, color = color.new(strCol, 20), style = line.style_dotted, width = 1)
+        label elb = label.new(b1, plS, "EQL", xloc = xloc.bar_index, style = label.style_label_up, color = color.new(discCol, 20), textcolor = txtHi, size = size.tiny)
+        f_pushLiq(eln, elb)
+        liqCount += 1
+    lowTxt := t == "EQ" ? "EQL" : t
+    lastPLv := plS
+    lastPLbar := b1
+    swBtm := plS
+    swBtmBar := bar_index - swingLen
+    swBtmBroken := false
+    swRangeLo := plS
+
+// Swing break detection
+bool swBull = not na(swTop) and not swTopBroken and breakUp > swTop
+bool swBear = not na(swBtm) and not swBtmBroken and breakDn < swBtm
+
+bool swBullBOS   = false
+bool swBullCHoCH = false
+bool swBearBOS   = false
+bool swBearCHoCH = false
+
+if swBull
+    swBullCHoCH := osSwing < 0
+    swBullBOS   := osSwing >= 0
+    if showSwing
+        line ln = line.new(swTopBar, swTop, bar_index, swTop, xloc = xloc.bar_index, color = color.new(bullCol, 0), style = line.style_solid, width = lineWidth)
+        int mid = int(math.round((swTopBar + bar_index) / 2))
+        label lb = label.new(mid, swTop + altSign * atrz * 0.6, swBullCHoCH ? "CHoCH" : "BOS", xloc = xloc.bar_index, style = label.style_none, textcolor = color.new(bullCol, 0), size = size.small)
+        f_pushBreak(ln, lb)
+        altSign := -altSign
+    lastEvent := swBullCHoCH ? "Bull CHoCH" : "Bull BOS"
+    lastEventCol := bullCol
+    if swBullCHoCH
+        chochCount += 1
+    else
+        bosCount += 1
+    osSwing := 1
+    swTopBroken := true
+    swRangeLo := nz(swBtm, swRangeLo)
+
+if swBear
+    swBearCHoCH := osSwing > 0
+    swBearBOS   := osSwing <= 0
+    if showSwing
+        line ln = line.new(swBtmBar, swBtm, bar_index, swBtm, xloc = xloc.bar_index, color = color.new(bearCol, 0), style = line.style_solid, width = lineWidth)
+        int mid = int(math.round((swBtmBar + bar_index) / 2))
+        label lb = label.new(mid, swBtm + altSign * atrz * 0.6, swBearCHoCH ? "CHoCH" : "BOS", xloc = xloc.bar_index, style = label.style_none, textcolor = color.new(bearCol, 0), size = size.small)
+        f_pushBreak(ln, lb)
+        altSign := -altSign
+    lastEvent := swBearCHoCH ? "Bear CHoCH" : "Bear BOS"
+    lastEventCol := bearCol
+    if swBearCHoCH
+        chochCount += 1
+    else
+        bosCount += 1
+    osSwing := -1
+    swRangeHi := nz(swTop, swRangeHi)
+    swBtmBroken := true
+
+//──────────────────────────────────────────────────────────────────────
+// INTERNAL STRUCTURE STATE MACHINE
+//──────────────────────────────────────────────────────────────────────
+var float inTop = na
+var int   inTopBar = na
+var bool  inTopBroken = true
+var float inBtm = na
+var int   inBtmBar = na
+var bool  inBtmBroken = true
+var int   osInt = 0
+
+if useInt and not na(phI)
+    inTop := phI
+    inTopBar := bar_index - intLen
+    inTopBroken := false
+if useInt and not na(plI)
+    inBtm := plI
+    inBtmBar := bar_index - intLen
+    inBtmBroken := false
+
+bool inBull = useInt and not na(inTop) and not inTopBroken and breakUp > inTop
+bool inBear = useInt and not na(inBtm) and not inBtmBroken and breakDn < inBtm
+
+bool inBullBOS   = false
+bool inBullCHoCH = false
+bool inBearBOS   = false
+bool inBearCHoCH = false
+
+if inBull
+    inBullCHoCH := osInt < 0
+    inBullBOS   := osInt >= 0
+    if showIntBrk
+        line ln = line.new(inTopBar, inTop, bar_index, inTop, xloc = xloc.bar_index, color = color.new(bullCol, 45), style = line.style_dashed, width = 1)
+        int mid = int(math.round((inTopBar + bar_index) / 2))
+        label lb = label.new(mid, inTop + altSign * atrz * 0.4, inBullCHoCH ? "CHoCH" : "BOS", xloc = xloc.bar_index, style = label.style_none, textcolor = color.new(bullCol, 30), size = size.tiny)
+        f_pushBreak(ln, lb)
+        altSign := -altSign
+    osInt := 1
+    inTopBroken := true
+
+if inBear
+    inBearCHoCH := osInt > 0
+    inBearBOS   := osInt <= 0
+    if showIntBrk
+        line ln = line.new(inBtmBar, inBtm, bar_index, inBtm, xloc = xloc.bar_index, color = color.new(bearCol, 45), style = line.style_dashed, width = 1)
+        int mid = int(math.round((inBtmBar + bar_index) / 2))
+        label lb = label.new(mid, inBtm + altSign * atrz * 0.4, inBearCHoCH ? "CHoCH" : "BOS", xloc = xloc.bar_index, style = label.style_none, textcolor = color.new(bearCol, 30), size = size.tiny)
+        f_pushBreak(ln, lb)
+        altSign := -altSign
+    osInt := -1
+    inBtmBroken := true
+
+//──────────────────────────────────────────────────────────────────────
+// SIGNAL COMPOSITION
+//──────────────────────────────────────────────────────────────────────
+bool useSw  = sigSrc == "Swing Only" or sigSrc == "Swing + Internal"
+bool useIn  = sigSrc == "Internal Only" or sigSrc == "Swing + Internal"
+
+bool bullCHoCH = (useSw and swBullCHoCH) or (useIn and inBullCHoCH)
+bool bearCHoCH = (useSw and swBearCHoCH) or (useIn and inBearCHoCH)
+bool bullBOS   = (useSw and swBullBOS)   or (useIn and inBullBOS)
+bool bearBOS   = (useSw and swBearBOS)   or (useIn and inBearBOS)
+
+bool buyRaw  = (sigChoch and bullCHoCH) or (sigBos and bullBOS)
+bool sellRaw = (sigChoch and bearCHoCH) or (sigBos and bearBOS)
+bool bothSig = buyRaw and sellRaw
+// never both on same bar (wide-range bar): drop both
+bool buySignal  = buyRaw and not bothSig
+bool sellSignal = sellRaw and not bothSig
+
+plotshape(showSignals and buySignal,  title = "BUY",  style = shape.labelup,   location = location.belowbar, color = bullCol, textcolor = color.white, text = "BUY",  size = size.small)
+plotshape(showSignals and sellSignal, title = "SELL", style = shape.labeldown, location = location.abovebar, color = bearCol, textcolor = color.white, text = "SELL", size = size.small)
+
+plotshape(showPivots and not na(phS), title = "Swing High", style = shape.circle, location = location.abovebar, color = color.new(bearCol, 20), size = size.tiny, offset = -swingLen)
+plotshape(showPivots and not na(plS), title = "Swing Low",  style = shape.circle, location = location.belowbar, color = color.new(bullCol, 20), size = size.tiny, offset = -swingLen)
+
+//──────────────────────────────────────────────────────────────────────
+// RISK MODEL — structure-anchored SL / TP zones (live-extend then freeze)
+//──────────────────────────────────────────────────────────────────────
+var bool  tActive  = false
+var int   tSide    = 0
+var int   tBar     = na
+var float tSL      = na
+var float tTP      = na
+var box   aTpBox   = na
+var box   aSlBox   = na
+var line  aEnL     = na
+var line  aSlL     = na
+var line  aTpL     = na
+var label aSlLb    = na
+var label aTpLb    = na
+var label aRiskTag = na
+var label aRewTag  = na
+
+// 1) extend the live trade each bar, then FREEZE on TP / SL / time-out
+if tActive
+    int rEdge = math.min(bar_index, nz(tBar, bar_index) + projLen)
+    if not na(aTpBox)
+        box.set_right(aTpBox, rEdge)
+    if not na(aSlBox)
+        box.set_right(aSlBox, rEdge)
+    if not na(aEnL)
+        line.set_x2(aEnL, rEdge)
+    if not na(aSlL)
+        line.set_x2(aSlL, rEdge)
+    if not na(aTpL)
+        line.set_x2(aTpL, rEdge)
+    if not na(aSlLb)
+        label.set_x(aSlLb, rEdge)
+    if not na(aTpLb)
+        label.set_x(aTpLb, rEdge)
+    bool tpHit  = tSide == 1 ? high >= tTP : low <= tTP
+    bool slHit  = tSide == 1 ? low <= tSL : high >= tSL
+    bool timeUp = bar_index >= nz(tBar, bar_index) + projLen
+    if tpHit or slHit or timeUp
+        array.push(trHist, mssTrade.new(aTpBox, aSlBox, aEnL, aSlL, aTpL, aSlLb, aTpLb, aRiskTag, aRewTag))
+        while array.size(trHist) > maxTrades
+            f_delTrade(array.shift(trHist))
+        aTpBox := na
+        aSlBox := na
+        aEnL := na
+        aSlL := na
+        aTpL := na
+        aSlLb := na
+        aTpLb := na
+        aRiskTag := na
+        aRewTag := na
+        tActive := false
+
+// 2) open a fresh structure-anchored trade on a new signal
+if showSLTP and (buySignal or sellSignal) and atrz > 0
+    // freeze any still-live trade before opening a new one
+    if tActive
+        array.push(trHist, mssTrade.new(aTpBox, aSlBox, aEnL, aSlL, aTpL, aSlLb, aTpLb, aRiskTag, aRewTag))
+        while array.size(trHist) > maxTrades
+            f_delTrade(array.shift(trHist))
+        tActive := false
+    bool isLong = buySignal
+    float entv  = close
+    // stop anchored BEYOND the swing that would invalidate the shift
+    float structRef = isLong ? (not na(swBtm) ? swBtm : inBtm) : (not na(swTop) ? swTop : inTop)
+    float slStruct  = slMode == "Structure + Buffer" and not na(structRef) ? (isLong ? structRef - atrz * slBufAtr : structRef + atrz * slBufAtr) : na
+    bool  structOk  = not na(slStruct) and (isLong ? slStruct < entv : slStruct > entv)
+    float slRaw = structOk ? slStruct : (isLong ? entv - atrz * slAtrMult : entv + atrz * slAtrMult)
+    float risk0 = math.abs(entv - slRaw)
+    float risk  = math.min(math.max(risk0, atrz * minRiskAtr), atrz * maxRiskAtr)
+    float slv   = isLong ? entv - risk : entv + risk
+    float tpv   = isLong ? entv + risk * rrMult : entv - risk * rrMult
+    color c     = isLong ? bullCol : bearCol
+    int   xr    = bar_index + 1
+    // reward box spans entry→TP, risk box spans entry→SL
+    float tpTop = isLong ? tpv : entv
+    float tpBot = isLong ? entv : tpv
+    float slTop = isLong ? entv : slv
+    float slBot = isLong ? slv : entv
+    aTpBox := box.new(bar_index, tpTop, xr, tpBot, xloc = xloc.bar_index, bgcolor = color.new(goodCol, 84), border_color = color.new(c, 45), border_width = 1)
+    aSlBox := box.new(bar_index, slTop, xr, slBot, xloc = xloc.bar_index, bgcolor = color.new(badCol, 84), border_color = color.new(badCol, 45), border_width = 1)
+    aEnL := line.new(bar_index, entv, xr, entv, xloc = xloc.bar_index, color = color.new(txtHi, 10), width = 2, style = line.style_solid)
+    aSlL := line.new(bar_index, slv, xr, slv, xloc = xloc.bar_index, color = color.new(badCol, 10), width = 1, style = line.style_dashed)
+    aTpL := line.new(bar_index, tpv, xr, tpv, xloc = xloc.bar_index, color = color.new(goodCol, 10), width = 1, style = line.style_dashed)
+    aSlLb := label.new(xr, slv, "SL @ " + str.tostring(slv, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(badCol, 10), textcolor = color.white, size = size.tiny)
+    aTpLb := label.new(xr, tpv, "TP " + str.tostring(rrMult, "#.#") + "R  @ " + str.tostring(tpv, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, color = color.new(goodCol, 10), textcolor = color.white, size = size.tiny)
+    aRiskTag := label.new(bar_index, (entv + slv) / 2, "RISK ZONE", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(badCol, 35), textcolor = color.white, size = size.tiny, text_formatting = text.format_bold + text.format_italic)
+    aRewTag  := label.new(bar_index, (entv + tpv) / 2, "TARGET ZONE", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(goodCol, 35), textcolor = color.white, size = size.tiny, text_formatting = text.format_bold + text.format_italic)
+    tActive := true
+    tSide := isLong ? 1 : -1
+    tBar := bar_index
+    tSL := slv
+    tTP := tpv
+
+//──────────────────────────────────────────────────────────────────────
+// PREMIUM / DISCOUNT ZONES
+//──────────────────────────────────────────────────────────────────────
+var box premBox = na
+var box eqBox   = na
+var box discBox = na
+var line eqLine = na
+
+float rHi = nz(swRangeHi, na)
+float rLo = nz(swRangeLo, na)
+bool  rngOk = showPD and not na(rHi) and not na(rLo) and rHi > rLo
+
+float eqMid  = rngOk ? (rHi + rLo) / 2 : na
+float rng    = rngOk ? rHi - rLo : na
+float eqTop  = rngOk ? eqMid + rng * eqBand : na
+float eqBot  = rngOk ? eqMid - rng * eqBand : na
+
+string zoneTxt = "—"
+color  zoneCol = txtLo
+if rngOk
+    zoneTxt := close > eqTop ? "Premium" : close < eqBot ? "Discount" : "Equilibrium"
+    zoneCol := close > eqTop ? premCol : close < eqBot ? discCol : txtLo
+
+if barstate.islast
+    if rngOk
+        int xl = bar_index - 2
+        int xr = bar_index + math.max(10, int(projLen / 2))
+        if na(premBox)
+            premBox := box.new(xl, rHi, xr, eqTop, xloc = xloc.bar_index, bgcolor = color.new(premCol, 88), border_color = color.new(premCol, 60), border_width = 1)
+            eqBox   := box.new(xl, eqTop, xr, eqBot, xloc = xloc.bar_index, bgcolor = color.new(strCol, 90), border_color = color.new(strCol, 70), border_width = 1)
+            discBox := box.new(xl, eqBot, xr, rLo, xloc = xloc.bar_index, bgcolor = color.new(discCol, 88), border_color = color.new(discCol, 60), border_width = 1)
+            eqLine  := line.new(xl, eqMid, xr, eqMid, xloc = xloc.bar_index, color = color.new(txtLo, 20), style = line.style_dotted, width = 1)
+        else
+            box.set_lefttop(premBox, xl, rHi)
+            box.set_rightbottom(premBox, xr, eqTop)
+            box.set_lefttop(eqBox, xl, eqTop)
+            box.set_rightbottom(eqBox, xr, eqBot)
+            box.set_lefttop(discBox, xl, eqBot)
+            box.set_rightbottom(discBox, xr, rLo)
+            line.set_xy1(eqLine, xl, eqMid)
+            line.set_xy2(eqLine, xr, eqMid)
+    else if not na(premBox)
+        box.delete(premBox)
+        box.delete(eqBox)
+        box.delete(discBox)
+        line.delete(eqLine)
+        premBox := na
+        eqBox := na
+        discBox := na
+        eqLine := na
+
+//──────────────────────────────────────────────────────────────────────
+// PRICE-ZONE LABEL (pinned at current price, right edge)
+//──────────────────────────────────────────────────────────────────────
+var label zoneLbl = na
+if barstate.islast
+    if showZoneLabel and rngOk
+        int zx = bar_index + 3
+        string zt = zoneTxt == "Premium" ? "PREMIUM" : zoneTxt == "Discount" ? "DISCOUNT" : "EQUILIBRIUM"
+        if na(zoneLbl)
+            zoneLbl := label.new(zx, close, zt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(zoneCol, 12), textcolor = color.white, size = size.small, text_formatting = text.format_bold)
+        else
+            label.set_xy(zoneLbl, zx, close)
+            label.set_text(zoneLbl, zt)
+            label.set_color(zoneLbl, color.new(zoneCol, 12))
+    else if not na(zoneLbl)
+        label.delete(zoneLbl)
+        zoneLbl := na
+
+//──────────────────────────────────────────────────────────────────────
+// VWAP + GRADIENT σ-BANDS  &  ZONE-READER CANDLES
+//──────────────────────────────────────────────────────────────────────
+plot(useVwap ? vwapV : na, "VWAP", color = color.new(chrome, 0), linewidth = 2)
+pU1 = plot(useVwap ? vwUp1 : na, "VWAP +σ", color = color.new(bearCol, 62))
+pL1 = plot(useVwap ? vwLo1 : na, "VWAP -σ", color = color.new(bullCol, 62))
+pU2 = plot(useVwap ? vwUp2 : na, "VWAP +2σ", color = color.new(bearCol, 80))
+pL2 = plot(useVwap ? vwLo2 : na, "VWAP -2σ", color = color.new(bullCol, 80))
+color vwBandCol = useVwap ? color.from_gradient(close, vwLo1, vwUp1, color.new(bullCol, 86), color.new(bearCol, 86)) : na
+fill(pU1, pL1, color = vwBandCol, title = "VWAP σ Band")
+fill(pU2, pU1, color = useVwap ? color.new(bearCol, 93) : na, title = "VWAP Upper σ")
+fill(pL1, pL2, color = useVwap ? color.new(bullCol, 93) : na, title = "VWAP Lower σ")
+
+color barCol = na
+if colorCandles and rngOk
+    barCol := close > eqTop ? color.new(premCol, 30) : close < eqBot ? color.new(discCol, 30) : color.new(strCol, 55)
+barcolor(barCol, title = "Zone Candles")
+
+//──────────────────────────────────────────────────────────────────────
+// DASHBOARD
+//──────────────────────────────────────────────────────────────────────
+string trendTxt = osSwing > 0 ? "Bullish" : osSwing < 0 ? "Bearish" : "Ranging"
+color  trendCol = osSwing > 0 ? bullCol : osSwing < 0 ? bearCol : txtLo
+string intTxt   = not useInt ? "Off" : osInt > 0 ? "Bullish" : osInt < 0 ? "Bearish" : "Ranging"
+color  intCol   = not useInt ? txtLo : osInt > 0 ? bullCol : osInt < 0 ? bearCol : txtLo
+string seqTxt   = highTxt + " · " + lowTxt
+string sigTxt   = buySignal ? "BUY" : sellSignal ? "SELL" : "—"
+color  sigCol   = buySignal ? bullCol : sellSignal ? bearCol : txtLo
+
+var table dash = table.new(f_pos(dashPosOpt), 2, 11, frame_color = panelBrd, frame_width = 1, border_width = 1, border_color = color.new(panelBrd, 40))
+
+if barstate.islast and showDash
+    string ps = dashSizeOpt == "Tiny" ? size.tiny : dashSizeOpt == "Normal" ? size.normal : size.small
+    table.cell(dash, 0, 0, "MARKET STRUCTURE", text_color = color.white, text_size = ps, text_halign = text.align_left, bgcolor = color.new(bullCol, 55))
+    table.cell(dash, 1, 0, "SHIFT", text_color = color.white, text_size = ps, text_halign = text.align_right, bgcolor = color.new(bearCol, 55))
+    table.cell_set_text_formatting(dash, 0, 0, text.format_bold + text.format_italic)
+    table.cell_set_text_formatting(dash, 1, 0, text.format_bold + text.format_italic)
+
+    f_row(dash, 1, "Trend",       trendTxt, trendCol, txtLo, panelBg, ps)
+    f_row(dash, 2, "Last Event",  lastEvent, lastEventCol, txtLo, panelAlt, ps)
+    f_row(dash, 3, "Swing Seq",   seqTxt, txtHi, txtLo, panelBg, ps)
+    f_row(dash, 4, "Internal",    intTxt, intCol, txtLo, panelAlt, ps)
+    f_row(dash, 5, "Price Zone",  zoneTxt, zoneCol, txtLo, panelBg, ps)
+    f_row(dash, 6, "BOS Count",   str.tostring(bosCount), txtHi, txtLo, panelAlt, ps)
+    f_row(dash, 7, "CHoCH Count", str.tostring(chochCount), txtHi, txtLo, panelBg, ps)
+    f_row(dash, 8, "Liquidity",   str.tostring(liqCount) + " (EQH/EQL)", txtHi, txtLo, panelAlt, ps)
+    f_row(dash, 9, "Signal",      sigTxt, sigCol, txtLo, panelBg, ps)
+
+    table.cell(dash, 0, 10, syminfo.ticker, text_color = txtLo, text_size = ps, text_halign = text.align_left, bgcolor = panelHdr)
+    table.cell(dash, 1, 10, timeframe.period, text_color = txtLo, text_size = ps, text_halign = text.align_right, bgcolor = panelHdr)
+
+//──────────────────────────────────────────────────────────────────────
+// ALERTS
+//──────────────────────────────────────────────────────────────────────
+alertcondition(bullBOS,   "Bullish BOS",   "MSS [JOAT]: Bullish Break of Structure on {{ticker}} {{interval}}.")
+alertcondition(bearBOS,   "Bearish BOS",   "MSS [JOAT]: Bearish Break of Structure on {{ticker}} {{interval}}.")
+alertcondition(bullCHoCH, "Bullish CHoCH", "MSS [JOAT]: Bullish Change of Character on {{ticker}} {{interval}}.")
+alertcondition(bearCHoCH, "Bearish CHoCH", "MSS [JOAT]: Bearish Change of Character on {{ticker}} {{interval}}.")
+alertcondition(buySignal,  "BUY Signal",  "MSS [JOAT]: BUY signal on {{ticker}} {{interval}}.")
+alertcondition(sellSignal, "SELL Signal", "MSS [JOAT]: SELL signal on {{ticker}} {{interval}}.")

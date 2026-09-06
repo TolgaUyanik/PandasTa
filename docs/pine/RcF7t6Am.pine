@@ -1,0 +1,212 @@
+//@version=6
+// =============================================================================
+// 82 TRADE Strategy v8.4 — 封神回歸版 (Pine Script v6)
+// =============================================================================
+// v8.4 說明：
+// 1. [升級 v6] 全面升級至 Pine Script v6 以符合 TradingView 公開發佈規定。
+// 2. [還原長線追蹤] 啟動門檻還原為 1.5R，最大化波段利潤。
+// 3. [保留安全底層] 變數隔離 (entryRisk) 與平倉重置機制，確保實盤無Bug。
+// =============================================================================
+strategy("82 TRADE Strategy v8.4 (Pine v6 Ready)",
+     overlay = true,
+     initial_capital = 2000000,
+     currency = currency.NONE,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.05,
+     calc_on_every_tick = false,
+     process_orders_on_close = false,
+     max_labels_count = 500,
+     max_lines_count = 500)
+
+// =============================================================================
+// 參數設定區
+// =============================================================================
+group_core = "1. 進場核心 (PA + Volume)"
+pivL       = input.int(5, "Sweep 左側 K 數", group = group_core)
+pivR       = input.int(2, "Sweep 右側 K 數", group = group_core)
+volMaLen   = input.int(20, "均量週期", group = group_core)
+volMult    = input.float(1.2, "放量倍數", group = group_core, step = 0.1)
+minDelta   = input.float(0.65, "K線拒絕力道門檻 (0~1)", group = group_core, step = 0.05)
+useSession = input.bool(true, "啟用 Killzones 時段", group = group_core)
+sessionTime= input.session("1500-0300", "允許進場時間 (台北)", group = group_core)
+
+group_risk = "2. 風控與部位管理"
+riskPct    = input.float(1.0, "單筆風險 %(權益)", group = group_risk, step = 0.25) / 100
+maxPosPct  = input.float(100, "最大部位佔比 %", group = group_risk, step = 10) / 100
+
+group_exit = "3. 動態追蹤與保護 (Smart Exit)"
+trailR     = input.float(1.5, "啟動追蹤/保本門檻 (R)", group = group_exit, step = 0.25, tooltip="給行情震盪空間，1.5R 啟動保本與追蹤")
+useAtrTrail= input.bool(true, "啟用 ATR 移動止損", group = group_exit)
+atrMult    = input.float(3.0, "ATR 追蹤倍數", group = group_exit, step = 0.5)
+capExitMode= input.string("收緊止損", "爆量反轉(CapExit)", options = ["直接平倉", "收緊止損", "關閉"], group = group_exit)
+capVolMult = input.float(2.5, "爆量反轉倍數門檻", group = group_exit, step = 0.5)
+capMinR    = input.float(1.0, "觸發爆量保護最低浮盈 (R)", group = group_exit, step = 0.25)
+useTimeStop= input.bool(true, "啟用虧損時間停損", group = group_exit)
+timeStopBars=input.int(15, "進場後 N 根未獲利平倉", group = group_exit)
+
+// =============================================================================
+// 模組 1：結構與濾網計算 (純粹的 Sweep + PA)
+// =============================================================================
+atrV = ta.atr(14)
+ph = ta.pivothigh(high, pivL, pivR)
+pl = ta.pivotlow(low, pivL, pivR)
+var float lastSwingHigh = na
+var float lastSwingLow = na
+
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    lastSwingLow := pl
+
+bullishSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow and close > open
+bearishSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh and close < open
+
+// 交易時段
+inSession = not useSession or not na(time(timeframe.period, sessionTime, "Asia/Taipei"))
+
+// 成交量與 PA
+volMa = ta.sma(volume, volMaLen)
+isHighVol = volume > volMult * volMa
+candleRange = high - low
+buyPressure  = candleRange == 0 ? 0 : (close - low) / candleRange
+sellPressure = candleRange == 0 ? 0 : (high - close) / candleRange
+paOkL = isHighVol and buyPressure >= minDelta
+paOkS = isHighVol and sellPressure >= minDelta
+
+// 最終訊號
+longSignal  = bullishSweep and inSession and paOkL and strategy.position_size == 0
+shortSignal = bearishSweep and inSession and paOkS and strategy.position_size == 0
+
+// =============================================================================
+// 模組 2：狀態隔離與進場管理 (安全底層)
+// =============================================================================
+var float pendingSL_L = na
+var float pendingSL_S = na
+
+if longSignal
+    pendingSL_L := low - syminfo.mintick 
+    float estRisk = close - pendingSL_L
+    if estRisk > 0
+        float riskQty = (strategy.equity * riskPct) / estRisk
+        float capQty  = (strategy.equity * maxPosPct) / close
+        float qty = math.min(riskQty, capQty)
+        if qty > 0
+            strategy.entry("Long", strategy.long, qty = qty)
+
+if shortSignal
+    pendingSL_S := high + syminfo.mintick
+    float estRisk = pendingSL_S - close
+    if estRisk > 0
+        float riskQty = (strategy.equity * riskPct) / estRisk
+        float capQty  = (strategy.equity * maxPosPct) / close
+        float qty = math.min(riskQty, capQty)
+        if qty > 0
+            strategy.entry("Short", strategy.short, qty = qty)
+
+// =============================================================================
+// 模組 3：真實成交後鎖定變數 & 出場管理
+// =============================================================================
+var float stopPrice = na
+var float entryRisk = na
+var int   entryBar  = na
+var bool  trailActive = false
+
+bool justOpenedLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+bool justOpenedShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+bool isFlat          = strategy.position_size == 0
+
+if justOpenedLong
+    stopPrice := pendingSL_L
+    entryRisk := strategy.position_avg_price - stopPrice
+    entryBar  := bar_index
+    trailActive := false
+
+if justOpenedShort
+    stopPrice := pendingSL_S
+    entryRisk := stopPrice - strategy.position_avg_price
+    entryBar  := bar_index
+    trailActive := false
+
+if isFlat
+    stopPrice := na
+    entryRisk := na
+    entryBar  := na
+    trailActive := false
+
+// =============================================================================
+// 模組 4：持倉動態風控
+// =============================================================================
+body = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+capitLong  = volume > capVolMult * volMa and upperWick >= (body * 1.5)
+capitShort = volume > capVolMult * volMa and lowerWick >= (body * 1.5)
+
+if strategy.position_size > 0
+    float avgPx = strategy.position_avg_price
+    
+    if not trailActive and (close >= avgPx + entryRisk * trailR)
+        trailActive := true
+        
+    if trailActive
+        stopPrice := math.max(stopPrice, avgPx)
+        if useAtrTrail
+            stopPrice := math.max(stopPrice, close - atrV * atrMult)
+            
+    if capitLong and capExitMode != "關閉"
+        float profR_L = (close - avgPx) / entryRisk
+        if profR_L >= capMinR
+            if capExitMode == "直接平倉"
+                strategy.close("Long", comment = "爆量出貨")
+            else
+                stopPrice := math.max(stopPrice, close - atrV) 
+                
+    if useTimeStop and not na(entryBar) and (bar_index - entryBar) >= timeStopBars and close < avgPx
+        strategy.close("Long", comment = "時間停損")
+        
+    strategy.exit("SL", from_entry = "Long", stop = stopPrice)
+
+else if strategy.position_size < 0
+    float avgPx = strategy.position_avg_price
+    
+    if not trailActive and (close <= avgPx - entryRisk * trailR)
+        trailActive := true
+        
+    if trailActive
+        stopPrice := math.min(stopPrice, avgPx)
+        if useAtrTrail
+            stopPrice := math.min(stopPrice, close + atrV * atrMult)
+            
+    if capitShort and capExitMode != "關閉"
+        float profR_S = (avgPx - close) / entryRisk
+        if profR_S >= capMinR
+            if capExitMode == "直接平倉"
+                strategy.close("Short", comment = "爆量止跌")
+            else
+                stopPrice := math.min(stopPrice, close + atrV) 
+
+    if useTimeStop and not na(entryBar) and (bar_index - entryBar) >= timeStopBars and close > avgPx
+        strategy.close("Short", comment = "時間停損")
+        
+    strategy.exit("SL", from_entry = "Short", stop = stopPrice)
+
+// =============================================================================
+// 圖面視覺化
+// =============================================================================
+plot(strategy.position_size != 0 ? stopPrice : na, color = color.new(color.fuchsia, 30), style = plot.style_linebr, linewidth = 2, title = "動態止損/保本線")
+
+float lblOff = atrV * 0.8
+if justOpenedLong
+    label.new(bar_index, low - lblOff, "▲ 多\nSL " + str.tostring(stopPrice, format.mintick), style = label.style_label_up, color = color.new(color.teal, 10), textcolor = color.white, size = size.small)
+if justOpenedShort
+    label.new(bar_index, high + lblOff, "▼ 空\nSL " + str.tostring(stopPrice, format.mintick), style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.small)
+
+if isFlat and strategy.position_size[1] != 0 and strategy.closedtrades > 0
+    int   tIdx    = strategy.closedtrades - 1
+    float ePx     = strategy.closedtrades.entry_price(tIdx)
+    float xPx     = strategy.closedtrades.exit_price(tIdx)
+    bool  wasLong = strategy.closedtrades.size(tIdx) > 0
+    float pct     = (xPx / ePx - 1) * 100 * (wasLong ? 1 : -1)
+    
+    label.new(bar_index, wasLong ? high + lblOff : low - lblOff, (pct >= 0 ? "✔ +" : "✘ ") + str.tostring(pct, "#.##") + "%", style = wasLong ? label.style_label_down : label.style_label_up, color = pct >= 0 ? color.new(color.green, 10) : color.new(color.gray, 10), textcolor = color.white, size = size.small)
+    line.new(strategy.closedtrades.entry_bar_index(tIdx), ePx, bar_index, xPx, color = pct >= 0 ? color.new(color.green, 30) : color.new(color.red, 30), width = 2, style = line.style_dotted)

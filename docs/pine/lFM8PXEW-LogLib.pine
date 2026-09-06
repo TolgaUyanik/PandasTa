@@ -1,0 +1,1268 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 15
+// @tw_status draft
+// Single source of truth: import cybermediaboy/LogLib/15
+// @description LogLib — unified logger (BUFFERED/PER_BAR/OFF), bit-packed plot
+//              encoders, perf timing (tick/tock), load timer, debug inspector,
+//              AND a generic assisted-labeling suite (SINGLE / DUAL High-Low /
+//              RANGE) with configurable capture, AUTO pivot resolution, stable
+//              slotId for downstream diffing, and adaptive export (CSV/Q8/log).
+//              v11: Section 3B adds MemLedger/MemRow aggregation, mem_footprint_floor(),
+//              thief(), to_line(), to_table() — single authoritative memory accounting.
+//              v14: Section 2D adds StructLog fluent builder for structured logging.
+library("LogLib", overlay=true)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (Pine v6, frozen ordering — see P11 enum lifetime rule)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Logger operating mode
+// @field OFF      no-op (production)
+// @field BUFFERED accumulate, auto-flush on char/line thresholds + explicit flush()
+// @field PER_BAR  accumulate, flush on barstate.isconfirmed
+// FROZEN ORDER: OFF=0, BUFFERED=1, PER_BAR=2 — do NOT reorder; backward-compat
+//               for int(mode) reads from legacy Logger.mode field.
+export enum LogMode
+    OFF
+    BUFFERED
+    PER_BAR
+
+// @enum Log severity level
+// FROZEN ORDER: DEBUG=0, INFO=1, WARN=2, ERROR=3
+export enum LogLevel
+    DEBUG
+    INFO
+    WARN
+    ERROR
+
+// @enum Label class for assisted labeling.
+// FROZEN ORDER: AUTO=0, HIGH=1, LOW=2, REJECT=3, NEUTRAL=4 — append new at end only.
+export enum LabelClass
+    AUTO
+    HIGH
+    LOW
+    REJECT
+    NEUTRAL
+
+// @enum Capture target geometry.
+// FROZEN ORDER: SINGLE=0 (one-type bars), DUAL=1 (separate H/L), RANGE=2 (bar ranges)
+export enum CaptureKind
+    SINGLE
+    DUAL
+    RANGE
+
+// @enum Dataset export format selected by LabelStore.export_auto().
+// FROZEN ORDER: CSV=0, Q8=1, LOG=2
+export enum ExportFmt
+    CSV
+    Q8
+    LOG
+
+// Legacy mode integer accessors — preserved for old call sites that used
+// f_logger_mode_buffered() etc. Internally these now mirror enum ordinals.
+export f_logger_mode_off()      => 0
+export f_logger_mode_buffered() => 1
+export f_logger_mode_stream()   => 1   // STREAM was old name for BUFFERED w/ tight thresholds; aliased
+export f_logger_mode_per_bar()  => 2
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: BIT-ENCODED PLOT UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+// Compress multiple oscillator/state values into single plot for data window.
+
+// @function Quantize unsigned float to N-bit integer
+export f_q_unsigned(float x, float scale, int maxv) =>
+    int(math.max(0.0, math.min(float(maxv), math.round(math.max(0.0, nz(x)) * scale))))
+
+// @function Quantize signed float to N-bit integer with bias offset
+export f_q_signed(float x, float scale, int bias, int maxv) =>
+    int(math.max(0.0, math.min(float(maxv), math.round(nz(x) * scale + bias))))
+
+// @function Pack three 10-bit values into single float for data window
+export f_pack3x10(int a, int b, int c) =>
+    float(a) + 1024.0 * float(b) + 1048576.0 * float(c)
+
+// @function Pack four 8-bit values into single float for data window
+export f_pack4x8(int a, int b, int c, int d) =>
+    float(a) + 256.0 * float(b) + 65536.0 * float(c) + 16777216.0 * float(d)
+
+export f_unpack3x10_a(int packed) => packed % 1024
+export f_unpack3x10_b(int packed) => int(packed / 1024) % 1024
+export f_unpack3x10_c(int packed) => int(packed / 1048576) % 1024
+export f_unpack4x8_a(int packed) => packed % 256
+export f_unpack4x8_b(int packed) => int(packed / 256) % 256
+export f_unpack4x8_c(int packed) => int(packed / 65536) % 256
+export f_unpack4x8_d(int packed) => int(packed / 16777216) % 256
+
+// @function Encode 8 binary flags into 8-bit int
+export f_encode_flags(bool s0, bool s1, bool s2, bool s3, bool s4, bool s5, bool s6, bool s7) =>
+    (s0 ? 1 : 0) + (s1 ? 2 : 0) + (s2 ? 4 : 0) + (s3 ? 8 : 0) + (s4 ? 16 : 0) + (s5 ? 32 : 0) + (s6 ? 64 : 0) + (s7 ? 128 : 0)
+
+// @function Encode 5 ternary states (0,1,2) into base-3 integer
+export f_encode_ternary(int s0, int s1, int s2, int s3, int s4) =>
+    s0 + (s1 * 3) + (s2 * 9) + (s3 * 27) + (s4 * 81)
+
+export f_decode_flag(int encoded, int bit_index) =>
+    int(encoded / math.pow(2, bit_index)) % 2 == 1
+
+export f_decode_ternary(int encoded, int state_index) =>
+    int(encoded / math.pow(3, state_index)) % 3
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: UNIFIED LOGGER
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type Logger state. Mode field stays int for backward compat with persisted
+//       call sites; new code should use LogMode enum and pass int(LogMode.X).
+// @field mode 0=OFF, 1=BUFFERED, 2=PER_BAR (matches LogMode ordinal)
+export type Logger
+    int    mode
+    string buffer
+    int    line_count
+    int    max_lines
+    int    max_chars
+    string header
+    bool   header_written
+    string label
+    map<string, int> markers
+    float  last_delta_ms
+    string last_tag
+
+// ─── Factories ─────────────────────────────────────────────────────────────
+
+// @function Initialize Logger (legacy signature, preserved)
+// @param mode 0=OFF/STREAM-alias, 1=BUFFERED, 2=PER_BAR
+export f_logger_new(simple int mode, simple string label,
+                    simple string header, simple int max_lines) =>
+    Logger.new(mode = mode, buffer = "", line_count = 0,
+               max_lines = max_lines > 0 ? max_lines : 2500,
+               max_chars = 4000, header = header,
+               header_written = false, label = label,
+               markers = map.new<string, int>(),
+               last_delta_ms = 0.0, last_tag = "")
+
+// @function Enum-aware factory (preferred for new code)
+export f_logger_new_enum(simple LogMode mode, simple string label,
+                         simple string header, simple int max_lines) =>
+    int mi = mode == LogMode.OFF ? 0 : mode == LogMode.BUFFERED ? 1 : 2
+    f_logger_new(mi, label, header, max_lines)
+
+// @function Quick BUFFERED logger with default thresholds (4000 chars / 2500 lines)
+export f_new_logger_buffered(simple string label, simple string header) =>
+    f_logger_new(1, label, header, 2500)
+
+// @function Quick PER_BAR logger
+export f_new_logger_per_bar(simple string label, simple string header) =>
+    f_logger_new(2, label, header, 2500)
+
+// @function Quick OFF logger (no-op, for production builds)
+export f_new_logger_off() =>
+    f_logger_new(0, "", "", 0)
+
+// ─── Core methods ──────────────────────────────────────────────────────────
+
+// @function Append a row to the log; routes by mode.
+// @details OFF: discarded. BUFFERED: auto-flush when chars/lines threshold hit.
+//          PER_BAR: caller must invoke flush() on barstate.isconfirmed.
+export method append(Logger l, string row) =>
+    if l.mode == 0
+        l  // OFF — no-op
+    else
+        if not l.header_written
+            l.buffer := "=== " + l.label + " ===\n" + l.header + "\n"
+            l.header_written := true
+
+        if l.mode == 1
+            // BUFFERED: auto-flush before append if next would exceed
+            if str.length(l.buffer) + str.length(row) + 1 >= l.max_chars or l.line_count >= l.max_lines
+                log.info(l.buffer)
+                l.buffer := ""
+                l.line_count := 0
+            l.buffer := l.buffer + row + "\n"
+            l.line_count += 1
+        else
+            // PER_BAR (mode == 2): accumulate without auto-flush
+            l.buffer := l.buffer + row + "\n"
+            l.line_count += 1
+        l
+
+// @function Explicit flush — drains any non-empty buffer.
+// @details Does NOT depend on barstate.islast. Caller invokes at natural
+//          boundaries (RCOM completion, manual checkpoint, barstate.isconfirmed
+//          for PER_BAR). BUFFERED mode primary flush remains automatic via append().
+export method flush(Logger l) =>
+    if (l.mode == 1 or l.mode == 2) and str.length(l.buffer) > 0
+        log.info(l.buffer)
+        l.buffer := ""
+        l.line_count := 0
+    l
+
+// @function Reset buffer without flushing (drops accumulated content)
+export method reset(Logger l) =>
+    l.buffer := ""
+    l.line_count := 0
+    l.header_written := false
+    l
+
+// ─── Convenience writers ───────────────────────────────────────────────────
+
+// @function Append key=value diagnostic line
+export method kv(Logger l, string key, float val) =>
+    l.append(key + "=" + str.tostring(val, "#.####"))
+
+// @function Append tagged event with bar_index prefix
+export method event(Logger l, string event_type, string payload) =>
+    l.append(str.tostring(bar_index) + "," + event_type + "," + payload)
+
+// @function Severity-tagged writers (level prefix added)
+export method debug(Logger l, string msg) => l.append("[DEBUG] " + msg)
+export method info (Logger l, string msg) => l.append("[INFO] "  + msg)
+export method warn (Logger l, string msg) => l.append("[WARN] "  + msg)
+
+// @function ERROR — appends + immediate flush (drains accumulated buffer too)
+export method error(Logger l, string msg) =>
+    l.append("[ERROR] " + msg)
+    l.flush()
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2B: PERFORMANCE TIMING (tick/tock)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export method tick(Logger l, string tag) =>
+    map.put(l.markers, tag, timenow)
+    l
+
+export method tock(Logger l, string tag) =>
+    int start_ts = map.get(l.markers, tag)
+    if not na(start_ts)
+        l.last_delta_ms := timenow - start_ts
+        l.last_tag := tag
+        l.append("[perf] " + tag + " = " + str.tostring(l.last_delta_ms, "#.##") + " ms")
+    l
+
+export method get_last_timing(Logger l) =>
+    [l.last_delta_ms, l.last_tag]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: MEMORY ALLOCATION COUNTERS
+// ═══════════════════════════════════════════════════════════════════════════
+// Accurate memory footprint estimation for Pine Script data structures.
+// Accounts for UDT object overhead, map storage, and array containers.
+//
+// OVERHEAD MULTIPLIERS (empirically derived):
+// - Simple UDT (2-3 fields): fields + 1
+// - Medium UDT (4-6 fields): fields + 2
+// - Complex UDT (7+ fields): fields + 3
+// - Map entry: 2 units per entry (key + value)
+// - Array container: 1 unit per array object
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BASIC ARRAY SIZE COUNTERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Count memory units for array<int>
+// @param a Array to measure
+// @returns int Number of memory units (1 per element)
+export mem_array_int(array<int> a) =>
+    array.size(a)
+
+// @function Count memory units for array<float>
+// @param a Array to measure
+// @returns int Number of memory units (1 per element)
+export mem_array_float(array<float> a) =>
+    array.size(a)
+
+// @function Count memory units for array<bool>
+// @param a Array to measure
+// @returns int Number of memory units (1 per element)
+export mem_array_bool(array<bool> a) =>
+    array.size(a)
+
+// @function Count memory units for array<string>
+// @param a Array to measure
+// @returns int Number of memory units (1 per element)
+export mem_array_string(array<string> a) =>
+    array.size(a)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UDT ARRAY COUNTERS WITH OVERHEAD
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Count memory units for array of UDT objects with overhead
+// @param size Array size (use array.size(your_array))
+// @param fields_per_object Number of fields in UDT
+// @param overhead_per_object Object overhead (default 2 for medium UDT)
+// @returns int Total memory units = size × (fields + overhead)
+// @example type W3LtfBar has 6 fields (o,h,l,c,v,t) + ~2 overhead = 8 units per object
+//          array<W3LtfBar> rqCur with 50 elements = 50 × 8 = 400 units
+//          units = mem_udt_array(array.size(rqCur), 6, 2)
+export mem_udt_array(int size, int fields_per_object, int overhead_per_object = 2) =>
+    size * (fields_per_object + overhead_per_object)
+
+// @function Count memory units for array<W3LtfBar> (6 fields + 2 overhead = 8)
+// @param size Array size
+// @returns int Memory units (size × 8)
+export mem_ltfbar_array(int size) =>
+    size * 8
+
+// @function Count memory units for array<W3LiqBar> (2 fields + 1 overhead = 3)
+// @param size Array size
+// @returns int Memory units (size × 3)
+export mem_liqbar_array(int size) =>
+    size * 3
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAP COUNTERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Count memory units for map<int, float>
+// @param m Map to measure
+// @returns int Memory units (size × 2, key + value per entry)
+export mem_map_int_float(map<int, float> m) =>
+    map.size(m) * 2
+
+// @function Count memory units for map<int, int>
+// @param m Map to measure
+// @returns int Memory units (size × 2, key + value per entry)
+export mem_map_int_int(map<int, int> m) =>
+    map.size(m) * 2
+
+// @function Count memory units for map<string, float>
+// @param m Map to measure
+// @returns int Memory units (size × 2, key + value per entry)
+export mem_map_string_float(map<string, float> m) =>
+    map.size(m) * 2
+
+// @function Count memory units for any map (generic)
+// @param size Map size (use map.size(your_map))
+// @returns int Memory units (size × 2, key + value per entry)
+export mem_map_generic(int size) =>
+    size * 2
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NESTED ARRAY STRUCTURES
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Count memory units for array of arrays (e.g., array<RollSlot>)
+// @param container_size Size of outer array
+// @param inner_units_total Total units from all inner arrays (pre-calculated)
+// @returns int Total units = container overhead + sum of inner units
+// @example type RollSlot has 3 arrays: rowId, buy, sell
+//          array<RollSlot> rollSlots with 7 slots
+//          Step 1: Calculate inner units for each slot
+//          int inner_total = 0
+//          for i = 0 to 6
+//              RollSlot s = array.get(rollSlots, i)
+//              inner_total += array.size(s.rowId) + array.size(s.buy) + array.size(s.sell)
+//          Step 2: Add container overhead
+//          units = mem_array_of_arrays(7, inner_total)
+export mem_array_of_arrays(int container_size, int inner_units_total) =>
+    container_size + inner_units_total
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPOSITE STRUCTURE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Count memory units for W3BucketPack UDT
+// @param rowId_size Size of rowId array
+// @param lo_size Size of lo array
+// @param hi_size Size of hi array
+// @param buy_size Size of buy array
+// @param sell_size Size of sell array
+// @param liqBuy_size Size of liqBuy array
+// @param liqSell_size Size of liqSell array
+// @returns int Total units (7 arrays + 5 scalar fields)
+export mem_bucket_pack(int rowId_size, int lo_size, int hi_size, int buy_size, int sell_size, int liqBuy_size, int liqSell_size) =>
+    rowId_size + lo_size + hi_size + buy_size + sell_size + liqBuy_size + liqSell_size + 5
+
+// @function Count memory units for RollSlot UDT
+// @param rowId_size Size of rowId array
+// @param buy_size Size of buy array
+// @param sell_size Size of sell array
+// @returns int Total units (3 arrays)
+export mem_rollslot(int rowId_size, int buy_size, int sell_size) =>
+    rowId_size + buy_size + sell_size
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SGD / ML LIBRARY OVERHEAD ESTIMATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Estimate memory units for SGD model (opaque library structure)
+// @param n_features Number of features
+// @returns int Approximate units (n_features × 4 for weights + gradients + momentum + variance)
+export mem_sgd_model(int n_features) =>
+    n_features * 4
+
+// @function Estimate memory units for Scaler model (opaque library structure)
+// @param n_features Number of features
+// @returns int Approximate units (n_features × 2 for min + max per feature)
+export mem_scaler_model(int n_features) =>
+    n_features * 2
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3B: MEMORY LEDGER
+// ═══════════════════════════════════════════════════════════════════════════
+// Aggregation + footprint-context model + table renderer.
+// Eliminates duplicated fdataunits / MEMFLOOR / table.cell blocks in indicators.
+//
+// Usage pattern:
+//   var MemLedger mem = mem_ledger_new()
+//   mem.put("Feed",   Log.mem_ltfbar_array(array.size(rqCur)), "cap", true)
+//   mem.put("fprows", Log.mem_footprint_floor(fpGB, scanHi-scanLo, fpTPR, array.size(fprows)), "r/b", true)
+//   mem.seal()
+//   if ilogexport and barstate.islast
+//       diagLogger.append("MEM," + mem.to_line(bar_index))
+//       mem.to_table(ftbl, startRow)
+
+// @function Footprint-context floor estimator.
+// @details  request.footprint context is pre-paid across the GATED bar span.
+//           rows/bar = price_range / (ticksPerRow × mintick).
+//           Returns max(model, live_snapshot) so the cell never under-reports.
+// @param gatedBars   Bars where the if-gate lets footprint allocate (iwarmup + intebars).
+// @param rangePrice  Price envelope used for row count estimate (scanHi - scanLo).
+// @param ticksPerRow fpTicksPerRow actually passed to request.footprint.
+// @param liveRows    array.size(fp.rows()) on the current bar (0 outside gate is fine).
+// @returns int       Floor units = max(gated_model, live_snapshot) × 7 fields.
+export mem_footprint_floor(int gatedBars, float rangePrice, int ticksPerRow, int liveRows) =>
+    int rpb   = ticksPerRow > 0 ? math.max(1, math.round(rangePrice / (ticksPerRow * syminfo.mintick))) : math.max(1, liveRows)
+    int model = gatedBars * rpb * 7
+    math.max(model, liveRows * 7)
+
+// ─── MemRow — one named accountable structure ─────────────────────────────
+
+// @type One row in the memory ledger: a named consumer with units, peak, and metadata.
+// @field name   Short name shown in table col 0.
+// @field units  Current memory units this tick.
+// @field peak   Realtime high-water mark (survives across ticks when MemLedger is var).
+// @field note   Capacity / detail text for table col 2.
+// @field gated  true = floor-tier (always-on); false = feature-gated.
+export type MemRow
+    string name
+    int    units
+    int    peak
+    string note
+    bool   gated
+
+// ─── MemLedger — accumulates rows, derives total ───────────────────────────
+
+// @type Memory ledger: holds a list of MemRows and their summed total.
+// @field rows  Ordered list of MemRow entries.
+// @field total Recomputed by seal() after all puts.
+export type MemLedger
+    array<MemRow> rows
+    int           total
+
+// @function Create a new empty MemLedger.
+export mem_ledger_new() =>
+    MemLedger.new(rows = array.new<MemRow>(), total = 0)
+
+// @function Add or update a row by name (idempotent — safe to call every bar).
+// @param m     The ledger.
+// @param name  Row identifier.
+// @param units Current memory units.
+// @param note  Optional detail string (e.g. "27r", "500b").
+// @param gated true = floor-tier consumer.
+export method put(MemLedger m, string name, int units, string note = "", bool gated = false) =>
+    int found = -1
+    int _sz = array.size(m.rows)
+    if _sz > 0
+        for i = 0 to _sz - 1
+            if array.get(m.rows, i).name == name
+                found := i
+                break
+    if found >= 0
+        MemRow r = array.get(m.rows, found)
+        r.units := units
+        r.peak  := math.max(r.peak, units)
+        r.note  := note
+        array.set(m.rows, found, r)
+    else
+        array.push(m.rows, MemRow.new(name, units, units, note, gated))
+    m
+
+// @function Recompute total from all rows. Call once after all puts().
+export method seal(MemLedger m) =>
+    int t = 0
+    for r in m.rows
+        t += r.units
+    m.total := t
+    m
+
+// @function Return [name, units] of the largest single consumer.
+export method thief(MemLedger m) =>
+    string nm = ""
+    int    mx = -1
+    for r in m.rows
+        if r.units > mx
+            mx := r.units
+            nm := r.name
+    [nm, mx]
+
+// @function Serialize ledger to a CSV line for the diag logger.
+// @details  Replaces MEMUNITS + MEMFLOOR log blocks with a single call.
+// @param barIdx  bar_index to prefix.
+export method to_line(MemLedger m, int barIdx) =>
+    string s = "bar=" + str.tostring(barIdx) + ",total=" + str.tostring(m.total)
+    for r in m.rows
+        s += "," + r.name + "=" + str.tostring(r.units) + (r.peak > r.units ? "(pk" + str.tostring(r.peak) + ")" : "")
+    s
+
+// @function Render the ledger into a table, replacing all inlined table.cell mem rows.
+// @param m         The ledger.
+// @param t         Target table (must be pre-created by caller).
+// @param startRow  First row index in the table to write into.
+// @param floorCol  Color for floor-tier (gated=true) name labels.
+// @param featCol   Color for feature-tier (gated=false) name labels.
+export method to_table(MemLedger m, table t, int startRow, color floorCol = color.orange, color featCol = color.aqua) =>
+    int n = array.size(m.rows)
+    if n > 0
+        for i = 0 to n - 1
+            MemRow r = array.get(m.rows, i)
+            color nc = r.gated ? floorCol : featCol
+            string peakStr = r.peak > r.units ? "pk" + str.tostring(r.peak) : r.note
+            table.cell(t, 0, startRow + i, r.name,                text_color = nc,            text_size = size.small)
+            table.cell(t, 1, startRow + i, str.tostring(r.units), text_color = color.white,   text_size = size.small)
+            table.cell(t, 2, startRow + i, peakStr,               text_color = color.gray,    text_size = size.small)
+    m
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: INDICATOR LOAD TIMER
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type LoadTimer
+    int   start_ms
+    float load_secs_latched
+    bool  captured
+
+export f_load_timer_new() =>
+    LoadTimer.new(start_ms = timenow, load_secs_latched = na, captured = false)
+
+export method update(LoadTimer lt) =>
+    if na(lt.start_ms)
+        lt.start_ms := timenow
+    if barstate.islastconfirmedhistory and not lt.captured
+        lt.load_secs_latched := (timenow - lt.start_ms) / 1000.0
+        lt.captured := true
+    lt.load_secs_latched
+
+export method get_time(LoadTimer lt) =>
+    [lt.load_secs_latched, lt.captured]
+
+export method get_formatted(LoadTimer lt) =>
+    na(lt.load_secs_latched) ? "..." : str.tostring(lt.load_secs_latched, "#.##") + "s"
+
+export method get_color(LoadTimer lt) =>
+    na(lt.load_secs_latched) ? color.gray :
+      lt.load_secs_latched <= 15.0 ? color.lime :
+      lt.load_secs_latched <= 32.0 ? color.orange : color.red
+
+export method log_time(LoadTimer lt, string prefix = "LOAD_TIME") =>
+    if lt.captured
+        log.info(prefix + ": " + str.tostring(lt.load_secs_latched, "#.####") + "s")
+
+export method log_to_logger(LoadTimer lt, Logger logger) =>
+    if lt.captured
+        logger.append("load_time_secs," + str.tostring(lt.load_secs_latched, "#.####"))
+
+export method add_to_table(LoadTimer lt, table t, int col, int row) =>
+    string time_text = lt.get_formatted()
+    color  time_color = lt.get_color()
+    table.cell(t, col, row, time_text, text_color = time_color, text_size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: DEBUG INSPECTOR (Assisted Labeling — manual var dump)
+// ═══════════════════════════════════════════════════════════════════════════
+// Drop-in debug inspector: user selects bar(s) via input.time(confirm=true),
+// call add() to log variable name->value pairs, render() draws vertical line
+// + label listing all logged values. Supports single-bar and bar-range modes.
+
+// @type Per-bar log entry captured inside the range
+export type LogRow
+    int    idx  = na
+    float  hi   = na
+    float  lo   = na
+    string body = ""
+
+// @type Inspector state container
+export type Inspector
+    bool   active    = false
+    bool   rangeMode = false
+    int    tgTime    = na
+    int    tgTime2   = na
+    float  atr       = na
+    string title     = "🔍 INSPECTOR"
+    array<string>  names = na
+    array<string>  vals  = na
+    array<LogRow>  rows  = na
+
+// @function Creates an Inspector
+export f_inspector_new(bool enabled, int startTime, int endTime = na, bool rangeMode = false, string title = "🔍 INSPECTOR") =>
+    Inspector.new(active = enabled, rangeMode = rangeMode, tgTime = startTime, tgTime2 = endTime,
+         title = title, names = array.new<string>(), vals = array.new<string>(),
+         rows = array.new<LogRow>())
+
+// @function Determines if the current bar should be logged. Single → exact match;
+//   range → time within [tgTime, tgTime2]. Resets transient buffer on match.
+export method scan(Inspector self, simple int atrLen = 14) =>
+    bool single = self.active and not self.rangeMode and time >= self.tgTime and time[1] < self.tgTime
+    bool inRange = self.active and self.rangeMode and time >= self.tgTime and time <= self.tgTime2
+    bool onTarget = single or inRange
+    if onTarget
+        self.atr := ta.atr(atrLen)
+        array.clear(self.names)
+        array.clear(self.vals)
+    onTarget
+
+// @function Logs a float (no-op off-target)
+export method add(Inspector self, bool onTarget, string name, float value, string fmt = "#.####") =>
+    if onTarget
+        array.push(self.names, name)
+        array.push(self.vals, str.tostring(value, fmt))
+
+// @function Logs an int
+export method add(Inspector self, bool onTarget, string name, int value) =>
+    if onTarget
+        array.push(self.names, name)
+        array.push(self.vals, str.tostring(value))
+
+// @function Logs a bool as ✓/✗
+export method add(Inspector self, bool onTarget, string name, bool value) =>
+    if onTarget
+        array.push(self.names, name)
+        array.push(self.vals, value ? "✓" : "✗")
+
+// @function Logs a string
+export method add(Inspector self, bool onTarget, string name, string value) =>
+    if onTarget
+        array.push(self.names, name)
+        array.push(self.vals, value)
+
+// @function Commits the current bar's buffered values into a LogRow.
+export method commit(Inspector self, bool onTarget, bool compact = false) =>
+    if onTarget
+        string bodyText = self.title + (compact ? "  " : "\n═══════════════\n")
+        int n = array.size(self.names)
+        for i = 0 to (n > 0 ? n - 1 : na)
+            string nm = array.get(self.names, i)
+            string vl = array.get(self.vals, i)
+            bodyText += compact ? (nm + "=" + vl + (i < n - 1 ? " | " : "")) : (nm + ": " + vl + "\n")
+        array.push(self.rows, LogRow.new(idx = bar_index, hi = high, lo = low, body = bodyText))
+
+// @function Draws line(s) + label(s) on the last bar.
+export method render(Inspector self, int maxRows = 60, color lineColor = color.yellow, color labelColor = color.black, color txtColor = color.yellow) =>
+    var array<line>  lns  = array.new<line>()
+    var array<label> lbls = array.new<label>()
+    color labelBg = color.new(labelColor, 10)
+    if barstate.islast and self.active
+        for ln in lns
+            line.delete(ln)
+        for lb in lbls
+            label.delete(lb)
+        array.clear(lns)
+        array.clear(lbls)
+        int total = array.size(self.rows)
+        if total > 0
+            int startI = math.max(0, total - maxRows)
+            if self.rangeMode
+                LogRow first = array.get(self.rows, startI)
+                LogRow last  = array.get(self.rows, total - 1)
+                array.push(lns, line.new(first.idx, first.lo - self.atr * 2, first.idx, first.hi + self.atr * 2, color = lineColor, width = 1, style = line.style_dotted))
+                array.push(lns, line.new(last.idx,  last.lo  - self.atr * 2, last.idx,  last.hi  + self.atr * 2, color = lineColor, width = 1, style = line.style_dotted))
+            for i = startI to total - 1
+                LogRow r = array.get(self.rows, i)
+                if not self.rangeMode
+                    array.push(lns, line.new(r.idx, r.lo - self.atr * 2, r.idx, r.hi + self.atr * 2, color = lineColor, width = 2, style = line.style_dashed))
+                array.push(lbls, label.new(r.idx, r.hi + self.atr * 2, r.body,
+                     style = label.style_label_down, color = labelBg, textcolor = txtColor,
+                     size = self.rangeMode ? size.small : size.normal, textalign = text.align_left))
+
+// @function Outputs Inspector data to Pine console via log.info.
+export method log_to_console(Inspector self) =>
+    if self.active and barstate.islast
+        int total = array.size(self.rows)
+        if total > 0
+            string header = "=== " + self.title + " ===\n"
+            header += "Mode: " + (self.rangeMode ? "RANGE" : "SINGLE") + "\n"
+            header += "Bars logged: " + str.tostring(total) + "\n"
+            header += "═══════════════════════════════════════\n"
+            string output = header
+            for i = 0 to total - 1
+                LogRow r = array.get(self.rows, i)
+                output += "\n[Bar #" + str.tostring(r.idx) + "]\n"
+                output += "Time: " + str.format_time(time[bar_index - r.idx], "yyyy-MM-dd HH:mm", syminfo.timezone) + "\n"
+                output += "High: " + str.tostring(r.hi, "#.####") + " | Low: " + str.tostring(r.lo, "#.####") + "\n"
+                output += r.body + "\n"
+                output += "───────────────────────────────────────\n"
+            log.info(output)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: JSON CONSTRUCTION HELPERS (Debug Alert Protocol v1.1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Escape string for JSON value (internal helper)
+f_json_escape(string s) =>
+    string r = str.replace(s, "\\", "\\\\")
+    r := str.replace(r, "\"", "\\\"")
+    r
+
+// @function Build JSON field: "key":value (string value)
+export f_json_field_str(string key, string val) =>
+    '"' + key + '":"' + f_json_escape(val) + '"'
+
+// @function Build JSON field: "key":value (numeric value; na→null)
+export f_json_field_num(string key, float val) =>
+    '"' + key + '":' + (na(val) ? "null" : str.tostring(val))
+
+// @function Build JSON field: "key":value (integer value)
+export f_json_field_int(string key, int val) =>
+    '"' + key + '":' + str.tostring(val)
+
+// @function Build JSON field: "key":value (boolean value)
+export f_json_field_bool(string key, bool val) =>
+    '"' + key + '":' + (val ? "true" : "false")
+
+// @function Build complete JSON object for debug alerts
+export f_debug_json(string source, string tag, array<string> fields) =>
+    string json = '{' + f_json_field_str("source", source)
+    json := json + ',' + f_json_field_str("tag", tag)
+    json := json + ',' + f_json_field_int("bar", bar_index)
+    json := json + ',' + f_json_field_int("time", timenow)
+    json := json + ',' + f_json_field_str("sym", syminfo.tickerid)
+    json := json + ',' + f_json_field_str("tf", timeframe.period)
+    if array.size(fields) > 0
+        for i = 0 to array.size(fields) - 1
+            json := json + ',' + array.get(fields, i)
+    json + '}'
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: ASSISTED LABELING SUITE (generic, importable)
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE
+//   Reusable engine to label a configurable SET of bars or bar-ranges with a
+//   feature vector captured AT EVENT TIME (no historical[offset] lookback) and
+//   export the labeled dataset via alert (CSV / Q8 pack) or Pine console
+//   (log.info) with automatic format selection by size.
+//
+// TWO PUSH PATHS (per your spec):
+//   (1) ON-LOAD FULL PUSH: when all targets are labeled, host calls finalize()
+//       then export_auto() at barstate.islast → whole bit-packable dataset out.
+//   (2) PER-LABEL DELTA: each sample carries a stable slotId. Because an
+//       input.time move forces a FULL recompile (Pine wipes state, alert() only
+//       fires on realtime), reliable "which line moved" detection is not possible
+//       purely in Pine. Strategy = re-push full dataset (cheap) and let the
+//       downstream webhook diff by slotId to act only on the changed label.
+//       export_one(slotId) is provided for RUN-mode single-signal pushes.
+//
+// HISTORICAL-BUFFER RULE: capture() COPIES feats/high/low/atr at match time via
+//   array.copy — never reads series[offset] later — avoiding RE10143 overflow.
+//
+// CAPTURE MODES: SINGLE (one homogeneous set), DUAL (HIGH & LOW separable via
+//   highs()/lows() for two matrices), RANGE (every bar in [tStart,tEnd]).
+
+// @type One labeled sample. Features copied at capture (no lookback).
+// @field slotId  STABLE id == target registration order; downstream diff key
+// @field cls     LabelClass ordinal resolved at finalize()
+// @field target  Numeric target: HIGH=+1, LOW=-1, REJECT/NEUTRAL=0 (configurable)
+// @field idx     bar_index at capture
+// @field tms     time (ms) at capture
+// @field hi/lo   bar extremes at capture (drawing/QC)
+// @field atr     atr at capture (spacing/QC)
+// @field feats   copied feature vector (length == cfg.nfeat)
+// @field rangeId range group id (RANGE mode), else -1
+export type LabSample
+    int           slotId = na
+    int           cls    = na
+    float         target = na
+    int           idx    = na
+    int           tms    = na
+    float         hi     = na
+    float         lo     = na
+    float         atr    = na
+    array<float>  feats  = na
+    int           rangeId = -1
+
+// @type Pending target spec registered by the host before capture.
+// @field slotId  stable registration index (diff key)
+// @field tStart  start (or single) time in ms
+// @field tEnd    end time in ms (RANGE only; na for point targets)
+// @field cls     user-chosen LabelClass (AUTO triggers pivot resolution)
+// @field matched true once a bar matched (point targets, dedup)
+// @field rangeId stable id for RANGE grouping
+export type LabTarget
+    int  slotId  = na
+    int  tStart  = na
+    int  tEnd    = na
+    int  cls     = na
+    bool matched = false
+    int  rangeId = -1
+
+// @type Configuration for the labeling engine. All knobs live here.
+export type LabelCfg
+    int    nfeat      = 7
+    int    kind       = 1     // CaptureKind ordinal
+    float  tgtHigh    = 1.0
+    float  tgtLow     = -1.0
+    float  tgtReject  = 0.0
+    float  qLo        = -3.2  // Q8 clamp lower bound
+    float  qHi        = 3.2   // Q8 clamp upper bound
+    int    csvSafeMax = 3800  // char ceiling before Q8 fallback (alert cap 4000)
+    int    featPrec   = 4     // CSV feature decimals (4 or 5)
+    bool   autoResolve = true // resolve AUTO via pivot catalog
+
+// @type Engine state.
+export type LabelStore
+    LabelCfg          cfg     = na
+    array<LabTarget>  targets = na
+    array<LabSample>  samples = na
+    array<int>        pivHigh = na
+    array<int>        pivLow  = na
+    int               rangeSeq = 0
+
+// ─── Factories ───────────────────────────────────────────────────────────────
+
+// @function Build a LabelCfg with defaults; override any field inline.
+export f_label_cfg(simple int nfeat = 7, simple CaptureKind kind = CaptureKind.DUAL,
+                   simple float tgtHigh = 1.0, simple float tgtLow = -1.0,
+                   simple float tgtReject = 0.0, simple float qLo = -3.2,
+                   simple float qHi = 3.2, simple int csvSafeMax = 3800,
+                   simple int featPrec = 4, simple bool autoResolve = true) =>
+    int ki = kind == CaptureKind.SINGLE ? 0 : kind == CaptureKind.DUAL ? 1 : 2
+    LabelCfg.new(nfeat = nfeat, kind = ki, tgtHigh = tgtHigh, tgtLow = tgtLow,
+                 tgtReject = tgtReject, qLo = qLo, qHi = qHi,
+                 csvSafeMax = csvSafeMax, featPrec = featPrec, autoResolve = autoResolve)
+
+// @function Create the labeling store from a config.
+export f_label_store_new(LabelCfg cfg) =>
+    LabelStore.new(cfg = cfg, targets = array.new<LabTarget>(),
+                   samples = array.new<LabSample>(),
+                   pivHigh = array.new<int>(), pivLow = array.new<int>(), rangeSeq = 0)
+
+// @function Internal: map LabelClass enum to ordinal int.
+f_cls_ord(LabelClass c) =>
+    c == LabelClass.AUTO ? 0 : c == LabelClass.HIGH ? 1 : c == LabelClass.LOW ? 2 : c == LabelClass.REJECT ? 3 : 4
+
+// ─── Target registration (call once, barstate.isfirst) ───────────────────────
+
+// @function Register a point target (single bar) at a timestamp. slotId auto-assigned.
+export method add_target(LabelStore self, int tms, LabelClass cls = LabelClass.AUTO) =>
+    int sid = array.size(self.targets)
+    array.push(self.targets, LabTarget.new(slotId = sid, tStart = tms, tEnd = na,
+         cls = f_cls_ord(cls), matched = false, rangeId = -1))
+    self
+
+// @function Register a bar-range target [tStart, tEnd]; every bar inside → a sample.
+export method add_range(LabelStore self, int tStart, int tEnd, LabelClass cls = LabelClass.NEUTRAL) =>
+    int sid = array.size(self.targets)
+    int rid = self.rangeSeq
+    self.rangeSeq += 1
+    array.push(self.targets, LabTarget.new(slotId = sid, tStart = tStart, tEnd = tEnd,
+         cls = f_cls_ord(cls), matched = false, rangeId = rid))
+    self
+
+// ─── Pivot catalog (optional, feeds AUTO resolution) ─────────────────────────
+
+// @function Feed a confirmed pivot bar_index into the catalog used by AUTO labels.
+// @details Host: if not na(ph): store.feed_pivot(true, bar_index-legR)
+export method feed_pivot(LabelStore self, bool isHigh, int pivotBar) =>
+    if isHigh
+        array.push(self.pivHigh, pivotBar)
+    else
+        array.push(self.pivLow, pivotBar)
+    self
+
+// ─── Capture (call EVERY bar, after building feats) ──────────────────────────
+
+// @function Capture current bar into a sample if it matches a target. No lookback.
+// @param feats feature vector for THIS bar (length must equal cfg.nfeat)
+export method capture(LabelStore self, array<float> feats, float hi, float lo, float atr) =>
+    if array.size(feats) == self.cfg.nfeat
+        int nt = array.size(self.targets)
+        if nt > 0
+            for ti = 0 to nt - 1
+                LabTarget tg = array.get(self.targets, ti)
+                bool isRange = not na(tg.tEnd)
+                if isRange
+                    if time >= tg.tStart and time <= tg.tEnd
+                        array<float> fc = array.copy(feats)
+                        array.push(self.samples, LabSample.new(slotId = tg.slotId, cls = tg.cls,
+                             target = na, idx = bar_index, tms = time, hi = hi, lo = lo,
+                             atr = atr, feats = fc, rangeId = tg.rangeId))
+                else
+                    // Match window: allow bars within same timeframe period (not exact timestamp)
+                    int tf_ms = timeframe.in_seconds() * 1000
+                    if not tg.matched and math.abs(time - tg.tStart) <= tf_ms
+                        tg.matched := true
+                        array.set(self.targets, ti, tg)
+                        array<float> fc = array.copy(feats)
+                        array.push(self.samples, LabSample.new(slotId = tg.slotId, cls = tg.cls,
+                             target = na, idx = bar_index, tms = time, hi = hi, lo = lo,
+                             atr = atr, feats = fc, rangeId = -1))
+    self
+
+// ─── Finalize (call once, barstate.islast) ───────────────────────────────────
+
+// @function Resolve AUTO classes via nearest pivot, assign numeric targets.
+export method finalize(LabelStore self) =>
+    int ns = array.size(self.samples)
+    if ns > 0
+        for i = 0 to ns - 1
+            LabSample s = array.get(self.samples, i)
+            int cls = s.cls
+            if cls == 0 and self.cfg.autoResolve
+                int minH = 999999, int minL = 999999
+                if array.size(self.pivHigh) > 0
+                    for j = 0 to array.size(self.pivHigh) - 1
+                        int pivH = array.get(self.pivHigh, j)
+                        minH := math.min(minH, math.abs(pivH - s.idx))
+                if array.size(self.pivLow) > 0
+                    for j = 0 to array.size(self.pivLow) - 1
+                        int pivL = array.get(self.pivLow, j)
+                        minL := math.min(minL, math.abs(pivL - s.idx))
+                cls := minH < minL ? 1 : minL < minH ? 2 : 3
+            float tgt = cls == 1 ? self.cfg.tgtHigh : cls == 2 ? self.cfg.tgtLow : self.cfg.tgtReject
+            s.cls := cls
+            s.target := tgt
+            array.set(self.samples, i, s)
+    self
+
+// ─── Query helpers ───────────────────────────────────────────────────────────
+
+// @function Count samples; optionally filter by class (1=HIGH,2=LOW,...; -1=all).
+export method count(LabelStore self, int clsFilter = -1) =>
+    int n = 0
+    int ns = array.size(self.samples)
+    if ns > 0
+        for i = 0 to ns - 1
+            LabSample s = array.get(self.samples, i)
+            if clsFilter == -1 or s.cls == clsFilter
+                n += 1
+    n
+
+// @function Return HIGH-class samples (DUAL convenience → matrix 1).
+export method highs(LabelStore self) =>
+    array<LabSample> out = array.new<LabSample>()
+    int ns = array.size(self.samples)
+    if ns > 0
+        for i = 0 to ns - 1
+            LabSample s = array.get(self.samples, i)
+            if s.cls == 1
+                array.push(out, s)
+    out
+
+// @function Return LOW-class samples (DUAL convenience → matrix 2).
+export method lows(LabelStore self) =>
+    array<LabSample> out = array.new<LabSample>()
+    int ns = array.size(self.samples)
+    if ns > 0
+        for i = 0 to ns - 1
+            LabSample s = array.get(self.samples, i)
+            if s.cls == 2
+                array.push(out, s)
+    out
+
+// ─── Serialization ───────────────────────────────────────────────────────────
+
+// @function One CSV row: slotId,cls,tgt,idx,tms,rid,f1..fN (comma fields, no keys)
+export method row_csv(LabelStore self, LabSample s) =>
+    string lc = s.cls == 1 ? "H" : s.cls == 2 ? "L" : s.cls == 3 ? "R" : s.cls == 4 ? "N" : "A"
+    string fmt = "#." + (self.cfg.featPrec >= 5 ? "#####" : "####")
+    string row = str.tostring(s.slotId) + "," + lc + "," + str.tostring(s.target, "#.#") +
+                 "," + str.tostring(s.idx) + "," + str.tostring(s.tms) + "," + str.tostring(s.rangeId)
+    for fi = 0 to array.size(s.feats) - 1
+        row += "," + str.tostring(array.get(s.feats, fi), fmt)
+    row
+
+// @function Full CSV body for all samples, ';'-separated. Pure ASCII, no keys.
+export method to_csv(LabelStore self) =>
+    string body = ""
+    int ns = array.size(self.samples)
+    if ns > 0
+        for i = 0 to ns - 1
+            if i > 0
+                body += ";"
+            body += self.row_csv(array.get(self.samples, i))
+    body
+
+// @function Q8 quantize one feature to 0..255 using cfg.qLo/qHi.
+export method q8(LabelStore self, float f) =>
+    float span = self.cfg.qHi - self.cfg.qLo
+    float c = math.max(self.cfg.qLo, math.min(self.cfg.qHi, nz(f)))
+    int q = math.round((c - self.cfg.qLo) / span * 255.0)
+    math.max(0, math.min(255, q))
+
+// @function Q8 compact pack: per sample 'slotId:cls.q1.q2...qN', ';'-separated.
+// @details Dependency-free decimal pack (~3-4 chars/feature). For true binary
+//   base64, supply a host-side encoder; this stays well under the char ceiling.
+export method to_q8(LabelStore self) =>
+    string body = ""
+    int ns = array.size(self.samples)
+    if ns > 0
+        for i = 0 to ns - 1
+            LabSample s = array.get(self.samples, i)
+            if i > 0
+                body += ";"
+            body += str.tostring(s.slotId) + ":" + str.tostring(s.cls)
+            for fi = 0 to array.size(s.feats) - 1
+                body += "." + str.tostring(self.q8(array.get(s.feats, fi)))
+    body
+
+// ─── Export: full dataset, adaptive format (PATH 1) ──────────────────────────
+
+// @function Emit the dataset. CSV (one alert) → Q8 (one alert) → log.info dump.
+// @param source   indicator id for f_debug_json envelope / log header
+// @param alertOn  permit alert() paths (host's "Emit Alert" toggle)
+// @param logOn    permit log.info fallback
+// @param logger   Logger (use f_new_logger_buffered) for the LOG path
+// @returns int ExportFmt ordinal (0=CSV,1=Q8,2=LOG)
+export method export_auto(LabelStore self, string source, bool alertOn, bool logOn, Logger logger) =>
+    string csv = self.to_csv()
+    int filled = array.size(self.samples)
+    int csvLen = str.length(csv) + 280
+    int chosen = 2
+    array<string> hdr = array.new<string>()
+    array.push(hdr, f_json_field_str("mode", "LABEL"))
+    array.push(hdr, f_json_field_int("nfeat", self.cfg.nfeat))
+    array.push(hdr, f_json_field_int("kind", self.cfg.kind))
+    array.push(hdr, f_json_field_int("filled", filled))
+    array.push(hdr, f_json_field_int("nHigh", self.count(1)))
+    array.push(hdr, f_json_field_int("nLow", self.count(2)))
+    if alertOn and csvLen <= self.cfg.csvSafeMax
+        array.push(hdr, f_json_field_str("fmt", "CSV"))
+        array.push(hdr, f_json_field_str("schema", "slot,cls,tgt,idx,tms,rid,f1..fN"))
+        array.push(hdr, f_json_field_str("data", csv))
+        alert(f_debug_json(source, "LABEL_DATASET_CSV", hdr), alert.freq_once_per_bar)
+        chosen := 0
+    else if alertOn
+        string q = self.to_q8()
+        int qLen = str.length(q) + 320
+        if qLen <= self.cfg.csvSafeMax
+            array.push(hdr, f_json_field_str("fmt", "Q8"))
+            array.push(hdr, f_json_field_num("qLo", self.cfg.qLo))
+            array.push(hdr, f_json_field_num("qHi", self.cfg.qHi))
+            array.push(hdr, f_json_field_str("schema", "slot:cls.q1...qN"))
+            array.push(hdr, f_json_field_str("data", q))
+            alert(f_debug_json(source, "LABEL_DATASET_Q8", hdr), alert.freq_once_per_bar)
+            chosen := 1
+        else if logOn
+            logger.event("LABEL", "TOO_LARGE_FALLBACK_LOG filled=" + str.tostring(filled))
+            int ns = array.size(self.samples)
+            if ns > 0
+                for i = 0 to ns - 1
+                    logger.event("SAMPLE", self.row_csv(array.get(self.samples, i)))
+            logger.flush()
+            chosen := 2
+    else if logOn
+        logger.event("LABEL", "DATASET_BEGIN filled=" + str.tostring(filled) + " nfeat=" + str.tostring(self.cfg.nfeat))
+        int ns = array.size(self.samples)
+        if ns > 0
+            for i = 0 to ns - 1
+                logger.event("SAMPLE", self.row_csv(array.get(self.samples, i)))
+        logger.event("LABEL", "DATASET_END")
+        logger.flush()
+        chosen := 2
+    chosen
+
+// ─── Export: single sample by slotId (PATH 2 — RUN / per-label) ──────────────
+
+// @function Emit ONE sample (by slotId) bit-packed. Use for RUN-mode signals or
+//   targeted re-push. Returns true if found & emitted.
+export method export_one(LabelStore self, string source, int slotId, bool alertOn, bool logOn, Logger logger) =>
+    int ns = array.size(self.samples)
+    int found = -1
+    if ns > 0
+        for i = 0 to ns - 1
+            if array.get(self.samples, i).slotId == slotId
+                found := i
+    bool ok = found >= 0
+    if ok
+        LabSample s = array.get(self.samples, found)
+        array<string> hdr = array.new<string>()
+        array.push(hdr, f_json_field_str("mode", "LABEL_ONE"))
+        array.push(hdr, f_json_field_int("slot", s.slotId))
+        array.push(hdr, f_json_field_int("cls", s.cls))
+        array.push(hdr, f_json_field_num("tgt", s.target))
+        string q = str.tostring(s.cls)
+        for fi = 0 to array.size(s.feats) - 1
+            q += "." + str.tostring(self.q8(array.get(s.feats, fi)))
+        array.push(hdr, f_json_field_str("q8", q))
+        if alertOn
+            alert(f_debug_json(source, "LABEL_ONE_Q8", hdr), alert.freq_once_per_bar)
+        else if logOn
+            logger.event("LABEL_ONE", self.row_csv(s))
+            logger.flush()
+    ok
+
+// ─── Visualization (optional QC overlay) ──────────────────────────────────────
+
+// @function Draw captured samples: HIGH red, LOW green, others gray.
+export method render(LabelStore self, int maxRows = 80) =>
+    var array<line>  lns  = array.new<line>()
+    var array<label> lbls = array.new<label>()
+    if barstate.islast
+        for ln in lns
+            line.delete(ln)
+        for lb in lbls
+            label.delete(lb)
+        array.clear(lns)
+        array.clear(lbls)
+        int total = array.size(self.samples)
+        if total > 0
+            int startI = math.max(0, total - maxRows)
+            for i = startI to total - 1
+                LabSample s = array.get(self.samples, i)
+                color col = s.cls == 1 ? color.red : s.cls == 2 ? color.lime : color.gray
+                bool isRange = s.rangeId >= 0
+                if not isRange
+                    array.push(lns, line.new(s.tms, s.lo - s.atr * 2, s.tms, s.hi + s.atr * 2, xloc = xloc.bar_time, color = col, width = 2))
+                string txt = (s.cls == 1 ? "HIGH" : s.cls == 2 ? "LOW" : s.cls == 3 ? "REJ" : "N") + " #" + str.tostring(s.slotId) + " " + str.tostring(s.target, "#.#")
+                // LOW at bottom, HIGH/REJECT at top, neutral style (no arrow)
+                float labelY = s.cls == 2 ? s.lo - s.atr * 2 : s.hi + s.atr * 2
+                array.push(lbls, label.new(s.tms, labelY, txt, xloc = xloc.bar_time,
+                     style = label.style_none, color = color.new(col, 10),
+                     textcolor = color.white, size = isRange ? size.tiny : size.small))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2D: STRUCTLOG BUILDER (fluent UDT serialization)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type StructLog — builder for structured log lines with field accumulation
+export type StructLog
+    Logger lg
+    string tag
+    array<string> parts
+
+// @function Begin a new structured log entry
+// @param lg Logger instance
+// @param tag Log tag/prefix
+// @returns StructLog builder instance
+export f_struct_log_begin(Logger lg, string tag) =>
+    StructLog.new(lg = lg, tag = tag, parts = array.new<string>())
+
+// @function Add float field with optional format
+// @param sl StructLog instance
+// @param name Field name
+// @param val Float value
+// @param fmt Format string (default "#.####")
+// @returns StructLog instance for chaining
+export method field(StructLog sl, string name, float val, string fmt = "#.####") =>
+    array.push(sl.parts, name + "=" + str.tostring(val, fmt))
+    sl
+
+// @function Add int field
+// @param sl StructLog instance
+// @param name Field name
+// @param val Int value
+// @returns StructLog instance for chaining
+export method field(StructLog sl, string name, int val) =>
+    array.push(sl.parts, name + "=" + str.tostring(val))
+    sl
+
+// @function Add bool field (T/F)
+// @param sl StructLog instance
+// @param name Field name
+// @param val Bool value
+// @returns StructLog instance for chaining
+export method field(StructLog sl, string name, bool val) =>
+    array.push(sl.parts, name + "=" + (val ? "T" : "F"))
+    sl
+
+// @function Add string field (raw, no quotes)
+// @param sl StructLog instance
+// @param name Field name
+// @param val String value
+// @returns StructLog instance for chaining
+export method field(StructLog sl, string name, string val) =>
+    array.push(sl.parts, name + "=" + val)
+    sl
+
+// @function Commit accumulated fields to logger as single line
+// @param sl StructLog instance
+// @returns StructLog instance
+export method commit(StructLog sl) =>
+    string out_line = sl.tag
+    int n = array.size(sl.parts)
+    if n > 0
+        out_line += "|"
+        for i = 0 to n - 1
+            out_line += array.get(sl.parts, i) + (i < n - 1 ? "," : "")
+    sl.lg.append(out_line)
+    sl
+
+export f_diag_avg_r2(float r1, float r2, float r3, float r4) =>
+    float s = 0.0
+    int n = 0
+    if not na(r1)
+        s += r1 * r1
+        n += 1
+    if not na(r2)
+        s += r2 * r2
+        n += 1
+    if not na(r3)
+        s += r3 * r3
+        n += 1
+    if not na(r4)
+        s += r4 * r4
+        n += 1
+    n > 0 ? s / float(n) : na
+
+export f_diag_best_name(float r1, float r2, float r3, float r4) =>
+    float b = -1.0
+    string nm = "na"
+    if not na(r1) and math.abs(r1) > b
+        b := math.abs(r1)
+        nm := "F1"
+    if not na(r2) and math.abs(r2) > b
+        b := math.abs(r2)
+        nm := "F2"
+    if not na(r3) and math.abs(r3) > b
+        b := math.abs(r3)
+        nm := "F3"
+    if not na(r4) and math.abs(r4) > b
+        b := math.abs(r4)
+        nm := "F4"
+    nm
+
+export f_diag_best_abs(float r1, float r2, float r3, float r4) =>
+    float b = na
+    if not na(r1)
+        b := na(b) ? math.abs(r1) : math.max(b, math.abs(r1))
+    if not na(r2)
+        b := na(b) ? math.abs(r2) : math.max(b, math.abs(r2))
+    if not na(r3)
+        b := na(b) ? math.abs(r3) : math.max(b, math.abs(r3))
+    if not na(r4)
+        b := na(b) ? math.abs(r4) : math.max(b, math.abs(r4))
+    b
+
+export f_diag_pct(float v) =>
+    na(v) ? "na" : str.tostring(v * 100.0, "#.0") + "%"
+
+export f_diag_num(float v) =>
+    na(v) ? "na" : str.tostring(v, "#.00")
+
+export f_diag_r_with_r2(float v) =>
+    na(v) ? "na" : str.tostring(v, "#.00") + " (" + str.tostring(v * v * 100.0, "#.0") + "%)"
+
+export f_diag_r2_bg(float v) =>
+    na(v) ? color.new(color.gray, 85) : v >= 0.10 ? color.new(color.lime, 65) : v >= 0.04 ? color.new(color.yellow, 65) : color.new(color.red, 70)
+
+export f_diag_pop_bg(float v, float expected) =>
+    na(v) ? color.new(color.gray, 85) : v >= expected * 0.75 ? color.new(color.lime, 65) : v >= expected * 0.35 ? color.new(color.yellow, 65) : color.new(color.red, 70)
+
+export f_diag_dist_bg(float v) =>
+    na(v) ? color.new(color.gray, 85) : v >= 1.50 ? color.new(color.lime, 65) : v >= 0.75 ? color.new(color.yellow, 65) : color.new(color.red, 70)
+
+export f_float_array_text(array<float> values, int count, string format, string prefix, string separator, string suffix) =>
+    string out = prefix
+    int n = math.min(math.max(count, 0), array.size(values))
+    if n > 0
+        for i = 0 to n - 1
+            out += (i > 0 ? separator : "") + str.tostring(array.get(values, i), format)
+    out + suffix
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY  (v14 — added StructLog fluent builder)
+// ═══════════════════════════════════════════════════════════════════════════

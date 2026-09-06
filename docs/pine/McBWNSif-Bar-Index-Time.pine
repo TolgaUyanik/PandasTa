@@ -1,0 +1,633 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © n00btraders
+
+//@version=6
+
+// @description  Library to convert a bar index to a timestamp and vice versa.
+// Utilizes runtime memory to store the `time` and `time_close` values of every bar on the chart (and optional future bars),
+// with the ability of storing additional custom values for every chart bar.
+library("ChartData")
+
+
+
+
+//#region ------------------------------ Constants ------------------------------
+
+const int MAX_ARRAY_SIZE = 100000       // pine script limit for size of arrays
+
+const int MAX_BARS_FORWARD = 500        // maximum number of future bars that can be retrieved by time() & time_close()
+
+const int MIN_BARS_FORWARD = 0          // minimum allowed value for `barsForward` argument in this library's functions
+
+const int DATA_LIMIT = MAX_ARRAY_SIZE - MAX_BARS_FORWARD    // custom array size limit, leaving room for future bar data
+
+// @enum           Behavior for determining the bar that a timestamp belongs to.
+//
+// @field LEFT     Snap to the leftmost bar.
+// @field RIGHT    Snap to the rightmost bar.
+// @field DEFAULT  Default `xloc.bar_time` behavior.
+export enum Snap
+    LEFT
+    RIGHT
+    DEFAULT
+
+//#endregion
+
+
+
+
+//#region ------------------------------ Types ------------------------------
+
+// @type          Represents a user-specified variable that can be tracked on every chart bar.
+//
+// @field name    Unique identifier for the variable.
+// @field values  The array of stored values (one value per chart bar).
+export type Variable
+    string name
+    array<float> values
+
+
+// @type                   Represents data for all bars on a chart.
+//                         Note: future values of `time` and `time_close` can be retrieved via
+//                         the `time()` and `time_close()` pine script built-in functions.
+//                         But future values of custom variables cannot be known for bars it has not yet executed on,
+//                         therefore the `timeValues` and `timeCloseValues` arrays may contain up to `MAX_BARS_FORWARD`
+//                         more elements than the `values` array of a Variable object.
+//
+// @field bars             Current number of bars on the chart.
+// @field timeValues       The `time` values of all chart bars (and some future bars).
+// @field timeCloseValues  The `time_close` values of all chart bars (and some future bars).
+// @field variables        Additional custom values to track on all chart bars.
+export type ChartData
+    int bars
+    array<int> timeValues
+    array<int> timeCloseValues
+    array<Variable> variables
+
+//#endregion
+
+
+
+
+//#region ------------------------------ Non-Exported Functions ------------------------------
+
+// @function           Validates `collectChartData()` function arguments.
+//                         1. `barsForward` argument must be in the range of `MIN_BARS_FORWARD` to `MAX_BARS_FORWARD`
+//                         2. `variables` map must have non-empty strings for all keys (if any)
+//                     Note: validation is only necessary on the first execution of `collectChartData()`
+//                     because all subsequent executions will only use the arguments from the first execution.
+//
+// @param barsForward  (simple int) Number of future bars to collect data for.
+// @param variables    (simple map<string, float>) Custom values to collect on every chart bar.
+// @returns            (void) Generates a runtime error message if the arguments are not valid.
+validateArguments(simple int barsForward, simple map<string, float> variables) =>
+    if nz(barsForward, -1) < MIN_BARS_FORWARD or nz(barsForward, -1) > MAX_BARS_FORWARD
+        string message = "Invalid value for the 𝚋𝚊𝚛𝚜𝙵𝚘𝚛𝚠𝚊𝚛𝚍 argument. "
+               + "                Expected: >= {0} and <= {1}      Actual: {2}"
+        runtime.error(str.format(message, MIN_BARS_FORWARD, MAX_BARS_FORWARD, barsForward))
+
+    if not na(variables)
+        for [i, name] in variables.keys()
+            if na(str.trim(name))
+                string message = "Invalid value for the 𝚟𝚊𝚛𝚒𝚊𝚋𝚕𝚎𝚜 argument. "
+                       + "         Map keys cannot be empty.                    Revise key #{0}"
+                runtime.error(str.format(message, i + 1))
+
+
+
+// @function      Validates the `length` argument of the `time()`, `timeClose()`, and `value()` library functions.
+//
+// @param length  (series int) Number of bars back.
+// @returns       (void) Generates a runtime error message if the argument is not valid.
+method validateHistoryReference(series int length) =>
+    if nz(length, -1) < 0
+        runtime.error("The history-referencing length for the data must be a value >= 0")
+
+
+
+// @function  Validates `collectChartData()` executes exactly 1 time per bar to ensure the accuracy of the stored data.
+//
+// @returns   (void) Generates a runtime error message if `collectChartData()` is not called once per bar.
+method validateBarCount(series ChartData chartData) =>
+    if chartData.bars != bar_index
+        runtime.error("𝚌𝚘𝚕𝚕𝚎𝚌𝚝𝙲𝚑𝚊𝚛𝚝𝙳𝚊𝚝𝚊() must be called one time on every bar")
+    chartData.bars += 1
+
+
+
+// @function           Creates and initializes a `ChartData` object.
+//
+// @param barsForward  (simple int) Number of future bars to collect data for.
+// @param variables    (simple map<string, float>) Custom values to collect on every chart bar.
+// @returns            New `ChartData` object.
+initializeChartData(simple int barsForward, simple map<string, float> variables) =>
+    ChartData data = ChartData.new(bars = 0, timeValues = array.new<int>(), timeCloseValues = array.new<int>())
+
+    validateArguments(barsForward, variables)
+
+    if barsForward > 0
+        // start at future bar #0 (current bar) to use it as a placeholder that will be replaced on the first bar
+        // end at `barsForward - 1` because the future bar at `barsForward - 0` will be added by `collectChartData()`
+        for i = 0 to barsForward - 1
+            data.timeValues.push(time(timeframe.period, bars_back = -i))
+            data.timeCloseValues.push(time_close(timeframe.period, bars_back = -i))
+
+    if not na(variables) and variables.size() > 0
+        data.variables := array.new<Variable>()     // optimize memory usage by conditionally initializing this array
+        for name in variables.keys()
+            data.variables.push(Variable.new(name, values = array.new<float>()))
+
+    data
+
+
+
+// @function           Updates the `time` and `time_close` arrays of a `ChartData` object.
+//
+// @param chartData    (series ChartData) The `ChartData` object.
+// @param barsForward  (simple int) Number of future bars to collect data for.
+// @returns            The same object from the `chartData` argument.
+method updateTimestamps(series ChartData chartData, simple int barsForward) =>
+    if chartData.bars > DATA_LIMIT
+        chartData.timeValues.shift()
+        chartData.timeCloseValues.shift()
+
+    if barsForward > 0
+        // update the previously forecasted time values for this [current] bar with the actual values
+        int index = chartData.timeValues.size() - barsForward
+        chartData.timeValues.set(index, time)
+        chartData.timeCloseValues.set(index, time_close)
+
+        // add a new set of forecasted time values to the end of the arrays
+        chartData.timeValues.push(time(timeframe.period, bars_back = -barsForward))
+        chartData.timeCloseValues.push(time_close(timeframe.period, bars_back = -barsForward))
+    else
+        chartData.timeValues.push(time)
+        chartData.timeCloseValues.push(time_close)
+
+    chartData
+
+
+
+// @function         Updates the `variables` array of a `ChartData` object.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param barData    (simple map<string, float>) Map of user-specified values that belong to the current bar.
+// @returns          The same object from the `chartData` argument.
+method updateVariables(series ChartData chartData, simple map<string, float> barData) =>
+    if not na(chartData.variables)
+        for variable in chartData.variables
+            if chartData.bars > DATA_LIMIT
+                variable.values.shift()
+            variable.values.push(na(barData) ? na : barData.get(variable.name))
+    chartData
+
+
+
+// @function         Converts a bar index value to the equivalent index in the arrays of a `ChartData` object.
+//                   Note: the `barIndex` argument may be `na`, but the result of this function will not be `na`.
+//
+// @param barIndex   (series int) The bar index.
+// @param chartData  (series ChartData) The `ChartData` object.
+// @returns          Array index, or a negative value if the return value is not used (caller must verify index >= 0).
+method toArrayIndex(series int barIndex, series ChartData chartData) =>
+    int shifted = chartData.bars - DATA_LIMIT                   // number of times `array.shift()` was called
+    shifted > 0 ? nz(barIndex) - shifted : nz(barIndex, -1)     // `shifted` is <= 0 if no data has been deleted yet
+
+
+
+// @function          Converts an array index (from the arrays of a `ChartData` object) to the equivalent bar index.
+//
+// @param arrayIndex  (series int) The array index.
+// @param chartData   (series ChartData) The `ChartData` object.
+// @returns           The `bar_index` of the bar that is associated with the data stored at the specified array index.
+method toBarIndex(series int arrayIndex, series ChartData chartData) =>
+    int shifted = chartData.bars - DATA_LIMIT                   // number of times `array.shift()` was called
+    shifted > 0 ? arrayIndex + shifted : arrayIndex             // `shifted` is <= 0 if no data has been deleted yet
+
+//#endregion
+
+
+
+
+//#region ------------------------------ Exported Functions ------------------------------
+
+// @function  Collects and tracks the `time` and `time_close` value of every bar on the chart.
+// ___
+// **Remarks** \
+// This function must be called on every bar to ensure the accuracy of the stored data. \
+// \
+// This function stores up to ~100,000 elements (per data point) in memory. \
+// In most cases, this limit is enough to cover the number of
+// [chart bars](https://www.tradingview.com/pine-script-docs/writing/limitations/#chart-bars). \
+// But if the limit is reached, the oldest stored data will be deleted to make room for the data on newer bars.
+// ___
+// @returns  A `ChartData` object that can be used to convert between `xloc.bar_index` and `xloc.bar_time` values.
+export collectChartData() =>
+    var ChartData data = initializeChartData(barsForward = 0, variables = na)
+
+    data.validateBarCount()
+
+    if data.bars > DATA_LIMIT               //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        data.timeValues.shift()             //|                                                                   |
+        data.timeCloseValues.shift()        //|                                                                   |
+                                            //|  This block of code is equivalent to `data.updateTimestamps(0)`,  |
+    data.timeValues.push(time)              //|  but it is explicitly written out for understandability           |
+    data.timeCloseValues.push(time_close)   //|                                                                   |
+                                            //|                                                                   |
+    data                                    //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+
+
+// @function  Collects and tracks the `time` and `time_close` value of every bar on the chart
+//            as well as a specified number of future bars.
+// ___
+// **Parameters**
+// ```
+// • simple int barsForward
+// ```
+// `barsForward` - Number of future bars to the right of the latest bar.  Value must be >= 0 and <= 500.
+// ___
+// **Remarks** \
+// This function must be called on every bar to ensure the accuracy of the stored data. \
+// \
+// This function stores up to ~100,000 elements (per data point) in memory. \
+// In most cases, this limit is enough to cover the number of
+// [chart bars](https://www.tradingview.com/pine-script-docs/writing/limitations/#chart-bars). \
+// But if the limit is reached, the oldest stored data will be deleted to make room for the data on newer bars.
+// ___
+// @param barsForward  (simple int) Number of future bars to collect data for.
+// @returns            A `ChartData` object that can be used to convert between `xloc.bar_index` and `xloc.bar_time` values.
+export collectChartData(simple int barsForward) =>
+    var ChartData data = initializeChartData(barsForward = barsForward, variables = na)
+    data.validateBarCount()
+    data.updateTimestamps(barsForward)
+
+
+
+// @function  Collects and tracks the `time` and `time_close` value of every bar on the chart. \
+//            Additionally, tracks a custom set of variables for every chart bar.
+// ___
+// **Parameters**
+// ```
+// • simple map<string, float> variables
+// ```
+// `variables` - Map of variable names & values that belong to the current bar. \
+// An empty or [na](https://www.tradingview.com/pine-script-reference/v6/#var_na) map will not track additional values.
+// Any keys in the map must be non-empty strings.
+// ___
+// **Remarks** \
+// This function must be called on every bar to ensure the accuracy of the stored data. \
+// \
+// This function stores up to ~100,000 elements (per data point) in memory. \
+// In most cases, this limit is enough to cover the number of
+// [chart bars](https://www.tradingview.com/pine-script-docs/writing/limitations/#chart-bars). \
+// But if the limit is reached, the oldest stored data will be deleted to make room for the data on newer bars. \
+// \
+// Parameter `variables`: only the variable names from the first execution of this function will be tracked; \
+// subsequent function calls will ignore any new key/value pairs that did not exist during the initial execution.
+// ___
+// @param variables  (simple map<string, float>) Custom values to collect on every chart bar.
+// @returns          A `ChartData` object that can be used to convert between `xloc.bar_index` and `xloc.bar_time` values.
+export collectChartData(simple map<string, float> variables) =>
+    var ChartData data = initializeChartData(barsForward = 0, variables = variables)
+    data.validateBarCount()
+    data.updateTimestamps(0).updateVariables(variables)
+
+
+
+// @function  Collects and tracks the `time` and `time_close` value of every bar on the chart
+//            as well as a specified number of future bars. \
+//            Additionally, tracks a custom set of variables for every chart bar.
+// ___
+// **Parameters**
+// ```
+// • simple int barsForward
+// • simple map<string, float> variables
+// ```
+// `barsForward` - Number of future bars to the right of the latest bar.  Value must be >= 0 and <= 500. \
+// `variables` - Map of variable names & values that belong to the current bar. \
+// An empty or [na](https://www.tradingview.com/pine-script-reference/v6/#var_na) map will not track additional values.
+// Any keys in the map must be non-empty strings.
+// ___
+// **Remarks** \
+// This function must be called on every bar to ensure the accuracy of the stored data. \
+// \
+// This function stores up to ~100,000 elements (per data point) in memory. \
+// In most cases, this limit is enough to cover the number of
+// [chart bars](https://www.tradingview.com/pine-script-docs/writing/limitations/#chart-bars). \
+// But if the limit is reached, the oldest stored data will be deleted to make room for the data on newer bars. \
+// \
+// Parameter `barsForward`: any data retrieved from future bars (i.e., bars that have not yet formed on the chart) \
+// is limited to [time](https://www.tradingview.com/pine-script-reference/v6/#var_time) and
+// [time_close](https://www.tradingview.com/pine-script-reference/v6/#var_time_close) values.
+// Future data cannot be retrieved for any of the custom variables. \
+// \
+// Parameter `variables`: only the variable names from the first execution of this function will be tracked; \
+// subsequent function calls will ignore any new key/value pairs that did not exist during the initial execution.
+// ___
+// @param barsForward  (simple int) Number of future bars to collect data for.
+// @param variables    (simple map<string, float>) Custom values to collect on every chart bar.
+// @returns            A `ChartData` object that can be used to convert between `xloc.bar_index` and `xloc.bar_time` values.
+export collectChartData(simple int barsForward, simple map<string, float> variables) =>
+    var ChartData data = initializeChartData(barsForward, variables)
+    data.validateBarCount()
+    data.updateTimestamps(barsForward).updateVariables(variables)
+
+
+
+// @function  Converts a UNIX timestamp to a bar index. \
+//            Returns [na](https://www.tradingview.com/pine-script-reference/v6/#var_na)
+//            if the timestamp does not belong to any bar index that is stored in memory.
+// ___
+// **Parameters**
+// ```
+// • series int timestamp
+// • series Snap snap
+// ```
+// `timestamp` - The UNIX timestamp (in milliseconds). \
+// `snap`      - The preferred behavior of snapping to the left or right when the timestamp is in between two bars.
+//               The default is 𝚂𝚗𝚊𝚙.𝙳𝙴𝙵𝙰𝚄𝙻𝚃.
+// ___
+// **Snap** \
+// The `snap` parameter determines the behavior when there may be ambiguity in the resulting bar index \
+// (i.e., when the timestamp is in between the closing time of one bar and the opening time of the next bar). \
+// \
+// \
+// • 𝚂𝚗𝚊𝚙.𝙻𝙴𝙵𝚃 : \
+// Prefer to snap to the leftmost bar. \
+// Suitable for handling [time_close](https://www.tradingview.com/pine-script-reference/v6/#var_time_close)
+// values (e.g., getting the bar index for the _closing_ time of a session). \
+// \
+// • 𝚂𝚗𝚊𝚙.𝚁𝙸𝙶𝙷𝚃 : \
+// Prefer to snap to the rightmost bar. \
+// Suitable for handling [time](https://www.tradingview.com/pine-script-reference/v6/#var_time)
+// values (e.g., getting the bar index for the _opening_ time of a session). \
+// \
+// • 𝚂𝚗𝚊𝚙.𝙳𝙴𝙵𝙰𝚄𝙻𝚃 : \
+// Always snap to the rightmost bar. \
+// Suitable for aligning timestamps to bar indexes the same way TradingView does when drawing with
+// [xloc.bar_time](https://www.tradingview.com/pine-script-reference/v6/#const_xloc.bar_time). \
+// \
+// \
+// Key Differences:
+// 1. If a `timestamp` falls somewhere in the middle of a bar, \
+//    𝚂𝚗𝚊𝚙.𝙻𝙴𝙵𝚃 and 𝚂𝚗𝚊𝚙.𝚁𝙸𝙶𝙷𝚃 will both align to that bar, \
+//    whereas 𝚂𝚗𝚊𝚙.𝙳𝙴𝙵𝙰𝚄𝙻𝚃 will snap to the next bar on the right.
+// 2. If a `timestamp` exactly matches the closing time of bar #1 and also the opening time of bar #2, \
+//    𝚂𝚗𝚊𝚙.𝙻𝙴𝙵𝚃 will snap to bar #1, whereas 𝚂𝚗𝚊𝚙.𝚁𝙸𝙶𝙷𝚃 and 𝚂𝚗𝚊𝚙.𝙳𝙴𝙵𝙰𝚄𝙻𝚃 will snap to bar #2. \
+//    Note: same snapping behavior applies if there is a time gap between the closing time of bar #1 \
+//    and the opening time of bar #2 and the `timestamp` happens to fall inside of that time gap.
+// ___
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param timestamp  (series int) A UNIX time.
+// @param snap       (series Snap) A `Snap` enum value.
+// @returns          A bar index, or `na` if unable to find the appropriate bar index.
+export method timestampToBarIndex(series ChartData chartData, series int timestamp, series Snap snap = Snap.DEFAULT) =>
+    int arrayIndex = na
+
+    // Note: this function works on the premise that the following are true for both arrays:
+    //   1.  array size is >= 1
+    //   2.  array elements are sorted in ascending order
+    //   3.  for each index 'i', `timeCloseValues.get(i)` <= `timeValues.get(i + 1)`
+    array<int> timeValues = chartData.timeValues
+    array<int> timeCloseValues = chartData.timeCloseValues
+
+    if na(timestamp)
+        arrayIndex := na
+
+    else if snap == Snap.LEFT
+
+        int index = timeCloseValues.binary_search_leftmost(timestamp)
+
+        // Special condition where the timestamp may be in the middle of the earliest bar that is stored in memory.
+        // Note: `array.binary_search_leftmost()` returns 0 instead of -1 if the value is smaller than all array items
+        if index == 0 and timestamp < timeCloseValues.get(index)
+            arrayIndex := timestamp > timeValues.get(index) ? index : na
+
+        // Condition where timestamp may be after latest stored time; avoids out of bounds error in the final branch
+        else if index == timeCloseValues.size() - 1
+            arrayIndex := timestamp == timeCloseValues.get(index) ? index : na
+
+        // Final condition to increase the index by 1 if the timestamp is between the open and close of the next bar
+        else
+            arrayIndex := timestamp > timeValues.get(index + 1) ? index + 1 : index
+
+
+    else if snap == Snap.RIGHT
+
+        int index = timeValues.binary_search_rightmost(timestamp)
+
+        // Unlike `array.binary_search_leftmost()`, the `array.binary_search_rightmost()` function can return an index
+        // that is 1 higher than the largest valid index.  Check this as the 1st condition to avoid out of bounds error
+        if index == timeValues.size() and timestamp >= timeCloseValues.get(index - 1)
+            arrayIndex := na
+
+        // Condition where timestamp may be before earliest stored time; avoids out of bounds error in the final branch
+        else if index == 0
+            arrayIndex := timestamp == timeValues.get(index) ? index : na
+
+        // Final condition to reduce the index by 1 if the timestamp is between the open and close of the previous bar
+        else
+            arrayIndex := timestamp < timeCloseValues.get(index - 1) ? index - 1 : index
+
+
+    else // Snap.DEFAULT
+        int index = timeValues.binary_search_rightmost(timestamp)
+        arrayIndex := timestamp < timeValues.first() or timestamp > timeValues.last() ? na : index
+
+    na(arrayIndex) ? na : arrayIndex.toBarIndex(chartData)
+
+
+
+// @function  Converts a UNIX timestamp to a history-referencing length (i.e., number of bars back).
+// ___
+// **Parameters**
+// ```
+// • series int timestamp
+// ```
+// `timestamp` - The UNIX timestamp (in milliseconds).
+// ___
+// **Remarks** \
+// The return value can be used in any function that accepts a history-referencing length, \
+// including the [[] history-referencing operator](https://www.tradingview.com/pine-script-reference/v6/#op_%5B%5D). \
+// \
+// Returns [na](https://www.tradingview.com/pine-script-reference/v6/#var_na)
+// if the timestamp does not belong to any bar data that is stored in memory \
+// or if the timestamp occurs after the `time` value of the latest bar on the chart. \
+// \
+// The return value will be either [na](https://www.tradingview.com/pine-script-reference/v6/#var_na) or >= 0.
+// ___
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param timestamp  (series int) A UNIX time.
+// @returns          A bar offset, or `na` if unable to find a valid number of bars back that the timestamp belongs to.
+export method getNumberOfBarsBack(series ChartData chartData, series int timestamp) =>
+    int barIndex = chartData.timestampToBarIndex(timestamp, Snap.DEFAULT)
+    int latestBarIndex = chartData.bars - 1
+    not na(barIndex) and barIndex <= latestBarIndex ? latestBarIndex - barIndex : na
+
+
+
+// @function         Retrieves the [time](https://www.tradingview.com/pine-script-reference/v6/#var_time)
+//                   value for the specified bar index.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param barIndex   (series int) The bar index.
+// @returns          The `time` value, or `na` if there is no `time` stored for the bar index.
+export method timeAtBarIndex(series ChartData chartData, series int barIndex) =>
+    int index = barIndex.toArrayIndex(chartData)
+    array<int> values = chartData.timeValues
+    index >= 0 and index < values.size() ? values.get(index) : na
+
+
+
+// @function         Retrieves the [time](https://www.tradingview.com/pine-script-reference/v6/#var_time)
+//                   value of the bar that is `length` bars back relative to the latest bar.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param length     (series int) Number of bars back.
+// @returns          The `time` value `length` bars ago, or `na` if there is no `time` stored for that bar.
+export method time(series ChartData chartData, series int length) =>
+    validateHistoryReference(length)
+    chartData.timeAtBarIndex(chartData.bars - 1 - length)
+
+
+
+// @function         Retrieves the [time_close](https://www.tradingview.com/pine-script-reference/v6/#var_time_close)
+//                   value for the specified bar index.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param barIndex   (series int) The bar index.
+// @returns          The `time_close` value, or `na` if there is no `time_close` stored for the bar index.
+export method timeCloseAtBarIndex(series ChartData chartData, series int barIndex) =>
+    int index = barIndex.toArrayIndex(chartData)
+    array<int> values = chartData.timeCloseValues
+    index >= 0 and index < values.size() ? values.get(index) : na
+
+
+
+// @function         Retrieves the [time_close](https://www.tradingview.com/pine-script-reference/v6/#var_time_close)
+//                   value of the bar that is `length` bars back relative to the latest bar.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param length     (series int) Number of bars back.
+// @returns          The `time_close` value `length` bars ago, or `na` if there is no `time_close` stored for that bar.
+export method timeClose(series ChartData chartData, series int length) =>
+    validateHistoryReference(length)
+    chartData.timeCloseAtBarIndex(chartData.bars - 1 - length)
+
+
+
+// @function         Retrieves the value of a custom variable for the specified bar index.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param name       (series string) The variable name.
+// @param barIndex   (series int) The bar index.
+// @returns          The value of the [name] variable, or `na` if there is no [name] variable stored for the bar index.
+export method valueAtBarIndex(series ChartData chartData, series string name, series int barIndex) =>
+    float value = na
+    if not na(chartData.variables)
+        for variable in chartData.variables
+            if variable.name == name
+                int index = barIndex.toArrayIndex(chartData)
+                array<float> values = variable.values
+                value := index >= 0 and index < values.size() ? values.get(index) : na
+                break
+    value
+
+
+
+// @function         Retrieves a variable value of the bar that is `length` bars back relative to the latest bar.
+//
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param name       (series string) The variable name.
+// @param length     (series int) Number of bars back.
+// @returns          The [name] value `length` bars ago, or `na` if there is no [name] variable stored for that bar.
+export method value(series ChartData chartData, series string name, series int length) =>
+    validateHistoryReference(length)
+    chartData.valueAtBarIndex(name, chartData.bars - 1 - length)
+
+
+
+// @function  Retrieves all custom variables for the specified bar index.
+// ___
+// **Remarks** \
+// The resulting map will not be [na](https://www.tradingview.com/pine-script-reference/v6/#var_na). \
+// The resulting map is a copy and any changes to it are not reflected in the stored data. \
+// \
+// If there is no data stored in memory for the specified bar index, \
+// the map keys will still contain all the variable names, but each value will be
+// [na](https://www.tradingview.com/pine-script-reference/v6/#var_na).
+// ___
+// @param chartData  (series ChartData) The `ChartData` object.
+// @param barIndex   (series int) The bar index.
+// @returns          Map of all custom variables that are stored for the specified bar index.
+export method getAllVariablesAtBarIndex(series ChartData chartData, series int barIndex) =>
+    map<string, float> variables = map.new<string, float>()
+
+    int index = barIndex.toArrayIndex(chartData)
+
+    int outOfBounds = na                // boolean value to determine if `index` is within bounds (1 = true, 0 = false)
+
+    if not na(chartData.variables)
+        for variable in chartData.variables
+            if na(outOfBounds)          // calculate only once since all `variable.values` arrays will be the same size
+                outOfBounds := index >= 0 and index < variable.values.size() ? 0 : 1
+
+            float value = bool(outOfBounds) ? na : variable.values.get(index)
+            variables.put(variable.name, value)
+
+    variables
+
+
+
+// @function  Gets all values from the earliest bar data that is currently stored in memory.
+// ___
+// **Remarks** \
+// Returns a tuple of the [bar_index](https://www.tradingview.com/pine-script-reference/v6/#var_bar_index)
+// (which may be greater than 0 if old data was deleted), \
+// the [time](https://www.tradingview.com/pine-script-reference/v6/#var_time),
+// the [time_close](https://www.tradingview.com/pine-script-reference/v6/#var_time_close),
+// and a map of all the custom variable names & values. \
+// \
+// Note: the resulting map is a copy and any changes to it are not reflected in the stored data.
+// ___
+// @param chartData  (series ChartData) The `ChartData` object.
+// @returns          A tuple: [bar_index, time, time_close, variables]
+export method getEarliestStoredData(series ChartData chartData) =>
+    int barIndex = (0).toBarIndex(chartData)
+    [barIndex, chartData.timeValues.first(), chartData.timeCloseValues.first(), chartData.getAllVariablesAtBarIndex(barIndex)]
+
+
+
+// @function  Gets all values from the latest bar data that is currently stored in memory.
+// ___
+// **Parameters**
+// ```
+// • series bool futureData
+// ```
+// `futureData` - Optional.  The default is [true](https://www.tradingview.com/pine-script-reference/v6/#const_true). \
+// A value of [true](https://www.tradingview.com/pine-script-reference/v6/#const_true)
+// will take into account any future data that may be stored in memory (due to a `barsForward` argument >= 1). \
+// A value of [false](https://www.tradingview.com/pine-script-reference/v6/#const_false)
+// will return the data points from the latest bar on the chart.
+// ___
+// **Remarks** \
+// Returns a tuple of the [bar_index](https://www.tradingview.com/pine-script-reference/v6/#var_bar_index),
+// the [time](https://www.tradingview.com/pine-script-reference/v6/#var_time),
+// the [time_close](https://www.tradingview.com/pine-script-reference/v6/#var_time_close),
+// and a map of all the custom variable names & values. \
+// \
+// Note: the resulting map is a copy and any changes to it are not reflected in the stored data.
+// ___
+// @param chartData   (series ChartData) The `ChartData` object.
+// @param futureData  (series bool) Whether to include all of the available future data that is stored in memory.
+// @returns           A tuple: [bar_index, time, time_close, variables]
+export method getLatestStoredData(series ChartData chartData, series bool futureData = true) =>
+    if futureData
+        int barIndex = (chartData.timeValues.size() - 1).toBarIndex(chartData)
+        [barIndex, chartData.timeValues.last(), chartData.timeCloseValues.last(), chartData.getAllVariablesAtBarIndex(barIndex)]
+    else
+        int barIndex = chartData.bars - 1
+        [barIndex, chartData.timeAtBarIndex(barIndex), chartData.timeCloseAtBarIndex(barIndex), chartData.getAllVariablesAtBarIndex(barIndex)]
+
+//#endregion

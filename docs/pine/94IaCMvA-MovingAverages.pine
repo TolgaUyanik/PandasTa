@@ -1,0 +1,1733 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © liquid-trader
+
+//@version=6
+
+// @description A collection of O(1) numerically stable moving averages that support anchors and fractional lengths up to 100k bars.
+library("MovingAverages")
+
+
+// ---------------------------------------------------- HELPERS ----------------------------------------------------- {
+
+// @function Checks if the input length is within a valid range.
+validate(simple string name, simple float length, simple float min = 1, simple float max = 100000) =>
+    if length < min or max < length
+        [ str, num ] = switch
+            length < min => [ "minimum", min ]
+            length > max => [ "maximum", max ]
+        runtime.error(str.format("An {0} length of {1, number, #.################} is invalid. The {2} is {3}. Alternatively, using 0 (or na) progressively extends the length indefinitely.", name, length, str, num))
+    not na(1 / length)
+
+// @function Checks if the built-in Pine function should and can be used.
+confirm(simple bool parity, simple float length, simple float max = 5000) =>
+    len_e6 = length * 1.0e6
+    parity and len_e6 == math.min(math.max(len_e6, 1.0e6), max * 1.0e6)
+
+// @function Gets the sign of a number as -1 or 1, unlike [math.sign](#fun_math.sign) which returns 0 if the number is 0.
+sign(simple float number) =>
+    sign = math.sign(number)
+    na(sign) ? na : 1 / sign < 0 ? -1 : 1
+
+// }
+
+
+// ---------------------------------------------------- ANCHORS ----------------------------------------------------- {
+
+// @function Checks if the current bar is the first bar of an intraday session, or the first bar on the chart.
+// It avoids detecting new sessions on higher timeframes to mitigate being [true](#const_true) on nevery bar.
+// @returns Is [true](#const_true) on the first bar of an intraday session **and / or** the first charted bar, [false](#const_false) otherwise.
+export new_session() =>
+    barstate.isfirst or (timeframe.isintraday and timeframe.change("1440"))
+
+
+// @function Interpolation between anchor and average.
+// @param source Series of values to process.
+// @param length Number of bars. This can be fractional (ie. 9.5).
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param variant Stabilization variant.
+// - `0` = none
+// - `1` = smooth step from *previous interpolated value*
+// - `2` = smooth step from *anchor* (default)
+// @returns Interpolated value between anchor and average.
+export method stabilize_anchor(series float moving_average, series float source, simple float length, series bool anchor, simple int variant = 2) =>
+    avg = moving_average
+
+    // Ensure valid input length
+    var simple bool valid_length = validate("anchor stabilization", length, max = na)
+
+    // Increment length from anchor
+    var series float len = 0
+    len := anchor ? 1 : valid_length ? math.min(len + 1, length) : len + 1
+
+    // Smoothstep to average
+    if len < length and variant != 0
+        var series float a = source
+        a := anchor ? source : a
+        t  = len / length
+        t *= t * (3 - 2 * t)
+        avg := a + (avg - a) * t
+        if variant == 1
+            a := avg
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ SMA ------------------------------------------------------- {
+
+// @function **Simple Moving Average**\
+// Alternative to [ta.sma()](#fun_ta.sma) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.sma()](#fun_ta.sma) should be used (when possible) for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Simple moving average of `source` for `length` bars back.
+export sma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("SMA", length)
+    var simple bool use_pine = confirm(parity, length)
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var simple float t = length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // Infinite SMA
+    if not valid_length
+        avg += (source - avg) / bar
+
+    // Use Pine SMA when specified (and possible) for mathematical parity
+    else if use_pine
+        a = ta.sma(source, min)
+        b = ta.sma(source, max)
+        avg := len < length
+         ? avg + (source - avg) / len
+         : a + (b - a) * t
+
+    // Extend fractional SMA up to 100k bars
+    else
+
+        // Circular buffer
+        var series int index = 0
+        var simple int shift = max - min
+        var series float[] src = array.new_float(max)
+
+        // Anchor reset
+        var series float err = 0
+        if anchor
+            avg := source
+            err := 0
+
+        // Online (streaming) numerically stable O(1) SMA
+        else
+            a = min < bar ? src.get((index + shift) % max) - avg : 0
+            b = max < bar ? src.get(index) - avg : 0
+            old  = a + (b - a) * t
+            dif  = (source - avg - old) / len - err
+            err := avg + dif - avg - dif
+            avg += dif
+
+        // Update buffer
+        src.set(index, source)
+        index := (index + 1) % max
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ EMA ------------------------------------------------------- {
+
+// @function **Exponential Moving Average**\
+// Alternative to [ta.ema()](#fun_ta.ema) that supports anchors and indefinite fractional lengths.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When less than one (ie. 0.5), it is used as the coefficient. When undefined
+// (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.ema()](#fun_ta.ema) should be used (when possible) for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Exponential moving average of `source` with alpha = 2 / (length + 1).
+export ema(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("EMA", length, 0, na)
+    var simple bool use_pine = confirm(parity, length)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = source
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var series float t = use_coef ? length : length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // The Pine EMA cannot be used after re-anchoring. EMAs do not remove old values.
+    // Meaning, the Pine EMA accounts for all values since barstate.isfirst,
+    // but this EMA only account for values since the previous anchor.
+    var series bool reanchored = false
+
+    // Infinite EMA
+    if not valid_length
+        avg += (source - avg) * (2 / (bar + 1))
+
+    // Use Pine EMA when specified (and possible) for mathematical parity
+    else if use_pine and not reanchored
+        reanchored := anchor ? not barstate.isfirst : reanchored
+        a = ta.ema(source, min)
+        b = ta.ema(source, max)
+        avg := len < length
+         ? avg + (source - avg) / len
+         : a + (b - a) * t
+
+    // Extend fractional EMA indefinitely
+    else
+
+        // The canonical EMA formula uses an alpha of `2 / (n + 1)` for every bar
+        // but the Pine EMA uses `1 / n` when bar_index < length.
+        // The following mimics this logic for barstate.isfirst, and then
+        // uses the canonical formula for all other anchors.
+        var simple int warm_up = max + 1
+        if len < warm_up and not use_coef
+            len_c = math.ceil(len)
+            one = bar_index < len_c ? (len_c - int(len)) * (len_c - len) : 1
+            t := (1 + one) / (len + one)
+
+        var series float err = 0
+        dif  = (source - avg) * t - err
+        err := len < length ? avg + dif - avg - dif : 0 // Conditional error compensation best matches the Pine EMA
+        avg += dif
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ RMA ------------------------------------------------------- {
+
+// @function **Recursive Moving Average** aka. **Wilder's Smoothed Moving Average**\
+// Alternative to [ta.rma()](#fun_ta.rma) that supports anchors and indefinite fractional lengths.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When less than one (ie. 0.5), it is used as the coefficient. When undefined
+// (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.rma()](#fun_ta.rma) should be used (when possible) for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Exponential moving average of `source` with alpha = 1 / `length`.
+export rma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("RMA", length, 0, na)
+    var simple bool use_pine = confirm(parity, length)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = source
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var series float t = use_coef ? length : length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // For the same reason as the EMA, the Pine RMA should not be re-anchored.
+    var series bool reanchored = false
+
+    // Infinite RMA
+    if not valid_length
+        avg += (source - avg) / bar
+
+    // Use Pine RMA when specified (and possible) for mathematical parity
+    else if use_pine and not reanchored
+        reanchored := anchor ? not barstate.isfirst : reanchored
+        a = ta.rma(source, min)
+        b = ta.rma(source, max)
+        avg := len < length
+         ? avg + (source - avg) / len
+         : a + (b - a) * t
+
+    // Extend fractional RMA indefinitely
+    else
+        var series float err = 0
+        t := use_coef ? t : 1 / len
+        dif  = (source - avg) * t - err
+        err := avg + dif - avg - dif
+        avg += dif
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ WMA ------------------------------------------------------- {
+
+// @function **Linearly Weighted Moving Average**\
+// Alternative to [ta.wma()](#fun_ta.wma) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.wma()](#fun_ta.wma) should be used when possible for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Weighted moving average of `source` for `length` bars back.
+export wma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("WMA", length)
+    var simple bool use_pine = confirm(parity, length)
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var simple float t = length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // Infinite length
+    if not valid_length
+        avg += (source - avg) * (2 / (bar + 1))
+
+    // Use Pine WMA when specified (and possible) for mathematical parity
+    else if use_pine
+        a = ta.wma(source, min)
+        b = ta.wma(source, max)
+        w = 2 / (len + 1) // aka. N / Sum of Weights == N / (N * (N + 1) / 2) == 2 / (N + 1)
+        avg := len < length
+         ? avg + (source - avg) * w
+         : a + (b - a) * t
+
+    // Extend fractional WMA up to 100k bars
+    else
+
+        // Because there is no canonical O(1) WMA, the following is a very close approximation with
+        // a max difference ≤ 1.0e-10 from the Pine WMA.
+
+        // Circular buffer
+        var series int index = 0
+        var simple int shift = max - min
+        var series float[] src = array.new_float(max, 0)
+
+        // Anchor reset
+        var series float sum = 0
+        var series float err = 0
+        var series float err_s = 0
+        if anchor
+            avg := source
+            sum := source
+            err := 0
+            err_s := 0
+            src.set((index + max - 1) % max, 0)
+
+        // Online (streaming) numerically stable O(1) WMA
+        else
+            old = src.get(index)
+            a = min < bar ? (sum - old * shift) / min - avg : 0
+            b = max < bar ?  sum / max - avg : 0
+            w = 2 / (len + 1)
+
+            dif = (max < bar ? source - old : source) - err_s
+            err_s := sum + dif - sum - dif
+            sum += dif
+
+            dif := (source - avg - (a + (b - a) * t)) * w - err
+            err := avg + dif - avg - dif
+            avg += dif
+
+        // Update buffer
+        src.set(index, source)
+        index := (index + 1) % max
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ VWMA ------------------------------------------------------ {
+
+// @function **Volume Weighted Moving Average**\
+// Alternative to [ta.vwma()](#fun_ta.vwma) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.vwma()](#fun_ta.vwma) should be used when possible for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Volume-weighted moving average of `source` for `length` bars back.
+export vwma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("VWMA", length)
+    var simple bool use_pine = confirm(parity, length)
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var simple float t = length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // Update volume sum and weight
+    var series float sum = 0
+    sum := anchor ? volume : sum + volume
+    w = volume / sum
+
+    // Infinite VWMA
+    if not valid_length
+        avg := use_pine
+         ? ta.vwap(source, anchor)
+         : avg + (source - avg) * w
+
+    // Use Pine VWMA when specified (and possible) for mathematical parity
+    else if use_pine
+        a = ta.vwma(source, min)
+        b = ta.vwma(source, max)
+        avg := len < min
+         ? avg + (source - avg) * w
+         : a + nz(b - a) * t
+
+    // Extend fractional VWMA up to 100k bars
+    else
+
+        // Circular buffers
+        var series int index = 0
+        var simple int shift = max - min
+        var series float[] src = array.new_float(max)
+        var series float[] vol = array.new_float(max)
+
+        // Init floor and ceiling VWMA
+        var series float a = 0
+        var series float b = 0
+        var series float err_a = 0
+        var series float err_b = 0
+        var series float err_s = 0
+
+        // Anchor reset
+        if anchor
+            a := source
+            b := source
+            avg := source
+            err_a := 0
+            err_b := 0
+            err_s := 0
+
+        // Online (streaming) numerically stable O(1) VWMA
+        else
+            // Old source and volume
+            idx_a = (index + shift) % max
+            old_src_a = min < bar ? src.get(idx_a) : 0
+            old_vol_a = min < bar ? vol.get(idx_a) : 0
+            old_src_b = max < bar ? src.get(index) : 0
+            old_vol_b = max < bar ? vol.get(index) : 0
+
+            // vwma(source, min)
+            f = volume / (sum - old_vol_b * shift)
+            old_a = old_vol_a / (sum - old_vol_b - old_vol_a * shift)
+            dif_a = (source - a) * f * (1 + old_a) - (old_src_a - a) * old_a - err_a
+            err_a := a + dif_a - a - dif_a
+            a += dif_a
+
+            // vwma(source, max)
+            old_b = old_vol_b / (sum - old_vol_b)
+            dif_b = (source - b) * w * (1 + old_b) - (old_src_b - b) * old_b - err_b
+            err_b := b + dif_b - b - dif_b
+            b += dif_b
+
+            // Remove old volume from sum
+            dif_s  = old_vol_b - err_s
+            err_s := sum - dif_s - sum + dif_s
+            sum -= dif_s
+
+            avg := a + (b - a) * t
+
+        // Update buffers
+        src.set(index, source)
+        vol.set(index, volume)
+        index := (index + 1) % max
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ VWAP ------------------------------------------------------ {
+
+// @function **Volume Weighted Average Price**\
+// Alternative to [ta.vwap()](#fun_ta.vwap) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.vwap()](#fun_ta.vwap) should be used when possible for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Volume-weighted moving average of `source` for `length` bars back.
+export vwap(series float source, series bool anchor = false, simple bool parity = true) =>
+    vwma(source, na, anchor, parity)
+
+// }
+
+
+// ------------------------------------------------------ HMA ------------------------------------------------------- {
+
+// @function **Hull Moving Average**\
+// Alternative to [ta.hma()](#fun_ta.hma) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.hma()](#fun_ta.hma) should be used when possible for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Hull moving average of `source` for `length` bars back.
+export hma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("HMA", length)
+    var simple bool use_pine = confirm(parity, length)
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var simple float t = length - min
+
+    // Half lengths
+    var simple int min_half = math.max(int(min * 0.5), 1)
+    var simple int max_half = math.max(int(max * 0.5), 1)
+    var simple int shift_half = max_half - min_half
+    var simple float frac_half = t * shift_half
+
+    // Square root lengths
+    var simple int min_sqrt = int(math.sqrt(min))
+    var simple int max_sqrt = int(math.sqrt(max))
+    var simple int shift_sqrt = max_sqrt - min_sqrt
+    var simple float frac_sqrt = t * shift_sqrt
+    var simple float warmup = length + max_sqrt
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+    len_half = math.min(bar, min_half + frac_half)
+    len_sqrt = math.min(bar, min_sqrt + frac_sqrt)
+
+    // Infinite HMA
+    if not valid_length
+        var series float wma_1 = 0
+        var series float wma_2 = 0
+        w1 = 2 / (bar + 1)
+        w2 = 2 / (math.max(int(bar * 0.5), 1) + 1)
+        w3 = 2 / (int(math.sqrt(bar)) + 1)
+
+        // wma(2 * wma(source, length / 2) - wma(source, length), sqrt(length))
+        wma_1 += (source - wma_1) * w1
+        wma_2 += (source - wma_2) * w2
+        avg += (2 * wma_2 - wma_1 - avg) * w3
+
+    // Use Pine HMA when specified (and possible) for mathematical parity
+    else if use_pine
+        a = ta.hma(source, min)
+        b = ta.hma(source, max)
+
+        // Interim WMAs needed to calc the HMA warmup
+        var series float f = 0
+        var series float c = 0
+        var series float x = 0
+        var series float y = 0
+
+        if bar < warmup
+            a := nz(a[1])
+            b := nz(b[1])
+
+            // wma(source, length)
+            wma_1_f = ta.wma(source, min)
+            wma_1_c = ta.wma(source, max)
+            w  = 2 / (len + 1)
+            f := len < min ? f + (source - f) * w : wma_1_f
+            c := len < max ? c + (source - c) * w : wma_1_c
+
+            // wma(source, length / 2)
+            wma_2_f = ta.wma(source, min_half)
+            wma_2_c = ta.wma(source, max_half)
+            w := 2 / (len_half + 1)
+            x := len < min_half ? x + (source - x) * w : wma_2_f
+            y := len < max_half ? y + (source - y) * w : wma_2_c
+
+            // wma(2 * wma_2 - wma_1, sqrt(length))
+            src_f = 2 * x - f
+            src_c = 2 * y - c
+            wma_3_f = ta.wma(src_f, min_sqrt)
+            wma_3_c = ta.wma(src_c, max_sqrt)
+            w := 2 / (len_sqrt + 1)
+            a := len < min_sqrt ? a + (src_f - a) * w : wma_3_f
+            b := len < max_sqrt ? b + (src_c - b) * w : wma_3_c
+
+        avg := a + (b - a) * t
+
+    // Extend fractional HMA up to 100k bars
+    else
+
+        // The formula for a fractional HMA would require 6 calls to the custom WMA function, which would create
+        // 6 separate historical buffers. While verbose, the following is a more efficient unrolled approach.
+
+        // Circular buffer
+        var series int index = 0
+        var simple int shift = max - min
+        var series float[] src1 = array.new_float(max, 0)
+        var series float[] src2 = array.new_float(max, 0)
+
+        // Interim values needed to calc the HMA
+        var series float src = 0
+        var series float sum = 0
+        var series float err = 0
+        var series float wma_1 = 0
+        var series float wma_2 = 0
+        var series float sum_1 = 0
+        var series float sum_2 = 0
+        var series float err_1 = 0
+        var series float err_2 = 0
+        var series float err_s = 0
+        var series float err_s1 = 0
+        var series float err_s2 = 0
+
+        // Anchor reset
+        if anchor
+            src := source
+            avg := source
+            sum := source
+            wma_1 := source
+            sum_1 := source
+            wma_2 := source
+            sum_2 := source
+            err := 0
+            err_1 := 0
+            err_2 := 0
+            err_s := 0
+            err_s1 := 0
+            err_s2 := 0
+            idx = (index + max - 1) % max
+            src1.set(idx, 0)
+            src2.set(idx, 0)
+
+        // Online (streaming) numerically stable O(1) HMA
+        else
+
+            // wma(source, length)
+            old = src1.get(index)
+            a = min < bar ? (sum_1 - old * shift) / min - wma_1 : 0
+            b = max < bar ?  sum_1 / max - wma_1 : 0
+            dif_s1  = (max < bar ? source - old : source) - err_s1
+            err_s1 := sum_1 + dif_s1 - sum_1 - dif_s1
+            sum_1  += dif_s1
+            dif_1  = (source - wma_1 - (a + (b - a) * t)) * (2 / (len + 1)) - err_1
+            err_1 := wma_1 + dif_1 - wma_1 - dif_1
+            wma_1 += dif_1
+
+            // wma(source, length / 2)
+            old := src1.get((index + max - max_half) % max)
+            a := min_half < bar ? (sum_2 - old * shift_half) / min_half - wma_2 : 0
+            b := max_half < bar ?  sum_2 / max_half - wma_2 : 0
+            dif_s2  = (max_half < bar ? source - old : source) - err_s2
+            err_s2 := sum_2 + dif_s2 - sum_2 - dif_s2
+            sum_2  += dif_s2
+            dif_2  = (source - wma_2 - (a + (b - a) * t)) * (2 / (len_half + 1)) - err_2
+            err_2 := wma_2 + dif_2 - wma_2 - dif_2
+            wma_2 += dif_2
+
+            // wma(2 * wma_2 - wma_1, sqrt(length))
+            src := 2 * wma_2 - wma_1
+            old := src2.get((index + max - max_sqrt) % max)
+            a := min_sqrt < bar ? (sum - old * shift_sqrt) / min_sqrt - avg : 0
+            b := max_sqrt < bar ?  sum / max_sqrt - avg : 0
+            dif_s  = (max_sqrt < bar ? src - old : src) - err_s
+            err_s := sum + dif_s - sum - dif_s
+            sum += dif_s
+            dif  = (src - avg - (a + (b - a) * t)) * (2 / (len_sqrt + 1)) - err
+            err := avg + dif - avg - dif
+            avg += dif
+
+        // Update buffers
+        src1.set(index, source)
+        src2.set(index, src)
+        index := (index + 1) % max
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ SWMA ------------------------------------------------------ {
+
+// @function **Symmetrically Weighted Moving Average**\
+// Alternative to [ta.swma()](#fun_ta.swma) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.swma()](#fun_ta.swma) should be used when possible for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Symmetrically weighted moving average of `source` for `length` bars back.
+export swma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("SWMA", length)
+    var simple bool use_pine = confirm(parity, length, 9998)
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var simple float t = length - min
+
+    // Half lengths
+    var simple float half_f = min * 0.5
+    var simple float half_c = max * 0.5
+    var simple int half_ff  = math.floor(half_f + 1)
+    var simple int half_fc  = math.ceil(half_f)
+    var simple int half_cf  = math.floor(half_c + 1)
+    var simple int half_cc  = math.ceil(half_c)
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // Interim SMAs needed to calc the SWMA
+    var series float x = 0
+    var series float y = 0
+    var series float a = 0
+    var series float b = 0
+
+    // Infinite SWMA
+    if not valid_length
+        a += (source - a) / bar
+        avg += (a - avg) / bar
+
+    // Use Pine functions when specified (and possible) for mathematical parity
+    else if use_pine
+
+        // The Pine SWMA has a fixed length of 4
+        var simple bool len_4 = length == 4
+        if len_4
+            avg := ta.swma(source)
+
+        // Extend the SWMA up to 10k bars (SMA lengths are half the SWMA length)
+        if not len_4 or len < length
+            sma_x = ta.sma(source, half_fc)
+            sma_y = ta.sma(source, half_cc)
+            x := len < half_fc ? x + (source - x) / len : sma_x
+            y := len < half_cc ? y + (source - y) / len : sma_y
+
+            sma_a = ta.sma(x, half_ff)
+            sma_b = ta.sma(y, half_cf)
+            a := len < half_ff ? a + (x - a) / len : sma_a
+            b := len < half_cf ? b + (y - b) / len : sma_b
+
+            avg := a + (b - a) * t
+
+    // Extend fractional SwMA up to 100k bars
+    else
+
+        // Circular buffer
+        var series int index = 0
+        var series int idx_a = 0
+        var series int idx_b = 0
+        var simple int shift = half_cc - half_fc
+        var series float[] src = array.new_float(half_cc)
+        var series float[] src_a = array.new_float(half_ff)
+        var series float[] src_b = array.new_float(half_cf)
+
+        // Init interim errors
+        var series float err_x = 0
+        var series float err_y = 0
+        var series float err_a = 0
+        var series float err_b = 0
+
+        if anchor
+            avg := source
+            x := source
+            y := source
+            a := source
+            b := source
+            err_x := 0
+            err_y := 0
+            err_a := 0
+            err_b := 0
+
+        else
+            // sma(source, half_fc)
+            old = half_fc < bar ? src.get((index + shift) % half_cc) - x :  0
+            dif = (source - x - old) / math.min(len, half_fc) - err_x
+            err_x := x + dif - x - dif
+            x += dif
+
+            // sma(source, half_cc)
+            old := half_cc < bar ? src.get(index) - y : 0
+            dif := (source - y - old) / math.min(len, half_cc) - err_y
+            err_y := y + dif - y - dif
+            y += dif
+
+            // sma(x, half_ff)
+            old := half_ff < bar ? src_a.get(idx_a) - a : 0
+            dif := (x - a - old) / math.min(len, half_ff) - err_a
+            err_a := a + dif - a - dif
+            a += dif
+
+            // sma(y, half_cf)
+            old := half_cf < bar ? src_b.get(idx_b) - b : 0
+            dif := (y - b - old) / math.min(len, half_cf) - err_b
+            err_b := b + dif - b - dif
+            b += dif
+
+            avg := a + (b - a) * t
+
+        // Update buffers
+        src.set(index, source)
+        src_a.set(idx_a, x)
+        src_b.set(idx_b, y)
+        index := (index + 1) % half_cc
+        idx_a := (idx_a + 1) % half_ff
+        idx_b := (idx_b + 1) % half_cf
+
+    avg
+
+// }
+
+
+// ----------------------------------------------------- LINREG ----------------------------------------------------- {
+
+// @function **Linear Regression**\
+// Alternative to [ta.linreg()](#fun_ta.linreg) that supports anchors and fractional lengths up to 100k bars.
+// @param source Series of values to process.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.linreg()](#fun_ta.linreg) should be used when possible for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @param offset Offset; 0 by default. Optional.
+// @returns Linear regression curve of `source` for `length` bars back.
+export linreg(series float source, simple float length = na, series bool anchor = false, simple bool parity = true, simple float offset = 0) =>
+
+    // Initialize
+    var simple bool valid_length = validate("LR", length)
+    var simple bool use_pine = confirm(parity, length)
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var simple float t = length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+
+    // Interim values needed to calc the LR
+    var simple int off = int(offset)
+    var series float sum_1 = 0
+    var series float sum_2 = 0
+
+    // Infinite LR
+    if not valid_length
+        if anchor
+            avg := source
+            sum_1 := source
+            sum_2 := 0
+        else
+            bm1 = bar - 1
+            sum_1 += source
+            sum_2 += source * bm1
+
+            w1 = bar * bm1 * 0.5
+            w2 = bm1 * bar * (2 * bar - 1) / 6
+            slope = nz((sum_2 * bar - sum_1 * w1) / (bar * w2 - w1 * w1), source)
+            intercept = (sum_1 - slope * w1) / bar
+            avg := intercept + slope * bm1
+
+    // Use Pine LR when specified (and possible) for mathematical parity
+    else if use_pine
+        a = ta.linreg(source, min, off)
+        b = ta.linreg(source, max, off)
+
+        if anchor
+            avg := source
+            sum_1 := source
+            sum_2 := 0
+
+        else if bar < length
+            bm1 = bar - 1
+            sum_2 += source * bm1
+            sum_1 += source
+
+            w1 = bar * bm1 * 0.5
+            w2 = bm1 * bar * (2 * bar - 1) / 6
+            slope = nz((sum_2 * bar - sum_1 * w1) / (bar * w2 - w1 * w1), source)
+            intercept = (sum_1 - slope * w1) / bar
+
+            avg := intercept + slope * (bm1 - off)
+
+        else
+            avg := a + (b - a) * t
+
+    // Extend fractional LR up to 100k bars
+    else
+
+        // Circular buffer
+        var series int index = 0
+        var simple int shift = max - min
+        var series float[] src = array.new_float(max)
+
+        // Interim values needed to calc the LR
+        var series float err_1 = 0
+        var series float err_2 = 0
+        var series float err_3 = 0
+        var series float err_4 = 0
+        var series float sum_3 = 0
+
+        // Anchor reset
+        if anchor
+            avg   := source
+            sum_1 := source
+            sum_2 := 0
+            sum_3 := 0
+            err_1 := 0
+            err_2 := 0
+            err_3 := 0
+            err_4 := 0
+
+        // Online (streaming) numerically stable O(1) LR
+        else
+            a = min < bar ? src.get((index + shift) % max) * shift : 0
+            b = max < bar ? src.get(index) : 0
+
+            len_f = math.min(bar, min)
+            len_c = math.min(bar, max)
+            lfm1  = len_f - 1
+            lcm1  = len_c - 1
+            stlf1 = source * lfm1
+            stlc1 = source * lcm1
+
+            // sum_1 -= b
+            dif_1  = -b - err_1
+            err_1 := sum_1 + dif_1 - sum_1 - dif_1
+            sum_1 += dif_1
+
+            // sum_4 = sum_1 - a
+            dif_4  = -a - err_4
+            err_4 := sum_1 + dif_4 - sum_1 - dif_4
+            sum_4  = sum_1 + dif_4
+
+            // sum_3 += source * (len_f - 1) - sum_4
+            dif_3  = (min < bar ? stlf1 - sum_4 : stlf1) - err_3
+            err_3 := sum_3 + dif_3 - sum_3 - dif_3
+            sum_3 += dif_3
+
+            // sum_2 += source * (len_c - 1) - sum_1
+            dif_2  = (max < bar ? stlc1 - sum_1 : stlc1) - err_2
+            err_2 := sum_2 + dif_2 - sum_2 - dif_2
+            sum_2 += dif_2
+
+            // sum_4 += source
+            dif_4 := source - err_4
+            err_4 := sum_4 + dif_4 - sum_4 - dif_4
+            sum_4 += dif_4
+
+            // sum_1 += source
+            dif_1 := source - err_1
+            err_1 := sum_1 + dif_1 - sum_1 - dif_1
+            sum_1 += dif_1
+
+            // Min LR
+            w1 = len_f * lfm1 * 0.5
+            w2 = lfm1 * len_f * (2 * len_f - 1) / 6
+            slope = nz((sum_3 * len_f - sum_4 * w1) / (len_f * w2 - w1 * w1), source)
+            intercept = (sum_4 - slope * w1) / len_f
+            a := intercept + slope * (lfm1 - off)
+
+            // Max LR
+            w1 := len_c * lcm1 * 0.5
+            w2 := lcm1 * len_c * (2 * len_c - 1) / 6
+            slope := nz((sum_2 * len_c - sum_1 * w1) / (len_c * w2 - w1 * w1), source)
+            intercept := (sum_1 - slope * w1) / len_c
+            b := intercept + slope * (lcm1 - off)
+
+            // Update average
+            avg := a + (b - a) * t
+
+        // Update buffer
+        src.set(index, source)
+        index := (index + 1) % max
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ ATR ------------------------------------------------------- {
+
+// @function **Average True Range**\
+// Alternative to [ta.atr()](#fun_ta.atr) that supports anchors and indefinite fractional lengths.
+// @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// lengths floor and ceiling. When less than one (ie. 0.5), it is used as the coefficient. When undefined
+// (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param parity Sets if [ta.atr()](#fun_ta.atr) should be used (when possible) for mathematical parity.
+// Optional; [true](#const_true) by default.
+// @returns Average true range.
+export atr(simple float length = na, series bool anchor = false, simple bool parity = true) =>
+
+    // Initialize
+    var simple bool valid_length = validate("ATR", length, 0, na)
+    var simple bool use_pine = confirm(parity, length)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = 0
+
+    // Parse length
+    var simple int min = math.floor(length)
+    var simple int max = math.ceil(length)
+    var series float t = use_coef ? length : length - min
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = math.min(bar, length)
+
+    // For the same reason as the EMA, the Pine ATR (which uses an RMA) should not be re-anchored.
+    var series bool reanchored = false
+
+    // True Range
+    source = ta.tr(true) // aka. na(high[1])? high - low : math.max(high - low, math.abs(high - close[1]), math.abs(low - close[1]))
+
+    // Infinite ATR
+    if not valid_length
+        avg += (source - avg) / bar
+
+    // Use Pine ATR when specified (and possible) for mathematical parity
+    else if use_pine and not reanchored
+        reanchored := anchor ? not barstate.isfirst : reanchored
+        a = ta.atr(min)
+        b = ta.atr(max)
+        avg := len < length
+         ? avg + (source - avg) / len
+         : a + (b - a) * t
+
+    // Extend fractional ATR indefinitely
+    else
+        var series float err = 0
+        t := use_coef ? t : 1 / len
+        dif  = (source - avg) * t - err
+        err := avg + dif - avg - dif
+        avg += dif
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ ALMA ------------------------------------------------------ {
+
+// THIS SECTION IS COMMENTED OUT BECAUSE I CANNOT MAKE THE ALMA O(1), AND LOOPS ARE TOO HEAVY WITH LONG LENGTHS.
+// BUT LEAVING IN PLACE AS AN EASTER EGG. IF YOU CAN FIGURE OUT AN APPROXIMATION THAT PRODUCES A MAXIMUM
+// DIFFERENCE LESS THAN 1.0E-10 FROM THE BUILT-IN ALMA WITH THE SAME INPUTS, SEND ME A MESSAGE AND
+// I WILL CREDIT YOU WITH THE CONTRIBUTION.
+
+// // @function Helper to initialize the weights for the ALMA.
+// alma_weights(simple int length, simple float offset, simple float sigma, simple bool floor, simple bool normalized = true) =>
+//     s = length / sigma
+//     m = offset * (length - 1)
+//     if floor
+//         m := math.floor(m)
+//     sum = 0.0
+//     arr = array.new_float(length, s * s * 2)
+//     for [x, v2] in arr
+//         d = x - m
+//         w = math.exp(-d * d / v2) // Gaussian PDF == exp( -(x - μ)² / 2σ² ) / σ√2π
+//         sum += w
+//         arr.set(i, normalized ? w / sow : w)
+//     arr
+
+
+// // @function **Arnaud Legoux Moving Average**\
+// // Alternative to [ta.alma()](#fun_ta.alma) that supports anchors and fractional lengths up to 100k bars.
+// // @param source Series of values to process.
+// // @param length Number of bars. When fractional (ie. 9.5), the result is linearly interpolated between the
+// // lengths floor and ceiling. When undefined (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// // @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// // when [false](#const_false), calculations proceed from the previous reset. Optional.
+// // @param parity Sets if [ta.alma()](#fun_ta.alma) should be used (when possible) for mathematical parity.
+// // Optional; [true](#const_true) by default.
+// // @param offset Controls tradeoff between smoothness (closer to 1) and responsiveness (closer to 0).
+// // @param sigma Changes the smoothness of ALMA. The larger sigma the smoother ALMA.
+// // @param floor Optional.
+// // @returns Arnaud Legoux moving average of `source` for `length` bars back.
+// export alma(series float source, simple float length = na, series bool anchor = false, simple bool parity = true, simple float offset = 0, simple float sigma = 0, simple bool floor = false) =>
+
+//     // Initial checks
+//     var simple bool valid_length = validate("ALMA", length)
+//     var simple bool use_pine = confirm(parity, length)
+//     avg = 0.
+
+//     // Parse length
+//     var simple int min = math.floor(length)
+//     var simple int max = math.ceil(length)
+//     var simple float t = length - min
+
+//     // Increment length
+//     var series float len = 0
+//     len := anchor ? 1 : math.min(len + 1, length)
+//     warm_up = len < length
+
+//     // Use Pine ALMA when specified (and possible) for mathematical parity
+//     if use_pine
+//         a = ta.alma(source, warm_up ? int(len) : min, offset, sigma, floor)
+//         b = ta.alma(source, warm_up ? int(len) : max, offset, sigma, floor)
+//         avg := a + (b - a) * t
+
+//     // Extend fractional ALMA up to 100k bars
+//     else
+
+//         // I'm not aware of an O(1) technique to avoid loops when the weights are not linear (in this case, Gaussian),
+//         // and a cubed EMA seems insufficient.
+
+//         // Circular buffer
+//         var series int index = 0
+//         var simple int shift = max - min
+//         var simple bool shifted = shift == 1
+//         var series float[] src = array.new_float(max)
+
+//         // Update buffer
+//         src.set(index, source)
+//         index := (index + 1) % max
+
+//         // Weight LUTs
+//         var simple float[] weights_lut = alma_weights(max, offset, sigma, floor, normalized = false)
+//         var simple float[] weights_min = alma_weights(min, offset, sigma, floor)
+//         var simple float[] weights_max = alma_weights(max, offset, sigma, floor)
+//         var series int first = 0
+//         var simple int last = max - 1
+
+//         // Anchor reset
+//         if anchor
+//             avg := source
+//             first := (index + last) % max
+
+//         // Extended fractional ALMA up to 100k bars
+//         else
+
+//             // This is way too heavy. Also needs error compensation.
+//             a = 0., b = 0., sow = 0., end = math.ceil(len) - 1
+//             for i = 0 to end
+
+//                 if warm_up
+
+//                     // Approximate warm up weights
+//                     j = last * i / end
+//                     w = weights_lut.get(math.floor(j)) * (1 - j % 1) + weights_lut.get(math.ceil(j)) * (j % 1)
+//                     sow += w
+//                     a += (src.get((first + i) % max) - a) * w / sow
+//                     b := a
+
+//                 else
+
+//                     // Interpolate between min and max length
+//                     a += i < min ? weights_min.get(i) * (src.get((index + i + shift) % max) - a) : 0
+//                     b += shifted ? weights_max.get(i) * (src.get((index + i) % max) - b) : 0
+
+//             avg := a + (b - a) * t
+
+//     avg
+
+// }
+
+
+// ---------------------------------------------------- ONE EURO ---------------------------------------------------- {
+
+// @function **1€ Filter**\
+// An adaptation of a responsive low-pass filter introduced by Géry Casiez, with an auto-adjusting cutoff frequency
+// based on the signals rate of change.\
+// \
+// To fit neatly within a trading paradigm, the intercept ( ƒcₘᵢₙ ), slope ( β ), and sampling rate ( 1 / 𝛵ₑ ) are
+// automatically computed from the `length` and `offset`.
+// ```
+// fc_min = 2 * math.pi / ( length - 1 )
+// beta   = math.max( -offset / length, 0 )
+// rate   = 2 * math.pi + nz(fc_min) * math.max(offset, 0)
+// ```
+// @param source Series of values to process.
+// @param length Number of bars. Used to calculate filter parameters. When undefined (ie. [na](#var_na)) or zero, the
+// length is considered infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param offset Offset; 0 by default. Used to calculate filter parameters.
+// @param skip_warm_up Sets if `length` should be treated as an exact value ([true](#const_true)) or a maximum value
+// ([false](#const_false), default).
+// @returns One euro moving average of `source`.
+export one_euro(series float source, simple float length = na, series bool anchor = false, simple float offset = 0, simple bool skip_warm_up = false) =>
+
+    // Initialize
+    var simple bool valid_length = validate("OEF", length, max = na)
+    var series float avg = source
+
+    // Increment length
+    var series float len = 0
+    len := valid_length
+     ? skip_warm_up ? length
+     : math.min(len + 1, length)
+     : len + 1
+
+    // Anchor reset
+    var series float err = 0
+    var series float avg_dx = 0
+    var series float err_dx = 0
+    if anchor
+        len := 1
+        avg := source
+        err := 0
+        avg_dx := 0
+        err_dx := 0
+
+    // Extend fractional OEMA indefinitely
+    else
+
+        // The 1€ Filter expresses cutoff frequencies in Hz (cycles / second). This function uses bars, not seconds.
+        // Because τ is one full sine cycle, if we remap 1 Hz to 1 τ, a bars frequency can be expressed in radians
+        // using `τ / x`. And since `|x| ≥ 0` and `len ≥ 1`, `τ / x == τ / (len - 1)`.
+
+        // Minimum angular frequency per bar ( ƒcₘᵢₙ )
+        const float tau = 2 * math.pi
+        fc_min = tau / (len - 1)
+
+        // Set beta ( β ) as the ratio between the offset and length when the offset is negative, reducing lag.
+        beta = math.max( -offset / len, 0 )
+
+        // Set sampling rate to a 1Hz bar equivalent, plus additional bars when offset is positive, increasing lag.
+        rate = tau + nz(fc_min) * math.max(offset, 0)
+
+        //  The canonical 1€ alpha equation can be simplified...
+        //  From: ⍺ = 1 / ( 1 + (1 / τc) / (1 / r) )
+        //  To:   ⍺ = τc / (τc + r)
+
+        // Derivative weight ( ⍺₁ ) with a fixed cutoff of 1 (per CHI 2012 paper)
+        tc = tau * 1
+        t  = tc / (tc + rate)
+
+        // Velocity ( X̂ )
+        dx = nz(source - source[1])
+        dif_dx  = (dx - avg_dx) * t - err_dx
+        err_dx := avg_dx + dif_dx - avg_dx - dif_dx
+        avg_dx += dif_dx
+
+        // Signal weight ( ⍺₂ ) with a cutoff of `ƒcₘᵢₙ + β × |X̂ᵢ|`
+        tc := tau * (fc_min + beta * math.abs(avg_dx))
+        t  := nz(tc / (tc + rate), 1)
+
+        // Update average
+        dif  = (source - avg) * t - err
+        err := avg + dif - avg - dif
+        avg += dif
+
+    avg
+
+// }
+
+
+// ---------------------------------------------------- LAGUERRE ---------------------------------------------------- {
+
+// @function **Laguerre Filter**\
+// An adaptation of a low-lag low-pass filter introduced by John Ehlers, with cascaded Laguerre stages and binomial
+// weighting for a smoother and faster response than traditional EMAs.\
+// \
+// To fit neatly within a trading paradigm, gamma ( 𝛄 ) is automatically computed using `length ` when it is
+// greater than 1, or explicitly defined by `length` when less than 1.
+// ```
+// gamma = length <= 1 ? length : 1 - math.exp(-2 * math.pi / length) // e^( -τ / n )
+// ```
+// @param source Series of values to process.
+// @param length Number of bars. Used to calculate gamma when > 1, or used as gamma when < 1. When undefined
+// (ie. [na](#var_na)) or zero, the length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param skip_warm_up Sets if `length` should be treated as an exact value ([true](#const_true)) or a maximum value
+// ([false](#const_false), default).
+// @returns Laguerre filtered value of `source`, parameterized by `length`.
+export laguerre(series float source, simple float length = na, series bool anchor = false, simple bool skip_warm_up = false) =>
+
+    // Initialize
+    var simple bool valid_length = validate("LF", length, 0, na)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = 0
+
+    // Increment length
+    var series float len = 0
+    len := valid_length
+     ? skip_warm_up ? length
+     : math.min(len + 1, length)
+     : len + 1
+
+    // Interim values needed to calc the LF
+    var series float sum_0 = source
+    var series float sum_1 = source
+    var series float sum_2 = source
+    var series float sum_3 = source
+    var series float err_0 = 0
+    var series float err_1 = 0
+    var series float err_2 = 0
+    var series float err_3 = 0
+
+    // Anchor reset
+    if anchor
+        len := 1
+        avg := source
+        sum_0 := source
+        sum_1 := source
+        sum_2 := source
+        sum_3 := source
+        err_0 := 0
+        err_1 := 0
+        err_2 := 0
+        err_3 := 0
+
+    // Extend fractional LF indefinitely
+    else
+
+        // I'm not aware of an established bar-length-to-gamma transformation, but the following
+        // is a principled heuristic that seems to work well: e^( -τ / n ).
+
+        // Gamma
+        t = use_coef ? length : 1 - math.exp(-2 * math.pi / len)
+        w = 1 - t
+
+        // Previous sums
+        dif_1 = sum_0
+        dif_2 = sum_1
+        dif_3 = sum_2
+
+        // (1 - gamma) ✕ source + gamma ✕ L0
+        dif_0  = (source - sum_0) * t - err_0
+        err_0 := sum_0 + dif_0 - sum_0 - dif_0
+        sum_0 += dif_0
+
+        // -gamma ✕ L0 + L0[1] + gamma ✕ L1[1]
+        dif_1 -= sum_0 * w + sum_1 * t - err_1
+        err_1 := sum_1 + dif_1 - sum_1 - dif_1
+        sum_1 += dif_1
+
+        // -gamma ✕ L1 + L1[1] + gamma ✕ L2[1]
+        dif_2 -= sum_1 * w + sum_2 * t - err_2
+        err_2 := sum_2 + dif_2 - sum_2 - dif_2
+        sum_2 += dif_2
+
+        // -gamma ✕ L2 + L2[1] + gamma ✕ L3[1]
+        dif_3 -= sum_2 * w + sum_3 * t - err_3
+        err_3 := sum_3 + dif_3 - sum_3 - dif_3
+        sum_3 += dif_3
+
+        // Update average
+        // (L0 + 2 ✕ L1 + 2 ✕ L2 + L3) / 6
+        const float sixth = 0.1666666666666667 // 1/6
+        const float third = 0.3333333333333333 // 2/6
+        avg := (sum_0 + sum_3) * sixth + (sum_1 + sum_2) * third
+
+    avg
+
+// }
+
+
+// ------------------------------------------------- SUPER SMOOTHER ------------------------------------------------- {
+
+// @function **Super Smoother Filter**\
+// An adaptation of a 2-pole Butterworth low-pass filter introduced by John Ehlers, designed to provide strong noise
+// attenuation with minimal lag and a maximally flat (ripple-free) passband compared to traditional moving averages.
+// @param source Series of values to process.
+// @param length Number of bars. Used to calculate filter parameters. When undefined (ie. [na](#var_na)) or zero, the
+// length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param skip_warm_up Sets if `length` should be treated as an exact value ([true](#const_true)) or a maximum value
+// ([false](#const_false), default).
+// @returns Super smoother filtered value of `source`, parameterized by `length`.
+export super_smoother(series float source, simple float length = na, series bool anchor = false, simple bool skip_warm_up = false) =>
+
+    // Initialize
+    var simple bool valid_length = validate("SSF", length, max = na)
+    var series float avg = source
+
+    // Increment length
+    var series float len = 0
+    len := valid_length
+     ? skip_warm_up ? length
+     : math.min(len + 1, length)
+     : len + 1
+
+    // Interim values needed to calc SSF
+    var series float src_1 = source
+    var series float avg_2 = source
+    var series float err = 0
+
+    // Anchor reset
+    if anchor
+        len := 1
+        avg := source
+        err := 0
+        avg_2 := source
+
+    // Extend fractional SSF indefinitely
+    else
+
+        // Set e^( √2π / N )
+        const float root_two_pi = math.sqrt(2) * math.pi
+        root_two_pi_len = root_two_pi / len
+        exp = math.exp(-root_two_pi_len)
+
+        // Coefficients
+        a = 2 * exp * math.cos(root_two_pi_len) - 1
+        b = -exp * exp
+
+        // Update average using an incremental version of c1 * (src + src[1]) / 2 + c2 * avg[1] + c3 * avg[2]
+
+        // Temporary avg[2]
+        avg_1 = avg
+
+        // c2 * avg[1]
+        dif  = avg * a - err
+        err := avg + dif - avg - dif
+        avg += dif
+
+        // c3 * avg[2]
+        dif := avg_2 * b - err
+        err := avg + dif - avg - dif
+        avg += dif
+
+        // c1 * (src + src[1]) / 2
+        dif := (source + src_1) * (-a - b) * 0.5 - err
+        err := avg + dif - avg - dif
+        avg += dif
+
+        // Set avg[2]
+        avg_2 := avg_1
+
+    // Set source[1]
+    src_1 := source
+
+    avg
+
+// }
+
+
+// ------------------------------------------------------ HOLT ------------------------------------------------------ {
+
+// @function **Holt’s Linear Trend Method**\
+// An adaptation of Holt’s double exponential smoothing technique, combining level and trend estimation to produce a
+// responsive moving average with built-in trend tracking and forward projection capability.\
+// \
+// To fit neatly within a trading paradigm, the alpha ( ⍺ ) and beta ( β ) are automatically computed from the `length`.
+// ```
+// alpha = 2 / (length + 1)
+// beta  = alpha * math.min((len - 1) / 10, 1)
+// ```
+// @param source Series of values to process.
+// @param length Number of bars. Used to calculate filter parameters. When undefined (ie. [na](#var_na)) or zero, the
+// length is considered progressively infinite.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param offset Offset; 0 by default. Used to calculate filter parameters.
+// @param skip_warm_up Sets if `length` should be treated as an exact value ([true](#const_true)) or a maximum value
+// ([false](#const_false), default).
+// @returns Holt's linear trend of `source`, parameterized by `length`.
+export holt(series float source, simple float length = na, series bool anchor = false, simple float offset = 0, simple bool skip_warm_up = false) =>
+
+    // Initialize
+    var simple bool valid_length = validate("HLT", length, 0, na)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = source
+
+    // Increment length
+    var series float len = 0
+    len := valid_length
+     ? skip_warm_up ? length
+     : math.min(len + 1, length)
+     : len + 1
+
+    // Interim values needed to calc the HLT
+    var series float level = source
+    var series float trend = 0
+    var series float src_1 = source
+    var series float err_l = 0
+    var series float err_t = 0
+
+    // Anchor reset
+    if anchor
+        len := 1
+        avg := source
+        level := source
+        trend := 0
+        err_l := 0
+        err_t := 0
+
+    // Extend fractional HLT indefinitely
+    else
+
+        // Alpha ( ⍺ ) & Beta ( β )
+        const float root_two_tenth = math.sqrt(2) * 0.1
+        w = use_coef ? length : 2 / (len + 1) // ⍺
+        t = w * math.min((len - 1) / 10, 1)   // β
+        level_1 = level
+
+        // alpha * source + (1 - alpha) * (level[1] + trend[1])
+        dif_l  = (source - level - trend) * w - err_l
+        err_l := level + dif_l - level - dif_l
+        level += dif_l
+
+        // beta * (level - level[1]) + (1 - beta) * trend[1]
+        dif_t  = (level - level_1 - trend) * t - err_t
+        err_t := trend + dif_t - trend - dif_t
+        trend += dif_t
+
+
+        // Update average, offset by forecasted trend
+        avg := level - offset * trend
+
+    // Set source[1]
+    src_1 := source
+
+    avg
+
+// }
+
+
+// -------------------------------------------------- SMOOTH DAMP --------------------------------------------------- {
+
+// @function **Smooth Damp**\
+// An adaptation of a critically damped second-order filter, specifically Thomas Lowe's 2004 *smoothCD* implementation,
+// producing a volatility-adaptive response.
+// @param source Series of values to process.
+// @param length Number of bars. Used to calculate filter parameters.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param offset Offset; [na](#var_na) by default. Controls the maximum rate of change. When positive, lag increases
+// by *decreasing* the max RoC. When negative, lag decreases by *increasing* the max RoC. When zero, the max RoC is the
+// quadratic mean speed of the source. When [na](#var_na), no max RoC is applied. Optional.
+// @param skip_warm_up Sets if `length` should be treated as an exact value ([true](#const_true)) or a maximum value
+// ([false](#const_false), default).
+// @returns Critically damped response of `source` changes.
+export smooth_damp(series float source, simple float length = na, series bool anchor = false, simple float offset = na, simple bool skip_warm_up = false) =>
+
+    // Initialize
+    var simple bool valid_length = validate("SD", length, 0, na)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = source // Critically damped output (not an average, but keeping nomenclature for consistency)
+
+    // Increment length
+    var series int bar = 0
+    bar := anchor ? 1 : bar + 1
+    len  = valid_length
+     ? skip_warm_up ? length
+     : math.min(bar, length)
+     : bar
+
+    // Interim values needed to calc the SD
+    var series float src_1 = source
+    var series float vel = 0
+
+    // Anchor reset
+    if anchor
+        avg := source
+        vel := 0
+
+    // Extend fractional SD indefinitely
+    else
+
+        // Based on the 2004 book "Game Programming Gems 4", Chapter 1.10, "Critically Damped Ease-In/Ease-Out Smoothing"
+        // with inputs: from, to, vel, maxSpeed, smoothTime, and timeDelta.
+        //
+        // Within a trading context, `from` is the average, `to` is the source, maxSpeed remaps to the average source
+        // change, smoothTime remaps to length, and timeDelta is 1 (a single bar).
+
+        // Convert length into a half-life coefficient
+        const float lambda = math.log(2)
+        smooth_time = use_coef ? length : len * lambda
+
+        // Critical damping
+        omega = 2 / smooth_time
+        exp = math.exp(-omega) // Δt = 1 : e^( -⍵Δt ) == e^( -⍵ )
+
+        // Set maximum change
+        change = if na(offset)
+            avg - source
+
+        else
+            var simple float o = offset <= 0 ? 1 - offset * 0.1 : 1 / (1 + offset * 0.1)
+            shift = o * (1 - 1 / bar)
+            max_speed  = math.sqrt(ta.cum(math.pow(source / src_1 - 1, 2)) / (bar_index + 1)) * avg * shift
+            max_change = max_speed * smooth_time
+            math.min(math.max(avg - source, -max_change), max_change) * shift
+
+        // Update velocity
+        temp =  vel + omega * change // Δt = 1 : (v + ⍵c)Δt == v + ⍵c
+        vel := (vel - omega * temp) * exp
+
+        // Update without Kahan compensation (it's not an average; floating point errors are okay).
+        avg += (change + temp) * exp - change
+
+    // Set source[1]
+    src_1 := source
+
+    avg
+
+// }
+
+
+// ----------------------------------------------- SLEW RATE LIMITER ------------------------------------------------ {
+
+// @function **Slew Rate Limiter**\
+// An adaptation of a common DSP technique that restricts the rate of change, notably forcing slew to occur as smooth
+// bounded ramps, with the ability to control the deadband and glide curvature.
+// @param source Series of values to process.
+// @param length Number of bars. Used to calculate filter parameters.
+// @param anchor The condition that triggers a calculation reset. When [true](#const_true), calculations reset;
+// when [false](#const_false), calculations proceed from the previous reset. Optional.
+// @param offset Offsets the output by easing between the flats and ramp ( + offset ) or accelerating the ramps rate of
+// change toward the source ( - offset ); 0 by default. Optional.
+// @param deadband A region of small changes that the limiter intentionally ignores (a noise floor) measured as an
+// absolute standard deviation percentage (ie. 100 == 1σ); 0 by default. Optional.
+// @param range_high High of bar range; [high](#var_high) by default. Used with `deadband` to help define signal noise. Optional.
+// @param range_low Low of bar range; [low](#var_low) by default. Used with `deadband` to help define signal noise. Optional.
+// @returns Slew limited `source`.
+export slew_rate_limiter(series float source, simple float length = na, series bool anchor = false, simple float offset = 0, simple float deadband = 0, series float range_high = high, series float range_low = low, simple bool skip_warm_up = false) =>
+
+    // Initialize
+    var simple bool valid_length = validate("SRL", length, 0, na)
+    var simple bool use_coef = valid_length and length <= 1
+    var series float avg = source // Slew Rate Limit (not an average, but keeping nomenclature for consistency)
+    var series float out = source // Output
+
+    // Increment length
+    var series float len = 0
+    len := valid_length
+     ? skip_warm_up ? length
+     : math.min(len + 1, length)
+     : len + 1
+
+    // Historical values
+    var series float src_1 = source
+    var series float avg_1 = source
+    var series float vel = 0
+
+    // Anchor reset
+    if anchor
+        avg := source
+        out := source
+        vel := 0
+
+    // Extend fractional SRL indefinitely
+    else
+
+        // Slew rate limiters are theoretically a 1 line operation:
+        // current_value += sign(signal - current_value) * min(slew_rate * delta_time, abs(signal - current_value))
+        //
+        // Within a trading context, `current_value` is the average, `signal` is the source, `slew_rate` remaps to the
+        // average source change, and `delta_time` remaps to length.
+
+        // Delta time, using the 1€ Filter alpha with a cutoff = 2 and rate = x.
+        const float tc = 4 * math.pi
+        delta_time = use_coef ? length : tc / (tc + len - 1)
+
+        // Quadratic mean (aka. RMS) slew rate coefficient
+        v = source / src_1 - 1
+        bar_count = bar_index + 1
+        slew_rate = math.sqrt(ta.cum(v * v) / bar_count)
+
+        // Step coefficients
+        max = slew_rate * delta_time
+        dif = source / avg - 1
+        sign = math.sign(dif)
+        dif := math.abs(dif)
+
+        // Update without Kahan compensation (it's not an average; floating point errors are okay).
+        avg *= 1 + sign * math.min(max, dif)
+
+        // Practical SRLs typically include a deadband to suppress quantization noise,
+        // and a second-order behavior to shape glide curvature.
+
+        var simple bool adjust_roc = not na(1 / offset) or not na(1 / deadband)
+        if adjust_roc
+
+            // Check thresholds
+            var simple float z_score = math.abs(deadband) * 0.01
+            stdev = math.sqrt(ta.cum(dif * dif) / bar_count)
+            overshoot = dif < max
+            within_range = range_low <= avg and avg <= range_high
+            within_stdev = dif <= stdev * z_score
+
+            // Define noise
+            var series bool noise = true
+            noise := noise
+             ? overshoot or within_range or within_stdev
+             : overshoot or within_range // Ignore deadband when limiter is ramped
+
+            // Persistent values
+            var series float mult = 0
+            var series float peak = 0
+            var simple float gain = math.abs(offset) * 0.0001
+
+            // Reduce noise ( source < σz )
+            var simple bool accel = not na(1 / offset) and sign(offset) < 0
+            if noise
+                mult := 0
+                peak := 0
+                avg := avg_1
+
+            // Accelerate ramp ( - offset )
+            else if accel
+                mult += 1
+                peak := math.max(peak, math.abs(v))
+                avg *= 1 + sign * math.min(peak * mult * gain, dif)
+
+            // Ease ramp ( + offset )
+            var simple bool ease  = not na(1 / offset) and sign(offset) > 0
+            out := switch
+                ease => // Smooth damp, minified
+                    var simple float w = 2 / (math.abs(offset) * math.log(2))
+                    var simple float e = math.exp(-w)
+                    c = out - avg, t = vel + w * c, vel := (vel - w * t) * e, out + (c + t) * e - c
+                => avg
+
+    // Set source[1] and avg[1]
+    src_1 := source
+    avg_1 := avg
+
+    out
+
+// }

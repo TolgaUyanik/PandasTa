@@ -1,0 +1,1521 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Trading-IQ
+
+//@version=6
+indicator("IQ Trend Beams [TradingIQ]", overlay = true, max_lines_count = 500, max_labels_count = 100, max_polylines_count = 100, calc_bars_count = 5000)
+
+
+// HEAD {
+
+// enums {
+
+//@enum the tempo: how quickly lines lock, break, and re-form
+enum Mode
+    fast = "Fast"
+    medium = "Medium"
+    slow = "Slow"
+
+//@enum how much data the engine reads: the fit window and the intrabar sample rate
+enum Preset
+    fast = "Fast"
+    balanced = "Balanced"
+    precision = "Precision"
+    extra = "Extra"
+    max = "Max"
+
+// enums }
+
+// types {
+
+//@type user configuration: tempo behavior, data depth, layers, palette
+type Config
+    int fit_cap
+    int lock_k
+    float lock_jit
+    int lock_min_span
+    int break_bars
+    float pool_h
+    float surv_h
+    float p_hyst
+    float disp_a
+
+    bool show_sketch
+    bool show_archive
+    bool show_badges
+    bool show_pred
+    bool show_sup
+    bool show_res
+
+    color bull_color
+    color bear_color
+    color chrome_color
+    float contrast
+
+//@type one run-length hypothesis: a local-linear-trend Kalman state over its flavor's
+// hug-side quantile stream (Sarkka ch. 4); the emission is symmetric - asymmetry lives
+// in the audit, never in the filter
+type Particle
+    int id
+    int side
+    int age = 0
+    float logw = 0.0
+    float m0
+    float m1
+    float p00
+    float p01
+    float p11
+
+//@type the fixed-lag RTS smoother (Sarkka ch. 8): the linear-phase slope reference
+type Smoother
+    float[] mf0
+    float[] mf1
+    float[] pf00
+    float[] pf01
+    float[] pf11
+    float[] mp0
+    float[] mp1
+    float[] pp00
+    float[] pp01
+    float[] pp11
+
+//@type one assistant line
+//@field state 0 = forming (free to move), 1 = locked (frozen forever), 2 = broken (restyled, never moved)
+//@field a_disp the displayed geometry, a one-pole behind the fitted a/b while forming
+type AsLine
+    int side
+    int state = 0
+    int anchor_t
+    float anchor_y
+    float a
+    float b
+    float a_disp
+    float b_disp
+    float prior_b
+    int born
+    int lock_t = -1
+    int break_t = -1
+    int end_bar
+    float p_alive = 0.95
+    float pen_avg = 0.1
+    int touches = 0
+    int still = 0
+    line[] strokes
+    label[] tags
+
+//@type one side of the duo: its locked ink, its forming sketch, its retired history
+type Channel
+    int side
+    AsLine ink = na
+    AsLine sketch = na
+    AsLine[] archive
+    int break_run = 0
+
+//@type engine telemetry: volatility, volume, and the learned slope population
+type Stats
+    float atr = na
+    float atr_fast = na
+    float vbar = na
+    float r_mult = 1.0
+    int ang_n = 0
+    float ang_mean = 0.0
+    float ang_m2 = 0.0
+    float prev_lo = na
+    float prev_hi = na
+    int next_id = 0
+    float vr = 1.0
+
+//@type the volume tape: intrabar (price, volume) prints and the per-bar rings cut from them
+type Tape
+    int slots
+    float[] prints_p
+    float[] prints_v
+    float[] hq_lo
+    float[] hq_hi
+    float[] atr
+    float[] unit
+    float y_lo = na
+    float y_hi = na
+    float y_mid = na
+
+//@type the live-edge forecast drawings
+type Forecast
+    polyline[] polys
+    line[] levels
+
+// Oklab: a perceptually-uniform colour space - smooth blends, vibrancy independent of lightness
+type Ok
+    float L
+    float a
+    float b
+
+//@type the assistant: shared swarm, both channels, tape, telemetry, forecast
+type Engine
+    Config config
+    Stats stats
+    Smoother smoother
+    Particle[] pool
+    Channel sup
+    Channel res
+    Tape tape
+    Forecast cast
+
+// types }
+
+// constants {
+
+// engine constants - calibrated offline in research/; deliberately not inputs
+var const int d_lag = 3
+var const float nu_beta = 11.675088162973507
+var const int k_particles = 16
+var const float kv_kick = 2.4138626045615337
+var const float tau = 0.10           // wick-through design target: volume allowed beyond the line
+var const float lam = 4.0
+var const float gamma_lev = 1.0
+var const float tau_anchor = 0.25
+var const float atr_alpha = 0.05
+var const float rho_q = 0.1
+var const float q_obs = 0.25
+var const float ang_max_z = 2.798201551028527
+var const float eps_touch = 0.21268271202843048 // tangency: hug quantile within this many ATR
+var const int touch_sep = 4
+var const int lock_min_touch = 2
+var const float lock_swarm = 0.3530581985159258
+var const float break_close = 0.16     // body-through depth (ATR) counting toward a break -
+                                     // measured against the bar's volume-weighted center
+// lock stillness, break persistence, hazards, hysteresis, and display smoothing are
+// tempo values - see the Mode table in inputs
+var const float w_touch = 2.723791354844021 // perceptual weights (obj-1.714 search config)
+var const float w_span = 0.8287819823204836
+var const float w_cut = 5.75311478513242
+var const float w_gap = 0.11560527439640671
+var const float w_ang = 0.31156056655775244
+var const int warmup = 60
+var const int archive_keep = 6
+var const int pred_bins = 41         // prediction: cross-trend residual bins (KDE-smoothed)
+var const float pred_span = 2.5      // ...over +/- this many ATR of the line
+var const int kde_radius = 4         // gaussian smoothing half-width (bins) for the density
+var const float kde_sigma = 1.2      // ...its std (bins): binned-KDE, light - keep the peaks
+var const int surv_kmax = 120        // survival-median search horizon, bars
+var const int pred_kmax = 26         // drawn forecast horizon cap, bars
+var const float atr_fast_a = 0.30    // fast-ATR EMA rate for the dual-timescale unit
+var const float swarm_fast = 0.70    // swarm agreement that fast-tracks stillness
+var const int retro_max = 60         // look-back-at-lock cap, bars
+var const float retro_pen = 0.22119743146422685 // a look-back bar violates if this volume breaks the line
+var const int h_cross = 12           // a lock is refused if it inverts the channel within this
+
+// constants }
+
+// survival head {
+
+// Pretrained discrete-time break hazard
+// holdout C-index 0.87). Per locked bar it returns P(break this bar) from the line's age,
+// recent wick-through, out-of-channel gap, hug distance, and volume ratio - the learned
+// replacement for the old hand-tuned evidence decay. The geomspaced age one-hots and the
+// standardization mirror the Python inference (surv_hazard) exactly; clamp inlined because
+// the helper clamp() is defined below this block.
+var float[] surv_edges = array.from(math.pow(40.0, 0.0 / 6.0), math.pow(40.0, 1.0 / 6.0), math.pow(40.0, 2.0 / 6.0), math.pow(40.0, 3.0 / 6.0), math.pow(40.0, 4.0 / 6.0), math.pow(40.0, 5.0 / 6.0), math.pow(40.0, 6.0 / 6.0))
+var float[] surv_mu = array.from(0.0580259222333001, 0.11585244267198405, 0.1373878364905284, 0.19222333000997008, 0.25044865403788635, 0.246061814556331, 0.13321633698903285, 0.9346353818544368, 2.9445011924227282, 0.9856438285144645)
+var float[] surv_sd = array.from(0.23379246049066466, 0.3200478936017564, 0.3442563272838727, 0.39404761312541825, 0.4332714227000338, 0.4307149846169415, 0.3190776763414699, 1.4453618948065203, 2.241380002659612, 0.6528508878633361)
+var float[] surv_w = array.from(-5.800688062439102, -0.9242006402506199, -0.08099528548253737, -0.15298007520035634, -0.1323053656138756, 0.15848003788540396, 0.6457347039010187, 2.4916877986226345, 0.7366477413898836, 1.4319242563204195, -0.5857458024380247)
+
+//@function per-bar break hazard from the pretrained survival head
+//@param age bars since the line locked
+//@param pen bar volume fraction beyond the line
+//@param out_gap hug distance beyond the channel, dual-ATR units, minus 2.5, floored at 0
+//@param gap_hug absolute hug distance from the line, raw-ATR units
+//@param vol_ratio bar volume against its own running average
+//@returns P(break this bar) in (0, 1)
+surv_hazard(int age, float pen, float out_gap, float gap_hug, float vol_ratio)=>
+    int nb = 6
+    float a = math.max(age, 1)
+    float z = surv_w.get(0)
+    for int b = 0 to nb - 1
+        bool active = a >= surv_edges.get(b) and a < surv_edges.get(b + 1)
+        if b == nb - 1 and a >= surv_edges.get(nb)
+            active := true
+        float oh = active ? 1.0 : 0.0
+        z += surv_w.get(b + 1) * ((oh - surv_mu.get(b)) / surv_sd.get(b))
+    z += surv_w.get(7) * ((pen - surv_mu.get(6)) / surv_sd.get(6))
+    z += surv_w.get(8) * ((out_gap - surv_mu.get(7)) / surv_sd.get(7))
+    z += surv_w.get(9) * ((gap_hug - surv_mu.get(8)) / surv_sd.get(8))
+    z += surv_w.get(10) * ((vol_ratio - surv_mu.get(9)) / surv_sd.get(9))
+    1.0 / (1.0 + math.exp(-math.max(math.min(z, 30.0), -30.0)))
+
+// survival head }
+
+// helpers {
+
+//@function clamps source into [min, max]
+clamp(float source, float min, float max)=> math.max(math.min(source, max), min)
+
+//@function hyperbolic tangent
+tanh(float x)=>
+    float e2 = math.exp(2.0 * clamp(x, -20.0, 20.0))
+    (e2 - 1.0) / (e2 + 1.0)
+
+//@function rescales a transparency by its remaining headroom
+method scale_alpha(float self, float alpha = 80)=>
+    float invert = 100 - alpha
+    self * invert / 100
+
+//@function a copy of the color at a new composed transparency
+method new_alpha(color self, float alpha = 80)=>
+    color.new(self, alpha + color.t(self).scale_alpha(alpha))
+
+//@function sRGB companding + a clamp, for the Oklab transform
+clamp01(float v)=> math.max(0.0, math.min(1.0, v))
+srgb_to_linear(float c)=> c <= 0.04045 ? c / 12.92 : math.pow((c + 0.055) / 1.055, 2.4)
+linear_to_srgb(float c)=> c <= 0.0031308 ? c * 12.92 : 1.055 * math.pow(c, 1.0 / 2.4) - 0.055
+
+//@function two-argument arctangent - for Oklab's polar hue
+atan2(float y, float x)=> x > 0 ? math.atan(y / x) : x < 0 ? (y >= 0 ? math.atan(y / x) + math.pi : math.atan(y / x) - math.pi) : (y > 0 ? math.pi / 2.0 : y < 0 ? -math.pi / 2.0 : 0.0)
+
+//@function sRGB colour → Oklab (perceptually-uniform: blends stay smooth, chroma decouples from lightness)
+to_ok(color c)=>
+    float r = srgb_to_linear(color.r(c) / 255.0)
+    float g = srgb_to_linear(color.g(c) / 255.0)
+    float bl = srgb_to_linear(color.b(c) / 255.0)
+    float l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl
+    float m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl
+    float s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl
+    float l_ = math.sign(l) * math.pow(math.abs(l), 1.0 / 3.0)
+    float m_ = math.sign(m) * math.pow(math.abs(m), 1.0 / 3.0)
+    float s_ = math.sign(s) * math.pow(math.abs(s), 1.0 / 3.0)
+    Ok.new(0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_, 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_, 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+
+//@function Oklab → sRGB colour (opaque)
+method col(Ok self)=>
+    float l_ = self.L + 0.3963377774 * self.a + 0.2158037573 * self.b
+    float m_ = self.L - 0.1055613458 * self.a - 0.0638541728 * self.b
+    float s_ = self.L - 0.0894841775 * self.a - 1.2914855480 * self.b
+    float l = l_ * l_ * l_
+    float m = m_ * m_ * m_
+    float s = s_ * s_ * s_
+    float r  =  4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+    float g  = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+    float bl = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+    color.rgb(linear_to_srgb(clamp01(r)) * 255, linear_to_srgb(clamp01(g)) * 255, linear_to_srgb(clamp01(bl)) * 255, 0)
+
+//@function rotate hue (deg), shift lightness, scale chroma in Oklab's polar form - the vibrancy knob
+method roll(Ok self, float dhue, float dL, float cmul)=>
+    float c  = math.sqrt(self.a * self.a + self.b * self.b)
+    float h  = atan2(self.b, self.a) + dhue * math.pi / 180.0
+    float c2 = c * cmul
+    Ok.new(clamp01(self.L + dL), c2 * math.cos(h), c2 * math.sin(h))
+
+//@function weighted quantile: linear interpolation along the cumulative-weight curve
+wq(float[] vals, float[] wts, float q)=>
+    int[] order = vals.sort_indices()
+    float total = 0.0
+    for w in wts
+        total += w
+    float target = q * total
+    float cum_prev = 0.0
+    float v_prev = na
+    float out = vals.get(order.get(order.size() - 1))
+    for idx in order
+        float cum = cum_prev + wts.get(idx)
+        float v = vals.get(idx)
+        if cum >= target
+            out := na(v_prev) or cum <= cum_prev ? v : v_prev + (v - v_prev) * (target - cum_prev) / (cum - cum_prev)
+            break
+        cum_prev := cum
+        v_prev := v
+    out
+
+//@function reads a one-slot-per-bar ring at chart bar t; na outside the ring
+method ring_at(float[] self, int t)=>
+    int idx = self.size() - 1 - (bar_index - t)
+    idx >= 0 and idx < self.size() ? self.get(idx) : na
+
+//@function pushes one value, evicting the oldest beyond cap
+method push_cap(float[] self, float v, int cap)=>
+    self.push(v)
+    if self.size() > cap
+        self.shift()
+    self
+
+//@function appends a bar of prints, evicting the oldest beyond cap
+method push_bar(float[] self, float[] fresh, int cap)=>
+    for f in fresh
+        self.push(f)
+    while self.size() > cap
+        self.shift()
+    self
+
+//@function predicted remaining length in bars: where the survival curve, started at the
+// element's confidence, crosses one half. The search horizon is wider than the drawn
+// forecast - callers cap for geometry, so patient tempos are not censored into the
+// chart cap and maturity stays honest. The 3-bar minimum is a display floor, not part
+// of the estimator - low-confidence elements would otherwise forecast one bar.
+surv_len(float p0, float h)=>
+    int k_len = surv_kmax
+    float s_run = p0
+    for int k = 1 to surv_kmax
+        s_run := s_run * (1.0 - h)
+        if s_run < 0.5 and k_len == surv_kmax
+            k_len := math.max(k, 3)
+    k_len
+
+//@function scales designed opacity (100 - alpha) by the contrast dial, so faint stays
+// faint relative to bold
+contrast_alpha(float alpha, float c)=> clamp(100.0 - (100.0 - alpha) * c, 0.0, 100.0)
+
+//@function price offset of residual bin i from the line, in chart units
+bin_off(int i, float atr_unit)=> ((2.0 * i / (pred_bins - 1)) - 1.0) * pred_span * atr_unit
+
+// helpers }
+
+// tape {
+
+//@function resamples one chart bar's lower-timeframe prints into a fixed number of
+// (price, volume) slots; without intrabar data the bar's volume spreads over its range
+resample(float[] ltf_p, float[] ltf_v, int slots)=>
+    float[] price = array.new<float>(slots, close)
+    float[] vol = array.new<float>(slots, 0.0)
+    int n = na(ltf_p) ? 0 : ltf_p.size()
+    if n == 0
+        float share = nz(volume) / slots
+        for int k = 0 to slots - 1
+            price.set(k, low + (high - low) * (k + 0.5) / slots)
+            vol.set(k, share)
+    else
+        float[] moment = array.new<float>(slots, 0.0)
+        for int i = 0 to n - 1
+            int slot = math.min(slots - 1, i * slots / n)
+            float v = math.max(nz(ltf_v.get(i)), 1e-9)
+            vol.set(slot, vol.get(slot) + v)
+            moment.set(slot, moment.get(slot) + v * nz(ltf_p.get(i), close))
+        for int k = 0 to slots - 1
+            if vol.get(k) > 0
+                price.set(k, moment.get(k) / vol.get(k))
+    [price, vol]
+
+//@function ingests one bar of prints into the rings and refreshes the bar's quantile facts
+method ingest(Tape self, float[] bar_p, float[] bar_v, float atr_unit, float unit_now, int ring_cap)=>
+    self.prints_p.push_bar(bar_p, ring_cap * self.slots)
+    self.prints_v.push_bar(bar_v, ring_cap * self.slots)
+    self.y_lo := wq(bar_p, bar_v, q_obs)
+    self.y_hi := wq(bar_p, bar_v, 1.0 - q_obs)
+    self.hq_lo.push_cap(self.y_lo, ring_cap)
+    self.hq_hi.push_cap(self.y_hi, ring_cap)
+    self.atr.push_cap(atr_unit, ring_cap)
+    self.unit.push_cap(unit_now, ring_cap)
+    float w_tot = 0.0
+    float wp = 0.0
+    for int k = 0 to bar_p.size() - 1
+        w_tot += bar_v.get(k)
+        wp += bar_v.get(k) * bar_p.get(k)
+    self.y_mid := w_tot > 0 ? wp / w_tot : close
+    self
+
+//@function how many whole bars of prints the tape currently holds
+method bars_held(Tape self)=> self.prints_p.size() / self.slots
+
+//@function the hug-side quantile ring for one side
+method hug(Tape self, int side)=> side > 0 ? self.hq_lo : self.hq_hi
+
+//@function the current bar's hug-side quantile for one side
+method hug_now(Tape self, int side)=> side > 0 ? self.y_lo : self.y_hi
+
+//@function volume fraction of bar t's prints beyond a line value, on the broken side
+method pen(Tape self, int t, float line_y, int side)=>
+    int size = self.prints_p.size()
+    int base = size - (bar_index - t + 1) * self.slots
+    float beyond = 0.0
+    float tot = 0.0
+    if base >= 0
+        for int k = 0 to self.slots - 1
+            float p = self.prints_p.get(base + k)
+            float w = self.prints_v.get(base + k)
+            tot += w
+            beyond += (side > 0 ? p < line_y : p > line_y) ? w : 0.0
+    tot > 0 ? beyond / tot : 0.0
+
+// tape }
+
+// smoother {
+
+//@function one Kalman filter step over the volume-weighted bar center; keeps a fixed lag
+// of filtered and predicted moments for the backward pass
+//@returns [innovation, innovation variance] for noise adaptation
+method step(Smoother self, float y, float r_scale, int lag)=>
+    float innov = 0.0
+    float s_out = r_scale
+    if self.mf0.size() == 0
+        self.mf0.push(y),      self.mf1.push(0.0)
+        self.pf00.push(r_scale * 10.0), self.pf01.push(0.0), self.pf11.push(r_scale * 0.1)
+        self.mp0.push(y),      self.mp1.push(0.0)
+        self.pp00.push(r_scale * 10.0), self.pp01.push(0.0), self.pp11.push(r_scale * 0.1)
+    else
+        int last = self.mf0.size() - 1
+        float m0 = self.mf0.get(last)
+        float m1 = self.mf1.get(last)
+        float p00 = self.pf00.get(last)
+        float p01 = self.pf01.get(last)
+        float p11 = self.pf11.get(last)
+        float q = rho_q * r_scale
+        float mp0 = m0 + m1
+        float mp1 = m1
+        float pp00 = p00 + 2 * p01 + p11 + q / 3.0
+        float pp01 = p01 + p11 + q * 0.5
+        float pp11 = p11 + q
+        float s = pp00 + r_scale
+        innov := y - mp0
+        s_out := s
+        float k0 = pp00 / s
+        float k1 = pp01 / s
+        self.mf0.push(mp0 + k0 * innov),  self.mf1.push(mp1 + k1 * innov)
+        self.pf00.push(pp00 - k0 * pp00), self.pf01.push(pp01 - k0 * pp01), self.pf11.push(pp11 - k1 * pp01)
+        self.mp0.push(mp0),  self.mp1.push(mp1)
+        self.pp00.push(pp00), self.pp01.push(pp01), self.pp11.push(pp11)
+        if self.mf0.size() > lag + 1
+            self.mf0.shift(),  self.mf1.shift()
+            self.pf00.shift(), self.pf01.shift(), self.pf11.shift()
+            self.mp0.shift(),  self.mp1.shift()
+            self.pp00.shift(), self.pp01.shift(), self.pp11.shift()
+    [innov, s_out]
+
+//@function the RTS backward pass over the stored lag
+//@returns [smoothed level, smoothed slope]
+method smoothed(Smoother self)=>
+    int n = self.mf0.size()
+    float s0 = n > 0 ? self.mf0.get(n - 1) : 0.0
+    float s1 = n > 0 ? self.mf1.get(n - 1) : 0.0
+    if n >= 2
+        for int k = n - 2 to 0
+            float a11 = self.pf00.get(k) + self.pf01.get(k)
+            float a12 = self.pf01.get(k)
+            float a21 = self.pf01.get(k) + self.pf11.get(k)
+            float a22 = self.pf11.get(k)
+            float b11 = self.pp00.get(k + 1)
+            float b12 = self.pp01.get(k + 1)
+            float b22 = self.pp11.get(k + 1)
+            float det = b11 * b22 - b12 * b12
+            if math.abs(det) > 1e-18
+                float i11 = b22 / det
+                float i12 = -b12 / det
+                float i22 = b11 / det
+                float g11 = a11 * i11 + a12 * i12
+                float g12 = a11 * i12 + a12 * i22
+                float g21 = a21 * i11 + a22 * i12
+                float g22 = a21 * i12 + a22 * i22
+                float d0 = s0 - self.mp0.get(k + 1)
+                float d1 = s1 - self.mp1.get(k + 1)
+                s0 := self.mf0.get(k) + g11 * d0 + g12 * d1
+                s1 := self.mf1.get(k) + g21 * d0 + g22 * d1
+    [s0, s1]
+
+// smoother }
+
+// swarm {
+
+//@function one Kalman step of a run-length hypothesis over its flavor's hug quantile.
+// Volume-scaled level diffusion (Clark-inspired, not a full operational-time
+// substitution): a high-volume bar lets the level move more; the slope stays stiff
+// in wall time.
+//@returns the observation log-likelihood
+method kstep(Particle self, float y_lo, float y_hi, float r_scale, float sig_pop, float vol_ratio)=>
+    float y = self.side > 0 ? y_lo : y_hi
+    float q_lvl = rho_q * r_scale * vol_ratio
+    float q_slp = math.pow(sig_pop / nu_beta, 2)
+    float mp0 = self.m0 + self.m1
+    float mp1 = self.m1
+    float pp00 = self.p00 + 2 * self.p01 + self.p11 + q_lvl
+    float pp01 = self.p01 + self.p11
+    float pp11 = self.p11 + q_slp
+    float s = pp00 + r_scale
+    float innov = y - mp0
+    float loglike = -0.5 * (math.log(2 * math.pi * s) + innov * innov / s)
+    float k0 = pp00 / s
+    float k1 = pp01 / s
+    self.m0 := mp0 + k0 * innov
+    self.m1 := mp1 + k1 * innov
+    self.p00 := pp00 - k0 * pp00
+    self.p01 := pp01 - k0 * pp01
+    self.p11 := pp11 - k1 * pp01
+    self.age += 1
+    loglike
+
+//@function decays every particle by the hazard and advances it one bar
+//@returns the leaked probability mass
+method advance(Particle[] self, Tape tape, float h_eff, float r_scale, float sig_pop, float vol_ratio)=>
+    float leak = 0.0
+    for pt in self
+        float ll = pt.kstep(tape.y_lo, tape.y_hi, r_scale, sig_pop, vol_ratio)
+        leak += math.exp(pt.logw) * h_eff
+        pt.logw += math.log(math.max(1.0 - h_eff, 1e-12)) + ll
+    leak
+
+//@function spawns the twin newborns, one per flavor; the trend-direction partition
+// splits the leaked mass between them
+method spawn(Particle[] self, Stats stats, Tape tape, float leak, float p_up, float ms1, float r_scale, float sig_pop, float vol_ratio)=>
+    for int flav = 0 to 1
+        int side_f = flav == 0 ? 1 : -1
+        float seed = side_f > 0 ? nz(stats.prev_lo, tape.y_lo) : nz(stats.prev_hi, tape.y_hi)
+        Particle fresh = Particle.new(stats.next_id, side_f, 0, 0.0, seed, ms1, r_scale * 4.0, 0.0, math.max(sig_pop * sig_pop, 1e-10))
+        stats.next_id += 1
+        float ll_f = fresh.kstep(tape.y_lo, tape.y_hi, r_scale, sig_pop, vol_ratio)
+        fresh.logw := (self.size() > 2 ? math.log(math.max(leak, 1e-300)) : math.log(0.5)) + math.log(side_f > 0 ? p_up : 1.0 - p_up) + ll_f
+        self.push(fresh)
+    stats.prev_lo := tape.y_lo
+    stats.prev_hi := tape.y_hi
+    self
+
+//@function renormalizes log-weights into a proper distribution
+method renorm(Particle[] self)=>
+    float max_lw = -1e300
+    for pt in self
+        max_lw := math.max(max_lw, pt.logw)
+    float z = 0.0
+    for pt in self
+        z += math.exp(pt.logw - max_lw)
+    for pt in self
+        pt.logw := pt.logw - max_lw - math.log(math.max(z, 1e-300))
+    self
+
+//@function evicts the weakest surplus particles; the two newest are protected
+method prune(Particle[] self, int cap)=>
+    while self.size() > cap
+        int drop = -1
+        float worst_lw = 1e300
+        for int i = 0 to self.size() - 3
+            if self.get(i).logw < worst_lw
+                worst_lw := self.get(i).logw
+                drop := i
+        if drop >= 0
+            self.remove(drop)
+        else
+            break
+    self
+
+//@function posterior mass held by one flavor
+method mass(Particle[] self, int side)=>
+    float m = 0.0
+    for pt in self
+        if pt.side == side
+            m += math.exp(pt.logw)
+    m
+
+//@function the highest-weight particle of one flavor; na when the flavor is empty
+method map_of(Particle[] self, int side)=>
+    Particle best = na
+    for pt in self
+        if pt.side == side and (na(best) or pt.logw > best.logw)
+            best := pt
+    best
+
+//@function the flavor's own slope posterior (weighted mean/sd over mature particles) and
+// its run agreement (mass within 3 bars of the MAP run age). The swarm has already
+// tracked the live regime, so its slope belief is an alternative angle authority to the
+// locked-line history - a steep run the swarm believes in is a valid line.
+//@returns [slope mean, slope sd (floored), agreement]
+method posture(Particle[] self, int side, float floor)=>
+    Particle mp = self.map_of(side)
+    if na(mp)
+        [0.0, 0.5 * floor, 0.0]
+    else
+        float agree = 0.0
+        float wsum = 0.0
+        float wmu = 0.0
+        for pt in self
+            if pt.side == side
+                float w = math.exp(pt.logw)
+                if math.abs(pt.age - mp.age) <= 3
+                    agree += w
+                if pt.age >= 3
+                    wsum += w
+                    wmu += w * pt.m1
+        float mu = wsum > 0 ? wmu / wsum : mp.m1
+        float sd = 0.5 * floor          // no mature particles yet: the wide prior
+        if wsum > 0
+            float vr = 0.0
+            for pt in self
+                if pt.side == side and pt.age >= 3
+                    float w = math.exp(pt.logw)
+                    vr += w * math.pow(pt.m1 - mu, 2)
+            sd := math.max(math.sqrt(math.max(vr / wsum, 0.0)), 0.05 * floor)
+        [mu, sd, agree]
+
+// swarm }
+
+// stats {
+
+//@function updates the volatility and volume trackers
+//@returns the bar's volume ratio against its own average
+method note_bar(Stats self)=>
+    float tr = math.max(high - low, syminfo.mintick)
+    self.atr := na(self.atr) ? tr : self.atr + atr_alpha * (tr - self.atr)
+    self.atr_fast := na(self.atr_fast) ? tr : self.atr_fast + atr_fast_a * (tr - self.atr_fast)
+    float v_bar = math.max(nz(volume), 1e-9)
+    self.vbar := na(self.vbar) ? v_bar : self.vbar + atr_alpha * (v_bar - self.vbar)
+    self.vr := clamp(v_bar / math.max(self.vbar, 1e-9), 0.25, 8.0)
+    self.vr
+
+//@function the dual-timescale geometry unit: slow ATR widened toward the fast ATR during
+// a volatility spike, so stillness/tangency normalizations do not lag the regime (the
+// steep-rally capture fix - the lagging slow ATR starved locks during vertical runs)
+method unit(Stats self)=> na(self.atr) ? 1.0 : self.atr * clamp(nz(self.atr_fast, self.atr) / math.max(self.atr, 1e-9), 1.0, 3.0)
+
+//@function adapts the observation-noise multiplier so innovations match their predicted
+// scale (NIS matching)
+method tune_r(Stats self, float innov, float s)=>
+    if s > 0 and bar_index > 10
+        float nis = innov * innov / s
+        self.r_mult := clamp(self.r_mult * math.exp(0.05 * (math.min(nis, 9.0) - 1.0)), 0.25, 16.0)
+    self
+
+//@function spread of the locked-slope population, floored ATR-relative: near-identical
+// locked slopes would collapse the raw sd toward zero and freeze the engine
+method sigma_pop(Stats self)=> self.ang_n < 4 ? 0.5 * nz(self.atr, 1.0) : math.max(math.sqrt(self.ang_m2 / (self.ang_n - 1)), 0.05 * nz(self.atr, 1.0))
+
+//@function mean of the locked-slope population; zero until it has enough members
+method ang_mu(Stats self)=> self.ang_n >= 4 ? self.ang_mean : 0.0
+
+//@function admits one locked slope into the population (Welford update)
+method note_angle(Stats self, float b)=>
+    self.ang_n += 1
+    float d = b - self.ang_mean
+    self.ang_mean += d / self.ang_n
+    self.ang_m2 += d * (b - self.ang_mean)
+    self
+
+// stats }
+
+// perceptual {
+
+//@function the perceptual score: rewards tangency clusters and span; penalizes body-cut
+// volume, off-price gap runs, and angles implausible against the learned slope
+// population (judged against its mean, not zero - with-trend steepness is normal)
+//@returns [score, tangency cluster count]
+method pscore(Tape self, float a_, float b_, int anchor_t, int side, int t0, int t1, float sig_pop, float ang_mu, float ang_mu2 = na, float sig2 = na)=>
+    float[] hq_ring = self.hug(side)
+    int touches = 0
+    int last_touch = -10
+    float cut = 0.0
+    int gap_run = 0
+    int worst = 0
+    int n = 0
+    for int t = t0 to t1
+        float hq = hq_ring.ring_at(t)
+        // tangency normalizes by the dual-timescale unit: a vol spike widens the
+        // touch band immediately instead of after the slow ATR catches up
+        float u_t = nz(self.unit.ring_at(t), self.atr.ring_at(t))
+        if not na(hq) and not na(u_t)
+            float line_y = a_ + b_ * (t - anchor_t)
+            float gap = (hq - line_y) * side / math.max(u_t, 1e-9)
+            if math.abs(gap) <= eps_touch
+                if t - last_touch >= touch_sep
+                    touches += 1
+                last_touch := t
+            if gap > 1.5
+                gap_run += 1
+                worst := math.max(worst, gap_run)
+            else
+                gap_run := 0
+            cut += self.pen(t, line_y, side)
+            n += 1
+    float score = -1e9
+    if n > 0
+        cut /= n
+        // angle plausibility against the learned population, OR the swarm's own live
+        // slope belief when supplied - the smaller z wins (a steep run the swarm tracks
+        // is not penalized against a history of shallow locks)
+        float ang_z = math.abs(b_ - ang_mu) / math.max(sig_pop, 1e-12)
+        if not na(ang_mu2)
+            ang_z := math.min(ang_z, math.abs(b_ - ang_mu2) / math.max(sig2, 1e-12))
+        score := w_touch * touches + w_span * math.log(1 + t1 - t0) - w_cut * math.max(0.0, cut - tau) - w_gap * worst - w_ang * math.max(0.0, ang_z - 2.0)
+    [score, touches]
+
+//@function recent hug-side swing extrema paired into candidate lines (pivots propose
+// candidates; they are never the estimator)
+//@returns [intercepts, slopes, anchor bars]
+method swing_candidates(Tape self, int side, int look = 42, int keep = 5)=>
+    float[] hq_ring = self.hug(side)
+    float[] cand_a = array.new<float>()
+    float[] cand_b = array.new<float>()
+    int[] cand_t = array.new<int>()
+    int size = hq_ring.size()
+    int lo = math.max(size - look, 2)
+    int[] ext_t = array.new<int>()
+    float[] ext_y = array.new<float>()
+    for int i = lo to size - 3
+        float v = hq_ring.get(i)
+        bool is_ext = true
+        for int j = i - 2 to i + 2
+            if side > 0 ? hq_ring.get(j) < v : hq_ring.get(j) > v
+                is_ext := false
+                break
+        if is_ext
+            ext_t.push(bar_index - (size - 1 - i))
+            ext_y.push(v)
+    while ext_t.size() > keep
+        ext_t.shift()
+        ext_y.shift()
+    if ext_t.size() >= 2
+        for int i = 0 to ext_t.size() - 2
+            for int j = i + 1 to ext_t.size() - 1
+                if ext_t.get(j) - ext_t.get(i) >= touch_sep
+                    cand_a.push(ext_y.get(i))
+                    cand_b.push((ext_y.get(j) - ext_y.get(i)) / (ext_t.get(j) - ext_t.get(i)))
+                    cand_t.push(ext_t.get(i))
+    [cand_a, cand_b, cand_t]
+
+//@function one-sided volume-weighted quantile trend fit: coordinate descent between the
+// intercept and slope quantile solves, with a bounded prior toward the anchor
+//@returns [intercept at the anchor, slope]
+method trend_fit(Tape self, int anchor_t, float anchor_y, float prior_b, int side, int fit_cap)=>
+    int span = bar_index - anchor_t
+    int use = math.min(span, math.min(fit_cap, self.bars_held() - 1))
+    float a = anchor_y
+    float b = prior_b
+    if use >= 1
+        float q = side > 0 ? tau : 1.0 - tau
+        float tail = math.min(q, 1.0 - q)
+        int size = self.prints_p.size()
+        float[] resid = array.new<float>()
+        float[] w_flat = array.new<float>()
+        float[] u_slope = array.new<float>()
+        float[] w_lev = array.new<float>()
+        float[] d_of = array.new<float>()
+        for int j = 0 to use - 1
+            float d = span - j
+            int base = size - (j + 1) * self.slots
+            for int k = 0 to self.slots - 1
+                resid.push(self.prints_p.get(base + k))
+                w_flat.push(self.prints_v.get(base + k))
+                u_slope.push(self.prints_p.get(base + k))
+                w_lev.push(self.prints_v.get(base + k) * math.pow(d, gamma_lev))
+                d_of.push(d)
+        float w_sum = 0.0
+        for wv in w_flat
+            w_sum += wv
+        float w_mean = w_sum / math.max(w_flat.size(), 1)
+        float wl_sum = 0.0
+        for wv in w_lev
+            wl_sum += wv
+        float wl_mean = wl_sum / math.max(w_lev.size(), 1)
+        float pseudo_a = math.min(lam * self.slots * w_mean, 0.5 * tail * w_sum)
+        float pseudo_b = math.min(lam * self.slots * wl_mean, 0.5 * tail * wl_sum)
+        for int pass_i = 1 to 2
+            float[] rv = array.new<float>()
+            for int i = 0 to resid.size() - 1
+                rv.push(resid.get(i) - b * d_of.get(i))
+            rv.push(anchor_y)
+            float[] rw = w_flat.copy()
+            rw.push(pseudo_a)
+            a := wq(rv, rw, q)
+            float[] uv = array.new<float>()
+            for int i = 0 to u_slope.size() - 1
+                uv.push((u_slope.get(i) - a) / d_of.get(i))
+            uv.push(prior_b)
+            float[] uw = w_lev.copy()
+            uw.push(pseudo_b)
+            b := wq(uv, uw, q)
+    [a, b]
+
+//@function the anchor: hug-side body-quantile extreme over a run's opening bars. The
+// proposed origin clamps into the held tape first - a long-lived particle can propose
+// an origin older than the tape, which would invert the scan loop (Pine for-loops
+// descend when the bounds invert) and waste a pass over dead indices.
+//@returns [anchor bar, anchor price]
+method find_anchor(Tape self, int origin, int side)=>
+    int oldest = bar_index - self.bars_held() + 1
+    int origin_c = math.max(oldest, math.min(origin, bar_index))
+    int lo_t = math.max(origin_c - 1, oldest)
+    int hi_t = math.min(origin_c + 4, bar_index)
+    float qa = side > 0 ? tau_anchor : 1.0 - tau_anchor
+    int best_t = lo_t
+    float best_y = na
+    int size = self.prints_p.size()
+    for int t = lo_t to hi_t
+        int base = size - (bar_index - t + 1) * self.slots
+        if base >= 0
+            float[] pv = array.new<float>()
+            float[] vv = array.new<float>()
+            for int k = 0 to self.slots - 1
+                pv.push(self.prints_p.get(base + k))
+                vv.push(self.prints_v.get(base + k))
+            float yq = wq(pv, vv, qa)
+            if na(best_y) or (side > 0 ? yq < best_y : yq > best_y)
+                best_t := t
+                best_y := yq
+    [best_t, nz(best_y, close)]
+
+// perceptual }
+
+// lines {
+
+//@function the line's price at bar t: displayed geometry while forming, frozen after
+method at(AsLine self, int t)=>
+    self.state == 0 ? self.a_disp + self.b_disp * (t - self.anchor_t) : self.a + self.b * (t - self.anchor_t)
+
+//@function deletes every drawing the line owns
+method wipe(AsLine self)=>
+    while self.strokes.size() > 0
+        self.strokes.pop().delete()
+    while self.tags.size() > 0
+        self.tags.pop().delete()
+    if false
+        log.info("void")
+
+//@function renders the line as its story: solid from anchor to the break (its locked
+// span), a short dashed stub past the break, a lock dot and a break x; sketches are
+// dotted and alive. Glow tracks survival; dim retires archived ink.
+method paint(AsLine self, Config config, float dim = 1.0)=>
+    self.wipe()
+    int x1 = self.end_bar
+    int x0 = self.anchor_t
+    if x1 > x0
+        color base = self.side > 0 ? config.bull_color : config.bear_color
+        if self.state == 0
+            self.strokes.push(line.new(x0, self.at(x0), x1, self.at(x1), color = base.new_alpha(55.0 + 30.0 * (1.0 - dim)), style = line.style_dotted, width = 1))
+        else
+            int solid_end = self.break_t >= 0 ? math.min(self.break_t, x1) : x1
+            float glow = clamp(self.p_alive, 0.15, 1.0) * dim
+            self.strokes.push(line.new(x0, self.at(x0), solid_end, self.at(solid_end), color = base.new_alpha(100.0 - 90.0 * dim), width = 2))
+            if self.state == 1 and dim >= 1.0
+                self.strokes.push(line.new(x0, self.at(x0), solid_end, self.at(solid_end), color = base.new_alpha(88), width = math.max(1, int(math.round(6 * glow)))))
+                self.strokes.push(line.new(x0, self.at(x0), solid_end, self.at(solid_end), color = base.new_alpha(80), width = math.max(1, int(math.round(3 * glow)))))
+            if self.lock_t >= 0
+                self.tags.push(label.new(self.lock_t, self.at(self.lock_t), "◉", color = #00000000, textcolor = base.new_alpha(100.0 - 90.0 * dim), style = label.style_label_center, size = size.tiny))
+            if self.break_t >= 0
+                if x1 > solid_end
+                    self.strokes.push(line.new(solid_end, self.at(solid_end), x1, self.at(x1), color = base.new_alpha(100.0 - 60.0 * dim), style = line.style_dashed, width = 1))
+                self.tags.push(label.new(self.break_t, self.at(self.break_t), "✕", color = #00000000, textcolor = base.new_alpha(100.0 - 90.0 * dim), style = label.style_label_center, size = size.small))
+    if false
+        log.info("void")
+
+//@function the audit badge for locked ink: recent wick-through (an exponentially
+// weighted rate, not a lifetime total) versus the design target, survival probability,
+// and maturity - run length so far over the predicted total run
+badge_text(AsLine ink, float surv_h)=>
+    float span_b = bar_index - ink.anchor_t
+    float mat = span_b / math.max(span_b + surv_len(ink.p_alive, surv_h), 1.0)
+    "recent wick " + str.tostring(ink.pen_avg * 100, "#.#") + "% (target " + str.tostring(tau * 100, "#") + "%) · survival " + str.tostring(ink.p_alive * 100, "#") + "% · maturity " + str.tostring(mat * 100, "#") + "%"
+
+// lines }
+
+// channel {
+
+//@function survival audit and break test for the channel's locked ink; broken ink keeps
+// a short dashed tail past its break node
+method audit(Channel self, Config config, Tape tape, Stats stats)=>
+    if not na(self.ink) and self.ink.state == 1
+        AsLine ink = self.ink
+        ink.end_bar := bar_index
+        float line_y = ink.at(bar_index)
+        float pen = tape.pen(bar_index, line_y, self.side)
+        ink.pen_avg += 0.2 * (pen - ink.pen_avg)
+        float out_gap = math.max(0.0, (tape.hug_now(self.side) - line_y) * self.side / math.max(stats.unit(), 1e-9) - 2.5)
+        // learned discrete-time break hazard (survival head) replaces the hand-tuned
+        // evidence decay: out_gap on the dual-ATR unit, hug distance on the raw ATR
+        float gap_hug = math.abs((tape.hug_now(self.side) - line_y) * self.side / math.max(stats.atr, 1e-9))
+        float h_k = surv_hazard(bar_index - ink.lock_t, pen, out_gap, gap_hug, stats.vr)
+        ink.p_alive := clamp(ink.p_alive * (1.0 - h_k), 0.02, 0.995)
+        bool close_through = (line_y - tape.y_mid) * self.side / math.max(stats.unit(), 1e-9) > break_close
+        self.break_run := close_through ? self.break_run + 1 : 0
+        if self.break_run >= config.break_bars or ink.p_alive < 0.15
+            ink.state := 2
+            ink.break_t := bar_index
+            self.break_run := 0
+    if not na(self.ink) and self.ink.state == 2
+        self.ink.end_bar := math.min(bar_index, self.ink.break_t + 5)
+    if false
+        log.info("void")
+
+//@function births a sketch when the channel has no live line - the channel is never
+// empty; the flavor's best particle proposes the origin
+method hatch(Channel self, Particle[] pool, Tape tape)=>
+    if na(self.sketch) and (na(self.ink) or self.ink.state == 2)
+        Particle mp = pool.map_of(self.side)
+        int origin = na(mp) ? math.max(bar_index - 4, 0) : math.max(bar_index - mp.age + 1, 0)
+        [t0a, y0a] = tape.find_anchor(origin, self.side)
+        float pb = na(mp) ? 0.0 : mp.m1
+        self.sketch := AsLine.new(self.side, 0, t0a, y0a, y0a, pb, y0a, pb, pb, bar_index, end_bar = bar_index, strokes = array.new<line>(), tags = array.new<label>())
+    if false
+        log.info("void")
+
+//@function revises the sketch's origin from the flavor's best particle - free look-back
+// while forming (mutability is the disclosure); intercepts live at anchor_t, so they
+// rebase before the frame moves
+method relocate(Channel self, Particle[] pool, Tape tape)=>
+    if not na(self.sketch)
+        AsLine sk = self.sketch
+        Particle mp = pool.map_of(self.side)
+        if not na(mp)
+            int origin = math.max(bar_index - mp.age + 1, 0)
+            if math.abs(origin - sk.anchor_t) > 3 and bar_index - origin >= 3
+                [t0r, y0r] = tape.find_anchor(origin, self.side)
+                if t0r != sk.anchor_t
+                    float shift_r = t0r - sk.anchor_t
+                    sk.a += sk.b * shift_r
+                    sk.a_disp += sk.b_disp * shift_r
+                    sk.anchor_t := t0r
+                    sk.anchor_y := y0r
+                    sk.prior_b := mp.m1
+    if false
+        log.info("void")
+
+//@function polishes the sketch one bar: the quantile fit is the incumbent, swing pairs
+// and local perturbations challenge it, hysteresis keeps the pen steady, and the
+// displayed geometry eases toward the winner; stillness accrues toward a lock
+method polish(Channel self, Config config, Tape tape, Stats stats, Particle[] pool, float sig_pop)=>
+    if not na(self.sketch)
+        AsLine sk = self.sketch
+        float ang_mu = stats.ang_mu()
+        // the flavor's own live slope belief - a second angle authority
+        [sw_mu, sw_sd, sw_agree] = pool.posture(self.side, stats.atr)
+        float prev_y = sk.a_disp + sk.b_disp * (bar_index - sk.anchor_t)
+        [a_fit, b_fit] = tape.trend_fit(sk.anchor_t, sk.anchor_y, sk.prior_b, self.side, config.fit_cap)
+        int t0s = math.max(sk.anchor_t, bar_index - config.fit_cap + 1)
+        t0s := math.max(t0s, bar_index - tape.hug(self.side).size() + 1)
+        [inc_s, inc_touch] = tape.pscore(a_fit, b_fit, sk.anchor_t, self.side, t0s, bar_index, sig_pop, ang_mu, sw_mu, sw_sd)
+        float best_s = -1e18
+        float best_a = na
+        float best_b = na
+        int best_touch = 0
+        [ca, cb, ct] = tape.swing_candidates(self.side)
+        if ca.size() > 0  
+            for [index, intercept] in ca
+                float a_n = intercept + cb.get(index) * (sk.anchor_t - ct.get(index))
+                [s_c, tc] = tape.pscore(a_n, cb.get(index), sk.anchor_t, self.side, t0s, bar_index, sig_pop, ang_mu, sw_mu, sw_sd)
+                if s_c > best_s
+                    best_s := s_c
+                    best_a := a_n
+                    best_b := cb.get(index)
+                    best_touch := tc
+        for int pa_i = 0 to 1
+            float da = pa_i == 0 ? -0.25 : 0.25
+            for int pb_i = 0 to 2
+                float db = pb_i == 0 ? -0.08 : pb_i == 1 ? 0.0 : 0.08
+                [s_c2, tc2] = tape.pscore(a_fit + da * stats.atr, b_fit + db * sig_pop, sk.anchor_t, self.side, t0s, bar_index, sig_pop, ang_mu, sw_mu, sw_sd)
+                if s_c2 > best_s
+                    best_s := s_c2
+                    best_a := a_fit + da * stats.atr
+                    best_b := b_fit + db * sig_pop
+                    best_touch := tc2
+        if not na(best_a) and best_s > math.max(inc_s * config.p_hyst, inc_s + 0.5)
+            sk.a := best_a
+            sk.b := best_b
+            sk.touches := best_touch
+        else
+            sk.a := a_fit
+            sk.b := b_fit
+            sk.touches := inc_touch
+        sk.a_disp += config.disp_a * (sk.a - sk.a_disp)
+        sk.b_disp += config.disp_a * (sk.b - sk.b_disp)
+        sk.end_bar := bar_index
+        // stillness in dual-unit terms; overwhelming swarm agreement fast-tracks it (a
+        // steep leg's lock window is short - the swarm converging on one run is the tell)
+        float jit = math.abs((sk.a_disp + sk.b_disp * (bar_index - sk.anchor_t)) - prev_y) / math.max(stats.unit(), 1e-9)
+        if jit <= config.lock_jit
+            int credit = sw_agree >= swarm_fast and bar_index - sk.anchor_t >= 6 and sk.touches >= lock_min_touch ? 2 : 1
+            sk.still += credit
+        else
+            sk.still := 0
+    if false
+        log.info("void")
+
+//@function one-time look-back at lock: walk the just-frozen geometry backward,
+// claiming earlier bars it already describes (break volume <= retro_pen and hug-gap
+// within tolerance; two violations stop the walk, capped at retro_max). Re-anchor,
+// refit, and keep the extension only if the lock's tangency and angle survive.
+method retro_extend(AsLine sk, Config config, Tape tape, Stats stats, float sig_pop, float ang_mu, float ang_mu2, float sig2)=>
+    int best = sk.anchor_t
+    int viol = 0
+    int lo_lim = math.max(sk.anchor_t - retro_max, 1)
+    if sk.anchor_t - 1 >= lo_lim
+        for int s = sk.anchor_t - 1 to lo_lim
+            float line_y = sk.a + sk.b * (s - sk.anchor_t)
+            float p = tape.pen(s, line_y, sk.side)
+            float hq = tape.hug(sk.side).ring_at(s)
+            float a_s = nz(tape.atr.ring_at(s), stats.atr)
+            float gap = na(hq) ? 99.0 : (hq - line_y) * sk.side / math.max(a_s, 1e-9)
+            if p <= retro_pen and gap <= 1.2
+                best := s
+                viol := 0
+            else
+                viol += 1
+                if viol >= 2
+                    break
+    if best < sk.anchor_t
+        [t0r, y0r] = tape.find_anchor(best, sk.side)
+        if t0r < sk.anchor_t
+            [a_n, b_n] = tape.trend_fit(t0r, y0r, sk.b, sk.side, config.fit_cap)
+            int t0 = math.max(t0r, bar_index - config.fit_cap + 1)
+            [s_n, touches_n] = tape.pscore(a_n, b_n, t0r, sk.side, t0, bar_index, sig_pop, ang_mu, ang_mu2, sig2)
+            bool ang_ok = math.abs(b_n - ang_mu) <= ang_max_z * sig_pop or (not na(ang_mu2) and math.abs(b_n - ang_mu2) <= ang_max_z * sig2)
+            if touches_n >= lock_min_touch and ang_ok
+                sk.anchor_t := t0r
+                sk.anchor_y := y0r
+                sk.a := a_n
+                sk.b := b_n
+                sk.a_disp := a_n
+                sk.b_disp := b_n
+                sk.touches := touches_n
+    sk
+
+//@function would locking this sketch invert the channel against the opposite side's
+// LOCKED ink, now or within h_cross bars? Only frozen ink constrains - a mutable forming
+// sketch is ignored (reacting to a mutable line delays good locks and raises crossings).
+method crosses_locked(Channel self, AsLine other, AsLine sk)=>
+    bool bad = false
+    if not na(other) and other.state == 1
+        for int k = 0 to h_cross
+            float here = sk.a_disp + sk.b_disp * (bar_index + k - sk.anchor_t)
+            float there = other.at(bar_index + k)
+            if (self.side > 0 ? here >= there : here <= there)
+                bad := true
+                break
+    bad
+
+//@function locks the sketch once its geometry stills and it has earned tangency, swarm,
+// and angle credit; the broken predecessor retires to the archive
+method try_lock(Channel self, Config config, Tape tape, Stats stats, Particle[] pool, AsLine other, float sig_pop)=>
+    if not na(self.sketch)
+        AsLine sk = self.sketch
+        [sw_mu, sw_sd, sw_agree] = pool.posture(self.side, stats.atr)
+        // angle valid against the learned population OR the swarm's live belief
+        bool angle_ok = math.abs(sk.b_disp - stats.ang_mu()) <= ang_max_z * sig_pop or math.abs(sk.b_disp - sw_mu) <= ang_max_z * sw_sd
+        if sk.still >= config.lock_k and bar_index - sk.anchor_t >= config.lock_min_span and sk.touches >= lock_min_touch and pool.mass(self.side) >= lock_swarm and angle_ok and not self.crosses_locked(other, sk)
+            sk.state := 1
+            sk.a := sk.a_disp
+            sk.b := sk.b_disp
+            sk.lock_t := bar_index
+            sk.p_alive := 0.95
+            sk.retro_extend(config, tape, stats, sig_pop, stats.ang_mu(), sw_mu, sw_sd)
+            stats.note_angle(sk.b)
+            if not na(self.ink)
+                if config.show_archive and (self.side > 0 ? config.show_sup : config.show_res)
+                    self.ink.paint(config, 0.35)
+                    self.archive.push(self.ink)
+                    if self.archive.size() > archive_keep
+                        self.archive.shift().wipe()
+                else
+                    self.ink.wipe()
+            self.ink := sk
+            self.sketch := na
+    if false
+        log.info("void")
+
+// channel }
+
+// forecast {
+
+//@function deletes the previous render's forecast drawings
+method wipe(Forecast self)=>
+    while self.polys.size() > 0
+        self.polys.pop().delete()
+    while self.levels.size() > 0
+        self.levels.pop().delete()
+    if false
+        log.info("void")
+
+//@function cross-trend residual volume histogram over the element's span; residuals
+// outside the span are dropped, not clamped - clamping piles phantom mass into the
+// edge bins
+method residual_hist(Tape self, AsLine tgt, int fit_cap, float atr_unit)=>
+    float[] hist = array.new<float>(pred_bins, 0.0)
+    int t0h = math.max(tgt.anchor_t + 1, bar_index - fit_cap + 1)
+    int csize = self.prints_p.size()
+    for int t = t0h to bar_index
+        int base_i = csize - (bar_index - t + 1) * self.slots
+        if base_i >= 0
+            float line_y = tgt.at(t)
+            float atr_t = nz(self.atr.ring_at(t), atr_unit)
+            for int k = 0 to self.slots - 1
+                float rr = (self.prints_p.get(base_i + k) - line_y) / math.max(atr_t, 1e-9)
+                if math.abs(rr) <= pred_span
+                    int bi = int(clamp((rr + pred_span) / (2 * pred_span) * (pred_bins - 1), 0, pred_bins - 1))
+                    hist.set(bi, hist.get(bi) + self.prints_v.get(base_i + k))
+    hist
+
+//@function gaussian smoothing over the residual bins (a binned kernel density estimate):
+// turns the coarse histogram into a smooth, high-resolution density so the band gradient
+// reads continuous rather than stepped. Edge-normalized so the tails do not darken.
+method kde(float[] src)=>
+    int n = src.size()
+    float[] out = array.new<float>(n, 0.0)
+    for int i = 0 to n - 1
+        float acc = 0.0
+        float wsum = 0.0
+        for int d = -kde_radius to kde_radius
+            int j = i + d
+            if j >= 0 and j < n
+                float wk = math.exp(-0.5 * (d / kde_sigma) * (d / kde_sigma))
+                acc += src.get(j) * wk
+                wsum += wk
+        out.set(i, acc / math.max(wsum, 1e-9))
+    out
+
+//@function the calibration band: one translucent ribbon per occupied residual bin, from
+// the element's start to now, riding parallel to the line; overlaps simply alpha-blend.
+// It is the aggregate residual profile extruded along the line at the current
+// volatility scale - where the trend has held its volume, not a pointwise replay.
+method band(Forecast self, Config config, AsLine tgt, float[] hist, float peak, int x0b, int x1b, float bin_h, float atr_unit, color base)=>
+    Ok hue = to_ok(base)
+    for int i = 0 to pred_bins - 1
+        float dens = hist.get(i) / peak
+        if dens >= 0.10
+            float off = bin_off(i, atr_unit)
+            // vibrancy encodes strength - dense bins vivid, thin tails muted - at constant Oklab lightness
+            color c = hue.roll(0.0, 0.0, 0.45 + 0.55 * dens).col()
+            chart.point[] rib = array.new<chart.point>()
+            rib.push(chart.point.new(na, x0b, tgt.at(x0b) + off - bin_h / 2))
+            rib.push(chart.point.new(na, x1b, tgt.at(x1b) + off - bin_h / 2))
+            rib.push(chart.point.new(na, x1b, tgt.at(x1b) + off + bin_h / 2))
+            rib.push(chart.point.new(na, x0b, tgt.at(x0b) + off + bin_h / 2))
+            self.polys.push(polyline.new(rib, curved = false, closed = true, xloc = xloc.bar_index, line_color = na, fill_color = color.new(c, contrast_alpha(100.0 - 14.0 * dens, config.contrast))))
+    if false
+        log.info("void")
+
+//@function the forecast profile: one filled glowing smooth-contour polyline fanning forward,
+// bars parallel to the trend; each bin's reach = its density x the predicted length
+// (confidence already shaped the length through the survival start point, so it must
+// not scale the reach a second time). The envelope threads one point per occupied bin at
+// its center and is splined (curved) into a smooth contour rather than a stepped staircase.
+method profile(Forecast self, Config config, AsLine tgt, float[] hist, float peak, int k_len, int x_base, float atr_unit, color base)=>
+    int i_min = -1
+    int i_max = -1
+    for int i = 0 to pred_bins - 1
+        if hist.get(i) / peak >= 0.06
+            i_max := i
+            if i_min < 0
+                i_min := i
+    if i_min >= 0
+        chart.point[] prof = array.new<chart.point>()
+        prof.push(chart.point.new(na, x_base, tgt.at(x_base) + bin_off(i_min, atr_unit)))
+        for int i = i_min to i_max
+            float dens = hist.get(i) / peak
+            float off = bin_off(i, atr_unit)
+            int reach = math.max(int(math.round(dens * k_len)), 0)
+            prof.push(chart.point.new(na, x_base + reach, tgt.at(x_base + reach) + off))
+        prof.push(chart.point.new(na, x_base, tgt.at(x_base) + bin_off(i_max, atr_unit)))
+        // a single clean contour: crisp vivid outline + translucent fill, no halo glow (Oklab-vivid so
+        // the colour reads rich, and its chroma gives the shape definition against the chart)
+        color vivid = to_ok(base).roll(0.0, 0.0, 1.15).col()
+        self.polys.push(polyline.new(prof, curved = true, closed = true, xloc = xloc.bar_index, line_color = color.new(vivid, contrast_alpha(42, config.contrast)), fill_color = color.new(vivid, contrast_alpha(86, config.contrast)), line_style = line.style_solid, line_width = 2))
+    if false
+        log.info("void")
+
+//@function ghost levels: the distribution's densest peaks (up to six, strongest first),
+// each riding parallel to the beam across the whole element - back to the band's
+// start, forward to the predicted length
+method ghosts(Forecast self, Config config, AsLine tgt, float[] hist, float peak, int k_len, int x0b, int x_base, float atr_unit, color base)=>
+    int[] gi = array.new<int>()
+    float[] gd = array.new<float>()
+    for int i = 1 to pred_bins - 2
+        float dens = hist.get(i) / peak
+        if dens >= 0.25 and hist.get(i) >= hist.get(i - 1) and hist.get(i) >= hist.get(i + 1)
+            gi.push(i)
+            gd.push(dens)
+    int drawn = 0
+    while drawn < 6 and gd.size() > 0
+        int pick = 0
+        for int j = 0 to gd.size() - 1
+            if gd.get(j) > gd.get(pick)
+                pick := j
+        float dens = gd.get(pick)
+        float off = bin_off(gi.get(pick), atr_unit)
+        gi.remove(pick)
+        gd.remove(pick)
+        color c = to_ok(base).roll(0.0, 0.0, 0.5 + 0.5 * dens).col()   // stronger peaks ride a more vivid ghost line
+        self.levels.push(line.new(x0b, tgt.at(x0b) + off, x_base + k_len, tgt.at(x_base + k_len) + off, color = color.new(c, contrast_alpha(100.0 - 35.0 * dens, config.contrast)), style = line.style_dashed, width = 1))
+        drawn += 1
+    if false
+        log.info("void")
+
+//@function forecast conviction: how much this element deserves the single-trend spotlight -
+// survival x maturity for locked ink, a lower earned score for a forming sketch, so the
+// projection rides the most established, most-alive trend and the other rail stays a bare beam
+method conviction(AsLine self, Config config)=>
+    if self.state == 1
+        float span_b = bar_index - self.anchor_t
+        float mat = span_b / math.max(span_b + surv_len(self.p_alive, config.surv_h), 1.0)
+        self.p_alive * (0.3 + 0.7 * mat)
+    else
+        0.5 * clamp(0.45 + 0.06 * self.touches + 0.03 * self.still, 0.45, 0.90)
+
+//@function draws one element's forecast: the calibration band, the reach profile, and
+// the ghost levels; the profile sits clear of price, out of its way
+method project(Forecast self, Config config, AsLine tgt, Tape tape, float atr_unit)=>
+    float[] hist = tape.residual_hist(tgt, config.fit_cap, atr_unit).kde()
+    float peak = 0.0
+    for hv in hist
+        peak := math.max(peak, hv)
+    if peak > 0
+        color base = tgt.side > 0 ? config.bull_color : config.bear_color
+        // forecast confidence: earned for sketches, survival for ink
+        float p0 = tgt.state == 1 ? tgt.p_alive : clamp(0.45 + 0.06 * tgt.touches + 0.03 * tgt.still, 0.45, 0.90)
+        // geometry draws the capped horizon; the badge reports the uncapped estimate
+        int k_len = math.min(surv_len(p0, config.surv_h), pred_kmax)
+        float bin_h = 2.0 * pred_span * atr_unit / (pred_bins - 1)
+        int x0b = math.max(tgt.anchor_t, bar_index - config.fit_cap + 1)
+        // the band rides to the live bar; the profile clears price by a bar so it never
+        // draws over the candles
+        int x_now = bar_index + 1
+        int x_base = bar_index + 2
+        self.band(config, tgt, hist, peak, x0b, x_now, bin_h, atr_unit, base)
+        self.profile(config, tgt, hist, peak, k_len, x_base, atr_unit, base)
+        self.ghosts(config, tgt, hist, peak, k_len, x0b, x_base, atr_unit, base)
+    if false
+        log.info("void")
+
+// forecast }
+
+// engine {
+
+//@function one bar of observation: volatility and volume telemetry, then the tape rings
+//@returns the bar's volume ratio
+method observe(Engine self, float[] bar_p, float[] bar_v)=>
+    float vol_ratio = self.stats.note_bar()
+    self.tape.ingest(bar_p, bar_v, self.stats.atr, self.stats.unit(), self.config.fit_cap + 8)
+    vol_ratio
+
+//@function evolves the shared swarm one bar: locked-ink break evidence kicks the hazard
+// (capped), every particle decays and advances, the twin newborns split the leaked
+// mass by trend direction, and the pool renormalizes and prunes
+method evolve(Engine self, float vol_ratio)=>
+    float r_scale = math.pow(0.4 * self.stats.atr, 2) * self.stats.r_mult
+    [innov_s, s_s] = self.smoother.step(self.tape.y_mid, r_scale, d_lag)
+    self.stats.tune_r(innov_s, s_s)
+    [ms0, ms1] = self.smoother.smoothed()
+    float sig_pop = self.stats.sigma_pop()
+    float kick = 0.0
+    for chside in array.from(1, -1)
+        AsLine ink_c = chside > 0 ? self.sup.ink : self.res.ink
+        if not na(ink_c) and ink_c.state == 1
+            kick += math.min(kv_kick * math.max(0.0, self.tape.pen(bar_index, ink_c.at(bar_index), chside) - tau) / tau, 0.6)
+    float h_eff = 1.0 - (1.0 - self.config.pool_h) * math.exp(-math.min(kick, 1.2))
+    float leak = self.pool.advance(self.tape, h_eff, r_scale, sig_pop, vol_ratio)
+    float p_up = 0.5 + 0.2 * tanh(ms1 / math.max(0.3 * sig_pop, 1e-12))
+    self.pool.spawn(self.stats, self.tape, leak, p_up, ms1, r_scale, sig_pop, vol_ratio)
+    self.pool.renorm()
+    self.pool.prune(k_particles)
+    if false
+        log.info("void")
+
+//@function advances both channels one confirmed bar: audit the ink, hatch and relocate
+// the sketch, polish its geometry, and try the lock. sigma_pop is snapshotted once per
+// bar so a same-bar support lock cannot rescale the resistance channel's scoring; the
+// angle mean deliberately reads live, matching the calibrated reference engine.
+method assist(Engine self)=>
+    float sig_pop = self.stats.sigma_pop()
+    for chside in array.from(1, -1)
+        Channel ch = chside > 0 ? self.sup : self.res
+        AsLine other = chside > 0 ? self.res.ink : self.sup.ink
+        ch.audit(self.config, self.tape, self.stats)
+        ch.hatch(self.pool, self.tape)
+        ch.relocate(self.pool, self.tape)
+        ch.polish(self.config, self.tape, self.stats, self.pool, sig_pop)
+        ch.try_lock(self.config, self.tape, self.stats, self.pool, other, sig_pop)
+    if false
+        log.info("void")
+
+//@function renders the duo and the live-edge forecast; forecasts attach only to a
+// channel's visible live element and keep no history
+method render(Engine self)=>
+    Config config = self.config
+    self.cast.wipe()
+    for chside in array.from(1, -1)
+        Channel ch = chside > 0 ? self.sup : self.res
+        bool side_on = chside > 0 ? config.show_sup : config.show_res
+        if side_on and not na(ch.ink)
+            ch.ink.paint(config)
+            if config.show_badges and ch.ink.state == 1
+                ch.ink.tags.push(label.new(ch.ink.end_bar, ch.ink.at(ch.ink.end_bar), badge_text(ch.ink, config.surv_h), color = #00000000, textcolor = config.chrome_color, style = chside > 0 ? label.style_label_upper_right : label.style_label_lower_right, size = size.small))
+        if side_on and not na(ch.sketch) and config.show_sketch
+            ch.sketch.paint(config)
+        // each visible live element carries its OWN forecast - the calibration band, the
+        // reach profile, and the ghost levels riding it. A sketch born this bar would
+        // invert the span loop, so it forecasts once it has a bar behind it.
+        AsLine tgt = not side_on ? na : not na(ch.sketch) ? (config.show_sketch ? ch.sketch : na) : (not na(ch.ink) and ch.ink.state == 1 ? ch.ink : na)
+        if config.show_pred and not na(tgt) and tgt.anchor_t < bar_index
+            self.cast.project(config, tgt, self.tape, self.stats.atr)
+    if false
+        log.info("void")
+
+// engine }
+
+// main {
+
+//@function assembles a fresh engine
+make_engine(Config config, int slots)=>
+    Smoother smoother = Smoother.new(array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>())
+    Tape tape = Tape.new(slots, array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>())
+    Forecast cast = Forecast.new(array.new<polyline>(), array.new<line>())
+    Engine.new(config, Stats.new(), smoother, array.new<Particle>(), Channel.new(1, archive = array.new<AsLine>()), Channel.new(-1, archive = array.new<AsLine>()), tape, cast)
+
+//@function one engine step: observe the bar, evolve the swarm, assist both channels on
+// confirmed bars, and render at the live edge. Rendering runs on the last confirmed
+// historical bar and at each realtime close - ordinary variables roll back on every
+// realtime tick, so confirmed-only rendering is what keeps the forecast stable.
+main(Config config, float[] bar_p, float[] bar_v, int slots)=>
+    var Engine eng = make_engine(config, slots)
+    float vol_ratio = eng.observe(bar_p, bar_v)
+    eng.evolve(vol_ratio)
+    if bar_index >= warmup and barstate.isconfirmed
+        eng.assist()
+    if barstate.islastconfirmedhistory or (barstate.islast and barstate.isconfirmed)
+        eng.render()
+    if false
+        log.info("void")
+
+// main }
+
+// HEAD }
+
+
+// BODY {
+
+// inputs {
+
+// { engine
+var const string engine_group = "Trend Engine"
+
+const string mode_tip = "The tempo. Fast reacts quickly: lines lock, break, and re-form sooner, favoring short swings. Slow is patient: lines demand more evidence and hold through more noise, favoring long movements. Medium is the balanced reference tuning."
+const string precision_tip = "How much data the engine reads: the perceptual fit window and the intrabar sample rate. Higher tiers resolve finer structure at the cost of load time. Sampling is timeframe-aware - bigger chart bars sample proportionally coarser intrabars, never below one minute."
+
+var Mode tempo = input.enum(Mode.medium, "Mode", tooltip = mode_tip, group = engine_group)
+var Preset quality = input.enum(Preset.balanced, "Precision", tooltip = precision_tip, group = engine_group)
+// } engine
+
+// { layers
+var const string layer_group = "Layers"
+
+const string sketch_tip = "The forming line - the assistant sketching. It moves and shifts freely until it locks; dotted."
+const string archive_tip = "Keep broken ink on the chart, dimmed, as history."
+const string badge_tip = "The measurement badge on locked ink: recent wick-through (exponentially weighted) versus the 10% design target, current survival probability, and maturity - how far through its predicted total run the trend is."
+const string pred_tip = "The live-edge forecast: a translucent calibration band showing where the trend has held its volume, a filled profile whose reach along the trend is the predicted remaining length, and dashed ghost levels at the volume distribution's densest peaks, projected across the whole element. Active lines only - forecasts keep no history."
+
+bool show_sketch = input.bool(true, "Show Forming Lines", tooltip = sketch_tip, group = layer_group)
+bool show_archive = input.bool(true, "Show Broken History", tooltip = archive_tip, group = layer_group)
+bool show_badges = input.bool(true, "Show Audit Badges", tooltip = badge_tip, group = layer_group)
+bool show_pred = input.bool(true, "Show Trend Forecast", tooltip = pred_tip, group = layer_group)
+// } layers
+
+// { colors
+var const string color_group = "Colors"
+
+color bull_color = input.color(#54aaee, "Support", tooltip = "The support channel: forming, locked, broken.", group = color_group)
+color bear_color = input.color(#b051c8, "Resistance", tooltip = "The resistance channel: forming, locked, broken.", group = color_group)
+color chrome_color = input.color(#a8bdce, "Chrome", tooltip = "Badges and neutral furniture.", group = color_group)
+float contrast = input.float(1.0, "Contrast", minval = 0.4, maxval = 2.0, step = 0.1, tooltip = "Opacity of the translucent forecast layers - the volume band, the profile, and the ghost levels. Higher is bolder.", group = color_group)
+// } colors
+
+// { channels
+var const string side_group = "Channels"
+
+const string sup_tip = "Show the support channel - its line, badge, and forecast. The engine models both sides either way; hiding one changes nothing about the other."
+const string res_tip = "Show the resistance channel - its line, badge, and forecast. The engine models both sides either way; hiding one changes nothing about the other."
+
+bool show_sup = input.bool(true, "Support Channel", tooltip = sup_tip, group = side_group)
+bool show_res = input.bool(true, "Resistance Channel", tooltip = res_tip, group = side_group)
+// } channels
+
+// the tempo table - behavior only; the precision table below owns how much data is read
+int lock_k_m = switch tempo
+    Mode.fast => 3
+    Mode.slow => 8
+    => 5
+float lock_jit_m = switch tempo
+    Mode.fast => 0.20
+    Mode.slow => 0.12
+    => 0.16544033202169228
+int lock_span_m = switch tempo
+    Mode.fast => 7
+    Mode.slow => 14
+    => 12
+int break_bars_m = switch tempo
+    Mode.fast => 2
+    Mode.slow => 5
+    => 4
+float pool_h_m = switch tempo
+    Mode.fast => 1.0 / 40.0
+    Mode.slow => 1.0 / 160.0
+    => 1.0 / 80.0
+float surv_h_m = switch tempo
+    Mode.fast => 1.0 / 25.0
+    Mode.slow => 1.0 / 70.0
+    => 1.0 / 40.0
+float p_hyst_m = switch tempo
+    Mode.fast => 1.06
+    Mode.slow => 1.18
+    => 1.10
+float disp_a_m = switch tempo
+    Mode.fast => 0.50
+    Mode.slow => 0.25
+    => 0.35
+
+// the precision table: the fit/score window and the intrabar sample-rate target
+// (bounded by the chart timeframe in calculations)
+int fit_cap = switch quality
+    Preset.fast => 96
+    Preset.balanced => 140
+    Preset.precision => 200
+    Preset.extra => 260
+    Preset.max => 320
+    => 140
+int slots_target = switch quality
+    Preset.fast => 6
+    Preset.balanced => 10
+    Preset.precision => 14
+    Preset.extra => 18
+    Preset.max => 24
+    => 10
+
+var Config config = Config.new(
+   fit_cap
+ , lock_k_m
+ , lock_jit_m
+ , lock_span_m
+ , break_bars_m
+ , pool_h_m
+ , surv_h_m
+ , p_hyst_m
+ , disp_a_m
+
+ , show_sketch
+ , show_archive
+ , show_badges
+ , show_pred
+ , show_sup
+ , show_res
+
+ , bull_color
+ , bear_color
+ , chrome_color
+ , contrast
+ )
+
+// inputs }
+
+// calculations {
+
+int chart_sec = timeframe.in_seconds(timeframe.period)
+if na(chart_sec)
+    runtime.error("Trend Beams requires a time-based chart.")
+if chart_sec < 60
+    runtime.error("Trend Beams requires a chart timeframe of one minute or higher (its volume cloud samples intrabar data).")
+
+int chart_min = math.max(nz(chart_sec, 60) / 60, 1)
+int slots = math.min(slots_target, chart_min)
+int ltf_sec = math.max(60, int(math.ceil(nz(chart_sec, 60) / math.max(float(slots), 1.0))))
+[ltf_p, ltf_v] = request.security_lower_tf(syminfo.tickerid, timeframe.from_seconds(ltf_sec), [close, volume])
+
+[bar_p, bar_v] = resample(ltf_p, ltf_v, slots)
+main(config, bar_p, bar_v, slots)
+plot(na, "void", display = display.none)
+
+// calculations }
+
+// errors {
+
+float has_volume = ta.cum(nz(volume))
+if barstate.islast
+    if has_volume == 0
+        runtime.error("This symbol has no volume data. Trend Beams weighs its fits by traded volume.")
+
+// errors }
+// BODY }

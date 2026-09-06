@@ -1,0 +1,279 @@
+//@version=6
+strategy("Crypto Swing EMA Colour Strategy Plus",
+     shorttitle="CSWING2",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=95,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     slippage=1,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     max_labels_count=500)
+
+// ─── DATE WINDOW ─────────────────────────────────────────────────────────────
+startDate = input.time(timestamp("01 Jan 2021 00:00 +0000"), "Backtest start", group="Date Window")
+endDate   = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Backtest end", group="Date Window")
+inWindow  = time >= startDate and time <= endDate
+
+// ─── DIRECTION ───────────────────────────────────────────────────────────────
+allowLong  = input.bool(true, "Allow longs", group="Direction")
+allowShort = input.bool(true, "Allow shorts", group="Direction")
+
+// ─── ORIGINAL INDICATOR INPUTS ───────────────────────────────────────────────
+lenRSI  = input.int(14,  "RSI Length", group="Indicator")
+lenMFI  = input.int(14,  "MFI Length", group="Indicator")
+fastLen = input.int(12,  "MACD Fast", group="Indicator")
+slowLen = input.int(26,  "MACD Slow", group="Indicator")
+sigLen  = input.int(9,   "MACD Signal", group="Indicator")
+emaLen  = input.int(200, "EMA Length", group="Indicator")
+src     = close
+
+// ─── CALCULATIONS ────────────────────────────────────────────────────────────
+ema200 = ta.ema(src, emaLen)
+rsiVal = ta.rsi(src, lenRSI)
+mfiVal = ta.mfi(hlc3, lenMFI)
+
+[macdLine, signalLine, histLine] = ta.macd(src, fastLen, slowLen, sigLen)
+
+emaBull = src > ema200
+emaBear = src < ema200
+
+macdBullCross = ta.crossover(histLine, 0)
+macdBearCross = ta.crossunder(histLine, 0)
+
+// ─── ORIGINAL SOL SWING SIGNALS ──────────────────────────────────────────────
+buySignal =
+     emaBull and
+     macdBullCross and
+     rsiVal > 20 and
+     rsiVal < 50 and
+     mfiVal < 50
+
+sellSignal =
+     emaBear and
+     macdBearCross and
+     rsiVal > 50 and
+     rsiVal < 80 and
+     mfiVal > 50
+
+// ─── ATR ─────────────────────────────────────────────────────────────────────
+atrLen = input.int(14, "ATR length", group="Risk")
+atrVal = ta.atr(atrLen)
+
+// ─── ANTI-WHIPSAW EMA BUFFER ─────────────────────────────────────────────────
+useAntiWhipsaw = input.bool(true, "Use anti-whipsaw EMA buffer", group="Anti-Whipsaw")
+
+bufferType    = input.string("ATR", "Buffer type", options=["ATR", "Percent"], group="Anti-Whipsaw")
+bufferAtrMult = input.float(0.35, "EMA buffer ATR multiplier", step=0.05, group="Anti-Whipsaw")
+bufferPct     = input.float(0.6, "EMA buffer %", step=0.1, group="Anti-Whipsaw")
+
+confirmBars          = input.int(2, "Confirmation bars beyond EMA", minval=1, group="Anti-Whipsaw")
+minBarsBetweenTrades = input.int(8, "Minimum bars between trades", minval=0, group="Anti-Whipsaw")
+
+emaBuffer =
+     bufferType == "ATR" ?
+     atrVal * bufferAtrMult :
+     ema200 * bufferPct / 100
+
+upperBand = ema200 + emaBuffer
+lowerBand = ema200 - emaBuffer
+
+aboveUpper = close > upperBand
+belowLower = close < lowerBand
+
+confirmedAbove = ta.barssince(not aboveUpper) >= confirmBars - 1
+confirmedBelow = ta.barssince(not belowLower) >= confirmBars - 1
+
+rawEmaTurnsGreen = ta.crossover(src, ema200)
+rawEmaTurnsRed   = ta.crossunder(src, ema200)
+
+var int lastTradeBar = na
+
+enoughBarsSinceTrade =
+     na(lastTradeBar) or
+     bar_index - lastTradeBar >= minBarsBetweenTrades
+
+emaTurnsGreen =
+     useAntiWhipsaw ?
+     confirmedAbove and not confirmedAbove[1] and enoughBarsSinceTrade :
+     rawEmaTurnsGreen and enoughBarsSinceTrade
+
+emaTurnsRed =
+     useAntiWhipsaw ?
+     confirmedBelow and not confirmedBelow[1] and enoughBarsSinceTrade :
+     rawEmaTurnsRed and enoughBarsSinceTrade
+
+// ─── STOCH FOR CAPITULATION EXIT ─────────────────────────────────────────────
+stochLen    = input.int(14, "Stoch length", group="Capitulation Exit")
+stochSmooth = input.int(3, "Stoch smoothing", group="Capitulation Exit")
+
+rawStoch = ta.stoch(close, high, low, stochLen)
+stochK   = ta.sma(rawStoch, stochSmooth)
+stochD   = ta.sma(stochK, stochSmooth)
+
+stochBullCross = ta.crossover(stochK, stochD)
+stochBearCross = ta.crossunder(stochK, stochD)
+
+// ─── STRATEGY LOGIC ──────────────────────────────────────────────────────────
+longEntry =
+     inWindow and
+     allowLong and
+     strategy.position_size <= 0 and
+     emaTurnsGreen
+
+shortEntry =
+     inWindow and
+     allowShort and
+     strategy.position_size >= 0 and
+     emaTurnsRed
+
+longExit =
+     strategy.position_size > 0 and
+     emaTurnsRed
+
+shortExitBySignal =
+     strategy.position_size < 0 and
+     sellSignal
+
+if longEntry
+    strategy.entry("Long", strategy.long)
+    lastTradeBar := bar_index
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+    lastTradeBar := bar_index
+
+if longExit
+    strategy.close("Long", comment="EMA turned red")
+
+if shortExitBySignal
+    strategy.close("Short", comment="SELL exit")
+
+if not inWindow
+    strategy.close_all(comment="Out of window")
+
+// ─── RISK + SHORT PROFIT TAKING ──────────────────────────────────────────────
+useAtrStop = input.bool(true, "Use ATR emergency stop", group="Risk")
+atrMult    = input.float(4.0, "ATR stop multiplier", step=0.1, group="Risk")
+
+useShortTP      = input.bool(true, "Use short take profits", group="Short Profit Taking")
+shortTP1Atr     = input.float(4.0, "Short TP1 ATR", step=0.1, group="Short Profit Taking")
+shortTP2Atr     = input.float(7.0, "Short TP2 ATR", step=0.1, group="Short Profit Taking")
+shortTP1QtyPct  = input.float(50, "Short TP1 qty %", minval=1, maxval=100, step=5, group="Short Profit Taking")
+shortTP2QtyPct  = input.float(50, "Short TP2 qty %", minval=1, maxval=100, step=5, group="Short Profit Taking")
+
+useShortCapExit     = input.bool(true, "Use short capitulation exit", group="Capitulation Exit")
+shortCapitulationAtr = input.float(5.0, "Short capitulation ATR move", step=0.1, group="Capitulation Exit")
+shortOversoldRsi     = input.float(28, "Short oversold RSI", step=1, group="Capitulation Exit")
+shortOversoldStoch   = input.float(20, "Short oversold Stoch", step=1, group="Capitulation Exit")
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+shortMoveAtr =
+     inShort ?
+     (strategy.position_avg_price - close) / atrVal :
+     0.0
+
+shortCapitulationExit =
+     inShort and
+     useShortCapExit and
+     shortMoveAtr >= shortCapitulationAtr and
+     (rsiVal <= shortOversoldRsi or stochK <= shortOversoldStoch) and
+     stochBullCross
+
+if inLong and useAtrStop
+    longStop = strategy.position_avg_price - atrVal * atrMult
+    strategy.exit("Long ATR Stop", from_entry="Long", stop=longStop)
+
+if inShort
+    shortStop = strategy.position_avg_price + atrVal * atrMult
+    shortTP1  = strategy.position_avg_price - atrVal * shortTP1Atr
+    shortTP2  = strategy.position_avg_price - atrVal * shortTP2Atr
+
+    if useShortTP and useAtrStop
+        strategy.exit("Short TP1/SL", from_entry="Short", limit=shortTP1, stop=shortStop, qty_percent=shortTP1QtyPct)
+        strategy.exit("Short TP2/SL", from_entry="Short", limit=shortTP2, stop=shortStop, qty_percent=shortTP2QtyPct)
+    else if useShortTP
+        strategy.exit("Short TP1", from_entry="Short", limit=shortTP1, qty_percent=shortTP1QtyPct)
+        strategy.exit("Short TP2", from_entry="Short", limit=shortTP2, qty_percent=shortTP2QtyPct)
+    else if useAtrStop
+        strategy.exit("Short ATR Stop", from_entry="Short", stop=shortStop)
+
+    if shortCapitulationExit
+        strategy.close("Short", comment="Short capitulation exit")
+
+// ─── PLOTTING ────────────────────────────────────────────────────────────────
+plot(
+     ema200,
+     "EMA 200",
+     color=emaBull ? color.new(#00E676, 20) : color.new(#FF5252, 20),
+     linewidth=2
+)
+
+plot(useAntiWhipsaw ? upperBand : na, "EMA upper buffer", color=color.new(color.gray, 70))
+plot(useAntiWhipsaw ? lowerBand : na, "EMA lower buffer", color=color.new(color.gray, 70))
+
+plotshape(
+     buySignal,
+     title="BUY",
+     text="BUY",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.new(#00E676, 0),
+     textcolor=color.white,
+     size=size.normal
+)
+
+plotshape(
+     sellSignal,
+     title="SELL",
+     text="SELL",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.new(#FF5252, 0),
+     textcolor=color.white,
+     size=size.normal
+)
+
+plotshape(
+     longEntry,
+     title="Long Entry",
+     text="LONG",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=color.new(color.green, 0),
+     textcolor=color.white,
+     size=size.small
+)
+
+plotshape(
+     shortEntry,
+     title="Short Entry",
+     text="SHORT",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=color.new(color.red, 0),
+     textcolor=color.white,
+     size=size.small
+)
+
+plotshape(
+     shortCapitulationExit,
+     title="Short Capitulation Exit",
+     text="CAP EXIT",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.new(color.orange, 0),
+     textcolor=color.white,
+     size=size.small
+)
+
+// ─── ALERTS ──────────────────────────────────────────────────────────────────
+alertcondition(longEntry, title="LONG ENTRY", message="LONG — EMA 200 confirmed green")
+alertcondition(shortEntry, title="SHORT ENTRY", message="SHORT — EMA 200 confirmed red")
+alertcondition(shortCapitulationExit, title="SHORT CAPITULATION EXIT", message="EXIT SHORT — capitulation / oversold rebound")
+alertcondition(buySignal, title="BUY", message="CRYPTO LONG — EMA bull + MACD flip + RSI recovering")
+alertcondition(sellSignal, title="SELL", message="CRYPTO SHORT — EMA bear + MACD flip + RSI cooling")

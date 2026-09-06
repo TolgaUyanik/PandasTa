@@ -1,0 +1,469 @@
+//@version=6
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  APEX Core Library  |  apex_core.pine
+//  Shared foundation for all APEX Tier-2 signal bots.
+//
+//  PUBLISHING: Publish this script as a Pine Script library on TradingView.
+//  Import in any bot script with:
+//    import <your_tv_username>/APEXCore/1 as core
+//
+//  Quick-start for bot scripts:
+//    kz              = core.killzone()             // "london"|"ny_open"|"ny_close"|"none"
+//    [bias,c,v,e]    = core.htf_context("60")      // HTF values on 1H
+//    [bf,bb,bbt,bbb,
+//     dbt,dbb]       = core.fvg_detect()           // FVG on current 3 bars
+//    [bsl, ssl]      = core.liquidity_nearest(5,50) // nearest BSL/SSL levels
+//    score           = core.calc_score(...)         // 0–100 confidence
+//    sig             = core.build_signal(...)       // Signal UDT
+//    alert(core.to_json(sig), alert.freq_once_per_bar)
+//
+//  NOTE: "Pine Script V8/V9" in APEX docs refers to internal iteration numbers.
+//        This file targets Pine Script language version 6 (current max).
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+library("APEXCore", overlay = true)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 1 — USER-DEFINED TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Canonical signal — every Tier-2 bot MUST populate all fields before alerting.
+// Tier-0 orchestrator validates this schema on ingest; missing fields = rejected.
+export type Signal
+    string instrument   = ""    // "MES" | "MNQ" | "MGC" | "MCL"
+    string direction    = ""    // "long" | "short"
+    float  score        = 0.0   // composite confidence 0–100
+    float  entry        = 0.0   // alert bar close (or limit price if resting)
+    float  stop         = 0.0   // hard stop level
+    float  target       = 0.0   // primary take-profit level
+    float  invalidation = 0.0   // level that voids the thesis before stop triggers
+    string setup_type   = ""    // "orb_break"|"orb_fade"|"liq_sweep"|"retest"|"kalman_trend"
+    string killzone     = ""    // auto-populated by build_signal()
+    string timeframe    = ""    // auto-populated by build_signal()
+
+// Fair-value gap zone descriptor (returned by fvg_detect / fvg_nearest).
+export type FVGZone
+    bool  is_bull  = true   // true=bullish FVG (support), false=bearish (resistance)
+    float top      = 0.0    // upper boundary of the gap
+    float bottom   = 0.0    // lower boundary of the gap
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 2 — SIGNAL SCHEMA EMITTER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Serialize a Signal to the canonical APEX JSON alert string.
+// In your bot: alert(core.to_json(sig), alert.freq_once_per_bar)
+// Tier-3 Python webhook parses this exact schema — do not rename fields.
+export to_json(Signal s) =>
+    _a = '{"instrument":"'  + s.instrument + '","direction":"' + s.direction
+    _b = '","score":'       + str.tostring(math.round(s.score,        1))
+    _c = ',"entry":'        + str.tostring(math.round(s.entry,        4))
+    _d = ',"stop":'         + str.tostring(math.round(s.stop,         4))
+    _e = ',"target":'       + str.tostring(math.round(s.target,       4))
+    _f = ',"invalidation":' + str.tostring(math.round(s.invalidation, 4))
+    _g = ',"setup_type":"'  + s.setup_type + '","killzone":"' + s.killzone
+    _h = '","timeframe":"'  + s.timeframe  + '"}'
+    _a + _b + _c + _d + _e + _f + _g + _h
+
+// Build a fully-populated Signal UDT, auto-filling killzone and timeframe.
+// Call this on your entry condition bar, then pass the result to to_json().
+//
+// Example:
+//   if long_signal
+//       sig = core.build_signal("MES","long",score,close,stop,target,inval,"orb_break")
+//       alert(core.to_json(sig), alert.freq_once_per_bar)
+export build_signal(
+     string instrument,
+     string direction,
+     float  score,
+     float  entry,
+     float  stop,
+     float  target,
+     float  invalidation,
+     string setup_type
+     ) =>
+    // Inline killzone logic — cannot call killzone() here because build_signal()
+    // is defined before killzone() in the file and Pine Script libraries do not
+    // resolve forward function references.
+    _et_h   = hour(time,      "America/New_York")
+    _et_m   = minute(time,    "America/New_York")
+    _et_now = _et_h * 60 + _et_m
+    _dow    = dayofweek(time, "America/New_York")
+    _wd     = _dow >= dayofweek.monday and _dow <= dayofweek.friday
+    _maint  = _et_h == 17
+    string _kz = "none"
+    if _wd and not _maint
+        if _et_now >= 180 and _et_now < 300
+            _kz := "london"
+        else if _et_now >= 570 and _et_now < 660
+            _kz := "ny_open"
+        else if _et_now >= 900 and _et_now < 960
+            _kz := "ny_close"
+    Signal.new(
+         instrument   = instrument,
+         direction    = direction,
+         score        = score,
+         entry        = entry,
+         stop         = stop,
+         target       = target,
+         invalidation = invalidation,
+         setup_type   = setup_type,
+         killzone     = _kz,
+         timeframe    = timeframe.period)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 3 — ICT KILLZONE ENFORCEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  All times are Eastern (America/New_York). CME futures only.
+//
+//  ┌─────────────────┬──────────────────────────┬──────────────────────────────┐
+//  │ Killzone        │ ET window                │ ICT rationale                │
+//  ├─────────────────┼──────────────────────────┼──────────────────────────────┤
+//  │ London open     │  3:00 –  5:00 AM ET      │ Institutional order flow     │
+//  │ NY open         │  9:30 – 11:00 AM ET      │ Highest intraday liquidity   │
+//  │ NY close        │  3:00 –  4:00 PM ET      │ End-of-day liquidity grabs   │
+//  │ BLOCKED         │ 17:00 – 18:00 ET         │ CME daily settlement/maint   │
+//  └─────────────────┴──────────────────────────┴──────────────────────────────┘
+//
+//  Weekends are fully blocked regardless of time.
+//  All bots must gate final entry signal on in_killzone() == true.
+
+// Returns the active killzone name, or "none".
+// Use the string value for panel display and for populating Signal.killzone.
+export killzone() =>
+    et_h   = hour(time,      "America/New_York")
+    et_m   = minute(time,    "America/New_York")
+    et_now = et_h * 60 + et_m
+    dow    = dayofweek(time, "America/New_York")
+
+    is_weekday = dow >= dayofweek.monday and dow <= dayofweek.friday
+    maintenance = et_h == 17   // CME settlement: block 17:00–18:00 ET
+
+    in_london   = is_weekday and not maintenance and et_now >=  180 and et_now <  300
+    in_ny_open  = is_weekday and not maintenance and et_now >=  570 and et_now <  660
+    in_ny_close = is_weekday and not maintenance and et_now >=  900 and et_now <  960
+
+    in_london ? "london" : in_ny_open ? "ny_open" : in_ny_close ? "ny_close" : "none"
+
+// Boolean gate — use this on the final entry condition.
+// long_signal = raw_signal and core.in_killzone() and score >= 70
+export in_killzone() =>
+    killzone() != "none"
+
+// Human-readable label for info panel display.
+// Covers all session states including inter-session gaps.
+export session_label() =>
+    et_h   = hour(time,      "America/New_York")
+    et_m   = minute(time,    "America/New_York")
+    et_now = et_h * 60 + et_m
+    dow    = dayofweek(time, "America/New_York")
+
+    is_weekday  = dow >= dayofweek.monday and dow <= dayofweek.friday
+    maintenance = et_h == 17
+
+    string _label = "AFTER HOURS"
+    if not is_weekday
+        _label := "WEEKEND"
+    else if maintenance
+        _label := "MAINTENANCE"
+    else if et_now < 180
+        _label := "ASIA / OFF"
+    else if et_now < 300
+        _label := "▶ LONDON KZ"
+    else if et_now < 570
+        _label := "INTER-SESSION"
+    else if et_now < 660
+        _label := "▶ NY OPEN KZ"
+    else if et_now < 900
+        _label := "MID-SESSION"
+    else if et_now < 960
+        _label := "▶ NY CLOSE KZ"
+    else if et_now < 1020
+        _label := "POST-MARKET"
+    _label
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 4 — HTF BIAS  (real higher-timeframe context via request.security)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  Previous scripts used same-chart VWAP as "HTF bias" — this is WRONG.
+//  On a 5m chart, VWAP is 5m-session VWAP, not 1H or 4H context.
+//
+//  This function pulls close, VWAP, and EMA21 from the actual HTF chart,
+//  then returns a bias integer and the raw values for granular use.
+//
+//  IMPORTANT: Always pass a timeframe HIGHER than your bot's chart.
+//    5m bot  → tf = "60"   (1H)  or  "240" (4H)
+//    15m bot → tf = "60"   (1H)  or  "240" (4H)
+//    30m bot → tf = "240"  (4H)  or  "D"   (Daily)
+//
+//  tf MUST be a simple string — pass input.string() or a string literal.
+//  Do NOT pass a computed/series string.
+//
+//  Returns: [bias, htf_close, htf_vwap, htf_ema21]
+//    bias:  1 = bullish (close above VWAP AND above EMA21)
+//           -1 = bearish (close below VWAP AND below EMA21)
+//            0 = neutral / conflicted (mixed signals)
+
+export htf_context(simple string tf) =>
+    [htf_c, htf_v, htf_e] = request.security(
+         syminfo.tickerid, tf,
+         [close, ta.vwap(hlc3), ta.ema(close, 21)],
+         lookahead = barmerge.lookahead_off)
+
+    bias = htf_c > htf_v and htf_c > htf_e ? 1 : htf_c < htf_v and htf_c < htf_e ? -1 : 0
+
+    [bias, htf_c, htf_v, htf_e]
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 5 — FVG DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  ICT Fair Value Gap — a 3-candle inefficiency where price moved so fast
+//  that a visible gap remains between the wick of candle[2] and candle[0].
+//
+//  Bullish FVG (demand / support below price):
+//    high[2] < low[0]  →  gap from high[2] up to low[0]
+//    Candle[1] was the bullish impulse. Gap is a magnet for price to return.
+//
+//  Bearish FVG (supply / resistance above price):
+//    low[2] > high[0]  →  gap from high[0] up to low[2]
+//    Candle[1] was the bearish impulse.
+//
+//  Mitigation: FVG is filled (mitigated) once price trades through the 50%
+//  level of the gap. Fully mitigated once price closes through the far edge.
+//  For scoring purposes this library uses a simplified "price hasn't traded
+//  through the near edge" check — extend as needed in individual bots.
+
+// Detect whether the most recent 3-bar pattern forms an FVG.
+// Called on every bar; returns values on the completing bar only.
+//
+// Returns: [bull_formed, bear_formed,
+//           bull_zone_top, bull_zone_bot,
+//           bear_zone_top, bear_zone_bot]
+//
+// Zone values are na when the respective FVG did not form this bar.
+export fvg_detect() =>
+    bull_formed = low[0]  > high[2]
+    bear_formed = high[0] < low[2]
+
+    bull_top = bull_formed ? low[0]  : float(na)   // top of bullish gap
+    bull_bot = bull_formed ? high[2] : float(na)   // bottom of bullish gap
+    bear_top = bear_formed ? low[2]  : float(na)   // top of bearish gap
+    bear_bot = bear_formed ? high[0] : float(na)   // bottom of bearish gap
+
+    [bull_formed, bear_formed, bull_top, bull_bot, bear_top, bear_bot]
+
+// Scan the last `lookback` bars for the nearest unmitigated FVG.
+//
+//   Nearest bullish FVG : closest support gap BELOW current price
+//                         (price returned toward it but not closed through)
+//   Nearest bearish FVG : closest resistance gap ABOVE current price
+//
+// Returns: [bull_bot, bull_top, bear_bot, bear_top]
+//   Values are na if no qualifying FVG found within lookback bars.
+//
+// Typical lookback: 30–75 bars. Needs i+2 bars of history — set
+// max_bars_back in your bot's indicator/strategy declaration accordingly.
+export fvg_nearest(int lookback) =>
+    float bull_bot = na
+    float bull_top = na
+    float bear_bot = na
+    float bear_top = na
+
+    for i = 0 to lookback - 1
+        lo_i  = low[i]
+        hi_i  = high[i]
+        hi_i2 = high[i + 2]
+        lo_i2 = low[i + 2]
+
+        // ── Bullish FVG at offset i ──────────────────────────────────────
+        if lo_i > hi_i2
+            z_bot = hi_i2
+            z_top = lo_i
+            // Unmitigated: price hasn't closed below the gap bottom
+            if close >= z_bot
+                // Keep the nearest (highest z_bot = closest support)
+                if na(bull_bot) or z_bot > bull_bot
+                    bull_bot := z_bot
+                    bull_top := z_top
+
+        // ── Bearish FVG at offset i ──────────────────────────────────────
+        if hi_i < lo_i2
+            z_bot = hi_i
+            z_top = lo_i2
+            // Unmitigated: price hasn't closed above the gap top
+            if close <= z_top
+                // Keep the nearest (lowest z_top = closest resistance)
+                if na(bear_top) or z_top < bear_top
+                    bear_bot := z_bot
+                    bear_top := z_top
+
+    [bull_bot, bull_top, bear_bot, bear_top]
+
+// Is price currently inside an FVG zone (either bullish or bearish)?
+// Use to confirm price has returned to fill the gap.
+// Combine with direction: bull FVG = potential long; bear FVG = potential short.
+export in_fvg(float zone_bot, float zone_top) =>
+    not na(zone_bot) and not na(zone_top) and close >= zone_bot and close <= zone_top
+
+// FVG 50% midpoint — common ICT entry level within the gap
+export fvg_midpoint(float zone_bot, float zone_top) =>
+    (zone_bot + zone_top) / 2.0
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 6 — BSL / SSL LIQUIDITY POOL DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  ICT liquidity pools — where resting orders cluster:
+//    BSL (Buy-Side Liquidity)  : buy-stops sitting ABOVE swing highs
+//    SSL (Sell-Side Liquidity) : sell-stops sitting BELOW swing lows
+//
+//  Detected via pivot highs/lows as proxies for swing points.
+//  Sweep confirmation:
+//    BSL swept: wick above the level + close BACK BELOW it → short setup
+//    SSL swept: wick below the level + close BACK ABOVE it → long setup
+//
+//  Parameters:
+//    lb   — bars on each side of pivot (simple int, use input.int).
+//             5 = short-term structure, 10 = intermediate, 20 = major
+//    scan — how many recent pivot detection bars to search (e.g., 50–100)
+//
+//  CONSTRAINT: lb must be a simple int (input.int or literal).
+//              ta.pivothigh/pivotlow require simple int lookbacks.
+
+// Returns [nearest_bsl_above_price, nearest_ssl_below_price]
+// nearest_bsl: closest swing high ABOVE close (buy-stops resting there)
+// nearest_ssl: closest swing low  BELOW close (sell-stops resting there)
+// Returns na if none found within scan bars.
+export liquidity_nearest(simple int lb, simple int scan) =>
+    float nearest_bsl = na
+    float nearest_ssl = na
+
+    // Pre-compute series once — index into it in the loop
+    ph_series = ta.pivothigh(high, lb, lb)
+    pl_series = ta.pivotlow(low,   lb, lb)
+
+    for i = 0 to scan
+        ph_val = ph_series[i]
+        pl_val = pl_series[i]
+
+        // BSL: swing high above current price — take the closest (lowest qualifying)
+        if not na(ph_val) and ph_val > close
+            nearest_bsl := na(nearest_bsl) or ph_val < nearest_bsl ? ph_val : nearest_bsl
+
+        // SSL: swing low below current price — take the closest (highest qualifying)
+        if not na(pl_val) and pl_val < close
+            nearest_ssl := na(nearest_ssl) or pl_val > nearest_ssl ? pl_val : nearest_ssl
+
+    [nearest_bsl, nearest_ssl]
+
+// Returns raw pivot levels on current bar for plotting and zone drawing.
+// Returns [pivot_high_level, pivot_low_level] — na on non-pivot bars.
+export liquidity_levels(simple int lb) =>
+    ph = ta.pivothigh(high, lb, lb)
+    pl = ta.pivotlow(low,   lb, lb)
+    [ph, pl]
+
+// BSL swept: current bar wicked ABOVE the level but CLOSED below it.
+// This is the bearish reversal signal — price grabbed buy-stops then reversed.
+export swept_bsl(float level) =>
+    not na(level) and high > level and close < level
+
+// SSL swept: current bar wicked BELOW the level but CLOSED above it.
+// This is the bullish reversal signal — price grabbed sell-stops then reversed.
+export swept_ssl(float level) =>
+    not na(level) and low < level and close > level
+
+// Distance from current price to a level, in ATR multiples.
+// Use to qualify whether a sweep target is "within reach" (e.g., < 3 ATR away).
+export atr_distance(float level, float atr_val) =>
+    not na(level) and atr_val > 0 ? math.abs(close - level) / atr_val : float(na)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 7 — SCORE CALCULATOR  (0 – 100)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  Composite confidence score. All Tier-2 bots use this function.
+//  Tier-0 routes signals to Tier-3 only when score ≥ 70 (default threshold).
+//  Scores below 50 must never be forwarded.
+//
+//  Component weights:
+//  ┌──────────────────────────────┬──────┬────────────────────────────────────┐
+//  │ Component                    │  Pts │ Logic                              │
+//  ├──────────────────────────────┼──────┼────────────────────────────────────┤
+//  │ Killzone active              │   20 │ All-or-nothing: no KZ = 0          │
+//  │ HTF bias aligned             │   25 │ Aligned=25, Neutral=8, Against=0   │
+//  │ ADX trend strength           │   15 │ Linear scale: ADX 20→40 = 0→15     │
+//  │ Volume confirmation          │   15 │ Linear: vol_ratio thresh→2×thresh  │
+//  │ FVG confluence               │   15 │ Price near/inside unmitigated FVG  │
+//  │ BSL/SSL liquidity sweep      │   10 │ Confirmed sweep in setup direction │
+//  ├──────────────────────────────┼──────┼────────────────────────────────────┤
+//  │ Maximum possible             │  100 │                                    │
+//  └──────────────────────────────┴──────┴────────────────────────────────────┘
+//
+//  TODO (Tier-4 learning loop): replace static weights with learned weights
+//  from performance feedback stored in RAG/Pinecone KB.
+//
+//  Parameters:
+//    direction     "long" | "short"
+//    kz            result of killzone()           e.g. "ny_open"
+//    htf_bias_val  result of htf_context(...)[0]  1 | -1 | 0
+//    adx           raw ADX float                  e.g. 28.4
+//    vol_ratio     volume / SMA(volume, 20)        e.g. 1.6
+//    vol_threshold minimum vol_ratio input         e.g. 1.2
+//    fvg_hit       price is near/inside a confluent unmitigated FVG
+//    liq_sweep     BSL or SSL sweep confirmed in the setup direction
+
+export calc_score(
+     string       direction,
+     string       kz,
+     int          htf_bias_val,
+     float        adx,
+     float        vol_ratio,
+     simple float vol_threshold,
+     bool         fvg_hit,
+     bool         liq_sweep
+     ) =>
+    score = 0.0
+
+    // ── Killzone: 20 pts ──────────────────────────────────────────────────────
+    // Hard gate — signals outside killzones score 0 here and should not fire.
+    score += kz != "none" ? 20.0 : 0.0
+
+    // ── HTF bias alignment: 25 pts ────────────────────────────────────────────
+    // Neutral HTF (0) = 8 pts partial credit: market isn't clearly opposed.
+    dir_bull    = direction == "long"
+    htf_aligned = (dir_bull and htf_bias_val == 1) or (not dir_bull and htf_bias_val == -1)
+    htf_neutral = htf_bias_val == 0
+    score += htf_aligned ? 25.0 : htf_neutral ? 8.0 : 0.0
+
+    // ── ADX trend strength: 0–15 pts ─────────────────────────────────────────
+    // ADX < 20 → 0 pts (choppy). ADX 20 → 0 pts. ADX 40 → 15 pts. Capped at 15.
+    adx_score = math.max(0.0, math.min(15.0, (adx - 20.0) / 20.0 * 15.0))
+    score += adx_score
+
+    // ── Volume confirmation: 0–15 pts ─────────────────────────────────────────
+    // At vol_threshold → 0 pts. At 2× vol_threshold → 15 pts. Linear between.
+    // Below threshold → clamped to 0 (vol filter should already block the signal).
+    vol_score = math.max(0.0, math.min(15.0,
+         (vol_ratio - vol_threshold) / vol_threshold * 15.0))
+    score += vol_score
+
+    // ── FVG confluence: 15 pts ────────────────────────────────────────────────
+    // Price is near or inside an unmitigated FVG that aligns with setup direction.
+    score += fvg_hit ? 15.0 : 0.0
+
+    // ── Liquidity sweep confirmation: 10 pts ──────────────────────────────────
+    // A BSL sweep confirms the short; an SSL sweep confirms the long.
+    score += liq_sweep ? 10.0 : 0.0
+
+    // Cap and return
+    math.min(100.0, score)

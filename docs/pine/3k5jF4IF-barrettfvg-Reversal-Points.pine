@@ -1,0 +1,268 @@
+// Author: barrettfvg
+// This source code is subject to the Mozilla Public License 2.0.
+// Original Reversal Points concept/code credited to enesyetkin.
+// Modified by barrettfvg with Pine v6 structure, confirmed-bar signal option,
+// RSI recency filtering, session-filtered alerts, and visual SL/TP trade planning.
+//@version=6
+indicator("barrettfvg Reversal Points", overlay=true, max_lines_count=10, max_labels_count=10)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+groupReversal = "Reversal Settings"
+sensitivity = input.int(defval=50, title="High/Low Sensitivity", minval=10, group=groupReversal)
+atrPeriod = input.int(title="ATR Period", defval=10, minval=1, group=groupReversal)
+src = input.source(hl2, title="Source", group=groupReversal)
+atrMultiplier = input.float(title="ATR Multiplier", step=0.1, defval=2.0, minval=0.1, group=groupReversal)
+changeAtrMethod = input.bool(title="Use Wilder ATR Calculation", defval=true, group=groupReversal)
+confirmSignals = input.bool(true, "Confirm signals on bar close", group=groupReversal)
+
+groupRsi = "RSI Filter"
+rsiFilterEnabled = input.bool(true, "Enable RSI filter", group=groupRsi)
+rsiLength = input.int(14, "RSI Length", minval=1, group=groupRsi)
+rsiFilterBottom = input.int(30, "RSI filter for bottom", minval=1, maxval=100, group=groupRsi)
+lookbackForBottom = input.int(10, "RSI lookback for bottom", minval=1, group=groupRsi)
+rsiFilterTop = input.int(70, "RSI filter for top", minval=1, maxval=100, group=groupRsi)
+lookbackForTop = input.int(10, "RSI lookback for top", minval=1, group=groupRsi)
+
+groupRisk = "Trade Levels"
+showTradeLevels = input.bool(true, "Show SL/TP lines", group=groupRisk)
+slMethod = input.string("Structure lookback extreme", "SL Method", options=["Structure lookback extreme", "Recent swing pivot"], group=groupRisk)
+slLookbackBars = input.int(30, "Structure SL Lookback Bars", minval=1, group=groupRisk)
+swingPivotLeft = input.int(2, "Swing pivot left bars", minval=1, maxval=20, group=groupRisk)
+swingPivotRight = input.int(2, "Swing pivot right bars", minval=1, maxval=20, group=groupRisk)
+swingLookback = input.int(10, "Fallback swing lookback", minval=1, group=groupRisk)
+stopBufferTicks = input.int(0, "SL buffer ticks", minval=0, group=groupRisk)
+targetRiskReward = input.float(1.0, "Take-profit R multiple (1:1 default)", minval=0.1, step=0.1, group=groupRisk)
+levelBars = input.int(10, "SL/TP projection bars", minval=1, maxval=100, group=groupRisk)
+
+groupDisplay = "Display"
+showSignals = input.bool(true, "Show Buy/Sell labels", group=groupDisplay)
+
+groupAlerts = "Alerts"
+useDynamicAlerts = input.bool(true, "Use alert() messages with Entry/SL/TP", group=groupAlerts)
+useAlertWindows = input.bool(true, "Only alert during trading windows", group=groupAlerts)
+alertTimezone = input.string("America/New_York", "Alert timezone", group=groupAlerts)
+eveningAlertWindow = input.session("1800-0000", "Evening alert window", group=groupAlerts)
+dayAlertWindow = input.session("0700-1600", "Day alert window", group=groupAlerts)
+
+//------------------------------------------------------------------------------
+// Supertrend logic
+//------------------------------------------------------------------------------
+f_supertrend(_src, _multiplier, _periods, _changeAtrMethod) =>
+    trValue = ta.tr(true)
+    atrSma = ta.sma(trValue, _periods)
+    atrValue = _changeAtrMethod ? ta.atr(_periods) : atrSma
+
+    up = _src - _multiplier * atrValue
+    upPrevious = nz(up[1], up)
+    up := close[1] > upPrevious ? math.max(up, upPrevious) : up
+
+    down = _src + _multiplier * atrValue
+    downPrevious = nz(down[1], down)
+    down := close[1] < downPrevious ? math.min(down, downPrevious) : down
+
+    trend = 1
+    trend := nz(trend[1], trend)
+    trend := trend == -1 and close > downPrevious ? 1 : trend == 1 and close < upPrevious ? -1 : trend
+
+    [trend, up, down, atrValue]
+
+[trend, up, down, atrValue] = f_supertrend(src, atrMultiplier, atrPeriod, changeAtrMethod)
+
+supertrendBuy = trend == 1 and trend[1] == -1
+supertrendSell = trend == -1 and trend[1] == 1
+
+//------------------------------------------------------------------------------
+// RSI filter
+//------------------------------------------------------------------------------
+rsi = ta.rsi(close, rsiLength)
+barsSinceRsiBottom = ta.barssince(rsi < rsiFilterBottom)
+barsSinceRsiTop = ta.barssince(rsi > rsiFilterTop)
+
+rsiInLookbackBottom = not rsiFilterEnabled or (not na(barsSinceRsiBottom) and barsSinceRsiBottom < lookbackForBottom)
+rsiInLookbackTop = not rsiFilterEnabled or (not na(barsSinceRsiTop) and barsSinceRsiTop < lookbackForTop)
+
+//------------------------------------------------------------------------------
+// Reversal signal logic
+//------------------------------------------------------------------------------
+pivotOffset = math.max(1, int(math.round(sensitivity / 10.0)))
+
+var int newHighCondition = 0
+highestLevel = ta.highest(high, sensitivity)
+previousHighestLevel = highestLevel[pivotOffset]
+
+if highestLevel == previousHighestLevel
+    newHighCondition := 0
+if highestLevel != previousHighestLevel and close > previousHighestLevel
+    newHighCondition := 1
+
+topSwitch = 0
+topSwitch := supertrendSell ? 0 : newHighCondition != 0 and trend == 1 ? 1 : nz(topSwitch[1], 0)
+
+rawSellReversal = topSwitch[1] == 1 and topSwitch == 0 and rsiInLookbackTop
+
+var int newLowCondition = 0
+lowestLevel = ta.lowest(low, sensitivity)
+previousLowestLevel = lowestLevel[pivotOffset]
+
+if lowestLevel == previousLowestLevel
+    newLowCondition := 0
+if lowestLevel != previousLowestLevel and close < previousLowestLevel
+    newLowCondition := 1
+
+bottomSwitch = 0
+bottomSwitch := supertrendBuy ? 0 : newLowCondition != 0 and trend == -1 ? 1 : nz(bottomSwitch[1], 0)
+
+rawBuyReversal = bottomSwitch[1] == 1 and bottomSwitch == 0 and rsiInLookbackBottom
+
+signalIsConfirmed = not confirmSignals or barstate.isconfirmed
+sellReversal = rawSellReversal and signalIsConfirmed
+buyReversal = rawBuyReversal and signalIsConfirmed
+
+inEveningAlertWindow = not na(time(timeframe.period, eveningAlertWindow, alertTimezone))
+inDayAlertWindow = not na(time(timeframe.period, dayAlertWindow, alertTimezone))
+alertWindowOk = not useAlertWindows or inEveningAlertWindow or inDayAlertWindow
+sellAlertSignal = sellReversal and alertWindowOk
+buyAlertSignal = buyReversal and alertWindowOk
+
+//------------------------------------------------------------------------------
+// Recent swing levels for SL placement
+//------------------------------------------------------------------------------
+swingHighPivot = ta.pivothigh(high, swingPivotLeft, swingPivotRight)
+swingLowPivot = ta.pivotlow(low, swingPivotLeft, swingPivotRight)
+recentSwingHigh = ta.valuewhen(not na(swingHighPivot), swingHighPivot, 0)
+recentSwingLow = ta.valuewhen(not na(swingLowPivot), swingLowPivot, 0)
+fallbackSwingHigh = ta.highest(high[1], swingLookback)
+fallbackSwingLow = ta.lowest(low[1], swingLookback)
+structureSwingHigh = ta.highest(high[1], slLookbackBars)
+structureSwingLow = ta.lowest(low[1], slLookbackBars)
+
+//------------------------------------------------------------------------------
+// Trade level helpers
+//------------------------------------------------------------------------------
+var array<line> tradeLines = array.new<line>()
+var array<label> tradeLabels = array.new<label>()
+var int activeTradeDirection = 0
+var float activeStopPrice = na
+var float activeTargetPrice = na
+
+f_price(_price) =>
+    str.tostring(_price, format.mintick)
+
+f_clear_trade_objects() =>
+    while array.size(tradeLines) > 0
+        line.delete(array.pop(tradeLines))
+    while array.size(tradeLabels) > 0
+        label.delete(array.pop(tradeLabels))
+    0
+
+f_add_line(_price, _color, _style, _width) =>
+    endBar = bar_index + levelBars
+    levelLine = line.new(
+         x1=bar_index,
+         y1=_price,
+         x2=endBar,
+         y2=_price,
+         xloc=xloc.bar_index,
+         extend=extend.none,
+         color=_color,
+         style=_style,
+         width=_width)
+    array.push(tradeLines, levelLine)
+    0
+
+f_add_label(_price, _text, _color) =>
+    labelBar = bar_index + levelBars
+    levelLabel = label.new(
+         x=labelBar,
+         y=_price,
+         text=_text,
+         xloc=xloc.bar_index,
+         style=label.style_label_left,
+         color=_color,
+         textcolor=color.white,
+         size=size.tiny)
+    array.push(tradeLabels, levelLabel)
+    0
+
+f_extend_trade_objects() =>
+    endBar = bar_index + levelBars
+    if array.size(tradeLines) > 0
+        for i = 0 to array.size(tradeLines) - 1
+            line.set_x2(array.get(tradeLines, i), endBar)
+    if array.size(tradeLabels) > 0
+        for i = 0 to array.size(tradeLabels) - 1
+            label.set_x(array.get(tradeLabels, i), endBar)
+    0
+
+f_trade_levels(_isLong) =>
+    entry = close
+    pivotStop = _isLong ? nz(recentSwingLow, nz(fallbackSwingLow, entry - syminfo.mintick)) : nz(recentSwingHigh, nz(fallbackSwingHigh, entry + syminfo.mintick))
+    structureStop = _isLong ? nz(structureSwingLow, pivotStop) : nz(structureSwingHigh, pivotStop)
+    swingStop = slMethod == "Structure lookback extreme" ? structureStop : pivotStop
+    stopBuffer = stopBufferTicks * syminfo.mintick
+    stop = _isLong ? swingStop - stopBuffer : swingStop + stopBuffer
+    stop := _isLong and stop >= entry ? entry - syminfo.mintick : stop
+    stop := not _isLong and stop <= entry ? entry + syminfo.mintick : stop
+
+    risk = math.max(math.abs(entry - stop), syminfo.mintick)
+    target = _isLong ? entry + risk * targetRiskReward : entry - risk * targetRiskReward
+
+    [entry, stop, target, risk]
+
+f_draw_trade(_isLong, _entry, _stop, _target, _risk) =>
+    stopColor = color.new(color.red, 0)
+    targetColor = color.new(color.green, 0)
+
+    f_add_line(_stop, stopColor, line.style_solid, 2)
+    f_add_label(_stop, "SL " + f_price(_stop), stopColor)
+
+    f_add_line(_target, targetColor, line.style_solid, 2)
+    f_add_label(_target, "TP " + f_price(_target) + " (" + str.tostring(targetRiskReward) + "R)", targetColor)
+
+f_alert_message(_side, _entry, _stop, _target, _risk) =>
+    _side + " " + syminfo.ticker + " | Entry: " + f_price(_entry) + " | SL: " + f_price(_stop) + " | TP: " + f_price(_target) + " | Risk: " + f_price(_risk)
+
+//------------------------------------------------------------------------------
+// Plots, drawings, and alerts
+//------------------------------------------------------------------------------
+plotshape(showSignals and sellReversal, title="Sell", text="Sell", location=location.abovebar, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+plotshape(showSignals and buyReversal, title="Buy", text="Buy", location=location.belowbar, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+
+activeLongExitHit = activeTradeDirection == 1 and (low <= activeStopPrice or high >= activeTargetPrice)
+activeShortExitHit = activeTradeDirection == -1 and (high >= activeStopPrice or low <= activeTargetPrice)
+
+if activeLongExitHit or activeShortExitHit
+    f_clear_trade_objects()
+    activeTradeDirection := 0
+    activeStopPrice := na
+    activeTargetPrice := na
+
+if activeTradeDirection != 0
+    f_extend_trade_objects()
+
+if sellReversal
+    [entry, stop, target, risk] = f_trade_levels(false)
+    f_clear_trade_objects()
+    activeTradeDirection := -1
+    activeStopPrice := stop
+    activeTargetPrice := target
+    if showTradeLevels
+        f_draw_trade(false, entry, stop, target, risk)
+    if useDynamicAlerts and alertWindowOk
+        alert(f_alert_message("Sell", entry, stop, target, risk), alert.freq_once_per_bar_close)
+
+if buyReversal
+    [entry, stop, target, risk] = f_trade_levels(true)
+    f_clear_trade_objects()
+    activeTradeDirection := 1
+    activeStopPrice := stop
+    activeTargetPrice := target
+    if showTradeLevels
+        f_draw_trade(true, entry, stop, target, risk)
+    if useDynamicAlerts and alertWindowOk
+        alert(f_alert_message("Buy", entry, stop, target, risk), alert.freq_once_per_bar_close)
+
+alertcondition(sellAlertSignal, title="Sell", message="Reversal Points Sell on {{ticker}} at {{close}}")
+alertcondition(buyAlertSignal, title="Buy", message="Reversal Points Buy on {{ticker}} at {{close}}")

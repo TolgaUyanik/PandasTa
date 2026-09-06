@@ -1,0 +1,223 @@
+//@version=6
+// @description 유니콘 패턴 라이브러리 (Unicorn Pattern Library)
+// 유니콘 모델 전략 로직, 데이터 구조체 및 상태 관리를 구현합니다.
+library("Mirpapa_Lib_Unicorn", overlay = false)
+
+import goodia/Mirpapa_Lib_Box/1 as libBox
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+// @type 유니콘 데이터 (UnicornData)
+// @field _isBull              // 상승/하락 방향 (True: Long, False: Short)
+// @field _status              // "pending", "active", "triggered", "win", "loss", "cancelled"
+// @field _createTime          // 생성 시간
+// @field _createBar           // 생성 bar_index
+// @field _obTop               // OB 상단
+// @field _obBot               // OB 하단
+// @field _obTime              // OB 캔들 시간
+// @field _obBox               // OB 박스 객체
+// @field _fvgTop              // FVG 상단
+// @field _fvgBot              // FVG 하단
+// @field _fvgTime             // FVG 시간
+// @field _fvgBox              // FVG 박스 객체
+// @field _zoneTop             // 겹침 영역 상단 (Unicorn Zone)
+// @field _zoneBot             // 겹침 영역 하단 (Unicorn Zone)
+// @field _zoneBox             // Unicorn Zone 박스 객체
+// @field _chochConfirmed      // CHoCH 확정 여부
+// @field _chochTime           // CHoCH 발생 시간
+// @field _chochPrice          // CHoCH 돌파 가격
+// @field _entryPrice          // 진입가
+// @field _targetPrice         // 목표가 (다음 유동성 레벨)
+// @field _stopPrice           // 손절가 (Zone 반대편)
+// @field _result              // "none", "win", "loss"
+// @field _resultTime          // 결과 확정 시간
+// @field _resultPrice         // 결과 확정 가격
+// @field _profitPips          // 수익 pips (양수)
+// @field _lossPips            // 손실 pips (음수)
+// @field _profitPercent       // 수익 %
+// @field _lossPercent         // 손실 %
+// @field _rrRatio             // Risk:Reward 비율
+// @field _timeframe           // 시간대 (HTF/MTF/CTF)
+// @field _triggerTime         // 진입 트리거 시간 (리테스트)
+// @field _triggerPrice        // 진입 트리거 가격
+// @field _isRetested          // 리테스트 여부
+// @field _retestCount         // 리테스트 횟수
+// @field _maxDrawdown         // 최대 손실폭 (진입 후)
+// @field _maxProfit           // 최대 수익폭 (진입 후)
+export type UnicornData
+    bool   _isBull
+    string _status
+    int    _createTime
+    int    _createBar
+    
+    // === OB 정보 ===
+    float  _obTop
+    float  _obBot
+    int    _obTime
+    box    _obBox
+    
+    // === FVG 정보 ===
+    float  _fvgTop
+    float  _fvgBot
+    int    _fvgTime
+    box    _fvgBox
+    
+    // === Unicorn Zone (OB + FVG 겹침) ===
+    float  _zoneTop
+    float  _zoneBot
+    box    _zoneBox
+    
+    // === CHoCH 정보 ===
+    bool   _chochConfirmed
+    int    _chochTime
+    float  _chochPrice
+    
+    // === 트레이딩 정보 ===
+    float  _entryPrice
+    float  _targetPrice
+    float  _stopPrice
+    
+    // === 결과 정보 ===
+    string _result
+    int    _resultTime
+    float  _resultPrice
+    float  _profitPips
+    float  _lossPips
+    float  _profitPercent
+    float  _lossPercent
+    float  _rrRatio
+    
+    // === 추가 필요 정보 ===
+    string _timeframe
+    int    _triggerTime
+    float  _triggerPrice
+    bool   _isRetested
+    int    _retestCount
+    float  _maxDrawdown
+    float  _maxProfit
+
+// ============================================================================
+// FUNCTIONS
+// ============================================================================
+
+// @function UnicornData 초기화
+// @description 새로운 UnicornData 객체를 생성하고 초기화합니다.
+// @param _isBull 방향 (True: 상승, False: 하락)
+// @param _createTime 생성 시간
+// @param _createBar 생성 Bar Index
+// @param _timeframe 시간대
+export initUnicornData(bool _isBull, int _createTime, int _createBar, string _timeframe) =>
+    UnicornData.new(
+         _isBull, "pending", _createTime, _createBar,
+         na, na, na, box(na), // OB
+         na, na, na, box(na), // FVG
+         na, na, box(na),     // Zone
+         false, na, na,       // CHoCH
+         na, na, na,          // Trade
+         "none", na, na, 0.0, 0.0, 0.0, 0.0, 0.0, // Result
+         _timeframe, na, na, false, 0, 0.0, 0.0   // Meta
+    )
+
+// @function 중첩 영역(Overlap Zone) 계산
+// @description OB와 FVG 사이의 겹치는 영역을 계산합니다.
+// @param _obTop OB 상단
+// @param _obBot OB 하단
+// @param _fvgTop FVG 상단
+// @param _fvgBot FVG 하단
+// @returns [float top, float bot, bool hasOverlap] 겹침 영역 상단, 하단, 겹침 여부
+export calculateOverlap(float _obTop, float _obBot, float _fvgTop, float _fvgBot) =>
+    _maxBot = math.max(_obBot, _fvgBot)
+    _minTop = math.min(_obTop, _fvgTop)
+    _hasOverlap = _minTop > _maxBot
+    [_minTop, _maxBot, _hasOverlap]
+
+// @function 유니콘 상태 업데이트
+// @description 가격 움직임에 따라 유니콘 패턴의 상태를 업데이트합니다.
+// active: 진입 대기 (리테스트 대기) -> triggered: 진입 (TP/SL 대기) -> win/loss: 결과 확정
+// @param _data UnicornData 객체
+// @param _currentHigh 현재 고가
+// @param _currentLow 현재 저가
+// @param _time 현재 시간
+// @returns UnicornData 업데이트된 객체
+export updateUnicornStatus(UnicornData _data, float _currentHigh, float _currentLow, int _time) =>
+    // 상태별 로직 처리
+    if _data._status == "active"
+        // --------------------------------------------------------------------
+        // Active -> Triggered (진입 조건: Zone 리테스트)
+        // --------------------------------------------------------------------
+        bool _isTriggered = false
+        
+        if _data._isBull
+            // 매수 조건: 저가가 Zone 상단보다 낮거나 같음 (Zone 터치)
+            // 더 정교한 트리거 조건(예: 캔들 패턴)은 여기서 추가 가능
+            if _currentLow <= _data._zoneTop
+                _isTriggered := true
+        else
+            // 매도 조건: 고가가 Zone 하단보다 높거나 같음 (Zone 터치)
+            if _currentHigh >= _data._zoneBot
+                _isTriggered := true
+        
+        if _isTriggered
+            _data._status := "triggered"
+            _data._triggerTime := _time
+            _data._triggerPrice := _data._zoneTop // 편의상 Zone 상단을 트리거 가격으로 기록 (실제 체결가와 다를 수 있음)
+            _data._isRetested := true
+            _data._retestCount := _data._retestCount + 1
+
+    else if _data._status == "triggered"
+        // --------------------------------------------------------------------
+        // Triggered -> Win / Loss (결과 청산 확인)
+        // --------------------------------------------------------------------
+        if _data._isBull
+            // 매수 포지션 결과 체크
+            if not na(_data._targetPrice) and _currentHigh >= _data._targetPrice
+                // 목표가 도달 (Win)
+                _data._status := "win"
+                _data._result := "win"
+                _data._resultTime := _time
+                _data._resultPrice := _data._targetPrice
+            else if not na(_data._stopPrice) and _currentLow <= _data._stopPrice
+                // 손절가 도달 (Loss)
+                _data._status := "loss"
+                _data._result := "loss"
+                _data._resultTime := _time
+                _data._resultPrice := _data._stopPrice
+        else
+            // 매도 포지션 결과 체크
+            if not na(_data._targetPrice) and _currentLow <= _data._targetPrice
+                // 목표가 도달 (Win)
+                _data._status := "win"
+                _data._result := "win"
+                _data._resultTime := _time
+                _data._resultPrice := _data._targetPrice
+            else if not na(_data._stopPrice) and _currentHigh >= _data._stopPrice
+                // 손절가 도달 (Loss)
+                _data._status := "loss"
+                _data._result := "loss"
+                _data._resultTime := _time
+                _data._resultPrice := _data._stopPrice
+            
+    _data
+
+// @function 유니콘 활성화 (Active 전환)
+// @description Pending 상태인 유니콘 데이터를 Active 상태로 전환합니다. (보통 CHoCH 발생 시 호출)
+// @param _data UnicornData 객체
+export activateUnicorn(UnicornData _data) =>
+    if _data._status == "pending"
+        _data._status := "active"
+    _data
+
+// @function 트레이딩 레벨 설정
+// @description 진입가, 목표가, 손절가를 설정합니다.
+// @param _data UnicornData 객체
+// @param _entry 진입가
+// @param _stop 손절가
+// @param _target 목표가
+export setTradeLevels(UnicornData _data, float _entry, float _stop, float _target) =>
+    _data._entryPrice := _entry
+    _data._stopPrice := _stop
+    _data._targetPrice := _target
+    _data._rrRatio := _stop == _entry ? 0.0 : math.abs(_target - _entry) / math.abs(_entry - _stop)
+    _data

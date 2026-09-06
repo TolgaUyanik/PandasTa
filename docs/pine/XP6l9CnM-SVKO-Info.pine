@@ -1,0 +1,757 @@
+//@version=6
+indicator("SVKO Info", shorttitle = "SVKO Info", overlay = true)
+
+const string ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:._"
+const int BASE = 41
+const string DEFAULT_MAPPING_PAIRS = "TRADENATION:AAPL=NASDAQ:AAPL\nTRADENATION:MSFT=NASDAQ:MSFT\nTRADENATION:NVDA=NASDAQ:NVDA"
+const float MAPPED_PRICE_COLOUR_THRESHOLD_PERCENT = 0.1
+const int MAX_PERFORMANCE_PLACEHOLDERS = 12
+const int PERFORMANCE_REFRESH_MILLISECONDS = 30000
+const int PERFORMANCE_STATE_VALID = 1
+const int PERFORMANCE_STATE_INVALID = 0
+const int PERFORMANCE_STATE_LIMIT = -1
+const float PERFORMANCE_OUT_OF_WINDOW = -1e30
+const string EARNINGS_WINDOW_TOOLTIP = "Show the Earnings row only when the next report is this many calendar days away or closer. Use 0 to disable the earnings request and table row completely. The countdown uses the calculation symbol's earnings data; on CFD charts this is the mapped native TradingView symbol."
+const string EARNINGS_FORMAT_TOOLTIP = "Format the Earnings row with date tokens and literal text. Supported tokens: EEEE, EEE, yyyy, yy, MMMM, MMM, MM, dd, HH, hh, mm, ss, a, and X. Use a as a standalone token for AM or PM. X inserts the complete countdown, for example 5 days or 1 day. MM means month; mm means minute. All other text is displayed literally. Default: EEE, dd MMM, in X."
+const string PAST_EARNINGS_WINDOW_TOOLTIP = "Show the Earnings row when the most recent reported earnings release was this many full days ago or less, unless the next report is within its own display window. Use 0 to disable the past earnings request and display completely. The event uses the calculation symbol's reported earnings data; on CFD charts this is the mapped native TradingView symbol."
+const string PAST_EARNINGS_FORMAT_TOOLTIP = "Format a past Earnings row with date tokens and literal text. Supported tokens: EEEE, EEE, yyyy, yy, MMMM, MMM, MM, dd, HH, hh, mm, ss, a, and X. Use a as a standalone token for AM or PM. X inserts the complete elapsed time, for example 5 days or 1 day. MM means month; mm means minute. All other text is displayed literally. Default: was X ago at dd MMM."
+const string DEFAULT_PERFORMANCE_FORMAT = "<since-2026-04-01> since 1 Apr, <last-5-days> 5D<nl><last-month> 1M, <ytd> YTD"
+const string PERFORMANCE_FORMAT_TOOLTIP = "Format one Performance row with up to 12 unique value placeholders. Supported values: <last-N-days>, <last-N-months>, <last-N-years>, <since-YYYY-MM-DD>, <last-month>, <last-year>, <ytd>, and <this-year>. Use <nl> for an unconditional new line. Use <cnl> for a new line shown only when its following segment contains at least one calculated value. A segment ends at the next <nl> or <cnl>. Control placeholders do not count towards the 12-value limit. Replace N with a positive whole number. Months equal 30 days and years equal 360 days. A period older than History window (days) is omitted together with its comma-separated item. Performance and history-high data refresh at most once every 30 seconds when the chart receives an update. Leave blank to disable the complete performance data path."
+const string HISTORY_WINDOW_TOOLTIP = "IMPORTANT: This is the main Performance speed control. It limits the shared daily history used by Performance and the history high. Performance periods that begin before this window are omitted from the row together with their comma-separated item. Smaller values usually calculate faster."
+
+groupMappings = "Mappings"
+groupMapperSources = "Fallback: SVKO CFD Symbol Mapper"
+groupCompanyName = "Company Name"
+groupMappedPriceMarker = "Mapped Price Marker"
+groupMarketData = "Market Data"
+groupEarnings = "Earnings"
+groupTableStyling = "Table Styling"
+groupPerformance = "Performance"
+groupHistoryWindow = "IMPORTANT: PERFORMANCE HISTORY"
+groupSymbolClassification = "Symbol Classification"
+mappingPairsInput = input.text_area(DEFAULT_MAPPING_PAIRS, "Mappings", tooltip = "Enter one source=target symbol pair per line, using complete TradingView ticker IDs. These mappings are checked first. When the current chart symbol matches a source or target, SVKO Info uses its counterpart without consulting SVKO CFD Symbol Mapper. If no local match exists, the two Mapper source inputs are used as a fallback.", group = groupMappings, display = display.data_window)
+mapperCode1Source = input.source(close, "1st code", tooltip = "Select Map: 1st code from SVKO CFD Symbol Mapper. This fallback source is used only when the current chart symbol is not found in Mappings.", group = groupMapperSources, display = display.data_window, active = true)
+mapperCode2Source = input.source(close, "2nd code", tooltip = "Select Map: 2nd code from the same SVKO CFD Symbol Mapper instance. Both codes are required and are used only when the current chart symbol is not found in Mappings.", group = groupMapperSources, display = display.data_window, active = true)
+historyWindowDays = input.int(365, "History window (days)", minval = 1, maxval = 99998, tooltip = HISTORY_WINDOW_TOOLTIP, group = groupHistoryWindow, display = display.data_window)
+companyNameMaxCharacters = input.int(20, "Max characters (0 to disable)", minval = 0, tooltip = "Show the company name as the first table row and truncate longer names after this many characters, followed by .... Use 0 to hide the row and disable its data request.", group = groupCompanyName, display = display.data_window)
+showMappedPriceOnlyWhenChartMarketClosed = input.bool(true, "Show only while chart market is closed", tooltip = "When enabled, show the mapped-price marker only outside the chart symbol's regular session or after the chart's latest bar has closed. Disable this option to show the marker whenever mapped-price data is available. Native TradingView symbols never display it.", group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceDistanceFromCandle = input.int(50, "Distance from candle (bars)", minval = 0, maxval = 495, tooltip = "Number of chart bars between the latest candle and the marker's left edge. The combined distance and line length are capped at 500 future bars.", group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceLineLength = input.int(100, "Line length (0 to disable)", minval = 0, maxval = 500, tooltip = "Set the marker line length in chart bars. Use 0 to hide the marker and skip its mapped-price request. The combined distance and line length are capped at 500 future bars. Available only on TRADENATION, TRADENATIONSB and IG charts; native TradingView symbols never request or display it.", group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceLineWidth = input.int(1, "Line width", minval = 1, group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceLineStyleInput = input.string("Dotted", "Line style", options = ["Solid", "Dotted", "Dashed"], group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceLineColour = input.color(color.white, "Line colour", group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceLabelFormat = input.string("<symbol> @ <exchange> · <price>", "Label format", tooltip = "Format the marker text with <symbol>, <exchange>, and <price>. Other text is displayed literally. Default: <symbol> @ <exchange> · <price>.", group = groupMappedPriceMarker, display = display.data_window)
+mappedPriceLabelFontSize = input.int(11, "Label font size (pt)", minval = 1, group = groupMappedPriceMarker, display = display.data_window)
+showExtendedHours = input.bool(true, "Show extended-hours change", group = groupMarketData, display = display.data_window)
+showAtrPercent = input.bool(true, "Show ATR percentage", group = groupMarketData, display = display.data_window)
+atrLength = input.int(14, "ATR length", minval = 1, group = groupMarketData, display = display.data_window, active = showAtrPercent)
+showPeRatios = input.bool(true, "Show P/E ratios", group = groupMarketData, display = display.data_window)
+showAllTimeHigh = input.bool(true, "Show history high", group = groupMarketData, display = display.data_window)
+showAllTimeHighDetails = input.bool(false, "Show history-high price and date", group = groupMarketData, display = display.data_window, active = showAllTimeHigh)
+showAnalystAverageTarget = input.bool(true, "Show analyst average target", group = groupMarketData, display = display.data_window)
+showEarningsWithinDays = input.int(20, "Show earnings within (days)", minval = 0, tooltip = EARNINGS_WINDOW_TOOLTIP, group = groupEarnings, display = display.data_window)
+earningsFormat = input.string("EEE, dd MMM, in X", "Earnings format", tooltip = EARNINGS_FORMAT_TOOLTIP, group = groupEarnings, display = display.data_window, active = showEarningsWithinDays > 0)
+showPastEarningsWithinDays = input.int(15, "Show past earnings within (days)", minval = 0, tooltip = PAST_EARNINGS_WINDOW_TOOLTIP, group = groupEarnings, display = display.data_window)
+pastEarningsFormat = input.string("was X ago at dd MMM", "Past earnings format", tooltip = PAST_EARNINGS_FORMAT_TOOLTIP, group = groupEarnings, display = display.data_window, active = showPastEarningsWithinDays > 0)
+tableFontSize = input.int(12, "Table font size", minval = 1, tooltip = "Font size in typographic points.", group = groupTableStyling, display = display.data_window)
+tableRowHeightPercent = input.float(0.0, "Table row height (%)", minval = 0.0, maxval = 100.0, step = 0.1, tooltip = "Row height as a percentage of the chart window. Use 0 for automatic height.", group = groupTableStyling, display = display.data_window)
+tableFontFamilyInput = input.string("Monospace", "Table font family", options = ["Default", "Monospace"], group = groupTableStyling, display = display.data_window)
+tableFrameWidth = input.int(0, "Table frame width", minval = 0, group = groupTableStyling, display = display.data_window)
+tableBackgroundColour = input.color(color.new(color.black, 100), "Table background colour", group = groupTableStyling, display = display.data_window)
+performanceFormat = input.string(DEFAULT_PERFORMANCE_FORMAT, "Performance format", tooltip = PERFORMANCE_FORMAT_TOOLTIP, group = groupPerformance, display = display.data_window)
+brokerExchangePrefixesInput = input.string("IG, TRADENATION, TRADENATIONSB", "Broker exchange prefixes", tooltip = "Comma-separated exchange prefixes that SVKO Info should treat as broker charts. Enter prefixes without colons. Spaces and letter case are ignored.", group = groupSymbolClassification, display = display.data_window)
+
+tableFontFamily = tableFontFamilyInput == "Monospace" ? font.family_monospace : font.family_default
+mappedPriceLineStyle = mappedPriceLineStyleInput == "Solid" ? line.style_solid : mappedPriceLineStyleInput == "Dashed" ? line.style_dashed : line.style_dotted
+
+decodeChunk(int code) =>
+    int value = code
+    string result = ""
+    bool valid = value >= 0
+    while value > 0 and valid
+        int digit = value % BASE
+        if digit == 0
+            valid := false
+        else
+            result := str.substring(ALPHABET, digit - 1, digit) + result
+            value := int(value / BASE)
+    valid ? result : "NO SYMBOL MAPPING"
+
+expandTransportSymbol(string symbol) =>
+    str.pos(symbol, "TNSB_") == 0 ? "TRADENATIONSB:" + str.substring(symbol, 5, str.length(symbol)) : str.pos(symbol, "TN_") == 0 ? "TRADENATION:" + str.substring(symbol, 3, str.length(symbol)) : symbol
+
+formatPercent(float value) =>
+    na(value) ? "N/A" : (value > 0 ? "+" : "") + str.tostring(value, "#.##") + "%"
+
+normalisePerformancePlaceholder(string placeholder) =>
+    string value = str.lower(str.trim(str.substring(placeholder, 1, str.length(placeholder) - 1)))
+    while str.contains(value, "  ")
+        value := str.replace_all(value, "  ", " ")
+    str.replace_all(value, " ", "-")
+
+parsePositiveWholeNumber(string value) =>
+    float parsedValue = str.tonumber(value)
+    bool valid = not na(parsedValue) and parsedValue > 0 and parsedValue == math.floor(parsedValue)
+    [valid ? int(parsedValue) : int(na), valid]
+
+rollingPerformanceStart(float days, string timezone) =>
+    int rawTime = int(float(timenow) - days * 86400000.0)
+    timestamp(timezone, year(rawTime, timezone), month(rawTime, timezone), dayofmonth(rawTime, timezone), 0, 0)
+
+parsePerformancePlaceholder(string placeholder, string timezone) =>
+    string value = normalisePerformancePlaceholder(placeholder)
+    array<string> parts = str.split(value, "-")
+    int startTime = na
+    bool valid = false
+    if value == "ytd" or value == "this-year"
+        startTime := timestamp(timezone, year(timenow, timezone), 1, 1, 0, 0)
+        valid := true
+    else if value == "last-month"
+        startTime := rollingPerformanceStart(30.0, timezone)
+        valid := true
+    else if value == "last-year"
+        startTime := rollingPerformanceStart(360.0, timezone)
+        valid := true
+    else if array.size(parts) == 3 and array.get(parts, 0) == "last"
+        [quantity, hasValidQuantity] = parsePositiveWholeNumber(array.get(parts, 1))
+        string unit = array.get(parts, 2)
+        float multiplier = unit == "day" or unit == "days" ? 1.0 : unit == "month" or unit == "months" ? 30.0 : unit == "year" or unit == "years" ? 360.0 : na
+        valid := hasValidQuantity and not na(multiplier)
+        startTime := valid ? rollingPerformanceStart(float(quantity) * multiplier, timezone) : na
+    else if array.size(parts) == 4 and array.get(parts, 0) == "since"
+        [yearValue, hasValidYear] = parsePositiveWholeNumber(array.get(parts, 1))
+        [monthValue, hasValidMonth] = parsePositiveWholeNumber(array.get(parts, 2))
+        [dayValue, hasValidDay] = parsePositiveWholeNumber(array.get(parts, 3))
+        if hasValidYear and hasValidMonth and hasValidDay
+            int candidateTime = timestamp(timezone, yearValue, monthValue, dayValue, 0, 0)
+            valid := year(candidateTime, timezone) == yearValue and month(candidateTime, timezone) == monthValue and dayofmonth(candidateTime, timezone) == dayValue
+            startTime := valid ? candidateTime : na
+    [startTime, valid]
+
+parsePerformanceFormat(string template, string timezone) =>
+    array<string> placeholders = array.new_string()
+    array<int> startTimes = array.new_int()
+    array<int> states = array.new_int()
+    int scanIndex = 0
+    int templateLength = str.length(template)
+    while scanIndex < templateLength
+        string remaining = str.substring(template, scanIndex, templateLength)
+        int openRelative = str.pos(remaining, "<")
+        if na(openRelative)
+            break
+        int openIndex = scanIndex + openRelative
+        string afterOpen = str.substring(template, openIndex + 1, templateLength)
+        int closeRelative = str.pos(afterOpen, ">")
+        if na(closeRelative)
+            break
+        int closeIndex = openIndex + closeRelative + 1
+        string placeholder = str.substring(template, openIndex, closeIndex + 1)
+        bool isControlPlaceholder = placeholder == "<nl>" or placeholder == "<cnl>"
+        if not isControlPlaceholder and array.indexof(placeholders, placeholder) == -1
+            int placeholderIndex = array.size(placeholders)
+            [startTime, valid] = parsePerformancePlaceholder(placeholder, timezone)
+            array.push(placeholders, placeholder)
+            array.push(startTimes, startTime)
+            array.push(states, placeholderIndex >= MAX_PERFORMANCE_PLACEHOLDERS ? PERFORMANCE_STATE_LIMIT : valid ? PERFORMANCE_STATE_VALID : PERFORMANCE_STATE_INVALID)
+        scanIndex := closeIndex + 1
+    [placeholders, startTimes, states]
+
+hasValidPerformancePlaceholder(array<int> states) =>
+    bool result = false
+    if array.size(states) > 0
+        for index = 0 to math.min(array.size(states), MAX_PERFORMANCE_PLACEHOLDERS) - 1
+            if array.get(states, index) == PERFORMANCE_STATE_VALID
+                result := true
+    result
+
+performanceValueIsAvailable(int placeholderIndex, array<int> states, array<float> startCloses, float latestClose) =>
+    bool hasValue = placeholderIndex < array.size(states) and array.get(states, placeholderIndex) == PERFORMANCE_STATE_VALID and placeholderIndex < array.size(startCloses)
+    float startClose = hasValue ? array.get(startCloses, placeholderIndex) : na
+    hasValue and not na(startClose) and startClose != PERFORMANCE_OUT_OF_WINDOW and startClose != 0 and not na(latestClose)
+
+performanceSegmentHasValue(string segment, array<string> placeholders, array<int> states, array<float> startCloses, float latestClose) =>
+    bool result = false
+    if array.size(placeholders) > 0
+        for placeholderIndex = 0 to array.size(placeholders) - 1
+            if str.contains(segment, array.get(placeholders, placeholderIndex)) and performanceValueIsAvailable(placeholderIndex, states, startCloses, latestClose)
+                result := true
+    result
+
+formatPerformanceSegment(string segment, array<string> placeholders, array<int> states, array<float> startCloses, float latestClose) =>
+    string result = segment
+    bool hasOutsideWindow = false
+    if array.size(placeholders) > 0
+        for placeholderIndex = 0 to array.size(placeholders) - 1
+            bool outsideWindow = placeholderIndex < array.size(startCloses) and array.get(startCloses, placeholderIndex) == PERFORMANCE_OUT_OF_WINDOW
+            if outsideWindow and str.contains(segment, array.get(placeholders, placeholderIndex))
+                hasOutsideWindow := true
+    if hasOutsideWindow
+        result := ""
+        array<string> items = str.split(segment, ",")
+        if array.size(items) > 0
+            for itemIndex = 0 to array.size(items) - 1
+                string item = str.trim(array.get(items, itemIndex))
+                bool omitItem = false
+                if array.size(placeholders) > 0
+                    for placeholderIndex = 0 to array.size(placeholders) - 1
+                        bool outsideWindow = placeholderIndex < array.size(startCloses) and array.get(startCloses, placeholderIndex) == PERFORMANCE_OUT_OF_WINDOW
+                        if outsideWindow and str.contains(item, array.get(placeholders, placeholderIndex))
+                            omitItem := true
+                if not omitItem
+                    result += str.length(result) == 0 ? item : ", " + item
+    if array.size(placeholders) > 0
+        for placeholderIndex = 0 to array.size(placeholders) - 1
+            int state = array.get(states, placeholderIndex)
+            string replacement = state == PERFORMANCE_STATE_LIMIT ? "LIMIT" : state == PERFORMANCE_STATE_INVALID ? "INVALID" : placeholderIndex >= array.size(startCloses) or na(array.get(startCloses, placeholderIndex)) or na(latestClose) or array.get(startCloses, placeholderIndex) == 0 ? "N/A" : formatPercent((latestClose / array.get(startCloses, placeholderIndex) - 1) * 100)
+            result := str.replace_all(result, array.get(placeholders, placeholderIndex), replacement)
+    result
+
+formatPerformance(string template, array<string> placeholders, array<int> states, array<float> startCloses, float latestClose) =>
+    string result = ""
+    int scanIndex = 0
+    int templateLength = str.length(template)
+    string breakBeforeSegment = ""
+    bool finished = false
+    while not finished
+        string remaining = str.substring(template, scanIndex, templateLength)
+        int newLineRelative = str.pos(remaining, "<nl>")
+        int conditionalNewLineRelative = str.pos(remaining, "<cnl>")
+        bool hasNewLine = not na(newLineRelative)
+        bool hasConditionalNewLine = not na(conditionalNewLineRelative)
+        bool useConditionalNewLine = hasConditionalNewLine and (not hasNewLine or conditionalNewLineRelative < newLineRelative)
+        int nextControlRelative = useConditionalNewLine ? conditionalNewLineRelative : hasNewLine ? newLineRelative : str.length(remaining)
+        int segmentEnd = scanIndex + nextControlRelative
+        string segment = str.substring(template, scanIndex, segmentEnd)
+        string renderedSegment = formatPerformanceSegment(segment, placeholders, states, startCloses, latestClose)
+        bool includeSegment = breakBeforeSegment != "<cnl>" or performanceSegmentHasValue(segment, placeholders, states, startCloses, latestClose)
+        if breakBeforeSegment == ""
+            result += renderedSegment
+        else if breakBeforeSegment == "<nl>"
+            result += "\n" + renderedSegment
+        else if includeSegment
+            result += "\n" + renderedSegment
+        if hasNewLine or hasConditionalNewLine
+            breakBeforeSegment := useConditionalNewLine ? "<cnl>" : "<nl>"
+            scanIndex := segmentEnd + str.length(breakBeforeSegment)
+        else
+            finished := true
+    result
+
+formatExtendedHours(float currentChange, int currentSession, float previousPostmarketChange, float premarketChange, float postmarketChange) =>
+    string currentValue = formatPercent(currentChange)
+    currentSession == 1 ? currentValue + (na(previousPostmarketChange) ? " (Pre " + formatPercent(premarketChange) + ")" : " (Post " + formatPercent(previousPostmarketChange) + ", Pre " + formatPercent(premarketChange) + ")") : currentSession == 2 ? currentValue + " (Post " + formatPercent(postmarketChange) + ")" : currentValue
+
+formatNumber(float value) =>
+    na(value) ? "N/A" : str.tostring(value, "#.##")
+
+formatCompanyName(string value, int maxCharacters) =>
+    na(value) ? "N/A" : str.length(value) > maxCharacters ? str.substring(value, 0, maxCharacters) + "..." : value
+
+formatAnalystTarget(float target, float currentPrice) =>
+    string result = "N/A"
+    if not na(target) and not na(currentPrice) and currentPrice != 0
+        float runway = (target / currentPrice - 1) * 100
+        string direction = runway > 0 ? "▲ " : runway < 0 ? "▼ " : "= "
+        result := formatNumber(target) + ", " + direction + str.tostring(math.abs(runway), "#.##") + "%"
+    result
+
+formatDays(int value) =>
+    na(value) ? "N/A" : str.tostring(value) + (value == 1 ? " day" : " days")
+
+isAsciiLetter(string value) =>
+    str.length(value) == 1 and str.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", value)
+
+markStandaloneAmPmTokens(string template) =>
+    string result = ""
+    int templateLength = str.length(template)
+    if templateLength > 0
+        for index = 0 to templateLength - 1
+            string character = str.substring(template, index, index + 1)
+            string previousCharacter = index > 0 ? str.substring(template, index - 1, index) : ""
+            string nextCharacter = index + 1 < templateLength ? str.substring(template, index + 1, index + 2) : ""
+            bool isStandaloneAmPmToken = character == "a" and not isAsciiLetter(previousCharacter) and not isAsciiLetter(nextCharacter)
+            result += isStandaloneAmPmToken ? "{12}" : character
+    result
+
+formatEarnings(int earningsTime, int days, string timezone, string template) =>
+    string result = markStandaloneAmPmTokens(template)
+    result := str.replace_all(result, "EEEE", "{0}")
+    result := str.replace_all(result, "EEE", "{1}")
+    result := str.replace_all(result, "yyyy", "{2}")
+    result := str.replace_all(result, "yy", "{3}")
+    result := str.replace_all(result, "MMMM", "{4}")
+    result := str.replace_all(result, "MMM", "{5}")
+    result := str.replace_all(result, "MM", "{6}")
+    result := str.replace_all(result, "dd", "{7}")
+    result := str.replace_all(result, "HH", "{8}")
+    result := str.replace_all(result, "hh", "{9}")
+    result := str.replace_all(result, "mm", "{10}")
+    result := str.replace_all(result, "ss", "{11}")
+    result := str.replace_all(result, "X", "{13}")
+    result := str.contains(result, "{0}") ? str.replace_all(result, "{0}", str.format_time(earningsTime, "EEEE", timezone)) : result
+    result := str.contains(result, "{1}") ? str.replace_all(result, "{1}", str.format_time(earningsTime, "EEE", timezone)) : result
+    result := str.contains(result, "{2}") ? str.replace_all(result, "{2}", str.format_time(earningsTime, "yyyy", timezone)) : result
+    result := str.contains(result, "{3}") ? str.replace_all(result, "{3}", str.format_time(earningsTime, "yy", timezone)) : result
+    result := str.contains(result, "{4}") ? str.replace_all(result, "{4}", str.format_time(earningsTime, "MMMM", timezone)) : result
+    result := str.contains(result, "{5}") ? str.replace_all(result, "{5}", str.format_time(earningsTime, "MMM", timezone)) : result
+    result := str.contains(result, "{6}") ? str.replace_all(result, "{6}", str.format_time(earningsTime, "MM", timezone)) : result
+    result := str.contains(result, "{7}") ? str.replace_all(result, "{7}", str.format_time(earningsTime, "dd", timezone)) : result
+    result := str.contains(result, "{8}") ? str.replace_all(result, "{8}", str.format_time(earningsTime, "HH", timezone)) : result
+    result := str.contains(result, "{9}") ? str.replace_all(result, "{9}", str.format_time(earningsTime, "hh", timezone)) : result
+    result := str.contains(result, "{10}") ? str.replace_all(result, "{10}", str.format_time(earningsTime, "mm", timezone)) : result
+    result := str.contains(result, "{11}") ? str.replace_all(result, "{11}", str.format_time(earningsTime, "ss", timezone)) : result
+    result := str.contains(result, "{12}") ? str.replace_all(result, "{12}", str.format_time(earningsTime, "a", timezone)) : result
+    str.replace_all(result, "{13}", formatDays(days))
+
+formatChartTickerId(string tickerId) =>
+    ticker.standard(tickerId)
+
+normaliseDelayedChartSymbol(string symbol) =>
+    string result = symbol
+    int separator = str.pos(symbol, ":")
+    if separator > 0
+        string exchange = str.substring(symbol, 0, separator)
+        int exchangeLength = str.length(exchange)
+        int suffixLength = exchangeLength >= 4 and str.substring(exchange, exchangeLength - 4, exchangeLength) == "_DLY" ? 4 : exchangeLength >= 3 and str.substring(exchange, exchangeLength - 3, exchangeLength) == "_DL" ? 3 : 0
+        if suffixLength > 0
+            result := str.substring(exchange, 0, exchangeLength - suffixLength) + str.substring(symbol, separator, str.length(symbol))
+    result
+
+formatMappedPriceLabel(string tickerId, string priceText, string template) =>
+    int separatorIndex = str.pos(tickerId, ":")
+    string exchange = separatorIndex > 0 ? str.substring(tickerId, 0, separatorIndex) : ""
+    string symbol = separatorIndex > 0 ? str.substring(tickerId, separatorIndex + 1, str.length(tickerId)) : tickerId
+    string result = str.replace_all(template, "<symbol>", symbol)
+    result := str.replace_all(result, "<exchange>", exchange)
+    str.replace_all(result, "<price>", priceText)
+
+normaliseBrokerExchangePrefixes(string prefixes) =>
+    "," + str.upper(str.replace_all(prefixes, " ", "")) + ","
+
+isBrokerSymbol(string symbol, string brokerExchangePrefixes) =>
+    int separator = str.pos(symbol, ":")
+    string exchange = separator > 0 ? str.substring(symbol, 0, separator) : ""
+    separator > 0 and str.contains(brokerExchangePrefixes, "," + str.upper(exchange) + ",")
+
+compactSymbol(string rawSymbol) =>
+    str.replace_all(rawSymbol, " ", "")
+
+loadMappingPairs(map<string, string> mappings, string mappingPairs) =>
+    array<string> lines = str.split(mappingPairs, "\n")
+    int lineCount = array.size(lines)
+    if lineCount > 0
+        for lineIndex = 0 to lineCount - 1
+            string line = array.get(lines, lineIndex)
+            int separator = str.pos(line, "=")
+            if not na(separator)
+                string sourceSymbol = compactSymbol(str.substring(line, 0, separator))
+                string targetSymbol = compactSymbol(str.substring(line, separator + 1, str.length(line)))
+                if sourceSymbol != "" and targetSymbol != ""
+                    map.put(mappings, sourceSymbol, targetSymbol)
+
+findFirstSourceForTarget(map<string, string> mappings, string targetSymbol) =>
+    string result = ""
+    for [sourceSymbol, mappedTarget] in mappings
+        if result == "" and mappedTarget == targetSymbol
+            result := sourceSymbol
+    result
+
+findInverseMappedSymbol(map<string, string> mappings, string chartSymbol) =>
+    string result = ""
+    int separator = str.pos(chartSymbol, ":")
+    if not na(separator)
+        string prefix = str.substring(chartSymbol, 0, separator)
+        string tickerName = str.substring(chartSymbol, separator + 1, str.length(chartSymbol))
+        if prefix == "NASDAQ" or prefix == "NYSE" or prefix == "BATS"
+            result := findFirstSourceForTarget(mappings, "NASDAQ:" + tickerName)
+            if result == ""
+                result := findFirstSourceForTarget(mappings, "NYSE:" + tickerName)
+            if result == ""
+                result := findFirstSourceForTarget(mappings, "BATS:" + tickerName)
+        else
+            result := findFirstSourceForTarget(mappings, chartSymbol)
+    result
+
+findLocalMappedSymbol(map<string, string> mappings, string chartSymbol, bool brokerSymbol) =>
+    brokerSymbol and map.contains(mappings, chartSymbol) ? map.get(mappings, chartSymbol) : findInverseMappedSymbol(mappings, chartSymbol)
+
+dailyAtrPercentValue() =>
+    float dailyAtr = ta.atr(atrLength)
+    close == 0 ? na : dailyAtr / close * 100
+
+latestReportedEarningsTime() =>
+    float reportedEarnings = request.earnings(syminfo.tickerid, earnings.actual, gaps = barmerge.gaps_on, ignore_invalid_symbol = true)
+    var int latestTime = na
+    if not na(reportedEarnings)
+        latestTime := time
+    latestTime
+
+regularDailyData(string template, bool trackAllTimeHigh, int historyDays) =>
+    var float allTimeHigh = na
+    var int allTimeHighTime = na
+    var array<int> performanceStartTimes = array.new_int()
+    var array<int> performanceStates = array.new_int()
+    var array<float> performanceStartCloses = array.new_float()
+    var array<float> result = array.new_float()
+    if barstate.isfirst
+        [parsedPlaceholders, parsedStartTimes, parsedStates] = parsePerformanceFormat(template, syminfo.timezone)
+        performanceStartTimes := parsedStartTimes
+        performanceStates := parsedStates
+        performanceStartCloses := array.new_float(array.size(parsedPlaceholders), na)
+        int historyStartTime = rollingPerformanceStart(float(historyDays), syminfo.timezone)
+        if array.size(performanceStartTimes) > 0
+            for index = 0 to math.min(array.size(performanceStartTimes), MAX_PERFORMANCE_PLACEHOLDERS) - 1
+                if array.get(performanceStates, index) == PERFORMANCE_STATE_VALID and array.get(performanceStartTimes, index) < historyStartTime
+                    array.set(performanceStartCloses, index, PERFORMANCE_OUT_OF_WINDOW)
+    int historyStartTime = rollingPerformanceStart(float(historyDays), syminfo.timezone)
+    if trackAllTimeHigh and time >= historyStartTime and (na(allTimeHigh) or high > allTimeHigh)
+        allTimeHigh := high
+        allTimeHighTime := time
+    int trackedPerformanceCount = math.min(array.size(performanceStartTimes), MAX_PERFORMANCE_PLACEHOLDERS)
+    if trackedPerformanceCount > 0
+        for index = 0 to trackedPerformanceCount - 1
+            int startTime = array.get(performanceStartTimes, index)
+            if array.get(performanceStates, index) == PERFORMANCE_STATE_VALID and na(array.get(performanceStartCloses, index)) and startTime >= historyStartTime and time >= startTime
+                array.set(performanceStartCloses, index, close)
+    if barstate.islast
+        array.clear(result)
+        array.push(result, close)
+        array.push(result, allTimeHigh)
+        array.push(result, float(allTimeHighTime))
+        if trackedPerformanceCount > 0
+            for index = 0 to trackedPerformanceCount - 1
+                array.push(result, array.get(performanceStartCloses, index))
+    result
+
+extendedHoursPrices() =>
+    var int trackedTradingDay = na
+    var float premarketClose = na
+    var float postmarketClose = na
+    var float previousPostmarketClose = na
+    if na(trackedTradingDay) or time_tradingday != trackedTradingDay
+        if not na(trackedTradingDay)
+            previousPostmarketClose := postmarketClose
+        premarketClose := na
+        postmarketClose := na
+        trackedTradingDay := time_tradingday
+    if session.ispremarket
+        premarketClose := close
+    if session.ispostmarket
+        postmarketClose := close
+    int currentSession = session.ispremarket ? 1 : session.ispostmarket ? 2 : 0
+    [currentSession, premarketClose, postmarketClose, previousPostmarketClose]
+
+latestExtendedHoursPrices() =>
+    request.security("", "1", extendedHoursPrices(), ignore_invalid_symbol = true, calc_bars_count = 1200)
+
+latestMappedPrice() =>
+    request.security("", "1", [close, str.tostring(close, format.mintick)], ignore_invalid_symbol = true, calc_bars_count = 1)
+
+var array<string> performancePlaceholders = array.new_string()
+var array<int> performanceStates = array.new_int()
+var bool performanceFormatParsed = false
+
+showPerformanceRow = str.length(str.trim(performanceFormat)) > 0
+chartDataSymbol = formatChartTickerId(syminfo.tickerid)
+chartSymbol = normaliseDelayedChartSymbol(chartDataSymbol)
+brokerExchangePrefixes = normaliseBrokerExchangePrefixes(brokerExchangePrefixesInput)
+isBrokerChart = isBrokerSymbol(chartSymbol, brokerExchangePrefixes)
+
+var map<string, string> localMappings = map.new<string, string>()
+var bool mapperSymbolLoaded = false
+var string mappedSymbol = "NO SYMBOL MAPPING"
+
+if barstate.isfirst
+    loadMappingPairs(localMappings, mappingPairsInput)
+    string localMappedSymbol = findLocalMappedSymbol(localMappings, chartSymbol, isBrokerChart)
+    if localMappedSymbol != ""
+        mappedSymbol := localMappedSymbol
+        mapperSymbolLoaded := true
+
+if (barstate.islastconfirmedhistory or barstate.islast) and not mapperSymbolLoaded
+    int mapperCode1 = int(math.round(mapperCode1Source))
+    int mapperCode2 = int(math.round(mapperCode2Source))
+    string decodedSymbol = expandTransportSymbol(decodeChunk(mapperCode1) + decodeChunk(mapperCode2))
+    bool hasNoMapping = mapperCode1Source == close and mapperCode2Source == close or mapperCode1 == 0 and mapperCode2 == 0
+    bool hasValidMappedSymbol = str.contains(decodedSymbol, ":") and not str.contains(decodedSymbol, "NO SYMBOL MAPPING")
+    mappedSymbol := hasNoMapping or not hasValidMappedSymbol ? "NO SYMBOL MAPPING" : decodedSymbol
+    mapperSymbolLoaded := true
+
+calculationSymbol = isBrokerChart ? mappedSymbol : chartDataSymbol
+hasMappedSymbol = str.contains(mappedSymbol, ":") and not str.contains(mappedSymbol, "NO SYMBOL MAPPING")
+hasCalculationSymbol = str.contains(calculationSymbol, ":") and not str.contains(calculationSymbol, "NO SYMBOL MAPPING")
+if (barstate.islastconfirmedhistory or barstate.islast) and hasCalculationSymbol and not performanceFormatParsed
+    [parsedPerformancePlaceholders, parsedPerformanceStartTimes, parsedPerformanceStates] = parsePerformanceFormat(performanceFormat, "UTC")
+    performancePlaceholders := parsedPerformancePlaceholders
+    performanceStates := parsedPerformanceStates
+    performanceFormatParsed := true
+hasValidPerformanceToken = hasValidPerformancePlaceholder(performanceStates)
+chartMarketClosed = not session.ismarket or timenow >= time_close
+mappedPriceMarketStateAllowsDisplay = not showMappedPriceOnlyWhenChartMarketClosed or chartMarketClosed
+hasEnabledMetric = showExtendedHours or showAtrPercent or showEarningsWithinDays > 0 or showPastEarningsWithinDays > 0 or showPeRatios or showAllTimeHigh or companyNameMaxCharacters > 0 or showAnalystAverageTarget or hasValidPerformanceToken
+
+varip int regularDailyLastRefreshTime = na
+varip float cachedCalculationClose = na
+varip array<float> cachedPerformanceStartCloses = array.new_float()
+varip float cachedAllTimeHigh = na
+varip int cachedAllTimeHighTime = na
+
+bool needsRegularDailyHistory = hasCalculationSymbol and (showAllTimeHigh or hasValidPerformanceToken)
+bool primeRegularDailyHistoryContext = barstate.islastconfirmedhistory
+bool refreshRegularDailyHistory = barstate.islast and (na(regularDailyLastRefreshTime) or timenow - regularDailyLastRefreshTime >= PERFORMANCE_REFRESH_MILLISECONDS)
+if needsRegularDailyHistory and (primeRegularDailyHistoryContext or refreshRegularDailyHistory)
+    string regularHistoryTicker = ticker.modify(calculationSymbol, session = session.regular)
+    array<float> requestedRegularDailyData = request.security(regularHistoryTicker, "D", regularDailyData(performanceFormat, showAllTimeHigh, historyWindowDays), lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true, calc_bars_count = historyWindowDays + 2)
+    if not na(requestedRegularDailyData) and array.size(requestedRegularDailyData) >= 3
+        cachedCalculationClose := array.get(requestedRegularDailyData, 0)
+        cachedAllTimeHigh := array.get(requestedRegularDailyData, 1)
+        cachedAllTimeHighTime := int(array.get(requestedRegularDailyData, 2))
+        array.clear(cachedPerformanceStartCloses)
+        if array.size(requestedRegularDailyData) > 3
+            for index = 3 to array.size(requestedRegularDailyData) - 1
+                array.push(cachedPerformanceStartCloses, array.get(requestedRegularDailyData, index))
+        regularDailyLastRefreshTime := timenow
+
+float calculationClose = cachedCalculationClose
+array<float> performanceStartCloses = cachedPerformanceStartCloses
+float requestedAllTimeHigh = cachedAllTimeHigh
+int requestedAllTimeHighTime = cachedAllTimeHighTime
+string companyName = na
+float analystAverageTarget = na
+float analystCurrentPrice = na
+float dailyAtrPercent = na
+float extendedHoursChange = na
+float premarketChange = na
+float postmarketChange = na
+float previousPostmarketChange = na
+int extendedHoursSession = 0
+float premarketClose = na
+float postmarketClose = na
+float previousPostmarketClose = na
+int daysToEarnings = na
+int earningsTime = na
+int daysSinceEarnings = na
+int pastEarningsTime = na
+string earningsTimezone = "UTC"
+float forwardPeRatio = na
+float peRatio = na
+string allTimeHighText = "N/A"
+
+if barstate.islast and hasCalculationSymbol and hasEnabledMetric
+    if showExtendedHours or showPeRatios or showAllTimeHigh or hasValidPerformanceToken
+        if showAllTimeHigh or hasValidPerformanceToken
+            if not na(requestedAllTimeHigh) and not na(requestedAllTimeHighTime) and not na(calculationClose) and requestedAllTimeHigh != 0 and calculationClose != 0
+                int allTimeHighDays = math.max(0, int(math.floor((float(timenow) - float(requestedAllTimeHighTime)) / 86400000.0)))
+                float dropFromAllTimeHigh = math.max(0, (requestedAllTimeHigh - calculationClose) / requestedAllTimeHigh * 100)
+                float riseToAllTimeHigh = math.max(0, (requestedAllTimeHigh / calculationClose - 1) * 100)
+                allTimeHighText := str.tostring(allTimeHighDays) + "d ago, ▼ " + str.tostring(dropFromAllTimeHigh, "#.##") + "% = ▲ " + str.tostring(riseToAllTimeHigh, "#.##") + "%"
+                if showAllTimeHighDetails
+                    string allTimeHighDate = str.tostring(year(requestedAllTimeHighTime)) + "-" + str.tostring(month(requestedAllTimeHighTime)) + "-" + str.tostring(dayofmonth(requestedAllTimeHighTime))
+                    allTimeHighText += ", " + str.tostring(requestedAllTimeHigh, format.mintick) + " @ " + allTimeHighDate
+        else
+            string regularTicker = ticker.modify(calculationSymbol, session = session.regular)
+            calculationClose := request.security(regularTicker, "D", close, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true, calc_bars_count = 2)
+    // Tuple requests remain the primary speed optimisation when every bundled value is enabled; otherwise request only the enabled value.
+    if showPastEarningsWithinDays > 0
+        int dailyMetricBars = math.max(showPastEarningsWithinDays + 2, showAtrPercent ? atrLength + 1 : 1)
+        if companyNameMaxCharacters > 0
+            if showAtrPercent and showEarningsWithinDays > 0
+                [requestedDailyAtrPercent, requestedEarningsTime, requestedPastEarningsTime, requestedEarningsTimezone, requestedCompanyName] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), earnings.future_time, latestReportedEarningsTime(), syminfo.timezone, syminfo.description], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+                dailyAtrPercent := requestedDailyAtrPercent
+                earningsTime := requestedEarningsTime
+                pastEarningsTime := requestedPastEarningsTime
+                earningsTimezone := requestedEarningsTimezone
+                companyName := requestedCompanyName
+            else if showAtrPercent
+                [requestedDailyAtrPercent, requestedPastEarningsTime, requestedEarningsTimezone, requestedCompanyName] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), latestReportedEarningsTime(), syminfo.timezone, syminfo.description], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+                dailyAtrPercent := requestedDailyAtrPercent
+                pastEarningsTime := requestedPastEarningsTime
+                earningsTimezone := requestedEarningsTimezone
+                companyName := requestedCompanyName
+            else if showEarningsWithinDays > 0
+                [requestedEarningsTime, requestedPastEarningsTime, requestedEarningsTimezone, requestedCompanyName] = request.security(calculationSymbol, "D", [earnings.future_time, latestReportedEarningsTime(), syminfo.timezone, syminfo.description], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+                earningsTime := requestedEarningsTime
+                pastEarningsTime := requestedPastEarningsTime
+                earningsTimezone := requestedEarningsTimezone
+                companyName := requestedCompanyName
+            else
+                [requestedPastEarningsTime, requestedEarningsTimezone, requestedCompanyName] = request.security(calculationSymbol, "D", [latestReportedEarningsTime(), syminfo.timezone, syminfo.description], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+                pastEarningsTime := requestedPastEarningsTime
+                earningsTimezone := requestedEarningsTimezone
+                companyName := requestedCompanyName
+        else if showAtrPercent and showEarningsWithinDays > 0
+            [requestedDailyAtrPercent, requestedEarningsTime, requestedPastEarningsTime, requestedEarningsTimezone] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), earnings.future_time, latestReportedEarningsTime(), syminfo.timezone], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+            dailyAtrPercent := requestedDailyAtrPercent
+            earningsTime := requestedEarningsTime
+            pastEarningsTime := requestedPastEarningsTime
+            earningsTimezone := requestedEarningsTimezone
+        else if showAtrPercent
+            [requestedDailyAtrPercent, requestedPastEarningsTime, requestedEarningsTimezone] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), latestReportedEarningsTime(), syminfo.timezone], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+            dailyAtrPercent := requestedDailyAtrPercent
+            pastEarningsTime := requestedPastEarningsTime
+            earningsTimezone := requestedEarningsTimezone
+        else if showEarningsWithinDays > 0
+            [requestedEarningsTime, requestedPastEarningsTime, requestedEarningsTimezone] = request.security(calculationSymbol, "D", [earnings.future_time, latestReportedEarningsTime(), syminfo.timezone], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+            earningsTime := requestedEarningsTime
+            pastEarningsTime := requestedPastEarningsTime
+            earningsTimezone := requestedEarningsTimezone
+        else
+            [requestedPastEarningsTime, requestedEarningsTimezone] = request.security(calculationSymbol, "D", [latestReportedEarningsTime(), syminfo.timezone], ignore_invalid_symbol = true, calc_bars_count = dailyMetricBars)
+            pastEarningsTime := requestedPastEarningsTime
+            earningsTimezone := requestedEarningsTimezone
+    else if companyNameMaxCharacters > 0
+        if showAtrPercent and showEarningsWithinDays > 0
+            [requestedDailyAtrPercent, requestedEarningsTime, requestedEarningsTimezone, requestedCompanyName] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), earnings.future_time, syminfo.timezone, syminfo.description], ignore_invalid_symbol = true)
+            dailyAtrPercent := requestedDailyAtrPercent
+            earningsTime := requestedEarningsTime
+            earningsTimezone := requestedEarningsTimezone
+            companyName := requestedCompanyName
+        else if showAtrPercent
+            [requestedDailyAtrPercent, requestedCompanyName] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), syminfo.description], ignore_invalid_symbol = true)
+            dailyAtrPercent := requestedDailyAtrPercent
+            companyName := requestedCompanyName
+        else if showEarningsWithinDays > 0
+            [requestedEarningsTime, requestedEarningsTimezone, requestedCompanyName] = request.security(calculationSymbol, "D", [earnings.future_time, syminfo.timezone, syminfo.description], ignore_invalid_symbol = true)
+            earningsTime := requestedEarningsTime
+            earningsTimezone := requestedEarningsTimezone
+            companyName := requestedCompanyName
+        else
+            companyName := request.security(calculationSymbol, "D", syminfo.description, ignore_invalid_symbol = true)
+    else if showAtrPercent and showEarningsWithinDays > 0
+        [requestedDailyAtrPercent, requestedEarningsTime, requestedEarningsTimezone] = request.security(calculationSymbol, "D", [dailyAtrPercentValue(), earnings.future_time, syminfo.timezone], ignore_invalid_symbol = true)
+        dailyAtrPercent := requestedDailyAtrPercent
+        earningsTime := requestedEarningsTime
+        earningsTimezone := requestedEarningsTimezone
+    else if showAtrPercent
+        dailyAtrPercent := request.security(calculationSymbol, "D", dailyAtrPercentValue(), ignore_invalid_symbol = true)
+    else if showEarningsWithinDays > 0
+        [requestedEarningsTime, requestedEarningsTimezone] = request.security(calculationSymbol, "D", [earnings.future_time, syminfo.timezone], ignore_invalid_symbol = true)
+        earningsTime := requestedEarningsTime
+        earningsTimezone := requestedEarningsTimezone
+    if showExtendedHours
+        string extendedTicker = ticker.modify(calculationSymbol, session = session.extended)
+        [requestedExtendedHoursSession, requestedPremarketClose, requestedPostmarketClose, requestedPreviousPostmarketClose] = request.security(extendedTicker, "D", latestExtendedHoursPrices(), lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true, calc_bars_count = 2)
+        extendedHoursSession := requestedExtendedHoursSession
+        premarketClose := requestedPremarketClose
+        postmarketClose := requestedPostmarketClose
+        previousPostmarketClose := requestedPreviousPostmarketClose
+        premarketChange := na(premarketClose) or na(calculationClose) or calculationClose == 0 ? na : (premarketClose / calculationClose - 1) * 100
+        postmarketChange := na(postmarketClose) or na(calculationClose) or calculationClose == 0 ? na : (postmarketClose / calculationClose - 1) * 100
+        previousPostmarketChange := na(previousPostmarketClose) or na(calculationClose) or calculationClose == 0 ? na : (previousPostmarketClose / calculationClose - 1) * 100
+        extendedHoursChange := extendedHoursSession == 1 ? premarketChange : extendedHoursSession == 2 ? postmarketChange : na
+    if showPeRatios
+        float epsTtm = request.financial(calculationSymbol, "EARNINGS_PER_SHARE", "TTM", ignore_invalid_symbol = true)
+        forwardPeRatio := request.financial(calculationSymbol, "PRICE_EARNINGS_FORWARD", "FY", ignore_invalid_symbol = true)
+        peRatio := epsTtm == 0 ? na : calculationClose / epsTtm
+    if showAnalystAverageTarget
+        [requestedAnalystAverageTarget, requestedAnalystCurrentPrice] = request.security(calculationSymbol, timeframe.period, [syminfo.target_price_average, close], ignore_invalid_symbol = true, calc_bars_count = 1)
+        analystAverageTarget := requestedAnalystAverageTarget
+        analystCurrentPrice := requestedAnalystCurrentPrice
+
+float mappedCurrentPrice = na
+string mappedCurrentPriceText = ""
+bool primeMappedPriceContext = barstate.islastconfirmedhistory
+bool updateMappedPrice = barstate.islast and mappedPriceMarketStateAllowsDisplay
+if isBrokerChart and hasMappedSymbol and mappedPriceLineLength > 0 and (primeMappedPriceContext or updateMappedPrice)
+    string mappedExtendedTicker = ticker.modify(mappedSymbol, session = session.extended)
+    [requestedMappedCurrentPrice, requestedMappedCurrentPriceText] = request.security(mappedExtendedTicker, "D", latestMappedPrice(), lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true, calc_bars_count = 2)
+    if updateMappedPrice
+        mappedCurrentPrice := requestedMappedCurrentPrice
+        mappedCurrentPriceText := requestedMappedCurrentPriceText
+
+daysToEarnings := na(earningsTime) ? na : int(math.ceil((float(earningsTime) - float(timenow)) / 86400000.0))
+daysToEarnings := not na(daysToEarnings) and daysToEarnings >= 0 ? daysToEarnings : na
+daysSinceEarnings := na(pastEarningsTime) ? na : int(math.floor((float(timenow) - float(pastEarningsTime)) / 86400000.0))
+daysSinceEarnings := not na(daysSinceEarnings) and daysSinceEarnings >= 0 ? daysSinceEarnings : na
+bool showFutureEarningsRow = showEarningsWithinDays > 0 and not na(daysToEarnings) and daysToEarnings <= showEarningsWithinDays
+bool showPastEarningsRow = not showFutureEarningsRow and showPastEarningsWithinDays > 0 and not na(daysSinceEarnings) and daysSinceEarnings <= showPastEarningsWithinDays
+bool showEarningsRow = showFutureEarningsRow or showPastEarningsRow
+bool highlightEarningsRow = showFutureEarningsRow and daysToEarnings <= 10
+string earningsText = hasCalculationSymbol and showFutureEarningsRow ? formatEarnings(earningsTime, daysToEarnings, earningsTimezone, earningsFormat) : hasCalculationSymbol and showPastEarningsRow ? formatEarnings(pastEarningsTime, daysSinceEarnings, earningsTimezone, pastEarningsFormat) : ""
+string performanceText = hasCalculationSymbol and showPerformanceRow ? formatPerformance(performanceFormat, performancePlaceholders, performanceStates, performanceStartCloses, calculationClose) : ""
+bool showRenderedPerformanceRow = showPerformanceRow and str.length(str.trim(performanceText)) > 0
+
+var line mappedPriceLine = na
+var box mappedPriceTextBox = na
+var table infoTable = na
+
+if barstate.islast and hasCalculationSymbol
+    if na(infoTable)
+        infoTable := table.new(position.bottom_right, 2, 10, bgcolor = na, frame_color = color.white, frame_width = tableFrameWidth, border_width = 0)
+    bool showMappedPriceLine = isBrokerChart and mappedPriceLineLength > 0 and mappedPriceMarketStateAllowsDisplay and not na(mappedCurrentPrice)
+    if showMappedPriceLine
+        int mappedPriceLineStart = bar_index + mappedPriceDistanceFromCandle
+        int mappedPriceLineEnd = math.min(mappedPriceLineStart + mappedPriceLineLength, bar_index + 500)
+        float mappedPriceDifferencePercent = close == 0 ? na : (mappedCurrentPrice / close - 1) * 100
+        color mappedPriceTextColour = na(mappedPriceDifferencePercent) or math.abs(mappedPriceDifferencePercent) <= MAPPED_PRICE_COLOUR_THRESHOLD_PERCENT ? color.white : mappedPriceDifferencePercent > 0 ? color.lime : color.red
+        string mappedPriceLabelText = formatMappedPriceLabel(mappedSymbol, mappedCurrentPriceText, mappedPriceLabelFormat)
+        if na(mappedPriceLine)
+            mappedPriceLine := line.new(mappedPriceLineStart, mappedCurrentPrice, mappedPriceLineEnd, mappedCurrentPrice, xloc = xloc.bar_index, extend = extend.none, color = mappedPriceLineColour, style = mappedPriceLineStyle, width = mappedPriceLineWidth)
+        else
+            line.set_xy1(mappedPriceLine, mappedPriceLineStart, mappedCurrentPrice)
+            line.set_xy2(mappedPriceLine, mappedPriceLineEnd, mappedCurrentPrice)
+            line.set_color(mappedPriceLine, mappedPriceLineColour)
+        line.set_style(mappedPriceLine, mappedPriceLineStyle)
+        line.set_width(mappedPriceLine, mappedPriceLineWidth)
+        if na(mappedPriceTextBox)
+            mappedPriceTextBox := box.new(left = mappedPriceLineStart, top = mappedCurrentPrice, right = mappedPriceLineEnd, bottom = mappedCurrentPrice, xloc = xloc.bar_index, border_color = na, bgcolor = color.new(color.white, 100), text = mappedPriceLabelText, text_color = mappedPriceTextColour, text_size = mappedPriceLabelFontSize, text_halign = text.align_left, text_valign = text.align_bottom, text_wrap = text.wrap_none, text_font_family = font.family_monospace)
+        else
+            box.set_left(mappedPriceTextBox, mappedPriceLineStart)
+            box.set_right(mappedPriceTextBox, mappedPriceLineEnd)
+            box.set_top(mappedPriceTextBox, mappedCurrentPrice)
+            box.set_bottom(mappedPriceTextBox, mappedCurrentPrice)
+            box.set_text(mappedPriceTextBox, mappedPriceLabelText)
+            box.set_text_color(mappedPriceTextBox, mappedPriceTextColour)
+            box.set_text_size(mappedPriceTextBox, mappedPriceLabelFontSize)
+            box.set_text_font_family(mappedPriceTextBox, font.family_monospace)
+    else
+        if not na(mappedPriceLine)
+            line.set_color(mappedPriceLine, na)
+        if not na(mappedPriceTextBox)
+            box.set_text(mappedPriceTextBox, "")
+    color liveTableBackgroundColour = color.new(tableBackgroundColour, color.t(tableBackgroundColour) + (bar_index - bar_index))
+    table.set_frame_width(infoTable, tableFrameWidth)
+    int row = 0
+    if hasCalculationSymbol and companyNameMaxCharacters > 0
+        table.cell(infoTable, 0, row, "Company:", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, formatCompanyName(companyName, companyNameMaxCharacters), height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    table.cell(infoTable, 0, row, "Chart Symbol:", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+    table.cell(infoTable, 1, row, chartSymbol, height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+    row += 1
+    if hasMappedSymbol
+        table.cell(infoTable, 0, row, isBrokerChart ? "Original Symbol:" : "CFD Symbol:", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, mappedSymbol, height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    if hasCalculationSymbol and showRenderedPerformanceRow
+        table.cell(infoTable, 0, row, "Performance", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_valign = text.align_top, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, performanceText, height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_valign = text.align_top, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    if hasCalculationSymbol and showExtendedHours
+        table.cell(infoTable, 0, row, "Extended Hours", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, formatExtendedHours(extendedHoursChange, extendedHoursSession, previousPostmarketChange, premarketChange, postmarketChange), height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    if hasCalculationSymbol and showAllTimeHigh
+        table.cell(infoTable, 0, row, str.tostring(historyWindowDays) + "d High", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, allTimeHighText, height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    if hasCalculationSymbol and showAtrPercent
+        table.cell(infoTable, 0, row, "Daily ATR", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, formatPercent(dailyAtrPercent), height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    if hasCalculationSymbol and showEarningsRow
+        table.cell(infoTable, 0, row, "Earnings", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = highlightEarningsRow ? color.red : color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily, text_formatting = highlightEarningsRow ? text.format_bold : text.format_none)
+        table.cell(infoTable, 1, row, earningsText, height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = highlightEarningsRow ? color.red : color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily, text_formatting = highlightEarningsRow ? text.format_bold : text.format_none)
+        row += 1
+    if hasCalculationSymbol and showAnalystAverageTarget
+        table.cell(infoTable, 0, row, "Analyst Avg", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, formatAnalystTarget(analystAverageTarget, analystCurrentPrice), height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    if hasCalculationSymbol and showPeRatios
+        table.cell(infoTable, 0, row, "P/E", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, formatNumber(peRatio) + " / Fwd " + formatNumber(forwardPeRatio), height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1
+    while row < 10
+        table.cell(infoTable, 0, row, "", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        table.cell(infoTable, 1, row, "", height = tableRowHeightPercent, bgcolor = liveTableBackgroundColour, text_color = color.white, text_halign = text.align_left, text_size = tableFontSize, text_font_family = tableFontFamily)
+        row += 1

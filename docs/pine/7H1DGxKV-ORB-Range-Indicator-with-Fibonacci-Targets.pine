@@ -1,0 +1,297 @@
+//@version=6
+indicator("ORB & Full Extended Range Indicator", overlay=true, max_lines_count=100, max_labels_count=100)
+
+// === Inputs ===
+session_choice    = input.string(title="Trading Session", defval="New York", options=["New York", "London", "Tokyo", "Frankfurt"])
+range_minutes     = input.int(title="Opening Range Duration (minutes)", defval=10, options=[5, 10, 15, 30, 45])
+direction         = input.string(title="Breakout Direction", defval="Both", options=["Both", "Long Only", "Short Only"])
+show_max_dist     = input.bool(true, title="Show Max Distance from Breakout")
+show_break_vol    = input.bool(true, title="Show Total Breakout Volume Label")
+
+// Extended Session Settings
+grp_ext           = "Extended Hours Settings"
+show_ext_levels   = input.bool(true, "Show Overnight High/Low", group=grp_ext)
+color_ext_high    = input.color(color.new(color.blue, 0), "Ext High Color", group=grp_ext)
+color_ext_low     = input.color(color.new(color.blue, 0), "Ext Low Color", group=grp_ext)
+ext_line_width    = input.int(1, "Ext Line Width (1=Thin)", minval=1, maxval=5, group=grp_ext)
+
+// Fib Inputs
+use_fib_0382      = input.bool(true, title="Show 0.382 Target")
+use_fib_0618      = input.bool(true, title="Show 0.618 Target")
+use_fib_1000      = input.bool(true, title="Show 1.000 Target")
+use_fib_1618      = input.bool(true, title="Show 1.618 Target")
+use_fib_2000      = input.bool(true, title="Show 2.000 Target")
+
+// Custom Fibs
+use_fib_cust1     = input.bool(false, title="Show Custom Fib 1")
+fib_cust1_val     = input.float(0.236, title="Custom Fib 1 Level")
+use_fib_cust2     = input.bool(false, title="Show Custom Fib 2")
+fib_cust2_val     = input.float(0.786, title="Custom Fib 2 Level")
+
+// Line & Label Settings
+grp_lines        = "Line & Label Settings"
+orb_line_len     = input.int(300, "ORB Line Length", group=grp_lines)
+orb_lbl_offset   = input.int(180, "ORB Label Offset", group=grp_lines)
+fib_line_len     = input.int(300, "Fib Line Length", group=grp_lines)
+fib_lbl_offset   = input.int(300, "Fib Label Offset", group=grp_lines)
+
+// === Time & Session Setup ===
+var string session_tz   = "America/New_York"
+var int    start_hour   = 9
+var int    start_minute = 30
+
+switch session_choice
+    "New York"  =>
+        session_tz   := "America/New_York"
+        start_hour   := 9
+        start_minute := 30
+    "London"    =>
+        session_tz   := "Europe/London"
+        start_hour   := 8
+        start_minute := 0
+    "Tokyo"     =>
+        session_tz   := "Asia/Tokyo"
+        start_hour   := 9
+        start_minute := 0
+    "Frankfurt" =>
+        session_tz   := "Europe/Berlin"
+        start_hour   := 9
+        start_minute := 0
+
+session_start     = timestamp(session_tz, year, month, dayofmonth, start_hour, start_minute)
+in_open_range     = (time >= session_start) and (time < session_start + range_minutes * 60 * 1000)
+
+// Market State Logic (RTH vs Overnight)
+is_reg_session    = not na(time(timeframe.period, "0930-1600", "America/New_York"))
+is_market_open    = is_reg_session and not is_reg_session[1]
+is_ext_start      = not is_reg_session and is_reg_session[1]
+
+// === State Variables ===
+var float high_wick         = na
+var float low_wick          = na
+var bool  range_drawn       = false
+var int   prev_range        = range_minutes
+var string prev_session     = session_choice
+
+// Overnight Collection Variables
+var float collect_ext_high  = na
+var float collect_ext_low   = na
+var float collect_ext_vol   = 0.0
+var int   collect_ext_start = na
+
+// Gap Tracking
+var float prev_day_close    = na
+var string gap_str          = ""
+
+// Volume Tracking
+var float orb_volume_only    = 0.0
+var float cum_vol_to_break   = 0.0
+var bool  breakout_occurred  = false
+var float volume_at_breakout = 0.0
+
+// Max Distance Tracking
+var float max_dist_high = na
+var float max_dist_low  = na
+var label lbl_max_high  = na
+var label lbl_max_low   = na
+
+// Objects management
+var line[] lines_to_delete   = array.new_line()
+var label[] labels_to_delete = array.new_label()
+
+// === Helper: safe max/min for wick tracking ===
+safeMax(float current, float newVal) =>
+    if na(current)
+        newVal
+    else
+        math.max(current, newVal)
+
+safeMin(float current, float newVal) =>
+    if na(current)
+        newVal
+    else
+        math.min(current, newVal)
+
+// === Reset on New Day/Settings Change ===
+is_new_day = ta.change(time("D")) != 0
+if is_new_day or prev_range != range_minutes or prev_session != session_choice
+    high_wick := na
+    low_wick := na
+    range_drawn := false
+    orb_volume_only := 0.0
+    cum_vol_to_break := 0.0
+    breakout_occurred := false
+    volume_at_breakout := 0.0
+    max_dist_high := na
+    max_dist_low := na
+    label.delete(lbl_max_high)
+    label.delete(lbl_max_low)
+    lbl_max_high := na
+    lbl_max_low := na
+    if array.size(lines_to_delete) > 0
+        for i = 0 to array.size(lines_to_delete) - 1
+            line.delete(array.get(lines_to_delete, i))
+        array.clear(lines_to_delete)
+    if array.size(labels_to_delete) > 0
+        for i = 0 to array.size(labels_to_delete) - 1
+            label.delete(array.get(labels_to_delete, i))
+        array.clear(labels_to_delete)
+
+prev_range := range_minutes
+prev_session := session_choice
+
+// === Capture RTH Close for Gap Calculation ===
+if is_ext_start
+    prev_day_close := close[1]
+
+// === Data Collection (Overnight - 16:00 Yesterday to 09:30 Today) ===
+if not is_reg_session
+    if is_ext_start or na(collect_ext_high)
+        collect_ext_high  := high
+        collect_ext_low   := low
+        collect_ext_vol   := 0.0
+        collect_ext_start := time
+    collect_ext_high := math.max(collect_ext_high, high)
+    collect_ext_low  := math.min(collect_ext_low, low)
+    collect_ext_vol  += volume
+
+// === Compute Gap String (global scope to avoid nested-scope issues) ===
+if is_market_open
+    if not na(prev_day_close) and prev_day_close != 0
+        float gp = ((open - prev_day_close) / prev_day_close) * 100
+        if gp >= 0
+            gap_str := "\nGap: +" + str.tostring(gp, "#.##") + "%"
+        else
+            gap_str := "\nGap: " + str.tostring(gp, "#.##") + "%"
+    else
+        gap_str := ""
+
+// === Market Open: Draw Overnight Range ===
+if is_market_open
+    if show_ext_levels and not na(collect_ext_high)
+        ext_range = collect_ext_high - collect_ext_low
+        ext_pct   = (ext_range / collect_ext_low) * 100
+        ext_text  = "Ext Vol: " + str.tostring(collect_ext_vol, format.volume) + "\nExt Range: " + str.tostring(ext_range, format.mintick) + " (" + str.tostring(ext_pct, "#.##") + "%)" + gap_str
+        ln_h = line.new(collect_ext_start, collect_ext_high, session_start, collect_ext_high, xloc=xloc.bar_time, color=color_ext_high, width=ext_line_width)
+        ln_l = line.new(collect_ext_start, collect_ext_low, session_start, collect_ext_low, xloc=xloc.bar_time, color=color_ext_low, width=ext_line_width)
+        lbl  = label.new(collect_ext_start, collect_ext_high, ext_text, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color_ext_high, 80), textcolor=color.white, size=size.small)
+        array.push(lines_to_delete, ln_h)
+        array.push(lines_to_delete, ln_l)
+        array.push(labels_to_delete, lbl)
+
+// === Regular Session Logic ===
+if is_reg_session
+    if not breakout_occurred
+        cum_vol_to_break += volume
+    if in_open_range
+        orb_volume_only += volume
+        high_wick := safeMax(high_wick, high)
+        low_wick  := safeMin(low_wick, low)
+
+// === Build Fib Levels (top-level to avoid nested-if issues) ===
+var fib_levels = array.new_float()
+
+// === Drawing ORB and Targets ===
+if is_reg_session and not in_open_range and not range_drawn and not na(high_wick) and not na(low_wick)
+    range_drawn := true
+    orb_range     = high_wick - low_wick
+    orb_percent   = orb_range / low_wick * 100
+    mid_level     = (high_wick + low_wick) / 2
+
+    line_high = line.new(bar_index, high_wick, bar_index + orb_line_len, high_wick, color=color.green, width=1, style=line.style_dashed)
+    label_high = label.new(bar_index + orb_lbl_offset, high_wick, str.tostring(range_minutes) + " Minutes High", style=label.style_label_left, textcolor=color.white, size=size.small, color=color.green)
+    array.push(lines_to_delete, line_high)
+    array.push(labels_to_delete, label_high)
+
+    line_low = line.new(bar_index, low_wick, bar_index + orb_line_len, low_wick, color=color.red, width=1, style=line.style_dashed)
+    label_low = label.new(bar_index + orb_lbl_offset, low_wick, str.tostring(range_minutes) + " Minutes Low", style=label.style_label_left, textcolor=color.white, size=size.small, color=color.red)
+    array.push(lines_to_delete, line_low)
+    array.push(labels_to_delete, label_low)
+
+    label_range = label.new(bar_index + orb_lbl_offset, mid_level, "ORB Size: " + str.tostring(orb_range, format.mintick) + " (" + str.tostring(orb_percent, "#.##") + "%)\nORB Vol: " + str.tostring(orb_volume_only, format.volume), style=label.style_label_left, textcolor=color.white, size=size.normal, color=color.new(color.blue, 20))
+    array.push(labels_to_delete, label_range)
+
+    array.clear(fib_levels)
+    if use_fib_0382
+        array.push(fib_levels, 0.382)
+    if use_fib_0618
+        array.push(fib_levels, 0.618)
+    if use_fib_1000
+        array.push(fib_levels, 1.0)
+    if use_fib_1618
+        array.push(fib_levels, 1.618)
+    if use_fib_2000
+        array.push(fib_levels, 2.0)
+    if use_fib_cust1
+        array.push(fib_levels, fib_cust1_val)
+    if use_fib_cust2
+        array.push(fib_levels, fib_cust2_val)
+
+    for i = 0 to array.size(fib_levels) - 1
+        level = array.get(fib_levels, i)
+        if direction != "Short Only"
+            fib_up = high_wick + orb_range * level
+            line_up = line.new(bar_index, fib_up, bar_index + fib_line_len, fib_up, color=color.teal, style=line.style_dotted)
+            label_up = label.new(bar_index + fib_lbl_offset, fib_up, "Target +" + str.tostring(level), style=label.style_label_left, size=size.tiny, textcolor=color.white, color=color.teal)
+            array.push(lines_to_delete, line_up)
+            array.push(labels_to_delete, label_up)
+        if direction != "Long Only"
+            fib_down = low_wick - orb_range * level
+            line_down = line.new(bar_index, fib_down, bar_index + fib_line_len, fib_down, color=color.orange, style=line.style_dotted)
+            label_down = label.new(bar_index + fib_lbl_offset, fib_down, "Target -" + str.tostring(level), style=label.style_label_left, size=size.tiny, textcolor=color.white, color=color.orange)
+            array.push(lines_to_delete, line_down)
+            array.push(labels_to_delete, label_down)
+
+// === Breakout & Alerts (ta calls at global scope) ===
+_crossHigh = ta.crossover(high, high_wick)
+_crossLow  = ta.crossunder(low, low_wick)
+cond_long_break  = range_drawn and direction != "Short Only" and _crossHigh and not breakout_occurred
+cond_short_break = range_drawn and direction != "Long Only" and _crossLow and not breakout_occurred
+
+if (cond_long_break or cond_short_break) and not breakout_occurred
+    breakout_occurred := true
+    volume_at_breakout := cum_vol_to_break
+    if show_break_vol
+        float break_y = na
+        string break_style = label.style_label_down
+        if cond_long_break
+            break_y := high
+            break_style := label.style_label_down
+        else
+            break_y := low
+            break_style := label.style_label_up
+        lbl_break = label.new(bar_index, break_y, "Total Breakout Vol: " + str.tostring(volume_at_breakout, format.volume), color=color.fuchsia, style=break_style, textcolor=color.white, size=size.small)
+        array.push(labels_to_delete, lbl_break)
+    string alert_dir = "Long"
+    if cond_long_break
+        alert_dir := "Long"
+    else
+        alert_dir := "Short"
+    alert(alert_dir + " Breakout! Price: " + str.tostring(close) + " | Total Vol: " + str.tostring(volume_at_breakout, format.volume), alert.freq_once_per_bar)
+
+// Breakout plot values
+float long_break_val  = na
+float short_break_val = na
+if cond_long_break
+    long_break_val := high_wick
+if cond_short_break
+    short_break_val := low_wick
+plotshape(long_break_val, style=shape.triangleup, location=location.absolute, color=color.green, size=size.small, title="Long Breakout Signal")
+plotshape(short_break_val, style=shape.triangledown, location=location.absolute, color=color.red, size=size.small, title="Short Breakout Signal")
+
+// === Max Distance Tracking ===
+if range_drawn and show_max_dist
+    if direction != "Short Only" and high > high_wick
+        if na(max_dist_high) or high > max_dist_high
+            max_dist_high := high
+            dist_pts = max_dist_high - high_wick
+            dist_pct = (dist_pts / high_wick) * 100
+            label.delete(lbl_max_high)
+            lbl_max_high := label.new(bar_index, max_dist_high, "Max Dist: +" + str.tostring(dist_pts, format.mintick) + " (" + str.tostring(dist_pct, "#.##") + "%)", style=label.style_label_down, color=color.new(color.green, 40), textcolor=color.white, size=size.small)
+    if direction != "Long Only" and low < low_wick
+        if na(max_dist_low) or low < max_dist_low
+            max_dist_low := low
+            dist_pts = low_wick - max_dist_low
+            dist_pct = (dist_pts / low_wick) * 100
+            label.delete(lbl_max_low)
+            lbl_max_low := label.new(bar_index, max_dist_low, "Max Dist: -" + str.tostring(dist_pts, format.mintick) + " (" + str.tostring(dist_pct, "#.##") + "%)", style=label.style_label_up, color=color.new(color.red, 40), textcolor=color.white, size=size.small)

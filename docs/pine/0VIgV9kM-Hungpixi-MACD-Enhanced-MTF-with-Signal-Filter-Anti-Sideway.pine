@@ -1,0 +1,210 @@
+//@version=6
+strategy(
+    "Hungpixi MACD Enhanced MTF with Signal Filter & Anti-Sideway",
+    overlay=true,
+    initial_capital=100,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=100,
+    calc_on_every_tick=true
+)
+
+// === INPUTS ===
+// Signal Mode Toggles
+showBuyTrend      = input.bool(true, "Show Buy With Trend")
+showBuyCounter    = input.bool(true, "Show Buy Counter Trend")
+showSellTrend     = input.bool(true, "Show Sell With Trend")
+showSellCounter   = input.bool(true, "Show Sell Counter Trend")
+showStrongBuy     = input.bool(true, "Show Strong Buy")
+showStrongSell    = input.bool(true, "Show Strong Sell")
+showStats         = input.bool(true, "Show Stats Table")
+
+// MACD / MTF Inputs
+fastLength = input.int(12, "MACD Fast")
+slowLength = input.int(26, "MACD Slow")
+signalLength = input.int(9, "MACD Signal")
+crossscore = input.float(10.0, "Cross Score")
+indiside = input.float(8.0, "Indicator Direction Score")
+histside = input.float(2.0, "Histogram Direction Score")
+Mult = input.float(1.2, "Stop Loss ATR Mult")
+Period = input.int(10, "Stop Loss ATR Period")
+lookaheadMTF = input.bool(true, "Lookahead MTF")
+
+// Anti-Sideway Filters
+ema34Period = input.int(34, "EMA34 M30")
+ema89Period = input.int(89, "EMA89 M30")
+minEMAdiff = input.float(20, "Minimum EMA Difference for Trend")
+atrPeriodFilter = input.int(14, "ATR Period Filter")
+minATR = input.float(50, "Minimum ATR for Entries")
+
+// MTF Config
+HTF = switch timeframe.period
+    '1'   => '5'
+    '3'   => '15'
+    '5'   => '15'
+    '15'  => '60'
+    '30'  => '60'
+    '45'  => '60'
+    '60'  => '240'
+    '120' => '240'
+    '180' => '240'
+    '240' => 'D'
+    'D'   => 'W'
+    => 'W'
+
+calc = switch timeframe.period
+    '1'  => 5
+    '3'  => 5
+    '5'  => 3
+    '15' => 4
+    '30' => 4
+    '45' => 4
+    '60' => 4
+    '120'=> 3
+    '180'=> 3
+    '240'=> 6
+    'D'  => 5
+    => 1
+
+// === MACD COUNT FUNCTION ===
+f_count() =>
+    indi = ta.ema(close, fastLength) - ta.ema(close, slowLength)
+    signalVal = ta.ema(indi, signalLength)
+    hist = indi - signalVal
+    score = 0.0
+    score := indi > indi[1] ? hist > hist[1] ? indiside + histside : hist == hist[1] ? indiside : indiside - histside : 0
+    score := score + (indi < indi[1] ? hist < hist[1] ? -(indiside + histside) : hist == hist[1] ? -indiside : -(indiside - histside) : 0)
+    score := score + (indi == indi[1] ? hist > hist[1] ? histside : hist < hist[1] ? -histside : 0 : 0)
+    countcross = indi >= signalVal and indi[1] < signalVal[1] ? crossscore :
+                 indi <= signalVal and indi[1] > signalVal[1] ? -crossscore : 0
+    countcross := countcross + nz(countcross[1]) * 0.6
+    score := score + countcross
+    score
+
+// === MTF Calculation ===
+Anlys = f_count()
+AnlysHTF = lookaheadMTF ? request.security(syminfo.tickerid, HTF, f_count(), lookahead=barmerge.lookahead_on) :
+                           request.security(syminfo.tickerid, HTF, f_count(), lookahead=barmerge.lookahead_off)
+Result = (AnlysHTF * calc + Anlys) / (calc + 1)
+
+// === EMA Trend Filter (Anti-Sideway) ===
+ema34_m30 = request.security(syminfo.tickerid, "30", ta.ema(close, ema34Period), lookahead=barmerge.lookahead_off)
+ema89_m30 = request.security(syminfo.tickerid, "30", ta.ema(close, ema89Period), lookahead=barmerge.lookahead_off)
+isUptrend = ema34_m30 > ema89_m30 and math.abs(ema34_m30 - ema89_m30) > minEMAdiff
+isDowntrend = ema34_m30 < ema89_m30 and math.abs(ema34_m30 - ema89_m30) > minEMAdiff
+
+// ATR Filter
+atrVal = ta.atr(atrPeriodFilter)
+canTrade = atrVal > minATR
+
+// === CONDITIONS ===
+baseBuy = ta.crossover(Result, 0) and canTrade
+baseSell = ta.crossunder(Result, 0) and canTrade
+
+buyWithTrend     = baseBuy and isUptrend
+sellWithTrend    = baseSell and isDowntrend
+buyCounterTrend  = baseBuy and isDowntrend
+sellCounterTrend = baseSell and isUptrend
+strongBuySignal  = buyWithTrend and ta.crossover(Result, 1.5)
+strongSellSignal = sellWithTrend and ta.crossunder(Result, -1.5)
+
+// Trade theo mọi tín hiệu hiển thị.
+// Gặp tín hiệu ngược: đóng lệnh cũ rồi đảo chiều.
+longCondition = buyWithTrend or buyCounterTrend or strongBuySignal
+shortCondition = sellWithTrend or sellCounterTrend or strongSellSignal
+
+// === STRATEGY ENTRY ===
+// Tín hiệu buy nào cũng Long. Tín hiệu sell nào cũng Short.
+// Nếu đang giữ hướng ngược, đóng trước rồi đảo chiều ngay.
+if longCondition
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Reverse to Long")
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Reverse to Short")
+    strategy.entry("Short", strategy.short)
+
+// === ATR STOP EXIT ===
+longStop = strategy.position_avg_price - ta.atr(Period) * Mult
+shortStop = strategy.position_avg_price + ta.atr(Period) * Mult
+
+if strategy.position_size > 0
+    strategy.exit("Long SL", from_entry="Long", stop=longStop)
+
+if strategy.position_size < 0
+    strategy.exit("Short SL", from_entry="Short", stop=shortStop)
+
+// === LABELS (Signal Mode Filter) ===
+if showBuyTrend and buyWithTrend
+    label.new(bar_index, low, "BUY Trend", color=color.green, style=label.style_label_up, textcolor=color.white)
+if showBuyCounter and buyCounterTrend
+    label.new(bar_index, low, "BUY Counter", color=color.yellow, style=label.style_label_up, textcolor=color.black)
+if showSellTrend and sellWithTrend
+    label.new(bar_index, high, "SELL Trend", color=color.red, style=label.style_label_down, textcolor=color.white)
+if showSellCounter and sellCounterTrend
+    label.new(bar_index, high, "SELL Counter", color=color.orange, style=label.style_label_down, textcolor=color.white)
+if showStrongBuy and strongBuySignal
+    label.new(bar_index, low - (high-low)*0.5, "STRONG BUY", color=color.lime, style=label.style_label_up, textcolor=color.black)
+if showStrongSell and strongSellSignal
+    label.new(bar_index, high + (high-low)*0.5, "STRONG SELL", color=color.fuchsia, style=label.style_label_down, textcolor=color.white)
+
+// === ALERTS JSON FOR BYBIT ===
+alertcondition(buyWithTrend, "Buy Trend", '{"symbol":"{{ticker}}","side":"buy","price":{{close}}}')
+alertcondition(buyCounterTrend, "Buy Counter", '{"symbol":"{{ticker}}","side":"buy","price":{{close}}}')
+alertcondition(sellWithTrend, "Sell Trend", '{"symbol":"{{ticker}}","side":"sell","price":{{close}}}')
+alertcondition(sellCounterTrend, "Sell Counter", '{"symbol":"{{ticker}}","side":"sell","price":{{close}}}')
+alertcondition(strongBuySignal, "Strong Buy", '{"symbol":"{{ticker}}","side":"buy","price":{{close}}}')
+alertcondition(strongSellSignal, "Strong Sell", '{"symbol":"{{ticker}}","side":"sell","price":{{close}}}')
+
+// === STATS TABLE ===
+var table stats = table.new(position.bottom_right, 2, 9, bgcolor=color.new(color.black, 80), frame_color=color.gray, frame_width=1)
+
+int longTrades = 0
+int shortTrades = 0
+int longWins = 0
+int shortWins = 0
+float longProfit = 0.0
+float shortProfit = 0.0
+
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+
+        if entryId == "Long"
+            longTrades += 1
+            longProfit += profit
+            if profit > 0
+                longWins += 1
+
+        if entryId == "Short"
+            shortTrades += 1
+            shortProfit += profit
+            if profit > 0
+                shortWins += 1
+
+totalTrades = longTrades + shortTrades
+totalWins = longWins + shortWins
+totalProfit = longProfit + shortProfit
+longWR = longTrades > 0 ? longWins * 100.0 / longTrades : 0.0
+shortWR = shortTrades > 0 ? shortWins * 100.0 / shortTrades : 0.0
+totalWR = totalTrades > 0 ? totalWins * 100.0 / totalTrades : 0.0
+netPct = (strategy.equity - strategy.initial_capital) * 100.0 / strategy.initial_capital
+maxDDPct = strategy.max_drawdown * 100.0 / strategy.initial_capital
+
+f_stat(_row, _name, _value, _color) =>
+    table.cell(stats, 0, _row, _name, text_color=color.white, text_size=size.small)
+    table.cell(stats, 1, _row, _value, text_color=_color, text_size=size.small)
+
+if barstate.islast and showStats
+    table.cell(stats, 0, 0, "STAT", text_color=color.white, bgcolor=color.new(color.blue, 35), text_size=size.small)
+    table.cell(stats, 1, 0, "VALUE", text_color=color.white, bgcolor=color.new(color.blue, 35), text_size=size.small)
+    f_stat(1, "Equity", "$" + str.tostring(strategy.equity, "#.##"), strategy.equity >= strategy.initial_capital ? color.lime : color.red)
+    f_stat(2, "Net %", str.tostring(netPct, "#.##") + "%", netPct >= 0 ? color.lime : color.red)
+    f_stat(3, "Closed Trades", str.tostring(totalTrades), color.white)
+    f_stat(4, "Win Rate", str.tostring(totalWR, "#.##") + "%", totalWR >= 50 ? color.lime : color.orange)
+    f_stat(5, "Long", str.tostring(longTrades) + " | " + str.tostring(longWR, "#.##") + "%", color.lime)
+    f_stat(6, "Short", str.tostring(shortTrades) + " | " + str.tostring(shortWR, "#.##") + "%", color.red)
+    f_stat(7, "Profit", "$" + str.tostring(totalProfit, "#.##"), totalProfit >= 0 ? color.lime : color.red)
+    f_stat(8, "Max DD", "$" + str.tostring(strategy.max_drawdown, "#.##") + " | " + str.tostring(maxDDPct, "#.##") + "%", color.orange)

@@ -1,0 +1,258 @@
+//@version=6
+// ============================================================================
+//  EMA + Market Structure Entries  (HL / LH reclaim triggers)
+//  ---------------------------------------------------------------------------
+//  Long  : EMA cross UP  -> first Higher Low -> bullish close within tolerance
+//                           of the last swing HIGH  => green triangle up
+//  Short : EMA cross DOWN -> first Lower High -> bearish close within tolerance
+//                           of the last swing LOW   => red triangle down
+//  One signal per EMA cross. Debug mode ignores the EMA gate and fires on every
+//  HL / LH reclaim, and labels every swing point.
+// ============================================================================
+indicator("EMA + Structure Entries", "EMA Struct", overlay = true, max_labels_count = 500)
+
+// ─────────────────────────── EMA ───────────────────────────
+var string GE = "EMA"
+emaLen   = input.int(135,    "Length",  minval = 1,             group = GE)
+emaSrc   = input.source(close, "Source",                        group = GE)
+emaCol   = input.color(#2962FF, "Color",                        group = GE)
+emaWidth = input.int(3,      "Width",   minval = 1, maxval = 5, group = GE)
+emaShow  = input.bool(true,  "Show line",                       group = GE)
+
+// ──────────────────── Swing (pivot) structure ────────────────────
+var string GS = "Swing structure"
+L        = input.int(3, "Pivot left bars",  minval = 1, group = GS,
+   tooltip = "Bars to the LEFT that must be higher/lower for a swing to count.")
+R        = input.int(2, "Pivot right bars", minval = 1, group = GS,
+   tooltip = "Bars to the RIGHT. THIS IS YOUR LAG: a swing is only confirmed R bars after it printed.")
+useAtrSw = input.bool(false, "Ignore micro-swings (ATR filter)", group = GS)
+atrLen   = input.int(14,   "ATR length",              minval = 1, group = GS)
+swMult   = input.float(0.5, "Min swing size (x ATR)", minval = 0, step = 0.1, group = GS)
+
+// ─────────────────────── Entry trigger ───────────────────────
+var string GT = "Entry trigger — proximity to pivot"
+tolMode   = input.string("ATR", "Tolerance mode", options = ["Percent", "ATR"], group = GT,
+   tooltip = "ATR = distance scales with volatility (default now). Percent = your original fixed 0.20%. Mutually exclusive — only one is ever active, switch the dropdown to change.")
+tolPctIn  = input.float(0.20, "Proximity to pivot (%)",   minval = 0, step = 0.01, group = GT)
+tolAtrIn  = input.float(0.25, "Proximity to pivot (xATR)", minval = 0, step = 0.05, group = GT)
+allowThru = input.bool(true,  "Count closes beyond the pivot", group = GT,
+   tooltip = "ON  = close >= pivot - tol (breakout still triggers).  OFF = close must land inside the band.")
+useWick   = input.bool(true, "Also allow a wick touch (not just close) to satisfy proximity", group = GT,
+   tooltip = "OFF (default) = only the CLOSE has to land in the tolerance band — your original spec, catches confirmed reclaims/rejections. ON = a candle whose high (long) / low (short) merely wicked into the band also qualifies, even if it closed back away from the pivot. Catches the tag itself, earlier and noisier.")
+strictRef = input.bool(false, "Reference pivot must itself be a HH (short: LL)", group = GT)
+
+var string GG = "Entry trigger — structure gate"
+needSide  = input.bool(true,  "Entry candle close must also be on the trend side of EMA", group = GG,
+   tooltip = "Extra filter on the trigger candle itself. The HL/LH-vs-EMA test below is the main gate; this is a secondary check.")
+requireCross = input.bool(false, "Also require a prior EMA cross before arming", group = GG,
+   tooltip = "OFF by default per corrected logic: a HL confirmed above EMA arms long on its own, no separate cross event needed.")
+maxAge    = input.int(0, "Max bars from cross to entry (0 = off)", minval = 0, group = GG,
+   tooltip = "Only applies when 'require a prior EMA cross' above is ON — otherwise there's no cross reference to measure age from.")
+onlyFirst = input.bool(false, "Only alert the FIRST LH/HL since the last reset", group = GG,
+   tooltip = "Reset = a fresh EMA cross OR the structure break that kills the arm (LL for longs, HH for shorts) — whichever happens more recently. OFF (default) = every qualifying LH/HL alerts, same as your original spec.")
+
+// ───────────────────────── Debug ─────────────────────────
+var string GD = "Debug"
+dbgLabels = input.bool(false, "Label every swing (HH / HL / LH / LL)",   group = GD)
+dbgShots  = input.bool(true, "Signal on every HL / LH (ignore EMA gate)", group = GD)
+showLvls  = input.bool(false, "Plot active pivot level + tolerance band", group = GD)
+
+// ═══════════════════════ Calculations ═══════════════════════
+ema = ta.ema(emaSrc, emaLen)
+plot(emaShow ? ema : na, "EMA", emaCol, emaWidth)
+
+atr      = ta.atr(atrLen)
+minSwing = useAtrSw ? atr * swMult : 0.0
+
+phRaw = ta.pivothigh(high, L, R)
+plRaw = ta.pivotlow(low,  L, R)
+
+var float lastPH = na
+var float prevPH = na
+var int   lastPHb = na
+var float lastPHema = na
+var float lastPL = na
+var float prevPL = na
+var int   lastPLb = na
+var float lastPLema = na
+
+newPH = false
+newPL = false
+
+// ema[R] = the EMA's value back on the bar where the pivot actually printed
+if not na(phRaw)
+    if not useAtrSw or na(lastPL) or (phRaw - lastPL) >= minSwing
+        prevPH    := lastPH
+        lastPH    := phRaw
+        lastPHb   := bar_index - R
+        lastPHema := ema[R]
+        newPH     := true
+
+if not na(plRaw)
+    if not useAtrSw or na(lastPH) or (lastPH - plRaw) >= minSwing
+        prevPL    := lastPL
+        lastPL    := plRaw
+        lastPLb   := bar_index - R
+        lastPLema := ema[R]
+        newPL     := true
+
+isHH = newPH and not na(prevPH) and lastPH > prevPH
+isLH = newPH and not na(prevPH) and lastPH < prevPH
+isHL = newPL and not na(prevPL) and lastPL > prevPL
+isLL = newPL and not na(prevPL) and lastPL < prevPL
+
+// structural state (is the most recent swing low a HL? most recent high a LH?)
+var bool lowIsHL  = false
+var bool highIsLH = false
+if isHL
+    lowIsHL := true
+if isLL
+    lowIsHL := false
+if isLH
+    highIsLH := true
+if isHH
+    highIsLH := false
+
+// reference-pivot quality filter
+var bool phIsHH = false
+var bool plIsLL = false
+if isHH
+    phIsHH := true
+if isLH
+    phIsHH := false
+if isLL
+    plIsLL := true
+if isHL
+    plIsLL := false
+
+// ───────────────── Arming state (corrected core logic) ─────────────────
+// Long arms when a HIGHER LOW is confirmed with its price ABOVE the EMA.
+// Short arms when a LOWER HIGH is confirmed with its price BELOW the EMA.
+// This IS the trend filter — no separate "EMA cross happened" event required.
+xUp = ta.crossover(close,  ema)
+xDn = ta.crossunder(close, ema)
+
+var int xUpBar = na
+var int xDnBar = na
+if xUp
+    xUpBar := bar_index
+if xDn
+    xDnBar := bar_index
+
+hlAboveEma = not na(lastPLema) and lastPL > lastPLema
+lhBelowEma = not na(lastPHema) and lastPH < lastPHema
+
+var bool longArm  = false
+var bool shortArm = false
+
+crossOkL = not requireCross or (not na(xUpBar) and lastPLb >= xUpBar)
+crossOkS = not requireCross or (not na(xDnBar) and lastPHb >= xDnBar)
+
+// count which HL/LH-since-the-last-RESET this one is, so we can optionally
+// only alert on the 1st occurrence. Resets on a fresh cross AND on the
+// structure break that kills the arm (isLL for longs, isHH for shorts) —
+// otherwise a stale count from an unrelated earlier leg can suppress the
+// setup you're actually looking at.
+var int hlCountSinceCross = 0
+var int lhCountSinceCross = 0
+if xUp
+    hlCountSinceCross := 0
+if isLL
+    hlCountSinceCross := 0
+if xDn
+    lhCountSinceCross := 0
+if isHH
+    lhCountSinceCross := 0
+
+allowHLCount = true
+allowLHCount = true
+if isHL
+    hlCountSinceCross := hlCountSinceCross + 1
+    allowHLCount := not onlyFirst or hlCountSinceCross <= 1
+if isLH
+    lhCountSinceCross := lhCountSinceCross + 1
+    allowLHCount := not onlyFirst or lhCountSinceCross <= 1
+
+if isHL and hlAboveEma and crossOkL and allowHLCount
+    longArm := true
+if isLL
+    longArm := false
+
+if isLH and lhBelowEma and crossOkS and allowLHCount
+    shortArm := true
+if isHH
+    shortArm := false
+
+hlOk = longArm
+lhOk = shortArm
+
+// ────────────────────── Proximity test ──────────────────────
+tolUp = na(lastPH) ? na : (tolMode == "ATR" ? atr * tolAtrIn : lastPH * tolPctIn / 100.0)
+tolDn = na(lastPL) ? na : (tolMode == "ATR" ? atr * tolAtrIn : lastPL * tolPctIn / 100.0)
+
+bull = close > open
+bear = close < open
+
+nearPH = not na(lastPH) and (
+   (close >= lastPH - tolUp and (allowThru or close <= lastPH + tolUp))
+   or (useWick and high >= lastPH - tolUp and (allowThru or high <= lastPH + tolUp))
+   ) and (not strictRef or phIsHH)
+nearPL = not na(lastPL) and (
+   (close <= lastPL + tolDn and (allowThru or close >= lastPL - tolDn))
+   or (useWick and low <= lastPL + tolDn and (allowThru or low >= lastPL - tolDn))
+   ) and (not strictRef or plIsLL)
+
+ageOkL = not requireCross or maxAge == 0 or (not na(xUpBar) and (bar_index - xUpBar) <= maxAge)
+ageOkS = not requireCross or maxAge == 0 or (not na(xDnBar) and (bar_index - xDnBar) <= maxAge)
+
+longSig  = longArm  and hlOk and bull and nearPH and (not needSide or close > ema) and ageOkL
+shortSig = shortArm and lhOk and bear and nearPL and (not needSide or close < ema) and ageOkS
+
+if longSig
+    longArm := false
+if shortSig
+    shortArm := false
+
+// ─────────────────────── Debug signals ───────────────────────
+var bool dbgArmL = false
+var bool dbgArmS = false
+if isHL
+    dbgArmL := true
+if isLL
+    dbgArmL := false
+if isLH
+    dbgArmS := true
+if isHH
+    dbgArmS := false
+
+dbgLong  = dbgShots and dbgArmL and bull and nearPH
+dbgShort = dbgShots and dbgArmS and bear and nearPL
+if dbgLong
+    dbgArmL := false
+if dbgShort
+    dbgArmS := false
+
+// ───────────────────────── Plotting ─────────────────────────
+plotshape(longSig,  "Long entry",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), size = size.small)
+plotshape(shortSig, "Short entry", shape.triangledown, location.abovebar, color.new(color.red,  0), size = size.small)
+plotshape(dbgLong  and not longSig,  "Debug long",  shape.triangleup,   location.belowbar, color.new(color.lime, 55), size = size.tiny)
+plotshape(dbgShort and not shortSig, "Debug short", shape.triangledown, location.abovebar, color.new(color.red,  55), size = size.tiny)
+
+if dbgLabels and newPH
+    label.new(lastPHb, lastPH, isHH ? "HH" : isLH ? "LH" : "H",
+       style = label.style_label_down, color = color.new(color.black, 100),
+       textcolor = isHH ? color.aqua : color.orange, size = size.tiny)
+
+if dbgLabels and newPL
+    label.new(lastPLb, lastPL, isHL ? "HL" : isLL ? "LL" : "L",
+       style = label.style_label_up, color = color.new(color.black, 100),
+       textcolor = isHL ? color.lime : color.fuchsia, size = size.tiny)
+
+plot(showLvls and longArm  and not na(lastPH) ? lastPH         : na, "Ref pivot high", color.new(color.lime, 30), 1, plot.style_linebr)
+plot(showLvls and longArm  and not na(lastPH) ? lastPH - tolUp : na, "Long tol band",  color.new(color.lime, 70), 1, plot.style_linebr)
+plot(showLvls and shortArm and not na(lastPL) ? lastPL         : na, "Ref pivot low",  color.new(color.red,  30), 1, plot.style_linebr)
+plot(showLvls and shortArm and not na(lastPL) ? lastPL + tolDn : na, "Short tol band", color.new(color.red,  70), 1, plot.style_linebr)
+
+// ───────────────────────── Alerts ─────────────────────────
+alertcondition(longSig,  "Long entry",  "EMA Struct: HL reclaim long")
+alertcondition(shortSig, "Short entry", "EMA Struct: LH rejection short")

@@ -1,0 +1,266 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © neghabi_mr
+
+
+//@version=6
+//@description Strategy Matrix Library — renders a full performance table (Strategy Tester-like) with streaks & long/short breakdown.
+
+library("StrategyMatrixLib")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers (internal; not exported)
+
+// Convert UI string to table anchor.
+posToConst(_pos) =>
+    _pos == "Top Left"     ? position.top_left : _pos == "Top Right"    ? position.top_right : _pos == "Bottom Left"  ? position.bottom_left : position.bottom_right
+
+
+fmtN(x, digits) =>
+    na(x) ? "—" : str.tostring(x, "0." + str.repeat("0", math.max(digits,1)-1) + "0")
+fmtP(x, digits) =>
+    na(x) ? "—" : str.tostring(x, "0." + str.repeat("0", math.max(digits,1)-1) + "0") + "%"
+
+writeRow(_t, _rowIndex, _lbl, _val, _isHeader, _bg, _headBg, _headTxt, _valCol, _valTxt) =>
+    _lblBg       = _isHeader ? _headBg : _bg
+    _valBg       = _isHeader ? _headBg : _valCol
+    _lblTxtColor = _isHeader ? _headTxt : _valTxt
+    _valTxtColor = _isHeader ? _headTxt : _valTxt
+    table.cell(_t, 0, _rowIndex, _lbl, bgcolor=_lblBg,  text_color=_lblTxtColor, text_size=size.small)
+    table.cell(_t, 1, _rowIndex, _val, bgcolor=_valBg,  text_color=_valTxtColor, text_size=size.small)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exported renderer
+
+// @function   Renders a strategy performance matrix table.
+// @param posStr   "Top Left" | "Top Right" | "Bottom Left" | "Bottom Right"
+// @param digits   Decimal places for numeric formatting
+// @param bgCol    Background for non-header label cells
+// @param headBg   Background for header rows
+// @param headTxt  Text color for header rows
+// @param valCol   Background for value cells
+// @param valTxt   Text color for value cells
+// @returns       table id (so caller can hold the table if desired)
+export render_matrix(string posStr, int digits, color bgCol, color headBg, color headTxt, color valCol, color valTxt) =>
+    // Persist first price for Buy&Hold reference
+    var float startClose = na
+    startClose := na(startClose) ? close : startClose
+
+    // Accumulators
+    float largestWin = na
+    float largestLoss = na
+    int   sumBarsInTrades = 0
+    float sumDurMs = 0.0
+
+    // Streak accumulators
+    int   curWinCount = 0,   maxWinCount = 0
+    float curWinSum   = 0.0, float maxWinSum   = na
+    int   curLossCount = 0,  maxLossCount = 0
+    float curLossSum   = 0.0, float maxLossSum   = na
+
+    // Direction buckets
+    int   longClosed = 0, shortClosed = 0
+    int   longWins = 0,   longLosses = 0
+    int   shortWins = 0,  shortLosses = 0
+    float longNet = 0.0,  shortNet = 0.0
+
+    // Compute only on last-confirmed history or realtime
+    if barstate.islastconfirmedhistory or barstate.isrealtime
+        _closed = strategy.closedtrades
+        if _closed > 0
+            for i = 0 to _closed - 1
+                float p  = strategy.closedtrades.profit(i)          // currency P/L
+                float sz = strategy.closedtrades.size(i)            // >0 long, <0 short
+
+                largestWin  := na(largestWin)  ? p : math.max(largestWin, p)
+                largestLoss := na(largestLoss) ? p : math.min(largestLoss, p)
+
+                int entryBar = strategy.closedtrades.entry_bar_index(i)
+                int exitBar  = strategy.closedtrades.exit_bar_index(i)
+                sumBarsInTrades += (exitBar - entryBar)
+
+                float durMs = strategy.closedtrades.exit_time(i) - strategy.closedtrades.entry_time(i)
+                sumDurMs += durMs
+
+                if p > 0
+                    curWinCount += 1
+                    curWinSum   += p
+                    curLossCount := 0
+                    curLossSum   := 0.0
+                    if curWinCount > maxWinCount
+                        maxWinCount := curWinCount
+                        maxWinSum   := curWinSum
+                    else
+                        maxWinSum := na(maxWinSum) ? curWinSum : (curWinCount == maxWinCount ? math.max(maxWinSum, curWinSum) : maxWinSum)
+                else if p < 0
+                    curLossCount += 1
+                    curLossSum   += p
+                    curWinCount := 0
+                    curWinSum   := 0.0
+                    if curLossCount > maxLossCount
+                        maxLossCount := curLossCount
+                        maxLossSum   := curLossSum
+                    else
+                        maxLossSum := na(maxLossSum) ? curLossSum : (curLossCount == maxLossCount ? math.min(maxLossSum, curLossSum) : maxLossSum)
+                else
+                    curWinCount  := 0
+                    curWinSum    := 0.0
+                    curLossCount := 0
+                    curLossSum   := 0.0
+
+                if sz > 0
+                    longClosed += 1
+                    longNet += p
+                    if p > 0
+                        longWins += 1
+                    else if p < 0
+                        longLosses += 1
+                else if sz < 0
+                    shortClosed += 1
+                    shortNet += p
+                    if p > 0
+                        shortWins += 1
+                    else if p < 0
+                        shortLosses += 1
+
+        // Headline strategy.* stats
+        int   closed    = strategy.closedtrades
+        int   wins      = strategy.wintrades
+        int   losses    = strategy.losstrades
+        float net       = strategy.netprofit
+        float grossProf = strategy.grossprofit
+        float grossLoss = strategy.grossloss
+        float ddAbs     = strategy.max_drawdown
+        float ddPct     = strategy.initial_capital != 0 ? (ddAbs / strategy.initial_capital) * 100.0 : na
+
+        // Derived
+        float winRate      = closed > 0 ? 100.0 * wins / closed : na
+        float avgTrade     = closed > 0 ? net / closed : na
+        float avgWin       = wins   > 0 ? grossProf / wins : na
+        float avgLossAbs   = losses > 0 ? math.abs(grossLoss) / losses : na
+        float profitFactor = grossLoss != 0 ? grossProf / math.abs(grossLoss) : na
+        float recoveryFac  = ddAbs != 0 ? net / math.abs(ddAbs) : na
+        float avgBars      = closed > 0 ? sumBarsInTrades / closed : na
+        float avgMin       = closed > 0 ? (sumDurMs / closed) / 60000.0 : na
+        float exposurePct  = bar_index > 0 and sumBarsInTrades > 0 ? 100.0 * (sumBarsInTrades) / (bar_index + 1) : na
+        float bhPct        = na(startClose) ? na : 100.0 * (close / startClose - 1.0)
+
+        float longWinRate  = longClosed  > 0 ? 100.0 * longWins  / longClosed  : na
+        float shortWinRate = shortClosed > 0 ? 100.0 * shortWins / shortClosed : na
+
+        // Risk/Quality metrics
+        float rrr        = (not na(avgWin) and not na(avgLossAbs) and avgLossAbs != 0) ? avgWin / avgLossAbs : na
+        float wlRatio    = losses > 0 ? (wins * 1.0) / losses : na
+        float expectancy = (closed > 0 and not na(avgWin) and not na(avgLossAbs)) ? (wins / closed) * avgWin - (losses / closed) * avgLossAbs : na
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Open trade status (latest open trade + overall open P/L%)
+        int   openCount   = strategy.opentrades
+        int   latestIdx   = openCount > 0 ? openCount - 1 : na
+        float latestEntry = openCount > 0 ? strategy.opentrades.entry_price(latestIdx) : na
+        float latestSize  = openCount > 0 ? strategy.opentrades.size(latestIdx) : na
+        string latestSide = openCount > 0 ? (latestSize > 0 ? "Long" : latestSize < 0 ? "Short" : "Flat") : "—"
+        float latestPL    = openCount > 0 ? strategy.opentrades.profit(latestIdx) : na
+        float latestPLpct = na
+        if openCount > 0 and not na(latestEntry) and latestEntry != 0
+            latestPLpct := latestSize > 0 ? 100.0 * (close - latestEntry) / latestEntry
+                                          : latestSize < 0 ? 100.0 * (latestEntry - close) / latestEntry
+                                                           : na
+        float posOpenPct = strategy.openprofit_percent
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Build/update the table (2 cols × 38 rows)
+        var table t = na
+        var bool built = false
+        if not built
+            t := table.new(posToConst(posStr), 2, 38, border_width=1, frame_color=color.new(color.white,0))
+            built := true
+
+        table.clear(t, 0, 0, 1, 37)
+
+        int r = 0
+        // Header
+        writeRow(t, r, "STRATEGY REPORT", str.tostring(syminfo.ticker) + " · " + timeframe.period, true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // Summary
+        writeRow(t, r, "Initial capital", fmtN(strategy.initial_capital, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Net profit",      fmtN(net, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Gross profit",    fmtN(grossProf, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Gross loss",      fmtN(grossLoss, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Buy & Hold ", fmtP(bhPct, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Closed trades", str.tostring(closed), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Win / Loss",    str.tostring(wins) + " / " + str.tostring(losses), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Win rate",  fmtP(winRate, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Profit factor", fmtN(profitFactor, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // writeRow(t, r, "Avg trade",     fmtN(avgTrade, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // // Risk/Quality
+        // writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // writeRow(t, r, "Win/Loss ratio", fmtN(wlRatio, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "RRR", fmtN(rrr, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // writeRow(t, r, "Expectancy (per trade)", fmtN(expectancy, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // Averages & Extremes
+        writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Avg winning trade", fmtN(avgWin, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Avg losing trade",  fmtN(avgLossAbs, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Largest win",       fmtN(largestWin, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Largest loss",      fmtN(largestLoss, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // Risk & Time
+        // writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Max drawdown",    fmtN(ddAbs, digits) + " " + syminfo.currency + " (" + fmtP(ddPct, digits) + ")", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // writeRow(t, r, "Recovery factor", fmtN(recoveryFac, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // writeRow(t, r, "Avg bars in trade", fmtN(avgBars, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Avg time in trade", fmtN(avgMin, digits) + " min", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        // writeRow(t, r, "Exposure",         fmtP(exposurePct, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // Streaks
+        // writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Max winning streak",
+            str.tostring(maxWinCount) + " trades (" + fmtN(maxWinSum, digits) + " " + syminfo.currency + ")", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Max losing streak",
+            str.tostring(maxLossCount) + " trades (" + fmtN(maxLossSum, digits) + " " + syminfo.currency + ")", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // Long vs Short breakdown
+        writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Long trades (W/L)",
+            str.tostring(longClosed) + " (" + str.tostring(longWins) + "/" + str.tostring(longLosses) + ")", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Long win rate", fmtP(longWinRate, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Long net P/L",  fmtN(longNet, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        writeRow(t, r, "Short trades (W/L)",
+            str.tostring(shortClosed) + " (" + str.tostring(shortWins) + "/" + str.tostring(shortLosses) + ")", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Short win rate", fmtP(shortWinRate, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Short net P/L",  fmtN(shortNet, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // NEW — Open trade status
+        writeRow(t, r, "", "", true, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Open trades", openCount > 0 ? str.tostring(openCount) : "0", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Latest open trade", openCount > 0 ? latestSide : "No open trade", false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Latest entry price", fmtN(latestEntry, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Latest open P/L", fmtN(latestPL, digits) + " " + syminfo.currency, false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Latest open P/L (%)", fmtP(latestPLpct, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+        writeRow(t, r, "Position open P/L (%)", fmtP(posOpenPct, digits), false, bgCol, headBg, headTxt, valCol, valTxt), r += 1
+
+        // Return the table ID
+        t
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

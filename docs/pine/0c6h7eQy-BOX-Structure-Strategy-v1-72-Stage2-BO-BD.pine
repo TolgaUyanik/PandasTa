@@ -1,0 +1,917 @@
+//@version=6
+// © cm28689_monkey
+// BOX Structure Strategy v1.72 - Stage2 BO+BD（檔名:Pine_BOXStr_v1.72_InfoLive_20260625）
+// ★鎖死值:breakTolATR=0.15 / breakConfirmBars=1 / minBreakClosePos=0.65 / runnerTrailATR=2.0(對齊Python)
+// ★入場=組合A純突破;EMA/週線已測無效→刪除;Major未測→保留
+// ★第1批止損改(2026-06-15):B1 slMode五模式 / B2 betaMult兩段→四段 / B3 加risk下限夾位
+// ★v1.7改(2026-06-24):新增 minBoxHeightATR=1.5(箱高下限,剷扁箱)→219樣本avgR 0.1121→0.1249
+// ★v1.71 InfoFix(2026-06-25):箱資訊統一3行定版格式(箱型分數/高%ATR/comp注碼)
+// ★v1.72 InfoLive(2026-06-25):只改顯示,唔改邏輯。三項修正:
+//      [1] 箱資訊3行+箱頂中底 → 改依 boxActive 即時跟「當前箱」(資料源 activeBox*),
+//          收市後靠 barstate.isconfirmed 定格不消失;無 active 箱則不顯示(合理)
+//      [2] 箱資訊位置 → 箱底「幾何正中」bar (公式 round((起始bar+當前bar)/2),9根第5/21根第11)
+//      [3] 績效快照table → 刪「最近單」「當下comp」,只留標題+勝率+最大單佔比(2x3)
+//      ※策略邏輯/回測 avgR/勝率完全不變;歷史箱資訊另開獨立指標處理(主策略只顯示當前箱)
+// ============================================================
+// 第一段 / 共四段：strategy() + Inputs
+// ============================================================
+
+
+
+
+strategy(
+     "BOX Structure Strategy v1.72 - Stage2 BO+BD",
+     overlay = true,
+     max_labels_count = 500,
+     max_lines_count = 200,
+     max_boxes_count = 10,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.05,
+     slippage = 1,
+     process_orders_on_close = true
+)
+
+
+
+
+//==================== Inputs: BOX ====================
+boxLookback     = input.int(60, "BOX 掃描視窗", minval = 20, maxval = 120, group = "BOX")
+pivotLen        = input.int(4, "轉折點長度", minval = 2, group = "BOX")
+atrLen          = input.int(14, "ATR 長度", minval = 5, group = "BOX")
+touchTolATR     = input.float(0.40, "觸碰容許值 ATR", step = 0.05, group = "BOX")
+minBoxHeightATR = input.float(1.5, "BOX 最小高度 ATR（★v1.7 剷扁箱）", step = 0.1, group = "BOX")
+maxBoxHeightATR = input.float(5.0, "BOX 最大高度 ATR", step = 0.5, group = "BOX")
+minInsideRatio  = input.float(0.70, "箱內收盤比例下限", minval = 0.50, maxval = 1.00, step = 0.05, group = "BOX")
+minGapBars      = input.int(8, "最小觸碰間隔 K 數", minval = 1, group = "BOX")
+maxBoxBars      = input.int(70, "BOX 最長有效 K 數", minval = 10, group = "BOX")
+
+
+
+
+//==================== Inputs: Breakout（★硬性卡入場:confirm=1 / tol=0.15 / closepos=0.65）====================
+//                                       （只記錄,不卡入場:volMult / minTP1RR）
+breakConfirmBars = input.int(1, "突破確認 K 數", minval = 1, maxval = 3, group = "Breakout")
+breakTolATR      = input.float(0.15, "突破緩衝 ATR", step = 0.05, group = "Breakout")
+minBreakClosePos = input.float(0.65, "突破 K 收盤位置要求", minval = 0.50, maxval = 0.95, step = 0.05, group = "Breakout")
+volMult          = input.float(1.3, "突破成交量倍數（只記錄,不卡入場）", step = 0.1, group = "Breakout")
+minTP1RR         = input.float(1.5, "TP1 RR 參考門檻（只記錄）", step = 0.25, group = "Breakout")
+
+
+
+
+//==================== Inputs: MACD（記錄+標示，不加權）====================
+useMacdLabel = input.bool(true, "圖上標示 MACD 金叉", group = "MACD")
+macdFast     = input.int(12, "MACD 快線", minval = 3, group = "MACD")
+macdSlow     = input.int(26, "MACD 慢線", minval = 5, group = "MACD")
+macdSignal   = input.int(9, "MACD 訊號線", minval = 2, group = "MACD")
+
+
+
+
+//==================== Inputs: 止損（★第1批:slMode切換 + betaMult四段 + risk下限夾位）====================
+// B1:slMode五模式(預設max混合=對齊現狀) / B2:betaMult兩段→四段 / B3:加minRiskATR下限
+slMode = input.string("max混合", "結構SL模式", options = ["max混合", "純波動", "純結構箱底-ATR", "純結構箱底-%", "箱中軸"], group = "止損")
+
+
+
+initialSLATRMult = input.float(1.0, "箱底結構SL ATR倍數", minval = 0.5, maxval = 3.0, step = 0.25, group = "止損")
+
+
+
+// ★betaMult 四段:3條界線(ATR%) — 由固定樣本(100+219隻)P33/P67/P90劃定,屬AB待測
+atrPctTh1 = input.float(2.2, "界線1 低|中 (ATR%)", step = 0.1, group = "止損")
+atrPctTh2 = input.float(3.2, "界線2 中|高 (ATR%)", step = 0.1, group = "止損")
+atrPctTh3 = input.float(4.9, "界線3 高|高高 (ATR%)", step = 0.1, group = "止損")
+
+
+
+// ★betaMult 四段:4個倍數(每段一個)
+betaMult1 = input.float(2.0, "低波動 SL ATR倍數", step = 0.25, group = "止損")
+betaMult2 = input.float(2.5, "中波動 SL ATR倍數", step = 0.25, group = "止損")
+betaMult3 = input.float(3.0, "高波動 SL ATR倍數", step = 0.25, group = "止損")
+betaMult4 = input.float(3.5, "高高波動 SL ATR倍數", step = 0.25, group = "止損")
+
+
+
+// ★B3:risk下限夾位(回測正常化用,防低波動股注碼爆量;手動交易不設上限)
+minRiskATR = input.float(0.8, "風險下限 ATR倍數(防注碼爆量)", minval = 0.0, maxval = 3.0, step = 0.1, group = "止損")
+
+
+
+// ★純結構箱底-% 模式專用(箱底往下退幾%做SL)
+slBoxPctBelow = input.float(2.0, "純結構箱底-% 下退百分比", minval = 0.5, maxval = 10.0, step = 0.5, group = "止損")
+
+
+
+
+//==================== Inputs: 三段式出場（runner 維持 2.0,同 Python 基準對齊）====================
+tp1BoxHeightMult = input.float(1.0, "TP1 箱高倍數", minval = 0.25, maxval = 3.0, step = 0.25, group = "出場")
+tp2RMult         = input.float(4.0, "TP2 R 倍數", minval = 1.0, maxval = 10.0, step = 0.5, group = "出場")
+qtyTP1Pct        = input.float(35.0, "TP1 佔比%", minval = 10.0, maxval = 80.0, step = 5.0, group = "出場")
+qtyTP2Pct        = input.float(35.0, "TP2 佔比%", minval = 10.0, maxval = 80.0, step = 5.0, group = "出場")
+runnerTrailATR   = input.float(2.0, "Runner ATR 追蹤倍數", minval = 1.0, maxval = 5.0, step = 0.25, group = "出場")
+tp1ProtectR      = input.float(0.0, "TP1中後保護R（0=BE）", minval = -1.0, maxval = 2.0, step = 0.25, group = "出場")
+
+
+
+
+//==================== Inputs: 注碼（固定金額 / 固定風險% 二選一）====================
+sizingMode      = input.string("固定金額", "注碼模式", options = ["固定金額", "固定風險%"], group = "注碼")
+fixedDollar     = input.float(10000.0, "每注固定金額 USD", minval = 100, step = 500, group = "注碼")
+riskPctPerTrade = input.float(1.0, "每筆風險 %（固定風險%模式用）", minval = 0.1, maxval = 5.0, step = 0.1, group = "注碼")
+useRiskSizing   = sizingMode == "固定風險%"
+
+
+
+
+//==================== Inputs: 品質 / Major（★Major未測,保留待測）====================
+minScoreForStrong = input.int(5, "強 BOX 最低總分", minval = 1, maxval = 11, group = "Score")
+majorTF           = input.timeframe("D", "Major 計算週期", group = "Context")
+
+
+
+
+//==================== Inputs: Visual / Diagnostic ====================
+showLabels            = input.bool(true, "顯示訊號標籤", group = "Visual")
+showBoxFill           = input.bool(true, "顯示 BOX 區塊", group = "Visual")
+showStrategyLevels    = input.bool(true, "顯示 SL/TP 線", group = "Visual")
+showMajorBands        = input.bool(true, "顯示 Major 區帶", group = "Visual")
+showBOBDLines         = input.bool(true,  "顯示 BO-L/BD 水平線(未觸虛/觸實)", group = "Visual")
+boBdTouchMode         = input.string("K高低範圍", "BO/BD 觸及判定", options = ["K高低範圍", "收盤穿過"], group = "Visual")
+showLevelTable        = input.bool(true, "顯示左欄關鍵價位(箱頂中底/TP1/SL)", group = "Visual")
+showBoxInfo3Line      = input.bool(true, "顯示箱資訊3行(箱型分數/高%ATR/comp注碼)", group = "Visual")
+showDiagnosticTable   = input.bool(true, "顯示診斷表", group = "Diagnostic")
+exportDiagnosticPlots = input.bool(true, "匯出回測診斷欄位", group = "Diagnostic")
+
+
+
+//==================== Inputs: Comp Gate（★v1.7comp 新增：comp=0 注碼處理）====================
+// 數據基準(219樣本B組,5512筆):comp=0 共506筆 meanR=-0.0844(蝕);comp>=1 meanR=+0.146(賺)
+// B3三柱模擬:減半注 總R710.72/回撤-19.60(最細) > 基準689 ; 踢走 總R732但勝率跌+不可逆
+// 結論:comp 係「有/無」閘,唔係「愈高愈勁」(comp=1 meanR最高,rho≈0.02不顯著)→揀減半,可逆
+useCompGate  = input.bool(true,  "啟用 comp=0 減注閘", group = "Comp Gate")
+compZeroMult = input.float(0.5,  "comp=0 注碼倍數 (0.5=減半 / 0=踢走 / 1=不減)", minval = 0.0, maxval = 1.0, step = 0.1, group = "Comp Gate")
+
+
+
+//==================== Inputs: 顯示對齊（★v1.71 InfoFix：箱資訊第2行 ATR 倍數來源）====================
+// true  = 用突破凍結值(跟入場當刻,不漂移)  ← 建議；false = 用即時 boxHeightNow/atr
+// ★v1.72 註:當前箱即時顯示時,凍結值未必有(未突破),會自動 fallback 即時值
+useFrozenBoxATR = input.bool(true, "箱資訊ATR倍數用突破凍結值(防漂移)", group = "Visual")
+
+
+// ============================================================
+// 第二段 / 共四段 ：核心計算 + 找箱 + 突破/破底凍結 + Reset（★畫圖全移除,交第四段P1）
+// ★瘦身-乙(2026-06-14):刪 trendMA/dailyTrendOK(EMA死碼)+weekly(已測無效)
+// ★定稿(2026-06-15):修 CW10002 → vol5/hh10/ll10 抽出全域(保證每bar執行,對齊Python)
+// ★定稿(2026-06-15 v3):box Reset 改返 set_right(收口,箱保留有顏色)
+//   多個箱問題改靠第一段 max_boxes_count 限數FIFO(唔再用delete刪當前箱)
+// ★v1.7改(2026-06-24):boxHeightOK 加箱高下限 >= minBoxHeightATR(剷扁箱),其餘不變
+// ★v1.71 InfoFix(2026-06-25):新增 activeBoxHeightATR + boBoxHeightATR 凍結值(供第三/四段3行顯示,防漂移),邏輯不變
+// ★v1.72 InfoLive(2026-06-25):本段完全不變;當前箱即時顯示靠第四段讀 activeBox*(鎖箱邏輯→箱頂底固定,不抖動)
+// ★Major保留待測;contextScore只用majorConfluence;凍結變數(boBox*)全留畀第四段
+// ============================================================
+
+
+
+//==================== Core Series ====================
+atr    = ta.atr(atrLen)
+atrPct = close > 0 ? atr / close * 100.0 : na
+ema10  = ta.ema(close, 10)
+ema20  = ta.ema(close, 20)
+sma50  = ta.sma(close, 50)
+avgVol = ta.sma(volume, 20)
+ph     = ta.pivothigh(high, pivotLen, pivotLen)
+pl     = ta.pivotlow(low, pivotLen, pivotLen)
+
+
+
+//==================== ★抽出全域 ta（修 CW10002，保證每bar執行）====================
+vol5   = ta.sma(volume, 5)
+hh10   = ta.highest(high, 10)
+ll10   = ta.lowest(low, 10)
+
+
+
+//==================== MACD ====================
+[macdLine, macdSig, _h] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdGolden    = ta.crossover(macdLine, macdSig)
+macdAboveZero = macdLine > 0
+macdGoldUp    = macdGolden and macdAboveZero
+
+
+
+//==================== Pivot History ====================
+var float[] highVals = array.new_float()
+var int[]   highBars = array.new_int()
+var float[] lowVals  = array.new_float()
+var int[]   lowBars  = array.new_int()
+
+
+
+cleanup_pivots(float[] vals, int[] bars, int keepBars) =>
+    bool go = array.size(bars) > 0
+    while go
+        if bar_index - array.get(bars, 0) > keepBars
+            array.shift(vals)
+            array.shift(bars)
+            go := array.size(bars) > 0
+        else
+            go := false
+    true
+
+
+
+if not na(ph)
+    array.push(highVals, ph)
+    array.push(highBars, bar_index - pivotLen)
+if not na(pl)
+    array.push(lowVals, pl)
+    array.push(lowBars, bar_index - pivotLen)
+
+
+
+cleanup_pivots(highVals, highBars, boxLookback + pivotLen + 20)
+cleanup_pivots(lowVals, lowBars, boxLookback + pivotLen + 20)
+
+
+
+//==================== Box Detection ====================
+find_cluster(float[] vals, int[] bars, int lookback, float tolATR, int gapBars) =>
+    float anchor = na
+    float m1 = na
+    float m2 = na
+    int b1 = na
+    int b2 = na
+    int touches = 0
+    int sz = array.size(vals)
+    float outLevel = na
+    int outLatest = na
+    int outEarliest = na
+    if sz >= 2
+        for k = 0 to sz - 1
+            int i = sz - 1 - k
+            int bi = array.get(bars, i)
+            float vi = array.get(vals, i)
+            if bar_index - bi <= lookback
+                if na(anchor)
+                    anchor := vi
+                    m1 := vi
+                    b1 := bi
+                    touches := 1
+                else if math.abs(vi - anchor) <= atr * tolATR and math.abs(bi - b1) >= gapBars
+                    m2 := vi
+                    b2 := bi
+                    touches := 2
+                    outLevel := (m1 + m2) / 2.0
+                    outLatest := math.max(b1, b2)
+                    outEarliest := math.min(b1, b2)
+                    break
+    [touches >= 2, outLevel, outLatest, outEarliest]
+
+
+
+[topFound, topLevel, topLatestBar, _te] = find_cluster(highVals, highBars, boxLookback, touchTolATR, minGapBars)
+[botFound, botLevel, botLatestBar, _be] = find_cluster(lowVals, lowBars, boxLookback, touchTolATR, minGapBars)
+
+
+
+candidateBox = topFound and botFound and not na(topLevel) and not na(botLevel) and topLevel > botLevel
+boxHeight    = candidateBox ? topLevel - botLevel : na
+boxHeightATR = candidateBox and atr > 0 ? boxHeight / atr : na
+boxHeightOK  = candidateBox and not na(boxHeightATR) and boxHeightATR >= minBoxHeightATR and boxHeightATR <= maxBoxHeightATR
+boxHeightPct = candidateBox and botLevel > 0 ? boxHeight / botLevel * 100.0 : na
+priceInside  = candidateBox and close <= topLevel + atr * 0.1 and close >= botLevel - atr * 0.1
+
+
+
+//==================== 箱內比例 ====================
+int insideBars = 0
+int validBars = 0
+if candidateBox
+    for i = 0 to boxLookback - 1
+        if not na(close[i])
+            validBars += 1
+            insideBars += close[i] <= topLevel and close[i] >= botLevel ? 1 : 0
+insideRatio   = validBars > 0 ? float(insideBars) / float(validBars) : na
+finalInsideOK = candidateBox and not na(insideRatio) and insideRatio >= minInsideRatio
+
+
+
+//==================== 加分（★用抽出的 vol5/hh10/ll10）====================
+maRange         = math.max(math.max(ema10, ema20), sma50) - math.min(math.min(ema10, ema20), sma50)
+compMaOK        = atr > 0 and maRange <= atr * 1.0
+compVolOK       = not na(avgVol) and vol5 <= avgVol * 0.85
+compRangeOK     = atr > 0 and (hh10 - ll10) <= atr * 4.0
+compressionScore = (compMaOK ? 1 : 0) + (compVolOK ? 1 : 0) + (compRangeOK ? 1 : 0)
+
+
+
+find_double(float[] vals, int[] bars, int lookback, float tolATR, int gapBars) =>
+    int sz = array.size(vals)
+    bool ok = false
+    if sz >= 2
+        for ki = 0 to sz - 2
+            int i = sz - 1 - ki
+            int bb1 = array.get(bars, i)
+            float vv1 = array.get(vals, i)
+            if bar_index - bb1 <= lookback
+                for kj = 0 to i - 1
+                    int j = i - 1 - kj
+                    if bar_index - array.get(bars, j) <= lookback and math.abs(bb1 - array.get(bars, j)) >= gapBars and math.abs(vv1 - array.get(vals, j)) <= atr * tolATR
+                        ok := true
+                        break
+            if ok
+                break
+    ok
+
+
+
+doubleBottomOK = find_double(lowVals, lowBars, boxLookback, 0.35, 6)
+
+
+
+//==================== Major（lookahead_off）★未測,保留待測 ====================
+f_major(int len, float posPct, int smoothLen, float bandMult) =>
+    l = ta.lowest(low, len)
+    h = ta.highest(high, len)
+    b = ta.ema(l + (h - l) * posPct, smoothLen)
+    [b[1], (b + ta.atr(atrLen) * bandMult)[1], (b - ta.atr(atrLen) * bandMult)[1]]
+
+
+
+[base60, upper60, lower60]    = request.security(syminfo.tickerid, majorTF, f_major(60, 0.35, 8, 1.0), lookahead = barmerge.lookahead_off)
+[base90, upper90, lower90]    = request.security(syminfo.tickerid, majorTF, f_major(90, 0.30, 9, 1.2), lookahead = barmerge.lookahead_off)
+[base180, upper180, lower180] = request.security(syminfo.tickerid, majorTF, f_major(180, 0.25, 10, 1.8), lookahead = barmerge.lookahead_off)
+
+
+
+boxNear60  = candidateBox and not na(lower60) and botLevel >= lower60 and botLevel <= upper60
+boxNear90  = candidateBox and not na(lower90) and botLevel >= lower90 and botLevel <= upper90
+boxNear180 = candidateBox and not na(lower180) and botLevel >= lower180 and botLevel <= upper180
+majorConfluence = (boxNear60 ? 1 : 0) + (boxNear90 ? 1 : 0) + (boxNear180 ? 1 : 0)
+
+
+
+//==================== Score（nz 防 NaN）====================
+structureScore = nz((topFound ? 1 : 0) + (botFound ? 1 : 0) + (doubleBottomOK ? 1 : 0), 0)
+contextScore   = nz(majorConfluence >= 1 ? 1 : 0, 0)
+totalScore     = nz(structureScore + compressionScore + contextScore, 0)
+isStrong       = totalScore >= minScoreForStrong
+
+
+
+f_box_type(int mc, bool strong) =>
+    mc >= 3 ? "MBOX3" : mc == 2 ? "MBOX2" : mc == 1 ? "MBOX" : strong ? "BOX+" : "BOX"
+
+
+
+newBoxReady = candidateBox and boxHeightOK and priceInside and finalInsideOK
+
+
+
+//==================== Box State ====================
+var bool  boxActive = false
+var float activeBoxHigh = na
+var float activeBoxLow = na
+var int   activeBoxStart = na
+var int   activeBoxScore = na
+var int   activeBoxMC = 0
+var bool  activeBoxStrong = false
+var float activeBoxHeightPct = na
+var float activeBoxHeightATR = na          // ★v1.71 InfoFix 新增:箱成立當刻凍結箱高ATR倍數
+var box   activeBoxObj = na
+
+
+
+if not boxActive and newBoxReady
+    boxActive := true
+    activeBoxHigh := topLevel
+    activeBoxLow := botLevel
+    activeBoxStart := bar_index
+    activeBoxScore := totalScore
+    activeBoxMC := majorConfluence
+    activeBoxStrong := isStrong
+    activeBoxHeightPct := boxHeightPct
+    activeBoxHeightATR := boxHeightATR     // ★v1.71 InfoFix 新增:跟箱成立當刻凍結
+    boxBg = showBoxFill ? color.new(color.aqua, 88) : na
+    activeBoxObj := box.new(activeBoxStart, activeBoxHigh, bar_index, activeBoxLow, xloc = xloc.bar_index, bgcolor = boxBg, border_color = color.new(color.teal, 0))
+
+
+
+boxAge      = boxActive and not na(activeBoxStart) ? bar_index - activeBoxStart : na
+breakBuffer = atr * breakTolATR
+boxExpired  = boxActive and not na(boxAge) and boxAge > maxBoxBars
+
+
+
+//==================== Breakout 判斷（向上突破→入場用）====================
+int upConfirm = 0
+if boxActive
+    for i = 0 to breakConfirmBars - 1
+        upConfirm += close[i] > activeBoxHigh + breakBuffer ? 1 : 0
+breakoutUp      = boxActive and upConfirm == breakConfirmBars
+barRange        = high - low
+closePos        = barRange > 0 ? (close - low) / barRange : 0.5
+volOK           = not na(avgVol) and volume > avgVol * volMult
+closeNearHigh   = closePos >= minBreakClosePos
+validBreakoutUp = barstate.isconfirmed and breakoutUp and closeNearHigh
+
+
+
+//==================== Breakdown 破底判斷（★BD:純收箱訊號,不開倉不平倉）====================
+int dnConfirm = 0
+if boxActive
+    for i = 0 to breakConfirmBars - 1
+        dnConfirm += close[i] < activeBoxLow - breakBuffer ? 1 : 0
+breakdownDown      = boxActive and dnConfirm == breakConfirmBars
+closeNearLow       = closePos <= (1.0 - minBreakClosePos)
+validBreakdownDown = barstate.isconfirmed and breakdownDown and closeNearLow
+
+
+
+//==================== 🔧 突破值凍結（Reset 前,全留畀第四段畫圖）====================
+var float boBoxHigh = na
+var float boBoxLow = na
+var int   boMC = 0
+var bool  boStrong = false
+var int   boScore = na
+var float boHeightPct = na
+var float boBoxHeightATR = na              // ★v1.71 InfoFix 新增:突破當刻凍結箱高ATR倍數(供第三/四段)
+var float boAtrPct = na
+var bool  boVolOK = false
+var bool  boMacdGold = false
+var bool  boMacdGoldUp = false
+var int   boBoxStartBar = na
+var int   boBoxEndBar = na
+
+
+
+if validBreakoutUp and boxActive
+    boBoxHigh := activeBoxHigh
+    boBoxLow := activeBoxLow
+    boMC := activeBoxMC
+    boStrong := activeBoxStrong
+    boScore := activeBoxScore
+    boHeightPct := activeBoxHeightPct
+    boBoxHeightATR := activeBoxHeightATR   // ★v1.71 InfoFix 新增:沿用箱凍結值(非即時ATR),防漂移
+    boAtrPct := atrPct
+    boVolOK := volOK
+    boMacdGold := macdGolden
+    boMacdGoldUp := macdGoldUp
+    boBoxStartBar := activeBoxStart
+    boBoxEndBar := bar_index
+
+
+
+//==================== 箱體 Reset（突破/破底/過期 → 收口：★set_right 保留顏色,靠 max_boxes_count 限數）====================
+boxResetTrigger = boxActive and (validBreakoutUp or validBreakdownDown or boxExpired)
+if boxResetTrigger
+    if not na(activeBoxObj)
+        box.set_right(activeBoxObj, bar_index)
+    boxActive := false
+    activeBoxHigh := na
+    activeBoxLow := na
+    activeBoxStart := na
+    activeBoxScore := na
+    activeBoxMC := 0
+    activeBoxStrong := false
+    activeBoxHeightPct := na
+    activeBoxHeightATR := na                // ★v1.71 InfoFix 新增:Reset 時一齊清
+    activeBoxObj := na
+
+
+
+// ★★ 四角標 + 左上BOX面板table 已整段刪除（解「線同K分離」元兇）★★
+// 所有畫圖統一交第四段(P1:label釘 bar_time,唔飄)
+// 第二段到此結束,只輸出變數,唔再畫任何嘢
+
+// ============================================================
+// 第三段 / 共四段：注碼 + 止損 + 三段式出場
+// ★v1.7comp(2026-06-24)：qtyTotal 加 comp=0 減注(B1) + 逐筆記低 comp 三子條件(A方案)
+// ★v1.71 InfoFix(2026-06-25):只加 tBoxHeightATR 逐筆凍結(供第四段3行+匯出),不參與任何注碼/止損/出場判斷
+// ★v1.72 InfoLive(2026-06-25):本段完全不變(純策略邏輯);顯示修正全部喺第四段
+// ============================================================
+
+
+
+//==================== 入場前：用凍結值 boBox ====================
+entryPriceNow = close
+boxHeightNow  = boBoxHigh - boBoxLow
+
+
+
+//==================== ★第1批:betaMult四段分流(用凍結 boAtrPct) + slMode五模式 + risk下限 ====================
+_apEntry = na(boAtrPct) ? atrPct : boAtrPct
+betaMult = na(_apEntry) ? betaMult1 : _apEntry >= atrPctTh3 ? betaMult4 : _apEntry >= atrPctTh2 ? betaMult3 : _apEntry >= atrPctTh1 ? betaMult2 : betaMult1
+
+
+
+// 各候選 SL 錨點
+slVol       = entryPriceNow - atr * betaMult
+slStructATR = boBoxLow - atr * initialSLATRMult
+slStructPct = boBoxLow * (1.0 - slBoxPctBelow / 100.0)
+slBoxMid    = (boBoxHigh + boBoxLow) / 2.0
+
+
+
+// B1修:slMode 五模式切換
+initialSLNow = slMode == "純波動"          ? slVol :
+               slMode == "純結構箱底-ATR"  ? slStructATR :
+               slMode == "純結構箱底-%"    ? slStructPct :
+               slMode == "箱中軸"          ? slBoxMid :
+                                             math.max(slStructATR, slVol)
+
+
+
+// B3修:risk下限夾位
+_riskRaw   = entryPriceNow - initialSLNow
+_riskFloor = atr * minRiskATR
+riskNow    = math.max(_riskRaw, _riskFloor)
+
+
+
+tp1Now   = boBoxHigh + boxHeightNow * tp1BoxHeightMult
+tp2Now   = entryPriceNow + riskNow * tp2RMult
+tp1RRNow = riskNow > 0 ? (tp1Now - entryPriceNow) / riskNow : na
+
+
+
+//==================== 注碼：固定金額 / 固定風險% 二選一（★v1.7comp comp=0 減注）====================
+equityNow   = strategy.equity
+qtyByDollar = entryPriceNow > 0 ? math.floor(fixedDollar / entryPriceNow) : na
+qtyByRisk   = riskNow > 0 ? math.floor((equityNow * riskPctPerTrade / 100.0) / riskNow) : na
+qtyTotalRaw = useRiskSizing ? qtyByRisk : qtyByDollar
+// ★v1.7comp：comp=0 減注(預設×0.5)；其餘維持。減注後 floor，夾最少1股
+compHalfMult = (useCompGate and compressionScore == 0) ? compZeroMult : 1.0
+qtyTotal     = not na(qtyTotalRaw) ? math.max(1, math.floor(qtyTotalRaw * compHalfMult)) : qtyTotalRaw
+qtyValid     = not na(qtyTotal) and qtyTotal >= 1
+
+
+
+qTP1Calc = qtyValid ? math.floor(qtyTotal * qtyTP1Pct / 100.0) : na
+qTP2Calc = qtyValid ? math.floor(qtyTotal * qtyTP2Pct / 100.0) : na
+qRunCalc = qtyValid ? int(qtyTotal - qTP1Calc - qTP2Calc) : na
+
+
+
+canSplit3 = qtyValid and not na(qTP1Calc) and not na(qTP2Calc) and not na(qRunCalc) and qTP1Calc >= 1 and qTP2Calc >= 1 and qRunCalc >= 1
+
+
+
+//==================== 入場條件 ★純突破(組合A) + canSplit3 守門 ====================
+longEntrySignal = validBreakoutUp and strategy.position_size == 0 and not na(boBoxHigh) and riskNow > 0 and qtyValid and canSplit3
+
+
+
+//==================== 交易狀態變數 ====================
+var float tradeEntryPrice = na
+var float tradeInitialSL = na
+var float tradeRisk = na
+var float tradeTP1 = na
+var float tradeTP2 = na
+var bool  tp1Hit = false
+var bool  tp2Hit = false
+var int   tradeEntryBar = na
+var float tradeTrailStop = na
+var float runnerHighClose = na
+var int   qTP1 = na
+var int   qTP2 = na
+var int   qRun = na
+
+
+
+//==================== ★績效變數 ====================
+var float maxTradeProfit = 0.0
+var string lastType = ""
+
+
+
+//==================== 逐筆凍結記錄（★v1.7comp 加 comp 三子條件）====================
+var string tBoxType = na
+var int    tScore = na
+var int    tCompScore = na
+var int    tCtxScore = na
+var int    tMC = na
+var float  tBoxHeightPct = na
+var float  tBoxHeightATR = na              // ★v1.71 InfoFix 新增:逐筆凍結箱高ATR倍數(供第四段第2行+匯出)
+var float  tAtrPctEntry = na
+var float  tTp1RR = na
+var bool   tVolOK = false
+var bool   tMacdGold = false
+var bool   tMacdGoldUp = false
+var string tExitReason = ""
+var bool  tCompMaOK    = false
+var bool  tCompVolOK   = false
+var bool  tCompRangeOK = false
+var float tCompMult    = na
+
+
+
+//==================== 固定入場 id ====================
+const string ENTRY_ID = "BO-L"
+var string tEntryId = ENTRY_ID
+
+
+
+if longEntrySignal
+    tradeEntryPrice := entryPriceNow
+    tradeInitialSL  := initialSLNow
+    tradeRisk       := riskNow
+    tradeTP1        := tp1Now
+    tradeTP2        := tp2Now
+    tp1Hit := false
+    tp2Hit := false
+    tradeEntryBar := bar_index
+    tradeTrailStop := na
+    runnerHighClose := na
+
+
+
+    qTP1 := qTP1Calc
+    qTP2 := qTP2Calc
+    qRun := qRunCalc
+
+
+
+    tBoxType := f_box_type(boMC, boStrong)
+    tScore := boScore
+    tCompScore := compressionScore
+    tCompMaOK    := compMaOK
+    tCompVolOK   := compVolOK
+    tCompRangeOK := compRangeOK
+    tCompMult    := compHalfMult
+    tCtxScore := contextScore
+    tMC := boMC
+    tBoxHeightPct := boHeightPct
+    tBoxHeightATR := boBoxHeightATR        // ★v1.71 InfoFix 新增:沿用突破凍結值,純記錄
+    tAtrPctEntry := boAtrPct
+    tVolOK := boVolOK
+    tTp1RR := tp1RRNow
+    tMacdGold := boMacdGold
+    tMacdGoldUp := boMacdGoldUp
+    tExitReason := "LIVE"
+
+
+
+    tEntryId := ENTRY_ID + "|" + (na(tBoxType) ? "NA" : tBoxType)
+
+
+
+    strategy.entry(ENTRY_ID, strategy.long, qty = qtyTotal)
+
+
+
+inTrade = strategy.position_size > 0
+
+
+
+//==================== 三段式出場 + 分階段保護 ====================
+if inTrade and not na(tradeTP1)
+    runnerHighClose := na(runnerHighClose) ? close : math.max(runnerHighClose, close)
+
+
+
+    if not tp1Hit and high >= tradeTP1
+        tp1Hit := true
+    if not tp2Hit and high >= tradeTP2
+        tp2Hit := true
+
+
+
+    beStop    = tradeEntryPrice + tradeRisk * tp1ProtectR
+    trailRaw  = not na(runnerHighClose) ? runnerHighClose - runnerTrailATR * atr : na
+    runnerStop = not tp1Hit ? tradeInitialSL : not tp2Hit ? beStop : math.max(beStop, nz(trailRaw, beStop))
+    tradeTrailStop := runnerStop
+
+
+
+    strategy.exit("BO-TP1", from_entry = ENTRY_ID, qty = qTP1, stop = tradeInitialSL, limit = tradeTP1)
+    strategy.exit("BO-TP2", from_entry = ENTRY_ID, qty = qTP2, stop = (tp1Hit ? beStop : tradeInitialSL), limit = tradeTP2)
+    strategy.exit("BO-RUNNER", from_entry = ENTRY_ID, qty = qRun, stop = runnerStop)
+
+
+
+//==================== 平倉 reset ====================
+if strategy.position_size == 0 and strategy.position_size[1] > 0
+    if strategy.closedtrades > 0
+        _profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        if _profit > maxTradeProfit
+            maxTradeProfit := _profit
+        lastType := na(tBoxType) ? "BOX" : tBoxType
+    tradeEntryPrice := na
+    tradeInitialSL := na
+    tradeRisk := na
+    tradeTP1 := na
+    tradeTP2 := na
+    tp1Hit := false
+    tp2Hit := false
+    tradeEntryBar := na
+    tradeTrailStop := na
+    runnerHighClose := na
+    qTP1 := na
+    qTP2 := na
+    qRun := na
+    tExitReason := "FLAT"
+
+
+// ============================================================
+// 第四段 / 共四段：標示(防飄) + 實時可見 + SL三色 + 左欄價位 + 右下績效
+// ★定稿(2026-06-15 v3.4)：箱頂中底/兩SL箱左外、箱資訊真箱外、TP1/BO-L/BD右端、BD失效標var+刪舊
+// ★第1批改(2026-06-15)：P1 pxVSL 改畫 initialSLNow(實際落單SL,跟slMode),label「波動SL」→「實際SL」
+// ★BE改(2026-06-16)：SL-BE膠囊搬左端(label_right,xloc.bar_index)，黃線照右拉，避免同BO-L右端重疊
+// ★v1.7comp(2026-06-24)：績效表加「當下comp」格(comp=0紅字減注)，其餘畫圖沿用 v1.6c
+// ★v1.71 InfoFix(2026-06-25)：箱資訊統一為3行定版格式(BOX+｜分N / 高XX.X%｜ATR X.Xx / comp=N｜size xX.X)
+// ★v1.72 InfoLive(2026-06-25)：三項顯示修正——
+//     [1] 箱頂中底 + 箱資訊3行 → 改綁 boxActive(即時跟當前箱),資料源 boBox*→activeBox*
+//     [2] 箱資訊3行位置 → 幾何正中;箱頂中底 → 箱左緣(v1.72b)
+//     [3] 績效table 2x5→2x3,刪「最近單」「當下comp」,只留 標題/勝率/最大單佔比
+//     ※TP1/實際SL/結構SL/BO-L/SIZE0/SL三色 維持綁 longEntrySignal(入場時刻交易標示,不變)
+// ★v1.72c(2026-06-25)：實際SL/結構SL label 由箱左緣搬去右端40根K線位(跟線尾,label_left向右)
+// ============================================================
+
+
+
+
+
+showOldBoxLabel = input.bool(false, "顯示舊箱標籤(突破點上方)", group = "Visual")
+
+
+
+
+
+f_px(float v) => na(v) ? "-" : str.tostring(v, format.mintick)
+f_dt(int t)   => na(t) ? "" : "@" + str.tostring(month(t), "00") + "-" + str.tostring(dayofmonth(t), "00") + "收"
+
+
+
+
+
+drawOK = barstate.isconfirmed or barstate.isrealtime
+tfMs    = timeframe.in_seconds() * 1000
+leftMs  = tfMs * 5
+rightMs = tfMs * 40
+
+
+
+
+
+//==================== SIZE0 保護標 ====================
+sizeZeroBlock = not qtyValid and validBreakoutUp
+if showLabels and sizeZeroBlock and drawOK
+    label.new(time, high, "SIZE0\n股數不足", xloc = xloc.bar_time, yloc = yloc.abovebar, style = label.style_label_down, color = color.new(color.gray, 70), textcolor = color.white, size = size.normal)
+
+
+
+
+
+//==================== 箱體線 ====================
+plot(boxActive ? activeBoxHigh : na, "BOX上緣", color = color.new(color.teal, 0), linewidth = 2, style = plot.style_linebr)
+plot(boxActive ? activeBoxLow  : na, "BOX下緣", color = color.new(color.teal, 0), linewidth = 2, style = plot.style_linebr)
+
+
+
+
+
+//==================== Major 區帶 ====================
+p60u = plot(showMajorBands ? upper60 : na, "60上", color = color.new(color.blue, 80))
+p60l = plot(showMajorBands ? lower60 : na, "60下", color = color.new(color.blue, 80))
+fill(p60u, p60l, color = color.new(color.blue, 93))
+p90u = plot(showMajorBands ? upper90 : na, "90上", color = color.new(color.red, 82))
+p90l = plot(showMajorBands ? lower90 : na, "90下", color = color.new(color.red, 82))
+fill(p90u, p90l, color = color.new(color.red, 94))
+p180u = plot(showMajorBands ? upper180 : na, "180上", color = color.new(color.orange, 82))
+p180l = plot(showMajorBands ? lower180 : na, "180下", color = color.new(color.orange, 82))
+fill(p180u, p180l, color = color.new(color.orange, 94))
+
+
+
+
+
+//==================== SL 三色階段線 ====================
+slStage = inTrade ? (not tp1Hit ? 0 : not tp2Hit ? 1 : 2) : na
+slColor = slStage == 0 ? color.red : slStage == 1 ? color.yellow : color.orange
+plot(showStrategyLevels and inTrade ? tradeTrailStop : na, "SL階段", color = slColor, linewidth = 2, style = plot.style_linebr)
+plot(showStrategyLevels and inTrade ? tradeTP1 : na, "TP1動態", color = color.new(color.lime, 0), linewidth = 1, style = plot.style_linebr)
+plot(showStrategyLevels and inTrade ? tradeTP2 : na, "TP2動態", color = color.new(color.green, 30), linewidth = 1, style = plot.style_linebr)
+tp1JustHit = inTrade and tp1Hit and not tp1Hit[1]
+tp2JustHit = inTrade and tp2Hit and not tp2Hit[1]
+if showLabels and tp1JustHit
+    label.new(time, low, "SL→BE", xloc = xloc.bar_time, yloc = yloc.belowbar, style = label.style_label_up, color = color.new(color.yellow, 70), textcolor = color.black, size = size.normal)
+if showLabels and tp2JustHit
+    label.new(time, low, "SL→TRAIL", xloc = xloc.bar_time, yloc = yloc.belowbar, style = label.style_label_up, color = color.new(color.orange, 70), textcolor = color.black, size = size.normal)
+
+
+
+
+
+//==================== ★P1:TP1/實際SL/結構SL（★v1.72c 三個label齊搬右端40根K線位,label_left）====================
+var line  lnTP1 = na
+var line  lnVSL = na
+var line  lnSSL = na
+var label lbTP1 = na
+var label lbVSL = na
+var label lbSSL = na
+var float pxTP1 = na
+var float pxVSL = na
+var float pxSSL = na
+var int   entryT = na
+if longEntrySignal and drawOK
+    if not na(lnTP1)
+        line.delete(lnTP1)
+    if not na(lnVSL)
+        line.delete(lnVSL)
+    if not na(lnSSL)
+        line.delete(lnSSL)
+    if not na(lbTP1)
+        label.delete(lbTP1)
+    if not na(lbVSL)
+        label.delete(lbVSL)
+    if not na(lbSSL)
+        label.delete(lbSSL)
+    entryT := time
+    pxTP1  := tp1Now
+    pxVSL  := initialSLNow
+    pxSSL  := boBoxLow - atr * initialSLATRMult
+    int rightT  = time + rightMs
+    int boxLeftBar = nz(boBoxStartBar, bar_index)
+    if showStrategyLevels
+        lnTP1 := line.new(time, pxTP1, rightT, pxTP1, xloc=xloc.bar_time, color=color.lime,   width=2, style=line.style_solid)
+        lnVSL := line.new(time, pxVSL, rightT, pxVSL, xloc=xloc.bar_time, color=color.red,    width=2, style=line.style_solid)
+        lnSSL := line.new(time, pxSSL, rightT, pxSSL, xloc=xloc.bar_time, color=color.maroon, width=2, style=line.style_dotted)
+        lbTP1 := label.new(rightT, pxTP1, "TP1 " + f_px(pxTP1), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.lime,20),   textcolor=color.black, size=size.small)
+        lbVSL := label.new(rightT, pxVSL, "實際SL " + f_px(pxVSL), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.red,20),    textcolor=color.white, size=size.small)
+        lbSSL := label.new(rightT, pxSSL, "結構SL " + f_px(pxSSL), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.maroon,20), textcolor=color.white, size=size.small)
+
+
+
+
+
+//==================== ★P1:箱頂/中/底（★v1.72b 改:箱左緣 貼最左,綁 boxActive 即時）====================
+var label lbBxTop = na
+var label lbBxMid = na
+var label lbBxBot = na
+if boxActive and drawOK
+    if not na(lbBxTop)
+        label.delete(lbBxTop)
+    if not na(lbBxMid)
+        label.delete(lbBxMid)
+    if not na(lbBxBot)
+        label.delete(lbBxBot)
+    float bxT = activeBoxHigh
+    float bxB = activeBoxLow
+    float bxM = (bxT + bxB) / 2
+    int boxMidBar = nz(activeBoxStart, bar_index)
+    if showLevelTable
+        lbBxTop := label.new(boxMidBar, bxT, "箱頂 " + f_px(bxT), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(#898000, 39), textcolor=color.white, size=size.small)
+        lbBxMid := label.new(boxMidBar, bxM, "箱中 " + f_px(bxM), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(#898000, 39), textcolor=color.white, size=size.small)
+        lbBxBot := label.new(boxMidBar, bxB, "箱底 " + f_px(bxB), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(#898000, 39), textcolor=color.white, size=size.small)
+
+
+
+
+
+//==================== ★v1.72 InfoLive:箱資訊3行（改綁 boxActive 即時+幾何正中箱底）====================
+// 行1 箱型｜分N    行2 高XX.X%｜ATR X.Xx    行3 comp=N｜size xX.X
+// 資料源 activeBox*(當前箱);ATR倍數:useFrozenBoxATR ? activeBoxHeightATR(箱凍結) : 即時箱高/atr
+// 位置:幾何正中 bar 的箱底,向上貼;收市後靠 drawOK 的 isconfirmed 定格不消失
+var label lbBoxInfo3 = na
+if boxActive and drawOK
+    if not na(lbBoxInfo3)
+        label.delete(lbBoxInfo3)
+    if showBoxInfo3Line
+        string _bt   = f_box_type(activeBoxMC, activeBoxStrong)
+        float  _atrX = useFrozenBoxATR ? activeBoxHeightATR : (atr > 0 ? (activeBoxHigh - activeBoxLow) / atr : na)
+        string _l1 = _bt + "｜分" + str.tostring(nz(activeBoxScore))
+        string _l2 = "高" + (na(activeBoxHeightPct) ? "-" : str.tostring(activeBoxHeightPct, "#.0")) + "%｜ATR " + (na(_atrX) ? "-" : str.tostring(_atrX, "#.0")) + "x"
+        string _l3 = "comp=" + str.tostring(nz(compressionScore)) + "｜size x" + str.tostring((useCompGate and compressionScore == 0) ? compZeroMult : 1.0, "#.0")
+        int    _infoBar = math.round((nz(activeBoxStart, bar_index) + bar_index) / 2)
+        lbBoxInfo3 := label.new(_infoBar, activeBoxLow, _l1 + "\n" + _l2 + "\n" + _l3, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up, color=color.new(color.teal, 15), textcolor=(nz(compressionScore)==0 ? color.yellow : color.white), size=size.small)
+
+
+
+
+
+//==================== ★P1:BO-L（右端線尾,label_left；修 close）★維持綁 longEntrySignal ====================
+if showLabels and longEntrySignal and drawOK
+    label.new(time + rightMs, close, "BO-L " + f_px(close) + " " + f_dt(time), xloc=xloc.bar_time, yloc=yloc.price, style=label.style_label_left, color=color.new(color.green,0), textcolor=color.white, size=size.small)
+
+
+
+
+
+//==================== ★規格14-16: 右下績效（★v1.72 刪「最近單」「當下comp」,2x5→2x3）====================
+winRate  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
+maxShare = strategy.grossprofit > 0 ? maxTradeProfit / strategy.grossprofit * 100 : na
+var table pf = table.new(position.bottom_right, 2, 3, border_width=1, bgcolor=color.new(color.black,0), frame_color=color.gray, frame_width=1)
+if showDiagnosticTable and barstate.islast and (barstate.isconfirmed or barstate.isrealtime)
+    table.cell(pf,0,0,"績效快照",text_color=color.white,bgcolor=color.black)
+    table.cell(pf,1,0,syminfo.ticker,text_color=color.white,bgcolor=color.black)
+    table.cell(pf,0,1,"勝率",text_color=color.white,bgcolor=color.rgb(35,35,35))
+    table.cell(pf,1,1,na(winRate)?"-":str.tostring(winRate,"#.0")+"%",text_color=color.lime,bgcolor=color.rgb(20,20,20))
+    table.cell(pf,0,2,"最大單佔比(單注)",text_color=color.white,bgcolor=color.rgb(35,35,35))
+    table.cell(pf,1,2,na(maxShare)?"-":str.tostring(maxShare,"#.0")+"%",text_color=(nz(maxShare)>30?color.red:color.white),bgcolor=color.rgb(20,20,20))

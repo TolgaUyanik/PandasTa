@@ -1,0 +1,78 @@
+//@version=6
+// AetherATS Library: Regime Classifier v1
+// Version: v1.1.0
+// Spec: docs/patches/AETHER_ATS_WEEK1_FRAMEWORK.md Section 1 (Component A).
+// Purpose: Foundation regime classifier for the Week 1 multi-gated automation
+// framework. Combines ADX(14) and Choppiness Index(14) into a three-state
+// regime label: GREEN (clean trend), YELLOW (transition / watch only), or
+// RED (range-bound chop). Consumed by ORB and VWAP MR strategies as their
+// firing gate. Runs every bar, never fires on its own.
+//
+// State table (defaults — Fibonacci 38.2 / 61.8 on CHOP):
+//   GREEN  : ADX > 25 AND CHOP < 38.2  → ORB only
+//   RED    : ADX < 25 AND CHOP > 61.8  → VWAP MR only
+//   YELLOW : anything else             → watch only, no fires
+//
+// Live readiness: library — pure functions, no side effects. Importers are
+// responsible for any plotting, alerts, or order paths.
+//
+// Repainting notes:
+//   - `ta.dmi()` and the Choppiness Index both update each tick. The regime
+//     label for the live bar is therefore LIVE-BAR-PROVISIONAL until the bar
+//     closes. Strategy code should gate fires on `barstate.isconfirmed` when
+//     reading the regime to avoid intrabar flip-flop.
+//   - Once a bar closes, the regime label for that bar is fixed.
+//   - No `request.security()` calls. Chart-timeframe only. Session windowing
+//     is out of scope for this library — the regime is the regime on the
+//     current chart TF, and strategies layer session gates on top.
+//
+// Confidence (0..100): scales linearly from `adxThreshold` up to
+// `adxThreshold * 2` (i.e. a doubling of ADX above threshold == full
+// conviction). This mirrors the `aether_trend_chop_classifier` 0..100 idiom
+// and lets the consumer reason about "borderline GREEN" vs "deep GREEN"
+// without re-deriving thresholds.
+
+library("aether_regime_v1", overlay=true)
+
+// ---------------- Internal helpers (not exported) ----------------
+
+// Choppiness Index: 100 * log10( sum(TR, n) / (highest(high, n) - lowest(low, n)) ) / log10(n)
+// Standard formula. Returns na until `n` bars have accumulated.
+chop_(simple int n) =>
+    trSum   = math.sum(ta.tr(true), n)
+    rangeHi = ta.highest(high, n)
+    rangeLo = ta.lowest(low,  n)
+    span    = rangeHi - rangeLo
+    span <= 0.0 or trSum <= 0.0 or n < 2 ? na : 100.0 * math.log10(trSum / span) / math.log10(n)
+
+// ---------------- Exported: getRegime ----------------
+export getRegime(simple int adxLen, simple int chopLen, simple float adxThreshold, simple float chopLowFib, simple float chopHighFib) =>
+    [_plusDi, _minusDi, adxVal] = ta.dmi(adxLen, adxLen)
+    chopVal = chop_(chopLen)
+
+    isWarm    = not na(adxVal) and not na(chopVal)
+    isGreen   = isWarm and adxVal >  adxThreshold and chopVal <  chopLowFib
+    isRed     = isWarm and adxVal <  adxThreshold and chopVal >  chopHighFib
+    isYellow  = not isGreen and not isRed
+
+    regimeStr = isGreen ? "GREEN" : isRed ? "RED" : "YELLOW"
+
+    [regimeStr, adxVal, chopVal, isGreen, isYellow, isRed]
+
+// ---------------- Exported: regimeColor ----------------
+// CHANGED v1.1.0: accepts series string (was simple) so consumers can pass
+// runtime regime labels returned from getRegime() directly.
+export regimeColor(series string regimeStr) =>
+    regimeStr == "GREEN"  ? color.new(color.green,  55) :
+     regimeStr == "RED"    ? color.new(color.red,    45) :
+     regimeStr == "YELLOW" ? color.new(color.yellow, 55) :
+     color.new(color.gray, 70)
+
+// ---------------- Exported: regimeConfidence ----------------
+// CHANGED v1.1.0: adxVal accepts series float (was simple) so ta.dmi()
+// output flows through directly.
+export regimeConfidence(series float adxVal, simple float adxThreshold) =>
+    na(adxVal) or adxThreshold <= 0.0 ? na :
+     adxVal >= adxThreshold ?
+         math.max(0.0, math.min(100.0, ((adxVal - adxThreshold) / adxThreshold) * 100.0)) :
+         math.max(0.0, math.min(100.0, ((adxThreshold - adxVal) / (adxThreshold * 0.6)) * 100.0))

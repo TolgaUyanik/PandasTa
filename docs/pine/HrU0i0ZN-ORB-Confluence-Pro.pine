@@ -1,0 +1,635 @@
+//@version=6
+// =============================================================================
+//  ORB Confluence Pro  [5 / 15 / 30]
+//  Opening Range Breakout system with 2-candle confirmation, pullback re-entry,
+//  ORB reversal detection, and VWAP + Volume confluence grading.
+//
+//  DESIGN NOTES
+//  ------------
+//  * "Today only" behaviour: every drawing (OR box/lines, golden highlights,
+//    reversal markers) is a deletable object. At the start of each new regular
+//    session all previous-day objects are deleted. As Pine processes history,
+//    only the MOST RECENT session's objects survive on the chart. This also
+//    handles weekends / holidays automatically: with no new session firing,
+//    the last valid trading session's drawings simply remain in place.
+//  * Signals never repaint after a bar closes (confirmation requires a closed
+//    second candle beyond the crossing candle).
+//  * Recommended chart timeframe: 1m-5m so the opening range has enough bars.
+// =============================================================================
+indicator("ORB Confluence Pro [5/15/30]", shorttitle="ORB Pro", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================ INPUTS =========================================
+grpOR = "Opening Range"
+orChoice = input.string("15", "OR Duration (min)", options = ["5", "15", "30"], group = grpOR)
+sess     = input.session("0930-1600", "Regular Session", group = grpOR)
+tz       = input.string("America/New_York", "Session Timezone", group = grpOR)
+showORBox= input.bool(true, "Show OR Box", group = grpOR)
+extendOR = input.bool(true, "Extend OR Lines Across Session", group = grpOR)
+orHiCol   = input.color(color.green, "OR High Line Color", group = grpOR)
+orLoCol   = input.color(color.red, "OR Low Line Color", group = grpOR)
+orLineW   = input.int(2, "OR Line Width", minval = 1, maxval = 6, group = grpOR)
+orLineSty = input.string("Solid", "OR Line Style", options = ["Solid", "Dashed", "Dotted"], group = grpOR)
+
+grpSig = "Breakout Signals"
+confirmBeyond = input.bool(true, "Require 2nd candle to close beyond crossing candle", group = grpSig)
+showReversal  = input.bool(true, "Show ORB Reversals (failed breakouts)", group = grpSig)
+goldCol  = input.color(#FFD700, "Golden Highlight", group = grpSig)
+revCol   = input.color(color.orange, "Reversal Marker", group = grpSig)
+longCol  = input.color(color.green, "Long Signal Bubble", group = grpSig)
+shortCol = input.color(color.red, "Short Signal Bubble", group = grpSig)
+
+grpConf = "Confluence"
+useVWAP     = input.bool(true, "Use VWAP Confluence", group = grpConf)
+useVol      = input.bool(true, "Use Volume Confluence", group = grpConf)
+volLen      = input.int(20, "Volume MA Length", minval = 1, group = grpConf)
+volMult     = input.float(1.5, "Volume Surge Multiplier (x avg)", minval = 0.1, step = 0.1, group = grpConf)
+requireConf = input.bool(false, "Require full confluence to fire a signal", group = grpConf)
+showVWAP    = input.bool(true, "Plot VWAP", group = grpConf)
+useRSI      = input.bool(true, "Use RSI Confluence", group = grpConf)
+rsiLen      = input.int(7, "RSI Length", minval = 1, group = grpConf)
+rsiOB       = input.int(80, "RSI Overbought", minval = 50, maxval = 100, group = grpConf)
+rsiOS       = input.int(20, "RSI Oversold", minval = 0, maxval = 50, group = grpConf)
+showRSITint = input.bool(true, "Tint background when RSI + VWAP align", group = grpConf)
+
+grpUI = "Dashboard"
+showTable = input.bool(true, "Show Status Table", group = grpUI)
+tblPos    = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpUI)
+
+grpARB = "Afternoon Range (ARB)"
+useARB     = input.bool(true, "Enable Afternoon Range Break (ARB)", group = grpARB)
+arbSess    = input.session("1330-1500", "ARB Window (build afternoon range)", group = grpARB)
+showARBox  = input.bool(true, "Show ARB Box", group = grpARB)
+extendARB  = input.bool(true, "Extend ARB Lines Across Session", group = grpARB)
+arbHiCol   = input.color(color.teal, "ARB High Line Color", group = grpARB)
+arbLoCol   = input.color(color.maroon, "ARB Low Line Color", group = grpARB)
+arbLineW   = input.int(2, "ARB Line Width", minval = 1, maxval = 6, group = grpARB)
+arbLineSty = input.string("Dashed", "ARB Line Style", options = ["Solid", "Dashed", "Dotted"], group = grpARB)
+arbBoxCol  = input.color(color.purple, "ARB Box Fill", group = grpARB)
+arbGoldCol = input.color(#00E5FF, "ARB Golden Highlight", group = grpARB)
+arbLongCol = input.color(#26A69A, "ARB Long Signal Bubble", group = grpARB)
+arbShortCol= input.color(#EF5350, "ARB Short Signal Bubble", group = grpARB)
+arbRevCol  = input.color(#FF6D00, "ARB Reversal Marker", group = grpARB)
+showARBMid = input.bool(true, "Show ARB Mid Line", group = grpARB)
+arbMidCol  = input.color(color.gray, "ARB Mid Line Color", group = grpARB)
+arbMidW    = input.int(1, "ARB Mid Line Width", minval = 1, maxval = 6, group = grpARB)
+arbMidSty  = input.string("Dotted", "ARB Mid Line Style", options = ["Solid", "Dashed", "Dotted"], group = grpARB)
+showARBg   = input.bool(true, "Tint Background During ARB", group = grpARB)
+arbBgCol   = input.color(color.new(color.purple, 90), "ARB Background Color", group = grpARB)
+
+// ============================ SESSION / OR CORE ==============================
+orMin = int(str.tonumber(orChoice))
+orMs  = orMin * 60 * 1000
+
+orLineStyle = orLineSty == "Dashed" ? line.style_dashed : orLineSty == "Dotted" ? line.style_dotted : line.style_solid
+
+t       = time(timeframe.period, sess, tz)
+inSess  = not na(t)
+newSess = inSess and (na(t[1]) or not inSess[1])
+
+// --- persistent state --------------------------------------------------------
+var float orH        = na
+var float orL        = na
+var int   sessOpen   = na
+var int   orStartBar = na
+var bool  orLocked   = false
+var int   orDir      = 0            // 1 = bullish bias, -1 = bearish, 0 = neutral
+
+var bool  pendingUp  = false
+var bool  pendingDn  = false
+var float crossHigh  = na
+var float crossLow   = na
+var int   crossBar   = na
+
+// --- rejection (wick) reversal state ----------------------------------------
+var bool  pendRevUp  = false       // wick below OR low  -> expecting bullish reversal
+var bool  pendRevDn  = false       // wick above OR high -> expecting bearish reversal
+var float rejHigh    = na
+var float rejLow     = na
+var int   rejBar     = na
+var bool  revDnUsed  = false       // latch: only ONE Rev down per breakout attempt
+var bool  revUpUsed  = false       // latch: only ONE Rev up   per breakout attempt
+
+// --- deletable drawing handles ----------------------------------------------
+var box     orBox     = na
+var line    orHiLine  = na
+var line    orLoLine  = na
+var label[] marks     = array.new_label()
+var box[]   markBoxes = array.new_box()
+var label[] revs      = array.new_label()
+
+// --- afternoon range (ARB) state --------------------------------------------
+var box   arbBox      = na
+var line  arbHiLine   = na
+var line  arbLoLine   = na
+var line  arbMidLine  = na
+var float arbH        = na
+var float arbL        = na
+var int   arbStartBar = na
+var bool  arbLocked   = false
+var int   arbDir      = 0
+var bool  arbPendingUp = false
+var bool  arbPendingDn = false
+var float arbCrossHigh = na
+var float arbCrossLow  = na
+var int   arbCrossBar  = na
+var bool  arbPendRevUp = false
+var bool  arbPendRevDn = false
+var float arbRejHigh   = na
+var float arbRejLow    = na
+var int   arbRejBar    = na
+var bool  arbRevDnUsed = false
+var bool  arbRevUpUsed = false
+
+// ---------------------------------------------------------------------------
+//  Clear previous day + reset on each new regular session
+// ---------------------------------------------------------------------------
+if newSess
+    if not na(orBox)
+        box.delete(orBox)
+    if not na(orHiLine)
+        line.delete(orHiLine)
+    if not na(orLoLine)
+        line.delete(orLoLine)
+    if array.size(marks) > 0
+        for i = 0 to array.size(marks) - 1
+            label.delete(array.get(marks, i))
+        array.clear(marks)
+    if array.size(markBoxes) > 0
+        for i = 0 to array.size(markBoxes) - 1
+            box.delete(array.get(markBoxes, i))
+        array.clear(markBoxes)
+    if array.size(revs) > 0
+        for i = 0 to array.size(revs) - 1
+            label.delete(array.get(revs, i))
+        array.clear(revs)
+    orBox      := na
+    orHiLine   := na
+    orLoLine   := na
+    orH        := high
+    orL        := low
+    sessOpen   := t
+    orStartBar := bar_index
+    orLocked   := false
+    orDir      := 0
+    pendingUp  := false
+    pendingDn  := false
+    crossHigh  := na
+    crossLow   := na
+    crossBar   := na
+    pendRevUp  := false
+    pendRevDn  := false
+    rejHigh    := na
+    rejLow     := na
+    rejBar     := na
+    revDnUsed  := false
+    revUpUsed  := false
+    // --- clear + reset the afternoon range (ARB) for the new day ------------
+    if not na(arbBox)
+        box.delete(arbBox)
+    if not na(arbHiLine)
+        line.delete(arbHiLine)
+    if not na(arbLoLine)
+        line.delete(arbLoLine)
+    if not na(arbMidLine)
+        line.delete(arbMidLine)
+    arbBox      := na
+    arbHiLine   := na
+    arbLoLine   := na
+    arbMidLine  := na
+    arbH        := na
+    arbL        := na
+    arbStartBar := na
+    arbLocked   := false
+    arbDir      := 0
+    arbPendingUp := false
+    arbPendingDn := false
+    arbCrossHigh := na
+    arbCrossLow  := na
+    arbCrossBar  := na
+    arbPendRevUp := false
+    arbPendRevDn := false
+    arbRejHigh   := na
+    arbRejLow    := na
+    arbRejBar    := na
+    arbRevDnUsed := false
+    arbRevUpUsed := false
+
+// ---------------------------------------------------------------------------
+//  Build the opening range while inside the OR window
+// ---------------------------------------------------------------------------
+inWindow = inSess and not na(sessOpen) and (t - sessOpen < orMs)
+if inWindow and not newSess
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+
+// Lock the OR once the window elapses (or session ends with a valid range)
+if (not orLocked) and (not na(orH)) and (not na(sessOpen)) and (t - sessOpen >= orMs)
+    orLocked := true
+    if showORBox
+        orBox := box.new(orStartBar, orH, bar_index, orL, border_color = color.new(color.gray, 30), bgcolor = color.new(color.blue, 92))
+    orHiLine := line.new(orStartBar, orH, bar_index, orH, color = orHiCol, width = orLineW, style = orLineStyle)
+    orLoLine := line.new(orStartBar, orL, bar_index, orL, color = orLoCol, width = orLineW, style = orLineStyle)
+
+// Extend the OR box / lines across the active session
+if orLocked and inSess
+    if not na(orHiLine)
+        line.set_x2(orHiLine, bar_index)
+        line.set_x2(orLoLine, bar_index)
+    if not na(orBox)
+        box.set_right(orBox, bar_index)
+
+// ============================ AFTERNOON RANGE (ARB) CORE =====================
+// Build a SECOND opening-range-style band during the afternoon window
+// (default 13:30-15:00 ET). Once locked, the same breakout / reversal engine
+// is applied to the ARB high & low. ORB signals keep firing until ARB locks.
+arbLineStyle = arbLineSty == "Dashed" ? line.style_dashed : arbLineSty == "Dotted" ? line.style_dotted : line.style_solid
+arbMidLineStyle = arbMidSty == "Dashed" ? line.style_dashed : arbMidSty == "Dotted" ? line.style_dotted : line.style_solid
+
+tArb   = useARB ? time(timeframe.period, arbSess, tz) : na
+inArb  = not na(tArb)
+newArb = inArb and (na(tArb[1]) or not inArb[1])
+
+// start a fresh afternoon range at the first bar of the ARB window
+if newArb
+    arbH        := high
+    arbL        := low
+    arbStartBar := bar_index
+    arbLocked   := false
+    arbDir      := 0
+    arbPendingUp := false
+    arbPendingDn := false
+    arbCrossHigh := na
+    arbCrossLow  := na
+    arbCrossBar  := na
+    arbPendRevUp := false
+    arbPendRevDn := false
+    arbRejHigh   := na
+    arbRejLow    := na
+    arbRejBar    := na
+    arbRevDnUsed := false
+    arbRevUpUsed := false
+
+// accumulate high / low across the ARB window
+if inArb and not newArb
+    arbH := math.max(arbH, high)
+    arbL := math.min(arbL, low)
+
+// lock the afternoon range once the window ends (first bar after 15:00)
+arbWindowEnded = useARB and (not inArb) and inArb[1] and (not arbLocked) and (not na(arbH))
+if arbWindowEnded
+    arbLocked := true
+    if showARBox
+        arbBox := box.new(arbStartBar, arbH, bar_index, arbL, border_color = color.new(color.gray, 30), bgcolor = color.new(arbBoxCol, 92))
+    arbHiLine := line.new(arbStartBar, arbH, bar_index, arbH, color = arbHiCol, width = arbLineW, style = arbLineStyle)
+    arbLoLine := line.new(arbStartBar, arbL, bar_index, arbL, color = arbLoCol, width = arbLineW, style = arbLineStyle)
+    if showARBMid
+        arbMid = (arbH + arbL) / 2
+        arbMidLine := line.new(arbStartBar, arbMid, bar_index, arbMid, color = arbMidCol, width = arbMidW, style = arbMidLineStyle)
+
+// extend ARB box / lines across the remainder of the session
+if arbLocked and inSess and extendARB
+    if not na(arbHiLine)
+        line.set_x2(arbHiLine, bar_index)
+        line.set_x2(arbLoLine, bar_index)
+    if not na(arbMidLine)
+        line.set_x2(arbMidLine, bar_index)
+    if not na(arbBox)
+        box.set_right(arbBox, bar_index)
+
+// ============================ CONFLUENCE ENGINE ==============================
+vwapVal  = ta.vwap
+volMA    = ta.sma(volume, volLen)
+volSurge = volume > volMA * volMult
+
+// RSI (Option B: threshold + momentum). For scalping, require RSI to be on the
+// correct side of its bands AND moving in the breakout direction.
+rsiVal    = ta.rsi(close, rsiLen)
+rsiRising = rsiVal > rsiVal[1]
+rsiUpOK   = rsiVal < rsiOB and rsiRising          // long ok: not overbought & momentum up
+rsiDnOK   = rsiVal > rsiOS and not rsiRising      // short ok: not oversold & momentum down
+
+f_grade(bool vwapOK, bool rsiOK) =>
+    pts    = 1 + (useVWAP and vwapOK ? 1 : 0) + (useVol and volSurge ? 1 : 0) + (useRSI and rsiOK ? 1 : 0)
+    maxPts = 1 + (useVWAP ? 1 : 0) + (useVol ? 1 : 0) + (useRSI ? 1 : 0)
+    pts == maxPts ? "A" : pts >= maxPts - 1 ? "B" : "C"
+
+// short plain-language explanation of WHY a breakout earned its grade (tooltip)
+f_reason(string g, int dir, bool vwapOK, bool rsiOK, string rngName) =>
+    dirTxt  = dir == 1 ? "Bullish breakout above " + rngName + " High" : "Bearish breakout below " + rngName + " Low"
+    confTxt = "2nd candle confirmed beyond the crossing candle"
+    vTxt    = not useVWAP ? "VWAP: not used" : vwapOK ? "VWAP: price on breakout side ✓" : "VWAP: price against ✗"
+    volTxt  = not useVol  ? "Volume: not used" : volSurge ? "Volume: surge vs avg ✓" : "Volume: below surge ✗"
+    rTxt    = not useRSI  ? "RSI: not used" : rsiOK ? "RSI(" + str.tostring(rsiLen) + "): aligned + momentum ✓" : "RSI(" + str.tostring(rsiLen) + "): against / stalling ✗"
+    meaning = g == "A" ? "Grade A = breakout + FULL confluence" : g == "B" ? "Grade B = breakout + PARTIAL confluence" : "Grade C = breakout only (no confluence)"
+    meaning + "\n• " + dirTxt + "\n• " + confTxt + "\n• " + vTxt + "\n• " + volTxt + "\n• " + rTxt
+
+// plain-language explanation of WHY a rejection reversal fired (tooltip on Rev marks)
+f_revReason(int dir, float zoneLo, float zoneHi, bool vwapOK, bool rsiOK, string rngName) =>
+    isUp     = dir == 1
+    action   = isUp ? "BUY — bullish reversal (Rev ↑)" : "SELL — bearish reversal (Rev ↓)"
+    edge     = isUp ? rngName + " Low" : rngName + " High"
+    approach = isUp ? "Price entered the 10% band around the " + edge + ", then reversed UP to the opposite side" : "Price entered the 10% band around the " + edge + ", then reversed DOWN to the opposite side"
+    trig     = isUp ? "Trigger: GREEN candle tested the low band" : "Trigger: RED candle tested the high band"
+    sig      = isUp ? "Signal: GREEN candle closed ABOVE the trigger candle's high" : "Signal: RED candle closed BELOW the trigger candle's low"
+    zoneTxt  = "10% band: " + str.tostring(zoneLo, format.mintick) + " – " + str.tostring(zoneHi, format.mintick) + " (inside + outside the edge)"
+    vTxt     = not useVWAP ? "VWAP: not used" : vwapOK ? "VWAP: aligned with reversal ✓" : "VWAP: against reversal ✗"
+    volTxt   = not useVol  ? "Volume: not used" : volSurge ? "Volume: surge vs avg ✓" : "Volume: below surge ✗"
+    rTxt     = not useRSI  ? "RSI: not used" : rsiOK ? "RSI(" + str.tostring(rsiLen) + "): aligned with reversal ✓" : "RSI(" + str.tostring(rsiLen) + "): against reversal ✗"
+    action + "\n• " + approach + "\n• " + trig + "\n• " + sig + "\n• " + zoneTxt + "\n• " + vTxt + "\n• " + volTxt + "\n• " + rTxt
+
+// ============================ BREAKOUT STATE MACHINE =========================
+// ORB fires from OR lock until the ARB range locks (afternoon takeover).
+// When ARB is disabled, ORB stays active for the whole regular session.
+orbActive    = orLocked and inSess and (not useARB or not arbLocked)
+arbSigActive = useARB and arbLocked and inSess
+
+crossUp = orbActive and close > orH and close[1] <= orH
+crossDn = orbActive and close < orL and close[1] >= orL
+
+// arm on a fresh cross of the range (initial breakout OR pullback re-entry)
+if crossUp
+    pendingUp := true
+    pendingDn := false
+    crossHigh := high
+    crossBar  := bar_index
+if crossDn
+    pendingDn := true
+    pendingUp := false
+    crossLow  := low
+    crossBar  := bar_index
+
+// confirmation: a LATER candle pushes the same direction beyond the crossing candle
+vwapUpOK = close > vwapVal
+vwapDnOK = close < vwapVal
+
+allowUp = (not requireConf) or ((not useVWAP or vwapUpOK) and (not useVol or volSurge) and (not useRSI or rsiUpOK))
+allowDn = (not requireConf) or ((not useVWAP or vwapDnOK) and (not useVol or volSurge) and (not useRSI or rsiDnOK))
+
+confUp = pendingUp and bar_index > crossBar and close > open and (not confirmBeyond or close > crossHigh)
+confDn = pendingDn and bar_index > crossBar and close < open and (not confirmBeyond or close < crossLow)
+
+// failed breakouts -> ORB reversal
+failUp = pendingUp and close < orH
+failDn = pendingDn and close > orL
+
+confUpFire = false
+confDnFire = false
+revUpFire  = false
+revDnFire  = false
+
+// ---- bullish confirmation ----
+if confUp and allowUp
+    confUpFire := true
+    orDir := 1
+    g = f_grade(vwapUpOK, rsiUpOK)
+    lb = label.new(bar_index, low, "▲ " + g, yloc = yloc.belowbar, color = longCol, textcolor = color.white, style = label.style_label_up, size = size.small, tooltip = f_reason(g, 1, vwapUpOK, rsiUpOK, "OR"))
+    array.push(marks, lb)
+    bx = box.new(bar_index, high, bar_index, low, border_color = goldCol, border_width = 4, bgcolor = color.new(goldCol, 75))
+    array.push(markBoxes, bx)
+    pendingUp := false
+    crossHigh := na
+else if failUp
+    // breakout attempt failed -> just clear state (reversal handled by strict wick logic below)
+    pendingUp := false
+    crossHigh := na
+
+// ---- bearish confirmation ----
+if confDn and allowDn
+    confDnFire := true
+    orDir := -1
+    g = f_grade(vwapDnOK, rsiDnOK)
+    lb = label.new(bar_index, high, "▼ " + g, yloc = yloc.abovebar, color = shortCol, textcolor = color.white, style = label.style_label_down, size = size.small, tooltip = f_reason(g, -1, vwapDnOK, rsiDnOK, "OR"))
+    array.push(marks, lb)
+    bx = box.new(bar_index, high, bar_index, low, border_color = goldCol, border_width = 4, bgcolor = color.new(goldCol, 75))
+    array.push(markBoxes, bx)
+    pendingDn := false
+    crossLow := na
+else if failDn
+    // breakout attempt failed -> just clear state (reversal handled by strict wick logic below)
+    pendingDn := false
+    crossLow := na
+
+// ---- ORB rejection reversals (10% band on BOTH sides of the edge) -----------
+// Band = 10% of the OR range. The trigger zone STRADDLES each edge (inside AND
+// outside), so a candle that comes within 10% of the level from either
+// direction can arm a reversal:
+//   High zone = [orH - band, orH + band]
+//   Low  zone = [orL - band, orL + band]
+// Rev DOWN @ OR high : trigger = RED candle whose HIGH enters the high zone
+//   (price came within 10% of the OR high, inside or outside). Signal = a later
+//   RED candle that closes BELOW the trigger candle's low -> reversed to the
+//   opposite (down) side.
+// Rev UP   @ OR low  : trigger = GREEN candle whose LOW enters the low zone.
+//   Signal = a later GREEN candle that closes ABOVE the trigger candle's high
+//   -> reversed to the opposite (up) side.
+orRange = orLocked ? orH - orL : na
+band    = na(orRange) ? na : orRange * 0.10
+
+isRed   = close < open
+isGreen = close > open
+
+// candle probes the 10% band around the edge (inside OR outside, not a runaway)
+inHiZone = not na(band) and high >= orH - band and high <= orH + band
+inLoZone = not na(band) and low  <= orL + band and low  >= orL - band
+
+trigDn = orbActive and isRed   and inHiZone   // red tests the OR-high band
+trigUp = orbActive and isGreen and inLoZone   // green tests the OR-low band
+
+// a genuine breakout CLOSE through an edge starts a new swing -> re-enable that side
+if close > orH
+    revDnUsed := false
+if close < orL
+    revUpUsed := false
+
+// arm the trigger candle, but only if that side isn't already used this swing
+if trigDn and not revDnUsed
+    pendRevDn := true
+    rejLow    := low          // wick of the trigger candle
+    rejBar    := bar_index
+if trigUp and not revUpUsed
+    pendRevUp := true
+    rejHigh   := high         // wick of the trigger candle
+    rejBar    := bar_index
+
+// signal candle: SAME colour as the trigger + closes beyond the trigger candle's wick
+revDnWick = showReversal and pendRevDn and bar_index > rejBar and isRed   and close < rejLow
+revUpWick = showReversal and pendRevUp and bar_index > rejBar and isGreen and close > rejHigh
+
+if revDnWick
+    revDnFire := true
+    revDnUsed := true          // latch: no more Rev down until a new breakout attempt
+    orDir := -1
+    rl = label.new(bar_index, high, "Rev ↓", yloc = yloc.abovebar, color = revCol, textcolor = color.white, style = label.style_label_down, size = size.tiny, tooltip = f_revReason(-1, orH - band, orH + band, vwapDnOK, rsiDnOK, "OR"))
+    array.push(revs, rl)
+    pendRevDn := false
+if revUpWick
+    revUpFire := true
+    revUpUsed := true          // latch: no more Rev up until a new breakout attempt
+    orDir := 1
+    rl = label.new(bar_index, low, "Rev ↑", yloc = yloc.belowbar, color = revCol, textcolor = color.white, style = label.style_label_up, size = size.tiny, tooltip = f_revReason(1, orL - band, orL + band, vwapUpOK, rsiUpOK, "OR"))
+    array.push(revs, rl)
+    pendRevUp := false
+
+// ============================ ARB BREAKOUT / REVERSAL ENGINE =================
+// Mirror of the ORB engine, driven by the afternoon range (arbH / arbL) and
+// gated by arbSigActive (only after the ARB window has locked, i.e. 15:00+).
+arbCrossUp = arbSigActive and close > arbH and close[1] <= arbH
+arbCrossDn = arbSigActive and close < arbL and close[1] >= arbL
+
+if arbCrossUp
+    arbPendingUp := true
+    arbPendingDn := false
+    arbCrossHigh := high
+    arbCrossBar  := bar_index
+if arbCrossDn
+    arbPendingDn := true
+    arbPendingUp := false
+    arbCrossLow  := low
+    arbCrossBar  := bar_index
+
+arbConfUp = arbPendingUp and bar_index > arbCrossBar and close > open and (not confirmBeyond or close > arbCrossHigh)
+arbConfDn = arbPendingDn and bar_index > arbCrossBar and close < open and (not confirmBeyond or close < arbCrossLow)
+
+arbFailUp = arbPendingUp and close < arbH
+arbFailDn = arbPendingDn and close > arbL
+
+arbConfUpFire = false
+arbConfDnFire = false
+arbRevUpFire  = false
+arbRevDnFire  = false
+
+// ---- ARB bullish confirmation ----
+if arbConfUp and allowUp
+    arbConfUpFire := true
+    arbDir := 1
+    g = f_grade(vwapUpOK, rsiUpOK)
+    lb = label.new(bar_index, low, "▲ " + g, yloc = yloc.belowbar, color = arbLongCol, textcolor = color.white, style = label.style_label_up, size = size.small, tooltip = f_reason(g, 1, vwapUpOK, rsiUpOK, "ARB"))
+    array.push(marks, lb)
+    bx = box.new(bar_index, high, bar_index, low, border_color = arbGoldCol, border_width = 4, bgcolor = color.new(arbGoldCol, 75))
+    array.push(markBoxes, bx)
+    arbPendingUp := false
+    arbCrossHigh := na
+else if arbFailUp
+    arbPendingUp := false
+    arbCrossHigh := na
+
+// ---- ARB bearish confirmation ----
+if arbConfDn and allowDn
+    arbConfDnFire := true
+    arbDir := -1
+    g = f_grade(vwapDnOK, rsiDnOK)
+    lb = label.new(bar_index, high, "▼ " + g, yloc = yloc.abovebar, color = arbShortCol, textcolor = color.white, style = label.style_label_down, size = size.small, tooltip = f_reason(g, -1, vwapDnOK, rsiDnOK, "ARB"))
+    array.push(marks, lb)
+    bx = box.new(bar_index, high, bar_index, low, border_color = arbGoldCol, border_width = 4, bgcolor = color.new(arbGoldCol, 75))
+    array.push(markBoxes, bx)
+    arbPendingDn := false
+    arbCrossLow := na
+else if arbFailDn
+    arbPendingDn := false
+    arbCrossLow := na
+
+// ---- ARB rejection reversals (10% band on both sides of each edge) ----------
+arbRange = arbLocked ? arbH - arbL : na
+arbBand  = na(arbRange) ? na : arbRange * 0.10
+
+arbInHiZone = not na(arbBand) and high >= arbH - arbBand and high <= arbH + arbBand
+arbInLoZone = not na(arbBand) and low  <= arbL + arbBand and low  >= arbL - arbBand
+
+arbTrigDn = arbSigActive and isRed   and arbInHiZone
+arbTrigUp = arbSigActive and isGreen and arbInLoZone
+
+if close > arbH
+    arbRevDnUsed := false
+if close < arbL
+    arbRevUpUsed := false
+
+if arbTrigDn and not arbRevDnUsed
+    arbPendRevDn := true
+    arbRejLow    := low
+    arbRejBar    := bar_index
+if arbTrigUp and not arbRevUpUsed
+    arbPendRevUp := true
+    arbRejHigh   := high
+    arbRejBar    := bar_index
+
+arbRevDnWick = showReversal and arbPendRevDn and bar_index > arbRejBar and isRed   and close < arbRejLow
+arbRevUpWick = showReversal and arbPendRevUp and bar_index > arbRejBar and isGreen and close > arbRejHigh
+
+if arbRevDnWick
+    arbRevDnFire := true
+    arbRevDnUsed := true
+    arbDir := -1
+    rl = label.new(bar_index, high, "Rev ↓", yloc = yloc.abovebar, color = arbRevCol, textcolor = color.white, style = label.style_label_down, size = size.tiny, tooltip = f_revReason(-1, arbH - arbBand, arbH + arbBand, vwapDnOK, rsiDnOK, "ARB"))
+    array.push(revs, rl)
+    arbPendRevDn := false
+if arbRevUpWick
+    arbRevUpFire := true
+    arbRevUpUsed := true
+    arbDir := 1
+    rl = label.new(bar_index, low, "Rev ↑", yloc = yloc.belowbar, color = arbRevCol, textcolor = color.white, style = label.style_label_up, size = size.tiny, tooltip = f_revReason(1, arbL - arbBand, arbL + arbBand, vwapUpOK, rsiUpOK, "ARB"))
+    array.push(revs, rl)
+    arbPendRevUp := false
+
+// ============================ VWAP PLOT ======================================
+plot(showVWAP and (orLocked or arbLocked) and inSess ? vwapVal : na, "VWAP", color = color.new(color.aqua, 0), linewidth = 1)
+
+// ============================ RSI ALIGNMENT TINT =============================
+// Faint background tint when RSI agrees with the VWAP side during a locked
+// session -> highlights bars where scalp entries have RSI + VWAP confluence.
+rsiTintUp = showRSITint and useRSI and (orLocked or arbLocked) and inSess and rsiUpOK and vwapUpOK
+rsiTintDn = showRSITint and useRSI and (orLocked or arbLocked) and inSess and rsiDnOK and vwapDnOK
+bgcolor(rsiTintUp ? color.new(color.green, 90) : rsiTintDn ? color.new(color.red, 90) : na, title = "RSI+VWAP Alignment Tint")
+
+// Tint the background across the afternoon range (build window + active phase)
+arbBgActive = showARBg and useARB and inSess and (inArb or arbLocked)
+bgcolor(arbBgActive ? arbBgCol : na, title = "ARB Background")
+
+// ============================ ALERTS =========================================
+alertcondition(confUpFire, "ORB Breakout Up (confirmed)", "ORB bullish breakout confirmed on {{ticker}}")
+alertcondition(confDnFire, "ORB Breakout Down (confirmed)", "ORB bearish breakout confirmed on {{ticker}}")
+alertcondition(revUpFire,  "ORB Reversal Up", "ORB failed short / bullish reversal on {{ticker}}")
+alertcondition(revDnFire,  "ORB Reversal Down", "ORB failed long / bearish reversal on {{ticker}}")
+alertcondition(arbConfUpFire, "ARB Breakout Up (confirmed)", "ARB bullish breakout confirmed on {{ticker}}")
+alertcondition(arbConfDnFire, "ARB Breakout Down (confirmed)", "ARB bearish breakout confirmed on {{ticker}}")
+alertcondition(arbRevUpFire,  "ARB Reversal Up", "ARB failed short / bullish reversal on {{ticker}}")
+alertcondition(arbRevDnFire,  "ARB Reversal Down", "ARB failed long / bearish reversal on {{ticker}}")
+
+// ============================ STATUS TABLE ===================================
+f_pos() =>
+    tblPos == "Top Left"     ? position.top_left     :
+     tblPos == "Bottom Right" ? position.bottom_right :
+     tblPos == "Bottom Left"  ? position.bottom_left  :
+     position.top_right
+
+var table dash = na
+if showTable and barstate.islast
+    if not na(dash)
+        table.delete(dash)
+    dash := table.new(f_pos(), 2, 10, border_width = 1, frame_color = color.gray, frame_width = 1)
+    activeDir = arbSigActive ? arbDir : orDir
+    activeTxt = arbSigActive ? "ARB (afternoon)" : orbActive ? "ORB (opening)" : (arbLocked ? "ARB (idle)" : orLocked ? "ORB (idle)" : "building…")
+    activeCol = arbSigActive ? color.new(color.purple, 0) : color.new(color.blue, 0)
+    biasTxt = activeDir == 1 ? "BULLISH" : activeDir == -1 ? "BEARISH" : "NEUTRAL"
+    biasCol = activeDir == 1 ? color.green : activeDir == -1 ? color.red : color.gray
+    table.cell(dash, 0, 0, "ORB + ARB Confluence", text_color = color.white, bgcolor = color.new(color.blue, 0), text_size = size.small)
+    table.cell(dash, 1, 0, str.tostring(orMin) + "-min OR", text_color = color.white, bgcolor = color.new(color.blue, 0), text_size = size.small)
+    table.cell(dash, 0, 1, "Active", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 1, activeTxt, text_color = color.white, bgcolor = activeCol, text_size = size.small)
+    table.cell(dash, 0, 2, "OR High", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 2, na(orH) ? "-" : str.tostring(orH, format.mintick), text_color = color.green, text_size = size.small)
+    table.cell(dash, 0, 3, "OR Low", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 3, na(orL) ? "-" : str.tostring(orL, format.mintick), text_color = color.red, text_size = size.small)
+    table.cell(dash, 0, 4, "ARB High", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 4, not useARB ? "off" : na(arbH) ? "-" : str.tostring(arbH, format.mintick), text_color = color.teal, text_size = size.small)
+    table.cell(dash, 0, 5, "ARB Low", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 5, not useARB ? "off" : na(arbL) ? "-" : str.tostring(arbL, format.mintick), text_color = color.maroon, text_size = size.small)
+    table.cell(dash, 0, 6, "Bias", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 6, biasTxt, text_color = biasCol, text_size = size.small)
+    table.cell(dash, 0, 7, "VWAP", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 7, na(vwapVal) ? "-" : (close > vwapVal ? "Above ✓" : "Below ✗"), text_color = close > vwapVal ? color.green : color.red, text_size = size.small)
+    table.cell(dash, 0, 8, "Volume", text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 8, volSurge ? "Surge ✓" : "Normal", text_color = volSurge ? color.green : color.gray, text_size = size.small)
+    table.cell(dash, 0, 9, "RSI(" + str.tostring(rsiLen) + ")", text_color = color.white, text_size = size.small)
+    rsiStateTxt = na(rsiVal) ? "-" : rsiVal >= rsiOB ? "OB " + str.tostring(rsiVal, "#.0") : rsiVal <= rsiOS ? "OS " + str.tostring(rsiVal, "#.0") : str.tostring(rsiVal, "#.0")
+    rsiStateCol = na(rsiVal) ? color.gray : rsiVal >= rsiOB ? color.red : rsiVal <= rsiOS ? color.green : color.gray
+    table.cell(dash, 1, 9, rsiStateTxt, text_color = rsiStateCol, text_size = size.small)

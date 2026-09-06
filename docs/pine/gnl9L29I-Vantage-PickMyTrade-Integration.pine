@@ -1,0 +1,435 @@
+//@version=6
+import xprophetx/jsonBuilder/2
+
+// @description Strongly-typed Pine Script interface for the PickMyTrade webhook
+// format. Constructs JSON and emits via alert() so callers never hand-build JSON.
+// Supports stop entries at the exchange, comment-based targeted close, pyramid
+// stacking, in-place SL/TP modification, and trailing stops.
+library("Vantage_PickMyTrade_Integration", true)
+
+// ─────────────────────────────────────────────────────────────────────────
+// USAGE — example calls for a breakout strategy: place a stop-entry bracket,
+// close a specific position by comment, and flatten everything for a symbol.
+// Copy the patterns into your strategy; adjust values to your setup.
+// ─────────────────────────────────────────────────────────────────────────
+//
+//   import Vantage-Stack/Vantage_PickMyTrade_Integration/1 as pmt
+//
+//   // Set up once (token + accountId from PMT dashboard "Generate Alert")
+//   pmt.PMTConfig cfg = pmt.PMTConfig.new("your-token", "DEMO12345678")
+//
+//   // Place a stop entry with bracket (pre-placed at the exchange)
+//   pmt.PMTResult resp = pmt.SendStopOrder(
+//       config    = cfg,
+//       symbol    = syminfo.ticker,
+//       data      = pmt.DataAction.buy,
+//       quantity  = 1,
+//       stopPrice = stopTriggerPx,
+//       tp        = tpPx,
+//       sl        = slPx,
+//       comment   = "long-breakout")
+//
+//   if not resp.success
+//       log.error("PMT send failed: " + resp.message)
+//
+//   // Close only the position matching a comment tag (leaves others intact)
+//   pmt.SendCloseByComment(cfg, syminfo.ticker, "long-breakout")
+//
+//   // Flatten all positions and cancel all orders for this symbol
+//   pmt.SendCloseAll(cfg, syminfo.ticker)
+//
+// ─────────────────────────────────────────────────────────────────────────
+
+// ============================================================================
+// ENUMS AND TYPES
+// ============================================================================
+
+// @description PMT data field values (action + direction)
+export enum DataAction
+    buy = "buy"
+    sell = "sell"
+    close = "close"
+
+// @description PMT order types (confirmed via support + live testing 2026-04-07)
+export enum OrderType
+    market = "MKT"
+    limit = "LMT"
+    stop = "STOP"
+    stopLimit = "STOP LIMIT"
+
+// @description TP/SL specification mode
+export enum BracketMode
+    price = "price"
+    dollar = "dollar"
+    percent = "percent"
+
+// @type Configuration for PMT webhook connection
+// @field token PMT auth token (from dashboard "Generate Alert")
+// @field accountId Tradovate account ID (e.g., "DEMO12345678")
+export type PMTConfig
+    string token
+    string accountId
+
+// @type Result from a PMT webhook call (compatible with TP's ErrorResponse pattern)
+// @field success Whether the JSON was built and alert emitted
+// @field errors Array of error/warning messages
+// @field message The JSON payload that was sent (for logging/debug)
+export type PMTResult
+    bool success
+    array<string> errors
+    string message
+
+// ============================================================================
+// INTERNAL: JSON BUILDING HELPERS
+// ============================================================================
+
+// @function Build a required JSON string field
+_jsonStr(string key, string value) =>
+    jsonBuilder.jsonString(key, value)
+
+// @function Build a conditional JSON string field (omitted if na or empty)
+_jsonStrOpt(string key, string value) =>
+    not na(value) and value != "" ? jsonBuilder.jsonString(key, value) : ""
+
+// @function Build a numeric JSON field (omitted if na)
+_jsonNum(string key, float value) =>
+    na(value) ? "" : jsonBuilder.jsonString(key, str.tostring(value))
+
+// @function Build a boolean JSON field (omitted if false, since false is the PMT default for most flags)
+_jsonBoolTrue(string key, bool value) =>
+    value ? jsonBuilder.jsonString(key, "true") : ""
+
+// @function Build an integer JSON field (omitted if na or 0)
+_jsonInt(string key, int value) =>
+    na(value) or value == 0 ? "" : jsonBuilder.jsonString(key, str.tostring(value))
+
+// ============================================================================
+// INTERNAL: VALIDATION
+// ============================================================================
+
+// @function Validate PMT config has required fields
+_validateConfig(PMTConfig config) =>
+    errors = array.new<string>()
+    if na(config) or na(config.token) or config.token == ""
+        array.push(errors, "PMT token is required")
+    if na(config) or na(config.accountId) or config.accountId == ""
+        array.push(errors, "PMT account ID is required")
+    errors
+
+// @function Validate symbol is present and reasonable
+_validateSymbol(string symbol) =>
+    errors = array.new<string>()
+    if na(symbol) or symbol == ""
+        array.push(errors, "Symbol is required")
+    else if str.length(symbol) > 20
+        array.push(errors, "Symbol too long (max 20 chars): " + symbol)
+    errors
+
+// @function Validate quantity is positive
+_validateQuantity(int qty) =>
+    errors = array.new<string>()
+    if na(qty) or qty < 1
+        array.push(errors, "Quantity must be >= 1, got: " + str.tostring(qty))
+    errors
+
+// @function Validate price is positive (for stop/limit orders)
+_validatePrice(float price, string label) =>
+    errors = array.new<string>()
+    if na(price) or price <= 0
+        array.push(errors, label + " must be > 0, got: " + str.tostring(price))
+    errors
+
+// @function Combine multiple error arrays into one
+_combineErrors(array<string> a, array<string> b) =>
+    result = array.new<string>()
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            array.push(result, array.get(a, i))
+    if array.size(b) > 0
+        for i = 0 to array.size(b) - 1
+            array.push(result, array.get(b, i))
+    result
+
+// ============================================================================
+// INTERNAL: CORE JSON CONSTRUCTION
+// ============================================================================
+
+// @function Build the multiple_accounts JSON array
+_buildMultipleAccounts(PMTConfig config) =>
+    // PMT requires this array for account routing
+    ',"multiple_accounts":[{' +
+     _jsonStr("token", config.token) + "," +
+     _jsonStr("account_id", config.accountId) +
+     ',"risk_percentage":0,"quantity_multiplier":1}]'
+
+// @function Build a complete PMT JSON payload with validation
+// @returns PMTResult with JSON in message field if successful
+_buildAndSend(
+     PMTConfig config,
+     string symbol,
+     DataAction data,
+     OrderType orderType = OrderType.market,
+     int quantity = 0,
+     float price = na,
+     float tp = na,
+     float sl = na,
+     float dollarTp = na,
+     float dollarSl = na,
+     float percentageTp = na,
+     float percentageSl = na,
+     bool updateTp = false,
+     bool updateSl = false,
+     string comment = na,
+     bool pyramid = false,
+     bool reverseOrderClose = false,
+     bool sameDirectionIgnore = false,
+     bool fullClosed = false,
+     int breakeven = 0,
+     int breakevenOffset = 0,
+     int trail = 0,
+     float trailStop = na,
+     float trailTrigger = na,
+     float trailFreq = na,
+     int gtdInSecond = 0) =>
+
+    // Validate required fields
+    configErrors = _validateConfig(config)
+    symbolErrors = _validateSymbol(symbol)
+    allErrors = _combineErrors(configErrors, symbolErrors)
+
+    // Validate price for stop/limit orders
+    if orderType == OrderType.stop or orderType == OrderType.limit or orderType == OrderType.stopLimit
+        priceErrors = _validatePrice(price, "Entry price")
+        allErrors := _combineErrors(allErrors, priceErrors)
+
+    // Validate quantity for non-close actions
+    if data != DataAction.close and quantity > 0
+        // quantity is valid
+        noop = 0
+    else if data != DataAction.close and quantity < 1
+        array.push(allErrors, "Quantity must be >= 1 for buy/sell orders")
+
+    if array.size(allErrors) > 0
+        PMTResult.new(false, allErrors, array.get(allErrors, 0))
+    else
+        // Build JSON fields
+        fields = array.new<string>()
+        array.push(fields, _jsonStr("symbol", symbol))
+        array.push(fields, _jsonStr("token", config.token))
+        array.push(fields, _jsonStr("data", str.tostring(data)))
+        array.push(fields, _jsonStr("order_type", str.tostring(orderType)))
+
+        if quantity > 0
+            array.push(fields, jsonBuilder.jsonString("quantity", str.tostring(quantity)))
+
+        // Price fields
+        if not na(price) and price > 0
+            array.push(fields, _jsonNum("price", price))
+
+        // Bracket TP/SL (fixed price)
+        if not na(tp) and tp > 0
+            array.push(fields, _jsonNum("tp", tp))
+        if not na(sl) and sl > 0
+            array.push(fields, _jsonNum("sl", sl))
+
+        // Bracket TP/SL (dollar amount)
+        if not na(dollarTp) and dollarTp > 0
+            array.push(fields, _jsonNum("dollar_tp", dollarTp))
+        if not na(dollarSl) and dollarSl > 0
+            array.push(fields, _jsonNum("dollar_sl", dollarSl))
+
+        // Bracket TP/SL (percentage)
+        if not na(percentageTp) and percentageTp > 0
+            array.push(fields, _jsonNum("percentage_tp", percentageTp))
+        if not na(percentageSl) and percentageSl > 0
+            array.push(fields, _jsonNum("percentage_sl", percentageSl))
+
+        // SL/TP modification flags
+        if updateTp
+            array.push(fields, '"update_tp":true')
+        if updateSl
+            array.push(fields, '"update_sl":true')
+
+        // Comment for targeted close
+        if not na(comment) and comment != ""
+            array.push(fields, _jsonStr("comment", comment))
+
+        // Position stacking flags (only emit when true, false is PMT default)
+        if pyramid
+            array.push(fields, '"pyramid":true')
+        if reverseOrderClose
+            array.push(fields, '"reverse_order_close":true')
+        if sameDirectionIgnore
+            array.push(fields, '"same_direction_ignore":true')
+        // Always emit full_closed explicitly -- PMT defaults to true when absent
+        array.push(fields, fullClosed ? '"full_closed":true' : '"full_closed":false')
+
+        // Breakeven
+        if breakeven > 0
+            array.push(fields, jsonBuilder.jsonString("breakeven", str.tostring(breakeven)))
+        if breakevenOffset > 0
+            array.push(fields, jsonBuilder.jsonString("breakeven_offset", str.tostring(breakevenOffset)))
+
+        // Trailing stop
+        if trail > 0
+            array.push(fields, jsonBuilder.jsonString("trail", str.tostring(trail)))
+        if not na(trailStop) and trailStop > 0
+            array.push(fields, _jsonNum("trail_stop", trailStop))
+        if not na(trailTrigger) and trailTrigger > 0
+            array.push(fields, _jsonNum("trail_trigger", trailTrigger))
+        if not na(trailFreq) and trailFreq > 0
+            array.push(fields, _jsonNum("trail_freq", trailFreq))
+
+        // Good-till-date
+        if gtdInSecond > 0
+            array.push(fields, jsonBuilder.jsonString("gtd_in_second", str.tostring(gtdInSecond)))
+
+        // Assemble JSON: join fields + append multiple_accounts
+        string json = "{" + array.join(fields, ",") + _buildMultipleAccounts(config) + "}"
+
+        // Emit alert
+        alert(json, alert.freq_once_per_bar)
+
+        PMTResult.new(true, array.new<string>(), json)
+
+// ============================================================================
+// PUBLIC: ORDER FUNCTIONS
+// ============================================================================
+
+// @function Send an order with full parameter control.
+//   This is the primary entry point -- all other functions delegate to this.
+// @param config PMT connection config
+// @param symbol Symbol to trade (e.g., "MYM1!")
+// @param data Order action: buy, sell, or close
+// @param orderType Order type: MKT, LMT, STOP, STOP LIMIT
+// @param quantity Number of contracts
+// @param price Entry price for stop/limit orders (na for market)
+// @param tp Take profit price (na to skip)
+// @param sl Stop loss price (na to skip)
+// @param dollarTp Take profit in dollars (na to skip)
+// @param dollarSl Stop loss in dollars (na to skip)
+// @param percentageTp Take profit as percentage (na to skip)
+// @param percentageSl Stop loss as percentage (na to skip)
+// @param updateTp If true, modify existing TP in-place (requires tp price)
+// @param updateSl If true, modify existing SL in-place (requires sl price)
+// @param comment Comment tag for targeted close (e.g., "long_entry")
+// @param pyramid Allow stacking alongside existing orders/positions
+// @param reverseOrderClose Cancel opposite-direction orders at placement time
+// @param sameDirectionIgnore Ignore if same-direction order already exists
+// @param fullClosed With close: flatten all regardless of comment
+// @param breakeven Points of profit before SL moves to entry (0 to skip)
+// @param breakevenOffset Offset from entry price for breakeven SL (0 to skip)
+// @param trail Enable trailing stop (1 = on, 0 = off)
+// @param trailStop Trailing distance in points
+// @param trailTrigger Points of profit before trailing activates
+// @param trailFreq Point increments at which SL updates
+// @param gtdInSecond Good-till-date for limit orders in seconds (0 to skip)
+// @returns PMTResult with success status and JSON payload
+export SendOrder(
+     PMTConfig config,
+     string symbol,
+     DataAction data = DataAction.buy,
+     OrderType orderType = OrderType.market,
+     int quantity = 1,
+     float price = na,
+     float tp = na,
+     float sl = na,
+     float dollarTp = na,
+     float dollarSl = na,
+     float percentageTp = na,
+     float percentageSl = na,
+     bool updateTp = false,
+     bool updateSl = false,
+     string comment = na,
+     bool pyramid = false,
+     bool reverseOrderClose = false,
+     bool sameDirectionIgnore = false,
+     bool fullClosed = false,
+     int breakeven = 0,
+     int breakevenOffset = 0,
+     int trail = 0,
+     float trailStop = na,
+     float trailTrigger = na,
+     float trailFreq = na,
+     int gtdInSecond = 0) =>
+    _buildAndSend(config, symbol, data, orderType, quantity, price,
+     tp, sl, dollarTp, dollarSl, percentageTp, percentageSl,
+     updateTp, updateSl, comment, pyramid, reverseOrderClose,
+     sameDirectionIgnore, fullClosed, breakeven, breakevenOffset,
+     trail, trailStop, trailTrigger, trailFreq, gtdInSecond)
+
+// @function Send a stop-market entry with bracket.
+//   Pre-places a stop order at the exchange for breakout strategies.
+export SendStopOrder(
+     PMTConfig config,
+     string symbol,
+     DataAction data,
+     int quantity,
+     float stopPrice,
+     float tp = na,
+     float sl = na,
+     string comment = na,
+     bool pyramid = false,
+     bool reverseOrderClose = false) =>
+    SendOrder(config, symbol, data, OrderType.stop, quantity, stopPrice,
+     tp, sl, comment=comment, pyramid=pyramid, reverseOrderClose=reverseOrderClose)
+
+// @function Send a market order with bracket.
+export SendMarketOrder(
+     PMTConfig config,
+     string symbol,
+     DataAction data,
+     int quantity,
+     float tp = na,
+     float sl = na,
+     string comment = na,
+     bool pyramid = false,
+     bool reverseOrderClose = false) =>
+    SendOrder(config, symbol, data, OrderType.market, quantity,
+     tp=tp, sl=sl, comment=comment, pyramid=pyramid, reverseOrderClose=reverseOrderClose)
+
+// @function Send a limit order with bracket.
+export SendLimitOrder(
+     PMTConfig config,
+     string symbol,
+     DataAction data,
+     int quantity,
+     float limitPrice,
+     float tp = na,
+     float sl = na,
+     string comment = na,
+     bool pyramid = false,
+     int gtdInSecond = 0) =>
+    SendOrder(config, symbol, data, OrderType.limit, quantity, limitPrice,
+     tp=tp, sl=sl, comment=comment, pyramid=pyramid, gtdInSecond=gtdInSecond)
+
+// @function Close a specific position by comment tag.
+//   Closes only the position matching the comment, leaving others intact.
+//   Safe to send repeatedly (already flat = no-op).
+export SendCloseByComment(
+     PMTConfig config,
+     string symbol,
+     string comment) =>
+    SendOrder(config, symbol, DataAction.close, OrderType.market, 1,
+     comment=comment, fullClosed=false)
+
+// @function Close/flatten ALL positions and cancel ALL orders for a symbol.
+//   Safe to send repeatedly (no reversal risk).
+export SendCloseAll(
+     PMTConfig config,
+     string symbol) =>
+    SendOrder(config, symbol, DataAction.close, OrderType.market, 1,
+     fullClosed=true)
+
+// @function Modify SL/TP on an existing filled position in-place.
+//   Applies to ALL positions for the symbol.
+//   Must use exact price values (dollar/percentage ignored when update flags set).
+//   Overwrites trailing stops if active.
+export SendModifySLTP(
+     PMTConfig config,
+     string symbol,
+     DataAction data,
+     float newTp = na,
+     float newSl = na) =>
+    SendOrder(config, symbol, data, OrderType.market, 0,
+     tp=newTp, sl=newSl, updateTp=not na(newTp), updateSl=not na(newSl))

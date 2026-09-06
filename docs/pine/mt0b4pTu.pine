@@ -1,0 +1,1148 @@
+//@version=6
+strategy("Strategia Bystrego v3 - Continuous BOS + First FVG", shorttitle="Bystry BOS/FVG v3", overlay=true, pyramiding=0, default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false, calc_on_order_fills=true, process_orders_on_close=false, max_boxes_count=500, max_lines_count=300, max_labels_count=500)
+
+//=============================================================================
+// 1. GRUPY
+//=============================================================================
+string GROUP_ASSET = "1. Instrument i kierunek"
+string GROUP_STRUCTURE = "2. Struktura SH/SL i BOS"
+string GROUP_FVG = "3. FVG i kolejka setupów"
+string GROUP_TREND = "4. EMA 200"
+string GROUP_RISK = "5. TP / SL"
+string GROUP_ASIA = "6. Sesja azjatycka"
+string GROUP_ALERTS = "7. Alerty"
+string GROUP_VISUAL = "8. Wygląd i diagnostyka"
+
+//=============================================================================
+// 2. INSTRUMENT I KIERUNEK
+//=============================================================================
+string assetMode = input.string("NASDAQ", "Instrument", options=["NASDAQ", "GOLD"], group=GROUP_ASSET)
+string tradeMode = input.string("BOTH", "Dozwolone pozycje", options=["BOTH", "LONG ONLY", "SHORT ONLY"], group=GROUP_ASSET)
+
+bool allowLong = tradeMode == "BOTH" or tradeMode == "LONG ONLY"
+bool allowShort = tradeMode == "BOTH" or tradeMode == "SHORT ONLY"
+
+//=============================================================================
+// 3. STRUKTURA
+//=============================================================================
+int microLeft = input.int(2, "Micro SH/SL - świece po lewej", minval=1, maxval=10, group=GROUP_STRUCTURE)
+int microRight = input.int(1, "Micro SH/SL - świece po prawej", minval=1, maxval=5, group=GROUP_STRUCTURE)
+
+bool useMajorStructure = input.bool(true, "Uwzględniaj także mocniejsze SH/SL", group=GROUP_STRUCTURE)
+int majorLeft = input.int(3, "Major SH/SL - świece po lewej", minval=2, maxval=20, group=GROUP_STRUCTURE)
+int majorRight = input.int(2, "Major SH/SL - świece po prawej", minval=1, maxval=10, group=GROUP_STRUCTURE)
+
+string breakoutMode = input.string("CLOSE", "Potwierdzenie wybicia", options=["CLOSE", "WICK"], group=GROUP_STRUCTURE)
+int breakoutBufferTicks = input.int(0, "Bufor wybicia [ticki]", minval=0, maxval=40, group=GROUP_STRUCTURE)
+int maxSwingAgeBars = input.int(100, "Maksymalny wiek łamanego SH/SL [świece]", minval=5, maxval=1000, group=GROUP_STRUCTURE)
+int minBarsBetweenBos = input.int(1, "Minimalny odstęp między BOS tego samego kierunku", minval=0, maxval=20, group=GROUP_STRUCTURE)
+
+bool cancelOnOppositeBos = input.bool(true, "Kasuj oczekujący setup po przeciwnym BOS", group=GROUP_STRUCTURE)
+
+//=============================================================================
+// 4. FVG I KOLEJKA
+//=============================================================================
+int fvgPreBreakBars = input.int(2, "FVG może powstać X świec przed formalnym BOS", minval=0, maxval=5, group=GROUP_FVG)
+int fvgSearchBars = input.int(10, "Szukaj pierwszego FVG maks. X świec po BOS", minval=0, maxval=30, group=GROUP_FVG)
+int minFvgTicks = input.int(1, "Minimalna szerokość FVG [ticki]", minval=1, maxval=100, group=GROUP_FVG)
+
+int setupLifetimeBars = input.int(18, "Ważność setupu / LIMITU [świece]", minval=1, maxval=200, group=GROUP_FVG)
+
+bool replaceWithNewerSetup = input.bool(true, "Nowszy BOS + FVG zastępuje starszy oczekujący setup", group=GROUP_FVG)
+bool cancelIfTargetReachedFirst = input.bool(true, "Kasuj setup, gdy rynek zrobił TP bez cofnięcia", group=GROUP_FVG)
+bool requireFvgOnImpulseSide = input.bool(true, "Bull FVG nad minimum impulsu / Bear FVG pod maksimum impulsu", group=GROUP_FVG)
+
+//=============================================================================
+// 5. EMA 200
+//=============================================================================
+bool useEmaFilter = input.bool(true, "Włącz filtr EMA 200", group=GROUP_TREND)
+bool requireEntryBeyondEma = input.bool(true, "Środek FVG też musi być po właściwej stronie EMA 200", group=GROUP_TREND)
+bool cancelPendingOnEmaLoss = input.bool(false, "Kasuj LIMIT po utracie EMA 200", group=GROUP_TREND)
+
+int emaLength = 200
+float ema200 = ta.ema(close, emaLength)
+
+bool longTrendOk = not useEmaFilter or close > ema200
+bool shortTrendOk = not useEmaFilter or close < ema200
+
+//=============================================================================
+// 6. TP / SL
+//=============================================================================
+float nasdaqTp = input.float(50.0, "NASDAQ TP [pkt]", minval=0.25, step=0.25, group=GROUP_RISK)
+float nasdaqSl = input.float(50.0, "NASDAQ SL [pkt]", minval=0.25, step=0.25, group=GROUP_RISK)
+
+float goldTp = input.float(10.0, "GOLD TP [pkt]", minval=0.1, step=0.1, group=GROUP_RISK)
+float goldSl = input.float(10.0, "GOLD SL [pkt]", minval=0.1, step=0.1, group=GROUP_RISK)
+
+float tpDistance = assetMode == "NASDAQ" ? nasdaqTp : goldTp
+float slDistance = assetMode == "NASDAQ" ? nasdaqSl : goldSl
+
+float minFvgSize = minFvgTicks * syminfo.mintick
+float breakoutBuffer = breakoutBufferTicks * syminfo.mintick
+
+//=============================================================================
+// 7. SESJA ASIA - WYŁĄCZNIE WIZUALNIE
+//=============================================================================
+string asiaSession = input.session("2000-0000", "Godziny sesji Asia", group=GROUP_ASIA)
+
+string asiaTimezone = input.string(
+     "America/New_York",
+     "Strefa czasowa Asia",
+     options=[
+         "America/New_York",
+         "Europe/London",
+         "Europe/Warsaw",
+         "Etc/UTC"
+     ],
+     group=GROUP_ASIA)
+
+bool inAsia = not na(time(timeframe.period, asiaSession, asiaTimezone))
+bool wasInAsia = bar_index > 0 ? inAsia[1] : false
+
+bool asiaStarted = inAsia and not wasInAsia
+bool asiaEnded = not inAsia and wasInAsia
+
+var float runningAsiaHigh = na
+var float runningAsiaLow = na
+
+var float completedAsiaHigh = na
+var float completedAsiaLow = na
+
+if asiaStarted
+    runningAsiaHigh := high
+    runningAsiaLow := low
+
+else if inAsia
+    runningAsiaHigh := na(runningAsiaHigh) ? high : math.max(runningAsiaHigh, high)
+    runningAsiaLow := na(runningAsiaLow) ? low : math.min(runningAsiaLow, low)
+
+if asiaEnded
+    completedAsiaHigh := runningAsiaHigh
+    completedAsiaLow := runningAsiaLow
+
+    runningAsiaHigh := na
+    runningAsiaLow := na
+
+float activeAsiaHigh = inAsia ? runningAsiaHigh : completedAsiaHigh
+float activeAsiaLow = inAsia ? runningAsiaLow : completedAsiaLow
+
+//=============================================================================
+// 8. ALERTY I WIZUALIZACJA
+//=============================================================================
+bool enableEntryAlerts = input.bool(true, "Alert dopiero po faktycznym wejściu", group=GROUP_ALERTS)
+string alertName = input.string("STRATEGIA BYSTREGO", "Nazwa alertu", group=GROUP_ALERTS)
+
+bool showSwingLines = input.bool(true, "Pokazuj aktywne SH/SL", group=GROUP_VISUAL)
+bool showAsia = input.bool(true, "Pokazuj Asia High/Low", group=GROUP_VISUAL)
+bool showPending = input.bool(true, "Pokazuj oczekujący setup", group=GROUP_VISUAL)
+bool showDiagnostics = input.bool(false, "Pokazuj diagnostykę", group=GROUP_VISUAL)
+
+//=============================================================================
+// 9. TYLKO TF 2M
+//=============================================================================
+bool isTwoMinute = timeframe.isminutes and timeframe.multiplier == 2
+
+if barstate.isfirst and not isTwoMinute
+    runtime.error("Strategia działa wyłącznie na interwale 2-minutowym.")
+
+//=============================================================================
+// 10. FUNKCJE
+//=============================================================================
+isBullFvg(int barsAgo) =>
+    bar_index >= barsAgo + 2 and low[barsAgo] > high[barsAgo + 2]
+
+isBearFvg(int barsAgo) =>
+    bar_index >= barsAgo + 2 and high[barsAgo] < low[barsAgo + 2]
+
+bullFvgTop(int barsAgo) =>
+    low[barsAgo]
+
+bullFvgBottom(int barsAgo) =>
+    high[barsAgo + 2]
+
+bearFvgTop(int barsAgo) =>
+    low[barsAgo + 2]
+
+bearFvgBottom(int barsAgo) =>
+    high[barsAgo]
+
+fvgMidpoint(float top, float bottom) =>
+    math.round_to_mintick((top + bottom) / 2.0)
+
+//=============================================================================
+// 11. MICRO I MAJOR SWINGI
+//=============================================================================
+float microPh = ta.pivothigh(high, microLeft, microRight)
+float microPl = ta.pivotlow(low, microLeft, microRight)
+
+float majorPh = ta.pivothigh(high, majorLeft, majorRight)
+float majorPl = ta.pivotlow(low, majorLeft, majorRight)
+
+var float microHigh = na
+var int microHighBar = na
+var bool microHighAvailable = false
+
+var float microLow = na
+var int microLowBar = na
+var bool microLowAvailable = false
+
+var float majorHigh = na
+var int majorHighBar = na
+var bool majorHighAvailable = false
+
+var float majorLow = na
+var int majorLowBar = na
+var bool majorLowAvailable = false
+
+var line microHighLine = na
+var line microLowLine = na
+var line majorHighLine = na
+var line majorLowLine = na
+
+if not na(microPh)
+    microHigh := microPh
+    microHighBar := bar_index - microRight
+    microHighAvailable := true
+
+    if not na(microHighLine)
+        line.delete(microHighLine)
+
+    if showSwingLines
+        microHighLine := line.new(
+             x1=microHighBar,
+             y1=microHigh,
+             x2=bar_index,
+             y2=microHigh,
+             xloc=xloc.bar_index,
+             extend=extend.right,
+             color=color.new(color.red, 5),
+             width=2)
+
+if not na(microPl)
+    microLow := microPl
+    microLowBar := bar_index - microRight
+    microLowAvailable := true
+
+    if not na(microLowLine)
+        line.delete(microLowLine)
+
+    if showSwingLines
+        microLowLine := line.new(
+             x1=microLowBar,
+             y1=microLow,
+             x2=bar_index,
+             y2=microLow,
+             xloc=xloc.bar_index,
+             extend=extend.right,
+             color=color.new(color.blue, 5),
+             width=2)
+
+if useMajorStructure and not na(majorPh)
+    majorHigh := majorPh
+    majorHighBar := bar_index - majorRight
+    majorHighAvailable := true
+
+    if not na(majorHighLine)
+        line.delete(majorHighLine)
+
+    if showSwingLines
+        majorHighLine := line.new(
+             x1=majorHighBar,
+             y1=majorHigh,
+             x2=bar_index,
+             y2=majorHigh,
+             xloc=xloc.bar_index,
+             extend=extend.right,
+             color=color.new(color.red, 55),
+             width=1)
+
+if useMajorStructure and not na(majorPl)
+    majorLow := majorPl
+    majorLowBar := bar_index - majorRight
+    majorLowAvailable := true
+
+    if not na(majorLowLine)
+        line.delete(majorLowLine)
+
+    if showSwingLines
+        majorLowLine := line.new(
+             x1=majorLowBar,
+             y1=majorLow,
+             x2=bar_index,
+             y2=majorLow,
+             xloc=xloc.bar_index,
+             extend=extend.right,
+             color=color.new(color.blue, 55),
+             width=1)
+
+if not showSwingLines
+    if not na(microHighLine)
+        line.delete(microHighLine)
+        microHighLine := na
+
+    if not na(microLowLine)
+        line.delete(microLowLine)
+        microLowLine := na
+
+    if not na(majorHighLine)
+        line.delete(majorHighLine)
+        majorHighLine := na
+
+    if not na(majorLowLine)
+        line.delete(majorLowLine)
+        majorLowLine := na
+
+//=============================================================================
+// 12. CIĄGŁE WYKRYWANIE BOS
+//=============================================================================
+float longBreakValue = breakoutMode == "CLOSE" ? close : high
+float previousLongBreakValue = breakoutMode == "CLOSE" ? close[1] : high[1]
+
+float shortBreakValue = breakoutMode == "CLOSE" ? close : low
+float previousShortBreakValue = breakoutMode == "CLOSE" ? close[1] : low[1]
+
+bool microHighFresh =
+     microHighAvailable and
+     not na(microHighBar) and
+     bar_index > microHighBar and
+     bar_index - microHighBar <= maxSwingAgeBars
+
+bool majorHighFresh =
+     useMajorStructure and
+     majorHighAvailable and
+     not na(majorHighBar) and
+     bar_index > majorHighBar and
+     bar_index - majorHighBar <= maxSwingAgeBars
+
+bool microLowFresh =
+     microLowAvailable and
+     not na(microLowBar) and
+     bar_index > microLowBar and
+     bar_index - microLowBar <= maxSwingAgeBars
+
+bool majorLowFresh =
+     useMajorStructure and
+     majorLowAvailable and
+     not na(majorLowBar) and
+     bar_index > majorLowBar and
+     bar_index - majorLowBar <= maxSwingAgeBars
+
+bool breakMicroHigh =
+     microHighFresh and
+     longBreakValue > microHigh + breakoutBuffer and
+     previousLongBreakValue <= microHigh + breakoutBuffer
+
+bool breakMajorHigh =
+     majorHighFresh and
+     longBreakValue > majorHigh + breakoutBuffer and
+     previousLongBreakValue <= majorHigh + breakoutBuffer
+
+bool breakMicroLow =
+     microLowFresh and
+     shortBreakValue < microLow - breakoutBuffer and
+     previousShortBreakValue >= microLow - breakoutBuffer
+
+bool breakMajorLow =
+     majorLowFresh and
+     shortBreakValue < majorLow - breakoutBuffer and
+     previousShortBreakValue >= majorLow - breakoutBuffer
+
+var int lastLongBosBar = na
+var int lastShortBosBar = na
+
+bool longBosSpacingOk =
+     na(lastLongBosBar) or
+     bar_index - lastLongBosBar >= minBarsBetweenBos
+
+bool shortBosSpacingOk =
+     na(lastShortBosBar) or
+     bar_index - lastShortBosBar >= minBarsBetweenBos
+
+bool rawLongBos =
+     barstate.isconfirmed and
+     (breakMicroHigh or breakMajorHigh) and
+     longBosSpacingOk
+
+bool rawShortBos =
+     barstate.isconfirmed and
+     (breakMicroLow or breakMajorLow) and
+     shortBosSpacingOk
+
+float brokenHighLevel = na
+int brokenHighBar = na
+
+if breakMicroHigh
+    brokenHighLevel := microHigh
+    brokenHighBar := microHighBar
+
+if breakMajorHigh and (na(brokenHighLevel) or majorHigh > brokenHighLevel)
+    brokenHighLevel := majorHigh
+    brokenHighBar := majorHighBar
+
+float brokenLowLevel = na
+int brokenLowBar = na
+
+if breakMicroLow
+    brokenLowLevel := microLow
+    brokenLowBar := microLowBar
+
+if breakMajorLow and (na(brokenLowLevel) or majorLow < brokenLowLevel)
+    brokenLowLevel := majorLow
+    brokenLowBar := majorLowBar
+
+if breakMicroHigh
+    microHighAvailable := false
+
+if breakMajorHigh
+    majorHighAvailable := false
+
+if breakMicroLow
+    microLowAvailable := false
+
+if breakMajorLow
+    majorLowAvailable := false
+
+//=============================================================================
+// 13. OCZEKIWANIE NA FVG PO KAŻDYM BOS
+//=============================================================================
+var bool waitLongFvg = false
+var int longBosBar = na
+var float longBosLevel = na
+var int longBrokenSwingBar = na
+var float longImpulseLow = na
+
+var bool waitShortFvg = false
+var int shortBosBar = na
+var float shortBosLevel = na
+var int shortBrokenSwingBar = na
+var float shortImpulseHigh = na
+
+bool acceptedLongBos =
+     rawLongBos and
+     allowLong and
+     longTrendOk
+
+bool acceptedShortBos =
+     rawShortBos and
+     allowShort and
+     shortTrendOk
+
+if acceptedLongBos
+    lastLongBosBar := bar_index
+
+    waitLongFvg := true
+    longBosBar := bar_index
+    longBosLevel := brokenHighLevel
+    longBrokenSwingBar := brokenHighBar
+
+    int impulseLength = math.max(
+         1,
+         math.min(
+             10,
+             bar_index - brokenHighBar + 1))
+
+    longImpulseLow := ta.lowest(low, impulseLength)
+
+if acceptedShortBos
+    lastShortBosBar := bar_index
+
+    waitShortFvg := true
+    shortBosBar := bar_index
+    shortBosLevel := brokenLowLevel
+    shortBrokenSwingBar := brokenLowBar
+
+    int impulseLength = math.max(
+         1,
+         math.min(
+             10,
+             bar_index - brokenLowBar + 1))
+
+    shortImpulseHigh := ta.highest(high, impulseLength)
+
+//=============================================================================
+// 14. GLOBALNY SETUP / KOLEJKA
+//=============================================================================
+var bool setupActive = false
+var bool orderPending = false
+
+var int setupDirection = 0
+var int setupBosBar = na
+var int setupCreatedBar = na
+var int setupFvgBar = na
+
+var float setupEntry = na
+var float setupTarget = na
+var float setupStop = na
+
+var float setupFvgTop = na
+var float setupFvgBottom = na
+
+var box setupFvgBox = na
+
+bool newQualifiedSetup = false
+int newDirection = 0
+
+int newBosBar = na
+int newFvgBar = na
+
+float newFvgTop = na
+float newFvgBottom = na
+float newEntry = na
+
+//=============================================================================
+// 15. FVG Z IMPULSU PRZED FORMALNYM BOS
+//=============================================================================
+if acceptedLongBos
+    for i = 0 to fvgPreBreakBars
+        bool validHistory =
+             bar_index >= i + 2 and
+             bar_index - i >= longBrokenSwingBar
+
+        if validHistory and isBullFvg(i)
+            float top = bullFvgTop(i)
+            float bottom = bullFvgBottom(i)
+            float entry = fvgMidpoint(top, bottom)
+
+            bool sizeOk =
+                 top - bottom >= minFvgSize
+
+            bool untouched = true
+
+            if i > 0
+                for j = 0 to i - 1
+                    if low[j] <= entry
+                        untouched := false
+
+            bool impulseSideOk =
+                 not requireFvgOnImpulseSide or
+                 bottom >= longImpulseLow
+
+            bool priceAboveEntry =
+                 close > entry
+
+            if sizeOk and
+                 untouched and
+                 impulseSideOk and
+                 priceAboveEntry
+
+                newQualifiedSetup := true
+                newDirection := 1
+
+                newBosBar := longBosBar
+                newFvgBar := bar_index - i
+
+                newFvgTop := top
+                newFvgBottom := bottom
+                newEntry := entry
+
+if acceptedShortBos
+    for i = 0 to fvgPreBreakBars
+        bool validHistory =
+             bar_index >= i + 2 and
+             bar_index - i >= shortBrokenSwingBar
+
+        if validHistory and isBearFvg(i)
+            float top = bearFvgTop(i)
+            float bottom = bearFvgBottom(i)
+            float entry = fvgMidpoint(top, bottom)
+
+            bool sizeOk =
+                 top - bottom >= minFvgSize
+
+            bool untouched = true
+
+            if i > 0
+                for j = 0 to i - 1
+                    if high[j] >= entry
+                        untouched := false
+
+            bool impulseSideOk =
+                 not requireFvgOnImpulseSide or
+                 top <= shortImpulseHigh
+
+            bool priceBelowEntry =
+                 close < entry
+
+            if sizeOk and
+                 untouched and
+                 impulseSideOk and
+                 priceBelowEntry
+
+                newQualifiedSetup := true
+                newDirection := -1
+
+                newBosBar := shortBosBar
+                newFvgBar := bar_index - i
+
+                newFvgTop := top
+                newFvgBottom := bottom
+                newEntry := entry
+
+//=============================================================================
+// 16. PIERWSZY FVG PO BOS
+//=============================================================================
+if waitLongFvg and not newQualifiedSetup
+    int barsFromBos = bar_index - longBosBar
+
+    if barsFromBos > fvgSearchBars
+        waitLongFvg := false
+
+    else if isBullFvg(0)
+        float top = bullFvgTop(0)
+        float bottom = bullFvgBottom(0)
+        float entry = fvgMidpoint(top, bottom)
+
+        bool sizeOk =
+             top - bottom >= minFvgSize
+
+        bool impulseSideOk =
+             not requireFvgOnImpulseSide or
+             bottom >= longImpulseLow
+
+        bool priceAboveEntry =
+             close > entry
+
+        if sizeOk and
+             impulseSideOk and
+             priceAboveEntry
+
+            newQualifiedSetup := true
+            newDirection := 1
+
+            newBosBar := longBosBar
+            newFvgBar := bar_index
+
+            newFvgTop := top
+            newFvgBottom := bottom
+            newEntry := entry
+
+            waitLongFvg := false
+
+if waitShortFvg and not newQualifiedSetup
+    int barsFromBos = bar_index - shortBosBar
+
+    if barsFromBos > fvgSearchBars
+        waitShortFvg := false
+
+    else if isBearFvg(0)
+        float top = bearFvgTop(0)
+        float bottom = bearFvgBottom(0)
+        float entry = fvgMidpoint(top, bottom)
+
+        bool sizeOk =
+             top - bottom >= minFvgSize
+
+        bool impulseSideOk =
+             not requireFvgOnImpulseSide or
+             top <= shortImpulseHigh
+
+        bool priceBelowEntry =
+             close < entry
+
+        if sizeOk and
+             impulseSideOk and
+             priceBelowEntry
+
+            newQualifiedSetup := true
+            newDirection := -1
+
+            newBosBar := shortBosBar
+            newFvgBar := bar_index
+
+            newFvgTop := top
+            newFvgBottom := bottom
+            newEntry := entry
+
+            waitShortFvg := false
+
+//=============================================================================
+// 17. PRZYJĘCIE NOWEGO SETUPU
+//=============================================================================
+bool newSetupEmaOk =
+     not useEmaFilter or
+     (
+         newDirection == 1
+         ? (
+             close > ema200 and
+             (
+                 not requireEntryBeyondEma or
+                 newEntry > ema200
+             )
+         )
+         : (
+             close < ema200 and
+             (
+                 not requireEntryBeyondEma or
+                 newEntry < ema200
+             )
+         )
+     )
+
+bool canReplaceSetup =
+     not setupActive or
+     replaceWithNewerSetup
+
+bool acceptNewSetup =
+     newQualifiedSetup and
+     newSetupEmaOk and
+     canReplaceSetup
+
+if acceptNewSetup
+    if orderPending
+        if setupDirection == 1
+            strategy.cancel("Long")
+
+        else if setupDirection == -1
+            strategy.cancel("Short")
+
+        orderPending := false
+
+    if not na(setupFvgBox)
+        box.delete(setupFvgBox)
+
+    setupActive := true
+    setupDirection := newDirection
+
+    setupBosBar := newBosBar
+    setupCreatedBar := bar_index
+    setupFvgBar := newFvgBar
+
+    setupEntry := newEntry
+
+    setupTarget := math.round_to_mintick(
+         newDirection == 1
+         ? newEntry + tpDistance
+         : newEntry - tpDistance)
+
+    setupStop := math.round_to_mintick(
+         newDirection == 1
+         ? newEntry - slDistance
+         : newEntry + slDistance)
+
+    setupFvgTop := newFvgTop
+    setupFvgBottom := newFvgBottom
+
+    setupFvgBox := box.new(
+         left=setupFvgBar,
+         top=setupFvgTop,
+         right=bar_index,
+         bottom=setupFvgBottom,
+         xloc=xloc.bar_index,
+         border_color=color.new(color.teal, 10),
+         bgcolor=color.new(color.teal, 82))
+
+    if newDirection == 1
+        waitLongFvg := false
+
+    else
+        waitShortFvg := false
+
+// Przeciwny BOS usuwa oczekujący setup.
+// Nie zamyka jednak już aktywnej pozycji.
+if cancelOnOppositeBos and setupActive and strategy.position_size == 0
+    bool oppositeBos =
+         setupDirection == 1
+         ? acceptedShortBos
+         : acceptedLongBos
+
+    if oppositeBos
+        if orderPending
+            if setupDirection == 1
+                strategy.cancel("Long")
+
+            else
+                strategy.cancel("Short")
+
+        orderPending := false
+        setupActive := false
+
+        if not na(setupFvgBox)
+            box.delete(setupFvgBox)
+            setupFvgBox := na
+
+//=============================================================================
+// 18. WALIDACJA SETUPU I LIMITU
+//=============================================================================
+bool setupExpired =
+     setupActive and
+     bar_index - setupCreatedBar > setupLifetimeBars
+
+bool setupTargetPassed =
+     setupActive and
+     cancelIfTargetReachedFirst and
+     (
+         setupDirection == 1
+         ? (
+             high >= setupTarget and
+             low > setupEntry
+         )
+         : (
+             low <= setupTarget and
+             high < setupEntry
+         )
+     )
+
+bool setupEmaLost =
+     setupActive and
+     cancelPendingOnEmaLoss and
+     useEmaFilter and
+     (
+         setupDirection == 1
+         ? close <= ema200
+         : close >= ema200
+     )
+
+// Setup może powstać podczas trwania poprzedniej pozycji.
+// Jeżeli jego entry zostało wtedy dotknięte, nie otwieramy go później po fakcie.
+bool deferredSetupMitigated =
+     setupActive and
+     not orderPending and
+     strategy.position_size != 0 and
+     (
+         setupDirection == 1
+         ? low <= setupEntry
+         : high >= setupEntry
+     )
+
+if setupExpired or
+     setupTargetPassed or
+     setupEmaLost or
+     deferredSetupMitigated
+
+    if orderPending
+        if setupDirection == 1
+            strategy.cancel("Long")
+
+        else
+            strategy.cancel("Short")
+
+    orderPending := false
+    setupActive := false
+
+    if not na(setupFvgBox)
+        box.delete(setupFvgBox)
+        setupFvgBox := na
+
+//=============================================================================
+// 19. WYSTAWIENIE LIMITU, GDY STRATEGIA JEST PŁASKA
+//=============================================================================
+if setupActive and
+     not orderPending and
+     strategy.position_size == 0
+
+    if setupDirection == 1
+        strategy.entry(
+             "Long",
+             strategy.long,
+             limit=setupEntry,
+             comment="Long - latest BOS + first bullish FVG 50%",
+             disable_alert=true)
+
+    else
+        strategy.entry(
+             "Short",
+             strategy.short,
+             limit=setupEntry,
+             comment="Short - latest BOS + first bearish FVG 50%",
+             disable_alert=true)
+
+    orderPending := true
+
+if setupActive and not na(setupFvgBox)
+    box.set_right(setupFvgBox, bar_index)
+
+//=============================================================================
+// 20. AKTYWNA POZYCJA
+//=============================================================================
+var bool tradeActive = false
+var int activeDirection = 0
+
+var float activeEntry = na
+var float activeTarget = na
+var float activeStop = na
+
+var box profitBox = na
+var box riskBox = na
+var box activeFvgBox = na
+
+bool actualLongEntry = false
+bool actualShortEntry = false
+
+if strategy.position_size != 0 and not tradeActive
+    tradeActive := true
+
+    orderPending := false
+    setupActive := false
+
+    activeDirection :=
+         strategy.position_size > 0
+         ? 1
+         : -1
+
+    activeEntry := strategy.position_avg_price
+
+    activeTarget := math.round_to_mintick(
+         activeDirection == 1
+         ? activeEntry + tpDistance
+         : activeEntry - tpDistance)
+
+    activeStop := math.round_to_mintick(
+         activeDirection == 1
+         ? activeEntry - slDistance
+         : activeEntry + slDistance)
+
+    actualLongEntry := activeDirection == 1
+    actualShortEntry := activeDirection == -1
+
+    if enableEntryAlerts
+        string directionText =
+             activeDirection == 1
+             ? "LONG"
+             : "SHORT"
+
+        string message =
+             alertName +
+             " | ENTRY " +
+             directionText +
+             " | Symbol: " +
+             syminfo.ticker +
+             " | TF: " +
+             timeframe.period +
+             " | Entry: " +
+             str.tostring(activeEntry, format.mintick) +
+             " | TP: " +
+             str.tostring(activeTarget, format.mintick) +
+             " | SL: " +
+             str.tostring(activeStop, format.mintick)
+
+        alert(message, alert.freq_all)
+
+    if activeDirection == 1
+        profitBox := box.new(
+             left=bar_index,
+             top=activeTarget,
+             right=bar_index,
+             bottom=activeEntry,
+             xloc=xloc.bar_index,
+             border_color=color.new(color.black, 65),
+             bgcolor=color.new(color.yellow, 65))
+
+        riskBox := box.new(
+             left=bar_index,
+             top=activeEntry,
+             right=bar_index,
+             bottom=activeStop,
+             xloc=xloc.bar_index,
+             border_color=color.new(color.black, 65),
+             bgcolor=color.new(color.gray, 72))
+
+    else
+        profitBox := box.new(
+             left=bar_index,
+             top=activeEntry,
+             right=bar_index,
+             bottom=activeTarget,
+             xloc=xloc.bar_index,
+             border_color=color.new(color.black, 65),
+             bgcolor=color.new(color.yellow, 65))
+
+        riskBox := box.new(
+             left=bar_index,
+             top=activeStop,
+             right=bar_index,
+             bottom=activeEntry,
+             xloc=xloc.bar_index,
+             border_color=color.new(color.black, 65),
+             bgcolor=color.new(color.gray, 72))
+
+    activeFvgBox := setupFvgBox
+    setupFvgBox := na
+
+if strategy.position_size > 0 and tradeActive
+    strategy.exit(
+         "Long TP/SL",
+         from_entry="Long",
+         limit=activeTarget,
+         stop=activeStop,
+         disable_alert=true)
+
+if strategy.position_size < 0 and tradeActive
+    strategy.exit(
+         "Short TP/SL",
+         from_entry="Short",
+         limit=activeTarget,
+         stop=activeStop,
+         disable_alert=true)
+
+if tradeActive
+    if not na(profitBox)
+        box.set_right(profitBox, bar_index)
+
+    if not na(riskBox)
+        box.set_right(riskBox, bar_index)
+
+    if not na(activeFvgBox)
+        box.set_right(activeFvgBox, bar_index)
+
+if tradeActive and strategy.position_size == 0
+    tradeActive := false
+    activeDirection := 0
+
+    activeEntry := na
+    activeTarget := na
+    activeStop := na
+
+    profitBox := na
+    riskBox := na
+    activeFvgBox := na
+
+//=============================================================================
+// 21. PLOTY
+//=============================================================================
+plot(
+     useEmaFilter ? ema200 : na,
+     title="EMA 200",
+     color=color.blue,
+     linewidth=2)
+
+plot(
+     showAsia ? activeAsiaHigh : na,
+     title="Asia High",
+     color=color.new(color.orange, 5),
+     linewidth=1,
+     style=plot.style_linebr)
+
+plot(
+     showAsia ? activeAsiaLow : na,
+     title="Asia Low",
+     color=color.new(color.orange, 35),
+     linewidth=1,
+     style=plot.style_linebr)
+
+plot(
+     showPending and setupActive ? setupEntry : na,
+     title="Pending Entry",
+     color=color.black,
+     linewidth=2,
+     style=plot.style_linebr)
+
+plot(
+     showPending and setupActive ? setupTarget : na,
+     title="Pending TP",
+     color=color.new(color.yellow, 5),
+     linewidth=1,
+     style=plot.style_linebr)
+
+plot(
+     showPending and setupActive ? setupStop : na,
+     title="Pending SL",
+     color=color.red,
+     linewidth=1,
+     style=plot.style_linebr)
+
+plot(
+     strategy.position_size != 0 ? activeEntry : na,
+     title="Entry",
+     color=color.black,
+     linewidth=2,
+     style=plot.style_linebr)
+
+plot(
+     strategy.position_size != 0 ? activeTarget : na,
+     title="TP",
+     color=color.new(color.yellow, 5),
+     linewidth=2,
+     style=plot.style_linebr)
+
+plot(
+     strategy.position_size != 0 ? activeStop : na,
+     title="SL",
+     color=color.red,
+     linewidth=2,
+     style=plot.style_linebr)
+
+//=============================================================================
+// 22. MARKERY
+//=============================================================================
+plotshape(
+     series=acceptedLongBos,
+     title="BOS LONG",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=color.green,
+     size=size.tiny,
+     text="BOS L")
+
+plotshape(
+     series=acceptedShortBos,
+     title="BOS SHORT",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=color.red,
+     size=size.tiny,
+     text="BOS S")
+
+plotshape(
+     series=acceptNewSetup and newDirection == 1,
+     title="Bull FVG setup",
+     style=shape.circle,
+     location=location.belowbar,
+     color=color.teal,
+     size=size.tiny,
+     text="FVG")
+
+plotshape(
+     series=acceptNewSetup and newDirection == -1,
+     title="Bear FVG setup",
+     style=shape.circle,
+     location=location.abovebar,
+     color=color.teal,
+     size=size.tiny,
+     text="FVG")
+
+plotshape(
+     series=actualLongEntry,
+     title="ENTRY LONG",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.green,
+     text="ENTRY L",
+     textcolor=color.white,
+     size=size.tiny)
+
+plotshape(
+     series=actualShortEntry,
+     title="ENTRY SHORT",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     text="ENTRY S",
+     textcolor=color.white,
+     size=size.tiny)
+
+plotshape(
+     series=showDiagnostics and rawLongBos and not acceptedLongBos,
+     title="Long BOS odrzucony",
+     style=shape.xcross,
+     location=location.abovebar,
+     color=color.orange,
+     size=size.tiny,
+     text="BOS X")
+
+plotshape(
+     series=showDiagnostics and rawShortBos and not acceptedShortBos,
+     title="Short BOS odrzucony",
+     style=shape.xcross,
+     location=location.belowbar,
+     color=color.orange,
+     size=size.tiny,
+     text="BOS X")
+
+plotshape(
+     series=showDiagnostics and newQualifiedSetup and not newSetupEmaOk,
+     title="FVG odrzucone EMA",
+     style=shape.xcross,
+     location=location.abovebar,
+     color=color.orange,
+     size=size.tiny,
+     text="EMA X")

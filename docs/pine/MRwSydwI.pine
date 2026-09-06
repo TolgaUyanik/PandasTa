@@ -1,0 +1,276 @@
+//@version=6
+
+// @description Multi-timeframe FVG detector and renderer for use in other indicators.
+library("MaidongFVGLibrary", overlay = true)
+
+type ZoneStore
+    array<float> upperLevels
+    array<float> lowerLevels
+    array<int> startTimes
+    array<box> zoneBoxes
+    array<box> demandSlices
+    array<box> supplySlices
+    array<line> centerLines
+
+chartTimeOffsetMs(int barsForward) =>
+    timeframe.in_seconds(timeframe.period) * barsForward * 1000
+
+barsBack(float val, series float source) =>
+    int back = time
+    for i = 0 to 4999 by 1
+        if val == source[i]
+            back := time[i]
+            break
+    back
+
+bodyMetrics() =>
+    var bodies = array.new<float>()
+    body = math.max(close, open) - math.min(close, open)
+    array.push(bodies, body)
+    baseline = array.avg(bodies)
+    [body, baseline]
+
+pressureShare(float volumeValue, float closeValue, float lowValue, float highValue, bool towardsHigh) =>
+    span = math.max(highValue - lowValue, syminfo.mintick)
+    towardsHigh ? math.round(math.round(volumeValue * (closeValue - lowValue) / span) / volumeValue * 100) :
+     math.round(math.round(volumeValue * (highValue - closeValue) / span) / volumeValue * 100)
+
+dropZone(ZoneStore store, int idx) =>
+    zone = array.get(store.zoneBoxes, idx)
+    demand = array.get(store.demandSlices, idx)
+    supply = array.get(store.supplySlices, idx)
+    center = array.get(store.centerLines, idx)
+
+    if not na(zone)
+        box.delete(zone)
+    if not na(demand)
+        box.delete(demand)
+    if not na(supply)
+        box.delete(supply)
+    if not na(center)
+        line.delete(center)
+
+    array.remove(store.upperLevels, idx)
+    array.remove(store.lowerLevels, idx)
+    array.remove(store.startTimes, idx)
+    array.remove(store.zoneBoxes, idx)
+    array.remove(store.demandSlices, idx)
+    array.remove(store.supplySlices, idx)
+    array.remove(store.centerLines, idx)
+
+pruneMitigated(ZoneStore store, bool bullish, bool useMidpoint) =>
+    if array.size(store.upperLevels) > 0
+        for [idx, zone] in store.zoneBoxes
+            upper = array.get(store.upperLevels, idx)
+            lower = array.get(store.lowerLevels, idx)
+            center = math.avg(upper, lower)
+            filled = useMidpoint ? (bullish ? low <= center : high >= center) : (bullish ? low <= lower : high >= upper)
+            if filled
+                dropZone(store, idx)
+
+recordZone(
+    ZoneStore store,
+    bool shouldDraw,
+    bool drawMidpoint,
+    bool drawPressure,
+    int startTime,
+    int endTime,
+    float upper,
+    float lower,
+    float buyPressure,
+    float sellPressure,
+    color areaColor,
+    color buyColor,
+    color sellColor) =>
+    array.unshift(store.upperLevels, upper)
+    array.unshift(store.lowerLevels, lower)
+    array.unshift(store.startTimes, startTime)
+
+    box zoneBox = na
+    box demandSlice = na
+    box supplySlice = na
+    line centerLine = na
+
+    if shouldDraw
+        zoneBox := box.new(startTime, upper, endTime, lower, xloc = xloc.bar_time, bgcolor = areaColor, border_color = areaColor)
+
+        midpoint = math.avg(upper, lower)
+        if drawMidpoint
+            centerLine := line.new(startTime, midpoint, endTime, midpoint, xloc = xloc.bar_time, color = color.new(color.white, 0), style = line.style_dashed)
+
+        if drawPressure
+            widthMs = endTime - startTime
+            demandEnd = int(startTime + widthMs * (buyPressure / 100.0))
+            supplyEnd = int(startTime + widthMs * (sellPressure / 100.0))
+            demandSlice := box.new(startTime, midpoint, demandEnd, upper, xloc = xloc.bar_time, bgcolor = buyColor, border_color = buyColor)
+            supplySlice := box.new(startTime, lower, supplyEnd, midpoint, xloc = xloc.bar_time, bgcolor = sellColor, border_color = sellColor)
+
+    array.unshift(store.zoneBoxes, zoneBox)
+    array.unshift(store.demandSlices, demandSlice)
+    array.unshift(store.supplySlices, supplySlice)
+    array.unshift(store.centerLines, centerLine)
+
+// Returns:
+// [newBullish, bullishStartTime, bullishUpper, bullishLower, bullishMidpoint,
+//  newBearish, bearishStartTime, bearishUpper, bearishLower, bearishMidpoint,
+//  bullishActiveCount, bearishActiveCount]
+export scanImbalanceZones(
+    string sourceTimeframe,
+    float displacementFactor,
+    bool mitigateAtMidpoint,
+    int projectionBars,
+    bool drawBullish,
+    bool drawBearish,
+    bool drawMidpoint,
+    bool drawPressure,
+    color bullishPressureColor,
+    color bearishPressureColor,
+    color zoneColor) =>
+    var bullishZones = ZoneStore.new(
+         array.new<float>(),
+         array.new<float>(),
+         array.new<int>(),
+         array.new<box>(),
+         array.new<box>(),
+         array.new<box>(),
+         array.new<line>())
+    var bearishZones = ZoneStore.new(
+         array.new<float>(),
+         array.new<float>(),
+         array.new<int>(),
+         array.new<box>(),
+         array.new<box>(),
+         array.new<box>(),
+         array.new<line>())
+
+    tf = sourceTimeframe == "" ? timeframe.period : sourceTimeframe
+
+    [htfClose, htfHigh, htfLow, htfHigh2, htfLow2, htfVolume] = request.security(
+         syminfo.tickerid,
+         tf,
+         [close, high, low, high[2], low[2], volume],
+         lookahead = barmerge.lookahead_on)
+
+    [htfBody, htfBodyBaseline] = request.security(
+         syminfo.tickerid,
+         tf,
+         bodyMetrics(),
+         lookahead = barmerge.lookahead_on)
+
+    bullishSetup = htfLow > htfHigh2 and htfClose > htfHigh2
+    bearishSetup = htfHigh < htfLow2 and htfClose < htfLow2
+
+    newBullish = bullishSetup and not bullishSetup[1] and htfBody >= htfBodyBaseline * displacementFactor
+    newBearish = bearishSetup and not bearishSetup[1] and htfBody >= htfBodyBaseline * displacementFactor
+
+    highTime = barsBack(htfHigh, high)
+    lowTime = barsBack(htfLow, low)
+    highTwoBackTime = barsBack(htfHigh2, high)
+    lowTwoBackTime = barsBack(htfLow2, low)
+
+    buyPressure = pressureShare(htfVolume, htfClose, htfLow, htfHigh, true)
+    sellPressure = pressureShare(htfVolume, htfClose, htfLow, htfHigh, false)
+
+    if newBullish
+        zoneStart = highTwoBackTime
+        zoneEnd = chartTimeOffsetMs(projectionBars) + highTime
+        recordZone(
+             bullishZones,
+             drawBullish,
+             drawMidpoint,
+             drawPressure,
+             zoneStart,
+             zoneEnd,
+             htfLow,
+             htfHigh2,
+             buyPressure,
+             sellPressure,
+             zoneColor,
+             bullishPressureColor,
+             bearishPressureColor)
+
+    if newBearish
+        zoneStart = lowTwoBackTime
+        zoneEnd = chartTimeOffsetMs(projectionBars) + lowTime
+        recordZone(
+             bearishZones,
+             drawBearish,
+             drawMidpoint,
+             drawPressure,
+             zoneStart,
+             zoneEnd,
+             htfLow2,
+             htfHigh,
+             buyPressure,
+             sellPressure,
+             zoneColor,
+             bullishPressureColor,
+             bearishPressureColor)
+
+    pruneMitigated(bullishZones, true, mitigateAtMidpoint)
+    pruneMitigated(bearishZones, false, mitigateAtMidpoint)
+
+    bullishActiveCount = array.size(bullishZones.upperLevels)
+    bearishActiveCount = array.size(bearishZones.upperLevels)
+
+    bullishStartTime = bullishActiveCount > 0 ? array.get(bullishZones.startTimes, 0) : int(na)
+    bullishUpper = bullishActiveCount > 0 ? array.get(bullishZones.upperLevels, 0) : na
+    bullishLower = bullishActiveCount > 0 ? array.get(bullishZones.lowerLevels, 0) : na
+    bullishMidpoint = bullishActiveCount > 0 ? math.avg(bullishUpper, bullishLower) : na
+
+    bearishStartTime = bearishActiveCount > 0 ? array.get(bearishZones.startTimes, 0) : int(na)
+    bearishUpper = bearishActiveCount > 0 ? array.get(bearishZones.upperLevels, 0) : na
+    bearishLower = bearishActiveCount > 0 ? array.get(bearishZones.lowerLevels, 0) : na
+    bearishMidpoint = bearishActiveCount > 0 ? math.avg(bearishUpper, bearishLower) : na
+
+    [newBullish, bullishStartTime, bullishUpper, bullishLower, bullishMidpoint,
+     newBearish, bearishStartTime, bearishUpper, bearishLower, bearishMidpoint,
+     bullishActiveCount, bearishActiveCount]
+
+// Compatibility output for scripts that expect event-style FVG fields similar to legacy detectors.
+// Returns:
+// [newBullish, bullishDistal, bullishProximal, bullishIndex,
+//  newBearish, bearishDistal, bearishProximal, bearishIndex]
+export scanLegacyFVGState(
+    string sourceTimeframe,
+    float displacementFactor) =>
+    var float bullishDistal = 0.0
+    var float bullishProximal = 0.0
+    var int bullishIndex = 0
+
+    var float bearishDistal = 0.0
+    var float bearishProximal = 0.0
+    var int bearishIndex = 0
+
+    tf = sourceTimeframe == "" ? timeframe.period : sourceTimeframe
+
+    [htfClose, htfHigh, htfLow, htfHigh2, htfLow2] = request.security(
+         syminfo.tickerid,
+         tf,
+         [close, high, low, high[2], low[2]],
+         lookahead = barmerge.lookahead_on)
+
+    [htfBody, htfBodyBaseline] = request.security(
+         syminfo.tickerid,
+         tf,
+         bodyMetrics(),
+         lookahead = barmerge.lookahead_on)
+
+    bullishSetup = htfLow > htfHigh2 and htfClose > htfHigh2
+    bearishSetup = htfHigh < htfLow2 and htfClose < htfLow2
+
+    newBullish = bullishSetup and not bullishSetup[1] and htfBody >= htfBodyBaseline * displacementFactor
+    newBearish = bearishSetup and not bearishSetup[1] and htfBody >= htfBodyBaseline * displacementFactor
+
+    if newBullish
+        bullishDistal := htfHigh2
+        bullishProximal := htfLow
+        bullishIndex := bar_index
+
+    if newBearish
+        bearishDistal := htfLow2
+        bearishProximal := htfHigh
+        bearishIndex := bar_index
+
+    [newBullish, bullishDistal, bullishProximal, bullishIndex,
+     newBearish, bearishDistal, bearishProximal, bearishIndex]

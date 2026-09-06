@@ -1,0 +1,192 @@
+//@version=6
+// ============================================================================
+//  OMBANYU — PERANG BENUA (Session War Strategy)
+//  ----------------------------------------------------------------------------
+//  Deskripsi:
+//    Strategi Gold (XAUUSD) berbasis "perang antar benua": sesi Amerika (NY),
+//    Asia, dan Eropa (London) berebut harga emas termurah. Script mengunci
+//    low jam terakhir sesi NY sebagai level kandidat, lalu mengevaluasi apakah
+//    Asia/Eropa mampu menembus level tersebut keesokan harinya.
+//
+//  Logika inti (strategi.md):
+//    1. NY jam terakhir (20–21 UTC) → kunci nyFinalLow (harga murah Amerika)
+//    2. Asia selesai → low Asia < nyFinalLow → SHORT (Amerika "tidak mau kalah")
+//    3. London selesai → Asia & London tidak tembus → LONG (low awet / support)
+//
+//  Metodologi: SESI → LEVEL → SINYAL
+//    1. SESI   = Track high/low per bucket Asia, London, NY (UTC)
+//    2. LEVEL  = Garis low NY jam terakhir (kandidat harga terendah awet)
+//    3. SINYAL = Entry SHORT/LONG di batas akhir sesi + SL/TP otomatis
+//
+//  Author  : Ombanyu
+//  Created : 2026-06-24
+//  Version : v1.0
+//  Pair    : XAUUSD (recommended) — filter Gold default ON
+//  TF      : Fleksibel; rekomendasi M15 (warning jika < 15m)
+//  Docs    : strategies/ombanyu/strategi.md
+//           docs/superpowers/specs/2026-06-24-ombanyu-perang-benua-design.md
+//  ----------------------------------------------------------------------------
+//  DESKRIPSI PUBLISH (copy ke TradingView):
+//    Perang Benua Gold — strategi sesi NY vs Asia/London. Low jam terakhir
+//    NY = level kunci. Asia tembus = Short. Asia+London tahan = Long. SL/TP
+//    ATR + R:R 2:1. Edukasi & backtest; bukan saran finansial.
+//  ----------------------------------------------------------------------------
+//  DISCLAIMER: Script untuk EDUKASI dan BACKTEST — BUKAN SARAN FINANSIAL.
+//  Trading melibatkan risiko kehilangan modal. Backtest + forward test
+//  WAJIB sebelum live trading.
+// ============================================================================
+strategy("Ombanyu Perang Benua", shorttitle="OmbanyuPB", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.03, max_lines_count=500, max_labels_count=500, calc_on_every_tick=false)
+
+// ── Input groups ──
+grpSession = "Sesi (UTC)"
+grpTrade   = "Eksekusi & MM"
+grpDisp    = "Tampilan"
+
+asiaStartH   = input.int(0,  "Asia mulai (jam UTC)", minval=0, maxval=23, group=grpSession)
+asiaEndH     = input.int(8,  "Asia selesai (jam UTC)", minval=1, maxval=24, group=grpSession)
+londonStartH = input.int(7,  "London mulai (jam UTC)", minval=0, maxval=23, group=grpSession)
+londonEndH   = input.int(16, "London selesai (jam UTC)", minval=1, maxval=24, group=grpSession)
+nyStartH     = input.int(12, "NY mulai (jam UTC)", minval=0, maxval=23, group=grpSession)
+nyEndH       = input.int(21, "NY selesai (jam UTC)", minval=1, maxval=24, group=grpSession)
+nyLastStartH = input.int(20, "NY jam terakhir mulai (UTC)", minval=0, maxval=23, group=grpSession)
+
+enableLong   = input.bool(true,  "Aktifkan LONG (low awet)", group=grpTrade)
+enableShort  = input.bool(true,  "Aktifkan SHORT (Asia tembus)", group=grpTrade)
+goldOnly     = input.bool(true,  "Hanya Gold (XAU/GOLD)", group=grpTrade)
+minRR        = input.float(2.0,  "Min R:R", minval=1.0, step=0.5, group=grpTrade)
+riskPct      = input.float(1.0,  "Risk % equity", minval=0.1, maxval=5.0, step=0.1, group=grpTrade)
+atrLen       = input.int(14,     "ATR length", minval=1, group=grpTrade)
+atrSlPad     = input.float(0.15,  "SL padding (x ATR)", minval=0.0, step=0.05, group=grpTrade)
+
+showDurableLine = input.bool(true,  "Garis low NY jam terakhir", group=grpDisp)
+showSessionBg   = input.bool(true,  "Background sesi aktif", group=grpDisp)
+showStatusTable = input.bool(true,  "Tabel status", group=grpDisp)
+showSignalLabels = input.bool(true, "Label sinyal", group=grpDisp)
+
+// ── Helpers ──
+hUTC = hour(time, "UTC")
+
+inHourRange(int startH, int endH) =>
+    startH < endH ? (hUTC >= startH and hUTC < endH) : (hUTC >= startH or hUTC < endH)
+
+inAsia       = inHourRange(asiaStartH, asiaEndH)
+inLondon     = inHourRange(londonStartH, londonEndH)
+inNY         = inHourRange(nyStartH, nyEndH)
+inNYLastHour = inHourRange(nyLastStartH, nyEndH)
+
+sessionLabel() =>
+    inAsia ? "Asia" : inLondon ? "London" : inNY ? "NY" : "Off"
+
+goldOk = not goldOnly or str.contains(str.upper(syminfo.ticker), "XAU") or str.contains(str.upper(syminfo.ticker), "GOLD")
+tfWarn = timeframe.in_seconds() < 15 * 60
+
+atrVal = ta.atr(atrLen)
+
+// ── Daily session trackers ──
+var float asiaLowDay    = na
+var float asiaHighDay   = na
+var float londonLowDay  = na
+var float nyLastLowBuild = na
+var float nyFinalLow    = na
+
+newDay = ta.change(time("D")) != 0
+if newDay
+    asiaLowDay    := na
+    asiaHighDay   := na
+    londonLowDay  := na
+    nyLastLowBuild := na
+
+if inAsia
+    asiaLowDay  := na(asiaLowDay)  ? low  : math.min(asiaLowDay, low)
+    asiaHighDay := na(asiaHighDay) ? high : math.max(asiaHighDay, high)
+
+if inLondon
+    londonLowDay := na(londonLowDay) ? low : math.min(londonLowDay, low)
+
+if inNYLastHour
+    nyLastLowBuild := na(nyLastLowBuild) ? low : math.min(nyLastLowBuild, low)
+
+nyLastHourEnded = inNYLastHour[1] and not inNYLastHour
+if nyLastHourEnded and not na(nyLastLowBuild)
+    nyFinalLow := nyLastLowBuild
+    nyLastLowBuild := na
+
+asiaEnded   = inAsia[1] and not inAsia
+londonEnded = inLondon[1] and not inLondon
+
+// ── Battle signals (confirmed bar only) ──
+bool signalShort = false
+bool signalLong  = false
+
+if barstate.isconfirmed and goldOk and not na(nyFinalLow)
+    if asiaEnded and enableShort and not na(asiaLowDay) and asiaLowDay < nyFinalLow
+        signalShort := true
+    if londonEnded and enableLong and not na(asiaLowDay) and not na(londonLowDay)
+        asiaHeld   = asiaLowDay >= nyFinalLow
+        londonHeld = londonLowDay >= nyFinalLow
+        if asiaHeld and londonHeld
+            signalLong := true
+
+// ── Trade execution ──
+var float entrySl = na
+var float entryTp = na
+
+if barstate.isconfirmed and strategy.position_size == 0
+    if signalShort
+        entrySl := asiaHighDay + atrVal * atrSlPad
+        float risk = entrySl - close
+        if risk > syminfo.mintick
+            entryTp := close - risk * minRR
+            float qty = (strategy.equity * riskPct / 100.0) / risk
+            strategy.entry("Short", strategy.short, qty=math.max(qty, 0.01))
+            strategy.exit("Short Exit", "Short", stop=entrySl, limit=entryTp)
+            if showSignalLabels
+                label.new(bar_index, high, "SHORT\nAsia tembus\nLow NY: " + str.tostring(nyFinalLow, format.mintick), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+    if signalLong
+        entrySl := nyFinalLow - atrVal * atrSlPad
+        float riskL = close - entrySl
+        if riskL > syminfo.mintick
+            entryTp := close + riskL * minRR
+            float qtyL = (strategy.equity * riskPct / 100.0) / riskL
+            strategy.entry("Long", strategy.long, qty=math.max(qtyL, 0.01))
+            strategy.exit("Long Exit", "Long", stop=entrySl, limit=entryTp)
+            if showSignalLabels
+                label.new(bar_index, low, "LONG\nLow awet\n" + str.tostring(nyFinalLow, format.mintick), style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
+
+// ── Durable low line ──
+var line durableLine = na
+if showDurableLine and nyLastHourEnded and not na(nyFinalLow)
+    if not na(durableLine)
+        line.delete(durableLine)
+    durableLine := line.new(bar_index, nyFinalLow, bar_index + 1, nyFinalLow, extend=extend.right, color=color.orange, width=2, style=line.style_dashed)
+    label.new(bar_index, nyFinalLow, "Low NY " + str.tostring(nyFinalLow, format.mintick), style=label.style_label_left, color=color.new(color.orange, 70), textcolor=color.orange, size=size.tiny)
+
+// ── Session background ──
+bgCol = showSessionBg ? (inNYLastHour ? color.new(color.orange, 92) : inAsia ? color.new(color.yellow, 95) : inLondon ? color.new(color.blue, 95) : inNY ? color.new(color.green, 95) : na) : na
+bgcolor(bgCol, title="Sesi")
+
+// ── Status table ──
+var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+if showStatusTable and barstate.islast
+    string battleStatus = na(nyFinalLow) ? "Menunggu low NY" : (not na(asiaLowDay) and asiaLowDay < nyFinalLow ? "Asia tembus" : "Asia tahan")
+    table.cell(tbl, 0, 0, "Ombanyu PB", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, sessionLabel(), text_color=color.aqua, text_size=size.small)
+    table.cell(tbl, 0, 1, "Low NY (awet?)", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, na(nyFinalLow) ? "—" : str.tostring(nyFinalLow, format.mintick), text_color=color.orange, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Asia low", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 2, na(asiaLowDay) ? "—" : str.tostring(asiaLowDay, format.mintick), text_size=size.tiny)
+    table.cell(tbl, 0, 3, "London low", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 3, na(londonLowDay) ? "—" : str.tostring(londonLowDay, format.mintick), text_size=size.tiny)
+    table.cell(tbl, 0, 4, "Status perang", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 4, battleStatus, text_color=battleStatus == "Asia tembus" ? color.red : color.lime, text_size=size.tiny)
+    table.cell(tbl, 0, 5, "TF", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 5, timeframe.period + (tfWarn ? " ⚠" : " OK"), text_color=tfWarn ? color.orange : color.lime, text_size=size.tiny)
+    table.cell(tbl, 0, 6, "Posisi", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 6, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "Flat", text_size=size.tiny)
+    table.cell(tbl, 0, 7, "Symbol", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 7, goldOk ? "OK" : "Skip", text_color=goldOk ? color.lime : color.red, text_size=size.tiny)
+
+// ── Alerts ──
+alertcondition(signalLong,  "Ombanyu Long",  "Low awet — LONG {{ticker}} {{interval}}")
+alertcondition(signalShort, "Ombanyu Short", "Asia tembus — SHORT {{ticker}} {{interval}}")

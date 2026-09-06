@@ -1,0 +1,419 @@
+//@version=6
+strategy("China A-Share Long Trend Resonance System (CLR System)", 
+     overlay=true,
+     pyramiding=0,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     calc_on_every_tick=true,
+     process_orders_on_close=true)
+
+//====================
+// 参数
+//====================
+atrLen = input.int(10, "ATR周期")
+factor = input.float(3.0, "Supertrend倍数")
+hmaLen = input.int(50 , "HMA周期")
+
+adxLen = input.int(12, "ADX周期")
+adxTh  = input.int(17, "ADX阈值")
+
+useADXSlope = input.bool(true, "ADX斜率过滤")
+useHMASlope = input.bool(true, "HMA斜率过滤")
+usePriceAccel = input.bool(true, "价格加速过滤")
+priceAccelFactor = input.float(0.5, "价格加速ATR倍数")
+useChandelier = input.bool(true, "启用吊灯止损")
+
+slR = input.float(2.0, "BUY-ATR止损")
+dynamicR = input.float(3.0, "T2吊灯ATR倍数")
+atrSmoothLen = input.int(5, "吊灯ATR抗震荡周期")
+
+tp1R = input.float(1.5, "TP1")
+tp2R = input.float(3.0, "TP2")
+tp1Qty = input.float(30, "TP1减仓%")
+tp2Qty = input.float(30, "TP2减仓%")
+
+coolBars = input.int(5, "冷却周期")
+
+//====================
+// 指标
+//====================
+atr = ta.atr(atrLen)
+hma = ta.hma(close, hmaLen)
+plot(hma, color=color.orange, linewidth=2)
+hmaUp = hma > hma[1]
+
+//====================
+// ADX
+//====================
+upMove = high - high[1]
+downMove = low[1] - low
+
+plusDM = (upMove > downMove and upMove > 0) ? upMove : 0
+minusDM = (downMove > upMove and downMove > 0) ? downMove : 0
+
+tr = math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
+
+smoothTR = ta.rma(tr, adxLen)
+smoothPlusDM = ta.rma(plusDM, adxLen)
+smoothMinusDM = ta.rma(minusDM, adxLen)
+
+plusDI = smoothPlusDM / smoothTR * 100
+minusDI = smoothMinusDM / smoothTR * 100
+
+dx = math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100
+adx = ta.rma(dx, adxLen)
+
+adxSlopeUp = adx > adx[1]
+
+//====================
+// Supertrend（D日线趋势）
+//====================
+src = hl2
+
+up = src - factor * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+
+dn = src + factor * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+var int trend = 1
+trend := trend == -1 and close > dn1 ? 1 :
+         trend == 1 and close < up1 ? -1 :
+         trend
+
+sellSignal = trend == -1 and trend[1] == 1
+dTrend = request.security(syminfo.tickerid, "D", trend)
+
+//====================
+// ⭐ 新增：周线趋势判断（核心新增）
+//====================
+wHMA = request.security(syminfo.tickerid, "W", ta.hma(close, hmaLen))
+wTrendUp = wHMA > wHMA[1]
+wClose = request.security(syminfo.tickerid, "W", close)
+
+wState = wClose > wHMA and wTrendUp ? "周线多头" :
+         wClose < wHMA and not wTrendUp ? "周线空头" :
+         "周线震荡"
+
+wHoldOk = (wClose > wHMA)
+
+//====================
+// 冷却
+//====================
+var int lastExitBar = na
+cooling = not na(lastExitBar) and (bar_index - lastExitBar < coolBars)
+
+//====================
+// 入场条件
+//====================
+priceAccel = (high - high[1]) > atr * priceAccelFactor
+
+entryTrigger = dTrend == 1 and close > hma and adx > adxTh and not cooling
+
+if useADXSlope
+    entryTrigger := entryTrigger and adxSlopeUp
+if useHMASlope
+    entryTrigger := entryTrigger and hmaUp
+if usePriceAccel
+    entryTrigger := entryTrigger and priceAccel
+
+if entryTrigger and strategy.position_size == 0
+    label.new(bar_index, low*0.995, "BUY*", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if entryTrigger and strategy.position_size == 0 and barstate.isconfirmed
+    strategy.entry("LONG", strategy.long)
+    label.new(bar_index, low*0.995, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+//====================
+// 持仓
+//====================
+isLong = strategy.position_size > 0
+
+var float entryPrice = na
+if strategy.opentrades > 0
+    entryPrice := strategy.opentrades.entry_price(0)
+
+var float entryATR = na
+if isLong and strategy.position_size[1] == 0
+    entryATR := atr
+if not isLong
+    entryATR := na
+
+var float r = na
+if isLong
+    r := (close - entryPrice) / entryATR
+
+//====================
+// TP
+//====================
+var bool tp1Done = false
+var bool tp2Done = false
+
+if not isLong
+    tp1Done := false
+    tp2Done := false
+
+tp1Trig = isLong and high >= entryPrice + tp1R * entryATR and not tp1Done
+tp2Trig = isLong and high >= entryPrice + tp2R * entryATR and not tp2Done
+
+if tp1Trig
+    strategy.close("LONG", qty_percent=tp1Qty)
+    tp1Done := true
+    label.new(bar_index, high*1.005, "T1", color=color.yellow, size=size.small)
+
+if tp2Trig
+    strategy.close("LONG", qty_percent=tp2Qty)
+    tp2Done := true
+    label.new(bar_index, high*1.005, "T2", color=color.orange, size=size.small)
+
+//====================
+// 阶段
+//====================
+stage = not isLong ? 0 : not tp1Done ? 1 : not tp2Done ? 2 : 3
+
+//====================
+// 吊灯止损
+//====================
+var float highestSinceT2 = na
+atrSmooth = ta.highest(ta.atr(atrLen), atrSmoothLen)
+
+if stage == 3
+    highestSinceT2 := na(highestSinceT2) ? close : math.max(highestSinceT2, close)
+else
+    highestSinceT2 := na
+
+chandelierStop = highestSinceT2 - dynamicR * atrSmooth
+
+//====================
+// 出场
+//====================
+stopPrice = entryPrice - slR * entryATR
+
+exitStage1 = stage == 1 and r >= 2 and low < entryPrice + 2 * entryATR
+exitStage2 = useChandelier and stage == 3 and low <= chandelierStop
+exitStage3 = stage == 3 and sellSignal
+
+exitNow = (isLong and low < stopPrice) or exitStage1 or exitStage2 or exitStage3
+
+if exitNow
+    strategy.close("LONG")
+    lastExitBar := bar_index
+    label.new(bar_index, high*1.005, "卖出", color=color.red, size=size.small)
+
+//====================
+// 生命周期
+//====================
+string trendStage = ""
+if not isLong
+    trendStage := "-"
+else
+    if r < 0
+        trendStage := "浮亏"
+    else if r < 1
+        trendStage := "启动"
+    else if r < 2
+        trendStage := "中段"
+    else if r < 4
+        trendStage := "主升"
+    else
+        trendStage := "高潮"
+
+string STATE = ""
+if not isLong
+    STATE := entryTrigger ? "准备开仓" : "等待"
+else
+    if r < 0
+        STATE := "浮亏"
+    else if r >= 2
+        STATE := "强趋势"
+    else if tp1Done or tp2Done
+        STATE := "减仓区"
+    else
+        STATE := "持仓"
+
+string ACTION = ""
+if entryTrigger and not isLong
+    ACTION := "买入"
+else if tp1Trig or tp2Trig
+    ACTION := "减仓"
+else if exitNow
+    ACTION := "卖出"
+else if isLong
+    ACTION := "持有"
+else
+    ACTION := "无"
+
+//====================
+// 仓位 风险
+//====================
+POS = isLong ? (tp2Done ? "40%" : tp1Done ? "70%" : "100%") : "0%"
+
+var float riskVal = na
+if isLong and entryATR != 0
+    riskVal := (close - stopPrice)/entryATR
+else
+    riskVal := na
+
+color riskColor = color.gray
+if isLong and not na(riskVal)
+    if riskVal < 0.5
+        riskColor := color.red
+    else if riskVal < 1.0
+        riskColor := color.yellow
+    else
+        riskColor := color.lime
+
+riskText = isLong and not na(riskVal) ? str.tostring(riskVal, "#.##") : "-"
+
+//====================
+// 质量
+//====================
+string Q_val = ""
+color Q_color = color.gray
+
+if plusDI > minusDI
+    if adx > 50
+        Q_val := "A+"
+        Q_color := color.lime
+    else if adx > 40
+        Q_val := "A"
+        Q_color := color.green
+    else if adx > 25
+        Q_val := "A-"
+        Q_color := color.new(color.green, 40)
+    else if adx > 18
+        Q_val := "B"
+        Q_color := color.yellow
+    else
+        Q_val := "C"
+        Q_color := color.gray
+else
+    if adx > 40
+        Q_val := "E"
+        Q_color := color.maroon
+    else if adx > 30
+        Q_val := "E"
+        Q_color := color.red
+    else if adx > 20
+        Q_val := "D"
+        Q_color := color.orange
+    else
+        Q_val := "C"
+        Q_color := color.gray
+
+adxText = str.tostring(adx, "#.##")
+adxColor = plusDI > minusDI ? color.lime : color.red
+
+//====================
+// 最大回撤
+//====================
+var float maxPrice = na
+var float maxDrawdown = 0.0
+
+if isLong
+    maxPrice := na(maxPrice) ? close : math.max(maxPrice, close)
+    maxDrawdown := (maxPrice - close) / maxPrice * 100
+else
+    maxPrice := na
+    maxDrawdown := 0.0
+
+drawdownText = str.tostring(maxDrawdown, "#.##") + "%"
+
+//====================
+// BBP
+//====================
+emaBBP = ta.ema(close, 34)
+bbpRaw = (close - emaBBP) / atr
+bbpNorm = ta.ema(bbpRaw, 5)
+
+string bbpState = ""
+color bbpColor = color.gray
+
+if bbpNorm > 2
+    bbpState := "极强"
+    bbpColor := color.rgb(0, 90, 0)
+else if bbpNorm > 1
+    bbpState := "强"
+    bbpColor := color.lime
+else if bbpNorm > 0.3
+    bbpState := "偏强"
+    bbpColor := color.new(color.lime, 40)
+else if bbpNorm > -0.3
+    bbpState := "震荡"
+    bbpColor := color.gray
+else if bbpNorm > -1
+    bbpState := "偏弱"
+    bbpColor := color.orange
+else
+    bbpState := "弱"
+    bbpColor := color.red
+
+//====================
+// RSI
+//====================
+rsi = ta.rsi(close, 21)
+
+string rsiState = ""
+color rsiColor = color.gray
+
+if rsi >= 75
+    rsiState := "过热"
+    rsiColor := color.red
+else if rsi >= 60
+    rsiState := "偏强"
+    rsiColor := color.lime
+else if rsi >= 40
+    rsiState := "中性"
+    rsiColor := color.gray
+else if rsi >= 25
+    rsiState := "偏弱"
+    rsiColor := color.orange
+else
+    rsiState := "超卖"
+    rsiColor := color.red
+
+//====================
+// 面板
+//====================
+var table panel = table.new(position.top_right, 2, 12, frame_color=color.white, frame_width=1, bgcolor=color.new(color.black,85))
+
+table.cell(panel, 0, 0, "状态", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 0, STATE, text_color=color.white, text_size=size.tiny)
+
+table.cell(panel, 0, 1, "操作", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 1, ACTION, text_color=color.white, text_size=size.tiny)
+
+table.cell(panel, 0, 2, "仓位", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 2, POS, text_color=color.white, text_size=size.tiny)
+
+table.cell(panel, 0, 3, "R值", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 3, isLong ? str.tostring(r, "#.##") : "-", text_color=color.white, text_size=size.tiny)
+
+table.cell(panel, 0, 4, "风险", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 4, riskText, text_color=riskColor, text_size=size.tiny)
+
+table.cell(panel, 0, 5, "质量", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 5, Q_val, text_color=Q_color, text_size=size.tiny)
+
+table.cell(panel, 0, 6, "ADX", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 6, adxText, text_color=adxColor, text_size=size.tiny)
+
+table.cell(panel, 0, 7, "阶段", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 7, trendStage, text_color=color.white, text_size=size.tiny)
+
+table.cell(panel, 0, 8, "最大回撤", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 8, drawdownText, text_color=color.red, text_size=size.tiny)
+
+table.cell(panel, 0, 9, "BBP", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 9, bbpState, text_color=bbpColor, text_size=size.tiny)
+
+table.cell(panel, 0, 10, "RSI", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 10, rsiState, text_color=rsiColor, text_size=size.tiny)
+
+//====================
+// ⭐ 周线趋势显示（新增面板）
+//====================
+table.cell(panel, 0, 11, "周线趋势", text_color=color.gray, text_size=size.tiny)
+table.cell(panel, 1, 11, wState + (wHoldOk ? " ✓持有" : " ⚠谨慎"), text_color=wHoldOk ? color.lime : color.orange, text_size=size.tiny)

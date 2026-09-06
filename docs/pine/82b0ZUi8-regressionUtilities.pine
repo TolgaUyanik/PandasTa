@@ -1,0 +1,1212 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlgoTrader_Pro
+
+//@version=6
+
+// @description: Various regression utilities for algo trading 
+library('regressionUtilities', overlay=true)
+import TradingView/ta/9
+import AlgoTrader_Pro/formattingUtilities/12 as fu
+import AlgoTrader_Pro/dataTableUtilities/13 as du
+
+// CONSTANTS
+//-------------
+
+// Linear Regression Type 
+type linRegData
+	int x1
+	float y1
+	int x2
+	float y2
+	float m
+	float b
+	float r2
+	float length
+	float stdDev
+
+type tableDataMapType
+	map<string, string> mapData
+
+// Colors 
+color COLOR_TRANSP = color.new(color.gray, 100)
+
+// Trend
+color COLOR_UP = color.green
+color COLOR_DOWN = color.red
+color COLOR_BEARGR = color.rgb(133, 17, 17) // Bearish Growing
+color COLOR_BULLGR = color.green // Bullish Growing
+color COLOR_BEARSH = color.red // Bearish Shrinking
+color COLOR_BULLSH = color.rgb(27, 96, 29) // Bullish Shrinking
+color COLOR_UPTREND = color.new(color.green, 50)
+color COLOR_DNTREND = color.new(color.red, 50)
+color COLOR_VALIDATED_LONG = color.new(color.green, 85)
+color COLOR_VALIDATED_SHORT = color.new(color.red, 85)
+color COLOR_VALIDATED_LONG_BORDER = color.new(color.green, 0)
+color COLOR_VALIDATED_SHORT_BORDER = color.new(color.red, 0)
+
+int LINEAR_REGRESSION_WIDTH = 2
+string DEVS_LINREG_STYLE = line.style_dotted
+string MID_LINREG_STYLE = line.style_solid
+
+int bars_to_right = 5
+int BARS_TO_RIGHT_LABELS = 70
+int QUADRATIC_REGRESSION_POINTS = 50
+int MINIMUM_BARS_FOR_ENTRY_VALIDATION = 20
+
+
+
+array<line> fib_levels_array = array.new<line>(na)
+
+// Data Table Texts
+var DATATABLE_TITLE = 'REGRESSION CHANNEL'
+var GROUP_REGRESSIONS = 'REGRESSIONS ================================'
+var GROUP_PIVOTS = 'PIVOTS ====================================='
+var GROUP_DATATABLE = 'DATA TABLE ================================='
+
+// INPUTS  
+//--------------
+float source_input = input.source(close, 'Source for regressions', group = GROUP_REGRESSIONS)
+int max_length_input = input.int(1000, 'Maximum length', minval = 0, maxval = 1500, group = GROUP_REGRESSIONS)
+int min_length_input = input.int(200, 'Minimum length', minval = 3, maxval = 500, group = GROUP_REGRESSIONS)
+float stdDev_mult_input = input.float(2.0, 'StdDev Multiple for Channel', minval = 1, group = GROUP_REGRESSIONS)
+int num_of_bars_to_project_input = input.int(100, 'Bars to project in Quadratic Regression', group = GROUP_REGRESSIONS)
+bool plot_linearRegression_input = input.bool(true, 'Plot Linear Regression', group = GROUP_REGRESSIONS)
+bool plot_quadraticRSquared_input = input.bool(false, 'Plot Quadratic Regression', group = GROUP_REGRESSIONS)
+bool plot_labels_input = input.bool(true, 'Plot Labels', group = GROUP_REGRESSIONS, inline = 'lbls')
+string with_levels_input = input.string('with Levels', '', options = ['with Levels', 'without Levels'], group = GROUP_REGRESSIONS, inline = 'lbls')
+bool show_data_table_input = input.bool(true, 'Show Data Table', group = GROUP_DATATABLE)
+string tableYposInput = input.string('Bottom', 'Position', inline = 'p', options = ['Top', 'Middle', 'Bottom'], group = GROUP_DATATABLE)
+string tableXposInput = input.string('Right', '', inline = 'p', options = ['Left', 'Center', 'Right'], group = GROUP_DATATABLE)
+string table_textSize_input = input.string('Small', 'Text Size', options = ['Auto', 'Tiny', 'Small', 'Normal'], group = GROUP_DATATABLE)
+
+// VARIABLES   
+//--------------
+int MAX_BARSBACK = 1000
+
+tableMaps_array = array.new<tableDataMapType>(na)
+dataTable_map = map.new<string, string>()
+linRegData linReg = na
+linRegData linReg_ph = na
+linRegData linReg_pl = na
+int pivot_max_length = max_length_input
+
+
+
+// Adjust barsback
+max_bars_back(source_input, MAX_BARSBACK)
+max_bars_back(high, MAX_BARSBACK)
+max_bars_back(low, MAX_BARSBACK)
+
+// FUNCTIONS 
+//--------------
+plot_sideLabel(bars_to_right, y, txt, label_color) =>
+
+    label.new(x = bar_index + bars_to_right, y = y, text = txt, xloc = xloc.bar_index, yloc = yloc.price, color = COLOR_TRANSP, style = label.style_label_left, textcolor = label_color, size = size.small, textalign = text.align_left)
+    // ---- Linear Regression (based on Source)
+get_data_arrays(length, source) =>
+
+    max_bars_back(source, MAX_BARSBACK)
+
+    // Create arrays for points
+    x_points_array = array.new_int(na)
+    y_points_array = array.new_float(na)
+
+    if barstate.islast
+
+        // Get first bar index
+        first_barIndex = bar_index - length
+
+        // Get normal arrays
+        for i = 0 to length - 1 by 1
+
+            x_points_array.push(first_barIndex + i)
+            y_points_array.push(source[length - i])
+
+    [x_points_array, y_points_array]
+
+
+get_linearRegression(x_array, y_array, stdDev_mult) =>
+
+    int first_barIndex = na
+    int last_barIndex = na
+    float y_first = na
+    float y_last = na
+    float m = na
+    float b = na
+    float R2 = na
+    float stdDev = na
+    int x1 = na
+    int x2 = na
+    float y1_mid = na
+    float y2_mid = na
+    float y1_up = na
+    float y2_up = na
+    float y1_dn = na
+    float y2_dn = na
+    float sum_x = 0.0
+    float sum_y = 0.0
+    float sum_x_squared = 0.0
+    float sum_xy = 0.0
+
+    // Get array size
+    int N = x_array.size()
+    int NP = y_array.size()
+
+    // Only if array contains more than one
+    if N > 0 and NP > 0 and N == NP
+
+        for i = 0 to N - 1 by 1
+
+            x = x_array.get(i)
+            y = y_array.get(i)
+
+            sum_x := sum_x + x
+            sum_y := sum_y + y
+            sum_x_squared := sum_x_squared + x * x
+            sum_xy := sum_xy + x * y
+            sum_xy
+
+        // Calculate slope (m) and y-intercept (b) for y = mx + b
+        m := (N * sum_xy - sum_x * sum_y) / (N * sum_x_squared - sum_x * sum_x)
+        b := (sum_y - m * sum_x) / N
+
+        // Finding lowest bar_index and last bar_index
+        first_barIndex := int(x_array.min())
+        last_barIndex := int(x_array.max())
+
+        // Calculate y-values for the lowest and last bar_index
+        y_first := m * first_barIndex + b
+        y_last := m * last_barIndex + b
+
+        // Initialize variables for calculating R2 and standard deviation
+        SST = 0.0
+        SSE = 0.0
+        residuals_sum_squared = 0.0
+
+        // Calculate mean of y-values
+        y_mean = sum_y / N
+
+        // Calculate SST, SSE, and residuals for standard deviation
+        for i = 0 to N - 1 by 1
+            y = y_array.get(i)
+            x = x_array.get(i)
+            y_hat = m * x + b
+
+            SST := SST + math.pow(y - y_mean, 2)
+            SSE := SSE + math.pow(y - y_hat, 2)
+
+            // Residual sum squared for standard deviation
+            residual = y - y_hat
+            residuals_sum_squared := residuals_sum_squared + math.pow(residual, 2)
+            residuals_sum_squared
+
+        // Calculate R-squared
+        R2 := 1 - SSE / SST
+
+        // Calculate Standard Deviation (σ)
+        stdDev := math.sqrt(residuals_sum_squared / N)
+        stdDev_adj = stdDev * stdDev_mult
+
+        // Calculate final coordinates 
+        x1 := int(first_barIndex)
+        x2 := int(last_barIndex)
+        y1_mid := y_first
+        y2_mid := y_last
+        y1_up := y1_mid + stdDev_adj
+        y2_up := y2_mid + stdDev_adj
+        y1_dn := y1_mid - stdDev_adj
+        y2_dn := y2_mid - stdDev_adj
+        y2_dn
+
+    [x1, x2, y1_mid, y2_mid, y1_up, y2_up, y1_dn, y2_dn, m, b, R2, stdDev]
+
+get_best_fit_linearRegression(x_array, y_array, stdDev_mult, max_length, min_length) =>
+
+    // Variables
+    x_array_2 = array.new_int(na)
+    y_array_2 = array.new_float(na)
+    r2_array = array.new_float(na)
+    length_array = array.new_int(na)
+    linReg_up_array = array.new<linRegData>(na)
+    linReg_mid_array = array.new<linRegData>(na)
+    linReg_dn_array = array.new<linRegData>(na)
+    linRegData linReg_up = na
+    linRegData linReg_mid = na
+    linRegData linReg_dn = na
+    linRegData final_linReg_up = na
+    linRegData final_linReg_mid = na
+    linRegData final_linReg_dn = na
+    int regLength = na
+    float max_r2 = na
+
+    // Create initial data arrays
+    x_array_size = x_array.size()
+    y_array_size = y_array.size()
+
+    // Find the best fit linear regression 
+    if barstate.islast
+
+        // Loop through all possible lengths
+        for length = min_length to math.min(max_length, x_array.size() - 1) by 1
+
+            x_array_2.clear()
+            y_array_2.clear()
+
+            // Create new arrays with the new length
+            for i = length - 1 to 0 by 1
+
+                x = x_array.get(x_array_size - i - 1)
+                x_array_2.push(x)
+
+                y = y_array.get(y_array_size - i - 1)
+                y_array_2.push(y)
+
+            // Generate a regression with the new length
+            [x1, x2, y1_mid, y2_mid, y1_up, y2_up, y1_dn, y2_dn, m, b, r2, stdDev] = get_linearRegression(x_array_2, y_array_2, stdDev_mult)
+
+            // Save the regression and relevant data in the regression arrays
+            linReg_up := linRegData.new(x1 = x1, y1 = y1_up, x2 = x2, y2 = y2_up, m = m, b = b, r2 = r2, length = length)
+            linReg_mid := linRegData.new(x1 = x1, y1 = y1_mid, x2 = x2, y2 = y2_mid, m = m, b = b, r2 = r2, length = length)
+            linReg_dn := linRegData.new(x1 = x1, y1 = y1_dn, x2 = x2, y2 = y2_dn, m = m, b = b, r2 = r2, length = length)
+            linReg_up_array.push(linReg_up)
+            linReg_mid_array.push(linReg_mid)
+            linReg_dn_array.push(linReg_dn)
+            r2_array.push(r2)
+            length_array.push(length)
+
+
+
+        // Get the regression with the highest r2
+        max_r2 := r2_array.max()
+        id_max_r2 = r2_array.indexof(max_r2)
+
+        // Get the final regressions and length
+        final_linReg_up := linReg_up_array.get(id_max_r2)
+        final_linReg_mid := linReg_mid_array.get(id_max_r2)
+        final_linReg_dn := linReg_dn_array.get(id_max_r2)
+        regLength := length_array.get(id_max_r2)
+        regLength
+
+
+    [final_linReg_up, final_linReg_mid, final_linReg_dn, regLength, max_r2]
+
+
+get_best_fit_linearRegression_v2(x_array, y_array, stdDev_mult, max_length, min_length) =>
+    linRegData final_linReg_up = na
+    linRegData final_linReg_mid = na
+    linRegData final_linReg_dn = na
+    int regLength = na
+    float max_r2 = na
+
+    if barstate.islast and array.size(x_array) >= min_length
+        int full_size = array.size(x_array)
+
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        float sum_xy = 0.0
+
+        for i = full_size - min_length to full_size - 1
+            x = array.get(x_array, i)
+            y = array.get(y_array, i)
+            sum_x += x
+            sum_y += y
+            sum_x2 += x * x
+            sum_y2 += y * y
+            sum_xy += x * y
+
+        for length = min_length to math.min(max_length, full_size)
+            N = length
+            denom = N * sum_x2 - sum_x * sum_x
+            if denom == 0
+                continue
+
+            m = (N * sum_xy - sum_x * sum_y) / denom
+            b = (sum_y - m * sum_x) / N
+            y_mean = sum_y / N
+
+            SST = sum_y2 - (sum_y * sum_y) / N
+            SSE = sum_y2 - 2 * (m * sum_xy + b * sum_y) + N * b * b + 2 * m * b * sum_x + m * m * sum_x2
+            R2 = SST == 0 ? na : 1 - SSE / SST
+
+            stdDev = math.sqrt(SSE / N)
+            stdDev_adj = stdDev * stdDev_mult
+
+            x1 = array.get(x_array, full_size - length)
+            x2 = array.get(x_array, full_size - 1)
+            y1_mid = m * x1 + b
+            y2_mid = m * x2 + b
+
+            if na(max_r2) or R2 > max_r2
+                y1_up = y1_mid + stdDev_adj
+                y2_up = y2_mid + stdDev_adj
+                y1_dn = y1_mid - stdDev_adj
+                y2_dn = y2_mid - stdDev_adj
+
+                max_r2 := R2
+                regLength := length
+                final_linReg_up := linRegData.new(x1, y1_up, x2, y2_up, m, b, R2, length, stdDev_adj)
+                final_linReg_mid := linRegData.new(x1, y1_mid, x2, y2_mid, m, b, R2, length, stdDev_adj)
+                final_linReg_dn := linRegData.new(x1, y1_dn, x2, y2_dn, m, b, R2, length, stdDev_adj)
+
+            if length < max_length
+                x_new = array.get(x_array, full_size - length - 1)
+                y_new = array.get(y_array, full_size - length - 1)
+                sum_x += x_new
+                sum_y += y_new
+                sum_x2 += x_new * x_new
+                sum_y2 += y_new * y_new
+                sum_xy += x_new * y_new
+
+    [final_linReg_up, final_linReg_mid, final_linReg_dn, regLength, max_r2]
+
+plot_linearRegressions(linReg_up, linReg_mid, linReg_dn, max_length, bars_to_right, plot_labels, stdDev_mult, include_levels, delete_old_plots) =>
+    line ln_linReg_up = na
+    line ln_linReg_mid = na
+    line ln_linReg_dn = na
+
+    if barstate.islast and not na(linReg_up) and not na(linReg_mid) and not na(linReg_dn)
+
+        if delete_old_plots
+            for ln in line.all
+                ln.delete()
+            for lb in label.all
+                lb.delete()
+
+        x1 = linReg_mid.x1
+        x2 = linReg_mid.x2
+        y1_mid = linReg_mid.y1
+        y2_mid = linReg_mid.y2
+        y1_up = linReg_up.y1
+        y2_up = linReg_up.y2
+        y1_dn = linReg_dn.y1
+        y2_dn = linReg_dn.y2
+
+        if x1 >= bar_index - max_length
+            line_color = y1_mid < y2_mid ? COLOR_UP : y1_mid > y2_mid ? COLOR_DOWN : COLOR_TRANSP
+
+            ln_linReg_up  := line.new(x1, y1_up, x2, y2_up, color = line_color, xloc = xloc.bar_index, style = DEVS_LINREG_STYLE, width = LINEAR_REGRESSION_WIDTH)
+            ln_linReg_mid := line.new(x1, y1_mid, x2, y2_mid, color = line_color, xloc = xloc.bar_index, style = MID_LINREG_STYLE,  width = LINEAR_REGRESSION_WIDTH)
+            ln_linReg_dn  := line.new(x1, y1_dn, x2, y2_dn, color = line_color, xloc = xloc.bar_index, style = DEVS_LINREG_STYLE, width = LINEAR_REGRESSION_WIDTH)
+
+            if plot_labels
+                y2_up_txt  = '+' + fu.toNumberString(stdDev_mult, 0) + ' StdDev'
+                y2_mid_txt = 'Lin Reg'
+                y2_dn_txt  = '-' + fu.toNumberString(stdDev_mult, 0) + ' StdDev'
+
+                if include_levels
+                    y2_up_txt  += ': ' + fu.toCurrencyString(y2_up, 1)
+                    y2_mid_txt += ': ' + fu.toCurrencyString(y2_mid, 1)
+                    y2_dn_txt  += ': ' + fu.toCurrencyString(y2_dn, 1)
+
+                plot_sideLabel(bars_to_right, y2_up,  y2_up_txt,  line_color)
+                plot_sideLabel(bars_to_right, y2_mid, y2_mid_txt, line_color)
+                plot_sideLabel(bars_to_right, y2_dn,  y2_dn_txt,  line_color)
+
+    [ln_linReg_up, ln_linReg_mid, ln_linReg_dn]
+
+get_linearRegression_by_length(x_array, y_array, length, stdDev_mult) =>
+    linRegData linReg_up = na
+    linRegData linReg_mid = na
+    linRegData linReg_dn = na
+
+    float R2 = na
+
+    if barstate.islast and array.size(x_array) >= length
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        float sum_xy = 0.0
+
+        int start = array.size(x_array) - length
+        for i = start to array.size(x_array) - 1
+            x = array.get(x_array, i)
+            y = array.get(y_array, i)
+            sum_x += x
+            sum_y += y
+            sum_x2 += x * x
+            sum_y2 += y * y
+            sum_xy += x * y
+
+        N = length
+        denom = N * sum_x2 - sum_x * sum_x
+        if denom != 0
+            m = (N * sum_xy - sum_x * sum_y) / denom
+            b = (sum_y - m * sum_x) / N
+            y_mean = sum_y / N
+
+            SST = sum_y2 - (sum_y * sum_y) / N
+            SSE = sum_y2 - 2 * (m * sum_xy + b * sum_y) + N * b * b + 2 * m * b * sum_x + m * m * sum_x2
+            R2 := SST == 0 ? na : 1 - SSE / SST
+            stdDev = math.sqrt(SSE / N)
+            stdDev_adj = stdDev * stdDev_mult
+
+            x1 = array.get(x_array, start)
+            x2 = array.get(x_array, array.size(x_array) - 1)
+            y1_mid = m * x1 + b
+            y2_mid = m * x2 + b
+            y1_up = y1_mid + stdDev_adj
+            y2_up = y2_mid + stdDev_adj
+            y1_dn = y1_mid - stdDev_adj
+            y2_dn = y2_mid - stdDev_adj
+
+            linReg_up  := linRegData.new(x1, y1_up, x2, y2_up, m, b, R2, length, stdDev_adj)
+            linReg_mid := linRegData.new(x1, y1_mid, x2, y2_mid, m, b, R2, length, stdDev_adj)
+            linReg_dn  := linRegData.new(x1, y1_dn, x2, y2_dn, m, b, R2, length, stdDev_adj)
+
+    [linReg_up, linReg_mid, linReg_dn, R2]
+
+get_linearRegression_DataTable(dataTable_map, linReg, max_length, direction_flag, comment_txt, trend_direction) =>
+
+    if not na(linReg)
+
+        // Get the length color 
+        length_percentage = linReg.length / max_length
+        length_rating_txt = length_percentage >= 0.9 ? 'Very High' : length_percentage < 0.9 and length_percentage >= 0.8 ? 'High' : length_percentage < 0.8 and length_percentage >= 0.6 ? 'Ok' : length_percentage < 0.6 ? 'Low' : ''
+        length_rating_color_txt = switch length_rating_txt
+            'Very High' => 'lime'
+            'High' => 'green'
+            'Ok' => 'yellow'
+            'Low' => 'red'
+        bars_as_perc_of_total_txt = fu.toPercentageString(length_percentage, 1)
+
+        // Get the rating text 
+        rating_txt = linReg.r2 >= 0.9 ? 'Very High' : linReg.r2 < 0.9 and linReg.r2 >= 0.8 ? 'High' : linReg.r2 < 0.8 and linReg.r2 >= 0.6 ? 'Ok' : linReg.r2 < 0.6 ? 'Low' : ''
+        rating_color_txt = switch rating_txt
+            'Very High' => 'lime'
+            'High' => 'green'
+            'Ok' => 'yellow'
+            'Low' => 'red'
+
+        // Define the color for the direction 
+        color_trend_txt__1 = str.lower(trend_direction)
+        color_trend_txt = switch color_trend_txt__1
+            'long' => 'green'
+            'short' => 'red'
+            'neutral' => 'yellow'
+
+        // Define the color for the direction 
+        color_4_txt__1 = str.lower(direction_flag)
+        color_4_txt = switch color_4_txt__1
+            'long' => 'green'
+            'short' => 'red'
+            'neutral' => 'yellow'
+
+        dataTable_map.put('sub_title', '')
+        dataTable_map.put('item_1', 'Length')
+        //dataTable_map.put('data_1', fu.toNumberString(linReg.length, 0))
+        dataTable_map.put('data_1', bars_as_perc_of_total_txt)
+        dataTable_map.put('color_1', length_rating_color_txt)
+        //dataTable_map.put('comment_1', 'Bars (' + bars_as_perc_of_total_txt + ' of all)')
+        dataTable_map.put('comment_1', fu.toNumberString(linReg.length, 0) + ' bars')
+
+        dataTable_map.put('item_2', 'r2')
+        dataTable_map.put('data_2', fu.toPercentageString(linReg.r2, 1))
+        dataTable_map.put('color_2', rating_color_txt)
+        dataTable_map.put('comment_2', rating_txt)
+        dataTable_map.put('colorComment_2', rating_color_txt)
+
+        dataTable_map.put('item_3', 'Trend Direction')
+        dataTable_map.put('data_3', trend_direction)
+        dataTable_map.put('comment_3', '')
+        dataTable_map.put('color_3', color_trend_txt)
+        dataTable_map.put('colorComment_3', '')
+
+        dataTable_map.put('item_4', 'Analyzed Direction')
+        dataTable_map.put('data_4', direction_flag)
+        dataTable_map.put('comment_4', comment_txt)
+        dataTable_map.put('color_4', color_4_txt)
+        dataTable_map.put('colorComment_4', '')
+
+
+
+    dataTable_map
+
+get_direction_flag(linReg_up, linReg_mid, linReg_dn, r2) =>
+
+    // Variables 
+    string direction_flag = ''
+    string comment_txt = ''
+    string linReg_direction = ''
+
+    if not na(linReg_mid)
+
+        bool down_trend = linReg_mid.m < 0
+        bool up_trend = linReg_mid.m > 0
+        linReg_direction := up_trend ? 'Long' : down_trend ? 'Short' : ''
+
+        // Definitions
+        possible_long_reversal = up_trend and close > linReg_up.y2
+        long_continuation = up_trend and close <= linReg_up.y2 and close >= linReg_mid.y2
+        undefined_long = up_trend and close < linReg_mid.y2 and close >= linReg_dn.y2
+        long_breakout_to_downside = up_trend and close < linReg_dn.y2
+
+        short_breakout_to_upside = down_trend and close > linReg_up.y2
+        undefined_short = down_trend and close <= linReg_up.y2 and close >= linReg_mid.y2
+        short_continuation = down_trend and close < linReg_mid.y2 and close >= linReg_dn.y2
+        possible_short_reversal = down_trend and close < linReg_dn.y2
+
+        direction_flag := possible_long_reversal ? 'Short' : long_continuation ? 'Long' : undefined_long ? 'Neutral' : long_breakout_to_downside ? 'Short' : short_breakout_to_upside ? 'Long' : undefined_short ? 'Neutral' : short_continuation ? 'Short' : possible_short_reversal ? 'Long' : 'Neutral'
+
+        comment_txt := possible_long_reversal or possible_short_reversal ? 'Potential Reversal' : long_continuation or short_continuation ? 'Possible Continuation' : undefined_long or undefined_short ? 'Undefined' : long_breakout_to_downside or short_breakout_to_upside ? 'Breakout' : 'Neutral'
+        comment_txt
+
+    [direction_flag, comment_txt, linReg_direction]
+
+get_regressionLevels_map(linReg_up, linReg_mid, linReg_dn, reversal_entry, reversal_stop) =>
+
+    regressionLevels_map = map.new<string, float>()
+
+    if not na(linReg_up) and not na(linReg_mid) and not na(linReg_dn)
+
+        //x1
+        regressionLevels_map.put('linReg_up_x1', linReg_up.x1)
+        regressionLevels_map.put('linReg_mid_x1', linReg_mid.x1)
+        regressionLevels_map.put('linReg_dn_x1', linReg_dn.x1)
+
+        //y1
+        regressionLevels_map.put('linReg_up_y1', linReg_up.y1)
+        regressionLevels_map.put('linReg_mid_y1', linReg_mid.y1)
+        regressionLevels_map.put('linReg_dn_y1', linReg_dn.y1)
+
+        //x2
+        regressionLevels_map.put('linReg_up_x2', linReg_up.x2)
+        regressionLevels_map.put('linReg_mid_x2', linReg_mid.x2)
+        regressionLevels_map.put('linReg_dn_x2', linReg_dn.x2)
+
+        // y2
+        regressionLevels_map.put('linReg_up_y2', linReg_up.y2)
+        regressionLevels_map.put('linReg_mid_y2', linReg_mid.y2)
+        regressionLevels_map.put('linReg_dn_y2', linReg_dn.y2)
+
+        // Reversal Levels
+        if not na(reversal_entry) and not na(reversal_stop)
+            regressionLevels_map.put('reversal_entry', reversal_entry)
+            regressionLevels_map.put('reversal_stop', reversal_stop)
+
+    regressionLevels_map
+
+
+identify_entry_points(linReg_up, linReg_mid, linReg_dn) =>
+
+    // Return empty arrays if either is na
+    var array<int> short_entry_bars = array.new_int(0)
+    var array<int> long_entry_bars = array.new_int(0)
+
+    if barstate.islast
+
+        // Check if linReg_mid.y1 or linReg_mid.y2 is na
+        if na(linReg_mid) or na(linReg_mid)
+
+            [short_entry_bars, long_entry_bars]
+        else
+            // Determine the direction of the channel
+            bool is_rising = linReg_mid.y1 < linReg_mid.y2
+            bool is_falling = linReg_mid.y1 > linReg_mid.y2
+            
+            // Calculate the standard deviation adjustment
+            float stdDev_adj = linReg_up.y1 - linReg_mid.y1
+
+            
+            // Define the range of bars (x1 to x2)
+            int x1 = linReg_mid.x1
+            int x2 = linReg_mid.x2
+            
+            // Loop through bars from x1 to x2-1 to check for crossings
+            for i = x1 to x2 - 1
+
+                // Calculate upper and lower channel values at bar i and i+1
+                float upper_i = linReg_mid.m * i + (linReg_mid.b + stdDev_adj)
+                float lower_i = linReg_mid.m * i + (linReg_mid.b - stdDev_adj)
+                float upper_i1 = linReg_mid.m * (i + 1) + (linReg_mid.b + stdDev_adj)
+                float lower_i1 = linReg_mid.m * (i + 1) + (linReg_mid.b - stdDev_adj)
+                
+                // Get close prices at bar i and i+1
+                float close_i = close[bar_index - i]
+                float close_i1 = close[bar_index - (i + 1)]
+                
+                // Check for ENTRY crossings in a rising channel (short entries)
+                if is_rising and close_i > upper_i and close_i1 < upper_i1
+                    short_entry_bars.push(i + 1)
+
+                // Check for ENTRY crossings in a falling channel (long entries)
+                else if is_falling and close_i < lower_i and close_i1 > lower_i1
+                    long_entry_bars.push(i + 1)
+
+            
+            // Return arrays of entry bar indices
+            [short_entry_bars, long_entry_bars]
+
+    else
+        [short_entry_bars, long_entry_bars]
+
+get_highest_and_lowest_regression_values(length)=>
+
+    optLength = na(length) ? 1 : length
+    max_bars_back(optLength, MAX_BARSBACK)
+
+    [
+         ta.highest(high, optLength),
+         ta.lowest(low, optLength),
+         ta.lowestbars(optLength),
+         ta.highestbars(optLength)
+     ]
+
+plot_and_validate_entry_levels(linReg_up, linReg_mid, linReg_dn,
+                         short_entries, long_entries,
+                         optLength,
+                         highest_value, lowest_value,
+                         long_stoploss_bar_offset, short_stoploss_bar_offset,
+                         plot_entry_levels,
+                         linReg_direction) =>
+
+    //---------------------------------------------------------------------------------------
+    // Short Entry: Re entry in the upper channel, which could be a short entry level.
+    // Long Entry: Re-entry in the lower channel, which could be a long entry level.
+    //---------------------------------------------------------------------------------------
+
+
+    // Set initial variables
+    //-----------------------
+    int signal_entry_bar = na
+    string entry_type = na
+    float entry_level = na
+    int last_long_entry_bar_offset = na
+
+    bool active_trade_setup_flag = false
+
+    float stoploss_level = na
+    int stoploss_bar_offset = na
+    int stoploss_entry_bar = na
+    int last_short_entry_bar_offset = na
+
+    bool HeadAndShoulders_long = false
+    bool HeadAndShoulders_short = false
+
+
+
+    if barstate.islast
+
+        // Entries in a FALLING CHANNEL, potential long entries
+        if array.size(long_entries) > 0 and linReg_direction == 'Short'
+
+            // Get the most recent long entry bar index
+            int last_long_entry_bar = array.get(long_entries, array.size(long_entries) - 1)
+            signal_entry_bar := last_long_entry_bar
+            last_long_entry_bar_offset := bar_index - last_long_entry_bar
+
+            // Calculate the exact value of the lower channel at the entry bar
+            entry_level := (linReg_dn.m * last_long_entry_bar + linReg_dn.b) - linReg_dn.stdDev
+
+            // Determine if the structure is correct for a long entry. 
+            if entry_level < close and last_long_entry_bar_offset >= MINIMUM_BARS_FOR_ENTRY_VALIDATION
+
+                active_trade_setup_flag := true
+
+                //Define stoploss value
+                entry_type := "Long"
+                stoploss_level := lowest_value - (entry_level - lowest_value)
+                stoploss_bar_offset := long_stoploss_bar_offset
+                stoploss_entry_bar := bar_index + stoploss_bar_offset
+
+                // Identify Head and Shoulder Long
+                HeadAndShoulders_long := last_long_entry_bar < stoploss_entry_bar and last_long_entry_bar_offset >= MINIMUM_BARS_FOR_ENTRY_VALIDATION
+
+            
+        // Entries in a RISING CHANNEL, potential short entries
+        else if array.size(short_entries) > 0 and linReg_direction == 'Long'
+
+            // Get the most recent short entry bar index
+            int last_short_entry_bar = array.get(short_entries, array.size(short_entries) - 1)
+            signal_entry_bar := last_short_entry_bar
+            last_short_entry_bar_offset := bar_index - last_short_entry_bar
+
+            // Calculate the exact value of the upper channel at the entry bar
+            entry_level := (linReg_up.m * last_short_entry_bar + linReg_up.b) + linReg_up.stdDev
+
+            // Determine if the structure is correct for a short entry. 
+            if entry_level > close and last_short_entry_bar_offset >= MINIMUM_BARS_FOR_ENTRY_VALIDATION
+
+                active_trade_setup_flag  := true
+
+                // Define stoploss value
+                entry_type := "Short"
+                stoploss_level := highest_value + (highest_value - entry_level)
+                stoploss_bar_offset := short_stoploss_bar_offset
+                stoploss_entry_bar := bar_index + stoploss_bar_offset
+
+                // Identify Head And Shoulders Short
+                HeadAndShoulders_short := last_short_entry_bar < stoploss_entry_bar and last_short_entry_bar_offset >= MINIMUM_BARS_FOR_ENTRY_VALIDATION
+
+
+        // Step 3: Plot the levels
+        if plot_entry_levels
+
+            // Set active trade setup flag
+            entry_level_text = active_trade_setup_flag ? entry_type + " Reversal Entry" : "Last channel re-entry"
+            entry_level_line_type = active_trade_setup_flag ? line.style_solid : line.style_dotted
+            entry_level_width = active_trade_setup_flag ? 2 : 1
+
+            // Entry Levels
+            if not na(entry_level)
+                line.new(x1=signal_entry_bar, y1=entry_level, x2=bar_index + BARS_TO_RIGHT_LABELS, y2=entry_level, color=color.blue, width=entry_level_width, style=entry_level_line_type)
+                label.new(x=bar_index + BARS_TO_RIGHT_LABELS, y=entry_level, text=entry_level_text, color=color.blue, textcolor=color.white, style=label.style_label_left, size=size.tiny)
+            if not na(stoploss_level)
+                line.new(x1=bar_index + stoploss_bar_offset, y1=stoploss_level, x2=bar_index + BARS_TO_RIGHT_LABELS, y2=stoploss_level, color=color.red, width=2, style=line.style_solid)
+                label.new(x=bar_index + BARS_TO_RIGHT_LABELS, y=stoploss_level, text="Stoploss", color=color.red, textcolor=color.white, style=label.style_label_left, size=size.tiny)
+            
+            // Head and Shoulder Pattern 
+
+            // if HeadAndShoulders_long 
+            //     box.new(left = bar_index + stoploss_bar_offset, top = stoploss_level, right = bar_index, bottom = entry_level, border_color = COLOR_VALIDATED_LONG_BORDER, border_width = 2, bgcolor = COLOR_VALIDATED_LONG)
+            // if HeadAndShoulders_short 
+            //     box.new(left = bar_index + stoploss_bar_offset, top = entry_level, right = bar_index, bottom = stoploss_level, border_color = COLOR_VALIDATED_SHORT_BORDER, border_width = 2, bgcolor = COLOR_VALIDATED_SHORT)
+
+    [entry_level, stoploss_level, entry_type, HeadAndShoulders_long, HeadAndShoulders_short, signal_entry_bar]
+
+//----- Quadratic Regression
+adjust_arrays_to_max_length(x_array, y_array, max_length)=>
+
+    new_x_array = array.new_int(na)
+    new_y_array = array.new_float(na)
+
+    initial_bar_index = bar_index - max_length 
+
+    // We loop through all of the bars
+    for i = 0 to x_array.size() - 1
+
+        x = x_array.get(i)
+        y = y_array.get(i)
+
+        if x >= initial_bar_index
+            new_x_array.push(int(x))
+            new_y_array.push(y)
+
+    [new_x_array, new_y_array]
+
+quadraticRSquared(x, y) => // Function to calculate R^2 for quadratic regression
+    n = x.size()
+    meanY2 = y.avg()
+    var float sumX = 0
+    var float sumY = 0
+    var float sumX2 = 0
+    var float sumX3 = 0
+    var float sumX4 = 0
+    var float sumXY = 0
+    var float sumX2Y = 0
+    var float ssTot = 0
+    var float ssRes = 0
+    for i = 0 to n - 1 by 1
+        xi = array.get(x, i)
+        yi = array.get(y, i)
+        sumX := sumX + xi
+        sumY := sumY + yi
+        xi2 = xi * xi
+        sumX2 := sumX2 + xi2
+        sumX3 := sumX3 + xi2 * xi
+        sumX4 := sumX4 + xi2 * xi2
+        sumXY := sumXY + xi * yi
+        sumX2Y := sumX2Y + xi2 * yi
+        sumX2Y
+    Sxx = sumX2 - sumX * sumX / n
+    Sxy = sumXY - sumX * sumY / n
+    Sxx2 = sumX3 - sumX * sumX2 / n
+    Sx2x2 = sumX4 - sumX2 * sumX2 / n
+    Sx2y = sumX2Y - sumX2 * sumY / n
+    denominator = Sxx * Sx2x2 - Sxx2 * Sxx2
+    if denominator == 0
+        0
+    else
+        a = (Sx2y * Sxx - Sxy * Sxx2) / denominator
+        b = (Sx2x2 * Sxy - Sx2y * Sxx2) / denominator
+        c = (sumY - b * sumX - a * sumX2) / n
+        for i = 0 to n - 1 by 1
+            yi = array.get(y, i)
+            yPred = a * math.pow(array.get(x, i), 2) + b * array.get(x, i) + c
+            ssTot := ssTot + (yi - meanY2) * (yi - meanY2)
+            ssRes := ssRes + (yi - yPred) * (yi - yPred)
+            ssRes
+        1 - ssRes / ssTot
+plot_quadraticRegression(x, y) =>
+
+    n = array.size(x)
+
+    var color lineColor = na
+    var int line_width = 3
+    var string line_style = line.style_dotted
+    var float a2 = 0
+    var float b2 = 0
+    var float c2 = 0
+    sumX = 0.0
+    sumY = 0.0
+    sumX2 = 0.0
+    sumX3 = 0.0
+    sumX4 = 0.0
+    sumXY = 0.0
+    sumX2Y = 0.0
+    for i = 0 to n - 1 by 1
+        xi = array.get(x, i)
+        yi = array.get(y, i)
+        sumX := sumX + xi
+        sumY := sumY + yi
+        xi2 = xi * xi
+        sumX2 := sumX2 + xi2
+        sumX3 := sumX3 + xi2 * xi
+        sumX4 := sumX4 + xi2 * xi2
+        sumXY := sumXY + xi * yi
+        sumX2Y := sumX2Y + xi2 * yi
+        sumX2Y
+    Sxx = sumX2 - sumX * sumX / n
+    Sxy = sumXY - sumX * sumY / n
+    Sxx2 = sumX3 - sumX * sumX2 / n
+    Sx2x2 = sumX4 - sumX2 * sumX2 / n
+    Sx2y = sumX2Y - sumX2 * sumY / n
+    denominator = Sxx * Sx2x2 - Sxx2 * Sxx2
+    a2 := (Sx2y * Sxx - Sxy * Sxx2) / denominator
+    b2 := (Sx2x2 * Sxy - Sx2y * Sxx2) / denominator
+    c2 := (sumY - b2 * sumX - a2 * sumX2) / n
+
+    // Plot of the quadratic curve
+    int steps = QUADRATIC_REGRESSION_POINTS // Number of points to plot the curve
+    float step_size = (array.get(x, n - 1) - array.get(x, 0)) / steps
+    float prev_x = array.get(x, 0)
+    float prev_y = a2 * math.pow(prev_x, 2) + b2 * prev_x + c2
+
+    for i = 1 to steps by 1
+        float curr_x = array.get(x, 0) + i * step_size
+        float curr_y = a2 * math.pow(curr_x, 2) + b2 * curr_x + c2
+        lineColor := curr_y > prev_y ? COLOR_UP : COLOR_DOWN
+        line.new(x1 = int(prev_x), y1 = prev_y, x2 = int(curr_x), y2 = curr_y, color = lineColor, width = line_width, style = line_style)
+        prev_x := curr_x
+        prev_y := curr_y
+        prev_y
+
+
+plotProjection(x, y, projectionBars) => // Function to plot the projection of the best fit line forward by "z" bars
+
+    // Variables
+    var color lineColor = na
+    var int line_width = 4
+    var string line_style = line.style_solid
+    float starting_y = na
+    float ending_y = na
+    string trend_direction = na
+
+
+    // Calculations
+    n = array.size(x)
+    var float a = 0
+    var float b = 0
+    var float c = 0
+    var float d = 0
+
+    sumX = 0.0
+    sumY = 0.0
+    sumX2 = 0.0
+    sumX3 = 0.0
+    sumX4 = 0.0
+    sumXY = 0.0
+    sumX2Y = 0.0
+    for i = 0 to n - 1 by 1
+        xi = array.get(x, i)
+        yi = array.get(y, i)
+        sumX := sumX + xi
+        sumY := sumY + yi
+        xi2 = xi * xi
+        sumX2 := sumX2 + xi2
+        sumX3 := sumX3 + xi2 * xi
+        sumX4 := sumX4 + xi2 * xi2
+        sumXY := sumXY + xi * yi
+        sumX2Y := sumX2Y + xi2 * yi
+        sumX2Y
+    Sxx = sumX2 - sumX * sumX / n
+    Sxy = sumXY - sumX * sumY / n
+    Sxx2 = sumX3 - sumX * sumX2 / n
+    Sx2x2 = sumX4 - sumX2 * sumX2 / n
+    Sx2y = sumX2Y - sumX2 * sumY / n
+    denominator = Sxx * Sx2x2 - Sxx2 * Sxx2
+    a := (Sx2y * Sxx - Sxy * Sxx2) / denominator
+    b := (Sx2x2 * Sxy - Sx2y * Sxx2) / denominator
+    c := (sumY - b * sumX - a * sumX2) / n
+    for i = 1 to projectionBars by 1
+        float proj_x = array.get(x, n - 1) + i
+        float proj_y = a * math.pow(proj_x, 2) + b * proj_x + c
+        proy1 = a * math.pow(proj_x - 1, 2) + b * (proj_x - 1) + c
+        proy2 = proj_y
+        lineColor := proy1 < proy2 ? COLOR_UP : COLOR_DOWN
+        line.new(x1 = int(proj_x - 1), y1 = proy1, x2 = int(proj_x), y2 = proy2, color = lineColor, width = line_width, style = line_style)
+        starting_y := i == 1 ? proy1 : starting_y
+        ending_y := i == projectionBars ? proy2 : ending_y
+        trend_direction := starting_y < ending_y ? 'Long' : 'Short'
+        trend_direction
+
+    [starting_y, ending_y, trend_direction]
+
+get_cuadraticRegression_DataTable(dataTable_map, r2, trend_direction)=>
+
+    very_high_txt   = 'Very High Determination'
+    high_txt        = 'High Determination'
+    ok_txt          = 'Ok Determination'
+    low_txt         = 'Low Determination'
+
+	if not na(r2)
+
+        // Get the rating text 
+        rating_txt = 
+             r2 >= 0.9 ? very_high_txt :
+             r2 < 0.9 and r2 >= 0.8 ? high_txt :
+             r2 < 0.8 and r2 >= 0.6 ? ok_txt :
+             r2 < 0.6 ? low_txt : ''
+
+        rating_color_txt = switch rating_txt
+            very_high_txt => 'lime'
+            high_txt      => 'green'
+            ok_txt        => 'yellow'
+            low_txt       => 'red'
+
+        direction_color_txt = switch trend_direction
+            'Long'  => 'green'
+            'Short' => 'red'
+	
+		dataTable_map.put('sub_title', '')
+		dataTable_map.put('item_1', 'r2')
+		dataTable_map.put('data_1', fu.toPercentageString(r2,2))
+		dataTable_map.put('comment_1', rating_txt)
+        dataTable_map.put('color_1', rating_color_txt)
+
+		dataTable_map.put('item_2', 'Direction')
+		dataTable_map.put('data_2', trend_direction)
+		dataTable_map.put('comment_2', '')
+        dataTable_map.put('color_2', direction_color_txt)
+
+	dataTable_map
+
+
+//-------------------------------------------------------------------------------------------------
+// EXPORTS 
+//-------------------------------------------------------------------------------------------------
+// @function:                           Generates the linear regression channel for an array of values.
+// @param bar_index_array (array<int>): Array with bar indexes
+// @param prices_array (array<float>):  Array with prices
+// @param stdDev_mult (float):          Standard deviation multiple for the channels
+// @returns:                            Returns x1, x2, y1_mid, y2_mid, y1_up, y2_up, y1_dn, y2_dn, m, b, R2, stdDev
+export get_linear_regression(array<int> bar_index_array, array<float> prices_array, float stdDev_mult) =>
+
+    [x1, x2, y1_mid, y2_mid, y1_up, y2_up, y1_dn, y2_dn, m, b, R2, stdDev] = get_linearRegression(bar_index_array, prices_array, stdDev_mult)
+    [x1, x2, y1_mid, y2_mid, y1_up, y2_up, y1_dn, y2_dn, m, b, R2, stdDev]
+
+// @function:                    Gets the best fitting linear regression using optimum length 
+// @param max_length (int):         Maximum bar length
+// @param min_length (int):         Minimum bar length
+// @param source (float):           Source for the regression
+// @param stdDev_mult (float):      Array with prices
+// @param show_data_table (bool):   Activates and shows the data table 
+// @param tableYposInput (string):  Y position of the data table
+// @param tableXposInput (string):  X position of the data table
+// @returns:                        Returns three line objects that conform the regression channel, plus the optimal length and maximum r2
+export get_optimal_linearRegression_channel(int max_length, int min_length, float source, float stdDev_mult, bool show_data_table, string tableYpos, string tableXpos, string table_textSize, int barsToRight, bool plot_labels, bool include_levels) =>
+
+    [x_array, y_array] = get_data_arrays(max_length, source)
+    [linReg_up, linReg_mid, linReg_dn, optLength, maxR2] = get_best_fit_linearRegression(x_array, y_array, stdDev_mult, max_length, min_length)
+    [ln_linReg_up, ln_linReg_mid, ln_linReg_dn] = plot_linearRegressions(linReg_up, linReg_mid, linReg_dn, max_length, barsToRight, plot_labels, stdDev_mult, include_levels, true)
+
+    // Get the direction flag
+    [direction_flag, comment_txt, linReg_direction] = get_direction_flag(linReg_up, linReg_mid, linReg_dn, maxR2)
+
+    // Create and show the data table
+    if show_data_table
+        dataTableMap = get_linearRegression_DataTable(map.new<string, string>(), linReg_mid, max_length, direction_flag, comment_txt, linReg_direction)
+        du.generate_dataTable(dataTableMap, DATATABLE_TITLE, tableYpos, tableXpos, table_textSize)
+
+    [ln_linReg_up, ln_linReg_mid, ln_linReg_dn, optLength, maxR2, x_array, y_array]
+
+
+// @function: 							Gets data for the linear regression channel 
+// @param max_length (int): 			Maximum length for the linear regression.
+// @param min_length (int): 			Minimum length for the linear regression.
+// @param source (float): 			    Source for the linear regression
+// @param stdDev_mult (float): 		    Multiple for the standar deviations for the linear regression channel.
+// @returns: 							Returns a maps with the regression levels, the direction flag and the datatable map.
+export get_regressionChannel_data(int max_length, int min_length, float source, float stdDev_mult, bool plot_linearRegression, bool plot_labels, bool include_levels, int barsToRight, bool plot_entry_levels) =>
+
+
+    [x_array, y_array]                                      = get_data_arrays(max_length, source)
+    [linReg_up, linReg_mid, linReg_dn, optLength, maxR2]    = get_best_fit_linearRegression_v2(x_array, y_array, stdDev_mult, max_length, min_length)
+    [direction_flag, comment_txt, linReg_direction]         = get_direction_flag(linReg_up, linReg_mid, linReg_dn, maxR2)
+    dataTableMap                                            = get_linearRegression_DataTable(map.new<string, string>(), linReg_mid, max_length, direction_flag, comment_txt, linReg_direction)
+
+
+    // Get the highest and lowest values in the linear regression
+    [highest_value, lowest_value, lowest_value_bar_offset, highest_value_bar_offset] = get_highest_and_lowest_regression_values(optLength)
+    
+    if plot_linearRegression
+        [ln_linReg_up, ln_linReg_mid, ln_linReg_dn] = plot_linearRegressions(linReg_up, linReg_mid, linReg_dn, max_length, barsToRight, plot_labels, stdDev_mult, include_levels, false)
+
+
+    // Identify entry points
+    [short_entries, long_entries] = identify_entry_points(linReg_up, linReg_mid, linReg_dn)
+
+    // Call the function to plot levels
+    [entry_level, stoploss_level, entry_type, HeadAndShoulders_long, HeadAndShoulders_short, signal_entry_bar] = plot_and_validate_entry_levels(linReg_up, linReg_mid, linReg_dn,
+                                                                                     short_entries, long_entries,
+                                                                                     optLength,
+                                                                                     highest_value, lowest_value,
+                                                                                     lowest_value_bar_offset, highest_value_bar_offset,
+                                                                                     plot_entry_levels,
+                                                                                     linReg_direction)
+
+    // Get regression levels map
+    regressionLevels_map = get_regressionLevels_map(linReg_up, linReg_mid, linReg_dn, entry_level, stoploss_level)
+
+    // Get upper and lower channel prices for export
+    float y2_up = na
+    float y2_mid = na
+    float y2_dn = na
+    if not na(linReg_up) and not na(linReg_mid) and not na(linReg_dn)
+        y2_up := linReg_up.y2
+        y2_mid := linReg_mid.y2
+        y2_dn := linReg_dn.y2
+
+
+    //Export values
+    [regressionLevels_map, direction_flag, dataTableMap, optLength, linReg_direction,
+     x_array, y_array, maxR2, entry_level, stoploss_level, entry_type, y2_up, y2_mid, y2_dn, HeadAndShoulders_long, HeadAndShoulders_short, signal_entry_bar]
+
+
+// @function: 							Gets data for the linear regression channel 
+// @param length (int): 			    Length for the linear regression.
+// @param source (float): 			    Source for the linear regression
+// @param stdDev_mult (float): 		    Multiple for the standar deviations for the linear regression channel.
+// @returns: 							Returns a maps with the regression levels, the direction flag and the datatable map.
+export get_regressionChannel_by_length(int length, float source, float stdDev_mult, bool plot_linearRegression, bool plot_labels, bool include_levels, int barsToRight) =>
+
+
+    [x_array, y_array]                                      = get_data_arrays(length, source)
+    [linReg_up, linReg_mid, linReg_dn, r2]                  = get_linearRegression_by_length(x_array, y_array, length, stdDev_mult)
+    [direction_flag, comment_txt, linReg_direction]         = get_direction_flag(linReg_up, linReg_mid, linReg_dn, r2)
+    dataTableMap                                            = get_linearRegression_DataTable(map.new<string, string>(), linReg_mid, length, direction_flag, comment_txt, linReg_direction)
+    
+    if plot_linearRegression
+        [ln_linReg_up, ln_linReg_mid, ln_linReg_dn] = plot_linearRegressions(linReg_up, linReg_mid, linReg_dn, length, barsToRight, plot_labels, stdDev_mult, include_levels, false)
+
+    // Get regression levels map
+    float reversal_entry = na
+    float reversal_stop = na
+    regressionLevels_map = get_regressionLevels_map(linReg_up, linReg_mid, linReg_dn, reversal_entry, reversal_stop)
+
+    // Get upper and lower channel prices for export
+    float y2_up = na
+    float y2_mid = na
+    float y2_dn = na
+    if not na(linReg_up) and not na(linReg_mid) and not na(linReg_dn)
+        y2_up := linReg_up.y2
+        y2_mid := linReg_mid.y2
+        y2_dn := linReg_dn.y2
+
+
+    //Export values
+    [regressionLevels_map, direction_flag, dataTableMap, length, linReg_direction, x_array, y_array, r2, y2_up, y2_mid, y2_dn]
+
+
+// @function:                       Gets the best fitting linear regression using optimum length 
+// @param x_array (array<int>):     Maximum bar length
+// @param y_array (array<float>):   Minimum bar length
+// @param bars_to_project (int):    Array with prices
+// @returns:                        Returns three line objects
+export get_cuadratic_regression(array<float> x_array, array<float> y_array, int bars_to_project, int max_length) =>
+
+    // Adjust the arrays to the required size 
+    [new_x_array, new_y_array] = adjust_arrays_to_max_length(x_array, y_array, max_length)
+
+    // Get the cuadratic reqgressions
+    r2Quadratic = quadraticRSquared(new_x_array, new_y_array)
+    plot_quadraticRegression(new_x_array, new_y_array)
+
+    // Plot the cuadratic regression
+    [starting_y, ending_y, trend_direction] = plotProjection(new_x_array, new_y_array, bars_to_project)
+
+    // Get dataTable map
+    cr_dataTable_map = get_cuadraticRegression_DataTable(map.new<string, string>(), r2Quadratic, trend_direction)
+
+
+    [starting_y, ending_y, trend_direction, r2Quadratic, cr_dataTable_map, ending_y]
+
+//=======================================
+// CALCULATIONS FOR LOCAL CHART
+//=======================================
+
+// Set flag for with or without levels
+include_levels = switch with_levels_input
+    'with Levels' => true
+    'without Levels' => false
+
+// Get the arrays for the regression 
+[x_array, y_array] = get_data_arrays(max_length_input, source_input)
+
+
+// Linear Regression
+//--------------------------------------
+if plot_linearRegression_input
+
+    plot_entry_levels = true // Flag to plot the entry levels
+
+    // Create the linear regression 
+    [linReg_up, linReg_mid, linReg_dn, optLength, maxR2] = get_best_fit_linearRegression_v2(x_array, y_array, stdDev_mult_input, max_length_input, min_length_input)
+
+    // Get the highest and lowest values in the linear regression
+    max_bars_back(optLength, MAX_BARSBACK)
+    [highest_value, lowest_value, lowest_value_bar_offset, highest_value_bar_offset] = get_highest_and_lowest_regression_values(optLength)
+
+    // Get the direction flag
+    [direction_flag, comment_txt, linReg_direction] = get_direction_flag(linReg_up, linReg_mid, linReg_dn, maxR2)
+
+    // Plot the linear Regression
+    [ln_linReg_up, ln_linReg_mid, ln_linReg_dn] = plot_linearRegressions(linReg_up, linReg_mid, linReg_dn, max_length_input, bars_to_right, plot_labels_input, stdDev_mult_input, include_levels, true)
+
+    // Identify entry points
+    [short_entries, long_entries] = identify_entry_points(linReg_up, linReg_mid, linReg_dn)
+
+
+    // Call the function to plot levels
+    [entry_level, stoploss_level, entry_type, HeadAndShoulders_long, HeadAndShoulders_short, signal_entry_bar] = plot_and_validate_entry_levels(linReg_up, linReg_mid, linReg_dn,
+                                                                                         short_entries, long_entries,
+                                                                                         optLength,
+                                                                                         highest_value, lowest_value,
+                                                                                         lowest_value_bar_offset, highest_value_bar_offset,
+                                                                                         plot_entry_levels,
+                                                                                         linReg_direction)
+    
+
+    // Update the length for the pivots
+    if not na(linReg_mid)
+        pivot_max_length := int(linReg_mid.length)
+        pivot_max_length
+
+    // Create the table data from the linear regression 
+    dataTable_map := get_linearRegression_DataTable(dataTable_map, linReg_mid, max_length_input, direction_flag, comment_txt, linReg_direction)
+
+    // Plot the data table
+    if show_data_table_input
+        du.generate_dataTable(dataTable_map, DATATABLE_TITLE, tableYposInput, tableXposInput, table_textSize_input)
+
+
+
+
+// Cuadratic Regression
+//--------------------------------------
+if plot_quadraticRSquared_input
+
+    if barstate.islast
+
+        // Adjust the arrays to the required size 
+        [new_x_array, new_y_array] = adjust_arrays_to_max_length(x_array, y_array, max_length_input)
+
+        // Get the cuadratic reqgressions
+        r2Quadratic = quadraticRSquared(new_x_array, new_y_array)
+        plot_quadraticRegression(new_x_array, new_y_array)
+
+        // Plot the cuadratic regression
+        [starting_y, ending_y, trend_direction] = plotProjection(new_x_array, new_y_array, num_of_bars_to_project_input)
+

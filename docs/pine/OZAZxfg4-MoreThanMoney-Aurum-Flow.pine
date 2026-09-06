@@ -1,0 +1,296 @@
+// Este software e código faz parte integrante da propriedade intelectual de RicardoGarciaPT e sua Empresa MoreThanMoney
+// MoreThanMoney - Aurum Flow — variante do MTM Scanner afinada para PERPÉTUOS CRIPTO (timeframe 1H).
+//  1) Filtro de tendência OBRIGATÓRIO pela stack DEMA (só compra em alta, só vende em baixa) + RSI
+//  2) Defaults ATR/RR do backtest (SL 1.5×ATR · TP1 1.5R · TP2 3R · TP3 6R)
+//  3) Níveis ESTÁTICOS — entry/SL/TP congelados na barra do sinal
+//  4) Labels com DISTÂNCIA (pontos + %) de cada nível à entrada
+//  5) Gestão de conta: alavancagem útil + notional + custo de fees para o tamanho de conta configurado
+//  6) Alertas → webhook DEDICADO dos perps (/api/webhooks/tradingview-perps)
+
+//@version=6
+indicator("MoreThanMoney - Aurum Flow", overlay=true)
+
+// ───────────────────────── DEMA ─────────────────────────
+dema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    2 * ema1 - ema2
+
+dema15 = dema(close, 15)
+dema50 = dema(close, 50)
+dema238 = dema(close, 238)
+
+plot(dema15, color=color.blue, title="DEMA 15")
+plot(dema50, color=color.green, title="DEMA 50")
+plot(dema238, color=#ffce2b, title="DEMA 238")
+
+// ───────────────────────── POC (volume) ─────────────────────────
+lengthPOC = input.int(14, "Período do POC")
+var float highestVolPrice = na
+var float highestVol = 0.0
+if (bar_index % lengthPOC == 0)
+    highestVol := 0.0
+    highestVolPrice := na
+for i = 0 to lengthPOC - 1
+    if volume[i] > highestVol
+        highestVol := volume[i]
+        highestVolPrice := close[i]
+plot(highestVolPrice, color=color.orange, linewidth=1, title="Linha do POC")
+
+// ───────────────────────── AURUM FLOW — filtros (perps) ─────────────────────────
+afGroup = "==== AURUM FLOW (Perps) ===="
+useTrendFilter = input.bool(true, "Só operar a favor da tendência (stack DEMA)", group=afGroup, tooltip="COMPRA só em tendência de alta (DEMA15>DEMA50>DEMA238); VENDA só em baixa.")
+useRSIFilter   = input.bool(true, "Confirmar com RSI", group=afGroup)
+rsiLen         = input.int(14, "Período RSI", minval=2, group=afGroup)
+rsiBuyMin      = input.float(50, "RSI mínimo p/ COMPRA", group=afGroup)
+rsiSellMax     = input.float(50, "RSI máximo p/ VENDA", group=afGroup)
+
+rsiVal    = ta.rsi(close, rsiLen)
+uptrend   = dema15 > dema50 and dema50 > dema238
+downtrend = dema15 < dema50 and dema50 < dema238
+
+// ───────────────────────── Sinais (POC cross + filtro tendência/RSI) ─────────────────────────
+rawBuy  = ta.crossover(close, highestVolPrice)
+rawSell = ta.crossunder(close, highestVolPrice)
+buyOk   = (not useTrendFilter or uptrend) and (not useRSIFilter or rsiVal >= rsiBuyMin)
+sellOk  = (not useTrendFilter or downtrend) and (not useRSIFilter or rsiVal <= rsiSellMax)
+isBuySignal  = rawBuy and buyOk
+isSellSignal = rawSell and sellOk
+
+plotshape(isBuySignal, style=shape.labelup, location=location.belowbar, color=color.green, text="B", size=size.tiny, title="Sinal de Compra")
+plotshape(isSellSignal, style=shape.labeldown, location=location.abovebar, color=color.red, text="S", size=size.tiny, title="Sinal de Venda")
+
+// ───────────────────────── Momentum básico (contador) ─────────────────────────
+var int bSC = 0
+var int sSC = 0
+if close < close[4]
+    bSC := bSC == 9 ? 1 : bSC + 1
+    sSC := 0
+else
+    sSC := sSC == 9 ? 1 : sSC + 1
+    bSC := 0
+plotshape(bSC != 0, "Possivel Reversão Compra", style=shape.circle, location=location.belowbar, color=color.new(color.green, 40), size=size.tiny)
+plotshape(sSC != 0, "Possivel Reversão Venda", style=shape.circle, location=location.abovebar, color=color.new(color.red, 40), size=size.tiny)
+
+// ───────────────────────── ATR / Risk-Reward (defaults do backtest) ─────────────────────────
+atrGroup = "==== ATR / RISK-REWARD ===="
+useATR = input.bool(true, "Usar ATR para Risk-Reward", group=atrGroup)
+atrPeriod = input.int(14, "Período do ATR", minval=1, group=atrGroup)
+atrMultiplierSL = input.float(1.5, "Multiplicador ATR para Stop Loss", step=0.1, group=atrGroup)
+atrValue = ta.atr(atrPeriod)
+tp1RR = input.float(1.5, "TP1 Ratio (1:X)", minval=0.1, step=0.1, group=atrGroup)
+tp2RR = input.float(3.0, "TP2 Ratio (1:X)", minval=0.1, step=0.1, group=atrGroup)
+tp3RR = input.float(6.0, "TP3 Ratio (1:X)", minval=0.1, step=0.1, group=atrGroup)
+showTP1 = input.bool(true, "Exibir TP1", group=atrGroup)
+showTP2 = input.bool(true, "Exibir TP2", group=atrGroup)
+showTP3 = input.bool(true, "Exibir TP3", group=atrGroup)
+
+// modo percentual alternativo
+pctGroup = "==== TP/SL modo % (alternativo) ===="
+use_TPs = input.bool(false, "Usa níveis de TP em % (em vez de ATR)?", group=pctGroup)
+slx  = input.float(0.3, "SL %", step=0.1, group=pctGroup)
+tp1x = input.float(0.4, "TP1 %", step=0.1, group=pctGroup)
+tp2x = input.float(0.8, "TP2 %", step=0.1, group=pctGroup)
+tp3x = input.float(1.2, "TP3 %", step=0.1, group=pctGroup)
+
+// ───────────────────────── GESTÃO / CONTA (alavancagem + custo) ─────────────────────────
+accGroup = "==== GESTÃO / CONTA ===="
+accountSize = input.float(1000.0, "Tamanho da conta (USD)", minval=1, group=accGroup, tooltip="Capital da conta de perps para dimensionar posição, alavancagem e custo.")
+riskPct     = input.float(1.0, "Risco por trade (%)", minval=0.1, step=0.1, group=accGroup)
+takerFeePct = input.float(0.055, "Taxa taker (%)", step=0.005, group=accGroup, tooltip="Bybit taker ~0.055%. Custo ida+volta = notional × taxa × 2.")
+maxLev      = input.float(25.0, "Alavancagem máxima permitida", minval=1, group=accGroup)
+showPanel   = input.bool(true, "Mostrar painel de conta/custo", group=accGroup)
+usePips     = input.bool(false, "Distâncias em 'pips' (×10) em vez de pontos", group=accGroup, tooltip="Cripto não tem pips reais; por defeito mostra pontos de preço + %.")
+
+// ───────────────────────── Alertas ─────────────────────────
+alGroup = "====== ALERTAS ======"
+long_alert  = input.bool(true, "Permite Alertas de COMPRA", group=alGroup)
+short_alert = input.bool(true, "Permite Alertas de VENDA", group=alGroup)
+order_type  = input.string("MARKET", "Alerta para ordens", options=["LIMIT", "MARKET"], group=alGroup)
+alertsOn    = input.bool(true, "Emitir alertas para o site MTM", group=alGroup, tooltip="1 alerta, condição 'Any alert() function call', cola o URL do webhook dedicado dos perps.")
+
+// entrada
+entry_source   = input.source(close, "Fonte das Entradas", group="===== ENTRADA =====")
+use_cstm_entry = input.bool(false, "Usa entrada customizada?", group="===== ENTRADA =====")
+custom_entry   = input.price(0.0, "Preço de Entrada", confirm=false, group="===== ENTRADA =====")
+
+// ───────────────────────── Cálculo estático de níveis ─────────────────────────
+round_price(x) =>
+    xx = int(x / syminfo.mintick)
+    xx * syminfo.mintick
+
+Price_in = use_cstm_entry ? custom_entry : entry_source
+
+var string sigDir = na
+if isBuySignal
+    sigDir := "BUY"
+else if isSellSignal
+    sigDir := "SELL"
+
+var float entry1 = na
+var float sl  = na
+var float tp1 = na
+var float tp2 = na
+var float tp3 = na
+var float slPts = na
+var float tp1Pts = na
+var float tp2Pts = na
+var float tp3Pts = na
+var float slPct = na
+var float tp1Pct = na
+var float tp2Pct = na
+var float tp3Pct = na
+var float posNotional = na
+var float levNeeded = na
+var float marginUsed = na
+var float riskAmt = na
+var float feeCost = na
+var float feePctAcct = na
+var int et = 0
+
+pipUnit = usePips ? syminfo.mintick * 10 : 1.0
+distLbl(pts) => str.tostring(pts / pipUnit, format.mintick) + (usePips ? " pips" : " pts")
+
+// ESTÁTICO: calcula SÓ na barra do sinal e congela via var até ao próximo sinal.
+if isBuySignal or isSellSignal
+    entry1 := round_price(Price_in)
+    et := time
+    if useATR
+        d = atrValue * atrMultiplierSL
+        if isBuySignal
+            sl := round_price(entry1 - d)
+            tp1 := round_price(entry1 + d * tp1RR)
+            tp2 := round_price(entry1 + d * tp2RR)
+            tp3 := round_price(entry1 + d * tp3RR)
+        else
+            sl := round_price(entry1 + d)
+            tp1 := round_price(entry1 - d * tp1RR)
+            tp2 := round_price(entry1 - d * tp2RR)
+            tp3 := round_price(entry1 - d * tp3RR)
+    else if use_TPs
+        if isBuySignal
+            sl := round_price(entry1 * (1 - slx/100))
+            tp1 := round_price(entry1 * (1 + tp1x/100))
+            tp2 := round_price(entry1 * (1 + tp2x/100))
+            tp3 := round_price(entry1 * (1 + tp3x/100))
+        else
+            sl := round_price(entry1 * (1 + slx/100))
+            tp1 := round_price(entry1 * (1 - tp1x/100))
+            tp2 := round_price(entry1 * (1 - tp2x/100))
+            tp3 := round_price(entry1 * (1 - tp3x/100))
+    slPts := math.abs(entry1 - sl)
+    tp1Pts := math.abs(tp1 - entry1)
+    tp2Pts := math.abs(tp2 - entry1)
+    tp3Pts := math.abs(tp3 - entry1)
+    slPct  := entry1 != 0 ? slPts  / entry1 * 100 : na
+    tp1Pct := entry1 != 0 ? tp1Pts / entry1 * 100 : na
+    tp2Pct := entry1 != 0 ? tp2Pts / entry1 * 100 : na
+    tp3Pct := entry1 != 0 ? tp3Pts / entry1 * 100 : na
+    riskAmt := accountSize * riskPct / 100
+    posNotional := slPct > 0 ? riskAmt / (slPct / 100) : na
+    levNeeded := (not na(posNotional) and accountSize > 0) ? math.max(1.0, posNotional / accountSize) : na
+    levNeeded := not na(levNeeded) ? math.min(levNeeded, maxLev) : na
+    marginUsed := (not na(posNotional) and not na(levNeeded) and levNeeded > 0) ? posNotional / levNeeded : na
+    feeCost := not na(posNotional) ? posNotional * takerFeePct / 100 * 2 : na
+    feePctAcct := (not na(feeCost) and accountSize > 0) ? feeCost / accountSize * 100 : na
+
+// ───────────────────────── Linhas + labels com distância ─────────────────────────
+dt = time - time[4]
+var line lE = na
+var line lS = na
+var line l1 = na
+var line l2 = na
+var line l3 = na
+var label bE = na
+var label bS = na
+var label b1 = na
+var label b2 = na
+var label b3 = na
+
+if barstate.islast and not na(entry1)
+    line.delete(lE)
+    line.delete(lS)
+    line.delete(l1)
+    line.delete(l2)
+    line.delete(l3)
+    label.delete(bE)
+    label.delete(bS)
+    label.delete(b1)
+    label.delete(b2)
+    label.delete(b3)
+    xR = time + dt * 3
+    lE := line.new(et, entry1, xR, entry1, color=color.blue, xloc=xloc.bar_time, width=2)
+    lS := line.new(et, sl, xR, sl, color=color.red, xloc=xloc.bar_time, width=1)
+    bE := label.new(xR, entry1, "ENTRY " + str.tostring(entry1, format.mintick), color=color.blue, textcolor=color.white, style=label.style_label_left, xloc=xloc.bar_time, size=size.small)
+    bS := label.new(xR, sl, "SL " + str.tostring(sl, format.mintick) + "  (-" + distLbl(slPts) + " | -" + str.tostring(slPct, "#.##") + "%)", color=color.red, textcolor=color.white, style=label.style_label_left, xloc=xloc.bar_time, size=size.small)
+    if showTP1
+        l1 := line.new(et, tp1, xR, tp1, color=color.green, xloc=xloc.bar_time)
+        b1 := label.new(xR, tp1, "TP1 " + str.tostring(tp1, format.mintick) + "  (+" + distLbl(tp1Pts) + " | +" + str.tostring(tp1Pct, "#.##") + "% | 1:" + str.tostring(tp1RR) + ")", color=color.green, textcolor=color.white, style=label.style_label_left, xloc=xloc.bar_time, size=size.small)
+    if showTP2
+        l2 := line.new(et, tp2, xR, tp2, color=color.green, xloc=xloc.bar_time)
+        b2 := label.new(xR, tp2, "TP2 " + str.tostring(tp2, format.mintick) + "  (+" + distLbl(tp2Pts) + " | +" + str.tostring(tp2Pct, "#.##") + "% | 1:" + str.tostring(tp2RR) + ")", color=color.green, textcolor=color.white, style=label.style_label_left, xloc=xloc.bar_time, size=size.small)
+    if showTP3
+        l3 := line.new(et, tp3, xR, tp3, color=color.green, xloc=xloc.bar_time)
+        b3 := label.new(xR, tp3, "TP3 " + str.tostring(tp3, format.mintick) + "  (+" + distLbl(tp3Pts) + " | +" + str.tostring(tp3Pct, "#.##") + "% | 1:" + str.tostring(tp3RR) + ")", color=color.green, textcolor=color.white, style=label.style_label_left, xloc=xloc.bar_time, size=size.small)
+
+// ───────────────────────── Painel de conta / alavancagem / custo ─────────────────────────
+var table pnl = table.new(position.bottom_right, 2, 8, border_width=1, frame_color=color.gray, frame_width=1)
+if showPanel and barstate.islast and not na(entry1)
+    bg = color.new(color.black, 15)
+    tc = color.white
+    table.cell(pnl, 0, 0, "AURUM FLOW · " + (na(sigDir) ? "—" : sigDir), bgcolor=color.new(color.blue, 0), text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 0, syminfo.ticker, bgcolor=color.new(color.blue, 0), text_color=tc, text_size=size.small)
+    table.cell(pnl, 0, 1, "Conta", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 1, "$" + str.tostring(accountSize, "#.##"), bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 0, 2, "Risco (" + str.tostring(riskPct, "#.#") + "%)", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 2, "$" + str.tostring(riskAmt, "#.##"), bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 0, 3, "SL dist.", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 3, str.tostring(slPct, "#.##") + "% (" + distLbl(slPts) + ")", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 0, 4, "Notional", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 4, "$" + str.tostring(posNotional, "#.##"), bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 0, 5, "Alav. útil", bgcolor=bg, text_color=color.yellow, text_size=size.small)
+    table.cell(pnl, 1, 5, str.tostring(levNeeded, "#.#") + "x", bgcolor=bg, text_color=color.yellow, text_size=size.small)
+    table.cell(pnl, 0, 6, "Margem", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 6, "$" + str.tostring(marginUsed, "#.##"), bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 0, 7, "Custo fees", bgcolor=bg, text_color=tc, text_size=size.small)
+    table.cell(pnl, 1, 7, "$" + str.tostring(feeCost, "#.##") + " (" + str.tostring(feePctAcct, "#.##") + "%)", bgcolor=bg, text_color=tc, text_size=size.small)
+
+// ───────────────────────── Alertas → webhook DEDICADO dos perps ─────────────────────────
+//  1 alerta, condição "Any alert() function call", URL:
+//  https://www.morethanmoney.pt/api/webhooks/tradingview-perps?secret=mtm-tv-sensei-2026
+//  Gráfico no timeframe 1H.
+sc_conf = '{"Tendencia Alta":' + (uptrend ? 'true' : 'false') + ',"Tendencia Baixa":' + (downtrend ? 'true' : 'false') + ',"RSI":' + str.tostring(math.round(rsiVal)) + ',"Acima POC":' + (close > highestVolPrice ? 'true' : 'false') + '}'
+
+f_json_af(_dir) =>
+    m = '{"strategy":"MTM Aurum Flow","alert_name":"MTM Perps Aurum Flow","ticker":"' + syminfo.ticker + '"'
+    m := m + ',"exchange":"' + syminfo.prefix + '"'
+    m := m + ',"timeframe":"' + timeframe.period + '"'
+    m := m + ',"action":"' + _dir + '"'
+    m := m + ',"order_type":"' + order_type + '"'
+    m := m + ',"entry":' + str.tostring(entry1)
+    m := m + ',"sl":' + str.tostring(sl)
+    m := m + ',"tp1":' + str.tostring(tp1)
+    m := m + ',"tp2":' + str.tostring(tp2)
+    m := m + ',"tp3":' + str.tostring(tp3)
+    m := m + ',"sl_pct":' + str.tostring(slPct)
+    m := m + ',"tp1_pct":' + str.tostring(tp1Pct)
+    m := m + ',"tp2_pct":' + str.tostring(tp2Pct)
+    m := m + ',"tp3_pct":' + str.tostring(tp3Pct)
+    m := m + ',"account":' + str.tostring(accountSize)
+    m := m + ',"risk_pct":' + str.tostring(riskPct)
+    m := m + ',"leverage":' + str.tostring(levNeeded)
+    m := m + ',"notional":' + str.tostring(posNotional)
+    m := m + ',"margin":' + str.tostring(marginUsed)
+    m := m + ',"fee_cost":' + str.tostring(feeCost)
+    m := m + ',"confirmations":' + sc_conf + '}'
+    m
+
+valid_af = not na(entry1) and not na(sl) and not na(tp1)
+
+if alertsOn and isBuySignal and long_alert and valid_af
+    alert(f_json_af("buy"), alert.freq_once_per_bar_close)
+if alertsOn and isSellSignal and short_alert and valid_af
+    alert(f_json_af("sell"), alert.freq_once_per_bar_close)
+
+alertcondition(isBuySignal and long_alert, "Aurum Flow COMPRA", "MTM Perps Aurum Flow BUY")
+alertcondition(isSellSignal and short_alert, "Aurum Flow VENDA", "MTM Perps Aurum Flow SELL")

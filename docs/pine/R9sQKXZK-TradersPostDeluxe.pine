@@ -1,0 +1,1283 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © adam_overton
+// Moved maintenance to Vantage-Stack
+
+//@version=6
+import xprophetx/jsonBuilder/2
+
+// @description Enhanced TradersPost integration library with comprehensive order management
+library("TradersPostDeluxe", true)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENUMS AND TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export enum Action
+    buy = "buy"
+    sell = "sell"
+    exit = "exit"
+    cancel = "cancel"
+    add = "add"
+
+export enum OrderType
+    market = "market"
+    limit = "limit"
+    stop = "stop"
+    stop_limit = "stop_limit"
+    trailing_stop = "trailing_stop"
+
+export enum QuantityType
+    fixed = "fixed"
+    dollar = "dollar"
+    percent = "percent"
+
+export enum Sentiment
+    long = "long"
+    short = "short" 
+    flat = "flat"
+
+export enum OptionType
+    both = "both"
+    call = "call"
+    put = "put"
+
+export enum IntrinsicValue
+    itm = "itm"
+    otm = "otm"
+
+export enum StopLossType
+    stop = "stop"
+    stop_limit = "stop_limit"
+    trailing_stop = "trailing_stop"
+
+export enum TimeInForce
+    day = "DAY"
+    gtc = "GTC"
+    ioc = "IOC"
+    fok = "FOK"
+
+// Error handling type
+export type ErrorResponse
+    bool success
+    array<string> errors
+    string message
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE JSON BUILDING FRAMEWORK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Build a JSON field with proper handling of required vs optional fields
+// @param key The JSON key name
+// @param value The value to include (any type, will be converted to string)
+// @param required If true, field is always included even if value is na/empty
+// @returns String containing JSON field or empty string if optional and na/empty
+export _buildJSONField(string key, string value, bool required = false) =>
+    if required or (not na(value) and value != "")
+        jsonBuilder.jsonString(key, value)
+    else
+        ""
+
+// @function Build a conditional JSON field that's only included if value is valid
+// @param key The JSON key name  
+// @param value The value to include
+// @returns String containing JSON field or empty string if value is na/empty
+export _buildConditionalField(string key, string value) =>
+    _buildJSONField(key, value, false)
+
+// @function Build a conditional JSON field for numeric values
+// @param key The JSON key name
+// @param value The numeric value
+// @returns String containing JSON field or empty string if value is na
+export _buildConditionalNumericField(string key, float value) =>
+    na(value) ? "" : jsonBuilder.jsonString(key, str.tostring(value))
+
+// @function Build nested JSON objects for takeProfit/stopLoss
+// @param objectType The type of object being built ("takeProfit" or "stopLoss")
+// @param price The limit price for TP or stop price for SL
+// @param amount The dollar amount (optional)
+// @param percent The percentage (optional)
+// @param stopType The stop loss type - only for stopLoss
+// @param limitPrice The limit price for stop_limit orders - only for stopLoss
+// @param trailAmount Trailing amount for trailing stops - only for stopLoss
+// @param trailPercent Trailing percent for trailing stops - only for stopLoss
+// @returns String containing nested JSON object or empty string if no valid data
+export _buildNestedObject(string objectType, float price = na, float amount = na, 
+                           float percent = na, StopLossType stopType = StopLossType.stop,
+                           float limitPrice = na, float trailAmount = na, 
+                           float trailPercent = na) =>
+    
+    // Collect non-empty fields for the nested object
+    fields = array.new<string>()
+    
+    if objectType == "takeProfit"
+        // TradersPost accepts only one of: limitPrice, amount, or percent
+        if not na(price)
+            array.push(fields, jsonBuilder.jsonString("limitPrice", str.tostring(price)))
+        else if not na(amount)
+            array.push(fields, jsonBuilder.jsonString("amount", str.tostring(amount)))
+        else if not na(percent)
+            array.push(fields, jsonBuilder.jsonString("percent", str.tostring(percent)))
+    
+    else if objectType == "stopLoss"
+        // Create stopLoss object if we have price/amount data OR trailing stop parameters
+        bool hasStopLossData = not na(price) or not na(amount) or not na(percent)
+        bool hasTrailingData = stopType == StopLossType.trailing_stop and (not na(trailAmount) or not na(trailPercent))
+        
+        if hasStopLossData or hasTrailingData
+            // Add type field first (stop, stop_limit, or trailing_stop)
+            if stopType == StopLossType.trailing_stop
+                array.push(fields, jsonBuilder.jsonString("type", str.tostring(StopLossType.trailing_stop)))
+            else if stopType == StopLossType.stop_limit and not na(limitPrice)
+                array.push(fields, jsonBuilder.jsonString("type", str.tostring(StopLossType.stop_limit)))
+            else
+                // Default to "stop" type
+                array.push(fields, jsonBuilder.jsonString("type", str.tostring(StopLossType.stop)))
+            
+            // Add price fields (only one of: stopPrice, amount, or percent)
+            if not na(price)
+                array.push(fields, jsonBuilder.jsonString("stopPrice", str.tostring(price)))
+            else if not na(amount)
+                array.push(fields, jsonBuilder.jsonString("amount", str.tostring(amount)))
+            else if not na(percent)
+                array.push(fields, jsonBuilder.jsonString("percent", str.tostring(percent)))
+            
+            // Add limit price for stop_limit orders
+            if stopType == StopLossType.stop_limit and not na(limitPrice)
+                array.push(fields, jsonBuilder.jsonString("limitPrice", str.tostring(limitPrice)))
+            
+            // Add trailing stop parameters
+            if stopType == StopLossType.trailing_stop
+                if not na(trailAmount)
+                    array.push(fields, jsonBuilder.jsonString("trailAmount", str.tostring(trailAmount)))
+                if not na(trailPercent)
+                    array.push(fields, jsonBuilder.jsonString("trailPercent", str.tostring(trailPercent)))
+    
+    // Only build object if we have fields
+    if array.size(fields) > 0
+        '"' + objectType + '": ' + jsonBuilder.jsonObject(array.join(fields, ", "))
+    else
+        ""
+
+// @function Master JSON builder that validates parameters and constructs JSON
+// @param ticker The trading symbol
+// @param action The order action (buy, sell, exit, etc.)
+// @param quantity The order quantity
+// @param quantityType The type of quantity (fixed, dollar, percent)
+// @param orderType The order type (market, limit, stop, etc.)
+// @param sentiment The position sentiment (long, short, flat) - optional
+// @param cancel Controls order cancellation (true = cancel existing orders, false = don't cancel)
+// @param timeInForce Time in force for the order (DAY, GTC, IOC, FOK)
+// @param limitPrice Price for limit orders
+// @param stopPrice Price for stop orders
+// @param trailAmount Trailing amount for trailing stops
+// @param trailPercent Trailing percent for trailing stops
+// @param takeProfitPrice Take profit limit price (absolute)
+// @param takeProfitAmount Take profit dollar amount (relative)
+// @param takeProfitPercent Take profit percentage (relative)
+// @param stopLossPrice Stop loss price (absolute)
+// @param stopLossAmount Stop loss dollar amount (relative)
+// @param stopLossPercent Stop loss percentage (relative)
+// @param stopLossType Stop loss order type
+// @param stopLossLimitPrice Limit price for stop_limit orders
+// @param extendedHours Enable extended hours trading (boolean)
+// @param optionType Option type for options trading (both/call/put)
+// @param intrinsicValue Intrinsic value filter for options (itm/otm)
+// @param expiration Option expiration (date string)
+// @param strikePrice Option strike price
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment for the order (shows in TradersPost UI for debugging)
+// @returns ErrorResponse with success status and JSON string or error details
+export _validateAndBuildJSON(string ticker = na, Action action = Action.buy,
+                             float quantity = na, QuantityType quantityType = QuantityType.fixed,
+                             OrderType orderType = OrderType.market, Sentiment sentiment = na,
+                             bool cancel = false, TimeInForce timeInForce = na,
+                             float limitPrice = na, float stopPrice = na, 
+                             float trailAmount = na, float trailPercent = na,
+                             float takeProfitPrice = na, float takeProfitAmount = na, float takeProfitPercent = na,
+                             float stopLossPrice = na, float stopLossAmount = na, float stopLossPercent = na,
+                             StopLossType stopLossType = StopLossType.stop, float stopLossLimitPrice = na,
+                             bool extendedHours = false, OptionType optionType = na, IntrinsicValue intrinsicValue = na,
+                             string expiration = na, float strikePrice = na,
+                             float signalPrice = na, string comment = na) =>
+    
+    // Initialize response
+    response = ErrorResponse.new(true, array.new<string>(), "")
+    
+    // Build core fields
+    jsonFields = array.new<string>()
+    
+    // Required fields
+    array.push(jsonFields, _buildJSONField("ticker", na(ticker) ? syminfo.ticker : ticker, true))
+    array.push(jsonFields, _buildJSONField("action", str.tostring(action), true))
+    
+    // Conditional core fields
+    if not na(quantity)
+        array.push(jsonFields, jsonBuilder.jsonString("quantity", str.tostring(quantity)))
+    
+    if quantityType != QuantityType.fixed
+        array.push(jsonFields, jsonBuilder.jsonString("quantityType", str.tostring(quantityType)))
+        
+    // Always include orderType for clarity and consistency
+    array.push(jsonFields, jsonBuilder.jsonString("orderType", str.tostring(orderType)))
+        
+    if not na(sentiment)
+        array.push(jsonFields, jsonBuilder.jsonString("sentiment", str.tostring(sentiment)))
+    
+    // Price fields
+    signalPriceField = _buildConditionalNumericField("signalPrice", signalPrice)
+    if signalPriceField != ""
+        array.push(jsonFields, signalPriceField)
+    
+    // Add limitPrice only for order types that use it
+    if orderType == OrderType.limit or orderType == OrderType.stop_limit
+        limitField = _buildConditionalNumericField("limitPrice", limitPrice)
+        if limitField != ""
+            array.push(jsonFields, limitField)
+
+    // Add stopPrice only for order types that use it
+    if orderType == OrderType.stop or orderType == OrderType.stop_limit
+        stopField = _buildConditionalNumericField("stopPrice", stopPrice)
+        if stopField != ""
+            array.push(jsonFields, stopField)
+        
+    trailAmountField = _buildConditionalNumericField("trailAmount", trailAmount)
+    if trailAmountField != ""
+        array.push(jsonFields, trailAmountField)
+        
+    trailPercentField = _buildConditionalNumericField("trailPercent", trailPercent)
+    if trailPercentField != ""
+        array.push(jsonFields, trailPercentField)
+    
+    // Time in force
+    tifField = na(timeInForce) ? "" : _buildConditionalField("timeInForce", str.tostring(timeInForce))
+    if tifField != ""
+        array.push(jsonFields, tifField)
+    
+    // Build nested objects
+    takeProfitObj = _buildNestedObject("takeProfit", takeProfitPrice, takeProfitAmount, takeProfitPercent)
+    if takeProfitObj != ""
+        array.push(jsonFields, takeProfitObj)
+        
+    stopLossObj = _buildNestedObject("stopLoss", stopLossPrice, stopLossAmount, stopLossPercent, 
+                                       stopLossType, stopLossLimitPrice, trailAmount, trailPercent)
+    if stopLossObj != ""
+        array.push(jsonFields, stopLossObj)
+    
+    // Extended hours trading - only add if true (false is default)
+    if extendedHours
+        array.push(jsonFields, jsonBuilder.jsonString("extendedHours", "true"))
+    
+    // Options trading fields
+    if not na(optionType)
+        array.push(jsonFields, jsonBuilder.jsonString("optionType", str.tostring(optionType)))
+    
+    if not na(intrinsicValue)
+        array.push(jsonFields, jsonBuilder.jsonString("intrinsicValue", str.tostring(intrinsicValue)))
+        
+    expirationField = _buildConditionalField("expiration", expiration)
+    if expirationField != ""
+        array.push(jsonFields, expirationField)
+        
+    strikePriceField = _buildConditionalNumericField("strikePrice", strikePrice)
+    if strikePriceField != ""
+        array.push(jsonFields, strikePriceField)
+    
+    // Optional comment field (useful for debugging in TradersPost UI)
+    commentField = _buildConditionalField("comment", comment)
+    if commentField != ""
+        array.push(jsonFields, commentField)
+    
+    // Cancel behavior control - only add if true (false is default)
+    if cancel
+        array.push(jsonFields, jsonBuilder.jsonString("cancel", "true"))
+    // Note: When cancel is false, we don't add the field (TradersPost default is no cancel)
+    
+    // Add timestamp
+    timeString = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", syminfo.timezone)
+    array.push(jsonFields, jsonBuilder.jsonString("time", timeString))
+    
+    // Build final JSON
+    json = jsonBuilder.jsonObject(array.join(jsonFields, ", "))
+    response.message := json
+    response
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARAMETER VALIDATION SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+// @function Helper to validate symbol format (basic patterns)
+// @param symbol The symbol string to check
+// @returns True if format appears valid
+_isValidSymbolFormat(string symbol) =>
+    if na(symbol) or symbol == ""
+        false
+    else if str.length(symbol) > 20
+        false
+    else
+        // Allow alphanumeric, dots, hyphens, underscores (common patterns)
+        hasInvalidChar = str.contains(symbol, " ") or str.contains(symbol, "\t") or 
+                         str.contains(symbol, "\n") or str.contains(symbol, "{") or 
+                         str.contains(symbol, "}") or str.contains(symbol, '"') or
+                         str.contains(symbol, "'") or str.contains(symbol, "\\")
+        not hasInvalidChar
+
+// @function Validate order parameters before JSON construction
+// @param ticker Trading symbol
+// @param action Order action
+// @param quantity Order quantity  
+// @param quantityType Type of quantity (fixed, dollar, percent)
+// @param orderType Order type (market, limit, stop, etc.)
+// @param limitPrice Limit price for limit orders
+// @param stopPrice Stop price for stop orders
+// @returns ErrorResponse with validation results
+export ValidateOrder(string ticker, Action action, OrderType orderType, float limitPrice = na, float stopPrice = na) =>
+    
+    errors = array.new<string>()
+    
+    // Validate ticker
+    if na(ticker) or ticker == ""
+        array.push(errors, "Ticker is required and cannot be empty")
+    else if str.length(ticker) > 20
+        array.push(errors, "Ticker symbol too long (max 20 characters)")
+    else if not _isValidSymbolFormat(ticker)
+        array.push(errors, "Invalid ticker symbol format")
+    
+    // Validate order type specific requirements
+    if orderType == OrderType.limit
+        if na(limitPrice) or limitPrice <= 0
+            array.push(errors, "Limit orders require a valid limit price")
+
+    else if orderType == OrderType.stop or orderType == OrderType.stop_limit
+        if na(stopPrice) or stopPrice <= 0
+            array.push(errors, "Stop orders require a valid stop price")
+    
+    // Validate price relationships for combination orders
+    if not na(limitPrice) and not na(stopPrice)
+        if action == Action.buy and limitPrice <= stopPrice
+            array.push(errors, "For buy orders, limit price should be above stop price")
+        else if action == Action.sell and limitPrice >= stopPrice
+            array.push(errors, "For sell orders, limit price should be below stop price")
+    
+    // Build response
+    response = ErrorResponse.new(true, errors, "Validation passed")
+    if array.size(errors) > 0
+        response.success := false
+        response.message := "Validation failed: " + array.join(errors, "; ")
+    
+    response
+
+// @function Validate quantity based on type and constraints
+// @param quantity The quantity value
+// @param quantityType The type of quantity
+// @returns ErrorResponse with validation results
+export ValidateQuantity(float quantity, QuantityType quantityType) =>
+    errors = array.new<string>()
+    
+    if na(quantity) or quantity <= 0
+        array.push(errors, "Quantity must be greater than 0")
+    else if quantity != math.floor(quantity) and quantity < 1
+        array.push(errors, "Quantity should be whole number for most brokers")
+            
+    if na(quantity)
+        array.push(errors, "Quantity cannot be na")
+    else if quantity <= 0
+        array.push(errors, "Quantity must be greater than 0")
+    else
+        switch quantityType
+            QuantityType.fixed =>
+                if quantity > 1000000
+                    array.push(errors, "Fixed quantity exceeds reasonable limit (1M)")
+            
+            QuantityType.dollar =>
+                if quantity > 10000000
+                    array.push(errors, "Dollar amount exceeds reasonable limit ($10M)")
+                else if quantity < 1
+                    array.push(errors, "Dollar amount should be at least $1")
+            
+            QuantityType.percent =>
+                if quantity > 100
+                    array.push(errors, "Percent cannot exceed 100%")
+                else if quantity < 0.01
+                    array.push(errors, "Percent should be at least 0.01%")
+    
+    response = ErrorResponse.new(true, errors, "Quantity validation passed")
+    if array.size(errors) > 0
+        response.success := false
+        response.message := "Quantity validation failed: " + array.join(errors, "; ")
+    
+    response
+
+// @function Validate price relationships and values
+// @param entryPrice Entry price for the order
+// @param stopPrice Stop loss price
+// @param takeProfitPrice Take profit price
+// @param action Order action (buy/sell)
+// @returns ErrorResponse with validation results
+export ValidatePrices(float entryPrice, float stopPrice = na, float takeProfitPrice = na, Action action = Action.buy) =>
+    errors = array.new<string>()
+    
+    // Validate individual prices are positive
+    if not na(entryPrice) and entryPrice <= 0
+        array.push(errors, "Entry price must be positive")
+    
+    if not na(stopPrice) and stopPrice <= 0
+        array.push(errors, "Stop price must be positive")
+        
+    if not na(takeProfitPrice) and takeProfitPrice <= 0
+        array.push(errors, "Take profit price must be positive")
+    
+    // Validate price relationships for buy orders
+    if action == Action.buy and not na(entryPrice)
+        if not na(stopPrice) and stopPrice >= entryPrice
+            array.push(errors, "Buy order stop loss must be below entry price")
+        
+        if not na(takeProfitPrice) and takeProfitPrice <= entryPrice  
+            array.push(errors, "Buy order take profit must be above entry price")
+    
+    // Validate price relationships for sell orders
+    else if action == Action.sell and not na(entryPrice)
+        if not na(stopPrice) and stopPrice <= entryPrice
+            array.push(errors, "Sell order stop loss must be above entry price")
+            
+        if not na(takeProfitPrice) and takeProfitPrice >= entryPrice
+            array.push(errors, "Sell order take profit must be below entry price")
+    
+    // Validate reasonable price ranges (prevent obvious errors)
+    prices = array.new<float>()
+    if not na(entryPrice)
+        array.push(prices, entryPrice)
+    if not na(stopPrice)
+        array.push(prices, stopPrice) 
+    if not na(takeProfitPrice)
+        array.push(prices, takeProfitPrice)
+    
+    if array.size(prices) > 1
+        maxPrice = array.max(prices)
+        minPrice = array.min(prices)
+        if maxPrice / minPrice > 10  // 10x difference seems unreasonable
+            array.push(errors, "Price difference too large - check for decimal errors")
+    
+    response = ErrorResponse.new(true, errors, "Price validation passed")
+    if array.size(errors) > 0
+        response.success := false
+        response.message := "Price validation failed: " + array.join(errors, "; ")
+        
+    response
+
+// @function Validate trading symbol format
+// @param ticker The symbol to validate
+// @returns ErrorResponse with validation results
+export ValidateSymbol(string ticker) =>
+    errors = array.new<string>()
+    
+    if na(ticker) or ticker == ""
+        array.push(errors, "Symbol cannot be empty")
+    else
+        // Basic format validation
+        if str.length(ticker) < 1 or str.length(ticker) > 20
+            array.push(errors, "Symbol length must be 1-20 characters")
+        
+        // Check for invalid characters (basic validation)
+        if str.contains(ticker, " ") or str.contains(ticker, "\t") or str.contains(ticker, "\n")
+            array.push(errors, "Symbol cannot contain whitespace")
+            
+        if str.contains(ticker, "{") or str.contains(ticker, "}") or str.contains(ticker, '"')
+            array.push(errors, "Symbol contains invalid characters")
+    
+    response = ErrorResponse.new(true, errors, "Symbol validation passed")
+    if array.size(errors) > 0
+        response.success := false
+        response.message := "Symbol validation failed: " + array.join(errors, "; ")
+        
+    response
+
+
+// @function Create validation error collection and reporting system
+// @param validationResults Array of ErrorResponse objects from multiple validations
+// @returns Combined ErrorResponse with all validation results
+export CombineValidationResults(array<ErrorResponse> validationResults) =>
+    combinedErrors = array.new<string>()
+    allPassed = true
+    
+    for i = 0 to array.size(validationResults) - 1
+        result = array.get(validationResults, i)
+        if not result.success
+            allPassed := false
+            // Add all errors from this validation
+            for j = 0 to array.size(result.errors) - 1
+                error = array.get(result.errors, j)
+                array.push(combinedErrors, error)
+    
+    response = ErrorResponse.new(allPassed, combinedErrors, "")
+    if allPassed
+        response.message := "All validations passed"
+    else
+        response.message := "Validation errors: " + array.join(combinedErrors, "; ")
+    
+    response
+
+// @function Comprehensive validation for all order parameters
+// @param ticker Trading symbol
+// @param action Order action  
+// @param quantity Order quantity
+// @param quantityType Type of quantity
+// @param orderType Order type
+// @param limitPrice Limit price (optional)
+// @param stopPrice Stop price (optional) 
+// @param takeProfitPrice Take profit price (optional)
+// @returns ErrorResponse with complete validation results
+export ValidateCompleteOrder(string ticker, Action action, float quantity, QuantityType quantityType,
+                               OrderType orderType, float limitPrice = na, float stopPrice = na,
+                               float takeProfitPrice = na) =>
+
+    validations = array.new<ErrorResponse>()
+
+    // Run all individual validations
+    array.push(validations, ValidateSymbol(ticker))
+    if action != Action.exit and action != Action.cancel
+        array.push(validations, ValidateQuantity(quantity, quantityType))
+    array.push(validations, ValidateOrder(ticker, action, orderType, limitPrice, stopPrice))
+    array.push(validations, ValidatePrices(limitPrice, stopPrice, takeProfitPrice, action))
+    
+    // Combine all results
+    CombineValidationResults(validations)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR HANDLING PATTERNS & UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Error severity levels
+export enum ErrorSeverity
+    info = "info"
+    warning = "warning"
+    error = "error"
+    critical = "critical"
+
+// Enhanced error response with severity and context
+export type EnhancedErrorResponse  
+    bool success
+    array<string> errors
+    string message
+    ErrorSeverity severity
+    string context
+    int timestamp
+    string functionName
+
+// @function Create standardized error response
+// @param success Whether the operation succeeded
+// @param errorMessages Array of error messages
+// @param message Summary message
+// @param severity Error severity level
+// @param context Context where error occurred
+// @param functionName Name of function that generated error
+// @returns EnhancedErrorResponse with all error details
+export CreateErrorResponse(bool success, array<string> errorMessages = na, string message = "", 
+                           ErrorSeverity severity = ErrorSeverity.error, string context = "",
+                           string functionName = "") =>
+    
+    errors = na(errorMessages) ? array.new<string>() : errorMessages
+    EnhancedErrorResponse.new(
+         success,
+         errors, 
+         message,
+         severity,
+         context,
+         timenow,
+         functionName
+     )
+
+// @function Handle validation errors with context
+// @param validationResult The validation result to handle
+// @param context Description of what was being validated
+// @param functionName Name of calling function
+// @returns Processed error response with enhanced context
+export HandleValidationError(ErrorResponse validationResult, string context = "", string functionName = "") =>
+    if validationResult.success
+        CreateErrorResponse(true, na, "Validation passed", ErrorSeverity.info, context, functionName)
+    else
+        CreateErrorResponse(
+             false,
+             validationResult.errors,
+             context + " validation failed: " + validationResult.message,
+             ErrorSeverity.error,
+             context,
+             functionName
+         )
+
+// @function Log error with appropriate level
+// @param errorResponse The error response to log
+// @param displayOnChart Whether to show error on chart
+export LogError(EnhancedErrorResponse errorResponse, bool displayOnChart = false) =>
+    timestamp = str.format_time(errorResponse.timestamp, "yyyy-MM-dd'T'HH:mm:ss", syminfo.timezone)
+    logMessage = "[" + str.tostring(errorResponse.severity) + "] " + timestamp + 
+                 " " + errorResponse.functionName + ": " + errorResponse.message
+    
+    // Pine Script doesn't have traditional logging, so we use runtime.error for critical errors
+    if errorResponse.severity == ErrorSeverity.critical
+        runtime.error(errorResponse.message)
+    
+    // Display on chart if requested
+    if displayOnChart
+        color = switch errorResponse.severity
+            ErrorSeverity.info => color.blue
+            ErrorSeverity.warning => color.orange  
+            ErrorSeverity.error => color.red
+            ErrorSeverity.critical => color.maroon
+            => color.gray
+            
+        label.new(
+             bar_index, 
+             high, 
+             str.tostring(errorResponse.severity) + ": " + errorResponse.message,
+             color = color,
+             style = label.style_label_down,
+             size = size.small
+         )
+
+// @function Create success response
+// @param message Success message
+// @param context Context of successful operation
+// @param functionName Name of function
+// @returns Success response
+export CreateSuccessResponse(string message, string context = "", string functionName = "") =>
+    CreateErrorResponse(true, array.new<string>(), message, ErrorSeverity.info, context, functionName)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR HANDLING FOR JSON CONSTRUCTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Validate JSON construction and handle malformed data
+// @param jsonString The constructed JSON string
+// @returns ErrorResponse indicating if JSON is valid
+export _validateJSONConstruction(string jsonString) =>
+    response = ErrorResponse.new(true, array.new<string>(), jsonString)
+    
+    // Basic JSON validation checks
+    if na(jsonString) or jsonString == ""
+        array.push(response.errors, "JSON string is empty or null")
+        response.success := false
+        
+    else if not str.contains(jsonString, "{") or not str.contains(jsonString, "}")
+        array.push(response.errors, "JSON string missing required braces")
+        response.success := false
+        
+    else if not str.contains(jsonString, "ticker") or not str.contains(jsonString, "action")
+        array.push(response.errors, "JSON missing required fields (ticker, action)")
+        response.success := false
+        
+    // Check for common malformed patterns
+    else if str.contains(jsonString, '""') and str.contains(jsonString, ': ""')
+        array.push(response.errors, "JSON contains empty string values")
+        response.success := false
+        
+    // Validate JSON size (TradersPost recommendation: under 4KB)
+    else if str.length(jsonString) > 4096
+        array.push(response.errors, "JSON payload exceeds 4KB size limit")
+        response.success := false
+    
+    if not response.success
+        response.message := "JSON validation failed"
+    
+    response
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENHANCED ERROR HANDLING WITH CONTEXT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export type DetailedErrorResponse
+    bool success
+    array<string> errors
+    array<string> warnings
+    ErrorSeverity severity
+    string context
+    string message
+
+// @function Create detailed error response with context
+// @param success Operation success status
+// @param errors Array of error messages
+// @param warnings Array of warning messages
+// @param severity Error severity level
+// @param context Context where error occurred
+// @returns DetailedErrorResponse object
+export CreateDetailedError(bool success, array<string> errors, array<string> warnings, ErrorSeverity severity, string context) =>
+    response = DetailedErrorResponse.new()
+    response.success := success
+    response.errors := na(errors) ? array.new<string>() : errors
+    response.warnings := na(warnings) ? array.new<string>() : warnings
+    response.severity := severity
+    response.context := context
+    
+    // Build summary message
+    errorCount = array.size(response.errors)
+    warningCount = array.size(response.warnings)
+    
+    if success
+        response.message := "Operation completed successfully"
+        if warningCount > 0
+            response.message += " (" + str.tostring(warningCount) + " warnings)"
+    else
+        response.message := "Operation failed in " + context
+        if errorCount > 0
+            response.message += " (" + str.tostring(errorCount) + " errors"
+            if warningCount > 0
+                response.message += ", " + str.tostring(warningCount) + " warnings"
+            response.message += ")"
+    
+    response
+
+// @function Log detailed error response with appropriate severity
+// @param response DetailedErrorResponse to log
+// @returns Nothing - logs to Pine Script console
+export LogDetailedError(DetailedErrorResponse response) =>
+    if not response.success
+        // Log all errors
+        for i = 0 to array.size(response.errors) - 1
+            errorMsg = response.context + ": " + array.get(response.errors, i)
+            if response.severity == ErrorSeverity.critical
+                runtime.error(errorMsg)
+            else
+                log.error(errorMsg)
+    
+    // Log warnings even on success
+    if array.size(response.warnings) > 0
+        for i = 0 to array.size(response.warnings) - 1
+            warningMsg = response.context + ": " + array.get(response.warnings, i)
+            log.warning(warningMsg)
+
+// @function Combine multiple error responses into detailed response
+// @param responses Array of ErrorResponse objects to combine
+// @param context Context for the combined operation
+// @returns DetailedErrorResponse with combined results
+export CombineIntoDetailedResponse(array<ErrorResponse> responses, string context) =>
+    allErrors = array.new<string>()
+    allWarnings = array.new<string>()
+    hasErrors = false
+    
+    for i = 0 to array.size(responses) - 1
+        response = array.get(responses, i)
+        if not response.success
+            hasErrors := true
+            // Add all errors from this response
+            for j = 0 to array.size(response.errors) - 1
+                array.push(allErrors, array.get(response.errors, j))
+    
+    severity = hasErrors ? ErrorSeverity.error : ErrorSeverity.warning
+    CreateDetailedError(not hasErrors, allErrors, allWarnings, severity, context)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 2: CORE ORDER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Send advanced order with comprehensive parameter validation and JSON construction
+// @param ticker Symbol to trade (defaults to syminfo.ticker)
+// @param action Order action (buy/sell/exit/cancel/add)
+// @param quantity Order quantity
+// @param quantityType Type of quantity (fixed/dollar/percent)
+// @param orderType Type of order (market/limit/stop/stop_limit/trailing_stop)
+// @param sentiment Position sentiment (long/short/flat, optional)
+// @param limitPrice Limit price for limit orders
+// @param stopPrice Stop price for stop orders
+// @param trailAmount Trailing amount for trailing stops
+// @param trailPercent Trailing percent for trailing stops
+// @param takeProfitPrice Take profit limit price (absolute)
+// @param takeProfitAmount Take profit dollar amount (relative)
+// @param takeProfitPercent Take profit percentage (relative)
+// @param stopLossPrice Stop loss price (absolute)
+// @param stopLossAmount Stop loss dollar amount (relative)
+// @param stopLossPercent Stop loss percentage (relative)
+// @param stopLossType Stop loss order type
+// @param stopLossLimitPrice Limit price for stop_limit orders
+// @param cancel Controls order cancellation (true = cancel existing, false = don't cancel, na = use defaults)
+// @param extendedHours Enable extended hours trading (boolean)
+// @param optionType Option type for options trading (both/call/put)
+// @param intrinsicValue Intrinsic value filter for options (itm/otm)
+// @param expiration Option expiration (date string)
+// @param strikePrice Option strike price
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment for the order (shows in TradersPost UI for debugging)
+// @returns ErrorResponse with success status and JSON or error details
+export SendAdvancedOrder(
+     string ticker = na,
+     Action action = Action.buy,
+     float quantity = na,
+     QuantityType quantityType = QuantityType.fixed,
+     OrderType orderType = OrderType.market,
+     Sentiment sentiment = na,
+     bool cancel = false,
+     float limitPrice = na,
+     float stopPrice = na,
+     float trailAmount = na,
+     float trailPercent = na,
+     float takeProfitPrice = na,
+     float takeProfitAmount = na,
+     float takeProfitPercent = na,
+     float stopLossPrice = na,
+     float stopLossAmount = na,
+     float stopLossPercent = na,
+     StopLossType stopLossType = StopLossType.stop,
+     float stopLossLimitPrice = na,
+     bool extendedHours = false,
+     OptionType optionType = na,
+     IntrinsicValue intrinsicValue = na,
+     string expiration = na,
+     float strikePrice = na,
+     float signalPrice = na,
+     string comment = na) =>
+    
+    // Initialize with success state - JSON will always be in message
+    rval = ErrorResponse.new(true, array.new<string>(), "")
+
+    _ticker = ticker
+    if na(_ticker)
+        _ticker := syminfo.ticker
+
+    // Step 1: Comprehensive parameter validation
+    if rval.success
+        validationResponse = ValidateCompleteOrder(
+             _ticker, action, quantity, quantityType, orderType,
+             limitPrice, stopPrice, takeProfitPrice
+         )
+
+        if not validationResponse.success
+            // Validation failed - copy error details
+            rval.success := false
+            rval.message := validationResponse.message
+            rval.errors := validationResponse.errors
+
+    // Step 2: Construct JSON using validated parameters
+    if rval.success
+        jsonResponse = _validateAndBuildJSON(
+             _ticker, action, quantity, quantityType, orderType, sentiment,
+             cancel, na,
+             limitPrice, stopPrice, trailAmount, trailPercent,
+             takeProfitPrice, takeProfitAmount, takeProfitPercent,
+             stopLossPrice, stopLossAmount, stopLossPercent,
+             stopLossType, stopLossLimitPrice,
+             extendedHours, optionType, intrinsicValue, expiration, strikePrice,
+             signalPrice, comment
+         )
+
+        if not jsonResponse.success
+            // JSON construction failed - copy error details
+            rval.success := false
+            rval.message := jsonResponse.message
+            rval.errors := jsonResponse.errors
+        else
+            // Success - put JSON in message
+            rval.message := jsonResponse.message
+
+    // Step 3: Send alert to TradersPost (only if successful)
+    if rval.success
+        alert(rval.message, alert.freq_once_per_bar)
+
+    rval
+
+// @function Send sentiment-based position management order
+// @param ticker Symbol to manage (defaults to syminfo.ticker)
+// @param sentiment Target position sentiment (long/short/flat)
+// @param quantity Position size (optional, uses account default if not specified)
+// @param quantityType Type of quantity specification
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment
+// @returns ErrorResponse with success status
+export SendSentiment(
+     string ticker = na,
+     Sentiment sentiment,
+     float quantity = na,
+     QuantityType quantityType = QuantityType.fixed,
+     float signalPrice = na,
+     string comment = na) =>
+    
+    ErrorResponse rval = na
+    
+    // Validate required sentiment parameter
+    if na(sentiment)
+        response = ErrorResponse.new(false, array.new<string>(), "Sentiment is required")
+        array.push(response.errors, "Sentiment cannot be na for position management")
+        rval := response
+    
+    if na(rval)
+        // Determine action based on sentiment
+        action = switch sentiment
+            Sentiment.long => Action.buy
+            Sentiment.short => Action.sell
+            Sentiment.flat => Action.exit
+            => Action.buy  // default
+        
+        // Send order with sentiment specified
+        rval := SendAdvancedOrder(
+             ticker = ticker,
+             action = action,
+             quantity = quantity,
+             quantityType = quantityType,
+             orderType = OrderType.market,
+             sentiment = sentiment,
+             signalPrice = signalPrice,
+             comment = comment
+         )
+    
+    rval
+
+// @function Cancel all open orders for the specified symbol
+// @param ticker Symbol to cancel orders for (defaults to syminfo.ticker)
+// @param comment Optional comment for the cancellation
+// @returns ErrorResponse with success status
+export SendCancelAll(
+     string ticker = na,
+     string comment = na) =>
+    
+    // Send cancel action order (minimal parameters needed for cancel)
+    SendAdvancedOrder(
+         ticker = ticker,
+         action = Action.cancel,
+         quantity = na,
+         quantityType = QuantityType.fixed,
+         orderType = OrderType.market,  // Order type not relevant for cancel
+         comment = comment
+     )
+
+// @function Send order without canceling existing orders
+// @param ticker Symbol to trade (defaults to syminfo.ticker)
+// @param action Order action (buy/sell/exit)
+// @param quantity Order quantity
+// @param quantityType Type of quantity (fixed/dollar/percent)
+// @param orderType Type of order (market/limit/stop/stop_limit)
+// @param limitPrice Limit price for limit orders
+// @param stopPrice Stop price for stop orders
+// @param sentiment Position sentiment (long/short/flat, optional)
+// @param takeProfitPrice Take profit price
+// @param takeProfitAmount Take profit amount (optional)
+// @param stopLossPrice Stop loss price
+// @param stopLossAmount Stop loss amount (optional)
+// @param stopLossPercent Stop loss percentage (optional)
+// @param stopLossType Stop loss order type
+// @param stopLossLimitPrice Limit price for stop_limit orders
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment
+// @returns ErrorResponse with success status
+export SendOrderNoCancelExisting(
+     string ticker = na,
+     Action action = Action.buy,
+     float quantity = na,
+     QuantityType quantityType = QuantityType.fixed,
+     OrderType orderType = OrderType.market,
+     Sentiment sentiment = na,
+     float limitPrice = na,
+     float stopPrice = na,
+     float takeProfitPrice = na,
+     float takeProfitAmount = na,
+     float takeProfitPercent = na,
+     float stopLossPrice = na,
+     float stopLossAmount = na,
+     float stopLossPercent = na,
+     StopLossType stopLossType = StopLossType.stop,
+     float stopLossLimitPrice = na,
+     float signalPrice = na,
+     string comment = na) =>
+    
+    // Send order with cancel explicitly set to false (don't cancel existing orders)
+    SendAdvancedOrder(
+         ticker = ticker,
+         action = action,
+         quantity = quantity,
+         quantityType = quantityType,
+         orderType = orderType,
+         sentiment = sentiment,
+         cancel = false,  // Key feature: prevents canceling existing orders
+         limitPrice = limitPrice,
+         stopPrice = stopPrice,
+         takeProfitPrice = takeProfitPrice,
+         takeProfitAmount = takeProfitAmount,
+         takeProfitPercent = takeProfitPercent,
+         stopLossPrice = stopLossPrice,
+         stopLossAmount = stopLossAmount,
+         stopLossPercent = stopLossPercent,
+         stopLossType = stopLossType,
+         stopLossLimitPrice = stopLossLimitPrice,
+         signalPrice = signalPrice,
+         comment = comment
+     )
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 2.2: BRACKET ORDER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Build bracket order parameters by routing entryPrice to correct parameter based on orderType
+// This helper function maps the conceptual "entryPrice" to the technical parameters needed
+// @param orderType The order type for the entry order
+// @param entryPrice The desired entry price (trigger for stops, limit for limits)
+// @param entryLimitPrice The limit price for stop_limit orders (optional)
+// @returns [limitPrice, stopPrice] array with correct routing
+export _buildBracketOrderParams(OrderType orderType, float entryPrice = na, float entryLimitPrice = na) =>
+    float limitPrice = na
+    float stopPrice = na
+
+    if not na(entryPrice)
+        switch orderType
+            OrderType.market =>
+                // Market orders don't use entry price - will be ignored
+                limitPrice := na
+                stopPrice := na
+            OrderType.limit =>
+                // Limit orders use entryPrice as limitPrice
+                limitPrice := entryPrice
+                stopPrice := na
+            OrderType.stop =>
+                // Stop orders use entryPrice as stopPrice (becomes market order when triggered)
+                limitPrice := na
+                stopPrice := entryPrice
+            OrderType.stop_limit =>
+                // Stop limit orders use entryPrice as stopPrice and entryLimitPrice as limitPrice
+                // If entryLimitPrice is na, add small buffer to ensure limitPrice > stopPrice for buy orders
+                limitPrice := na(entryLimitPrice) ? entryPrice * 1.001 : entryLimitPrice
+                stopPrice := entryPrice
+
+    [limitPrice, stopPrice]
+
+// @function Send bracket order (entry + take profit + stop loss)
+// @param ticker Symbol to trade
+// @param action Entry action (buy/sell)
+// @param quantity Order quantity
+// @param quantityType Type of quantity specification
+// @param orderType Type of entry order
+// @param entryPrice Entry price (trigger price for stop orders, limit price for limit orders)
+// @param entryLimitPrice Entry limit price (only for stop_limit orders, defaults to entryPrice if na)
+// @param takeProfitPrice Take profit price
+// @param stopLossPrice Stop loss price
+// @param takeProfitAmount Take profit dollar amount (alternative to price)
+// @param takeProfitPercent Take profit percentage (alternative to price)
+// @param stopLossAmount Stop loss dollar amount (alternative to price)
+// @param stopLossPercent Stop loss percentage (alternative to price)
+// @param stopLossType Stop loss order type
+// @param stopLossLimitPrice Limit price for stop_limit orders
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment
+// @returns ErrorResponse with success status
+export SendBracketOrder(
+     string ticker = na,
+     Action action = Action.buy,
+     float quantity = na,
+     QuantityType quantityType = QuantityType.fixed,
+     OrderType orderType = OrderType.market,
+     float entryPrice = na,
+     float entryLimitPrice = na,
+     float takeProfitPrice = na,
+     float stopLossPrice = na,
+     float takeProfitAmount = na,
+     float takeProfitPercent = na,
+     float stopLossAmount = na,
+     float stopLossPercent = na,
+     StopLossType stopLossType = StopLossType.stop,
+     float stopLossLimitPrice = na,
+     float signalPrice = na,
+     string comment = na) =>
+    
+    ErrorResponse rval = na
+    
+    // Validate bracket order requirements
+    if na(takeProfitPrice) and na(takeProfitAmount)
+        response = ErrorResponse.new(false, array.new<string>(), "Bracket order requires take profit")
+        array.push(response.errors, "Must specify either takeProfitPrice or takeProfitAmount")
+        rval := response
+    
+    if na(rval) and na(stopLossPrice) and na(stopLossAmount)
+        response = ErrorResponse.new(false, array.new<string>(), "Bracket order requires stop loss")
+        array.push(response.errors, "Must specify either stopLossPrice or stopLossAmount")
+        rval := response
+    
+    // Validate price relationships for bracket orders
+    if na(rval) and not na(entryPrice) and not na(takeProfitPrice) and not na(stopLossPrice)
+        priceValidation = ValidatePrices(entryPrice, stopLossPrice, takeProfitPrice, action)
+        if not priceValidation.success
+            rval := priceValidation
+    
+    // Send the bracket order
+    if na(rval)
+        // Route entryPrice to correct parameter based on orderType
+        [bracketLimitPrice, bracketStopPrice] = _buildBracketOrderParams(orderType, entryPrice, entryLimitPrice)
+
+        // Map trailing stop parameters correctly
+        trailAmountParam = stopLossType == StopLossType.trailing_stop ? stopLossAmount : na
+        trailPercentParam = stopLossType == StopLossType.trailing_stop ? stopLossPercent : na
+        stopLossAmountParam = stopLossType == StopLossType.trailing_stop ? na : stopLossAmount
+        stopLossPercentParam = stopLossType == StopLossType.trailing_stop ? na : stopLossPercent
+
+        rval := SendAdvancedOrder(
+         ticker = ticker,
+         action = action,
+         quantity = quantity,
+         quantityType = quantityType,
+         orderType = orderType,
+         sentiment = na,
+         cancel = false,  // Use default cancel behavior (no cancel)
+         limitPrice = bracketLimitPrice,
+         stopPrice = bracketStopPrice,
+         trailAmount = trailAmountParam,
+         trailPercent = trailPercentParam,
+         takeProfitPrice = takeProfitPrice,
+         takeProfitAmount = takeProfitAmount,
+         takeProfitPercent = takeProfitPercent,
+         stopLossPrice = stopLossPrice,
+         stopLossAmount = stopLossAmountParam,
+         stopLossPercent = stopLossPercentParam,
+         stopLossType = stopLossType,
+         stopLossLimitPrice = stopLossLimitPrice,
+         signalPrice = signalPrice,
+         comment = comment
+         )
+    
+    rval
+
+// @function Send One-Triggers-Other (OTO) order sequence
+// Note: OTO linking must be configured in TradersPost strategy settings
+// This sends two separate orders - TradersPost handles the OTO logic
+// @param primaryTicker Primary order ticker
+// @param primaryAction Primary order action
+// @param primaryQuantity Primary order quantity
+// @param primaryOrderType Primary entry type
+// @param primaryPrice Primary order price
+// @param secondaryTicker Secondary order ticker (defaults to primary ticker)
+// @param secondaryAction Secondary order action
+// @param secondaryQuantity Secondary order quantity
+// @param secondaryOrderType Secondary entry type
+// @param secondaryPrice Secondary order price
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment for both orders
+// @returns ErrorResponse with success status
+export SendOTOOrder(
+     string primaryTicker = na,
+     Action primaryAction = Action.buy,
+     float primaryQuantity = na,
+     OrderType primaryOrderType = OrderType.market,
+     float primaryPrice = na,
+     string secondaryTicker = na,
+     Action secondaryAction = Action.sell,
+     float secondaryQuantity = na,
+     OrderType secondaryOrderType = OrderType.limit,
+     float secondaryPrice = na,
+     float signalPrice = na,
+     string comment = na) =>
+    
+    ErrorResponse rval = na
+    
+    // Send primary order first
+    primaryResponse = SendAdvancedOrder(
+         ticker = primaryTicker,
+         action = primaryAction,
+         quantity = primaryQuantity,
+         orderType = primaryOrderType,
+         limitPrice = primaryPrice,
+         signalPrice = signalPrice,
+         comment = na(comment) ? "OTO Primary" : comment + " [OTO Primary]"
+     )
+    
+    if not primaryResponse.success
+        // Primary order failed, don't send secondary
+        rval := primaryResponse
+    
+    if na(rval)
+        // Send secondary order
+        secondaryResponse = SendAdvancedOrder(
+             ticker = na(secondaryTicker) ? primaryTicker : secondaryTicker,
+             action = secondaryAction,
+             quantity = na(secondaryQuantity) ? primaryQuantity : secondaryQuantity,
+             orderType = secondaryOrderType,
+             limitPrice = secondaryPrice,
+             signalPrice = signalPrice,
+             comment = na(comment) ? "OTO Secondary" : comment + " [OTO Secondary]"
+         )
+        
+        if not secondaryResponse.success
+            // Secondary order failed - ideally would cancel primary, but TradersPost handles this
+            combinedResponse = ErrorResponse.new(false, array.new<string>(), "OTO order partially failed")
+            array.push(combinedResponse.errors, "Primary order sent successfully")
+            array.push(combinedResponse.errors, "Secondary order failed: " + secondaryResponse.message)
+            rval := combinedResponse
+        else
+            // Both orders successful
+            successResponse = ErrorResponse.new(true, array.new<string>(), "OTO order sequence sent successfully")
+            array.push(successResponse.errors, "Primary: " + primaryResponse.message)
+            array.push(successResponse.errors, "Secondary: " + secondaryResponse.message)
+            rval := successResponse
+    
+    rval
+
+// @function Send One-Cancels-Other (OCO) order pair
+// Note: OCO linking must be configured in TradersPost strategy settings
+// This sends two separate orders - TradersPost handles the OCO logic
+// @param ticker Symbol for both orders
+// @param firstAction Action for first order
+// @param firstQuantity Quantity for first order
+// @param firstOrderType Order type for first order
+// @param firstPrice Price for first order
+// @param secondAction Action for second order
+// @param secondQuantity Quantity for second order
+// @param secondOrderType Order type for second order
+// @param secondPrice Price for second order
+// @param signalPrice The market price at alert time (for slippage tracking)
+// @param comment Optional comment
+// @returns ErrorResponse with success status
+export SendOCOOrder(
+     string ticker = na,
+     Action firstAction = Action.buy,
+     float firstQuantity = na,
+     OrderType firstOrderType = OrderType.limit,
+     float firstPrice = na,
+     Action secondAction = Action.buy,
+     float secondQuantity = na,
+     OrderType secondOrderType = OrderType.stop,
+     float secondPrice = na,
+     float signalPrice = na,
+     string comment = na) =>
+    
+    ErrorResponse rval = na
+    ErrorResponse firstResponse = na
+    
+    // Validate that we have different order types/prices
+    if firstOrderType == secondOrderType and firstPrice == secondPrice
+        response = ErrorResponse.new(false, array.new<string>(), "OCO orders must be different")
+        array.push(response.errors, "OCO orders cannot have identical type and price")
+        rval := response
+    
+    if na(rval)
+        // Send first order
+        firstResponse := SendAdvancedOrder(
+             ticker = ticker,
+             action = firstAction,
+             quantity = firstQuantity,
+             orderType = firstOrderType,
+             limitPrice = firstOrderType == OrderType.limit ? firstPrice : na,
+             stopPrice = firstOrderType == OrderType.stop or firstOrderType == OrderType.stop_limit ? firstPrice : na,
+             signalPrice = signalPrice,
+             comment = na(comment) ? "OCO A" : comment + " [OCO A]"
+         )
+        
+        if not firstResponse.success
+            rval := firstResponse
+    
+    if na(rval)
+        // Send second order
+        secondResponse = SendAdvancedOrder(
+             ticker = ticker,
+             action = secondAction,
+             quantity = na(secondQuantity) ? firstQuantity : secondQuantity,
+             orderType = secondOrderType,
+             limitPrice = secondOrderType == OrderType.limit ? secondPrice : na,
+             stopPrice = secondOrderType == OrderType.stop or secondOrderType == OrderType.stop_limit ? secondPrice : na,
+             signalPrice = signalPrice,
+             comment = na(comment) ? "OCO B" : comment + " [OCO B]"
+         )
+        
+        if not secondResponse.success
+            // Second order failed - first order already sent
+            combinedResponse = ErrorResponse.new(false, array.new<string>(), "OCO order partially failed")
+            array.push(combinedResponse.errors, "First order sent successfully")
+            array.push(combinedResponse.errors, "Second order failed: " + secondResponse.message)
+            rval := combinedResponse
+        else
+            // Both orders successful
+            successResponse = ErrorResponse.new(true, array.new<string>(), "OCO order pair sent successfully")
+            array.push(successResponse.errors, "First: " + firstResponse.message)
+            array.push(successResponse.errors, "Second: " + secondResponse.message)
+            rval := successResponse
+    
+    rval

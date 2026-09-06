@@ -1,0 +1,350 @@
+//@version=6
+strategy("Concordance Allocation Strategy [JOAT]", "CAS [JOAT]", overlay = true, max_bars_back = 1500, initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 1, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+color LONG_COLOR      = #0d9b79
+color SHORT_COLOR     = #d25b66
+color RANGE_COLOR     = #6f7d8c
+color GOLD_COLOR      = #d5a021
+color PANEL_BG        = #11161d
+color PANEL_BORDER    = #2a3340
+color PANEL_TEXT      = #d7dee8
+color PANEL_HEADER    = #8d99a7
+color PANEL_DIM       = #556070
+
+//--------------------------------------------------------------------------------------------------
+// Helpers
+//--------------------------------------------------------------------------------------------------
+clampFloat(float value, float floorValue, float ceilingValue) =>
+    math.max(floorValue, math.min(ceilingValue, value))
+
+nzDiv(float numerator, float denominator) =>
+    denominator == 0.0 ? 0.0 : numerator / denominator
+
+percentileFromSorted(array<float> sortedValues, float percentile) =>
+    float result = na
+    int sampleSize = array.size(sortedValues)
+    if sampleSize > 0
+        float location = (sampleSize - 1) * percentile / 100.0
+        int lowerIndex = int(math.floor(location))
+        int upperIndex = int(math.ceil(location))
+        if lowerIndex == upperIndex
+            result := array.get(sortedValues, lowerIndex)
+        else
+            float lowerValue = array.get(sortedValues, lowerIndex)
+            float upperValue = array.get(sortedValues, upperIndex)
+            result := lowerValue + (upperValue - lowerValue) * (location - lowerIndex)
+    result
+
+formatPct(float v) =>
+    str.tostring(v, "0.0") + "%"
+
+formatPrice(float v) =>
+    str.tostring(v, format.mintick)
+
+//--------------------------------------------------------------------------------------------------
+// Inputs
+//--------------------------------------------------------------------------------------------------
+string REGIME_GROUP         = "Regime Layer"
+int returnLengthInput       = input.int(34, "Return Lookback", minval = 10, group = REGIME_GROUP)
+int volatilityLengthInput   = input.int(55, "Volatility Lookback", minval = 20, group = REGIME_GROUP)
+int efficiencyLengthInput   = input.int(21, "Efficiency Length", minval = 5, group = REGIME_GROUP)
+float learningInput         = input.float(0.22, "Regime Learning", minval = 0.05, maxval = 0.95, step = 0.01, group = REGIME_GROUP)
+float trendGateInput        = input.float(51.0, "Trend Gate", minval = 50.0, maxval = 95.0, step = 0.5, group = REGIME_GROUP)
+
+string TREND_GROUP          = "Directional Bias"
+int atrLengthInput          = input.int(14, "ATR Length", minval = 5, group = TREND_GROUP)
+float atrBaseInput          = input.float(2.7, "ATR Base Multiplier", minval = 0.5, step = 0.1, group = TREND_GROUP)
+float avoidanceInput        = input.float(0.55, "Avoidance Expansion", minval = 0.0, step = 0.05, group = TREND_GROUP)
+float recoveryInput         = input.float(0.18, "Recovery Pull", minval = 0.01, maxval = 0.90, step = 0.01, group = TREND_GROUP)
+float noiseGateInput        = input.float(1.35, "Noise Threshold ATR", minval = 0.1, step = 0.05, group = TREND_GROUP)
+
+string MOMENTUM_GROUP       = "Momentum Layer"
+int stochLengthInput        = input.int(20, "Stochastic Length", minval = 5, group = MOMENTUM_GROUP)
+int smoothLengthInput       = input.int(5, "Stochastic Smoothing", minval = 1, group = MOMENTUM_GROUP)
+int presmoothInput          = input.int(8, "Price Presmoothing", minval = 1, group = MOMENTUM_GROUP)
+float adaptiveAttenuation   = input.float(2.0, "Adaptive Attenuation", minval = 0.5, step = 0.1, group = MOMENTUM_GROUP)
+float momentumGateInput     = input.float(2.0, "Momentum Spread Gate", minval = 0.5, step = 0.5, group = MOMENTUM_GROUP)
+
+string VALUE_GROUP          = "Value Layer"
+int valueLookbackInput      = input.int(120, "Value Lookback", minval = 50, maxval = 500, group = VALUE_GROUP)
+float lowerRailInput        = input.float(20.0, "Lower Rail Percentile", minval = 1.0, maxval = 49.0, step = 0.5, group = VALUE_GROUP)
+float upperRailInput        = input.float(80.0, "Upper Rail Percentile", minval = 51.0, maxval = 99.0, step = 0.5, group = VALUE_GROUP)
+int railSmoothInput         = input.int(5, "Rail Smoothing", minval = 1, maxval = 20, group = VALUE_GROUP)
+
+string RISK_GROUP           = "Risk Layer"
+float stopAtrInput          = input.float(2.2, "Stop ATR", minval = 0.5, step = 0.1, group = RISK_GROUP)
+float targetAtrInput        = input.float(3.8, "Take Profit ATR", minval = 1.0, step = 0.1, group = RISK_GROUP)
+float trailTriggerInput     = input.float(1.6, "Trail Activation ATR", minval = 0.5, step = 0.1, group = RISK_GROUP)
+float trailBufferInput      = input.float(0.40, "Trail Buffer ATR", minval = 0.05, step = 0.05, group = RISK_GROUP)
+
+string VISUAL_GROUP         = "Visual System"
+bool showCloudInput         = input.bool(true, "Show Bias Cloud", group = VISUAL_GROUP)
+bool tintCandlesInput       = input.bool(true, "Tint Candles", group = VISUAL_GROUP)
+bool showDashboardInput     = input.bool(true, "Show Dashboard", group = VISUAL_GROUP)
+
+//--------------------------------------------------------------------------------------------------
+// Regime Engine
+//--------------------------------------------------------------------------------------------------
+float logReturn             = math.log(close / nz(close[1], close))
+float driftMean             = ta.ema(logReturn, returnLengthInput)
+float realizedVol           = ta.stdev(logReturn, volatilityLengthInput)
+float volBaseline           = ta.ema(realizedVol, volatilityLengthInput)
+float normalizedReturn      = nzDiv(logReturn - driftMean, realizedVol + 1e-9)
+float normalizedVol         = nzDiv(realizedVol, volBaseline + 1e-9)
+
+float directionalTravel     = math.abs(close - close[efficiencyLengthInput])
+float rotationalTravel      = math.sum(math.abs(ta.change(close)), efficiencyLengthInput)
+float efficiencyRatio       = clampFloat(nzDiv(directionalTravel, rotationalTravel), 0.0, 1.0)
+
+float slopeFast             = ta.ema(close, 21) - ta.ema(close, 34)
+float slopeSlow             = ta.ema(close, 55) - ta.ema(close, 89)
+float slopeScore            = clampFloat(math.abs(nzDiv(slopeFast + slopeSlow, close * 0.01)) * 35.0, 0.0, 1.0)
+
+float trendEmission         = math.max(1e-6, math.exp(-math.pow(math.abs(normalizedReturn) - 0.90, 2.0) / 1.40) * math.exp(-math.pow(normalizedVol - 1.15, 2.0) / 0.70) * math.exp(-math.pow(efficiencyRatio - 0.72, 2.0) / 0.10) * clampFloat(0.35 + slopeScore, 0.0, 1.0))
+float rangeEmission         = math.max(1e-6, math.exp(-math.pow(math.abs(normalizedReturn) - 0.15, 2.0) / 0.70) * math.exp(-math.pow(normalizedVol - 0.82, 2.0) / 0.40) * math.exp(-math.pow(efficiencyRatio - 0.22, 2.0) / 0.08) * clampFloat(1.10 - slopeScore, 0.0, 1.0))
+
+var float trendProb         = 0.50
+var float rangeProb         = 0.50
+float persistenceTrend      = 0.92 + efficiencyRatio * 0.04
+float persistenceRange      = 0.92 + (1.0 - efficiencyRatio) * 0.04
+
+if not na(logReturn)
+    float priorTrend        = trendProb * persistenceTrend + rangeProb * (1.0 - persistenceRange)
+    float priorRange        = rangeProb * persistenceRange + trendProb * (1.0 - persistenceTrend)
+    float rawTrend          = trendEmission * priorTrend
+    float rawRange          = rangeEmission * priorRange
+    float rawTotal          = rawTrend + rawRange
+    if rawTotal > 0
+        float targetTrend   = rawTrend / rawTotal
+        float targetRange   = rawRange / rawTotal
+        trendProb          := trendProb + learningInput * (targetTrend - trendProb)
+        rangeProb          := rangeProb + learningInput * (targetRange - rangeProb)
+
+float probTotal            = trendProb + rangeProb
+trendProb                  := probTotal == 0 ? 0.5 : trendProb / probTotal
+rangeProb                  := probTotal == 0 ? 0.5 : rangeProb / probTotal
+
+float trendPercent         = trendProb * 100.0
+float rangePercent         = rangeProb * 100.0
+float confidencePercent    = math.max(trendPercent, rangePercent)
+bool confirmedTrendRegime  = barstate.isconfirmed and trendPercent > rangePercent and confidencePercent >= trendGateInput
+bool confirmedRangeRegime  = barstate.isconfirmed and rangePercent >= trendPercent and confidencePercent >= trendGateInput
+bool directionalContext    = barstate.isconfirmed and trendPercent > rangePercent
+
+//--------------------------------------------------------------------------------------------------
+// Directional Bias Engine
+//--------------------------------------------------------------------------------------------------
+float atrValue             = ta.atr(atrLengthInput)
+float sourceMid            = hl2
+float upperBase            = sourceMid + atrBaseInput * atrValue
+float lowerBase            = sourceMid - atrBaseInput * atrValue
+
+var int biasTrend          = 1
+var float biasBand         = na
+var float switchPrice      = na
+
+float priorBand            = nz(biasBand[1], lowerBase)
+bool noisyEnvironment      = math.abs(close - priorBand) < atrValue * noiseGateInput
+bool drawdownState         = (biasTrend == 1 and not na(switchPrice) and switchPrice - close > atrValue) or (biasTrend == -1 and not na(switchPrice) and close - switchPrice > atrValue)
+
+if biasTrend == 1
+    float bullTarget = drawdownState ? recoveryInput * close + (1.0 - recoveryInput) * priorBand : lowerBase
+    float evasiveTarget = noisyEnvironment ? priorBand - atrValue * avoidanceInput : bullTarget
+    biasBand := math.max(evasiveTarget, priorBand)
+    if close < biasBand
+        biasTrend := -1
+        biasBand := upperBase
+        switchPrice := close
+else
+    float bearTarget = drawdownState ? recoveryInput * close + (1.0 - recoveryInput) * priorBand : upperBase
+    float evasiveTarget = noisyEnvironment ? priorBand + atrValue * avoidanceInput : bearTarget
+    biasBand := math.min(evasiveTarget, priorBand)
+    if close > biasBand
+        biasTrend := 1
+        biasBand := lowerBase
+        switchPrice := close
+
+if barstate.isfirst
+    switchPrice := close
+
+bool bullishBias          = biasTrend == 1 and close > biasBand
+bool bearishBias          = biasTrend == -1 and close < biasBand
+
+//--------------------------------------------------------------------------------------------------
+// Momentum Engine
+//--------------------------------------------------------------------------------------------------
+float smoothHigh          = ta.ema(high, presmoothInput)
+float smoothLow           = ta.ema(low, presmoothInput)
+float smoothClose         = ta.ema(close, presmoothInput)
+float rawStoch            = ta.stoch(smoothClose, smoothHigh, smoothLow, stochLengthInput)
+float centeredStoch       = 50.0 + (rawStoch - 50.0) / 2.0
+float smoothedStoch       = 50.0 + (ta.ema(rawStoch, smoothLengthInput) - 50.0) / 2.0
+float adaptiveAlpha       = clampFloat((math.abs(smoothedStoch - 50.0) / 100.0) / adaptiveAttenuation, 0.0, 1.0)
+float adaptiveSource      = (smoothedStoch - 50.0) / adaptiveAttenuation + 50.0
+
+var float adaptiveLine    = 50.0
+adaptiveLine              := nz(adaptiveLine[1], 50.0) + adaptiveAlpha * (adaptiveSource - nz(adaptiveLine[1], 50.0))
+float momentumSpread      = (smoothedStoch - adaptiveLine) * 2.0
+bool bullishMomentum      = barstate.isconfirmed and smoothedStoch > 55.0 and momentumSpread > momentumGateInput
+bool bearishMomentum      = barstate.isconfirmed and smoothedStoch < 45.0 and momentumSpread < -momentumGateInput
+bool momentumTurnUp       = barstate.isconfirmed and ta.crossover(momentumSpread, 0.0)
+bool momentumTurnDown     = barstate.isconfirmed and ta.crossunder(momentumSpread, 0.0)
+
+//--------------------------------------------------------------------------------------------------
+// Value Layer
+//--------------------------------------------------------------------------------------------------
+var array<float> closeBuffer = array.new_float()
+if barstate.isnew
+    array.push(closeBuffer, close)
+    if array.size(closeBuffer) > valueLookbackInput
+        array.shift(closeBuffer)
+
+array<float> sortedCloses = array.copy(closeBuffer)
+array.sort(sortedCloses, order.ascending)
+
+float rawLowerRail        = percentileFromSorted(sortedCloses, lowerRailInput)
+float rawUpperRail        = percentileFromSorted(sortedCloses, upperRailInput)
+float lowerRail           = ta.ema(rawLowerRail, railSmoothInput)
+float upperRail           = ta.ema(rawUpperRail, railSmoothInput)
+float railMid             = math.avg(lowerRail, upperRail)
+
+bool valueAlignedLong     = not na(upperRail) and close >= railMid and close >= lowerRail
+bool valueAlignedShort    = not na(lowerRail) and close <= railMid and close <= upperRail
+bool valueRecoveredLong   = not na(railMid) and close > railMid and close[1] <= nz(railMid[1], railMid)
+bool valueRecoveredShort  = not na(railMid) and close < railMid and close[1] >= nz(railMid[1], railMid)
+bool railExpansionLong    = not na(upperRail) and close > upperRail
+bool railExpansionShort   = not na(lowerRail) and close < lowerRail
+
+//--------------------------------------------------------------------------------------------------
+// Entry Logic
+//--------------------------------------------------------------------------------------------------
+bool longSignal           = directionalContext and bullishBias and (bullishMomentum or momentumTurnUp) and (valueAlignedLong or valueRecoveredLong or railExpansionLong or close > close[1])
+bool shortSignal          = directionalContext and bearishBias and (bearishMomentum or momentumTurnDown) and (valueAlignedShort or valueRecoveredShort or railExpansionShort or close < close[1])
+
+bool rangeProbeLong       = confirmedRangeRegime and bullishBias and momentumTurnUp and valueRecoveredLong
+bool rangeProbeShort      = confirmedRangeRegime and bearishBias and momentumTurnDown and valueRecoveredShort
+
+if longSignal and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, comment = "Long Concordance")
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, comment = "Short Concordance")
+
+if rangeProbeLong and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, comment = "Long Rotation")
+
+if rangeProbeShort and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, comment = "Short Rotation")
+
+//--------------------------------------------------------------------------------------------------
+// Risk Management
+//--------------------------------------------------------------------------------------------------
+var float frozenLongAtr     = na
+var float frozenShortAtr    = na
+var float frozenLongStop    = na
+var float frozenShortStop   = na
+var float frozenLongTarget  = na
+var float frozenShortTarget = na
+
+bool newLongPosition        = strategy.position_size > 0 and strategy.position_size[1] <= 0
+bool newShortPosition       = strategy.position_size < 0 and strategy.position_size[1] >= 0
+bool flatNow                = strategy.position_size == 0
+
+if newLongPosition
+    frozenLongAtr := atrValue
+    frozenLongStop := strategy.position_avg_price - frozenLongAtr * stopAtrInput
+    frozenLongTarget := strategy.position_avg_price + frozenLongAtr * targetAtrInput
+    frozenShortAtr := na
+    frozenShortStop := na
+    frozenShortTarget := na
+
+if newShortPosition
+    frozenShortAtr := atrValue
+    frozenShortStop := strategy.position_avg_price + frozenShortAtr * stopAtrInput
+    frozenShortTarget := strategy.position_avg_price - frozenShortAtr * targetAtrInput
+    frozenLongAtr := na
+    frozenLongStop := na
+    frozenLongTarget := na
+
+if flatNow
+    frozenLongAtr := na
+    frozenShortAtr := na
+    frozenLongStop := na
+    frozenShortStop := na
+    frozenLongTarget := na
+    frozenShortTarget := na
+
+float longTrailActive     = strategy.position_avg_price + nz(frozenLongAtr, atrValue) * trailTriggerInput
+float shortTrailActive    = strategy.position_avg_price - nz(frozenShortAtr, atrValue) * trailTriggerInput
+
+float longAdaptiveStop    = high > longTrailActive ? math.max(nz(frozenLongStop, strategy.position_avg_price - atrValue * stopAtrInput), biasBand - nz(frozenLongAtr, atrValue) * trailBufferInput) : nz(frozenLongStop, strategy.position_avg_price - atrValue * stopAtrInput)
+float shortAdaptiveStop   = low < shortTrailActive ? math.min(nz(frozenShortStop, strategy.position_avg_price + atrValue * stopAtrInput), biasBand + nz(frozenShortAtr, atrValue) * trailBufferInput) : nz(frozenShortStop, strategy.position_avg_price + atrValue * stopAtrInput)
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop = longAdaptiveStop, limit = frozenLongTarget, comment = "Long Risk")
+    if barstate.isconfirmed and (confirmedRangeRegime or bearishMomentum)
+        strategy.close("Long", comment = "Long Context Exit")
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop = shortAdaptiveStop, limit = frozenShortTarget, comment = "Short Risk")
+    if barstate.isconfirmed and (confirmedRangeRegime or bullishMomentum)
+        strategy.close("Short", comment = "Short Context Exit")
+
+//--------------------------------------------------------------------------------------------------
+// Visual Layer
+//--------------------------------------------------------------------------------------------------
+color biasColor           = bullishBias ? LONG_COLOR : bearishBias ? SHORT_COLOR : RANGE_COLOR
+
+plotBiasBand = plot(biasBand, "Bias Band", color = biasColor, linewidth = 2, style = plot.style_linebr)
+plotRailUpper = plot(upperRail, "Upper Value Rail", color = color.new(LONG_COLOR, 20), linewidth = 1)
+plotRailLower = plot(lowerRail, "Lower Value Rail", color = color.new(SHORT_COLOR, 20), linewidth = 1)
+plotMidRail = plot(railMid, "Value Mid", color = color.new(RANGE_COLOR, 50), linewidth = 1)
+plotPriceAnchor = plot(close, "Hidden Price Anchor", color = na, display = display.none)
+
+fill(plotBiasBand, plotPriceAnchor, color = showCloudInput ? color.new(biasColor, 90) : na, title = "Bias Cloud")
+fill(plotRailUpper, plotRailLower, color = showCloudInput ? color.new(color.from_gradient(momentumSpread, -20.0, 20.0, SHORT_COLOR, LONG_COLOR), 92) : na, title = "Value Cloud")
+
+barcolor(tintCandlesInput ? color.new(color.from_gradient(momentumSpread, -20.0, 20.0, SHORT_COLOR, LONG_COLOR), 0) : na)
+
+//--------------------------------------------------------------------------------------------------
+// Dashboard
+//--------------------------------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 9, bgcolor = PANEL_BG, frame_color = PANEL_BORDER, frame_width = 1, border_width = 0)
+
+dashCell(table panel, int row, string labelText, string valueText, color valueColor) =>
+    panel.cell(0, row, labelText, text_color = PANEL_HEADER, text_size = size.normal, text_halign = text.align_left)
+    panel.cell(1, row, valueText, text_color = valueColor, text_size = size.normal, text_halign = text.align_right)
+
+dashDivider(table panel, int row) =>
+    panel.merge_cells(0, row, 1, row)
+    panel.cell(0, row, "--------------", text_color = PANEL_BORDER, text_size = size.normal, text_halign = text.align_center)
+
+if barstate.islast
+    if showDashboardInput
+        string exposureState = strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat"
+        color exposureColor = strategy.position_size > 0 ? LONG_COLOR : strategy.position_size < 0 ? SHORT_COLOR : PANEL_DIM
+        string regimeState = confirmedTrendRegime ? "Directional" : confirmedRangeRegime ? "Rotation" : "Developing"
+        color regimeColor = confirmedTrendRegime ? GOLD_COLOR : confirmedRangeRegime ? RANGE_COLOR : PANEL_DIM
+        string bandText = na(biasBand) ? "N/A" : formatPrice(biasBand)
+        string upperText = na(upperRail) ? "N/A" : formatPrice(upperRail)
+        string lowerText = na(lowerRail) ? "N/A" : formatPrice(lowerRail)
+
+        table.cell(dash, 0, 0, "Concordance Strategy", text_color = PANEL_TEXT, text_size = size.normal, text_halign = text.align_left)
+        table.cell(dash, 1, 0, exposureState, text_color = exposureColor, text_size = size.normal, text_halign = text.align_right)
+
+        dashDivider(dash, 1)
+
+        dashCell(dash, 2, "Regime", regimeState, regimeColor)
+        dashCell(dash, 3, "Trend Prob", formatPct(trendPercent), LONG_COLOR)
+        dashCell(dash, 4, "Momentum", formatPct(clampFloat(momentumSpread * 2.5 + 50.0, 0.0, 100.0)), biasColor)
+
+        dashDivider(dash, 5)
+
+        dashCell(dash, 6, "Bias Band", bandText, biasColor)
+        dashCell(dash, 7, "Upper Rail", upperText, LONG_COLOR)
+        dashCell(dash, 8, "Lower Rail", lowerText, SHORT_COLOR)
+    else
+        table.clear(dash, 0, 0, 1, 8)

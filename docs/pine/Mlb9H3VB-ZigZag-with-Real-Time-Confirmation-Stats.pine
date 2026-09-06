@@ -1,0 +1,264 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © gogaz
+
+//@version=6
+indicator("ZigZag with Real-Time Confirmation Stats", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============ INPUTS ============ //
+zigperiod = input.int(13, "ZigZag Period")
+showprice = input.bool(false, "Show Standalone Price Labels")
+showperc  = input.bool(true, "Show Percentage & Price Labels")
+showline  = input.bool(true, "Show Zig Lines")
+upcolor   = input.color(color.green, "Zig Zag Up Color")
+downcolor = input.color(color.red, "Zig Zag Down Color")
+txtcol    = input.color(color.white, "Text Color")
+zigstyle  = input.string("Solid", "Zig Zag Line Style", options=["Solid", "Dotted"])
+zigwidth  = input.int(3, "Zig zag Line Width", minval=1)
+
+// Date Range Inputs
+startDate   = input.time(timestamp("01 Jan 2020 00:00 +0000"), "Start Date")
+endDate     = input.time(timestamp("31 Dec 2030 23:59 +0000"), "End Date")
+inDateRange = time >= startDate and time <= endDate
+
+// ============ INDICATORS ============ //
+len = input.int(5, "EMA Length", minval=1)
+src = input.source(close, "EMA Source")
+out = ta.ema(src, len)
+
+// Bollinger Bands
+emaSource    = close
+emaPeriod    = 20
+devMultiple  = 2
+baseline     = ta.sma(emaSource, emaPeriod)
+plot(baseline, title="BB Mid Line", color=color.red, display=display.none)
+stdDeviation = devMultiple * ta.stdev(emaSource, emaPeriod)
+upperBand    = baseline + stdDeviation
+lowerBand    = baseline - stdDeviation
+p1           = plot(upperBand, title="BB Top", color=#4dd0e1)
+p2           = plot(lowerBand, title="BB Bottom", color=#ce93d8)
+fill(p1, p2, color=color.new(color.blue, 90))
+
+// Hidden Plot for Reference
+plot(out, title="EMA Invis", color=color.blue, display=display.none)
+
+// ============ ZIGZAG CALCULATION ============ //
+float highs = ta.highestbars(high, zigperiod) == 0 ? high : na
+float lows  = ta.lowestbars(low, zigperiod) == 0 ? low : na
+
+bool isHigh = not na(highs)
+bool isLow  = not na(lows)
+
+var int dir1 = 0
+dir1 := isHigh and not isLow ? 1 : isLow and not isHigh ? -1 : dir1
+
+truncate(number, decimals) =>
+    factor = math.pow(10, decimals)
+    int(number * factor) / factor
+
+percent(n1, n2) =>
+    ((n1 - n2) / n2) * 100
+
+var ziggyzags = array.new_float(0)
+
+add_to_zigzag(pointer, value, bindex) =>
+    array.unshift(pointer, bindex)
+    array.unshift(pointer, value)
+
+update_zigzag(pointer, value, bindex, dir) =>
+    if array.size(pointer) == 0
+        add_to_zigzag(pointer, value, bindex)
+    else
+        if (dir == 1 and value > array.get(pointer, 0)) or (dir == -1 and value < array.get(pointer, 0))
+            array.set(pointer, 0, value)
+            array.set(pointer, 1, bindex)
+
+int dir1Delta = ta.change(dir1)
+bool dir1changed = not na(dir1Delta) and dir1Delta != 0
+
+if isHigh or isLow
+    float currentPivot = dir1 == 1 ? highs : lows
+    if dir1changed 
+        add_to_zigzag(ziggyzags, currentPivot, bar_index)
+    else
+        update_zigzag(ziggyzags, currentPivot, bar_index, dir1)
+
+// ============ STATISTICAL TRACKING ============ //
+var array<float> theoretical_moves = array.new_float(0)
+var array<float> confirmed_moves   = array.new_float(0)
+var array<float> lag_costs         = array.new_float(0)
+
+// Capture real-time confirmation price at the exact bar the pivot direction flipped
+if dir1changed and array.size(ziggyzags) >= 4 and inDateRange
+    float prev_pivot_val = array.get(ziggyzags, 2) // Extreme price of previous swing
+    float curr_pivot_val = array.get(ziggyzags, 0) // Extreme price of finished swing
+    float confirm_price  = close                   // Execution price on confirmation bar
+
+    if not na(prev_pivot_val) and not na(curr_pivot_val) and prev_pivot_val != curr_pivot_val
+        // 1. Theoretical Move (% move from extreme low to extreme high)
+        float theo_perc = percent(curr_pivot_val, prev_pivot_val)
+        array.push(theoretical_moves, theo_perc)
+
+        // 2. Confirmed Move (% move left from confirmation bar close to extreme high/low)
+        float conf_perc = percent(curr_pivot_val, confirm_price)
+        array.push(confirmed_moves, conf_perc)
+
+        // 3. Lag Cost (% missed due to confirmation delay)
+        float lag_cost = math.abs(theo_perc) - math.abs(conf_perc)
+        array.push(lag_costs, lag_cost)
+
+// Math Helpers
+calc_average(arr) =>
+    array.size(arr) > 0 ? array.sum(arr) / array.size(arr) : na
+
+calc_max(arr) => array.size(arr) > 0 ? array.max(arr) : na
+calc_min(arr) => array.size(arr) > 0 ? array.min(arr) : na
+
+// ============ STATISTICAL TABLE DISPLAY WITH TOOLTIPS ============ //
+var table stats_table = table.new(position.top_right, 4, 6, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    // --- ROW 0: HEADERS ---
+    table.cell(stats_table, 0, 0, "Metric", 
+               bgcolor=color.new(color.blue, 80), text_color=color.white, 
+               tooltip="Statistical breakdown of historical swing moves.")
+               
+    table.cell(stats_table, 1, 0, "Theoretical", 
+               bgcolor=color.new(color.blue, 80), text_color=color.white, 
+               tooltip="Theoretical performance measured strictly from absolute Low to absolute High.\n(Note: Contains repainting/look-ahead bias).")
+               
+    table.cell(stats_table, 2, 0, "Confirmed (Real)", 
+               bgcolor=color.new(color.purple, 80), text_color=color.white, 
+               tooltip="Tradeable performance remaining AFTER the ZigZag pivot was confirmed on the chart in real time.")
+               
+    table.cell(stats_table, 3, 0, "Lag Cost", 
+               bgcolor=color.new(color.orange, 80), text_color=color.white, 
+               tooltip="The performance percentage lost/missed due to the delay required to confirm the pivot point.")
+
+    // --- ROW 1: COUNT ---
+    table.cell(stats_table, 0, 1, "Count", 
+               text_color=color.white, 
+               tooltip="Total number of confirmed ZigZag swing moves within the selected date range.")
+               
+    table.cell(stats_table, 1, 1, str.tostring(array.size(theoretical_moves)), 
+               text_color=color.white, 
+               tooltip="Total theoretical swing legs recorded.")
+               
+    table.cell(stats_table, 2, 1, str.tostring(array.size(confirmed_moves)), 
+               text_color=color.purple, 
+               tooltip="Total confirmed swing legs recorded in real time.")
+               
+    table.cell(stats_table, 3, 1, "-", 
+               text_color=color.gray, 
+               tooltip="Not applicable for count.")
+
+    // --- ROW 2: AVERAGE MOVE ---
+    table.cell(stats_table, 0, 2, "Average Move", 
+               text_color=color.white, 
+               tooltip="The arithmetic mean percentage size across all completed swings.")
+               
+    table.cell(stats_table, 1, 2, str.tostring(truncate(calc_average(theoretical_moves), 2)) + "%", 
+               text_color=color.white, 
+               tooltip="Average percentage move calculated from peak-to-trough (unrealistic live entry).")
+               
+    table.cell(stats_table, 2, 2, str.tostring(truncate(calc_average(confirmed_moves), 2)) + "%", 
+               text_color=color.purple, 
+               tooltip="Average percentage move captured after confirmation bar closed (realistic tradeable edge).")
+               
+    table.cell(stats_table, 3, 2, str.tostring(truncate(calc_average(lag_costs), 2)) + "%", 
+               text_color=color.orange, 
+               tooltip="Average percentage move lost per swing while waiting for pivot confirmation.")
+
+    // --- ROW 3: MAX MOVE ---
+    table.cell(stats_table, 0, 3, "Max Move", 
+               text_color=color.white, 
+               tooltip="The single largest percentage move recorded among all swings.")
+               
+    table.cell(stats_table, 1, 3, str.tostring(truncate(calc_max(theoretical_moves), 2)) + "%", 
+               text_color=color.white, 
+               tooltip="Largest peak-to-trough percentage gain in the dataset.")
+               
+    table.cell(stats_table, 2, 3, str.tostring(truncate(calc_max(confirmed_moves), 2)) + "%", 
+               text_color=color.purple, 
+               tooltip="Largest percentage gain remaining after confirmation in the dataset.")
+               
+    table.cell(stats_table, 3, 3, str.tostring(truncate(calc_max(lag_costs), 2)) + "%", 
+               text_color=color.orange, 
+               tooltip="Maximum performance percentage missed on a single swing due to lag.")
+
+    // --- ROW 4: MIN MOVE ---
+    table.cell(stats_table, 0, 4, "Min Move", 
+               text_color=color.white, 
+               tooltip="The smallest percentage move recorded among all swings.")
+               
+    table.cell(stats_table, 1, 4, str.tostring(truncate(calc_min(theoretical_moves), 2)) + "%", 
+               text_color=color.white, 
+               tooltip="Smallest peak-to-trough percentage move in the dataset.")
+               
+    table.cell(stats_table, 2, 4, str.tostring(truncate(calc_min(confirmed_moves), 2)) + "%", 
+               text_color=color.purple, 
+               tooltip="Smallest percentage move remaining after confirmation in the dataset.")
+               
+    table.cell(stats_table, 3, 4, str.tostring(truncate(calc_min(lag_costs), 2)) + "%", 
+               text_color=color.orange, 
+               tooltip="Minimum performance percentage missed on a single swing due to lag.")
+
+    // --- ROW 5: TOTAL CUMULATED RETURN ---
+    total_theo = array.size(theoretical_moves) > 0 ? array.sum(theoretical_moves) : 0.0
+    total_conf = array.size(confirmed_moves) > 0 ? array.sum(confirmed_moves) : 0.0
+    
+    table.cell(stats_table, 0, 5, "Total Cum. Return", 
+               text_color=color.white, 
+               tooltip="Sum of all percentage returns across the entire historical range.")
+               
+    table.cell(stats_table, 1, 5, str.tostring(truncate(total_theo, 2)) + "%", 
+               text_color=total_theo > 0 ? color.green : color.red, 
+               tooltip="Hypothetical total return if you bought every bottom and sold every top perfectly.")
+               
+    table.cell(stats_table, 2, 5, str.tostring(truncate(total_conf, 2)) + "%", 
+               text_color=total_conf > 0 ? color.green : color.red, 
+               tooltip="Realistic total return if you entered at market close on every pivot confirmation bar.")
+               
+    table.cell(stats_table, 3, 5, str.tostring(truncate(total_theo - total_conf, 2)) + "%", 
+               text_color=color.orange, 
+               tooltip="Total cumulative return given up to indicator lag over the entire dataset.")
+
+// ============ ALL ZIGZAG LINES & PERCENTAGE LABELS ============ //
+var line cur_line = na
+var label cur_label = na
+
+if array.size(ziggyzags) >= 4 and inDateRange
+    float val   = array.get(ziggyzags, 0)
+    int point   = math.round(array.get(ziggyzags, 1))
+    float val1  = array.get(ziggyzags, 2)
+    int point1  = math.round(array.get(ziggyzags, 3))
+
+    if dir1changed
+        cur_line := na
+        cur_label := na
+
+    if showline
+        line.delete(cur_line)
+        cur_line := line.new(
+             x1=point1, y1=val1, x2=point, y2=val, 
+             color=dir1 == 1 ? upcolor : downcolor, 
+             width=zigwidth, 
+             style=zigstyle == "Solid" ? line.style_solid : line.style_dotted
+         )
+
+    if showperc
+        label.delete(cur_label)
+        float perc_val = percent(val, val1)
+        
+        string price_str = str.tostring(val, "#.##") 
+        string perc_str  = (perc_val > 0 ? "+" : "") + str.tostring(truncate(perc_val, 2)) + "%"
+        string plabel    = price_str + "\n" + perc_str
+        
+        color labelcol = dir1 == 1 ? (val > out ? upcolor : downcolor) : (val < out ? downcolor : upcolor)
+
+        cur_label := label.new(
+             x=point, y=val, 
+             text=plabel, 
+             color=labelcol, 
+             textcolor=txtcol, 
+             style=dir1 == 1 ? label.style_label_down : label.style_label_up
+         )

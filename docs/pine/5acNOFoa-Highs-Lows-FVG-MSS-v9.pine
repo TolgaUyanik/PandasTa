@@ -1,0 +1,543 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  HIGHS / LOWS + FVG + MSS
+//  ---------------------------------------------------------------------------
+//  Stripped-back structural marker. Three things only:
+//    1. Swing highs and lows, extended right, terminating on the candle that
+//       takes them.
+//    2. Fair Value Gaps — solid thin border, no fill, dotted midpoint line.
+//       Inverted by a WICK trading through (close not required).
+//    3. Market Structure Shifts — "MSS" text plus a line back to the structure
+//       that was broken.
+//
+//  No bias engine, no dashboard, no background shading, no momentum filter,
+//  no entries, no sessions, no IFVG, no text labels on the levels.
+//
+//  ANTI-REPAINT: structure comes from ta.pivothigh/low(len, len), which confirm
+//  `len` bars after the pivot and are never revised. No security(), no lookahead,
+//  no future bar references. Signals gate on barstate.isconfirmed.
+// ═══════════════════════════════════════════════════════════════════════════════
+indicator("Highs/Lows + FVG + MSS  v9", overlay = true, max_lines_count = 500, max_labels_count = 200, max_bars_back = 1000)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  1. INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+gGen          = "① General"
+confirmedOnly = input.bool(true, "Confirmed Bars Only (anti-repaint)", group = gGen)
+
+// ── Highs & Lows ──────────────────────────────────────────────────────────────
+gLvl          = "② Highs & Lows"
+showLvl       = input.bool(true, "Show Swing Highs / Lows",      group = gLvl)
+swingLen      = input.int(10,   "Swing Length",                  minval = 1, maxval = 100, group = gLvl)
+maxLvl        = input.int(5,    "Max Untaken Levels (per side)", minval = 1, maxval = 20,  group = gLvl)
+lvlWidth      = input.int(1,    "Line Width",                    minval = 1, maxval = 4,   group = gLvl)
+lvlCol        = input.color(color.new(#b2b5be, 0),  "Untaken Colour", group = gLvl, inline = "c")
+sweptCol      = input.color(color.new(#787b86, 45), "Swept Colour",   group = gLvl, inline = "c")
+keepSwept     = input.bool(true, "Keep Swept Levels Visible",    group = gLvl)
+maxSweptKeep  = input.int(5,    "Max Swept Levels Kept",         minval = 0, maxval = 30, group = gLvl)
+sweepUseWick  = input.bool(true, "Sweep on Wick (off = close)",  group = gLvl)
+touchCounts   = input.bool(true, "Exact Touch Counts As Swept",  group = gLvl)
+retroSweep    = input.bool(true, "Retro-Check Level On Creation", group = gLvl, tooltip = "A pivot confirms several bars after it forms. This scans the bars the line was drawn back across and terminates it at the first candle that already traded through.")
+
+// ── FVG ───────────────────────────────────────────────────────────────────────
+gFvg          = "③ Fair Value Gaps"
+showFVG       = input.bool(true,  "Show FVGs",                   group = gFvg)
+minGapSize    = input.float(1.0,  "Minimum FVG Size (ES points)",   minval = 0.0, step = 0.25, group = gFvg, tooltip = "In ES index points (1 pt = 4 ticks = $50/contract). 1.0 = a one-point gap. Default tuned for ES1!.")
+minDisp       = input.float(6.0,  "Minimum Displacement Range (ES points)", minval = 0.0, step = 0.25, group = gFvg, tooltip = "Required high-low range of the displacement candle, in ES points. ~6 pts is a strong 5-min ES candle. Raise for stricter, lower for more signals.")
+bodyLookback  = input.int(20,     "Body Size Lookback",          minval = 2, maxval = 200, group = gFvg)
+reqCloseDir   = input.bool(true,  "Displacement Must Close In Direction", group = gFvg)
+maxFVG        = input.int(8,      "Max Live FVGs",               minval = 1, maxval = 40, group = gFvg)
+invByWick     = input.bool(true,  "Invert On Wick (no close needed)", group = gFvg, tooltip = "ON: the gap is done the moment a wick trades through the far side. OFF: requires a candle to close through.")
+zoneEndOffset = input.int(1, "End Zone N Candles After Inversion", minval = 0, maxval = 20, group = gFvg)
+deleteMitig   = input.bool(false, "Delete Inverted FVGs (off = fade)", group = gFvg)
+showMidline   = input.bool(true,  "Show Midpoint Line (dotted)", group = gFvg)
+fvgCol        = input.color(color.new(#9598a1, 0),  "FVG Border Colour",    group = gFvg)
+midCol        = input.color(color.new(#787b86, 25), "Midpoint Line Colour", group = gFvg)
+borderWidth   = input.int(1, "Border Width", minval = 1, maxval = 3, group = gFvg)
+
+// ── MSS ───────────────────────────────────────────────────────────────────────
+gMss          = "④ Market Structure Shift"
+showMSS       = input.bool(true, "Show MSS",                     group = gMss)
+mssLen        = input.int(5,     "MSS Swing Sensitivity",        minval = 1, maxval = 50, group = gMss)
+mssStrict     = input.bool(true, "Strict Structure (require LH / HL sequence)", group = gMss)
+mssFlipOnly   = input.bool(true, "Only Mark Direction Changes",  group = gMss, tooltip = "ON: an MSS only prints when structure flips the other way, so you get alternating marks instead of a cluster.")
+mssLabelSize  = input.string("tiny", "MSS Label Size", options = ["tiny","small","normal"], group = gMss)
+mssCol        = input.color(color.new(#d1d4dc, 0), "MSS Text Colour", group = gMss)
+showMssLine   = input.bool(true, "Draw Line To Broken Structure", group = gMss)
+mssLineMode   = input.string("Diagonal", "Structure Line Mode", options = ["Diagonal","Horizontal"], group = gMss)
+mssLineStyle  = input.string("Solid", "Structure Line Style", options = ["Solid","Dashed","Dotted"], group = gMss)
+mssLineCol    = input.color(color.new(#b2b5be, 0), "Structure Line Colour", group = gMss)
+mssLineWidth  = input.int(1, "Structure Line Width", minval = 1, maxval = 3, group = gMss)
+mssLineCap    = input.float(2.0, "Diagonal Drop Cap (ATR mult)", minval = 0.25, maxval = 20.0, step = 0.25, group = gMss, tooltip = "Limits how far the diagonal's far end can travel from the broken level, so a violent break can't streak the line down the whole chart. Higher = steeper allowed.")
+
+// ── HTF Levels & FVG ──────────────────────────────────────────────────────────
+gHtf          = "⑤ Higher-Timeframe (PDH/PDL, 4H)"
+showPDHL      = input.bool(true, "Show PDH / PDL",         group = gHtf)
+show4HHL      = input.bool(true, "Show 4H High / Low",     group = gHtf)
+show4HFVG     = input.bool(true, "Show 4H FVG",            group = gHtf)
+htfRes        = input.timeframe("240", "4H Resolution",    group = gHtf, tooltip = "The 'higher timeframe' used for the 4H high/low and 4H FVG. Change if you trade a different HTF.")
+htfWidth      = input.int(1,     "HTF Line Width",         minval = 1, maxval = 4, group = gHtf)
+pdhCol        = input.color(color.new(#ffb74d, 0), "PDH / PDL Colour",  group = gHtf, inline = "hc")
+h4Col         = input.color(color.new(#4dd0e1, 0), "4H High / Low Colour", group = gHtf, inline = "hc")
+htf4FvgCol    = input.color(color.new(#7e57c2, 0), "4H FVG Border Colour", group = gHtf)
+htfLblSize    = input.string("tiny", "HTF Label Size", options = ["tiny","small","normal"], group = gHtf)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  2. HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+f_size(string s) =>
+    switch s
+        "tiny"   => size.tiny
+        "small"  => size.small
+        "normal" => size.normal
+        => size.tiny
+
+f_lineStyle(string s) =>
+    switch s
+        "Solid"  => line.style_solid
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+noFill     = color.new(color.black, 100)   // zones are NEVER filled
+mssLblSize = f_size(mssLabelSize)
+htfLblS    = f_size(htfLblSize)
+canSignal  = confirmedOnly ? barstate.isconfirmed : true
+
+// Small vertical lift so HTF label text sits above its line, not through it.
+lblLift    = nz(ta.atr(14), syminfo.mintick * 10) * 0.15
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  3. TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+type Liq
+    float price
+    int   bar
+    bool  isHigh      // true = swing high, false = swing low
+    bool  swept
+    line  ln
+
+type Zone
+    float top
+    float bot
+    bool  bull        // true = bullish gap (support)
+    bool  dead
+    int   deadBar     // bar that inverted it
+    line  tl          // top border line
+    line  bl          // bottom border line
+    line  mid         // dotted midpoint line
+
+var array<Liq>  liqs  = array.new<Liq>()
+var array<Zone> zones = array.new<Zone>()
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  4. HIGHS & LOWS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Single source of truth for "has this level been taken?".
+// `off` is a history offset so the test can be replayed over past bars.
+f_hit(bool isHigh, float px, int off) =>
+    float hi = high[off]
+    float lo = low[off]
+    float cl = close[off]
+    bool res = false
+    if isHigh
+        res := sweepUseWick ? (touchCounts ? hi >= px : hi > px) : cl > px
+    else
+        res := sweepUseWick ? (touchCounts ? lo <= px : lo < px) : cl < px
+    res
+
+// Terminate a level on the candle that took it.
+f_markSwept(Liq l, int atBar) =>
+    l.swept := true
+    line.set_extend(l.ln, extend.none)
+    line.set_x2(l.ln, atBar)
+    line.set_color(l.ln, sweptCol)
+
+// Create a level: line from the swing point, extending right, no text label.
+f_addLiq(float price, bool isHigh, int originBar) =>
+    ln = line.new(originBar, price, bar_index, price, extend = extend.right, color = lvlCol, width = lvlWidth, style = line.style_solid)
+    Liq nl = Liq.new(price, originBar, isHigh, false, ln)
+
+    // The line is drawn back to originBar but the level only becomes known now,
+    // so scan that back-span and terminate at the first candle already through it.
+    //
+    // NOTE: the scan starts at span-1, i.e. the bar AFTER the origin. The origin
+    // bar IS the swing point, so its own high equals the level exactly — including
+    // it would mark every level swept the instant it was created.
+    if retroSweep
+        int span = (bar_index - originBar) < 500 ? (bar_index - originBar) : 500
+        if span > 1
+            bool done = false
+            for k = span - 1 to 1
+                if not done and f_hit(isHigh, price, k)
+                    f_markSwept(nl, bar_index - k)
+                    done := true
+
+    array.push(liqs, nl)
+
+// Bound the arrays: N untaken per side, N swept overall.
+f_trimLiq() =>
+    int uH = 0, int uL = 0, int sw = 0
+    if array.size(liqs) > 0
+        for i = array.size(liqs) - 1 to 0
+            Liq l = array.get(liqs, i)
+            bool drop = false
+            if l.swept
+                sw += 1
+                drop := not keepSwept or sw > maxSweptKeep
+            else if l.isHigh
+                uH += 1
+                drop := uH > maxLvl
+            else
+                uL += 1
+                drop := uL > maxLvl
+            if drop
+                line.delete(l.ln)
+                array.remove(liqs, i)
+
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low,  swingLen, swingLen)
+
+if showLvl and canSignal
+    if not na(ph)
+        f_addLiq(ph, true,  bar_index - swingLen)
+    if not na(pl)
+        f_addLiq(pl, false, bar_index - swingLen)
+
+// Live sweep check.
+bool sweepNow = false
+if array.size(liqs) > 0 and canSignal
+    for i = 0 to array.size(liqs) - 1
+        Liq l = array.get(liqs, i)
+        if not l.swept and f_hit(l.isHigh, l.price, 0)
+            f_markSwept(l, bar_index)
+            sweepNow := true
+
+f_trimLiq()
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  5. FAIR VALUE GAPS
+// ═══════════════════════════════════════════════════════════════════════════════
+body     = math.abs(close - open)
+avgBody  = ta.sma(body, bodyLookback)
+
+// The displacement candle is the MIDDLE bar of the three-bar pattern -> [1].
+dispRange = high[1] - low[1]
+dispBody  = math.abs(close[1] - open[1])
+dispOK    = dispRange >= minDisp and not na(avgBody[1]) and dispBody > avgBody[1]
+
+bullGapSz = low - high[2]
+bearGapSz = low[2] - high
+
+bullFVG = canSignal and showFVG and low  > high[2] and bullGapSz >= minGapSize and dispOK and (not reqCloseDir or close[1] > open[1])
+bearFVG = canSignal and showFVG and high < low[2]  and bearGapSz >= minGapSize and dispOK and (not reqCloseDir or close[1] < open[1])
+
+// Two horizontal border lines (top + bottom) and a dotted midpoint. NO box, so
+// there is never a vertical left/right edge — the zone is purely horizontal.
+f_addZone(float top, float bot, bool bull) =>
+    tl = line.new(bar_index - 2, top, bar_index, top, extend = extend.right, color = fvgCol, width = borderWidth, style = line.style_solid)
+    bl = line.new(bar_index - 2, bot, bar_index, bot, extend = extend.right, color = fvgCol, width = borderWidth, style = line.style_solid)
+    md = showMidline ? line.new(bar_index - 2, math.avg(top, bot), bar_index, math.avg(top, bot), extend = extend.right, color = midCol, width = 1, style = line.style_dotted) : na
+    array.push(zones, Zone.new(top, bot, bull, false, na, tl, bl, md))
+
+f_trimZones() =>
+    int n = 0
+    if array.size(zones) > 0
+        for i = array.size(zones) - 1 to 0
+            n += 1
+            if n > maxFVG
+                Zone z = array.get(zones, i)
+                line.delete(z.tl), line.delete(z.bl), line.delete(z.mid)
+                array.remove(zones, i)
+
+if bullFVG
+    f_addZone(low, high[2], true)
+if bearFVG
+    f_addZone(low[2], high, false)
+
+// ── Inversion ─────────────────────────────────────────────────────────────────
+// A WICK through the far side is enough — no close required (toggleable).
+//   Bullish gap dies when price trades below its bottom.
+//   Bearish gap dies when price trades above its top.
+bool invNow = false
+if array.size(zones) > 0 and canSignal
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        if not z.dead
+            bool broken = z.bull ? (invByWick ? low < z.bot : close < z.bot) : (invByWick ? high > z.top : close > z.top)
+            if broken
+                z.dead    := true
+                z.deadBar := bar_index
+                invNow    := true
+
+// Freeze inverted zones N candles past the inverting bar. deadBar is fixed, so
+// this is idempotent — the lines can never creep forward on later bars.
+f_endLine(line ln, int endBar, color col) =>
+    if not na(ln)
+        line.set_extend(ln, extend.none)
+        line.set_x2(ln, endBar)
+        line.set_color(ln, col)
+
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        if z.dead
+            if deleteMitig
+                line.delete(z.tl), line.delete(z.bl), line.delete(z.mid)
+                array.remove(zones, i)
+            else
+                int endBar = nz(z.deadBar, bar_index) + zoneEndOffset
+                f_endLine(z.tl,  endBar, sweptCol)
+                f_endLine(z.bl,  endBar, sweptCol)
+                f_endLine(z.mid, endBar, sweptCol)
+
+f_trimZones()
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  5B. HIGHER-TIMEFRAME LEVELS  —  PDH / PDL and previous 4H high / low
+//      Each period's high/low AND the exact bar it printed on are tracked live on
+//      the chart, so the level line can START at that candle and extend right.
+//      Non-repainting: the "previous period" values only change on a period
+//      boundary (a completed, historical event); the developing period is never
+//      drawn. This also works on every chart timeframe at or below the period.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// HTF references only make sense when the chart timeframe is AT OR BELOW the
+// period. On a higher chart TF the concept is meaningless, so skip it.
+chartSec = timeframe.in_seconds()
+pdhOK    = chartSec <= timeframe.in_seconds("1D")
+h4OK     = chartSec <= timeframe.in_seconds(htfRes)
+
+// Rolling extreme tracker for one period. Returns the PREVIOUS completed period's
+// high, low, and the bar_index each occurred on. `changed` marks a new period.
+// Uses var state passed back so the caller can persist it across bars.
+// (Implemented inline below for daily and 4H to keep the state explicit.)
+
+// ── Daily (PDH / PDL) ─────────────────────────────────────────────────────────
+var float dCurH = na, var int dCurHb = na, var float dCurL = na, var int dCurLb = na
+var float pdH   = na, var int pdHb   = na, var float pdL   = na, var int pdLb   = na
+dNew = timeframe.change("1D")
+if na(dCurH) or dNew
+    if dNew
+        pdH := dCurH, pdHb := dCurHb, pdL := dCurL, pdLb := dCurLb
+    dCurH := high, dCurHb := bar_index, dCurL := low, dCurLb := bar_index
+else
+    if high > dCurH
+        dCurH := high, dCurHb := bar_index
+    if low < dCurL
+        dCurL := low,  dCurLb := bar_index
+
+// ── 4H (or chosen HTF) high / low ─────────────────────────────────────────────
+var float hCurH = na, var int hCurHb = na, var float hCurL = na, var int hCurLb = na
+var float h4H   = na, var int h4Hb   = na, var float h4L   = na, var int h4Lb   = na
+hNew = timeframe.change(htfRes)
+if na(hCurH) or hNew
+    if hNew
+        h4H := hCurH, h4Hb := hCurHb, h4L := hCurL, h4Lb := hCurLb
+    hCurH := high, hCurHb := bar_index, hCurL := low, hCurLb := bar_index
+else
+    if high > hCurH
+        hCurH := high, hCurHb := bar_index
+    if low < hCurL
+        hCurL := low,  hCurLb := bar_index
+
+// Stateful HTF level: holds its own drawing plus sweep state so the line can be
+// terminated on the exact candle that takes it (wick touch — no close needed).
+type HLevel
+    float price
+    int   startBar
+    bool  isHigh      // true = a high (BSL), false = a low (SSL)
+    bool  swept
+    int   sweptBar
+    line  ln
+    label lb
+
+var HLevel pdhLv = HLevel.new(na, na, true,  false, na, na, na)
+var HLevel pdlLv = HLevel.new(na, na, false, false, na, na, na)
+var HLevel h4hLv = HLevel.new(na, na, true,  false, na, na, na)
+var HLevel h4lLv = HLevel.new(na, na, false, false, na, na, na)
+
+// Update one level each bar.
+//   isNew  = a new period just produced a fresh value (rebuild the line).
+//   A high level is swept when price wicks to/through it (high >= price); a low
+//   when low <= price. On sweep the line stops at that candle and greys out.
+f_level(HLevel lv, bool show, bool isNew, float price, int startBar, color col, string txt) =>
+    // Rebuild on a new period value.
+    if isNew and show and not na(price) and not na(startBar)
+        if not na(lv.ln)
+            line.delete(lv.ln)
+        if not na(lv.lb)
+            label.delete(lv.lb)
+        lv.price    := price
+        lv.startBar := startBar
+        lv.swept    := false
+        lv.sweptBar := na
+        int xa = startBar < bar_index ? startBar : bar_index
+        lv.ln := line.new(xa, price, bar_index, price, extend = extend.right, color = col, width = htfWidth, style = line.style_solid)
+        lv.lb := label.new(bar_index + 30, price + lblLift, txt, style = label.style_none, textcolor = col, size = htfLblS, textalign = text.align_left)
+
+    // If the feature was switched off, clear any existing drawing.
+    if not show
+        if not na(lv.ln)
+            line.delete(lv.ln), lv.ln := na
+        if not na(lv.lb)
+            label.delete(lv.lb), lv.lb := na
+
+    // Maintain a live line: detect the wick-touch sweep, else keep the label pinned right.
+    if not na(lv.ln) and not lv.swept
+        bool hit = lv.isHigh ? high >= lv.price : low <= lv.price
+        if hit and canSignal
+            lv.swept    := true
+            lv.sweptBar := bar_index
+            line.set_extend(lv.ln, extend.none)
+            line.set_x2(lv.ln, bar_index)          // end the line on the sweeping candle
+            line.set_color(lv.ln, sweptCol)
+            if not na(lv.lb)
+                label.set_xy(lv.lb, bar_index, lv.price + lblLift)
+                label.set_textcolor(lv.lb, sweptCol)
+        else if not na(lv.lb)
+            label.set_x(lv.lb, bar_index + 30)     // still live: keep label at the right edge
+
+f_level(pdhLv, showPDHL and pdhOK, dNew, pdH, pdHb, pdhCol, "PDH")
+f_level(pdlLv, showPDHL and pdhOK, dNew, pdL, pdLb, pdhCol, "PDL")
+f_level(h4hLv, show4HHL and h4OK,  hNew, h4H, h4Hb, h4Col,  "4H High")
+f_level(h4lLv, show4HHL and h4OK,  hNew, h4L, h4Lb, h4Col,  "4H Low")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  5C. 4H FAIR VALUE GAPS
+//      Detected on the HTF series. We keep a rolling window of the last three
+//      COMPLETED HTF candles and test for a 3-candle gap the moment the third
+//      one closes. Reading htfH[1]/htfL[1] on the HTF-change bar guarantees the
+//      candle is finished — non-repainting.
+// ═══════════════════════════════════════════════════════════════════════════════
+type HZone
+    float top
+    float bot
+    bool  bull
+    bool  dead
+    int   deadBar
+    line  tl
+    line  bl
+    line  mid
+    label lb
+
+var array<HZone> hzones = array.new<HZone>()
+
+htfH      = request.security(syminfo.tickerid, htfRes, high,  lookahead = barmerge.lookahead_off)
+htfL      = request.security(syminfo.tickerid, htfRes, low,   lookahead = barmerge.lookahead_off)
+htfNewBar = timeframe.change(htfRes)
+
+// Rolling highs/lows of the three most recent COMPLETED HTF candles.
+var float H1 = na, var float H2 = na, var float H3 = na
+var float L1 = na, var float L2 = na, var float L3 = na
+
+bool bull4 = false
+bool bear4 = false
+
+if htfNewBar and canSignal and h4OK
+    H3 := H2, H2 := H1, H1 := htfH[1]
+    L3 := L2, L2 := L1, L1 := htfL[1]
+    // Bullish 4H FVG: most-recent-completed low is above the two-ago high.
+    bull4 := show4HFVG and not na(H3) and L1 > H3
+    // Bearish 4H FVG: most-recent-completed high is below the two-ago low.
+    bear4 := show4HFVG and not na(L3) and H1 < L3
+
+f_add4Zone(float top, float bot, bool bull) =>
+    // Normalise so tl is always the higher price and bl the lower.
+    float hi = math.max(top, bot)
+    float lo = math.min(top, bot)
+    tl = line.new(bar_index - 1, hi, bar_index, hi, extend = extend.right, color = htf4FvgCol, width = borderWidth, style = line.style_solid)
+    bl = line.new(bar_index - 1, lo, bar_index, lo, extend = extend.right, color = htf4FvgCol, width = borderWidth, style = line.style_solid)
+    md = showMidline ? line.new(bar_index - 1, math.avg(hi, lo), bar_index, math.avg(hi, lo), extend = extend.right, color = htf4FvgCol, width = 1, style = line.style_dotted) : na
+    lb = label.new(bar_index + 30, math.avg(hi, lo) + lblLift, "4H FVG", style = label.style_none, textcolor = htf4FvgCol, size = htfLblS, textalign = text.align_left)
+    array.push(hzones, HZone.new(hi, lo, bull, false, na, tl, bl, md, lb))
+
+if bull4
+    f_add4Zone(L1, H3, true)
+if bear4
+    f_add4Zone(H1, L3, false)
+
+// Inversion (wick through the far side) + freeze, mirroring the LTF FVG logic.
+if array.size(hzones) > 0 and canSignal
+    for i = array.size(hzones) - 1 to 0
+        HZone z = array.get(hzones, i)
+        if not z.dead
+            bool broken = z.bull ? (invByWick ? low < z.bot : close < z.bot) : (invByWick ? high > z.top : close > z.top)
+            if broken
+                z.dead    := true
+                z.deadBar := bar_index
+
+if array.size(hzones) > 0
+    for i = array.size(hzones) - 1 to 0
+        HZone z = array.get(hzones, i)
+        if z.dead
+            if deleteMitig
+                line.delete(z.tl), line.delete(z.bl), line.delete(z.mid), label.delete(z.lb)
+                array.remove(hzones, i)
+            else
+                int endBar = nz(z.deadBar, bar_index) + zoneEndOffset
+                f_endLine(z.tl,  endBar, sweptCol)
+                f_endLine(z.bl,  endBar, sweptCol)
+                f_endLine(z.mid, endBar, sweptCol)
+                label.delete(z.lb)
+        else if not na(z.lb)
+            label.set_x(z.lb, bar_index + 30)
+
+// Cap live 4H FVGs.
+if array.size(hzones) > 8
+    HZone zr = array.shift(hzones)
+    line.delete(zr.tl), line.delete(zr.bl), line.delete(zr.mid), label.delete(zr.lb)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  6. MARKET STRUCTURE SHIFT
+// ═══════════════════════════════════════════════════════════════════════════════
+mPH = ta.pivothigh(high, mssLen, mssLen)
+mPL = ta.pivotlow(low,  mssLen, mssLen)
+
+var float lastPH = na, var float prevPH = na, var int lastPHbar = na
+var float lastPL = na, var float prevPL = na, var int lastPLbar = na
+var int   mssDir = 0
+
+if not na(mPH)
+    prevPH := lastPH, lastPH := mPH, lastPHbar := bar_index - mssLen
+if not na(mPL)
+    prevPL := lastPL, lastPL := mPL, lastPLbar := bar_index - mssLen
+
+higherLow = not na(lastPL) and not na(prevPL) and lastPL > prevPL
+lowerHigh = not na(lastPH) and not na(prevPH) and lastPH < prevPH
+
+// CLOSE through structure only — wick breaks never count as an MSS.
+bullMSS = canSignal and showMSS and not na(lastPH) and close > lastPH and close[1] <= lastPH and (not mssStrict or higherLow) and (not mssFlipOnly or mssDir != 1)
+bearMSS = canSignal and showMSS and not na(lastPL) and close < lastPL and close[1] >= lastPL and (not mssStrict or lowerHigh) and (not mssFlipOnly or mssDir != -1)
+
+if bullMSS or bearMSS
+    mssDir := bullMSS ? 1 : -1
+
+    // The structure that broke: swing high for a bullish MSS, swing low for bearish.
+    float brokenLvl = bullMSS ? lastPH    : lastPL
+    int   brokenBar = bullMSS ? lastPHbar : lastPLbar
+
+    if showMssLine and not na(brokenLvl) and not na(brokenBar)
+        // Diagonal ends at the break candle's close, but the vertical travel is
+        // capped to `mssLineCap` × ATR so a violent displacement can't streak the
+        // line down the whole chart. Bullish breaks cap upward, bearish downward.
+        float cap = nz(ta.atr(14), syminfo.mintick * 10) * mssLineCap
+        float y2  = brokenLvl
+        if mssLineMode == "Diagonal"
+            y2 := bullMSS ? math.min(close, brokenLvl + cap) : math.max(close, brokenLvl - cap)
+        line.new(brokenBar, brokenLvl, bar_index, y2, xloc = xloc.bar_index, color = mssLineCol, width = mssLineWidth, style = f_lineStyle(mssLineStyle))
+
+    label.new(bar_index, bullMSS ? high : low, "MSS", style = bullMSS ? label.style_label_down : label.style_label_up, color = noFill, textcolor = mssCol, size = mssLblSize)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  7. ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+alertcondition(sweepNow, "Liquidity Sweep", "Level swept")
+alertcondition(bullMSS,  "Bullish MSS",     "Bullish MSS")
+alertcondition(bearMSS,  "Bearish MSS",     "Bearish MSS")
+alertcondition(bullFVG,  "Bullish FVG",     "Bullish FVG formed")
+alertcondition(bearFVG,  "Bearish FVG",     "Bearish FVG formed")
+alertcondition(invNow,   "FVG Inverted",    "FVG inverted")
+alertcondition(bull4,    "Bullish 4H FVG",  "Bullish 4H FVG formed")
+alertcondition(bear4,    "Bearish 4H FVG",  "Bearish 4H FVG formed")

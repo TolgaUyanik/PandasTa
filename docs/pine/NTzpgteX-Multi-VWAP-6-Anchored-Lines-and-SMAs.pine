@@ -1,0 +1,362 @@
+//@version=6
+indicator("Multi-VWAP — 6 Anchored Lines + SMAs", shorttitle = "VWAP x6 + SMA", overlay = true, max_bars_back = 5000, max_labels_count = 60)
+
+// ============================================================================
+//  MULTI-VWAP  —  six independently-anchored VWAPs on one chart
+// ----------------------------------------------------------------------------
+//  Each VWAP can anchor to:  Session / Day / Week / Month / Quarter / Year /
+//  Custom Date.  Each carries optional ± standard-deviation bands.
+//
+//  Per-line styling : colour, width, line transparency, fill transparency.
+//  End-of-line labels: name the anchor + the line (VWAP / +SD / -SD),
+//                      with horizontal offset and optional vertical stagger.
+//
+//  NOTE: these are *anchored* VWAPs (volume accumulator resets at each new
+//  anchor period). They are NOT rolling/HTF security() VWAPs. The "timeframe"
+//  you choose per line is the ANCHOR period, not a higher chart resolution.
+//
+//  + Adds a Simple Moving Average block (up to 4 lines) at the bottom.
+// ============================================================================
+
+// ----------------------------- Shared inputs --------------------------------
+grpGen   = "General"
+tzSel    = input.string("Europe / Berlin (Frankfurt)", "Session timezone (for 'Session' anchor)",
+             options = ["Europe / Berlin (Frankfurt)", "America / New York (US)", "Asia / Tokyo (Asian)"], group = grpGen,
+             tooltip = "Used only by VWAPs whose anchor is set to 'Session'. Sets the timezone the session window is interpreted in. GER40 cash = Europe / Berlin.")
+tzSess   = tzSel == "America / New York (US)" ? "America/New_York" : tzSel == "Asia / Tokyo (Asian)" ? "Asia/Tokyo" : "Europe/Berlin"
+useP     = input.bool(false, "Use market cash-session preset", group = grpGen,
+             tooltip = "When ON, every 'Session'-anchored VWAP uses the standard cash hours for the timezone chosen above and ignores its own Session field. When OFF, each line's Session field is used.")
+presetS  = tzSel == "America / New York (US)" ? "0930-1600" : tzSel == "Asia / Tokyo (Asian)" ? "0900-1500" : "0900-1730"
+breakNew = input.bool(true, "Break line at each new anchor", group = grpGen,
+             tooltip = "Prevents the diagonal 'jump' line drawn when a VWAP resets to a new period.")
+fillBnds = input.bool(true, "Fill between ± bands (master)", group = grpGen)
+
+grpLbl   = "Labels"
+showLbl  = input.bool(true, "Show end-of-line labels", group = grpLbl)
+lblSizeS = input.string("Small", "Label size", options = ["Tiny","Small","Normal","Large"], group = grpLbl)
+lblXoff  = input.int(2, "Offset (bars from line end)", minval = 0, maxval = 50, group = grpLbl,
+             tooltip = "Higher = labels sit further to the right (away from the line). 0 = right at the last bar.")
+stagOn   = input.bool(false, "Stagger labels vertically", group = grpLbl, inline = "stag",
+             tooltip = "Fans the lines' labels apart vertically so they stop overlapping when prices cluster. NOTE: this detaches the label from the exact line level by the offset below.")
+stagAmt  = input.float(0.3, "× ATR", minval = 0.0, step = 0.1, group = grpLbl, inline = "stag")
+
+lblSz    = lblSizeS == "Tiny" ? size.tiny : lblSizeS == "Normal" ? size.normal : lblSizeS == "Large" ? size.large : size.small
+atrLbl   = ta.atr(14)
+
+// ----------------------------- Reset helper ---------------------------------
+// Returns TRUE on the first bar of a new anchor period for the chosen mode.
+f_reset(simple string mode, simple string sess, simple string tz, simple int aTs) =>
+    bool r = false
+    if mode == "Day"
+        r := timeframe.change("1D")
+    else if mode == "Week"
+        r := timeframe.change("1W")
+    else if mode == "Month"
+        r := timeframe.change("1M")
+    else if mode == "Quarter"
+        r := timeframe.change("3M")
+    else if mode == "Year"
+        r := timeframe.change("12M")
+    else if mode == "Custom Date"
+        r := time >= aTs and time[1] < aTs
+    else  // "Session"
+        int t = time(timeframe.period, sess, tz)
+        r := (not na(t)) and na(t[1])
+    r
+
+// ----------------------------- VWAP builder ---------------------------------
+// Runs unconditionally every bar (required by ta.vwap). Returns value, bands,
+// and the reset flag so the caller can break the plot at each new anchor.
+f_vwap(float src, simple string mode, simple string sess, simple string tz, simple int aTs, simple float mult) =>
+    bool reset = f_reset(mode, sess, tz, aTs)
+    [v, u, l] = ta.vwap(src, reset, mult)
+    [v, u, l, reset]
+
+// ----------------------------- Stagger offset -------------------------------
+// Fan-out slot per line index (1..6) -> centred on 0 (using 3.5 as the
+// midpoint of 1..6), scaled by ATR.
+f_yoff(int idx, bool on, float amt, float atr) =>
+    on ? (idx - 3.5) * amt * nz(atr) : 0.0
+
+// ----------------------------- Label manager --------------------------------
+// One persistent label per line (VWAP / upper SD / lower SD). var-in-function
+// keeps a separate instance per call site, so each VWAP owns its own labels.
+// Labels only live on the last bar; toggling off deletes them (no leak).
+// xOff = bars to the right of the last bar;  yOff = vertical stagger nudge.
+f_labels(bool en, bool showBands, bool master, string anchorName, float vVal, float uVal, float lVal, float mult, color c, string sz, int xOff, float yOff) =>
+    var label lV = na
+    var label lU = na
+    var label lL = na
+    if barstate.islast
+        int xp = bar_index + xOff
+        // --- VWAP line ---
+        if master and en and not na(vVal)
+            txtV = anchorName + " VWAP"
+            if na(lV)
+                lV := label.new(xp, vVal + yOff, txtV, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(c, 100), textcolor = color.new(c, 0), size = sz)
+            else
+                label.set_xy(lV, xp, vVal + yOff)
+                label.set_text(lV, txtV)
+                label.set_textcolor(lV, color.new(c, 0))
+                label.set_size(lV, sz)
+        else if not na(lV)
+            label.delete(lV)
+            lV := na
+        // --- Upper SD line ---
+        if master and en and showBands and not na(uVal)
+            txtU = anchorName + " +" + str.tostring(mult, "0.0") + " SD"
+            if na(lU)
+                lU := label.new(xp, uVal + yOff, txtU, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(c, 100), textcolor = color.new(c, 25), size = sz)
+            else
+                label.set_xy(lU, xp, uVal + yOff)
+                label.set_text(lU, txtU)
+                label.set_textcolor(lU, color.new(c, 25))
+                label.set_size(lU, sz)
+        else if not na(lU)
+            label.delete(lU)
+            lU := na
+        // --- Lower SD line ---
+        if master and en and showBands and not na(lVal)
+            txtL = anchorName + " -" + str.tostring(mult, "0.0") + " SD"
+            if na(lL)
+                lL := label.new(xp, lVal + yOff, txtL, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(c, 100), textcolor = color.new(c, 25), size = sz)
+            else
+                label.set_xy(lL, xp, lVal + yOff)
+                label.set_text(lL, txtL)
+                label.set_textcolor(lL, color.new(c, 25))
+                label.set_size(lL, sz)
+        else if not na(lL)
+            label.delete(lL)
+            lL := na
+    true
+
+// ============================================================================
+//  VWAP 1
+// ============================================================================
+g1     = "VWAP 1"
+en1    = input.bool(true,  "Enable", group = g1, inline = "1a")
+col1   = input.color(#2962FF, "", group = g1, inline = "1a")
+w1     = input.int(2, "Width", minval = 1, maxval = 5, group = g1, inline = "1a")
+lt1    = input.int(0,  "Line transparency", minval = 0, maxval = 100, group = g1)
+src1   = input.source(hlc3, "Source", group = g1)
+mode1  = input.string("Day", "Anchor", options = ["Session","Day","Week","Month","Quarter","Year","Custom Date"], group = g1)
+sess1  = input.session("0900-1730", "Session (if anchor = Session)", group = g1)
+a1     = input.time(timestamp("2025-01-01 00:00 +0000"), "Custom anchor (if anchor = Custom Date)", group = g1)
+band1  = input.bool(false, "Bands", group = g1, inline = "1b")
+mult1  = input.float(1.0, "× stdev", minval = 0.1, step = 0.1, group = g1, inline = "1b")
+ft1    = input.int(90, "Fill transp", minval = 0, maxval = 100, group = g1, inline = "1b")
+
+[v1, u1, l1, r1] = f_vwap(src1, mode1, useP ? presetS : sess1, tzSess, a1, mult1)
+brk1 = breakNew and r1
+pv1  = plot(en1 ? (brk1 ? na : v1) : na, "VWAP 1", color = color.new(col1, lt1), linewidth = w1)
+pu1  = plot(en1 and band1 ? (brk1 ? na : u1) : na, "V1 upper", color = color.new(col1, lt1))
+pl1  = plot(en1 and band1 ? (brk1 ? na : l1) : na, "V1 lower", color = color.new(col1, lt1))
+fill(pu1, pl1, color = en1 and band1 and fillBnds ? color.new(col1, ft1) : na)
+f_labels(en1, band1, showLbl, mode1, v1, u1, l1, mult1, col1, lblSz, lblXoff, f_yoff(1, stagOn, stagAmt, atrLbl))
+
+// ============================================================================
+//  VWAP 2
+// ============================================================================
+g2     = "VWAP 2"
+en2    = input.bool(true,  "Enable", group = g2, inline = "2a")
+col2   = input.color(#FF6D00, "", group = g2, inline = "2a")
+w2     = input.int(2, "Width", minval = 1, maxval = 5, group = g2, inline = "2a")
+lt2    = input.int(0,  "Line transparency", minval = 0, maxval = 100, group = g2)
+src2   = input.source(hlc3, "Source", group = g2)
+mode2  = input.string("Week", "Anchor", options = ["Session","Day","Week","Month","Quarter","Year","Custom Date"], group = g2)
+sess2  = input.session("0900-1730", "Session (if anchor = Session)", group = g2)
+a2     = input.time(timestamp("2025-01-01 00:00 +0000"), "Custom anchor (if anchor = Custom Date)", group = g2)
+band2  = input.bool(false, "Bands", group = g2, inline = "2b")
+mult2  = input.float(1.0, "× stdev", minval = 0.1, step = 0.1, group = g2, inline = "2b")
+ft2    = input.int(90, "Fill transp", minval = 0, maxval = 100, group = g2, inline = "2b")
+
+[v2, u2, l2, r2] = f_vwap(src2, mode2, useP ? presetS : sess2, tzSess, a2, mult2)
+brk2 = breakNew and r2
+pv2  = plot(en2 ? (brk2 ? na : v2) : na, "VWAP 2", color = color.new(col2, lt2), linewidth = w2)
+pu2  = plot(en2 and band2 ? (brk2 ? na : u2) : na, "V2 upper", color = color.new(col2, lt2))
+pl2  = plot(en2 and band2 ? (brk2 ? na : l2) : na, "V2 lower", color = color.new(col2, lt2))
+fill(pu2, pl2, color = en2 and band2 and fillBnds ? color.new(col2, ft2) : na)
+f_labels(en2, band2, showLbl, mode2, v2, u2, l2, mult2, col2, lblSz, lblXoff, f_yoff(2, stagOn, stagAmt, atrLbl))
+
+// ============================================================================
+//  VWAP 3
+// ============================================================================
+g3     = "VWAP 3"
+en3    = input.bool(true,  "Enable", group = g3, inline = "3a")
+col3   = input.color(#00C853, "", group = g3, inline = "3a")
+w3     = input.int(2, "Width", minval = 1, maxval = 5, group = g3, inline = "3a")
+lt3    = input.int(0,  "Line transparency", minval = 0, maxval = 100, group = g3)
+src3   = input.source(hlc3, "Source", group = g3)
+mode3  = input.string("Month", "Anchor", options = ["Session","Day","Week","Month","Quarter","Year","Custom Date"], group = g3)
+sess3  = input.session("0900-1730", "Session (if anchor = Session)", group = g3)
+a3     = input.time(timestamp("2025-01-01 00:00 +0000"), "Custom anchor (if anchor = Custom Date)", group = g3)
+band3  = input.bool(false, "Bands", group = g3, inline = "3b")
+mult3  = input.float(1.0, "× stdev", minval = 0.1, step = 0.1, group = g3, inline = "3b")
+ft3    = input.int(90, "Fill transp", minval = 0, maxval = 100, group = g3, inline = "3b")
+
+[v3, u3, l3, r3] = f_vwap(src3, mode3, useP ? presetS : sess3, tzSess, a3, mult3)
+brk3 = breakNew and r3
+pv3  = plot(en3 ? (brk3 ? na : v3) : na, "VWAP 3", color = color.new(col3, lt3), linewidth = w3)
+pu3  = plot(en3 and band3 ? (brk3 ? na : u3) : na, "V3 upper", color = color.new(col3, lt3))
+pl3  = plot(en3 and band3 ? (brk3 ? na : l3) : na, "V3 lower", color = color.new(col3, lt3))
+fill(pu3, pl3, color = en3 and band3 and fillBnds ? color.new(col3, ft3) : na)
+f_labels(en3, band3, showLbl, mode3, v3, u3, l3, mult3, col3, lblSz, lblXoff, f_yoff(3, stagOn, stagAmt, atrLbl))
+
+// ============================================================================
+//  VWAP 4  — defaults to GER40 cash session anchor
+// ============================================================================
+g4     = "VWAP 4"
+en4    = input.bool(true,  "Enable", group = g4, inline = "4a")
+col4   = input.color(#AA00FF, "", group = g4, inline = "4a")
+w4     = input.int(2, "Width", minval = 1, maxval = 5, group = g4, inline = "4a")
+lt4    = input.int(0,  "Line transparency", minval = 0, maxval = 100, group = g4)
+src4   = input.source(hlc3, "Source", group = g4)
+mode4  = input.string("Session", "Anchor", options = ["Session","Day","Week","Month","Quarter","Year","Custom Date"], group = g4)
+sess4  = input.session("0900-1730", "Session (if anchor = Session)", group = g4)
+a4     = input.time(timestamp("2025-01-01 00:00 +0000"), "Custom anchor (if anchor = Custom Date)", group = g4)
+band4  = input.bool(true,  "Bands", group = g4, inline = "4b")
+mult4  = input.float(1.0, "× stdev", minval = 0.1, step = 0.1, group = g4, inline = "4b")
+ft4    = input.int(90, "Fill transp", minval = 0, maxval = 100, group = g4, inline = "4b")
+
+[v4, u4, l4, r4] = f_vwap(src4, mode4, useP ? presetS : sess4, tzSess, a4, mult4)
+brk4 = breakNew and r4
+pv4  = plot(en4 ? (brk4 ? na : v4) : na, "VWAP 4", color = color.new(col4, lt4), linewidth = w4)
+pu4  = plot(en4 and band4 ? (brk4 ? na : u4) : na, "V4 upper", color = color.new(col4, lt4))
+pl4  = plot(en4 and band4 ? (brk4 ? na : l4) : na, "V4 lower", color = color.new(col4, lt4))
+fill(pu4, pl4, color = en4 and band4 and fillBnds ? color.new(col4, ft4) : na)
+f_labels(en4, band4, showLbl, mode4, v4, u4, l4, mult4, col4, lblSz, lblXoff, f_yoff(4, stagOn, stagAmt, atrLbl))
+
+// ============================================================================
+//  VWAP 5  — defaults to a custom anchor date
+// ============================================================================
+g5     = "VWAP 5"
+en5    = input.bool(false, "Enable", group = g5, inline = "5a")
+col5   = input.color(#FFD600, "", group = g5, inline = "5a")
+w5     = input.int(2, "Width", minval = 1, maxval = 5, group = g5, inline = "5a")
+lt5    = input.int(0,  "Line transparency", minval = 0, maxval = 100, group = g5)
+src5   = input.source(hlc3, "Source", group = g5)
+mode5  = input.string("Custom Date", "Anchor", options = ["Session","Day","Week","Month","Quarter","Year","Custom Date"], group = g5)
+sess5  = input.session("0900-1730", "Session (if anchor = Session)", group = g5)
+a5     = input.time(timestamp("2025-01-01 00:00 +0000"), "Custom anchor (if anchor = Custom Date)", group = g5)
+band5  = input.bool(false, "Bands", group = g5, inline = "5b")
+mult5  = input.float(1.0, "× stdev", minval = 0.1, step = 0.1, group = g5, inline = "5b")
+ft5    = input.int(90, "Fill transp", minval = 0, maxval = 100, group = g5, inline = "5b")
+
+[v5, u5, l5, r5] = f_vwap(src5, mode5, useP ? presetS : sess5, tzSess, a5, mult5)
+brk5 = breakNew and r5
+pv5  = plot(en5 ? (brk5 ? na : v5) : na, "VWAP 5", color = color.new(col5, lt5), linewidth = w5)
+pu5  = plot(en5 and band5 ? (brk5 ? na : u5) : na, "V5 upper", color = color.new(col5, lt5))
+pl5  = plot(en5 and band5 ? (brk5 ? na : l5) : na, "V5 lower", color = color.new(col5, lt5))
+fill(pu5, pl5, color = en5 and band5 and fillBnds ? color.new(col5, ft5) : na)
+f_labels(en5, band5, showLbl, mode5, v5, u5, l5, mult5, col5, lblSz, lblXoff, f_yoff(5, stagOn, stagAmt, atrLbl))
+
+// ============================================================================
+//  VWAP 6  — defaults to a Year anchor (off by default)
+// ============================================================================
+g6     = "VWAP 6"
+en6    = input.bool(false, "Enable", group = g6, inline = "6a")
+col6   = input.color(#00B8D4, "", group = g6, inline = "6a")
+w6     = input.int(2, "Width", minval = 1, maxval = 5, group = g6, inline = "6a")
+lt6    = input.int(0,  "Line transparency", minval = 0, maxval = 100, group = g6)
+src6   = input.source(hlc3, "Source", group = g6)
+mode6  = input.string("Year", "Anchor", options = ["Session","Day","Week","Month","Quarter","Year","Custom Date"], group = g6)
+sess6  = input.session("0900-1730", "Session (if anchor = Session)", group = g6)
+a6     = input.time(timestamp("2025-01-01 00:00 +0000"), "Custom anchor (if anchor = Custom Date)", group = g6)
+band6  = input.bool(false, "Bands", group = g6, inline = "6b")
+mult6  = input.float(1.0, "× stdev", minval = 0.1, step = 0.1, group = g6, inline = "6b")
+ft6    = input.int(90, "Fill transp", minval = 0, maxval = 100, group = g6, inline = "6b")
+
+[v6, u6, l6, r6] = f_vwap(src6, mode6, useP ? presetS : sess6, tzSess, a6, mult6)
+brk6 = breakNew and r6
+pv6  = plot(en6 ? (brk6 ? na : v6) : na, "VWAP 6", color = color.new(col6, lt6), linewidth = w6)
+pu6  = plot(en6 and band6 ? (brk6 ? na : u6) : na, "V6 upper", color = color.new(col6, lt6))
+pl6  = plot(en6 and band6 ? (brk6 ? na : l6) : na, "V6 lower", color = color.new(col6, lt6))
+fill(pu6, pl6, color = en6 and band6 and fillBnds ? color.new(col6, ft6) : na)
+f_labels(en6, band6, showLbl, mode6, v6, u6, l6, mult6, col6, lblSz, lblXoff, f_yoff(6, stagOn, stagAmt, atrLbl))
+
+// ============================================================================
+//  SIMPLE MOVING AVERAGES  —  up to 4 configurable lines
+// ----------------------------------------------------------------------------
+//  Chart-timeframe by default. Optionally source each SMA from a higher
+//  timeframe (leave "Source TF" blank = chart). HTF fetch is NON-REPAINTING
+//  via the [1] offset + barmerge.lookahead_on idiom, so a HTF-sourced SMA
+//  only updates on confirmed HTF bars (no intra-bar repaint).
+//
+//  Reuses the shared Label controls above (size / offset / stagger).
+// ============================================================================
+grpSMA  = "Simple Moving Averages"
+smaLbl  = input.bool(true, "Show SMA end-of-line labels", group = grpSMA)
+
+// -- non-repainting SMA (chart-TF or HTF) --
+f_sma(float src, simple int len, simple string tf) =>
+    bool useHTF = not (tf == "" or tf == timeframe.period)
+    float chartVal = ta.sma(src, len)
+    useHTF ? request.security(syminfo.tickerid, tf, ta.sma(src, len)[1], lookahead = barmerge.lookahead_on) : chartVal
+
+// -- one persistent end-of-line label per SMA (mirrors f_labels: no leak) --
+f_smaLabel(bool en, string txt, float val, color c, string sz, int xOff, float yOff) =>
+    var label lb = na
+    if barstate.islast
+        if en and not na(val)
+            int xp = bar_index + xOff
+            if na(lb)
+                lb := label.new(xp, val + yOff, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(c, 100), textcolor = color.new(c, 0), size = sz)
+            else
+                label.set_xy(lb, xp, val + yOff)
+                label.set_text(lb, txt)
+                label.set_textcolor(lb, color.new(c, 0))
+                label.set_size(lb, sz)
+        else if not na(lb)
+            label.delete(lb)
+            lb := na
+    true
+
+// -- build a label caption: "SMA 20" or "SMA 50 1D" when HTF-sourced --
+f_smaTxt(int len, string tf) => "SMA " + str.tostring(len) + (tf == "" ? "" : " " + tf)
+
+// --- SMA 1 (20, on) ---
+sEn1  = input.bool(true,  "Enable", group = grpSMA, inline = "s1a")
+sCol1 = input.color(#FFFFFF, "", group = grpSMA, inline = "s1a")
+sW1   = input.int(2, "Width", minval = 1, maxval = 5, group = grpSMA, inline = "s1a")
+sLen1 = input.int(20, "└ Length", minval = 1, group = grpSMA)
+sSrc1 = input.source(close, "└ Source", group = grpSMA, inline = "s1b")
+sTf1  = input.timeframe("", "└ Source TF (blank = chart)", group = grpSMA, inline = "s1b")
+
+// --- SMA 2 (50, on) ---
+sEn2  = input.bool(true,  "Enable", group = grpSMA, inline = "s2a")
+sCol2 = input.color(#E040FB, "", group = grpSMA, inline = "s2a")
+sW2   = input.int(2, "Width", minval = 1, maxval = 5, group = grpSMA, inline = "s2a")
+sLen2 = input.int(50, "└ Length", minval = 1, group = grpSMA)
+sSrc2 = input.source(close, "└ Source", group = grpSMA, inline = "s2b")
+sTf2  = input.timeframe("", "└ Source TF (blank = chart)", group = grpSMA, inline = "s2b")
+
+// --- SMA 3 (100, off) ---
+sEn3  = input.bool(false, "Enable", group = grpSMA, inline = "s3a")
+sCol3 = input.color(#FF5252, "", group = grpSMA, inline = "s3a")
+sW3   = input.int(2, "Width", minval = 1, maxval = 5, group = grpSMA, inline = "s3a")
+sLen3 = input.int(100, "└ Length", minval = 1, group = grpSMA)
+sSrc3 = input.source(close, "└ Source", group = grpSMA, inline = "s3b")
+sTf3  = input.timeframe("", "└ Source TF (blank = chart)", group = grpSMA, inline = "s3b")
+
+// --- SMA 4 (200, off) ---
+sEn4  = input.bool(false, "Enable", group = grpSMA, inline = "s4a")
+sCol4 = input.color(#FFD180, "", group = grpSMA, inline = "s4a")
+sW4   = input.int(2, "Width", minval = 1, maxval = 5, group = grpSMA, inline = "s4a")
+sLen4 = input.int(200, "└ Length", minval = 1, group = grpSMA)
+sSrc4 = input.source(close, "└ Source", group = grpSMA, inline = "s4b")
+sTf4  = input.timeframe("", "└ Source TF (blank = chart)", group = grpSMA, inline = "s4b")
+
+sma1 = f_sma(sSrc1, sLen1, sTf1)
+sma2 = f_sma(sSrc2, sLen2, sTf2)
+sma3 = f_sma(sSrc3, sLen3, sTf3)
+sma4 = f_sma(sSrc4, sLen4, sTf4)
+
+plot(sEn1 ? sma1 : na, "SMA 1", color = color.new(sCol1, 0), linewidth = sW1)
+plot(sEn2 ? sma2 : na, "SMA 2", color = color.new(sCol2, 0), linewidth = sW2)
+plot(sEn3 ? sma3 : na, "SMA 3", color = color.new(sCol3, 0), linewidth = sW3)
+plot(sEn4 ? sma4 : na, "SMA 4", color = color.new(sCol4, 0), linewidth = sW4)
+
+f_smaLabel(sEn1 and smaLbl, f_smaTxt(sLen1, sTf1), sma1, sCol1, lblSz, lblXoff, f_yoff(1, stagOn, stagAmt, atrLbl))
+f_smaLabel(sEn2 and smaLbl, f_smaTxt(sLen2, sTf2), sma2, sCol2, lblSz, lblXoff, f_yoff(2, stagOn, stagAmt, atrLbl))
+f_smaLabel(sEn3 and smaLbl, f_smaTxt(sLen3, sTf3), sma3, sCol3, lblSz, lblXoff, f_yoff(3, stagOn, stagAmt, atrLbl))
+f_smaLabel(sEn4 and smaLbl, f_smaTxt(sLen4, sTf4), sma4, sCol4, lblSz, lblXoff, f_yoff(4, stagOn, stagAmt, atrLbl))

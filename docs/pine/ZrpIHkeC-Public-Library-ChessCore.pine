@@ -1,0 +1,973 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © @SimpleCryptoLife
+
+//@version=6
+//@description The rules of chess as a reusable engine, with no display and no AI. It keeps the whole position in one object, generates every fully legal move, applies moves, and detects checkmate, stalemate and the automatic draws, with position-key helpers for threefold repetition. Internally everything thinks in (row, column). Square names like "e4" appear only at the edges.
+library("Public_Library_ChessCore", overlay = true)
+
+
+//#region 🟩🟩🟩🟩🟩🟩  ENUMS  🟩🟩🟩🟩🟩🟩
+
+//@type What sits on a square. Piece.empty is a real member so a board is always fully populated. The twelve coloured pieces carry both type and side in one value.
+export enum Piece
+    empty = "Empty"                // Nothing on this square.
+    whitePawn = "White pawn"
+    whiteKnight = "White knight"
+    whiteBishop = "White bishop"
+    whiteRook = "White rook"
+    whiteQueen = "White queen"
+    whiteKing = "White king"
+    blackPawn = "Black pawn"
+    blackKnight = "Black knight"
+    blackBishop = "Black bishop"
+    blackRook = "Black rook"
+    blackQueen = "Black queen"
+    blackKing = "Black king"
+
+//@type Which army. Used for side to move and for "whose piece is this".
+export enum Side
+    white = "White"
+    black = "Black"
+
+//@type The kind of piece with the colour stripped off: whiteKnight and blackKnight are both PieceType.knight.
+export enum PieceType
+    pawn = "Pawn"
+    knight = "Knight"
+    bishop = "Bishop"
+    rook = "Rook"
+    queen = "Queen"
+    king = "King"
+    none = "None"      // Piece.empty has no type.
+
+//@type The result of replaying or extending a game. inProgress means the side to move still has a legal move. Everything else means the game is over.
+export enum GameStatus
+    inProgress = "In progress"                 // The side to move has at least one legal move.
+    whiteWinsCheckmate = "White wins"          // Black is checkmated.
+    blackWinsCheckmate = "Black wins"          // White is checkmated.
+    drawStalemate = "Draw by stalemate"        // Side to move has no legal move and is not in check.
+    drawFiftyMove = "Draw by the 50-move rule" // No pawn move or capture for 50 moves by each side.
+    drawInsufficient = "Draw by insufficient material"  // Neither side has mating material.
+    drawThreefold = "Draw by threefold repetition"      // Detected by the consumer via the REPETITION helpers, not by gameStatusOf.
+
+//#endregion ENUMS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  TYPES  🟩🟩🟩🟩🟩🟩
+
+//@type The whole game position in one object: the board itself plus everything else the rules need to know (whose move, castling rights, the en-passant target, the clocks, and the cached king squares). Kept in one object so the rules functions read state from here rather than from globals, which keeps them replay-safe.
+//@field mat_board The 8x8 board, indexed (row, column). Row 0 = rank 8 (Black's back rank), column 0 = file "a".
+//@field sideToMove Whose turn it is to move from this position.
+//@field whiteCanCastleKingside True while White still has the right to castle short (king and h1-rook unmoved).
+//@field whiteCanCastleQueenside True while White still has the right to castle long (king and a1-rook unmoved).
+//@field blackCanCastleKingside True while Black still has the right to castle short.
+//@field blackCanCastleQueenside True while Black still has the right to castle long.
+//@field epTargetRow Row of the en-passant target square, or -1 when there is none. Set only by an immediately preceding double push, and cleared by the very next move.
+//@field epTargetCol Column of the en-passant target square, or -1 when there is none.
+//@field halfmoveClock Half-moves since the last pawn move or capture. Reaching 100 is the automatic 50-move draw.
+//@field fullmoveCount The move number, incremented after each Black move. Starts at 1. Cosmetic. Not used by rules.
+//@field whiteKingRow Row of the White king, cached so check tests don't scan the board (maintained by applyMove).
+//@field whiteKingCol Column of the White king.
+//@field blackKingRow Row of the Black king.
+//@field blackKingCol Column of the Black king.
+export type o_position
+    matrix<Piece> mat_board
+    Side sideToMove
+    bool whiteCanCastleKingside
+    bool whiteCanCastleQueenside
+    bool blackCanCastleKingside
+    bool blackCanCastleQueenside
+    int epTargetRow
+    int epTargetCol
+    int halfmoveClock
+    int fullmoveCount
+    int whiteKingRow
+    int whiteKingCol
+    int blackKingRow
+    int blackKingCol
+
+//@type One move, as (from, to) squares plus the promotion piece if any. ChessCore's generator leaves the destination counts at -1 and every flag/score field at its default. An outside AI fills those in.
+//@field fromRow Row of the square the piece leaves.
+//@field fromCol Column of the square the piece leaves.
+//@field toRow Row of the destination square.
+//@field toCol Column of the destination square.
+//@field promotion The piece a pawn becomes on the last rank, or Piece.empty for a non-promotion move.
+//@field isEnPassant True when this pawn move captures en passant (the captured pawn is not on the destination).
+//@field isCastle True when this is a king's two-square castling move.
+//@field attackersOnDest How many enemy pieces attack the destination after the move. -1 until an outside AI fills it.
+//@field defendersOnDest How many friendly pieces defend the destination after the move. -1 until filled.
+//@field cheapestAttackerOnDest Point value of the cheapest enemy attacker on the destination (pawn 1 .. queen 9, king 99), or 100 when nothing attacks it. -1 until filled. Makes safety value-aware, not just count-aware.
+//@field isShield True when this move thins the mover's own king cover. Filled by an outside AI, false by default.
+//@field isUndo True when this move reverses the mover's last move or repeats their second-to-last. Filled by an outside AI.
+//@field foreseeScore The material outcome (points for the mover) of the move's short look-ahead. Filled by an outside AI, never ChessCore.
+//@field endgameAttackBonus The endgame safe-attack nudge, 1 or 0. Filled by an outside AI, never ChessCore.
+//@field repeatsPosition True when the move recreates a position already seen. Stamped by the consumer, never ChessCore.
+export type o_move
+    int fromRow
+    int fromCol
+    int toRow
+    int toCol
+    Piece promotion
+    bool isEnPassant
+    bool isCastle
+    int attackersOnDest
+    int defendersOnDest
+    float cheapestAttackerOnDest = -1.0  // Defaulted so a constructor call can leave it out.
+    bool isShield = false                // Defaulted likewise.
+    bool isUndo = false                  // Defaulted likewise.
+    float foreseeScore = 0.0             // Defaulted likewise.
+    float endgameAttackBonus = 0.0       // Defaulted likewise.
+    bool repeatsPosition = false         // Defaulted likewise.
+
+//#endregion TYPES
+
+
+// Shorthand for str.tostring.
+s(_thing) => string _string = str.tostring(_thing)
+
+
+//#region 🟩🟩🟩🟩🟩🟩  PIECE HELPERS  🟩🟩🟩🟩🟩🟩
+
+//@function The side that owns a piece, or na for Piece.empty.
+//@param    _piece The piece to inspect.
+//@returns  Side.white, Side.black, or na for an empty square.
+export pieceSide(Piece _piece) =>
+    Side _side = switch _piece
+        Piece.whitePawn => Side.white
+        Piece.whiteKnight => Side.white
+        Piece.whiteBishop => Side.white
+        Piece.whiteRook => Side.white
+        Piece.whiteQueen => Side.white
+        Piece.whiteKing => Side.white
+        Piece.blackPawn => Side.black
+        Piece.blackKnight => Side.black
+        Piece.blackBishop => Side.black
+        Piece.blackRook => Side.black
+        Piece.blackQueen => Side.black
+        Piece.blackKing => Side.black
+        => na  // Piece.empty has no side.
+
+//@function True when _piece belongs to _side. False for an empty square or the other side.
+//@param    _piece The piece to test.
+//@param    _side  The side we are asking about.
+//@returns  True only when _piece is a real piece of _side.
+export pieceBelongsTo(Piece _piece, Side _side) =>
+    bool _belongs = pieceSide(_piece) == _side
+
+//@function The colour-independent kind of a piece: whiteKnight and blackKnight are both PieceType.knight.
+//@param    _piece The piece to classify.
+//@returns  The PieceType, or PieceType.none for Piece.empty.
+export pieceTypeOf(Piece _piece) =>
+    PieceType _type = switch _piece
+        Piece.whitePawn => PieceType.pawn
+        Piece.blackPawn => PieceType.pawn
+        Piece.whiteKnight => PieceType.knight
+        Piece.blackKnight => PieceType.knight
+        Piece.whiteBishop => PieceType.bishop
+        Piece.blackBishop => PieceType.bishop
+        Piece.whiteRook => PieceType.rook
+        Piece.blackRook => PieceType.rook
+        Piece.whiteQueen => PieceType.queen
+        Piece.blackQueen => PieceType.queen
+        Piece.whiteKing => PieceType.king
+        Piece.blackKing => PieceType.king
+        => PieceType.none  // Piece.empty.
+
+//@function A piece's point value: pawn 1, knight 3, bishop 3, rook 5, queen 9, and 0 for king or empty.
+// Returned as a float so callers can take fractions of it.
+//@param    _piece The piece to value.
+//@returns  The point value as a float, 0 for king or empty.
+export pieceValue(Piece _piece) =>
+    float _value = switch pieceTypeOf(_piece)
+        PieceType.pawn => 1.0
+        PieceType.knight => 3.0
+        PieceType.bishop => 3.0
+        PieceType.rook => 5.0
+        PieceType.queen => 9.0
+        => 0.0  // King and empty.
+
+//@function The promotion piece of _side for a typed suffix letter q/r/b/n (case-insensitive).
+// Any other letter, or an empty string, gives a queen -- a bare promotion move promotes to queen by default per the notation spec.
+//@param    _side   The side whose pawn is promoting.
+//@param    _letter The 5th character of the move token, or "" for none.
+//@returns  A coloured queen/rook/bishop/knight of _side.
+export promotionPieceFor(Side _side, string _letter) =>
+    string _lower = str.lower(_letter)
+    Piece _piece = switch _lower
+        "r" => _side == Side.white ? Piece.whiteRook : Piece.blackRook
+        "b" => _side == Side.white ? Piece.whiteBishop : Piece.blackBishop
+        "n" => _side == Side.white ? Piece.whiteKnight : Piece.blackKnight
+        => _side == Side.white ? Piece.whiteQueen : Piece.blackQueen  // "q" and the default.
+
+//@function The promotion suffix letter for a piece, "" for anything that is not a promotable piece.
+// Used to print a move token (e.g. the queen glyph in "g7g8q").
+//@param    _piece The promotion piece.
+//@returns  "q", "r", "b" or "n", or "" for a non-promotion piece.
+export promotionLetterFor(Piece _piece) =>
+    string _letter = switch _piece
+        Piece.whiteQueen => "q"
+        Piece.blackQueen => "q"
+        Piece.whiteRook => "r"
+        Piece.blackRook => "r"
+        Piece.whiteBishop => "b"
+        Piece.blackBishop => "b"
+        Piece.whiteKnight => "n"
+        Piece.blackKnight => "n"
+        => ""
+
+//#endregion PIECE HELPERS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  COORDINATE HELPERS  🟩🟩🟩🟩🟩🟩
+
+// Conversion between text and (row, column) lives ONLY here, at the edge. All engine logic thinks purely in (row, column). row = 8 - rank, column = file index (a=0..h=7).
+
+//@function True when (row, column) is on the board.
+// The guard every generator and attack scan uses before touching the matrix.
+//@param    _row Row index.
+//@param    _col Column index.
+//@returns  True when both are in 0..7.
+export onBoard(int _row, int _col) =>
+    bool _onBoard = _row >= 0 and _row <= 7 and _col >= 0 and _col <= 7
+
+//@function Column index (0..7) for a file letter "a".."h", or -1 for anything outside a..h.
+//@param    _file A one-character file string.
+//@returns  0..7, or -1 when the string is not a single a..h letter.
+export fileToCol(string _file) =>
+    int _pos = str.length(_file) == 1 ? str.pos("abcdefgh", _file) : na
+    int _col = na(_pos) or _pos < 0 or _pos > 7 ? -1 : _pos
+
+//@function File letter "a".."h" for a column index, or "" when out of range.
+//@param    _col Column index.
+//@returns  The file letter, or "".
+export colToFile(int _col) =>
+    string _file = _col >= 0 and _col <= 7 ? str.substring("abcdefgh", _col, _col + 1) : ""
+
+//@function The square label "a1".."h8" for (row, column), or "" when off-board. row 7 is rank 1, row 0 is rank 8.
+//@param    _row Row index.
+//@param    _col Column index.
+//@returns  The two-character square name, or "".
+export squareName(int _row, int _col) =>
+    string _name = onBoard(_row, _col) ? colToFile(_col) + s(8 - _row) : ""
+
+//#endregion COORDINATE HELPERS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  BOARD SETUP  🟩🟩🟩🟩🟩🟩
+
+//@function Fills _mat_board with the standard starting position: White at the bottom (rows 6-7), Black at the top (rows 0-1).
+// Changes the matrix it was given.
+//@param    _mat_board The 8x8 board to overwrite.
+//@returns  Nothing. The board is changed in place.
+export setStartingBoard(matrix<Piece> _mat_board) =>
+    _mat_board.fill(Piece.empty)
+    _mat_board.set(0, 0, Piece.blackRook)
+    _mat_board.set(0, 1, Piece.blackKnight)
+    _mat_board.set(0, 2, Piece.blackBishop)
+    _mat_board.set(0, 3, Piece.blackQueen)
+    _mat_board.set(0, 4, Piece.blackKing)
+    _mat_board.set(0, 5, Piece.blackBishop)
+    _mat_board.set(0, 6, Piece.blackKnight)
+    _mat_board.set(0, 7, Piece.blackRook)
+    for _col = 0 to 7
+        _mat_board.set(1, _col, Piece.blackPawn)
+        _mat_board.set(6, _col, Piece.whitePawn)
+    _mat_board.set(7, 0, Piece.whiteRook)
+    _mat_board.set(7, 1, Piece.whiteKnight)
+    _mat_board.set(7, 2, Piece.whiteBishop)
+    _mat_board.set(7, 3, Piece.whiteQueen)
+    _mat_board.set(7, 4, Piece.whiteKing)
+    _mat_board.set(7, 5, Piece.whiteBishop)
+    _mat_board.set(7, 6, Piece.whiteKnight)
+    _mat_board.set(7, 7, Piece.whiteRook)
+
+//@function A fresh o_position at the standard starting position: new board, White to move, all four castling rights intact, no en-passant target, clocks at their starting values.
+//@returns  A new o_position ready to replay moves into.
+export newStartingPosition() =>
+    matrix<Piece> _mat_board = matrix.new<Piece>(rows=8, columns=8, initial_value=Piece.empty)
+    setStartingBoard(_mat_board)
+    o_position _position = o_position.new(mat_board=_mat_board, sideToMove=Side.white, whiteCanCastleKingside=true, whiteCanCastleQueenside=true, blackCanCastleKingside=true, blackCanCastleQueenside=true, epTargetRow=-1, epTargetCol=-1, halfmoveClock=0, fullmoveCount=1, whiteKingRow=7, whiteKingCol=4, blackKingRow=0, blackKingCol=4)
+
+//@function A fully independent copy of a position: the board is copied with matrix.copy, so changing the copy never touches the original. This is the scratch board the make-move and king-safety tests use.
+// We can make shallow copies cheaply because the board is filled by *enums*, not UDTs, so there's no risk of a scratch board changing the real board.
+//@param    _position The position to copy.
+//@returns  A new o_position with its own board.
+export copyPosition(o_position _position) =>
+    o_position _copy = o_position.new(mat_board=_position.mat_board.copy(), sideToMove=_position.sideToMove, whiteCanCastleKingside=_position.whiteCanCastleKingside, whiteCanCastleQueenside=_position.whiteCanCastleQueenside, blackCanCastleKingside=_position.blackCanCastleKingside, blackCanCastleQueenside=_position.blackCanCastleQueenside, epTargetRow=_position.epTargetRow, epTargetCol=_position.epTargetCol, halfmoveClock=_position.halfmoveClock, fullmoveCount=_position.fullmoveCount, whiteKingRow=_position.whiteKingRow, whiteKingCol=_position.whiteKingCol, blackKingRow=_position.blackKingRow, blackKingCol=_position.blackKingCol)
+
+//#endregion BOARD SETUP
+
+
+//#region 🟩🟩🟩🟩🟩🟩  ATTACK DETECTION  🟩🟩🟩🟩🟩🟩
+
+// Everything downstream -- check detection, castling legality, the self-check filter, the AI's safety thinking -- is built on one question: who attacks this square?
+// attackersInfo answers it, and the other three exports are thin wrappers over it so their answers can never disagree.
+// Sliders (bishop, rook, queen) walk outward until they hit a piece or the edge -- that is how blocking works.
+
+// The offset tables can't be global var arrays: Pine rejects an exported function referencing a global array (CE10227. A global var string is fine, an array is not).
+// So these builders hand each caller a fresh local pair.
+//@function The eight knight move offsets as a [dRow[], dCol[]] pair of fresh arrays.
+f_knightOffsets() =>
+    [array.from(-2, -2, -1, -1, 1, 1, 2, 2), array.from(-1, 1, -2, 2, -2, 2, -1, 1)]
+//@function The eight king-step (and queen-ray) directions as a [dRow[], dCol[]] pair of fresh arrays.
+f_kingOffsets() =>
+    [array.from(-1, -1, -1, 0, 0, 1, 1, 1), array.from(-1, 0, 1, -1, 1, -1, 0, 1)]
+//@function The four straight rook rays (up, down, left, right) as a [dRow[], dCol[]] pair of fresh arrays.
+f_rookRays() =>
+    [array.from(-1, 1, 0, 0), array.from(0, 0, -1, 1)]
+//@function The four diagonal bishop rays as a [dRow[], dCol[]] pair of fresh arrays.
+f_bishopRays() =>
+    [array.from(-1, -1, 1, 1), array.from(-1, 1, -1, 1)]
+
+//@function The combined attack scan: how many pieces of _bySide could capture on (_row, _col), and the point value of the cheapest of them.
+// "Attack" means "could capture a piece standing there", so it counts squares defended by a friendly _bySide piece too, and ignores whether the target is empty or occupied.
+// Pawns count their two forward diagonals only. Sliders stop at the first piece on each ray.
+// Cheapest values: pawn 1, knight/bishop 3, rook 5, queen 9, king 99, and 100.0 when nothing attacks (so ">= my value" reads as safe).
+//@param    _mat_board The board to scan.
+//@param    _row Target square row.
+//@param    _col Target square column.
+//@param    _bySide The attacking side.
+//@returns  A tuple [_count, _cheapest]: the attacker count, and the cheapest attacker's value as a float (100.0 when the square is unattacked).
+export attackersInfo(matrix<Piece> _mat_board, int _row, int _col, Side _bySide) =>
+    int _count = 0
+    float _cheapest = 100.0
+    if onBoard(_row, _col)
+        // Local copies of the direction tables. See the CE10227 note above the builders.
+        [_a_knightDRow, _a_knightDCol] = f_knightOffsets()
+        [_a_kingDRow, _a_kingDCol] = f_kingOffsets()
+        [_a_rookDRow, _a_rookDCol] = f_rookRays()
+        [_a_bishopDRow, _a_bishopDCol] = f_bishopRays()
+        // Pawns (1). An attacking pawn sits one row "behind" the target on an adjacent file: White pawns march towards row 0 so sit at row+1, Black march towards row 7 so sit at row-1.
+        int _pawnRow = _bySide == Side.white ? _row + 1 : _row - 1
+        Piece _wantPawn = _bySide == Side.white ? Piece.whitePawn : Piece.blackPawn
+        bool _pawnAttacks = false
+        if onBoard(_pawnRow, _col - 1) and _mat_board.get(_pawnRow, _col - 1) == _wantPawn
+            _count += 1
+            _pawnAttacks := true
+        if onBoard(_pawnRow, _col + 1) and _mat_board.get(_pawnRow, _col + 1) == _wantPawn
+            _count += 1
+            _pawnAttacks := true
+        // Knights (3).
+        Piece _wantKnight = _bySide == Side.white ? Piece.whiteKnight : Piece.blackKnight
+        bool _knightAttacks = false
+        for [_i, _dRow] in _a_knightDRow
+            int _r = _row + _dRow
+            int _c = _col + _a_knightDCol.get(_i)
+            if onBoard(_r, _c) and _mat_board.get(_r, _c) == _wantKnight
+                _count += 1
+                _knightAttacks := true
+        // King (99, adjacent squares).
+        Piece _wantKing = _bySide == Side.white ? Piece.whiteKing : Piece.blackKing
+        bool _kingAttacks = false
+        for [_i, _dRow] in _a_kingDRow
+            int _r = _row + _dRow
+            int _c = _col + _a_kingDCol.get(_i)
+            if onBoard(_r, _c) and _mat_board.get(_r, _c) == _wantKing
+                _count += 1
+                _kingAttacks := true
+        // Rook-like rays: a rook (5) or a queen (9) along the straight lines. Walk each until we hit a piece or the edge.
+        Piece _wantRook = _bySide == Side.white ? Piece.whiteRook : Piece.blackRook
+        Piece _wantQueen = _bySide == Side.white ? Piece.whiteQueen : Piece.blackQueen
+        bool _rookAttacks = false
+        bool _queenAttacks = false
+        for [_i, _dRow] in _a_rookDRow
+            int _dCol = _a_rookDCol.get(_i)
+            int _r = _row + _dRow
+            int _c = _col + _dCol
+            bool _blocked = false
+            while not _blocked and onBoard(_r, _c)
+                Piece _hit = _mat_board.get(_r, _c)
+                if _hit != Piece.empty
+                    if _hit == _wantRook
+                        _count += 1
+                        _rookAttacks := true
+                    else if _hit == _wantQueen
+                        _count += 1
+                        _queenAttacks := true
+                    _blocked := true  // Any piece, friend or foe, blocks the ray beyond it.
+                _r += _dRow
+                _c += _dCol
+        // Bishop-like rays: a bishop (3) or a queen (9) along the diagonals.
+        Piece _wantBishop = _bySide == Side.white ? Piece.whiteBishop : Piece.blackBishop
+        bool _bishopAttacks = false
+        for [_i, _dRow] in _a_bishopDRow
+            int _dCol = _a_bishopDCol.get(_i)
+            int _r = _row + _dRow
+            int _c = _col + _dCol
+            bool _blocked = false
+            while not _blocked and onBoard(_r, _c)
+                Piece _hit = _mat_board.get(_r, _c)
+                if _hit != Piece.empty
+                    if _hit == _wantBishop
+                        _count += 1
+                        _bishopAttacks := true
+                    else if _hit == _wantQueen
+                        _count += 1
+                        _queenAttacks := true
+                    _blocked := true
+                _r += _dRow
+                _c += _dCol
+        // Fold the findings into the cheapest value. 100.0 is the explicit "nothing attacks" fallback.
+        _cheapest := _pawnAttacks ? 1.0 : _knightAttacks or _bishopAttacks ? 3.0 : _rookAttacks ? 5.0 : _queenAttacks ? 9.0 : _kingAttacks ? 99.0 : 100.0
+    [_count, _cheapest]
+
+//@function Counts how many pieces of _bySide attack (_row, _col). A thin wrapper over attackersInfo.
+//@param    _mat_board The board to scan.
+//@param    _row Target square row.
+//@param    _col Target square column.
+//@param    _bySide The attacking side.
+//@returns  The number of _bySide pieces attacking (_row, _col).
+export countAttackers(matrix<Piece> _mat_board, int _row, int _col, Side _bySide) =>
+    [_count, _cheapest] = attackersInfo(_mat_board, _row, _col, _bySide)
+    _count
+
+//@function True when at least one _bySide piece attacks (_row, _col). Thin wrapper over the one scan.
+//@param    _mat_board The board to scan.
+//@param    _row Target square row.
+//@param    _col Target square column.
+//@param    _bySide The attacking side.
+//@returns  True when the square is attacked by _bySide.
+export isSquareAttacked(matrix<Piece> _mat_board, int _row, int _col, Side _bySide) =>
+    bool _attacked = countAttackers(_mat_board, _row, _col, _bySide) > 0
+
+//@function The point value of the cheapest piece of _bySide attacking (_row, _col), or 100.0 when nothing attacks it.
+// A thin wrapper over attackersInfo().
+//@param    _mat_board The board to scan.
+//@param    _row Target square row.
+//@param    _col Target square column.
+//@param    _bySide The attacking side.
+//@returns  The cheapest attacker's point value as a float, or 100.0 when the square is unattacked.
+export cheapestAttackerValue(matrix<Piece> _mat_board, int _row, int _col, Side _bySide) =>
+    [_count, _cheapest] = attackersInfo(_mat_board, _row, _col, _bySide)
+    _cheapest
+
+//@function Whether the piece on (_fromRow, _fromCol) attacks (_toRow, _toCol): the single-piece version of the attackersInfo question, for callers that need to know WHICH piece attacks, not just how many.
+// "Attack" means the same as in attackersInfo -- pawns count their two forward diagonals only, sliders stop at the first piece in the way, and the target may be empty or occupied.
+//@param    _mat_board The board to read.
+//@param    _fromRow The candidate attacker's row.
+//@param    _fromCol The candidate attacker's column.
+//@param    _toRow Target square row.
+//@param    _toCol Target square column.
+//@returns  True when the piece on the from-square attacks the target square. False when the from-square is empty, the two squares are equal or off the board, the piece simply doesn't move that way, or something stands in the path.
+export pieceAttacksSquare(matrix<Piece> _mat_board, int _fromRow, int _fromCol, int _toRow, int _toCol) =>
+    bool _attacks = false
+    if onBoard(_fromRow, _fromCol) and onBoard(_toRow, _toCol) and not (_fromRow == _toRow and _fromCol == _toCol)
+        Piece _piece = _mat_board.get(_fromRow, _fromCol)
+        if _piece != Piece.empty
+            int _dRow = _toRow - _fromRow
+            int _dCol = _toCol - _fromCol
+            PieceType _type = pieceTypeOf(_piece)
+            if _type == PieceType.pawn
+                int _dir = pieceSide(_piece) == Side.white ? -1 : 1  // White pawns attack towards smaller rows (row 0 = rank 8).
+                _attacks := _dRow == _dir and math.abs(_dCol) == 1
+            else if _type == PieceType.knight
+                _attacks := (math.abs(_dRow) == 1 and math.abs(_dCol) == 2) or (math.abs(_dRow) == 2 and math.abs(_dCol) == 1)
+            else if _type == PieceType.king
+                _attacks := math.max(math.abs(_dRow), math.abs(_dCol)) == 1
+            else
+                // Sliding pieces: the target must lie on a line the piece moves along, and every square strictly between must be empty.
+                bool _orthogonal = _dRow == 0 or _dCol == 0
+                bool _diagonal = math.abs(_dRow) == math.abs(_dCol)
+                bool _rayOk = _type == PieceType.rook ? _orthogonal : _type == PieceType.bishop ? _diagonal : _type == PieceType.queen ? _orthogonal or _diagonal : false
+                if _rayOk
+                    int _stepRow = _dRow > 0 ? 1 : _dRow < 0 ? -1 : 0
+                    int _stepCol = _dCol > 0 ? 1 : _dCol < 0 ? -1 : 0
+                    bool _blocked = false
+                    int _r = _fromRow + _stepRow
+                    int _c = _fromCol + _stepCol
+                    while not _blocked and (_r != _toRow or _c != _toCol)
+                        if _mat_board.get(_r, _c) != Piece.empty
+                            _blocked := true
+                        _r += _stepRow
+                        _c += _stepCol
+                    _attacks := not _blocked
+    _attacks
+
+//@function The square of _side's king, read straight from the position's cached king fields -- no board scan.
+// The cache is maintained by applyMove (the one place a king moves), which is what makes isInCheck cheap.
+//@param    _position The position whose king we locate.
+//@param    _side The king's side.
+//@returns  A [row, column] tuple.
+export findKing(o_position _position, Side _side) =>
+    int _kingRow = _side == Side.white ? _position.whiteKingRow : _position.blackKingRow
+    int _kingCol = _side == Side.white ? _position.whiteKingCol : _position.blackKingCol
+    [_kingRow, _kingCol]
+
+//@function True when _side's king is currently in check: read its remembered square, ask whether the enemy attacks it.
+//@param    _position The position to test.
+//@param    _side The side whose king we check.
+//@returns  True when _side is in check.
+export isInCheck(o_position _position, Side _side) =>
+    [_kingRow, _kingCol] = findKing(_position, _side)
+    Side _enemy = _side == Side.white ? Side.black : Side.white
+    bool _inCheck = isSquareAttacked(_position.mat_board, _kingRow, _kingCol, _enemy)
+
+//#endregion ATTACK DETECTION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  MOVE APPLICATION  🟩🟩🟩🟩🟩🟩
+
+// Apply a move to a position, updating the board and all the side state. The generator uses it on a scratch copy to filter self-checks. The consumer uses it to advance the real game.
+
+//@function Applies _move to _position IN PLACE, assuming _move is at least pseudo-legal. Handles the ordinary move, capture, en passant, castling (moving the rook too) and promotion, and updates castling rights, the en-passant target, the clocks and the side to move. Does NOT check legality or self-check -- callers do that.
+//@param    _position The position to advance. Changed in place.
+//@param    _move The move to apply.
+//@returns  Nothing. _position is changed in place.
+export applyMove(o_position _position, o_move _move) =>
+    matrix<Piece> _board = _position.mat_board
+    Piece _mover = _board.get(_move.fromRow, _move.fromCol)
+    Side _side = _position.sideToMove
+    Piece _captured = _board.get(_move.toRow, _move.toCol)
+    bool _isPawnMove = _mover == Piece.whitePawn or _mover == Piece.blackPawn
+    bool _isCapture = _captured != Piece.empty or _move.isEnPassant
+    // Move the piece. Promotion swaps in the promotion piece. Everything else keeps the mover.
+    Piece _placed = _move.promotion != Piece.empty ? _move.promotion : _mover
+    _board.set(_move.fromRow, _move.fromCol, Piece.empty)
+    _board.set(_move.toRow, _move.toCol, _placed)
+    // En passant removes the enemy pawn that sits BESIDE the destination, on the moving pawn's own starting row.
+    if _move.isEnPassant
+        _board.set(_move.fromRow, _move.toCol, Piece.empty)
+    // Castling moves the rook to the far side of the king. The king's own two-square step is already done above.
+    if _move.isCastle
+        if _move.toCol == 6  // Kingside: rook from the h-file (column 7) to column 5.
+            _board.set(_move.toRow, 7, Piece.empty)
+            _board.set(_move.toRow, 5, _side == Side.white ? Piece.whiteRook : Piece.blackRook)
+        else if _move.toCol == 2  // Queenside: rook from the a-file (column 0) to column 3.
+            _board.set(_move.toRow, 0, Piece.empty)
+            _board.set(_move.toRow, 3, _side == Side.white ? Piece.whiteRook : Piece.blackRook)
+    // Castling rights: lose them when the king moves, when a rook leaves its home square, or when a rook is captured on its home square. We check the from- and to-squares against the four rook homes.
+    if _mover == Piece.whiteKing
+        _position.whiteCanCastleKingside := false
+        _position.whiteCanCastleQueenside := false
+        _position.whiteKingRow := _move.toRow  // Maintain the king cache (castling lands here too).
+        _position.whiteKingCol := _move.toCol
+    if _mover == Piece.blackKing
+        _position.blackCanCastleKingside := false
+        _position.blackCanCastleQueenside := false
+        _position.blackKingRow := _move.toRow
+        _position.blackKingCol := _move.toCol
+    // A move FROM a rook's home square, or a capture ONTO it, kills the matching right. Home squares: White a1 = (7,0), White h1 = (7,7), Black a8 = (0,0), Black h8 = (0,7).
+    if (_move.fromRow == 7 and _move.fromCol == 0) or (_move.toRow == 7 and _move.toCol == 0)
+        _position.whiteCanCastleQueenside := false
+    if (_move.fromRow == 7 and _move.fromCol == 7) or (_move.toRow == 7 and _move.toCol == 7)
+        _position.whiteCanCastleKingside := false
+    if (_move.fromRow == 0 and _move.fromCol == 0) or (_move.toRow == 0 and _move.toCol == 0)
+        _position.blackCanCastleQueenside := false
+    if (_move.fromRow == 0 and _move.fromCol == 7) or (_move.toRow == 0 and _move.toCol == 7)
+        _position.blackCanCastleKingside := false
+    // En-passant target: set only by a pawn double push, to the square the pawn skipped over. Cleared otherwise.
+    if _isPawnMove and math.abs(_move.toRow - _move.fromRow) == 2
+        _position.epTargetRow := (_move.fromRow + _move.toRow) / 2
+        _position.epTargetCol := _move.fromCol
+    else
+        _position.epTargetRow := -1
+        _position.epTargetCol := -1
+    // Clocks. Halfmove clock resets on a pawn move or any capture, else increments. Fullmove count ticks after a Black move.
+    _position.halfmoveClock := (_isPawnMove or _isCapture) ? 0 : _position.halfmoveClock + 1
+    if _side == Side.black
+        _position.fullmoveCount := _position.fullmoveCount + 1
+    _position.sideToMove := _side == Side.white ? Side.black : Side.white
+
+//#endregion MOVE APPLICATION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  PSEUDO-LEGAL MOVE GENERATION  🟩🟩🟩🟩🟩🟩
+
+// Every move a side's pieces could make ignoring self-check (the "pseudo-legal" set). The next region filters out the ones that leave the mover's own king attacked.
+
+//@function Appends every pseudo-legal pawn destination: single/double push, the two diagonal captures, en passant, and promotion (each promotion piece as a separate move). A helper. Not exported.
+f_genPawnMoves(o_position _position, int _row, int _col, Side _side, array<o_move> _a_moves) =>
+    matrix<Piece> _board = _position.mat_board
+    int _dir = _side == Side.white ? -1 : 1  // White pawns march towards row 0, Black towards row 7.
+    int _startRow = _side == Side.white ? 6 : 1  // Home row for a double push.
+    int _promoRow = _side == Side.white ? 0 : 7  // Reaching this row promotes.
+    Side _enemy = _side == Side.white ? Side.black : Side.white
+    int _oneRow = _row + _dir
+    // Single push onto an empty square, with promotion if it lands on the last rank.
+    if onBoard(_oneRow, _col) and _board.get(_oneRow, _col) == Piece.empty
+        if _oneRow == _promoRow
+            _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_col, promotion=(_side == Side.white ? Piece.whiteQueen : Piece.blackQueen), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+            _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_col, promotion=(_side == Side.white ? Piece.whiteRook : Piece.blackRook), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+            _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_col, promotion=(_side == Side.white ? Piece.whiteBishop : Piece.blackBishop), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+            _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_col, promotion=(_side == Side.white ? Piece.whiteKnight : Piece.blackKnight), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+        else
+            _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_col, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+            // Double push only from the home row, and only when BOTH the skipped and landing squares are empty.
+            int _twoRow = _row + 2 * _dir
+            if _row == _startRow and onBoard(_twoRow, _col) and _board.get(_twoRow, _col) == Piece.empty
+                _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_twoRow, toCol=_col, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+    // Diagonal captures, left and right. A capture needs an enemy piece on the destination, or the destination to be the en-passant target square.
+    for _dCol in array.from(-1, 1)
+        int _toCol = _col + _dCol
+        if onBoard(_oneRow, _toCol)
+            Piece _target = _board.get(_oneRow, _toCol)
+            bool _normalCapture = _target != Piece.empty and pieceBelongsTo(_target, _enemy)
+            bool _epCapture = _oneRow == _position.epTargetRow and _toCol == _position.epTargetCol and _position.epTargetRow != -1
+            if _normalCapture
+                if _oneRow == _promoRow
+                    _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_toCol, promotion=(_side == Side.white ? Piece.whiteQueen : Piece.blackQueen), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+                    _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_toCol, promotion=(_side == Side.white ? Piece.whiteRook : Piece.blackRook), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+                    _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_toCol, promotion=(_side == Side.white ? Piece.whiteBishop : Piece.blackBishop), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+                    _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_toCol, promotion=(_side == Side.white ? Piece.whiteKnight : Piece.blackKnight), isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+                else
+                    _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_toCol, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+            else if _epCapture  // En passant never lands on the promotion row, so no promotion branch needed.
+                _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_oneRow, toCol=_toCol, promotion=Piece.empty, isEnPassant=true, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+
+//@function Appends every pseudo-legal knight move: the eight L-shapes onto an empty square or an enemy piece. A helper. Not exported.
+f_genKnightMoves(o_position _position, int _row, int _col, Side _side, array<o_move> _a_moves) =>
+    matrix<Piece> _board = _position.mat_board
+    [_a_knightDRow, _a_knightDCol] = f_knightOffsets()  // Local copies. See the CE10227 note above the builders.
+    for [_i, _dRow] in _a_knightDRow
+        int _r = _row + _dRow
+        int _c = _col + _a_knightDCol.get(_i)
+        if onBoard(_r, _c)
+            Piece _target = _board.get(_r, _c)
+            if _target == Piece.empty or not pieceBelongsTo(_target, _side)  // Empty or enemy. Own piece blocks.
+                _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_r, toCol=_c, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+
+//@function Appends every pseudo-legal sliding move along the given ray set (rook rays, bishop rays, or both for a queen). Each ray walks outward, may end on an enemy capture, and stops at the first piece. A helper. Not exported.
+f_genSlideMoves(o_position _position, int _row, int _col, Side _side, array<int> _a_dRow, array<int> _a_dCol, array<o_move> _a_moves) =>
+    matrix<Piece> _board = _position.mat_board
+    for [_i, _dRow] in _a_dRow
+        int _dCol = _a_dCol.get(_i)
+        int _r = _row + _dRow
+        int _c = _col + _dCol
+        bool _blocked = false
+        while not _blocked and onBoard(_r, _c)
+            Piece _target = _board.get(_r, _c)
+            if _target == Piece.empty
+                _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_r, toCol=_c, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+            else
+                if not pieceBelongsTo(_target, _side)  // Enemy piece: a capture, and the ray ends here.
+                    _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_r, toCol=_c, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+                _blocked := true
+            _r += _dRow
+            _c += _dCol
+
+//@function Appends every pseudo-legal king step (the eight adjacent squares onto empty or enemy), plus the two castling moves. Castling is checked in FULL here -- rights, empty squares between, king not in check, and no attacked transit/destination square -- so the self-check filter has nothing extra to prove for it. A helper. Not exported.
+f_genKingMoves(o_position _position, int _row, int _col, Side _side, array<o_move> _a_moves) =>
+    matrix<Piece> _board = _position.mat_board
+    Side _enemy = _side == Side.white ? Side.black : Side.white
+    // The eight ordinary king steps.
+    [_a_kingDRow, _a_kingDCol] = f_kingOffsets()  // Local copies. See the CE10227 note above the builders.
+    for [_i, _dRow] in _a_kingDRow
+        int _r = _row + _dRow
+        int _c = _col + _a_kingDCol.get(_i)
+        if onBoard(_r, _c)
+            Piece _target = _board.get(_r, _c)
+            if _target == Piece.empty or not pieceBelongsTo(_target, _side)
+                _a_moves.push(o_move.new(fromRow=_row, fromCol=_col, toRow=_r, toCol=_c, promotion=Piece.empty, isEnPassant=false, isCastle=false, attackersOnDest=-1, defendersOnDest=-1))
+    // Castling. Only from the king's home square, and only when not currently in check (checked once here).
+    int _homeRow = _side == Side.white ? 7 : 0
+    bool _canKingside = _side == Side.white ? _position.whiteCanCastleKingside : _position.blackCanCastleKingside
+    bool _canQueenside = _side == Side.white ? _position.whiteCanCastleQueenside : _position.blackCanCastleQueenside
+    if _row == _homeRow and _col == 4 and not isSquareAttacked(_board, _homeRow, 4, _enemy)
+        // Kingside: squares f (column 5) and g (column 6) empty. King passes through f and lands on g, neither attacked.
+        if _canKingside and _board.get(_homeRow, 5) == Piece.empty and _board.get(_homeRow, 6) == Piece.empty and not isSquareAttacked(_board, _homeRow, 5, _enemy) and not isSquareAttacked(_board, _homeRow, 6, _enemy)
+            _a_moves.push(o_move.new(fromRow=_homeRow, fromCol=4, toRow=_homeRow, toCol=6, promotion=Piece.empty, isEnPassant=false, isCastle=true, attackersOnDest=-1, defendersOnDest=-1))
+        // Queenside: squares b (column 1), c (column 2), d (column 3) empty. King passes through d and lands on c, neither attacked. Square b need not be unattacked (only the rook passes over it), but must be empty.
+        if _canQueenside and _board.get(_homeRow, 1) == Piece.empty and _board.get(_homeRow, 2) == Piece.empty and _board.get(_homeRow, 3) == Piece.empty and not isSquareAttacked(_board, _homeRow, 3, _enemy) and not isSquareAttacked(_board, _homeRow, 2, _enemy)
+            _a_moves.push(o_move.new(fromRow=_homeRow, fromCol=4, toRow=_homeRow, toCol=2, promotion=Piece.empty, isEnPassant=false, isCastle=true, attackersOnDest=-1, defendersOnDest=-1))
+
+//@function Every pseudo-legal move for _position's side to move: walk the board, dispatch each piece to its generator. Pseudo-legal moves may still leave the king in check. Most callers should use generateLegalMoves.
+//@param    _position The position whose side to move we generate for.
+//@returns  A fresh array<o_move> of pseudo-legal moves.
+export generatePseudoLegalMoves(o_position _position) =>
+    matrix<Piece> _board = _position.mat_board
+    Side _side = _position.sideToMove
+    array<o_move> _a_moves = array.new<o_move>()
+    // Ray tables for the sliders, built once per call. A queen reuses the king offsets (all eight directions).
+    // Local copies. See the CE10227 note above the builders.
+    [_a_rookDRow, _a_rookDCol] = f_rookRays()
+    [_a_bishopDRow, _a_bishopDCol] = f_bishopRays()
+    [_a_kingDRow, _a_kingDCol] = f_kingOffsets()
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Piece _piece = _board.get(_row, _col)
+            if _piece != Piece.empty and pieceBelongsTo(_piece, _side)
+                // if/else-if, not a switch: the helpers have differing trailing types and a switch would try to unify them. Here each call is a discarded statement, so no unification happens.
+                if _piece == Piece.whitePawn or _piece == Piece.blackPawn
+                    f_genPawnMoves(_position, _row, _col, _side, _a_moves)
+                else if _piece == Piece.whiteKnight or _piece == Piece.blackKnight
+                    f_genKnightMoves(_position, _row, _col, _side, _a_moves)
+                else if _piece == Piece.whiteBishop or _piece == Piece.blackBishop
+                    f_genSlideMoves(_position, _row, _col, _side, _a_bishopDRow, _a_bishopDCol, _a_moves)
+                else if _piece == Piece.whiteRook or _piece == Piece.blackRook
+                    f_genSlideMoves(_position, _row, _col, _side, _a_rookDRow, _a_rookDCol, _a_moves)
+                else if _piece == Piece.whiteQueen or _piece == Piece.blackQueen
+                    f_genSlideMoves(_position, _row, _col, _side, _a_kingDRow, _a_kingDCol, _a_moves)
+                else if _piece == Piece.whiteKing or _piece == Piece.blackKing
+                    f_genKingMoves(_position, _row, _col, _side, _a_moves)
+    _a_moves
+
+//#endregion PSEUDO-LEGAL MOVE GENERATION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  LEGAL MOVE GENERATION  🟩🟩🟩🟩🟩🟩
+
+// A legal move is a pseudo-legal move whose resulting position does not leave the mover's own king attacked. We test each candidate by applying it to a scratch copy and asking isInCheck.
+
+//@function True when applying _move would leave the mover's own king NOT in check. Works on a scratch copy so _position is untouched. The self-check filter that turns a pseudo-legal move into a legal one.
+//@param    _position The position the move is made from.
+//@param    _move The pseudo-legal move to test.
+//@returns  True when the move leaves the mover's own king safe.
+export moveIsSafe(o_position _position, o_move _move) =>
+    Side _mover = _position.sideToMove
+    o_position _scratch = copyPosition(_position)
+    applyMove(_scratch, _move)
+    bool _safe = not isInCheck(_scratch, _mover)
+
+//@function Every fully legal move for _position's side to move: the pseudo-legal set with self-checks filtered out.
+//@param    _position The position to generate for.
+//@returns  A fresh array<o_move> of legal moves (empty means checkmate or stalemate).
+export generateLegalMoves(o_position _position) =>
+    array<o_move> _a_pseudo = generatePseudoLegalMoves(_position)
+    array<o_move> _a_legal = array.new<o_move>()
+    for [_i, _move] in _a_pseudo
+        if moveIsSafe(_position, _move)
+            _a_legal.push(_move)
+    _a_legal
+
+//@function True when _position's side to move has at least one legal move. Stops at the first one found, so the game-end check stays cheap.
+//@param    _position The position to test.
+//@returns  True when at least one legal move exists.
+export hasAnyLegalMove(o_position _position) =>
+    array<o_move> _a_pseudo = generatePseudoLegalMoves(_position)
+    bool _hasLegal = false
+    for [_i, _move] in _a_pseudo
+        if moveIsSafe(_position, _move)
+            _hasLegal := true
+            break  // First legal move is enough. The game is not over.
+    _hasLegal
+
+//#endregion LEGAL MOVE GENERATION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  GAME-STATUS DETECTION  🟩🟩🟩🟩🟩🟩
+
+//@function True when the board holds only material that can never force mate: K vs K, K+bishop vs K, or K+knight vs K. Richer cases (same-coloured bishops, two knights) need square-colour bookkeeping and are deliberately OUT OF SCOPE, so the detector stays simple and honest.
+//@param    _mat_board The board to weigh.
+//@returns  True for the three trivially-drawn material configurations only.
+export isInsufficientMaterial(matrix<Piece> _mat_board) =>
+    int _whiteMinors = 0  // Knights + bishops for White.
+    int _blackMinors = 0  // Knights + bishops for Black.
+    bool _anyHeavyOrPawn = false  // A pawn, rook or queen means mate is possible. Short-circuits to false.
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Piece _piece = _mat_board.get(_row, _col)
+            // if/else-if, not a switch: the branches assign different-typed things a switch would try to unify.
+            // Kings and empty squares fall through and change nothing.
+            if _piece == Piece.whitePawn or _piece == Piece.blackPawn or _piece == Piece.whiteRook or _piece == Piece.blackRook or _piece == Piece.whiteQueen or _piece == Piece.blackQueen
+                _anyHeavyOrPawn := true  // Any pawn, rook or queen means mate is possible. Not a trivial draw.
+            else if _piece == Piece.whiteKnight or _piece == Piece.whiteBishop
+                _whiteMinors += 1
+            else if _piece == Piece.blackKnight or _piece == Piece.blackBishop
+                _blackMinors += 1
+            if _anyHeavyOrPawn
+                break
+        if _anyHeavyOrPawn
+            break
+    // Insufficient when there is no pawn/rook/queen and neither side has more than one minor piece.
+    bool _insufficient = not _anyHeavyOrPawn and _whiteMinors <= 1 and _blackMinors <= 1
+
+//@function The status of _position. Checks the automatic draws first (50-move, insufficient material), then legal moves: no legal move in check is checkmate (the OTHER side wins), no legal move not in check is stalemate.
+// Threefold repetition is NOT detected here -- it needs position history. The consumer handles it via the REPETITION helpers and overrides an inProgress status with drawThreefold itself.
+//@param    _position The position to classify.
+//@returns  A GameStatus.
+export gameStatusOf(o_position _position) =>
+    GameStatus _status = GameStatus.inProgress
+    if _position.halfmoveClock >= 100  // 50 full moves by each side without a pawn move or capture.
+        _status := GameStatus.drawFiftyMove
+    else if isInsufficientMaterial(_position.mat_board)
+        _status := GameStatus.drawInsufficient
+    else if not hasAnyLegalMove(_position)
+        Side _side = _position.sideToMove
+        bool _inCheck = isInCheck(_position, _side)
+        if _inCheck  // Checkmate: the side to move is mated, so the other side wins.
+            _status := _side == Side.white ? GameStatus.blackWinsCheckmate : GameStatus.whiteWinsCheckmate
+        else
+            _status := GameStatus.drawStalemate
+    _status
+
+//@function True when the given status is any game-over state.
+//@param    _status The status to test.
+//@returns  True for anything other than GameStatus.inProgress.
+export isGameOver(GameStatus _status) =>
+    bool _over = _status != GameStatus.inProgress
+
+//#endregion GAME-STATUS DETECTION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  MOVE MATCHING AND VALIDATION  🟩🟩🟩🟩🟩🟩
+
+// Turning a typed token like "e2e4" or "e7e8q" into a legal o_move by matching against the generated legal-move list, so there is one source of truth for what is legal. The promotion suffix picks between the four promotion moves that share from/to squares.
+
+//@function Finds the legal move in _a_legalMoves matching the typed squares and promotion letter, or na when none matches. Matching against the pre-generated legal list is what makes castling, en passant and the self-check filter "just work" here.
+//@param    _a_legalMoves The legal moves for the current position.
+//@param    _fromRow Parsed from-square row.
+//@param    _fromCol Parsed from-square column.
+//@param    _toRow Parsed to-square row.
+//@param    _toCol Parsed to-square column.
+//@param    _promoLetter The promotion suffix letter, or "".
+//@returns  The matching o_move, or na.
+export matchLegalMove(array<o_move> _a_legalMoves, int _fromRow, int _fromCol, int _toRow, int _toCol, string _promoLetter) =>
+    o_move _match = na
+    for [_i, _move] in _a_legalMoves
+        if _move.fromRow == _fromRow and _move.fromCol == _fromCol and _move.toRow == _toRow and _move.toCol == _toCol
+            if _move.promotion == Piece.empty  // A non-promotion move matches regardless of any stray suffix.
+                _match := _move
+                break
+            else  // A promotion move: the suffix must pick this promotion piece (bare suffix means queen).
+                string _wantLetter = _promoLetter == "" ? "q" : str.lower(_promoLetter)
+                if promotionLetterFor(_move.promotion) == _wantLetter
+                    _match := _move
+                    break
+    _match
+
+//#endregion MOVE MATCHING AND VALIDATION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  PARSING AND CANONICALISATION  🟩🟩🟩🟩🟩🟩
+
+// Junk-tolerant parsing: ONE scan finds every valid move token (a square pair plus an optional promotion letter) and treats everything else as a separator.
+// Rebuilding the tokens lowercased and single-spaced gives the CANONICAL record -- that standard string, not the raw field, is the opening-book key and the seed source, so cosmetic typing differences can't change a book hit or re-roll a move.
+
+//@function Scans _movesText for coordinate move tokens in one pass. A token is a file letter, rank digit, file letter, rank digit, optionally a promotion letter. Case-insensitive. Anything that is not a valid square pair is skipped a character at a time, so "e2e4 e7e5", "e2e4e7e5" and "e2-e4, e7-e5" all parse the same.
+//@param    _movesText The raw Moves field text.
+//@returns  A tuple [_a_squares, _a_promos]: the flat squares array (four ints per move) and the promotion letters (one string per move, "" for none).
+export parseMoves(string _movesText) =>
+    array<int> _a_squares = array.new<int>()
+    array<string> _a_promos = array.new<string>()
+    int _len = str.length(_movesText)
+    int _i = 0
+    while _i <= _len - 4  // Need at least four characters left for a square pair.
+        string _c0 = str.lower(str.substring(_movesText, _i, _i + 1))
+        int _fromCol = fileToCol(_c0)
+        int _fromRank = int(str.tonumber(str.substring(_movesText, _i + 1, _i + 2)))
+        string _c2 = str.lower(str.substring(_movesText, _i + 2, _i + 3))
+        int _toCol = fileToCol(_c2)
+        int _toRank = int(str.tonumber(str.substring(_movesText, _i + 3, _i + 4)))
+        bool _valid = _fromCol != -1 and not na(_fromRank) and _fromRank >= 1 and _fromRank <= 8 and _toCol != -1 and not na(_toRank) and _toRank >= 1 and _toRank <= 8  // Explicit na guards: str.tonumber gives na for a non-digit.
+        if _valid
+            _a_squares.push(8 - _fromRank)  // fromRow = 8 - rank.
+            _a_squares.push(_fromCol)
+            _a_squares.push(8 - _toRank)  // toRow = 8 - rank.
+            _a_squares.push(_toCol)
+            // Consume the four characters, plus a promotion letter if one immediately follows.
+            int _next = _i + 4
+            string _promo = ""
+            if _next < _len
+                string _maybePromo = str.lower(str.substring(_movesText, _next, _next + 1))
+                if _maybePromo == "q" or _maybePromo == "r" or _maybePromo == "b" or _maybePromo == "n"
+                    _promo := _maybePromo
+                    _next += 1
+            _a_promos.push(_promo)
+            _i := _next
+        else
+            _i += 1  // Not a token starting here. Treat this character as a separator and try the next.
+    [_a_squares, _a_promos]
+
+//@function The printed token for a move: from-square, to-square, and the promotion letter when it promotes (e.g. "e2e4", "e1g1", "g7g8q"). The one place we turn an o_move back into text.
+//@param    _move The move to print.
+//@returns  A lowercase move token.
+export moveToToken(o_move _move) =>
+    string _token = squareName(_move.fromRow, _move.fromCol) + squareName(_move.toRow, _move.toCol) + promotionLetterFor(_move.promotion)
+
+//@function The canonical token for the parsed move at index _moveIndex, so the book key after N moves is exactly the record's first N tokens in standard form. Reads the two arrays produced by parseMoves.
+//@param    _a_squares The flat squares array from parseMoves.
+//@param    _a_promos The promotion letters from parseMoves.
+//@param    _moveIndex Which move (0-based) to print.
+//@returns  The canonical token for that move, or "" when the index is out of range.
+export canonicalTokenAt(array<int> _a_squares, array<string> _a_promos, int _moveIndex) =>
+    int _base = _moveIndex * 4
+    string _token = ""
+    if _base + 3 < _a_squares.size()
+        int _fromRow = _a_squares.get(_base)
+        int _fromCol = _a_squares.get(_base + 1)
+        int _toRow = _a_squares.get(_base + 2)
+        int _toCol = _a_squares.get(_base + 3)
+        string _promo = _moveIndex < _a_promos.size() ? _a_promos.get(_moveIndex) : ""
+        _token := squareName(_fromRow, _fromCol) + squareName(_toRow, _toCol) + _promo
+    _token
+
+//@function The full canonical record string: every token, lowercase, single-spaced (e.g. "e2e4 e7e5 g1f3").
+// This exact string is the opening-book key and the seed source.
+//@param    _a_squares The flat squares array from parseMoves.
+//@param    _a_promos The promotion letters from parseMoves.
+//@returns  The canonical record string.
+export canonicalRecord(array<int> _a_squares, array<string> _a_promos) =>
+    int _moveCount = _a_squares.size() / 4
+    string _record = ""
+    int _i = 0
+    while _i < _moveCount
+        string _token = canonicalTokenAt(_a_squares, _a_promos, _i)
+        _record := _i == 0 ? _token : _record + " " + _token
+        _i += 1
+    _record
+
+//#endregion PARSING AND CANONICALISATION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  REPETITION  🟩🟩🟩🟩🟩🟩
+
+// Threefold repetition needs position HISTORY, which these stateless functions don't keep. So this region gives two building blocks -- a text key meaning "the same position" and a count of it over recent history -- and the consumer owns the history.
+// The halfmove clock bounds how far back to look: a pawn move or capture makes every earlier position unrepeatable, and the clock counts the half-moves since the last one.
+
+//@function A text key for _position: two positions are "the same" exactly when their keys are equal. Encodes every square's occupant, the side to move, the four castling rights, and the en-passant target -- but the ep target is included ONLY when a pawn of the side to move actually stands ready to take, else a phantom target would hide a real repetition. We stop at "a pawn is placed to take" and don't test whether that capture is legal (the pawn might be pinned), a vanishingly rare nuance.
+//@param    _position The position to encode.
+//@returns  The key string: 64 board characters, then side, castling rights, and the ep part.
+export positionKey(o_position _position) =>
+    matrix<Piece> _board = _position.mat_board
+    string _key = ""
+    for _row = 0 to 7
+        for _col = 0 to 7
+            Piece _piece = _board.get(_row, _col)
+            string _char = switch _piece
+                Piece.whitePawn => "P"
+                Piece.whiteKnight => "N"
+                Piece.whiteBishop => "B"
+                Piece.whiteRook => "R"
+                Piece.whiteQueen => "Q"
+                Piece.whiteKing => "K"
+                Piece.blackPawn => "p"
+                Piece.blackKnight => "n"
+                Piece.blackBishop => "b"
+                Piece.blackRook => "r"
+                Piece.blackQueen => "q"
+                Piece.blackKing => "k"
+                => "."  // Piece.empty.
+            _key += _char
+    _key += _position.sideToMove == Side.white ? "w" : "b"
+    _key += _position.whiteCanCastleKingside ? "K" : "-"
+    _key += _position.whiteCanCastleQueenside ? "Q" : "-"
+    _key += _position.blackCanCastleKingside ? "k" : "-"
+    _key += _position.blackCanCastleQueenside ? "q" : "-"
+    // The ep part: the target square's name, but only when a side-to-move pawn stands ready to take it -- one file either side, on the capture's starting row (White at row+1, Black at row-1). "-" otherwise.
+    string _epPart = "-"
+    if _position.epTargetRow != -1
+        int _pawnRow = _position.sideToMove == Side.white ? _position.epTargetRow + 1 : _position.epTargetRow - 1
+        Piece _wantPawn = _position.sideToMove == Side.white ? Piece.whitePawn : Piece.blackPawn
+        bool _captureAvailable = (onBoard(_pawnRow, _position.epTargetCol - 1) and _board.get(_pawnRow, _position.epTargetCol - 1) == _wantPawn) or (onBoard(_pawnRow, _position.epTargetCol + 1) and _board.get(_pawnRow, _position.epTargetCol + 1) == _wantPawn)
+        if _captureAvailable
+            _epPart := squareName(_position.epTargetRow, _position.epTargetCol)
+    _key += _epPart
+    _key
+
+//@function True when the position whose key is _currentKey has occurred at least three times. Counts matches among the last (_halfmoveClock + 1) entries of _a_keys. Anything older can't repeat. _a_keys must already hold the current position's key as its newest entry (push first, then ask).
+//@param    _a_keys The key history, one entry per position in game order, the current position last.
+//@param    _currentKey The current position's key (the newest entry of _a_keys).
+//@param    _halfmoveClock The current position's halfmove clock (half-moves since the last pawn move or capture).
+//@returns  True when this is at least the third occurrence of the position.
+export isThreefoldRepetition(array<string> _a_keys, string _currentKey, int _halfmoveClock) =>
+    int _window = (na(_halfmoveClock) ? 0 : _halfmoveClock) + 1  // na guard: a broken clock degrades to "current position only", never a false draw.
+    int _size = _a_keys.size()
+    int _oldest = math.max(0, _size - _window)
+    int _count = 0
+    int _i = _size - 1
+    while _i >= _oldest  // Newest backwards to the window edge.
+        if _a_keys.get(_i) == _currentKey
+            _count += 1
+        _i -= 1
+    bool _threefold = _count >= 3
+
+//#endregion REPETITION

@@ -1,0 +1,497 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   This is a utility library for handling timeframes and
+//                multi-timeframe (MTF) analysis in Pine Script. It provides a
+//                collection of functions designed to handle common tasks related
+//                to period detection, session alignment, timeframe construction,
+//                and time calculations, forming a foundation for
+//                MTF indicators.
+//
+//                Key Capabilities:
+//
+//                1.  **MTF Period Engine:** The library includes functions for
+//                    managing higher-timeframe (HTF) periods.
+//                    - **Period Detection (`isNewPeriod`):** Detects the first bar
+//                      of a given timeframe. It includes custom logic to handle
+//                      multi-month and multi-year intervals using strict calendar
+//                      alignment (e.g., Q1 starts in Jan, not relative to chart),
+//                      where standard `timeframe.change()` may not be sufficient.
+//                    - **Bar Counting (`sinceNewPeriod`):** Counts the number of
+//                      bars that have passed in the current HTF period or
+//                      returns the final count for a completed historical period.
+//
+//                2.  **Automatic Timeframe Selection:** Offers functions for building
+//                    a top-down analysis framework:
+//                    - **Automatic HTF (`autoHTF`):** Suggests a higher timeframe
+//                      (HTF) for broader context based on the current timeframe.
+//                    - **Automatic LTF (`autoLTF`):** Suggests an appropriate lower
+//                      timeframe (LTF) for granular intra-bar analysis.
+//
+//                3.  **Timeframe Manipulation and Comparison:** Includes tools for
+//                    working with timeframe strings:
+//                    - **Build & Split (`buildTF`, `splitTF`):** Functions to
+//                      programmatically construct valid Pine Script timeframe
+//                      strings (e.g., "4H") and parse them back into their
+//                      numeric and unit components.
+//                    - **Formatting (`readableTF`):** Converts technical timeframe
+//                      strings into human-readable formats (e.g., "240" -> "4h")
+//                      suitable for UI labels and tables.
+//                    - **Comparison (`isHigherTF`, `isActiveTF`, `isLowerTF`):**
+//                      A set of functions to check if a given timeframe is
+//                      higher, lower, or the same as the script's active timeframe.
+//                    - **Multiple Validation (`isMultipleTF`):** Checks if a
+//                      higher timeframe is a practical multiple of the current
+//                      timeframe. This is based on the assumption that checking
+//                      if recent, completed HTF periods contained more than one
+//                      bar is a valid proxy for preventing data gaps.
+//
+//                4.  **Timestamp Interpolation:** Contains an `interpolateTime()`
+//                    function that calculates an absolute timestamp by
+//                    interpolating at a given percentage across a specified
+//                    range of bars (e.g., 50% of the way through the last
+//                    20 bars).
+//                    *Note: Uses linear interpolation assuming uniform time distribution.*
+//
+//                **IMPORTANT NOTE ON STATE MANAGEMENT**
+//                Functions within this library that rely on history referencing or 
+//                internal state counters (specifically `isNewPeriod`, `sinceNewPeriod`, 
+//                and `isMultipleTF` which utilize `ta.barssince` or `ta.valuewhen`) 
+//                must be called in the script's global scope. 
+//                Do NOT call these functions inside conditional structures (e.g., `if`, `for`) 
+//                unless you fully understand Pine Script's execution model, as this 
+//                will break the consistency of the internal series history.
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibTmFr")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.2.0
+// (Add) Added `readableTF` function for human-readable timeframe formatting in UIs.
+// (Mod) Renamed `interpTimestamp` to `interpolateTime` for better 
+//       readability (Breaking Change).
+// (Ref) Renamed internal variable `tfNom` to `tfUpper` in `splitTF` and 
+//       parameters in interpolation logic.
+// (Doc) Expanded header with detailed feature list and warning about State 
+//       Management/Global Scope usage.
+//
+// 2025-11-01 0.1.0
+// Initial release of library
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibTmFr"
+const string VERSION = "0.2.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── ENUM ─────────────────────────────────────────────────────────────────────
+// @enum  TFUnit Timeframe unit used when composing a custom interval string
+// @field seconds  Seconds
+// @field minutes  Minutes
+// @field hours    Hours
+// @field days     Days
+// @field weeks    Weeks
+// @field months   Months
+// @field years    Years
+export enum TFUnit
+    seconds = "Seconds"
+    minutes = "Minutes"
+    hours   = "Hours"
+    days    = "Days"
+    weeks   = "Weeks"
+    months  = "Months"
+    years   = "Years"
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function  Builds a Pine Script timeframe string from a numeric quantity and a unit enum.
+//            The resulting string can be used with `request.security()` or `input.timeframe`.
+// @param     quantity series int     Number to specifie how many `unit` the timeframe spans.
+// @param     unit     series TFUnit  The size category for the bars.
+// @returns            series string  A Pine-style timeframe identifier, e.g.
+//                                      "5S"   → 5-seconds bars
+//                                      "30"   → 30-minute bars
+//                                      "120"  → 2-hour bars
+//                                      "1D"   → daily bars
+//                                      "3M"   → 3-month bars
+//                                      "24M"  → 2-year bars
+export buildTF(
+  series int quantity,
+  series TFUnit unit
+  ) =>
+    if quantity <= 0
+        runtime.error("parameter quantity must be greater than 0")
+
+    switch unit
+        TFUnit.seconds => str.tostring(quantity) + "S"
+        TFUnit.minutes => str.tostring(quantity)
+        TFUnit.hours   => str.tostring(quantity * 60)
+        TFUnit.days    => str.tostring(quantity) + "D"
+        TFUnit.weeks   => str.tostring(quantity) + "W"
+        TFUnit.months  => str.tostring(quantity) + "M"
+        TFUnit.years   => str.tostring(quantity * 12) + "M"
+        => runtime.error("No matching type found"), na
+
+// @function  Splits a Pine‑timeframe identifier into numeric quantity and unit (TFUnit).
+// @param     tf              series string   Timeframe string, e.g. 
+//                                            "5S", "30", "120", "1D", "3M", "24M".
+// @returns   [quantity, unit]
+//             quantity   series int     The numeric value of the timeframe (e.g., 15 for "15", 3 for "3M").
+//             unit       series TFUnit  The unit of the timeframe (e.g., TFUnit.minutes, TFUnit.months).
+//
+//  Notes on strings without a suffix:
+//  • Pure digits are minutes; if divisible by 60, they are treated as hours.
+//  • An "M" suffix is months; if divisible by 12, it is converted to years.
+export splitTF(
+  series string tf
+  ) =>
+    series int len = str.length(tf)
+    if len == 0
+        runtime.error("timeframe string is empty")
+
+    series string tfUpper = str.upper(tf)
+    series string lastChr = str.substring(tfUpper, len - 1)
+    series bool   hasSuf  = lastChr == "S" or lastChr == "D" or lastChr == "W" or lastChr == "M"
+    series string numStr  = hasSuf ? (len > 1 ? str.substring(tfUpper, 0, len - 1) : "1") : tfUpper
+
+    series float numFloat = str.tonumber(numStr)
+    if na(numFloat) or numFloat <= 0
+        runtime.error("invalid numeric part in timeframe")
+    series int numVal = int(numFloat)
+
+    series int quantity = numVal
+
+    series TFUnit unit = switch lastChr
+        "S" => TFUnit.seconds
+        "D" => TFUnit.days
+        "W" => TFUnit.weeks
+        "M" => TFUnit.months
+        => TFUnit.minutes
+
+    if unit == TFUnit.minutes and quantity % 60 == 0
+        unit     := TFUnit.hours
+        quantity := quantity / 60
+    
+    if unit == TFUnit.months and quantity % 12 == 0
+        unit     := TFUnit.years
+        quantity := quantity / 12
+
+    [quantity, unit]
+
+// @function  Converts a technical timeframe string into a human-readable short format.
+//            Useful for displaying timeframes in tables, labels, or status lines.
+//            e.g., converts "240" to "4h", "1D" to "1D", "30" to "30m".
+// @param     tf   series string   Raw timeframe string.
+// @returns        series string   Formatted short string for UI display.
+export readableTF(
+  series string tf
+  ) =>
+    [qty, unit] = splitTF(tf)
+    string out = str.tostring(qty)
+
+    switch unit
+        TFUnit.seconds => out += "s"
+        TFUnit.minutes => out += "m"
+        TFUnit.hours   => out += "h"
+        TFUnit.days    => out += "D"
+        TFUnit.weeks   => out += "W"
+        TFUnit.months  => out += "M"
+        TFUnit.years   => out += "Y"
+    
+    out
+
+// @function  Picks an appropriate **higher timeframe (HTF)** relative to the selected timeframe.
+//            It steps up along a coarse ladder to produce sensible jumps for top‑down analysis.
+//
+//           Mapping → chosen HTF:
+//               ≤  1 min  →  60  (1h)          ≈ ×60
+//               ≤  3 min  → 180  (3h)          ≈ ×60
+//               ≤  5 min  → 240  (4h)          ≈ ×48
+//               ≤ 15 min  →  D   (1 day)       ≈ ×26–×32   (regular session 6.5–8 h)
+//               > 15 min  →  W   (1 week)      ≈ ×64–×80 for 30m; varies with input
+//               ≤  1 h    →  W   (1 week)      ≈ ×32–×40
+//               ≤  4 h    →  M   (1 month)     ≈ ×36–×44   (~22 trading days / month)
+//               >  4 h    →  3M  (3 months)    ≈ ×36–×66   (e.g., 12h→×36–×44; 8h→×53–×66)
+//               ≤  1 day  →  3M  (3 months)    ≈ ×60–×66   (~20–22 trading days / month)
+//               >  1 day  → 12M  (1 year)      ≈ ×(252–264)/quantity
+//               ≤  1 week → 12M  (1 year)      ≈ ×52
+//               >  1 week → 48M  (4 years)     ≈ ×(208)/quantity
+//               =  1 M    → 48M  (4 years)     ≈ ×48
+//               >  1 M    → error ("HTF too big")
+//               any       → error ("HTF too big")
+//
+//            Notes:
+//              • Inputs in months or years are restricted: only 1M is allowed; larger months/any years throw.
+//              • Returns a Pine timeframe string usable in `request.security()` and `input.timeframe`.
+//
+// @param     tf   series string   Selected timeframe (e.g., "D", "240", or `timeframe.period`).
+// @returns        series string   Suggested higher timeframe.
+export autoHTF(
+  series string tf
+  ) =>
+    [quantity, unit] = splitTF(tf)
+
+    if unit == TFUnit.years or (unit == TFUnit.months and quantity > 1)
+        runtime.error("HTF too big")
+
+    switch unit
+        TFUnit.minutes => quantity <= 1  ? "60"  :
+                          quantity <= 3  ? "180" :
+                          quantity <= 5  ? "240" :
+                          quantity <= 15 ? "D"   :
+                                           "W"
+
+        TFUnit.hours   => quantity <= 1  ? "W"   :
+                          quantity <= 4  ? "M"   :
+                                           "3M"
+
+        TFUnit.days    => quantity <= 1  ? "3M"  :
+                                           "12M"
+
+        TFUnit.weeks   => quantity <= 1  ? "12M" :
+                                           "48M"
+        TFUnit.months  =>                  "48M"
+
+        => runtime.error("Invalid timeframe unit"), na
+
+// @function  Selects an appropriate **lower timeframe LTF)** for intra‑bar evaluation
+//            based on the selected timeframe. The goal is to keep intra‑bar
+//            loops performant while providing enough granularity.
+//
+//            Mapping → chosen LTF:
+//                ≤  1 min  →  1S      ≈ ×60
+//                ≤  5 min  →  5S      ≈ ×60
+//                ≤ 15 min  → 15S      ≈ ×60
+//                ≤ 30 min  → 30S      ≈ ×60
+//                > 30 min  → 60S (1m) ≈ ×31–×59   (for 31–59 minute charts)
+//                ≤  1 h    →  1  (1m) ≈ ×60
+//                ≤  2 h    →  2  (2m) ≈ ×60
+//                ≤  4 h    →  5  (5m) ≈ ×48
+//                >  4 h    → 15 (15m) ≈ ×24–×48   (e.g., 6h→×24, 8h→×32, 12h→×48)
+//                ≤  1 day  → 15 (15m) ≈ ×26–×32   (regular sessions ~6.5–8h)
+//                >  1 day  → 60 (60m) ≈ ×(26–32)  per day × quantity
+//                ≤  1 week → 60 (60m) ≈ ×32–×40   (≈5 sessions of ~6.5–8h)
+//                >  1 week → 240 (4h) ≈ ×(8–10)   per week × quantity
+//                ≤  1 M    → 240 (4h) ≈ ×33–×44   (~20–22 sessions × 6.5–8h / 4h)
+//                ≤  3 M    →  D  (1d) ≈ ×(20–22)  per month × quantity
+//                >  3 M    →  W  (1w) ≈ ×(4–5)    per month × quantity
+//                ≤  1 Y    →  W  (1w) ≈ ×52
+//                >  1 Y    →  M  (1M) ≈ ×12       per year × quantity
+//
+//            Notes:
+//              • Ratios for D/W/M are given as ranges because they depend on
+//                **regular session length** (typically ~6.5–8h, not 24h).
+//              • Returned strings can be used with `request.security()` and `input.timeframe`.
+//
+// @param    tf   series string   Selected timeframe (e.g., "D", "240", or timeframe.period).
+// @returns       series string   Suggested lower TF to use for intra‑bar work.
+export autoLTF(
+  series string tf
+  ) =>
+    [quantity, unit] = splitTF(tf)
+
+    switch unit
+        TFUnit.minutes => quantity <= 1  ? "1S"  :
+                          quantity <= 5  ? "5S"  : 
+                          quantity <= 15 ? "15S" : 
+                          quantity <= 30 ? "30S" :
+                                           "60S"
+
+        TFUnit.hours   => quantity <= 1  ? "1"   :
+                          quantity <= 2  ? "2"   :
+                          quantity <= 4  ? "5"   :
+                                           "15"
+
+        TFUnit.days    => quantity <= 1  ? "15"  :
+                                           "60"
+
+        TFUnit.weeks   => quantity <= 1  ? "60"  :
+                                           "240"
+
+        TFUnit.months  => quantity <= 1  ? "240" :
+                          quantity <= 3  ? "D"   :
+                                           "W"
+
+        TFUnit.years   => quantity <= 1  ? "W"   :
+                                           "M"
+
+        => runtime.error("Invalid timeframe unit"), na
+
+// @function  Returns `true` when a new session-aligned period begins, or on the Nth bar of that period.
+//            For custom intervals (e.g., "3M", "12M"), the logic enforces strict calendar alignment 
+//            (e.g., "3M" triggers on Jan, Apr, Jul, Oct) rather than relative counting.
+// @param     tf           series string  Target higher timeframe (e.g., "D", "W", "M").
+// @param     offset       simple int     0 → checks for the first bar of the new period.
+//                                         1+ → checks for the N-th bar of the period.
+// @returns                series bool    `true` if the condition is met
+export isNewPeriod(
+  series string tf,
+  simple int offset = 0
+  ) =>
+    if offset < 0
+        runtime.error("offset must be >= 0")
+    
+    [quantity, unit] = splitTF(tf) 
+
+    series bool newPeriod = false
+    if unit == TFUnit.years and quantity > 1
+        newPeriod := timeframe.change("12M") and year % quantity == 0
+    else if unit == TFUnit.months and quantity > 12
+        series bool isNewMonth  = timeframe.change("M")
+        series int  totalMonths = year * 12 + month - 1
+        newPeriod := isNewMonth and totalMonths % quantity == 0
+    else
+        newPeriod := timeframe.change(tf)
+
+    series int barsSince = ta.barssince(newPeriod)
+    not na(barsSince) and barsSince == offset
+
+// @function  Counts how many bars have passed within a higher timeframe (HTF) period.
+//            For daily, weekly, and monthly resolutions, the period is aligned with the trading session.
+// @param     tf          series string  Target parent timeframe (e.g., "60", "D").
+// @param     offset      simple int     0  → Running count for the current period.
+//                                       1+ → Finalized count for the Nth most recent *completed* period.
+// @returns               series int     Number of bars.
+export sinceNewPeriod(
+  series string tf,
+  simple int offset = 0
+  ) =>
+    if offset < 0
+        runtime.error("offset must be >= 0")
+
+    series bool newPeriod = isNewPeriod(tf)
+
+    series int  barsDone  = nz(ta.barssince(newPeriod)) + 1
+    offset == 0 ? barsDone : nz(ta.valuewhen(newPeriod, barsDone[1], offset))
+
+// @function  Returns `true` when the selected timeframe represents a
+//            higher resolution than the active timeframe.
+// @param     tf   series string  Selected timeframe.
+// @param     main series bool    When `true`, the comparison is made against the chart's main timeframe
+//                                instead of the script's active timeframe. Optional. Defaults to `false`.
+// @returns        series bool    `true` if `tf` > active TF; otherwise `false`.
+export isHigherTF(
+  series string tf,
+  series bool main = false
+  ) =>
+    series string period = main ? timeframe.main_period : timeframe.period
+    timeframe.in_seconds(tf == "" ? period  : tf) > timeframe.in_seconds(period )
+
+// @function  Returns `true` when the selected timeframe represents the
+//            exact resolution of the active timeframe.
+// @param     tf   series string  Selected timeframe.
+// @param     main series bool    When `true`, the comparison is made against the chart's main timeframe
+//                                instead of the script's active timeframe. Optional. Defaults to `false`.
+// @returns        series bool    `true` if `tf` == active TF; otherwise `false`.
+export isActiveTF(
+  series string tf,
+  series bool main = false
+  ) =>
+    series string period = main ? timeframe.main_period : timeframe.period
+    timeframe.in_seconds(tf == "" ? period : tf) == timeframe.in_seconds(period)
+
+// @function  Returns `true` when the selected timeframe represents a
+//            lower resolution than the active timeframe.
+// @param     tf   series string  Selected timeframe.
+// @param     main series bool    When `true`, the comparison is made against the chart's main timeframe
+//                                instead of the script's active timeframe. Optional. Defaults to `false`.
+// @returns        series bool    `true` if `tf` < active TF; otherwise `false`.
+export isLowerTF(
+  series string tf,
+  series bool main = false
+  ) =>
+    series string period = main ? timeframe.main_period : timeframe.period
+    timeframe.in_seconds(tf == "" ? period : tf) < timeframe.in_seconds(period)
+
+// @function  Returns `true` if the selected timeframe (`tf`) is a practical multiple
+//            of the active skript's timeframe. It verifies this by checking if `tf` is a higher timeframe
+//            that has consistently contained more than one bar of the skript's timeframe in recent periods.
+//            The period detection is session-aware.
+// @param     tf   series string  The higher timeframe to check.
+// @returns        series bool    `true` if `tf` is a practical multiple; otherwise `false`.
+export isMultipleTF(
+  series string tf
+  ) =>
+    series bool newPeriod = isNewPeriod(tf)
+    
+    series int  barsDone = nz(ta.barssince(newPeriod)) + 1
+    
+    series int barsLastPrd = nz(ta.valuewhen(newPeriod, barsDone[1], 1))
+    series int barsPrevPrd = nz(ta.valuewhen(newPeriod, barsDone[1], 2))
+    
+    isHigherTF(tf) and barsLastPrd > 1 and barsPrevPrd > 1
+
+// @function  Calculates a precise absolute timestamp by interpolating within a bar range based on a percentage.
+//            This version works with RELATIVE bar offsets from the current bar.
+//
+//            NOTE: This function uses linear interpolation based on time. It assumes a uniform 
+//            distribution of time across the bar. This is a mathematical simplification and 
+//            does not account for tick volume distribution or intra-bar price action volatility.
+//
+// @param     offsetStart series int    The relative offset of the starting bar (e.g., 10 for 10 bars ago).
+// @param     offsetEnd   series int    The relative offset of the ending bar (e.g., 1 for 1 bar ago). Must be <= offsetStart.
+// @param     pct         series float  The percentage of the bar range to measure (e.g., 50.5 for 50.5%).
+//                                      Values are clamped to the [0, 100] range.
+// @returns               series int    The calculated, interpolated absolute Unix timestamp in milliseconds.
+export interpolateTime(
+  series int offsetStart,
+  series int offsetEnd,
+  series float pct
+  ) =>
+    if offsetStart < offsetEnd
+        runtime.error("offsetStart cannot be less than offsetEnd.")
+    if offsetEnd < 0
+        runtime.error("offsetEnd cannot be negative.")
+
+    series float clampedPct = math.max(0.0, math.min(100.0, pct))
+    if clampedPct == 0.0
+        time[offsetStart]
+    else if clampedPct == 100.0
+        time_close[offsetEnd]
+    else
+        series int   numBars   = offsetStart - offsetEnd + 1
+        series float targetBar = numBars * (clampedPct / 100.0)
+
+        series int   fullBars  = math.floor(targetBar)
+        series float barFrac   = targetBar - fullBars
+
+        series int   interpOffset = offsetStart - fullBars
+        series int   interpStartTime = time[interpOffset]
+
+        series int   interpDur = 0
+        if barFrac > 0.0
+            series int barDurMs = timeframe.in_seconds(timeframe.period) * 1000
+
+            if interpOffset > 0
+                series int nextBarTime = time[interpOffset - 1]
+                barDurMs := nextBarTime - interpStartTime
+
+            interpDur := math.round(barDurMs * barFrac)
+
+        interpStartTime + interpDur

@@ -1,0 +1,819 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// For commercial use licensing, contact https://www.tradingview.com/u/Alien_Algorithms/
+// © Alien_Algorithms
+
+//@version=6
+
+// @description Companion expansion for NeuraLib providing higher-level neural architecture blocks, including Conv1D, LSTM, GRU, attention, Transformer blocks, dueling Q-heads, positional encoding, and deterministic Prioritized Experience Replay.
+library("NeuraLib_Models", false)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+
+export type PrioritizedReplaySample
+    nl.Batch batch
+    array<int> indexArray
+    array<float> weightArray
+    int sampleRows
+
+export type PrioritizedReplayBuffer
+    string name
+    int featureCount
+    int targetCount
+    int maxRows
+    array<float> featureStoreArray
+    array<float> targetStoreArray
+    array<float> priorityArray
+    int rowCount
+    int headIndex = 0
+
+
+// Maps chronological replay rows to physical ring-buffer slots.
+_replayPhysicalRow(int rowIndex, int rowCount, int maxRows, int headIndex) =>
+    int safeMaxRows = math.max(maxRows, 1)
+    rowCount >= safeMaxRows ? (headIndex + rowIndex) % safeMaxRows : rowIndex
+
+
+// Keeps replay priorities positive so sampling probabilities and importance weights stay finite.
+_safePriority(float priority) =>
+    math.max(math.abs(priority), 1e-7)
+
+
+// Packs replay arrays into a NeuraLib batch without applying dataset scaling.
+_replayBatch(array<float> featureValuesArray, array<float> targetValuesArray, int rows, int featureCount, int targetCount) =>
+    nl.Tensor inputTensor = nl.vector(featureValuesArray, "replay_inputs").reshape(array.from(rows, featureCount))
+    nl.Tensor targetTensor = nl.vector(targetValuesArray, "replay_targets").reshape(array.from(rows, targetCount))
+    nl.Batch.new(inputTensor, targetTensor, rows)
+
+
+// Wraps sampled replay tensors with logical indices and normalized importance weights.
+_replaySample(PrioritizedReplayBuffer buffer, array<float> featureValuesArray, array<float> targetValuesArray, array<int> indexArray, array<float> weightArray, int rows) =>
+    PrioritizedReplaySample.new(_replayBatch(featureValuesArray, targetValuesArray, rows, buffer.featureCount, buffer.targetCount), indexArray, weightArray, rows)
+
+
+// @function                Initializes a prioritized experience replay buffer to efficiently store and sample transition tuples for reinforcement learning.
+// @param featureCount      (simple int) The number of input features stored per experience row.
+// @param targetCount       (simple int) The number of target values stored per experience row.
+// @param maxRows           (simple int) The maximum number of experiences the buffer can hold before overwriting.
+// @param name              (string) An optional label for the buffer, used in diagnostics.
+// @returns                 (PrioritizedReplayBuffer) A new, empty replay buffer ready for use.
+// @example
+// buffer = models.prioritizedReplayBuffer(4, 1, 1000)
+export prioritizedReplayBuffer(simple int featureCount, simple int targetCount, simple int maxRows, string name = "prioritized_replay") =>
+    PrioritizedReplayBuffer.new(name, math.max(featureCount, 1), math.max(targetCount, 1), math.max(maxRows, 1), array.new<float>(), array.new<float>(), array.new<float>(), 0, 0)
+
+
+// Validates Conv1D sequence geometry and returns the flattened output step count.
+_conv1dOutputSteps(simple int timeSteps, simple int kernelSize, simple int stride) =>
+    int safeKernel = math.max(kernelSize, 1)
+    int safeStride = math.max(stride, 1)
+    if timeSteps < safeKernel
+        runtime.error("conv1dBlock requires timeSteps >= kernelSize.")
+    int(math.floor((timeSteps - safeKernel) / safeStride)) + 1
+
+
+// Uses He initialization for rectifier-style activations and Xavier initialization otherwise.
+_defaultInit(nl.ActivationKind activationKind) =>
+    activationKind == nl.ActivationKind.relu or activationKind == nl.ActivationKind.leakyRelu or activationKind == nl.ActivationKind.elu or activationKind == nl.ActivationKind.geluApprox or activationKind == nl.ActivationKind.swish ? nl.InitKind.heUniform : nl.InitKind.xavierUniform
+
+
+// Adds a trainable affine projection to a GraphBlock.
+_linear(nl.GraphBlock block, int source, int inputFeatures, int outputFeatures, nl.InitKind initKind, string prefix) =>
+    int w = block.param(inputFeatures, outputFeatures, initKind, prefix + "_kernel")
+    int b = block.param(1, outputFeatures, nl.InitKind.zeros, prefix + "_bias")
+    block.add(block.matmul(source, w, prefix + "_matmul"), b, prefix + "_affine")
+
+
+// Applies the requested activation unless the block is explicitly linear.
+_maybeActivate(nl.GraphBlock block, int source, nl.ActivationKind activationKind, string name) =>
+    activationKind == nl.ActivationKind.linear ? source : block.activate(source, activationKind, 0.01, name)
+
+
+// Reads the feature width produced by the last Sequential block.
+_modelOutputFeatures(nl.Sequential model) =>
+    int blockCount = model.blockArray.size()
+    if blockCount <= 0
+        runtime.error("Advanced Sequential methods require model.input() before adding Advanced blocks.")
+    nl.GraphBlock lastBlock = model.blockArray.get(blockCount - 1)
+    int result = lastBlock.outFeatures
+    if result <= 0
+        runtime.error("Advanced Sequential method could not infer the current model feature count.")
+    result
+
+
+// Fails early when a fluent builder receives a model width it cannot consume.
+_requireModelFeatures(nl.Sequential model, int expectedFeatures, string methodName) =>
+    int actualFeatures = _modelOutputFeatures(model)
+    if actualFeatures != expectedFeatures
+        runtime.error(methodName + " expected current model feature count " + str.tostring(expectedFeatures) + " but received " + str.tostring(actualFeatures) + ".")
+    actualFeatures
+
+
+// Validates attention head geometry and returns each head's feature width.
+_requireHeadShape(simple int modelDim, simple int headCount, simple string context) =>
+    simple int safeModelDim = math.max(modelDim, 1)
+    simple int safeHeads = math.max(headCount, 1)
+    if safeModelDim % safeHeads != 0
+        runtime.error(context + " requires modelDim divisible by headCount.")
+    int(math.floor(safeModelDim / safeHeads))
+
+
+// Adds a trainable query, key, value, or output projection.
+_attentionProjection(nl.GraphBlock block, int source, int inputFeatures, int outputFeatures, string prefix) =>
+    _linear(block, source, inputFeatures, outputFeatures, nl.InitKind.xavierUniform, prefix)
+
+
+// Slices one attention head, computes scaled scores, applies softmax, and returns context.
+_attentionHead(nl.GraphBlock block, int q, int k, int v, simple int startCol, simple int headDim, bool causal, simple string prefix) =>
+    int qh = block.sliceCols(q, startCol, headDim, prefix + "_q")
+    int kh = block.sliceCols(k, startCol, headDim, prefix + "_k")
+    int vh = block.sliceCols(v, startCol, headDim, prefix + "_v")
+    int scores = block.attentionScore(qh, kh, causal, prefix + "_scores")
+    int weights = block.softmax(scores, prefix + "_weights")
+    block.attentionApply(weights, vh, prefix + "_context")
+
+
+// Builds up to eight attention heads and projects the concatenated context back to modelDim.
+_multiHeadAttention(nl.GraphBlock block, int querySource, int keySource, int valueSource, simple int modelDim, simple int headCount, bool causal, simple string prefix) =>
+    simple int safeModelDim = math.max(modelDim, 1)
+    simple int safeHeads = math.max(headCount, 1)
+    simple int headDim = _requireHeadShape(safeModelDim, safeHeads, prefix)
+    if safeHeads > 8
+        runtime.error(prefix + " supports up to 8 heads.")
+    int q = _attentionProjection(block, querySource, safeModelDim, safeModelDim, prefix + "_query")
+    int k = _attentionProjection(block, keySource, safeModelDim, safeModelDim, prefix + "_key")
+    int v = _attentionProjection(block, valueSource, safeModelDim, safeModelDim, prefix + "_value")
+    int mergedContext = _attentionHead(block, q, k, v, 0, headDim, causal, prefix + "_h1")
+    if safeHeads >= 2
+        int h2 = _attentionHead(block, q, k, v, headDim, headDim, causal, prefix + "_h2")
+        mergedContext := block.concatCols(mergedContext, h2, prefix + "_h2_concat")
+    if safeHeads >= 3
+        int h3 = _attentionHead(block, q, k, v, headDim * 2, headDim, causal, prefix + "_h3")
+        mergedContext := block.concatCols(mergedContext, h3, prefix + "_h3_concat")
+    if safeHeads >= 4
+        int h4 = _attentionHead(block, q, k, v, headDim * 3, headDim, causal, prefix + "_h4")
+        mergedContext := block.concatCols(mergedContext, h4, prefix + "_h4_concat")
+    if safeHeads >= 5
+        int h5 = _attentionHead(block, q, k, v, headDim * 4, headDim, causal, prefix + "_h5")
+        mergedContext := block.concatCols(mergedContext, h5, prefix + "_h5_concat")
+    if safeHeads >= 6
+        int h6 = _attentionHead(block, q, k, v, headDim * 5, headDim, causal, prefix + "_h6")
+        mergedContext := block.concatCols(mergedContext, h6, prefix + "_h6_concat")
+    if safeHeads >= 7
+        int h7 = _attentionHead(block, q, k, v, headDim * 6, headDim, causal, prefix + "_h7")
+        mergedContext := block.concatCols(mergedContext, h7, prefix + "_h7_concat")
+    if safeHeads >= 8
+        int h8 = _attentionHead(block, q, k, v, headDim * 7, headDim, causal, prefix + "_h8")
+        mergedContext := block.concatCols(mergedContext, h8, prefix + "_h8_concat")
+    _linear(block, mergedContext, safeModelDim, safeModelDim, nl.InitKind.xavierUniform, prefix + "_output")
+
+
+// @function                Stores a new transition experience into the replay buffer for future sampling.
+// @param self              (PrioritizedReplayBuffer) The buffer to push the experience into.
+// @param featureRowArray   (array<float>) A flat array of feature values for a single experience.
+// @param targetRowArray    (array<float>) A flat array of target values for a single experience.
+// @param priority          (float) The initial sampling priority weight for this experience. Defaults to 1.0.
+// @returns                 (PrioritizedReplayBuffer) The buffer, updated in place.
+export method pushExperience(PrioritizedReplayBuffer self, array<float> featureRowArray, array<float> targetRowArray, float priority = 1.0) =>
+    if featureRowArray.size() != self.featureCount
+        runtime.error("PrioritizedReplayBuffer feature size mismatch.")
+    if targetRowArray.size() != self.targetCount
+        runtime.error("PrioritizedReplayBuffer target size mismatch.")
+    bool full = self.rowCount >= self.maxRows
+    int rowIndex = full ? self.headIndex : self.rowCount
+    if full
+        for featureIndex = 0 to self.featureCount - 1
+            self.featureStoreArray.set(rowIndex * self.featureCount + featureIndex, featureRowArray.get(featureIndex))
+        for targetIndex = 0 to self.targetCount - 1
+            self.targetStoreArray.set(rowIndex * self.targetCount + targetIndex, targetRowArray.get(targetIndex))
+        self.priorityArray.set(rowIndex, _safePriority(priority))
+        self.headIndex := (self.headIndex + 1) % self.maxRows
+    else
+        for featureIndex = 0 to self.featureCount - 1
+            self.featureStoreArray.push(featureRowArray.get(featureIndex))
+        for targetIndex = 0 to self.targetCount - 1
+            self.targetStoreArray.push(targetRowArray.get(targetIndex))
+        self.priorityArray.push(_safePriority(priority))
+        self.rowCount += 1
+    self
+
+
+// @function                Updates the priority weight of a specific experience index based on temporal difference errors.
+// @param self              (PrioritizedReplayBuffer) The buffer whose priority entry to modify.
+// @param index             (int) The logical index of the experience to update (as returned by sampleBatch).
+// @param priority          (float) The new priority weight, typically based on the latest TD error.
+// @returns                 (PrioritizedReplayBuffer) The buffer, updated in place.
+export method updatePriority(PrioritizedReplayBuffer self, int index, float priority) =>
+    if index >= 0 and index < self.rowCount
+        int physicalRow = _replayPhysicalRow(index, self.rowCount, self.maxRows, self.headIndex)
+        self.priorityArray.set(physicalRow, _safePriority(priority))
+    self
+
+
+// @function                Returns every stored replay row as a chronological training batch.
+// @param self              (PrioritizedReplayBuffer) The buffer to convert.
+// @returns                 (nl.Batch) A training batch containing all stored experiences in chronological order.
+export method toBatch(PrioritizedReplayBuffer self) =>
+    array<float> featureValuesArray = array.new<float>()
+    array<float> targetValuesArray = array.new<float>()
+    for logicalRow = 0 to self.rowCount - 1
+        int physicalRow = _replayPhysicalRow(logicalRow, self.rowCount, self.maxRows, self.headIndex)
+        for featureIndex = 0 to self.featureCount - 1
+            featureValuesArray.push(self.featureStoreArray.get(physicalRow * self.featureCount + featureIndex))
+        for targetIndex = 0 to self.targetCount - 1
+            targetValuesArray.push(self.targetStoreArray.get(physicalRow * self.targetCount + targetIndex))
+    _replayBatch(featureValuesArray, targetValuesArray, self.rowCount, self.featureCount, self.targetCount)
+
+
+// @function                Samples replay rows according to priority and returns the batch, logical indices, and importance weights.
+// @param self              (PrioritizedReplayBuffer) The buffer to sample from.
+// @param batchSize         (simple int) The number of experiences to draw in the sample.
+// @param alpha             (float) Controls how much priority affects sampling probability. 0.0 = uniform, 1.0 = fully prioritized.
+// @param beta              (float) Controls importance-sampling weight correction. Higher values reduce bias.
+// @param seed              (simple int) A deterministic seed to make sampling reproducible across runs.
+// @returns                 (PrioritizedReplaySample) A sample containing the batch, selected indices, and normalized importance weights.
+export method sampleBatch(PrioritizedReplayBuffer self, simple int batchSize, float alpha = 0.6, float beta = 0.4, simple int seed = 0) =>
+    int rows = math.min(math.max(batchSize, 0), self.rowCount)
+    array<float> featureValuesArray = array.new<float>()
+    array<float> targetValuesArray = array.new<float>()
+    array<int> indexArray = array.new<int>()
+    array<float> weightArray = array.new<float>()
+    float safeAlpha = math.max(alpha, 0.0)
+    float safeBeta = math.max(beta, 0.0)
+    float totalPriority = 0.0
+    for logicalRow = 0 to self.rowCount - 1
+        int physicalRow = _replayPhysicalRow(logicalRow, self.rowCount, self.maxRows, self.headIndex)
+        totalPriority += math.pow(_safePriority(self.priorityArray.get(physicalRow)), safeAlpha)
+    float maxWeight = 0.0
+    int offsetSteps = rows > 0 ? math.abs(seed) % rows : 0
+    for drawIndex = 0 to rows - 1
+        float fraction = rows > 0 ? (drawIndex + 0.5) / rows + offsetSteps / rows : 0.0
+        fraction -= math.floor(fraction)
+        float threshold = fraction * totalPriority
+        float cumulative = 0.0
+        int selectedLogicalRow = math.max(self.rowCount - 1, 0)
+        for logicalRow = 0 to self.rowCount - 1
+            int physicalRow = _replayPhysicalRow(logicalRow, self.rowCount, self.maxRows, self.headIndex)
+            cumulative += math.pow(_safePriority(self.priorityArray.get(physicalRow)), safeAlpha)
+            if cumulative >= threshold
+                selectedLogicalRow := logicalRow
+                break
+        int selectedPhysicalRow = _replayPhysicalRow(selectedLogicalRow, self.rowCount, self.maxRows, self.headIndex)
+        for featureIndex = 0 to self.featureCount - 1
+            featureValuesArray.push(self.featureStoreArray.get(selectedPhysicalRow * self.featureCount + featureIndex))
+        for targetIndex = 0 to self.targetCount - 1
+            targetValuesArray.push(self.targetStoreArray.get(selectedPhysicalRow * self.targetCount + targetIndex))
+        float selectedPriority = math.pow(_safePriority(self.priorityArray.get(selectedPhysicalRow)), safeAlpha)
+        float probability = totalPriority > 0.0 ? selectedPriority / totalPriority : 1.0
+        float weight = math.pow(math.max(self.rowCount * probability, 1e-7), -safeBeta)
+        maxWeight := math.max(maxWeight, weight)
+        indexArray.push(selectedLogicalRow)
+        weightArray.push(weight)
+    if maxWeight > 0.0
+        for i = 0 to weightArray.size() - 1
+            weightArray.set(i, weightArray.get(i) / maxWeight)
+    _replaySample(self, featureValuesArray, targetValuesArray, indexArray, weightArray, rows)
+
+
+// @function                Checks if the buffer has accumulated sufficient experiences to begin sampling operations.
+// @param self              (PrioritizedReplayBuffer) The buffer to check.
+// @param minRows           (simple int) The minimum number of stored experiences required. Defaults to 1.
+// @returns                 (bool) True if the buffer holds at least minRows experiences.
+export method ready(PrioritizedReplayBuffer self, simple int minRows = 1) =>
+    self.rowCount >= math.max(minRows, 0)
+
+
+// @function                Returns the current number of experiences stored within the buffer.
+// @param self              (PrioritizedReplayBuffer) The buffer to query.
+// @returns                 (int) The current number of stored experiences.
+export method size(PrioritizedReplayBuffer self) =>
+    self.rowCount
+
+
+// @function                Clears all stored replay rows, priorities, and ring-buffer position.
+// @param self              (PrioritizedReplayBuffer) The buffer to reset.
+// @returns                 (PrioritizedReplayBuffer) The buffer, now empty and ready to accept new data.
+export method clear(PrioritizedReplayBuffer self) =>
+    self.featureStoreArray.clear()
+    self.targetStoreArray.clear()
+    self.priorityArray.clear()
+    self.rowCount := 0
+    self.headIndex := 0
+    self
+
+
+// @function                Appends sinusoidal position features for attention-style models.
+// @param self              (nl.FeatureBuilder) The feature builder to append encoding values to.
+// @param position          (simple int) The token or time-step index to encode.
+// @param dimensions        (simple int) The total number of encoding dimensions to generate (should match modelDim).
+// @param maxPeriod         (float) The maximum wavelength period for the sinusoidal functions. Defaults to 10000.
+// @param featurePrefix     (string) A name prefix for each generated feature entry.
+// @returns                 (nl.FeatureBuilder) The feature builder with positional values appended.
+export method pushPositionalEncoding(nl.FeatureBuilder self, simple int position, simple int dimensions, float maxPeriod = 10000.0, string featurePrefix = "pos") =>
+    int safeDims = math.max(dimensions, 1)
+    float safePeriod = math.max(maxPeriod, 1.0)
+    for dimIndex = 0 to safeDims - 1
+        int pairIndex = int(math.floor(dimIndex / 2))
+        float exponent = safeDims > 0 ? (2.0 * pairIndex) / safeDims : 0.0
+        float angle = position / math.pow(safePeriod, exponent)
+        float value = dimIndex % 2 == 0 ? math.sin(angle) : math.cos(angle)
+        self.push(value, featurePrefix + "_" + str.tostring(position) + "_" + str.tostring(dimIndex))
+    self
+
+
+// @function                Builds a dense projection head that maps features directly to action-value outputs.
+// @param inputFeatures     (int) The number of input features entering the head.
+// @param actionCount       (simple int) The number of discrete actions to produce Q-values for.
+// @param activationKind    (nl.ActivationKind) Activation applied to the action-value projection before returning Q-values.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed Q-head projection graph block.
+export qHeadBlock(int inputFeatures, simple int actionCount, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "q_head") =>
+    int safeActions = math.max(actionCount, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int z = _linear(block, x, math.max(inputFeatures, 1), safeActions, _defaultInit(activationKind), "q")
+    int y = _maybeActivate(block, z, activationKind, "q_output")
+    block.output(y, safeActions)
+
+
+// @function                Constructs a dueling Q-network head, separating state-value and advantage-action estimations.
+// @param inputFeatures     (int) The number of input features entering the head.
+// @param hiddenUnits       (simple int) The number of hidden units in each value and advantage stream.
+// @param actionCount       (simple int) The number of discrete actions to produce Q-values for.
+// @param activationKind    (nl.ActivationKind) Activation applied to the hidden value and advantage projections before producing Q-values.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed dueling Q-head graph block.
+export duelingQHeadBlock(int inputFeatures, simple int hiddenUnits, simple int actionCount, nl.ActivationKind activationKind = nl.ActivationKind.relu, string name = "dueling_q_head") =>
+    int safeInput = math.max(inputFeatures, 1)
+    int safeHidden = math.max(hiddenUnits, 1)
+    int safeActions = math.max(actionCount, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int vHidden = _maybeActivate(block, _linear(block, x, safeInput, safeHidden, _defaultInit(activationKind), "value_hidden"), activationKind, "value_act")
+    int value = _linear(block, vHidden, safeHidden, 1, nl.InitKind.xavierUniform, "value")
+    int aHidden = _maybeActivate(block, _linear(block, x, safeInput, safeHidden, _defaultInit(activationKind), "adv_hidden"), activationKind, "adv_act")
+    int advantage = _linear(block, aHidden, safeHidden, safeActions, nl.InitKind.xavierUniform, "advantage")
+    int advMean = block.scale(block.reduceCols(advantage, "advantage_sum"), 1.0 / safeActions, "advantage_mean")
+    int centeredAdvantage = block.subtract(advantage, advMean, "centered_advantage")
+    int qValues = block.add(centeredAdvantage, value, "q_values")
+    block.output(qValues, safeActions)
+
+
+// @function                Constructs a residual dense block with skip connections and layer normalization.
+// @param inputFeatures     (int) The number of input and output features (must match for the residual connection).
+// @param hiddenUnits       (simple int) Hidden width used by the residual branch.
+// @param activationKind    (nl.ActivationKind) Activation used in the residual branch hidden layer.
+// @param dropoutRate       (float) Dropout rate applied inside the block. 0.0 disables dropout.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed residual dense graph block.
+export residualDenseBlock(int inputFeatures, simple int hiddenUnits, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, string name = "residual_dense") =>
+    int safeFeatures = math.max(inputFeatures, 1)
+    int safeHidden = math.max(hiddenUnits, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int hPre = _linear(block, x, safeFeatures, safeHidden, _defaultInit(activationKind), "hidden")
+    int h = _maybeActivate(block, hPre, activationKind, "hidden_act")
+    int hDrop = dropoutRate > 0.0 ? block.dropout(h, dropoutRate, "hidden_dropout") : h
+    int proj = _linear(block, hDrop, safeHidden, safeFeatures, nl.InitKind.xavierUniform, "project")
+    int residual = block.add(x, proj, "residual")
+    int y = block.layerNorm(residual, 1e-7, "output_norm")
+    block.output(y, safeFeatures)
+
+
+// @function                Appends a 1D convolutional layer for extracting local temporal patterns from flattened sequences.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param filters           (simple int) The number of output convolution filters.
+// @param kernelSize        (simple int) The width of the sliding convolution window.
+// @param stride            (simple int) The step size between convolution applications.
+// @param activationKind    (nl.ActivationKind) Activation applied after each convolution filter output.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed Conv1D graph block.
+export conv1dBlock(simple int timeSteps, simple int featureCount, simple int filters, simple int kernelSize, simple int stride = 1, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "conv1d") =>
+    int safeTimeSteps = math.max(timeSteps, 1)
+    int safeFeatureCount = math.max(featureCount, 1)
+    int safeFilters = math.max(filters, 1)
+    int safeKernel = math.max(kernelSize, 1)
+    int safeStride = math.max(stride, 1)
+    int outputSteps = _conv1dOutputSteps(safeTimeSteps, safeKernel, safeStride)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int kernel = block.param(safeKernel * safeFeatureCount, safeFilters, _defaultInit(activationKind), "kernel")
+    int bias = block.param(1, safeFilters, nl.InitKind.zeros, "bias")
+    int z = block.conv1d(x, kernel, bias, safeTimeSteps, safeFeatureCount, safeKernel, safeStride, "conv")
+    int y = _maybeActivate(block, z, activationKind, "conv_output")
+    block.output(y, outputSteps * safeFilters)
+
+
+// @function                Builds a stack of dilated temporal convolutional networks to capture long-range dependencies.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param filters           (simple int) The number of output convolution filters.
+// @param kernelSize        (simple int) The width of the sliding convolution window.
+// @param layers            (simple int) The number of stacked convolutional layers to apply.
+// @param stride            (simple int) The step size between convolution applications.
+// @param activationKind    (nl.ActivationKind) Activation applied after each convolution layer output.
+// @param dropoutRate       (float) Dropout rate applied after convolution activations. 0.0 disables dropout.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed temporal convolution stack graph block.
+export temporalConvStackBlock(simple int timeSteps, simple int featureCount, simple int filters, simple int kernelSize, simple int layers = 2, simple int stride = 1, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, string name = "temporal_conv_stack") =>
+    int safeTimeSteps = math.max(timeSteps, 1)
+    int safeFeatureCount = math.max(featureCount, 1)
+    int safeFilters = math.max(filters, 1)
+    int safeKernel = math.max(kernelSize, 1)
+    int safeStride = math.max(stride, 1)
+    int safeLayers = math.max(layers, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int current = block.input("x")
+    int currentSteps = safeTimeSteps
+    int currentFeatures = safeFeatureCount
+    for layerIndex = 0 to safeLayers - 1
+        string layerName = "conv" + str.tostring(layerIndex + 1)
+        int kernel = block.param(safeKernel * currentFeatures, safeFilters, _defaultInit(activationKind), layerName + "_kernel")
+        int bias = block.param(1, safeFilters, nl.InitKind.zeros, layerName + "_bias")
+        int z = block.conv1d(current, kernel, bias, currentSteps, currentFeatures, safeKernel, safeStride, layerName)
+        int a = _maybeActivate(block, z, activationKind, layerName + "_act")
+        current := dropoutRate > 0.0 ? block.dropout(a, dropoutRate, layerName + "_dropout") : a
+        currentSteps := _conv1dOutputSteps(currentSteps, safeKernel, safeStride)
+        currentFeatures := safeFilters
+    block.output(current, currentSteps * currentFeatures)
+
+
+// @function                Performs global average pooling across the temporal dimension, reducing sequence lengths to single feature vectors.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed global average pooling graph block.
+export globalAvgPool1dBlock(simple int timeSteps, simple int featureCount, string name = "global_avg_pool1d") =>
+    int safeTimeSteps = math.max(timeSteps, 1)
+    int safeFeatureCount = math.max(featureCount, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int y = block.globalAvgPool1d(x, safeTimeSteps, safeFeatureCount, "output")
+    block.output(y, safeFeatureCount)
+
+
+// @function                Executes global max pooling across the temporal dimension to extract the most prominent sequence features.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed global max pooling graph block.
+export globalMaxPool1dBlock(simple int timeSteps, simple int featureCount, string name = "global_max_pool1d") =>
+    int safeTimeSteps = math.max(timeSteps, 1)
+    int safeFeatureCount = math.max(featureCount, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int y = block.globalMaxPool1d(x, safeTimeSteps, safeFeatureCount, "output")
+    block.output(y, safeFeatureCount)
+
+
+// @function                Appends a Long Short-Term Memory recurrent layer to process sequential data and mitigate vanishing gradients.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param units             (simple int) Number of recurrent hidden units.
+// @param activationKind    (nl.ActivationKind) Activation applied to the final LSTM output.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed LSTM graph block.
+export lstmBlock(simple int timeSteps, simple int featureCount, simple int units, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "lstm") =>
+    int safeTimeSteps = math.max(timeSteps, 1)
+    int safeFeatureCount = math.max(featureCount, 1)
+    int safeUnits = math.max(units, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int kernel = block.param(safeFeatureCount + safeUnits, 4 * safeUnits, _defaultInit(nl.ActivationKind.tanh), "kernel")
+    int bias = block.param(1, 4 * safeUnits, nl.InitKind.zeros, "bias")
+    int z = block.scanLstm(x, kernel, bias, safeTimeSteps, safeFeatureCount, safeUnits, "scan")
+    int y = _maybeActivate(block, z, activationKind, "lstm_output")
+    block.output(y, safeUnits)
+
+
+// @function                Appends a Gated Recurrent Unit layer to process sequences with a streamlined gating mechanism.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param units             (simple int) Number of recurrent hidden units.
+// @param activationKind    (nl.ActivationKind) Activation applied to the final GRU output.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed GRU graph block.
+export gruBlock(simple int timeSteps, simple int featureCount, simple int units, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "gru") =>
+    int safeTimeSteps = math.max(timeSteps, 1)
+    int safeFeatureCount = math.max(featureCount, 1)
+    int safeUnits = math.max(units, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int kernel = block.param(safeFeatureCount + safeUnits, 3 * safeUnits, _defaultInit(nl.ActivationKind.tanh), "kernel")
+    int bias = block.param(1, 3 * safeUnits, nl.InitKind.zeros, "bias")
+    int z = block.scanGru(x, kernel, bias, safeTimeSteps, safeFeatureCount, safeUnits, "scan")
+    int y = _maybeActivate(block, z, activationKind, "gru_output")
+    block.output(y, safeUnits)
+
+
+// @function                Constructs a single-head self-attention layer to compute contextual feature dependencies within sequences.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed self-attention graph block.
+export selfAttentionBlock(simple int modelDim, bool causal = false, string name = "self_attention") =>
+    simple int safeModelDim = math.max(modelDim, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int q = _linear(block, x, safeModelDim, safeModelDim, nl.InitKind.xavierUniform, "query")
+    int k = _linear(block, x, safeModelDim, safeModelDim, nl.InitKind.xavierUniform, "key")
+    int v = _linear(block, x, safeModelDim, safeModelDim, nl.InitKind.xavierUniform, "value")
+    int scores = block.attentionScore(q, k, causal, "scores")
+    int weights = block.softmax(scores, "weights")
+    int context = block.attentionApply(weights, v, "context")
+    int y = _linear(block, context, safeModelDim, safeModelDim, nl.InitKind.xavierUniform, "output")
+    block.output(y, safeModelDim)
+
+
+// @function                Builds a multi-head self-attention mechanism, allowing the model to jointly attend to information from different representation subspaces.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param headCount         (simple int) The number of parallel attention heads. modelDim must be divisible by this value.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed multi-head self-attention graph block.
+export multiHeadSelfAttentionBlock(simple int modelDim, simple int headCount = 2, bool causal = false, string name = "multi_head_self_attention") =>
+    simple int safeModelDim = math.max(modelDim, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int y = _multiHeadAttention(block, x, x, x, safeModelDim, headCount, causal, "mha")
+    block.output(y, safeModelDim)
+
+
+// @function                Instantiates a cross-attention block, aligning representations between separate query and key-value sequences.
+// @param queryRows         (simple int) The number of query token rows in the packed input.
+// @param memoryRows        (simple int) The number of memory (key/value) rows following the query rows.
+// @param modelDim          (simple int) The embedding dimension of each token or feature vector.
+// @param headCount         (simple int) Number of attention heads to build. modelDim must be divisible by this value.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed cross-attention graph block.
+export crossAttentionBlock(simple int queryRows, simple int memoryRows, simple int modelDim, simple int headCount = 1, string name = "cross_attention") =>
+    simple int safeQueryRows = math.max(queryRows, 1)
+    simple int safeMemoryRows = math.max(memoryRows, 1)
+    simple int safeModelDim = math.max(modelDim, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int query = block.sliceRows(x, 0, safeQueryRows, "query_rows")
+    int memory = block.sliceRows(x, safeQueryRows, safeMemoryRows, "memory_rows")
+    int y = _multiHeadAttention(block, query, memory, memory, safeModelDim, headCount, false, "cross")
+    block.output(y, safeModelDim)
+
+
+// @function                Appends a full transformer encoder block consisting of multi-head attention and position-wise feed-forward networks.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param ffMultiplier      (simple int) The expansion factor for the feed-forward hidden dimension (hidden = modelDim * ffMultiplier).
+// @param activationKind    (nl.ActivationKind) Activation used inside the feed-forward branch.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @param dropoutRate       (float) Dropout rate applied after attention and feed-forward sublayers. 0.0 disables dropout.
+// @param headCount         (simple int) Number of attention heads to build. modelDim must be divisible by this value.
+// @returns                 (nl.GraphBlock) The constructed transformer encoder graph block.
+export transformerEncoderBlock(simple int modelDim, bool causal = false, simple int ffMultiplier = 4, nl.ActivationKind activationKind = nl.ActivationKind.relu, string name = "transformer_encoder", float dropoutRate = 0.0, simple int headCount = 1) =>
+    simple int safeModelDim = math.max(modelDim, 1)
+    simple int hiddenDim = safeModelDim * math.max(ffMultiplier, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int attnProj = _multiHeadAttention(block, x, x, x, safeModelDim, headCount, causal, "attention")
+    int attnDrop = dropoutRate > 0.0 ? block.dropout(attnProj, dropoutRate, "attention_dropout") : attnProj
+    int attnResidual = block.layerNorm(block.add(x, attnDrop, "attention_residual"), 1e-7, "attention_norm")
+    int ffPre = _linear(block, attnResidual, safeModelDim, hiddenDim, _defaultInit(activationKind), "ff1")
+    int ff = _maybeActivate(block, ffPre, activationKind, "ff_activation")
+    int ffDrop = dropoutRate > 0.0 ? block.dropout(ff, dropoutRate, "ff_dropout") : ff
+    int ffProj = _linear(block, ffDrop, hiddenDim, safeModelDim, nl.InitKind.xavierUniform, "ff2")
+    int ffProjDrop = dropoutRate > 0.0 ? block.dropout(ffProj, dropoutRate, "ff_output_dropout") : ffProj
+    int y = block.layerNorm(block.add(attnResidual, ffProjDrop, "ff_residual"), 1e-7, "output_norm")
+    block.output(y, safeModelDim)
+
+
+// @function                Builds a transformer decoder block to process sequence-to-sequence mappings using causal masking.
+// @param targetRows        (simple int) The number of target (decoder) rows in the packed input.
+// @param memoryRows        (simple int) The number of memory (encoder) rows following the target rows.
+// @param modelDim          (simple int) The embedding dimension of each token or feature vector.
+// @param headCount         (simple int) The number of parallel attention heads. modelDim must be divisible by this value.
+// @param ffMultiplier      (simple int) The expansion factor for the feed-forward hidden dimension.
+// @param activationKind    (nl.ActivationKind) Activation used inside the feed-forward branch.
+// @param dropoutRate       (float) Dropout rate applied after attention and feed-forward sublayers. 0.0 disables dropout.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.GraphBlock) The constructed transformer decoder graph block.
+export transformerDecoderBlock(simple int targetRows, simple int memoryRows, simple int modelDim, simple int headCount = 1, simple int ffMultiplier = 4, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, string name = "transformer_decoder") =>
+    simple int safeTargetRows = math.max(targetRows, 1)
+    simple int safeMemoryRows = math.max(memoryRows, 1)
+    simple int safeModelDim = math.max(modelDim, 1)
+    simple int hiddenDim = safeModelDim * math.max(ffMultiplier, 1)
+    nl.GraphBlock block = nl.graphBlock(name)
+    int x = block.input("x")
+    int target = block.sliceRows(x, 0, safeTargetRows, "target_rows")
+    int memory = block.sliceRows(x, safeTargetRows, safeMemoryRows, "memory_rows")
+    int selfAttn = _multiHeadAttention(block, target, target, target, safeModelDim, headCount, true, "self_attention")
+    int selfDrop = dropoutRate > 0.0 ? block.dropout(selfAttn, dropoutRate, "self_attention_dropout") : selfAttn
+    int selfNorm = block.layerNorm(block.add(target, selfDrop, "self_attention_residual"), 1e-7, "self_attention_norm")
+    int crossAttn = _multiHeadAttention(block, selfNorm, memory, memory, safeModelDim, headCount, false, "cross_attention")
+    int crossDrop = dropoutRate > 0.0 ? block.dropout(crossAttn, dropoutRate, "cross_attention_dropout") : crossAttn
+    int crossNorm = block.layerNorm(block.add(selfNorm, crossDrop, "cross_attention_residual"), 1e-7, "cross_attention_norm")
+    int ffPre = _linear(block, crossNorm, safeModelDim, hiddenDim, _defaultInit(activationKind), "ff1")
+    int ff = _maybeActivate(block, ffPre, activationKind, "ff_activation")
+    int ffDrop = dropoutRate > 0.0 ? block.dropout(ff, dropoutRate, "ff_dropout") : ff
+    int ffProj = _linear(block, ffDrop, hiddenDim, safeModelDim, nl.InitKind.xavierUniform, "ff2")
+    int ffProjDrop = dropoutRate > 0.0 ? block.dropout(ffProj, dropoutRate, "ff_output_dropout") : ffProj
+    int y = block.layerNorm(block.add(crossNorm, ffProjDrop, "ff_residual"), 1e-7, "output_norm")
+    block.output(y, safeModelDim)
+
+
+// @function                Appends a residual dense block with skip connections to the model architecture.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param hiddenUnits       (simple int) Hidden width used by the residual branch.
+// @param activationKind    (nl.ActivationKind) Activation used in the residual branch hidden layer.
+// @param dropoutRate       (float) Dropout rate applied inside the block. 0.0 disables dropout.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method residualDense(nl.Sequential model, simple int hiddenUnits, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, string name = "residual_dense") =>
+    model.block(residualDenseBlock(_modelOutputFeatures(model), hiddenUnits, activationKind, dropoutRate, name))
+
+
+// @function                Constructs a dueling Q-network head, separating state-value and advantage-action estimations.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param hiddenUnits       (simple int) Hidden width used by the value and advantage streams.
+// @param actionCount       (simple int) The number of discrete actions to produce Q-values for.
+// @param activationKind    (nl.ActivationKind) Activation applied to the hidden value and advantage projections before producing Q-values.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method duelingQHead(nl.Sequential model, simple int hiddenUnits, simple int actionCount, nl.ActivationKind activationKind = nl.ActivationKind.relu, string name = "dueling_q_head") =>
+    model.block(duelingQHeadBlock(_modelOutputFeatures(model), hiddenUnits, actionCount, activationKind, name))
+
+
+// @function                Appends a 1D convolutional layer for extracting local temporal patterns from flattened sequences.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param filters           (simple int) The number of output convolution filters.
+// @param kernelSize        (simple int) The width of the sliding convolution window.
+// @param stride            (simple int) The step size between convolution applications.
+// @param activationKind    (nl.ActivationKind) Activation applied after each convolution filter output.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+// @example
+// model.conv1d(10, 4, 16, 3)
+export method conv1d(nl.Sequential model, simple int timeSteps, simple int featureCount, simple int filters, simple int kernelSize, simple int stride = 1, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "conv1d") =>
+    int expectedFeatures = math.max(timeSteps, 1) * math.max(featureCount, 1)
+    _requireModelFeatures(model, expectedFeatures, "conv1d")
+    model.block(conv1dBlock(timeSteps, featureCount, filters, kernelSize, stride, activationKind, name))
+
+
+// @function                Builds a stack of dilated temporal convolutional networks to capture long-range dependencies.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param filters           (simple int) The number of output convolution filters.
+// @param kernelSize        (simple int) The width of the sliding convolution window.
+// @param layers            (simple int) The number of stacked convolutional layers to apply.
+// @param stride            (simple int) The step size between convolution applications.
+// @param activationKind    (nl.ActivationKind) Activation applied after each convolution layer output.
+// @param dropoutRate       (float) Dropout rate applied after convolution activations. 0.0 disables dropout.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method temporalConvStack(nl.Sequential model, simple int timeSteps, simple int featureCount, simple int filters, simple int kernelSize, simple int layers = 2, simple int stride = 1, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, string name = "temporal_conv_stack") =>
+    int expectedFeatures = math.max(timeSteps, 1) * math.max(featureCount, 1)
+    _requireModelFeatures(model, expectedFeatures, "temporalConvStack")
+    model.block(temporalConvStackBlock(timeSteps, featureCount, filters, kernelSize, layers, stride, activationKind, dropoutRate, name))
+
+
+// @function                Performs global average pooling across the temporal dimension, reducing sequence lengths to single feature vectors.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method globalAvgPool1d(nl.Sequential model, simple int timeSteps, simple int featureCount, string name = "global_avg_pool1d") =>
+    int expectedFeatures = math.max(timeSteps, 1) * math.max(featureCount, 1)
+    _requireModelFeatures(model, expectedFeatures, "globalAvgPool1d")
+    model.block(globalAvgPool1dBlock(timeSteps, featureCount, name))
+
+
+// @function                Executes global max pooling across the temporal dimension to extract the most prominent sequence features.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method globalMaxPool1d(nl.Sequential model, simple int timeSteps, simple int featureCount, string name = "global_max_pool1d") =>
+    int expectedFeatures = math.max(timeSteps, 1) * math.max(featureCount, 1)
+    _requireModelFeatures(model, expectedFeatures, "globalMaxPool1d")
+    model.block(globalMaxPool1dBlock(timeSteps, featureCount, name))
+
+
+// @function                Appends a Long Short-Term Memory recurrent layer to process sequential data and mitigate vanishing gradients.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param units             (simple int) Number of recurrent hidden units.
+// @param activationKind    (nl.ActivationKind) Activation applied to the final LSTM output.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+// @example
+// model.lstm(10, 4, 64)
+export method lstm(nl.Sequential model, simple int timeSteps, simple int featureCount, simple int units, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "lstm") =>
+    int expectedFeatures = math.max(timeSteps, 1) * math.max(featureCount, 1)
+    _requireModelFeatures(model, expectedFeatures, "lstm")
+    model.block(lstmBlock(timeSteps, featureCount, units, activationKind, name))
+
+
+// @function                Appends a Gated Recurrent Unit layer to process sequences with a streamlined gating mechanism.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param timeSteps         (simple int) The number of sequential historical steps.
+// @param featureCount      (simple int) The number of features per time step in the flattened input.
+// @param units             (simple int) Number of recurrent hidden units.
+// @param activationKind    (nl.ActivationKind) Activation applied to the final GRU output.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method gru(nl.Sequential model, simple int timeSteps, simple int featureCount, simple int units, nl.ActivationKind activationKind = nl.ActivationKind.linear, string name = "gru") =>
+    int expectedFeatures = math.max(timeSteps, 1) * math.max(featureCount, 1)
+    _requireModelFeatures(model, expectedFeatures, "gru")
+    model.block(gruBlock(timeSteps, featureCount, units, activationKind, name))
+
+
+// @function                Constructs a single-head self-attention layer to compute contextual feature dependencies within sequences.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method selfAttention(nl.Sequential model, simple int modelDim, bool causal = false, string name = "self_attention") =>
+    _requireModelFeatures(model, math.max(modelDim, 1), "selfAttention")
+    model.block(selfAttentionBlock(modelDim, causal, name))
+
+
+// @function                Builds a multi-head self-attention mechanism, allowing the model to jointly attend to information from different representation subspaces.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param headCount         (simple int) The number of parallel attention heads. modelDim must be divisible by this value.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method multiHeadSelfAttention(nl.Sequential model, simple int modelDim, simple int headCount = 2, bool causal = false, string name = "multi_head_self_attention") =>
+    _requireModelFeatures(model, math.max(modelDim, 1), "multiHeadSelfAttention")
+    model.block(multiHeadSelfAttentionBlock(modelDim, headCount, causal, name))
+
+
+// @function                Instantiates a cross-attention block, aligning representations between separate query and key-value sequences.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param queryRows         (simple int) The number of query token rows in the packed input.
+// @param memoryRows        (simple int) The number of memory (key/value) rows following the query rows.
+// @param modelDim          (simple int) The embedding dimension of each token or feature vector.
+// @param headCount         (simple int) Number of attention heads to build. modelDim must be divisible by this value.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method crossAttention(nl.Sequential model, simple int queryRows, simple int memoryRows, simple int modelDim, simple int headCount = 1, string name = "cross_attention") =>
+    _requireModelFeatures(model, math.max(modelDim, 1), "crossAttention")
+    model.block(crossAttentionBlock(queryRows, memoryRows, modelDim, headCount, name))
+
+
+// @function                Appends a full transformer encoder block consisting of multi-head attention and position-wise feed-forward networks.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param ffMultiplier      (simple int) The expansion factor for the feed-forward hidden dimension.
+// @param activationKind    (nl.ActivationKind) Activation used inside the feed-forward branch.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @param dropoutRate       (float) Dropout rate applied after attention and feed-forward sublayers. 0.0 disables dropout.
+// @param headCount         (simple int) Number of attention heads to build. modelDim must be divisible by this value.
+// @returns                 (nl.Sequential) The model with the new block appended.
+// @example
+// model.transformerEncoder(16)
+export method transformerEncoder(nl.Sequential model, simple int modelDim, bool causal = false, simple int ffMultiplier = 4, nl.ActivationKind activationKind = nl.ActivationKind.relu, string name = "transformer_encoder", float dropoutRate = 0.0, simple int headCount = 1) =>
+    _requireModelFeatures(model, math.max(modelDim, 1), "transformerEncoder")
+    model.block(transformerEncoderBlock(modelDim, causal, ffMultiplier, activationKind, name, dropoutRate, headCount))
+
+
+// @function                Appends a stack of transformer encoder blocks to the model architecture.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param modelDim          (simple int) The embedding dimension of each input token or feature vector.
+// @param layers            (simple int) The number of stacked encoder layers to add.
+// @param causal            (bool) When true, applies a causal mask to prevent tokens from attending to future positions.
+// @param ffMultiplier      (simple int) The expansion factor for the feed-forward hidden dimension.
+// @param activationKind    (nl.ActivationKind) Activation used inside the feed-forward branch.
+// @param dropoutRate       (float) Dropout rate applied after attention and feed-forward sublayers. 0.0 disables dropout.
+// @param headCount         (simple int) Number of attention heads to build. modelDim must be divisible by this value.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method transformerEncoderStack(nl.Sequential model, simple int modelDim, simple int layers = 2, bool causal = false, simple int ffMultiplier = 4, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, simple int headCount = 1, string name = "transformer_encoder_stack") =>
+    _requireModelFeatures(model, math.max(modelDim, 1), "transformerEncoderStack")
+    int safeLayers = math.max(layers, 1)
+    nl.Sequential result = model
+    for layerIndex = 0 to safeLayers - 1
+        result := result.block(transformerEncoderBlock(modelDim, causal, ffMultiplier, activationKind, name + "_" + str.tostring(layerIndex + 1), dropoutRate, headCount))
+    result
+
+
+// @function                Builds a transformer decoder block to process sequence-to-sequence mappings using causal masking.
+// @param model             (nl.Sequential) The model to append the block to.
+// @param targetRows        (simple int) The number of target (decoder) rows in the packed input.
+// @param memoryRows        (simple int) The number of memory (encoder) rows following the target rows.
+// @param modelDim          (simple int) The embedding dimension of each token or feature vector.
+// @param headCount         (simple int) The number of parallel attention heads. modelDim must be divisible by this value.
+// @param ffMultiplier      (simple int) The expansion factor for the feed-forward hidden dimension.
+// @param activationKind    (nl.ActivationKind) Activation used inside the feed-forward branch.
+// @param dropoutRate       (float) Dropout rate applied after attention and feed-forward sublayers. 0.0 disables dropout.
+// @param name              (string) Optional block name recorded for diagnostics.
+// @returns                 (nl.Sequential) The model with the new block appended.
+export method transformerDecoder(nl.Sequential model, simple int targetRows, simple int memoryRows, simple int modelDim, simple int headCount = 1, simple int ffMultiplier = 4, nl.ActivationKind activationKind = nl.ActivationKind.relu, float dropoutRate = 0.0, string name = "transformer_decoder") =>
+    _requireModelFeatures(model, math.max(modelDim, 1), "transformerDecoder")
+    model.block(transformerDecoderBlock(targetRows, memoryRows, modelDim, headCount, ffMultiplier, activationKind, dropoutRate, name))

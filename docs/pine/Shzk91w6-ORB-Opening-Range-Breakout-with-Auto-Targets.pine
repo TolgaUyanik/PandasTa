@@ -1,0 +1,233 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Stoicchoco809
+
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  ORB - WITH AUTO TARGETS (full version)
+//  Plots the Opening Range plus breakout targets automatically.
+//    • You pick the start time, the range duration, and the "hay time".
+//    • Dotted lines while the range is forming, solid once it's locked in.
+//    • Yellow signal when a candle CLOSES beyond the range.
+//    • Targets auto-print at 0.5x / 1x / 1.5x the range (both directions).
+//    • Range high/low carry forward (dashed) to the next session's open.
+//  Concept inspired by "ORB" by zzzcrypto123.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("ORB - WITH AUTO TARGETS", shorttitle="ORB - WITH AUTO TARGETS", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ─────────────────────────── INPUTS ───────────────────────────
+gR = "Opening Range"
+tzIn     = input.string("America/New_York", "Timezone", options=["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Sao_Paulo", "Europe/London", "Europe/Berlin", "Asia/Tokyo", "Asia/Hong_Kong", "Asia/Kolkata", "Australia/Sydney", "UTC"], group=gR)
+hh       = input.int(9,   "Range starts at (hour)", minval=0, maxval=23, inline="s", group=gR)
+mm       = input.int(30,  "minute",                 minval=0, maxval=59, inline="s", group=gR)
+orbLen   = input.int(30,  "Opening range duration (minutes)", minval=1, maxval=1440, group=gR, tooltip="5, 15, 30 — your choice. The high and low of this window define the range.")
+hayLen   = input.int(120, "Hay time (minutes)", minval=1, maxval=1440, group=gR, tooltip="How long the indicator keeps printing lines, measured from the range start. When the time is up, the indicator hits the hay.")
+extendNx = input.bool(true, "Extend range high/low to next session", group=gR, tooltip="After hay time, the range levels continue as dashed lines until the next session's opening range begins.")
+wkdays   = input.bool(true,  "Weekdays only", group=gR)
+keepHist = input.bool(true,  "Keep previous sessions on chart", group=gR)
+
+gT = "Targets"
+showTgts = input.bool(true, "Show target lines", group=gT)
+m1       = input.float(0.5, "Target 1  (x range)", step=0.1, minval=0, group=gT)
+m2       = input.float(1.0, "Target 2  (x range)", step=0.1, minval=0, group=gT)
+m3       = input.float(1.5, "Target 3  (x range)", step=0.1, minval=0, group=gT)
+showDn   = input.bool(true,  "Plot downside targets too", group=gT)
+showMid  = input.bool(false, "Show range midpoint", group=gT)
+
+gS = "Signals"
+showSig  = input.bool(true, "Signal on candle close beyond range", group=gS)
+firstOnly= input.bool(false, "First signal per side only", group=gS)
+sigCol   = input.color(color.yellow, "Signal color", group=gS)
+paintBar = input.bool(true, "Paint the signal candle", group=gS)
+
+gV = "Style"
+hiCol    = input.color(color.new(#26a69a, 0), "Range high", group=gV)
+loCol    = input.color(color.new(#ef5350, 0), "Range low",  group=gV)
+tgtUpCol = input.color(color.new(#26a69a, 35), "Upside targets",   group=gV)
+tgtDnCol = input.color(color.new(#ef5350, 35), "Downside targets", group=gV)
+midCol   = input.color(color.new(color.gray, 30), "Midpoint", group=gV)
+lw       = input.int(2, "Line width", minval=1, maxval=5, group=gV)
+showLbl  = input.bool(true, "Show price labels", group=gV)
+lblGap   = input.int(4, "Gap after labels (bars)", minval=0, maxval=50, group=gV, tooltip="Blank space left after hay time before the carry-forward lines resume, so the ORB High / ORB Low text stays readable.")
+showBox  = input.bool(true, "Shade the opening range", group=gV)
+boxCol   = input.color(color.new(color.blue, 90), "Range shading", group=gV)
+
+// ─────────────────────────── TIME MATH ───────────────────────────
+// Minute-of-day window test, wraps correctly past midnight for overnight sessions.
+inWin(s, e, t) =>
+    e <= 1440 ? (t >= s and t < e) : (t >= s or t < e - 1440)
+
+orbStart  = hh * 60 + mm
+orbFinish = orbStart + orbLen
+hayFinish = orbStart + math.max(hayLen, orbLen)
+
+tMin  = hour(time, tzIn) * 60 + minute(time, tzIn)
+dw    = dayofweek(time, tzIn)
+okDay = not wkdays or (dw != dayofweek.saturday and dw != dayofweek.sunday)
+
+inORB = okDay and inWin(orbStart, orbFinish, tMin)
+inHay = okDay and inWin(orbStart, hayFinish, tMin)
+
+newSession = inORB and not inORB[1]
+rangeShut  = not inORB and inORB[1]
+hayShut    = not inHay and inHay[1]
+
+barMs = timeframe.in_seconds() * 1000
+xNow  = time + barMs
+
+// ─────────────────────────── STATE ───────────────────────────
+var float orbH  = na
+var float orbL  = na
+var bool  done  = false
+var bool  upHit = false
+var bool  dnHit = false
+var int   t0    = na
+
+var line  lnH = na
+var line  lnL = na
+var line  lnM = na
+var line  cH  = na          // carry-forward high
+var line  cL  = na          // carry-forward low
+var label lbH = na
+var label lbL = na
+var label lbM = na
+var box   bx  = na
+var line[]  tLines  = array.new_line()
+var label[] tLabels = array.new_label()
+
+// ─────────────────────────── 1. NEW SESSION ───────────────────────────
+if newSession
+    // stop yesterday's carry-forward levels right where today's range starts
+    if not na(cH)
+        line.set_x2(cH, time)
+        line.set_x2(cL, time)
+    if not na(lnH) and inHay[1]
+        line.set_x2(lnH, time)
+        line.set_x2(lnL, time)
+
+    if not keepHist
+        line.delete(lnH)
+        line.delete(lnL)
+        line.delete(lnM)
+        line.delete(cH)
+        line.delete(cL)
+        label.delete(lbH)
+        label.delete(lbL)
+        label.delete(lbM)
+        box.delete(bx)
+        if array.size(tLines) > 0
+            for i = 0 to array.size(tLines) - 1
+                line.delete(array.get(tLines, i))
+        if array.size(tLabels) > 0
+            for i = 0 to array.size(tLabels) - 1
+                label.delete(array.get(tLabels, i))
+    cH := na
+    cL := na
+    array.clear(tLines)
+    array.clear(tLabels)
+
+    orbH  := high
+    orbL  := low
+    done  := false
+    upHit := false
+    dnHit := false
+    t0    := time
+
+    // dotted lines while the range is still forming
+    lnH := line.new(t0, orbH, xNow, orbH, xloc=xloc.bar_time, color=hiCol, style=line.style_dotted, width=lw)
+    lnL := line.new(t0, orbL, xNow, orbL, xloc=xloc.bar_time, color=loCol, style=line.style_dotted, width=lw)
+    bx  := showBox ? box.new(t0, orbH, xNow, orbL, xloc=xloc.bar_time, border_color=color.new(color.gray, 70), bgcolor=boxCol) : na
+
+// ─────────────────────────── 2. RANGE BUILDING ───────────────────────────
+if inORB and not newSession
+    orbH := math.max(orbH, high)
+    orbL := math.min(orbL, low)
+
+if inORB
+    line.set_y1(lnH, orbH), line.set_y2(lnH, orbH), line.set_x2(lnH, xNow)
+    line.set_y1(lnL, orbL), line.set_y2(lnL, orbL), line.set_x2(lnL, xNow)
+    if showBox and not na(bx)
+        box.set_top(bx, orbH), box.set_bottom(bx, orbL), box.set_right(bx, xNow)
+
+// ─────────────────────────── 3. RANGE COMPLETE ───────────────────────────
+if rangeShut and not na(lnH)
+    done := true
+    line.set_style(lnH, line.style_solid)
+    line.set_style(lnL, line.style_solid)
+
+    rng = orbH - orbL
+
+    if showLbl
+        lbH := label.new(xNow, orbH, " ORB High  " + str.tostring(orbH, format.mintick) + " ", xloc=xloc.bar_time, style=label.style_label_left, color=chart.bg_color, textcolor=hiCol, size=size.small)
+        lbL := label.new(xNow, orbL, " ORB Low  "  + str.tostring(orbL, format.mintick) + " ", xloc=xloc.bar_time, style=label.style_label_left, color=chart.bg_color, textcolor=loCol, size=size.small)
+
+    if showMid
+        mid = (orbH + orbL) / 2
+        lnM := line.new(t0, mid, xNow, mid, xloc=xloc.bar_time, color=midCol, style=line.style_dashed, width=1)
+        if showLbl
+            lbM := label.new(xNow, mid, " Mid  " + str.tostring(mid, format.mintick) + " ", xloc=xloc.bar_time, style=label.style_label_left, color=chart.bg_color, textcolor=midCol, size=size.tiny)
+
+    if showTgts and rng > 0
+        mults = array.from(m1, m2, m3)
+        for i = 0 to array.size(mults) - 1
+            m = array.get(mults, i)
+            if m > 0
+                yUp = orbH + rng * m
+                array.push(tLines, line.new(time, yUp, xNow, yUp, xloc=xloc.bar_time, color=tgtUpCol, style=line.style_dashed, width=1))
+                if showLbl
+                    array.push(tLabels, label.new(xNow, yUp, " " + str.tostring(m, "#.##") + "x  " + str.tostring(yUp, format.mintick) + " ", xloc=xloc.bar_time, style=label.style_label_left, color=chart.bg_color, textcolor=tgtUpCol, size=size.tiny))
+                if showDn
+                    yDn = orbL - rng * m
+                    array.push(tLines, line.new(time, yDn, xNow, yDn, xloc=xloc.bar_time, color=tgtDnCol, style=line.style_dashed, width=1))
+                    if showLbl
+                        array.push(tLabels, label.new(xNow, yDn, " " + str.tostring(m, "#.##") + "x  " + str.tostring(yDn, format.mintick) + " ", xloc=xloc.bar_time, style=label.style_label_left, color=chart.bg_color, textcolor=tgtDnCol, size=size.tiny))
+
+// ─────────────────────────── 4. EXTEND UNTIL HAY TIME ───────────────────────────
+if done and inHay
+    line.set_x2(lnH, xNow)
+    line.set_x2(lnL, xNow)
+    label.set_x(lbH, xNow)
+    label.set_x(lbL, xNow)
+    if showMid
+        line.set_x2(lnM, xNow)
+        label.set_x(lbM, xNow)
+    if array.size(tLines) > 0
+        for i = 0 to array.size(tLines) - 1
+            line.set_x2(array.get(tLines, i), xNow)
+    if array.size(tLabels) > 0
+        for i = 0 to array.size(tLabels) - 1
+            label.set_x(array.get(tLabels, i), xNow)
+
+// ─────────── 5. CARRY THE RANGE HIGH/LOW TO THE NEXT SESSION ───────────
+if done and extendNx and hayShut and not na(lnH)
+    xGap = time + lblGap * barMs
+    cH := line.new(xGap, orbH, xGap + barMs, orbH, xloc=xloc.bar_time, color=hiCol, style=line.style_dashed, width=lw)
+    cL := line.new(xGap, orbL, xGap + barMs, orbL, xloc=xloc.bar_time, color=loCol, style=line.style_dashed, width=lw)
+
+// note: the labels are intentionally NOT moved here — they park at hay time
+// so the tags stay near the morning session instead of drifting overnight.
+if not na(cH) and xNow > line.get_x1(cH)
+    line.set_x2(cH, xNow)
+    line.set_x2(cL, xNow)
+
+// ─────────────────────────── 6. CLOSE-BEYOND SIGNALS ───────────────────────────
+sigUp = showSig and done and inHay and close > orbH and (not firstOnly or not upHit)
+sigDn = showSig and done and inHay and close < orbL and (not firstOnly or not dnHit)
+
+if sigUp
+    upHit := true
+if sigDn
+    dnHit := true
+
+plotshape(sigUp, title="Close Above Range", style=shape.triangleup,   location=location.belowbar, color=sigCol, size=size.tiny)
+plotshape(sigDn, title="Close Below Range", style=shape.triangledown, location=location.abovebar, color=sigCol, size=size.tiny)
+barcolor(paintBar and (sigUp or sigDn) ? sigCol : na, title="Signal Candle")
+
+alertcondition(sigUp, title="ORB - Close above range", message="ORB Wrangler: candle closed ABOVE the opening range on {{ticker}} ({{interval}})")
+alertcondition(sigDn, title="ORB - Close below range", message="ORB Wrangler: candle closed BELOW the opening range on {{ticker}} ({{interval}})")
+
+// ─────────────────────────── 7. TIMEFRAME SANITY CHECK ───────────────────────────
+var label warn = na
+if barstate.islast
+    label.delete(warn)
+    if timeframe.in_seconds() / 60 > orbLen
+        warn := label.new(bar_index, high, "⚠ Chart timeframe is larger than the " + str.tostring(orbLen) + "-min opening range.\nDrop to a lower timeframe for an accurate range.", style=label.style_label_down, color=color.new(color.orange, 20), textcolor=color.black, size=size.small)

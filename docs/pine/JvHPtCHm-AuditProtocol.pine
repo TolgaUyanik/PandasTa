@@ -1,0 +1,263 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TheRealDrip2Rip
+
+//@version=6
+// =============================================================================
+//  THE AUDIT PROTOCOL
+//  A self-audit standard for indicators, packaged as a reusable library.
+//
+//  THE IDEA:
+//    Every indicator makes implicit claims: "this signal has edge", "price
+//    stays inside these bands." Almost none of them keep score. This library
+//    makes keeping score a three-line habit, so any indicator can wear a
+//    live, lookahead-free audit of its own claims:
+//
+//    PREQUENTIAL TRACKER  register a probability BEFORE the outcome, resolve
+//                         AFTER it is real (Dawid's prequential principle).
+//                         Tracks hit rate and the Brier score, the proper
+//                         scoring rule for probability forecasts.
+//    COVERAGE TRACKER     for bands/intervals: did price actually stay inside
+//                         as often as the band claims? Target vs realized.
+//    CONFORMAL SCALER     learns the width multiplier that makes ANY band hit
+//                         its stated coverage (split-conformal quantile trick).
+//    BARRIER RESOLVER     target-before-stop outcome resolution for setups,
+//                         a nod to triple-barrier labeling (Lopez de Prado).
+//    THE AUDIT SCORE      one 0-100 number: calibration earns up to 50,
+//                         demonstrated skill (Brier skill vs coin flip) earns
+//                         up to 50. An honest indicator with zero edge scores
+//                         ~50. Above 50 requires real skill. Below 50 means
+//                         miscalibrated. 50 is sea level. Everything above
+//                         is earned.
+//    THE RECEIPT          the standard panel: claims on the left, reality on
+//                         the right. Every audited indicator shows it.
+//
+//  HONEST LINEAGE:
+//    The components are established statistics: Brier (1950), prequential
+//    evaluation (Dawid, 1984), conformal prediction (Vovk et al.). The
+//    protocol, the composite Score, and the packaging are the contribution.
+//
+//  USAGE SKETCH (in any indicator):
+//      import <YourTradingViewHandle>/AuditProtocol/1 as ap
+//      var pq  = ap.newPrequal()
+//      var c90 = ap.newCoverage(90)
+//      if barstate.isconfirmed
+//          ap.resolve(pq, close > close[1])          // settle yesterday's call
+//          ap.resolveInterval(c90, close)            // settle yesterday's band
+//          ap.predict(pq, myProbabilityUp)           // register today's call
+//          ap.setInterval(c90, myLo, myHi)           // register today's band
+//      ap.panel(pq, c90, na, position.top_right)     // standard audit panel
+// =============================================================================
+
+library("AuditProtocol", overlay = true)
+
+// ~~ INTERNAL =================================================================
+clamp01(float v) => math.max(0.0, math.min(1.0, v))
+
+// =============================================================================
+//  PREQUENTIAL TRACKER : probability forecasts, scored after the fact
+// =============================================================================
+export type Prequal
+    float pPend   = na     // probability registered for the next outcome
+    float accEma  = na     // EMA hit rate
+    float brierEma = na    // EMA Brier score (lower is better; 0.25 = coin flip)
+    int   hits    = 0
+    int   n       = 0
+    float emaA    = 0.02   // EMA rate for the live readings
+
+// @function Creates a prequential tracker.
+// @param emaAlpha EMA rate for the live (recent) readings. Default 0.02.
+// @returns A fresh Prequal tracker.
+export newPrequal(float emaAlpha = 0.02) =>
+    p = Prequal.new()
+    p.emaA := emaAlpha
+    p
+
+// @function Registers a probability forecast (P of the outcome being TRUE) for the NEXT resolution. Call AFTER resolve() in the same confirmed-bar block.
+export method predict(Prequal this, float p) =>
+    this.pPend := math.max(0.0, math.min(1.0, p))
+    this
+
+// @function Resolves the pending forecast against the realized outcome. Call once per confirmed bar BEFORE registering the next forecast.
+export method resolve(Prequal this, bool outcome) =>
+    if not na(this.pPend)
+        y = outcome ? 1.0 : 0.0
+        hit = (this.pPend > 0.5) == outcome ? 1.0 : 0.0
+        b = (this.pPend - y) * (this.pPend - y)
+        this.accEma := na(this.accEma) ? hit : this.accEma + this.emaA * (hit - this.accEma)
+        this.brierEma := na(this.brierEma) ? b : this.brierEma + this.emaA * (b - this.brierEma)
+        this.hits += int(hit)
+        this.n += 1
+        this.pPend := na
+    this
+
+// @function Lifetime hit rate in percent, or na before any resolution.
+export method hitRate(Prequal this) =>
+    this.n > 0 ? 100.0 * this.hits / this.n : na
+
+// @function Brier skill score vs the coin-flip baseline: 1 - Brier/0.25. 0 = no skill, 1 = perfect, negative = worse than guessing.
+export method skill(Prequal this) =>
+    na(this.brierEma) ? na : 1.0 - this.brierEma / 0.25
+
+// =============================================================================
+//  COVERAGE TRACKER : do your bands deliver the coverage they claim?
+// =============================================================================
+export type Coverage
+    float target  = 90.0   // claimed coverage, percent
+    float loPend  = na
+    float hiPend  = na
+    float covEma  = na
+    int   hits    = 0
+    int   n       = 0
+    float emaA    = 0.02
+
+// @function Creates a coverage tracker for a band claiming `targetPct` percent containment.
+export newCoverage(float targetPct, float emaAlpha = 0.02) =>
+    c = Coverage.new()
+    c.target := targetPct
+    c.emaA := emaAlpha
+    c
+
+// @function Registers the band that should contain the NEXT observation.
+export method setInterval(Coverage this, float lo, float hi) =>
+    this.loPend := lo
+    this.hiPend := hi
+    this
+
+// @function Resolves the pending band against the realized value.
+export method resolveInterval(Coverage this, float x) =>
+    if not na(this.loPend) and not na(this.hiPend) and not na(x)
+        inside = x >= this.loPend and x <= this.hiPend ? 1.0 : 0.0
+        this.covEma := na(this.covEma) ? inside : this.covEma + this.emaA * (inside - this.covEma)
+        this.hits += int(inside)
+        this.n += 1
+        this.loPend := na
+        this.hiPend := na
+    this
+
+// @function Lifetime realized coverage in percent, or na before any resolution.
+export method realized(Coverage this) =>
+    this.n > 0 ? 100.0 * this.hits / this.n : na
+
+// @function Absolute calibration error in percentage points: |realized - target|. na before any resolution.
+export method covError(Coverage this) =>
+    this.n > 0 ? math.abs(100.0 * this.hits / this.n - this.target) : na
+
+// =============================================================================
+//  CONFORMAL SCALER : learn the multiplier that makes any band honest
+// =============================================================================
+export type Conformal
+    array<float> resid = na   // |error| / scale history
+    float target = 90.0
+    int   win    = 120
+    int   warm   = 30
+
+// @function Creates a conformal scaler. Feed it |realized error| / your band's unit width; ask it for k().
+export newConformal(float targetPct, int window = 120, int warmup = 30) =>
+    s = Conformal.new()
+    s.resid := array.new<float>()
+    s.target := targetPct
+    s.win := window
+    s.warm := warmup
+    s
+
+// @function Records one realized normalized residual (e.g. |close - center| / sigma).
+export method observe(Conformal this, float normResid) =>
+    if not na(normResid)
+        array.push(this.resid, normResid)
+        if array.size(this.resid) > this.win
+            array.shift(this.resid)
+    this
+
+// @function The learned width multiplier: the target-quantile of observed residuals. Returns `fallback` until warm. Band = center ± k() * unitWidth delivers ~target coverage.
+export method k(Conformal this, float fallback = 1.0) =>
+    n = array.size(this.resid)
+    if n < this.warm
+        fallback
+    else
+        b = array.copy(this.resid)
+        array.sort(b, order.ascending)
+        idx = math.max(0, math.min(n - 1, int(math.ceil(this.target / 100.0 * n)) - 1))
+        array.get(b, idx)
+
+// =============================================================================
+//  BARRIER RESOLVER : target-before-stop, settled by the tape
+//  (a nod to triple-barrier labeling: target barrier, stop barrier, first
+//   one touched settles the label)
+// =============================================================================
+export type Barrier
+    float tgt   = na
+    float stp   = na
+    bool  live  = false
+    int   wins  = 0
+    int   losses = 0
+
+// @function Creates a barrier tracker for first-touch setup outcomes.
+export newBarrier() =>
+    Barrier.new()
+
+// @function Arms a setup: which barrier must be touched first for a win (tgt) vs a loss (stp).
+export method arm(Barrier this, float target, float stop) =>
+    this.tgt := target
+    this.stp := stop
+    this.live := true
+    this
+
+// @function Checks the current bar. Returns +1 (target first), -1 (stop first), 0 (still open). If both are inside one bar, the stop wins: conservative by design.
+export method check(Barrier this, float barHigh, float barLow) =>
+    res = 0
+    if this.live
+        hitT = this.tgt > this.stp ? barHigh >= this.tgt : barLow <= this.tgt
+        hitS = this.tgt > this.stp ? barLow <= this.stp : barHigh >= this.stp
+        if hitS
+            res := -1
+            this.losses += 1
+            this.live := false
+        else if hitT
+            res := 1
+            this.wins += 1
+            this.live := false
+    res
+
+// @function Lifetime win rate of resolved setups in percent, or na.
+export method winRate(Barrier this) =>
+    tot = this.wins + this.losses
+    tot > 0 ? 100.0 * this.wins / tot : na
+
+// =============================================================================
+//  THE AUDIT SCORE : one number. 50 is sea level. Earn the rest.
+// =============================================================================
+// @function The composite 0-100 audit score. Calibration earns up to 50 points
+//           (25 per coverage tracker; pass the same tracker twice if you only
+//           have one band). Skill earns up to 50 (Brier skill vs coin flip).
+//           Returns na until minN resolutions on the prequential tracker.
+export score(Prequal pq, Coverage cA, Coverage cB, int minN = 30) =>
+    float out = na
+    if pq.n >= minN
+        sk = 1.0 - (na(pq.brierEma) ? 0.25 : pq.brierEma) / 0.25
+        skillPts = 50.0 * clamp01(sk)
+        eA = cA.n > 0 ? math.abs(100.0 * cA.hits / cA.n - cA.target) : 25.0
+        eB = cB.n > 0 ? math.abs(100.0 * cB.hits / cB.n - cB.target) : 25.0
+        calPts = 25.0 * clamp01(1.0 - eA / 25.0) + 25.0 * clamp01(1.0 - eB / 25.0)
+        out := skillPts + calPts
+    out
+
+// =============================================================================
+//  THE RECEIPT : claims on the left, reality on the right
+// =============================================================================
+// @function Renders the Receipt, the standard audit panel. Pass na for trackers you don't use.
+export panel(Prequal pq, Coverage cA, Coverage cB, string pos = position.bottom_right) =>
+    var table t = table.new(pos, 2, 5, frame_color = color.new(color.gray, 50), frame_width = 1)
+    if barstate.islast
+        s = score(pq, na(cA) ? newCoverage(90) : cA, na(cB) ? (na(cA) ? newCoverage(90) : cA) : cB)
+        sCol = na(s) ? color.gray : s >= 60 ? color.rgb(47, 230, 194) : s >= 45 ? color.white : color.orange
+        table.cell(t, 0, 0, "AUDIT SCORE", text_color = color.white, bgcolor = color.new(color.rgb(40, 60, 110), 10), text_size = size.small)
+        table.cell(t, 1, 0, na(s) ? "warming" : str.tostring(s, "#"), text_color = sCol, bgcolor = color.new(color.rgb(40, 60, 110), 10), text_size = size.small)
+        table.cell(t, 0, 1, "Hit rate", text_color = color.gray, text_size = size.tiny)
+        table.cell(t, 1, 1, pq.n > 0 ? str.tostring(100.0 * pq.hits / pq.n, "#.0") + "%  (n " + str.tostring(pq.n) + ")" : "-", text_color = color.white, text_size = size.tiny)
+        table.cell(t, 0, 2, "Brier skill vs coin", text_color = color.gray, text_size = size.tiny)
+        table.cell(t, 1, 2, na(pq.brierEma) ? "-" : str.tostring(100.0 * (1.0 - pq.brierEma / 0.25), "#.0") + "%", text_color = color.white, text_size = size.tiny)
+        table.cell(t, 0, 3, na(cA) ? "" : "Band A " + str.tostring(cA.target, "#") + "% claimed", text_color = color.gray, text_size = size.tiny)
+        table.cell(t, 1, 3, na(cA) or cA.n == 0 ? "" : str.tostring(100.0 * cA.hits / cA.n, "#") + "% real", text_color = color.white, text_size = size.tiny)
+        table.cell(t, 0, 4, na(cB) ? "" : "Band B " + str.tostring(cB.target, "#") + "% claimed", text_color = color.gray, text_size = size.tiny)
+        table.cell(t, 1, 4, na(cB) or cB.n == 0 ? "" : str.tostring(100.0 * cB.hits / cB.n, "#") + "% real", text_color = color.white, text_size = size.tiny)
+    t

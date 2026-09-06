@@ -1,0 +1,297 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © YourUsername
+
+//@version=6
+library("SPX_0DTE_Engine", overlay=true)
+
+// ============================================================================
+// CORE ENGINE: SPX 0DTE OPTIONS TRADING LIBRARY (CORRECTED VERSION)
+// Purpose: Centralized logic for liquidity, volatility, and forced-move detection
+// No classical MAs — only adaptive, volatility-weighted calculations
+// ============================================================================
+
+// ────────────────────────────────────────────────────────────────────────────
+// 1. DYNAMIC ATM CALCULATION
+// ────────────────────────────────────────────────────────────────────────────
+
+export getATM(float price) =>
+    // Round to nearest $5 or $10 strike based on SPX level
+    int strikeInterval = price >= 5000 ? 5 : 10
+    int atmStrike = math.round(price / strikeInterval) * strikeInterval
+    atmStrike
+
+export getCallStrikes(int atmStrike, int count = 10) =>
+    // Generate array of CALL strikes above ATM
+    var int[] strikes = array.new<int>(count)
+    for i = 0 to count - 1
+        array.set(strikes, i, atmStrike + (i + 1) * 5)
+    strikes
+
+export getPutStrikes(int atmStrike, int count = 10) =>
+    // Generate array of PUT strikes below ATM
+    var int[] strikes = array.new<int>(count)
+    for i = 0 to count - 1
+        array.set(strikes, i, atmStrike - (i + 1) * 5)
+    strikes
+
+export generateOCCSymbol(string underlying, int year, int month, int day, string optionType, int strike) =>
+    // Format: SPXW YYMMDD C/P STRIKE
+    // Example: SPXW 260105 C 5850
+    string dateStr = str.format("{0,number,00}{1,number,00}{2,number,00}", year % 100, month, day)
+    string strikeStr = str.tostring(strike)
+    underlying + " " + dateStr + " " + optionType + " " + strikeStr
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 2. ADAPTIVE VOLATILITY-WEIGHTED REFERENCE (NO CLASSICAL MA)
+// ────────────────────────────────────────────────────────────────────────────
+
+export getAdaptiveReference(float src, int lookback = 20) =>
+    // Volatility-weighted price reference (NOT an EMA)
+    // Higher volatility = less weight on past prices (more responsive)
+    float atr = ta.atr(14)
+    float avgATR = ta.sma(atr, lookback)
+    float volWeight = atr / avgATR // Volatility ratio
+    
+    // Adaptive length based on volatility
+    int adaptiveLength = math.max(5, math.round(lookback / volWeight))
+    
+    // Volume-weighted average price over adaptive period
+    float vwap = ta.vwap(src)
+    float recentVWAP = ta.sma(src * volume, adaptiveLength) / ta.sma(volume, adaptiveLength)
+    
+    // Blend VWAP with recent volume-weighted price
+    float reference = (vwap * 0.3) + (recentVWAP * 0.7)
+    reference
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 3. LIQUIDITY DETECTION ENGINE (FIXED)
+// ────────────────────────────────────────────────────────────────────────────
+
+export detectLiquidityGrabHigh(float high, float low, float close, float volume, int lookback = 20) =>
+    // Detects high liquidity grab (bearish signal)
+    // FIXED: Now uses "low" argument and extracts ta.highest to global scope
+    
+    // Extract ta.highest to be called every bar (compiler requirement)
+    float highestHigh = ta.highest(high, lookback)
+    float avgVolume = ta.sma(volume, lookback)
+    
+    // Calculate wick size using both high and low
+    float wickSize = (high - math.max(close, low)) / close
+    
+    bool newHigh = high >= highestHigh
+    bool quickReversal = close < high * 0.998 // Closed 0.2% below high
+    bool volumeSpike = volume > avgVolume * 1.2
+    bool wickPresent = wickSize > 0.003 // 0.3% wick
+    
+    bool liquidityGrab = newHigh and quickReversal and volumeSpike and wickPresent
+    liquidityGrab
+
+export detectLiquidityGrabLow(float high, float low, float close, float volume, int lookback = 20) =>
+    // Detects low liquidity grab (bullish signal)
+    // FIXED: Extract ta.lowest to global scope
+    
+    float lowestLow = ta.lowest(low, lookback)
+    float avgVolume = ta.sma(volume, lookback)
+    
+    // Calculate wick size using both high and low
+    float wickSize = (math.min(close, high) - low) / close
+    
+    bool newLow = low <= lowestLow
+    bool quickReversal = close > low * 1.002 // Closed 0.2% above low
+    bool volumeSpike = volume > avgVolume * 1.2
+    bool wickPresent = wickSize > 0.003 // 0.3% wick
+    
+    bool liquidityGrab = newLow and quickReversal and volumeSpike and wickPresent
+    liquidityGrab
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 4. VOLATILITY REGIME CLASSIFICATION
+// ────────────────────────────────────────────────────────────────────────────
+
+export getVolatilityRegime(float src, int bbLength = 20, float bbMult = 2.0) =>
+    // Returns: 0 = Compression (NO TRADE), 1 = Transition (CAUTION), 2 = Expansion (TRADE)
+    
+    // Bollinger Bands
+    float basis = ta.sma(src, bbLength)
+    float dev = bbMult * ta.stdev(src, bbLength)
+    float upper = basis + dev
+    float lower = basis - dev
+    float bbWidth = (upper - lower) / src
+    
+    // ATR
+    float atr = ta.atr(14)
+    float atrPercent = atr / src
+    
+    // Classification
+    int regime = 0
+    if bbWidth < 0.015 and atrPercent < 0.002 // BB < 1.5%, ATR < 0.2%
+        regime := 0 // Compression
+    else if bbWidth < 0.025 and atrPercent < 0.004 // BB < 2.5%, ATR < 0.4%
+        regime := 1 // Transition
+    else
+        regime := 2 // Expansion
+    
+    regime
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 5. ES1! INSTITUTIONAL CONFIRMATION (FIXED)
+// ────────────────────────────────────────────────────────────────────────────
+
+export getESConfirmation(float spxClose, float esClose, float spxHigh, float esHigh, float spxLow, float esLow, int lookback = 5) =>
+    // Returns: 1 = Bullish confirmation, -1 = Bearish confirmation, 0 = No confirmation
+    // FIXED: Extract ta.highest and ta.lowest outside conditional scope
+    
+    // Calculate these EVERY bar (compiler requirement)
+    float spxHighest = ta.highest(spxHigh, lookback)
+    float spxLowest = ta.lowest(spxLow, lookback)
+    float esHighest = ta.highest(esHigh, lookback)
+    float esLowest = ta.lowest(esLow, lookback)
+    
+    // ES leading SPX check (within 0.1% correlation)
+    float spxESRatio = spxClose / esClose
+    bool correlated = math.abs(spxESRatio - 1.0) < 0.001
+    
+    int confirmation = 0
+    
+    if correlated
+        // Bullish: ES breaks above 5-bar high
+        bool esBullBreak = esClose > esHighest[1]
+        bool spxFollowing = spxClose > spxHighest[1]
+        
+        // Bearish: ES breaks below 5-bar low
+        bool esBearBreak = esClose < esLowest[1]
+        bool spxFollowingDown = spxClose < spxLowest[1]
+        
+        if esBullBreak and spxFollowing
+            confirmation := 1
+        else if esBearBreak and spxFollowingDown
+            confirmation := -1
+    
+    confirmation
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 6. GREEKS PROXIES (NO DIRECT GREEKS DATA)
+// ────────────────────────────────────────────────────────────────────────────
+
+export getDeltaBias(float src, float adaptiveRef, float esClose, float spxClose) =>
+    // Returns: 1 = Bullish delta, -1 = Bearish delta, 0 = Neutral
+    
+    bool priceAboveRef = src > adaptiveRef
+    bool esLeadsBull = esClose / spxClose > 1.0001
+    
+    int deltaBias = 0
+    if priceAboveRef and esLeadsBull
+        deltaBias := 1
+    else if not priceAboveRef and not esLeadsBull
+        deltaBias := -1
+    
+    deltaBias
+
+export getGammaZone(float src, int atmStrike) =>
+    // Major strikes are 50-point intervals
+    int nearestMajor = math.round(src / 50) * 50
+    float distanceToMajor = math.abs(src - nearestMajor)
+    
+    // Calculate distance to the ATM strike provided
+    float distanceToATM = math.abs(src - atmStrike)
+    
+    // Low gamma if > 20 points from major strike AND > 10 points from ATM
+    bool lowGamma = distanceToMajor > 20 and distanceToATM > 10
+    lowGamma
+
+export getVegaRegime(simple string vixSymbol = "VIX") =>
+    // Returns: 1 = High vega (VIX > 20), 0 = Normal (15-20), -1 = Low vega (< 15)
+    float vix = request.security(vixSymbol, timeframe.period, close)
+    
+    int vegaRegime = 0
+    if vix > 20
+        vegaRegime := 1
+    else if vix < 15
+        vegaRegime := -1
+    
+    vegaRegime
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 7. FAIL-STATE DETECTION (NO TRADE ZONES)
+// ────────────────────────────────────────────────────────────────────────────
+
+export isFailState(int volRegime, int hour, int minute, float vix, float atr) =>
+    // Returns: true if in fail-state (DO NOT TRADE), false if safe
+    
+    // Time-based exclusions (Eastern Time)
+    bool firstMinutes = (hour == 9 and minute < 45) or (hour < 9 and minute >= 30)
+    bool lastMinutes = (hour == 15 and minute >= 30) or hour >= 16
+    bool lunchHour = hour == 12
+    
+    // Volatility extremes
+    bool vixTooLow = vix < 12
+    bool vixTooHigh = vix > 35
+    bool atrTooLow = atr < 8
+    
+    // Compression regime
+    bool inCompression = volRegime == 0
+    
+    bool failState = firstMinutes or lastMinutes or lunchHour or vixTooLow or vixTooHigh or atrTooLow or inCompression
+    failState
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 8. CONFLUENCE ENGINE (ALL CONDITIONS)
+// ────────────────────────────────────────────────────────────────────────────
+
+export checkCallConfluence(bool liquidityGrabLow, int volRegime, int esConfirmation, bool failState, int deltaBias, bool lowGamma) =>
+    // Returns: true if ALL conditions met for CALL entry
+    
+    bool condition1 = liquidityGrabLow
+    bool condition2 = volRegime >= 1 // Transition or Expansion
+    bool condition3 = esConfirmation == 1 // ES confirms bullish
+    bool condition4 = not failState
+    bool condition5 = deltaBias >= 0 and lowGamma // Bullish or neutral delta, low gamma zone
+    
+    bool callSignal = condition1 and condition2 and condition3 and condition4 and condition5
+    callSignal
+
+export checkPutConfluence(bool liquidityGrabHigh, int volRegime, int esConfirmation, bool failState, int deltaBias, bool lowGamma) =>
+    // Returns: true if ALL conditions met for PUT entry
+    
+    bool condition1 = liquidityGrabHigh
+    bool condition2 = volRegime >= 1 // Transition or Expansion
+    bool condition3 = esConfirmation == -1 // ES confirms bearish
+    bool condition4 = not failState
+    bool condition5 = deltaBias <= 0 and lowGamma // Bearish or neutral delta, low gamma zone
+    
+    bool putSignal = condition1 and condition2 and condition3 and condition4 and condition5
+    putSignal
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// 9. EXIT LOGIC HELPERS
+// ────────────────────────────────────────────────────────────────────────────
+
+export checkProfitTarget(float entryPrice, float currentPrice, float targetPercent = 50.0, bool isCall = true) =>
+    // Returns: true if profit target hit
+    float priceChange = isCall ? (currentPrice - entryPrice) / entryPrice : (entryPrice - currentPrice) / entryPrice
+    bool targetHit = priceChange >= (targetPercent / 100.0)
+    targetHit
+
+export checkStopLoss(float entryPrice, float currentPrice, float stopPercent = 40.0, bool isCall = true) =>
+    // Returns: true if stop loss hit
+    float priceChange = isCall ? (currentPrice - entryPrice) / entryPrice : (entryPrice - currentPrice) / entryPrice
+    bool stopHit = priceChange <= -(stopPercent / 100.0)
+    stopHit
+
+export checkTimeExit(int hour, int minute) =>
+    // Returns: true if past 2:30 PM ET (time-based exit)
+    bool timeExit = (hour == 14 and minute >= 30) or hour >= 15
+    timeExit
+
+export checkInvalidation(int esConfirmation, bool isCallPosition) =>
+    // Returns: true if position invalidated (ES reverses)
+    bool invalidated = (isCallPosition and esConfirmation == -1) or (not isCallPosition and esConfirmation == 1)
+    invalidated

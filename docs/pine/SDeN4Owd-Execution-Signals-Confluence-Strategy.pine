@@ -1,0 +1,254 @@
+//@version=6
+strategy("Execution Signals Strategy", overlay = true,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     calc_on_every_tick      = false,
+     pyramiding              = 0,
+     process_orders_on_close = false)
+
+// ───── SETTINGS ─────
+showFailures    = input.bool(true,   "Show Failure Candles")
+showInsideBars  = input.bool(true,   "Show Inside Bars")
+showRange       = input.bool(true,   "Show Range Labels")
+minRange        = input.float(0.0,   "Minimum Failure Range",       step = 0.01)
+offsetTicks     = input.int(2,       "Range Label Offset (ticks)",  minval = 0)
+smallRangeLimit = input.float(0.0,   "Max Range For Tight Candle",  step = 0.01)
+insideBarColor  = input.color(color.yellow, "Inside Bar Color")
+atrProxMult     = input.float(0.1,   "ATR Proximity Multiplier",    step = 0.01)
+
+textSizeInput = input.string("small", "Range Text Size",
+     options = ["tiny", "small", "normal", "large", "huge"])
+labelSize = switch textSizeInput
+    "tiny"   => size.tiny
+    "large"  => size.large
+    "huge"   => size.huge
+    "normal" => size.normal
+    =>          size.small
+
+// ───── ENGINE LEVEL SETTINGS ─────
+engineColor = input.color(color.new(color.blue, 0), "Engine Level Color")
+engineWidth = input.int(1, "Engine Line Width", minval = 1, maxval = 4)
+
+// ───── INTRADAY ONLY ─────
+if not timeframe.isintraday
+    runtime.error("Intraday only.")
+
+// ───── 1H DATA ─────
+ho       = request.security(syminfo.tickerid, "60", open,       lookahead = barmerge.lookahead_off)
+hc       = request.security(syminfo.tickerid, "60", close,      lookahead = barmerge.lookahead_off)
+ht       = request.security(syminfo.tickerid, "60", time,       lookahead = barmerge.lookahead_off)
+atrValue = request.security(syminfo.tickerid, "60", ta.atr(14), lookahead = barmerge.lookahead_off)
+
+newHour = ta.change(ht) != 0
+
+// ───── ENGINE LEVELS ─────
+var float[] levelPrices = array.new_float()
+var line[]  levelLines  = array.new_line()
+var label[] levelLabels = array.new_label()
+var int[]   levelTimes  = array.new_int()
+
+// Invalidate body-crossed levels
+if newHour and array.size(levelPrices) > 0
+    for i = array.size(levelPrices) - 1 to 0
+        lvl = array.get(levelPrices, i)
+        if (ho < lvl and hc > lvl) or (ho > lvl and hc < lvl)
+            line.delete(array.get(levelLines,  i))
+            label.delete(array.get(levelLabels, i))
+            array.remove(levelPrices, i)
+            array.remove(levelLines,  i)
+            array.remove(levelLabels, i)
+            array.remove(levelTimes,  i)
+
+// Detect flip and draw level
+if newHour
+    flippedUp   = hc[1] < ho[1] and hc > ho
+    flippedDown = hc[1] > ho[1] and hc < ho
+
+    if flippedUp or flippedDown
+        minSpacing  = atrValue * 0.25
+        threeMonths = 90 * 24 * 60 * 60 * 1000
+        allowNew    = true
+
+        if array.size(levelPrices) > 0
+            for i = array.size(levelPrices) - 1 to 0
+                existingPrice = array.get(levelPrices, i)
+                existingTime  = array.get(levelTimes,  i)
+                if math.abs(existingPrice - ho) < minSpacing
+                    if (time - existingTime) > threeMonths
+                        line.delete(array.get(levelLines,  i))
+                        label.delete(array.get(levelLabels, i))
+                        array.remove(levelPrices, i)
+                        array.remove(levelLines,  i)
+                        array.remove(levelLabels, i)
+                        array.remove(levelTimes,  i)
+                    else
+                        allowNew := false
+
+        if allowNew
+            array.push(levelLines, line.new(
+                 bar_index, ho, bar_index + 1, ho,
+                 extend = extend.right,
+                 color  = engineColor,
+                 width  = engineWidth))
+            array.push(levelLabels, label.new(
+                 bar_index, ho,
+                 str.tostring(ho, format.mintick),
+                 style     = label.style_label_left,
+                 textcolor = color.white,
+                 color     = engineColor,
+                 size      = size.small))
+            array.push(levelPrices, ho)
+            array.push(levelTimes,  time)
+
+// Anchor labels to right edge
+if array.size(levelLabels) > 0
+    for i = 0 to array.size(levelLabels) - 1
+        label.set_x(array.get(levelLabels, i), bar_index + 10)
+        label.set_y(array.get(levelLabels, i), array.get(levelPrices, i))
+
+// ───── VWAP ─────
+vwapValue = ta.vwap(hlc3)
+plot(vwapValue, "VWAP", color = color.new(color.purple, 0), linewidth = 2)
+
+// ───── PDH / PDL (Previous RTH Session: 9:30 AM – 4:00 PM ET) ─────
+barHour   = hour(time,   "America/New_York")
+barMinute = minute(time, "America/New_York")
+
+isRTH     = (barHour == 9 and barMinute >= 30) or (barHour >= 10 and barHour < 16)
+isRTHOpen = barHour == 9 and barMinute == 30
+
+var float rthHigh    = na
+var float rthLow     = na
+var float pdh        = na
+var float pdl        = na
+
+// Build current RTH session high/low
+if isRTH
+    rthHigh := na(rthHigh) ? high : math.max(rthHigh, high)
+    rthLow  := na(rthLow)  ? low  : math.min(rthLow,  low)
+
+// At RTH open, freeze previous session values and reset
+if isRTHOpen
+    pdh     := rthHigh
+    pdl     := rthLow
+    rthHigh := high
+    rthLow  := low
+
+plot(pdh, "PDH", color = color.new(color.orange, 0), linewidth = 1, style = plot.style_stepline)
+plot(pdl, "PDL", color = color.new(color.orange, 0), linewidth = 1, style = plot.style_stepline)
+
+// ───── SESSION / DEAD ZONE ─────
+inDeadZone = barHour >= 16 and barHour < 18
+isCloseBar = barHour == 16 and barMinute == 00
+
+// ───── ATR PROXIMITY ─────
+atrCurrent = ta.atr(14)
+proxDist   = atrCurrent * atrProxMult
+
+// ───── CANDLE ANATOMY ─────
+upperWick   = high - math.max(open, close)
+lowerWick   = math.min(open, close) - low
+candleRange = high - low
+
+// ───── SIGNALS ─────
+failHigh    = high > high[1] and close <= high[1] and upperWick > 0
+failLow     = low  < low[1]  and close >= low[1]  and lowerWick > 0
+rangeValid  = candleRange >= minRange
+failure     = (failHigh or failLow) and rangeValid
+insideBar   = high < high[1] and low > low[1]
+isSignal    = failure or insideBar
+tightCandle = isSignal and smallRangeLimit > 0 and candleRange <= smallRangeLimit
+
+// ───── SIGNAL STATE ─────
+var float sigHigh   = na
+var float sigLow    = na
+var int   sigBar    = na
+var bool  pending   = false
+
+flat = strategy.position_size == 0
+
+// Rule 3: always use most recent signal — replace pending with newer signal
+if barstate.isconfirmed and isSignal and flat and not inDeadZone
+    sigHigh := high
+    sigLow  := low
+    sigBar  := bar_index
+    pending := true
+
+// Expire if execution bar passed without a qualifying close
+if pending and flat and bar_index > sigBar + 1
+    pending := false
+
+// ───── CONFLUENCE: check signal bar proximity ─────
+// Near engine level
+nearLevel = false
+if array.size(levelPrices) > 0
+    for i = 0 to array.size(levelPrices) - 1
+        lvl = array.get(levelPrices, i)
+        if math.abs(sigLow - lvl) <= proxDist or math.abs(sigHigh - lvl) <= proxDist
+            nearLevel := true
+
+// Near VWAP
+nearVWAP = math.abs(sigLow - vwapValue) <= proxDist or math.abs(sigHigh - vwapValue) <= proxDist
+
+// Near PDH or PDL
+nearPDH = not na(pdh) and (math.abs(sigLow - pdh) <= proxDist or math.abs(sigHigh - pdh) <= proxDist)
+nearPDL = not na(pdl) and (math.abs(sigLow - pdl) <= proxDist or math.abs(sigHigh - pdl) <= proxDist)
+nearPD  = nearPDH or nearPDL
+
+// Position size: base 1 + additive confluence
+confluenceQty = 1
+confluenceQty += nearLevel ? 2 : 0
+confluenceQty += nearVWAP  ? 3 : 0
+confluenceQty += nearPD    ? 4 : 0
+
+// ───── ENTRY: execution bar closes beyond signal bar ─────
+if pending and flat and not inDeadZone and bar_index == sigBar + 1
+
+    // Both sides close outside — skip (indecision)
+    if close > sigHigh and close < sigLow
+        pending := false
+
+    // Long: execution bar closes above signal high
+    else if close > sigHigh
+        stopDist = close - sigLow
+        strategy.entry("Long", strategy.long, qty = confluenceQty)
+        strategy.exit("Long X", from_entry = "Long",
+             stop  = sigLow,
+             limit = close + stopDist)
+        pending := false
+
+    // Short: execution bar closes below signal low
+    else if close < sigLow
+        stopDist = sigHigh - close
+        strategy.entry("Short", strategy.short, qty = confluenceQty)
+        strategy.exit("Short X", from_entry = "Short",
+             stop  = sigHigh,
+             limit = close - stopDist)
+        pending := false
+
+// ───── EOD FORCE CLOSE ─────
+if isCloseBar and not flat
+    strategy.close_all(comment = "EOD")
+    pending := false
+
+// ───── COLORING ─────
+barcolor(
+     showFailures   and failHigh  and rangeValid ? color.red      :
+     showFailures   and failLow   and rangeValid ? color.lime     :
+     showInsideBars and insideBar                ? insideBarColor : na)
+
+// ───── RANGE LABELS ─────
+if showRange and isSignal
+    label.new(
+         bar_index,
+         low - offsetTicks * syminfo.mintick,
+         str.tostring(candleRange, format.mintick),
+         style     = label.style_none,
+         textcolor = color.gray,
+         size      = labelSize)
+
+// ───── ALERTS ─────
+alertcondition(failHigh  and rangeValid, title = "Failure to Go High", message = "Failure to Go High detected")
+alertcondition(failLow   and rangeValid, title = "Failure to Go Low",  message = "Failure to Go Low detected")
+alertcondition(insideBar,                title = "Inside Bar",          message = "Inside bar detected")
+alertcondition(tightCandle,              title = "Tight Candle",        message = "Tight candle — range ≤ limit")

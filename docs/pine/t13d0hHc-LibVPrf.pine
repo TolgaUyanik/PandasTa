@@ -1,0 +1,1035 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   Volume Profile Library.
+//                This library serves as the specialized **Trading Logic Layer**
+//                for Volume Profile analysis. It acts as a wrapper around the 
+//                domain-agnostic `LibProf` engine, translating raw trading data 
+//                (OHLCV) into mathematical profile primitives.
+//
+//                Key Features:
+//
+//                1.  **Modular Architecture (Proxy Pattern):**
+//                    The library is built around the `VPrf` UDT, which encapsulates 
+//                    an instance of the `LibProf` engine. It acts as the Guardian of 
+//                    Market Physics, injecting symbol-specific constraints (like mintick)
+//                    into the neutral engine while delegating heavy mathematical operations.
+//                    All mathematical operations (e.g., integration, resampling) are
+//                    delegated to  the engine, while trading-relevant state management 
+//                    (configuration, delta) remains within this library.
+//
+//                2.  **Dual-Mode Geometry (Linear & Logarithmic):**
+//                    Fully supports the engine's dual-mode capability.
+//                    - **Grid:** Delegates logarithmic binning to `LibProf`.
+//                    - **Allocation:** When in PDF mode + Log mode, it instructs 
+//                      `LibBrSt` to calculate probability mass in Log-Space, ensuring 
+//                      that volume is distributed consistent with log-normal return assumptions.
+//
+//                3.  **Volume Allocation (`AllotMode`):**
+//                    Defines methods for distributing a candle's volume onto the 
+//                    price grid:
+//                    - **Classic:** Assigns the entire bar volume to the bin 
+//                      containing the close price.
+//                    - **PDF:** Distributes volume across the entire candle range 
+//                      (High to Low) based on a statistical Probability Density 
+//                      Function (via `LibBrSt`).
+//
+//                4.  **Buy/Sell Classification (`SplitMode`):**
+//                    Determines the proportion of volume classified as Buy (Ask) 
+//                    or Sell (Bid) pressure:
+//                    - **Classic:** Classifies volume based on candle color 
+//                      (Close ≥ Open).
+//                    - **Dynamic:** An advanced model analyzing candle structure 
+//                      (body vs. wicks) and a short-term trend factor.
+//                      It uses **Exact Analytical Integration** of the piece-wise 
+//                      linear buy-share function $s(u)$ against the structural PDF. 
+//                      This eliminates discretization errors and numerical loops, 
+//                      providing $O(1)$ precision for determining Buy/Sell ratios.
+//
+//                5.  **Delta Analysis (CVD):**
+//                    As the core engine is mass-neutral, this library handles the 
+//                    tracking of specific Delta metrics:
+//                    - **CVD:** Cumulative Volume Delta.
+//                    - **High/Low Watermarks:** Tracks historical high and low 
+//                      points of the CVD during profile construction.
+//
+//                6.  **Core Engine Integration:**
+//                    Provides seamless access to `LibProf` capabilities:
+//                    - **Auto-Fitting:** Automatic adjustment of price ranges.
+//                    - **Statistics:** Retrieval of POC, VWAP, Median, Standard 
+//                      Deviation, Skewness, Kurtosis, and Value Area (VA).
+//                    - **High-Fidelity Resampling:** Uses linear interpolation to 
+//                      accurately redistribute volume when resolution (bins) changes.
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibVPrf")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.3.0
+// (Ref) Architecture: Decoupled the generic core into the external `LibProf`
+//       engine. `LibVPrf` now acts as a specialized trading logic wrapper
+//       (Proxy Pattern).
+// (Mod) API: Renamed all "Bucket" related methods to "Bin" (e.g., `setBuckets`
+//       -> `setBins`, `getBuckets` -> `getBins`) to align with the generic
+//       engine terminology.
+// (Mod) API: Reordered arguments in `create()` function. `valueArea` is now a
+//       mandatory argument positioned before optional parameters to ensure
+//       type safety.
+// (Mod) Config: Injected `syminfo.mintick` as the default grid resolution to
+//       enforce physical market limits.
+// (Add) Config: Exposed `setResolution` and `gapSize` to allow runtime
+//       modification of grid granularity and segmentation sensitivity.
+// (Ref) Internal: Renamed calculation helpers to `_calc...` (e.g.,
+//       `_calcVolShare`) to enforce strict naming consistency.
+// (Ref) Math: Replaced numerical integration loops with **Exact Analytical
+//       Integration** for Buy/Sell ratios. Decomposes the linear buy-share
+//       function s(u) into segments and integrates against `LibBrSt` partial
+//       moments.
+// (Ref) Core: Implemented `_calcBuyShareCoeffs` as a Single Source of Truth
+//       (SSOT) for s(u) geometry, preventing logic duplication.
+// (Fix) Math: Implemented strict coordinate mapping (Raw <-> Norm) to ensure
+//       integration cuts are valid in both Linear and Log-Space.
+// (Fix) Math: Hardened volume allocation and normalization logic against
+//       floating-point noise using global `EPSILON` checks.
+// (Opt) Performance: Optimized `_addBarPdfDynamic` to pass pre-calculated
+//       volume share to the ratio function, avoiding redundant CDF calls.
+// (Mod) Core: Adjusted `_addBarPdfDynamic` to use exact CDF mass for total
+//       volume and apply the calculated ratio for split.
+// (Add) Feature: Added `isLog` support to `create` and new `setLog` method.
+//
+// 2025-11-13 0.2.0
+// (Ref) Renamed UDT from `VProf` to `VPrf`.
+// (Mod) Encapsulated all UDT fields. Added getter methods for data access.
+// (Add) Added getters: `getBins`, `getRanges`, `getArrayBuyVol`, `getArraySellVol`.
+// (Fix) Resolved an indexing bug in the `addBar` function.
+//
+// 2025-11-01 0.1.0
+// (New) Initial release of library.
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibVPrf"
+const string VERSION = "0.3.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── IMPORTS ──────────────────────────────────────────────────────────────────
+import AustrianTradingMachine/LibBrSt/2 as LibBrSt
+import AustrianTradingMachine/LibProf/1 as LibProf
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const float EPSILON = 1e-9
+
+// ── ENUM ─────────────────────────────────────────────────────────────────────
+// @enum AllotMode  Volume allocation mode per bar.
+// @field   classic Assign the entire bar volume to the bin that contains the
+//                  close price.
+// @field   pdf     Distribute the bar volume across bins proportionally to
+//                  the probability mass of the selected price PDF.
+export enum AllotMode
+    classic = "Classic"
+    pdf     = "PDF"
+
+// @enum SplitMode  How Buy/Sell volume is determined (PDF mode only).
+// @field   classic After bin allocation, classify all volume as Buy if
+//                  Close ≥ Open, otherwise Sell.
+// @field   dynamic BODY split OC-proportional; wick volume is allocated using
+//                  trend-weighted asymmetric rules via s(u).
+export enum SplitMode
+    classic = "Classic"
+    dynamic = "Dynamic"
+
+// ── UDT ──────────────────────────────────────────────────────────────────────
+// @type VPrf Wrapper object combining the core Profile engine and trading state.
+// @field _prof      LibProf.Prof     The neutral profile engine instance.
+// @field _allot     AllotMode        Allocation mode `classic` or `pdf`
+// @field _estimator LibBrSt.RealEst  Price density model when  `model == PDF`
+// @field _split     SplitMode        Buy/Sell split strategy per bar 
+// @field _trendLen  int              Look‑back length for trend factor (≥1)
+// @field _cvd       float            Final Cumulative Volume Delta (Total Buy Vol - Total Sell Vol).
+// @field _cvdHi     float            Running high-water mark of the CVD as volume was added.
+// @field _cvdLo     float            Running low-water mark of the CVD as volume was added.
+export type VPrf
+    LibProf.Prof     _prof
+
+    AllotMode        _allot
+    LibBrSt.RealEst  _estimator
+
+    SplitMode        _split
+    int              _trendLen
+
+    float            _cvd
+    float            _cvdHi
+    float            _cvdLo
+
+// ── PRIVATE ──────────────────────────────────────────────────────────────────
+// @function Clamp helper.
+// @param   x  series float  Value
+// @param   up series float  Upper Boundary
+// @param   lo series float  Lower Boundary
+// @returns    series float  Clamped value
+_clamp(
+  series float x,
+  series float up,
+  series float lo
+  ) =>
+    math.max(lo, math.min(up, x))
+
+// @function Normalizes a value based on its boundaries.
+// @param   x      series float  Value
+// @param   up     series float  Upper Boundary
+// @param   lo     series float  Lower Boundary
+// @param   isLog  series bool   If true, applies log to val before norm.
+// @returns        series float  Normalized value
+_normalize(
+  series float x,
+  series float up,
+  series float lo,
+  series bool isLog
+  ) =>
+    series float denom = up - lo
+    if denom < EPSILON
+        0.0
+    else
+        series float v = isLog ? math.log(math.max(x, EPSILON)) : x
+        _clamp((v - lo) / denom, 1.0, 0.0)
+
+// @function Volume share of the volume of a candle. Calculated by the Probability
+//           of PDF segment `[lo, hi]` inside bin `idx`.
+// @param   self   VPrf          The profile object.
+// @param   idx    series int    Bin index
+// @param   hi     series float  The high price of the bar.
+// @param   lo     series float  The low price of the bar.
+// @param   isLog   series bool True if calculating in Log-Space.
+// @param   offset series int    To offset the calculated bar 
+// @returns        series float  The volume share of the candle for the bin [0,1]
+method _calcVolShare(
+  VPrf self,
+  series int idx,
+  series float hi,
+  series float lo,
+  series bool isLog,
+  series int offset
+  ) =>
+    [binUp, binLo] = self._prof.getBinBnds(idx)
+
+    series float volShare = LibBrSt.realCdf(
+      estimator = self._estimator,
+      upper     = math.min(hi, binUp),
+      lower     = math.max(lo, binLo),
+      logSpace  = isLog,
+      offset    = offset)
+    
+    _clamp(volShare, 1.0, 0.0)
+
+// @function Single Source of Truth (SSOT) for Buy-Share geometry.
+//           Calculates the linear coefficients (Slope m, Intercept c) for the three 
+//           segments of the piecewise function s(u) based on candle shape and trend.
+// @param   uwB    series float  The normalized upper wick boundary (0..1).
+// @param   lwB    series float  The normalized lower wick boundary (0..1).
+// @param   beta   series float  Trend factor affecting body tilt (-1..1).
+// @param   delta  series float  Wick imbalance factor (-0.5..0.5).
+// @returns [m1, c1, m2, c2, m3, c3]
+//          m1  series float  Slope of Segment 1 (Lower Wick).
+//          c1  series float  Intercept of Segment 1 (Lower Wick).
+//          m2  series float  Slope of Segment 2 (Body).
+//          c2  series float  Intercept of Segment 2 (Body).
+//          m3  series float  Slope of Segment 3 (Upper Wick).
+//          c3  series float  Intercept of Segment 3 (Upper Wick).
+_calcBuyShareCoeffs(
+  series float uwB,
+  series float lwB,
+  series float beta,
+  series float delta
+  ) =>
+    series float kL = (1.0 + beta) * 0.25 + delta * 0.5
+    series float m1 = 0.0
+    series float c1 = 0.5 + kL
+    if lwB > EPSILON
+        m1 := -kL / lwB
+    
+    series float bodyLen = uwB - lwB
+    series float m2 = 0.0
+    series float c2 = 0.5 
+    if bodyLen > EPSILON
+        m2 := (beta * 0.5) / bodyLen
+        series float mid = (lwB + uwB) * 0.5
+        c2 := 0.5 + (beta * 0.25) - (m2 * mid)
+
+    series float kU = (1.0 - beta) * 0.25 + delta * 0.5
+    series float wickU = 1.0 - uwB
+    series float m3 = 0.0
+    series float c3 = 0.5
+    if wickU > EPSILON
+        m3 := -kU / wickU
+        c3 := 0.5 - (m3 * uwB)
+
+    [m1, c1, m2, c2, m3, c3]
+
+// @function Evaluates the piecewise Buy-Share function s(u) at a specific point.
+//           Used as a fallback for singularity handling (e.g., zero-width bins)
+//           or point-based logic. Uses centralized SSOT coefficients.
+// @param   normP  series float   Normalized price position u ∈ [0, 1].
+// @param   uwB    series float   Upper body/wick boundary.
+// @param   lwB    series float   Lower wick/body boundary.
+// @param   beta   series float   Trend factor.
+// @param   delta  series float   Wick factor.
+// @returns        series float   The buy share value s(u) ∈ [0, 1].
+method _calcBuyShare(
+  series float normP,
+  series float uwB,
+  series float lwB,
+  series float beta,
+  series float delta
+  ) =>
+    [m1, c1, m2, c2, m3, c3] = _calcBuyShareCoeffs(uwB, lwB, beta, delta)
+
+    series float val = 0.5
+    if normP < lwB
+        val := m1 * normP + c1
+    else if normP > uwB
+        val := m3 * normP + c3
+    else
+        val := m2 * normP + c2
+    _clamp(val, 1.0, 0.0)
+
+// @function Calculates the definite integral of a linear buy-share segment weighted by the PDF.
+//           Formula: ∫ (m·u + c) · f(p) du  ≡  m · ∫ u·f(u) + c · ∫ f(u)
+//           Leverages LibBrSt's analytical CDF and Partial Moment functions.
+// @param   est        series LibBrSt.RealEst Structural estimator model (e.g., Beta, T4).
+// @param   m          series float           Slope of the linear buy-share segment s(u).
+// @param   c          series float           Intercept of the linear buy-share segment s(u).
+// @param   start      series float           Normalized start coordinate u ∈ [0, 1].
+// @param   end        series float           Normalized end coordinate u ∈ [0, 1].
+// @param   pRawEnd    series float           Raw price corresponding to 'end' (input for LibBrSt).
+// @param   pRawStart  series float           Raw price corresponding to 'start' (input for LibBrSt).
+// @param   isLog      series bool            If true, LibBrSt applies logarithmic transformation.
+// @param   off        series int             Bar offset.
+// @returns            series float           The calculated integral value.
+_calcBuyVolShare(
+  series LibBrSt.RealEst est,
+  series float m,
+  series float c,
+  series float start,
+  series float end,
+  series float pRawEnd,
+  series float pRawStart,
+  series bool isLog,
+  series int off
+  ) =>
+    if end <= start + EPSILON
+        0.0
+    else
+        series float volShare = LibBrSt.realCdf(est, pRawEnd, pRawStart, isLog, off)
+        
+        series float momEnd   = LibBrSt.realPartialMuRel(est, pRawEnd, isLog, off)
+        series float momStart = LibBrSt.realPartialMuRel(est, pRawStart, isLog, off)
+        series float moment   = momEnd - momStart
+
+        (m * moment) + (c * volShare)
+
+// @function Calculates the Buy-to-Total volume ratio for a specific bin using 
+//           Exact Analytical Integration.
+//           Decomposes the buy-share function s(u) into segments and integrates them
+//           against the PDF calculated volume share. Handles strict coordinate mapping to ensure 
+//           cuts are valid in both Linear and Logarithmic space.
+// @param   self       VPrf          The profile object.
+// @param   idx          series int    The index of the bin to analyze.
+// @param   hi           series float  The high price of the bar.
+// @param   lo           series float  The low price of the bar.
+// @param   uwB          series float  Upper body/wick boundary (0..1).
+// @param   lwB          series float  Lower wick/body boundary (0..1).
+// @param   beta         series float  Trend factor.
+// @param   delta        series float  Wick factor.
+// @param   totVolShare  series float  Pre-calculated PDF calculated volume share of the bin (Optimization).
+// @param   isLog        series bool   True if calculating in Log-Space.
+// @param   offset       series int    Bar offset.
+// @returns              series float  The calculated buy ratio ∈ [0, 1].
+method _calcBuyVolRatio(
+  VPrf self,
+  series int idx,
+  series float hi,
+  series float lo,
+  series float uwB,
+  series float lwB,
+  series float beta,
+  series float delta,
+  series float totVolShare, 
+  series bool isLog,
+  series int offset
+  ) =>
+    [binUp, binLo] = self._prof.getBinBnds(idx)
+
+    series float ub = math.min(binUp, hi)
+    series float lb = math.max(binLo, lo)
+
+    if ub <= lb + EPSILON
+        0.0
+    else
+        [m1, c1, m2, c2, m3, c3] = _calcBuyShareCoeffs(uwB, lwB, beta, delta)
+
+        series float baseVal  = 0.0
+        series float rangeVal = 0.0
+        
+        if isLog
+            series float lnHi = math.log(math.max(hi, EPSILON))
+            series float lnLo = math.log(math.max(lo, EPSILON))
+            baseVal  := lnLo
+            rangeVal := lnHi - lnLo
+        else
+            baseVal  := lo
+            rangeVal := hi - lo
+
+        series float invRng = rangeVal > EPSILON ? 1.0 / rangeVal : 0.0
+
+        series float vLb    = isLog ? math.log(math.max(lb, EPSILON)) : lb
+        series float uStart = math.max(0.0, math.min(1.0, (vLb - baseVal) * invRng))
+        
+        series float vUb    = isLog ? math.log(math.max(ub, EPSILON)) : ub
+        series float uEnd   = math.max(0.0, math.min(1.0, (vUb - baseVal) * invRng))
+
+        series float sumBuy = 0.0
+        
+        if uStart < lwB
+            series float uSegEnd = math.min(uEnd, lwB)
+            
+            series float rawValEnd = baseVal + uSegEnd * rangeVal
+            series float pSegEnd   = isLog ? math.exp(rawValEnd) : rawValEnd
+            
+            sumBuy += _calcBuyVolShare(self._estimator, m1, c1, uStart, uSegEnd, pSegEnd, lb, isLog, offset)
+
+        if uEnd > lwB and uStart < uwB
+            series float uSegStart = math.max(uStart, lwB)
+            series float uSegEnd   = math.min(uEnd, uwB)
+            
+            series float rawValEnd = baseVal + uSegEnd * rangeVal
+            series float pSegEnd   = isLog ? math.exp(rawValEnd) : rawValEnd
+            
+            series float rawValStart = baseVal + uSegStart * rangeVal
+            series float pSegStart   = isLog ? math.exp(rawValStart) : rawValStart
+            
+            sumBuy += _calcBuyVolShare(self._estimator, m2, c2, uSegStart, uSegEnd, pSegEnd, pSegStart, isLog, offset)
+
+        if uEnd > uwB
+            series float uSegStart = math.max(uStart, uwB)
+            
+            series float rawValStart = baseVal + uSegStart * rangeVal
+            series float pSegStart   = isLog ? math.exp(rawValStart) : rawValStart
+            
+            sumBuy += _calcBuyVolShare(self._estimator, m3, c3, uSegStart, uEnd, ub, pSegStart, isLog, offset)
+
+        if totVolShare > EPSILON
+            _clamp(sumBuy / totVolShare, 1.0, 0.0)
+        else
+            series float midNorm = (uStart + uEnd) * 0.5
+            series float val = 0.5
+            
+            if midNorm < lwB
+                val := m1 * midNorm + c1
+            else if midNorm > uwB
+                val := m3 * midNorm + c3
+            else
+                val := m2 * midNorm + c2
+            _clamp(val, 1.0, 0.0)
+
+// @function Add volume quantity to Buy or Sell array at bin `idx`.
+// @param   self    VPrf          profile object
+// @param   idx     series int    bin index 0…bins‑1
+// @param   vol     series float  volume quantity (absolute units)
+// @param   isBuy   series bool   `true` → add to Buy, `false` → Sell
+// @returns         VPrf          `self` (chaining)
+method _addVolume(
+  VPrf self,
+  series int idx,
+  series float vol,
+  series bool isBuy
+  ) =>
+    if vol > EPSILON
+        self._cvd   += isBuy ? vol : -vol
+        self._cvdHi := math.max(self._cvdHi, self._cvd)
+        self._cvdLo := math.min(self._cvdLo, self._cvd)
+
+        self._prof.addMass(
+          idx      = idx,
+          mass     = vol,
+          useMassA = isBuy)
+    
+    self
+
+// @function Adds a bar's volume using classic allocation.
+// @param   self    VPrf        Profile object
+// @param   offset  series int  Bar offset for calculations
+// @returns         VPrf       `self` (chaining)
+method _addBarClassic(
+  VPrf self,
+  series int offset
+  ) =>
+    series bool isBuy = close[offset] >= open[offset]
+    series int idx    = self._prof.getBinIdx(close[offset])
+
+    self._addVolume(idx, volume[offset], isBuy)
+    
+    self
+
+// @function Adds a bar's volume using PDF allocation and classic split.
+// @param   self    VPrf        Profile object
+// @param   isLog   series bool True if calculating in Log-Space.
+// @param   offset  series int  Bar offset for calculations
+// @returns         VPrf       `self` (chaining)
+method _addBarPdfClassic(
+  VPrf self,
+  series bool isLog,
+  series int offset
+  ) =>
+    series bool isBuy = close[offset] >= open[offset]
+    series int idxUp  = self._prof.getBinIdx(high[offset])
+    series int idxLo  = self._prof.getBinIdx(low[offset])
+
+    for idx = idxLo to idxUp
+        series float volShare = self._calcVolShare(idx, high[offset], low[offset], isLog, offset)
+        if volShare > EPSILON
+            self._addVolume(idx, volShare * volume[offset], isBuy)
+    
+    self
+
+// @function Calculates the normalized lower and upper body boundaries of a bar.
+// @param   isLog  series bool True if calculating in Log-Space.
+// @param   offset series int  The offset of the bar.
+// @returns [uwB, lwB, beta]
+//          uwB   series float  The normalized upper wick boundary of the candle (0..1).
+//          lwB   series float  The normalized lower wick boundary of the candle (0..1).
+//          beta  series float  The clamped, normalized body size and direction (-1..1).
+_calcCandleShape(
+  series bool isLog,
+  series int offset
+  ) =>
+    series float rawH = high[offset]
+    series float rawL = low[offset]
+    
+    if rawH <= rawL + EPSILON
+        [0.5, 0.5, 0.0]
+    else
+        series float rawO = open[offset]
+        series float rawC = close[offset]
+
+        series float o = isLog ? math.log(math.max(rawO, EPSILON)) : rawO
+        series float h = isLog ? math.log(math.max(rawH, EPSILON)) : rawH
+        series float l = isLog ? math.log(math.max(rawL, EPSILON)) : rawL
+        series float c = isLog ? math.log(math.max(rawC, EPSILON)) : rawC
+
+        series float rng = h - l
+        
+        if rng < EPSILON
+            [0.5, 0.5, 0.0]
+        else
+            series float invRng = 1.0 / rng
+            series float uwB  = (math.max(o, c) - l) * invRng
+            series float lwB  = (math.min(o, c) - l) * invRng
+            series float beta = _clamp((c - o) * invRng, 1.0, -1.0)
+            [uwB, lwB, beta]
+
+// @function Adds a bar's volume using PDF allocation and Dynamic Split logic.
+//           Optimized Implementation: Calculates the PDF mass for each bin only once
+//           and passes it to the ratio calculator to avoid redundant heavy math operations.
+// @param   self    VPrf        The profile object.
+// @param   isLog   series bool True if calculating in Log-Space.
+// @param   offset  series int  Bar offset for calculations.
+// @returns         VPrf        `self` (allows method chaining).
+method _addBarPdfDynamic(
+  VPrf self, 
+  series bool isLog,
+  series int offset
+  ) =>
+    [uwB0, lwB0, beta0]  = _calcCandleShape(isLog, offset)
+
+    series float sumBeta  = 0.0
+    series float sumWicks = 0.0
+    series float   cnt    = 0.0
+    for k = 1 to self._trendLen
+        if not (na(open[k + offset]) or na(low[k + offset]) or na(close[k + offset]))
+            [uwBK, lwBK, betaK]  = _calcCandleShape(isLog, k + offset)
+
+            sumBeta  += betaK
+            sumWicks += _clamp((lwBK - (1.0 - uwBK)), 1, -1)
+            cnt      += 1.0
+
+    series float meanBeta = cnt > 0 ? sumBeta  / cnt : 0.0
+    series float meanWick = cnt > 0 ? sumWicks / cnt : 0.0
+
+    series float beta  = _clamp((beta0 + meanBeta) * 0.5, 1, -1)
+    series float delta = _clamp(meanWick * 0.5, 0.5, -0.5)
+
+    series int idxUp = self._prof.getBinIdx(high[offset])
+    series int idxLo = self._prof.getBinIdx(low[offset])
+    for idx = idxLo to idxUp
+        series float totVolShare = self._calcVolShare(idx, high[offset], low[offset], isLog, offset)
+        
+        if totVolShare > EPSILON
+            series float buyVolRatio = self._calcBuyVolRatio(
+              idx, high[offset], low[offset], 
+              uwB0, lwB0, beta, delta, 
+              totVolShare,
+              isLog, offset
+            )
+            
+            series float buyVolShare = totVolShare * buyVolRatio
+            series float selVolShare = totVolShare - buyVolShare
+            
+            if buyVolShare > EPSILON
+                self._addVolume(idx, buyVolShare * volume[offset], true)
+            if selVolShare > EPSILON
+                self._addVolume(idx, selVolShare * volume[offset], false)
+
+    self
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function Construct a new `VPrf` object.
+// @param   bins       series int        Number of price bins ≥ 1 (Resolution grid).
+// @param   upper      series float      Upper price bound (absolute).
+// @param   lower      series float      Lower price bound (absolute).
+// @param   valueArea  series int        Percentage of total volume for Value Area (1..100).
+// @param   dynamic    series bool       Flag for dynamic adaption of profile bounds.
+// @param   isLog      series bool       Flag to enable Logarithmic bin scaling.
+// @param   gapSize    series int        Noise filter for segmentation (default 1).
+// @param   allot      series AllotMode  Volume allocation mode (default `classic`).
+// @param   estimator  series LibBrSt.RealEst PDF model (default `uniform`).
+// @param   split      series SplitMode  Buy/Sell split strategy (default `classic`).
+// @param   trendLen   series int        Look‑back bars for trend factor (default 3).
+// @returns            VPrf              Freshly initialised volume profile.
+export create(
+  series int bins,
+  series float upper,
+  series float lower,
+  series int valueArea,
+  series bool dynamic = false,
+  series bool isLog = false,
+  series int gapSize = 1,
+  series AllotMode allot = AllotMode.classic,
+  series LibBrSt.RealEst estimator = LibBrSt.RealEst.uniform,
+  series SplitMode split = SplitMode.classic,
+  series int trendLen = 3
+  ) =>
+    LibProf.Prof prof = LibProf.create(
+      bins       = bins,
+      upper      = upper,
+      lower      = lower,
+      
+      resolution = syminfo.mintick,
+      dynamic    = dynamic,
+      isLog      = isLog,
+
+      coverage   = valueArea,
+      gapSize    = gapSize),
+
+    VPrf.new(
+      _prof      = prof,
+
+      _allot     = allot,
+      _estimator = estimator,
+      
+      _split     = split,
+      _trendLen  = math.max(trendLen, 1),
+
+      _cvd       = 0.0,
+      _cvdHi     = 0.0,
+      _cvdLo     = 0.0)
+
+// @function Create a deep copy of the volume profile.
+// @param    self VPrf  Profile object to copy
+// @returns       VPrf  A new, independent copy of the profile
+export method clone(
+  VPrf self
+  ) =>
+    VPrf.new(
+      _prof      = self._prof.clone(),
+
+      _allot     = self._allot,
+      _estimator = self._estimator,
+
+      _split     = self._split,
+      _trendLen  = self._trendLen,
+
+      _cvd       = self._cvd,
+      _cvdHi     = self._cvdHi,
+      _cvdLo     = self._cvdLo)
+
+// @function Merges volume data from a source profile into the current profile.
+//           If resizing is needed, it performs a high-fidelity re-bining of existing
+//           volume using a linear interpolation model inferred from neighboring bins,
+//           preventing aliasing artifacts and ensuring accurate volume preservation.
+// @param   self    VPrf          The target profile object to merge into.
+// @param   buyVol  array<float>  The source profile's Buy Volume array.
+// @param   sellVol array<float>  The source profile's Sell Volume array.
+// @param   upper   series float  The upper price bound of the source profile.
+// @param   lower   series float  The lower price bound of the source profile.
+// @param   cvd     series float  The final Cumulative Volume Delta (CVD) value of the source profile.
+// @param   cvdHi   series float  The historical high-water mark of the CVD from the source profile.
+// @param   cvdLo   series float  The historical low-water mark of the CVD from the source profile.
+// @returns         VPrf          `self` (chaining), now containing the merged data.
+export method merge(
+  VPrf self,
+  array<float> buyVol,
+  array<float> sellVol,
+  series float upper,
+  series float lower,
+  series float cvd,
+  series float cvdHi,
+  series float cvdLo
+  ) =>
+    self._prof.merge(
+      massA = buyVol,
+      massB = sellVol,
+      upper = upper,
+      lower = lower)
+    
+    self._cvdHi := math.max(self._cvdHi, self._cvd + cvdHi)
+    self._cvdLo := math.min(self._cvdLo, self._cvd + cvdLo)
+    self._cvd   += cvd
+
+    self
+
+// @function Reset all bin tallies while keeping configuration intact.
+// @param   self VPrf  profile object
+// @returns      VPrf  cleared profile (chaining)
+export method clear(
+  VPrf self
+  ) =>
+    self._prof.clear()
+
+    self._cvd   := 0.0
+    self._cvdHi := 0.0
+    self._cvdLo := 0.0
+
+    self
+
+// @function Add current bar’s volume to the profile (call once per realtime bar).
+//           classic mode: allocates all volume to the close bin and classifies
+//           by `close >= open`. PDF mode: distributes volume across bins by the
+//           estimator’s CDF mass. For `split = dynamic`, the buy/sell share per
+//           price is computed via context-driven piecewise s(u).
+// @param   self    VPrf        Profile object
+// @param   offset  series int  To offset the calculated bar 
+// @returns         VPrf        `self` (method chaining)
+export method addBar(
+  VPrf self,
+  series int offset = 0
+  ) =>
+    if not na(open[offset])   and
+       not na(high[offset])   and
+       not na(low[offset])    and
+       not na(close[offset])  and
+       not na(volume[offset]) and
+       volume[offset] > EPSILON
+        self._prof.adapt(high[offset], low[offset])
+
+        series bool isLog = self._prof._isLog
+
+        if self._allot == AllotMode.classic or high[offset] == low[offset]
+            self._addBarClassic(offset)
+        else if self._allot == AllotMode.pdf
+            if self._split == SplitMode.classic
+                self._addBarPdfClassic(isLog, offset)
+            else if self._split == SplitMode.dynamic
+                self._addBarPdfDynamic(isLog, offset)
+            else
+                runtime.error("Unknown buy/sell split mode")
+        else
+            runtime.error("Unknown volume profile mode")
+    
+    self
+
+// @function Sets the number of bins for the volume profile.
+//           Behavior depends on the `isDynamic` flag.
+//           - If `dynamic = true`: Works on filled profiles by re-bining to a new resolution.
+//           - If `dynamic = false`: Only works on empty profiles to prevent accidental changes.
+// @param   self    VPrf        Profile object
+// @param   bins    series int  The new number of bins
+// @returns         VPrf       `self` (chaining)
+export method setBins(
+  VPrf self,
+  series int bins
+  ) =>
+    self._prof.setBins(bins = bins)
+    
+    self
+
+// @function Sets the price bounds for the volume profile.
+//           Behavior depends on the `dynamic` flag.
+//           - If `dynamic = true`: Works on filled profiles by re-bining existing volume.
+//           - If `dynamic = false`: Only works on empty profiles to prevent accidental changes.
+// @param   self     VPrf          Profile object
+// @param   upper    series float  The new upper price bound
+// @param   lower    series float  The new lower price bound
+// @returns          VPrf          `self` (chaining)
+export method setBounds(
+  VPrf self,
+  series float upper,
+  series float lower
+  ) =>
+    self._prof.setBounds(upper = upper, lower = lower)
+    
+    self
+
+// @function Sets the minimum resolution (granularity limit) for the underlying engine.
+//           Useful if you want to impose a coarser grid limit than the symbol's mintick
+//           or update limits dynamically.
+// @param   self     VPrf         Profile object
+// @param   minStep  series float The new smallest allowed bin size.
+// @returns          VPrf         `self` (chaining)
+export method setResolution(
+  VPrf self,
+  series float resolution
+  ) =>
+    self._prof.setResolution(resolution = resolution)
+
+    self
+
+// @function Toggles the geometry of the profile between Linear and Logarithmic.
+//           Behavior depends on the `dynamic` flag.
+//           - If `dynamic = true`: Volume is re-distributed (merged) into the new geometric grid.
+//           - If `dynamic = false`: Only works on empty profiles.
+// @param   self   VPrf        Profile object
+// @param   isLog  series bool True for Logarithmic, False for Linear.
+// @returns        VPrf       `self` (chaining)
+export method setLog(
+  VPrf self,
+  series bool isLog
+  ) =>
+    self._prof.setLog(isLog = isLog)
+
+    self
+
+// @function Set the percentage of volume for the Value Area. If the value
+//           changes, the profile is finalized again.
+// @param   self       VPrf        Profile object
+// @param   valueArea  series int  The new Value Area percentage (0..100)
+// @returns            VPrf       `self` (chaining)
+export method setValueArea(
+  VPrf self,
+  series int valueArea
+  ) =>
+    self._prof.setCoverage(coverage = valueArea)
+
+    self
+
+// @function Sets the gap size (noise filter) for segmentation.
+// @param   self       VPrf      Profile object
+// @param   gapSize  series int  Number of bins allowed to violate monotonicity
+// @returns            VPrf      `self` (chaining)
+export method setGapSize(
+  VPrf self,
+  series int gapSize
+  ) =>
+    self._prof.setGapSize(gapSize = gapSize)
+    
+    self
+
+// @function Returns the current number of bins in the profile.
+// @param    self VPrf       The profile object.
+// @returns       series int The number of bins.
+export method getBins(
+  VPrf self
+  ) =>
+    self._prof.getBins()
+
+// @function Returns the current price bounds of the profile.
+// @param    self VPrf        The profile object.
+// @returns [upper, lower]
+//          upper  series float The upper price bound of the profile.
+//          lower  series float The lower price bound of the profile.
+export method getBounds(
+  VPrf self
+  ) =>
+    self._prof.getBounds()
+
+// @function Get Width of a bin.
+// @param   self VPrf         Profile object
+// @returns      series float The witdh of a bin
+export method getBinWidth(
+  VPrf self
+  ) =>
+    self._prof.getBinWidth()
+
+// @function Get Index of a bin.
+// @param   self VPrf           Profile object
+// @param   price  series float The price to find the bin index for
+// @returns        series int   bin index 0…bins‑1 (clamped)
+export method getBinIdx(
+  VPrf self,
+  series float price
+  ) =>
+    self._prof.getBinIdx(level = price)
+
+// @function Get Bounds of a bin.
+// @param   self VPrf        Profile object
+// @param   idx  series int  Bin index
+// @returns [up, lo]
+//          up  series float  The upper price bound of the bin.
+//          lo  series float  The lower price bound of the bin.
+export method getBinBnds(
+  VPrf self,
+  series int idx
+  ) =>
+    self._prof.getBinBnds(idx = idx)
+
+// @function Get Mid price of a bin.
+// @param   self VPrf       Profile object
+// @param   idx  series int    Bin index
+// @returns      series float  Mid price
+export method getBinMid(
+  VPrf self,
+  series int idx
+  ) =>
+    self._prof.getBinMid(idx = idx)
+
+// @function Returns a copy of the internal raw data array for **Buy Volume** directly.
+// @param    self VPrf The profile object.
+// @returns       array<float> The internal array for buy volume.
+export method getBuyVol(
+  VPrf self
+  ) =>
+    self._prof.getMassA()
+
+// @function Returns a copy of the internal raw data array for **Sell Volume** directly.
+// @param    self VPrf The profile object.
+// @returns       array<float> The internal array for sell volume.
+export method getSellVol(
+  VPrf self
+  ) =>
+    self._prof.getMassB()
+
+// @function Get Buy volume of a bin.
+// @param   self  VPrf          Profile object
+// @param   idx   series int    Bin index
+// @returns       series float  Buy volume ≥ 0
+export method getBinBuyVol(
+  VPrf self,
+  series int idx
+  ) =>
+    self._prof.getBinMassA(idx = idx)
+
+// @function Get Sell volume of a bin.
+// @param   self  VPrf          Profile object
+// @param   idx   series int    Bin index
+// @returns       series float  Sell volume ≥ 0
+export method getBinSellVol(
+  VPrf self,
+  series int idx
+  ) =>
+    self._prof.getBinMassB(idx = idx)
+
+// @function Get POC information.
+// @param   self VPrf  Profile object
+// @returns [pocIndex, pocPrice]
+//          pocIndex  series int    The index of the Point of Control (POC) bin.
+//          pocPrice. series float  The mid-price of the Point of Control (POC) bin.
+export method getPoc(
+  VPrf self
+  ) =>
+    self._prof.getPeak()
+
+// @function Get Value Area (VA) information.
+// @param   self VPrf  Profile object
+// @returns [vaUpIndex, vaUpPrice, vaLoIndex, vaLoPrice]
+//          vaUpIndex  series int    The index of the upper bound bin of the Value Area.
+//          vaUpPrice  series float  The upper price bound of the Value Area.
+//          vaLoIndex  series int    The index of the lower bound bin of the Value Area.
+//          vaLoPrice  series float  The lower price bound of the Value Area.
+export method getValueArea(
+  VPrf self
+  ) =>
+    self._prof.getCoverage()
+
+// @function Get the profile's median price and its bin index. Calculates the value on-demand if stale.
+// @param   self VPrf         Profile object.
+// @returns [series int, series float]  [medianIndex, medianPrice]
+//          medianIndex  series int    The index of the bin containing the Median.
+//          medianPrice  series float  The Median price of the profile.
+export method getMedian(
+  VPrf self
+  ) =>
+    self._prof.getMedian()
+
+// @function Get the profile's VWAP and its bin index. Calculates the value on-demand if stale.
+// @param   self  VPrf         Profile object.
+// @returns [series int, series float]  [vwapIndex, vwapPrice]
+//          vwapIndex    series int    The index of the bin containing the VWAP.
+//          vwapPrice    series float  The Volume Weighted Average Price of the profile.
+export method getVwap(
+  VPrf self
+  ) =>
+    self._prof.getMean()
+
+// @function Get the profile's volume-weighted standard deviation. Calculates the value on-demand if stale.
+// @param   self  VPrf         Profile object.
+// @returns       series float  The Standard deviation of the profile.
+export method getStdDev(
+  VPrf self
+  ) =>
+    self._prof.getStdDev()
+
+// @function Get the profile's skewness. Calculates the value on-demand if stale.
+// @param   self  VPrf         Profile object.
+// @returns       series float  The Skewness of the profile.
+export method getSkewness(
+  VPrf self
+  ) =>
+    self._prof.getSkewness()
+
+// @function Get the profile's excess kurtosis. Calculates the value on-demand if stale.
+// @param   self  VPrf         Profile object.
+// @returns       series float  The Kurtosis of the profile.
+export method getKurtosis(
+  VPrf self
+  ) =>
+    self._prof.getKurtosis()
+
+// @function Get the profile's fundamental unimodal segments. Calculates on-demand if stale.
+//           Uses a parameter-free, pivot-based recursive algorithm.
+// @param   self  VPrf        The profile object.
+// @returns       matrix<int>  A 2-column matrix where each row is an [startIndex, endIndex] pair.
+export method getSegments(
+  VPrf self
+  ) =>
+    self._prof.getSegments()
+
+// @function Cumulative Volume Delta (CVD) like metric over all bins.
+// @param    self    VPrf      Profile object.
+// @returns [cvd, cvdHi, cvdLo]
+//          cvd    series float  The final Cumulative Volume Delta (Total Buy Vol - Total Sell Vol).
+//          cvdHi  series float  The running high-water mark of the CVD as volume was added.
+//          cvdLo  series float  The running low-water mark of the CVD as volume was added.
+export method getCvd(
+  VPrf self
+  ) =>
+    series float totVol = array.sum(self._prof.getMassA()) + array.sum(self._prof.getMassB())
+    if totVol > 0
+        [self._cvd, self._cvdHi, self._cvdLo]
+    else
+        [na, na, na]

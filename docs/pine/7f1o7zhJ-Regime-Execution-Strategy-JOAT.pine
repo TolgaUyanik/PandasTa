@@ -1,0 +1,291 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © officialjackofalltrades
+//@version=6
+strategy("Regime Execution Strategy [JOAT]", "RES [JOAT]", overlay = true, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, process_orders_on_close = true)
+
+//------------------------------------------------------------------------------
+// Constants
+//------------------------------------------------------------------------------
+color JOAT_BULL   = #089981
+color JOAT_BEAR   = #f23645
+color JOAT_TEXT   = #DBDBDB
+color JOAT_MID    = #787b86
+color JOAT_PANEL  = #161616
+color JOAT_BORDER = #2E2E2E
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+groupForecast = "Forecast"
+srcInput = input.source(close, "Source", group = groupForecast)
+lambdaInput = input.float(0.975, "Forgetting Factor", minval = 0.80, maxval = 1.0, step = 0.005, group = groupForecast)
+regLenInput = input.int(80, "Regression Horizon", minval = 10, group = groupForecast)
+bandMultInput = input.float(1.8, "Band Multiplier", minval = 0.1, step = 0.1, group = groupForecast)
+atrMixInput = input.float(0.35, "ATR Blend", minval = 0.0, maxval = 2.0, step = 0.05, group = groupForecast)
+rebaseInput = input.int(200, "Rebase Interval", minval = 25, group = groupForecast)
+
+groupChannel = "Channel"
+channelResetInput = input.int(20, "Reset Length", minval = 1, group = groupChannel)
+channelAlphaInput = input.float(50.0, "Reset Alpha", minval = 0.0, maxval = 100.0, step = 1.0, group = groupChannel) / 100.0
+
+groupRegime = "Regime"
+fastLenInput = input.int(21, "Fast EMA", minval = 2, group = groupRegime)
+slowLenInput = input.int(55, "Slow EMA", minval = 3, group = groupRegime)
+pressureLenInput = input.int(20, "Pressure Length", minval = 5, group = groupRegime)
+pressureThreshInput = input.float(0.10, "Pressure Threshold", minval = 0.0, maxval = 1.0, step = 0.01, group = groupRegime)
+rvolMinInput = input.float(0.80, "Min RVOL", minval = 0.1, step = 0.05, group = groupRegime)
+voteThreshInput = input.int(2, "Min Votes", minval = 1, maxval = 3, group = groupRegime)
+
+groupRisk = "Risk"
+stopAtrInput = input.float(1.6, "Stop ATR", minval = 0.1, step = 0.1, group = groupRisk)
+targetAtrInput = input.float(2.6, "Target ATR", minval = 0.1, step = 0.1, group = groupRisk)
+maxDrawdownInput = input.float(15.0, "Max Drawdown %", minval = 0.1, step = 0.1, group = groupRisk)
+maxOrdersInput = input.int(6, "Max Intraday Filled Orders", minval = 1, group = groupRisk)
+
+groupVisual = "Visuals"
+showDashInput = input.bool(true, "Show Dashboard", group = groupVisual)
+showBandsInput = input.bool(true, "Show Bands", group = groupVisual)
+showChannelInput = input.bool(true, "Show Channel", group = groupVisual)
+showRegimeTintInput = input.bool(true, "Show Regime Background", group = groupVisual)
+dashPosInput = input.string("Top Right", "Position", options = ["Top Right", "Bottom Right", "Bottom Left"], group = groupVisual)
+dashSizeInput = input.string("Normal", "Size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = groupVisual)
+bullBandInput = input.color(color.new(JOAT_BULL, 0), "Bull Band", group = groupVisual)
+bearBandInput = input.color(color.new(JOAT_BEAR, 0), "Bear Band", group = groupVisual)
+meanInput = input.color(color.new(JOAT_MID, 25), "Mean", group = groupVisual)
+channelInput = input.color(color.new(#7f8c98, 35), "Channel", group = groupVisual)
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+parsePos(string choice) =>
+    switch choice
+        "Top Right" => position.top_right
+        "Bottom Right" => position.bottom_right
+        => position.bottom_left
+
+parseSize(string choice) =>
+    switch choice
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.huge
+
+var parsedDashSize = parseSize(dashSizeInput)
+
+cell(table t, int c, int r, string txt, color txtColor, color bg, align) =>
+    t.cell(c, r, txt, text_color = txtColor, bgcolor = bg, text_size = parsedDashSize, text_halign = align)
+
+tanhFast(float x) =>
+    float ex = math.exp(2.0 * x)
+    (ex - 1.0) / (ex + 1.0)
+
+strategy.risk.max_drawdown(maxDrawdownInput, strategy.percent_of_equity)
+strategy.risk.max_intraday_filled_orders(maxOrdersInput)
+
+//------------------------------------------------------------------------------
+// Forecast Engine
+//------------------------------------------------------------------------------
+var float beta0 = srcInput
+var float beta1 = 0.0
+var float p00 = 1000.0
+var float p01 = 0.0
+var float p11 = 1000.0
+var float errEwma = 0.0
+var int baseBar = bar_index
+
+if bar_index == 0
+    beta0 := srcInput
+    beta1 := 0.0
+    baseBar := 0
+
+if barstate.isconfirmed and bar_index > 0 and rebaseInput > 0 and bar_index % rebaseInput == 0
+    baseBar := bar_index
+    beta0 := srcInput
+    beta1 := 0.0
+    p00 := 1000.0
+    p01 := 0.0
+    p11 := 1000.0
+    errEwma := 0.0
+
+float xNorm = math.max(0.0, (bar_index - baseBar) / math.max(1.0, float(regLenInput)))
+float forecastMean = beta0 + beta1 * xNorm
+float forecastErr = srcInput - forecastMean
+
+errEwma := lambdaInput * errEwma + (1.0 - lambdaInput) * math.pow(forecastErr, 2)
+
+float px0 = p00 + p01 * xNorm
+float px1 = p01 + p11 * xNorm
+float denom = lambdaInput + px0 + xNorm * px1
+
+if denom != 0
+    float k0 = px0 / denom
+    float k1 = px1 / denom
+    beta0 += k0 * forecastErr
+    beta1 += k1 * forecastErr
+    p00 := (p00 - k0 * px0) / lambdaInput
+    p01 := (p01 - k0 * px1) / lambdaInput
+    p11 := (p11 - k1 * px1) / lambdaInput
+
+float atrValue = ta.atr(14)
+float bandSpread = math.max(syminfo.mintick, math.sqrt(math.max(errEwma, 0.0)) * bandMultInput + atrValue * atrMixInput)
+float upperBand = forecastMean + bandSpread
+float lowerBand = forecastMean - bandSpread
+
+//------------------------------------------------------------------------------
+// Channel Engine
+//------------------------------------------------------------------------------
+var float upperCore = high
+var float lowerCore = low
+var int upperAge = 0
+var int lowerAge = 0
+var int channelState = 0
+
+if bar_index == 0
+    upperCore := high
+    lowerCore := low
+
+bool newUpperExtreme = high >= upperCore
+bool newLowerExtreme = low <= lowerCore
+
+if newUpperExtreme
+    upperCore := high
+    upperAge := 0
+    channelState := 1
+else
+    upperAge += 1
+    if upperAge >= channelResetInput
+        upperCore := upperCore * (1.0 - channelAlphaInput) + high * channelAlphaInput
+        upperAge := 0
+
+if newLowerExtreme
+    lowerCore := low
+    lowerAge := 0
+    channelState := -1
+else
+    lowerAge += 1
+    if lowerAge >= channelResetInput
+        lowerCore := lowerCore * (1.0 - channelAlphaInput) + low * channelAlphaInput
+        lowerAge := 0
+
+float channelMid = (upperCore + lowerCore) / 2.0
+float channelRange = math.max(syminfo.mintick, upperCore - lowerCore)
+float pricePos = (close - lowerCore) / channelRange * 100.0
+
+if barstate.isconfirmed and newLowerExtreme and close > channelMid and close > open
+    channelState := 1
+if barstate.isconfirmed and newUpperExtreme and close < channelMid and close < open
+    channelState := -1
+
+//------------------------------------------------------------------------------
+// Regime Engine
+//------------------------------------------------------------------------------
+float fastEma = ta.ema(close, fastLenInput)
+float slowEma = ta.ema(close, slowLenInput)
+float momentum = ta.roc(close, pressureLenInput)
+float momentumStdev = nz(ta.stdev(momentum, pressureLenInput), 1.0)
+float momentumNorm = tanhFast(momentum / math.max(momentumStdev, syminfo.mintick))
+float volAvg = nz(ta.sma(volume, 20), volume)
+float rvol = volume / math.max(volAvg, 1.0)
+float pullbackSpread = math.max(syminfo.mintick, ta.highest(high, pressureLenInput) - ta.lowest(low, pressureLenInput))
+float pullbackBias = ((close - ta.lowest(low, pressureLenInput)) / pullbackSpread) * 2.0 - 1.0
+float structureBias = fastEma >= slowEma ? 1.0 : -1.0
+float forecastBias = tanhFast((close - forecastMean) / bandSpread)
+float channelBias = channelState == 1 ? 1.0 : channelState == -1 ? -1.0 : tanhFast((close - channelMid) / channelRange)
+float pressureBias = tanhFast((momentumNorm + pullbackBias) / 2.0)
+float regimeScore = (forecastBias * 0.40) + (channelBias * 0.30) + (pressureBias * 0.20) + (structureBias * 0.10)
+
+int bullVotes = (forecastBias > 0 ? 1 : 0) + (channelBias > 0 ? 1 : 0) + (pressureBias > pressureThreshInput ? 1 : 0)
+int bearVotes = (forecastBias < 0 ? 1 : 0) + (channelBias < 0 ? 1 : 0) + (pressureBias < -pressureThreshInput ? 1 : 0)
+
+bool bullRegime = regimeScore > 0.12 and rvol >= rvolMinInput
+bool bearRegime = regimeScore < -0.12 and rvol >= rvolMinInput
+bool neutralRegime = not bullRegime and not bearRegime
+
+//------------------------------------------------------------------------------
+// Entry Logic
+//------------------------------------------------------------------------------
+bool longBreakout = ta.crossover(close, forecastMean) and close > channelMid and pressureBias > pressureThreshInput
+bool longReclaim = ta.crossover(close, lowerBand) and channelBias >= 0 and pressureBias > 0
+bool shortBreakout = ta.crossunder(close, forecastMean) and close < channelMid and pressureBias < -pressureThreshInput
+bool shortReclaim = ta.crossunder(close, upperBand) and channelBias <= 0 and pressureBias < 0
+
+bool longSignal = barstate.isconfirmed and rvol >= rvolMinInput and bullVotes >= voteThreshInput and bullRegime and (longBreakout or longReclaim)
+bool shortSignal = barstate.isconfirmed and rvol >= rvolMinInput and bearVotes >= voteThreshInput and bearRegime and (shortBreakout or shortReclaim)
+
+if longSignal and not shortSignal
+    strategy.entry("Long", strategy.long, comment = "BiasLong")
+if shortSignal and not longSignal
+    strategy.entry("Short", strategy.short, comment = "BiasShort")
+
+//------------------------------------------------------------------------------
+// Exit Logic
+//------------------------------------------------------------------------------
+if strategy.position_size > 0
+    float longStopCandidate = math.max(strategy.position_avg_price - atrValue * stopAtrInput, lowerCore - syminfo.mintick)
+    float longStop = math.min(longStopCandidate, strategy.position_avg_price - syminfo.mintick)
+    float longTarget = strategy.position_avg_price + atrValue * targetAtrInput
+    strategy.exit("Long Exit", "Long", stop = longStop, limit = longTarget)
+    if barstate.isconfirmed and bearVotes >= voteThreshInput and regimeScore < -0.10
+        strategy.close("Long", comment = "BiasFlip")
+
+if strategy.position_size < 0
+    float shortStopCandidate = math.min(strategy.position_avg_price + atrValue * stopAtrInput, upperCore + syminfo.mintick)
+    float shortStop = math.max(shortStopCandidate, strategy.position_avg_price + syminfo.mintick)
+    float shortTarget = strategy.position_avg_price - atrValue * targetAtrInput
+    strategy.exit("Short Exit", "Short", stop = shortStop, limit = shortTarget)
+    if barstate.isconfirmed and bullVotes >= voteThreshInput and regimeScore > 0.10
+        strategy.close("Short", comment = "BiasFlip")
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+pMean = plot(showBandsInput ? forecastMean : na, "Forecast Mean", color = meanInput, linewidth = 2)
+pUpper = plot(showBandsInput ? upperBand : na, "Upper Band", color = bearBandInput, linewidth = 1)
+pLower = plot(showBandsInput ? lowerBand : na, "Lower Band", color = bullBandInput, linewidth = 1)
+fill(pUpper, pMean, color.new(bearBandInput, 86), title = "Upper Zone")
+fill(pMean, pLower, color.new(bullBandInput, 86), title = "Lower Zone")
+
+pChannelMid = plot(showChannelInput ? channelMid : na, "Channel Mid", color = channelInput, style = plot.style_stepline, linewidth = 1)
+pChannelUpper = plot(showChannelInput ? upperCore : na, "Channel Upper", color = color.new(channelInput, 15), style = plot.style_stepline, linewidth = 1)
+pChannelLower = plot(showChannelInput ? lowerCore : na, "Channel Lower", color = color.new(channelInput, 15), style = plot.style_stepline, linewidth = 1)
+fill(pChannelMid, pChannelUpper, color.new(channelInput, 92), title = "Upper Channel Glow")
+fill(pChannelMid, pChannelLower, color.new(channelInput, 92), title = "Lower Channel Glow")
+bgcolor(showRegimeTintInput ? (bullRegime ? color.new(JOAT_BULL, 92) : bearRegime ? color.new(JOAT_BEAR, 92) : color.new(JOAT_MID, 95)) : na, title = "Regime Background")
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+var parsedDashPos = parsePos(dashPosInput)
+var table dash = table.new(parsedDashPos, 2, 9, bgcolor = JOAT_PANEL, border_width = 0, frame_color = JOAT_BORDER, frame_width = 1)
+
+if showDashInput and barstate.islast
+    dash.merge_cells(0, 0, 1, 0)
+    cell(dash, 0, 0, "Regime Execution Strategy [JOAT]", JOAT_TEXT, JOAT_PANEL, text.align_center)
+
+    cell(dash, 0, 1, "Regime", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 1, bullRegime ? "Bull" : bearRegime ? "Bear" : "Neutral", bullRegime ? JOAT_BULL : bearRegime ? JOAT_BEAR : JOAT_TEXT, na, text.align_right)
+
+    cell(dash, 0, 2, "Score", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 2, str.tostring(regimeScore, "#.##"), regimeScore >= 0 ? JOAT_BULL : JOAT_BEAR, na, text.align_right)
+
+    cell(dash, 0, 3, "Pressure", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 3, str.tostring(pressureBias, "#.##"), pressureBias >= 0 ? JOAT_BULL : JOAT_BEAR, na, text.align_right)
+
+    cell(dash, 0, 4, "RVOL", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 4, str.tostring(rvol, "#.##"), rvol >= rvolMinInput ? JOAT_BULL : JOAT_TEXT, na, text.align_right)
+
+    cell(dash, 0, 5, "Votes", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 5, str.tostring(bullVotes) + " / " + str.tostring(bearVotes), bullVotes >= bearVotes ? JOAT_BULL : JOAT_BEAR, na, text.align_right)
+
+    cell(dash, 0, 6, "Position", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 6, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", strategy.position_size > 0 ? JOAT_BULL : strategy.position_size < 0 ? JOAT_BEAR : JOAT_TEXT, na, text.align_right)
+
+    cell(dash, 0, 7, "Band Width", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 7, str.tostring(bandSpread, format.mintick), JOAT_TEXT, na, text.align_right)
+
+    cell(dash, 0, 8, "Setup", JOAT_MID, na, text.align_left)
+    cell(dash, 1, 8, longSignal ? "Long" : shortSignal ? "Short" : neutralRegime ? "Wait" : "Hold", longSignal ? JOAT_BULL : shortSignal ? JOAT_BEAR : JOAT_TEXT, na, text.align_right)
+
+alertcondition(longSignal, "Regime Long", "Regime Execution Strategy long setup on {{ticker}}")
+alertcondition(shortSignal, "Regime Short", "Regime Execution Strategy short setup on {{ticker}}")

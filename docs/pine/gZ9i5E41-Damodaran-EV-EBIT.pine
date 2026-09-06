@@ -1,0 +1,579 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © himynameisbuzz
+// Damodaran EV/EBIT library with Developed Market mode using US base data as proxy,
+// and Emerging Market mode using the January 2026 Emerging Markets table.
+// Updated mapping includes full TradingView sector/industry coverage and proxy fills for non-bank NA industries.
+// Band outputs use log-space percentile modeling with industry sigma overrides and sector fallback.
+
+//@version=6
+library("Damodaran_EV_EBIT", overlay=true)
+
+export const float PCTL_LOW  = 0.3
+export const float PCTL_HIGH = 0.7
+
+// ------------------------------------------------------------------------------------------------
+// Z-scores for common percentiles (hardcoded)
+// ------------------------------------------------------------------------------------------------
+f_z(float p) =>
+    p == 0.10 ? -1.281551565545 :
+      p == 0.20 ? -0.841621233573 :
+      p == 0.25 ? -0.674489750196 :
+      p == 0.30 ? -0.524400512708 :
+      p == 0.70 ?  0.524400512708 :
+      p == 0.75 ?  0.674489750196 :
+      p == 0.80 ?  0.841621233573 :
+      p == 0.90 ?  1.281551565545 : na
+
+// ------------------------------------------------------------------------------------------------
+// Sector sigma (dispersion in log-space).
+// You can tune sigma later; usually you just change percentiles first.
+// ------------------------------------------------------------------------------------------------
+export sector_sigma(string sector) =>
+    switch
+        sector == "Utilities" => 0.25
+        sector == "Finance" => 0.30
+        sector == "Investment Trusts/Mutual Funds" => 0.30
+        sector == "Technology Services" => 0.65
+        sector == "Electronic Technology" => 0.65
+        sector == "Health Technology" => 0.45
+        sector == "Health Services" => 0.40
+        sector == "Retail Trade" => 0.40
+        sector == "Consumer Non-Durables" => 0.40
+        sector == "Consumer Durables" => 0.45
+        sector == "Consumer Services" => 0.45
+        sector == "Producer Manufacturing" => 0.45
+        sector == "Industrial Services" => 0.45
+        sector == "Commercial Services" => 0.45
+        sector == "Distribution Services" => 0.45
+        sector == "Transportation" => 0.50
+        sector == "Communications" => 0.50
+        sector == "Process Industries" => 0.50
+        sector == "Energy Minerals" => 0.55
+        sector == "Non-Energy Minerals" => 0.55
+        sector == "Miscellaneous" => 0.50
+        => 0.50
+
+// ------------------------------------------------------------------------------------------------
+// Industry sigma (dispersion in log-space).
+// Heuristic overrides for industries that tend to trade with materially tighter/wider
+// valuation spreads than their broad sector bucket. Falls back to sector sigma.
+// ------------------------------------------------------------------------------------------------
+f_industry_sigma(string industry, string sector) =>
+    _sig = sector_sigma(sector)
+
+    switch
+        // High dispersion growth / tech
+        industry == "Internet Software/Services" => 0.85
+        industry == "Packaged Software" => 0.75
+        industry == "Semiconductors" => 0.75
+        industry == "Electronic Production Equipment" => 0.70
+        industry == "Telecommunications Equipment" => 0.70
+        industry == "Computer Communications" => 0.70
+        industry == "Biotechnology" => 0.90
+        industry == "Medical Specialties" => 0.55
+        industry == "Alternative Power Generation" => 0.70
+
+        // Lower dispersion mature tech / defensive
+        industry == "Information Technology Services" => 0.55
+        industry == "Data Processing Services" => 0.50
+        industry == "Pharmaceuticals: Major" => 0.35
+        industry == "Pharmaceuticals: Other" => 0.40
+        industry == "Pharmaceuticals: Generic" => 0.35
+        industry == "Drug Manufacturers: Specialty & Generic" => 0.40
+        industry == "Managed Health Care" => 0.30
+        industry == "Medical/Nursing Services" => 0.30
+        industry == "Healthcare Facilities" => 0.35
+        industry == "Hospital/Nursing Management" => 0.35
+        industry == "Services to the Health Industry" => 0.35
+        industry == "Household/Personal Care" => 0.30
+        industry == "Food: Major Diversified" => 0.30
+        industry == "Food: Specialty/Candy" => 0.30
+        industry == "Food: Meat/Fish/Dairy" => 0.30
+        industry == "Food Retail" => 0.30
+        industry == "Beverages: Non-Alcoholic" => 0.30
+        industry == "Tobacco" => 0.30
+        industry == "Electric Utilities" => 0.22
+        industry == "Gas Distributors" => 0.22
+        industry == "Water Utilities" => 0.20
+        industry == "Major Telecommunications" => 0.35
+        industry == "Specialty Telecommunications" => 0.40
+        industry == "Wireless Telecommunications" => 0.40
+
+        // Commodity / cyclical industries
+        industry == "Coal" => 0.70
+        industry == "Integrated Oil" => 0.45
+        industry == "Oil Refining/Marketing" => 0.45
+        industry == "Oil and Gas Production" => 0.70
+        industry == "Oil & Gas Production" => 0.70
+        industry == "Contract Drilling" => 0.65
+        industry == "Oilfield Services/Equipment" => 0.65
+        industry == "Precious Metals" => 0.70
+        industry == "Other Metals/Minerals" => 0.65
+        industry == "Aluminum" => 0.60
+        industry == "Steel" => 0.60
+        industry == "Chemicals: Agricultural" => 0.55
+        industry == "Chemicals: Major Diversified" => 0.45
+        industry == "Chemicals: Specialty" => 0.45
+        industry == "Agricultural Commodities/Milling" => 0.55
+        industry == "Forest Products" => 0.55
+        industry == "Pulp and Paper" => 0.55
+        industry == "Pulp & Paper" => 0.55
+        industry == "Construction Materials" => 0.55
+        industry == "Marine Shipping" => 0.60
+        industry == "Airlines" => 0.60
+        industry == "Trucking" => 0.55
+        industry == "Railroads" => 0.40
+
+        // Financial / property
+        industry == "Real Estate Development" => 0.60
+        industry == "Real Estate Services" => 0.50
+        industry == "Real Estate Investment Trusts" => 0.35
+        industry == "Investment Managers" => 0.40
+        industry == "Investment Trusts/Mutual Funds" => 0.35
+        industry == "Finance/Rental/Leasing" => 0.55
+        industry == "Finance: Consumer Services" => 0.55
+        industry == "Property/Casualty Insurance" => 0.30
+        industry == "Multi-Line Insurance" => 0.30
+        industry == "Life/Health Insurance" => 0.30
+        industry == "Specialty Insurance" => 0.35
+        industry == "Insurance Brokers/Services" => 0.30
+
+        // Consumer / retail
+        industry == "Internet Retail" => 0.60
+        industry == "Department Stores" => 0.50
+        industry == "Discount Stores" => 0.40
+        industry == "Specialty Stores" => 0.50
+        industry == "Apparel/Footwear Retail" => 0.50
+        industry == "Electronics/Appliance Stores" => 0.50
+        industry == "Home Improvement Chains" => 0.35
+        industry == "Restaurants" => 0.45
+        industry == "Hotels/Resorts/Cruiselines" => 0.55
+        industry == "Hotels/Resorts/Cruise lines" => 0.55
+        industry == "Casinos/Gaming" => 0.60
+
+        => _sig
+
+// ------------------------------------------------------------------------------------------------
+// Damodaran EV/EBIT base multiples mapped to TradingView industry strings.
+// Source: January 2026 "vebitda.htm", using EV/EBIT for Only positive EBITDA firms.
+// If Damodaran doesn’t provide EV/EBIT or no defensible match exists, return na.
+// ------------------------------------------------------------------------------------------------
+export ev_ebit_base(string industry) =>
+    switch
+        industry == "Steel" => 24.56
+        industry == "Aluminum" => 15.72
+        industry == "Precious Metals" => 14.28
+        industry == "Other Metals/Minerals" => 15.72
+        industry == "Forest Products" => 15.51
+        industry == "Construction Materials" => 15.97
+        industry == "Metal Fabrication" => 21.04
+        industry == "Industrial Machinery" => 21.04
+        industry == "Trucks/Construction/Farm Machinery" => 21.04
+        industry == "Auto Parts: OEM" => 12.38
+        industry == "Building Products" => 21.15
+        industry == "Electrical Products" => 43.19
+        industry == "Office Equipment/Supplies" => 13.03
+        industry == "Miscellaneous Manufacturing" => 13.49
+        industry == "Industrial Conglomerates" => 13.49
+        industry == "Semiconductors" => 44.30
+        industry == "Electronic Components" => 29.76
+        industry == "Electronic Equipment/Instruments" => 29.76
+        industry == "Telecommunications Equipment" => 30.86
+        industry == "Aerospace & Defense" => 34.79
+        industry == "Computer Processing Hardware" => 29.36
+        industry == "Computer Peripherals" => 29.36
+        industry == "Computer Communications" => 30.86
+        industry == "Electronic Production Equipment" => 28.81
+        industry == "Motor Vehicles" => 160.32
+        industry == "Automotive Aftermarket" => 12.38
+        industry == "Homebuilding" => 9.43
+        industry == "Home Furnishings" => 19.15
+        // Proxy from January 2026 Emerging Markets "Electronics (Consumer & Office)" EV/EBIT.
+        industry == "Electronics/Appliances" => 21.06914792694693
+        industry == "Tools & Hardware" => 21.15
+        industry == "Recreational Products" => 23.96
+        industry == "Other Consumer Specialties" => 20.15
+        industry == "Oil and Gas Production" => 10.28
+        industry == "Integrated Oil" => 15.16
+        industry == "Oil Refining/Marketing" => 15.16
+        // Proxy from January 2026 Emerging Markets "Coal & Related Energy" EV/EBIT.
+        industry == "Coal" => 11.11123502813179
+        industry == "Chemicals: Major Diversified" => 24.69
+        industry == "Chemicals: Specialty" => 21.30
+        industry == "Chemicals: Agricultural" => 28.98
+        industry == "Textiles" => 16.09
+        industry == "Agricultural Commodities/Milling" => 23.74
+        industry == "Pulp and Paper" => 15.51
+        industry == "Containers/Packaging" => 15.78
+        industry == "Industrial Specialities" => 21.30
+        industry == "Pharmaceuticals: Major" => 20.32
+        industry == "Pharmaceuticals: Other" => 20.32
+        industry == "Pharmaceuticals: Generic" => 20.32
+        industry == "Biotechnology" => 68.97
+        industry == "Medical Specialties" => 29.99
+        industry == "Food: Major Diversified" => 13.61
+        industry == "Food: Specialty/Candy" => 13.61
+        industry == "Food: Meat/Fish/Dairy" => 13.61
+        industry == "Beverages: Non-Alcoholic" => 20.14
+        industry == "Beverages: Alcoholic" => 10.75
+        industry == "Tobacco" => 14.63
+        industry == "Household/Personal Care" => 16.25
+        industry == "Apparel/Footwear" => 16.09
+        industry == "Consumer Sundries" => 16.25
+        industry == "Contract Drilling" => 14.90
+        industry == "Oilfield Services/Equipment" => 14.90
+        industry == "Engineering and Construction" => 25.17
+        industry == "Environmental Services" => 24.83
+        industry == "Oil and Gas Pipelines" => 16.48
+        industry == "Miscellaneous Commercial Services" => 20.15
+        industry == "Advertising /Marketing Services" => 20.91
+        industry == "Commercial Printing/Forms" => 17.16
+        industry == "Financial Publishing/Services" => 17.77
+        industry == "Personnel Services" => 20.15
+        industry == "Wholesale Distributors" => 17.11
+        industry == "Food Distributors" => 17.94
+        industry == "Electronics Distributors" => 17.11
+        industry == "Medical Distributors" => 15.02
+        industry == "Data Processing Services" => 19.25
+        industry == "Information Technology Services" => 19.25
+        industry == "Packaged Software" => 32.41
+        industry == "Internet Software/Services" => 172.99
+        industry == "Managed Health Care" => 15.02
+        industry == "Hospital/Nursing Management" => 13.12
+        industry == "Medical/Nursing Services" => 15.02
+        industry == "Services to the Health Industry" => 15.02
+        industry == "Media Conglomerates" => 38.92
+        industry == "Broadcasting" => 11.16
+        industry == "Cable/Satellite TV" => 11.27
+        industry == "Publishing: Newspapers" => 17.16
+        industry == "Publishing: Books/Magazines" => 17.16
+        industry == "Movies/Entertainment" => 38.92
+        industry == "Restaurants" => 30.15
+        industry == "Hotels/Resorts/Cruiselines" => 25.71
+        industry == "Casinos/Gaming" => 25.71
+        industry == "Other Consumer Services" => 20.15
+        industry == "Food Retail" => 26.53
+        industry == "Drugstore Chains" => 20.02
+        industry == "Department Stores" => 32.44
+        industry == "Discount Stores" => 32.44
+        industry == "Apparel/Footwear Retail" => 20.02
+        industry == "Home Improvement Chains" => 19.10
+        industry == "Electronics/Appliance Stores" => 20.02
+        industry == "Specialty Stores" => 20.02
+        industry == "Catalogs/Specialty Distribution" => 17.11
+        industry == "Internet Retail" => 20.02
+        industry == "Air Freight/Couriers" => 21.45
+        industry == "Airlines" => 19.32
+        industry == "Trucking" => 23.81
+        industry == "Railroads" => 17.81
+        industry == "Marine Shipping" => 21.45
+        industry == "Other Transportation" => 21.45
+        industry == "Electric Utilities" => 21.86
+        industry == "Gas Distributors" => 16.48
+        industry == "Water Utilities" => 21.08
+        industry == "Alternative Power Generation" => 42.63
+        industry == "Major Banks" => na
+        industry == "Regional Banks" => na
+        industry == "Savings Banks" => na
+        industry == "Finance/Rental/Leasing" => 69.40
+        industry == "Investment Banks/Brokers" => na
+        industry == "Investment Managers" => 20.40
+        industry == "Financial Conglomerates" => 13.49
+        industry == "Property/Casualty Insurance" => 9.64
+        industry == "Multi-Line Insurance" => 20.10
+        industry == "Life/Health Insurance" => 11.70
+        industry == "Specialty Insurance" => 20.10
+        industry == "Insurance Brokers/Services" => 20.10
+        industry == "Real Estate Development" => 13.49
+        industry == "Real Estate Investment Trusts" => 42.73
+        industry == "Major Telecommunications" => 12.22
+        industry == "Specialty Telecommunications" => 12.22
+        industry == "Wireless Telecommunications" => 18.83
+        industry == "Miscellaneous" => 13.49
+        industry == "Investment Trusts/Mutual Funds" => 20.40
+        industry == "Advertising/Marketing Services" => 20.91
+        industry == "Drug Manufacturers: Specialty & Generic" => 20.32
+        industry == "Engineering & Construction" => 25.17
+        industry == "Finance: Consumer Services" => 69.40
+        industry == "Healthcare Facilities" => 13.12
+        industry == "Hotels/Resorts/Cruise lines" => 25.71
+        industry == "Industrial Specialties" => 21.30
+        industry == "Oil & Gas Production" => 10.28
+        industry == "Pulp & Paper" => 15.51
+        industry == "Real Estate Services" => 49.59
+        => na
+
+// ------------------------------------------------------------------------------------------------
+// Emerging Markets EV/EBIT base multiples mapped to TradingView industry strings.
+// Source: January 2026 "vebitdaemerg.xls", using EV/EBIT for Only positive EBITDA firms.
+// ------------------------------------------------------------------------------------------------
+f_ev_ebit_base_em(string industry) =>
+    switch
+        industry == "Steel" => 18.09457954881115
+        industry == "Aluminum" => 16.17163979713972
+        industry == "Precious Metals" => 19.49828464693265
+        industry == "Other Metals/Minerals" => 16.17163979713972
+        industry == "Forest Products" => 29.38009234074296
+        industry == "Construction Materials" => 26.54308658080944
+        industry == "Metal Fabrication" => 16.17163979713972
+        industry == "Industrial Machinery" => 41.73040238021817
+        industry == "Trucks/Construction/Farm Machinery" => 41.73040238021817
+        industry == "Auto Parts: OEM" => 26.86785201153388
+        industry == "Building Products" => 19.00871234657343
+        industry == "Electrical Products" => 35.8945977895028
+        industry == "Office Equipment/Supplies" => 25.72694356395389
+        industry == "Miscellaneous Manufacturing" => 12.35294485443296
+        industry == "Industrial Conglomerates" => 12.35294485443296
+        industry == "Semiconductors" => 28.61222613074307
+        industry == "Electronic Components" => 41.87989229232563
+        industry == "Electronic Equipment/Instruments" => 41.87989229232563
+        industry == "Telecommunications Equipment" => 57.70468726509104
+        industry == "Aerospace & Defense" => 42.59212037792966
+        industry == "Computer Processing Hardware" => 21.78828506897574
+        industry == "Computer Peripherals" => 21.78828506897574
+        industry == "Computer Communications" => 57.70468726509104
+        industry == "Electronic Production Equipment" => 87.64967366876336
+        industry == "Motor Vehicles" => 20.9705266306958
+        industry == "Automotive Aftermarket" => 26.86785201153388
+        industry == "Homebuilding" => 13.12568166133682
+        industry == "Home Furnishings" => 13.61522072478648
+        industry == "Electronics/Appliances" => 21.06914792694693
+        industry == "Tools & Hardware" => 19.00871234657343
+        industry == "Recreational Products" => 26.14338919171197
+        industry == "Other Consumer Specialties" => 26.14338919171197
+        industry == "Oil and Gas Production" => 7.59846063087374
+        industry == "Integrated Oil" => 8.52040461307079
+        industry == "Oil Refining/Marketing" => 8.52040461307079
+        industry == "Coal" => 11.11123502813179
+        industry == "Chemicals: Major Diversified" => 15.24020977702092
+        industry == "Chemicals: Specialty" => 25.80275245539613
+        industry == "Chemicals: Agricultural" => 44.87790853942586
+        industry == "Textiles" => 18.30415383172827
+        industry == "Agricultural Commodities/Milling" => 14.9747183422282
+        industry == "Pulp and Paper" => 29.38009234074296
+        industry == "Containers/Packaging" => 25.84288247258166
+        industry == "Industrial Specialities" => 25.80275245539613
+        industry == "Pharmaceuticals: Major" => 25.6350154890283
+        industry == "Pharmaceuticals: Other" => 25.6350154890283
+        industry == "Pharmaceuticals: Generic" => 25.6350154890283
+        // Proxy from January 2026 US "Drugs (Biotechnology)" EV/EBIT.
+        industry == "Biotechnology" => 68.97132135165363
+        industry == "Medical Specialties" => 36.95978394312243
+        industry == "Food: Major Diversified" => 15.86554344192613
+        industry == "Food: Specialty/Candy" => 15.86554344192613
+        industry == "Food: Meat/Fish/Dairy" => 15.86554344192613
+        industry == "Beverages: Non-Alcoholic" => 20.16371326989313
+        industry == "Beverages: Alcoholic" => 17.35294888579746
+        industry == "Tobacco" => 17.2845370126351
+        industry == "Household/Personal Care" => 28.40394043295945
+        industry == "Apparel/Footwear" => 18.30415383172827
+        industry == "Consumer Sundries" => 28.40394043295945
+        industry == "Contract Drilling" => 16.05480918268978
+        industry == "Oilfield Services/Equipment" => 16.05480918268978
+        industry == "Engineering and Construction" => 15.08264745035219
+        industry == "Environmental Services" => 26.26101770375904
+        industry == "Oil and Gas Pipelines" => 16.43605774929149
+        industry == "Miscellaneous Commercial Services" => 29.51224784089494
+        industry == "Advertising /Marketing Services" => 45.13002082854867
+        industry == "Commercial Printing/Forms" => 24.98173854074118
+        industry == "Financial Publishing/Services" => 24.98173854074118
+        industry == "Personnel Services" => 29.51224784089494
+        industry == "Wholesale Distributors" => 20.61579760238619
+        industry == "Food Distributors" => 13.02334831205682
+        industry == "Electronics Distributors" => 20.61579760238619
+        industry == "Medical Distributors" => 15.20076297931068
+        industry == "Data Processing Services" => 21.63346343059478
+        industry == "Information Technology Services" => 21.63346343059478
+        // Proxy from January 2026 US "Software (System & Application)" EV/EBIT.
+        industry == "Packaged Software" => 32.41233949136116
+        industry == "Internet Software/Services" => 76.12162283113493
+        industry == "Managed Health Care" => 15.20076297931068
+        industry == "Hospital/Nursing Management" => 25.47693568133169
+        industry == "Medical/Nursing Services" => 15.20076297931068
+        industry == "Services to the Health Industry" => 15.20076297931068
+        industry == "Media Conglomerates" => 22.9152012385997
+        industry == "Broadcasting" => 23.93617367392998
+        industry == "Cable/Satellite TV" => 181.54748421105785
+        industry == "Publishing: Newspapers" => 24.98173854074118
+        industry == "Publishing: Books/Magazines" => 24.98173854074118
+        industry == "Movies/Entertainment" => 22.9152012385997
+        industry == "Restaurants" => 41.05115739818426
+        industry == "Hotels/Resorts/Cruiselines" => 20.62145610824835
+        industry == "Casinos/Gaming" => 20.62145610824835
+        industry == "Other Consumer Services" => 29.51224784089494
+        industry == "Food Retail" => 20.67487451044042
+        industry == "Drugstore Chains" => 20.20809950175828
+        industry == "Department Stores" => 21.94027504705362
+        industry == "Discount Stores" => 21.94027504705362
+        industry == "Apparel/Footwear Retail" => 20.20809950175828
+        industry == "Home Improvement Chains" => 12.13577226940791
+        industry == "Electronics/Appliance Stores" => 20.20809950175828
+        industry == "Specialty Stores" => 20.20809950175828
+        industry == "Catalogs/Specialty Distribution" => 20.61579760238619
+        industry == "Internet Retail" => 21.94027504705362
+        industry == "Air Freight/Couriers" => 15.48881656151127
+        industry == "Airlines" => 23.35791434807038
+        industry == "Trucking" => 11.47792386150732
+        industry == "Railroads" => 11.34780152681693
+        industry == "Marine Shipping" => 15.48881656151127
+        industry == "Other Transportation" => 15.48881656151127
+        industry == "Electric Utilities" => 24.22949458261262
+        industry == "Gas Distributors" => 16.43605774929149
+        industry == "Water Utilities" => 15.07124772158731
+        industry == "Alternative Power Generation" => 23.23480884489329
+        industry == "Major Banks" => 75.15332220794264
+        industry == "Regional Banks" => na
+        industry == "Savings Banks" => na
+        industry == "Finance/Rental/Leasing" => 17.80498861420282
+        industry == "Investment Banks/Brokers" => 34.68234953962997
+        industry == "Investment Managers" => 16.5272054201046
+        industry == "Financial Conglomerates" => 12.35294485443296
+        industry == "Property/Casualty Insurance" => 7.15047464356627
+        industry == "Multi-Line Insurance" => 8.34980630572196
+        industry == "Life/Health Insurance" => 7.5651486369458
+        industry == "Specialty Insurance" => 8.34980630572196
+        industry == "Insurance Brokers/Services" => 8.34980630572196
+        industry == "Real Estate Development" => 43.40006860289256
+        industry == "Real Estate Investment Trusts" => 12.45949227354153
+        industry == "Major Telecommunications" => 14.97908495824227
+        industry == "Specialty Telecommunications" => 14.97908495824227
+        industry == "Wireless Telecommunications" => 13.60552385381905
+        industry == "Miscellaneous" => 12.35294485443296
+        industry == "Investment Trusts/Mutual Funds" => 16.5272054201046
+        industry == "Advertising/Marketing Services" => 45.13002082854867
+        industry == "Drug Manufacturers: Specialty & Generic" => 25.6350154890283
+        industry == "Engineering & Construction" => 15.08264745035219
+        industry == "Finance: Consumer Services" => 17.80498861420282
+        industry == "Healthcare Facilities" => 25.47693568133169
+        industry == "Hotels/Resorts/Cruise lines" => 20.62145610824835
+        industry == "Industrial Specialties" => 25.80275245539613
+        industry == "Oil & Gas Production" => 7.59846063087374
+        industry == "Pulp & Paper" => 29.38009234074296
+        industry == "Real Estate Services" => 16.98853973838435
+        => na
+
+// ------------------------------------------------------------------------------------------------
+// Default routing keeps existing two-arg API usable on other scripts:
+// - Developed Market country or known developed-market prefixes -> DM mode
+// - otherwise                                                  -> EM mode
+// ------------------------------------------------------------------------------------------------
+f_is_dm_country(string _country) =>
+    _country == "AU" or
+      _country == "AT" or
+      _country == "BE" or
+      _country == "CA" or
+      _country == "DK" or
+      _country == "FI" or
+      _country == "FR" or
+      _country == "DE" or
+      _country == "HK" or
+      _country == "IE" or
+      _country == "IL" or
+      _country == "IT" or
+      _country == "JP" or
+      _country == "NL" or
+      _country == "NZ" or
+      _country == "NO" or
+      _country == "PT" or
+      _country == "SG" or
+      _country == "ES" or
+      _country == "SE" or
+      _country == "CH" or
+      _country == "GB" or
+      _country == "US"
+
+f_is_dm_prefix(string _prefix) =>
+    _prefix == "AMEX" or
+      _prefix == "ARCA" or
+      _prefix == "ASX" or
+      _prefix == "BATS" or
+      _prefix == "BER" or
+      _prefix == "BME" or
+      _prefix == "BX" or
+      _prefix == "CBOE" or
+      _prefix == "CBOT" or
+      _prefix == "CBOT_MINI" or
+      _prefix == "CME" or
+      _prefix == "CME_MINI" or
+      _prefix == "COMEX" or
+      _prefix == "CSE" or
+      _prefix == "DJ" or
+      _prefix == "DUS" or
+      _prefix == "EURONEXT" or
+      _prefix == "FSE" or
+      _prefix == "FWB" or
+      _prefix == "HAM" or
+      _prefix == "HAN" or
+      _prefix == "HKEX" or
+      _prefix == "ICEUS" or
+      _prefix == "LSE" or
+      _prefix == "LSIN" or
+      _prefix == "MIL" or
+      _prefix == "MUN" or
+      _prefix == "NASDAQ" or
+      _prefix == "NEO" or
+      _prefix == "NGM" or
+      _prefix == "NZX" or
+      _prefix == "NYMEX" or
+      _prefix == "NYSE" or
+      _prefix == "OMXCOP" or
+      _prefix == "OMXHEX" or
+      _prefix == "OMXSTO" or
+      _prefix == "OMXTSE" or
+      _prefix == "OSL" or
+      _prefix == "OTC" or
+      _prefix == "OTCBB" or
+      _prefix == "SGX" or
+      _prefix == "SIX" or
+      _prefix == "SP" or
+      _prefix == "SWB" or
+      _prefix == "TASE" or
+      _prefix == "TSE" or
+      _prefix == "TSX" or
+      _prefix == "TSXV" or
+      _prefix == "XETR"
+
+f_default_market() =>
+    _prefix = syminfo.prefix
+    (f_is_dm_country(syminfo.country) or f_is_dm_prefix(_prefix)) ? "DM" : "EM"
+
+f_market_mode(string _market) =>
+    _market == "EM" ? "EM" : "DM"
+
+export ev_ebit_base_market(string industry, string market) =>
+    _market_mode = f_market_mode(market)
+    _market_mode == "DM" ? ev_ebit_base(industry) : f_ev_ebit_base_em(industry)
+
+// ------------------------------------------------------------------------------------------------
+// Band construction in log-space:
+// low  = base * exp(z_low  * sigma)
+// high = base * exp(z_high * sigma)
+// ------------------------------------------------------------------------------------------------
+export ev_ebit_band_market(string industry, string sector, string market) =>
+    base = ev_ebit_base_market(industry, market)
+    sig  = f_industry_sigma(industry, sector)
+    zL   = f_z(PCTL_LOW)
+    zH   = f_z(PCTL_HIGH)
+
+    _low  = (not na(base) and base > 0 and not na(zL)) ? base * math.exp(zL * sig) : na
+    _high = (not na(base) and base > 0 and not na(zH)) ? base * math.exp(zH * sig) : na
+
+    [_low, _high, base, sig]
+
+export ev_ebit_band(string industry, string sector) =>
+    ev_ebit_band_market(industry, sector, f_default_market())
+
+// Convenience wrappers
+export ev_ebit_low_market(string industry, string sector, string market) =>
+    [lo, _, _, _] = ev_ebit_band_market(industry, sector, market)
+    lo
+
+export ev_ebit_low(string industry, string sector) =>
+    ev_ebit_low_market(industry, sector, f_default_market())
+
+export ev_ebit_high_market(string industry, string sector, string market) =>
+    [_, hi, _, _] = ev_ebit_band_market(industry, sector, market)
+    hi
+
+export ev_ebit_high(string industry, string sector) =>
+    ev_ebit_high_market(industry, sector, f_default_market())

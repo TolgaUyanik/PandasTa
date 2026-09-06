@@ -1,0 +1,179 @@
+//@version=6
+// =============================================================================
+// OpenFlow SMC — Structure & Trend Suite  (v1.0, clean-room, MIT)
+// -----------------------------------------------------------------------------
+// A free, open-source re-implementation of the standard Smart-Money-Concepts +
+// trend-follow toolkit (order blocks, fair value gaps, BOS/CHoCH, trend engine,
+// buy/sell signals, alerts). Built ENTIRELY from public-domain TA primitives.
+//
+// DESIGN NON-NEGOTIABLES
+//   * No lookahead. No security() calls at all -> nothing can peek forward.
+//   * No same-bar feedback. Signals gate on barstate.isconfirmed.
+//   * All structure state kept in `var` so it survives without repainting.
+//   * Pivots use ta.pivothigh/low(len,len): they confirm `len` bars back by
+//     construction and NEVER repaint (they appear late, honestly, not early).
+//   * Repeated draw logic folded into functions to buy statement-count
+//     headroom.  [SIZE] marks size-optimisation folds.
+// =============================================================================
+
+indicator("OpenFlow SMC", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ============================== INPUTS =======================================
+grpT = "Trend Engine"
+atrLen    = input.int(10,   "ATR / SuperTrend length", minval = 1,             group = grpT)
+atrMult   = input.float(3.0,"ATR multiplier",          minval = 0.5, step = 0.1,group = grpT)
+showST    = input.bool(true,"Show ATR stop line",                              group = grpT)
+
+grpM = "Trend Moving Average"
+showMA    = input.bool(true, "Show trend MA",                                  group = grpM)
+maType    = input.string("EMA","MA type", options = ["EMA","SMA","WMA","HMA"], group = grpM)
+maLen     = input.int(50,   "MA length", minval = 1,                           group = grpM)
+
+grpS = "Market Structure"
+showSwing = input.bool(true,"Show swing high/low trail",                       group = grpS)
+swingLen  = input.int(10,   "Swing pivot length", minval = 2,                  group = grpS)
+showBOS   = input.bool(true,"Show BOS / CHoCH labels",                         group = grpS)
+
+grpOB = "Order Blocks"
+showOB    = input.bool(true,"Show order blocks",                               group = grpOB)
+obLook    = input.int(20,   "OB search lookback (bars)", minval = 1,           group = grpOB)
+obMax     = input.int(6,    "Max order blocks kept",     minval = 1,           group = grpOB)
+
+grpF = "Fair Value Gaps"
+showFVG   = input.bool(true,"Show fair value gaps",                            group = grpF)
+fvgMax    = input.int(8,    "Max FVGs kept",             minval = 1,           group = grpF)
+
+grpSig = "Signals"
+showSig   = input.bool(true,"Show buy/sell arrows",                            group = grpSig)
+paint     = input.bool(true,"Paint candles by trend",                         group = grpSig)
+
+grpC = "Colors"
+colUp     = input.color(#26a69a, "Up / bullish",  group = grpC)
+colDn     = input.color(#ef5350, "Down / bearish", group = grpC)
+colOB     = input.color(color.new(#2962ff, 80), "Order-block fill", group = grpC)
+colFVG    = input.color(color.new(#9c27b0, 85), "FVG fill",         group = grpC)
+
+// ============================== HELPERS ======================================
+// [SIZE] one MA switch instead of four inline blocks
+f_ma(src, len, t) =>
+    switch t
+        "EMA" => ta.ema(src, len)
+        "SMA" => ta.sma(src, len)
+        "WMA" => ta.wma(src, len)
+        "HMA" => ta.hma(src, len)
+        => ta.ema(src, len)
+
+// [SIZE] delete oldest boxes until array within cap
+f_capBoxes(arr, maxN) =>
+    while array.size(arr) > maxN
+        box.delete(array.shift(arr))
+
+// ============================== TREND ENGINE =================================
+atr = ta.atr(atrLen)
+[stLine, stDir] = ta.supertrend(atrMult, atrLen)     // built-in, causal, no repaint
+trendUp = stDir < 0                                  // stDir: -1 up-trend, +1 down-trend
+flipUp  = trendUp and not trendUp[1]
+flipDn  = not trendUp and trendUp[1]
+
+maVal = f_ma(close, maLen, maType)
+
+plot(showST and trendUp  ? stLine : na, "ATR stop (up)",   color = colUp, style = plot.style_linebr, linewidth = 2)
+plot(showST and not trendUp ? stLine : na, "ATR stop (dn)", color = colDn, style = plot.style_linebr, linewidth = 2)
+plot(showMA ? maVal : na, "Trend MA", color = color.new(color.orange, 0), linewidth = 2)
+
+// ============================== SWINGS / STRUCTURE ==========================
+ph = ta.pivothigh(swingLen, swingLen)                // confirms swingLen bars back
+pl = ta.pivotlow(swingLen,  swingLen)
+
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+plot(showSwing ? lastPH : na, "Swing high", color = color.new(colDn, 30), style = plot.style_stepline)
+plot(showSwing ? lastPL : na, "Swing low",  color = color.new(colUp, 30), style = plot.style_stepline)
+
+// BOS / CHoCH on a CONFIRMED break of the last confirmed swing
+var int structDir = 0
+bosUp = not na(lastPH) and ta.crossover(close, lastPH)
+bosDn = not na(lastPL) and ta.crossunder(close, lastPL)
+chochUp = bosUp and structDir < 0
+chochDn = bosDn and structDir > 0
+// commit structure state only on closed bars -> state machine never advances
+// on an intrabar cross that fails to hold (leak-safe)
+if barstate.isconfirmed
+    if bosUp
+        structDir := 1
+    if bosDn
+        structDir := -1
+
+if showBOS and barstate.isconfirmed
+    if bosUp
+        label.new(bar_index, high, chochUp ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(colUp, 20), textcolor = color.white, size = size.tiny)
+    if bosDn
+        label.new(bar_index, low, chochDn ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(colDn, 20), textcolor = color.white, size = size.tiny)
+
+// ============================== ORDER BLOCKS =================================
+// [SIZE] find nearest opposing candle within lookback; returns offset or -1
+f_findOB(bull, look) =>
+    idx = -1
+    for i = 1 to look
+        cond = bull ? close[i] < open[i] : close[i] > open[i]
+        if cond and idx == -1
+            idx := i
+    idx
+
+var array<box> obBull = array.new<box>()
+var array<box> obBear = array.new<box>()
+
+if showOB and barstate.isconfirmed
+    if bosUp
+        k = f_findOB(true, obLook)
+        if k >= 0
+            b = box.new(bar_index - k, high[k], bar_index + 10, low[k], border_color = colUp, bgcolor = colOB, extend = extend.none)
+            array.push(obBull, b)
+            f_capBoxes(obBull, obMax)
+    if bosDn
+        k = f_findOB(false, obLook)
+        if k >= 0
+            b = box.new(bar_index - k, high[k], bar_index + 10, low[k], border_color = colDn, bgcolor = colOB, extend = extend.none)
+            array.push(obBear, b)
+            f_capBoxes(obBear, obMax)
+
+// ============================== FAIR VALUE GAPS =============================
+// Bullish FVG: low[0] > high[2]  (gap between bar-3 high and bar-1 low)
+// Bearish FVG: high[0] < low[2]
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+var array<box> fvgArr = array.new<box>()
+
+if showFVG and barstate.isconfirmed
+    if bullFVG
+        b = box.new(bar_index - 2, low, bar_index, high[2], border_color = na, bgcolor = colFVG, extend = extend.none)
+        array.push(fvgArr, b)
+        f_capBoxes(fvgArr, fvgMax)
+    if bearFVG
+        b = box.new(bar_index - 2, low[2], bar_index, high, border_color = na, bgcolor = colFVG, extend = extend.none)
+        array.push(fvgArr, b)
+        f_capBoxes(fvgArr, fvgMax)
+
+// ============================== SIGNALS =====================================
+// Trend flip that AGREES with the MA. Gate on confirmed bar -> arrow cannot
+// repaint on the live bar.
+buySig  = flipUp and close > maVal
+sellSig = flipDn and close < maVal
+
+plotshape(showSig and buySig  and barstate.isconfirmed ? low  : na, "Buy",  location = location.belowbar, style = shape.triangleup,   color = colUp, size = size.small)
+plotshape(showSig and sellSig and barstate.isconfirmed ? high : na, "Sell", location = location.abovebar, style = shape.triangledown, color = colDn, size = size.small)
+
+barcolor(paint ? (trendUp ? colUp : colDn) : na)
+
+// ============================== ALERTS ======================================
+// NOTE: set TradingView alert to "Once Per Bar Close" for non-repaint behaviour.
+alertcondition(buySig,  "OpenFlow Buy",  "OpenFlow SMC: BUY signal on {{ticker}} {{interval}}")
+alertcondition(sellSig, "OpenFlow Sell", "OpenFlow SMC: SELL signal on {{ticker}} {{interval}}")
+alertcondition(bosUp,   "OpenFlow BOS Up",   "OpenFlow SMC: bullish structure break on {{ticker}}")
+alertcondition(bosDn,   "OpenFlow BOS Down", "OpenFlow SMC: bearish structure break on {{ticker}}")

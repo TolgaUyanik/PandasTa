@@ -1,0 +1,428 @@
+// This source code is subject to the terms of the Mozilla Public License 2.1
+// Sphinx Unicorn - standalone breaker / FVG nesting model
+// v2.0
+//
+// A swing that forms INSIDE an opposing-polarity FVG is a breaker in waiting.
+// This runs continuously - it is not armed by an SMT, does not borrow any
+// tier's lifecycle, and has no candidate timeout. SMT is a separate reading.
+//
+//   BEARISH setup : swing LOW nested in a bullish FVG (BISI)
+//                   activates on a close below BOTH the swing and the BISI
+//   BULLISH setup : swing HIGH nested in a bearish FVG (SIBI)
+//                   activates on a close above BOTH the swing and the SIBI
+//
+// Four states. Only ARMED can activate.
+//   LEVEL  grey, thin    - demoted. price still reacts here, but it is not
+//                          the front-runner and will never light up.
+//   ARMED  grey, solid   - most recent qualifying swing in that direction.
+//                          the only zone the model is watching.
+//   ACTIVE bull/bear     - the displacement closed beyond swing and FVG.
+//   SPENT  purple        - an ACTIVE zone price has since mitigated. kept,
+//                          because a proven unicorn is a level price returns to.
+//
+// Promotion is one-way: a new qualifying swing demotes the current ARMED to
+// LEVEL and takes its place. A demoted LEVEL never re-arms.
+//
+//@version=6
+indicator('Sphinx Unicorn', shorttitle = 'Sphinx Unicorn', overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 600)
+
+// ============================================================
+// === INPUTS ===
+// ============================================================
+g_core = 'Model'
+g_disp = 'Display'
+g_dbg = 'Diagnostic'
+
+i_swing = input.int(2, 'Swing strength (bars)', group = g_core, minval = 1, maxval = 15, tooltip = 'Bars either side required for a pivot to count as a swing. 2 means the low must be lower than the two bars before and the two after. Higher values find fewer, more pronounced swings.')
+i_fvg_look = input.int(20, 'FVG search radius (bars)', group = g_core, minval = 3, maxval = 400, tooltip = 'How far back from a swing to look for the FVG it might be nested in. Keep this tight. On 1m index futures price oscillates within a few points, so a wide radius will always find SOME old gap whose range brackets the swing, and the nesting test stops meaning anything. The unfilled requirement does most of the filtering, but radius still matters.')
+i_strict = input.bool(true, 'Swing must sit strictly inside the FVG', group = g_core, tooltip = 'ON (default): the swing price must be within the gap, not touching either edge. This is the nesting the model is built on. OFF: the swing may sit on an edge, which admits swings that merely abut the gap.')
+i_need_disp = input.bool(true, 'Require displacement close beyond the FVG too', group = g_core, tooltip = 'ON (default): activation needs a close beyond BOTH the swing price and the far edge of the FVG - the model as taught. OFF: a close beyond the swing alone activates, which fires earlier and far more often.')
+i_need_bpr = input.bool(true, 'Require a BPR (displacement leaves its own FVG)', group = g_core, tooltip = 'ON (default): the breaking leg must itself leave a same-direction FVG that OVERLAPS the nesting FVG - the two gaps forming a Balanced Price Range. This is what separates a real unicorn from a slow grind through the level. Without it, any close beyond the breaker activates. OFF: close-beyond alone activates.')
+i_bpr_look = input.int(6, 'BPR displacement lookback (bars)', group = g_core, minval = 2, maxval = 30, tooltip = 'How many bars back from the activation bar to look for the displacement FVG. The gap that breaks the breaker forms right at the break, so this is short.')
+i_disp_min = input.int(3, 'Min displacement FVG size (ticks)', group = g_core, minval = 1, maxval = 40, tooltip = 'Floor on the displacement gap in ticks, applied under the ratio test so a tiny SIBI cannot be matched by an even tinier BISI that only passes on percentage.')
+i_disp_ratio = input.float(0.75, 'Displacement FVG >= this x nesting FVG', group = g_core, minval = 0.1, maxval = 2.0, step = 0.05, tooltip = 'The gap the breaking leg leaves (BISI for a bull, SIBI for a bear) must be at least this fraction of the gap it is inverting. Self-scaling: a big level demands a big displacement to reclaim it, a small one needs less. This is the Balanced Price Range read literally - the two gaps should be comparable in size. 0.75 means the displacement must be at least three-quarters the size of the nesting FVG.')
+
+c_level = input.color(color.new(#8a8a8a, 90), 'Level (demoted)', group = g_disp)
+c_armed = input.color(color.new(#c8c8c8, 84), 'Armed (watching)', group = g_disp)
+c_bull = input.color(color.new(#35a37b, 72), 'Active bullish', group = g_disp)
+c_bear = input.color(color.new(#cf5a5f, 72), 'Active bearish', group = g_disp)
+c_spent = input.color(color.new(#a06cd5, 78), 'Spent (mitigated unicorn)', group = g_disp)
+i_max = input.int(8, 'Maximum zones on chart', group = g_disp, minval = 4, maxval = 60, tooltip = 'Ring buffer size. The oldest zone is removed when full, regardless of state. Note this also bounds the one-box-per-FVG dedupe: once a zone is evicted its FVG can be claimed again, though by then it is far offscreen.')
+i_mit = input.string('Touched', 'Active zone mitigates on', group = g_disp, options = ['Touched', 'Close through'], tooltip = 'Touched: price trading back into the zone. Close through: a close past the far side, so a zone being respected stays lit through its retests. Either way the zone turns purple and keeps extending.')
+i_tags = input.bool(true, 'Show tags', group = g_disp)
+
+i_dbg = input.bool(false, 'Show state counts', group = g_dbg)
+
+REACH = 550
+
+// ============================================================
+// === FVG SEARCH ===
+// ============================================================
+// Bullish FVG / BISI: high[i+2] < low[i]  ->  range high[i+2] .. low[i]
+// Bearish FVG / SIBI: low[i+2] > high[i]  ->  range high[i] .. low[i+2]
+// A swing qualifies when its price sits inside that range.
+
+find_bisi(ref_bar, probe, radius, strict) =>
+    float ft = na
+    float fb = na
+    int fbar = na
+    int off0 = math.max(0, bar_index - ref_bar)
+    int r = off0 > REACH ? 0 : radius
+    if off0 > REACH
+        off0 := 0
+    for i = off0 to off0 + r by 1
+        if i + 2 <= bar_index and not na(high[i + 2]) and not na(low[i])
+            if high[i + 2] < low[i]
+                float t = low[i]
+                float b = high[i + 2]
+                bool hit = strict ? probe > b and probe < t : probe >= b and probe <= t
+                if hit
+                    // the gap must still be OPEN when the swing forms - if price
+                    // traded fully through it in between, it is spent inefficiency
+                    bool filled = false
+                    for k = off0 to i - 1 by 1
+                        if not na(low[k]) and low[k] < b
+                            filled := true
+                            break
+                    if not filled
+                        ft := t
+                        fb := b
+                        fbar := bar_index - (i + 2)
+                        break
+    [ft, fb, fbar]
+
+find_sibi(ref_bar, probe, radius, strict) =>
+    float ft = na
+    float fb = na
+    int fbar = na
+    int off0 = math.max(0, bar_index - ref_bar)
+    int r = off0 > REACH ? 0 : radius
+    if off0 > REACH
+        off0 := 0
+    for i = off0 to off0 + r by 1
+        if i + 2 <= bar_index and not na(low[i + 2]) and not na(high[i])
+            if low[i + 2] > high[i]
+                float t = low[i + 2]
+                float b = high[i]
+                bool hit = strict ? probe > b and probe < t : probe >= b and probe <= t
+                if hit
+                    bool filled = false
+                    for k = off0 to i - 1 by 1
+                        if not na(high[k]) and high[k] > t
+                            filled := true
+                            break
+                    if not filled
+                        ft := t
+                        fb := b
+                        fbar := bar_index - (i + 2)
+                        break
+    [ft, fb, fbar]
+
+// Displacement FVG for the BPR: a same-direction gap left by the leg that
+// broke the breaker, scanned across the most recent 'lookback' bars, that
+// overlaps the nesting FVG [nz_t, nz_b] by at least one tick. Bullish setup
+// wants a bullish gap (high[i+2] < low[i]); bearish wants a bearish gap.
+// The displacement gap must (1) overlap the nesting FVG, (2) clear the tick
+// floor, and (3) be at least 'ratio' x the size of the nesting FVG it inverts.
+// The ratio is the real gate: a decisive break leaves a gap comparable to the
+// level it reclaims; a drift-through leaves a small one and fails.
+find_disp_fvg(is_bull_setup, nz_t, nz_b, lookback, min_ticks, ratio) =>
+    bool ok = false
+    int lb = math.min(lookback, REACH)
+    float min_sz = min_ticks * syminfo.mintick
+    float nest_sz = nz_t - nz_b
+    float need_sz = math.max(min_sz, ratio * nest_sz)
+    for i = 0 to lb by 1
+        if i + 2 <= bar_index
+            if is_bull_setup and not na(high[i + 2]) and not na(low[i])
+                if high[i + 2] < low[i]
+                    float t = low[i]
+                    float b = high[i + 2]
+                    float ov = math.min(t, nz_t) - math.max(b, nz_b)
+                    float gap = t - b
+                    if ov >= syminfo.mintick and gap >= need_sz
+                        ok := true
+                        break
+            if not is_bull_setup and not na(low[i + 2]) and not na(high[i])
+                if low[i + 2] > high[i]
+                    float t = low[i + 2]
+                    float b = high[i]
+                    float ov = math.min(t, nz_t) - math.max(b, nz_b)
+                    float gap = t - b
+                    if ov >= syminfo.mintick and gap >= need_sz
+                        ok := true
+                        break
+    ok
+
+// ============================================================
+// === ZONE POOL ===
+// ============================================================
+// state: 0 LEVEL  1 ARMED  2 ACTIVE  3 SPENT
+var box[] z_bx = array.new_box(60)
+var label[] z_lb = array.new_label(60)
+var line[] z_ln = array.new_line(60)
+var float[] z_top = array.new_float(60, na)
+var float[] z_bot = array.new_float(60, na)
+var float[] z_sw = array.new_float(60, na)
+var int[] z_swb = array.new_int(60, 0)
+var int[] z_dir = array.new_int(60, 0)
+var int[] z_st = array.new_int(60, 0)
+var int[] z_cur = array.new_int(1, 0)
+var int[] z_armed = array.new_int(2, -1)
+var bool arm_bull = false
+var bool arm_bear = false
+
+_st_col(st, dir) =>
+    st == 3 ? c_spent : st == 2 ? (dir == 1 ? c_bull : c_bear) : st == 1 ? c_armed : c_level
+
+_st_txt(st, dir) =>
+    st == 3 ? 'spent' : st == 2 ? 'UNICORN' : st == 1 ? 'armed' : ''
+
+_paint(idx) =>
+    box bx = array.get(z_bx, idx)
+    if not na(bx)
+        int st = array.get(z_st, idx)
+        int dir = array.get(z_dir, idx)
+        color cc = _st_col(st, dir)
+        bx.set_bgcolor(cc)
+        bx.set_border_color(color.new(cc, st == 0 ? 70 : 10))
+        bx.set_border_width(st == 1 or st == 2 ? 2 : 1)
+        bx.set_border_style(st == 1 ? line.style_dashed : line.style_solid)
+    idx
+
+// Index of an overlapping, not-yet-activated zone in the same direction, or
+// -1. Clustering is by range overlap: two FVGs whose price ranges intersect
+// belong to one cluster and share a single box. Active/spent zones are left
+// alone - a completed unicorn is not a placeholder and never gets merged.
+_cluster_of(zt, zb, dir) =>
+    int hit = -1
+    for i = 0 to i_max - 1 by 1
+        if not na(array.get(z_bx, i)) and array.get(z_dir, i) == dir
+            int st = array.get(z_st, i)
+            if st == 0 or st == 1
+                if math.min(array.get(z_top, i), zt) - math.max(array.get(z_bot, i), zb) > 0
+                    hit := i
+                    break
+    hit
+
+// Demote whatever is armed in this direction, then take the slot.
+_arm(dir_slot) =>
+    int prev = array.get(z_armed, dir_slot)
+    if prev >= 0
+        if array.get(z_st, prev) == 1
+            array.set(z_st, prev, 0)
+            _paint(prev)
+            label pl_ = array.get(z_lb, prev)
+            if not na(pl_)
+                pl_.delete()
+                array.set(z_lb, prev, label(na))
+    prev
+
+_push(zt, zb, swp, dir, left_bar) =>
+    int i = array.get(z_cur, 0) % i_max
+    box ob = array.get(z_bx, i)
+    if not na(ob)
+        ob.delete()
+    label ol = array.get(z_lb, i)
+    if not na(ol)
+        ol.delete()
+    line oln = array.get(z_ln, i)
+    if not na(oln)
+        oln.delete()
+    // if the evicted entry was the armed one, forget it
+    if array.get(z_armed, 0) == i
+        array.set(z_armed, 0, -1)
+    if array.get(z_armed, 1) == i
+        array.set(z_armed, 1, -1)
+    array.set(z_top, i, zt)
+    array.set(z_bot, i, zb)
+    array.set(z_sw, i, swp)
+    array.set(z_swb, i, bar_index - i_swing)
+    array.set(z_dir, i, dir)
+    array.set(z_st, i, 1)
+    array.set(z_bx, i, box.new(left_bar, zt, bar_index + 1, zb, bgcolor = c_armed, border_color = color.new(c_armed, 10), border_width = 2, border_style = line.style_dashed))
+    array.set(z_ln, i, line.new(left_bar, swp, bar_index + 1, swp, color = color.new(#c8c8c8, 30), width = 1, style = line.style_dotted))
+    array.set(z_lb, i, i_tags ? label.new(bar_index + 1, swp, 'armed', style = label.style_label_left, color = color.new(#c8c8c8, 20), textcolor = #1a1a1a, size = size.tiny) : label(na))
+    array.set(z_cur, 0, (i + 1) % i_max)
+    i
+
+// ============================================================
+// === SWING DETECTION -> ARM ===
+// ============================================================
+arm_bull := false
+arm_bear := false
+ph = ta.pivothigh(high, i_swing, i_swing)
+pl = ta.pivotlow(low, i_swing, i_swing)
+pbar = bar_index - i_swing
+
+// BEARISH setup: swing LOW nested in a bullish FVG.
+if not na(pl)
+    [ft, fb, fbar] = find_bisi(pbar, pl, i_fvg_look, i_strict)
+    if not na(ft) and not na(fb)
+        int cl = _cluster_of(ft, fb, -1)
+        if cl < 0
+            // new cluster - arm it, demoting any prior armed in this direction
+            _prev = _arm(1)
+            _idx = _push(ft, fb, pl, -1, na(fbar) ? pbar : fbar)
+            array.set(z_armed, 1, _idx)
+            arm_bear := true
+        else
+            // existing cluster: the box shows the LARGEST gap, but the WATCHED
+            // swing is always the newest nested one, so the model can complete
+            // on it. No new box.
+            float cur_span = array.get(z_top, cl) - array.get(z_bot, cl)
+            float new_span = ft - fb
+            if new_span > cur_span
+                array.set(z_top, cl, ft)
+                array.set(z_bot, cl, fb)
+                box bx = array.get(z_bx, cl)
+                if not na(bx)
+                    bx.set_top(ft)
+                    bx.set_bottom(fb)
+            array.set(z_sw, cl, pl)
+            array.set(z_swb, cl, bar_index - i_swing)
+            if array.get(z_st, cl) == 0
+                array.set(z_st, cl, 1)
+                _paint(cl)
+                arm_bear := true
+            array.set(z_armed, 1, cl)
+
+// BULLISH setup: swing HIGH nested in a bearish FVG.
+if not na(ph)
+    [ft, fb, fbar] = find_sibi(pbar, ph, i_fvg_look, i_strict)
+    if not na(ft) and not na(fb)
+        int cl = _cluster_of(ft, fb, 1)
+        if cl < 0
+            _prev = _arm(0)
+            _idx = _push(ft, fb, ph, 1, na(fbar) ? pbar : fbar)
+            array.set(z_armed, 0, _idx)
+            arm_bull := true
+        else
+            float cur_span = array.get(z_top, cl) - array.get(z_bot, cl)
+            float new_span = ft - fb
+            if new_span > cur_span
+                array.set(z_top, cl, ft)
+                array.set(z_bot, cl, fb)
+                box bx = array.get(z_bx, cl)
+                if not na(bx)
+                    bx.set_top(ft)
+                    bx.set_bottom(fb)
+            array.set(z_sw, cl, ph)
+            array.set(z_swb, cl, bar_index - i_swing)
+            if array.get(z_st, cl) == 0
+                array.set(z_st, cl, 1)
+                _paint(cl)
+                arm_bull := true
+            array.set(z_armed, 0, cl)
+
+// ============================================================
+// === ACTIVATION ===
+// ============================================================
+// Only ARMED can activate. Close must clear the swing, and the far edge of
+// the FVG as well when the displacement requirement is on.
+var bool fire_bull = false
+var bool fire_bear = false
+fire_bull := false
+fire_bear := false
+
+for d = 0 to 1 by 1
+    int ai = array.get(z_armed, d)
+    if ai >= 0 and array.get(z_st, ai) == 1
+        int dir = array.get(z_dir, ai)
+        float swp = array.get(z_sw, ai)
+        float zt = array.get(z_top, ai)
+        float zb = array.get(z_bot, ai)
+        float need = dir == 1 ? (i_need_disp ? math.max(swp, zt) : swp) : (i_need_disp ? math.min(swp, zb) : swp)
+        bool go = dir == 1 ? close > need : close < need
+        bool bpr = i_need_bpr ? find_disp_fvg(dir == 1, zt, zb, i_bpr_look, i_disp_min, i_disp_ratio) : true
+        if go and bpr
+            array.set(z_st, ai, 2)
+            array.set(z_armed, d, -1)
+            _paint(ai)
+            label lb = array.get(z_lb, ai)
+            if not na(lb)
+                lb.set_text(_st_txt(2, dir))
+                lb.set_color(color.new(dir == 1 ? #35a37b : #cf5a5f, 0))
+                lb.set_textcolor(#ffffff)
+            line ln = array.get(z_ln, ai)
+            if not na(ln)
+                ln.set_color(color.new(dir == 1 ? #35a37b : #cf5a5f, 0))
+                ln.set_style(line.style_solid)
+            if dir == 1
+                fire_bull := true
+                fire_bull
+            else
+                fire_bear := true
+                fire_bear
+
+// ============================================================
+// === UPKEEP: extend everything, mitigate actives ===
+// ============================================================
+for i = 0 to i_max - 1 by 1
+    box bx = array.get(z_bx, i)
+    if not na(bx)
+        int st = array.get(z_st, i)
+        int dir = array.get(z_dir, i)
+        float zt = array.get(z_top, i)
+        float zb = array.get(z_bot, i)
+        if st == 2 and not na(zt) and not na(zb)
+            bool hit = i_mit == 'Close through' ? (dir == 1 ? close < zb : close > zt) : (dir == 1 ? low <= zt : high >= zb)
+            if hit
+                array.set(z_st, i, 3)
+                _paint(i)
+                label lb2 = array.get(z_lb, i)
+                if not na(lb2)
+                    lb2.delete()
+                    array.set(z_lb, i, label(na))
+        bx.set_right(bar_index + 1)
+        line ln2 = array.get(z_ln, i)
+        if not na(ln2)
+            ln2.set_x2(bar_index + 1)
+        label lb3 = array.get(z_lb, i)
+        if not na(lb3)
+            lb3.set_x(bar_index + 1)
+
+// ============================================================
+// === DIAGNOSTIC ===
+// ============================================================
+var table dtb = na
+if i_dbg and barstate.islast
+    if not na(dtb)
+        dtb.delete()
+    dtb := table.new(position.middle_left, 2, 5, bgcolor = color.new(#1a1a1a, 10), border_width = 1, border_color = color.new(#333333, 0))
+    int n_lv = 0
+    int n_ar = 0
+    int n_ac = 0
+    int n_sp = 0
+    for i = 0 to i_max - 1 by 1
+        if not na(array.get(z_bx, i))
+            int st = array.get(z_st, i)
+            n_lv := st == 0 ? n_lv + 1 : n_lv
+            n_ar := st == 1 ? n_ar + 1 : n_ar
+            n_ac := st == 2 ? n_ac + 1 : n_ac
+            n_sp := st == 3 ? n_sp + 1 : n_sp
+    table.cell(dtb, 0, 0, 'UNICORN', text_color = #dbdbdb, text_size = size.tiny, bgcolor = color.new(#000000, 0))
+    table.cell(dtb, 1, 0, '', text_color = #dbdbdb, text_size = size.tiny, bgcolor = color.new(#000000, 0))
+    table.cell(dtb, 0, 1, 'level', text_color = #8a8a8a, text_size = size.tiny)
+    table.cell(dtb, 1, 1, str.tostring(n_lv), text_color = #8a8a8a, text_size = size.tiny)
+    table.cell(dtb, 0, 2, 'armed', text_color = #c8c8c8, text_size = size.tiny)
+    table.cell(dtb, 1, 2, str.tostring(n_ar), text_color = #c8c8c8, text_size = size.tiny)
+    table.cell(dtb, 0, 3, 'active', text_color = #35a37b, text_size = size.tiny)
+    table.cell(dtb, 1, 3, str.tostring(n_ac), text_color = #35a37b, text_size = size.tiny)
+    table.cell(dtb, 0, 4, 'spent', text_color = #a06cd5, text_size = size.tiny)
+    table.cell(dtb, 1, 4, str.tostring(n_sp), text_color = #a06cd5, text_size = size.tiny)
+
+// ============================================================
+// === ALERTS ===
+// ============================================================
+alertcondition(arm_bull, 'Unicorn armed - bullish', 'Bullish unicorn armed - watching for displacement')
+alertcondition(arm_bear, 'Unicorn armed - bearish', 'Bearish unicorn armed - watching for displacement')
+alertcondition(arm_bull or arm_bear, 'Unicorn armed - any', 'Unicorn armed')
+alertcondition(fire_bull, 'Unicorn activated - bullish', 'Bullish unicorn confirmed')
+alertcondition(fire_bear, 'Unicorn activated - bearish', 'Bearish unicorn confirmed')
+alertcondition(fire_bull or fire_bear, 'Unicorn activated - any', 'Unicorn confirmed')
+
+plot(fire_bull ? 1 : 0, 'Fire Bull', color = na, display = display.data_window)
+plot(fire_bear ? 1 : 0, 'Fire Bear', color = na, display = display.data_window)
+plot(arm_bull ? 1 : 0, 'Arm Bull', color = na, display = display.data_window)
+plot(arm_bear ? 1 : 0, 'Arm Bear', color = na, display = display.data_window)

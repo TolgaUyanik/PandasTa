@@ -1,0 +1,503 @@
+//@version=6
+// FVG Sweep Magnet Engine [PhenLabs]
+// Displacement-validated Fair Value Gaps become magnetic targets after liquidity sweeps.
+// Clean visual hierarchy: FVG zones → MAG signals → optional rails. No chart clutter.
+indicator("FVG Sweep Magnet Engine [PhenLabs]", shorttitle="FSME", overlay = true,
+     max_boxes_count = 200, max_lines_count = 200, max_labels_count = 100,
+     max_bars_back = 500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+string G_FVG  = "FVG Detection"
+string G_SWP  = "Liquidity Sweeps"
+string G_SIG  = "Magnet Signals"
+string G_VIS  = "Visuals"
+string G_DASH = "Dashboard"
+
+int    fvgLookback  = input.int(10, "Max Active FVGs", minval = 2, maxval = 40, group = G_FVG,
+     tooltip = "Keep this low for a clean chart. Only the newest live gaps stay visible.")
+float  dispAtrMult  = input.float(1.25, "Displacement ATR Mult", minval = 0.3, maxval = 5.0, step = 0.05, group = G_FVG,
+     tooltip = "Middle candle body must exceed ATR × this to qualify.")
+int    atrLen       = input.int(14, "ATR Length", minval = 1, maxval = 100, group = G_FVG)
+float  minGapAtr    = input.float(0.25, "Min Gap Size (ATR)", minval = 0.05, maxval = 3.0, step = 0.05, group = G_FVG,
+     tooltip = "Filters micro-gaps. Higher = fewer, cleaner zones.")
+bool   requireDisp  = input.bool(true, "Require Displacement Candle", group = G_FVG)
+int    maxFvgAge    = input.int(60, "Max FVG Age (bars)", minval = 10, maxval = 300, group = G_FVG)
+
+int    pivotLen     = input.int(5, "Liquidity Pivot Length", minval = 2, maxval = 30, group = G_SWP)
+int    liqKeep      = input.int(4, "Liquidity Levels Kept", minval = 1, maxval = 20, group = G_SWP)
+float  sweepWickMult = input.float(0.35, "Sweep Wick Ratio", minval = 0.1, maxval = 0.9, step = 0.05, group = G_SWP)
+int    sweepConfirm = input.int(2, "Sweep Confirm Bars", minval = 1, maxval = 5, group = G_SWP)
+
+int    magnetWindow = input.int(18, "Magnet Window (bars after sweep)", minval = 3, maxval = 80, group = G_SIG)
+int    minScore     = input.int(5, "Min Score for Signal (0-10)", minval = 0, maxval = 10, group = G_SIG)
+float  targetExtAtr = input.float(1.6, "Target Extension (ATR)", minval = 0.3, maxval = 6.0, step = 0.1, group = G_SIG)
+
+// Visual hierarchy — Clean defaults
+bool   showFvgBoxes   = input.bool(true, "Show FVG Zones", group = G_VIS)
+bool   showCeLine     = input.bool(true, "Show FVG Midline (CE)", group = G_VIS,
+     tooltip = "Single thin dashed line at the gap center. Much cleaner than multi-layer beams.")
+bool   showNeonOnMag  = input.bool(true, "Neon Beam Only on MAG Signal", group = G_VIS,
+     tooltip = "Triple neon appears only when a magnet signal fires — not on every gap.")
+bool   showLiqLines   = input.bool(false, "Show Liquidity Rails", group = G_VIS)
+bool   showSweepMarks = input.bool(false, "Show Sweep Diamonds", group = G_VIS)
+bool   showScores     = input.bool(true, "Show Score on Zone", group = G_VIS)
+bool   showTargets    = input.bool(true, "Show Target on MAG", group = G_VIS)
+bool   showSignals    = input.bool(true, "Show MAG Markers", group = G_VIS)
+bool   showSigGlow    = input.bool(true, "Signal Bar Highlight", group = G_VIS)
+int    zoneExtend     = input.int(8, "Zone Extend (bars right)", minval = 2, maxval = 40, group = G_VIS)
+color  bullCol        = input.color(#26A69A, "Bull Color", group = G_VIS)
+color  bearCol        = input.color(#EF5350, "Bear Color", group = G_VIS)
+color  bslColor       = input.color(color.new(#FFD166, 55), "BSL Rail", group = G_VIS)
+color  sslColor       = input.color(color.new(#42A5F5, 55), "SSL Rail", group = G_VIS)
+
+bool   showDash  = input.bool(true, "Show Dashboard", group = G_DASH)
+string dashPos   = input.string("Top Right", "Dashboard Position",
+     options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = G_DASH)
+color  dashBg    = input.color(color.new(#131722, 5), "Dashboard BG", group = G_DASH)
+color  dashText  = input.color(#D1D4DC, "Dashboard Text", group = G_DASH)
+color  dashHead  = input.color(#2962FF, "Dashboard Header", group = G_DASH)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+float atr    = ta.atr(atrLen)
+float barRng = high - low
+
+f_safeDiv(float a, float b) =>
+    b == 0.0 or na(b) ? 0.0 : a / b
+
+f_clamp(float v, float lo, float hi) =>
+    math.max(lo, math.min(hi, v))
+
+f_pos() =>
+    dashPos == "Top Left" ? position.top_left :
+     dashPos == "Bottom Right" ? position.bottom_right :
+     dashPos == "Bottom Left" ? position.bottom_left :
+     position.top_right
+
+// Score 0–10
+f_score(float gapSize, float dispBody, float ageBars, float volRatio) =>
+    float gapPts  = f_clamp(f_safeDiv(gapSize, atr) * 3.2, 0.0, 3.0)
+    float dispPts = f_clamp(f_safeDiv(dispBody, atr) * 2.0, 0.0, 3.0)
+    float agePts  = f_clamp(3.0 - ageBars / 40.0, 0.0, 2.0)
+    float volPts  = f_clamp(volRatio * 1.2, 0.0, 2.0)
+    int(math.round(f_clamp(gapPts + dispPts + agePts + volPts, 0.0, 10.0)))
+
+// Soft fills — readable zones, candles stay visible
+color bullFill = color.new(bullCol, 88)
+color bearFill = color.new(bearCol, 88)
+color bullBord = color.new(bullCol, 45)
+color bearBord = color.new(bearCol, 45)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY POOLS
+// ══════════════════════════════════════════════════════════════════════════════
+float ph = ta.pivothigh(high, pivotLen, pivotLen)
+float pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var array<float> bslLvl = array.new_float()
+var array<float> sslLvl = array.new_float()
+var array<line>  bslLn  = array.new_line()
+var array<line>  sslLn  = array.new_line()
+
+f_pushLiq(array<float> lvls, array<line> lns, float lvl, int bIdx, color col) =>
+    array.push(lvls, lvl)
+    line ln = showLiqLines ? line.new(bIdx, lvl, bar_index, lvl, color = col, style = line.style_dotted, width = 1) : na
+    array.push(lns, ln)
+    if array.size(lvls) > liqKeep
+        if not na(array.get(lns, 0))
+            line.delete(array.get(lns, 0))
+        array.shift(lvls)
+        array.shift(lns)
+
+if not na(ph)
+    f_pushLiq(bslLvl, bslLn, ph, bar_index - pivotLen, bslColor)
+if not na(pl)
+    f_pushLiq(sslLvl, sslLn, pl, bar_index - pivotLen, sslColor)
+
+if showLiqLines and array.size(bslLn) > 0
+    for i = 0 to array.size(bslLn) - 1
+        line ln = array.get(bslLn, i)
+        if not na(ln)
+            line.set_x2(ln, bar_index)
+
+if showLiqLines and array.size(sslLn) > 0
+    for i = 0 to array.size(sslLn) - 1
+        line ln = array.get(sslLn, i)
+        if not na(ln)
+            line.set_x2(ln, bar_index)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SWEEP DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+var int   lastBullSweepBar = na
+var int   lastBearSweepBar = na
+var float lastBullSweepLvl = na
+var float lastBearSweepLvl = na
+
+bool wickOkHigh = barRng > 0 and (high - math.max(open, close)) / barRng >= sweepWickMult
+bool wickOkLow  = barRng > 0 and (math.min(open, close) - low) / barRng >= sweepWickMult
+
+bool  bullSweep    = false
+bool  bearSweep    = false
+float sweptBullLvl = na
+float sweptBearLvl = na
+
+if array.size(sslLvl) > 0 and wickOkLow and not na(atr)
+    for i = 0 to array.size(sslLvl) - 1
+        float lvl = array.get(sslLvl, i)
+        if low < lvl and close > lvl and close > open
+            bullSweep := true
+            sweptBullLvl := lvl
+
+if array.size(bslLvl) > 0 and wickOkHigh and not na(atr)
+    for i = 0 to array.size(bslLvl) - 1
+        float lvl = array.get(bslLvl, i)
+        if high > lvl and close < lvl and close < open
+            bearSweep := true
+            sweptBearLvl := lvl
+
+if bullSweep
+    lastBullSweepBar := bar_index
+    lastBullSweepLvl := sweptBullLvl
+if bearSweep
+    lastBearSweepBar := bar_index
+    lastBearSweepLvl := sweptBearLvl
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FVG STORAGE — boxes + optional single CE midline (no permanent neon stack)
+// ══════════════════════════════════════════════════════════════════════════════
+var array<box>   fvgBox   = array.new_box()
+var array<line>  fvgCe    = array.new_line()
+var array<float> fvgTop   = array.new_float()
+var array<float> fvgBot   = array.new_float()
+var array<int>   fvgDir   = array.new_int()
+var array<int>   fvgBirth = array.new_int()
+var array<int>   fvgScore = array.new_int()
+var array<bool>  fvgLive  = array.new_bool()
+var array<line>  tgtLn    = array.new_line()
+var array<line>  neonW    = array.new_line()
+var array<line>  neonM    = array.new_line()
+var array<line>  neonC    = array.new_line()
+
+float volSma   = ta.sma(volume, 20)
+float volRatio = f_safeDiv(volume, volSma)
+
+bool  bullGapRaw = low > high[2] and not na(atr)
+bool  bearGapRaw = high < low[2] and not na(atr)
+float bullGapSz  = bullGapRaw ? low - high[2] : 0.0
+float bearGapSz  = bearGapRaw ? low[2] - high : 0.0
+float midBody    = math.abs(close[1] - open[1])
+bool  midBull    = close[1] > open[1]
+bool  midBear    = close[1] < open[1]
+bool  dispOkBull = not requireDisp or (midBull and midBody >= atr * dispAtrMult)
+bool  dispOkBear = not requireDisp or (midBear and midBody >= atr * dispAtrMult)
+bool  sizeOkBull = bullGapSz >= atr * minGapAtr
+bool  sizeOkBear = bearGapSz >= atr * minGapAtr
+
+bool newBullFvg = bullGapRaw and sizeOkBull and dispOkBull
+bool newBearFvg = bearGapRaw and sizeOkBear and dispOkBear
+
+f_deleteAt(int idx) =>
+    box bx = array.get(fvgBox, idx)
+    line ce = array.get(fvgCe, idx)
+    line tg = array.get(tgtLn, idx)
+    line lw = array.get(neonW, idx)
+    line lm = array.get(neonM, idx)
+    line lc = array.get(neonC, idx)
+    if not na(bx)
+        box.delete(bx)
+    if not na(ce)
+        line.delete(ce)
+    if not na(tg)
+        line.delete(tg)
+    if not na(lw)
+        line.delete(lw)
+    if not na(lm)
+        line.delete(lm)
+    if not na(lc)
+        line.delete(lc)
+
+f_trimOldest() =>
+    if array.size(fvgBox) > fvgLookback
+        f_deleteAt(0)
+        array.shift(fvgBox)
+        array.shift(fvgCe)
+        array.shift(fvgTop)
+        array.shift(fvgBot)
+        array.shift(fvgDir)
+        array.shift(fvgBirth)
+        array.shift(fvgScore)
+        array.shift(fvgLive)
+        array.shift(tgtLn)
+        array.shift(neonW)
+        array.shift(neonM)
+        array.shift(neonC)
+
+f_addFvg(float top, float bot, int dir, int score) =>
+    color fillC = dir == 1 ? bullFill : bearFill
+    color bordC = dir == 1 ? bullBord : bearBord
+    color accent = dir == 1 ? bullCol : bearCol
+    float mid = (top + bot) * 0.5
+    string boxTxt = showScores ? str.tostring(score) : ""
+    // Compact zone: only extends a few bars — does not cage the chart
+    box bx = showFvgBoxes ? box.new(bar_index - 2, top, bar_index + zoneExtend, bot,
+         border_color = bordC, bgcolor = fillC, border_width = 1,
+         text = boxTxt, text_color = color.new(accent, 15),
+         text_size = size.small, text_halign = text.align_right, text_valign = text.align_center) : na
+    // Single CE midline — dashed, thin, low opacity
+    line ce = showCeLine ? line.new(bar_index - 2, mid, bar_index + zoneExtend, mid,
+         color = color.new(accent, 55), width = 1, style = line.style_dashed) : na
+    array.push(fvgBox, bx)
+    array.push(fvgCe, ce)
+    array.push(fvgTop, top)
+    array.push(fvgBot, bot)
+    array.push(fvgDir, dir)
+    array.push(fvgBirth, bar_index)
+    array.push(fvgScore, score)
+    array.push(fvgLive, true)
+    array.push(tgtLn, na)
+    array.push(neonW, na)
+    array.push(neonM, na)
+    array.push(neonC, na)
+    f_trimOldest()
+
+if newBullFvg
+    f_addFvg(low, high[2], 1, f_score(bullGapSz, midBody, 0.0, volRatio[1]))
+
+if newBearFvg
+    f_addFvg(low[2], high, -1, f_score(bearGapSz, midBody, 0.0, volRatio[1]))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MAINTAIN FVGs
+// ══════════════════════════════════════════════════════════════════════════════
+var int   activeBull  = 0
+var int   activeBear  = 0
+var int   bestScore   = 0
+var float nearestMid  = na
+var int   nearestDir  = 0
+
+activeBull := 0
+activeBear := 0
+bestScore  := 0
+nearestMid := na
+nearestDir := 0
+float nearestDist = 1e10
+
+if array.size(fvgBox) > 0
+    for i = 0 to array.size(fvgBox) - 1
+        bool  live  = array.get(fvgLive, i)
+        float top   = array.get(fvgTop, i)
+        float bot   = array.get(fvgBot, i)
+        int   dir   = array.get(fvgDir, i)
+        int   birth = array.get(fvgBirth, i)
+        int   age   = bar_index - birth
+        float mid   = (top + bot) * 0.5
+        box   bx    = array.get(fvgBox, i)
+        line  ce    = array.get(fvgCe, i)
+
+        bool filled  = dir == 1 ? close < bot : close > top
+        bool expired = age > maxFvgAge
+
+        if live and (filled or expired)
+            array.set(fvgLive, i, false)
+            live := false
+            f_deleteAt(i)
+            array.set(fvgBox, i, na)
+            array.set(fvgCe, i, na)
+            array.set(tgtLn, i, na)
+            array.set(neonW, i, na)
+            array.set(neonM, i, na)
+            array.set(neonC, i, na)
+
+        if live
+            // Grow zone only to current bar + small pad (never a long cage)
+            int rightX = bar_index + zoneExtend
+            if not na(bx)
+                box.set_right(bx, rightX)
+            if not na(ce)
+                line.set_x2(ce, rightX)
+
+            // Soften after first touch
+            bool partial = dir == 1 ? low <= top and close >= bot : high >= bot and close <= top
+            if partial and not na(bx)
+                box.set_bgcolor(bx, color.new(dir == 1 ? bullCol : bearCol, 93))
+                box.set_border_color(bx, color.new(dir == 1 ? bullCol : bearCol, 65))
+
+            float gapSzNow = top - bot
+            int scNow = f_score(gapSzNow, atr, float(age), volRatio)
+            array.set(fvgScore, i, scNow)
+            if showScores and not na(bx)
+                box.set_text(bx, str.tostring(scNow))
+
+            if dir == 1
+                activeBull += 1
+            else
+                activeBear += 1
+            if scNow > bestScore
+                bestScore := scNow
+
+            float d = math.abs(close - mid)
+            if d < nearestDist
+                nearestDist := d
+                nearestMid := mid
+                nearestDir := dir
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MAGNET SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+bool  bullMagnet = false
+bool  bearMagnet = false
+float bullTgt    = na
+float bearTgt    = na
+int   sigScore   = 0
+float sigMid     = na
+
+bool bullSweepFresh = not na(lastBullSweepBar) and (bar_index - lastBullSweepBar) <= magnetWindow and (bar_index - lastBullSweepBar) >= sweepConfirm
+bool bearSweepFresh = not na(lastBearSweepBar) and (bar_index - lastBearSweepBar) <= magnetWindow and (bar_index - lastBearSweepBar) >= sweepConfirm
+
+// Draw neon stack only once, on the armed magnet FVG
+f_armNeon(int i, color neon, float mid, float tgt) =>
+    // Highlight the zone
+    box bx = array.get(fvgBox, i)
+    if not na(bx)
+        box.set_bgcolor(bx, color.new(neon, 78))
+        box.set_border_color(bx, color.new(neon, 15))
+        box.set_border_width(bx, 2)
+    // Optional triple neon — only on signal
+    if showNeonOnMag
+        line lw = array.get(neonW, i)
+        line lm = array.get(neonM, i)
+        line lc = array.get(neonC, i)
+        if na(lw)
+            lw := line.new(bar_index, mid, bar_index + zoneExtend + 6, mid, color = color.new(neon, 80), width = 7)
+            lm := line.new(bar_index, mid, bar_index + zoneExtend + 6, mid, color = color.new(neon, 50), width = 3)
+            lc := line.new(bar_index, mid, bar_index + zoneExtend + 6, mid, color = color.new(neon, 0), width = 1)
+            array.set(neonW, i, lw)
+            array.set(neonM, i, lm)
+            array.set(neonC, i, lc)
+    // Target ray
+    if showTargets
+        line tg = array.get(tgtLn, i)
+        if na(tg)
+            tg := line.new(bar_index, mid, bar_index + zoneExtend + 6, tgt,
+                 color = color.new(neon, 35), style = line.style_dotted, width = 2)
+            array.set(tgtLn, i, tg)
+            // Small target label once
+            label.new(bar_index + zoneExtend + 6, tgt, "TP",
+                 style = label.style_label_left, color = color.new(neon, 40),
+                 textcolor = color.white, size = size.tiny)
+
+if array.size(fvgBox) > 0 and not na(atr)
+    for i = 0 to array.size(fvgBox) - 1
+        if array.get(fvgLive, i)
+            float top = array.get(fvgTop, i)
+            float bot = array.get(fvgBot, i)
+            int   dir = array.get(fvgDir, i)
+            int   sc  = array.get(fvgScore, i)
+            float mid = (top + bot) * 0.5
+            bool  inGap = low <= top and high >= bot
+
+            if bullSweepFresh and dir == 1 and inGap and sc >= minScore and close > open
+                bullMagnet := true
+                sigScore := sc
+                sigMid := mid
+                bullTgt := mid + atr * targetExtAtr
+                f_armNeon(i, bullCol, mid, bullTgt)
+
+            if bearSweepFresh and dir == -1 and inGap and sc >= minScore and close < open
+                bearMagnet := true
+                sigScore := sc
+                sigMid := mid
+                bearTgt := mid - atr * targetExtAtr
+                f_armNeon(i, bearCol, mid, bearTgt)
+
+var int lastBullSigBar = na
+var int lastBearSigBar = na
+bool bullSig = bullMagnet and (na(lastBullSigBar) or bar_index - lastBullSigBar > magnetWindow)
+bool bearSig = bearMagnet and (na(lastBearSigBar) or bar_index - lastBearSigBar > magnetWindow)
+
+if bullSig
+    lastBullSigBar := bar_index
+if bearSig
+    lastBearSigBar := bar_index
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MARKERS — signal-first, minimal noise
+// ══════════════════════════════════════════════════════════════════════════════
+// Primary: MAG labels offset from price so candles stay readable
+if showSignals and bullSig
+    label.new(bar_index, low, "▲ MAG",
+         style = label.style_label_up, color = color.new(bullCol, 10),
+         textcolor = color.white, size = size.small, yloc = yloc.belowbar)
+
+if showSignals and bearSig
+    label.new(bar_index, high, "▼ MAG",
+         style = label.style_label_down, color = color.new(bearCol, 10),
+         textcolor = color.white, size = size.small, yloc = yloc.abovebar)
+
+// Optional sweep marks (off by default)
+plotshape(showSweepMarks and bullSweep, title = "SSL Sweep", style = shape.diamond,
+     location = location.belowbar, color = color.new(sslColor, 20), size = size.tiny,
+     display = display.pane)
+plotshape(showSweepMarks and bearSweep, title = "BSL Sweep", style = shape.diamond,
+     location = location.abovebar, color = color.new(bslColor, 20), size = size.tiny,
+     display = display.pane)
+
+// Soft bar tint only on confirmed MAG (not every sweep)
+bgcolor(showSigGlow and bullSig ? color.new(bullCol, 93) : showSigGlow and bearSig ? color.new(bearCol, 93) : na,
+     title = "Signal Highlight")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD — fewer rows, larger type, plain English
+// ══════════════════════════════════════════════════════════════════════════════
+var table dash = na
+if showDash and barstate.islast
+    if na(dash)
+        dash := table.new(f_pos(), 2, 6, bgcolor = dashBg,
+             border_color = color.new(dashHead, 50), border_width = 1,
+             frame_color = color.new(dashHead, 30), frame_width = 1)
+
+    string bias = activeBull > activeBear + 1 ? "Bullish" : activeBear > activeBull + 1 ? "Bearish" : "Neutral"
+    color  biasCol = activeBull > activeBear + 1 ? bullCol : activeBear > activeBull + 1 ? bearCol : dashText
+    string sweepTxt = bullSweepFresh ? "SSL swept — waiting" : bearSweepFresh ? "BSL swept — waiting" : "No active sweep"
+    color  sweepCol = bullSweepFresh or bearSweepFresh ? color.new(#FFB74D, 0) : color.new(dashText, 30)
+    string lastTxt = not na(lastBullSigBar) and (na(lastBearSigBar) or lastBullSigBar >= lastBearSigBar) ? "Bull MAG" :
+         not na(lastBearSigBar) ? "Bear MAG" : "None"
+    color  lastCol = lastTxt == "Bull MAG" ? bullCol : lastTxt == "Bear MAG" ? bearCol : color.new(dashText, 30)
+
+    table.cell(dash, 0, 0, "FSME", text_color = color.white, bgcolor = dashHead, text_size = size.normal)
+    table.cell(dash, 1, 0, "PhenLabs", text_color = color.white, bgcolor = dashHead, text_size = size.normal)
+
+    table.cell(dash, 0, 1, "Bias", text_color = color.new(dashText, 20), text_size = size.small)
+    table.cell(dash, 1, 1, bias, text_color = biasCol, text_size = size.small)
+
+    table.cell(dash, 0, 2, "Live Gaps", text_color = color.new(dashText, 20), text_size = size.small)
+    table.cell(dash, 1, 2, str.tostring(activeBull) + "↑  " + str.tostring(activeBear) + "↓", text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 3, "Best Score", text_color = color.new(dashText, 20), text_size = size.small)
+    table.cell(dash, 1, 3, str.tostring(bestScore) + " / 10", text_color = bestScore >= minScore ? bullCol : dashText, text_size = size.small)
+
+    table.cell(dash, 0, 4, "Sweep", text_color = color.new(dashText, 20), text_size = size.small)
+    table.cell(dash, 1, 4, sweepTxt, text_color = sweepCol, text_size = size.small)
+
+    table.cell(dash, 0, 5, "Last Signal", text_color = color.new(dashText, 20), text_size = size.small)
+    table.cell(dash, 1, 5, lastTxt, text_color = lastCol, text_size = size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+alertcondition(bullSig, title = "Bull FVG Magnet",
+     message = "FSME: Bullish magnet — SSL sweep confirmed into scored bullish FVG")
+alertcondition(bearSig, title = "Bear FVG Magnet",
+     message = "FSME: Bearish magnet — BSL sweep confirmed into scored bearish FVG")
+alertcondition(bullSweep, title = "SSL Liquidity Sweep",
+     message = "FSME: Sell-side liquidity swept (SSL raid)")
+alertcondition(bearSweep, title = "BSL Liquidity Sweep",
+     message = "FSME: Buy-side liquidity swept (BSL raid)")
+alertcondition(newBullFvg, title = "New Bull Displacement FVG",
+     message = "FSME: New bullish displacement FVG printed")
+alertcondition(newBearFvg, title = "New Bear Displacement FVG",
+     message = "FSME: New bearish displacement FVG printed")

@@ -1,0 +1,374 @@
+//@version=6
+//@description Strict Highlander v7 origin lifecycle for engulfing indicators.
+//             Exports enums, an OriginCandidate UDT, helper functions, and
+//             a line-rendering function used by engulfing_opportunities_v20.6+
+//             to detect, track, promote, invalidate, consume, and visually
+//             render origin levels discovered on lower timeframes inside an
+//             engulfment zone.
+//
+// Published-as-library rationale: the engulfing indicator is already at Pine v6's
+// top-level-declaration limit (CE10295) and hits static-analyzer timeout (CE10293)
+// when the main script iterates typed arrays to render origin detail. Moving the
+// type, state-machine, and render functions into a library pushes that work into
+// the library's own compilation unit and keeps the main script under both caps.
+//
+// v2 additions (2026-04-17):
+//   - OriginCandidate gains `line lineRef` field — library owns the drawing lifecycle.
+//   - New `renderOriginLines` export creates/updates/deletes chart lines based on
+//     candidate state: CONFIRMED → draw, CONSUMED/BROKEN_BSUT → delete.
+//
+// Reference: highlander_v7.pine:212-293 for the state-transition rules this
+// implementation mirrors.
+library("OriginLifecycle", overlay = false)
+
+// ─── Enums ───
+
+//@enum             State in the Highlander origin lifecycle. Mirrors
+//                  highlander_v7.pine:104-107 plus two terminal states.
+//@field BREAK          Detected BREAK pair, no touch yet.
+//@field BREAK_TOUCHED  First touch recorded; waiting for rejection.
+//@field ORIGIN         Rejected; waiting for 2-bar confirmation.
+//@field CONFIRMED      CONFIRMED — eligible for display.
+//@field BROKEN_BSUT    Hard-close invalidation before CONFIRMED — pending delete.
+//@field CONSUMED       Post-display touch (user-defined rule) — terminal.
+export enum OriginState
+    BREAK
+    BREAK_TOUCHED
+    ORIGIN
+    CONFIRMED
+    BROKEN_BSUT
+    CONSUMED
+
+//@enum       Direction of the origin level.
+//@field UP   Support (origin sits BELOW the engulfment's upper bound).
+//@field DOWN Resistance (origin sits ABOVE the engulfment's lower bound).
+export enum OriginDir
+    UP
+    DOWN
+
+// ─── Types ───
+
+//@type                       A single tracked origin candidate.
+//@field tfLabel              Display string ("1H", "5m" etc.).
+//@field ltfMinutes           Lower-timeframe length in minutes; used for the
+//                            "skip the touch bar" gate in `tickStateMachine`.
+//@field price                The origin level price.
+//@field dir                  UP (support) or DOWN (resistance).
+//@field state                Current lifecycle state.
+//@field firstTouchTime       ms timestamp of first touch (0 if `touchSeen == false`).
+//@field touchSeen            True once this candidate has been touched at least once.
+//@field createdTime          ms timestamp of the d1 bar that formed the BREAK pair.
+//@field lastProcessedTime    ms timestamp of the last LTF bar fed through the
+//                            state machine; watermark used to avoid re-processing.
+//@field consecutiveDirCount  Counter for 2-bar CONFIRMED confirmation, 0-2.
+//@field lineRef              v2: Chart line drawn at `price` once the state
+//                            reaches CONFIRMED, deleted once it reaches CONSUMED
+//                            or BROKEN_BSUT. Managed by `renderOriginLines`.
+//                            Callers should initialise to `na`.
+export type OriginCandidate
+    string      tfLabel
+    int         ltfMinutes
+    float       price
+    OriginDir   dir
+    OriginState state
+    int         firstTouchTime
+    bool        touchSeen
+    int         createdTime
+    int         lastProcessedTime
+    int         consecutiveDirCount
+    line        lineRef = na
+
+// ─── Functions ───
+
+//@function       Pure state-transition function. One closed LTF bar in,
+//                updated candidate out. Mirrors highlander_v7.pine:212-293.
+//@param c        The current candidate state.
+//@param bO       Bar open.
+//@param bH       Bar high.
+//@param bL       Bar low.
+//@param bC       Bar close.
+//@param bTime    Bar start time in ms.
+//@returns        Updated OriginCandidate with `lastProcessedTime := bTime`.
+//                Caller is responsible for:
+//                - Only passing CLOSED LTF bars.
+//                - Skipping bars whose time <= c.lastProcessedTime.
+//                - On BROKEN_BSUT, looking for a retest in subsequent bars to delete.
+export tickStateMachine(OriginCandidate c, float bO, float bH, float bL, float bC, int bTime) =>
+    OriginCandidate r = c
+    float p = r.price
+    bool isUp = r.dir == OriginDir.UP
+
+    bool touch = bH >= p and bL <= p
+    bool reject = isUp ? (touch and bC > p) : (touch and bC < p)
+    bool hardClose = isUp ? (bC < bO and bO < p and bC < p) : (bC > bO and bO > p and bC > p)
+
+    // 1. First-touch recording — BREAK -> BREAK_TOUCHED
+    if touch and not r.touchSeen
+        r.touchSeen := true
+        r.firstTouchTime := bTime
+        if r.state == OriginState.BREAK
+            r.state := OriginState.BREAK_TOUCHED
+
+    // 2. Rejection -> ORIGIN, gated on "skip the touch bar" rule
+    bool canReject = r.touchSeen and bTime > r.firstTouchTime + r.ltfMinutes * 60000
+    if reject and canReject and (r.state == OriginState.BREAK or r.state == OriginState.BREAK_TOUCHED)
+        r.state := OriginState.ORIGIN
+        r.consecutiveDirCount := 0
+
+    // 3. Confirmation: 2 same-colour-in-direction bars after entering ORIGIN
+    if r.state == OriginState.ORIGIN
+        bool sameDir = isUp ? (bC > bO) : (bC < bO)
+        if sameDir
+            r.consecutiveDirCount := r.consecutiveDirCount + 1
+            if r.consecutiveDirCount >= 2
+                r.state := OriginState.CONFIRMED
+        else
+            r.consecutiveDirCount := 0
+
+    // 4. Hard-close BSUT (pre-CONFIRMED only — once CONFIRMED, only the
+    //    per-tick consumed-on-touch sweep modifies the candidate)
+    if (r.state == OriginState.BREAK or r.state == OriginState.BREAK_TOUCHED or r.state == OriginState.ORIGIN) and hardClose
+        r.state := OriginState.BROKEN_BSUT
+
+    r.lastProcessedTime := bTime
+    r
+
+//@function            Find new BREAK pairs in the engulfment zone and push
+//                     them to `outCandidates` if not already tracked. De-dup
+//                     key is (price, createdTime, tfLabel).
+//@param isBullish     true -> look for SUPPORT (green-green) pairs;
+//                     false -> look for RESISTANCE (red-red) pairs.
+//@param zoneLow       Lower bound of the engulfment zone (inclusive).
+//@param zoneHigh      Upper bound of the engulfment zone (inclusive).
+//@param prevO,H,L,C,T Prev-HTF-bar LTF buffer (opens/highs/lows/closes/times).
+//@param currO,H,L,C,T Current-HTF-bar LTF buffer.
+//@param ltfValid      Pre-computed validity flag for this LTF.
+//@param ltfMin        LTF length in minutes (baked into each new candidate).
+//@param tfLabel       Display string, e.g. "1H".
+//@param outCandidates The per-pattern candidate array to push into.
+//@returns             Nothing (mutates outCandidates).
+export scanForBreakCandidates(bool isBullish, float zoneLow, float zoneHigh,
+     array<float> prevO, array<float> prevH, array<float> prevL, array<float> prevC, array<int> prevT,
+     array<float> currO, array<float> currH, array<float> currL, array<float> currC, array<int> currT,
+     bool ltfValid, int ltfMin, string tfLabel,
+     array<OriginCandidate> outCandidates) =>
+    if ltfValid
+        array<float> combO = array.new<float>(0)
+        array<float> combH = array.new<float>(0)
+        array<float> combL = array.new<float>(0)
+        array<float> combC = array.new<float>(0)
+        array<int>   combT = array.new<int>(0)
+        if not na(prevO)
+            array.concat(combO, prevO)
+            array.concat(combH, prevH)
+            array.concat(combL, prevL)
+            array.concat(combC, prevC)
+            array.concat(combT, prevT)
+        if not na(currO)
+            array.concat(combO, currO)
+            array.concat(combH, currH)
+            array.concat(combL, currL)
+            array.concat(combC, currC)
+            array.concat(combT, currT)
+
+        int sz = array.size(combO)
+        if sz >= 3
+            float minRange = syminfo.mintick * 5
+            for i = 2 to sz - 1
+                float d0O = array.get(combO, i)
+                float d0C = array.get(combC, i)
+                float d0H = array.get(combH, i)
+                float d0L = array.get(combL, i)
+                int   d0T = array.get(combT, i)
+                float d1O = array.get(combO, i - 1)
+                float d1C = array.get(combC, i - 1)
+                float d1H = array.get(combH, i - 1)
+                float d1L = array.get(combL, i - 1)
+                int   d1T = array.get(combT, i - 1)
+                float d2O = array.get(combO, i - 2)
+                float d2C = array.get(combC, i - 2)
+
+                bool d0Green = d0C > d0O
+                bool d0Red   = d0C < d0O
+                bool d1Green = d1C > d1O
+                bool d1Red   = d1C < d1O
+                bool d2Green = d2C > d2O
+                bool d2Red   = d2C < d2O
+
+                float lvl = na
+                OriginDir dirNew = OriginDir.UP   // overwritten if a BREAK pair is found
+                if isBullish and d0Green and d1Green and not d2Green
+                    if d0L >= d1L and (d1H - d1L) >= minRange and d1L >= zoneLow and d1L <= zoneHigh
+                        lvl := d1L
+                        dirNew := OriginDir.UP
+                if not isBullish and d0Red and d1Red and not d2Red
+                    if d0H <= d1H and (d1H - d1L) >= minRange and d1H >= zoneLow and d1H <= zoneHigh
+                        lvl := d1H
+                        dirNew := OriginDir.DOWN
+
+                if not na(lvl)
+                    // De-dup: (price, createdTime, tfLabel) triple
+                    bool dup = false
+                    int existSize = array.size(outCandidates)
+                    if existSize > 0
+                        for j = 0 to existSize - 1
+                            OriginCandidate ex = array.get(outCandidates, j)
+                            if ex.price == lvl and ex.createdTime == d1T and ex.tfLabel == tfLabel
+                                dup := true
+                                break
+                    if not dup
+                        OriginCandidate nc = OriginCandidate.new(tfLabel, ltfMin, lvl, dirNew, OriginState.BREAK, 0, false, d1T, d1T, 0)
+                        array.push(outCandidates, nc)
+
+//@function        Drive the state machine across unprocessed LTF bars for every
+//                 candidate whose `ltfMinutes == ltfMin`. Removes candidates
+//                 that reach BROKEN_BSUT AND see a retest within the buffer.
+//@param candidates The per-pattern candidate array to update.
+//@param ltfMin     The LTF length this buffer represents; candidates with a
+//                  different ltfMinutes are skipped.
+//@param prevO,H,L,C,T   Prev-HTF-bar LTF buffer.
+//@param currO,H,L,C,T   Current-HTF-bar LTF buffer.
+//@param ltfValid   Validity flag.
+//@returns          Nothing (mutates candidates).
+export processNewLTFBars(array<OriginCandidate> candidates, int ltfMin,
+     array<float> prevO, array<float> prevH, array<float> prevL, array<float> prevC, array<int> prevT,
+     array<float> currO, array<float> currH, array<float> currL, array<float> currC, array<int> currT,
+     bool ltfValid) =>
+    if ltfValid and array.size(candidates) > 0
+        array<float> combO = array.new<float>(0)
+        array<float> combH = array.new<float>(0)
+        array<float> combL = array.new<float>(0)
+        array<float> combC = array.new<float>(0)
+        array<int>   combT = array.new<int>(0)
+        if not na(prevO)
+            array.concat(combO, prevO)
+            array.concat(combH, prevH)
+            array.concat(combL, prevL)
+            array.concat(combC, prevC)
+            array.concat(combT, prevT)
+        if not na(currO)
+            array.concat(combO, currO)
+            array.concat(combH, currH)
+            array.concat(combL, currL)
+            array.concat(combC, currC)
+            array.concat(combT, currT)
+        int sz = array.size(combT)
+
+        int n = array.size(candidates)
+        for ci = n - 1 to 0
+            OriginCandidate c = array.get(candidates, ci)
+            if c.ltfMinutes != ltfMin
+                continue
+            if c.state == OriginState.CONFIRMED or c.state == OriginState.CONSUMED
+                continue
+
+            bool deleteIt = false
+            for bi = 0 to sz - 1
+                int bT = array.get(combT, bi)
+                if bT <= c.lastProcessedTime
+                    continue
+                if bT <= c.createdTime
+                    continue
+                float bO = array.get(combO, bi)
+                float bH = array.get(combH, bi)
+                float bL = array.get(combL, bi)
+                float bC = array.get(combC, bi)
+                c := tickStateMachine(c, bO, bH, bL, bC, bT)
+                if c.state == OriginState.BROKEN_BSUT
+                    if bi + 1 <= sz - 1
+                        for ri = bi + 1 to sz - 1
+                            float rH = array.get(combH, ri)
+                            float rL = array.get(combL, ri)
+                            bool retest = c.dir == OriginDir.UP ? (rH >= c.price) : (rL <= c.price)
+                            if retest
+                                deleteIt := true
+                                break
+                    break
+                if c.state == OriginState.CONFIRMED
+                    break
+
+            // Split into two `if`s so Pine v6 doesn't complain about mixed
+            // return types: array.remove returns OriginCandidate, array.set
+            // returns void.
+            if deleteIt
+                array.remove(candidates, ci)
+            if not deleteIt
+                array.set(candidates, ci, c)
+
+//@function                   Per-tick sweep. Marks CONFIRMED origins and
+//                            untouched greedy entries as consumed once price
+//                            wicks into them. Caller passes `curLow`/`curHigh`
+//                            because library functions cannot reference the
+//                            `low`/`high` chart globals directly.
+//@param candidates            Per-pattern origin-candidate array.
+//@param greedyEntries         Per-pattern greedy-entry price array.
+//@param greedyConsumedFlags   Parallel bool array — resized lazily to match
+//                            greedyEntries size.
+//@param isBullish             Drives the touch check for greedy entries
+//                            (origins use their own per-candidate dir).
+//@param curLow                Current bar low (pass `low` from caller).
+//@param curHigh               Current bar high (pass `high` from caller).
+//@returns                     Nothing (mutates both arrays).
+export applyConsumedOnTouch(array<OriginCandidate> candidates,
+     array<float> greedyEntries, array<bool> greedyConsumedFlags, bool isBullish,
+     float curLow, float curHigh) =>
+    // 1. Origins
+    int n = array.size(candidates)
+    if n > 0
+        for i = 0 to n - 1
+            OriginCandidate c = array.get(candidates, i)
+            if c.state == OriginState.CONFIRMED
+                bool touched = c.dir == OriginDir.UP ? (curLow <= c.price) : (curHigh >= c.price)
+                if touched
+                    c.state := OriginState.CONSUMED
+                    array.set(candidates, i, c)
+
+    // 2. Greedy entries (parallel arrays)
+    int g = array.size(greedyEntries)
+    while array.size(greedyConsumedFlags) < g
+        array.push(greedyConsumedFlags, false)
+    if g > 0
+        for i = 0 to g - 1
+            if not array.get(greedyConsumedFlags, i)
+                float lvl = array.get(greedyEntries, i)
+                bool touched = isBullish ? (curLow <= lvl) : (curHigh >= lvl)
+                if touched
+                    array.set(greedyConsumedFlags, i, true)
+
+//@function            v2: Sync chart lines against candidate states. For every
+//                     CONFIRMED origin without a line, draws one at `c.price`
+//                     extending right. For every CONSUMED or BROKEN_BSUT origin
+//                     that has a line, deletes it and clears the reference.
+//                     Call once per pattern per bar (cheap — just reference
+//                     bookkeeping + occasional line.new / line.delete).
+//@param candidates    Per-pattern origin-candidate array. Mutated.
+//@param upColor       Line color for DIR_UP (support) origins.
+//@param downColor     Line color for DIR_DOWN (resistance) origins.
+//@param lineWidth     Line width (1-4).
+//@returns             Nothing.
+export renderOriginLines(array<OriginCandidate> candidates, color upColor, color downColor, int lineWidth) =>
+    int n = array.size(candidates)
+    if n > 0
+        for i = 0 to n - 1
+            OriginCandidate c = array.get(candidates, i)
+            bool shouldDraw = c.state == OriginState.CONFIRMED
+            bool shouldRemove = c.state == OriginState.CONSUMED or c.state == OriginState.BROKEN_BSUT
+
+            if shouldDraw and na(c.lineRef)
+                color col = c.dir == OriginDir.UP ? upColor : downColor
+                line newLine = line.new(bar_index, c.price, bar_index + 1, c.price,
+                     extend = extend.right, color = col, style = line.style_dashed, width = lineWidth)
+                c.lineRef := newLine
+                array.set(candidates, i, c)
+
+            if shouldRemove and not na(c.lineRef)
+                line.delete(c.lineRef)
+                c.lineRef := na
+                array.set(candidates, i, c)
+
+// ─── End of library ───
+// A library script must contain at least one plot / visual output when
+// published, so TradingView can render it on the chart during publication.
+// Plot a constant so "Publish Library" succeeds — this has no effect on
+// scripts that `import` the library.
+plot(na, "", color.new(color.gray, 100))

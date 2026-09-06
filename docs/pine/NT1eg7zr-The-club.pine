@@ -1,0 +1,430 @@
+//@version=5
+strategy(
+     title             = "NQ/MNQ Volume Confirmation v5 — Prop Edition",
+     overlay           = true,
+     initial_capital   = 50000,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 1,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 4.0,
+     slippage          = 2
+ )
+
+// ─────────────────────────────────────────────
+//  INPUTS
+// ─────────────────────────────────────────────
+grp0 = "Instrument"
+isMicro = input.bool(false, "Trading MNQ (micro contract)?", group=grp0)
+
+grp1 = "Volume Settings"
+volMultiplier = input.float(2.0, "Volume Spike Multiplier (vs avg)", minval=1.0, maxval=5.0, step=0.25, group=grp1)
+volLookback   = input.int(10,   "Volume Average Lookback (bars)",    minval=5,   maxval=50,              group=grp1)
+
+grp2 = "Prop Firm & Risk"
+propFirmMode     = input.string("LucidFlex", "Prop Firm", options=["LucidFlex", "Alpha Advanced", "Custom"], group=grp2)
+maxDDDollars     = input.float(2000.0, "Max Drawdown $ (Firm Limit)",     minval=100,  maxval=50000, step=100,  group=grp2)
+riskDollarsFixed = input.float(500.0,  "Fixed Risk Per Trade ($)",         minval=10,   maxval=10000, step=10,   group=grp2)
+customDLL        = input.float(1000.0, "Daily Loss Limit $ (Custom only)", minval=100,  maxval=20000, step=100,  group=grp2)
+stopMode         = input.string("Fixed", "Stop Loss Mode", options=["Fixed", "Wick-Based"], group=grp2)
+fixedStop        = input.float(15.0,   "Fixed Stop (NQ points)",           minval=5,    maxval=40,   step=1.0,  group=grp2)
+wickBuffer       = input.float(2.0,    "Wick Buffer (NQ points, wick-based only)", minval=0.5, maxval=10, step=0.5, group=grp2)
+tp1Multiplier    = input.float(1.5,    "TP1 R:R Multiplier",               minval=0.5,  maxval=5.0,  step=0.25, group=grp2)
+tp2Multiplier    = input.float(3.0,    "TP2 R:R Multiplier",               minval=1.0,  maxval=8.0,  step=0.25, group=grp2)
+tp1Pct           = input.int(50,       "% of position closed at TP1",      minval=10,   maxval=90,   step=5,    group=grp2)
+maxBarsInTrade   = input.int(40,       "Max Bars In Trade (time exit)",     minval=5,    maxval=100,             group=grp2)
+
+grp3 = "Session Filter (New York Time)"
+useSessionFilter = input.bool(true, "Enable Session Filter", group=grp3)
+
+grp4 = "Filters"
+useEmaFilter   = input.bool(true, "Use EMA Trend Filter",         group=grp4)
+emaLength      = input.int(20,    "EMA Length",                   minval=5, maxval=200, group=grp4)
+useMorningBias = input.bool(false, "Use 9:30 Morning Bias Filter", group=grp4)
+
+grp5 = "Key Level Settings"
+sweepZone  = input.float(6.0, "Level Sweep Zone (NQ points)", minval=1, maxval=20, step=0.5, group=grp5)
+posBoxBars = input.int(40,    "Position Box Width (bars)",     minval=5, maxval=200, step=5,   group=grp5)
+showLevels = input.bool(true, "Show Session Open Levels",      group=grp5)
+showSignals= input.bool(true, "Show Entry Signals",            group=grp5)
+showEma    = input.bool(true, "Show EMA",                      group=grp5)
+
+// ─────────────────────────────────────────────
+//  INSTRUMENT
+//  NQ = $20/pt  MNQ = $2/pt
+// ─────────────────────────────────────────────
+pointValue = isMicro ? 2.0 : 20.0
+
+// Stop loss — Fixed or Wick-Based
+// Wick-based: places stop just beyond the wick of the entry candle + buffer
+// This is tighter and more accurate for sweep/rejection setups
+longStopDynamic  = low  - wickBuffer
+shortStopDynamic = high + wickBuffer
+longStopFixed    = close - fixedStop
+shortStopFixed   = close + fixedStop
+
+stopPoints = fixedStop  // used for sizing when in fixed mode; wick mode uses dynamic SL below
+
+// ─────────────────────────────────────────────
+//  PROP FIRM RULES
+//  LucidFlex:      $2,000 EOD DD on $50k | No DLL | Close 4:40 PM
+//  Alpha Advanced: $2,000 EOD DD on $50k | $1,000 DLL | Close 4:15 PM
+// ─────────────────────────────────────────────
+isLucid        = propFirmMode == "LucidFlex"
+isAlpha        = propFirmMode == "Alpha Advanced"
+internalDDStop = maxDDDollars * 0.75
+dllAmount      = isAlpha ? 1000.0 : isLucid ? 999999.0 : customDLL
+maxDailyTrades = 999
+
+alphaCloseTime = time(timeframe.period, "1615-1616", "America/New_York")
+lucidCloseTime = time(timeframe.period, "1640-1641", "America/New_York")
+forceClose     = strategy.position_size != 0 and ((isAlpha and not na(alphaCloseTime)) or (isLucid and not na(lucidCloseTime)))
+
+if forceClose
+    strategy.close_all(comment="EOD Close")
+
+// ─────────────────────────────────────────────
+//  SESSION FILTER — London 02:00-05:00 + NY AM 09:30-11:00
+// ─────────────────────────────────────────────
+inLondon  = time(timeframe.period, "0200-0500", "America/New_York")
+inNYOpen  = time(timeframe.period, "0930-1100", "America/New_York")
+inSession = useSessionFilter ? (not na(inLondon) or not na(inNYOpen)) : true
+
+// ─────────────────────────────────────────────
+//  TREND EMA
+// ─────────────────────────────────────────────
+ema      = ta.ema(close, emaLength)
+aboveEma = close > ema
+belowEma = close < ema
+plot(showEma ? ema : na, "Trend EMA", color=color.new(color.yellow, 20), linewidth=1)
+
+// ─────────────────────────────────────────────
+//  HIGHER TIMEFRAME TREND  (15-min EMA)
+// ─────────────────────────────────────────────
+ema15      = request.security(syminfo.tickerid, "15", ta.ema(close, 20), lookahead=barmerge.lookahead_off)
+htfBullish = close > ema15
+htfBearish = close < ema15
+
+// ─────────────────────────────────────────────
+//  CANDLE CONFIRMATION
+// ─────────────────────────────────────────────
+bullCandle = close > open and close > close[1]
+bearCandle = close < open and close < close[1]
+
+// ─────────────────────────────────────────────
+//  KEY SESSION OPEN PRICES  (New York Time)
+// ─────────────────────────────────────────────
+t730  = time(timeframe.period, "0730-0731", "America/New_York")
+t0800 = time(timeframe.period, "0800-0801", "America/New_York")
+t0930 = time(timeframe.period, "0930-0931", "America/New_York")
+t1000 = time(timeframe.period, "1000-1001", "America/New_York")
+t1800 = time(timeframe.period, "1800-1801", "America/New_York")
+
+var float open_730  = na
+var float open_800  = na
+var float open_930  = na
+var float open_1000 = na
+var float open_1800 = na
+var int   morningBias = 0
+
+var bool traded_730  = false
+var bool traded_800  = false
+var bool traded_930  = false
+var bool traded_1000 = false
+var bool traded_1800 = false
+
+if ta.change(time("D")) != 0
+    open_730    := na
+    open_800    := na
+    open_930    := na
+    open_1000   := na
+    open_1800   := na
+    morningBias := 0
+    traded_730  := false
+    traded_800  := false
+    traded_930  := false
+    traded_1000 := false
+    traded_1800 := false
+
+if not na(t730)  and na(open_730)
+    open_730  := open
+if not na(t0800) and na(open_800)
+    open_800  := open
+if not na(t0930) and na(open_930)
+    open_930  := open
+    morningBias := close > open ? 1 : -1
+if not na(t1000) and na(open_1000)
+    open_1000 := open
+if not na(t1800) and na(open_1800)
+    open_1800 := open
+
+// ─────────────────────────────────────────────
+//  PREVIOUS DAY HIGH / LOW
+// ─────────────────────────────────────────────
+prevDayHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+prevDayLow  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+// ─────────────────────────────────────────────
+//  PREVIOUS WEEK HIGH / LOW  (Monday only)
+// ─────────────────────────────────────────────
+isMonday      = dayofweek == dayofweek.monday
+prevWeekHigh  = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_on)
+prevWeekLow   = request.security(syminfo.tickerid, "W", low[1],  lookahead=barmerge.lookahead_on)
+
+// Only use prev week levels on Mondays
+activeWeekHigh = isMonday ? prevWeekHigh : na
+activeWeekLow  = isMonday ? prevWeekLow  : na
+
+// ─────────────────────────────────────────────
+//  PLOT PREVIOUS DAY & WEEK LEVELS
+// ─────────────────────────────────────────────
+plot(showLevels ? prevDayHigh  : na, "Prev Day High",  color=color.new(color.red,    30), style=plot.style_linebr, linewidth=1)
+plot(showLevels ? prevDayLow   : na, "Prev Day Low",   color=color.new(color.green,  30), style=plot.style_linebr, linewidth=1)
+plot(showLevels ? activeWeekHigh : na, "Prev Week High", color=color.new(color.red,  10), style=plot.style_linebr, linewidth=2)
+plot(showLevels ? activeWeekLow  : na, "Prev Week Low",  color=color.new(color.green,10), style=plot.style_linebr, linewidth=2)
+plot(showLevels ? open_730  : na, "7:30 Open",  color=color.new(color.purple, 20), style=plot.style_linebr, linewidth=2)
+plot(showLevels ? open_800  : na, "8:00 Open",  color=color.new(color.blue,   20), style=plot.style_linebr, linewidth=2)
+plot(showLevels ? open_930  : na, "9:30 Open",  color=color.new(color.orange, 20), style=plot.style_linebr, linewidth=2)
+plot(showLevels ? open_1000 : na, "10:00 Open", color=color.new(color.teal,   20), style=plot.style_linebr, linewidth=2)
+plot(showLevels ? open_1800 : na, "18:00 Open", color=color.new(color.gray,   20), style=plot.style_linebr, linewidth=2)
+
+// ─────────────────────────────────────────────
+//  SWEEP + REJECTION
+// ─────────────────────────────────────────────
+// Session open levels
+sweepLong(lvl)  => not na(lvl) and low  <= lvl + sweepZone and low  >= lvl - sweepZone and bullCandle
+sweepShort(lvl) => not na(lvl) and high >= lvl - sweepZone and high <= lvl + sweepZone and bearCandle
+
+// Previous day & week levels (no once-per-day restriction — can trigger multiple times)
+longPDH  = sweepLong(prevDayHigh)
+longPDL  = sweepLong(prevDayLow)
+longPWH  = sweepLong(activeWeekHigh)
+longPWL  = sweepLong(activeWeekLow)
+
+shortPDH = sweepShort(prevDayHigh)
+shortPDL = sweepShort(prevDayLow)
+shortPWH = sweepShort(activeWeekHigh)
+shortPWL = sweepShort(activeWeekLow)
+
+long730  = sweepLong(open_730)  and not traded_730
+long800  = sweepLong(open_800)  and not traded_800
+long930  = sweepLong(open_930)  and not traded_930
+long1000 = sweepLong(open_1000) and not traded_1000
+long1800 = sweepLong(open_1800) and not traded_1800
+
+short730  = sweepShort(open_730)  and not traded_730
+short800  = sweepShort(open_800)  and not traded_800
+short930  = sweepShort(open_930)  and not traded_930
+short1000 = sweepShort(open_1000) and not traded_1000
+short1800 = sweepShort(open_1800) and not traded_1800
+
+anyLongLevel  = long730  or long800  or long930  or long1000  or long1800 or longPDH  or longPDL  or longPWH  or longPWL
+anyShortLevel = short730 or short800 or short930 or short1000 or short1800 or shortPDH or shortPDL or shortPWH or shortPWL
+
+// ─────────────────────────────────────────────
+//  DAILY TRADE COUNTER & LOSS GUARDS
+// ─────────────────────────────────────────────
+var int   dailyTrades   = 0
+var float dailyStartEq  = strategy.equity
+var float dailyPnL      = 0.0
+var bool  dailyLimitHit = false
+
+if ta.change(time("D")) != 0
+    dailyTrades   := 0
+    dailyStartEq  := strategy.equity
+    dailyPnL      := 0.0
+    dailyLimitHit := false
+
+dailyPnL := strategy.equity - dailyStartEq
+
+ddBreached  = (strategy.initial_capital - strategy.equity) >= internalDDStop
+dllBreached = dailyPnL <= -dllAmount
+
+if ddBreached or dllBreached
+    dailyLimitHit := true
+
+// ─────────────────────────────────────────────
+//  VOLUME SPIKE
+// ─────────────────────────────────────────────
+avgVol      = ta.sma(volume, volLookback)
+volumeSpike = volume[1] >= avgVol[1] * volMultiplier
+
+// ─────────────────────────────────────────────
+//  FILTERS
+// ─────────────────────────────────────────────
+emaOkLong   = not useEmaFilter   or aboveEma
+emaOkShort  = not useEmaFilter   or belowEma
+biasOkLong  = not useMorningBias or morningBias >= 0
+biasOkShort = not useMorningBias or morningBias <= 0
+
+// ─────────────────────────────────────────────
+//  ONE TRADE PER BAR GUARD
+// ─────────────────────────────────────────────
+var int lastEntryBar = -1
+freshBar = bar_index != lastEntryBar
+canTrade = inSession and not dailyLimitHit and dailyTrades < maxDailyTrades and strategy.position_size == 0 and freshBar
+
+// ─────────────────────────────────────────────
+//  ENTRY CONDITIONS
+// ─────────────────────────────────────────────
+longCondition  = canTrade and anyLongLevel  and volumeSpike and emaOkLong  and biasOkLong  and htfBullish
+shortCondition = canTrade and anyShortLevel and volumeSpike and emaOkShort and biasOkShort and htfBearish and not longCondition
+
+// ─────────────────────────────────────────────
+//  POSITION SIZING
+// ─────────────────────────────────────────────
+contracts = math.max(math.floor(riskDollarsFixed / (stopPoints * pointValue)), 1)
+tp1Qty    = math.max(math.floor(contracts * tp1Pct / 100), 1)
+
+// ─────────────────────────────────────────────
+//  ENTRIES
+// ─────────────────────────────────────────────
+if longCondition
+    strategy.entry("Long", strategy.long, qty=contracts)
+    lastEntryBar := bar_index
+    dailyTrades  += 1
+    if long730
+        traded_730  := true
+    if long800
+        traded_800  := true
+    if long930
+        traded_930  := true
+    if long1000
+        traded_1000 := true
+    if long1800
+        traded_1800 := true
+
+if shortCondition
+    strategy.entry("Short", strategy.short, qty=contracts)
+    lastEntryBar := bar_index
+    dailyTrades  += 1
+    if short730
+        traded_730  := true
+    if short800
+        traded_800  := true
+    if short930
+        traded_930  := true
+    if short1000
+        traded_1000 := true
+    if short1800
+        traded_1800 := true
+
+// ─────────────────────────────────────────────
+//  EXITS
+// ─────────────────────────────────────────────
+// Calculate actual stop distance used for TP levels
+longSlPrice  = stopMode == "Wick-Based" ? longStopDynamic  : longStopFixed
+shortSlPrice = stopMode == "Wick-Based" ? shortStopDynamic : shortStopFixed
+
+longRisk  = strategy.position_avg_price - longSlPrice
+shortRisk = shortSlPrice - strategy.position_avg_price
+
+longTP1   = strategy.position_avg_price + longRisk  * tp1Multiplier
+longTP2   = strategy.position_avg_price + longRisk  * tp2Multiplier
+shortTP1  = strategy.position_avg_price - shortRisk * tp1Multiplier
+shortTP2  = strategy.position_avg_price - shortRisk * tp2Multiplier
+
+var bool tp1HitLong  = false
+var bool tp1HitShort = false
+
+if strategy.position_size == 0
+    tp1HitLong  := false
+    tp1HitShort := false
+
+if strategy.position_size > 0 and high >= longTP1
+    tp1HitLong := true
+if strategy.position_size < 0 and low <= shortTP1
+    tp1HitShort := true
+
+activeLongStop  = tp1HitLong  ? strategy.position_avg_price : longSlPrice
+activeShortStop = tp1HitShort ? strategy.position_avg_price : shortSlPrice
+
+if strategy.position_size > 0
+    strategy.exit("Long TP1", "Long", qty=tp1Qty,   limit=longTP1, stop=activeLongStop)
+    strategy.exit("Long TP2", "Long", qty=contracts, limit=longTP2, stop=activeLongStop)
+
+if strategy.position_size < 0
+    strategy.exit("Short TP1", "Short", qty=tp1Qty,   limit=shortTP1, stop=activeShortStop)
+    strategy.exit("Short TP2", "Short", qty=contracts, limit=shortTP2, stop=activeShortStop)
+
+// Time exit
+var int barsInTrade = 0
+if strategy.position_size != 0
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+if barsInTrade >= maxBarsInTrade and strategy.position_size != 0
+    strategy.close_all(comment="Time Exit")
+
+// ─────────────────────────────────────────────
+//  POSITION TOOL
+// ─────────────────────────────────────────────
+drawPosition(isLong, entryP, sl, tp1, tp2, startBar) =>
+    endBar  = startBar + posBoxBars
+    profCol = color.new(color.green, 75)
+    slCol   = color.new(color.red, 75)
+    line.new(startBar, entryP, endBar, entryP, color=color.white, width=1, style=line.style_solid)
+    box.new(startBar, entryP, endBar, sl, bgcolor=slCol, border_color=color.new(color.red, 40), border_width=1)
+    line.new(startBar, sl, endBar, sl, color=color.red, width=1, style=line.style_dashed)
+    box.new(startBar, entryP, endBar, tp1, bgcolor=profCol, border_color=color.new(color.green, 40), border_width=1)
+    line.new(startBar, tp1, endBar, tp1, color=color.green, width=1, style=line.style_dashed)
+    box.new(startBar, tp1, endBar, tp2, bgcolor=color.new(color.green, 88), border_color=color.new(color.green, 60), border_width=1)
+    line.new(startBar, tp2, endBar, tp2, color=color.green, width=2, style=line.style_solid)
+    label.new(endBar, entryP, " Entry: " + str.tostring(entryP, "#.##"), color=color.new(color.white, 100), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(endBar, sl, " SL: " + str.tostring(sl, "#.##"), color=color.new(color.white, 100), textcolor=color.red, style=label.style_label_left, size=size.small)
+    label.new(endBar, tp1, " TP1: " + str.tostring(tp1, "#.##"), color=color.new(color.white, 100), textcolor=color.green, style=label.style_label_left, size=size.small)
+    label.new(endBar, tp2, " TP2: " + str.tostring(tp2, "#.##"), color=color.new(color.white, 100), textcolor=color.green, style=label.style_label_left, size=size.small)
+    dirTxt = isLong ? "▲ LONG" : "▼ SHORT"
+    label.new(startBar, isLong ? sl - 2 : sl + 2, dirTxt, color=isLong ? color.new(color.green, 10) : color.new(color.red, 10), textcolor=color.white, style=isLong ? label.style_label_up : label.style_label_down, size=size.normal)
+
+if showSignals and longCondition
+    eP  = close
+    sl  = stopMode == "Wick-Based" ? low - wickBuffer : eP - fixedStop
+    tp1 = eP + (eP - sl) * tp1Multiplier
+    tp2 = eP + (eP - sl) * tp2Multiplier
+    drawPosition(true, eP, sl, tp1, tp2, bar_index)
+
+if showSignals and shortCondition
+    eP  = close
+    sl  = stopMode == "Wick-Based" ? high + wickBuffer : eP + fixedStop
+    tp1 = eP - (sl - eP) * tp1Multiplier
+    tp2 = eP - (sl - eP) * tp2Multiplier
+    drawPosition(false, eP, sl, tp1, tp2, bar_index)
+
+// ─────────────────────────────────────────────
+//  INFO TABLE
+// ─────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 13, border_width=1)
+
+if barstate.islast
+    biasStr  = morningBias == 1 ? "BULL" : morningBias == -1 ? "BEAR" : "NONE"
+    biasCol  = morningBias == 1 ? color.green : morningBias == -1 ? color.red : color.gray
+    instrStr = isMicro ? "MNQ  $2/pt" : "NQ  $20/pt"
+    ddUsed   = strategy.initial_capital - strategy.equity
+    ddColor  = ddUsed >= internalDDStop ? color.red : ddUsed >= internalDDStop * 0.6 ? color.orange : color.green
+    dllStr   = isLucid ? "NO LIMIT" : "$" + str.tostring(dllAmount, "#")
+
+    table.cell(infoTable, 0, 0,  "Prop Firm",    text_color=color.gray,  bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 1, 0,  propFirmMode,    text_color=color.white, bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 0, 1,  "Instrument",   text_color=color.gray,  bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 1, 1,  instrStr,        text_color=color.white, bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 0, 2,  "DD Used",       text_color=color.gray,  bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 1, 2,  "$" + str.tostring(math.round(ddUsed, 0)) + " / $" + str.tostring(maxDDDollars), text_color=ddColor, bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 0, 3,  "Daily P&L",     text_color=color.gray,  bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 1, 3,  "$" + str.tostring(math.round(dailyPnL, 0)), text_color=dailyPnL >= 0 ? color.green : color.red, bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 0, 4,  "DLL",           text_color=color.gray,  bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 1, 4,  dllStr,           text_color=color.white, bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 0, 5,  "Daily Trades",  text_color=color.gray,  bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 1, 5,  str.tostring(dailyTrades) + " / " + str.tostring(maxDailyTrades), text_color=color.white, bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 0, 6,  "Session",       text_color=color.gray,  bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 1, 6,  inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.green : color.red, bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 0, 7,  "HTF Trend",     text_color=color.gray,  bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 1, 8,  htfBullish ? "BULL" : "BEAR", text_color=htfBullish ? color.green : color.red, bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 0, 9,  "Vol Spike",     text_color=color.gray,  bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 1, 9,  volumeSpike ? "YES" : "NO", text_color=volumeSpike ? color.green : color.red, bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 0, 10, "Level Sweep",   text_color=color.gray,  bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 1, 10, (anyLongLevel or anyShortLevel) ? "YES" : "NO", text_color=(anyLongLevel or anyShortLevel) ? color.green : color.red, bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 0, 11, "Stop Mode",     text_color=color.gray,  bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 1, 11, stopMode,         text_color=color.white, bgcolor=color.new(color.gray, 95))
+    table.cell(infoTable, 0, 12, "Risk Guard",    text_color=color.gray,  bgcolor=color.new(color.gray, 90))
+    table.cell(infoTable, 1, 12, dailyLimitHit ? "LOCKED" : "OK", text_color=dailyLimitHit ? color.red : color.green, bgcolor=color.new(color.gray, 90))

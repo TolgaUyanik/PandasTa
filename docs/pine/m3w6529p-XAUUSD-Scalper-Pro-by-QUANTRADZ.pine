@@ -1,0 +1,355 @@
+//@version=6
+indicator("XAUUSD Scalper Pro", shorttitle="XAU Scalper Pro", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// =============================================================================
+// XAUUSD SCALPER PRO — Trend-Pullback Signal Indicator
+// -----------------------------------------------------------------------------
+// Non-repainting BUY / SELL / NO TRADE signal engine for XAU/USD scalping on
+// 1m / 3m / 5m charts. Combines EMA trend structure, RSI momentum, ADX/DMI
+// trend strength, ATR volatility filtering, candle-body confirmation and an
+// optional higher-timeframe trend filter into a configurable scoring system.
+//
+// WHEN A SIGNAL IS CONFIRMED:
+//   Every condition below is evaluated using the values of the CURRENT bar,
+//   but the resulting BUY/SELL boolean is only ever set to `true` inside a
+//   block gated by `barstate.isconfirmed`. On the live (still-forming) bar,
+//   isconfirmed is false, so no signal, marker, line or alert is produced.
+//   The instant the bar closes, the script re-executes one final time with
+//   isconfirmed = true using that bar's final OHLC/indicator values, and the
+//   signal (if any) is fixed permanently at that bar. It is never recomputed,
+//   moved, or removed afterward — this is what makes the script non-repainting.
+// =============================================================================
+
+// ============================================================================
+// PRESET SELECTOR
+// ============================================================================
+presetGroup  = "Preset (optional starting point)"
+presetChoice = input.string("Custom", "Preset", options=["Custom", "1m Aggressive", "3m Balanced", "5m Conservative"], group=presetGroup, tooltip="Loads recommended starting values for RSI/ADX/body/pullback/score/cooldown/SL settings. Choose 'Custom' to use every manual input below untouched. Presets are starting points only, not guarantees of performance — always verify and tune.")
+
+// ============================================================================
+// TREND FILTER INPUTS
+// ============================================================================
+trendGroup    = "Trend Filters"
+emaFastLen    = input.int(20, "EMA Fast Length", minval=1, group=trendGroup)
+emaMedLen     = input.int(50, "EMA Medium Length", minval=1, group=trendGroup)
+emaSlowLen    = input.int(200, "EMA Slow (200) Length", minval=1, group=trendGroup)
+useEma200     = input.bool(true, "Use EMA200 Trend Filter", group=trendGroup)
+slopeLookback = input.int(3, "EMA Rising/Falling Lookback (bars)", minval=1, group=trendGroup)
+
+// ============================================================================
+// MOMENTUM & TREND STRENGTH INPUTS
+// ============================================================================
+momGroup       = "Momentum & Strength"
+rsiLen         = input.int(14, "RSI Length", minval=1, group=momGroup)
+rsiBullLevelIn = input.float(50, "RSI Bullish Level", group=momGroup)
+rsiBearLevelIn = input.float(50, "RSI Bearish Level", group=momGroup)
+adxMinIn       = input.float(20, "Minimum ADX Strength", group=momGroup)
+adxLen         = input.int(14, "ADX/DMI Length (used for DI length and ADX smoothing)", minval=1, group=momGroup)
+
+// ============================================================================
+// VOLATILITY (ATR) INPUTS
+// ============================================================================
+volGroup     = "Volatility (ATR)"
+atrLen       = input.int(14, "ATR Length", minval=1, group=volGroup)
+atrAvgLen    = input.int(50, "ATR Baseline Average Length", minval=1, group=volGroup)
+atrMinMultIn = input.float(0.5, "Min Acceptable ATR / ATR-Average Ratio", minval=0.0, step=0.1, group=volGroup)
+atrMaxMultIn = input.float(2.5, "Max Acceptable ATR / ATR-Average Ratio", minval=0.1, step=0.1, group=volGroup)
+
+// ============================================================================
+// CANDLE & PULLBACK INPUTS
+// ============================================================================
+candleGroup    = "Candle & Pullback"
+bodyMinPctIn   = input.float(50, "Minimum Candle Body % of Range", minval=1, maxval=100, group=candleGroup)
+pullbackDistIn = input.float(1.0, "Max Pullback Distance from EMA (x ATR)", minval=0.1, step=0.1, group=candleGroup)
+pullbackLookIn = input.int(6, "Pullback Lookback (bars)", minval=1, group=candleGroup)
+
+// ============================================================================
+// SCORING & SIGNAL MANAGEMENT
+// ============================================================================
+scoreGroup     = "Scoring & Signal Management"
+minScoreIn     = input.int(7, "Minimum Score to Trigger Signal (out of 10)", minval=1, maxval=10, group=scoreGroup)
+strongScoreIn  = input.int(9, "Minimum Score for 'Strong' Signal (out of 10)", minval=1, maxval=10, group=scoreGroup)
+strictModeIn   = input.bool(false, "Strict Mode (require ALL 10 conditions, ignore score threshold)", group=scoreGroup)
+cooldownBarsIn = input.int(5, "Cooldown Between Same-Direction Signals (bars)", minval=0, group=scoreGroup)
+showAllSignals = input.bool(false, "Show Every Qualifying Signal (testing mode — ignores cooldown & pullback re-use)", group=scoreGroup)
+
+// ============================================================================
+// HIGHER TIMEFRAME FILTER
+// ============================================================================
+htfGroup = "Higher Timeframe Filter"
+useHtfIn = input.bool(true, "Use Higher Timeframe Trend Filter", group=htfGroup)
+htfTfIn  = input.timeframe("15", "Higher Timeframe", group=htfGroup)
+
+// ============================================================================
+// SESSION & NEWS BLACKOUT
+// ============================================================================
+sessGroup         = "Session & News Blackout"
+useSessionIn      = input.bool(false, "Use Trading Session Filter", group=sessGroup)
+sessionIn         = input.session("0000-2400", "Trading Session (exchange time)", group=sessGroup)
+useNewsBlackoutIn = input.bool(false, "Use Manual News Blackout Window", group=sessGroup)
+newsSessionIn     = input.session("1330-1400", "News Blackout Window (exchange time)", group=sessGroup, tooltip="Pine Script cannot read an economic calendar. Manually enter known high-impact news times (exchange time) to suppress signals during that window. Update this yourself before each event.")
+
+// ============================================================================
+// RISK MANAGEMENT
+// ============================================================================
+riskGroup   = "Risk Management"
+atrSlMultIn = input.float(1.5, "Stop Loss = ATR x", minval=0.1, step=0.1, group=riskGroup)
+rr1In       = input.float(1.0, "Take Profit 1 (R multiple)", minval=0.1, step=0.1, group=riskGroup)
+rr2In       = input.float(1.5, "Take Profit 2 (R multiple)", minval=0.1, step=0.1, group=riskGroup)
+rr3In       = input.float(2.0, "Take Profit 3 (R multiple)", minval=0.1, step=0.1, group=riskGroup)
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+visGroup       = "Visuals"
+showMarkers    = input.bool(true, "Show BUY/SELL Markers", group=visGroup)
+showEma200Plot = input.bool(true, "Plot EMA200 (if filter enabled)", group=visGroup)
+showBackground = input.bool(true, "Show Trend Background", group=visGroup)
+showSlTp       = input.bool(true, "Show ATR Stop / Target Lines", group=visGroup)
+showDashboard  = input.bool(true, "Show Dashboard", group=visGroup)
+extendBarsIn   = input.int(20, "SL/TP Line Extend (bars)", minval=1, group=visGroup)
+
+// ============================================================================
+// PRESET OVERRIDES
+// ============================================================================
+rsiBullLevel = presetChoice == "1m Aggressive" ? 52.0 : presetChoice == "3m Balanced" ? 50.0 : presetChoice == "5m Conservative" ? 50.0 : rsiBullLevelIn
+rsiBearLevel = presetChoice == "1m Aggressive" ? 48.0 : presetChoice == "3m Balanced" ? 50.0 : presetChoice == "5m Conservative" ? 50.0 : rsiBearLevelIn
+adxMin       = presetChoice == "1m Aggressive" ? 15.0 : presetChoice == "3m Balanced" ? 20.0 : presetChoice == "5m Conservative" ? 23.0 : adxMinIn
+bodyMinPct   = presetChoice == "1m Aggressive" ? 45.0 : presetChoice == "3m Balanced" ? 55.0 : presetChoice == "5m Conservative" ? 60.0 : bodyMinPctIn
+pullbackDist = presetChoice == "1m Aggressive" ? 1.3 : presetChoice == "3m Balanced" ? 1.0 : presetChoice == "5m Conservative" ? 0.8 : pullbackDistIn
+pullbackLook = presetChoice == "1m Aggressive" ? 4 : presetChoice == "3m Balanced" ? 6 : presetChoice == "5m Conservative" ? 8 : pullbackLookIn
+minScore     = presetChoice == "1m Aggressive" ? 6 : presetChoice == "3m Balanced" ? 7 : presetChoice == "5m Conservative" ? 8 : minScoreIn
+cooldownBars = presetChoice == "1m Aggressive" ? 3 : presetChoice == "3m Balanced" ? 5 : presetChoice == "5m Conservative" ? 8 : cooldownBarsIn
+atrSlMult    = presetChoice == "1m Aggressive" ? 1.2 : presetChoice == "3m Balanced" ? 1.5 : presetChoice == "5m Conservative" ? 1.8 : atrSlMultIn
+atrMinMult   = atrMinMultIn
+atrMaxMult   = atrMaxMultIn
+
+// ============================================================================
+// CORE INDICATORS
+// ============================================================================
+emaFast = ta.ema(close, emaFastLen)
+emaMed  = ta.ema(close, emaMedLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+rsi = ta.rsi(close, rsiLen)
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+
+atr      = ta.atr(atrLen)
+atrAvg   = ta.sma(atr, atrAvgLen)
+atrRatio = atrAvg == 0 ? 0.0 : atr / atrAvg
+atrOk    = atrRatio >= atrMinMult and atrRatio <= atrMaxMult
+
+emaFastRising  = ta.rising(emaFast, slopeLookback)
+emaFastFalling = ta.falling(emaFast, slopeLookback)
+emaMedRising   = ta.rising(emaMed, slopeLookback)
+emaMedFalling  = ta.falling(emaMed, slopeLookback)
+
+bodySize  = math.abs(close - open)
+rangeSize = high - low
+bodyPct   = rangeSize == 0 ? 0.0 : (bodySize / rangeSize) * 100
+bullishCandle = close > open and bodyPct >= bodyMinPct
+bearishCandle = close < open and bodyPct >= bodyMinPct
+
+nearEmaBull = low  <= emaFast + pullbackDist * atr or low  <= emaMed + pullbackDist * atr
+nearEmaBear = high >= emaFast - pullbackDist * atr or high >= emaMed - pullbackDist * atr
+
+barsSinceNearBull = ta.barssince(nearEmaBull)
+barsSinceNearBear = ta.barssince(nearEmaBear)
+
+pullbackRecentBull = not na(barsSinceNearBull) and barsSinceNearBull <= pullbackLook
+pullbackRecentBear = not na(barsSinceNearBear) and barsSinceNearBear <= pullbackLook
+
+pullbackBarIdxBull = na(barsSinceNearBull) ? na : bar_index - barsSinceNearBull
+pullbackBarIdxBear = na(barsSinceNearBear) ? na : bar_index - barsSinceNearBear
+
+htfEmaFast = request.security(syminfo.tickerid, htfTfIn, ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+htfEmaMed  = request.security(syminfo.tickerid, htfTfIn, ta.ema(close, emaMedLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+htfBullish = htfEmaFast > htfEmaMed
+htfBearish = htfEmaFast < htfEmaMed
+
+trendUpBase      = emaFast > emaMed
+trendDownBase    = emaFast < emaMed
+priceAboveEma200 = not useEma200 or close > emaSlow
+priceBelowEma200 = not useEma200 or close < emaSlow
+
+inSession      = not useSessionIn or not na(time(timeframe.period, sessionIn))
+inNewsBlackout = useNewsBlackoutIn and not na(time(timeframe.period, newsSessionIn))
+
+// ============================================================================
+// SCORING SYSTEM
+// ============================================================================
+c1Bull  = trendUpBase
+c2Bull  = emaFastRising and emaMedRising
+c3Bull  = priceAboveEma200
+c4Bull  = pullbackRecentBull
+c5Bull  = bullishCandle
+c6Bull  = rsi > rsiBullLevel
+c7Bull  = adx >= adxMin
+c8Bull  = diPlus > diMinus
+c9Bull  = atrOk
+c10Bull = not useHtfIn or htfBullish
+
+c1Bear  = trendDownBase
+c2Bear  = emaFastFalling and emaMedFalling
+c3Bear  = priceBelowEma200
+c4Bear  = pullbackRecentBear
+c5Bear  = bearishCandle
+c6Bear  = rsi < rsiBearLevel
+c7Bear  = adx >= adxMin
+c8Bear  = diMinus > diPlus
+c9Bear  = atrOk
+c10Bear = not useHtfIn or htfBearish
+
+bullScore = (c1Bull ? 1 : 0) + (c2Bull ? 1 : 0) + (c3Bull ? 1 : 0) + (c4Bull ? 1 : 0) + (c5Bull ? 1 : 0) + (c6Bull ? 1 : 0) + (c7Bull ? 1 : 0) + (c8Bull ? 1 : 0) + (c9Bull ? 1 : 0) + (c10Bull ? 1 : 0)
+bearScore = (c1Bear ? 1 : 0) + (c2Bear ? 1 : 0) + (c3Bear ? 1 : 0) + (c4Bear ? 1 : 0) + (c5Bear ? 1 : 0) + (c6Bear ? 1 : 0) + (c7Bear ? 1 : 0) + (c8Bear ? 1 : 0) + (c9Bear ? 1 : 0) + (c10Bear ? 1 : 0)
+
+allBullTrue = c1Bull and c2Bull and c3Bull and c4Bull and c5Bull and c6Bull and c7Bull and c8Bull and c9Bull and c10Bull
+allBearTrue = c1Bear and c2Bear and c3Bear and c4Bear and c5Bear and c6Bear and c7Bear and c8Bear and c9Bear and c10Bear
+
+bullQualifies = strictModeIn ? allBullTrue : bullScore >= minScore
+bearQualifies = strictModeIn ? allBearTrue : bearScore >= minScore
+
+rawBuy  = bullQualifies and not bearQualifies and inSession and not inNewsBlackout
+rawSell = bearQualifies and not bullQualifies and inSession and not inNewsBlackout
+
+// ============================================================================
+// SIGNAL MANAGEMENT
+// ============================================================================
+var int   lastSignalBar        = na
+var string lastSignalDir       = ""
+var float lastUsedPullbackBull = na
+var float lastUsedPullbackBear = na
+
+cooldownOk      = na(lastSignalBar) or (bar_index - lastSignalBar) >= cooldownBars
+newPullbackBull = na(lastUsedPullbackBull) or pullbackBarIdxBull != lastUsedPullbackBull
+newPullbackBear = na(lastUsedPullbackBear) or pullbackBarIdxBear != lastUsedPullbackBear
+
+buySignal  = false
+sellSignal = false
+
+if barstate.isconfirmed and rawBuy and (showAllSignals or (cooldownOk and newPullbackBull))
+    buySignal := true
+
+if barstate.isconfirmed and rawSell and (showAllSignals or (cooldownOk and newPullbackBear))
+    sellSignal := true
+
+if buySignal
+    lastSignalBar        := bar_index
+    lastSignalDir         := "BUY"
+    lastUsedPullbackBull := pullbackBarIdxBull
+
+if sellSignal
+    lastSignalBar        := bar_index
+    lastSignalDir         := "SELL"
+    lastUsedPullbackBear := pullbackBarIdxBear
+
+strongBuySignal  = buySignal and bullScore >= strongScoreIn
+strongSellSignal = sellSignal and bearScore >= strongScoreIn
+
+// ============================================================================
+// RISK LEVELS
+// ============================================================================
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float tp3Price   = na
+var float riskR      = na
+
+if buySignal
+    entryPrice := close
+    riskR      := atrSlMult * atr
+    slPrice    := close - riskR
+    tp1Price   := close + riskR * rr1In
+    tp2Price   := close + riskR * rr2In
+    tp3Price   := close + riskR * rr3In
+
+if sellSignal
+    entryPrice := close
+    riskR      := atrSlMult * atr
+    slPrice    := close + riskR
+    tp1Price   := close - riskR * rr1In
+    tp2Price   := close - riskR * rr2In
+    tp3Price   := close - riskR * rr3In
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+plot(emaFast, "EMA Fast", color=color.new(color.blue, 0))
+plot(emaMed, "EMA Medium", color=color.new(color.orange, 0))
+plot(showEma200Plot and useEma200 ? emaSlow : na, "EMA Slow (200)", color=color.new(color.purple, 0))
+
+bgColor = showBackground ? (trendUpBase and priceAboveEma200 ? color.new(color.green, 92) : trendDownBase and priceBelowEma200 ? color.new(color.red, 92) : na) : na
+bgcolor(bgColor, title="Trend Background")
+
+plotshape(showMarkers and buySignal ? low : na, title="BUY Signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="BUY")
+plotshape(showMarkers and sellSignal ? high : na, title="SELL Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SELL")
+
+// ============================================================================
+// SL / TP LINES
+// ============================================================================
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+var line tp3Line = na
+
+if showSlTp and (buySignal or sellSignal)
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(tp3Line)
+    slLine  := line.new(bar_index, slPrice, bar_index + extendBarsIn, slPrice, color=color.red, width=1, style=line.style_dashed)
+    tp1Line := line.new(bar_index, tp1Price, bar_index + extendBarsIn, tp1Price, color=color.green, width=1, style=line.style_dotted)
+    tp2Line := line.new(bar_index, tp2Price, bar_index + extendBarsIn, tp2Price, color=color.green, width=1, style=line.style_dotted)
+    tp3Line := line.new(bar_index, tp3Price, bar_index + extendBarsIn, tp3Price, color=color.green, width=1, style=line.style_dotted)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+var table dash = table.new(position.top_right, 2, 9, border_width=1)
+
+if barstate.islast and showDashboard
+    trendText   = trendUpBase ? "UP" : trendDownBase ? "DOWN" : "MIXED"
+    htfText     = not useHtfIn ? "OFF" : htfBullish ? "BULL" : htfBearish ? "BEAR" : "MIXED"
+    atrText     = atrOk ? "OK (" + str.tostring(atrRatio, "#.##") + "x)" : "OUT OF RANGE (" + str.tostring(atrRatio, "#.##") + "x)"
+    finalSigText  = buySignal ? "BUY" : sellSignal ? "SELL" : "NO TRADE"
+    finalSigColor = buySignal ? color.green : sellSignal ? color.red : color.gray
+
+    table.cell(dash, 0, 0, "Trend", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 0, trendText, bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 0, 1, "RSI", bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 1, 1, str.tostring(rsi, "#.##"), bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 0, 2, "ADX", bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 1, 2, str.tostring(adx, "#.##"), bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 0, 3, "ATR Cond.", bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 1, 3, atrText, bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 0, 4, "HTF Trend", bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 1, 4, htfText, bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 0, 5, "Bull Score", bgcolor=color.new(color.green, 70))
+    table.cell(dash, 1, 5, str.tostring(bullScore) + "/10", bgcolor=color.new(color.green, 70))
+    table.cell(dash, 0, 6, "Bear Score", bgcolor=color.new(color.red, 70))
+    table.cell(dash, 1, 6, str.tostring(bearScore) + "/10", bgcolor=color.new(color.red, 70))
+    table.cell(dash, 0, 7, "Signal", bgcolor=finalSigColor, text_color=color.white)
+    table.cell(dash, 1, 7, finalSigText, bgcolor=finalSigColor, text_color=color.white)
+    table.cell(dash, 0, 8, "News Blackout", bgcolor=color.new(color.gray, 60))
+    table.cell(dash, 1, 8, inNewsBlackout ? "ACTIVE" : "clear", bgcolor=color.new(color.gray, 60))
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(buySignal, title="Confirmed BUY", message="XAUUSD Scalper: Confirmed BUY on {{ticker}} {{interval}} at {{close}}")
+alertcondition(sellSignal, title="Confirmed SELL", message="XAUUSD Scalper: Confirmed SELL on {{ticker}} {{interval}} at {{close}}")
+alertcondition(strongBuySignal, title="Strong BUY", message="XAUUSD Scalper: STRONG BUY on {{ticker}} {{interval}} at {{close}}")
+alertcondition(strongSellSignal, title="Strong SELL", message="XAUUSD Scalper: STRONG SELL on {{ticker}} {{interval}} at {{close}}")
+
+if buySignal
+    alert("BUY " + syminfo.ticker + " " + timeframe.period + " | Entry=" + str.tostring(entryPrice) + " SL=" + str.tostring(slPrice) + " TP1=" + str.tostring(tp1Price) + " TP2=" + str.tostring(tp2Price) + " TP3=" + str.tostring(tp3Price) + " BullScore=" + str.tostring(bullScore) + "/10", alert.freq_once_per_bar_close)
+
+if sellSignal
+    alert("SELL " + syminfo.ticker + " " + timeframe.period + " | Entry=" + str.tostring(entryPrice) + " SL=" + str.tostring(slPrice) + " TP1=" + str.tostring(tp1Price) + " TP2=" + str.tostring(tp2Price) + " TP3=" + str.tostring(tp3Price) + " BearScore=" + str.tostring(bearScore) + "/10", alert.freq_once_per_bar_close)
+
+if strongBuySignal
+    alert("STRONG BUY " + syminfo.ticker + " " + timeframe.period + " | Score=" + str.tostring(bullScore) + "/10 Entry=" + str.tostring(entryPrice) + " SL=" + str.tostring(slPrice), alert.freq_once_per_bar_close)
+
+if strongSellSignal
+    alert("STRONG SELL " + syminfo.ticker + " " + timeframe.period + " | Score=" + str.tostring(bearScore) + "/10 Entry=" + str.tostring(entryPrice) + " SL=" + str.tostring(slPrice), alert.freq_once_per_bar_close)

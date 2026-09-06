@@ -1,0 +1,550 @@
+//#region SETUP
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jason5480
+
+//@version=6
+
+// @description Conversion of a datagram type to a signal that can be "send" as a single value from an indicator to a strategy script
+library(title = 'signal_datagram')
+
+//#endregion ===========================================================================================================
+//#region MATH
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @function The logarithm of a number with a custom base
+// @param base The base of the logarithm
+// @param number The number to calculate the logarithm
+// @returns The result logarithm of the base of the number
+log(int base, simple int number) =>
+    math.log10(number) / math.log10(base)
+
+// @function The maximum number of words (bits/octals/digits/nibbles/hexes/bytes) that can fit "in full range" into a signed 52bit integer (+1 sign bit) with the given word span
+// @param span The number of values that can be expressed with a single word
+// @returns The number of words that can fit into
+max_words_of(int span) =>
+    // signed integers range from -2^63 to 2^63 - 1, unsigned rage from 0 to 2^64 - 1
+    // However, pinescript merge integers and floats into one type by using the 52 bits of the exponent for the integer
+    // Thus the signed integer in pinescript range is [-4503599627370496, 4503599627370495]
+    const int INT_MAX_52_BITS = 4503599627370495 // 2^52 - 1
+    math.floor(log(span, INT_MAX_52_BITS)) // span 2: 52 bits [0, 1], span 8 : 17 octals [0-7], span 10 : 15 digits [0-9], span 16: 13 nibles [0-F], span 256: 6 bytes [0-FF]
+
+//#endregion ===========================================================================================================
+//#region WORD DESCRIPTOR
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @enum The enum of the supported numeric sytems
+// @field binary Binary numeric system that has base of 2 and uses bits as words
+// @field octal Octal numeric system that has base of 8 uses octal digits as words
+// @field decimal Decimal numeric system that has base of 10 and uses decimal digits as words
+// @field hexadecimal Hexamdecimal numeric system that has base of 16 and uses hexadecimal digits as words
+// @field ducentohexaquinquagesimal Ducentohexaquinquagesimal numeric system that has base of 256 and uses bytes as words
+export enum NumericSystem
+    binary = 'BIN'
+    octal = 'OCT'
+    decimal = 'DEC'
+    hexadecimal = 'HEX'
+    ducentohexaquinquagesimal = 'BYTE'
+
+// @type Object that represents the description of a "word"
+// @field numericSystem The numeric system the word is using binary, octal, decimal, hexadecimal and bytes
+// @field span The range of values one single word may have in the numeric system
+export type WordDesc
+    int span = 16
+
+// @function Initialize the word descriptor span given it's numerical system
+// @param this The word descriptor
+// @param numericSystem The enum numeric system of the words to be used
+// @returns The initialized object
+method init(WordDesc this, simple NumericSystem numericSystem) =>
+    this.span := switch numericSystem
+        NumericSystem.binary => 2
+        NumericSystem.octal => 8
+        NumericSystem.decimal => 10
+        NumericSystem.hexadecimal => 16
+        NumericSystem.ducentohexaquinquagesimal => 256
+        =>
+            runtime.error('Only word span of 2, 8, 10, 16 and 256 a.k.a bits, octals, digits, nibbles and bytes are supported.')
+            na
+    this
+
+//#endregion ===========================================================================================================
+//#region POSITONS ARRAY
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @type Object that represents a set of words
+// @field positions The positions of the words
+export type WordPosArray
+    array<int> positions
+
+// @function Check if the given word positions meets all the requirements
+// @param this The word positions array object
+// @param maxWords The maximum words allowed based on the span
+// @returns The validated object. Otherwise, throws an error if the word positons array values are invalid with the reason why 
+method validate(WordPosArray this, int maxWords) =>
+    for pos in this.positions
+        if pos >= maxWords
+            runtime.error(str.format('Position {0,number,integer} is not valid. Valid positions range from 0 to {1,number,integer}.', pos, maxWords - 1))
+    this
+
+// @function Initialize if the word positons array with an empty array
+// @param this The word positions array object
+// @param positions The array that contains all the positions of the worlds that shape the channel
+// @param maxWords The maximum words allowed based on the span
+// @returns The initialized object
+export method init(WordPosArray this, array<int> positions, int maxWords) =>
+    this.positions := positions
+    this.validate(maxWords)
+
+//#endregion ===========================================================================================================
+//#region CHANNEL
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @type Object that represents the channel description map
+// @field map The map of the channels to the set of the words
+export type ChannelDesc
+    map<string, WordPosArray> map
+
+// @function Check if the given channel descriptor meets all the requirements
+// @param this The channels' descriptor object
+// @param maxWords The maximum words allowed based on the span
+// @returns The validated object. Otherwise, throws an error if the word positons array values are invalid with the reason why 
+method validate(ChannelDesc this, int maxWords) =>
+    for [_, wordPositions] in this.map
+        wordPositions.validate(maxWords)
+    this
+
+// @function Initialize if the channels word positons map with an empty map
+// @param this The channels' descriptor object
+// @returns The initialized object
+export method init(ChannelDesc this) =>
+    this.map := map.new<string, WordPosArray>()
+    this
+
+// @function Return the number of channels that exist
+// @param this The channels' descriptor object
+// @returns The number of the channels
+method num_of_channels(ChannelDesc this) =>
+    this.map.size()
+
+// @function Add a new channel descriptopn with its name and its corresponding word positons to the map
+// @param this The channels' descriptor object to update
+// @returns The initialized object
+export method add_channel(ChannelDesc this, simple string name, array<int> positions) =>
+    if this.map.contains(name)
+        runtime.error(str.format('The channel {0} has already been defined.', name))
+    array<WordPosArray> wordPosArrays = this.map.values()
+    array<int> reservedPositions = array.new<int>()
+    for wordPosArray in wordPosArrays
+        reservedPositions.concat(wordPosArray.positions)
+    for pos in positions
+        for reserved in reservedPositions
+            if pos == reserved
+                runtime.error(str.format('The position {0,number,integer} was already taken by an other channel.', pos))
+    this.map.put(name, WordPosArray.new(positions))
+
+// @function Get an array of the ppsitions of the words the channel consists of
+// @param this The channels' descriptor object to query
+// @param name The name of the channel
+// @returns The array with the positions
+method get_channel_words_pos(ChannelDesc this, simple string name) =>
+    if not this.map.contains(name)
+        runtime.error(str.format('The channel {0} does not exist in the channel descriptor.', name))
+    this.map.get(name).positions
+
+// @function Get an array of the ppsitions of the words the channel consists of
+// @param this The channels' descriptor object to query
+// @param name The name of the channel
+// @returns The array with the positions
+method get_channel_words_pos(ChannelDesc this, string name) =>
+    if not this.map.contains(name)
+        runtime.error(str.format('The channel {0} does not exist in the channel descriptor.', name))
+    this.map.get(name).positions
+
+//#endregion ===========================================================================================================
+//#region SCHEMA
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @type Object that represents the static description of the datagram
+// @field wordDesc The description of the words
+// @field channelDesc The description of the channels
+export type Schema
+    WordDesc wordDesc
+    ChannelDesc channelDesc
+
+// @function Check if the given schema meets all the requirements
+// @param this The schema
+// @returns The validated object. Otherwise, throws an error if the schema is invalid with the reason why
+method validate(Schema this) =>
+    if na(this.wordDesc)
+        runtime.error('The descriptor that defines what a word is has not been set.')
+    if na(this.channelDesc)
+        runtime.error('The map that defines the word positions of each channel has not been set.')
+    int numOfChannels = this.channelDesc.num_of_channels()
+    if numOfChannels == 0
+        runtime.error('The Schema has no channels. At least one is required.')
+    int maxWords = max_words_of(this.wordDesc.span)
+    if numOfChannels > maxWords
+        runtime.error(str.format('Schema has more channels {0,number,integer} than the maximum words allowed {1,number,integer}.', numOfChannels, maxWords))
+    this.channelDesc.validate(maxWords)
+    this
+
+// @function Initialize if the schema
+// @param this The schema
+// @param numericSystem The enum numeric system of the words to be used
+// @param channelDesc The channels descriptor that contains the positions of the words that each channel consists of
+// @returns The initialized object 
+method init(Schema this, simple NumericSystem numericSystem, ChannelDesc channelDesc) =>
+    this.wordDesc := WordDesc.new().init(numericSystem)
+    this.channelDesc := channelDesc
+    this.validate()
+
+//#endregion ===========================================================================================================
+//#region SIGNAL
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @type Object that represents the dynamic value of the datagram
+// @field value The actual integer value
+// @field isNegative The sign if the value
+// @field words The array of the words the signal consists of  
+export type Signal
+    int value = 0
+    bool isNegative = false
+    array<int> words = na
+
+// @function Initialize if the signal
+// @param this The signal representation
+// @param wordSpan The number of values that can be expressed with a single word. If wordSpan is 2 each word is one bit, if wordSpan is 10 each word is one digit, if wordSpan is 16 each word is one nibble, and if wordSpan is 256 each word is one byte
+// @returns The initialized object
+method init(Signal this, int wordSpan) =>
+    this.words := array.new<int>(max_words_of(wordSpan), 0)
+    this
+
+// @function Set the signal value
+// @param this The signal object to update
+// @param value The actual integer value of the signal
+// @param wordDesc The word descriptor that has the number of values that can be expressed with a single word. If wordSpan is 2 each word is one bit, if wordSpan is 10 each word is one digit, if wordSpan is 16 each word is one nibble, and if wordSpan is 256 each word is one byte
+method set_value(Signal this, int value, WordDesc wordDesc) =>
+    // The convetions uses one sign bit that will flip the value if it is negative by multiping it by -1. Thus two zero values +-0 exist compared to the 2s complement convention
+    const int INT_MAX_52_BITS = 4503599627370495 // 2^52 - 1
+    const int INT_MAX_17_OCTALS = 2251799813685247 // 8^17 - 1
+    const int INT_MAX_15_DIGITS = 999999999999999 // 10^15 - 1
+    const int INT_MAX_13_NIBBLES = 4503599627370495 // 16^13 - 1
+    const int INT_MAX_6_BYTES = 281474976710655 // 256^6 - 1
+    int wordSpan = wordDesc.span
+    var int INT_MAX = switch wordSpan
+        2 => INT_MAX_52_BITS
+        8 => INT_MAX_17_OCTALS
+        10 => INT_MAX_15_DIGITS
+        16 => INT_MAX_13_NIBBLES
+        256 => INT_MAX_6_BYTES
+        => INT_MAX_52_BITS
+    var int INT_MIN = -INT_MAX
+    if value > INT_MAX or value < INT_MIN
+        log.error('Value {0,number,integer} cannot be represented by a {1} integer (+1 sign bit)', value, wordSpan == 2 ? '52bits' : wordSpan == 8 ? '17octals' : wordSpan == 10 ? '15digits' : wordSpan == 16 ? '13nibbles' : '6bytes')
+    this.value := value
+    this.isNegative := value < 0
+    int signal = math.abs(value)
+    int size = this.words.size()
+    for i = 0 to size - 1
+        this.words.set(i, signal % wordSpan)
+        signal := int(signal / wordSpan)
+    this
+
+// @function Merge an array of words (bits(bits/octals/digits/nibbles/hexes/bytes) into an 52bits unsigned integer
+// @param this The signal object to query
+// @param wordSpan The number of values that can be expressed with a single word. If wordSpan is 2 each word is one bit, if wordSpan is 10 each word is one digit, if wordSpan is 16 each word is one nibble, and if wordSpan is 256 each word is one byte
+// @returns Encoded the words (bits/octals/digits/nibbles/hexes/bytes) array into an unsigned integer number (signal)
+method get_value(Signal this, int wordSpan) =>
+    int signal = 0
+    for [i, word] in this.words
+        signal := signal + word * int(math.pow(wordSpan, i))
+    this.isNegative ? -1 * signal : signal
+
+//#endregion ===========================================================================================================
+//#region DATAGRAM
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// @type Object that represents the full static and dynamic description of the datagram
+// @field schema The static description of all the channels
+// @field signal The dynamic value of the datagram
+export type Datagram
+    Schema schema
+    Signal signal
+
+// @function Initialize if the datagram
+// @param this The datagram object
+// @param numericSystem The enum numeric system of the words to be used
+// @param channelDesc The channels descriptor that contains the positions of the words that each channel consists of
+// @returns The initialized object
+export method init(Datagram this, simple NumericSystem numericSystem, ChannelDesc channelDesc) =>
+    this.schema := Schema.new().init(numericSystem, channelDesc)
+    this.signal := Signal.new().init(this.schema.wordDesc.span)
+    this
+
+// @function Set the signal value
+// @param this The datagram object to update
+// @param value The signal value to set
+export method set_signal(Datagram this, int value) =>
+    this.signal.set_value(value, this.schema.wordDesc)
+
+// @function Get the signal value
+// @param this The datagram object to query
+// @returns The value of the signal in digits
+export method get_signal(Datagram this) =>
+    this.signal.get_value(this.schema.wordDesc.span)
+
+// @function Set the signal sign
+// @param this The datagram object to update
+// @param sign The negative -1 or positive 1 sign of the underlying value
+export method set_signal_sign(Datagram this, int sign) =>
+    this.signal.isNegative := sign < 0
+
+// @function Get the signal sign
+// @param this The datagram object to query
+// @returns The sign of the signal value -1 if it is negative and 1 if it is possitive
+export method get_signal_sign(Datagram this) =>
+    this.signal.isNegative ? -1 : 1
+
+// @function Get an array of all channel names
+// @returns An array that has all the channel names that are used by the datagram
+export method get_channel_names(Datagram this) =>
+    this.schema.channelDesc.map.keys()
+
+// @function Set the value of the channel
+// @param this The datagram object to update
+// @param channelName The name of the channel to set the value to. Then name should be as described int the schemas channel descriptor
+// @param value The channel value to set
+export method set_channel_value(Datagram this, simple string channelName, int value) =>
+    array<int> wordPositions = this.schema.channelDesc.get_channel_words_pos(channelName)
+    int size = wordPositions.size()
+    if value < 0 or value >= math.pow(this.schema.wordDesc.span, size)
+        log.error('The value {0,number,integer} cannot be expressed with {1,number,integer} word(s) of range from 0 to {2,number,integer}', value, size, this.schema.wordDesc.span - 1)
+    Signal temp = Signal.new().init(this.schema.wordDesc.span).set_value(value, this.schema.wordDesc)
+    for [i, pos] in wordPositions
+        this.signal.words.set(pos, temp.words.get(i))
+
+// @function Set the value of all the channels
+// @param this The datagram object to update
+// @param value The channel value to set
+export method set_all_channels_value(Datagram this, int value) =>
+    for channelName in this.get_channel_names()
+        array<int> wordPositions = this.schema.channelDesc.get_channel_words_pos(channelName)
+        int size = wordPositions.size()
+        if value < 0 or value >= math.pow(this.schema.wordDesc.span, size)
+            log.error('The value {0,number,integer} cannot be expressed with {1,number,integer} word(s) of range from 0 to {2,number,integer}', value, size, this.schema.wordDesc.span - 1)
+        Signal temp = Signal.new().init(this.schema.wordDesc.span).set_value(value, this.schema.wordDesc)
+        for [i, pos] in wordPositions
+            this.signal.words.set(pos, temp.words.get(i))
+
+// @function Set the value of all the channels
+// @param this The datagram object to update
+export method set_all_channels_max_value(Datagram this) =>
+    for channelName in this.get_channel_names()
+        array<int> wordPositions = this.schema.channelDesc.get_channel_words_pos(channelName)
+        int size = wordPositions.size()
+        int maximum = int(math.pow(this.schema.wordDesc.span, size)) - 1
+        Signal temp = Signal.new().init(this.schema.wordDesc.span).set_value(maximum, this.schema.wordDesc)
+        for [i, pos] in wordPositions
+            this.signal.words.set(pos, temp.words.get(i))
+
+// @function Get the value of the channel
+// @param this The datagram object to query
+// @param channel The name of the channel name to retrieve the value from. Then name should be as described int the schemas channel descriptor
+// @returns Digit group of words (bits/octals/digits/nibbles/hexes/bytes) found at the channel accodring to the schema
+export method get_channel_value(Datagram this, simple string channelName) =>
+    if na(this.signal.words)
+        runtime.error('No signal has been set. Set the signal by using the "set_signal" method.')
+        na
+    array<int> wordPositions = this.schema.channelDesc.get_channel_words_pos(channelName)
+    int value = 0
+    for [i, pos] in wordPositions
+        value := value + this.signal.words.get(pos) * int(math.pow(this.schema.wordDesc.span, i))
+    value
+
+//#endregion ===========================================================================================================
+//#region EXAMPLE
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+// INPUT ===============================================================================================================
+enum DatagramInputMode
+    signal = 'SIGNAL'
+    channels = 'CHANNELS'
+
+numericSystem = input.enum(defval = NumericSystem.ducentohexaquinquagesimal, title = 'Numeric System', tooltip = 'The numeric system that is used. This will define what a single word represents (bit/octal/digit/nibble/hex/byte).')
+inputMode = input.enum(defval = DatagramInputMode.signal, title = 'Datagram Input Mode', tooltip = 'The mode the datagram will operate. The SIGNAL mode will set the users signal value to the datagram and it will get back the chanel values. The CHANNELS mode will set the channel values set by the user to the datagram and it will get back the signal value.')
+
+inputSignal = input.int(defval = 4278190335, title = 'Signal Value', minval = -4503599627370495, maxval = 4503599627370495, tooltip = 'The signal value to split into the channels that have words (octals/digits/nibbles/hexes/bytes) when SIGNAL mode is selected.', group = 'SIGNAL')
+
+inputChannel0Value = input.int(defval = 255, title = 'Channel 0 Value', tooltip = 'The value to set into the channel 0 when CHANNELS mode is selected.', group = 'CHANNELS')
+inputChannel1Value = input.int(defval = 255, title = 'Channel 1 Value', tooltip = 'The value to set into the channel 1 when CHANNELS mode is selected.', group = 'CHANNELS')
+inputSign = input.int(defval = 1, options = [1, -1], title = 'Sign', tooltip = 'The sign possitive or negative to set into the datagram when CHANNELS mode is selected.', group = 'CHANNELS')
+
+testEnabled = input.bool(defval = false, title = 'Enable Test', tooltip = 'Test if the input and output signal and channel values are the same. If not log an error.')
+
+// LOGIC ===============================================================================================================
+// Channels of the datagram
+const string CHANNEL_0_NAME = 'CH0'
+const string CHANNEL_1_NAME = 'CH1'
+
+var Datagram datagram = na
+if barstate.isfirst
+    // Split the integer into two channels in half
+    channelWordPosMap = ChannelDesc.new().init()
+    array<int> channel0Pos = switch numericSystem
+        NumericSystem.binary => array.from(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
+        NumericSystem.octal => array.from(0, 1, 2, 3, 4, 5, 6, 7)
+        NumericSystem.decimal => array.from(0, 1, 2, 3, 4, 5, 6)
+        NumericSystem.hexadecimal => array.from(0, 1, 2, 3, 4, 5)
+        NumericSystem.ducentohexaquinquagesimal => array.from(0, 1, 2)
+    channelWordPosMap.add_channel(CHANNEL_0_NAME, channel0Pos) // Use the first half for the short channel
+    array<int> channel1Pos = switch numericSystem
+        NumericSystem.binary => array.from(26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51)
+        NumericSystem.octal => array.from(8, 9, 10, 11, 12, 13, 14, 15, 16)
+        NumericSystem.decimal => array.from(7, 8, 9, 10, 11, 12, 13, 14)
+        NumericSystem.hexadecimal => array.from(6, 7, 8, 9, 10, 11, 12)
+        NumericSystem.ducentohexaquinquagesimal => array.from(3, 4, 5)
+    channelWordPosMap.add_channel(CHANNEL_1_NAME, channel1Pos) // Use the second half for the long channel
+    datagram := Datagram.new().init(numericSystem, channelWordPosMap)
+    
+if inputMode == DatagramInputMode.signal
+    datagram.set_signal(inputSignal)
+else if inputMode == DatagramInputMode.channels
+    datagram.set_channel_value(CHANNEL_0_NAME, inputChannel0Value)
+    datagram.set_channel_value(CHANNEL_1_NAME, inputChannel1Value)
+    datagram.set_signal_sign(inputSign)
+
+int outputSignal = datagram.get_signal()
+int outputChannel0Value = datagram.get_channel_value(CHANNEL_0_NAME)
+int outputChannel1Value = datagram.get_channel_value(CHANNEL_1_NAME)
+int outputSign = datagram.get_signal_sign()
+
+if testEnabled and barstate.islastconfirmedhistory and inputSignal != outputSignal
+    log.error('The output signal = {0,number,integer} is different than the input signal = {1,number,integer}', outputSignal, inputSignal)
+if testEnabled and barstate.islastconfirmedhistory and inputChannel0Value != outputChannel0Value
+    log.error('The output channel 0 value = {0,number,integer} is different than the input channel 0 value = {1,number,integer}', outputChannel0Value, inputChannel0Value)
+if testEnabled and barstate.islastconfirmedhistory and inputChannel1Value != outputChannel1Value
+    log.error('The output channel 1 value = {0,number,integer} is different than the input channel 1 value = {1,number,integer}', outputChannel1Value, inputChannel1Value)
+if testEnabled and barstate.islastconfirmedhistory and inputSign != outputSign
+    log.error('The output signal sign = {0,number,integer} is different than the input signal sign = {1,number,integer}', outputSign, inputSign)
+
+array<int> words = datagram.signal.words
+var int numOfWords = words.size()
+
+// PLOT ================================================================================================================
+plot(series = outputSignal, title = 'Output Signal', color = color.orange, display = display.all - display.price_scale - display.pane, precision = 0)
+plot(series = outputChannel0Value, title = CHANNEL_0_NAME, color = color.maroon, display = display.all - display.price_scale - display.pane, precision = 0)
+plot(series = outputChannel1Value, title = CHANNEL_1_NAME, color = color.teal, display = display.all - display.price_scale - display.pane, precision = 0)
+plot(series = outputSign, title = 'Output Sign', color = color.black, display = display.all - display.price_scale - display.pane, precision = 0)
+
+plot(series = numOfWords, title = 'Num of Words', color = color.navy, display = display.data_window)
+ 
+plot(series = numericSystem == NumericSystem.ducentohexaquinquagesimal ? words.get(5) : na, title = 'Byte5', color = color.olive, display = numericSystem == NumericSystem.ducentohexaquinquagesimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.ducentohexaquinquagesimal ? words.get(4) : na, title = 'Byte4', color = color.olive, display = numericSystem == NumericSystem.ducentohexaquinquagesimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.ducentohexaquinquagesimal ? words.get(3) : na, title = 'Byte3', color = color.olive, display = numericSystem == NumericSystem.ducentohexaquinquagesimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.ducentohexaquinquagesimal ? words.get(2) : na, title = 'Byte2', color = color.olive, display = numericSystem == NumericSystem.ducentohexaquinquagesimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.ducentohexaquinquagesimal ? words.get(1) : na, title = 'Byte1', color = color.olive, display = numericSystem == NumericSystem.ducentohexaquinquagesimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.ducentohexaquinquagesimal ? words.get(0) : na, title = 'Byte0', color = color.olive, display = numericSystem == NumericSystem.ducentohexaquinquagesimal ? display.all - display.price_scale : display.none, precision = 0)
+
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(12) : na, title = 'Nibble12', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(11) : na, title = 'Nibble11', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(10) : na, title = 'Nibble10', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(9) : na, title = 'Nibble9', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(8) : na, title = 'Nibble8', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(7) : na, title = 'Nibble7', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(6) : na, title = 'Nibble6', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(5) : na, title = 'Nibble5', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(4) : na, title = 'Nibble4', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(3) : na, title = 'Nibble3', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(2) : na, title = 'Nibble2', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(1) : na, title = 'Nibble1', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.hexadecimal ? words.get(0) : na, title = 'Nibble0', color = color.aqua, display = numericSystem == NumericSystem.hexadecimal ? display.all - display.price_scale : display.none, precision = 0)
+
+plot(series = numericSystem == NumericSystem.decimal ? words.get(14) : na, title = 'Digit14', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(13) : na, title = 'Digit13', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(12) : na, title = 'Digit12', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(11) : na, title = 'Digit11', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(10) : na, title = 'Digit10', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(9) : na, title = 'Digit9', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(8) : na, title = 'Digit8', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(7) : na, title = 'Digit7', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(6) : na, title = 'Digit6', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(5) : na, title = 'Digit5', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(4) : na, title = 'Digit4', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(3) : na, title = 'Digit3', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(2) : na, title = 'Digit2', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(1) : na, title = 'Digit1', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.decimal ? words.get(0) : na, title = 'Digit0', color = color.fuchsia, display = numericSystem == NumericSystem.decimal ? display.all - display.price_scale : display.none, precision = 0)
+
+plot(series = numericSystem == NumericSystem.octal ? words.get(16) : na, title = 'Octal16', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(15) : na, title = 'Octal15', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(14) : na, title = 'Octal14', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(13) : na, title = 'Octal13', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(12) : na, title = 'Octal12', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(11) : na, title = 'Octal11', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(10) : na, title = 'Octal10', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(9) : na, title = 'Octal9', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(8) : na, title = 'Octal8', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(7) : na, title = 'Octal7', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(6) : na, title = 'Octal6', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(5) : na, title = 'Octal5', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(4) : na, title = 'Octal4', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(3) : na, title = 'Octal3', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(2) : na, title = 'Octal2', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(1) : na, title = 'Octal1', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+plot(series = numericSystem == NumericSystem.octal ? words.get(0) : na, title = 'Octal0', color = color.purple, display = numericSystem == NumericSystem.octal ? display.all - display.price_scale : display.none, precision = 0)
+
+plot(series = numericSystem == NumericSystem.binary ? words.get(51) : na, title = 'Bit51', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(50) : na, title = 'Bit50', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(49) : na, title = 'Bit49', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(48) : na, title = 'Bit48', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(47) : na, title = 'Bit47', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(46) : na, title = 'Bit46', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(45) : na, title = 'Bit46', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(44) : na, title = 'Bit44', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(43) : na, title = 'Bit43', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(42) : na, title = 'Bit42', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(41) : na, title = 'Bit41', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(40) : na, title = 'Bit40', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(39) : na, title = 'Bit39', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(38) : na, title = 'Bit38', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(37) : na, title = 'Bit37', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(36) : na, title = 'Bit36', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(35) : na, title = 'Bit35', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(34) : na, title = 'Bit34', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(33) : na, title = 'Bit33', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(32) : na, title = 'Bit32', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(31) : na, title = 'Bit31', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(30) : na, title = 'Bit30', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(29) : na, title = 'Bit29', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(28) : na, title = 'Bit28', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(27) : na, title = 'Bit27', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(26) : na, title = 'Bit26', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(25) : na, title = 'Bit25', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(24) : na, title = 'Bit24', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(23) : na, title = 'Bit23', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(22) : na, title = 'Bit22', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(21) : na, title = 'Bit21', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(20) : na, title = 'Bit20', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(19) : na, title = 'Bit19', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(18) : na, title = 'Bit18', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(17) : na, title = 'Bit17', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(16) : na, title = 'Bit16', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(15) : na, title = 'Bit15', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(14) : na, title = 'Bit14', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(13) : na, title = 'Bit13', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(12) : na, title = 'Bit12', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(11) : na, title = 'Bit11', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(10) : na, title = 'Bit10', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(9) : na, title = 'Bit9', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(8) : na, title = 'Bit8', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(7) : na, title = 'Bit7', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(6) : na, title = 'Bit6', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(5) : na, title = 'Bit5', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(4) : na, title = 'Bit4', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(3) : na, title = 'Bit3', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(2) : na, title = 'Bit2', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(1) : na, title = 'Bit1', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+// plot(series = numericSystem == NumericSystem.binary ? words.get(0) : na, title = 'Bit0', color = color.silver, display = numericSystem == NumericSystem.binary ? display.all - display.price_scale : display.none, precision = 0)
+
+//#endregion ===========================================================================================================

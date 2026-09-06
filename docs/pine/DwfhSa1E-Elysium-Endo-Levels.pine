@@ -1,0 +1,924 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Elysium
+//
+// This is an MPL 2.0 work. The Standard Deviation module is adapted from:
+//   "multi-tf standard devs [keypoems]" © fadizeidan — multi-timeframe support by keypoems
+// Attribution retained per MPL 2.0. Do not strip these lines when publishing.
+//
+// ============================================================================
+// ELYSIUM LEVELS — PHASE 3
+// ----------------------------------------------------------------------------
+// Every module PUSHES its levels into one shared collector. A single de-dup
+// engine clusters overlapping prices, merges names into one label, and draws
+// through a fixed object pool. No module draws its own lines.
+//
+// LINE MODES (per module):
+//   Ray     = origin -> right edge forever (prev day/week default)
+//   Dynamic = origin (open) -> current bar + a few bars, tracks live (SD default)
+//   Fixed   = origin -> origin + N bars (sessions default)
+// Previous-candle SD levels always draw across that candle's own range.
+//
+// Live: Standard Dev (per-line + prev candles) · Key Opens · Prev Day/Week
+//       · Current Sessions · VWAP w/ SD bands
+// Coming next: prev-day 4H candles (waiting on your 4H alignment) · HTF side candle
+// ============================================================================
+
+//@version=6
+indicator("Elysium Levels", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 5000)
+
+// ============================================================================
+// TYPES
+// ============================================================================
+type Level
+    float  price
+    string name
+    color  col
+    int    width
+    string style      // "solid" | "dashed" | "dotted"
+    int    priority
+    int    x1
+    int    x2
+    bool   ext        // true = ray (extend right)
+
+// ---- fadi/keypoems Standard Deviation types (MPL 2.0, verbatim) ----
+type Settings
+    bool        htf1_show
+    string      htf1
+    bool        htf1_extend
+    bool        htf2_show
+    string      htf2
+    bool        htf2_extend
+    bool        htf3_show
+    string      htf3
+    bool        htf3_extend
+    bool        mirror
+    int         max
+    int         lookback
+    string      override1
+    float       overridevalue1
+    string      override2
+    float       overridevalue2
+    string      override3
+    float       overridevalue3
+    string      override4
+    float       overridevalue4
+    string      override5
+    float       overridevalue5
+
+type FibLevels
+    bool        show
+    int         padding
+    bool        useLog
+    bool        use_background
+    int         fill_percent
+    bool        show_level
+    bool        show_price
+    bool        show_timeframe
+    string      label_size
+    string      zero_level_text
+
+    bool        fib1
+    float       fib1_level
+    color       fib1_color
+    string      fib1_style
+    int         fib1_size
+    bool        fib2
+    float       fib2_level
+    color       fib2_color
+    string      fib2_style
+    int         fib2_size
+    bool        fib3
+    float       fib3_level
+    color       fib3_color
+    string      fib3_style
+    int         fib3_size
+    bool        fib4
+    float       fib4_level
+    color       fib4_color
+    string      fib4_style
+    int         fib4_size
+    bool        fib5
+    float       fib5_level
+    color       fib5_color
+    string      fib5_style
+    int         fib5_size
+    bool        fib6
+    float       fib6_level
+    color       fib6_color
+    string      fib6_style
+    int         fib6_size
+    bool        fib7
+    float       fib7_level
+    color       fib7_color
+    string      fib7_style
+    int         fib7_size
+    bool        fib8
+    float       fib8_level
+    color       fib8_color
+    string      fib8_style
+    int         fib8_size
+    bool        fib9
+    float       fib9_level
+    color       fib9_color
+    string      fib9_style
+    int         fib9_size
+
+type fib
+    float       level
+    float       price
+    color       color
+    string      style
+    int         size
+    line        ln
+    label       lbl
+    linefill    fl
+
+type Daily
+    array<fib>  fibs
+    float       price
+    int         time
+    int         time_last
+    string      htf_timeframe
+    bool        htf_extend
+    float       stdDevValue
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+g_core  = "Core ━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+g_opens = "Key Opens ━━━━━━━━━━━━━━━━━━━━━━━━"
+g_pdw   = "Prev Day / Week ━━━━━━━━━━━━━━━━━━━"
+g_sess  = "Current Sessions ━━━━━━━━━━━━━━━━━━"
+g_vwap  = "VWAP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+tolTicks  = input.int(4, "Merge tolerance (ticks)", minval = 0, group = g_core, tooltip = "Levels within this many ticks collapse into one line and one merged label.")
+fixedLen  = input.int(10, "Fixed line length (bars)", minval = 5, group = g_core)
+dynPad    = input.int(5, "Dynamic right pad (bars)", minval = 0, group = g_core, tooltip = "Extra bars past the current bar for Dynamic-mode lines.")
+labelSize = input.string(size.tiny, "Label size", [size.tiny, size.small, size.normal], group = g_core)
+
+// --- Key Opens ---
+openMode     = input.string("Ray", "Line mode", ["Ray", "Dynamic", "Fixed"], group = g_opens)
+showOpens    = input.bool(true,  "Show key opens", group = g_opens)
+showMidnight = input.bool(true,  "Midnight (00:00)", group = g_opens, inline = "o1")
+show0830     = input.bool(true,  "8:30", group = g_opens, inline = "o1")
+show0930     = input.bool(true,  "9:30", group = g_opens, inline = "o1")
+// each open: color | width | style
+midCol  = input.color(color.new(#4c9aff, 0), "Midnight", inline = "ko1", group = g_opens)
+midW    = input.int(1, "W", minval = 1, maxval = 4, inline = "ko1", group = g_opens)
+midSt   = input.string("solid", "", ["solid", "dashed", "dotted"], inline = "ko1", group = g_opens)
+o830Col = input.color(color.new(#ab47bc, 0), "8:30", inline = "ko2", group = g_opens)
+o830W   = input.int(1, "W", minval = 1, maxval = 4, inline = "ko2", group = g_opens)
+o830St  = input.string("solid", "", ["solid", "dashed", "dotted"], inline = "ko2", group = g_opens)
+o930Col = input.color(color.new(#ffa726, 0), "9:30", inline = "ko3", group = g_opens)
+o930W   = input.int(1, "W", minval = 1, maxval = 4, inline = "ko3", group = g_opens)
+o930St  = input.string("solid", "", ["solid", "dashed", "dotted"], inline = "ko3", group = g_opens)
+
+// --- Prev Day / Week ---
+pdwMode = input.string("Dynamic", "Line mode", ["Dynamic", "Fixed"], group = g_pdw)
+showPD  = input.bool(true, "Prev day H/L", group = g_pdw, inline = "p")
+showPW  = input.bool(true, "Prev week H/L", group = g_pdw, inline = "p")
+pdCol   = input.color(color.new(#9598a1, 0), "PD color", group = g_pdw, inline = "pds")
+pdWidth = input.int(1, "W", minval = 1, maxval = 4, group = g_pdw, inline = "pds")
+pdStyle = input.string("solid", "", ["solid", "dashed", "dotted"], group = g_pdw, inline = "pds")
+pwCol   = input.color(color.new(#d1d4dc, 0), "PW color", group = g_pdw, inline = "pws")
+pwWidth = input.int(2, "W", minval = 1, maxval = 4, group = g_pdw, inline = "pws")
+pwStyle = input.string("solid", "", ["solid", "dashed", "dotted"], group = g_pdw, inline = "pws")
+
+// --- Current Sessions ---
+sessMode = input.string("Fixed", "Line mode", ["Ray", "Dynamic", "Fixed"], group = g_sess)
+showAsia = input.bool(true, "Asia (20:00-02:00)", group = g_sess)
+showLdn  = input.bool(true, "London (02:00-08:00)", group = g_sess)
+showNY   = input.bool(true, "New York (08:00-16:00)", group = g_sess)
+sessOpen = input.bool(true, "Include session opens", group = g_sess)
+sessCol  = input.color(color.new(#5d606b, 0), "Color", group = g_sess, inline = "ss")
+sessWidth= input.int(1, "Width", minval = 1, maxval = 4, group = g_sess, inline = "ss")
+sessStyle= input.string("dashed", "Style", ["solid", "dashed", "dotted"], group = g_sess, inline = "ss")
+
+// --- VWAP ---
+showVWAP   = input.bool(true, "Show VWAP", group = g_vwap)
+vwapSrc    = input.source(hlc3, "Source", group = g_vwap)
+vwapAncStr = input.string("Session", "Anchor", ["Session", "Day", "Week"], group = g_vwap)
+vwapCol    = input.color(color.new(color.yellow, 0), "VWAP", group = g_vwap, inline = "v0")
+vwapWidth  = input.int(2, "W", minval = 1, maxval = 4, group = g_vwap, inline = "v0")
+vb1en = input.bool(true,  "", inline = "vb1", group = g_vwap)
+vb1m  = input.float(1.0,  "", inline = "vb1", group = g_vwap)
+vb1c  = input.color(color.new(color.yellow, 30), "", inline = "vb1", group = g_vwap)
+vb1w  = input.int(1, "", minval = 1, maxval = 4, inline = "vb1", group = g_vwap)
+vb2en = input.bool(true,  "", inline = "vb2", group = g_vwap)
+vb2m  = input.float(2.0,  "", inline = "vb2", group = g_vwap)
+vb2c  = input.color(color.new(color.yellow, 55), "", inline = "vb2", group = g_vwap)
+vb2w  = input.int(1, "", minval = 1, maxval = 4, inline = "vb2", group = g_vwap)
+vb3en = input.bool(true, "", inline = "vb3", group = g_vwap)
+vb3m  = input.float(3.0,  "", inline = "vb3", group = g_vwap)
+vb3c  = input.color(color.new(color.yellow, 70), "", inline = "vb3", group = g_vwap)
+vb3w  = input.int(1, "", minval = 1, maxval = 4, inline = "vb3", group = g_vwap)
+
+// ============================================================================
+// COLLECTOR + PUBLIC API
+// ============================================================================
+var array<Level> levels = array.new<Level>()
+
+addLevel(float price, string name, color col, int width, string style, int priority, int x1, int x2, bool ext) =>
+    if not na(price)
+        levels.push(Level.new(price, name, col, width, style, priority, x1, x2, ext))
+
+// ============================================================================
+// DE-DUP ENGINE
+// ============================================================================
+sortLevels(array<Level> a) =>
+    n = a.size()
+    if n > 1
+        for i = 0 to n - 2
+            for j = 0 to n - 2 - i
+                if a.get(j).price > a.get(j + 1).price
+                    tmp = a.get(j)
+                    a.set(j, a.get(j + 1))
+                    a.set(j + 1, tmp)
+
+copyLevel(Level s) =>
+    Level.new(s.price, s.name, s.col, s.width, s.style, s.priority, s.x1, s.x2, s.ext)
+
+dedup(array<Level> src) =>
+    result = array.new<Level>()
+    n = src.size()
+    if n > 0
+        sortLevels(src)
+        float tol = tolTicks * syminfo.mintick
+        Level acc = copyLevel(src.get(0))
+        if n > 1
+            for i = 1 to n - 1
+                Level nxt = src.get(i)
+                if math.abs(nxt.price - acc.price) <= tol
+                    if nxt.priority > acc.priority
+                        acc.name     := nxt.name + " / " + acc.name
+                        acc.price    := nxt.price
+                        acc.col      := nxt.col
+                        acc.width    := nxt.width
+                        acc.style    := nxt.style
+                        acc.priority := nxt.priority
+                        acc.x1       := nxt.x1
+                        acc.x2       := nxt.x2
+                        acc.ext      := nxt.ext
+                    else
+                        acc.name := acc.name + " / " + nxt.name
+                else
+                    result.push(acc)
+                    acc := copyLevel(nxt)
+        result.push(acc)
+    result
+
+// ============================================================================
+// RENDER POOL
+// ============================================================================
+int POOL = 200
+
+var array<line>  linePool  = array.new<line>()
+var array<label> labelPool = array.new<label>()
+
+if barstate.isfirst
+    for i = 0 to POOL - 1
+        linePool.push(line.new(bar_index, na, bar_index, na, xloc = xloc.bar_index))
+        labelPool.push(label.new(bar_index, na, "", xloc = xloc.bar_index, style = label.style_label_left, color = #00000000, size = labelSize))
+
+styleToLine(string s) =>
+    switch s
+        "dashed" => line.style_dashed
+        "dotted" => line.style_dotted
+        => line.style_solid
+
+render(array<Level> ds) =>
+    int n = math.min(ds.size(), POOL)
+    for i = 0 to POOL - 1
+        line  ln = linePool.get(i)
+        label lb = labelPool.get(i)
+        if i < n
+            Level lv = ds.get(i)
+            int lx1 = na(lv.x1) ? bar_index - fixedLen : lv.x1
+            int lx2 = na(lv.x2) ? bar_index : lv.x2
+            ln.set_xy1(lx1, lv.price)
+            ln.set_xy2(lx2, lv.price)
+            ln.set_extend(lv.ext ? extend.right : extend.none)
+            ln.set_color(lv.col)
+            ln.set_width(lv.width)
+            ln.set_style(styleToLine(lv.style))
+            int labelX = lv.ext ? bar_index : lx2
+            lb.set_xy(labelX, lv.price)
+            lb.set_text(lv.name)
+            lb.set_size(labelSize)
+            lb.set_textcolor(lv.col)
+        else
+            ln.set_extend(extend.none)
+            ln.set_xy1(bar_index, na)
+            ln.set_xy2(bar_index, na)
+            lb.set_xy(bar_index, na)
+            lb.set_text("")
+
+// ============================================================================
+// MODE RESOLVER -> [x2, extendRight]
+// ============================================================================
+resolveEnd(string mode, int originX) =>
+    int   x2  = bar_index
+    bool  ext = false
+    if mode == "Ray"
+        x2  := bar_index
+        ext := true
+    else if mode == "Dynamic"
+        x2  := bar_index + dynPad
+        ext := false
+    else
+        x2  := (na(originX) ? bar_index : originX) + fixedLen
+        ext := false
+    [x2, ext]
+
+// ============================================================================
+// SHARED TIME HELPERS
+// ============================================================================
+isIntraday = timeframe.isintraday
+etHour = hour(time, "America/New_York")
+etMin  = minute(time, "America/New_York")
+
+var int dayStartX      = na
+var int weekStartX     = na
+var int prevDayStartX  = na
+var int prevWeekStartX = na
+if ta.change(time("D")) != 0
+    prevDayStartX := dayStartX
+    dayStartX := bar_index
+if ta.change(time("W")) != 0
+    prevWeekStartX := weekStartX
+    weekStartX := bar_index
+
+// ============================================================================
+// MODULE: KEY OPENS
+// ============================================================================
+var float midOpen = na
+var int   midX    = na
+var float o0830   = na
+var int   x0830   = na
+var float o0930   = na
+var int   x0930   = na
+
+if isIntraday
+    if etHour == 0 and etMin == 0
+        midOpen := open
+        midX := bar_index
+    if etHour == 8 and etMin == 30
+        o0830 := open
+        x0830 := bar_index
+    if etHour == 9 and etMin == 30
+        o0930 := open
+        x0930 := bar_index
+
+// ============================================================================
+// MODULE: PREV DAY / WEEK (2 security calls, non-repainting)
+// ============================================================================
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwh, pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+// ============================================================================
+// MODULE: CURRENT SESSIONS
+// ============================================================================
+trackSession(string sess) =>
+    bool inSess  = not na(time(timeframe.period, sess, "America/New_York"))
+    bool started = inSess and not inSess[1]
+    var float sh = na
+    var float sl = na
+    var float so = na
+    var int   sx = na
+    if started
+        sh := high
+        sl := low
+        so := open
+        sx := bar_index
+    else if inSess
+        sh := math.max(sh, high)
+        sl := math.min(sl, low)
+    [sh, sl, so, sx]
+
+[asH, asL, asO, asX] = trackSession("2000-0200")
+[ldH, ldL, ldO, ldX] = trackSession("0200-0800")
+[nyH, nyL, nyO, nyX] = trackSession("0800-1600")
+
+pushSession(bool on, float h, float l, float o, int x, string tag) =>
+    if on
+        [s2, sext] = resolveEnd(sessMode, x)
+        addLevel(h, tag + ".H", sessCol, sessWidth, sessStyle, 30, x, s2, sext)
+        addLevel(l, tag + ".L", sessCol, sessWidth, sessStyle, 30, x, s2, sext)
+        if sessOpen
+            addLevel(o, tag + ".O", sessCol, sessWidth, sessStyle, 30, x, s2, sext)
+
+// ============================================================================
+// MODULE: VWAP (plotted, not fed to the level engine — it is a moving line)
+// ============================================================================
+bool vwapAnchor = switch vwapAncStr
+    "Week" => ta.change(time("W")) != 0
+    "Day"  => ta.change(time("D")) != 0
+    => ta.change(time("D")) != 0
+
+[vwapVal, vwUp1, vwLo1] = ta.vwap(vwapSrc, vwapAnchor, 1.0)
+float vwStd = vwUp1 - vwapVal
+
+plot(showVWAP ? vwapVal : na, "VWAP", color = vwapCol, linewidth = vwapWidth)
+plot(showVWAP and vb1en ? vwapVal + vb1m * vwStd : na, "VWAP +b1", color = vb1c, linewidth = vb1w)
+plot(showVWAP and vb1en ? vwapVal - vb1m * vwStd : na, "VWAP -b1", color = vb1c, linewidth = vb1w)
+plot(showVWAP and vb2en ? vwapVal + vb2m * vwStd : na, "VWAP +b2", color = vb2c, linewidth = vb2w)
+plot(showVWAP and vb2en ? vwapVal - vb2m * vwStd : na, "VWAP -b2", color = vb2c, linewidth = vb2w)
+plot(showVWAP and vb3en ? vwapVal + vb3m * vwStd : na, "VWAP +b3", color = vb3c, linewidth = vb3w)
+plot(showVWAP and vb3en ? vwapVal - vb3m * vwStd : na, "VWAP -b3", color = vb3c, linewidth = vb3w)
+
+// ============================================================================
+// BUILD + RENDER (last bar only)
+// ============================================================================
+if barstate.islast
+    levels.clear()
+
+    // Key Opens
+    if showOpens and isIntraday
+        if showMidnight
+            [me2, meext] = resolveEnd(openMode, midX)
+            addLevel(midOpen, "Midnight", midCol, midW, midSt, 60, midX, me2, meext)
+        if show0930
+            [e93, x93] = resolveEnd(openMode, x0930)
+            addLevel(o0930, "9:30", o930Col, o930W, o930St, 58, x0930, e93, x93)
+        if show0830
+            [e83, x83] = resolveEnd(openMode, x0830)
+            addLevel(o0830, "8:30", o830Col, o830W, o830St, 55, x0830, e83, x83)
+
+    // Prev Day / Week
+    if showPD
+        [pd2, pdext] = resolveEnd(pdwMode, prevDayStartX)
+        addLevel(pdh, "PDH", pdCol, pdWidth, pdStyle, 80, prevDayStartX, pd2, pdext)
+        addLevel(pdl, "PDL", pdCol, pdWidth, pdStyle, 80, prevDayStartX, pd2, pdext)
+    if showPW
+        [pw2, pwext] = resolveEnd(pdwMode, prevWeekStartX)
+        addLevel(pwh, "PWH", pwCol, pwWidth, pwStyle, 90, prevWeekStartX, pw2, pwext)
+        addLevel(pwl, "PWL", pwCol, pwWidth, pwStyle, 90, prevWeekStartX, pw2, pwext)
+
+    // Current Sessions
+    if isIntraday
+        pushSession(showAsia, asH, asL, asO, asX, "AS")
+        pushSession(showLdn, ldH, ldL, ldO, ldX, "LDN")
+        pushSession(showNY, nyH, nyL, nyO, nyX, "NY")
+
+    render(dedup(levels))
+
+// ============================================================================
+// MODULE: STANDARD DEVIATION — verbatim from "multi-tf standard devs [keypoems]"
+// (c) fadizeidan, MTF support keypoems, MPL 2.0. Copied unchanged for accuracy.
+// ============================================================================
+
+settings_general                            = 'General Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+settings_fibs                               = 'StdDev Fib Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+settings_override                           = 'Overrides ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+var Settings  settings                      = Settings.new()
+var FibLevels fiblevels                     = FibLevels.new()
+settings.htf1_show                          := input.bool(true, 'Higher Timeframe #1', group = settings_general, inline = 'htf1')
+settings.htf1                               := input.timeframe('240', '', group = settings_general, inline = 'htf1')
+settings.htf1_extend                        := input.bool(false, 'Extend', group = settings_general, inline = 'htf1')
+settings.htf2_show                          := input.bool(true, 'Higher Timeframe #2', group = settings_general, inline = 'htf2')
+settings.htf2                               := input.timeframe('60', '', group = settings_general, inline = 'htf2')
+settings.htf2_extend                        := input.bool(true, 'Extend', group = settings_general, inline = 'htf2')
+settings.htf3_show                          := input.bool(false, 'Higher Timeframe #3', group = settings_general, inline = 'htf3')
+settings.htf3                               := input.timeframe('D', '', group = settings_general, inline = 'htf3')
+settings.htf3_extend                        := input.bool(false, 'Extend', group = settings_general, inline = 'htf3')
+settings.max                                := input.int(1, 'Show levels for last X days', group = settings_general, minval=1, maxval=50)
+settings.lookback                           := input.int(5000, 'Based on last X periods', group = settings_general, minval=2, maxval=5000)
+settings.mirror                             := input.bool(true, 'Mirror levels on the other side', group = settings_fibs)
+//fiblevels.useLog                            := input.bool(true, 'Use Log scale for calculations', group = settings_general)
+fiblevels.fib1                              := input.bool(true, '', group = settings_fibs, inline = '1')
+fiblevels.fib1_level                        := input.float(0, '', group = settings_fibs, inline = '1')
+fiblevels.fib1_color                        := input.color(color.blue, '', group = settings_fibs, inline = '1')
+fiblevels.fib1_style                        := input.string('⎯⎯⎯', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '1')
+fiblevels.fib1_size                         := input.int(1, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '1')
+fiblevels.fib2                              := input.bool(true, '', group = settings_fibs, inline = '2')
+fiblevels.fib2_level                        := input.float(0.5, '', group = settings_fibs, inline = '2')
+fiblevels.fib2_color                        := input.color(color.black, '', group = settings_fibs, inline = '2')
+fiblevels.fib2_style                        := input.string('----', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '2')
+fiblevels.fib2_size                         := input.int(1, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '2')
+fiblevels.fib3                              := input.bool(true, '', group = settings_fibs, inline = '3')
+fiblevels.fib3_level                        := input.float(1, '', group = settings_fibs, inline = '3')
+fiblevels.fib3_color                        := input.color(color.black, '', group = settings_fibs, inline = '3')
+fiblevels.fib3_style                        := input.string('⎯⎯⎯', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '3')
+fiblevels.fib3_size                         := input.int(2, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '3')
+fiblevels.fib4                              := input.bool(true, '', group = settings_fibs, inline = '4')
+fiblevels.fib4_level                        := input.float(1.5, '', group = settings_fibs, inline = '4')
+fiblevels.fib4_color                        := input.color(color.black, '', group = settings_fibs, inline = '4')
+fiblevels.fib4_style                        := input.string('····', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '4')
+fiblevels.fib4_size                         := input.int(1, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '4')
+fiblevels.fib5                              := input.bool(true, '', group = settings_fibs, inline = '5')
+fiblevels.fib5_level                        := input.float(2, '', group = settings_fibs, inline = '5')
+fiblevels.fib5_color                        := input.color(color.black, '', group = settings_fibs, inline = '5')
+fiblevels.fib5_style                        := input.string('⎯⎯⎯', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '5')
+fiblevels.fib5_size                         := input.int(2, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '5')
+fiblevels.fib6                              := input.bool(false, '', group = settings_fibs, inline = '6')
+fiblevels.fib6_level                        := input.float(2.5, '', group = settings_fibs, inline = '6')
+fiblevels.fib6_color                        := input.color(color.black, '', group = settings_fibs, inline = '6')
+fiblevels.fib6_style                        := input.string('····', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '6')
+fiblevels.fib6_size                         := input.int(1, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '6')
+fiblevels.fib7                              := input.bool(false, '', group = settings_fibs, inline = '7')
+fiblevels.fib7_level                        := input.float(3, '', group = settings_fibs, inline = '7')
+fiblevels.fib7_color                        := input.color(color.black, '', group = settings_fibs, inline = '7')
+fiblevels.fib7_style                        := input.string('⎯⎯⎯', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '7')
+fiblevels.fib7_size                         := input.int(2, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '7')
+fiblevels.fib8                              := input.bool(false, '', group = settings_fibs, inline = '8')
+fiblevels.fib8_level                        := input.float(3.5, '', group = settings_fibs, inline = '8')
+fiblevels.fib8_color                        := input.color(color.black, '', group = settings_fibs, inline = '8')
+fiblevels.fib8_style                        := input.string('····', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '8')
+fiblevels.fib8_size                         := input.int(1, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '8')
+fiblevels.fib9                              := input.bool(false, '', group = settings_fibs, inline = '9')
+fiblevels.fib9_level                        := input.float(4, '', group = settings_fibs, inline = '9')
+fiblevels.fib9_color                        := input.color(color.black, '', group = settings_fibs, inline = '9')
+fiblevels.fib9_style                        := input.string('⎯⎯⎯', '', options = ['⎯⎯⎯', '----', '····'], group = settings_fibs, inline = '9')
+fiblevels.fib9_size                         := input.int(2, '', options = [1, 2, 3, 4], group = settings_fibs, inline = '9')
+
+fiblevels.use_background                    := input.bool(false, "Background transparency    ", group = settings_fibs, inline = 'fill')
+fiblevels.fill_percent                      := input.int(99, '', options = [99, 97, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50], group = settings_fibs, inline = 'fill')
+fiblevels.padding                           := input.int(1, 'Fib levels padding', group = settings_fibs)
+fiblevels.label_size                        := input.string(size.normal, 'Label size', [size.tiny, size.small, size.normal, size.large, size.huge], group = settings_fibs)
+fiblevels.show_level                        := input.bool(true, 'Level value', group = settings_fibs)
+fiblevels.show_price                        := input.bool(false, 'Price value', group = settings_fibs)
+fiblevels.show_timeframe                    := input.bool(true, 'Timeframe', group = settings_fibs)
+fiblevels.zero_level_text                   := input.string('Open', 'Zero level text', group = settings_fibs)
+settings.override1                          := input.string('', 'Override Symbol', group = settings_override, inline = 'o1')
+settings.overridevalue1                     := input.float(0, 'StDev', group = settings_override, inline = 'o1')
+settings.override2                          := input.string('', 'Override Symbol', group = settings_override, inline = 'o2')
+settings.overridevalue2                     := input.float(0, 'StDev', group = settings_override, inline = 'o2')
+settings.override3                          := input.string('', 'Override Symbol', group = settings_override, inline = 'o3')
+settings.overridevalue3                     := input.float(0, 'StDev', group = settings_override, inline = 'o3')
+settings.override4                          := input.string('', 'Override Symbol', group = settings_override, inline = 'o4')
+settings.overridevalue4                     := input.float(0, 'StDev', group = settings_override, inline = 'o4')
+settings.override5                          := input.string('', 'Override Symbol', group = settings_override, inline = 'o5')
+settings.overridevalue5                     := input.float(0, 'StDev', group = settings_override, inline = 'o5')
+
+color color_transparent = #00000000
+var array<Daily> daily1  = array.new<Daily>()
+var array<Daily> daily2  = array.new<Daily>()
+var array<Daily> daily3  = array.new<Daily>()
+
+lineStyle(string style) =>
+    out = switch style
+        '----' => line.style_dashed
+        '····' => line.style_dotted
+        => line.style_solid
+    out
+
+timeframeToShorthand(string tf) =>
+    result = switch tf
+        "1" => "1m"
+        "3" => "3m"
+        "5" => "5m"
+        "15" => "15m"
+        "30" => "30m"
+        "45" => "45m"
+        "60" => "1H"
+        "120" => "2H"
+        "180" => "3H"
+        "240" => "4H"
+        "360" => "6H"
+        "480" => "8H"
+        "720" => "12H"
+        "D" => "1D"
+        "1D" => "1D"
+        "3D" => "3D"
+        "W" => "1W"
+        "1W" => "1W"
+        "M" => "1M"
+        "1M" => "1M"
+        "3M" => "3M"
+        "6M" => "6M"
+        "12M" => "1Y"
+        => tf  // return original if not found
+    result
+
+// Calculate the end time of the higher timeframe period
+getHTFPeriodEnd(int start_time, string htf) =>
+    int duration_ms = switch htf
+        "1" => 60000  // 1 minute
+        "3" => 180000  // 3 minutes  
+        "5" => 300000  // 5 minutes
+        "15" => 900000  // 15 minutes
+        "30" => 1800000  // 30 minutes
+        "45" => 2700000  // 45 minutes
+        "60" => 3600000  // 1 hour
+        "120" => 7200000  // 2 hours
+        "180" => 10800000  // 3 hours
+        "240" => 14400000  // 4 hours
+        "360" => 21600000  // 6 hours
+        "480" => 28800000  // 8 hours
+        "720" => 43200000  // 12 hours
+        "D" => 86400000  // 1 day
+        "1D" => 86400000  // 1 day
+        "3D" => 259200000  // 3 days
+        "W" => 604800000  // 1 week
+        "1W" => 604800000  // 1 week
+        "M" => 2592000000  // ~30 days (approximate)
+        "1M" => 2592000000  // ~30 days (approximate)
+        "3M" => 7776000000  // ~90 days (approximate)
+        "6M" => 15552000000  // ~180 days (approximate)
+        "12M" => 31104000000  // ~365 days (approximate)
+        => 86400000  // default to 1 day
+    start_time + duration_ms
+
+method swap(array<fib> this, int i, int j) =>
+    temp = this.get(i)
+    this.set(i, this.get(j))
+    this.set(j, temp)
+
+method sort(array<fib> this) =>
+    size = this.size()
+    for i = 0 to size - 2
+        for j = 0 to size - 2 - i
+            if this.get(j).level > this.get(j + 1).level
+                this.swap(j, j + 1)
+
+// Method to delete drawing objects for a single fib
+method deleteFib(fib this) =>
+    if not na(this.ln)
+        this.ln.delete()
+    if not na(this.lbl)
+        this.lbl.delete()  
+    if not na(this.fl)
+        this.fl.delete()
+
+// Method to delete all drawing objects for a Daily
+method deleteDrawings(Daily this) =>
+    if not na(this.fibs)
+        for f in this.fibs
+            f.deleteFib()
+
+getFibLevel(float level, float _price, color _color, string _style, int _size) =>
+    fib f           = fib.new()
+    f.level         := level
+    f.color         := _color
+    f.price         := _price
+    f.style         := _style
+    f.size          := _size
+    f.ln            := na  // Will be created later in drawFibs
+    f.lbl           := na  // Will be created later in drawFibs
+    f.fl            := na  // Will be created later in drawFibs
+    f
+method calcFibs(Daily this, float price, float stdDev) =>
+    if this.fibs.size() == 0
+        if fiblevels.fib1
+            this.fibs.unshift(getFibLevel(fiblevels.fib1_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib1_level))) : price+(stdDev*fiblevels.fib1_level), fiblevels.fib1_color, fiblevels.fib1_style, fiblevels.fib1_size))
+            if settings.mirror and fiblevels.fib1_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib1_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib1_level)))) : price+(-1*(stdDev*fiblevels.fib1_level)), fiblevels.fib1_color, fiblevels.fib1_style, fiblevels.fib1_size))      
+        if fiblevels.fib2
+            this.fibs.unshift(getFibLevel(fiblevels.fib2_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib2_level))) : price+(stdDev*fiblevels.fib2_level), fiblevels.fib2_color, fiblevels.fib2_style, fiblevels.fib2_size))
+            if settings.mirror and fiblevels.fib2_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib2_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib2_level)))) : price+(-1*(stdDev*fiblevels.fib2_level)), fiblevels.fib2_color, fiblevels.fib2_style, fiblevels.fib2_size))
+
+        if fiblevels.fib3
+            this.fibs.unshift(getFibLevel(fiblevels.fib3_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib3_level))) : price+(stdDev*fiblevels.fib3_level), fiblevels.fib3_color, fiblevels.fib3_style, fiblevels.fib3_size))
+            if settings.mirror and fiblevels.fib3_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib3_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib3_level)))) : price+(-1*(stdDev*fiblevels.fib3_level)), fiblevels.fib3_color, fiblevels.fib3_style, fiblevels.fib3_size))
+
+        if fiblevels.fib4
+            this.fibs.unshift(getFibLevel(fiblevels.fib4_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib4_level))) : price+(stdDev*fiblevels.fib4_level), fiblevels.fib4_color, fiblevels.fib4_style, fiblevels.fib4_size))
+            if settings.mirror and fiblevels.fib4_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib4_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib4_level)))) : price+(-1*(stdDev*fiblevels.fib4_level)), fiblevels.fib4_color, fiblevels.fib4_style, fiblevels.fib4_size))
+
+        if fiblevels.fib5
+            this.fibs.unshift(getFibLevel(fiblevels.fib5_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib5_level))) : price+(stdDev*fiblevels.fib5_level), fiblevels.fib5_color, fiblevels.fib5_style, fiblevels.fib5_size))
+            if settings.mirror and fiblevels.fib5_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib5_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib5_level)))) : price+(-1*(stdDev*fiblevels.fib5_level)), fiblevels.fib5_color, fiblevels.fib5_style, fiblevels.fib5_size))
+
+        if fiblevels.fib6
+            this.fibs.unshift(getFibLevel(fiblevels.fib6_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib6_level))) : price+(stdDev*fiblevels.fib6_level), fiblevels.fib6_color, fiblevels.fib6_style, fiblevels.fib6_size))
+            if settings.mirror and fiblevels.fib6_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib6_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib6_level)))) : price+(-1*(stdDev*fiblevels.fib6_level)), fiblevels.fib6_color, fiblevels.fib6_style, fiblevels.fib6_size))
+
+        if fiblevels.fib7
+            this.fibs.unshift(getFibLevel(fiblevels.fib7_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib7_level))) : price+(stdDev*fiblevels.fib7_level), fiblevels.fib7_color, fiblevels.fib7_style, fiblevels.fib7_size))
+            if settings.mirror and fiblevels.fib7_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib7_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib7_level)))) : price+(-1*(stdDev*fiblevels.fib7_level)), fiblevels.fib7_color, fiblevels.fib7_style, fiblevels.fib7_size))
+
+        if fiblevels.fib8
+            this.fibs.unshift(getFibLevel(fiblevels.fib8_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib8_level))) : price+(stdDev*fiblevels.fib8_level), fiblevels.fib8_color, fiblevels.fib8_style, fiblevels.fib8_size))
+            if settings.mirror and fiblevels.fib8_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib8_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib8_level)))) : price+(-1*(stdDev*fiblevels.fib8_level)), fiblevels.fib8_color, fiblevels.fib8_style, fiblevels.fib8_size))
+
+        if fiblevels.fib9
+            this.fibs.unshift(getFibLevel(fiblevels.fib9_level, fiblevels.useLog ? math.exp(math.log(price+(stdDev*fiblevels.fib9_level))) : price+(stdDev*fiblevels.fib9_level), fiblevels.fib9_color, fiblevels.fib9_style, fiblevels.fib9_size))
+            if settings.mirror and fiblevels.fib9_level != 0
+                this.fibs.unshift(getFibLevel(-1*fiblevels.fib9_level, fiblevels.useLog ? math.exp(math.log(price+(-1*(stdDev*fiblevels.fib9_level)))) : price+(-1*(stdDev*fiblevels.fib9_level)), fiblevels.fib9_color, fiblevels.fib9_style, fiblevels.fib9_size))
+    this.fibs.sort()
+    this
+
+method fibAlert(Daily this) =>
+    for f in this.fibs
+        if f.level < 0 and ta.crossunder(low, f.price)
+            alert('Price crossed below StDev ' + str.tostring(f.level) + ' [' + syminfo.ticker + ']')
+            break
+        if f.level > 1 and ta.crossover(high, f.level)
+            alert('Price crossed above below StDev ' + str.tostring(f.level) + ' [' + syminfo.ticker + ']')
+            break
+
+method drawFibs(Daily this, int idx) =>
+    if this.fibs.size() > 0
+        for i=0 to this.fibs.size()-1
+            fib f = this.fibs.get(i)
+            string txt          = ''
+            string space_s      = ''
+            string space_e      = ''
+            
+            // Calculate end time: either end of HTF period or padded time
+            int end_time = this.htf_extend ? 
+                           getHTFPeriodEnd(this.time, this.htf_timeframe) : 
+                           this.time_last+(fiblevels.padding*(time-time[1]))
+            
+            // Build label text with timeframe, level, and price
+            string tf_text = fiblevels.show_timeframe ? timeframeToShorthand(this.htf_timeframe) + " " : ""
+            
+            if fiblevels.show_level 
+                // Use custom text for zero level, otherwise show the level number
+                string level_text = f.level == 0 ? fiblevels.zero_level_text : str.tostring(f.level)
+                txt := tf_text + level_text
+                space_s := ' ('
+                space_e := ')'
+            else
+                txt := tf_text
+
+            if fiblevels.show_price
+                txt := txt + space_s + str.format('{0,number,#,###.00}', f.price) + space_e
+
+            // Create drawing objects if they don't exist (outside security context)
+            if na(f.ln)
+                f.ln := line.new(na, f.price, na, f.price, color=f.color, style=lineStyle(f.style), xloc=xloc.bar_time, width = f.size)
+            if na(f.lbl)
+                f.lbl := label.new(na, f.price, '', style = label.style_label_left, textcolor = f.color, color = color_transparent, size=fiblevels.label_size, xloc=xloc.bar_time)
+
+            f.ln.set_color(f.color)
+            f.lbl.set_xy(end_time, f.price)
+            if idx == 0
+                f.ln.set_xy1(this.time, f.price)
+                f.ln.set_xy2(end_time, f.price)
+                f.lbl.set_text(txt)
+                if fiblevels.use_background and na(f.fl) and i > 0
+                    fib pf = this.fibs.get(i-1)
+                    if not na(pf.ln)
+                        f.fl := linefill.new(pf.ln, f.ln, color.new(f.color, fiblevels.fill_percent))
+            else
+                f.ln.set_x1(this.time)
+                f.ln.set_x2(this.htf_extend ? 
+                           getHTFPeriodEnd(this.time, this.htf_timeframe) : 
+                           this.time_last+(time-time[1]))
+                f.lbl.set_x(this.htf_extend ? 
+                           getHTFPeriodEnd(this.time, this.htf_timeframe) : 
+                           this.time_last)
+    this
+
+getDailyStDev() =>
+    float stdev = 0
+    switch str.lower(syminfo.ticker)
+        str.lower(settings.override1) =>
+            settings.overridevalue1
+        str.lower(settings.override2) =>
+            settings.overridevalue2
+        str.lower(settings.override3) =>
+            settings.overridevalue3
+        str.lower(settings.override4) =>
+            settings.overridevalue4
+        str.lower(settings.override5) =>
+            settings.overridevalue5
+        =>
+            // if there aren't 5000 bars, we will use the first bars
+            lookback = math.min(settings.lookback, bar_index)  // Roughly 252 trading days/year * 20 years
+            lookback := lookback <= 0 ? 1 : lookback
+            diff = ((close - open)/open)
+            ta.stdev(diff, lookback)
+
+method add(array<Daily> this, float price, int _time, float _stdDevValue, string htf_timeframe, bool htf_extend) =>
+    Daily d     = Daily.new()
+    d.price     := price
+    d.time      := _time
+    d.time_last := _time
+    d.htf_timeframe := htf_timeframe
+    d.htf_extend := htf_extend
+    d.stdDevValue := _stdDevValue
+    d.fibs      := array.new<fib>()
+    this.unshift(d)
+
+method update(array<Daily> this, int _time) =>
+    if this.size() > 0
+        Daily f = this.first()
+        f.time_last := _time
+
+// Method to cleanup old drawing objects outside security context
+method cleanup(array<Daily> this) =>
+    if this.size() > settings.max
+        for i = settings.max to this.size() - 1
+            if i < this.size()
+                Daily temp = this.get(i)
+                temp.deleteDrawings()
+        // Remove excess items
+        while this.size() > settings.max
+            this.pop()
+
+varip bool done = false
+var float factor1 = 0
+var float factor2 = 0  
+var float factor3 = 0
+var float day_open = 0
+var int   day_time = 0
+//////////////////////////////////////////
+if true //timeframe.isintraday //and barstate.islast
+
+    // Process HTF #1
+    if settings.htf1_show
+        factor1 := request.security(syminfo.ticker, settings.htf1, getDailyStDev(), lookahead = barmerge.lookahead_on)
+        bool newPeriod1 = bool(ta.change(time(settings.htf1, "america/New_York")))
+        if bool(newPeriod1)
+            if not bool(newPeriod1[1])
+                daily1.add(open, time, (factor1 * open), settings.htf1, settings.htf1_extend)
+                day_open := open
+                day_time := time
+        daily1.update(time)
+
+    // Process HTF #2  
+    if settings.htf2_show
+        factor2 := request.security(syminfo.ticker, settings.htf2, getDailyStDev(), lookahead = barmerge.lookahead_on)
+        bool newPeriod2 = bool(ta.change(time(settings.htf2, "america/New_York")))
+        if bool(newPeriod2)
+            if not bool(newPeriod2[1])
+                daily2.add(open, time, (factor2 * open), settings.htf2, settings.htf2_extend)
+        daily2.update(time)
+
+    // Process HTF #3
+    if settings.htf3_show
+        factor3 := request.security(syminfo.ticker, settings.htf3, getDailyStDev(), lookahead = barmerge.lookahead_on)
+        bool newPeriod3 = bool(ta.change(time(settings.htf3, "america/New_York")))
+        if bool(newPeriod3)
+            if not bool(newPeriod3[1])
+                daily3.add(open, time, (factor3 * open), settings.htf3, settings.htf3_extend)
+        daily3.update(time)
+
+    if barstate.islast
+        // Manage drawings for HTF #1
+        if settings.htf1_show
+            // Delete drawings for any daily objects beyond settings.max
+            // These objects would have had their fibs calculated and drawings created in a previous barstate.islast execution
+            for i = settings.max to daily1.size() - 1
+                if i < daily1.size() 
+                    daily1.get(i).deleteDrawings() // Ensure drawings are deleted
+            
+            // Prune array to settings.max (actual data objects)
+            while daily1.size() > settings.max
+                daily1.pop() 
+
+            // Draw fibs for visible daily objects
+            for i = 0 to math.min(daily1.size(), settings.max) - 1
+                if i < daily1.size() 
+                    dayToDraw = daily1.get(i)
+                    // Calculate Fibs on demand if not already calculated (i.e., fibs array is empty)
+                    if dayToDraw.fibs.size() == 0 and not na(dayToDraw.stdDevValue) and dayToDraw.stdDevValue != 0
+                        dayToDraw.calcFibs(dayToDraw.price, dayToDraw.stdDevValue)
+                    dayToDraw.drawFibs(i)
+            if daily1.size() > 0 and daily1.first().fibs.size() > 0 // Ensure fibs are calculated before alerting
+                daily1.first().fibAlert()
+        else 
+            // HTF1 is turned off, delete all its drawings and clear data
+            for day in daily1
+                day.deleteDrawings()
+            daily1.clear()
+
+        // Manage drawings for HTF #2
+        if settings.htf2_show
+            for i = settings.max to daily2.size() - 1
+                if i < daily2.size()
+                    daily2.get(i).deleteDrawings()
+            while daily2.size() > settings.max
+                daily2.pop()
+            for i = 0 to math.min(daily2.size(), settings.max) - 1
+                if i < daily2.size()
+                    dayToDraw = daily2.get(i)
+                    if dayToDraw.fibs.size() == 0 and not na(dayToDraw.stdDevValue) and dayToDraw.stdDevValue != 0
+                        dayToDraw.calcFibs(dayToDraw.price, dayToDraw.stdDevValue)
+                    dayToDraw.drawFibs(i)
+            if daily2.size() > 0 and daily2.first().fibs.size() > 0
+                daily2.first().fibAlert()
+        else
+            for day in daily2
+                day.deleteDrawings()
+            daily2.clear()
+                
+        // Manage drawings for HTF #3
+        if settings.htf3_show
+            for i = settings.max to daily3.size() - 1
+                if i < daily3.size()
+                    daily3.get(i).deleteDrawings()
+            while daily3.size() > settings.max
+                daily3.pop()
+            for i = 0 to math.min(daily3.size(), settings.max) - 1
+                if i < daily3.size()
+                    dayToDraw = daily3.get(i)
+                    if dayToDraw.fibs.size() == 0 and not na(dayToDraw.stdDevValue) and dayToDraw.stdDevValue != 0
+                        dayToDraw.calcFibs(dayToDraw.price, dayToDraw.stdDevValue)
+                    dayToDraw.drawFibs(i)
+            if daily3.size() > 0 and daily3.first().fibs.size() > 0
+                daily3.first().fibAlert()
+        else
+            for day in daily3
+                day.deleteDrawings()
+            daily3.clear()
+

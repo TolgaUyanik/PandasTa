@@ -1,0 +1,660 @@
+//@version=6
+// =============================================================================
+// SESSION RUNWAY & VOLATILITY EXPANSION MATRIX  ·  v16
+// -----------------------------------------------------------------------------
+// One question: is there RUNWAY left in the session for a fresh trade to reach
+// target — in SPACE (range vs ASR) AND TIME (clock)? A trade fails if either axis
+// is constrained; the 2x2 HUD lights the live cell so you see which one.
+//
+//   |             | TIME OK        | TIME LOW         |
+//   | SPACE OK    | CLEAR     (G)  | TIME LOW    (A)  |
+//   | SPACE TIGHT | EXHAUSTED (A)  | NO RUNWAY   (R)  |
+//
+// Not a buy/sell and not a direction — a timing/regime filter over your own setup.
+//
+// Design notes (the load-bearing choices):
+//   - Continuous day envelope, London-open -> NY-close, one anchor. Session close
+//     is projected and FROZEN at open, so the time axis can't step mid-session.
+//   - TIME axis is front-loaded (effTimeFrac = 1 - elapsed^p): range forms early,
+//     so late minutes buy less distance than a straight-line clock implies.
+//   - TIME-LOW gate is STRUCTURAL, not a forecast: suppressed while a range burst
+//     is still ahead — pre-NY (NY's range to come) and the NY fill-window
+//     (earlyNyMin, keyed to NY open). Gated on where orders fill, not a per-symbol
+//     curve. The SPACE axis is never suppressed.
+//   - Target ATR is anchored to a fixed TF, so the verdict reads the same on M5-H1
+//     instead of shifting with chart TF.
+//   - FREEZE-AT-BREAK: each edge locks on the first confirmed close through it;
+//     "+N beyond" then measures real travel, not anchor drift.
+//   - REGIME: directional efficiency (net displacement / range) flags ROTATION vs
+//     EXPANSION. In expansion the exhaustion read inverts, the 2x2 stands down, and
+//     the edges re-flag as trend-day references.
+//
+// Chart-TF native except two request.security calls (H4 direction gate, anchored
+// target ATR) — both lookahead_off, non-repainting.
+// =============================================================================
+indicator("Session Runway & Volatility Expansion Matrix", "RUNWAY", overlay = true, max_labels_count = 20, max_boxes_count = 10, max_lines_count = 10)
+
+// ============================================================================
+// 0 · INPUTS
+// ============================================================================
+grpS = "Sessions"
+londonSession = input.session("0800-1700", "London window",       group = grpS, tooltip = "Local London time. DST self-corrects via timezone.")
+londonTz      = input.string ("Europe/London",   "London timezone",   group = grpS)
+nySession     = input.session("0800-1700", "New York window",     group = grpS, tooltip = "Local New York time. DST self-corrects via timezone.")
+nyTz          = input.string ("America/New_York","New York timezone",  group = grpS)
+earlyNyMin    = input.int   (180,  "NY fill-window (min, time gate)", minval = 0, group = grpS, tooltip = "TIME LOW is suppressed for this many minutes after NY opens, because NY's order-fill window is where most of the day's range is still AHEAD of price — the time axis can't be the binding constraint yet. This is a STRUCTURAL fact about when orders fill, not a forecast of travel: ~180 = the first ~3h of NY where most fills land. Keyed to the persisted NY-open timestamp, so a genuine late-session TIME LOW is never silenced. Raise it for a Tokyo-centric pair or a known release day; 0 disables the early-NY gate (pre-NY suppression via nyStillAhead is unaffected).")
+
+grpE = "ASR Engine"
+asrLen        = input.int   (14,   "ASR lookback (sessions)", minval = 1, group = grpE)
+expMult       = input.float (0.90, "Expansion multiple (m)",  minval = 0.1, maxval = 2.0, step = 0.05, group = grpE)
+minSessFrac   = input.float (0.60, "Min session completeness", minval = 0.1, maxval = 1.0, step = 0.05, group = grpE, tooltip = "Fraction of EXPECTED bars a session must have to count. Auto-scales per timeframe. Kills holiday / half-day pollution.")
+minReady      = input.int   (5,    "Sessions before live (warm-up)", minval = 1, group = grpE, tooltip = "ASR shows WARMING UP until this many valid sessions are recorded.")
+
+grpT = "Target & Runway"
+targetMode    = input.string("ATR mult", "Target distance mode", options = ["ATR mult", "Fixed (pips/ticks)"], group = grpT)
+atrLen        = input.int   (14,  "ATR length",   minval = 1, group = grpT)
+atrMult       = input.float (2.0, "ATR multiple", minval = 0.1, step = 0.1, group = grpT)
+atrAnchorTf   = input.timeframe("60", "Target ATR anchor TF", group = grpT, tooltip = "The ATR-mult target is measured on THIS timeframe, not the chart — so the verdict (and the Clear / Low / NO RUNWAY cells + alerts) reads identically whether you chart M5, M15, M30 or H1. Default 60 = H1. Set it to your chart TF for the legacy chart-relative behaviour. A higher anchor ⇒ larger target ⇒ runway-low trips sooner (more conservative). Ignored in Fixed-pips mode.")
+fixedPips     = input.float (30.0,"Fixed target (pips / ticks)", minval = 0.1, group = grpT, tooltip = "Pips for forex, mintick TICKS for non-forex (metals/indices). Set the Pip size override below to your instrument's real pip/tick so the number is correct. NOTE: unlike ATR-mult mode (where pip size is display-only), in Fixed mode the target IS fixedPips × pipSize — so on metals/indices the override isn't cosmetic, it's required, or the target is off by the mintick-vs-pip ratio (e.g. gold mintick 0.01 vs a 0.1 pip = target 10× too small).")
+safety        = input.float (1.0, "Safety factor", minval = 0.1, step = 0.1, group = grpT, tooltip = "Runway must exceed target x safety. >1 = stricter.")
+timeDirFactor = input.float (0.7, "Time-axis directional factor", minval = 0.1, maxval = 1.0, step = 0.05, group = grpT, tooltip = "ASR is total round-trip range; one directional leg is usually less. <1 tightens the time axis. Default 0.7 reflects a single leg.")
+timeShape     = input.float (0.7, "Time front-load shape (p)", minval = 0.3, maxval = 1.0, step = 0.05, group = grpT, tooltip = "Session range is front-loaded — most of it forms early (London/NY opens), so the back half of the clock buys less distance than its share of time. Achievable runway = 1 − elapsed^p. p=1 is the old straight-line clock; p<1 makes late-session minutes count for less. 0.7 is a moderate prior; you can fit the real p from your own per-session range-accrual data.")
+pipOverride   = input.float (0.0, "Pip size override (0 = auto)", minval = 0.0, step = 0.0001, group = grpT)
+
+grpD = "Direction"
+dirMode       = input.string("H4 Gate", "Direction", options = ["Long", "Short", "Both", "H4 Gate"], group = grpD, tooltip = "H4 Gate = long above H4 SMA-20, short below (non-repainting). Drives WHICH exhaustion zone is drawn. Both = draw both, most-constraining side governs.")
+
+grpR = "Regime (trend-day awareness)"
+effThresh     = input.float (0.50, "Expansion efficiency threshold", minval = 0.1, maxval = 1.0, step = 0.05, group = grpR, tooltip = "Directional efficiency = net session displacement (close − session open) ÷ realised range (high − low), signed. When |efficiency| is at/above this AND the matching average-range edge has already broken, the session reads as a directional EXPANSION (trend day) instead of ROTATION. 0.50 = the net one-way move is at least half the round-trip range. Fit it to your own per-symbol session data.")
+expBenchMult  = input.float (1.8,  "Expansion-range edge (×ASR)",     minval = 1.0, step = 0.1, group = grpR, tooltip = "On a trend day the runway benchmark widens from the spent 0.9·ASR edge to this multiple of ASR — a descriptive marker of how far a trend day's range typically reaches, the same kind of average-range benchmark the tool already uses. Not a target or a forecast.")
+showRegime    = input.bool  (true, "Expansion levels on chart",     group = grpR, tooltip = "Draw the broken-edge and expansion-range-edge reference levels and the counter-trend caution zone on strong trend days. The Regime row in the HUD and the verdict / alert behaviour are always active regardless of this toggle.")
+
+grpV = "Visuals"
+showZone      = input.bool  (true, "Exhaustion zone",  group = grpV, tooltip = "Warm danger band on the gated side. Not a support/resistance level.")
+showTints     = input.bool  (true, "Session tints",     group = grpV)
+showLabels    = input.bool  (true, "Zone label",        group = grpV)
+showTable     = input.bool  (true, "HUD panel",         group = grpV)
+tblSize       = input.string("Normal", "HUD size", options = ["Small", "Normal", "Large"], group = grpV)
+
+grpC = "Color thresholds (gauges & bands)"
+// Drive BOTH chart band and HUD gauge colour off session-native % (not chart-TF
+// ATR), so colours read the same on M5/M15/H1. green >= greenPct, red < redPct.
+spaceGreenPct = input.float(40, "Space · green ≥ %", minval = 0, maxval = 100, step = 5, group = grpC, tooltip = "Space gauges/bands are GREEN at/above this % of that leg's average-range room remaining.")
+spaceRedPct   = input.float(20, "Space · red < %",   minval = 0, maxval = 100, step = 5, group = grpC, tooltip = "Space goes RED below this %. Between red and green = amber.")
+timeGreenPct  = input.float(30, "Time · green ≥ %",  minval = 0, maxval = 100, step = 5, group = grpC, tooltip = "Time gauge/band is GREEN at/above this % of the session clock remaining.")
+timeRedPct    = input.float(15, "Time · red < %",    minval = 0, maxval = 100, step = 5, group = grpC, tooltip = "Time goes RED below this %. Between red and green = amber.")
+
+// --- palette (design tokens) ---
+cChart   = #0A0E14
+cLondon  = #FFB347
+cNY      = #29B6F6
+cOverlap = #00E676
+cGreen   = #00E676
+cAmber   = #FFB300
+cRed     = #FF5252
+cDim     = #6E7B8E
+cBright  = #E8EDF2
+cCyan    = #29B6F6
+cPanelBg = #090D13
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+// projected [start, end] absolute ms of `sess` for the calendar day of `anchor`,
+// in `tz`. DST-safe (timestamp() resolves the offset); overnight windows wrap.
+sessWindowMs(sess, tz, anchor) =>
+    s  = str.contains(sess, ",") ? str.substring(sess, 0, str.pos(sess, ",")) : sess
+    oH = int(str.tonumber(str.substring(s, 0, 2)))
+    oM = int(str.tonumber(str.substring(s, 2, 4)))
+    cH = int(str.tonumber(str.substring(s, 5, 7)))
+    cM = int(str.tonumber(str.substring(s, 7, 9)))
+    y  = year(anchor, tz), mo = month(anchor, tz), d = dayofmonth(anchor, tz)
+    oMs = timestamp(tz, y, mo, d, oH, oM)
+    cMs = timestamp(tz, y, mo, d, cH, cM)
+    [oMs, cMs <= oMs ? cMs + 86400000 : cMs]
+
+// 10-segment unicode gauge
+gaugeStr(pct) =>
+    filled = math.max(0, math.min(10, int(math.round(pct / 10))))
+    s = ""
+    for i = 0 to 9
+        s := s + (i < filled ? "█" : "░")
+    s
+
+// "Europe/London" -> "London". Labels the next-open time in the session's own
+// zone (Pine can't read the chart's display timezone).
+tzShort(tz) =>
+    i = str.contains(tz, "/") ? str.pos(tz, "/") + 1 : 0
+    str.replace_all(str.substring(tz, i), "_", " ")
+
+// % -> severity (0 dim, 1 green, 2 amber, 3 red) -> colour. Lets a band take the
+// WORSE of its two axes even when space and time use different cutoffs.
+sevOf(pct, gPct, rPct) =>
+    na(pct) ? 0 : pct >= gPct ? 1 : pct >= rPct ? 2 : 3
+colOf(sev) =>
+    sev == 1 ? cGreen : sev == 2 ? cAmber : sev == 3 ? cRed : cDim
+
+// ============================================================================
+// PRECOMPUTE · pip size, ATR, H4 gate, session detection, TF guard
+// ============================================================================
+isJPY   = str.contains(syminfo.ticker, "JPY")
+pipSize = pipOverride > 0 ? pipOverride : (syminfo.type == "forex" ? (isJPY ? 0.01 : 0.0001) : syminfo.mintick)
+
+// unit label follows the INSTRUMENT: forex reads in pips, everything else
+// (metals/indices/futures) reads in mintick TICKS. Display only — no math changes.
+// Set the Pip size override to your instrument's real pip/tick for correct numbers.
+isForex = syminfo.type == "forex"
+unitTxt = isForex ? "pips" : "ticks"   // long unit for HUD / label readouts
+unitAbb = isForex ? "p"    : "t"        // compact suffix on overshoot readouts
+
+atr       = ta.atr(atrLen)   // chart-TF ATR — display readouts only (Runway "· N ATR")
+// TF-anchored ATR for the verdict target: same value across M5-H1 so the lit cell
+// doesn't shift with chart TF. On an H1 chart at the H1 default it is the chart's
+// own ATR. lookahead_off + confirmed history = non-repainting.
+atrTarget = request.security(syminfo.tickerid, atrAnchorTf, ta.atr(atrLen), lookahead = barmerge.lookahead_off)
+
+[h4sma, h4cls] = request.security(syminfo.tickerid, "240", [ta.sma(close, 20), close], lookahead = barmerge.lookahead_off)
+gateLong = h4cls > h4sma
+
+isWeekend = dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+inLondon  = not na(time(timeframe.period, londonSession, londonTz)) and not isWeekend
+inNY      = not na(time(timeframe.period, nySession,     nyTz))     and not isWeekend
+
+tfSec = timeframe.in_seconds()
+tfOK  = tfSec >= 300 and tfSec <= 3600    // meaningful M5..H1
+
+barMin     = tfSec / 60.0
+
+// London open hour/min for the NO-SESSION countdown
+lonOpenH = int(str.tonumber(str.substring(londonSession, 0, 2)))
+lonOpenM = int(str.tonumber(str.substring(londonSession, 2, 4)))
+
+// ============================================================================
+// 1 · ASR ENGINE — continuous day envelope (London-open -> NY-close, one anchor)
+// ----------------------------------------------------------------------------
+// One envelope over the whole London/NY span. The day's END is projected and
+// FROZEN at open (later of the two closes, DST-safe), so gDur — and the TIME axis
+// — stays constant across the session instead of stepping up when NY opens. A
+// completeness gate (minSessFrac) keeps holiday / half-days out of the day ASR.
+// (Per-session ASR arrays were dropped in v4 — computed every bar, never read.)
+// ============================================================================
+var array<float> dayRanges = array.new<float>()
+var float dayHigh  = na
+var float dayLow   = na
+var float dayOpen  = na     // session-open price — anchor for net displacement / efficiency
+var int   dayStart = na
+var int   dayBars  = 0
+var float dayEndMs = na     // frozen projected session close (ms) for the live day
+var bool  sessTouch = false // true when London∪NY are one continuous span (vs a real gap)
+var float nyOpenMs = na     // frozen NY-open (ms) for the live day — drives the v14 early-NY time gate
+
+govActive = inLondon or inNY
+govOpen   = govActive and not govActive[1]
+govClose  = not govActive and govActive[1]
+
+if govOpen
+    dayHigh := high, dayLow := low, dayOpen := open, dayStart := time, dayBars := 1
+    [lonO, lonC] = sessWindowMs(londonSession, londonTz, time)
+    [nyO,  nyC ] = sessWindowMs(nySession,     nyTz,     time)
+// touch/overlap -> one block, end at the later close. Disjoint (real gap) -> end
+// at this sub-session's own close, so the dead gap isn't counted as runway.
+    touch = lonO <= nyC and nyO <= lonC
+    sessTouch := touch
+    nyOpenMs  := nyO
+    dayEndMs := touch ? math.max(lonC, nyC) : (inLondon ? lonC : nyC)
+else if govActive
+    dayHigh := math.max(dayHigh, high), dayLow := math.min(dayLow, low), dayBars := dayBars + 1
+if govClose
+    if not na(dayHigh) and not na(dayLow) and not na(dayEndMs)
+        expBars = int(math.max(1, math.floor((dayEndMs - dayStart) / 60000.0 / barMin)))
+        if dayBars >= int(math.floor(expBars * minSessFrac))
+            array.push(dayRanges, dayHigh - dayLow)
+            if array.size(dayRanges) > asrLen
+                array.shift(dayRanges)
+    dayHigh := na, dayLow := na, dayBars := 0
+    // dayEndMs intentionally NOT cleared — keeps rtClosed valid through NO-SESSION
+
+dayASR   = array.size(dayRanges) > 0 ? array.avg(dayRanges) : na
+dayReady = array.size(dayRanges) >= minReady
+
+gHigh  = dayHigh
+gLow   = dayLow
+gOpen  = dayOpen
+gStart = dayStart
+gASR   = dayASR
+gReady = dayReady
+
+gDur   = not na(dayStart) and not na(dayEndMs) ? (dayEndMs - dayStart) / 60000.0 : na
+
+// realtime awareness — LIVE bar only. Historical bars keep bar-open `time`, so
+// the ASR engine and the alert history stay bar-aligned / non-repainting.
+isLive   = barstate.islast
+nowRef   = isLive ? timenow : time
+rtClosed = isLive and not na(dayEndMs) and timenow >= dayEndMs   // wall clock past close (Fri 17:00 NY, holidays, feed gaps)
+
+// session identity — display / tint / label / payload only (NOT governance)
+isOverlap = inLondon and inNY
+useNY     = inNY and not inLondon
+useLon    = inLondon and not inNY
+sessId  = isOverlap ? 3 : useNY ? 2 : useLon ? 1 : 0
+sesName = isOverlap ? "OVERLAP" : useNY ? "NEW YORK" : useLon ? "LONDON" : "—"
+sesCol  = isOverlap ? cOverlap  : useNY ? cNY        : useLon ? cLondon  : cDim
+
+// ============================================================================
+// 2 · SPATIAL AXIS  +  3 · TEMPORAL AXIS
+// ============================================================================
+hasEnv = govActive and not na(gASR) and not na(gHigh) and not na(gLow)
+
+ceiling  = hasEnv ? gLow  + expMult * gASR : na
+floorL   = hasEnv ? gHigh - expMult * gASR : na
+realRange      = hasEnv ? gHigh - gLow : na
+asrConsumedPct = hasEnv ? realRange / gASR * 100.0 : na
+
+// --- FREEZE AT BREAK -------------------------------------------------------
+// An edge tracks its live anchor (gLow/gHigh) until the first CONFIRMED close
+// through it, then locks for the session — so "+N beyond" measures real travel,
+// not drift from the opposite extreme extending. upSpent/dnSpent latch, reset at
+// open. COSMETIC ONLY: the verdict and alerts stay on the live target test below.
+var float ceilFrz  = na
+var float floorFrz = na
+var bool  upSpent  = false
+var bool  dnSpent  = false
+var bool  expExcUp = false   // EXP-RANGE EXCEEDED latch (up-expansion), confirmed-close gated
+var bool  expExcDn = false   // EXP-RANGE EXCEEDED latch (down-expansion)
+if govOpen
+    ceilFrz  := na
+    floorFrz := na
+    upSpent  := false
+    dnSpent  := false
+    expExcUp := false
+    expExcDn := false
+if barstate.isconfirmed and hasEnv
+    if not upSpent and close >= ceiling
+        upSpent  := true
+        ceilFrz  := ceiling
+    if not dnSpent and close <= floorL
+        dnSpent  := true
+        floorFrz := floorL
+ceilEff  = upSpent ? ceilFrz  : ceiling   // effective upper edge (frozen once spent)
+floorEff = dnSpent ? floorFrz : floorL    // effective lower edge (frozen once spent)
+
+// direction / trade side
+dirLong  = dirMode == "Long" ? true : dirMode == "Short" ? false : dirMode == "H4 Gate" ? gateLong : bool(na)
+isBoth   = dirMode == "Both"
+spaceLong  = ceiling - close
+spaceShort = close - floorL
+spaceDir   = isBoth ? math.min(spaceLong, spaceShort) : (dirLong ? spaceLong : spaceShort)
+
+// temporal (timestamp elapsed, nominal duration -> decays to 0 at close)
+elapsedMin    = hasEnv and not na(gStart) ? (nowRef - gStart) / 60000.0 : na
+remainMin     = hasEnv ? math.max(0.0, gDur - elapsedMin) : na      // LITERAL wall-clock minutes to close
+// Front-loaded accrual: reachable distance isn't linear in clock left. Model
+// cumulative range as elapsed^p, so reachable fraction = 1 - elapsed^p (p=1 = old
+// straight-line clock). Drives the verdict + time gauge; remainMin stays literal.
+elapsedFrac   = hasEnv and not na(gDur) and gDur > 0 ? math.min(1.0, math.max(0.0, elapsedMin / gDur)) : na
+effTimeFrac   = not na(elapsedFrac) ? math.max(0.0, 1.0 - math.pow(elapsedFrac, timeShape)) : na
+timeRemaining = hasEnv and not na(effTimeFrac) ? gASR * effTimeFrac * timeDirFactor : na      // price units
+
+// ============================================================================
+// 4 · COMPOSITE FLAG + MATRIX
+// ============================================================================
+// targetDist uses the TF-anchored ATR (atrTarget), so the verdict reads the same
+// on M5/M15/H1 — the same discipline the band/gauge colours use.
+targetDist = targetMode == "ATR mult" ? atrMult * atrTarget : fixedPips * pipSize
+
+runwayPrice = hasEnv ? math.min(spaceDir, timeRemaining) : na
+// safety scales the TARGET (the thing that must fit), not the runway: low fires
+// when target*safety exceeds room left, so safety>1 = stricter (matches tooltip).
+spaceLow    = hasEnv ? targetDist * safety > spaceDir      : false
+
+// --- NY-AWARE TIME GATE ----------------------------------------------------
+// A continuous London/NY day is BIMODAL — NY open injects a second range burst —
+// but effTimeFrac is one monotonic curve, so it discounts the clock hardest right
+// before NY's range arrives. Suppress timeLow in both windows where a burst is
+// still AHEAD of price:
+//   (1) nyStillAhead — the pre-NY London-only leg of a continuous span (sessTouch);
+//       NY's whole range is still to come. Disjoint days fire normally.
+//   (2) earlyNY — the first earlyNyMin minutes after NY opens, the fill window where
+//       most of the day's orders land. Keyed to the persisted NY-open timestamp,
+//       NOT a clock-% rule, so a real late-session timeLow is never silenced.
+// SPACE is untouched in both — a range-exhausted morning still reads EXHAUSTED; only
+// the time axis (the one mismodelled at the handoff) is gated. Single point: verdict,
+// 2x2, the timeSev clamp and the alerts all inherit timeBurstAhead.
+nyStillAhead   = useLon and sessTouch
+earlyNY        = inNY and not na(nyOpenMs) and (nowRef - nyOpenMs) < earlyNyMin * 60000.0
+timeBurstAhead = nyStillAhead or earlyNY
+timeLowClock = hasEnv ? targetDist * safety > timeRemaining : false   // safety scales the target (see spaceLow) — v15 fix
+timeLow      = timeLowClock and not timeBurstAhead
+lowRunway   = spaceLow or timeLow
+clearState  = hasEnv and not spaceLow and not timeLow
+ready       = hasEnv and gReady and tfOK
+
+// ============================================================================
+// 4b · REGIME — directional efficiency splits ROTATION vs EXPANSION
+// ----------------------------------------------------------------------------
+// The average-range model assumes price reverts within ASR — true on a rotational
+// day, inverted on a trend day that escapes the edge. Efficiency = net displacement
+// (close - open) / realised range, signed: +1 clean run up, 0 chop, -1 run down.
+// EXPANSION needs BOTH a latched edge break (upSpent/dnSpent) AND |eff| >= thresh,
+// so it can't arm until the range is large enough to clear the edge. Symmetric.
+// ============================================================================
+netDisp     = hasEnv and not na(gOpen) ? close - gOpen : na
+effRatio    = hasEnv and not na(realRange) and realRange > 0 ? netDisp / realRange : na   // signed −1..+1
+expUp       = hasEnv and upSpent and not na(effRatio) and effRatio >=  effThresh
+expDn       = hasEnv and dnSpent and not na(effRatio) and effRatio <= -effThresh
+expansion   = expUp or expDn
+rotation    = hasEnv and not expansion
+// expansion benchmark — trend-direction runway, replacing the spent 0.9·ASR edge
+expTargetUp = expUp ? gLow  + expBenchMult * gASR : na
+expTargetDn = expDn ? gHigh - expBenchMult * gASR : na
+expRunwayUp = expUp ? math.max(0.0, expTargetUp - close) / pipSize : na
+expRunwayDn = expDn ? math.max(0.0, close - expTargetDn) / pipSize : na
+// EXP-RANGE EXCEEDED: past the exp-range edge the "N pips to edge" readout floors
+// at 0 and reads stale; flip it to a descriptive "+N beyond". Confirmed-close gated
+// (expExcUp/expExcDn, reset at open) so it never repaints. Kept cyan/neutral on
+// purpose — on a trend day, beyond-typical-reach is a FACT, not a fade.
+if barstate.isconfirmed and hasEnv
+    if expUp and not expExcUp and close >= gLow  + expBenchMult * gASR
+        expExcUp := true
+    if expDn and not expExcDn and close <= gHigh - expBenchMult * gASR
+        expExcDn := true
+expBeyondUp = expUp ? math.max(0.0, close - expTargetUp) / pipSize : na
+expBeyondDn = expDn ? math.max(0.0, expTargetDn - close) / pipSize : na
+expExceeded = (expUp and expExcUp) or (expDn and expExcDn)
+effPctTxt   = not na(effRatio) ? str.tostring(int(math.round(math.abs(effRatio) * 100.0))) + "%" : "—"
+
+statusTxt = not tfOK ? "WRONG TF" : (not govActive or rtClosed) ? "NO SESSION" : not gReady ? "WARMING UP" : expUp ? "EXPANSION ▲ TREND" : expDn ? "EXPANSION ▼ TREND" : clearState ? "RUNWAY CLEAR" : (not spaceLow and timeLow) ? "TIME RUNWAY LOW" : (spaceLow and not timeLow) ? "RANGE EXHAUSTED" : "NO RUNWAY"
+statusCol = (not ready or rtClosed) ? cDim : expansion ? cCyan : clearState ? cGreen : (not spaceLow and timeLow) ? cAmber : (spaceLow and not timeLow) ? cAmber : cRed
+
+// NO-SESSION -> next London open (DST-aware, weekend-skipping). Shown as a STATIC
+// schedule, not a live countdown: Pine only ticks on new bars, so a HH:MM:SS timer
+// would freeze the moment the market closes. The open is a fixed moment, so name it.
+var string nextOpenTxt = na
+if not govActive or rtClosed
+    ly = year(time, londonTz), lm = month(time, londonTz), ld = dayofmonth(time, londonTz)
+    found = false
+    for i = 0 to 7
+        cand = timestamp(londonTz, ly, lm, ld + i, lonOpenH, lonOpenM)
+        dow  = dayofweek(cand, londonTz)
+        if not found and cand > time and dow != dayofweek.saturday and dow != dayofweek.sunday
+            dName = dow == dayofweek.monday ? "Mon" : dow == dayofweek.tuesday ? "Tue" : dow == dayofweek.wednesday ? "Wed" : dow == dayofweek.thursday ? "Thu" : "Fri"
+            nextOpenTxt := "Opens " + dName + " " + (lonOpenH < 10 ? "0" : "") + str.tostring(lonOpenH) + ":" + (lonOpenM < 10 ? "0" : "") + str.tostring(lonOpenM) + " " + tzShort(londonTz)
+            found := true
+else
+    nextOpenTxt := na
+
+// plain-English action line (rookie-facing)
+sessNeed = math.max(0, minReady - array.size(dayRanges))
+actionTxt = not tfOK ? "Use M5–H1 chart" : (not govActive or rtClosed) ? (not na(nextOpenTxt) ? nextOpenTxt : "Wait for London") : not gReady ? "Need " + str.tostring(sessNeed) + " more days" : expUp ? "Trend day · range model off — don't fade" : expDn ? "Trend day · range model off — don't fade" : clearState ? "OK to seek entries" : (not spaceLow and timeLow) ? "Avoid new entries" : (spaceLow and not timeLow) ? "Move likely spent" : "Avoid new entries"
+
+// display metrics
+spaceLeftPctLong  = not hasEnv ? na : rtClosed ? 0.0 : upSpent ? 0.0 : math.max(0.0, math.min(100.0, spaceLong  / (expMult * gASR) * 100.0))
+spaceLeftPctShort = not hasEnv ? na : rtClosed ? 0.0 : dnSpent ? 0.0 : math.max(0.0, math.min(100.0, spaceShort / (expMult * gASR) * 100.0))
+timeLeftPct  = hasEnv and not na(effTimeFrac) ? math.max(0.0, math.min(100.0, effTimeFrac * 100.0)) : na   // effective (concave) runway — matches verdict
+elapsedPct   = hasEnv ? math.min(100.0, elapsedMin / gDur * 100.0) : na                                     // LITERAL elapsed clock — for the alert payload
+runwayPips   = hasEnv ? runwayPrice / pipSize : na
+runwayATR    = hasEnv and atr > 0 ? runwayPrice / atr : na
+asrPips      = not na(gASR) ? gASR / pipSize : na
+runwayPipsDisp = math.max(0.0, nz(runwayPips))
+runwayTxt = expUp ? (expExceeded ? "+" + str.tostring(nz(expBeyondUp), "#") + unitAbb + " beyond exp-edge" : str.tostring(nz(expRunwayUp), "#") + " " + unitTxt + " to exp-range edge") : expDn ? (expExceeded ? "+" + str.tostring(nz(expBeyondDn), "#") + unitAbb + " beyond exp-edge" : str.tostring(nz(expRunwayDn), "#") + " " + unitTxt + " to exp-range edge") : (hasEnv and not na(runwayATR) ? str.tostring(runwayPipsDisp, "#") + " " + unitTxt + " · " + str.tostring(runwayATR, "#.0") + " ATR" : "—")
+// literal wall-clock to session close (compact H:MM) — shown alongside the
+// effective-runway gauge so the front-loading is visible, not hidden.
+clockShortTxt = not na(remainMin) ? str.tostring(int(remainMin / 60)) + ":" + (int(remainMin % 60) < 10 ? "0" : "") + str.tostring(int(remainMin % 60)) : "--:--"
+
+// zone warms cyan -> amber -> red as ASR is consumed
+consumedForCol = nz(asrConsumedPct, 0)
+zoneCol = consumedForCol < 50 ? color.from_gradient(consumedForCol, 0, 50, cCyan, cAmber) : color.from_gradient(consumedForCol, 50, 100, cAmber, cRed)
+
+// ============================================================================
+// 6 · COSMETICS — single-sided exhaustion zone, tints, label, HUD
+// ============================================================================
+// session tints (felt, not seen; overlap brightest = prime runway)
+bgcolor(showTints and not rtClosed and inLondon and not inNY ? color.new(cLondon, 95) : na, title = "London tint")
+bgcolor(showTints and not rtClosed and inNY and not inLondon ? color.new(cNY, 95)     : na, title = "NY tint")
+bgcolor(showTints and not rtClosed and isOverlap             ? color.new(cOverlap, 93) : na, title = "Overlap tint")
+
+// --- exhaustion zones: BOTH edges as warm AVG-RANGE-SPENT bands -------------
+// UPPER = upside (gLow + m*ASR), LOWER = downside (gHigh - m*ASR). Coloured off
+// session-native % (not chart-TF ATR) so they read the same on M5-H1, each by its
+// own leg's room — UPPER matches Space-up, LOWER matches Space-down. Exhaustion
+// edges, NOT support/resistance. (The verdict uses the target-FIT test, the bands
+// use %-of-ASR thresholds — on a marginal day the two can disagree.)
+upSpaceSev = not ready ? 0 : sevOf(spaceLeftPctLong,  spaceGreenPct, spaceRedPct)
+dnSpaceSev = not ready ? 0 : sevOf(spaceLeftPctShort, spaceGreenPct, spaceRedPct)
+timeSevRaw = not ready ? 0 : sevOf(timeLeftPct,       timeGreenPct,  timeRedPct)
+// VERDICT RECONCILIATION: on a ROTATION day, when timeLow fires the Time gauge must
+// not read greener than amber, so its colour agrees with the lit cell instead of
+// contradicting it. The FILL and the "NN% · H:MM" text stay literal — only the hue
+// is clamped. Suppressed in EXPANSION (the exhaustion read is off by design). Time-
+// only: the space gauges drive band colour, so they're left untouched here.
+timeSev    = (ready and not rtClosed and timeLow and rotation) ? math.max(timeSevRaw, 2) : timeSevRaw
+
+upSpaceTone = colOf(upSpaceSev)   // pure space-↑ colour (Space ↑ gauge)
+dnSpaceTone = colOf(dnSpaceSev)   // pure space-↓ colour (Space ↓ gauge)
+timeTone    = colOf(timeSev)      // pure time   colour (Time left gauge)
+
+vColUp = upSpaceTone   // upper band = pure space↑ proxy — matches the Space ↑ gauge
+vColDn = dnSpaceTone   // lower band = pure space↓ proxy — matches the Space ↓ gauge
+pipsUp    = math.max(0.0, spaceLong)  / pipSize
+pipsDn    = math.max(0.0, spaceShort) / pipSize
+
+// break state — latched on first confirmed close through the edge (freeze-at-break)
+brokeUp = upSpent
+brokeDn = dnSpent
+overUp  = math.max(0.0, close - ceilEff) / pipSize   // pips traded BEYOND the frozen upper edge
+overDn  = math.max(0.0, floorEff - close) / pipSize   // pips traded BEYOND the frozen lower edge
+mStr    = str.tostring(expMult)
+labUpTxt = brokeUp ? "▲ AVG RANGE SPENT · +" + str.tostring(overUp, "#") + " " + unitTxt + " beyond " + mStr + "·ASR off low" : "▲ " + str.tostring(pipsUp, "#") + " " + unitTxt + " to AVG-RANGE EDGE (" + mStr + "·ASR off low)"
+labDnTxt = brokeDn ? "▼ AVG RANGE SPENT · +" + str.tostring(overDn, "#") + " " + unitTxt + " beyond " + mStr + "·ASR off high" : "▼ " + str.tostring(pipsDn, "#") + " " + unitTxt + " to AVG-RANGE EDGE (" + mStr + "·ASR off high)"
+
+// CLAMP: if both legs spend and the frozen levels cross (day travelled >~1.8*ASR
+// both ways), ceilEff sits below floorEff and the bands would render swapped —
+// detect it and collapse to one zone below.
+bandsCrossed = upSpent and dnSpent and ceilEff < floorEff
+labBothTxt   = "▲▼ RANGE SPENT BOTH WAYS · ↑+" + str.tostring(overUp, "#") + " ↓+" + str.tostring(overDn, "#") + " " + unitTxt
+
+var box   zBoxC = na
+var box   zBoxF = na
+var line  zLnC  = na
+var line  zLnF  = na
+var label zLabC  = na
+var label zLabF  = na
+var label zLabCT = na   // counter-trend caution label (expansion only)
+
+if barstate.islast
+    box.delete(zBoxC),    box.delete(zBoxF)
+    line.delete(zLnC),    line.delete(zLnF)
+    label.delete(zLabC),  label.delete(zLabF)
+    label.delete(zLabCT)
+    if showZone and ready and not rtClosed and not na(gStart)
+        rightT = int(not na(dayEndMs) ? dayEndMs : time)   // band lives until session close
+        if (expUp or expDn) and showRegime
+// EXPANSION: re-flag the broken edge as AVG-RANGE BROKEN (a reference, no claim it
+// holds), mark the EXPANSION-RANGE EDGE (expBenchMult*ASR) ahead as a typical-reach
+// benchmark, mute the opposite edge to a counter-trend caution zone. All cyan /
+// neutral — reference levels, NOT signals.
+            wallLvl   = expUp ? ceilEff : floorEff
+            tgtLvl    = expUp ? expTargetUp : expTargetDn
+            ctLvl     = expUp ? floorEff : ceilEff
+            tgtPips   = expUp ? expRunwayUp : expRunwayDn
+            arrow     = expUp ? "▲" : "▼"
+            wTop      = expUp ? wallLvl : wallLvl + 0.06 * gASR
+            wBot      = expUp ? wallLvl - 0.06 * gASR : wallLvl
+            cTop      = expUp ? ctLvl + 0.06 * gASR : ctLvl
+            cBot      = expUp ? ctLvl : ctLvl - 0.06 * gASR
+            // broken average-range edge band + line + label (descriptive reference)
+            zBoxC := box.new(gStart, wTop, rightT, wBot, xloc = xloc.bar_time, border_color = na, border_width = 0, bgcolor = color.new(cCyan, 80))
+            zLnC  := line.new(gStart, wallLvl, rightT, wallLvl, xloc = xloc.bar_time, color = color.new(cCyan, 15), width = 2)
+            if showLabels
+                zLabC := label.new(rightT, wallLvl, arrow + " AVG-RANGE BROKEN · trend day", xloc = xloc.bar_time, style = expUp ? label.style_label_lower_left : label.style_label_upper_left, color = color.new(cChart, 100), textcolor = cCyan, size = size.small, textalign = text.align_left)
+            // expansion-range edge line + label (typical reach of a trend day — a benchmark)
+            zLnF  := line.new(gStart, tgtLvl, rightT, tgtLvl, xloc = xloc.bar_time, color = color.new(cCyan, 45), width = 1, style = line.style_dashed)
+            if showLabels
+                expEdgeTxt = expExceeded ? (arrow + " EXP-RANGE EXCEEDED · +" + str.tostring(nz(expUp ? expBeyondUp : expBeyondDn), "#") + " " + unitTxt + " beyond " + str.tostring(expBenchMult) + "·ASR") : (arrow + " " + str.tostring(nz(tgtPips), "#") + " " + unitTxt + " to EXP-RANGE EDGE (" + str.tostring(expBenchMult) + "·ASR)")
+                zLabF := label.new(rightT, tgtLvl, expEdgeTxt, xloc = xloc.bar_time, style = expUp ? label.style_label_upper_left : label.style_label_lower_left, color = color.new(cChart, 100), textcolor = color.new(cCyan, 30), size = size.small, textalign = text.align_left)
+// counter-trend caution zone (muted) — the opposite edge, where a move that FADES
+// the trend would exhaust. Suppressed below ctMinRoom: on a deep trend day this edge
+// converges on then crosses the broken edge, so its room collapses to zero and it
+// carries nothing the trend-side reference doesn't. ctRoom is signed in the counter-
+// trend direction, so the band hides before crossing and never re-appears inverted.
+            ctMinRoom = 0.25 * gASR
+            ctRoom    = expUp ? (wallLvl - ctLvl) : (ctLvl - wallLvl)
+            if ctRoom >= ctMinRoom
+                zBoxF := box.new(gStart, cTop, rightT, cBot, xloc = xloc.bar_time, border_color = na, border_width = 0, bgcolor = color.new(cRed, 90))
+                if showLabels
+                    zLabCT := label.new(rightT, ctLvl, (expUp ? "▼" : "▲") + " counter-trend caution", xloc = xloc.bar_time, style = expUp ? label.style_label_lower_left : label.style_label_upper_left, color = color.new(cChart, 100), textcolor = color.new(cRed, 20), size = size.small, textalign = text.align_left)
+        else if bandsCrossed
+// collapse to one red "spent both ways" zone over the crossed overlap, a line kept
+// at EACH true frozen level so neither overshoot is misrepresented.
+            zBoxC := box.new(gStart, floorEff, rightT, ceilEff, xloc = xloc.bar_time, border_color = na, border_width = 0, bgcolor = color.new(cRed, 80))
+            zLnC  := line.new(gStart, ceilEff,  rightT, ceilEff,  xloc = xloc.bar_time, color = color.new(cRed, 20), width = 1)
+            zLnF  := line.new(gStart, floorEff, rightT, floorEff, xloc = xloc.bar_time, color = color.new(cRed, 20), width = 1)
+            if showLabels
+                zLabC := label.new(rightT, floorEff, labBothTxt, xloc = xloc.bar_time, style = label.style_label_lower_left, color = color.new(cChart, 100), textcolor = cRed, size = size.small, textalign = text.align_left)
+        else
+            // ----- UPPER: upside exhaustion (frozen at break) -----
+            zBoxC := box.new(gStart, ceilEff, rightT, ceilEff - 0.06 * gASR, xloc = xloc.bar_time, border_color = na, border_width = 0, bgcolor = color.new(vColUp, 82))
+            zLnC  := line.new(gStart, ceilEff, rightT, ceilEff, xloc = xloc.bar_time, color = color.new(vColUp, 20), width = 1)
+            if showLabels
+                zLabC := label.new(rightT, ceilEff, labUpTxt, xloc = xloc.bar_time, style = label.style_label_lower_left, color = color.new(cChart, 100), textcolor = vColUp, size = size.small, textalign = text.align_left)
+
+            // ----- LOWER: downside exhaustion (frozen at break) -----
+            zBoxF := box.new(gStart, floorEff + 0.06 * gASR, rightT, floorEff, xloc = xloc.bar_time, border_color = na, border_width = 0, bgcolor = color.new(vColDn, 82))
+            zLnF  := line.new(gStart, floorEff, rightT, floorEff, xloc = xloc.bar_time, color = color.new(vColDn, 20), width = 1)
+            if showLabels
+                zLabF := label.new(rightT, floorEff, labDnTxt, xloc = xloc.bar_time, style = label.style_label_upper_left, color = color.new(cChart, 100), textcolor = vColDn, size = size.small, textalign = text.align_left)
+
+// ---------------------------------------------------------------------------
+// HUD — decision first: verdict + action, then the lit 2x2, then the axes
+// ---------------------------------------------------------------------------
+tSize = tblSize == "Small" ? size.small : tblSize == "Large" ? size.large : size.normal
+cBg   = color.new(cPanelBg, 0)
+gateArrow = isBoth ? "↕" : (dirLong ? "▲" : "▼")   // which direction the matrix is judging
+
+// which matrix cell is live — only during a genuinely live session. Past close
+// (rtClosed) the status reads NO SESSION, so the 2x2 must not show a stale verdict.
+live   = ready and not rtClosed
+aClear = live and rotation and clearState
+aEnd   = live and rotation and (not spaceLow) and timeLow
+aExh   = live and rotation and spaceLow and (not timeLow)
+aNo    = live and rotation and spaceLow and timeLow
+
+cellBg(active, bg)   => active ? color.new(bg, 25) : color.new(cPanelBg, 0)   // bg = the cell's accent colour, not a severity int
+cellTx(active)       => active ? cBright : color.new(cDim, 25)
+cellSz(active)       => active ? size.small : size.tiny
+
+sCol = ready ? (spaceLow ? cRed : cGreen) : cDim
+tCol = timeTone
+
+// spent-leg readout: once an edge breaks, its Space gauge shows live overshoot
+// (+N pips past the frozen edge) instead of a bare 0%. Pre-break: % as before.
+upValTxt = upSpent ? "+" + str.tostring(overUp, "#") + unitAbb : str.tostring(int(math.round(nz(spaceLeftPctLong))))  + "%"
+dnValTxt = dnSpent ? "+" + str.tostring(overDn, "#") + unitAbb : str.tostring(int(math.round(nz(spaceLeftPctShort)))) + "%"
+
+// regime row — ROTATION (neutral) vs EXPANSION ▲/▼ (trend), with the live efficiency read
+regimeTxt = not ready ? "—" : expUp ? "EXPANSION ▲" : expDn ? "EXPANSION ▼" : "ROTATION"
+regimeCol = not ready ? cDim : expansion ? cCyan : cDim
+regimeVal = ready and not na(effRatio) ? "eff " + (effRatio < 0 ? "−" : "") + effPctTxt : "—"
+
+var table hud = na
+if showTable and barstate.islast
+    if na(hud)
+        hud := table.new(position.top_right, 3, 12, bgcolor = color.new(cPanelBg, 0), frame_color = color.new(cBright, 92), frame_width = 1, border_color = color.new(cBright, 94), border_width = 1)
+
+    // row 0 — title
+    table.cell(hud, 0, 0, "RUNWAY", text_color = cDim,  text_size = size.small, text_halign = text.align_left,  bgcolor = cBg)
+    table.cell(hud, 1, 0, "",       text_color = cDim,  text_size = size.small, bgcolor = cBg)
+    table.cell(hud, 2, 0, rtClosed ? "—" : sesName,  text_color = rtClosed ? cDim : sesCol, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 1 — VERDICT (status) + ACTION (what to do)
+    table.cell(hud, 0, 1, "●",        text_color = statusCol, text_size = size.large, text_halign = text.align_left,  bgcolor = cBg)
+    table.cell(hud, 1, 1, statusTxt,  text_color = statusCol, text_size = tSize,      text_halign = text.align_left,  bgcolor = cBg)
+    table.cell(hud, 2, 1, actionTxt,  text_color = cBright,   text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 2 — REGIME (rotation vs expansion) — gates whether the 2x2 below applies
+    table.cell(hud, 0, 2, "Regime", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 2, regimeTxt, text_color = regimeCol, text_size = size.small, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 2, 2, regimeVal, text_color = regimeCol, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 3 — matrix column headers
+    table.cell(hud, 0, 3, gateArrow,  text_color = cDim, text_size = size.tiny, text_halign = text.align_center, bgcolor = cBg)
+    table.cell(hud, 1, 3, "TIME OK",  text_color = cDim, text_size = size.tiny, text_halign = text.align_center, bgcolor = cBg)
+    table.cell(hud, 2, 3, "TIME LOW", text_color = cDim, text_size = size.tiny, text_halign = text.align_center, bgcolor = cBg)
+
+    // row 4 — SPACE OK : CLEAR | TIME LOW
+    table.cell(hud, 0, 4, "SPACE\nOK", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 4, "CLEAR",     text_color = cellTx(aClear), text_size = cellSz(aClear), text_halign = text.align_center, bgcolor = cellBg(aClear, cGreen))
+    table.cell(hud, 2, 4, "TIME LOW",  text_color = cellTx(aEnd),   text_size = cellSz(aEnd),   text_halign = text.align_center, bgcolor = cellBg(aEnd,   cAmber))
+
+    // row 5 — SPACE LOW : EXHAUSTED | NO RUNWAY
+    table.cell(hud, 0, 5, "SPACE\nTIGHT", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 5, "EXHAUSTED",  text_color = cellTx(aExh), text_size = cellSz(aExh), text_halign = text.align_center, bgcolor = cellBg(aExh, cAmber))
+    table.cell(hud, 2, 5, "NO RUNWAY",  text_color = cellTx(aNo),  text_size = cellSz(aNo),  text_halign = text.align_center, bgcolor = cellBg(aNo,  cRed))
+
+    // row 6 — SPACE ↑ (long leg) — colour matches the UPPER chart band
+    table.cell(hud, 0, 6, "Space ↑", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 6, gaugeStr(nz(spaceLeftPctLong)), text_color = upSpaceTone, text_size = size.small, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 2, 6, upValTxt, text_color = upSpaceTone, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 7 — SPACE ↓ (short leg) — colour matches the LOWER chart band
+    table.cell(hud, 0, 7, "Space ↓", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 7, gaugeStr(nz(spaceLeftPctShort)), text_color = dnSpaceTone, text_size = size.small, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 2, 7, dnValTxt, text_color = dnSpaceTone, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 8 — time gauge + clock
+    table.cell(hud, 0, 8, "Time runway", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 8, gaugeStr(nz(timeLeftPct)), text_color = tCol, text_size = size.small, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 2, 8, str.tostring(int(math.round(nz(timeLeftPct)))) + "% · " + clockShortTxt, text_color = tCol, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 9 — runway
+    table.cell(hud, 0, 9, "Runway", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 9, "",       text_color = cDim, text_size = size.tiny, bgcolor = cBg)
+    table.cell(hud, 2, 9, runwayTxt, text_color = cBright, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 10 — ASR consumed
+    table.cell(hud, 0, 10, "ASR used", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 10, "",         text_color = cDim, text_size = size.tiny, bgcolor = cBg)
+    table.cell(hud, 2, 10, not na(asrConsumedPct) ? str.tostring(int(math.round(asrConsumedPct))) + "%" : "—", text_color = ready ? zoneCol : cDim, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+    // row 11 — day ASR context
+    table.cell(hud, 0, 11, "Day ASR(" + str.tostring(asrLen) + ")", text_color = cDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cBg)
+    table.cell(hud, 1, 11, "", text_color = cDim, text_size = size.tiny, bgcolor = cBg)
+    table.cell(hud, 2, 11, not na(asrPips) ? str.tostring(asrPips, "#") + " " + unitTxt : "—", text_color = cDim, text_size = size.small, text_halign = text.align_right, bgcolor = cBg)
+
+// --- author watermark (subtle, always on; bottom-right so it never collides with the HUD) ---
+var table wm = na
+if barstate.islast
+    if na(wm)
+        wm := table.new(position.bottom_right, 1, 1, bgcolor = color.new(cPanelBg, 100))
+    table.cell(wm, 0, 0, "SlatinaTrades", text_color = color.new(cDim, 35), text_size = size.tiny, text_halign = text.align_right)
+
+// ============================================================================
+// 5 · ALERTS  (named hidden plots carry the live numbers into the message)
+// ----------------------------------------------------------------------------
+// RUNWAY CLEAR = room left in both range and time (a green light to look for an
+// entry, not a buy/sell). LOW RUNWAY = out of range and/or time (avoid new entries,
+// manage open ones). Both ROTATION-only; EXPANSION fires its own flag. The messages
+// below spell this out in full. Set on an M5-H1 chart, "Once Per Bar Close".
+// ============================================================================
+plot(hasEnv ? runwayPips : na,        "RUNWAY_PIPS",         display = display.none)
+plot(asrConsumedPct,                  "ASR_CONSUMED_PCT",    display = display.none)
+plot(elapsedPct,                      "SESSION_ELAPSED_PCT", display = display.none)
+plot(lowRunway ? 1 : 0,               "LOW_RUNWAY",          display = display.none)
+plot(sessId,                          "SESSION_ID",          display = display.none)
+plot(isBoth ? na : (dirLong ? 1 : -1), "H4_BIAS",            display = display.none)
+plot(expUp ? 1 : expDn ? -1 : 0,      "REGIME",              display = display.none)   // 1 expUp · −1 expDn · 0 rotation
+plot(not na(effRatio) ? effRatio * 100.0 : na, "EFFICIENCY_PCT", display = display.none)
+
+active     = ready and govActive and not rtClosed
+// Clear / Low fire only in ROTATION — the range-exhaustion verdict is meaningless
+// (and backwards) on a trend day. EXPANSION gets its own edge-triggered alert.
+rotLow     = active and rotation and lowRunway
+rotClear   = active and rotation and clearState
+expActive  = active and expansion
+lowEntry   = rotLow   and not rotLow[1]
+clearEntry = rotClear and not rotClear[1]
+expEntry   = expActive and not expActive[1]
+
+alertcondition(clearEntry, "Runway Clear", 'RUNWAY CLEAR — {{ticker}} {{interval}}: the session has room left in range and time for a move to reach target. Green light to look for an entry (this is not a buy/sell or direction signal). · runway {{plot("RUNWAY_PIPS")}} pips · ASR used {{plot("ASR_CONSUMED_PCT")}}% · elapsed {{plot("SESSION_ELAPSED_PCT")}}%')
+alertcondition(lowEntry,   "Low Runway",   'LOW RUNWAY — {{ticker}} {{interval}}: the session is running out of range and/or time. A fresh trade likely cannot reach target — avoid new entries and manage open ones. · runway {{plot("RUNWAY_PIPS")}} pips · ASR used {{plot("ASR_CONSUMED_PCT")}}% · elapsed {{plot("SESSION_ELAPSED_PCT")}}%')
+alertcondition(expEntry,   "Expansion Day", 'EXPANSION — {{ticker}} {{interval}}: the session has broken its average-range edge with strong one-way conviction (a trend day), so the range-exhaustion read does NOT apply. This is a regime flag, not a trade signal: do not fade the move with this range tool. The expansion-range edge marks the typical reach of a trend day. · efficiency {{plot("EFFICIENCY_PCT")}}% · ASR used {{plot("ASR_CONSUMED_PCT")}}% · elapsed {{plot("SESSION_ELAPSED_PCT")}}%')

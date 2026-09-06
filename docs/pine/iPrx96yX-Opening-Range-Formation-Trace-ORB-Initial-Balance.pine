@@ -1,0 +1,2527 @@
+//@version=6
+// Copyright (c) SG_Group
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// https://mozilla.org/MPL/2.0/
+//
+// Opening Range Formation Trace - ORB & Initial Balance
+// A non-directional research indicator for studying how an opening range forms,
+// locks, and is subsequently accepted, rejected, or traversed.
+
+// Visualizes a configurable opening range and preserves its formation path as
+// cumulative time-slice envelopes. Completed ranges are classified from
+// transparent measurements, then tracked through neutral post-range events.
+// English is the default chart language; Japanese chart text is selectable.
+// Revision 1.6: fresh-editor distribution. Runtime calculations, chart objects, colors, and the visual research panel are unchanged from Revision 1.5.
+indicator(
+     "Opening Range Formation Trace - ORB & Initial Balance",
+     overlay = true,
+     behind_chart = false,
+     max_boxes_count = 500,
+     max_lines_count = 500,
+     max_labels_count = 500
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Constants
+//──────────────────────────────────────────────────────────────────────────────
+const int MS_MINUTE = 60 * 1000
+const int MS_HOUR   = 60 * MS_MINUTE
+const int MS_DAY    = 24 * MS_HOUR
+
+const int PANEL_METER_SEGMENTS = 6
+const int PANEL_CONTENT_LAST_COLUMN = 8
+const int PANEL_SPACER_COLUMN = 9
+const int PANEL_BOTTOM_SPACER_ROW = 10
+
+// Custom integer text sizes provide a controlled step between Pine's fixed
+// tiny/small/normal presets. The comfortable default is intentionally only
+// one step larger than v1.4, preserving the panel's compact visual identity.
+const int PANEL_MICRO_COMPACT = 8
+const int PANEL_BASE_COMPACT = 9
+const int PANEL_VALUE_COMPACT = 10
+const int PANEL_ICON_COMPACT = 12
+
+const int PANEL_MICRO_COMFORTABLE = 9
+const int PANEL_BASE_COMFORTABLE = 10
+const int PANEL_VALUE_COMFORTABLE = 12
+const int PANEL_ICON_COMFORTABLE = 14
+
+const int PANEL_MICRO_LARGE = 10
+const int PANEL_BASE_LARGE = 12
+const int PANEL_VALUE_LARGE = 14
+const int PANEL_ICON_LARGE = 16
+
+const string GROUP_GENERAL   = "1. General / 全般"
+const string GROUP_SESSION   = "2. Opening range / オープニングレンジ"
+const string GROUP_TRACE     = "3. Formation trace / 形成トレース"
+const string GROUP_CLASSIFY  = "4. Formation classification / 形成分類"
+const string GROUP_EVIDENCE  = "5. Post-range evidence / レンジ後の検証"
+const string GROUP_VISUAL    = "6. Visual design / 表示設計"
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+// Every input uses display.none so only the indicator name appears in the
+// chart status line. Inputs remain editable in the Settings dialog.
+//──────────────────────────────────────────────────────────────────────────────
+string languageInput = input.string(
+     "English",
+     "Language / 言語",
+     options = ["English", "日本語"],
+     group = GROUP_GENERAL,
+     tooltip = "Changes chart labels and notices. Input names remain bilingual.\nチャート上のラベルと注意表示を切り替えます。入力名は日英併記です。",
+     display = display.none
+)
+
+string precisionInput = input.timeframe(
+     "1",
+     "Intrabar sampling / 下位足サンプリング",
+     options = ["1", "3", "5", "15"],
+     group = GROUP_GENERAL,
+     tooltip = "Lower sampling improves boundary and chronology resolution when the symbol provides it. The script automatically falls back to the chart timeframe when the selected sampling timeframe is higher than the chart timeframe. On second charts, the chart timeframe is used.\n下位足ほど境界と時系列の解像度が高まります。選択足がチャート足より上位の場合はチャート足へ自動退避し、秒足チャートではチャート足を使用します。",
+     display = display.none
+)
+
+string historyRenderInput = input.string(
+     "Visible chart (adaptive)",
+     "Historical rendering / 過去描画方式",
+     options = ["Visible chart (adaptive)", "Most recent sessions"],
+     group = GROUP_GENERAL,
+     tooltip = "Visible chart recalculates the visual layer when you scroll or zoom, so historical sessions inside the viewport are reconstructed instead of retaining only the newest sessions. Most recent sessions preserves the traditional live-first rolling window.\n表示中チャートはスクロールやズーム時に描画層を再計算し、最新セッションだけでなく表示範囲内の過去セッションを再構築します。Most recent sessionsは従来のライブ重視ローリング表示です。",
+     display = display.none
+)
+
+int sessionsToKeepInput = input.int(
+     30,
+     "Maximum rendered sessions / 最大描画セッション数",
+     minval = 1,
+     maxval = 40,
+     group = GROUP_GENERAL,
+     tooltip = "Caps drawing objects while retaining full calculations. In adaptive mode, the newest sessions intersecting the visible window are retained when the window contains more sessions than this budget.\n計算自体は維持したまま描画オブジェクト数を制限します。適応表示で表示範囲内のセッション数が上限を超える場合、表示範囲内の新しいセッションを優先します。",
+     display = display.none
+)
+
+int intrabarHistoryBarsInput = input.int(
+     100000,
+     "Intrabar history request / 下位足履歴リクエスト",
+     options = [50000, 100000, 125000, 200000],
+     group = GROUP_GENERAL,
+     tooltip = "Requests this many lower-timeframe bars, subject to the user's TradingView plan and available symbol history. Larger values improve precise historical coverage but consume more resources.\nTradingViewプランと銘柄の利用可能履歴の範囲内で下位足を取得します。値を大きくすると精密な過去範囲が広がりますが、使用資源も増えます。",
+     display = display.none
+)
+
+bool confirmedChartFallbackInput = input.bool(
+     true,
+     "Confirmed chart-bar fallback beyond intrabar history / 下位足履歴外で確定チャート足を使用",
+     group = GROUP_GENERAL,
+     tooltip = "When lower-timeframe arrays are unavailable on older confirmed bars, the script can continue with the chart timeframe if that timeframe can fit inside the opening-range duration. Such sessions remain visible and are explicitly tagged as coarse-resolution research. Realtime calculations continue to use completed intrabars only.\n古い確定バーで下位足配列を取得できない場合、チャート足が形成時間内に収まるときはチャート足で研究を継続します。該当セッションは粗い解像度として明示され、リアルタイム計算は引き続き確定済み下位足のみを使用します。",
+     display = display.none
+)
+
+int widthContextInput = input.int(
+     20,
+     "Width percentile context / 幅順位の参照数",
+     minval = 5,
+     maxval = 100,
+     group = GROUP_GENERAL,
+     tooltip = "Compares the current opening-range width with prior complete ranges from the same configured session. At least five prior observations are required before a percentile is shown.\n同じ設定の過去の完全なレンジ幅と比較します。順位表示には最低5件の過去観測が必要です。",
+     display = display.none
+)
+
+string widthBasisInput = input.string(
+     "Percent of opening price",
+     "Width comparison basis / 幅比較の基準",
+     options = ["Percent of opening price", "Raw price"],
+     group = GROUP_GENERAL,
+     tooltip = "Percent of opening price improves comparability when the instrument's price level changes. Raw price preserves the instrument's native units.\n始値比率は価格水準が変化した期間の比較性を高めます。Raw priceは銘柄固有の価格単位を維持します。",
+     display = display.none
+)
+
+string presetInput = input.string(
+     "US Equities 09:30 New York",
+     "Session preset / セッションプリセット",
+     options = [
+         "US Equities 09:30 New York",
+         "Tokyo Cash 09:00 Tokyo",
+         "London Cash 08:00 London",
+         "CME Equity RTH 08:30 Chicago",
+         "Exchange Time 09:30",
+         "Custom"
+     ],
+     group = GROUP_SESSION,
+     tooltip = "Presets are editable reference anchors, not holiday or early-close calendars. Select Custom to enter another IANA timezone and opening time.\nプリセットは編集可能な基準時刻であり、祝日や短縮取引日を自動判定するカレンダーではありません。",
+     display = display.none
+)
+
+bool customPreset = presetInput == "Custom"
+
+string customTimezoneInput = input.string(
+     "America/New_York",
+     "Custom IANA timezone / カスタムIANA時間帯",
+     group = GROUP_SESSION,
+     active = customPreset,
+     tooltip = "Examples: America/New_York, Europe/London, Asia/Tokyo, Australia/Sydney.\n例: America/New_York, Europe/London, Asia/Tokyo, Australia/Sydney",
+     display = display.none
+)
+
+int customHourInput = input.int(
+     9,
+     "Custom open hour / カスタム開始時",
+     minval = 0,
+     maxval = 23,
+     group = GROUP_SESSION,
+     active = customPreset,
+     inline = "customOpen",
+     display = display.none
+)
+
+int customMinuteInput = input.int(
+     30,
+     "Minute / 分",
+     minval = 0,
+     maxval = 59,
+     group = GROUP_SESSION,
+     active = customPreset,
+     inline = "customOpen",
+     display = display.none
+)
+
+int rangeMinutesInput = input.int(
+     15,
+     "Range duration (minutes) / レンジ形成時間（分）",
+     minval = 1,
+     maxval = 240,
+     group = GROUP_SESSION,
+     display = display.none
+)
+
+int projectionMinutesInput = input.int(
+     390,
+     "Reference projection (minutes) / 参照延長時間（分）",
+     minval = 15,
+     maxval = 1440,
+     group = GROUP_SESSION,
+     tooltip = "How long the completed range remains projected from the session open. Values shorter than the range duration are automatically raised to the range duration.\n寄り付きからレンジを参照表示する時間です。形成時間より短い場合は形成時間まで自動補正されます。",
+     display = display.none
+)
+
+string dayMaskInput = input.string(
+     "23456",
+     "Active day mask / 有効曜日マスク",
+     group = GROUP_SESSION,
+     tooltip = "TradingView day numbers: 1 Sunday, 2 Monday, ... 7 Saturday. Default 23456 = Monday-Friday.\nTradingViewの曜日番号: 1=日曜、2=月曜、... 7=土曜。既定値23456は月曜から金曜です。",
+     display = display.none
+)
+
+bool showMainBoxInput = input.bool(
+     true,
+     "Show opening-range box / オープニングレンジボックス",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+bool showTraceInput = input.bool(
+     true,
+     "Show cumulative formation trace / 累積形成トレース",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+int traceSlicesInput = input.int(
+     4,
+     "Trace time slices / トレース時間分割",
+     minval = 2,
+     maxval = 8,
+     group = GROUP_TRACE,
+     active = showTraceInput,
+     tooltip = "Each slice preserves the cumulative high-low envelope reached by that elapsed-time checkpoint. It is not an independent mini-range.\n各分割は、その時点までに到達した累積高値・安値を保存します。独立した小レンジではありません。",
+     display = display.none
+)
+
+bool showHighLowInput = input.bool(
+     true,
+     "Show locked high and low / 確定高値・安値",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+bool showMidpointInput = input.bool(
+     true,
+     "Show midpoint / 中央値",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+bool showOpenInput = input.bool(
+     false,
+     "Show session open / セッション始値",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+bool showEquilibriumInput = input.bool(
+     true,
+     "Show research equilibrium / 研究用均衡値",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+string equilibriumModeInput = input.string(
+     "Volume-weighted mean",
+     "Equilibrium method / 均衡値の方式",
+     options = ["Volume-weighted mean", "Mean price", "Midpoint", "Opening price"],
+     group = GROUP_TRACE,
+     active = showEquilibriumInput,
+     tooltip = "Volume-weighted mean uses sampled HLC3 weighted by available volume. If usable volume is unavailable, it falls back to the arithmetic mean of sampled HLC3.\n出来高加重平均はサンプルHLC3を利用可能な出来高で加重します。利用可能な出来高がない場合はHLC3単純平均へ退避します。",
+     display = display.none
+)
+
+bool showFormationLabelInput = input.bool(
+     true,
+     "Show completed formation label / 完成時の形成ラベル",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+string formationLabelDetailInput = input.string(
+     "Compact",
+     "Completed formation label detail / 完成形成ラベル詳細",
+     options = ["Compact", "Detailed"],
+     group = GROUP_TRACE,
+     active = showFormationLabelInput,
+     tooltip = "Compact keeps the chart readable and places the complete metrics in the label tooltip. Detailed keeps the multi-line research text visible on the chart.\nCompactはチャート上を短く保ち、完全な指標をラベルのツールチップへ収めます。Detailedは複数行の研究情報を常時表示します。",
+     display = display.none
+)
+
+bool showExtremeTimesInput = input.bool(
+     false,
+     "Show final extreme times / 最終高安の時刻",
+     group = GROUP_TRACE,
+     display = display.none
+)
+
+float driveEfficiencyInput = input.float(
+     0.55,
+     "Drive: minimum path efficiency / ドライブ: 最低経路効率",
+     minval = 0.05,
+     maxval = 1.00,
+     step = 0.05,
+     group = GROUP_CLASSIFY,
+     display = display.none
+)
+
+float edgeCloseInput = input.float(
+     0.72,
+     "Drive: close-location edge / ドライブ: 終値端部基準",
+     minval = 0.50,
+     maxval = 0.95,
+     step = 0.01,
+     group = GROUP_CLASSIFY,
+     tooltip = "Upper drive requires close location at or above this value. Lower drive uses 1 minus this value.\n上側ドライブは終値位置がこの値以上、下側ドライブは1からこの値を引いた水準以下を条件とします。",
+     display = display.none
+)
+
+float skewThresholdInput = input.float(
+     0.18,
+     "Directional expansion skew / 方向別拡張偏り",
+     minval = 0.00,
+     maxval = 0.80,
+     step = 0.02,
+     group = GROUP_CLASSIFY,
+     display = display.none
+)
+
+float rotationEfficiencyInput = input.float(
+     0.32,
+     "Rotation: maximum efficiency / ローテーション: 最大効率",
+     minval = 0.05,
+     maxval = 0.70,
+     step = 0.01,
+     group = GROUP_CLASSIFY,
+     display = display.none
+)
+
+float lateShareInput = input.float(
+     0.35,
+     "Late expansion: minimum share / 後半拡張: 最低比率",
+     minval = 0.05,
+     maxval = 0.90,
+     step = 0.05,
+     group = GROUP_CLASSIFY,
+     tooltip = "Share of the final width added after the halfway checkpoint.\n最終レンジ幅のうち、形成時間の後半に追加された比率です。",
+     display = display.none
+)
+
+float earlyCheckpointInput = input.float(
+     25.0,
+     "Early checkpoint (% of duration) / 初動チェックポイント（形成時間比）",
+     minval = 10.0,
+     maxval = 50.0,
+     step = 5.0,
+     group = GROUP_CLASSIFY,
+     tooltip = "Defines the independent early checkpoint used by the formation classifier. It does not change the number of visual trace slices.\n形成分類で使う独立した初動チェックポイントです。表示トレースの分割数は変更しません。",
+     display = display.none
+)
+
+float earlyShareMaxInput = input.float(
+     0.72,
+     "Two-sided: maximum early-width share / 両側拡張: 初動幅の最大比率",
+     minval = 0.10,
+     maxval = 1.00,
+     step = 0.02,
+     group = GROUP_CLASSIFY,
+     tooltip = "Maximum share of the final range already present at the independent early checkpoint.\n独立した初動チェックポイント時点で、最終レンジ幅のうち既に形成済みである比率の上限です。",
+     display = display.none
+)
+
+bool evidenceEnabledInput = input.bool(
+     true,
+     "Track post-range evidence / レンジ後の検証を追跡",
+     group = GROUP_EVIDENCE,
+     display = display.none
+)
+
+string evidenceBasisInput = input.string(
+     "Close",
+     "Departure evidence basis / 離脱判定基準",
+     options = ["Close", "Wick"],
+     group = GROUP_EVIDENCE,
+     active = evidenceEnabledInput,
+     display = display.none
+)
+
+float departureBufferInput = input.float(
+     0.05,
+     "Departure buffer (% of range) / 離脱余白（レンジ比）",
+     minval = 0.00,
+     maxval = 1.00,
+     step = 0.01,
+     group = GROUP_EVIDENCE,
+     active = evidenceEnabledInput,
+     tooltip = "0.05 means 5% of the completed opening-range width, not 0.05%.\n0.05は完成レンジ幅の5%を意味し、0.05%ではありません。",
+     display = display.none
+)
+
+int confirmationSamplesInput = input.int(
+     2,
+     "Consecutive evidence samples / 連続確認サンプル",
+     minval = 1,
+     maxval = 10,
+     group = GROUP_EVIDENCE,
+     active = evidenceEnabledInput,
+     display = display.none
+)
+
+float touchBandInput = input.float(
+     0.02,
+     "Edge-test band (% of range) / 端部テスト帯（レンジ比）",
+     minval = 0.00,
+     maxval = 0.25,
+     step = 0.01,
+     group = GROUP_EVIDENCE,
+     active = evidenceEnabledInput,
+     display = display.none
+)
+
+bool showEvidenceLabelsInput = input.bool(
+     true,
+     "Show evidence event labels / 検証イベントラベル",
+     group = GROUP_EVIDENCE,
+     active = evidenceEnabledInput,
+     display = display.none
+)
+
+string researchCardModeInput = input.string(
+     "Compact",
+     "Research card / 研究カード",
+     options = ["Compact", "Detailed", "Off"],
+     group = GROUP_EVIDENCE,
+     display = display.none
+)
+
+color upperColorInput = input.color(
+     color.rgb(0, 229, 255),
+     "Upper expansion / 上側拡張",
+     group = GROUP_VISUAL,
+     inline = "colors1",
+     display = display.none
+)
+
+color lowerColorInput = input.color(
+     color.rgb(255, 45, 117),
+     "Lower expansion / 下側拡張",
+     group = GROUP_VISUAL,
+     inline = "colors1",
+     display = display.none
+)
+
+color neutralColorInput = input.color(
+     color.rgb(196, 214, 255),
+     "Balanced / 中立",
+     group = GROUP_VISUAL,
+     inline = "colors2",
+     display = display.none
+)
+
+color twoSidedColorInput = input.color(
+     color.rgb(255, 215, 0),
+     "Two-sided and transition / 両側拡張・遷移",
+     group = GROUP_VISUAL,
+     inline = "colors2",
+     display = display.none
+)
+
+int mainTransparencyInput = input.int(
+     88,
+     "Main box transparency / メインボックス透明度",
+     minval = 70,
+     maxval = 100,
+     group = GROUP_VISUAL,
+     inline = "alpha",
+     display = display.none
+)
+
+int traceTransparencyInput = input.int(
+     78,
+     "Trace transparency / トレース透明度",
+     minval = 55,
+     maxval = 100,
+     group = GROUP_VISUAL,
+     inline = "alpha",
+     display = display.none
+)
+
+int lineWidthInput = input.int(
+     2,
+     "Boundary line width / 境界線の太さ",
+     minval = 1,
+     maxval = 4,
+     group = GROUP_VISUAL,
+     display = display.none
+)
+
+string boundaryLineStyleInput = input.string(
+     "Solid",
+     "Boundary line style / 境界線スタイル",
+     options = ["Solid", "Dashed", "Dotted"],
+     group = GROUP_VISUAL,
+     display = display.none
+)
+
+string referenceLineStyleInput = input.string(
+     "Dashed",
+     "Reference line style / 参照線スタイル",
+     options = ["Solid", "Dashed", "Dotted"],
+     group = GROUP_VISUAL,
+     display = display.none
+)
+
+string labelSizeInput = input.string(
+     "Small",
+     "Chart label size / チャートラベルサイズ",
+     options = ["Tiny", "Small", "Normal"],
+     group = GROUP_VISUAL,
+     display = display.none
+)
+
+string eventAnnotationModeInput = input.string(
+     "Compact markers",
+     "Evidence annotation style / 検証注釈スタイル",
+     options = ["Compact markers", "Full callouts"],
+     group = GROUP_VISUAL,
+     active = showEvidenceLabelsInput,
+     tooltip = "Compact markers use A↑, A↓, R and X on the chart while preserving the full event description and time in tooltips. Full callouts show complete text directly on the chart.\nCompact markersはチャート上をA↑、A↓、R、Xで簡潔にし、完全なイベント説明と時刻はツールチップに保持します。Full calloutsは全文をチャートへ表示します。",
+     display = display.none
+)
+
+string researchPanelPositionInput = input.string(
+     "Bottom right",
+     "Visual research panel position / ビジュアル研究パネル位置",
+     options = ["Bottom right", "Bottom left", "Top right", "Top left"],
+     group = GROUP_VISUAL,
+     tooltip = "Bottom right is the high-visibility default. The panel includes a transparent right clearance column and a bottom clearance row, keeping it away from the price-scale labels and time axis.\n右下を高視認性の既定位置とします。透明な右余白列と下余白行を備え、価格スケールのラベルと時間軸から少し離して表示します。",
+     display = display.none
+)
+
+string researchPanelScaleInput = input.string(
+     "Comfortable",
+     "Visual research panel scale / ビジュアル研究パネル倍率",
+     options = ["Compact", "Comfortable", "Large"],
+     group = GROUP_VISUAL,
+     tooltip = "Comfortable is the slightly enlarged default. Compact reproduces the tighter v1.4 density, while Large provides additional readability on high-resolution displays. This setting affects only the fixed research panel and does not change chart annotations or calculations.\nComfortableを少し拡大した既定値とします。Compactはv1.4に近い密度、Largeは高解像度画面向けにさらに視認性を高めます。固定研究パネルだけに作用し、チャート注釈や計算は変更しません。",
+     display = display.none
+)
+
+float annotationSpacingInput = input.float(
+     0.25,
+     "Annotation lane spacing (range multiple) / 注釈レーン間隔（レンジ倍率）",
+     minval = 0.05,
+     maxval = 1.00,
+     step = 0.05,
+     group = GROUP_VISUAL,
+     tooltip = "Primary spacing based on each completed opening-range width. The final layout also applies a visible-chart-span floor so narrow ranges do not create unreadably tight lanes.\n各完成レンジ幅を基準とする主間隔です。最終配置では表示中チャートの価格幅を基準とする最低間隔も適用し、狭いレンジで注釈が密集することを防ぎます。",
+     display = display.none
+)
+
+float visibleLaneFloorInput = input.float(
+     2.75,
+     "Minimum lane spacing (% of visible price span) / 最低レーン間隔（表示価格幅比）",
+     minval = 0.25,
+     maxval = 10.0,
+     step = 0.25,
+     group = GROUP_VISUAL,
+     tooltip = "Provides a zoom-aware minimum vertical separation. The script reflows all retained annotations whenever the visible chart window changes.\nズーム状態に応じた最低縦間隔です。表示範囲が変わるたびに、保持中の全注釈を再配置します。",
+     display = display.none
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Helpers
+//──────────────────────────────────────────────────────────────────────────────
+f_localText(bool japanese, string englishText, string japaneseText) =>
+    japanese ? japaneseText : englishText
+
+f_lineStyle(string styleText) =>
+    styleText == "Solid" ? line.style_solid : styleText == "Dotted" ? line.style_dotted : line.style_dashed
+
+f_labelSize(string sizeText) =>
+    sizeText == "Tiny" ? size.tiny : sizeText == "Normal" ? size.normal : size.small
+
+f_panelMicroSize(string scaleText) =>
+    scaleText == "Compact" ? PANEL_MICRO_COMPACT : scaleText == "Large" ? PANEL_MICRO_LARGE : PANEL_MICRO_COMFORTABLE
+
+f_panelBaseSize(string scaleText) =>
+    scaleText == "Compact" ? PANEL_BASE_COMPACT : scaleText == "Large" ? PANEL_BASE_LARGE : PANEL_BASE_COMFORTABLE
+
+f_panelValueSize(string scaleText) =>
+    scaleText == "Compact" ? PANEL_VALUE_COMPACT : scaleText == "Large" ? PANEL_VALUE_LARGE : PANEL_VALUE_COMFORTABLE
+
+f_panelIconSize(string scaleText) =>
+    scaleText == "Compact" ? PANEL_ICON_COMPACT : scaleText == "Large" ? PANEL_ICON_LARGE : PANEL_ICON_COMFORTABLE
+
+f_tablePosition(string positionText) =>
+    (
+         positionText == "Top left" ? position.top_left :
+         positionText == "Bottom right" ? position.bottom_right :
+         positionText == "Bottom left" ? position.bottom_left :
+         position.top_right
+    )
+
+f_contrastText(color backgroundColor) =>
+    float perceivedLuminance = (
+         0.299 * color.r(backgroundColor) +
+         0.587 * color.g(backgroundColor) +
+         0.114 * color.b(backgroundColor)
+    )
+    perceivedLuminance >= 150.0 ? color.rgb(7, 15, 28) : color.white
+
+f_drawPanelMeter(
+     table panel,
+     int row,
+     float normalizedValue,
+     color activeColor,
+     color baseBackground,
+     bool visible
+) =>
+    float boundedValue = na(normalizedValue) ? 0.0 : math.max(0.0, math.min(1.0, normalizedValue))
+    int filledSegments = visible and not na(normalizedValue) ? int(math.round(boundedValue * PANEL_METER_SEGMENTS)) : 0
+    for segment = 0 to PANEL_METER_SEGMENTS - 1
+        bool segmentActive = segment < filledSegments
+        table.cell(
+             panel,
+             segment + 3,
+             row,
+             visible ? "■" : "",
+             text_color = segmentActive ? activeColor : color.new(chart.fg_color, 84),
+             text_halign = text.align_center,
+             text_valign = text.align_center,
+             text_size = f_panelBaseSize(researchPanelScaleInput),
+             text_formatting = text.format_bold,
+             bgcolor = visible ? baseBackground : color.new(chart.bg_color, 100)
+        )
+    0
+
+f_annotationStep(float rangeWidth, float visibleSpan) =>
+    float sizeScale = labelSizeInput == "Tiny" ? 0.85 : labelSizeInput == "Normal" ? 1.25 : 1.00
+    float widthBasedStep = math.max(nz(rangeWidth, syminfo.mintick), syminfo.mintick) * annotationSpacingInput
+    float visibleBasedFloor = na(visibleSpan) ? 0.0 : math.max(visibleSpan, syminfo.mintick) * visibleLaneFloorInput / 100.0
+    float tickBasedFloor = syminfo.mintick * 6.0
+    math.max(math.max(widthBasedStep, visibleBasedFloor), tickBasedFloor) * sizeScale
+
+f_upperLane(float upperEdge, float laneStep, float laneNumber) =>
+    upperEdge + laneStep * laneNumber
+
+f_lowerLane(float lowerEdge, float laneStep, float laneNumber) =>
+    lowerEdge - laneStep * laneNumber
+
+f_sessionStart(int sampleTime, string timezone, int openingHour, int openingMinute) =>
+    int localMidnight = timestamp(
+         timezone,
+         year(sampleTime, timezone),
+         month(sampleTime, timezone),
+         dayofmonth(sampleTime, timezone),
+         0,
+         0
+    )
+    int todayStart = timestamp(
+         timezone,
+         year(sampleTime, timezone),
+         month(sampleTime, timezone),
+         dayofmonth(sampleTime, timezone),
+         openingHour,
+         openingMinute
+    )
+    int previousDayProbe = localMidnight - 12 * MS_HOUR
+    int previousStart = timestamp(
+         timezone,
+         year(previousDayProbe, timezone),
+         month(previousDayProbe, timezone),
+         dayofmonth(previousDayProbe, timezone),
+         openingHour,
+         openingMinute
+    )
+    sampleTime >= todayStart ? todayStart : previousStart
+
+f_dayAllowed(int sessionStart, string timezone, string dayMask) =>
+    int sessionDay = dayofweek(sessionStart, timezone)
+    str.contains(dayMask, str.tostring(sessionDay))
+
+f_safeRatio(float numerator, float denominator, float fallback) =>
+    not na(denominator) and denominator != 0.0 ? numerator / denominator : fallback
+
+f_rangePercent(float rangeWidth, float openingPrice) =>
+    openingPrice != 0.0 ? 100.0 * rangeWidth / math.abs(openingPrice) : na
+
+f_percentile(float currentValue, array<float> history) =>
+    int historyCount = array.size(history)
+    float result = na
+    if historyCount >= 5 and not na(currentValue)
+        float rank = 0.0
+        for historicalValue in history
+            rank += currentValue > historicalValue ? 1.0 : currentValue == historicalValue ? 0.5 : 0.0
+        result := 100.0 * rank / historyCount
+    result
+
+f_classify(
+     float efficiency,
+     float closeLocation,
+     float expansionSkew,
+     float lateShare,
+     float earlyWidthShare
+) =>
+    int classification = 0
+    bool upperDrive = efficiency >= driveEfficiencyInput and closeLocation >= edgeCloseInput and expansionSkew >= skewThresholdInput
+    bool lowerDrive = efficiency >= driveEfficiencyInput and closeLocation <= 1.0 - edgeCloseInput and expansionSkew <= -skewThresholdInput
+    bool lateExpansion = lateShare >= lateShareInput
+    bool rotation = efficiency <= rotationEfficiencyInput and closeLocation >= 0.35 and closeLocation <= 0.65
+    bool twoSided = math.abs(expansionSkew) < skewThresholdInput and earlyWidthShare <= earlyShareMaxInput
+
+    if upperDrive
+        classification := 1
+    else if lowerDrive
+        classification := -1
+    else if lateExpansion and expansionSkew >= skewThresholdInput
+        classification := 2
+    else if lateExpansion and expansionSkew <= -skewThresholdInput
+        classification := -2
+    else if lateExpansion
+        classification := 3
+    else if rotation
+        classification := 4
+    else if twoSided
+        classification := 5
+    classification
+
+f_classText(int classification, bool japanese) =>
+    string englishText = "Mixed formation"
+    string japaneseText = "混合形成"
+
+    if classification == 1
+        englishText := "Upper-led drive"
+        japaneseText := "上側主導ドライブ"
+    else if classification == -1
+        englishText := "Lower-led drive"
+        japaneseText := "下側主導ドライブ"
+    else if classification == 2
+        englishText := "Late upper expansion"
+        japaneseText := "後半上側拡張"
+    else if classification == -2
+        englishText := "Late lower expansion"
+        japaneseText := "後半下側拡張"
+    else if classification == 3
+        englishText := "Late two-sided expansion"
+        japaneseText := "後半両側拡張"
+    else if classification == 4
+        englishText := "Rotational formation"
+        japaneseText := "回転型形成"
+    else if classification == 5
+        englishText := "Two-sided formation"
+        japaneseText := "両側形成"
+
+    japanese ? japaneseText : englishText
+
+f_classShortText(int classification, bool japanese) =>
+    string englishText = "Mixed"
+    string japaneseText = "混合"
+
+    if classification == 1
+        englishText := "Upper drive"
+        japaneseText := "上主導"
+    else if classification == -1
+        englishText := "Lower drive"
+        japaneseText := "下主導"
+    else if classification == 2
+        englishText := "Late ↑"
+        japaneseText := "後半↑"
+    else if classification == -2
+        englishText := "Late ↓"
+        japaneseText := "後半↓"
+    else if classification == 3
+        englishText := "Late ↕"
+        japaneseText := "後半↕"
+    else if classification == 4
+        englishText := "Rotation"
+        japaneseText := "回転"
+    else if classification == 5
+        englishText := "Two-sided"
+        japaneseText := "両側"
+
+    japanese ? japaneseText : englishText
+
+f_classColor(int classification) =>
+    (
+         classification == 1 or classification == 2 ? upperColorInput :
+         classification == -1 or classification == -2 ? lowerColorInput :
+         classification == 3 or classification == 5 ? twoSidedColorInput :
+         neutralColorInput
+    )
+
+f_orderText(int highTime, int lowTime, bool japanese) =>
+    string result = highTime < lowTime ? "H→L" : highTime > lowTime ? "L→H" : "H=L"
+    japanese ? (highTime < lowTime ? "高→安" : highTime > lowTime ? "安→高" : "高=安") : result
+
+f_percentText(float percentile, bool japanese) =>
+    (
+         na(percentile)
+             ? f_localText(japanese, "PCTL n/a", "順位 未算出")
+             : f_localText(japanese, "PCTL " + str.tostring(percentile, "#"), "順位 " + str.tostring(percentile, "#"))
+    )
+
+f_signed(float value) =>
+    na(value) ? "n/a" : (value > 0.0 ? "+" : "") + str.tostring(value, "#.00")
+
+f_appendLine(string currentText, string nextLine) =>
+    currentText == "" ? nextLine : currentText + "\n" + nextLine
+
+f_registerBox(array<box> ids, array<int> sessionKeys, box id, int sessionKey) =>
+    if not na(id)
+        array.push(ids, id)
+        array.push(sessionKeys, sessionKey)
+    0
+
+f_registerLine(array<line> ids, array<int> sessionKeys, line id, int sessionKey) =>
+    if not na(id)
+        array.push(ids, id)
+        array.push(sessionKeys, sessionKey)
+    0
+
+f_registerLabel(
+     array<label> ids,
+     array<int> sessionKeys,
+     array<int> sides,
+     array<float> lanes,
+     label id,
+     int sessionKey,
+     int side,
+     float lane
+) =>
+    if not na(id)
+        array.push(ids, id)
+        array.push(sessionKeys, sessionKey)
+        array.push(sides, side)
+        array.push(lanes, lane)
+    0
+
+f_deleteSessionBoxes(array<box> ids, array<int> sessionKeys, int sessionKey) =>
+    int index = array.size(ids) - 1
+    while index >= 0
+        if array.get(sessionKeys, index) == sessionKey
+            box.delete(array.get(ids, index))
+            array.remove(ids, index)
+            array.remove(sessionKeys, index)
+        index -= 1
+    0
+
+f_deleteSessionLines(array<line> ids, array<int> sessionKeys, int sessionKey) =>
+    int index = array.size(ids) - 1
+    while index >= 0
+        if array.get(sessionKeys, index) == sessionKey
+            line.delete(array.get(ids, index))
+            array.remove(ids, index)
+            array.remove(sessionKeys, index)
+        index -= 1
+    0
+
+f_deleteSessionLabels(
+     array<label> ids,
+     array<int> sessionKeys,
+     array<int> sides,
+     array<float> lanes,
+     int sessionKey
+) =>
+    int index = array.size(ids) - 1
+    while index >= 0
+        if array.get(sessionKeys, index) == sessionKey
+            label.delete(array.get(ids, index))
+            array.remove(ids, index)
+            array.remove(sessionKeys, index)
+            array.remove(sides, index)
+            array.remove(lanes, index)
+        index -= 1
+    0
+
+f_updateSessionBounds(
+     array<int> sessionKeys,
+     array<float> tops,
+     array<float> bottoms,
+     array<float> widths,
+     int sessionKey,
+     float observedHigh,
+     float observedLow,
+     float rangeWidth
+) =>
+    int sessionIndex = array.indexof(sessionKeys, sessionKey)
+    if sessionIndex >= 0
+        float storedTop = array.get(tops, sessionIndex)
+        float storedBottom = array.get(bottoms, sessionIndex)
+        array.set(tops, sessionIndex, na(storedTop) ? observedHigh : math.max(storedTop, observedHigh))
+        array.set(bottoms, sessionIndex, na(storedBottom) ? observedLow : math.min(storedBottom, observedLow))
+        if not na(rangeWidth)
+            array.set(widths, sessionIndex, math.max(rangeWidth, syminfo.mintick))
+    0
+
+f_reflowLabels(
+     array<label> ids,
+     array<int> labelSessionKeys,
+     array<int> sides,
+     array<float> lanes,
+     array<int> sessionKeys,
+     array<float> tops,
+     array<float> bottoms,
+     array<float> widths,
+     float visibleSpan
+) =>
+    int labelCount = array.size(ids)
+    if labelCount > 0
+        for labelIndex = 0 to labelCount - 1
+            int sessionKey = array.get(labelSessionKeys, labelIndex)
+            int sessionIndex = array.indexof(sessionKeys, sessionKey)
+            if sessionIndex >= 0
+                int side = array.get(sides, labelIndex)
+                float lane = array.get(lanes, labelIndex)
+                float sessionTop = array.get(tops, sessionIndex)
+                float sessionBottom = array.get(bottoms, sessionIndex)
+                float sessionWidth = array.get(widths, sessionIndex)
+                float laneStep = f_annotationStep(sessionWidth, visibleSpan)
+                float labelY = side > 0 ? f_upperLane(sessionTop, laneStep, lane) : f_lowerLane(sessionBottom, laneStep, lane)
+                label.set_y(array.get(ids, labelIndex), labelY)
+    0
+
+//──────────────────────────────────────────────────────────────────────────────
+// Effective configuration
+//──────────────────────────────────────────────────────────────────────────────
+bool japanese = languageInput == "日本語"
+
+string sessionTimezone = (
+     presetInput == "US Equities 09:30 New York" ? "America/New_York" :
+     presetInput == "Tokyo Cash 09:00 Tokyo"      ? "Asia/Tokyo" :
+     presetInput == "London Cash 08:00 London"    ? "Europe/London" :
+     presetInput == "CME Equity RTH 08:30 Chicago"? "America/Chicago" :
+     presetInput == "Exchange Time 09:30"         ? syminfo.timezone :
+                                                    customTimezoneInput
+)
+
+int sessionHour = (
+     presetInput == "Tokyo Cash 09:00 Tokyo"       ? 9 :
+     presetInput == "London Cash 08:00 London"     ? 8 :
+     presetInput == "CME Equity RTH 08:30 Chicago" ? 8 :
+     presetInput == "Custom"                       ? customHourInput :
+                                                    9
+)
+
+int sessionMinute = (
+     presetInput == "CME Equity RTH 08:30 Chicago" ? 30 :
+     presetInput == "Custom"                       ? customMinuteInput :
+     presetInput == "Tokyo Cash 09:00 Tokyo"       ? 0 :
+     presetInput == "London Cash 08:00 London"     ? 0 :
+                                                    30
+)
+
+int rangeMilliseconds = rangeMinutesInput * MS_MINUTE
+int projectionMinutes = math.max(projectionMinutesInput, rangeMinutesInput)
+int projectionMilliseconds = projectionMinutes * MS_MINUTE
+
+bool chartSupported = timeframe.isintraday and chart.is_standard
+float chartSeconds = timeframe.in_seconds()
+float requestedSeconds = timeframe.in_seconds(precisionInput)
+bool selectedTimeframeUsable = chartSupported and not na(chartSeconds) and not na(requestedSeconds) and requestedSeconds <= chartSeconds
+string samplingTimeframe = selectedTimeframeUsable ? precisionInput : timeframe.period
+float effectiveSampleSeconds = timeframe.in_seconds(samplingTimeframe)
+bool boundaryAligned = not na(effectiveSampleSeconds) and math.abs((rangeMinutesInput * 60.0) % effectiveSampleSeconds) < 0.000001
+bool samplingFallback = chartSupported and not selectedTimeframeUsable and not na(chartSeconds) and chartSeconds >= 60
+bool adaptiveHistory = historyRenderInput == "Visible chart (adaptive)"
+bool chartFallbackUsable = chartSupported and confirmedChartFallbackInput and not na(chartSeconds) and chartSeconds <= rangeMinutesInput * 60.0
+
+// One tuple request keeps intrabar acquisition centralized.
+[ltfTime, ltfTimeClose, ltfOpen, ltfHigh, ltfLow, ltfClose, ltfVolume] = request.security_lower_tf(
+     syminfo.tickerid,
+     samplingTimeframe,
+     [time, time_close, open, high, low, close, volume],
+     ignore_invalid_timeframe = true,
+     calc_bars_count = intrabarHistoryBarsInput
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Persistent object stores and session state
+//──────────────────────────────────────────────────────────────────────────────
+var array<int> retainedSessions = array.new<int>()
+var array<float> retainedSessionTops = array.new<float>()
+var array<float> retainedSessionBottoms = array.new<float>()
+var array<float> retainedSessionWidths = array.new<float>()
+
+var array<box> storedBoxes = array.new<box>()
+var array<int> storedBoxSessions = array.new<int>()
+
+var array<line> storedLines = array.new<line>()
+var array<int> storedLineSessions = array.new<int>()
+
+var array<label> storedLabels = array.new<label>()
+var array<int> storedLabelSessions = array.new<int>()
+var array<int> storedLabelSides = array.new<int>()
+var array<float> storedLabelLanes = array.new<float>()
+
+var array<float> widthHistory = array.new<float>()
+
+var bool anySampleSeen = false
+var bool currentRenderSession = false
+var bool currentUsedChartFallback = false
+var bool historyBudgetExceeded = false
+var bool visibleFallbackUsed = false
+var bool visibleHistoryGapDetected = false
+var float visibleChartHigh = na
+var float visibleChartLow = na
+var int currentSession = na
+var int currentRangeEnd = na
+var int currentProjectionEnd = na
+var bool currentStarted = false
+var bool currentLocked = false
+var bool currentPartialStart = false
+
+var float currentOpen = na
+var float currentHigh = na
+var float currentLow = na
+var float currentClose = na
+var float previousSampleClose = na
+var int currentHighTime = na
+var int currentLowTime = na
+var int currentFirstSampleTime = na
+var int currentLastSampleCloseTime = na
+
+var float currentPath = 0.0
+var float currentPriceSum = 0.0
+var float currentVolumePriceSum = 0.0
+var float currentVolumeSum = 0.0
+var int currentSamples = 0
+var float currentHalfHigh = na
+var float currentHalfLow = na
+var float currentEarlyHigh = na
+var float currentEarlyLow = na
+
+var array<float> sliceHighs = array.new<float>(traceSlicesInput, na)
+var array<float> sliceLows = array.new<float>(traceSlicesInput, na)
+var array<box> sliceBoxes = array.new<box>(traceSlicesInput)
+
+var box currentMainBox = na
+var line currentHighLine = na
+var line currentLowLine = na
+var line currentMidLine = na
+var line currentOpenLine = na
+var line currentEquilibriumLine = na
+var label currentFormationLabel = na
+var label currentHighTimeLabel = na
+var label currentLowTimeLabel = na
+var label currentDepartureLabel = na
+var label currentReentryLabel = na
+var label currentTraverseLabel = na
+var table researchPanel = table.new(
+     f_tablePosition(researchPanelPositionInput),
+     10,
+     11,
+     bgcolor = color.new(chart.bg_color, 100),
+     frame_width = 0,
+     border_width = 0
+)
+
+if barstate.isfirst
+    table.cell(researchPanel, 0, 0, "")
+    table.cell(researchPanel, 1, 1, "")
+    table.cell(researchPanel, 0, 2, "")
+    table.cell(researchPanel, 0, 3, "")
+    table.cell(researchPanel, 0, 4, "")
+    table.cell(researchPanel, 1, 5, "")
+    table.cell(researchPanel, 0, 6, "")
+    table.cell(researchPanel, 2, 6, "")
+    table.cell(researchPanel, 0, 7, "")
+    table.cell(researchPanel, 2, 7, "")
+    table.cell(researchPanel, 0, 8, "")
+    table.cell(researchPanel, 0, 9, "")
+    table.cell(researchPanel, 0, PANEL_BOTTOM_SPACER_ROW, "")
+    table.merge_cells(researchPanel, 0, 0, PANEL_CONTENT_LAST_COLUMN, 0)
+    table.merge_cells(researchPanel, 1, 1, PANEL_CONTENT_LAST_COLUMN, 1)
+    table.merge_cells(researchPanel, 0, 2, 1, 2)
+    table.merge_cells(researchPanel, 0, 3, 1, 3)
+    table.merge_cells(researchPanel, 0, 4, 1, 4)
+    table.merge_cells(researchPanel, 1, 5, PANEL_CONTENT_LAST_COLUMN, 5)
+    table.merge_cells(researchPanel, 0, 6, 1, 6)
+    table.merge_cells(researchPanel, 2, 6, PANEL_CONTENT_LAST_COLUMN, 6)
+    table.merge_cells(researchPanel, 0, 7, 1, 7)
+    table.merge_cells(researchPanel, 2, 7, PANEL_CONTENT_LAST_COLUMN, 7)
+    table.merge_cells(researchPanel, 0, 8, PANEL_CONTENT_LAST_COLUMN, 8)
+    table.merge_cells(researchPanel, 0, 9, PANEL_CONTENT_LAST_COLUMN, 9)
+    table.merge_cells(researchPanel, 0, PANEL_BOTTOM_SPACER_ROW, PANEL_SPACER_COLUMN, PANEL_BOTTOM_SPACER_ROW)
+
+// Snapshot used by the fixed research card. In adaptive mode it follows the
+// rightmost rendered session, so scrolling backward keeps the card relevant.
+var bool cardStarted = false
+var int cardSession = na
+var int cardRangeEnd = na
+var int cardProjectionEnd = na
+var int cardObservationTime = na
+var bool cardLocked = false
+var bool cardPartialStart = false
+var bool cardUsedChartFallback = false
+var float cardHigh = na
+var float cardLow = na
+var float cardWidth = na
+var float cardPercentile = na
+var float cardEfficiency = na
+var float cardLateShare = na
+var float cardSkew = na
+var int cardClassification = 0
+var int cardPostSampleCount = 0
+var int cardInsideSampleCount = 0
+var int cardAboveSampleCount = 0
+var int cardBelowSampleCount = 0
+var int cardFirstDepartureSide = 0
+var bool cardReenteredRange = false
+var bool cardTraversedOppositeEdge = false
+var int cardUpperTestCount = 0
+var int cardLowerTestCount = 0
+var float cardMaxUpperReachR = 0.0
+var float cardMaxLowerReachR = 0.0
+
+var float finalRangeWidth = na
+var float finalRangeContextMeasure = na
+var float finalRangeMidpoint = na
+var float finalRangeEquilibrium = na
+var float finalPathEfficiency = na
+var float finalCloseLocation = na
+var float finalExpansionSkew = na
+var float finalLateExpansionShare = na
+var float finalEarlyWidthShare = na
+var float finalWidthPercentile = na
+var int finalFormationClass = 0
+var float finalAnnotationStep = na
+
+// Post-range evidence state.
+var int lastPostSampleTime = na
+var int postSampleCount = 0
+var int insideSampleCount = 0
+var int aboveSampleCount = 0
+var int belowSampleCount = 0
+var int upperEvidenceRun = 0
+var int lowerEvidenceRun = 0
+var int firstDepartureSide = 0
+var int firstDepartureTime = na
+var bool reenteredRange = false
+var int reentryTime = na
+var bool traversedOppositeEdge = false
+var int upperTestCount = 0
+var int lowerTestCount = 0
+var bool touchingUpper = false
+var bool touchingLower = false
+var float maxUpperReachR = 0.0
+var float maxLowerReachR = 0.0
+
+// One-execution event flags used by the neutral alert conditions.
+bool rangeLockedEvent = false
+bool acceptedAboveEvent = false
+bool acceptedBelowEvent = false
+bool reentryEvent = false
+bool traverseEvent = false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pass 1: Build the opening range from intrabars
+//──────────────────────────────────────────────────────────────────────────────
+bool barInsideVisibleWindow = time_close >= chart.left_visible_bar_time and time <= chart.right_visible_bar_time
+if barInsideVisibleWindow
+    visibleChartHigh := na(visibleChartHigh) ? high : math.max(visibleChartHigh, high)
+    visibleChartLow := na(visibleChartLow) ? low : math.min(visibleChartLow, low)
+
+int intrabarCount = array.size(ltfTime)
+bool useConfirmedChartFallback = intrabarCount == 0 and chartFallbackUsable and not barstate.isrealtime and barstate.isconfirmed
+int analysisSampleCount = intrabarCount > 0 ? intrabarCount : useConfirmedChartFallback ? 1 : 0
+
+if barInsideVisibleWindow and chartSupported and intrabarCount == 0 and barstate.isconfirmed and not useConfirmedChartFallback
+    visibleHistoryGapDetected := true
+
+if chartSupported and analysisSampleCount > 0
+    for intrabarIndex = 0 to analysisSampleCount - 1
+        bool coarseSample = intrabarCount == 0
+        int sampleTime = coarseSample ? time : array.get(ltfTime, intrabarIndex)
+        int sampleCloseTime = coarseSample ? time_close : array.get(ltfTimeClose, intrabarIndex)
+        float sampleOpen = coarseSample ? open : array.get(ltfOpen, intrabarIndex)
+        float sampleHigh = coarseSample ? high : array.get(ltfHigh, intrabarIndex)
+        float sampleLow = coarseSample ? low : array.get(ltfLow, intrabarIndex)
+        float sampleClose = coarseSample ? close : array.get(ltfClose, intrabarIndex)
+        float sampleVolume = coarseSample ? volume : array.get(ltfVolume, intrabarIndex)
+
+        bool firstRetrievedSample = not anySampleSeen
+        anySampleSeen := true
+
+        int candidateSession = f_sessionStart(sampleTime, sessionTimezone, sessionHour, sessionMinute)
+        int candidateRangeEnd = candidateSession + rangeMilliseconds
+        bool validSessionDay = f_dayAllowed(candidateSession, sessionTimezone, dayMaskInput)
+        bool sampleInsideRange = sampleTime >= candidateSession and sampleTime < candidateRangeEnd
+        bool sampleClosesInsideRange = sampleCloseTime <= candidateRangeEnd
+        bool sampleAvailableNow = not barstate.isrealtime or sampleTime <= timenow
+
+        if validSessionDay and sampleInsideRange and sampleClosesInsideRange and sampleAvailableNow
+            bool newSession = na(currentSession) or candidateSession != currentSession
+
+            if newSession
+                currentSession := candidateSession
+                currentRangeEnd := candidateRangeEnd
+                currentProjectionEnd := candidateSession + projectionMilliseconds
+                currentStarted := true
+                currentLocked := false
+                currentPartialStart := firstRetrievedSample and sampleTime > candidateSession
+                currentUsedChartFallback := coarseSample
+
+                bool sessionIntersectsVisible = (
+                     currentProjectionEnd >= chart.left_visible_bar_time and
+                     currentSession <= chart.right_visible_bar_time
+                )
+                currentRenderSession := adaptiveHistory ? sessionIntersectsVisible : true
+
+                if currentRenderSession
+                    array.push(retainedSessions, currentSession)
+                    array.push(retainedSessionTops, sampleHigh)
+                    array.push(retainedSessionBottoms, sampleLow)
+                    array.push(retainedSessionWidths, math.max(sampleHigh - sampleLow, syminfo.mintick))
+                    visibleFallbackUsed := visibleFallbackUsed or coarseSample
+
+                    while array.size(retainedSessions) > sessionsToKeepInput
+                        historyBudgetExceeded := historyBudgetExceeded or adaptiveHistory
+                        int expiredSession = array.shift(retainedSessions)
+                        array.shift(retainedSessionTops)
+                        array.shift(retainedSessionBottoms)
+                        array.shift(retainedSessionWidths)
+                        f_deleteSessionBoxes(storedBoxes, storedBoxSessions, expiredSession)
+                        f_deleteSessionLines(storedLines, storedLineSessions, expiredSession)
+                        f_deleteSessionLabels(
+                             storedLabels,
+                             storedLabelSessions,
+                             storedLabelSides,
+                             storedLabelLanes,
+                             expiredSession
+                        )
+
+                currentOpen := na
+                currentHigh := na
+                currentLow := na
+                currentClose := na
+                previousSampleClose := na
+                currentHighTime := na
+                currentLowTime := na
+                currentFirstSampleTime := na
+                currentLastSampleCloseTime := na
+                currentPath := 0.0
+                currentPriceSum := 0.0
+                currentVolumePriceSum := 0.0
+                currentVolumeSum := 0.0
+                currentSamples := 0
+                currentHalfHigh := na
+                currentHalfLow := na
+                currentEarlyHigh := na
+                currentEarlyLow := na
+
+                for sliceIndex = 0 to traceSlicesInput - 1
+                    array.set(sliceHighs, sliceIndex, na)
+                    array.set(sliceLows, sliceIndex, na)
+                    array.set(sliceBoxes, sliceIndex, na)
+
+                currentMainBox := na
+                currentHighLine := na
+                currentLowLine := na
+                currentMidLine := na
+                currentOpenLine := na
+                currentEquilibriumLine := na
+                currentFormationLabel := na
+                currentHighTimeLabel := na
+                currentLowTimeLabel := na
+                currentDepartureLabel := na
+                currentReentryLabel := na
+                currentTraverseLabel := na
+
+                finalRangeWidth := na
+                finalRangeContextMeasure := na
+                finalRangeMidpoint := na
+                finalRangeEquilibrium := na
+                finalPathEfficiency := na
+                finalCloseLocation := na
+                finalExpansionSkew := na
+                finalLateExpansionShare := na
+                finalEarlyWidthShare := na
+                finalWidthPercentile := na
+                finalFormationClass := 0
+                finalAnnotationStep := na
+
+                lastPostSampleTime := na
+                postSampleCount := 0
+                insideSampleCount := 0
+                aboveSampleCount := 0
+                belowSampleCount := 0
+                upperEvidenceRun := 0
+                lowerEvidenceRun := 0
+                firstDepartureSide := 0
+                firstDepartureTime := na
+                reenteredRange := false
+                reentryTime := na
+                traversedOppositeEdge := false
+                upperTestCount := 0
+                lowerTestCount := 0
+                touchingUpper := false
+                touchingLower := false
+                maxUpperReachR := 0.0
+                maxLowerReachR := 0.0
+
+            bool firstSample = currentSamples == 0
+            if firstSample
+                currentOpen := sampleOpen
+                currentHigh := sampleHigh
+                currentLow := sampleLow
+                currentHighTime := sampleTime
+                currentLowTime := sampleTime
+                currentFirstSampleTime := sampleTime
+                currentPath := math.abs(sampleClose - sampleOpen)
+            else
+                if sampleHigh > currentHigh
+                    currentHigh := sampleHigh
+                    currentHighTime := sampleTime
+                if sampleLow < currentLow
+                    currentLow := sampleLow
+                    currentLowTime := sampleTime
+                currentPath += math.abs(sampleClose - previousSampleClose)
+
+            currentClose := sampleClose
+            previousSampleClose := sampleClose
+            currentLastSampleCloseTime := sampleCloseTime
+            currentSamples += 1
+            currentUsedChartFallback := currentUsedChartFallback or coarseSample
+
+            if currentRenderSession
+                visibleFallbackUsed := visibleFallbackUsed or coarseSample
+                f_updateSessionBounds(
+                     retainedSessions,
+                     retainedSessionTops,
+                     retainedSessionBottoms,
+                     retainedSessionWidths,
+                     currentSession,
+                     sampleHigh,
+                     sampleLow,
+                     currentHigh - currentLow
+                )
+
+            // Classification checkpoints are independent of the visual trace-slice count.
+            int halfwayCheckpoint = currentSession + int(math.round(rangeMilliseconds * 0.5))
+            int earlyCheckpoint = currentSession + int(math.round(rangeMilliseconds * earlyCheckpointInput / 100.0))
+            if sampleTime < halfwayCheckpoint
+                currentHalfHigh := na(currentHalfHigh) ? currentHigh : math.max(currentHalfHigh, currentHigh)
+                currentHalfLow := na(currentHalfLow) ? currentLow : math.min(currentHalfLow, currentLow)
+            if sampleTime < earlyCheckpoint
+                currentEarlyHigh := na(currentEarlyHigh) ? currentHigh : math.max(currentEarlyHigh, currentHigh)
+                currentEarlyLow := na(currentEarlyLow) ? currentLow : math.min(currentEarlyLow, currentLow)
+
+            float sampleTypicalPrice = (sampleHigh + sampleLow + sampleClose) / 3.0
+            currentPriceSum += sampleTypicalPrice
+            if not na(sampleVolume) and sampleVolume > 0.0
+                currentVolumePriceSum += sampleTypicalPrice * sampleVolume
+                currentVolumeSum += sampleVolume
+
+            int elapsedMilliseconds = math.max(0, sampleTime - currentSession)
+            int activeSlice = math.min(
+                 traceSlicesInput - 1,
+                 int(math.floor(float(elapsedMilliseconds) * traceSlicesInput / rangeMilliseconds))
+            )
+            array.set(sliceHighs, activeSlice, currentHigh)
+            array.set(sliceLows, activeSlice, currentLow)
+
+            if showMainBoxInput and currentRenderSession
+                if na(currentMainBox)
+                    currentMainBox := box.new(
+                         left = currentSession,
+                         top = currentHigh,
+                         right = currentRangeEnd,
+                         bottom = currentLow,
+                         xloc = xloc.bar_time,
+                         border_color = neutralColorInput,
+                         border_width = lineWidthInput,
+                         border_style = f_lineStyle(referenceLineStyleInput),
+                         bgcolor = color.new(neutralColorInput, mainTransparencyInput)
+                    )
+                    f_registerBox(storedBoxes, storedBoxSessions, currentMainBox, currentSession)
+                else
+                    box.set_top(currentMainBox, currentHigh)
+                    box.set_bottom(currentMainBox, currentLow)
+                    box.set_right(currentMainBox, currentRangeEnd)
+
+            if showTraceInput and currentRenderSession
+                int sliceLeft = currentSession + int(math.floor(float(rangeMilliseconds) * activeSlice / traceSlicesInput))
+                int sliceRight = currentSession + int(math.floor(float(rangeMilliseconds) * (activeSlice + 1) / traceSlicesInput))
+                box activeSliceBox = array.get(sliceBoxes, activeSlice)
+                if na(activeSliceBox)
+                    activeSliceBox := box.new(
+                         left = sliceLeft,
+                         top = currentHigh,
+                         right = sliceRight,
+                         bottom = currentLow,
+                         xloc = xloc.bar_time,
+                         border_color = neutralColorInput,
+                         border_width = 1,
+                         bgcolor = color.new(neutralColorInput, traceTransparencyInput)
+                    )
+                    array.set(sliceBoxes, activeSlice, activeSliceBox)
+                    f_registerBox(storedBoxes, storedBoxSessions, activeSliceBox, currentSession)
+                else
+                    box.set_top(activeSliceBox, currentHigh)
+                    box.set_bottom(activeSliceBox, currentLow)
+
+            float developingMidpoint = (currentHigh + currentLow) / 2.0
+            float developingMean = currentSamples > 0 ? currentPriceSum / currentSamples : developingMidpoint
+            float developingVolumeMean = currentVolumeSum > 0.0 ? currentVolumePriceSum / currentVolumeSum : developingMean
+            float developingEquilibrium = (
+                 equilibriumModeInput == "Volume-weighted mean" ? developingVolumeMean :
+                 equilibriumModeInput == "Mean price"           ? developingMean :
+                 equilibriumModeInput == "Opening price"        ? currentOpen :
+                                                                  developingMidpoint
+            )
+
+            if showHighLowInput and currentRenderSession
+                if na(currentHighLine)
+                    currentHighLine := line.new(
+                         x1 = currentSession,
+                         y1 = currentHigh,
+                         x2 = currentProjectionEnd,
+                         y2 = currentHigh,
+                         xloc = xloc.bar_time,
+                         extend = extend.none,
+                         color = upperColorInput,
+                         style = f_lineStyle(boundaryLineStyleInput),
+                         width = lineWidthInput
+                    )
+                    f_registerLine(storedLines, storedLineSessions, currentHighLine, currentSession)
+                else
+                    line.set_xy1(currentHighLine, currentSession, currentHigh)
+                    line.set_xy2(currentHighLine, currentProjectionEnd, currentHigh)
+
+                if na(currentLowLine)
+                    currentLowLine := line.new(
+                         x1 = currentSession,
+                         y1 = currentLow,
+                         x2 = currentProjectionEnd,
+                         y2 = currentLow,
+                         xloc = xloc.bar_time,
+                         extend = extend.none,
+                         color = lowerColorInput,
+                         style = f_lineStyle(boundaryLineStyleInput),
+                         width = lineWidthInput
+                    )
+                    f_registerLine(storedLines, storedLineSessions, currentLowLine, currentSession)
+                else
+                    line.set_xy1(currentLowLine, currentSession, currentLow)
+                    line.set_xy2(currentLowLine, currentProjectionEnd, currentLow)
+
+            if showMidpointInput and currentRenderSession
+                if na(currentMidLine)
+                    currentMidLine := line.new(
+                         x1 = currentSession,
+                         y1 = developingMidpoint,
+                         x2 = currentProjectionEnd,
+                         y2 = developingMidpoint,
+                         xloc = xloc.bar_time,
+                         extend = extend.none,
+                         color = neutralColorInput,
+                         style = line.style_dashed,
+                         width = 1
+                    )
+                    f_registerLine(storedLines, storedLineSessions, currentMidLine, currentSession)
+                else
+                    line.set_xy1(currentMidLine, currentSession, developingMidpoint)
+                    line.set_xy2(currentMidLine, currentProjectionEnd, developingMidpoint)
+
+            if showOpenInput and currentRenderSession
+                if na(currentOpenLine)
+                    currentOpenLine := line.new(
+                         x1 = currentSession,
+                         y1 = currentOpen,
+                         x2 = currentProjectionEnd,
+                         y2 = currentOpen,
+                         xloc = xloc.bar_time,
+                         extend = extend.none,
+                         color = color.new(chart.fg_color, 35),
+                         style = line.style_dotted,
+                         width = 1
+                    )
+                    f_registerLine(storedLines, storedLineSessions, currentOpenLine, currentSession)
+
+            if showEquilibriumInput and currentRenderSession
+                if na(currentEquilibriumLine)
+                    currentEquilibriumLine := line.new(
+                         x1 = currentSession,
+                         y1 = developingEquilibrium,
+                         x2 = currentProjectionEnd,
+                         y2 = developingEquilibrium,
+                         xloc = xloc.bar_time,
+                         extend = extend.none,
+                         color = twoSidedColorInput,
+                         style = f_lineStyle(referenceLineStyleInput),
+                         width = 1
+                    )
+                    f_registerLine(storedLines, storedLineSessions, currentEquilibriumLine, currentSession)
+                else
+                    line.set_xy1(currentEquilibriumLine, currentSession, developingEquilibrium)
+                    line.set_xy2(currentEquilibriumLine, currentProjectionEnd, developingEquilibrium)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Lock the range and preserve its formation fingerprint
+//──────────────────────────────────────────────────────────────────────────────
+int lastAvailableIntrabarClose = intrabarCount > 0 ? array.get(ltfTimeClose, intrabarCount - 1) : na
+bool finalIntrabarCloseAvailable = not barstate.isrealtime or (not na(lastAvailableIntrabarClose) and lastAvailableIntrabarClose <= timenow)
+bool rangeEndReachedByData = currentStarted and not na(lastAvailableIntrabarClose) and finalIntrabarCloseAvailable and lastAvailableIntrabarClose >= currentRangeEnd
+bool rangeEndReachedByClock = currentStarted and (barstate.isrealtime ? timenow >= currentRangeEnd : time_close >= currentRangeEnd)
+
+if chartSupported and currentStarted and not currentLocked and (rangeEndReachedByData or rangeEndReachedByClock)
+    currentLocked := true
+    rangeLockedEvent := true
+
+    finalRangeWidth := math.max(currentHigh - currentLow, syminfo.mintick)
+    finalAnnotationStep := f_annotationStep(finalRangeWidth, na)
+    finalRangeContextMeasure := widthBasisInput == "Raw price" ? finalRangeWidth : f_rangePercent(finalRangeWidth, currentOpen)
+    finalRangeMidpoint := (currentHigh + currentLow) / 2.0
+
+    if currentRenderSession
+        f_updateSessionBounds(
+             retainedSessions,
+             retainedSessionTops,
+             retainedSessionBottoms,
+             retainedSessionWidths,
+             currentSession,
+             currentHigh,
+             currentLow,
+             finalRangeWidth
+        )
+
+    float arithmeticMean = currentSamples > 0 ? currentPriceSum / currentSamples : finalRangeMidpoint
+    float volumeWeightedMean = currentVolumeSum > 0.0 ? currentVolumePriceSum / currentVolumeSum : arithmeticMean
+    finalRangeEquilibrium := (
+         equilibriumModeInput == "Volume-weighted mean" ? volumeWeightedMean :
+         equilibriumModeInput == "Mean price"           ? arithmeticMean :
+         equilibriumModeInput == "Opening price"        ? currentOpen :
+                                                          finalRangeMidpoint
+    )
+
+    finalPathEfficiency := math.min(1.0, f_safeRatio(math.abs(currentClose - currentOpen), currentPath, 0.0))
+    finalCloseLocation := math.min(1.0, math.max(0.0, f_safeRatio(currentClose - currentLow, finalRangeWidth, 0.5)))
+    finalExpansionSkew := math.max(-1.0, math.min(1.0, f_safeRatio((currentHigh - currentOpen) - (currentOpen - currentLow), finalRangeWidth, 0.0)))
+
+    // Carry the last available cumulative envelope through empty trace slices.
+    float previousSliceHigh = currentOpen
+    float previousSliceLow = currentOpen
+    for sliceIndex = 0 to traceSlicesInput - 1
+        float sliceHigh = array.get(sliceHighs, sliceIndex)
+        float sliceLow = array.get(sliceLows, sliceIndex)
+
+        if na(sliceHigh) or na(sliceLow)
+            sliceHigh := previousSliceHigh
+            sliceLow := previousSliceLow
+            array.set(sliceHighs, sliceIndex, sliceHigh)
+            array.set(sliceLows, sliceIndex, sliceLow)
+
+            if showTraceInput and currentRenderSession
+                int sliceLeft = currentSession + int(math.floor(float(rangeMilliseconds) * sliceIndex / traceSlicesInput))
+                int sliceRight = currentSession + int(math.floor(float(rangeMilliseconds) * (sliceIndex + 1) / traceSlicesInput))
+                box missingSliceBox = box.new(
+                     left = sliceLeft,
+                     top = sliceHigh,
+                     right = sliceRight,
+                     bottom = sliceLow,
+                     xloc = xloc.bar_time,
+                     border_color = color.new(neutralColorInput, 5),
+                     border_width = 1,
+                     bgcolor = color.new(neutralColorInput, traceTransparencyInput)
+                )
+                array.set(sliceBoxes, sliceIndex, missingSliceBox)
+                f_registerBox(storedBoxes, storedBoxSessions, missingSliceBox, currentSession)
+
+        box sliceBox = array.get(sliceBoxes, sliceIndex)
+        bool expandedUpper = sliceHigh > previousSliceHigh
+        bool expandedLower = sliceLow < previousSliceLow
+        color sliceColor = (
+             expandedUpper and not expandedLower ? upperColorInput :
+             expandedLower and not expandedUpper ? lowerColorInput :
+             expandedUpper and expandedLower     ? twoSidedColorInput :
+                                                   neutralColorInput
+        )
+
+        if not na(sliceBox)
+            box.set_top(sliceBox, sliceHigh)
+            box.set_bottom(sliceBox, sliceLow)
+            box.set_border_color(sliceBox, sliceColor)
+            box.set_bgcolor(sliceBox, color.new(sliceColor, traceTransparencyInput))
+
+        previousSliceHigh := sliceHigh
+        previousSliceLow := sliceLow
+
+    float halfWidth = not na(currentHalfHigh) and not na(currentHalfLow) ? currentHalfHigh - currentHalfLow : 0.0
+    float earlyWidth = not na(currentEarlyHigh) and not na(currentEarlyLow) ? currentEarlyHigh - currentEarlyLow : 0.0
+    finalLateExpansionShare := math.max(0.0, math.min(1.0, f_safeRatio(finalRangeWidth - halfWidth, finalRangeWidth, 0.0)))
+    finalEarlyWidthShare := math.max(0.0, math.min(1.0, f_safeRatio(earlyWidth, finalRangeWidth, 0.0)))
+
+    if currentPartialStart
+        finalWidthPercentile := na
+        finalFormationClass := 0
+    else
+        if not na(finalRangeContextMeasure)
+            finalWidthPercentile := f_percentile(finalRangeContextMeasure, widthHistory)
+            array.push(widthHistory, finalRangeContextMeasure)
+            while array.size(widthHistory) > widthContextInput
+                array.shift(widthHistory)
+        else
+            finalWidthPercentile := na
+
+        finalFormationClass := f_classify(
+             finalPathEfficiency,
+             finalCloseLocation,
+             finalExpansionSkew,
+             finalLateExpansionShare,
+             finalEarlyWidthShare
+        )
+
+    color formationColor = currentPartialStart ? twoSidedColorInput : f_classColor(finalFormationClass)
+
+    if not na(currentMainBox)
+        box.set_top(currentMainBox, currentHigh)
+        box.set_bottom(currentMainBox, currentLow)
+        box.set_right(currentMainBox, currentRangeEnd)
+        box.set_border_color(currentMainBox, formationColor)
+        box.set_bgcolor(currentMainBox, color.new(formationColor, mainTransparencyInput))
+
+    if not na(currentHighLine)
+        line.set_xy1(currentHighLine, currentSession, currentHigh)
+        line.set_xy2(currentHighLine, currentProjectionEnd, currentHigh)
+    if not na(currentLowLine)
+        line.set_xy1(currentLowLine, currentSession, currentLow)
+        line.set_xy2(currentLowLine, currentProjectionEnd, currentLow)
+    if not na(currentMidLine)
+        line.set_xy1(currentMidLine, currentSession, finalRangeMidpoint)
+        line.set_xy2(currentMidLine, currentProjectionEnd, finalRangeMidpoint)
+    if not na(currentEquilibriumLine)
+        line.set_xy1(currentEquilibriumLine, currentSession, finalRangeEquilibrium)
+        line.set_xy2(currentEquilibriumLine, currentProjectionEnd, finalRangeEquilibrium)
+
+    if showFormationLabelInput and currentRenderSession
+        string resolutionText = (
+             currentUsedChartFallback
+                 ? f_localText(
+                     japanese,
+                     "Resolution: confirmed chart bars ~" + timeframe.period,
+                     "解像度: 確定チャート足 ~" + timeframe.period
+                 )
+                 : f_localText(
+                     japanese,
+                     "Resolution: " + samplingTimeframe + " intrabars",
+                     "解像度: " + samplingTimeframe + " 下位足"
+                 )
+        )
+        string detailedFormationText = (
+             currentPartialStart
+                 ? f_localText(
+                     japanese,
+                     "Partial opening range\nEarlier samples unavailable",
+                     "不完全なオープニングレンジ\n開始前半のデータなし"
+                 )
+                 : f_classText(finalFormationClass, japanese) + "\n" +
+                   f_percentText(finalWidthPercentile, japanese) + "  |  " +
+                   f_localText(japanese, "EFF ", "効率 ") + str.tostring(finalPathEfficiency, "#.00") + "\n" +
+                   f_orderText(currentHighTime, currentLowTime, japanese) + "  |  " +
+                   f_localText(japanese, "Late ", "後半 ") + str.tostring(finalLateExpansionShare * 100.0, "#") + "%"
+        )
+        string compactPercentile = (
+             na(finalWidthPercentile)
+                 ? f_localText(japanese, "P—", "順—")
+                 : f_localText(japanese, "P", "順") + str.tostring(finalWidthPercentile, "#")
+        )
+        string compactFormationText = (
+             currentPartialStart
+                 ? f_localText(japanese, "Partial OR", "不完全OR")
+                 : f_classShortText(finalFormationClass, japanese) + " · " + compactPercentile +
+                   " · E" + str.tostring(finalPathEfficiency, "#.00") +
+                   " · L" + str.tostring(finalLateExpansionShare * 100.0, "#") + "%" +
+                   (currentUsedChartFallback ? " · ~" + timeframe.period : "")
+        )
+        string formationText = formationLabelDetailInput == "Detailed" ? detailedFormationText : compactFormationText
+        string formationTooltip = (
+             detailedFormationText + "\n" +
+             f_localText(japanese, "Width ", "幅 ") + str.tostring(finalRangeWidth, format.mintick) +
+             "  |  " + f_localText(japanese, "Width % ", "幅% ") + str.tostring(f_rangePercent(finalRangeWidth, currentOpen), "#.###") + "%\n" +
+             f_localText(japanese, "Close location ", "終値位置 ") + str.tostring(finalCloseLocation, "#.00") +
+             "  |  " + f_localText(japanese, "Skew ", "偏り ") + f_signed(finalExpansionSkew) + "\n" +
+             f_localText(japanese, "Early share ", "初動比率 ") + str.tostring(finalEarlyWidthShare * 100.0, "#") + "%\n" +
+             resolutionText
+        )
+        int formationSide = (
+             currentPartialStart ? 1 :
+             finalFormationClass > 0 ? -1 :
+             finalFormationClass < 0 ? 1 :
+             dayofmonth(currentSession, sessionTimezone) % 2 == 0 ? 1 : -1
+        )
+        float formationLane = formationLabelDetailInput == "Detailed" ? 3.80 : 3.20
+        float formationLabelY = (
+             formationSide > 0
+                 ? f_upperLane(currentHigh, finalAnnotationStep, formationLane)
+                 : f_lowerLane(currentLow, finalAnnotationStep, formationLane)
+        )
+        string formationStyle = (
+             formationLabelDetailInput == "Detailed"
+                 ? (formationSide > 0 ? label.style_label_lower_left : label.style_label_upper_left)
+                 : (formationSide > 0 ? label.style_label_down : label.style_label_up)
+        )
+        int formationX = currentSession + int(math.round(rangeMilliseconds * 0.5))
+        currentFormationLabel := label.new(
+             x = formationX,
+             y = formationLabelY,
+             text = formationText,
+             xloc = xloc.bar_time,
+             yloc = yloc.price,
+             style = formationStyle,
+             color = color.new(formationColor, 4),
+             textcolor = f_contrastText(formationColor),
+             size = f_labelSize(labelSizeInput),
+             textalign = formationLabelDetailInput == "Detailed" ? text.align_left : text.align_center,
+             tooltip = formationTooltip
+        )
+        f_registerLabel(
+             storedLabels,
+             storedLabelSessions,
+             storedLabelSides,
+             storedLabelLanes,
+             currentFormationLabel,
+             currentSession,
+             formationSide,
+             formationLane
+        )
+
+    if showExtremeTimesInput and not currentPartialStart and currentRenderSession
+        if not na(currentHighTime)
+            string highTimeText = "H " + str.format_time(currentHighTime, "HH:mm", sessionTimezone)
+            currentHighTimeLabel := label.new(
+                 x = currentHighTime,
+                 y = f_upperLane(currentHigh, finalAnnotationStep, 0.60),
+                 text = highTimeText,
+                 xloc = xloc.bar_time,
+                 yloc = yloc.price,
+                 style = label.style_label_down,
+                 color = color.new(upperColorInput, 58),
+                 textcolor = chart.fg_color,
+                 size = f_labelSize(labelSizeInput),
+                 tooltip = f_localText(japanese, "Final opening-range high time: ", "最終オープニングレンジ高値時刻: ") + str.format_time(currentHighTime, "yyyy-MM-dd HH:mm", sessionTimezone)
+            )
+            f_registerLabel(
+                 storedLabels,
+                 storedLabelSessions,
+                 storedLabelSides,
+                 storedLabelLanes,
+                 currentHighTimeLabel,
+                 currentSession,
+                 1,
+                 0.60
+            )
+
+        if not na(currentLowTime)
+            string lowTimeText = "L " + str.format_time(currentLowTime, "HH:mm", sessionTimezone)
+            currentLowTimeLabel := label.new(
+                 x = currentLowTime,
+                 y = f_lowerLane(currentLow, finalAnnotationStep, 0.60),
+                 text = lowTimeText,
+                 xloc = xloc.bar_time,
+                 yloc = yloc.price,
+                 style = label.style_label_up,
+                 color = color.new(lowerColorInput, 58),
+                 textcolor = chart.fg_color,
+                 size = f_labelSize(labelSizeInput),
+                 tooltip = f_localText(japanese, "Final opening-range low time: ", "最終オープニングレンジ安値時刻: ") + str.format_time(currentLowTime, "yyyy-MM-dd HH:mm", sessionTimezone)
+            )
+            f_registerLabel(
+                 storedLabels,
+                 storedLabelSessions,
+                 storedLabelSides,
+                 storedLabelLanes,
+                 currentLowTimeLabel,
+                 currentSession,
+                 -1,
+                 0.60
+            )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Projection bounds for collision-safe annotation reflow
+// Uses chart-bar highs/lows only for visual clearance. It never changes the OR,
+// classification, or evidence calculations.
+//──────────────────────────────────────────────────────────────────────────────
+bool chartBarInsideCurrentProjection = (
+     currentStarted and currentLocked and
+     time < currentProjectionEnd and time_close > currentRangeEnd
+)
+if currentRenderSession and chartBarInsideCurrentProjection and (not adaptiveHistory or barInsideVisibleWindow)
+    f_updateSessionBounds(
+         retainedSessions,
+         retainedSessionTops,
+         retainedSessionBottoms,
+         retainedSessionWidths,
+         currentSession,
+         high,
+         low,
+         finalRangeWidth
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pass 2: Neutral post-range evidence tracking
+//──────────────────────────────────────────────────────────────────────────────
+if chartSupported and evidenceEnabledInput and currentLocked and not currentPartialStart and analysisSampleCount > 0
+    for intrabarIndex = 0 to analysisSampleCount - 1
+        bool coarseEvidenceSample = intrabarCount == 0
+        int sampleTime = coarseEvidenceSample ? time : array.get(ltfTime, intrabarIndex)
+        int sampleCloseTime = coarseEvidenceSample ? time_close : array.get(ltfTimeClose, intrabarIndex)
+        float sampleHigh = coarseEvidenceSample ? high : array.get(ltfHigh, intrabarIndex)
+        float sampleLow = coarseEvidenceSample ? low : array.get(ltfLow, intrabarIndex)
+        float sampleClose = coarseEvidenceSample ? close : array.get(ltfClose, intrabarIndex)
+
+        bool belongsToCurrentSession = f_sessionStart(sampleTime, sessionTimezone, sessionHour, sessionMinute) == currentSession
+        bool inEvidenceWindow = sampleTime >= currentRangeEnd and sampleTime < currentProjectionEnd
+        bool notProcessed = na(lastPostSampleTime) or sampleTime > lastPostSampleTime
+        bool sampleAvailableNow = not barstate.isrealtime or sampleCloseTime <= timenow
+
+        if belongsToCurrentSession and inEvidenceWindow and notProcessed and sampleAvailableNow
+            lastPostSampleTime := sampleTime
+            postSampleCount += 1
+            currentUsedChartFallback := currentUsedChartFallback or coarseEvidenceSample
+
+            if currentRenderSession
+                visibleFallbackUsed := visibleFallbackUsed or coarseEvidenceSample
+                if not adaptiveHistory or barInsideVisibleWindow
+                    f_updateSessionBounds(
+                         retainedSessions,
+                         retainedSessionTops,
+                         retainedSessionBottoms,
+                         retainedSessionWidths,
+                         currentSession,
+                         sampleHigh,
+                         sampleLow,
+                         finalRangeWidth
+                    )
+
+            if sampleClose > currentHigh
+                aboveSampleCount += 1
+            else if sampleClose < currentLow
+                belowSampleCount += 1
+            else
+                insideSampleCount += 1
+
+            float touchBand = finalRangeWidth * touchBandInput
+            bool upperTouched = sampleLow <= currentHigh + touchBand and sampleHigh >= currentHigh - touchBand
+            bool lowerTouched = sampleLow <= currentLow + touchBand and sampleHigh >= currentLow - touchBand
+
+            if upperTouched and not touchingUpper
+                upperTestCount += 1
+            if lowerTouched and not touchingLower
+                lowerTestCount += 1
+            touchingUpper := upperTouched
+            touchingLower := lowerTouched
+
+            maxUpperReachR := math.max(maxUpperReachR, math.max(0.0, (sampleHigh - currentHigh) / finalRangeWidth))
+            maxLowerReachR := math.max(maxLowerReachR, math.max(0.0, (currentLow - sampleLow) / finalRangeWidth))
+
+            float departureBuffer = finalRangeWidth * departureBufferInput
+            bool aboveEvidence = (
+                 evidenceBasisInput == "Close"
+                     ? sampleClose > currentHigh + departureBuffer
+                     : sampleHigh > currentHigh + departureBuffer
+            )
+            bool belowEvidence = (
+                 evidenceBasisInput == "Close"
+                     ? sampleClose < currentLow - departureBuffer
+                     : sampleLow < currentLow - departureBuffer
+            )
+
+            if aboveEvidence and belowEvidence
+                upperEvidenceRun := 0
+                lowerEvidenceRun := 0
+            else if aboveEvidence
+                upperEvidenceRun += 1
+                lowerEvidenceRun := 0
+            else if belowEvidence
+                lowerEvidenceRun += 1
+                upperEvidenceRun := 0
+            else
+                upperEvidenceRun := 0
+                lowerEvidenceRun := 0
+
+            if firstDepartureSide == 0
+                if upperEvidenceRun >= confirmationSamplesInput
+                    firstDepartureSide := 1
+                    firstDepartureTime := sampleTime
+                    acceptedAboveEvent := true
+
+                    if showEvidenceLabelsInput and currentRenderSession
+                        string departureText = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? "A↑"
+                                 : f_localText(japanese, "Accepted above", "上側受容")
+                        )
+                        string departureTooltip = (
+                             f_localText(
+                                 japanese,
+                                 "Accepted departure above the completed opening range",
+                                 "完成オープニングレンジ上側への受容離脱"
+                             ) + "\n" +
+                             str.format_time(sampleTime, "yyyy-MM-dd HH:mm", sessionTimezone) + "  |  " +
+                             f_localText(japanese, "Basis ", "基準 ") + evidenceBasisInput + "  |  " +
+                             f_localText(japanese, "Confirmations ", "連続確認 ") + str.tostring(confirmationSamplesInput)
+                        )
+                        float departureLane = 1.20
+                        string departureStyle = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? label.style_label_down
+                                 : label.style_label_lower_right
+                        )
+                        currentDepartureLabel := label.new(
+                             x = sampleTime,
+                             y = f_upperLane(currentHigh, finalAnnotationStep, departureLane),
+                             text = departureText,
+                             xloc = xloc.bar_time,
+                             yloc = yloc.price,
+                             style = departureStyle,
+                             color = color.new(upperColorInput, 3),
+                             textcolor = f_contrastText(upperColorInput),
+                             size = f_labelSize(labelSizeInput),
+                             tooltip = departureTooltip
+                        )
+                        f_registerLabel(
+                             storedLabels,
+                             storedLabelSessions,
+                             storedLabelSides,
+                             storedLabelLanes,
+                             currentDepartureLabel,
+                             currentSession,
+                             1,
+                             departureLane
+                        )
+
+                else if lowerEvidenceRun >= confirmationSamplesInput
+                    firstDepartureSide := -1
+                    firstDepartureTime := sampleTime
+                    acceptedBelowEvent := true
+
+                    if showEvidenceLabelsInput and currentRenderSession
+                        string departureText = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? "A↓"
+                                 : f_localText(japanese, "Accepted below", "下側受容")
+                        )
+                        string departureTooltip = (
+                             f_localText(
+                                 japanese,
+                                 "Accepted departure below the completed opening range",
+                                 "完成オープニングレンジ下側への受容離脱"
+                             ) + "\n" +
+                             str.format_time(sampleTime, "yyyy-MM-dd HH:mm", sessionTimezone) + "  |  " +
+                             f_localText(japanese, "Basis ", "基準 ") + evidenceBasisInput + "  |  " +
+                             f_localText(japanese, "Confirmations ", "連続確認 ") + str.tostring(confirmationSamplesInput)
+                        )
+                        float departureLane = 1.20
+                        string departureStyle = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? label.style_label_up
+                                 : label.style_label_upper_right
+                        )
+                        currentDepartureLabel := label.new(
+                             x = sampleTime,
+                             y = f_lowerLane(currentLow, finalAnnotationStep, departureLane),
+                             text = departureText,
+                             xloc = xloc.bar_time,
+                             yloc = yloc.price,
+                             style = departureStyle,
+                             color = color.new(lowerColorInput, 3),
+                             textcolor = f_contrastText(lowerColorInput),
+                             size = f_labelSize(labelSizeInput),
+                             tooltip = departureTooltip
+                        )
+                        f_registerLabel(
+                             storedLabels,
+                             storedLabelSessions,
+                             storedLabelSides,
+                             storedLabelLanes,
+                             currentDepartureLabel,
+                             currentSession,
+                             -1,
+                             departureLane
+                        )
+
+            if firstDepartureSide != 0 and not reenteredRange and sampleTime > firstDepartureTime
+                bool returnedInside = firstDepartureSide == 1 ? sampleClose <= currentHigh : sampleClose >= currentLow
+                if returnedInside
+                    reenteredRange := true
+                    reentryTime := sampleTime
+                    reentryEvent := true
+
+                    if showEvidenceLabelsInput and currentRenderSession
+                        string reentryText = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? "R"
+                                 : f_localText(japanese, "Re-entry", "再侵入")
+                        )
+                        string reentryTooltip = (
+                             f_localText(
+                                 japanese,
+                                 "Price re-entered the completed opening range after the first accepted departure",
+                                 "最初の受容離脱後に完成オープニングレンジへ再侵入"
+                             ) + "\n" +
+                             str.format_time(sampleTime, "yyyy-MM-dd HH:mm", sessionTimezone)
+                        )
+                        int reentrySide = firstDepartureSide
+                        float reentryLane = 2.25
+                        float reentryY = (
+                             reentrySide > 0
+                                 ? f_upperLane(currentHigh, finalAnnotationStep, reentryLane)
+                                 : f_lowerLane(currentLow, finalAnnotationStep, reentryLane)
+                        )
+                        string reentryStyle = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? (reentrySide > 0 ? label.style_label_down : label.style_label_up)
+                                 : (reentrySide > 0 ? label.style_label_lower_left : label.style_label_upper_left)
+                        )
+                        currentReentryLabel := label.new(
+                             x = sampleTime,
+                             y = reentryY,
+                             text = reentryText,
+                             xloc = xloc.bar_time,
+                             yloc = yloc.price,
+                             style = reentryStyle,
+                             color = color.new(neutralColorInput, 6),
+                             textcolor = f_contrastText(neutralColorInput),
+                             size = f_labelSize(labelSizeInput),
+                             tooltip = reentryTooltip
+                        )
+                        f_registerLabel(
+                             storedLabels,
+                             storedLabelSessions,
+                             storedLabelSides,
+                             storedLabelLanes,
+                             currentReentryLabel,
+                             currentSession,
+                             reentrySide,
+                             reentryLane
+                        )
+
+            if reenteredRange and not traversedOppositeEdge and sampleTime > reentryTime
+                bool oppositeEdgeReached = (
+                     firstDepartureSide == 1
+                         ? sampleLow <= currentLow
+                         : sampleHigh >= currentHigh
+                )
+                if oppositeEdgeReached
+                    traversedOppositeEdge := true
+                    traverseEvent := true
+
+                    if showEvidenceLabelsInput and currentRenderSession
+                        string traverseText = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? "X"
+                                 : f_localText(japanese, "Opposite edge", "反対端到達")
+                        )
+                        string traverseTooltip = (
+                             f_localText(
+                                 japanese,
+                                 "Price reached the opposite opening-range edge after re-entry",
+                                 "再侵入後にオープニングレンジの反対端へ到達"
+                             ) + "\n" +
+                             str.format_time(sampleTime, "yyyy-MM-dd HH:mm", sessionTimezone)
+                        )
+                        int traverseSide = -firstDepartureSide
+                        float traverseLane = 1.20
+                        float traverseY = (
+                             traverseSide > 0
+                                 ? f_upperLane(currentHigh, finalAnnotationStep, traverseLane)
+                                 : f_lowerLane(currentLow, finalAnnotationStep, traverseLane)
+                        )
+                        string traverseStyle = (
+                             eventAnnotationModeInput == "Compact markers"
+                                 ? (traverseSide > 0 ? label.style_label_down : label.style_label_up)
+                                 : (traverseSide > 0 ? label.style_label_lower_left : label.style_label_upper_left)
+                        )
+                        currentTraverseLabel := label.new(
+                             x = sampleTime,
+                             y = traverseY,
+                             text = traverseText,
+                             xloc = xloc.bar_time,
+                             yloc = yloc.price,
+                             style = traverseStyle,
+                             color = color.new(twoSidedColorInput, 3),
+                             textcolor = f_contrastText(twoSidedColorInput),
+                             size = f_labelSize(labelSizeInput),
+                             tooltip = traverseTooltip
+                        )
+                        f_registerLabel(
+                             storedLabels,
+                             storedLabelSessions,
+                             storedLabelSides,
+                             storedLabelLanes,
+                             currentTraverseLabel,
+                             currentSession,
+                             traverseSide,
+                             traverseLane
+                        )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Research-card snapshot and final visual reflow
+//──────────────────────────────────────────────────────────────────────────────
+if currentRenderSession and currentStarted and (not adaptiveHistory or time <= chart.right_visible_bar_time)
+    cardStarted := true
+    cardSession := currentSession
+    cardRangeEnd := currentRangeEnd
+    cardProjectionEnd := currentProjectionEnd
+    cardObservationTime := math.min(barstate.isrealtime ? timenow : nz(time_close, time), currentProjectionEnd)
+    cardLocked := currentLocked
+    cardPartialStart := currentPartialStart
+    cardUsedChartFallback := currentUsedChartFallback
+    cardHigh := currentHigh
+    cardLow := currentLow
+    cardWidth := currentLocked ? finalRangeWidth : math.max(nz(currentHigh - currentLow, syminfo.mintick), syminfo.mintick)
+    cardPercentile := finalWidthPercentile
+    cardEfficiency := finalPathEfficiency
+    cardLateShare := finalLateExpansionShare
+    cardSkew := finalExpansionSkew
+    cardClassification := finalFormationClass
+    cardPostSampleCount := postSampleCount
+    cardInsideSampleCount := insideSampleCount
+    cardAboveSampleCount := aboveSampleCount
+    cardBelowSampleCount := belowSampleCount
+    cardFirstDepartureSide := firstDepartureSide
+    cardReenteredRange := reenteredRange
+    cardTraversedOppositeEdge := traversedOppositeEdge
+    cardUpperTestCount := upperTestCount
+    cardLowerTestCount := lowerTestCount
+    cardMaxUpperReachR := maxUpperReachR
+    cardMaxLowerReachR := maxLowerReachR
+
+if barstate.islast
+    float visibleSpan = (
+         not na(visibleChartHigh) and not na(visibleChartLow)
+             ? math.max(visibleChartHigh - visibleChartLow, syminfo.mintick)
+             : math.max(high - low, syminfo.mintick)
+    )
+    f_reflowLabels(
+         storedLabels,
+         storedLabelSessions,
+         storedLabelSides,
+         storedLabelLanes,
+         retainedSessions,
+         retainedSessionTops,
+         retainedSessionBottoms,
+         retainedSessionWidths,
+         visibleSpan
+    )
+
+    bool showPanelData = cardStarted and researchCardModeInput != "Off"
+    string panelHeaderText = ""
+    string panelClassText = ""
+    string panelStateText = ""
+    string panelFlowText = ""
+    string panelDetailText = ""
+    string panelResolutionText = ""
+    string panelStateIcon = "OR"
+    string panelPercentileValue = "—"
+    string panelEfficiencyValue = "—"
+    string panelLateValue = "—"
+    float panelPercentileRatio = na
+    float panelEfficiencyRatio = na
+    float panelLateRatio = na
+    color panelAccentColor = neutralColorInput
+
+    if showPanelData
+        string scopeEnglish = adaptiveHistory ? "VISIBLE OPENING RANGE" : "LATEST OPENING RANGE"
+        string scopeJapanese = adaptiveHistory ? "表示中オープニングレンジ" : "最新オープニングレンジ"
+        panelHeaderText := (
+             (japanese ? scopeJapanese : scopeEnglish) + "  ·  " +
+             str.format_time(cardSession, "MM-dd HH:mm", sessionTimezone)
+        )
+
+        float panelInsidePercent = cardPostSampleCount > 0 ? 100.0 * cardInsideSampleCount / cardPostSampleCount : na
+        float panelAbovePercent = cardPostSampleCount > 0 ? 100.0 * cardAboveSampleCount / cardPostSampleCount : na
+        float panelBelowPercent = cardPostSampleCount > 0 ? 100.0 * cardBelowSampleCount / cardPostSampleCount : na
+        int panelElapsedMinutes = int(math.floor(math.max(0, math.min(cardObservationTime, cardRangeEnd) - cardSession) / MS_MINUTE))
+        panelResolutionText := (
+             cardUsedChartFallback
+                 ? f_localText(japanese, "Resolution  ·  confirmed chart bars ~" + timeframe.period, "解像度  ·  確定チャート足 ~" + timeframe.period)
+                 : f_localText(japanese, "Resolution  ·  " + samplingTimeframe + " intrabars", "解像度  ·  " + samplingTimeframe + " 下位足")
+        )
+
+        if not cardLocked
+            panelClassText := (
+                 f_localText(japanese, "BUILDING RANGE", "レンジ形成中") + "  " +
+                 str.tostring(math.min(panelElapsedMinutes, rangeMinutesInput)) + "/" + str.tostring(rangeMinutesInput) + "m"
+            )
+            panelStateText := f_localText(japanese, "Capturing the opening auction in realtime", "寄り付きオークションをリアルタイム収集中")
+            panelFlowText := f_localText(japanese, "High / low / equilibrium are updating", "高値・安値・均衡値を更新中")
+            panelDetailText := f_localText(japanese, "Current width  ", "現在幅  ") + str.tostring(cardWidth, format.mintick)
+            panelStateIcon := "LIVE"
+            panelAccentColor := neutralColorInput
+        else if cardPartialStart
+            panelClassText := f_localText(japanese, "PARTIAL OPENING RANGE", "不完全オープニングレンジ")
+            panelStateText := f_localText(japanese, "Earlier opening samples are unavailable", "寄り付き前半サンプルを取得できません")
+            panelFlowText := f_localText(japanese, "Classification and evidence are intentionally disabled", "形成分類とレンジ後検証を意図的に停止")
+            panelDetailText := f_localText(japanese, "Research-grade fallback only", "研究用フォールバック表示")
+            panelStateIcon := "!"
+            panelAccentColor := twoSidedColorInput
+        else
+            panelClassText := researchCardModeInput == "Detailed" ? f_classText(cardClassification, japanese) : f_classShortText(cardClassification, japanese)
+            panelPercentileValue := na(cardPercentile) ? "—" : str.tostring(cardPercentile, "#")
+            panelEfficiencyValue := str.tostring(cardEfficiency, "#.00")
+            panelLateValue := str.tostring(cardLateShare * 100.0, "#") + "%"
+            panelPercentileRatio := na(cardPercentile) ? na : cardPercentile / 100.0
+            panelEfficiencyRatio := cardEfficiency
+            panelLateRatio := cardLateShare
+
+            panelStateText := (
+                 not evidenceEnabledInput
+                     ? f_localText(japanese, "Evidence tracking is off", "レンジ後検証はオフ")
+                     : cardFirstDepartureSide == 0
+                         ? f_localText(japanese, "No accepted departure", "受容離脱なし")
+                         : cardTraversedOppositeEdge
+                             ? f_localText(japanese, "Opposite edge traversed", "反対端まで横断")
+                             : cardReenteredRange
+                                 ? f_localText(japanese, "Re-entered the range", "レンジへ再侵入")
+                                 : cardFirstDepartureSide == 1
+                                     ? f_localText(japanese, "Holding above after acceptance", "上側受容後に上方滞在")
+                                     : f_localText(japanese, "Holding below after acceptance", "下側受容後に下方滞在")
+            )
+            panelStateIcon := (
+                 not evidenceEnabledInput ? "—" :
+                 cardTraversedOppositeEdge ? "↔" :
+                 cardReenteredRange ? "↩" :
+                 cardFirstDepartureSide == 1 ? "↑" :
+                 cardFirstDepartureSide == -1 ? "↓" :
+                 "•"
+            )
+
+            string departureNode = cardFirstDepartureSide == 1 ? "A↑" : cardFirstDepartureSide == -1 ? "A↓" : "A·"
+            string reentryNode = cardReenteredRange ? "R✓" : "R·"
+            string traverseNode = cardTraversedOppositeEdge ? "X✓" : "X·"
+            panelFlowText := evidenceEnabledInput ? departureNode + "   ›   " + reentryNode + "   ›   " + traverseNode : "A—   ›   R—   ›   X—"
+
+            string compactDetail = (
+                 f_localText(japanese, "Tests U/L  ", "テスト 上/下  ") +
+                 str.tostring(cardUpperTestCount) + "/" + str.tostring(cardLowerTestCount) +
+                 "   ·   " + f_localText(japanese, "Reach +", "到達 +") + str.tostring(cardMaxUpperReachR, "#.00") + "R / -" +
+                 str.tostring(cardMaxLowerReachR, "#.00") + "R"
+            )
+            string detailedDetail = (
+                 f_localText(japanese, "Dwell I/U/D  ", "滞在 内/上/下  ") +
+                 (na(panelInsidePercent)
+                     ? "n/a"
+                     : str.tostring(panelInsidePercent, "#") + "/" +
+                       str.tostring(panelAbovePercent, "#") + "/" +
+                       str.tostring(panelBelowPercent, "#") + "%") +
+                 "   ·   " + compactDetail
+            )
+            panelDetailText := researchCardModeInput == "Detailed" ? detailedDetail : compactDetail
+            panelAccentColor := (
+                 cardTraversedOppositeEdge or cardReenteredRange ? twoSidedColorInput :
+                 cardFirstDepartureSide == 1 ? upperColorInput :
+                 cardFirstDepartureSide == -1 ? lowerColorInput :
+                 f_classColor(cardClassification)
+            )
+
+    string noticeText = ""
+    if not chartSupported
+        noticeText := f_appendLine(
+             noticeText,
+             f_localText(
+                 japanese,
+                 "Use a standard intraday chart; synthetic and daily-or-higher charts are disabled.",
+                 "標準の日中足チャートを使用してください。合成足および日足以上では停止します。"
+             )
+        )
+    else
+        if samplingFallback
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "Sampling fallback: the chart timeframe replaces the selected higher sampling timeframe.",
+                     "サンプリング退避: 選択足がチャート足より上位のためチャート足を使用しています。"
+                 )
+            )
+        if not boundaryAligned
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "Boundary note: choose a finer sampling timeframe for cleaner range-end attribution.",
+                     "境界注意: より細かいサンプリング足でレンジ終了境界が明確になります。"
+                 )
+            )
+        if cardStarted and cardPartialStart
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "Partial visible session: classification and post-range evidence are disabled.",
+                     "表示セッションは不完全です。形成分類とレンジ後検証を停止しています。"
+                 )
+            )
+        if adaptiveHistory and visibleFallbackUsed
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "Coarse history active: some visible sessions use confirmed " + timeframe.period + " chart bars.",
+                     "粗い履歴を使用中: 一部の表示セッションは確定" + timeframe.period + "チャート足で再構築しています。"
+                 )
+            )
+        if adaptiveHistory and visibleHistoryGapDetected
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "Some visible bars exceed available intrabar history and cannot use chart-bar fallback at this timeframe.",
+                     "一部の表示バーは下位足履歴外で、この時間足ではチャート足退避を使用できません。"
+                 )
+            )
+        if adaptiveHistory and historyBudgetExceeded
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "Visible-session drawing budget reached; the newest " + str.tostring(sessionsToKeepInput) + " intersecting sessions are retained.",
+                     "表示セッション描画上限に到達し、交差する新しい" + str.tostring(sessionsToKeepInput) + "セッションを保持しています。"
+                 )
+            )
+        if adaptiveHistory and not cardStarted
+            noticeText := f_appendLine(
+                 noticeText,
+                 f_localText(
+                     japanese,
+                     "No configured opening range intersects the current visible window.",
+                     "現在の表示範囲に設定済みオープニングレンジがありません。"
+                 )
+            )
+
+    bool showNoticeCell = noticeText != ""
+    bool showPanelSurface = showPanelData or showNoticeCell
+    color panelBaseBackground = color.new(chart.bg_color, 4)
+    color panelSecondaryBackground = color.new(chart.fg_color, 92)
+    color panelTransparent = color.new(chart.bg_color, 100)
+    color panelAccentText = f_contrastText(panelAccentColor)
+
+    int panelMicroTextSize = f_panelMicroSize(researchPanelScaleInput)
+    int panelBaseTextSize = f_panelBaseSize(researchPanelScaleInput)
+    int panelValueTextSize = f_panelValueSize(researchPanelScaleInput)
+    int panelIconTextSize = f_panelIconSize(researchPanelScaleInput)
+    string panelInnerPad = researchPanelScaleInput == "Compact" ? " " : "  "
+
+    table.set_position(researchPanel, f_tablePosition(researchPanelPositionInput))
+
+    table.cell(
+         researchPanel,
+         0,
+         0,
+         showPanelData ? panelInnerPad + panelHeaderText + panelInnerPad : "",
+         text_color = showPanelData ? panelAccentColor : color.new(chart.fg_color, 100),
+         text_halign = text.align_left,
+         text_valign = text.align_center,
+         text_size = panelMicroTextSize,
+         text_formatting = text.format_bold,
+         bgcolor = showPanelData ? panelBaseBackground : panelTransparent
+    )
+    table.cell(
+         researchPanel,
+         0,
+         1,
+         showPanelData ? panelStateIcon : "",
+         text_color = showPanelData ? panelAccentText : color.new(chart.fg_color, 100),
+         text_halign = text.align_center,
+         text_valign = text.align_center,
+         text_size = panelIconTextSize,
+         text_formatting = text.format_bold,
+         bgcolor = showPanelData ? panelAccentColor : panelTransparent
+    )
+    table.cell(
+         researchPanel,
+         1,
+         1,
+         showPanelData ? panelInnerPad + panelClassText + panelInnerPad : "",
+         text_color = showPanelData ? panelAccentText : color.new(chart.fg_color, 100),
+         text_halign = text.align_left,
+         text_valign = text.align_center,
+         text_size = panelValueTextSize,
+         text_formatting = text.format_bold,
+         bgcolor = showPanelData ? color.new(panelAccentColor, 12) : panelTransparent
+    )
+
+    table.cell(researchPanel, 0, 2, showPanelData ? " PCTL" : "", text_color = twoSidedColorInput, text_halign = text.align_left, text_size = panelBaseTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 2, 2, showPanelData ? panelPercentileValue + " " : "", text_color = twoSidedColorInput, text_halign = text.align_right, text_size = panelValueTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    f_drawPanelMeter(researchPanel, 2, panelPercentileRatio, twoSidedColorInput, panelBaseBackground, showPanelData)
+
+    table.cell(researchPanel, 0, 3, showPanelData ? " EFF" : "", text_color = upperColorInput, text_halign = text.align_left, text_size = panelBaseTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 2, 3, showPanelData ? panelEfficiencyValue + " " : "", text_color = upperColorInput, text_halign = text.align_right, text_size = panelValueTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    f_drawPanelMeter(researchPanel, 3, panelEfficiencyRatio, upperColorInput, panelBaseBackground, showPanelData)
+
+    table.cell(researchPanel, 0, 4, showPanelData ? " LATE" : "", text_color = lowerColorInput, text_halign = text.align_left, text_size = panelBaseTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 2, 4, showPanelData ? panelLateValue + " " : "", text_color = lowerColorInput, text_halign = text.align_right, text_size = panelValueTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    f_drawPanelMeter(researchPanel, 4, panelLateRatio, lowerColorInput, panelBaseBackground, showPanelData)
+
+    table.cell(
+         researchPanel,
+         0,
+         5,
+         showPanelData ? "●" : "",
+         text_color = showPanelData ? panelAccentColor : color.new(chart.fg_color, 100),
+         text_halign = text.align_center,
+         text_size = panelValueTextSize,
+         text_formatting = text.format_bold,
+         bgcolor = showPanelData ? panelSecondaryBackground : panelTransparent
+    )
+    table.cell(
+         researchPanel,
+         1,
+         5,
+         showPanelData ? panelInnerPad + panelStateText + panelInnerPad : "",
+         text_color = chart.fg_color,
+         text_halign = text.align_left,
+         text_size = panelBaseTextSize,
+         bgcolor = showPanelData ? panelSecondaryBackground : panelTransparent
+    )
+    table.cell(researchPanel, 0, 6, showPanelData ? " FLOW" : "", text_color = neutralColorInput, text_halign = text.align_left, text_size = panelBaseTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 2, 6, showPanelData ? panelInnerPad + panelFlowText + panelInnerPad : "", text_color = panelAccentColor, text_halign = text.align_left, text_size = panelValueTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 0, 7, showPanelData ? " STUDY" : "", text_color = neutralColorInput, text_halign = text.align_left, text_size = panelBaseTextSize, text_formatting = text.format_bold, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 2, 7, showPanelData ? panelInnerPad + panelDetailText + panelInnerPad : "", text_color = chart.fg_color, text_halign = text.align_left, text_size = panelBaseTextSize, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(researchPanel, 0, 8, showPanelData ? panelInnerPad + panelResolutionText + panelInnerPad : "", text_color = color.new(chart.fg_color, 18), text_halign = text.align_left, text_size = panelMicroTextSize, bgcolor = showPanelData ? panelBaseBackground : panelTransparent)
+    table.cell(
+         researchPanel,
+         0,
+         9,
+         showNoticeCell ? panelInnerPad + "⚠  " + noticeText + panelInnerPad : "",
+         text_color = showNoticeCell ? f_contrastText(twoSidedColorInput) : color.new(chart.fg_color, 100),
+         text_halign = text.align_left,
+         text_size = panelBaseTextSize,
+         text_formatting = text.format_bold,
+         bgcolor = showNoticeCell ? color.new(twoSidedColorInput, 8) : panelTransparent
+    )
+
+    // Transparent right clearance: keeps the wider panel away from price-scale labels.
+    table.cell(
+         researchPanel,
+         PANEL_SPACER_COLUMN,
+         0,
+         showPanelSurface ? "••••" : "",
+         text_color = color.new(chart.fg_color, 100),
+         text_size = panelBaseTextSize,
+         bgcolor = panelTransparent
+    )
+    for panelRow = 1 to 9
+        table.cell(researchPanel, PANEL_SPACER_COLUMN, panelRow, "", bgcolor = panelTransparent)
+
+    // Transparent bottom clearance: keeps the panel off the time-axis edge.
+    table.cell(
+         researchPanel,
+         0,
+         PANEL_BOTTOM_SPACER_ROW,
+         showPanelSurface ? " " : "",
+         text_color = color.new(chart.fg_color, 100),
+         text_size = panelMicroTextSize,
+         bgcolor = panelTransparent
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Research outputs
+// These appear in the Data Window for transparent study, but remain absent from
+// the chart and status line. They are also available to external-source workflows.
+// Extreme-order code: 1 = final high occurred first, -1 = final low occurred first,
+// 0 = both final extremes were first recorded in the same sampled interval.
+// Formation code: -2 late lower, -1 lower-led, 0 mixed, 1 upper-led,
+// 2 late upper, 3 late two-sided, 4 rotational, 5 two-sided.
+// Evidence code: sign = first departure side; absolute value 1 = accepted,
+// 2 = re-entered, 3 = traversed to the opposite edge.
+//──────────────────────────────────────────────────────────────────────────────
+int evidenceStateCode = (
+     not currentLocked             ? 0 :
+     traversedOppositeEdge         ? firstDepartureSide * 3 :
+     reenteredRange                ? firstDepartureSide * 2 :
+                                     firstDepartureSide
+)
+
+plot(currentStarted ? currentHigh : na, "Opening Range High", display = display.data_window, editable = false)
+plot(currentStarted ? currentLow : na, "Opening Range Low", display = display.data_window, editable = false)
+plot(currentLocked ? finalRangeEquilibrium : na, "Opening Range Equilibrium", display = display.data_window, editable = false)
+plot(currentLocked ? f_rangePercent(finalRangeWidth, currentOpen) : na, "Opening Range Width Percent", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalWidthPercentile : na, "Opening Range Width Percentile", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalPathEfficiency : na, "Sampled Path Efficiency", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalCloseLocation : na, "Opening Range Close Location", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalExpansionSkew : na, "Opening Range Expansion Skew", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalLateExpansionShare : na, "Late Expansion Share", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalEarlyWidthShare : na, "Early Checkpoint Width Share", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? (currentHighTime < currentLowTime ? 1 : currentHighTime > currentLowTime ? -1 : 0) : na, "Final Extreme Order Code", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart ? finalFormationClass : na, "Formation Classification Code", display = display.data_window, editable = false)
+plot(currentLocked and not currentPartialStart and evidenceEnabledInput ? evidenceStateCode : na, "Post-Range Evidence State Code", display = display.data_window, editable = false)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Alerts: neutral research events, not trade instructions
+//──────────────────────────────────────────────────────────────────────────────
+alertcondition(
+     rangeLockedEvent and barstate.isconfirmed,
+     "Opening range locked",
+     "Opening Range Formation Trace: the configured opening range has locked."
+)
+
+alertcondition(
+     acceptedAboveEvent and barstate.isconfirmed,
+     "Accepted departure above",
+     "Opening Range Formation Trace: the first configured accepted departure occurred above the range."
+)
+
+alertcondition(
+     acceptedBelowEvent and barstate.isconfirmed,
+     "Accepted departure below",
+     "Opening Range Formation Trace: the first configured accepted departure occurred below the range."
+)
+
+alertcondition(
+     reentryEvent and barstate.isconfirmed,
+     "Range re-entry",
+     "Opening Range Formation Trace: price re-entered the range after the first accepted departure."
+)
+
+alertcondition(
+     traverseEvent and barstate.isconfirmed,
+     "Opposite-edge traverse",
+     "Opening Range Formation Trace: price reached the opposite range edge after re-entry."
+)

@@ -1,0 +1,197 @@
+//@version=6
+// ============================================================================
+//  Delta Volume Profile — Buy/Sell Split & Absorption POC [LunqFX]
+// ----------------------------------------------------------------------------
+//  ONE idea: a volume profile that shows WHO traded at each price, not just
+//  how much. Every price row is split into buying volume and selling volume,
+//  so you see where buyers and sellers were actually active across the range.
+//
+//  Two things, nothing else:
+//    1) DELTA SPLIT — each row is drawn as buy-volume (one colour) stacked
+//       against sell-volume (the other), so the profile reads as order flow,
+//       not a plain histogram.
+//    2) ABSORPTION POC — the one price level where the most volume traded with
+//       the least net delta: heavy two-sided trade, i.e. a large player
+//       absorbing flow. Highlighted as the key level.
+//
+//  NON-REPAINTING: the profile is built over a fixed rolling lookback and
+//  drawn on the last bar. Historical bars are never repainted.
+// ============================================================================
+indicator("Delta Volume Profile — Buy/Sell Split & Absorption POC [LunqFX]",
+     "Delta Volume Profile [LunqFX]", overlay = true, max_boxes_count = 500, max_lines_count = 20, max_labels_count = 20)
+
+// ─────────────────────────────────────────────────────────────────────────
+//  PALETTE
+// ─────────────────────────────────────────────────────────────────────────
+BUY_C   = #2D7DD2            // buying volume — blue  (high-contrast pair on grey)
+BUY_HI  = #6AA9E9
+SELL_C  = #EE8A3B            // selling volume — orange
+SELL_HI = #F5B478
+GOLD    = #FFCE3A            // absorption POC — bright yellow-gold (distinct from orange)
+INK     = #0E1017
+PANEL   = color.new(#0E1017, 8)
+HEAD    = color.new(#191D28, 0)
+TXT     = #EAEEF4
+MUTE    = #8891A0
+
+// ─────────────────────────────────────────────────────────────────────────
+//  INPUTS
+// ─────────────────────────────────────────────────────────────────────────
+gP      = "Profile"
+lookback= input.int(240, "Lookback (bars)", minval = 30, maxval = 5000, group = gP)
+rows    = input.int(30,  "Rows (resolution)", minval = 10, maxval = 80, group = gP, tooltip = "Number of price levels the range is split into.")
+width   = input.int(90,  "Profile width (bars)", minval = 20, maxval = 400, group = gP)
+side    = input.string("Right", "Profile side", options = ["Right","Left"], group = gP)
+
+gV      = "Visuals"
+rowGap  = input.int(1, "Row gap", minval = 0, maxval = 3, group = gV, tooltip = "Pixels of space between rows.")
+showPOC = input.bool(true, "Absorption POC line", group = gV)
+candOn  = input.bool(true, "Neutral candles", group = gV, tooltip = "Recolour candles in neutral slate so they don't blend with the profile.")
+
+gD      = "Dashboard"
+showHUD = input.bool(true, "Show dashboard", group = gD)
+hudPos  = input.string("Top Right","Position", options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right"], group = gD)
+
+// ─────────────────────────────────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────────────────────────────────
+hudPosition(string s) =>
+    switch s
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        => position.middle_right
+
+// per-bar buy/sell split from close position in the bar's range.
+// weight by real volume when the symbol has it; fall back to equal weight
+// (1 per bar) when it does not — so the profile works on EVERY symbol.
+rngHL   = math.max(high - low, syminfo.mintick)
+wv      = nz(volume) > 0 ? volume : 1.0
+barBuy  = wv * (close - low) / rngHL
+barSell = wv * (high - close) / rngHL
+noVol   = ta.cum(nz(volume)) == 0        // true = symbol reports no volume
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CANDLES — NEUTRAL slate, so they never blend with the teal/coral profile
+// ─────────────────────────────────────────────────────────────────────────
+// monochrome candles with a contrasting outline so they read across the whole
+// grey gradient (light top / dark bottom) and never clash with blue/orange
+UP_BODY = #ECEFF4            // near-white body
+UP_EDGE = #2A2F3A            // dark outline → visible on light grey
+DN_BODY = #262B34            // charcoal body
+DN_EDGE = #C2C9D4            // light outline → visible on dark grey
+isUp    = close >= open
+cBody   = isUp ? UP_BODY : DN_BODY
+cEdge   = isUp ? UP_EDGE : DN_EDGE
+plotcandle(candOn ? open : na, high, low, close, title = "Candles", color = cBody, wickcolor = cEdge, bordercolor = cEdge)
+
+// range of the profile — computed every bar (TA functions must run each bar)
+hh  = ta.highest(high, lookback)
+ll  = ta.lowest(low, lookback)
+rng = hh - ll
+
+// ─────────────────────────────────────────────────────────────────────────
+//  RENDER (last bar only)
+// ─────────────────────────────────────────────────────────────────────────
+var array<box>  cells = array.new<box>()
+var array<line> pocLn = array.new<line>()
+var array<label> pocLb= array.new<label>()
+var table hud = na
+
+if barstate.islast
+    if array.size(cells) > 0
+        for i = 0 to array.size(cells) - 1
+            box.delete(array.get(cells, i))
+        array.clear(cells)
+    if array.size(pocLn) > 0
+        for i = 0 to array.size(pocLn) - 1
+            line.delete(array.get(pocLn, i))
+        array.clear(pocLn)
+    if array.size(pocLb) > 0
+        for i = 0 to array.size(pocLb) - 1
+            label.delete(array.get(pocLb, i))
+        array.clear(pocLb)
+    if not na(hud)
+        table.delete(hud)
+
+    if rng > 0
+        step = rng / rows
+        buyRow  = array.new<float>(rows, 0.0)
+        sellRow = array.new<float>(rows, 0.0)
+
+        // accumulate buy/sell volume into the row of each bar's hlc3
+        for i = 0 to lookback - 1
+            if bar_index - i >= 0
+                p = (high[i] + low[i] + close[i]) / 3.0
+                r = math.max(0, math.min(rows - 1, math.floor((p - ll) / step)))
+                array.set(buyRow,  r, array.get(buyRow,  r) + nz(barBuy[i],  0.0))
+                array.set(sellRow, r, array.get(sellRow, r) + nz(barSell[i], 0.0))
+
+        // totals + find max total row (for scaling) and absorption POC
+        maxTot = 0.0
+        for r = 0 to rows - 1
+            t = array.get(buyRow, r) + array.get(sellRow, r)
+            maxTot := math.max(maxTot, t)
+
+        // absorption POC = row with the most volume AND the most balanced delta
+        pocR    = -1
+        pocScore= -1.0
+        totBuy  = 0.0
+        totSell = 0.0
+        for r = 0 to rows - 1
+            b = array.get(buyRow, r)
+            s = array.get(sellRow, r)
+            t = b + s
+            totBuy  += b
+            totSell += s
+            if t > 0 and maxTot > 0
+                balance = 1.0 - math.abs(b - s) / t          // 1 = perfectly two-sided
+                sc = (t / maxTot) * balance                   // heavy AND absorbed
+                if sc > pocScore
+                    pocScore := sc
+                    pocR := r
+
+        // draw rows — profile sits in the empty area to the RIGHT of the last
+        // candle (sidebar), growing right, so it never covers price
+        baseX = bar_index + 3
+        for r = 0 to rows - 1
+            b = array.get(buyRow, r)
+            s = array.get(sellRow, r)
+            t = b + s
+            if t > 0 and maxTot > 0
+                yTop = ll + step * (r + 1) - step * (rowGap * 0.06)
+                yBot = ll + step * r + step * (rowGap * 0.06)
+                wTot = math.round(t / maxTot * width)
+                wBuy = t > 0 ? math.round(wTot * b / t) : 0
+                isPOC = r == pocR
+                xa   = baseX               // nearest price (buy side)
+                xMid = baseX + wBuy
+                xb   = baseX + wTot
+                bOp  = isPOC ? 14 : 32
+                // buy block (inner, toward price)
+                array.push(cells, box.new(xa, yTop, xMid, yBot, border_color = color.new(BUY_C, 100), bgcolor = color.new(BUY_C, bOp)))
+                // sell block (outer)
+                array.push(cells, box.new(xMid, yTop, xb, yBot, border_color = color.new(SELL_C, 100), bgcolor = color.new(SELL_C, bOp)))
+
+        // absorption POC — thin line to the right, label clear of ALL bars
+        if showPOC and pocR >= 0
+            pocPrice = ll + step * (pocR + 0.5)
+            lblX = baseX + width + 6            // past the longest possible bar
+            array.push(pocLn, line.new(baseX, pocPrice, lblX, pocPrice, color = color.new(GOLD, 45), width = 1, style = line.style_dotted))
+            array.push(pocLb, label.new(lblX, pocPrice, " ABSORPTION " + str.tostring(pocPrice, format.mintick) + " ", style = label.style_label_left, color = color.new(INK, 4), textcolor = GOLD, size = size.normal))
+
+        // ── DASHBOARD — compact info card (can't be confused with the price axis) ──
+        if showHUD and maxTot > 0
+            tot   = totBuy + totSell
+            buyPc = tot > 0 ? totBuy / tot * 100 : 50
+            netD  = tot > 0 ? (totBuy - totSell) / tot * 100 : 0
+            hud := table.new(hudPosition(hudPos), 2, 4, bgcolor = PANEL, border_width = 0, frame_width = 0)
+            table.cell(hud, 0, 0, "  " + (noVol ? "PRICE PROFILE" : "DELTA PROFILE"), text_color = TXT, text_size = size.normal, text_halign = text.align_left, bgcolor = HEAD)
+            table.cell(hud, 1, 0, "LunqFX  ", text_color = MUTE, text_size = size.small, text_halign = text.align_right, bgcolor = HEAD)
+            table.cell(hud, 0, 1, "  NET DELTA", text_color = MUTE, text_size = size.normal, text_halign = text.align_left, bgcolor = PANEL)
+            table.cell(hud, 1, 1, (netD >= 0 ? "▲ +" : "▼ ") + str.tostring(math.abs(netD), "#.0") + "%  ", text_color = netD >= 0 ? BUY_HI : SELL_HI, text_size = size.huge, text_halign = text.align_right, bgcolor = PANEL)
+            table.cell(hud, 0, 2, "  Buy / Sell", text_color = MUTE, text_size = size.normal, text_halign = text.align_left, bgcolor = PANEL)
+            table.cell(hud, 1, 2, str.tostring(math.round(buyPc)) + "% / " + str.tostring(100 - math.round(buyPc)) + "%  ", text_color = buyPc >= 50 ? BUY_HI : SELL_HI, text_size = size.large, text_halign = text.align_right, bgcolor = PANEL)
+            table.cell(hud, 0, 3, "  Absorption", text_color = MUTE, text_size = size.normal, text_halign = text.align_left, bgcolor = PANEL)
+            table.cell(hud, 1, 3, (pocR >= 0 ? str.tostring(ll + step * (pocR + 0.5), format.mintick) : "—") + "  ", text_color = GOLD, text_size = size.large, text_halign = text.align_right, bgcolor = PANEL)

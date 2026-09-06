@@ -1,0 +1,673 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// Smart Liquidity ULTIMATE
+// Зассан: 1) WinRate муу 2) Өнгөрсөн chart дээр харагдахгүй 3) Оновчтой цөөн entry
+// Логик: Nearest Liq → Sweep → CHoCH → Retest → Strict Confirm → 1:3 FIXED
+// ═══════════════════════════════════════════════════════════════════════════════
+//@version=6
+indicator("Smart Liquidity V4 [Optimal Few | High WR | Fixed 1:3]", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500, max_bars_back=1500)
+
+// COLORS
+color CYAN        = color.rgb(0, 245, 255)
+color MAGENTA     = color.rgb(255, 0, 230)
+color NEON_GREEN  = color.rgb(0, 255, 163)
+color NEON_PINK   = color.rgb(255, 42, 109)
+color NEON_YELLOW = color.rgb(255, 230, 0)
+color DARK_BG     = color.rgb(11, 15, 31)
+color DARK_BG2    = color.rgb(19, 23, 41)
+
+color COL_BUY_LIQ  = CYAN
+color COL_SELL_LIQ = MAGENTA
+color COL_NEAR_BUY = NEON_GREEN
+color COL_NEAR_SELL= NEON_PINK
+color COL_SWEEP    = NEON_YELLOW
+color COL_MITI     = color.rgb(85,85,95)
+
+// INPUTS
+grpDisp = "═══ 🎨 DISPLAY ═══"
+grpLiq  = "═══ 💧 LIQUIDITY ═══"
+grpStruct = "═══ 🏗️ STRUCTURE ═══"
+grpConf = "═══ 🕯️ STRICT CONFIRM (Few) ═══"
+grpSig  = "═══ 🚀 OPTIMAL ENTRIES ═══"
+grpRisk = "═══ ⚖️ FIXED RR 1:3 ═══"
+grpWin  = "═══ 📊 WINRATE ═══"
+
+showLiqLines   = input.bool(true, "Liquidity шугам", group=grpDisp)
+showNearestBox = input.bool(true, "Nearest Box", group=grpDisp)
+showPosBox     = input.bool(true, "Position Box 1:3 - Түүхэнд харагдана", group=grpDisp)
+showStruct     = input.bool(true, "HH/HL BOS/CHoCH", group=grpDisp)
+showZigZag     = input.bool(false, "ZigZag OFF = цэвэр", group=grpDisp)
+keepHistorical = input.bool(true, "Өнгөрсөн Box-ууд хадгалагдах (100 хүртэл)", group=grpDisp)
+
+leftBars  = input.int(5, "Left Bars", 1, 20, group=grpLiq)
+rightBars = input.int(5, "Right Bars", 1, 20, group=grpLiq)
+maxAge    = input.int(500, "Max Age", 50, 2000, group=grpLiq)
+minFresh  = input.int(25, "Min Fresh bars (чанартай түвшин)", 5, 100, group=grpLiq)
+
+structLeft  = input.int(5, "Struct Left", 2, 15, group=grpStruct)
+structRight = input.int(5, "Struct Right", 2, 15, group=grpStruct)
+structLookback = input.int(25, "BOS/CHoCH Lookback", 5, 60, group=grpStruct)
+atrFiltPct = input.float(0.12, "BOS ATR Filter", 0.0, 1.0, 0.02, group=grpStruct)
+
+confMode = input.string("ULTRA STRICT Few", "Confirm (цөөн болгох)", ["STRICT Few", "ULTRA STRICT Few", "PIN + ULTRA"], group=grpConf)
+bodyMult = input.float(1.25, "Body > SMA* (1.25 = цөөн, чанартай)", 0.8, 2.5, 0.05, group=grpConf)
+useRsiFilter = input.bool(true, "RSI Filter - WinRate өсгөнө", group=grpConf)
+useEmaFilter = input.bool(true, "EMA 50/200 Trend Filter - цөөн entry", group=grpConf)
+
+entryMode = input.string("Reversal After Sweep (High WR)", "Entry Mode - Оновчтой цөөн", ["Reversal After Sweep (High WR)", "Continuation To Liq (Path)"], group=grpSig, tooltip="Reversal = Sweep хийсний дараа буцах → WinRate өндөр, цөөн | Continuation = Liq руу шууд → олон, WR бага")
+sweepToChoChMax = input.int(15, "Sweep → CHoCH max bars", 3, 40, group=grpSig)
+choChToConfMax  = input.int(8, "CHoCH → Confirm max bars", 2, 20, group=grpSig)
+cooldownBars    = input.int(50, "Cooldown 50 = цөөн оновчтой entry", 10, 150, group=grpSig)
+minProb         = input.float(55, "Min Prob %", 40, 80, 1, group=grpSig)
+
+fixedRR     = input.float(3.0, "FIXED RR 1:3 тогтмол", 1.0, 5.0, 0.1, group=grpRisk)
+slAtrMult   = input.float(0.8, "SL ATR Buffer (том = SL хол, WR өндөр)", 0.2, 3.0, 0.1, group=grpRisk)
+boxLen      = input.int(35, "Box урт", 10, 100, group=grpRisk)
+maxBoxes    = input.int(100, "Түүхэнд хадгалах Box тоо (100 = өнгөрсөн харагдана)", 10, 200, group=grpRisk)
+
+showWinPanel  = input.bool(true, "WinRate Panel", group=grpWin)
+showProbPanel = input.bool(true, "Prob Panel", group=grpWin)
+
+// UDT
+type liqLevel
+    float price
+    int   barIdx
+    bool  isBuy
+    bool  mitigated
+    bool  swept
+    int   sweptBar
+    line  ln
+    label lbl
+
+type tradeInfo
+    int   dir
+    float entry
+    float sl
+    float tp
+    float rr
+    int   openBar
+    bool  active
+    float targetLiqPrice
+
+// VARS
+var array<liqLevel> buyPool  = array.new<liqLevel>(0)
+var array<liqLevel> sellPool = array.new<liqLevel>(0)
+
+var box[] nearBuyBoxes  = array.new_box(0)
+var box[] nearSellBoxes = array.new_box(0)
+var label nearestBuyLbl  = na
+var label nearestSellLbl = na
+
+var box[]   posBoxes   = array.new_box(0)
+var box[]   posSlBoxes = array.new_box(0)
+var line[]  posEntryLn = array.new_line(0)
+var line[]  posSlLn    = array.new_line(0)
+var line[]  posTpLn    = array.new_line(0)
+var label[] posLbls    = array.new_label(0)
+
+var float lastSwingHigh = na
+var int   lastSwingHighBar = na
+var float prevSwingHigh = na
+var int   prevSwingHighBar = na
+var float lastSwingLow = na
+var int   lastSwingLowBar = na
+var float prevSwingLow = na
+var int   prevSwingLowBar = na
+var int structTrend = 0
+var int lastBullBOSBar = na
+var int lastBearBOSBar = na
+var int lastBullChoChBar = na
+var int lastBearChoChBar = na
+
+var line[] zzLines = array.new_line(0)
+var line[] bosLines = array.new_line(0)
+var label[] structLbls = array.new_label(0)
+
+var int lastBuySweepBar = na
+var float lastBuySweepPrice = na
+var int lastSellSweepBar = na
+var float lastSellSweepPrice = na
+var int lastBullChoChAfterSweepBar = na
+var int lastBearChoChAfterSweepBar = na
+var float choChBrokenLevel = na
+
+var tradeInfo activeTrade = na
+var int totalTrades = 0
+var int winCount = 0
+var int lossCount = 0
+var float totalRRWin = 0.0
+var float totalRRLoss = 0.0
+var int curWinStreak = 0
+var int curLossStreak = 0
+var int bestWinStreak = 0
+var int bestLossStreak= 0
+var string lastResult = "N/A"
+var int lastSignalBar = na
+
+atrVal = ta.atr(14)
+body = math.abs(close - open)
+rng = high - low
+avgBody = ta.sma(body, 20)
+rsiVal = ta.rsi(close, 14)
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// HELPERS
+calcDist(float p) => math.abs(close - p)
+checkMitigation(liqLevel l) => l.isBuy ? close < l.price : close > l.price
+checkSweep(liqLevel l) => l.isBuy ? low < l.price and close > l.price : high > l.price and close < l.price
+
+findNearest(array<liqLevel> pool) =>
+    float best = na
+    int idx = -1
+    int sz = array.size(pool)
+    if sz>0
+        for i=0 to sz-1
+            liqLevel it = array.get(pool, i)
+            if not it.mitigated
+                float d = calcDist(it.price)
+                if na(best) or d < best
+                    best := d
+                    idx := i
+    idx
+
+fmt(float p) => str.tostring(p, format.mintick)
+
+// LIQ DETECTION
+float ph = ta.pivothigh(high, leftBars, rightBars)
+float pl = ta.pivotlow(low, leftBars, rightBars)
+if not na(ph)
+    array.push(sellPool, liqLevel.new(ph, bar_index-rightBars, false, false, false, -1, na, na))
+if not na(pl)
+    array.push(buyPool, liqLevel.new(pl, bar_index-rightBars, true, false, false, -1, na, na))
+
+// STRUCTURE
+float stH = ta.pivothigh(high, structLeft, structRight)
+float stL = ta.pivotlow(low, structLeft, structRight)
+
+if not na(stH)
+    prevSwingHigh := lastSwingHigh
+    prevSwingHighBar := lastSwingHighBar
+    lastSwingHigh := stH
+    lastSwingHighBar := bar_index - structRight
+    if showStruct
+        string txt = na(prevSwingHigh) ? "H" : stH > prevSwingHigh ? "HH" : "LH"
+        color c = txt=="HH" ? NEON_GREEN : txt=="LH" ? NEON_PINK : color.gray
+        array.push(structLbls, label.new(lastSwingHighBar, stH, txt, style=label.style_label_down, color=color.new(DARK_BG2,0), textcolor=c, size=size.tiny))
+        if showZigZag and not na(lastSwingLow) and not na(lastSwingLowBar)
+            array.push(zzLines, line.new(lastSwingLowBar, lastSwingLow, lastSwingHighBar, stH, color=color.new(CYAN,75), width=1))
+
+if not na(stL)
+    prevSwingLow := lastSwingLow
+    prevSwingLowBar := lastSwingLowBar
+    lastSwingLow := stL
+    lastSwingLowBar := bar_index - structRight
+    if showStruct
+        string txt = na(prevSwingLow) ? "L" : stL > prevSwingLow ? "HL" : "LL"
+        color c = txt=="HL" ? NEON_GREEN : txt=="LL" ? NEON_PINK : color.gray
+        array.push(structLbls, label.new(lastSwingLowBar, stL, txt, style=label.style_label_up, color=color.new(DARK_BG2,0), textcolor=c, size=size.tiny))
+        if showZigZag and not na(lastSwingHigh) and not na(lastSwingHighBar)
+            array.push(zzLines, line.new(lastSwingHighBar, lastSwingHigh, lastSwingLowBar, stL, color=color.new(MAGENTA,75), width=1))
+
+if array.size(zzLines)>80
+    line.delete(array.shift(zzLines))
+if array.size(structLbls)>120
+    label.delete(array.shift(structLbls))
+
+bool bullBreak = not na(lastSwingHigh) and (ta.crossover(close, lastSwingHigh) or close > lastSwingHigh + atrVal*atrFiltPct)
+bool bearBreak = not na(lastSwingLow) and (ta.crossunder(close, lastSwingLow) or close < lastSwingLow - atrVal*atrFiltPct)
+
+bool bullBOS = false
+bool bearBOS = false
+bool bullChoCh = false
+bool bearChoCh = false
+
+if bullBreak
+    if structTrend==-1
+        bullChoCh := true
+        lastBullChoChBar := bar_index
+        structTrend := 1
+    else
+        bullBOS := true
+        lastBullBOSBar := bar_index
+        if structTrend==0
+            structTrend :=1
+if bearBreak
+    if structTrend==1
+        bearChoCh := true
+        lastBearChoChBar := bar_index
+        structTrend := -1
+    else
+        bearBOS := true
+        lastBearBOSBar := bar_index
+        if structTrend==0
+            structTrend :=-1
+
+if showStruct
+    if bullBOS and not na(lastSwingHigh) and not na(lastSwingHighBar)
+        array.push(bosLines, line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color=CYAN, width=2, style=line.style_dashed))
+        array.push(structLbls, label.new(bar_index, lastSwingHigh, "BOS▲", style=label.style_label_left, color=color.new(CYAN,80), textcolor=color.white, size=size.tiny))
+    if bearBOS and not na(lastSwingLow) and not na(lastSwingLowBar)
+        array.push(bosLines, line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color=MAGENTA, width=2, style=line.style_dashed))
+        array.push(structLbls, label.new(bar_index, lastSwingLow, "BOS▼", style=label.style_label_left, color=color.new(MAGENTA,80), textcolor=color.white, size=size.tiny))
+    if bullChoCh and not na(lastSwingHigh) and not na(lastSwingHighBar)
+        array.push(bosLines, line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color=NEON_GREEN, width=2))
+        array.push(structLbls, label.new(bar_index, lastSwingHigh, "CHoCH▲", style=label.style_label_left, color=color.new(NEON_GREEN,20), textcolor=color.black, size=size.small))
+    if bearChoCh and not na(lastSwingLow) and not na(lastSwingLowBar)
+        array.push(bosLines, line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color=NEON_PINK, width=2))
+        array.push(structLbls, label.new(bar_index, lastSwingLow, "CHoCH▼", style=label.style_label_left, color=color.new(NEON_PINK,20), textcolor=color.white, size=size.small))
+    if array.size(bosLines)>50
+        line.delete(array.shift(bosLines))
+
+// CONFIRMATION - ULTRA STRICT FOR FEW ENTRIES
+bool bullEngulf = close>open and close[1]<open[1] and close>=open[1] and open<=close[1] and body>body[1]*0.9
+bool bearEngulf = close<open and close[1]>open[1] and close<=open[1] and open>=close[1] and body>body[1]*0.9
+bool bullStrong = body > avgBody*bodyMult and close > (high+low)/2 + rng*0.15 and close>open
+bool bearStrong = body > avgBody*bodyMult and close < (high+low)/2 - rng*0.15 and close<open
+bool bullPin = (math.min(open,close)-low) > body*2.0 and (high-math.max(open,close)) < body*0.4
+bool bearPin = (high-math.max(open,close)) > body*2.0 and (math.min(open,close)-low) < body*0.4
+
+bool bullConf = false
+bool bearConf = false
+if confMode=="STRICT Few"
+    bullConf := (bullEngulf or close>high[1]) and bullStrong
+    bearConf := (bearEngulf or close<low[1]) and bearStrong
+else if confMode=="ULTRA STRICT Few"
+    bullConf := bullEngulf and bullStrong and close>high[1] and body>avgBody*1.2
+    bearConf := bearEngulf and bearStrong and close<low[1] and body>avgBody*1.2
+else // PIN + ULTRA
+    bullConf := (bullPin or bullEngulf) and bullStrong and close>high[1]
+    bearConf := (bearPin or bearEngulf) and bearStrong and close<low[1]
+
+// LIQ POOLS UPDATE
+array<liqLevel> newBuy = array.new<liqLevel>(0)
+if array.size(buyPool)>0
+    for i=0 to array.size(buyPool)-1
+        liqLevel liq = array.get(buyPool, i)
+        if bar_index - liq.barIdx > maxAge
+            if not na(liq.ln)
+                line.delete(liq.ln)
+            if not na(liq.lbl)
+                label.delete(liq.lbl)
+            continue
+        if not liq.mitigated and checkMitigation(liq)
+            liq.mitigated := true
+            if not na(liq.ln)
+                line.set_color(liq.ln, COL_MITI)
+                line.set_style(liq.ln, line.style_dotted)
+            if not na(liq.lbl)
+                label.delete(liq.lbl)
+            array.push(newBuy, liq)
+            continue
+        if not liq.swept and not liq.mitigated and checkSweep(liq)
+            // strong sweep only
+            if (liq.price - low) > body*1.3 or low < liq.price - atrVal*0.25
+                liq.swept := true
+                liq.sweptBar := bar_index
+        if not liq.mitigated and showLiqLines
+            color c = liq.swept ? COL_SWEEP : COL_BUY_LIQ
+            if na(liq.ln)
+                liq.ln := line.new(liq.barIdx, liq.price, bar_index, liq.price, color=c, width=1, extend=extend.right)
+            else
+                line.set_color(liq.ln, c)
+                line.set_x2(liq.ln, bar_index)
+        array.push(newBuy, liq)
+buyPool := newBuy
+
+array<liqLevel> newSell = array.new<liqLevel>(0)
+if array.size(sellPool)>0
+    for i=0 to array.size(sellPool)-1
+        liqLevel liq = array.get(sellPool, i)
+        if bar_index - liq.barIdx > maxAge
+            if not na(liq.ln)
+                line.delete(liq.ln)
+            if not na(liq.lbl)
+                label.delete(liq.lbl)
+            continue
+        if not liq.mitigated and checkMitigation(liq)
+            liq.mitigated := true
+            if not na(liq.ln)
+                line.set_color(liq.ln, COL_MITI)
+                line.set_style(liq.ln, line.style_dotted)
+            if not na(liq.lbl)
+                label.delete(liq.lbl)
+            array.push(newSell, liq)
+            continue
+        if not liq.swept and not liq.mitigated and checkSweep(liq)
+            if (high - liq.price) > body*1.3 or high > liq.price + atrVal*0.25
+                liq.swept := true
+                liq.sweptBar := bar_index
+        if not liq.mitigated and showLiqLines
+            color c = liq.swept ? COL_SWEEP : COL_SELL_LIQ
+            if na(liq.ln)
+                liq.ln := line.new(liq.barIdx, liq.price, bar_index, liq.price, color=c, width=1, extend=extend.right)
+            else
+                line.set_color(liq.ln, c)
+                line.set_x2(liq.ln, bar_index)
+        array.push(newSell, liq)
+sellPool := newSell
+
+// NEAREST
+if array.size(nearBuyBoxes)>0
+    for b in nearBuyBoxes
+        box.delete(b)
+    array.clear(nearBuyBoxes)
+if array.size(nearSellBoxes)>0
+    for b in nearSellBoxes
+        box.delete(b)
+    array.clear(nearSellBoxes)
+if not na(nearestBuyLbl)
+    label.delete(nearestBuyLbl)
+    nearestBuyLbl := na
+if not na(nearestSellLbl)
+    label.delete(nearestSellLbl)
+    nearestSellLbl := na
+
+int nearestBuyIdx = findNearest(buyPool)
+int nearestSellIdx = findNearest(sellPool)
+float nearestBuyPrice = na
+float nearestSellPrice = na
+if nearestBuyIdx>=0
+    nearestBuyPrice := array.get(buyPool, nearestBuyIdx).price
+if nearestSellIdx>=0
+    nearestSellPrice := array.get(sellPool, nearestSellIdx).price
+
+if nearestBuyIdx>=0 and showNearestBox
+    liqLevel l = array.get(buyPool, nearestBuyIdx)
+    float ts = syminfo.mintick*25
+    array.push(nearBuyBoxes, box.new(bar_index-30, l.price+ts, bar_index, l.price-ts, bgcolor=color.new(COL_NEAR_BUY,70), border_color=COL_NEAR_BUY, border_width=2))
+    nearestBuyLbl := label.new(bar_index, l.price, "⬇ BUY LIQ\n"+fmt(l.price), color=color.new(COL_NEAR_BUY,20), textcolor=color.black, style=label.style_label_down, size=size.small)
+    if not na(l.ln)
+        line.set_width(l.ln, 3)
+
+if nearestSellIdx>=0 and showNearestBox
+    liqLevel l = array.get(sellPool, nearestSellIdx)
+    float ts = syminfo.mintick*25
+    array.push(nearSellBoxes, box.new(bar_index-30, l.price+ts, bar_index, l.price-ts, bgcolor=color.new(COL_NEAR_SELL,70), border_color=COL_NEAR_SELL, border_width=2))
+    nearestSellLbl := label.new(bar_index, l.price, "⬆ SELL LIQ\n"+fmt(l.price), color=color.new(COL_NEAR_SELL,20), textcolor=color.white, style=label.style_label_up, size=size.small)
+    if not na(l.ln)
+        line.set_width(l.ln, 3)
+
+// PROB
+float probBuy = 50.0
+float probSell = 50.0
+float dBuy = na
+float dSell = na
+if nearestBuyIdx>=0 and nearestSellIdx>=0
+    liqLevel bL = array.get(buyPool, nearestBuyIdx)
+    liqLevel sL = array.get(sellPool, nearestSellIdx)
+    dBuy := calcDist(bL.price)
+    dSell := calcDist(sL.price)
+    float tot = dBuy + dSell
+    if tot>0
+        probBuy := (dSell / tot) * 100
+        probSell := (dBuy / tot) * 100
+    if structTrend==1
+        probSell := math.min(90, probSell+12)
+        probBuy := 100-probSell
+    if structTrend==-1
+        probBuy := math.min(90, probBuy+12)
+        probSell := 100-probBuy
+
+probBuy := math.max(5, math.min(95, probBuy))
+probSell := 100 - probBuy
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OPTIMAL FEW ENTRIES LOGIC - SWEEP → CHoCH → CONFIRM (HIGH WR)
+// ═══════════════════════════════════════════════════════════════════════════════
+bool immediateBuySweep  = not na(nearestBuyPrice) and low <= nearestBuyPrice and close > nearestBuyPrice and (nearestBuyPrice - low) > body*1.2
+bool immediateSellSweep = not na(nearestSellPrice) and high >= nearestSellPrice and close < nearestSellPrice and (high - nearestSellPrice) > body*1.2
+
+if immediateBuySweep
+    lastBuySweepBar := bar_index
+    lastBuySweepPrice := nearestBuyPrice
+if immediateSellSweep
+    lastSellSweepBar := bar_index
+    lastSellSweepPrice := nearestSellPrice
+
+// CHoCH after sweep
+if bullChoCh and not na(lastBuySweepBar) and bar_index - lastBuySweepBar <= sweepToChoChMax and bar_index > lastBuySweepBar
+    lastBullChoChAfterSweepBar := bar_index
+    choChBrokenLevel := lastSwingHigh
+if bearChoCh and not na(lastSellSweepBar) and bar_index - lastSellSweepBar <= sweepToChoChMax and bar_index > lastSellSweepBar
+    lastBearChoChAfterSweepBar := bar_index
+    choChBrokenLevel := lastSwingLow
+
+// Clear stale
+if not na(lastBullChoChAfterSweepBar) and bar_index - lastBullChoChAfterSweepBar > choChToConfMax + 10
+    lastBullChoChAfterSweepBar := na
+if not na(lastBearChoChAfterSweepBar) and bar_index - lastBearChoChAfterSweepBar > choChToConfMax + 10
+    lastBearChoChAfterSweepBar := na
+
+bool cooldownOk = na(lastSignalBar) or bar_index - lastSignalBar >= cooldownBars
+bool noActive = na(activeTrade) or not activeTrade.active
+
+bool longSignal = false
+bool shortSignal = false
+
+bool isReversalMode = entryMode == "Reversal After Sweep (High WR)"
+
+if isReversalMode
+    // REVERSAL - HIGH WINRATE - цөөн оновчтой
+    if not na(lastBullChoChAfterSweepBar) and bar_index - lastBullChoChAfterSweepBar <= choChToConfMax and cooldownOk and noActive
+        bool freshOk = true
+        if nearestBuyIdx>=0
+            liqLevel l = array.get(buyPool, nearestBuyIdx)
+            freshOk := bar_index - l.barIdx >= minFresh
+        bool rsiOk = not useRsiFilter or (rsiVal < 58 and rsiVal > rsiVal[1]) // oversold recovery
+        bool emaOk = not useEmaFilter or close > ema50
+        bool probOk = probBuy >= minProb or probSell >= minProb // аль нэг нь хангалттай
+        bool structOk = structTrend==1 or bullChoCh
+        if bullConf and freshOk and rsiOk and emaOk and probOk and structOk
+            longSignal := true
+
+    if not na(lastBearChoChAfterSweepBar) and bar_index - lastBearChoChAfterSweepBar <= choChToConfMax and cooldownOk and noActive
+        bool freshOk = true
+        if nearestSellIdx>=0
+            liqLevel l = array.get(sellPool, nearestSellIdx)
+            freshOk := bar_index - l.barIdx >= minFresh
+        bool rsiOk = not useRsiFilter or (rsiVal > 42 and rsiVal < rsiVal[1])
+        bool emaOk = not useEmaFilter or close < ema50
+        bool probOk = probBuy >= minProb or probSell >= minProb
+        bool structOk = structTrend==-1 or bearChoCh
+        if bearConf and freshOk and rsiOk and emaOk and probOk and structOk
+            shortSignal := true
+else
+    // CONTINUATION TO LIQ - PATH MODE
+    bool targetSell = false
+    bool targetBuy = false
+    if nearestBuyIdx>=0 and nearestSellIdx>=0
+        if probSell>=60
+            targetSell := true
+        else if probBuy>=60
+            targetBuy := true
+        else
+            targetSell := dSell < dBuy
+            targetBuy := not targetSell
+    else if nearestSellIdx>=0
+        targetSell := true
+    else if nearestBuyIdx>=0
+        targetBuy := true
+
+    bool pathBullOk = structTrend==1 or bullBOS or not na(lastBullBOSBar) and bar_index-lastBullBOSBar<=structLookback
+    bool pathBearOk = structTrend==-1 or bearBOS or not na(lastBearBOSBar) and bar_index-lastBearBOSBar<=structLookback
+
+    if targetSell and pathBullOk and bullConf and cooldownOk and noActive and probSell>=minProb
+        longSignal := true
+    if targetBuy and pathBearOk and bearConf and cooldownOk and noActive and probBuy>=minProb
+        shortSignal := true
+
+if longSignal and shortSignal
+    longSignal := false
+    shortSignal := false
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIXED 1:3 BOX - VISIBLE ON PAST CHART (100 хүртэл хадгалагдана)
+// ═══════════════════════════════════════════════════════════════════════════════
+float entry = close
+float sl = na
+float tp = na
+float risk = na
+
+if longSignal or shortSignal
+    if longSignal
+        float swingLow = not na(lastSwingLow) ? lastSwingLow : ta.lowest(low, 10)
+        // SL илүү хол = WinRate өндөр (0.8 ATR)
+        sl := swingLow - atrVal*slAtrMult
+        if sl >= entry
+            sl := entry - atrVal*0.9
+        risk := entry - sl
+        tp := entry + risk * fixedRR
+    else
+        float swingHigh = not na(lastSwingHigh) ? lastSwingHigh : ta.highest(high, 10)
+        sl := swingHigh + atrVal*slAtrMult
+        if sl <= entry
+            sl := entry + atrVal*0.9
+        risk := sl - entry
+        tp := entry - risk * fixedRR
+
+    bool riskOk = risk>0 and risk < close*0.1 and risk > syminfo.mintick*15
+
+    if riskOk and showPosBox
+        // Түүхэнд харагдах: зөвхөн 100 болоод устгана (өнгөрсөн chart харагдана)
+        if keepHistorical
+            while array.size(posBoxes) >= maxBoxes
+                box.delete(array.shift(posBoxes))
+                box.delete(array.shift(posSlBoxes))
+                line.delete(array.shift(posEntryLn))
+                line.delete(array.shift(posSlLn))
+                line.delete(array.shift(posTpLn))
+                label.delete(array.shift(posLbls))
+        else
+            // хуучин логик - 8 бол устга
+            while array.size(posBoxes) >= 8
+                box.delete(array.shift(posBoxes))
+                box.delete(array.shift(posSlBoxes))
+                line.delete(array.shift(posEntryLn))
+                line.delete(array.shift(posSlLn))
+                line.delete(array.shift(posTpLn))
+                label.delete(array.shift(posLbls))
+
+        line entryLn = line.new(bar_index, entry, bar_index+boxLen, entry, color=color.white, width=2, style=line.style_dashed)
+        line slLn = line.new(bar_index, sl, bar_index+boxLen, sl, color=NEON_PINK, width=2)
+        line tpLn = na
+        box tpB = na
+        box slB = na
+
+        if longSignal
+            tpLn := line.new(bar_index, tp, bar_index+boxLen, tp, color=NEON_GREEN, width=2)
+            tpB := box.new(bar_index, tp, bar_index+boxLen, entry, bgcolor=color.new(NEON_GREEN, 68), border_color=NEON_GREEN, border_width=2)
+            slB := box.new(bar_index, entry, bar_index+boxLen, sl, bgcolor=color.new(NEON_PINK, 82), border_color=NEON_PINK, border_width=1)
+        else
+            tpLn := line.new(bar_index, tp, bar_index+boxLen, tp, color=MAGENTA, width=2)
+            tpB := box.new(bar_index, entry, bar_index+boxLen, tp, bgcolor=color.new(MAGENTA, 68), border_color=MAGENTA, border_width=2)
+            slB := box.new(bar_index, sl, bar_index+boxLen, entry, bgcolor=color.new(NEON_PINK, 82), border_color=NEON_PINK, border_width=1)
+
+        array.push(posBoxes, tpB)
+        array.push(posSlBoxes, slB)
+        array.push(posEntryLn, entryLn)
+        array.push(posSlLn, slLn)
+        array.push(posTpLn, tpLn)
+
+        string side = longSignal ? "LONG REVERSAL" : "SHORT REVERSAL"
+        string txt = side + " 1:"+str.tostring(fixedRR,"#.##")+" FIXED\nE:"+fmt(entry)+"\nSL:"+fmt(sl)+"\nTP:"+fmt(tp)+"\n"+(isReversalMode ? "Sweep→CHoCH→Conf✓" : "Path→Struct→Conf✓") + "\nFew Optimal"
+        color bg = longSignal ? color.new(NEON_GREEN, 12) : color.new(MAGENTA, 12)
+        color tx = longSignal ? color.black : color.white
+        array.push(posLbls, label.new(bar_index+boxLen, entry, txt, style=label.style_label_left, color=bg, textcolor=tx, size=size.small))
+
+plotshape(longSignal, "OPTIMAL LONG 1:3", shape.labelup, location.belowbar, color.new(NEON_GREEN,0), size=size.small, text="LONG\n1:3", textcolor=color.black)
+plotshape(shortSignal, "OPTIMAL SHORT 1:3", shape.labeldown, location.abovebar, color.new(MAGENTA,0), size=size.small, text="SHORT\n1:3", textcolor=color.white)
+
+// WINRATE - FIXED
+if longSignal or shortSignal
+    if na(activeTrade) or not activeTrade.active
+        int dir = longSignal ? 1 : -1
+        float tLiq = dir==1 ? nearestSellPrice : nearestBuyPrice
+        activeTrade := tradeInfo.new(dir, entry, sl, tp, fixedRR, bar_index, true, tLiq)
+        totalTrades += 1
+        lastSignalBar := bar_index
+        // reset after entry
+        lastBullChoChAfterSweepBar := na
+        lastBearChoChAfterSweepBar := na
+
+if not na(activeTrade) and activeTrade.active
+    bool hitSL = false
+    bool hitTP = false
+    if activeTrade.dir==1
+        hitSL := low <= activeTrade.sl
+        hitTP := high >= activeTrade.tp
+        if hitSL and hitTP
+            hitSL := close < activeTrade.entry
+            hitTP := not hitSL
+    else
+        hitSL := high >= activeTrade.sl
+        hitTP := low <= activeTrade.tp
+        if hitSL and hitTP
+            hitSL := close > activeTrade.entry
+            hitTP := not hitSL
+    if hitSL
+        lossCount += 1
+        totalRRLoss += 1
+        lastResult := "❌ LOSS -1R"
+        curLossStreak += 1
+        curWinStreak := 0
+        bestLossStreak := math.max(bestLossStreak, curLossStreak)
+        activeTrade.active := false
+        activeTrade := na
+    else if hitTP
+        winCount += 1
+        totalRRWin += activeTrade.rr
+        lastResult := "✅ WIN +"+str.tostring(activeTrade.rr,"#.#")+"R"
+        curWinStreak += 1
+        curLossStreak := 0
+        bestWinStreak := math.max(bestWinStreak, curWinStreak)
+        activeTrade.active := false
+        activeTrade := na
+
+// PANELS
+if showProbPanel
+    var table probTbl = table.new(position.top_right, 2, 6, bgcolor=color.new(DARK_BG,10), frame_color=CYAN, frame_width=2, border_color=color.new(CYAN,70), border_width=1)
+    table.cell(probTbl, 0, 0, "🎯 NEAREST LIQ", text_color=CYAN, text_size=size.small)
+    table.cell(probTbl, 1, 0, "PROB / DIST", text_color=color.white, text_size=size.small)
+    string bTxt = nearestBuyIdx>=0 ? str.tostring(probBuy,"#.#")+"% | "+str.tostring(dBuy,"#.##") : "N/A"
+    string sTxt = nearestSellIdx>=0 ? str.tostring(probSell,"#.#")+"% | "+str.tostring(dSell,"#.##") : "N/A"
+    bool isBuyTarget = probBuy>probSell
+    table.cell(probTbl, 0, 1, "BUY LIQ", text_color=COL_BUY_LIQ, text_size=size.small)
+    table.cell(probTbl, 1, 1, bTxt, text_color=isBuyTarget ? color.black : COL_BUY_LIQ, text_size=size.small, bgcolor=isBuyTarget ? color.new(NEON_GREEN,55) : na)
+    table.cell(probTbl, 0, 2, "SELL LIQ", text_color=COL_SELL_LIQ, text_size=size.small)
+    table.cell(probTbl, 1, 2, sTxt, text_color=not isBuyTarget ? color.white : COL_SELL_LIQ, text_size=size.small, bgcolor=not isBuyTarget ? color.new(MAGENTA,55) : na)
+    table.cell(probTbl, 0, 3, "MODE", text_color=color.white, text_size=size.tiny)
+    table.cell(probTbl, 1, 3, entryMode, text_color=NEON_YELLOW, text_size=size.tiny)
+    table.cell(probTbl, 0, 4, "SWEEP→CHoCH", text_color=color.white, text_size=size.tiny)
+    string scTxt = "BuySweep:"+(na(lastBuySweepBar)?"-":str.tostring(bar_index-lastBuySweepBar))+" Sell:"+(na(lastSellSweepBar)?"-":str.tostring(bar_index-lastSellSweepBar))+" CHoCH B:"+(na(lastBullChoChBar)?"-":str.tostring(bar_index-lastBullChoChBar))+" S:"+(na(lastBearChoChBar)?"-":str.tostring(bar_index-lastBearChoChBar))
+    table.cell(probTbl, 1, 4, scTxt, text_color=CYAN, text_size=size.tiny)
+    table.cell(probTbl, 0, 5, "STRUCT", text_color=color.white, text_size=size.tiny)
+    table.cell(probTbl, 1, 5, structTrend==1?"BULL ↑":structTrend==-1?"BEAR ↓":"NEUTRAL", text_color=structTrend==1?NEON_GREEN:structTrend==-1?NEON_PINK:color.gray, text_size=size.tiny)
+
+if showWinPanel
+    var table winTbl = table.new(position.top_left, 2, 9, bgcolor=color.new(DARK_BG,5), frame_color=MAGENTA, frame_width=2, border_color=color.new(MAGENTA,70), border_width=1)
+    int closed = winCount + lossCount
+    float wr = closed>0 ? winCount/closed*100 : 0
+    float pf = totalRRLoss>0 ? totalRRWin/totalRRLoss : totalRRWin>0 ? 99 : 0
+    table.cell(winTbl, 0, 0, "🧠 V4 OPTIMAL FEW", text_color=CYAN, text_size=size.small, text_halign=text.align_center)
+    table.cell(winTbl, 1, 0, na(activeTrade) ? "IDLE - Few Scan" : activeTrade.dir==1 ? "LONG 1:3 LIVE" : "SHORT 1:3 LIVE", text_color=na(activeTrade)?color.gray: activeTrade.dir==1?NEON_GREEN:MAGENTA, text_size=size.small)
+    table.cell(winTbl, 0, 1, "Total/Closed", text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 1, 1, str.tostring(totalTrades)+"/"+str.tostring(closed), text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 0, 2, "W/L", text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 1, 2, str.tostring(winCount)+"✅/"+str.tostring(lossCount)+"❌", text_color=winCount>=lossCount?NEON_GREEN:NEON_PINK, text_size=size.tiny)
+    table.cell(winTbl, 0, 3, "WinRate", text_color=color.white, text_size=size.tiny)
+    color wrC = wr>=50 ? NEON_GREEN : wr>=38 ? NEON_YELLOW : NEON_PINK
+    table.cell(winTbl, 1, 3, str.tostring(wr,"#.#")+"% "+(wr>=55?"🔥 HIGH WR":""), text_color=wrC, text_size=size.small, bgcolor=color.new(wrC,80))
+    table.cell(winTbl, 0, 4, "PF / RR", text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 1, 4, str.tostring(pf,"#.##")+" / 1:"+str.tostring(fixedRR,"#.#")+" FIXED", text_color=CYAN, text_size=size.tiny)
+    table.cell(winTbl, 0, 5, "Best Streak", text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 1, 5, str.tostring(bestWinStreak)+"W / "+str.tostring(bestLossStreak)+"L Cur:"+(curWinStreak>0?str.tostring(curWinStreak):"-"+str.tostring(curLossStreak)), text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 0, 6, "Last", text_color=color.white, text_size=size.tiny)
+    table.cell(winTbl, 1, 6, lastResult, text_color=str.contains(lastResult,"WIN")?NEON_GREEN:NEON_PINK, text_size=size.tiny)
+    table.cell(winTbl, 0, 7, "Active", text_color=color.white, text_size=size.tiny)
+    string act = na(activeTrade) ? "Scanning few optimal..." : fmt(activeTrade.entry)+" → "+fmt(activeTrade.tp)+" 1:"+str.tostring(activeTrade.rr,"#.#")
+    table.cell(winTbl, 1, 7, act, text_color=NEON_YELLOW, text_size=size.tiny)
+    table.cell(winTbl, 0, 8, "Logic", text_color=color.gray, text_size=size.tiny)
+    table.cell(winTbl, 1, 8, "Sweep→CHoCH→Retest→Conf→1:3 Few", text_color=CYAN, text_size=size.tiny)
+
+alertcondition(longSignal, "OPTIMAL LONG 1:3", "Few Optimal LONG Reversal 1:3 Fixed")
+alertcondition(shortSignal, "OPTIMAL SHORT 1:3", "Few Optimal SHORT Reversal 1:3 Fixed")

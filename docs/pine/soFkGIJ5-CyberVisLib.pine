@@ -1,0 +1,443 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 6
+// @tw_status twPublishDenied (moderation review required)
+// Last published: cybermediaboy/VisLib/6
+// @description CyberVisLib — rendering layer extracted from TaUtilityLib.
+//              Oscillator metadata, sub-pane stacking, color utilities, tooltips,
+//              diagnostic tables, legend rendering. No market logic, no math.
+//              Layer L1. Depends only on NumLib.
+//
+// Step 6 of restructuring.
+//
+// CHANGELOG v6 — BREAKING: Parametric FeatureImportanceTable
+//   - Added Section 9: FeatureImportanceTable with multi-indicator support
+//     - Constructor: f_feat_importance_new(pos, n_feat, n_quality, n_meta, show_lower)
+//     - show_lower=false enables single-model mode (2-column layout)
+//     - Convenience wrappers: feature_row_single(), quality_row_single()
+//     - Internal helpers: f_quality_color(), f_weight_color()
+//   - Maintains backward compat for dual-model indicators (WickID, CMD)
+//
+// CHANGELOG v2 — BREAKING: UDT renaming for OscLib separation
+//   - OscMeta → MiniOscMeta (lightweight 6-field version)
+//   - SubPane → MiniSubPane (lightweight 4-field version)
+//   - OscState → MiniOscState (lightweight 4-field version)
+//   - This eliminates name collision when co-importing with OscLib/1 (rich UDTs)
+//   - Existing consumers: update type names on next chart edit
+//
+// REPLACES from TaUtilityLib:
+//   - MiniOscMeta, MiniSubPane, MiniOscState UDTs and their methods
+//   - Color blending: f_blend_color, f_color_gradient_*, f_regime_color
+//   - Label/line management: f_safe_label_new/delete, f_safe_line_new/delete
+//   - Tooltip builders: f_tooltip_format, f_kv_tooltip
+//   - Diagnostic table: f_diag_table_*
+//   - Legend table renderer
+//
+library("CyberVisLib", overlay=false)
+import cybermediaboy/CyberNumLib/1 as N
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Oscillator scale type — affects sub-pane allocation and rendering
+export enum OscScale
+    BIPOLAR        // [-1, 1] or symmetric around 0
+    UNIPOLAR_01    // [0, 1]
+    UNIPOLAR_0100  // [0, 100]
+    PERCENTILE     // [0, 100] but rank-based
+    UNBOUNDED      // no fixed range
+
+// @enum Sub-pane vertical position policy
+export enum SubPanePolicy
+    STACK_TOP      // first registered occupies top
+    STACK_BOTTOM   // first registered occupies bottom
+    EQUAL_SPLIT    // all panes share equal vertical space
+
+// @enum Regime label for color mapping
+export enum RegimeLabel
+    NEUTRAL
+    BULL_TREND
+    BEAR_TREND
+    HIGH_VOL
+    LOW_VOL
+    MEAN_REVERT
+    BREAKOUT
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: COLOR UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Linear blend of two colors at fraction t in [0,1]
+export f_blend(color a, color b, float t) =>
+    float tc = math.max(0.0, math.min(1.0, t))
+    color.rgb(int(color.r(a) * (1.0 - tc) + color.r(b) * tc), int(color.g(a) * (1.0 - tc) + color.g(b) * tc), int(color.b(a) * (1.0 - tc) + color.b(b) * tc))
+
+// @function Diverging red-yellow-green gradient for z-score-like values
+export f_diverging_rgyg(float z) =>
+    float zc = math.max(-3.0, math.min(3.0, z))
+    zc < 0.0 ? f_blend(color.red, color.yellow, (zc + 3.0) / 3.0) : f_blend(color.yellow, color.lime, zc / 3.0)
+
+// @function Sequential blue-red heatmap for [0,1] probability/percentile
+export f_sequential_br(float p) =>
+    float pc = math.max(0.0, math.min(1.0, p))
+    f_blend(color.blue, color.red, pc)
+
+// @function Heatmap alias (same as sequential_br)
+export f_heatmap(float p) => f_sequential_br(p)
+
+// @function Regime color mapping
+export f_regime_color(RegimeLabel r) =>
+    r == RegimeLabel.BULL_TREND ? color.lime : r == RegimeLabel.BEAR_TREND ? color.red : r == RegimeLabel.HIGH_VOL ? color.orange : r == RegimeLabel.LOW_VOL ? color.aqua : r == RegimeLabel.MEAN_REVERT ? color.purple : r == RegimeLabel.BREAKOUT ? color.yellow : color.gray
+
+// @function Transparency from confidence [0,1] → [90,30]
+export f_transp(float conf) =>
+    int(90.0 - 60.0 * math.max(0.0, math.min(1.0, conf)))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: OSCILLATOR METADATA
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type MiniOscMeta — lightweight oscillator display metadata (6 fields)
+// NOTE: For rich 13-field version with signal/alpha/alert/count, use OscLib.OscMeta
+export type MiniOscMeta
+    string id
+    string label
+    OscScale scale
+    color hue
+    float range_min
+    float range_max
+
+// @function Convert raw value to unit [0,1] for sub-pane rendering
+export method to_unit(MiniOscMeta m, float val) =>
+    float v = nz(val)
+    float rng = m.range_max - m.range_min
+    rng > 0.0 ? math.max(0.0, math.min(1.0, (v - m.range_min) / rng)) : 0.5
+
+// @function Factory for bipolar oscillator [-1, 1]
+export f_meta_bipolar(string id, string label, color hue) =>
+    MiniOscMeta.new(id = id, label = label, scale = OscScale.BIPOLAR, hue = hue, range_min = -1.0, range_max = 1.0)
+
+// @function Factory for unipolar [0, 1]
+export f_meta_unipolar01(string id, string label, color hue) =>
+    MiniOscMeta.new(id = id, label = label, scale = OscScale.UNIPOLAR_01, hue = hue, range_min = 0.0, range_max = 1.0)
+
+// @function Factory for unipolar [0, 100]
+export f_meta_unipolar0100(string id, string label, color hue) =>
+    MiniOscMeta.new(id = id, label = label, scale = OscScale.UNIPOLAR_0100, hue = hue, range_min = 0.0, range_max = 100.0)
+
+// @function Factory for percentile [0, 100]
+export f_meta_percentile(string id, string label, color hue) =>
+    MiniOscMeta.new(id = id, label = label, scale = OscScale.PERCENTILE, hue = hue, range_min = 0.0, range_max = 100.0)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: SUB-PANE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type MiniSubPane — lightweight vertical band allocation for one oscillator (4 fields)
+// NOTE: For rich 12-field version with margin/locator/plotchar, use OscLib.SubPane
+export type MiniSubPane
+    MiniOscMeta meta
+    float band_low
+    float band_high
+
+// @function Map unit value [0,1] to pane's vertical coordinate
+export method band_y(MiniSubPane sp, float unit_val) =>
+    float u = math.max(0.0, math.min(1.0, unit_val))
+    sp.band_low + u * (sp.band_high - sp.band_low)
+
+// @type SubPaneManager — allocates vertical space for multiple oscillators
+export type SubPaneManager
+    SubPanePolicy policy
+    float padding_pct
+    array<MiniOscMeta> metas
+    array<MiniSubPane> panes
+    bool finalized
+
+// @function Create new sub-pane manager
+export f_panemgr_new(SubPanePolicy policy, float padding_pct) =>
+    SubPaneManager.new(policy = policy, padding_pct = padding_pct, metas = array.new<MiniOscMeta>(), panes = array.new<MiniSubPane>(), finalized = false)
+
+// @function Register oscillator metadata (before finalize)
+export method register(SubPaneManager mgr, MiniOscMeta meta) =>
+    if not mgr.finalized
+        array.push(mgr.metas, meta)
+    mgr
+
+// @function Finalize pane allocation (call once after all register calls)
+export method finalize(SubPaneManager mgr, float global_min, float global_max) =>
+    if mgr.finalized
+        mgr
+    else
+        int n = array.size(mgr.metas)
+        if n == 0
+            mgr.finalized := true
+            mgr
+        else
+            float total_range = global_max - global_min
+            float pad = mgr.padding_pct * total_range
+            float usable = total_range - pad * float(n - 1)
+            float slot_height = usable / float(n)
+            for i = 0 to n - 1
+                int idx = mgr.policy == SubPanePolicy.STACK_BOTTOM ? n - 1 - i : i
+                MiniOscMeta m = array.get(mgr.metas, idx)
+                float lo = global_min + float(i) * (slot_height + pad)
+                float hi = lo + slot_height
+                array.push(mgr.panes, MiniSubPane.new(meta = m, band_low = lo, band_high = hi))
+            mgr.finalized := true
+            mgr
+
+// @function Get pane by oscillator id
+export method get_pane(SubPaneManager mgr, string id) =>
+    MiniSubPane result = na
+    int n = array.size(mgr.panes)
+    if n > 0
+        for i = 0 to n - 1
+            MiniSubPane sp = array.get(mgr.panes, i)
+            if sp.meta.id == id
+                result := sp
+                break
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: OSCILLATOR STATE (line/label refs)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type MiniOscState — lightweight per-oscillator rendering state (4 fields)
+// NOTE: For rich 7-field version with warmup/alpha/count, use OscLib.OscState
+export type MiniOscState
+    float value
+    line baseline
+    label lbl
+
+// @function Update oscillator value
+export method update_value(MiniOscState st, float val) =>
+    st.value := val
+    st
+
+// @function Draw baseline at zero (for bipolar oscillators)
+export method draw_baseline(MiniOscState st, MiniSubPane sp, int x1, int x2, color col, int width) =>
+    float y_zero = sp.band_y(sp.meta.to_unit(0.0))
+    st.baseline := line.new(x1, y_zero, x2, y_zero, color = col, width = width)
+    st
+
+// @function Draw label at current value
+export method draw_label(MiniOscState st, MiniSubPane sp, int x) =>
+    float y = sp.band_y(sp.meta.to_unit(st.value))
+    st.lbl := label.new(x, y, str.tostring(st.value, "#.##"), color = sp.meta.hue, textcolor = color.white, style = label.style_label_left, size = size.small)
+    st
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: LABEL/LINE LIFECYCLE (safe create/delete)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Safe label create-or-update (idempotent on na prev)
+export f_safe_label(label prev, int x, float y, string txt, color bg, color tc, string style_str, string size_str) =>
+    if not na(prev)
+        label.delete(prev)
+    string ls = style_str == "up" ? label.style_label_up : style_str == "down" ? label.style_label_down : style_str == "left" ? label.style_label_left : style_str == "right" ? label.style_label_right : label.style_label_center
+    string sz = size_str == "tiny" ? size.tiny : size_str == "small" ? size.small : size_str == "normal" ? size.normal : size_str == "large" ? size.large : size.auto
+    label.new(x, y, txt, color = bg, textcolor = tc, style = ls, size = sz)
+
+// @function Safe line create-or-update
+export f_safe_line(line prev, int x1, float y1, int x2, float y2, color col, int width, string style_str) =>
+    if not na(prev)
+        line.delete(prev)
+    string ls = style_str == "solid" ? line.style_solid : style_str == "dotted" ? line.style_dotted : style_str == "dashed" ? line.style_dashed : line.style_solid
+    line.new(x1, y1, x2, y2, color = col, width = width, style = ls)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: TOOLTIP BUILDERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Format key-value pair for tooltip
+export f_tooltip_kv(string key, string val) =>
+    key + ": " + val
+
+// @function Build multi-line tooltip from array of kv strings
+export f_tooltip_setup(array<string> kvs) =>
+    string result = ""
+    int n = array.size(kvs)
+    if n > 0
+        for i = 0 to n - 1
+            result += array.get(kvs, i)
+            if i < n - 1
+                result += "\n"
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: DIAGNOSTIC TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type DiagnosticTable — persistent table with header + dynamic rows
+export type DiagnosticTable
+    table tbl
+    array<string> headers
+    int max_rows
+    int current_row
+
+// @function Create diagnostic table (call once in var block)
+export f_diag_table_new(string pos_str, int max_rows, int cols, array<string> headers) =>
+    string position_val = pos_str == "top_left" ? position.top_left : pos_str == "top_right" ? position.top_right : pos_str == "bottom_left" ? position.bottom_left : pos_str == "bottom_right" ? position.bottom_right : position.top_right
+    table t = table.new(position_val, cols, max_rows + 1, border_width = 1)
+    DiagnosticTable.new(tbl = t, headers = headers, max_rows = max_rows, current_row = 0)
+
+// @function Render header row (call once after creation)
+export method header_render(DiagnosticTable dt) =>
+    int n = array.size(dt.headers)
+    if n > 0
+        for i = 0 to n - 1
+            table.cell(dt.tbl, i, 0, array.get(dt.headers, i), bgcolor = color.new(color.gray, 70), text_color = color.white, text_size = size.small)
+    dt
+
+// @function Push data row (call per setup/event)
+export method push_row(DiagnosticTable dt, array<string> cells, color bg) =>
+    if dt.current_row < dt.max_rows
+        int row_idx = dt.current_row + 1
+        int n = array.size(cells)
+        if n > 0
+            for i = 0 to n - 1
+                table.cell(dt.tbl, i, row_idx, array.get(cells, i), bgcolor = bg, text_color = color.white, text_size = size.tiny)
+        dt.current_row += 1
+    dt
+
+// @function Clear all data rows (keep header)
+export method clear(DiagnosticTable dt) =>
+    for row = 1 to dt.max_rows
+        for col = 0 to array.size(dt.headers) - 1
+            table.cell(dt.tbl, col, row, "", bgcolor = color.new(color.black, 100), text_color = color.white)
+    dt.current_row := 0
+    dt
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: LEGEND RENDERING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Single legend chip (colored square + label)
+export f_legend_chip(table t, int col, string txt, color bg) =>
+    table.cell(t, col, 0, txt, bgcolor = bg, text_color = color.white, text_size = size.tiny)
+
+// @function Horizontal legend strip (call once per bar with array of [label, color] tuples)
+export f_legend_strip(string pos_str, array<string> labels, array<color> colors) =>
+    int n = array.size(labels)
+    if n > 0 and n == array.size(colors)
+        string position_val = pos_str == "top_left" ? position.top_left : pos_str == "top_center" ? position.top_center : pos_str == "top_right" ? position.top_right : position.top_center
+        table t = table.new(position_val, n, 1, border_width = 0)
+        for i = 0 to n - 1
+            f_legend_chip(t, i, array.get(labels, i), array.get(colors, i))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9: FEATURE IMPORTANCE TABLE (parametric — multi-indicator support)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type FeatureImportanceTable — renders feature weights with heatmap coloring
+// @field tbl         Pine Script table object
+// @field n_feat      number of feature rows to display
+// @field n_quality   number of quality metric rows before features
+// @field n_meta      number of metadata rows after features
+// @field show_lower  if false, hides lower-model columns (single-model mode)
+// @field cols        column count (2=single-model, 3=dual-model)
+export type FeatureImportanceTable
+    table tbl
+    int   n_feat
+    int   n_quality
+    int   n_meta
+    bool  show_lower
+    int   cols
+
+// @function Create new Feature Importance Table
+// @param pos_str     position string: "top_left", "top_right", "bottom_left", "bottom_right"
+// @param n_feat      number of feature rows (e.g., 6 for WickID, 8 for CMD)
+// @param n_quality   number of quality metric rows (e.g., 3 for WickQ/EffQ/BE%, 5 for +Stop%+MedR)
+// @param n_meta      number of metadata rows (e.g., 4 for Mode/Rows/RowSz/Upd)
+// @param show_lower  true for dual-model (U/L), false for single-model
+export f_feat_importance_new(string pos_str, int n_feat, int n_quality, int n_meta, bool show_lower) =>
+    string position_val = pos_str == "top_left" ? position.top_left : pos_str == "top_right" ? position.top_right : pos_str == "bottom_left" ? position.bottom_left : pos_str == "bottom_right" ? position.bottom_right : position.bottom_left
+    int cols = show_lower ? 3 : 2
+    int total_rows = 1 + n_quality + n_feat + n_meta  // header + quality + features + meta
+    table t = table.new(position_val, cols, total_rows, bgcolor = color.new(color.black, 0), border_color = color.new(color.gray, 50), border_width = 1)
+    FeatureImportanceTable.new(tbl = t, n_feat = n_feat, n_quality = n_quality, n_meta = n_meta, show_lower = show_lower, cols = cols)
+
+// @function Color lookup for quality metrics (internal helper)
+f_quality_color(float val, array<float> thresholds, bool higher_is_better) =>
+    higher_is_better ? (val >= array.get(thresholds, 0) ? color.new(color.lime, 10) : val >= array.get(thresholds, 1) ? color.new(color.green, 20) : val >= array.get(thresholds, 2) ? color.new(color.orange, 20) : color.new(color.red, 20)) : (val <= array.get(thresholds, 0) ? color.new(color.lime, 10) : val <= array.get(thresholds, 1) ? color.new(color.green, 20) : val <= array.get(thresholds, 2) ? color.new(color.orange, 20) : color.new(color.red, 20))
+
+// @function Render header row — parametric based on show_lower
+export method header(FeatureImportanceTable fit) =>
+    table.cell(fit.tbl, 0, 0, "Feat", text_color = color.gray, text_size = size.normal, bgcolor = color.new(color.navy, 60))
+    table.cell(fit.tbl, 1, 0, "W↑", text_color = color.gray, text_size = size.normal, bgcolor = color.new(color.navy, 60))
+    if fit.show_lower
+        table.cell(fit.tbl, 2, 0, "W↓", text_color = color.gray, text_size = size.normal, bgcolor = color.new(color.navy, 60))
+    fit
+
+// @function Render quality metric row with color-coded value — parametric
+// @param row_idx     row index (0-based, within quality section, 0..n_quality-1)
+// @param name        metric name (e.g., "WickQ", "EffQ")
+// @param val_u       upper model value (na if show_lower=false and single-model)
+// @param val_l       lower model value (ignored if show_lower=false)
+// @param thresholds  array of 4 threshold values for color bands [excellent, good, fair, poor]
+// @param higher_is_better  if true, higher values get better colors (lime/green)
+// @param tooltip     optional tooltip text for the row label cell (default "")
+export method quality_row(FeatureImportanceTable fit, int row_idx, string name, float val_u, float val_l, array<float> thresholds, bool higher_is_better, string tooltip = "") =>
+    if row_idx >= 0 and row_idx < fit.n_quality
+        int table_row = 1 + row_idx  // +1 for header row
+        color cu = f_quality_color(val_u, thresholds, higher_is_better)
+        table.cell(fit.tbl, 0, table_row, name, text_color = color.white, text_size = size.normal, bgcolor = color.new(color.navy, 40), tooltip = tooltip)
+        table.cell(fit.tbl, 1, table_row, str.tostring(val_u, "#.###"), text_color = color.white, text_size = size.normal, bgcolor = cu)
+        if fit.show_lower
+            color cl = f_quality_color(val_l, thresholds, higher_is_better)
+            table.cell(fit.tbl, 2, table_row, str.tostring(val_l, "#.###"), text_color = color.white, text_size = size.normal, bgcolor = cl)
+    fit
+
+// @function Color lookup for feature weights (internal helper)
+f_weight_color(float w, bool is_g6) =>
+    is_g6 ? (w < 0 ? color.new(color.green, 40) : color.new(color.red, 40)) : (w > 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+
+// @function Render feature weight row — parametric
+// @param feat_idx    feature index (0-based, 0..n_feat-1)
+// @param name        feature name/abbreviation
+// @param w_u         upper model weight
+// @param w_l         lower model weight (ignored if show_lower=false)
+// @param is_g6       if true, invert color logic (G6: negative=good for upper)
+export method feature_row(FeatureImportanceTable fit, int feat_idx, string name, float w_u, float w_l, bool is_g6) =>
+    if feat_idx >= 0 and feat_idx < fit.n_feat
+        int row_idx = 1 + fit.n_quality + feat_idx
+        color cu = f_weight_color(w_u, is_g6)
+        table.cell(fit.tbl, 0, row_idx, name, text_color = color.white, text_size = size.normal)
+        table.cell(fit.tbl, 1, row_idx, str.tostring(w_u, "#.###"), text_color = color.white, text_size = size.normal, bgcolor = cu)
+        if fit.show_lower
+            color cl = f_weight_color(w_l, is_g6)
+            table.cell(fit.tbl, 2, row_idx, str.tostring(w_l, "#.###"), text_color = color.white, text_size = size.normal, bgcolor = cl)
+    fit
+
+// @function Render metadata row — parametric
+// @param meta_idx    metadata row index (0-based, 0..n_meta-1)
+// @param label       label text
+// @param val_u       upper model value
+// @param val_l       lower model value (na for single-value rows, ignored if show_lower=false)
+export method metadata_row(FeatureImportanceTable fit, int meta_idx, string label, string val_u, string val_l) =>
+    if meta_idx >= 0 and meta_idx < fit.n_meta
+        int row_idx = 1 + fit.n_quality + fit.n_feat + meta_idx
+        table.cell(fit.tbl, 0, row_idx, label, text_color = color.aqua, text_size = size.small)
+        table.cell(fit.tbl, 1, row_idx, val_u, text_color = color.white, text_size = size.small)
+        if fit.show_lower and not na(val_l)
+            table.cell(fit.tbl, 2, row_idx, val_l, text_color = color.gray, text_size = size.small)
+    fit
+
+// @function Render single-model feature row (convenience wrapper for single-model indicators)
+// @param feat_idx    feature index
+// @param name        feature name
+// @param weight      model weight
+// @param is_g6       invert color logic
+export method feature_row_single(FeatureImportanceTable fit, int feat_idx, string name, float weight, bool is_g6) =>
+    fit.feature_row(feat_idx, name, weight, na, is_g6)
+
+// @function Render single-model quality row (convenience wrapper)
+export method quality_row_single(FeatureImportanceTable fit, int row_idx, string name, float val, array<float> thresholds, bool higher_is_better) =>
+    fit.quality_row(row_idx, name, val, na, thresholds, higher_is_better)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

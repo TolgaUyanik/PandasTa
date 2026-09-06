@@ -1,0 +1,196 @@
+//@version=6
+indicator("Fair Value Gap Detector | AlphaScript", shorttitle="FVG | AlphaScript", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=100)
+
+// ============================================================
+// INPUTS
+// ============================================================
+grpFilter  = "Filter Settings"
+grpDisplay = "Display Settings"
+
+atrLen       = input.int(14,    title="ATR Length",              group=grpFilter)
+minAtrMult   = input.float(0.1, title="Min Gap Size (ATR mult)", group=grpFilter, minval=0.0, step=0.05, tooltip="Minimum FVG height as a multiple of ATR. Filters out tiny noise gaps.")
+useDisplacement = input.bool(true, title="Require Displacement", group=grpFilter,
+     tooltip="Only register an FVG when the middle (gap-creating) candle is a genuine displacement move — a large body relative to ATR — not just any 3-candle gap. This is what separates a real institutional FVG from a weak noise gap.")
+dispMult     = input.float(1.0, title="Min Displacement (body × ATR)", group=grpFilter, minval=0.1, maxval=5.0, step=0.1,
+     tooltip="The middle candle's body must be at least this multiple of ATR for the FVG to qualify. Higher = stricter, fewer but stronger FVGs. Only applies when Require Displacement is on.")
+maxFVGs      = input.int(10,    title="Max FVGs to Display",     group=grpFilter, minval=1, maxval=50)
+mitigMode    = input.string("Touch", title="Mitigation Mode", options=["Touch", "Close"], group=grpFilter, tooltip="Touch: FVG mitigated when price closes past the 50% midpoint. Close: FVG mitigated only when price closes through the opposite boundary.")
+
+showBull     = input.bool(true,  title="Show Bullish FVGs",  group=grpDisplay)
+showBear     = input.bool(true,  title="Show Bearish FVGs",  group=grpDisplay)
+showMidLine  = input.bool(true,  title="Show Mid-Line",      group=grpDisplay)
+extendMode   = input.string("Fixed Bars", title="Extend FVGs Right", options=["Infinite","Fixed Bars"], group=grpDisplay, inline="ext")
+extendBars   = input.int(300, title="Bars", group=grpDisplay, inline="ext", minval=1, maxval=1000, tooltip="How many bars an FVG box/midline extends to the right. Prevents boxes running infinitely across the chart. Used when Extend = Fixed Bars.")
+
+bullColor    = input.color(color.new(#26a69a, 75), title="Bullish Fill",   group=grpDisplay)
+bearColor    = input.color(color.new(#ef5350, 75), title="Bearish Fill",   group=grpDisplay)
+midColor     = input.color(color.new(#e0e0e0, 55), title="Mid-Line Color", group=grpDisplay)
+
+// ============================================================
+// TYPES
+// ============================================================
+type FVG
+    float   top
+    float   bottom
+    float   mid
+    int     startTime
+    bool    isBullish
+    bool    mitigated
+    box     fvgBox
+    line    midLine
+
+// ============================================================
+// ARRAYS
+// ============================================================
+var array<FVG> bullFVGs = array.new<FVG>()
+var array<FVG> bearFVGs = array.new<FVG>()
+
+// ============================================================
+// CORE CALCULATIONS
+// ============================================================
+atrVal = ta.atr(atrLen)
+minGap = atrVal * minAtrMult
+msPerBar = bar_index > 0 ? time - time[1] : 0
+f_boxExt() => extendMode == "Infinite" ? extend.right : extend.none
+
+// ============================================================
+// SMC FAIR VALUE GAP DETECTION
+// ============================================================
+bullGapTop    = low[0]
+bullGapBot    = high[2]
+bearGapTop    = low[2]
+bearGapBot    = high[0]
+
+// Displacement: the middle candle (index [1]) is the gap-creating bar.
+// A true FVG comes from a strong-bodied displacement, not a weak drift.
+midBody      = math.abs(close[1] - open[1])
+dispOk       = not useDisplacement or midBody >= atrVal * dispMult
+// For a bullish FVG the displacement candle should be bullish (up move);
+// for a bearish FVG, bearish (down move). This rejects gaps whose middle
+// candle pushed the opposite way.
+bullDispDir  = not useDisplacement or close[1] > open[1]
+bearDispDir  = not useDisplacement or close[1] < open[1]
+
+bullCondition = barstate.isconfirmed and showBull and (bullGapTop > bullGapBot) and (bullGapTop - bullGapBot) >= minGap and dispOk and bullDispDir
+bearCondition = barstate.isconfirmed and showBear and (bearGapTop > bearGapBot) and (bearGapTop - bearGapBot) >= minGap and dispOk and bearDispDir
+
+// ============================================================
+// CREATE NEW FVG OBJECTS
+// ============================================================
+if bullCondition
+    fTop   = bullGapTop
+    fBot   = bullGapBot
+    fMid   = (fTop + fBot) / 2.0
+    tStart = time[2]
+    tEnd   = extendMode == "Fixed Bars" ? time + extendBars * msPerBar : time
+
+    newBox = box.new(
+         left         = tStart,
+         top          = fTop,
+         right        = tEnd,
+         bottom       = fBot,
+         xloc         = xloc.bar_time,
+         extend       = f_boxExt(),
+         bgcolor      = bullColor,
+         border_color = color.new(#26a69a, 100),
+         border_width = 1
+         )
+
+    newLine = showMidLine ? line.new(
+         x1     = tStart,
+         y1     = fMid,
+         x2     = tEnd,
+         y2     = fMid,
+         xloc   = xloc.bar_time,
+         extend = f_boxExt(),
+         color  = midColor,
+         style  = line.style_dashed,
+         width  = 1
+         ) : line(na)
+
+    newFVG = FVG.new(fTop, fBot, fMid, tStart, true, false, newBox, newLine)
+    bullFVGs.push(newFVG)
+
+    if bullFVGs.size() > maxFVGs
+        old = bullFVGs.shift()
+        box.delete(old.fvgBox)
+        line.delete(old.midLine)
+
+if bearCondition
+    fTop   = bearGapTop
+    fBot   = bearGapBot
+    fMid   = (fTop + fBot) / 2.0
+    tStart = time[2]
+    tEnd   = extendMode == "Fixed Bars" ? time + extendBars * msPerBar : time
+
+    newBox = box.new(
+         left         = tStart,
+         top          = fTop,
+         right        = tEnd,
+         bottom       = fBot,
+         xloc         = xloc.bar_time,
+         extend       = f_boxExt(),
+         bgcolor      = bearColor,
+         border_color = color.new(#ef5350, 100),
+         border_width = 1
+         )
+
+    newLine = showMidLine ? line.new(
+         x1     = tStart,
+         y1     = fMid,
+         x2     = tEnd,
+         y2     = fMid,
+         xloc   = xloc.bar_time,
+         extend = f_boxExt(),
+         color  = midColor,
+         style  = line.style_dashed,
+         width  = 1
+         ) : line(na)
+
+    newFVG = FVG.new(fTop, fBot, fMid, tStart, false, false, newBox, newLine)
+    bearFVGs.push(newFVG)
+
+    if bearFVGs.size() > maxFVGs
+        old = bearFVGs.shift()
+        box.delete(old.fvgBox)
+        line.delete(old.midLine)
+
+// ============================================================
+// MITIGATION CHECK
+// ============================================================
+bullMitigatedNow = false
+if bullFVGs.size() > 0
+    for i = bullFVGs.size() - 1 to 0
+        if i < bullFVGs.size()
+            fvg = bullFVGs.get(i)
+            if not fvg.mitigated
+                isMitigated = mitigMode == "Touch" ? close < fvg.mid : close < fvg.bottom
+                if isMitigated
+                    fvg.mitigated    := true
+                    bullMitigatedNow := true
+                    box.delete(fvg.fvgBox)
+                    line.delete(fvg.midLine)
+                    _ = bullFVGs.remove(i)
+
+bearMitigatedNow = false
+if bearFVGs.size() > 0
+    for i = bearFVGs.size() - 1 to 0
+        if i < bearFVGs.size()
+            fvg = bearFVGs.get(i)
+            if not fvg.mitigated
+                isMitigated = mitigMode == "Touch" ? close > fvg.mid : close > fvg.top
+                if isMitigated
+                    fvg.mitigated    := true
+                    bearMitigatedNow := true
+                    box.delete(fvg.fvgBox)
+                    line.delete(fvg.midLine)
+                    _ = bearFVGs.remove(i)
+
+// ============================================================
+// ALERT CONDITIONS — global scope
+// ============================================================
+alertcondition(bullCondition,                  title="New Bullish FVG",       message="🟢 New Bullish Fair Value Gap detected on {{ticker}} ({{interval}})")
+alertcondition(bearCondition,                  title="New Bearish FVG",       message="🔴 New Bearish Fair Value Gap detected on {{ticker}} ({{interval}})")
+alertcondition(bullMitigatedNow,               title="Bullish FVG Mitigated", message="⚡ Bullish FVG mitigated on {{ticker}} ({{interval}}) — price entered the gap")
+alertcondition(bearMitigatedNow,               title="Bearish FVG Mitigated", message="⚡ Bearish FVG mitigated on {{ticker}} ({{interval}}) — price entered the gap")
+alertcondition(bullCondition or bearCondition, title="Any New FVG",           message="📊 New Fair Value Gap detected on {{ticker}} ({{interval}})")

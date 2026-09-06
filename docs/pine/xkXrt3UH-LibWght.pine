@@ -1,0 +1,2155 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   This library implements a comprehensive set of mathematical and
+//                statistical functions for quantitative analysis in Pine Script™.
+//                It integrates a custom weighting series (e.g., volume, tick count)
+//                into standard and advanced statistical calculations, focusing on
+//                **Weighted Least Squares (WLS)** and the **Law of Total Moments**.
+//
+//                This architecture allows for a structural decomposition of statistics,
+//                separating market microstructure (Within-Bar) from trend components
+//                (Between-Bar) and noise (Residuals).
+//
+//                1.  Effective Sample Size (Kish's N_eff):
+//                    Standard deviation and standard errors are dynamically corrected
+//                    for the reduction in information caused by weighting concentration.
+//                    Formula: N_eff = (Σw)² / Σ(w²)
+//
+//                2.  Moment Decomposition (Law of Total Moments):
+//                    Decomposes statistics into additive structural components.
+//                    This allows analyzing whether volatility or skewness originates
+//                    from the trend direction or the intrabar noise.
+//                    • Variance: σ²_tot = σ²_btw + E[σ²_wtn]
+//                    • Skewness: M3_tot = M3_btw + E[M3_wtn] + Interaction
+//
+//                3.  Advanced Bias Correction (Rimoldini, 2013):
+//                    Implements exact correction factors for weighted Skewness
+//                    and Kurtosis to ensure unbiased estimators for population
+//                    statistics, even under heavy weighting.
+//                    • Skew_unb = g₁ * [ (Σw(Σw²-w)) / ( (Σw)³ - 3ΣwΣw² + 2Σw³ ) ]^(1/2) ...
+//
+//                4.  Relationship Analysis (Covariance & Correlation):
+//                    A complete suite for analyzing the relationship between two assets,
+//                    decomposed into three distinct layers:
+//                    • Total:    Correlation of the full price distributions.
+//                    • Between:  Correlation of the trend components (Path correlation).
+//                    • Residual: Correlation of the noise/residuals (Cointegration proxy).
+//                    All correlation functions (`w...Cor`) are normalized using
+//                    mathematically consistent weighted standard deviations.
+//
+//                5.  Weighted Least Squares (Linear Regression):
+//                    Performs regression analysis where bars are weighted by importance.
+//                    Decomposes the Total Variance into:
+//                    • Explained Variance (Trend)
+//                    • Residual Variance (Noise around trend)
+//                    • Within Variance (Microstructure)
+//                    Key Metrics: `wSlopeStdErr` (Reliability), `wResCoVar` (Cointegration).
+//
+//                6.  Higher Statistical Moments:
+//                    Computes higher-order weighted moments for all decomposition layers:
+//                    - Variance (M2): Dispersion measurement.
+//                    - Skewness (M3): Asymmetry of the distribution (Tail risk).
+//                    - Kurtosis (M4): Tail heaviness and outlier frequency.
+//
+//                7.  Universal Weighting & Fallback Logic:
+//                    All functions accept a `weight` parameter. If Σw = 0 (e.g., no volume),
+//                    calculations automatically fall back to standard unweighted
+//                    equivalents (Uniform Distribution) to ensure stability.
+//
+//                8.  Standard Weighted Indicators:
+//                    Weighted versions of classic technical indicators:
+//                    - `wSma`, `wEma`, `wRma` (Wilder), `wHma` (Hull), `wRsi`.
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibWght")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.2.0
+// (Ref) Architecture: Complete internal refactoring to modular kernel functions
+//       (_calcMom, _calcLRMom, _calcGeom) to ensure mathematical consistency
+//       and reduce code duplication.
+// (Ref) Internal: Renamed helper '_wgtClean' to '_sanitize' and added '_calcRho'
+//       to centralize correlation normalization logic.
+// (Mod) API: Removed redundant `midLine` parameter from Residual functions.
+//       Geometry is now calculated internally via slope and intercept.
+// (Mod) API: Removed default value for `biased` input parameter to enforce
+//       explicit decision between Population and Sample statistics.
+// (Mod) Returns: Standardized return values of variance functions to
+//       `[variance, neff]` (Kish's Effective Sample Size).
+// (Add) Higher Moments: Implementation of a comprehensive suite for weighted
+//       Skewness and Kurtosis (Between, Residual, Total). Includes exact
+//       bias corrections per Rimoldini (2013).
+// (Add) Covariance: Added functions for covariance decomposition (`wBtwCoVar`,
+//       `wTotCoVar`, `wResCoVar`, etc.) to analyze correlations structure.
+// (Add) Correlation: Added full suite of correlation coefficients (`wBtwCor`,
+//       `wTotCor`, `wResCor`, `wLRTotCor`, `wLRLocTotCor`) matching the
+//       covariance logic.
+// (Add) Statistics: New indicator `wSlopeStdErr` to measure the reliability
+//       of the regression slope.
+// (Mod) API: Standard Deviation (`w...StdDev`) and Standard Error (`w...StdErr`) 
+//       functions now return full component decomposition (e.g., [stdTot, stdTrd, stdRes])
+//       to allow analysis of volatility sources in price units.
+// (Dep) Removed functions wAtr, wTr, and wR.
+// (Fix) Math: Critical fix in `wLinReg`. Corrected the determinant calculation
+//       fallback logic when the sum of weights is zero (e.g., symbols without volume).
+// (Fix) Math: Corrected logic for Skewness bias correction (Sample vs Population)
+//       to strictly apply Rimoldini factors only when `biased=false`.
+// (Fix) Stability: Introduced Epsilon checks and extended `na` handling to
+//       prevent division-by-zero during singularities.
+//
+// 2025-11-01 0.1.0
+// (New) Initial release of library
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibWght"
+const string VERSION = "0.2.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const float EPSILON = 1e-9
+
+// ── PRIVATE ──────────────────────────────────────────────────────────────────
+// @function Sanitises a data series by replacing *na* with 0 and clamping
+//           negative values to 0. Use strictly for data that must be
+//           non-negative (e.g., Weights, Sigma, Price).
+// @param   src   series float  Raw series that may contain *na* or negatives.
+// @returns       series float  Clean, non-negative series without gaps.
+_sanitize(
+  series float src
+  ) =>
+    series float filled = nz(source = src, replacement = 0)
+    math.max(filled, 0)
+
+// @function The core routine for weighted mean.
+//           This is the fundamental mean calculation used by all weighted statistics functions.
+// @param     source   series float  Data to average.
+// @param     wgt      series float  Clean weight series.
+// @param     len      series int    Look-back length ≥ 1.
+// @returns            series float  Linear-kernel weighted mean; falls back to
+//                                   the arithmetic mean if Σweight = 0.
+_calcMean(
+  series float source,
+  series float wgt,
+  series int len
+  ) =>
+    series float sumW = math.sum(source = wgt, length = len)
+    if sumW > 0
+        series float sumWS = math.sum(source = wgt * source , length = len)
+        sumWS / sumW 
+    else
+        series float sumS = math.sum(source = source, length = len)
+        sumS / len
+
+// @function Calculates the weighted mean (1st moment) and the required central biased moments 
+//           (M2, M3, M4) using a numerically stable Two-Pass algorithm.
+//           Pass 1: Calculate Weighted Mean.
+//           Pass 2: Accumulate central moments using deviations (x - mean).
+//           This avoids catastrophic cancellation present in Naïve algorithms (E[x^2] - E[x]^2)
+//           when dealing with high-value assets (e.g. Price > 10,000).
+// @param    source   series float  Data series (Y).
+// @param    wgt      series float  Clean weight series (w).
+// @param    len      series int    Lookback length (L).
+// @param    needM1   series bool   True if the 1nd moment (mean component) is required.
+// @param    needM2   series bool   True if the 2nd moment (Variance component) is required.
+// @param    needM3   series bool   True if the 3rd central moment (Skewness component) is required.
+// @param    needM4   series bool   True if the 4th central moment (Kurtosis component) is required.
+// @returns  [mean, mom2, mom3, mom4]
+//           mom1 series float  The weighted mean (E[X]).
+//           mom2 series float  The biased 2nd central moment (M₂), NA if not requested.
+//           mom3 series float  The biased 3rd central moment (M₃), NA if not requested.
+//           mom4 series float  The biased 4th central moment (M₄), NA if not requested.
+_calcMom(
+  series float source,
+  series float wgt,
+  series int len,
+  series bool needM1,
+  series bool needM2,
+  series bool needM3,
+  series bool needM4
+  ) =>
+    series bool calcM4 = needM4
+    series bool calcM3 = needM3 or calcM4
+    series bool calcM2 = needM2 or calcM3
+    series bool calcM1 = needM1 or calcM2
+    
+    series float mom1 = na
+    series float mom2 = na
+    series float mom3 = na
+    series float mom4 = na
+
+    series float sumW = math.sum(source = wgt, length = len)
+    series bool  useW = sumW > 0
+    
+    if calcM1
+        series float mean = _calcMean(source, wgt, len)
+        mom1 := mean
+
+        if calcM2
+            series float cumWDev2 = 0.0
+            series float cumWDev3 = 0.0
+            series float cumWDev4 = 0.0
+
+            for i = 0 to len - 1
+                series float val = source[i]
+                series float w   = useW ? wgt[i] : 1.0
+                series float dev = val - mean
+                series float dev2 = dev * dev
+                
+                cumWDev2 += w * dev2
+                
+                if calcM3
+                    cumWDev3 += w * dev2 * dev
+                
+                if calcM4
+                    cumWDev4 += w * dev2 * dev2
+            
+            series float denom = useW ? sumW : float(len)
+            mom2 := cumWDev2 / denom
+            mom3 := calcM3 ? cumWDev3 / denom : na
+            mom4 := calcM4 ? cumWDev4 / denom : na
+
+    [mom1, mom2, mom3, mom4]
+
+// @function Calculates Kish's Effective Sample Size (N_eff).
+//           Used to quantify the information content of weighted data.
+//           Formula: N_eff = (Σw)² / Σ(w²)
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Lookback length.
+// @returns           series float  N_eff.
+_calcNeff(
+  series float wgt,
+  series int len
+  ) =>
+    series float sumW  = math.sum(source = wgt, length = len)
+    series float sumW2 = math.sum(source = wgt * wgt, length = len)
+
+    sumW2 > EPSILON ? (sumW * sumW) / sumW2 : float(len)
+
+// @function Calculates the bias correction factor for Variance/Covariance using N_eff.
+//           Refactored to use _calcNeff for better modularity.
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Lookback length.
+// @param    biased   series bool   true → population (biased); false → sample.
+// @param    df       simple int    Lost degrees of freedom (1 for Mean, 2 for Regression).
+// @returns  [crct, neff]
+//           crct series float  The correction factor (biased * crct = unbiased).
+//           neff series float  Kish's Effective Sample Size (N_eff).
+_calcVarCrct(
+  series float wgt,
+  series int len,
+  series bool biased,
+  simple int df
+  ) =>
+    series float neff = _calcNeff(wgt, len)
+    series float crct = 1.0
+
+    if not biased
+        series float denom = neff - float(df)
+        if denom > EPSILON
+            crct := neff / denom
+        else
+            crct := na
+    
+    [crct, neff]
+
+// @function Calculates the bias correction factor for Skewness (Rimoldini/Fisher).
+//           Used to convert biased population skewness to unbiased sample skewness.
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Look-back length.
+// @param    biased   series bool   true → population (biased); false → sample.
+// @returns           series float  The correction factor (multiply biased skewness by this).
+_calcSkwCrct(
+  series float wgt,
+  series int len,
+  series bool biased
+  ) =>
+    series float crct = 1.0
+    
+    if not biased
+        series float sumW = math.sum(source = wgt, length = len)
+        if sumW > 0
+            // Rimoldini Exact Factor
+            series float sumW2  = math.sum(source = wgt * wgt, length = len)
+            series float sumW3  = math.sum(source = wgt * wgt * wgt, length = len)
+            series float sumWP2 = sumW * sumW
+            series float sumWP3 = sumWP2 * sumW
+
+            series float denom  = sumWP3 - 3 * sumW * sumW2 + 2 * sumW3
+            series float termB  = sumWP2 - sumW2
+            
+            if denom > EPSILON and termB > 0
+                crct := (termB * math.sqrt(termB)) / denom
+            else
+                crct := na
+        else
+            // Fisher-Pearson Factor
+            if len > 2
+                series float neff = float(len)
+                crct := math.sqrt(neff * (neff - 1)) / (neff - 2)
+            else
+                crct := na
+    
+    crct
+
+// @function Calculates Unbiased Excess Kurtosis from biased moments.
+//           Unlike Variance/Skewness, this is not a simple factor multiplication.
+//           It reconstructs the value using Rimoldini (weighted) or Fisher (uniform) logic.
+// @param    mom2     series float  Biased 2nd central moment (Variance).
+// @param    mom4     series float  Biased 4th central moment.
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Look-back length.
+// @param    biased   series bool   true → population (biased); false → sample.
+// @returns           series float  The unbiased excess kurtosis.
+_calcKrtCrct(
+  series float mom2,
+  series float mom4,
+  series float wgt,
+  series int len,
+  series bool biased
+  ) =>
+    series float krt = mom2 > EPSILON ? (mom4 / (mom2 * mom2)) - 3.0 : na
+    
+    if not biased
+        series float sumW = math.sum(source = wgt, length = len)
+        if sumW > 0
+            // Rimoldini Logic using Weight Sums
+            series float wgt2 = wgt * wgt
+            series float wgt3 = wgt2 * wgt
+            series float wgt4 = wgt3 * wgt
+
+            series float sumW2 = math.sum(source = wgt2, length = len)
+            series float sumW3 = math.sum(source = wgt3, length = len)
+            series float sumW4 = math.sum(source = wgt4, length = len)
+
+            series float sumWP2  = sumW * sumW
+            series float sumWP4  = sumWP2 * sumWP2
+            series float sumW2P2 = sumW2 * sumW2
+
+            series float termA = sumWP2 * (sumWP4 - 4 * sumW * sumW3 + 3 * sumW2P2)
+            series float termB = sumWP2 * (sumWP4 - 2 * sumWP2 * sumW2 + 4 * sumW * sumW3 - 3 * sumW2P2)
+            
+            series float termDA = sumWP2 - sumW2
+            series float termDB = sumWP4 - 6 * sumWP2 * sumW2 + 8 * sumW * sumW3 + 3 * sumW2P2 - 6 * sumW4
+            series float termD  = termDA * termDB
+
+            series float denom = termD * mom2 * mom2
+            if denom > EPSILON
+                krt := (termA * mom4 - 3 * termB * mom2 * mom2) / denom
+            else
+                krt := na
+        else
+            if len > 3
+                // Fisher-Pearson Fallback
+                series float neff  = float(len)
+                series float g2    = krt
+                series float num   = neff - 1
+                series float denom = (neff - 2) * (neff - 3)
+                    
+                krt := (num / denom) * ((neff + 1) * g2 + 6)
+            else
+                krt := na
+    
+    krt
+
+// @function Calculates the weighted covariance and variances of two series using a
+//           numerically stable **Two-Pass algorithm** (Centered Moments).
+//           Pass 1: Calculates the weighted means of X and Y.
+//           Pass 2: Accumulates the product of deviations: Σw * (x - x̄) * (y - ȳ).
+//
+//           This approach is strictly preferred over the naive computational formula
+//           (E[XY] - E[X]E[Y]) for financial time series, as it prevents
+//           "catastrophic cancellation" when price levels are high relative to
+//           their volatility (e.g., BTC, JPY, Indices).
+// @param    sourceX  series float  First data series (X).
+// @param    sourceY  series float  Second data series (Y).
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Look-back length.
+// @returns  [cov, varX, varY, meanX, meanY]
+//           cov      series float  The weighted biased covariance (Cov[X,Y]).
+//           varX     series float  The weighted biased variance of X (σ²x).
+//           varY     series float  The weighted biased variance of Y (σ²y).
+//           meanX    series float  The weighted mean of X (x̄).
+//           meanY    series float  The weighted mean of Y (ȳ).
+_calcCoVar(
+  series float sourceX,
+  series float sourceY,
+  series float wgt,
+  series int len
+  ) =>
+    series float sumW = math.sum(source = wgt, length = len)
+    series bool  useW = sumW > 0
+    series float invW = useW ? 1.0 / sumW : 1.0 / float(len)
+
+    series float meanX = _calcMean(sourceX, wgt, len)
+    series float meanY = _calcMean(sourceY, wgt, len)
+
+    series float cumCov  = 0.0
+    series float cumVarX = 0.0
+    series float cumVarY = 0.0
+    for i = 0 to len - 1
+        series float w  = useW ? wgt[i] : 1.0
+        series float valX = sourceX[i]
+        series float valY = sourceY[i]
+        
+        series float dx = valX - meanX
+        series float dy = valY - meanY
+        
+        cumCov  += w * dx * dy
+        cumVarX += w * dx * dx
+        cumVarY += w * dy * dy
+    
+    series float cov  = cumCov  * invW
+    series float varX = cumVarX * invW
+    series float varY = cumVarY * invW
+
+    [cov, varX, varY, meanX, meanY]
+
+// @function Calculates the weighted mean of the residuals around the trend line.
+//           This value is theoretically zero in exact WLS, but its calculation 
+//           is needed to accurately define the center of the residual distribution
+//           when computing higher moments (Skewness and Kurtosis).
+//           M(r) ≈ E[Source - Slope * X].
+// @param    source   series float  The data series (Y).
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Lookback length.
+// @param    sumW     series float  The sum of weights (Σw).
+// @param    slope    series float  The slope (b₁).
+// @returns           series float  The weighted mean residual value (Mean Residual).
+_calcResMean(
+  series float source,
+  series float wgt,
+  series int len,
+  series float sumW,
+  series float slope
+  ) =>
+    series bool  useW = sumW > 0
+
+    series float cumWVal = 0.0
+    for i = 0 to len - 1
+        series float w = useW ? wgt[i] : 1.0
+        series float x = float(len - 1 - i)
+
+        cumWVal += w * (source[i] - slope * x)
+
+    series float denom = useW ? sumW : float(len)
+    cumWVal / denom
+
+// @function Calculates the 1st, 2nd, 3rd, and 4th central moments of the residuals (r = source - trend).
+//           This highly optimized routine first calculates the mean residual (r̄) using `_calcResMean` 
+//           and then performs the accumulation of all required central moments (M₂, M₃, M₄) 
+//           in a single, efficient loop.
+// @param    source   series float  Data series (Y).
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Lookback length.
+// @param    slope    series float  The slope (b₁).
+// @param    sumW     series float  The sum of weights (Σw).
+// @param    needM3   series bool   True if the 3rd moment (Skewness component) is required.
+// @param    needM4   series bool   True if the 4th moment (Kurtosis component) is required.
+// @returns  [mom1, mom2, mom3, mom4]
+//           mom1 series float  The weighted **Mean Residual** (r̄).
+//           mom2 series float  The biased 2nd central moment (Residual Variance M₂).
+//           mom3 series float  The biased 3rd central moment (Residual Skewness M₃), NA if not requested.
+//           mom4 series float  The biased 4th central moment (Residual Kurtosis M₄), NA if not requested.
+_calcResMom(
+  series float source,
+  series float wgt,
+  series int len,
+  series float slope,
+  series float sumW,
+  series bool needM3,
+  series bool needM4
+  ) =>
+    series bool useW = sumW > 0
+
+    series float meanRes = _calcResMean(source, wgt, len, sumW, slope)
+    
+    series float cumWRes2  = 0.0
+    series float cumWRes3  = 0.0
+    series float cumWRes4  = 0.0
+    for i = 0 to len - 1
+        series float w = useW ? wgt[i] : 1.0
+        series float x = float(len - 1 - i)
+        
+        series float res  = source[i] - (slope * x) - meanRes
+        series float res2 = res * res
+        
+        cumWRes2 += w * res2
+        
+        if needM3
+            cumWRes3 += w * res2 * res
+            
+        if needM4
+            cumWRes4 += w * res2 * res2
+
+    series float denom = useW ? sumW : float(len)
+    
+    series float mom1 = meanRes
+    series float mom2 = cumWRes2 / denom
+    series float mom3 = needM3 ? cumWRes3 / denom : na
+    series float mom4 = needM4 ? cumWRes4 / denom : na
+    
+    [mom1, mom2, mom3, mom4]
+
+// @function Calculates the weighted moments of the time axis (X-axis) for use in 
+//           Weighted Least Squares (WLS) regression components.
+//           Uses Two-Pass algorithm for stability in Variance of X.
+// @param    wgt      series float  Clean weight series.
+// @param    len      series int    Lookback length.
+// @param    sumW     series float  The sum of weights (Σw).
+// @returns  [meanX, varX, tssX]
+//           meanX series float  The weighted mean of the X-axis (x̄).
+//           varX  series float  The weighted variance of the X-axis (σ²ₓ).
+//           tssX  series float  The weighted Total Sum of Squares of the X-axis (TSSₓ = Σw(x - x̄)²).
+_calcGeom(
+  series float wgt,
+  series int len,
+  series float sumW
+  ) =>
+    series bool useW = sumW > 0
+    series float invW = useW ? 1.0 / sumW : 1.0 / float(len)
+
+    series float cumWX  = 0.0
+    for i = 0 to len - 1
+        series float w  = useW ? wgt[i] : 1.0
+        series float x  = float(len - 1 - i)
+        cumWX  += w * x
+    
+    series float meanX = cumWX * invW
+
+    series float cumWDev2 = 0.0
+    for i = 0 to len - 1
+        series float w  = useW ? wgt[i] : 1.0
+        series float x  = float(len - 1 - i)
+        series float d  = x - meanX
+        cumWDev2 += w * d * d
+
+    series float varX = useW ? (cumWDev2 * invW) : (float(len * len) - 1.0) / 12.0
+    series float tssX = useW ? cumWDev2 : float(len) * varX
+
+    [meanX, varX, tssX]
+
+// @function Core Loop for Linear Regression Moments.
+//           Calculates weighted central biased moments for decomposed components
+//           relative to a Linear Regression Trend Line.
+//           Uses a numerically stable Two-Pass algorithm to prevent catastrophic cancellation.
+//
+//           Decomposition Logic:
+//           1. Global (Total): Moments around the global weighted mean (includes Trend).
+//           2. Local (Noise): Moments around the regression line (excludes Trend).
+//
+//           Crucial Note on 4th Moment (Kurtosis):
+//           Unlike Variance (M2) or Skewness (M3), the 4th moment is not simply additive
+//           due to complex cross-terms: (A + B)^4 != A^4 + B^4.
+//           Therefore, 'mom4Tot' and 'mom4Loc' are calculated directly from the
+//           deviations to ensure all interaction effects are captured correctly.
+//
+// @param    mu       series float  Per-bar mean (e.g., HL2).
+// @param    sig      series float  Per-bar standard deviation (e.g., (H-L)/2).
+// @param    skw      series float  Per-bar intrabar skewness (Input 0.0 if unknown).
+// @param    krt      series float  Per-bar intrabar excess kurtosis (Input 0.0 if unknown).
+// @param    wgt      series float  Weight series.
+// @param    slope    series float  Slope of the regression line (b1).
+// @param    len      series int    Look-back length.
+// @param    needTrd  simple bool   If true, calculates Total (Global) components including Trend.
+//                                  If false, calculates Local components only (Residuals + Within).
+// @param    needM3   simple bool   If true, calculates 3rd moments (Skewness).
+// @param    needM4   simple bool   If true, calculates 4th moments (Kurtosis).
+//
+// @returns  [mom2Loc, mom2Tot, mom3Res, mom3Wtn, mom3Trd, mom3Tot, mom3Loc, 
+//            mom4Res, mom4Wtn, mom4Trd, mom4Tot, mom4Loc,
+//            mom4IntV, mom4IntS, mom4LocIntV, mom4LocIntS]
+//
+//           -- Variance (M2) --
+//           mom2Loc:     Local Variance (Residuals + Within).
+//           mom2Tot:     Total Variance (Trend + Residuals + Within).
+//
+//           -- Skewness (M3) --
+//           mom3Res:     Residual Skewness Component.
+//           mom3Wtn:     Within-Bar Skewness Component.
+//           mom3Trd:     Trend Skewness Component.
+//           mom3Tot:     Total Skewness (Sum of components + Interaction).
+//           mom3Loc:     Local Skewness (Sum of Res + Wtn + Local Interaction).
+//
+//           -- Kurtosis (M4) --
+//           mom4Res:     Residual Kurtosis Component (Tail risk of noise).
+//           mom4Wtn:     Within-Bar Kurtosis Component (Tail risk of microstructure).
+//           mom4Trd:     Trend Kurtosis Component (Tail risk of slope changes).
+//           mom4Tot:     Total 4th Moment. Calculated DIRECTLY from global deviations
+//                        to capture all cross-terms and interactions correctly.
+//           mom4Loc:     Local 4th Moment. Calculated DIRECTLY from local deviations
+//                        to capture noise interactions correctly.
+//           mom4IntV:    Interaction Variance Component (6 * d^2 * sigma^2).
+//           mom4IntS:    Interaction Skewness Component (4 * d * Skew * sigma^3).
+//           mom4LocIntV: Local version of Interaction Variance (ignoring Trend).
+//           mom4LocIntS: Local version of Interaction Skewness (ignoring Trend).
+_calcLRMom(
+  series float mu,
+  series float sig,
+  series float skw,
+  series float krt,
+  series float wgt,
+  series float slope,
+  series int len,
+  simple bool needTrd,
+  simple bool needM3, 
+  simple bool needM4
+  ) =>
+    series bool needSkw = needM3 or (needM4 and needTrd)
+    series bool needKrt = needM4
+
+    series float sumW = math.sum(source = wgt, length = len)
+    series bool  useW = sumW > 0
+    series float invW = useW ? 1.0 / sumW : 1.0 / float(len)
+    
+    series float xBase = float(len - 1)
+
+    series float cumWX = 0.0
+    series float cumWM = 0.0
+
+    for i = 0 to len - 1
+        series float w = useW ? wgt[i] : 1.0
+        series float x = xBase - i
+        series float m = mu[i]
+        
+        cumWX += w * x
+        cumWM += w * m
+
+    series float meanX  = cumWX * invW
+    series float meanMu = cumWM * invW
+
+    series float mom2Loc = 0.0
+    series float mom2Tot = 0.0 
+
+    series float mom3Res = 0.0
+    series float mom3Wtn = 0.0
+    series float mom3Trd = 0.0 
+    series float mom3Tot = 0.0 
+    series float mom3Loc = 0.0
+
+    series float mom4Res = 0.0
+    series float mom4Wtn = 0.0
+    series float mom4Trd = 0.0 
+    series float mom4Tot = 0.0
+    series float mom4Loc = 0.0
+    
+    series float mom4IntV    = 0.0
+    series float mom4IntS    = 0.0
+    series float mom4LocIntV = 0.0
+    series float mom4LocIntS = 0.0
+
+    series bool calcGeom = not needTrd or needM3 or needM4
+    series bool calcS3   = needSkw or needKrt
+
+    for i = 0 to len - 1
+        series float w = useW ? wgt[i] : 1.0
+        series float x = xBase - i
+        series float m = mu[i]
+        series float s = sig[i]
+        
+        series float g = needSkw ? skw[i] : 0.0
+        series float k = needKrt ? krt[i] : 0.0
+        
+        series float muDev = m - meanMu
+        series float s2    = s * s
+        
+        series float trdDev  = 0.0
+        series float resDev  = 0.0
+        series float trdDev2 = 0.0
+        series float resDev2 = 0.0
+        series float muDev2  = 0.0
+
+        if calcGeom
+            trdDev  := slope * (x - meanX)
+            resDev  := muDev - trdDev
+            trdDev2 := trdDev * trdDev
+            resDev2 := resDev * resDev
+        
+        series float s3 = 0.0
+        if calcS3
+            s3 := s2 * s
+
+        if needTrd
+            muDev2  := muDev * muDev
+            mom2Tot += w * (muDev2 + s2)
+        else
+            mom2Loc += w * (resDev2 + s2)
+
+        if needM3
+            series float rawM3Wtn = g * s3
+            
+            mom3Res += w * (resDev2 * resDev)
+            mom3Wtn += w * rawM3Wtn
+            
+            if needTrd
+                mom3Trd += w * (trdDev2 * trdDev)
+                series float termInt = 3.0 * muDev * s2
+                mom3Tot += w * ((muDev2 * muDev) + rawM3Wtn + termInt)
+            else
+                series float termIntLoc = 3.0 * resDev * s2
+                mom3Loc += w * ((resDev2 * resDev) + rawM3Wtn + termIntLoc)
+
+        if needM4
+            series float s4 = s2 * s2
+            series float rawM4Wtn = (k + 3.0) * s4
+            
+            series float resDev4 = resDev2 * resDev2
+            mom4Res += w * resDev4
+            mom4Wtn += w * rawM4Wtn
+            
+            if needTrd
+                mom4Trd += w * (trdDev2 * trdDev2)
+                
+                series float termIntVar = 6.0 * muDev2 * s2
+                series float termIntSkw = 4.0 * muDev * g * s3
+                series float muDev4     = muDev2 * muDev2
+                
+                mom4IntV += w * termIntVar
+                mom4IntS += w * termIntSkw
+                mom4Tot  += w * (muDev4 + termIntVar + termIntSkw + rawM4Wtn)
+            else
+                series float termIntLocVar = 6.0 * resDev2 * s2
+                series float termIntLocSkw = 4.0 * resDev * g * s3 
+                series float resDev4_Loop  = resDev2 * resDev2
+                
+                mom4LocIntV += w * termIntLocVar
+                mom4LocIntS += w * termIntLocSkw
+                mom4Loc     += w * (resDev4_Loop + termIntLocVar + termIntLocSkw + rawM4Wtn)
+
+    series float denom = useW ? sumW : float(len)
+    series float invD  = 1.0 / denom
+
+    mom2Loc := not needTrd ? mom2Loc * invD : na
+    mom2Tot := needTrd     ? mom2Tot * invD : na
+
+    mom3Res := needM3 ? mom3Res * invD : na
+    mom3Wtn := needM3 ? mom3Wtn * invD : na
+    mom3Trd := needM3 and needTrd ? mom3Trd * invD : na
+    mom3Tot := needM3 and needTrd ? mom3Tot * invD : na
+    mom3Loc := needM3 and not needTrd ? mom3Loc * invD : na
+
+    mom4Res := needM4 ? mom4Res * invD : na
+    mom4Wtn := needM4 ? mom4Wtn * invD : na
+    mom4Trd := needM4 and needTrd ? mom4Trd * invD : na
+    
+    mom4IntV    := needM4 and needTrd ? mom4IntV * invD : na
+    mom4IntS    := needM4 and needTrd ? mom4IntS * invD : na
+    mom4LocIntV := needM4 and not needTrd ? mom4LocIntV * invD : na
+    mom4LocIntS := needM4 and not needTrd ? mom4LocIntS * invD : na
+    
+    mom4Tot := needM4 and needTrd ? mom4Tot * invD : na
+    mom4Loc := needM4 and not needTrd ? mom4Loc * invD : na
+
+    [mom2Loc, mom2Tot, 
+     mom3Res, mom3Wtn, mom3Trd, mom3Tot, mom3Loc, 
+     mom4Res, mom4Wtn, mom4Trd, mom4Tot, mom4Loc,
+     mom4IntV, mom4IntS, mom4LocIntV, mom4LocIntS]
+
+// @function Helper to calculate correlation coefficient from covariance and std devs.
+//           Handles division by zero and clamps result to [-1, 1].
+// @param    cov    float Weighted Covariance.
+// @param    stdA   float Weighted Standard Deviation of Asset A.
+// @param    stdB   float Weighted Standard Deviation of Asset B.
+// @returns         float Correlation coefficient.
+_calcRho(
+  series float cov,
+  series float stdA,
+  series float stdB) =>
+    series float denom = stdA * stdB
+    series float rho   = denom > EPSILON ? cov / denom : 0.0
+    math.max(math.min(rho, 1.0), -1.0)
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function  Weighted Simple Moving Average (linear kernel).
+// @param     source   series float  Data to average.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length ≥ 1.
+// @returns            series float  Linear-kernel weighted mean; falls back to
+//                                   the arithmetic mean if Σweight = 0.
+export wSma(
+  series float source,
+  series float weight,
+  series int length
+  ) =>
+    series int len   = math.max(length, 1)
+    series float wgt = _sanitize(weight)
+
+    _calcMean(source, wgt, len)
+
+// @function  Weighted EMA (exponential kernel).
+// @param     source   series float  Data to average.
+// @param     weight   series float  Weight series.
+// @param     length   simple int    Look-back length ≥ 1.
+// @returns            series float  Exponential-kernel weighted mean; falls
+//                                   back to classic EMA if Σweight = 0.
+export wEma(
+  series float source,
+  series float weight,
+  simple int length
+  ) =>
+    simple int len   = math.max(length, 1)
+    series float wgt = _sanitize(weight)
+
+    series float denW = ta.ema(source = wgt, length = len)
+    if denW > 0
+        series float numWS = ta.ema(source = wgt * source, length = len)
+        numWS / denW
+    else
+        ta.ema(source = source, length = len)
+
+// @function  Weighted WMA (linear kernel).
+// @param     source   series float  Data to average.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length ≥ 1.
+// @returns            series float  Linear-kernel weighted mean; falls back to
+//                                   classic WMA if Σweight = 0.
+export wWma(
+  series float source,
+  series float weight,
+  series int length
+  ) =>
+    series int len   = math.max(length, 1)
+    series float wgt = _sanitize(weight)
+
+    series float denW = ta.wma(source = wgt, length = len)
+    if denW > 0
+        series float numWS = ta.wma(source = wgt * source, length = len)
+        numWS / denW
+    else
+        ta.wma(source = source, length = len)
+
+// @function  Weighted RMA (Wilder kernel, α = 1/len).
+// @param     source   series float  Data to average.
+// @param     weight   series float  Weight series.
+// @param     length   simple int    Look-back length ≥ 1.
+// @returns            series float  Wilder-kernel weighted mean; falls back to
+//                                   classic RMA if Σweight = 0.
+export wRma(
+  series float source,
+  series float weight,
+  simple int length
+  ) =>
+    simple int len   = math.max(length, 1)
+    series float wgt = _sanitize(weight)
+
+    series float denW = ta.rma(source = wgt, length = len)
+    if denW > 0
+        series float numWS = ta.rma(source = wgt * source, length = len)
+        numWS / denW
+    else
+        ta.rma(source = source, length = len)
+
+// @function  Weighted HMA (linear kernel).
+// @param     source   series float  Data to average.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length ≥ 1.
+// @returns            series float  Linear-kernel weighted mean; falls back to
+//                                   classic HMA if Σweight = 0.
+export wHma(
+  series float source,
+  series float weight,
+  series int length
+  ) =>
+    series int len = math.max(length, 2)
+
+    series int halfLen = math.max(int(math.floor(len / 2)), 1)
+    series int sqrtLen = math.max(int(math.floor(math.sqrt(len))), 1)
+
+    series float fast = wWma(source, weight, halfLen)
+    series float slow = wWma(source, weight, len)
+    series float diff = 2 * fast - slow
+
+    wWma(source = diff, weight = weight, length = sqrtLen)
+
+// @function  Weighted Relative Strength Index.
+//            Applies the weighting kernel to the calculation of Average Gain
+//            and Average Loss.
+// @param     source   series float  Price series.
+// @param     weight   series float  Weight series.
+// @param     length   simple int    Look-back length ≥ 1.
+// @returns            series float  Weighted RSI; uniform if Σw = 0.
+export wRsi(
+  series float source,
+  series float weight,
+  simple int length
+  ) =>
+    simple int len   = math.max(length, 1)
+    series float wgt = _sanitize(weight)
+
+    series float delta = ta.change(source)
+    series float gain  = math.max(delta, 0)
+    series float loss  = math.max(-delta, 0)
+
+    series float avgGain = wRma(gain, wgt, len)
+    series float avgLoss = wRma(loss, wgt, len)
+
+    avgLoss < EPSILON ? 100 : 100 - 100 / (1 + avgGain / avgLoss)
+
+// @function  Weighted Between Variance (biased/unbiased).
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns [variance, neff]
+//          variance  series float  The calculated between-bar variance (σ²btw), either biased or unbiased.
+//          neff      series float  Kish's Effective Sample Size (N_eff).
+export wBtwVar(
+  series float source,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+
+    [_, varB, _, _] = _calcMom(source, wgt, len, false, true, false, false)
+    [crct, neff] = _calcVarCrct(wgt, len, biased, 1)
+
+    [varB * crct, neff]
+
+// @function  Weighted Between Standard Deviation.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns            series float  σbtw uniform if Σw = 0.
+export wBtwStdDev(
+  series float source,
+  series float weight,
+  series int length,
+  series bool biased
+   ) =>
+    [varBtw, _] = wBtwVar(source, weight, length, biased)
+    varBtw >= 0 ? math.sqrt(varBtw) : na
+
+// @function  Weighted Between Standard Error.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns            series float  √(σ²btw / N_eff) uniform if Σw = 0.
+export wBtwStdErr(
+  series float source,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    [varBtw, neff] = wBtwVar(source, weight, length, biased)
+    varBtw >= 0 and neff > EPSILON ? math.sqrt(varBtw / neff) : na
+
+// @function  Weighted Between Skewness (Rimoldini Exact).
+//            Uses algebraic expansion for moments and the exact Rimoldini (2013)
+//            correction factor for unbiased estimation.
+//            Fallback: If total weight is 0, assumes uniform weights and applies
+//            standard Fisher-Pearson correction.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns            series float  Skewness.
+export wBtwSkw(
+  series float source,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+
+    [_, mom2, mom3, _] = _calcMom(source, wgt, len, false, true, true, false)
+    series float denom = mom2 * math.sqrt(mom2)
+    series float skw   = denom > EPSILON ? mom3 / denom : na
+
+    skw * _calcSkwCrct(wgt, len, biased)
+
+// @function  Weighted Between Kurtosis (Rimoldini Exact).
+//            Calculates Excess Kurtosis (Normal = 0).
+//            Uses algebraic expansion for 4th moment and the exact Rimoldini (2013)
+//            correction factor for unbiased estimation with frequency weights.
+//            Reference: Rimoldini, R. (2013). "Weighted skewness and kurtosis unbiased by sample size".
+//            Fallback: If total weight is 0, applies standard Fisher-Pearson correction for sample size N.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population (biased); false → sample (Rimoldini corrected).
+// @returns            series float  Excess Kurtosis.
+export wBtwKrt(
+  series float source,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 4)
+    series float wgt = _sanitize(weight)
+
+    [_, mom2, _, mom4] = _calcMom(source, wgt, len, false, true, false, true)
+
+    _calcKrtCrct(mom2, mom4, wgt, len, biased)
+
+// @function  Weighted Between Covariance.
+//            Measures how two variables change together using the computational
+//            formula: E[XY] - E[X]E[Y].
+//            Utilizes joint geometric weights for both the individual means and the
+//            joint moment to ensure structural consistency."
+// @param     sourceA  series float  First series (X).
+// @param     sourceB  series float  Second series (Y).
+// @param     weightA  series float  Weight of first series.
+// @param     weightB  series float  Weight of second series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns            series float  Weighted Covariance.
+export wBtwCoVar(
+  series float sourceA,
+  series float sourceB,
+  series float weightA,
+  series float weightB,
+  series int length,
+  series bool biased
+  ) =>
+    series int len      = math.max(length, 2)
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    [cov, _, _, _, _] = _calcCoVar(sourceA, sourceB, wgtJnt, len)
+
+    [crct, _] = _calcVarCrct(wgtJnt, len, biased, 1) 
+    cov * crct
+
+// @function    Weighted Between Correlation.
+//              Standard correlation of price paths (Trend Correlation).
+// @param       sourceA  series float  Asset A.
+// @param       sourceB  series float  Asset B.
+// @param       weightA  series float  Weight of Asset A.
+// @param       weightB  series float  Weight of Asset B.
+// @param       length   series int    Look-back length.
+// @returns              series float  Correlation [-1, 1].
+export wBtwCor(
+  series float sourceA,
+  series float sourceB,
+  series float weightA,
+  series float weightB,
+  series int length
+  ) =>
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+    series int len      = math.max(length, 2)
+
+    [cov, varA, varB, _, _] = _calcCoVar(sourceA, sourceB, wgtJnt, len)
+    
+    series float stdA = varA >= 0 ? math.sqrt(varA) : 0.0
+    series float stdB = varB >= 0 ? math.sqrt(varB) : 0.0
+    
+    _calcRho(cov, stdA, stdB)
+
+// @function  Weighted Total Variance (= between-group + within-group).
+//            Useful when each bar represents an aggregate with its own
+//            mean* and pre-estimated σ (e.g., second-level ranges inside a
+//            1-minute bar). Assumes the *weight* series applies to both the
+//            group means and their σ estimates.
+// @param     mu       series float  Group means (e.g., HL2 of 1-second bars).
+// @param     sigma    series float  Pre-estimated σ of each group (same basis).
+// @param     weight   series float  Weight series (volume, ticks, …).
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns [varBtw, varWtn, neff]
+//          varBtw  series float  The between-bar variance component (σ²btw).
+//          varWtn  series float  The within-bar variance component (σ²wtn).
+//          neff      series float  Kish's Effective Sample Size (N_eff).
+export wTotVar(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+
+    [crct, neff] = _calcVarCrct(wgt, len, biased, 1)
+
+    [varBtwRaw, _] = wBtwVar(mu, wgt, len, true)
+    series float varWtnRaw = _calcMean(sig * sig, wgt, len)
+
+    series float varBtw = varBtwRaw * crct
+    series float varWtn = varWtnRaw * crct
+
+    [varBtw, varWtn, neff]
+
+// @function  Weighted Total Standard Deviation Decomposition.
+//            Calculates the total standard deviation and its components.
+//            Note: Components are NOT additive (σ_tot ≠ σ_btw + σ_wtn), 
+//            but related via variance: σ²_tot = σ²_btw + σ²_wtn.
+// @param     mu       series float  Group means.
+// @param     sigma    series float  Group sigmas.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [stdTot, stdBtw, stdWtn]
+//            stdTot   series float  Total Standard Deviation.
+//            stdBtw   series float  Between-Bar component (Trend volatility).
+//            stdWtn   series float  Within-Bar component (Intrabar volatility).
+export wTotStdDev(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series int length,
+  series bool biased
+   ) =>
+    [varBtw, varWtn, _] = wTotVar(mu, sigma, weight, length, biased)
+    
+    series float stdTot = math.min(varBtw, varWtn) >= 0 ? math.sqrt(varBtw + varWtn) : na
+    series float stdBtw = varBtw >= 0 ? math.sqrt(varBtw) : na
+    series float stdWtn = varWtn >= 0 ? math.sqrt(varWtn) : na
+    
+    [stdTot, stdBtw, stdWtn]
+
+// @function  Weighted Total Standard Error Decomposition.
+//            Decomposes the standard error estimate.
+//            SE_part = √( Var_part / N_eff ).
+// @param     mu       series float  Group means.
+// @param     sigma    series float  Group sigmas.
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [steTot, steBtw, steWtn]
+//            steTot   series float  Total Standard Error.
+//            steBtw   series float  Between-Bar Standard Error.
+//            steWtn   series float  Within-Bar Standard Error.
+export wTotStdErr(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    [varBtw, varWtn, neff] = wTotVar(mu, sigma, weight, length, biased)
+    
+    series float n     = neff > EPSILON ? neff : na
+    series float steTot = math.min(varBtw, varWtn) >= 0 and not na(n) ? math.sqrt((varBtw + varWtn) / n) : na
+    series float steBtw = varBtw >= 0 and not na(n) ? math.sqrt(varBtw / n) : na
+    series float steWtn = varWtn >= 0 and not na(n) ? math.sqrt(varWtn / n) : na
+    
+    [steTot, steBtw, steWtn]
+
+// @function  Weighted Total Skewness (Rimoldini Exact).
+//            Combines Between-Bar, Within-Bar, and Interaction moments via
+//            algebraic expansion (Law of Total Moments).
+//            Formula: M3_tot = M3_btw + M3_wtn + Interaction
+//            Interaction = 3 * (E[σ²µ] - E[µ]*E[σ²])
+// @param     mu       series float  Per-bar mean (e.g. HL2).
+// @param     sigma    series float  Per-bar standard deviation (e.g. (H-L)/2).
+// @param     skewness series float  Per-bar intrabar skewness (Input 0.0 if unknown).
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [skwBtw, skwWtn, skwInt]
+//            skwBtw  series float  Between-Component: Asymmetry of the trend itself (price path).
+//            skwWtn  series float  Within-Component: Average asymmetry inside the candles.
+//            skwInt  series float  Interaction-Component: Correlation between Price and Volatility.
+export wTotSkw(
+  series float mu,
+  series float sigma,
+  series float skewness,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+    series float skw = nz(skewness, 0.0)
+
+    [meanMu, mom2Btw, mom3Btw, _] = _calcMom(mu, wgt, len, true, true, true, false)
+
+    series float sig2 = sig * sig
+    series float sig3 = sig2 * sig
+
+    series float meanSig2   = _calcMean(sig2, wgt, len)
+    series float meanSig2Mu = _calcMean(sig2 * mu, wgt, len)
+    
+    series float mom3Wtn = _calcMean(skw * sig3, wgt, len)
+    series float mom3Int = 3 * (meanSig2Mu - meanMu * meanSig2)
+
+    series float varBtw = mom2Btw
+    series float varTot = varBtw + meanSig2
+    series float denom  = varTot > 0 ? (varTot * math.sqrt(varTot)) : 1.0
+    series float crct   = _calcSkwCrct(wgt, len, biased)
+
+    series float skwBtw = denom > EPSILON ? (crct * mom3Btw) / denom : na
+    series float skwWtn = denom > EPSILON ? (crct * mom3Wtn) / denom : na
+    series float skwInt = denom > EPSILON ? (crct * mom3Int) / denom : na
+
+    [skwBtw, skwWtn, skwInt]
+
+// @function  Weighted Total Kurtosis (Rimoldini Exact).
+//            Combines Between-Bar, Within-Bar, and multiple Interaction moments.
+//            Calculates Total Excess Kurtosis.
+//            Formula Decomposition:
+//            M4_tot = M4_btw + E[M4_wtn] + 6*E[d²σ²] + 4*E[d*M3_wtn]
+//            where d = (µ - E[µ])
+// @param     mu       series float  Per-bar mean.
+// @param     sigma    series float  Per-bar standard deviation.
+// @param     skewness series float  Per-bar intrabar skewness (0.0 if unknown).
+// @param     kurtosis series float  Per-bar intrabar excess kurtosis (0.0 if unknown).
+// @param     weight   series float  Weight series.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [krtTot, krtBtw, krtWtn, krtIntVar, krtIntSkw]
+//            krtTot    series float  Total Excess Kurtosis (Rimoldini corrected).
+//            krtBtw    series float  Between-Bar Component (Scaled additive contribution).
+//            krtWtn    series float  Within-Bar Component (Scaled additive contribution).
+//            krtIntVar series float  Interaction (Variance) Component (Scaled additive contribution).
+//            krtIntSkw series float  Interaction (Skewness) Component (Scaled additive contribution).
+export wTotKrt(
+  series float mu,
+  series float sigma,
+  series float skewness,
+  series float kurtosis,
+  series float weight,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 4)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+    series float skw = nz(skewness, 0.0)
+    series float krt = nz(kurtosis, 0.0)
+
+    [meanMu, mom2Btw, mom3Btw, mom4Btw] = _calcMom(mu, wgt, len, true, true, true, true)
+
+    series float sig2 = sig * sig
+    series float sig4 = sig2 * sig2
+
+    series float rawM3Wtn = skw * (sig2 * sig)
+    series float rawM4Wtn = (krt + 3.0) * sig4
+
+    series float meanSig2    = _calcMean(sig2, wgt, len)
+    series float meanMuSig2  = _calcMean(mu * sig2, wgt, len)
+    series float meanMu2Sig2 = _calcMean(mu * mu * sig2, wgt, len)
+    series float meanM3      = _calcMean(rawM3Wtn, wgt, len)
+    series float meanMuM3    = _calcMean(mu * rawM3Wtn, wgt, len)
+    series float mom4Wtn     = _calcMean(rawM4Wtn, wgt, len)
+
+    series float mom4IntVar = 6.0 * (meanMu2Sig2 - 2 * meanMu * meanMuSig2 + meanMu * meanMu * meanSig2)
+    series float mom4IntSkw = 4.0 * (meanMuM3 - meanMu * meanM3)
+
+    series float mom4Tot = mom4Btw + mom4Wtn + mom4IntVar + mom4IntSkw
+
+    series float varBtw = mom2Btw
+    series float varTot = varBtw + meanSig2
+
+    series float krtTotU = _calcKrtCrct(varTot, mom4Tot, wgt, len, biased) 
+    series float ratio   = math.abs(mom4Tot) > EPSILON ? krtTotU / mom4Tot : 0.0
+
+    series float krtBtw  = ratio * mom4Btw
+    series float krtWtn  = ratio * mom4Wtn
+    series float krtIntV = ratio * mom4IntVar
+    series float krtIntS = ratio * mom4IntSkw
+
+    [krtTotU, krtBtw, krtWtn, krtIntV, krtIntS]
+
+// @function  Weighted Total Covariance Decomposition.
+//            Decomposes the total covariance into its "Between" and "Within" components
+//            based on the Law of Total Covariance.
+//            Allows analyzing whether correlation comes from the trend (Between)
+//            or the microstructure/noise (Within).
+// @param     muA      series float  Mean of Asset A (e.g. HL2).
+// @param     muB      series float  Mean of Asset B.
+// @param     coVar    series float  Per-bar intrabar covariance (Input).
+// @param     weightA  series float  Weight of Asset A.
+// @param     weightB  series float  Weight of Asset B.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [covBtw, covWtn]
+//            covBtw   series float  Between-Bar Covariance (Trend correlation).
+//            covWtn   series float  Average Within-Bar Covariance (Intrabar correlation).
+export wTotCoVar(
+  series float muA,
+  series float muB,
+  series float coVar,
+  series float weightA,
+  series float weightB,
+  series int length,
+  series bool biased
+  ) =>
+    series int len      = math.max(length, 2)
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    [crct, _] = _calcVarCrct(wgtJnt, len, biased, 1)
+
+    series float covBtwRaw = wBtwCoVar(muA, muB, wgtA, wgtB, len, true)
+    series float covWtnRaw = _calcMean(coVar, wgtJnt, len)
+
+    series float covBtw = covBtwRaw * crct
+    series float covWtn = covWtnRaw * crct
+
+    [covBtw, covWtn]
+
+// @function    Weighted Total Correlation Decomposition.
+//              Calculates the total correlation and decomposes it into its structural components.
+//              All components are normalized by their respective joint-weighted standard deviations.
+// @param       muA      series float  Mean of Asset A (e.g. HL2).
+// @param       muB      series float  Mean of Asset B.
+// @param       sigmaA   series float  Sigma of Asset A.
+// @param       sigmaB   series float  Sigma of Asset B.
+// @param       coVar    series float  Intrabar Covariance.
+// @param       weightA  series float  Weight of Asset A.
+// @param       weightB  series float  Weight of Asset B.
+// @param       length   series int    Look-back length.
+// @returns     [corrTot, corrBtw, corrWtn]
+//              corrTot  series float  Total Correlation.
+//              corrBtw  series float  Between-Bar Correlation (Trend similarity).
+//              corrWtn  series float  Within-Bar Correlation (Microstructure similarity).
+export wTotCor(
+  series float muA,
+  series float muB,
+  series float sigmaA,
+  series float sigmaB,
+  series float coVar,
+  series float weightA,
+  series float weightB,
+  series int length
+  ) =>
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    [covBtw, covWtn] = wTotCoVar(muA, muB, coVar, wgtA, wgtB, length, true)
+    series float covTot = covBtw + covWtn
+    
+    [varBtwA, varWtnA, _] = wTotVar(muA, sigmaA, wgtJnt, length, true)
+    [varBtwB, varWtnB, _] = wTotVar(muB, sigmaB, wgtJnt, length, true)
+    
+    series float stdTotA = math.sqrt(varBtwA + varWtnA)
+    series float stdTotB = math.sqrt(varBtwB + varWtnB)
+    series float corrTot = _calcRho(covTot, stdTotA, stdTotB)
+
+    series float stdBtwA = math.sqrt(varBtwA)
+    series float stdBtwB = math.sqrt(varBtwB)
+    series float corrBtw = _calcRho(covBtw, stdBtwA, stdBtwB)
+
+    series float stdWtnA = math.sqrt(varWtnA)
+    series float stdWtnB = math.sqrt(varWtnB)
+    series float corrWtn = _calcRho(covWtn, stdWtnA, stdWtnB)
+    
+    [corrTot, corrBtw, corrWtn]
+
+// @function  Weighted Linear Regression.
+// @param     source   series float   Data series.
+// @param     weight   series float   Weight series.
+// @param     length   series int     Look-back length ≥ 2.
+// @returns [estimate, slope, intercept]
+//          estimate   series float  The estimated value of the regression line at the most recent bar.
+//          slope      series float  The slope of the regression line.
+//          intercept  series float  The intercept of the regression line.
+export wLinReg(
+  series float source,
+  series float weight,
+  series int length
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+    series float x   = float(bar_index)
+    
+    [covXY, varX, _, meanX, meanY] = _calcCoVar(x, source, wgt, len)
+
+    series float slope     = math.abs(varX) > EPSILON ? covXY / varX : 0.0
+    series float intercept = meanY - slope * meanX
+    series float estimate  = intercept + slope * x
+
+    [estimate, slope, intercept]
+
+// @function  Weighted Least Square Moving Average.
+// @param     source   series float   Data series.
+// @param     weight   series float   Weight series.
+// @param     length   series int     Look-back length ≥ 2.
+// @returns            series float   Least square weighted mean. Falls back
+//                                    to unweighted regression if Σw = 0.
+export wLSma(
+  series float source,
+  series float weight,
+  series int length
+  ) =>
+    [estimate, _, _] = wLinReg(source, weight, length)
+    estimate
+
+// @function  Weighted Residual Variance.
+//            linear regression – optionally biased (population) or
+//            unbiased (sample).
+// @param     source     series float   Data series.
+// @param     weight     series float   Weighting series (volume, etc.).
+// @param     slope      series float   Slope per bar.
+// @param     length     series int     Look-back length ≥ 2.
+// @param     biased     series bool    true  → population variance (σ²_P), denominator ≈ N_eff.
+//                                      false → sample variance (σ²_S), denominator ≈ N_eff - 2.
+//                                              (Adjusts for 2 degrees of freedom lost to the regression).
+// @returns [variance, neff]
+//          variance  series float  The calculated residual variance (σ²res), either biased or unbiased.
+//          neff      series float  Kish's Effective Sample Size (N_eff).
+export wResVar(
+  series float source,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+
+    series float sumW = math.sum(source = wgt, length = len)
+
+    [_, varResB, _, _] = _calcResMom(source, wgt, len, slope, sumW, false, false)
+    [crct, neff] = _calcVarCrct(wgt, len, biased, 2)
+
+    [varResB * crct, neff]
+
+// @function  Weighted Residual Standard Deviation.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope per bar.
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns            series float  σres; uniform if Σw = 0.
+export wResStdDev(
+  series float source,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+   ) =>
+    [varRes, _] = wResVar(source, weight, slope, length, biased)
+    varRes >= 0 ? math.sqrt(varRes) : na
+
+// @function  Weighted Residual Standard Error.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope per bar.
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population (biased); false → sample.
+// @returns            series float  √(σ²res / N_eff); uniform if Σw = 0.
+export wResStdErr(
+  series float source,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    [varRes, neff] = wResVar(source, weight, slope, length, biased)
+    varRes >= 0 and neff > EPSILON ? math.sqrt(varRes / neff) : na
+
+// @function  Weighted Residual Skewness.
+//            Measures the asymmetry of the residuals (noise) around the regression line.
+//            Uses exact Rimoldini correction.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns            series float  Residual Skewness.
+export wResSkw(
+  series float source,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+
+    series float sumW  = math.sum(source = wgt,  length = len)
+    
+    [_, mom2, mom3, _] = _calcResMom(source, wgt, len, slope, sumW, true, false)
+    series float denom = mom2 * math.sqrt(mom2)
+    series float skw   = denom > EPSILON ? mom3 / denom : na
+
+    skw *  _calcSkwCrct(wgt, len, biased)
+
+// @function  Weighted Residual Kurtosis.
+//            Measures the "fatness" of the tails of the residuals.
+//            High Kurtosis: Trend is prone to extreme outlier shocks.
+//            Uses exact Rimoldini correction for Excess Kurtosis.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns            series float  Residual Excess Kurtosis.
+export wResKrt(
+  series float source,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+
+    series float sumW = math.sum(source = wgt,  length = len)
+    
+    [_, mom2, _, mom4] = _calcResMom(source, wgt, len, slope, sumW, false, true)
+
+    _calcKrtCrct(mom2, mom4, wgt, len, biased)
+
+// @function  Weighted Residual Covariance (Optimized).
+//            Measures the co-movement of the noise (residuals) of two assets.
+//            Uses Covariance Decomposition: Cov(Res) = Cov(Btw) - Cov(Trend).
+//            Cov(Trend) = SlopeA * SlopeB * Var(X).
+//            This metric is mathematically related to the analysis of cointegration.
+// @param     sourceA  series float  Asset A.
+// @param     sourceB  series float  Asset B.
+// @param     weightA  series float  Weight of A.
+// @param     weightB  series float  Weight of B.
+// @param     slopeA   series float  Slope of Asset A.
+// @param     slopeB   series float  Slope of Asset B.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns            series float  Residual Covariance.
+export wResCoVar(
+  series float sourceA,
+  series float sourceB,
+  series float weightA,
+  series float weightB,
+  series float slopeA,
+  series float slopeB,
+  series int length,
+  series bool biased
+  ) =>
+    series int len      = math.max(length, 2)
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    series float sumWJnt = math.sum(source = wgtJnt, length = len)
+
+    [_, varX, _] = _calcGeom(wgtJnt, len, sumWJnt)
+    series float covBtw = wBtwCoVar(sourceA, sourceB, wgtA, wgtB, len, true)
+    series float covTrd = slopeA * slopeB * varX
+    series float covRes = covBtw - covTrd
+
+    [crct, _] = _calcVarCrct(wgtJnt, len, biased, 2) 
+    covRes * crct 
+
+// @function    Weighted Residual Correlation.
+//              Correlation of the noise (residuals) after removing the linear trends.
+//              High values indicate that assets mean-revert together (Cointegration proxy).
+// @param       sourceA  series float  Asset A.
+// @param       sourceB  series float  Asset B.
+// @param       weightA  series float  Weight of Asset A.
+// @param       weightB  series float  Weight of Asset B.
+// @param       slopeA   series float  Slope of Asset A.
+// @param       slopeB   series float  Slope of Asset B.
+// @param       length   series int    Look-back length.
+// @returns              series float  Correlation [-1, 1].
+export wResCor(
+  series float sourceA,
+  series float sourceB,
+  series float weightA,
+  series float weightB,
+  series float slopeA,
+  series float slopeB,
+  series int length
+  ) =>
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    series float covRes = wResCoVar(sourceA, sourceB, wgtA, wgtB, slopeA, slopeB, length, true)
+    
+    series float stdA = wResStdDev(sourceA, wgtJnt, slopeA, length, true)
+    series float stdB = wResStdDev(sourceB, wgtJnt, slopeB, length, true)
+    
+    _calcRho(covRes, stdA, stdB)
+
+// @function    Weighted Standard Error of the Slope.
+//              Measures the reliability of the estimated trend slope.
+//              Formula: Sqrt( UnbiasedResVar / TSS_x )
+//              where TSS_x is the Total Sum of Squares of the X-axis.
+// @param     source   series float  Data series.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @returns            series float Standard Error of the slope (in units of source per bar).
+export wSlopeStdErr(
+  series float source,
+  series float weight,
+  series float slope,
+  series int length
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+
+    series float sumW = math.sum(source = wgt, length = len)
+
+    [varResU, _] = wResVar(source, wgt, slope, len, false)
+    [_, _, tssX] = _calcGeom(wgt, len, sumW)
+    math.abs(varResU) < EPSILON ? 0 : tssX > EPSILON ? math.sqrt(varResU / tssX) : na
+
+// @function  Weighted Linear-Regression Total Variance **around the
+//            window’s weighted mean μ**.
+// @param     mu       series float  Per-bar mean m_i.
+// @param     sigma    series float  Pre-estimated σ_i of each bar.
+// @param     weight   series float  Weight series w_i (≥ 0).
+// @param     slope    series float  Slope b₁ of the regression line.
+// @param     length   series int    Look-back length ≥ 2.
+// @param     biased   series bool   true → population; false → sample.
+//
+// @returns [varTrd, varRes, varWtn, neff]
+//          varTrd  series float  The trend variance component (σ²trd), explained by the linear regression.
+//          varRes  series float  The residual variance component (σ²res).
+//          varWtn  series float  The within-bar variance component (σ²wtn).
+//          neff    series float  Kish's Effective Sample Size (N_eff).
+export wLRTotVar(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+
+    series float varWtnRaw = _calcMean(sig * sig, wgt, len)
+    [varRes, neff] = wResVar(mu, wgt, slope, length, biased)
+    series float sumW = math.sum(source = wgt, length = len)
+    [_, varXRaw, _]   = _calcGeom(wgt, len, sumW)
+    series float varTrdRaw = slope * slope * varXRaw
+   
+    [crctGen, _] = _calcVarCrct(wgt, len, biased, 1)
+    
+    series float varTrd = varTrdRaw * crctGen
+    series float varWtn = varWtnRaw * crctGen
+
+    [varTrd, varRes, varWtn, neff]
+
+// @function  Weighted Linear-Regression Total Standard Deviation Decomposition.
+//            Decomposes volatility relative to the regression line.
+// @param     mu       series float  Per-bar mean.
+// @param     sigma    series float  Per-bar sigma.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope b₁.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [stdTot, stdTrd, stdRes, stdWtn]
+//            stdTot   series float  Total Standard Deviation.
+//            stdTrd   series float  Trend component (Explained volatility).
+//            stdRes   series float  Residual component (Unexplained volatility).
+//            stdWtn   series float  Within component (Microstructure volatility).
+export wLRTotStdDev(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    [varTrd, varRes, varWtn, _] = wLRTotVar(mu, sigma, weight, slope, length, biased)
+    
+    series float stdTot = math.min(varTrd, varRes, varWtn) >= 0 ? math.sqrt(varTrd + varRes + varWtn) : na
+    series float stdTrd = varTrd >= 0 ? math.sqrt(varTrd) : na
+    series float stdRes = varRes >= 0 ? math.sqrt(varRes) : na
+    series float stdWtn = varWtn >= 0 ? math.sqrt(varWtn) : na
+    
+    [stdTot, stdTrd, stdRes, stdWtn]
+
+// @function  Weighted Linear-Regression Total Standard Error Decomposition.
+//            Decomposes the standard error of the estimate components.
+// @param     mu       series float  Per-bar mean.
+// @param     sigma    series float  Per-bar sigma.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope b₁.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [steTot, steTrd, steRes, steWtn]
+export wLRTotStdErr(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    [varTrd, varRes, varWtn, neff] = wLRTotVar(mu, sigma, weight, slope, length, biased)
+    
+    series float n = neff > EPSILON ? neff : na
+    series float steTot = math.min(varTrd, varRes, varWtn) >= 0 and not na(n) ? math.sqrt((varTrd + varRes + varWtn) / n) : na
+    series float steTrd = varTrd >= 0 and not na(n) ? math.sqrt(varTrd / n) : na
+    series float steRes = varRes >= 0 and not na(n) ? math.sqrt(varRes / n) : na
+    series float steWtn = varWtn >= 0 and not na(n) ? math.sqrt(varWtn / n) : na
+    
+    [steTot, steTrd, steRes, steWtn]
+
+// @function  Weighted Linear-Regression Total Skewness Decomposition (Optimized).
+//            Calculates the total skewness and decomposes it mathematically exactly into its components.
+//            The method is based on the additive decomposition of the third moments.
+//            Formula: M3_tot = M3_trd + M3_res + M3_wtn + M3_inter
+//            All components are corrected with the Rimoldini factor and normalized to the
+//            total standard deviation.
+// @param     mu       series float  Per-bar mean (e.g., HL2).
+// @param     sigma    series float  Per-bar standard deviation.
+// @param     skewness series float  Per-bar intrabar skewness (Input 0.0 if unknown).
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [skwTrd, skwRes, skwWtn, skwLRInt]
+//            skwTrd   series float  Trend Component: Asymmetry resulting from the slope and the weight distribution.
+//            skwRes   series float  Residual Component: Asymmetry of the noise around the regression line.
+//            skwWtn   series float  Within Component: Average asymmetry inside the bars.
+//            skwLRInt series float  Interaction Component: Covers correlations between price/volatility and non-linearities.
+export wLRTotSkw(
+  series float mu,
+  series float sigma,
+  series float skewness,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+    series float skw = nz(skewness, 0.0)
+
+    [_, m2Tot,
+     m3Res, m3Wtn, m3Trd, m3Tot, _,
+     _, _, _, _, _,
+     _, _, _, _] = _calcLRMom(mu, sig, skw, na, wgt, slope, len, true, true, false)
+
+    series float m3Int = m3Tot - (m3Trd + m3Res + m3Wtn)
+
+    series float denom   = m2Tot > 0 ? (m2Tot * math.sqrt(m2Tot)) : 0
+    series float crctSkw = _calcSkwCrct(wgt, len, biased)
+
+    series float skwTrd = denom > EPSILON ? (crctSkw * m3Trd) / denom : na
+    series float skwRes = denom > EPSILON ? (crctSkw * m3Res) / denom : na
+    series float skwWtn = denom > EPSILON ? (crctSkw * m3Wtn) / denom : na
+    series float skwInt = denom > EPSILON ? (crctSkw * m3Int) / denom : na
+
+    [skwTrd, skwRes, skwWtn, skwInt]
+
+// @function  Weighted Linear-Regression Total Kurtosis.
+//            Calculates Total Excess Kurtosis and decomposes the 4th moment 
+//            into its components relative to the linear regression trend line.
+//            Mathematical Identity: Tot = Trd + Res + Wtn + IntV + IntS.
+// @param     mu       series float  Per-bar mean (e.g., HL2).
+// @param     sigma    series float  Per-bar standard deviation.
+// @param     skewness series float  Per-bar intrabar skewness (Input 0.0 if unknown).
+// @param     kurtosis series float  Per-bar intrabar excess kurtosis.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [krtTot, krtTrd, krtRes, krtWtn, krtIntVar, krtIntSkw]
+//            krtTot    series float  Total Excess Kurtosis (Rimoldini corrected).
+//            krtTrd    series float  Trend Component (Tail risks from slope changes).
+//            krtRes    series float  Residual Component (Tail risks from noise).
+//            krtWtn    series float  Within Component (Tail risks from microstructure).
+//            krtIntVar series float  Interaction (Variance): Heteroskedasticity component (6*σ²*d²).
+//                                    High values indicate volatility clusters around trend deviations.
+//            krtIntSkw series float  Interaction (Skewness): Asymmetry component (4*Skew*d).
+//                                    High values indicate skewed candles occur at trend deviations.
+export wLRTotKrt(
+  series float mu,
+  series float sigma,
+  series float skewness,
+  series float kurtosis,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 4)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+    series float skw = nz(skewness, 0.0)
+    series float krt = nz(kurtosis, 0.0)
+
+    [_, m2Tot,
+     _, _, _, _, _,
+     m4Res, m4Wtn, m4Trd, m4Tot, _,
+     m4IntV, m4IntS, _, _] = _calcLRMom(mu, sig, skw, krt, wgt, slope, len, true, true, true)
+    
+    series float krtTotU = _calcKrtCrct(m2Tot, m4Tot, wgt, len, biased)
+    series float ratio   = math.abs(m4Tot) > EPSILON ? krtTotU / m4Tot : 0.0
+    
+    series float krtTrd  = ratio * m4Trd
+    series float krtRes  = ratio * m4Res
+    series float krtWtn  = ratio * m4Wtn
+    series float krtIntV = ratio * m4IntV
+    series float krtIntS = ratio * m4IntS
+
+    [krtTotU, krtTrd, krtRes, krtWtn, krtIntV, krtIntS]
+
+// @function  Weighted Linear Regression Total Covariance Decomposition.
+//            Decomposes the relationship between two assets into three distinct components:
+//            1. Trend Covariance: Covariance of the regression lines.
+//            2. Residual Covariance: Covariance of the deviations from the regression lines.
+//            3. Within Covariance: Average covariance inside the bars (microstructure).
+// @param     muA      series float  Mean of Asset A.
+// @param     muB      series float  Mean of Asset B.
+// @param     coVar    series float  Per-bar exact intrabar covariance.
+// @param     weightA  series float  Weight of Asset A.
+// @param     weightB  series float  Weight of Asset B.
+// @param     slopeA   series float  Slope of Asset A.
+// @param     slopeB   series float  Slope of Asset B.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns [covTrd, covRes, covWtn]
+//          covTrd   series float  Trend Covariance.
+//          covRes   series float  Residual Covariance.
+//          covWtn   series float  Average Within-Bar Covariance.
+export wLRTotCoVar(
+  series float muA,
+  series float muB,
+  series float coVar,
+  series float weightA,
+  series float weightB,
+  series float slopeA,
+  series float slopeB,
+  series int length,
+  series bool biased
+  ) =>
+    series int len      = math.max(length, 2)
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+    
+    series float sumWJnt = math.sum(source = wgtJnt, length = len)
+    [_, varX, _] = _calcGeom(wgtJnt, len, sumWJnt)
+
+    series float covBtwB = wBtwCoVar(muA, muB, wgtA, wgtB, len, true)
+    series float covWtnB = _calcMean(coVar, wgtJnt, len)
+    series float covTrdB = slopeA * slopeB * varX
+    series float covResB = covBtwB - covTrdB
+
+    [crctRes, _] = _calcVarCrct(wgtJnt, len, biased, 2)
+    [crctGen, _] = _calcVarCrct(wgtJnt, len, biased, 1)
+
+    series float covTrd = covTrdB * crctGen
+    series float covRes = covResB * crctRes
+    series float covWtn = covWtnB * crctGen
+
+    [covTrd, covRes, covWtn]
+
+// @function    Weighted Linear-Regression Total Correlation Decomposition.
+//              Decomposes correlation into Trend (Regression), Residuals (Noise), and Within components.
+// @param       muA      series float  Mean of Asset A.
+// @param       muB      series float  Mean of Asset B.
+// @param       sigmaA   series float  Sigma of Asset A.
+// @param       sigmaB   series float  Sigma of Asset B.
+// @param       coVar    series float  Intrabar Covariance.
+// @param       weightA  series float  Weight of Asset A.
+// @param       weightB  series float  Weight of Asset B.
+// @param       slopeA   series float  Slope of Asset A.
+// @param       slopeB   series float  Slope of Asset B.
+// @param       length   series int    Look-back length.
+// @returns     [corrTot, corrTrd, corrRes, corrWtn]
+//              corrTot  series float  Total Correlation.
+//              corrTrd  series float  Trend Correlation (Slope alignment).
+//              corrRes  series float  Residual Correlation (Cointegration).
+//              corrWtn  series float  Within Correlation (Microstructure).
+export wLRTotCor(
+  series float muA,
+  series float muB,
+  series float sigmaA,
+  series float sigmaB,
+  series float coVar,
+  series float weightA,
+  series float weightB,
+  series float slopeA,
+  series float slopeB,
+  series int length
+  ) =>
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    [covTrd, covRes, covWtn] = wLRTotCoVar(muA, muB, coVar, wgtA, wgtB, slopeA, slopeB, length, true)
+    series float covTot = covTrd + covRes + covWtn
+    
+    [varTrdA, varResA, varWtnA, _] = wLRTotVar(muA, sigmaA, wgtJnt, slopeA, length, true)
+    [varTrdB, varResB, varWtnB, _] = wLRTotVar(muB, sigmaB, wgtJnt, slopeB, length, true)
+    
+    series float stdTotA = math.sqrt(varResA + varWtnA + varTrdA)
+    series float stdTotB = math.sqrt(varResB + varWtnB + varTrdB)
+    series float corrTot = _calcRho(covTot, stdTotA, stdTotB)
+
+    series float stdTrdA = math.sqrt(varTrdA)
+    series float stdTrdB = math.sqrt(varTrdB)
+    series float corrTrd = _calcRho(covTrd, stdTrdA, stdTrdB)
+
+    series float stdResA = math.sqrt(varResA)
+    series float stdResB = math.sqrt(varResB)
+    series float corrRes = _calcRho(covRes, stdResA, stdResB)
+
+    series float stdWtnA = math.sqrt(varWtnA)
+    series float stdWtnB = math.sqrt(varWtnB)
+    series float corrWtn = _calcRho(covWtn, stdWtnA, stdWtnB)
+    
+    [corrTot, corrTrd, corrRes, corrWtn]
+
+// @function  Weighted Linear-Regression Local Total Standard Deviation.
+//            Measures the total "noise" (within-bar + residual) around the trend.
+// @returns   [stdLoc, stdRes, stdWtn]
+//            stdLoc   series float  Local Noise StdDev (Total Noise).
+//            stdRes   series float  Residual StdDev.
+//            stdWtn   series float  Within StdDev.
+export wLRLocTotStdDev(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    [_, varRes, varWtn, _] = wLRTotVar(mu, sigma, weight, slope, length, biased)
+    
+    series float stdLoc = math.min(varRes, varWtn) >= 0 ? math.sqrt(varRes + varWtn) : na
+    series float stdRes = varRes >= 0 ? math.sqrt(varRes) : na
+    series float stdWtn = varWtn >= 0 ? math.sqrt(varWtn) : na
+    
+    [stdLoc, stdRes, stdWtn]
+
+// @function    Weighted Linear-Regression Local Total Standard Error Decomposition.
+//              Calculates the Standard Error of the "Local" variance components.
+//              "Local" refers to the sum of Residual Variance (Inter-bar noise around the trend)
+//              and Within Variance (Intra-bar microstructure).
+//              This metric quantifies the sampling variability (uncertainty) of the noise
+//              estimation itself, using Kish's Effective Sample Size (N_eff).
+//              Formula: SE_part = Sqrt( Var_part / N_eff ).
+// @param       mu       series float  Per-bar mean (e.g., HL2).
+// @param       sigma    series float  Per-bar standard deviation.
+// @param       weight   series float  Weight series.
+// @param       slope    series float  Slope of the regression line.
+// @param       length   series int    Look-back length.
+// @param       biased   series bool   true → population; false → sample.
+// @returns     [steLoc, steRes, steWtn]
+//              steLoc   series float  Local Standard Error: Uncertainty of the total noise estimate (Res + Wtn).
+//              steRes   series float  Residual Standard Error: Uncertainty of the residual variance estimate.
+//              steWtn   series float  Within Standard Error: Uncertainty of the within-bar variance estimate.
+export wLRLocTotStdErr(
+  series float mu,
+  series float sigma,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    [_, varRes, varWtn, neff] = wLRTotVar(mu, sigma, weight, slope, length, biased)
+    
+    series float n = neff > EPSILON ? neff : na
+    series float steLoc = math.min(varRes, varWtn) >= 0 and not na(n) ? math.sqrt((varRes + varWtn) / n) : na
+    series float steRes = varRes >= 0 and not na(n) ? math.sqrt(varRes / n) : na
+    series float steWtn = varWtn >= 0 and not na(n) ? math.sqrt(varWtn / n) : na
+    
+    [steLoc, steRes, steWtn]
+
+// @function  Weighted Linear-Regression Local Total Skewness.
+//            Measures the total asymmetry of the market noise and microstructure 
+//            (Residual + Within components) around the linear trend line.
+// @param     mu       series float  Per-bar mean.
+// @param     sigma    series float  Per-bar standard deviation.
+// @param     skewness  series float  Per-bar intrabar skewness.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [skwRes, skwWtn]
+//            skwRes   series float  Residual Component: Asymmetry of the noise around the regression line.
+//            skwWtn   series float  Within Component: Average asymmetry inside the bars.       
+export wLRLocTotSkw(
+  series float mu,
+  series float sigma,
+  series float skewness,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 2)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+    series float skw = nz(skewness, 0.0)
+
+    [m2Loc, _,
+     m3Res, m3Wtn, _, _, m3Loc,
+     _, _, _, _, _,
+     _, _, _, _] = _calcLRMom(mu, sig, skw, na, wgt, slope, len, false, true, false)
+    
+    series float crctSkw = _calcSkwCrct(wgt, len, biased)
+    series float denom   = m2Loc > 0 ? (m2Loc * math.sqrt(m2Loc)) : na
+    
+    series float skwLoc = denom > EPSILON ? (m3Loc * crctSkw) / denom : na
+    series float skwRes = denom > EPSILON ? (m3Res * crctSkw) / denom : na
+    series float skwWtn = denom > EPSILON ? (m3Wtn * crctSkw) / denom : na
+    
+    [skwLoc, skwRes, skwWtn]
+
+// @function  Weighted Linear-Regression Local Total Kurtosis.
+//            Measures the total Excess Kurtosis of market noise and microstructure
+//            (Residual + Within components) around the linear trend line.
+//            Ignores the trend component.
+//            Mathematical Identity: Loc = Res + Wtn + IntV + IntS.
+// @param     mu       series float  Per-bar mean.
+// @param     sigma    series float  Per-bar standard deviation.
+// @param     skewness series float  Per-bar intrabar skewness.
+// @param     kurtosis series float  Per-bar intrabar excess kurtosis.
+// @param     weight   series float  Weight series.
+// @param     slope    series float  Slope of the regression line.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [krtLoc, krtRes, krtWtn, krtIntVar, krtIntSkw]
+//            krtLoc    series float  Local Total Excess Kurtosis (Noise tails).
+//            krtRes    series float  Residual Component.
+//            krtWtn    series float  Within Component.
+//            krtIntVar series float  Interaction (Variance): Coupling of Residuals and Microstructure Volatility.
+//            krtIntSkw series float  Interaction (Skewness): Coupling of Residuals and Microstructure Skewness.
+export wLRLocTotKrt(
+  series float mu,
+  series float sigma,
+  series float skewness,
+  series float kurtosis,
+  series float weight,
+  series float slope,
+  series int length,
+  series bool biased
+  ) =>
+    series int len   = math.max(length, 4)
+    series float wgt = _sanitize(weight)
+    series float sig = _sanitize(sigma)
+    series float skw = nz(skewness, 0.0)
+    series float krt = nz(kurtosis, 0.0)
+
+    [m2Loc, _,
+     _, _, _, _, _,
+     m4Res, m4Wtn, _, _, m4Loc,
+     _, _, m4LocIntV, m4LocIntS] = _calcLRMom(mu, sig, skw, krt, wgt, slope, len, false, true, true)
+    
+    series float krtLocU = _calcKrtCrct(m2Loc, m4Loc, wgt, len, biased)
+    series float ratio   = math.abs(m4Loc) > EPSILON ? krtLocU / m4Loc : 0.0
+    
+    series float krtRes  = ratio * m4Res
+    series float krtWtn  = ratio * m4Wtn
+    series float krtIntV = ratio * m4LocIntV
+    series float krtIntS = ratio * m4LocIntS
+
+    [krtLocU, krtRes, krtWtn, krtIntV, krtIntS]
+
+// @function  Weighted Linear-Regression Local Total Covariance.
+//            Measures the co-movement of the "Total Noise" of two assets.
+// @param     muA      series float  Mean of Asset A (e.g. HL2).
+// @param     muB      series float  Mean of Asset B.
+// @param     coVar    series float  Per-bar intrabar covariance (Input).
+// @param     weightA  series float  Weight of Asset A.
+// @param     weightB  series float  Weight of Asset B.
+// @param     slopeA   series float  Slope of Asset A.
+// @param     slopeB   series float  Slope of Asset B.
+// @param     length   series int    Look-back length.
+// @param     biased   series bool   true → population; false → sample.
+// @returns   [covRes, covWtn]
+//            covRes   series float  Residual Covariance. Co-movement of deviations from the regression lines.
+//                                   High values indicate Cointegration (mean-reverting together).
+//            covWtn   series float  Within Covariance. Average co-movement inside the bars (microstructure).
+export wLRLocTotCoVar(
+  series float muA,
+  series float muB,
+  series float coVar,
+  series float weightA,
+  series float weightB,
+  series float slopeA,
+  series float slopeB,
+  series int length,
+  series bool biased
+  ) =>
+    [_, covRes, covWtn] = wLRTotCoVar(muA, muB, coVar, weightA, weightB, slopeA, slopeB, length, biased)
+    [covRes, covWtn]
+
+// @function    Weighted Linear-Regression Local Noise Correlation Decomposition.
+//              Calculates the correlation of the "Local Noise" (Residuals + Within-Bar)
+//              and decomposes it into its components.
+//              This metric ignores the trend entirely and focuses on the synchronization
+//              of market noise and microstructure.
+// @param       muA      series float  Mean of Asset A.
+// @param       muB      series float  Mean of Asset B.
+// @param       sigmaA   series float  Sigma of Asset A.
+// @param       sigmaB   series float  Sigma of Asset B.
+// @param       coVar    series float  Intrabar Covariance.
+// @param       weightA  series float  Weight of Asset A.
+// @param       weightB  series float  Weight of Asset B.
+// @param       slopeA   series float  Slope of Asset A.
+// @param       slopeB   series float  Slope of Asset B.
+// @param       length   series int    Look-back length.
+// @returns     [corrLoc, corrRes, corrWtn]
+//              corrLoc  series float  Local Correlation (Total Noise: Res + Wtn).
+//              corrRes  series float  Residual Correlation (Cointegration of daily noise).
+//              corrWtn  series float  Within Correlation (Microstructure noise).
+export wLRLocTotCor(
+  series float muA,
+  series float muB,
+  series float sigmaA,
+  series float sigmaB,
+  series float coVar,
+  series float weightA,
+  series float weightB,
+  series float slopeA,
+  series float slopeB,
+  series int length
+  ) =>
+    series float wgtA   = _sanitize(weightA)
+    series float wgtB   = _sanitize(weightB)
+    series float wgtJnt = math.sqrt(wgtA * wgtB)
+
+    [covRes, covWtn] = wLRLocTotCoVar(muA, muB, coVar, wgtA, wgtB, slopeA, slopeB, length, true)
+    series float covLoc = covRes + covWtn
+    
+    [_, varResA, varWtnA, _] = wLRTotVar(muA, sigmaA, wgtJnt, slopeA, length, true)
+    [_, varResB, varWtnB, _] = wLRTotVar(muB, sigmaB, wgtJnt, slopeB, length, true)
+    
+    series float stdLocA = math.sqrt(varResA + varWtnA)
+    series float stdLocB = math.sqrt(varResB + varWtnB)
+    series float corrLoc = _calcRho(covLoc, stdLocA, stdLocB)
+
+    series float stdResA = math.sqrt(varResA)
+    series float stdResB = math.sqrt(varResB)
+    series float corrRes = _calcRho(covRes, stdResA, stdResB)
+
+    series float stdWtnA = math.sqrt(varWtnA)
+    series float stdWtnB = math.sqrt(varWtnB)
+    series float corrWtn = _calcRho(covWtn, stdWtnA, stdWtnB)
+    
+    [corrLoc, corrRes, corrWtn]

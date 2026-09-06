@@ -1,0 +1,293 @@
+//@version=6
+library("SMCFunctions", overlay=true) 
+
+// --- Custom Types ---
+export type SwingPointData
+    int bar_index
+    float price
+    string type // "HH", "LH", "HL", "LL"
+    int direction // 1 for bullish (HH, HL), -1 for bearish (LH, LL)
+
+export type BOSData
+    int bar_index // Bar index where the BOS occurred (current bar)
+    float price // Price level of the BOS
+    string bos_text // "BOS" or "CHoCH"
+    int direction // 1 for bullish break, -1 for bearish break
+    int original_swing_bar_index // Bar index of the swing point that was broken
+    int creation_bar // Bar index when this BOSData was created (current bar)
+
+export type RetracementData
+    int bar_index // Bar index where the retracement level was calculated (end of the expansion move)
+    float price // Price level of the retracement
+    string type // e.g., "0.5"
+    int direction // 1 for bullish expansion, -1 for bearish expansion
+    int start_bar_index // Bar index where the expansion move started
+
+export type FVGData
+    int discovery_bar_index // Bar_index when FVG was first identified (current bar forming the FVG)
+    float top_price           // Top price of the FVG
+    float bottom_price        // Bottom price of the FVG
+    bool is_bullish         // true for bullish FVG (gap above), false for bearish (gap below)
+    bool mitigated          // Flag to mark if FVG is mitigated
+    // Times and Indices for drawing - these are of the bars that form the FVG boundaries
+    int bar1_time           // time of bar_index[2] for bullish, bar_index[0] for bearish
+    int bar1_index          // bar_index[2] for bullish, bar_index[0] for bearish
+    int bar3_time           // time of bar_index[0] for bullish, bar_index[2] for bearish
+    int bar3_index          // bar_index[0] for bullish, bar_index[2] for bearish
+
+
+// --- Internal Helper Functions ---
+findSwingPivots(float highSeries, float lowSeries, int swing_size_param) =>
+    float pivHi = ta.pivothigh(highSeries, swing_size_param, swing_size_param)
+    float pivLo = ta.pivotlow(lowSeries, swing_size_param, swing_size_param)
+    int pivHiIndex = na(pivHi) ? na : bar_index[swing_size_param] 
+    int pivLoIndex = na(pivLo) ? na : bar_index[swing_size_param] 
+    [pivHi, pivLo, pivHiIndex, pivLoIndex]
+
+_detectBOSInternal(float closeSeries, float highSeries, float lowSeries, float prevHigh_val, float prevLow_val, bool highActive_val, bool lowActive_val, string bos_conf_type_param) =>
+    bool highBroken = false
+    bool lowBroken = false
+    float highSrc = bos_conf_type_param == 'Candle Close' ? closeSeries : highSeries
+    float lowSrc = bos_conf_type_param == 'Candle Close' ? closeSeries : lowSeries
+    if not na(prevHigh_val) and highActive_val and highSrc > prevHigh_val
+        highBroken := true
+    if not na(prevLow_val) and lowActive_val and lowSrc < prevLow_val
+        lowBroken := true
+    [highBroken, lowBroken]
+
+_getBOSDetailsInternal(bool highBroken_param, bool lowBroken_param, float prevHigh_val, float prevLow_val, int prevSwingType_val, int prevHighIndex_val, int prevLowIndex_val, bool showChoch_param) =>
+    float bos_price = na
+    string bos_text = "" 
+    int bos_direction = 0
+    int original_swing_b_index = na
+    if highBroken_param
+        bos_price := prevHigh_val
+        original_swing_b_index := prevHighIndex_val
+        bos_direction := 1
+        if prevSwingType_val == 1 and showChoch_param // Prior swing was LH, breaking it is Bullish CHoCH
+            bos_text := "CHoCH"
+        else
+            bos_text := "BOS"
+    else if lowBroken_param
+        bos_price := prevLow_val
+        original_swing_b_index := prevLowIndex_val
+        bos_direction := -1
+        if prevSwingType_val == -1 and showChoch_param // Prior swing was HL, breaking it is Bearish CHoCH
+            bos_text := "CHoCH"
+        else
+            bos_text := "BOS"
+    [bos_price, bos_text, bos_direction, original_swing_b_index]
+
+// --- Exported Orchestrator Functions ---
+export type SwingStateAndPoint
+    float prevHigh 
+    float prevLow  
+    int prevHighIndex 
+    int prevLowIndex  
+    int prevSwingType 
+    SwingPointData newSwingPoint 
+
+export processSwingLogic(float currentHigh, float currentLow, int swing_size_input, float prevHigh_in, float prevLow_in, int prevHighIndex_in, int prevLowIndex_in, int prevSwingType_in) =>
+    [pivHi, pivLo, pivHiIdx, pivLoIdx] = findSwingPivots(currentHigh, currentLow, swing_size_input)
+    bool hh_detected_flag = false
+    bool lh_detected_flag = false
+    bool hl_detected_flag = false
+    bool ll_detected_flag = false
+    float newPrevHigh = prevHigh_in
+    float newPrevLow = prevLow_in
+    int newPrevHighIndex = prevHighIndex_in
+    int newPrevLowIndex = prevLowIndex_in
+    int newPrevSwingType = prevSwingType_in
+    SwingPointData point_to_add = na
+    if not na(pivHi)
+        if na(newPrevHigh) or pivHi >= newPrevHigh
+            hh_detected_flag := true
+            newPrevSwingType := 2 
+        else
+            lh_detected_flag := true
+            newPrevSwingType := 1 
+        newPrevHigh := pivHi
+        newPrevHighIndex := pivHiIdx
+    if not na(pivLo)
+        if na(newPrevLow) or pivLo <= newPrevLow 
+            ll_detected_flag := true
+            newPrevSwingType := -2 
+        else
+            hl_detected_flag := true
+            newPrevSwingType := -1 
+        newPrevLow := pivLo
+        newPrevLowIndex := pivLoIdx
+    if hh_detected_flag
+        point_to_add := SwingPointData.new(newPrevHighIndex, newPrevHigh, "HH", 1)
+    else if lh_detected_flag
+        point_to_add := SwingPointData.new(newPrevHighIndex, newPrevHigh, "LH", -1) 
+    else if hl_detected_flag
+        point_to_add := SwingPointData.new(newPrevLowIndex, newPrevLow, "HL", 1)  
+    else if ll_detected_flag
+        point_to_add := SwingPointData.new(newPrevLowIndex, newPrevLow, "LL", -1)
+    SwingStateAndPoint.new(newPrevHigh, newPrevLow, newPrevHighIndex, newPrevLowIndex, newPrevSwingType, point_to_add)
+
+export processBOSDetection(float current_close_price, float current_high_price, float current_low_price, float prev_high_to_break, float prev_low_to_break, bool is_prev_high_active, bool is_prev_low_active, int prev_swing_type_for_choch, int prev_high_idx_for_choch, int prev_low_idx_for_choch, string bos_confirmation_type, bool show_choch_option) =>
+    BOSData bos_event_to_add = na
+    [highIsBroken, lowIsBroken] = _detectBOSInternal(current_close_price, current_high_price, current_low_price, prev_high_to_break, prev_low_to_break, is_prev_high_active, is_prev_low_active, bos_confirmation_type)
+    if highIsBroken or lowIsBroken
+        [detected_bos_price, detected_bos_text, detected_bos_direction, original_b_index] = _getBOSDetailsInternal(highIsBroken, lowIsBroken, prev_high_to_break, prev_low_to_break, prev_swing_type_for_choch, prev_high_idx_for_choch, prev_low_idx_for_choch, show_choch_option)
+        if not na(detected_bos_text) and detected_bos_text != ""
+            bos_event_to_add := BOSData.new(bar_index, detected_bos_price, detected_bos_text, detected_bos_direction, original_b_index, bar_index)
+    bos_event_to_add
+
+export calculateRetracementLevels(float start_price, float end_price) => 
+    float priceRange = end_price - start_price
+    float half_price = start_price + priceRange * 0.5
+    float level_0_29_price = start_price + priceRange * 0.29 
+    float level_0_66_price = start_price + priceRange * 0.66 
+    array.from(half_price, level_0_29_price, level_0_66_price)
+
+export identifyExpansionAndRetracement(array<SwingPointData> swing_points_buffer, bool show_half_retracement_input) =>
+    RetracementData retracement_to_add = na
+    if array.size(swing_points_buffer) >= 2
+        SwingPointData last_swing = array.get(swing_points_buffer, array.size(swing_points_buffer) - 1)
+        SwingPointData second_last_swing = array.get(swing_points_buffer, array.size(swing_points_buffer) - 2)
+        bool is_bull_expansion = false
+        bool is_bear_expansion = false
+        if not na(last_swing) and not na(second_last_swing)
+            if second_last_swing.type == "HL" and last_swing.type == "HH"
+                is_bull_expansion := true
+            else if second_last_swing.type == "LH" and last_swing.type == "LL"
+                is_bear_expansion := true
+        if (is_bull_expansion or is_bear_expansion) and show_half_retracement_input
+            float expansion_start_price = second_last_swing.price
+            float expansion_end_price = last_swing.price
+            int expansion_start_bar = second_last_swing.bar_index
+            int expansion_end_bar = last_swing.bar_index
+            array<float> retracement_prices = calculateRetracementLevels(expansion_start_price, expansion_end_price)
+            float half_level_price = array.get(retracement_prices, 0)
+            retracement_to_add := RetracementData.new(expansion_end_bar, half_level_price, "0.5", is_bull_expansion ? 1 : -1, expansion_start_bar)
+    retracement_to_add
+
+// --- FVG LOGIC ---
+_checkFVGMitigation(FVGData fvg, float curHigh, float curLow, float curClose, float curOpen, string mitigationType) =>
+    bool isMitigated = fvg.mitigated 
+    if isMitigated 
+        isMitigated 
+    else if fvg.is_bullish 
+        if mitigationType == "Full Fill H/L"
+            isMitigated := curLow <= fvg.bottom_price 
+        else if mitigationType == "Half Fill H/L"
+            isMitigated := curLow <= fvg.bottom_price + (fvg.top_price - fvg.bottom_price) / 2
+        else if mitigationType == "Full Fill O/C"
+            isMitigated := math.min(curOpen, curClose) <= fvg.bottom_price
+        else if mitigationType == "Half Fill O/C"
+            isMitigated := math.min(curOpen, curClose) <= fvg.bottom_price + (fvg.top_price - fvg.bottom_price) / 2
+        else 
+            isMitigated := false
+    else 
+        if mitigationType == "Full Fill H/L"
+            isMitigated := curHigh >= fvg.top_price 
+        else if mitigationType == "Half Fill H/L"
+            isMitigated := curHigh >= fvg.top_price - (fvg.top_price - fvg.bottom_price) / 2
+        else if mitigationType == "Full Fill O/C"
+            isMitigated := math.max(curOpen, curClose) >= fvg.top_price
+        else if mitigationType == "Half Fill O/C"
+            isMitigated := math.max(curOpen, curClose) >= fvg.top_price - (fvg.top_price - fvg.bottom_price) / 2
+        else 
+            isMitigated := false
+    isMitigated
+
+export detectAndManageFVGs(float H, float L, float O, float C, array<FVGData> fvgs_array_in, int lookback_param, string mitigation_type_param, int max_fvgs_to_display) =>
+    // Detect New FVGs on the current bar
+    if H[2] < L[0] and not na(H[2]) and not na(L[0])
+        FVGData bullFvg = FVGData.new(bar_index, L[0], H[2], true, false, time[2], bar_index[2], time[0], bar_index[0])
+        array.push(fvgs_array_in, bullFvg)
+
+    if L[2] > H[0] and not na(L[2]) and not na(H[0])
+        FVGData bearFvg = FVGData.new(bar_index, L[2], H[0], false, false, time[0], bar_index[0], time[2], bar_index[2])
+        array.push(fvgs_array_in, bearFvg)
+
+    array<FVGData> active_unmitigated_fvgs = array.new<FVGData>()
+    
+    // Iterate through the fvgs_array_in (which is a local copy of the array passed from the main script)
+    // Modify this local copy and then decide which ones to return.
+    for i = 0 to array.size(fvgs_array_in) - 1 
+        FVGData current_fvg_copy = array.get(fvgs_array_in, i) // Get a copy of the FVG object
+        
+        bool initial_mitigation_status = current_fvg_copy.mitigated
+
+        // Mark as mitigated if too old (beyond lookback from current bar)
+        if bar_index - current_fvg_copy.discovery_bar_index >= lookback_param
+            current_fvg_copy.mitigated := true 
+        
+        // Check mitigation if not already marked as such (either initially or by age check)
+        if not current_fvg_copy.mitigated 
+            current_fvg_copy.mitigated := _checkFVGMitigation(current_fvg_copy, H, L, C, O, mitigation_type_param)
+        
+        // Update the element in the local fvgs_array_in if mitigation status changed
+        if current_fvg_copy.mitigated != initial_mitigation_status
+            array.set(fvgs_array_in, i, current_fvg_copy) // Put the modified copy back
+
+        // If still not mitigated and within lookback, consider it for display list
+        // Check the (potentially updated) fvg from the array directly after array.set
+        FVGData fvg_for_active_list = array.get(fvgs_array_in, i)
+        if not fvg_for_active_list.mitigated and (bar_index - fvg_for_active_list.discovery_bar_index < lookback_param)
+            array.push(active_unmitigated_fvgs, fvg_for_active_list)
+            
+    array<FVGData> finalFVGsToDisplay = array.new<FVGData>()
+    int start_index = math.max(0, array.size(active_unmitigated_fvgs) - max_fvgs_to_display)
+    for i = start_index to array.size(active_unmitigated_fvgs) - 1
+        array.push(finalFVGsToDisplay, array.get(active_unmitigated_fvgs, i))
+            
+    finalFVGsToDisplay
+
+
+// --- Array Management Functions ---
+export addSwingPoint(array<SwingPointData> swing_points_array, SwingPointData point_data, int max_size) =>
+    if not na(point_data)
+        array.push(swing_points_array, point_data)
+        while array.size(swing_points_array) > max_size
+            array.shift(swing_points_array) 
+
+export addBOS(array<BOSData> bos_details_array, BOSData bos_event_data, int max_size) =>
+    if not na(bos_event_data)
+        array.push(bos_details_array, bos_event_data)
+        while array.size(bos_details_array) > max_size
+            array.shift(bos_details_array)
+
+export addRetracementLevel(array<RetracementData> retracement_levels_array, RetracementData retracement_level_data, int max_size) =>
+    if not na(retracement_level_data)
+        array.push(retracement_levels_array, retracement_level_data)
+        while array.size(retracement_levels_array) > max_size
+            array.shift(retracement_levels_array)
+
+// --- Functions to Get Buffered Data ---
+export getBufferedSwingPoints(array<SwingPointData> swing_points_array, int lookback_bars) =>
+    array<SwingPointData> result = array.new<SwingPointData>(0)
+    int first_relevant_bar = bar_index - lookback_bars + 1 
+    for i = 0 to array.size(swing_points_array) - 1
+        SwingPointData data = array.get(swing_points_array, i)
+        if data.bar_index >= first_relevant_bar and data.bar_index <= bar_index
+            array.push(result, data)
+    result
+
+export getBufferedBOSDetails(array<BOSData> bos_details_array, int lookback_bars) =>
+    array<BOSData> result = array.new<BOSData>(0)
+    int first_relevant_bar = bar_index - lookback_bars + 1
+    for i = 0 to array.size(bos_details_array) - 1
+        BOSData data = array.get(bos_details_array, i)
+        if data.creation_bar >= first_relevant_bar and data.creation_bar <= bar_index
+            array.push(result, data)
+    result
+
+export getBufferedRetracementLevels(array<RetracementData> retracement_levels_array, int lookback_bars) =>
+    array<RetracementData> result = array.new<RetracementData>(0)
+    int first_relevant_bar = bar_index - lookback_bars + 1
+    for i = 0 to array.size(retracement_levels_array) - 1
+        RetracementData data = array.get(retracement_levels_array, i)
+        if data.bar_index >= first_relevant_bar and data.bar_index <= bar_index 
+            array.push(result, data)
+    result
+
+// --- Get Array Sizes ---
+export getBufferedSwingPointsSize(array<SwingPointData> swing_points_array) => array.size(swing_points_array)
+export getBufferedBOSDetailsSize(array<BOSData> bos_details_array) => array.size(bos_details_array)
+export getBufferedRetracementLevelsSize(array<RetracementData> retracement_levels_array) => array.size(retracement_levels_array)
+

@@ -1,0 +1,586 @@
+//@version=6
+indicator(
+     "Session Fair Value Map — Globex / Asia / London / New York",
+     shorttitle = "Session FV Map",
+     overlay = true,
+     max_lines_count = 500,
+     max_labels_count = 500)
+
+// Fair value = session opening print.
+// Optional displacement = 0.25 × median range of the prior 20
+// completed occurrences of the same session.
+
+string GROUP_LEVELS = "Levels"
+string GROUP_DISPLAY = "Display"
+string GROUP_COLORS = "Colors"
+
+bool showFairValue = input.bool(true, "Show opening-print fair value", group = GROUP_LEVELS)
+bool showBands = input.bool(true, "Show displacement bands", group = GROUP_LEVELS)
+int rangeLookback = input.int(20, "Prior completed session ranges", minval = 5, maxval = 60, group = GROUP_LEVELS)
+float displacementMultiple = input.float(0.25, "Displacement × median session range", minval = 0.05, maxval = 2.00, step = 0.05, group = GROUP_LEVELS)
+
+int sessionsToKeep = input.int(30, "Historical sessions to retain per type", minval = 1, maxval = 35, group = GROUP_DISPLAY)
+bool showLabels = input.bool(true, "Label each fair-value opening", group = GROUP_DISPLAY)
+bool showLiveStatus = input.bool(true, "Show status table", group = GROUP_DISPLAY)
+int fairValueWidth = input.int(2, "Fair-value line width", minval = 1, maxval = 4, group = GROUP_DISPLAY)
+int bandWidth = input.int(1, "Band line width", minval = 1, maxval = 3, group = GROUP_DISPLAY)
+
+color globexColor = input.color(color.rgb(255, 152, 0), "Globex", group = GROUP_COLORS)
+color asiaColor = input.color(color.rgb(0, 188, 212), "Asia", group = GROUP_COLORS)
+color londonColor = input.color(color.rgb(186, 104, 200), "London", group = GROUP_COLORS)
+color newYorkColor = input.color(color.rgb(76, 175, 80), "New York", group = GROUP_COLORS)
+
+const string TZ_CHICAGO = "America/Chicago"
+const string TZ_LONDON = "Europe/London"
+
+float chartSeconds = timeframe.in_seconds(timeframe.period)
+
+if not timeframe.isintraday or chartSeconds < 60 or chartSeconds > 300
+    runtime.error("Session FV Map requires an intraday chart from 1 through 5 minutes. The research source uses 1-minute bars.")
+
+// Sunday through Thursday evening sessions.
+bool globexStartPulse = not na(time(timeframe.period, "1700-1701:12345", TZ_CHICAGO))
+bool globexEndPulse = not na(time(timeframe.period, "1900-1901:12345", TZ_CHICAGO))
+bool asiaStartPulse = globexEndPulse
+
+// Monday through Friday daytime sessions.
+bool londonStartPulse = not na(time(timeframe.period, "0800-0801:23456", TZ_LONDON))
+bool londonEndPulse = not na(time(timeframe.period, "0730-0731:23456", TZ_CHICAGO))
+bool newYorkStartPulse = not na(time(timeframe.period, "0830-0831:23456", TZ_CHICAGO))
+bool newYorkEndPulse = not na(time(timeframe.period, "1500-1501:23456", TZ_CHICAGO))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+var array<line> retainedLines = array.new<line>()
+var array<label> retainedLabels = array.new<label>()
+
+int linesPerSession = (showFairValue ? 1 : 0) + (showBands ? 2 : 0)
+int maximumRetainedLines = sessionsToKeep * 4 * linesPerSession
+int maximumRetainedLabels = sessionsToKeep * 4
+
+f_retain_line(array<line> store, line drawing, int maximum) =>
+    if not na(drawing)
+        array.push(store, drawing)
+
+    while array.size(store) > maximum
+        line.delete(array.shift(store))
+
+f_retain_label(array<label> store, label drawing, int maximum) =>
+    if not na(drawing)
+        array.push(store, drawing)
+
+    while array.size(store) > maximum
+        label.delete(array.shift(store))
+
+f_store_completed_range(array<float> ranges, float completedRange, int lookback) =>
+    if not na(completedRange) and completedRange > 0
+        array.push(ranges, completedRange)
+
+        while array.size(ranges) > lookback
+            array.shift(ranges)
+
+f_lagged_median(array<float> ranges, int lookback) =>
+    array.size(ranges) >= lookback ? array.median(ranges) : na
+
+f_open_label(string sessionName, float fairValue, color sessionColor) =>
+    label.new(
+         x = time,
+         y = fairValue,
+         text = sessionName + " FV  " + str.tostring(fairValue, format.mintick),
+         xloc = xloc.bar_time,
+         yloc = yloc.price,
+         style = label.style_label_left,
+         color = color.new(sessionColor, 78),
+         textcolor = sessionColor,
+         size = size.tiny)
+
+f_new_level(float price, color levelColor, int width, string levelStyle) =>
+    line.new(
+         x1 = time,
+         y1 = price,
+         x2 = time_close,
+         y2 = price,
+         xloc = xloc.bar_time,
+         extend = extend.none,
+         color = levelColor,
+         style = levelStyle == "solid" ? line.style_solid : line.style_dashed,
+         width = width)
+
+f_extend_level(line level) =>
+    if not na(level)
+        line.set_x2(level, time_close)
+
+f_status_row(
+     table dashboard,
+     int row,
+     string name,
+     bool active,
+     float fairValue,
+     float medianRange,
+     color sessionColor) =>
+
+    string fairText = na(fairValue) ? "—" : str.tostring(fairValue, format.mintick)
+    string rangeText = na(medianRange) ? "warming up" : str.tostring(medianRange, format.mintick)
+
+    table.cell(
+         dashboard, 0, row, name,
+         text_color = sessionColor,
+         bgcolor = color.new(color.black, 10),
+         text_size = size.tiny)
+
+    table.cell(
+         dashboard, 1, row, active ? "ACTIVE" : "closed",
+         text_color = active ? color.lime : color.gray,
+         bgcolor = color.new(color.black, 10),
+         text_size = size.tiny)
+
+    table.cell(
+         dashboard, 2, row, fairText,
+         text_color = color.white,
+         bgcolor = color.new(color.black, 10),
+         text_size = size.tiny)
+
+    table.cell(
+         dashboard, 3, row, rangeText,
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 10),
+         text_size = size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Globex: 17:00–19:00 America/Chicago
+// ─────────────────────────────────────────────────────────────────────────────
+
+var bool globexActive = false
+var float globexFairValue = na
+var float globexHigh = na
+var float globexLow = na
+var float globexMedianRange = na
+var float globexUpperBand = na
+var float globexLowerBand = na
+var array<float> globexRanges = array.new<float>()
+
+var line globexFairLine = na
+var line globexUpperLine = na
+var line globexLowerLine = na
+
+if globexEndPulse and globexActive
+    f_store_completed_range(
+         globexRanges,
+         globexHigh - globexLow,
+         rangeLookback)
+
+    globexActive := false
+    globexFairLine := na
+    globexUpperLine := na
+    globexLowerLine := na
+
+if globexStartPulse
+    globexActive := true
+    globexFairValue := open
+    globexHigh := high
+    globexLow := low
+    globexMedianRange := f_lagged_median(globexRanges, rangeLookback)
+
+    globexUpperBand := na(globexMedianRange) ? na : globexFairValue + displacementMultiple * globexMedianRange
+    globexLowerBand := na(globexMedianRange) ? na : globexFairValue - displacementMultiple * globexMedianRange
+
+    if showFairValue
+        globexFairLine := f_new_level(
+             globexFairValue,
+             globexColor,
+             fairValueWidth,
+             "solid")
+
+        f_retain_line(
+             retainedLines,
+             globexFairLine,
+             maximumRetainedLines)
+
+    if showBands and not na(globexMedianRange)
+        globexUpperLine := f_new_level(
+             globexUpperBand,
+             color.new(globexColor, 45),
+             bandWidth,
+             "dashed")
+
+        globexLowerLine := f_new_level(
+             globexLowerBand,
+             color.new(globexColor, 45),
+             bandWidth,
+             "dashed")
+
+        f_retain_line(
+             retainedLines,
+             globexUpperLine,
+             maximumRetainedLines)
+
+        f_retain_line(
+             retainedLines,
+             globexLowerLine,
+             maximumRetainedLines)
+
+    if showLabels
+        label newLabel = f_open_label(
+             "Globex",
+             globexFairValue,
+             globexColor)
+
+        f_retain_label(
+             retainedLabels,
+             newLabel,
+             maximumRetainedLabels)
+
+if globexActive
+    globexHigh := math.max(globexHigh, high)
+    globexLow := math.min(globexLow, low)
+
+    f_extend_level(globexFairLine)
+    f_extend_level(globexUpperLine)
+    f_extend_level(globexLowerLine)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Asia: 19:00 America/Chicago to 08:00 Europe/London
+// ─────────────────────────────────────────────────────────────────────────────
+
+var bool asiaActive = false
+var float asiaFairValue = na
+var float asiaHigh = na
+var float asiaLow = na
+var float asiaMedianRange = na
+var float asiaUpperBand = na
+var float asiaLowerBand = na
+var array<float> asiaRanges = array.new<float>()
+
+var line asiaFairLine = na
+var line asiaUpperLine = na
+var line asiaLowerLine = na
+
+if londonStartPulse and asiaActive
+    f_store_completed_range(
+         asiaRanges,
+         asiaHigh - asiaLow,
+         rangeLookback)
+
+    asiaActive := false
+    asiaFairLine := na
+    asiaUpperLine := na
+    asiaLowerLine := na
+
+if asiaStartPulse
+    asiaActive := true
+    asiaFairValue := open
+    asiaHigh := high
+    asiaLow := low
+    asiaMedianRange := f_lagged_median(asiaRanges, rangeLookback)
+
+    asiaUpperBand := na(asiaMedianRange) ? na : asiaFairValue + displacementMultiple * asiaMedianRange
+    asiaLowerBand := na(asiaMedianRange) ? na : asiaFairValue - displacementMultiple * asiaMedianRange
+
+    if showFairValue
+        asiaFairLine := f_new_level(
+             asiaFairValue,
+             asiaColor,
+             fairValueWidth,
+             "solid")
+
+        f_retain_line(
+             retainedLines,
+             asiaFairLine,
+             maximumRetainedLines)
+
+    if showBands and not na(asiaMedianRange)
+        asiaUpperLine := f_new_level(
+             asiaUpperBand,
+             color.new(asiaColor, 45),
+             bandWidth,
+             "dashed")
+
+        asiaLowerLine := f_new_level(
+             asiaLowerBand,
+             color.new(asiaColor, 45),
+             bandWidth,
+             "dashed")
+
+        f_retain_line(
+             retainedLines,
+             asiaUpperLine,
+             maximumRetainedLines)
+
+        f_retain_line(
+             retainedLines,
+             asiaLowerLine,
+             maximumRetainedLines)
+
+    if showLabels
+        label newLabel = f_open_label(
+             "Asia",
+             asiaFairValue,
+             asiaColor)
+
+        f_retain_label(
+             retainedLabels,
+             newLabel,
+             maximumRetainedLabels)
+
+if asiaActive
+    asiaHigh := math.max(asiaHigh, high)
+    asiaLow := math.min(asiaLow, low)
+
+    f_extend_level(asiaFairLine)
+    f_extend_level(asiaUpperLine)
+    f_extend_level(asiaLowerLine)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// London: 08:00 Europe/London to 07:30 America/Chicago
+// ─────────────────────────────────────────────────────────────────────────────
+
+var bool londonActive = false
+var float londonFairValue = na
+var float londonHigh = na
+var float londonLow = na
+var float londonMedianRange = na
+var float londonUpperBand = na
+var float londonLowerBand = na
+var array<float> londonRanges = array.new<float>()
+
+var line londonFairLine = na
+var line londonUpperLine = na
+var line londonLowerLine = na
+
+if londonEndPulse and londonActive
+    f_store_completed_range(
+         londonRanges,
+         londonHigh - londonLow,
+         rangeLookback)
+
+    londonActive := false
+    londonFairLine := na
+    londonUpperLine := na
+    londonLowerLine := na
+
+if londonStartPulse
+    londonActive := true
+    londonFairValue := open
+    londonHigh := high
+    londonLow := low
+    londonMedianRange := f_lagged_median(londonRanges, rangeLookback)
+
+    londonUpperBand := na(londonMedianRange) ? na : londonFairValue + displacementMultiple * londonMedianRange
+    londonLowerBand := na(londonMedianRange) ? na : londonFairValue - displacementMultiple * londonMedianRange
+
+    if showFairValue
+        londonFairLine := f_new_level(
+             londonFairValue,
+             londonColor,
+             fairValueWidth,
+             "solid")
+
+        f_retain_line(
+             retainedLines,
+             londonFairLine,
+             maximumRetainedLines)
+
+    if showBands and not na(londonMedianRange)
+        londonUpperLine := f_new_level(
+             londonUpperBand,
+             color.new(londonColor, 45),
+             bandWidth,
+             "dashed")
+
+        londonLowerLine := f_new_level(
+             londonLowerBand,
+             color.new(londonColor, 45),
+             bandWidth,
+             "dashed")
+
+        f_retain_line(
+             retainedLines,
+             londonUpperLine,
+             maximumRetainedLines)
+
+        f_retain_line(
+             retainedLines,
+             londonLowerLine,
+             maximumRetainedLines)
+
+    if showLabels
+        label newLabel = f_open_label(
+             "London",
+             londonFairValue,
+             londonColor)
+
+        f_retain_label(
+             retainedLabels,
+             newLabel,
+             maximumRetainedLabels)
+
+if londonActive
+    londonHigh := math.max(londonHigh, high)
+    londonLow := math.min(londonLow, low)
+
+    f_extend_level(londonFairLine)
+    f_extend_level(londonUpperLine)
+    f_extend_level(londonLowerLine)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New York: 08:30–15:00 America/Chicago
+// ─────────────────────────────────────────────────────────────────────────────
+
+var bool newYorkActive = false
+var float newYorkFairValue = na
+var float newYorkHigh = na
+var float newYorkLow = na
+var float newYorkMedianRange = na
+var float newYorkUpperBand = na
+var float newYorkLowerBand = na
+var array<float> newYorkRanges = array.new<float>()
+
+var line newYorkFairLine = na
+var line newYorkUpperLine = na
+var line newYorkLowerLine = na
+
+if newYorkEndPulse and newYorkActive
+    f_store_completed_range(
+         newYorkRanges,
+         newYorkHigh - newYorkLow,
+         rangeLookback)
+
+    newYorkActive := false
+    newYorkFairLine := na
+    newYorkUpperLine := na
+    newYorkLowerLine := na
+
+if newYorkStartPulse
+    newYorkActive := true
+    newYorkFairValue := open
+    newYorkHigh := high
+    newYorkLow := low
+    newYorkMedianRange := f_lagged_median(
+         newYorkRanges,
+         rangeLookback)
+
+    newYorkUpperBand := na(newYorkMedianRange) ? na : newYorkFairValue + displacementMultiple * newYorkMedianRange
+    newYorkLowerBand := na(newYorkMedianRange) ? na : newYorkFairValue - displacementMultiple * newYorkMedianRange
+
+    if showFairValue
+        newYorkFairLine := f_new_level(
+             newYorkFairValue,
+             newYorkColor,
+             fairValueWidth,
+             "solid")
+
+        f_retain_line(
+             retainedLines,
+             newYorkFairLine,
+             maximumRetainedLines)
+
+    if showBands and not na(newYorkMedianRange)
+        newYorkUpperLine := f_new_level(
+             newYorkUpperBand,
+             color.new(newYorkColor, 45),
+             bandWidth,
+             "dashed")
+
+        newYorkLowerLine := f_new_level(
+             newYorkLowerBand,
+             color.new(newYorkColor, 45),
+             bandWidth,
+             "dashed")
+
+        f_retain_line(
+             retainedLines,
+             newYorkUpperLine,
+             maximumRetainedLines)
+
+        f_retain_line(
+             retainedLines,
+             newYorkLowerLine,
+             maximumRetainedLines)
+
+    if showLabels
+        label newLabel = f_open_label(
+             "New York",
+             newYorkFairValue,
+             newYorkColor)
+
+        f_retain_label(
+             retainedLabels,
+             newLabel,
+             maximumRetainedLabels)
+
+if newYorkActive
+    newYorkHigh := math.max(newYorkHigh, high)
+    newYorkLow := math.min(newYorkLow, low)
+
+    f_extend_level(newYorkFairLine)
+    f_extend_level(newYorkUpperLine)
+    f_extend_level(newYorkLowerLine)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Live status table
+// ─────────────────────────────────────────────────────────────────────────────
+
+var table status = table.new(
+     position.top_right,
+     4,
+     5,
+     frame_color = color.new(color.gray, 70),
+     frame_width = 1)
+
+if barstate.islast
+    if showLiveStatus
+        table.cell(
+             status, 0, 0, "Session",
+             text_color = color.silver,
+             bgcolor = color.new(color.black, 10),
+             text_size = size.tiny)
+
+        table.cell(
+             status, 1, 0, "State",
+             text_color = color.silver,
+             bgcolor = color.new(color.black, 10),
+             text_size = size.tiny)
+
+        table.cell(
+             status, 2, 0, "Fair value",
+             text_color = color.silver,
+             bgcolor = color.new(color.black, 10),
+             text_size = size.tiny)
+
+        table.cell(
+             status, 3, 0, "Median range",
+             text_color = color.silver,
+             bgcolor = color.new(color.black, 10),
+             text_size = size.tiny)
+
+        f_status_row(
+             status, 1, "Globex",
+             globexActive,
+             globexFairValue,
+             globexMedianRange,
+             globexColor)
+
+        f_status_row(
+             status, 2, "Asia",
+             asiaActive,
+             asiaFairValue,
+             asiaMedianRange,
+             asiaColor)
+
+        f_status_row(
+             status, 3, "London",
+             londonActive,
+             londonFairValue,
+             londonMedianRange,
+             londonColor)
+
+        f_status_row(
+             status, 4, "New York",
+             newYorkActive,
+             newYorkFairValue,
+             newYorkMedianRange,
+             newYorkColor)
+    else
+        table.clear(status, 0, 0, 3, 4)

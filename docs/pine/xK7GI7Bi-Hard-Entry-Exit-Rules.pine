@@ -1,0 +1,268 @@
+//@version=6
+// =============================================================================
+// PB FIRST-HOUR RULES ENGINE  —  v2
+// Price-action exits (no option-premium math). Runs on the UNDERLYING.
+//
+// ENTRY (2 units, candle-close confirmed):
+//   - Direction: longs only ABOVE VWAP, shorts only BELOW VWAP
+//   - Location: no trades inside the prior-day range UNLESS beyond premarket
+//     (long needs close > PDH or > PMH; short needs close < PDL or < PML)
+//   - Setups: Retest / FirstTouch of PDH-PMH (long) or PDL-PML (short),
+//     plus 8 EMA tap. Entry candle must close on the trend side of the 8 EMA.
+//   - Optional 8-over-20 EMA alignment. Only inside the trade window.
+//
+// EXITS (layered):
+//   - TRIM 1 unit intrabar at a NEW high/low of day (limit order, no close needed)
+//   - RUNNER exits on the candle CLOSE back below the 8 EMA -- and, for level
+//     entries, below the entry level too (must close above BOTH to hold)
+//   - HARD STOP: price TAPPING the 20 EMA closes everything remaining (intrabar)
+//   - Force flat before the market close (no overnight)
+//   - If no new HOD/LOD prints, no trim -> both units ride the same exits together
+//
+// NOTES: PDH/PDL/PMH/PML are computed internally but NOT plotted (you have them).
+// Backtest $ is 1-2 shares of the underlying and is meaningless -- read Percent
+// Profitable and the Avg Win / Avg Loss ratio. Partial-exit fills in the tester
+// are approximate. Test on Bar Replay / paper first. Not financial advice.
+// =============================================================================
+
+strategy("Hard Entry & Exit Rules", overlay=true, pyramiding=0,
+     initial_capital=1000, default_qty_type=strategy.fixed, default_qty_value=2,
+     process_orders_on_close=true, calc_on_every_tick=false)
+
+// ---------- Session & timezone ----------
+tz       = input.string("America/New_York", "Chart timezone", group="Session")
+winSess  = input.session("0930-1030", "Trade window (entries ONLY here)", group="Session")
+pmSess   = input.session("0400-0930", "Premarket window (builds PMH/PML)", group="Session")
+eodSess  = input.session("1545-1600", "End-of-day flatten window", group="Session")
+
+// ---------- Direction filters ----------
+useVwap  = input.bool(true, "Require VWAP alignment (long>VWAP / short<VWAP)", group="Direction")
+reqAlign = input.bool(true, "Require 8-over-20 EMA alignment", group="Direction")
+emaFastLen = input.int(8,  "Fast EMA (tap / trail)", minval=1, group="Direction")
+emaSlowLen = input.int(20, "Slow EMA (alignment + HARD STOP)", minval=1, group="Direction")
+
+// ---------- Setups ----------
+useRetest = input.bool(true, "Enable Retest",     group="Setups")
+useFirst  = input.bool(true, "Enable FirstTouch", group="Setups")
+useTap    = input.bool(true, "Enable 8 EMA tap",  group="Setups")
+tolPct    = input.float(0.05, "Level touch tolerance (%)", step=0.01, minval=0, group="Setups") / 100.0
+
+// ---------- Levels used for setups + location ----------
+usePDH = input.bool(true, "Use PDH", group="Levels")
+usePDL = input.bool(true, "Use PDL", group="Levels")
+usePMH = input.bool(true, "Use PMH", group="Levels")
+usePML = input.bool(true, "Use PML", group="Levels")
+
+// ---------- Position / risk ----------
+units     = input.int(2, "Units per entry", minval=1, group="Position")
+maxTrades = input.int(2, "Max trades per day (set 1 for one-and-done)", minval=1, group="Position")
+
+// ---------- Display ----------
+showEma8  = input.bool(true,  "Plot 8 EMA",  group="Display")
+showEma20 = input.bool(true,  "Plot 20 EMA (stop)", group="Display")
+showVwap  = input.bool(false, "Plot VWAP",   group="Display")
+
+// ---------- Core series ----------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwap    = ta.vwap(hlc3)
+
+// ---------- Prior-day levels (non-repainting) ----------
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+// ---------- Session flags ----------
+inPM   = not na(time(timeframe.period, pmSess,  tz))
+inWin  = not na(time(timeframe.period, winSess, tz))
+inEod  = not na(time(timeframe.period, eodSess, tz))
+inRTH  = not na(time(timeframe.period, "0930-1600", tz))
+newDay = time("D") != time("D")[1]
+newRTH = inRTH and not inRTH[1]
+
+// ---------- Premarket high/low (needs Extended Hours on chart) ----------
+var float pmh = na
+var float pml = na
+var int tradesToday = 0
+if newDay
+    pmh := na
+    pml := na
+    tradesToday := 0
+if inPM
+    pmh := na(pmh) ? high : math.max(pmh, high)
+    pml := na(pml) ? low  : math.min(pml, low)
+
+// ---------- Running high/low of day (RTH only) ----------
+var float dayHi = na
+var float dayLo = na
+if newRTH
+    dayHi := na
+    dayLo := na
+if inRTH
+    dayHi := na(dayHi) ? high : math.max(dayHi, high)
+    dayLo := na(dayLo) ? low  : math.min(dayLo, low)
+
+// ---------- First-touch state (reset daily) ----------
+var bool tPDH = false
+var bool tPDL = false
+var bool tPMH = false
+var bool tPML = false
+if newDay
+    tPDH := false
+    tPDL := false
+    tPMH := false
+    tPML := false
+
+// ---------- Confirmation + helpers ----------
+confLong  = close > open
+confShort = close < open
+touch(lvl) => not na(lvl) and high >= lvl * (1 - tolPct) and low <= lvl * (1 + tolPct)
+retestLongLvl(lvl)  => not na(lvl) and low  <= lvl * (1 + tolPct) and close > lvl and confLong
+retestShortLvl(lvl) => not na(lvl) and high >= lvl * (1 - tolPct) and close < lvl and confShort
+firstLong(lvl)  => touch(lvl) and close > lvl and confLong
+firstShort(lvl) => touch(lvl) and close < lvl and confShort
+tapLong  = low  <= emaFast and close > emaFast and confLong
+tapShort = high >= emaFast and close < emaFast and confShort
+
+// ---------- Direction gates ----------
+longVwapOK  = not useVwap or (not na(vwap) and close > vwap)
+shortVwapOK = not useVwap or (not na(vwap) and close < vwap)
+alignLong   = not reqAlign or emaFast > emaSlow
+alignShort  = not reqAlign or emaFast < emaSlow
+// location: cleared once beyond prior-day range OR premarket range, directionally
+longLocOK  = (usePDH and not na(pdh) and close > pdh) or (usePMH and not na(pmh) and close > pmh)
+shortLocOK = (usePDL and not na(pdl) and close < pdl) or (usePML and not na(pml) and close < pml)
+// stop-validity: guarantees the 20 EMA hard stop sits on the correct side of entry
+stopOKLong  = close > emaSlow
+stopOKShort = close < emaSlow
+
+longGate  = inWin and longVwapOK  and alignLong  and longLocOK  and stopOKLong  and close > emaFast
+shortGate = inWin and shortVwapOK and alignShort and shortLocOK and stopOKShort and close < emaFast
+
+// ---------- Mark first-touch (first confirmed reaction in window) ----------
+if inWin
+    if usePDH and not tPDH and firstLong(pdh)
+        tPDH := true
+    if usePMH and not tPMH and firstLong(pmh)
+        tPMH := true
+    if usePDL and not tPDL and firstShort(pdl)
+        tPDL := true
+    if usePML and not tPML and firstShort(pml)
+        tPML := true
+
+// ---------- Build LONG trigger + capture entry level ----------
+longTrig = false
+lvlLong  = float(na)
+if useRetest and usePDH and retestLongLvl(pdh)
+    longTrig := true
+    lvlLong  := pdh
+if useRetest and usePMH and retestLongLvl(pmh)
+    longTrig := true
+    lvlLong  := na(lvlLong) ? pmh : lvlLong
+if useFirst and usePDH and firstLong(pdh)
+    longTrig := true
+    lvlLong  := na(lvlLong) ? pdh : lvlLong
+if useFirst and usePMH and firstLong(pmh)
+    longTrig := true
+    lvlLong  := na(lvlLong) ? pmh : lvlLong
+if useTap and tapLong
+    longTrig := true
+
+// ---------- Build SHORT trigger + capture entry level ----------
+shortTrig = false
+lvlShort  = float(na)
+if useRetest and usePDL and retestShortLvl(pdl)
+    shortTrig := true
+    lvlShort  := pdl
+if useRetest and usePML and retestShortLvl(pml)
+    shortTrig := true
+    lvlShort  := na(lvlShort) ? pml : lvlShort
+if useFirst and usePDL and firstShort(pdl)
+    shortTrig := true
+    lvlShort  := na(lvlShort) ? pdl : lvlShort
+if useFirst and usePML and firstShort(pml)
+    shortTrig := true
+    lvlShort  := na(lvlShort) ? pml : lvlShort
+if useTap and tapShort
+    shortTrig := true
+
+canTrade   = tradesToday < maxTrades and strategy.position_size == 0
+enterLong  = longGate  and longTrig  and canTrade
+enterShort = shortGate and shortTrig and canTrade
+
+// ---------- Trade state ----------
+var float entryLevel = na   // level the runner trails (na for 8 EMA tap entries)
+var float trimLong   = na   // limit to trim 1 long unit at a new HOD
+var float trimShort  = na   // limit to trim 1 short unit at a new LOD
+didLong  = false
+didShort = false
+
+if enterLong
+    strategy.entry("L", strategy.long, qty=units)
+    entryLevel := lvlLong
+    trimLong   := dayHi + syminfo.mintick
+    tradesToday := tradesToday + 1
+    didLong := true
+
+if enterShort
+    strategy.entry("S", strategy.short, qty=units)
+    entryLevel := lvlShort
+    trimShort  := dayLo - syminfo.mintick
+    tradesToday := tradesToday + 1
+    didShort := true
+
+// ---------- Exit conditions ----------
+trailBreakLong  = close < emaFast or (not na(entryLevel) and close < entryLevel)
+trailBreakShort = close > emaFast or (not na(entryLevel) and close > entryLevel)
+
+posSize = strategy.position_size
+absSize = math.abs(posSize)
+
+// LONG management
+if posSize > 0
+    if absSize >= 2
+        strategy.exit("L1", from_entry="L", qty=1, limit=trimLong, stop=emaSlow) // trim @ new HOD, else hard stop @ 20 EMA
+        strategy.exit("L2", from_entry="L", qty=1, stop=emaSlow)                 // runner hard stop @ 20 EMA (trails w/ the EMA)
+    else
+        strategy.cancel("L1")
+        strategy.exit("L2", from_entry="L", qty=1, stop=emaSlow)
+    if trailBreakLong
+        strategy.close("L", comment="8EMA/level close")
+
+// SHORT management
+if posSize < 0
+    if absSize >= 2
+        strategy.exit("S1", from_entry="S", qty=1, limit=trimShort, stop=emaSlow)
+        strategy.exit("S2", from_entry="S", qty=1, stop=emaSlow)
+    else
+        strategy.cancel("S1")
+        strategy.exit("S2", from_entry="S", qty=1, stop=emaSlow)
+    if trailBreakShort
+        strategy.close("S", comment="8EMA/level close")
+
+// ---------- End-of-day flatten ----------
+if posSize != 0 and inEod
+    strategy.close_all(comment="EOD flat")
+
+// ---------- Plots ----------
+plot(showEma8  ? emaFast : na, "8 EMA",  color=color.new(color.blue,   0))
+plot(showEma20 ? emaSlow : na, "20 EMA (stop)", color=color.new(color.orange, 0), linewidth=2)
+plot(showVwap  ? vwap    : na, "VWAP",   color=color.new(color.purple, 0))
+
+bgcolor(inWin ? color.new(color.blue, 92) : na, title="Trade window")
+
+plotshape(didLong,  "Long entry",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(didShort, "Short entry", shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.small)
+
+// active trim target (not on your chart) while in a trade
+plot(posSize > 0 ? trimLong  : na, "Trim @ new HOD", color=color.new(color.teal, 0), style=plot.style_circles)
+plot(posSize < 0 ? trimShort : na, "Trim @ new LOD", color=color.new(color.teal, 0), style=plot.style_circles)
+
+// ---------- Alerts ----------
+inLong  = posSize > 0
+inShort = posSize < 0
+exitLongSig  = inLong  and (low  <= emaSlow or trailBreakLong)
+exitShortSig = inShort and (high >= emaSlow or trailBreakShort)
+alertcondition(didLong,      title="Long entry",  message="LONG triggered — 2 units. Trim 1 at new HOD; runner exits on close under 8 EMA/level; hard stop = 20 EMA tap.")
+alertcondition(didShort,     title="Short entry", message="SHORT triggered — 2 units. Trim 1 at new LOD; runner exits on close over 8 EMA/level; hard stop = 20 EMA tap.")
+alertcondition(exitLongSig,  title="Long exit",   message="LONG exit condition — 20 EMA tapped or candle closed under 8 EMA/level.")
+alertcondition(exitShortSig, title="Short exit",  message="SHORT exit condition — 20 EMA tapped or candle closed over 8 EMA/level.")

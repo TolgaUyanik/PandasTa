@@ -1,0 +1,191 @@
+//@version=6
+indicator("Quantitative Footprint Divergence & Dynamic HUD", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ==========================================
+// 1. Chart Timeline / Date Filter
+// ==========================================
+useTimeline = input.bool(false, title="Enable Timeline Filter", group="Timeline")
+// In v6, input.time requires a const int literal (Unix milliseconds) for the default value
+// 1704067200000 = Jan 1, 2024 | 1801353600000 = Jan 1, 2027
+startDate = input.time(1704067200000, title="Start Date", group="Timeline")
+endDate = input.time(1801353600000, title="End Date", group="Timeline")
+
+inTimeline = not useTimeline or (time >= startDate and time <= endDate)
+
+// ==========================================
+// 2. Custom Intervals / Trend Mapping
+// ==========================================
+trendTF = input.timeframe("1D", title="Trend Timeframe", group="Trend Indicators")
+emaLength = input.int(20, "EMA Length", group="Trend Indicators")
+smaLength = input.int(50, "SMA Length", group="Trend Indicators")
+
+// Securely pull data from the user-defined timeframe without repainting
+emaVal = request.security(syminfo.tickerid, trendTF, ta.ema(close, emaLength), lookahead=barmerge.lookahead_off)
+smaVal = request.security(syminfo.tickerid, trendTF, ta.sma(close, smaLength), lookahead=barmerge.lookahead_off)
+
+plot(emaVal, color=color.new(color.blue, 0), title="EMA", linewidth=2)
+plot(smaVal, color=color.new(color.orange, 0), title="SMA", linewidth=2)
+
+// ==========================================
+// 3. Absolute Accuracy: Native Footprint Delta
+// ==========================================
+// Utilizing Pine v6 native request.footprint() for true bid/ask order flow
+ticksPerRow = input.int(1, "Ticks Per Row (Footprint)", group="Order Flow Settings")
+volThreshold = input.float(1.5, "Volume Spike Multiplier", group="Order Flow Settings")
+
+// Request the footprint object for the current bar. 
+fp_id = request.footprint(ticks_per_row = ticksPerRow)
+
+// Fix for RE10029: Footprint ID can be 'na' if no data is available for historical bars.
+// This safeguard ensures we only query delta when the footprint object is valid.
+float trueDelta = na
+if not na(fp_id)
+    trueDelta := footprint.delta(fp_id)
+
+volMA = ta.sma(volume, 20)
+
+// ==========================================
+// 4. Order Flow Absorption & Trapped Logic
+// ==========================================
+// Trapped Buyers (Bearish Reversal Setup): 
+// High volume, significant upper wick, bearish close, but POSITIVE footprint delta (aggressive buyers absorbed)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+bodySize = math.abs(close - open)
+
+// 'not na(trueDelta)' protects the evaluation from returning errors on missing data bars
+isTrappedBuyers = inTimeline and 
+                  (volume > volMA * volThreshold) and 
+                  (upperWick > bodySize) and 
+                  (close < open) and 
+                  (not na(trueDelta) and trueDelta > 0) 
+
+// Trapped Sellers (Bullish Reversal Setup): 
+// High volume, significant lower wick, bullish close, but NEGATIVE footprint delta (aggressive sellers absorbed)
+isTrappedSellers = inTimeline and 
+                   (volume > volMA * volThreshold) and 
+                   (lowerWick > bodySize) and 
+                   (close > open) and 
+                   (not na(trueDelta) and trueDelta < 0) 
+
+// ==========================================
+// 5. Custom Order Flow Candle Chart
+// ==========================================
+// Renders the chart candles dynamically based on trapped trader detection.
+// Red/Green indicates trapped traders; faded gray indicates standard unanomalous order flow.
+candleColor = isTrappedBuyers? color.new(color.red, 0) : isTrappedSellers? color.new(color.green, 0) : (close >= open? color.new(color.gray, 60) : color.new(color.gray, 60))
+plotcandle(open, high, low, close, title="Order Flow Candles", color=candleColor, wickcolor=candleColor, bordercolor=candleColor)
+
+// ==========================================
+// 6. Dynamic Zone Mapping & Mitigation State Machine
+// ==========================================
+var activeBuyerLines = array.new_line()
+var activeSellerLines = array.new_line()
+
+if isTrappedBuyers
+    // Plot identification label
+    deltaStr = not na(trueDelta)? str.tostring(trueDelta, "#.##") : "N/A"
+    label.new(bar_index, high, text="🎈 TRAPPED\nBUYERS (Delta: " + deltaStr + ")", color=color.rgb(255, 82, 82, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+    // Project new supply line and store in tracking array
+    newLine = line.new(bar_index, high, bar_index, high, color=color.red, style=line.style_solid, width=2)
+    array.push(activeBuyerLines, newLine)
+
+if isTrappedSellers
+    // Plot identification label
+    deltaStr = not na(trueDelta)? str.tostring(trueDelta, "#.##") : "N/A"
+    label.new(bar_index, low, text="🎈 TRAPPED\nSELLERS (Delta: " + deltaStr + ")", color=color.rgb(76, 175, 80, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+    // Project new demand line and store in tracking array
+    newLine = line.new(bar_index, low, bar_index, low, color=color.green, style=line.style_solid, width=2)
+    array.push(activeSellerLines, newLine)
+
+// Mitigation Logic: Extend lines until price breaches them, then mark as spent.
+// Iterating backward prevents index out-of-bounds errors when elements are removed.
+if array.size(activeBuyerLines) > 0
+    for i = array.size(activeBuyerLines) - 1 to 0
+        currentLine = array.get(activeBuyerLines, i)
+        lineLevel = line.get_y1(currentLine)
+        
+        if high >= lineLevel and bar_index > line.get_x1(currentLine)
+            // Price breached the supply line. Stop extension and visually mitigate.
+            line.set_x2(currentLine, bar_index)
+            line.set_style(currentLine, line.style_dotted)
+            array.remove(activeBuyerLines, i)
+        else
+            // Zone unmitigated. Continue forward projection.
+            line.set_x2(currentLine, bar_index)
+
+if array.size(activeSellerLines) > 0
+    for i = array.size(activeSellerLines) - 1 to 0
+        currentLine = array.get(activeSellerLines, i)
+        lineLevel = line.get_y1(currentLine)
+        
+        if low <= lineLevel and bar_index > line.get_x1(currentLine)
+             // Price breached the demand line. Stop extension and visually mitigate.
+            line.set_x2(currentLine, bar_index)
+            line.set_style(currentLine, line.style_dotted)
+            array.remove(activeSellerLines, i)
+        else
+             // Zone unmitigated. Continue forward projection.
+            line.set_x2(currentLine, bar_index)
+
+// ==========================================
+// 7. Dynamic State-Aware Execution HUD
+// ==========================================
+// Initialize table once via 'var' to prevent UI rendering lag
+var table execPlan = table.new(position.bottom_right, 3, 5, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+
+// Execute intense geometric distance calculations only on the live real-time bar
+if barstate.islast
+    // Calculate nearest active unmitigated zones relative to current price
+    float nearestSupply = na
+    float nearestDemand = na
+    
+    if array.size(activeBuyerLines) > 0
+        nearestSupply := 9999999
+        for i = 0 to array.size(activeBuyerLines) - 1
+            lvl = line.get_y1(array.get(activeBuyerLines, i))
+            if lvl > close and lvl < nearestSupply
+                nearestSupply := lvl
+
+    if array.size(activeSellerLines) > 0
+        nearestDemand := 0
+        for i = 0 to array.size(activeSellerLines) - 1
+            lvl = line.get_y1(array.get(activeSellerLines, i))
+            if lvl < close and lvl > nearestDemand
+                nearestDemand := lvl
+
+    // Calculate absolute point/tick distances
+    distToSupply = na(nearestSupply)? na : (nearestSupply - close)
+    distToDemand = na(nearestDemand)? na : (close - nearestDemand)
+    
+    // Define alert statuses based on volatility-adjusted proximity (0.5 ATR)
+    currentATR = ta.atr(14)
+    supplyStatus = na(distToSupply)? "NO ACTIVE SUPPLY" : (distToSupply < (currentATR * 0.5)? "🚨 PREPARE SHORT" : "WAITING")
+    demandStatus = na(distToDemand)? "NO ACTIVE DEMAND" : (distToDemand < (currentATR * 0.5)? "🚨 PREPARE LONG" : "WAITING")
+    
+    // Render Table Headers
+    table.cell(execPlan, 0, 0, "📡 DYNAMIC ORDER FLOW HUD", text_color=color.white, text_halign=text.align_center, bgcolor=color.new(color.blue, 30))
+    table.merge_cells(execPlan, 0, 0, 2, 0)
+    
+    // Render Real-Time True Footprint Delta safely
+    hudDeltaStr = not na(trueDelta)? str.tostring(trueDelta, "#.##") : "N/A"
+    deltaColor = na(trueDelta)? color.gray : (trueDelta > 0? color.green : color.red)
+    table.cell(execPlan, 0, 1, "CURRENT BAR DELTA", text_color=color.gray, text_halign=text.align_left)
+    table.cell(execPlan, 1, 1, hudDeltaStr, text_color=deltaColor, text_halign=text.align_right)
+    table.cell(execPlan, 2, 1, "True Footprint Data", text_color=color.gray, text_halign=text.align_left)
+    
+    // Render Nearest Supply Data and Execution Status
+    table.cell(execPlan, 0, 2, "NEAREST SUPPLY (TRAPPED BUYERS)", text_color=color.red, text_halign=text.align_left)
+    table.cell(execPlan, 1, 2, na(nearestSupply)? "N/A" : str.tostring(nearestSupply, "#.##"), text_color=color.white, text_halign=text.align_right)
+    table.cell(execPlan, 2, 2, supplyStatus, text_color=color.white, text_halign=text.align_left, bgcolor= supplyStatus == "WAITING"? color.new(color.black, 100) : color.new(color.red, 40))
+    
+    // Render Nearest Demand Data and Execution Status
+    table.cell(execPlan, 0, 3, "NEAREST DEMAND (TRAPPED SELLERS)", text_color=color.green, text_halign=text.align_left)
+    table.cell(execPlan, 1, 3, na(nearestDemand)? "N/A" : str.tostring(nearestDemand, "#.##"), text_color=color.white, text_halign=text.align_right)
+    table.cell(execPlan, 2, 3, demandStatus, text_color=color.white, text_halign=text.align_left, bgcolor= demandStatus == "WAITING"? color.new(color.black, 100) : color.new(color.green, 40))
+    
+    // Render Distance Telemetry 
+    table.cell(execPlan, 0, 4, "DISTANCE TO ZONES", text_color=color.gray, text_halign=text.align_left)
+    distString = "Up: " + (na(distToSupply)? "-" : str.tostring(distToSupply, "#.##")) + " | Down: " + (na(distToDemand)? "-" : str.tostring(distToDemand, "#.##"))
+    table.cell(execPlan, 1, 4, distString, text_color=color.yellow, text_halign=text.align_center)
+    table.merge_cells(execPlan, 1, 4, 2, 4)

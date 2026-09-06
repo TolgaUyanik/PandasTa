@@ -1,0 +1,412 @@
+// @license This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// @author algotraderdev
+// @description This library introduces the `PolylinePlus` type, which is an enhanced version of the built-in PineScript
+// `polyline`. It enable two features that are absent from the built-in type:
+//   1. Developers can now dynamically add or remove points from the poyline in an efficient manner. In contrast, the
+//      built-in `polyline` type is immutable, and developers are forced to reconstruct a new instance of the polyline
+//      if they were to add/remove points, which is unwieldy and comes with significant performance penalty.
+//   2. Each PolylinePlus instance can theoretically hold up to ~1M points, instead of the 10K points allowed by the
+//      built-in `polyline` type, as long as it does not exceed the memory limit of the PineScript runtime.
+// Under the hood, it stores an array of `line`s and use it as a buffer to hold the lines that are formed by the newly
+// added points. When this buffer is full, it then flushes the buffer and converts the lines into polylines,
+// which are expected to be updated much less frequently.
+// This concept is similar to how "Buffered I/O" works in file and network systems.
+// @version=5
+
+library('polylineplus', overlay = true)
+
+//#region Utilities
+
+// @function Asserts the condition is met. Throws an exception if not.
+// @param cond The condition to check.
+// @param msg The message to display in the exception.
+assert(bool cond, string msg) =>
+	if not cond
+		runtime.error(msg)
+
+//#endregion
+
+//#region PolylineWithPoints
+
+// @type A helper type that serves as the union of a built-in `polyline` object and the `chart.point`s that back
+// up the polyline. This object is needed because the built-in `polyline` type does not expose its underlying points
+// to developers.
+export type PolylineWithPoints
+	// Determines the field of the chart.point objects in the points array that the polyline will use for its
+	// x-coordinates. If xloc.bar_index, the polyline will use the index field from each point. If xloc.bar_time,
+	// it will use the time field.
+	string xloc = xloc.bar_index
+
+	// The color of the line segments.
+	color line_color = color.blue
+
+	// The style of the polyline. Possible values: line.style_solid, line.style_dotted, line.style_dashed,
+	// line.style_arrow_left, line.style_arrow_right, line.style_arrow_both.
+	string line_style = line.style_solid
+
+	// The width of the line segments, expressed in pixels.
+	int line_width = 1
+
+	// The maximum number of points that each built-in `polyline` instance can contain.
+	// NOTE: this is not to be confused with the maximum number of points that each `PolylinePlus` instance can contain.
+	// In fact, each `PolylinePlus` instance can theoretically hold up to 10,000 * 100 + 500 = 1,000,500 points as long
+	// as it does not exceed the memory limit of the PineScript runtime.
+	int max_points_per_builtin_polyline = 10000
+
+	// The underlying polyline.
+	polyline polyline
+
+	// The underlying points that form the polyline.
+	chart.point[] points
+
+// @function Gets the size of points in this polyline.
+method points_size(PolylineWithPoints this) =>
+	if na(this.points)
+		0
+	else
+		this.points.size()
+
+// @function Gets the last point from this polyline.
+method last_point(PolylineWithPoints this) =>
+	if not na(this.points)
+		if this.points.size() > 0
+			this.points.last()
+
+// @function Sets the points for the polyline.
+// @param points The new points to set.
+method set_points(PolylineWithPoints this, chart.point[] points) =>
+	this.points := points.copy()
+	if not na(this.polyline)
+		this.polyline.delete()
+	this.polyline := polyline.new(
+	  this.points,
+	  xloc = this.xloc,
+	  line_color = this.line_color,
+	  line_style = this.line_style,
+	  line_width = this.line_width)
+
+// @function Checks if this instance has reached the maximum capacity for points.
+// @returns Whether this instance has reached the maximum capacity for points.
+method is_full(PolylineWithPoints this) =>
+	if na(this.points)
+		false
+	else
+		this.points.size() == this.max_points_per_builtin_polyline
+
+// @function Pushes more points into the polyline. If it exceeds the max number of points that each polyline can store,
+// then the remaining un-stored portion will be returned.
+// @param new_points An array of points to add into the polyline.
+// @returns The remaining points that are not added into the polyline, or na if all points were added.
+method push_points(PolylineWithPoints this, chart.point[] new_points) =>
+	// Make sure `this.points` is initialized.
+	if na(this.points)
+		this.points := array.new<chart.point>()
+
+	int size = this.points.size()
+	int new_size = size + new_points.size()
+	if new_size > this.max_points_per_builtin_polyline
+		// Calculate the remaining capacity of `this.points`.
+		int capacity = this.max_points_per_builtin_polyline - size
+		
+		// Split the `new_points` array into two parts, with the first part being the points that can be added into the
+		// polyline and the second part being the remaining points that cannot be added.
+		chart.point[] to_add = new_points.slice(0, capacity)
+		chart.point[] remaining = new_points.slice(capacity, new_points.size())
+
+		// Update `this.points` and `this.polyline`.
+		this.set_points(this.points.concat(to_add))
+		remaining
+	else // all points can be added into `this.points`.
+		this.set_points(this.points.concat(new_points))
+		na
+
+// @function Pops N points from the polyline.
+// @param n The number of points to pop.
+// @returns An array of `chart.point`s that are popped.
+method pop_points(PolylineWithPoints this, int n) =>
+	assert(not na(this.points), '`this.points` should not be na in `PolylineWithPoints#pop_points`.')
+	int size = this.points.size()
+	assert(n <= size, 'The number of points to pop should be less than or equal to the size of `this.points`.')
+
+	chart.point[] left = if size == n
+		// NOTE: ideally we should be able to do `this.points.slice(0, size - n)` regardless of whether size == n,
+		// but there's seems to be bug that in PineScript that if the second param provided to slice is 0, then
+		// the full array will be returned. e.g. [1, 2, 3].slice(0, 0) is [1, 2, 3] rather than [].
+		array.new<chart.point>()
+	else
+		this.points.slice(0, size - n)
+	chart.point[] right = this.points.slice(size - n, size)
+	this.set_points(left)
+	right
+
+// @function Deletes the chart elements from this object and frees up memory.
+method delete(PolylineWithPoints this) =>
+	if not na(this.polyline)
+		this.polyline.delete()
+		this.polyline := na
+	this.points := na
+
+//#endregion
+
+//#region PolylinePlus
+
+// @type A PolylinePlus type is an enhanced version of the built-in PineScript `polyline` type to enable developers to
+// dynamically add or remove points from the poyline with significantly optimized performance.
+// Under the hood, it stores an array of `line`s and use it as a buffer to hold the lines that are formed by the newly
+// added points. When this buffer is full, it then flushes the buffer and converts the lines into polylines,
+// which are expected to be updated much less frequently.
+// This concept is similar to how file system buffers and network buffers work.
+export type PolylinePlus
+	// If true, the drawing will also connect the first point to the last point from the points array, resulting in a
+	// closed polyline.
+	bool closed = false
+
+	// Determines the field of the chart.point objects in the points array that the polyline will use for its
+	// x-coordinates. If xloc.bar_index, the polyline will use the index field from each point. If xloc.bar_time,
+	// it will use the time field.
+	string xloc = xloc.bar_index
+
+	// The color of the line segments.
+	color line_color = color.blue
+
+	// The style of the polyline. Possible values: line.style_solid, line.style_dotted, line.style_dashed,
+	// line.style_arrow_left, line.style_arrow_right, line.style_arrow_both.
+	string line_style = line.style_solid
+
+	// The width of the line segments, expressed in pixels.
+	int line_width = 1
+
+	// The maximum number of points that each built-in `polyline` instance can contain.
+	// NOTE: this is not to be confused with the maximum number of points that each `PolylinePlus` instance can contain.
+	// In fact, each `PolylinePlus` instance can theoretically hold up to 10,000 * 100 + 500 = 1,000,500 points as long as
+	// it does not exceed the memory limit of the PineScript runtime.
+	int max_points_per_builtin_polyline = 10000
+
+	// The number of lines to keep in the buffer. If more points are to be added while the buffer is full, then all the
+	// lines in the buffer will be flushed into the poylines. The higher the number, the less frequent we'll need to
+	// flush the buffer, and thus lead to better performance.
+	// NOTE: the maximum total number of lines per chart allowed by PineScript is 500. But given there might be other
+	// places where the indicator or strategy are drawing lines outside this poyline context, we use a conservative
+	// number here to be safe.
+	// NOTE: When specifying a higher number here, please also make sure to use a higher number for the
+	// `max_lines_count` param for the indicator. Otherwise the lines beyond the `max_lines_count` may be automatically
+	// deleted and thus lead to missing points in the polyline.
+	int lines_buffer_size = 50
+
+	// [Private] The first point that's added to the polyline.
+	chart.point first_point
+
+	// [Private] The lines buffer. This buffer holds the most recently added lines until the buffer is full.
+	line[] lines
+
+	// [Private] The underlying polylines that represent the old-generation lines.
+	PolylineWithPoints[] polylines_with_points
+
+	// [Private] The line that connects the first point to the last point, if the `closed` property is set to true.
+	// NOTE: using `polyline` instead of `line` here since the polylines can be displayed on the chart even if their
+	// starting points are outside of the viewport.
+	polyline close_line
+
+// @function Gets the internal lines property while making sure it's properly initialized.
+method lines(PolylinePlus this) =>
+	if na(this.lines)
+		this.lines := array.new_line()
+	this.lines
+
+// @function Gets the internal polylines property while making sure it's properly initialized.
+method polylines_with_points(PolylinePlus this) =>
+	if na(this.polylines_with_points)
+		this.polylines_with_points := array.new<PolylineWithPoints>()
+	this.polylines_with_points
+
+// @function Creates a new instance of `PolylineWithPoints`.
+// @returns The newly created instance.
+method new_polyline_with_points(PolylinePlus this) =>
+	PolylineWithPoints pwp = PolylineWithPoints.new(
+	  xloc = this.xloc,
+	  line_color = this.line_color,
+	  line_style = this.line_style,
+	  line_width = this.line_width,
+	  max_points_per_builtin_polyline = this.max_points_per_builtin_polyline)
+	PolylineWithPoints[] pwps = this.polylines_with_points()
+	if pwps.size() > 0
+		pwp.push_points(array.from(pwps.last().last_point()))
+	pwps.push(pwp)
+	pwp
+
+// @function Gets the start and end endpoints for the given line.
+// @param ln The line instance.
+// @returns A two-element tuple that contains the start and end endpoints (both of the `chart.point` type).
+method line_endpoints(PolylinePlus this, line ln) =>
+	if this.xloc == xloc.bar_index
+		[chart.point.from_index(ln.get_x1(), ln.get_y1()), chart.point.from_index(ln.get_x2(), ln.get_y2())]
+	else
+		[chart.point.from_time(ln.get_x1(), ln.get_y1()), chart.point.from_time(ln.get_x2(), ln.get_y2())]
+
+// @function Gets the last point in the polyline.
+// @returns The last point in the polyline, or na if the polyline is empty.
+method last_point(PolylinePlus this) =>
+	line[] lines = this.lines()
+	chart.point p = if lines.size() > 0
+		[start, end] = this.line_endpoints(lines.last())
+		end
+	else
+		PolylineWithPoints[] pwps = this.polylines_with_points()
+		if pwps.size() > 0
+			pwps.last().last_point()
+	na(p) ? this.first_point : p
+
+// @function Updates the close line.
+method update_close_line(PolylinePlus this) =>
+	if this.closed and not na(this.first_point) and not na(this.last_point())
+		if not na(this.close_line)
+			this.close_line.delete()
+
+		this.close_line := polyline.new(
+		  array.from(this.first_point, this.last_point()),
+		  xloc = this.xloc,
+		  line_color = this.line_color,
+		  line_style = this.line_style,
+		  line_width = this.line_width)
+	else
+		if not na(this.close_line)
+			this.close_line.delete()
+			this.close_line := na
+	this
+
+// @function Flushes the lines buffer if it's full.
+method flush_if_full(PolylinePlus this) =>
+	line[] lines = this.lines()
+	if lines.size() == this.lines_buffer_size
+		PolylineWithPoints[] pwps = this.polylines_with_points()
+		if pwps.size() == 0
+			this.new_polyline_with_points()
+		PolylineWithPoints pwp = this.polylines_with_points.last()
+
+		chart.point[] points = array.new<chart.point>()
+		for [i, ln] in lines
+			[start, end] = this.line_endpoints(ln)
+			// Add the start point of the first line into the points array if the pwp is currently empty.
+			if i == 0 and pwp.points_size() == 0
+				points.push(start)
+			points.push(end)
+			ln.delete()
+		lines.clear()
+
+		// Gets the last polyline from the list and try to add the points into it.
+		// If the polyline is full, then create a new polyline.
+		while not na(points)
+			pwp := this.polylines_with_points.last()
+			if pwp.is_full()
+				pwp := this.new_polyline_with_points()
+			chart.point[] remaining = pwp.push_points(points)
+			points := remaining
+
+// @function Pushes a new point into this polyline.
+// @param point A chart.point object that specifies the coordinate.
+export method push_point(PolylinePlus this, chart.point point) =>
+	if na(this.first_point)
+		this.first_point := point
+	else
+		this.flush_if_full()
+		line ln = line.new(
+		  first_point = this.last_point(),
+		  second_point = point,
+		  xloc = this.xloc,
+		  color = this.line_color,
+		  style = this.line_style,
+		  width = this.line_width)
+		this.lines().push(ln)
+	this.update_close_line()
+
+// @function Pushes a list of new point into this polyline.
+// @param points A list of new points to push.
+export method push_points(PolylinePlus this, chart.point[] points) =>
+	for p in points
+		this.push_point(p)
+
+// @function Formats the chart.point type.
+// @returns A string representing the chart.point.
+method format_point(PolylinePlus this, chart.point point) =>
+	string x = if this.xloc == xloc.bar_index
+		str.tostring(point.index)
+	else
+		str.format_time(point.time)
+	str.format('({0}, {1})', x, point.price)
+
+// @function Pops the last point from the polyline.
+export method pop_point(PolylinePlus this) =>
+	line[] lines = this.lines()
+
+	if lines.size() > 0
+		line ln = lines.pop()
+		ln.delete()
+	else // lines.size() == 0
+		PolylineWithPoints[] pwps = this.polylines_with_points()
+		if pwps.size() > 0
+			PolylineWithPoints pwp = pwps.last()
+			if pwp.points_size() > 2
+				// If there are more than two points in the pwp, then move some points from the pwp into the lines
+				// buffer.
+				int num_points_to_pop = math.min(this.lines_buffer_size + 1, pwp.points_size() - 1)
+				chart.point[] points = pwp.pop_points(num_points_to_pop)
+				points.pop()
+				// Deletes and pop the pwp if it only has one point remaining.
+				if pwp.points_size() == 1
+					this.polylines_with_points.pop().delete()
+					if this.polylines_with_points.size() == 0
+						this.first_point := na
+				this.push_points(points)
+			else // pwp.points_size() <= 2
+				this.polylines_with_points.pop().delete()
+	this.update_close_line()
+
+// @function Deletes the chart elements from this object and frees up memory.
+export method delete(PolylinePlus this) =>
+	line[] lines = this.lines()
+	for ln in lines
+		ln.delete()
+	lines.clear()
+	this.lines := na
+	if not na(this.close_line)
+		this.close_line.delete()
+		this.close_line := na
+
+	PolylineWithPoints[] pwps = this.polylines_with_points()
+	for pwp in pwps
+		pwp.delete()
+	pwps.clear()
+	this.polylines_with_points := na
+
+	this.first_point := na
+
+// @function Sets the point in the polyline.
+// @param points The points to set.
+export method set_points(PolylinePlus this, chart.point[] points) =>
+	this.delete()
+	this.push_points(points)
+
+// @function Generates the debug string for a `PolylineWithPoints` instance.
+// @returns A string representing the debug information.
+method pwp_debug_str(PolylinePlus this, PolylineWithPoints pwp) =>
+	string[] rows = array.new_string()
+	if not na(pwp.points)
+		for p in pwp.points
+			rows.push(this.format_point(p))
+	rows.join('\n')
+
+// @function Generates the debug string for this instance.
+// @returns A string representing the debug information.
+method debug_str(PolylinePlus this) =>
+	string[] rows = array.new_string()
+	rows.push(str.format('lines={0} polylines={1}', this.lines().size(), this.polylines_with_points().size()))
+	for [i, pwp] in this.polylines_with_points
+		rows.push(str.format('------- Polyline {0} -------', i))
+		rows.push(this.pwp_debug_str(pwp))
+	rows.push('---------- Lines ----------')
+	for ln in this.lines
+		[start, end] = this.line_endpoints(ln)
+		rows.push(str.format('{0} -> {1}', this.format_point(start), this.format_point(end)))
+	rows.join('\n')
+
+//#endregion

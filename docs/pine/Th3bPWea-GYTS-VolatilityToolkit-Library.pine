@@ -1,0 +1,620 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © GoemonYae, 2026
+
+//@version=6
+// @description Library with volatility estimation functions based on range-based estimators (Parkinson, Garman-Klass, 
+//              Rogers-Satchell, Yang-Zhang), smoothing post-processors (Asymmetric EWMA), and aggregation tools 
+//              (weighted horizon volatility, MTF aggregation, Volatility Burst Ratio for regime detection).
+library("VolatilityToolkit", overlay=false)
+
+const int VERSION = 3
+
+import GoemonYae/FiltersToolkit/2 as filt
+
+// ========================================================================= //
+//#region ==================[   CONTENT   ]================================= //
+// ========================================================================= //
+// * Close-to-Close              - Classical benchmark estimator
+// * Parkinson (1980)            - Range-based volatility (High-Low)
+// * Garman-Klass (1980)         - OHLC-optimised estimator
+// * Rogers-Satchell (1991)      - Drift-independent estimator
+// * Yang-Zhang (2000)           - Gap-aware composite estimator
+// * ATR                         - Average True Range (price units)
+// * Chaikin Volatility          - Range expansion/contraction oscillator
+// * Asymmetric EWMA             - Differential smoothing for volatility
+// * Weighted Horizon Volatility - Multi-horizon weighted average (inspired by HAR)
+// * Volatility MTF              - Multi-timeframe volatility aggregation
+// * Volatility Burst Ratio      - Regime shift detection
+//
+// =============================================================================================================================== //
+//#endregion
+
+
+// ========================================================================= //
+//#region ==========[   CONFIGURATION AND HELPERS   ]======================= //
+// ========================================================================= //
+
+// @enum Filter types available for volatility smoothing
+export enum eFilterType
+    ultimate_2 = "Ultimate Smoother (2-Pole)"
+    ultimate_3 = "Ultimate Smoother (3-Pole)"
+    super_2    = "Super Smoother (2-Pole)"
+    super_3    = "Super Smoother (3-Pole)"
+    biquad     = "BiQuad"
+    adxvma     = "ADXvma"
+    mama       = "MAMA (Kaufman)"
+    a2rma      = "A2RMA"
+    sma        = "SMA"
+    ema        = "EMA"
+
+// @enum Estimator types for MTF aggregation
+export enum eVolatilityEstimator
+    yang_zhang      = "Yang-Zhang"
+    rogers_satchell = "Rogers-Satchell"
+    garman_klass    = "Garman-Klass"
+    parkinson       = "Parkinson"
+    close_to_close  = "Close-to-Close"
+    chaikin         = "Chaikin"
+    std_dev         = "Standard Deviation"
+    atr             = "Average True Range"
+
+// @function Internal helper to apply selected smoothing filter
+_apply_smoothing(float src, eFilterType type, int length, float factor) =>
+    float smoothed = switch type
+        eFilterType.ultimate_2 => filt.ultimate_smoother_2pole(src, length)
+        eFilterType.ultimate_3 => filt.ultimate_smoother_3pole(src, length)
+        eFilterType.super_2    => filt.super_smoother_2pole(src, length)
+        eFilterType.super_3    => filt.super_smoother_3pole(src, length)
+        eFilterType.biquad     => filt.lpf_biquad(src, length, factor)
+        eFilterType.adxvma     => filt.adxvma(src, length)
+        eFilterType.a2rma      => filt.a2rma(src, length, factor)
+        eFilterType.mama       =>
+            [m, f, k] = filt.mesa_adaptive_moving_average(src, lookback_period=length)
+            m
+        eFilterType.ema        => ta.ema(src, length)
+        => ta.sma(src, length)
+    smoothed
+
+
+// @function Internal helper for smoothing range-estimator output safely.
+_smooth_range_volatility(float raw_var, eFilterType type, int length, float factor) =>
+    float raw_vol = math.sqrt(math.max(raw_var, 0))
+    if length <= 1
+        raw_vol
+    else
+        bool use_volatility_smoothing = type == eFilterType.ultimate_2 or type == eFilterType.ultimate_3
+          or type == eFilterType.super_2 or type == eFilterType.super_3
+          or type == eFilterType.biquad or type == eFilterType.a2rma
+        if use_volatility_smoothing
+            // Overshooting filters can ring below zero when applied to variance.
+            float smoothed_vol = _apply_smoothing(raw_vol, type, length, factor)
+            smoothed_vol > 0 ? smoothed_vol : raw_vol
+        else
+            float smoothed_var = _apply_smoothing(raw_var, type, length, factor)
+            math.sqrt(math.max(smoothed_var, 0))
+
+//#endregion
+
+
+// ========================================================================= //
+//#region =============[   RANGE-BASED ESTIMATORS   ]======================= //
+// ========================================================================= //
+
+// ------------------------------------------------------------------- //
+//#region ------[  CLOSE-TO-CLOSE VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate classical close-to-close volatility (standard deviation of log returns).
+//                      This is the baseline estimator against which range-based estimators are compared.
+//                      It is approximately 5x less efficient than Parkinson and 7-8x less efficient than Yang-Zhang,
+//                      meaning it requires proportionally more data to achieve the same estimation accuracy.
+// @param lookback      <int> Lookback period for standard deviation calculation (default 14)
+// @param filter_type   <eFilterType> Type of smoothing filter to apply (default SMA).
+//                      If SMA is selected, calculates standard Sample Variance (unbiased).
+//                      For linear filters (Ultimate, Super, BiQuad, EMA), calculates Population Variance using
+//                      the identity Var[X] = E[X²] − (E[X])² with the filter as the expectation operator.
+//                      Adaptive filters (ADXvma, MAMA, A2RMA) smooth squared deviations directly to avoid
+//                      input-dependent kernel bias, where the identity does not hold.
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Per-bar volatility in log-return units. To annualise for daily bars, multiply by sqrt(252).
+// @note                Useful as a benchmark. While drift-independent (like Rogers-Satchell), it is highly inefficient.
+export close_to_close(int lookback = 14, eFilterType filter_type = eFilterType.sma, float smoothing_factor = 0.7) =>
+    // Log return: ln(C_t / C_{t-1})
+    // Note: ratio can be < 1 (price decrease), which gives negative log return - this is valid and expected
+    float prev_close = nz(close[1], close)
+    float ratio = close / math.max(prev_close, 1e-10)
+    float log_return = math.log(math.max(ratio, 1e-10))  // Guard only against log(0), not against ratio < 1
+    
+    float final_variance = 0.0
+    
+    if filter_type == eFilterType.sma
+        // Classical Sample Variance (N-1 denominator) using built-in optimised function
+        final_variance := ta.variance(log_return, lookback, false)
+    else
+        bool is_linear = filter_type == eFilterType.ultimate_2 or filter_type == eFilterType.ultimate_3
+                          or filter_type == eFilterType.super_2 or filter_type == eFilterType.super_3
+                          or filter_type == eFilterType.biquad  or filter_type == eFilterType.ema
+
+        if is_linear
+            // Linear filter: E[X²] - (E[X])² is exact.
+            float mean_r  = _apply_smoothing(log_return, filter_type, lookback, smoothing_factor)
+            float mean_r2 = _apply_smoothing(math.pow(log_return, 2), filter_type, lookback, smoothing_factor)
+            final_variance := mean_r2 - math.pow(mean_r, 2)
+        else
+            // Adaptive filter (ADXvma, MAMA, A2RMA): smooth squared deviations from the same-filter mean
+            // to avoid input-dependent kernel bias.
+            float mean_r = _apply_smoothing(log_return, filter_type, lookback, smoothing_factor)
+            final_variance := _apply_smoothing(math.pow(log_return - mean_r, 2), filter_type, lookback, smoothing_factor)
+    
+    // Return standard deviation
+    math.sqrt(math.max(final_variance, 0))
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  PARKINSON VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate Parkinson volatility (High-Low range-based), also known as the Extreme Value Method.
+//                      Based on Parkinson (1980), this estimator is approximately 2.5-5 times more efficient than the
+//                      close-to-close estimator ($N_{close} \approx 5 N_{park}$), requiring about 80% less data for the same accuracy.
+//                      It assumes the price follows a continuous random walk with no drift (zero mean returns) and no gaps.
+//                      Note: As shown by Rogers & Satchell (1991), this estimator is biased in trending markets (non-zero drift).
+// @param lookback      <int> Lookback period for smoothing (default 14). When set to 1, returns instantaneous
+//                      (unsmoothed) volatility for use in signal processing or other smoothing pipelines.
+// @param filter_type   <eFilterType> Type of smoothing filter to use (default SMA).
+//                      Overshooting filters smooth volatility rather than variance. Only invoked when lookback > 1.
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Per-bar volatility (standard deviation) in log-return units. To annualise, use annualize().
+// @reference           Parkinson, M. (1980). "The Extreme Value Method for Estimating the Variance of the Rate of Return."
+//                      Journal of Business, 53(1), 61-65. DOI: https://doi.org/10.1086/296071
+export parkinson(int lookback = 14, eFilterType filter_type = eFilterType.sma, float smoothing_factor = 0.7) =>
+    // σ²_parkinson = (1 / 4·ln(2)) × (ln(H/L))²
+    // Constant: 1 / (4 * ln(2)) ≈ 0.3607
+    // Note: H/L >= 1 by definition (high >= low always), so ln(H/L) >= 0
+    // Guard against division by zero on micro-priced assets and log(0) on flat candles
+    float hl_ratio = high / math.max(low, 1e-10)
+    float raw_var = (1.0 / (4.0 * math.log(2))) * math.pow(math.log(math.max(hl_ratio, 1e-10)), 2)
+
+    // Preserve variance smoothing for safe filters; smooth volatility for overshooting filters.
+    _smooth_range_volatility(raw_var, filter_type, lookback, smoothing_factor)
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  GARMAN-KLASS VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate Garman-Klass volatility (OHLC-optimised).
+//                      This estimator improves upon Parkinson by incorporating open and close prices,
+//                      making it approximately 7.4 times more efficient than close-to-close estimators.
+//                      Like Parkinson, it assumes no drift and continuous trading (fraction of day closed f=0).
+//                      Note: As shown by Rogers & Satchell (1991), this estimator is biased in trending markets.
+//                      Note: This implements the "practical" analytic estimator (σ̂²₅) described in the paper,
+//                      which is robust and avoids cross-product terms found in the "best" estimator (σ̂²₄).
+// @param lookback      <int> Lookback period for smoothing (default 14). When set to 1, returns instantaneous
+//                      (unsmoothed) volatility for use in signal processing or other smoothing pipelines.
+// @param filter_type   <eFilterType> Type of smoothing filter to use (default SMA).
+//                      Overshooting filters smooth volatility rather than variance. Only invoked when lookback > 1.
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Per-bar volatility (standard deviation) in log-return units. To annualise, use annualize().
+// @reference           Garman, M.B. & Klass, M.J. (1980). "On the Estimation of Security Price Volatilities from Historical Data."
+//                      Journal of Business, 53(1), 67-78. DOI: https://doi.org/10.1086/296072
+export garman_klass(int lookback = 14, eFilterType filter_type = eFilterType.sma, float smoothing_factor = 0.7) =>
+    // σ²_gk = 0.5 × (ln(H/L))² - (2·ln(2) - 1) × (ln(C/O))²
+    // Constant: (2 * ln(2) - 1) ≈ 0.3863
+    // Note: H/L >= 1 always, but C/O can be < 1 (down candle) - both are valid
+    // The squared terms handle negative log returns correctly: (-x)² = x²
+    float hl_ratio = high / math.max(low, 1e-10)
+    float co_ratio = close / math.max(open, 1e-10)
+
+    float hl_component = 0.5 * math.pow(math.log(math.max(hl_ratio, 1e-10)), 2)
+    float co_component = (2.0 * math.log(2) - 1.0) * math.pow(math.log(math.max(co_ratio, 1e-10)), 2)
+    float raw_var = hl_component - co_component
+
+    // Preserve variance smoothing for safe filters; smooth volatility for overshooting filters.
+    _smooth_range_volatility(raw_var, filter_type, lookback, smoothing_factor)
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  ROGERS-SATCHELL VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate Rogers-Satchell volatility (drift-independent).
+//                      This estimator allows for non-zero drift (trending markets) but does not handle gaps.
+//                      It is superior to Parkinson and Garman-Klass when the underlying has a non-zero drift,
+//                      as GK becomes significantly biased in trending conditions (Rogers & Satchell, 1991).
+// @param lookback      <int> Lookback period for smoothing (default 14). When set to 1, returns instantaneous
+//                      (unsmoothed) volatility for use in signal processing or other smoothing pipelines.
+// @param filter_type   <eFilterType> Type of smoothing filter to use (default SMA).
+//                      Overshooting filters smooth volatility rather than variance. Only invoked when lookback > 1.
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Per-bar volatility (standard deviation) in log-return units. To annualise, use annualize().
+// @reference           Rogers, L.C.G. & Satchell, S.E. (1991). "Estimating Variance from High, Low and Closing Prices."
+//                      Annals of Applied Probability, 1(4), 504-512.
+export rogers_satchell(int lookback = 14, eFilterType filter_type = eFilterType.sma, float smoothing_factor = 0.7) =>
+    // σ²_rs = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O)
+    // Formula (2) from Rogers & Satchell (1991): S₁(S₁-X₁) + I₁(I₁-X₁)
+    //
+    // By definition of OHLC:
+    //   - H >= C, H >= O  →  H/C >= 1, H/O >= 1  →  ln(H/C) >= 0, ln(H/O) >= 0
+    //   - L <= C, L <= O  →  L/C <= 1, L/O <= 1  →  ln(L/C) <= 0, ln(L/O) <= 0
+    //
+    // The formula works because: positive × positive + negative × negative = positive
+    // We must NOT clip the L/C and L/O ratios to 1.0, or we lose half the variance
+    float hc_ratio = high / math.max(close, 1e-10)
+    float ho_ratio = high / math.max(open, 1e-10)
+    float lc_ratio = low / math.max(close, 1e-10)
+    float lo_ratio = low / math.max(open, 1e-10)
+
+    // Guard only against log(0), allowing ratios < 1 which give valid negative logs
+    float raw_var = math.log(math.max(hc_ratio, 1e-10)) * math.log(math.max(ho_ratio, 1e-10)) +
+      math.log(math.max(lc_ratio, 1e-10)) * math.log(math.max(lo_ratio, 1e-10))
+
+    // Preserve variance smoothing for safe filters; smooth volatility for overshooting filters.
+    _smooth_range_volatility(raw_var, filter_type, lookback, smoothing_factor)
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  YANG-ZHANG VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate Yang-Zhang volatility (gap-aware, drift-independent).
+//                      This is the most comprehensive range-based estimator, combining overnight
+//                      returns, open-to-close returns, and the Rogers-Satchell component.
+//                      It handles both price drift and overnight gaps, making it suitable for
+//                      markets with significant opening gaps.
+// @param lookback      <int> Lookback period (default 14). Minimum enforced value is 2, as the estimator
+//                      requires rolling sample variance calculations that are undefined for a single bar.
+//                      Unlike other estimators, Yang-Zhang cannot return instantaneous volatility.
+// @param alpha         <float> Variance-minimisation constant (default 1.34). The original Yang-Zhang (2000)
+//                      paper derived α=1.34 for US equities. Higher values weight the open-close component
+//                      more heavily; lower values weight the Rogers-Satchell component more. For high-drift
+//                      environments (e.g., crypto bull markets), consider values in range [1.0, 2.0].
+// @returns             <float> Per-bar volatility (standard deviation) in log-return units. To annualise, use annualize().
+// @reference           Yang, D. & Zhang, Q. (2000). "Drift-Independent Volatility Estimation Based on High, Low, Open, and Close Prices."
+//                      Journal of Business, 73(3), 477-491. DOI: https://doi.org/10.1086/209650
+// @note                The RS component is mathematically guaranteed non-negative for valid OHLC data.
+//                      A simple floor guards against data quality issues (e.g., erroneous H < L values).
+export yang_zhang(int lookback = 14, float alpha = 1.34) =>
+    // Enforce minimum lookback of 2 to prevent division by zero in k calculation and variance
+    int lb = math.max(lookback, 2)
+    
+    // 1. Overnight return: ln(O_t / C_{t-1})
+    // Note: Can be negative (gap down) or positive (gap up) - both are valid
+    // Use `na` for first bar to avoid polluting variance calculation during warmup
+    float overnight_return = na(close[1]) ? na : math.log(math.max(open / math.max(close[1], 1e-10), 1e-10))
+    
+    // 2. Open-to-close return: ln(C_t / O_t)
+    // Note: Can be negative (down day) or positive (up day) - both are valid
+    float open_close_return = math.log(math.max(close / math.max(open, 1e-10), 1e-10))
+    
+    // 3. Rogers-Satchell component: ln(H/C) × ln(H/O) + ln(L/C) × ln(L/O)
+    // CRITICAL: L/C and L/O are <= 1 by definition, giving negative logs
+    // The formula requires these: negative × negative = positive contribution
+    float hc_ratio = high / math.max(close, 1e-10)
+    float ho_ratio = high / math.max(open, 1e-10)
+    float lc_ratio = low / math.max(close, 1e-10)
+    float lo_ratio = low / math.max(open, 1e-10)
+    
+    // Guard only against log(0), allowing ratios < 1 which give valid negative logs
+    float rs_component = math.log(math.max(hc_ratio, 1e-10)) * math.log(math.max(ho_ratio, 1e-10)) +
+      math.log(math.max(lc_ratio, 1e-10)) * math.log(math.max(lo_ratio, 1e-10))
+    
+    // Calculate variances using rolling series
+    // Use biased=false for sample variance (n-1 denominator), matching Yang-Zhang paper
+    float var_overnight = ta.variance(overnight_return, lb, false)
+    float var_open_close = ta.variance(open_close_return, lb, false)
+    
+    // RS is an expectation E[...], not a variance — use SMA
+    // Note: RS can be negative in strongly trending markets
+    float rs_mean = ta.sma(rs_component, lb)
+    
+    // Optimal weighting factor k that minimises estimator variance
+    // k = (alpha - 1) / (alpha + (n+1)/(n-1))
+    // Uses alpha parameter (default 1.34 as recommended by Yang & Zhang 2000 for equities)
+    float k = (alpha - 1.0) / (alpha + (lb + 1.0) / (lb - 1.0))
+    
+    // Combined Yang-Zhang variance
+    // σ²_yz = σ²_overnight + k × σ²_open_close + (1-k) × E[RS]
+    // Note: RS is mathematically guaranteed non-negative for valid OHLC data (H≥C,O and L≤C,O).
+    // We guard against bad data (e.g., H < L from data provider errors) with a simple floor.
+    float var_yz = var_overnight + k * var_open_close + (1.0 - k) * math.max(rs_mean, 0)
+    
+    // Return volatility (standard deviation)
+    // Guard against negative variance from RS component in extreme trends
+    math.sqrt(math.max(var_yz, 0))
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  AVERAGE TRUE RANGE  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate Average True Range with flexible smoothing options.
+//                      ATR measures volatility in price units (not log-returns), making it directly
+//                      interpretable for stop-loss placement and position sizing.
+// @param lookback      <int> Lookback period for smoothing (default 14)
+// @param filter_type   <eFilterType> Type of smoothing filter (default SMA, matching Wilder's original)
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Average True Range in price units.
+// @reference           Wilder, J. W. (1978). "New Concepts in Technical Trading Systems". Trend Research.
+// @note                For best performance, use the built-in ta.atr() which is optimised in Pine Script.
+//                      This function is provided for consistency with the library's filter options and for
+//                      cases where alternative smoothing methods (e.g., Super Smoother) are preferred.
+export atr(int lookback = 14, eFilterType filter_type = eFilterType.sma, float smoothing_factor = 0.7) =>
+    // True Range: max(H-L, |H-C[1]|, |L-C[1]|)
+    float prev_close = nz(close[1], close)
+    float tr = math.max(high - low, math.max(math.abs(high - prev_close), math.abs(low - prev_close)))
+
+    // Apply selected smoothing filter
+    _apply_smoothing(tr, filter_type, lookback, smoothing_factor)
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  CHAIKIN VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate Chaikin Volatility (ROC of EMA of Range).
+//                      Measures the rate of change of the trading range.
+//                      High values indicate increased volatility; low values indicate range contraction.
+// @param length        <int> Smoothing length for the range EMA (default 10)
+// @param roc_length    <int> Lookback for Rate of Change calculation (default 10)
+// @param filter_type   <eFilterType> Type of smoothing filter to use (default EMA)
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Chaikin Volatility (percentage change)
+export chaikin_volatility(int length = 10, int roc_length = 10, eFilterType filter_type = eFilterType.ema, float smoothing_factor = 0.7) =>
+    float range_smoothed = _apply_smoothing(high - low, filter_type, length, smoothing_factor)
+    float prev_range_smoothed = nz(range_smoothed[roc_length], range_smoothed)
+    // Avoid division by zero
+    ((range_smoothed - prev_range_smoothed) / math.max(prev_range_smoothed, 1e-10)) * 100
+
+//#endregion
+
+// ------------------------------------------------------------------- //
+//#region ------[  ANNUALISATION HELPER  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Annualise a per-bar volatility estimate to yearly volatility.
+//                      Converts per-bar standard deviation to annualised volatility using the
+//                      square-root-of-time rule: σ_annual = σ_bar × √(periods_per_year).
+// @param vol           <series float> Per-bar volatility (standard deviation) in log-return units.
+// @param periods       <int> Number of bars per year (default 252 for daily equity bars).
+//                      Common values: 252 (daily equities), 365 (daily crypto), 52 (weekly),
+//                      12 (monthly), 252*6.5*60 ≈ 98,280 (1-minute equity bars).
+// @returns             <float> Annualised volatility in log-return units.
+// @note                This assumes returns are i.i.d. (independent and identically distributed).
+//                      For assets with significant autocorrelation, this approximation may be biased.
+export annualize(series float vol, int periods = 252) =>
+    vol * math.sqrt(periods)
+
+//#endregion
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ==========[   SMOOTHING AND POST-PROCESSING   ]=================== //
+// ========================================================================= //
+
+// ------------------------------------------------------------------- //
+//#region ------[  ASYMMETRIC EWMA  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Asymmetric EWMA smoothing with different alphas for rising/falling volatility.
+//                      This filter allows volatility to rise quickly (fast reaction to shocks)
+//                      while decaying slowly (stability). Useful for trailing stops.
+// @param vol           <series float> Input volatility series
+// @param alpha_up      <float> Smoothing factor when volatility increases (default 0.1)
+// @param alpha_down    <float> Smoothing factor when volatility decreases (default 0.02)
+// @returns             <float> Asymmetrically smoothed volatility
+// @note                STATEFUL FUNCTION — uses `var` for internal state persistence.
+//                      Each call site has its own state slot, so multiple call sites are fine.
+//                      Do NOT call inside conditional or loop branches: `var` updates are
+//                      skipped when the branch does not execute, producing stale output.
+export asymmetric_ewma(series float vol, float alpha_up = 0.1, float alpha_down = 0.02) =>
+    var float smoothed = na
+    if na(vol)
+        smoothed  // Return current state (na initially, then last valid)
+    else
+        float prev = na(smoothed[1]) ? vol : smoothed[1]
+        float change = vol - prev
+        float alpha = change > 0 ? alpha_up : alpha_down
+        smoothed := alpha * vol + (1.0 - alpha) * prev
+        smoothed
+
+//#endregion
+
+//#endregion
+
+
+// ========================================================================= //
+//#region ========[   AGGREGATION AND REGIME DETECTION   ]================== //
+// ========================================================================= //
+
+// ------------------------------------------------------------------- //
+//#region ------[  WEIGHTED HORIZON VOLATILITY  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Weighted combination of volatility across multiple lookback horizons.
+//                      Inspired by the HAR-RV model's recognition that market participants operate on
+//                      different time horizons (daily, weekly, monthly), but note this is NOT a forecasting
+//                      regression model. This function produces a weighted trailing average that blends
+//                      short, medium, and long-term volatility readings.
+// @param base_vol      <series float> Base volatility series
+// @param short_h       <int> Short horizon lookback in bars (default 1)
+// @param medium_h      <int> Medium horizon lookback in bars (default 5)
+// @param long_h        <int> Long horizon lookback in bars (default 22)
+// @param w_short       <float> Weight for short horizon (default 0.5)
+// @param w_medium      <float> Weight for medium horizon (default 0.3)
+// @param w_long        <float> Weight for long horizon (default 0.2)
+// @returns             <float> Weighted multi-horizon volatility (trailing, not predictive)
+// @note                This is a weighted moving average, not a regression forecast. For true HAR-RV
+//                      forecasting, fit regression coefficients externally and apply them here, or use
+//                      the empirical coefficients from Corsi (2009): β_d≈0.37, β_w≈0.34, β_m≈0.22.
+// @reference           Inspired by Corsi, F. (2009). "A Simple Approximate Long-Memory Model of Realized Volatility."
+export weighted_horizon_volatility(
+     series float base_vol,
+     int short_h = 1,
+     int medium_h = 5,
+     int long_h = 22,
+     float w_short = 0.5,
+     float w_medium = 0.3,
+     float w_long = 0.2
+ ) =>
+    float vol_short = ta.sma(base_vol, short_h)
+    float vol_medium = ta.sma(base_vol, medium_h)
+    float vol_long = ta.sma(base_vol, long_h)
+    w_short * vol_short + w_medium * vol_medium + w_long * vol_long
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  VOLATILITY MTF  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Multi-timeframe volatility aggregation.
+//                      Combines base volatility with provided higher-timeframe volatilities.
+//                      Designed for use on intraday charts to incorporate higher-timeframe volatility regimes.
+//                      Automatically scales HTF volatilities down to the current timeframe's magnitude.
+//                      Note: Users must calculate HTF volatilities using request.security() externally and pass them here.
+// @param base_vol      <series float> Base volatility series (calculated on current timeframe)
+// @param vol_daily     <series float> Daily volatility (calculated via request.security)
+// @param vol_weekly    <series float> Weekly volatility (calculated via request.security)
+// @param vol_monthly   <series float> Monthly volatility (calculated via request.security)
+// @param w_daily       <float> Weight for daily timeframe volatility (default 0.5)
+// @param w_weekly      <float> Weight for weekly timeframe volatility (default 0.3)
+// @param w_monthly     <float> Weight for monthly timeframe volatility (default 0.2)
+// @returns             <float> Weighted multi-timeframe volatility. Returns base_vol on daily+ timeframes.
+export volatility_mtf(
+     series float base_vol,
+     series float vol_daily,
+     series float vol_weekly,
+     series float vol_monthly,
+     float w_daily = 0.5,
+     float w_weekly = 0.3,
+     float w_monthly = 0.2
+ ) =>
+    // Detect if we're already on daily or higher timeframe
+    bool is_intraday = timeframe.isintraday
+    
+    if not is_intraday
+        // On daily+ charts, MTF aggregation doesn't apply - return base
+        base_vol
+    else
+        // Calculate time scaling factors (Square Root of Time Rule)
+        float tf_curr = math.max(timeframe.in_seconds(timeframe.period), 1.0)
+        float tf_d    = timeframe.in_seconds("D")
+        float tf_w    = timeframe.in_seconds("W")
+        float tf_m    = timeframe.in_seconds("M")
+        
+        // Factors to convert HTF per-bar volatility to Current TF per-bar volatility
+        float scale_d = math.sqrt(tf_curr / math.max(tf_d, 1.0))
+        float scale_w = math.sqrt(tf_curr / math.max(tf_w, 1.0))
+        float scale_m = math.sqrt(tf_curr / math.max(tf_m, 1.0))
+
+        // Scale HTF volatilities to current timeframe; missing horizons are dropped, not aliased.
+        float d = na(vol_daily)   ? na : vol_daily   * scale_d
+        float w = na(vol_weekly)  ? na : vol_weekly  * scale_w
+        float m = na(vol_monthly) ? na : vol_monthly * scale_m
+
+        float wd = na(d) ? 0.0 : w_daily
+        float ww = na(w) ? 0.0 : w_weekly
+        float wm = na(m) ? 0.0 : w_monthly
+        float wsum = wd + ww + wm
+
+        wsum > 0 ? (wd * nz(d) + ww * nz(w) + wm * nz(m)) / wsum : base_vol
+
+//#endregion
+
+
+// ------------------------------------------------------------------- //
+//#region ------[  VOLATILITY BURST RATIO  ]------
+// ------------------------------------------------------------------- //
+
+// @function            Calculate volatility burst ratio (short-term / long-term).
+//                      Identifies regime shifts by comparing short-term volatility to long-term baseline.
+//                      Ratio > 1.0 implies rising volatility; > 1.5 often suggests a breakout/burst.
+// @param vol           <series float> Input volatility series
+// @param short_period  <int> Short-term lookback (default 8)
+// @param long_period   <int> Long-term lookback (default 50)
+// @param filter_type   <eFilterType> Type of smoothing filter (default Super Smoother 2-Pole)
+// @param smoothing_factor <float> Smoothing factor for applicable filters (default 0.7)
+// @returns             <float> Ratio indicating regime shift (>1 = expanding, <1 = contracting)
+export volatility_burst_ratio(
+     series float vol,
+     int short_period = 8,
+     int long_period = 50,
+     eFilterType filter_type = eFilterType.super_2,
+     float smoothing_factor = 0.7
+ ) =>
+    float short_vol = _apply_smoothing(vol, filter_type, short_period, smoothing_factor)
+    float long_vol  = _apply_smoothing(vol, filter_type, long_period, smoothing_factor)
+    // Guard against division by zero
+    long_vol > 0 ? short_vol / long_vol : 1.0
+
+//#endregion
+
+//#endregion
+
+
+// ========================================================================= //
+//#region =================[   Plotting examples   ]======================== //
+// ========================================================================= //
+
+param_type = input.enum(eFilterType.sma, "Filtertype")
+param_len  = input.int(30, "Critical/lookback period")
+param_factor = input.float(0.7, "Filter factor", step=0.1)
+param_yz_alpha = input.float(1.34, "Yang-Zhang alpha", minval=0.5, maxval=3.0, step=0.1)
+
+// ------[  Range-based estimators comparison  ]------ //
+ctc_vol             = close_to_close(lookback=param_len, filter_type=param_type, smoothing_factor=param_factor)
+parkinson_vol       = parkinson(filter_type=param_type, lookback=param_len, smoothing_factor=param_factor)
+garman_klass_vol    = garman_klass(filter_type=param_type, lookback=param_len, smoothing_factor=param_factor)
+rogers_satchell_vol = rogers_satchell(filter_type=param_type, lookback=param_len, smoothing_factor=param_factor)
+yang_zhang_vol      = yang_zhang(param_len, param_yz_alpha)
+atr_vol             = atr(lookback=param_len, filter_type=param_type, smoothing_factor=param_factor)
+chaikin_vol         = chaikin_volatility(param_len, 10, param_type, param_factor)
+
+plot(ctc_vol,             "Close-to-Close",  color.gray)
+plot(parkinson_vol,       "Parkinson",       color.blue)
+plot(garman_klass_vol,    "Garman-Klass",    color.green)
+plot(rogers_satchell_vol, "Rogers-Satchell", color.orange)
+plot(yang_zhang_vol,      "Yang-Zhang",      color.purple)
+plot(atr_vol,             "ATR",             color.silver)
+plot(chaikin_vol,         "Chaikin Vol",     color.teal)
+
+// ------[  Asymmetric smoothing example  ]------ //
+smoothed_vol = asymmetric_ewma(yang_zhang_vol, 0.2, 0.08)
+plot(smoothed_vol, "Smoothed YZ", color.red, linewidth=2)
+
+// ------[  Burst ratio with threshold  ]------ //
+burst = volatility_burst_ratio(yang_zhang_vol, 5, 50, param_type, param_factor)
+hline(1.0, "Normal", color.gray)
+hline(1.5, "Burst Threshold", color.red, linestyle=hline.style_dashed)
+plot(burst, "Burst Ratio", color.aqua)
+
+// ------[  Weighted horizon aggregation example  ]------ //
+weighted_vol = weighted_horizon_volatility(yang_zhang_vol, 1, 5, 22, 0.5, 0.3, 0.2)
+plot(weighted_vol, "Weighted Horizon Vol", color.yellow, linewidth=2)
+
+// ------[  MTF aggregation example (intraday only)  ]------ //
+// Note: In a real script, you would calculate these using request.security()
+vol_d = request.security(syminfo.tickerid, "D", yang_zhang(param_len)[1], lookahead=barmerge.lookahead_on)
+vol_w = request.security(syminfo.tickerid, "W", yang_zhang(param_len)[1], lookahead=barmerge.lookahead_on)
+vol_m = request.security(syminfo.tickerid, "M", yang_zhang(param_len)[1], lookahead=barmerge.lookahead_on)
+
+mtf_vol = volatility_mtf(yang_zhang_vol, vol_d, vol_w, vol_m, 0.5, 0.3, 0.2)
+plot(mtf_vol, "MTF Vol", color.fuchsia, linewidth=2)
+
+//#endregion

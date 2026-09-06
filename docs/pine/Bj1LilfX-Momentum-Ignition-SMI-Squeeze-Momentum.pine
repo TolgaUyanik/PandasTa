@@ -1,0 +1,302 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © KironKavanagh
+
+//@version=6
+//@version=5
+indicator("SMI Pro X — SMI + Squeeze Momentum", shorttitle="SMI Pro X", overlay=false, precision=2, max_labels_count=200)
+
+// =============================================================================
+// INPUTS — SMI
+// =============================================================================
+grpCalc = "◆ SMI Calculation"
+smiK    = input.int(10, "%K Length", minval=1, group=grpCalc)
+smiD    = input.int(3,  "%D Length (1st smooth)", minval=1, group=grpCalc)
+smiDD   = input.int(3,  "%DD Length (2nd smooth)", minval=1, group=grpCalc)
+sigLen  = input.int(5,  "Signal Length", minval=1, group=grpCalc)
+maType  = input.string("EMA", "Smoothing MA", options=["SMA","EMA","WMA","RMA","HMA","TEMA","DEMA"], group=grpCalc)
+
+grpLvl  = "◆ Levels"
+obLevel = input.int(40,  "Overbought", group=grpLvl)
+osLevel = input.int(-40, "Oversold",   group=grpLvl)
+xtOb    = input.int(60,  "Extreme OB", group=grpLvl)
+xtOs    = input.int(-60, "Extreme OS", group=grpLvl)
+
+// =============================================================================
+// INPUTS — SQUEEZE MOMENTUM (LazyBear/TTM)
+// =============================================================================
+grpSqz    = "◆ Squeeze Momentum"
+useSqz    = input.bool(true, "Enable Squeeze module", group=grpSqz)
+bbLen     = input.int(20, "BB Length", group=grpSqz)
+bbMult    = input.float(2.0, "BB StdDev Mult", step=0.1, group=grpSqz)
+kcLen     = input.int(20, "KC Length", group=grpSqz)
+kcMult    = input.float(1.5, "KC Range Mult", step=0.1, group=grpSqz, tooltip="1.5 = TTM standard; 2.0 = looser (LazyBear default)")
+useTR     = input.bool(true, "Use TrueRange for KC", group=grpSqz)
+sqzWindow = input.int(10, "Bars after fire = 'fresh'", minval=1, group=grpSqz)
+sqzHist   = input.bool(true, "Show Squeeze Momentum histogram", group=grpSqz)
+sqzNormalize = input.bool(true, "Normalize histogram to SMI scale", group=grpSqz, tooltip="Scales Squeeze Momentum to -100..+100 so it fits the SMI pane")
+
+// =============================================================================
+// INPUTS — FILTERS
+// =============================================================================
+grpFilt     = "◆ Signal Filters (1m noise reduction)"
+useTrend    = input.bool(true,  "Trend Filter (EMA)", group=grpFilt)
+trendLen    = input.int(200,   "Trend EMA length (chart TF)", minval=5, group=grpFilt)
+useHTF      = input.bool(true,  "HTF Confirmation", group=grpFilt)
+htfTF       = input.timeframe("15", "HTF timeframe", group=grpFilt)
+useVol      = input.bool(true,  "ATR Volatility Filter", group=grpFilt)
+volLen      = input.int(14, "ATR length", group=grpFilt)
+volMult     = input.float(0.75, "Min ATR vs SMA(ATR,50)", step=0.05, group=grpFilt)
+useSess     = input.bool(false, "Session Filter", group=grpFilt)
+sess        = input.session("0700-1600", "Session (exchange TZ)", group=grpFilt)
+confirmBars = input.int(1, "Confirmation bars", minval=1, maxval=5, group=grpFilt)
+
+grpDiv   = "◆ Divergence"
+useDiv   = input.bool(true, "Show regular divergences", group=grpDiv)
+divLbL   = input.int(5, "Pivot lookback L", group=grpDiv)
+divLbR   = input.int(3, "Pivot lookback R", group=grpDiv)
+divRange = input.int(60, "Max bars between pivots", group=grpDiv)
+
+grpVis  = "◆ Visuals"
+showBg  = input.bool(true, "Shade OB/OS zones", group=grpVis)
+showTbl = input.bool(true, "Show info table", group=grpVis)
+showSmiHist = input.bool(false, "Show SMI-Signal histogram (if Squeeze hist off)", group=grpVis)
+tblPos  = input.string("top_right", "Table position", options=["top_left","top_right","bottom_left","bottom_right"], group=grpVis)
+
+// =============================================================================
+// MA HELPER
+// =============================================================================
+f_ma(src, len, kind) =>
+    out = switch kind
+        "SMA"  => ta.sma(src, len)
+        "EMA"  => ta.ema(src, len)
+        "WMA"  => ta.wma(src, len)
+        "RMA"  => ta.rma(src, len)
+        "HMA"  => ta.hma(src, len)
+        "TEMA" =>
+            e1 = ta.ema(src, len)
+            e2 = ta.ema(e1,  len)
+            e3 = ta.ema(e2,  len)
+            3 * (e1 - e2) + e3
+        "DEMA" =>
+            e1 = ta.ema(src, len)
+            e2 = ta.ema(e1,  len)
+            2 * e1 - e2
+        =>       ta.ema(src, len)
+    out
+
+// =============================================================================
+// CORE SMI (Blau — double-smoothed)
+// =============================================================================
+f_smi(_h, _l, _c, _k, _d, _dd, _kind) =>
+    hh   = ta.highest(_h, _k)
+    ll   = ta.lowest(_l,  _k)
+    mid  = (hh + ll) / 2
+    dist = _c - mid
+    hl   = hh - ll
+    dist_ss = f_ma(f_ma(dist, _d, _kind), _dd, _kind)
+    hl_ss   = f_ma(f_ma(hl,   _d, _kind), _dd, _kind)
+    hl_ss != 0 ? 200 * dist_ss / hl_ss : 0.0
+
+smi     = f_smi(high, low, close, smiK, smiD, smiDD, maType)
+signal  = f_ma(smi, sigLen, maType)
+smiHist = smi - signal
+
+htfSmi = useHTF ? request.security(syminfo.tickerid, htfTF, f_smi(high, low, close, smiK, smiD, smiDD, maType)[1], lookahead=barmerge.lookahead_off) : smi
+
+// =============================================================================
+// SQUEEZE MOMENTUM (LazyBear formula)
+// =============================================================================
+srcSqz  = close
+basis   = ta.sma(srcSqz, bbLen)
+dev     = bbMult * ta.stdev(srcSqz, bbLen)
+upperBB = basis + dev
+lowerBB = basis - dev
+
+maSqz   = ta.sma(srcSqz, kcLen)
+rng     = useTR ? ta.tr : (high - low)
+rngMa   = ta.sma(rng, kcLen)
+upperKC = maSqz + rngMa * kcMult
+lowerKC = maSqz - rngMa * kcMult
+
+sqzOn   = (lowerBB > lowerKC) and (upperBB < upperKC)
+sqzOff  = (lowerBB < lowerKC) and (upperBB > upperKC)
+noSqz   = not sqzOn and not sqzOff
+
+sqzVal = ta.linreg(srcSqz - math.avg(math.avg(ta.highest(high, kcLen), ta.lowest(low, kcLen)), ta.sma(close, kcLen)), kcLen, 0)
+
+// Normalize for pane fit
+sqzMaxAbs   = ta.highest(math.abs(sqzVal), 200)
+sqzValPlot  = sqzNormalize and sqzMaxAbs > 0 ? 100 * sqzVal / sqzMaxAbs : sqzVal
+
+// Fire detection
+sqzFired = sqzOn[1] and not sqzOn
+var int barsSinceFireVar = 999
+barsSinceFireVar := sqzFired ? 0 : barsSinceFireVar + 1
+freshFire = barsSinceFireVar <= sqzWindow
+
+// =============================================================================
+// FILTERS
+// =============================================================================
+trendEma = ta.ema(close, trendLen)
+trendUp  = close > trendEma
+trendDn  = close < trendEma
+
+atrV   = ta.atr(volLen)
+atrAvg = ta.sma(atrV, 50)
+volOk  = not useVol or atrV >= volMult * atrAvg
+
+inSess = not useSess or not na(time(timeframe.period, sess))
+
+htfOkLong  = not useHTF or htfSmi > 0
+htfOkShort = not useHTF or htfSmi < 0
+
+trendOkLong  = not useTrend or trendUp
+trendOkShort = not useTrend or trendDn
+
+// =============================================================================
+// SIGNAL LOGIC
+// =============================================================================
+var int longStreak  = 0
+var int shortStreak = 0
+longStreak  := smi > signal ? longStreak  + 1 : 0
+shortStreak := smi < signal ? shortStreak + 1 : 0
+
+goLongRaw  = longStreak  == confirmBars
+goShortRaw = shortStreak == confirmBars
+
+goLong  = goLongRaw  and smi < obLevel and htfOkLong  and trendOkLong  and volOk and inSess
+goShort = goShortRaw and smi > osLevel and htfOkShort and trendOkShort and volOk and inSess
+
+// Squeeze alignment
+sqzOkLong  = not useSqz or (sqzVal > 0 and (sqzOn or freshFire))
+sqzOkShort = not useSqz or (sqzVal < 0 and (sqzOn or freshFire))
+
+powerLong  = goLong  and sqzOkLong
+powerShort = goShort and sqzOkShort
+
+// Suppress regular marker if power is firing
+regLong  = goLong  and not powerLong
+regShort = goShort and not powerShort
+
+zeroUp = ta.crossover(smi, 0)
+zeroDn = ta.crossunder(smi, 0)
+
+// =============================================================================
+// DIVERGENCE
+// =============================================================================
+plH = ta.pivothigh(smi, divLbL, divLbR)
+plL = ta.pivotlow (smi, divLbL, divLbR)
+
+var float lastPHval = na
+var int   lastPHbar = na
+var float lastPHpx  = na
+var float lastPLval = na
+var int   lastPLbar = na
+var float lastPLpx  = na
+
+bearDiv = false
+bullDiv = false
+
+if not na(plH)
+    curPx = high[divLbR]
+    if not na(lastPHval) and (bar_index - lastPHbar) <= divRange
+        if plH < lastPHval and curPx > lastPHpx
+            bearDiv := true
+    lastPHval := plH
+    lastPHbar := bar_index - divLbR
+    lastPHpx  := curPx
+
+if not na(plL)
+    curPx = low[divLbR]
+    if not na(lastPLval) and (bar_index - lastPLbar) <= divRange
+        if plL > lastPLval and curPx < lastPLpx
+            bullDiv := true
+    lastPLval := plL
+    lastPLbar := bar_index - divLbR
+    lastPLpx  := curPx
+
+// =============================================================================
+// PLOTS
+// =============================================================================
+bgcolor(showBg and smi >= obLevel ? color.new(color.red,   90) : na)
+bgcolor(showBg and smi <= osLevel ? color.new(color.green, 90) : na)
+
+hline(0,       "Zero",       color=color.new(color.gray, 40), linestyle=hline.style_dotted)
+hline(obLevel, "Overbought", color=color.new(color.red,  60), linestyle=hline.style_dashed)
+hline(osLevel, "Oversold",   color=color.new(color.green,60), linestyle=hline.style_dashed)
+hline(xtOb,    "Extreme OB", color=color.new(color.red,  80))
+hline(xtOs,    "Extreme OS", color=color.new(color.green,80))
+
+// Squeeze Momentum histogram (LazyBear 4-color)
+mColor = sqzVal > 0 ? (sqzVal > nz(sqzVal[1]) ? color.new(color.lime, 0) : color.new(#26A69A, 40)) : (sqzVal < nz(sqzVal[1]) ? color.new(color.red, 0) : color.new(#EF5350, 40))
+plot(useSqz and sqzHist ? sqzValPlot : na, "Sqz Momentum", color=mColor, style=plot.style_columns)
+
+// Optional SMI-Signal histogram
+smiHistColor = smiHist >= 0 ? (smiHist >= nz(smiHist[1]) ? color.new(#26A69A, 20) : color.new(#26A69A, 70)) : (smiHist <= nz(smiHist[1]) ? color.new(#EF5350, 20) : color.new(#EF5350, 70))
+plot(showSmiHist and not (useSqz and sqzHist) ? smiHist : na, "SMI-Signal Hist", color=smiHistColor, style=plot.style_columns)
+
+// SMI + Signal + HTF SMI lines
+plot(smi,    "SMI",    color=color.new(#2962FF, 0), linewidth=2)
+plot(signal, "Signal", color=color.new(#FF6D00, 0), linewidth=1)
+plot(useHTF ? htfSmi : na, "HTF SMI", color=color.new(color.purple, 50), linewidth=1)
+
+// Squeeze state dot on zero-line
+sqzDotCol = sqzFired ? color.new(color.aqua, 0) : sqzOn ? color.new(color.black, 0) : sqzOff ? color.new(color.gray, 40) : color.new(color.gray, 80)
+plot(useSqz ? 0 : na, "Sqz Dot", color=sqzDotCol, style=plot.style_circles, linewidth=3, editable=false)
+
+// Regular signals
+plotshape(regLong,  title="Long",  location=location.bottom, style=shape.triangleup,   size=size.small, color=color.new(#26A69A,0), text="BUY",  textcolor=color.white)
+plotshape(regShort, title="Short", location=location.top,    style=shape.triangledown, size=size.small, color=color.new(#EF5350,0), text="SELL", textcolor=color.white)
+
+// POWER signals (SMI + Squeeze aligned)
+plotshape(powerLong,  title="POWER LONG",  location=location.bottom, style=shape.labelup,   size=size.normal, color=color.new(color.lime, 0),    text="★ PWR ★", textcolor=color.black)
+plotshape(powerShort, title="POWER SHORT", location=location.top,    style=shape.labeldown, size=size.normal, color=color.new(color.fuchsia, 0), text="★ PWR ★", textcolor=color.white)
+
+// Divergence labels
+if useDiv and bearDiv
+    label.new(bar_index - divLbR, smi, "Bear Div", color=color.new(color.red, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+if useDiv and bullDiv
+    label.new(bar_index - divLbR, smi, "Bull Div", color=color.new(color.green, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// =============================================================================
+// INFO TABLE
+// =============================================================================
+var table t = table.new(tblPos == "top_left" ? position.top_left : tblPos == "top_right" ? position.top_right : tblPos == "bottom_left" ? position.bottom_left : position.bottom_right, 2, 8, border_width=1)
+
+if showTbl and barstate.islast
+    stateTxt = smi > signal ? (smi > 0 ? "LONG bias" : "Recovering") : (smi < 0 ? "SHORT bias" : "Fading")
+    stateCol = smi > signal ? color.new(#26A69A, 20) : color.new(#EF5350, 20)
+    sqzTxt = sqzOn ? "COILED" : sqzFired ? "FIRED!" : freshFire ? "Fresh Fire" : sqzOff ? "Released" : "Idle"
+    sqzCol = sqzOn ? color.new(color.orange, 20) : sqzFired ? color.new(color.aqua, 0) : freshFire ? color.new(color.aqua, 40) : color.new(color.gray, 40)
+    momTxt = sqzVal > 0 ? (sqzVal > nz(sqzVal[1]) ? "↑ Bull accel" : "↓ Bull fade")  : (sqzVal < nz(sqzVal[1]) ? "↓ Bear accel" : "↑ Bear fade")
+    momCol = sqzVal > 0 ? color.new(#26A69A, 20) : color.new(#EF5350, 20)
+    table.cell(t, 0, 0, "SMI Pro X", bgcolor=color.new(color.black, 20), text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, stateTxt,   bgcolor=stateCol, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 1, "SMI",      text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(smi, "#.##"),    text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 2, "Signal",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(signal, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 3, "HTF SMI",  text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 3, useHTF ? str.tostring(htfSmi, "#.##") : "off", text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 4, "Squeeze",  text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 4, sqzTxt,     bgcolor=sqzCol, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 5, "Momentum", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 5, momTxt,     bgcolor=momCol, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 6, "Trend",    text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 6, trendUp ? "UP" : trendDn ? "DOWN" : "flat", text_color=trendUp ? color.new(#26A69A,0) : color.new(#EF5350,0), text_size=size.small)
+    table.cell(t, 0, 7, "Vol OK",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 7, volOk ? "yes" : "no", text_color=volOk ? color.new(#26A69A,0) : color.new(#EF5350,0), text_size=size.small)
+
+// =============================================================================
+// ALERTS
+// =============================================================================
+alertcondition(powerLong,  "★ POWER LONG",          "SMI+Squeeze POWER LONG on {{ticker}} {{interval}}")
+alertcondition(powerShort, "★ POWER SHORT",         "SMI+Squeeze POWER SHORT on {{ticker}} {{interval}}")
+alertcondition(sqzFired,   "Squeeze Fired",         "Squeeze released on {{ticker}} {{interval}}")
+alertcondition(goLong,     "SMI Long (regular)",    "SMI regular long on {{ticker}} {{interval}}")
+alertcondition(goShort,    "SMI Short (regular)",   "SMI regular short on {{ticker}} {{interval}}")
+alertcondition(zeroUp,     "SMI zero-line UP",      "SMI crossed above zero on {{ticker}} {{interval}}")
+alertcondition(zeroDn,     "SMI zero-line DOWN",    "SMI crossed below zero on {{ticker}} {{interval}}")
+alertcondition(bullDiv,    "Bullish divergence",    "Bullish divergence on {{ticker}} {{interval}}")
+alertcondition(bearDiv,    "Bearish divergence",    "Bearish divergence on {{ticker}} {{interval}}")
+

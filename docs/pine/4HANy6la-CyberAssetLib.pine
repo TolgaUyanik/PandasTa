@@ -1,0 +1,783 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description CyberAssetLib — typed asset registry replacing chainaggrLib (v5 → v6 rewrite).
+//              Single source of truth for asset class, parent chain, trading hours, venues.
+//              Replaces 3 parallel maps (token_db, asset_class_map, hours_map) with one
+//              AssetRegistry holding AssetRecord-s with enum-typed fields and Venue arrays.
+//
+//
+library("CyberAssetLib", overlay=false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: UTILITY FUNCTIONS (v6 compat)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Trim leading/trailing whitespace (Pine v6 has no str.trim)
+export f_trim(string s) =>
+    string result = s
+    // Remove leading spaces
+    while str.startswith(result, " ") or str.startswith(result, "\t") or str.startswith(result, "\n")
+        result := str.substring(result, 1)
+    // Remove trailing spaces
+    int len = str.length(result)
+    while len > 0 and (str.endswith(result, " ") or str.endswith(result, "\t") or str.endswith(result, "\n"))
+        result := str.substring(result, 0, len - 1)
+        len := str.length(result)
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: ENUMS (frozen ordering — see GENERIC_RESTRUCTURING_GUIDE P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Asset class taxonomy. FROZEN ORDER — backward-compat for kNN int casts.
+export enum AssetClass
+    UNKNOWN
+    CRYPTO_MAIN     // BTC, ETH, SOL
+    ALTS            // other crypto
+    SHARES          // stocks/ETFs
+    COMMODITY       // gold, oil, natgas
+    INDEX           // SPX, DAX
+    FX              // forex pairs
+
+// @enum Trading hours regime. FROZEN.
+export enum TradingHours
+    UNKNOWN
+    H_24X7          // crypto perpetual
+    H_23X5          // futures globex / CFD
+    H_EU            // European cash session
+    H_US            // US cash session
+
+// @enum Venue kind. FROZEN.
+export enum VenueKind
+    UNKNOWN
+    SPOT
+    PERP
+    FUT             // dated futures (CME-style)
+
+// @enum Liquidity tier. FROZEN.
+//       1 = Binance/Coinbase/CME tier-1, 2 = OKX/Bybit/Kraken, 3 = others
+export enum LiquidityTier
+    T1
+    T2
+    T3
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: UDTs
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type Venue — single trading venue for one asset
+export type Venue
+    string ticker            // "BINANCE:BTCUSDT"
+    VenueKind kind
+    string exchange          // "BINANCE"
+    LiquidityTier tier
+
+// @type AssetRecord — immutable post-registration
+// @field symbol      canonical key, e.g. "BTC"
+// @field cls         AssetClass enum
+// @field subtype     fine-grained label "bitcoin", "sp500-fut", "natgas-cfd"
+// @field chain       parent L1 chain symbol (== symbol if isl1==true)
+// @field isl1        true iff symbol IS its own chain
+// @field hours       trading hours regime
+// @field venues      all venues (spot+perp+fut combined)
+// @field aliases     full-symbol aliases for byalias map
+export type AssetRecord
+    string symbol
+    AssetClass cls
+    string subtype
+    string chain
+    bool   isl1
+    TradingHours hours
+    array<Venue> venues
+    array<string> aliases
+
+// @type AssetRegistry — singleton lookup table
+export type AssetRegistry
+    map<string, AssetRecord> bysymbol
+    map<string, string>      byalias    // alias → canonical symbol
+    bool initialized
+
+// @type AggregationPolicy — caller-defined filter for venue selection
+// @field include_spot/perp/fut   which kinds to include
+// @field max_tier                worst tier accepted (1=T1 only, 3=all)
+// @field max_venues              cap on returned venues
+export type AggregationPolicy
+    bool include_spot
+    bool include_perp
+    bool include_fut
+    int  max_tier
+    int  max_venues
+
+// @type VolumeAggregator — selected venues with normalized weights for aggregation
+export type VolumeAggregator
+    AssetRecord asset
+    AggregationPolicy policy
+    array<Venue> selected
+    array<float> weights
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: VENUE METHODS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export method is_spot(Venue v) => v.kind == VenueKind.SPOT
+export method is_perp(Venue v) => v.kind == VenueKind.PERP
+export method is_fut (Venue v) => v.kind == VenueKind.FUT
+export method is_t1  (Venue v) => v.tier == LiquidityTier.T1
+
+// @function Build Venue from raw ticker — auto-detect kind + exchange + tier
+export f_build_venue(string ticker, LiquidityTier tier) =>
+    string u = str.upper(f_trim(ticker))
+    VenueKind kind = VenueKind.SPOT
+    if str.contains(u, ".P") or str.contains(u, "PERP") or str.contains(u, "SWAP")
+        kind := VenueKind.PERP
+    else if str.contains(u, "1!") or str.contains(u, "F2") or str.contains(u, "FUT")
+        kind := VenueKind.FUT
+    array<string> parts = str.split(u, ":")
+    string exch = array.size(parts) > 0 ? array.get(parts, 0) : ""
+    Venue.new(ticker = u, kind = kind, exchange = exch, tier = tier)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: ASSETRECORD METHODS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Filter venues by kind
+export method venues_of(AssetRecord rec, VenueKind kind) =>
+    array<Venue> out = array.new<Venue>()
+    int n = array.size(rec.venues)
+    if n > 0
+        for i = 0 to n - 1
+            Venue v = array.get(rec.venues, i)
+            if v.kind == kind
+                array.push(out, v)
+    out
+
+// @function Flat ticker list for a kind
+export method tickers_of(AssetRecord rec, VenueKind kind) =>
+    array<string> out = array.new<string>()
+    int n = array.size(rec.venues)
+    if n > 0
+        for i = 0 to n - 1
+            Venue v = array.get(rec.venues, i)
+            if v.kind == kind
+                array.push(out, v.ticker)
+    out
+
+// @function All venues' tickers (union)
+export method all_tickers(AssetRecord rec) =>
+    array<string> out = array.new<string>()
+    int n = array.size(rec.venues)
+    if n > 0
+        for i = 0 to n - 1
+            array.push(out, array.get(rec.venues, i).ticker)
+    out
+
+// @function Class predicate
+export method is_class(AssetRecord rec, AssetClass cls) => rec.cls == cls
+export method is_crypto_main(AssetRecord rec) => rec.cls == AssetClass.CRYPTO_MAIN
+export method is_alt        (AssetRecord rec) => rec.cls == AssetClass.ALTS
+export method is_index      (AssetRecord rec) => rec.cls == AssetClass.INDEX
+export method is_commodity  (AssetRecord rec) => rec.cls == AssetClass.COMMODITY
+export method is_shares     (AssetRecord rec) => rec.cls == AssetClass.SHARES
+export method is_fx         (AssetRecord rec) => rec.cls == AssetClass.FX
+
+// @function Apply AggregationPolicy → returns selected venues
+export method agg_venues(AssetRecord rec, AggregationPolicy pol) =>
+    array<Venue> out = array.new<Venue>()
+    int n = array.size(rec.venues)
+    if n > 0
+        for i = 0 to n - 1
+            if array.size(out) >= pol.max_venues
+                break
+            Venue v = array.get(rec.venues, i)
+            int tier_int = v.tier == LiquidityTier.T1 ? 1 :
+                           v.tier == LiquidityTier.T2 ? 2 : 3
+            bool kind_ok = (pol.include_spot and v.kind == VenueKind.SPOT) or
+                           (pol.include_perp and v.kind == VenueKind.PERP) or
+                           (pol.include_fut  and v.kind == VenueKind.FUT)
+            if kind_ok and tier_int <= pol.max_tier
+                array.push(out, v)
+    out
+
+// @function Build VolumeAggregator with tier-derived weights
+export method build_aggregator(AssetRecord rec, AggregationPolicy pol) =>
+    array<Venue> sel = rec.agg_venues(pol)
+    array<float> w = array.new<float>()
+    int n = array.size(sel)
+    if n > 0
+        for i = 0 to n - 1
+            Venue v = array.get(sel, i)
+            float wt = v.tier == LiquidityTier.T1 ? 1.0 :
+                       v.tier == LiquidityTier.T2 ? 0.6 : 0.3
+            array.push(w, wt)
+    VolumeAggregator.new(asset = rec, policy = pol, selected = sel, weights = w)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: REGISTRY METHODS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Add an AssetRecord to registry (also indexes aliases)
+export method register(AssetRegistry reg, AssetRecord rec) =>
+    map.put(reg.bysymbol, rec.symbol, rec)
+    int an = array.size(rec.aliases)
+    if an > 0
+        for i = 0 to an - 1
+            map.put(reg.byalias, str.upper(f_trim(array.get(rec.aliases, i))), rec.symbol)
+    // venue tickers also become aliases (free-of-charge full-symbol resolution)
+    int vn = array.size(rec.venues)
+    if vn > 0
+        for i = 0 to vn - 1
+            map.put(reg.byalias, array.get(rec.venues, i).ticker, rec.symbol)
+    reg
+
+// @function Bind explicit alias to canonical symbol
+export method alias(AssetRegistry reg, string alias_str, string canonical) =>
+    map.put(reg.byalias, str.upper(f_trim(alias_str)), canonical)
+    reg
+
+// @function Resolve symbol-or-ticker to AssetRecord. Returns na if not found.
+export method lookup(AssetRegistry reg, string sym_or_ticker) =>
+    string key = str.upper(f_trim(sym_or_ticker))
+    AssetRecord rec = map.get(reg.bysymbol, key)
+    if not na(rec)
+        rec
+    else
+        string canonical = map.get(reg.byalias, key)
+        na(canonical) ? na : map.get(reg.bysymbol, canonical)
+
+// @function Existence check
+export method has(AssetRegistry reg, string sym_or_ticker) =>
+    AssetRecord rec = reg.lookup(sym_or_ticker)
+    not na(rec)
+
+// @function All registered canonical symbols
+export method all_symbols(AssetRegistry reg) => map.keys(reg.bysymbol)
+
+// @function Resolve parent L1 record for an alt token. Returns rec itself if isl1.
+export method parent_chain(AssetRecord rec, AssetRegistry reg) =>
+    rec.isl1 ? rec : reg.lookup(rec.chain)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: REGISTRY FACTORY + DEFAULT SEED
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Empty registry
+export f_new_registry() =>
+    AssetRegistry.new(
+         bysymbol = map.new<string, AssetRecord>(),
+         byalias  = map.new<string, string>(),
+         initialized = true)
+
+// ─── Internal builders to compress seeding boilerplate ─────────────────────
+
+f_v(string t, LiquidityTier tier) => f_build_venue(t, tier)
+
+// Build venue array for L1 crypto with up to 5 tier-mixed venues
+f_l1_venues(string t1, string t2, string t3, string t4, string t5) =>
+    array<Venue> a = array.new<Venue>()
+    if str.length(t1) > 0
+        array.push(a, f_v(t1, LiquidityTier.T1))
+    if str.length(t2) > 0
+        array.push(a, f_v(t2, LiquidityTier.T1))
+    if str.length(t3) > 0
+        array.push(a, f_v(t3, LiquidityTier.T2))
+    if str.length(t4) > 0
+        array.push(a, f_v(t4, LiquidityTier.T2))
+    if str.length(t5) > 0
+        array.push(a, f_v(t5, LiquidityTier.T2))
+    a
+
+// Build minimal alt record (no venues, parent chain only)
+f_alt_rec(string sym, string parent_chain) =>
+    AssetRecord.new(
+         symbol = sym, cls = AssetClass.ALTS, subtype = str.lower(sym),
+         chain = parent_chain, isl1 = false, hours = TradingHours.H_24X7,
+         venues = array.new<Venue>(), aliases = array.new<string>())
+
+// Build L1 crypto record
+f_l1_rec(string sym, string subtype, AssetClass cls, array<Venue> venues) =>
+    AssetRecord.new(
+         symbol = sym, cls = cls, subtype = subtype,
+         chain = sym, isl1 = true, hours = TradingHours.H_24X7,
+         venues = venues, aliases = array.new<string>())
+
+// @function Default registry — seeded singleton (var-cached, build once)
+export f_default_registry() =>
+    var AssetRegistry reg = f_new_registry()
+    if barstate.isfirst
+        // ─── L1 cryptos with venue lists ─────────────────────────────────
+        reg.register(f_l1_rec("BTC", "bitcoin", AssetClass.CRYPTO_MAIN,
+            f_l1_venues("BINANCE:BTCUSDT", "COINBASE:BTCUSD", "BYBIT:BTCUSDT",
+                        "OKX:BTCUSDT", "KUCOIN:BTCUSDT")))
+        reg.register(f_l1_rec("ETH", "ethereum", AssetClass.CRYPTO_MAIN,
+            f_l1_venues("BINANCE:ETHUSDT", "COINBASE:ETHUSD", "BYBIT:ETHUSDT",
+                        "OKX:ETHUSDT", "KUCOIN:ETHUSDT")))
+        reg.register(f_l1_rec("SOL", "solana", AssetClass.CRYPTO_MAIN,
+            f_l1_venues("BINANCE:SOLUSDT", "COINBASE:SOLUSD", "BYBIT:SOLUSDT.P",
+                        "OKX:SOLUSDT.P", "KUCOIN:SOLUSDT")))
+        reg.register(f_l1_rec("BNB", "binance-coin", AssetClass.ALTS,
+            f_l1_venues("BINANCE:BNBUSDT", "OKX:BNBUSDT", "BYBIT:BNBUSDT",
+                        "KUCOIN:BNBUSDT", "HTX:BNBUSDT")))
+        reg.register(f_l1_rec("TRX", "tron", AssetClass.ALTS,
+            f_l1_venues("BINANCE:TRXUSDT", "OKX:TRXUSDT", "BYBIT:TRXUSDT",
+                        "KUCOIN:TRXUSDT", "KRAKEN:TRXUSD")))
+        reg.register(f_l1_rec("TON", "ton", AssetClass.ALTS,
+            f_l1_venues("BINANCE:TONUSDT", "OKX:TONUSDT", "BYBIT:TONUSDT",
+                        "KUCOIN:TONUSDT", "HTX:TONUSDT")))
+        reg.register(f_l1_rec("ADA", "cardano", AssetClass.ALTS,
+            f_l1_venues("BINANCE:ADAUSDT", "COINBASE:ADAUSD", "BYBIT:ADAUSDT",
+                        "OKX:ADAUSDT", "KUCOIN:ADAUSDT")))
+        reg.register(f_l1_rec("DOGE", "dogecoin", AssetClass.ALTS,
+            f_l1_venues("BINANCE:DOGEUSDT", "COINBASE:DOGEUSD", "BYBIT:DOGEUSDT",
+                        "OKX:DOGEUSDT", "KUCOIN:DOGEUSDT")))
+        reg.register(f_l1_rec("LTC", "litecoin", AssetClass.ALTS,
+            f_l1_venues("BINANCE:LTCUSDT", "COINBASE:LTCUSD", "BYBIT:LTCUSDT",
+                        "OKX:LTCUSDT", "KUCOIN:LTCUSDT")))
+        reg.register(f_l1_rec("XLM", "stellar", AssetClass.ALTS,
+            f_l1_venues("BINANCE:XLMUSDT", "COINBASE:XLMUSD", "BYBIT:XLMUSDT",
+                        "OKX:XLMUSDT", "KUCOIN:XLMUSDT")))
+        reg.register(f_l1_rec("ZEC", "zcash", AssetClass.ALTS,
+            f_l1_venues("BINANCE:ZECUSDT", "COINBASE:ZECUSD", "KRAKEN:ZECUSD",
+                        "KUCOIN:ZECUSDT", "HTX:ZECUSDT")))
+        reg.register(f_l1_rec("KAS", "kaspa", AssetClass.ALTS,
+            f_l1_venues("BINANCE:KASUSDT", "OKX:KASUSDT", "BYBIT:KASUSDT",
+                        "KUCOIN:KASUSDT", "HTX:KASUSDT")))
+        reg.register(f_l1_rec("INJ", "injective", AssetClass.ALTS,
+            f_l1_venues("BINANCE:INJUSDT", "COINBASE:INJUSD", "BYBIT:INJUSDT",
+                        "OKX:INJUSDT", "KUCOIN:INJUSDT")))
+        reg.register(f_l1_rec("TIA", "celestia", AssetClass.ALTS,
+            f_l1_venues("BINANCE:TIAUSDT", "COINBASE:TIAUSD", "BYBIT:TIAUSDT",
+                        "OKX:TIAUSDT", "KUCOIN:TIAUSDT")))
+        reg.register(f_l1_rec("SUI", "sui", AssetClass.ALTS,
+            f_l1_venues("BINANCE:SUIUSDT", "COINBASE:SUIUSD", "BYBIT:SUIUSDT",
+                        "OKX:SUIUSDT", "KUCOIN:SUIUSDT")))
+        reg.register(f_l1_rec("APT", "aptos", AssetClass.ALTS,
+            f_l1_venues("BINANCE:APTUSDT", "COINBASE:APTUSD", "BYBIT:APTUSDT",
+                        "OKX:APTUSDT", "KUCOIN:APTUSDT")))
+        reg.register(f_l1_rec("AR", "arweave", AssetClass.ALTS,
+            f_l1_venues("BINANCE:ARUSDT", "COINBASE:ARUSD", "BYBIT:ARUSDT",
+                        "OKX:ARUSDT", "KUCOIN:ARUSDT")))
+        reg.register(f_l1_rec("ICP", "internet-computer", AssetClass.ALTS,
+            f_l1_venues("BINANCE:ICPUSDT", "COINBASE:ICPUSD", "BYBIT:ICPUSDT",
+                        "OKX:ICPUSDT", "KUCOIN:ICPUSDT")))
+        reg.register(f_l1_rec("ETC", "ethereum-classic", AssetClass.ALTS,
+            f_l1_venues("BINANCE:ETCUSDT", "COINBASE:ETCUSD", "BYBIT:ETCUSDT",
+                        "OKX:ETCUSDT", "KUCOIN:ETCUSDT")))
+        reg.register(f_l1_rec("DYDX", "dydx", AssetClass.ALTS,
+            f_l1_venues("BINANCE:DYDXUSDT", "COINBASE:DYDXUSD", "BYBIT:DYDXUSDT",
+                        "OKX:DYDXUSDT", "KUCOIN:DYDXUSDT")))
+
+        // ─── ETH-based alts (chain="ETH", no own venues) ────────────────
+        reg.register(f_alt_rec("LINK",   "ETH"))
+        reg.register(f_alt_rec("UNI",    "ETH"))
+        reg.register(f_alt_rec("MANA",   "ETH"))
+        reg.register(f_alt_rec("SHIB",   "ETH"))
+        reg.register(f_alt_rec("CRV",    "ETH"))
+        reg.register(f_alt_rec("APE",    "ETH"))
+        reg.register(f_alt_rec("PENDLE", "ETH"))
+        reg.register(f_alt_rec("SNX",    "ETH"))
+        reg.register(f_alt_rec("AAVE",   "ETH"))
+        reg.register(f_alt_rec("1INCH",  "ETH"))
+        reg.register(f_alt_rec("STRK",   "ETH"))
+        reg.register(f_alt_rec("HYPE",   "ETH"))
+        reg.register(f_alt_rec("WIF",    "ETH"))
+        reg.register(f_alt_rec("OM",     "ETH"))
+        reg.register(f_alt_rec("AERO",   "ETH"))
+        reg.register(f_alt_rec("PEPE",   "ETH"))
+
+        // ─── SOL-based alts ─────────────────────────────────────────────
+        reg.register(f_alt_rec("BONK",   "SOL"))
+        reg.register(f_alt_rec("POPCAT", "SOL"))
+        reg.register(f_alt_rec("HNT",    "SOL"))
+
+        // ─── Other chain alts ───────────────────────────────────────────
+        reg.register(f_alt_rec("NOT",   "TON"))
+        reg.register(f_alt_rec("FLOKI", "BNB"))
+        reg.register(f_alt_rec("TWT",   "BNB"))
+
+        // ─── INDEXES ────────────────────────────────────────────────────
+        AssetRecord rec_spx = AssetRecord.new(
+             symbol = "SPX", cls = AssetClass.INDEX, subtype = "sp500",
+             chain = "SPX", isl1 = true, hours = TradingHours.H_US,
+             venues = array.from<Venue>(
+                 f_v("CME:ES1!", LiquidityTier.T1),
+                 f_v("CME_MINI:MES1!", LiquidityTier.T1),
+                 f_v("TVC:SPX", LiquidityTier.T2)),
+             aliases = array.from<string>("CME:ES1!", "CME_MINI:MES1!", "TVC:SPX"))
+        reg.register(rec_spx)
+
+        AssetRecord rec_dax = AssetRecord.new(
+             symbol = "DAX", cls = AssetClass.INDEX, subtype = "dax40",
+             chain = "DAX", isl1 = true, hours = TradingHours.H_EU,
+             venues = array.from<Venue>(
+                 f_v("XETR:DAX", LiquidityTier.T1),
+                 f_v("XETR:DAX40", LiquidityTier.T1),
+                 f_v("PEPPERSTONE:GER40", LiquidityTier.T2)),
+             aliases = array.from<string>("DAX40", "GER40", "PEPPERSTONE:GER40"))
+        reg.register(rec_dax)
+
+        // ─── COMMODITIES ────────────────────────────────────────────────
+        AssetRecord rec_gold = AssetRecord.new(
+             symbol = "XAU", cls = AssetClass.COMMODITY, subtype = "gold",
+             chain = "XAU", isl1 = true, hours = TradingHours.H_23X5,
+             venues = array.from<Venue>(
+                 f_v("COMEX:GC1!", LiquidityTier.T1),
+                 f_v("OANDA:XAUUSD", LiquidityTier.T2)),
+             aliases = array.from<string>("XAUUSD", "COMEX:GC1!", "OANDA:XAUUSD"))
+        reg.register(rec_gold)
+
+        AssetRecord rec_silver = AssetRecord.new(
+             symbol = "XAG", cls = AssetClass.COMMODITY, subtype = "silver",
+             chain = "XAG", isl1 = true, hours = TradingHours.H_23X5,
+             venues = array.from<Venue>(
+                 f_v("COMEX:SI1!", LiquidityTier.T1),
+                 f_v("OANDA:XAGUSD", LiquidityTier.T2)),
+             aliases = array.from<string>("XAGUSD", "COMEX:SI1!", "OANDA:XAGUSD"))
+        reg.register(rec_silver)
+
+        AssetRecord rec_oil = AssetRecord.new(
+             symbol = "WTI", cls = AssetClass.COMMODITY, subtype = "crude-wti",
+             chain = "WTI", isl1 = true, hours = TradingHours.H_23X5,
+             venues = array.from<Venue>(
+                 f_v("NYMEX:CL1!", LiquidityTier.T1),
+                 f_v("CFI:WTI", LiquidityTier.T3)),
+             aliases = array.from<string>("CL1!", "NYMEX:CL1!", "CFI:WTI"))
+        reg.register(rec_oil)
+
+        AssetRecord rec_ng = AssetRecord.new(
+             symbol = "NG", cls = AssetClass.COMMODITY, subtype = "natgas",
+             chain = "NG", isl1 = true, hours = TradingHours.H_23X5,
+             venues = array.from<Venue>(
+                 f_v("NYMEX:NG1!", LiquidityTier.T1),
+                 f_v("PEPPERSTONE:NATGAS", LiquidityTier.T2),
+                 f_v("OANDA:NATGASUSD", LiquidityTier.T2)),
+             aliases = array.from<string>("NG1!", "NYMEX:NG1!", "NATGAS",
+                                           "PEPPERSTONE:NATGAS", "OANDA:NATGASUSD"))
+        reg.register(rec_ng)
+
+        // ─── FX ─────────────────────────────────────────────────────────
+        AssetRecord rec_eur = AssetRecord.new(
+             symbol = "EURUSD", cls = AssetClass.FX, subtype = "eurusd",
+             chain = "EURUSD", isl1 = true, hours = TradingHours.H_23X5,
+             venues = array.new<Venue>(),
+             aliases = array.from<string>("OANDA:EURUSD", "FX:EURUSD"))
+        reg.register(rec_eur)
+
+        AssetRecord rec_dxy = AssetRecord.new(
+             symbol = "DXY", cls = AssetClass.FX, subtype = "usd-index",
+             chain = "DXY", isl1 = true, hours = TradingHours.H_23X5,
+             venues = array.new<Venue>(),
+             aliases = array.from<string>("TVC:DXY"))
+        reg.register(rec_dxy)
+    reg
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: PREBUILT POLICIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Aggregate spot+perp tier-1+2, max 5 venues — default crypto
+export f_policy_crypto_aggregate() =>
+    AggregationPolicy.new(true, true, false, 2, 5)
+
+// @function Spot only, tier-1 only, max 3 — institutional reference
+export f_policy_spot_institutional() =>
+    AggregationPolicy.new(true, false, false, 1, 3)
+
+// @function Perpetuals only, tier-1+2, max 3
+export f_policy_perp_only() =>
+    AggregationPolicy.new(false, true, false, 2, 3)
+
+// @function Dated futures only
+export f_policy_futures_only() =>
+    AggregationPolicy.new(false, false, true, 3, 3)
+
+// @function Permissive — everything tier-1..3
+export f_policy_all() =>
+    AggregationPolicy.new(true, true, true, 3, 10)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: CONVENIENCE WRAPPERS FOR CURRENT CHART
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Resolve current chart symbol → AssetRecord (na if not registered)
+export f_current_record() =>
+    AssetRegistry reg = f_default_registry()
+    reg.lookup(syminfo.tickerid)
+
+// @function Current chart's asset class (UNKNOWN if unregistered)
+export f_current_class() =>
+    AssetRecord rec = f_current_record()
+    na(rec) ? AssetClass.UNKNOWN : rec.cls
+
+// @function Current chart's trading hours regime
+export f_current_hours() =>
+    AssetRecord rec = f_current_record()
+    na(rec) ? TradingHours.UNKNOWN : rec.hours
+
+// @function Current chart's parent L1 chain symbol (e.g. "ETH" for LINK)
+export f_current_chain() =>
+    AssetRecord rec = f_current_record()
+    na(rec) ? "" : rec.chain
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9: ENUM ↔ STRING BRIDGES (for logging and UI)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_class_str(AssetClass c) =>
+    c == AssetClass.CRYPTO_MAIN ? "crypto_main" :c == AssetClass.ALTS        ? "alts"        :c == AssetClass.SHARES      ? "shares"      :c == AssetClass.COMMODITY   ? "commodity"   :c == AssetClass.INDEX       ? "index"       :c == AssetClass.FX          ? "fx"          : "unknown"
+
+export f_hours_str(TradingHours h) =>
+	h == TradingHours.H_24X7 ? "24/7" : h == TradingHours.H_23X5 ? "23/5" :h == TradingHours.H_EU   ? "EU"   :h == TradingHours.H_US   ? "US"   : "unknown"
+
+export f_kind_str(VenueKind k) =>
+    k == VenueKind.SPOT ? "spot" :k == VenueKind.PERP ? "perp" :k == VenueKind.FUT  ? "fut"  : "unknown"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 10: COST MODELING SUBSYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Commission fee model. FROZEN ORDER — backward-compat.
+//       PCT_ONLY=0 (crypto), BOTH=1 (broker hybrid),
+//       FLAT_ONLY=2 (per-side flat), ROUND_TRIP_FLAT=3 (CME RT).
+export enum CommissionMode
+    PCT_ONLY
+    BOTH
+    FLAT_ONLY
+    ROUND_TRIP_FLAT
+
+// @type CostProfile — Trading cost parameters for a symbol
+// @field tickerid Full symbol identifier (e.g., "BINANCE:BTCUSDT.P")
+// @field venue Exchange/broker (e.g., "BINANCE", "CME_MINI")
+// @field asset_class Asset class integer (cast from AssetClass enum)
+// @field ticker Base symbol (e.g., "BTC", "AAPL")
+// @field prefix Venue prefix (e.g., "BINANCE", "NASDAQ")
+// @field currency Quote currency (e.g., "USDT", "USD")
+// @field isin International Securities Identification Number (runtime from syminfo.isin)
+// @field figi Financial Instrument Global Identifier (dormant, Pine v6 has no syminfo.figi)
+// @field commission_mode CommissionMode enum value
+// @field commission_pct Commission percentage (e.g., 0.04 = 0.04%)
+// @field commission_flat Flat commission per contract/share (e.g., 0.35 for IBKR min)
+// @field min_commission Minimum commission floor (e.g., $0.35)
+// @field max_commission_pct Maximum commission cap as percentage (e.g., 0.5%)
+// @field slippage_ticks Typical slippage in ticks (e.g., 2)
+// @field spread_bps Median bid-ask spread in basis points (e.g., 0.8)
+// @field funding_rate Estimated funding rate for perps (e.g., 0.0001 = 0.01% per 8h)
+// @field tick_size Minimum price increment (e.g., 0.1 for BTC)
+// @field tick_value Dollar value per tick (e.g., 12.5 for ES)
+// @field contract_size Contract multiplier (e.g., 50 for MES, 1 for crypto)
+// @field point_value Dollar value per point (e.g., 5 for MES)
+export type CostProfile
+    string tickerid
+    string venue
+    int asset_class
+    string ticker
+    string prefix
+    string currency
+    string isin
+    string figi
+    CommissionMode commission_mode
+    float commission_pct
+    float commission_flat
+    float min_commission
+    float max_commission_pct
+    int slippage_ticks
+    float spread_bps
+    float funding_rate
+    float tick_size
+    float tick_value
+    float contract_size
+    float point_value
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11: EMBEDDED COST REGISTRY
+// ═══════════════════════════════════════════════════════════════════════════
+
+// AssetClass int mapping (FIX-4):
+// 0=UNKNOWN, 1=CRYPTO_MAIN, 2=ALTS, 3=SHARES, 4=COMMODITY, 5=INDEX, 6=FX
+
+// @const Embedded cost profile registry (CSV format)
+// Schema: tickerid,venue,asset_class_int,ticker,prefix,currency,
+//         commission_mode,commission_pct,commission_flat,min_commission,
+//         max_commission_pct,slippage_ticks,spread_bps,funding_rate,
+//         tick_size,tick_value,contract_size,point_value
+// Note: isin/figi populated at runtime, not in registry
+const string REGISTRY_DATA = "tickerid,venue,asset_class_int,ticker,prefix,currency,commission_mode,commission_pct,commission_flat,min_commission,max_commission_pct,slippage_ticks,spread_bps,funding_rate,tick_size,tick_value,contract_size,point_value\nBINANCE:BTCUSDT.P,BINANCE,1,BTC,BINANCE,USDT,0,0.04,0.0,0.0,0.5,2,0.8,0.0001,0.1,0.1,1.0,1.0\nBYBIT:BTCUSDT.P,BYBIT,1,BTC,BYBIT,USDT,0,0.055,0.0,0.0,0.5,2,1.0,0.0001,0.1,0.1,1.0,1.0\nCOINBASE:BTCUSD,COINBASE,1,BTC,COINBASE,USD,0,0.6,0.0,0.0,0.5,2,1.5,0.0,0.01,0.01,1.0,1.0\nBINANCE:BTCUSDT,BINANCE,1,BTC,BINANCE,USDT,0,0.1,0.0,0.0,0.5,2,1.2,0.0,0.01,0.01,1.0,1.0\nCME_MINI:MES1!,CME_MINI,5,ES,CME_MINI,USD,3,0.0,2.50,0.0,0.0,1,0.5,0.0,0.25,1.25,50.0,5.0\nNASDAQ:AAPL,NASDAQ,3,AAPL,NASDAQ,USD,1,0.0035,0.0,0.35,0.5,0,0.3,0.0,0.01,1.0,1.0,1.0\nOANDA:EURUSD,OANDA,6,EUR,OANDA,USD,0,0.008,0.0,0.0,0.5,1,0.2,0.0,0.00001,1.0,1.0,1.0\nCUSTOM:MYINDEX,CUSTOM,0,MYINDEX,CUSTOM,USD,0,0.05,0.0,0.0,0.5,0,0.0,0.0,1.0,1.0,1.0,1.0\n"
+
+// FIX-8: Parse registry inline (Pine v6 CE10180: cannot use global var in export functions)
+// Small registry (8 rows) → parse cost acceptable vs caching complexity
+_parse_registry() =>
+    map<string, CostProfile> registry = map.new<string, CostProfile>()
+    array<string> lines = str.split(REGISTRY_DATA, "\n")
+    
+    int n = array.size(lines)
+    if n > 1
+        for i = 1 to n - 1
+            string line = array.get(lines, i)
+            // FIX-5: Inverted condition instead of continue
+            if str.length(line) > 0
+                array<string> fields = str.split(line, ",")
+                if array.size(fields) >= 18
+                    string tickerid = array.get(fields, 0)
+                    int mode_int = int(math.round(str.tonumber(array.get(fields, 6))))
+                    // FIX-2: Convert int to CommissionMode enum
+                    CommissionMode mode = (mode_int == 0 ? CommissionMode.PCT_ONLY : mode_int == 1 ? CommissionMode.BOTH : mode_int == 2 ? CommissionMode.FLAT_ONLY : CommissionMode.ROUND_TRIP_FLAT)
+                    
+                    CostProfile cp = CostProfile.new(tickerid = tickerid, venue = array.get(fields, 1), asset_class = int(math.round(str.tonumber(array.get(fields, 2)))), ticker = array.get(fields, 3), prefix = array.get(fields, 4), currency = array.get(fields, 5), isin = "", figi = "", commission_mode = mode, commission_pct = str.tonumber(array.get(fields, 7)), commission_flat = str.tonumber(array.get(fields, 8)), min_commission = str.tonumber(array.get(fields, 9)), max_commission_pct = str.tonumber(array.get(fields, 10)), slippage_ticks = int(math.round(str.tonumber(array.get(fields, 11)))), spread_bps = str.tonumber(array.get(fields, 12)), funding_rate = str.tonumber(array.get(fields, 13)), tick_size = str.tonumber(array.get(fields, 14)), tick_value = str.tonumber(array.get(fields, 15)), contract_size = str.tonumber(array.get(fields, 16)), point_value = str.tonumber(array.get(fields, 17)))
+                    
+                    map.put(registry, tickerid, cp)
+    
+    registry
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 12: COST PROFILE RESOLUTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Resolve cost profile for current chart symbol
+// @returns CostProfile with runtime-populated isin field, or na if not found
+// FIX-1: Returns na on full miss (no silent fallback)
+export resolve() =>
+    map<string, CostProfile> registry = _parse_registry()
+    
+    // Tier 1: Exact tickerid match
+    if map.contains(registry, syminfo.tickerid)
+        CostProfile cp = map.get(registry, syminfo.tickerid)
+        cp.isin := syminfo.isin
+        cp
+    else
+        // Tier 2: Venue default (match by prefix)
+        // FIX-6: Explicit key iteration (Pine v6 safe)
+        CostProfile venue_default = na
+        array<string> keys = map.keys(registry)
+        int nkeys = array.size(keys)
+        if nkeys > 0
+            for i = 0 to nkeys - 1
+                string tickerid = array.get(keys, i)
+                CostProfile cp = map.get(registry, tickerid)
+                if cp.prefix == syminfo.prefix
+                    venue_default := cp
+                    break
+        
+        if not na(venue_default)
+            venue_default.isin := syminfo.isin
+            venue_default
+        else
+            // Tier 3: Asset class default (first entry of matching class)
+            int inferred_class = (syminfo.type == "stock" ? 3 : syminfo.type == "futures" ? 5 : syminfo.type == "forex" ? 6 : syminfo.type == "crypto" ? 1 : 0)
+            
+            CostProfile class_default = na
+            if nkeys > 0
+                for i = 0 to nkeys - 1
+                    string tickerid = array.get(keys, i)
+                    CostProfile cp = map.get(registry, tickerid)
+                    if cp.asset_class == inferred_class
+                        class_default := cp
+                        break
+            
+            if not na(class_default)
+                class_default.isin := syminfo.isin
+                class_default
+            else
+                // FIX-1: Return na (no silent fallback)
+                na
+
+// @function Resolve cost profile by explicit tickerid
+// @param tickerid Symbol identifier (e.g., "NASDAQ:AAPL")
+// @returns CostProfile or na if not found
+export resolve_by_tickerid(string tickerid) =>
+    map<string, CostProfile> registry = _parse_registry()
+    map.contains(registry, tickerid) ? map.get(registry, tickerid) : na
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 13: COMMISSION CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Calculate commission for a trade
+// @param cp CostProfile
+// @param qty Quantity (shares/contracts)
+// @param price Entry/exit price
+// @returns Commission in quote currency
+// FIX-3: BOTH mode includes flat component
+export calc_commission(CostProfile cp, float qty, float price) =>
+    float notional = qty * price * cp.contract_size
+    
+    float comm = 0.0
+    
+    if cp.commission_mode == CommissionMode.PCT_ONLY
+        comm := notional * (cp.commission_pct / 100.0)
+    else if cp.commission_mode == CommissionMode.BOTH
+        // FIX-3: pct + flat components
+        float pct_part = notional * (cp.commission_pct / 100.0)
+        float flat_part = qty * cp.commission_flat
+        float raw = pct_part + flat_part
+        comm := math.max(cp.min_commission, raw)
+    else if cp.commission_mode == CommissionMode.FLAT_ONLY
+        comm := cp.commission_flat * qty
+    else if cp.commission_mode == CommissionMode.ROUND_TRIP_FLAT
+        comm := cp.commission_flat
+    
+    // Apply max cap if specified
+    if cp.max_commission_pct > 0.0
+        float max_comm = notional * (cp.max_commission_pct / 100.0)
+        comm := math.min(comm, max_comm)
+    
+    comm
+
+// @function Calculate round-trip commission (entry + exit)
+// @param cp CostProfile
+// @param qty Quantity
+// @param entry_price Entry price
+// @param exit_price Exit price
+// @returns Total RT commission
+export calc_rt_commission(CostProfile cp, float qty, float entry_price, float exit_price) =>
+    float entry_comm = calc_commission(cp, qty, entry_price)
+    float exit_comm = calc_commission(cp, qty, exit_price)
+    
+    if cp.commission_mode == CommissionMode.ROUND_TRIP_FLAT
+        cp.commission_flat * 2.0
+    else
+        entry_comm + exit_comm
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 14: ASSETRECORD BRIDGE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @method cost_profile — Get cost profile for this asset's primary venue
+// @param rec AssetRecord
+// @returns CostProfile or na if no venue match
+method cost_profile(AssetRecord rec) =>
+    if array.size(rec.venues) == 0
+        na
+    else
+        Venue primary = array.get(rec.venues, 0)
+        resolve_by_tickerid(primary.ticker)
+
+// @function Get cost profile for current chart symbol
+// @returns CostProfile with runtime isin, or na
+export f_current_cost_profile() =>
+    resolve()
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 15: COST DRIFT DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Compute cost drift between current and training costs
+// @param current Current CostProfile
+// @param training_commission_pct Training commission percentage
+// @param training_slippage Training slippage ticks
+// @returns Aggregate drift as fraction (e.g., 0.20 = 20%)
+export compute_cost_drift(CostProfile current, float training_commission_pct, int training_slippage) =>
+    float comm_drift = math.abs(current.commission_pct - training_commission_pct) / 
+                       math.max(training_commission_pct, 0.0001)
+    float slip_drift = math.abs(current.slippage_ticks - training_slippage) / 
+                       math.max(float(training_slippage), 1.0)
+    
+    math.max(comm_drift, slip_drift)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF ASSETLIB V3
+// ═══════════════════════════════════════════════════════════════════════════

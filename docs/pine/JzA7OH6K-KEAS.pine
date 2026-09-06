@@ -1,0 +1,427 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ZurvanEG
+// @version=6 
+ 
+// In the Name of God of Infinite Time and Space
+// ──────────────────────────────────────────────────────────────────────── ─── ─
+//    Title : 𝗞𝗘𝗔𝗦 - 𝗞alman-𝗘hlers 𝗔daptive 𝗦moother - library [𝗭urvān𝗘𝗚]
+//            Blend two adaptive filter engines into a single low-lag smoother
+//            using a quality-driven fusion layer and regime-aware adaptation.
+//    Method: ▸ Detect market regime via ER, slope & persistence ▸ Run Two-State
+//            Kalman (position + velocity) with adaptive Q and R ▸ Run Ehlers
+//            2-Pole SuperSmoother with adaptive length, de-lag & HL2 pre-mix
+//            ▸ Score each engine on error, roughness, lag & direction agreement
+//            ▸ Map quality scores to a rate-limited Kalman weight ∈ [floor,ceil]
+//    Output: hybrid = w × k1 + (1−w) × ss
+//     Date : S-404.02.20, E-405.02.24 (v1.0)
+// Language : TradingView's Pine Script® v6 
+// ──────────────────────────────────────────────────────────────────────── ─── ─
+
+// #START_REGION
+// ▾▾▾▾▾▾▾▾▾▾▾▾▾
+library("KEAS", overlay = true)
+
+
+// ════════════════════ ═══ ═
+// >>HELPER FUNCTIONS<<
+// ════════════════════ ═══ ═ ⑴
+// @function  clamp a float between lo and hi.
+// @param     x   value to clamp
+// @param     lo  lower bound
+// @param     hi  upper bound
+// @returns   clamped float
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+// @function  safe division — returns 0.0 when denominator is zero.
+// @param     a   numerator
+// @param     b   denominator
+// @returns   a / b  or  0.0
+f_safe_div(float a, float b) =>
+    b != 0.0 ? a / b : 0.0
+
+// @function  sum of absolute bar‑to‑bar differences over n bars.
+//            used as denominator in Kaufman Efficiency Ratio.
+// @param     s   source series
+// @param     n   lookback length
+// @returns   cumulative absolute difference (volatility proxy)
+f_sum_abs_diff(series float s, int n) =>
+    float acc = 0.0
+    for i = 0 to n - 1
+        acc += math.abs(s[i] - s[i + 1])
+    acc
+
+// @function  two‑state Kalman filter (position + velocity).
+//            full predict → update cycle with 2×2 covariance matrix.
+// @param     z        observation
+// @param     qLevel   process noise for level state
+// @param     qVel     process noise for velocity state
+// @param     rMeas    measurement noise
+// @param     xPrev    previous position estimate
+// @param     vPrev    previous velocity estimate
+// @param     p11Prev  covariance [1,1]
+// @param     p12Prev  covariance [1,2]
+// @param     p21Prev  covariance [2,1]
+// @param     p22Prev  covariance [2,2]
+// @returns   [xNew, vNew, p11, p12, p21, p22, residual]
+f_kalman2(float z, float qLevel, float qVel, float rMeas,
+          float xPrev, float vPrev,
+          float p11Prev, float p12Prev, float p21Prev, float p22Prev) =>
+    // — predict —
+    float xPred   = xPrev + vPrev
+    float vPred   = vPrev
+    float p11Pred = p11Prev + p12Prev + p21Prev + p22Prev + qLevel
+    float p12Pred = p12Prev + p22Prev
+    float p21Pred = p21Prev + p22Prev
+    float p22Pred = p22Prev + qVel
+    // — update —
+    float innov   = p11Pred + rMeas
+    float kx      = p11Pred / math.max(innov, 1e-10)
+    float kv      = p21Pred / math.max(innov, 1e-10)
+    float resid   = z - xPred
+    float xNew    = xPred + kx * resid
+    float vNew    = vPred + kv * resid
+    float p11New  = (1.0 - kx) * p11Pred
+    float p12New  = (1.0 - kx) * p12Pred
+    float p21New  = p21Pred - kv * p11Pred
+    float p22New  = p22Pred - kv * p12Pred
+    [xNew, vNew, p11New, p12New, p21New, p22New, resid]
+
+// @function  Ehlers 2‑pole SuperSmoother — single‑step recursive form.
+// @param     x    current input
+// @param     x1   previous input
+// @param     y1   previous output
+// @param     y2   output two bars ago
+// @param     len  effective period (≥ 2)
+// @returns   smoothed value
+f_ss2(float x, float x1, float y1, float y2, float len) =>
+    float ll = math.max(len, 2.0)
+    float a1 = math.exp(-1.414 * math.pi / ll)
+    float b1 = 2.0 * a1 * math.cos(1.414 * math.pi / ll)
+    float c2 = b1
+    float c3 = -a1 * a1
+    float c1 = 1.0 - c2 - c3
+    c1 * (x + x1) * 0.5 + c2 * y1 + c3 * y2
+
+
+// ═════════════════════ ═══ ═
+// >>EXPORTED FUNCTION<<
+// ═════════════════════ ═══ ═ ⑵
+
+// @function  Kalman‑Ehlers Adaptive Smoother (source‑agnostic).
+//            Blends a two‑state adaptive Kalman filter with an Ehlers 2‑pole
+//            SuperSmoother via a quality‑driven, rate‑limited weight.
+//            Works on any numeric series (price, RSI, oscillator, etc.).
+//
+// @param     src         Input series (price, oscillator, any float).
+// @param     len         Base smoothing period (drives both engines).
+//
+// — Kalman parameters —
+// @param     kQMult      Global process noise Q multiplier.
+// @param     kRMult      Global measurement noise R multiplier.
+// @param     kVelQR      Velocity‑to‑level noise ratio.
+// @param     kTrBst      Q boost factor in trend regime.
+// @param     kAcBst      Q boost from acceleration.
+// @param     kNoBst      R boost when residual noise elevated.
+// @param     kSpBst      R boost on single‑bar spike.
+//
+// — SuperSmoother parameters —
+// @param     ssMinLen    Floor for adaptive SS period.
+// @param     ssDeLag     Lag pre‑compensation factor.
+// @param     ssSpdup     Adaptive speedup max fraction.
+//
+// — Adaptive weighting parameters —
+// @param     wFloor      Kalman minimum blend weight.
+// @param     wCeil       Kalman maximum blend weight.
+// @param     wSmLen      Quality EMA smoothing length.
+// @param     wRise       Max weight increase per bar.
+// @param     wFall       Max weight decrease per bar.
+// @param     wDisBst     Extra step on k1/ss disagreement.
+//
+// — Regime score parameters —
+// @param     erLen       Efficiency Ratio lookback.
+// @param     slpFast     Slope fast EMA length.
+// @param     slpSlow     Slope slow EMA length.
+// @param     persBars    Bars for full directional persistence.
+// @param     scWER       ER weight in composite score.
+// @param     scWSlp      Slope weight in composite score.
+// @param     scWPers     Persistence weight in composite score.
+// @param     scSmLen     Score EMA smoothing length.
+//
+// @returns   hybrid — final blended smoother value
+export keas(
+     series float src      = close,
+     simple int   len      = 20,
+     // kalman
+     simple float kQMult   = 0.90,
+     simple float kRMult   = 1.10,
+     simple float kVelQR   = 0.15,
+     simple float kTrBst   = 1.90,
+     simple float kAcBst   = 1.30,
+     simple float kNoBst   = 2.50,
+     simple float kSpBst   = 2.50,
+     // super smoother
+     simple int   ssMinLen = 8,
+     simple float ssDeLag  = 0.14,
+     simple float ssSpdup  = 0.25,
+     // adaptive weighting
+     simple float wFloor   = 0.22,
+     simple float wCeil    = 0.78,
+     simple int   wSmLen   = 5,
+     simple float wRise    = 0.040,
+     simple float wFall    = 0.030,
+     simple float wDisBst  = 0.060,
+     // regime score
+     simple int   erLen    = 10,
+     simple int   slpFast  = 4,
+     simple int   slpSlow  = 12,
+     simple int   persBars = 3,
+     simple float scWER    = 0.45,
+     simple float scWSlp   = 0.35,
+     simple float scWPers  = 0.20,
+     simple int   scSmLen  = 5) =>
+
+    // >a) scale — derived entirely from src, not from chart OHLC
+    // ────────────────────────────────────────────────────────── ─── ─
+    float srcChg   = math.abs(src - nz(src[1], src))
+    float avgChg   = ta.sma(srcChg, 20)
+    float scale    = math.max(nz(avgChg, math.abs(src) * 0.01), 1e-10)
+    float minFloor = scale * 0.001
+    float sc       = scale * scale
+
+    // >b) regime score
+    // ──────────────── ─── ─
+    //  fuses efficiency ratio, slope magnitude and directional persistence
+    float wSum  = math.max(scWER + scWSlp + scWPers, 1e-10)
+    float wER   = scWER  / wSum
+    float wSL   = scWSlp / wSum
+    float wPS   = scWPers / wSum
+
+    float chgER = math.abs(src - nz(src[erLen], src))
+    float volER = f_sum_abs_diff(src, erLen)
+    float er    = f_clamp(f_safe_div(chgER, volER), 0.0, 1.0)
+
+    float slpRaw = ta.ema(src, slpFast) - ta.ema(src, slpSlow)
+    float slpN   = f_clamp(math.abs(slpRaw) / math.max(scale, minFloor), 0.0, 2.0) / 2.0
+
+    float dirNow = src > src[1] ? 1.0 : src < src[1] ? -1.0 : 0.0
+    var float sameCnt = 0.0
+    sameCnt := dirNow != 0 and dirNow == nz(dirNow[1]) ? nz(sameCnt[1]) + 1.0 : (dirNow != 0 ? 1.0 : 0.0)
+    float persist  = f_clamp(sameCnt / persBars, 0.0, 1.0)
+
+    float scoreRaw = f_clamp(wER * er + wSL * slpN + wPS * persist, 0.0, 1.0)
+    float scoreSm  = ta.ema(scoreRaw, scSmLen)
+
+    // >c) kalman filter — 2‑state (position + velocity)
+    // ───────────────────────────────────────────────── ─── ─
+    //  Q driven by trend score & acceleration · R driven by residual & spikes
+    float alphaBase = 2.0 / (len + 1.0)
+    float qBase     = (alphaBase * alphaBase) / math.max(1.0 - alphaBase, 0.0001)
+
+    var float kX  = na
+    var float kV  = 0.0
+    var float p11 = na
+    var float p12 = 0.0
+    var float p21 = 0.0
+    var float p22 = na
+
+    if na(kX)
+        kX  := src
+        kV  := 0.0
+        p11 := sc
+        p12 := 0.0
+        p21 := 0.0
+        p22 := sc * 0.20
+
+    // >adaptive signals — all derived from src
+    float residPrev = src - nz(kX, src)
+    float residN    = f_clamp(math.abs(residPrev) / math.max(scale, minFloor), 0.0, 3.0) / 3.0
+
+    float accelRaw = (src - nz(src[1], src)) - (nz(src[1], src) - nz(src[2], src))
+    float accelN   = f_clamp(math.abs(accelRaw) / math.max(scale, minFloor), 0.0, 3.0) / 3.0
+
+    // >spike detection — source‑agnostic (single‑bar move vs recent average)
+    float spikeN = f_clamp(srcChg / math.max(avgChg, minFloor) - 1.0, 0.0, 2.0) / 2.0
+
+    // >adaptive Q & R
+    float qAdapt = 1.0 + scoreSm * (kTrBst - 1.0) + accelN * (kAcBst - 1.0)
+    float rAdapt = (1.0 + residN * (kNoBst - 1.0)) * (1.0 + spikeN * (kSpBst - 1.0))
+
+    float qLevel = qBase * sc * kQMult * qAdapt
+    float qVel   = qLevel * kVelQR * (1.0 + 0.7 * accelN + 0.3 * scoreSm)
+    float rMeas  = sc * kRMult * rAdapt
+
+    [kxN, kvN, p11N, p12N, p21N, p22N, _] =
+         f_kalman2(src, qLevel, qVel, rMeas, kX, kV, p11, p12, p21, p22)
+
+    kX  := kxN
+    kV  := kvN
+    p11 := p11N
+    p12 := p12N
+    p21 := p21N
+    p22 := p22N
+
+    float k1 = kX
+
+    // >d) super smoother — adaptive length, source‑agnostic
+    // ───────────────────────────────────────────────────── ─── ─
+    //  effective period shrinks with move intensity
+    float srcDL  = src + ssDeLag * (src - nz(src[1], src))
+    float moveN  = f_clamp(0.45 * scoreSm + 0.35 * accelN + 0.20 * residN, 0.0, 1.0)
+    float ssLen  = math.max(float(ssMinLen), float(len) * (1.0 - ssSpdup * moveN))
+
+    var float ss = na
+    ss := bar_index < 2 ? srcDL :
+         f_ss2(srcDL, nz(srcDL[1], srcDL), nz(ss[1], srcDL), nz(ss[2], srcDL), ssLen)
+
+    // >e) adaptive weight — quality‑driven blend
+    // ────────────────────────────────────────── ─── ─
+    //  evaluates error, roughness, lag penalty, direction agreement
+    //  maps to rate‑limited Kalman weight within [floor … ceil]
+    float errK1 = math.abs(src - k1)
+    float errSS = math.abs(src - ss)
+
+    float rghK1 = ta.ema(math.abs(k1 - nz(k1[1], k1)), wSmLen)
+    float rghSS = ta.ema(math.abs(ss - nz(ss[1], ss)), wSmLen)
+
+    float lagK1 = ta.ema(errK1, math.max(2, wSmLen * 2))
+    float lagSS = ta.ema(errSS, math.max(2, wSmLen * 2))
+
+    float dirK1  = math.sign(k1  - nz(k1[1],  k1))
+    float dirSS  = math.sign(ss  - nz(ss[1],  ss))
+    float dirSrc = math.sign(src - nz(src[1], src))
+    float agrK1  = dirK1 == dirSrc ? 1.0 : 0.0
+    float agrSS  = dirSS == dirSrc ? 1.0 : 0.0
+
+    float iEK1 = f_safe_div(1.0, 1.0 + errK1 / math.max(scale, minFloor))
+    float iESS = f_safe_div(1.0, 1.0 + errSS  / math.max(scale, minFloor))
+    float iRK1 = f_safe_div(1.0, 1.0 + rghK1  / math.max(scale, minFloor))
+    float iRSS = f_safe_div(1.0, 1.0 + rghSS  / math.max(scale, minFloor))
+    float iLK1 = f_safe_div(1.0, 1.0 + lagK1  / math.max(scale, minFloor))
+    float iLSS = f_safe_div(1.0, 1.0 + lagSS  / math.max(scale, minFloor))
+
+    float qkRaw = 0.42 * iEK1 + 0.16 * iRK1 + 0.22 * iLK1 + 0.12 * agrK1 + 0.08 * scoreSm
+    float qsRaw = 0.34 * iESS + 0.26 * iRSS + 0.22 * iLSS + 0.10 * agrSS + 0.08 * (1.0 - spikeN)
+
+    float qk    = ta.ema(qkRaw, wSmLen)
+    float qs    = ta.ema(qsRaw, wSmLen)
+    float disN  = f_clamp(math.abs(k1 - ss) / math.max(scale, minFloor), 0.0, 2.0) / 2.0
+
+    float lo    = math.min(wFloor, wCeil)
+    float hi    = math.max(wFloor, wCeil)
+    float wRaw  = f_safe_div(qk, math.max(qk + qs, 1e-10))
+    float wBias = f_clamp(0.5 + (wRaw - 0.5) * (1.0 + 0.9 * disN), 0.0, 1.0)
+    float wMap  = lo + (hi - lo) * wBias
+
+    var float wK1 = na
+    float prevW   = na(wK1[1]) ? (lo + hi) * 0.5 : wK1[1]
+    float riseNow = wRise + wDisBst * disN
+    float fallNow = wFall + wDisBst * disN
+    float dlt     = wMap - prevW
+    float stp     = dlt > 0 ? math.min(dlt, riseNow) : math.max(dlt, -fallNow)
+    wK1 := f_clamp(prevW + stp, lo, hi)
+
+    // >f) hybrid output
+    // ───────────────── ─── ─
+    float hybrid = wK1 * k1 + (1.0 - wK1) * ss
+
+    hybrid
+// ▴▴▴▴▴▴▴▴▴▴▴
+// #END REGION
+
+
+
+// ═══════════════════════════════ ═══ ═
+// >>LIBRARY DOCUMENTATION NOTES<<
+// ═══════════════════════════════ ═══ ═
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  KEAS — Kalman‑Ehlers Adaptive Smoother  ·  Library Reference               │
+// ├─────────────────────────────────────────────────────────────────────────────┤
+// │                                                                             │
+// │  PURPOSE                                                                    │
+// │  ───────                                                                    │
+// │  Produces a low-lag, noise-resistant smoothed price series by fusing        │
+// │  two complementary adaptive engines: a Two-State Kalman Filter              │
+// │  (position + velocity) and an Ehlers 2-Pole SuperSmoother with              │
+// │  adaptive length. A quality-driven weighting layer continuously             │
+// │  measures each engine's performance and blends them into a single           │
+// │  hybrid output that balances smoothness, lag and responsiveness.            │
+// │                                                                             │
+// │  ARCHITECTURE                                                               │
+// │  ────────────                                                               │
+// │  1. Scale       → ATR-based normalization anchor for all adaptive signals   │
+// │  2. Regime      → Composite trend/range score from Efficiency Ratio,        │
+// │                    slope magnitude and directional persistence              │
+// │  3. Kalman      → Two-state predict/update cycle with 2×2 covariance;       │
+// │                    Q boosted by regime & acceleration, R by noise & spikes  │
+// │  4. SS          → Ehlers 2-pole SuperSmoother; length shrinks with          │
+// │                    move intensity via speedup, de-lag & HL2 pre-mix         │
+// │  5. Quality     → Per-engine scoring on tracking error, roughness,          │
+// │                    lag penalty and directional agreement with source        │
+// │  6. Weight      → Quality gap resolved into a drift-controlled Kalman       │
+// │                    weight, rate-limited and clamped to [floor, ceil]        │
+// │  7. Hybrid      → Final output: w × k1 + (1−w) × ss                         │
+// │                                                                             │
+// │  INPUTS                                                                     │
+// │  ──────                                                                     │
+// │  src       → Price source (series float). Default: close.                   │
+// │  len       → Base smoothing period (int, bars). Default: 20.                │
+// │              Drives both Kalman Q-calibration and SS base period.           │
+// │              Lower → faster & noisier · Higher → smoother & more lag.       │
+// │                                                                             │
+// │  All remaining parameters have pre-tuned defaults and are optional.         │
+// │  See exported function signature for full parameter list.                   │
+// │                                                                             │
+// │  OUTPUTS                                                                    │
+// │  ───────                                                                    │
+// │  hybrid    → Final blended smoother value (float).                          │
+// │               Quality-weighted fusion of Kalman and SuperSmoother.          │
+// │               Regime-aware, spike-protected, low-lag.                       │
+// │                                                                             │
+// │  INTERNAL TUNING (LOCKED)                                                   │
+// │  ────────────────────────                                                   │
+// │  All quality score weights, regime thresholds, spike detection              │
+// │  coefficients, SS frequency constants and covariance init values            │
+// │  are pre-tuned and locked inside the library. This ensures consistent       │
+// │  behavior across all scripts that import KEAS.                              │
+// │                                                                             │
+// │  USAGE GUIDE                                                                │
+// │  ──────────                                                                 │
+// │  • Minimal call  → keas(close, 20)                                          │
+// │                     Returns a clean hybrid smooth with default settings.    │
+// │  • Custom call   → override any parameter by name (see signature).          │
+// │  • Source        → hl2 / hlc3 / ohlc4 can reduce spike sensitivity.         │
+// │  • Base Length   → treat it like an EMA period; start with 20–50.           │
+// │  • Use as input  → feed hybrid into RSI, Bollinger, ATR or any indicator    │
+// │                     that accepts a series — no extra smoothing needed.      │
+// │                                                                             │
+// │  PERFORMANCE NOTES                                                          │
+// │  ─────────────────                                                          │
+// │  • No arrays or ring buffers — fully recursive, O(1) per bar.               │
+// │  • Kalman 2×2 covariance runs one predict/update cycle per bar.             │
+// │  • SS recursive form: only two previous values required.                    │
+// │  • Safe for all timeframes and instruments with no parameter changes.       │
+// │                                                                             │
+// └─────────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─────────────────────────────────────────────────────────────────────────────┐
+// │  EXAMPLE USAGE — Library Reference                                          │
+// ├─────────────────────────────────────────────────────────────────────────────┤
+// │ indicator("My Indicator", overlay = true)                                   │
+// │ import yourUsername/KEAS/1 as keas                                          │
+// │                                                                             │
+// │ // minimal — source and length only                                         │
+// │ float smooth = keas.keas(close, 34)                                         │
+// │ plot(smooth, "KEAS", color.teal, 2)                                         │
+// │                                                                             │
+// │ // custom — override specific parameters                                    │
+// │ float smooth2 = keas.keas(                                                  │
+// │      src    = hlc3,                                                         │
+// │      len    = 50,                                                           │
+// │      kQMult = 1.20,                                                         │
+// │      wFloor = 0.30,                                                         │
+// │      wCeil  = 0.70)                                                         │
+// │                                                                             │
+// │ // use as adaptive RSI source                                               │
+// │ plot(ta.rsi(smooth, 14), "RSI on KEAS", color.orange)                       │
+// └─────────────────────────────────────────────────────────────────────────────┘ 

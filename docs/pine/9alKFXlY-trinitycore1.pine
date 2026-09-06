@@ -1,0 +1,406 @@
+//@version=5
+library("TrinityCore1", overlay=false, dynamic_requests=true)
+
+// =============================================================================
+// 1. CONSTANTS & ENUMS
+// =============================================================================
+const int READY_OK        = 0
+const int NOT_ENOUGH_BARS = 1
+const int NA_INPUTS       = 2
+const int SUM_FAIL        = 3
+const int CASH_FAIL       = 4
+
+const int DROP_OK       = 0
+const int DROP_DISABLED = 1
+const int DROP_INVALID  = 2
+const int DROP_SHOCK    = 3
+const int DROP_PENALTY  = 4
+
+const float EPSILON = 1e-6
+const float MIN_SUM = 1e-12
+const float MIN_VOL = 0.001
+
+// =============================================================================
+// 2. UDT (DATA STRUCTURES)
+// =============================================================================
+export type TrinityWeights
+    float stock
+    float s1
+    float s2
+    float s3
+    float s4
+    float s5
+    float cash
+
+export type SafeDiag
+    string id
+    float  vol
+    float  corr
+    float  dd
+    float  score
+    float  final_w
+
+export type TrinityDiagLite
+    int   ready_code
+    int   drop_code
+    bool  is_ready
+    bool  risk_gate
+    float p_value
+    int   d_bar_index
+
+export type TrinityDiagFull
+    TrinityDiagLite base
+    float raw_vol
+    float adj_vol
+    float target_w
+    float penalty_mult
+    SafeDiag sd1
+    SafeDiag sd2
+    SafeDiag sd3
+    SafeDiag sd4
+    SafeDiag sd5
+
+export type TrinityConfig
+    bool  enabled
+    int   len_20
+    float w_20
+    int   len_63
+    float w_63
+    int   len_126
+    float w_126
+    int   len_252
+    float w_252
+    float risk_floor
+    float risk_factor
+    float target_vol_stock
+    float target_vol_safe
+    float gov_max_lev
+    float gov_min_mult
+    int   top_k
+    float sqs_base
+    float sqs_w_corr
+    float sqs_w_vol
+    float sqs_w_dd
+    float sqs_range_corr
+    float sqs_range_dd
+    float fall_thr
+    float rate_fall
+    float rate_accel
+    float penalty_val
+    int   ready_bars
+
+type StockData
+    float o
+    float c
+    int   i
+    bool  present
+    bool  ok
+
+type SafeData
+    float o
+    float c
+    bool  present
+    bool  ok
+
+type CashData
+    float c
+    bool  ok
+
+// =============================================================================
+// 3. HELPERS & FACTORY
+// =============================================================================
+export default_config() =>
+    // keep .new() on ONE line (parser-safe in library context)
+    TrinityConfig.new(true, 20, 12.0, 63, 4.0, 126, 2.0, 252, 1.0, 0.0, 1.0, 0.15, 0.08, 1.5, 0.5, 1, 0.0, 0.5, 0.3, 0.2, 1.0, 0.2, 0.10, 0.05, 0.02, 0.50, 252)
+
+_reset_weights() =>
+    TrinityWeights.new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+
+_reset_safe_diag(string id) =>
+    SafeDiag.new(id, 0.0, 0.0, 0.0, 999.0, 0.0)
+
+_clamp01(float x) =>
+    math.max(0.0, math.min(1.0, x))
+
+_calc_vol(float p, int len) =>
+    float prev = nz(p[1], p)
+    float r = math.log(p / prev)
+    float sd = ta.stdev(r, len)
+    sd * math.sqrt(252)
+
+_calc_corr(float p1, float p2, int len) =>
+    float p1p = nz(p1[1], p1)
+    float p2p = nz(p2[1], p2)
+    float r1 = math.log(p1 / p1p)
+    float r2 = math.log(p2 / p2p)
+    ta.correlation(r1, r2, len)
+
+_calc_dd(float p, int len) =>
+    float hh = ta.highest(p, len)
+    hh != 0 ? (p - hh) / hh : 0.0
+
+_normalize_and_validate(float w0, float w1, float w2, float w3, float w4, float w5, float wc) =>
+    bool bad_na  = na(w0) or na(w1) or na(w2) or na(w3) or na(w4) or na(w5) or na(wc)
+    bool bad_neg = (w0 < 0) or (w1 < 0) or (w2 < 0) or (w3 < 0) or (w4 < 0) or (w5 < 0) or (wc < 0)
+    float s = w0 + w1 + w2 + w3 + w4 + w5 + wc
+    bool under = s <= MIN_SUM
+
+    TrinityWeights out = _reset_weights()
+    bool ok = false
+
+    if not bad_na and not bad_neg and not under
+        float inv = 1.0 / s
+        float n0 = w0 * inv
+        float n1 = w1 * inv
+        float n2 = w2 * inv
+        float n3 = w3 * inv
+        float n4 = w4 * inv
+        float n5 = w5 * inv
+        float nc = wc * inv
+        float sn = n0 + n1 + n2 + n3 + n4 + n5 + nc
+        if math.abs(sn - 1.0) <= EPSILON
+            out := TrinityWeights.new(n0, n1, n2, n3, n4, n5, nc)
+            ok := true
+
+    [out, ok]
+
+_stitch_cash(float cp, float cs) =>
+    bool has_p = not na(cp)
+    bool has_s = not na(cs)
+    bool join  = has_p and has_s and cs != 0
+    float k    = ta.valuewhen(join, cp / cs, 0)
+    float kk   = nz(k, 1.0)
+    has_p ? cp : (has_s ? cs * kk : na)
+
+_wroc_ratio(float ratio, int l20, float w20, int l63, float w63, int l126, float w126, int l252, float w252) =>
+    float denom = math.max(w20 + w63 + w126 + w252, EPSILON)
+    float r20  = ta.roc(ratio, l20)
+    float r63  = ta.roc(ratio, l63)
+    float r126 = ta.roc(ratio, l126)
+    float r252 = ta.roc(ratio, l252)
+    (w20*r20 + w63*r63 + w126*r126 + w252*r252) / denom
+
+// =============================================================================
+// 4. DATA FETCH
+// =============================================================================
+_fetch_stock(string sym) =>
+    string tf = "D"
+    [o, c, bi] = request.security(sym, tf, [open, close, bar_index], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    bool present = str.length(sym) > 0
+    bool ok = present and not na(o) and not na(c) and not na(bi)
+    StockData.new(o, c, ok ? int(bi) : 0, present, ok)
+
+_fetch_safe(string sym) =>
+    string tf = "D"
+    [o, c] = request.security(sym, tf, [open, close], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    bool present = str.length(sym) > 0
+    bool ok = (not present) ? true : (not na(o) and not na(c))
+    SafeData.new(o, c, present, ok)
+
+_fetch_cash_stitched(string p, string s) =>
+    string tf = "D"
+    float cp = request.security(p, tf, close, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    float cs = request.security(s, tf, close, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+    float v  = _stitch_cash(cp, cs)
+    CashData.new(v, not na(v))
+
+// =============================================================================
+// 5. CORE PRIMITIVE
+// =============================================================================
+_core_primitive(
+      string sym, string cp, string cs, string s1, string s2, string s3, string s4, string s5,
+      bool en,
+      int l20, float w20, int l63, float w63, int l126, float w126, int l252, float w252,
+      float risk_floor, float risk_factor, float tv_stock, float tv_safe, float gov_max, float gov_min,
+      int top_k, float sqs_base, float w_corr, float w_vol, float w_dd, float rng_corr, float rng_dd,
+      float fall_thr, float rate_fall, float rate_accel, float pen_val,
+      int rb) =>
+
+    StockData ds = _fetch_stock(sym)
+    CashData  cc = _fetch_cash_stitched(cp, cs)
+    SafeData a1 = _fetch_safe(s1)
+    SafeData a2 = _fetch_safe(s2)
+    SafeData a3 = _fetch_safe(s3)
+    SafeData a4 = _fetch_safe(s4)
+    SafeData a5 = _fetch_safe(s5)
+
+    int rc = READY_OK
+    int dr = DROP_OK
+
+    if not en
+        dr := DROP_DISABLED
+    else if not ds.ok
+        rc := NA_INPUTS
+    else if not cc.ok
+        rc := CASH_FAIL
+    else if ds.i < rb
+        rc := NOT_ENOUGH_BARS
+    else if top_k != 1
+        dr := DROP_INVALID
+    else if (a1.present and not a1.ok) or (a2.present and not a2.ok) or (a3.present and not a3.ok) or (a4.present and not a4.ok) or (a5.present and not a5.ok)
+        dr := DROP_INVALID
+
+    bool ready = (rc == READY_OK) and (dr == DROP_OK)
+
+    float ratio = (cc.c != 0) ? (ds.c / cc.c) : na
+    if na(ratio) and ready
+        rc := CASH_FAIL
+        ready := false
+
+    float wroc = _wroc_ratio(ratio, l20, w20, l63, w63, l126, w126, l252, w252)
+
+    float stock_dd = _calc_dd(ds.c, 63)
+    float vol_real = _calc_vol(ds.c, 21)
+    float vol_adj  = math.max(vol_real, MIN_VOL)
+
+    float roc_1 = ta.roc(ds.c, 1) / 100.0
+    float accel = roc_1 - nz(roc_1[1])
+
+    float penalty_mult = 1.0
+
+    if ready and stock_dd < -math.abs(fall_thr)
+        dr := DROP_PENALTY
+        ready := false
+
+    if ready and (roc_1 < -math.abs(rate_fall) or accel < -math.abs(rate_accel))
+        dr := DROP_SHOCK
+        penalty_mult := pen_val
+
+    float w_target_raw = tv_stock / vol_adj
+    w_target_raw := math.min(w_target_raw, gov_max)
+    w_target_raw := math.max(w_target_raw, w_target_raw * gov_min)
+
+    float tvs = math.max(tv_safe, MIN_VOL)
+
+    SafeDiag sd1 = _reset_safe_diag("S1")
+    SafeDiag sd2 = _reset_safe_diag("S2")
+    SafeDiag sd3 = _reset_safe_diag("S3")
+    SafeDiag sd4 = _reset_safe_diag("S4")
+    SafeDiag sd5 = _reset_safe_diag("S5")
+
+    float best_score = 999.0
+    int best_idx = 0
+
+    if a1.present and a1.ok and ds.ok
+        float c = _calc_corr(ds.c, a1.c, 63)
+        float v = _calc_vol(a1.c, 63)
+        float d = _calc_dd(a1.c, 126)
+        float term_c = (c / rng_corr) * w_corr
+        float term_v = (v / tvs) * w_vol
+        float term_d = (math.abs(d) / rng_dd) * w_dd
+        float sc = sqs_base + term_c + term_v + term_d
+        sd1 := SafeDiag.new("S1", v, c, d, sc, 0.0)
+        if sc < best_score
+            best_score := sc
+            best_idx := 1
+
+    if a2.present and a2.ok and ds.ok
+        float c = _calc_corr(ds.c, a2.c, 63)
+        float v = _calc_vol(a2.c, 63)
+        float d = _calc_dd(a2.c, 126)
+        float term_c = (c / rng_corr) * w_corr
+        float term_v = (v / tvs) * w_vol
+        float term_d = (math.abs(d) / rng_dd) * w_dd
+        float sc = sqs_base + term_c + term_v + term_d
+        sd2 := SafeDiag.new("S2", v, c, d, sc, 0.0)
+        if sc < best_score
+            best_score := sc
+            best_idx := 2
+
+    if a3.present and a3.ok and ds.ok
+        float c = _calc_corr(ds.c, a3.c, 63)
+        float v = _calc_vol(a3.c, 63)
+        float d = _calc_dd(a3.c, 126)
+        float term_c = (c / rng_corr) * w_corr
+        float term_v = (v / tvs) * w_vol
+        float term_d = (math.abs(d) / rng_dd) * w_dd
+        float sc = sqs_base + term_c + term_v + term_d
+        sd3 := SafeDiag.new("S3", v, c, d, sc, 0.0)
+        if sc < best_score
+            best_score := sc
+            best_idx := 3
+
+    if a4.present and a4.ok and ds.ok
+        float c = _calc_corr(ds.c, a4.c, 63)
+        float v = _calc_vol(a4.c, 63)
+        float d = _calc_dd(a4.c, 126)
+        float term_c = (c / rng_corr) * w_corr
+        float term_v = (v / tvs) * w_vol
+        float term_d = (math.abs(d) / rng_dd) * w_dd
+        float sc = sqs_base + term_c + term_v + term_d
+        sd4 := SafeDiag.new("S4", v, c, d, sc, 0.0)
+        if sc < best_score
+            best_score := sc
+            best_idx := 4
+
+    if a5.present and a5.ok and ds.ok
+        float c = _calc_corr(ds.c, a5.c, 63)
+        float v = _calc_vol(a5.c, 63)
+        float d = _calc_dd(a5.c, 126)
+        float term_c = (c / rng_corr) * w_corr
+        float term_v = (v / tvs) * w_vol
+        float term_d = (math.abs(d) / rng_dd) * w_dd
+        float sc = sqs_base + term_c + term_v + term_d
+        sd5 := SafeDiag.new("S5", v, c, d, sc, 0.0)
+        if sc < best_score
+            best_score := sc
+            best_idx := 5
+
+    TrinityWeights w_out = _reset_weights()
+    bool risk_gate = false
+
+    if ready
+        float mom_scalar = (wroc > 0 ? 1.0 : 0.5)
+
+        float w_stock = w_target_raw * risk_factor * mom_scalar * penalty_mult
+        w_stock := math.max(w_stock, risk_floor)
+        w_stock := _clamp01(w_stock)
+
+        float safe_budget = math.max(0.0, 1.0 - w_stock)
+
+        if best_idx == 1
+            sd1 := SafeDiag.new(sd1.id, sd1.vol, sd1.corr, sd1.dd, sd1.score, safe_budget)
+        else if best_idx == 2
+            sd2 := SafeDiag.new(sd2.id, sd2.vol, sd2.corr, sd2.dd, sd2.score, safe_budget)
+        else if best_idx == 3
+            sd3 := SafeDiag.new(sd3.id, sd3.vol, sd3.corr, sd3.dd, sd3.score, safe_budget)
+        else if best_idx == 4
+            sd4 := SafeDiag.new(sd4.id, sd4.vol, sd4.corr, sd4.dd, sd4.score, safe_budget)
+        else if best_idx == 5
+            sd5 := SafeDiag.new(sd5.id, sd5.vol, sd5.corr, sd5.dd, sd5.score, safe_budget)
+
+        float cash_resid = 1.0 - (w_stock + sd1.final_w + sd2.final_w + sd3.final_w + sd4.final_w + sd5.final_w)
+        cash_resid := math.max(0.0, cash_resid)
+
+        TrinityWeights raw_w = TrinityWeights.new(w_stock, sd1.final_w, sd2.final_w, sd3.final_w, sd4.final_w, sd5.final_w, cash_resid)
+        [wRes, okRes] = _normalize_and_validate(raw_w.stock, raw_w.s1, raw_w.s2, raw_w.s3, raw_w.s4, raw_w.s5, raw_w.cash)
+
+        if not okRes or na(wroc)
+            rc := SUM_FAIL
+            ready := false
+            w_out := _reset_weights()
+            risk_gate := false
+            wroc := 0.0
+        else
+            w_out := wRes
+            risk_gate := w_out.stock > 0.0
+    else
+        w_out := _reset_weights()
+        risk_gate := false
+        wroc := 0.0
+
+    TrinityDiagLite lite = TrinityDiagLite.new(rc, dr, ready, risk_gate, wroc, ds.i)
+    TrinityDiagFull full = TrinityDiagFull.new(lite, vol_real, vol_adj, w_target_raw, penalty_mult, sd1, sd2, sd3, sd4, sd5)
+
+    [w_out, lite, full, sd1, sd2, sd3, sd4, sd5]
+
+// =============================================================================
+// 6. EXPORTS
+// =============================================================================
+export calc_weights(string sym, string cp, string cs, string s1, string s2, string s3, string s4, string s5, TrinityConfig cfg) =>
+    [w, l, f, sd1, sd2, sd3, sd4, sd5] = _core_primitive(sym, cp, cs, s1, s2, s3, s4, s5, cfg.enabled, cfg.len_20, cfg.w_20, cfg.len_63, cfg.w_63, cfg.len_126, cfg.w_126, cfg.len_252, cfg.w_252, cfg.risk_floor, cfg.risk_factor, cfg.target_vol_stock, cfg.target_vol_safe, cfg.gov_max_lev, cfg.gov_min_mult, cfg.top_k, cfg.sqs_base, cfg.sqs_w_corr, cfg.sqs_w_vol, cfg.sqs_w_dd, cfg.sqs_range_corr, cfg.sqs_range_dd, cfg.fall_thr, cfg.rate_fall, cfg.rate_accel, cfg.penalty_val, cfg.ready_bars)
+    [w, l]
+
+export calc_diagnostics(string sym, string cp, string cs, string s1, string s2, string s3, string s4, string s5, TrinityConfig cfg) =>
+    [w, l, f, sd1, sd2, sd3, sd4, sd5] = _core_primitive(sym, cp, cs, s1, s2, s3, s4, s5, cfg.enabled, cfg.len_20, cfg.w_20, cfg.len_63, cfg.w_63, cfg.len_126, cfg.w_126, cfg.len_252, cfg.w_252, cfg.risk_floor, cfg.risk_factor, cfg.target_vol_stock, cfg.target_vol_safe, cfg.gov_max_lev, cfg.gov_min_mult, cfg.top_k, cfg.sqs_base, cfg.sqs_w_corr, cfg.sqs_w_vol, cfg.sqs_w_dd, cfg.sqs_range_corr, cfg.sqs_range_dd, cfg.fall_thr, cfg.rate_fall, cfg.rate_accel, cfg.penalty_val, cfg.ready_bars)
+    [f, sd1, sd2, sd3, sd4, sd5]

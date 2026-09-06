@@ -1,0 +1,916 @@
+//@version=6
+//@description Lane-owned live summary entrypoint for the continuation prototype. Staged for future host wiring without moving continuation logic into the meta layer.
+library("si_continuation_live_summary_v5", false)
+
+enum RegimeState
+    bullish_trend = "Bullish Trend"
+    bearish_trend = "Bearish Trend"
+    compression = "Compression"
+    expansion = "Expansion"
+    ranging = "Range"
+    neutral = "Neutral"
+
+enum StructureState
+    bullish = "Bullish"
+    bearish = "Bearish"
+    transition_up = "Transition Up"
+    transition_down = "Transition Down"
+    ranging = "Range"
+    neutral = "Neutral"
+
+enum DirectionalBias
+    bullish = "Bullish"
+    bearish = "Bearish"
+    neutral = "Neutral"
+
+enum BoundaryPressureState
+    none = "None"
+    upper_pressure = "Upper Pressure"
+    lower_pressure = "Lower Pressure"
+    balanced = "Balanced"
+
+enum ValueAnchorAlignment
+    above_vwap = "Above VWAP"
+    below_vwap = "Below VWAP"
+    balanced_vwap = "Balanced VWAP"
+    reclaiming_vwap = "Reclaiming VWAP"
+    rejecting_vwap = "Rejecting VWAP"
+
+enum ContinuationPath
+    none = "None"
+    pullback = "Pullback"
+    drift = "Drift"
+
+enum ContinuationState
+    none = "None"
+    seeded = "Seeded"
+    pullback_phase = "Pullback Phase"
+    hold_valid = "Hold Valid"
+    reaccept = "Reaccept"
+    resumption = "Resumption"
+    value_hold = "Value Hold"
+    non_reversion = "Non-Reversion"
+    directional_drift = "Directional Drift"
+    drift_resumption = "Drift Resumption"
+    continuation_failed = "Continuation Failed"
+
+string GROUP_REGIME = "Regime"
+string GROUP_STRUCTURE = "Structure"
+string GROUP_FAIR_VALUE = "Fair value / extension"
+string GROUP_CONTINUATION = "Continuation prototype"
+string GROUP_DEBUG = "Debug / validation"
+
+int regime_fast_length = 10
+int regime_slow_length = 30
+int regime_compression_length = 20
+float regime_compression_threshold = 0.60
+
+int structure_pivot_left = 3
+int structure_pivot_right = 3
+int structure_basis_length = 20
+float structure_displacement_atr = 0.90
+
+int fair_value_atr_length = 14
+float fair_value_extreme_atr = 1.50
+
+float continuation_pullback_min = 5.0
+float continuation_pullback_max = 75.0
+float continuation_hold_buffer_atr = 0.30
+float continuation_break_buffer_atr = 0.35
+float continuation_reaccept_buffer_atr = 0.10
+float continuation_body_ratio_min = 0.45
+float continuation_close_quality_min = 0.60
+int continuation_memory_bars = 20
+int continuation_resumption_window = 3
+
+bool show_debug_panel = false
+
+int V1_MIN_COMPRESSION_BARS = 8
+int V1_MAX_COMPRESSION_BARS = 24
+int V1_ARMED_BOX_GRACE_BARS = 3
+int V1_SEED_VALIDATION_BARS = 3
+float V1_VALUE_ZONE_BUFFER_ATR = 0.35
+float V1_VALUE_ZONE_PERSISTENCE_BUFFER_ATR = 0.03
+float V1_VALUE_ZONE_INVALIDATION_BUFFER_ATR = 0.10
+float V1_SEED_ENTRY_BODY_RATIO_MIN = 0.38
+float V1_SEED_ENTRY_CLOSE_QUALITY_MIN = 0.55
+float V1_SEED_STRONG_BODY_RATIO_MIN = 0.60
+float V1_SEED_STRONG_CLOSE_QUALITY_MIN = 0.70
+int V1_HOLD_RECENCY_BARS = 2
+int V1_HOLD_PERSISTENCE_BARS = 2
+float V1_CONTINUATION_VALUE_TOLERANCE_ATR = 0.15
+float V1_CONTINUATION_DRIFT_EXCURSION_ATR = 0.45
+int V1_CONTINUATION_DRIFT_CONFIRM_BARS = 2
+int V1_CONTINUATION_WRONG_VWAP_FAIL_BARS = 2
+float V1_CONTINUATION_DRIFT_RESUMPTION_RANGE_ATR = 0.55
+
+clamp_signed(float value) =>
+    na(value) ? na : math.max(-100.0, math.min(100.0, value))
+
+clamp_unsigned(float value) =>
+    na(value) ? na : math.max(0.0, math.min(100.0, value))
+
+negative_component(float score) =>
+    na(score) ? na : math.max(-score, 0.0)
+
+positive_component(float score) =>
+    na(score) ? na : math.max(score, 0.0)
+
+score_magnitude(float value) =>
+    na(value) ? na : math.abs(value)
+
+score_to_text(float value) =>
+    na(value) ? "NA" : str.tostring(value, "#.0")
+
+price_to_text(float value) =>
+    na(value) ? "NA" : str.tostring(value, format.mintick)
+
+bool_to_text(bool value) =>
+    value ? "true" : "false"
+
+bias_to_text(DirectionalBias bias) =>
+    str.tostring(bias)
+
+directional_color(DirectionalBias bias) =>
+    bias == DirectionalBias.bullish ? color.new(color.lime, 0) : bias == DirectionalBias.bearish ? color.new(color.red, 0) : color.new(color.silver, 0)
+
+lane_summary_setup_tier(float lane_confidence) =>
+    float normalized_confidence = na(lane_confidence) ? 0.0 : clamp_unsigned(lane_confidence)
+    normalized_confidence >= 75.0 ? "A-tier" : normalized_confidence >= 55.0 ? "B-tier" : "Informational"
+
+lane_summary_actionability(string lane_actionability_text, float fallback_confidence) =>
+    string normalized = str.length(lane_actionability_text) > 0 ? lane_actionability_text : ""
+    normalized == "Strong" ? "Strong" : normalized == "Actionable" ? "Actionable" : normalized == "Watch" ? "Watch" : normalized == "Informational" ? "Informational" : fallback_confidence >= 35.0 ? "Informational" : "No Action"
+
+lane_summary_handoff_hint(string lane_handoff_hint_text) =>
+    string normalized = str.length(lane_handoff_hint_text) > 0 ? lane_handoff_hint_text : "None"
+    normalized == "Continuation" ? "Continuation" : normalized == "Reversal/Trap" ? "Reversal/Trap" : "None"
+
+lane_summary_trigger_state(string lane_trigger_state_text) =>
+    str.length(lane_trigger_state_text) > 0 ? lane_trigger_state_text : "None"
+
+continuation_path_color(ContinuationPath continuation_path) =>
+    continuation_path == ContinuationPath.pullback ? color.new(color.orange, 0) : continuation_path == ContinuationPath.drift ? color.new(color.aqua, 0) : color.new(color.silver, 0)
+
+continuation_state_color(ContinuationState continuation_state) =>
+    continuation_state == ContinuationState.resumption or continuation_state == ContinuationState.drift_resumption ? color.new(color.lime, 0) : continuation_state == ContinuationState.reaccept or continuation_state == ContinuationState.directional_drift ? color.new(color.aqua, 0) : continuation_state == ContinuationState.hold_valid or continuation_state == ContinuationState.value_hold ? color.new(color.orange, 0) : continuation_state == ContinuationState.pullback_phase or continuation_state == ContinuationState.non_reversion ? color.new(color.yellow, 0) : continuation_state == ContinuationState.continuation_failed ? color.new(color.red, 0) : color.new(color.silver, 0)
+
+dominant_of_counts(float bullish_votes, float bearish_votes, float minimum_votes) =>
+    bullish_votes >= minimum_votes and bullish_votes >= bearish_votes + 1.0 ? DirectionalBias.bullish : bearish_votes >= minimum_votes and bearish_votes >= bullish_votes + 1.0 ? DirectionalBias.bearish : DirectionalBias.neutral
+
+regime_state_text(RegimeState regime_state) =>
+    str.tostring(regime_state)
+
+structure_state_text(StructureState structure_state) =>
+    str.tostring(structure_state)
+
+boundary_pressure_state_text(BoundaryPressureState boundary_pressure_state) =>
+    str.tostring(boundary_pressure_state)
+
+value_anchor_alignment_text(ValueAnchorAlignment value_anchor_alignment) =>
+    str.tostring(value_anchor_alignment)
+
+continuation_path_text(ContinuationPath continuation_path) =>
+    str.tostring(continuation_path)
+
+continuation_state_text(ContinuationState continuation_state) =>
+    str.tostring(continuation_state)
+
+calc_regime(int fast_length, int slow_length, int compression_length, int atr_length, float compression_threshold) =>
+    float fast_ema = ta.ema(close, fast_length)
+    float slow_ema = ta.ema(close, slow_length)
+    float atr_value = ta.atr(atr_length)
+    float compression_raw = ta.stdev(close, compression_length)
+    float atr_percent = close != 0.0 ? atr_value / close * 100.0 : 0.0
+    float compression_proxy = close != 0.0 ? compression_raw / close * 100.0 : 0.0
+    float trend_spread_pct = close != 0.0 ? (fast_ema - slow_ema) / close * 100.0 : 0.0
+    bool bullish_stack = close > fast_ema and fast_ema > slow_ema
+    bool bearish_stack = close < fast_ema and fast_ema < slow_ema
+    bool in_compression = compression_proxy <= compression_threshold
+    bool in_expansion = atr_percent >= compression_threshold * 2.0
+    RegimeState regime_state = RegimeState.neutral
+    DirectionalBias regime_bias = DirectionalBias.neutral
+    float regime_score = 0.0
+
+    if in_compression
+        regime_state := RegimeState.compression
+    else if bullish_stack
+        regime_state := in_expansion ? RegimeState.expansion : RegimeState.bullish_trend
+        regime_bias := DirectionalBias.bullish
+        regime_score := clamp_signed(trend_spread_pct * 350.0)
+    else if bearish_stack
+        regime_state := in_expansion ? RegimeState.expansion : RegimeState.bearish_trend
+        regime_bias := DirectionalBias.bearish
+        regime_score := clamp_signed(trend_spread_pct * 350.0)
+    else if math.abs(trend_spread_pct) <= 0.05
+        regime_state := RegimeState.ranging
+
+    [regime_state, regime_score, regime_bias]
+
+calc_structure(int pivot_left, int pivot_right, int basis_length, float displacement_atr_multiple) =>
+    float pivot_high = ta.pivothigh(high, pivot_left, pivot_right)
+    float pivot_low = ta.pivotlow(low, pivot_left, pivot_right)
+    float last_pivot_high = ta.valuewhen(not na(pivot_high), pivot_high, 0)
+    float previous_pivot_high = ta.valuewhen(not na(pivot_high), pivot_high, 1)
+    float last_pivot_low = ta.valuewhen(not na(pivot_low), pivot_low, 0)
+    float previous_pivot_low = ta.valuewhen(not na(pivot_low), pivot_low, 1)
+    bool pivots_ready = not na(last_pivot_high) and not na(last_pivot_low) and not na(previous_pivot_high) and not na(previous_pivot_low)
+    float atr_value = ta.atr(math.max(5, basis_length))
+    float break_buffer = atr_value * 0.10
+    float structure_basis = ta.ema(close, basis_length)
+    float pullback_allowance = atr_value * 0.35
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float close_location = candle_range > 0 ? (close - low) / candle_range : 0.5
+    bool basis_rising = structure_basis >= structure_basis[1]
+    bool basis_falling = structure_basis <= structure_basis[1]
+    bool bullish_swing_context = pivots_ready and last_pivot_high > previous_pivot_high and last_pivot_low > previous_pivot_low
+    bool bearish_swing_context = pivots_ready and last_pivot_high < previous_pivot_high and last_pivot_low < previous_pivot_low
+    bool weak_bos_up = pivots_ready and close > last_pivot_high and close[1] <= last_pivot_high
+    bool weak_bos_down = pivots_ready and close < last_pivot_low and close[1] >= last_pivot_low
+    bool strong_bos_up = pivots_ready and close > last_pivot_high + break_buffer and close[1] <= last_pivot_high
+    bool strong_bos_down = pivots_ready and close < last_pivot_low - break_buffer and close[1] >= last_pivot_low
+    bool displacement_up = strong_bos_up and close > open and atr_value > 0 and body_size >= atr_value * displacement_atr_multiple and body_ratio >= 0.60 and close_location >= 0.70
+    bool displacement_down = strong_bos_down and close < open and atr_value > 0 and body_size >= atr_value * displacement_atr_multiple and body_ratio >= 0.60 and close_location <= 0.30
+    bool bullish_pullback = bullish_swing_context and close >= structure_basis - pullback_allowance and low <= structure_basis + break_buffer and not strong_bos_down
+    bool bearish_pullback = bearish_swing_context and close <= structure_basis + pullback_allowance and high >= structure_basis - break_buffer and not strong_bos_up
+
+    StructureState structure_state = StructureState.neutral
+    float structure_score = na
+
+    if not pivots_ready
+        structure_score := na
+    else
+        float raw_score = 0.0
+        raw_score += bullish_swing_context ? 18.0 : 0.0
+        raw_score -= bearish_swing_context ? 18.0 : 0.0
+        raw_score += basis_rising ? 6.0 : 0.0
+        raw_score -= basis_falling ? 6.0 : 0.0
+        raw_score += strong_bos_up ? 32.0 : weak_bos_up ? 18.0 : 0.0
+        raw_score -= strong_bos_down ? 32.0 : weak_bos_down ? 18.0 : 0.0
+        raw_score += displacement_up ? 16.0 : 0.0
+        raw_score -= displacement_down ? 16.0 : 0.0
+        raw_score -= bullish_pullback ? 8.0 : 0.0
+        raw_score += bearish_pullback ? 8.0 : 0.0
+
+        if (strong_bos_up or displacement_up or (bullish_swing_context and basis_rising and close >= structure_basis - pullback_allowance)) and not strong_bos_down
+            structure_state := bullish_pullback ? StructureState.transition_down : StructureState.bullish
+        else if (strong_bos_down or displacement_down or (bearish_swing_context and basis_falling and close <= structure_basis + pullback_allowance)) and not strong_bos_up
+            structure_state := bearish_pullback ? StructureState.transition_up : StructureState.bearish
+        else if bullish_swing_context
+            structure_state := StructureState.transition_down
+        else if bearish_swing_context
+            structure_state := StructureState.transition_up
+        else
+            structure_state := StructureState.ranging
+
+        if structure_state == StructureState.bullish
+            structure_score := math.max(raw_score, 25.0)
+        else if structure_state == StructureState.bearish
+            structure_score := math.min(raw_score, -25.0)
+        else
+            structure_score := clamp_signed(raw_score)
+
+    [structure_state, structure_score, last_pivot_high, last_pivot_low, structure_basis]
+
+calc_fair_value_extension(int atr_length, float extreme_atr_multiple) =>
+    float session_vwap = ta.vwap(hlc3)
+    float atr_value = ta.atr(atr_length)
+    int local_mean_length = math.max(5, atr_length * 2)
+    float local_mean = ta.ema(hlc3, local_mean_length)
+    float blended_fair_value = na(session_vwap) ? local_mean : na(local_mean) ? session_vwap : session_vwap * 0.65 + local_mean * 0.35
+    float vwap_extension_atr = not na(session_vwap) and atr_value > 0 ? (close - session_vwap) / atr_value : na
+    float blended_extension_atr = not na(blended_fair_value) and atr_value > 0 ? (close - blended_fair_value) / atr_value : na
+    float signed_extension_value = na(vwap_extension_atr) and na(blended_extension_atr) ? na : na(vwap_extension_atr) ? blended_extension_atr : na(blended_extension_atr) ? vwap_extension_atr : vwap_extension_atr * 0.65 + blended_extension_atr * 0.35
+    float absolute_extension = math.abs(nz(signed_extension_value, 0.0))
+    float pullback_band = 0.35
+    float moderate_band = math.max(0.85, extreme_atr_multiple * 0.55)
+    float overextension_band = math.max(moderate_band + 0.15, extreme_atr_multiple)
+    float extension_score = na
+
+    if not na(signed_extension_value)
+        float direction = math.sign(signed_extension_value)
+        if absolute_extension <= pullback_band
+            extension_score := direction * (absolute_extension / pullback_band) * 12.0
+        else if absolute_extension <= moderate_band
+            extension_score := direction * (12.0 + (absolute_extension - pullback_band) / math.max(moderate_band - pullback_band, 0.1) * 23.0)
+        else if absolute_extension <= overextension_band
+            extension_score := direction * (35.0 + (absolute_extension - moderate_band) / math.max(overextension_band - moderate_band, 0.1) * 30.0)
+        else
+            extension_score := direction * (65.0 + math.min((absolute_extension - overextension_band) / math.max(overextension_band, 0.1), 1.0) * 35.0)
+        extension_score := clamp_signed(extension_score)
+
+    [session_vwap, extension_score]
+
+calc_dynamic_compression_window(bool compression_eligible_input, float atr_value_input) =>
+    int compression_window_bars = 0
+    float compression_outer_high = na
+    float compression_outer_low = na
+    float compression_inner_high = na
+    float compression_inner_low = na
+
+    for i = 0 to V1_MAX_COMPRESSION_BARS - 1
+        bool eligible_bar = bar_index >= i and compression_eligible_input[i]
+        if eligible_bar
+            compression_window_bars += 1
+            compression_outer_high := na(compression_outer_high) ? high[i] : math.max(compression_outer_high, high[i])
+            compression_outer_low := na(compression_outer_low) ? low[i] : math.min(compression_outer_low, low[i])
+            float body_high = math.max(open[i], close[i])
+            float body_low = math.min(open[i], close[i])
+            compression_inner_high := na(compression_inner_high) ? body_high : math.max(compression_inner_high, body_high)
+            compression_inner_low := na(compression_inner_low) ? body_low : math.min(compression_inner_low, body_low)
+        else
+            break
+
+    bool compression_window_valid = compression_window_bars >= V1_MIN_COMPRESSION_BARS
+    float compression_mid = compression_window_valid ? (compression_outer_high + compression_outer_low) * 0.5 : na
+    float compression_width_atr = compression_window_valid and atr_value_input > 0 ? (compression_outer_high - compression_outer_low) / atr_value_input : na
+    float pressure_buffer = atr_value_input * 0.20
+    int upper_pressure_count = 0
+    int lower_pressure_count = 0
+
+    if compression_window_valid
+        for i = 0 to V1_MAX_COMPRESSION_BARS - 1
+            if i < compression_window_bars
+                upper_pressure_count += high[i] >= compression_outer_high - pressure_buffer ? 1 : 0
+                lower_pressure_count += low[i] <= compression_outer_low + pressure_buffer ? 1 : 0
+
+    BoundaryPressureState boundary_pressure_state = not compression_window_valid ? BoundaryPressureState.none : upper_pressure_count >= lower_pressure_count + 2 ? BoundaryPressureState.upper_pressure : lower_pressure_count >= upper_pressure_count + 2 ? BoundaryPressureState.lower_pressure : BoundaryPressureState.balanced
+    float compression_quality = not compression_window_valid ? 0.0 : clamp_unsigned(34.0 + math.min(float(compression_window_bars), float(V1_MAX_COMPRESSION_BARS)) * 1.8 + (boundary_pressure_state != BoundaryPressureState.balanced ? 8.0 : 0.0) + math.max(0.0, 18.0 - nz(compression_width_atr, 0.0) * 8.0))
+
+    [compression_window_valid, compression_window_bars, compression_outer_high, compression_outer_low, compression_inner_high, compression_inner_low, compression_mid, compression_width_atr, compression_quality, boundary_pressure_state]
+
+calc_continuation_seed_context(bool compression_eligible_input, float structure_basis_input, float structure_score_input, float session_vwap_input, float atr_value_input, int seed_memory_bars_input, float hold_buffer_atr_multiple, float reaccept_buffer_atr_multiple) =>
+    var bool armed_box_valid = false
+    var float armed_box_high = na
+    var float armed_box_low = na
+    var float armed_box_inner_high = na
+    var float armed_box_inner_low = na
+    var float armed_box_mid = na
+    var float armed_box_width_atr = na
+    var float armed_box_quality = 0.0
+    var BoundaryPressureState armed_box_pressure = BoundaryPressureState.none
+    var DirectionalBias armed_release_bias = DirectionalBias.neutral
+    var int armed_box_last_valid_bar = na
+
+    var int seed_attempt_direction = 0
+    var int seed_attempt_start_bar = na
+    var int seed_attempt_validation_deadline = na
+    var int seed_attempt_hold_count = 0
+    var bool seed_attempt_strong_close_seen = false
+    var bool seed_attempt_value_reversion_seen = false
+    var bool seed_attempt_wrong_vwap_seen = false
+    var float seed_attempt_value_zone_high = na
+    var float seed_attempt_value_zone_low = na
+    var float seed_attempt_release_zone_high = na
+    var float seed_attempt_release_zone_low = na
+    var float seed_attempt_release_reference = na
+
+    var int accepted_seed_direction = 0
+    var int accepted_seed_bar = na
+    var float accepted_release_zone_high = na
+    var float accepted_release_zone_low = na
+    var float accepted_release_reference = na
+    var float accepted_value_zone_high = na
+    var float accepted_value_zone_low = na
+
+    [compression_window_valid, compression_window_bars, compression_outer_high, compression_outer_low, compression_inner_high, compression_inner_low, compression_mid, compression_width_atr, compression_quality, boundary_pressure_state] = calc_dynamic_compression_window(compression_eligible_input, atr_value_input)
+
+    float bullish_votes = 0.0
+    float bearish_votes = 0.0
+    if compression_window_valid and not na(compression_mid)
+        bullish_votes += close > compression_mid ? 1.0 : 0.0
+        bearish_votes += close < compression_mid ? 1.0 : 0.0
+    bullish_votes += structure_basis_input > structure_basis_input[1] ? 1.0 : 0.0
+    bearish_votes += structure_basis_input < structure_basis_input[1] ? 1.0 : 0.0
+    if not na(session_vwap_input)
+        bullish_votes += close > session_vwap_input ? 1.0 : 0.0
+        bearish_votes += close < session_vwap_input ? 1.0 : 0.0
+    bullish_votes += boundary_pressure_state == BoundaryPressureState.upper_pressure ? 1.0 : 0.0
+    bearish_votes += boundary_pressure_state == BoundaryPressureState.lower_pressure ? 1.0 : 0.0
+    DirectionalBias candidate_release_bias = dominant_of_counts(bullish_votes, bearish_votes, 2.0)
+
+    ValueAnchorAlignment value_anchor_alignment = na(session_vwap_input) ? ValueAnchorAlignment.balanced_vwap : close > session_vwap_input and close[1] <= session_vwap_input ? ValueAnchorAlignment.reclaiming_vwap : close < session_vwap_input and close[1] >= session_vwap_input ? ValueAnchorAlignment.rejecting_vwap : close > session_vwap_input + atr_value_input * 0.05 ? ValueAnchorAlignment.above_vwap : close < session_vwap_input - atr_value_input * 0.05 ? ValueAnchorAlignment.below_vwap : ValueAnchorAlignment.balanced_vwap
+
+    if compression_window_valid
+        armed_box_valid := true
+        armed_box_high := compression_outer_high
+        armed_box_low := compression_outer_low
+        armed_box_inner_high := compression_inner_high
+        armed_box_inner_low := compression_inner_low
+        armed_box_mid := compression_mid
+        armed_box_width_atr := compression_width_atr
+        armed_box_quality := compression_quality
+        armed_box_pressure := boundary_pressure_state
+        armed_release_bias := candidate_release_bias
+        armed_box_last_valid_bar := bar_index
+    else if armed_box_valid and not na(armed_box_last_valid_bar) and bar_index - armed_box_last_valid_bar > V1_ARMED_BOX_GRACE_BARS
+        armed_box_valid := false
+        armed_box_high := na
+        armed_box_low := na
+        armed_box_inner_high := na
+        armed_box_inner_low := na
+        armed_box_mid := na
+        armed_box_width_atr := na
+        armed_box_quality := 0.0
+        armed_box_pressure := BoundaryPressureState.none
+        armed_release_bias := DirectionalBias.neutral
+        armed_box_last_valid_bar := na
+
+    bool can_evaluate_seed = armed_box_valid and not na(armed_box_mid) and atr_value_input > 0
+    float value_zone_center = na(session_vwap_input) ? armed_box_mid : session_vwap_input
+    float value_zone_buffer = atr_value_input * V1_VALUE_ZONE_BUFFER_ATR
+    float value_zone_high = can_evaluate_seed and not na(value_zone_center) ? value_zone_center + value_zone_buffer : na
+    float value_zone_low = can_evaluate_seed and not na(value_zone_center) ? value_zone_center - value_zone_buffer : na
+    float persistence_buffer = atr_value_input * V1_VALUE_ZONE_PERSISTENCE_BUFFER_ATR
+    float invalidation_buffer = atr_value_input * V1_VALUE_ZONE_INVALIDATION_BUFFER_ATR
+    float hold_buffer = atr_value_input * hold_buffer_atr_multiple
+    float reaccept_buffer = atr_value_input * reaccept_buffer_atr_multiple
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float bullish_close_quality = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float bearish_close_quality = candle_range > 0 ? (high - close) / candle_range : 0.5
+    bool bullish_departure_now = can_evaluate_seed and not na(value_zone_high) and close > value_zone_high + persistence_buffer and (armed_release_bias == DirectionalBias.bullish or structure_score_input > 20.0)
+    bool bearish_departure_now = can_evaluate_seed and not na(value_zone_low) and close < value_zone_low - persistence_buffer and (armed_release_bias == DirectionalBias.bearish or structure_score_input < -20.0)
+    bool bullish_quality_ok = body_ratio >= V1_SEED_ENTRY_BODY_RATIO_MIN and bullish_close_quality >= V1_SEED_ENTRY_CLOSE_QUALITY_MIN
+    bool bearish_quality_ok = body_ratio >= V1_SEED_ENTRY_BODY_RATIO_MIN and bearish_close_quality >= V1_SEED_ENTRY_CLOSE_QUALITY_MIN
+
+    if seed_attempt_direction == 0 and can_evaluate_seed and ((bullish_departure_now and bullish_quality_ok) or (bearish_departure_now and bearish_quality_ok))
+        bool bullish_attempt = bullish_departure_now and bullish_quality_ok
+        seed_attempt_direction := bullish_attempt ? 1 : -1
+        seed_attempt_start_bar := bar_index
+        seed_attempt_validation_deadline := bar_index + V1_SEED_VALIDATION_BARS - 1
+        seed_attempt_hold_count := 1
+        seed_attempt_strong_close_seen := bullish_attempt ? body_ratio >= V1_SEED_STRONG_BODY_RATIO_MIN and bullish_close_quality >= V1_SEED_STRONG_CLOSE_QUALITY_MIN : body_ratio >= V1_SEED_STRONG_BODY_RATIO_MIN and bearish_close_quality >= V1_SEED_STRONG_CLOSE_QUALITY_MIN
+        seed_attempt_value_reversion_seen := false
+        seed_attempt_wrong_vwap_seen := false
+        seed_attempt_value_zone_high := value_zone_high
+        seed_attempt_value_zone_low := value_zone_low
+        float release_anchor = bullish_attempt ? value_zone_high : value_zone_low
+        seed_attempt_release_reference := release_anchor
+        seed_attempt_release_zone_low := bullish_attempt ? release_anchor - hold_buffer * 0.85 : release_anchor - reaccept_buffer * 0.40
+        seed_attempt_release_zone_high := bullish_attempt ? release_anchor + reaccept_buffer * 0.40 : release_anchor + hold_buffer * 0.85
+
+    if seed_attempt_direction != 0
+        bool bullish_attempt = seed_attempt_direction == 1
+        bool holds_outside_value = bullish_attempt ? not na(seed_attempt_value_zone_high) and low > seed_attempt_value_zone_high - persistence_buffer : not na(seed_attempt_value_zone_low) and high < seed_attempt_value_zone_low + persistence_buffer
+        bool closes_outside_value = bullish_attempt ? not na(seed_attempt_value_zone_high) and close > seed_attempt_value_zone_high : not na(seed_attempt_value_zone_low) and close < seed_attempt_value_zone_low
+        bool wrong_side_vwap = not na(session_vwap_input) and (bullish_attempt ? close < session_vwap_input : close > session_vwap_input)
+        bool decisive_value_reversion = bullish_attempt ? not na(seed_attempt_value_zone_high) and close < seed_attempt_value_zone_high - invalidation_buffer : not na(seed_attempt_value_zone_low) and close > seed_attempt_value_zone_low + invalidation_buffer
+        bool strong_close_now = bullish_attempt ? body_ratio >= V1_SEED_STRONG_BODY_RATIO_MIN and bullish_close_quality >= V1_SEED_STRONG_CLOSE_QUALITY_MIN : body_ratio >= V1_SEED_STRONG_BODY_RATIO_MIN and bearish_close_quality >= V1_SEED_STRONG_CLOSE_QUALITY_MIN
+
+        if bar_index > seed_attempt_start_bar and (holds_outside_value or closes_outside_value)
+            seed_attempt_hold_count += 1
+        seed_attempt_strong_close_seen := seed_attempt_strong_close_seen or strong_close_now
+        seed_attempt_value_reversion_seen := seed_attempt_value_reversion_seen or decisive_value_reversion
+        seed_attempt_wrong_vwap_seen := seed_attempt_wrong_vwap_seen or wrong_side_vwap
+
+        if bar_index <= seed_attempt_validation_deadline and (decisive_value_reversion or wrong_side_vwap)
+            seed_attempt_direction := 0
+            seed_attempt_start_bar := na
+            seed_attempt_validation_deadline := na
+            seed_attempt_hold_count := 0
+            seed_attempt_strong_close_seen := false
+            seed_attempt_value_reversion_seen := false
+            seed_attempt_wrong_vwap_seen := false
+            seed_attempt_value_zone_high := na
+            seed_attempt_value_zone_low := na
+            seed_attempt_release_zone_high := na
+            seed_attempt_release_zone_low := na
+            seed_attempt_release_reference := na
+        else if bar_index >= seed_attempt_validation_deadline
+            bool accepted_now = not seed_attempt_value_reversion_seen and not seed_attempt_wrong_vwap_seen and (seed_attempt_hold_count >= 2 or seed_attempt_strong_close_seen)
+            if accepted_now
+                accepted_seed_direction := seed_attempt_direction
+                accepted_seed_bar := bar_index
+                accepted_release_zone_high := seed_attempt_release_zone_high
+                accepted_release_zone_low := seed_attempt_release_zone_low
+                accepted_release_reference := seed_attempt_release_reference
+                accepted_value_zone_high := seed_attempt_value_zone_high
+                accepted_value_zone_low := seed_attempt_value_zone_low
+            seed_attempt_direction := 0
+            seed_attempt_start_bar := na
+            seed_attempt_validation_deadline := na
+            seed_attempt_hold_count := 0
+            seed_attempt_strong_close_seen := false
+            seed_attempt_value_reversion_seen := false
+            seed_attempt_wrong_vwap_seen := false
+            seed_attempt_value_zone_high := na
+            seed_attempt_value_zone_low := na
+            seed_attempt_release_zone_high := na
+            seed_attempt_release_zone_low := na
+            seed_attempt_release_reference := na
+
+    bool accepted_seed_valid = not na(accepted_seed_bar) and bar_index - accepted_seed_bar <= seed_memory_bars_input
+    DirectionalBias seed_bias = accepted_seed_direction == 1 ? DirectionalBias.bullish : accepted_seed_direction == -1 ? DirectionalBias.bearish : DirectionalBias.neutral
+    float seed_confidence = not accepted_seed_valid ? 0.0 : clamp_unsigned(armed_box_quality * 0.55 + (armed_release_bias == seed_bias ? 10.0 : 0.0) + (score_magnitude(structure_score_input) >= 25.0 ? 10.0 : 0.0) + (not na(session_vwap_input) ? 6.0 : 0.0))
+    string seed_state_text = accepted_seed_valid ? "Accepted Expansion Seed" : seed_attempt_direction != 0 ? "Seed Attempt" : armed_box_valid ? "Armed Compression" : "No Seed"
+    string seed_block_reason = accepted_seed_valid ? "Accepted seed memory" : seed_attempt_direction != 0 ? "Seed validation live" : not armed_box_valid ? "No armed compression" : armed_release_bias == DirectionalBias.neutral ? "Need directional bias" : "Waiting for value departure"
+
+    [accepted_seed_valid, seed_bias, accepted_release_zone_high, accepted_release_zone_low, accepted_release_reference, accepted_value_zone_high, accepted_value_zone_low, accepted_seed_bar, seed_confidence, seed_state_text, seed_block_reason, armed_box_valid, armed_box_high, armed_box_low, armed_box_mid, armed_box_quality, armed_box_pressure, value_anchor_alignment]
+
+calc_continuation_pullback_context(bool seed_valid_input, DirectionalBias seed_bias_input, float release_zone_high_input, float release_zone_low_input, float release_reference_input, int seed_start_bar_input, float session_vwap_input, float atr_value_input, float pullback_min_input, float pullback_max_input, float hold_buffer_atr_multiple, float decisive_break_atr_multiple, int seed_memory_bars_input) =>
+    float hold_buffer = atr_value_input * hold_buffer_atr_multiple
+    float decisive_break_buffer = atr_value_input * decisive_break_atr_multiple
+    float near_zone_buffer = hold_buffer * 1.25
+    bool bullish_seed = seed_bias_input == DirectionalBias.bullish
+    bool zone_touch = seed_valid_input and bullish_seed ? low <= release_zone_high_input + near_zone_buffer and high >= release_zone_low_input - hold_buffer * 0.35 : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? high >= release_zone_low_input - near_zone_buffer and low <= release_zone_high_input + hold_buffer * 0.35 : false
+    bool near_release_reference = seed_valid_input and not na(release_reference_input) and math.abs(close - release_reference_input) <= near_zone_buffer
+    bool inside_hold_area = seed_valid_input and bullish_seed ? close <= release_zone_high_input + near_zone_buffer and close >= release_zone_low_input - near_zone_buffer * 0.55 : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? close >= release_zone_low_input - near_zone_buffer and close <= release_zone_high_input + near_zone_buffer * 0.55 : false
+    bool still_valid_side = seed_valid_input and bullish_seed ? close >= release_zone_low_input - decisive_break_buffer : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? close <= release_zone_high_input + decisive_break_buffer : false
+    bool vwap_headwind = seed_valid_input and not na(session_vwap_input) and (bullish_seed ? close < session_vwap_input - decisive_break_buffer * 0.50 : close > session_vwap_input + decisive_break_buffer * 0.50)
+    float pullback_distance_atr = not seed_valid_input or atr_value_input <= 0 or na(release_reference_input) ? na : bullish_seed ? math.max(release_reference_input - low, 0.0) / atr_value_input : math.max(high - release_reference_input, 0.0) / atr_value_input
+    bool pullback_progress = nz(pullback_distance_atr, 0.0) >= 0.10
+    float raw_pullback_score = not seed_valid_input ? 0.0 : clamp_unsigned((zone_touch ? 18.0 : 0.0) + (near_release_reference ? 12.0 : 0.0) + (inside_hold_area ? 8.0 : 0.0) + math.min(nz(pullback_distance_atr, 0.0) * 26.0, 54.0) - (vwap_headwind ? 8.0 : 0.0))
+    float pullback_depth_score = raw_pullback_score < pullback_min_input ? raw_pullback_score * 0.75 : raw_pullback_score > pullback_max_input ? clamp_unsigned(raw_pullback_score - 8.0) : raw_pullback_score
+    int bars_since_seed = seed_valid_input and not na(seed_start_bar_input) ? bar_index - seed_start_bar_input : na
+    float pullback_freshness = seed_valid_input and not na(bars_since_seed) ? clamp_unsigned(100.0 - math.min(float(bars_since_seed), float(seed_memory_bars_input)) / math.max(float(seed_memory_bars_input), 1.0) * 100.0) : 0.0
+    bool pullback_valid = seed_valid_input and still_valid_side and (zone_touch or (pullback_progress and (near_release_reference or inside_hold_area)))
+    [pullback_valid, pullback_depth_score, pullback_freshness, zone_touch, vwap_headwind]
+
+calc_continuation_hold_context(bool seed_valid_input, bool pullback_valid_input, DirectionalBias seed_bias_input, float release_zone_high_input, float release_zone_low_input, float release_reference_input, float session_vwap_input, float structure_basis_input, float pdh_input, float pdl_input, float atr_value_input, float hold_buffer_atr_multiple, float decisive_break_atr_multiple) =>
+    var int hold_respect_bars = 0
+    var int hold_last_respect_bar = na
+    var int hold_persistence_bars = 0
+    var int hold_last_soft_bar = na
+
+    float hold_buffer = atr_value_input * hold_buffer_atr_multiple
+    float decisive_break_buffer = atr_value_input * decisive_break_atr_multiple
+    float hold_tolerance = hold_buffer * 1.25
+    bool bullish_seed = seed_bias_input == DirectionalBias.bullish
+    bool near_release_reference_now = seed_valid_input and not na(release_reference_input) and math.abs(close - release_reference_input) <= hold_tolerance
+    bool zone_touch_now = seed_valid_input and bullish_seed ? low <= release_zone_high_input + hold_tolerance and high >= release_zone_low_input - hold_buffer : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? high >= release_zone_low_input - hold_tolerance and low <= release_zone_high_input + hold_buffer : false
+    bool hold_candidate_now = seed_valid_input and (pullback_valid_input or near_release_reference_now or zone_touch_now)
+    bool close_respects_now = hold_candidate_now and (bullish_seed ? close >= release_zone_low_input - hold_buffer * 0.45 : close <= release_zone_high_input + hold_buffer * 0.45)
+    bool vwap_supportive_now = na(session_vwap_input) or (bullish_seed ? close >= session_vwap_input - hold_buffer * 0.55 or near_release_reference_now : close <= session_vwap_input + hold_buffer * 0.55 or near_release_reference_now)
+    bool reference_loss_flag = seed_valid_input and (bullish_seed ? close < release_zone_low_input - decisive_break_buffer : close > release_zone_high_input + decisive_break_buffer)
+    bool soft_hold_now = seed_valid_input and not reference_loss_flag and close_respects_now and (near_release_reference_now or zone_touch_now)
+
+    if not seed_valid_input or reference_loss_flag
+        hold_respect_bars := 0
+        hold_last_respect_bar := na
+    else if hold_candidate_now and close_respects_now
+        hold_respect_bars := math.min(hold_respect_bars + 1, 10)
+        hold_last_respect_bar := bar_index
+
+    if not seed_valid_input or reference_loss_flag
+        hold_persistence_bars := 0
+        hold_last_soft_bar := na
+    else if soft_hold_now
+        hold_persistence_bars := not na(hold_last_soft_bar) and bar_index - hold_last_soft_bar <= 2 ? math.min(hold_persistence_bars + 1, 10) : 1
+        hold_last_soft_bar := bar_index
+    else if not na(hold_last_soft_bar) and bar_index - hold_last_soft_bar > 1
+        hold_persistence_bars := math.max(hold_persistence_bars - 1, 0)
+
+    bool hold_recent_flag = (not na(hold_last_respect_bar) and bar_index - hold_last_respect_bar <= V1_HOLD_RECENCY_BARS) or (not na(hold_last_soft_bar) and bar_index - hold_last_soft_bar <= V1_HOLD_RECENCY_BARS)
+    bool near_structure_basis = not na(structure_basis_input) and atr_value_input > 0 and not na(release_reference_input) and math.abs(structure_basis_input - release_reference_input) <= atr_value_input * 0.40
+    bool near_session_level = seed_bias_input == DirectionalBias.bullish ? not na(pdh_input) and atr_value_input > 0 and not na(release_reference_input) and math.abs(pdh_input - release_reference_input) <= atr_value_input * 0.40 : seed_bias_input == DirectionalBias.bearish ? not na(pdl_input) and atr_value_input > 0 and not na(release_reference_input) and math.abs(pdl_input - release_reference_input) <= atr_value_input * 0.40 : false
+    float hold_quality_score = not seed_valid_input ? 0.0 : clamp_unsigned((zone_touch_now ? 18.0 : 0.0) + (near_release_reference_now ? 10.0 : 0.0) + hold_respect_bars * 18.0 + hold_persistence_bars * 10.0 + (vwap_supportive_now ? 10.0 : 0.0) + (near_structure_basis ? 6.0 : 0.0) + (near_session_level ? 6.0 : 0.0) - (reference_loss_flag ? 25.0 : 0.0))
+    bool hold_valid = seed_valid_input and hold_recent_flag and (hold_respect_bars >= 1 or hold_persistence_bars >= V1_HOLD_PERSISTENCE_BARS) and not reference_loss_flag
+
+    [hold_valid, hold_quality_score, reference_loss_flag, hold_recent_flag, hold_respect_bars]
+
+calc_continuation_drift_context(bool seed_valid_input, DirectionalBias seed_bias_input, float value_zone_high_input, float value_zone_low_input, float session_vwap_input, float structure_basis_input, float atr_value_input, bool pullback_valid_input, float pullback_depth_score_input, float pullback_min_input) =>
+    var int value_hold_bars = 0
+    var int value_hold_last_bar = na
+    var int non_reversion_bars = 0
+    var int non_reversion_last_bar = na
+    var int directional_drift_bars = 0
+    var int directional_drift_last_bar = na
+
+    float value_tolerance = atr_value_input * V1_CONTINUATION_VALUE_TOLERANCE_ATR
+    float excursion_buffer = atr_value_input * V1_CONTINUATION_DRIFT_EXCURSION_ATR
+    float stair_buffer = atr_value_input * 0.18
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float bullish_close_quality = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float bearish_close_quality = candle_range > 0 ? (high - close) / candle_range : 0.5
+    bool bullish_seed = seed_bias_input == DirectionalBias.bullish
+    bool no_meaningful_pullback = seed_valid_input and not pullback_valid_input and nz(pullback_depth_score_input, 0.0) < pullback_min_input
+    bool correct_value_side = seed_valid_input and bullish_seed ? close >= value_zone_high_input - value_tolerance : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? close <= value_zone_low_input + value_tolerance : false
+    bool shallow_excursion_ok = seed_valid_input and bullish_seed ? low >= value_zone_low_input - excursion_buffer : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? high <= value_zone_high_input + excursion_buffer : false
+    float adverse_excursion_atr = not seed_valid_input or atr_value_input <= 0 ? na : bullish_seed ? math.max(value_zone_high_input - low, 0.0) / atr_value_input : math.max(high - value_zone_low_input, 0.0) / atr_value_input
+    bool vwap_supportive_now = na(session_vwap_input) or (bullish_seed ? close >= session_vwap_input - value_tolerance : close <= session_vwap_input + value_tolerance)
+    bool staircase_close = seed_valid_input and bullish_seed ? close >= close[1] - stair_buffer : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? close <= close[1] + stair_buffer : false
+    bool staircase_swing = seed_valid_input and bullish_seed ? low >= low[1] - stair_buffer * 1.25 : seed_valid_input and seed_bias_input == DirectionalBias.bearish ? high <= high[1] + stair_buffer * 1.25 : false
+    bool basis_supportive = seed_valid_input and not na(structure_basis_input) and (bullish_seed ? structure_basis_input >= structure_basis_input[1] or close >= structure_basis_input - excursion_buffer * 0.50 : structure_basis_input <= structure_basis_input[1] or close <= structure_basis_input + excursion_buffer * 0.50)
+
+    int persistence_votes = 0
+    persistence_votes += correct_value_side ? 1 : 0
+    persistence_votes += shallow_excursion_ok ? 1 : 0
+    persistence_votes += staircase_close ? 1 : 0
+    persistence_votes += staircase_swing ? 1 : 0
+    persistence_votes += basis_supportive ? 1 : 0
+    persistence_votes += vwap_supportive_now ? 1 : 0
+
+    bool value_hold_now = seed_valid_input and no_meaningful_pullback and correct_value_side and shallow_excursion_ok
+    bool non_reversion_now = value_hold_now and persistence_votes >= 3
+    bool directional_drift_now = non_reversion_now and persistence_votes >= 4
+
+    if not seed_valid_input or pullback_valid_input
+        value_hold_bars := 0
+        value_hold_last_bar := na
+        non_reversion_bars := 0
+        non_reversion_last_bar := na
+        directional_drift_bars := 0
+        directional_drift_last_bar := na
+    else
+        if value_hold_now
+            value_hold_bars := not na(value_hold_last_bar) and bar_index - value_hold_last_bar <= 2 ? math.min(value_hold_bars + 1, 10) : 1
+            value_hold_last_bar := bar_index
+        else if not na(value_hold_last_bar) and bar_index - value_hold_last_bar > 1
+            value_hold_bars := math.max(value_hold_bars - 1, 0)
+
+        if non_reversion_now
+            non_reversion_bars := not na(non_reversion_last_bar) and bar_index - non_reversion_last_bar <= 2 ? math.min(non_reversion_bars + 1, 10) : 1
+            non_reversion_last_bar := bar_index
+        else if not na(non_reversion_last_bar) and bar_index - non_reversion_last_bar > 1
+            non_reversion_bars := math.max(non_reversion_bars - 1, 0)
+
+        if directional_drift_now
+            directional_drift_bars := not na(directional_drift_last_bar) and bar_index - directional_drift_last_bar <= 2 ? math.min(directional_drift_bars + 1, 10) : 1
+            directional_drift_last_bar := bar_index
+        else if not na(directional_drift_last_bar) and bar_index - directional_drift_last_bar > 1
+            directional_drift_bars := math.max(directional_drift_bars - 1, 0)
+
+    bool value_hold_valid = no_meaningful_pullback and value_hold_bars >= 1
+    bool non_reversion_flag = no_meaningful_pullback and non_reversion_bars >= V1_CONTINUATION_DRIFT_CONFIRM_BARS
+    bool directional_drift_flag = non_reversion_flag and directional_drift_bars >= V1_CONTINUATION_DRIFT_CONFIRM_BARS
+    bool drift_push_now = directional_drift_flag and (bullish_seed ? close > high[1] and close >= value_zone_high_input and candle_range >= atr_value_input * V1_CONTINUATION_DRIFT_RESUMPTION_RANGE_ATR and bullish_close_quality >= 0.55 and body_ratio >= 0.35 : seed_bias_input == DirectionalBias.bearish ? close < low[1] and close <= value_zone_low_input and candle_range >= atr_value_input * V1_CONTINUATION_DRIFT_RESUMPTION_RANGE_ATR and bearish_close_quality >= 0.55 and body_ratio >= 0.35 : false)
+    bool drift_resumption_flag = directional_drift_flag and drift_push_now
+    float drift_persistence_score = not seed_valid_input ? 0.0 : clamp_unsigned(value_hold_bars * 12.0 + non_reversion_bars * 14.0 + directional_drift_bars * 16.0 + (vwap_supportive_now ? 8.0 : 0.0) + (basis_supportive ? 8.0 : 0.0) + (staircase_swing ? 6.0 : 0.0) + (staircase_close ? 6.0 : 0.0) - (pullback_valid_input ? 15.0 : 0.0))
+    string drift_block_reason = not seed_valid_input ? "Need accepted seed" : not no_meaningful_pullback ? "Pullback path active" : not correct_value_side ? "Back inside value" : not shallow_excursion_ok ? "Adverse excursion too deep" : directional_drift_flag ? "Directional drift active" : non_reversion_flag ? "Non-reversion building" : value_hold_valid ? "Value hold building" : "Need more persistence"
+
+    [value_hold_valid, non_reversion_flag, directional_drift_flag, drift_resumption_flag, drift_persistence_score, adverse_excursion_atr, drift_block_reason]
+
+calc_continuation_failure_context(bool seed_valid_input, DirectionalBias seed_bias_input, float value_zone_high_input, float value_zone_low_input, float session_vwap_input, float atr_value_input, float decisive_break_atr_multiple, ContinuationPath path_candidate_input, bool hold_valid_input, bool reaccept_flag_input, bool value_hold_valid_input, bool non_reversion_flag_input, float drift_persistence_score_input) =>
+    var int wrong_side_vwap_bars = 0
+    var int weak_persistence_bars = 0
+
+    float decisive_break_buffer = atr_value_input * decisive_break_atr_multiple
+    float value_tolerance = atr_value_input * V1_CONTINUATION_VALUE_TOLERANCE_ATR
+    bool bullish_seed = seed_bias_input == DirectionalBias.bullish
+    bool decisive_value_reentry_flag = seed_valid_input and (bullish_seed ? close < value_zone_low_input - decisive_break_buffer : seed_bias_input == DirectionalBias.bearish ? close > value_zone_high_input + decisive_break_buffer : false)
+    bool wrong_side_vwap_now = seed_valid_input and not na(session_vwap_input) and (bullish_seed ? close < session_vwap_input - value_tolerance : seed_bias_input == DirectionalBias.bearish ? close > session_vwap_input + value_tolerance : false)
+    bool weak_value_acceptance = seed_valid_input and (bullish_seed ? close < value_zone_high_input - value_tolerance : seed_bias_input == DirectionalBias.bearish ? close > value_zone_low_input + value_tolerance : false)
+
+    if not seed_valid_input or decisive_value_reentry_flag
+        wrong_side_vwap_bars := 0
+    else if wrong_side_vwap_now and weak_value_acceptance
+        wrong_side_vwap_bars := math.min(wrong_side_vwap_bars + 1, 10)
+    else if wrong_side_vwap_bars > 0
+        wrong_side_vwap_bars := math.max(wrong_side_vwap_bars - 1, 0)
+
+    bool sustained_wrong_side_vwap_flag = wrong_side_vwap_bars >= V1_CONTINUATION_WRONG_VWAP_FAIL_BARS
+    bool persistence_healthy = path_candidate_input == ContinuationPath.pullback ? (hold_valid_input or reaccept_flag_input) : path_candidate_input == ContinuationPath.drift ? (value_hold_valid_input or non_reversion_flag_input or drift_persistence_score_input >= 38.0) : true
+
+    if not seed_valid_input or decisive_value_reentry_flag or sustained_wrong_side_vwap_flag
+        weak_persistence_bars := 0
+    else if path_candidate_input == ContinuationPath.drift and not persistence_healthy and weak_value_acceptance
+        weak_persistence_bars := math.min(weak_persistence_bars + 1, 10)
+    else if weak_persistence_bars > 0
+        weak_persistence_bars := math.max(weak_persistence_bars - 1, 0)
+
+    bool persistence_loss_flag = path_candidate_input == ContinuationPath.drift and weak_persistence_bars >= V1_CONTINUATION_DRIFT_CONFIRM_BARS
+    bool shared_failure_flag = decisive_value_reentry_flag or sustained_wrong_side_vwap_flag or persistence_loss_flag
+    string failure_reason = decisive_value_reentry_flag ? "Decisive value re-entry" : sustained_wrong_side_vwap_flag ? "Sustained wrong-side VWAP" : persistence_loss_flag ? "Lost directional persistence" : "None"
+
+    [decisive_value_reentry_flag, sustained_wrong_side_vwap_flag, persistence_loss_flag, shared_failure_flag, wrong_side_vwap_bars, failure_reason]
+
+calc_continuation_reaccept_event(bool seed_valid_input, bool hold_valid_input, bool hold_recent_flag_input, bool reference_loss_flag_input, DirectionalBias seed_bias_input, float release_zone_high_input, float release_zone_low_input, float session_vwap_input, float atr_value_input, float reaccept_buffer_atr_multiple, float body_ratio_min_input, float close_quality_min_input) =>
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float bullish_close_quality = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float bearish_close_quality = candle_range > 0 ? (high - close) / candle_range : 0.5
+    float reaccept_buffer = atr_value_input * reaccept_buffer_atr_multiple
+    bool bullish_seed = seed_bias_input == DirectionalBias.bullish
+    bool bullish_reaccept_quality = close > open and body_ratio >= body_ratio_min_input * 0.90 and bullish_close_quality >= close_quality_min_input * 0.90
+    bool bearish_reaccept_quality = close < open and body_ratio >= body_ratio_min_input * 0.90 and bearish_close_quality >= close_quality_min_input * 0.90
+    bool bullish_reclaim = close > release_zone_high_input + reaccept_buffer * 0.35 and (close[1] <= release_zone_high_input + reaccept_buffer or low <= release_zone_high_input + reaccept_buffer or low[1] <= release_zone_high_input + reaccept_buffer)
+    bool bearish_reclaim = close < release_zone_low_input - reaccept_buffer * 0.35 and (close[1] >= release_zone_low_input - reaccept_buffer or high >= release_zone_low_input - reaccept_buffer or high[1] >= release_zone_low_input - reaccept_buffer)
+    bool vwap_supportive = na(session_vwap_input) or (bullish_seed ? close >= session_vwap_input - reaccept_buffer : close <= session_vwap_input + reaccept_buffer)
+    bool strong_directional_reclaim = bullish_seed ? close > release_zone_high_input + reaccept_buffer * 0.60 : seed_bias_input == DirectionalBias.bearish ? close < release_zone_low_input - reaccept_buffer * 0.60 : false
+    bool reaccept_flag = seed_valid_input and hold_valid_input and hold_recent_flag_input and not reference_loss_flag_input and (bullish_seed ? bullish_reclaim and bullish_reaccept_quality : seed_bias_input == DirectionalBias.bearish ? bearish_reclaim and bearish_reaccept_quality : false) and (vwap_supportive or strong_directional_reclaim)
+    float reaccept_quality_score = not reaccept_flag ? 0.0 : clamp_unsigned(32.0 + body_ratio * 28.0 + (bullish_seed ? bullish_close_quality : bearish_close_quality) * 24.0 + (vwap_supportive ? 10.0 : 4.0))
+    [reaccept_flag, reaccept_quality_score]
+
+calc_continuation_resumption_state(bool seed_valid_input, DirectionalBias seed_bias_input, ContinuationPath path_candidate_input, float release_zone_high_input, float release_zone_low_input, float value_zone_high_input, float value_zone_low_input, float session_vwap_input, float atr_value_input, float hold_buffer_atr_multiple, float reaccept_buffer_atr_multiple, float body_ratio_min_input, float close_quality_min_input, int resumption_window_input, bool pullback_valid_input, bool hold_valid_input, bool reference_loss_flag_input, bool reaccept_flag_input, float reaccept_quality_score_input, bool value_hold_valid_input, bool non_reversion_flag_input, bool directional_drift_flag_input, bool drift_resumption_flag_input, float drift_persistence_score_input, bool shared_failure_flag_input) =>
+    var int active_reaccept_bar = na
+    var int active_resumption_deadline = na
+    var float active_reaccept_signal_high = na
+    var float active_reaccept_signal_low = na
+    var float active_reaccept_signal_close = na
+    var bool active_resumption = false
+
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float bullish_close_quality = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float bearish_close_quality = candle_range > 0 ? (high - close) / candle_range : 0.5
+    float hold_buffer = atr_value_input * hold_buffer_atr_multiple
+    float reaccept_buffer = atr_value_input * reaccept_buffer_atr_multiple
+    bool bullish_seed = seed_bias_input == DirectionalBias.bullish
+
+    if not seed_valid_input or reference_loss_flag_input or shared_failure_flag_input
+        active_reaccept_bar := na
+        active_resumption_deadline := na
+        active_reaccept_signal_high := na
+        active_reaccept_signal_low := na
+        active_reaccept_signal_close := na
+        active_resumption := false
+
+    if reaccept_flag_input
+        active_reaccept_bar := bar_index
+        active_resumption_deadline := bar_index + resumption_window_input
+        active_reaccept_signal_high := high
+        active_reaccept_signal_low := low
+        active_reaccept_signal_close := close
+        active_resumption := false
+
+    bool reaccept_recent = not na(active_reaccept_bar) and not na(active_resumption_deadline) and bar_index >= active_reaccept_bar and bar_index <= active_resumption_deadline
+    bool bullish_resumption_quality = close > open and body_ratio >= body_ratio_min_input and bullish_close_quality >= close_quality_min_input * 0.90
+    bool bearish_resumption_quality = close < open and body_ratio >= body_ratio_min_input and bearish_close_quality >= close_quality_min_input * 0.90
+    bool bullish_signal_break = reaccept_recent and not na(active_reaccept_signal_high) and (close > active_reaccept_signal_high or high > active_reaccept_signal_high + reaccept_buffer * 0.35)
+    bool bearish_signal_break = reaccept_recent and not na(active_reaccept_signal_low) and (close < active_reaccept_signal_low or low < active_reaccept_signal_low - reaccept_buffer * 0.35)
+    bool bullish_resume_expand = reaccept_recent and bullish_resumption_quality and atr_value_input > 0 and candle_range >= atr_value_input * 0.75 and close > release_zone_high_input + hold_buffer * 0.35 and (na(session_vwap_input) or close >= session_vwap_input)
+    bool bearish_resume_expand = reaccept_recent and bearish_resumption_quality and atr_value_input > 0 and candle_range >= atr_value_input * 0.75 and close < release_zone_low_input - hold_buffer * 0.35 and (na(session_vwap_input) or close <= session_vwap_input)
+    bool pullback_resumption_flag = seed_valid_input and (bullish_seed ? (bullish_signal_break or bullish_resume_expand) : seed_bias_input == DirectionalBias.bearish ? (bearish_signal_break or bearish_resume_expand) : false)
+    bool drift_resumption_quality_now = drift_resumption_flag_input and (bullish_seed ? bullish_close_quality >= 0.55 : seed_bias_input == DirectionalBias.bearish ? bearish_close_quality >= 0.55 : false)
+
+    if pullback_resumption_flag
+        active_resumption := true
+        active_reaccept_bar := na
+        active_resumption_deadline := na
+        active_reaccept_signal_high := na
+        active_reaccept_signal_low := na
+        active_reaccept_signal_close := na
+    else if pullback_valid_input
+        active_resumption := false
+
+    bool reaccept_timed_out = not na(active_resumption_deadline) and bar_index > active_resumption_deadline and not pullback_resumption_flag
+    bool continuation_failed_flag = seed_valid_input and (shared_failure_flag_input or reference_loss_flag_input or reaccept_timed_out)
+    float pullback_resumption_quality = not (pullback_resumption_flag or active_resumption) ? 0.0 : clamp_unsigned(math.max(reaccept_quality_score_input, 48.0) + (pullback_resumption_flag ? 16.0 : 8.0) + (bullish_seed ? bullish_close_quality : bearish_close_quality) * 16.0 + (atr_value_input > 0 and candle_range >= atr_value_input * 0.75 ? 10.0 : 0.0))
+    float drift_resumption_quality = not drift_resumption_flag_input ? 0.0 : clamp_unsigned(math.max(drift_persistence_score_input, 42.0) + (drift_resumption_quality_now ? 14.0 : 8.0) + (bullish_seed ? bullish_close_quality : bearish_close_quality) * 20.0 + (atr_value_input > 0 and candle_range >= atr_value_input * V1_CONTINUATION_DRIFT_RESUMPTION_RANGE_ATR ? 10.0 : 0.0))
+    float resumption_quality_score = pullback_resumption_flag or active_resumption ? pullback_resumption_quality : drift_resumption_flag_input ? drift_resumption_quality : 0.0
+
+    ContinuationPath continuation_path = ContinuationPath.none
+    ContinuationState continuation_state = ContinuationState.none
+    if continuation_failed_flag
+        continuation_path := path_candidate_input
+        continuation_state := ContinuationState.continuation_failed
+        active_resumption := false
+    else if active_resumption or pullback_resumption_flag
+        continuation_path := ContinuationPath.pullback
+        continuation_state := ContinuationState.resumption
+    else if reaccept_flag_input or reaccept_recent
+        continuation_path := ContinuationPath.pullback
+        continuation_state := ContinuationState.reaccept
+    else if hold_valid_input
+        continuation_path := ContinuationPath.pullback
+        continuation_state := ContinuationState.hold_valid
+    else if pullback_valid_input
+        continuation_path := ContinuationPath.pullback
+        continuation_state := ContinuationState.pullback_phase
+    else if drift_resumption_flag_input
+        continuation_path := ContinuationPath.drift
+        continuation_state := ContinuationState.drift_resumption
+    else if directional_drift_flag_input
+        continuation_path := ContinuationPath.drift
+        continuation_state := ContinuationState.directional_drift
+    else if non_reversion_flag_input
+        continuation_path := ContinuationPath.drift
+        continuation_state := ContinuationState.non_reversion
+    else if value_hold_valid_input
+        continuation_path := ContinuationPath.drift
+        continuation_state := ContinuationState.value_hold
+    else if seed_valid_input
+        continuation_path := path_candidate_input
+        continuation_state := ContinuationState.seeded
+
+    [continuation_path, continuation_state, continuation_failed_flag, pullback_resumption_flag or drift_resumption_flag_input or active_resumption, resumption_quality_score]
+
+calc_continuation_lane_summary(bool seed_valid_input, DirectionalBias seed_bias_input, ContinuationPath continuation_path_input, ContinuationState continuation_state_input, float seed_confidence_input, float pullback_depth_score_input, float hold_quality_score_input, float reaccept_quality_score_input, float drift_persistence_score_input, float resumption_quality_score_input, bool continuation_failed_flag_input) =>
+    string lane_name = "Continuation"
+    string lane_bias = bias_to_text(seed_bias_input)
+    float lane_confidence = 0.0
+    if continuation_state_input == ContinuationState.resumption or continuation_state_input == ContinuationState.drift_resumption
+        lane_confidence := resumption_quality_score_input
+    else if continuation_state_input == ContinuationState.reaccept
+        lane_confidence := math.max(reaccept_quality_score_input, hold_quality_score_input)
+    else if continuation_state_input == ContinuationState.hold_valid
+        lane_confidence := hold_quality_score_input
+    else if continuation_state_input == ContinuationState.pullback_phase
+        lane_confidence := pullback_depth_score_input
+    else if continuation_state_input == ContinuationState.directional_drift
+        lane_confidence := math.max(drift_persistence_score_input, 44.0)
+    else if continuation_state_input == ContinuationState.non_reversion
+        lane_confidence := clamp_unsigned(drift_persistence_score_input * 0.85)
+    else if continuation_state_input == ContinuationState.value_hold
+        lane_confidence := clamp_unsigned(drift_persistence_score_input * 0.75)
+    else if continuation_state_input == ContinuationState.seeded
+        lane_confidence := clamp_unsigned(seed_confidence_input * 0.60)
+    else if continuation_state_input == ContinuationState.continuation_failed
+        lane_confidence := clamp_unsigned(math.max(math.max(hold_quality_score_input, reaccept_quality_score_input), drift_persistence_score_input) * 0.60 + 12.0)
+    else if seed_valid_input
+        lane_confidence := seed_confidence_input * 0.45
+    string lane_setup_tier = lane_summary_setup_tier(lane_confidence)
+    string lane_actionability_seed = "No Action"
+    if (continuation_state_input == ContinuationState.resumption or continuation_state_input == ContinuationState.drift_resumption) and lane_confidence >= 58.0
+        lane_actionability_seed := "Watch"
+    else if (continuation_state_input == ContinuationState.reaccept or continuation_state_input == ContinuationState.directional_drift) and lane_confidence >= 50.0
+        lane_actionability_seed := "Watch"
+    else if lane_confidence >= 35.0
+        lane_actionability_seed := "Informational"
+    string lane_actionability = lane_summary_actionability(lane_actionability_seed, lane_confidence)
+    string lane_lead_state = continuation_path_text(continuation_path_input) + " / " + continuation_state_text(continuation_state_input)
+    string lane_runner_up_context = "Need maintenance evidence"
+    if not seed_valid_input
+        lane_runner_up_context := "Need accepted expansion seed"
+    else if continuation_state_input == ContinuationState.seeded
+        lane_runner_up_context := "Accepted seed armed; path not selected yet"
+    else if continuation_state_input == ContinuationState.pullback_phase
+        lane_runner_up_context := "Pullback in progress"
+    else if continuation_state_input == ContinuationState.hold_valid
+        lane_runner_up_context := "Hold respected, need reaccept"
+    else if continuation_state_input == ContinuationState.reaccept
+        lane_runner_up_context := "Need resumption follow-through"
+    else if continuation_state_input == ContinuationState.resumption
+        lane_runner_up_context := "Trend maintenance active"
+    else if continuation_state_input == ContinuationState.value_hold
+        lane_runner_up_context := "Holding outside value without retrace"
+    else if continuation_state_input == ContinuationState.non_reversion
+        lane_runner_up_context := "No meaningful reversion yet"
+    else if continuation_state_input == ContinuationState.directional_drift
+        lane_runner_up_context := "Directional drift maintaining"
+    else if continuation_state_input == ContinuationState.drift_resumption
+        lane_runner_up_context := "Drift renewed into push"
+    else if continuation_state_input == ContinuationState.continuation_failed
+        lane_runner_up_context := "Reversal/Trap handoff favored"
+    string lane_trigger_state = lane_summary_trigger_state("None")
+    string lane_market_fit = "No accepted expansion seed"
+    if continuation_state_input == ContinuationState.pullback_phase
+        lane_market_fit := "Accepted move retracing into release zone"
+    else if continuation_state_input == ContinuationState.hold_valid
+        lane_market_fit := "Release zone still holding"
+    else if continuation_state_input == ContinuationState.reaccept
+        lane_market_fit := "Correct-side reclaim from hold"
+    else if continuation_state_input == ContinuationState.resumption
+        lane_market_fit := "Continuation resuming after hold"
+    else if continuation_state_input == ContinuationState.value_hold
+        lane_market_fit := "Accepted move holding outside value"
+    else if continuation_state_input == ContinuationState.non_reversion
+        lane_market_fit := "No meaningful value reversion"
+    else if continuation_state_input == ContinuationState.directional_drift
+        lane_market_fit := "Directional drift maintaining without retest"
+    else if continuation_state_input == ContinuationState.drift_resumption
+        lane_market_fit := "Drift continuation renewed higher/lower"
+    else if continuation_state_input == ContinuationState.continuation_failed
+        lane_market_fit := "Continuation failed back into handoff risk"
+    else if continuation_state_input == ContinuationState.seeded
+        lane_market_fit := "Accepted expansion seeded; waiting for pullback or drift maintenance"
+    string lane_handoff_hint = lane_summary_handoff_hint(continuation_failed_flag_input ? "Reversal/Trap" : "None")
+    [lane_name, lane_bias, lane_confidence, lane_setup_tier, lane_actionability, lane_lead_state, lane_runner_up_context, lane_trigger_state, lane_market_fit, lane_handoff_hint]
+
+// @function Public host-callable live continuation summary surface. Returns the standardized 10-field primitive tuple.
+export calc_continuation_live_summary(
+    int regime_fast_length_input,
+    int regime_slow_length_input,
+    int regime_compression_length_input,
+    float regime_compression_threshold_input,
+    int structure_pivot_left_input,
+    int structure_pivot_right_input,
+    int structure_basis_length_input,
+    float structure_displacement_atr_input,
+    int fair_value_atr_length_input,
+    float fair_value_extreme_atr_input,
+    float continuation_pullback_min_input,
+    float continuation_pullback_max_input,
+    float continuation_hold_buffer_atr_input,
+    float continuation_break_buffer_atr_input,
+    float continuation_reaccept_buffer_atr_input,
+    float continuation_body_ratio_min_input,
+    float continuation_close_quality_min_input,
+    int continuation_memory_bars_input,
+    int continuation_resumption_window_input) =>
+    [regime_state_export, _, _] = calc_regime(regime_fast_length_input, regime_slow_length_input, regime_compression_length_input, fair_value_atr_length_input, regime_compression_threshold_input)
+    [structure_state_export, structure_score_export, _, _, structure_basis_value_export] = calc_structure(structure_pivot_left_input, structure_pivot_right_input, structure_basis_length_input, structure_displacement_atr_input)
+    [session_vwap_value_export, extension_score_export] = calc_fair_value_extension(fair_value_atr_length_input, fair_value_extreme_atr_input)
+    float atr_value_export = ta.atr(fair_value_atr_length_input)
+    float pdh_value_export = request.security(syminfo.tickerid, "D", high[1], barmerge.gaps_off, barmerge.lookahead_off)
+    float pdl_value_export = request.security(syminfo.tickerid, "D", low[1], barmerge.gaps_off, barmerge.lookahead_off)
+    bool compression_eligible_export = regime_state_export == RegimeState.compression and structure_state_export != StructureState.bullish and structure_state_export != StructureState.bearish
+
+    [seed_valid_export, seed_bias_export, seed_release_zone_high_export, seed_release_zone_low_export, seed_release_reference_export, seed_value_zone_high_export, seed_value_zone_low_export, seed_start_bar_export, seed_confidence_export, _, _, _, _, _, _, _, _, _] = calc_continuation_seed_context(compression_eligible_export, structure_basis_value_export, structure_score_export, session_vwap_value_export, atr_value_export, continuation_memory_bars_input, continuation_hold_buffer_atr_input, continuation_reaccept_buffer_atr_input)
+    [pullback_valid_export, pullback_depth_score_export, _, _, _] = calc_continuation_pullback_context(seed_valid_export, seed_bias_export, seed_release_zone_high_export, seed_release_zone_low_export, seed_release_reference_export, seed_start_bar_export, session_vwap_value_export, atr_value_export, continuation_pullback_min_input, continuation_pullback_max_input, continuation_hold_buffer_atr_input, continuation_break_buffer_atr_input, continuation_memory_bars_input)
+    [hold_valid_export, hold_quality_score_export, reference_loss_flag_export, hold_recent_flag_export, _] = calc_continuation_hold_context(seed_valid_export, pullback_valid_export, seed_bias_export, seed_release_zone_high_export, seed_release_zone_low_export, seed_release_reference_export, session_vwap_value_export, structure_basis_value_export, pdh_value_export, pdl_value_export, atr_value_export, continuation_hold_buffer_atr_input, continuation_break_buffer_atr_input)
+    [value_hold_valid_export, non_reversion_flag_export, directional_drift_flag_export, drift_resumption_flag_export, drift_persistence_score_export, _, _] = calc_continuation_drift_context(seed_valid_export, seed_bias_export, seed_value_zone_high_export, seed_value_zone_low_export, session_vwap_value_export, structure_basis_value_export, atr_value_export, pullback_valid_export, pullback_depth_score_export, continuation_pullback_min_input)
+    [reaccept_flag_export, reaccept_quality_score_export] = calc_continuation_reaccept_event(seed_valid_export, hold_valid_export, hold_recent_flag_export, reference_loss_flag_export, seed_bias_export, seed_release_zone_high_export, seed_release_zone_low_export, session_vwap_value_export, atr_value_export, continuation_reaccept_buffer_atr_input, continuation_body_ratio_min_input, continuation_close_quality_min_input)
+    ContinuationPath path_candidate_export = pullback_valid_export or hold_valid_export or reaccept_flag_export ? ContinuationPath.pullback : value_hold_valid_export or non_reversion_flag_export or directional_drift_flag_export or drift_resumption_flag_export ? ContinuationPath.drift : ContinuationPath.none
+    [_, _, _, shared_failure_flag_export, _, _] = calc_continuation_failure_context(seed_valid_export, seed_bias_export, seed_value_zone_high_export, seed_value_zone_low_export, session_vwap_value_export, atr_value_export, continuation_break_buffer_atr_input, path_candidate_export, hold_valid_export, reaccept_flag_export, value_hold_valid_export, non_reversion_flag_export, drift_persistence_score_export)
+    [continuation_path_export, continuation_state_export, continuation_failed_flag_export, _, resumption_quality_score_export] = calc_continuation_resumption_state(seed_valid_export, seed_bias_export, path_candidate_export, seed_release_zone_high_export, seed_release_zone_low_export, seed_value_zone_high_export, seed_value_zone_low_export, session_vwap_value_export, atr_value_export, continuation_hold_buffer_atr_input, continuation_reaccept_buffer_atr_input, continuation_body_ratio_min_input, continuation_close_quality_min_input, continuation_resumption_window_input, pullback_valid_export, hold_valid_export, reference_loss_flag_export, reaccept_flag_export, reaccept_quality_score_export, value_hold_valid_export, non_reversion_flag_export, directional_drift_flag_export, drift_resumption_flag_export, drift_persistence_score_export, shared_failure_flag_export)
+
+    calc_continuation_lane_summary(seed_valid_export, seed_bias_export, continuation_path_export, continuation_state_export, seed_confidence_export, pullback_depth_score_export, hold_quality_score_export, reaccept_quality_score_export, drift_persistence_score_export, resumption_quality_score_export, continuation_failed_flag_export)

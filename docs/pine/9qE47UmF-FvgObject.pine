@@ -1,0 +1,768 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © no1x
+
+//@version=6
+library("FvgObject", true)
+
+// FvgObject Library
+// v2, 2025.06.12
+
+// This code's style is based on the recommendations from the Pine Script User Manual's Style guide:
+//    https://www.tradingview.com/pine-script-docs/writing/style-guide/
+
+
+
+import no1x/FvgTypes/2         as types 
+import no1x/FvgCalculations/2  as calc 
+
+
+
+//#region ———————————————————— Functions
+
+
+// @function                            Draws the initial visual representation of the FVG object on the chart.
+//                                      This includes the main FVG box, and its midline (if enabled). 
+//                                      The separate box label is now handled entirely by updateDrawings.
+// @param this     (types.fvgObject)    The FVG object instance to be drawn. Core properties (top, bottom,
+//                                      startTime, isBullish, tfType) should be pre-initialized. This method will
+//                                      initialize `boxId`, `midLineId`, and
+//                                      `currentTop`/`currentBottom` (if currently `na`) on this object.
+// @param settings (types.drawSettings) A `drawSettings` object providing all visual parameters.
+//                                      Reads display settings (colors, styles, visibility for boxes, midlines,
+//                                      box extension) relevant to `this.tfType`.
+//                                      Note: Cannot be qualified as 'simple'.
+export method draw(types.fvgObject this, types.drawSettings settings) =>
+    // --- Initialize Local Drawing Settings ---
+    bool   shouldShowBoxes     = settings.shouldShowBoxes
+    bool   shouldShowMidpoint  = settings.shouldShowMidpoint
+    bool   shouldShowBorder    = settings.shouldShowBoxBorder
+    bool   shouldExtendBox     = settings.shouldExtendBoxes
+    int    boxLength           = settings.boxLengthBars
+    color  midColor            = settings.midpointColorInput
+    color  borderColor         = settings.boxBorderColor
+    int    boxBorderWidth      = settings.boxBorderWidth
+    string boxBorderStyle      = settings.boxBorderStyle
+    int    midLineWidth        = settings.midLineWidthInput
+    string midpointLineStyle   = settings.midpointLineStyleInput
+
+    // --- Determine Resolved Box Color ---
+    color resolvedBoxColor = na
+    if this.isBullish
+        resolvedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.lvBullColor : settings.bullBoxColor
+    else
+        resolvedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.lvBearColor : settings.bearBoxColor
+
+    // --- Core Drawing Operations ---
+    if not (na(this.top) or na(this.bottom) or na(this.startTime))
+        float midY = math.avg(this.top, this.bottom)
+        int    rightTime       = shouldExtendBox ? settings.currentTime + (time - time[1]) : this.startTime + (time - time[1]) * boxLength
+        string boxExtendStyle  = shouldExtendBox ? extend.right : extend.none
+        string lineExtendStyle = shouldExtendBox ? extend.right : extend.none 
+        int    lineEndTime     = rightTime
+
+        // Draw main FVG box
+        if shouldShowBoxes and na(this.boxId)
+            this.boxId := box.new(
+                 left         = this.startTime,
+                 top          = this.top,
+                 right        = rightTime,
+                 bottom       = this.bottom,
+                 xloc         = xloc.bar_time,
+                 bgcolor      = resolvedBoxColor,
+                 border_color = shouldShowBorder ? borderColor : na,
+                 border_width = shouldShowBorder ? boxBorderWidth : 0,
+                 border_style = shouldShowBorder ? boxBorderStyle : line.style_solid,
+                 extend       = boxExtendStyle)
+
+        // Draw FVG midline
+        if shouldShowMidpoint and na(this.midLineId)
+            this.midLineId := line.new(
+                 x1     = this.startTime,
+                 y1     = midY,
+                 x2     = lineEndTime,
+                 y2     = midY,
+                 xloc   = xloc.bar_time,
+                 color  = midColor,
+                 style  = midpointLineStyle,
+                 width  = midLineWidth,
+                 extend = lineExtendStyle) 
+
+        // --- Initialize FVG Current Boundary Fields ---
+        if na(this.currentTop)
+            this.currentTop    := this.top
+        if na(this.currentBottom)
+            this.currentBottom := this.bottom
+
+
+// @function                        Checks if the FVG has been fully mitigated by the current bar's price action.
+// @param this    (types.fvgObject) The FVG object instance. Reads `this.isMitigated`, `this.isVisible`,
+//                                  `this.isBullish`, `this.top`, `this.bottom`. Updates `this.isMitigated` and
+//                                  `this.mitigationTime` if full mitigation occurs.
+// @param highVal (series float)    The high price of the current bar, used for mitigation check.
+// @param lowVal  (series float)    The low price of the current bar, used for mitigation check.
+export method updateMitigation(types.fvgObject this, series float highVal, series float lowVal) =>
+    // --- Check and Update Mitigation Status ---
+    if not this.isMitigated and this.isVisible
+        if not (na(this.top) or na(this.bottom)) 
+            bool fvgIsBullish = this.isBullish
+            if calc.checkMitigation(fvgIsBullish, this.top, this.bottom, highVal, lowVal)
+                this.isMitigated    := true
+                this.mitigationTime := time
+
+
+// @function                            Checks for and processes partial fills of the FVG.
+// @param this     (types.fvgObject)    The FVG object instance. Reads `this.isMitigated`, `this.isVisible`,
+//                                      `this.isBullish`, `this.currentTop`, `this.currentBottom`, original `this.top`/`this.bottom`,
+//                                      `this.startTime`, `this.tfType`, `this.isLV`. Updates `this.currentTop` or
+//                                      `this.currentBottom`, creates/updates `this.mitigatedBoxId`, and may update `this.boxId`'s
+//                                      top/bottom to reflect the filled portion.
+// @param highVal  (series float)       The high price of the current bar, used for partial fill check.
+// @param lowVal   (series float)       The low price of the current bar, used for partial fill check.
+// @param settings (types.drawSettings) The drawing settings. Reads timeframe-specific colors for mitigated
+//                                      boxes (e.g., `settings.mitigatedBullBoxColor`, `settings.mitigatedLvBullColor`),
+//                                      box extension settings (`settings.shouldExtendBoxes`, `settings.shouldExtendMtfBoxes`, etc.),
+//                                      and `settings.currentTime` to style and position the `mitigatedBoxId` and potentially adjust the main `boxId`.
+export method updatePartialFill(types.fvgObject this, series float highVal, series float lowVal, types.drawSettings settings) =>
+    // --- Process Partial Fill ---
+    if not this.isMitigated and this.isVisible
+        if not (na(this.currentTop) or na(this.currentBottom) or na(this.top) or na(this.bottom) or na(this.startTime)) 
+            
+            // --- Check for Partial Mitigation ---
+            bool fvgIsBullish = this.isBullish
+            float partialLevel = calc.checkPartialMitigation(fvgIsBullish, this.currentTop, this.currentBottom, highVal, lowVal)
+
+            if not na(partialLevel)
+                // --- Determine Timeframe-Specific Settings for Mitigated Box ---
+                color mitigatedBoxColor = na
+                bool  extendBoxes       = false 
+                int   boxLengthBars     = 0
+
+                switch this.tfType
+                    types.tfType.MTF =>
+                        extendBoxes   := settings.shouldExtendMtfBoxes
+                        boxLengthBars := settings.mtfBoxLengthBars
+                        if this.isBullish
+                            mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.lvBullColor : settings.mtfMitigatedBullBoxColor
+                        else
+                            mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.mtfMitigatedBearBoxColor
+                    types.tfType.HTF =>
+                        extendBoxes   := settings.shouldExtendHtfBoxes
+                        boxLengthBars := settings.htfBoxLengthBars
+                        if this.isBullish
+                            mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.htfMitigatedBullBoxColor
+                        else
+                            mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.htfMitigatedBearBoxColor
+                    => 
+                        extendBoxes   := settings.shouldExtendBoxes
+                        boxLengthBars := settings.boxLengthBars
+                        if this.isBullish
+                            mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.lvBullColor : settings.mitigatedBullBoxColor
+                        else
+                            mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.mitigatedBearBoxColor
+
+                int    rightTime      = extendBoxes ? settings.currentTime + (time - time[1]) : this.startTime + (time - time[1]) * boxLengthBars
+                string boxExtendStyle = extendBoxes ? extend.right : extend.none
+
+                // --- Manage Mitigated Box Drawing ---
+                if na(this.mitigatedBoxId)
+                    float mitTop    = this.isBullish ? this.top : partialLevel
+                    float mitBottom = this.isBullish ? partialLevel : this.bottom
+                    this.mitigatedBoxId := box.new(
+                         left         = this.startTime,
+                         top          = mitTop,
+                         right        = rightTime,
+                         bottom       = mitBottom,
+                         xloc         = xloc.bar_time,
+                         bgcolor      = mitigatedBoxColor,
+                         border_color = na, 
+                         border_width = 0,
+                         border_style = line.style_solid,
+                         extend       = boxExtendStyle)
+                else
+                    if this.isBullish
+                        box.set_bottom(this.mitigatedBoxId, partialLevel)
+                    else
+                        box.set_top(this.mitigatedBoxId, partialLevel)
+                    box.set_bgcolor(this.mitigatedBoxId, mitigatedBoxColor)
+                    box.set_extend(this.mitigatedBoxId, boxExtendStyle)
+                    if not extendBoxes 
+                        box.set_right(this.mitigatedBoxId, rightTime)
+                    box.set_border_color(this.mitigatedBoxId, na)
+                    box.set_border_width(this.mitigatedBoxId, 0)
+                    box.set_border_style(this.mitigatedBoxId, line.style_solid)
+
+                // --- Update Main FVG Box for Partial Fill ---
+                if not na(this.boxId) 
+                    if this.isBullish
+                        box.set_top(this.boxId, partialLevel) 
+                    else
+                        box.set_bottom(this.boxId, partialLevel) 
+
+                // --- Update FVG Current Boundary ---
+                if this.isBullish
+                    this.currentTop := partialLevel
+                else
+                    this.currentBottom := partialLevel
+
+
+// @function                        Checks if the FVG's midline (50% level or Equilibrium) has been touched.
+// @param this    (types.fvgObject) The FVG object instance. Reads `this.midLineId`, `this.isMidlineTouched`,
+//                                  `this.top`, `this.bottom`. Updates `this.isMidlineTouched` if a touch occurs.
+// @param highVal (series float)    The high price of the current bar, used for midline touch check.
+// @param lowVal  (series float)    The low price of the current bar, used for midline touch check.
+export method checkMidlineTouch(types.fvgObject this, series float highVal, series float lowVal) =>
+    // --- Check and Update Midline Touch Status ---
+    if not na(this.midLineId) and not this.isMidlineTouched 
+        if not (na(this.top) or na(this.bottom)) 
+            float midY = math.avg(this.top, this.bottom)
+            if (highVal >= midY and lowVal <= midY) 
+                this.isMidlineTouched := true
+
+
+// @function                                Deletes all visual drawing objects associated with this FVG object.
+// @param this            (types.fvgObject) The FVG object instance. Deletes drawings referenced by `boxId`,
+//                                          `mitigatedBoxId`, `midLineId`, `mitLineId`, `boxLabelId`, `mitLineLabelId`,
+//                                          and potentially `testedBoxId`, `keptMitLineId`. Sets these ID fields to `na`.
+// @param deleteTestedToo (simple bool)     If true, also deletes drawings for "tested" FVGs 
+//                                          (i.e., `testedBoxId` and `keptMitLineId`).
+export method deleteDrawings(types.fvgObject this, simple bool deleteTestedToo = true) =>
+    // --- Delete Core FVG Drawing Objects ---
+    if not na(this.boxId)
+        box.delete(this.boxId)
+        this.boxId := na
+    if not na(this.mitigatedBoxId)
+        box.delete(this.mitigatedBoxId)
+        this.mitigatedBoxId := na
+    if not na(this.midLineId)
+        line.delete(this.midLineId)
+        this.midLineId := na
+    if not na(this.mitLineId)
+        line.delete(this.mitLineId)
+        this.mitLineId := na
+    if not na(this.boxLabelId)
+        label.delete(this.boxLabelId)
+        this.boxLabelId := na
+    if not na(this.mitLineLabelId)
+        label.delete(this.mitLineLabelId)
+        this.mitLineLabelId := na
+
+    // --- Conditionally Delete Tested FVG Drawings ---
+    if deleteTestedToo
+        if not na(this.testedBoxId)
+            box.delete(this.testedBoxId)
+            this.testedBoxId := na
+        if not na(this.keptMitLineId)
+            line.delete(this.keptMitLineId)
+            this.keptMitLineId := na
+
+
+// @function                                Manages the comprehensive update of all visual elements of an FVG object
+//                                          based on its current state (e.g., active, mitigated, partially filled) and visibility.
+//                                          It handles the drawing, updating, or deletion of FVG boxes (main and mitigated part),
+//                                          midlines, mitigation lines, and their associated labels.
+//                                          Visibility is determined by the `isVisibleNow` parameter and relevant `settings`
+//                                          (like `settings.shouldHideMitigated` or timeframe-specific show flags).
+//                                          This method is central to the FVG's visual lifecycle and includes optimization
+//                                          to avoid redundant drawing operations if the FVG's relevant state or appearance
+//                                          settings have not changed since the last bar.
+//                                          It also updates the FVG object's internal `prev_*` state fields for future optimization checks.
+// @param this         (types.fvgObject)    The FVG object instance to update. Reads most state fields (e.g.,
+//                                          `isMitigated`, `currentTop`, `tfType`, etc.) and updates all drawing ID fields
+//                                          (`boxId`, `midLineId`, etc.), `this.isVisible`, and all `this.prev_*` state fields.
+// @param isVisibleNow (series bool)        A flag indicating whether the FVG should be currently visible.
+//                                          Typically determined by external logic (e.g., visual range filter). Affects
+//                                          whether active FVG drawings are created/updated or deleted by this method.
+// @param settings     (types.drawSettings) A fully populated `drawSettings` object. This method extensively
+//                                          reads its fields (colors, styles, visibility toggles, timeframe strings, etc.)
+//                                          to render FVG components according to `this.tfType` and current state.
+//                                          `settings.currentTime` is critical for positioning elements like labels and extending drawings.
+//                                          Note: Cannot be qualified as 'simple'.
+export method updateDrawings(types.fvgObject this, series bool isVisibleNow, types.drawSettings settings) =>
+    // --- Determine if FVG State or Visibility Changed ---
+    bool hasStateChanged = na(this.prevCurrentTop)    or 
+      na(this.prevCurrentBottom)                      or
+      this.prevIsVisible        != isVisibleNow       or
+      this.prevIsMitigated      != this.isMitigated   or
+      this.prevCurrentTop       != this.currentTop    or
+      this.prevCurrentBottom    != this.currentBottom or
+      this.prevIsMidlineTouched != this.isMidlineTouched
+
+    bool wasVisible = this.prevIsVisible 
+    
+    // --- Timeframe-Specific Settings Initialization ---
+    bool   tfShouldExtendBoxes        = false
+    bool   tfShouldShowBoxLabels      = false
+    bool   tfShouldShowBoxes          = false
+    float  boxLabelOffsetXLocal       = 0.0
+
+    switch this.tfType
+        types.tfType.MTF =>
+            tfShouldExtendBoxes        := settings.shouldExtendMtfBoxes 
+            tfShouldShowBoxLabels      := settings.shouldShowMtfBoxLabels
+            tfShouldShowBoxes          := settings.shouldShowMtfBoxes
+            boxLabelOffsetXLocal       := settings.mtfBoxLabelOffsetX
+        types.tfType.HTF =>
+            tfShouldExtendBoxes        := settings.shouldExtendHtfBoxes 
+            tfShouldShowBoxLabels      := settings.shouldShowHtfBoxLabels
+            tfShouldShowBoxes          := settings.shouldShowHtfBoxes
+            boxLabelOffsetXLocal       := settings.htfBoxLabelOffsetX
+        => 
+            tfShouldExtendBoxes        := settings.shouldExtendBoxes 
+            tfShouldShowBoxLabels      := settings.shouldShowCurrentTfBoxLabels
+            tfShouldShowBoxes          := settings.shouldShowBoxes
+            boxLabelOffsetXLocal       := settings.boxLabelOffsetX
+
+    // --- Main Drawing Logic Block ---
+    if hasStateChanged
+        this.isVisible := isVisibleNow 
+
+        // --- Initialize Timeframe-Specific Drawing Settings ---
+        color  boxColor                   = na,    color  mitigatedBoxColor         = na,    color mitLineColor               = na,   color  boxBorderColor     = na
+        color  tfBoxLabelTextColor        = na,    color  keptMitLineColor          = na,    color midColor                   = na 
+        bool   localTfShouldShowBoxes     = false, bool   tfShouldShowBoxBorder     = false, bool  tfShouldShowMidpoint       = false
+        bool   tfShouldShowMitigationLine = false, bool   tfShouldShowMitLineLabels = false, bool  tfShouldKeepMitigatedLines = false 
+        int    boxLengthBars             = 0,      int    boxBorderWidth            = 0,     int   midLineWidth               = 0,    int    mitLineWidth       = 0
+        string boxBorderStyle            = "",     string midpointLineStyle         = "",    string mitigationLineStyle       = "",   string tfBoxLabelTextSize = ""
+        string tfString                  = "",     
+
+        switch this.tfType
+            types.tfType.MTF =>
+                localTfShouldShowBoxes     := settings.shouldShowMtfBoxes
+                boxLengthBars              := settings.mtfBoxLengthBars
+                tfBoxLabelTextColor        := settings.mtfBoxLabelTextColor
+                tfBoxLabelTextSize         := settings.mtfBoxLabelTextSize
+                tfShouldShowBoxBorder      := settings.shouldShowMtfBoxBorder
+                boxBorderWidth             := settings.mtfBoxBorderWidth
+                boxBorderStyle             := settings.mtfBoxBorderStyle
+                boxBorderColor             := settings.mtfBoxBorderColor
+                tfShouldShowMidpoint       := settings.shouldShowMtfMidpoint
+                midLineWidth               := settings.mtfMidLineWidthInput
+                midpointLineStyle          := settings.mtfMidpointLineStyleInput
+                midColor                   := settings.mtfMidpointColorInput
+                tfShouldShowMitigationLine := settings.shouldShowMtfMitigationLine
+                mitLineWidth               := settings.mtfMitLineWidthInput
+                mitigationLineStyle        := settings.mtfMitigationLineStyleInput
+                mitLineColor               := settings.mtfMitigationLineColorInput
+                tfShouldShowMitLineLabels  := settings.shouldShowMtfMitLineLabels
+                tfShouldKeepMitigatedLines := settings.shouldKeepMtfMitigatedLines
+                if this.isBullish
+                    boxColor          := settings.shouldClassifyLV and this.isLV ? settings.lvBullColor : settings.mtfBullBoxColor
+                    mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.mtfMitigatedBullBoxColor
+                    keptMitLineColor  := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.mtfMitigatedMitLineColor
+                else
+                    boxColor          := settings.shouldClassifyLV and this.isLV ? settings.lvBearColor : settings.mtfBearBoxColor
+                    mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.mtfMitigatedBearBoxColor
+                    keptMitLineColor  := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.mtfMitigatedMitLineColor
+            types.tfType.HTF =>
+                localTfShouldShowBoxes     := settings.shouldShowHtfBoxes
+                boxLengthBars              := settings.htfBoxLengthBars
+                tfBoxLabelTextColor        := settings.htfBoxLabelTextColor
+                tfBoxLabelTextSize         := settings.htfBoxLabelTextSize
+                tfShouldShowBoxBorder      := settings.shouldShowHtfBoxBorder
+                boxBorderWidth             := settings.htfBoxBorderWidth
+                boxBorderStyle             := settings.htfBoxBorderStyle
+                boxBorderColor             := settings.htfBoxBorderColor
+                tfShouldShowMidpoint       := settings.shouldShowHtfMidpoint
+                midLineWidth               := settings.htfMidLineWidthInput
+                midpointLineStyle          := settings.htfMidpointLineStyleInput
+                midColor                   := settings.htfMidpointColorInput
+                tfShouldShowMitigationLine := settings.shouldShowHtfMitigationLine
+                mitLineWidth               := settings.htfMitLineWidthInput
+                mitigationLineStyle        := settings.htfMitigationLineStyleInput
+                mitLineColor               := settings.htfMitigationLineColorInput
+                tfShouldShowMitLineLabels  := settings.shouldShowHtfMitLineLabels
+                tfShouldKeepMitigatedLines := settings.shouldKeepHtfMitigatedLines
+                if this.isBullish
+                    boxColor          := settings.shouldClassifyLV and this.isLV ? settings.lvBullColor : settings.htfBullBoxColor
+                    mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.htfMitigatedBullBoxColor
+                    keptMitLineColor  := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.htfMitigatedMitLineColor
+                else
+                    boxColor          := settings.shouldClassifyLV and this.isLV ? settings.lvBearColor : settings.htfBearBoxColor
+                    mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.htfMitigatedBearBoxColor
+                    keptMitLineColor  := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.htfMitigatedMitLineColor
+            => 
+                localTfShouldShowBoxes     := settings.shouldShowBoxes
+                boxLengthBars              := settings.boxLengthBars
+                tfBoxLabelTextColor        := settings.boxLabelTextColor
+                tfBoxLabelTextSize         := settings.boxLabelTextSize
+                tfShouldShowBoxBorder      := settings.shouldShowBoxBorder
+                boxBorderWidth             := settings.boxBorderWidth
+                boxBorderStyle             := settings.boxBorderStyle
+                boxBorderColor             := settings.boxBorderColor
+                tfShouldShowMidpoint       := settings.shouldShowMidpoint
+                midLineWidth               := settings.midLineWidthInput
+                midpointLineStyle          := settings.midpointLineStyleInput
+                midColor                   := settings.midpointColorInput
+                tfShouldShowMitigationLine := settings.shouldShowMitigationLine
+                mitLineWidth               := settings.mitLineWidthInput
+                mitigationLineStyle        := settings.mitigationLineStyleInput
+                mitLineColor               := settings.mitigationLineColorInput
+                tfShouldShowMitLineLabels  := settings.shouldShowCurrentTfMitLineLabels
+                tfShouldKeepMitigatedLines := settings.shouldKeepLtfMitigatedLines
+                if this.isBullish
+                    boxColor          := settings.shouldClassifyLV and this.isLV ? settings.lvBullColor : settings.bullBoxColor
+                    mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.mitigatedBullBoxColor
+                    keptMitLineColor  := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBullColor : settings.mitigatedMitLineColor
+                else
+                    boxColor          := settings.shouldClassifyLV and this.isLV ? settings.lvBearColor : settings.bearBoxColor
+                    mitigatedBoxColor := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.mitigatedBearBoxColor
+                    keptMitLineColor  := settings.shouldClassifyLV and this.isLV ? settings.mitigatedLvBearColor : settings.mitigatedMitLineColor
+
+        // --- Handle FVG Deletion or Hiding Based on Current State ---
+        if (this.isMitigated and settings.shouldHideMitigated)
+            this.deleteDrawings(true) 
+        else if (this.isMitigated and not settings.shouldHideMitigated)
+            if not na(this.boxId)
+                box.delete(this.boxId)
+                this.boxId := na
+            if not na(this.mitigatedBoxId)
+                box.delete(this.mitigatedBoxId)
+                this.mitigatedBoxId := na
+            if not na(this.midLineId)
+                line.delete(this.midLineId)
+                this.midLineId := na
+            if not na(this.boxLabelId)
+                label.delete(this.boxLabelId)
+                this.boxLabelId := na
+            if not na(this.mitLineId)
+                line.delete(this.mitLineId)
+                this.mitLineId := na
+            if not na(this.mitLineLabelId)
+                label.delete(this.mitLineLabelId)
+                this.mitLineLabelId := na
+        else if (not this.isMitigated and not isVisibleNow and wasVisible) 
+            this.deleteDrawings(false) 
+        
+        // --- Manage Drawings for "Tested" (Mitigated but Visible) FVGs ---
+        bool shouldShowTested = this.isMitigated and not settings.shouldHideMitigated and isVisibleNow 
+        if shouldShowTested and localTfShouldShowBoxes
+            int testedRightTime = na(this.mitigationTime) ? settings.currentTime : this.mitigationTime 
+            if na(this.testedBoxId)
+                this.testedBoxId := box.new(
+                  left         = this.startTime,  
+                  top          = this.top,
+                  right        = testedRightTime, 
+                  bottom       = this.bottom,
+                  xloc         = xloc.bar_time,   
+                  bgcolor      = mitigatedBoxColor, 
+                  border_color = tfShouldShowBoxBorder ? boxBorderColor : na,
+                  border_width = tfShouldShowBoxBorder ? boxBorderWidth : 0,
+                  border_style = tfShouldShowBoxBorder ? boxBorderStyle : line.style_solid,
+                  extend       = extend.none) 
+            else 
+                box.set_left(this.testedBoxId, this.startTime)
+                box.set_top(this.testedBoxId, this.top)
+                box.set_right(this.testedBoxId, testedRightTime)
+                box.set_bottom(this.testedBoxId, this.bottom)
+                box.set_bgcolor(this.testedBoxId, mitigatedBoxColor)
+                box.set_border_color(this.testedBoxId, tfShouldShowBoxBorder ? boxBorderColor : na)
+                box.set_border_width(this.testedBoxId, tfShouldShowBoxBorder ? boxBorderWidth : 0)
+                box.set_border_style(this.testedBoxId, tfShouldShowBoxBorder ? boxBorderStyle : line.style_solid)
+                box.set_extend(this.testedBoxId, extend.none)
+        else if not na(this.testedBoxId)
+            box.delete(this.testedBoxId)
+            this.testedBoxId := na
+
+        bool shouldKeepLine = this.isMitigated and tfShouldKeepMitigatedLines and tfShouldShowMitigationLine
+        if shouldKeepLine
+            float mitLevel        = this.isBullish ? this.bottom : this.top
+            int   keptLineEndTime = na(this.mitigationTime) ? settings.currentTime : this.mitigationTime
+            if na(this.keptMitLineId)
+                this.keptMitLineId := line.new(
+                  x1     = this.startTime,      
+                  y1     = mitLevel,
+                  x2     = keptLineEndTime,     
+                  y2     = mitLevel,
+                  xloc   = xloc.bar_time,       
+                  color  = keptMitLineColor, 
+                  style  = mitigationLineStyle, 
+                  width  = mitLineWidth,
+                  extend = extend.none) 
+            else 
+                line.set_x1(this.keptMitLineId, this.startTime)
+                line.set_y1(this.keptMitLineId, mitLevel)
+                line.set_x2(this.keptMitLineId, keptLineEndTime)
+                line.set_y2(this.keptMitLineId, mitLevel)
+                line.set_color(this.keptMitLineId, keptMitLineColor)
+                line.set_style(this.keptMitLineId, mitigationLineStyle)
+                line.set_width(this.keptMitLineId, mitLineWidth)
+                line.set_extend(this.keptMitLineId, extend.none)
+        else if not na(this.keptMitLineId)
+            line.delete(this.keptMitLineId)
+            this.keptMitLineId := na
+
+        // --- Manage Drawings for "Active" (Non-Mitigated and Visible) FVGs ---
+        bool shouldShowActive = not this.isMitigated and isVisibleNow
+        if shouldShowActive
+            int    rightTime       = tfShouldExtendBoxes ? settings.currentTime + (time - time[1]) : this.startTime + (time - time[1]) * boxLengthBars
+            string boxExtendStyle  = tfShouldExtendBoxes ? extend.right : extend.none
+            string lineExtendStyle = tfShouldExtendBoxes ? extend.right : extend.none 
+            int    lineEndTime     = rightTime 
+
+            // Manage main FVG box (unfilled portion)
+            if localTfShouldShowBoxes
+                if na(this.boxId)
+                    this.boxId := box.new(
+                      left         = this.startTime, 
+                      top          = this.currentTop, 
+                      right        = rightTime,      
+                      bottom       = this.currentBottom, 
+                      xloc         = xloc.bar_time,  
+                      bgcolor      = boxColor,
+                      border_color = tfShouldShowBoxBorder ? boxBorderColor : na,
+                      border_width = tfShouldShowBoxBorder ? boxBorderWidth : 0,
+                      border_style = tfShouldShowBoxBorder ? boxBorderStyle : line.style_solid,
+                      extend       = boxExtendStyle)
+                else 
+                    box.set_left(this.boxId, this.startTime)
+                    box.set_top(this.boxId, this.currentTop)
+                    box.set_right(this.boxId, rightTime)
+                    box.set_bottom(this.boxId, this.currentBottom)
+                    box.set_bgcolor(this.boxId, boxColor)
+                    box.set_extend(this.boxId, boxExtendStyle)
+                    box.set_border_color(this.boxId, tfShouldShowBoxBorder ? boxBorderColor : na)
+                    box.set_border_width(this.boxId, tfShouldShowBoxBorder ? boxBorderWidth : 0)
+                    box.set_border_style(this.boxId, tfShouldShowBoxBorder ? boxBorderStyle : line.style_solid)
+            else if not na(this.boxId)
+                box.delete(this.boxId)
+                this.boxId := na
+            
+            // Manage partially filled box
+            bool hasPartialFill = this.currentTop != this.top or this.currentBottom != this.bottom 
+            if localTfShouldShowBoxes and hasPartialFill
+                float mitTop    = this.isBullish ? this.top : this.currentBottom 
+                float mitBottom = this.isBullish ? this.currentTop : this.bottom 
+                if na(this.mitigatedBoxId)
+                    this.mitigatedBoxId := box.new(
+                      left         = this.startTime,   
+                      top          = mitTop,
+                      right        = rightTime,        
+                      bottom       = mitBottom,
+                      xloc         = xloc.bar_time,    
+                      bgcolor      = mitigatedBoxColor,
+                      border_color = na,               
+                      border_width = 0, 
+                      border_style = line.style_solid, 
+                      extend       = boxExtendStyle)
+                else 
+                    box.set_left(this.mitigatedBoxId, this.startTime)
+                    box.set_top(this.mitigatedBoxId, mitTop)
+                    box.set_right(this.mitigatedBoxId, rightTime)
+                    box.set_bottom(this.mitigatedBoxId, mitBottom)
+                    box.set_bgcolor(this.mitigatedBoxId, mitigatedBoxColor)
+                    box.set_extend(this.mitigatedBoxId, boxExtendStyle)
+            else if not na(this.mitigatedBoxId)
+                box.delete(this.mitigatedBoxId)
+                this.mitigatedBoxId := na
+            
+            // Manage Midline
+            if tfShouldShowMidpoint
+                if not this.isMidlineTouched
+                    if not (na(this.top) or na(this.bottom))
+                        float midY = math.avg(this.top, this.bottom) 
+                        if na(this.midLineId)
+                            this.midLineId := line.new(
+                              x1     = this.startTime,    
+                              y1     = midY,
+                              x2     = lineEndTime,       
+                              y2     = midY,
+                              xloc   = xloc.bar_time,     
+                              color  = midColor,
+                              style  = midpointLineStyle, 
+                              width  = midLineWidth, 
+                              extend = lineExtendStyle) 
+                        else 
+                            line.set_x1(this.midLineId, this.startTime)
+                            line.set_y1(this.midLineId, midY)
+                            line.set_x2(this.midLineId, lineEndTime)
+                            line.set_y2(this.midLineId, midY)
+                            line.set_color(this.midLineId, midColor)
+                            line.set_style(this.midLineId, midpointLineStyle)
+                            line.set_width(this.midLineId, midLineWidth)
+                            line.set_extend(this.midLineId, lineExtendStyle)
+                    else if not na(this.midLineId) 
+                        line.delete(this.midLineId)
+                        this.midLineId := na
+            else if not na(this.midLineId)
+                line.delete(this.midLineId)
+                this.midLineId := na
+            
+            // Manage Mitigation Line
+            if tfShouldShowMitigationLine 
+                float mitLevel = this.isBullish ? this.bottom : this.top 
+                if not na(mitLevel)
+                    int x2ForExtendedLine = this.startTime + (time - time[1])
+
+                    if na(this.mitLineId)
+                        this.mitLineId := line.new(
+                          x1     = this.startTime,      
+                          y1     = mitLevel,
+                          x2     = x2ForExtendedLine,   
+                          y2     = mitLevel,
+                          xloc   = xloc.bar_time,       
+                          color  = mitLineColor,
+                          style  = mitigationLineStyle, 
+                          width  = mitLineWidth, 
+                          extend = extend.right) 
+                    else 
+                        line.set_x1(this.mitLineId, this.startTime)
+                        line.set_y1(this.mitLineId, mitLevel)
+                        line.set_x2(this.mitLineId, x2ForExtendedLine)
+                        line.set_y2(this.mitLineId, mitLevel)
+                        line.set_color(this.mitLineId, mitLineColor)
+                        line.set_style(this.mitLineId, mitigationLineStyle)
+                        line.set_width(this.mitLineId, mitLineWidth)
+                        line.set_extend(this.mitLineId, extend.right)
+                else if not na(this.mitLineId) 
+                    line.delete(this.mitLineId)
+                    this.mitLineId := na
+            else if not na(this.mitLineId)
+                line.delete(this.mitLineId)
+                this.mitLineId := na
+
+            // --- Update static label properties only on state change ---
+            if tfShouldShowBoxLabels
+                string longTf         = ""
+                string shortTf        = ""
+                string boxLabelFormat = ""
+                
+                switch this.tfType
+                    types.tfType.MTF =>
+                        longTf         := settings.mtfTfString
+                        shortTf        := settings.mtfShortTfString
+                        boxLabelFormat := settings.mtfBoxLabelFormat
+                    types.tfType.HTF =>
+                        longTf         := settings.htfTfString
+                        shortTf        := settings.htfShortTfString
+                        boxLabelFormat := settings.htfBoxLabelFormat
+                    =>
+                        longTf         := settings.tfString
+                        shortTf        := settings.shortTfString
+                        boxLabelFormat := settings.boxLabelFormat
+                
+                float  originalSize   = math.abs(this.top - this.bottom)
+                float  remainingSize  = math.abs(this.currentTop - this.currentBottom)
+                string fillRatioText  = ""
+                if not na(originalSize) and not na(remainingSize) and originalSize > 0 and remainingSize < originalSize and remainingSize >= 0
+                    int fillPercentage = math.round((originalSize - remainingSize) / originalSize * 100)
+                    fillRatioText     := " %" + str.tostring(fillPercentage)
+                
+                string finalLabelText = switch boxLabelFormat
+                    "TF (Long) + FVG + %"  => longTf  + " FVG" + fillRatioText
+                    "TF (Short) + FVG + %" => shortTf + " FVG" + fillRatioText
+                    "TF (Long) + FVG"      => longTf  + " FVG"
+                    "TF (Short) + FVG"     => shortTf + " FVG"
+                    "TF (Short) + %"       => shortTf + fillRatioText
+                    "Only TF (Long)"       => longTf
+                    "Only TF (Short)"      => shortTf
+                    => ""
+                
+                if na(this.boxLabelId)
+                    this.boxLabelId := label.new(
+                      x         = settings.currentTime, 
+                      y         = this.isBullish ? this.currentTop : this.currentBottom,
+                      text      = finalLabelText,       
+                      xloc      = xloc.bar_time,
+                      color     = na, 
+                      textcolor = tfBoxLabelTextColor,       
+                      style     = label.style_label_left,
+                      size      = tfBoxLabelTextSize)
+                else 
+                    label.set_text(this.boxLabelId, finalLabelText)
+                    label.set_textcolor(this.boxLabelId, tfBoxLabelTextColor)
+                    label.set_size(this.boxLabelId, tfBoxLabelTextSize)
+            else if not na(this.boxLabelId)
+                label.delete(this.boxLabelId)
+                this.boxLabelId := na
+
+    // --- Fallback Deletion for Invisibility Not Caught by State Change ---
+    else if not isVisibleNow and wasVisible
+        this.deleteDrawings(false)
+
+    // --- CONTINUOUS LABEL UPDATE LOGIC ---
+    bool shouldShowActiveBoxLabel = not this.isMitigated and this.isVisible and tfShouldShowBoxes and tfShouldShowBoxLabels
+    if shouldShowActiveBoxLabel
+        if not na(this.boxLabelId)
+            float labelY = this.isBullish ? this.currentTop : this.currentBottom
+            label.set_y(this.boxLabelId, labelY)
+    
+            if tfShouldExtendBoxes
+                float timeOffsetMs = (time - time[1]) * boxLabelOffsetXLocal
+                int finalXtime = settings.currentTime + int(math.round(timeOffsetMs))
+                label.set_xloc(this.boxLabelId, finalXtime, xloc.bar_time)
+                label.set_style(this.boxLabelId, label.style_label_left)
+            else
+                label.set_xloc(this.boxLabelId, this.startTime, xloc.bar_time)
+                label.set_style(this.boxLabelId, label.style_label_right)
+    else 
+        if not na(this.boxLabelId)
+            label.delete(this.boxLabelId)
+            this.boxLabelId := na
+            
+    // --- CONTINUOUS MITIGATION LABEL UPDATE LOGIC ---
+    bool tfShouldShowMitLineLabels = false
+    bool tfMitLineLabelUseCustomColor = false
+    color tfMitLineLabelCustomColor = na
+    color defaultMitLineColor = na
+    string tfMitLineLabelSize = size.normal
+    float currentMitLabelOffsetX = 0.0
+    switch (this.tfType)
+        types.tfType.MTF =>
+            tfShouldShowMitLineLabels    := settings.shouldShowMtfMitigationLine and settings.shouldShowMtfMitLineLabels
+            currentMitLabelOffsetX       := settings.mtfMitLineLabelOffsetX
+            tfMitLineLabelUseCustomColor := settings.shouldMtfUseCustomMitLabelColor
+            tfMitLineLabelCustomColor    := settings.mtfMitLineLabelCustomColor
+            tfMitLineLabelSize           := settings.mtfMitLineLabelSize
+            defaultMitLineColor          := settings.mtfMitigationLineColorInput
+        types.tfType.HTF =>
+            tfShouldShowMitLineLabels    := settings.shouldShowHtfMitigationLine and settings.shouldShowHtfMitLineLabels
+            currentMitLabelOffsetX       := settings.htfMitLineLabelOffsetX
+            tfMitLineLabelUseCustomColor := settings.shouldHtfUseCustomMitLabelColor
+            tfMitLineLabelCustomColor    := settings.htfMitLineLabelCustomColor
+            tfMitLineLabelSize           := settings.htfMitLineLabelSize
+            defaultMitLineColor          := settings.htfMitigationLineColorInput
+        => 
+            tfShouldShowMitLineLabels    := settings.shouldShowMitigationLine and settings.shouldShowCurrentTfMitLineLabels
+            currentMitLabelOffsetX       := settings.currentTfMitLineLabelOffsetX
+            tfMitLineLabelUseCustomColor := settings.shouldLtfUseCustomMitLabelColor
+            tfMitLineLabelCustomColor    := settings.currentTfMitLineLabelCustomColor
+            tfMitLineLabelSize           := settings.currentTfMitLineLabelSize
+            defaultMitLineColor          := settings.mitigationLineColorInput
+    
+    if (not this.isMitigated and this.isVisible and tfShouldShowMitLineLabels)
+        float mitLevelForLabelUpdate = this.isBullish ? this.bottom : this.top
+        if not na(mitLevelForLabelUpdate)
+            int baseXtime = settings.currentTime
+            float timeOffsetMs = (time - time[1]) * currentMitLabelOffsetX
+            int finalXtime = baseXtime + int(math.round(timeOffsetMs))
+            color finalTextColor = tfMitLineLabelUseCustomColor ? tfMitLineLabelCustomColor : defaultMitLineColor
+            string priceOnlyLabelText = str.tostring(mitLevelForLabelUpdate, format.mintick)
+            if na(this.mitLineLabelId)
+                this.mitLineLabelId := label.new(
+                  x         = finalXtime, 
+                  y         = mitLevelForLabelUpdate, 
+                  text      = priceOnlyLabelText,
+                  xloc      = xloc.bar_time,
+                  style     = label.style_none,
+                  textcolor = finalTextColor,
+                  size      = tfMitLineLabelSize)
+            else
+                label.set_x(this.mitLineLabelId, finalXtime)
+                label.set_y(this.mitLineLabelId, mitLevelForLabelUpdate) 
+                label.set_textcolor(this.mitLineLabelId, finalTextColor)
+                label.set_size(this.mitLineLabelId, tfMitLineLabelSize)
+                label.set_text(this.mitLineLabelId, priceOnlyLabelText)
+        else if not na(this.mitLineLabelId)
+            label.delete(this.mitLineLabelId)
+            this.mitLineLabelId := na
+    else if not na(this.mitLineLabelId)
+        label.delete(this.mitLineLabelId)
+        this.mitLineLabelId := na
+
+    // --- Store Current FVG State for Next Bar's Comparison ---
+    this.prevIsMitigated      := this.isMitigated
+    this.prevCurrentTop       := this.currentTop
+    this.prevCurrentBottom    := this.currentBottom
+    this.prevIsVisible        := isVisibleNow 
+    this.prevIsMidlineTouched := this.isMidlineTouched
+//#endregion

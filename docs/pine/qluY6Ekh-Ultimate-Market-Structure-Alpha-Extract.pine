@@ -1,0 +1,516 @@
+//@version=6
+indicator("Ultimate Market Structure [Alpha Extract]", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// Constants
+TRANSPARENT = color.new(color.white, 100)
+
+// Input Parameters  
+swingLength = input.int(5, title="Swing Length", minval=2, maxval=50)
+showSwingPoints = input.bool(true, title="Show Swing Points")
+minSwingDistance = input.float(1.0, title="Min Swing Distance %", minval=0.1, maxval=10.0)
+useClosesForStructure = input.bool(true, title="Use Closes for Market Structure", tooltip="When enabled, uses candle closes instead of wicks for structure analysis")
+
+// Imbalance Zone Settings
+showImbalanceZones = input.bool(true, title="Show Imbalance Zones", group="Imbalance Zones")
+useMiddleBreak = input.bool(false, "Central Point Mitigation", group="Imbalance Zones", tooltip="Zones mitigated when center is touched")
+keepFilledZones = input.bool(true, "Preserve Filled Zones", group="Imbalance Zones")
+fvgExtensionBars = input.int(50, title="FVG Extension Length (bars)", minval=1, maxval=500, group="Imbalance Zones", tooltip="Number of bars to extend imbalance zones to the right")
+limitFvgExtension = input.bool(true, title="Limit FVG Extension", group="Imbalance Zones", tooltip="When enabled, FVG zones will have limited extension instead of infinite")
+
+// Structure Break Settings
+showBOS = input.bool(true, title="Show Break of Structure (BOS)", group="Structure Analysis")
+showDC = input.bool(true, title="Show Directional Change (DC)", group="Structure Analysis")
+structureLookback = input.int(15, title="Structure Analysis Period", minval=1, group="Structure Analysis")
+
+// Colors
+bullishColor = input.color(color.new(#089981, 0), title="Bullish Structure Color")
+bearishColor = input.color(color.new(#f23645, 0), title="Bearish Structure Color")
+
+// Imbalance Zone Colors
+bullishImbalanceColor = input.color(color.new(#28affd, 53), "Bullish Imbalance", group="Imbalance Zones", inline="BLIMP")
+bearishImbalanceColor = input.color(color.new(#ff5252, 52), "Bearish Imbalance", group="Imbalance Zones", inline="BRIMP") 
+centerLineColor = (color.new(#ffffff, 100))
+
+// Structure Break Colors
+continuationColor = color.rgb(42, 156, 44)
+reversalColor = color.rgb(255, 44, 44)
+bullishDCColor = color.rgb(42, 156, 44)
+bearishDCColor = color.rgb(255, 44, 44)
+
+// === UNIQUE MARKET STRUCTURE SYSTEM ===
+
+// Structure Trend Scoring System 
+type TrendScore
+    float momentum
+    float strength  
+    int direction    
+    int confidence   
+
+// Structure Point Classification 
+type StructurePoint
+    float price
+    int timeBar
+    string classification  
+    int significance      
+    bool isLiquidity
+    bool isBroken         
+
+// Structure Break Analysis 
+type StructureBreakEvent
+    float level
+    int breakBar
+    string breakType     
+    string trendChange    
+    TrendScore preTrend
+    TrendScore postTrend
+
+// Arrays for unique structure tracking
+var StructurePoint[] upperStructure = array.new<StructurePoint>()
+var StructurePoint[] lowerStructure = array.new<StructurePoint>()
+var StructureBreakEvent[] recentBreaks = array.new<StructureBreakEvent>()
+var TrendScore currentTrendState = TrendScore.new(0, 0, 0, 0)
+
+// Arrays for swing point tracking 
+var float[] swingHighs = array.new<float>()
+var float[] swingLows = array.new<float>()
+var int[] swingHighBars = array.new<int>()
+var int[] swingLowBars = array.new<int>()
+
+// Imbalance Management 
+type ImbalanceZone
+    box zoneBox
+    line centerLine
+    float upperLevel
+    float lowerLevel
+    float centerLevel
+    int creationBar
+    bool isBullish
+
+var ImbalanceZone[] bullishImbalances = array.new<ImbalanceZone>()
+var ImbalanceZone[] bearishImbalances = array.new<ImbalanceZone>()
+var color hiddenColor = color.new(color.white, 100)
+
+// === UNIQUE TREND ANALYSIS FUNCTIONS ===
+
+// Calculate trend momentum using rate of change and volatility
+calculateTrendMomentum(lookback) =>
+    if bar_index < lookback
+        0.0
+    else
+        priceChange = (close - close[lookback]) / close[lookback] * 100
+        avgVolatility = ta.atr(lookback) / close * 100
+        momentum = priceChange / (avgVolatility + 0.0001)  
+        momentum
+
+// Calculate trend strength using multiple timeframe correlation
+calculateTrendStrength(shortPeriod, longPeriod) =>
+    shortMA = ta.sma(close, shortPeriod)
+    longMA = ta.sma(close, longPeriod)
+    
+    separation = math.abs(shortMA - longMA) / longMA * 100
+    shortSlope = (shortMA - shortMA[5]) / shortMA[5] * 100
+    longSlope = (longMA - longMA[10]) / longMA[10] * 100
+    
+    slopeAlignment = shortSlope * longSlope > 0 ? 1.0 : 0.5
+    strength = separation * slopeAlignment
+    math.min(strength, 100.0)
+
+// Unique structure point classification
+classifyStructurePoint(currentPrice, previousPoints, isHigh) =>
+    if array.size(previousPoints) < 2
+        isHigh ? "peak_high" : "valley_low"
+    else
+        recent = array.get(previousPoints, array.size(previousPoints) - 1)
+        previous = array.get(previousPoints, array.size(previousPoints) - 2)
+        
+        if isHigh
+            if currentPrice > recent.price and recent.price > previous.price
+                "rising_high"
+            else if currentPrice < recent.price and recent.price < previous.price
+                "falling_high"
+            else
+                "peak_high"
+        else
+            if currentPrice > recent.price and recent.price > previous.price
+                "rising_low"
+            else if currentPrice < recent.price and recent.price < previous.price
+                "falling_low"
+            else
+                "valley_low"
+
+// Calculate structure significance (1-5 scale)
+calculateSignificance(price, points, isHigh) =>
+    if array.size(points) < 3
+        3
+    else
+        distances = array.new<float>()
+        for i = 0 to math.min(array.size(points) - 1, 4)
+            point = array.get(points, array.size(points) - 1 - i)
+            distance = math.abs(price - point.price) / point.price * 100
+            array.push(distances, distance)
+        
+        avgDistance = array.avg(distances)
+        significance = avgDistance > 5.0 ? 5 : avgDistance > 3.0 ? 4 : avgDistance > 2.0 ? 3 : avgDistance > 1.0 ? 2 : 1
+        math.round(significance)
+
+// === UNIQUE SWING DETECTION ===
+
+swingHighPrice = useClosesForStructure ? ta.pivothigh(close, swingLength, swingLength) : ta.pivothigh(high, swingLength, swingLength)
+swingLowPrice = useClosesForStructure ? ta.pivotlow(close, swingLength, swingLength) : ta.pivotlow(low, swingLength, swingLength)
+
+// Structure analysis swings
+structureHighPrice = useClosesForStructure ? ta.pivothigh(close, structureLookback, structureLookback) : ta.pivothigh(high, structureLookback, structureLookback)
+structureLowPrice = useClosesForStructure ? ta.pivotlow(close, structureLookback, structureLookback) : ta.pivotlow(low, structureLookback, structureLookback)
+
+// Process structure highs with unique classification
+if not na(structureHighPrice)
+    classification = classifyStructurePoint(structureHighPrice, upperStructure, true)
+    significance = calculateSignificance(structureHighPrice, upperStructure, true)
+    
+    newPoint = StructurePoint.new(
+         price = structureHighPrice,
+         timeBar = bar_index[structureLookback],
+         classification = classification,
+         significance = significance,
+         isLiquidity = false,
+         isBroken = false
+     )
+    
+    array.push(upperStructure, newPoint)
+    
+    if array.size(upperStructure) > 8
+        array.shift(upperStructure)
+
+if not na(structureLowPrice)
+    classification = classifyStructurePoint(structureLowPrice, lowerStructure, false)
+    significance = calculateSignificance(structureLowPrice, lowerStructure, false)
+    
+    newPoint = StructurePoint.new(
+         price = structureLowPrice,
+         timeBar = bar_index[structureLookback],
+         classification = classification,
+         significance = significance,
+         isLiquidity = false,
+         isBroken = false
+     )
+    
+    array.push(lowerStructure, newPoint)
+    
+    if array.size(lowerStructure) > 8
+        array.shift(lowerStructure)
+
+// == STRUCTURE BREAK DETECTION ===
+
+// Function to analyze structure breaks 
+analyzeStructureBreaks() =>
+    newTrendState = currentTrendState
+    
+    if array.size(upperStructure) > 0 and array.size(lowerStructure) > 0
+        latestHigh = array.get(upperStructure, array.size(upperStructure) - 1)
+        latestLow = array.get(lowerStructure, array.size(lowerStructure) - 1)
+        
+        momentum = calculateTrendMomentum(structureLookback)
+        strength = calculateTrendStrength(10, 20)
+        direction = momentum > 0.5 ? 1 : momentum < -0.5 ? -1 : 0
+        confidence = math.round(math.min(math.abs(momentum) * 20 + strength, 100))
+        
+        calculatedTrendState = TrendScore.new(momentum, strength, direction, confidence)
+        
+        bullishBreak = false
+        bearishBreak = false
+        
+        if useClosesForStructure
+            bullishBreak := close > latestHigh.price and not latestHigh.isBroken
+            bearishBreak := close < latestLow.price and not latestLow.isBroken
+        else
+            bullishBreak := high > latestHigh.price and not latestHigh.isBroken
+            bearishBreak := low < latestLow.price and not latestLow.isBroken
+        
+        if bullishBreak or bearishBreak
+            breakType = "neutral"
+            trendChange = "neutral"
+            
+            if bullishBreak
+                if currentTrendState.direction == 1 and calculatedTrendState.direction == 1
+                    breakType := "continuation"
+                    trendChange := calculatedTrendState.strength > currentTrendState.strength ? "strengthening" : "weakening"
+                else if currentTrendState.direction == -1 and calculatedTrendState.direction == 1
+                    breakType := "reversal"
+                    trendChange := "shifting"
+                
+                brokenPoint = StructurePoint.new(latestHigh.price, latestHigh.timeBar, latestHigh.classification, latestHigh.significance, latestHigh.isLiquidity, true)
+                array.set(upperStructure, array.size(upperStructure) - 1, brokenPoint)
+                
+                breakEvent = StructureBreakEvent.new(
+                     level = latestHigh.price,
+                     breakBar = bar_index,
+                     breakType = breakType,
+                     trendChange = trendChange,
+                     preTrend = currentTrendState,
+                     postTrend = calculatedTrendState
+                 )
+                
+                array.push(recentBreaks, breakEvent)
+                
+                if showBOS and breakType == "continuation"
+                    line.new(x1=latestHigh.timeBar, y1=latestHigh.price, x2=bar_index, y2=latestHigh.price, 
+                             color=continuationColor, style=line.style_dashed, width=1)
+                    label.new(x=math.round((latestHigh.timeBar + bar_index) / 2), y=latestHigh.price, text="BOS", 
+                             color=TRANSPARENT, style=label.style_label_down, textcolor=continuationColor, size=size.tiny)
+                
+                if showDC and breakType == "reversal"
+                    line.new(x1=latestHigh.timeBar, y1=latestHigh.price, x2=bar_index, y2=latestHigh.price, 
+                             color=bullishDCColor, style=line.style_dashed, width=1)
+                    label.new(x=math.round((latestHigh.timeBar + bar_index) / 2), y=latestHigh.price, text="DC", 
+                             color=TRANSPARENT, style=label.style_label_down, textcolor=bullishDCColor, size=size.tiny)
+            
+            if bearishBreak
+                if currentTrendState.direction == -1 and calculatedTrendState.direction == -1
+                    breakType := "continuation"
+                    trendChange := calculatedTrendState.strength > currentTrendState.strength ? "strengthening" : "weakening"
+                else if currentTrendState.direction == 1 and calculatedTrendState.direction == -1
+                    breakType := "reversal"
+                    trendChange := "shifting"
+                
+                brokenPoint = StructurePoint.new(latestLow.price, latestLow.timeBar, latestLow.classification, latestLow.significance, latestLow.isLiquidity, true)
+                array.set(lowerStructure, array.size(lowerStructure) - 1, brokenPoint)
+                
+                breakEvent = StructureBreakEvent.new(
+                     level = latestLow.price,
+                     breakBar = bar_index,
+                     breakType = breakType,
+                     trendChange = trendChange,
+                     preTrend = currentTrendState,
+                     postTrend = calculatedTrendState
+                 )
+                
+                array.push(recentBreaks, breakEvent)
+                
+                if showBOS and breakType == "continuation"
+                    line.new(x1=latestLow.timeBar, y1=latestLow.price, x2=bar_index, y2=latestLow.price, 
+                             color=reversalColor, style=line.style_dashed, width=1)
+                    label.new(x=math.round((latestLow.timeBar + bar_index) / 2), y=latestLow.price, text="BOS", 
+                             color=TRANSPARENT, style=label.style_label_up, textcolor=reversalColor, size=size.tiny)
+                
+                if showDC and breakType == "reversal"
+                    line.new(x1=latestLow.timeBar, y1=latestLow.price, x2=bar_index, y2=latestLow.price, 
+                             color=bearishDCColor, style=line.style_dashed, width=1)
+                    label.new(x=math.round((latestLow.timeBar + bar_index) / 2), y=latestLow.price, text="DC", 
+                             color=TRANSPARENT, style=label.style_label_up, textcolor=bearishDCColor, size=size.tiny)
+        
+        newTrendState := calculatedTrendState
+        
+        if array.size(recentBreaks) > 5
+            array.shift(recentBreaks)
+    
+    newTrendState
+
+currentTrendState := analyzeStructureBreaks()
+
+// === IMBALANCE DETECTION ===
+
+detectPriceImbalance() =>
+    if barstate.isconfirmed[1]
+        currentHigh = high
+        currentLow = low
+        currentOpen = open[1]
+        currentClose = close[1]
+        
+        refHigh = high[2]
+        refLow = low[2]
+        
+        rightEdge = limitFvgExtension ? bar_index + fvgExtensionBars : bar_index + 1
+        extensionType = limitFvgExtension ? extend.none : extend.right
+        
+        if currentOpen > currentClose
+            if currentHigh - refLow < 0
+                upperBound = currentClose - (currentClose - refLow)
+                lowerBound = currentClose - (currentClose - currentHigh)  
+                centerPoint = (upperBound + lowerBound) / 2
+                
+                if upperBound > lowerBound
+                    newZone = ImbalanceZone.new(
+                         zoneBox = box.new(bar_index, upperBound, rightEdge, lowerBound, 
+                                           bgcolor=bullishImbalanceColor, border_color=hiddenColor, extend=extensionType),
+                         centerLine = useMiddleBreak ? line.new(bar_index, centerPoint, rightEdge, centerPoint, 
+                                                               color=centerLineColor, extend=extensionType) : na,
+                         upperLevel = upperBound,
+                         lowerLevel = lowerBound,
+                         centerLevel = centerPoint,
+                         creationBar = bar_index,
+                         isBullish = true
+                     )
+                    array.push(bullishImbalances, newZone)
+        
+        if currentOpen < currentClose
+            if currentLow - refHigh > 0
+                upperBound = currentClose - (currentClose - currentLow)
+                lowerBound = currentClose - (currentClose - refHigh)
+                centerPoint = (upperBound + lowerBound) / 2
+                
+                if upperBound > lowerBound
+                    newZone = ImbalanceZone.new(
+                         zoneBox = box.new(bar_index, upperBound, rightEdge, lowerBound, 
+                                           bgcolor=bearishImbalanceColor, border_color=hiddenColor, extend=extensionType),
+                         centerLine = useMiddleBreak ? line.new(bar_index, centerPoint, rightEdge, centerPoint, 
+                                                               color=centerLineColor, extend=extensionType) : na,
+                         upperLevel = upperBound,
+                         lowerLevel = lowerBound,
+                         centerLevel = centerPoint,
+                         creationBar = bar_index,
+                         isBullish = false
+                     )
+                    array.push(bearishImbalances, newZone)
+
+processImbalanceMitigation() =>
+    if array.size(bullishImbalances) > 0
+        i = array.size(bullishImbalances) - 1
+        while i >= 0
+            zone = array.get(bullishImbalances, i)
+            mitigationLevel = useMiddleBreak ? zone.centerLevel : zone.upperLevel
+            
+            if high >= mitigationLevel
+                if keepFilledZones
+                    box.set_extend(zone.zoneBox, extend.none)
+                    box.set_right(zone.zoneBox, bar_index)
+                    if not na(zone.centerLine)
+                        line.set_extend(zone.centerLine, extend.none)
+                        line.set_x2(zone.centerLine, bar_index)
+                else
+                    box.delete(zone.zoneBox)
+                    if not na(zone.centerLine)
+                        line.delete(zone.centerLine)
+                
+                array.remove(bullishImbalances, i)
+            else
+                if high > zone.lowerLevel and high < zone.upperLevel
+                    box.set_bottom(zone.zoneBox, high)
+                    newZone = ImbalanceZone.new(zone.zoneBox, zone.centerLine, zone.upperLevel, high, zone.centerLevel, zone.creationBar, zone.isBullish)
+                    array.set(bullishImbalances, i, newZone)
+            i := i - 1
+    
+    if array.size(bearishImbalances) > 0
+        j = array.size(bearishImbalances) - 1
+        while j >= 0
+            zone = array.get(bearishImbalances, j)
+            mitigationLevel = useMiddleBreak ? zone.centerLevel : zone.lowerLevel
+            
+            if low <= mitigationLevel
+                if keepFilledZones
+                    box.set_extend(zone.zoneBox, extend.none)
+                    box.set_right(zone.zoneBox, bar_index)
+                    if not na(zone.centerLine)
+                        line.set_extend(zone.centerLine, extend.none)
+                        line.set_x2(zone.centerLine, bar_index)
+                else
+                    box.delete(zone.zoneBox)
+                    if not na(zone.centerLine)
+                        line.delete(zone.centerLine)
+                
+                array.remove(bearishImbalances, j)
+            else
+                if low < zone.upperLevel and low > zone.lowerLevel
+                    box.set_top(zone.zoneBox, low)
+                    newZone = ImbalanceZone.new(zone.zoneBox, zone.centerLine, low, zone.lowerLevel, zone.centerLevel, zone.creationBar, zone.isBullish)
+                    array.set(bearishImbalances, j, newZone)
+            j := j - 1
+
+if showImbalanceZones
+    detectPriceImbalance()
+
+processImbalanceMitigation()
+
+// === SWING POINT DISPLAY WITH MARKET STRUCTURE ANALYSIS ===
+
+// Check minimum distance between swings
+isValidSwing(newPrice, isHigh) =>
+    if isHigh
+        if array.size(swingHighs) == 0
+            true
+        else
+            lastHigh = array.get(swingHighs, array.size(swingHighs) - 1)
+            math.abs(newPrice - lastHigh) / lastHigh * 100 >= minSwingDistance
+    else
+        if array.size(swingLows) == 0
+            true
+        else
+            lastLow = array.get(swingLows, array.size(swingLows) - 1)
+            math.abs(newPrice - lastLow) / lastLow * 100 >= minSwingDistance
+
+// Process swing highs with market structure analysis
+if not na(swingHighPrice) and isValidSwing(swingHighPrice, true) and showSwingPoints
+    swingLabel = "H"
+    labelColor = color.new(bearishColor, 70)
+    
+    if array.size(swingHighs) > 0
+        lastHigh = array.get(swingHighs, array.size(swingHighs) - 1)
+        if swingHighPrice > lastHigh
+            swingLabel := "HH"
+            labelColor := color.new(bullishColor, 70)
+        else
+            swingLabel := "LH"
+            labelColor := color.new(bearishColor, 70)
+    
+    array.push(swingHighs, swingHighPrice)
+    array.push(swingHighBars, bar_index[swingLength])
+    
+    if array.size(swingHighs) > 10
+        array.shift(swingHighs)
+        array.shift(swingHighBars)
+    
+    label.new(
+         x = bar_index[swingLength],
+         y = swingHighPrice, 
+         text = swingLabel,
+         style = label.style_label_down,
+         color = labelColor,
+         textcolor = color.white,
+         size = size.tiny
+     )
+
+// Process swing lows with market structure analysis
+if not na(swingLowPrice) and isValidSwing(swingLowPrice, false) and showSwingPoints
+    swingLabel = "L"
+    labelColor = color.new(bullishColor, 70)
+    
+    if array.size(swingLows) > 0
+        lastLow = array.get(swingLows, array.size(swingLows) - 1)
+        if swingLowPrice > lastLow
+            swingLabel := "HL"
+            labelColor := color.new(bullishColor, 70)
+        else
+            swingLabel := "LL"
+            labelColor := color.new(bearishColor, 70)
+    
+    array.push(swingLows, swingLowPrice)
+    array.push(swingLowBars, bar_index[swingLength])
+    
+    if array.size(swingLows) > 10
+        array.shift(swingLows)
+        array.shift(swingLowBars)
+    
+    label.new(
+         x = bar_index[swingLength],
+         y = swingLowPrice, 
+         text = swingLabel,
+         style = label.style_label_up,
+         color = labelColor,
+         textcolor = color.white,
+         size = size.tiny
+     )
+
+
+// Alert conditions
+var int lastBullImbalanceCount = 0
+var int lastBearImbalanceCount = 0
+currentBullImbalanceCount = array.size(bullishImbalances)
+currentBearImbalanceCount = array.size(bearishImbalances)
+
+alertcondition(currentBullImbalanceCount > lastBullImbalanceCount, "New Bullish Imbalance", "A new Bullish Imbalance Zone has been identified")
+alertcondition(currentBearImbalanceCount > lastBearImbalanceCount, "New Bearish Imbalance", "A new Bearish Imbalance Zone has been identified")
+alertcondition(currentBullImbalanceCount < lastBullImbalanceCount, "Bullish Imbalance Filled", "A Bullish Imbalance Zone has been filled")
+alertcondition(currentBearImbalanceCount < lastBearImbalanceCount, "Bearish Imbalance Filled", "A Bearish Imbalance Zone has been filled")
+
+if barstate.isconfirmed
+    lastBullImbalanceCount := currentBullImbalanceCount
+    lastBearImbalanceCount := currentBearImbalanceCount

@@ -1,0 +1,145 @@
+// © 2025 PROInvesting.co
+//@version=5
+indicator("PRO Investing - Apex Engine", shorttitle="PRO Investing - Engine+", overlay=false, max_lines_count = 500, max_labels_count = 500)
+
+// SECTION: CORE ADAPTATION INPUTS
+// =============================================================================
+var G_ENGINE = "Synaptic Engine"
+volatility_period = input.int(100, "Volatility Period for Auto-Tuning", group=G_ENGINE, tooltip="This single period drives the auto-adjustment of all momentum lengths. Higher = more stable, slower to adapt.")
+opt_lookback = input.int(50, "Optimization Lookback (Bars)", group=G_ENGINE)
+switch_sensitivity = input.float(0.05, "Switch Sensitivity (Hysteresis %)", minval=0, maxval=1, step=0.01, group=G_ENGINE, tooltip="A new parameter must have a score this much % higher than the active one to take over. Prevents flickering.")
+
+// SECTION: ADVANCED CONFIGURATION & FILTERS
+// =============================================================================
+var G_FILTERS = "Advanced Configuration & Filters"
+price_source = input.source(close, "1. Price Source for Momentum", group=G_FILTERS, tooltip="The source price used for the core momentum (ROC) calculation.")
+ma_type = input.string("EMA", "2. Trend Filter MA Type", options=["EMA", "SMA", "HMA"], group=G_FILTERS)
+trend_ma_len = input.int(200, "3. Trend Filter MA Length", group=G_FILTERS)
+use_ma_slope_filter = input.bool(true, "4. Filter by MA Slope", group=G_FILTERS, tooltip="ON: An uptrend is defined by the MA rising (allows 'buy the dip' signals).\nOFF: Trend is defined by price being strictly above/below the MA.")
+adx_len = input.int(14, "5. ADX Length", group=G_FILTERS)
+adx_threshold = input.int(20, "6. ADX Trend Threshold", group=G_FILTERS)
+
+// SECTION: HELPER FUNCTIONS
+// =============================================================================
+f_getMA(src, len, type) =>
+    switch type
+        "SMA" => ta.sma(src, len)
+        "HMA" => ta.hma(src, len)
+        => ta.ema(src, len) // Default to EMA
+
+// SECTION: AUTO-ADJUSTING & SELF-OPTIMIZING ENGINE
+// =============================================================================
+atr_for_tuning = ta.atr(volatility_period)
+avg_atr = ta.sma(atr_for_tuning, volatility_period)
+volatility_factor = avg_atr > 0 ? atr_for_tuning / avg_atr : 1.0
+base_len = math.round(volatility_period / 4 / volatility_factor)
+dynamic_mid_len = math.max(5, base_len) 
+dynamic_fast_len = math.max(3, math.round(dynamic_mid_len / 2)) 
+dynamic_slow_len = math.max(10, math.round(dynamic_mid_len * 2)) 
+
+roc_fast = ta.roc(price_source, dynamic_fast_len)
+roc_mid = ta.roc(price_source, dynamic_mid_len)
+roc_slow = ta.roc(price_source, dynamic_slow_len)
+price_change = ta.change(price_source)
+score_fast = ta.correlation(roc_fast, price_change, opt_lookback)
+score_mid = ta.correlation(roc_mid, price_change, opt_lookback)
+score_slow = ta.correlation(roc_slow, price_change, opt_lookback)
+
+var int active_mom_len = dynamic_mid_len
+var float active_score = 0.0
+var series float active_roc_series = roc_mid
+
+best_score = math.max(score_fast, score_mid, score_slow)
+best_len = score_fast == best_score ? dynamic_fast_len : score_mid == best_score ? dynamic_mid_len : dynamic_slow_len
+
+if (best_score > active_score * (1 + switch_sensitivity))
+    active_mom_len := best_len
+    active_score := best_score
+else 
+    if (active_mom_len == dynamic_fast_len)
+        active_score := score_fast
+    else if (active_mom_len == dynamic_mid_len)
+        active_score := score_mid
+    else
+        active_score := score_slow
+
+if (active_mom_len == dynamic_fast_len)
+    active_roc_series := roc_fast
+else if (active_mom_len == dynamic_mid_len)
+    active_roc_series := roc_mid
+else
+    active_roc_series := roc_slow
+    
+f_getVelocity(roc_source, smooth_len) =>
+    velocity_base = ta.ema(roc_source, smooth_len)
+    highest_v = ta.highest(velocity_base, 50)
+    lowest_v = ta.lowest(velocity_base, 50)
+    range_v = highest_v - lowest_v
+    velocity_line = 100 * (2 * ((velocity_base - lowest_v) / (range_v + 1e-9)) - 1)
+    signal_line = ta.ema(velocity_line, 9)
+    [velocity_line, signal_line]
+
+[velocity_line, signal_line] = f_getVelocity(active_roc_series, 5)
+
+// SECTION: IMPROVED SIGNAL LOGIC
+// =============================================================================
+trend_ma = f_getMA(close, trend_ma_len, ma_type)
+[_, _, adx_val] = ta.dmi(adx_len, adx_len)
+
+is_uptrend_slope = ta.rising(trend_ma, 1)
+is_downtrend_slope = ta.falling(trend_ma, 1)
+is_uptrend_strict = close > trend_ma
+is_downtrend_strict = close < trend_ma
+
+is_uptrend_ok = (use_ma_slope_filter ? is_uptrend_slope : is_uptrend_strict) and adx_val > adx_threshold
+is_downtrend_ok = (use_ma_slope_filter ? is_downtrend_slope : is_downtrend_strict) and adx_val > adx_threshold
+
+cross_up = ta.crossover(velocity_line, signal_line)
+cross_down = ta.crossunder(velocity_line, signal_line)
+
+buy_signal = is_uptrend_ok and cross_up and (velocity_line[1] < 0 or velocity_line > 0)
+sell_signal = is_downtrend_ok and cross_down and (velocity_line[1] > 0 or velocity_line < 0)
+
+// SECTION: OSCILLATOR PLOTTING
+// =============================================================================
+bgcolor(is_uptrend_ok ? color.new(color.green, 90) : is_downtrend_ok ? color.new(color.red, 90) : color.new(color.gray, 95))
+
+col_fast = color.new(#00BCD4, 0)
+col_mid = color.new(#FFC107, 0)
+col_slow = color.new(#E91E63, 0)
+active_color = active_mom_len == dynamic_fast_len ? col_fast : active_mom_len == dynamic_mid_len ? col_mid : col_slow
+
+plot(velocity_line, "Velocity", color=active_color, linewidth=2)
+plot(signal_line, "Signal", color=color.new(color.white, 30), linewidth=1)
+
+ob_level = hline(80, "Overbought", color.new(color.red, 70))
+hline(0, "Zero Line", color.new(color.gray, 50))
+os_level = hline(-80, "Oversold", color.new(color.green, 70))
+fill(ob_level, os_level, color.new(color.purple, 95))
+
+plotshape(buy_signal, "Buy", style=shape.triangleup, location=location.bottom, color=color.new(color.lime, 0), size=size.small)
+plotshape(sell_signal, "Sell", style=shape.triangledown, location=location.top, color=color.new(color.red, 0), size=size.small)
+
+// SECTION: DASHBOARD
+// =============================================================================
+var table perf_table = table.new(position.bottom_right, 3, 4, border_width=1)
+if (barstate.islast)
+    is_active_fast = active_mom_len == dynamic_fast_len
+    is_active_mid = active_mom_len == dynamic_mid_len
+    is_active_slow = active_mom_len == dynamic_slow_len
+    
+    table.cell(perf_table, 0, 0, "Parameter (Auto)", bgcolor=color.new(color.blue, 70))
+    table.cell(perf_table, 1, 0, "Correlation", bgcolor=color.new(color.blue, 70))
+    table.cell(perf_table, 2, 0, "Status", bgcolor=color.new(color.blue, 70))
+    
+    table.cell(perf_table, 0, 1, "Fast (" + str.tostring(dynamic_fast_len) + ")", bgcolor=is_active_fast ? col_fast : color.gray)
+    table.cell(perf_table, 1, 1, str.tostring(score_fast, "#.###"), bgcolor=is_active_fast ? col_fast : color.gray)
+    table.cell(perf_table, 2, 1, is_active_fast ? "ACTIVE" : "", text_color=color.white, bgcolor=is_active_fast ? color.green : color.gray)
+    
+    table.cell(perf_table, 0, 2, "Mid (" + str.tostring(dynamic_mid_len) + ")", bgcolor=is_active_mid ? col_mid : color.gray)
+    table.cell(perf_table, 1, 2, str.tostring(score_mid, "#.###"), bgcolor=is_active_mid ? col_mid : color.gray)
+    table.cell(perf_table, 2, 2, is_active_mid ? "ACTIVE" : "", text_color=color.white, bgcolor=is_active_mid ? color.green : color.gray)
+    
+    table.cell(perf_table, 0, 3, "Slow (" + str.tostring(dynamic_slow_len) + ")", bgcolor=is_active_slow ? col_slow : color.gray)
+    table.cell(perf_table, 1, 3, str.tostring(score_slow, "#.###"), bgcolor=is_active_slow ? col_slow : color.gray)
+    table.cell(perf_table, 2, 3, is_active_slow ? "ACTIVE" : "", text_color=color.white, bgcolor=is_active_slow ? color.green : color.gray)

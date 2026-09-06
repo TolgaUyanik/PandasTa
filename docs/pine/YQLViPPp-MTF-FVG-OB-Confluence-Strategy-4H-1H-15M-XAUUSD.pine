@@ -1,0 +1,452 @@
+//@version=6
+strategy("MTF FVG + OB Confluence Strategy (4H -> 1H -> 15M) | XAUUSD",
+     overlay = true, initial_capital = 10000, currency = currency.USD,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0,
+     slippage = 2, pyramiding = 0,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// =====================================================================================
+// STRATEGY VERSION of the MTF FVG + OB Confluence system.
+//
+// FIX vs. the previous revision: the engulfing entry trigger used to be pulled from a
+// SEPARATE lower timeframe via request.security() (e.g. 1min), which only produces a
+// valid sample once per CHART bar -- so unless the chart was loaded on that exact lower
+// timeframe, the entry condition almost never fired and the Strategy Tester showed
+// "0 trades" / an empty report. That separate pull has been REMOVED. The engulfing
+// trigger now evaluates directly on the chart's own bars (open/close/high/low of the
+// current and previous bar), so it fires on every chart bar close, on whatever
+// timeframe you load the chart on. No special "Entry Trigger Timeframe" setting or
+// chart/timeframe alignment is required anymore.
+//
+// Recommended: load the chart on the SAME timeframe as "15M Timeframe" below (default
+// 15) so the zone-formation timeframe and the entry-trigger timeframe are the same
+// series -- this gives the cleanest, most reliable signal count.
+//
+// Also changed to make the report populate out of the box:
+//   - "Require Full 4H+1H+15M Confluence" now defaults to OFF (uses 15M+1H alignment
+//     only). Turn it back ON once you've confirmed trades/SL/TP work, if you want the
+//     stricter triple-timeframe filter.
+//   - "Only Trade London / NY AM Killzones" now defaults to OFF. Turn back ON once
+//     you've confirmed the base strategy trades.
+//
+// SL / TP: every position is closed via strategy.exit(), which carries BOTH a stop=
+// (stop-loss) and limit= (take-profit) price on three scaled targets (TP1/TP2/TP3 =
+// Fibonacci extensions of the initial risk distance, closing 33/33/34% of size). SL/TP
+// was never actually missing from this script -- an empty report just means the entry
+// conditions never triggered a single time, which the entry-trigger fix above solves.
+// =====================================================================================
+
+// ------------------------------- INPUTS ------------------------------------
+grp_tf = "Confluence Timeframes"
+tf4H  = input.timeframe("240", "4H Timeframe", group = grp_tf)
+tf1H  = input.timeframe("60",  "1H Timeframe", group = grp_tf)
+tf15M = input.timeframe("15",  "15M Timeframe", group = grp_tf)
+
+grp_gen = "General"
+maxZonesPerTF   = input.int(12, "Max Zones Tracked per Timeframe", minval = 4, maxval = 30, group = grp_gen)
+showTable       = input.bool(true, "Show Confluence Status Table", group = grp_gen)
+requireFullConf = input.bool(false, "Require Full 4H+1H+15M Confluence (stricter, fewer trades)", group = grp_gen)
+
+grp_fvg = "Fair Value Gap"
+showFVG4H  = input.bool(true, "Show 4H FVG",  group = grp_fvg)
+showFVG1H  = input.bool(true, "Show 1H FVG",  group = grp_fvg)
+showFVG15M = input.bool(true, "Show 15M FVG", group = grp_fvg)
+
+grp_ob = "Order Block"
+showOB4H  = input.bool(true, "Show 4H OB",  group = grp_ob)
+showOB1H  = input.bool(true, "Show 1H OB",  group = grp_ob)
+showOB15M = input.bool(true, "Show 15M OB", group = grp_ob)
+obAtrMult = input.float(1.2, "OB Displacement ATR Multiplier", minval = 0.5, maxval = 3.0, step = 0.1, group = grp_ob)
+includeBreakers = input.bool(true, "Detect Breaker Blocks (mitigated OB flips bias)", group = grp_ob)
+
+grp_zone = "Zone Display"
+keepMitigated = input.bool(true, "Keep Mitigated Zones Visible (greyed out)", group = grp_zone)
+
+grp_risk = "Risk Management"
+riskPercent      = input.float(1.0, "Risk % per Trade", minval = 0.1, maxval = 5.0, step = 0.1, group = grp_risk)
+slBufferATRmult  = input.float(0.1, "SL Buffer (x 15M ATR)", minval = 0.0, maxval = 1.0, step = 0.05, group = grp_risk)
+minStopDistance  = input.float(0.1, "Minimum Stop Distance (price units)", minval = 0.01, group = grp_risk)
+fibTP1           = input.float(1.618, "TP1 Extension (x Risk)", minval = 0.1, step = 0.1, group = grp_risk)
+fibTP2           = input.float(2.618, "TP2 Extension (x Risk)", minval = 0.1, step = 0.1, group = grp_risk)
+fibTP3           = input.float(4.236, "TP3 Extension (x Risk)", minval = 0.1, step = 0.1, group = grp_risk)
+
+grp_sess = "Session Filter"
+useKillzoneFilter = input.bool(false, "Only Trade London / NY AM Killzones", group = grp_sess)
+londonSession = input.session("0700-1000", "London Killzone (UTC)", group = grp_sess)
+nyamSession   = input.session("1230-1500", "NY AM Killzone (UTC)", group = grp_sess)
+
+grp_col = "Colors"
+col4H       = input.color(color.new(color.blue, 82),   "4H Zone Fill",  group = grp_col)
+col1H       = input.color(color.new(color.purple, 78), "1H Zone Fill",  group = grp_col)
+colBull15   = input.color(color.new(color.teal, 55),    "15M Bullish Zone Fill", group = grp_col)
+colBear15   = input.color(color.new(color.red, 55),     "15M Bearish Zone Fill", group = grp_col)
+colBuyZone  = input.color(color.new(color.lime, 25),    "BUY ZONE Highlight",  group = grp_col)
+colSellZone = input.color(color.new(color.red, 25),     "SELL ZONE Highlight", group = grp_col)
+
+// ------------------------------- ZONE TYPE ----------------------------------
+type Zone
+    float top
+    float bottom
+    bool isBullish
+    bool mitigated = false
+    string kind
+    int barIndexCreated
+    box b = na
+
+var array<Zone> zones4H  = array.new<Zone>()
+var array<Zone> zones1H  = array.new<Zone>()
+var array<Zone> zones15M = array.new<Zone>()
+
+// ------------------------------- HTF DATA PULL -------------------------------
+f_getHTFData() =>
+    [time, time[1], time[2], time[3], high[1], high[2], high[3], low[1], low[2], low[3],
+     open[1], open[2], close[1], close[2], ta.atr(14)[1]]
+
+[t4H,  t1_4H,  t2_4H,  t3_4H,  h1_4H,  h2_4H,  h3_4H,  l1_4H,  l2_4H,  l3_4H,  o1_4H,  o2_4H,  c1_4H,  c2_4H,  atr1_4H]  = request.security(syminfo.tickerid, tf4H,  f_getHTFData(), lookahead = barmerge.lookahead_off)
+[t1H,  t1_1H,  t2_1H,  t3_1H,  h1_1H,  h2_1H,  h3_1H,  l1_1H,  l2_1H,  l3_1H,  o1_1H,  o2_1H,  c1_1H,  c2_1H,  atr1_1H]  = request.security(syminfo.tickerid, tf1H,  f_getHTFData(), lookahead = barmerge.lookahead_off)
+[t15M, t1_15M, t2_15M, t3_15M, h1_15M, h2_15M, h3_15M, l1_15M, l2_15M, l3_15M, o1_15M, o2_15M, c1_15M, c2_15M, atr1_15M] = request.security(syminfo.tickerid, tf15M, f_getHTFData(), lookahead = barmerge.lookahead_off)
+
+newBar4H  = not na(t4H)  and ta.change(t4H)  != 0
+newBar1H  = not na(t1H)  and ta.change(t1H)  != 0
+newBar15M = not na(t15M) and ta.change(t15M) != 0
+
+// ------------------------------- ZONE BUILDERS -------------------------------
+f_pushZone(array<Zone> zones, float top, float bottom, bool isBullish, string kind, string tfLabel, int leftTime, color fillCol, int maxZones) =>
+    z = Zone.new(top = top, bottom = bottom, isBullish = isBullish, kind = kind, barIndexCreated = bar_index)
+    z.b := box.new(left = leftTime, top = top, right = leftTime, bottom = bottom, xloc = xloc.bar_time,
+         border_color = isBullish ? color.new(color.teal, 20) : color.new(color.red, 20), bgcolor = fillCol, extend = extend.none,
+         text = tfLabel + " " + (isBullish ? "Bullish " : "Bearish ") + kind, text_color = color.white, text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_top)
+    array.unshift(zones, z)
+    while array.size(zones) > maxZones
+        old = array.pop(zones)
+        if not na(old.b)
+            box.delete(old.b)
+
+f_addFVG(array<Zone> zones, bool newBar, float hi1, float hi3, float lo1, float lo3, int t3, string tfLabel, bool showFlag, color fillCol, int maxZones) =>
+    if newBar and showFlag and not na(hi1) and not na(hi3) and not na(lo1) and not na(lo3) and not na(t3)
+        if hi3 < lo1
+            f_pushZone(zones, lo1, hi3, true, "FVG", tfLabel, t3, fillCol, maxZones)
+        else if lo3 > hi1
+            f_pushZone(zones, lo3, hi1, false, "FVG", tfLabel, t3, fillCol, maxZones)
+
+f_addOB(array<Zone> zones, bool newBar, float o1, float c1, float h1, float l1, float o2, float c2, float h2, float l2, int t2, float atrv, float atrMult, string tfLabel, bool showFlag, color fillCol, int maxZones) =>
+    if newBar and showFlag and not na(atrv) and not na(h1) and not na(l1) and not na(h2) and not na(l2) and not na(t2)
+        bigMove = (h1 - l1) > atrv * atrMult
+        if bigMove
+            if c2 < o2 and c1 > o1 and c1 > h2
+                f_pushZone(zones, h2, l2, true, "OB", tfLabel, t2, fillCol, maxZones)
+            else if c2 > o2 and c1 < o1 and c1 < l2
+                f_pushZone(zones, h2, l2, false, "OB", tfLabel, t2, fillCol, maxZones)
+
+f_addFVG(zones4H,  newBar4H,  h1_4H,  h3_4H,  l1_4H,  l3_4H,  t3_4H,  "4H",  showFVG4H,  col4H, maxZonesPerTF)
+f_addFVG(zones1H,  newBar1H,  h1_1H,  h3_1H,  l1_1H,  l3_1H,  t3_1H,  "1H",  showFVG1H,  col1H, maxZonesPerTF)
+f_addFVG(zones15M, newBar15M, h1_15M, h3_15M, l1_15M, l3_15M, t3_15M, "15M", showFVG15M, na,    maxZonesPerTF)
+
+f_addOB(zones4H,  newBar4H,  o1_4H,  c1_4H,  h1_4H,  l1_4H,  o2_4H,  c2_4H,  h2_4H,  l2_4H,  t2_4H,  atr1_4H,  obAtrMult, "4H",  showOB4H,  col4H, maxZonesPerTF)
+f_addOB(zones1H,  newBar1H,  o1_1H,  c1_1H,  h1_1H,  l1_1H,  o2_1H,  c2_1H,  h2_1H,  l2_1H,  t2_1H,  atr1_1H,  obAtrMult, "1H",  showOB1H,  col1H, maxZonesPerTF)
+f_addOB(zones15M, newBar15M, o1_15M, c1_15M, h1_15M, l1_15M, o2_15M, c2_15M, h2_15M, l2_15M, t2_15M, atr1_15M, obAtrMult, "15M", showOB15M, na,    maxZonesPerTF)
+
+if newBar15M
+    if array.size(zones15M) > 0
+        z = array.get(zones15M, 0)
+        if z.barIndexCreated == bar_index
+            box.set_bgcolor(z.b, z.isBullish ? colBull15 : colBear15)
+
+// ------------------------------- MITIGATION + BOX UPDATE ---------------------
+f_updateZones(array<Zone> zones, bool checkMitigation, float mitigationClose, bool spawnBreakers, string tfLabel, color bullCol, color bearCol, int maxZones) =>
+    array<Zone> pending = array.new<Zone>()
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            z = array.get(zones, i)
+            if not z.mitigated
+                box.set_right(z.b, time)
+                if checkMitigation and not na(mitigationClose)
+                    mitigateNow = (z.isBullish and mitigationClose < z.bottom) or ((not z.isBullish) and mitigationClose > z.top)
+                    if mitigateNow
+                        z.mitigated := true
+                        if keepMitigated
+                            box.set_border_color(z.b, color.new(color.gray, 40))
+                            box.set_bgcolor(z.b, color.new(color.gray, 92))
+                            box.set_text_color(z.b, color.new(color.gray, 10))
+                        else
+                            box.delete(z.b)
+                        if spawnBreakers and z.kind == "OB"
+                            pz = Zone.new(top = z.top, bottom = z.bottom, isBullish = not z.isBullish, kind = "BRK", barIndexCreated = bar_index)
+                            array.push(pending, pz)
+    if array.size(pending) > 0
+        for j = 0 to array.size(pending) - 1
+            pz = array.get(pending, j)
+            brkColor = pz.isBullish ? bullCol : bearCol
+            f_pushZone(zones, pz.top, pz.bottom, pz.isBullish, "BRK", tfLabel, time, brkColor, maxZones)
+
+f_updateZones(zones4H,  newBar4H,  c1_4H,  includeBreakers, "4H",  col4H,     col4H,     maxZonesPerTF)
+f_updateZones(zones1H,  newBar1H,  c1_1H,  includeBreakers, "1H",  col1H,     col1H,     maxZonesPerTF)
+f_updateZones(zones15M, newBar15M, c1_15M, includeBreakers, "15M", colBull15, colBear15, maxZonesPerTF)
+
+// ------------------------------- CONFLUENCE CHECK -----------------------------
+f_overlaps(Zone a, Zone b) =>
+    a.top >= b.bottom and a.bottom <= b.top
+
+var Zone activeBuyZone  = na
+var Zone activeSellZone = na
+var bool partial15_1H   = false
+activeBuyZone  := na
+activeSellZone := na
+partial15_1H   := false
+
+if array.size(zones15M) > 0
+    for i15 = 0 to array.size(zones15M) - 1
+        z15 = array.get(zones15M, i15)
+        if not z15.mitigated
+            conf1HOnly = false   // 15M zone overlaps a same-bias, unmitigated 1H zone
+            conf4H     = false   // ...and that 1H zone also overlaps a same-bias 4H zone
+            if array.size(zones1H) > 0
+                for i1 = 0 to array.size(zones1H) - 1
+                    z1 = array.get(zones1H, i1)
+                    if (not z1.mitigated) and z1.isBullish == z15.isBullish and f_overlaps(z15, z1)
+                        conf1HOnly := true
+                        partial15_1H := true
+                        if array.size(zones4H) > 0
+                            for i4 = 0 to array.size(zones4H) - 1
+                                z4 = array.get(zones4H, i4)
+                                if (not z4.mitigated) and z4.isBullish == z15.isBullish and f_overlaps(z1, z4)
+                                    conf4H := true
+            confluenceMet = requireFullConf ? conf4H : conf1HOnly
+            if confluenceMet
+                if z15.isBullish
+                    activeBuyZone := z15
+                else
+                    activeSellZone := z15
+
+if not na(activeBuyZone)
+    box.set_bgcolor(activeBuyZone.b, colBuyZone)
+    box.set_border_color(activeBuyZone.b, color.lime)
+    box.set_border_width(activeBuyZone.b, 2)
+if not na(activeSellZone)
+    box.set_bgcolor(activeSellZone.b, colSellZone)
+    box.set_border_color(activeSellZone.b, color.red)
+    box.set_border_width(activeSellZone.b, 2)
+
+// ------------------------------- ENGULFING ENTRY TRIGGER -----------------------
+// Evaluated on the CHART'S OWN bars now (no separate lower-timeframe pull). Fires on
+// every bar close where the current bar engulfs the previous bar's body and the
+// current bar's range touches the active confluence zone.
+bullishEngulf = close[1] < open[1] and close > open and close > open[1] and open <= close[1]
+bearishEngulf = close[1] > open[1] and close < open and close < open[1] and open >= close[1]
+
+buySignal  = bullishEngulf and not na(activeBuyZone)  and high >= activeBuyZone.bottom  and low <= activeBuyZone.top
+sellSignal = bearishEngulf and not na(activeSellZone) and high >= activeSellZone.bottom and low <= activeSellZone.top
+
+plotshape(buySignal,  title = "BUY Signal",  style = shape.triangleup,   location = location.belowbar, color = color.lime, size = size.small, text = "BUY")
+plotshape(sellSignal, title = "SELL Signal", style = shape.triangledown, location = location.abovebar, color = color.red,  size = size.small, text = "SELL")
+
+// ------------------------------- SESSION FILTER ---------------------------------
+inLondon    = not na(time(timeframe.period, londonSession, "UTC"))
+inNYAM      = not na(time(timeframe.period, nyamSession, "UTC"))
+inKillzone  = inLondon or inNYAM
+sessionOK   = useKillzoneFilter ? inKillzone : true
+
+// ------------------------------- TRADE PLAN DRAWING (SL / TP1 / TP2 / TP3) -------------
+var line  enLine  = na
+var line  slLine  = na
+var line  tp1Line = na
+var line  tp2Line = na
+var line  tp3Line = na
+var label enLbl   = na
+var label slLbl   = na
+var label tp1Lbl  = na
+var label tp2Lbl  = na
+var label tp3Lbl  = na
+
+f_clearTradePlan() =>
+    if not na(enLine)
+        line.delete(enLine)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tp1Line)
+        line.delete(tp1Line)
+    if not na(tp2Line)
+        line.delete(tp2Line)
+    if not na(tp3Line)
+        line.delete(tp3Line)
+    if not na(enLbl)
+        label.delete(enLbl)
+    if not na(slLbl)
+        label.delete(slLbl)
+    if not na(tp1Lbl)
+        label.delete(tp1Lbl)
+    if not na(tp2Lbl)
+        label.delete(tp2Lbl)
+    if not na(tp3Lbl)
+        label.delete(tp3Lbl)
+
+f_drawTradePlan(float entryPx, float slPx, float tp1Px, float tp2Px, float tp3Px, string dir) =>
+    f_clearTradePlan()
+    dirColor = dir == "BUY" ? color.blue : color.orange
+    newEnLine  = line.new(x1 = time, y1 = entryPx, x2 = time, y2 = entryPx, xloc = xloc.bar_time, extend = extend.right, color = dirColor, width = 1, style = line.style_dashed)
+    newSlLine  = line.new(x1 = time, y1 = slPx,    x2 = time, y2 = slPx,    xloc = xloc.bar_time, extend = extend.right, color = color.red,  width = 1, style = line.style_dashed)
+    newTp1Line = line.new(x1 = time, y1 = tp1Px,   x2 = time, y2 = tp1Px,   xloc = xloc.bar_time, extend = extend.right, color = color.lime, width = 1, style = line.style_dotted)
+    newTp2Line = line.new(x1 = time, y1 = tp2Px,   x2 = time, y2 = tp2Px,   xloc = xloc.bar_time, extend = extend.right, color = color.lime, width = 1, style = line.style_dotted)
+    newTp3Line = line.new(x1 = time, y1 = tp3Px,   x2 = time, y2 = tp3Px,   xloc = xloc.bar_time, extend = extend.right, color = color.lime, width = 1, style = line.style_dotted)
+    newEnLbl   = label.new(x = time, y = entryPx, xloc = xloc.bar_time, text = "ENTRY " + str.tostring(entryPx, format.mintick), style = label.style_label_left, color = dirColor, textcolor = color.white, size = size.small)
+    newSlLbl   = label.new(x = time, y = slPx,    xloc = xloc.bar_time, text = "SL " + str.tostring(slPx, format.mintick),       style = label.style_label_left, color = color.red,  textcolor = color.white, size = size.small)
+    newTp1Lbl  = label.new(x = time, y = tp1Px,   xloc = xloc.bar_time, text = "TP1 " + str.tostring(tp1Px, format.mintick),     style = label.style_label_left, color = color.green, textcolor = color.white, size = size.small)
+    newTp2Lbl  = label.new(x = time, y = tp2Px,   xloc = xloc.bar_time, text = "TP2 " + str.tostring(tp2Px, format.mintick),     style = label.style_label_left, color = color.green, textcolor = color.white, size = size.small)
+    newTp3Lbl  = label.new(x = time, y = tp3Px,   xloc = xloc.bar_time, text = "TP3 " + str.tostring(tp3Px, format.mintick),     style = label.style_label_left, color = color.green, textcolor = color.white, size = size.small)
+    [newEnLine, newSlLine, newTp1Line, newTp2Line, newTp3Line, newEnLbl, newSlLbl, newTp1Lbl, newTp2Lbl, newTp3Lbl]
+
+var float lastEntry = na
+var float lastSL    = na
+var float lastTP1   = na
+var float lastTP2   = na
+var float lastTP3   = na
+var string lastDir  = ""
+var int lastSignalTime = na
+var int totalBuySignals  = 0
+var int totalSellSignals = 0
+
+f_formatAge(int sigTime) =>
+    string result = "—"
+    if not na(sigTime)
+        elapsedMin = (time - sigTime) / 60000.0
+        if elapsedMin < 60
+            result := str.tostring(math.round(elapsedMin)) + "m ago"
+        else if elapsedMin < 1440
+            hours = math.floor(elapsedMin / 60)
+            mins  = math.round(elapsedMin - hours * 60)
+            result := str.tostring(int(hours)) + "h " + str.tostring(int(mins)) + "m ago"
+        else
+            days = math.floor(elapsedMin / 1440)
+            hours = math.round((elapsedMin - days * 1440) / 60)
+            result := str.tostring(int(days)) + "d " + str.tostring(int(hours)) + "h ago"
+    result
+
+if buySignal
+    totalBuySignals += 1
+if sellSignal
+    totalSellSignals += 1
+
+// ------------------------------- TRADE EXECUTION (one trade at a time) ----------
+// TP1/TP2/TP3 are Fibonacci extensions of the risk distance (entry to SL), scaling out
+// 33/33/34% of the position at each level; SL is shared across all three legs via the
+// stop= argument on each strategy.exit() call below.
+if buySignal and sessionOK and strategy.position_size == 0
+    slPrice   = math.min(activeBuyZone.bottom, low) - atr1_15M * slBufferATRmult
+    stopDist  = close - slPrice
+    if stopDist >= minStopDistance
+        tp1Price = close + stopDist * fibTP1
+        tp2Price = close + stopDist * fibTP2
+        tp3Price = close + stopDist * fibTP3
+        riskAmt  = strategy.equity * (riskPercent / 100)
+        qty      = riskAmt / stopDist
+        strategy.entry("Buy", strategy.long, qty = qty)
+        strategy.exit("TP1", from_entry = "Buy", qty_percent = 33, stop = slPrice, limit = tp1Price)
+        strategy.exit("TP2", from_entry = "Buy", qty_percent = 33, stop = slPrice, limit = tp2Price)
+        strategy.exit("TP3", from_entry = "Buy", qty_percent = 34, stop = slPrice, limit = tp3Price)
+        [newEn, newSl, newTp1, newTp2, newTp3, newEnL, newSlL, newTp1L, newTp2L, newTp3L] = f_drawTradePlan(close, slPrice, tp1Price, tp2Price, tp3Price, "BUY")
+        enLine  := newEn
+        slLine  := newSl
+        tp1Line := newTp1
+        tp2Line := newTp2
+        tp3Line := newTp3
+        enLbl   := newEnL
+        slLbl   := newSlL
+        tp1Lbl  := newTp1L
+        tp2Lbl  := newTp2L
+        tp3Lbl  := newTp3L
+        lastEntry := close
+        lastSL    := slPrice
+        lastTP1   := tp1Price
+        lastTP2   := tp2Price
+        lastTP3   := tp3Price
+        lastDir   := "BUY"
+        lastSignalTime := time
+
+if sellSignal and sessionOK and strategy.position_size == 0
+    slPrice   = math.max(activeSellZone.top, high) + atr1_15M * slBufferATRmult
+    stopDist  = slPrice - close
+    if stopDist >= minStopDistance
+        tp1Price = close - stopDist * fibTP1
+        tp2Price = close - stopDist * fibTP2
+        tp3Price = close - stopDist * fibTP3
+        riskAmt  = strategy.equity * (riskPercent / 100)
+        qty      = riskAmt / stopDist
+        strategy.entry("Sell", strategy.short, qty = qty)
+        strategy.exit("TP1", from_entry = "Sell", qty_percent = 33, stop = slPrice, limit = tp1Price)
+        strategy.exit("TP2", from_entry = "Sell", qty_percent = 33, stop = slPrice, limit = tp2Price)
+        strategy.exit("TP3", from_entry = "Sell", qty_percent = 34, stop = slPrice, limit = tp3Price)
+        [newEn, newSl, newTp1, newTp2, newTp3, newEnL, newSlL, newTp1L, newTp2L, newTp3L] = f_drawTradePlan(close, slPrice, tp1Price, tp2Price, tp3Price, "SELL")
+        enLine  := newEn
+        slLine  := newSl
+        tp1Line := newTp1
+        tp2Line := newTp2
+        tp3Line := newTp3
+        enLbl   := newEnL
+        slLbl   := newSlL
+        tp1Lbl  := newTp1L
+        tp2Lbl  := newTp2L
+        tp3Lbl  := newTp3L
+        lastEntry := close
+        lastSL    := slPrice
+        lastTP1   := tp1Price
+        lastTP2   := tp2Price
+        lastTP3   := tp3Price
+        lastDir   := "SELL"
+        lastSignalTime := time
+
+// ------------------------------- STATUS TABLE -----------------------------------
+countActive(array<Zone> zones, bool bull) =>
+    int c = 0
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            z = array.get(zones, i)
+            if (not z.mitigated) and z.isBullish == bull
+                c += 1
+    c
+
+var table infoTable = table.new(position.top_right, 2, 13, border_width = 1, bgcolor = color.new(color.black, 20))
+if showTable and barstate.islast
+    table.cell(infoTable, 0, 0, "MTF Confluence", bgcolor = color.gray, text_color = color.white)
+    table.cell(infoTable, 1, 0, "Bull / Bear", bgcolor = color.gray, text_color = color.white)
+
+    table.cell(infoTable, 0, 1, "4H Zones", text_color = color.white)
+    table.cell(infoTable, 1, 1, str.tostring(countActive(zones4H, true)) + " / " + str.tostring(countActive(zones4H, false)), text_color = color.white)
+
+    table.cell(infoTable, 0, 2, "1H Zones", text_color = color.white)
+    table.cell(infoTable, 1, 2, str.tostring(countActive(zones1H, true)) + " / " + str.tostring(countActive(zones1H, false)), text_color = color.white)
+
+    table.cell(infoTable, 0, 3, "15M Zones", text_color = color.white)
+    table.cell(infoTable, 1, 3, str.tostring(countActive(zones15M, true)) + " / " + str.tostring(countActive(zones15M, false)), text_color = color.white)
+
+    table.cell(infoTable, 0, 4, "Partial (15M+1H)", text_color = color.white)
+    table.cell(infoTable, 1, 4, partial15_1H ? "YES" : "no", text_color = partial15_1H ? color.yellow : color.gray)
+
+    confStatus = not na(activeBuyZone) ? "BUY ZONE" : not na(activeSellZone) ? "SELL ZONE" : "NONE"
+    confColor  = not na(activeBuyZone) ? color.lime : not na(activeSellZone) ? color.red : color.gray
+    table.cell(infoTable, 0, 5, "Confluence (" + (requireFullConf ? "4H+1H+15M" : "15M+1H") + ")", text_color = color.white)
+    table.cell(infoTable, 1, 5, confStatus, text_color = confColor)
+
+    trigStatus = buySignal ? "BUY SIGNAL" : sellSignal ? "SELL SIGNAL" : (not na(activeBuyZone) or not na(activeSellZone)) ? "WAITING FOR ENGULF" : "NO ZONE"
+    trigColor  = buySignal ? color.lime : sellSignal ? color.red : color.orange
+    table.cell(infoTable, 0, 6, "Entry Trigger", text_color = color.white)
+    table.cell(infoTable, 1, 6, trigStatus, text_color = trigColor)
+
+    table.cell(infoTable, 0, 7, "In Killzone", text_color = color.white)
+    table.cell(infoTable, 1, 7, sessionOK ? "YES" : "NO", text_color = sessionOK ? color.lime : color.gray)
+
+    table.cell(infoTable, 0, 8, "Total Signals (Buy/Sell)", text_color = color.white)
+    table.cell(infoTable, 1, 8, str.tostring(totalBuySignals) + " / " + str.tostring(totalSellSignals), text_color = (totalBuySignals + totalSellSignals) == 0 ? color.orange : color.white)
+
+    if not na(lastEntry)
+        table.cell(infoTable, 0, 9, "Last " + lastDir + " (" + f_formatAge(lastSignalTime) + ")", text_color = color.white)
+        table.cell(infoTable, 1, 9, "E " + str.tostring(lastEntry, format.mintick) + " / SL " + str.tostring(lastSL, format.mintick), text_color = lastDir == "BUY" ? color.lime : color.red)
+
+        table.cell(infoTable, 0, 10, "TP1 / TP2 / TP3", text_color = color.white)
+        table.cell(infoTable, 1, 10, str.tostring(lastTP1, format.mintick) + " / " + str.tostring(lastTP2, format.mintick) + " / " + str.tostring(lastTP3, format.mintick), text_color = color.green)
+
+        table.cell(infoTable, 0, 11, "Position Status", text_color = color.white)
+        table.cell(infoTable, 1, 11, strategy.position_size != 0 ? "OPEN" : "CLOSED", text_color = strategy.position_size != 0 ? color.yellow : color.gray)
+    else
+        table.cell(infoTable, 0, 9, "Trades", text_color = color.white)
+        table.cell(infoTable, 1, 9, "0 -- no entry yet", text_color = color.orange)

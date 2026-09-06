@@ -1,0 +1,299 @@
+//@version=6
+// TRADERGUS KEY LEVELS — PDH/PDL · PMH/PML · PWH/PWL · ORB · HOD/LOD
+// v1.7 — HOD/LOD added: live developing session high/low, persists to the 2am
+//        reset, and included in backtest mode (that day's session H/L, anchored)
+indicator("TraderGus Key Levels", "Key Levels", overlay = true, max_lines_count = 50)
+
+string TZ = "America/Chicago"
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+bool   showPD  = input.bool(true,  "Show PDH / PDL", group = "Levels", display = display.none)
+bool   showPM  = input.bool(true,  "Show PMH / PML", group = "Levels", display = display.none)
+bool   showPW  = input.bool(true,  "Show PWH / PWL", group = "Levels", display = display.none)
+bool   showOR  = input.bool(true,  "Show ORB",       group = "Levels", display = display.none)
+bool   showHL  = input.bool(true,  "Show HOD / LOD", group = "Levels", display = display.none)
+string orbTF   = input.string("5", "ORB period (minutes)", options = ["5", "10", "15", "30"], group = "Levels", display = display.none)
+
+int    resetHr = input.int(2, "Daily reset hour (CT, 24h)", minval = 0, maxval = 23, group = "Sessions", display = display.none)
+string rthSess = input.session("0830-1500", "Main session (CT)", group = "Sessions", display = display.none)
+string pmSess  = input.session("0300-0830", "Premarket (CT)",    group = "Sessions", display = display.none)
+
+color  colPD   = input.color(#00BCD4, "PDH / PDL", group = "Style", display = display.none)
+color  colPM   = input.color(#673AB7, "PMH / PML", group = "Style", display = display.none)
+color  colPW   = input.color(#FF9800, "PWH / PWL", group = "Style", display = display.none)
+color  colHL   = input.color(#8FFF3B, "HOD / LOD", group = "Style", display = display.none)
+color  colORH  = input.color(#4CAF50, "ORB high", group = "Style", inline = "or", display = display.none)
+color  colORL  = input.color(#F23645, "ORB low",  group = "Style", inline = "or", display = display.none)
+int    lnW     = input.int(1, "Line width", minval = 1, maxval = 4, group = "Style", display = display.none)
+string styIn   = input.string("Solid", "Line style", options = ["Solid", "Dashed", "Dotted"], group = "Style", display = display.none)
+
+bool   btOn    = input.bool(false, "Backtest mode", group = "Backtest", display = display.none,
+     tooltip = "Hides live lines and draws the selected day's full set, including that day's HOD/LOD. Weekend/holiday dates snap forward to the next trading day. Limited by your plan's intraday history depth.")
+int    btStamp = input.time(timestamp("2026-07-01 12:00 -0600"), "Backtest date (time ignored)", group = "Backtest", display = display.none)
+
+string lnSty = styIn == "Dashed" ? line.style_dashed : styIn == "Dotted" ? line.style_dotted : line.style_solid
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+f_tday(int t) =>
+    int ts = t - resetHr * 3600000
+    year(ts, TZ) * 10000 + month(ts, TZ) * 100 + dayofmonth(ts, TZ)
+
+f_tweek(int t) =>
+    int ts = t - resetHr * 3600000
+    year(ts, TZ) * 100 + weekofyear(ts, TZ)
+
+f_cday(int t) =>
+    year(t, TZ) * 10000 + month(t, TZ) * 100 + dayofmonth(t, TZ)
+
+f_hm(string s) =>
+    string p = array.get(str.split(s, "-"), 0)
+    int hh = math.round(str.tonumber(str.substring(p, 0, 2)))
+    int mm = math.round(str.tonumber(str.substring(p, 2, 4)))
+    [hh, mm]
+
+f_ts(int dInt, int hh, int mm) =>
+    timestamp(TZ, dInt / 10000, (dInt % 10000) / 100, dInt % 100, hh, mm)
+
+int btTday = f_cday(btStamp)
+int btWeek = f_tweek(btStamp)
+
+// ── Security functions ───────────────────────────────────────────────────────
+f_pm(int btD) =>
+    bool inPM = not na(time(timeframe.period, pmSess, TZ))
+    var float h  = na
+    var float l  = na
+    var int   d  = na
+    var float bh = na
+    var float bl = na
+    var int   ld = na
+    if inPM and not inPM[1]
+        h := high
+        l := low
+        d := f_tday(time)
+    else if inPM
+        h := math.max(h, high)
+        l := math.min(l, low)
+    if inPM and na(ld) and d >= btD
+        ld := d
+    if inPM and d == ld
+        bh := h
+        bl := l
+    [h, l, d, bh, bl, ld]
+
+f_orb(int btD) =>
+    bool nd = ta.change(time("D")) != 0
+    var float oh  = na
+    var float ol  = na
+    var int   od  = na
+    var float boh = na
+    var float bol = na
+    var int   lo  = na
+    if nd
+        oh := high
+        ol := low
+        od := f_tday(time)
+    if nd and na(lo) and od >= btD
+        lo := od
+    if nd and od == lo
+        boh := oh
+        bol := ol
+    [oh, ol, od, boh, bol, lo]
+
+string extTk = ticker.new(syminfo.prefix, syminfo.ticker, session.extended)
+[pmH, pmL, pmD, btPmH, btPmL, btPmDay] = request.security(extTk, "5", f_pm(btTday))
+[orH, orL, orD, btOrH, btOrL, btOrDay] = request.security(syminfo.tickerid, orbTF, f_orb(btTday))
+
+// ── Native day/week tracking (chart bars) ────────────────────────────────────
+bool inRTH = timeframe.isintraday and not na(time(timeframe.period, rthSess, TZ))
+bool barOK = timeframe.isintraday ? inRTH : timeframe.isdaily
+
+var float fHi   = na
+var float fLo   = na
+var int   fHiT  = na
+var int   fLoT  = na
+var int   fDate = na
+var float cHi   = na
+var float cLo   = na
+var int   cHiT  = na
+var int   cLoT  = na
+var float wfHi  = na
+var float wfLo  = na
+var int   wfHiT = na
+var int   wfLoT = na
+var int   wfId  = na
+var float wcHi  = na
+var float wcLo  = na
+var int   wcHiT = na
+var int   wcLoT = na
+var float bPdH  = na
+var float bPdL  = na
+var int   bPdHT = na
+var int   bPdLT = na
+var float bPwH  = na
+var float bPwL  = na
+var int   bPwHT = na
+var int   bPwLT = na
+var float bHdH  = na
+var float bHdL  = na
+var int   bHdHT = na
+var int   bHdLT = na
+var int   bDay  = na
+var int   bWk   = na
+
+if barOK
+    int bd = f_tday(time)
+    int bw = f_tweek(time)
+    if na(fDate) or bd != fDate
+        // capture the backtest day's completed HOD/LOD before rolling past it
+        if not na(bDay) and fDate == bDay and na(bHdH)
+            bHdH := fHi
+            bHdL := fLo
+            bHdHT := fHiT
+            bHdLT := fLoT
+        cHi := fHi
+        cLo := fLo
+        cHiT := fHiT
+        cLoT := fLoT
+        fHi := high
+        fLo := low
+        fHiT := time
+        fLoT := time
+        fDate := bd
+        if na(bDay) and bd >= btTday
+            bDay := bd
+            bPdH := cHi
+            bPdL := cLo
+            bPdHT := cHiT
+            bPdLT := cLoT
+    else
+        if high >= fHi
+            fHi := high
+            fHiT := time
+        if low <= fLo
+            fLo := low
+            fLoT := time
+    if na(wfId) or bw != wfId
+        wcHi := wfHi
+        wcLo := wfLo
+        wcHiT := wfHiT
+        wcLoT := wfLoT
+        wfHi := high
+        wfLo := low
+        wfHiT := time
+        wfLoT := time
+        wfId := bw
+        if na(bWk) and bw >= btWeek
+            bWk := bw
+            bPwH := wcHi
+            bPwL := wcLo
+            bPwHT := wcHiT
+            bPwLT := wcLoT
+    else
+        if high >= wfHi
+            wfHi := high
+            wfHiT := time
+        if low <= wfLo
+            wfLo := low
+            wfLoT := time
+
+// ── Which set is "prior"? (2am reset, evaluated off the clock) ───────────────
+int tdNow = f_tday(timenow)
+int twNow = f_tweek(timenow)
+
+bool dUseF = not na(fDate) and tdNow > fDate
+float pdhV = dUseF ? fHi  : cHi
+float pdlV = dUseF ? fLo  : cLo
+int   pdhX = dUseF ? fHiT : cHiT
+int   pdlX = dUseF ? fLoT : cLoT
+
+bool wUseF = not na(wfId) and twNow > wfId
+float pwhV = wUseF ? wfHi  : wcHi
+float pwlV = wUseF ? wfLo  : wcLo
+int   pwhX = wUseF ? wfHiT : wcHiT
+int   pwlX = wUseF ? wfLoT : wcLoT
+
+// Live HOD/LOD: today's forming session, shown while its trading day is current
+bool hlLive = not na(fDate) and fDate == tdNow
+float hodV = hlLive ? fHi  : na
+float lodV = hlLive ? fLo  : na
+int   hodX = hlLive ? fHiT : na
+int   lodX = hlLive ? fLoT : na
+
+// Backtest HOD/LOD: captured completed day, or the forming day if backtesting today
+float btHdH  = not na(bHdH) ? bHdH  : (not na(bDay) and fDate == bDay ? fHi  : na)
+float btHdL  = not na(bHdL) ? bHdL  : (not na(bDay) and fDate == bDay ? fLo  : na)
+int   btHdHT = not na(bHdH) ? bHdHT : (not na(bDay) and fDate == bDay ? fHiT : na)
+int   btHdLT = not na(bHdL) ? bHdLT : (not na(bDay) and fDate == bDay ? fLoT : na)
+
+bool pmLive = pmD == tdNow and timeframe.isintraday
+
+[rH, rM] = f_hm(rthSess)
+[pH, pM] = f_hm(pmSess)
+int  orbMin  = math.round(str.tonumber(orbTF))
+int  openTs  = f_ts(tdNow, rH, rM)
+bool orbLive = orD == tdNow and timenow >= openTs + orbMin * 60000
+
+// ── Final drawn values (backtest switch) ─────────────────────────────────────
+float vPDH = btOn ? bPdH : pdhV
+float vPDL = btOn ? bPdL : pdlV
+int   xPDH = btOn ? bPdHT : pdhX
+int   xPDL = btOn ? bPdLT : pdlX
+float vPWH = btOn ? bPwH : pwhV
+float vPWL = btOn ? bPwL : pwlV
+int   xPWH = btOn ? bPwHT : pwhX
+int   xPWL = btOn ? bPwLT : pwlX
+float vPMH = btOn ? btPmH : (pmLive ? pmH : na)
+float vPML = btOn ? btPmL : (pmLive ? pmL : na)
+int   xPM  = btOn ? (na(btPmDay) ? na : f_ts(btPmDay, pH, pM)) : f_ts(tdNow, pH, pM)
+float vORH = btOn ? btOrH : (orbLive ? orH : na)
+float vORL = btOn ? btOrL : (orbLive ? orL : na)
+int   xOR  = btOn ? (na(btOrDay) ? na : f_ts(btOrDay, rH, rM)) : openTs
+float vHOD = btOn ? btHdH  : hodV
+float vLOD = btOn ? btHdL  : lodV
+int   xHOD = btOn ? btHdHT : hodX
+int   xLOD = btOn ? btHdLT : lodX
+
+// ── Drawing ──────────────────────────────────────────────────────────────────
+var line lPDH = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lPDL = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lPMH = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lPML = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lPWH = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lPWL = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lORH = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lORL = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lHOD = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+var line lLOD = line.new(time, close, time + 1, close, xloc = xloc.bar_time, extend = extend.right)
+
+f_upd(line ln, float y, int x1, color lc, bool show) =>
+    bool ok = show and not na(y) and not na(x1)
+    if ok
+        line.set_xy1(ln, x1, y)
+        line.set_xy2(ln, x1 + 86400000, y)
+        line.set_width(ln, lnW)
+        line.set_style(ln, lnSty)
+    line.set_color(ln, ok ? lc : color.new(lc, 100))
+
+if barstate.islast
+    f_upd(lPDH, vPDH, xPDH, colPD, showPD)
+    f_upd(lPDL, vPDL, xPDL, colPD, showPD)
+    f_upd(lPMH, vPMH, xPM,  colPM, showPM)
+    f_upd(lPML, vPML, xPM,  colPM, showPM)
+    f_upd(lPWH, vPWH, xPWH, colPW, showPW)
+    f_upd(lPWL, vPWL, xPWL, colPW, showPW)
+    f_upd(lORH, vORH, xOR, colORH, showOR)
+    f_upd(lORL, vORL, xOR, colORL, showOR)
+    f_upd(lHOD, vHOD, xHOD, colHL, showHL)
+    f_upd(lLOD, vLOD, xLOD, colHL, showHL)
+
+// ── Price-scale tags ─────────────────────────────────────────────────────────
+plot(showPD ? vPDH : na, "PDH", colPD,  display = display.price_scale, editable = false)
+plot(showPD ? vPDL : na, "PDL", colPD,  display = display.price_scale, editable = false)
+plot(showPM ? vPMH : na, "PMH", colPM,  display = display.price_scale, editable = false)
+plot(showPM ? vPML : na, "PML", colPM,  display = display.price_scale, editable = false)
+plot(showPW ? vPWH : na, "PWH", colPW,  display = display.price_scale, editable = false)
+plot(showPW ? vPWL : na, "PWL", colPW,  display = display.price_scale, editable = false)
+plot(showOR ? vORH : na, "ORH", colORH, display = display.price_scale, editable = false)
+plot(showOR ? vORL : na, "ORL", colORL, display = display.price_scale, editable = false)
+plot(showHL ? vHOD : na, "HOD", colHL,  display = display.price_scale, editable = false)
+plot(showHL ? vLOD : na, "LOD", colHL,  display = display.price_scale, editable = false)

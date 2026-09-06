@@ -1,0 +1,559 @@
+//@version=6
+strategy("200MA BOS - MTF Enhanced", overlay=true, initial_capital=1000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+//==================== INPUTS ====================
+maLength = input.int(200, "MA Length")
+maType   = input.string("EMA", "MA Type", options=["EMA", "SMA", "HMA"])
+
+useAdaptiveFilters = input.bool(true, "Use Adaptive Filters (low vol coins)")
+forceFiltersOn = input.bool(false, "Force Filters ON (all coins)")
+forceFiltersOff = input.bool(false, "Force Filters OFF (all coins)")
+
+emaDistanceThreshold = input.float(0.008, "EMA Distance (%)", minval=0.001, maxval=0.02, step=0.001)
+rvolThreshold = input.float(1.0, "RVOL Threshold", minval=0.01, maxval=3.0, step=0.01)
+
+useMtfFilter = input.bool(true, "Use 15m EMA Filter")
+mtfEmaLength = input.int(200, "15m EMA Length", minval=20, maxval=500)
+
+useMtfDistanceFilter = input.bool(true, "Use 15m EMA Distance Filter")
+mtfDistanceThreshold = input.float(0.015, "Max Distance from 15m EMA (%)", minval=0.001, maxval=0.2, step=0.001)
+
+useCustomRR = input.bool(false, "Use Custom SL/TP Ratio")
+tpMultiplier = input.float(2.0, "TP Multiplier (1:X)", minval=0.5, maxval=5.0, step=0.1)
+
+// ⭐ POSITION SIZING
+riskPercent = input.float(1.5, "Risk Per Trade (%)", minval=0.1, maxval=10.0, step=0.1, group="Position Sizing")
+leverage    = input.int(10, "Leverage (x)", minval=1, maxval=125, step=1, group="Position Sizing")
+
+// ⭐ SLOPE FILTER
+useSlopeFilter = input.bool(true,  "Use 15m EMA Slope Filter",  group="Slope Filter")
+slopeNMin      = input.int(60,     "Lookback N (minutes)",      group="Slope Filter", minval=15, maxval=300, step=15)
+minAngleDeg    = input.float(15.0, "Min Angle (degrees)",       group="Slope Filter", minval=0.1, maxval=89.0, step=0.1)
+showSlopeLines = input.bool(true,  "Show Slope Lines on Chart", group="Slope Filter")
+
+//==================== MOVING AVERAGE ====================
+ma =
+     maType == "EMA" ? ta.ema(close, maLength) :
+     maType == "SMA" ? ta.sma(close, maLength) :
+     ta.hma(close, maLength)
+
+plot(ma, color=color.orange, linewidth=2)
+
+//==================== 15M EMA VALUES ====================
+// Cap n15Bars to 290 to stay safely under Pine's 300 bar buffer limit
+n15Bars = math.min(290, math.max(1, math.round(slopeNMin / 15)))
+
+// ⭐ FIX: add max_bars_back=500 so Pine allocates enough history
+ema15mNow  = request.security(syminfo.tickerid, "15", ta.ema(close, mtfEmaLength),         lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+ema15mPrev = request.security(syminfo.tickerid, "15", ta.ema(close, mtfEmaLength)[n15Bars], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+plot(ema15mNow, color=color.new(color.purple, 50), linewidth=1, title="15m 200 EMA")
+
+//==================== GEOMETRIC SLOPE ANGLE ====================
+rise          = ema15mPrev != 0 ? (ema15mNow - ema15mPrev) / ema15mPrev * 100 : 0.0
+run           = float(n15Bars)
+slopeAngleDeg = math.atan(rise / run) * (180.0 / math.pi)
+
+slopeUp   = slopeAngleDeg >=  minAngleDeg
+slopeDown = slopeAngleDeg <= -minAngleDeg
+slopeFlat = not slopeUp and not slopeDown
+
+slopeBuyOk  = useSlopeFilter ? slopeUp   : true
+slopeSellOk = useSlopeFilter ? slopeDown : true
+
+//==================== DRAW SLOPE LINES ON CHART ====================
+chartMins = timeframe.in_seconds() / 60.0
+barsBack  = math.round(n15Bars * 15.0 / chartMins)
+
+var line slopeHorizLine = na
+var line slopeDiagLine  = na
+var label slopeAngleLabel = na
+
+if showSlopeLines and barstate.islast
+    if not na(slopeHorizLine)
+        line.delete(slopeHorizLine)
+    if not na(slopeDiagLine)
+        line.delete(slopeDiagLine)
+    if not na(slopeAngleLabel)
+        label.delete(slopeAngleLabel)
+
+    lineColor = slopeUp ? color.new(color.green, 0) : slopeDown ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+    // Line 1: HORIZONTAL from Point A to current bar at ema15mPrev height
+    slopeHorizLine := line.new(
+         bar_index - barsBack, ema15mPrev,
+         bar_index,            ema15mPrev,
+         color=color.new(color.blue, 0),
+         style=line.style_dashed,
+         width=1)
+
+    // Line 2: DIAGONAL from Point A to Point B
+    slopeDiagLine := line.new(
+         bar_index - barsBack, ema15mPrev,
+         bar_index,            ema15mNow,
+         color=lineColor,
+         style=line.style_solid,
+         width=2)
+
+    // Angle label at Point A
+    labelYPos = ema15mPrev + (ema15mPrev * 0.001)
+    slopeAngleLabel := label.new(
+         bar_index - barsBack, labelYPos,
+         text="∠ " + str.tostring(math.round(slopeAngleDeg, 1)) + "°",
+         style=label.style_label_right,
+         color=lineColor,
+         textcolor=color.white,
+         size=size.small)
+
+//==================== SLOPE BACKGROUND ====================
+slopeBgColor = slopeUp ? color.new(color.green, 90) : slopeDown ? color.new(color.red, 90) : color.new(color.gray, 90)
+bgcolor(useSlopeFilter ? slopeBgColor : na, title="Slope BG")
+
+//==================== RELATIVE VOLUME ====================
+volSma = ta.sma(volume, 20)
+rvol   = volSma != 0 ? volume / volSma : 0
+
+//==================== ATR-BASED VOLATILITY ====================
+atr           = ta.atr(14)
+atrPercent    = (atr / close) * 100
+lowVolatility = atrPercent < 2.0
+shouldUseFilters = forceFiltersOn ? true : (forceFiltersOff ? false : (useAdaptiveFilters ? lowVolatility : true))
+
+//==================== STATE ====================
+var float swingHigh = na
+var float swingLow  = na
+var bool  inSetup   = false
+var bool  retrace   = false
+
+var float impulseHigh = na
+var float impulseLow  = na
+
+var int  pullbackCount           = 0
+var bool pullbackDone            = false
+var bool emaTouchedAfterPullback = false
+
+bull = close > ma
+bear = close < ma
+
+//==================== STATS TRACKING ====================
+var array<int> last100 = array.new<int>()
+var int consecutiveWins = 0
+var int consecutiveLosses = 0
+var int maxConsecutiveWins = 0
+var int maxConsecutiveLosses = 0
+
+//==================== ARRAYS ====================
+var array<box>   allTpZones     = array.new<box>()
+var array<box>   allSlZones     = array.new<box>()
+var array<line>  allTpLines     = array.new<line>()
+var array<line>  allSlLines     = array.new<line>()
+var array<line>  allEntryLines  = array.new<line>()
+var array<label> allTpLabels    = array.new<label>()
+var array<label> allSlLabels    = array.new<label>()
+var array<label> allEntryLabels = array.new<label>()
+
+var array<float> openEntry   = array.new<float>()
+var array<float> openSL      = array.new<float>()
+var array<float> openTP      = array.new<float>()
+var array<int>   openBar     = array.new<int>()
+var array<int>   openDir     = array.new<int>()
+var array<box>   openTpZones = array.new<box>()
+var array<box>   openSlZones = array.new<box>()
+
+//==================== STATS TABLE ====================
+var table statsTable = table.new(position.top_right, 4, 11,
+     border_width=1,
+     border_color=color.new(color.gray, 60),
+     bgcolor=color.new(color.black, 20),
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+updateStatsTable() =>
+    total  = array.size(last100)
+    wins   = 0
+    losses = 0
+    for r in last100
+        if r == 1
+            wins += 1
+        else
+            losses += 1
+    winPct   = total > 0 ? (wins / total) * 100 : 0.0
+    winColor = winPct >= 50 ? color.new(color.green, 20) : color.new(color.red, 20)
+
+    filterStatus  = shouldUseFilters ? "✅ FILTERS ON" : "❌ FILTERS OFF"
+    filterColor   = shouldUseFilters ? color.new(color.orange, 30) : color.new(color.gray, 40)
+    mtfStatus     = useMtfFilter ? "✅ MTF ON" : "❌ MTF OFF"
+    mtfColor      = useMtfFilter ? color.new(color.blue, 30) : color.new(color.gray, 40)
+    mtfDistStatus = useMtfDistanceFilter ? "✅ DIST ON" : "❌ DIST OFF"
+
+    streakText  = ""
+    streakColor = color.new(color.black, 40)
+    if maxConsecutiveWins > 0 or maxConsecutiveLosses > 0
+        if maxConsecutiveWins >= maxConsecutiveLosses
+            streakText  := "🔥 Best W: " + str.tostring(maxConsecutiveWins)
+            streakColor := color.new(color.green, 30)
+        else
+            streakText  := "❄️  Worst L: " + str.tostring(maxConsecutiveLosses)
+            streakColor := color.new(color.red, 30)
+    else
+        streakText := "➖ NO DATA"
+
+    mtfEmaDistance   = math.abs(close - ema15mNow) / ema15mNow * 100
+    mtfDistanceColor = mtfEmaDistance <= mtfDistanceThreshold * 100 ? color.new(color.green, 30) : color.new(color.orange, 30)
+    rrStatus         = useCustomRR ? ("✅ 1:" + str.tostring(math.round(tpMultiplier, 1))) : ("📌 1:2.0")
+    rrColor          = useCustomRR ? color.new(color.teal, 30) : color.new(color.gray, 40)
+
+    slopeIcon        = slopeUp ? "📈" : slopeDown ? "📉" : "➡️"
+    slopeLbl         = slopeUp ? "UP" : slopeDown ? "DOWN" : "FLAT"
+    slopeColor       = slopeUp ? color.new(color.green, 30) : slopeDown ? color.new(color.red, 30) : color.new(color.gray, 40)
+    slopeFilterLabel = useSlopeFilter ? "✅ ON" : "❌ OFF"
+
+    table.cell(statsTable, 0, 0, "📊 LAST " + str.tostring(total),
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10), text_halign=text.align_center)
+    table.cell(statsTable, 1, 0, "ATR: " + str.tostring(math.round(atrPercent, 2)) + "%",
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10), text_halign=text.align_center)
+    table.cell(statsTable, 2, 0, filterStatus,
+         text_color=color.white, text_size=size.small, bgcolor=filterColor, text_halign=text.align_center)
+    table.cell(statsTable, 3, 0, mtfStatus,
+         text_color=color.white, text_size=size.small, bgcolor=mtfColor, text_halign=text.align_center)
+    table.cell(statsTable, 0, 1, "✅  Wins",
+         text_color=color.new(color.green, 10), text_size=size.small, bgcolor=color.new(color.black, 40), text_halign=text.align_left)
+    table.cell(statsTable, 1, 1, str.tostring(wins),
+         text_color=color.new(color.green, 10), text_size=size.small, bgcolor=color.new(color.black, 40), text_halign=text.align_center)
+    table.cell(statsTable, 2, 1, "", bgcolor=color.new(color.black, 40))
+    table.cell(statsTable, 3, 1, "", bgcolor=color.new(color.black, 40))
+    table.cell(statsTable, 0, 2, "❌  Losses",
+         text_color=color.new(color.red, 10), text_size=size.small, bgcolor=color.new(color.black, 40), text_halign=text.align_left)
+    table.cell(statsTable, 1, 2, str.tostring(losses),
+         text_color=color.new(color.red, 10), text_size=size.small, bgcolor=color.new(color.black, 40), text_halign=text.align_center)
+    table.cell(statsTable, 2, 2, "", bgcolor=color.new(color.black, 40))
+    table.cell(statsTable, 3, 2, "", bgcolor=color.new(color.black, 40))
+    table.cell(statsTable, 0, 3, "📈  Highest Streak",
+         text_color=color.white, text_size=size.small, bgcolor=streakColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 3, streakText,
+         text_color=color.white, text_size=size.small, bgcolor=streakColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 3, "", bgcolor=streakColor)
+    table.cell(statsTable, 3, 3, "", bgcolor=streakColor)
+    table.cell(statsTable, 0, 4, "📊  Total",
+         text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40), text_halign=text.align_left)
+    table.cell(statsTable, 1, 4, str.tostring(total),
+         text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40), text_halign=text.align_center)
+    table.cell(statsTable, 2, 4, "", bgcolor=color.new(color.black, 40))
+    table.cell(statsTable, 3, 4, "", bgcolor=color.new(color.black, 40))
+    table.cell(statsTable, 0, 5, "🎯  Win %",
+         text_color=color.white, text_size=size.small, bgcolor=winColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 5, str.tostring(math.round(winPct, 1)) + "%",
+         text_color=color.white, text_size=size.small, bgcolor=winColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 5, "", bgcolor=winColor)
+    table.cell(statsTable, 3, 5, "", bgcolor=winColor)
+    actualMultiplier = useCustomRR ? tpMultiplier : 2.0
+    expectancy       = (winPct / 100 * actualMultiplier) - ((100 - winPct) / 100 * 1)
+    expColor         = expectancy > 0 ? color.new(color.green, 30) : color.new(color.red, 30)
+    table.cell(statsTable, 0, 6, "💰  Expect",
+         text_color=color.white, text_size=size.small, bgcolor=expColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 6, str.tostring(math.round(expectancy, 2)),
+         text_color=color.white, text_size=size.small, bgcolor=expColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 6, "", bgcolor=expColor)
+    table.cell(statsTable, 3, 6, "", bgcolor=expColor)
+    table.cell(statsTable, 0, 7, "⚙️  SL/TP Ratio",
+         text_color=color.white, text_size=size.small, bgcolor=rrColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 7, rrStatus,
+         text_color=color.white, text_size=size.small, bgcolor=rrColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 7, "", bgcolor=rrColor)
+    table.cell(statsTable, 3, 7, "", bgcolor=rrColor)
+    table.cell(statsTable, 0, 8, "📏  15m Dist",
+         text_color=color.white, text_size=size.small, bgcolor=mtfDistanceColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 8, str.tostring(math.round(mtfEmaDistance, 2)) + "%",
+         text_color=color.white, text_size=size.small, bgcolor=mtfDistanceColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 8, mtfDistStatus,
+         text_color=color.white, text_size=size.small, bgcolor=mtfDistanceColor, text_halign=text.align_center)
+    table.cell(statsTable, 3, 8, "", bgcolor=mtfDistanceColor)
+    mtfTrendText  = close > ema15mNow ? "🟢 BUY ZONE" : "🔴 SELL ZONE"
+    mtfTrendColor = close > ema15mNow ? color.new(color.green, 30) : color.new(color.red, 30)
+    table.cell(statsTable, 0, 9, "📡  15m Trend",
+         text_color=color.white, text_size=size.small, bgcolor=mtfTrendColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 9, mtfTrendText,
+         text_color=color.white, text_size=size.small, bgcolor=mtfTrendColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 9, "", bgcolor=mtfTrendColor)
+    table.cell(statsTable, 3, 9, "", bgcolor=mtfTrendColor)
+    table.cell(statsTable, 0, 10, "📐  15m Slope",
+         text_color=color.white, text_size=size.small, bgcolor=slopeColor, text_halign=text.align_left)
+    table.cell(statsTable, 1, 10, slopeIcon + " " + slopeLbl + " " + str.tostring(math.round(slopeAngleDeg, 2)) + "°",
+         text_color=color.white, text_size=size.small, bgcolor=slopeColor, text_halign=text.align_center)
+    table.cell(statsTable, 2, 10, "Min:" + str.tostring(minAngleDeg) + "° N:" + str.tostring(n15Bars) + "bars",
+         text_color=color.white, text_size=size.small, bgcolor=slopeColor, text_halign=text.align_center)
+    table.cell(statsTable, 3, 10, slopeFilterLabel,
+         text_color=color.white, text_size=size.small, bgcolor=slopeColor, text_halign=text.align_center)
+
+//==================== START SETUP ====================
+if ta.crossover(close, ma)
+    inSetup                 := true
+    retrace                 := false
+    pullbackCount           := 0
+    pullbackDone            := false
+    emaTouchedAfterPullback := false
+    swingHigh               := high
+    swingLow                := low
+    impulseHigh             := high
+    impulseLow              := low
+
+if ta.crossunder(close, ma)
+    inSetup                 := true
+    retrace                 := false
+    pullbackCount           := 0
+    pullbackDone            := false
+    emaTouchedAfterPullback := false
+    swingHigh               := high
+    swingLow                := low
+    impulseHigh             := high
+    impulseLow              := low
+
+//==================== IMPULSE ====================
+if inSetup and not retrace
+    impulseHigh := math.max(impulseHigh, high)
+    impulseLow  := math.min(impulseLow, low)
+    swingHigh   := math.max(swingHigh, high)
+    swingLow    := math.min(swingLow, low)
+
+//==================== PULLBACK ====================
+if inSetup
+    if bull and close < open
+        pullbackCount += 1
+    if bear and close > open
+        pullbackCount += 1
+
+if pullbackCount >= 5
+    pullbackDone := true
+
+impulseSize   = impulseHigh - impulseLow
+pullbackDepth = math.abs(close - ma) / (impulseSize == 0 ? 1 : impulseSize)
+pullbackValid = pullbackDepth >= 0.30
+
+maZone = shouldUseFilters ? (math.abs(close - ma) / ma < emaDistanceThreshold) : true
+
+if pullbackDone and maZone and pullbackValid
+    emaTouchedAfterPullback := true
+
+retrace := pullbackDone and emaTouchedAfterPullback
+
+//==================== 15M EMA DISTANCE FILTER ====================
+mtfEmaDistanceOk = useMtfDistanceFilter ? (math.abs(close - ema15mNow) / ema15mNow < mtfDistanceThreshold) : true
+
+//==================== SIGNALS ====================
+mtfTrendBuy  = useMtfFilter ? (close > ema15mNow) : true
+mtfTrendSell = useMtfFilter ? (close < ema15mNow) : true
+
+buySignal  = inSetup and retrace and close > swingHigh and (not shouldUseFilters or rvol >= rvolThreshold) and mtfTrendBuy and mtfEmaDistanceOk and slopeBuyOk
+sellSignal = inSetup and retrace and close < swingLow  and (not shouldUseFilters or rvol >= rvolThreshold) and mtfTrendSell and mtfEmaDistanceOk and slopeSellOk
+
+//==================== SEAL OPEN TRADE BOXES ====================
+if array.size(openEntry) > 0
+    var int i = 0
+    i := 0
+    while i < array.size(openEntry)
+        tradeDir  = array.get(openDir,     i)
+        tradeTP   = array.get(openTP,      i)
+        tradeSL   = array.get(openSL,      i)
+        tradeTpBx = array.get(openTpZones, i)
+        tradeSlBx = array.get(openSlZones, i)
+        hit       = false
+        isWin     = false
+
+        if tradeDir == 1
+            if high >= tradeTP
+                box.set_right(tradeTpBx, bar_index)
+                box.set_right(tradeSlBx, bar_index)
+                box.set_bgcolor(tradeTpBx, color.new(color.green, 70))
+                box.set_extend(tradeTpBx, extend.none)
+                box.set_extend(tradeSlBx, extend.none)
+                hit   := true
+                isWin := true
+            else if low <= tradeSL
+                box.set_right(tradeTpBx, bar_index)
+                box.set_right(tradeSlBx, bar_index)
+                box.set_bgcolor(tradeSlBx, color.new(color.red, 70))
+                box.set_extend(tradeTpBx, extend.none)
+                box.set_extend(tradeSlBx, extend.none)
+                hit   := true
+                isWin := false
+
+        if tradeDir == -1
+            if low <= tradeTP
+                box.set_right(tradeTpBx, bar_index)
+                box.set_right(tradeSlBx, bar_index)
+                box.set_bgcolor(tradeTpBx, color.new(color.green, 70))
+                box.set_extend(tradeTpBx, extend.none)
+                box.set_extend(tradeSlBx, extend.none)
+                hit   := true
+                isWin := true
+            else if high >= tradeSL
+                box.set_right(tradeTpBx, bar_index)
+                box.set_right(tradeSlBx, bar_index)
+                box.set_bgcolor(tradeSlBx, color.new(color.red, 70))
+                box.set_extend(tradeTpBx, extend.none)
+                box.set_extend(tradeSlBx, extend.none)
+                hit   := true
+                isWin := false
+
+        if hit
+            if isWin
+                if consecutiveLosses > 0
+                    if consecutiveLosses > maxConsecutiveLosses
+                        maxConsecutiveLosses := consecutiveLosses
+                    consecutiveLosses := 0
+                consecutiveWins += 1
+                if consecutiveWins > maxConsecutiveWins
+                    maxConsecutiveWins := consecutiveWins
+            else
+                if consecutiveWins > 0
+                    if consecutiveWins > maxConsecutiveWins
+                        maxConsecutiveWins := consecutiveWins
+                    consecutiveWins := 0
+                consecutiveLosses += 1
+                if consecutiveLosses > maxConsecutiveLosses
+                    maxConsecutiveLosses := consecutiveLosses
+
+            array.push(last100, isWin ? 1 : 0)
+            if array.size(last100) > 100
+                array.shift(last100)
+
+            array.remove(openEntry,   i)
+            array.remove(openSL,      i)
+            array.remove(openTP,      i)
+            array.remove(openBar,     i)
+            array.remove(openDir,     i)
+            array.remove(openTpZones, i)
+            array.remove(openSlZones, i)
+        else
+            i += 1
+
+updateStatsTable()
+
+//==================== DRAW LONG ====================
+if buySignal
+    entry    = close
+    sl       = swingLow
+    actualTP = useCustomRR ? tpMultiplier : 2.0
+    tp       = entry + (entry - sl) * actualTP
+    rr       = (tp - entry) / (entry - sl)
+
+    riskAmt    = strategy.equity * (riskPercent / 100)
+    slDist     = math.abs(entry - sl)
+    qty        = slDist > 0 ? riskAmt / slDist : 1
+    marginUsed = (qty * entry) / leverage
+
+    strategy.entry("LONG", strategy.long, qty=qty, comment="binance entry")
+    strategy.exit("LX", "LONG", stop=sl, limit=tp, comment="binance exit")
+
+    tpZ = box.new(bar_index, tp, bar_index + 1, entry,
+          border_color=na, bgcolor=color.new(color.green, 88), extend=extend.right)
+    slZ = box.new(bar_index, entry, bar_index + 1, sl,
+          border_color=na, bgcolor=color.new(color.red, 88), extend=extend.right)
+    tpL = line.new(bar_index, tp, bar_index + 1, tp,
+          extend=extend.right, color=color.new(color.green, 0), style=line.style_dashed, width=2)
+    enL = line.new(bar_index, entry, bar_index + 1, entry,
+          extend=extend.right, color=color.new(color.blue, 0), style=line.style_solid, width=2)
+    slL = line.new(bar_index, sl, bar_index + 1, sl,
+          extend=extend.right, color=color.new(color.red, 0), style=line.style_dashed, width=2)
+
+    rvolText = shouldUseFilters ? ("  RVOL: " + str.tostring(math.round(rvol, 2))) : ""
+
+    tpLbl = label.new(bar_index, tp,
+            text="TP  " + str.tostring(math.round(tp, 2)) + "  (1:" + str.tostring(math.round(rr, 1)) + "R)",
+            style=label.style_label_left, color=color.new(color.green, 10),
+            textcolor=color.white, size=size.small)
+    enLbl = label.new(bar_index, entry,
+            text="ENTRY  " + str.tostring(math.round(entry, 2)) + rvolText,
+            style=label.style_label_left, color=color.new(color.blue, 10),
+            textcolor=color.white, size=size.small)
+    slLbl = label.new(bar_index, sl,
+            text="SL  " + str.tostring(math.round(sl, 2)) + "  |  QTY: " + str.tostring(math.round(qty, 4)) + "  |  RISK: $" + str.tostring(math.round(riskAmt, 2)) + "  |  MARGIN: $" + str.tostring(math.round(marginUsed, 2)),
+            style=label.style_label_left, color=color.new(color.red, 10),
+            textcolor=color.white, size=size.small)
+
+    array.push(allTpZones,     tpZ)
+    array.push(allSlZones,     slZ)
+    array.push(allTpLines,     tpL)
+    array.push(allSlLines,     slL)
+    array.push(allEntryLines,  enL)
+    array.push(allTpLabels,    tpLbl)
+    array.push(allSlLabels,    slLbl)
+    array.push(allEntryLabels, enLbl)
+
+    array.push(openEntry,   entry)
+    array.push(openSL,      sl)
+    array.push(openTP,      tp)
+    array.push(openBar,     bar_index)
+    array.push(openDir,     1)
+    array.push(openTpZones, tpZ)
+    array.push(openSlZones, slZ)
+
+//==================== DRAW SHORT ====================
+if sellSignal
+    entry    = close
+    sl       = swingHigh
+    actualTP = useCustomRR ? tpMultiplier : 2.0
+    tp       = entry - (sl - entry) * actualTP
+    rr       = (entry - tp) / (sl - entry)
+
+    riskAmt    = strategy.equity * (riskPercent / 100)
+    slDist     = math.abs(entry - sl)
+    qty        = slDist > 0 ? riskAmt / slDist : 1
+    marginUsed = (qty * entry) / leverage
+
+    strategy.entry("SHORT", strategy.short, qty=qty, comment="binance entry")
+    strategy.exit("SX", "SHORT", stop=sl, limit=tp, comment="binance exit")
+
+    slZ = box.new(bar_index, sl, bar_index + 1, entry,
+          border_color=na, bgcolor=color.new(color.red, 88), extend=extend.right)
+    tpZ = box.new(bar_index, entry, bar_index + 1, tp,
+          border_color=na, bgcolor=color.new(color.green, 88), extend=extend.right)
+    slL = line.new(bar_index, sl, bar_index + 1, sl,
+          extend=extend.right, color=color.new(color.red, 0), style=line.style_dashed, width=2)
+    enL = line.new(bar_index, entry, bar_index + 1, entry,
+          extend=extend.right, color=color.new(color.blue, 0), style=line.style_solid, width=2)
+    tpL = line.new(bar_index, tp, bar_index + 1, tp,
+          extend=extend.right, color=color.new(color.green, 0), style=line.style_dashed, width=2)
+
+    rvolText = shouldUseFilters ? ("  RVOL: " + str.tostring(math.round(rvol, 2))) : ""
+
+    slLbl = label.new(bar_index, sl,
+            text="SL  " + str.tostring(math.round(sl, 2)) + "  |  QTY: " + str.tostring(math.round(qty, 4)) + "  |  RISK: $" + str.tostring(math.round(riskAmt, 2)) + "  |  MARGIN: $" + str.tostring(math.round(marginUsed, 2)),
+            style=label.style_label_left, color=color.new(color.red, 10),
+            textcolor=color.white, size=size.small)
+    enLbl = label.new(bar_index, entry,
+            text="ENTRY  " + str.tostring(math.round(entry, 2)) + rvolText,
+            style=label.style_label_left, color=color.new(color.blue, 10),
+            textcolor=color.white, size=size.small)
+    tpLbl = label.new(bar_index, tp,
+            text="TP  " + str.tostring(math.round(tp, 2)) + "  (1:" + str.tostring(math.round(rr, 1)) + "R)",
+            style=label.style_label_left, color=color.new(color.green, 10),
+            textcolor=color.white, size=size.small)
+
+    array.push(allTpZones,     tpZ)
+    array.push(allSlZones,     slZ)
+    array.push(allTpLines,     tpL)
+    array.push(allSlLines,     slL)
+    array.push(allEntryLines,  enL)
+    array.push(allTpLabels,    tpLbl)
+    array.push(allSlLabels,    slLbl)
+    array.push(allEntryLabels, enLbl)
+
+    array.push(openEntry,   entry)
+    array.push(openSL,      sl)
+    array.push(openTP,      tp)
+    array.push(openBar,     bar_index)
+    array.push(openDir,     -1)
+    array.push(openTpZones, tpZ)
+    array.push(openSlZones, slZ)
+
+//==================== RESET ====================
+if buySignal or sellSignal
+    inSetup                 := false
+    pullbackCount           := 0
+    pullbackDone            := false
+    emaTouchedAfterPullback := false
+
+//==================== PLOTS ====================
+plotshape(buySignal,  location=location.belowbar, color=color.green, style=shape.labelup,   text="BUY")
+plotshape(sellSignal, location=location.abovebar, color=color.red,   style=shape.labeldown, text="SELL")

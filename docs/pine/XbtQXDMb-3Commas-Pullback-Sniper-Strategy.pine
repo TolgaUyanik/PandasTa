@@ -1,0 +1,267 @@
+//@version=6
+// =====================================================================
+//  Aggressive RSI HYPE/USDT Long  —  DCA Bot Replica
+// ---------------------------------------------------------------------
+//  Source bot config:
+//    Type        : MultiBot (Long, spot)
+//    Pair        : USDT_HYPE  (OKX)
+//    Entry       : RSI(14) crossing below 31  on 3m
+//    Exit        : RSI(14) crossing above 69  on 3m
+//                  AND profit >= 2.4% from avg entry (deal_close_type=strategy)
+//    Base order  : 45 USDT
+//    Safety order: 55 USDT, max 5,
+//                  step 1.3% (mode=base, cumulative),
+//                  martingale: vol x1.25, step x1.30
+//    Stop loss   : disabled
+//    TSL         : disabled
+//  Backtest period from config: 2026-01-26 14:00 UTC → 2026-04-26 UTC
+// =====================================================================
+
+strategy(
+     title                   = "[3Commas] Aggressive RSI HYPE/USDT Long",
+     shorttitle              = "Agg RSI DCA",
+     overlay                 = true,
+     pyramiding              = 10,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.cash,
+     default_qty_value       = 45,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.1,
+     slippage                = 5,
+     calc_on_every_tick      = false,
+     process_orders_on_close = false)
+
+// =====================================================================
+//                              INPUTS
+// =====================================================================
+rsiLen     = input.int  (14,   "RSI Length",                    minval = 2, group = "RSI Settings")
+rsiBuyLvl  = input.float(31.0, "RSI Buy Trigger (cross below)",             group = "RSI Settings")
+rsiSellLvl = input.float(69.0, "RSI Sell Trigger (cross above)",            group = "RSI Settings")
+
+boVol    = input.float(45.0,  "Base Order Volume (USDT)",            group = "DCA / Safety Orders")
+soVol    = input.float(55.0,  "Safety Order Volume (USDT)",          group = "DCA / Safety Orders")
+maxSO    = input.int  (5,     "Max Safety Orders",  minval = 0, maxval = 15, group = "DCA / Safety Orders")
+soStep   = input.float(1.3,   "Price Deviation % (SO step from base)", step = 0.1, group = "DCA / Safety Orders")
+volCoef  = input.float(1.25,  "Martingale Volume Coefficient",       step = 0.05, group = "DCA / Safety Orders")
+stepCoef = input.float(1.30,  "Martingale Step Coefficient",         step = 0.05, group = "DCA / Safety Orders")
+
+minProfit   = input.float(2.4,  "Min Profit % (from avg entry)", step = 0.1, group = "Take Profit")
+useCloseSig = input.bool (true, "Require RSI Sell Signal to Close (deal_close_type=strategy)", group = "Take Profit")
+
+useDates = input.bool(false, "Limit by Date Range",                       group = "Backtest Period")
+startTs  = input.time(timestamp("2026-01-26 14:00 +0000"), "Start",       group = "Backtest Period")
+endTs    = input.time(timestamp("2026-04-26 23:59 +0000"), "End",         group = "Backtest Period")
+
+botId      = input.string("12345678",         "Bot ID",                                      group = "Webhook (DCA Bot)")
+emailToken = input.string("YOUR_EMAIL_TOKEN", "Email Token",                                 group = "Webhook (DCA Bot)")
+pairLabel  = input.string("USDT_HYPE",        "Pair (Bot format: QUOTE_BASE)",               group = "Webhook (DCA Bot)")
+
+// — Display layer —
+showStats   = input.bool   (true,        "Show stats card",                                  group = "Display")
+statsPosStr = input.string ("top_left",  "Stats card position",
+     options = ["top_left","top_center","top_right","middle_left","middle_right","bottom_left","bottom_center","bottom_right"], group = "Display")
+showWM      = input.bool   (true,        "Show watermark",                                   group = "Display")
+wmText      = input.string ("3Commas",   "Watermark text",                                   group = "Display")
+wmPosStr    = input.string ("top_right", "Watermark position",
+     options = ["top_left","top_center","top_right","middle_left","middle_center","middle_right","bottom_left","bottom_center","bottom_right"], group = "Display")
+wmSizeStr   = input.string ("huge",      "Watermark size",
+     options = ["tiny","small","normal","large","huge"], group = "Display")
+wmAlpha     = input.int    (70,          "Watermark transparency (0=solid)", minval = 0, maxval = 100, group = "Display")
+
+// =====================================================================
+//                              SIGNALS
+// =====================================================================
+inRange = (not useDates) or (time >= startTs and time <= endTs)
+rsiVal  = ta.rsi(close, rsiLen)
+buySig  = ta.crossunder(rsiVal, rsiBuyLvl)
+sellSig = ta.crossover (rsiVal, rsiSellLvl)
+
+// =====================================================================
+//                               STATE
+// =====================================================================
+var bool  inDeal      = false
+var float basePrice   = na
+var float totalVolume = 0.0
+var float totalQty    = 0.0
+var int   soCount     = 0
+
+avgPrice = totalQty > 0 ? totalVolume / totalQty : na
+tpPrice  = na(avgPrice) ? na : avgPrice * (1.0 + minProfit / 100.0)
+
+// =====================================================================
+//                              HELPERS
+// =====================================================================
+// Cumulative price deviation in % for SO_n (mode = base):
+//   dev_n = sum_{i=1..n} ( soStep * stepCoef^(i-1) )
+// Trigger price for SO_n = basePrice * (1 - dev_n/100)
+soTriggerPrice(int n) =>
+    dev = 0.0
+    s   = soStep
+    for i = 1 to n
+        dev := dev + s
+        s   := s * stepCoef
+    basePrice * (1.0 - dev / 100.0)
+
+// Volume of SO_n in quote currency:
+//   v_n = soVol * volCoef^(n-1)
+soVolume(int n) =>
+    soVol * math.pow(volCoef, n - 1)
+
+// =====================================================================
+//                            BASE ORDER
+// =====================================================================
+if (not inDeal and buySig and inRange and barstate.isconfirmed)
+    qty = boVol / close
+    strategy.entry("BO", strategy.long, qty = qty)
+    inDeal      := true
+    basePrice   := close
+    totalVolume := boVol
+    totalQty    := qty
+    soCount     := 0
+
+// =====================================================================
+//                          SAFETY ORDERS
+// =====================================================================
+// Several SOs can trigger inside one bar — process all that the bar
+// low has reached, in order.
+if (inDeal and barstate.isconfirmed)
+    while soCount < maxSO
+        nextSO = soCount + 1
+        trig   = soTriggerPrice(nextSO)
+        if low <= trig
+            v = soVolume(nextSO)
+            q = v / trig
+            strategy.entry("SO" + str.tostring(nextSO), strategy.long, qty = q, limit = trig)
+            totalVolume := totalVolume + v
+            totalQty    := totalQty + q
+            soCount     := nextSO
+        else
+            break
+
+// =====================================================================
+//                              EXIT
+// =====================================================================
+canCloseBySignal = (not useCloseSig) or sellSig
+priceOK          = not na(tpPrice) and close >= tpPrice
+
+if (inDeal and canCloseBySignal and priceOK and barstate.isconfirmed)
+    strategy.close_all(comment = "TP")
+    inDeal      := false
+    basePrice   := na
+    totalVolume := 0.0
+    totalQty    := 0.0
+    soCount     := 0
+
+// =====================================================================
+//                             VISUALS
+// =====================================================================
+plot(inDeal ? avgPrice  : na, "Avg Entry",  color = color.yellow, style = plot.style_linebr, linewidth = 2)
+plot(inDeal ? tpPrice   : na, "TP Target",  color = color.lime,   style = plot.style_linebr, linewidth = 2)
+plot(inDeal ? basePrice : na, "Base Price", color = color.aqua,   style = plot.style_linebr)
+plot(inDeal and soCount < 1 ? soTriggerPrice(1) : na, "SO1", color = color.new(color.red, 40), style = plot.style_linebr)
+plot(inDeal and soCount < 2 ? soTriggerPrice(2) : na, "SO2", color = color.new(color.red, 50), style = plot.style_linebr)
+plot(inDeal and soCount < 3 ? soTriggerPrice(3) : na, "SO3", color = color.new(color.red, 60), style = plot.style_linebr)
+plot(inDeal and soCount < 4 ? soTriggerPrice(4) : na, "SO4", color = color.new(color.red, 70), style = plot.style_linebr)
+plot(inDeal and soCount < 5 ? soTriggerPrice(5) : na, "SO5", color = color.new(color.red, 80), style = plot.style_linebr)
+
+plotshape(buySig  and not inDeal[1], "Buy Sig",  shape.triangleup,   location.belowbar, color = color.green, size = size.tiny)
+plotshape(sellSig and inDeal,        "Sell Sig", shape.triangledown, location.abovebar, color = color.red,   size = size.tiny)
+
+// =====================================================================
+//                          STATS CARD
+// =====================================================================
+f_pos(s) =>
+    s == "top_left"      ? position.top_left      :
+     s == "top_center"    ? position.top_center    :
+     s == "top_right"     ? position.top_right     :
+     s == "middle_left"   ? position.middle_left   :
+     s == "middle_center" ? position.middle_center :
+     s == "middle_right"  ? position.middle_right  :
+     s == "bottom_left"   ? position.bottom_left   :
+     s == "bottom_center" ? position.bottom_center :
+     position.bottom_right
+
+f_size(s) =>
+    s == "tiny"   ? size.tiny   :
+     s == "small"  ? size.small  :
+     s == "normal" ? size.normal :
+     s == "large"  ? size.large  :
+     size.huge
+
+// Live metrics
+np         = strategy.netprofit
+npPct      = strategy.initial_capital > 0 ? np / strategy.initial_capital * 100 : 0.0
+dd         = strategy.max_drawdown
+ddPct      = strategy.initial_capital > 0 ? dd / strategy.initial_capital * 100 : 0.0
+nTrades    = strategy.closedtrades
+wins       = strategy.wintrades
+wrPct      = nTrades > 0 ? wins / nTrades * 100 : 0.0
+gp         = strategy.grossprofit
+gl         = strategy.grossloss
+pf         = gl > 0 ? gp / gl : 0.0
+
+// Color rules
+clrPos    = color.new(#00C853, 0)
+clrNeg    = color.new(#D50000, 0)
+clrNeutral= color.new(#FFFFFF, 10)
+clrHdrBg  = color.new(#1E88E5, 10)
+clrRowBg  = color.new(#0D1B2A, 25)
+clrAltBg  = color.new(#152238, 25)
+clrBorder = color.new(#1E88E5, 60)
+
+var table stats = table.new(f_pos(statsPosStr), 2, 6, bgcolor = clrRowBg, border_width = 1, border_color = clrBorder, frame_color = clrBorder, frame_width = 1)
+
+if showStats and barstate.islast
+    // Header
+    table.cell(stats, 0, 0, "BACKTEST RESULTS", text_color = color.white, text_size = size.normal, bgcolor = clrHdrBg, text_halign = text.align_center)
+    table.cell(stats, 1, 0, "—",                text_color = clrHdrBg,   text_size = size.normal, bgcolor = clrHdrBg, text_halign = text.align_center)
+
+    // Net P&L
+    table.cell(stats, 0, 1, "Net P&L",  text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 1, (np >= 0 ? "+" : "") + str.tostring(np, "0.00") + "  (" + (npPct >= 0 ? "+" : "") + str.tostring(npPct, "0.00") + "%)",
+         text_color = np >= 0 ? clrPos : clrNeg, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+    // Max Drawdown
+    table.cell(stats, 0, 2, "Max Drawdown", text_color = clrNeutral, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_left)
+    table.cell(stats, 1, 2, str.tostring(dd, "0.00") + "  (" + str.tostring(ddPct, "0.00") + "%)",
+         text_color = clrNeg, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_right)
+
+    // Total Trades
+    table.cell(stats, 0, 3, "Total Trades", text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 3, str.tostring(nTrades), text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+    // Win Rate
+    table.cell(stats, 0, 4, "Win Rate", text_color = clrNeutral, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_left)
+    table.cell(stats, 1, 4, str.tostring(wrPct, "0.00") + "%  (" + str.tostring(wins) + "/" + str.tostring(nTrades) + ")",
+         text_color = wrPct >= 50 ? clrPos : clrNeg, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_right)
+
+    // Profit Factor
+    table.cell(stats, 0, 5, "Profit Factor", text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 5, str.tostring(pf, "0.000"), text_color = pf >= 1.5 ? clrPos : (pf >= 1.0 ? clrNeutral : clrNeg), text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+// =====================================================================
+//                          BRAND WATERMARK
+// =====================================================================
+var table wm = table.new(f_pos(wmPosStr), 1, 1, bgcolor = color.new(color.black, 100), border_width = 0)
+if showWM and barstate.islast
+    table.cell(wm, 0, 0, wmText, text_color = color.new(color.white, wmAlpha), text_size = f_size(wmSizeStr), bgcolor = color.new(color.black, 100))
+
+// =====================================================================
+//                          WEBHOOK ALERTS
+// =====================================================================
+// Format compatible with DCA Bot signals. In TradingView alert dialog:
+//      Webhook URL: https://app.3commas.io/trade_signal/trading_view
+//      Message: leave default — the script's alert() supplies it.
+dealStartMsg = '{"message_type":"bot","bot_id":' + botId +
+     ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairLabel + '"}'
+dealCloseMsg = '{"action":"close_at_market_price","message_type":"bot","bot_id":' + botId +
+     ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairLabel + '"}'
+
+// Deal Start (BO entry)
+if (buySig and not inDeal[1] and inRange and barstate.isconfirmed)
+    alert(dealStartMsg, alert.freq_once_per_bar_close)
+
+// Deal Close (TP via close strategy + min profit gate)
+exitNow = inDeal and ((not useCloseSig) or sellSig) and (not na(tpPrice)) and (close >= tpPrice)
+if (exitNow and barstate.isconfirmed)
+    alert(dealCloseMsg, alert.freq_once_per_bar_close)

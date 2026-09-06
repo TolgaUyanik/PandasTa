@@ -1,0 +1,266 @@
+//@version=6
+// =====================================================================
+//  [3Commas] MA-CCI Trailing Long — Mean Reversion Strategy
+// ---------------------------------------------------------------------
+//  Source bot config:
+//    Type        : Bot::MultiBot (Long, perpetual)
+//    Pair        : USDT_BTC
+//    Entry       : SMA(24) crosses below SMA(31) on 1h  AND
+//                  CCI(11) on 1h falls below −80
+//    Exit        : Trailing take profit
+//                    Activation: +1.5% from entry
+//                    Trailing deviation: 0.05%
+//    Stop loss   : −3.25% (hard SL from entry)
+//    Base order  : 41.55858 USDT
+//    Safety ord  : disabled (max_safety_orders = 0, single entry)
+//    Leverage    : 1x cross (no margin amplification)
+// =====================================================================
+
+strategy(
+     title                   = "[3Commas] MA-CCI Trailing Long",
+     shorttitle              = "MA-CCI Trail",
+     overlay                 = true,
+     pyramiding              = 0,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.cash,
+     default_qty_value       = 41.55858,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.055,        // Bybit linear taker
+     slippage                = 5,
+     calc_on_every_tick      = false,
+     process_orders_on_close = false)
+
+// =====================================================================
+//                              INPUTS
+// =====================================================================
+maType     = input.string ("SMA", "MA Type", options = ["SMA","EMA"], group = "Entry — MA Cross")
+maFastLen  = input.int    (24,   "Fast MA Length",            minval = 2, group = "Entry — MA Cross")
+maSlowLen  = input.int    (31,   "Slow MA Length",            minval = 2, group = "Entry — MA Cross")
+maTF       = input.timeframe("60", "MA Cross Timeframe",                  group = "Entry — MA Cross")
+useMACross = input.bool   (true, "Use MA Cross signal",                   group = "Entry — MA Cross")
+
+cciLen   = input.int  (11,   "CCI Length",                    minval = 2, group = "Entry — CCI")
+cciThr   = input.float(-80,  "CCI Oversold Threshold",                    group = "Entry — CCI")
+cciTF    = input.timeframe("60", "CCI Timeframe",                          group = "Entry — CCI")
+useCCI   = input.bool (true, "Use CCI signal",                            group = "Entry — CCI")
+
+combineMode  = input.string("AND", "Combine Signals", options = ["AND","OR"], group = "Entry — Signal Combination")
+keepAliveBars= input.int   (3,     "Signal Keep-Alive (bars)", minval = 1, maxval = 20, tooltip = "Bars within which both signals must align for AND mode", group = "Entry — Signal Combination")
+
+boVol = input.float(41.55858, "Base Order Volume (USDT)", minval = 0.01, step = 0.01, group = "Position Sizing")
+
+tpPct        = input.float(1.5,  "Take Profit % (activation)", minval = 0.01, step = 0.05, group = "Take Profit / Trailing") / 100.0
+trailEnabled = input.bool (true, "Enable Trailing Stop",                                    group = "Take Profit / Trailing")
+trailDevPct  = input.float(0.05, "Trailing Deviation %",       minval = 0.01, step = 0.01, group = "Take Profit / Trailing") / 100.0
+
+useSL = input.bool (true, "Enable Stop Loss",                                  group = "Stop Loss")
+slPct = input.float(3.25, "Stop Loss % (from entry)", minval = 0.01, step = 0.05, group = "Stop Loss") / 100.0
+
+useDates = input.bool(false, "Limit by Date Range", group = "Backtest Period")
+startTs  = input.time(timestamp("2025-05-11 16:00 +0000"), "Start", group = "Backtest Period")
+endTs    = input.time(timestamp("2026-05-12 16:00 +0000"), "End",   group = "Backtest Period")
+
+botId      = input.string("12345678",         "Bot ID",                                      group = "Webhook (DCA Bot)")
+emailToken = input.string("YOUR_EMAIL_TOKEN", "Email Token",                                 group = "Webhook (DCA Bot)")
+pairLabel  = input.string("USDT_ETHUSDT",     "Pair (Bot format: QUOTE_BASE)",               group = "Webhook (DCA Bot)")
+
+// — Display —
+showStats   = input.bool   (true,        "Show stats card",  group = "Display")
+statsPosStr = input.string ("top_left",  "Stats card position",
+     options = ["top_left","top_center","top_right","middle_left","middle_right","bottom_left","bottom_center","bottom_right"], group = "Display")
+showWM      = input.bool   (true,        "Show watermark",   group = "Display")
+wmText      = input.string ("3Commas",   "Watermark text",   group = "Display")
+wmPosStr    = input.string ("top_right", "Watermark position",
+     options = ["top_left","top_center","top_right","middle_left","middle_center","middle_right","bottom_left","bottom_center","bottom_right"], group = "Display")
+wmSizeStr   = input.string ("huge",      "Watermark size",
+     options = ["tiny","small","normal","large","huge"], group = "Display")
+wmAlpha     = input.int    (70,          "Watermark transparency (0=solid)", minval = 0, maxval = 100, group = "Display")
+
+// =====================================================================
+//                              SIGNALS
+// =====================================================================
+inRange = (not useDates) or (time >= startTs and time <= endTs)
+
+// MA values on selected TF — for plotting only (look-ahead-safe [1] + lookahead_on)
+maFastVal = request.security(syminfo.tickerid, maTF, (maType == "SMA" ? ta.sma(close, maFastLen) : ta.ema(close, maFastLen))[1], lookahead = barmerge.lookahead_on)
+maSlowVal = request.security(syminfo.tickerid, maTF, (maType == "SMA" ? ta.sma(close, maSlowLen) : ta.ema(close, maSlowLen))[1], lookahead = barmerge.lookahead_on)
+
+// Cross detection MUST be computed INSIDE security context to capture every
+// signal-TF crossing event regardless of chart timeframe. Otherwise on a 1h
+// chart with 15m signals, intra-hour crosses are aggregated away and missed.
+maCrossSig = request.security(syminfo.tickerid, maTF,
+     ta.crossunder(
+         maType == "SMA" ? ta.sma(close, maFastLen) : ta.ema(close, maFastLen),
+         maType == "SMA" ? ta.sma(close, maSlowLen) : ta.ema(close, maSlowLen)
+     ),
+     lookahead = barmerge.lookahead_off)
+
+cciSig = request.security(syminfo.tickerid, cciTF,
+     ta.crossunder(ta.cci(close, cciLen), cciThr),
+     lookahead = barmerge.lookahead_off)
+
+// Keep-alive tracker — bar_index of last fire for each signal
+// Use explicit -1 sentinel (more reliable than na for int in Pine v6)
+var int maLastBar  = -1
+var int cciLastBar = -1
+
+if maCrossSig
+    maLastBar := bar_index
+if cciSig
+    cciLastBar := bar_index
+
+maAlive  = (not useMACross) or (maLastBar  >= 0 and (bar_index - maLastBar)  <= keepAliveBars)
+cciAlive = (not useCCI)     or (cciLastBar >= 0 and (bar_index - cciLastBar) <= keepAliveBars)
+
+// Either signal must have just fired on this bar
+freshlyFired = (useMACross and maCrossSig) or (useCCI and cciSig)
+
+// Combined entry condition
+entrySignal = combineMode == "AND" ? (maAlive and cciAlive and freshlyFired) : (maCrossSig or cciSig)
+
+// =====================================================================
+//                               STATE
+// =====================================================================
+var float entryPx = na
+
+// =====================================================================
+//                              ENTRY
+// =====================================================================
+if (strategy.position_size == 0 and entrySignal and inRange and barstate.isconfirmed)
+    qty = boVol / close
+    strategy.entry("Long", strategy.long, qty = qty)
+    entryPx := close
+
+// =====================================================================
+//                              EXIT
+// =====================================================================
+// One strategy.exit call handles both SL + trailing TP (or fixed TP if trailing off).
+if (strategy.position_size > 0 and not na(entryPx))
+    slPx          = entryPx * (1.0 - slPct)
+    tpActivPx     = entryPx * (1.0 + tpPct)
+    // trail_offset requires integer ticks in Pine v6 — cast explicitly
+    trailOffTicks = math.max(1, int(math.round(entryPx * trailDevPct / syminfo.mintick)))
+
+    strategy.exit("Exit",
+         from_entry   = "Long",
+         stop         = useSL        ? slPx          : na,
+         trail_price  = trailEnabled ? tpActivPx     : na,
+         trail_offset = trailEnabled ? trailOffTicks : na,
+         limit        = (not trailEnabled) ? tpActivPx : na)
+
+// Reset state when position closes
+if (strategy.position_size == 0 and strategy.position_size[1] > 0)
+    entryPx := na
+
+// =====================================================================
+//                             VISUALS
+// =====================================================================
+// MA debug lines — visible always so you can see if signals are computing
+showMAs = input.bool(true, "Show MA lines on chart", group = "Display")
+plot(showMAs ? maFastVal : na, "Fast MA", color = color.new(#00BCD4, 0), linewidth = 1)
+plot(showMAs ? maSlowVal : na, "Slow MA", color = color.new(#FF9800, 0), linewidth = 1)
+
+// Position-related lines (only when in trade)
+plot(strategy.position_size > 0 ? entryPx                    : na, "Entry",   color = color.aqua,   style = plot.style_linebr, linewidth = 2)
+plot(strategy.position_size > 0 ? entryPx * (1.0 + tpPct)    : na, "TP/Trail",color = color.lime,   style = plot.style_linebr, linewidth = 1)
+plot(strategy.position_size > 0 and useSL ? entryPx * (1.0 - slPct) : na, "SL", color = color.red, style = plot.style_linebr, linewidth = 1)
+
+// Signal markers — fire on every signal, even without entry
+plotshape(useMACross and maCrossSig, "MA Cross",     shape.triangledown, location.abovebar, color = color.new(#FF9800, 30), size = size.tiny, text = "MA",  textcolor = color.new(#FF9800, 0))
+plotshape(useCCI and cciSig,         "CCI Oversold", shape.triangleup,   location.belowbar, color = color.new(#00BCD4, 30), size = size.tiny, text = "CCI", textcolor = color.new(#00BCD4, 0))
+plotshape(entrySignal and strategy.position_size == 0, "Long Entry", shape.triangleup, location.belowbar, color = color.green, size = size.small, text = "L", textcolor = color.green)
+
+// =====================================================================
+//                          STATS CARD
+// =====================================================================
+f_pos(s) =>
+    s == "top_left"      ? position.top_left      :
+     s == "top_center"    ? position.top_center    :
+     s == "top_right"     ? position.top_right     :
+     s == "middle_left"   ? position.middle_left   :
+     s == "middle_center" ? position.middle_center :
+     s == "middle_right"  ? position.middle_right  :
+     s == "bottom_left"   ? position.bottom_left   :
+     s == "bottom_center" ? position.bottom_center :
+     position.bottom_right
+
+f_size(s) =>
+    s == "tiny"   ? size.tiny   :
+     s == "small"  ? size.small  :
+     s == "normal" ? size.normal :
+     s == "large"  ? size.large  :
+     size.huge
+
+// Live metrics
+np      = strategy.netprofit
+npPct   = strategy.initial_capital > 0 ? np / strategy.initial_capital * 100 : 0.0
+dd      = strategy.max_drawdown
+ddPct   = strategy.initial_capital > 0 ? dd / strategy.initial_capital * 100 : 0.0
+nTrades = strategy.closedtrades
+wins    = strategy.wintrades
+wrPct   = nTrades > 0 ? wins / nTrades * 100 : 0.0
+gp      = strategy.grossprofit
+gl      = strategy.grossloss
+pf      = gl > 0 ? gp / gl : 0.0
+
+clrPos    = color.new(#00C853, 0)
+clrNeg    = color.new(#D50000, 0)
+clrNeutral= color.new(#FFFFFF, 10)
+clrHdrBg  = color.new(#1E88E5, 10)
+clrRowBg  = color.new(#0D1B2A, 25)
+clrAltBg  = color.new(#152238, 25)
+clrBorder = color.new(#1E88E5, 60)
+
+// Safer pattern: create table lazily inside the if-block (avoids Pine v6 issues
+// with `var table` initializing from input-derived position).
+var table stats = na
+
+if showStats and barstate.islast
+    if na(stats)
+        stats := table.new(f_pos(statsPosStr), 2, 6, bgcolor = clrRowBg, border_width = 1, border_color = clrBorder, frame_color = clrBorder, frame_width = 1)
+
+    table.cell(stats, 0, 0, "BACKTEST RESULTS", text_color = color.white, text_size = size.normal, bgcolor = clrHdrBg, text_halign = text.align_center)
+    table.cell(stats, 1, 0, "—",                text_color = clrHdrBg,   text_size = size.normal, bgcolor = clrHdrBg, text_halign = text.align_center)
+
+    table.cell(stats, 0, 1, "Net P&L",  text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 1, (np >= 0 ? "+" : "") + str.tostring(np, "0.00") + "  (" + (npPct >= 0 ? "+" : "") + str.tostring(npPct, "0.00") + "%)",
+         text_color = np >= 0 ? clrPos : clrNeg, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 2, "Max Drawdown", text_color = clrNeutral, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_left)
+    table.cell(stats, 1, 2, str.tostring(dd, "0.00") + "  (" + str.tostring(ddPct, "0.00") + "%)",
+         text_color = clrNeg, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 3, "Total Trades", text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 3, str.tostring(nTrades), text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 4, "Win Rate", text_color = clrNeutral, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_left)
+    table.cell(stats, 1, 4, str.tostring(wrPct, "0.00") + "%  (" + str.tostring(wins) + "/" + str.tostring(nTrades) + ")",
+         text_color = wrPct >= 50 ? clrPos : clrNeg, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 5, "Profit Factor", text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 5, str.tostring(pf, "0.000"), text_color = pf >= 1.5 ? clrPos : (pf >= 1.0 ? clrNeutral : clrNeg), text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+// =====================================================================
+//                          BRAND WATERMARK
+// =====================================================================
+var table wm = na
+if showWM and barstate.islast
+    if na(wm)
+        wm := table.new(f_pos(wmPosStr), 1, 1, bgcolor = color.new(color.black, 100), border_width = 0)
+    table.cell(wm, 0, 0, wmText, text_color = color.new(color.white, wmAlpha), text_size = f_size(wmSizeStr), bgcolor = color.new(color.black, 100))
+
+// =====================================================================
+//                          WEBHOOK ALERTS
+// =====================================================================
+dealStartMsg = '{"message_type":"bot","bot_id":' + botId +
+     ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairLabel + '"}'
+dealCloseMsg = '{"action":"close_at_market_price","message_type":"bot","bot_id":' + botId +
+     ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairLabel + '"}'
+
+// Deal Start
+if (entrySignal and strategy.position_size == 0 and inRange and barstate.isconfirmed)
+    alert(dealStartMsg, alert.freq_once_per_bar_close)
+
+// Deal Close (when position transitions from open to flat)
+if (strategy.position_size == 0 and strategy.position_size[1] > 0 and barstate.isconfirmed)
+    alert(dealCloseMsg, alert.freq_once_per_bar_close)

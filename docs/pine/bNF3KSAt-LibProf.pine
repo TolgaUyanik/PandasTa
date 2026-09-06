@@ -1,0 +1,1505 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   Core Profiling Library.
+//                This library provides a generic, object-oriented framework for
+//                creating, managing, and analyzing 1D distributions (profiles) on 
+//                a customizable coordinate grid.
+//
+//                Unlike traditional Volume Profile libraries, `LibProf` is designed 
+//                as a **neutral Engine**. It abstracts away specific concepts 
+//                like "Price" or "Volume" in favor of mathematical primitives 
+//                ("Level" and "Mass"). This allows developers to profile *any*
+//                data series, such as Time-at-Price, Velocity, Delta, or Ticks.
+//
+//                Key Features:
+//
+//                1.  **Object-Oriented Design (UDT):** Built around the `Prof` 
+//                    object, encapsulating grid geometry, two generic data accumulators 
+//                    (Array A & B), and cached statistical metrics. Supports full 
+//                    lifecycle management: creation, cloning, clearing, and merging.
+//
+//                2.  **Data-Agnostic Abstraction:**
+//                    - **Level (X-Axis):** Represents the coordinate system (e.g., 
+//                      Price, Time, Oscillator Value).
+//                    - **Mass (Y-Axis):** Represents the accumulated quantity 
+//                      (e.g., Volume, Duration, Count).
+//                    - **Resolution (Grain):** The grid represents continuous data 
+//                      discretized by a customizable resolution step size.
+//
+//                3.  **Dual-Mode Geometry (Linear & Logarithmic):**
+//                    The engine supports seamless switching between two geometric modes:
+//                    - **Linear:** Arithmetic scaling (equal distance).
+//                    - **Logarithmic:** Geometric scaling (equal percentage), essential 
+//                      for consistent density analysis across large ranges (Crypto).
+//                    Includes strict domain validation (enforcing positive bounds for log-space)
+//                    and physics-based constraints to prevent aliasing.
+//
+//                4.  **High-Fidelity Resampling:**
+//                    Includes a sophisticated **Trapezoidal Integration Model** to 
+//                    handle grid resizing and profile merging. When data is moved 
+//                    between grids of different resolutions or geometries, the 
+//                    library calculates the exact integral of the mass density 
+//                    to ensure strict mass conservation.
+//
+//                5.  **Dynamic Grid Management:**
+//                    - **Adapting:** Automatically expands the coordinate boundaries 
+//                      to include new data points (`adapt`).
+//                    - **Resizing:** Allows changing the resolution (bins) or 
+//                      boundaries on the fly, triggering the interpolation engine to 
+//                      re-sample existing data accurately.
+//
+//                6.  **Statistical Analysis (Lazy Evaluation):**
+//                    Comprehensive metrics calculated on-demand.
+//                    In Logarithmic mode, metrics adapt to use **Geometric Mean** and 
+//                    **Geometric Interpolation** for maximum precision.
+//                    - **Location:** Peak (Mode), Weighted Mean (Center of Gravity), Median.
+//                    - **Dispersion:** Standard Deviation (Population), Coverage.
+//                    - **Shape:** Skewness and Excess Kurtosis.
+//
+//                7.  **Structural Analysis:**
+//                    Includes a monotonic segmentation algorithm (configured by gapSize)
+//                    to decompose the distribution into its fundamental unimodal 
+//                    segments, aiding in the detection of multi-modal distributions.
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibProf")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.1.0
+// (New) Initial release of library.
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibProf"
+const string VERSION = "0.1.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const float EPSILON = 1e-9
+
+// ── UDT ──────────────────────────────────────────────────────────────────────
+// @type Prof  Generic Profile object containing the grid and two data arrays.
+// @field _bins       int          Number of discrete containers (bins).
+// @field _upper      float        Upper boundary of the domain.
+// @field _lower      float        Lower boundary of the domain.
+// @field _resolution float        Smallest atomic grid unit (Resolution).
+// @field _isLog      bool         If true, the grid uses logarithmic scaling.
+// @field _logFactor  float        Cached multiplier for log iteration (k = (up/lo)^(1/n)).
+// @field _logStep    float        Cached natural logarithm of the factor (ln(k)) for optimized index calculation.
+// @field _dynamic    bool         Flag for dynamic resizing/resampling.
+// @field _coverage   int          Target Mass Coverage Percentage (Input for Coverage).
+// @field _gapSize    int          Tolerance against trend violations (Noise filter).
+// @field _maxBins    int          Hard capacity limit for bins.
+// @field _massA      array<float> Generic Mass Array A.
+// @field _massB      array<float> Generic Mass Array B.
+// @field _peak       int          Index of max mass (Mode).
+// @field _covUp      int          Index of Coverage Upper Bound.
+// @field _covLo      int          Index of Coverage Lower Bound.
+// @field _median     float        Median level of distribution.
+// @field _mean       float        Weighted Average Level (Center of Gravity).
+// @field _stdDev     float        Population Standard Deviation.
+// @field _skewness   float        Asymmetry measure.
+// @field _kurtosis   float        Tail heaviness measure.
+// @field _segments   matrix<int>  Identified unimodal segments.
+export type Prof
+    int          _bins
+    float        _upper
+    float        _lower
+    float        _resolution
+
+    bool         _isLog
+    float        _logFactor
+    float        _logStep
+
+    bool         _dynamic
+    int          _coverage
+    int          _gapSize
+    int          _maxBins
+
+    array<float> _massA
+    array<float> _massB
+
+    int          _peak
+    int          _covUp
+    int          _covLo
+
+    float        _median
+    float        _mean
+    float        _stdDev
+    float        _skewness
+    float        _kurtosis
+
+    matrix<int>  _segments
+
+// ── PRIVATE ──────────────────────────────────────────────────────────────────
+// @function Clamp helper.
+// @param   x  series float  Value
+// @param   up series float  Upper Boundary
+// @param   lo series float  Lower Boundary
+// @returns    series float  Clamped value
+_clamp(
+  series float x,
+  series float up,
+  series float lo
+  ) =>
+    math.max(lo, math.min(up, x))
+
+// @function Clamp helper.
+// @param   x  series int    Value
+// @param   up series float  Upper Boundary
+// @param   lo series float  Lower Boundary
+// @returns    series int    Clamped value
+_clamp(
+  series int x,
+  series int up,
+  series int lo
+  ) =>
+    math.max(lo, math.min(up, x))
+
+// @function Upper/Lower absolute bounds of a bin.
+// @param   self Prof        Profile object
+// @param   idx  series int  Bin index
+// @returns [up, lo]
+//          up  series float  The upper level bound of the bin.
+//          lo  series float  The lower level bound of the bin.
+method _binBnds(
+  Prof self,
+  series int idx
+  ) =>
+    if self._isLog
+        series float lo = self._lower * math.pow(self._logFactor, idx)
+        series float up = lo * self._logFactor
+        [up, lo]
+    else
+        series float rawWidth = (self._upper - self._lower) / self._bins
+        series float lo = self._lower + idx * rawWidth
+        series float up = lo + rawWidth
+        [up, lo]
+
+// @function Bin width in coordinate units.
+// @param   self Prof          Profile object
+// @param   idx  series int    (Optional) Index needed for log width calculation. Default 0.
+// @returns      series float  width of one bin
+method _binWidth(
+  Prof self,
+  series int idx = 0
+  ) =>
+    [up, lo] = self._binBnds(idx)
+    up - lo
+
+// @function Bin index for an absolute `level`.
+// @param   self   Prof         Profile object
+// @param   level  series float absolute coordinate to locate
+// @returns        series int   bin index 0…bins‑1 (clamped)
+method _binIdx(
+  Prof self,
+  series float level
+  ) =>
+    if self._isLog
+        series float safeLvl = math.max(level, self._lower)
+
+        if self._logStep < EPSILON
+            0 
+        else
+            series int rawIdx = int((math.log(safeLvl / self._lower) / self._logStep) + EPSILON)
+            _clamp(rawIdx, self._bins - 1, 0)
+    else
+        _clamp(int(((level - self._lower) / self._binWidth()) + EPSILON), self._bins - 1, 0)
+
+// @function Mid level of a bin.
+//           - Linear Mode: Returns Arithmetic Mean ( (Up + Lo) / 2 )
+//           - Log Mode:    Returns Geometric Mean ( sqrt(Up * Lo) )
+// @param   self Prof          Profile object
+// @param   idx  series int    Bin index
+// @returns      series float  Mid level
+method _binMid(
+  Prof self,
+  series int idx
+  ) =>
+    [up, lo] = self._binBnds(idx)
+    
+    if self._isLog
+        math.sqrt(up * lo)
+    else
+        (up + lo) * 0.5
+
+// @function Get total mass of both arrays at same index.
+// @param   self Prof          Profile object
+// @param   idx  series int    Bin index
+// @returns      series float  Total mass
+method _binTotMass(
+  Prof self,
+  series int idx
+  ) =>
+    math.max(array.get(self._massA, idx) + array.get(self._massB, idx), 0)
+
+// @function Helper to recalculate log geometry cache.
+//           Must be called whenever bounds or bins change in log mode.
+// @param    self  Prof          Profile object
+// @returns        series float  Factor k = (upper/lower)^(1/bins)
+method _recalcLogGeo(
+  Prof self
+  ) =>
+    if self._isLog
+        if self._lower <= 0
+            runtime.error("Logarithmic profile requires positive lower bound (>0).")
+        
+        self._logFactor := math.pow(self._upper / self._lower, 1.0 / self._bins)
+        self._logStep   := math.log(self._logFactor)
+
+// @function Resets all cached metric fields to `na`.
+//           This is called by any method that modifies the profile's raw data.
+// @param   self Prof   The profile object.
+// @returns      Prof  `self` (chaining).
+method _clearCache(
+  Prof self
+  ) =>
+    self._peak     := na
+    self._covUp    := na
+    self._covLo    := na
+
+    self._median   := na
+    self._mean     := na
+    self._stdDev   := na
+    self._skewness := na
+    self._kurtosis := na
+
+    self._segments := na
+
+    self
+
+// @function Helper to ensure coordinate intervals respect the resolution limit and geometric domain constraints.
+//           1. Enforces minimal span: (Upper - Lower) >= Resolution. Expands symmetrically if needed.
+//           2. Enforces Log safety: If isLog is true, ensures Lower > 0.
+//              If the lower bound breaches the zero-threshold, the entire window is shifted upwards
+//              to preserve the required span while remaining in the valid logarithmic domain.
+// @param   up     float  The requested upper boundary.
+// @param   lo     float  The requested lower boundary.
+// @param   res    float  The resolution constraint.
+// @param   isLog  bool   True if the grid uses logarithmic scaling.
+// @returns        [float, float] A tuple containing the [safeUpper, safeLower] bounds.
+_calcSafeSpan(
+  series float up, 
+  series float lo, 
+  series float res, 
+  series bool isLog
+  ) =>
+    series float validUp = up 
+    series float validLo = lo
+
+    if (up - lo) < res
+        series float center = (up + lo) * 0.5
+        series float half   = res * 0.5
+        validUp := center + half
+        validLo := center - half
+    
+    if isLog and lo <= EPSILON
+        series float shift = EPSILON - lo + EPSILON
+        validUp += shift
+        validLo += shift
+
+        if validLo <= 0
+            runtime.error("Logarithmic Profile requires positive bounds.")
+
+    [validUp, validLo]
+
+// @function Universal constraint calculator.
+//           Determines the maximum number of bins allowed for the given bounds and resolution.
+// @param   up      float  The upper bound.
+// @param   lo      float  The lower bound.
+// @param   res     float  The resolution (minimum atomic unit/tick size).
+// @param   isLog   bool   True for Logarithmic scale, False for Linear.
+// @returns         int    The maximum permissible bin count (clamped to >= 1).
+_calcMaxBins(
+  series float up,
+  series float lo,
+  series float res,
+  series bool isLog
+  ) =>
+    series int maxBins = 0
+
+    if up <= lo
+        maxBins := 1 
+    else if isLog
+        if lo <= 0
+            maxBins := 1
+        else
+            series float min_k = 1.0 + (res / lo)
+            maxBins := int(math.log(up / lo) / math.log(min_k))
+    else
+        maxBins := int((up - lo) / res)
+    
+    math.max(1, maxBins)
+
+// @function Calculates the unnormalized mass density at a given level `lvl`.
+//           This is based on a piecewise linear model defined by three points:
+//           the bin itself and its immediate neighbors.
+//           NOTE: This function uses a linear interpolation model for density
+//           distribution between bin centers. In Logarithmic mode (`isLog=true`),
+//           this is a mathematical simplification. While the grid allows for
+//           geometric expansion, the density slope within a single bin remains
+//           linear for performance reasons.
+// @param   lvl     series float  The level at which to calculate the density.
+// @param   upLvl   series float  Center level of the upper neighbor bin.
+// @param   midLvl  series float  Center level of the main bin.
+// @param   loLvl   series float  Center level of the lower neighbor bin.
+// @param   upMass  series float  Mass of the upper neighbor bin.
+// @param   midMass series float  Mass of the main bin.
+// @param   loMass  series float  Mass of the lower neighbor bin.
+// @returns         series float  The non-negative, unnormalized mass density.
+_calcDens(
+  series float lvl,
+  series float upLvl,
+  series float midLvl,
+  series float loLvl,
+  series float upMass,
+  series float midMass,
+  series float loMass
+  ) =>
+    series float density = 0.0
+
+    if lvl <= midLvl
+        series float denom = midLvl - loLvl
+        if denom > EPSILON
+            series float t = (lvl - loLvl) / denom
+            density := loMass + t * (midMass - loMass)
+        else
+            density := midMass
+    else
+        series float denom = upLvl - midLvl
+        if denom > EPSILON
+            series float t = (lvl - midLvl) / denom
+            density := midMass + t * (upMass - midMass)
+        else
+            density := midMass
+    
+    math.max(0.0, density)
+
+// @function Analytically integrates the linear interpolation density function.
+//           It calculates the exact area of the trapezoid(s) under the curve,
+//           which is faster and more precise than numerical approximation.
+// @param   upper   series float  The upper bound of the integration interval.
+// @param   lower   series float  The lower bound of the integration interval.
+// @param   upLvl   series float  Center level of the upper neighbor bin.
+// @param   midLvl  series float  Center level of the main bin.
+// @param   loLvl   series float  Center level of the lower neighbor bin.
+// @param   upMass  series float  Mass of the upper neighbor bin.
+// @param   midMass series float  Mass of the main bin.
+// @param   loMass  series float  Mass of the lower neighbor bin.
+// @returns         series float  The result of the definite integral (the exact area).
+_calcArea(
+  series float upper,
+  series float lower,
+  series float upLvl,
+  series float midLvl,
+  series float loLvl,
+  series float upMass,
+  series float midMass,
+  series float loMass
+  ) =>
+    if upper <= lower + EPSILON
+        0.0
+    else
+        series float area = 0.0
+
+        if lower < midLvl and upper > midLvl
+            series float h1Lo = _calcDens(lower, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+            series float h1Up = _calcDens(midLvl, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+            area += (h1Lo + h1Up) * 0.5 * (midLvl - lower)
+
+            series float h2Lo = h1Up
+            series float h2Up = _calcDens(upper, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+            area += (h2Lo + h2Up) * 0.5 * (upper - midLvl)
+        else
+            series float hLo = _calcDens(lower, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+            series float hUp = _calcDens(upper, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+            area := (hLo + hUp) * 0.5 * (upper - lower)
+        
+        area
+
+// @function Calculates the mass share for a target bin from a source bin
+//           using a linear interpolation model based on the source bin and its
+//           immediate neighbors. This creates a sloped mass distribution.
+//           The model is normalized to ensure total mass is conserved.
+// @param   upLvl   series float  Center level of the upper neighbor bin.
+// @param   midLvl  series float  Center level of the main bin.
+// @param   loLvl   series float  Center level of the lower neighbor bin.
+// @param   upMass  series float  Mass of the upper neighbor bin.
+// @param   midMass series float  Mass of the main bin.
+// @param   loMass  series float  Mass of the lower neighbor bin.
+// @param   tgtUp   series float  Upper level bound of the target bin.
+// @param   tgtLo   series float  Lower level bound of the target bin.
+// @returns         series float  The portion of `midMass` that falls into the target bin.
+_calcShare(
+  series float upLvl,
+  series float midLvl,
+  series float loLvl,
+  series float upMass,
+  series float midMass,
+  series float loMass,
+  series float tgtUp,
+  series float tgtLo
+  ) =>
+    if midMass <= 0
+        0.0
+    else
+        series float width = midLvl - loLvl
+        series float upper = midLvl + 0.5 * width
+        series float lower = midLvl - 0.5 * width
+
+        series float totalArea = _calcArea(upper, lower, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+
+        series float ovlpUp = math.min(upper, tgtUp)
+        series float ovlpLo = math.max(lower, tgtLo)
+        if totalArea <= EPSILON
+            series float ovlpWidth = math.max(0, ovlpUp - ovlpLo)
+            series float share = width > EPSILON ? ovlpWidth / width : 0
+            midMass * share
+        else
+            series float ovlpArea = _calcArea(ovlpUp, ovlpLo, upLvl, midLvl, loLvl, upMass, midMass, loMass)
+            series float share = ovlpArea / totalArea
+            midMass * _clamp(share, 1.0, 0.0)
+
+// @function Internal processor for a single source bin during a merge operation.
+//           This method encapsulates the entire mass transfer logic for one specific
+//           interval of the source grid. It relieves the main iterator (`_mergeMass`)
+//           from operational details by handling:
+//
+//           1. **Coordinate Transformation:** Converts physical grid points (Price)
+//              into the mathematical "Calculation Space". If `isLog` is true,
+//              coordinates are transformed to `ln(x)` to ensure the linear density
+//              model behaves as a geometric interpolation in the original space.
+//           2. **Neighbor Retrieval:** Safely retrieves mass values from adjacent
+//              bins to determine the density slope (Trapezoidal rule).
+//           3. **Target Intersection:** Identifies overlapping bins on the target
+//              grid and performs the final integration.
+//
+// @param   self        Prof          The target profile object.
+// @param   idx         series int    Index of the current source bin being processed.
+// @param   count       series int    Total number of bins in the source profile (for boundary checks).
+// @param   massA       array<float>  Source Array A (to retrieve current and neighbor mass).
+// @param   massB       array<float>  Source Array B (to retrieve current and neighbor mass).
+// @param   midCurrent  series float  Physical center level of the current source bin.
+// @param   midPrev     series float  Physical center level of the previous source bin (extrapolated).
+// @param   midNext     series float  Physical center level of the next source bin.
+// @param   bound0      series float  Physical lower boundary of the current source bin.
+// @param   bound1      series float  Physical upper boundary of the current source bin.
+// @param   isLog       series bool   Flag indicating source geometry. If true, transforms inputs to Log-Space.
+// @returns             Prof         `self` (chaining), now containing the merged data.
+method _distributeMass(
+  Prof self,
+  series int idx,
+  series int count,
+  array<float> massA,
+  array<float> massB,
+  series float midCurrent,
+  series float midPrev,
+  series float midNext,
+  series float bound0,
+  series float bound1,
+  series bool  isLog
+  ) =>
+    series float valA = array.get(massA, idx)
+    series float valB = array.get(massB, idx)
+
+    if valA > 0 or valB > 0
+        series float transMid = isLog ? math.log(midCurrent) : midCurrent
+        series float transLo  = isLog ? math.log(midPrev)    : midPrev
+        
+        series float transUp  = na
+        if idx == count - 1
+            series float rawUp = isLog ? (bound1 * bound1) / midCurrent : 2 * bound1 - midCurrent
+            transUp := isLog ? math.log(rawUp) : rawUp
+        else
+            transUp := isLog ? math.log(midNext) : midNext
+
+        series float upA = array.get(massA, idx < count - 1 ? idx + 1 : idx)
+        series float loA = array.get(massA, idx > 0 ? idx - 1 : idx)
+        series float upB = array.get(massB, idx < count - 1 ? idx + 1 : idx)
+        series float loB = array.get(massB, idx > 0 ? idx - 1 : idx)
+
+        series int idxTgtUp = self._binIdx(bound1) 
+        series int idxTgtLo = self._binIdx(bound0)
+
+        for j = idxTgtLo to idxTgtUp
+            [tgtUpRaw, tgtLoRaw] = self._binBnds(j)
+            
+            series float transTgtUp = isLog ? math.log(math.max(EPSILON, tgtUpRaw)) : tgtUpRaw
+            series float transTgtLo = isLog ? math.log(math.max(EPSILON, tgtLoRaw)) : tgtLoRaw
+
+            if valA > 0
+                series float shareA = _calcShare(transUp, transMid, transLo, upA, valA, loA, transTgtUp, transTgtLo)
+                if shareA > 0
+                    array.set(self._massA, j, array.get(self._massA, j) + shareA)
+            
+            if valB > 0
+                series float shareB = _calcShare(transUp, transMid, transLo, upB, valB, loB, transTgtUp, transTgtLo)
+                if shareB > 0
+                    array.set(self._massB, j, array.get(self._massB, j) + shareB)
+    
+    self
+
+// @function Merges mass data from a source profile into the current profile.
+//          Performs a high-fidelity resampling. If the source profile uses logarithmic
+//          geometry, the integration domain is transformed into log-space (ln).
+//          This ensures that the linear interpolation model in the density calculation
+//          behaves as a geometric interpolation relative to the original prices,
+//          eliminating aliasing errors in log-mode.
+// @param   self     Prof          The target profile object to merge into.
+// @param   massA    array float   The source profile's mass A bin array.
+// @param   massB    array float   The source profile's mass B bin array.
+// @param   srcUp    series float  The upper level bound of the source profile.
+// @param   srcLo    series float  The lower level bound of the source profile.
+// @param   srcIsLog series bool   True if the source distribution was logarithmic.
+// @returns          Prof         `self` (chaining), now containing the merged data.
+method _mergeMass(
+  Prof self,
+  array<float> massA,
+  array<float> massB,
+  series float srcUp,
+  series float srcLo,
+  series bool  srcIsLog
+  ) =>
+    series int srcBins = array.size(massA)
+    
+    if srcBins != array.size(massB)
+        runtime.error("Number of mass A and mass B bins is different")
+    if srcIsLog and srcLo <= 0
+        runtime.error("Logarithmic source profile requires positive bounds (> 0)")
+
+    if srcBins > 0
+        self._clearCache()
+        
+        series float srcWidth  = 0.0
+        series float srcFactor = 0.0
+        
+        if srcIsLog
+            srcFactor := math.pow(srcUp / srcLo, 1.0 / srcBins)
+        else
+            srcWidth := (srcUp - srcLo) / srcBins
+
+        series float bound0 = srcLo
+        series float bound1 = srcIsLog ? bound0 * srcFactor : bound0 + srcWidth
+        series float bound2 = srcIsLog ? bound1 * srcFactor : bound1 + srcWidth
+        
+        series float midCurrent = srcIsLog ? math.sqrt(bound0 * bound1) : (bound0 + bound1) * 0.5
+        series float midNext    = srcIsLog ? math.sqrt(bound1 * bound2) : (bound1 + bound2) * 0.5
+        series float midPrev    = srcIsLog ? (bound0 * bound0) / midCurrent : 2 * bound0 - midCurrent
+
+        for i = 0 to srcBins - 1
+            self._distributeMass(
+              i, srcBins, 
+              massA, massB, 
+              midCurrent, midPrev, midNext, 
+              bound0, bound1, 
+              srcIsLog)
+            
+            midPrev    := midCurrent
+            midCurrent := midNext
+            bound0     := bound1
+            
+            if srcIsLog
+                bound1  := srcLo * math.pow(srcFactor, i + 2) 
+                bound2  := srcLo * math.pow(srcFactor, i + 3)
+                midNext := math.sqrt(bound1 * bound2)
+            else
+                bound1  := srcLo + (i + 2) * srcWidth
+                bound2  := srcLo + (i + 3) * srcWidth
+                midNext := (bound1 + bound2) * 0.5
+    
+    self
+
+// @function Internal Master Method for Re-gridding.
+//           This method consolidates the structural reconfiguration logic used by
+//           resizing and reconstruction operations. It creates a snapshot of the
+//           current data, applies the new grid parameters (bounds, bins, geometry),
+//           and triggers the interpolation engine to map the old mass onto the new grid.
+// @param   self     Prof   The profile object.
+// @param   newUp    float  The new upper level bound.
+// @param   newLo    float  The new lower level bound.
+// @param   newBins  int    The new number of bins.
+// @param   newIsLog bool   The new geometric mode (True=Log, False=Linear).
+// @returns          Prof   `self` (chaining).
+method _remap(
+  Prof self,
+  series float newUp,
+  series float newLo, 
+  series int newBins, 
+  series bool newIsLog
+  ) =>
+    [safeUp, safeLo] = _calcSafeSpan(newUp, newLo, self._resolution, newIsLog)
+    series int limit = _calcMaxBins(safeUp, safeLo, self._resolution, newIsLog)
+    series int finalBins = math.max(1, math.min(newBins, limit))
+
+    if safeUp != self._upper or safeLo != self._lower or finalBins != self._bins or newIsLog != self._isLog
+        array<float> oldMassA = array.copy(self._massA)
+        array<float> oldMassB = array.copy(self._massB)
+        float oldUpper = self._upper
+        float oldLower = self._lower
+        bool  oldIsLog = self._isLog
+
+        self._upper := safeUp
+        self._lower := safeLo
+        self._bins  := finalBins
+        self._isLog := newIsLog
+
+        if self._isLog
+            self._recalcLogGeo()
+
+        self._massA := array.new_float(self._bins, 0.0)
+        self._massB := array.new_float(self._bins, 0.0)
+
+        self._mergeMass(oldMassA, oldMassB, oldUpper, oldLower, oldIsLog)
+
+    self
+
+// @function Performs the Peak calculation.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcPeak(
+  Prof self
+  ) =>
+    series int   binN   = self._bins
+    series int   peakIdx  = na
+    series float peakMass = na
+
+    for idx = 0 to binN - 1
+        series float mass = self._binTotMass(idx)
+        if mass > 0
+            if na(peakMass) or mass > peakMass
+                peakMass := mass
+                peakIdx  := idx
+    
+    self._peak := peakIdx
+    
+    self
+
+// @function Performs the Coverage calculation. Manages its own dependency on the Peak.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcCoverage(
+  Prof self
+  ) =>
+    if na(self._peak)
+        self._calcPeak()
+    series int peakIdx = self._peak
+
+    if na(peakIdx)
+        self._covUp := na
+        self._covLo := na
+    else
+        series float totMass = array.sum(self._massA) + array.sum(self._massB)
+        if totMass <= 0
+            self._covUp := na
+            self._covLo := na
+        else
+            series float covMass = totMass * self._coverage / 100
+            series float cumMass = self._binTotMass(peakIdx)
+
+            series int upIdx = peakIdx
+            series int loIdx = peakIdx
+            while cumMass < covMass and (loIdx > 0 or upIdx < self._bins - 1)
+                series int nxtUpIdx = upIdx < self._bins - 1 ? upIdx + 1 : na
+                series int nxtLoIdx = loIdx > 0 ? loIdx - 1 : na
+
+                series float massUp  = not na(nxtUpIdx) ? self._binTotMass(nxtUpIdx) : na
+                series float massLo  = not na(nxtLoIdx) ? self._binTotMass(nxtLoIdx) : na
+                series bool chooseUp = na(massLo) ? true : (na(massUp) ? false : massUp >= massLo)
+
+                if chooseUp and not na(nxtUpIdx)
+                    upIdx   := nxtUpIdx
+                    cumMass += massUp
+                else if not na(nxtLoIdx)
+                    loIdx   := nxtLoIdx
+                    cumMass += massLo
+                else
+                    break
+
+            self._covUp := upIdx   
+            self._covLo := loIdx
+    
+    self
+
+// @function Performs the calculation of the median level.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcMedian(
+  Prof self
+  ) =>
+    series float totMass = math.max(array.sum(self._massA) + array.sum(self._massB), 0)
+    if totMass <= 0
+        self._median := na
+    else
+        series float massMedian = totMass/ 2.0
+        series float cumMass    = 0.0
+
+        for idx = 0 to self._bins - 1
+            series float binMass = self._binTotMass(idx)
+            if binMass > 0
+                if cumMass +  binMass >= massMedian
+                    series float massDelta = massMedian - cumMass
+                    series float fraction  = massDelta /  binMass
+                    [up, lo] = self._binBnds(idx)
+
+                    if self._isLog
+                        self._median := lo * math.pow(up / lo, fraction)
+                    else
+                        self._median := lo + (up - lo) * fraction
+                        
+                    break 
+
+                cumMass += binMass
+    
+    self
+
+// @function Performs the mean calculation.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcMean(
+  Prof self
+  ) =>
+    series float cumPM   = 0.0
+    series float cumMass = 0.0
+
+    for idx = 0 to self._bins - 1
+        series float mass = self._binTotMass(idx)
+        if mass > 0
+            cumPM   += self._binMid(idx) * mass
+            cumMass += mass
+    self._mean := cumMass > EPSILON ? cumPM / cumMass : na
+
+    self
+
+// @function Performs the standard deviation calculation.
+//           This uses the POPULATION standard deviation formula, as the profile
+//           is considered a complete dataset for its specific timeframe
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcStdDev(
+  Prof self
+  ) =>
+    if na(self._mean)
+        self._calcMean()
+    series float mean = self._mean
+
+    if na(mean)
+        self._stdDev := na
+    else
+        series float cumD2M  = 0.0
+        series float cumMass = 0.0
+
+        for idx = 0 to self._bins - 1
+            series float mass = self._binTotMass(idx)
+            if mass > 0
+                series float delta = self._binMid(idx) - mean
+                cumD2M  += delta * delta * mass
+                cumMass += mass
+        self._stdDev := cumMass > EPSILON ? math.sqrt(cumD2M / cumMass) : na
+    
+    self
+
+// @function Performs the skewness calculation.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcSkewness(
+  Prof self
+  ) =>
+    if na(self._mean)
+        self._calcMean()
+    if na(self._stdDev)
+        self._calcStdDev()
+    series float mean   = self._mean
+    series float stdDev = self._stdDev
+
+    if na(mean) or na(stdDev) or stdDev < EPSILON
+        self._skewness := na
+    else
+        series float cumD3M  = 0.0
+        series float cumMass = 0.0
+
+        for idx = 0 to self._bins - 1
+            series float mass = self._binTotMass(idx)
+            if mass > 0
+                series float delta = self._binMid(idx) - mean
+                cumD3M  += delta * delta * delta * mass
+                cumMass += mass
+        
+        series float m3 = cumMass > EPSILON ? cumD3M / cumMass : na
+        self._skewness := m3 / (stdDev * stdDev * stdDev)
+    
+    self
+
+// @function Performs the excess kurtosis calculation.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcKurtosis(
+  Prof self
+  ) =>
+    if na(self._mean)
+        self._calcMean()
+    if na(self._stdDev)
+        self._calcStdDev()
+    series float mean   = self._mean
+    series float stdDev = self._stdDev
+
+    if na(mean) or na(stdDev) or stdDev < EPSILON
+        self._kurtosis := na
+    else
+        series float cumD4M  = 0.0
+        series float cumMass = 0.0
+
+        for idx = 0 to self._bins - 1
+            series float mass = self._binTotMass(idx)
+            if mass > 0
+                series float delta  = self._binMid(idx) - mean
+                series float deltaP2 = delta * delta
+                cumD4M  += deltaP2 * deltaP2 * mass
+                cumMass += mass
+
+        series float m4 = cumMass > EPSILON ? cumD4M / cumMass : na
+        series float stdDevP2 = stdDev * stdDev
+        self._kurtosis := (m4 / (stdDevP2 * stdDevP2)) - 3
+    
+    self
+
+// @function Performs the profile segmentation using a monotonic-based algorithm.
+//           A segment is considered unimodal if its mass is monotonically
+//           non-increasing from its peak to both edges. If not, it is split
+//           at the true local minimum (the valley) found between the peak and 
+//           the point violating the monotonicity.
+// @param   self  Prof  Profile object
+// @returns       Prof  `self` (chaining)
+method _calcSegments(
+  Prof self
+  ) =>
+    matrix<int> unimodSegm = matrix.new<int>(0, 2)
+    matrix<int> unchkdSegm = matrix.new<int>(0, 2)
+
+    matrix.add_row(unchkdSegm, matrix.rows(unchkdSegm), array.from(0, self._bins - 1))
+
+    while matrix.rows(unchkdSegm) > 0
+        series int lastRowIdx = matrix.rows(unchkdSegm) - 1
+        array<int> segmentArr = matrix.row(unchkdSegm, lastRowIdx)
+        matrix.remove_row(unchkdSegm, lastRowIdx)
+        
+        series int loIdx = array.get(segmentArr, 0)
+        series int upIdx = array.get(segmentArr, 1)
+
+        series int segmentSize = upIdx - loIdx + 1
+        if segmentSize < 2
+            matrix.add_row(unimodSegm, na, array.from(loIdx, upIdx))
+            continue
+
+        series int maxIdx   = loIdx
+        series float maxMass = self._binTotMass(loIdx)
+        for idx = loIdx + 1 to upIdx
+            series float mass = self._binTotMass(idx)
+            if mass > maxMass
+                maxMass := mass
+                maxIdx  := idx
+        
+        series int splitIdx = na
+
+        if maxIdx < upIdx
+            series int run = 0
+            for idx = maxIdx + 1 to upIdx
+                series float currMass = self._binTotMass(idx)
+                series float prevMass = self._binTotMass(idx - 1)
+
+                if currMass > prevMass
+                    run += 1
+                else
+                    run := 0
+
+                if run >= self._gapSize
+                    series int   bestValleyIdx  = idx - run
+                    series float bestValleyMass = self._binTotMass(bestValleyIdx)
+
+                    for searchK = idx - run to maxIdx + 1
+                        series float kMass = self._binTotMass(searchK)
+                        if kMass <= bestValleyMass
+                            bestValleyMass := kMass
+                            bestValleyIdx  := searchK
+                    
+                    splitIdx := bestValleyIdx
+                    break
+        
+        if na(splitIdx) and maxIdx > loIdx
+            series int run = 0 
+            for idx = maxIdx - 1 to loIdx 
+                series float currMass = self._binTotMass(idx)
+                series float prevMass = self._binTotMass(idx + 1)
+
+                if currMass > prevMass
+                    run += 1
+                else
+                    run := 0
+                
+                if run >= self._gapSize
+                    series int   bestValleyIdx  = idx + run
+                    series float bestValleyMass = self._binTotMass(bestValleyIdx)
+
+                    for searchK = idx + run to maxIdx - 1
+                        series float kMass = self._binTotMass(searchK)
+                        if kMass <= bestValleyMass
+                            bestValleyMass := kMass
+                            bestValleyIdx  := searchK
+
+                    splitIdx := bestValleyIdx 
+                    break
+        
+        if na(splitIdx)
+            matrix.add_row(unimodSegm, matrix.rows(unimodSegm), array.from(loIdx, upIdx))
+        else
+            if maxIdx < splitIdx
+                matrix.add_row(unchkdSegm, matrix.rows(unchkdSegm), array.from(loIdx, splitIdx))
+                if splitIdx + 1 <= upIdx
+                    matrix.add_row(unchkdSegm, matrix.rows(unchkdSegm), array.from(splitIdx + 1, upIdx))
+            else
+                if splitIdx - 1 >= loIdx
+                    matrix.add_row(unchkdSegm, matrix.rows(unchkdSegm), array.from(loIdx, splitIdx - 1))
+                matrix.add_row(unchkdSegm, matrix.rows(unchkdSegm), array.from(splitIdx, upIdx))
+
+    self._segments := unimodSegm
+
+    self
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function Construct a new `Prof` object with fixed bin count & bounds.
+// @param   bins       series int        number of level bins ≥ 1
+// @param   upper      series float      upper level bound (absolute)
+// @param   lower      series float      lower level bound (absolute)
+// @param   resolution series float      Smallest allowed bin size (resolution).
+// @param   dynamic    series bool       Flag for dynamic adaption of profile bounds
+// @param   isLog      series bool       Flag to enable Logarithmic bin scaling.
+// @param   coverage   series int        Percentage of total mass to include in the Coverage Area (1..100)
+// @param   gapSize    series int        Noise filter for segmentation. Number of allowed bins against trend.
+// @returns            Prof              freshly initialised profile
+export create(
+  series int bins,
+  series float upper,
+  series float lower,
+  series float resolution,
+  series bool dynamic,
+  series bool isLog,
+  series int coverage,
+  series int gapSize
+  ) =>
+    series float _resolution = resolution > EPSILON ? resolution : EPSILON
+    series int _gapSize      = math.max(1, gapSize)
+    series int _coverage     = _clamp(coverage, 100, 0)
+
+    series float _upper = math.max(upper, lower)
+    series float _lower = math.min(upper, lower)
+
+    [_safeUp, _safeLo] = _calcSafeSpan(_upper, _lower, _resolution, isLog)
+    series int limit = _calcMaxBins(_safeUp, _safeLo, _resolution, isLog)
+    series int _bins = math.max(1, math.min(bins, limit))
+    
+    series float _logFactor = na
+    series float _logStep   = na
+    if isLog
+        _logFactor := math.pow(_safeUp / _safeLo, 1.0 / _bins)
+        _logStep   := math.log(_logFactor)
+
+    Prof.new(
+      _bins       = _bins,
+      _upper      = _safeUp,
+      _lower      = _safeLo,
+      _resolution = _resolution,
+
+      _isLog      = isLog,
+      _logFactor  = _logFactor,
+      _logStep    = _logStep,
+
+      _dynamic    = dynamic,
+      _coverage   = _coverage,
+      _gapSize    = _gapSize,
+      _maxBins    = bins,
+
+      _massA      = array.new_float(_bins, 0.0),
+      _massB      = array.new_float(_bins, 0.0),
+
+      _peak       = na,
+      _covUp      = na,
+      _covLo      = na,
+
+      _median     = na,
+      _mean       = na,
+      _stdDev     = na,
+      _skewness   = na,
+      _kurtosis   = na,
+
+      _segments   = na)
+
+// @function Create a deep copy of the profile.
+// @param    self Prof  Profile object to copy
+// @returns       Prof  A new, independent copy of the profile
+export method clone(
+  Prof self
+  ) =>
+    Prof.new(
+      _bins       = self._bins,
+      _upper      = self._upper,
+      _lower      = self._lower,
+      _resolution = self._resolution,
+
+      _isLog      = self._isLog,
+      _logFactor  = self._logFactor,
+      _logStep    = self._logStep,
+
+      _dynamic    = self._dynamic,
+      _coverage   = self._coverage,
+      _gapSize    = self._gapSize,
+      _maxBins    = self._maxBins,
+
+      _massA      = array.copy(self._massA),
+      _massB      = array.copy(self._massB),
+
+      _peak       = self._peak,
+      _covUp      = self._covUp,
+      _covLo      = self._covLo,
+
+      _median     = self._median,
+      _mean       = self._mean,
+      _stdDev     = self._stdDev,
+      _skewness   = self._skewness,
+      _kurtosis   = self._kurtosis,
+
+      _segments   = na(self._segments) ? na : matrix.copy(self._segments))
+
+// @function Merges mass data from a source profile into the current profile.
+//           If resizing is needed, it performs a high-fidelity re-binning of existing
+//           mass using a linear interpolation model inferred from neighboring bins,
+//           preventing aliasing artifacts and ensuring accurate mass preservation.
+// @param   self    Prof          The target profile object to merge into.
+// @param   massA   array  float  The source profile's mass A bin array.
+// @param   massB   array  float  The source profile's mass B bin array.
+// @param   upper   series float  The upper level bound of the source profile.
+// @param   lower   series float  The lower level bound of the source profile.
+// @returns         Prof          `self` (chaining), now containing the merged data.
+export method merge(
+  Prof self,
+  array<float> massA,
+  array<float> massB,
+  series float upper,
+  series float lower
+  ) =>
+    series float _upper = math.max(upper, lower)
+    series float _lower = math.min(upper, lower)
+
+    series float reqUp = math.max(self._upper, _upper)
+    series float reqLo = math.min(self._lower, _lower) 
+
+    self._remap(reqUp, reqLo, self._maxBins, self._isLog)
+    self._mergeMass(massA, massB, _upper, _lower, false)
+
+    self
+
+// @function Reset all bin tallies while keeping configuration intact.
+// @param   self Prof  profile object
+// @returns      Prof  cleared profile (chaining)
+export method clear(
+  Prof self
+  ) =>
+    array.fill(self._massA, 0.0)
+    array.fill(self._massB, 0.0)
+
+    self._clearCache()
+
+    self
+
+// @function Adds mass to a bin.
+// @param   self     Prof         Profile object
+// @param   idx      series int   Bin index
+// @param   mass     series float Mass to add (must be > 0)
+// @param   useMassA series bool  If true, adds to Array A, otherwise Array B
+export method addMass(
+  Prof self,
+  series int idx,
+  series float mass,
+  series bool useMassA
+  ) =>
+    if mass < 0
+        runtime.error("Mass is not allowed to be lower 0")
+    
+    if idx < 0 or idx >= self._bins
+        runtime.error("Bin index out of range")
+
+    self._clearCache()
+
+    if useMassA
+        array.set(self._massA, idx, array.get(self._massA, idx) + mass)
+    else
+        array.set(self._massB, idx, array.get(self._massB, idx) + mass)
+        
+    self
+
+// @function Automatically adapts the profile's boundaries to include a given level interval.
+//           If the level bound exceeds the current profile bounds, it triggers
+//           the _resizeGrid method to resize the profile and re-bin existing mass.
+// @param   self  Prof          The profile object.
+// @param   upper series float  The upper level to fit.
+// @param   lower series float  The lower level to fit.
+// @returns       Prof         `self` (chaining).
+export method adapt(
+  Prof self,
+  series float upper,
+  series float lower
+  ) =>
+    series float _upper = math.max(upper, lower)
+    series float _lower = math.min(upper, lower)
+
+    [safeUp, safeLo] = _calcSafeSpan(_upper, _lower, self._resolution, self._isLog)
+
+    if safeLo < self._lower or safeUp > self._upper
+        if self._dynamic
+            series float reqUp = math.max(self._upper, safeUp)
+            series float reqLo = math.min(self._lower, safeLo)
+
+            self._remap(reqUp, reqLo, self._maxBins, self._isLog)
+        else
+            runtime.error("Level interval exceeds profile bounds. Switch profile to dynamic.")
+    self
+
+// @function Sets the number of bins for the profile.
+//           Behavior depends on the `isDynamic` flag.
+//           - If `dynamic = true`: Works on filled profiles by re-binning to a new resolution.
+//           - If `dynamic = false`: Only works on empty profiles to prevent accidental changes.
+// @param   self    Prof        Profile object
+// @param   bins    series int  The new number of bins
+// @returns         Prof       `self` (chaining)
+export method setBins(
+  Prof self,
+  series int bins
+  ) =>
+    self._maxBins := math.max(1, bins)
+    self._remap(self._upper, self._lower, bins, self._isLog)
+    
+    self
+
+// @function Sets the level bounds for the profile.
+//           Behavior depends on the `dynamic` flag.
+//           - If `dynamic = true`: Works on filled profiles by re-binning existing mass
+//           - If `dynamic = false`: Only works on empty profiles to prevent accidental changes.
+// @param   self     Prof          Profile object
+// @param   upper    series float  The new upper level bound
+// @param   lower    series float  The new lower level bound
+// @returns          Prof         `self` (chaining)
+export method setBounds(
+  Prof self,
+  series float upper,
+  series float lower
+  ) =>
+    if not self._dynamic and (array.sum(self._massA) > 0 or array.sum(self._massB) > 0)
+        runtime.error("Cannot change bounds on a filled, non-dynamic profile.")
+    
+    series float _upper = math.max(upper, lower)
+    series float _lower = math.min(upper, lower)
+
+    self._remap(_upper, _lower, self._maxBins, self._isLog)
+
+    self
+
+// @function Sets the minimum resolution size (granularity limit) for the profile.
+//           If the current bin count exceeds the limit imposed by the new
+//           resolution, the profile is automatically resized (downsampled) to fit.
+// @param   self       Prof         Profile object
+// @param   resolution series float The new smallest allowed bin size.
+// @returns            Prof         `self` (chaining)
+export method setResolution(
+  Prof self,
+  series float resolution
+  ) =>
+    series float newRes = math.max(resolution, EPSILON)
+
+    if self._resolution != newRes
+        self._resolution := newRes
+        self._remap(self._upper, self._lower, self._maxBins, self._isLog)
+
+    self
+
+// @function Toggles the geometry of the profile between Linear and Logarithmic.
+//           Behavior depends on the `dynamic` flag.
+//           - If `dynamic = true`: Mass is re-distributed (merged) into the new geometric grid.
+//           - If `dynamic = false`: Only works on empty profiles.
+// @param   self   Prof        Profile object
+// @param   isLog  series bool True for Logarithmic, False for Linear.
+// @returns        Prof       `self` (chaining)
+export method setLog(
+  Prof self,
+  series bool isLog
+  ) =>
+    if self._isLog != isLog
+        self._remap(self._upper, self._lower, self._maxBins, isLog)
+
+    self
+
+// @function Set the percentage of mass for the Coverage Area. If the value
+//           changes, the profile is finalized again.
+// @param   self       Prof       Profile object
+// @param   coverage   series int  The new Mass Coverage Percentage (0..100)
+// @returns            Prof       `self` (chaining)
+export method setCoverage(
+  Prof self,
+  series int coverage
+  ) =>
+    series int _coverage = _clamp(coverage, 100, 0)
+
+    if self._coverage != _coverage
+        self._coverage := _coverage
+        self._covUp := na
+        self._covLo := na
+
+    self
+
+// @function Sets the gapSize (noise filter) for segmentation.
+// @param   self     Prof        Profile object
+// @param   gapSize  series int  Number of bins allowed to violate monotonicity
+// @returns          Prof        `self` (chaining)
+export method setGapSize(
+  Prof self,
+  series int gapSize
+  ) =>
+    series int newGap = math.max(1, gapSize)
+    
+    if self._gapSize != newGap
+        self._gapSize  := newGap
+        self._segments := na
+    
+    self
+
+// @function Returns the current number of bins in the profile.
+// @param    self Prof       The profile object.
+// @returns       series int The number of bins.
+export method getBins(
+  Prof self
+  ) =>
+    self._bins
+
+// @function Returns the current level bounds of the profile.
+// @param    self Prof        The profile object.
+// @returns [upper, lower]
+//          upper  series float The upper level bound of the profile.
+//          lower  series float The lower level bound of the profile.
+export method getBounds(
+  Prof self
+  ) =>
+    [self._upper, self._lower]
+
+// @function Get Width of a bin.
+// @param   self Prof          Profile object
+// @returns      series float The width of a bin
+export method getBinWidth(
+  Prof self
+  ) =>
+    self._binWidth()
+
+// @function Get Index of a bin.
+// @param   self Prof           Profile object
+// @param   level  series float absolute coordinate to locate
+// @returns        series int   bin index 0…bins‑1 (clamped)
+export method getBinIdx(
+  Prof self,
+  series float level
+  ) =>
+    self._binIdx(level)
+
+// @function Get Bounds of a bin.
+// @param   self Prof        Profile object
+// @param   idx  series int  Bin index
+// @returns [up, lo]
+//          up  series float  The upper level bound of the bin.
+//          lo  series float  The lower level bound of the bin.
+export method getBinBnds(
+  Prof self,
+  series int idx
+  ) =>
+    self._binBnds(idx)
+
+// @function Get Mid level of a bin.
+// @param   self Prof          Profile object
+// @param   idx  series int    Bin index
+// @returns      series float  Mid level
+export method getBinMid(
+  Prof self,
+  series int idx
+  ) =>
+    self._binMid(idx)
+
+// @function Returns a copy of the internal raw data array A (Mass A).
+// @param    self Prof The profile object.
+// @returns       array<float> The internal array for mass A.
+export method getMassA(
+  Prof self
+  ) =>
+    array.copy(self._massA)
+
+// @function Returns a copy of the internal raw data array B (Mass B).
+// @param    self Prof The profile object.
+// @returns       array<float> The internal array for mass B.
+export method getMassB(
+  Prof self
+  ) =>
+    array.copy(self._massB)
+
+// @function Get Mass A of a bin.
+// @param   self  Prof          Profile object
+// @param   idx   series int    Bin index
+// @returns       series float  mass A
+export method getBinMassA(
+  Prof self,
+  series int idx
+  ) =>
+    array.get(self._massA, idx)
+
+// @function Get Mass B of a bin.
+// @param   self  Prof          Profile object
+// @param   idx   series int    Bin index
+// @returns       series float  mass B
+export method getBinMassB(
+  Prof self,
+  series int idx
+  ) =>
+    array.get(self._massB, idx)
+
+// @function Get Peak information.
+// @param   self Prof  Profile object
+// @returns [peakIndex, peakLevel]
+//          peakIndex  series int    The index of the Peak bin.
+//          peakLevel. series float  The mid-level of the Peak bin.
+export method getPeak(
+  Prof self
+  ) =>
+    if na(self._peak)
+        self._calcPeak()
+    
+    if na(self._peak)
+        [na, na]
+    else
+        [self._peak, self._binMid(self._peak)]
+
+// @function Get Coverage information.
+// @param   self Prof  Profile object
+// @returns [covUpIndex, covUpLevel, covLoIndex, covLoLevel]
+//          covUpIndex  series int    The index of the upper bound bin of the Coverage Area.
+//          covUpLevel  series float  The upper level bound of the Coverage Area.
+//          covLoIndex  series int    The index of the lower bound bin of the Coverage Area.
+//          covLoLevel  series float  The lower level bound of the Coverage Area.
+export method getCoverage(
+  Prof self
+  ) =>
+    if na(self._covLo)
+        self._calcCoverage()
+    
+    if na(self._covLo)
+        [na, na, na, na]
+    else
+        [covUpP, _] = self._binBnds(self._covUp)
+        [_, covLoP] = self._binBnds(self._covLo)
+        [self._covUp, covUpP, self._covLo, covLoP]
+
+// @function Get the profile's median level and its bin index. Calculates the value on-demand if stale.
+// @param   self Prof   Profile object.
+// @returns [series int, series float]  [medianIndex, medianLevel]
+//          medianIndex  series int    The index of the bin containing the Median.
+//          medianLevel  series float  The Median level of the profile.
+export method getMedian(
+  Prof self
+  ) =>
+    if na(self._median)
+        self._calcMedian()
+    
+    if na(self._median)
+        [na, na]
+    else
+        [self._binIdx(self._median), self._median]
+
+// @function Get the profile's mean and its bin index. Calculates the value on-demand if stale.
+// @param   self  Prof   Profile object.
+// @returns [series int, series float]  [meanIndex, meanLevel]
+//          meanIndex    series int    The index of the bin containing the mean.
+//          meanLevel    series float  The mean of the profile.
+export method getMean(
+  Prof self
+  ) =>
+    if na(self._mean)
+        self._calcMean()
+
+    if na(self._mean)
+        [na, na]
+    else
+        [self._binIdx(self._mean), self._mean]
+
+// @function Get the profile's standard deviation. Calculates the value on-demand if stale.
+// @param   self  Prof   Profile object.
+// @returns       series float  The Standard deviation of the profile.
+export method getStdDev(
+  Prof self
+  ) =>
+    if na(self._stdDev)
+        self._calcStdDev()
+
+    self._stdDev
+
+// @function Get the profile's skewness. Calculates the value on-demand if stale.
+// @param   self  Prof   Profile object.
+// @returns       series float  The Skewness of the profile.
+export method getSkewness(
+  Prof self
+  ) =>
+    if na(self._skewness)
+        self._calcSkewness()
+
+    self._skewness
+
+// @function Get the profile's excess kurtosis. Calculates the value on-demand if stale.
+// @param   self  Prof   Profile object.
+// @returns       series float  The Kurtosis of the profile.
+export method getKurtosis(
+  Prof self
+  ) =>
+    if na(self._kurtosis)
+        self._calcKurtosis()
+
+    self._kurtosis
+
+// @function Get the profile's fundamental unimodal segments. Calculates on-demand if stale.
+//           Uses a pivot-based recursive algorithm configured by gapSize.
+// @param   self  Prof   The profile object.
+// @returns       matrix<int>  A 2-column matrix where each row is an [startIndex, endIndex] pair.
+export method getSegments(
+  Prof self
+  ) =>
+    if na(self._segments)
+        self._calcSegments()
+        
+    self._segments

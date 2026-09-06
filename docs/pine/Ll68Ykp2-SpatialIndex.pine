@@ -1,0 +1,683 @@
+// =============================================================================
+//                           SPATIAL INDEX LIBRARY
+// =============================================================================
+// @version=6
+// @description Generic price-bucketed spatial indexing for efficient proximity queries.
+// Works with ANY data type through index-based references. Provides O(k) bucket lookup
+// instead of O(n) linear scan for proximity-based filtering.
+//
+// Usage:
+//   import ArunaReborn/SpatialIndex/1 as SI
+//   var SI.SpatialBucket index = SI.newSpatialBucket(bucketSize)
+//   SI.add(index, itemIdx, price)
+//   SI.QueryResult result = SI.queryProximity(index, close, 5.0)
+//
+library("SpatialIndex", overlay = false)
+
+// =============================================================================
+// SECTION 1: TYPE DEFINITIONS
+// =============================================================================
+
+//@type Wrapper for array<int> to allow use inside map (Pine Script doesn't allow nested collections).
+export type IntArray
+    //@field data The wrapped array of integers.
+    array<int> data
+
+//@type Configuration for bucket sizing and behavior.
+export type BucketConfig
+    //@field bucketSize Size of each price bucket (or ATR multiplier if useATRBuckets is true).
+    float bucketSize = 1.0
+    //@field basePriceForBuckets Base price offset for bucket calculation (usually 0).
+    float basePriceForBuckets = 0.0
+    //@field useATRBuckets When true, bucketSize is interpreted as ATR multiplier.
+    bool useATRBuckets = false
+    //@field cachedATR Cached ATR value for bucket calculation when useATRBuckets is true.
+    float cachedATR = 1.0
+
+//@type Price-bucketed spatial index using integer indices to reference items in external arrays.
+export type SpatialBucket
+    //@field config Bucket configuration settings.
+    BucketConfig config
+    //@field buckets Map from bucket key (int) to wrapped array of item indices.
+    map<int, IntArray> buckets
+    //@field itemToBucket Map from item index to its primary bucket key (enables O(1) removal).
+    map<int, int> itemToBucket
+    //@field itemCount Total number of indexed items.
+    int itemCount = 0
+    //@field minBucket Lowest bucket key currently in use.
+    int minBucket = na
+    //@field maxBucket Highest bucket key currently in use.
+    int maxBucket = na
+
+//@type Result of a spatial query containing matching item indices.
+export type QueryResult
+    //@field indices Array of item indices matching the query.
+    array<int> indices
+    //@field bucketKeys Array of bucket keys that were searched.
+    array<int> bucketKeys
+    //@field queryCount Number of items examined during the query.
+    int queryCount = 0
+
+//@type Cached query result for repeated proximity checks within same bar.
+export type CachedQuery
+    //@field refPrice Reference price used for the cached query.
+    float refPrice = na
+    //@field proximityPercent Proximity percentage used for the cached query.
+    float proximityPercent = na
+    //@field result Cached query result.
+    QueryResult result = na
+    //@field validUntilBar Bar index until which cache remains valid.
+    int validUntilBar = 0
+
+// =============================================================================
+// SECTION 2: INITIALIZATION FUNCTIONS
+// =============================================================================
+
+//@function Creates a new BucketConfig with fixed bucket size.
+//@param bucketSize (float) The price range each bucket covers.
+//@returns (BucketConfig) New bucket configuration.
+export newBucketConfig(float bucketSize) =>
+    BucketConfig.new(
+         bucketSize = math.max(bucketSize, 0.0001),
+         basePriceForBuckets = 0.0,
+         useATRBuckets = false,
+         cachedATR = 1.0
+     )
+
+//@function Creates a new BucketConfig with ATR-based bucket sizing.
+//@param atrMultiplier (float) Multiplier for ATR to determine bucket size.
+//@param atrValue (float) Current ATR value.
+//@returns (BucketConfig) New bucket configuration.
+export newBucketConfigATR(float atrMultiplier, float atrValue) =>
+    BucketConfig.new(
+         bucketSize = math.max(atrMultiplier, 0.1),
+         basePriceForBuckets = 0.0,
+         useATRBuckets = true,
+         cachedATR = math.max(atrValue, 0.0001)
+     )
+
+//@function Creates a new SpatialBucket with fixed bucket size.
+//@param bucketSize (float) The price range each bucket covers.
+//@returns (SpatialBucket) New initialized spatial bucket index.
+export newSpatialBucket(float bucketSize) =>
+    SpatialBucket.new(
+         config = newBucketConfig(bucketSize),
+         buckets = map.new<int, IntArray>(),
+         itemToBucket = map.new<int, int>(),
+         itemCount = 0,
+         minBucket = na,
+         maxBucket = na
+     )
+
+//@function Creates a new SpatialBucket with ATR-based bucket sizing.
+//@param atrMultiplier (float) Multiplier for ATR to determine bucket size.
+//@param atrValue (float) Current ATR value.
+//@returns (SpatialBucket) New initialized spatial bucket index.
+export newSpatialBucketATR(float atrMultiplier, float atrValue) =>
+    SpatialBucket.new(
+         config = newBucketConfigATR(atrMultiplier, atrValue),
+         buckets = map.new<int, IntArray>(),
+         itemToBucket = map.new<int, int>(),
+         itemCount = 0,
+         minBucket = na,
+         maxBucket = na
+     )
+
+//@function Creates an empty QueryResult.
+//@returns (QueryResult) Empty query result.
+export newQueryResult() =>
+    QueryResult.new(
+         indices = array.new<int>(),
+         bucketKeys = array.new<int>(),
+         queryCount = 0
+     )
+
+//@function Creates a new CachedQuery container.
+//@returns (CachedQuery) Empty cache container.
+export newCachedQuery() =>
+    CachedQuery.new(
+         refPrice = na,
+         proximityPercent = na,
+         result = na,
+         validUntilBar = 0
+     )
+
+// =============================================================================
+// SECTION 3: BUCKET KEY CALCULATION
+// =============================================================================
+
+//@function Gets the effective bucket size accounting for ATR mode.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@returns (float) Effective bucket size in price units.
+export getEffectiveBucketSize(SpatialBucket sb) =>
+    if sb.config.useATRBuckets
+        math.max(sb.config.cachedATR * sb.config.bucketSize, 0.0001)
+    else
+        math.max(sb.config.bucketSize, 0.0001)
+
+//@function Calculates the bucket key for a given price.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param price (float) The price to calculate bucket key for.
+//@returns (int) The bucket key (integer).
+export getBucketKey(SpatialBucket sb, float price) =>
+    if na(price)
+        0
+    else
+        float effectiveSize = getEffectiveBucketSize(sb)
+        int(math.floor((price - sb.config.basePriceForBuckets) / effectiveSize))
+
+//@function Calculates bucket keys that span a price range.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param priceBottom (float) Lower price boundary.
+//@param priceTop (float) Upper price boundary.
+//@returns (array<int>) Array of bucket keys covering the range.
+export getBucketKeysForRange(SpatialBucket sb, float priceBottom, float priceTop) =>
+    array<int> keys = array.new<int>()
+    if not na(priceBottom) and not na(priceTop)
+        int lowKey = getBucketKey(sb, math.min(priceBottom, priceTop))
+        int highKey = getBucketKey(sb, math.max(priceBottom, priceTop))
+        for k = lowKey to highKey
+            array.push(keys, k)
+    keys
+
+//@function Updates the ATR value for dynamic bucket sizing.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param newATR (float) New ATR value.
+export updateATR(SpatialBucket sb, float newATR) =>
+    sb.config.cachedATR := math.max(newATR, 0.0001)
+
+// =============================================================================
+// SECTION 4: UTILITY FUNCTIONS
+// =============================================================================
+
+//@function Calculates proximity band around a reference price.
+//@param refPrice (float) Reference price (e.g., current close).
+//@param pct (float) Percentage range (e.g., 5.0 for +/-5%).
+//@returns [float, float] Tuple of [bandLow, bandHigh].
+export getProximityBand(float refPrice, float pct) =>
+    if na(refPrice) or refPrice <= 0
+        [0.0, 0.0]
+    else
+        float safePct = math.max(pct, 0.0) / 100.0
+        float a = refPrice * (1.0 - safePct)
+        float b = refPrice * (1.0 + safePct)
+        [math.min(a, b), math.max(a, b)]
+
+//@function Checks if two price ranges overlap.
+//@param itemTop (float) Upper boundary of item.
+//@param itemBottom (float) Lower boundary of item.
+//@param bandLow (float) Lower boundary of band.
+//@param bandHigh (float) Upper boundary of band.
+//@returns (bool) True if ranges overlap.
+export rangesOverlap(float itemTop, float itemBottom, float bandLow, float bandHigh) =>
+    not (itemBottom > bandHigh or itemTop < bandLow)
+
+//@function Returns the number of items in the index.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@returns (int) Item count.
+export size(SpatialBucket sb) =>
+    sb.itemCount
+
+//@function Checks if the index is empty.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@returns (bool) True if empty.
+export isEmpty(SpatialBucket sb) =>
+    sb.itemCount == 0
+
+//@function Returns the number of buckets in use.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@returns (int) Bucket count.
+export bucketCount(SpatialBucket sb) =>
+    map.size(sb.buckets)
+
+//@function Returns statistics about the spatial index as a debug string.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@returns (string) Debug string with statistics.
+export getStats(SpatialBucket sb) =>
+    str.format(
+         "SpatialIndex: items={0}, buckets={1}, range=[{2}-{3}], bucketSize={4}",
+         sb.itemCount,
+         map.size(sb.buckets),
+         sb.minBucket,
+         sb.maxBucket,
+         getEffectiveBucketSize(sb)
+     )
+
+//@function Calculates optimal bucket size based on price and proximity percent.
+//@param refPrice (float) Reference price level.
+//@param proximityPercent (float) Proximity percentage being used.
+//@returns (float) Recommended bucket size.
+export calculateOptimalBucketSize(float refPrice, float proximityPercent) =>
+    // Bucket size = proximity range, so each query spans ~3 buckets max
+    float safePrice = math.max(refPrice, 0.01)
+    float safePct = math.max(proximityPercent, 1.0)
+    safePrice * safePct / 100.0
+
+// =============================================================================
+// SECTION 5: ADD OPERATIONS
+// =============================================================================
+
+//@function Adds an item to the spatial index by its index and single price point.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index of the item in the external array.
+//@param price (float) The representative price of the item.
+//@returns (bool) True if successfully added.
+export add(SpatialBucket sb, int itemIndex, float price) =>
+    if na(price) or itemIndex < 0
+        false
+    else
+        int key = getBucketKey(sb, price)
+
+        // Get or create bucket wrapper
+        IntArray bucketWrapper = na
+        if map.contains(sb.buckets, key)
+            bucketWrapper := map.get(sb.buckets, key)
+        else
+            bucketWrapper := IntArray.new(array.new<int>())
+            map.put(sb.buckets, key, bucketWrapper)
+
+        // Add item to bucket if not already present
+        if not array.includes(bucketWrapper.data, itemIndex)
+            array.push(bucketWrapper.data, itemIndex)
+
+            // Track item's bucket for O(1) removal
+            map.put(sb.itemToBucket, itemIndex, key)
+
+            // Update stats
+            sb.itemCount += 1
+            sb.minBucket := na(sb.minBucket) ? key : math.min(sb.minBucket, key)
+            sb.maxBucket := na(sb.maxBucket) ? key : math.max(sb.maxBucket, key)
+
+        true
+
+//@function Adds an item spanning a price range to the spatial index.
+//@description Item is added to ALL buckets it overlaps for accurate range queries.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index of the item in the external array.
+//@param priceBottom (float) Lower price boundary of the item.
+//@param priceTop (float) Upper price boundary of the item.
+//@returns (bool) True if successfully added.
+export addRange(SpatialBucket sb, int itemIndex, float priceBottom, float priceTop) =>
+    if na(priceBottom) or na(priceTop) or itemIndex < 0
+        false
+    else
+        array<int> keys = getBucketKeysForRange(sb, priceBottom, priceTop)
+
+        // Track primary bucket (midpoint) for removal
+        float midPrice = (priceBottom + priceTop) / 2.0
+        int primaryKey = getBucketKey(sb, midPrice)
+
+        bool addedAny = false
+        for key in keys
+            // Get or create bucket wrapper
+            IntArray bucketWrapper = na
+            if map.contains(sb.buckets, key)
+                bucketWrapper := map.get(sb.buckets, key)
+            else
+                bucketWrapper := IntArray.new(array.new<int>())
+                map.put(sb.buckets, key, bucketWrapper)
+
+            // Add item to bucket if not already present
+            if not array.includes(bucketWrapper.data, itemIndex)
+                array.push(bucketWrapper.data, itemIndex)
+                addedAny := true
+
+        if addedAny
+            // Track item's primary bucket for removal
+            map.put(sb.itemToBucket, itemIndex, primaryKey)
+
+            // Update stats (only count once even if in multiple buckets)
+            if not map.contains(sb.itemToBucket, itemIndex) or addedAny
+                sb.itemCount += 1
+
+            // Update bucket range
+            if array.size(keys) > 0
+                int minKey = array.min(keys)
+                int maxKey = array.max(keys)
+                sb.minBucket := na(sb.minBucket) ? minKey : math.min(sb.minBucket, minKey)
+                sb.maxBucket := na(sb.maxBucket) ? maxKey : math.max(sb.maxBucket, maxKey)
+
+        true
+
+// =============================================================================
+// SECTION 6: REMOVE OPERATIONS
+// =============================================================================
+
+//@function Removes an item from the spatial index.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index of the item to remove.
+//@returns (bool) True if item was found and removed.
+export remove(SpatialBucket sb, int itemIndex) =>
+    if not map.contains(sb.itemToBucket, itemIndex)
+        false
+    else
+        // Remove from all buckets (item may span multiple buckets)
+        array<int> allKeys = map.keys(sb.buckets)
+        for key in allKeys
+            if map.contains(sb.buckets, key)
+                IntArray bucketWrapper = map.get(sb.buckets, key)
+                int idx = array.indexof(bucketWrapper.data, itemIndex)
+                if idx >= 0
+                    array.remove(bucketWrapper.data, idx)
+
+                // Remove empty bucket to keep map clean
+                if array.size(bucketWrapper.data) == 0
+                    map.remove(sb.buckets, key)
+
+        // Remove from tracking map
+        map.remove(sb.itemToBucket, itemIndex)
+        sb.itemCount -= 1
+
+        true
+
+//@function Updates an item's position in the index (remove + add).
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index of the item.
+//@param newPrice (float) New representative price.
+//@returns (bool) True if successfully updated.
+export update(SpatialBucket sb, int itemIndex, float newPrice) =>
+    remove(sb, itemIndex)
+    add(sb, itemIndex, newPrice)
+
+//@function Updates an item's price range in the index.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index of the item.
+//@param newPriceBottom (float) New lower price boundary.
+//@param newPriceTop (float) New upper price boundary.
+//@returns (bool) True if successfully updated.
+export updateRange(SpatialBucket sb, int itemIndex, float newPriceBottom, float newPriceTop) =>
+    remove(sb, itemIndex)
+    addRange(sb, itemIndex, newPriceBottom, newPriceTop)
+
+// =============================================================================
+// SECTION 7: INDEX MANAGEMENT
+// =============================================================================
+
+//@function Reindexes all items after an item is removed from the master array.
+//@description When an item is removed from the external array at a specific index,
+//@description all items with indices > removedIndex need to be decremented by 1.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param removedIndex (int) The index that was removed from the external array.
+export reindexAfterRemoval(SpatialBucket sb, int removedIndex) =>
+    // Update all bucket arrays: decrement indices > removedIndex
+    array<int> allKeys = map.keys(sb.buckets)
+    for key in allKeys
+        if map.contains(sb.buckets, key)
+            IntArray bucketWrapper = map.get(sb.buckets, key)
+            int sz = array.size(bucketWrapper.data)
+            if sz > 0
+                for i = sz - 1 to 0
+                    int idx = array.get(bucketWrapper.data, i)
+                    if idx == removedIndex
+                        array.remove(bucketWrapper.data, i)
+                    else if idx > removedIndex
+                        array.set(bucketWrapper.data, i, idx - 1)
+
+                // Remove empty bucket
+                if array.size(bucketWrapper.data) == 0
+                    map.remove(sb.buckets, key)
+
+    // Rebuild itemToBucket map with new indices
+    map<int, int> newItemToBucket = map.new<int, int>()
+    for [itemIdx, bucketKey] in sb.itemToBucket
+        if itemIdx == removedIndex
+            // Skip the removed item
+            continue
+        int newIdx = itemIdx > removedIndex ? itemIdx - 1 : itemIdx
+        map.put(newItemToBucket, newIdx, bucketKey)
+
+    sb.itemToBucket := newItemToBucket
+    sb.itemCount -= 1
+
+//@function Batch reindex after multiple removals (more efficient for bulk operations).
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param removedIndices (array<int>) Array of removed indices (will be sorted ascending).
+export reindexAfterBatchRemoval(SpatialBucket sb, array<int> removedIndices) =>
+    if array.size(removedIndices) > 0
+        // Sort indices ascending for proper offset calculation
+        array<int> sorted = array.copy(removedIndices)
+        array.sort(sorted, order.ascending)
+
+        // Calculate offset for each index: how many removed indices are below it
+        // Update all bucket arrays
+        array<int> allKeys = map.keys(sb.buckets)
+        for key in allKeys
+            if map.contains(sb.buckets, key)
+                IntArray bucketWrapper = map.get(sb.buckets, key)
+                int sz = array.size(bucketWrapper.data)
+                if sz > 0
+                    for i = sz - 1 to 0
+                        int idx = array.get(bucketWrapper.data, i)
+
+                        // Check if this index was removed
+                        if array.includes(sorted, idx)
+                            array.remove(bucketWrapper.data, i)
+                        else
+                            // Calculate offset: count removed indices below this one
+                            int offset = 0
+                            for removedIdx in sorted
+                                if removedIdx < idx
+                                    offset += 1
+                                else
+                                    break
+                            if offset > 0
+                                array.set(bucketWrapper.data, i, idx - offset)
+
+                    // Remove empty bucket
+                    if array.size(bucketWrapper.data) == 0
+                        map.remove(sb.buckets, key)
+
+        // Rebuild itemToBucket map
+        map<int, int> newItemToBucket = map.new<int, int>()
+        for [itemIdx, bucketKey] in sb.itemToBucket
+            if array.includes(sorted, itemIdx)
+                continue
+
+            // Calculate offset
+            int offset = 0
+            for removedIdx in sorted
+                if removedIdx < itemIdx
+                    offset += 1
+                else
+                    break
+
+            int newIdx = itemIdx - offset
+            map.put(newItemToBucket, newIdx, bucketKey)
+
+        sb.itemToBucket := newItemToBucket
+        sb.itemCount -= array.size(sorted)
+
+//@function Clears all items from the spatial index.
+//@param sb (SpatialBucket) The spatial bucket index.
+export clear(SpatialBucket sb) =>
+    map.clear(sb.buckets)
+    map.clear(sb.itemToBucket)
+    sb.itemCount := 0
+    sb.minBucket := na
+    sb.maxBucket := na
+
+//@function Rebuilds the entire index from an external array of prices.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param prices (array<float>) Array of prices (array index = item index).
+export rebuild(SpatialBucket sb, array<float> prices) =>
+    clear(sb)
+    int sz = array.size(prices)
+    if sz > 0
+        for i = 0 to sz - 1
+            float price = array.get(prices, i)
+            if not na(price)
+                add(sb, i, price)
+
+//@function Rebuilds the entire index from external arrays of price ranges.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param pricesBottom (array<float>) Array of bottom prices.
+//@param pricesTop (array<float>) Array of top prices.
+export rebuildRanges(SpatialBucket sb, array<float> pricesBottom, array<float> pricesTop) =>
+    clear(sb)
+    int sz = math.min(array.size(pricesBottom), array.size(pricesTop))
+    if sz > 0
+        for i = 0 to sz - 1
+            float bottom = array.get(pricesBottom, i)
+            float top = array.get(pricesTop, i)
+            if not na(bottom) and not na(top)
+                addRange(sb, i, bottom, top)
+
+// =============================================================================
+// SECTION 8: QUERY OPERATIONS
+// =============================================================================
+
+//@function Queries items within a percentage proximity of a reference price.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param refPrice (float) Reference price (e.g., current close).
+//@param proximityPercent (float) Percentage range (e.g., 5.0 for +/-5%).
+//@returns (QueryResult) Result containing matching item indices.
+export queryProximity(SpatialBucket sb, float refPrice, float proximityPercent) =>
+    if na(refPrice) or refPrice <= 0
+        newQueryResult()
+    else
+        [bandLow, bandHigh] = getProximityBand(refPrice, proximityPercent)
+        array<int> keys = getBucketKeysForRange(sb, bandLow, bandHigh)
+        array<int> results = array.new<int>()
+        int examined = 0
+
+        for key in keys
+            if map.contains(sb.buckets, key)
+                IntArray bucketWrapper = map.get(sb.buckets, key)
+                for itemIdx in bucketWrapper.data
+                    examined += 1
+                    if not array.includes(results, itemIdx)
+                        array.push(results, itemIdx)
+
+        QueryResult.new(results, keys, examined)
+
+//@function Queries items within a fixed price range.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param priceBottom (float) Lower price boundary.
+//@param priceTop (float) Upper price boundary.
+//@returns (QueryResult) Result containing matching item indices.
+export queryRange(SpatialBucket sb, float priceBottom, float priceTop) =>
+    if na(priceBottom) or na(priceTop)
+        newQueryResult()
+    else
+        array<int> keys = getBucketKeysForRange(sb, priceBottom, priceTop)
+        array<int> results = array.new<int>()
+        int examined = 0
+
+        for key in keys
+            if map.contains(sb.buckets, key)
+                IntArray bucketWrapper = map.get(sb.buckets, key)
+                for itemIdx in bucketWrapper.data
+                    examined += 1
+                    if not array.includes(results, itemIdx)
+                        array.push(results, itemIdx)
+
+        QueryResult.new(results, keys, examined)
+
+//@function Queries items at a specific price with tolerance.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param price (float) The exact price to query.
+//@param tolerance (float) Price tolerance (items within price +/- tolerance).
+//@returns (QueryResult) Result containing matching item indices.
+export queryAt(SpatialBucket sb, float price, float tolerance) =>
+    if na(price)
+        newQueryResult()
+    else
+        float safeTol = math.max(tolerance, 0.0)
+        queryRange(sb, price - safeTol, price + safeTol)
+
+//@function Gets all item indices in a specific bucket.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param bucketKey (int) The bucket key to retrieve.
+//@returns (array<int>) Copy of item indices in that bucket.
+export getItemsInBucket(SpatialBucket sb, int bucketKey) =>
+    if map.contains(sb.buckets, bucketKey)
+        IntArray bucketWrapper = map.get(sb.buckets, bucketKey)
+        array.copy(bucketWrapper.data)
+    else
+        array.new<int>()
+
+//@function Gets all item indices currently in the index.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@returns (array<int>) Array of all item indices.
+export getAllItems(SpatialBucket sb) =>
+    array<int> result = array.new<int>()
+    for [itemIdx, _bucketKey] in sb.itemToBucket
+        array.push(result, itemIdx)
+    result
+
+// =============================================================================
+// SECTION 9: CACHED QUERIES
+// =============================================================================
+
+//@function Queries with caching - returns cached result if parameters match and cache is valid.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param cache (CachedQuery) Cache object (should be persistent via var).
+//@param refPrice (float) Reference price.
+//@param proximityPercent (float) Proximity percentage.
+//@param cacheDurationBars (int) How many bars to keep cache valid (default 1).
+//@returns (QueryResult) Result (cached or fresh).
+export queryProximityCached(SpatialBucket sb, CachedQuery cache, float refPrice, float proximityPercent, int cacheDurationBars = 1) =>
+    // Check if cache is valid
+    bool cacheValid = not na(cache.result) and
+         cache.refPrice == refPrice and
+         cache.proximityPercent == proximityPercent and
+         bar_index < cache.validUntilBar
+
+    if cacheValid
+        cache.result
+    else
+        // Perform fresh query
+        QueryResult result = queryProximity(sb, refPrice, proximityPercent)
+
+        // Update cache
+        cache.refPrice := refPrice
+        cache.proximityPercent := proximityPercent
+        cache.result := result
+        cache.validUntilBar := bar_index + cacheDurationBars
+
+        result
+
+//@function Invalidates the cache, forcing next query to be fresh.
+//@param cache (CachedQuery) Cache object to invalidate.
+export invalidateCache(CachedQuery cache) =>
+    cache.refPrice := na
+    cache.proximityPercent := na
+    cache.result := na
+    cache.validUntilBar := 0
+
+// =============================================================================
+// SECTION 10: CONVENIENCE METHODS
+// =============================================================================
+
+//@function Checks if an item index exists in the spatial index.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index to check.
+//@returns (bool) True if item is indexed.
+export contains(SpatialBucket sb, int itemIndex) =>
+    map.contains(sb.itemToBucket, itemIndex)
+
+//@function Gets the bucket key for an indexed item.
+//@param sb (SpatialBucket) The spatial bucket index.
+//@param itemIndex (int) Index of the item.
+//@returns (int) Bucket key, or na if item not found.
+export getItemBucket(SpatialBucket sb, int itemIndex) =>
+    if map.contains(sb.itemToBucket, itemIndex)
+        map.get(sb.itemToBucket, itemIndex)
+    else
+        na
+
+//@function Sorts query result indices in descending order (safe for removal iteration).
+//@param result (QueryResult) Query result to sort.
+//@returns (array<int>) Sorted indices (descending).
+export sortIndicesDescending(QueryResult result) =>
+    array<int> sorted = array.copy(result.indices)
+    array.sort(sorted, order.descending)
+    sorted
+
+//@function Sorts query result indices in ascending order.
+//@param result (QueryResult) Query result to sort.
+//@returns (array<int>) Sorted indices (ascending).
+export sortIndicesAscending(QueryResult result) =>
+    array<int> sorted = array.copy(result.indices)
+    array.sort(sorted, order.ascending)
+    sorted

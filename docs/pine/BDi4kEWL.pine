@@ -1,0 +1,203 @@
+//@version=6
+indicator("4小时波段转折 V2.0", overlay = true, max_bars_back = 500, max_labels_count = 500)
+
+// V2 只识别已确认的4小时波段拐点：不下单、不画入场/止损/止盈横线。
+// 分型在右侧K线收盘后才成立；信号还要等待价格从分型点反向运行足够距离。
+// “针尖标记”只会在实时确认完成后创建，再锚定到已经确认的枢轴价位；提醒时间仍是确认K线，绝不冒充提前预知。
+
+string GROUP_STRUCTURE = "一、波段结构"
+string GROUP_SCORE = "二、五项评分"
+string GROUP_DISPLAY = "三、显示与提醒"
+
+int pivotLeft = input.int(3, "分型左侧K线", minval = 2, maxval = 8, group = GROUP_STRUCTURE)
+int pivotRight = input.int(2, "分型右侧确认K线", minval = 1, maxval = 5, group = GROUP_STRUCTURE)
+int impulseLookback = input.int(12, "转折前行情回看K线", minval = 6, maxval = 36, group = GROUP_STRUCTURE)
+float minImpulseAtr = input.float(2.00, "前置行情最小幅度（ATR）", minval = 0.5, step = 0.1, group = GROUP_STRUCTURE)
+float minReversalAtr = input.float(1.20, "分型后最小反转幅度（ATR）", minval = 0.5, step = 0.1, group = GROUP_STRUCTURE)
+int maxConfirmationBars = input.int(12, "等待反转确认的最长K线数", minval = 2, maxval = 24, group = GROUP_STRUCTURE)
+float minSwingSeparationAtr = input.float(1.50, "相邻反向波段最小距离（ATR）", minval = 0.5, step = 0.1, group = GROUP_STRUCTURE)
+
+int contextBars = input.int(6, "前置方向回看K线", minval = 3, maxval = 18, group = GROUP_SCORE)
+float longRsiLevel = input.float(48.0, "低点RSI参考上限", minval = 20, maxval = 60, step = 0.5, group = GROUP_SCORE)
+float shortRsiLevel = input.float(52.0, "高点RSI参考下限", minval = 40, maxval = 80, step = 0.5, group = GROUP_SCORE)
+float longBbLevel = input.float(0.35, "低点布林位置上限", minval = -0.5, maxval = 0.7, step = 0.05, group = GROUP_SCORE)
+float shortBbLevel = input.float(0.65, "高点布林位置下限", minval = 0.3, maxval = 1.5, step = 0.05, group = GROUP_SCORE)
+float activityVolumeRatio = input.float(1.15, "活跃成交量倍数", minval = 0.5, step = 0.05, group = GROUP_SCORE)
+float activityRangeAtr = input.float(1.10, "活跃K线波幅（ATR）", minval = 0.5, step = 0.05, group = GROUP_SCORE)
+float rejectionWickRatio = input.float(0.25, "拒绝影线占整根K线比例", minval = 0.05, maxval = 0.8, step = 0.05, group = GROUP_SCORE)
+int minScore = input.int(3, "五项评分最低分", minval = 3, maxval = 5, group = GROUP_SCORE)
+bool enableRescueBranch = input.bool(true, "启用强波动拒绝救援分支", group = GROUP_SCORE,
+     tooltip = "当常规评分只有2分，但活跃度和拒绝形态同时成立时，允许进入后续反转确认。仍须满足前置行情、1.2 ATR反转和1.5 ATR波段距离。")
+
+bool showLongSignals = input.bool(true, "显示波段低点信号", group = GROUP_DISPLAY)
+bool showShortSignals = input.bool(true, "显示波段高点信号", group = GROUP_DISPLAY)
+bool showPivotTipLabels = input.bool(true, "标记在实际枢轴针尖（确认后回标）", group = GROUP_DISPLAY,
+     tooltip = "图标会落在实际波段最高/最低价，但它是在后续反转确认完成时才创建。历史位置不是实时预知位置。")
+bool showConfirmationMarks = input.bool(false, "同时显示实时确认K线", group = GROUP_DISPLAY,
+     tooltip = "开启后，确认信号发生的当前K线也会显示小图标；警报始终在这根确认K线收盘时触发。")
+
+bool validChart = timeframe.isintraday and timeframe.multiplier == 240 and chart.is_standard
+
+float atr = ta.atr(14)
+float rsi = ta.rsi(close, 14)
+float ema21 = ta.ema(close, 21)
+float bbBasis = ta.sma(close, 20)
+float bbDeviation = ta.stdev(close, 20) * 2.0
+float bbUpper = bbBasis + bbDeviation
+float bbLower = bbBasis - bbDeviation
+float bbPosition = bbUpper != bbLower ? (close - bbLower) / (bbUpper - bbLower) : 0.5
+[plusDi, minusDi, adx] = ta.dmi(14, 14)
+[macdLine, macdSignal, macdHist] = ta.macd(close, 12, 26, 9)
+float averageVolume = ta.sma(volume, 20)
+float volumeRatio = averageVolume > 0 ? volume / averageVolume : 0.0
+
+float pivotLow = ta.pivotlow(low, pivotLeft, pivotRight)
+float pivotHigh = ta.pivothigh(high, pivotLeft, pivotRight)
+// 这两个滚动序列必须在每根K线上计算，再在分型成立时读取锚点值。
+float impulseHighest = ta.highest(high, impulseLookback)
+float impulseLowest = ta.lowest(low, impulseLookback)
+
+// 尚未达到1.2 ATR反转确认的候选点。数组只保留最多 maxConfirmationBars 根K线。
+var array<int> pendingDirection = array.new_int()
+var array<int> pendingPivotBar = array.new_int()
+var array<float> pendingPrice = array.new_float()
+var array<float> pendingAtr = array.new_float()
+var array<int> pendingScore = array.new_int()
+var array<bool> pendingRescue = array.new_bool()
+
+var int lastSignalDirection = 0  // 1=波段低点，-1=波段高点
+var float lastSignalPrice = na
+var float lastSignalAtr = na
+
+bool longSignal = false
+bool shortSignal = false
+bool acceptedByRescue = false
+
+if validChart and barstate.isconfirmed and not na(atr[pivotRight])
+    int anchorBar = bar_index - pivotRight
+    float anchorAtr = atr[pivotRight]
+    float anchorRange = high[pivotRight] - low[pivotRight]
+    float anchorLowerWick = anchorRange > 0 ? (math.min(open[pivotRight], close[pivotRight]) - low[pivotRight]) / anchorRange : 0.0
+    float anchorUpperWick = anchorRange > 0 ? (high[pivotRight] - math.max(open[pivotRight], close[pivotRight])) / anchorRange : 0.0
+    float anchorRangeAtr = anchorAtr > 0 ? anchorRange / anchorAtr : 0.0
+    bool anchorActive = volumeRatio[pivotRight] >= activityVolumeRatio or anchorRangeAtr >= activityRangeAtr
+
+    // 五项评分：前置方向、价格位置、动能、市场活跃度、拒绝/转向形态。
+    if not na(pivotLow)
+        bool priorMovePass = close[pivotRight] < close[pivotRight + contextBars]
+        bool locationPass = bbPosition[pivotRight] <= longBbLevel or close[pivotRight] < ema21[pivotRight]
+        bool momentumPass = rsi[pivotRight] <= longRsiLevel or minusDi[pivotRight] > plusDi[pivotRight]
+        bool rejectionPass = anchorLowerWick >= rejectionWickRatio or close[pivotRight] > open[pivotRight] or macdHist[pivotRight] > macdHist[pivotRight + 1]
+        int score = (priorMovePass ? 1 : 0) + (locationPass ? 1 : 0) + (momentumPass ? 1 : 0) + (anchorActive ? 1 : 0) + (rejectionPass ? 1 : 0)
+        float precedingHigh = impulseHighest[pivotRight]
+        bool impulsePass = precedingHigh - pivotLow >= minImpulseAtr * anchorAtr
+        bool rescuePass = enableRescueBranch and score == 2 and anchorActive and rejectionPass
+        if impulsePass and (score >= minScore or rescuePass)
+            // 同方向待确认候选只保留价格更极端的一个，避免同一波段重复报警。
+            bool addCandidate = true
+            int pruneIndex = array.size(pendingDirection) - 1
+            while pruneIndex >= 0
+                if array.get(pendingDirection, pruneIndex) == 1
+                    if pivotLow <= array.get(pendingPrice, pruneIndex)
+                        array.remove(pendingDirection, pruneIndex)
+                        array.remove(pendingPivotBar, pruneIndex)
+                        array.remove(pendingPrice, pruneIndex)
+                        array.remove(pendingAtr, pruneIndex)
+                        array.remove(pendingScore, pruneIndex)
+                        array.remove(pendingRescue, pruneIndex)
+                    else
+                        addCandidate := false
+                pruneIndex -= 1
+            if addCandidate
+                array.push(pendingDirection, 1)
+                array.push(pendingPivotBar, anchorBar)
+                array.push(pendingPrice, pivotLow)
+                array.push(pendingAtr, anchorAtr)
+                array.push(pendingScore, score)
+                array.push(pendingRescue, rescuePass)
+
+    if not na(pivotHigh)
+        bool priorMovePass = close[pivotRight] > close[pivotRight + contextBars]
+        bool locationPass = bbPosition[pivotRight] >= shortBbLevel or close[pivotRight] > ema21[pivotRight]
+        bool momentumPass = rsi[pivotRight] >= shortRsiLevel or plusDi[pivotRight] > minusDi[pivotRight]
+        bool rejectionPass = anchorUpperWick >= rejectionWickRatio or close[pivotRight] < open[pivotRight] or macdHist[pivotRight] < macdHist[pivotRight + 1]
+        int score = (priorMovePass ? 1 : 0) + (locationPass ? 1 : 0) + (momentumPass ? 1 : 0) + (anchorActive ? 1 : 0) + (rejectionPass ? 1 : 0)
+        float precedingLow = impulseLowest[pivotRight]
+        bool impulsePass = pivotHigh - precedingLow >= minImpulseAtr * anchorAtr
+        bool rescuePass = enableRescueBranch and score == 2 and anchorActive and rejectionPass
+        if impulsePass and (score >= minScore or rescuePass)
+            bool addCandidate = true
+            int pruneIndex = array.size(pendingDirection) - 1
+            while pruneIndex >= 0
+                if array.get(pendingDirection, pruneIndex) == -1
+                    if pivotHigh >= array.get(pendingPrice, pruneIndex)
+                        array.remove(pendingDirection, pruneIndex)
+                        array.remove(pendingPivotBar, pruneIndex)
+                        array.remove(pendingPrice, pruneIndex)
+                        array.remove(pendingAtr, pruneIndex)
+                        array.remove(pendingScore, pruneIndex)
+                        array.remove(pendingRescue, pruneIndex)
+                    else
+                        addCandidate := false
+                pruneIndex -= 1
+            if addCandidate
+                array.push(pendingDirection, -1)
+                array.push(pendingPivotBar, anchorBar)
+                array.push(pendingPrice, pivotHigh)
+                array.push(pendingAtr, anchorAtr)
+                array.push(pendingScore, score)
+                array.push(pendingRescue, rescuePass)
+
+    // 候选按发生顺序处理。达到确认距离后无论接纳与否都移除，避免旧候选反复报警。
+    int candidateIndex = 0
+    bool signalAcceptedThisBar = false
+    while candidateIndex < array.size(pendingDirection)
+        int direction = array.get(pendingDirection, candidateIndex)
+        int candidateBar = array.get(pendingPivotBar, candidateIndex)
+        float candidatePrice = array.get(pendingPrice, candidateIndex)
+        float candidateAtr = array.get(pendingAtr, candidateIndex)
+        int candidateScore = array.get(pendingScore, candidateIndex)
+        bool candidateRescue = array.get(pendingRescue, candidateIndex)
+        int candidateAge = bar_index - candidateBar
+        bool expired = candidateAge > maxConfirmationBars
+        bool reversalConfirmed = candidateAge >= pivotRight and (direction == 1 ? close - candidatePrice >= minReversalAtr * candidateAtr : candidatePrice - close >= minReversalAtr * candidateAtr)
+
+        if expired or reversalConfirmed
+            if reversalConfirmed
+                bool alternationPass = lastSignalDirection != direction
+                float comparisonAtr = na(lastSignalAtr) ? candidateAtr : math.max(candidateAtr, lastSignalAtr)
+                bool separationPass = na(lastSignalPrice) or math.abs(candidatePrice - lastSignalPrice) >= minSwingSeparationAtr * comparisonAtr
+                if not signalAcceptedThisBar and alternationPass and separationPass
+                    longSignal := direction == 1
+                    shortSignal := direction == -1
+                    acceptedByRescue := candidateRescue or candidateScore < minScore
+                    if showPivotTipLabels and (direction == 1 ? showLongSignals : showShortSignals)
+                        label.new(x = candidateBar, y = candidatePrice, text = direction == 1 ? "多" : "空",
+                             xloc = xloc.bar_index, yloc = yloc.price,
+                             style = direction == 1 ? label.style_label_up : label.style_label_down,
+                             color = direction == 1 ? (acceptedByRescue ? color.rgb(25, 145, 105) : color.rgb(0, 175, 90)) :
+                                  (acceptedByRescue ? color.rgb(205, 90, 55) : color.rgb(220, 55, 55)),
+                             textcolor = color.white, size = size.small,
+                             tooltip = "该枢轴已在 " + str.format_time(time, "yyyy-MM-dd HH:mm") + " 的4小时收盘确认")
+                    lastSignalDirection := direction
+                    lastSignalPrice := candidatePrice
+                    lastSignalAtr := candidateAtr
+                    signalAcceptedThisBar := true
+
+            array.remove(pendingDirection, candidateIndex)
+            array.remove(pendingPivotBar, candidateIndex)
+            array.remove(pendingPrice, candidateIndex)
+            array.remove(pendingAtr, candidateIndex)
+            array.remove(pendingScore, candidateIndex)
+            array.remove(pendingRescue, candidateIndex)
+        else
+            candidateIndex += 1
+
+plotshape(showConfirmationMarks and showLongSignals and longSignal, title = "实时确认波段低点", style = shape.triangleup, location = location.belowbar,
+     color = acceptedByRescue ? color.rgb(25, 145, 105) : color.rgb(0, 175, 90), text = "确认", textcolor = color.white, size = size.tiny)
+plotshape(showConfirmationMarks and showShortSignals and shortSignal, title = "实时确认波段高点", style = shape.triangledown, location = location.abovebar,
+     color = acceptedByRescue ? color.rgb(205, 90, 55) : color.rgb(220, 55, 55), text = "确认", textcolor = color.white, size = size.tiny)
+
+alertcondition(longSignal, title = "4小时已确认波段低点", message = "{{ticker}} 4小时波段低点已确认：V2做多信号，收盘价 {{close}}")
+alertcondition(shortSignal, title = "4小时已确认波段高点", message = "{{ticker}} 4小时波段高点已确认：V2做空信号，收盘价 {{close}}")
+alertcondition(longSignal or shortSignal, title = "4小时已确认波段转折", message = "{{ticker}} 4小时波段转折已确认，收盘价 {{close}}")

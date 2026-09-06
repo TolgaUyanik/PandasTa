@@ -1,0 +1,483 @@
+// @version=6
+//@description This library shows how to implement circular arrays, which can be more performant for fixed-size, large arrays. It includes several custom methods to replace the built-in Pine array manipulation methods. It also includes a demonstration of the same operation performed by circular arrays and normal arrays which you can inspect using the Pine Profiler. Find out more about the Pine Profiler: https://www.tradingview.com/pine-script-docs/writing/profiling-and-optimization/
+library("CircularArrays", overlay = true)
+
+
+// 🔵 TEMPLATE NOTE: To adapt this for another element type, replace every `float` element type with your type (e.g. `int`, `string`, or an object type),
+//   change `array.new_float` in `new()` to the matching constructor, and pick a suitable "empty" sentinel (`na` works for all built-in types and objects).
+//   The head/elementCount/capacity bookkeeping and every index calculation stay exactly the same.
+//   For value types, deepCopy() also works unchanged. For an object or another reference type, change the assignment inside deepCopy() to copy each
+//   non-na element, e.g. `_copiedElement = na(_originalElement) ? na : _originalElement.copy()`. The element's copy method must also copy any nested
+//   arrays, objects, or other reference-type fields that need to be independent.
+
+
+//#region 🟩🟩🟩🟩🟩🟩  TYPE  🟩🟩🟩🟩🟩🟩
+
+//@type A fixed-capacity circular buffer of floats. Elements are addressed by a LOGICAL index where 0 is the oldest retained element and elementCount-1 is the newest, matching normal array indexing. Internally the data lives in a recycled backing array of length `capacity`; `head` marks where the oldest element physically sits, and the buffer wraps around the end of the backing array as elements are added and removed.
+//@field a_data   The backing array. Always actually `capacity` elements long; unused slots hold na. Never index this directly - use getValue()/setValue(), which translate logical indices to physical ones.
+//@field head     The physical index in `a_data` of the oldest logical element (logical index 0). Advances on shiftValue(), retreats on unshiftValue(), wrapping modulo capacity. Always kept in 0..capacity-1; the index maths in f_physicalIndex() relies on this.
+//@field elementCount The number of elements currently stored (0..capacity). This differs from the backing array's size, which always equals capacity.
+//@field capacity The maximum number of elements the buffer can hold. Fixed at construction; change it only via resize().
+export type o_circularFloat
+    array<float> a_data
+    int          head
+    int          elementCount
+    int          capacity
+
+//#endregion TYPE
+
+
+//#region 🟩🟩🟩🟩🟩🟩  INTERNAL HELPERS  🟩🟩🟩🟩🟩🟩
+
+// These are NOT exported. They translate logical indices to physical backing-array indices and keep the wrap-around maths in one place.
+
+//@function Converts a logical index (0 = oldest) to its actual index in the backing array, including any wrap-around.
+//@param    _this    The circular buffer.
+//@param    _logicalIndex The logical position to translate. This helper does not check bounds; its internal callers supply a position valid for the operation, including `elementCount` when locating the next free slot.
+//@returns  The corresponding index in `_this.a_data`.
+f_physicalIndex(o_circularFloat _this, int _logicalIndex) =>
+    int _physicalIndex = _this.head + _logicalIndex
+    // Single subtraction is enough because `head` is always kept in 0..capacity-1 and callers pass a logical index of at most `capacity`, so the sum never reaches 2*capacity. If you adapt this template, preserve that head invariant or this must become a wrap.
+    if _physicalIndex >= _this.capacity  // Internal callers never supply an index large enough to require wrapping more than once.
+        _physicalIndex -= _this.capacity
+    _physicalIndex
+
+//@function Wraps any integer into the range 0..capacity-1. Pine's % can return a negative result, which matters when unshiftValue() moves head backwards.
+//@param    _value    The value to wrap (may be negative).
+//@param    _capacity The circular array's capacity.
+//@returns  The value wrapped into the range 0..capacity-1.
+f_wrap(int _value, int _capacity) =>
+    int _wrappedValue = ((_value % _capacity) + _capacity) % _capacity
+    _wrappedValue
+
+//#endregion INTERNAL HELPERS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  CONSTRUCTION  🟩🟩🟩🟩🟩🟩
+
+//@function Creates an empty circular array with a fixed capacity. The backing array starts at its full length, filled with `na`, so normal operations never need to resize it.
+//@param    _capacity The maximum number of elements. Values below 1 or `na` are changed to 1 so the circular array remains usable without a runtime error.
+//@returns  A new, empty `o_circularFloat` object. Empty in the sense that there are no values in it.
+export new(int _capacity) =>
+    int _capacityOrFallback = na(_capacity) ? 1 : _capacity
+    int _safeCapacity = math.max(1, _capacityOrFallback)  // A capacity of 0 or less would break the index maths, so use 1 instead.
+    //@variable The backing array, created at its full size and filled with `na`.
+    array<float> _a_data = array.new_float(_safeCapacity, na)
+    o_circularFloat _newCircularArray = o_circularFloat.new(a_data = _a_data, head = 0, elementCount = 0, capacity = _safeCapacity)
+    _newCircularArray
+
+//#endregion CONSTRUCTION
+
+
+//#region 🟩🟩🟩🟩🟩🟩  STATE QUERIES  🟩🟩🟩🟩🟩🟩
+
+// We provide these trivial-looking methods simply because users are already accustomed to using array methods to get this information. You could also use the object fields to get the same info.
+
+//@function Gets the number of elements currently stored. This is different from capacity: the backing array always has `capacity` slots, but only `elementCount` of them currently hold logical values. We have kind of split array "size" into two concepts of elementCount and capacity, so to avoid confusion we do not expose a .size() method.
+//@param    _this The circular buffer.
+//@returns  The number of stored elements (0..capacity).
+export method elementCount(o_circularFloat _this) =>
+    _this.elementCount
+
+//@function Gets the maximum number of elements the circular array can hold. We have kind of split array "size" into two concepts of elementCount and capacity, so to avoid confusion we do not expose a .size() method.
+//@param    _this The circular buffer.
+//@returns  The fixed capacity.
+export method capacity(o_circularFloat _this) =>
+    _this.capacity
+
+//@function Checks whether the circular array is full. When it is, pushValue() or unshiftValue() must evict an element (they always return the element).
+//@param    _this The circular buffer.
+//@returns  `true` when elementCount == capacity.
+export method isFull(o_circularFloat _this) =>
+    _this.elementCount == _this.capacity
+
+//@function Checks whether the circular array is empty.
+//@param    _this The circular buffer.
+//@returns  `true` when elementCount == 0.
+export method isEmpty(o_circularFloat _this) =>
+    _this.elementCount == 0
+
+//#endregion STATE QUERIES
+
+
+//#region 🟩🟩🟩🟩🟩🟩  ELEMENT ACCESS  🟩🟩🟩🟩🟩🟩
+
+// Getting or setting an element by its logical index is O(1). An invalid index returns `na` when getting a value, or changes nothing when setting one. Public libraries can throw runtime errors when the problem is severe enough, but these are fundamental array operations, so we want them to fail softly.
+
+//@function Gets the element at a logical index, where 0 is the oldest and elementCount-1 is the newest.
+//@param    _this  The circular buffer.
+//@param    _index The logical index.
+//@returns  The element, or `na` when the index is out of range.
+export method getValue(o_circularFloat _this, int _index) =>
+    float _result = na
+    if _index >= 0 and _index < _this.elementCount  // Guard: only translate and read valid logical indices.
+        _result := _this.a_data.get(f_physicalIndex(_this, _index))
+    _result
+
+//@function Replaces the element at a logical index without changing the circular array's element count or order. This can update a stored value, or a field when the same pattern is adapted for objects.
+//@param    _this  The circular buffer.
+//@param    _index The logical index (0..elementCount-1). An out-of-range index does nothing.
+//@param    _value The new value.
+export method setValue(o_circularFloat _this, int _index, float _value) =>
+    if _index >= 0 and _index < _this.elementCount  // Guard: silently ignore out-of-range writes.
+        _this.a_data.set(f_physicalIndex(_this, _index), _value)
+
+//@function Gets the oldest element (logical index 0) without removing it.
+//@param    _this The circular buffer.
+//@returns  The oldest element, or `na` when empty.
+export method firstValue(o_circularFloat _this) =>
+    _this.getValue(0)
+
+//@function Gets the newest element (logical index elementCount-1) without removing it.
+//@param    _this The circular buffer.
+//@returns  The newest element, or `na` when empty.
+export method lastValue(o_circularFloat _this) =>
+    _this.getValue(_this.elementCount - 1)
+
+//#endregion ELEMENT ACCESS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  DEQUE OPERATIONS (ALL O(1))  🟩🟩🟩🟩🟩🟩
+
+// A ring buffer has no inherent direction: both ends are cheap because we only move pointers and overwrite slots.
+// The pushValue() and shiftValue() functions behave like a First-In-First-Out queue; unshiftValue/popValue let you also work the other end (a deque).
+
+//@function Adds a value at the end as the new newest element. If the circular array is full, this replces and returns the oldest element so you can react to it, for example by deleting an evicted drawing.
+//@param    _this  The circular buffer.
+//@param    _value The value to add.
+//@returns  The evicted oldest value when the circular array was full, otherwise `na`.
+export method pushValue(o_circularFloat _this, float _value) =>
+    float _evictedValue = na
+    if _this.elementCount == _this.capacity
+        // Full: save the oldest value, replace it with the new value, then move head forward. The next-oldest value becomes logical index 0 and the new value becomes the newest.
+        _evictedValue := _this.a_data.get(_this.head)
+        _this.a_data.set(_this.head, _value)
+        _this.head += 1
+        if _this.head == _this.capacity
+            _this.head := 0
+    else if _this.elementCount < _this.capacity
+        // Not full: write the value into the first free slot after the current newest value, then increase elementCount.
+        int _tailPhysicalIndex = f_physicalIndex(_this, _this.elementCount)
+        _this.a_data.set(_tailPhysicalIndex, _value)
+        _this.elementCount += 1
+    _evictedValue
+
+//@function Adds a value at the beginning as the new oldest element. If the circular array is full, this replaces and returns the newest element. This gives the same result as using array.unshift() with a size limit, but is O(1).
+//@param    _this  The circular buffer.
+//@param    _value The value to add.
+//@returns  The evicted newest value when the circular array was full, otherwise `na`.
+export method unshiftValue(o_circularFloat _this, float _value) =>
+    float _evictedValue = na
+    // Move head back one slot, wrapping around if needed. This becomes the new logical index 0.
+    int _newHead = f_wrap(_this.head - 1, _this.capacity)
+    if _this.isFull()
+        // Full: moving head back lands on the current newest value, so replace and return it.
+        _evictedValue := _this.a_data.get(_newHead)
+        _this.a_data.set(_newHead, _value)
+        _this.head := _newHead
+    else
+        // Not full: use the empty slot before head and increase elementCount.
+        _this.a_data.set(_newHead, _value)
+        _this.head := _newHead
+        _this.elementCount += 1
+    _evictedValue
+
+//@function Removes and returns the oldest element. Unlike the O(n) array.shift(), this is O(1) because we only clear one slot and move the head pointer. This is therefore the big payoff for all this fussing about.
+//@param    _this The circular buffer.
+//@returns  The removed oldest element, or `na` when the circular array was empty.
+export method shiftValue(o_circularFloat _this) =>
+    float _removedValue = na
+    if _this.elementCount > 0
+        _removedValue := _this.a_data.get(_this.head)
+        _this.a_data.set(_this.head, na)  // Clear the vacated slot so stale values can't be read by mistake.
+        _this.head := f_wrap(_this.head + 1, _this.capacity)
+        _this.elementCount -= 1
+    _removedValue
+
+//@function Removes and returns the newest element.
+//@param    _this The circular buffer.
+//@returns  The removed newest element, or `na` when the circular array was empty.
+export method popValue(o_circularFloat _this) =>
+    float _removedValue = na
+    if _this.elementCount > 0
+        int _tailPhysicalIndex = f_physicalIndex(_this, _this.elementCount - 1)
+        _removedValue := _this.a_data.get(_tailPhysicalIndex)
+        _this.a_data.set(_tailPhysicalIndex, na)  // Clear the vacated slot.
+        _this.elementCount -= 1
+    _removedValue
+
+//#endregion DEQUE OPERATIONS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  MID-ARRAY EDITS (O(n) - USE SPARINGLY)  🟩🟩🟩🟩🟩🟩
+
+// ⚠️ insertAt() and removeAt() are NOT O(1). They must shift the elements that come after the insertion or removal point in the backing array.
+// Theyre included here to match the built-in array.* methods. If you only add or remove at the ends, you do not need them.
+
+//@function Removes and returns the element at a logical index. Later elements move down to close the gap, so this is O(n).
+//@param    _this  The circular buffer.
+//@param    _index The logical index to remove (0..elementCount-1). An out-of-range index returns `na` and changes nothing.
+//@returns  The removed element, or `na` when the index was out of range.
+export method removeAt(o_circularFloat _this, int _index) =>
+    float _removedValue = na
+    if _index >= 0 and _index < _this.elementCount
+        _removedValue := _this.getValue(_index)
+        // Move each later element one place towards the beginning to fill the gap. Use `while` because Pine can reverse a `for` loop when removing the final element.
+        int _i = _index
+        while _i < _this.elementCount - 1
+            _this.setValue(_i, _this.getValue(_i + 1))
+            _i += 1
+        // Clear the duplicated final slot and decrease elementCount.
+        _this.a_data.set(f_physicalIndex(_this, _this.elementCount - 1), na)
+        _this.elementCount -= 1
+    _removedValue
+
+//@function Inserts a value at a logical index. Elements at and after that index move towards the end, so this is O(n). If the circular array is full, the newest element is removed and returned.
+//@param    _this  The circular buffer.
+//@param    _index The logical index at which to insert (0..elementCount). Numeric values outside this range are clamped into it, except that an index past the newest element on a full buffer has nowhere to go, so the value is returned unstored. An `na` index changes nothing and returns `_value`.
+//@param    _value The value to insert.
+//@returns  The evicted newest value when the circular array was full, the supplied value when an `na` index prevented insertion, otherwise `na`.
+export method insertAt(o_circularFloat _this, int _index, float _value) =>
+    float _evictedValue = na
+    if na(_index)
+        _evictedValue := _value  // There is no meaningful insertion position, so return the unstored value and leave the buffer unchanged.
+    else
+        int _clampedIndex = math.max(0, math.min(_index, _this.elementCount))  // Clamp: allow inserting anywhere from front (0) to just past the tail (elementCount).
+        bool _isFull = _this.elementCount == _this.capacity
+        if _isFull and _clampedIndex >= _this.elementCount
+            _evictedValue := _value  // There is no room to insert after the newest value, so return it without storing it.
+        else
+            if _isFull
+                _evictedValue := _this.lastValue()  // The newest element falls off the end.
+            else
+                _this.elementCount += 1  // Grow into the free slot before moving the later elements.
+            // Move the elements from `_clampedIndex` onwards up by one, then insert the value. Use `while` because Pine reverses an empty `for` range.
+            int _i = _this.elementCount - 1
+            while _i > _clampedIndex
+                _this.setValue(_i, _this.getValue(_i - 1))
+                _i -= 1
+            _this.setValue(_clampedIndex, _value)
+    _evictedValue
+
+//#endregion MID-ARRAY EDITS
+
+
+//#region 🟩🟩🟩🟩🟩🟩  SEARCH & LIFECYCLE  🟩🟩🟩🟩🟩🟩
+
+//@function Checks whether the circular array contains an exact match, treating a stored `na` as matching an `na` search value. This is O(n). If you adapt this template to an object type, `==` compares references, not contents, so you will likely want to replace the comparison with a field-by-field check.
+//@param    _this  The circular buffer.
+//@param    _value The value to look for.
+//@returns  `true` when found.
+export method containsValue(o_circularFloat _this, float _value) =>
+    bool _isValueFound = false
+    int _i = 0
+    while _i < _this.elementCount
+        float _storedValue = _this.getValue(_i)
+        bool _bothNa = na(_storedValue) and na(_value)
+        bool _bothValues = not na(_storedValue) and not na(_value) and _storedValue == _value
+        if _bothNa or _bothValues
+            _isValueFound := true
+            break  // Stop at the first match.
+        _i += 1
+    _isValueFound
+
+//@function Empties the circular array without changing its capacity. All backing-array slots are reset to `na`, and head and elementCount return to zero.
+//@param    _this The circular buffer.
+export method clearValues(o_circularFloat _this) =>
+    _this.a_data.fill(na)
+    _this.head := 0
+    _this.elementCount := 0
+
+//@function Copies the circular array's contents into a normal array, from oldest to newest. This can be useful for iteration or debugging. Changes to the returned array do not affect the circular array.
+//@param    _this The circular buffer.
+//@returns  A new array<float> containing the stored values from oldest to newest.
+export method toArray(o_circularFloat _this) =>
+    array<float> _a_outputValues = array.new_float(0)
+    int _i = 0
+    while _i < _this.elementCount  // Use `while` because Pine reverses `for` when elementCount is 0 (`0 to -1`). This would write two extra `na` elements to the copy.
+        _a_outputValues.push(_this.getValue(_i))
+        _i += 1
+    _a_outputValues
+
+//@function Copies the circular array, including a separate backing array, so either copy can be changed without affecting the other.
+//@param    _this The circular buffer.
+//@returns  A new o_circularFloat with the same contents and capacity.
+export method deepCopy(o_circularFloat _this) =>
+    array<float> _a_copiedData = array.new_float(_this.capacity, na)
+    int _physicalIndex = 0
+    while _physicalIndex < _this.capacity
+        _a_copiedData.set(_physicalIndex, _this.a_data.get(_physicalIndex))
+        _physicalIndex += 1
+    o_circularFloat _clone = o_circularFloat.new(a_data = _a_copiedData, head = _this.head, elementCount = _this.elementCount, capacity = _this.capacity)
+    _clone
+
+
+//@function Changes the capacity. Increasing it keeps every element. Decreasing it below the current element count keeps the newest elements and returns the dropped oldest elements, oldest first, so you can react to them as with pushValue().
+//@param    _this        The circular buffer.
+//@param    _newCapacity The new capacity. Values below 1 are changed to 1. An `na` value leaves the capacity unchanged.
+//@returns  An array<float> containing the dropped oldest elements, or an empty array when nothing was dropped.
+export method resize(o_circularFloat _this, int _newCapacity) =>
+    array<float> _a_droppedValues = array.new_float(0)
+    if not na(_newCapacity)  // Obviously we're not doing anything is the capacity is undefined.
+        int _safeCapacity = math.max(1, _newCapacity)
+        // Work out how many of the oldest elements no longer fit.
+        int _dropCount = math.max(0, _this.elementCount - _safeCapacity)
+        int _dropIndex = 0
+        while _dropIndex < _dropCount  // Use `while` because Pine reverses `for` when dropCount is 0 (`0 to -1`).
+            _a_droppedValues.push(_this.getValue(_dropIndex))  // Save the dropped elements in oldest-first order before rebuilding.
+            _dropIndex += 1
+        // Create a new backing array with head at 0, containing only the newest elements that still fit.
+        array<float> _newData = array.new_float(_safeCapacity, na)
+        int _keepCount = math.min(_this.elementCount, _safeCapacity)
+        int _firstKeptIndex = _this.elementCount - _keepCount  // Logical index of the oldest element we are keeping.
+        int _keepIndex = 0
+        while _keepIndex < _keepCount
+            _newData.set(_keepIndex, _this.getValue(_firstKeptIndex + _keepIndex))
+            _keepIndex += 1
+        // Replace the old backing array and update the circular array's state.
+        _this.a_data := _newData
+        _this.head := 0
+        _this.elementCount := _keepCount
+        _this.capacity := _safeCapacity
+    _a_droppedValues
+
+//#endregion SEARCH & LIFECYCLE
+
+
+//#region 🔵🔵🔵🔵🔵🔵  EXAMPLE USAGE & PROFILER DEMO  🔵🔵🔵🔵🔵🔵
+
+// This simple UDT is used only for comparison. We try to emulate what a Pine implementation of the built-in `shift()` would look like, to compensate for the Pine overhead in our circular array implementation: calling methods, accessing UDT fields, etc. It shows the cost of the linear algorithm when both implementations run as Pine methods; it does NOT claim to reproduce TradingView's optimised native implementation.
+type o_linearFloat
+    array<float> a_data
+    int capacity
+
+method m_replaceOldest(o_linearFloat _this, float _value) =>
+    float _evictedValue = _this.a_data.get(0)
+    int _index = 0
+    while _index < _this.capacity - 1
+        _this.a_data.set(_index, _this.a_data.get(_index + 1))
+        _index += 1
+    _this.a_data.set(_this.capacity - 1, _value)
+    _evictedValue
+
+// Here we have two demos:
+//   1. A FUNCTIONAL demo: a small buffer used as a rolling window of the last N closing prices, rendered to a table and showing eviction.
+//   2. A PERFORMANCE demo: four versions of the same fixed-window "evict oldest, add newest" operation, separating practical performance from the underlying circular-vs-linear algorithm.
+// Use the input to switch between them or turn them off. Add this library to a chart on its own to try them.
+
+//@enum Selects which demonstration to display.
+//@field off        Does not run or display either demonstration.
+//@field functional A rolling price-window table that shows the ring buffer's behaviour and eviction.
+//@field profiler   Four fixed-window benchmarks that separate practical library performance, native built-in performance, circular-algorithm cost, and manual linear-algorithm cost.
+enum DemoMode
+    off        = "Off"
+    functional = "Functional (rolling price window)"
+    profiler   = "Profiler (circular vs linear)"
+
+const string G_DEMO = "Demonstration"
+DemoMode in_demoMode = input.enum(defval = DemoMode.off, title = "Demo mode", group = G_DEMO,
+  tooltip = "Off: does not run or display either demonstration.\nFunctional: shows a small ring buffer working as a rolling window of recent closes.\nProfiler: compares four versions of the same fixed-window replacement. Exported `pushValue()` shows the library's real performance. A bare ring shows the circular algorithm without UDT or method overhead. Native `array.shift()` + `array.push()` shows the usual Pine approach. A manual Pine-level linear shift compares the circular and linear algorithms when both are written in Pine.")
+
+int in_windowSize = input.int(defval = 8, title = "Functional: window size", minval = 2, maxval = 20, group = G_DEMO,
+  tooltip = "How many recent closes the rolling-window demo keeps. Watch the oldest fall off once this many bars have passed.")
+
+int in_largeSize = input.int(defval = 2000, title = "Profiler: workload size", minval = 100, maxval = 100000, group = G_DEMO,
+  tooltip = "The window size. On each of the final benchmark bars, the main benchmarks replace every value once. The emulated linear UDT performs fewer replacements because each one manually moves the entire array in Pine code.")
+
+
+// 1. FUNCTIONAL DEMO: rolling window of recent closes 
+// We keep one persistent ring buffer across bars and pushValue() each new close into it. Once it fills, the oldest close is evicted and we capture it to display.
+
+//@variable The persistent rolling-window ring buffer.
+var o_circularFloat priceWindow = new(in_windowSize)
+//@variable The close that was evicted on the current bar (`na` until the window fills). Demonstrates the `pushValue()` eviction return value.
+float evictedClose = na
+
+if in_demoMode == DemoMode.functional and barstate.isconfirmed
+    evictedClose := priceWindow.pushValue(close)  // `pushValue()` returns the displaced oldest close once the window is full.
+
+// Render the window to a table on the last bar only.
+var table t_demo = table.new(position.top_right, 2, in_windowSize + 3, border_width = 1)
+if in_demoMode == DemoMode.functional and barstate.islast
+    t_demo.cell(0, 0, "Rolling price window", text_color = chart.fg_color, bgcolor = color.teal)
+    t_demo.merge_cells(0, 0, 1, 0)
+    t_demo.cell(0, 1, "Logical index", text_color = color.black, bgcolor = color.silver)
+    t_demo.cell(1, 1, "Close (oldest -> newest)", text_color = color.black, bgcolor = color.silver)
+    //@variable Snapshot of the buffer in logical order for display.
+    array<float> a_snapshot = priceWindow.toArray()
+    int _i = 0
+    while _i < a_snapshot.size()
+        t_demo.cell(0, _i + 2, str.tostring(_i), text_color = color.black, bgcolor = color.white)
+        t_demo.cell(1, _i + 2, str.tostring(a_snapshot.get(_i), format.mintick), text_color = color.black, bgcolor = color.white)
+        _i += 1
+    // Status row: size/capacity, full?, and the most recent eviction.
+    string _status = "elementCount=" + str.tostring(priceWindow.elementCount()) + "/" + str.tostring(priceWindow.capacity()) +
+      "  full=" + str.tostring(priceWindow.isFull()) +
+      "  last evicted=" + (na(evictedClose) ? "none" : str.tostring(evictedClose, format.mintick))
+    t_demo.cell(0, in_windowSize + 2, _status, text_color = chart.fg_color, bgcolor = color.gray)
+    t_demo.merge_cells(0, in_windowSize + 2, 1, in_windowSize + 2)
+
+
+// ════════ 2. PROFILER DEMO: CIRCULAR VS LINEAR FIXED-WINDOW REPLACEMENT ════════
+// We test four versions of the same fixed-window operation:
+// 1. Exported pushValue() shows the library's real performance.
+// 2. The bare ring shows the circular algorithm without UDT or method overhead.
+// 3. Native array.shift() + array.push() shows the usual Pine approach using built-in functions, which are optimised and can be m,uch faster even if they are O9n).
+// 4. The manual linear-shift UDT compares the circular and linear algorithms when both are written in Pine. Of course no-one would write a linear shift in Pine, but it demonstrates how our circular array performs against a similar level of linear function.
+// The first three replace every value on each benchmark bar. The manual linear shift is so much slower that we must perfrom 1000x fewer replacements tpo avoid distorting the Profiler values beyond recognition.
+
+const int PROFILER_BAR_COUNT = 20
+int profilerEmulatedReplacementsPerBar = math.max(1, int(in_largeSize / 1000))
+bool runProfiler = in_demoMode == DemoMode.profiler and bar_index > last_bar_index - PROFILER_BAR_COUNT and barstate.isconfirmed
+bool showProfiler = in_demoMode == DemoMode.profiler and barstate.islast
+var int profilerOperationCount = 0
+var int profilerEmulatedOperationCount = 0
+var float profilerRingSink = 0.0
+var float profilerInlineRingSink = 0.0
+var float profilerPlainSink = 0.0
+var float profilerEmulatedSink = 0.0
+var array<float> a_profilerRingData = array.new_float(in_largeSize, 1.0)
+var o_circularFloat o_profilerRing = o_circularFloat.new(a_data = a_profilerRingData, head = 0, elementCount = in_largeSize, capacity = in_largeSize)
+var array<float> a_profilerInlineRingData = array.new_float(in_largeSize, 1.0)
+var int profilerInlineHead = 0
+var array<float> a_profilerPlainValues = array.new_float(in_largeSize, 1.0)
+var array<float> a_profilerEmulatedData = array.new_float(in_largeSize, 1.0)
+var o_linearFloat o_profilerEmulated = o_linearFloat.new(a_data = a_profilerEmulatedData, capacity = in_largeSize)
+
+// 🧪 1. The actual library method. This is the one that matters in real use: pushValue() replaces the oldest value and moves the head pointer.
+if runProfiler
+    for _i = 0 to in_largeSize - 1
+        profilerRingSink += o_profilerRing.pushValue(_i)
+
+// 🧪 2. The ring stripped back to the underlying array and pointer maths. This shows how cheap the circular algorithm itself is before we wrap it in a UDT and method.
+if runProfiler
+    for _i = 0 to in_largeSize - 1
+        profilerInlineRingSink += a_profilerInlineRingData.get(profilerInlineHead)
+        a_profilerInlineRingData.set(profilerInlineHead, _i)
+        profilerInlineHead += 1
+        if profilerInlineHead == in_largeSize
+            profilerInlineHead := 0
+
+// 🧪 3. The usual Pine approach: shift() removes the oldest value, then push() adds the new one at the end.
+if runProfiler
+    for _i = 0 to in_largeSize - 1
+        profilerPlainSink += a_profilerPlainValues.shift()
+        a_profilerPlainValues.push(_i)
+    profilerOperationCount += in_largeSize
+
+// 🧪 4. A deliberately manual Pine version of the linear algorithm. It moves every value down one index so we can compare like-for-like Pine code, not our method against TradingView's optimised built-in.
+if runProfiler
+    for _i = 0 to profilerEmulatedReplacementsPerBar - 1
+        profilerEmulatedSink += o_profilerEmulated.m_replaceOldest(_i)
+    profilerEmulatedOperationCount += profilerEmulatedReplacementsPerBar
+
+// Display the sinks so the profiler retains the measured work.
+if showProfiler
+    var table t_prof = table.new(position.bottom_right, 1, 5, border_width = 1)
+    t_prof.cell(0, 0, "Profiler demo - open the Pine Profiler", text_color = chart.fg_color, bgcolor = color.purple)
+    t_prof.cell(0, 1, "Exported pushValue x " + str.tostring(profilerOperationCount) + "  sink=" + str.tostring(profilerRingSink), text_color = color.black, bgcolor = color.white)
+    t_prof.cell(0, 2, "Bare ring replacement x " + str.tostring(profilerOperationCount) + "  sink=" + str.tostring(profilerInlineRingSink), text_color = color.black, bgcolor = color.white)
+    t_prof.cell(0, 3, "array.shift+push x " + str.tostring(profilerOperationCount) + "  sink=" + str.tostring(profilerPlainSink), text_color = color.black, bgcolor = color.white)
+    t_prof.cell(0, 4, "Manual linear-shift UDT x " + str.tostring(profilerEmulatedOperationCount) + "  sink=" + str.tostring(profilerEmulatedSink), text_color = color.black, bgcolor = color.white)
+
+//#endregion EXAMPLE USAGE & PROFILER DEMO

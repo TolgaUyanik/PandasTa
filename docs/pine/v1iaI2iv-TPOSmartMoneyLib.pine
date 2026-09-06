@@ -1,0 +1,420 @@
+//@version=6
+// @description Library for TPO (Time Price Opportunity) and Smart Money concepts including session management, PDH/PDL detection, sweeping logic, and volume profile utilities
+// v6 migration: Added overlay=false (required in Pine v6)
+library("TPOSmartMoneyLib", overlay=false)
+
+// ==================== TYPES ====================
+
+// @type Represents a high/low line with sweeping detection
+// @field ln Line object
+// @field lb Label object
+// @field lvl Price level
+// @field startBar Bar index where line starts
+// @field swept Whether the level has been swept
+// @field isHigh True if this is a high, false if low
+// @field col Line color
+export type HLLine
+    line ln
+    label lb
+    float lvl
+    int startBar
+    bool swept
+    bool isHigh
+    color col
+
+// @type Represents a naked POC/VAH/VAL line
+// @field ln Line object
+// @field lb Label object
+// @field lvl Price level
+// @field startBar Bar index where line starts
+// @field swept Whether the level has been swept
+// @field sweptBar Bar index where swept occurred
+// @field endBar Bar index where line should end
+export type NakedLine
+    line ln
+    label lb
+    float lvl
+    int startBar
+    bool swept
+    int sweptBar
+    int endBar
+
+// ==================== TICK/ROW CONVERSION ====================
+
+// @function Convert price to tick
+// @param p Price value
+// @returns Tick value
+export f_price_to_tick(float p) =>
+    int(math.round(p / syminfo.mintick))
+
+// @function Convert tick to row
+// @param t Tick value
+// @param row_ticks_in Number of ticks per row
+// @returns Row index
+export f_tick_to_row(int t, int row_ticks_in) =>
+    int(math.floor(t / row_ticks_in))
+
+// @function Convert row to price (midpoint)
+// @param row Row index
+// @param row_ticks_in Number of ticks per row
+// @returns Price at row midpoint
+export f_row_to_price(int row, int row_ticks_in) =>
+    (row + 0.5) * row_ticks_in * syminfo.mintick
+
+// @function Calculate dynamic row size based on normalized ATR
+// @param natr_ref Daily normalized ATR reference value
+// @param row_gran_mult Row granularity multiplier
+// @returns Number of ticks per row
+export f_calc_row_ticks(float natr_ref, float row_gran_mult) =>
+    float _natr = nz(natr_ref, 1.0)
+    float _trp = math.max(0.001, math.min((_natr / 100.0) * row_gran_mult, 1.0))
+    float _rh = close * (_trp / 100.0)
+    int _rt = int(math.round(_rh / syminfo.mintick))
+    math.max(1, math.min(_rt, 10000))
+
+// ==================== COLOR UTILITIES ====================
+
+// @function Increase color transparency by percentage
+// @param c Input color
+// @param pct Percentage to increase transparency (0.0 to 1.0)
+// @returns Color with increased transparency
+export f_more_transp_pct(color c, float pct) =>
+    float p = math.max(0.0, math.min(1.0, pct))
+    int t = int(color.t(c))
+    int new_t = int(t + (100 - t) * p)
+    color.new(c, math.max(0, math.min(100, new_t)))
+
+// @function Calculate dominance color based on buy/sell ratio
+// @param dom Dominance ratio (-1 to 1, negative = sell, positive = buy)
+// @param buy_col Buy dominant color
+// @param sell_col Sell dominant color
+// @param gamma Gamma correction for color intensity
+// @param transp_weak Transparency for weak dominance
+// @param transp_strong Transparency for strong dominance
+// @returns Blended color
+export f_dom_color(float dom, color buy_col, color sell_col, float gamma, int transp_weak, int transp_strong) =>
+    float abs_dom = math.abs(dom)
+    float pow_dom = math.pow(abs_dom, gamma)
+    int transp = int(transp_weak + (transp_strong - transp_weak) * pow_dom)
+    color base = dom >= 0 ? buy_col : sell_col
+    color.new(base, transp)
+
+// ==================== SESSION MANAGEMENT ====================
+
+// @function Parse session string to get start or end time
+// @param sess_str Session string in format "HHMM-HHMM"
+// @param get_start True to get start time, false to get end time
+// @returns Time string in HHMM format
+export f_sess_part(string sess_str, bool get_start) =>
+    string[] parts = str.split(sess_str, "-")
+    int idx = get_start ? 0 : 1
+    array.size(parts) > idx ? array.get(parts, idx) : "0000"
+
+// @function Convert HHMM string to hours
+// @param hhmm Time string in HHMM format
+// @returns Hours (0-23)
+export f_hhmm_to_h(string hhmm) =>
+    int(str.tonumber(str.substring(hhmm, 0, 2)))
+
+// @function Convert HHMM string to minutes
+// @param hhmm Time string in HHMM format
+// @returns Minutes (0-59)
+export f_hhmm_to_m(string hhmm) =>
+    int(str.tonumber(str.substring(hhmm, 2, 4)))
+
+// @function Calculate previous day window bounds
+// @param today_day_rth Today's RTH start timestamp
+// @param win_start Window start time in HHMM format
+// @param win_end Window end time in HHMM format
+// @param session_tz Session timezone
+// @returns Tuple of [window_start_ms, window_end_ms]
+export f_prev_day_window_bounds(int today_day_rth, string win_start, string win_end, string session_tz) =>
+    int _start_h = f_hhmm_to_h(win_start)
+    int _start_m = f_hhmm_to_m(win_start)
+    int _end_h = f_hhmm_to_h(win_end)
+    int _end_m = f_hhmm_to_m(win_end)
+    int _today_start0 = timestamp(session_tz, year(today_day_rth, session_tz), month(today_day_rth, session_tz), dayofmonth(today_day_rth, session_tz), _start_h, _start_m)
+    int _today_end0 = timestamp(session_tz, year(today_day_rth, session_tz), month(today_day_rth, session_tz), dayofmonth(today_day_rth, session_tz), _end_h, _end_m)
+    int today_day_start = _today_start0 <= today_day_rth ? (_today_start0 + 24 * 60 * 60 * 1000) : _today_start0
+    int today_day_end = _today_end0 <= today_day_rth ? (_today_end0 + 24 * 60 * 60 * 1000) : _today_end0
+    int ws = today_day_start - 24 * 60 * 60 * 1000
+    int we = today_day_end - 24 * 60 * 60 * 1000
+    [ws, we]
+
+// @function Get default session colors
+// @returns Array of 4 colors [Asia, Frankfurt, London, NY]
+export f_default_session_colors() =>
+    array.from(
+         color.new(color.rgb(210, 190, 255), 88),
+         color.new(color.rgb(255, 165, 0), 88),
+         color.new(color.rgb(200, 255, 200), 88),
+         color.new(color.rgb(190, 220, 255), 88)
+     )
+
+// @function Get session names
+// @returns Array of 4 session names
+export f_session_names() =>
+    array.from("Asia", "Frankfurt", "London", "NY")
+
+// ==================== SWEEPING DETECTION ====================
+
+// @function Process high/low lines with sweeping detection
+// @param arr Array of HLLine objects
+// @param rng Price range for visibility filtering
+// @param keep_bars Maximum bars to keep lines
+// @param lock_to_live Whether to lock line end to current bar
+// @returns 0 (for chaining)
+export f_process_hl(HLLine[] arr, float rng, int keep_bars, bool lock_to_live) =>
+    int n = array.size(arr)
+    if n > 0
+        for i = n - 1 to 0
+            HLLine it = array.get(arr, i)
+            bool out_scope = (last_bar_index - it.startBar) > keep_bars
+            if out_scope
+                if not na(it.ln)
+                    line.delete(it.ln)
+                if not na(it.lb)
+                    label.delete(it.lb)
+                array.remove(arr, i)
+            else
+                bool in_rng = math.abs(it.lvl - close) <= rng
+                line.set_color(it.ln, in_rng ? it.col : color.new(it.col, 100))
+                if not na(it.lb)
+                    label.set_y(it.lb, line.get_y1(it.ln))
+                    int _x_safe = lock_to_live ? bar_index : label.get_x(it.lb)
+                    if math.abs(bar_index - _x_safe) > 9000
+                        _x_safe := bar_index
+                    label.set_x(it.lb, _x_safe)
+                bool do_lock = lock_to_live and not it.swept
+                if do_lock
+                    line.set_extend(it.ln, extend.none)
+                    int _x1 = line.get_x1(it.ln)
+                    line.set_x2(it.ln, math.max(bar_index, _x1 + 1))
+                if not it.swept
+                    bool hit = it.isHigh ? (high >= it.lvl) : (low <= it.lvl)
+                    if hit
+                        it.swept := true
+                        array.set(arr, i, it)
+                        line.set_extend(it.ln, extend.none)
+                        line.set_x2(it.ln, bar_index)
+                        if not na(it.lb)
+                            label.set_x(it.lb, bar_index)
+                            if lock_to_live
+                                label.set_text(it.lb, "")
+                    else
+                        if not na(it.lb)
+                            label.set_x(it.lb, do_lock ? bar_index : (bar_index + 5))
+                else
+                    if not na(it.lb)
+                        label.set_x(it.lb, do_lock ? bar_index : (math.abs(bar_index - line.get_x2(it.ln)) > 9000 ? bar_index : line.get_x2(it.ln)))
+    0
+
+// @function Process naked lines (POC/VAH/VAL) with sweeping detection
+// @param arr Array of NakedLine objects
+// @param calc_bars Maximum calculation bars
+// @param bars_per_day Bars per day for scope calculation
+// @param keep_to_day_end Whether to extend to day end
+// @returns 0 (for chaining)
+export f_process_naked_lines(NakedLine[] arr, int calc_bars, int bars_per_day, bool keep_to_day_end) =>
+    int n = array.size(arr)
+    int max_age = calc_bars + bars_per_day
+    if n > 0
+        for idx = n - 1 to 0
+            NakedLine nl = array.get(arr, idx)
+            line l = nl.ln
+            label lb0 = nl.lb
+            bool swept = nl.swept
+            int end_bar = nl.endBar
+            
+            int _x1_age = bar_index - line.get_x1(l)
+            bool out_scope = _x1_age > max_age
+            
+            if out_scope
+                if not na(l)
+                    line.delete(l)
+                if not na(lb0)
+                    label.delete(lb0)
+                array.remove(arr, idx)
+            else
+                float lvl = line.get_y1(l)
+                bool hit = high >= lvl and low <= lvl
+                
+                if swept
+                    int x1 = line.get_x1(l)
+                    int x2 = keep_to_day_end ? end_bar : nl.sweptBar
+                    line.set_x2(l, math.max(x2, x1 + 5))
+                else
+                    int x1 = line.get_x1(l)
+                    int x2 = keep_to_day_end ? end_bar : bar_index
+                    line.set_x2(l, math.max(x2, x1 + 5))
+                    if hit
+                        nl.swept := true
+                        nl.sweptBar := bar_index
+                        array.set(arr, idx, nl)
+                
+                if not na(lb0)
+                    label.set_x(lb0, line.get_x2(l) + 2)
+    0
+
+// ==================== PDH/PDL DETECTION ====================
+
+// @function Detect and create PDH/PDL lines
+// @param pd_hl Array to store HLLine objects
+// @param pdh Previous day high
+// @param pdl Previous day low
+// @param new_day Whether it's a new day
+// @param pd_rng Price range for visibility
+// @param bars_per_day Bars per day
+// @param pdh_color PDH line color
+// @param pdl_color PDL line color
+// @returns 0 (for chaining)
+export f_update_pdhl_lines(HLLine[] pd_hl, float pdh, float pdl, bool new_day, float pd_rng, int bars_per_day, color pdh_color, color pdl_color) =>
+    bool pdh_in_rng = not na(pdh) and math.abs(pdh - close) <= pd_rng
+    bool pdl_in_rng = not na(pdl) and math.abs(pdl - close) <= pd_rng
+    
+    if pdh_in_rng or pdl_in_rng
+        int _nn0 = array.size(pd_hl)
+        if _nn0 > 0
+            for _j = _nn0 - 1 to 0
+                HLLine _it0 = array.get(pd_hl, _j)
+                bool _keep = math.abs(_it0.lvl - close) <= pd_rng
+                if not _keep
+                    if not na(_it0.ln)
+                        line.delete(_it0.ln)
+                    if not na(_it0.lb)
+                        label.delete(_it0.lb)
+                    array.remove(pd_hl, _j)
+        
+        if (new_day or array.size(pd_hl) == 0) and (pdh_in_rng or pdl_in_rng)
+            int _old_n = array.size(pd_hl)
+            if _old_n > 0
+                for _i = _old_n - 1 to 0
+                    HLLine _it = array.get(pd_hl, _i)
+                    if not na(_it.ln)
+                        line.delete(_it.ln)
+                    if not na(_it.lb)
+                        label.delete(_it.lb)
+                    array.remove(pd_hl, _i)
+            
+            int pdh_bar = bar_index
+            int pdl_bar = bar_index
+            int scan_n = math.min(math.min(bars_per_day, bar_index), 700)
+            
+            for i = 1 to scan_n
+                if high[i] == pdh
+                    pdh_bar := bar_index - i
+                    break
+            for i = 1 to scan_n
+                if low[i] == pdl
+                    pdl_bar := bar_index - i
+                    break
+            
+            if pdh_in_rng
+                line new_pdh = line.new(pdh_bar, pdh, bar_index, pdh, extend=extend.none, color=pdh_color, width=1, force_overlay=true)
+                label lb_h = label.new(bar_index, pdh, "PDH", style=label.style_label_left, color=color.new(color.white, 100), textcolor=pdh_color, size=size.tiny, force_overlay=true)
+                array.push(pd_hl, HLLine.new(new_pdh, lb_h, pdh, pdh_bar, false, true, pdh_color))
+            
+            if pdl_in_rng
+                line new_pdl = line.new(pdl_bar, pdl, bar_index, pdl, extend=extend.none, color=pdl_color, width=1, force_overlay=true)
+                label lb_l = label.new(bar_index, pdl, "PDL", style=label.style_label_left, color=color.new(color.white, 100), textcolor=pdl_color, size=size.tiny, force_overlay=true)
+                array.push(pd_hl, HLLine.new(new_pdl, lb_l, pdl, pdl_bar, false, false, pdl_color))
+
+        f_process_hl(pd_hl, pd_rng, 1000000, true)
+    0
+
+// ==================== VOLUME PROFILE UTILITIES ====================
+
+// @function Calculate POC from sorted keys and values
+// @param keys Sorted array of row keys
+// @param vals Array of volume values
+// @returns POC row key
+export f_poc_from_vals(int[] keys, float[] vals) =>
+    int poc_key = na
+    float best = 0.0
+    int n = math.min(array.size(keys), array.size(vals))
+    for i = 0 to n - 1
+        float v = array.get(vals, i)
+        if v > best
+            best := v
+            poc_key := array.get(keys, i)
+    poc_key
+
+// @function Calculate Value Area from volume distribution
+// @param keys Sorted array of row keys
+// @param vals Array of volume values
+// @param poc_key POC row key
+// @param va_pct Value Area percentage (typically 0.70)
+// @returns Tuple of [VAL_key, VAH_key]
+export f_value_area(int[] keys, float[] vals, int poc_key, float va_pct) =>
+    int n = math.min(array.size(keys), array.size(vals))
+    float total_vol = 0.0
+    for i = 0 to n - 1
+        total_vol += array.get(vals, i)
+    
+    float target_vol = total_vol * va_pct
+    float acc_vol = 0.0
+    int poc_idx = -1
+    
+    for i = 0 to n - 1
+        if array.get(keys, i) == poc_key
+            poc_idx := i
+            acc_vol += array.get(vals, i)
+            break
+    
+    if poc_idx < 0
+        [na, na]
+    else
+        int lo_idx = poc_idx
+        int hi_idx = poc_idx
+        
+        while acc_vol < target_vol and (lo_idx > 0 or hi_idx < n - 1)
+            float vol_below = lo_idx > 0 ? array.get(vals, lo_idx - 1) : 0.0
+            float vol_above = hi_idx < n - 1 ? array.get(vals, hi_idx + 1) : 0.0
+            
+            if vol_below >= vol_above and lo_idx > 0
+                lo_idx -= 1
+                acc_vol += vol_below
+            else if hi_idx < n - 1
+                hi_idx += 1
+                acc_vol += vol_above
+            else if lo_idx > 0
+                lo_idx -= 1
+                acc_vol += vol_below
+            else
+                break
+        
+        int val_key = array.get(keys, lo_idx)
+        int vah_key = array.get(keys, hi_idx)
+        [val_key, vah_key]
+
+// @function Find key in sorted array using binary search
+// @param keys Sorted array of keys
+// @param target Target key to find
+// @returns Index of key, or -1 if not found
+export f_find_key_sorted(int[] keys, int target) =>
+    int n = array.size(keys)
+    int out = -1
+    if n > 0
+        int lo = 0
+        int hi = n - 1
+        while lo <= hi
+            int mid = int((lo + hi) / 2)
+            int k = array.get(keys, mid)
+            if k == target
+                out := mid
+                break
+            else if k < target
+                lo := mid + 1
+            else
+                hi := mid - 1
+    out
+
+// @function Safe z-score calculation using built-in functions
+// @param x Input series
+// @param len Lookback length
+// @returns Z-score
+export f_zscore_safe(float x, int len) =>
+    int n = math.max(2, len)
+    float mu = ta.sma(x, n)
+    float sd = ta.stdev(x, n)
+    (not na(mu) and not na(sd) and sd != 0.0) ? ((x - mu) / sd) : na

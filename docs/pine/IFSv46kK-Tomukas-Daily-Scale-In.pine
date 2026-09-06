@@ -1,0 +1,162 @@
+//@version=6
+strategy("Tomukas Sweep Reclaim Scale-In Strategy", overlay=true, pyramiding=5, process_orders_on_close=true, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// INPUTS
+leftBars = input.int(8, "Swing Left", minval=1)
+rightBars = input.int(8, "Swing Right", minval=1)
+atrLen = input.int(14, "ATR Length")
+
+minSweepATR = input.float(0.05, "Min Sweep ATR", step=0.01)
+maxSweepATR = input.float(0.80, "Max Sweep ATR", step=0.01)
+
+reclaimBars = input.int(3, "Reclaim Window Bars", minval=0)
+closeBufferATR = input.float(0.02, "Reclaim Close Buffer ATR", step=0.01)
+minCloseLocation = input.float(0.60, "Min Close Location", step=0.05)
+minBodyATR = input.float(0.05, "Min Body ATR", step=0.01)
+
+useEMA = input.bool(true, "Use EMA200 Bias")
+emaLen = input.int(200, "EMA Length")
+
+tpPct = input.float(0.40, "Take Profit Fixed % From Average", step=0.05)
+scaleStepPct = input.float(0.30, "Scale-In Step Fixed %", step=0.05)
+
+q1 = input.float(10, "Entry 1 % Equity")
+q2 = input.float(10, "Entry 2 % Equity")
+q3 = input.float(20, "Entry 3 % Equity")
+q4 = input.float(40, "Entry 4 % Equity")
+q5 = input.float(80, "Entry 5 % Equity")
+
+closeOnOpposite = input.bool(true, "Close On Opposite Signal")
+
+// CORE
+atr = ta.atr(atrLen)
+safeATR = math.max(nz(atr), syminfo.mintick)
+ema = ta.ema(close, emaLen)
+
+bullBias = not useEMA or close > ema
+bearBias = not useEMA or close < ema
+
+bodyATR = math.abs(close - open) / safeATR
+barRange = math.max(high - low, syminfo.mintick)
+bullCloseLocation = (close - low) / barRange
+bearCloseLocation = (high - close) / barRange
+
+// SWING LEVELS
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low, leftBars, rightBars)
+
+var float swingHigh = na
+var float swingLow = na
+var int swingHighBar = na
+var int swingLowBar = na
+
+var bool highSwept = false
+var bool lowSwept = false
+var int highSweepBar = na
+var int lowSweepBar = na
+var float highSweepLevel = na
+var float lowSweepLevel = na
+
+if not na(ph)
+    swingHigh := ph
+    swingHighBar := bar_index - rightBars
+    highSwept := false
+
+if not na(pl)
+    swingLow := pl
+    swingLowBar := bar_index - rightBars
+    lowSwept := false
+
+// SWEEP DETECTION
+highSweepDepth = not na(swingHigh) ? (high - swingHigh) / safeATR : na
+lowSweepDepth = not na(swingLow) ? (swingLow - low) / safeATR : na
+
+newHighSweep = not na(swingHigh) and not highSwept and bar_index > swingHighBar and high > swingHigh and highSweepDepth >= minSweepATR and highSweepDepth <= maxSweepATR
+newLowSweep = not na(swingLow) and not lowSwept and bar_index > swingLowBar and low < swingLow and lowSweepDepth >= minSweepATR and lowSweepDepth <= maxSweepATR
+
+if newHighSweep
+    highSwept := true
+    highSweepBar := bar_index
+    highSweepLevel := swingHigh
+
+if newLowSweep
+    lowSwept := true
+    lowSweepBar := bar_index
+    lowSweepLevel := swingLow
+
+// RECLAIM SIGNALS
+sellReclaim = highSwept and not na(highSweepBar) and bar_index - highSweepBar <= reclaimBars and close < highSweepLevel - safeATR * closeBufferATR and bearCloseLocation >= minCloseLocation and bodyATR >= minBodyATR and bearBias
+buyReclaim = lowSwept and not na(lowSweepBar) and bar_index - lowSweepBar <= reclaimBars and close > lowSweepLevel + safeATR * closeBufferATR and bullCloseLocation >= minCloseLocation and bodyATR >= minBodyATR and bullBias
+
+if sellReclaim
+    highSwept := false
+
+if buyReclaim
+    lowSwept := false
+
+if sellReclaim and buyReclaim
+    sellReclaim := false
+    buyReclaim := false
+
+// POSITION SIZE
+f_qty(pct) =>
+    (strategy.equity * pct / 100.0) / close
+
+f_scaleQty(stage) =>
+    stage == 1 ? q1 : stage == 2 ? q2 : stage == 3 ? q3 : stage == 4 ? q4 : q5
+
+// SCALE ENGINE
+var int scaleStage = 0
+var float baseEntry = na
+var int tradeDir = 0
+
+flat = strategy.position_size == 0
+
+if flat
+    scaleStage := 0
+    baseEntry := na
+    tradeDir := 0
+
+// MAIN ENTRIES
+if buyReclaim and (flat or strategy.position_size < 0)
+    if strategy.position_size < 0 and closeOnOpposite
+        strategy.close_all(comment="Close Short")
+    strategy.entry("L1", strategy.long, qty=f_qty(q1))
+    baseEntry := close
+    scaleStage := 1
+    tradeDir := 1
+
+if sellReclaim and (flat or strategy.position_size > 0)
+    if strategy.position_size > 0 and closeOnOpposite
+        strategy.close_all(comment="Close Long")
+    strategy.entry("S1", strategy.short, qty=f_qty(q1))
+    baseEntry := close
+    scaleStage := 1
+    tradeDir := -1
+
+// SCALE-IN ADDS
+if strategy.position_size > 0 and tradeDir == 1 and scaleStage > 0 and scaleStage < 5
+    nextAddPriceLong = baseEntry * (1 - scaleStepPct * scaleStage / 100)
+    if low <= nextAddPriceLong
+        scaleStage += 1
+        strategy.entry("L" + str.tostring(scaleStage), strategy.long, qty=f_qty(f_scaleQty(scaleStage)))
+
+if strategy.position_size < 0 and tradeDir == -1 and scaleStage > 0 and scaleStage < 5
+    nextAddPriceShort = baseEntry * (1 + scaleStepPct * scaleStage / 100)
+    if high >= nextAddPriceShort
+        scaleStage += 1
+        strategy.entry("S" + str.tostring(scaleStage), strategy.short, qty=f_qty(f_scaleQty(scaleStage)))
+
+// FIXED % TAKE PROFIT FROM AVERAGE
+longTP = strategy.position_avg_price * (1 + tpPct / 100)
+shortTP = strategy.position_avg_price * (1 - tpPct / 100)
+
+if strategy.position_size > 0 and high >= longTP
+    strategy.close_all(comment="TP Long")
+
+if strategy.position_size < 0 and low <= shortTP
+    strategy.close_all(comment="TP Short")
+
+// ALERTS
+alertcondition(buyReclaim, "BUY RECLAIM", "Tomukas BUY Sweep Reclaim")
+alertcondition(sellReclaim, "SELL RECLAIM", "Tomukas SELL Sweep Reclaim")

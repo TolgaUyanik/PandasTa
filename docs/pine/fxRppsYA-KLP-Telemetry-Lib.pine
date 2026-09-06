@@ -1,0 +1,200 @@
+//@version=6
+library("KLP_Telemetry_Lib", overlay=false)
+// ═══════════════════════════════════════════════════════════════════════════════
+// KLP Telemetry Library — v3.0
+//
+// Hosts the AFZT_KLP webhook payload string builders, extracted from the main
+// indicator (Key Levels Pro Ai) to free Pine token budget (CE10117).
+// Libraries have their own separate compile budget; moving heavy pure
+// functions here lets the indicator stay under its own limit.
+//
+// Import in the indicator (bump the version number after each TV republish):
+//   import ragstotrading/KLP_Telemetry_Lib/2 as klp_lib
+//
+// v3.0 (2026-06-19, mirrors QT v3.9.0 KLP-RSI work):
+//   + rsi_rev_pts()  — unified RSI reversal confluence (-2..+2), moved here to
+//     free main-script tokens (CE10117). build_payload() gains rsi_x100 (ML
+//     feature #28). Import bumped /2 -> /3.
+// v2.0 (2026-06-10, mirrors QT v3.7.0 KLP-PATH-POST-TP1.1):
+//   + path_payload()     — AFZT_KLP_PATH 11-field string (moved from the
+//                          indicator's _emit_path_event; alert() stays in the
+//                          indicator since libraries cannot fire alerts)
+//   + shadow_payload()   — AFZT_KLP_SHADOW 14-field string (moved from
+//                          _emit_shadow_event, same reasoning)
+//   + post_tp1_payload() — POST_TP1_STATS 13-field string (NEW event: post-TP1
+//                          MFE/MAE telemetry for the BE5/6 R-buffer policy
+//                          simulator; server v17.61 ingests fields 12-13)
+//   Field order parity with QT v3.7.0 is byte-exact — r_x100 slot carries
+//   MFE, bars slot carries bars-to-MFE, trailing two fields carry MAE +
+//   bars-to-MAE. Built-ins (syminfo.ticker / timeframe.period / time)
+//   evaluate in the importing script's chart context.
+//
+// v1.0 (2026-05-13): build_payload() — AFZT_KLP candidate JSON. Renamed from
+// the prior telemetry library on 2026-05-14 for TradingView House Rules
+// compliance and re-published as a new TV library — the prior publication
+// could not be updated in place.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// AFZT_KLP_PATH payload builder (11 fields). Pure string builder — the
+// indicator fires the alert. event_ts_ms = int(time) — the bar's open epoch
+// ms, accurate at bar-close per the alert.freq_once_per_bar_close gate at
+// the call site.
+export path_payload(string ev_type, int r_val, int bars, int ts_ms, int dir, string acct) =>
+    "AFZT_KLP_PATH|" + syminfo.ticker + "|" + timeframe.period + "|" + str.tostring(ts_ms) + "|" + str.tostring(dir) + "|" + ev_type + "|" + str.tostring(r_val) + "|" + str.tostring(bars) + "|0|" + acct + "|" + str.tostring(int(time))
+
+// AFZT_KLP_SHADOW payload builder (14 fields incl. MAE/MFE Phase-0 tail).
+// No bar_idx field — schema difference vs PATH is intentional (server parser).
+export shadow_payload(int outcome, int r_val, int bars, int ts_ms, int dir, string acct, int mae_x100, int mfe_x100, int bars_to_mfe, int bars_to_mae) =>
+    "AFZT_KLP_SHADOW|" + syminfo.ticker + "|" + timeframe.period + "|" + str.tostring(ts_ms) + "|" + str.tostring(dir) + "|" + str.tostring(outcome) + "|" + str.tostring(r_val) + "|" + str.tostring(bars) + "|" + acct + "|" + str.tostring(int(time)) + "|" + str.tostring(mae_x100) + "|" + str.tostring(mfe_x100) + "|" + str.tostring(bars_to_mfe) + "|" + str.tostring(bars_to_mae)
+
+// POST_TP1_STATS payload builder (13 fields). Extends the standard PATH
+// schema: r_x100 slot = post-TP1 max MFE, bars slot = bars from TP1 to MFE,
+// trailing fields 12-13 = post-TP1 max MAE + bars from TP1 to MAE. Emitted
+// once at shadow close when TP1 was hit. QT v3.7.0 emits the identical shape.
+export post_tp1_payload(int ts_ms, int dir, string acct, int mfe_x100, int mfe_bars, int mae_x100, int mae_bars) =>
+    "AFZT_KLP_PATH|" + syminfo.ticker + "|" + timeframe.period + "|" + str.tostring(ts_ms) + "|" + str.tostring(dir) + "|POST_TP1_STATS|" + str.tostring(mfe_x100) + "|" + str.tostring(mfe_bars) + "|0|" + acct + "|" + str.tostring(int(time)) + "|" + str.tostring(mae_x100) + "|" + str.tostring(mae_bars)
+
+
+// KLP-RSI-REV-CONF.1 / KLP-RSI-REV-NEG.1 (v3): unified RSI reversal confluence.
+// Most-recent extreme (oversold <=30 long / overbought >=70 short): bar
+// [0]/[1] -> +2, [2]/[3] -> +1, [4]/[5] -> -1, none in [0..5] -> -2. na -> 0.
+// Lives in the lib so the cascade's comparisons don't count against main's
+// CE10117 token budget.
+export rsi_rev_pts(series float rsi, simple bool is_long) =>
+    float r0 = nz(rsi, 50.0)
+    float r1 = nz(rsi[1], 50.0)
+    float r2 = nz(rsi[2], 50.0)
+    float r3 = nz(rsi[3], 50.0)
+    float r4 = nz(rsi[4], 50.0)
+    float r5 = nz(rsi[5], 50.0)
+    na(rsi) ? 0 : is_long ? ((r0 <= 30 or r1 <= 30) ? 2 : (r2 <= 30 or r3 <= 30) ? 1 : (r4 <= 30 or r5 <= 30) ? -1 : -2) : ((r0 >= 70 or r1 >= 70) ? 2 : (r2 >= 70 or r3 >= 70) ? 1 : (r4 >= 70 or r5 >= 70) ? -1 : -2)
+
+// AFZT_KLP webhook payload builder. Pure function — all values passed as
+// parameters. Returns a single string in the format "AFZT_KLP|{json}" that
+// the server parses via json.loads on the trailing JSON object.
+export build_payload(
+     string sym,
+     string tf,
+     int    dir,
+     string fam,
+     string sub,
+     int    bt,
+     string loc,
+     string ichi_st,
+     float  ichi_wr,
+     bool   vwap_c,
+     bool   lvn_p,
+     bool   ilvn,
+     bool   hvn_p,
+     bool   sb,
+     float  wick_p,
+     float  body_p,
+     float  close_l,
+     float  dist_kl,
+     float  dist_vw,
+     float  entry,
+     float  stop,
+     float  tp1,
+     float  tp2,
+     int    rticks,
+     string qtag,
+     int    ts_ms,
+     string acct,
+     // qheur removed in v1.0 — legacy unused param (CE10237 in library compiler).
+     bool   zdz,
+     bool   zsz,
+     int    qlvl,
+     int    shlb,
+     int    spmx,
+     int    a5tk,
+     string sess_src,
+     string active_sess,
+     string family_name,
+     string manual_sess,
+     int    auto_switched,
+     string stop_meth,
+     int    atr15tk,
+     int    atr2tk,
+     int    atr25tk,
+     int    sw_stop_tk,
+     int    vol_reg,
+     int    tp_cnt,
+     string be_rule,
+     // v4.71 KLP-ML.3C: 9 component telemetry fields.
+     int    raw_conf,
+     int    kl_match_count,
+     string kl_match_names_json,
+     bool   vwap_aligned,
+     bool   poc_magnet,
+     int    poc_dist_r_x100,
+     bool   ichi_at_break,
+     bool   hvn_break_thru,
+     string cont_path,
+     // v5.0.2 KLP-REV-ZONE-EXMPT.1: zone-touch exemption telemetry.
+     bool   zone_exempt_used,
+     int    rsi_x100) =>
+    string _p = "AFZT_KLP|{"
+    _p := _p + "\"symbol\":\"" + sym + "\","
+    _p := _p + "\"timeframe\":\"" + tf + "\","
+    _p := _p + "\"direction\":\"" + (dir == 1 ? "BUY" : "SELL") + "\","
+    _p := _p + "\"signal_family\":\"" + fam + "\","
+    _p := _p + "\"signal_subtype\":\"" + sub + "\","
+    _p := _p + "\"base_type\":" + str.tostring(bt) + ","
+    _p := _p + "\"location_type\":\"" + loc + "\","
+    _p := _p + "\"ichi_state\":\"" + ichi_st + "\","
+    _p := _p + "\"ichi_width_x100\":" + str.tostring(math.round(ichi_wr * 100)) + ","
+    _p := _p + "\"vwap_confluence\":" + (vwap_c ? "1" : "0") + ","
+    _p := _p + "\"lvn_present\":" + (lvn_p ? "1" : "0") + ","
+    _p := _p + "\"inside_lvn\":" + (ilvn ? "1" : "0") + ","
+    _p := _p + "\"hvn_present\":" + (hvn_p ? "1" : "0") + ","
+    _p := _p + "\"session_bounce_prior\":" + (sb ? "1" : "0") + ","
+    _p := _p + "\"wick_pct_x100\":" + str.tostring(math.round(wick_p * 100)) + ","
+    _p := _p + "\"body_pct_x100\":" + str.tostring(math.round(body_p * 100)) + ","
+    _p := _p + "\"close_loc_x100\":" + str.tostring(math.round(close_l * 100)) + ","
+    _p := _p + "\"dist_to_key_level_ticks\":" + (not na(dist_kl) ? str.tostring(math.round(dist_kl)) : "null") + ","
+    _p := _p + "\"dist_to_vwap_ticks\":" + (not na(dist_vw) ? str.tostring(math.round(dist_vw)) : "null") + ","
+    _p := _p + "\"entry_price\":" + str.tostring(entry, format.mintick) + ","
+    _p := _p + "\"stop_price\":" + str.tostring(stop, format.mintick) + ","
+    _p := _p + "\"tp1_price\":" + (not na(tp1) ? str.tostring(tp1, format.mintick) : "null") + ","
+    _p := _p + "\"tp2_price\":" + (not na(tp2) ? str.tostring(tp2, format.mintick) : "null") + ","
+    _p := _p + "\"risk_ticks\":" + str.tostring(rticks) + ","
+    _p := _p + "\"quality_tag\":\"" + qtag + "\","
+    _p := _p + "\"ts_ms\":" + str.tostring(ts_ms) + ","
+    _p := _p + "\"account_tag\":\"" + acct + "\","
+    _p := _p + "\"zone_demand_overlap\":"  + (zdz ? "1" : "0") + ","
+    _p := _p + "\"zone_supply_overlap\":"  + (zsz ? "1" : "0") + ","
+    _p := _p + "\"quality_score\":"    + str.tostring(qlvl)  + ","
+    _p := _p + "\"shift_lookback\":"   + str.tostring(shlb)  + ","
+    _p := _p + "\"spike_mult_x10\":"   + str.tostring(spmx)  + ","
+    _p := _p + "\"atr5_ticks\":"       + str.tostring(a5tk)  + ","
+    _p := _p + "\"session_source_mode\":\"" + sess_src      + "\","
+    _p := _p + "\"active_session_name\":\"" + active_sess   + "\","
+    _p := _p + "\"session_family_name\":\"" + family_name   + "\","
+    _p := _p + "\"manual_session_name\":\"" + manual_sess   + "\","
+    _p := _p + "\"session_auto_switched\":" + str.tostring(auto_switched) + ","
+    _p := _p + "\"stop_method\":\"" + stop_meth + "\","
+    _p := _p + "\"atr_1_5x_ticks\":" + str.tostring(atr15tk) + ","
+    _p := _p + "\"atr_2x_ticks\":" + str.tostring(atr2tk) + ","
+    _p := _p + "\"atr_2_5x_ticks\":" + str.tostring(atr25tk) + ","
+    _p := _p + "\"swing_stop_ticks\":" + str.tostring(sw_stop_tk) + ","
+    _p := _p + "\"volatility_regime\":" + str.tostring(vol_reg) + ","
+    _p := _p + "\"source_platform\":\"TV\","
+    _p := _p + "\"tp_count\":" + str.tostring(tp_cnt) + ","
+    _p := _p + "\"be_default_rule\":\"" + be_rule + "\","
+    _p := _p + "\"raw_conf\":"        + str.tostring(raw_conf)        + ","
+    _p := _p + "\"kl_match_count\":"  + str.tostring(kl_match_count)  + ","
+    _p := _p + "\"kl_match_names\":"  + kl_match_names_json           + ","
+    _p := _p + "\"vwap_aligned\":"    + (vwap_aligned   ? "1" : "0")  + ","
+    _p := _p + "\"poc_magnet\":"      + (poc_magnet     ? "1" : "0")  + ","
+    _p := _p + "\"poc_dist_r_x100\":" + (not na(poc_dist_r_x100) ? str.tostring(poc_dist_r_x100) : "null") + ","
+    _p := _p + "\"ichi_at_break\":"   + (ichi_at_break  ? "1" : "0")  + ","
+    _p := _p + "\"hvn_break_thru\":"  + (hvn_break_thru ? "1" : "0")  + ","
+    _p := _p + "\"cont_path\":"       + (cont_path == "" ? "null" : "\"" + cont_path + "\"") + ","
+    _p := _p + "\"rsi_x100\":" + str.tostring(rsi_x100) + ","
+    _p := _p + "\"zone_exemption_used\":" + (zone_exempt_used ? "1" : "0") + "}"
+    _p
+
+
+// Pine library publish requires at least one demo plot/output. Hidden no-op
+// plot so the library compiles cleanly without affecting any importer's chart.
+plot(na, "lib_init", display=display.none)

@@ -1,0 +1,462 @@
+//@version=6
+// @description Thư viện FlowStateEngine - Phân tích Dòng tiền Đa tầng
+library("FlowStateEngine", overlay=true)
+
+// =====================================================================
+// HẠNG MỤC 1: KHAI BÁO CƠ SỞ HẠ TẦNG (USER-DEFINED TYPES - UDTs)
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// 1. Chiếc hộp Vĩ mô & Bối cảnh (Macro Context)
+// ---------------------------------------------------------------------
+export type MacroContext
+    float dxy_correlation       // Hệ số tương quan với DXY (-1.0 đến 1.0)
+    float spx_correlation       // Hệ số tương quan với S&P 500
+    string risk_regime          // Trạng thái: "Risk-On", "Risk-Off", "Neutral"
+    bool is_killzone            // True nếu đang trong giờ giao thoa phiên có thanh khoản cao
+
+// ---------------------------------------------------------------------
+// 2. Chiếc hộp Cấu trúc & Năng lượng (Market Structure)
+// ---------------------------------------------------------------------
+export type MarketStructure
+    string trend                // Xu hướng hiện tại: "Bullish", "Bearish", "Ranging"
+    float atr_value             // Giá trị ATR hiện tại (để tính Stop-loss)
+    string atr_regime           // Trạng thái biến động: "Expansion" (Nổ), "Compression" (Nén)
+    bool is_msb                 // True nếu vừa xảy ra Market Structure Break (Phá vỡ cấu trúc)
+
+// ---------------------------------------------------------------------
+// 3. Chiếc hộp Vùng giá trị (Value Zone)
+// ---------------------------------------------------------------------
+export type ValueZone
+    float vwap_anchor           // Mức giá trung tâm (Mean)
+    float upper_band_2sd        
+    float lower_band_2sd        
+    float upper_band_3sd        
+    float lower_band_3sd        
+    float true_poc              // True Point of Control
+    float vah                   
+    float val                   
+    bool is_in_void             // True nếu lọt vào Vùng rỗng
+    float liq_short_50x         // [MỚI]: Điểm quét thanh lý Short đòn bẩy 50x
+    float liq_short_25x         // [MỚI]: Điểm quét thanh lý Short đòn bẩy 25x
+    float liq_long_50x          // [MỚI]: Điểm quét thanh lý Long đòn bẩy 50x
+    float liq_long_25x          // [MỚI]: Điểm quét thanh lý Long đòn bẩy 25x
+
+// ---------------------------------------------------------------------
+// 4. Chiếc hộp Dòng tiền Phái sinh (Derivative Flow)
+// ---------------------------------------------------------------------
+export type DerivativeFlow
+    float oi_delta_percent      // % thay đổi của Open Interest
+    string oi_regime            // Trạng thái: "Long Build", "Short Squeeze", "Distribution"...
+    float funding_rate          // Giá trị Funding Rate (Đã làm mượt)
+    string funding_status       // "Overheated" (Nóng), "Negative" (Âm), "Neutral" (Bình thường)
+    float cvd_proxy             // Giá trị CVD lũy kế
+    float current_delta         // Delta chủ động của nến hiện tại để làm Trigger
+    float norm_oi               // [MỚI]: OI chuẩn hóa (0-100) để đo lường cực trị
+    float oi_velocity           // [MỚI]: Vận tốc OI (Đã làm mượt) để bắt phân kỳ
+
+// ---------------------------------------------------------------------
+// 5. Chiếc hộp Tín hiệu Tổng hợp (Master Signal / Scoring)
+// ---------------------------------------------------------------------
+export type FlowStateResult
+    int total_score             // Điểm số hợp lưu từ 0 - 100
+    string final_signal         // Lệnh thực thi: "Strong Buy", "Weak Sell", "Neutral"...
+    color signal_color          // Màu sắc để Script chính lấy ra vẽ Dashboard
+    bool is_valid_trade         // True nếu vượt qua các bộ lọc Vùng xám/Bẫy thanh khoản
+
+// ---------------------------------------------------------------------
+// 6. THÙNG CHỨA TỔNG (THE MASTER CONTAINER)
+// ---------------------------------------------------------------------
+// Đây là kiến trúc cấp cao nhất: Một UDT chứa các UDT khác bên trong.
+// Khi Script chính gọi hàm phân tích, Library chỉ cần trả về DUY NHẤT một object MasterData này.
+export type MasterData
+    MacroContext macro
+    MarketStructure structure
+    ValueZone value
+    DerivativeFlow flow
+    FlowStateResult result
+	
+// =====================================================================
+// MODULE 1: MACRO CONTEXT (XỬ LÝ DỮ LIỆU VĨ MÔ)
+// =====================================================================
+
+// Hàm export xử lý toàn bộ logic vĩ mô
+export get_macro_context(float btc_close, float dxy_close, float spx_close, int corr_length, float dxy_sma50, float spx_sma50) =>
+    
+    // 1. Tính toán hệ số tương quan (Pearson)
+    float corr_dxy = ta.correlation(btc_close, dxy_close, corr_length)
+    float corr_spx = ta.correlation(btc_close, spx_close, corr_length)
+    
+    // 2. Phân tích trạng thái rủi ro (Risk Regime)
+    string current_regime = "Neutral"
+    bool dxy_bearish = dxy_close < dxy_sma50
+    bool spx_bullish = spx_close > spx_sma50
+    
+    if dxy_bearish and spx_bullish
+        current_regime := "Risk-On"
+    else if not dxy_bearish and not spx_bullish
+        current_regime := "Risk-Off"
+        
+    // 3. Xác định Giờ G (Killzones) theo UTC
+    int current_hour = hour(time, "UTC")
+    bool london_kz   = (current_hour >= 7 and current_hour <= 10)
+    bool ny_kz       = (current_hour >= 12 and current_hour <= 15)
+    bool asia_kz     = (current_hour >= 23 or current_hour <= 2)
+    bool in_killzone = london_kz or ny_kz or asia_kz
+    
+    // 4. Đóng gói vào UDT MacroContext và trả về kết quả
+    MacroContext.new(corr_dxy, corr_spx, current_regime, in_killzone)
+	
+// =====================================================================
+// MODULE 2: MARKET STRUCTURE & VOLATILITY (CẤU TRÚC VÀ NĂNG LƯỢNG)
+// =====================================================================
+
+// Hàm export xử lý logic cấu trúc và ATR
+export get_market_structure(float src_high, float src_low, float src_close, int pivot_left, int pivot_right, int atr_length) =>
+    
+    // -----------------------------------------------------------------
+    // 1. Tính toán ATR & Trạng thái năng lượng (Volatility Regime)
+    // -----------------------------------------------------------------
+    float current_atr = ta.atr(atr_length)
+    float atr_sma = ta.sma(current_atr, atr_length * 2) // Đường trung bình của ATR
+    
+    string atr_status = "Compression"
+    if current_atr > atr_sma
+        atr_status := "Expansion"
+        
+    // -----------------------------------------------------------------
+    // 2. Thuật toán tìm Pivot (Swing High / Swing Low)
+    // -----------------------------------------------------------------
+    float ph = ta.pivothigh(src_high, pivot_left, pivot_right)
+    float pl = ta.pivotlow(src_low, pivot_left, pivot_right)
+    
+    // Sử dụng 'var' để lưu trữ các đỉnh đáy vĩnh viễn qua các nến
+    var float last_ph = na
+    var float last_pl = na
+    var string current_trend = "Ranging"
+    
+    // Cập nhật Đỉnh/Đáy mới nhất khi phát hiện
+    if not na(ph)
+        last_ph := ph
+    if not na(pl)
+        last_pl := pl
+        
+    // -----------------------------------------------------------------
+    // 3. Logic Market Structure Break (MSB)
+    // -----------------------------------------------------------------
+    bool msb_occurred = false
+    
+    // Phát hiện phá vỡ Đỉnh (Bullish MSB)
+    if not na(last_ph) and src_close > last_ph and current_trend != "Bullish"
+        current_trend := "Bullish"
+        msb_occurred := true
+        last_ph := na // Xóa mốc đỉnh cũ để chờ lập đỉnh mới, tránh báo MSB lặp lại
+        
+    // Phát hiện phá vỡ Đáy (Bearish MSB)
+    else if not na(last_pl) and src_close < last_pl and current_trend != "Bearish"
+        current_trend := "Bearish"
+        msb_occurred := true
+        last_pl := na // Xóa mốc đáy cũ
+        
+    // -----------------------------------------------------------------
+    // 4. Đóng gói vào UDT MarketStructure và trả về
+    // -----------------------------------------------------------------
+    MarketStructure.new(current_trend, current_atr, atr_status, msb_occurred)
+	
+// =====================================================================
+// MODULE 3: VALUE ZONE (AVWAP & ARRAY VOLUME PROFILE)
+// =====================================================================
+
+// Hàm export tính toán vùng giá trị và phân bổ thanh khoản theo mảng (Array)
+export get_value_zone(bool is_anchor_reset, float src_price, float vol, float step_size) =>
+    
+    // -----------------------------------------------------------------
+    // PHẦN A: TOÁN HỌC AVWAP & ĐỘ LỆCH CHUẨN (Phương sai 1 lượt)
+    // -----------------------------------------------------------------
+    var float cum_vol = 0.0          
+    var float cum_src_vol = 0.0      
+    var float cum_src2_vol = 0.0     
+    
+    // -----------------------------------------------------------------
+    // PHẦN B: ARRAY VOLUME PROFILE (Hệ thống chia hộp Binning)
+    // -----------------------------------------------------------------
+    var array<float> price_bins = array.new<float>()
+    var array<float> vol_bins = array.new<float>()
+    
+    // Logic Reset khi có Điểm Neo mới
+    if is_anchor_reset
+        cum_vol := 0.0
+        cum_src_vol := 0.0
+        cum_src2_vol := 0.0
+        array.clear(price_bins)
+        array.clear(vol_bins)
+        
+    // Cộng dồn dữ liệu AVWAP
+    cum_vol += vol
+    cum_src_vol += src_price * vol
+    cum_src2_vol += (src_price * src_price) * vol
+
+    // Toán học tính toán VWAP và Phương sai
+    float vwap_value = (cum_vol > 0) ? (cum_src_vol / cum_vol) : src_price
+    float mean_sq = (cum_vol > 0) ? (cum_src2_vol / cum_vol) : (src_price * src_price)
+    float variance = math.max(0, mean_sq - (vwap_value * vwap_value))
+    float stdev = math.sqrt(variance)
+    
+    // Tính các dải biên
+    float up_band_2 = vwap_value + (2 * stdev) 
+    float dn_band_2 = vwap_value - (2 * stdev) 
+    float up_band_3 = vwap_value + (3 * stdev) 
+    float dn_band_3 = vwap_value - (3 * stdev) 
+    
+    // Trong phân phối chuẩn gia quyền khối lượng, 68% Value Area chính xác bằng VWAP +- 1 StdDev
+    float vah_level = vwap_value + stdev
+    float val_level = vwap_value - stdev
+
+    // -----------------------------------------------------------------
+    // PHẦN C: CẬP NHẬT MẢNG THANH KHOẢN & TÌM VÙNG RỖNG (VOID)
+    // -----------------------------------------------------------------
+    // Làm tròn giá hiện tại vào hộp gần nhất (Bảo vệ lỗi chia cho 0)
+    float safe_step = step_size > 0 ? step_size : syminfo.mintick
+    float current_bin = math.round(src_price / safe_step) * safe_step
+    
+    // Tìm xem hộp giá này đã tồn tại trong Mảng chưa
+    int bin_index = array.indexof(price_bins, current_bin)
+    
+    if bin_index == -1
+        // Nếu hộp chưa tồn tại -> Tạo hộp mới
+        array.push(price_bins, current_bin)
+        array.push(vol_bins, vol)
+        bin_index := array.size(price_bins) - 1 // Cập nhật lại index cho hộp vừa tạo
+    else
+        // Nếu hộp đã tồn tại -> Nhồi thêm Volume vào hộp đó
+        float existing_vol = array.get(vol_bins, bin_index)
+        array.set(vol_bins, bin_index, existing_vol + vol)
+        
+    // Tìm True POC (Điểm kiểm soát có Volume cao nhất)
+    float true_poc = src_price
+    int bin_count = array.size(vol_bins)
+    
+    if bin_count > 0
+        // Tìm giá trị Volume lớn nhất trong Mảng bằng hàm C++ tối ưu của Pine
+        float max_vol = array.max(vol_bins)
+        int poc_index = array.indexof(vol_bins, max_vol)
+        if poc_index != -1
+            true_poc := array.get(price_bins, poc_index)
+        // [THÊM MỚI]: Thuật toán dự phóng Bản đồ Thanh lý từ True POC
+		// Dựa trên công thức Margin Call: Price * (1 +/- (1/Leverage))
+	float l_short_50x = true_poc * 1.02
+	float l_short_25x = true_poc * 1.04
+	float l_long_50x = true_poc * 0.98
+	float l_long_25x = true_poc * 0.96    
+		
+    // Thuật toán quét Vùng rỗng thanh khoản (Liquidity Void / Low Volume Node)
+    bool is_in_void = false
+    if bin_count > 10 // Đợi đủ lượng hộp được hình thành mới bắt đầu tính toán
+        // Khối lượng trung bình của 1 hộp = Tổng Khối Lượng / Số lượng hộp
+        float avg_bin_vol = cum_vol / bin_count 
+        float current_bin_vol = array.get(vol_bins, bin_index)
+        
+        // Cảnh báo: Nếu Volume của hộp hiện tại nhỏ hơn 25% mức trung bình -> Rỗng
+        if current_bin_vol < (avg_bin_vol * 0.25)
+            is_in_void := true
+
+// -----------------------------------------------------------------
+    // Đóng gói vào UDT ValueZone và trả về kết quả (Cập nhật tham số)
+    // -----------------------------------------------------------------
+    ValueZone.new(vwap_value, up_band_2, dn_band_2, up_band_3, dn_band_3, true_poc, vah_level, val_level, is_in_void, l_short_50x, l_short_25x, l_long_50x, l_long_25x)
+
+// =====================================================================
+// MODULE 4: DERIVATIVES FLOW (DÒNG TIỀN PHÁI SINH) - BẢN VÁ HOÀN CHỈNH
+// =====================================================================
+export get_derivative_flow(float src_close, float prev_close, float current_oi, float current_funding, float src_open, float src_high, float src_low, float vol, bool is_cvd_reset, array<float> ltf_open, array<float> ltf_close, array<float> ltf_vol, int oi_lookback) =>
+    var array<float> oi_history = array.new<float>()
+    var array<float> fund_history = array.new<float>()
+    var float prev_smoothed_oi = current_oi
+    
+    array.push(oi_history, current_oi)
+    if array.size(oi_history) > oi_lookback
+        array.shift(oi_history)
+        
+    array.push(fund_history, current_funding)
+    if array.size(fund_history) > 5
+        array.shift(fund_history)
+        
+    float oi_high = array.size(oi_history) > 0 ? array.max(oi_history) : current_oi
+    float oi_low = array.size(oi_history) > 0 ? array.min(oi_history) : current_oi
+    float norm_oi = (oi_high - oi_low) != 0 ? ((current_oi - oi_low) / (oi_high - oi_low)) * 100 : 50.0
+    
+    float weight = 0.8
+    float total_w = weight + math.pow(weight, 2) + math.pow(weight, 3) + math.pow(weight, 4) + math.pow(weight, 5)
+    
+    float smoothed_fund = current_funding
+    float smoothed_oi = current_oi
+    
+    if array.size(fund_history) == 5
+        smoothed_fund := (array.get(fund_history, 4)*weight + array.get(fund_history, 3)*math.pow(weight, 2) + array.get(fund_history, 2)*math.pow(weight, 3) + array.get(fund_history, 1)*math.pow(weight, 4) + array.get(fund_history, 0)*math.pow(weight, 5)) / total_w
+        int s = array.size(oi_history)
+        if s >= 5
+            smoothed_oi := (array.get(oi_history, s-1)*weight + array.get(oi_history, s-2)*math.pow(weight, 2) + array.get(oi_history, s-3)*math.pow(weight, 3) + array.get(oi_history, s-4)*math.pow(weight, 4) + array.get(oi_history, s-5)*math.pow(weight, 5)) / total_w
+        
+    float oi_velocity = (prev_smoothed_oi > 0) ? ((smoothed_oi - prev_smoothed_oi) / prev_smoothed_oi) * 100 : 0.0
+    prev_smoothed_oi := smoothed_oi
+    
+    float price_delta = src_close - prev_close
+    string oi_regime = "Neutral"
+    
+    if math.abs(oi_velocity) > 0.05
+        if price_delta > 0 and oi_velocity > 0
+            oi_regime := "Long Build"      
+        else if price_delta < 0 and oi_velocity > 0
+            oi_regime := "Short Build"     
+        else if price_delta > 0 and oi_velocity < 0
+            oi_regime := "Short Cover"     
+        else if price_delta < 0 and oi_velocity < 0
+            oi_regime := "Long Liq"        
+
+    string fund_status = "Neutral"
+    if smoothed_fund >= 0.05
+        fund_status := "Overheated"        
+    else if smoothed_fund <= -0.05
+        fund_status := "Negative"          
+        
+    float current_delta = 0.0
+    int ltf_size = array.size(ltf_close)
+    
+    if ltf_size > 0
+        for i = 0 to ltf_size - 1
+            float o_ltf = array.get(ltf_open, i)
+            float c_ltf = array.get(ltf_close, i)
+            float v_ltf = array.get(ltf_vol, i)
+            if c_ltf > o_ltf
+                current_delta += v_ltf
+            else if c_ltf < o_ltf
+                current_delta -= v_ltf
+    else
+        float candle_range = src_high - src_low
+        current_delta := (candle_range > 0) ? vol * ((src_close - src_open) / candle_range) : 0.0
+    
+    var float cum_cvd = 0.0
+    if is_cvd_reset
+        cum_cvd := current_delta
+    else
+        cum_cvd += current_delta
+
+    DerivativeFlow.new(oi_velocity, oi_regime, smoothed_fund, fund_status, cum_cvd, current_delta, norm_oi, oi_velocity)
+
+// =====================================================================
+// MODULE 5: SCORING SYSTEM & MASTER SIGNAL (BỘ NÃO TỔNG HỢP)
+// =====================================================================
+// [CẬP NHẬT]: Thêm tham số 'vol' để tính Z-Score khối lượng
+export get_master_signal(float src_close, float vol, MacroContext macro_ctx, MarketStructure struct_ctx, ValueZone value_ctx, DerivativeFlow flow_ctx) =>
+    
+    // -----------------------------------------------------------------
+    // 0. Thuật toán Z-Score Khối lượng (Phát hiện Spike)
+    // -----------------------------------------------------------------
+    var array<float> vol_history = array.new<float>()
+    array.push(vol_history, vol)
+    if array.size(vol_history) > 200
+        array.shift(vol_history)
+        
+    float vol_avg = array.size(vol_history) > 0 ? array.avg(vol_history) : vol
+    float vol_stdev = array.size(vol_history) > 0 ? array.stdev(vol_history) : 0.0
+    float vol_zscore = (vol_stdev > 0) ? (vol - vol_avg) / vol_stdev : 0.0
+
+    // -----------------------------------------------------------------
+    // 1. Thuật toán Z-Score Giá (Tính độ lệch so với VWAP)
+    // -----------------------------------------------------------------
+    float std_dev = (value_ctx.upper_band_2sd - value_ctx.vwap_anchor) / 2
+    float z_score = (std_dev > 0) ? (src_close - value_ctx.vwap_anchor) / std_dev : 0.0
+    
+    // -----------------------------------------------------------------
+    // 2. Hệ thống chấm điểm trọng số (Scoring System: -100 đến +100)
+    // -----------------------------------------------------------------
+    float macro_score = 0.0
+    float struct_score = 0.0
+    float value_score = 0.0
+    float flow_score = 0.0
+    float trigger_score = 0.0
+    
+    // [15%] BỘ LỌC VĨ MÔ
+    if macro_ctx.risk_regime == "Risk-On"
+        macro_score := 15
+    else if macro_ctx.risk_regime == "Risk-Off"
+        macro_score := -15
+        
+    // [20%] BỘ LỌC CẤU TRÚC
+    if struct_ctx.trend == "Bullish"
+        struct_score := 20
+    else if struct_ctx.trend == "Bearish"
+        struct_score := -20
+        
+    // [25%] BỘ LỌC GIÁ TRỊ 
+    if z_score <= -2.0
+        value_score := 25
+    else if z_score <= -1.0
+        value_score := 10
+    else if z_score >= 2.0
+        value_score := -25
+    else if z_score >= 1.0
+        value_score := -10
+        
+    // [20%] BỘ LỌC DÒNG TIỀN PHÁI SINH
+    if flow_ctx.oi_regime == "Long Build"
+        flow_score := 20
+    else if flow_ctx.oi_regime == "Short Cover"
+        flow_score := 10 
+    else if flow_ctx.oi_regime == "Short Build"
+        flow_score := -20
+    else if flow_ctx.oi_regime == "Long Liq"
+        flow_score := -10
+        
+    // [20%] BỘ LỌC KÍCH HOẠT (TRIGGER & LIQUIDATION TRAP)
+    // Phân tích sự kiện Quét Thanh Lý (Liquidation Sweep)
+    bool is_sweep_short = (src_close >= value_ctx.liq_short_50x or src_close >= value_ctx.liq_short_25x) and vol_zscore >= 3.0
+    bool is_sweep_long = (src_close <= value_ctx.liq_long_50x or src_close <= value_ctx.liq_long_25x) and vol_zscore >= 3.0
+
+    if is_sweep_short and flow_ctx.current_delta < 0
+        // Đỉnh điểm lừa đảo: Giá chạm kháng cự thanh lý, Volume bùng nổ (Z > 3) do Short bị ép cháy lệnh, 
+        // NHƯNG CVD lại âm (Bán chủ động). Đây là Cá Mập đang xả hàng vào thanh khoản của đám đông!
+        trigger_score := -25 
+    else if is_sweep_long and flow_ctx.current_delta > 0
+        // Đáy tuyệt vọng: Giá chạm hỗ trợ thanh lý, Volume bùng nổ do Long bị cháy, 
+        // NHƯNG CVD lại dương (Mua chủ động). Cá mập đang gom hàng!
+        trigger_score := 25
+    else if flow_ctx.current_delta > 0 and flow_ctx.funding_status != "Overheated"
+        trigger_score := 20
+    else if flow_ctx.current_delta < 0 and flow_ctx.funding_status != "Negative"
+        trigger_score := -20
+        
+    // -----------------------------------------------------------------
+    // 3. Xử lý Vùng Xám & Đóng gói Tín Hiệu Cuối
+    // -----------------------------------------------------------------
+    float raw_score = macro_score + struct_score + value_score + flow_score + trigger_score
+    int final_score = math.round(math.abs(raw_score)) 
+    
+    string signal_text = "Neutral"
+    color signal_col = color.gray
+    bool is_valid = false
+    
+    if raw_score >= 80
+        signal_text := "Strong Buy"
+        signal_col := color.green
+        is_valid := true
+    else if raw_score >= 50
+        signal_text := "Weak Buy"
+        signal_col := color.lime
+    else if raw_score <= -80
+        signal_text := "Strong Sell"
+        signal_col := color.red
+        is_valid := true
+    else if raw_score <= -50
+        signal_text := "Weak Sell"
+        signal_col := color.orange
+        
+    // Chặn lệnh nếu lọt vào Liquidity Void (Vùng rỗng)
+    if value_ctx.is_in_void
+        is_valid := false
+        
+    if macro_ctx.is_killzone and final_score < 90
+        is_valid := false
+        
+    FlowStateResult result = FlowStateResult.new(final_score, signal_text, signal_col, is_valid)
+    MasterData.new(macro_ctx, struct_ctx, value_ctx, flow_ctx, result)

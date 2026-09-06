@@ -1,0 +1,843 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © GoemonYae
+//@version=6
+
+// @description Auxiliary functions for transforming data using mathematical and statistical methods
+library("MathTransform")
+
+const int VERSION = 6
+
+import GoemonYae/ColourUtilities/8 as cu
+
+// INCLUDES:
+// * Utility Functions
+// * Scalers
+// * Non-Linear transformations
+// * Error/Loss metrics
+// * Statistical Functions
+// * Combinatorial Functions
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  CONSTANTS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+const float EPSILON = 1e-9  // Must be ≤9 fractional digits; comparison operators round to 9 digits
+const float PHI = 1.618033988749895  // ( 1 + math.sqrt(5) ) / 2
+const float SQRT2 = 1.4142135623730951  
+const float PI = 3.141592653589793
+const float E = 2.718281828459045
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  HELPER FUNCTIONS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+//
+// * _apply_moving_average
+//
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    Processes a metric, e.g. absolute error with an SMA (default) or EMA in given lookback window.
+// @param x                     <float> Input value to be transformed
+// @param lookback_window       <int> The period over which the metric is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculation.
+// @returns                     <float> Transformed error value
+_apply_moving_average(float x, int lookback_window, bool use_ema=false) =>
+    float result = na
+    if lookback_window < 1
+        runtime.error("The `lookback_window` in the calculation must be greater than or equal to 1.")
+        result := na
+    else if use_ema
+        alpha = 2.0 / (lookback_window + 1)
+        var float ema = na
+        ema := alpha * x + (1.0 - alpha) * nz(ema[1], x)
+        result := ema
+    else
+        result := ta.sma(x, lookback_window)
+    result
+
+
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  UTILITY FUNCTIONS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+//
+// * clamp
+// * lerp
+// * smooth_step
+// * remap
+// * snr_db
+// * deadband
+//
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function            Constrains a value between minimum and maximum bounds
+// @param value         <float> Value to constrain
+// @param min           <float> Minimum bound
+// @param max           <float> Maximum bound
+// @returns             <float> Constrained value
+export clamp(float value, float min, float max) =>
+    math.max(min, math.min(max, value))
+
+// @function            Linear interpolation between two values
+// @param a             <float> Start value
+// @param b             <float> End value
+// @param t             <float> Interpolation factor (0-1)
+// @returns             <float> Interpolated value
+export lerp(float a, float b, float t) =>
+    a + (b - a) * clamp(t, 0, 1)
+
+// @function            Smooth interpolation with ease-in/ease-out
+// @param edge0         <float> Lower edge
+// @param edge1         <float> Upper edge
+// @param x             <float> Input value
+// @returns             <float> Smoothed value (0-1). Returns 0.0 if x < edge0 when edges collapse, 1.0 otherwise
+export smooth_step(float edge0, float edge1, float x) =>
+    float edge_range = edge1 - edge0
+    if math.abs(edge_range) < EPSILON
+        x < edge0 ? 0.0 : 1.0
+    else
+        t = clamp((x - edge0) / edge_range, 0.0, 1.0)
+        t * t * (3.0 - 2.0 * t)
+
+// @function            Maps a value from one range to another
+// @param value         <float> Input value
+// @param in_min        <float> Input range minimum
+// @param in_max        <float> Input range maximum
+// @param out_min       <float> Output range minimum
+// @param out_max       <float> Output range maximum
+// @returns             <float> Remapped value, or na if input range is zero
+export remap(float value, float in_min, float in_max, float out_min, float out_max) =>
+    float in_range = in_max - in_min
+    math.abs(in_range) < EPSILON ? na : (value - in_min) * (out_max - out_min) / in_range + out_min
+
+// @function            Calculates signal-to-noise ratio
+// @param signal        <float> Signal value
+// @param noise         <float> Noise value
+// @returns             <float> SNR in decibels
+export snr_db(float signal, float noise) =>
+    noise == 0 ? na : 20 * math.log10(math.abs(signal / noise))
+
+// @function            Applies deadband filter to reduce noise
+// @param value         <float> Input value
+// @param threshold     <float> Deadband threshold
+// @param previous      <float> Previous output value
+// @returns             <float> Filtered value
+export deadband(float value, float threshold, float previous) =>
+    math.abs(value - previous) > threshold ? value : previous
+
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  SCALERS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+//
+// * scaler_zscore
+// * scaler_min_max
+// * scaler_robust
+// * scaler_logarithmic_interpolation
+//
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+
+// @function                    Calculates Z-Score normalization of a series within a given window
+// @param x                     <float> series to normalize
+// @param lookback_window       <int> lookback period for calculating mean and standard deviation
+// @returns                     <float> Z-Score normalized series
+export scaler_zscore(float x, int lookback_window) =>
+    mean = ta.sma(x, lookback_window)  // Calculate the simple moving average over the window
+    std  = ta.stdev(x, lookback_window)  // Calculate the standard deviation over the window
+    math.abs(std) < EPSILON ? na : (x - mean) / std
+
+
+// @function                    Performs Min-Max scaling of a series within a given window, user-defined bounds, and optional midpoint
+// @param x                     <float> series to transform
+// @param lookback_window       <int> optional lookback window size to consider for scaling.
+// @param min_val               <float> minimum value of the scaled range. Default is 0.0.
+// @param max_val               <float> maximum value of the scaled range. Default is 1.0.
+// @param empiric_min           <float> user-defined minimum value of the input data. This means that the output could exceed the `min_val` bound if there is data in `x` lesser than `empiric_min`. If na, it's calculated from `x` and `lookback_window`.
+// @param empiric_max           <float> user-defined maximum value of the input data. This means that the output could exceed the `max_val` bound if there is data in `x` greater than `empiric_max`. If na, it's calculated from `x` and `lookback_window`.
+// @param empiric_mid           <float> user-defined midpoint value of the input data. If na, it's calculated from `empiric_min` and `empiric_max`.
+// @returns                     <float> rescaled series with values between the min and max
+export scaler_min_max(float x, int lookback_window=na, float min_val=0., float max_val=1., float empiric_min=na, float empiric_max=na, float empiric_mid=na) =>
+    if min_val >= max_val
+        runtime.error('`min_val` must be less than `max_val`')
+
+    window_min = nz(empiric_min, ta.lowest(x, lookback_window))
+    window_max = nz(empiric_max, ta.highest(x, lookback_window))
+    window_mid = nz(empiric_mid, (window_min + window_max) / 2)
+
+    mid_val = (min_val + max_val) / 2
+
+    float scale = na
+    float out = na
+    if x < window_mid
+        if window_mid == window_min
+            out := na
+        else
+            scale := (x - window_min) / (window_mid - window_min)
+            out := min_val + scale * (mid_val - min_val)
+    else
+        if window_mid == window_max
+            out := na
+        else
+            scale := (x - window_mid) / (window_max - window_mid)
+            out := mid_val + scale * (max_val - mid_val)
+
+    out
+
+
+// @function                    Performs robust scaling (using interquartile range) of a series within a given window
+// @param x                     <float> series to transform
+// @param lookback_window       <int> lookback period for calculating median and IQR
+// @returns                     <float> robust scaled series
+export scaler_robust(float x, int lookback_window) =>
+    median = ta.median(x, lookback_window)
+    q1 = ta.percentile_linear_interpolation(x, length=lookback_window, percentage=25)  // Calculate the 25th percentile over the window
+    q3 = ta.percentile_linear_interpolation(x, length=lookback_window, percentage=75)  // Calculate the 75th percentile over the window
+    iqr = q3 - q1  // Calculate the IQR
+    math.abs(iqr) < EPSILON ? na : (x - median) / iqr
+
+
+// @function            Converts a given value within a range to a logarithmic range. Also works for mapping low values to high values and vice versa.
+//                      For example, an input in the range of x_min=1 to x_max=10 can be mapped to y_min=10 to y_max=10000 on a continuous scale.
+//                      In that example, a value of 2 would become approximately 21 and a value of 5 would become approximately 215.
+// @param x             {float} Input value to be converted
+// @param x_min         {float} Lower bound of input range
+// @param x_max         {float} Upper bound of input range
+// @param y_min         {float} Lower bound of output range that corresponds with x_min (must be positive)
+// @param y_max         {float} Upper bound of output range that corresponds with x_max (must be positive)
+// @returns             {float} Logarithmically converted value of input x into the range of [y_min, y_max], or na if input range is zero
+export scaler_logarithmic_interpolation(series float x, float x_min, float x_max, float y_min, float y_max) =>
+    float result = na
+    if y_min <= 0 or y_max <= 0
+        runtime.error("scaler_logarithmic_interpolation: y_min and y_max must be positive")
+    else if math.abs(x_max - x_min) < EPSILON
+        result := na
+    else
+        // Normalise the input value to a 0-1 range
+        normalized_x = (x - x_min) / (x_max - x_min)
+
+        // Interpolate within the logarithmic range
+        y_min_log = math.log(y_min)
+        y_max_log = math.log(y_max)
+        log_value = y_min_log + normalized_x * (y_max_log - y_min_log)
+
+        // Convert the logarithmic value back to the actual range
+        result := math.exp(log_value)
+    result
+
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  NON-LINEAR TRANSFORMATIONS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+//
+// * log
+// * exp
+// * power
+// * tanh
+// * sinh
+// * cosh
+// * sigmoid
+// * sigmoid_double
+// * logistic_decay
+// * RMS
+//
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    Applies logarithmic transformation to a value, base can be user-defined.
+// @param x                     <float> value to transform (must be positive)
+// @param base                  <float> logarithmic base (must be positive and not equal to 1)
+// @returns                     <float> logarithm of the value to the given base, or na for invalid inputs
+export log(float x, float base) =>
+    if x <= 0 or base <= 0 or base == 1
+        float(na)
+    else
+        math.log(x) / math.log(base)
+
+
+// @function                    Applies exponential transformation to a value, base can be user-defined.
+// @param x                     <float> value to transform
+// @param base                  <float> base of the exponentiation (must be positive)
+// @returns                     <float> the result of raising the base to the power of the value, or na if base is non-positive
+export exp(float x, float base) =>
+    base <= 0 ? float(na) : math.pow(base, x)
+
+
+// @function                    Applies power transformation to a value, exponent can be user-defined. Handles both positive and negative inputs.
+// @param x                     <float> value to transform
+// @param exponent              <float> exponent for the transformation
+// @returns                     <float> the value raised to the given exponent, preserving the sign of the original value
+export power(float x, float exponent) =>
+    math.sign(x) * math.pow(math.abs(x), exponent)
+
+
+// @function                    The Inverse Fisher Transform, or hyperbolic tangent (tanh), is the ratio of the hyperbolic sine and hyperbolic cosine.
+//                              It limits an output to a range of −1 to 1. It is related to the Fisher z-transformation that is used to transform
+//                              the Pearson's correlation coefficient into a normally distributed variable, which makes it easier to perform statistical analyses.
+//                              The inverse of this transformation is given by the hyperbolic tangent function.
+//                              Note: Saturates to ±1 for extreme inputs (|2*scale*x| > 20) to avoid numerical instability.
+// @param x                     <float> The input value for which the hyperbolic tangent is calculated.
+// @param scale                 <float> A scaling factor for the input value, allows the function to be adjusted for different ranges and transformations.
+// @returns                     <float> The hyperbolic tangent of the scaled input value (-1 to 1).
+export tanh(series float x, float scale=1) =>
+    float z = 2 * scale * x
+    if z > 20
+        1.0
+    else if z < -20
+        -1.0
+    else
+        -1 + 2 / (1 + math.exp(-z))
+
+
+//@function                     The hyperbolic sine (sinh) is defined as the half-difference of the exponential function of its argument. It is a useful function
+//                              in various areas of mathematics, including calculus and complex analysis, and is closely related to the geometry of hyperbolas.
+//                              The scale parameter allows the function to be adjusted for different ranges and transformations.
+//                              Note: Returns na for |scale*x| > 709 to prevent IEEE 754 overflow.
+// @param x                     <float> The input value for which the hyperbolic sine is calculated.
+// @param scale                 <float> A scaling factor for the input value, allows the function to be adjusted for different ranges and transformations.
+// @returns                     <float> The hyperbolic sine of the scaled input value, or na if overflow would occur.
+export sinh(series float x, float scale=1) =>
+    float scaled = scale * x
+    // math.exp() overflows for values > 709 (IEEE 754 limit)
+    if math.abs(scaled) > 709
+        float(na)
+    else
+        (math.exp(scaled) - math.exp(-scaled)) / 2
+
+
+//@function                     The hyperbolic cosine (cosh) is defined as the half-sum of the exponential function of its argument. It is a useful function
+//                              in various areas of mathematics, including calculus and complex analysis, and is closely related to the geometry of hyperbolas.
+//                              The scale parameter allows the function to be adjusted for different ranges and transformations.
+//                              Note: Returns na for |scale*x| > 709 to prevent IEEE 754 overflow.
+// @param x                     <float> The input value for which the hyperbolic cosine is calculated.
+// @param scale                 <float> A scaling factor for the input value, allows the function to be adjusted for different ranges and transformations.
+// @returns                     <float> The hyperbolic cosine of the scaled input value, or na if overflow would occur.
+export cosh(series float x, float scale=1) =>
+    float scaled = scale * x
+    // math.exp() overflows for values > 709 (IEEE 754 limit)
+    if math.abs(scaled) > 709
+        float(na)
+    else
+        (math.exp(scaled) + math.exp(-scaled)) / 2
+
+
+// @function                    Applies the sigmoid function to a series.
+// @param x                     <float> series to transform
+// @param scale                 <float> scaling factor for the sigmoid function
+// @param offset                <float> offset for the sigmoid function
+// @returns                     transformed series using the sigmoid function
+export sigmoid(series float x, float scale=1, float offset=0) =>
+    1 / (1 + math.exp(-x * scale + offset))
+
+
+// @function                    Applies a double sigmoid function to a series, handling positive and negative values differently.
+// @param x                     <float> series to transform
+// @param scale                 <float> scaling factor for the sigmoid function
+// @param offset                <float> offset for the sigmoid function
+// @returns                     transformed series using the double sigmoid function
+export sigmoid_double(series float x, float scale=1, float offset=0) =>
+    x >= 0 ? sigmoid(x, scale, offset) : sigmoid(x, scale, -offset) - 1
+
+
+// @function                    Calculates logistic decay based on given parameters.
+// @param a                     <float> parameter affecting the steepness of the curve
+// @param b                     <float> parameter affecting the direction of the decay
+// @param c                     <float> the upper bound of the function's output
+// @param t                     <float> time variable
+// @returns                     value of the logistic decay function at time t
+export logistic_decay(float a, float b, float c, float t) =>
+    c / (1 + a * math.exp(b * t))
+
+
+// @function                    Applies the Root Mean Square (RMS), a statistical measure of the magnitude of a varying quantity.
+//                              It is calculated as the square root of the arithmetic mean of the squares of the original values, providing a measure of the effective value of a fluctuating series.
+//                              The original series can be divided by the RMS to normalise the series.
+// @param x                     <float> series to transform
+// @param lookback_window       <int> The period over which the RMS is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the RMS.
+// @returns                     <float> Computed RMS value, or na for missing data.
+export RMS(float x, int lookback_window, bool use_ema=false) =>
+    pow = math.pow(x, 2)
+    out = _apply_moving_average(pow, lookback_window, use_ema)
+    math.sqrt(out)
+
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  ERROR/LOSS METRICS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+//
+// * MSE
+// * RMSE
+// * MAE
+// * RMSLE
+// * Huber Loss
+// * Quantile Loss
+//
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+
+// @function                    Calculates the Mean Square Error (MSE), a statistical measure of the average of the squares of the errors.
+//                              Also known as L2 Loss and Mean Square Deviation (MSD): https://en.wikipedia.org/wiki/Mean_squared_error
+//                              MSE is the mean of the squared differences between the predicted and actual values.
+//                              It provides a measure of the variance of the prediction errors.
+// @param y_pred                <float> series of predicted values
+// @param y_true                <float> series of actual observed values
+// @param lookback_window       <int> The period over which the MSE is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the MSE.
+// @returns                     <float> Transformed MSE value
+export MSE(float y_pred, float y_true, int lookback_window, bool use_ema=false) =>
+    squared_error = math.pow(y_pred - y_true, 2)
+    _apply_moving_average(squared_error, lookback_window, use_ema)
+
+
+// @function                    Applies the Root Mean Square Error (RMSE), a statistical measure of the differences between predicted and observed values.
+//                              Also known as Root Mean Square Deviation (RMSD): https://en.wikipedia.org/wiki/Root_mean_square_deviation
+//                              It is calculated as the square root of the arithmetic mean of the squares of the differences between the predicted and actual values.
+//                              RMSE provides a measure of how accurately the model predicts the actual values, with lower values indicating better accuracy.
+// @param y_pred                <float> series of predicted values
+// @param y_true                <float> series of actual observed values
+// @param lookback_window       <int> The period over which the RMSE is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the RMSE.
+// @returns                     <float> Transformed RMSE value
+export RMSE(float y_pred, float y_true, int lookback_window, bool use_ema=false) =>
+    math.sqrt(MSE(y_pred, y_true, lookback_window, use_ema))
+
+
+// @function                    Calculates the Mean Absolute Error (MAE), a statistical measure of the average of the absolute differences between the predicted and actual values.
+//                              MAE is the mean of the absolute deviations between the predicted and actual values, providing a straightforward measure of prediction accuracy.
+//                              MAE is also known as L1 Loss and Mean Absolute Deviation (MAD).
+// @param y_pred                <float> series of predicted values
+// @param y_true                <float> series of actual observed values
+// @param lookback_window       <int> The period over which the MAE is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the MAE.
+// @returns                     <float> Transformed MAE value
+export MAE(float y_pred, float y_true, int lookback_window, bool use_ema=false) =>
+    absolute_error = math.abs(y_pred - y_true)
+    _apply_moving_average(absolute_error, lookback_window, use_ema)
+
+
+// @function                    Calculates the Root Mean Squared Logarithmic Error (RMSLE), a statistical measure that penalizes underestimates more than overestimates.
+//                              RMSLE is the square root of the average of the squared differences between the logarithm of the predicted values and the logarithm of the actual values.
+//                              The logarithmic transformation ensures that the metric is not too sensitive to large prediction errors on large numbers and penalizes underestimates more.
+//                              RMSLE is particularly useful when the target variable has a wide range of values.
+// @param y_pred                <float> series of predicted values
+// @param y_true                <float> series of actual observed values
+// @param lookback_window       <int> The period over which the RMSLE is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the RMSLE.
+// @returns                     <float> Transformed RMSLE value
+export RMSLE(float y_pred, float y_true, int lookback_window, bool use_ema=false) =>
+    log_pred = math.log(y_pred + 1)
+    log_true = math.log(y_true + 1)
+    squared_log_error = math.pow(log_pred - log_true, 2)
+
+    // Apply the moving average (SMA or EMA) to the squared logarithmic error
+    avg_squared_log_error = _apply_moving_average(squared_log_error, lookback_window, use_ema)
+
+    // Calculate the RMSLE by taking the square root of the average squared logarithmic error
+    math.sqrt(avg_squared_log_error)
+
+
+// @function                    Calculates the Huber Loss, a robust error metric that combines the best properties of MAE and MSE.
+//                              The Huber Loss is less sensitive to outliers in data than the MSE. It is quadratic for small errors and linear for large errors.
+//                              This function allows to smooth between the two by specifying a threshold (delta).
+//                              https://en.wikipedia.org/wiki/Huber_loss
+// @param y_pred                <float> series of predicted values
+// @param y_true                <float> series of actual observed values
+// @param delta                 <float> The threshold (compared to the absolute error) at which to switch between MAE and MSE behaviour.
+// @param lookback_window       <int> The period over which the Huber Loss is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the Huber Loss.
+// @returns                     <float> Transformed Huber Loss value
+export HuberLoss(float y_pred, float y_true, float delta, int lookback_window, bool use_ema=false) =>
+    error = y_pred - y_true
+    abs_error = math.abs(error)
+
+    // Calculate the Huber Loss
+    huber_loss = abs_error <= delta ?
+      0.5 * math.pow(error, 2) :
+      delta * (abs_error - 0.5 * delta)
+
+    // Apply the moving average (SMA or EMA) to the Huber Loss
+    float result = _apply_moving_average(huber_loss, lookback_window, use_ema)
+    result
+
+
+// @function                    Calculates the Quantile Loss, also known as Pinball Loss, which is used to estimate conditional quantiles.
+//                              The Quantile Loss function helps to predict a specific quantile (e.g., the 10th percentile, 50th percentile, etc.) rather than just the mean.
+//                              This loss function is particularly useful when you want to make predictions at different quantiles, especially in situations with skewed data.
+// @param y_pred                <float> series of predicted values
+// @param y_true                <float> series of actual observed values
+// @param quantile              <float> The quantile (tau) you are targeting (e.g., 0.5 for the median, 0.9 for the 90th percentile). Must be between 0 and 1.
+// @param lookback_window       <int> The period over which the Quantile Loss is calculated. Must be >= 1.
+// @param use_ema               <bool> Whether to use EMA (true) or SMA (false, default) for calculating the Quantile Loss.
+// @returns                     <float> Transformed Quantile Loss value
+export QuantileLoss(float y_pred, float y_true, float quantile, int lookback_window, bool use_ema=false) =>
+    float result = na
+    if quantile < 0 or quantile > 1
+        runtime.error("The `quantile` parameter must be between 0 and 1.")
+        result := na
+    else
+        error = y_true - y_pred
+
+        // Calculate the Quantile Loss
+        quantile_loss = error >= 0 ?
+          quantile * error :
+          (quantile - 1) * error
+
+        // Apply the moving average (SMA or EMA) to the Quantile Loss
+        result := _apply_moving_average(quantile_loss, lookback_window, use_ema)
+    result
+
+
+//#endregion
+
+
+//==================================================================//
+//#region               STATISTICAL FUNCTIONS                       //
+//==================================================================//
+//
+// * r_squared
+// * correlation_spearman
+//
+//==================================================================//
+
+// @function                    Calculates R² (coefficient of determination) between predicted and actual values.
+//                              R² represents the proportion of variance in the actual values explained by the predictions.
+//                              Values typically range 0–1; negative values indicate predictions worse than mean baseline.
+// @param y_pred                <float> Series of predicted values
+// @param y_true                <float> Series of actual observed values
+// @param lookback_window       <int> Period for calculation (must be >= 2)
+// @param use_ema               <bool> Use EMA (true) or SMA (false, default) for averaging
+// @returns                     <float> R² value, or na for invalid inputs or zero variance
+export r_squared(float y_pred, float y_true, int lookback_window, bool use_ema=false) =>
+    if lookback_window < 2
+        runtime.error("r_squared: lookback_window must be >= 2")
+        float(na)
+    else
+        // Total sum of squares (variance of actual values)
+        mean_true = _apply_moving_average(y_true, lookback_window, use_ema)
+        ss_tot = math.pow(y_true - mean_true, 2)
+        ss_tot_avg = _apply_moving_average(ss_tot, lookback_window, use_ema)
+
+        // Residual sum of squares (variance of prediction errors)
+        ss_res = math.pow(y_true - y_pred, 2)
+        ss_res_avg = _apply_moving_average(ss_res, lookback_window, use_ema)
+
+        // R² = 1 - (SS_res / SS_tot)
+        float result = math.abs(ss_tot_avg) < EPSILON ? na : 1 - (ss_res_avg / ss_tot_avg)
+        result
+
+
+// @function                    Calculates Spearman rank correlation between two series.
+//                              Unlike Pearson correlation (ta.correlation), Spearman uses ranks, making it
+//                              robust to outliers and suitable for detecting monotonic (non-linear) relationships.
+// @param x                     <float> First series
+// @param y                     <float> Second series
+// @param lookback_window       <int> Period for calculation (must be >= 3)
+// @returns                     <float> Spearman correlation coefficient (-1 to 1), or na for invalid inputs
+export correlation_spearman(float x, float y, int lookback_window) =>
+    if lookback_window < 3
+        runtime.error("correlation_spearman: lookback_window must be >= 3")
+        float(na)
+    else
+        // Calculate percentile ranks (0–100)
+        rank_x = ta.percentrank(x, lookback_window)
+        rank_y = ta.percentrank(y, lookback_window)
+
+        // Pearson correlation on ranks = Spearman correlation
+        float result = ta.correlation(rank_x, rank_y, lookback_window)
+        result
+
+
+//#endregion
+
+
+//----------------------------------------------------------------------------------------------------------------------------- //
+//#region ------[  COMBINATORIAL FUNCTIONS  ]------
+//----------------------------------------------------------------------------------------------------------------------------- //
+//
+// * factorial
+//
+//----------------------------------------------------------------------------------------------------------------------------- //
+
+// @function                    Returns the factorial of a non-negative integer using a pre-computed lookup table.
+//                              We compute externally exact arbitrary-precision integers before converting to IEEE 754 floats.
+//                              This approach provides O(1) performance and maximum possible precision (avoiding cumulative
+//                              floating-point errors from iterative multiplication).
+//                              Note: 171! exceeds IEEE 754 float range (~1.8e308), hence the upper limit of 170.
+// @param n                     <int> The non-negative integer (0–170).
+// @returns                     <float> The factorial of n (n!), or na for invalid inputs.
+export factorial(int n) =>
+    // Pre-computed factorial lookup table (0! through 170!)
+    // Generated via Python: [float(math.factorial(x)) for x in range(171)]
+    var float[] factorials = array.from(
+        1.0,
+        1.0,
+        2.0,
+        6.0,
+        24.0,
+        120.0,
+        720.0,
+        5040.0,
+        40320.0,
+        362880.0,
+        3628800.0,
+        39916800.0,
+        479001600.0,
+        6227020800.0,
+        87178291200.0,
+        1307674368000.0,
+        20922789888000.0,
+        355687428096000.0,
+        6402373705728000.0,
+        1.21645100408832e+17,
+        2.43290200817664e+18,
+        5.109094217170944e+19,
+        1.1240007277776077e+21,
+        2.585201673888498e+22,
+        6.204484017332394e+23,
+        1.5511210043330986e+25,
+        4.0329146112660565e+26,
+        1.0888869450418352e+28,
+        3.0488834461171387e+29,
+        8.841761993739702e+30,
+        2.6525285981219107e+32,
+        8.222838654177922e+33,
+        2.631308369336935e+35,
+        8.683317618811886e+36,
+        2.9523279903960416e+38,
+        1.0333147966386145e+40,
+        3.7199332678990125e+41,
+        1.3763753091226346e+43,
+        5.230226174666011e+44,
+        2.0397882081197444e+46,
+        8.159152832478977e+47,
+        3.345252661316381e+49,
+        1.40500611775288e+51,
+        6.041526306337383e+52,
+        2.658271574788449e+54,
+        1.1962222086548019e+56,
+        5.502622159812089e+57,
+        2.5862324151116818e+59,
+        1.2413915592536073e+61,
+        6.082818640342675e+62,
+        3.0414093201713376e+64,
+        1.5511187532873822e+66,
+        8.065817517094388e+67,
+        4.2748832840600255e+69,
+        2.308436973392414e+71,
+        1.2696403353658276e+73,
+        7.109985878048635e+74,
+        4.0526919504877214e+76,
+        2.3505613312828785e+78,
+        1.3868311854568984e+80,
+        8.32098711274139e+81,
+        5.075802138772248e+83,
+        3.146997326038794e+85,
+        1.98260831540444e+87,
+        1.2688693218588417e+89,
+        8.247650592082472e+90,
+        5.443449390774431e+92,
+        3.647111091818868e+94,
+        2.4800355424368305e+96,
+        1.711224524281413e+98,
+        1.1978571669969892e+100,
+        8.504785885678623e+101,
+        6.1234458376886085e+103,
+        4.4701154615126844e+105,
+        3.307885441519386e+107,
+        2.48091408113954e+109,
+        1.8854947016660504e+111,
+        1.4518309202828587e+113,
+        1.1324281178206297e+115,
+        8.946182130782976e+116,
+        7.156945704626381e+118,
+        5.797126020747368e+120,
+        4.753643337012842e+122,
+        3.945523969720659e+124,
+        3.314240134565353e+126,
+        2.81710411438055e+128,
+        2.4227095383672734e+130,
+        2.107757298379528e+132,
+        1.8548264225739844e+134,
+        1.650795516090846e+136,
+        1.4857159644817615e+138,
+        1.352001527678403e+140,
+        1.2438414054641308e+142,
+        1.1567725070816416e+144,
+        1.087366156656743e+146,
+        1.032997848823906e+148,
+        9.916779348709496e+149,
+        9.619275968248212e+151,
+        9.426890448883248e+153,
+        9.332621544394415e+155,
+        9.332621544394415e+157,
+        9.42594775983836e+159,
+        9.614466715035127e+161,
+        9.90290071648618e+163,
+        1.0299016745145628e+166,
+        1.081396758240291e+168,
+        1.1462805637347084e+170,
+        1.226520203196138e+172,
+        1.324641819451829e+174,
+        1.4438595832024937e+176,
+        1.588245541522743e+178,
+        1.7629525510902446e+180,
+        1.974506857221074e+182,
+        2.2311927486598138e+184,
+        2.5435597334721877e+186,
+        2.925093693493016e+188,
+        3.393108684451898e+190,
+        3.969937160808721e+192,
+        4.684525849754291e+194,
+        5.574585761207606e+196,
+        6.689502913449127e+198,
+        8.094298525273444e+200,
+        9.875044200833601e+202,
+        1.214630436702533e+205,
+        1.506141741511141e+207,
+        1.882677176888926e+209,
+        2.372173242880047e+211,
+        3.0126600184576594e+213,
+        3.856204823625804e+215,
+        4.974504222477287e+217,
+        6.466855489220474e+219,
+        8.47158069087882e+221,
+        1.1182486511960043e+224,
+        1.4872707060906857e+226,
+        1.9929427461615188e+228,
+        2.6904727073180504e+230,
+        3.659042881952549e+232,
+        5.012888748274992e+234,
+        6.917786472619489e+236,
+        9.615723196941089e+238,
+        1.3462012475717526e+241,
+        1.898143759076171e+243,
+        2.695364137888163e+245,
+        3.854370717180073e+247,
+        5.5502938327393044e+249,
+        8.047926057471992e+251,
+        1.1749972043909107e+254,
+        1.727245890454639e+256,
+        2.5563239178728654e+258,
+        3.80892263763057e+260,
+        5.713383956445855e+262,
+        8.62720977423324e+264,
+        1.3113358856834524e+267,
+        2.0063439050956823e+269,
+        3.0897696138473508e+271,
+        4.789142901463394e+273,
+        7.471062926282894e+275,
+        1.1729568794264145e+278,
+        1.853271869493735e+280,
+        2.9467022724950384e+282,
+        4.7147236359920616e+284,
+        7.590705053947219e+286,
+        1.2296942187394494e+289,
+        2.0044015765453026e+291,
+        3.287218585534296e+293,
+        5.423910666131589e+295,
+        9.003691705778438e+297,
+        1.503616514864999e+300,
+        2.5260757449731984e+302,
+        4.269068009004705e+304,
+        7.257415615307999e+306
+    )
+    if n < 0
+        runtime.error("factorial: n must be non-negative")
+        float(na)
+    else if n > 170
+        float(na)
+    else
+        array.get(factorials, n)
+
+
+//#endregion
+
+
+//==================================================================//
+//#region                    SAMPLE USAGE                           //
+//==================================================================//
+
+// Setup palette
+var palette = cu.Palette.new(transparency=0)
+if barstate.isfirst
+    palette.apply_default_palette(cu.PaletteNames.gyts_purple)
+
+
+// -----[ Scalers ] ----- //
+
+x1 = scaler_min_max(close, 100, -3, 3)
+x2 = scaler_zscore(close, 100)
+x3 = scaler_robust(close, 100)
+x4 = 4 * sigmoid(x1) - 2
+
+c1 = palette.get_colour(1, 30)
+c2 = palette.get_colour(2, 30)
+c3 = palette.get_colour(5, 30)
+c4 = palette.get_colour(6, 30)
+
+idx1 = last_bar_index - 60
+idx2 = last_bar_index - 40
+idx3 = last_bar_index - 20
+idx4 = last_bar_index
+
+plot(bar_index < idx1 ? x1 : na, "Min-Max scaler",      c1)
+plot(bar_index < idx2 ? x2 : na, "Z-score scaler",      c2)
+plot(bar_index < idx3 ? x3 : na, "Robust scaler",       c3)
+plot(bar_index < idx4 ? x4 : na, "Sigmoid on Min-Max",  c4)
+
+if barstate.islastconfirmedhistory
+    label.new(idx1, x1[last_bar_index - idx1], 'Min-Max scaler',     color=c1, style=label.style_label_left, size=size.small, textcolor=color.white)
+    label.new(idx2, x2[last_bar_index - idx2], 'Z-score scaler',     color=c2, style=label.style_label_left, size=size.small, textcolor=color.white)
+    label.new(idx3, x3[last_bar_index - idx3], 'Robust scaler',      color=c3, style=label.style_label_left, size=size.small, textcolor=color.white)
+    label.new(idx4, x4[last_bar_index - idx4], 'Sigmoid on Min-Max', color=c4, style=label.style_label_left, size=size.small, textcolor=color.white)
+
+
+// -----[ Error Metrics ] ----- //
+
+ma       = ta.ema(close, 10)
+error1   = RMSE(ma, close,  10, true)
+error2   = RMSE(ma, close, 100, true)
+
+c_error1      = palette.get_colour(1)
+c_error1_fill = color.new(c_error1, 98)
+c_error2      = palette.get_colour(2)
+c_error2_fill = color.new(c_error2, 98)
+
+plot(ma, 'MA prediction', palette.get_colour(4), 2, force_overlay=true)
+p_ub1 = plot(ma + error1, 'error1 UB', c_error1, 1, force_overlay=true)
+p_lb1 = plot(ma - error1, 'error1 LB', c_error1, 1, force_overlay=true)
+fill(p_ub1, p_lb1, c_error1_fill)
+
+p_ub2 = plot(ma + error2, 'error2 UB', c_error2, 1, force_overlay=true)
+p_lb2 = plot(ma - error2, 'error2 LB', c_error2, 1, force_overlay=true)
+fill(p_ub2, p_lb2, c_error2_fill)
+
+
+// -----[ Statistical Functions ] ----- //
+
+// R² measures how well the moving average predicts actual prices (0–1, higher = better fit)
+r2 = r_squared(ma, close, 50)
+c_r2 = palette.get_gradient_colour(r2, value_min=0, value_max=1)
+plot(r2, "R²", c_r2)
+
+// Spearman correlation between price and volume (robust to outliers)
+spearman = correlation_spearman(close, volume, 50)
+c_spearman = palette.get_gradient_colour(spearman, value_min=-1, value_max=1)
+plot(spearman, "Spearman ρ", c_spearman)
+
+//#endregion

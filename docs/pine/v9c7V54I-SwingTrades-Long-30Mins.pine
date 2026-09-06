@@ -1,0 +1,444 @@
+//@version=6
+indicator("SwingTrades-Long-30Mins", shorttitle="SWT-30m", overlay=true)
+
+// =====================================================================================
+// SwingTrades-Long-30Mins — WHAT THIS INDICATOR DOES AND HOW (read this first)
+// =====================================================================================
+// THIS IS HALF OF A PAIR
+//   SwingTrades-Long used to be one script covering 4 categories (MT, 3Q, TR, R). It
+//   has been split into two independent indicators so each runs on the timeframe that
+//   actually fits its checks:
+//     - SwingTrades-Long-Daily  (companion script) — Category 1 (MT) only.
+//       Runs on the DAILY chart. Answers: "is this stock structurally set up to buy?"
+//       Updates once per day.
+//     - SwingTrades-Long-30Mins (THIS script) — Category 2 (3Q) + Category 3 (TR) +
+//       Category 4 (R). Runs on the 30-MINUTE chart. Answers: "where has it come from,
+//       where can it go, is the reward-vs-risk worth it, and right now, is this a safe
+//       moment to pull the trigger?" Updates every 30 minutes throughout the session.
+//   NOTE: 3Q (Category 2) originally lived in the Daily script but was MOVED here, and
+//   now computes its base range / target / stop entirely off native 30-min bars (see
+//   Step E) rather than sharing the Daily-based machinery Risk uses. The overall 0-10
+//   score (Step H) is currently COMMENTED OUT in BOTH scripts — see Step H below for
+//   how to re-enable it.
+//
+// PURPOSE OF THIS SCRIPT
+//   Scores a stock on: (2) 3Q — where has it come from, where can it go, and is the
+//   reward-vs-risk worth it; (3) Trend Reading — is the stock overextended, and is the
+//   long bias ("innocent") still intact; and (4) Risk — does the reward-vs-risk still
+//   hold up live, is there room left to run today, and how big should the position be.
+//
+// WHERE DATA COMES FROM / DESIGN NOTE
+//   - Runs on a 30-MINUTE chart. Native 30-min `close` is used everywhere as the
+//     "current live price" — this is what makes the dashboard refresh in real time
+//     throughout the session instead of only once at the daily close.
+//   - Most of the TR/Risk THRESHOLDS (5-Day SMA, 20/50-Day SMA trend, ATR, prior-day
+//     R2 pivot, N-bar daily high for target, daily swing-low for stop) are still DAILY
+//     concepts, so they are pulled from the Daily timeframe in a single bundled
+//     request.security() call and reused throughout. 3Q (Step E) is the exception — it
+//     computes its own base range/target/stop entirely off native 30-min bars.
+//   - VWAP and "minutes since the session open" are computed natively/from real time
+//     since this script already runs on an intraday chart — no extra security() pull
+//     needed for those two.
+//   - The "minutes since open" and live-price checks are only meaningful while the
+//     market is open and bars are updating in real time; on closed historical bars
+//     they reflect that bar's snapshot, not true intrabar behavior.
+//
+// STEP-BY-STEP LOGIC
+//   STEP A — Inputs, grouped by category (plus a "Daily Reference" group for the
+//            lengths/lookbacks used to pull Daily-timeframe data).
+//   STEP B — One bundled request.security() call to the Daily timeframe for every
+//            daily-scale value this script needs (5/20/50 SMA + slopes, ATR, prior-day
+//            H/L/C, N-bar high, swing-low, N-bar base-range high/low, today's open,
+//            close N days ago (extension check), today's running high/low, day-start
+//            timestamp).
+//   STEP C — Native intraday values: VWAP (resets each session) and "current price"
+//            (= native 30-min close).
+//   STEP D — DAILY STOP / TARGET / RvR calc (for Risk): the stop (wider of a daily
+//            structural swing-low and a daily-ATR-multiple stop) and reward (to the
+//            daily N-bar high) are computed once here, live off the current 30-min
+//            price, and reused by 4. Risk (Step G) and the Trade Level Lines (Step J).
+//            3Q (Step E) does NOT use this — it has its own native 30-min version.
+//   STEP E — 2. 3Q — BASE / TARGET / RvR — 3 checks, category score /10. Computed
+//            ENTIRELY off native 30-min bars (no request.security() needed):
+//            a. Good Base Position — where the live price sits (%) within the recent
+//               N-bar (30-min) high/low range ("where has it come from?")
+//            b. Reward Potential    — % distance from the live price to the recent
+//               N-bar (30-min) high target ("where can it go?")
+//            c. RvR >= minimum      — 3Q's own stop (wider of a 30-min structural
+//               swing-low and a 30-min-ATR-multiple stop) vs. the 30-min target above
+//               ("is it worth it?")
+//   STEP F — 3. TREND READING (TR) — 5 scored checks + 2 unscored caution flags:
+//            a. Not overextended vs the Daily 5-SMA (distance measured in daily ATRs),
+//               also check to make sure price > Daily 5-SMA
+//            b. Net price move over the last 2-5 days vs. that period's ATR budget —
+//               if price has moved too far (in ATRs) over the last few days relative
+//               to normal daily ranges, it's overextended; avoid
+//            c. Not too close to / above the prior day's classic R2 pivot
+//            d. Gap/VWAP OK — no gap today, OR price has returned near session VWAP
+//               after a gap
+//            e. Innocent bias — live price > daily 5-SMA and daily 20 & 50 SMA rising
+//            f. [flag, not scored] Guilty bias — live price < daily 5-SMA and daily
+//               20 & 50 SMA both declining. VETOES the entire TR score to 0.
+//            g. [flag, not scored] First-5-minutes-after-open — separate WATCH
+//               warning, not folded into the score (temporary, not structural).
+//   STEP G — 4. RISK (R) — 3 checks + sizing outputs, category score /10:
+//            a. RvR >= minimum — reuses the shared RvR from Step D
+//            b. Room left in today's ATR range (today's running high-low, so far, as
+//               % of daily ATR)
+//            c. Adequate stop distance — stop is placed at least N daily ATRs away
+//               (enforced by construction, shown as an explicit check)
+//            + Suggested share size, $ position value, and $ stop level, sized off
+//              account equity and max risk % per trade (informational, not scored)
+//   STEP H — [COMMENTED OUT] Overall score. Per user request, the weighted-combination
+//            formula (previously TR + Risk) is disabled. Each category's own score
+//            (qScoreFrac, trScoreFrac, riskScoreFrac) is still fully computed and shown
+//            individually in the dashboard — only the single combined 0-10 number is
+//            turned off. Uncomment the code block to re-enable it (extend it to also
+//            include wQ * qScoreFrac if you want all 3 categories combined).
+//   STEP I — Plots native VWAP and the pulled Daily 5-SMA.
+//   STEP J — Draws three configurable horizontal lines (+ optional price labels)
+//            projecting the current potential trade plan to the right of the chart:
+//            Entry (live 30-min close), Exit/Target (dTargetHigh), and Stop
+//            (stopLevel) — both from Step D. Color, width, style, labels, and how far
+//            back the visible line segment starts are all inputs.
+//   STEP K — Builds the dashboard table.
+// =====================================================================================
+
+// ============================== STEP A: INPUTS =======================================
+grpRef = "Daily Reference (pulled via security)"
+sma5Len        = input.int(5, "5-Day SMA Length", group=grpRef)                        // "5-Day SMA" for overextension + innocent/guilty checks
+smaFastLen     = input.int(20, "20-Day SMA Length", group=grpRef)                      // "20-Day SMA" for innocent/guilty trend check
+smaMidLen      = input.int(50, "50-Day SMA Length", group=grpRef)                      // "50-Day SMA" for innocent/guilty trend check
+atrLen         = input.int(14, "Daily ATR Length", group=grpRef)                       // Daily ATR, used throughout Steps D-G
+slopeLookback  = input.int(5, "Daily SMA Slope Lookback (bars)", group=grpRef)         // bars back used to decide "rising" for 20/50 SMA
+targetLookback = input.int(60, "Target Lookback (Daily bars)", group=grpRef)           // N-bar daily high used as the reward target — shared by 3Q (Step E) and Risk (Step G)
+stopSwingLookback = input.int(10, "Structural Stop Lookback (Daily bars)", group=grpRef) // lookback for the structural daily swing-low stop
+stopATRmult    = input.float(1.0, "Min Stop Distance (Daily ATR multiple)", group=grpRef) // "allow at least 1 ATR%" stop rule (4.c.i); also reused as the ATR-multiple for 3Q's native 30-min stop (Step E)
+
+grpQ = "2. 3Q - Base / Target / RvR"
+baseLookback   = input.int(20, "Base Lookback (30-min bars) - Where From", group=grpQ) // "where has it come from?" lookback window — native 30-min bars
+minBasePct     = input.float(10.0, "Min % Position within Base Range", group=grpQ)     // lower bound of an acceptable base position
+maxBasePct     = input.float(70.0, "Max % Position within Base Range", group=grpQ)     // upper bound of an acceptable base position
+targetLookbackQ = input.int(60, "Target Lookback (30-min bars) - Where To", group=grpQ) // "where can it go?" lookback window — native 30-min bars; separate from Risk's Daily target lookback
+minRewardPct   = input.float(5.0, "Min Reward % to Target", group=grpQ)                // minimum % move to target required ("where can it go?")
+stopSwingLookbackQ = input.int(10, "Structural Stop Lookback (30-min bars, for 3Q RvR)", group=grpQ) // native 30-min swing-low used only by 3Q's own RvR check
+atrLenQ        = input.int(14, "ATR Length (30-min bars, for 3Q RvR)", group=grpQ)     // native 30-min ATR used only by 3Q's own RvR check
+
+grpTR = "3. Trend Reading (TR)"
+maxATRfromSMA5  = input.float(2.0, "Max Distance from 5-SMA (in Daily ATRs)", group=grpTR)   // overextension threshold vs 5-SMA (3.a.i)
+extDays         = input.int(3, "Days Lookback for Net-Move Extension Check", minval=2, maxval=5, group=grpTR) // "last few (2 to 5) days" window
+maxNetMoveATR   = input.float(3.0, "Max Net Price Move over Ext. Days (in Daily ATRs)", group=grpTR) // max allowed net upward move over the last `extDays` days, vs ATR
+r2ProxATR       = input.float(0.5, "Min Distance Below Daily R2 (in Daily ATRs)", group=grpTR) // "Daily R2: too extended, avoid" rule (3.a.ii)
+watchMinutes    = input.int(5, "Minutes After Open to Watch Only", group=grpTR)        // "First 5 Minutes after Open - Watch, don't trade" rule (3.b)
+gapThresholdPct = input.float(1.0, "Gap Threshold %", group=grpTR)                     // % gap that counts as a "gap" for the gap/VWAP rule
+vwapTolerancePct= input.float(0.3, "VWAP Return Tolerance %", group=grpTR)             // how close to VWAP counts as "returned" (3.c)
+
+grpR = "4. Risk (R)"
+minRvR          = input.float(1.5, "Minimum RvR", group=grpR)                          // "Enter only when RvR > 1.5" rule (4.a) — shared threshold: 3Q (Step E) applies it to its own native 30-min RvR, Risk (Step G) applies it to the Daily-based RvR from Step D
+maxATRUsedPct   = input.float(70.0, "Max % of Daily ATR Already Used Today", group=grpR) // "only if price has more room to go within ATR" rule (4.b)
+accountEquity   = input.float(100000, "Account Equity ($)", group=grpR)                // used to size the suggested position
+riskPerTradePct = input.float(1.0, "Risk per Trade (%)", group=grpR)                   // % of equity risked per trade, used for position sizing (4.c.ii)
+
+grpScore = "Scoring Weights (relative, auto-normalized) — currently unused, Step H is commented out"
+wQ  = input.float(5.0, "Weight: 3Q", group=grpScore)
+wTR = input.float(5.0, "Weight: TR", group=grpScore)
+wR  = input.float(5.0, "Weight: Risk", group=grpScore)
+scoreGoodTh = input.float(7.0, "Score: Good Threshold (>=)", group=grpScore)           // overall score >= this shows green (only relevant if Step H is re-enabled)
+scoreWarnTh = input.float(4.0, "Score: Caution Threshold (>=)", group=grpScore)        // overall score >= this (but < good) shows orange; below shows red (only relevant if Step H is re-enabled)
+
+grpTbl = "Dashboard"
+showDashboard = input.bool(true, "Show Dashboard", group=grpTbl)
+tblPositionIn = input.string("Top Right", "Table Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grpTbl)
+
+grpLines = "Trade Levels (Entry/Exit/Stop Lines)"
+showTradeLevels = input.bool(true, "Show Entry/Exit/Stop Lines", group=grpLines)
+entryColor      = input.color(color.blue, "Entry Line Color", group=grpLines)
+exitColor       = input.color(color.green, "Exit/Target Line Color", group=grpLines)
+stopColor       = input.color(color.red, "Stop Line Color", group=grpLines)
+lineWidthIn     = input.int(2, "Line Width", minval=1, maxval=5, group=grpLines)
+lineStyleIn     = input.string("Dashed", "Line Style", options=["Solid","Dashed","Dotted"], group=grpLines)
+lineAnchorBars  = input.int(15, "Visible Segment Length (bars back)", minval=1, group=grpLines) // line extends right indefinitely; this just sets where the drawn segment starts
+showLineLabels  = input.bool(true, "Show Price Labels", group=grpLines)
+
+f_pos(p) =>
+    switch p
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        => position.top_right
+
+tblPosition = f_pos(tblPositionIn)
+
+// helper: maps the line-style input string to a Pine line style constant
+f_lineStyle(s) =>
+    switch s
+        "Solid"  => line.style_solid
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_dashed
+
+lineStyleVal = f_lineStyle(lineStyleIn)
+
+// ============================== STEP B: BUNDLED DAILY PULL ============================
+// One request.security() call brings in every Daily-scale value this script needs:
+//   dSMA5, dSMA20 (+ prior), dSMA50 (+ prior), dATR, prior-day H/L/C (for R2), the
+//   N-bar daily high (target, used by Risk/Step G), the daily structural swing-low
+//   (stop, used by Risk/Step G), today's daily open (for the gap check), the close
+//   from `extDays` days ago (net-move extension check), today's running daily
+//   high/low (room-left check), and the daily bar's start time (for the "minutes
+//   since open" check). NOTE: 3Q (Step E) no longer pulls anything from here — it
+//   computes its own base range / target / stop natively off 30-min bars.
+[dSMA5, dSMA20, dSMA20Prev, dSMA50, dSMA50Prev, dATR, dHigh1, dLow1, dClose1,
+     dTargetHigh, dStructStop, dOpen, dCloseNAgo, dHigh0, dLow0, dDayStart] = request.security(syminfo.tickerid, "D",
+     [ta.sma(close, sma5Len), ta.sma(close, smaFastLen), ta.sma(close, smaFastLen)[slopeLookback],
+      ta.sma(close, smaMidLen), ta.sma(close, smaMidLen)[slopeLookback], ta.atr(atrLen),
+      high[1], low[1], close[1], ta.highest(high, targetLookback), ta.lowest(low, stopSwingLookback),
+      open, close[extDays], high, low, time])
+
+dSMA20Rising = dSMA20 > dSMA20Prev
+dSMA50Rising = dSMA50 > dSMA50Prev
+
+// ============================== STEP C: NATIVE INTRADAY VALUES =========================
+// Already on an intraday (30-min) chart, so VWAP and "current price" are native — no
+// extra security() pull required.
+vwapNative = ta.vwap(hlc3)   // resets automatically each session
+// `close` (native 30-min) is used everywhere below as the live "current price".
+
+// ============================== STEP D: DAILY STOP / TARGET / RvR (for Risk) ============
+// Computed here and reused by 4. Risk (Step G) and the Trade Level Lines (Step J).
+// Stop = the WIDER (further from price) of a daily structural swing-low and a
+// daily-ATR-multiple stop, which guarantees the stop is never tighter than
+// `stopATRmult` daily ATRs. Reward = distance to the daily N-bar-high target.
+// NOTE: 3Q (Step E) does NOT use these — it computes its own native 30-min version.
+minStopByATR = close - stopATRmult * dATR
+stopLevel    = math.min(dStructStop, minStopByATR)
+riskAmt      = close - stopLevel
+rewardAmt    = dTargetHigh - close
+rvr          = riskAmt != 0 ? rewardAmt / riskAmt : na
+rvrOK        = not na(rvr) and rvr >= minRvR   // "does the RvR make the trade worth doing?" (Daily-based, used by Risk/Step G)
+
+// ============================== STEP E: 2. 3Q (NATIVE 30-MIN BARS) ======================
+// Unlike Step D above (which sizes Risk's stop/target off DAILY bars), 3Q here uses the
+// 30-minute chart's own bars natively — no request.security() needed. Its base range,
+// target, and stop all reflect the last N 30-min bars, not the last N days.
+//
+// "Where has it come from?" — position of the live price within the recent N-bar
+// (30-min) base range.
+baseLow   = ta.lowest(low, baseLookback)
+baseHigh  = ta.highest(high, baseLookback)
+baseRange = baseHigh - baseLow
+pctFromBase = baseRange != 0 ? (close - baseLow) / baseRange * 100 : na
+goodBase = not na(pctFromBase) and pctFromBase >= minBasePct and pctFromBase <= maxBasePct
+
+// "Where can it go?" — reward potential to the recent N-bar (30-min) high.
+targetHighQ = ta.highest(high, targetLookbackQ)
+rewardPct = close != 0 ? (targetHighQ - close) / close * 100 : na
+rewardOK  = not na(rewardPct) and rewardPct >= minRewardPct
+
+// "Is it worth it?" — 3Q's own native 30-min stop/reward/RvR calc (mirrors the Step D
+// formula in shape, but built entirely off 30-min bars and 3Q's own lookback/ATR).
+atrQ          = ta.atr(atrLenQ)
+structStopQ   = ta.lowest(low, stopSwingLookbackQ)
+minStopByATRQ = close - stopATRmult * atrQ
+stopLevelQ    = math.min(structStopQ, minStopByATRQ)
+riskAmtQ      = close - stopLevelQ
+rewardAmtQ    = targetHighQ - close
+rvrQ          = riskAmtQ != 0 ? rewardAmtQ / riskAmtQ : na
+rvrOKQ        = not na(rvrQ) and rvrQ >= minRvR
+
+qCount = (goodBase ? 1 : 0) + (rewardOK ? 1 : 0) + (rvrOKQ ? 1 : 0)
+qScoreFrac = qCount / 3.0
+
+// ============================== STEP F: 3. TREND READING (TR) ==========================
+// (a) Overextension vs the Daily 5-SMA, measured in Daily ATRs, AND price must be
+//     above the Daily 5-SMA (rule 3.a.i) — being far below the 5-SMA isn't the
+//     "overextended, don't chase" case this check is meant to catch.
+priceAboveSMA5 = close > dSMA5
+distSMA5ATR = dATR != 0 ? math.abs(close - dSMA5) / dATR : na
+notOverextendedSMA5 = not na(distSMA5ATR) and distSMA5ATR <= maxATRfromSMA5 and priceAboveSMA5
+
+// (b) Net price move over the last `extDays` daily bars vs. that period's ATR budget:
+//     how far (in Daily ATRs) has price run, net, over the last 2-5 days? Only a net
+//     move UP beyond the threshold counts as overextended — a big net move down isn't
+//     "chasing an extended stock" and doesn't trip this check.
+netMoveATR = dATR != 0 ? (close - dCloseNAgo) / dATR : na
+notOverextendedSum = not na(netMoveATR) and netMoveATR <= maxNetMoveATR
+
+// (c) Classic floor-trader R2 pivot from the PRIOR day's H/L/C; too close to/above R2
+//     means the stock is too extended for a fresh long entry (rule 3.a.ii).
+pp = (dHigh1 + dLow1 + dClose1) / 3
+r2 = pp + (dHigh1 - dLow1)
+distToR2ATR = dATR != 0 ? (r2 - close) / dATR : na
+notTooCloseR2 = not na(distToR2ATR) and distToR2ATR >= r2ProxATR
+
+// (d) Gap-Up/Gap-Down handling: if today's daily open gapped beyond the threshold vs.
+//     the prior daily close, price must have returned close to session VWAP (rule 3.c).
+gapPct = dClose1 != 0 ? (dOpen - dClose1) / dClose1 * 100 : na
+gapOccurred = not na(gapPct) and math.abs(gapPct) >= gapThresholdPct
+distVWAPpct = vwapNative != 0 ? math.abs(close - vwapNative) / vwapNative * 100 : na
+vwapReturned = not na(distVWAPpct) and distVWAPpct <= vwapTolerancePct
+gapVWAPok = gapOccurred ? vwapReturned : true   // if no gap occurred, this check auto-passes
+
+// (e)/(f) Innocent vs Guilty framework (rule 3.d), using the live 30-min price against
+// the Daily 5-SMA and Daily 20/50 SMA slopes. Guilty is a hard veto, applied below.
+innocentBias = close > dSMA5 and dSMA20Rising and dSMA50Rising
+guiltyBias   = close < dSMA5 and (not dSMA20Rising) and (not dSMA50Rising)
+
+// (g) First-5-minutes-after-open watch window, using real (wall-clock) time against
+// the current daily bar's start — works in real time on any intraday chart resolution.
+minutesSinceOpen = (timenow - dDayStart) / 60000
+inWatchWindow = minutesSinceOpen >= 0 and minutesSinceOpen <= watchMinutes
+
+// Tally the 5 SCORED TR checks (a-e); Guilty (f) and the Watch window (g) are handled
+// separately since they're vetoes/cautions, not counted criteria.
+trCount = (notOverextendedSMA5 ? 1 : 0) + (notOverextendedSum ? 1 : 0) + (notTooCloseR2 ? 1 : 0) +
+          (gapVWAPok ? 1 : 0) + (innocentBias ? 1 : 0)
+trScoreFrac = guiltyBias ? 0.0 : trCount / 5.0   // Guilty bias zeroes the whole TR category
+
+// ============================== STEP G: 4. RISK (R) =====================================
+// (a) RvR check — reuses the shared calculation from Step D.
+// (b) "Room to go" — how much of today's typical (Daily ATR) range has already been
+//     used, based on today's running daily high/low so far (rule 4.b).
+atrUsedPct = dATR != 0 ? (dHigh0 - dLow0) / dATR * 100 : na
+roomLeft = not na(atrUsedPct) and atrUsedPct <= maxATRUsedPct
+
+// (c) Adequate stop distance — true by construction given the stop formula in Step D,
+//     kept here as an explicit, visible check (rule 4.c.i).
+adequateStopDistance = riskAmt > 0 and (riskAmt / dATR) >= stopATRmult
+
+riskCount = (rvrOK ? 1 : 0) + (roomLeft ? 1 : 0) + (adequateStopDistance ? 1 : 0)
+riskScoreFrac = riskCount / 3.0
+
+// Position sizing (rule 4.c.ii): risk a fixed % of account equity per trade, sized to
+// the live $ distance between the current price and the stop level (Step D).
+riskDollarBudget = accountEquity * riskPerTradePct / 100
+riskPerShare = close - stopLevel
+suggestedShares = riskPerShare > 0 ? math.floor(riskDollarBudget / riskPerShare) : 0
+positionValue = suggestedShares * close
+
+// ============================== STEP H: OVERALL SCORE (COMMENTED OUT) ===================
+// Per user request, this step is disabled. It used to combine TR + Risk into one 0-10
+// score (no broader-market cap here — that safeguard lives in the companion Daily
+// script). 3Q's qScoreFrac is also available now but was never wired into this
+// formula since it's disabled. Uncomment to re-enable (extend the weights as desired
+// to also include wQ * qScoreFrac if you want all 3 categories combined).
+// wSum = wTR + wR
+// overallScore = wSum != 0 ? (trScoreFrac * wTR + riskScoreFrac * wR) / wSum * 10 : 0.0
+
+// ============================== STEP I: PLOTS ============================================
+plot(vwapNative, "VWAP", color=color.new(color.teal, 0), linewidth=1)
+plot(dSMA5, "Daily 5 SMA", color=color.new(color.orange, 0), linewidth=1)
+bgcolor(guiltyBias ? color.new(color.red, 92) : innocentBias ? color.new(color.green, 92) : na) // quick visual innocent/guilty cue
+
+// ============================== STEP J: TRADE LEVEL LINES ==================================
+// Draws (and redraws, each bar, so it always reflects the latest values) three
+// horizontal lines projecting the current potential trade plan to the right:
+//   Entry  = live 30-min close (the "current price" used throughout this script)
+//   Exit   = dTargetHigh, the daily N-bar-high reward target from Step B/D
+//   Stop   = stopLevel, the daily structural/ATR-based stop from Step D
+// Lines use extend.right so they keep projecting forward off the edge of the chart
+// regardless of the visible segment's start point (set by "Visible Segment Length").
+var line entryLine = na
+var line exitLine  = na
+var line stopLine  = na
+var label entryLbl = na
+var label exitLbl  = na
+var label stopLbl  = na
+
+if showTradeLevels and barstate.islast
+    line.delete(entryLine)
+    line.delete(exitLine)
+    line.delete(stopLine)
+    label.delete(entryLbl)
+    label.delete(exitLbl)
+    label.delete(stopLbl)
+
+    lx1 = bar_index - lineAnchorBars
+    lx2 = bar_index
+
+    entryLine := line.new(lx1, close, lx2, close, extend=extend.right, color=entryColor, width=lineWidthIn, style=lineStyleVal)
+    exitLine  := line.new(lx1, dTargetHigh, lx2, dTargetHigh, extend=extend.right, color=exitColor, width=lineWidthIn, style=lineStyleVal)
+    stopLine  := line.new(lx1, stopLevel, lx2, stopLevel, extend=extend.right, color=stopColor, width=lineWidthIn, style=lineStyleVal)
+
+    if showLineLabels
+        entryLbl := label.new(lx2, close, "Entry " + str.tostring(close, "#.##"), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(entryColor, 0), textcolor=color.white, size=size.small)
+        exitLbl  := label.new(lx2, dTargetHigh, "Target " + str.tostring(dTargetHigh, "#.##"), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(exitColor, 0), textcolor=color.white, size=size.small)
+        stopLbl  := label.new(lx2, stopLevel, "Stop " + str.tostring(stopLevel, "#.##"), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(stopColor, 0), textcolor=color.white, size=size.small)
+
+// ============================== STEP K: DASHBOARD TABLE ==================================
+var table tbl = table.new(tblPosition, 2, 30, border_width=1, border_color=color.gray, frame_color=color.gray, frame_width=1)
+
+f_hdr(_t, _r, _txt) =>
+    table.cell(_t, 0, _r, _txt, bgcolor=color.new(color.navy, 20), text_color=color.white, text_halign=text.align_left, text_size=size.small)
+    table.cell(_t, 1, _r, "", bgcolor=color.new(color.navy, 20))
+
+f_row(_t, _r, _label, _value, _pass) =>
+    table.cell(_t, 0, _r, _label, bgcolor=color.new(color.gray, 85), text_color=color.black, text_halign=text.align_left, text_size=size.small)
+    table.cell(_t, 1, _r, _value, bgcolor=_pass ? color.new(color.green, 75) : color.new(color.red, 75), text_color=color.black, text_size=size.small)
+
+f_rowNeutral(_t, _r, _label, _value, _flag) =>
+    table.cell(_t, 0, _r, _label, bgcolor=color.new(color.gray, 85), text_color=color.black, text_halign=text.align_left, text_size=size.small)
+    table.cell(_t, 1, _r, _value, bgcolor=_flag ? color.new(color.orange, 60) : color.new(color.green, 75), text_color=color.black, text_size=size.small)
+
+if showDashboard and barstate.islast
+    table.clear(tbl, 0, 0, 1, 29)
+    r = 0
+
+    // ---- Section 2: 3Q (Base / Target / RvR) ----
+    f_hdr(tbl, r, "2. 3Q - Base / Target / RvR")
+    r += 1
+    f_row(tbl, r, "Good Base Position", str.tostring(pctFromBase, "#.#") + "%", goodBase)
+    r += 1
+    f_row(tbl, r, "Reward Potential >= Min%", str.tostring(rewardPct, "#.#") + "%", rewardOK)
+    r += 1
+    f_row(tbl, r, "RvR >= Min", str.tostring(rvrQ, "#.##"), rvrOKQ)
+    r += 1
+    f_row(tbl, r, "3Q Score", str.tostring(qScoreFrac * 10, "#.#") + " / 10", qScoreFrac >= 0.6)
+    r += 1
+
+    // ---- Section 3: Trend Reading (TR) ----
+    f_hdr(tbl, r, "3. Trend Reading (TR)")
+    r += 1
+    f_row(tbl, r, "Not Overextended (5-SMA)", str.tostring(distSMA5ATR, "#.##") + " ATR", notOverextendedSMA5)
+    r += 1
+    f_row(tbl, r, "Not Overextended (N-Day Move)", str.tostring(netMoveATR, "#.##") + " ATR", notOverextendedSum)
+    r += 1
+    f_row(tbl, r, "Not Too Close to Daily R2", str.tostring(distToR2ATR, "#.##") + " ATR", notTooCloseR2)
+    r += 1
+    f_row(tbl, r, "Gap/VWAP OK", gapOccurred ? (vwapReturned ? "Returned" : "Not Returned") : "No Gap", gapVWAPok)
+    r += 1
+    f_row(tbl, r, "Innocent Bias (Long OK)", innocentBias ? "Yes" : "No", innocentBias)
+    r += 1
+    f_rowNeutral(tbl, r, "Guilty Bias (Veto Long)", guiltyBias ? "YES - AVOID" : "No", guiltyBias)          // caution flag, not scored directly (it vetoes TR to 0)
+    r += 1
+    f_rowNeutral(tbl, r, "First 5-Min Window", inWatchWindow ? "WATCH - DON'T ENTER" : "Clear", inWatchWindow) // caution flag, not scored
+    r += 1
+    f_row(tbl, r, "TR Score", str.tostring(trScoreFrac * 10, "#.#") + " / 10", trScoreFrac >= 0.6)
+    r += 1
+
+    // ---- Section 4: Risk (R) ----
+    f_hdr(tbl, r, "4. Risk (R)")
+    r += 1
+    f_row(tbl, r, "RvR >= Min", str.tostring(rvr, "#.##"), rvrOK)
+    r += 1
+    f_row(tbl, r, "Room Left in Today's ATR", str.tostring(atrUsedPct, "#.#") + "%", roomLeft)
+    r += 1
+    f_row(tbl, r, "Adequate Stop Distance", str.tostring(riskAmt / dATR, "#.##") + " ATR", adequateStopDistance)
+    r += 1
+    f_row(tbl, r, "Suggested Shares", str.tostring(suggestedShares, "#"), suggestedShares > 0)        // informational, sizing output
+    r += 1
+    f_row(tbl, r, "Position Value", "$" + str.tostring(positionValue, "#,###"), suggestedShares > 0)  // informational, sizing output
+    r += 1
+    f_row(tbl, r, "Stop Level", str.tostring(stopLevel, "#.##"), true)                                 // informational, sizing output
+    r += 1
+    f_row(tbl, r, "Risk Score", str.tostring(riskScoreFrac * 10, "#.#") + " / 10", riskScoreFrac >= 0.6)
+    r += 1
+
+    // ---- Overall score row — COMMENTED OUT (Step H disabled) ----
+    // f_hdr(tbl, r, "OVERALL (30-Min)")
+    // r += 1
+    // scoreColor = overallScore >= scoreGoodTh ? color.new(color.green, 40) : overallScore >= scoreWarnTh ? color.new(color.orange, 40) : color.new(color.red, 40)
+    // table.cell(tbl, 0, r, "SCORE (0-10)", bgcolor=scoreColor, text_color=color.white, text_halign=text.align_left, text_size=size.normal)
+    // table.cell(tbl, 1, r, str.tostring(overallScore, "#.#"), bgcolor=scoreColor, text_color=color.white, text_size=size.normal)
+    // r += 1

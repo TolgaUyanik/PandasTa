@@ -1,0 +1,238 @@
+//@version=6
+indicator("XRS IFVG Detector + Alerts", shorttitle="XRS IFVG", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+groupDetection = "IFVG Detection"
+minGapTicks = input.int(1, "Minimum Original FVG Size (Ticks)", minval=1, group=groupDetection)
+maxBarsToInvert = input.int(2000, "Maximum Bars From FVG to Inversion", minval=1, group=groupDetection,
+     tooltip="Invisible FVG candidates older than this are discarded.")
+confirmationMode = input.string("Candle Close", "IFVG Formation Requires", options=["Live Price", "Candle Close"], group=groupDetection,
+     tooltip="'Live Price' can identify an IFVG while the realtime candle is forming. 'Candle Close' waits for bar-close confirmation.")
+
+groupDisplay = "Display"
+bullColor = input.color(color.rgb(33, 150, 243), "Bullish IFVG Color", group=groupDisplay)
+bearColor = input.color(color.rgb(239, 83, 80), "Bearish IFVG Color", group=groupDisplay)
+lineWidth = input.int(2, "Midpoint Line Width", minval=1, maxval=5, group=groupDisplay)
+lineStyleInput = input.string("Solid", "Midpoint Line Style", options=["Solid", "Dashed", "Dotted"], group=groupDisplay)
+showLabels = input.bool(true, "Show Small IFVG Tags", group=groupDisplay)
+maxVisibleIFVGs = input.int(20, "Maximum IFVGs Remaining on Chart", minval=1, maxval=250, group=groupDisplay)
+
+groupRemoval = "Mitigation / Removal"
+removeOnMitigation = input.bool(true, "Remove IFVG After Midpoint Mitigation", group=groupRemoval)
+mitigationMethod = input.string("Wick", "Midpoint Mitigation Method", options=["Wick", "Candle Close"], group=groupRemoval)
+expirationBars = input.int(0, "Expire IFVG After X Bars", minval=0, group=groupRemoval,
+     tooltip="Set to 0 to disable time-based expiration.")
+
+groupAlerts = "Alerts"
+enableFormingAlerts = input.bool(true, "Enable Forming-Candle Alerts", group=groupAlerts,
+     tooltip="Triggers intrabar when live price first forms an IFVG. Create the TradingView alert with 'Once Per Bar'.")
+enableConfirmedAlerts = input.bool(true, "Enable Confirmed-Close Alerts", group=groupAlerts,
+     tooltip="Triggers only when the inversion candle closes and confirms the IFVG. Create the TradingView alert with 'Once Per Bar Close'.")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Helpers
+//──────────────────────────────────────────────────────────────────────────────
+lineStyle = switch lineStyleInput
+    "Dashed" => line.style_dashed
+    "Dotted" => line.style_dotted
+    => line.style_solid
+
+f_deleteVisibleAt(int index, array<line> lines, array<label> labels, array<float> mids, array<bool> bullish, array<int> createdBars) =>
+    line oldLine = array.get(lines, index)
+    label oldLabel = array.get(labels, index)
+    line.delete(oldLine)
+    if not na(oldLabel)
+        label.delete(oldLabel)
+    array.remove(lines, index)
+    array.remove(labels, index)
+    array.remove(mids, index)
+    array.remove(bullish, index)
+    array.remove(createdBars, index)
+
+f_trimVisible(array<line> lines, array<label> labels, array<float> mids, array<bool> bullish, array<int> createdBars, int maximum) =>
+    while array.size(lines) > maximum
+        f_deleteVisibleAt(0, lines, labels, mids, bullish, createdBars)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Invisible original-FVG storage
+//
+// A bullish FVG exists when low > high[2].
+// A bearish FVG exists when high < low[2].
+//
+// Bullish FVG broken downward  → bearish IFVG.
+// Bearish FVG broken upward    → bullish IFVG.
+//──────────────────────────────────────────────────────────────────────────────
+var array<float> fvgLower = array.new_float()
+var array<float> fvgUpper = array.new_float()
+var array<int>   fvgStart = array.new_int()
+var array<int>   fvgBorn  = array.new_int()
+var array<bool>  fvgBull  = array.new_bool()
+
+minimumGap = syminfo.mintick * minGapTicks
+
+newBullishFVG = bar_index >= 2 and low > high[2] and (low - high[2]) >= minimumGap
+newBearishFVG = bar_index >= 2 and high < low[2] and (low[2] - high) >= minimumGap
+
+if barstate.isnew
+    if newBullishFVG
+        array.push(fvgLower, high[2])
+        array.push(fvgUpper, low)
+        array.push(fvgStart, bar_index - 2)
+        array.push(fvgBorn, bar_index)
+        array.push(fvgBull, true)
+
+    if newBearishFVG
+        array.push(fvgLower, high)
+        array.push(fvgUpper, low[2])
+        array.push(fvgStart, bar_index - 2)
+        array.push(fvgBorn, bar_index)
+        array.push(fvgBull, false)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Visible confirmed/in-progress IFVG storage
+//──────────────────────────────────────────────────────────────────────────────
+var array<line>  ifvgLines = array.new_line()
+var array<label> ifvgLabels = array.new_label()
+var array<float> ifvgMids = array.new_float()
+var array<bool>  ifvgBullish = array.new_bool()
+var array<int>   ifvgCreatedBars = array.new_int()
+
+// Prevent duplicate realtime alerts on repeated ticks of the same candle.
+varip bool bullishFormingAlertSent = false
+varip bool bearishFormingAlertSent = false
+
+if barstate.isnew
+    bullishFormingAlertSent := false
+    bearishFormingAlertSent := false
+
+bool bullishIFVGForming = false
+bool bearishIFVGForming = false
+bool bullishIFVGConfirmed = false
+bool bearishIFVGConfirmed = false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Find inversions. Original FVGs remain invisible until this event.
+//──────────────────────────────────────────────────────────────────────────────
+if array.size(fvgLower) > 0
+    for i = array.size(fvgLower) - 1 to 0
+        float lower = array.get(fvgLower, i)
+        float upper = array.get(fvgUpper, i)
+        int startBar = array.get(fvgStart, i)
+        int bornBar = array.get(fvgBorn, i)
+        bool wasBullishFVG = array.get(fvgBull, i)
+
+        bool expiredCandidate = bar_index - bornBar > maxBarsToInvert
+        bool eligible = bar_index > bornBar
+
+        // A bullish FVG becomes a bearish IFVG below its lower boundary.
+        bool bearishLiveBreak = eligible and wasBullishFVG and low < lower
+        bool bearishCloseBreak = eligible and wasBullishFVG and close < lower
+
+        // A bearish FVG becomes a bullish IFVG above its upper boundary.
+        bool bullishLiveBreak = eligible and not wasBullishFVG and high > upper
+        bool bullishCloseBreak = eligible and not wasBullishFVG and close > upper
+
+        bool createBearish = confirmationMode == "Live Price" ? bearishLiveBreak : bearishCloseBreak and barstate.isconfirmed
+        bool createBullish = confirmationMode == "Live Price" ? bullishLiveBreak : bullishCloseBreak and barstate.isconfirmed
+
+        bullishIFVGForming := bullishIFVGForming or bullishLiveBreak
+        bearishIFVGForming := bearishIFVGForming or bearishLiveBreak
+        bullishIFVGConfirmed := bullishIFVGConfirmed or (bullishCloseBreak and barstate.isconfirmed)
+        bearishIFVGConfirmed := bearishIFVGConfirmed or (bearishCloseBreak and barstate.isconfirmed)
+
+        if createBullish or createBearish
+            bool isBullishIFVG = createBullish
+            float midpoint = (lower + upper) / 2.0
+            color chosenColor = isBullishIFVG ? bullColor : bearColor
+
+            // Start at the first candle of the original 3-candle FVG and finish
+            // one candle to the right of the inversion candle.
+            line newLine = line.new(
+                 x1=startBar,
+                 y1=midpoint,
+                 x2=bar_index + 1,
+                 y2=midpoint,
+                 xloc=xloc.bar_index,
+                 extend=extend.none,
+                 color=chosenColor,
+                 style=lineStyle,
+                 width=lineWidth)
+
+            label newLabel = na
+            if showLabels
+                newLabel := label.new(
+                     x=bar_index + 1,
+                     y=midpoint,
+                     text="IFVG",
+                     xloc=xloc.bar_index,
+                     yloc=yloc.price,
+                     style=isBullishIFVG ? label.style_label_up : label.style_label_down,
+                     color=color.new(chosenColor, 80),
+                     textcolor=chosenColor,
+                     size=size.tiny)
+
+            array.push(ifvgLines, newLine)
+            array.push(ifvgLabels, newLabel)
+            array.push(ifvgMids, midpoint)
+            array.push(ifvgBullish, isBullishIFVG)
+            array.push(ifvgCreatedBars, bar_index)
+
+            array.remove(fvgLower, i)
+            array.remove(fvgUpper, i)
+            array.remove(fvgStart, i)
+            array.remove(fvgBorn, i)
+            array.remove(fvgBull, i)
+
+            f_trimVisible(ifvgLines, ifvgLabels, ifvgMids, ifvgBullish, ifvgCreatedBars, maxVisibleIFVGs)
+
+        else if expiredCandidate
+            array.remove(fvgLower, i)
+            array.remove(fvgUpper, i)
+            array.remove(fvgStart, i)
+            array.remove(fvgBorn, i)
+            array.remove(fvgBull, i)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Remove visible IFVGs after midpoint mitigation and/or time expiration.
+// The creation candle is excluded so an IFVG cannot delete itself immediately.
+//──────────────────────────────────────────────────────────────────────────────
+if array.size(ifvgLines) > 0
+    for i = array.size(ifvgLines) - 1 to 0
+        float midpoint = array.get(ifvgMids, i)
+        bool isBullishIFVG = array.get(ifvgBullish, i)
+        int createdBar = array.get(ifvgCreatedBars, i)
+
+        bool afterCreation = bar_index > createdBar
+
+        bool wickMitigated = isBullishIFVG ? low <= midpoint : high >= midpoint
+        bool closeMitigated = isBullishIFVG ? close <= midpoint : close >= midpoint
+        bool midpointMitigated = mitigationMethod == "Wick" ? wickMitigated : closeMitigated
+
+        bool removeForMitigation = removeOnMitigation and afterCreation and midpointMitigated
+        bool removeForExpiration = expirationBars > 0 and bar_index - createdBar >= expirationBars
+
+        if removeForMitigation or removeForExpiration
+            f_deleteVisibleAt(i, ifvgLines, ifvgLabels, ifvgMids, ifvgBullish, ifvgCreatedBars)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Alerts
+//──────────────────────────────────────────────────────────────────────────────
+bool bullishFormingTrigger = enableFormingAlerts and bullishIFVGForming and not bullishFormingAlertSent
+bool bearishFormingTrigger = enableFormingAlerts and bearishIFVGForming and not bearishFormingAlertSent
+bool bullishConfirmedTrigger = enableConfirmedAlerts and bullishIFVGConfirmed
+bool bearishConfirmedTrigger = enableConfirmedAlerts and bearishIFVGConfirmed
+
+if bullishFormingTrigger
+    bullishFormingAlertSent := true
+
+if bearishFormingTrigger
+    bearishFormingAlertSent := true
+
+alertcondition(bullishFormingTrigger, "Bullish IFVG Forming", "Bullish IFVG is forming on {{ticker}} {{interval}} at {{close}}.")
+alertcondition(bearishFormingTrigger, "Bearish IFVG Forming", "Bearish IFVG is forming on {{ticker}} {{interval}} at {{close}}.")
+alertcondition(bullishConfirmedTrigger, "Bullish IFVG Confirmed", "Bullish IFVG confirmed on {{ticker}} {{interval}} at {{close}}.")
+alertcondition(bearishConfirmedTrigger, "Bearish IFVG Confirmed", "Bearish IFVG confirmed on {{ticker}} {{interval}} at {{close}}.")
+
+alertcondition(bullishConfirmedTrigger or bearishConfirmedTrigger, "Any IFVG Confirmed", "An IFVG confirmed on {{ticker}} {{interval}} at {{close}}.")

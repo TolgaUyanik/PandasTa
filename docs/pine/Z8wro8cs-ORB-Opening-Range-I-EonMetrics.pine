@@ -1,0 +1,219 @@
+//@version=6
+indicator('EonMetrics ORB — Opening Range', 'ORB by EonMetrics', overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=100)
+
+// ORB by EonMetrics — Opening Range Breakout levels (open-source).
+//
+// The first X minutes of a session define the day's opening range. The high and
+// low of that window are the reference levels for the rest of the session:
+//   • range window drawn as a box, then FROZEN — high/low lines extend until the
+//     next session's window begins
+//   • optional extension levels at ±0.5 / ±1 / ±1.5 / ±2 × range height
+//   • breakout status: the first CLOSE outside the range tags the day (▲/▼);
+//     a close back INSIDE within K bars tags a FAILED breakout and re-arms the day
+//   • last D days kept on the chart so the eye can judge how the instrument
+//     actually behaves around its opening range
+//
+// Extension levels are reference levels, NOT targets. No signals, no trade
+// suggestions — annotation only. Breakout state advances on confirmed closes.
+//
+// MARKET NOTE: the concept assumes a session with a real open (indices, metals,
+// forex). On 24/7 crypto a "session open" is a convention — the tool still
+// works, but the premise is weaker there.
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SESSION
+// ═════════════════════════════════════════════════════════════════════════════
+grpSes = 'Session'
+
+preset = input.string('New York 09:30', 'Session Preset', options=['New York 09:30', 'London 08:00', 'Tokyo 09:00', 'Custom'], group=grpSes,
+  tooltip = 'Which session open anchors the range. New York 09:30 = US equities/index open (the classic ORB). Custom = set your own time and timezone below.')
+
+durMin = input.int(30, 'Opening Range Length (minutes)', options=[5, 15, 30, 45, 60], group=grpSes,
+  tooltip = 'How many minutes after the open build the range. 30 (default) and 15 are the classic choices. Must be at least one chart bar long — on a chart timeframe larger than this window the indicator stays empty.')
+
+cusH = input.int(9,  'Custom Open — Hour',   minval=0, maxval=23, inline='cus', group=grpSes)
+cusM = input.int(30, 'Minute', minval=0, maxval=59, inline='cus', group=grpSes,
+  tooltip = 'Used only when Session Preset = Custom.')
+
+cusTz = input.string('Exchange', 'Custom Timezone', options=['Exchange', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Asia/Hong_Kong', 'Australia/Sydney', 'UTC'], group=grpSes,
+  tooltip = 'Timezone for the Custom open time. Presets use their own market timezone automatically. Exchange = the chart symbol\'s exchange timezone.')
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  LEVELS & BREAKOUT
+// ═════════════════════════════════════════════════════════════════════════════
+grpLvl = 'Levels & Breakout'
+
+ext05 = input.bool(true,  '±0.5x', inline='ext', group=grpLvl)
+ext10 = input.bool(true,  '±1x',   inline='ext', group=grpLvl)
+ext15 = input.bool(false, '±1.5x', inline='ext', group=grpLvl)
+ext20 = input.bool(false, '±2x',   inline='ext', group=grpLvl,
+  tooltip = 'Extension levels projected above the range high and below the range low, in multiples of the range height. Reference levels only — the script does not call them targets, because they are not.')
+
+failK = input.int(6, 'Failed Breakout Window (bars)', minval=1, maxval=50, group=grpLvl,
+  tooltip = 'After a close outside the range, a close back INSIDE within this many bars tags the move as a FAILED breakout and re-arms the day (a later breakout in either direction can then tag again).')
+
+histDays = input.int(5, 'Days of History', minval=1, maxval=20, group=grpLvl,
+  tooltip = 'How many past opening ranges stay on the chart. More days = better eyeball statistics, busier chart.')
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  STYLE
+// ═════════════════════════════════════════════════════════════════════════════
+grpSty = 'Style'
+
+rngC  = input.color(color.new(#2196f3, 0), 'Range', inline='c1', group=grpSty)
+upC   = input.color(#089981, 'Breakout Up', inline='c1', group=grpSty)
+dnC   = input.color(#f23645, 'Breakout Down', inline='c1', group=grpSty)
+
+boxFill = input.bool(true, 'Fill Range Box', group=grpSty)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  WINDOW DETECTION
+// ═════════════════════════════════════════════════════════════════════════════
+int startH = preset == 'London 08:00' ? 8 : preset == 'Tokyo 09:00' ? 9 : preset == 'Custom' ? cusH : 9
+int startM = preset == 'New York 09:30' ? 30 : preset == 'Custom' ? cusM : 0
+
+string tzStr = preset == 'New York 09:30' ? 'America/New_York' : preset == 'London 08:00' ? 'Europe/London' : preset == 'Tokyo 09:00' ? 'Asia/Tokyo' : cusTz == 'Exchange' ? syminfo.timezone : cusTz
+
+// build the '"HHMM-HHMM"' window string from open time + duration (wraps past midnight)
+int endTot = (startH * 60 + startM + durMin) % 1440
+string winStr = str.tostring(startH, '00') + str.tostring(startM, '00') + '-' + str.tostring(endTot / 60, '00') + str.tostring(endTot % 60, '00')
+
+bool okTf = timeframe.isintraday and timeframe.in_seconds() <= durMin * 60
+
+bool inWin    = okTf and not na(time(timeframe.period, winStr, tzStr))
+bool winStart = inWin and not inWin[1]
+bool winEnd   = not inWin and inWin[1]
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  STATE
+// ═════════════════════════════════════════════════════════════════════════════
+type Day
+    box   bx
+    line  hiLn
+    line  loLn
+    array<line>  exts
+    array<label> lbls
+    float hi
+    float lo
+    bool  done    // next session started → right edge frozen
+    int   bkDir   // 0 = armed · 1 = broke up · -1 = broke down
+    int   bkBar
+
+var array<Day> days = array.new<Day>()
+
+// building window state
+var bool  building = false
+var float bHi = na
+var float bLo = na
+var int   bStart = na
+
+// per-bar event flags
+bool evRange = false
+bool evUp    = false
+bool evDn    = false
+bool evFail  = false
+
+f_wipeDay(Day D) =>
+    box.delete(D.bx)
+    line.delete(D.hiLn)
+    line.delete(D.loLn)
+    if array.size(D.exts) > 0
+        for j = 0 to array.size(D.exts) - 1
+            line.delete(array.get(D.exts, j))
+    if array.size(D.lbls) > 0
+        for j = 0 to array.size(D.lbls) - 1
+            label.delete(array.get(D.lbls, j))
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  RANGE ENGINE
+// ═════════════════════════════════════════════════════════════════════════════
+// a new window opens → freeze the previous day's right edge, start collecting
+if winStart
+    if array.size(days) > 0
+        Day prev = array.get(days, array.size(days) - 1)
+        prev.done := true
+    building := true
+    bHi := high
+    bLo := low
+    bStart := bar_index
+
+// collect the range while inside the window
+if inWin and building
+    bHi := math.max(bHi, high)
+    bLo := math.min(bLo, low)
+
+// window closed → freeze the range, draw everything
+if winEnd and building
+    building := false
+    float rngH = bHi - bLo
+    box bx = box.new(bStart, bHi, bar_index - 1, bLo,
+      bgcolor      = boxFill ? color.new(rngC, 88) : color.new(rngC, 100),
+      border_color = color.new(rngC, 45),
+      border_width = 1)
+    line hiLn = line.new(bar_index - 1, bHi, bar_index, bHi, color=rngC, width=2)
+    line loLn = line.new(bar_index - 1, bLo, bar_index, bLo, color=rngC, width=2)
+    array<line> exts = array.new<line>()
+    if rngH > 0
+        if ext05
+            array.push(exts, line.new(bar_index - 1, bHi + 0.5 * rngH, bar_index, bHi + 0.5 * rngH, color=color.new(rngC, 55), style=line.style_dotted))
+            array.push(exts, line.new(bar_index - 1, bLo - 0.5 * rngH, bar_index, bLo - 0.5 * rngH, color=color.new(rngC, 55), style=line.style_dotted))
+        if ext10
+            array.push(exts, line.new(bar_index - 1, bHi + rngH, bar_index, bHi + rngH, color=color.new(rngC, 55), style=line.style_dotted))
+            array.push(exts, line.new(bar_index - 1, bLo - rngH, bar_index, bLo - rngH, color=color.new(rngC, 55), style=line.style_dotted))
+        if ext15
+            array.push(exts, line.new(bar_index - 1, bHi + 1.5 * rngH, bar_index, bHi + 1.5 * rngH, color=color.new(rngC, 55), style=line.style_dotted))
+            array.push(exts, line.new(bar_index - 1, bLo - 1.5 * rngH, bar_index, bLo - 1.5 * rngH, color=color.new(rngC, 55), style=line.style_dotted))
+        if ext20
+            array.push(exts, line.new(bar_index - 1, bHi + 2.0 * rngH, bar_index, bHi + 2.0 * rngH, color=color.new(rngC, 55), style=line.style_dotted))
+            array.push(exts, line.new(bar_index - 1, bLo - 2.0 * rngH, bar_index, bLo - 2.0 * rngH, color=color.new(rngC, 55), style=line.style_dotted))
+    array.push(days, Day.new(bx, hiLn, loLn, exts, array.new<label>(), bHi, bLo, false, 0, na))
+    evRange := true
+    // history cap
+    while array.size(days) > histDays
+        Day old = array.get(days, 0)
+        f_wipeDay(old)
+        array.remove(days, 0)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  TRAILING + BREAKOUT — current day only, state on confirmed closes
+// ═════════════════════════════════════════════════════════════════════════════
+if array.size(days) > 0
+    Day D = array.get(days, array.size(days) - 1)
+    if not D.done
+        // trail lines to the live bar
+        line.set_x2(D.hiLn, bar_index)
+        line.set_x2(D.loLn, bar_index)
+        if array.size(D.exts) > 0
+            for j = 0 to array.size(D.exts) - 1
+                line.set_x2(array.get(D.exts, j), bar_index)
+        // breakout state machine — closes only, never wicks
+        if barstate.isconfirmed and not inWin
+            if D.bkDir == 0
+                if close > D.hi
+                    D.bkDir := 1
+                    D.bkBar := bar_index
+                    label lb = label.new(bar_index, D.hi, 'ORB ▲', style=label.style_label_up, color=color.new(upC, 100), textcolor=upC, size=size.small)
+                    array.push(D.lbls, lb)
+                    evUp := true
+                else if close < D.lo
+                    D.bkDir := -1
+                    D.bkBar := bar_index
+                    label lb = label.new(bar_index, D.lo, 'ORB ▼', style=label.style_label_down, color=color.new(dnC, 100), textcolor=dnC, size=size.small)
+                    array.push(D.lbls, lb)
+                    evDn := true
+            else
+                bool inside = close < D.hi and close > D.lo
+                if inside and bar_index - D.bkBar <= failK
+                    label lb = label.new(bar_index, D.bkDir == 1 ? D.hi : D.lo, 'FAIL', style=D.bkDir == 1 ? label.style_label_down : label.style_label_up, color=color.new(color.gray, 100), textcolor=color.gray, size=size.tiny)
+                    array.push(D.lbls, lb)
+                    evFail := true
+                    D.bkDir := 0     // re-arm — the day can break out again
+                    D.bkBar := na
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ALERTS
+// ═════════════════════════════════════════════════════════════════════════════
+alertcondition(evRange, title='1. Opening range set',       message='ORB: the opening range is locked in — high/low levels are live.')
+alertcondition(evUp,    title='2. Breakout above the range', message='ORB: first close above the opening range high.')
+alertcondition(evDn,    title='3. Breakout below the range', message='ORB: first close below the opening range low.')
+alertcondition(evFail,  title='4. Failed breakout',          message='ORB: price closed back inside the opening range — failed breakout.')

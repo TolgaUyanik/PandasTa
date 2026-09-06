@@ -1,0 +1,245 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// ┬® Lovevanshi (rewritten/fixed by Gautham Dhanaraju) 
+
+//@version=6
+strategy("V20 strat", shorttitle="V20 strat",
+     overlay=true, default_qty_type=strategy.cash, default_qty_value=10000,
+     pyramiding=1000, process_orders_on_close=true)
+
+// ---- Inputs: Position sizing ----
+// Fixed cash amount per trade, independent of current equity ÔÇö this is what
+// makes unlimited concurrent trades safe. percent_of_equity sizing broke
+// once several trades were open simultaneously and equity dipped negative
+// on paper; a fixed cash amount can never produce a negative order size.
+cashPerTrade = input.float(10000.0, "Cash Amount per Trade (INR)", minval=0.0, group="Orders")
+
+// ---- Inputs: Pattern detection ----
+minGainPct  = input.float(20.0, "Minimum Gain % (from run's low)", minval=0.1, group="Pattern") / 100.0
+minRunLen   = input.int(2,  "Minimum consecutive green candles required", minval=1, group="Pattern")
+
+// ---- Inputs: Visuals ----
+showZones  = input.bool(true, "Show buy/sell zone lines", group="Visuals")
+extendBars = input.int(10, "Extend lines forward by (bars)", minval=1, group="Visuals")
+
+// ---- Inputs: Filters ----
+maPeriod = input.int(200, "Moving Average Period (DMA)", minval=1, group="Filters")
+ma200    = ta.sma(close, maPeriod)
+
+exemptListStr = input.text_area("LT,RELIANCE,SBIN,HDFCBANK,ICICIBANK,AXISBANK,KOTAKBANK,HCLTECH,INFY,TCS,HDFCAMC,NAM-INDIA,HDFCLIFE,ICICIPRULI,ICICIGI,BAJAJFINSV,BAJAJHLDNG,BAJFINANCE,BAJAJ-AUTO,MARUTI,HINDUNILVR,NESTLEIND,PGHH,PIDILITIND,COLPAL,DABUR,GILLETTE,MARICO,ITC,TITAN,PAGEIND,BATAINDIA,HAVELLS,VOLTAS,GLAXO,ABBOTIND,PFIZER,SANOFI,ASIANPAINT,BERGERPAINT,CDSL,BSE,JIOFIN,ANGELONE,CAMS,BAJAJHFL,MCX,ULTRACEMCO,ACC,TEAMLEASE,QUESS,ASTRAZEN,CIPLA,ERIS,LALPATHLAB,APOLLOHOSP,MEDANTA,FORTIS,ADANIPORTS,JSWINFRA,AWL,GODREJCP,DIXON,KAJARIACER,HONAUT,DMART,RELAXO,BLUESTARCO,BOSCHLTD,EICHERMOT,MRF,M&M,TATAMOTORS,HYUNDAI,INDHOTEL,ITCHOTELS,UNITDSPR,RADICO,UBL,VBL",
+     title="Stocks EXEMPT from DMA Rule (comma-separated NSE tickers)", group="Filters")
+
+dmaOverride = input.string("Auto (use list)", title="DMA Filter Override",
+     options=["Auto (use list)", "Force DMA Filter ON", "Force DMA Filter OFF"], group="Filters")
+
+// Parse the exempt list once, at the very first bar.
+var array<string> exemptTickers = array.new_string()
+if barstate.isfirst
+    rawParts = str.split(exemptListStr, ",")
+    if array.size(rawParts) > 0
+        for idx = 0 to array.size(rawParts) - 1
+            trimmed = str.trim(array.get(rawParts, idx))
+            if str.length(trimmed) > 0
+                array.push(exemptTickers, trimmed)
+
+isExemptStock = array.includes(exemptTickers, syminfo.ticker)
+
+// Auto: exempt-list stocks skip the DMA check entirely; everyone else needs
+// base < DMA. Override dropdown forces the filter on/off for all stocks,
+// ignoring the list (useful for quick testing).
+applyDmaFilter = dmaOverride == "Force DMA Filter ON" ? true : dmaOverride == "Force DMA Filter OFF" ? false : not isExemptStock
+
+// ---- Green candle definition (unchanged) ----
+greenCandle = close > open or (close == open and open > low[1])
+
+// ---- Consecutive green candle count (uncapped) ----
+var int consecGreen = 0
+consecGreen := greenCandle ? nz(consecGreen[1]) + 1 : 0
+runLength = consecGreen
+
+highestInRun = runLength > 0 ? ta.highest(high, runLength) : na
+lowestInRun  = runLength > 0 ? ta.lowest(low,  runLength) : na
+gain = (runLength > 0 and not na(lowestInRun) and lowestInRun != 0) ? (highestInRun - lowestInRun) / lowestInRun : na
+
+// ---- Signal: only the LAST green candle of a qualifying run ----
+// A run can only be confirmed "done" once we see the NEXT candle fail the
+// green test ÔÇö checking every bar while runLength/gain keep climbing would
+// fire the signal repeatedly (once per bar) for the whole remainder of the
+// run. So we look one bar back: was yesterday's candle the final green bar
+// of a qualifying run? That's knowable today (yesterday is closed data),
+// so this doesn't repaint. plotshape below uses offset=-1 to visually place
+// the marker back on that actual last green candle.
+runEnded = not greenCandle and greenCandle[1]
+signal = runEnded and runLength[1] >= minRunLen and not na(gain[1]) and gain[1] > minGainPct
+
+// Trade is valid if either the DMA filter doesn't apply to this stock
+// (exempt list or override), or it does apply AND the run's base sits
+// below the DMA as of the run's own last bar.
+tradeAllowed = signal and (not applyDmaFilter or (not na(ma200[1]) and lowestInRun[1] < ma200[1]))
+
+// ---- Per-trade tracking (parallel arrays, one slot per active/pending trade) ----
+var array<string> tradeIds   = array.new_string()
+var array<float>  tradeBase  = array.new_float()
+var array<float>  tradeTop   = array.new_float()
+var array<float>  tradeQtys  = array.new_float()
+var array<int>    tradeSetBar= array.new_int()
+var array<int>    tradeRunStart = array.new_int()
+var array<bool>   visualsCreated = array.new_bool()
+var array<line>   baseLines  = array.new_line()
+var array<line>   topLines   = array.new_line()
+var array<label>  baseLbls   = array.new_label()
+var array<label>  topLbls    = array.new_label()
+
+// ---- Arm a brand-new, fully independent trade on every valid signal ----
+// No "in position" guard here anymore ÔÇö each signal gets its own ID, so an
+// existing open or pending trade can never block a new one.
+if tradeAllowed
+    runEndBar   = bar_index - 1                  // the actual last green candle
+    baseThisRun = lowestInRun[1]
+    topThisRun  = high[1]
+    runLenThisRun = runLength[1]
+    runStartBar = runEndBar - runLenThisRun + 1
+
+    newId = "Long_" + str.tostring(runEndBar)
+    array.push(tradeIds, newId)
+    array.push(tradeBase, baseThisRun)
+    array.push(tradeTop, topThisRun)
+    array.push(tradeSetBar, runEndBar)
+    array.push(tradeRunStart, runStartBar)
+    array.push(visualsCreated, false)
+    tradeQty = cashPerTrade / baseThisRun
+    array.push(tradeQtys, tradeQty)
+    strategy.entry(newId, strategy.long, qty=tradeQty, limit=baseThisRun)
+
+    // No lines/labels yet ÔÇö only the plotshape triangle marks this while
+    // it's just a pending pullback order. BUY/TARGET labels and zone lines
+    // only appear once the trade actually fills (see management loop below).
+    array.push(baseLines, na)
+    array.push(topLines, na)
+    array.push(baseLbls, na)
+    array.push(topLbls, na)
+
+// ---- Manage every tracked trade independently, each bar ----
+// Loop backwards since closed/invalidated trades get removed mid-loop.
+// Guarded with size checks: in Pine, "for x = 0 to n-1" does NOT skip when
+// n=0 ÔÇö it still executes at least once with an invalid negative index,
+// which throws a runtime error and silently halts the whole script. Every
+// loop below is wrapped in an explicit size > 0 check to avoid that.
+if array.size(tradeIds) > 0
+    for i = array.size(tradeIds) - 1 to 0
+        id      = array.get(tradeIds, i)
+        base    = array.get(tradeBase, i)
+        top     = array.get(tradeTop, i)
+        qty     = array.get(tradeQtys, i)
+        setBar  = array.get(tradeSetBar, i)
+        runStart = array.get(tradeRunStart, i)
+        created = array.get(visualsCreated, i)
+
+        // Is this id currently an OPEN (filled) trade?
+        isOpen = false
+        if strategy.opentrades > 0
+            for j = 0 to strategy.opentrades - 1
+                if strategy.opentrades.entry_id(j) == id
+                    isOpen := true
+
+        // Is this id already a CLOSED trade (target hit, done)?
+        isClosed = false
+        if strategy.closedtrades > 0
+            for k = 0 to strategy.closedtrades - 1
+                if strategy.closedtrades.entry_id(k) == id
+                    isClosed := true
+
+        if isOpen
+            // Filled ÔÇö manage its own independent exit at its own target,
+            // with an EXPLICIT qty so this order can only ever close this
+            // trade's own shares, never another open trade's.
+            strategy.exit("Exit_" + id, from_entry=id, qty=qty, limit=top)
+
+            if showZones
+                if not created
+                    // First bar we see this trade as filled ÔÇö draw the
+                    // BUY/TARGET labels and zone lines now, not before.
+                    bLine = line.new(runStart, base, setBar, base, color=color.lime, style=line.style_dashed)
+                    tLine = line.new(runStart, top, setBar, top, color=color.orange, style=line.style_dashed)
+                    bLbl  = label.new(setBar, base, "BUY " + str.tostring(base, format.mintick), style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
+                    tLbl  = label.new(setBar, top, "TARGET " + str.tostring(top, format.mintick), style=label.style_label_down, color=color.orange, textcolor=color.black, size=size.small)
+                    array.set(baseLines, i, bLine)
+                    array.set(topLines, i, tLine)
+                    array.set(baseLbls, i, bLbl)
+                    array.set(topLbls, i, tLbl)
+                    array.set(visualsCreated, i, true)
+                else
+                    lineEndBar = math.min(bar_index, setBar + extendBars)
+                    line.set_x2(array.get(baseLines, i), lineEndBar)
+                    line.set_x2(array.get(topLines, i), lineEndBar)
+
+        else if isClosed
+            // Target reached and trade fully closed ÔÇö stop tracking it.
+            array.remove(tradeIds, i)
+            array.remove(tradeBase, i)
+            array.remove(tradeTop, i)
+            array.remove(tradeQtys, i)
+            array.remove(tradeSetBar, i)
+            array.remove(tradeRunStart, i)
+            array.remove(visualsCreated, i)
+            array.remove(baseLines, i)
+            array.remove(topLines, i)
+            array.remove(baseLbls, i)
+            array.remove(topLbls, i)
+
+        else
+            // Still a PENDING (unfilled) pullback limit order. No
+            // invalidation or expiry ÔÇö it stays live indefinitely, however
+            // far price moves below the base, until it eventually fills.
+            // Nothing to draw yet ÔÇö only the plotshape triangle marks this
+            // stage; lines/labels are created above once it actually fills.
+            true
+
+plot(ma200, title="DMA", color=color.new(color.blue, 0), linewidth=1)
+plotshape(signal and not tradeAllowed, style=shape.triangleup, location=location.abovebar, color=color.new(color.gray, 0), size=size.tiny, title="Run Signal (filtered out ÔÇö base above DMA)", offset=-1)
+plotshape(tradeAllowed, style=shape.triangleup, location=location.abovebar, color=color.new(color.green, 0), size=size.tiny, title="Run Signal (trade taken)", offset=-1)
+
+// ---- Debug: hover any candle to see these in the Data Window ----
+// consecGreen resets to 0 the moment a bar fails the greenCandle test ÔÇö
+// use this to pinpoint exactly which bar breaks a visually-continuous run.
+// gainPctPlot shows the run's gain at THAT bar; watch it to see whether it
+// ever actually crosses your minGainPct threshold, or falls just short.
+plot(consecGreen, title="DEBUG: Consecutive Green Count", display=display.data_window)
+plot(na(gain) ? na : gain * 100, title="DEBUG: Run Gain %", display=display.data_window)
+plot(greenCandle ? 1 : 0, title="DEBUG: Is Green Candle (1/0)", display=display.data_window)
+
+// ---- Trade Stats Table ----
+var table statsTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    openCount   = strategy.opentrades
+    closedCount = strategy.closedtrades
+
+    totalBars   = 0.0
+    totalProfit = 0.0
+    // Guarded: "for m = 0 to closedCount - 1" would run once with an
+    // invalid index if closedCount is 0 (Pine for-loop quirk) ÔÇö so only
+    // enter the loop when there's actually at least one closed trade.
+    if closedCount > 0
+        for m = 0 to closedCount - 1
+            entryBar = strategy.closedtrades.entry_bar_index(m)
+            exitBar  = strategy.closedtrades.exit_bar_index(m)
+            totalBars   += (exitBar - entryBar)
+            totalProfit += strategy.closedtrades.profit(m)
+
+    avgBars   = closedCount > 0 ? totalBars / closedCount : na
+    avgProfit = closedCount > 0 ? (totalProfit / closedCount)/100 : na
+
+    table.cell(statsTable, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(statsTable, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.gray, 40))
+
+    table.cell(statsTable, 0, 1, "Open Trades", text_color=color.white)
+    table.cell(statsTable, 1, 1, str.tostring(openCount), text_color=color.white)
+
+    table.cell(statsTable, 0, 2, "Closed Trades", text_color=color.white)
+    table.cell(statsTable, 1, 2, str.tostring(closedCount), text_color=color.white)
+
+    table.cell(statsTable, 0, 3, "Avg Bars Held (closed)", text_color=color.white)
+    table.cell(statsTable, 1, 3, na(avgBars) ? "N/A" : str.tostring(avgBars, "#.##"), text_color=color.white)
+
+    table.cell(statsTable, 0, 4, "Avg Profit (closed)", text_color=color.white)
+    table.cell(statsTable, 1, 4, na(avgProfit) ? "N/A" : str.tostring(avgProfit, "#.##"), text_color=na(avgProfit) ? color.white : (avgProfit >= 0 ? color.green : color.red))

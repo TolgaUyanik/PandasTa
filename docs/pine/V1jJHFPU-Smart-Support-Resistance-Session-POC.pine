@@ -1,0 +1,416 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © elsrodriguez1
+
+//@version=6
+indicator(
+     "Smart Support & Resistance + Session POC",
+     "Smart S/R + POC",
+     overlay = true,
+     behind_chart = true,
+     max_boxes_count = 200,
+     max_bars_back = 5000)
+
+//=============================================================================
+// INPUTS
+//=============================================================================
+
+string GROUP_DETECTION = "1. Zone Detection"
+string detectionTf = input.timeframe("60", "Zone detection timeframe", group = GROUP_DETECTION,
+     tooltip = "Zones are calculated from confirmed bars on this timeframe. Keep this timeframe equal to or above the chart timeframe.")
+int pivotLeft = input.int(3, "Pivot bars left", minval = 1, maxval = 20, group = GROUP_DETECTION)
+int pivotRight = input.int(3, "Pivot bars right", minval = 1, maxval = 20, group = GROUP_DETECTION,
+     tooltip = "More right-side bars produce slower but more selective confirmation.")
+int minimumRejections = input.int(2, "Minimum rejections", minval = 2, maxval = 10, group = GROUP_DETECTION)
+int strongRejectionsInput = input.int(3, "Strong-zone rejections", minval = 2, maxval = 15, group = GROUP_DETECTION)
+int minimumBarsBetween = input.int(3, "Minimum bars between rejections", minval = 1, maxval = 100, group = GROUP_DETECTION)
+int rejectionWickTicks = input.int(4, "Minimum rejection wick (ticks)", minval = 0, maxval = 500, group = GROUP_DETECTION,
+     tooltip = "Resistance requires the pivot candle to close this far below its high. Support requires it to close this far above its low. Set to 0 to disable.")
+bool useApproachFilter = input.bool(true, "Require correct approach direction", group = GROUP_DETECTION,
+     tooltip = "Resistance should be approached from below. Support should be approached from above.")
+bool useDepartureFilter = input.bool(true, "Require displacement after rejection", group = GROUP_DETECTION)
+string departureMode = input.string("Ticks", "Displacement mode", options = ["Ticks", "ATR"], group = GROUP_DETECTION)
+int departureTicks = input.int(20, "Minimum displacement (ticks)", minval = 1, maxval = 2000, group = GROUP_DETECTION)
+int departureBarsInput = input.int(3, "Displacement window (bars)", minval = 1, maxval = 20, group = GROUP_DETECTION,
+     tooltip = "The usable window cannot exceed Pivot bars right because the rejection must remain confirmed and non-repainting.")
+int atrLength = input.int(14, "ATR length", minval = 1, maxval = 200, group = GROUP_DETECTION)
+float atrMultiplier = input.float(0.50, "ATR displacement multiplier", minval = 0.05, maxval = 10.0, step = 0.05, group = GROUP_DETECTION)
+
+string GROUP_ZONE = "2. Zone Construction & Life"
+int zoneTicks = input.int(20, "Zone thickness (ticks)", minval = 1, maxval = 2000, group = GROUP_ZONE)
+int mergeToleranceTicks = input.int(8, "Zone merge tolerance (ticks)", minval = 0, maxval = 1000, group = GROUP_ZONE)
+int freshnessDays = input.int(10, "Zone freshness lookback (days)", minval = 1, maxval = 365, group = GROUP_ZONE,
+     tooltip = "A level is removed when its most recent valid rejection is older than this many days.")
+string extensionMode = input.string("Until broken", "Zone length", options = ["Until broken", "Fixed detection bars"], group = GROUP_ZONE)
+int fixedLengthBars = input.int(100, "Fixed length (detection bars)", minval = 1, maxval = 5000, group = GROUP_ZONE)
+string breakTimeframeMode = input.string("Detection timeframe", "Break confirmation candle", options = ["Detection timeframe", "Chart timeframe"], group = GROUP_ZONE,
+     tooltip = "Detection timeframe is recommended so a 1-minute close does not invalidate a 1-hour zone.")
+int breakBufferTicks = input.int(4, "Break buffer (ticks)", minval = 0, maxval = 1000, group = GROUP_ZONE)
+int maxTrackedLevels = input.int(60, "Maximum tracked levels", minval = 10, maxval = 200, group = GROUP_ZONE,
+     tooltip = "Includes hidden one-rejection candidates and visible confirmed zones.")
+
+string GROUP_PROFILE = "3. Session Volume Profile Confluence"
+bool useProfilePoc = input.bool(true, "Use completed-profile POC confluence", group = GROUP_PROFILE)
+string profileTf = input.timeframe("1D", "Profile timeframe", group = GROUP_PROFILE,
+     tooltip = "Use 1D for one completed daily/session profile. This timeframe must be above the chart timeframe.")
+string profileSessionMode = input.string("Exchange regular", "Profile session", options = ["Exchange regular", "Extended/full"], group = GROUP_PROFILE,
+     tooltip = "Exchange regular uses TradingView's exchange-defined regular session. Extended/full includes the extended session when the symbol supports it.")
+int profileLookback = input.int(5, "POC lookback (completed profiles)", minval = 1, maxval = 30, group = GROUP_PROFILE)
+int profileRowTicks = input.int(4, "Footprint row size (ticks)", minval = 1, maxval = 1000, group = GROUP_PROFILE)
+float profileVaPercent = input.float(70.0, "Value area percent", minval = 1.0, maxval = 100.0, step = 1.0, group = GROUP_PROFILE)
+int pocToleranceTicks = input.int(0, "POC overlap tolerance (ticks)", minval = 0, maxval = 1000, group = GROUP_PROFILE)
+
+string GROUP_STYLE = "4. Appearance"
+color supportColor = input.color(color.rgb(0, 170, 110), "Support color", group = GROUP_STYLE)
+color resistanceColor = input.color(color.rgb(210, 55, 70), "Resistance color", group = GROUP_STYLE)
+int regularOpacity = input.int(50, "Regular zone opacity (%)", minval = 0, maxval = 100, group = GROUP_STYLE)
+int strongOpacity = input.int(75, "Strong zone opacity (%)", minval = 0, maxval = 100, group = GROUP_STYLE)
+int pocOpacity = input.int(100, "POC zone opacity (%)", minval = 0, maxval = 100, group = GROUP_STYLE)
+int borderWidth = input.int(1, "Border width", minval = 0, maxval = 4, group = GROUP_STYLE)
+
+//=============================================================================
+// TYPES AND STATE
+//=============================================================================
+
+type ZoneRecord
+    bool isSupport
+    float top
+    float bottom
+    int touches
+    int firstTouchTime
+    int lastTouchTime
+    int confirmationTime
+    int expiryTime
+    bool confirmed
+    bool pocConfluence
+    box zoneBox
+
+var array<ZoneRecord> zones = array.new<ZoneRecord>()
+var array<float> pocTops = array.new_float()
+var array<float> pocBottoms = array.new_float()
+
+float tickSize = syminfo.mintick
+float zoneHeight = zoneTicks * tickSize
+float mergeTolerance = mergeToleranceTicks * tickSize
+float breakBuffer = breakBufferTicks * tickSize
+float pocTolerance = pocToleranceTicks * tickSize
+int strongRejections = math.max(strongRejectionsInput, minimumRejections)
+int detectionMs = int(timeframe.in_seconds(detectionTf) * 1000.0)
+int minimumTouchSpacingMs = detectionMs * minimumBarsBetween
+int freshnessMs = freshnessDays * 24 * 60 * 60 * 1000
+
+//=============================================================================
+// UTILITY FUNCTIONS
+//=============================================================================
+
+f_visibleOpacity(ZoneRecord z) =>
+    z.pocConfluence ? pocOpacity : z.touches >= strongRejections ? strongOpacity : regularOpacity
+
+f_baseColor(ZoneRecord z) =>
+    z.isSupport ? supportColor : resistanceColor
+
+f_fillColor(ZoneRecord z) =>
+    color.new(f_baseColor(z), 100 - f_visibleOpacity(z))
+
+f_borderColor(ZoneRecord z) =>
+    color.new(f_baseColor(z), 100 - f_visibleOpacity(z))
+
+f_hasPocConfluence(float top, float bottom) =>
+    bool hasConfluence = false
+    int pocCount = array.size(pocTops)
+    if useProfilePoc and pocCount > 0
+        for i = 0 to pocCount - 1
+            float pocTop = array.get(pocTops, i)
+            float pocBottom = array.get(pocBottoms, i)
+            bool overlaps = pocTop + pocTolerance >= bottom and pocBottom - pocTolerance <= top
+            if overlaps
+                hasConfluence := true
+                break
+    hasConfluence
+
+f_zoneExpiry(int confirmationTime) =>
+    extensionMode == "Fixed detection bars" ? confirmationTime + detectionMs * fixedLengthBars : confirmationTime
+
+f_createBox(ZoneRecord z) =>
+    int rightTime = extensionMode == "Fixed detection bars" ? z.expiryTime : z.confirmationTime
+    box.new(
+         left = z.firstTouchTime,
+         top = z.top,
+         right = rightTime,
+         bottom = z.bottom,
+         xloc = xloc.bar_time,
+         extend = extensionMode == "Until broken" ? extend.right : extend.none,
+         border_color = f_borderColor(z),
+         border_width = borderWidth,
+         bgcolor = f_fillColor(z))
+
+f_updateBox(ZoneRecord z) =>
+    if z.confirmed and not na(z.zoneBox)
+        box.set_left(z.zoneBox, z.firstTouchTime)
+        box.set_top(z.zoneBox, z.top)
+        box.set_bottom(z.zoneBox, z.bottom)
+        box.set_border_color(z.zoneBox, f_borderColor(z))
+        box.set_border_width(z.zoneBox, borderWidth)
+        box.set_bgcolor(z.zoneBox, f_fillColor(z))
+        if extensionMode == "Fixed detection bars"
+            box.set_right(z.zoneBox, z.expiryTime)
+            box.set_extend(z.zoneBox, extend.none)
+        else
+            box.set_right(z.zoneBox, z.confirmationTime)
+            box.set_extend(z.zoneBox, extend.right)
+
+f_removeZone(int index) =>
+    ZoneRecord z = array.get(zones, index)
+    if not na(z.zoneBox)
+        box.delete(z.zoneBox)
+    array.remove(zones, index)
+
+f_enforceRecordLimit() =>
+    while array.size(zones) > maxTrackedLevels
+        int oldestIndex = 0
+        ZoneRecord firstRecord = array.get(zones, 0)
+        int oldestTime = firstRecord.lastTouchTime
+        if array.size(zones) > 1
+            for i = 1 to array.size(zones) - 1
+                int candidateTime = array.get(zones, i).lastTouchTime
+                if candidateTime < oldestTime
+                    oldestTime := candidateTime
+                    oldestIndex := i
+        f_removeZone(oldestIndex)
+
+f_addRejection(bool isSupport, float rejectionPrice, int rejectionTime) =>
+    bool confirmedNow = false
+    bool strongNow = false
+    bool pocNow = false
+
+    float proposedTop = isSupport ? rejectionPrice + zoneHeight : rejectionPrice
+    float proposedBottom = isSupport ? rejectionPrice : rejectionPrice - zoneHeight
+
+    int matchIndex = -1
+    float bestDistance = 1e20
+    int zoneCount = array.size(zones)
+
+    if zoneCount > 0
+        for i = 0 to zoneCount - 1
+            ZoneRecord z = array.get(zones, i)
+            if z.isSupport == isSupport
+                bool overlaps = proposedTop + mergeTolerance >= z.bottom and proposedBottom - mergeTolerance <= z.top
+                if overlaps
+                    float zAnchor = isSupport ? z.bottom : z.top
+                    float distance = math.abs(rejectionPrice - zAnchor)
+                    if distance < bestDistance
+                        bestDistance := distance
+                        matchIndex := i
+
+    if matchIndex == -1
+        ZoneRecord newZone = ZoneRecord.new(
+             isSupport,
+             proposedTop,
+             proposedBottom,
+             1,
+             rejectionTime,
+             rejectionTime,
+             na,
+             na,
+             false,
+             false,
+             na)
+        array.push(zones, newZone)
+    else
+        ZoneRecord z = array.get(zones, matchIndex)
+        bool separateVisit = rejectionTime > z.lastTouchTime and rejectionTime - z.lastTouchTime >= minimumTouchSpacingMs
+
+        if separateVisit
+            int oldTouches = z.touches
+            bool oldPoc = z.pocConfluence
+
+            z.touches += 1
+            z.lastTouchTime := rejectionTime
+
+            if isSupport
+                z.bottom := math.min(z.bottom, rejectionPrice)
+                z.top := z.bottom + zoneHeight
+            else
+                z.top := math.max(z.top, rejectionPrice)
+                z.bottom := z.top - zoneHeight
+
+            if not z.confirmed and z.touches >= minimumRejections
+                z.confirmed := true
+                z.confirmationTime := rejectionTime
+                z.expiryTime := f_zoneExpiry(rejectionTime)
+                z.pocConfluence := f_hasPocConfluence(z.top, z.bottom)
+                z.zoneBox := f_createBox(z)
+                confirmedNow := true
+                pocNow := z.pocConfluence
+            else if z.confirmed
+                z.pocConfluence := f_hasPocConfluence(z.top, z.bottom)
+                strongNow := oldTouches < strongRejections and z.touches >= strongRejections
+                pocNow := not oldPoc and z.pocConfluence
+                f_updateBox(z)
+
+            array.set(zones, matchIndex, z)
+
+    f_enforceRecordLimit()
+    [confirmedNow, strongNow, pocNow]
+
+f_recalculatePocConfluence() =>
+    bool upgraded = false
+    int zoneCount = array.size(zones)
+    if zoneCount > 0
+        for i = 0 to zoneCount - 1
+            ZoneRecord z = array.get(zones, i)
+            if z.confirmed
+                bool oldPoc = z.pocConfluence
+                z.pocConfluence := f_hasPocConfluence(z.top, z.bottom)
+                upgraded := upgraded or (not oldPoc and z.pocConfluence)
+                f_updateBox(z)
+                array.set(zones, i, z)
+    upgraded
+
+// This function runs inside the selected detection timeframe.
+f_detectionData() =>
+    int departureBars = math.max(1, math.min(departureBarsInput, pivotRight))
+    float pivotHigh = ta.pivothigh(high, pivotLeft, pivotRight)
+    float pivotLow = ta.pivotlow(low, pivotLeft, pivotRight)
+
+    float atrAtPivot = ta.atr(atrLength)[pivotRight]
+    float requiredDeparture = departureMode == "ATR" ? atrAtPivot * atrMultiplier : departureTicks * syminfo.mintick
+
+    // Measure the first N bars immediately after the pivot, not simply the most recent N bars.
+    float postPivotLow = na
+    float postPivotHigh = na
+    for step = 1 to departureBars
+        int offset = pivotRight - step
+        postPivotLow := na(postPivotLow) ? low[offset] : math.min(postPivotLow, low[offset])
+        postPivotHigh := na(postPivotHigh) ? high[offset] : math.max(postPivotHigh, high[offset])
+
+    bool resistanceApproach = not useApproachFilter or close[pivotRight + 1] < pivotHigh - zoneHeight
+    bool supportApproach = not useApproachFilter or close[pivotRight + 1] > pivotLow + zoneHeight
+    bool resistanceWick = close[pivotRight] <= pivotHigh - rejectionWickTicks * syminfo.mintick
+    bool supportWick = close[pivotRight] >= pivotLow + rejectionWickTicks * syminfo.mintick
+    bool resistanceDeparture = not useDepartureFilter or postPivotLow <= pivotHigh - requiredDeparture
+    bool supportDeparture = not useDepartureFilter or postPivotHigh >= pivotLow + requiredDeparture
+
+    int resistanceValid = not na(pivotHigh) and resistanceApproach and resistanceWick and resistanceDeparture ? 1 : 0
+    int supportValid = not na(pivotLow) and supportApproach and supportWick and supportDeparture ? 1 : 0
+    int resistanceTime = not na(pivotHigh) ? time[pivotRight] : na
+    int supportTime = not na(pivotLow) ? time[pivotRight] : na
+
+    [pivotHigh, pivotLow, resistanceTime, supportTime, resistanceValid, supportValid, close, time]
+
+//=============================================================================
+// TIMEFRAME VALIDATION
+//=============================================================================
+
+if barstate.isfirst
+    if timeframe.in_seconds(detectionTf) < timeframe.in_seconds()
+        runtime.error("Zone detection timeframe must be equal to or higher than the chart timeframe.")
+    if useProfilePoc and timeframe.in_seconds(profileTf) <= timeframe.in_seconds()
+        runtime.error("Profile timeframe must be higher than the chart timeframe when POC confluence is enabled.")
+
+//=============================================================================
+// REQUEST CONFIRMED DETECTION-TIMEFRAME DATA
+//=============================================================================
+
+[detPivotHigh, detPivotLow, detResistanceTime, detSupportTime, detResistanceValid, detSupportValid, detClose, detBarTime] = request.security(
+     syminfo.tickerid,
+     detectionTf,
+     f_detectionData(),
+     gaps = barmerge.gaps_on,
+     lookahead = barmerge.lookahead_off)
+
+//=============================================================================
+// REQUEST ONE CONFIRMED PROFILE FOOTPRINT
+//=============================================================================
+
+string profileTicker = profileSessionMode == "Exchange regular" ?
+     ticker.new(syminfo.prefix, syminfo.ticker, session.regular) :
+     ticker.new(syminfo.prefix, syminfo.ticker, session.extended)
+
+footprint completedProfile = request.security(
+     profileTicker,
+     profileTf,
+     request.footprint(profileRowTicks, profileVaPercent)[1],
+     barmerge.gaps_on,
+     barmerge.lookahead_on)
+
+bool newPocProfile = false
+if useProfilePoc and not na(completedProfile)
+    volume_row pocRow = completedProfile.poc()
+    array.push(pocTops, pocRow.up_price())
+    array.push(pocBottoms, pocRow.down_price())
+    while array.size(pocTops) > profileLookback
+        array.shift(pocTops)
+        array.shift(pocBottoms)
+    newPocProfile := true
+
+//=============================================================================
+// EVENT FLAGS
+//=============================================================================
+
+bool newSupportZone = false
+bool newResistanceZone = false
+bool strongZoneUpgrade = false
+bool pocZoneUpgrade = false
+bool supportZoneBroken = false
+bool resistanceZoneBroken = false
+
+// Recalculate every confirmed zone when a completed profile enters or leaves the POC lookback.
+if newPocProfile
+    pocZoneUpgrade := f_recalculatePocConfluence()
+
+//=============================================================================
+// BREAK / INVALIDATION LOGIC
+//=============================================================================
+
+bool detectionCloseAvailable = not na(detBarTime) and not na(detClose)
+bool evaluateBreak = breakTimeframeMode == "Detection timeframe" ? detectionCloseAvailable : barstate.isconfirmed
+float breakClose = breakTimeframeMode == "Detection timeframe" ? detClose : close
+
+if evaluateBreak and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        ZoneRecord z = array.get(zones, i)
+        bool broken = z.isSupport ? breakClose < z.bottom - breakBuffer : breakClose > z.top + breakBuffer
+        if broken
+            supportZoneBroken := supportZoneBroken or z.isSupport
+            resistanceZoneBroken := resistanceZoneBroken or not z.isSupport
+            f_removeZone(i)
+
+//=============================================================================
+// ADD NEW, FULLY CONFIRMED REJECTIONS
+//=============================================================================
+
+if detResistanceValid == 1 and not na(detPivotHigh) and not na(detResistanceTime)
+    [confirmedNow, strongNow, pocNow] = f_addRejection(false, detPivotHigh, detResistanceTime)
+    newResistanceZone := newResistanceZone or confirmedNow
+    strongZoneUpgrade := strongZoneUpgrade or strongNow
+    pocZoneUpgrade := pocZoneUpgrade or pocNow
+
+if detSupportValid == 1 and not na(detPivotLow) and not na(detSupportTime)
+    [confirmedNow, strongNow, pocNow] = f_addRejection(true, detPivotLow, detSupportTime)
+    newSupportZone := newSupportZone or confirmedNow
+    strongZoneUpgrade := strongZoneUpgrade or strongNow
+    pocZoneUpgrade := pocZoneUpgrade or pocNow
+
+//=============================================================================
+// FRESHNESS AND FIXED-LENGTH CLEANUP
+//=============================================================================
+
+int freshnessCutoff = time - freshnessMs
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        ZoneRecord z = array.get(zones, i)
+        bool stale = z.lastTouchTime < freshnessCutoff
+        bool fixedExpired = z.confirmed and extensionMode == "Fixed detection bars" and time > z.expiryTime
+        if stale or fixedExpired
+            f_removeZone(i)
+
+//=============================================================================
+// ALERTS
+//=============================================================================
+
+alertcondition(newSupportZone, "New support zone", "A new support zone has been confirmed by the required number of rejections.")
+alertcondition(newResistanceZone, "New resistance zone", "A new resistance zone has been confirmed by the required number of rejections.")
+alertcondition(strongZoneUpgrade, "Zone upgraded to strong", "A confirmed zone reached the strong-rejection threshold.")
+alertcondition(pocZoneUpgrade, "Zone gained POC confluence", "A confirmed zone overlaps a POC inside the selected completed-profile lookback.")
+alertcondition(supportZoneBroken, "Support zone broken", "A candle closed below a support zone plus its break buffer. The zone was deleted.")
+alertcondition(resistanceZoneBroken, "Resistance zone broken", "A candle closed above a resistance zone plus its break buffer. The zone was deleted.")

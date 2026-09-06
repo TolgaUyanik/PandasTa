@@ -1,0 +1,330 @@
+//@version=6
+library("FootprintCore")
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+export enum SignalSide
+    none
+    bull
+    bear
+
+export enum ExecMode
+    passive
+    caution
+    avoid
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+export type FPBar
+    bool  available
+    float totalVol
+    float buyVol
+    float sellVol
+    float delta
+    float pocTop
+    float pocBot
+    float pocMid
+    float vahTop
+    float valBot
+    float vaWidthPct
+    float pocShift
+    int   buyStackCount
+    int   sellStackCount
+    float maxPosRowDelta
+    float maxNegRowDelta
+    bool  topTailUnfinished
+    bool  bottomTailUnfinished
+    float deltaEfficiency
+    float responsePerDelta
+    float rangeCompressionPct
+
+export type FPNorm
+    float vaWidthZ
+    float pocShiftZ
+    float deltaEffZ
+    float responsePerDeltaZ
+    float compressionZ
+    float stackDomZ
+    float posRowDeltaZ
+    float negRowDeltaZ
+    float vaWidthPctRank
+    float deltaEffPctRank
+    float stackDomPctRank
+
+export type FPDerived
+    float stackDominance
+    bool  bullishStackEdge
+    bool  bearishStackEdge
+    bool  bullishAcceptance
+    bool  bearishAcceptance
+    bool  bullishAuctionFailure
+    bool  bearishAuctionFailure
+
+export type FPSignal
+    bool       setupLong
+    bool       setupShort
+    bool       triggerLong
+    bool       triggerShort
+    bool       invalidateLong
+    bool       invalidateShort
+    float      confidence
+    SignalSide side
+    string     reason
+
+export type FPExec
+    ExecMode mode
+    float    slippageZ
+    float    fragilityZ
+    bool     noTrade
+    bool     passiveOnly
+    string   reason
+
+// ============================================================================
+// BASIC HELPERS
+// ============================================================================
+
+export clamp01(float x) =>
+    math.max(0.0, math.min(1.0, x))
+
+export safeDiv(float num, float den, float fallback) =>
+    na(den) or den == 0.0 ? fallback : num / den
+
+export zScore(float x, int len) =>
+    float mu = ta.sma(x, len)
+    float sd = ta.stdev(x, len)
+    sd > 0 ? (x - mu) / sd : 0.0
+
+export pctRank01(float x, int len) =>
+    float hi = ta.highest(x, len)
+    float lo = ta.lowest(x, len)
+    hi > lo ? (x - lo) / (hi - lo) : 0.5
+
+export canFire(int lastBar, int cooldownBars, int currentBar) =>
+    na(lastBar) or (currentBar - lastBar) >= cooldownBars
+
+// ============================================================================
+// ROW HELPERS
+// ============================================================================
+
+export rowTop(volume_row row) =>
+    na(row) ? na : row.up_price()
+
+export rowBot(volume_row row) =>
+    na(row) ? na : row.down_price()
+
+export rowMid(volume_row row) =>
+    na(row) ? na : (row.up_price() + row.down_price()) * 0.5
+
+// ============================================================================
+// RAW FEATURE EXTRACTION
+// ============================================================================
+
+export extractBar(
+  footprint fp,
+  float prevPocMid,
+  float closePx,
+  float highPx,
+  float lowPx,
+  float atr14
+  ) =>
+    bool  available = not na(fp)
+
+    float totalVol = na
+    float buyVol   = na
+    float sellVol  = na
+    float delta    = na
+
+    float pocTop   = na
+    float pocBot   = na
+    float pocMid   = na
+    float vahTop   = na
+    float valBot   = na
+    float vaWidthPct = na
+    float pocShift = na
+
+    int   buyStackCount = 0
+    int   sellStackCount = 0
+    float maxPosRowDelta = na
+    float maxNegRowDelta = na
+
+    bool  topTailUnfinished = false
+    bool  bottomTailUnfinished = false
+
+    float deltaEfficiency = na
+    float responsePerDelta = na
+    float rangeCompressionPct = na
+
+    if available
+        totalVol := fp.total_volume()
+        buyVol   := fp.buy_volume()
+        sellVol  := fp.sell_volume()
+        delta    := fp.delta()
+
+        volume_row poc = fp.poc()
+        volume_row vah = fp.vah()
+        volume_row val = fp.val()
+
+        pocTop := rowTop(poc)
+        pocBot := rowBot(poc)
+        pocMid := rowMid(poc)
+        vahTop := rowTop(vah)
+        valBot := rowBot(val)
+
+        vaWidthPct := closePx != 0 and not na(vahTop) and not na(valBot) ? (vahTop - valBot) / closePx : na
+        pocShift   := not na(prevPocMid) and not na(pocMid) ? pocMid - prevPocMid : na
+
+        array<volume_row> rows = fp.rows()
+        int n = array.size(rows)
+
+        for i = 0 to n - 1
+            volume_row r = array.get(rows, i)
+            float rowDelta = r.delta()
+
+            maxPosRowDelta := na(maxPosRowDelta) ? rowDelta : math.max(maxPosRowDelta, rowDelta)
+            maxNegRowDelta := na(maxNegRowDelta) ? rowDelta : math.min(maxNegRowDelta, rowDelta)
+
+            if r.has_buy_imbalance()
+                buyStackCount += 1
+            if r.has_sell_imbalance()
+                sellStackCount += 1
+
+        if n > 0
+            volume_row bottomRow = array.get(rows, 0)
+            volume_row topRow    = array.get(rows, n - 1)
+            bottomTailUnfinished := bottomRow.buy_volume() > 0 and bottomRow.sell_volume() > 0
+            topTailUnfinished    := topRow.buy_volume() > 0 and topRow.sell_volume() > 0
+
+        float candleRange = highPx - lowPx
+        deltaEfficiency   := totalVol > 0 ? math.abs(delta) / totalVol : na
+        responsePerDelta  := math.abs(delta) > 0 ? candleRange / math.abs(delta) : na
+        rangeCompressionPct := atr14 > 0 ? candleRange / atr14 : na
+
+    FPBar.new(available, totalVol, buyVol, sellVol, delta, pocTop, pocBot, pocMid, vahTop, valBot, vaWidthPct, pocShift, buyStackCount, sellStackCount, maxPosRowDelta, maxNegRowDelta, topTailUnfinished, bottomTailUnfinished, deltaEfficiency, responsePerDelta, rangeCompressionPct)
+
+// ============================================================================
+// NORMALIZATION LAYER
+// ============================================================================
+
+export normalizeBar(FPBar b, int zLen, int rankLen) =>
+    float stackDom = b.buyStackCount - b.sellStackCount
+    FPNorm.new(zScore(b.vaWidthPct, zLen), zScore(b.pocShift, zLen), zScore(b.deltaEfficiency, zLen), zScore(b.responsePerDelta, zLen), zScore(b.rangeCompressionPct, zLen), zScore(stackDom, zLen), zScore(b.maxPosRowDelta, zLen), zScore(b.maxNegRowDelta, zLen), pctRank01(b.vaWidthPct, rankLen), pctRank01(b.deltaEfficiency, rankLen), pctRank01(stackDom, rankLen))
+
+// ============================================================================
+// DERIVED INTERPRETATIONS
+// ============================================================================
+
+export derive(FPBar b, float closePx) =>
+    float stackDominance = b.buyStackCount - b.sellStackCount
+
+    bool bullishStackEdge = stackDominance > 0 and b.maxPosRowDelta > math.abs(b.maxNegRowDelta)
+    bool bearishStackEdge = stackDominance < 0 and math.abs(b.maxNegRowDelta) > b.maxPosRowDelta
+
+    bool bullishAcceptance = not na(b.vahTop) and closePx > b.vahTop and b.delta > 0
+    bool bearishAcceptance = not na(b.valBot) and closePx < b.valBot and b.delta < 0
+
+    bool bullishAuctionFailure = b.bottomTailUnfinished and not na(b.pocMid) and closePx > b.pocMid and b.delta > 0
+    bool bearishAuctionFailure = b.topTailUnfinished and not na(b.pocMid) and closePx < b.pocMid and b.delta < 0
+
+    FPDerived.new(stackDominance, bullishStackEdge, bearishStackEdge, bullishAcceptance, bearishAcceptance, bullishAuctionFailure, bearishAuctionFailure)
+
+// ============================================================================
+// BREAKOUT CLASSIFIER
+// ============================================================================
+
+export breakoutSignal(
+  FPBar b,
+  FPDerived d,
+  float closePx,
+  float minDeltaEff,
+  int minStacks,
+  float maxCompression
+  ) =>
+    bool setupLong = b.available and not na(b.pocMid) and not na(b.vahTop) and closePx > b.pocMid and closePx <= b.vahTop and b.pocShift > 0
+    bool setupShort = b.available and not na(b.pocMid) and not na(b.valBot) and closePx < b.pocMid and closePx >= b.valBot and b.pocShift < 0
+
+    bool triggerLong = b.available and d.bullishAcceptance and d.bullishStackEdge and b.buyStackCount >= minStacks and b.deltaEfficiency >= minDeltaEff and b.rangeCompressionPct <= maxCompression
+    bool triggerShort = b.available and d.bearishAcceptance and d.bearishStackEdge and b.sellStackCount >= minStacks and b.deltaEfficiency >= minDeltaEff and b.rangeCompressionPct <= maxCompression
+
+    bool invalidateLong = b.available and not na(b.pocMid) and closePx < b.pocMid
+    bool invalidateShort = b.available and not na(b.pocMid) and closePx > b.pocMid
+
+    float confidence = 0.0
+    confidence += triggerLong or triggerShort ? 0.40 : 0.0
+    confidence += not na(b.pocShift) and math.abs(b.pocShift) > 0 ? 0.20 : 0.0
+    confidence += math.max(b.buyStackCount, b.sellStackCount) >= minStacks ? 0.20 : 0.0
+    confidence += b.deltaEfficiency >= minDeltaEff ? 0.20 : 0.0
+
+    SignalSide side = if triggerLong
+        SignalSide.bull
+    else if triggerShort
+        SignalSide.bear
+    else
+        SignalSide.none
+
+    string reason = if triggerLong
+        "Value escape + buy stacks + positive delta"
+    else if triggerShort
+        "Value escape + sell stacks + negative delta"
+    else
+        "No breakout"
+
+    FPSignal.new(setupLong, setupShort, triggerLong, triggerShort, invalidateLong, invalidateShort, confidence, side, reason)
+
+// ============================================================================
+// EXECUTION GOVERNOR
+// ============================================================================
+
+export executionState(
+  FPBar b,
+  FPNorm n,
+  float avoidZ,
+  float cautionZ,
+  float fragilityCutoff
+  ) =>
+    float slipProxy = 0.40 * n.vaWidthZ - 0.30 * n.responsePerDeltaZ + 0.30 * n.compressionZ
+    float fragProxy = n.compressionZ + math.abs(n.pocShiftZ) * 0.25
+
+    ExecMode mode = if slipProxy >= avoidZ
+        ExecMode.avoid
+    else if slipProxy >= cautionZ
+        ExecMode.caution
+    else
+        ExecMode.passive
+
+    bool noTrade = not b.available or fragProxy >= fragilityCutoff
+    bool passiveOnly = not noTrade and mode != ExecMode.passive
+
+    string reason = if not b.available
+        "No footprint data"
+    else if fragProxy >= fragilityCutoff
+        "Liquidity/structure unstable"
+    else if mode == ExecMode.avoid
+        "Execution stress extreme"
+    else if mode == ExecMode.caution
+        "Execution stress elevated"
+    else
+        "Normal execution regime"
+
+    FPExec.new(mode, slipProxy, fragProxy, noTrade, passiveOnly, reason)
+
+// ============================================================================
+// MACHINE-READABLE REASON CODES
+// ============================================================================
+
+export reasonCodeBreakout(FPBar b, FPDerived d, FPNorm n) =>
+    string code = ""
+    
+    // Utilize 'b' to satisfy the compiler and safeguard against empty data
+    if not b.available
+        code := "NONE"
+    else
+        code += d.bullishAcceptance or d.bearishAcceptance ? "ACC|" : ""
+        code += d.bullishStackEdge or d.bearishStackEdge ? "STACK|" : ""
+        code += n.deltaEffZ > 1 ? "EFF|" : ""
+        code += math.abs(n.pocShiftZ) > 1 ? "POCSHIFT|" : ""
+        
+    code == "" ? "NONE" : code

@@ -1,0 +1,282 @@
+//@version=6
+indicator("SessionFlow", "Sesh Flow", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ── General ─────────────────────────────────────────────────────────────
+gGeneral = "General"
+sessionTZ = input.string("UTC-5", "Timezone", group=gGeneral, options=["UTC+0", "UTC-5", "UTC-4", "UTC+1", "UTC+9"], tooltip="Timezone for all sessions. Default UTC-5 (New York EST).")
+lineWidth = input.int(2, "Line width", minval=1, maxval=4, group=gGeneral, tooltip="Width of horizontal lines.")
+showKill  = input.bool(true, "Show kill zones", group=gGeneral, tooltip="Draw lines + boxes for both kill zones of the previous session.")
+showBoxes  = input.bool(true, "Show session boxes", group=gGeneral, tooltip="Draw background boxes for the previous session and its kill zones.")
+extendLines = input.bool(true, "Extend lines to current bar", group=gGeneral, tooltip="When ON, all lines extend to the current bar. When OFF, lines stop at the end of the previous session/kill zone.")
+labelOffsetBars = input.int(10, "Label offset (bars)", minval=0, maxval=200, group=gGeneral, tooltip="Number of bars forward to push session H/L labels so they don't cover the forming candle. Default 10. 0 = label sits on the live bar (seed behavior).")
+
+// Per-bar duration in ms — recomputed on every bar so it survives timeframe changes.
+// Falls back to 0 on the chart's first bar where time[1] is na (no offset applied).
+barMs = na(time[1]) ? 0 : (time - time[1])
+// Forward x anchor for session H/L labels (extendLines ON only). Kill-zone labels are bounded and do not use this.
+labelOffsetMs = labelOffsetBars * barMs
+
+// ── London ──────────────────────────────────────────────────────────────
+gLondon = "London"
+londonEnabled  = input.bool(true, "Enable", group=gLondon)
+londonSession  = input.session("0700-1600", "Session hours", group=gLondon, tooltip="London session time window. Default 07:00-16:00.")
+londonK1On     = input.bool(true, "Kill zone 1", group=gLondon, tooltip="Enable London kill zone 1 (open).")
+londonK1       = input.session("0700-0900", "  Hours", group=gLondon, tooltip="Default 07:00-09:00.")
+londonK2On     = input.bool(true, "Kill zone 2", group=gLondon, tooltip="Enable London kill zone 2 (close).")
+londonK2       = input.session("1400-1600", "  Hours", group=gLondon, tooltip="Default 14:00-16:00.")
+londonColor    = input.color(color.blue, "Color", group=gLondon, tooltip="Base color for London. Opacity varies by element.")
+
+// ── New York ────────────────────────────────────────────────────────────
+gNY = "New York"
+nyEnabled  = input.bool(true, "Enable", group=gNY)
+nySession  = input.session("1200-2100", "Session hours", group=gNY, tooltip="New York session time window. Default 12:00-21:00.")
+nyK1On     = input.bool(true, "Kill zone 1", group=gNY, tooltip="Enable NY kill zone 1 (open).")
+nyK1       = input.session("1200-1400", "  Hours", group=gNY, tooltip="Default 12:00-14:00.")
+nyK2On     = input.bool(true, "Kill zone 2", group=gNY, tooltip="Enable NY kill zone 2 (close).")
+nyK2       = input.session("1900-2100", "  Hours", group=gNY, tooltip="Default 19:00-21:00.")
+nyColor    = input.color(color.orange, "Color", group=gNY, tooltip="Base color for New York. Opacity varies by element.")
+
+// ── Asian ───────────────────────────────────────────────────────────────
+gAsian = "Asian"
+asianEnabled  = input.bool(true, "Enable", group=gAsian)
+asianSession  = input.session("0000-0900", "Session hours", group=gAsian, tooltip="Asian session time window. Default 00:00-09:00.")
+asianK1On     = input.bool(true, "Kill zone 1", group=gAsian, tooltip="Enable Asian kill zone 1 (open).")
+asianK1       = input.session("0000-0200", "  Hours", group=gAsian, tooltip="Default 00:00-02:00.")
+asianK2On     = input.bool(false, "Kill zone 2", group=gAsian, tooltip="Enable Asian kill zone 2 (London overlap).")
+asianK2       = input.session("0700-0900", "  Hours", group=gAsian, tooltip="Default 07:00-09:00.")
+asianColor    = input.color(color.teal, "Color", group=gAsian, tooltip="Base color for Asian. Opacity varies by element.")
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Zone type — bundles state + visuals for a session or kill zone
+// ═══════════════════════════════════════════════════════════════════════════
+type Zone
+    float hi
+    float lo
+    int   start
+    int   endTime
+    color clr
+    int   bgOpacity
+    line  hiLine
+    line  loLine
+    label hiLabel
+    label loLabel
+    box   zoneBox
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  drawZone — draw lines + box for a Zone
+//
+//  Line + label follow the same extend + offset semantics as session H/L:
+//  `lineX = extendLines ? time + labelOffsetMs : z.endTime`. The box stays
+//  time-bounded (start-to-endTime) and is unaffected by the offset (Rule R7,
+//  R11, A10, C22).
+// ═══════════════════════════════════════════════════════════════════════════
+drawZone(z, prefix) =>
+    if not na(z.hi) and not na(z.start) and not na(z.endTime)
+        lineX = extendLines ? time + labelOffsetMs : z.endTime
+        if na(z.hiLine)
+            z.hiLine  := line.new(z.start, z.hi, lineX, z.hi, color=z.clr, width=lineWidth, extend=extend.none, xloc=xloc.bar_time, style=line.style_solid)
+            z.hiLabel := label.new(lineX, z.hi, "   " + prefix + " High   ", style=label.style_label_left, color=color.black, textcolor=color.white, size=size.normal, xloc=xloc.bar_time, tooltip="")
+        if extendLines and not na(z.hiLine)
+            line.set_x2(z.hiLine, lineX)
+            label.set_xy(z.hiLabel, lineX, z.hi)
+        if na(z.loLine)
+            z.loLine  := line.new(z.start, z.lo, lineX, z.lo, color=z.clr, width=lineWidth, extend=extend.none, xloc=xloc.bar_time, style=line.style_solid)
+            z.loLabel := label.new(lineX, z.lo, "   " + prefix + " Low   ", style=label.style_label_left, color=color.black, textcolor=color.white, size=size.normal, xloc=xloc.bar_time, tooltip="")
+        if extendLines and not na(z.loLine)
+            line.set_x2(z.loLine, lineX)
+            label.set_xy(z.loLabel, lineX, z.lo)
+        if showBoxes and na(z.zoneBox)
+            z.zoneBox := box.new(z.start, z.hi, z.endTime, z.lo, border_color=z.clr, bgcolor=color.new(z.clr, z.bgOpacity), extend=extend.none, xloc=xloc.bar_time)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  cleanZone — delete a Zone's visual objects
+// ═══════════════════════════════════════════════════════════════════════════
+cleanZone(z) =>
+    if not na(z.hiLine)
+        line.delete(z.hiLine)
+        z.hiLine := na
+    if not na(z.loLine)
+        line.delete(z.loLine)
+        z.loLine := na
+    if not na(z.hiLabel)
+        label.delete(z.hiLabel)
+        z.hiLabel := na
+    if not na(z.loLabel)
+        label.delete(z.loLabel)
+        z.loLabel := na
+    if not na(z.zoneBox)
+        box.delete(z.zoneBox)
+        z.zoneBox := na
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  drawSessionBox — create the main session box
+// ═══════════════════════════════════════════════════════════════════════════
+drawSessionBox(leftTime, topPrice, rightTime, bottomPrice, border, fill) =>
+    if not na(leftTime) and not na(rightTime) and not na(topPrice) and not na(bottomPrice)
+        box.new(leftTime, topPrice, rightTime, bottomPrice, border_color=border, bgcolor=fill, extend=extend.none, xloc=xloc.bar_time)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  manageSessionZone — previous session H/L + 2 toggleable kill zones
+// ═══════════════════════════════════════════════════════════════════════════
+manageSessionZone(name, sessionStr, k1On, k1Str, k2On, k2Str, enabled, baseColor, lw) =>
+    // derived colors — same base, different opacities
+    lineColor   = color.new(baseColor, 60)
+    killLineC   = color.new(baseColor, 40)
+    boxFill     = color.new(baseColor, 92)
+    killBoxFill = color.new(baseColor, 85)
+
+    // session tracking
+    var float sessionHi  = na
+    var float sessionLo  = na
+    var float prevHi     = na
+    var float prevLo     = na
+    var int   sStart     = na
+    var int   prevSStart = na
+    var int   prevSEnd   = na
+    var int   sSEnd      = na
+    var box   sessionBox = na
+    var line  highLine   = na
+    var line  lowLine    = na
+    var label highLabel  = na
+    var label lowLabel   = na
+
+    // kill zones — current tracking
+    var float  k1Hi    = na
+    var float  k1Lo    = na
+    var int    k1Start = na
+    var float  k2Hi    = na
+    var float  k2Lo    = na
+    var int    k2Start = na
+    // kill zones — previous (drawn)
+    var Zone pk1 = Zone.new(na, na, na, na, na, na, na, na, na, na, na)
+    var Zone pk2 = Zone.new(na, na, na, na, na, na, na, na, na, na, na)
+    // saved end times for line drawing
+    var int    sK1End  = na
+    var int    sK2End  = na
+
+    if enabled
+        inSess    = not na(time(timeframe.period, sessionStr, sessionTZ))
+        inK1      = k1On and not na(time(timeframe.period, k1Str, sessionTZ))
+        inK2      = k2On and not na(time(timeframe.period, k2Str, sessionTZ))
+        newDay    = inSess and not inSess[1]
+        sessEnded = not inSess and inSess[1]
+        k1Ended   = not inK1 and inK1[1]
+        k2Ended   = not inK2 and inK2[1]
+
+        // ── track session start ─────────────────────────────────────────
+        if newDay
+            sStart := time
+
+        // ── track end times ─────────────────────────────────────────────
+        if sessEnded
+            prevSEnd := time
+        if k1Ended
+            pk1.endTime := time
+        if k2Ended
+            pk2.endTime := time
+
+        // ── on new session day: archive previous, reset, draw ───────────
+        if newDay
+            if not na(sessionHi)
+                prevHi     := sessionHi
+                prevLo     := sessionLo
+                prevSStart := sStart[1]
+                pk1.hi      := k1Hi
+                pk1.lo      := k1Lo
+                pk1.start   := k1Start
+                pk1.clr     := killLineC
+                pk1.bgOpacity := 85
+                pk2.hi      := k2Hi
+                pk2.lo      := k2Lo
+                pk2.start   := k2Start
+                pk2.clr     := killLineC
+                pk2.bgOpacity := 85
+            sessionHi := high
+            sessionLo := low
+            k1Hi      := na
+            k1Lo      := na
+            k1Start   := na
+            k2Hi      := na
+            k2Lo      := na
+            k2Start   := na
+            // clean up old lines/labels
+            if not na(highLine)
+                line.delete(highLine)
+                highLine := na
+            if not na(lowLine)
+                line.delete(lowLine)
+                lowLine := na
+            if not na(highLabel)
+                label.delete(highLabel)
+                highLabel := na
+            if not na(lowLabel)
+                label.delete(lowLabel)
+                lowLabel := na
+            // clean up old kill zone visuals
+            cleanZone(pk1)
+            cleanZone(pk2)
+            // clean up old session box
+            if not na(sessionBox)
+                box.delete(sessionBox)
+                sessionBox := na
+
+            // ── draw boxes (before resetting end times) ────────────────
+            if showBoxes
+                sessionBox := drawSessionBox(prevSStart, prevHi, prevSEnd, prevLo, lineColor, boxFill)
+
+            // ── save session end time for line drawing, then reset ────
+            sSEnd   := prevSEnd
+            prevSEnd := na
+
+        // ── track session extremes (after reset) ──────────────────────
+        if inSess
+            sessionHi := na(sessionHi) ? high : math.max(sessionHi, high)
+            sessionLo := na(sessionLo) ? low  : math.min(sessionLo, low)
+
+        // ── track kill zone 1 extremes ─────────────────────────────────
+        if inK1 and not inK1[1]
+            k1Start := time
+        if inK1
+            k1Hi := na(k1Hi) ? high : math.max(k1Hi, high)
+            k1Lo := na(k1Lo) ? low  : math.min(k1Lo, low)
+
+        // ── track kill zone 2 extremes ─────────────────────────────────
+        if inK2 and not inK2[1]
+            k2Start := time
+        if inK2
+            k2Hi := na(k2Hi) ? high : math.max(k2Hi, high)
+            k2Lo := na(k2Lo) ? low  : math.min(k2Lo, low)
+
+        // ── draw previous session H/L lines ────────────────────────────
+        if not na(prevHi) and not na(prevSStart) and not na(sSEnd)
+            // When extendLines is ON, both the line's right edge AND the label
+            // are pushed forward by labelOffsetBars so neither covers the forming
+            // candle. When OFF, line + label both stop at sSEnd (no offset; seed behavior).
+            // Kill-zone labels (drawn in drawZone) are bounded to z.endTime per Rule R2
+            // and do NOT receive this offset.
+            lineX = extendLines ? time + labelOffsetMs : sSEnd
+            if na(highLine)
+                highLine  := line.new(prevSStart, prevHi, lineX, prevHi, color=lineColor, width=lw, extend=extend.none, xloc=xloc.bar_time, style=line.style_solid)
+                highLabel := label.new(lineX, prevHi, "   " + name + " High   ", style=label.style_label_left, color=color.black, textcolor=color.white, size=size.normal, xloc=xloc.bar_time, tooltip="")
+            if extendLines and not na(highLine)
+                line.set_x2(highLine, lineX)
+                label.set_xy(highLabel, lineX, prevHi)
+            if na(lowLine)
+                lowLine  := line.new(prevSStart, prevLo, lineX, prevLo, color=lineColor, width=lw, extend=extend.none, xloc=xloc.bar_time, style=line.style_solid)
+                lowLabel := label.new(lineX, prevLo, "   " + name + " Low   ", style=label.style_label_left, color=color.black, textcolor=color.white, size=size.normal, xloc=xloc.bar_time, tooltip="")
+            if extendLines and not na(lowLine)
+                line.set_x2(lowLine, lineX)
+                label.set_xy(lowLabel, lineX, prevLo)
+
+        // ── draw kill zone lines + boxes ──────────────────────────────
+        if showKill
+            drawZone(pk1, name + " K1")
+        if showKill
+            drawZone(pk2, name + " K2")
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Deploy sessions
+// ═══════════════════════════════════════════════════════════════════════════
+manageSessionZone("London",  londonSession, londonK1On, londonK1, londonK2On, londonK2, londonEnabled, londonColor, lineWidth)
+manageSessionZone("New York", nySession,     nyK1On,     nyK1,     nyK2On,     nyK2,     nyEnabled,     nyColor,     lineWidth)
+manageSessionZone("Asian",    asianSession,  asianK1On,  asianK1,  asianK2On,  asianK2,  asianEnabled,   asianColor,  lineWidth)

@@ -1,0 +1,2197 @@
+//@version=6
+//@description Lane-owned live summary entrypoint for the active reversal / trap engine. Staged for host wiring without moving reversal logic into the meta layer.
+library("si_reversal_trap_live_summary", false)
+
+// Workflow note:
+// - This library mirrors the canonical default-path reversal / trap engine logic.
+// - It exists to expose a host-callable live lane summary without duplicating logic in the family host.
+// - Preserve engine/mirror semantics when updating this surface.
+
+enum PresetMode
+    conservative = "Conservative"
+    balanced = "Balanced"
+    aggressive = "Aggressive"
+
+enum RegimeState
+    bullish_trend = "Bull Trend"
+    bearish_trend = "Bear Trend"
+    ranging = "Range"
+    compression = "Compression"
+    expansion = "Expansion"
+    neutral = "Neutral"
+
+enum StructureState
+    bullish = "Bullish"
+    bearish = "Bearish"
+    transition_up = "Transition Up"
+    transition_down = "Transition Down"
+    ranging = "Range"
+    neutral = "Neutral"
+
+enum DirectionalBias
+    bullish = "Bullish"
+    bearish = "Bearish"
+    neutral = "Neutral"
+
+enum OiState
+    unavailable = "Unavailable"
+    long_build = "Long Build"
+    short_build = "Short Build"
+    short_covering = "Short Covering"
+    long_unwind = "Long Unwind"
+    neutral = "Neutral"
+
+enum ExhaustionSubtype
+    none = "None"
+    upside_exhaustion = "Upside Exhaustion"
+    downside_exhaustion = "Downside Exhaustion"
+    compression_release = "Compression Release"
+
+enum TriggerState
+    none = "None"
+    reversal_confirmed = "Reversal Confirmed"
+    continuation_confirmed = "Continuation Confirmed"
+    squeeze_confirmed = "Squeeze Confirmed"
+
+enum LevelType
+    session_vwap = "Session VWAP"
+    previous_day_high = "PDH"
+    previous_day_low = "PDL"
+    structure_basis = "Structure Basis"
+
+enum LevelRole
+    auction = "Auction"
+    liquidity = "Liquidity"
+    structural = "Structural"
+
+enum LevelTrustBucket
+    anchor = "Anchor"
+    secondary = "Secondary"
+
+enum LevelDecayProfile
+    session_reset = "Session Reset"
+    intraday = "Intraday"
+    adaptive = "Adaptive"
+
+enum LevelRelevanceState
+    unavailable = "Unavailable"
+    fresh = "Fresh"
+    active = "Active"
+    aging = "Aging"
+    stale = "Stale"
+
+enum InteractionType
+    none = "None"
+    vwap_rejection = "VWAP Rejection"
+    vwap_reclaim = "VWAP Reclaim"
+    pdh_sweep = "PDH Sweep"
+    pdl_sweep = "PDL Sweep"
+    pdh_failed_acceptance = "PDH Failed Acceptance"
+    pdl_failed_acceptance = "PDL Failed Acceptance"
+    structure_basis_interaction = "Structure Basis Interaction"
+
+enum InteractionLevelType
+    none = "None"
+    session_vwap = "Session VWAP"
+    previous_day_high = "PDH"
+    previous_day_low = "PDL"
+    structure_basis = "Structure Basis"
+
+enum InteractionFreshnessBucket
+    unavailable = "Unavailable"
+    fresh = "Fresh"
+    aging = "Aging"
+    stale = "Stale"
+
+enum InteractionPolarity
+    bullish = "Bullish"
+    bearish = "Bearish"
+    neutral = "Neutral"
+
+enum InteractionQualityState
+    unavailable = "Unavailable"
+    strong = "Strong"
+    clean = "Clean"
+    tentative = "Tentative"
+
+enum AbsorptionState
+    none = "None"
+    bullish_active = "Bullish Active"
+    bearish_active = "Bearish Active"
+
+enum HistoricalRibbonState
+    mixed_no_action = "Mixed / No Action"
+    reversal_bias = "Reversal-Biased Context"
+    trap_risk = "Trap-Risk Context"
+    compression_context = "Compression Context"
+
+//------------------------------------------------------------------------------
+// Input groups
+
+PresetMode DEFAULT_PRESET_MODE = PresetMode.balanced
+int DEFAULT_REGIME_FAST_LENGTH = 21
+int DEFAULT_REGIME_SLOW_LENGTH = 55
+int DEFAULT_REGIME_COMPRESSION_LENGTH = 20
+int DEFAULT_REGIME_ATR_LENGTH = 14
+float DEFAULT_REGIME_COMPRESSION_THRESHOLD = 0.60
+int DEFAULT_STRUCTURE_PIVOT_LEFT = 3
+int DEFAULT_STRUCTURE_PIVOT_RIGHT = 3
+int DEFAULT_STRUCTURE_BASIS_LENGTH = 20
+float DEFAULT_STRUCTURE_DISPLACEMENT_ATR = 0.90
+bool DEFAULT_MTF_ENABLE_HTF = true
+string DEFAULT_MTF_HTF_TIMEFRAME = "240"
+int DEFAULT_FAIR_VALUE_ATR_LENGTH = 14
+float DEFAULT_FAIR_VALUE_EXTREME_ATR = 1.50
+bool DEFAULT_FAIR_VALUE_ENABLE_ANCHORED_VWAP = false
+int DEFAULT_PARTICIPATION_RVOL_LENGTH = 20
+float DEFAULT_PARTICIPATION_DIVERGENCE_THRESHOLD = 20.0
+float DEFAULT_PARTICIPATION_ABSORPTION_WICK_THRESHOLD = 0.45
+bool DEFAULT_PARTICIPATION_USE_LTF = false
+string DEFAULT_PARTICIPATION_LTF_TIMEFRAME = "5"
+bool DEFAULT_FOOTPRINT_ENABLE_PREMIUM = false
+int DEFAULT_FOOTPRINT_TICKS_PER_ROW = 50
+float DEFAULT_FOOTPRINT_VALUE_AREA_PERCENT = 70.0
+float DEFAULT_FOOTPRINT_IMBALANCE_PERCENT = 300.0
+float DEFAULT_FOOTPRINT_REFERENCE_PROXIMITY_ATR = 0.35
+float DEFAULT_FOOTPRINT_DELTA_PRESSURE_THRESHOLD = 12.0
+bool DEFAULT_OI_ENABLE = false
+string DEFAULT_OI_SYMBOL = ""
+float DEFAULT_EXHAUSTION_WICK_THRESHOLD = 0.45
+bool DEFAULT_EXHAUSTION_USE_TD_REFERENCE = false
+float DEFAULT_LIQUIDITY_RECLAIM_BUFFER_ATR = 0.20
+bool DEFAULT_LIQUIDITY_ENABLE_EXPERIMENTAL_CONTINUATION = false
+bool DEFAULT_TRIGGER_REQUIRE_EVENT = true
+float DEFAULT_COMPOSITE_WEIGHT_CONTEXT = 1.0
+float DEFAULT_COMPOSITE_WEIGHT_EVENT = 1.0
+float DEFAULT_COMPOSITE_WEIGHT_TRIGGER = 1.0
+
+clamp_signed(float value) =>
+    na(value) ? na : math.max(-100.0, math.min(100.0, value))
+
+clamp_unsigned(float value) =>
+    na(value) ? na : math.max(0.0, math.min(100.0, value))
+
+bias_to_int(DirectionalBias bias) =>
+    bias == DirectionalBias.bullish ? 1 : bias == DirectionalBias.bearish ? -1 : 0
+
+positive_component(float score) =>
+    na(score) ? na : math.max(score, 0.0)
+
+negative_component(float score) =>
+    na(score) ? na : math.max(-score, 0.0)
+
+score_magnitude(float score) =>
+    na(score) ? na : math.abs(score)
+
+accumulate_component(float weighted_sum, float weight_sum, float component_value, float component_weight) =>
+    if na(component_value)
+        [weighted_sum, weight_sum]
+    else
+        [weighted_sum + clamp_unsigned(component_value) * component_weight, weight_sum + component_weight]
+
+finalize_weighted_score(float weighted_sum, float weight_sum) =>
+    weight_sum > 0 ? clamp_unsigned(weighted_sum / weight_sum) : na
+
+round_score_step(float score, float step_size) =>
+    na(score) ? na : math.round(score / step_size) * step_size
+
+shape_composite_family_score(float base_score, float coverage_ratio, float clarity_bonus, float ambiguity_penalty) =>
+    if na(base_score)
+        na
+    else
+        float normalized_base = clamp_unsigned(base_score) / 100.0
+        float shaped_base = math.pow(normalized_base, 1.12) * 100.0
+        float coverage_multiplier = 0.72 + math.min(math.max(coverage_ratio, 0.0), 1.0) * 0.28
+        float calibrated_score = shaped_base * coverage_multiplier + clarity_bonus - ambiguity_penalty
+        round_score_step(clamp_unsigned(calibrated_score), 0.5)
+
+second_highest_score(float score_a, float score_b, float score_c, float score_d) =>
+    float highest_score = math.max(nz(score_a, 0.0), math.max(nz(score_b, 0.0), math.max(nz(score_c, 0.0), nz(score_d, 0.0))))
+    int highest_count = (nz(score_a, 0.0) == highest_score ? 1 : 0) + (nz(score_b, 0.0) == highest_score ? 1 : 0) + (nz(score_c, 0.0) == highest_score ? 1 : 0) + (nz(score_d, 0.0) == highest_score ? 1 : 0)
+    float second_score = 0.0
+    if highest_count > 1
+        second_score := highest_score
+    else
+        if nz(score_a, 0.0) < highest_score
+            second_score := math.max(second_score, nz(score_a, 0.0))
+        if nz(score_b, 0.0) < highest_score
+            second_score := math.max(second_score, nz(score_b, 0.0))
+        if nz(score_c, 0.0) < highest_score
+            second_score := math.max(second_score, nz(score_c, 0.0))
+        if nz(score_d, 0.0) < highest_score
+            second_score := math.max(second_score, nz(score_d, 0.0))
+    second_score
+
+score_to_text(float score) =>
+    na(score) ? "ABSTAIN" : str.tostring(score, "#.0")
+
+score_to_color(float score) =>
+    na(score) ? color.new(color.gray, 20) : score > 0 ? color.new(color.lime, 0) : score < 0 ? color.new(color.red, 0) : color.new(color.silver, 0)
+
+unsigned_to_color(float score) =>
+    na(score) ? color.new(color.gray, 20) : score >= 70 ? color.new(color.lime, 0) : score >= 50 ? color.new(color.orange, 0) : color.new(color.silver, 0)
+
+watch_threshold_from_actionable(float actionable_threshold) =>
+    actionable_threshold * 0.55
+
+strong_signal_threshold(float minimum_confidence) =>
+    math.min(100.0, minimum_confidence + 10.0)
+
+trigger_state_code(TriggerState trigger_state, DirectionalBias trigger_bias) =>
+    int base_code = trigger_state == TriggerState.reversal_confirmed ? 100 : trigger_state == TriggerState.continuation_confirmed ? 200 : trigger_state == TriggerState.squeeze_confirmed ? 300 : 0
+    base_code + bias_to_int(trigger_bias)
+
+label_trigger_text(TriggerState trigger_state) =>
+    trigger_state == TriggerState.reversal_confirmed ? "Reversal Candidate" : trigger_state == TriggerState.continuation_confirmed ? "Continuation Candidate" : trigger_state == TriggerState.squeeze_confirmed ? "Squeeze Candidate" : "No Signal"
+
+dominant_family_name(float reversal_score, float continuation_score, float squeeze_score, float trap_score) =>
+    float reversal_value = nz(reversal_score, 0.0)
+    float continuation_value = nz(continuation_score, 0.0)
+    float squeeze_value = nz(squeeze_score, 0.0)
+    float trap_value = nz(trap_score, 0.0)
+    if reversal_value >= continuation_value and reversal_value >= squeeze_value and reversal_value >= trap_value
+        "Reversal"
+    else if continuation_value >= squeeze_value and continuation_value >= trap_value
+        "Continuation"
+    else if squeeze_value >= trap_value
+        "Squeeze"
+    else
+        "Trap"
+
+runner_up_family_name(float reversal_score, float continuation_score, float squeeze_score, float trap_score) =>
+    string dominant_family = dominant_family_name(reversal_score, continuation_score, squeeze_score, trap_score)
+    float reversal_value = dominant_family == "Reversal" ? -1.0 : nz(reversal_score, 0.0)
+    float continuation_value = dominant_family == "Continuation" ? -1.0 : nz(continuation_score, 0.0)
+    float squeeze_value = dominant_family == "Squeeze" ? -1.0 : nz(squeeze_score, 0.0)
+    float trap_value = dominant_family == "Trap" ? -1.0 : nz(trap_score, 0.0)
+    if reversal_value >= continuation_value and reversal_value >= squeeze_value and reversal_value >= trap_value
+        "Reversal"
+    else if continuation_value >= squeeze_value and continuation_value >= trap_value
+        "Continuation"
+    else if squeeze_value >= trap_value
+        "Squeeze"
+    else
+        "Trap"
+
+candidate_status_text(TriggerState trigger_state, float confidence_score, float actionable_threshold, string dominant_family) =>
+    float watch_threshold = watch_threshold_from_actionable(actionable_threshold)
+    float strong_threshold = math.min(100.0, actionable_threshold + 12.5)
+    if na(confidence_score) or confidence_score < watch_threshold
+        "No Action"
+    else if trigger_state != TriggerState.none and confidence_score >= strong_threshold
+        "Strong " + dominant_family
+    else if trigger_state != TriggerState.none and confidence_score >= actionable_threshold
+        "Actionable " + dominant_family
+    else
+        "Watch " + dominant_family
+
+label_signal_title(TriggerState trigger_state, float confidence_score, float minimum_confidence) =>
+    string family_text = trigger_state == TriggerState.reversal_confirmed ? "Reversal" : trigger_state == TriggerState.continuation_confirmed ? "Continuation" : trigger_state == TriggerState.squeeze_confirmed ? "Squeeze" : "No Signal"
+    float strong_threshold = strong_signal_threshold(minimum_confidence)
+    trigger_state == TriggerState.none ? "No Signal" : confidence_score >= strong_threshold ? "Strong " + family_text : family_text + " Candidate"
+
+dashboard_confidence_color(float confidence_score, float actionable_threshold) =>
+    float watch_threshold = watch_threshold_from_actionable(actionable_threshold)
+    na(confidence_score) ? color.new(color.gray, 20) : confidence_score >= actionable_threshold ? color.new(color.lime, 0) : confidence_score >= watch_threshold ? color.new(color.orange, 0) : color.new(color.silver, 0)
+
+lane_summary_setup_tier(float lane_confidence) =>
+    float normalized_confidence = na(lane_confidence) ? 0.0 : clamp_unsigned(lane_confidence)
+    normalized_confidence >= 75.0 ? "A-tier" : normalized_confidence >= 55.0 ? "B-tier" : "Informational"
+
+lane_summary_actionability(string lane_actionability_text, float fallback_confidence) =>
+    string normalized = str.length(lane_actionability_text) > 0 ? lane_actionability_text : ""
+    normalized == "Strong" ? "Strong" : normalized == "Actionable" ? "Actionable" : normalized == "Watch" ? "Watch" : normalized == "Informational" ? "Informational" : fallback_confidence >= 35.0 ? "Informational" : "No Action"
+
+lane_summary_handoff_hint(string lane_handoff_hint_text) =>
+    string normalized = str.length(lane_handoff_hint_text) > 0 ? lane_handoff_hint_text : "None"
+    normalized == "Continuation" ? "Continuation" : normalized == "Reversal/Trap" ? "Reversal/Trap" : "None"
+
+lane_summary_trigger_state(TriggerState trigger_state) =>
+    trigger_state == TriggerState.none ? "None" : label_trigger_text(trigger_state)
+
+family_value_text(string family_name, float family_score) =>
+    family_name + " " + score_to_text(family_score)
+
+calc_reversal_trap_lane_summary(float reversal_score_input, float continuation_score_input, float squeeze_score_input, float trap_score_input, float confidence_score_input, TriggerState trigger_state_input, float actionable_confidence_threshold) =>
+    float reversal_value = clamp_unsigned(reversal_score_input)
+    float trap_value = clamp_unsigned(trap_score_input)
+    string dominant_family = dominant_family_name(reversal_score_input, continuation_score_input, squeeze_score_input, trap_score_input)
+    string runner_up_family = runner_up_family_name(reversal_score_input, continuation_score_input, squeeze_score_input, trap_score_input)
+    float dominant_family_score = math.max(reversal_value, math.max(clamp_unsigned(continuation_score_input), math.max(clamp_unsigned(squeeze_score_input), trap_value)))
+    float runner_up_family_score = second_highest_score(reversal_score_input, continuation_score_input, squeeze_score_input, trap_score_input)
+    float dominance_gap = math.max(dominant_family_score - runner_up_family_score, 0.0)
+    string setup_text = candidate_status_text(trigger_state_input, confidence_score_input, actionable_confidence_threshold, dominant_family)
+    string lane_name = "Reversal / Trap"
+    string lane_bias = str.contains(setup_text, "Trap") ? "Trap" : str.contains(setup_text, "Reversal") ? "Reversal" : trap_value >= reversal_value + 6.0 ? "Trap" : reversal_value >= trap_value + 6.0 ? "Reversal" : reversal_value >= 20.0 or trap_value >= 20.0 ? "Mixed" : "Mixed"
+    float lane_confidence = clamp_unsigned(confidence_score_input)
+    string lane_setup_tier = lane_summary_setup_tier(lane_confidence)
+    string lane_actionability = lane_summary_actionability(str.contains(setup_text, "Strong") ? "Strong" : str.contains(setup_text, "Actionable") ? "Actionable" : str.contains(setup_text, "Watch") ? "Watch" : setup_text == "Informational" ? "Informational" : "No Action", lane_confidence)
+    string lane_lead_state = lane_bias
+    string gap_state = dominance_gap >= 12.0 ? "clean gap" : dominance_gap >= 8.0 ? "usable gap" : dominance_gap >= 4.0 ? "contested gap" : "ambiguous gap"
+    string lane_runner_up_context = runner_up_family_score >= 10.0 ? runner_up_family + " secondary / " + gap_state : lane_bias == "Trap" ? "Reversal pressure secondary / " + gap_state : lane_bias == "Reversal" ? "Trap pressure secondary / " + gap_state : "Need cleaner failure context"
+    string lane_trigger_state = lane_summary_trigger_state(trigger_state_input)
+    string lane_market_fit = lane_bias == "Trap" ? "Failure / trap transition risk" : lane_bias == "Reversal" ? "Reversal / rejection pressure" : dominant_family == "Continuation" ? "Continuation pressure leading inside reversal engine" : dominant_family == "Squeeze" ? "Compression / squeeze pressure leading inside reversal engine" : "Mixed failure context"
+    string lane_handoff_hint = lane_summary_handoff_hint("None")
+    [lane_name, lane_bias, lane_confidence, lane_setup_tier, lane_actionability, lane_lead_state, lane_runner_up_context, lane_trigger_state, lane_market_fit, lane_handoff_hint]
+
+resolve_preset_thresholds(PresetMode selected_preset) =>
+    float context_threshold = 35.0
+    float event_threshold = 35.0
+    float trigger_threshold = 55.0
+    float confidence_threshold = 60.0
+    int label_cooldown_bars = 20
+    switch selected_preset
+        PresetMode.conservative =>
+            context_threshold := 50.0
+            event_threshold := 45.0
+            trigger_threshold := 65.0
+            confidence_threshold := 70.0
+            label_cooldown_bars := 35
+        PresetMode.balanced =>
+            context_threshold := 35.0
+            event_threshold := 35.0
+            trigger_threshold := 55.0
+            confidence_threshold := 58.0
+            label_cooldown_bars := 20
+        PresetMode.aggressive =>
+            context_threshold := 25.0
+            event_threshold := 25.0
+            trigger_threshold := 45.0
+            confidence_threshold := 47.0
+            label_cooldown_bars := 10
+    [context_threshold, event_threshold, trigger_threshold, confidence_threshold, label_cooldown_bars]
+
+calc_effort_vs_result_placeholder(float volume_ratio, float result_efficiency) =>
+    // TODO: Replace with research-backed effort-vs-result logic.
+    clamp_signed((volume_ratio - result_efficiency) * 20.0)
+
+touches_level(float level_price, float atr_value, float tolerance_atr_multiple) =>
+    not na(level_price) and atr_value > 0 and high >= level_price - atr_value * tolerance_atr_multiple and low <= level_price + atr_value * tolerance_atr_multiple
+
+level_relevance_supports_interaction(LevelRelevanceState relevance_state) =>
+    relevance_state == LevelRelevanceState.fresh or relevance_state == LevelRelevanceState.active
+
+resolve_level_relevance_state(LevelDecayProfile decay_profile, int bars_since_interaction) =>
+    if na(bars_since_interaction)
+        LevelRelevanceState.unavailable
+    else if decay_profile == LevelDecayProfile.session_reset
+        bars_since_interaction <= 3 ? LevelRelevanceState.fresh : bars_since_interaction <= 18 ? LevelRelevanceState.active : bars_since_interaction <= 48 ? LevelRelevanceState.aging : LevelRelevanceState.stale
+    else if decay_profile == LevelDecayProfile.intraday
+        bars_since_interaction <= 2 ? LevelRelevanceState.fresh : bars_since_interaction <= 12 ? LevelRelevanceState.active : bars_since_interaction <= 30 ? LevelRelevanceState.aging : LevelRelevanceState.stale
+    else
+        bars_since_interaction <= 2 ? LevelRelevanceState.fresh : bars_since_interaction <= 8 ? LevelRelevanceState.active : bars_since_interaction <= 20 ? LevelRelevanceState.aging : LevelRelevanceState.stale
+
+update_level_map_entry(LevelType level_type_input, LevelRole level_role_input, LevelTrustBucket trust_bucket_input, LevelDecayProfile decay_profile_input, float level_price_input, bool epoch_reset, bool interaction_now, int prior_last_interaction_bar) =>
+    bool level_available = not na(level_price_input)
+    int last_interaction_bar = prior_last_interaction_bar
+    if not level_available
+        last_interaction_bar := na
+    else
+        if epoch_reset or na(last_interaction_bar)
+            last_interaction_bar := bar_index
+        if interaction_now
+            last_interaction_bar := bar_index
+    int bars_since_interaction = level_available and not na(last_interaction_bar) ? bar_index - last_interaction_bar : na
+    LevelRelevanceState active_relevance_state = resolve_level_relevance_state(decay_profile_input, bars_since_interaction)
+    [level_type_input, level_role_input, trust_bucket_input, decay_profile_input, last_interaction_bar, active_relevance_state]
+
+resolve_interaction_freshness_bucket(int bars_since_interaction) =>
+    if na(bars_since_interaction)
+        InteractionFreshnessBucket.unavailable
+    else if bars_since_interaction <= 3
+        InteractionFreshnessBucket.fresh
+    else if bars_since_interaction <= 12
+        InteractionFreshnessBucket.aging
+    else
+        InteractionFreshnessBucket.stale
+
+level_close_quality(float level_price, float atr_value, bool bullish_interaction) =>
+    if na(level_price) or atr_value <= 0
+        0.0
+    else
+        float quality_buffer = atr_value * 0.25
+        float close_progress = bullish_interaction ? close - level_price : level_price - close
+        math.max(0.0, math.min(1.0, close_progress / math.max(quality_buffer, syminfo.mintick)))
+
+resolve_interaction_quality_state(float close_quality, float body_ratio, bool preferred_context) =>
+    if close_quality >= 0.75 and body_ratio >= 0.45 and preferred_context
+        InteractionQualityState.strong
+    else if close_quality >= 0.55 and body_ratio >= 0.30
+        InteractionQualityState.clean
+    else
+        InteractionQualityState.tentative
+
+interaction_quality_multiplier(InteractionQualityState quality_state) =>
+    quality_state == InteractionQualityState.strong ? 1.0 : quality_state == InteractionQualityState.clean ? 0.75 : quality_state == InteractionQualityState.tentative ? 0.45 : 0.0
+
+resolve_interaction_level_price(InteractionLevelType interaction_level_type, float session_vwap_value, float previous_day_high, float previous_day_low, float structure_basis_value) =>
+    interaction_level_type == InteractionLevelType.session_vwap ? session_vwap_value : interaction_level_type == InteractionLevelType.previous_day_high ? previous_day_high : interaction_level_type == InteractionLevelType.previous_day_low ? previous_day_low : interaction_level_type == InteractionLevelType.structure_basis ? structure_basis_value : na
+
+resolve_absorption_state(bool bullish_state_active, bool bearish_state_active) =>
+    bullish_state_active ? AbsorptionState.bullish_active : bearish_state_active ? AbsorptionState.bearish_active : AbsorptionState.none
+
+historical_state_shading_color(HistoricalRibbonState ribbon_state) =>
+    ribbon_state == HistoricalRibbonState.reversal_bias ? color.new(color.aqua, 93) : ribbon_state == HistoricalRibbonState.trap_risk ? color.new(color.orange, 92) : ribbon_state == HistoricalRibbonState.compression_context ? color.new(color.blue, 96) : na
+
+historical_ribbon_state_text(HistoricalRibbonState ribbon_state) =>
+    ribbon_state == HistoricalRibbonState.reversal_bias ? "Reversal" : ribbon_state == HistoricalRibbonState.trap_risk ? "Trap" : ribbon_state == HistoricalRibbonState.compression_context ? "Compression" : "Mixed"
+
+resolve_contextual_level_multiplier(InteractionLevelType interaction_level_type) =>
+    interaction_level_type == InteractionLevelType.session_vwap ? 1.0 : interaction_level_type == InteractionLevelType.previous_day_high or interaction_level_type == InteractionLevelType.previous_day_low ? 0.90 : interaction_level_type == InteractionLevelType.structure_basis ? 0.60 : 0.0
+
+resolve_contextual_freshness_multiplier(InteractionFreshnessBucket freshness_bucket) =>
+    freshness_bucket == InteractionFreshnessBucket.fresh ? 1.0 : freshness_bucket == InteractionFreshnessBucket.aging ? 0.55 : 0.0
+
+calc_historical_state_ribbon(RegimeState regime_state_input, float reversal_score_input, float trap_score_input, float squeeze_score_input, bool bullish_sweep, bool bearish_sweep, bool bullish_reclaim, bool bearish_reclaim, bool trap_event, bool high_effort_poor_result_flag, bool weak_acceptance_flag, bool expansion_without_acceptance_flag, AbsorptionState absorption_state_input, float absorption_quality_score_input, InteractionType last_level_interaction_type_input, InteractionFreshnessBucket level_interaction_freshness_bucket_input, InteractionLevelType last_level_interaction_level_type_input, InteractionQualityState last_level_interaction_quality_state_input) =>
+    bool interaction_failed_acceptance = last_level_interaction_type_input == InteractionType.pdh_failed_acceptance or last_level_interaction_type_input == InteractionType.pdl_failed_acceptance
+    bool interaction_sweep_failure = last_level_interaction_type_input == InteractionType.pdh_sweep or last_level_interaction_type_input == InteractionType.pdl_sweep
+    bool interaction_vwap_reclaim = last_level_interaction_type_input == InteractionType.vwap_reclaim
+    bool interaction_vwap_rejection = last_level_interaction_type_input == InteractionType.vwap_rejection
+    bool absorption_supportive_context = absorption_state_input != AbsorptionState.none and nz(absorption_quality_score_input, 0.0) >= 18.0
+    float ribbon_level_multiplier = resolve_contextual_level_multiplier(last_level_interaction_level_type_input)
+    float ribbon_freshness_multiplier = resolve_contextual_freshness_multiplier(level_interaction_freshness_bucket_input)
+    float ribbon_quality_multiplier = interaction_quality_multiplier(last_level_interaction_quality_state_input)
+    float ribbon_context_multiplier = ribbon_level_multiplier * ribbon_freshness_multiplier * ribbon_quality_multiplier
+    float weak_rejection_penalty = (weak_acceptance_flag ? 10.0 : 0.0) + (expansion_without_acceptance_flag ? 8.0 : 0.0) + (interaction_vwap_rejection and last_level_interaction_quality_state_input == InteractionQualityState.tentative ? 6.0 : 0.0) + (last_level_interaction_level_type_input == InteractionLevelType.structure_basis and last_level_interaction_quality_state_input != InteractionQualityState.strong ? 6.0 : 0.0)
+    float raw_reversal_context = nz(reversal_score_input, 0.0) * 0.72 + ((interaction_failed_acceptance ? 14.0 : 0.0) + (interaction_vwap_reclaim ? 9.0 : 0.0) + (absorption_supportive_context ? 9.0 : 0.0) + (high_effort_poor_result_flag ? 8.0 : 0.0)) * ribbon_context_multiplier - weak_rejection_penalty * 0.55 * ribbon_context_multiplier - (trap_event ? 4.0 : 0.0)
+    float raw_trap_context = nz(trap_score_input, 0.0) * 0.74 + ((interaction_sweep_failure ? 14.0 : 0.0) + (trap_event ? 12.0 : 0.0) + (high_effort_poor_result_flag and interaction_sweep_failure ? 6.0 : 0.0)) * ribbon_context_multiplier - ((interaction_failed_acceptance ? 6.0 : 0.0) + (absorption_supportive_context ? 4.0 : 0.0)) * ribbon_context_multiplier - weak_rejection_penalty * 0.22 * ribbon_context_multiplier
+    float raw_compression_context = (regime_state_input == RegimeState.compression ? 28.0 : 0.0) + nz(squeeze_score_input, 0.0) * 0.78 - ((bullish_sweep or bearish_sweep or bullish_reclaim or bearish_reclaim or trap_event) ? 10.0 : 0.0) - (high_effort_poor_result_flag ? 6.0 : 0.0)
+    float reversal_context_smooth = ta.rma(clamp_unsigned(raw_reversal_context), 5)
+    float trap_context_smooth = ta.rma(clamp_unsigned(raw_trap_context), 5)
+    float compression_context_smooth = ta.rma(clamp_unsigned(raw_compression_context), 6)
+    float reversal_trap_compression_overlap_tolerance = 3.0
+    bool reversal_state_candidate = reversal_context_smooth >= 38.0 and reversal_context_smooth >= trap_context_smooth + 6.0 and reversal_context_smooth >= compression_context_smooth - reversal_trap_compression_overlap_tolerance
+    bool trap_state_candidate = trap_context_smooth >= 36.0 and trap_context_smooth >= reversal_context_smooth + 4.0 and trap_context_smooth >= compression_context_smooth - reversal_trap_compression_overlap_tolerance
+    bool compression_state_candidate = regime_state_input == RegimeState.compression and compression_context_smooth >= 34.0 and compression_context_smooth >= math.max(reversal_context_smooth, trap_context_smooth) + 6.0
+
+    HistoricalRibbonState candidate_state = HistoricalRibbonState.mixed_no_action
+    if reversal_state_candidate
+        candidate_state := HistoricalRibbonState.reversal_bias
+    else if trap_state_candidate
+        candidate_state := HistoricalRibbonState.trap_risk
+    else if compression_state_candidate
+        candidate_state := HistoricalRibbonState.compression_context
+
+    var HistoricalRibbonState historical_ribbon_state = HistoricalRibbonState.mixed_no_action
+    var HistoricalRibbonState pending_ribbon_state = HistoricalRibbonState.mixed_no_action
+    var int pending_ribbon_bars = 0
+
+    if candidate_state == historical_ribbon_state
+        pending_ribbon_state := candidate_state
+        pending_ribbon_bars := 0
+    else
+        if candidate_state == pending_ribbon_state
+            pending_ribbon_bars += 1
+        else
+            pending_ribbon_state := candidate_state
+            pending_ribbon_bars := 1
+
+        int required_confirmation_bars = candidate_state == HistoricalRibbonState.mixed_no_action ? 3 : 2
+        if pending_ribbon_bars >= required_confirmation_bars
+            historical_ribbon_state := candidate_state
+            pending_ribbon_bars := 0
+
+    [historical_ribbon_state, candidate_state, reversal_context_smooth, trap_context_smooth, compression_context_smooth]
+
+render_historical_state_debug(bool show_state_debug_input, int window_input, HistoricalRibbonState candidate_state_input, HistoricalRibbonState final_state_input, float reversal_context_smooth_input, float trap_context_smooth_input, float compression_context_smooth_input) =>
+    var table historical_state_debug_table = table.new(position.bottom_left, 2, 8, border_width = 1)
+    if barstate.islast
+        if show_state_debug_input
+            int candidate_reversal_count = 0
+            int candidate_trap_count = 0
+            int candidate_compression_count = 0
+            int candidate_mixed_count = 0
+            int final_reversal_count = 0
+            int final_trap_count = 0
+            int final_compression_count = 0
+            int final_mixed_count = 0
+            int debug_window_bars = math.min(window_input - 1, bar_index)
+
+            for history_offset = 0 to debug_window_bars
+                HistoricalRibbonState candidate_state_value = candidate_state_input[history_offset]
+                HistoricalRibbonState final_state_value = final_state_input[history_offset]
+                candidate_reversal_count += candidate_state_value == HistoricalRibbonState.reversal_bias ? 1 : 0
+                candidate_trap_count += candidate_state_value == HistoricalRibbonState.trap_risk ? 1 : 0
+                candidate_compression_count += candidate_state_value == HistoricalRibbonState.compression_context ? 1 : 0
+                candidate_mixed_count += candidate_state_value == HistoricalRibbonState.mixed_no_action ? 1 : 0
+                final_reversal_count += final_state_value == HistoricalRibbonState.reversal_bias ? 1 : 0
+                final_trap_count += final_state_value == HistoricalRibbonState.trap_risk ? 1 : 0
+                final_compression_count += final_state_value == HistoricalRibbonState.compression_context ? 1 : 0
+                final_mixed_count += final_state_value == HistoricalRibbonState.mixed_no_action ? 1 : 0
+
+            table.cell(historical_state_debug_table, 0, 0, "Hist State", text_color = color.white, bgcolor = color.new(color.black, 0))
+            table.cell(historical_state_debug_table, 1, 0, str.tostring(debug_window_bars + 1) + " bars", text_color = color.white, bgcolor = color.new(color.black, 0))
+            table.cell(historical_state_debug_table, 0, 1, "Current", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 1, historical_ribbon_state_text(final_state_input) + " | Cand " + historical_ribbon_state_text(candidate_state_input), text_color = color.white)
+            table.cell(historical_state_debug_table, 0, 2, "Final", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 2, "R " + str.tostring(final_reversal_count) + " T " + str.tostring(final_trap_count) + " C " + str.tostring(final_compression_count) + " M " + str.tostring(final_mixed_count), text_color = color.white)
+            table.cell(historical_state_debug_table, 0, 3, "Candidate", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 3, "R " + str.tostring(candidate_reversal_count) + " T " + str.tostring(candidate_trap_count) + " C " + str.tostring(candidate_compression_count) + " M " + str.tostring(candidate_mixed_count), text_color = color.white)
+            table.cell(historical_state_debug_table, 0, 4, "Rev Sm", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 4, score_to_text(reversal_context_smooth_input), text_color = unsigned_to_color(reversal_context_smooth_input))
+            table.cell(historical_state_debug_table, 0, 5, "Trap Sm", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 5, score_to_text(trap_context_smooth_input), text_color = unsigned_to_color(trap_context_smooth_input))
+            table.cell(historical_state_debug_table, 0, 6, "Comp Sm", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 6, score_to_text(compression_context_smooth_input), text_color = unsigned_to_color(compression_context_smooth_input))
+            table.cell(historical_state_debug_table, 0, 7, "Shade", text_color = color.white)
+            table.cell(historical_state_debug_table, 1, 7, na(historical_state_shading_color(final_state_input)) ? "None" : historical_ribbon_state_text(final_state_input), text_color = color.white)
+        else
+            table.clear(historical_state_debug_table, 0, 0, 1, 7)
+
+calc_td_reference_placeholder(bool enable_reference) =>
+    // TODO: Replace with an optional secondary TD reference if research justifies it.
+    enable_reference ? 0.0 : na
+
+build_blended_fair_value_reference(float session_vwap_value, float local_mean_value) =>
+    na(session_vwap_value) ? local_mean_value : na(local_mean_value) ? session_vwap_value : session_vwap_value * 0.65 + local_mean_value * 0.35
+
+score_extension_ladder(float signed_extension_value, float extreme_atr_multiple) =>
+    float absolute_extension = math.abs(nz(signed_extension_value, 0.0))
+    float pullback_band = 0.35
+    float moderate_band = math.max(0.85, extreme_atr_multiple * 0.55)
+    float overextension_band = math.max(moderate_band + 0.15, extreme_atr_multiple)
+    float extension_score = na
+    if not na(signed_extension_value)
+        float extension_direction = math.sign(signed_extension_value)
+        if absolute_extension <= pullback_band
+            extension_score := extension_direction * (absolute_extension / pullback_band) * 12.0
+        else if absolute_extension <= moderate_band
+            float moderate_progress = (absolute_extension - pullback_band) / math.max(moderate_band - pullback_band, 0.1)
+            extension_score := extension_direction * (12.0 + moderate_progress * 23.0)
+        else if absolute_extension <= overextension_band
+            float strong_progress = (absolute_extension - moderate_band) / math.max(overextension_band - moderate_band, 0.1)
+            extension_score := extension_direction * (35.0 + strong_progress * 30.0)
+        else
+            float overshoot_progress = math.min((absolute_extension - overextension_band) / math.max(overextension_band, 0.1), 1.0)
+            extension_score := extension_direction * (65.0 + overshoot_progress * 35.0)
+    extension_score
+
+resolve_exhaustion_trend_sign(float move_now, float extension_score_input) =>
+    move_now > 0.50 ? 1 : move_now < -0.50 ? -1 : nz(extension_score_input, 0.0) >= 35.0 ? 1 : nz(extension_score_input, 0.0) <= -35.0 ? -1 : 0
+
+directional_component(int trend_sign, float signed_score) =>
+    trend_sign == 1 ? nz(positive_component(signed_score), 0.0) : trend_sign == -1 ? nz(negative_component(signed_score), 0.0) : 0.0
+
+calc_level_map_core(float session_vwap_value, float previous_day_high, float previous_day_low, float structure_basis_value, StructureState structure_state_input) =>
+    float atr_value = ta.atr(14)
+    float level_touch_tolerance_atr = 0.15
+    bool new_session_epoch = ta.change(time("D")) != 0
+    bool structure_basis_shifted = not na(structure_basis_value) and not na(structure_basis_value[1]) and atr_value > 0 and math.abs(structure_basis_value - structure_basis_value[1]) > atr_value * 0.60
+    bool structure_epoch_reset = structure_state_input != structure_state_input[1] or structure_basis_shifted
+
+    bool session_vwap_interaction = touches_level(session_vwap_value, atr_value, level_touch_tolerance_atr)
+    bool previous_day_high_interaction = touches_level(previous_day_high, atr_value, level_touch_tolerance_atr)
+    bool previous_day_low_interaction = touches_level(previous_day_low, atr_value, level_touch_tolerance_atr)
+    bool structure_basis_interaction = touches_level(structure_basis_value, atr_value, level_touch_tolerance_atr)
+
+    var int session_vwap_last_interaction_bar = na
+    var int previous_day_high_last_interaction_bar = na
+    var int previous_day_low_last_interaction_bar = na
+    var int structure_basis_last_interaction_bar = na
+
+    [session_vwap_level_type, session_vwap_level_role, session_vwap_trust_bucket, session_vwap_decay_profile, session_vwap_last_interaction_bar_next, session_vwap_relevance_state] = update_level_map_entry(LevelType.session_vwap, LevelRole.auction, LevelTrustBucket.anchor, LevelDecayProfile.session_reset, session_vwap_value, new_session_epoch, session_vwap_interaction, session_vwap_last_interaction_bar)
+    [previous_day_high_level_type, previous_day_high_level_role, previous_day_high_trust_bucket, previous_day_high_decay_profile, previous_day_high_last_interaction_bar_next, previous_day_high_relevance_state] = update_level_map_entry(LevelType.previous_day_high, LevelRole.liquidity, LevelTrustBucket.anchor, LevelDecayProfile.intraday, previous_day_high, new_session_epoch, previous_day_high_interaction, previous_day_high_last_interaction_bar)
+    [previous_day_low_level_type, previous_day_low_level_role, previous_day_low_trust_bucket, previous_day_low_decay_profile, previous_day_low_last_interaction_bar_next, previous_day_low_relevance_state] = update_level_map_entry(LevelType.previous_day_low, LevelRole.liquidity, LevelTrustBucket.anchor, LevelDecayProfile.intraday, previous_day_low, new_session_epoch, previous_day_low_interaction, previous_day_low_last_interaction_bar)
+    [structure_basis_level_type, structure_basis_level_role, structure_basis_trust_bucket, structure_basis_decay_profile, structure_basis_last_interaction_bar_next, structure_basis_relevance_state] = update_level_map_entry(LevelType.structure_basis, LevelRole.structural, LevelTrustBucket.secondary, LevelDecayProfile.adaptive, structure_basis_value, structure_epoch_reset, structure_basis_interaction, structure_basis_last_interaction_bar)
+
+    session_vwap_last_interaction_bar := session_vwap_last_interaction_bar_next
+    previous_day_high_last_interaction_bar := previous_day_high_last_interaction_bar_next
+    previous_day_low_last_interaction_bar := previous_day_low_last_interaction_bar_next
+    structure_basis_last_interaction_bar := structure_basis_last_interaction_bar_next
+
+    [session_vwap_level_type, session_vwap_level_role, session_vwap_trust_bucket, session_vwap_decay_profile, session_vwap_last_interaction_bar, session_vwap_relevance_state, previous_day_high_level_type, previous_day_high_level_role, previous_day_high_trust_bucket, previous_day_high_decay_profile, previous_day_high_last_interaction_bar, previous_day_high_relevance_state, previous_day_low_level_type, previous_day_low_level_role, previous_day_low_trust_bucket, previous_day_low_decay_profile, previous_day_low_last_interaction_bar, previous_day_low_relevance_state, structure_basis_level_type, structure_basis_level_role, structure_basis_trust_bucket, structure_basis_decay_profile, structure_basis_last_interaction_bar, structure_basis_relevance_state]
+
+calc_level_interactions(float session_vwap_value, LevelRelevanceState session_vwap_relevance_state, float previous_day_high, LevelRelevanceState previous_day_high_relevance_state, float previous_day_low, LevelRelevanceState previous_day_low_relevance_state, float structure_basis_value, LevelRelevanceState structure_basis_relevance_state, float extension_score_input) =>
+    float atr_value = ta.atr(14)
+    float bar_range = math.max(high - low, syminfo.mintick)
+    float body_ratio = math.abs(close - open) / bar_range
+    float lower_wick_ratio = (math.min(open, close) - low) / bar_range
+    float upper_wick_ratio = (high - math.max(open, close)) / bar_range
+    float probe_buffer = atr_value * 0.06
+    float reclaim_buffer = atr_value * 0.08
+    float failed_acceptance_buffer = atr_value * 0.10
+    float structure_buffer = atr_value * 0.07
+
+    bool session_vwap_meaningful = level_relevance_supports_interaction(session_vwap_relevance_state)
+    bool previous_day_high_meaningful = level_relevance_supports_interaction(previous_day_high_relevance_state)
+    bool previous_day_low_meaningful = level_relevance_supports_interaction(previous_day_low_relevance_state)
+    bool structure_basis_meaningful = level_relevance_supports_interaction(structure_basis_relevance_state)
+
+    bool bullish_vwap_reclaim = session_vwap_meaningful and not na(session_vwap_value) and low <= session_vwap_value + reclaim_buffer and open <= session_vwap_value and close > session_vwap_value + reclaim_buffer
+    bool bearish_vwap_reclaim = session_vwap_meaningful and not na(session_vwap_value) and high >= session_vwap_value - reclaim_buffer and open >= session_vwap_value and close < session_vwap_value - reclaim_buffer
+    bool bullish_vwap_rejection = session_vwap_meaningful and not bullish_vwap_reclaim and not na(session_vwap_value) and low <= session_vwap_value + probe_buffer and close > session_vwap_value and close > open and lower_wick_ratio >= 0.35
+    bool bearish_vwap_rejection = session_vwap_meaningful and not bearish_vwap_reclaim and not na(session_vwap_value) and high >= session_vwap_value - probe_buffer and close < session_vwap_value and close < open and upper_wick_ratio >= 0.35
+
+    bool bearish_previous_day_high_sweep = previous_day_high_meaningful and not na(previous_day_high) and high > previous_day_high + probe_buffer and close < previous_day_high - reclaim_buffer
+    bool bullish_previous_day_low_sweep = previous_day_low_meaningful and not na(previous_day_low) and low < previous_day_low - probe_buffer and close > previous_day_low + reclaim_buffer
+    bool bearish_previous_day_high_failed_acceptance = previous_day_high_meaningful and not na(previous_day_high) and (open > previous_day_high or close[1] > previous_day_high) and high >= previous_day_high + probe_buffer * 0.50 and close < previous_day_high - failed_acceptance_buffer
+    bool bullish_previous_day_low_failed_acceptance = previous_day_low_meaningful and not na(previous_day_low) and (open < previous_day_low or close[1] < previous_day_low) and low <= previous_day_low - probe_buffer * 0.50 and close > previous_day_low + failed_acceptance_buffer
+
+    bool structure_basis_low_risk_context = structure_basis_meaningful and not na(structure_basis_value) and atr_value > 0 and bar_range <= atr_value * 1.25 and body_ratio >= 0.40 and math.abs(nz(extension_score_input, 0.0)) <= 55.0
+    bool bullish_structure_basis_interaction = structure_basis_low_risk_context and low <= structure_basis_value + structure_buffer and open <= structure_basis_value and close > structure_basis_value + structure_buffer
+    bool bearish_structure_basis_interaction = structure_basis_low_risk_context and high >= structure_basis_value - structure_buffer and open >= structure_basis_value and close < structure_basis_value - structure_buffer
+
+    InteractionType current_interaction_type = InteractionType.none
+    InteractionLevelType current_interaction_level_type = InteractionLevelType.none
+    InteractionPolarity current_interaction_polarity = InteractionPolarity.neutral
+    InteractionQualityState current_interaction_quality_state = InteractionQualityState.unavailable
+    float current_interaction_close_quality = 0.0
+    int current_interaction_priority = 0
+
+    if bearish_previous_day_high_failed_acceptance and 95 > current_interaction_priority
+        current_interaction_type := InteractionType.pdh_failed_acceptance
+        current_interaction_level_type := InteractionLevelType.previous_day_high
+        current_interaction_polarity := InteractionPolarity.bearish
+        current_interaction_close_quality := level_close_quality(previous_day_high, atr_value, false)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 95
+    if bullish_previous_day_low_failed_acceptance and 95 > current_interaction_priority
+        current_interaction_type := InteractionType.pdl_failed_acceptance
+        current_interaction_level_type := InteractionLevelType.previous_day_low
+        current_interaction_polarity := InteractionPolarity.bullish
+        current_interaction_close_quality := level_close_quality(previous_day_low, atr_value, true)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 95
+    if bearish_previous_day_high_sweep and 85 > current_interaction_priority
+        current_interaction_type := InteractionType.pdh_sweep
+        current_interaction_level_type := InteractionLevelType.previous_day_high
+        current_interaction_polarity := InteractionPolarity.bearish
+        current_interaction_close_quality := level_close_quality(previous_day_high, atr_value, false)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 85
+    if bullish_previous_day_low_sweep and 85 > current_interaction_priority
+        current_interaction_type := InteractionType.pdl_sweep
+        current_interaction_level_type := InteractionLevelType.previous_day_low
+        current_interaction_polarity := InteractionPolarity.bullish
+        current_interaction_close_quality := level_close_quality(previous_day_low, atr_value, true)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 85
+    if bullish_vwap_reclaim and 72 > current_interaction_priority
+        current_interaction_type := InteractionType.vwap_reclaim
+        current_interaction_level_type := InteractionLevelType.session_vwap
+        current_interaction_polarity := InteractionPolarity.bullish
+        current_interaction_close_quality := level_close_quality(session_vwap_value, atr_value, true)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 72
+    if bearish_vwap_reclaim and 72 > current_interaction_priority
+        current_interaction_type := InteractionType.vwap_reclaim
+        current_interaction_level_type := InteractionLevelType.session_vwap
+        current_interaction_polarity := InteractionPolarity.bearish
+        current_interaction_close_quality := level_close_quality(session_vwap_value, atr_value, false)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 72
+    if bullish_vwap_rejection and 62 > current_interaction_priority
+        current_interaction_type := InteractionType.vwap_rejection
+        current_interaction_level_type := InteractionLevelType.session_vwap
+        current_interaction_polarity := InteractionPolarity.bullish
+        current_interaction_close_quality := level_close_quality(session_vwap_value, atr_value, true)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 62
+    if bearish_vwap_rejection and 62 > current_interaction_priority
+        current_interaction_type := InteractionType.vwap_rejection
+        current_interaction_level_type := InteractionLevelType.session_vwap
+        current_interaction_polarity := InteractionPolarity.bearish
+        current_interaction_close_quality := level_close_quality(session_vwap_value, atr_value, false)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, true)
+        current_interaction_priority := 62
+    if bullish_structure_basis_interaction and 40 > current_interaction_priority
+        current_interaction_type := InteractionType.structure_basis_interaction
+        current_interaction_level_type := InteractionLevelType.structure_basis
+        current_interaction_polarity := InteractionPolarity.bullish
+        current_interaction_close_quality := level_close_quality(structure_basis_value, atr_value, true)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, false)
+        current_interaction_priority := 40
+    if bearish_structure_basis_interaction and 40 > current_interaction_priority
+        current_interaction_type := InteractionType.structure_basis_interaction
+        current_interaction_level_type := InteractionLevelType.structure_basis
+        current_interaction_polarity := InteractionPolarity.bearish
+        current_interaction_close_quality := level_close_quality(structure_basis_value, atr_value, false)
+        current_interaction_quality_state := resolve_interaction_quality_state(current_interaction_close_quality, body_ratio, false)
+        current_interaction_priority := 40
+
+    var int last_level_interaction_bar = na
+    var InteractionType last_interaction_type = InteractionType.none
+    var InteractionLevelType last_interaction_level_type = InteractionLevelType.none
+    var InteractionPolarity last_interaction_polarity = InteractionPolarity.neutral
+    var InteractionQualityState last_interaction_quality_state = InteractionQualityState.unavailable
+
+    bool has_current_interaction = current_interaction_type != InteractionType.none
+    if has_current_interaction
+        last_level_interaction_bar := bar_index
+        last_interaction_type := current_interaction_type
+        last_interaction_level_type := current_interaction_level_type
+        last_interaction_polarity := current_interaction_polarity
+        last_interaction_quality_state := current_interaction_quality_state
+
+    int bars_since_interaction = not na(last_level_interaction_bar) ? bar_index - last_level_interaction_bar : na
+    InteractionFreshnessBucket interaction_freshness_bucket = resolve_interaction_freshness_bucket(bars_since_interaction)
+
+    float watchfulness_score = 0.0
+    if interaction_freshness_bucket != InteractionFreshnessBucket.stale and interaction_freshness_bucket != InteractionFreshnessBucket.unavailable
+        float base_watchfulness = last_interaction_quality_state == InteractionQualityState.strong ? 18.0 : last_interaction_quality_state == InteractionQualityState.clean ? 12.0 : last_interaction_quality_state == InteractionQualityState.tentative ? 6.0 : 0.0
+        float freshness_multiplier = interaction_freshness_bucket == InteractionFreshnessBucket.fresh ? 1.0 : 0.5
+        watchfulness_score := math.min(20.0, base_watchfulness * freshness_multiplier)
+
+    [bullish_vwap_rejection, bearish_vwap_rejection, bullish_vwap_reclaim, bearish_vwap_reclaim, bearish_previous_day_high_sweep, bullish_previous_day_low_sweep, bearish_previous_day_high_failed_acceptance, bullish_previous_day_low_failed_acceptance, bullish_structure_basis_interaction, bearish_structure_basis_interaction, last_interaction_type, bars_since_interaction, interaction_freshness_bucket, last_interaction_level_type, last_interaction_polarity, last_interaction_quality_state, watchfulness_score]
+
+calc_effort_result_context(float session_vwap_value, float previous_day_high, float previous_day_low, float structure_basis_value, InteractionType last_interaction_type, int bars_since_interaction, InteractionFreshnessBucket interaction_freshness_bucket, InteractionLevelType last_interaction_level_type, InteractionPolarity last_interaction_polarity, InteractionQualityState last_interaction_quality_state, float extension_score_input, float fallback_participation_score_input, float exhaustion_score_input, bool bullish_divergence, bool bearish_divergence, bool bullish_absorption_proxy, bool bearish_absorption_proxy) =>
+    float atr_value = ta.atr(14)
+    float bar_range = math.max(high - low, syminfo.mintick)
+    float body_ratio = math.abs(close - open) / bar_range
+    float lower_wick_ratio = (math.min(open, close) - low) / bar_range
+    float upper_wick_ratio = (high - math.max(open, close)) / bar_range
+    float average_volume = ta.sma(volume, 20)
+    float volume_ratio = not na(average_volume) and average_volume > 0 ? volume / average_volume : 1.0
+    float interaction_level_price = resolve_interaction_level_price(last_interaction_level_type, session_vwap_value, previous_day_high, previous_day_low, structure_basis_value)
+    bool bullish_interaction = last_interaction_polarity == InteractionPolarity.bullish
+    bool bearish_interaction = last_interaction_polarity == InteractionPolarity.bearish
+    bool fresh_interaction = last_interaction_type != InteractionType.none and interaction_freshness_bucket == InteractionFreshnessBucket.fresh and not na(bars_since_interaction) and bars_since_interaction <= 3
+    bool contextual_interaction = last_interaction_type != InteractionType.none and interaction_freshness_bucket != InteractionFreshnessBucket.stale and interaction_freshness_bucket != InteractionFreshnessBucket.unavailable
+    float level_multiplier = last_interaction_level_type == InteractionLevelType.structure_basis ? 0.65 : last_interaction_level_type == InteractionLevelType.none ? 0.0 : 1.0
+    float freshness_multiplier = interaction_freshness_bucket == InteractionFreshnessBucket.fresh ? 1.0 : interaction_freshness_bucket == InteractionFreshnessBucket.aging ? 0.55 : 0.0
+    float quality_multiplier = interaction_quality_multiplier(last_interaction_quality_state)
+    float close_quality = (bullish_interaction or bearish_interaction) and not na(interaction_level_price) ? level_close_quality(interaction_level_price, atr_value, bullish_interaction) : 0.0
+    float directional_wick_ratio = bullish_interaction ? lower_wick_ratio : bearish_interaction ? upper_wick_ratio : math.max(lower_wick_ratio, upper_wick_ratio)
+    bool same_side_divergence = bullish_interaction ? bullish_divergence : bearish_interaction ? bearish_divergence : false
+    float opposing_extension = bullish_interaction ? nz(negative_component(extension_score_input), 0.0) : bearish_interaction ? nz(positive_component(extension_score_input), 0.0) : math.abs(nz(extension_score_input, 0.0)) * 0.25
+    bool high_effort_condition = volume_ratio >= 1.35 or math.abs(nz(fallback_participation_score_input, 0.0)) >= 55.0 or same_side_divergence
+    bool poor_result_condition = close_quality <= 0.45 or body_ratio <= 0.35 or directional_wick_ratio >= 0.40
+    bool expansion_without_acceptance_flag = contextual_interaction and atr_value > 0 and bar_range >= atr_value * 1.10 and close_quality <= 0.35
+    bool weak_acceptance_flag = contextual_interaction and (last_interaction_type == InteractionType.pdh_failed_acceptance or last_interaction_type == InteractionType.pdl_failed_acceptance or last_interaction_type == InteractionType.pdh_sweep or last_interaction_type == InteractionType.pdl_sweep or last_interaction_type == InteractionType.vwap_rejection or expansion_without_acceptance_flag)
+    bool failure_thesis_plausible = contextual_interaction and (last_interaction_type == InteractionType.pdh_failed_acceptance or last_interaction_type == InteractionType.pdl_failed_acceptance or last_interaction_type == InteractionType.pdh_sweep or last_interaction_type == InteractionType.pdl_sweep or last_interaction_type == InteractionType.vwap_reclaim or last_interaction_type == InteractionType.vwap_rejection or same_side_divergence or opposing_extension >= 25.0 or math.abs(nz(exhaustion_score_input, 0.0)) >= 25.0)
+    bool high_effort_poor_result_flag = fresh_interaction and failure_thesis_plausible and high_effort_condition and poor_result_condition
+
+    float directional_effort_result_score = 0.0
+    if contextual_interaction
+        float efficiency_component = (1.0 - close_quality) * 35.0 + directional_wick_ratio * 20.0 + math.max(volume_ratio - 1.0, 0.0) * 18.0
+        float aligned_score = clamp_unsigned(efficiency_component * level_multiplier * freshness_multiplier * quality_multiplier)
+        directional_effort_result_score := high_effort_poor_result_flag ? aligned_score : weak_acceptance_flag ? aligned_score * 0.55 : aligned_score * 0.25
+        directional_effort_result_score := bullish_interaction ? directional_effort_result_score : bearish_interaction ? -directional_effort_result_score : 0.0
+    else
+        directional_effort_result_score := clamp_signed(calc_effort_vs_result_placeholder(volume_ratio, body_ratio) * 0.15)
+
+    bool absorption_event = false
+    float absorption_event_score = 0.0
+    if fresh_interaction and failure_thesis_plausible and high_effort_condition
+        if bullish_interaction and bullish_absorption_proxy and (lower_wick_ratio >= 0.35 or close_quality >= 0.40) and poor_result_condition
+            absorption_event := true
+            absorption_event_score := clamp_unsigned((math.max(volume_ratio - 1.0, 0.0) * 24.0 + lower_wick_ratio * 26.0 + close_quality * 30.0 + quality_multiplier * 20.0) * level_multiplier)
+        if bearish_interaction and bearish_absorption_proxy and (upper_wick_ratio >= 0.35 or close_quality >= 0.40) and poor_result_condition
+            absorption_event := true
+            absorption_event_score := clamp_unsigned((math.max(volume_ratio - 1.0, 0.0) * 24.0 + upper_wick_ratio * 26.0 + close_quality * 30.0 + quality_multiplier * 20.0) * level_multiplier)
+
+    var int bullish_absorption_event_bar = na
+    var int bearish_absorption_event_bar = na
+    var float bullish_absorption_event_score = 0.0
+    var float bearish_absorption_event_score = 0.0
+    int absorption_persistence_bars = 3
+
+    if absorption_event and bullish_interaction
+        bullish_absorption_event_bar := bar_index
+        bullish_absorption_event_score := absorption_event_score
+        bearish_absorption_event_bar := na
+        bearish_absorption_event_score := 0.0
+    if absorption_event and bearish_interaction
+        bearish_absorption_event_bar := bar_index
+        bearish_absorption_event_score := absorption_event_score
+        bullish_absorption_event_bar := na
+        bullish_absorption_event_score := 0.0
+
+    bool bullish_absorption_state_active = not na(bullish_absorption_event_bar) and bar_index - bullish_absorption_event_bar <= absorption_persistence_bars
+    bool bearish_absorption_state_active = not na(bearish_absorption_event_bar) and bar_index - bearish_absorption_event_bar <= absorption_persistence_bars
+    if not bullish_absorption_state_active
+        bullish_absorption_event_score := 0.0
+    if not bearish_absorption_state_active
+        bearish_absorption_event_score := 0.0
+
+    AbsorptionState absorption_state = resolve_absorption_state(bullish_absorption_state_active, bearish_absorption_state_active)
+    float absorption_quality_score = bullish_absorption_state_active ? math.max(0.0, bullish_absorption_event_score - (bar_index - bullish_absorption_event_bar) * 12.0) : bearish_absorption_state_active ? math.max(0.0, bearish_absorption_event_score - (bar_index - bearish_absorption_event_bar) * 12.0) : 0.0
+
+    [clamp_signed(directional_effort_result_score), high_effort_poor_result_flag, weak_acceptance_flag, expansion_without_acceptance_flag, absorption_event, absorption_state, clamp_unsigned(absorption_quality_score)]
+
+calc_experimental_continuation_state(StructureState structure_state_input, float structure_score_input, bool bos_up, bool bos_down, float last_pivot_high, float last_pivot_low, float structure_basis_value, float session_vwap_value, float extension_score_input) =>
+    // Experimental continuation defaults mirror the validated prototype branch.
+    float pullback_min = 5.0
+    float pullback_max = 75.0
+    float hold_buffer_atr_multiple = 0.30
+    float decisive_break_atr_multiple = 0.35
+    float reaccept_buffer_atr_multiple = 0.10
+    float reaccept_body_ratio_min = 0.45
+    float reaccept_close_quality_min = 0.60
+    int breakout_memory_window = 20
+    int resumption_window = 2
+    var float bullish_breakout_memory = na
+    var float bearish_breakout_memory = na
+    var int bullish_breakout_bar = na
+    var int bearish_breakout_bar = na
+    var int active_reference_direction = 0
+    var int active_reference_type = 0
+    var float active_reference_price = na
+    var int active_hold_start_bar = na
+    var int active_hold_last_respect_bar = na
+    var int active_hold_respect_bars = 0
+    var bool active_hold_valid = false
+    var int active_reaccept_bar = na
+    var int active_resumption_deadline = na
+    var float active_reaccept_signal_high = na
+    var float active_reaccept_signal_low = na
+    var float active_reaccept_signal_close = na
+
+    if bos_up and not na(last_pivot_high)
+        bullish_breakout_memory := last_pivot_high
+        bullish_breakout_bar := bar_index
+    if bos_down and not na(last_pivot_low)
+        bearish_breakout_memory := last_pivot_low
+        bearish_breakout_bar := bar_index
+
+    if not na(bullish_breakout_bar) and bar_index - bullish_breakout_bar > breakout_memory_window
+        bullish_breakout_memory := na
+        bullish_breakout_bar := na
+    if not na(bearish_breakout_bar) and bar_index - bearish_breakout_bar > breakout_memory_window
+        bearish_breakout_memory := na
+        bearish_breakout_bar := na
+
+    float atr_value = ta.atr(14)
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float close_location = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float hold_buffer = atr_value * hold_buffer_atr_multiple
+    float decisive_break_buffer = atr_value * decisive_break_atr_multiple
+    float reaccept_buffer = atr_value * reaccept_buffer_atr_multiple
+    int hold_context_max_bars = math.min(breakout_memory_window, math.max(4, resumption_window + 4))
+    int reaccept_confirmation_window = math.max(2, math.min(3, resumption_window + 2))
+    bool bullish_structure_confirmed = structure_state_input == StructureState.bullish and not na(structure_score_input) and structure_score_input >= 25.0
+    bool bearish_structure_confirmed = structure_state_input == StructureState.bearish and not na(structure_score_input) and structure_score_input <= -25.0
+    float bullish_pullback_extension = nz(negative_component(extension_score_input), 0.0)
+    float bearish_pullback_extension = nz(positive_component(extension_score_input), 0.0)
+    float bullish_opposing_extension = nz(positive_component(extension_score_input), 0.0)
+    float bearish_opposing_extension = nz(negative_component(extension_score_input), 0.0)
+    bool bullish_pullback_window = bullish_pullback_extension >= pullback_min and bullish_pullback_extension <= pullback_max and bullish_opposing_extension <= 25.0
+    bool bearish_pullback_window = bearish_pullback_extension >= pullback_min and bearish_pullback_extension <= pullback_max and bearish_opposing_extension <= 25.0
+    bool bullish_breakout_recent = not na(bullish_breakout_memory) and not na(bullish_breakout_bar) and bar_index - bullish_breakout_bar <= breakout_memory_window
+    bool bearish_breakout_recent = not na(bearish_breakout_memory) and not na(bearish_breakout_bar) and bar_index - bearish_breakout_bar <= breakout_memory_window
+    float recent_low_3 = ta.lowest(low, 3)
+    float recent_high_3 = ta.highest(high, 3)
+    float bullish_dynamic_reference = na(session_vwap_value) ? structure_basis_value : na(structure_basis_value) ? session_vwap_value : math.max(session_vwap_value, structure_basis_value)
+    float bearish_dynamic_reference = na(session_vwap_value) ? structure_basis_value : na(structure_basis_value) ? session_vwap_value : math.min(session_vwap_value, structure_basis_value)
+    float bullish_reference_level = bullish_dynamic_reference
+    float bearish_reference_level = bearish_dynamic_reference
+    int bullish_reference_type = na(session_vwap_value) ? 3 : na(structure_basis_value) ? 1 : 4
+    int bearish_reference_type = na(session_vwap_value) ? 3 : na(structure_basis_value) ? 1 : 4
+
+    if bullish_breakout_recent
+        if na(bullish_dynamic_reference)
+            bullish_reference_level := bullish_breakout_memory
+            bullish_reference_type := 2
+        else if bullish_breakout_memory >= bullish_dynamic_reference - hold_buffer
+            bullish_reference_level := math.max(bullish_dynamic_reference, bullish_breakout_memory)
+            bullish_reference_type := 2
+        else
+            bullish_reference_level := bullish_dynamic_reference
+    if bearish_breakout_recent
+        if na(bearish_dynamic_reference)
+            bearish_reference_level := bearish_breakout_memory
+            bearish_reference_type := 2
+        else if bearish_breakout_memory <= bearish_dynamic_reference + hold_buffer
+            bearish_reference_level := math.min(bearish_dynamic_reference, bearish_breakout_memory)
+            bearish_reference_type := 2
+        else
+            bearish_reference_level := bearish_dynamic_reference
+    if na(bullish_reference_level)
+        bullish_reference_level := bullish_breakout_recent ? bullish_breakout_memory : last_pivot_high
+        bullish_reference_type := bullish_breakout_recent ? 2 : 3
+    if na(bearish_reference_level)
+        bearish_reference_level := bearish_breakout_recent ? bearish_breakout_memory : last_pivot_low
+        bearish_reference_type := bearish_breakout_recent ? 2 : 3
+
+    int candidate_direction = bullish_structure_confirmed and bullish_pullback_window ? 1 : bearish_structure_confirmed and bearish_pullback_window ? -1 : 0
+    float candidate_reference_price = candidate_direction == 1 ? bullish_reference_level : candidate_direction == -1 ? bearish_reference_level : na
+    int candidate_reference_type = candidate_direction == 1 ? bullish_reference_type : candidate_direction == -1 ? bearish_reference_type : 0
+
+    bool active_setup_stale = not na(active_hold_start_bar) and bar_index - active_hold_start_bar > hold_context_max_bars
+    bool active_direction_invalid = active_reference_direction == 1 and not bullish_structure_confirmed or active_reference_direction == -1 and not bearish_structure_confirmed
+    bool active_extension_invalid = active_reference_direction == 1 and bullish_opposing_extension > 35.0 or active_reference_direction == -1 and bearish_opposing_extension > 35.0
+    bool active_decisive_break = active_reference_direction == 1 and not na(active_reference_price) and close < active_reference_price - decisive_break_buffer and low < active_reference_price - decisive_break_buffer * 1.25 or active_reference_direction == -1 and not na(active_reference_price) and close > active_reference_price + decisive_break_buffer and high > active_reference_price + decisive_break_buffer * 1.25
+
+    if active_setup_stale or active_direction_invalid or active_extension_invalid or active_decisive_break
+        active_reference_direction := 0
+        active_reference_type := 0
+        active_reference_price := na
+        active_hold_start_bar := na
+        active_hold_last_respect_bar := na
+        active_hold_respect_bars := 0
+        active_hold_valid := false
+        active_reaccept_bar := na
+        active_resumption_deadline := na
+        active_reaccept_signal_high := na
+        active_reaccept_signal_low := na
+        active_reaccept_signal_close := na
+
+    bool new_candidate_setup = candidate_direction != 0 and (active_reference_direction == 0 or active_reference_direction != candidate_direction or na(active_reference_price) or math.abs(candidate_reference_price - active_reference_price) > atr_value * 1.25)
+
+    if new_candidate_setup
+        active_reference_direction := candidate_direction
+        active_reference_type := candidate_reference_type
+        active_reference_price := candidate_reference_price
+        active_hold_start_bar := na
+        active_hold_last_respect_bar := na
+        active_hold_respect_bars := 0
+        active_hold_valid := false
+        active_reaccept_bar := na
+        active_resumption_deadline := na
+        active_reaccept_signal_high := na
+        active_reaccept_signal_low := na
+        active_reaccept_signal_close := na
+
+    bool active_zone_touch = active_reference_direction == 1 and low <= active_reference_price + hold_buffer * 1.75 and high >= active_reference_price - hold_buffer * 0.75 and close >= active_reference_price - decisive_break_buffer * 1.25 or active_reference_direction == -1 and high >= active_reference_price - hold_buffer * 1.75 and low <= active_reference_price + hold_buffer * 0.75 and close <= active_reference_price + decisive_break_buffer * 1.25
+    bool active_hold_quality = active_reference_direction == 1 and active_zone_touch and close >= active_reference_price - hold_buffer * 0.75 and close_location >= 0.35 or active_reference_direction == -1 and active_zone_touch and close <= active_reference_price + hold_buffer * 0.75 and close_location <= 0.65
+
+    if active_reference_direction != 0 and active_zone_touch
+        if not active_hold_valid
+            active_hold_start_bar := bar_index
+            active_hold_valid := true
+            active_hold_respect_bars := active_hold_quality ? 1 : 0
+            active_hold_last_respect_bar := active_hold_quality ? bar_index : na
+        else if active_hold_quality
+            active_hold_respect_bars := math.min(active_hold_respect_bars + 1, 10)
+            active_hold_last_respect_bar := bar_index
+
+    bool active_pullback = active_reference_direction != 0 and active_hold_valid and not na(active_reference_price)
+    bool active_hold = active_pullback and active_hold_respect_bars >= 1
+    bool active_hold_context_recent = active_pullback and not na(active_hold_last_respect_bar) and bar_index - active_hold_last_respect_bar >= 0 and bar_index - active_hold_last_respect_bar <= reaccept_confirmation_window
+    bool bullish_reaccept_quality = close > open and (close > close[1] or close_location >= 0.80) and body_ratio >= reaccept_body_ratio_min * 0.75 and close_location >= reaccept_close_quality_min * 0.85
+    bool bearish_reaccept_quality = close < open and (close < close[1] or close_location <= 0.20) and body_ratio >= reaccept_body_ratio_min * 0.75 and close_location <= 1.0 - reaccept_close_quality_min * 0.85
+    bool bullish_reference_reclaim = active_reference_direction == 1 and close > active_reference_price + reaccept_buffer * 0.35 and (close[1] <= active_reference_price + hold_buffer * 1.10 or open <= active_reference_price + hold_buffer * 1.10 or recent_low_3 <= active_reference_price + hold_buffer * 1.10)
+    bool bearish_reference_reclaim = active_reference_direction == -1 and close < active_reference_price - reaccept_buffer * 0.35 and (close[1] >= active_reference_price - hold_buffer * 1.10 or open >= active_reference_price - hold_buffer * 1.10 or recent_high_3 >= active_reference_price - hold_buffer * 1.10)
+    bool bullish_reaccept = active_hold_context_recent and bullish_reference_reclaim and bullish_reaccept_quality and not active_decisive_break
+    bool bearish_reaccept = active_hold_context_recent and bearish_reference_reclaim and bearish_reaccept_quality and not active_decisive_break
+
+    if bullish_reaccept
+        active_reaccept_bar := bar_index
+        active_resumption_deadline := bar_index + resumption_window + 1
+        active_reaccept_signal_high := high
+        active_reaccept_signal_low := low
+        active_reaccept_signal_close := close
+    else if bearish_reaccept
+        active_reaccept_bar := bar_index
+        active_resumption_deadline := bar_index + resumption_window + 1
+        active_reaccept_signal_high := high
+        active_reaccept_signal_low := low
+        active_reaccept_signal_close := close
+    else if active_decisive_break or (not na(active_resumption_deadline) and bar_index > active_resumption_deadline)
+        active_reaccept_bar := na
+        active_resumption_deadline := na
+        active_reaccept_signal_high := na
+        active_reaccept_signal_low := na
+        active_reaccept_signal_close := na
+
+    bool active_reaccept_recent = not na(active_reaccept_bar) and not na(active_resumption_deadline) and bar_index > active_reaccept_bar and bar_index <= active_resumption_deadline
+    bool bullish_resumption_quality = close > open and body_ratio >= 0.45 and close_location >= reaccept_close_quality_min * 0.90
+    bool bearish_resumption_quality = close < open and body_ratio >= 0.45 and close_location <= 1.0 - reaccept_close_quality_min * 0.90
+    bool bullish_signal_bar_break = active_reference_direction == 1 and active_reaccept_recent and not na(active_reaccept_signal_high) and (close > active_reaccept_signal_high or high > active_reaccept_signal_high + reaccept_buffer * 0.35)
+    bool bearish_signal_bar_break = active_reference_direction == -1 and active_reaccept_recent and not na(active_reaccept_signal_low) and (close < active_reaccept_signal_low or low < active_reaccept_signal_low - reaccept_buffer * 0.35)
+    bool bullish_second_confirm_close = active_reference_direction == 1 and active_reaccept_recent and not na(active_reaccept_signal_close) and bullish_resumption_quality and close > active_reaccept_signal_close and close > active_reference_price + hold_buffer * 0.50
+    bool bearish_second_confirm_close = active_reference_direction == -1 and active_reaccept_recent and not na(active_reaccept_signal_close) and bearish_resumption_quality and close < active_reaccept_signal_close and close < active_reference_price - hold_buffer * 0.50
+    bool bullish_expansion_resume = active_reference_direction == 1 and active_reaccept_recent and bullish_resumption_quality and atr_value > 0 and candle_range >= atr_value * 0.75 and close > active_reference_price + hold_buffer
+    bool bearish_expansion_resume = active_reference_direction == -1 and active_reaccept_recent and bearish_resumption_quality and atr_value > 0 and candle_range >= atr_value * 0.75 and close < active_reference_price - hold_buffer
+    bool bullish_resumption = bullish_signal_bar_break or bullish_second_confirm_close or bullish_expansion_resume
+    bool bearish_resumption = bearish_signal_bar_break or bearish_second_confirm_close or bearish_expansion_resume
+
+    int continuation_state = 0
+    DirectionalBias continuation_bias = DirectionalBias.neutral
+    float continuation_reference_level = na
+
+    if bullish_resumption
+        continuation_state := 4
+        continuation_bias := DirectionalBias.bullish
+        continuation_reference_level := active_reference_price
+    else if bearish_resumption
+        continuation_state := 4
+        continuation_bias := DirectionalBias.bearish
+        continuation_reference_level := active_reference_price
+    else if bullish_reaccept or (active_reference_direction == 1 and active_reaccept_recent and not bullish_resumption)
+        continuation_state := 3
+        continuation_bias := DirectionalBias.bullish
+        continuation_reference_level := active_reference_price
+    else if bearish_reaccept or (active_reference_direction == -1 and active_reaccept_recent and not bearish_resumption)
+        continuation_state := 3
+        continuation_bias := DirectionalBias.bearish
+        continuation_reference_level := active_reference_price
+    else if active_hold and active_reference_direction == 1
+        continuation_state := 2
+        continuation_bias := DirectionalBias.bullish
+        continuation_reference_level := active_reference_price
+    else if active_hold and active_reference_direction == -1
+        continuation_state := 2
+        continuation_bias := DirectionalBias.bearish
+        continuation_reference_level := active_reference_price
+    else if active_pullback and active_reference_direction == 1
+        continuation_state := 1
+        continuation_bias := DirectionalBias.bullish
+        continuation_reference_level := active_reference_price
+    else if active_pullback and active_reference_direction == -1
+        continuation_state := 1
+        continuation_bias := DirectionalBias.bearish
+        continuation_reference_level := active_reference_price
+
+    bool continuation_valid_flag = continuation_state >= 2
+
+    [continuation_state, continuation_reference_level, continuation_valid_flag, continuation_bias, bullish_reaccept, bearish_reaccept, bullish_resumption, bearish_resumption]
+
+describe_liquidity_event(bool bullish_sweep, bool bearish_sweep, bool bullish_failed_breakout, bool bearish_failed_breakout, bool bullish_reclaim, bool bearish_reclaim, bool trap_event, bool premium_auction_event) =>
+    string event_text = "None"
+    if trap_event
+        event_text := "Trap"
+    else if bullish_sweep
+        event_text := "Bull Sweep"
+    else if bearish_sweep
+        event_text := "Bear Sweep"
+    else if bullish_failed_breakout
+        event_text := "Bull Failed Break"
+    else if bearish_failed_breakout
+        event_text := "Bear Failed Break"
+    else if bullish_reclaim
+        event_text := "Bull Reclaim"
+    else if bearish_reclaim
+        event_text := "Bear Reclaim"
+    else if premium_auction_event
+        event_text := "Premium Auction"
+    event_text
+
+footprint_row_metrics(footprint requested_footprint, float reference_price) =>
+    float row_delta = na
+    float row_total_volume = na
+    bool row_buy_imbalance = false
+    bool row_sell_imbalance = false
+    if not na(requested_footprint) and not na(reference_price)
+        volume_row reference_row = requested_footprint.get_row_by_price(reference_price)
+        if not na(reference_row)
+            row_delta := reference_row.delta()
+            row_total_volume := reference_row.total_volume()
+            row_buy_imbalance := reference_row.has_buy_imbalance()
+            row_sell_imbalance := reference_row.has_sell_imbalance()
+    [row_delta, row_total_volume, row_buy_imbalance, row_sell_imbalance]
+
+row_object_metrics(volume_row reference_row) =>
+    float row_delta = na
+    float row_total_volume = na
+    bool row_buy_imbalance = false
+    bool row_sell_imbalance = false
+    if not na(reference_row)
+        row_delta := reference_row.delta()
+        row_total_volume := reference_row.total_volume()
+        row_buy_imbalance := reference_row.has_buy_imbalance()
+        row_sell_imbalance := reference_row.has_sell_imbalance()
+    [row_delta, row_total_volume, row_buy_imbalance, row_sell_imbalance]
+
+//------------------------------------------------------------------------------
+// Centralized request handling
+
+calc_regime(int fast_length, int slow_length, int compression_length, int atr_length, float compression_threshold) =>
+    float fast_ema = ta.ema(close, fast_length)
+    float slow_ema = ta.ema(close, slow_length)
+    float atr_value = ta.atr(atr_length)
+    float compression_raw = ta.stdev(close, compression_length)
+    float atr_percent = close != 0.0 ? atr_value / close * 100.0 : 0.0
+    float compression_proxy = close != 0.0 ? compression_raw / close * 100.0 : 0.0
+    float trend_spread_pct = close != 0.0 ? (fast_ema - slow_ema) / close * 100.0 : 0.0
+    bool bullish_stack = close > fast_ema and fast_ema > slow_ema
+    bool bearish_stack = close < fast_ema and fast_ema < slow_ema
+    bool in_compression = compression_proxy <= compression_threshold
+    bool in_expansion = atr_percent >= compression_threshold * 2.0
+    RegimeState regime_state = RegimeState.neutral
+    DirectionalBias regime_bias = DirectionalBias.neutral
+    float regime_score = 0.0
+
+    if in_compression
+        regime_state := RegimeState.compression
+        regime_score := 0.0
+    else if bullish_stack
+        regime_state := in_expansion ? RegimeState.expansion : RegimeState.bullish_trend
+        regime_bias := DirectionalBias.bullish
+        regime_score := clamp_signed(trend_spread_pct * 350.0)
+    else if bearish_stack
+        regime_state := in_expansion ? RegimeState.expansion : RegimeState.bearish_trend
+        regime_bias := DirectionalBias.bearish
+        regime_score := clamp_signed(trend_spread_pct * 350.0)
+    else if math.abs(trend_spread_pct) <= 0.05
+        regime_state := RegimeState.ranging
+        regime_score := 0.0
+
+    [regime_state, regime_score, regime_bias]
+
+calc_structure(int pivot_left, int pivot_right, int basis_length, float displacement_atr_multiple) =>
+    float pivot_high = ta.pivothigh(high, pivot_left, pivot_right)
+    float pivot_low = ta.pivotlow(low, pivot_left, pivot_right)
+    float last_pivot_high = ta.valuewhen(not na(pivot_high), pivot_high, 0)
+    float previous_pivot_high = ta.valuewhen(not na(pivot_high), pivot_high, 1)
+    float last_pivot_low = ta.valuewhen(not na(pivot_low), pivot_low, 0)
+    float previous_pivot_low = ta.valuewhen(not na(pivot_low), pivot_low, 1)
+    bool pivots_ready = not na(last_pivot_high) and not na(last_pivot_low)
+    bool swing_context_ready = pivots_ready and not na(previous_pivot_high) and not na(previous_pivot_low)
+    float atr_value = ta.atr(math.max(5, basis_length))
+    float break_buffer = atr_value * 0.10
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = candle_range > 0 ? body_size / candle_range : 0.0
+    float close_location = candle_range > 0 ? (close - low) / candle_range : 0.5
+    float structure_basis = ta.ema(close, basis_length)
+    float pullback_allowance = atr_value * 0.35
+    float deterioration_allowance = atr_value * 0.20
+    int impulse_lookback = math.max(4, pivot_left + pivot_right + 2)
+    bool basis_rising = structure_basis >= structure_basis[1]
+    bool basis_falling = structure_basis <= structure_basis[1]
+    bool bullish_swing_context = swing_context_ready and last_pivot_high > previous_pivot_high and last_pivot_low > previous_pivot_low
+    bool bearish_swing_context = swing_context_ready and last_pivot_high < previous_pivot_high and last_pivot_low < previous_pivot_low
+
+    bool weak_bos_up = pivots_ready and close > last_pivot_high and close[1] <= last_pivot_high
+    bool weak_bos_down = pivots_ready and close < last_pivot_low and close[1] >= last_pivot_low
+    bool strong_bos_up = pivots_ready and close > last_pivot_high + break_buffer and close[1] <= last_pivot_high
+    bool strong_bos_down = pivots_ready and close < last_pivot_low - break_buffer and close[1] >= last_pivot_low
+    bool bos_up = weak_bos_up
+    bool bos_down = weak_bos_down
+    bool displacement_up = strong_bos_up and close > open and atr_value > 0 and body_size >= atr_value * displacement_atr_multiple and body_ratio >= 0.60 and close_location >= 0.70
+    bool displacement_down = strong_bos_down and close < open and atr_value > 0 and body_size >= atr_value * displacement_atr_multiple and body_ratio >= 0.60 and close_location <= 0.30
+    int bullish_impulse_bars_ago = ta.barssince(displacement_up or strong_bos_up)
+    int bearish_impulse_bars_ago = ta.barssince(displacement_down or strong_bos_down)
+    bool recent_bullish_impulse = not na(bullish_impulse_bars_ago) and bullish_impulse_bars_ago <= impulse_lookback
+    bool recent_bearish_impulse = not na(bearish_impulse_bars_ago) and bearish_impulse_bars_ago <= impulse_lookback
+    bool choch_up = bos_up and not bullish_swing_context and (bearish_swing_context or (swing_context_ready and last_pivot_low < previous_pivot_low)) and close > structure_basis + break_buffer * 0.25 and basis_rising
+    bool choch_down = bos_down and not bearish_swing_context and (bullish_swing_context or (swing_context_ready and last_pivot_high > previous_pivot_high)) and close < structure_basis - break_buffer * 0.25 and basis_falling
+    bool reclaim_ready_long = pivots_ready and low < last_pivot_low - break_buffer and close > last_pivot_low + break_buffer * 0.25 and close > structure_basis
+    bool reclaim_ready_short = pivots_ready and high > last_pivot_high + break_buffer and close < last_pivot_high - break_buffer * 0.25 and close < structure_basis
+    bool bullish_trend_intact = bullish_swing_context and close > last_pivot_low - pullback_allowance and (basis_rising or close >= structure_basis - pullback_allowance)
+    bool bearish_trend_intact = bearish_swing_context and close < last_pivot_high + pullback_allowance and (basis_falling or close <= structure_basis + pullback_allowance)
+    float bullish_acceptance_count = (close > structure_basis + deterioration_allowance ? 1.0 : 0.0) + (close[1] > structure_basis[1] + deterioration_allowance[1] ? 1.0 : 0.0) + (close[2] > structure_basis[2] + deterioration_allowance[2] ? 1.0 : 0.0) + (close[3] > structure_basis[3] + deterioration_allowance[3] ? 1.0 : 0.0)
+    float bearish_acceptance_count = (close < structure_basis - deterioration_allowance ? 1.0 : 0.0) + (close[1] < structure_basis[1] - deterioration_allowance[1] ? 1.0 : 0.0) + (close[2] < structure_basis[2] - deterioration_allowance[2] ? 1.0 : 0.0) + (close[3] < structure_basis[3] - deterioration_allowance[3] ? 1.0 : 0.0)
+    bool bullish_acceptance_persistent = bullish_acceptance_count >= 3.0
+    bool bearish_acceptance_persistent = bearish_acceptance_count >= 3.0
+    bool bullish_acceptance_mature = bullish_acceptance_persistent and close > structure_basis + deterioration_allowance and (basis_rising or strong_bos_up or displacement_up or reclaim_ready_long or recent_bullish_impulse)
+    bool bearish_acceptance_mature = bearish_acceptance_persistent and close < structure_basis - deterioration_allowance and (basis_falling or strong_bos_down or displacement_down or reclaim_ready_short or recent_bearish_impulse)
+    bool bullish_early_opposite_acceptance = bullish_trend_intact and bearish_acceptance_count > 0 and not bearish_acceptance_mature
+    bool bearish_early_opposite_acceptance = bearish_trend_intact and bullish_acceptance_count > 0 and not bullish_acceptance_mature
+    bool bullish_pullback = bullish_trend_intact and not bos_down and (close < structure_basis or low < structure_basis) and close >= structure_basis - pullback_allowance
+    bool bearish_pullback = bearish_trend_intact and not bos_up and (close > structure_basis or high > structure_basis) and close <= structure_basis + pullback_allowance
+    bool bullish_deterioration = bullish_swing_context and ((choch_down or strong_bos_down or displacement_down) or (weak_bos_down and bearish_acceptance_count >= 2.0 and close < structure_basis - deterioration_allowance and basis_falling))
+    bool bearish_deterioration = bearish_swing_context and ((choch_up or strong_bos_up or displacement_up) or (weak_bos_up and bullish_acceptance_count >= 2.0 and close > structure_basis + deterioration_allowance and basis_rising))
+    bool bullish_confirmation_event = strong_bos_up or displacement_up or reclaim_ready_long
+    bool bearish_confirmation_event = strong_bos_down or displacement_down or reclaim_ready_short
+    bool bullish_structure_confirmed = (bullish_confirmation_event or ((bullish_trend_intact or recent_bullish_impulse) and bullish_acceptance_mature and not bearish_acceptance_persistent)) and not bullish_deterioration
+    bool bearish_structure_confirmed = (bearish_confirmation_event or ((bearish_trend_intact or recent_bearish_impulse) and bearish_acceptance_mature and not bullish_acceptance_persistent)) and not bearish_deterioration
+
+    StructureState structure_state = StructureState.neutral
+    float structure_score = na
+
+    if not pivots_ready
+        structure_score := na
+    else
+        float raw_structure_score = 0.0
+        if bullish_swing_context
+            raw_structure_score += 18.0
+        if bearish_swing_context
+            raw_structure_score -= 18.0
+        if basis_rising
+            raw_structure_score += 6.0
+        if basis_falling
+            raw_structure_score -= 6.0
+        if bos_up
+            raw_structure_score += strong_bos_up ? 34.0 : 20.0
+        if bos_down
+            raw_structure_score -= strong_bos_down ? 34.0 : 20.0
+        if choch_up
+            raw_structure_score += 14.0
+        if choch_down
+            raw_structure_score -= 14.0
+        if displacement_up
+            raw_structure_score += 18.0
+        if displacement_down
+            raw_structure_score -= 18.0
+        if reclaim_ready_long and not bos_down
+            raw_structure_score += 10.0
+        if reclaim_ready_short and not bos_up
+            raw_structure_score -= 10.0
+        if bullish_pullback
+            raw_structure_score -= 10.0
+        if bearish_pullback
+            raw_structure_score += 10.0
+        if bullish_deterioration and not bearish_structure_confirmed
+            raw_structure_score -= 16.0
+        if bearish_deterioration and not bullish_structure_confirmed
+            raw_structure_score += 16.0
+
+        if choch_up
+            structure_state := bullish_structure_confirmed and bullish_acceptance_mature and bullish_confirmation_event and not bearish_early_opposite_acceptance ? StructureState.bullish : StructureState.transition_up
+        else if choch_down
+            structure_state := bearish_structure_confirmed and bearish_acceptance_mature and bearish_confirmation_event and not bullish_early_opposite_acceptance ? StructureState.bearish : StructureState.transition_down
+        else if bullish_structure_confirmed and not bullish_pullback and not bullish_early_opposite_acceptance and not bearish_acceptance_persistent and (bullish_trend_intact or bullish_confirmation_event or recent_bullish_impulse)
+            structure_state := StructureState.bullish
+        else if bearish_structure_confirmed and not bearish_pullback and not bearish_early_opposite_acceptance and not bullish_acceptance_persistent and (bearish_trend_intact or bearish_confirmation_event or recent_bearish_impulse)
+            structure_state := StructureState.bearish
+        else if bullish_pullback or bullish_deterioration or bullish_early_opposite_acceptance or (recent_bullish_impulse and bearish_acceptance_count > 0 and not bearish_acceptance_mature)
+            structure_state := StructureState.transition_down
+        else if bearish_pullback or bearish_deterioration or bearish_early_opposite_acceptance or (recent_bearish_impulse and bullish_acceptance_count > 0 and not bullish_acceptance_mature)
+            structure_state := StructureState.transition_up
+        else
+            structure_state := StructureState.ranging
+
+        structure_score := raw_structure_score
+        if structure_state == StructureState.bullish
+            structure_score := math.max(structure_score, 25.0)
+        else if structure_state == StructureState.bearish
+            structure_score := math.min(structure_score, -25.0)
+        else if structure_state == StructureState.transition_down
+            bool preserve_bullish_context = bullish_pullback or bullish_early_opposite_acceptance or (recent_bullish_impulse and not bearish_acceptance_mature)
+            structure_score := preserve_bullish_context ? math.max(math.min(structure_score, 20.0), 6.0) : math.max(math.min(structure_score, 8.0), -12.0)
+        else if structure_state == StructureState.transition_up
+            bool preserve_bearish_context = bearish_pullback or bearish_early_opposite_acceptance or (recent_bearish_impulse and not bullish_acceptance_mature)
+            structure_score := preserve_bearish_context ? math.min(math.max(structure_score, -20.0), -6.0) : math.min(math.max(structure_score, -8.0), 12.0)
+        structure_score := clamp_signed(structure_score)
+
+    [structure_state, structure_score, bos_up, bos_down, choch_up, choch_down, displacement_up, displacement_down, reclaim_ready_long, reclaim_ready_short, last_pivot_high, last_pivot_low, structure_basis]
+
+calc_mtf_alignment(DirectionalBias regime_bias, float structure_score_input, bool enable_htf, float requested_htf_close, float requested_htf_fast_ema, float requested_htf_slow_ema) =>
+    DirectionalBias htf_bias = DirectionalBias.neutral
+    float alignment_score = na
+    bool countertrend_flag = false
+
+    if not enable_htf or na(requested_htf_close) or na(requested_htf_fast_ema) or na(requested_htf_slow_ema)
+        alignment_score := na
+    else
+        if requested_htf_close > requested_htf_fast_ema and requested_htf_fast_ema > requested_htf_slow_ema
+            htf_bias := DirectionalBias.bullish
+        else if requested_htf_close < requested_htf_fast_ema and requested_htf_fast_ema < requested_htf_slow_ema
+            htf_bias := DirectionalBias.bearish
+
+        int local_direction = bias_to_int(regime_bias)
+        if local_direction == 0 and not na(structure_score_input)
+            local_direction := structure_score_input > 0 ? 1 : structure_score_input < 0 ? -1 : 0
+
+        int htf_direction = bias_to_int(htf_bias)
+        countertrend_flag := local_direction != 0 and htf_direction != 0 and local_direction != htf_direction
+
+        if htf_direction == 0
+            alignment_score := 0.0
+        else if countertrend_flag
+            alignment_score := clamp_signed(htf_direction * 25.0)
+        else
+            alignment_score := clamp_signed(htf_direction * (60.0 + math.min(score_magnitude(structure_score_input), 25.0) * 0.5))
+
+    [alignment_score, countertrend_flag, htf_bias]
+
+calc_fair_value_extension(int atr_length, float extreme_atr_multiple, bool enable_anchored_vwap) =>
+    float session_vwap = ta.vwap(hlc3)
+    float anchored_vwap_placeholder = na
+    bool anchored_vwap_ready = false
+    // TODO: Anchored VWAP anchor selection is intentionally deferred in V1.
+    float atr_value = ta.atr(atr_length)
+    int local_mean_length = math.max(5, atr_length * 2)
+    float local_mean = ta.ema(hlc3, local_mean_length)
+    float blended_fair_value = build_blended_fair_value_reference(session_vwap, local_mean)
+    float vwap_extension_atr = not na(session_vwap) and atr_value > 0 ? (close - session_vwap) / atr_value : na
+    float blended_extension_atr = not na(blended_fair_value) and atr_value > 0 ? (close - blended_fair_value) / atr_value : na
+    float signed_extension_value = na(vwap_extension_atr) and na(blended_extension_atr) ? na : na(vwap_extension_atr) ? blended_extension_atr : na(blended_extension_atr) ? vwap_extension_atr : vwap_extension_atr * 0.65 + blended_extension_atr * 0.35
+    float extension_score = clamp_signed(score_extension_ladder(signed_extension_value, extreme_atr_multiple))
+    float absolute_extension = math.abs(nz(signed_extension_value, 0.0))
+    float moderate_band = math.max(0.85, extreme_atr_multiple * 0.55)
+    float overextension_band = math.max(moderate_band + 0.15, extreme_atr_multiple)
+    bool extreme_flag = not na(signed_extension_value) and absolute_extension >= overextension_band
+
+    if enable_anchored_vwap
+        anchored_vwap_placeholder := na
+        anchored_vwap_ready := false
+
+    [session_vwap, anchored_vwap_placeholder, signed_extension_value, extension_score, extreme_flag, anchored_vwap_ready]
+
+calc_participation_fallback(int rvol_length, float divergence_threshold, float absorption_wick_threshold, bool use_ltf_assist, float requested_ltf_close, float requested_ltf_volume, float requested_ltf_change) =>
+    float volume_average = ta.sma(volume, rvol_length)
+    float volume_ratio = not na(volume_average) and volume_average > 0 ? volume / volume_average : 1.0
+    float smoothed_volume_ratio = ta.ema(volume_ratio, 3)
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = body_size / candle_range
+    float close_location = ((close - low) / candle_range) * 2.0 - 1.0
+    float upper_wick_ratio = (high - math.max(open, close)) / candle_range
+    float lower_wick_ratio = (math.min(open, close) - low) / candle_range
+    float atr_value = ta.atr(math.max(5, rvol_length))
+    float bar_result = atr_value > 0 ? (close - open) / atr_value : 0.0
+    float short_result = atr_value > 0 and not na(close[3]) ? (close - close[3]) / atr_value : bar_result
+    float range_expansion = atr_value > 0 ? candle_range / atr_value : 1.0
+    float bar_direction = math.sign(close - open)
+    bar_direction := bar_direction == 0 ? math.sign(close_location) : bar_direction
+
+    float directional_delta_quality = clamp_signed(close_location * body_ratio * math.min(smoothed_volume_ratio, 3.0) * 55.0)
+    float directional_effort_quality = clamp_signed(bar_result * (25.0 + math.min(math.max(smoothed_volume_ratio - 1.0, 0.0) * 18.0, 30.0)) * math.min(range_expansion, 1.50))
+    float stalled_effort_penalty = clamp_signed(-bar_direction * math.max(0.0, smoothed_volume_ratio - 1.0) * math.max(0.0, 0.55 - math.abs(bar_result)) * 45.0)
+
+    bool bullish_absorption_proxy = lower_wick_ratio >= absorption_wick_threshold and smoothed_volume_ratio > 1.05 and close_location > 0.10 and body_ratio <= 0.65
+    bool bearish_absorption_proxy = upper_wick_ratio >= absorption_wick_threshold and smoothed_volume_ratio > 1.05 and close_location < -0.10 and body_ratio <= 0.65
+    float absorption_score = bullish_absorption_proxy ? 25.0 + math.min((smoothed_volume_ratio - 1.0) * 20.0, 20.0) : bearish_absorption_proxy ? -(25.0 + math.min((smoothed_volume_ratio - 1.0) * 20.0, 20.0)) : 0.0
+
+    float effort_vs_result_gap = clamp_signed(directional_delta_quality * 0.60 + absorption_score * 0.40 - short_result * 18.0)
+    float effort_vs_result = clamp_signed(stalled_effort_penalty + effort_vs_result_gap * 0.35)
+    float participation_score = directional_delta_quality * 0.40 + directional_effort_quality * 0.30 + effort_vs_result * 0.15 + absorption_score * 0.15
+
+    if use_ltf_assist and not na(requested_ltf_close) and not na(requested_ltf_volume) and not na(requested_ltf_change)
+        float ltf_volume_ratio = not na(volume_average) and volume_average > 0 ? requested_ltf_volume / volume_average : 1.0
+        float ltf_change_ratio = requested_ltf_close != 0.0 ? requested_ltf_change / requested_ltf_close : 0.0
+        float ltf_participation_proxy = clamp_signed(ltf_change_ratio * 10000.0 + (ltf_volume_ratio - 1.0) * 12.0 * math.sign(requested_ltf_change))
+        participation_score := participation_score * 0.85 + ltf_participation_proxy * 0.15
+
+    participation_score := clamp_signed(participation_score)
+
+    float divergence_pressure = clamp_signed(directional_delta_quality * 0.55 + absorption_score * 0.45)
+    bool bullish_divergence = short_result < -0.35 and divergence_pressure >= divergence_threshold and participation_score > 0
+    bool bearish_divergence = short_result > 0.35 and divergence_pressure <= -divergence_threshold and participation_score < 0
+
+    [participation_score, bullish_divergence, bearish_divergence, bullish_absorption_proxy, bearish_absorption_proxy]
+
+calc_participation_footprint(bool enable_premium_path, float fallback_score_input, footprint requested_footprint, float session_vwap_input, float structure_basis_input, float extension_score_input, float reference_proximity_atr_multiple, float delta_pressure_threshold) =>
+    float premium_participation_score = na
+    bool bullish_auction_flag = false
+    bool bearish_auction_flag = false
+    bool premium_available = false
+    bool bullish_absorption = false
+    bool bearish_absorption = false
+    bool bullish_trapped_aggression = false
+    bool bearish_trapped_aggression = false
+    bool bullish_failed_auction = false
+    bool bearish_failed_auction = false
+    bool bullish_acceptance = false
+    bool bearish_acceptance = false
+    int bullish_reference_type = 0
+    int bearish_reference_type = 0
+    float atr_value = ta.atr(14)
+
+    if enable_premium_path and not na(requested_footprint)
+        premium_available := true
+        premium_participation_score := fallback_score_input
+
+        float candle_range = math.max(high - low, syminfo.mintick)
+        float body_ratio = candle_range > 0 ? math.abs(close - open) / candle_range : 0.0
+        float close_location = candle_range > 0 ? (close - low) / candle_range : 0.5
+        float upper_wick_ratio = candle_range > 0 ? (high - math.max(open, close)) / candle_range : 0.0
+        float lower_wick_ratio = candle_range > 0 ? (math.min(open, close) - low) / candle_range : 0.0
+        float reference_buffer = atr_value * reference_proximity_atr_multiple
+        float outer_reference_buffer = reference_buffer * 1.25
+        float upside_extension = nz(positive_component(extension_score_input), 0.0)
+        float downside_extension = nz(negative_component(extension_score_input), 0.0)
+        float total_delta = requested_footprint.delta()
+        float total_volume = requested_footprint.total_volume()
+        float delta_pressure = total_volume > 0 ? total_delta / total_volume * 100.0 : na
+        volume_row poc_row = requested_footprint.poc()
+        volume_row vah_row = requested_footprint.vah()
+        volume_row val_row = requested_footprint.val()
+        float poc_mid_price = not na(poc_row) ? math.avg(poc_row.up_price(), poc_row.down_price()) : na
+        float vah_upper_price = not na(vah_row) ? vah_row.up_price() : na
+        float val_lower_price = not na(val_row) ? val_row.down_price() : na
+
+        [vwap_row_delta, vwap_row_total, vwap_buy_imbalance, vwap_sell_imbalance] = footprint_row_metrics(requested_footprint, session_vwap_input)
+        [structure_row_delta, structure_row_total, structure_buy_imbalance, structure_sell_imbalance] = footprint_row_metrics(requested_footprint, structure_basis_input)
+        [poc_row_delta, poc_row_total, poc_buy_imbalance, poc_sell_imbalance] = row_object_metrics(poc_row)
+        [vah_row_delta, vah_row_total, vah_buy_imbalance, vah_sell_imbalance] = row_object_metrics(vah_row)
+        [val_row_delta, val_row_total, val_buy_imbalance, val_sell_imbalance] = row_object_metrics(val_row)
+
+        float poc_delta_pressure = poc_row_total > 0 ? poc_row_delta / poc_row_total * 100.0 : na
+        float vah_delta_pressure = vah_row_total > 0 ? vah_row_delta / vah_row_total * 100.0 : na
+        float val_delta_pressure = val_row_total > 0 ? val_row_delta / val_row_total * 100.0 : na
+        bool bullish_reclaim_quality = close > open and close_location >= 0.60 and body_ratio >= 0.35
+        bool bearish_reclaim_quality = close < open and close_location <= 0.40 and body_ratio >= 0.35
+        bool near_session_zone = not na(session_vwap_input) and low <= session_vwap_input + outer_reference_buffer and high >= session_vwap_input - outer_reference_buffer
+        bool near_structure_zone = not na(structure_basis_input) and low <= structure_basis_input + outer_reference_buffer and high >= structure_basis_input - outer_reference_buffer
+        bool near_poc_zone = not na(poc_mid_price) and low <= poc_mid_price + outer_reference_buffer and high >= poc_mid_price - outer_reference_buffer
+        bool near_val_zone = not na(val_lower_price) and low <= val_lower_price + outer_reference_buffer and high >= val_lower_price - outer_reference_buffer
+        bool near_vah_zone = not na(vah_upper_price) and low <= vah_upper_price + outer_reference_buffer and high >= vah_upper_price - outer_reference_buffer
+        bool bullish_auction_priority = downside_extension >= 45.0
+        bool bearish_auction_priority = upside_extension >= 45.0
+        float bullish_reference_price = na
+        float bearish_reference_price = na
+
+        if bullish_auction_priority and near_val_zone
+            bullish_reference_type := 3
+            bullish_reference_price := val_lower_price
+        else if near_structure_zone and near_session_zone
+            bullish_reference_type := math.abs(low - structure_basis_input) <= math.abs(low - session_vwap_input) ? 2 : 1
+            bullish_reference_price := bullish_reference_type == 2 ? structure_basis_input : session_vwap_input
+        else if near_structure_zone
+            bullish_reference_type := 2
+            bullish_reference_price := structure_basis_input
+        else if near_session_zone
+            bullish_reference_type := 1
+            bullish_reference_price := session_vwap_input
+        else if near_val_zone
+            bullish_reference_type := 3
+            bullish_reference_price := val_lower_price
+        else if near_poc_zone
+            bullish_reference_type := 5
+            bullish_reference_price := poc_mid_price
+
+        if bearish_auction_priority and near_vah_zone
+            bearish_reference_type := 4
+            bearish_reference_price := vah_upper_price
+        else if near_structure_zone and near_session_zone
+            bearish_reference_type := math.abs(high - structure_basis_input) <= math.abs(high - session_vwap_input) ? 2 : 1
+            bearish_reference_price := bearish_reference_type == 2 ? structure_basis_input : session_vwap_input
+        else if near_structure_zone
+            bearish_reference_type := 2
+            bearish_reference_price := structure_basis_input
+        else if near_session_zone
+            bearish_reference_type := 1
+            bearish_reference_price := session_vwap_input
+        else if near_vah_zone
+            bearish_reference_type := 4
+            bearish_reference_price := vah_upper_price
+        else if near_poc_zone
+            bearish_reference_type := 5
+            bearish_reference_price := poc_mid_price
+
+        float bullish_selected_row_delta = bullish_reference_type == 1 ? vwap_row_delta : bullish_reference_type == 2 ? structure_row_delta : bullish_reference_type == 3 ? val_row_delta : bullish_reference_type == 5 ? poc_row_delta : na
+        float bullish_selected_row_total = bullish_reference_type == 1 ? vwap_row_total : bullish_reference_type == 2 ? structure_row_total : bullish_reference_type == 3 ? val_row_total : bullish_reference_type == 5 ? poc_row_total : na
+        bool bullish_selected_buy_imbalance = bullish_reference_type == 1 ? vwap_buy_imbalance : bullish_reference_type == 2 ? structure_buy_imbalance : bullish_reference_type == 3 ? val_buy_imbalance : bullish_reference_type == 5 ? poc_buy_imbalance : false
+        bool bullish_selected_sell_imbalance = bullish_reference_type == 1 ? vwap_sell_imbalance : bullish_reference_type == 2 ? structure_sell_imbalance : bullish_reference_type == 3 ? val_sell_imbalance : bullish_reference_type == 5 ? poc_sell_imbalance : false
+        float bearish_selected_row_delta = bearish_reference_type == 1 ? vwap_row_delta : bearish_reference_type == 2 ? structure_row_delta : bearish_reference_type == 4 ? vah_row_delta : bearish_reference_type == 5 ? poc_row_delta : na
+        float bearish_selected_row_total = bearish_reference_type == 1 ? vwap_row_total : bearish_reference_type == 2 ? structure_row_total : bearish_reference_type == 4 ? vah_row_total : bearish_reference_type == 5 ? poc_row_total : na
+        bool bearish_selected_buy_imbalance = bearish_reference_type == 1 ? vwap_buy_imbalance : bearish_reference_type == 2 ? structure_buy_imbalance : bearish_reference_type == 4 ? vah_buy_imbalance : bearish_reference_type == 5 ? poc_buy_imbalance : false
+        bool bearish_selected_sell_imbalance = bearish_reference_type == 1 ? vwap_sell_imbalance : bearish_reference_type == 2 ? structure_sell_imbalance : bearish_reference_type == 4 ? vah_sell_imbalance : bearish_reference_type == 5 ? poc_sell_imbalance : false
+        float bullish_reference_delta_pressure = bullish_selected_row_total > 0 ? bullish_selected_row_delta / bullish_selected_row_total * 100.0 : na
+        float bearish_reference_delta_pressure = bearish_selected_row_total > 0 ? bearish_selected_row_delta / bearish_selected_row_total * 100.0 : na
+        bool bullish_reference_is_vwap = bullish_reference_type == 1
+        bool bullish_reference_is_basis = bullish_reference_type == 2
+        bool bullish_reference_is_val = bullish_reference_type == 3
+        bool bullish_reference_is_poc = bullish_reference_type == 5
+        bool bearish_reference_is_vwap = bearish_reference_type == 1
+        bool bearish_reference_is_basis = bearish_reference_type == 2
+        bool bearish_reference_is_vah = bearish_reference_type == 4
+        bool bearish_reference_is_poc = bearish_reference_type == 5
+        bool bullish_near_reference_zone = not na(bullish_reference_price) and low <= bullish_reference_price + reference_buffer and high >= bullish_reference_price - reference_buffer
+        bool bearish_near_reference_zone = not na(bearish_reference_price) and low <= bearish_reference_price + reference_buffer and high >= bearish_reference_price - reference_buffer
+        bool below_bullish_reference_probe = not na(bullish_reference_price) and low < bullish_reference_price - reference_buffer * 0.30
+        bool above_bearish_reference_probe = not na(bearish_reference_price) and high > bearish_reference_price + reference_buffer * 0.30
+
+        float bullish_flow_threshold = bullish_reference_is_vwap ? delta_pressure_threshold * 0.50 : bullish_reference_is_basis ? delta_pressure_threshold * 0.65 : bullish_reference_is_val ? delta_pressure_threshold * 0.45 : bullish_reference_is_poc ? delta_pressure_threshold * 0.90 : delta_pressure_threshold * 0.60
+        float bearish_flow_threshold = bearish_reference_is_vwap ? delta_pressure_threshold * 0.50 : bearish_reference_is_basis ? delta_pressure_threshold * 0.65 : bearish_reference_is_vah ? delta_pressure_threshold * 0.45 : bearish_reference_is_poc ? delta_pressure_threshold * 0.90 : delta_pressure_threshold * 0.60
+        bool bullish_negative_flow = nz(delta_pressure, 0.0) <= -bullish_flow_threshold or nz(bullish_reference_delta_pressure, 0.0) <= -bullish_flow_threshold
+        bool bearish_positive_flow = nz(delta_pressure, 0.0) >= bearish_flow_threshold or nz(bearish_reference_delta_pressure, 0.0) >= bearish_flow_threshold
+        bool bullish_confirm_reference_ok = bullish_reference_is_vwap or bullish_reference_is_basis or bullish_reference_is_val
+        bool bearish_confirm_reference_ok = bearish_reference_is_vwap or bearish_reference_is_basis or bearish_reference_is_vah
+        bool bullish_quality_strict_ok = bullish_reference_is_basis ? close_location >= 0.72 and body_ratio >= 0.42 : bullish_reference_is_val ? lower_wick_ratio >= 0.15 or close_location >= 0.70 : close_location >= 0.68 or lower_wick_ratio >= 0.12
+        bool bearish_quality_strict_ok = bearish_reference_is_basis ? close_location <= 0.28 and body_ratio >= 0.42 : bearish_reference_is_vah ? upper_wick_ratio >= 0.16 or close_location <= 0.33 : close_location <= 0.32 or upper_wick_ratio >= 0.12
+        bool bearish_vah_reclaim_quality = bearish_reclaim_quality or bearish_reference_is_vah and close < nz(vah_upper_price, close) - reference_buffer * 0.04 and close_location <= 0.45 and body_ratio >= 0.22 and upper_wick_ratio >= 0.18
+
+        bool bullish_absorption_raw = bullish_confirm_reference_ok and bullish_reclaim_quality and bullish_near_reference_zone and close >= nz(bullish_reference_price, close) + reference_buffer * 0.05 and bullish_negative_flow and bullish_quality_strict_ok and (bullish_selected_sell_imbalance or nz(bullish_reference_delta_pressure, 0.0) <= -bullish_flow_threshold * 1.10 or lower_wick_ratio >= 0.16)
+        bool bearish_absorption_raw = bearish_confirm_reference_ok and bearish_reclaim_quality and bearish_near_reference_zone and close <= nz(bearish_reference_price, close) - reference_buffer * 0.05 and bearish_positive_flow and bearish_quality_strict_ok and (bearish_selected_buy_imbalance or nz(bearish_reference_delta_pressure, 0.0) >= bearish_flow_threshold * 1.10 or upper_wick_ratio >= 0.16)
+        bool bullish_trapped_aggression_raw = bullish_confirm_reference_ok and not bullish_reference_is_poc and bullish_reclaim_quality and body_ratio >= (bullish_reference_is_basis ? 0.50 : 0.45) and below_bullish_reference_probe and close > nz(bullish_reference_price, close) + reference_buffer * 0.10 and bullish_negative_flow and (nz(bullish_reference_delta_pressure, 0.0) <= -bullish_flow_threshold * 1.15 or bullish_selected_sell_imbalance)
+        bool bearish_trapped_aggression_raw = bearish_confirm_reference_ok and not bearish_reference_is_poc and bearish_reclaim_quality and body_ratio >= (bearish_reference_is_basis ? 0.50 : 0.45) and above_bearish_reference_probe and close < nz(bearish_reference_price, close) - reference_buffer * 0.10 and bearish_positive_flow and (nz(bearish_reference_delta_pressure, 0.0) >= bearish_flow_threshold * 1.15 or bearish_selected_buy_imbalance)
+        bool bullish_failed_auction_raw = bullish_reference_is_val and bullish_reclaim_quality and not na(val_lower_price) and low < val_lower_price - reference_buffer * 0.25 and close > val_lower_price + reference_buffer * 0.12 and (lower_wick_ratio >= 0.15 or close_location >= 0.72) and (nz(delta_pressure, 0.0) <= -delta_pressure_threshold * 0.20 or nz(val_delta_pressure, 0.0) <= -delta_pressure_threshold * 0.45 or val_sell_imbalance)
+        bool bearish_failed_auction_raw = bearish_reference_is_vah and bearish_vah_reclaim_quality and not na(vah_upper_price) and high > vah_upper_price + reference_buffer * 0.22 and close < vah_upper_price - reference_buffer * 0.08 and (upper_wick_ratio >= 0.18 or close_location <= 0.33) and (nz(delta_pressure, 0.0) >= delta_pressure_threshold * 0.15 or nz(vah_delta_pressure, 0.0) >= delta_pressure_threshold * 0.40 or vah_buy_imbalance)
+
+        bullish_acceptance := close > nz(vah_upper_price, bearish_reference_price) + reference_buffer * 0.10 and nz(delta_pressure, 0.0) >= delta_pressure_threshold and (bearish_selected_buy_imbalance or nz(bearish_reference_delta_pressure, 0.0) >= delta_pressure_threshold * 0.60) and upside_extension <= 40.0
+        bearish_acceptance := close < nz(val_lower_price, bullish_reference_price) - reference_buffer * 0.10 and nz(delta_pressure, 0.0) <= -delta_pressure_threshold and (bullish_selected_sell_imbalance or nz(bullish_reference_delta_pressure, 0.0) <= -delta_pressure_threshold * 0.60) and downside_extension <= 40.0
+        bullish_absorption := bullish_absorption_raw and not bearish_acceptance
+        bearish_absorption := bearish_absorption_raw and not bullish_acceptance
+        bullish_trapped_aggression := bullish_trapped_aggression_raw and not bearish_acceptance
+        bearish_trapped_aggression := bearish_trapped_aggression_raw and not bullish_acceptance
+        bullish_failed_auction := bullish_failed_auction_raw and not bearish_acceptance
+        bearish_failed_auction := bearish_failed_auction_raw and not bullish_acceptance
+
+    [premium_participation_score, bullish_auction_flag, bearish_auction_flag, premium_available, bullish_absorption, bearish_absorption, bullish_trapped_aggression, bearish_trapped_aggression, bullish_failed_auction, bearish_failed_auction, bullish_acceptance, bearish_acceptance, bullish_reference_type, bearish_reference_type]
+
+calc_oi_positioning(bool enable_oi_path, float requested_oi_value, float requested_oi_delta, float participation_score_input) =>
+    OiState oi_state = OiState.unavailable
+    float oi_contribution_score = na
+    bool trap_support_long = false
+    bool trap_support_short = false
+    float price_delta = ta.change(close)
+
+    if enable_oi_path and not na(requested_oi_value) and not na(requested_oi_delta)
+        oi_state := OiState.neutral
+        oi_contribution_score := 0.0
+        if price_delta > 0 and requested_oi_delta > 0
+            oi_state := OiState.long_build
+            oi_contribution_score := 45.0
+        else if price_delta < 0 and requested_oi_delta > 0
+            oi_state := OiState.short_build
+            oi_contribution_score := -45.0
+        else if price_delta > 0 and requested_oi_delta < 0
+            oi_state := OiState.short_covering
+            oi_contribution_score := 20.0
+            trap_support_short := participation_score_input < 0
+        else if price_delta < 0 and requested_oi_delta < 0
+            oi_state := OiState.long_unwind
+            oi_contribution_score := -20.0
+            trap_support_long := participation_score_input > 0
+        oi_contribution_score := clamp_signed(oi_contribution_score + nz(participation_score_input, 0.0) * 0.20)
+
+    [oi_state, oi_contribution_score, trap_support_long, trap_support_short]
+
+calc_exhaustion(RegimeState regime_state_input, float extension_score_input, bool extension_extreme_flag, float participation_score_input, bool bullish_divergence, bool bearish_divergence, float wick_threshold, bool use_td_reference) =>
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float body_size = math.abs(close - open)
+    float body_ratio = body_size / candle_range
+    float close_location = ((close - low) / candle_range) * 2.0 - 1.0
+    float upper_wick_ratio = (high - math.max(open, close)) / candle_range
+    float lower_wick_ratio = (math.min(open, close) - low) / candle_range
+    float upper_wick_average = ta.ema(upper_wick_ratio, 5)
+    float lower_wick_average = ta.ema(lower_wick_ratio, 5)
+    float atr_value = ta.atr(14)
+    int persistence_length = 5
+    int prior_length = persistence_length * 2
+    float move_now = atr_value > 0 and not na(close[persistence_length]) ? (close - close[persistence_length]) / atr_value : 0.0
+    float move_prev = atr_value > 0 and not na(close[prior_length]) ? (close[persistence_length] - close[prior_length]) / atr_value : move_now
+    float short_move = atr_value > 0 and not na(close[2]) ? (close - close[2]) / atr_value : move_now
+    int trend_sign = resolve_exhaustion_trend_sign(move_now, extension_score_input)
+    float signed_move_now = trend_sign * move_now
+    float signed_move_prev = trend_sign * move_prev
+    float signed_short_move = trend_sign * short_move
+    float persistence_strength = trend_sign == 0 ? 0.0 : math.max(math.max(signed_move_now, 0.0), math.max(signed_short_move, 0.0))
+    float slope_decay = trend_sign == 0 ? 0.0 : math.max(signed_move_prev - signed_move_now, 0.0)
+    float bar_quality = trend_sign == 1 ? close_location * body_ratio : trend_sign == -1 ? -close_location * body_ratio : 0.0
+    float worsening_bar_quality = trend_sign == 0 ? 0.0 : math.max(0.0, 0.28 - bar_quality)
+    float rejection_ratio = trend_sign == 1 ? upper_wick_ratio : trend_sign == -1 ? lower_wick_ratio : 0.0
+    float rejection_average = trend_sign == 1 ? nz(upper_wick_average[1], upper_wick_ratio) : trend_sign == -1 ? nz(lower_wick_average[1], lower_wick_ratio) : 0.0
+    float rejection_expansion = trend_sign == 0 ? 0.0 : math.max(0.0, rejection_ratio - wick_threshold) + math.max(0.0, rejection_ratio - rejection_average)
+    float extension_alignment = directional_component(trend_sign, extension_score_input)
+    float participation_disagreement = directional_component(-trend_sign, participation_score_input)
+    float aligned_participation = directional_component(trend_sign, participation_score_input)
+    float continuation_quality = math.max(0.0, persistence_strength * 12.0 + aligned_participation * 0.45 - slope_decay * 10.0 - rejection_expansion * 30.0 - worsening_bar_quality * 45.0)
+    float divergence_bonus = bullish_divergence and trend_sign == -1 ? 22.0 : bearish_divergence and trend_sign == 1 ? 22.0 : 0.0
+    float fatigue_pressure = 0.0
+    float exhaustion_score = 0.0
+    ExhaustionSubtype exhaustion_subtype = ExhaustionSubtype.none
+
+    if trend_sign != 0
+        fatigue_pressure += slope_decay * 16.0
+        fatigue_pressure += worsening_bar_quality * 55.0
+        fatigue_pressure += rejection_expansion * 42.0
+        fatigue_pressure += extension_alignment * 0.30
+        fatigue_pressure += participation_disagreement * 0.35
+        fatigue_pressure += divergence_bonus
+        if extension_extreme_flag and extension_alignment >= 50.0
+            fatigue_pressure += 18.0
+        if persistence_strength >= 1.0 and aligned_participation < 10.0 and extension_alignment >= 25.0
+            fatigue_pressure += (10.0 - aligned_participation) * 0.80
+        fatigue_pressure := math.max(0.0, fatigue_pressure - continuation_quality * 0.35)
+        fatigue_pressure := clamp_unsigned(fatigue_pressure)
+        exhaustion_score := trend_sign == 1 ? -fatigue_pressure : fatigue_pressure
+
+    if regime_state_input == RegimeState.compression and math.abs(nz(participation_score_input, 0.0)) > 20.0
+        exhaustion_subtype := ExhaustionSubtype.compression_release
+
+    float td_reference = calc_td_reference_placeholder(use_td_reference)
+    if not na(td_reference)
+        exhaustion_score += td_reference * 0.05
+
+    exhaustion_score := clamp_signed(exhaustion_score)
+
+    if exhaustion_score > 0
+        exhaustion_subtype := exhaustion_subtype == ExhaustionSubtype.compression_release ? exhaustion_subtype : ExhaustionSubtype.downside_exhaustion
+    else if exhaustion_score < 0
+        exhaustion_subtype := exhaustion_subtype == ExhaustionSubtype.compression_release ? exhaustion_subtype : ExhaustionSubtype.upside_exhaustion
+
+    [exhaustion_score, exhaustion_subtype]
+
+calc_liquidity_events(StructureState structure_state_input, float structure_score_input, float structure_basis_value, float last_pivot_high, float last_pivot_low, bool bos_up, bool bos_down, bool reclaim_ready_long, bool reclaim_ready_short, float previous_day_high, float previous_day_low, float session_vwap_value, float extension_score_input, float exhaustion_score_input, bool bullish_divergence, bool bearish_divergence, bool trap_support_long, bool trap_support_short, bool premium_bullish_auction, bool premium_bearish_auction, float reclaim_buffer_atr_multiple, bool enable_experimental_continuation) =>
+    float atr_value = ta.atr(14)
+    float candle_range = math.max(high - low, syminfo.mintick)
+    float close_location = (close - low) / candle_range
+    float sweep_buffer = atr_value * 0.10
+    float reclaim_buffer = atr_value * reclaim_buffer_atr_multiple
+    float liquidity_tolerance = atr_value * 0.12
+    float liquidity_pivot_high = ta.pivothigh(high, 2, 2)
+    float liquidity_pivot_low = ta.pivotlow(low, 2, 2)
+    float recent_liquidity_high = ta.valuewhen(not na(liquidity_pivot_high), liquidity_pivot_high, 0)
+    float prior_liquidity_high = ta.valuewhen(not na(liquidity_pivot_high), liquidity_pivot_high, 1)
+    float recent_liquidity_low = ta.valuewhen(not na(liquidity_pivot_low), liquidity_pivot_low, 0)
+    float prior_liquidity_low = ta.valuewhen(not na(liquidity_pivot_low), liquidity_pivot_low, 1)
+    bool equal_highs = not na(recent_liquidity_high) and not na(prior_liquidity_high) and math.abs(recent_liquidity_high - prior_liquidity_high) <= liquidity_tolerance
+    bool equal_lows = not na(recent_liquidity_low) and not na(prior_liquidity_low) and math.abs(recent_liquidity_low - prior_liquidity_low) <= liquidity_tolerance
+    float equal_high_level = equal_highs ? math.max(recent_liquidity_high, prior_liquidity_high) : na
+    float equal_low_level = equal_lows ? math.min(recent_liquidity_low, prior_liquidity_low) : na
+    bool bullish_structure_confirmed = structure_state_input == StructureState.bullish
+    bool bearish_structure_confirmed = structure_state_input == StructureState.bearish
+    float bullish_pullback_extension = nz(negative_component(extension_score_input), 0.0)
+    float bearish_pullback_extension = nz(positive_component(extension_score_input), 0.0)
+    float bullish_opposing_extension = nz(positive_component(extension_score_input), 0.0)
+    float bearish_opposing_extension = nz(negative_component(extension_score_input), 0.0)
+    float bullish_reversal_extension = nz(negative_component(extension_score_input), 0.0)
+    float bearish_reversal_extension = nz(positive_component(extension_score_input), 0.0)
+    float bullish_reversal_exhaustion = nz(positive_component(exhaustion_score_input), 0.0)
+    float bearish_reversal_exhaustion = nz(negative_component(exhaustion_score_input), 0.0)
+    bool bullish_pullback_moderate = bullish_pullback_extension >= 5.0 and bullish_pullback_extension <= 75.0 and bullish_opposing_extension <= 20.0
+    bool bearish_pullback_moderate = bearish_pullback_extension >= 5.0 and bearish_pullback_extension <= 75.0 and bearish_opposing_extension <= 20.0
+    bool bullish_trend_close_quality = close > open and close_location >= 0.55
+    bool bearish_trend_close_quality = close < open and close_location <= 0.45
+    bool bullish_reversal_close_quality = close > open and close_location >= 0.58
+    bool bearish_reversal_close_quality = close < open and close_location <= 0.42
+    bool bullish_resumption_bar = bullish_structure_confirmed and bullish_pullback_moderate and bullish_trend_close_quality and close > open[1] and high >= high[1] - sweep_buffer
+    bool bearish_resumption_bar = bearish_structure_confirmed and bearish_pullback_moderate and bearish_trend_close_quality and close < open[1] and low <= low[1] + sweep_buffer
+
+    bool pdl_sweep = not na(previous_day_low) and low < previous_day_low - sweep_buffer and close >= previous_day_low - sweep_buffer * 0.10
+    bool pdh_sweep = not na(previous_day_high) and high > previous_day_high + sweep_buffer and close <= previous_day_high + sweep_buffer * 0.10
+    bool equal_low_sweep = not na(equal_low_level) and low < equal_low_level - sweep_buffer and close >= equal_low_level - sweep_buffer * 0.10
+    bool equal_high_sweep = not na(equal_high_level) and high > equal_high_level + sweep_buffer and close <= equal_high_level + sweep_buffer * 0.10
+    bool pivot_low_sweep = not na(last_pivot_low) and low < last_pivot_low - sweep_buffer and close >= last_pivot_low - sweep_buffer * 0.10
+    bool pivot_high_sweep = not na(last_pivot_high) and high > last_pivot_high + sweep_buffer and close <= last_pivot_high + sweep_buffer * 0.10
+    bool pdl_sweep_reclaim = pdl_sweep and close > previous_day_low + reclaim_buffer * 0.25
+    bool pdh_sweep_reclaim = pdh_sweep and close < previous_day_high - reclaim_buffer * 0.25
+    bool equal_low_sweep_reclaim = equal_low_sweep and close > equal_low_level + reclaim_buffer * 0.25
+    bool equal_high_sweep_reclaim = equal_high_sweep and close < equal_high_level - reclaim_buffer * 0.25
+    bool pivot_low_sweep_reclaim = pivot_low_sweep and close > last_pivot_low + reclaim_buffer * 0.25
+    bool pivot_high_sweep_reclaim = pivot_high_sweep and close < last_pivot_high - reclaim_buffer * 0.25
+
+    bool bullish_sweep = pdl_sweep or equal_low_sweep or pivot_low_sweep
+    bool bearish_sweep = pdh_sweep or equal_high_sweep or pivot_high_sweep
+    bool pivot_breakdown_reject = not na(last_pivot_low) and (bos_down[1] or close[1] < last_pivot_low - sweep_buffer) and close > last_pivot_low + reclaim_buffer and close > open
+    bool pdl_breakdown_reject = not na(previous_day_low) and (low[1] < previous_day_low - sweep_buffer or close[1] < previous_day_low - sweep_buffer) and close > previous_day_low + reclaim_buffer and close > open
+    bool equal_low_breakdown_reject = not na(equal_low_level) and (low[1] < equal_low_level - sweep_buffer or close[1] < equal_low_level - sweep_buffer) and close > equal_low_level + reclaim_buffer and close > open
+    bool bullish_breakdown_reject = (pivot_breakdown_reject or pdl_breakdown_reject or equal_low_breakdown_reject) and (na(session_vwap_value) or close >= session_vwap_value - reclaim_buffer)
+    bool pivot_breakout_reject = not na(last_pivot_high) and (bos_up[1] or close[1] > last_pivot_high + sweep_buffer) and close < last_pivot_high - reclaim_buffer and close < open
+    bool pdh_breakout_reject = not na(previous_day_high) and (high[1] > previous_day_high + sweep_buffer or close[1] > previous_day_high + sweep_buffer) and close < previous_day_high - reclaim_buffer and close < open
+    bool equal_high_breakout_reject = not na(equal_high_level) and (high[1] > equal_high_level + sweep_buffer or close[1] > equal_high_level + sweep_buffer) and close < equal_high_level - reclaim_buffer and close < open
+    bool bearish_breakout_reject = (pivot_breakout_reject or pdh_breakout_reject or equal_high_breakout_reject) and (na(session_vwap_value) or close <= session_vwap_value + reclaim_buffer)
+    bool bullish_session_cross_reclaim = bullish_structure_confirmed and bullish_pullback_moderate and bullish_trend_close_quality and not na(session_vwap_value) and close > session_vwap_value + reclaim_buffer * 0.02 and nz(close[1], close) <= nz(session_vwap_value[1], session_vwap_value) + reclaim_buffer * 0.35
+    bool bearish_session_cross_reclaim = bearish_structure_confirmed and bearish_pullback_moderate and bearish_trend_close_quality and not na(session_vwap_value) and close < session_vwap_value - reclaim_buffer * 0.02 and nz(close[1], close) >= nz(session_vwap_value[1], session_vwap_value) - reclaim_buffer * 0.35
+    bool bullish_trend_hold_reclaim = bullish_session_cross_reclaim or (bullish_resumption_bar and not na(session_vwap_value) and math.min(low, low[1]) <= session_vwap_value + reclaim_buffer * 1.25 and close >= session_vwap_value + reclaim_buffer * 0.05)
+    bool bearish_trend_hold_reclaim = bearish_session_cross_reclaim or (bearish_resumption_bar and not na(session_vwap_value) and math.max(high, high[1]) >= session_vwap_value - reclaim_buffer * 1.25 and close <= session_vwap_value - reclaim_buffer * 0.05)
+    bool bullish_pivot_continuation_reclaim = bullish_resumption_bar and not na(last_pivot_high) and math.min(low, low[1]) <= last_pivot_high + reclaim_buffer * 1.25 and close > last_pivot_high + reclaim_buffer * 0.20
+    bool bearish_pivot_continuation_reclaim = bearish_resumption_bar and not na(last_pivot_low) and math.max(high, high[1]) >= last_pivot_low - reclaim_buffer * 1.25 and close < last_pivot_low - reclaim_buffer * 0.20
+    bool bullish_pdh_continuation_reclaim = bullish_resumption_bar and not na(previous_day_high) and math.min(low, low[1]) <= previous_day_high + reclaim_buffer * 1.25 and close > previous_day_high + reclaim_buffer * 0.20
+    bool bearish_pdl_continuation_reclaim = bearish_resumption_bar and not na(previous_day_low) and math.max(high, high[1]) >= previous_day_low - reclaim_buffer * 1.25 and close < previous_day_low - reclaim_buffer * 0.20
+    bool bullish_reversal_pressure_context = bullish_reversal_extension >= 45.0 and bullish_reversal_exhaustion >= 25.0
+    bool bearish_reversal_pressure_context = bearish_reversal_extension >= 45.0 and bearish_reversal_exhaustion >= 25.0
+    bool bullish_reversal_supportive_context = bullish_divergence or trap_support_long or bullish_reversal_pressure_context
+    bool bearish_reversal_supportive_context = bearish_divergence or trap_support_short or bearish_reversal_pressure_context
+    bool bullish_continuation_supportive_context = bullish_structure_confirmed and bullish_pullback_moderate and not bullish_sweep and not bullish_breakdown_reject
+    bool bearish_continuation_supportive_context = bearish_structure_confirmed and bearish_pullback_moderate and not bearish_sweep and not bearish_breakout_reject
+    [experimental_continuation_state, experimental_continuation_reference, experimental_continuation_valid_flag, experimental_continuation_bias, experimental_bullish_reaccept, experimental_bearish_reaccept, experimental_bullish_resumption, experimental_bearish_resumption] = calc_experimental_continuation_state(structure_state_input, structure_score_input, bos_up, bos_down, last_pivot_high, last_pivot_low, structure_basis_value, session_vwap_value, extension_score_input)
+    bool bullish_reversal_maturity_context = bullish_breakdown_reject or bullish_divergence or trap_support_long or bullish_reversal_pressure_context
+    bool bearish_reversal_maturity_context = bearish_breakout_reject or bearish_divergence or trap_support_short or bearish_reversal_pressure_context
+    bool bullish_sweep_reclaim_mature = (pdl_sweep_reclaim or equal_low_sweep_reclaim or pivot_low_sweep_reclaim) and bullish_reversal_close_quality and bullish_reversal_maturity_context
+    bool bearish_sweep_reclaim_mature = (pdh_sweep_reclaim or equal_high_sweep_reclaim or pivot_high_sweep_reclaim) and bearish_reversal_close_quality and bearish_reversal_maturity_context
+    bool bullish_failed_breakout = bullish_breakdown_reject or bullish_sweep_reclaim_mature
+    bool bearish_failed_breakout = bearish_breakout_reject or bearish_sweep_reclaim_mature
+    bool bullish_reversal_reclaim = bullish_sweep_reclaim_mature
+    bool bearish_reversal_reclaim = bearish_sweep_reclaim_mature
+    bool bullish_continuation_reclaim_default = bullish_continuation_supportive_context and (bullish_trend_hold_reclaim or bullish_pivot_continuation_reclaim or bullish_pdh_continuation_reclaim) and not bullish_reversal_reclaim
+    bool bearish_continuation_reclaim_default = bearish_continuation_supportive_context and (bearish_trend_hold_reclaim or bearish_pivot_continuation_reclaim or bearish_pdl_continuation_reclaim) and not bearish_reversal_reclaim
+    bool experimental_bullish_maturity = experimental_continuation_bias == DirectionalBias.bullish and experimental_continuation_valid_flag and experimental_continuation_state >= 3
+    bool experimental_bearish_maturity = experimental_continuation_bias == DirectionalBias.bearish and experimental_continuation_valid_flag and experimental_continuation_state >= 3
+    bool experimental_bullish_resumption_maturity = experimental_continuation_bias == DirectionalBias.bullish and experimental_continuation_state >= 4
+    bool experimental_bearish_resumption_maturity = experimental_continuation_bias == DirectionalBias.bearish and experimental_continuation_state >= 4
+    bool bullish_continuation_reclaim_experimental = bullish_continuation_supportive_context and experimental_bullish_maturity and not bullish_reversal_reclaim
+    bool bearish_continuation_reclaim_experimental = bearish_continuation_supportive_context and experimental_bearish_maturity and not bearish_reversal_reclaim
+    bool bullish_continuation_reclaim = enable_experimental_continuation ? bullish_continuation_reclaim_experimental : bullish_continuation_reclaim_default
+    bool bearish_continuation_reclaim = enable_experimental_continuation ? bearish_continuation_reclaim_experimental : bearish_continuation_reclaim_default
+    bool bullish_reclaim = (bullish_reversal_reclaim or bullish_continuation_reclaim) and (na(session_vwap_value) or close >= session_vwap_value - reclaim_buffer * 0.25)
+    bool bearish_reclaim = (bearish_reversal_reclaim or bearish_continuation_reclaim) and (na(session_vwap_value) or close <= session_vwap_value + reclaim_buffer * 0.25)
+    bool high_conviction_sweep = (bullish_reversal_reclaim or bearish_reversal_reclaim) and not bullish_continuation_reclaim and not bearish_continuation_reclaim
+    bool mature_continuation_reclaim = bullish_continuation_reclaim or bearish_continuation_reclaim
+    bool trap_event = (bullish_failed_breakout and (bullish_divergence or trap_support_long)) or (bearish_failed_breakout and (bearish_divergence or trap_support_short))
+    bool premium_auction_event = premium_bullish_auction or premium_bearish_auction
+    bool mature_reversal_event = bullish_failed_breakout or bearish_failed_breakout or bullish_reversal_reclaim or bearish_reversal_reclaim or trap_event
+
+    float event_score = 0.0
+    if bullish_sweep or bearish_sweep
+        event_score := math.max(event_score, high_conviction_sweep ? 52.0 : 28.0)
+    if bullish_failed_breakout or bearish_failed_breakout
+        event_score := math.max(event_score, bullish_reversal_supportive_context or bearish_reversal_supportive_context ? 82.0 : 68.0)
+    if bullish_reclaim or bearish_reclaim
+        float continuation_reclaim_score = enable_experimental_continuation and (experimental_bullish_resumption_maturity or experimental_bearish_resumption_maturity) ? 88.0 : enable_experimental_continuation and (experimental_bullish_maturity or experimental_bearish_maturity) ? 80.0 : 78.0
+        event_score := math.max(event_score, mature_continuation_reclaim ? continuation_reclaim_score : 68.0)
+    if trap_event
+        event_score := math.max(event_score, 85.0)
+    if premium_auction_event
+        event_score := math.max(event_score, 60.0)
+    if not na(extension_score_input) and math.abs(extension_score_input) >= 25.0
+        float continuation_extension_bonus = enable_experimental_continuation and (experimental_bullish_resumption_maturity or experimental_bearish_resumption_maturity) ? 10.0 : enable_experimental_continuation and (experimental_bullish_maturity or experimental_bearish_maturity) ? 9.0 : 8.0
+        event_score += mature_reversal_event and (bullish_reversal_supportive_context or bearish_reversal_supportive_context) ? 10.0 : mature_continuation_reclaim ? continuation_extension_bonus : bullish_continuation_supportive_context or bearish_continuation_supportive_context ? 5.0 : bullish_sweep or bearish_sweep ? 2.0 : 3.0
+
+    [bullish_sweep, bearish_sweep, bullish_failed_breakout, bearish_failed_breakout, bullish_reclaim, bearish_reclaim, trap_event, premium_auction_event, clamp_unsigned(event_score), experimental_continuation_state, experimental_continuation_bias]
+
+calc_triggers(RegimeState regime_state_input, StructureState structure_state_input, float regime_score_input, float structure_score_input, float mtf_alignment_score_input, float extension_score_input, float participation_score_input, float oi_contribution_score_input, float exhaustion_score_input, bool countertrend_flag, bool bullish_sweep, bool bearish_sweep, bool bullish_failed_breakout, bool bearish_failed_breakout, bool bullish_reclaim, bool bearish_reclaim, bool trap_event, float event_score_input, float context_threshold, float event_threshold, float trigger_threshold, bool require_event_confirmation, bool enable_experimental_continuation, int experimental_continuation_state_input, DirectionalBias experimental_continuation_bias_input) =>
+    float bullish_context = 0.0
+    float bearish_context = 0.0
+    int bullish_context_count = 0
+    int bearish_context_count = 0
+
+    float bullish_regime = positive_component(regime_score_input)
+    float bearish_regime = negative_component(regime_score_input)
+    float bullish_structure = positive_component(structure_score_input)
+    float bearish_structure = negative_component(structure_score_input)
+    float bullish_mtf = positive_component(mtf_alignment_score_input)
+    float bearish_mtf = negative_component(mtf_alignment_score_input)
+    float bullish_participation = positive_component(participation_score_input)
+    float bearish_participation = negative_component(participation_score_input)
+    float bullish_oi = positive_component(oi_contribution_score_input)
+    float bearish_oi = negative_component(oi_contribution_score_input)
+    float bullish_exhaustion = positive_component(exhaustion_score_input)
+    float bearish_exhaustion = negative_component(exhaustion_score_input)
+    float bullish_extension = negative_component(extension_score_input)
+    float bearish_extension = positive_component(extension_score_input)
+
+    if not na(bullish_regime) and bullish_regime >= context_threshold
+        bullish_context += bullish_regime
+        bullish_context_count += 1
+    if not na(bearish_regime) and bearish_regime >= context_threshold
+        bearish_context += bearish_regime
+        bearish_context_count += 1
+    if not na(bullish_structure) and bullish_structure >= context_threshold
+        bullish_context += bullish_structure
+        bullish_context_count += 1
+    if not na(bearish_structure) and bearish_structure >= context_threshold
+        bearish_context += bearish_structure
+        bearish_context_count += 1
+    if not na(bullish_mtf) and bullish_mtf >= context_threshold and not countertrend_flag
+        bullish_context += bullish_mtf
+        bullish_context_count += 1
+    if not na(bearish_mtf) and bearish_mtf >= context_threshold and not countertrend_flag
+        bearish_context += bearish_mtf
+        bearish_context_count += 1
+    if not na(bullish_participation) and bullish_participation >= context_threshold
+        bullish_context += bullish_participation
+        bullish_context_count += 1
+    if not na(bearish_participation) and bearish_participation >= context_threshold
+        bearish_context += bearish_participation
+        bearish_context_count += 1
+    if not na(bullish_oi) and bullish_oi >= context_threshold
+        bullish_context += bullish_oi
+        bullish_context_count += 1
+    if not na(bearish_oi) and bearish_oi >= context_threshold
+        bearish_context += bearish_oi
+        bearish_context_count += 1
+
+    float bullish_context_avg = bullish_context_count > 0 ? bullish_context / bullish_context_count : na
+    float bearish_context_avg = bearish_context_count > 0 ? bearish_context / bearish_context_count : na
+    float strict_event_threshold = math.max(event_threshold, trigger_threshold - 5.0)
+    float strong_context_threshold = math.max(context_threshold, trigger_threshold - 10.0)
+    float confirmed_threshold = math.min(100.0, trigger_threshold + 5.0)
+    float transition_structure_threshold = 8.0
+    float confirmed_structure_threshold = 25.0
+    float reversal_alignment_threshold = math.max(strong_context_threshold, trigger_threshold - 5.0)
+    float continuation_context_threshold = math.max(context_threshold, strong_context_threshold - 6.0)
+    float continuation_participation_threshold = math.max(10.0, context_threshold * 0.60)
+    float continuation_extension_floor = math.max(8.0, context_threshold * 0.25)
+    float continuation_extension_cap = math.min(100.0, trigger_threshold + 12.0)
+    float continuation_opposing_extension_cap = math.max(10.0, context_threshold * 0.80)
+    float continuation_exhaustion_cap = math.max(12.0, context_threshold * 0.75)
+    float structure_strength_abs = math.abs(nz(structure_score_input, 0.0))
+    bool event_gate = not require_event_confirmation or event_score_input >= strict_event_threshold
+    bool strong_event_gate = not require_event_confirmation or event_score_input >= math.min(100.0, strict_event_threshold + 5.0)
+    bool reversal_event_gate = not require_event_confirmation or event_score_input >= math.min(100.0, strict_event_threshold + 10.0)
+    bool continuation_event_gate = not require_event_confirmation or event_score_input >= math.max(event_threshold, strict_event_threshold - 10.0)
+    float bullish_experimental_handoff_bonus = enable_experimental_continuation and experimental_continuation_bias_input == DirectionalBias.bullish ? experimental_continuation_state_input >= 4 ? 10.0 : experimental_continuation_state_input >= 3 ? 5.0 : 0.0 : 0.0
+    float bearish_experimental_handoff_bonus = enable_experimental_continuation and experimental_continuation_bias_input == DirectionalBias.bearish ? experimental_continuation_state_input >= 4 ? 10.0 : experimental_continuation_state_input >= 3 ? 5.0 : 0.0 : 0.0
+
+    bool bullish_structure_confirmed = structure_state_input == StructureState.bullish and structure_strength_abs >= confirmed_structure_threshold
+    bool bearish_structure_confirmed = structure_state_input == StructureState.bearish and structure_strength_abs >= confirmed_structure_threshold
+    bool bullish_structure_transition = structure_state_input == StructureState.transition_up and structure_strength_abs >= transition_structure_threshold
+    bool bearish_structure_transition = structure_state_input == StructureState.transition_down and structure_strength_abs >= transition_structure_threshold
+    bool structure_is_neutral = structure_state_input == StructureState.ranging or structure_state_input == StructureState.neutral or structure_strength_abs < transition_structure_threshold
+
+    bool bullish_trend_context = not countertrend_flag and nz(bullish_regime, 0.0) >= strong_context_threshold and (na(bullish_mtf) or bullish_mtf >= context_threshold)
+    bool bearish_trend_context = not countertrend_flag and nz(bearish_regime, 0.0) >= strong_context_threshold and (na(bearish_mtf) or bearish_mtf >= context_threshold)
+
+    bool bullish_reversal_event = bullish_failed_breakout or (bullish_sweep and bullish_reclaim)
+    bool bearish_reversal_event = bearish_failed_breakout or (bearish_sweep and bearish_reclaim)
+    bool bullish_continuation_event = bullish_reclaim and not bullish_failed_breakout and not bullish_sweep and not trap_event
+    bool bearish_continuation_event = bearish_reclaim and not bearish_failed_breakout and not bearish_sweep and not trap_event
+    bool squeeze_event_clean = not trap_event and not bullish_reversal_event and not bearish_reversal_event and not bullish_continuation_event and not bearish_continuation_event and nz(event_score_input, 0.0) < strict_event_threshold
+
+    bool bullish_reversal_structure_ok = (bullish_structure_transition or structure_is_neutral) and not bearish_structure_confirmed
+    bool bearish_reversal_structure_ok = (bearish_structure_transition or structure_is_neutral) and not bullish_structure_confirmed
+    bool bullish_reversal_alignment_ok = nz(bullish_extension, 0.0) >= reversal_alignment_threshold and nz(bullish_exhaustion, 0.0) >= trigger_threshold and (nz(bullish_participation, 0.0) >= context_threshold * 0.75 or nz(bullish_oi, 0.0) >= context_threshold * 0.50 or bullish_failed_breakout)
+    bool bearish_reversal_alignment_ok = nz(bearish_extension, 0.0) >= reversal_alignment_threshold and nz(bearish_exhaustion, 0.0) >= trigger_threshold and (nz(bearish_participation, 0.0) >= context_threshold * 0.75 or nz(bearish_oi, 0.0) >= context_threshold * 0.50 or bearish_failed_breakout)
+    bool bullish_reversal_context_ok = bullish_reversal_structure_ok and bullish_context_count >= (bullish_structure_transition ? 3 : 2) and nz(bullish_context_avg, 0.0) >= (bullish_structure_transition ? context_threshold : strong_context_threshold) and bullish_reversal_alignment_ok
+    bool bearish_reversal_context_ok = bearish_reversal_structure_ok and bearish_context_count >= (bearish_structure_transition ? 3 : 2) and nz(bearish_context_avg, 0.0) >= (bearish_structure_transition ? context_threshold : strong_context_threshold) and bearish_reversal_alignment_ok
+    bool bullish_continuation_structure_ok = bullish_structure_confirmed and not bearish_structure_transition and not structure_is_neutral
+    bool bearish_continuation_structure_ok = bearish_structure_confirmed and not bullish_structure_transition and not structure_is_neutral
+    bool bullish_continuation_pullback_ok = nz(bullish_extension, 0.0) >= continuation_extension_floor and nz(bullish_extension, 0.0) <= continuation_extension_cap and nz(bearish_extension, 0.0) <= continuation_opposing_extension_cap
+    bool bearish_continuation_pullback_ok = nz(bearish_extension, 0.0) >= continuation_extension_floor and nz(bearish_extension, 0.0) <= continuation_extension_cap and nz(bullish_extension, 0.0) <= continuation_opposing_extension_cap
+    bool bullish_continuation_alignment_ok = nz(bullish_participation, 0.0) >= continuation_participation_threshold and nz(bearish_exhaustion, 0.0) <= continuation_exhaustion_cap
+    bool bearish_continuation_alignment_ok = nz(bearish_participation, 0.0) >= continuation_participation_threshold and nz(bullish_exhaustion, 0.0) <= continuation_exhaustion_cap
+    float bullish_continuation_context_strength = nz(bullish_context_avg, 0.0) + bullish_experimental_handoff_bonus * 0.45
+    float bearish_continuation_context_strength = nz(bearish_context_avg, 0.0) + bearish_experimental_handoff_bonus * 0.45
+    bool bullish_continuation_context_ok = bullish_continuation_structure_ok and bullish_trend_context and bullish_context_count >= 3 and bullish_continuation_context_strength >= continuation_context_threshold and bullish_continuation_pullback_ok and bullish_continuation_alignment_ok
+    bool bearish_continuation_context_ok = bearish_continuation_structure_ok and bearish_trend_context and bearish_context_count >= 3 and bearish_continuation_context_strength >= continuation_context_threshold and bearish_continuation_pullback_ok and bearish_continuation_alignment_ok
+    bool bullish_squeeze_direction_ok = not bullish_structure_confirmed and (bullish_structure_transition or structure_is_neutral) and nz(bullish_participation, 0.0) >= context_threshold * 0.50 and (na(bullish_mtf) or bullish_mtf >= 0.0)
+    bool bearish_squeeze_direction_ok = not bearish_structure_confirmed and (bearish_structure_transition or structure_is_neutral) and nz(bearish_participation, 0.0) >= context_threshold * 0.50 and (na(bearish_mtf) or bearish_mtf >= 0.0)
+    bool bullish_squeeze_context_ok = regime_state_input == RegimeState.compression and squeeze_event_clean and bullish_context_count >= 2 and bullish_squeeze_direction_ok and score_magnitude(extension_score_input) < strong_context_threshold and score_magnitude(exhaustion_score_input) < context_threshold
+    bool bearish_squeeze_context_ok = regime_state_input == RegimeState.compression and squeeze_event_clean and bearish_context_count >= 2 and bearish_squeeze_direction_ok and score_magnitude(extension_score_input) < strong_context_threshold and score_magnitude(exhaustion_score_input) < context_threshold
+
+    bool raw_bullish_reversal = reversal_event_gate and bullish_reversal_event and bullish_reversal_context_ok
+    bool raw_bearish_reversal = reversal_event_gate and bearish_reversal_event and bearish_reversal_context_ok
+    bool bullish_continuation_event_gate = not require_event_confirmation or event_score_input + bullish_experimental_handoff_bonus >= math.max(event_threshold, strict_event_threshold - 10.0)
+    bool bearish_continuation_event_gate = not require_event_confirmation or event_score_input + bearish_experimental_handoff_bonus >= math.max(event_threshold, strict_event_threshold - 10.0)
+    bool raw_bullish_continuation = bullish_continuation_event_gate and bullish_continuation_event and bullish_continuation_context_ok
+    bool raw_bearish_continuation = bearish_continuation_event_gate and bearish_continuation_event and bearish_continuation_context_ok
+    bool raw_bullish_squeeze = bullish_squeeze_context_ok
+    bool raw_bearish_squeeze = bearish_squeeze_context_ok
+
+    bool bullish_reversal = raw_bullish_reversal and not raw_bullish_continuation and not raw_bullish_squeeze and not raw_bearish_reversal and not raw_bearish_continuation and not raw_bearish_squeeze
+    bool bearish_reversal = raw_bearish_reversal and not raw_bearish_continuation and not raw_bearish_squeeze and not raw_bullish_reversal and not raw_bullish_continuation and not raw_bullish_squeeze
+    bool bullish_continuation = raw_bullish_continuation and not raw_bullish_reversal and not raw_bullish_squeeze and not raw_bearish_reversal and not raw_bearish_continuation and not raw_bearish_squeeze
+    bool bearish_continuation = raw_bearish_continuation and not raw_bearish_reversal and not raw_bearish_squeeze and not raw_bullish_reversal and not raw_bullish_continuation and not raw_bullish_squeeze
+    bool bullish_squeeze = raw_bullish_squeeze and not raw_bullish_reversal and not raw_bullish_continuation and not raw_bearish_reversal and not raw_bearish_continuation and not raw_bearish_squeeze
+    bool bearish_squeeze = raw_bearish_squeeze and not raw_bearish_reversal and not raw_bearish_continuation and not raw_bullish_reversal and not raw_bullish_continuation and not raw_bullish_squeeze
+
+    TriggerState trigger_state = TriggerState.none
+    DirectionalBias trigger_bias = DirectionalBias.neutral
+    bool reversal_trigger_flag = false
+    bool continuation_trigger_flag = false
+    bool squeeze_trigger_flag = false
+
+    if bullish_reversal or bearish_reversal
+        trigger_state := TriggerState.reversal_confirmed
+        trigger_bias := bullish_reversal ? DirectionalBias.bullish : DirectionalBias.bearish
+        reversal_trigger_flag := true
+    else if bullish_continuation or bearish_continuation
+        trigger_state := TriggerState.continuation_confirmed
+        trigger_bias := bullish_continuation ? DirectionalBias.bullish : DirectionalBias.bearish
+        continuation_trigger_flag := true
+    else if bullish_squeeze or bearish_squeeze
+        trigger_state := TriggerState.squeeze_confirmed
+        trigger_bias := bullish_squeeze ? DirectionalBias.bullish : DirectionalBias.bearish
+        squeeze_trigger_flag := true
+
+    [trigger_state, reversal_trigger_flag, continuation_trigger_flag, squeeze_trigger_flag, trigger_bias]
+
+calc_composite_scores(float regime_score_input, float structure_score_input, float mtf_alignment_score_input, float extension_score_input, float participation_score_input, float oi_contribution_score_input, float exhaustion_score_input, float event_score_input, bool trap_event, TriggerState trigger_state_input, float context_weight, float event_weight, float trigger_weight, bool bullish_sweep, bool bearish_sweep, bool bullish_reclaim, bool bearish_reclaim, bool enable_experimental_continuation, int experimental_continuation_state_input, DirectionalBias experimental_continuation_bias_input, float effort_result_score_input, bool high_effort_poor_result_flag, bool weak_acceptance_flag, bool expansion_without_acceptance_flag, bool absorption_event_input, AbsorptionState absorption_state_input, float absorption_quality_score_input, InteractionType last_level_interaction_type_input, InteractionFreshnessBucket level_interaction_freshness_bucket_input, InteractionLevelType last_level_interaction_level_type_input, InteractionQualityState last_level_interaction_quality_state_input, float level_interaction_watchfulness_score_input, bool premium_available_input, bool premium_bullish_absorption_input, bool premium_bearish_absorption_input, bool premium_bullish_trapped_aggression_input, bool premium_bearish_trapped_aggression_input, bool premium_bullish_failed_auction_input, bool premium_bearish_failed_auction_input, bool premium_bullish_acceptance_input, bool premium_bearish_acceptance_input, int premium_bullish_reference_type_input, int premium_bearish_reference_type_input, float confidence_threshold_input) =>
+    float reversal_sum = 0.0
+    float reversal_weights = 0.0
+    float continuation_sum = 0.0
+    float continuation_weights = 0.0
+    float squeeze_sum = 0.0
+    float squeeze_weights = 0.0
+    float trap_sum = 0.0
+    float trap_weights = 0.0
+
+    float aligned_context = math.max(positive_component(regime_score_input), negative_component(regime_score_input))
+    aligned_context := na(aligned_context) ? na : aligned_context
+    float structure_strength = score_magnitude(structure_score_input)
+    float mtf_strength = score_magnitude(mtf_alignment_score_input)
+    float participation_strength = score_magnitude(participation_score_input)
+    float oi_strength = score_magnitude(oi_contribution_score_input)
+    float exhaustion_strength = score_magnitude(exhaustion_score_input)
+    float extension_strength = score_magnitude(extension_score_input)
+    bool has_sweep_event = bullish_sweep or bearish_sweep
+    bool has_reclaim_event = bullish_reclaim or bearish_reclaim
+    // These fits keep family expression closer to the intended context without changing the upstream modules.
+    float continuation_extension_fit = na(extension_strength) ? na : extension_strength <= 15.0 ? 40.0 + extension_strength * 1.4 : extension_strength <= 55.0 ? 78.0 - math.abs(extension_strength - 32.5) * 1.1 : math.max(0.0, 45.0 - (extension_strength - 55.0) * 1.35)
+    float continuation_exhaustion_fit = na(exhaustion_strength) ? na : clamp_unsigned(82.0 - exhaustion_strength * 1.15)
+    float squeeze_compression_fit = clamp_unsigned(100.0 - nz(aligned_context, 0.0) * 0.95 - nz(structure_strength, 0.0) * 0.55 - nz(extension_strength, 0.0) * 0.35 - nz(exhaustion_strength, 0.0) * 0.45)
+    float quiet_event_fit = clamp_unsigned(68.0 - nz(event_score_input, 0.0) * 0.90)
+    float experimental_continuation_relevance = enable_experimental_continuation and experimental_continuation_state_input >= 4 ? 88.0 : enable_experimental_continuation and experimental_continuation_state_input >= 3 ? 74.0 : na
+
+    [reversal_sum_step_1, reversal_weights_step_1] = accumulate_component(reversal_sum, reversal_weights, exhaustion_strength, 1.3 * context_weight)
+    reversal_sum := reversal_sum_step_1
+    reversal_weights := reversal_weights_step_1
+    [reversal_sum_step_2, reversal_weights_step_2] = accumulate_component(reversal_sum, reversal_weights, extension_strength, 0.8 * context_weight)
+    reversal_sum := reversal_sum_step_2
+    reversal_weights := reversal_weights_step_2
+    [reversal_sum_step_3, reversal_weights_step_3] = accumulate_component(reversal_sum, reversal_weights, event_score_input, 1.2 * event_weight)
+    reversal_sum := reversal_sum_step_3
+    reversal_weights := reversal_weights_step_3
+    [reversal_sum_step_4, reversal_weights_step_4] = accumulate_component(reversal_sum, reversal_weights, trap_event ? 75.0 : na, 1.0 * trigger_weight)
+    reversal_sum := reversal_sum_step_4
+    reversal_weights := reversal_weights_step_4
+
+    [continuation_sum_step_1, continuation_weights_step_1] = accumulate_component(continuation_sum, continuation_weights, aligned_context, 1.0 * context_weight)
+    continuation_sum := continuation_sum_step_1
+    continuation_weights := continuation_weights_step_1
+    [continuation_sum_step_2, continuation_weights_step_2] = accumulate_component(continuation_sum, continuation_weights, structure_strength, 1.0 * context_weight)
+    continuation_sum := continuation_sum_step_2
+    continuation_weights := continuation_weights_step_2
+    [continuation_sum_step_3, continuation_weights_step_3] = accumulate_component(continuation_sum, continuation_weights, mtf_strength, 1.0 * context_weight)
+    continuation_sum := continuation_sum_step_3
+    continuation_weights := continuation_weights_step_3
+    [continuation_sum_step_4, continuation_weights_step_4] = accumulate_component(continuation_sum, continuation_weights, participation_strength, 0.8 * context_weight)
+    continuation_sum := continuation_sum_step_4
+    continuation_weights := continuation_weights_step_4
+    [continuation_sum_step_5, continuation_weights_step_5] = accumulate_component(continuation_sum, continuation_weights, oi_strength, 0.6 * context_weight)
+    continuation_sum := continuation_sum_step_5
+    continuation_weights := continuation_weights_step_5
+    [continuation_sum_step_6, continuation_weights_step_6] = accumulate_component(continuation_sum, continuation_weights, (bullish_sweep or bearish_sweep or bullish_reclaim or bearish_reclaim) ? event_score_input : na, 0.8 * event_weight)
+    continuation_sum := continuation_sum_step_6
+    continuation_weights := continuation_weights_step_6
+    [continuation_sum_step_7, continuation_weights_step_7] = accumulate_component(continuation_sum, continuation_weights, continuation_extension_fit, 0.9 * context_weight)
+    continuation_sum := continuation_sum_step_7
+    continuation_weights := continuation_weights_step_7
+    [continuation_sum_step_8, continuation_weights_step_8] = accumulate_component(continuation_sum, continuation_weights, continuation_exhaustion_fit, 0.7 * context_weight)
+    continuation_sum := continuation_sum_step_8
+    continuation_weights := continuation_weights_step_8
+    [continuation_sum_step_9, continuation_weights_step_9] = accumulate_component(continuation_sum, continuation_weights, trigger_state_input == TriggerState.continuation_confirmed ? 82.0 : na, 1.0 * trigger_weight)
+    continuation_sum := continuation_sum_step_9
+    continuation_weights := continuation_weights_step_9
+    [continuation_sum_step_10, continuation_weights_step_10] = accumulate_component(continuation_sum, continuation_weights, experimental_continuation_relevance, 0.9 * event_weight)
+    continuation_sum := continuation_sum_step_10
+    continuation_weights := continuation_weights_step_10
+
+    [squeeze_sum_step_1, squeeze_weights_step_1] = accumulate_component(squeeze_sum, squeeze_weights, structure_strength, 0.8 * context_weight)
+    squeeze_sum := squeeze_sum_step_1
+    squeeze_weights := squeeze_weights_step_1
+    [squeeze_sum_step_2, squeeze_weights_step_2] = accumulate_component(squeeze_sum, squeeze_weights, participation_strength, 0.8 * context_weight)
+    squeeze_sum := squeeze_sum_step_2
+    squeeze_weights := squeeze_weights_step_2
+    [squeeze_sum_step_3, squeeze_weights_step_3] = accumulate_component(squeeze_sum, squeeze_weights, event_score_input, 1.0 * event_weight)
+    squeeze_sum := squeeze_sum_step_3
+    squeeze_weights := squeeze_weights_step_3
+    [squeeze_sum_step_4, squeeze_weights_step_4] = accumulate_component(squeeze_sum, squeeze_weights, trigger_state_input == TriggerState.squeeze_confirmed ? 85.0 : na, 1.2 * trigger_weight)
+    squeeze_sum := squeeze_sum_step_4
+    squeeze_weights := squeeze_weights_step_4
+    [squeeze_sum_step_5, squeeze_weights_step_5] = accumulate_component(squeeze_sum, squeeze_weights, squeeze_compression_fit, 1.0 * context_weight)
+    squeeze_sum := squeeze_sum_step_5
+    squeeze_weights := squeeze_weights_step_5
+    [squeeze_sum_step_6, squeeze_weights_step_6] = accumulate_component(squeeze_sum, squeeze_weights, quiet_event_fit, 0.7 * context_weight)
+    squeeze_sum := squeeze_sum_step_6
+    squeeze_weights := squeeze_weights_step_6
+
+    [trap_sum_step_1, trap_weights_step_1] = accumulate_component(trap_sum, trap_weights, trap_event ? event_score_input : na, 1.1 * event_weight)
+    trap_sum := trap_sum_step_1
+    trap_weights := trap_weights_step_1
+    [trap_sum_step_2, trap_weights_step_2] = accumulate_component(trap_sum, trap_weights, exhaustion_strength, 0.8 * context_weight)
+    trap_sum := trap_sum_step_2
+    trap_weights := trap_weights_step_2
+    [trap_sum_step_3, trap_weights_step_3] = accumulate_component(trap_sum, trap_weights, trigger_state_input == TriggerState.reversal_confirmed and trap_event ? 80.0 : na, 1.0 * trigger_weight)
+    trap_sum := trap_sum_step_3
+    trap_weights := trap_weights_step_3
+
+    float reversal_base_score = finalize_weighted_score(reversal_sum, reversal_weights)
+    float continuation_base_score = finalize_weighted_score(continuation_sum, continuation_weights)
+    float squeeze_base_score = finalize_weighted_score(squeeze_sum, squeeze_weights)
+    float trap_base_score = finalize_weighted_score(trap_sum, trap_weights)
+    float reversal_expected_weights = 2.1 * context_weight + 1.2 * event_weight + 1.0 * trigger_weight
+    float continuation_expected_weights = 6.0 * context_weight + 0.8 * event_weight + 1.0 * trigger_weight
+    float squeeze_expected_weights = 3.3 * context_weight + 1.0 * event_weight + 1.2 * trigger_weight
+    float trap_expected_weights = 0.8 * context_weight + 1.1 * event_weight + 1.0 * trigger_weight
+    float reversal_coverage = reversal_expected_weights > 0 ? reversal_weights / reversal_expected_weights : 0.0
+    float continuation_coverage = continuation_expected_weights > 0 ? continuation_weights / continuation_expected_weights : 0.0
+    float squeeze_coverage = squeeze_expected_weights > 0 ? squeeze_weights / squeeze_expected_weights : 0.0
+    float trap_coverage = trap_expected_weights > 0 ? trap_weights / trap_expected_weights : 0.0
+    float reversal_clarity_bonus = (trigger_state_input == TriggerState.reversal_confirmed ? 9.0 : 0.0) + (trap_event ? 5.0 : 0.0) + (has_sweep_event and has_reclaim_event and not trap_event ? 1.5 : 0.0)
+    float continuation_clarity_bonus = (trigger_state_input == TriggerState.continuation_confirmed ? 10.0 : 0.0) + (has_reclaim_event ? 4.5 : 0.0) + (nz(continuation_extension_fit, 0.0) >= 60.0 ? 3.0 : nz(continuation_extension_fit, 0.0) >= 45.0 ? 1.5 : 0.0) + (nz(continuation_exhaustion_fit, 0.0) >= 50.0 ? 2.5 : 0.0) + (enable_experimental_continuation and experimental_continuation_bias_input != DirectionalBias.neutral and experimental_continuation_state_input >= 4 ? 6.0 : enable_experimental_continuation and experimental_continuation_bias_input != DirectionalBias.neutral and experimental_continuation_state_input >= 3 ? 3.0 : 0.0)
+    float squeeze_clarity_bonus = (trigger_state_input == TriggerState.squeeze_confirmed ? 10.0 : 0.0) + (nz(quiet_event_fit, 0.0) >= 40.0 ? 4.0 : 0.0) + (nz(squeeze_compression_fit, 0.0) >= 55.0 ? 3.0 : 0.0)
+    float trap_clarity_bonus = (trap_event ? 8.0 : 0.0) + (trigger_state_input == TriggerState.reversal_confirmed and trap_event ? 5.0 : 0.0)
+    float weak_sweep_reversal_penalty = has_sweep_event and not trap_event ? (has_reclaim_event ? (structure_strength < 25.0 ? 3.0 : 1.5) : 5.0) : 0.0
+    float reversal_ambiguity_penalty = weak_sweep_reversal_penalty + (not has_sweep_event and not trap_event and nz(continuation_extension_fit, 0.0) >= 55.0 and nz(continuation_exhaustion_fit, 0.0) >= 50.0 ? 1.5 : 0.0)
+    float continuation_ambiguity_penalty = math.max(0.0, (has_sweep_event and not has_reclaim_event ? 5.0 : 0.0) + (trap_event ? 3.0 : 0.0) - (nz(continuation_extension_fit, 0.0) >= 55.0 ? 1.5 : 0.0) - (has_reclaim_event ? 1.5 : 0.0))
+    float squeeze_ambiguity_penalty = math.max(0.0, (has_sweep_event or has_reclaim_event or trap_event ? 7.0 : 0.0) - (nz(quiet_event_fit, 0.0) >= 45.0 ? 1.0 : 0.0))
+    float trap_ambiguity_penalty = not trap_event ? (has_reclaim_event ? 14.0 : 18.0) : 0.0
+
+    float watch_confidence_threshold = watch_threshold_from_actionable(confidence_threshold_input)
+    float reversal_score = shape_composite_family_score(reversal_base_score, reversal_coverage, reversal_clarity_bonus, reversal_ambiguity_penalty)
+    float continuation_score = shape_composite_family_score(continuation_base_score, continuation_coverage, continuation_clarity_bonus, continuation_ambiguity_penalty)
+    float squeeze_score = shape_composite_family_score(squeeze_base_score, squeeze_coverage, squeeze_clarity_bonus, squeeze_ambiguity_penalty)
+    float trap_score = shape_composite_family_score(trap_base_score, trap_coverage, trap_clarity_bonus, trap_ambiguity_penalty)
+
+    float top_family_score_pre_context = math.max(nz(reversal_score, 0.0), math.max(nz(continuation_score, 0.0), math.max(nz(squeeze_score, 0.0), nz(trap_score, 0.0))))
+    float second_family_score_pre_context = second_highest_score(reversal_score, continuation_score, squeeze_score, trap_score)
+    float family_separation_pre_context = math.max(top_family_score_pre_context - second_family_score_pre_context, 0.0)
+    string dominant_family_pre_context = dominant_family_name(reversal_score, continuation_score, squeeze_score, trap_score)
+    float ambiguity_penalty_pre_context = second_family_score_pre_context >= top_family_score_pre_context - 4.0 ? 12.0 : second_family_score_pre_context >= top_family_score_pre_context - 10.0 ? 6.0 : second_family_score_pre_context >= top_family_score_pre_context - 18.0 ? 2.5 : 0.0
+    if dominant_family_pre_context == "Continuation" and continuation_coverage >= 0.70 and nz(continuation_extension_fit, 0.0) >= 45.0 and nz(continuation_exhaustion_fit, 0.0) >= 40.0
+        ambiguity_penalty_pre_context := ambiguity_penalty_pre_context * 0.55
+    else if dominant_family_pre_context == "Squeeze" and squeeze_coverage >= 0.65 and nz(squeeze_compression_fit, 0.0) >= 45.0 and nz(quiet_event_fit, 0.0) >= 35.0
+        ambiguity_penalty_pre_context := ambiguity_penalty_pre_context * 0.35
+    else if dominant_family_pre_context == "Reversal" and not has_sweep_event and not has_reclaim_event and not trap_event and nz(continuation_extension_fit, 0.0) >= 55.0 and nz(continuation_exhaustion_fit, 0.0) >= 50.0
+        ambiguity_penalty_pre_context := ambiguity_penalty_pre_context + 2.0
+    float event_quality = nz(event_score_input, 0.0)
+    float trigger_confirmation_bonus = trigger_state_input == TriggerState.none ? 0.0 : 10.0
+    float coverage_quality = math.max(reversal_coverage, math.max(continuation_coverage, math.max(squeeze_coverage, trap_coverage))) * 100.0
+    float continuation_family_bonus_pre_context = dominant_family_pre_context == "Continuation" ? nz(continuation_extension_fit, 0.0) * 0.14 + nz(continuation_exhaustion_fit, 0.0) * 0.09 + (has_reclaim_event ? 5.0 : 0.0) + (top_family_score_pre_context >= 28.0 ? 4.0 : 0.0) + (not has_sweep_event and not trap_event and top_family_score_pre_context >= 26.0 ? 6.0 : 0.0) - (trap_event ? 5.0 : 0.0) : 0.0
+    float squeeze_family_bonus_pre_context = dominant_family_pre_context == "Squeeze" ? nz(squeeze_compression_fit, 0.0) * 0.14 + nz(quiet_event_fit, 0.0) * 0.10 + (top_family_score_pre_context >= 24.0 ? 4.0 : 0.0) + (not has_sweep_event and not has_reclaim_event and not trap_event and top_family_score_pre_context >= 18.0 ? 6.0 : 0.0) - ((has_sweep_event or has_reclaim_event or trap_event) ? 6.0 : 0.0) : 0.0
+    float reversal_family_dampen_pre_context = dominant_family_pre_context == "Reversal" and not has_sweep_event and not has_reclaim_event and not trap_event and nz(continuation_extension_fit, 0.0) >= 55.0 ? 3.0 : 0.0
+    float mid_confidence_support_pre_context = top_family_score_pre_context >= 20.0 and top_family_score_pre_context <= 55.0 ? math.min(family_separation_pre_context, 18.0) * 0.10 + 3.0 : top_family_score_pre_context > 55.0 ? 2.0 : 0.0
+    float clean_family_relief_pre_context = dominant_family_pre_context == "Continuation" or dominant_family_pre_context == "Squeeze" ? 2.0 : 0.0
+    float confidence_score_raw_pre_context = trigger_state_input == TriggerState.none ? top_family_score_pre_context * 0.46 + event_quality * 0.10 + family_separation_pre_context * 0.22 + coverage_quality * 0.11 + mid_confidence_support_pre_context + continuation_family_bonus_pre_context + squeeze_family_bonus_pre_context + clean_family_relief_pre_context - reversal_family_dampen_pre_context - ambiguity_penalty_pre_context - 6.0 : top_family_score_pre_context * 0.55 + event_quality * 0.10 + family_separation_pre_context * 0.20 + coverage_quality * 0.08 + trigger_confirmation_bonus + continuation_family_bonus_pre_context + squeeze_family_bonus_pre_context - reversal_family_dampen_pre_context - ambiguity_penalty_pre_context
+    float confidence_score_unclamped_pre_context = clamp_unsigned(confidence_score_raw_pre_context)
+
+    bool contextual_family_ok = dominant_family_pre_context == "Reversal" or dominant_family_pre_context == "Trap"
+    bool contextual_interaction_fresh = last_level_interaction_type_input != InteractionType.none and (level_interaction_freshness_bucket_input == InteractionFreshnessBucket.fresh or level_interaction_freshness_bucket_input == InteractionFreshnessBucket.aging)
+    float contextual_freshness_multiplier = level_interaction_freshness_bucket_input == InteractionFreshnessBucket.fresh ? 1.0 : level_interaction_freshness_bucket_input == InteractionFreshnessBucket.aging ? 0.55 : 0.0
+    float contextual_level_multiplier = last_level_interaction_level_type_input == InteractionLevelType.session_vwap ? 1.0 : last_level_interaction_level_type_input == InteractionLevelType.previous_day_high or last_level_interaction_level_type_input == InteractionLevelType.previous_day_low ? 0.90 : last_level_interaction_level_type_input == InteractionLevelType.structure_basis ? 0.60 : 0.0
+    float contextual_quality_multiplier = interaction_quality_multiplier(last_level_interaction_quality_state_input)
+    bool interaction_failed_acceptance = last_level_interaction_type_input == InteractionType.pdh_failed_acceptance or last_level_interaction_type_input == InteractionType.pdl_failed_acceptance
+    bool interaction_sweep_failure = last_level_interaction_type_input == InteractionType.pdh_sweep or last_level_interaction_type_input == InteractionType.pdl_sweep
+    bool interaction_vwap_context = last_level_interaction_type_input == InteractionType.vwap_reclaim or last_level_interaction_type_input == InteractionType.vwap_rejection
+    bool absorption_state_active = absorption_state_input != AbsorptionState.none
+    bool high_trust_level_context = last_level_interaction_level_type_input == InteractionLevelType.session_vwap or last_level_interaction_level_type_input == InteractionLevelType.previous_day_high or last_level_interaction_level_type_input == InteractionLevelType.previous_day_low
+    bool basis_only_context = last_level_interaction_level_type_input == InteractionLevelType.structure_basis
+    bool clean_or_strong_interaction = last_level_interaction_quality_state_input == InteractionQualityState.clean or last_level_interaction_quality_state_input == InteractionQualityState.strong
+    bool strong_interaction_only = last_level_interaction_quality_state_input == InteractionQualityState.strong
+    bool absorption_supportive_context = absorption_event_input or (absorption_state_active and nz(absorption_quality_score_input, 0.0) >= 18.0)
+    bool contextual_event_mature = trap_event or has_reclaim_event or event_quality >= 68.0 or interaction_failed_acceptance
+    float contextual_failure_quality = 0.0
+    contextual_failure_quality += high_effort_poor_result_flag ? 1.20 : 0.0
+    contextual_failure_quality += interaction_failed_acceptance ? 1.15 : interaction_sweep_failure ? 0.85 : 0.0
+    contextual_failure_quality += absorption_supportive_context ? 0.90 : 0.0
+    contextual_failure_quality += clean_or_strong_interaction ? 0.60 : 0.0
+    contextual_failure_quality += high_trust_level_context ? 0.55 : basis_only_context and strong_interaction_only ? 0.20 : 0.0
+    contextual_failure_quality += nz(level_interaction_watchfulness_score_input, 0.0) >= 12.0 ? 0.25 : 0.0
+    float contextual_rejection_weakness = 0.0
+    contextual_rejection_weakness += weak_acceptance_flag ? 1.30 : 0.0
+    contextual_rejection_weakness += expansion_without_acceptance_flag ? 1.05 : 0.0
+    contextual_rejection_weakness += interaction_vwap_context and last_level_interaction_quality_state_input == InteractionQualityState.tentative ? 0.95 : 0.0
+    contextual_rejection_weakness += basis_only_context and not strong_interaction_only ? 0.95 : 0.0
+    contextual_rejection_weakness += not high_effort_poor_result_flag ? 0.45 : 0.0
+    contextual_rejection_weakness += not absorption_supportive_context ? 0.30 : 0.0
+    bool meaningful_failure_context = contextual_family_ok and contextual_interaction_fresh and contextual_event_mature and contextual_failure_quality >= 2.10 and (high_trust_level_context or basis_only_context and strong_interaction_only)
+    bool weak_rejection_context = contextual_family_ok and contextual_interaction_fresh and not meaningful_failure_context and contextual_rejection_weakness >= 1.35
+    float contextual_support_base = meaningful_failure_context ? math.min(4.0, ((math.abs(nz(effort_result_score_input, 0.0)) * 0.08) + (nz(absorption_quality_score_input, 0.0) * 0.05) + (high_effort_poor_result_flag ? 0.90 : 0.0) + (absorption_supportive_context ? 0.90 : 0.0) + (interaction_failed_acceptance ? 0.75 : interaction_sweep_failure ? 0.55 : 0.0) + (clean_or_strong_interaction ? 0.40 : 0.0) + (high_trust_level_context ? 0.35 : 0.0) + (level_interaction_watchfulness_score_input * 0.05)) * contextual_freshness_multiplier * contextual_level_multiplier * contextual_quality_multiplier) : 0.0
+    float contextual_penalty_base = weak_rejection_context ? math.min(4.5, (contextual_rejection_weakness + (last_level_interaction_quality_state_input == InteractionQualityState.tentative ? 0.60 : 0.0) + (basis_only_context ? 0.30 : 0.0) + (not contextual_event_mature ? 0.35 : 0.0) + (level_interaction_watchfulness_score_input * 0.03)) * contextual_freshness_multiplier * contextual_level_multiplier * (last_level_interaction_quality_state_input == InteractionQualityState.tentative ? 1.0 : 0.75)) : 0.0
+    bool contextual_positive_allowed = confidence_score_unclamped_pre_context >= watch_confidence_threshold
+    bool trap_skewed_context = interaction_sweep_failure and (trap_event or has_sweep_event) and not interaction_failed_acceptance
+    bool reversal_skewed_context = interaction_failed_acceptance or last_level_interaction_type_input == InteractionType.vwap_reclaim or absorption_supportive_context
+    float reversal_contextual_boost = contextual_positive_allowed ? contextual_support_base * (reversal_skewed_context ? 1.0 : trap_skewed_context ? 0.35 : 0.60) : 0.0
+    float trap_contextual_boost = contextual_positive_allowed ? contextual_support_base * (trap_skewed_context ? 1.0 : reversal_skewed_context ? 0.30 : 0.55) : 0.0
+    float reversal_contextual_penalty = contextual_penalty_base * (dominant_family_pre_context == "Reversal" ? 1.0 : 0.75) + (meaningful_failure_context and trap_skewed_context ? contextual_support_base * 0.40 : 0.0)
+    float trap_contextual_penalty = contextual_penalty_base * (trap_event or dominant_family_pre_context == "Trap" ? 1.0 : 0.70) + (meaningful_failure_context and reversal_skewed_context ? contextual_support_base * 0.45 : 0.0)
+
+    reversal_score := round_score_step(clamp_unsigned(reversal_score + reversal_contextual_boost - reversal_contextual_penalty), 0.5)
+    trap_score := round_score_step(clamp_unsigned(trap_score + trap_contextual_boost - trap_contextual_penalty), 0.5)
+
+    float top_family_score = math.max(nz(reversal_score, 0.0), math.max(nz(continuation_score, 0.0), math.max(nz(squeeze_score, 0.0), nz(trap_score, 0.0))))
+    float second_family_score = second_highest_score(reversal_score, continuation_score, squeeze_score, trap_score)
+    float family_separation = math.max(top_family_score - second_family_score, 0.0)
+    string dominant_family = dominant_family_name(reversal_score, continuation_score, squeeze_score, trap_score)
+    float ambiguity_penalty = second_family_score >= top_family_score - 4.0 ? 12.0 : second_family_score >= top_family_score - 10.0 ? 6.0 : second_family_score >= top_family_score - 18.0 ? 2.5 : 0.0
+    if dominant_family == "Continuation" and continuation_coverage >= 0.70 and nz(continuation_extension_fit, 0.0) >= 45.0 and nz(continuation_exhaustion_fit, 0.0) >= 40.0
+        ambiguity_penalty := ambiguity_penalty * 0.55
+    else if dominant_family == "Squeeze" and squeeze_coverage >= 0.65 and nz(squeeze_compression_fit, 0.0) >= 45.0 and nz(quiet_event_fit, 0.0) >= 35.0
+        ambiguity_penalty := ambiguity_penalty * 0.35
+    else if dominant_family == "Reversal" and not has_sweep_event and not has_reclaim_event and not trap_event and nz(continuation_extension_fit, 0.0) >= 55.0 and nz(continuation_exhaustion_fit, 0.0) >= 50.0
+        ambiguity_penalty := ambiguity_penalty + 2.0
+    float continuation_family_bonus = dominant_family == "Continuation" ? nz(continuation_extension_fit, 0.0) * 0.14 + nz(continuation_exhaustion_fit, 0.0) * 0.09 + (has_reclaim_event ? 5.0 : 0.0) + (top_family_score >= 28.0 ? 4.0 : 0.0) + (not has_sweep_event and not trap_event and top_family_score >= 26.0 ? 6.0 : 0.0) - (trap_event ? 5.0 : 0.0) : 0.0
+    float squeeze_family_bonus = dominant_family == "Squeeze" ? nz(squeeze_compression_fit, 0.0) * 0.14 + nz(quiet_event_fit, 0.0) * 0.10 + (top_family_score >= 24.0 ? 4.0 : 0.0) + (not has_sweep_event and not has_reclaim_event and not trap_event and top_family_score >= 18.0 ? 6.0 : 0.0) - ((has_sweep_event or has_reclaim_event or trap_event) ? 6.0 : 0.0) : 0.0
+    float reversal_family_dampen = dominant_family == "Reversal" and not has_sweep_event and not has_reclaim_event and not trap_event and nz(continuation_extension_fit, 0.0) >= 55.0 ? 3.0 : 0.0
+    float mid_confidence_support = top_family_score >= 20.0 and top_family_score <= 55.0 ? math.min(family_separation, 18.0) * 0.10 + 3.0 : top_family_score > 55.0 ? 2.0 : 0.0
+    float clean_family_relief = dominant_family == "Continuation" or dominant_family == "Squeeze" ? 2.0 : 0.0
+    float confidence_score_raw = trigger_state_input == TriggerState.none ? top_family_score * 0.46 + event_quality * 0.10 + family_separation * 0.22 + coverage_quality * 0.11 + mid_confidence_support + continuation_family_bonus + squeeze_family_bonus + clean_family_relief - reversal_family_dampen - ambiguity_penalty - 6.0 : top_family_score * 0.55 + event_quality * 0.10 + family_separation * 0.20 + coverage_quality * 0.08 + trigger_confirmation_bonus + continuation_family_bonus + squeeze_family_bonus - reversal_family_dampen - ambiguity_penalty
+    if confidence_score_unclamped_pre_context < watch_confidence_threshold and confidence_score_raw > confidence_score_unclamped_pre_context
+        confidence_score_raw := confidence_score_unclamped_pre_context
+    else if confidence_score_unclamped_pre_context < confidence_threshold_input
+        confidence_score_raw := math.min(confidence_score_raw, math.max(0.0, confidence_threshold_input - 0.5))
+    float confidence_score_unclamped = clamp_unsigned(confidence_score_raw)
+    bool premium_confidence_family_ok = dominant_family == "Reversal" or dominant_family == "Trap"
+    float bullish_reversal_context_strength = nz(positive_component(extension_score_input), 0.0) * 0.50 + nz(positive_component(exhaustion_score_input), 0.0) * 0.35 + (bullish_sweep ? 12.0 : 0.0) + (bullish_reclaim ? 6.0 : 0.0)
+    float bearish_reversal_context_strength = nz(negative_component(extension_score_input), 0.0) * 0.50 + nz(negative_component(exhaustion_score_input), 0.0) * 0.35 + (bearish_sweep ? 12.0 : 0.0) + (bearish_reclaim ? 6.0 : 0.0)
+    bool bullish_premium_alignment = bullish_reversal_context_strength >= bearish_reversal_context_strength + 5.0
+    bool bearish_premium_alignment = bearish_reversal_context_strength >= bullish_reversal_context_strength + 5.0
+    bool bullish_acceptance_veto_active = bullish_premium_alignment and premium_bullish_acceptance_input
+    bool bearish_acceptance_veto_active = bearish_premium_alignment and premium_bearish_acceptance_input
+    bool same_side_acceptance_veto_active = bullish_acceptance_veto_active or bearish_acceptance_veto_active
+    bool premium_event_mature = trap_event or has_reclaim_event or event_quality >= 68.0
+    bool premium_confirm_eligible = premium_available_input and premium_confidence_family_ok and confidence_score_unclamped >= watch_confidence_threshold and premium_event_mature and not same_side_acceptance_veto_active
+    float premium_confirm_boost = 0.0
+
+    if premium_confirm_eligible
+        if bullish_premium_alignment
+            if premium_bullish_absorption_input and premium_bullish_reference_type_input == 1
+                premium_confirm_boost += dominant_family == "Reversal" ? 4.5 : 1.5
+            if premium_bullish_trapped_aggression_input and premium_bullish_reference_type_input == 1
+                premium_confirm_boost += dominant_family == "Trap" ? 4.5 : 1.5
+            if premium_bullish_failed_auction_input and premium_bullish_reference_type_input == 3
+                premium_confirm_boost += dominant_family == "Reversal" ? 3.5 : 1.0
+        if bearish_premium_alignment
+            if premium_bearish_absorption_input and premium_bearish_reference_type_input == 1
+                premium_confirm_boost += dominant_family == "Reversal" ? 4.5 : 1.5
+            if premium_bearish_trapped_aggression_input and premium_bearish_reference_type_input == 1
+                premium_confirm_boost += dominant_family == "Trap" ? 4.5 : 1.5
+            if premium_bearish_failed_auction_input and premium_bearish_reference_type_input == 4
+                premium_confirm_boost += dominant_family == "Reversal" ? 1.0 : 0.5
+
+    premium_confirm_boost := math.min(premium_confirm_boost, dominant_family == "Trap" ? 5.5 : 5.0)
+
+    float premium_veto_penalty = 0.0
+    if premium_available_input and premium_confidence_family_ok
+        if bullish_acceptance_veto_active
+            premium_veto_penalty += dominant_family == "Trap" ? 10.0 : 8.0
+        if bearish_acceptance_veto_active
+            premium_veto_penalty += dominant_family == "Trap" ? 10.0 : 8.0
+
+    premium_veto_penalty := math.min(premium_veto_penalty, dominant_family == "Trap" ? 12.0 : 10.0)
+
+    float confidence_score_with_boost = confidence_score_unclamped
+    if premium_confirm_boost > 0 and premium_confidence_family_ok
+        if confidence_score_unclamped >= confidence_threshold_input
+            confidence_score_with_boost := confidence_score_unclamped + premium_confirm_boost
+        else if confidence_score_unclamped >= watch_confidence_threshold
+            confidence_score_with_boost := math.min(math.max(0.0, confidence_threshold_input - 0.5), confidence_score_unclamped + premium_confirm_boost)
+    float confidence_score = round_score_step(clamp_unsigned(confidence_score_with_boost - premium_veto_penalty), 0.5)
+
+    [reversal_score, continuation_score, squeeze_score, trap_score, confidence_score]
+
+
+// @function Public host-callable live reversal / trap summary surface. Returns the standardized 10-field primitive tuple.
+export calc_reversal_trap_live_summary() =>
+    [context_threshold, event_threshold, trigger_threshold, confidence_threshold, _] = resolve_preset_thresholds(DEFAULT_PRESET_MODE)
+
+    float htf_close = na
+    float htf_fast_ema = na
+    float htf_slow_ema = na
+    if DEFAULT_MTF_ENABLE_HTF
+        [htf_close_request, htf_fast_ema_request, htf_slow_ema_request] = request.security(
+             syminfo.tickerid,
+             DEFAULT_MTF_HTF_TIMEFRAME,
+             [close, ta.ema(close, DEFAULT_REGIME_FAST_LENGTH), ta.ema(close, DEFAULT_REGIME_SLOW_LENGTH)],
+             gaps = barmerge.gaps_off,
+             lookahead = barmerge.lookahead_off
+         )
+        htf_close := htf_close_request
+        htf_fast_ema := htf_fast_ema_request
+        htf_slow_ema := htf_slow_ema_request
+
+    float ltf_close = na
+    float ltf_volume = na
+    float ltf_change = na
+    if DEFAULT_PARTICIPATION_USE_LTF
+        [ltf_close_request, ltf_volume_request, ltf_change_request] = request.security(
+             syminfo.tickerid,
+             DEFAULT_PARTICIPATION_LTF_TIMEFRAME,
+             [close, volume, ta.change(close)],
+             gaps = barmerge.gaps_off,
+             lookahead = barmerge.lookahead_off
+         )
+        ltf_close := ltf_close_request
+        ltf_volume := ltf_volume_request
+        ltf_change := ltf_change_request
+
+    float oi_value = na
+    float oi_delta = na
+    if DEFAULT_OI_ENABLE and DEFAULT_OI_SYMBOL != ""
+        [oi_value_request, oi_delta_request] = request.security(
+             DEFAULT_OI_SYMBOL,
+             timeframe.period,
+             [close, ta.change(close)],
+             gaps = barmerge.gaps_off,
+             lookahead = barmerge.lookahead_off,
+             ignore_invalid_symbol = true
+         )
+        oi_value := oi_value_request
+        oi_delta := oi_delta_request
+
+    footprint premium_footprint_request = request.footprint(DEFAULT_FOOTPRINT_TICKS_PER_ROW, DEFAULT_FOOTPRINT_VALUE_AREA_PERCENT, DEFAULT_FOOTPRINT_IMBALANCE_PERCENT)
+
+    [regime_state, regime_score, regime_bias] = calc_regime(DEFAULT_REGIME_FAST_LENGTH, DEFAULT_REGIME_SLOW_LENGTH, DEFAULT_REGIME_COMPRESSION_LENGTH, DEFAULT_REGIME_ATR_LENGTH, DEFAULT_REGIME_COMPRESSION_THRESHOLD)
+    [structure_state, structure_score, bos_up, bos_down, choch_up, choch_down, displacement_up, displacement_down, reclaim_ready_long, reclaim_ready_short, last_pivot_high, last_pivot_low, structure_basis_value] = calc_structure(DEFAULT_STRUCTURE_PIVOT_LEFT, DEFAULT_STRUCTURE_PIVOT_RIGHT, DEFAULT_STRUCTURE_BASIS_LENGTH, DEFAULT_STRUCTURE_DISPLACEMENT_ATR)
+    [mtf_alignment_score, countertrend_flag, _] = calc_mtf_alignment(regime_bias, structure_score, DEFAULT_MTF_ENABLE_HTF, htf_close, htf_fast_ema, htf_slow_ema)
+    [session_vwap_value, anchored_vwap_value, extension_value, extension_score, extension_extreme_flag, anchored_vwap_ready] = calc_fair_value_extension(DEFAULT_FAIR_VALUE_ATR_LENGTH, DEFAULT_FAIR_VALUE_EXTREME_ATR, DEFAULT_FAIR_VALUE_ENABLE_ANCHORED_VWAP)
+    [previous_day_high, previous_day_low] = request.security(
+         syminfo.tickerid,
+         "D",
+         [high[1], low[1]],
+         gaps = barmerge.gaps_off,
+         lookahead = barmerge.lookahead_off
+     )
+    [session_vwap_level_type, session_vwap_level_role, session_vwap_trust_bucket, session_vwap_decay_profile, session_vwap_last_interaction_bar, session_vwap_relevance_state, previous_day_high_level_type, previous_day_high_level_role, previous_day_high_trust_bucket, previous_day_high_decay_profile, previous_day_high_last_interaction_bar, previous_day_high_relevance_state, previous_day_low_level_type, previous_day_low_level_role, previous_day_low_trust_bucket, previous_day_low_decay_profile, previous_day_low_last_interaction_bar, previous_day_low_relevance_state, structure_basis_level_type, structure_basis_level_role, structure_basis_trust_bucket, structure_basis_decay_profile, structure_basis_last_interaction_bar, structure_basis_relevance_state] = calc_level_map_core(session_vwap_value, previous_day_high, previous_day_low, structure_basis_value, structure_state)
+    [bullish_vwap_rejection, bearish_vwap_rejection, bullish_vwap_reclaim, bearish_vwap_reclaim, bearish_previous_day_high_sweep, bullish_previous_day_low_sweep, bearish_previous_day_high_failed_acceptance, bullish_previous_day_low_failed_acceptance, bullish_structure_basis_interaction, bearish_structure_basis_interaction, last_level_interaction_type, level_interaction_bars_since, level_interaction_freshness_bucket, last_level_interaction_level_type, last_level_interaction_polarity, last_level_interaction_quality_state, level_interaction_watchfulness_score] = calc_level_interactions(session_vwap_value, session_vwap_relevance_state, previous_day_high, previous_day_high_relevance_state, previous_day_low, previous_day_low_relevance_state, structure_basis_value, structure_basis_relevance_state, extension_score)
+    [fallback_participation_score, bullish_divergence, bearish_divergence, bullish_absorption_proxy, bearish_absorption_proxy] = calc_participation_fallback(DEFAULT_PARTICIPATION_RVOL_LENGTH, DEFAULT_PARTICIPATION_DIVERGENCE_THRESHOLD, DEFAULT_PARTICIPATION_ABSORPTION_WICK_THRESHOLD, DEFAULT_PARTICIPATION_USE_LTF, ltf_close, ltf_volume, ltf_change)
+    [premium_participation_score, premium_bullish_auction, premium_bearish_auction, premium_available, premium_bullish_absorption, premium_bearish_absorption, premium_bullish_trapped_aggression, premium_bearish_trapped_aggression, premium_bullish_failed_auction, premium_bearish_failed_auction, premium_bullish_acceptance, premium_bearish_acceptance, premium_bullish_reference_type, premium_bearish_reference_type] = calc_participation_footprint(DEFAULT_FOOTPRINT_ENABLE_PREMIUM, fallback_participation_score, premium_footprint_request, session_vwap_value, structure_basis_value, extension_score, DEFAULT_FOOTPRINT_REFERENCE_PROXIMITY_ATR, DEFAULT_FOOTPRINT_DELTA_PRESSURE_THRESHOLD)
+    float participation_score = premium_available and not na(premium_participation_score) ? premium_participation_score : fallback_participation_score
+    [_, oi_contribution_score, trap_support_long, trap_support_short] = calc_oi_positioning(DEFAULT_OI_ENABLE, oi_value, oi_delta, participation_score)
+    [exhaustion_score, _] = calc_exhaustion(regime_state, extension_score, extension_extreme_flag, participation_score, bullish_divergence, bearish_divergence, DEFAULT_EXHAUSTION_WICK_THRESHOLD, DEFAULT_EXHAUSTION_USE_TD_REFERENCE)
+    [effort_result_score, high_effort_poor_result_flag, weak_acceptance_flag, expansion_without_acceptance_flag, absorption_event, absorption_state, absorption_quality_score] = calc_effort_result_context(session_vwap_value, previous_day_high, previous_day_low, structure_basis_value, last_level_interaction_type, level_interaction_bars_since, level_interaction_freshness_bucket, last_level_interaction_level_type, last_level_interaction_polarity, last_level_interaction_quality_state, extension_score, fallback_participation_score, exhaustion_score, bullish_divergence, bearish_divergence, bullish_absorption_proxy, bearish_absorption_proxy)
+    [bullish_sweep, bearish_sweep, bullish_failed_breakout, bearish_failed_breakout, bullish_reclaim, bearish_reclaim, trap_event, premium_auction_event, liquidity_event_score, experimental_continuation_state, experimental_continuation_bias] = calc_liquidity_events(structure_state, structure_score, structure_basis_value, last_pivot_high, last_pivot_low, bos_up, bos_down, reclaim_ready_long, reclaim_ready_short, previous_day_high, previous_day_low, session_vwap_value, extension_score, exhaustion_score, bullish_divergence, bearish_divergence, trap_support_long, trap_support_short, premium_bullish_auction, premium_bearish_auction, DEFAULT_LIQUIDITY_RECLAIM_BUFFER_ATR, DEFAULT_LIQUIDITY_ENABLE_EXPERIMENTAL_CONTINUATION)
+    [trigger_state, _, _, _, _] = calc_triggers(regime_state, structure_state, regime_score, structure_score, mtf_alignment_score, extension_score, participation_score, oi_contribution_score, exhaustion_score, countertrend_flag, bullish_sweep, bearish_sweep, bullish_failed_breakout, bearish_failed_breakout, bullish_reclaim, bearish_reclaim, trap_event, liquidity_event_score, context_threshold, event_threshold, trigger_threshold, DEFAULT_TRIGGER_REQUIRE_EVENT, DEFAULT_LIQUIDITY_ENABLE_EXPERIMENTAL_CONTINUATION, experimental_continuation_state, experimental_continuation_bias)
+    [reversal_score, continuation_score, squeeze_score, trap_score, confidence_score_raw] = calc_composite_scores(regime_score, structure_score, mtf_alignment_score, extension_score, participation_score, oi_contribution_score, exhaustion_score, liquidity_event_score, trap_event, trigger_state, DEFAULT_COMPOSITE_WEIGHT_CONTEXT, DEFAULT_COMPOSITE_WEIGHT_EVENT, DEFAULT_COMPOSITE_WEIGHT_TRIGGER, bullish_sweep, bearish_sweep, bullish_reclaim, bearish_reclaim, DEFAULT_LIQUIDITY_ENABLE_EXPERIMENTAL_CONTINUATION, experimental_continuation_state, experimental_continuation_bias, effort_result_score, high_effort_poor_result_flag, weak_acceptance_flag, expansion_without_acceptance_flag, absorption_event, absorption_state, absorption_quality_score, last_level_interaction_type, level_interaction_freshness_bucket, last_level_interaction_level_type, last_level_interaction_quality_state, level_interaction_watchfulness_score, premium_available, premium_bullish_absorption, premium_bearish_absorption, premium_bullish_trapped_aggression, premium_bearish_trapped_aggression, premium_bullish_failed_auction, premium_bearish_failed_auction, premium_bullish_acceptance, premium_bearish_acceptance, premium_bullish_reference_type, premium_bearish_reference_type, confidence_threshold)
+    float confidence_score = confidence_score_raw
+    calc_reversal_trap_lane_summary(reversal_score, continuation_score, squeeze_score, trap_score, confidence_score, trigger_state, confidence_threshold)

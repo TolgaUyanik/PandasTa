@@ -1,0 +1,144 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0
+/// © ADXAE
+
+//@version=6
+// =============================================================================
+//  Trend Pulse OBV Strategy
+// -----------------------------------------------------------------------------
+
+strategy(title                       = "Trend Pulse OBV",
+         overlay                     = true,
+         initial_capital             = 1000,
+         default_qty_type            = strategy.percent_of_equity,
+         default_qty_value           = 33,
+         commission_type             = strategy.commission.percent,
+         commission_value            = 0.1,
+         slippage                    = 1,
+         margin_long                 = 0,
+         margin_short                = 0,
+         fill_orders_on_standard_ohlc= true,
+         calc_on_every_tick          = false,
+         calc_on_order_fills         = false,
+         use_bar_magnifier           = false,
+         process_orders_on_close     = false,
+         pyramiding                  = 1)
+
+// ──────────────────────── User inputs ────────────────────────
+startDate = input.time(timestamp("1 Jan 2018 00:00 +0000"), "Start Date",
+         tooltip = "First bar on which new entries and forced exits can fire. Indicators still warm up on earlier bars so signals are stable when trading begins.")
+endDate   = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date",
+         tooltip = "Last bar on which new entries can fire. Leave far in the future to run to the current bar.")
+inRange   = time >= startDate and time <= endDate
+
+grpT = "Trend Pulse Channel (core)"
+tpcSrc   = input.source(hlc3, "Source", group = grpT,
+         tooltip = "Price source fed into the Gaussian filter. hlc3 is the Trend Pulse default and smooths intraday noise vs. close-only.")
+tpcPoles = input.int(4, "Poles", minval = 1, maxval = 4, group = grpT,
+         tooltip = "Cascaded-EMA pole count. Higher = smoother but more lag. The Pine implementation hardcodes a ceiling of 4 to match the canonical indicator.")
+tpcPeriod= input.int(144, "Period", minval = 2, group = grpT,
+         tooltip = "Characteristic period of the filter. 144 tracks long-term trend on 1D charts (roughly five months of bars).")
+tpcMult  = input.float(1.414, "Range Multiplier", minval = 0, step = 0.1, group = grpT,
+         tooltip = "Band width in multiples of filtered true range. 1.414 (√2) is the Trend Pulse default — wide enough to filter noise yet narrow enough to catch breakouts quickly.")
+lagMode  = input.bool(true, "Lag Mode (zero-lag pre-transform)", group = grpT,
+         tooltip = "When ON, applies Ehlers' zero-lag trick x := x + (x - x[lag]) to BOTH the price source and the true-range stream BEFORE the filter. Sharpens breakout timing. Recommended ON.")
+
+grpO = "OBV confirmation filter"
+useObv   = input.bool(true, "Require OBV > EMA(OBV, N)", group = grpO,
+         tooltip = "Volume confirmation. When ON, long entries only fire if On-Balance Volume is above its own EMA — evidence that volume is pushing price up, not just price drifting through the band. This is the key v3.0 addition.")
+obvLen   = input.int(60, "OBV EMA Length", minval = 2, group = grpO,
+         active = useObv,
+         tooltip = "EMA length applied to OBV for the confirmation filter. 60 captures medium-term accumulation/distribution; shorter values (20-30) admit more false breakouts, longer values (100+) filter out too many good signals.")
+
+grpR = "Regime filter"
+useRegime= input.bool(true, "Require close > regime EMA", group = grpR,
+         tooltip = "Trend filter. When ON, long entries only fire if close is above the regime EMA. Skips breakouts that occur in clear downtrends.")
+regLen   = input.int(50, "Regime EMA Length", minval = 2, group = grpR,
+         active = useRegime,
+         tooltip = "EMA length for the regime filter. 50 balances responsiveness and trend quality on 1D crypto; longer values (100/200) filter too much, shorter values admit too much chop.")
+
+grpE = "Exit logic"
+exitOnMid    = input.bool(true, "Exit on close < TPC midline", group = grpE,
+         tooltip = "When ON, exits when price closes below the TPC filter midline (the smoothed price). Much faster than waiting for the upper band to break back down.")
+exitOnRegime = input.bool(true, "Exit on close < regime EMA", group = grpE,
+         tooltip = "When ON, exits when price closes below the regime EMA. Acts as a hard trend-break stop. Runs in parallel with the midline exit — whichever fires first wins.")
+
+grpS = "Risk — ATR stop"
+atrLen   = input.int(14, "ATR Length", minval = 1, group = grpS,
+         tooltip = "ATR lookback used to scale the stop distance. 14 is the Wilder default.")
+atrMult  = input.float(1.7, "ATR Stop Multiplier", minval = 0.1, step = 0.1, group = grpS,
+         tooltip = "Stop distance = ATR × multiplier, fixed at entry. Tightened from v2.0's 2.0 to 1.7 because the OBV filter removes weaker breakouts, so tighter risk on the remaining signals improves expectancy.")
+
+// ──────────────────────── Indicators ────────────────────────
+// True range (shared with the TPC upper-band calculation)
+trTrue   = ta.tr(true)
+
+// Lag Mode pre-transform — applied BEFORE the filter
+lagN     = int((tpcPeriod - 1) / (2 * tpcPoles))
+srcIn    = lagMode ? tpcSrc + (tpcSrc - tpcSrc[lagN]) : tpcSrc
+trIn     = lagMode ? trTrue + (trTrue - trTrue[lagN]) : trTrue
+
+// Gaussian filter constants (uses 1.414, the truncated √2, per Pine convention)
+pi       = math.asin(1) * 2
+beta     = (1 - math.cos(2 * pi / tpcPeriod)) / (math.pow(1.414, 2.0 / tpcPoles) - 1)
+alpha    = -beta + math.sqrt(beta * beta + 2 * beta)
+
+aiFilter(_src, _alpha, _poles) =>
+    int lenEma = math.max(1, int(2.0 / _alpha))
+    float r = ta.ema(_src, lenEma)
+    if _poles >= 2
+        r := ta.ema(r, lenEma)
+    if _poles >= 3
+        r := ta.ema(r, lenEma)
+    if _poles >= 4
+        r := ta.ema(r, lenEma)
+    r
+
+tpcFilt   = aiFilter(srcIn, alpha, tpcPoles)
+tpcFiltTR = aiFilter(trIn,  alpha, tpcPoles)
+tpcUpper  = tpcFilt + tpcFiltTR * tpcMult
+
+// OBV volume-confirmation filter
+obvVal    = ta.obv
+obvEMA    = ta.ema(obvVal, obvLen)
+obvOk     = useObv ? obvVal > obvEMA : true
+
+// Regime filter
+regimeMA  = ta.ema(close, regLen)
+regimeOk  = useRegime ? close > regimeMA : true
+
+// ATR-based stop — prior-bar ATR to match the Python engine's shift(1) timing
+atrVal    = ta.atr(atrLen)
+stopOffset= atrVal[1] * atrMult
+
+// ──────────────────────── Entry / Exit logic ────────────────────────
+// Entry: close crosses above the TPC upper band AND regime OK AND OBV confirming
+tpcBreakout = ta.crossover(close, tpcUpper)
+longEntry   = tpcBreakout and regimeOk and obvOk and inRange
+
+// Exit: close < TPC midline OR close < regime EMA (whichever first)
+midExit     = exitOnMid    and close < tpcFilt
+regimeExit  = exitOnRegime and useRegime and close < regimeMA
+longExit    = midExit or regimeExit
+
+// Snapshot ATR stop at entry so it stays fixed (matches engine's sl_offset)
+var float stopPrice = na
+if longEntry and strategy.position_size == 0
+    strategy.entry("long", strategy.long)
+    stopPrice := close - stopOffset
+if strategy.position_size > 0
+    strategy.exit("sl", "long", stop = stopPrice)
+if strategy.position_size == 0
+    stopPrice := na
+if longExit and strategy.position_size > 0 and inRange
+    strategy.close("long")
+
+// ──────────────────────── Plots ────────────────────────
+plot(tpcUpper,  "TPC Upper",   color.new(color.orange, 20))
+plot(tpcFilt,   "TPC Midline", color.new(color.orange, 60))
+plot(regimeMA,  "Regime EMA",  color.new(color.purple, 30))
+plotshape(longEntry and strategy.position_size == 0,
+          title = "Long Entry", style = shape.triangleup,
+          location = location.belowbar, color = color.new(color.green, 0), size = size.small)
+plotshape(longExit and strategy.position_size > 0,
+          title = "Long Exit",  style = shape.triangledown,
+          location = location.abovebar, color = color.new(color.red,   0), size = size.small)

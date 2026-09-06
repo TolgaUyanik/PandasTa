@@ -1,0 +1,226 @@
+//@version=6
+
+// @description Isotropic Coordinate System (ICS): a dimensionless price-time
+// space for scale-invariant chart geometry.
+// Vertical axis: y = ln(price) / (sigma * sqrt(lookback)), where sigma is the
+// Yang-Zhang (2000) minimum-variance, drift-independent, gap-consistent OHLC
+// volatility estimator.
+// Horizontal axis: x = sqrt(bars / lookback). Diffusion-consistent (sqrt-time
+// scaling), so that tan(theta) equals the z-score of the move and 45 degrees
+// corresponds to a move of exactly one standard deviation of the n-bar
+// log-return distribution. Assumes approximately iid returns within the sigma
+// window (the standard assumption behind sqrt-time scaling; see Danielsson
+// & Zigrand, 2006, for its known limits under vol clustering and jumps).
+// Every output (angle, length, area, centroid) is a pure dimensionless number,
+// comparable across symbols, currencies, and timeframes.
+// Reference: Yang, D. & Zhang, Q. (2000), "Drift-Independent Volatility
+// Estimation Based on High, Low, Open, and Close Prices",
+// The Journal of Business, 73(3), 477-492.
+library("ICS", overlay = false)
+
+// ─────────── Engineering rules — read before every edit ───────────
+// 1. Input-derived constants (e.g. sqrt of a length) are hoisted once
+//    with `var`. Never recompute a constant per bar or per call.
+// 2. `lookback` parameters are `simple int` by design: it enables the
+//    per-call-site `var` hoisting above. Do not weaken them to series.
+// 3. Single coordinate system. There is no mode switch; do not
+//    reintroduce one.
+// 4. Every exported function validates its inputs and returns na on
+//    failure, never a fake zero.
+
+// ───────────────────────── Constants ─────────────────────────
+
+// Numerical floor for sigma. Prevents division by zero on degenerate
+// windows (flat synthetic series, first bars of illiquid symbols).
+const float MIN_SIGMA = 1e-10
+
+// ───────────────────────── Types ─────────────────────────
+
+// @type One triangle's measurements in ICS space. All fields dimensionless.
+//       theta and dy are signed; area is always >= 0. Fields are na when
+//       inputs were invalid, so downstream stats never ingest fake zeros.
+// @field theta Signed hypotenuse angle in degrees; tan(theta) is the z-score of the move.
+// @field dy Signed Euclidean magnitude of the hypotenuse.
+// @field area Triangle area (>= 0).
+// @field centroidY Vertical centroid of the triangle.
+export type TriangleData
+    float theta     = 0.0
+    float dy        = 0.0
+    float area      = 0.0
+    float centroidY = 0.0
+
+// @type Anchors frozen at a reference bar, plus activity state.
+// @field hh Highest high at the freeze bar (world-A price units).
+// @field ll Lowest low at the freeze bar (world-A price units).
+// @field mid Geometric mean sqrt(hh * ll) at the freeze bar.
+// @field bar_x bar_index of the freeze bar.
+// @field time_x time of the freeze bar.
+// @field is_active Whether the frozen structure is currently active.
+export type FrozenAnchors
+    float hh        = 0.0
+    float ll        = 0.0
+    float mid       = 0.0
+    int   bar_x     = 0
+    int   time_x    = 0
+    bool  is_active = false
+
+// ───────────── Volatility: the vertical normalizer ─────────────
+
+// @function Yang-Zhang volatility estimator. Minimum-variance, unbiased,
+//           drift-independent, and consistent with opening gaps
+//           (Yang & Zhang, 2000). Uses the unbiased sample variance
+//           (biased = false) for both the overnight and open-to-close
+//           components, matching the estimator's unbiasedness claim.
+// @param length (simple int) Rolling window length. Must be >= 2.
+// @returns (series float) Per-bar sigma, floored at 1e-10.
+export yangZhangSigma(simple int length) =>
+    float yzOR = math.log(open / nz(close[1], open))
+    float yzCO = math.log(close / open)
+    float yzHO = math.log(high / open)
+    float yzHC = math.log(high / close)
+    float yzLO = math.log(low / open)
+    float yzLC = math.log(low / close)
+    float sqOR = ta.variance(yzOR, length, false)
+    float sqCO = ta.variance(yzCO, length, false)
+    float sqRS = ta.sma(yzHO * yzHC + yzLO * yzLC, length)
+    var float k = 0.34 / (1.34 + (length + 1.0) / math.max(length - 1.0, 1.0))
+    float sq = nz(sqOR) + k * nz(sqCO) + (1.0 - k) * nz(sqRS)
+    math.max(math.sqrt(math.max(sq, 0.0)), MIN_SIGMA)
+
+// ───────── Coordinate transforms: world A -> world X ─────────
+
+// Internal: vertical-scale divisor. `lookback` is simple, so its sqrt
+// is hoisted once per call site.
+_yDiv(float sig, simple int lookback) =>
+    var float sqrtLb = math.sqrt(math.max(float(lookback), 1.0))
+    sig * sqrtLb
+
+// @function Dimensionless horizontal coordinate, sqrt-time scaled.
+// @param bars (series int) Signed bar distance from the anchor.
+// @param lookback (simple int) Window length acting as the horizontal unit.
+// @returns (series float) Signed dimensionless x.
+export toX(int bars, simple int lookback) =>
+    var float lb = math.max(float(lookback), 1.0)
+    float lin = float(bars) / lb
+    math.sign(lin) * math.sqrt(math.abs(lin))
+
+// @function Dimensionless vertical coordinate.
+// @param price (series float) Price. Must be > 0.
+// @param sigma (series float) Yang-Zhang sigma. Must be > 1e-10.
+// @param lookback (simple int) Window length (vertical sqrt normalizer).
+// @returns (series float) Dimensionless y, or na when inputs are invalid.
+export toY(float price, float sigma, simple int lookback) =>
+    price > 0.0 and sigma > MIN_SIGMA ?
+     math.log(price) / _yDiv(sigma, lookback) : na
+
+// @function Z-score of a log-price move over n bars: dLog / (sigma * sqrt(n)).
+//           This equals tan(theta) of the same move in ICS space.
+// @param dLogPrice (series float) ln(target) - ln(anchor).
+// @param sigma (series float) Per-bar Yang-Zhang sigma. Must be > 1e-10.
+// @param bars (series int) Number of bars in the move. Must be > 0.
+// @returns (series float) The z-score, or na when inputs are invalid.
+export moveZScore(float dLogPrice, float sigma, int bars) =>
+    sigma > MIN_SIGMA and bars > 0 ?
+     dLogPrice / (sigma * math.sqrt(float(bars))) : na
+
+// ───────────────────── Triangle engines ─────────────────────
+
+// @function Right triangle between an anchor and a target, computed entirely
+//           in ICS space. Writes results in place into `td` and returns it.
+//           On invalid inputs every field is set to na, so world X never
+//           receives contaminated numbers.
+// @param td (TriangleData) Output object, updated in place.
+// @param anchorPrice (series float) Anchor price (world A). Must be > 0.
+// @param anchorBar (series int) Anchor bar_index.
+// @param targetPrice (series float) Target price (world A). Must be > 0.
+// @param targetBar (series int) Target bar_index. Must differ from anchorBar.
+// @param sig (series float) Yang-Zhang sigma. Must be > 1e-10.
+// @param lookback (simple int) Horizontal unit window.
+// @returns (TriangleData) The same `td`, for chaining.
+export triangle(TriangleData td, float anchorPrice, int anchorBar,
+     float targetPrice, int targetBar, float sig,
+     simple int lookback) =>
+    td.theta     := na
+    td.dy        := na
+    td.area      := na
+    td.centroidY := na
+    float dx = toX(targetBar - anchorBar, lookback)
+    if math.abs(dx) > 0.0 and anchorPrice > 0.0 and targetPrice > 0.0
+         and sig > MIN_SIGMA
+        float yA = toY(anchorPrice, sig, lookback)
+        float yT = toY(targetPrice, sig, lookback)
+        float vd = yT - yA
+        td.theta     := math.atan(vd / dx) * (180.0 / math.pi)
+        td.area      := 0.5 * math.abs(vd) * math.abs(dx)
+        td.centroidY := (2.0 * yA + yT) / 3.0
+        float mag    = math.sqrt(dx * dx + vd * vd)
+        td.dy        := vd >= 0.0 ? mag : -mag
+    td
+
+// @function Pin (wick) triangle with three vertices in ICS space:
+//           A = anchor, B = candle extreme, C = candle body edge.
+//           Side BC is the wick. theta = signed angle at A between AB and AC.
+//           Since xB = xC, the shoelace area reduces exactly to
+//           0.5 * |yB - yC| * |dx|.
+// @param td (TriangleData) Output object, updated in place.
+// @param anchorPrice (series float) Anchor price (hh or ll). Must be > 0.
+// @param anchorBar (series int) Anchor bar_index.
+// @param extremePrice (series float) Candle extreme (high or low). Must be > 0.
+// @param bodyPrice (series float) Candle body edge. Must be > 0.
+// @param curBar (series int) Current bar_index. Must differ from anchorBar.
+// @param sig (series float) Yang-Zhang sigma. Must be > 1e-10.
+// @param lookback (simple int) Horizontal unit window.
+// @returns (TriangleData) The same `td`, for chaining.
+export pinTriangle(TriangleData td, float anchorPrice, int anchorBar,
+     float extremePrice, float bodyPrice, int curBar, float sig,
+     simple int lookback) =>
+    td.theta     := na
+    td.dy        := na
+    td.area      := na
+    td.centroidY := na
+    float dx = toX(curBar - anchorBar, lookback)
+    if math.abs(dx) > 0.0 and anchorPrice > 0.0 and extremePrice > 0.0
+         and bodyPrice > 0.0 and sig > MIN_SIGMA
+        float yA = toY(anchorPrice,  sig, lookback)
+        float yB = toY(extremePrice, sig, lookback)
+        float yC = toY(bodyPrice,    sig, lookback)
+        float ws   = yB - yC
+        float angB = math.atan((yB - yA) / dx)
+        float angC = math.atan((yC - yA) / dx)
+        td.theta     := (angB - angC) * (180.0 / math.pi)
+        td.area      := 0.5 * math.abs(ws) * math.abs(dx)
+        td.centroidY := (yA + yB + yC) / 3.0
+        float mag    = math.sqrt(dx * dx + ws * ws)
+        td.dy        := ws >= 0.0 ? mag : -mag
+    td
+
+// @function Resets a TriangleData to na. Use when the structure is inactive,
+//           so inactive periods never enter moving averages or normalization
+//           as fake zero values.
+// @param td (TriangleData) Object to reset, updated in place.
+// @returns (TriangleData) The same `td`, for chaining.
+export zeroTri(TriangleData td) =>
+    td.theta     := na
+    td.dy        := na
+    td.area      := na
+    td.centroidY := na
+    td
+
+// ───────────────────── Demo / example usage ─────────────────────
+
+int   demoSigmaLen = input.int(23, "Sigma length", minval = 2)
+int   demoLookback = input.int(23, "Lookback",     minval = 1)
+
+float demoSigma = yangZhangSigma(demoSigmaLen)
+float demoHH    = ta.highest(high, demoLookback)
+int   demoBarX  = bar_index - demoLookback + 1
+
+var TriangleData demoTri = TriangleData.new()
+
+triangle(demoTri, demoHH, demoBarX, high, bar_index,
+     demoSigma, demoLookback)
+
+plot(demoTri.theta, "Ceiling theta", color.new(color.teal, 0))
+hline(45.0,  "+1 sigma", color.new(color.gray, 50))
+hline(-45.0, "-1 sigma", color.new(color.gray, 50))
+hline(0.0,   "Zero",     color.new(color.gray, 70))

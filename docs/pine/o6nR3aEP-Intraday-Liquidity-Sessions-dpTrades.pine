@@ -1,0 +1,307 @@
+//@version=6
+// ============================================================
+// dpTrades | Market Sessions
+// © dpTrades · EDUCATIONAL / RESEARCH ONLY. NOT FINANCIAL ADVICE.
+// ------------------------------------------------------------
+// Highlights the key trading sessions of the day (New York / London / Tokyo)
+// AND adds a session-analytics layer that plain session tools do not have:
+//   · Liquidity-sweep detection — marks when a session takes out the high or
+//     low left by its own previous session (a run on session liquidity).
+//   · Session stats table — for each session: current range, whether it is
+//     expanding or compressing vs its own recent average, directional bias,
+//     and whether it has swept its prior session's liquidity.
+// Plus the standard session drawing: range box, name label and H/L lines.
+// Works on any intraday timeframe. Hours are timezone-aware (default New York).
+// ============================================================
+indicator("Intraday Liquidity Sessions [dpTrades]", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ───────────── GENERAL ─────────────
+gG = "General"
+sStyleS   = input.string("Box + Background", "Session Style",
+     options=["Box","Outline","Background","Box + Background","Vertical Lines","Colored Candles"], group=gG,
+     tooltip="How each session is marked:\n• Box: filled high/low range\n• Outline: range border only\n• Background: full-height vertical shade\n• Box + Background: both\n• Vertical Lines: open/close separators\n• Colored Candles: tints the session's candles")
+tz        = input.string("America/New_York", "Timezone", group=gG,
+     options=["America/New_York","America/Chicago","America/Denver","America/Los_Angeles",
+              "America/Sao_Paulo","America/Mexico_City","UTC","Europe/London","Europe/Madrid",
+              "Europe/Berlin","Europe/Moscow","Asia/Dubai","Asia/Kolkata","Asia/Singapore",
+              "Asia/Hong_Kong","Asia/Tokyo","Australia/Sydney"],
+     tooltip="Timezone the session hours below are written in. Leaving it on New York keeps the sessions correct for any user worldwide.")
+boxTransp = input.int(95, "Box Transparency", minval=0, maxval=100, group=gG,
+     tooltip="0 = solid · 100 = invisible.")
+keepDays  = input.int(5, "Days To Show", minval=1, maxval=60, group=gG,
+     tooltip="Only the most recent N days are drawn. Applies to EVERYTHING (boxes, background, colored candles, vertical lines and H/L lines) so the limit is consistent across all styles.")
+
+// ───────────── SESSION ANALYTICS (the original layer) ─────────────
+gA = "Session Analytics"
+showStats  = input.bool(true,  "Session Stats Table", group=gA,
+     tooltip="Top-right panel: for each session shows its current range, whether it is Expanding or Compressing vs its own recent average, the directional bias, and whether it has swept its prior session's liquidity.")
+statsPos   = input.string("Bottom Right", "Table Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=gA)
+avgLen     = input.int(20, "Average Range Lookback (sessions)", minval=2, maxval=100, group=gA,
+     tooltip="How many past instances of each session are averaged to decide Expanding vs Compressing.")
+showSweeps = input.bool(true,  "Liquidity Sweep Markers", group=gA,
+     tooltip="Marks on the chart when a session trades through the high or low left by its own previous session — a run on session liquidity.")
+
+// ───────────── LABEL ─────────────
+gL = "Label"
+lblStyleS = input.string("Text", "Style", options=["Text","Pill"], group=gL,
+     tooltip="'Text': clean, just the name in color (minimal). 'Pill': solid capsule with white text.")
+lblPosS   = input.string("Above", "Position", options=["Above","Below","Inside"], group=gL,
+     tooltip="Where the name sits: above the box, below it, or inside the box.")
+lblSizeS  = input.string("Tiny", "Size", options=["Tiny","Small","Normal","Large"], group=gL)
+
+// ───────────── HIGH / LOW LINES ─────────────
+gH = "High/Low Lines"
+hlStyleS  = input.string("Dashed", "Style", options=["Dashed","Solid","Dotted"], group=gH)
+hlWidth   = input.int(1, "Width", minval=1, maxval=6, group=gH)
+hlExtS    = input.string("Fixed length (bars)", "Extension",
+     options=["Until next session","Fixed length (bars)","Full (right)"], group=gH,
+     tooltip="How far the high/low lines project to the right.")
+hlBars    = input.int(60, "Fixed Length (bars)", minval=5, group=gH,
+     tooltip="Only when Extension = 'Fixed length'. How many bars the line extends after the session closes.")
+
+// mappings
+lblSize     = lblSizeS == "Tiny" ? size.tiny : lblSizeS == "Small" ? size.small : lblSizeS == "Large" ? size.large : size.normal
+lblIsBottom = lblPosS == "Below"
+lblStyleObj = lblPosS == "Above" ? label.style_label_down : label.style_label_up
+hlStyle     = hlStyleS == "Solid" ? line.style_solid : hlStyleS == "Dotted" ? line.style_dotted : line.style_dashed
+isPill      = lblStyleS == "Pill"
+isFijo      = hlExtS == "Fixed length (bars)"
+isAuto      = hlExtS == "Until next session"
+lineExt     = isFijo ? extend.none : extend.right
+stBox       = sStyleS == "Box" or sStyleS == "Box + Background"
+stOutline   = sStyleS == "Outline"
+stBg        = sStyleS == "Background" or sStyleS == "Box + Background"
+stVLines    = sStyleS == "Vertical Lines"
+stCandles   = sStyleS == "Colored Candles"
+tblPos      = statsPos == "Top Left" ? position.top_left : statsPos == "Bottom Right" ? position.bottom_right : statsPos == "Bottom Left" ? position.bottom_left : position.top_right
+
+// Single time cutoff: EVERYTHING (boxes, background, candles, vertical lines and
+// H/L lines) is only drawn within the last `keepDays` days from the last bar, so
+// the "Days To Show" limit stays consistent across every style.
+int cutoffTime = last_bar_time - keepDays * 86400000
+inWindow = time >= cutoffTime
+
+// ───────────── SESSIONS ─────────────
+// Each session is its own labelled group with named fields (not a single packed row),
+// so the settings read clearly and each window is configured on its own.
+// First session — New York
+gNY    = "First Session"
+nyOn   = input.bool(true,  "Enable session",     group=gNY)
+nyName = input.string("New York", "Display name", group=gNY)
+nySess = input.session("0930-1600", "Active hours (session time)", group=gNY)
+nyCol  = input.color(#98383F, "Zone color",      group=gNY)
+nyLbl  = input.bool(true,  "Show name label",    group=gNY)
+nyHL   = input.bool(false, "Extend high / low",  group=gNY)
+// Second session — London
+gLN    = "Second Session"
+lnOn   = input.bool(true,  "Enable session",     group=gLN)
+lnName = input.string("London", "Display name",  group=gLN)
+lnSess = input.session("0300-0900", "Active hours (session time)", group=gLN)
+lnCol  = input.color(#1E466E, "Zone color",      group=gLN)
+lnLbl  = input.bool(true,  "Show name label",    group=gLN)
+lnHL   = input.bool(false, "Extend high / low",  group=gLN)
+// Third session — Tokyo
+gTK    = "Third Session"
+tkOn   = input.bool(true,  "Enable session",     group=gTK)
+tkName = input.string("Tokyo", "Display name",   group=gTK)
+tkSess = input.session("1930-0200", "Active hours (session time)", group=gTK)
+tkCol  = input.color(#563D61, "Zone color",      group=gTK)
+tkLbl  = input.bool(true,  "Show name label",    group=gTK)
+tkHL   = input.bool(false, "Extend high / low",  group=gTK)
+
+// ───────────── ENGINE (session drawing) ─────────────
+// Each session keeps its own state (var per call site). It opens the box at the
+// session start, expands the top/bottom with the running high/low, places the
+// label, and manages the H/L lines according to the chosen extension mode.
+// Only the last `keepDays` instances per session are kept on the chart.
+f_zone(bool show, string nm, string sess, color col, bool wLbl, bool wHL) =>
+    var array<box>   bxs = array.new<box>()
+    var array<label> lbs = array.new<label>()
+    var array<line>  his = array.new<line>()
+    var array<line>  los = array.new<line>()
+    var array<line>  vls = array.new<line>()
+    var box   cb  = na
+    var label cl  = na
+    var line  chi = na
+    var line  clo = na
+    bool inS   = not na(time(timeframe.period, sess, tz))
+    bool start = inS and not inS[1]
+    bool endS  = (not inS) and inS[1]
+    if show
+        if start and inWindow
+            if isAuto and not na(chi)
+                line.set_extend(chi, extend.none)
+                line.set_x2(chi, bar_index)
+                line.set_extend(clo, extend.none)
+                line.set_x2(clo, bar_index)
+            color  fillCol   = stBox     ? color.new(col, boxTransp) : color.new(col, 100)
+            color  borderCol = stOutline ? color.new(col, 20) : stBox ? color.new(col, 70) : color.new(col, 100)
+            int    borderW   = stOutline ? 2 : 1
+            cb := box.new(bar_index, high, bar_index, low,
+                 border_color=borderCol, border_width=borderW, bgcolor=fillCol)
+            array.push(bxs, cb)
+            if array.size(bxs) > keepDays
+                box.delete(array.shift(bxs))
+            if stVLines
+                line vlo = line.new(bar_index, high, bar_index, low, xloc=xloc.bar_index,
+                     extend=extend.both, color=color.new(col, 30), width=1, style=line.style_dashed)
+                array.push(vls, vlo)
+                if array.size(vls) > keepDays * 2
+                    line.delete(array.shift(vls))
+            if wLbl
+                float yA = lblIsBottom ? box.get_bottom(cb) : box.get_top(cb)
+                cl := label.new(bar_index, yA, nm, xloc=xloc.bar_index, yloc=yloc.price,
+                     color=isPill ? col : color.new(col, 100),
+                     textcolor=isPill ? color.white : col,
+                     style=lblStyleObj, size=lblSize)
+                array.push(lbs, cl)
+                if array.size(lbs) > keepDays
+                    label.delete(array.shift(lbs))
+            if wHL
+                chi := line.new(bar_index, high, bar_index, high, xloc=xloc.bar_index,
+                     color=color.new(col, 20), width=hlWidth, style=hlStyle, extend=lineExt)
+                clo := line.new(bar_index, low, bar_index, low, xloc=xloc.bar_index,
+                     color=color.new(col, 20), width=hlWidth, style=hlStyle, extend=lineExt)
+                array.push(his, chi)
+                array.push(los, clo)
+                if array.size(his) > keepDays
+                    line.delete(array.shift(his))
+                if array.size(los) > keepDays
+                    line.delete(array.shift(los))
+        else if inS and not na(cb)
+            box.set_right(cb, bar_index)
+            box.set_top(cb, math.max(box.get_top(cb), high))
+            box.set_bottom(cb, math.min(box.get_bottom(cb), low))
+            if wLbl and not na(cl)
+                label.set_x(cl, int(math.avg(box.get_left(cb), bar_index)))
+                label.set_y(cl, lblIsBottom ? box.get_bottom(cb) : box.get_top(cb))
+            if wHL and not na(chi)
+                line.set_y1(chi, box.get_top(cb))
+                line.set_y2(chi, box.get_top(cb))
+                line.set_x2(chi, bar_index)
+                line.set_y1(clo, box.get_bottom(cb))
+                line.set_y2(clo, box.get_bottom(cb))
+                line.set_x2(clo, bar_index)
+        if endS and isFijo and wHL and not na(chi)
+            line.set_x2(chi, bar_index + hlBars)
+            line.set_x2(clo, bar_index + hlBars)
+        if endS and stVLines and inWindow
+            line vlc = line.new(bar_index, high, bar_index, low, xloc=xloc.bar_index,
+                 extend=extend.both, color=color.new(col, 55), width=1, style=line.style_dotted)
+            array.push(vls, vlc)
+            if array.size(vls) > keepDays * 2
+                line.delete(array.shift(vls))
+
+f_zone(nyOn, nyName, nySess, nyCol, nyLbl, nyHL)
+f_zone(lnOn, lnName, lnSess, lnCol, lnLbl, lnHL)
+f_zone(tkOn, tkName, tkSess, tkCol, tkLbl, tkHL)
+
+// ───────────── ANALYTICS ENGINE (the original layer) ─────────────
+// Per session it tracks the running high/low, stores the previous instance's
+// high/low, measures the range and a rolling average of ranges, the directional
+// bias (close vs session open), and detects when price sweeps the prior
+// session's high or low (a run on session liquidity). Returns the stats so the
+// global scope can build the table; draws the sweep markers itself.
+f_fx(bool show, string sess, color col) =>
+    var float curHi   = na
+    var float curLo   = na
+    var float sOpen   = na
+    var float pHi     = na
+    var float pLo     = na
+    var float lastRng = na
+    var float avgR    = na
+    var int   rCount  = 0
+    var bool  swH     = false
+    var bool  swL     = false
+    var int   swState = 0
+    var array<line> swLn = array.new<line>()
+    bool inS   = show and not na(time(timeframe.period, sess, tz))
+    bool start = inS and not inS[1]
+    bool endS  = (not inS) and inS[1]
+    if start
+        curHi := high
+        curLo := low
+        sOpen := open
+    else if inS
+        curHi := math.max(curHi, high)
+        curLo := math.min(curLo, low)
+    if endS
+        pHi     := curHi
+        pLo     := curLo
+        lastRng := curHi - curLo
+        rCount  := rCount + 1
+        avgR    := na(avgR) ? lastRng : avgR + (lastRng - avgR) / math.min(rCount, avgLen)
+        swH     := false
+        swL     := false
+        swState := 0
+    if not na(pHi) and not swH and high > pHi
+        swH     := true
+        swState := 1
+        if showSweeps and inWindow
+            line ln = line.new(bar_index - 5, pHi, bar_index + 1, pHi, xloc=xloc.bar_index, color=col, width=2)
+            array.push(swLn, ln)
+            if array.size(swLn) > 16
+                line.delete(array.shift(swLn))
+    if not na(pLo) and not swL and low < pLo
+        swL     := true
+        swState := -1
+        if showSweeps and inWindow
+            line ln2 = line.new(bar_index - 5, pLo, bar_index + 1, pLo, xloc=xloc.bar_index, color=col, width=2)
+            array.push(swLn, ln2)
+            if array.size(swLn) > 16
+                line.delete(array.shift(swLn))
+    float rngNow = inS ? (curHi - curLo) : (na(lastRng) ? (curHi - curLo) : lastRng)
+    bool  biasUp = not na(sOpen) and close >= sOpen
+    [rngNow, avgR, biasUp, swState, inS]
+
+[nyR, nyA, nyB, nyS, nyInS] = f_fx(nyOn, nySess, nyCol)
+[lnR, lnA, lnB, lnS, lnInS] = f_fx(lnOn, lnSess, lnCol)
+[tkR, tkA, tkB, tkS, tkInS] = f_fx(tkOn, tkSess, tkCol)
+
+// ───────────── STATS TABLE ─────────────
+var color darkBg  = color.rgb(30, 33, 38)
+var color hdrBg   = color.rgb(24, 27, 32)
+var table sTbl = table.new(tblPos, 5, 4, border_width=1, border_color=color.new(color.gray, 80))
+
+f_statRow(int row, string nm, color col, float r, float a, bool biasUp, int s, bool live) =>
+    string rngTxt  = str.tostring(math.round(r))
+    string avgTxt  = na(a) ? "—" : (r >= a ? "Exp" : "Comp")
+    color  avgBg   = na(a) ? darkBg : (r >= a ? color.new(#1E8E5A, 25) : color.new(#98383F, 25))
+    string biasTxt = biasUp ? "▲" : "▼"
+    color  biasBg  = biasUp ? color.new(#1E8E5A, 25) : color.new(#98383F, 25)
+    string swTxt   = s == 1 ? "H swept" : s == -1 ? "L swept" : "—"
+    table.cell(sTbl, 0, row, (live ? "● " : "  ") + nm, text_color=color.white, bgcolor=color.new(col, 30), text_size=size.tiny, text_halign=text.align_left, text_font_family=font.family_monospace)
+    table.cell(sTbl, 1, row, rngTxt,  text_color=color.white, bgcolor=darkBg, text_size=size.tiny, text_font_family=font.family_monospace)
+    table.cell(sTbl, 2, row, avgTxt,  text_color=color.white, bgcolor=avgBg,  text_size=size.tiny, text_font_family=font.family_monospace)
+    table.cell(sTbl, 3, row, biasTxt, text_color=color.white, bgcolor=biasBg, text_size=size.tiny, text_font_family=font.family_monospace)
+    table.cell(sTbl, 4, row, swTxt,   text_color=color.white, bgcolor=darkBg, text_size=size.tiny, text_font_family=font.family_monospace)
+
+if showStats and barstate.islast
+    table.cell(sTbl, 0, 0, "SESSION",   text_color=color.new(color.white, 25), bgcolor=hdrBg, text_size=size.tiny, text_halign=text.align_left, text_font_family=font.family_monospace)
+    table.cell(sTbl, 1, 0, "Range",     text_color=color.new(color.white, 25), bgcolor=hdrBg, text_size=size.tiny, text_font_family=font.family_monospace)
+    table.cell(sTbl, 2, 0, "vs Avg",    text_color=color.new(color.white, 25), bgcolor=hdrBg, text_size=size.tiny, text_font_family=font.family_monospace)
+    table.cell(sTbl, 3, 0, "Bias",      text_color=color.new(color.white, 25), bgcolor=hdrBg, text_size=size.tiny, text_font_family=font.family_monospace)
+    table.cell(sTbl, 4, 0, "Liquidity", text_color=color.new(color.white, 25), bgcolor=hdrBg, text_size=size.tiny, text_font_family=font.family_monospace)
+    int row = 1
+    if nyOn
+        f_statRow(row, nyName, nyCol, nyR, nyA, nyB, nyS, nyInS)
+        row := row + 1
+    if lnOn
+        f_statRow(row, lnName, lnCol, lnR, lnA, lnB, lnS, lnInS)
+        row := row + 1
+    if tkOn
+        f_statRow(row, tkName, tkCol, tkR, tkA, tkB, tkS, tkInS)
+        row := row + 1
+
+// ───────────── BACKGROUND & CANDLE STYLES (global scope) ─────────────
+inNY = nyOn and not na(time(timeframe.period, nySess, tz))
+inLN = lnOn and not na(time(timeframe.period, lnSess, tz))
+inTK = tkOn and not na(time(timeframe.period, tkSess, tz))
+
+bgcolor(stBg and inWindow and inNY ? color.new(nyCol, boxTransp) : na, title="New York Background")
+bgcolor(stBg and inWindow and inLN ? color.new(lnCol, boxTransp) : na, title="London Background")
+bgcolor(stBg and inWindow and inTK ? color.new(tkCol, boxTransp) : na, title="Tokyo Background")
+
+color candleCol = stCandles and inWindow ? (inNY ? nyCol : inLN ? lnCol : inTK ? tkCol : na) : na
+barcolor(candleCol, title="Session Candles")

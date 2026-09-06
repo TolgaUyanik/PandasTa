@@ -1,0 +1,176 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © bluealgocapital
+
+//@version=6
+strategy("Fractal Memory Strategy [Jayadev Rana]", "FMP Strat", overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, commission_type = strategy.commission.percent, commission_value = 0.01, slippage = 2, pyramiding = 0, process_orders_on_close = true, margin_long = 100, margin_short = 100, calc_on_every_tick = false, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+gFC   = "Forecast"
+showGhost = input.bool(true, "Show Ghost Candles", group = gFC)
+winLen    = input.int(30, "Pattern Window (bars)", minval = 10, maxval = 60, group = gFC)
+scanDepth = input.int(750, "Scan Depth (bars)", minval = 200, maxval = 2000, group = gFC)
+fcLen     = input.int(50, "Forecast Length (candles)", minval = 10, maxval = 100, group = gFC)
+ghostUpCol = input.color(color.new(#26a69a, 72), "Ghost Up", inline = "gc", group = gFC)
+ghostDnCol = input.color(color.new(#ef5350, 72), "Ghost Down", inline = "gc", group = gFC)
+
+gSig  = "Entries & Exits"
+tradeDirIn = input.string("Both", "Trade Direction", options = ["Both", "Long only", "Short only"], group = gSig)
+atrLen    = input.int(14, "ATR Length", minval = 2, group = gSig)
+trailMult = input.float(4.0, "Trail Stop (ATR x)", minval = 0.5, step = 0.1, group = gSig)
+needAgree = input.bool(true, "Require Forecast Agreement", group = gSig)
+slMult    = input.float(1.5, "Stop Loss (R x)", minval = 0.2, step = 0.1, group = gSig)
+tp1Pct    = input.int(33, "TP1 Exit %", minval = 5, maxval = 90, group = gSig)
+tp2Pct    = input.int(33, "TP2 Exit %", minval = 5, maxval = 90, group = gSig)
+
+gUI   = "Panel"
+showPanel = input.bool(true, "Show Panel", group = gUI)
+panelPos  = input.string("Top Right", "Panel Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = gUI)
+
+atr      = ta.atr(atrLen)
+volRank  = ta.percentrank(atr, 200) / 100
+volTxt   = volRank > 0.7 ? "High" : volRank < 0.3 ? "Low" : "Normal"
+unitR    = atr * (1.2 + volRank)
+
+var float trail = na
+var int   dir   = 1
+upStop = close - atr * trailMult
+dnStop = close + atr * trailMult
+trail := dir == 1 ? math.max(nz(trail, upStop), upStop) : math.min(nz(trail, dnStop), dnStop)
+newDir = dir == 1 and close < trail ? -1 : dir == -1 and close > trail ? 1 : dir
+flipUp = newDir == 1 and dir == -1
+flipDn = newDir == -1 and dir == 1
+if flipUp
+    trail := upStop
+if flipDn
+    trail := dnStop
+dir := newDir
+
+ret = math.log(close / close[1])
+retSd = ta.stdev(ret, winLen)
+max_bars_back(ret, 2200)
+max_bars_back(atr, 2200)
+
+var box[]  gBodies = array.new<box>()
+var line[] gWicks  = array.new<line>()
+var float  matchQ   = na
+var int    matchAge = na
+var int    fcDir    = 0
+
+filtDepth = math.min(scanDepth, 300)
+fcAgreeDir = 0
+if (flipUp or flipDn) and bar_index > winLen + fcLen + filtDepth
+    curSd0 = nz(retSd, 1e-10) + 1e-10
+    bErr = 1e20
+    bOff = -1
+    for j = fcLen + 1 to filtDepth
+        e = 0.0
+        for k = 0 to winLen - 1
+            d = nz(ret[k]) / curSd0 - nz(ret[j + k]) / curSd0
+            e := e + d * d
+        if e < bErr
+            bErr := e
+            bOff := j
+    if bOff > 0
+        s = 0.0
+        for i = 1 to fcLen
+            s := s + nz(ret[bOff - i])
+        fcAgreeDir := s > 0 ? 1 : -1
+
+if barstate.islast
+    for b in gBodies
+        box.delete(b)
+    for w in gWicks
+        line.delete(w)
+    array.clear(gBodies)
+    array.clear(gWicks)
+    maxScan = math.min(scanDepth, bar_index - winLen - fcLen - 1)
+    if maxScan > winLen + fcLen
+        curSd = nz(retSd, 1e-10) + 1e-10
+        bestErr = 1e20
+        bestOff = -1
+        for j = fcLen + 1 to maxScan
+            err = 0.0
+            for k = 0 to winLen - 1
+                d = nz(ret[k]) / curSd - nz(ret[j + k]) / curSd
+                err := err + d * d
+            if err < bestErr
+                bestErr := err
+                bestOff := j
+        if bestOff > 0
+            matchAge := bestOff
+            matchQ   := math.max(0, 100 - math.sqrt(bestErr / winLen) * 100)
+            mAtr = nz(atr[bestOff], atr) + 1e-10
+            scaleF = atr / mAtr
+            pc = close
+            for i = 1 to fcLen
+                idx = bestOff - i
+                ro = nz(ret[idx]) * scaleF
+                o = pc
+                c = pc * math.exp(ro)
+                hiRaw = math.max(o, c) * (1 + nz(math.abs(ret[idx])) * 0.35 * scaleF)
+                loRaw = math.min(o, c) * (1 - nz(math.abs(ret[idx])) * 0.35 * scaleF)
+                up = c >= o
+                if showGhost
+                    array.push(gBodies, box.new(bar_index + i, math.max(o, c), bar_index + i, math.min(o, c), border_color = up ? ghostUpCol : ghostDnCol, border_width = 2, bgcolor = up ? ghostUpCol : ghostDnCol))
+                    array.push(gWicks, line.new(bar_index + i, hiRaw, bar_index + i, loRaw, color = up ? ghostUpCol : ghostDnCol, width = 1))
+                pc := c
+            fcDir := pc > close ? 1 : -1
+
+allowLong  = tradeDirIn != "Short only"
+allowShort = tradeDirIn != "Long only"
+agreeUp = not needAgree or fcAgreeDir >= 0
+agreeDn = not needAgree or fcAgreeDir <= 0
+
+longSig  = flipUp and agreeUp and allowLong
+shortSig = flipDn and agreeDn and allowShort
+
+if longSig
+    strategy.close("Short", comment = "Flip")
+    strategy.entry("Long", strategy.long)
+    eP = close
+    strategy.exit("L-TP1", "Long", qty_percent = tp1Pct, limit = eP + unitR, stop = eP - unitR * slMult)
+    strategy.exit("L-TP2", "Long", qty_percent = tp2Pct, limit = eP + unitR * 2, stop = eP - unitR * slMult)
+    strategy.exit("L-TP3", "Long", limit = eP + unitR * 3, stop = eP - unitR * slMult)
+    label.new(bar_index, low, "BUY", style = label.style_label_up, color = color.new(#26a69a, 0), textcolor = color.white, size = size.small)
+if shortSig
+    strategy.close("Long", comment = "Flip")
+    strategy.entry("Short", strategy.short)
+    eP = close
+    strategy.exit("S-TP1", "Short", qty_percent = tp1Pct, limit = eP - unitR, stop = eP + unitR * slMult)
+    strategy.exit("S-TP2", "Short", qty_percent = tp2Pct, limit = eP - unitR * 2, stop = eP + unitR * slMult)
+    strategy.exit("S-TP3", "Short", limit = eP - unitR * 3, stop = eP + unitR * slMult)
+    label.new(bar_index, high, "SELL", style = label.style_label_down, color = color.new(#ef5350, 0), textcolor = color.white, size = size.small)
+
+plot(trail, "Trail Stop", color = dir == 1 ? color.new(#26a69a, 55) : color.new(#ef5350, 55), style = plot.style_linebr)
+
+if longSig
+    alert("FMP strategy long entry", alert.freq_once_per_bar_close)
+if shortSig
+    alert("FMP strategy short entry", alert.freq_once_per_bar_close)
+
+f_pos(s) =>
+    switch s
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        => position.bottom_left
+
+GOLD  = color.new(#c9a227, 0)
+INK   = color.new(#131722, 0)
+CLEAR = color.new(color.white, 100)
+
+var table pan = table.new(f_pos(panelPos), 2, 6, bgcolor = CLEAR, border_color = GOLD, border_width = 1, frame_color = GOLD, frame_width = 1)
+
+if barstate.islast and showPanel
+    winRate = strategy.closedtrades > 0 ? 100 * strategy.wintrades / strategy.closedtrades : 0
+    table.cell(pan, 0, 0, "FMP", text_color = INK, text_size = size.small)
+    table.cell(pan, 1, 0, "Memory Strategy 🔮", text_color = INK, text_size = size.small)
+    table.cell(pan, 0, 1, "Match", text_color = INK, text_size = size.small)
+    table.cell(pan, 1, 1, na(matchQ) ? "…" : str.tostring(matchQ, "#.#") + " %", text_color = INK, text_size = size.small)
+    table.cell(pan, 0, 2, "Volatility", text_color = INK, text_size = size.small)
+    table.cell(pan, 1, 2, volTxt, text_color = volRank > 0.7 ? color.new(#ef5350, 0) : volRank < 0.3 ? color.new(#26a69a, 0) : INK, text_size = size.small)
+    table.cell(pan, 0, 3, "Forecast", text_color = INK, text_size = size.small)
+    table.cell(pan, 1, 3, fcDir > 0 ? "Up ▲" : fcDir < 0 ? "Down ▼" : "…", text_color = fcDir > 0 ? color.new(#26a69a, 0) : color.new(#ef5350, 0), text_size = size.small)
+    table.cell(pan, 0, 4, "Trades", text_color = INK, text_size = size.small)
+    table.cell(pan, 1, 4, str.tostring(strategy.closedtrades), text_color = INK, text_size = size.small)
+    table.cell(pan, 0, 5, "Win rate", text_color = INK, text_size = size.small)
+    table.cell(pan, 1, 5, str.tostring(winRate, "#.#") + " %", text_color = winRate >= 50 ? color.new(#26a69a, 0) : color.new(#ef5350, 0), text_size = size.small)

@@ -1,0 +1,346 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © YOUR_TV_USERNAME
+//
+// OBS Volume Spike Reaction Fade [NQ]
+// Mean-reversion strategy that fades extreme volume-spike bars ("reaction bars").
+// When a bar prints with abnormally high volume AND an abnormally wide range,
+// symmetric limit orders are placed just beyond both extremes and the snap-back
+// toward the middle of the bar is traded. First-fill-wins: the first sweet spot
+// touched takes the trade, the opposite limit is cancelled (OCA group), and the
+// reaction bar is locked after exit so a rebound cannot re-arm a second fill.
+// Designed and tested on NQ futures, 1-minute chart.
+//@version=6
+strategy("OBS Volume Spike Reaction Fade [NQ]",
+     shorttitle="OBS",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     pyramiding=1,            // first-fill-wins: only one leg can be live per reaction bar
+     calc_on_every_tick=false,
+     process_orders_on_close=false,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=1.50,
+     slippage=1,
+     // v6 defaults margin to 100% (fully cash-backed) which rejects every
+     // futures order; 5% approximates CME initial margin for NQ.
+     margin_long=5,
+     margin_short=5)
+
+// =====================================================================
+// INPUTS
+// =====================================================================
+grpSig   = "Signal Detection"
+volMult  = input.float(3.0, "Volume Spike x SMA20 (RTH)", minval=1.5, step=0.1, group=grpSig)
+volMultET= input.float(5.0, "Volume Spike x SMA20 (ETH)", minval=1.5, step=0.1, group=grpSig)
+minRange = input.float(20, "Min Reaction Range (pts)", minval=0, step=1, group=grpSig,
+     tooltip="Gate A: absolute minimum bar range.")
+useOvershootFilter = input.bool(true, "Use Range Overshoot Filter", group=grpSig,
+     tooltip="When enabled (default), require bar range >= rangeMult x prior-30 avg range. Turn off to drop the overshoot gate entirely (more signals, lower edge per trade).")
+rangeMult = input.float(3.0, "Min Range x SMA30 (overshoot filter)", minval=0.0, step=0.1, group=grpSig,
+     tooltip="Only used when 'Use Range Overshoot Filter' is on. Bar range must be at least this x the average range of the prior 30 bars. This relative gate is what separates a genuine exhaustion bar from ordinary volatility.")
+clusterN = input.int(3, "Cluster Filter - Skip if Spike in Prior N Bars", minval=0, maxval=10, group=grpSig)
+useBodyFilter = input.bool(false, "Only ROCKET or INDECISION bars (body% filter)", group=grpSig,
+     tooltip="When enabled, require body% > rocket threshold OR body% < indecision threshold, skipping ordinary bars in between.")
+rocketThresh = input.float(85.0, "ROCKET body% threshold (>)", minval=50, maxval=100, step=1, group=grpSig)
+indecThresh  = input.float(30.0, "INDECISION body% threshold (<)", minval=0,  maxval=50,  step=1, group=grpSig)
+
+grpTrade = "Trade Geometry"
+geomMode = input.string("Default", "Geometry preset",
+     options=["Default", "Aggressive", "Custom"], group=grpTrade,
+     tooltip="Default: stop 1.25x range beyond the extreme, target at the bar midpoint." +
+     " Aggressive: stop 1.75x range, target 0.25x range into the bar - historically a higher win rate" +
+     " and smoother curve, but it risks more per trade to make the same; the extra win rate buys" +
+     " smoothness, not money. Custom: use the three inputs below. NOTE: Aggressive backtests on 1-min" +
+     " bars need Bar Magnifier - without it the Strategy Tester overstates close-target results.")
+entryMult = input.float(0.25, "Entry - sweet spot multiple (x range)", minval=0.1, step=0.05, group=grpTrade,
+     tooltip="L25/H25 sweet spots. Entry below low / above high by this x range. Used by Default & Custom.")
+stopMult  = input.float(1.00, "Stop - distance beyond entry (x range)", minval=0.25, step=0.05, group=grpTrade,
+     tooltip="A wide 1R stop gives the mean-reversion room to work; tighter stops tend to bail out of trades that would have recovered. Used by Default & Custom.")
+tgtFrac   = input.float(0.50, "Target - depth into bar (x range, 0.5 = MID)", minval=0.05, maxval=1.0, step=0.05, group=grpTrade,
+     tooltip="Distance of the target INTO the reaction bar from the faded extreme. 0.50 = bar midpoint (Default preset)," +
+     " 0.25 = Aggressive preset target. Only used when Geometry preset = Custom.")
+enableLong  = input.bool(true, "Enable LONG leg (buy L25 -> target)",  group=grpTrade)
+enableShort = input.bool(true, "Enable SHORT leg (sell H25 -> target)", group=grpTrade)
+orderTTLmin = input.int(60, "Order TTL (minutes)", minval=5, maxval=240, group=grpTrade,
+     tooltip="Cancel unfilled limit orders after this many minutes.")
+
+grpFib   = "Static Level Filter (Gate B - AVOID or BOOST)"
+fibMode  = input.string("avoid", "Level filter mode", options=["off","avoid","boost"], group=grpFib,
+     tooltip="avoid = skip if entry is within tolerance of a confluence level (entries straight into a strong level behave differently). boost = require level proximity to fire. off = ignore levels. The levels are static, calibrated for NQ over Oct 2025 - Apr 2026; set to off outside that range or on other symbols.")
+fibTol   = input.float(5.0, "Level tolerance (pts)", minval=0.25, step=0.25, group=grpFib)
+
+grpTime  = "Time Filters"
+skipAsia = input.bool(true,  "Skip Asia KZ (19:00 CT -> 00:59 CT)",  group=grpTime, tooltip="Historically poor for this setup.")
+skipLondon=input.bool(true,  "Skip London KZ (1:00-4:00 CT)",  group=grpTime)
+skipNews = input.bool(false, "Skip News Windows (7:25-7:40 & 12:55-13:35 CT)", group=grpTime, tooltip="Default OFF: this setup is designed to fade news-driven overshoots, so news windows are included.")
+skipRthOC= input.bool(true,  "Skip Session Edges +/-10 min (8:30, 15:00, 16:00, 17:00 CT)", group=grpTime,
+     tooltip="Skips a 21-min window around each session boundary. 17:00 CT = 6 PM ET Globex reopen (always a structural volume spike).")
+
+grpRegime= "Regime"
+useRegime= input.bool(false, "Skip BEAR regime", group=grpRegime,
+     tooltip="Optional trend-regime filter: skip signals while price is below its ~5-day average and that average is falling. Drops a share of trades in exchange for avoiding the historically weakest regime.")
+
+grpViz   = "Visualization"
+showSpike= input.bool(true, "Show reaction bar signal", group=grpViz)
+showLevels=input.bool(true, "Show entry/stop/target levels", group=grpViz)
+showSuperFibs = input.bool(false, "Plot static confluence levels", group=grpViz,
+     tooltip="May be noisy; use for visual confluence.")
+
+// =====================================================================
+// STATIC CONFLUENCE LEVELS
+// Multi-timeframe Fibonacci confluence levels for NQ, generated externally
+// from daily + weekly retracements over Oct 2025 - Apr 2026; only levels
+// that recurred across anchors (count >= 2) are kept. Static by design -
+// they go stale outside that window. See the script description.
+// =====================================================================
+var float[] superFibLevels = array.from(22137.25, 22288.62, 22772.75, 23425.88, 23488.00, 23802.25, 23954.69, 24043.00, 24158.25, 24173.50, 24209.06, 24322.75, 24376.25, 24380.75, 24391.75, 24446.00, 24502.75, 24505.50, 24537.00, 24602.75, 24635.62, 24656.56, 24667.81, 24726.75, 24746.50, 24750.75, 24757.50, 25062.19, 25197.62, 25245.00, 25294.50, 25323.12, 25354.50, 25488.75, 25542.75, 25708.00, 25733.25, 25798.75, 25981.25, 26086.56, 26160.25, 26170.25, 26178.25, 26212.75, 26251.50, 26341.88, 26461.75, 26462.75, 26546.75, 26620.25, 26672.00, 26692.44, 26768.44, 26896.75, 27000.88, 27044.50, 27165.12, 27188.00, 27195.00, 27339.25, 27536.25, 27674.00, 27816.12, 28060.25, 28449.88, 28476.38, 19707.50, 21953.75, 22116.00, 22432.50, 22439.00, 22709.25, 22782.00, 22921.50, 23328.50, 23385.00, 23515.00, 23735.50, 23739.75, 23926.00, 23936.88, 23986.50, 24009.00, 24026.38, 24444.00, 24636.25, 24793.00, 24949.25, 24966.00, 24989.00, 25046.25, 25158.38, 25419.75, 25463.00, 25768.62, 25793.00, 25834.75, 25892.75, 25902.00, 25936.50, 25946.25, 26066.25, 26118.00, 26193.00, 26222.50, 26349.00, 26381.00, 26443.75, 26455.50, 26459.50, 26507.75, 26596.25, 26630.00, 26655.25, 26682.50, 26816.75, 26889.75, 27129.00, 27238.38, 27321.75, 27398.50, 27445.62, 27486.88, 27573.75, 27795.00, 28551.94)
+
+// =====================================================================
+// INDICATORS & TIME CONTEXT
+// =====================================================================
+volSMA20 = ta.sma(volume, 20)
+atr14    = ta.atr(14)
+// Overshoot filter baseline: prior-30 average bar range (shifted so current bar not self-compared)
+avgRangePrev30 = ta.sma(high - low, 30)[1]
+
+ctHour = hour(time, "America/Chicago")
+ctMin  = minute(time, "America/Chicago")
+ctTotalMin = ctHour * 60 + ctMin
+
+isAsia   = ctTotalMin >= 19*60 or ctTotalMin < 1*60
+isLondon = ctTotalMin >= 1*60  and ctTotalMin < 4*60
+isNewsA  = ctTotalMin >= 7*60+25  and ctTotalMin <= 7*60+40
+isNewsB  = ctTotalMin >= 12*60+55 and ctTotalMin <= 13*60+35
+isRTH      = ctTotalMin >= 8*60+30 and ctTotalMin < 15*60
+// Session edges +/-10 min: RTH open (8:30), RTH close (15:00), Globex close (16:00), Globex reopen/6 PM ET (17:00)
+edgeBuf = 10
+nearEdge = (math.abs(ctTotalMin - (8*60+30)) <= edgeBuf) or (math.abs(ctTotalMin - 15*60) <= edgeBuf) or (math.abs(ctTotalMin - 16*60) <= edgeBuf) or (math.abs(ctTotalMin - 17*60) <= edgeBuf)
+
+timeFilterOK = not (skipAsia and isAsia) and not (skipLondon and isLondon) and not (skipNews and (isNewsA or isNewsB)) and not (skipRthOC and nearEdge)
+
+// Regime: simple — is today's close > close[-5 days]?
+regimeBar = 5 * 390   // ~5 trading days of 1-min bars (approx on higher TFs too)
+sma5 = ta.sma(close, regimeBar)
+isBearRegime = close < sma5 and not ta.rising(sma5, 2)
+regimeOK = not (useRegime and isBearRegime)
+
+// =====================================================================
+// LEVEL PROXIMITY HELPER
+// =====================================================================
+nearSuperFib(price, tol) =>
+    found = false
+    matched = float(na)
+    bestD = tol + 1.0
+    n = array.size(superFibLevels)
+    for i = 0 to n - 1
+        lvl = array.get(superFibLevels, i)
+        d = math.abs(lvl - price)
+        if d <= tol and d < bestD
+            found := true
+            matched := lvl
+            bestD := d
+    [found, matched]
+
+// =====================================================================
+// SIGNAL DETECTION
+// =====================================================================
+barRange  = high - low
+volThresh = isRTH ? volMult * volSMA20 : volMultET * volSMA20
+isVolSpike = volume >= volThresh
+
+// Range gate: absolute minimum is always enforced; the relative
+// (rangeMult x prior-30) overshoot gate is conditional on useOvershootFilter.
+passMinRange  = barRange >= minRange
+passOvershoot = not useOvershootFilter or (not na(avgRangePrev30) and avgRangePrev30 > 0 and barRange >= rangeMult * avgRangePrev30)
+passRange     = passMinRange and passOvershoot
+
+// Cluster filter
+clustered = false
+if clusterN > 0
+    for i = 1 to clusterN
+        if volume[i] >= (isRTH ? volMult * volSMA20[i] : volMultET * volSMA20[i])
+            clustered := true
+
+// Body% filter (optional): only ROCKET (>rocketThresh) or INDECISION (<indecThresh) bars
+bodyPct  = barRange > 0 ? math.abs(close - open) / barRange * 100 : 0.0
+isRocket = bodyPct > rocketThresh
+isIndec  = bodyPct < indecThresh
+bodyOK   = not useBodyFilter or isRocket or isIndec
+
+isReactionBar = isVolSpike and passRange and not clustered and timeFilterOK and regimeOK and bodyOK
+
+// Effective geometry — preset resolution (preset values are hard-coded so a
+// stray input tweak can't silently change a preset; Custom uses the inputs).
+//   effE: entry offset beyond the extreme (x range)
+//   effStopBeyond: stop distance beyond the extreme (x range); risk = effStopBeyond - effE
+//   effTgtFrac: target depth INTO the bar from the faded extreme (x range); 0.5 = MID
+effE          = geomMode == "Aggressive" ? 0.25 : entryMult
+effStopBeyond = geomMode == "Aggressive" ? 1.75 : entryMult + stopMult
+effTgtFrac    = geomMode == "Aggressive" ? 0.25 : geomMode == "Custom" ? tgtFrac : 0.50
+
+// Sweet-spot levels (targets are per-side: at 0.5 both collapse to MID)
+entryL25 = low  - effE * barRange
+entryH25 = high + effE * barRange
+stopL    = low  - effStopBeyond * barRange
+stopH    = high + effStopBeyond * barRange
+tgtLong  = low  + effTgtFrac * barRange
+tgtShort = high - effTgtFrac * barRange
+
+// Level gate applied per leg
+// Auto-disable the level filter on MNQ: baked-in levels were generated from the
+// NQ continuous contract. NQ and MNQ share the same underlying but their
+// back-adjusted continuous series drift; levels can be off by a few to 20+ pts.
+// Cleaner to disable the filter than to use stale levels.
+tickerLower = str.lower(syminfo.ticker)
+rootLower   = str.lower(syminfo.root)
+isMNQsymbol = str.contains(tickerLower, "mnq") or str.contains(rootLower, "mnq")
+effectiveFibMode = isMNQsymbol and fibMode != "off" ? "off" : fibMode
+
+[longNearSF,  longSFlvl]  = nearSuperFib(entryL25, fibTol)
+[shortNearSF, shortSFlvl] = nearSuperFib(entryH25, fibTol)
+
+longFibOK  = effectiveFibMode == "off" ? true : effectiveFibMode == "avoid" ? not longNearSF  : longNearSF
+shortFibOK = effectiveFibMode == "off" ? true : effectiveFibMode == "avoid" ? not shortNearSF : shortNearSF
+
+// On-chart warning label when the level filter was auto-disabled due to MNQ symbol
+var label mnqWarnLabel = na
+if barstate.islast and isMNQsymbol and fibMode != "off"
+    label.delete(mnqWarnLabel)
+    mnqWarnLabel := label.new(bar_index, high, "Level filter auto-disabled on MNQ\n(levels calibrated for NQ)", color=color.new(color.orange, 80), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// "One reaction candle = one trade" guard. OCA cancel (below) handles the
+// same-bar dual-fill race atomically. This counter-based flag is the
+// belt-and-suspenders: if ANY trade has opened or closed since the most
+// recent reaction bar armed the setup, suppress any further entries until
+// the NEXT reaction bar fires. Prevents re-arming the same reaction's
+// sweet spots if the prior cleanup logic ever misses an edge case.
+var int  setupClosedAtArm = 0
+var int  setupOpenedAtArm = 0
+var bool setupConsumed    = false
+
+isReactionAny = isReactionBar and (longFibOK or shortFibOK)
+if isReactionAny
+    setupClosedAtArm := strategy.closedtrades
+    setupOpenedAtArm := strategy.opentrades
+    setupConsumed    := false
+if (strategy.closedtrades > setupClosedAtArm) or (strategy.opentrades > setupOpenedAtArm)
+    setupConsumed := true
+
+fireLong  = isReactionBar and enableLong  and longFibOK  and not setupConsumed
+fireShort = isReactionBar and enableShort and shortFibOK and not setupConsumed
+
+// =====================================================================
+// ORDERS (limit with TTL via strategy.cancel)
+// =====================================================================
+var float pendLongEntry  = na
+var float pendLongStop   = na
+var float pendLongTgt    = na
+var int   pendLongBar    = na
+var float pendShortEntry = na
+var float pendShortStop  = na
+var float pendShortTgt   = na
+var int   pendShortBar   = na
+
+// OCA cancel grouping: TradingView atomically cancels the unfilled leg the
+// instant the other one fills (including intrabar). This is the ONLY way to
+// guarantee "one reaction candle = one trade" — an end-of-bar cleanup
+// misses two cases: (a) a wide subsequent bar touching both sweet spots →
+// long fills then short reverses, (b) fill-and-stop on the same 1-min bar →
+// position_size[1]==0 AND position_size==0 at bar close, so the cleanup
+// condition never matches and the opposite leg's limit stays alive.
+if fireLong
+    pendLongEntry := entryL25
+    pendLongStop  := stopL
+    pendLongTgt   := tgtLong
+    pendLongBar   := bar_index
+    strategy.entry("OBS_LONG", strategy.long, limit=entryL25, oca_name="OBS_RXN", oca_type=strategy.oca.cancel, comment="OBS long L25")
+
+if fireShort
+    pendShortEntry := entryH25
+    pendShortStop  := stopH
+    pendShortTgt   := tgtShort
+    pendShortBar   := bar_index
+    strategy.entry("OBS_SHORT", strategy.short, limit=entryH25, oca_name="OBS_RXN", oca_type=strategy.oca.cancel, comment="OBS short H25")
+
+// Attach exits (stop + target) as soon as position is open
+if strategy.position_size > 0
+    strategy.exit("OBS_LONG_X", from_entry="OBS_LONG", stop=pendLongStop, limit=pendLongTgt)
+
+if strategy.position_size < 0
+    strategy.exit("OBS_SHORT_X", from_entry="OBS_SHORT", stop=pendShortStop, limit=pendShortTgt)
+
+// First-fill-wins: when one leg opens, cancel the opposite resting limit.
+// When the filled position closes (target or stop), hard-cancel both so the
+// reaction bar cannot re-arm a second trade within the TTL window.
+var bool setupLocked = false
+
+if strategy.position_size[1] == 0 and strategy.position_size > 0
+    strategy.cancel("OBS_SHORT")
+    pendShortEntry := na
+    pendShortBar := na
+    setupLocked := true
+
+if strategy.position_size[1] == 0 and strategy.position_size < 0
+    strategy.cancel("OBS_LONG")
+    pendLongEntry := na
+    pendLongBar := na
+    setupLocked := true
+
+if strategy.position_size[1] != 0 and strategy.position_size == 0 and setupLocked
+    strategy.cancel("OBS_LONG")
+    strategy.cancel("OBS_SHORT")
+    pendLongEntry := na
+    pendLongBar := na
+    pendShortEntry := na
+    pendShortBar := na
+    setupLocked := false
+
+// A fresh reaction bar re-arms the setup (new fireLong/fireShort overwrote
+// the pend* vars above, so just release the lock).
+if fireLong or fireShort
+    setupLocked := false
+
+// TTL: cancel unfilled limits after N bars (assumes chart TF is 1-min; scale accordingly)
+if not na(pendLongBar) and (bar_index - pendLongBar) > orderTTLmin and strategy.position_size <= 0
+    strategy.cancel("OBS_LONG")
+    pendLongEntry := na
+    pendLongBar := na
+
+if not na(pendShortBar) and (bar_index - pendShortBar) > orderTTLmin and strategy.position_size >= 0
+    strategy.cancel("OBS_SHORT")
+    pendShortEntry := na
+    pendShortBar := na
+
+// =====================================================================
+// VISUALIZATION
+// =====================================================================
+plotshape(showSpike and fireLong  and fireShort, title="OBS Both",  style=shape.triangledown, location=location.abovebar, color=color.new(color.aqua, 0),    size=size.small, text="OBS")
+plotshape(showSpike and fireLong  and not fireShort, title="OBS Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),   size=size.small, text="L25")
+plotshape(showSpike and fireShort and not fireLong,  title="OBS Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),     size=size.small, text="H25")
+
+bgcolor(showSpike and (fireLong or fireShort) ? color.new(color.yellow, 88) : na, title="Signal highlight")
+
+livePos = strategy.opentrades > 0 or not na(pendLongEntry) or not na(pendShortEntry)
+
+plot(showLevels and not na(pendLongEntry)  ? pendLongEntry  : na, title="LONG entry",  color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+plot(showLevels and not na(pendLongEntry)  ? pendLongStop   : na, title="LONG stop",   color=color.new(color.red,   0), linewidth=1, style=plot.style_linebr)
+plot(showLevels and not na(pendShortEntry) ? pendShortEntry : na, title="SHORT entry", color=color.new(color.red,   0), linewidth=2, style=plot.style_linebr)
+plot(showLevels and not na(pendShortEntry) ? pendShortStop  : na, title="SHORT stop",  color=color.new(color.maroon,0), linewidth=1, style=plot.style_linebr)
+plot(showLevels and not na(pendLongEntry)  ? pendLongTgt  : na, title="LONG target",  color=color.new(color.blue, 0), linewidth=2, style=plot.style_linebr)
+plot(showLevels and not na(pendShortEntry) ? pendShortTgt : na, title="SHORT target", color=color.new(color.navy, 0), linewidth=2, style=plot.style_linebr)
+
+// Static confluence level plotting (optional, may be noisy)
+plotSfArray(show) =>
+    if show and barstate.islast
+        n = array.size(superFibLevels)
+        for i = 0 to n - 1
+            lvl = array.get(superFibLevels, i)
+            line.new(bar_index[50], lvl, bar_index, lvl, color=color.new(color.gray, 60), width=1, extend=extend.right)
+plotSfArray(showSuperFibs)
+
+// =====================================================================
+// ALERTS
+// =====================================================================
+alertcondition(fireLong,  "OBS LONG",  "OBS long signal - buy limit at L25; stop/target per the selected Geometry preset (Default: MID target / Aggressive: 0.25-into-bar target, 1.75 stop)")
+alertcondition(fireShort, "OBS SHORT", "OBS short signal - sell limit at H25; stop/target per the selected Geometry preset (Default: MID target / Aggressive: 0.25-into-bar target, 1.75 stop)")

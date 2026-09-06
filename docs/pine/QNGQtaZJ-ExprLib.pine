@@ -1,0 +1,3671 @@
+// MIT License
+//
+// Copyright (c) 2026 Liubomyr Boiko
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Project version: 1.0.0
+
+//@version=6
+//@description Library for parsing and evaluating custom expressions.
+library("ExprLib", overlay = true)
+
+
+
+// =================
+//     [ Model ]
+// =================
+
+f(string str) =>
+    int count = 0
+    string result = str
+    while not na(str.pos(result, "{}"))
+        result := str.replace(result, "{}", "{" + str.tostring(count) + "}")
+        count += 1
+    result
+
+throwException(string message, string prefix = "") =>
+    runtime.error(prefix + message)
+
+toBool(float value) =>
+    not na(value) and value != 0.0
+
+toNum(bool value) =>
+    value ? 1.0 : 0.0
+
+
+const int TOKEN_PAYLOAD_MULT = 100000000
+const int TOKEN_FUNC_ARG_PAYLOAD_MULT = 1000
+const int MAX_FUNC_ARGS = 999
+
+const int TOKEN_GROUP_VARIABLE = 1
+const int TOKEN_GROUP_LOGICAL = 2
+const int TOKEN_GROUP_CMP = 3
+const int TOKEN_GROUP_ARITH = 4
+const int TOKEN_GROUP_UNARY = 5
+const int TOKEN_GROUP_PARENTH = 6
+const int TOKEN_GROUP_TERNARY = 7
+const int TOKEN_GROUP_FUNCTION = 8
+const int TOKEN_GROUP_COMMA = 9
+
+const int TOKEN_VARIABLE            = TOKEN_GROUP_VARIABLE  * TOKEN_PAYLOAD_MULT        // Variable
+const int TOKEN_LOGICAL_AND         = TOKEN_GROUP_LOGICAL   * TOKEN_PAYLOAD_MULT + 1    // Logical operator "AND"
+const int TOKEN_LOGICAL_OR          = TOKEN_GROUP_LOGICAL   * TOKEN_PAYLOAD_MULT + 2    // Logical operator "OR"
+const int TOKEN_LOGICAL_NOT         = TOKEN_GROUP_LOGICAL   * TOKEN_PAYLOAD_MULT + 3    // Logical operator "NOT"
+const int TOKEN_CMP_GREATER         = TOKEN_GROUP_CMP       * TOKEN_PAYLOAD_MULT + 1    // Comparison operator ">"
+const int TOKEN_CMP_LESS            = TOKEN_GROUP_CMP       * TOKEN_PAYLOAD_MULT + 2    // Comparison operator "<"
+const int TOKEN_CMP_GREATER_EQ      = TOKEN_GROUP_CMP       * TOKEN_PAYLOAD_MULT + 3    // Comparison operator ">="
+const int TOKEN_CMP_LESS_EQ         = TOKEN_GROUP_CMP       * TOKEN_PAYLOAD_MULT + 4    // Comparison operator "<="
+const int TOKEN_CMP_EQ              = TOKEN_GROUP_CMP       * TOKEN_PAYLOAD_MULT + 5    // Comparison operator "=="
+const int TOKEN_CMP_NOT_EQ          = TOKEN_GROUP_CMP       * TOKEN_PAYLOAD_MULT + 6    // Comparison operator "!="
+const int TOKEN_ARITH_ADD           = TOKEN_GROUP_ARITH     * TOKEN_PAYLOAD_MULT + 1    // Arithmetic operator "+"
+const int TOKEN_ARITH_SUBTRACT      = TOKEN_GROUP_ARITH     * TOKEN_PAYLOAD_MULT + 2    // Arithmetic operator "-"
+const int TOKEN_ARITH_MULTIPLY      = TOKEN_GROUP_ARITH     * TOKEN_PAYLOAD_MULT + 3    // Arithmetic operator "*"
+const int TOKEN_ARITH_DIVIDE        = TOKEN_GROUP_ARITH     * TOKEN_PAYLOAD_MULT + 4    // Arithmetic operator "/"
+const int TOKEN_ARITH_MODULO        = TOKEN_GROUP_ARITH     * TOKEN_PAYLOAD_MULT + 5    // Arithmetic operator "%"
+const int TOKEN_UNARY_MINUS         = TOKEN_GROUP_UNARY     * TOKEN_PAYLOAD_MULT + 1    // Unary minus
+const int TOKEN_UNARY_PLUS          = TOKEN_GROUP_UNARY     * TOKEN_PAYLOAD_MULT + 2    // Unary plus
+const int TOKEN_PARENTH_LEFT        = TOKEN_GROUP_PARENTH   * TOKEN_PAYLOAD_MULT + 1    // Open parenthesis "("
+const int TOKEN_PARENTH_RIGHT       = TOKEN_GROUP_PARENTH   * TOKEN_PAYLOAD_MULT + 2    // Close parenthesis ")"
+const int TOKEN_TERNARY_QUESTION    = TOKEN_GROUP_TERNARY   * TOKEN_PAYLOAD_MULT + 1    // Ternary operator question mark "?"
+const int TOKEN_TERNARY_COLON       = TOKEN_GROUP_TERNARY   * TOKEN_PAYLOAD_MULT + 2    // Ternary operator colon ":"
+const int TOKEN_TERNARY             = TOKEN_GROUP_TERNARY   * TOKEN_PAYLOAD_MULT + 3    // Ternary operator "?:"
+const int TOKEN_FUNCTION            = TOKEN_GROUP_FUNCTION  * TOKEN_PAYLOAD_MULT        // Function call
+const int TOKEN_COMMA               = TOKEN_GROUP_COMMA     * TOKEN_PAYLOAD_MULT + 1    // Comma
+
+
+//@type             Error that occurred during expression parsing.
+//@field message    Error message.
+//@field index      Character index where the parser detected the error.
+export type ParseError
+    string message
+    int index
+
+
+//@enum     Represents evaluation error reason.
+export enum EvaluationErrorReason
+    DIVISION_BY_ZERO
+
+//@type                 Error that occurred during expression evaluation.
+//@field reason         Error reason.
+//@field message        Error message.
+export type EvaluationError
+    EvaluationErrorReason reason
+    string message
+
+//@type             Parsed expression.
+export type Expression
+    array<int> tokens
+    map<string, int> variableIdMap
+    array<float> values             // Variable values
+    array<float> defValues          // Variable default values (constant values + unassigned variables)
+    array<float> operandStack       // Pre-allocated operand "stack" to reuse in evaluation
+
+newExpression() =>
+    Expression.new(
+            tokens = array.new<int>(),
+            variableIdMap = map.new<string, int>(),
+            values = array.new<float>(),
+            defValues = array.new<float>(),
+            operandStack = array.new<float>())
+
+type TokenizeError
+    string message
+    int index
+
+type TokenizeResult
+    bool isSuccessful
+    Expression expression
+    TokenizeError error = na
+
+failTokenizeResult(TokenizeResult result, string message, int index) =>
+    result.isSuccessful := false
+    result.expression := na
+    result.error := TokenizeError.new(message, index)
+
+
+
+readChar(array<string> chars, int index) =>
+    index >= 0 and index < chars.size() ? chars.get(index) : na
+
+isSpaceChar(string ch) =>
+    ch == " " or ch == "\t" or ch == "\n"
+
+isDigitChar(string ch) =>
+    str.contains("0123456789", ch)
+
+isLetterChar(string ch) =>
+    str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
+
+isIdentifierStartChar(string ch) =>
+    isLetterChar(ch) or ch == "_"
+
+isIdentifierChar(string ch) =>
+    isLetterChar(ch) or isDigitChar(ch) or ch == "_"
+
+parseNumber(string numStr) =>
+    exponentIndex = str.pos(str.upper(numStr), "E")
+    if na(exponentIndex)
+        str.tonumber(numStr)
+    else
+        coefficient = str.tonumber(str.substring(numStr, 0, exponentIndex))
+        exponent = str.tonumber(str.substring(numStr, exponentIndex + 1, str.length(numStr)))
+        na(coefficient) or na(exponent) ? na : coefficient * math.pow(10, exponent)
+
+
+craftVariableToken(int variableId) =>
+    TOKEN_VARIABLE + variableId
+
+craftFunctionToken(int functionId, int numArgs) =>
+    TOKEN_FUNCTION + functionId * TOKEN_FUNC_ARG_PAYLOAD_MULT + numArgs
+
+getTokenVariableId(int token) =>
+    token - TOKEN_VARIABLE
+
+getTokenFunctionId(int token) =>
+    int((token - TOKEN_FUNCTION) / TOKEN_FUNC_ARG_PAYLOAD_MULT)
+
+getTokenFunctionNumArgs(int token) =>
+    (token - TOKEN_FUNCTION) % TOKEN_FUNC_ARG_PAYLOAD_MULT
+
+isVariableToken(int token) =>
+    int(token / TOKEN_PAYLOAD_MULT) == TOKEN_GROUP_VARIABLE
+
+isFunctionToken(int token) =>
+    int(token / TOKEN_PAYLOAD_MULT) == TOKEN_GROUP_FUNCTION
+
+isOperatorToken(int token) =>
+    token == TOKEN_LOGICAL_AND
+           or token == TOKEN_LOGICAL_OR
+           or token == TOKEN_LOGICAL_NOT
+           or token == TOKEN_CMP_GREATER
+           or token == TOKEN_CMP_LESS
+           or token == TOKEN_CMP_GREATER_EQ
+           or token == TOKEN_CMP_LESS_EQ
+           or token == TOKEN_CMP_EQ
+           or token == TOKEN_CMP_NOT_EQ
+           or token == TOKEN_ARITH_ADD
+           or token == TOKEN_ARITH_SUBTRACT
+           or token == TOKEN_ARITH_MULTIPLY
+           or token == TOKEN_ARITH_DIVIDE
+           or token == TOKEN_ARITH_MODULO
+           or token == TOKEN_UNARY_MINUS
+           or token == TOKEN_UNARY_PLUS
+           or token == TOKEN_TERNARY_QUESTION
+           or token == TOKEN_TERNARY
+
+isUnaryOperatorToken(int token) =>
+    token == TOKEN_LOGICAL_NOT
+           or token == TOKEN_UNARY_MINUS
+           or token == TOKEN_UNARY_PLUS
+
+isRightAssociative(int token) =>
+    token == TOKEN_LOGICAL_NOT
+           or token == TOKEN_UNARY_MINUS
+           or token == TOKEN_UNARY_PLUS
+           or token == TOKEN_TERNARY_QUESTION
+           or token == TOKEN_TERNARY
+
+isLeftAssociative(int token) =>
+    not isRightAssociative(token)
+
+getOperatorPrecedence(int token) =>
+    prec = switch token
+        // Unary
+        TOKEN_UNARY_MINUS => 7
+        TOKEN_UNARY_PLUS => 7
+        TOKEN_LOGICAL_NOT => 7
+
+        // Multiplicative
+        TOKEN_ARITH_MULTIPLY => 6
+        TOKEN_ARITH_DIVIDE => 6
+        TOKEN_ARITH_MODULO => 6
+
+        // Additive
+        TOKEN_ARITH_ADD => 5
+        TOKEN_ARITH_SUBTRACT => 5
+
+        // Relational
+        TOKEN_CMP_GREATER => 4
+        TOKEN_CMP_LESS => 4
+        TOKEN_CMP_GREATER_EQ => 4
+        TOKEN_CMP_LESS_EQ => 4
+
+        // Equality
+        TOKEN_CMP_EQ => 3
+        TOKEN_CMP_NOT_EQ => 3
+
+        // Logical AND
+        TOKEN_LOGICAL_AND => 2
+
+        // Logical OR
+        TOKEN_LOGICAL_OR => 1
+
+        // Ternary
+        TOKEN_TERNARY_QUESTION => 0
+        TOKEN_TERNARY => 0
+
+        // Undefined
+        => -1
+
+    if prec == -1
+        throwException("Unknown token: " + str.tostring(token))
+
+    prec
+
+tokenToString(int token) =>
+    tokenGroup = int(token / TOKEN_PAYLOAD_MULT)
+    switch tokenGroup
+        TOKEN_GROUP_VARIABLE => "<variable>"
+        TOKEN_GROUP_LOGICAL =>
+            switch token
+                TOKEN_LOGICAL_AND => "AND"
+                TOKEN_LOGICAL_OR => "OR"
+                TOKEN_LOGICAL_NOT => "NOT"
+                => "?"
+        TOKEN_GROUP_CMP =>
+            switch token
+                TOKEN_CMP_GREATER => ">"
+                TOKEN_CMP_LESS => "<"
+                TOKEN_CMP_GREATER_EQ => ">="
+                TOKEN_CMP_LESS_EQ => "<="
+                TOKEN_CMP_EQ => "=="
+                TOKEN_CMP_NOT_EQ => "!="
+                => "?"
+        TOKEN_GROUP_ARITH =>
+            switch token
+                TOKEN_ARITH_ADD => "+"
+                TOKEN_ARITH_SUBTRACT => "-"
+                TOKEN_ARITH_MULTIPLY => "*"
+                TOKEN_ARITH_DIVIDE => "/"
+                TOKEN_ARITH_MODULO => "%"
+                => "?"
+        TOKEN_GROUP_UNARY =>
+            switch token
+                TOKEN_UNARY_MINUS => "-"
+                TOKEN_UNARY_PLUS => "+"
+                => "?"
+        TOKEN_GROUP_PARENTH =>
+            switch token
+                TOKEN_PARENTH_LEFT => "("
+                TOKEN_PARENTH_RIGHT => ")"
+                => "?"
+        TOKEN_GROUP_TERNARY =>
+            switch token
+                TOKEN_TERNARY_QUESTION => "?"
+                TOKEN_TERNARY_COLON => ":"
+                TOKEN_TERNARY => "?:"
+                => "?"
+        TOKEN_GROUP_FUNCTION => "<function>"
+        TOKEN_GROUP_COMMA => ","
+        => "?"
+
+
+//@type                 Expression constant pool.
+export type ExpressionConstantPool
+    map<string, float> constants
+
+//@function             Creates an expression constant pool.
+//@returns              Expression constant pool.
+export createConstantPool() =>
+    ExpressionConstantPool.new(map.new<string, float>())
+
+//@function             Assigns a numeric constant value.
+//@param pool           Expression constant pool.
+//@param identifier     Constant name.
+//@param value          Value.
+//@returns              This expression constant pool.
+export method set(ExpressionConstantPool pool, string identifier, float value) =>
+    pool.constants.put(identifier, value)
+    pool
+
+//@function             Assigns a boolean constant value.
+//@param pool           Expression constant pool.
+//@param identifier     Constant name.
+//@param value          Value.
+//@returns              This expression constant pool.
+export method set(ExpressionConstantPool pool, string identifier, bool value) =>
+    pool.set(identifier, toNum(value))
+
+//@function             Clears all constants.
+//@param pool           Expression constant pool.
+//@returns              This expression constant pool.
+export method clear(ExpressionConstantPool pool) =>
+    pool.constants.clear()
+    pool
+
+method contains(ExpressionConstantPool pool, string identifier) =>
+    pool.constants.contains(identifier)
+
+method get(ExpressionConstantPool pool, string identifier) =>
+    pool.constants.get(identifier)
+
+createDefaultConstantPool() =>
+    pool = createConstantPool()
+    pool.set("true", true)
+    pool.set("false", false)
+    pool.set("na", na)
+    pool.set("pi", math.pi)
+    pool.set("e", math.e)
+    pool.set("phi", math.phi)
+    pool.set("rphi", math.rphi)
+    pool
+
+
+// Important:
+// - Function IDs must reflect their index in `ExpressionParser.funcs` array.
+const int FUNC_VOID = 0
+const int FUNC_NA = 1
+const int FUNC_NZ = 2
+const int FUNC_MAX = 3
+const int FUNC_MIN = 4
+const int FUNC_POW = 5
+const int FUNC_SQRT = 6
+const int FUNC_CLAMP = 7
+const int FUNC_ABS = 8
+const int FUNC_CEIL = 9
+const int FUNC_FLOOR = 10
+const int FUNC_ROUND = 11
+const int FUNC_ROUND_TO_MINTICK = 12
+const int FUNC_LOG = 13
+const int FUNC_LOG10 = 14
+const int FUNC_SIGN = 15
+const int FUNC_COS = 16
+const int FUNC_SIN = 17
+const int FUNC_TAN = 18
+const int FUNC_ACOS = 19
+const int FUNC_ASIN = 20
+const int FUNC_ATAN = 21
+const int FUNC_TO_DEGREES = 22
+const int FUNC_TO_RADIANS = 23
+const int FUNC_RANDOM = 24
+const int FUNC_RANDOM_INT = 25
+const int FUNC_RANDOM_BOOL = 26
+
+
+//@type             Represents an expression function specification.
+//@field id         Function ID.
+//@field name       Function name.
+//@field minArgs    Minimum number of accepted arguments.
+//@field maxArgs    Maximum number of accepted arguments. Negative value means unlimited.
+export type FunctionSpec
+    int id
+    string name
+    int minArgs
+    int maxArgs
+
+createFunctionSpec(int id, string name, int minArgs, int maxArgs) =>
+    FunctionSpec.new(id, name, minArgs, maxArgs)
+
+registerFunctionSpec(array<FunctionSpec> funcs, int id, string name, int minArgs, int maxArgs) =>
+    if id != funcs.size()
+        throwException("Function ID doesn't match its index in array")
+    funcSpec = createFunctionSpec(id, name, minArgs, maxArgs)
+    funcs.push(funcSpec)
+
+
+//@type                         Expression parser.
+//@field isParsed               `true` if the last parse completed successfully, `false` otherwise.
+//@field error                  Error from the last parse attempt. If the last parse was successful, then this field is `na`.
+export type ExpressionParser
+    bool isParsed
+    ParseError error
+    ExpressionConstantPool defaultConstantPool
+    array<FunctionSpec> funcs
+
+//@function         Creates an expression parser.
+//@returns          Expression parser.
+export createExpressionParser() =>
+    parser = ExpressionParser.new(
+            isParsed = true,
+            error = na,
+            defaultConstantPool = createDefaultConstantPool(),
+            funcs = array.new<FunctionSpec>())
+
+    registerFunctionSpec(parser.funcs, FUNC_VOID, "void", 0, 0)
+    registerFunctionSpec(parser.funcs, FUNC_NA, "na", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_NZ, "nz", 2, 2)
+    registerFunctionSpec(parser.funcs, FUNC_MAX, "max", 2, MAX_FUNC_ARGS)
+    registerFunctionSpec(parser.funcs, FUNC_MIN, "min", 2, MAX_FUNC_ARGS)
+    registerFunctionSpec(parser.funcs, FUNC_POW, "pow", 2, 2)
+    registerFunctionSpec(parser.funcs, FUNC_SQRT, "sqrt", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_CLAMP, "clamp", 3, 3)
+    registerFunctionSpec(parser.funcs, FUNC_ABS, "abs", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_CEIL, "ceil", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_FLOOR, "floor", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_ROUND, "round", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_ROUND_TO_MINTICK, "round_to_mintick", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_LOG, "log", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_LOG10, "log10", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_SIGN, "sign", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_COS, "cos", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_SIN, "sin", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_TAN, "tan", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_ACOS, "acos", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_ASIN, "asin", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_ATAN, "atan", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_TO_DEGREES, "deg", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_TO_RADIANS, "rad", 1, 1)
+    registerFunctionSpec(parser.funcs, FUNC_RANDOM, "random", 0, 3)
+    registerFunctionSpec(parser.funcs, FUNC_RANDOM_INT, "random_int", 2, 3)
+    registerFunctionSpec(parser.funcs, FUNC_RANDOM_BOOL, "random_bool", 0, 1)
+
+    parser
+
+
+//@type                             Expression evaluator.
+//@field isEvaluated                `true` if the last evaluation completed successfully, `false` otherwise.
+//@field error                      Error from the last evaluation attempt. If the last evaluation was successful, then this field is `na`.
+//@field result                     Numeric result of the last evaluation.
+//@field boolResult                 Boolean result of the last evaluation.
+//@field isFailOnDivisionByZero     If `true`, division or modulo by zero fails evaluation. If `false`, it produces `na`.
+export type ExpressionEvaluator
+    bool isEvaluated
+    EvaluationError error
+    float result
+    bool boolResult
+    bool isFailOnDivisionByZero
+
+//@function         Creates an expression evaluator.
+//@returns          Expression evaluator.
+export createExpressionEvaluator() =>
+    ExpressionEvaluator.new(isFailOnDivisionByZero = true)
+
+//@function         Sets whether division or modulo by zero should fail evaluation.
+//@param evaluator  Expression evaluator.
+//@param value      If `true`, division or modulo by zero fails evaluation. If `false`, it produces `na`.
+//@returns          This expression evaluator.
+export method setFailOnDivisionByZero(ExpressionEvaluator evaluator, bool value) =>
+    evaluator.isFailOnDivisionByZero := value
+    evaluator
+
+failEvaluation(ExpressionEvaluator evaluator, EvaluationErrorReason reason, string message) =>
+    evaluator.isEvaluated := false
+    evaluator.error := EvaluationError.new(reason, message)
+
+
+getFunctionId(string _symbol, array<FunctionSpec> funcs) =>
+    id = -1
+    for [i, funcSpec] in funcs
+        if funcSpec.name == _symbol
+            id := i
+            break
+    id
+
+isFunctionNumArgsValid(FunctionSpec funcSpec, int numArgs) =>
+    minArgs = funcSpec.minArgs
+    maxArgs = funcSpec.maxArgs
+    numArgs >= minArgs and (maxArgs < 0 or numArgs <= maxArgs)
+
+getFunctionArityErrorMessage(FunctionSpec funcSpec, int numArgs) =>
+    minArgs = funcSpec.minArgs
+    maxArgs = funcSpec.maxArgs
+    argumentRange = minArgs == maxArgs
+           ? str.tostring(minArgs)
+           : (maxArgs < 0
+                   ? "at least " + str.tostring(minArgs)
+                   : str.tostring(minArgs) + " to " + str.tostring(maxArgs))
+    str.format(
+        f("Function \"{}\" expects {} arguments, got {}"),
+        funcSpec.name, argumentRange, numArgs)
+
+
+checkOperatorExpected(TokenizeResult result, bool isOperandExpected, int index) =>
+    isPassed = true
+    if isOperandExpected
+        failTokenizeResult(result, "Expected operand at index " + str.tostring(index), index)
+        isPassed := false
+    isPassed
+
+checkOperandExpected(TokenizeResult result, bool isOperandExpected, int index) =>
+    isPassed = true
+    if not isOperandExpected
+        failTokenizeResult(result, "Expected operator at index " + str.tostring(index), index)
+        isPassed := false
+    isPassed
+
+
+tokenizeExpression(ExpressionParser parser, string exprStr, ExpressionConstantPool constantPool) =>
+    expr = newExpression()
+    result = TokenizeResult.new(true, expr)
+
+    exprChars = not na(exprStr) and str.length(exprStr) > 0 ? str.split(exprStr, "") : array.new<string>()
+    exprLength = exprChars.size()
+
+    isOperandExpected = true
+    int numOpenedParenth = 0
+    ternaryParenthLevels = array.new<int>()
+
+    functionParenthLevels = array.new<int>()
+    functionIdStack = array.new<int>()
+    functionCommaCountStack = array.new<int>()
+    functionTokenIndexStack = array.new<int>()
+    int pendingFunctionId = na
+    int pendingFunctionTokenIndex = na
+
+    int i = 0
+    while result.isSuccessful and i < exprLength
+        ch = exprChars.get(i)
+
+        if isSpaceChar(ch)
+            i += 1
+        else if isDigitChar(ch) or ch == "."
+            // Handle:
+            // - Constants
+
+            if not checkOperandExpected(result, isOperandExpected, i)
+                break
+
+            numStartIndex = i
+            numStr = ""
+
+            while i < exprLength
+                chx = exprChars.get(i)
+                if isDigitChar(chx) or chx == "."
+                    numStr += chx
+                    i += 1
+                else
+                    break
+
+            // Read scientific notation exponent
+            chx = readChar(exprChars, i)
+            if chx == "E" or chx == "e"
+                numStr += chx
+                i += 1
+                chx := readChar(exprChars, i)
+
+                if chx == "+" or chx == "-"
+                    numStr += chx
+                    i += 1
+                    chx := readChar(exprChars, i)
+
+                while not na(chx) and isDigitChar(chx)
+                    numStr += chx
+                    i += 1
+                    chx := readChar(exprChars, i)
+
+            // ---
+            numVal = parseNumber(numStr)
+            if na(numVal)
+                failTokenizeResult(result, "Invalid number '" + numStr + "' at index " + str.tostring(numStartIndex), numStartIndex)
+                break
+
+            variableId = expr.values.size()
+            expr.values.push(numVal)
+            expr.defValues.push(numVal)
+            expr.tokens.push(craftVariableToken(variableId))
+
+            isOperandExpected := false
+        else if isIdentifierStartChar(ch)
+            // Handle:
+            // - Logical operators (AND, OR, NOT)
+            // - Named constants
+            // - Functions
+            // - Variables
+
+            identifierStartIndex = i
+            _symbol = ""
+            while i < exprLength and isIdentifierChar(exprChars.get(i))
+                _symbol += exprChars.get(i)
+                i += 1
+
+            symbolUpper = str.upper(_symbol)
+            isFunctionCall = i < exprLength and exprChars.get(i) == "("
+
+            if symbolUpper == "AND"
+                if not checkOperatorExpected(result, isOperandExpected, identifierStartIndex)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_AND)
+                isOperandExpected := true
+            else if symbolUpper == "OR"
+                if not checkOperatorExpected(result, isOperandExpected, identifierStartIndex)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_OR)
+                isOperandExpected := true
+            else if symbolUpper == "NOT"
+                if not checkOperandExpected(result, isOperandExpected, identifierStartIndex)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_NOT)
+            else
+                if not checkOperandExpected(result, isOperandExpected, identifierStartIndex)
+                    break
+
+                if isFunctionCall
+                    functionId = getFunctionId(_symbol, parser.funcs)
+                    if functionId >= 0
+                        // Push now with 0 arguments; modify later when the number of arguments is known.
+                        expr.tokens.push(craftFunctionToken(functionId, 0))
+                        pendingFunctionId := functionId
+                        pendingFunctionTokenIndex := expr.tokens.size() - 1
+                    else
+                        failTokenizeResult(result, "Unknown function '" + _symbol + "' at index " + str.tostring(identifierStartIndex), identifierStartIndex)
+                        break
+                else
+                    variableId = expr.variableIdMap.get(_symbol)
+                    if na(variableId)
+                        // Register new variable.
+                        // Give it constant value if available, else fallback to 'na'.
+                        float value = na
+                        if not na(constantPool) and constantPool.contains(_symbol)
+                            value := constantPool.get(_symbol)
+                        else if parser.defaultConstantPool.contains(_symbol)
+                            value := parser.defaultConstantPool.get(_symbol)
+
+                        variableId := expr.values.size()
+                        expr.variableIdMap.put(_symbol, variableId)
+                        expr.values.push(value)
+                        expr.defValues.push(value)
+
+                    expr.tokens.push(craftVariableToken(variableId))
+                    isOperandExpected := false
+        else
+            // Handle:
+            // - Comparison operators (<, >, <=, >=, ==, !=)
+            // - Logical operators (&, &&, |, ||, !)
+            // - Arithmetic operators (+, -, *, /, %)
+            // - Ternary operators
+            // - Function argument separators
+            // - Parentheses
+
+            nextCh = i + 1 < exprLength ? exprChars.get(i + 1) : ""
+
+            if ch == ">" and nextCh == "="
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_CMP_GREATER_EQ)
+                i += 2
+                isOperandExpected := true
+            else if ch == "<" and nextCh == "="
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_CMP_LESS_EQ)
+                i += 2
+                isOperandExpected := true
+            else if ch == "=" and nextCh == "="
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_CMP_EQ)
+                i += 2
+                isOperandExpected := true
+            else if ch == "!" and nextCh == "="
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_CMP_NOT_EQ)
+                i += 2
+                isOperandExpected := true
+            else if ch == "&" and nextCh == "&"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_AND)
+                i += 2
+                isOperandExpected := true
+            else if ch == "|" and nextCh == "|"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_OR)
+                i += 2
+                isOperandExpected := true
+            else if ch == ">"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_CMP_GREATER)
+                i += 1
+                isOperandExpected := true
+            else if ch == "<"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_CMP_LESS)
+                i += 1
+                isOperandExpected := true
+            else if ch == "&"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_AND)
+                i += 1
+                isOperandExpected := true
+            else if ch == "|"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_OR)
+                i += 1
+                isOperandExpected := true
+            else if ch == "!"
+                if not checkOperandExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_LOGICAL_NOT)
+                i += 1
+            else if ch == "+"
+                if isOperandExpected
+                    expr.tokens.push(TOKEN_UNARY_PLUS)
+                else
+                    expr.tokens.push(TOKEN_ARITH_ADD)
+                    isOperandExpected := true
+                i += 1
+            else if ch == "-"
+                if isOperandExpected
+                    expr.tokens.push(TOKEN_UNARY_MINUS)
+                else
+                    expr.tokens.push(TOKEN_ARITH_SUBTRACT)
+                    isOperandExpected := true
+                i += 1
+            else if ch == "*"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_ARITH_MULTIPLY)
+                i += 1
+                isOperandExpected := true
+            else if ch == "/"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_ARITH_DIVIDE)
+                i += 1
+                isOperandExpected := true
+            else if ch == "%"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_ARITH_MODULO)
+                i += 1
+                isOperandExpected := true
+            else if ch == "?"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_TERNARY_QUESTION)
+                ternaryParenthLevels.push(numOpenedParenth)
+                i += 1
+                isOperandExpected := true
+            else if ch == ":"
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                if ternaryParenthLevels.size() <= 0 or ternaryParenthLevels.last() != numOpenedParenth
+                    failTokenizeResult(result, "Unexpected ':' at index " + str.tostring(i), i)
+                    break
+                expr.tokens.push(TOKEN_TERNARY_COLON)
+                ternaryParenthLevels.pop()
+                i += 1
+                isOperandExpected := true
+            else if ch == ","
+                if not checkOperatorExpected(result, isOperandExpected, i)
+                    break
+                if functionParenthLevels.size() == 0 or functionParenthLevels.last() != numOpenedParenth
+                    failTokenizeResult(result, "Unexpected ',' at index " + str.tostring(i), i)
+                    break
+                if ternaryParenthLevels.size() > 0 and ternaryParenthLevels.last() == numOpenedParenth
+                    failTokenizeResult(result, "Expected ':' before ',' at index " + str.tostring(i), i)
+                    break
+                expr.tokens.push(TOKEN_COMMA)
+                functionCommaCountStack.set(functionCommaCountStack.size() - 1, functionCommaCountStack.last() + 1)
+                i += 1
+                isOperandExpected := true
+            else if ch == "("
+                if not checkOperandExpected(result, isOperandExpected, i)
+                    break
+                expr.tokens.push(TOKEN_PARENTH_LEFT)
+                numOpenedParenth += 1
+                if not na(pendingFunctionId)
+                    functionParenthLevels.push(numOpenedParenth)
+                    functionIdStack.push(pendingFunctionId)
+                    functionCommaCountStack.push(0)
+                    functionTokenIndexStack.push(pendingFunctionTokenIndex)
+                    pendingFunctionId := na
+                    pendingFunctionTokenIndex := na
+                i += 1
+            else if ch == ")"
+                if numOpenedParenth <= 0
+                    failTokenizeResult(result, "Unmatched ')' at index " + str.tostring(i), i)
+                    break
+
+                if ternaryParenthLevels.size() > 0 and ternaryParenthLevels.last() == numOpenedParenth
+                    failTokenizeResult(result, "Expected ':' before ')' at index " + str.tostring(i), i)
+                    break
+
+                isFunctionParenthClose = functionParenthLevels.size() > 0 and functionParenthLevels.last() == numOpenedParenth
+                isEmptyFunctionClose = isFunctionParenthClose and expr.tokens.size() > 0 and expr.tokens.last() == TOKEN_PARENTH_LEFT
+
+                if isOperandExpected and not isEmptyFunctionClose
+                    failTokenizeResult(result, "Expected operand at index " + str.tostring(i), i)
+                    break
+
+                if isFunctionParenthClose
+                    functionParenthLevels.pop()
+                    functionId = functionIdStack.pop()
+                    numArgs = functionCommaCountStack.pop() + (isOperandExpected ? 0 : 1)
+                    funcSpec = parser.funcs.get(functionId)
+                    if not isFunctionNumArgsValid(funcSpec, numArgs)
+                        failTokenizeResult(result, getFunctionArityErrorMessage(funcSpec, numArgs) + " at index " + str.tostring(i), i)
+                        break
+
+                    // Now that we know the number of arguments, modify the function token payload.
+                    functionTokenIndex = functionTokenIndexStack.pop()
+                    expr.tokens.set(functionTokenIndex, craftFunctionToken(functionId, numArgs))
+
+                expr.tokens.push(TOKEN_PARENTH_RIGHT)
+                numOpenedParenth -= 1
+                i += 1
+                isOperandExpected := false
+            else
+                failTokenizeResult(result, "Unexpected character '" + ch + "' at index " + str.tostring(i), i)
+                break
+
+    // Notes:
+    // - For non-closed empty zero-arg functions ('func(') operand is expected, but we should report missing ')'.
+    // - Arrays `expr.tokens` and `functionIdStack` are guaranted to be non-empty with `functionParenthLevels`.
+    isEmptyValidFunctionAtTheEnd = functionParenthLevels.size() > 0
+           and functionParenthLevels.last() == numOpenedParenth
+           and expr.tokens.last() == TOKEN_PARENTH_LEFT
+           and isFunctionNumArgsValid(parser.funcs.get(functionIdStack.last()), 0)
+
+    // ---
+    if result.isSuccessful and expr.tokens.size() > 0 and isOperandExpected and not isEmptyValidFunctionAtTheEnd
+        failTokenizeResult(result, "Expected operand at index " + str.tostring(exprLength), exprLength)
+
+    if result.isSuccessful and ternaryParenthLevels.size() > 0
+        failTokenizeResult(result, "Expected ':' at index " + str.tostring(exprLength), exprLength)
+
+    if result.isSuccessful and numOpenedParenth > 0
+        failTokenizeResult(result, "Expected ')' at index " + str.tostring(exprLength), exprLength)
+
+    result
+
+
+pushOperatorByPrecedence(int token, array<int> operatorStack, Expression rpnExpr) =>
+    tokenPrec = getOperatorPrecedence(token)
+
+    while operatorStack.size() > 0
+        stackToken = operatorStack.last()
+        if isOperatorToken(stackToken)
+            stackTokenPrec = getOperatorPrecedence(stackToken)
+            if stackTokenPrec > tokenPrec or (stackTokenPrec == tokenPrec and isLeftAssociative(token))
+                operatorStack.pop()
+                rpnExpr.tokens.push(stackToken)
+                continue
+        break
+
+    operatorStack.push(token)
+
+calcMaxOperandStackSize(Expression rpnExpr) =>
+    stackSize = 0
+    maxStackSize = 0
+
+    for token in rpnExpr.tokens
+        if isVariableToken(token)
+            stackSize += 1
+        else if isFunctionToken(token)
+            numArgs = getTokenFunctionNumArgs(token)
+            stackSize := stackSize - numArgs + 1
+        else if token == TOKEN_TERNARY
+            stackSize -= 2 // 3 pop, 1 push
+        else if not isUnaryOperatorToken(token)
+            stackSize -= 1 // 2 pop, 1 push
+
+        // Record peak stack size
+        if stackSize > maxStackSize
+            maxStackSize := stackSize
+
+    maxStackSize
+
+convertToRpnExpression(Expression infixExpr) =>
+    var errorPrefix = "Failed to convert to RPN expression. "
+    rpnExpr = newExpression()
+    rpnExpr.variableIdMap := infixExpr.variableIdMap
+    rpnExpr.values := infixExpr.values
+    rpnExpr.defValues := infixExpr.defValues
+
+    if infixExpr.tokens.size() > 0
+        operatorStack = array.new<int>()
+
+        isOperandExpected = true
+        isLeftParenthExpected = false
+
+        for [i, token] in infixExpr.tokens
+            if isLeftParenthExpected and token != TOKEN_PARENTH_LEFT
+                throwException("Missing '(' after function", errorPrefix)
+
+            if isVariableToken(token)
+                if not isOperandExpected
+                    throwException("Missing operator before variable", errorPrefix)
+
+                rpnExpr.tokens.push(token)
+                isOperandExpected := false
+            else if isFunctionToken(token)
+                if not isOperandExpected
+                    throwException("Missing operator before function", errorPrefix)
+
+                operatorStack.push(token)
+                isLeftParenthExpected := true
+            else if token == TOKEN_PARENTH_LEFT
+                if not isOperandExpected
+                    throwException("Missing operator before '('", errorPrefix)
+
+                operatorStack.push(token)
+                if isLeftParenthExpected
+                    isLeftParenthExpected := false
+            else if token == TOKEN_PARENTH_RIGHT
+                isEmptyFunctionClose = operatorStack.size() > 1
+                       and operatorStack.last() == TOKEN_PARENTH_LEFT
+                       and isFunctionToken(operatorStack.get(operatorStack.size() - 2))
+                       and infixExpr.tokens.get(i - 1) == TOKEN_PARENTH_LEFT // Covers "func(a,)", "func(a)", etc.
+
+                if isOperandExpected and not isEmptyFunctionClose
+                    throwException("Missing operand before ')'", errorPrefix)
+
+                bool isLeftParenthFound = false
+                while operatorStack.size() > 0
+                    stackToken = operatorStack.pop()
+                    if stackToken == TOKEN_PARENTH_LEFT
+                        isLeftParenthFound := true
+                        break
+                    if stackToken == TOKEN_TERNARY_QUESTION
+                        throwException("Missing ':' before ')'", errorPrefix)
+                    rpnExpr.tokens.push(stackToken)
+
+                if not isLeftParenthFound
+                    throwException("Mismatched parenthesis: ')' without '('", errorPrefix)
+
+                if operatorStack.size() > 0 and isFunctionToken(operatorStack.last())
+                    rpnExpr.tokens.push(operatorStack.pop())
+
+                isOperandExpected := false
+            else if token == TOKEN_COMMA
+                if isOperandExpected
+                    throwException("Missing operand before ','", errorPrefix)
+
+                bool isLeftParenthFound = false
+                while operatorStack.size() > 0
+                    stackToken = operatorStack.last()
+                    if stackToken == TOKEN_PARENTH_LEFT
+                        isLeftParenthFound := true
+                        break
+                    operatorStack.pop()
+                    if stackToken == TOKEN_TERNARY_QUESTION
+                        throwException("Missing ':' before ','", errorPrefix)
+                    rpnExpr.tokens.push(stackToken)
+
+                // Valid operator stack must be: [... , FUNCTION, PARENTH_LEFT]
+                // Examples of invalid expressions:
+                // - "func((a, b), c)"
+                // - "func(a, (b, c))"
+                isProperFunctionSeqInStack = isLeftParenthFound
+                       and operatorStack.size() > 1
+                       and isFunctionToken(operatorStack.get(operatorStack.size() - 2))
+
+                if not isProperFunctionSeqInStack
+                    throwException("Unexpected ','", errorPrefix)
+
+                isOperandExpected := true
+            else if token == TOKEN_TERNARY_QUESTION
+                if isOperandExpected
+                    throwException("Missing operand before '?'", errorPrefix)
+
+                pushOperatorByPrecedence(token, operatorStack, rpnExpr)
+                isOperandExpected := true
+            else if token == TOKEN_TERNARY_COLON
+                if isOperandExpected
+                    throwException("Missing operand before ':'", errorPrefix)
+
+                bool isQuestionFound = false
+                while operatorStack.size() > 0
+                    stackToken = operatorStack.pop()
+                    if stackToken == TOKEN_TERNARY_QUESTION
+                        isQuestionFound := true
+                        break
+                    if stackToken == TOKEN_PARENTH_LEFT
+                        throwException("Missing '?' before ':'", errorPrefix)
+                    rpnExpr.tokens.push(stackToken)
+
+                if not isQuestionFound
+                    throwException("Missing '?' before ':'", errorPrefix)
+
+                operatorStack.push(TOKEN_TERNARY)
+                isOperandExpected := true
+            else
+                if isOperandExpected
+                    if isUnaryOperatorToken(token)
+                        operatorStack.push(token)
+                    else
+                        throwException("Missing operand before '" + tokenToString(token) + "'", errorPrefix)
+                else
+                    if isUnaryOperatorToken(token)
+                        throwException("Missing operator before '" + tokenToString(token) + "'", errorPrefix)
+
+                    pushOperatorByPrecedence(token, operatorStack, rpnExpr)
+                    isOperandExpected := true
+
+        if isOperandExpected
+            throwException("Expression ends with an operator", errorPrefix)
+
+        while operatorStack.size() > 0
+            stackToken = operatorStack.pop()
+
+            if stackToken == TOKEN_PARENTH_LEFT
+                throwException("Mismatched parenthesis", errorPrefix)
+
+            if stackToken == TOKEN_TERNARY_QUESTION
+                throwException("Missing ':'", errorPrefix)
+
+            if isFunctionToken(stackToken)
+                throwException("Missing '(' after function", errorPrefix)
+
+            rpnExpr.tokens.push(stackToken)
+
+    rpnExpr.operandStack := array.new<float>(calcMaxOperandStackSize(rpnExpr), na)
+    rpnExpr
+
+
+//@function             Parses an expression.
+//@param parser         Expression parser.
+//@param exprStr        Expression string. Can be empty, blank, or 'na'. That way expression is valid and will return `na` on evaluation.
+//@param constantPool   (Optional) Named constants.
+//@returns              Parsed expression. If an error occurs during parsing, then the returned expression will be `na`.
+//                      You can check validity and error details accessing parser's `isParsed` and `error` fields.
+export method parse(ExpressionParser parser, string exprStr, ExpressionConstantPool constantPool = na) =>
+    parser.isParsed := true
+    parser.error := na
+
+    tokenizeResult = tokenizeExpression(parser, exprStr, constantPool)
+    if tokenizeResult.isSuccessful
+        convertToRpnExpression(tokenizeResult.expression)
+    else
+        parser.isParsed := false
+        parser.error := ParseError.new(
+                tokenizeResult.error.message,
+                tokenizeResult.error.index)
+        na
+
+
+//@function             Clears all variable values.
+//@param expr           Expression.
+//@returns              This expression.
+export method clearVariables(Expression expr) =>
+    expr.values := expr.defValues.copy()
+    expr
+
+//@function             Assigns a numeric value to a variable.
+//@param expr           Expression.
+//@param identifier     Variable name.
+//@param value          Value.
+//@returns              This expression.
+export method setVariable(Expression expr, string identifier, float value) =>
+    variableId = expr.variableIdMap.get(identifier)
+    if not na(variableId)
+        expr.values.set(variableId, value)
+    expr
+
+//@function             Assigns a boolean value to a variable.
+//@param expr           Expression.
+//@param identifier     Variable name.
+//@param value          Value.
+//@returns              This expression.
+export method setVariable(Expression expr, string identifier, bool value) =>
+    expr.setVariable(identifier, toNum(value))
+
+
+evaluateFuncVoid() =>
+    0.0
+
+evaluateFuncNa(array<float> stack, int firstArgIndex) =>
+    toNum(na(stack.get(firstArgIndex)))
+
+evaluateFuncNz(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    fallback = stack.get(firstArgIndex + 1)
+    nz(x, fallback)
+
+evaluateFuncMax(array<float> stack, int firstArgIndex, int numArgs) =>
+    maxValue = math.max(stack.get(firstArgIndex), stack.get(firstArgIndex + 1))
+    if numArgs > 2
+        for i = firstArgIndex + 2 to firstArgIndex + numArgs - 1
+            maxValue := math.max(maxValue, stack.get(i))
+            if na(maxValue)
+                break
+    maxValue
+
+evaluateFuncMin(array<float> stack, int firstArgIndex, int numArgs) =>
+    minValue = math.min(stack.get(firstArgIndex), stack.get(firstArgIndex + 1))
+    if numArgs > 2
+        for i = firstArgIndex + 2 to firstArgIndex + numArgs - 1
+            minValue := math.min(minValue, stack.get(i))
+            if na(minValue)
+                break
+    minValue
+
+evaluateFuncPow(array<float> stack, int firstArgIndex) =>
+    base = stack.get(firstArgIndex)
+    exponent = stack.get(firstArgIndex + 1)
+    math.pow(base, exponent)
+
+evaluateFuncSqrt(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.sqrt(x)
+
+evaluateFuncClamp(array<float> stack, int firstArgIndex) =>
+    value = stack.get(firstArgIndex)
+    minValue = stack.get(firstArgIndex + 1)
+    maxValue = stack.get(firstArgIndex + 2)
+    math.min(math.max(value, minValue), maxValue)
+
+evaluateFuncAbs(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.abs(x)
+
+evaluateFuncCeil(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.ceil(x)
+
+evaluateFuncFloor(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.floor(x)
+
+evaluateFuncRound(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.round(x)
+
+evaluateFuncRoundToMintick(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.round_to_mintick(x)
+
+evaluateFuncLog(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.log(x)
+
+evaluateFuncLog10(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.log10(x)
+
+evaluateFuncSign(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.sign(x)
+
+evaluateFuncCos(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.cos(x)
+
+evaluateFuncSin(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.sin(x)
+
+evaluateFuncTan(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.tan(x)
+
+evaluateFuncAcos(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.acos(x)
+
+evaluateFuncAsin(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.asin(x)
+
+evaluateFuncAtan(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.atan(x)
+
+evaluateFuncToDegrees(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.todegrees(x)
+
+evaluateFuncToRadians(array<float> stack, int firstArgIndex) =>
+    x = stack.get(firstArgIndex)
+    math.toradians(x)
+
+evaluateFuncRandom(array<float> stack, int firstArgIndex, int numArgs) =>
+    switch numArgs
+        0 => math.random()
+        1 => math.random(stack.get(firstArgIndex))
+        2 => math.random(stack.get(firstArgIndex), stack.get(firstArgIndex + 1))
+        => math.random(stack.get(firstArgIndex), stack.get(firstArgIndex + 1), int(stack.get(firstArgIndex + 2)))
+
+evaluateFuncRandomInt(array<float> stack, int firstArgIndex, int numArgs) =>
+    minValue = stack.get(firstArgIndex)
+    maxValue = stack.get(firstArgIndex + 1)
+    randomValue = numArgs == 2
+           ? math.random(minValue, maxValue)
+           : math.random(minValue, maxValue, int(stack.get(firstArgIndex + 2)))
+    math.floor(randomValue)
+
+evaluateFuncRandomBool(array<float> stack, int firstArgIndex, int numArgs) =>
+    randomValue = numArgs == 0
+           ? math.random()
+           : math.random(0, 1, int(stack.get(firstArgIndex)))
+    toNum(randomValue >= 0.5)
+
+evaluateFunc(int functionId, array<float> stack, int stackIndex, int numArgs, string errorPrefix) =>
+    // Expected stack index after function pops arguments and pushes the result.
+    // It is also equal to first argument index for non-empty functions.
+    resultIndex = stackIndex - numArgs + 1
+
+    result = switch functionId
+        FUNC_VOID => evaluateFuncVoid()
+        FUNC_NA => evaluateFuncNa(stack, resultIndex)
+        FUNC_NZ => evaluateFuncNz(stack, resultIndex)
+        FUNC_MAX => evaluateFuncMax(stack, resultIndex, numArgs)
+        FUNC_MIN => evaluateFuncMin(stack, resultIndex, numArgs)
+        FUNC_POW => evaluateFuncPow(stack, resultIndex)
+        FUNC_SQRT => evaluateFuncSqrt(stack, resultIndex)
+        FUNC_CLAMP => evaluateFuncClamp(stack, resultIndex)
+        FUNC_ABS => evaluateFuncAbs(stack, resultIndex)
+        FUNC_CEIL => evaluateFuncCeil(stack, resultIndex)
+        FUNC_FLOOR => evaluateFuncFloor(stack, resultIndex)
+        FUNC_ROUND => evaluateFuncRound(stack, resultIndex)
+        FUNC_ROUND_TO_MINTICK => evaluateFuncRoundToMintick(stack, resultIndex)
+        FUNC_LOG => evaluateFuncLog(stack, resultIndex)
+        FUNC_LOG10 => evaluateFuncLog10(stack, resultIndex)
+        FUNC_SIGN => evaluateFuncSign(stack, resultIndex)
+        FUNC_COS => evaluateFuncCos(stack, resultIndex)
+        FUNC_SIN => evaluateFuncSin(stack, resultIndex)
+        FUNC_TAN => evaluateFuncTan(stack, resultIndex)
+        FUNC_ACOS => evaluateFuncAcos(stack, resultIndex)
+        FUNC_ASIN => evaluateFuncAsin(stack, resultIndex)
+        FUNC_ATAN => evaluateFuncAtan(stack, resultIndex)
+        FUNC_TO_DEGREES => evaluateFuncToDegrees(stack, resultIndex)
+        FUNC_TO_RADIANS => evaluateFuncToRadians(stack, resultIndex)
+        FUNC_RANDOM => evaluateFuncRandom(stack, resultIndex, numArgs)
+        FUNC_RANDOM_INT => evaluateFuncRandomInt(stack, resultIndex, numArgs)
+        FUNC_RANDOM_BOOL => evaluateFuncRandomBool(stack, resultIndex, numArgs)
+        =>
+            throwException("Unsupported function ID \"" + str.tostring(functionId) + "\"", errorPrefix)
+            na
+
+    stack.set(resultIndex, result)
+    resultIndex
+
+//@function         Evaluates an expression.
+//@param evaluator  Expression evaluator.
+//@param expr       Expression to evaluate.
+//@returns          Numeric evaluation result.
+//                  For boolean-result expressions `1.0` means `true` and `0.0` means `false`.
+//                  Returns `na` if expression is empty.
+export method evaluate(ExpressionEvaluator evaluator, Expression expr) =>
+    var errorPrefix = "Failed to evaluate expression. "
+
+    evaluator.isEvaluated := true
+    evaluator.error := na
+
+    result = if expr.tokens.size() > 0
+        tokens = expr.tokens
+        values = expr.values
+
+        stack = expr.operandStack
+        stackIndex = -1
+
+        for token in tokens
+            if isVariableToken(token)
+                identifierId = getTokenVariableId(token)
+                stackIndex += 1
+                stack.set(stackIndex, values.get(identifierId))
+            else if token == TOKEN_UNARY_MINUS
+                stack.set(stackIndex, -stack.get(stackIndex))
+            else if token == TOKEN_UNARY_PLUS
+                _d = 0 // No-op
+            else if token == TOKEN_LOGICAL_NOT
+                x = stack.get(stackIndex)
+                stack.set(stackIndex, toNum(not toBool(x)))
+            else if token == TOKEN_TERNARY
+                condition = stack.get(stackIndex - 2)
+                valueIfTrue = stack.get(stackIndex - 1)
+                valueIfFalse = stack.get(stackIndex)
+                stackIndex -= 2 // 3 pop, 1 push
+                stack.set(stackIndex, toBool(condition) ? valueIfTrue : valueIfFalse)
+            else if isFunctionToken(token)
+                functionId = getTokenFunctionId(token)
+                numArgs = getTokenFunctionNumArgs(token)
+                stackIndex := evaluateFunc(functionId, stack, stackIndex, numArgs, errorPrefix)
+            else
+                x = stack.get(stackIndex - 1)
+                y = stack.get(stackIndex)
+
+                if (token == TOKEN_ARITH_DIVIDE or token == TOKEN_ARITH_MODULO) and y == 0.0 and evaluator.isFailOnDivisionByZero
+                    failEvaluation(evaluator, EvaluationErrorReason.DIVISION_BY_ZERO, "Division by zero")
+                    break
+
+                result = switch token
+                    // Arithmetic
+                    TOKEN_ARITH_ADD => x + y
+                    TOKEN_ARITH_SUBTRACT => x - y
+                    TOKEN_ARITH_MULTIPLY => x * y
+                    TOKEN_ARITH_DIVIDE => y == 0.0 ? na : x / y
+                    TOKEN_ARITH_MODULO => y == 0.0 ? na : x % y
+
+                    // Comparison
+                    TOKEN_CMP_GREATER => toNum(x > y)
+                    TOKEN_CMP_LESS => toNum(x < y)
+                    TOKEN_CMP_GREATER_EQ => toNum(x >= y)
+                    TOKEN_CMP_LESS_EQ => toNum(x <= y)
+                    TOKEN_CMP_EQ => toNum(x == y)
+                    TOKEN_CMP_NOT_EQ => toNum(x != y)
+
+                    // Logical
+                    TOKEN_LOGICAL_AND => toNum(toBool(x) and toBool(y))
+                    TOKEN_LOGICAL_OR => toNum(toBool(x) or toBool(y))
+
+                    =>
+                        throwException("Unsupported token '" + tokenToString(token) + "'", errorPrefix)
+                        na
+
+                stackIndex -= 1 // 2 pop, 1 push
+                stack.set(stackIndex, result)
+
+        evaluator.isEvaluated and stackIndex >= 0 ? stack.get(0) : na
+    else
+        na
+
+    evaluator.result := result
+    evaluator.boolResult := toBool(result)
+    result
+
+//@function         Evaluates an expression.
+//@param evaluator  Expression evaluator.
+//@param expr       Expression to evaluate.
+//@returns          Boolean evaluation result.
+//                  Returns `false` if expression is empty.
+export method evaluateToBool(ExpressionEvaluator evaluator, Expression expr) =>
+    toBool(evaluate(evaluator, expr))
+
+
+
+
+// =================
+//     [ Tests ]
+// =================
+
+const bool IS_DISPLAY_PASSED_TESTS = false
+
+setVariableValues(Expression expr, array<string> identifiers, array<float> values) =>
+    if not na(identifiers) and not na(values)
+        for [i, identifier] in identifiers
+            if i < values.size()
+                expr.setVariable(identifier, values.get(i))
+
+reportTestFail(string testName, string reason) =>
+    log.warning(str.format(f("\nFAILED: {}\n        {}"), testName, reason))
+
+reportTestPassed(string testName) =>
+    if IS_DISPLAY_PASSED_TESTS
+        log.info(str.format(f("\nPASSED: {}"), testName))
+
+assertParseFail(string testName, string exprStr, array<string> identifiers) =>
+    parser = createExpressionParser()
+    expr = parser.parse(exprStr)
+    if parser.isParsed
+        reportTestFail(testName, "Expected parse failure, but got success.")
+    else
+        reportTestPassed(testName)
+
+assertParseFailWithMessageMatching(string testName, string exprStr, array<string> identifiers, string expectedText, int matchKind, bool isIgnoreCase) =>
+    parser = createExpressionParser()
+    expr = parser.parse(exprStr)
+    if parser.isParsed
+        reportTestFail(testName, "Expected parse failure, but got success.")
+    else
+        errorMessage = parser.error.message
+        checkedErrorMessage = isIgnoreCase ? str.upper(errorMessage) : errorMessage
+        checkedExpectedText = isIgnoreCase ? str.upper(expectedText) : expectedText
+
+        isErrorMessageMatches = switch matchKind
+            0 => checkedErrorMessage == checkedExpectedText
+            1 => str.startswith(checkedErrorMessage, checkedExpectedText)
+            2 => str.contains(checkedErrorMessage, checkedExpectedText)
+            3 => str.endswith(checkedErrorMessage, checkedExpectedText)
+
+        if isErrorMessageMatches
+            reportTestPassed(testName)
+        else
+            expectedCondition = switch matchKind
+                0 => "be"
+                1 => "start with"
+                2 => "contain"
+                3 => "ends with"
+            testReportMessage = str.format(
+                    f("Expected error message to {}:\n    \"{}\"\nbut the message was:\n    \"{}\""),
+                    expectedCondition, expectedText, errorMessage)
+            reportTestFail(testName, testReportMessage)
+
+assertParseFailWithMessage(string testName, string exprStr, array<string> identifiers, string expectedText, bool isIgnoreCase = false) =>
+    assertParseFailWithMessageMatching(testName, exprStr, identifiers, expectedText, 0, isIgnoreCase)
+
+assertParseFailWithMessageStartingWith(string testName, string exprStr, array<string> identifiers, string expectedText, bool isIgnoreCase = false) =>
+    assertParseFailWithMessageMatching(testName, exprStr, identifiers, expectedText, 1, isIgnoreCase)
+
+assertParseFailWithMessageContaining(string testName, string exprStr, array<string> identifiers, string expectedText, bool isIgnoreCase = false) =>
+    assertParseFailWithMessageMatching(testName, exprStr, identifiers, expectedText, 2, isIgnoreCase)
+
+assertParseFailWithMessageEndingWith(string testName, string exprStr, array<string> identifiers, string expectedText, bool isIgnoreCase = false) =>
+    assertParseFailWithMessageMatching(testName, exprStr, identifiers, expectedText, 3, isIgnoreCase)
+
+assertEvaluationCorrect(string testName, string exprStr, array<string> identifiers, array<float> values, float expectedResult, ExpressionConstantPool constantPool = na, ExpressionEvaluator customEvaluator = na) =>
+    parser = createExpressionParser()
+    expr = parser.parse(exprStr, constantPool)
+    if not parser.isParsed
+        reportTestFail(testName, "Expected parse success, but got error: " + parser.error.message)
+    else
+        setVariableValues(expr, identifiers, values)
+        evaluator = not na(customEvaluator) ? customEvaluator : createExpressionEvaluator()
+        result = evaluator.evaluate(expr)
+
+        if not evaluator.isEvaluated
+            message = str.format(
+                    f("Expected evaluation success, but got error: {}"),
+                    evaluator.error.message)
+            reportTestFail(testName, message)
+        else
+            isExpectedResult = result == expectedResult or na(result) and na(expectedResult)
+            if not isExpectedResult
+                message = str.format(
+                        f("Expected evaluation result to be {} but got {}."),
+                        expectedResult,
+                        result)
+                reportTestFail(testName, message)
+            else
+                reportTestPassed(testName)
+
+assertEvaluationFailWithMessageMatching(string testName, string exprStr, array<string> identifiers, array<float> values, string expectedText, int matchKind, bool isIgnoreCase) =>
+    parser = createExpressionParser()
+    expr = parser.parse(exprStr)
+    if not parser.isParsed
+        reportTestFail(testName, "Expected parse success, but got error: " + parser.error.message)
+    else
+        setVariableValues(expr, identifiers, values)
+        evaluator = createExpressionEvaluator()
+        evaluator.evaluate(expr)
+
+        if evaluator.isEvaluated
+            reportTestFail(testName, "Expected evaluation failure, but got success.")
+        else
+            errorMessage = evaluator.error.message
+            checkedErrorMessage = isIgnoreCase ? str.upper(errorMessage) : errorMessage
+            checkedExpectedText = isIgnoreCase ? str.upper(expectedText) : expectedText
+
+            isErrorMessageMatches = switch matchKind
+                0 => checkedErrorMessage == checkedExpectedText
+                1 => str.startswith(checkedErrorMessage, checkedExpectedText)
+                2 => str.contains(checkedErrorMessage, checkedExpectedText)
+                3 => str.endswith(checkedErrorMessage, checkedExpectedText)
+
+            if isErrorMessageMatches
+                reportTestPassed(testName)
+            else
+                expectedCondition = switch matchKind
+                    0 => "be"
+                    1 => "start with"
+                    2 => "contain"
+                    3 => "ends with"
+                testReportMessage = str.format(
+                        f("Expected evaluation error message to {}:\n    \"{}\"\nbut the message was:\n    \"{}\""),
+                        expectedCondition, expectedText, errorMessage)
+                reportTestFail(testName, testReportMessage)
+
+assertEvaluationFailWithMessage(string testName, string exprStr, array<string> identifiers, array<float> values, string expectedText, bool isIgnoreCase = false) =>
+    assertEvaluationFailWithMessageMatching(testName, exprStr, identifiers, values, expectedText, 0, isIgnoreCase)
+
+assertEvaluationFailWithMessageStartingWith(string testName, string exprStr, array<string> identifiers, array<float> values, string expectedText, bool isIgnoreCase = false) =>
+    assertEvaluationFailWithMessageMatching(testName, exprStr, identifiers, values, expectedText, 1, isIgnoreCase)
+
+assertEvaluationFailWithMessageContaining(string testName, string exprStr, array<string> identifiers, array<float> values, string expectedText, bool isIgnoreCase = false) =>
+    assertEvaluationFailWithMessageMatching(testName, exprStr, identifiers, values, expectedText, 2, isIgnoreCase)
+
+assertEvaluationFailWithMessageEndingWith(string testName, string exprStr, array<string> identifiers, array<float> values, string expectedText, bool isIgnoreCase = false) =>
+    assertEvaluationFailWithMessageMatching(testName, exprStr, identifiers, values, expectedText, 3, isIgnoreCase)
+
+
+if barstate.islastconfirmedhistory
+    EMPTY_STRING_ARR = array.new<string>()
+    EMPTY_FLOAT_ARR = array.new<float>()
+
+    log.info("====== TESTS BEGIN ======")
+
+    // Positive tests: Built-in constants
+
+    assertEvaluationCorrect(
+            "givenIntegerLiteral_whenParseAndEvaluate_thenReturnSameValue",
+            "10",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            10.0)
+
+    assertEvaluationCorrect(
+            "givenDecimalLiteralWithLeadingDigit_whenParseAndEvaluate_thenReturnSameValue",
+            "3.14",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.14)
+
+    assertEvaluationCorrect(
+            "givenDecimalLiteralWithoutLeadingDigit_whenParseAndEvaluate_thenReturnSameValue",
+            ".5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.5)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (1)",
+            "1e3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1000)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (2)",
+            "1e+3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1000)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (3)",
+            "1e-3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.001)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (4)",
+            "5.21e3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5210)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (5)",
+            "5.2e3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5200)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (6)",
+            "5.2e-3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0052)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (7)",
+            "5.2e-10",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.00000000052)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (8)",
+            "0.52e-9",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.00000000052)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (9)",
+            "52e-11",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.00000000052)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (10)",
+            "0.0052e3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.2)
+
+    assertEvaluationCorrect(
+            "givenScientificNotationNum_whenParseAndEvaluate_thenReturnCorrectValue (11)",
+            "0.0052E3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.2)
+
+    assertEvaluationCorrect(
+            "givenTrueBuiltinConstant_whenParseAndEvaluate_thenReturnOne",
+            "true",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenFalseBuiltinConstant_whenParseAndEvaluate_thenReturnZero",
+            "false",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenNaBuiltinConstant_whenParseAndEvaluate_thenReturnNa",
+            "na",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+    assertEvaluationCorrect(
+            "givenUnknownBuiltinConstant_whenParseAndEvaluate_thenReturnNa",
+            "unknown",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+
+    // Positive tests: Custom constants
+
+    assertEvaluationCorrect(
+            "givenExprWithCustomNumericNamedConstant_whenParseAndEvaluate_thenReturnCorrectResult",
+            "offset + 5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            12.0,
+            createConstantPool()
+                   .set("offset", 7.0))
+
+    assertEvaluationCorrect(
+            "givenExprWithCustomBoolNamedConstant_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "is_enabled AND true",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0,
+            createConstantPool()
+                   .set("is_enabled", false))
+
+    assertEvaluationCorrect(
+            "givenExprWithCustomBoolNamedConstant_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "is_enabled AND true",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0,
+            createConstantPool()
+                   .set("is_enabled", true))
+
+    assertEvaluationCorrect(
+            "givenCustomAndBuiltInConstantsSameName_whenParseAndEvaluate_thenUseCustomConstantValue",
+            "true",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0,
+            createConstantPool()
+                   .set("true", 5.0))
+
+    assertEvaluationCorrect(
+            "givenCustomAndBuiltInConstantsSameNameDiffCase_whenParseAndEvaluate_thenUseBothValues",
+            "true + TRUE",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            6.0,
+            createConstantPool()
+                   .set("TRUE", 5.0))
+
+    assertEvaluationCorrect(
+            "givenCustomConstantsSameNameDiffCase_whenParseAndEvaluate_thenUseBothValues",
+            "Rate + rate",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            7.0,
+            createConstantPool()
+                   .set("Rate", 2.0)
+                   .set("rate", 5.0))
+
+    assertEvaluationCorrect(
+            "givenCustomConstantAndVariableSameNameDiffCase_whenParseAndEvaluate_thenUseBothValues",
+            "limit + Limit",
+            array.from("limit"),
+            array.from(3.0),
+            13.0,
+            createConstantPool()
+                   .set("Limit", 10.0))
+
+    assertEvaluationCorrect(
+            "givenCustomConstantAndVariableSameName_whenParseAndEvaluate_thenUseVariableValue",
+            "score",
+            array.from("score"),
+            array.from(3.0),
+            3.0,
+            createConstantPool()
+                   .set("score", 10.0))
+
+    assertEvaluationCorrect(
+            "givenBuiltInConstantAndVariableSameName_whenParseAndEvaluate_thenUseVariableValue",
+            "true",
+            array.from("true"),
+            array.from(7.0),
+            7.0)
+
+
+    // Positive tests: Variables
+
+    assertEvaluationCorrect(
+            "givenVariable_whenParseAndEvaluate_thenReturnVariableValue",
+            "var_1",
+            array.from("var_1"),
+            array.from(42.0),
+            42.0)
+
+    assertEvaluationCorrect(
+            "givenCaseSensitiveVariableNames_whenParseAndEvaluate_thenApplyValuesProperly",
+            "A + a + a",
+            array.from("A", "a"),
+            array.from(10.0, 1.0),
+            12.0)
+
+    assertEvaluationCorrect(
+            "givenVariableStartingWithOperatorName_whenParseAndEvaluate_thenTreatAsVariable",
+            "AND_ + OR_ + NOT_",
+            array.from("AND_", "OR_", "NOT_"),
+            array.from(1.0, 2.0, 3.0),
+            6.0)
+
+    assertEvaluationCorrect(
+            "givenVariableIncludingOperatorName_whenParseAndEvaluate_thenTreatAsVariable",
+            "A_AND_B + X_OR_Y + IS_NOT_READY",
+            array.from("A_AND_B", "X_OR_Y", "IS_NOT_READY"),
+            array.from(4.0, 5.0, 6.0),
+            15.0)
+
+    assertEvaluationCorrect(
+            "givenVariableEndingWithOperatorName_whenParseAndEvaluate_thenTreatAsVariable",
+            "_AND + _OR + _NOT",
+            array.from("_AND", "_OR", "_NOT"),
+            array.from(7.0, 8.0, 9.0),
+            24.0)
+
+    assertEvaluationCorrect(
+            "givenUnassignedVariable_whenEvaluate_thenTreatAsNa",
+            "a + b",
+            array.from("a"),
+            array.from(1.0),
+            na)
+
+
+    // Positive tests: Operators (Arithmetic operators)
+
+    assertEvaluationCorrect(
+            "givenAdditionOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "2 + 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+    assertEvaluationCorrect(
+            "givenSubtractionOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "7 - 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+    assertEvaluationCorrect(
+            "givenMultiplicationOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "4 * 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            12.0)
+
+    assertEvaluationCorrect(
+            "givenDivisionOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "8 / 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            4.0)
+
+    assertEvaluationCorrect(
+            "givenModuloOperator_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "8 % 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenModuloOperator_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "-5 % 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -2.0)
+
+    assertEvaluationCorrect(
+            "givenModuloOperator_whenParseAndEvaluate_thenReturnCorrectResult (3)",
+            "5 % -3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenModuloOperator_whenParseAndEvaluate_thenReturnCorrectResult (4)",
+            "-5 % -3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -2.0)
+
+
+    // Positive tests: Operators (Comparison operators)
+
+    assertEvaluationCorrect(
+            "givenGreaterThanOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "5 > 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenLessThanOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "3 < 5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenGreaterThanOrEqualOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "5 >= 5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenLessThanOrEqualOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "5 <= 5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenEqualityOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "5 == 5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenInequalityOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "5 != 4",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+
+    // Positive tests: Operators (Logical operators and aliases)
+
+    assertEvaluationCorrect(
+            "givenUppercaseAndOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 AND 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenLowercaseAndOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 and 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenMixedCaseAndOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 AnD 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenSingleAmpersandOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 & 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenDoubleAmpersandOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 && 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenUppercaseOrOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "0 OR 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenLowercaseOrOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "0 or 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenMixedCaseOrOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "0 oR 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenSinglePipeOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "0 | 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenDoublePipeOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "0 || 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenUppercaseNotOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "NOT 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenLowercaseNotOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "not 1",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenMixedCaseNotOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "NoT 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenExclamationOperator_whenParseAndEvaluate_thenReturnCorrectResult",
+            "!0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+
+    // Positive tests: Operators (Precedence)
+
+    assertEvaluationCorrect(
+            "givenMultiplicationAndAddition_whenParseAndEvaluate_thenMultiplicationHasHigherPrecedence",
+            "2 + 3 * 4",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            14.0)
+
+    assertEvaluationCorrect(
+            "givenAdditionAndComparison_whenParseAndEvaluate_thenAdditionHasHigherPrecedence",
+            "2 + 3 > 4",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenComparisonAndEquality_whenParseAndEvaluate_thenComparisonHasHigherPrecedence",
+            "2 < 3 == 1",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenEqualityAndAnd_whenParseAndEvaluate_thenEqualityHasHigherPrecedence",
+            "0 == 1 AND 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenAndAndOr_whenParseAndEvaluate_thenAndHasHigherPrecedence",
+            "1 OR 0 AND 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenUnaryAndAddition_whenParseAndEvaluate_thenUnaryHasHigherPrecedence",
+            "-2 + 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenOrAndTernary_whenParseAndEvaluate_thenOrHasHigherPrecedence",
+            "0 OR 1 ? 2 : 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenAdditionAndTernary_whenParseAndEvaluate_thenAdditionHasHigherPrecedence",
+            "-1 + 1 ? 5 : 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+
+    // Positive tests: Operators (Associativity)
+
+    assertEvaluationCorrect(
+            "givenLeftAssociativeSubtraction_whenParseAndEvaluate_thenEvaluateLeftToRight",
+            "10 - 3 - 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+    assertEvaluationCorrect(
+            "givenLeftAssociativeDivision_whenParseAndEvaluate_thenEvaluateLeftToRight",
+            "16 / 4 / 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenLeftAssociativeModulo_whenParseAndEvaluate_thenEvaluateLeftToRight",
+            "20 % 6 % 4",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenLeftAssociativeComparison_whenParseAndEvaluate_thenEvaluateLeftToRight",
+            "2 < 1 < 1",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenLeftAssociativeEquality_whenParseAndEvaluate_thenEvaluateLeftToRight",
+            "2 == 2 == 1",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenRightAssociativeUnaryOperators_whenParseAndEvaluate_thenEvaluateRightToLeft",
+            "-NOT 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -1.0)
+
+    assertEvaluationCorrect(
+            "givenNestedTernaryInFalseBranch_whenParseAndEvaluate_thenEvaluateRightToLeft",
+            "1 ? 0 : 1 ? 2 : 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenNestedTernaryInTrueBranch_whenParseAndEvaluate_thenEvaluateRightToLeft",
+            "1 ? 0 ? 2 : 3 : 4",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+
+    // Positive tests: Operators (Unary operators)
+
+    assertEvaluationCorrect(
+            "givenUnaryPlus_whenParseAndEvaluate_thenReturnCorrectResult",
+            "+5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+    assertEvaluationCorrect(
+            "givenUnaryMinus_whenParseAndEvaluate_thenReturnCorrectResult",
+            "-5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -5.0)
+
+    assertEvaluationCorrect(
+            "givenConsecutiveUnaryOperators_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "--5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+    assertEvaluationCorrect(
+            "givenConsecutiveUnaryOperators_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "-+5",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -5.0)
+
+    assertEvaluationCorrect(
+            "givenConsecutiveUnaryOperators_whenParseAndEvaluate_thenReturnCorrectResult (3)",
+            "!!0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenUnaryAfterBinaryOperator_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "1 + -2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -1.0)
+
+    assertEvaluationCorrect(
+            "givenUnaryAfterBinaryOperator_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "0 < NOT 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenUnaryAfterBinaryOperator_whenParseAndEvaluate_thenReturnCorrectResult (3)",
+            "1 AND NOT 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+
+    // Positive tests: Operators (Ternary operator)
+
+    assertEvaluationCorrect(
+            "givenTrueTernaryCondition_whenParseAndEvaluate_thenReturnTrueBranch",
+            "1 ? 2 : 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenFalseTernaryCondition_whenParseAndEvaluate_thenReturnFalseBranch",
+            "0 ? 2 : 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenVariableTernaryCondition_whenParseAndEvaluate_thenReturnCorrectBranch",
+            "a > 0 ? a : -a",
+            array.from("a"),
+            array.from(-4.0),
+            4.0)
+
+
+    // Positive tests: Parentheses
+
+    assertEvaluationCorrect(
+            "givenParenthesesAroundExpression_whenParseAndEvaluate_thenReturnCorrectResult",
+            "(1 + 2)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenParenthesesAroundVariable_whenParseAndEvaluate_thenReturnCorrectResult",
+            "(a)",
+            array.from("a"),
+            array.from(9.0),
+            9.0)
+
+    assertEvaluationCorrect(
+            "givenParenthesesChangingPrecedence_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "(2 + 3) * 4",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            20.0)
+
+    assertEvaluationCorrect(
+            "givenParenthesesChangingPrecedence_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "(1 OR 0) AND 1",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenNestedParentheses_whenParseAndEvaluate_thenReturnCorrectResult",
+            "((2 + 3) * (4 - 1))",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            15.0)
+
+    assertEvaluationCorrect(
+            "givenUnaryBeforeParentheses_whenParseAndEvaluate_thenReturnCorrectResult",
+            "-(2 + 3)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -5.0)
+
+
+    // Positive tests: Functions (Available functions, primitive implementations excluded)
+
+    assertEvaluationCorrect(
+            "givenNaFunctionWithNaArg_whenParseAndEvaluate_thenReturnTrue",
+            "na(a)",
+            array.from("a"),
+            array.from(na),
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenNaFunctionWithNonNaArg_whenParseAndEvaluate_thenReturnFalse",
+            "na(a)",
+            array.from("a"),
+            array.from(5),
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenNzFunctionWithNaArg_whenParseAndEvaluate_thenReturnFallback",
+            "nz(a, 7)",
+            array.from("a"),
+            array.from(na),
+            7.0)
+
+    assertEvaluationCorrect(
+            "givenNzFunctionWithNonNaArg_whenParseAndEvaluate_thenReturnArg",
+            "nz(a, 7)",
+            array.from("a"),
+            array.from(3.0),
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenMaxFunctionWithTwoArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "max(2, 5)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+    assertEvaluationCorrect(
+            "givenMaxFunctionWithThreeArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "max(2, 9, 5)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            9.0)
+
+    assertEvaluationCorrect(
+            "givenMaxFunctionWithFiveArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "max(-4, -1, -9, 3, 2)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenMinFunctionWithTwoArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "min(2, 5)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenMinFunctionWithThreeArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "min(2, -9, 5)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -9.0)
+
+    assertEvaluationCorrect(
+            "givenMinFunctionWithFiveArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "min(4, 1, 9, -3, 2)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            -3.0)
+
+    assertEvaluationCorrect(
+            "givenPowFunction_whenParseAndEvaluate_thenReturnCorrectResult",
+            "pow(2, 3)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            8.0)
+
+    assertEvaluationCorrect(
+            "givenClampFunction_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "clamp(12, 3, 9)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            9.0)
+
+    assertEvaluationCorrect(
+            "givenClampFunction_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "clamp(2, 3, 9)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenClampFunction_whenParseAndEvaluate_thenReturnCorrectResult (3)",
+            "clamp(5, 3, 9)",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            5.0)
+
+
+    // Positive tests: Functions (Common)
+
+    assertEvaluationCorrect(
+            "givenVariableWithSameNameAsFunction_whenParseAndEvaluate_thenReturnCorrectResult",
+            "max + max(2, max)",
+            array.from("max"),
+            array.from(5.0),
+            10.0)
+
+    assertEvaluationCorrect(
+            "givenFunctionArgsWithTernary_whenParseAndEvaluate_thenReturnCorrectResult (1)",
+            "max(a ? 1 : 2, b ? 3 : 4)",
+            array.from("a", "b"),
+            array.from(0.0, 1.0),
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenFunctionArgsWithTernary_whenParseAndEvaluate_thenReturnCorrectResult (2)",
+            "min(a ? 3 : 4, b ? 1 : 2)",
+            array.from("a", "b"),
+            array.from(1.0, 0.0),
+            2.0)
+
+    assertEvaluationCorrect(
+            "givenFunctionsAndParentheses_whenParseAndEvaluate_thenReturnCorrectResult",
+            "max(a, a * (b + c)) * (min(b - a, c) + pow(c - b, 2))",
+            array.from("a", "b", "c"),
+            array.from(2.0, 5.0, 3.0),
+            112.0)
+
+    assertEvaluationCorrect(
+            "givenFunctionWithComplexArgs_whenParseAndEvaluate_thenReturnCorrectResult",
+            "max(a, a + b * 4, c > 0 ? 8 : pow(3, 2), (d + 1) * 2, min(pow(2, 3), sqrt(81)))",
+            array.from("a", "b", "c", "d"),
+            array.from(3.0, 2.0, 1.0, 4.0),
+            11.0)
+
+
+    // Positive tests: Whitespaces
+
+    assertEvaluationCorrect(
+            "givenNoWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1+2*3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            7.0)
+
+    assertEvaluationCorrect(
+            "givenSpaceWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 + 2 * 3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            7.0)
+
+    assertEvaluationCorrect(
+            "givenTabWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1\t+\t2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenNewlineWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1\n+\n2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenConsecutiveWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1   \t \n   +   \t \n   2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenLeadingWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "   1 + 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+    assertEvaluationCorrect(
+            "givenTrailingWhitespace_whenParseAndEvaluate_thenReturnCorrectResult",
+            "1 + 2   ",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            3.0)
+
+
+    // Positive tests: Evaluation
+
+    assertEvaluationCorrect(
+            "givenEmptyExpression_whenEvaluate_thenReturnNa",
+            "",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+    assertEvaluationCorrect(
+            "givenBlankExpression_whenEvaluate_thenReturnNa (1)",
+            " ",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+    assertEvaluationCorrect(
+            "givenBlankExpression_whenEvaluate_thenReturnNa (2)",
+            "\n",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+    assertEvaluationCorrect(
+            "givenBlankExpression_whenEvaluate_thenReturnNa (3)",
+            "\t",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+    assertEvaluationCorrect(
+            "givenBlankExpression_whenEvaluate_thenReturnNa (4)",
+            "\n   \t\t\n",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na)
+
+    assertEvaluationCorrect(
+            "givenZeroAndNonZeroNumbersWithAnd_whenEvaluate_thenReturnCorrectResult (1)",
+            "0 AND 2",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenZeroAndNonZeroNumbersWithAnd_whenEvaluate_thenReturnCorrectResult (2)",
+            "2 AND -3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenZeroAndNonZeroNumbersWithOr_whenEvaluate_thenReturnCorrectResult (1)",
+            "0 OR 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenZeroAndNonZeroNumbersWithOr_whenEvaluate_thenReturnCorrectResult (2)",
+            "0 OR -3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenZeroAndNonZeroNumbersWithNot_whenEvaluate_thenReturnCorrectResult (1)",
+            "NOT 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenZeroAndNonZeroNumbersWithNot_whenEvaluate_thenReturnCorrectResult (2)",
+            "NOT -3",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenNaOperandWithAddition_whenEvaluate_thenReturnNa",
+            "a + 1",
+            array.from("a"),
+            array.from(na),
+            na)
+
+    assertEvaluationCorrect(
+            "givenNaOperandWithComparison_whenEvaluate_thenReturnFalse",
+            "a > 1",
+            array.from("a"),
+            array.from(na),
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenNaOperandWithLogicalAnd_whenEvaluate_thenReturnFalse",
+            "a AND 1",
+            array.from("a"),
+            array.from(na),
+            0.0)
+
+    assertEvaluationCorrect(
+            "givenNaOperandWithLogicalOr_whenEvaluate_thenReturnTrue",
+            "a OR 1",
+            array.from("a"),
+            array.from(na),
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenNaOperandWithLogicalNot_whenEvaluate_thenReturnTrue",
+            "NOT a",
+            array.from("a"),
+            array.from(na),
+            1.0)
+
+    assertEvaluationCorrect(
+            "givenMissingIdentifiersAndArgs_whenEvaluate_thenReturnCorrectResult",
+            "2 + 2",
+            na,
+            na,
+            4.0)
+
+    assertEvaluationCorrect(
+            "givenDivisionByZeroAndFailOptionDisabled_whenEvaluate_thenReturnNa",
+            "1 / 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na,
+            customEvaluator = createExpressionEvaluator()
+                   .setFailOnDivisionByZero(false))
+
+    assertEvaluationCorrect(
+            "givenModuloByZeroAndFailOptionDisabled_whenEvaluate_thenReturnNa",
+            "1 % 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            na,
+            customEvaluator = createExpressionEvaluator()
+                   .setFailOnDivisionByZero(false))
+
+
+    // Negative tests: Invalid expression (Missing operator or operand)
+
+    assertParseFail(
+            "givenMissingOperator_whenParse_thenReturnError (1)",
+            "1 2",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingOperator_whenParse_thenReturnError (2)",
+            "a 1",
+            array.from("a"))
+
+    assertParseFail(
+            "givenMissingOperator_whenParse_thenReturnError (3)",
+            "(1 + 2)(3 + 4)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingOperand_whenParse_thenReturnError (1)",
+            "1 +",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingOperand_whenParse_thenReturnError (2)",
+            "* 1",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingOperand_whenParse_thenReturnError (3)",
+            "1 + * 2",
+            EMPTY_STRING_ARR)
+
+
+    // Negative tests: Invalid expression (Invalid constant)
+
+    assertParseFail(
+            "givenInvalidConstant_whenParse_thenReturnError (1)",
+            ".",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenInvalidConstant_whenParse_thenReturnError (2)",
+            "1.2.3",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenInvalidConstant_whenParse_thenReturnError (3)",
+            "1e",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenInvalidConstant_whenParse_thenReturnError (4)",
+            "1e+",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenInvalidConstant_whenParse_thenReturnError (5)",
+            "1e++3",
+            EMPTY_STRING_ARR)
+
+
+    // Negative tests: Invalid expression (Invalid identifier)
+
+    assertParseFail(
+            "givenInvalidIdentifier_whenParse_thenReturnError (1)",
+            "1abc",
+            array.from("1abc"))
+
+    assertParseFail(
+            "givenInvalidIdentifier_whenParse_thenReturnError (2)",
+            ".abc",
+            array.from(".abc"))
+
+    assertParseFail(
+            "givenInvalidIdentifier_whenParse_thenReturnError (3)",
+            "$abc",
+            array.from("$abc"))
+
+
+    // Negative tests: Invalid expression (Unsupported constructs and unknown symbols)
+
+    assertParseFail(
+            "givenSingleEqualsOperator_whenParse_thenReturnError",
+            "a = 1",
+            array.from("a"))
+
+    assertParseFail(
+            "givenComma_whenParse_thenReturnError",
+            "a, b",
+            array.from("a", "b"))
+
+    assertParseFail(
+            "givenStringLiteral_whenParse_thenReturnError",
+            "\"a\"",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMemberAccess_whenParse_thenReturnError",
+            "a.b",
+            array.from("a", "b"))
+
+    assertParseFail(
+            "givenUnknownSymbol_whenParse_thenReturnError",
+            "a @ b",
+            array.from("a", "b"))
+
+
+    // Negative tests: Invalid expression (Functions)
+
+    assertParseFail(
+            "givenUnknownFunction_whenParse_thenReturnError",
+            "foo(a, b)",
+            array.from("a", "b"))
+
+    assertParseFail(
+            "givenLessThanMinArgsToFunction_whenParse_thenReturnError (1)",
+            "max()",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenLessThanMinArgsToFunction_whenParse_thenReturnError (2)",
+            "max(1)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMoreThanMaxArgsToFunction_whenParse_thenReturnError (1)",
+            "void(1)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMoreThanMaxArgsToFunction_whenParse_thenReturnError (2)",
+            "sqrt(4, 9)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingFirstArgInFunction_whenParse_thenReturnError",
+            "max(, 1)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingLastArgInFunction_whenParse_thenReturnError",
+            "max(1, )",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingMiddleArgInFunction_whenParse_thenReturnError",
+            "max(1, , 2)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenCommaInsideNestedNonFunctionParentheses_whenParse_thenReturnError (1)",
+            "max((1, 2), 3)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenCommaInsideNestedNonFunctionParentheses_whenParse_thenReturnError (2)",
+            "max(1, (2, 3))",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenWhitespaceBetweenFunctionNameAndParenthesis_whenParse_thenDoNotTreatAsFunction",
+            "max (1, 2)",
+            array.from("max"))
+
+    assertParseFail(
+            "givenFunctionWithIncompleteArgument_whenParse_thenReturnError",
+            "sqrt(2 +)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenZeroArgFunctionWithIncompleteArgument_whenParse_thenReturnError",
+            "void(2 +)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenFunctionArgNoTernaryColonBeforeComma_whenParse_thenReturnError",
+            "max(a ? 1, 2)",
+            array.from("a"))
+
+    assertParseFail(
+            "givenFunctionArgNoTernaryColonBeforeParenth_whenParse_thenReturnError",
+            "max(a ? 1)",
+            array.from("a"))
+
+    assertParseFail(
+            "givenFunctionArgNoTernaryQuestionAfterParenth_whenParse_thenReturnError",
+            "max(? a : 1)",
+            array.from("a"))
+
+    assertParseFail(
+            "givenFunctionArgNoOperandAfterColonBeforeParenth_whenParse_thenReturnError",
+            "max(1 ? a :)",
+            array.from("a"))
+
+    assertParseFail(
+            "givenFunctionArgNoOperandAfterColonBeforeComma_whenParse_thenReturnError",
+            "max(1 ? a :, 2)",
+            array.from("a"))
+
+
+    // Negative tests: Invalid expression (Unmatched parentheses)
+
+    assertParseFail(
+            "givenMissingClosingParenthesis_whenParse_thenReturnError",
+            "(1 + 2",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingOpeningParenthesis_whenParse_thenReturnError",
+            "1 + 2)",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenEmptyParentheses_whenParse_thenReturnError",
+            "()",
+            EMPTY_STRING_ARR)
+
+    assertParseFail(
+            "givenMissingOperandInsideParentheses_whenParse_thenReturnError",
+            "(1 +)",
+            EMPTY_STRING_ARR)
+
+
+    // Negative tests: Invalid expression (Ternary operator)
+
+    assertParseFail(
+            "givenTernaryMissingTrueBranch_whenParse_thenReturnError",
+            "a ? : 0",
+            array.from("a"))
+
+    assertParseFail(
+            "givenTernaryMissingFalseBranch_whenParse_thenReturnError",
+            "a ? 1 :",
+            array.from("a"))
+
+    assertParseFail(
+            "givenTernaryMissingColon_whenParse_thenReturnError",
+            "a ? 1",
+            array.from("a"))
+
+    assertParseFail(
+            "givenUnexpectedTernaryColon_whenParse_thenReturnError",
+            "a : 1",
+            array.from("a"))
+
+    assertParseFail(
+            "givenTernaryColonInsideParentheses_whenParse_thenReturnError",
+            "a ? (1 : 2)",
+            array.from("a"))
+
+    assertParseFail(
+            "givenTernaryClosingParenthesisBeforeColon_whenParse_thenReturnError",
+            "(a ? 1) : 2",
+            array.from("a"))
+
+
+    // Negative tests: Invalid expression (Proper error messages)
+
+    assertParseFailWithMessageStartingWith(
+            "givenMissingParenthAfterZeroArgFunction_whenParse_thenProperErrorMessage",
+            "void(",
+            EMPTY_STRING_ARR,
+            "Expected ')'")
+
+    assertParseFailWithMessageStartingWith(
+            "givenMissingArgAfterFunctionBegin_whenParse_thenProperErrorMessage",
+            "max(",
+            EMPTY_STRING_ARR,
+            "Expected operand")
+
+    assertParseFailWithMessageStartingWith(
+            "givenMissingTernaryColonAfterFunctionBegin_whenParse_thenProperErrorMessage",
+            "max(a ? 1",
+            array.from("a"),
+            "Expected ':'")
+
+
+    // Negative tests: Variables
+
+    assertEvaluationCorrect(
+            "givenVariableWithoutValue_whenEvaluate_thenReturnNa",
+            "b",
+            array.from("a", "b"),
+            array.from(1.0),
+            na)
+
+
+    // Negative tests: Evaluation
+
+    assertEvaluationFailWithMessage(
+            "givenDivisionByZero_whenEvaluate_thenReturnError",
+            "1 / 0",
+            EMPTY_STRING_ARR,
+            EMPTY_FLOAT_ARR,
+            "Division by zero")
+
+    log.info("====== TESTS END ======")
+
+
+
+
+// ==================
+//     [ Readme ]
+// ==================
+
+// # ExprLib
+//
+// ## Overview
+//
+// ExprLib is a Pine Script v6 library for parsing and evaluating string expressions. It allows scripts to expose configurable logic by letting users define custom conditions and calculations based on available data.
+//
+//
+//
+// ## Key Features
+//
+// - Rich expression support:
+//     - Built-in constants (e.g., `10`, `2.5`, `5e-2`, `true`, `false`, `na`)
+//     - Custom constants
+//     - Variables
+//     - Arithmetic operators: `+`, `-`, `*`, `/`, `%`
+//     - Comparison operators: `>`, `<`, `>=`, `<=`, `==`, `!=`
+//     - Logical operators: `AND`, `OR`, `NOT` (with aliases)
+//     - Ternary operator: `condition ? if_true : if_false`
+//     - Parentheses: `(`, `)`
+//     - Built-in functions: `na()`, `nz()`, `max()`, `pow()`, `sqrt()`, `random()`, and more!
+// - Graceful error handling during parsing and evaluation
+// - Optimized for evaluation performance (RPN-based approach)
+//
+//
+//
+// ## Quick Start
+//
+// An example of an indicator that colors areas on a chart where the expression evaluates to `true`:
+//
+// ```pine
+// //@version=6
+// indicator("Quick Start", overlay = true)
+//
+// import A1trdX/ExprLib/1 as ExprLib
+//
+//
+// // ---------------
+// //     INPUTS
+// // ---------------
+//
+// // Let the user customize the expression
+// inputExpressionStr = input.text_area("trend_up AND (rsi < 50 OR close < open)", "Expression")
+//
+//
+// // -------------------
+// //     CALCULATION
+// // -------------------
+//
+// // Prepare some data to use in the expression.
+// rsi = ta.rsi(close, 14)
+// ema = ta.ema(close, 200)
+//
+// isTrendUp = close > ema
+// isTrendDown = close < ema
+//
+// // Step 0: Prepare the parser and evaluator.
+// var parser = ExprLib.createExpressionParser()
+// var evaluator = ExprLib.createExpressionEvaluator()
+//
+// // Step 1: Parse the expression string.
+// var expression = parser.parse(inputExpressionStr)
+//
+// // Step 2 (Recommended): Verify whether the expression was parsed without errors.
+// if not parser.isParsed
+//     // You can define your own logic to handle errors
+//     runtime.error("Failed to parse expression: " + parser.error.message)
+//
+// // Step 3: Assign values to variables. Both numbers and booleans are supported.
+// expression.setVariable("open", open)
+// expression.setVariable("close", close)
+// expression.setVariable("rsi", rsi)
+// expression.setVariable("trend_up", isTrendUp)
+// expression.setVariable("trend_down", isTrendDown)
+//
+// // Step 4: Evaluate the expression.
+// bool result = evaluator.evaluateToBool(expression)
+//
+// // Step 4 (Alternative): If you expect a numeric result, use `evaluate()` instead.
+// // float result = evaluator.evaluate(expression)
+//
+// // Step 5 (Recommended): Verify whether the expression was evaluated without errors.
+// if not evaluator.isEvaluated
+//     // You can define your own logic to handle errors
+//     runtime.error("Failed to evaluate expression: " + evaluator.error.message)
+//
+//
+// // ----------------
+// //     GRAPHICS
+// // ----------------
+//
+// // Highlight bars where the expression returns `true`
+// bgcolor(result ? color.new(color.green, 90) : na)
+// ```
+//
+//
+//
+// ## Expression Syntax Reference
+//
+// ### Components
+//
+// An expression can include:
+// - Constants
+// - Variables
+// - Operators
+// - Functions
+// - Parentheses
+// - Spaces, tabs, or newlines
+//
+//
+// ### Data Types
+//
+// Constants and variables can have the following data types:
+// - Numeric (`int`, `float`)
+// - Boolean (`bool`)
+// - Undefined (`na`)
+//
+//
+// ### Identifiers
+//
+// Identifiers are names used to refer to named constants, variables, and functions.
+//
+// Identifier naming rules:
+// - Must start with a letter (`a-z`, `A-Z`) or underscore (`_`).
+// - May contain letters (`a-z`, `A-Z`), digits (`0-9`), and underscores (`_`).
+//
+// Identifiers cannot contain spaces or other characters.
+//
+// Identifiers are case-sensitive.
+//
+//
+// ### Constants
+//
+// #### Numeric Constants
+//
+// Examples:
+//
+// ```
+// +-----------+--------------+
+// | Constant  |  Plain Value |
+// +-----------+--------------+
+// | 12        |        12.00 |
+// | 0.05      |         0.05 |
+// | .05       |         0.05 |
+// | 5e-2      |         0.05 |
+// | 5E-2      |         0.05 |
+// | 1.2e4     |     12000.00 |
+// +-----------+--------------+
+// ```
+//
+// #### Named Constants
+//
+// Available built-in named constants:
+//
+// ```
+// +----------+-------------------------------------+-------------------------+
+// |  Name    |             Description             |  Pine Script Equivalent |
+// +----------+-------------------------------------+-------------------------+
+// | `true`   |  Boolean TRUE                       |  `true`                 |
+// | `false`  |  Boolean FALSE                      |  `false`                |
+// | `na`     |  Undefined value                    |  `na`                   |
+// | `pi`     |  Pi (~3.14159)                      |  `math.pi`              |
+// | `e`      |  Euler's number (~2.71828)          |  `math.e`               |
+// | `phi`    |  Golden ratio (~1.61803)            |  `math.phi`             |
+// | `rphi`   |  Golden ratio conjugate (~0.61803)  |  `math.rphi`            |
+// +----------+-------------------------------------+-------------------------+
+// ```
+//
+// It is possible to add custom constants.
+//
+//
+// ### Variables
+//
+// It is possible to add variables, just like custom constants, except that variable values can be changed before each evaluation.
+//
+//
+// ### Operators
+//
+// The following operators are supported:
+//
+// ```
+// +--------------+-------------+-------------------------+-------------+------------------+-------------+
+// | Type         |  Operator   |  Name                   |  Aliases    |  Example #1      |  Example #2 |
+// +--------------+-------------+-------------------------+-------------+------------------+-------------+
+// | Arithmetic   |  `+`        |  Add                    |             |  `a + b`         |             |
+// | Arithmetic   |  `-`        |  Subtract               |             |  `a - b`         |             |
+// | Arithmetic   |  `*`        |  Multiply               |             |  `a * b`         |             |
+// | Arithmetic   |  `/`        |  Divide                 |             |  `a / b`         |             |
+// | Arithmetic   |  `%`        |  Modulo                 |             |  `a % b`         |             |
+// | Comparison   |  `>`        |  Greater than           |             |  `a > b`         |             |
+// | Comparison   |  `<`        |  Less than              |             |  `a < b`         |             |
+// | Comparison   |  `>=`       |  Greater than or equal  |             |  `a >= b`        |             |
+// | Comparison   |  `<=`       |  Less than or equal     |             |  `a <= b`        |             |
+// | Comparison   |  `==`       |  Equal                  |             |  `a == b`        |             |
+// | Comparison   |  `!=`       |  Not equal              |             |  `a != b`        |             |
+// | Logical      |  `AND`      |  Logical AND            |  `&&`, `&`  |  `a AND b`       |  `a && b`   |
+// | Logical      |  `OR`       |  Logical OR             |  `||`, `|`  |  `a OR b`        |  `a || b`   |
+// | Logical      |  `NOT`      |  Logical NOT            |  `!`        |  `NOT x`         |  `!x`       |
+// | Conditional  |  `?:`       |  Ternary                |             |  `cond ? x : y`  |             |
+// | Unary        |  Unary `+`  |  Unary plus             |             |  `+x`            |             |
+// | Unary        |  Unary `-`  |  Unary minus            |             |  `-x`            |             |
+// +--------------+-------------+-------------------------+-------------+------------------+-------------+
+// ```
+//
+// Logical operator names are case-insensitive.
+//
+// Operator precedence:
+//
+// ```
+// +------------+-----------------------------+
+// | Precedence |          Operators          |
+// +------------+-----------------------------+
+// |          8 | Unary `-`, Unary `+`, `NOT` |
+// |          7 | `*`, `/`, `%`               |
+// |          6 | `+`, `-`                    |
+// |          5 | `>`, `<`, `>=`, `<=`        |
+// |          4 | `==`, `!=`                  |
+// |          3 | `AND`                       |
+// |          2 | `OR`                        |
+// |          1 | `?:`                        |
+// +------------+-----------------------------+
+// ```
+//
+// Operator associativity:
+// - Unary `+`, Unary `-`, `NOT`, and ternary are right-associative
+// - Other operators are left-associative
+//
+//
+// ### Parentheses
+//
+// Parentheses are used to group sub-expressions and override the default operator precedence.
+//
+// Example:
+//
+// `((a + b) * c + 1) * d`
+//
+//
+// ### Functions
+//
+// Functions are called by an identifier followed immediately by parentheses: `func(arg1, arg2)`.
+//
+// Arguments are separated by commas. Each argument can be any valid expression, including another function call.
+//
+// Available built-in functions:
+//
+// ```
+// +-------------------------------+----------+------------------------------------------------------------------------+
+// |           Function            |   Args   |                               Description                              |
+// +-------------------------------+----------+------------------------------------------------------------------------+
+// | `na(x)`                       |       1  |  Returns `true` when `x` is `na`, `false` otherwise.                   |
+// | `nz(x, fallback)`             |       2  |  Returns `x` when it is not `na`, `fallback` otherwise.                |
+// | `max(x1, x2, ...)`            |  2..999  |  Returns the largest argument.                                         |
+// | `min(x1, x2, ...)`            |  2..999  |  Returns the smallest argument.                                        |
+// | `pow(base, exponent)`         |       2  |  Returns `base` raised to `exponent`.                                  |
+// | `sqrt(x)`                     |       1  |  Returns the square root of `x`.                                       |
+// | `clamp(x, min, max)`          |       3  |  Restricts `x` to the `[min, max]` range.                              |
+// | `abs(x)`                      |       1  |  Returns the absolute value of `x`.                                    |
+// | `ceil(x)`                     |       1  |  Rounds `x` up to the nearest integer.                                 |
+// | `floor(x)`                    |       1  |  Rounds `x` down to the nearest integer.                               |
+// | `round(x)`                    |       1  |  Rounds `x` to the nearest integer.                                    |
+// | `round_to_mintick(x)`         |       1  |  Rounds `x` to the symbol's minimum tick precision.                    |
+// | `log(x)`                      |       1  |  Returns the natural logarithm of `x`.                                 |
+// | `log10(x)`                    |       1  |  Returns the base-10 logarithm of `x`.                                 |
+// | `sign(x)`                     |       1  |  Returns the sign of `x`: `1`, `0`, or `-1`.                           |
+// | `cos(x)`                      |       1  |  Returns the cosine of `x` in radians.                                 |
+// | `sin(x)`                      |       1  |  Returns the sine of `x` in radians.                                   |
+// | `tan(x)`                      |       1  |  Returns the tangent of `x` in radians.                                |
+// | `acos(x)`                     |       1  |  Returns the arccosine of `x` in radians.                              |
+// | `asin(x)`                     |       1  |  Returns the arcsine of `x` in radians.                                |
+// | `atan(x)`                     |       1  |  Returns the arctangent of `x` in radians.                             |
+// | `deg(x)`                      |       1  |  Converts radians to degrees.                                          |
+// | `rad(x)`                      |       1  |  Converts degrees to radians.                                          |
+// | `random(min, max, seed)`      |    0..3  |  Returns a random float. Bounds default to 0 and 1. Seed is optional.  |
+// | `random_int(min, max, seed)`  |    2..3  |  Returns a random integer. Seed is optional.                           |
+// | `random_bool(seed)`           |    0..1  |  Returns a random boolean value. Seed is optional.                     |
+// +-------------------------------+----------+------------------------------------------------------------------------+
+// ```
+//
+// The number of arguments can be either fixed or variable.
+//
+// For example, the `max(x1, x2, ...)` function supports 2 to 999 arguments, so the following calls to this function are valid:
+//
+// ```
+// max(x1, x2)
+// max(x1, x2, x3)
+// max(x1, x2, x3, x4, x5)
+// ```
+//
+// Other functions may have optional arguments. For example, the following calls to the `random(min, max, seed)` function are valid:
+//
+// ```
+// random()                // Random float from 0 to 1
+// random(0.5)             // Random float from 0.5 to 1
+// random(0.5, 2)          // Random float from 0.5 to 2
+// random(0.5, 2, 777)     // Random float from 0.5 to 2 with a specific seed
+// ```
+//
+//
+// ### Whitespace
+//
+// Spaces, tabs, and line breaks are ignored between symbols. For example, an expression can be formatted across multiple lines:
+//
+// ```
+// price > ema_slow
+//   AND ema_fast > ema_slow
+//   AND (bb_lo_up OR rsi_lo_up)
+// ```
+//
+//
+//
+// ## Parsing
+//
+// ### Workflow
+//
+// Before evaluating an expression, it must be parsed. To do this:
+// - Create a parser in advance using the `createExpressionParser()` function.
+// - Call the `parse()` method, passing the expression string as an argument.
+//
+// Example:
+//
+// ```
+// var parser = ExprLib.createExpressionParser()
+//
+// var expr1 = parser.parse("a + 2")
+// var expr2 = parser.parse("a + b * c")
+// ```
+//
+//
+// ### Error Handling
+//
+// A user may enter an invalid expression. In this case, the parser will return `na` instead of a valid expression object. The parser stores the result of the last parse. You can use that result to retrieve the status and error information.
+//
+// Parser and error field structures:
+//
+// ```
+// type ExpressionParser
+//     bool isParsed           // `true` if the last parse completed successfully, `false` otherwise.
+//     ParseError error        // Error from the last parse attempt. If the last parse was successful, then this field is `na`.
+//
+// type ParseError
+//     string message          // Error message.
+//     int index               // Character index where the parser detected the error.
+// ```
+//
+// For example, suppose we want to display an error message on the chart if one of the expressions is invalid:
+//
+// ```
+// //@version=6
+// indicator("Parser Error Handling")
+//
+// import A1trdX/ExprLib/1 as ExprLib
+//
+// inputExpr1 = input.text_area("a + 2", "Expression 1")
+// inputExpr2 = input.text_area("a + b * c /", "Expression 2")
+//
+// displayErrorMessage(string errorMessage) =>
+//     var table errorMessageTable = na
+//     if na(errorMessageTable)
+//         errorMessageTable := table.new(position.top_right, 1, 1)
+//         errorMessageTable.cell(0, 0, errorMessage,
+//                 bgcolor = color.red,
+//                 text_color = color.white,
+//                 text_halign = text.align_left,
+//                 text_formatting = text.format_bold)
+//
+// checkParsed(ExprLib.ExpressionParser parser, string prefix) =>
+//     if not parser.isParsed
+//         displayErrorMessage(prefix + parser.error.message)
+//
+// var parser = ExprLib.createExpressionParser()
+//
+// var expr1 = parser.parse(inputExpr1)
+// checkParsed(parser, "Failed to parse expression #1:\n")
+//
+// var expr2 = parser.parse(inputExpr2)
+// checkParsed(parser, "Failed to parse expression #2:\n")
+// ```
+//
+// A blank expression (e.g., "") is allowed and will evaluate to `na` (or `false` when returning a boolean value).
+//
+//
+// ### Custom Constants
+//
+// You can add your own named constants during the parsing stage. To do this:
+// - Create a constant pool in advance using the `createConstantPool()` function.
+// - Set constants and their values using the `set()` method.
+// - Pass the constant pool to the `parse()` method.
+//
+// Example:
+//
+// ```
+// var constantPool = ExprLib.createConstantPool()
+//
+// if barstate.isfirst
+//     constantPool.set("one", 1)
+//     constantPool.set("two", 2)
+//     constantPool.set("three_p_one", 3.1)
+//     constantPool.set("yes", true)
+//     constantPool.set("no", false)
+//
+// var parser = ExprLib.createExpressionParser()
+// var expr = parser.parse("one + two", constantPool)
+// ```
+//
+// The `set()` method returns the same constant pool object, so you can chain calls together. This is more convenient and more elegant:
+//
+// ```
+// var constantPool = ExprLib.createConstantPool()
+//        .set("one", 1)
+//        .set("two", 2)
+//        .set("three_p_one", 3.1)
+//        .set("yes", true)
+//        .set("no", false) // Note that the indentation is 7 spaces (not a multiple of 4)
+//
+// var parser = ExprLib.createExpressionParser()
+// var expr = parser.parse("one + two", constantPool)
+// ```
+//
+// You can also override built-in constants:
+//
+// ```
+// var constantPool = ExprLib.createConstantPool()
+//        .set("true", false)
+//        .set("false", -1)
+//        .set("na", 0.0)
+// ```
+//
+//
+//
+// ## Evaluation
+//
+// ### Type Coercion
+//
+// An expression can consist of values of different data types. ExprLib does not have strict data type checking. Instead, all values are converted to `float` and then back if necessary.
+//
+// Converting `bool` to `float`:
+// - `true` -> `1.0`
+// - `false` -> `0.0`
+//
+// Converting `float` to `bool`:
+// - `0.0` or `na` -> `false`
+// - Any other value -> `true`
+//
+// Thus, expressions that incorrectly combine different data types are allowed. For example, `true + 2` will return `3.0`. Strict typing requires additional memory as well as additional computational resources during evaluation, which is a critical concern. Therefore, it was decided not to implement it.
+//
+// As in Pine Script, most operations with an `na` operand results in `na` or `false`, but logical operations first convert `na` to `false`, so their result follows boolean logic. For example:
+// - `3 - na` returns `na`
+// - `3 > na` returns `false`
+// - `3 <= na` also returns `false`
+// - `na AND true` returns `false`
+// - `na OR true` returns `true`
+// - `NOT na` returns `true`
+//
+//
+// ### Workflow
+//
+// To evaluate an expression:
+// - Create an evaluator in advance using the `createExpressionEvaluator()` function.
+// - Set variables and their values in the expression using the `setVariable()` method.
+// - Call the `evaluate()` or `evaluateToBool()` method, passing the expression as an argument.
+//
+// The `evaluate()` and `evaluateToBool()` methods differ in their return types. The former returns a `float` result, while the latter returns a `bool` result. The method to call depends on the expected result type.
+//
+// Example:
+//
+// ```
+// // Parsed expressions:
+// // - expr1 <= "(H - L) / 2 + L"
+// // - expr2 <= "rsi_oversold AND close > open"
+//
+//
+// // Initialize evaluator
+//
+// var evaluator = ExprLib.createExpressionEvaluator()
+//
+//
+// // Set variables and evaluate the first expression
+//
+// expr1.setVariable("H", high)
+// expr1.setVariable("L", low)
+//
+// float result1 = evaluator.evaluate(expr1)
+//
+//
+// // Set variables and evaluate the second expression
+//
+// rsi = ta.rsi(close, 14)
+//
+// expr2.setVariable("open", open)
+// expr2.setVariable("close", close)
+// expr2.setVariable("rsi_oversold", rsi < 30)
+// expr2.setVariable("rsi_overbought", rsi > 70)
+//
+// bool result2 = evaluator.evaluateToBool(expr2)
+// ```
+//
+//
+// ### Variables
+//
+// If an expression contains an identifier that is neither a function nor a constant, and this identifier has not been assigned a variable value, then this identifier is considered a constant with the value `na` (or `false` in boolean operations).
+//
+// The `setVariable()` method overrides existing constants (both built-in and custom). For example, by default, the identifier `e` is used as the constant Euler's number (~2.71828). However, you can make `e` your own variable:
+//
+// ```
+// // Parsed expressions:
+// // - expr <= "e + 1"
+//
+// expr.setVariable("e", 5)  // Now `e` is equal to `5` instead of `2.7182818284590452`
+//
+// result = evaluator.evaluate(expr) // `6.0`
+// ```
+//
+// The `setVariable()` method does not need to be called on each bar if the variable's value does not change. The expression always stores and uses the last value set.
+//
+// You can clear all previously set variables using the `clearVariables()` method. This can be useful if you have many variables and want to reset them all and set values for only a small subset.
+//
+//
+// ### Error Handling
+//
+// In some cases (for example, when dividing by zero), evaluation results in an error. In this case, `evaluate()` will return `na`, and `evaluateToBool()` will return `false`. Like the parser, the evaluator stores the result of the last evaluation.
+//
+// Evaluator and error field structures:
+//
+// ```
+// type ExpressionEvaluator
+//     bool isEvaluated                // `true` if the last evaluation completed successfully, `false` otherwise.
+//     EvaluationError error           // Error from the last evaluation attempt. If the last evaluation was successful, then this field is `na`.
+//
+// type EvaluationError
+//     EvaluationErrorReason reason    // Error reason.
+//     string message                  // Error message.
+//
+// enum EvaluationErrorReason
+//     DIVISION_BY_ZERO
+// ```
+//
+// Example:
+//
+// ```
+// //@version=6
+// indicator("Evaluator Error Handling")
+//
+// import A1trdX/ExprLib/1 as ExprLib
+//
+// inputExpr1 = input.text_area("a + 2", "Expression 1")
+// inputExpr2 = input.text_area("a + b / c", "Expression 2")
+//
+// displayErrorMessage(string errorMessage) =>
+//     var table errorMessageTable = na
+//     if na(errorMessageTable)
+//         errorMessageTable := table.new(position.top_right, 1, 1)
+//         errorMessageTable.cell(0, 0, errorMessage,
+//                 bgcolor = color.red,
+//                 text_color = color.white,
+//                 text_halign = text.align_left,
+//                 text_formatting = text.format_bold)
+//
+// // Parse
+//
+// checkParsed(ExprLib.ExpressionParser parser, string prefix) =>
+//     if not parser.isParsed
+//         displayErrorMessage(prefix + parser.error.message)
+//
+// var parser = ExprLib.createExpressionParser()
+//
+// var expr1 = parser.parse(inputExpr1)
+// checkParsed(parser, "Failed to parse expression #1:\n")
+//
+// var expr2 = parser.parse(inputExpr2)
+// checkParsed(parser, "Failed to parse expression #2:\n")
+//
+//
+// // Evaluate
+//
+// checkEvaluated(ExprLib.ExpressionEvaluator evaluator, string prefix) =>
+//     if not evaluator.isEvaluated
+//         displayErrorMessage(prefix + evaluator.error.message)
+//
+// var evaluator = ExprLib.createExpressionEvaluator()
+//
+// expr1.setVariable("a", open)
+// expr1.setVariable("b", close)
+// expr1.setVariable("c", 0)
+//
+// result1 = evaluator.evaluate(expr1)
+// checkEvaluated(evaluator, "Failed to evaluate expression #1:\n")
+//
+// expr2.setVariable("a", open)
+// expr2.setVariable("b", close)
+// expr2.setVariable("c", 0)
+//
+// result2 = evaluator.evaluate(expr2)
+// checkEvaluated(evaluator, "Failed to evaluate expression #2:\n")
+// ```
+//
+// Currently, the only possible cause of this error is division by zero. You can disable this error and have the evaluator interpret the result of division by zero as `na`. To do this, disable the corresponding flag in the evaluator:
+//
+// ```
+// evaluator.setFailOnDivisionByZero(false)
+// ```
+//
+// Thus, an expression like `na(5 / 0) ? 1 : 2` will return `1` instead of an error.
+//
+//
+//
+// ## Best Practices
+//
+// - Reuse `ExpressionParser` and `ExpressionEvaluator` objects whenever possible.
+// - Parse expressions only once, and evaluate them as needed. Parsing is slow. Evaluation is fast.
+// - If certain variable values change rarely, call `setVariable()` only when necessary.
+// - Try to avoid excessive numbers of variables whose values ​​change frequently. This can impact performance even if they're not used in the expression.
+//
+//
+//
+// ## API Reference
+//
+// ### Expression Parser
+//
+// ```
+// [b]ExpressionParser[/b]
+//   Expression parser.
+//   Fields:
+//     [b]isParsed (series bool)[/b]: `true` if the last parse completed successfully, `false` otherwise.
+//     [b]error (ParseError)[/b]: Error from the last parse attempt. If the last parse was successful, then this field is `na`.
+// ```
+//
+// ```
+// [b]createExpressionParser()[/b]
+//   Creates an expression parser.
+//   Returns: Expression parser.
+// ```
+//
+// ```
+// [b]method parse(parser, exprStr, constantPool)[/b]
+//   Parses an expression.
+//   Namespace types: ExpressionParser
+//   Parameters:
+//     [b]parser (ExpressionParser)[/b]: Expression parser.
+//     [b]exprStr (string)[/b]: Expression string. Can be empty, blank, or 'na'. That way expression is valid and will return `na` on evaluation.
+//     [b]constantPool (ExpressionConstantPool)[/b]: (Optional) Named constants.
+//   Returns: Parsed expression. If an error occurs during parsing, then the returned expression will be `na`.
+// You can check validity and error details accessing parser's `isParsed` and `error` fields.
+// ```
+//
+//
+// ### Expression
+//
+// ```
+// [b]Expression[/b]
+//   Parsed expression.
+// ```
+//
+// ```
+// [b]method setVariable(expr, identifier, value)[/b]
+//   Assigns a numeric value to a variable.
+//   Namespace types: Expression
+//   Parameters:
+//     [b]expr (Expression)[/b]: Expression.
+//     [b]identifier (string)[/b]: Variable name.
+//     [b]value (float)[/b]: Value.
+//   Returns: This expression.
+// ```
+//
+// ```
+// [b]method setVariable(expr, identifier, value)[/b]
+//   Assigns a boolean value to a variable.
+//   Namespace types: Expression
+//   Parameters:
+//     [b]expr (Expression)[/b]: Expression.
+//     [b]identifier (string)[/b]: Variable name.
+//     [b]value (bool)[/b]: Value.
+//   Returns: This expression.
+// ```
+//
+// ```
+// [b]method clearVariables(expr)[/b]
+//   Clears all variable values.
+//   Namespace types: Expression
+//   Parameters:
+//     [b]expr (Expression)[/b]: Expression.
+//   Returns: This expression.
+// ```
+//
+//
+// ### Constant Pool
+//
+// ```
+// [b]ExpressionConstantPool[/b]
+//   Expression constant pool.
+// ```
+//
+// ```
+// [b]createConstantPool()[/b]
+//   Creates an expression constant pool.
+//   Returns: Expression constant pool.
+// ```
+//
+// ```
+// [b]method set(pool, identifier, value)[/b]
+//   Assigns a numeric constant value.
+//   Namespace types: ExpressionConstantPool
+//   Parameters:
+//     [b]pool (ExpressionConstantPool)[/b]: Expression constant pool.
+//     [b]identifier (string)[/b]: Constant name.
+//     [b]value (float)[/b]: Value.
+//   Returns: This expression constant pool.
+// ```
+//
+// ```
+// [b]method set(pool, identifier, value)[/b]
+//   Assigns a boolean constant value.
+//   Namespace types: ExpressionConstantPool
+//   Parameters:
+//     [b]pool (ExpressionConstantPool)[/b]: Expression constant pool.
+//     [b]identifier (string)[/b]: Constant name.
+//     [b]value (bool)[/b]: Value.
+//   Returns: This expression constant pool.
+// ```
+//
+// ```
+// [b]method clear(pool)[/b]
+//   Clears all constants.
+//   Namespace types: ExpressionConstantPool
+//   Parameters:
+//     [b]pool (ExpressionConstantPool)[/b]: Expression constant pool.
+//   Returns: This expression constant pool.
+// ```
+//
+//
+// ### Expression Evaluator
+//
+// ```
+// [b]ExpressionEvaluator[/b]
+//   Expression evaluator.
+//   Fields:
+//     [b]isEvaluated (series bool)[/b]: `true` if the last evaluation completed successfully, `false` otherwise.
+//     [b]error (EvaluationError)[/b]: Error from the last evaluation attempt. If the last evaluation was successful, then this field is `na`.
+//     [b]result (series float)[/b]: Numeric result of the last evaluation.
+//     [b]boolResult (series bool)[/b]: Boolean result of the last evaluation.
+// ```
+//
+// ```
+// [b]createExpressionEvaluator()[/b]
+//   Creates an expression evaluator.
+//   Returns: Expression evaluator.
+// ```
+//
+// ```
+// [b]method evaluate(evaluator, expr)[/b]
+//   Evaluates an expression.
+//   Namespace types: ExpressionEvaluator
+//   Parameters:
+//     [b]evaluator (ExpressionEvaluator)[/b]: Expression evaluator.
+//     [b]expr (Expression)[/b]: Expression to evaluate.
+//   Returns: Numeric evaluation result.
+// For boolean-result expressions `1.0` means `true` and `0.0` means `false`.
+// Returns `na` if expression is empty.
+// ```
+//
+// ```
+// [b]method evaluateToBool(evaluator, expr)[/b]
+//   Evaluates an expression.
+//   Namespace types: ExpressionEvaluator
+//   Parameters:
+//     [b]evaluator (ExpressionEvaluator)[/b]: Expression evaluator.
+//     [b]expr (Expression)[/b]: Expression to evaluate.
+//   Returns: Boolean evaluation result.
+// Returns `false` if expression is empty.
+// ```
+//
+// ```
+// [b]method setFailOnDivisionByZero(evaluator, value)[/b]
+//   Sets whether division or modulo by zero should fail evaluation.
+//   Namespace types: ExpressionEvaluator
+//   Parameters:
+//     [b]evaluator (ExpressionEvaluator)[/b]: Expression evaluator.
+//     [b]value (bool)[/b]: If `true`, division or modulo by zero fails evaluation. If `false`, it produces `na`.
+//   Returns: This expression evaluator.
+// ```
+//
+//
+// ### Errors
+//
+// ```
+// [b]ParseError[/b]
+//   Error that occurred during expression parsing.
+//   Fields:
+//     [b]message (series string)[/b]: Error message.
+//     [b]index (series int)[/b]: Character index where the parser detected the error.
+// ```
+//
+// ```
+// [b]EvaluationError[/b]
+//   Error that occurred during expression evaluation.
+//   Fields:
+//     [b]reason (series EvaluationErrorReason)[/b]: Error reason.
+//     [b]message (series string)[/b]: Error message.
+// ```

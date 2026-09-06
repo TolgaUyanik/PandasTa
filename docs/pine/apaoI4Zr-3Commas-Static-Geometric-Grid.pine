@@ -1,0 +1,239 @@
+//@version=6
+// =====================================================================
+//  [3Commas] Static Geometric Grid — APE/USDT
+// ---------------------------------------------------------------------
+//  ⚠️ RECOMMENDED TIMEFRAME: 15 minutes
+//
+//
+//
+//  Pine backtest on OKX:APEUSDT, 15m chart, Jan 12 — May 14, 2026:
+//    Net Profit:    +365.72 USDT (+18.29%)
+//    Max Drawdown:  540.57 USDT (26.04%)
+//    Total Trades:  1,026
+//    Win Rate:      55.26% (567 / 1026)
+//    Profit Factor: 1.952
+//
+//  Differs from "Geometric Grid Machine" by having trailing-up off —
+//  this is a pure static-range grid for instruments expected to remain
+//  inside the configured High/Low boundary.
+// =====================================================================
+
+strategy(
+     title                   = "[3Commas] Static Geometric Grid — APE",
+     shorttitle              = "Static Grid APE",
+     overlay                 = true,
+     pyramiding              = 100,
+     initial_capital         = 2000,
+     default_qty_type        = strategy.cash,
+     default_qty_value       = 24.15,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.1,        // Bybit spot taker
+     slippage                = 2,
+     calc_on_every_tick      = false)
+
+// =====================================================================
+//                              INPUTS
+// =====================================================================
+highPx     = input.float(0.15466, "Grid High Price",                    step = 0.00001, group = "Grid Range")
+lowPx      = input.float(0.10591, "Grid Low Price",                     step = 0.00001, group = "Grid Range")
+levels     = input.int  (64,      "Grid Levels",     minval = 2, maxval = 100,           group = "Grid Range")
+gridMode   = input.string("Geometric", "Grid Mode", options = ["Geometric","Arithmetic"], group = "Grid Range")
+
+amountPerLevel = input.float(24.15,   "Amount per Level (USDT)",      minval = 0.01, step = 0.01, group = "Sizing")
+investment     = input.float(1545.84, "Total Investment (USDT, ref)", minval = 0.01, step = 1,   group = "Sizing")
+
+trailUp     = input.bool (false, "Trailing Up — shift grid when price exceeds High", group = "Behavior")
+trailUpThr  = input.float(3.0,   "Trail Up Threshold % above High",  minval = 0.1, step = 0.1, group = "Behavior")
+trailShiftPct = input.float(50,  "Shift Up Magnitude % of range",    minval = 1, maxval = 100, step = 1, group = "Behavior")
+
+useDates = input.bool(true, "Limit by Date Range",                                                  group = "Backtest Period")
+startTs  = input.time(timestamp("2026-01-12 00:00 +0000"), "Start", group = "Backtest Period")
+endTs    = input.time(timestamp("2026-05-14 00:00 +0000"), "End",   group = "Backtest Period")
+inWindow = (not useDates) or (time >= startTs and time <= endTs)
+
+botId      = input.string("12345678",         "Bot ID",                                      group = "Webhook (GRID Bot)")
+emailToken = input.string("YOUR_EMAIL_TOKEN", "Email Token",                                 group = "Webhook (GRID Bot)")
+pairLabel  = input.string("USDT_APE",         "Pair (Bot format: QUOTE_BASE)",               group = "Webhook (GRID Bot)")
+
+// — Display —
+showGridLines = input.bool(true, "Show grid lines on chart",   group = "Display")
+showStats     = input.bool(true, "Show stats card",            group = "Display")
+statsPosStr   = input.string("top_left", "Stats card position",
+     options = ["top_left","top_center","top_right","middle_left","middle_right","bottom_left","bottom_center","bottom_right"], group = "Display")
+showWM        = input.bool(true, "Show watermark",             group = "Display")
+wmText        = input.string("3Commas", "Watermark text",      group = "Display")
+wmPosStr      = input.string("top_right", "Watermark position",
+     options = ["top_left","top_center","top_right","middle_left","middle_center","middle_right","bottom_left","bottom_center","bottom_right"], group = "Display")
+wmSizeStr     = input.string("huge", "Watermark size",
+     options = ["tiny","small","normal","large","huge"], group = "Display")
+wmAlpha       = input.int(70, "Watermark transparency (0=solid)", minval = 0, maxval = 100, group = "Display")
+
+// =====================================================================
+//                       TIMEFRAME WARNING
+// =====================================================================
+recommendedTF = input.timeframe("15", "Recommended TF (for warning)", group = "Timeframe")
+tfMismatch = timeframe.period != recommendedTF
+
+var label tfWarn = na
+if barstate.islast and tfMismatch
+    label.delete(tfWarn)
+    tfWarn := label.new(
+         x      = bar_index,
+         y      = high,
+         text   = "⚠ This strategy is calibrated for " + recommendedTF + "m chart.\nCurrent TF: " + timeframe.period + ". Results may differ significantly.",
+         style  = label.style_label_down,
+         color  = color.new(color.orange, 20),
+         textcolor = color.white,
+         size   = size.normal,
+         yloc   = yloc.abovebar)
+
+// =====================================================================
+//                          GRID STATE
+// =====================================================================
+var float curHigh     = highPx
+var float curLow      = lowPx
+var array<float> gridLevels = array.new<float>(levels, 0.0)
+var array<bool>  filled     = array.new<bool>(levels, false)
+var array<line>  gridLines  = array.new<line>(0)
+
+f_computeLevels() =>
+    for i = 0 to levels - 1
+        ratio = i / (levels - 1.0)
+        lvl = gridMode == "Geometric"
+             ? curLow * math.pow(curHigh / curLow, ratio)
+             : curLow + (curHigh - curLow) * ratio
+        array.set(gridLevels, i, lvl)
+
+if barstate.isfirst
+    f_computeLevels()
+
+// =====================================================================
+//                       TRAILING UP — shift grid
+// =====================================================================
+if trailUp and inWindow and close > curHigh * (1.0 + trailUpThr / 100.0)
+    rng = curHigh - curLow
+    shift = rng * trailShiftPct / 100.0
+    curHigh := curHigh + shift
+    curLow  := curLow  + shift
+    f_computeLevels()
+
+// =====================================================================
+//                       GRID TRADING LOGIC
+// =====================================================================
+if inWindow and barstate.isconfirmed and bar_index > 0
+    // SELL pass
+    for i = 0 to levels - 2
+        if array.get(filled, i)
+            sellLvl = array.get(gridLevels, i + 1)
+            if close >= sellLvl and close[1] < sellLvl
+                strategy.close("B" + str.tostring(i), comment = "Grid Sell L" + str.tostring(i))
+                array.set(filled, i, false)
+
+    // BUY pass
+    for i = 0 to levels - 1
+        if not array.get(filled, i)
+            buyLvl = array.get(gridLevels, i)
+            if close <= buyLvl and close[1] > buyLvl
+                qty = amountPerLevel / buyLvl
+                strategy.entry("B" + str.tostring(i), strategy.long, qty = qty, comment = "Grid Buy L" + str.tostring(i))
+                array.set(filled, i, true)
+
+// =====================================================================
+//                       VISUALIZE GRID LINES
+// =====================================================================
+if barstate.islast and showGridLines
+    while array.size(gridLines) > 0
+        line.delete(array.pop(gridLines))
+    for i = 0 to levels - 1
+        lvl = array.get(gridLevels, i)
+        isHi = i == levels - 1
+        isLo = i == 0
+        clr = isHi ? color.new(color.red, 30) : isLo ? color.new(color.green, 30) : color.new(color.aqua, 80)
+        wd  = (isHi or isLo) ? 2 : 1
+        ln = line.new(bar_index - 1, lvl, bar_index, lvl, color = clr, width = wd, extend = extend.both)
+        array.push(gridLines, ln)
+
+// =====================================================================
+//                          STATS CARD
+// =====================================================================
+f_pos(s) =>
+    s == "top_left"      ? position.top_left      :
+     s == "top_center"    ? position.top_center    :
+     s == "top_right"     ? position.top_right     :
+     s == "middle_left"   ? position.middle_left   :
+     s == "middle_center" ? position.middle_center :
+     s == "middle_right"  ? position.middle_right  :
+     s == "bottom_left"   ? position.bottom_left   :
+     s == "bottom_center" ? position.bottom_center :
+     position.bottom_right
+
+f_size(s) =>
+    s == "tiny"   ? size.tiny   :
+     s == "small"  ? size.small  :
+     s == "normal" ? size.normal :
+     s == "large"  ? size.large  :
+     size.huge
+
+np      = strategy.netprofit
+npPct   = strategy.initial_capital > 0 ? np / strategy.initial_capital * 100 : 0.0
+dd      = strategy.max_drawdown
+ddPct   = strategy.initial_capital > 0 ? dd / strategy.initial_capital * 100 : 0.0
+nTrades = strategy.closedtrades
+wins    = strategy.wintrades
+wrPct   = nTrades > 0 ? wins / nTrades * 100 : 0.0
+gp      = strategy.grossprofit
+gl      = strategy.grossloss
+pf      = gl > 0 ? gp / gl : 0.0
+
+clrPos    = color.new(#00C853, 0)
+clrNeg    = color.new(#D50000, 0)
+clrNeutral= color.new(#FFFFFF, 10)
+clrHdrBg  = color.new(#1E88E5, 10)
+clrRowBg  = color.new(#0D1B2A, 25)
+clrAltBg  = color.new(#152238, 25)
+clrBorder = color.new(#1E88E5, 60)
+
+var table stats = na
+if showStats and barstate.islast
+    if na(stats)
+        stats := table.new(f_pos(statsPosStr), 2, 6, bgcolor = clrRowBg, border_width = 1, border_color = clrBorder, frame_color = clrBorder, frame_width = 1)
+
+    table.cell(stats, 0, 0, "GRID BACKTEST RESULTS", text_color = color.white, text_size = size.normal, bgcolor = clrHdrBg, text_halign = text.align_center)
+    table.cell(stats, 1, 0, "—",                     text_color = clrHdrBg,   text_size = size.normal, bgcolor = clrHdrBg, text_halign = text.align_center)
+
+    table.cell(stats, 0, 1, "Net P&L",  text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 1, (np >= 0 ? "+" : "") + str.tostring(np, "0.00") + "  (" + (npPct >= 0 ? "+" : "") + str.tostring(npPct, "0.00") + "%)",
+         text_color = np >= 0 ? clrPos : clrNeg, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 2, "Max Drawdown", text_color = clrNeutral, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_left)
+    table.cell(stats, 1, 2, str.tostring(dd, "0.00") + "  (" + str.tostring(ddPct, "0.00") + "%)",
+         text_color = clrNeg, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 3, "Grid Fills", text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 3, str.tostring(nTrades), text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 4, "Win Rate", text_color = clrNeutral, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_left)
+    table.cell(stats, 1, 4, str.tostring(wrPct, "0.00") + "%  (" + str.tostring(wins) + "/" + str.tostring(nTrades) + ")",
+         text_color = wrPct >= 50 ? clrPos : clrNeg, text_size = size.normal, bgcolor = clrAltBg, text_halign = text.align_right)
+
+    table.cell(stats, 0, 5, "Profit Factor", text_color = clrNeutral, text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_left)
+    table.cell(stats, 1, 5, str.tostring(pf, "0.000"), text_color = pf >= 1.5 ? clrPos : (pf >= 1.0 ? clrNeutral : clrNeg), text_size = size.normal, bgcolor = clrRowBg, text_halign = text.align_right)
+
+// =====================================================================
+//                          BRAND WATERMARK
+// =====================================================================
+var table wm = na
+if showWM and barstate.islast
+    if na(wm)
+        wm := table.new(f_pos(wmPosStr), 1, 1, bgcolor = color.new(color.black, 100), border_width = 0)
+    table.cell(wm, 0, 0, wmText, text_color = color.new(color.white, wmAlpha), text_size = f_size(wmSizeStr), bgcolor = color.new(color.black, 100))
+
+// =====================================================================
+//                          WEBHOOK ALERTS
+// =====================================================================
+gridStartMsg = '{"message_type":"bot","bot_id":' + botId + ',"email_token":"' + emailToken + '","action":"grid_start","pair":"' + pairLabel + '"}'
+
+var bool startedNotified = false
+if (not startedNotified) and inWindow and barstate.isconfirmed
+    alert(gridStartMsg, alert.freq_once_per_bar_close)
+    startedNotified := true

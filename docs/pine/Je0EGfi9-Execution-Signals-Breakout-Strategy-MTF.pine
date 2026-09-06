@@ -1,0 +1,322 @@
+//@version=6
+strategy("Execution Signals — 1m Execution / 13m Signals", overlay = true,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     calc_on_every_tick      = false,
+     pyramiding              = 0,
+     process_orders_on_close = true,
+     max_lines_count         = 500,
+     max_labels_count        = 500,
+     max_boxes_count         = 500)
+
+// ───── SIGNAL SETTINGS ─────
+signalTF      = input.timeframe("5", "Signal Timeframe", group = "Signal Settings")
+useFailures   = input.bool(true, "Trade Failures",       group = "Signal Settings")
+useInsideBars = input.bool(true, "Trade Inside Bars",    group = "Signal Settings")
+
+// ───── DISPLAY SETTINGS ─────
+showRange       = input.bool(true,  "Show Range Labels",          group = "Display")
+offsetTicks     = input.int(2,      "Range Label Offset (ticks)", group = "Display", minval = 0)
+smallRangeLimit = input.float(0.0,  "Max Range For Tight Candle", group = "Display", step = 0.01)
+minRange        = input.float(0.0,  "Minimum Failure Range",      group = "Display", step = 0.01)
+
+textSizeInput = input.string("small", "Range Text Size", group = "Display",
+     options = ["tiny", "small", "normal", "large", "huge"])
+labelSize = switch textSizeInput
+    "tiny"   => size.tiny
+    "large"  => size.large
+    "huge"   => size.huge
+    "normal" => size.normal
+    =>          size.small
+
+// ───── DAY-SET LEVEL SETTINGS ─────
+engineColor  = input.color(color.new(color.blue, 0),   "Hourly Level Color", group = "Day-Set Levels")
+engineWidth  = input.int(2, "Hourly Level Width",       group = "Day-Set Levels", minval = 1, maxval = 4)
+pdhlColor    = input.color(color.new(color.yellow, 0), "PDH/PDL Color",      group = "Day-Set Levels")
+pdhlWidth    = input.int(2, "PDH/PDL Width",            group = "Day-Set Levels", minval = 1, maxval = 4)
+atrRelevMult = input.float(2.0, "Daily ATR Relevance Multiplier", group = "Day-Set Levels", step = 0.25)
+
+// ───── PROFIT MANAGEMENT ─────
+rMultiple  = input.float(2.0, "Take Profit (R multiple)",   group = "Profit Management", step = 0.25, minval = 0.25)
+useBE      = input.bool(false, "Break Even Mode",           group = "Profit Management")
+useCloseTP = input.bool(false, "Close At Target Mode",      group = "Profit Management")
+profitPts  = input.float(10.0, "Profit Threshold (points)", group = "Profit Management", step = 0.25)
+
+beActive    = useBE and not useCloseTP
+closeActive = useCloseTP and not useBE
+
+// ───── CHART GUARD ─────
+if not timeframe.isintraday
+    runtime.error("Intraday only.")
+if timeframe.in_seconds() >= timeframe.in_seconds(signalTF)
+    runtime.error("Chart timeframe must be BELOW the signal timeframe. Recommended: 1m chart, 5m signals.")
+
+// ───── SIGNAL TF DATA ─────
+sT = request.security(syminfo.tickerid, signalTF, time,  lookahead = barmerge.lookahead_off)
+sO = request.security(syminfo.tickerid, signalTF, open,  lookahead = barmerge.lookahead_off)
+sH = request.security(syminfo.tickerid, signalTF, high,  lookahead = barmerge.lookahead_off)
+sL = request.security(syminfo.tickerid, signalTF, low,   lookahead = barmerge.lookahead_off)
+sC = request.security(syminfo.tickerid, signalTF, close, lookahead = barmerge.lookahead_off)
+
+newPeriod = ta.change(sT) != 0
+
+// ───── 1H DATA (day-set levels) ─────
+ho    = request.security(syminfo.tickerid, "60", open,       lookahead = barmerge.lookahead_off)
+hc    = request.security(syminfo.tickerid, "60", close,      lookahead = barmerge.lookahead_off)
+ht    = request.security(syminfo.tickerid, "60", time,       lookahead = barmerge.lookahead_off)
+atr1h = request.security(syminfo.tickerid, "60", ta.atr(14), lookahead = barmerge.lookahead_off)
+
+dailyATR = request.security(syminfo.tickerid, "D", ta.atr(14), lookahead = barmerge.lookahead_off)
+
+newHour = ta.change(ht) != 0
+
+// ───── SESSION (New York) ─────
+barHour   = hour(time,       "America/New_York")
+barMinute = minute(time,     "America/New_York")
+barDay    = dayofmonth(time, "America/New_York")
+barMonth  = month(time,      "America/New_York")
+barYear   = year(time,       "America/New_York")
+
+newDayNY   = ta.change(barDay) != 0
+isRTH      = (barHour == 9 and barMinute >= 30) or (barHour >= 10 and barHour < 16)
+inDeadZone = barHour >= 16 and barHour < 18
+isCloseBar = barHour == 16 and barMinute == 9
+
+prevH1Hour = hour(ht[1], "America/New_York")
+wasRTH1H   = prevH1Hour >= 9 and prevH1Hour < 16
+
+// ─────────────────────────────────────────────
+// MASTER LEVEL LIST
+// ─────────────────────────────────────────────
+var float[] masterPrices = array.new_float()
+var int[]   masterTimes  = array.new_int()
+
+
+if newHour and wasRTH1H and array.size(masterPrices) > 0
+    for i = array.size(masterPrices) - 1 to 0
+        lvl = array.get(masterPrices, i)
+        if (ho < lvl and hc > lvl) or (ho > lvl and hc < lvl)
+            array.remove(masterPrices, i)
+            array.remove(masterTimes,  i)
+
+if newHour and wasRTH1H
+    flippedUp   = hc[1] < ho[1] and hc > ho
+    flippedDown = hc[1] > ho[1] and hc < ho
+
+    if flippedUp or flippedDown
+        minSpacing  = atr1h * 0.25
+        threeMonths = 90 * 24 * 60 * 60 * 1000
+        allowNew    = true
+
+        if array.size(masterPrices) > 0
+            for i = array.size(masterPrices) - 1 to 0
+                existingPrice = array.get(masterPrices, i)
+                existingTime  = array.get(masterTimes,  i)
+                if math.abs(existingPrice - ho) < minSpacing
+                    if (time - existingTime) > threeMonths
+                        array.remove(masterPrices, i)
+                        array.remove(masterTimes,  i)
+                    else
+                        allowNew := false
+
+        if allowNew
+            array.push(masterPrices, ho)
+            array.push(masterTimes,  time)
+
+// ─────────────────────────────────────────────
+// DAILY CYCLE: accumulate RTH → deploy day-set
+// ─────────────────────────────────────────────
+var float rthHigh     = na
+var float rthLow      = na
+var float refClose    = na
+var bool  setDeployed = true
+
+deployEvening = barHour >= 18
+deployMorning = newDayNY and barHour < 16
+deployNow     = not setDeployed and not na(rthHigh) and not na(rthLow) and (deployEvening or deployMorning)
+
+if deployNow
+    dayShift  = deployEvening ? 0 : -1
+    startTime = timestamp("America/New_York", barYear, barMonth, barDay + dayShift,     18, 0)
+    endTime   = timestamp("America/New_York", barYear, barMonth, barDay + dayShift + 1, 16, 0)
+
+    line.new(startTime, rthHigh, endTime, rthHigh,
+         xloc = xloc.bar_time, color = pdhlColor, width = pdhlWidth)
+    line.new(startTime, rthLow, endTime, rthLow,
+         xloc = xloc.bar_time, color = pdhlColor, width = pdhlWidth)
+
+    maxDist = dailyATR * atrRelevMult
+    if array.size(masterPrices) > 0
+        for i = 0 to array.size(masterPrices) - 1
+            lvl = array.get(masterPrices, i)
+            if math.abs(lvl - refClose) <= maxDist
+                line.new(startTime, lvl, endTime, lvl,
+                     xloc = xloc.bar_time, color = engineColor, width = engineWidth)
+
+    setDeployed := true
+    rthHigh     := na
+    rthLow      := na
+
+if isRTH
+    rthHigh     := na(rthHigh) ? high : math.max(rthHigh, high)
+    rthLow      := na(rthLow)  ? low  : math.min(rthLow,  low)
+    refClose    := close
+    setDeployed := false
+
+// ───── VWAP ─────
+vwapValue = ta.vwap(hlc3)
+plot(vwapValue, "VWAP", color = color.new(color.purple, 0), linewidth = 2)
+
+// ─────────────────────────────────────────────
+// SIGNAL DETECTION (on completed signal-TF bars)
+// ─────────────────────────────────────────────
+var float c1O = na
+var float c1H = na
+var float c1L = na
+var float c1C = na
+var float c2H = na
+var float c2L = na
+
+var float sigHigh  = na
+var float sigLow   = na
+var box   tpBox = na
+var box   slBox = na
+var bool  pending  = false
+var int   pendQty  = 1
+var bool  thresholdHit = false
+
+flat = strategy.position_size == 0
+
+regFailHigh = false
+regFailLow  = false
+regInside   = false
+regRange    = float(na)
+
+if newPeriod
+    // Expire any pending order — its execution window just closed
+    if pending and flat
+        pending := false
+
+    // The just-completed signal-TF bar
+    nO = sO[1]
+    nH = sH[1]
+    nL = sL[1]
+    nC = sC[1]
+
+    if not na(c1H) and not na(nH)
+        uw  = nH - math.max(nO, nC)
+        lw  = math.min(nO, nC) - nL
+        rng = nH - nL
+
+        fH = nH > c1H and nC <= c1H and uw > 0
+        fL = nL < c1L and nC >= c1L and lw > 0
+        rv = rng >= minRange
+        ib = nH < c1H and nL > c1L
+
+        regFailHigh := fH and rv and useFailures
+        regFailLow  := fL and rv and useFailures
+        regInside   := ib and useInsideBars
+        regRange    := rng
+
+        if (regFailHigh or regFailLow or regInside) and flat and not inDeadZone
+            sigHigh := nH
+            sigLow  := nL
+            pendQty := regInside ? 2 : 1
+            pending := true
+
+    // Shift completed-bar memory
+    c2H := c1H
+    c2L := c1L
+    c1O := nO
+    c1H := nH
+    c1L := nL
+    c1C := nC
+
+tightCandle = (regFailHigh or regFailLow or regInside) and smallRangeLimit > 0 and regRange <= smallRangeLimit
+
+// ─────────────────────────────────────────────
+// 1m EXECUTION: first 1m close beyond a side wins.
+// Entry kills pending → other side can never fire (no flipping).
+// ─────────────────────────────────────────────
+if pending and flat and not inDeadZone
+    if close > sigHigh
+        stopDist = close - sigLow
+        strategy.entry("Long", strategy.long, qty = pendQty)
+        strategy.exit("Long X", from_entry = "Long",
+             stop  = sigLow,
+             limit = close + stopDist * rMultiple),
+             tpBox := box.new(bar_index, close + stopDist * rMultiple, bar_index, close,
+             bgcolor = color.new(color.green, 85), border_color = color.new(color.green, 50))
+        slBox := box.new(bar_index, close, bar_index, sigLow,
+             bgcolor = color.new(color.red, 85), border_color = color.new(color.red, 50))
+        pending      := false
+        thresholdHit := false
+    else if close < sigLow
+        stopDist = sigHigh - close
+        strategy.entry("Short", strategy.short, qty = pendQty)
+        strategy.exit("Short X", from_entry = "Short",
+             stop  = sigHigh,
+             limit = close - stopDist * rMultiple),
+             tpBox := box.new(bar_index, close, bar_index, close - stopDist * rMultiple,
+             bgcolor = color.new(color.green, 85), border_color = color.new(color.green, 50))
+        slBox := box.new(bar_index, sigHigh, bar_index, close,
+             bgcolor = color.new(color.red, 85), border_color = color.new(color.red, 50))
+        pending      := false
+        thresholdHit := false
+
+// ───── PROFIT MANAGEMENT (1m closes) ─────
+if not flat
+    dir       = strategy.position_size > 0 ? 1 : -1
+    avgPrice  = strategy.position_avg_price
+    profitNow = dir == 1 ? (close - avgPrice) : (avgPrice - close)
+
+    if profitNow >= profitPts and not thresholdHit
+        thresholdHit := true
+
+    if beActive and thresholdHit
+        if dir == 1 and close <= avgPrice
+            strategy.close("Long", comment = "BE Exit")
+            thresholdHit := false
+        if dir == -1 and close >= avgPrice
+            strategy.close("Short", comment = "BE Exit")
+            thresholdHit := false
+
+    if closeActive and thresholdHit
+        strategy.close_all(comment = "Target Close")
+        thresholdHit := false
+
+// ───── EOD FORCE CLOSE ─────
+if isCloseBar
+    if not flat
+        strategy.close_all(comment = "EOD")
+    pending      := false
+    thresholdHit := false
+
+// ───── SIGNAL MARKERS ─────
+plotshape(regFailHigh, "Failure High", style = shape.triangledown, location = location.abovebar, color = color.red,    size = size.tiny)
+plotshape(regFailLow,  "Failure Low",  style = shape.triangleup,   location = location.belowbar, color = color.lime,   size = size.tiny)
+plotshape(regInside,   "Inside Bar",   style = shape.diamond,      location = location.abovebar, color = color.yellow, size = size.tiny)
+
+// ───── RANGE LABELS ─────
+if showRange and (regFailHigh or regFailLow or regInside)
+    label.new(
+         bar_index,
+         low - offsetTicks * syminfo.mintick,
+         str.tostring(regRange, format.mintick),
+         style     = label.style_none,
+         textcolor = color.gray,
+         size      = labelSize)
+
+// ───── ALERTS ─────
+// ───── POSITION LIFECYCLE ─────
+justEntered = strategy.position_size != 0 and strategy.position_size[1] == 0
+justExited  = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// Stretch boxes while in a trade; freeze them on exit
+if not na(tpBox) and (strategy.position_size != 0 or justExited)
+    box.set_right(tpBox, bar_index)
+    box.set_right(slBox, bar_index)
+
+// ───── ALERTS ─────
+alertcondition(justEntered, title = "Entry", message = "Position opened")
+alertcondition(justExited,  title = "Exit",  message = "Position closed")

@@ -1,0 +1,196 @@
+//@version=6
+indicator("1M Opening POC Lines", overlay=true, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
+
+// ===== Inputs =====
+tz = input.string("UTC-4", "Session Timezone")
+
+displayMode = input.string("Current Day", "Show POCs From", options=["Current Day", "Past 3 Days", "Past Week", "Past Month", "All Loaded History"])
+
+showLastPOCs = input.int(6, "Show Last POCs", minval=1, maxval=100)
+
+pocSource = input.string("Close", "POC Price Source", options=["Close", "HLC3", "OHLC4"])
+
+rows = input.int(48, "POC Rows", minval=5, maxval=150)
+extendLines = input.bool(true, "Extend Lines Right")
+showLabels = input.bool(true, "Show Labels")
+showWarning = input.bool(true, "Show 1M Warning")
+
+asiaSession = input.session("1800-1815", "Asia POC Window")
+londonSession = input.session("0300-0315", "London POC Window")
+nySession = input.session("0800-0815", "NY POC Window")
+
+asiaColor = input.color(color.orange, "Asia POC Colour")
+londonColor = input.color(color.aqua, "London POC Colour")
+nyColor = input.color(color.lime, "NY POC Colour")
+
+// ===== Timeframe Warning =====
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+
+var label warningLabel = na
+
+if showWarning and not isOneMinute and barstate.islast
+    if na(warningLabel)
+        warningLabel := label.new(bar_index, high, "Use this on the 1-minute chart for accurate opening POCs", style=label.style_label_down, color=color.red, textcolor=color.white)
+    else
+        label.set_xy(warningLabel, bar_index, high)
+        label.set_text(warningLabel, "Use this on the 1-minute chart for accurate opening POCs")
+
+// ===== Date Filter =====
+currentDayStart = timestamp(tz, year(timenow, tz), month(timenow, tz), dayofmonth(timenow, tz), 0, 0)
+
+daysBack = displayMode == "Current Day" ? 0 : displayMode == "Past 3 Days" ? 3 : displayMode == "Past Week" ? 7 : displayMode == "Past Month" ? 31 : 100000
+
+cutoffTime = displayMode == "Current Day" ? currentDayStart : timenow - daysBack * 24 * 60 * 60 * 1000
+
+showAllHistory = displayMode == "All Loaded History"
+
+f_should_show(int sessionTime) =>
+    showAllHistory or sessionTime >= cutoffTime
+
+// ===== Source Price =====
+srcPrice = pocSource == "Close" ? close : pocSource == "HLC3" ? hlc3 : ohlc4
+
+// ===== Stored POC Lines / Labels =====
+var line[] pocLines = array.new_line()
+var label[] pocLabels = array.new_label()
+
+// ===== POC Calculation =====
+f_calc_poc_from_price(array<float> prices, array<float> vols, float sessionHigh, float sessionLow, int rowCount) =>
+    float poc = na
+    int count = array.size(prices)
+    if count > 0
+        if sessionHigh == sessionLow
+            poc := array.get(prices, 0)
+        else
+            array<float> bins = array.new_float(rowCount, 0.0)
+            float rangeSize = sessionHigh - sessionLow
+            float binSize = rangeSize / rowCount
+
+            for i = 0 to count - 1
+                float price = array.get(prices, i)
+                float vol = array.get(vols, i)
+                int rawIndex = int(math.floor((price - sessionLow) / binSize))
+                int binIndex = int(math.max(0, math.min(rowCount - 1, rawIndex)))
+                float oldVol = array.get(bins, binIndex)
+                array.set(bins, binIndex, oldVol + vol)
+
+            float maxVol = 0.0
+            int pocIndex = 0
+
+            for b = 0 to rowCount - 1
+                float binVol = array.get(bins, b)
+                if binVol > maxVol
+                    maxVol := binVol
+                    pocIndex := b
+
+            poc := sessionLow + (pocIndex + 0.5) * binSize
+    poc
+
+// ===== Line Creator =====
+f_create_poc_line(string name, string windowText, int startBar, int sessionStartTime, float price, color lineColor) =>
+    if f_should_show(sessionStartTime)
+        lineExtend = extendLines ? extend.right : extend.none
+        newLine = line.new(startBar, price, bar_index, price, xloc=xloc.bar_index, extend=lineExtend, color=lineColor, width=2)
+        array.push(pocLines, newLine)
+
+        if showLabels
+            labelText = name + " POC " + windowText + ": " + str.tostring(price, format.mintick)
+            newLabel = label.new(bar_index, price, labelText, xloc=xloc.bar_index, style=label.style_label_left, color=lineColor, textcolor=color.white)
+            array.push(pocLabels, newLabel)
+
+        while array.size(pocLines) > showLastPOCs
+            oldLine = array.shift(pocLines)
+            line.delete(oldLine)
+
+        while array.size(pocLabels) > showLastPOCs
+            oldLabel = array.shift(pocLabels)
+            label.delete(oldLabel)
+
+// ===== Session Detection =====
+inAsia = not na(time(timeframe.period, asiaSession, tz))
+inLondon = not na(time(timeframe.period, londonSession, tz))
+inNY = not na(time(timeframe.period, nySession, tz))
+
+// ===== Asia Variables =====
+var array<float> asiaPrices = array.new_float()
+var array<float> asiaVols = array.new_float()
+var float asiaHigh = na
+var float asiaLow = na
+var int asiaStartBar = na
+var int asiaStartTime = na
+
+// ===== London Variables =====
+var array<float> londonPrices = array.new_float()
+var array<float> londonVols = array.new_float()
+var float londonHigh = na
+var float londonLow = na
+var int londonStartBar = na
+var int londonStartTime = na
+
+// ===== NY Variables =====
+var array<float> nyPrices = array.new_float()
+var array<float> nyVols = array.new_float()
+var float nyHigh = na
+var float nyLow = na
+var int nyStartBar = na
+var int nyStartTime = na
+
+// ===== Asia POC =====
+if inAsia and not inAsia[1]
+    array.clear(asiaPrices)
+    array.clear(asiaVols)
+    asiaHigh := high
+    asiaLow := low
+    asiaStartBar := bar_index
+    asiaStartTime := time
+
+if inAsia
+    array.push(asiaPrices, srcPrice)
+    array.push(asiaVols, volume)
+    asiaHigh := math.max(asiaHigh, high)
+    asiaLow := math.min(asiaLow, low)
+
+if not inAsia and inAsia[1]
+    float asiaPoc = f_calc_poc_from_price(asiaPrices, asiaVols, asiaHigh, asiaLow, rows)
+    if not na(asiaPoc)
+        f_create_poc_line("Asia", "18:00-18:15", asiaStartBar, asiaStartTime, asiaPoc, asiaColor)
+
+// ===== London POC =====
+if inLondon and not inLondon[1]
+    array.clear(londonPrices)
+    array.clear(londonVols)
+    londonHigh := high
+    londonLow := low
+    londonStartBar := bar_index
+    londonStartTime := time
+
+if inLondon
+    array.push(londonPrices, srcPrice)
+    array.push(londonVols, volume)
+    londonHigh := math.max(londonHigh, high)
+    londonLow := math.min(londonLow, low)
+
+if not inLondon and inLondon[1]
+    float londonPoc = f_calc_poc_from_price(londonPrices, londonVols, londonHigh, londonLow, rows)
+    if not na(londonPoc)
+        f_create_poc_line("London", "03:00-03:15", londonStartBar, londonStartTime, londonPoc, londonColor)
+
+// ===== NY POC =====
+if inNY and not inNY[1]
+    array.clear(nyPrices)
+    array.clear(nyVols)
+    nyHigh := high
+    nyLow := low
+    nyStartBar := bar_index
+    nyStartTime := time
+
+if inNY
+    array.push(nyPrices, srcPrice)
+    array.push(nyVols, volume)
+    nyHigh := math.max(nyHigh, high)
+    nyLow := math.min(nyLow, low)
+
+if not inNY and inNY[1]
+    float nyPoc = f_calc_poc_from_price(nyPrices, nyVols, nyHigh, nyLow, rows)
+    if not na(nyPoc)
+        f_create_poc_line("NY", "08:00-08:15", nyStartBar, nyStartTime, nyPoc, nyColor)

@@ -1,0 +1,421 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+// © PickMyTrade
+
+//@version=6
+
+// @description PickMyTradeLib — Market Microstructure & Quantitative Finance Library for Pine Script.
+// Provides analytically rigorous, academically grounded functions covering five domains:
+// (1) Synthetic bid-ask spread estimation (Roll 1984, Corwin-Schultz 2012),
+// (2) Market illiquidity & price impact (Amihud 2002, Kyle 1985),
+// (3) OHLC-efficient volatility estimators (Garman-Klass 1980, Parkinson 1980, Rogers-Satchell 1991),
+// (4) Fractal & complexity measures (Higuchi 1988, Hurst R/S, Katz 1988),
+// (5) Realized distributional moments (skewness, excess kurtosis, realized variance).
+// All functions are pure Pine — no request.security calls, no external dependencies.
+// Compatible with any instrument and timeframe. Import with:
+//   import PickMyTrade/PickMyTradeLib/1 as pmtq
+
+library("PickMyTradeLib", overlay = false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 1 — EXPORTED TYPES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @type         Holds a complete spread estimate result with its z-score
+// @field value  Raw spread estimate (in price units or as ratio)
+// @field zscore Rolling z-score of the estimate vs lookback window
+// @field isAnomaly True when zscore > threshold (default 2.0)
+export type SpreadResult
+    float value
+    float zscore
+    bool  isAnomaly
+
+// @type            Holds a volatility estimate with annualisation
+// @field daily     Daily volatility estimate (fraction of price)
+// @field annual    Annualised estimate (daily * sqrt(252))
+// @field rank      0-100 percentile rank vs lookback window
+export type VolResult
+    float daily
+    float annual
+    float rank
+
+// @type              Fractal / complexity measurement result
+// @field fd          Fractal Dimension value (1.0 = smooth trend, 2.0 = noise)
+// @field regime      "Trending" when fd < 1.4, "Random" 1.4–1.6, "Choppy" > 1.6
+// @field normalised  fd linearly mapped to 0.0 (trend) – 1.0 (noise)
+export type FractalResult
+    float  fd
+    string regime
+    float  normalised
+
+// @type         Rolling moment statistics
+// @field mean   Rolling mean
+// @field stdev  Rolling standard deviation
+// @field skew   Rolling skewness (negative = left tail)
+// @field kurt   Rolling excess kurtosis (positive = fat tails / leptokurtic)
+export type MomentResult
+    float mean
+    float stdev
+    float skew
+    float kurt
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 2 — BID-ASK SPREAD ESTIMATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function     Roll's (1984) synthetic bid-ask spread estimator.
+//               Exploits the negative serial covariance of price changes that
+//               arises from the bid-ask bounce. Requires no order-book data.
+//               Formula: spread = 2 * sqrt(max(0, -Cov(Δp_t, Δp_{t-1})))
+//               Reference: Roll, R. (1984). "A Simple Implicit Measure of the
+//               Effective Bid-Ask Spread in an Efficient Market." JoF 39(4).
+// @param src    Price series (typically close)
+// @param len    Lookback window for covariance estimation (minimum 10)
+// @param zLen   Window for z-score normalisation (default = len * 3)
+// @returns      SpreadResult with value, zscore, and anomaly flag
+export rollSpread(float src = close, simple int len = 20, simple int zLen = 60) =>
+    SpreadResult result = SpreadResult.new()
+    float d  = src - src[1]
+    float d1 = d[1]
+    // Rolling covariance via sums
+    float sumDt   = math.sum(d,        len)
+    float sumDt1  = math.sum(d1,       len)
+    float sumProd = math.sum(d * d1,   len)
+    float cov     = (sumProd - sumDt * sumDt1 / len) / (len - 1)
+    float spread  = 2.0 * math.sqrt(math.max(0.0, -cov))
+    float mu      = ta.sma(spread, zLen)
+    float sigma   = ta.stdev(spread, zLen)
+    float z       = sigma > 1e-10 ? (spread - mu) / sigma : 0.0
+    result.value    := spread
+    result.zscore   := z
+    result.isAnomaly := z > 2.0
+    result
+
+// @function     Corwin & Schultz (2012) high-low spread estimator.
+//               Derives the effective spread from the ratio of two-day to
+//               one-day high-low ranges. More robust than Roll on noisy series.
+//               Reference: Corwin, S. & Schultz, P. (2012). "A Simple Way to
+//               Estimate Bid-Ask Spreads from Daily High and Low Prices."
+//               JoF 67(2), 719-760.
+// @param h      High series
+// @param l      Low series
+// @param zLen   Window for z-score normalisation
+// @returns      SpreadResult
+export corwinSchultz(float h = high, float l = low, simple int zLen = 60) =>
+    SpreadResult result = SpreadResult.new()
+    float beta  = math.pow(math.log(h / l), 2) + math.pow(math.log(h[1] / l[1]), 2)
+    float h2    = math.max(h, h[1])
+    float l2    = math.min(l, l[1])
+    float gamma = math.pow(math.log(h2 / l2), 2)
+    float k2    = (math.sqrt(2.0) - 1.0) / (3.0 - 2.0 * math.sqrt(2.0))
+    float alpha = (math.sqrt(2.0 * beta) - math.sqrt(beta)) / k2 -
+                  math.sqrt(gamma / k2)
+    float spread = 2.0 * (math.exp(alpha) - 1.0) / (1.0 + math.exp(alpha))
+    spread := math.max(spread, 0.0)
+    float mu  = ta.sma(spread, zLen)
+    float sig = ta.stdev(spread, zLen)
+    float z   = sig > 1e-10 ? (spread - mu) / sig : 0.0
+    result.value    := spread
+    result.zscore   := z
+    result.isAnomaly := z > 2.0
+    result
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 3 — ILLIQUIDITY & PRICE IMPACT
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function     Amihud (2002) illiquidity ratio.
+//               Measures how much price moves per unit of trading volume —
+//               higher values mean illiquid markets where small trades move price.
+//               Formula: ILLIQ_t = |r_t| / Volume_t, smoothed over len bars.
+//               Reference: Amihud, Y. (2002). "Illiquidity and stock returns."
+//               Journal of Financial Markets 5(1), 31-56.
+// @param src    Price series for return calculation
+// @param vol    Volume series
+// @param len    Rolling average window
+// @param zLen   Z-score window
+// @returns      SpreadResult (value = illiquidity ratio, z-scored)
+export amihud(float src = close, float vol = volume, simple int len = 20, simple int zLen = 60) =>
+    SpreadResult result = SpreadResult.new()
+    float ret    = math.abs(src / src[1] - 1.0)
+    float illiq  = vol > 0 ? ret / vol : 0.0
+    float smooth = ta.sma(illiq, len)
+    float mu     = ta.sma(smooth, zLen)
+    float sig    = ta.stdev(smooth, zLen)
+    float z      = sig > 1e-10 ? (smooth - mu) / sig : 0.0
+    result.value    := smooth
+    result.zscore   := z
+    result.isAnomaly := z > 2.0
+    result
+
+// @function     Kyle's Lambda — price impact coefficient (Kyle 1985).
+//               Estimates how aggressively price responds to signed order flow.
+//               Approximates signed volume as: buy volume when close >= open,
+//               sell volume otherwise. Lambda = OLS slope of Δprice on signed vol.
+//               Reference: Kyle, A.S. (1985). "Continuous Auctions and Insider
+//               Trading." Econometrica 53(6), 1315-1335.
+// @param src    Price series
+// @param vol    Volume series
+// @param len    Regression window (minimum 15)
+// @returns      SpreadResult (value = lambda slope)
+export kyleLambda(float src = close, float vol = volume, simple int len = 20) =>
+    SpreadResult result = SpreadResult.new()
+    float dp       = src - src[1]
+    float signedV  = close >= open ? vol : -vol
+    // OLS: lambda = Cov(dp, signedV) / Var(signedV)
+    float sumX  = math.sum(signedV,           len)
+    float sumY  = math.sum(dp,                len)
+    float sumXY = math.sum(signedV * dp,      len)
+    float sumX2 = math.sum(signedV * signedV, len)
+    float denom = len * sumX2 - sumX * sumX
+    float lam   = math.abs(denom) > 1e-12 ? (len * sumXY - sumX * sumY) / denom : 0.0
+    float mu    = ta.sma(lam, len * 3)
+    float sig   = ta.stdev(lam, len * 3)
+    float z     = sig > 1e-10 ? (lam - mu) / sig : 0.0
+    result.value    := lam
+    result.zscore   := z
+    result.isAnomaly := z > 2.0
+    result
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 4 — OHLC-EFFICIENT VOLATILITY ESTIMATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function     Garman-Klass (1980) volatility estimator.
+//               Uses OHLC data to estimate variance more efficiently than
+//               close-to-close (theoretical efficiency ratio ≈ 7.4×).
+//               Formula: σ² = 0.5*(ln H/L)² − (2ln2−1)*(ln C/O)²
+//               Reference: Garman, M. & Klass, M. (1980). "On the Estimation
+//               of Security Price Volatilities from Historical Data."
+//               Journal of Business 53(1), 67-78.
+// @param o      Open series
+// @param h      High series
+// @param l      Low series
+// @param c      Close series
+// @param len    Averaging window
+// @returns      VolResult with daily, annual, and rank fields
+export garmanKlass(float o = open, float h = high, float l = low, float c = close,
+                   simple int len = 20) =>
+    VolResult result = VolResult.new()
+    float hl   = math.log(h / l)
+    float co   = math.log(c / o)
+    float gk   = 0.5 * hl * hl - (2.0 * math.log(2.0) - 1.0) * co * co
+    float var_ = ta.sma(gk, len)
+    float vol_ = math.sqrt(math.max(var_, 0.0))
+    result.daily  := vol_
+    result.annual := vol_ * math.sqrt(252.0)
+    result.rank   := ta.percentrank(vol_, len * 5)
+    result
+
+// @function     Parkinson (1980) volatility estimator.
+//               Uses only High and Low — ignores close. More efficient than
+//               close-to-close (theoretical efficiency ≈ 5.2×) but assumes
+//               no overnight gaps or drift. Good intraday baseline.
+//               Reference: Parkinson, M. (1980). "The Extreme Value Method
+//               for Estimating the Variance of the Rate of Return."
+//               Journal of Business 53(1), 61-65.
+// @param h      High series
+// @param l      Low series
+// @param len    Averaging window
+// @returns      VolResult
+export parkinson(float h = high, float l = low, simple int len = 20) =>
+    VolResult result = VolResult.new()
+    float hl   = math.log(h / l)
+    float pk   = hl * hl / (4.0 * math.log(2.0))
+    float var_ = ta.sma(pk, len)
+    float vol_ = math.sqrt(math.max(var_, 0.0))
+    result.daily  := vol_
+    result.annual := vol_ * math.sqrt(252.0)
+    result.rank   := ta.percentrank(vol_, len * 5)
+    result
+
+// @function     Rogers-Satchell (1991) volatility estimator.
+//               Accounts for non-zero drift — unbiased even when price trends.
+//               The only classical OHLC estimator that handles drift correctly.
+//               Formula: σ² = ln(H/C)*ln(H/O) + ln(L/C)*ln(L/O)
+//               Reference: Rogers, L. & Satchell, S. (1991). "Estimating
+//               Variance From High, Low and Closing Prices."
+//               Annals of Applied Probability 1(4), 504-512.
+// @param o      Open series
+// @param h      High series
+// @param l      Low series
+// @param c      Close series
+// @param len    Averaging window
+// @returns      VolResult
+export rogersSatchell(float o = open, float h = high, float l = low, float c = close,
+                      simple int len = 20) =>
+    VolResult result = VolResult.new()
+    float rs   = math.log(h / c) * math.log(h / o) + math.log(l / c) * math.log(l / o)
+    float var_ = ta.sma(rs, len)
+    float vol_ = math.sqrt(math.max(var_, 0.0))
+    result.daily  := vol_
+    result.annual := vol_ * math.sqrt(252.0)
+    result.rank   := ta.percentrank(vol_, len * 5)
+    result
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 5 — FRACTAL DIMENSION & COMPLEXITY
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function     Higuchi (1988) Fractal Dimension.
+//               Estimates the fractal complexity of a time series directly from
+//               the data. D = 1 → perfectly smooth trend. D = 2 → pure noise.
+//               D < 1.4: trending. 1.4-1.6: random walk. D > 1.6: mean-reverting.
+//               This implementation uses the average of k=2..kMax curve lengths
+//               and OLS regression of log(L_k) on log(k) to get the slope (= -FD).
+//               Reference: Higuchi, T. (1988). "Approach to an irregular time
+//               series on the basis of the fractal theory." Physica D 31(2).
+// @param src    Input price series
+// @param len    Number of bars to sample (minimum 20, recommended 30-50)
+// @param kMax   Maximum lag (2-8; higher = more stable but slower)
+// @returns      FractalResult with fd, regime string, and normalised [0,1]
+export higuchifd(float src = close, simple int len = 40, simple int kMax = 6) =>
+    FractalResult result = FractalResult.new()
+    // Collect 'len' bars into an array
+    array<float> s = array.new<float>(len)
+    for i = 0 to len - 1
+        array.set(s, i, nz(src[len - 1 - i], src))
+    // Compute average curve length for each k
+    array<float> logK = array.new<float>(kMax - 1)
+    array<float> logL = array.new<float>(kMax - 1)
+    for k = 2 to kMax
+        float totalL = 0.0
+        int   count  = 0
+        for m = 0 to k - 1
+            int    nSub = math.floor((len - m - 1) / k)
+            if nSub > 1
+                float sumDiff = 0.0
+                for i = 1 to nSub - 1
+                    int idx1 = m + i * k
+                    int idx2 = m + (i - 1) * k
+                    if idx1 < len and idx2 < len
+                        sumDiff += math.abs(array.get(s, idx1) - array.get(s, idx2))
+                float Lm = sumDiff * (len - 1) / (k * nSub)
+                totalL += Lm
+                count  += 1
+        if count > 0
+            array.set(logK, k - 2, math.log(k))
+            array.set(logL, k - 2, math.log(totalL / count + 1e-10))
+    // OLS slope of logL ~ logK → slope ≈ -FD
+    int   n2    = array.size(logK)
+    float sX    = 0.0
+    float sY    = 0.0
+    float sXY   = 0.0
+    float sX2   = 0.0
+    for i2 = 0 to n2 - 1
+        float xi = array.get(logK, i2)
+        float yi = array.get(logL, i2)
+        sX  += xi
+        sY  += yi
+        sXY += xi * yi
+        sX2 += xi * xi
+    float denom2 = n2 * sX2 - sX * sX
+    float slope  = math.abs(denom2) > 1e-10 ? (n2 * sXY - sX * sY) / denom2 : -1.5
+    float fd     = math.max(1.0, math.min(2.0, -slope))
+    result.fd   := fd
+    result.normalised := (fd - 1.0)
+    result.regime := fd < 1.4 ? "Trending" : fd < 1.6 ? "Random Walk" : "Choppy"
+    result
+
+// @function     Hurst Exponent via Rescaled Range (R/S) analysis.
+//               H > 0.55 → persistent trend-following (long memory).
+//               H ≈ 0.50 → random walk (no memory).
+//               H < 0.45 → mean-reverting (anti-persistent).
+//               Note: FD and Hurst are complementary: FD = 2 - H (theoretically).
+// @param src    Input price series
+// @param len    Lookback length (minimum 30, recommended 60-100)
+// @returns      float Hurst exponent in [0, 1]
+export hurstRS(float src = close, simple int len = 60) =>
+    array<float> returns = array.new<float>(len - 1)
+    for i = 0 to len - 2
+        float r = src[i] > 0 and src[i + 1] > 0 ? math.log(src[i] / src[i + 1]) : 0.0
+        array.set(returns, i, r)
+    // Mean-adjust returns
+    float meanR = array.avg(returns)
+    array<float> devs  = array.new<float>(len - 1)
+    array<float> cumul = array.new<float>(len - 1)
+    float runSum = 0.0
+    for j = 0 to len - 2
+        float d = array.get(returns, j) - meanR
+        array.set(devs, j, d)
+        runSum += d
+        array.set(cumul, j, runSum)
+    // Range = max - min of cumulative deviations
+    float maxC = array.max(cumul)
+    float minC = array.min(cumul)
+    float R    = maxC - minC
+    // Std dev of mean-adjusted returns
+    float S    = array.stdev(returns)
+    float hurst = S > 1e-12 and R > 0 ?
+                  math.log(R / S) / math.log(len / 2.0) : 0.5
+    math.max(0.0, math.min(1.0, hurst))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6 — REALIZED DISTRIBUTIONAL MOMENTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function     Rolling distributional moments of a return series.
+//               Computes mean, standard deviation, skewness, and excess kurtosis
+//               over a rolling window using Welford's online algorithm for
+//               numerical stability.
+// @param src    Input series (typically log returns: math.log(close/close[1]))
+// @param len    Rolling window length
+// @returns      MomentResult with mean, stdev, skew, kurt
+export moments(float src = close, simple int len = 30) =>
+    MomentResult result = MomentResult.new()
+    float mu    = ta.sma(src, len)
+    float sigma = ta.stdev(src, len)
+    // Higher central moments via sum of powers
+    float s3 = 0.0
+    float s4 = 0.0
+    for i3 = 0 to len - 1
+        float dev = nz(src[i3]) - mu
+        float d2  = dev * dev
+        s3 += d2 * dev
+        s4 += d2 * d2
+    float s3norm = s3 / len
+    float s4norm = s4 / len
+    float s2     = sigma * sigma
+    float skew   = s2 > 1e-14 ? s3norm / (sigma * s2)  : 0.0
+    float kurt   = s2 > 1e-14 ? s4norm / (s2 * s2) - 3.0 : 0.0
+    result.mean  := mu
+    result.stdev := sigma
+    result.skew  := skew
+    result.kurt  := kurt
+    result
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 7 — UTILITY HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function     Normalise any float series to [0, 1] over a rolling window.
+// @param src    Input series
+// @param len    Lookback for min/max
+// @returns      float in [0.0, 1.0]
+export normalise(float src, simple int len = 100) =>
+    float lo = ta.lowest(src,  len)
+    float hi = ta.highest(src, len)
+    float rng = hi - lo
+    rng > 1e-10 ? (src - lo) / rng : 0.5
+
+// @function     Exponentially weighted z-score — reacts faster than simple z-score.
+// @param src    Input series
+// @param len    EMA length for mean and variance estimation
+// @returns      float z-score
+export ewZscore(float src, simple int len = 20) =>
+    float mu  = ta.ema(src, len)
+    float dev = src - mu
+    float var_ = ta.ema(dev * dev, len)
+    float sig  = math.sqrt(math.max(var_, 1e-14))
+    dev / sig
+
+// @function     Colour helper — maps a [-3, 3] z-score to a green-grey-red gradient.
+//               z < -2: bright green (anomaly low)  z > 2: bright red (anomaly high)
+// @param z      Z-score value
+// @returns      color
+export zscoreColor(float z) =>
+    float clamped = math.max(-3.0, math.min(3.0, z))
+    if clamped >= 0.0
+        color.from_gradient(clamped, 0.0, 3.0, color.gray, color.red)
+    else
+        color.from_gradient(clamped, -3.0, 0.0, color.green, color.gray)

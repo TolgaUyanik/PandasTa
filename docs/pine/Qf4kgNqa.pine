@@ -1,0 +1,165 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © crypto_two_face
+
+//@version=6
+library("ema_flow_lib")
+
+// ===== 狀態常數（需 const + 型別）=====
+export const int S_UNDEF             = 0
+export const int S1_BULL_START       = 1
+export const int S2_BULL_STACK       = 2
+export const int S3_HIGH_DRIFT       = 3
+export const int S4_REV_PREP         = 4
+export const int S5_BEAR_STACK       = 5
+export const int S6_LOW_HOVERING     = 6
+
+// ===== 內部工具 =====
+
+// 判斷絕對值距離
+are_far_than_pct(float val1, float val2, float pct) =>
+    // 1. 計算兩個值的絕對距離 (點數)
+    float distance_points = math.abs(val1 - val2)
+    // 2. 為了標準化，我們將距離除以兩者中較小的值，得到一個更穩健的百分比
+    float base_value = math.min(val1, val2)
+    // 3. 計算實際的距離百分比
+    float distance_pct = distance_points / base_value
+    // 4. 回傳比較結果
+    distance_pct >= pct
+
+// 判斷 10EMA 與 20EMA 是否「糾纏」
+entangle_ok(e10, e20, pct) =>
+    math.abs(e10 - e20) / e20 <= pct
+
+// 判斷短期均線組是否「遠高於」長期均線
+far_above_100(e10, e20, e100, pct) =>
+    (math.min(e10, e20) - e100) / e100 >= pct
+
+// [新增] 判斷短期均線組是否「遠低於」長期均線 (為了邏輯對稱性)
+far_below_100(e10, e20, e100, pct) =>
+    (e100 - math.max(e10, e20)) / e100 >= pct
+
+// 判斷是否為「已確認的黃金交叉」(拉開有效距離)
+cross_up_confirmed(e10, e20, pct) =>
+    e10 > e20 and are_far_than_pct(e10, e20, pct)
+
+// 判斷是否為「已確認的死亡交叉」(拉開有效距離)
+cross_down_confirmed(e10, e20, pct) =>
+    e10 < e20 and are_far_than_pct(e10, e20, pct)
+
+
+// ===== 有限狀態機版本 (完全重構) =====
+export ema_flow_fsm(
+     int prevState,
+     float e10, float e20, float e100,
+     float entanglePct, float farPct,
+     float crossUpPct, float crossDownPct
+     ) =>
+
+    // ==================================================================
+    // STEP 1: 將所有核心狀態的判斷邏輯抽離到這裡，轉為布林變數
+    // ==================================================================
+    // 趨勢狀態
+    bool isBullStack      = e10 > e20 and e20 > e100 and are_far_than_pct(e10, e20, crossUpPct) and far_above_100(e10, e20, e100, farPct)
+    bool isBearStack      = e10 < e20 and e20 < e100 and are_far_than_pct(e10, e20, crossDownPct) and far_below_100(e10, e20, e100, farPct)
+    
+    // 過渡狀態
+    bool isBullStart      = e100 > e10 and e10 > e20 and are_far_than_pct(e10, e20, crossUpPct)
+    bool isRevPrep        = e100 < e10 and e20 > e10 and are_far_than_pct(e10, e20, crossDownPct)
+    
+    // 盤整狀態
+    bool isHighDrift      = not are_far_than_pct(e10, e20, entanglePct) and far_above_100(e10, e20, e100, farPct)
+    bool isLowHover       = not are_far_than_pct(e10, e20, entanglePct) and far_below_100(e10, e20, e100, farPct)
+
+    // 特殊轉換狀態
+    bool isBullBreakdown  = e20 < e100 and e10 < e20 and are_far_than_pct(e10, e20, crossDownPct)
+    bool isBearContinuation = e10 < e20 and e20 < e100 and are_far_than_pct(e10, e20, crossDownPct)
+
+    
+    // 點火邏輯 (尋找初始狀態，使其更為周全)
+    if prevState == S_UNDEF
+        if isBullStack
+            S2_BULL_STACK // 明確多頭
+        else if isBearStack
+            S5_BEAR_STACK // 明確空頭
+        else if isBullStart
+            S1_BULL_START // 底部剛啟動
+        else if isRevPrep
+            S4_REV_PREP // 頂部剛反轉
+        else
+            S_UNDEF // 仍然無法定義，等待明確信號
+    else
+        // 主狀態轉換邏輯
+        nextState = switch prevState
+            // S1: 多頭啟動。可能成功進入S2，或失敗回滾至S6
+            S1_BULL_START =>
+                if isBullStack
+                    S2_BULL_STACK // 條件滿足，成功進入多頭排列
+                else if isLowHover
+                    S6_LOW_HOVERING // 回滾至低位橫盤
+                else
+                    prevState
+
+            // S2: 多頭排列。可能過熱進入S3，或崩盤進入S5
+            S2_BULL_STACK =>
+                if isBullBreakdown
+                    S5_BEAR_STACK // 多頭趨勢直接轉崩盤
+                else if isHighDrift 
+                    S3_HIGH_DRIFT // 漲多過熱，進入高位鈍化
+                else
+                    prevState
+
+            // S3: 高位鈍化。可能整理後再攻回S2，或轉弱進入S4，也有可能不糾纏直接墜下為 S5空頭排列
+            S3_HIGH_DRIFT =>
+                if isBullStack
+                    S2_BULL_STACK // 鈍化結束，多頭趨勢繼續
+                else if isRevPrep
+                    S4_REV_PREP // 20>10>100 死叉，進入反轉預備
+                else if isBearStack
+                    S5_BEAR_STACK // 無糾纏直接進入空頭排列
+                else
+                    prevState
+
+            // S4: 反轉預備。可能確認跌勢進入S5，或反轉失敗彈回S3
+            S4_REV_PREP =>
+                if isBearContinuation
+                    S5_BEAR_STACK // 確認跌破，進入空頭排列
+                else if isHighDrift
+                    S3_HIGH_DRIFT // 反轉失敗，回滾至高位鈍化
+                else
+                    prevState
+
+            // S5: 空頭排列。可能超跌進入S6，或V轉進入S2
+            S5_BEAR_STACK =>
+                if isBullStack
+                    S2_BULL_STACK // 空頭趨勢直接V型反轉
+                else if isLowHover
+                    S6_LOW_HOVERING // 跌多超賣，進入低位橫盤
+                else
+                    prevState
+
+            // S6: 低位橫盤。可能築底完成進入S1，或盤久回到S5
+            S6_LOW_HOVERING =>
+                if isBearStack
+                    S5_BEAR_STACK // 橫盤後繼續破底
+                else if isBullStart
+                    S1_BULL_START // 100>10>20 金叉，進入多頭啟動
+                else if isBullStack
+                    S2_BULL_STACK // 10>20>100 無糾纏直接進入多頭排列   
+                else
+                    prevState
+            
+            // 預設情況，理論上不應觸發
+            => S_UNDEF
+        
+        nextState
+
+// ===== 名稱工具 =====
+export state_name(int s) =>
+    s == S1_BULL_START      ? "S1 多頭啟動" :
+     s == S2_BULL_STACK      ? "S2 多頭排列" :
+     s == S3_HIGH_DRIFT      ? "S3 高位鈍化" :
+     s == S4_REV_PREP        ? "S4 反轉預備" :
+     s == S5_BEAR_STACK      ? "S5 空頭排列" :
+     s == S6_LOW_HOVERING    ? "S6 低位糾纏" : 
+     "未定義"
+

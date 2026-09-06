@@ -1,0 +1,286 @@
+//@version=6
+strategy("PV Quantix Pro v20", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, max_labels_count=500)
+
+//====================================================
+// 1. INPUTS & CONFIGURATION (V6 ORIGINAL + LICENSE + LSMA)
+//====================================================
+showDashboard = input.bool(true, "Show Info Dashboard", group="Display Settings")
+showEMA20     = input.bool(true, "Show 20 Trend Line on Chart", group="Display Settings")
+showEMA50     = input.bool(false, "Show EMA 50 on Chart", group="Display Settings")
+showVWAP      = input.bool(false, "Show VWAP on Chart", group="Display Settings")
+showORB       = input.bool(false, "Show ORB Lines on Chart", group="Display Settings")
+showSL        = input.bool(true, "Show Trailing SL on Chart", group="Display Settings")
+showLSMA      = input.bool(false, "Show LSMA 250 on Chart", group="Display Settings")
+
+// LICENSE ACTIVATION INPUT (यह बॉक्स सेटिंग्स में सबसे ऊपर दिखेगा)
+licenseKey    = input.string("ENTER_KEY_HERE", "Enter License Key", group="License Activation")
+
+// Time & HTF Filter Options 
+useTimeFilter  = input.bool(true, "Limit Trading to Specific Hours? (9:15 - 11:30)", group="Time & HTF Settings")
+tradingSession = input.session("0915-1130", "Trading Session Hours (Exchange Time)", group="Time & HTF Settings")
+useHtfFilter   = input.bool(true, "Use 1-Hour Institutional Trend Filter?", group="Time & HTF Settings")
+useLsmaFilter  = input.bool(true, "Use LSMA 250 Macro Trend Filter?", group="Time & HTF Settings")
+
+// Target Type Selection (Fixed vs Trailing)
+exitType      = input.string("Trailing Stop", "Exit Strategy", options=["Fixed Target", "Trailing Stop"], group="Risk Management")
+
+// Indicator Settings
+useVwmaFilter = input.bool(false, "Use VWMA 20 instead of EMA 20?", group="Moving Averages")
+ema20Len      = input.int(20, "EMA 20 Length", group="Moving Averages")
+ema50Len      = input.int(50, "EMA 50 Length", group="Moving Averages")
+lsmaLen       = input.int(250, "LSMA Length", group="Moving Averages")
+
+rsiLen        = input.int(14, "RSI Length", group="Momentum (RSI)")
+macdFast      = input.int(12, "MACD Fast Length", group="Momentum (MACD)")
+macdSlow      = input.int(26, "MACD Slow Length", group="Momentum (MACD)")
+macdSignal    = input.int(9, "MACD Signal Length", group="Momentum (MACD)")
+
+rvolLength    = input.int(20, "Relative Volume Period", group="Volume Settings")
+rvolThreshold = input.float(0.9, "Min Relative Volume", group="Volume Settings")
+
+orbSession    = input.session("0915-0930", "ORB Session Time (First 15 Mins)", group="ORB Settings")
+
+// Risk Management & New Exhustion Filter
+useExhaustionFilter = input.bool(true, "Use Daily Range Exhaustion Filter?", group="Risk Management") 
+exhaustionThreshold = input.float(85.0, "Daily Range Exhaustion Threshold (%)", group="Risk Management") 
+atrLen        = input.int(14, "ATR Length for SL/TP", group="Risk Management")
+atrMultSL     = input.float(1.5, "SL ATR Multiplier", group="Risk Management")
+riskReward    = input.float(2.0, "Risk-to-Reward Ratio (For Fixed Target)", group="Risk Management")
+
+minScore      = input.int(3, "Minimum Quality Score (1-7)", group="Signal Quality Settings")
+
+//====================================================
+// 2. OPTIMIZED LICENSE KEY DATABASE (100% SECURE V6 SYNTAX!)
+//====================================================
+var approvedKeys = array.new<string>(0)
+
+if barstate.isfirst
+    array.push(approvedKeys, "PQ_OWNER_77")   // आपका मास्टर पासवर्ड
+    array.push(approvedKeys, "PQ_FRIEND_99")  // आपके दोस्त का पासवर्ड
+    // भविष्य में जब भी नया ग्राहक आए, बस नीचे एक नई 'array.push' वाली लाइन जोड़ दें, जैसे:
+    // array.push(approvedKeys, "PQ_CLIENT_101")
+
+isLicensed = array.includes(approvedKeys, licenseKey)
+
+//====================================================
+// 3. INDICATOR CALCULATIONS
+//====================================================
+trendLine = useVwmaFilter ? ta.vwma(close, ema20Len) : ta.ema(close, ema20Len)
+ema50   = ta.ema(close, ema50Len)
+vwapVal = ta.vwap(close)
+rsiVal  = ta.rsi(close, rsiLen)
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+lsma250 = ta.linreg(close, lsmaLen, 0)
+volAvg = ta.sma(volume, rvolLength)
+rvol   = volAvg > 0 ? volume / volAvg : 1.0
+atrVal = ta.atr(atrLen)
+
+inTradingSession = not useTimeFilter or not na(time(timeframe.period, tradingSession))
+
+htfEma = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+htfBull = not useHtfFilter or na(htfEma) or (close > htfEma)
+htfBear = not useHtfFilter or na(htfEma) or (close < htfEma)
+
+lsmaBull = not useLsmaFilter or (close > lsma250)
+lsmaBear = not useLsmaFilter or (close < lsma250)
+
+dailyAtr = request.security(syminfo.tickerid, "D", ta.atr(14))
+safeDailyAtr = na(dailyAtr) ? close * 0.02 : dailyAtr
+
+var float dHigh = na
+var float dLow  = na
+
+if ta.change(time("D")) != 0
+    dHigh := high
+    dLow  := low
+else
+    dHigh := math.max(high, na(dHigh) ? high : dHigh)
+    dLow  := math.min(low, na(dLow) ? low : dLow)
+
+currentDailyRange = (na(dHigh) or na(dLow)) ? 0.0 : dHigh - dLow
+rangeExhausted = useExhaustionFilter and (currentDailyRange >= (safeDailyAtr * (exhaustionThreshold / 100.0)))
+canTradeRange = not rangeExhausted
+
+inSession = not na(time(timeframe.period, orbSession))
+var float orbHigh = na
+var float orbLow  = na
+
+if inSession and not inSession[1]
+    orbHigh := high
+    orbLow  := low
+else if inSession
+    orbHigh := math.max(high, orbHigh)
+    orbLow  := math.min(low, orbLow)
+
+bodySize = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+
+isFakeUpsideBreak = (high > orbHigh and close < orbHigh) or (upperWick > bodySize * 2.0)
+isFakeDownsideBreak = (low < orbLow and close > orbLow) or (lowerWick > bodySize * 2.0)
+
+isGreenCandle = close > open
+isRedCandle   = close < open
+
+//====================================================
+// 4. QUALITY SCORE SYSTEM (1 to 7)
+//====================================================
+int score = 0
+
+emaBull = close > trendLine and trendLine > ema50
+emaBear = close < trendLine and trendLine < ema50
+if (emaBull or emaBear)
+    score := score + 1
+
+vwapBull = close > vwapVal
+vwapBear = close < vwapVal
+if (vwapBull or vwapBear)
+    score := score + 1
+
+orbBull = close > orbHigh and not isFakeUpsideBreak
+orbBear = close < orbLow and not isFakeDownsideBreak
+if (orbBull or orbBear)
+    score := score + 1
+
+rvolFilter = rvol >= rvolThreshold
+if rvolFilter
+    score := score + 1
+
+noRejectionBuy = upperWick < bodySize * 1.2
+noRejectionSell = lowerWick < bodySize * 1.2
+if (noRejectionBuy or noRejectionSell)
+    score := score + 1
+
+rsiBull = rsiVal > 48 and rsiVal < 70
+rsiBear = rsiVal < 52 and rsiVal > 30
+if (rsiBull or rsiBear)
+    score := score + 1
+
+macdBull = macdLine > signalLine
+macdBear = macdLine < signalLine
+if (macdBull or macdBear)
+    score := score + 1
+
+//====================================================
+// 5. TRIGGERS & STRATEGY ENTRY (LOCKED WITH LICENSE CHECK!)
+//====================================================
+fastEMA = ta.ema(close, 9)
+slowEMA = ta.ema(close, 21)
+
+breakout10Buy  = ta.crossover(close, ta.highest(high, 10)[1])
+breakout10Sell = ta.crossunder(close, ta.lowest(low, 10)[1])
+
+triggerBuy  = ta.crossover(close, trendLine) or (emaBull and breakout10Buy)
+triggerSell = ta.crossunder(close, trendLine) or (emaBear and breakout10Sell)
+
+// Signals only trigger if License Key is Correct! (isLicensed)
+strategyBuy  = isLicensed and triggerBuy and score >= minScore and close > vwapVal and inTradingSession and isGreenCandle and htfBull and canTradeRange and lsmaBull
+strategySell = isLicensed and triggerSell and score >= minScore and close < vwapVal and inTradingSession and isRedCandle and htfBear and canTradeRange and lsmaBear
+
+//====================================================
+// 6. RISK MANAGEMENT & EXIT (V6 ORIGINAL)
+//====================================================
+var float activeSL = na
+var float activeTP = na
+
+// Calculate Trailing Stop Loss dynamically
+if strategy.position_size > 0
+    atrDist = atrVal * atrMultSL
+    activeSL := na(activeSL) ? close - atrDist : math.max(activeSL, close - atrDist)
+else if strategy.position_size < 0
+    atrDist = atrVal * atrMultSL
+    activeSL := na(activeSL) ? close + atrDist : math.min(activeSL, close + atrDist)
+else
+    activeSL := na
+    activeTP := na
+
+// Entry Executions
+if strategyBuy and strategy.position_size == 0
+    activeSL := close - (atrVal * atrMultSL)
+    activeTP := exitType == "Fixed Target" ? close + ((close - activeSL) * riskReward) : na
+    strategy.entry("Long Entry", strategy.long)
+
+if strategySell and strategy.position_size == 0
+    activeSL := close + (atrVal * atrMultSL)
+    activeTP := exitType == "Fixed Target" ? close - ((activeSL - close) * riskReward) : na
+    strategy.entry("Short Entry", strategy.short)
+
+// Exit Executions based on Selected Mode
+if strategy.position_size > 0
+    if exitType == "Fixed Target"
+        strategy.exit("Long Exit", "Long Entry", stop=activeSL, limit=activeTP)
+    else
+        strategy.exit("Long Exit", "Long Entry", stop=activeSL)
+
+if strategy.position_size < 0
+    if exitType == "Fixed Target"
+        strategy.exit("Short Exit", "Short Entry", stop=activeSL, limit=activeTP)
+    else
+        strategy.exit("Short Exit", "Short Entry", stop=activeSL)
+
+// Exits detection for manual alerts
+exitBuySignal  = (strategy.position_size[1] > 0 and strategy.position_size == 0)
+exitSellSignal = (strategy.position_size[1] < 0 and strategy.position_size == 0)
+
+//====================================================
+// 7. VISUALS & PLOTS (V6 ORIGINAL - ONLY SHOWN IF LICENSED)
+//====================================================
+emaColor = trendLine > trendLine[1] ? color.lime : color.red
+plot(isLicensed and showEMA20 ? trendLine : na, color=color.new(emaColor, 10), linewidth=3, title="Trend Line 20")
+plot(isLicensed and showEMA50 ? ema50 : na, color=color.new(color.orange, 40), title="EMA 50")
+plot(isLicensed and showVWAP ? vwapVal : na, color=color.new(color.purple, 30), linewidth=2, title="VWAP")
+plot(isLicensed and showLSMA ? lsma250 : na, color=color.new(color.blue, 30), linewidth=2, title="LSMA 250 Line")
+// पुरानी लाइन को हटाकर इसे पेस्ट करें (इसमें हमने 'showSL' जोड़ दिया है):
+plot(isLicensed and showSL ? activeSL : na, color=color.new(color.red, 20), style=plot.style_linebr, linewidth=2, title="Dynamic Trailing SL")
+
+//====================================================
+// 8. DASHBOARD & WARNING SYSTEM (FIXED V6 SYNTAX!)
+//====================================================
+// 1. Red License Warning Table (If User enters wrong or empty License Key!)
+var table warningTable = table.new(position.middle_center, 1, 1, bgcolor=color.red, border_width=2, border_color=color.black)
+if not isLicensed and barstate.islast
+    table.cell(warningTable, 0, 0, "❌ INVALID OR EXPIRED LICENSE KEY!\nContact Praquantix Pro to Get Your Key.", text_color=color.white, text_size=size.large)
+
+// 2. Normal Dashboard (Only shows if User enters correct License Key! Branded Header Added!)
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+if isLicensed and showDashboard and barstate.islast
+    // Branded Header (Metric is replaced by your Brand Name: PV Quantix Pro v20!)
+    table.cell(infoTable, 0, 0, "PV Quantix Pro v20", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 0, "Status / Value", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    
+    // 1. EMA
+    table.cell(infoTable, 0, 1, useVwmaFilter ? "VWMA 20 Trend" : "EMA 20 Trend", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, trendLine > trendLine[1] ? "Rising (Bull)" : "Falling (Bear)", bgcolor=trendLine > trendLine[1] ? color.green : color.red, text_color=color.white, text_size=size.small)
+    
+    // 2. VWAP
+    table.cell(infoTable, 0, 2, "VWAP Filter", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, close > vwapVal ? "Above" : "Below", bgcolor=close > vwapVal ? color.green : color.red, text_color=color.white, text_size=size.small)
+    
+    // 3. RSI 14
+    table.cell(infoTable, 0, 3, "RSI (14)", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, str.tostring(rsiVal, "#.##"), bgcolor=rsiVal > 50 ? color.green : color.red, text_color=color.white, text_size=size.small)
+    
+    // 4. MACD Status (CDMA)
+    table.cell(infoTable, 0, 4, "CDMA (MACD)", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, macdLine > signalLine ? "Bullish Cross" : "Bearish Cross", bgcolor=macdLine > signalLine ? color.green : color.red, text_color=color.white, text_size=size.small)
+    
+    // 5. Volume Average / RE Volume
+    table.cell(infoTable, 0, 5, "RE Volume", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, str.tostring(rvol, "#.##"), bgcolor=rvolFilter ? color.green : color.gray, text_color=color.white, text_size=size.small)
+    
+    // 6. LSMA 250 Trend Status
+    table.cell(infoTable, 0, 6, "LSMA 250 Trend", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, close > lsma250 ? "Macro Bullish" : "Macro Bearish", bgcolor=close > lsma250 ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+    // 7. Total Quality Score
+    table.cell(infoTable, 0, 7, "Quality Score", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, str.tostring(score) + " / 7", bgcolor=score >= minScore ? color.teal : color.navy, text_color=color.white, text_size=size.small)
+
+//====================================================
+// 9. ALERTS CONFIGURATION (Only trigger if Licensed!)
+//====================================================
+alertcondition(isLicensed and strategyBuy, title="Kishun BUY Entry", message="BUY Entry Signal at {{close}}! Place Trade on Broker App.")
+alertcondition(isLicensed and strategySell, title="Kishun SELL Entry", message="SELL Entry Signal at {{close}}! Place Trade on Broker App.")
+alertcondition(isLicensed and exitBuySignal, title="Kishun BUY Exit", message="EXIT LONG Trade Now! Trailing SL / Target Hit at {{close}}.")
+alertcondition(isLicensed and exitSellSignal, title="Kishun SELL Exit", message="EXIT SHORT Trade Now! Trailing SL / Target Hit at {{close}}.")

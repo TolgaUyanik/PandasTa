@@ -1,0 +1,239 @@
+//@version=6
+indicator("Pakistan Currency Stress Engine (Institutional Macro v13.4)", shorttitle="PCSI Macro v13.4", overlay=false)
+
+// ==============================================================================
+// 1. TICKER INPUTS & DATA FEEDS
+// ==============================================================================
+res_ticker    = input.symbol("ECONOMICS:PKFER", "Gross FX Reserves Ticker", group="Data Feeds")
+res_unit      = input.string("USD Millions", "Reserves Ticker Unit", options=["USD Billions", "USD Millions", "PKR Billions"], group="Data Feeds")
+
+ca_ticker     = input.symbol("ECONOMICS:PKCA", "Current Account Ticker (USD)", group="Data Feeds")
+exp_ticker    = input.symbol("ECONOMICS:PKEXP", "Exports Ticker (USD)", group="Data Feeds")
+rem_ticker    = input.symbol("ECONOMICS:PKREM", "Remittances Ticker (USD)", group="Data Feeds")
+imp_ticker    = input.symbol("ECONOMICS:PKIMP", "Direct Imports Ticker (USD, Optional)", group="Data Feeds")
+
+cpi_ticker    = input.symbol("ECONOMICS:PKIRYY", "Pakistan Inflation YoY Ticker", group="Data Feeds")
+uscpi_ticker  = input.symbol("ECONOMICS:USIRYY", "US Inflation YoY Ticker", group="Data Feeds")
+pkintr_ticker = input.symbol("ECONOMICS:PKINTR", "Policy Rate Ticker", group="Data Feeds")
+m2_ticker     = input.symbol("ECONOMICS:PKM2", "M2 Money Supply Ticker (PKR)", group="Data Feeds")
+ccr_ticker    = input.symbol("ECONOMICS:PKCCR", "Private Credit Ticker (PKR)", group="Data Feeds")
+dxy_ticker    = input.symbol("TVC:DXY", "DXY Dollar Index", group="Data Feeds")
+brent_ticker  = input.symbol("TVC:UKOIL", "Brent Crude Oil Ticker", group="Data Feeds")
+usdpkr_ticker = input.symbol("FX_IDC:USDPKR", "USDPKR Spot", group="Data Feeds")
+
+// Model Parameters
+comm_fx_deduct  = input.float(5000.0, "Commercial Bank FX Deduction for SBP Net (USD M)", group="Reserve & Liquidity Settings")
+energy_weight   = input.float(0.23, "Energy Share of Import Basket (23%)", minval=0.05, maxval=0.50, group="Reserve & Liquidity Settings")
+rer_len         = input.int(60, "Rolling RER Window (Months)", minval=12, maxval=120, group="Model Parameters")
+anchor_2006_val = input.float(60.0, "USDPKR Rate in Jan 2006 Baseline", group="2006 Crisis Benchmark")
+base_cagr       = input.float(0.08, "Crisis Compounding CAGR (0.08 = 8.0%)", group="2006 Crisis Benchmark")
+
+string macro_tf = "1M"
+
+// ==============================================================================
+// 2. HELPER FUNCTIONS
+// ==============================================================================
+f_clamp(float val, float min_v, float max_v) =>
+    math.min(math.max(val, min_v), max_v)
+
+f_tanh(float x) =>
+    float e2x = math.exp(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+
+f_slope(float src, int len) =>
+    float s0 = ta.linreg(nz(src), len, 0)
+    float s1 = ta.linreg(nz(src), len, 1)
+    float base = math.abs(s1) < 0.0001 ? 1.0 : math.abs(s1)
+    float res = ((s0 - s1) / base) * 100.0
+    na(res) ? 0.0 : f_clamp(res, -100.0, 100.0)
+
+f_sym_premium(float pct_rank, float max_range) =>
+    float norm_centered = (pct_rank - 50.0) / 50.0
+    f_clamp(norm_centered * max_range, -max_range, max_range)
+
+// ==============================================================================
+// 3. DATA FETCHING (STRICT MONTHLY RESOLUTION)
+// ==============================================================================
+float res_raw   = request.security(res_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float ca_raw    = request.security(ca_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float exp_raw   = request.security(exp_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float rem_raw   = request.security(rem_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float imp_raw   = request.security(imp_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+
+float cpi       = request.security(cpi_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float us_cpi    = request.security(uscpi_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float pkintr    = request.security(pkintr_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float m2        = request.security(m2_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float ccr       = request.security(ccr_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float dxy       = request.security(dxy_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float brent_m0  = request.security(brent_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+float brent_m12 = request.security(brent_ticker, macro_tf, close[12], barmerge.gaps_off, barmerge.lookahead_on)
+float usdpkr    = request.security(usdpkr_ticker, macro_tf, close, barmerge.gaps_off, barmerge.lookahead_on)
+
+float usdpkr_safe = nz(usdpkr, 278.0)
+bool is_new_month  = ta.change(time("1M")) != 0 or barstate.isfirst
+
+// ==============================================================================
+// 4. UNIT CONVERSION & METRIC SEPARATION
+// ==============================================================================
+// 1. Explicit Reserve Normalization to USD Millions
+float gross_res_usd_m = switch res_unit
+    "USD Billions" => nz(res_raw, 14.5) * 1000.0
+    "USD Millions" => nz(res_raw, 14500.0)
+    "PKR Billions" => (nz(res_raw, 4000.0) * 1000.0) / usdpkr_safe
+    => nz(res_raw, 14500.0)
+
+// Separated Measures
+float gross_res_usd_b = gross_res_usd_m / 1000.0
+float sbp_net_res_usd_m = math.max(100.0, gross_res_usd_m - comm_fx_deduct)
+
+// 2. Derived Macro Import Bill (Balance of Payments Fallback)
+float ca_safe  = nz(ca_raw, -300.0)  // Monthly USD M
+float exp_safe = nz(exp_raw, 2500.0) // Monthly USD M
+float rem_safe = nz(rem_raw, 2500.0) // Monthly USD M
+
+float derived_import_m = exp_safe + rem_safe - ca_safe
+float base_import_usd_m = not na(imp_raw) and imp_raw > 100.0 ? imp_raw : derived_import_m
+float base_import_usd_b = math.max(1.0, base_import_usd_m) / 1000.0
+
+// 3. Calibrated Energy Transmission
+float brent_safe    = nz(brent_m0, 75.0)
+float brent_12m_pct = (brent_safe - nz(brent_m12, brent_safe)) / nz(brent_m12, 75.0) * 100.0
+float adjusted_import_b = base_import_usd_b * (1.0 + (energy_weight * (brent_12m_pct / 100.0)))
+
+// 4. Standard Published Import Cover (Uses Gross Reserves)
+float import_cover_m        = gross_res_usd_b / adjusted_import_b
+float reserve_vulnerability = f_clamp((3.5 - import_cover_m) / 2.0, 0.0, 1.0)
+
+// 5. Stress & Liquidity Ratios (Uses SBP Net Usable Reserves)
+float m2_raw     = nz(m2, 34000000.0)
+float m2_pkr_m   = m2_raw < 1000.0 ? m2_raw * 1000000.0 : m2_raw
+float m2_usd_m   = m2_pkr_m / usdpkr_safe
+
+float ca_12m_flow = ta.sma(ca_safe, 12) * 12.0
+float r_m2_res    = m2_usd_m / math.max(100.0, sbp_net_res_usd_m)
+float r_ext_res   = math.abs(math.min(0.0, ca_12m_flow)) / math.max(100.0, sbp_net_res_usd_m)
+
+float pk_cpi_safe  = math.max(-2.0, nz(cpi, 12.0))
+float us_cpi_safe  = math.max(-2.0, nz(us_cpi, 2.5))
+float pk_rate_safe = math.max(0.0, nz(pkintr, 15.0))
+
+float m2_growth_yoy    = ta.change(m2, 12) / nz(m2[12], 1.0) * 100.0
+float res_growth_yoy   = ta.change(gross_res_usd_m, 12) / nz(gross_res_usd_m[12], 1.0) * 100.0
+float real_policy_rate = pk_rate_safe - pk_cpi_safe
+float fiscal_monetization_risk = f_clamp((m2_growth_yoy - math.max(0.0, real_policy_rate)) / 20.0, 0.0, 1.0)
+
+// ==============================================================================
+// 5. 2006 COMPOUNDED CRISIS FAIR VALUE & RER EQUILIBRIUM ENGINE
+// ==============================================================================
+var int anchor_2006_time = timestamp(2006, 1, 1, 0, 0)
+float years_from_2006    = math.max((time - anchor_2006_time) / (365.25 * 86400 * 1000), 0.0)
+float crisis_fair_value  = anchor_2006_val * math.pow(1.0 + base_cagr, years_from_2006)
+
+float rer_spot       = usdpkr_safe * (us_cpi_safe / math.max(1.0, pk_cpi_safe))
+float rer_5y_mean    = ta.sma(rer_spot, rer_len)
+float rolling_ppp_fv = rer_5y_mean * (pk_cpi_safe / math.max(1.0, us_cpi_safe))
+
+float energy_shock_prem = f_clamp(brent_12m_pct * 0.0015, -0.05, 0.10)
+float erer_baseline     = rolling_ppp_fv * (1.0 + energy_shock_prem)
+
+float dev_erer_sanity    = math.abs(erer_baseline - crisis_fair_value) / crisis_fair_value
+float governor_dampening = dev_erer_sanity > 0.08 ? f_tanh((dev_erer_sanity - 0.08) * 3.5) * 0.25 : 0.0
+float governed_baseline  = erer_baseline * (1.0 - (math.sign(erer_baseline - crisis_fair_value) * governor_dampening))
+
+// ==============================================================================
+// 6. CONDITIONAL INTERACTION & STRESS FILTER
+// ==============================================================================
+float pct_liq       = ta.percentrank(r_m2_res, 60)
+float pct_ext       = ta.percentrank(r_ext_res, 60)
+float pct_real_rate = ta.percentrank(real_policy_rate, 60)
+float pct_dxy       = ta.percentrank(nz(dxy, 100.0), 60)
+
+float base_prem_liq = f_sym_premium(pct_liq, 0.08)
+float prem_ext      = f_sym_premium(pct_ext, 0.08)
+float prem_policy   = f_sym_premium(100.0 - pct_real_rate, 0.04)
+
+float interactive_prem_liq  = base_prem_liq * (1.0 + (1.5 * reserve_vulnerability) + (0.5 * fiscal_monetization_risk))
+float structural_multiplier = (1.0 + interactive_prem_liq) * (1.0 + prem_ext) * (1.0 + prem_policy)
+float implied_fair_value    = governed_baseline * structural_multiplier
+
+// Causal Stress Acceleration (Filtered via SBP Net Usable Reserve)
+float m2_res_slope    = f_slope(r_m2_res, 6)
+float ccr_growth      = ta.change(ccr, 12) / nz(ccr[12], 1.0) * 100.0
+float s_credit_growth = f_clamp((ccr_growth - 5.0) / 20.0, 0.0, 1.0) * 100.0
+float s_m2_velocity   = f_clamp((m2_res_slope > 0 ? m2_res_slope * 5.0 : 0.0) + (s_credit_growth * 0.20), 0.0, 100.0)
+
+float ca_flow_slope  = f_slope(ca_12m_flow, 6)
+float s_ext_velocity = f_clamp(ca_flow_slope < 0 ? math.abs(ca_flow_slope) * 4.0 : 0.0, 0.0, 100.0)
+
+float res_dep_slp    = f_slope(sbp_net_res_usd_m, 3)
+float s_res_velocity = f_clamp(res_dep_slp < 0 ? math.abs(res_dep_slp) * 5.0 : 0.0, 0.0, 100.0)
+
+var float res_liquidity = 0.0
+var float res_external  = 0.0
+var float res_reserve   = 0.0
+
+if is_new_month
+    res_liquidity := f_clamp((0.96 * nz(res_liquidity[1])) + (s_m2_velocity * 0.04), 0.0, 100.0)
+    res_external  := f_clamp((0.90 * nz(res_external[1])) + (s_ext_velocity * 0.10), 0.0, 100.0)
+    res_reserve   := f_clamp((0.80 * nz(res_reserve[1])) + (s_res_velocity * 0.20), 0.0, 100.0)
+
+float effective_dxy_weight = 0.12 * (res_liquidity / 100.0)
+float hidden_stress        = (0.45 * res_liquidity) + (0.35 * res_external) + (0.20 * res_reserve) + (effective_dxy_weight * pct_dxy)
+
+// ==============================================================================
+// 7. CONVERGENCE & DEVALUATION PROBABILITY
+// ==============================================================================
+float valuation_gap_pct   = ((implied_fair_value - usdpkr_safe) / usdpkr_safe) * 100.0
+float hist_divergence_pct = ((usdpkr_safe - crisis_fair_value) / crisis_fair_value) * 100.0
+
+float convergence_speed    = 0.15 + 0.85 * math.pow(hidden_stress / 100.0, 2.0)
+float expected_12m_dep_pct = (valuation_gap_pct * convergence_speed) + (base_cagr * 100.0 * (hidden_stress / 100.0))
+
+float deval_raw_score = (0.35 * hidden_stress) + (0.30 * math.max(0.0, valuation_gap_pct * 3.0)) + (0.20 * (reserve_vulnerability * 100.0)) + (0.15 * (fiscal_monetization_risk * 100.0))
+float deval_prob_6m   = f_clamp(100.0 / (1.0 + math.exp(-(deval_raw_score - 45.0) / 10.0)), 0.0, 100.0)
+
+float band_width_pct    = 0.02 + (0.05 * math.pow(hidden_stress / 100.0, 1.5))
+float band_low          = implied_fair_value * (1.0 - band_width_pct)
+float band_high         = implied_fair_value * (1.0 + band_width_pct)
+string valuation_status = usdpkr_safe > band_high ? "OVERVALUED" : (usdpkr_safe < band_low ? "UNDERVALUED" : "OPTIMUM")
+
+color div_color = hist_divergence_pct < 0.0 ? color.red : color.green
+color prob_color = deval_prob_6m >= 75.0 ? color.red : (deval_prob_6m >= 50.0 ? color.orange : (deval_prob_6m >= 30.0 ? color.yellow : color.green))
+
+// ==============================================================================
+// 8. PLOTS & DASHBOARD
+// ==============================================================================
+plot(deval_prob_6m, "6-Month Devaluation Probability (%)", color=prob_color, linewidth=3)
+plot(hist_divergence_pct, "2006 Crisis Baseline Divergence (%)", color=div_color, linewidth=2, style=plot.style_line)
+
+hline(0, "0% Divergence Baseline", color=color.new(color.white, 50), linestyle=hline.style_dotted)
+hline(75, "Critical Risk (75%)", color=color.new(color.red, 40), linestyle=hline.style_dashed)
+hline(50, "Elevated Risk (50%)", color=color.new(color.orange, 40), linestyle=hline.style_dashed)
+
+var table tbl = table.new(position=position.top_right, columns=2, rows=8, bgcolor=color.new(color.black, 15), border_color=color.gray, border_width=1)
+
+if barstate.islast
+    table.cell(tbl, 0, 0, "INSTITUTIONAL ENGINE v13.4", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "MACRO AUDIT SUMMARY", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+
+    table.cell(tbl, 0, 1, "USDPKR SPOT PRICE", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(usdpkr_safe, "#.##") + " PKR", text_color=color.white, text_size=size.small)
+
+    table.cell(tbl, 0, 2, "E-RER FAIR VALUE", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(implied_fair_value, "#.#") + " PKR", text_color=color.fuchsia, text_size=size.small)
+
+    table.cell(tbl, 0, 3, "2006 CRISIS FAIR VALUE", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(crisis_fair_value, "#.#") + " PKR (8% CAGR)", text_color=color.red, text_size=size.small)
+
+    table.cell(tbl, 0, 4, "STATUS / VALUATION GAP", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 4, valuation_status + " (" + str.tostring(valuation_gap_pct, "+#.#;-#.#") + "%)", text_color=valuation_status == "OPTIMUM" ? color.green : color.yellow, text_size=size.small)
+
+    table.cell(tbl, 0, 5, "EXPECTED 12M DEP.", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(expected_12m_dep_pct, "+#.#;-#.#") + "%", text_color=color.orange, text_size=size.small)
+
+    table.cell(tbl, 0, 6, "6M DEVAL. PROBABILITY", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 6, str.tostring(deval_prob_6m, "#.#") + "%", text_color=prob_color, text_size=size.small)
+
+    table.cell(tbl, 0, 7, "HIDDEN STRESS INDEX", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 7, str.tostring(hidden_stress, "#.#") + " / 100", bgcolor=prob_color, text_color=color.black, text_size=size.small)

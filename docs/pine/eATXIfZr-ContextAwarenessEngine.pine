@@ -1,0 +1,743 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © wise_trade_hunter [Ronald Natalia]
+
+//@version=6
+// @description Shared "human contextual awareness" engine — structure memory,
+// zone memory, sequence engine, regime flags. Import this from any indicator
+// instead of rebuilding these primitives per-script (the bug pattern behind
+// Kurisko v1/v2's misfires: each indicator invents its own crude, unverified
+// context logic). FIRST DRAFT — verify every threshold before trusting it.
+library("ContextAwarenessEngine", overlay = false)
+
+// =============================================================================
+// MODULE 1 — STRUCTURE MEMORY
+// A human glancing at a chart doesn't see "a pivot happened" — they see HOW
+// BIG it was, HOW OLD it is, and HOW MANY TIMES price has reacted there.
+// This module gives every pivot that same three-part memory.
+// =============================================================================
+
+// @type A single tracked swing pivot with magnitude/age/touch context.
+export type Pivot
+    float price
+    int   barIndex
+    float magnitude   // size of swing relative to ATR at the time it formed
+    int   touchCount  // how many times price has since revisited within tolerance
+
+// @type A rolling memory of pivots (one instance for highs, one for lows).
+export type StructureMemory
+    array<Pivot> pivots
+    int          maxAge     // bars — stale pivots get pruned
+    float        minMagATR  // minimum size (x ATR) to even be remembered
+
+// @function Creates a new, empty structure memory.
+// @param maxAgeBars bars after which a pivot is forgotten
+// @param minMagnitudeATR minimum swing size (in ATR multiples) to be recorded — filters noise pivots
+// @returns a fresh StructureMemory instance
+export newStructureMemory(int maxAgeBars = 150, float minMagnitudeATR = 0.5) =>
+    StructureMemory.new(array.new<Pivot>(), maxAgeBars, minMagnitudeATR)
+
+// @function Prunes pivots older than maxAge. Call once per bar before recording.
+// @param mem the StructureMemory to prune
+export prune(StructureMemory mem) =>
+    bool pruning = true
+    while pruning
+        if array.size(mem.pivots) == 0
+            pruning := false
+        else if bar_index - array.get(mem.pivots, 0).barIndex > mem.maxAge
+            array.shift(mem.pivots)
+            pruning := pruning  // no-op: keeps this branch's trailing type as bool, matching the other branches (array.shift alone returns Pivot, which doesn't type-match)
+        else
+            pruning := false
+
+// @function DEPRECATED/removed: an earlier placeholder `record()` stub was
+// here but never actually used its `mem` parameter (it always returned a
+// literal `true`), which is exactly what CE10237 caught. recordWithMagnitude()
+// below is the real, only entry point — use that instead.
+
+
+// @function Preferred entry point: caller supplies the actual swing magnitude
+// (e.g. abs(pivotPrice - priorOppositePivotPrice)) so "significant vs noise"
+// reflects real swing size, not just ATR at a point.
+// @param mem the StructureMemory to update
+// @param price the pivot price
+// @param swingMagnitude the size of the swing this pivot represents (price units)
+// @param atrVal current ATR — swingMagnitude is measured in ATR multiples against this
+// @param touchTolATR tolerance (x ATR) for counting a revisit vs a new pivot
+// @returns [isNew, matchedIndex] — isNew true if recorded as a fresh pivot, matchedIndex is the array index touched (-1 if new)
+// @param isLow true if this pivot is a swing LOW (directional override checks
+// for a genuinely lower low); false for a swing HIGH (checks for higher high).
+// Without this, a real break beyond an old level gets silently logged as a
+// mere "touch" of that level instead of a new, more extreme pivot — the exact
+// bug behind missing the deeper low in the circled BTCUSD chart area.
+export recordWithMagnitude(StructureMemory mem, float price, float swingMagnitude, float atrVal, bool isLow, float touchTolATR = 0.15) =>
+    float magATR = na(atrVal) or atrVal == 0 ? 0.0 : swingMagnitude / atrVal
+    float tol = atrVal * touchTolATR
+    int matchedIdx = -1
+    if array.size(mem.pivots) > 0
+        for i = 0 to array.size(mem.pivots) - 1
+            p = array.get(mem.pivots, i)
+            if math.abs(price - p.price) <= tol
+                matchedIdx := i
+    bool isNew = false
+    if matchedIdx >= 0
+        p = array.get(mem.pivots, matchedIdx)
+        // Directional override: if price actually broke beyond the matched
+        // level (not just sitting near it), this is a NEW extreme, not a touch.
+        bool genuineBreak = isLow ? price < p.price - tol * 0.25 : price > p.price + tol * 0.25
+        if genuineBreak and magATR >= mem.minMagATR
+            array.push(mem.pivots, Pivot.new(price, bar_index, magATR, 1))
+            isNew := true
+        else
+            p.touchCount := p.touchCount + 1
+            array.set(mem.pivots, matchedIdx, p)
+    else if magATR >= mem.minMagATR
+        array.push(mem.pivots, Pivot.new(price, bar_index, magATR, 1))
+        isNew := true
+    [isNew, matchedIdx]
+
+// @function Returns the actual current floor/ceiling in memory — lowest low
+// or highest high still tracked — regardless of its ATR-relative magnitude
+// at formation. This answers "where is price's real extreme right now,"
+// which mostSignificant() (magnitude-ranked) does NOT answer.
+// @param mem the StructureMemory to search
+// @param wantLowest true to find the lowest price (support floor), false for highest (ceiling)
+// @returns the most extreme Pivot by raw price, or na fields if empty
+export currentExtreme(StructureMemory mem, bool wantLowest) =>
+    Pivot best = Pivot.new(na, na, na, na)
+    if array.size(mem.pivots) > 0
+        best := array.get(mem.pivots, 0)
+        for i = 1 to array.size(mem.pivots) - 1
+            p = array.get(mem.pivots, i)
+            better = wantLowest ? p.price < best.price : p.price > best.price
+            if better
+                best := p
+    best
+
+// @function A level touched too many times has likely already been consumed —
+// flag it as stale so callers stop treating it as fresh, reliable liquidity.
+// @param p the Pivot to check
+// @param maxTouches touches beyond this count are considered stale
+export isStale(Pivot p, int maxTouches = 2) =>
+    not na(p.touchCount) and p.touchCount > maxTouches
+
+// @function The single most "significant" pivot still in memory — largest
+// magnitude among NON-STALE pivots (excludes levels already ground through
+// maxTouches times, since those have likely been consumed already). This is
+// the closest analogue to "the obvious swing point a human's eye lands on
+// first" — but a human also discounts a level they've watched fail three
+// times already, which is what the staleness filter encodes.
+// @param mem the StructureMemory to search
+// @param maxTouches touches beyond this exclude a pivot as stale (see isStale)
+// @returns the most significant non-stale Pivot, or na fields if none qualify
+export mostSignificant(StructureMemory mem, int maxTouches = 2) =>
+    Pivot best = Pivot.new(na, na, na, na)
+    if array.size(mem.pivots) > 0
+        for i = 0 to array.size(mem.pivots) - 1
+            p = array.get(mem.pivots, i)
+            if not isStale(p, maxTouches)
+                better = na(best.price) or p.magnitude > best.magnitude or (p.magnitude == best.magnitude and p.touchCount > best.touchCount)
+                if better
+                    best := p
+    best
+
+
+// =============================================================================
+// MODULE 2 — ZONE MEMORY
+// FVGs, equal-highs/lows, prior-session levels: all "a price band that matters
+// for a limited time." One shared representation instead of three copies of
+// nearly-identical tracking code (the exact duplication in Kurisko v2).
+// =============================================================================
+
+// @type A price zone with a validity clock (Horner's age x visibility idea).
+export type Zone
+    float top
+    float bottom
+    int   createdBar
+    int   validBars     // Horner's 4-6 candle rule, generalized
+    bool  touched        // has price re-entered this zone since creation
+    string kind           // "FVG_BULL", "FVG_BEAR", "EQ_HIGH", "EQ_LOW", "SESSION_HIGH", "SESSION_LOW", custom
+
+// @function Creates a new zone.
+// @param top top of the zone
+// @param bottom bottom of the zone
+// @param validBars how many bars the zone stays "live" before expiring unfilled
+// @param kind free-text label for what kind of zone this is
+// @returns a fresh Zone
+export newZone(float top, float bottom, int validBars, string kind) =>
+    Zone.new(top, bottom, bar_index, validBars, false, kind)
+
+// @function Checks whether a zone is still within its validity window.
+// @param z the Zone to check
+// @returns true if the zone hasn't expired
+export isFresh(Zone z) =>
+    (bar_index - z.createdBar) <= z.validBars
+
+// @function Checks whether current price has entered the zone, and marks it
+// touched if so. Call once per bar for each active zone.
+// @param z the Zone to check/update
+// @param hi current bar high
+// @param lo current bar low
+// @returns true if price is inside the zone on this bar
+export checkTouch(Zone z, float hi, float lo) =>
+    bool inside = hi >= z.bottom and lo <= z.top
+    if inside
+        z.touched := true
+    inside
+
+// @function A zone counts as an active, meaningful reaction target only if
+// it's still fresh AND has actually been touched — "sweep happened, price
+// came back" not just "gap exists somewhere in memory."
+// @param z the Zone to evaluate
+export isActiveReaction(Zone z) =>
+    isFresh(z) and z.touched
+
+// @function Two entry modes for an FVG zone, corrected against primary
+// ICT-methodology sources (see this project's FVG_Comprehensive_Reference.md,
+// section 4) after an earlier version of this function had the labeling
+// backwards. Per every primary source checked: Consequent Encroachment (CE,
+// the 50% midpoint) is the STANDARD, higher-conviction entry reference --
+// "the equilibrium point... where institutional orders are often most
+// concentrated" -- not a risky/aggressive extreme. The far edge (requiring
+// a full gap fill before triggering) is the WEAKER, lower-probability
+// signal -- it's the "clean reaction" boundary, not a safe default. This
+// function previously called the far edge "conservative" and the midpoint
+// "aggressive," which inverted the actual risk/conviction relationship.
+// Direction-aware via z.kind so callers don't have to work out which edge
+// is "far" themselves.
+// @param z the Zone to compute an entry for (kind must be "FVG_BULL" or "FVG_BEAR")
+// @param useCE true for the Consequent Encroachment (50% midpoint, standard/higher-conviction entry); false for the far-edge full-fill entry (lower-probability, requires the entire gap to be filled first)
+// @returns the entry price, or na if z.kind isn't a recognized FVG type
+export entryPrice(Zone z, bool useCE) =>
+    float mid = (z.top + z.bottom) / 2
+    float result = na
+    if z.kind == "FVG_BULL"
+        // bullish gap: price retraces DOWN into it: the far edge (full fill)
+        // is the BOTTOM of the zone; stop sits beyond that.
+        result := useCE ? mid : z.bottom
+    else if z.kind == "FVG_BEAR"
+        // bearish gap: price retraces UP into it: far edge is the TOP.
+        result := useCE ? mid : z.top
+    result
+
+// @function The matching stop-loss reference: "beyond the far edge of the
+// FVG" per both Horner's video and this project's own Confluence Trading
+// Framework doc. A small ATR buffer is added so the stop isn't sitting
+// exactly on the boundary (which invites getting picked off by noise).
+// @param z the Zone to compute a stop for
+// @param atrVal current ATR, used for the buffer beyond the far edge
+// @param bufferATRmult how far beyond the far edge to place the stop (x ATR)
+export stopPrice(Zone z, float atrVal, float bufferATRmult = 0.1) =>
+    float buf = atrVal * bufferATRmult
+    float result = na
+    if z.kind == "FVG_BULL"
+        result := z.bottom - buf
+    else if z.kind == "FVG_BEAR"
+        result := z.top + buf
+    result
+
+
+// =============================================================================
+// MODULE 3 — SEQUENCE ENGINE
+// The core fix from v3: enforces ORDER, not just co-occurrence in a loose
+// window. Generalized here so ANY 3-leg setup (not just Kurisko's) can reuse
+// it: liquidity -> confirmation -> trigger, in that order, with a timeout.
+// =============================================================================
+
+// @type Generic 3-stage sequence tracker.
+export type Sequence
+    int stage        // 0=idle, 1=leg1 done, 2=leg2 done, 3=fired (consumed same bar)
+    int stageBar      // bar_index when current stage was reached
+    int maxBars       // validity window — sequence resets if it stalls this long
+
+// @function Creates a new idle sequence tracker.
+// @param maxBars how many bars a sequence can sit at one stage before expiring
+export newSequence(int maxBars = 6) =>
+    Sequence.new(0, na, maxBars)
+
+// @function Advances or resets a sequence given the state of its three legs.
+// Call once per bar with the three boolean conditions for THIS bar. Order is
+// enforced: leg2 only counts if stage is already >=1, leg3 only if stage is
+// already >=2 — mirrors bar_index-ordering without needing separate `>=` checks
+// at every call site.
+// @param seq the Sequence to advance
+// @param leg1 condition for stage 0->1 (e.g. liquidity sweep / zone touch)
+// @param leg2 condition for stage 1->2 (e.g. extreme / momentum confirmation)
+// @param leg3 condition for stage 2->3, i.e. the actual fire (e.g. divergence)
+// @returns true on the exact bar the full sequence fires
+export advance(Sequence seq, bool leg1, bool leg2, bool leg3) =>
+    // expire stalled sequences first
+    if seq.stage > 0 and seq.stage < 3 and (bar_index - seq.stageBar) > seq.maxBars
+        seq.stage := 0
+    if seq.stage == 0 and leg1
+        seq.stage := 1
+        seq.stageBar := bar_index
+    if seq.stage == 1 and leg2
+        seq.stage := 2
+        seq.stageBar := bar_index
+    bool fired = seq.stage == 2 and leg3
+    if fired
+        seq.stage := 0  // consumed, ready for the next setup
+    fired
+
+// @function Human-readable status for a status-table row — this is the direct
+// answer to "why hasn't it fired yet," visible instead of a black-box boolean.
+// @param seq the Sequence to describe
+export describe(Sequence seq) =>
+    seq.stage == 0 ? "idle" : seq.stage == 1 ? "leg1 done, awaiting leg2" : seq.stage == 2 ? "leg2 done, awaiting trigger" : "idle"
+
+
+// =============================================================================
+// MODULE 4 — REGIME / CONTEXT FLAGS
+// Trend, session, and volatility state — ATR-relative so nothing silently
+// dies the way v2's fixed FX-pip tolerance died on a BTC chart.
+// =============================================================================
+
+// @function Trend regime from price vs EMA200 + VWAP, as used across this project.
+// @param src typically `close`
+// @returns "UP", "DOWN", or "NEUTRAL"
+export trendRegime(float src) =>
+    e200 = ta.ema(src, 200)
+    vw   = ta.vwap(hlc3)
+    src > e200 and src > vw ? "UP" : src < e200 and src < vw ? "DOWN" : "NEUTRAL"
+
+// @function Volatility regime relative to the instrument's own recent history —
+// avoids hardcoding an absolute number that only makes sense for one asset class.
+// @param atrVal current ATR
+// @param atrLookback bars to compare against for "normal" ATR
+// @returns "HIGH", "LOW", or "NORMAL"
+export volRegime(float atrVal, int atrLookback = 100) =>
+    avgATR = ta.sma(atrVal, atrLookback)
+    atrVal > avgATR * 1.3 ? "HIGH" : atrVal < avgATR * 0.7 ? "LOW" : "NORMAL"
+
+// @function Session/killzone check, generalized from the FX clock in Kurisko v2/v3.
+// @param sessSpec a session string, e.g. "0800-1100"
+// @param tz timezone string, e.g. "America/New_York"
+// @returns true if the current bar falls inside the session
+export inSession(string sessSpec, string tz = "America/New_York") =>
+    not na(time(timeframe.period, sessSpec, tz))
+
+// @function Pulls trend regime from a higher timeframe via request.security.
+// NOTE: Pine v6 forbids a request.*() call's expression from depending on
+// ANY parameter of the exported function it's inside (CE10051) -- so this
+// can no longer accept a caller-supplied `src`. It always evaluates on
+// `close`, which is a global built-in, not a function argument, and so is
+// allowed inside the request expression. If you need a different source,
+// call request.security(syminfo.tickerid, htf, yourSrc) yourself from your
+// script's own (non-exported) scope, then pass the result into
+// trendRegime() directly -- that function has no request.*() call in it,
+// so it's free of this restriction.
+// @param htf the higher timeframe string, e.g. "60", "240", "D"
+// @returns "UP", "DOWN", or "NEUTRAL" as read on the HTF's close
+export htfRegime(string htf) =>
+    request.security(syminfo.tickerid, htf, trendRegime(close))
+
+// @type Tracks a regime series over time so a TRANSITION (not just current
+// state) can be detected — the specific case: was ranging, just started
+// trending, which means older structure below is now lower-confidence.
+export type RegimeTracker
+    string current
+    string previous
+    int    barsInCurrent
+
+// @function Creates a new, empty regime tracker.
+export newRegimeTracker() =>
+    RegimeTracker.new(na, na, 0)
+
+// @function Updates the tracker with this bar's regime reading.
+// @param rt the RegimeTracker to update
+// @param newRegime this bar's regime string ("UP"/"DOWN"/"NEUTRAL")
+// @returns true on the exact bar a transition occurred
+export updateRegime(RegimeTracker rt, string newRegime) =>
+    bool transitioned = not na(rt.current) and newRegime != rt.current
+    rt.previous := rt.current
+    rt.current := newRegime
+    rt.barsInCurrent := transitioned ? 0 : rt.barsInCurrent + 1
+    transitioned
+
+// @function The specific case flagged: HTF just flipped from ranging to
+// trending. Structure recorded before this point should be discounted —
+// it formed under a regime that no longer applies.
+// @param rt the RegimeTracker to check
+// @param recencyBars how recently the flip must have happened to still count as "just"
+export justStartedTrending(RegimeTracker rt) =>
+    rt.previous == "NEUTRAL" and (rt.current == "UP" or rt.current == "DOWN") and rt.barsInCurrent <= 3
+
+
+// =============================================================================
+// MODULE 6 — STRUCTURE BREAK + CANDLE CHARACTER (the "challenge" layer)
+// This is what lets the engine argue with its own prior read instead of
+// trusting old structure blindly: did price actually break structure (BOS),
+// did the break flip the character of the trend (CHoCH), and is the HTF
+// candle CURRENTLY FORMING showing signs of weakening (doji/hangman/wick
+// rejection) before it even closes.
+// =============================================================================
+
+// @function Break of Structure: price closes beyond the given reference pivot
+// in the direction of the prevailing move — continuation confirmation.
+// @param closePrice typically `close`
+// @param refPivot the structural high/low being tested (from currentExtreme or mostSignificant)
+// @param isBullBreak true to test a break ABOVE refPivot.price, false for BELOW
+export brokeStructure(float closePrice, Pivot refPivot, bool isBullBreak) =>
+    not na(refPivot.price) and (isBullBreak ? closePrice > refPivot.price : closePrice < refPivot.price)
+
+// @type Tracks the last confirmed structural break direction to detect CHoCH.
+export type StructureState
+    string lastBreakDir   // "BULL", "BEAR", or na
+
+// @function Creates a new, empty structure-break tracker.
+export newStructureState() =>
+    StructureState.new(na)
+
+// @function Change of Character: a break in the OPPOSITE direction of the
+// last confirmed break — the actual trend-shift signal, distinct from a
+// same-direction BOS (which is just continuation, not a character change).
+// @param ss the StructureState to update
+// @param brokeBull true if a bullish BOS just occurred this bar
+// @param brokeBear true if a bearish BOS just occurred this bar
+// @returns true on the bar a genuine character change is confirmed
+export changeOfCharacter(StructureState ss, bool brokeBull, bool brokeBear) =>
+    bool choch = false
+    if brokeBull
+        choch := ss.lastBreakDir == "BEAR"
+        ss.lastBreakDir := "BULL"
+    else if brokeBear
+        choch := ss.lastBreakDir == "BULL"
+        ss.lastBreakDir := "BEAR"
+    choch
+
+// @function Reads the character of a (typically higher-timeframe) candle
+// while it is still forming — doji (indecision), hangman/hammer-shaped
+// rejection wick, or a body that's weakening relative to its own recent
+// average. This is the "how is the HTF candle developing" challenge layer —
+// it doesn't wait for the candle to close to start discounting a level.
+// @param o open, h high, l low, c close — pass HTF values via request.security
+// @param avgBody a recent average body size for comparison (e.g. ta.sma of abs(close-open))
+// @returns "DOJI", "HANGMAN", "HAMMER", "WEAKENING", or "NORMAL"
+export candleCharacter(float o, float h, float l, float c, float avgBody) =>
+    float body = math.abs(c - o)
+    float candleRange = h - l
+    float upperWick = h - math.max(o, c)
+    float lowerWick = math.min(o, c) - l
+    bool isDoji = candleRange > 0 and body <= candleRange * 0.1
+    bool isHangman = lowerWick >= body * 2 and upperWick <= body * 0.5 and c < o
+    bool isHammer  = lowerWick >= body * 2 and upperWick <= body * 0.5 and c >= o
+    bool isWeakening = not na(avgBody) and avgBody > 0 and body < avgBody * 0.5 and not isDoji
+    isDoji ? "DOJI" : isHangman ? "HANGMAN" : isHammer ? "HAMMER" : isWeakening ? "WEAKENING" : "NORMAL"
+
+// @function The combined "challenge" score: how much should a structural
+// level's reliability be discounted right now. Pulls together staleness,
+// a fresh regime transition, and weakening HTF candle character into one
+// read instead of leaving the caller to reconcile three signals by hand.
+// @param pivotStale true if the reference pivot is already stale (see isStale)
+// @param regimeJustShifted true if justStartedTrending() fired recently
+// @param htfCharacter result of candleCharacter() on the current HTF candle
+// @returns "LOW", "MEDIUM", or "HIGH" confidence in the level still holding
+export confidence(bool pivotStale, bool regimeJustShifted, string htfCharacter) =>
+    int penalties = 0
+    if pivotStale
+        penalties += 1
+    if regimeJustShifted
+        penalties += 1
+    if htfCharacter == "DOJI" or htfCharacter == "WEAKENING" or htfCharacter == "HANGMAN"
+        penalties += 1
+    penalties >= 2 ? "LOW" : penalties == 1 ? "MEDIUM" : "HIGH"
+
+
+// =============================================================================
+// MODULE 7 — PIVOT RELATION (HH / HL / LH / LL)
+// The missing primitive: not "how big was this pivot" or "is it stale" but
+// "is this pivot higher or lower than the LAST pivot of the same type." This
+// is the actual Dow-theory building block Kurisko's script has no equivalent
+// of — it only reads absolute stochastic levels, never relative swing
+// structure. Two consecutive higher-lows is what a human means by "the
+// uptrend held," not any single stochastic crossover.
+// =============================================================================
+
+// @function Classifies a new pivot against the prior pivot of the SAME type
+// (both lows, or both highs) still in memory. Call this right after a new
+// pivot is recorded — compare the two most recent non-stale entries.
+// @param newPrice this pivot's price
+// @param priorPrice the previous same-type pivot's price
+// @param isLowType true if comparing lows (HL/LL), false if comparing highs (HH/LH)
+// @param tol tolerance (price units) below which prices count as "equal"
+// @returns "HIGHER_LOW", "LOWER_LOW", "HIGHER_HIGH", "LOWER_HIGH", or "EQUAL"
+export pivotRelation(float newPrice, float priorPrice, bool isLowType, float tol) =>
+    string result = "EQUAL"
+    if na(newPrice) or na(priorPrice)
+        result := na
+    else if math.abs(newPrice - priorPrice) <= tol
+        result := "EQUAL"
+    else if isLowType
+        result := newPrice > priorPrice ? "HIGHER_LOW" : "LOWER_LOW"
+    else
+        result := newPrice > priorPrice ? "HIGHER_HIGH" : "LOWER_HIGH"
+    result
+
+// @function Convenience wrapper: pulls the two most recent non-stale pivots
+// from a StructureMemory and classifies their relation directly, so callers
+// don't have to manually pull "last two" themselves.
+// @param mem the StructureMemory to read (lows-memory or highs-memory)
+// @param isLowType true if this memory tracks lows, false if it tracks highs
+// @param atrVal current ATR, used to scale the equality tolerance
+// @param maxTouches staleness threshold passed through to filtering
+// @returns [relation, newest Pivot, prior Pivot] — relation is na if fewer than 2 non-stale pivots exist
+export latestRelation(StructureMemory mem, bool isLowType, float atrVal, int maxTouches = 2) =>
+    array<Pivot> nonStale = array.new<Pivot>()
+    if array.size(mem.pivots) > 0
+        for i = 0 to array.size(mem.pivots) - 1
+            p = array.get(mem.pivots, i)
+            if not isStale(p, maxTouches)
+                array.push(nonStale, p)
+    string rel = na
+    Pivot newest = Pivot.new(na, na, na, na)
+    Pivot prior  = Pivot.new(na, na, na, na)
+    if array.size(nonStale) >= 2
+        newest := array.get(nonStale, array.size(nonStale) - 1)
+        prior  := array.get(nonStale, array.size(nonStale) - 2)
+        rel := pivotRelation(newest.price, prior.price, isLowType, atrVal * 0.1)
+    [rel, newest, prior]
+
+// @type Running structure-trend state built from consecutive HH/HL vs LH/LL
+// classifications — the "is the uptrend actually intact" read a human forms
+// by eyeballing a sequence of swings, not just the last single comparison.
+export type StructureTrend
+    string bias            // "BULLISH", "BEARISH", or "MIXED"
+    int    consecutiveCount // how many same-direction relations in a row
+
+// @function Creates a new, neutral structure-trend tracker.
+export newStructureTrend() =>
+    StructureTrend.new("MIXED", 0)
+
+// @function Feeds one new relation classification (from a LOW comparison OR
+// a HIGH comparison — call separately for each, or alternate as pivots form)
+// into the running trend read. Two consecutive HIGHER_LOW or HIGHER_HIGH
+// reads confirm BULLISH; two consecutive LOWER_LOW or LOWER_HIGH confirm
+// BEARISH; a contradicting read resets the count instead of flipping instantly.
+// @param st the StructureTrend to update
+// @param relation output of pivotRelation()/latestRelation() ("HIGHER_LOW" etc.)
+// @param confirmAfter how many consecutive agreeing reads confirm a bias (default 2)
+// @returns true on the exact bar the bias is (re)confirmed
+export updateStructureTrend(StructureTrend st, string relation, int confirmAfter = 2) =>
+    bool bullishRead = relation == "HIGHER_LOW" or relation == "HIGHER_HIGH"
+    bool bearishRead = relation == "LOWER_LOW" or relation == "LOWER_HIGH"
+    bool confirmed = false
+    if bullishRead
+        st.consecutiveCount := st.bias == "BULLISH" ? st.consecutiveCount + 1 : 1
+        st.bias := "BULLISH"
+        confirmed := st.consecutiveCount >= confirmAfter
+    else if bearishRead
+        st.consecutiveCount := st.bias == "BEARISH" ? st.consecutiveCount + 1 : 1
+        st.bias := "BEARISH"
+        confirmed := st.consecutiveCount >= confirmAfter
+    else
+        st.bias := "MIXED"
+        st.consecutiveCount := 0
+    confirmed
+
+
+// =============================================================================
+// MODULE 8 — BREAKOUT CONVICTION (genuine break vs. opportunistic hunt)
+// Motivation behind a breakout can never be directly observed from price
+// alone -- this does NOT attempt to read intent. It scores the discriminating
+// FOOTPRINTS that correlate with genuine directional participation vs. a
+// thin-liquidity stop-hunt, combined into one composite rather than five
+// signals to eyeball separately. Every weight here is a starting hypothesis,
+// not a calibrated statistical result -- backtest before trusting the score.
+// =============================================================================
+
+// @type Tracks one structural break from the moment it occurs through
+// resolution (fast give-back vs. held), then produces a composite score.
+export type BreakoutTracker
+    float  level
+    bool   isBull        // true = broke upward, false = broke downward
+    int    breakBar
+    bool   resolved
+    float  score          // 0-100 once resolved, na until then
+    string conviction     // "LOW", "MEDIUM", "HIGH", na until resolved
+
+// @function Starts tracking a fresh structural break.
+// @param level the structural price level that was broken
+// @param isBull true if price broke upward through the level, false if downward
+export newBreakoutTracker(float level, bool isBull) =>
+    BreakoutTracker.new(level, isBull, bar_index, false, na, na)
+
+// Composite scoring, kept private (non-exported) since it's only an internal
+// helper for updateBreakoutTracker -- weights sum to a 100-point scale:
+//   40 pts — held the close beyond the level past the retrace window (the
+//            single strongest discriminator: acceptance vs. wick-and-reject)
+//   20 pts — move size relative to ATR, capped at 2x ATR (bigger, but not
+//            unboundedly so — an absurdly oversized wick is often the hunt,
+//            not the conviction)
+//   15 pts — occurred during an active high-liquidity session (a given move
+//            requires genuinely larger size to achieve in deep liquidity,
+//            which is weaker evidence for "cheap, opportunistic")
+//   15 pts — part of a sequence of same-direction sweeps, capped at 3 (a lone
+//            isolated spike is weaker evidence than progressive liquidity-taking)
+//   10 pts — subsequent structure (pivotRelation/StructureTrend) agrees with
+//            the break direction after the fact
+computeBreakoutScore(bool heldClose, float sizeATRmult, bool inLiquiditySession, int sweepSequenceCount, bool pivotAgreement) =>
+    float s = 0.0
+    s += heldClose ? 40.0 : 0.0
+    s += math.min(sizeATRmult, 2.0) * 10.0
+    s += inLiquiditySession ? 15.0 : 0.0
+    s += math.min(sweepSequenceCount, 3) * 5.0
+    s += pivotAgreement ? 10.0 : 0.0
+    math.min(s, 100.0)
+
+gradeBreakoutScore(float s) =>
+    s >= 65 ? "HIGH" : s >= 35 ? "MEDIUM" : "LOW"
+
+// @function Call once per bar after a break is being tracked. Resolves the
+// tracker (and returns true) the first time either condition below fires:
+// a FAST give-back within retraceWindowBars (close moves back beyond the
+// level quickly — reads as a hunt, scored with heldClose=false), or the
+// close HOLDS beyond the level through holdWindowBars without giving back
+// (reads as genuine acceptance, scored with heldClose=true). Once resolved,
+// the tracker stops updating -- read bt.score/bt.conviction after a true
+// return, or check bt.resolved directly at any time.
+// @param bt the BreakoutTracker to update
+// @param closePrice current bar's close
+// @param sizeATRmult the breakout candle's size in ATR multiples
+// @param inLiquiditySession true if the break occurred during an active killzone/session
+// @param sweepSequenceCount how many same-direction sweeps preceded this break (0 if isolated)
+// @param pivotAgreement true if subsequent structure (see Module 7) agrees with the break direction
+// @param retraceWindowBars bars within which a give-back counts as "fast" (default 3)
+// @param holdWindowBars bars of holding without give-back required to score as "held" (default 5)
+// @returns true on the exact bar the tracker resolves (score/conviction become valid)
+export updateBreakoutTracker(BreakoutTracker bt, float closePrice, float sizeATRmult, bool inLiquiditySession, int sweepSequenceCount, bool pivotAgreement, int retraceWindowBars = 3, int holdWindowBars = 5) =>
+    bool fired = false
+    if not bt.resolved
+        int barsSince = bar_index - bt.breakBar
+        bool gaveBack = bt.isBull ? closePrice < bt.level : closePrice > bt.level
+        if gaveBack and barsSince <= retraceWindowBars
+            bt.score := computeBreakoutScore(false, sizeATRmult, inLiquiditySession, sweepSequenceCount, pivotAgreement)
+            bt.conviction := gradeBreakoutScore(bt.score)
+            bt.resolved := true
+            fired := true
+        else if barsSince >= holdWindowBars and not gaveBack
+            bt.score := computeBreakoutScore(true, sizeATRmult, inLiquiditySession, sweepSequenceCount, pivotAgreement)
+            bt.conviction := gradeBreakoutScore(bt.score)
+            bt.resolved := true
+            fired := true
+    fired
+
+
+// =============================================================================
+// MODULE 9 — VALUE AREA / POINT OF CONTROL
+// Market-maker-facilitated two-sided liquidity is what produces a stable
+// "agreed" price range in the first place (Market Profile / auction market
+// theory, Steidlmayer). This module measures where volume actually
+// concentrated over a session, giving Modules 1-8 a way to check whether a
+// gap/sweep/break happened INSIDE the range participants already agreed on
+// (weaker signal — that's exactly where two-sided trading was already
+// happening) or OUTSIDE it (stronger signal — genuine one-sided displacement
+// away from the agreed zone).
+// =============================================================================
+
+// @type A simple price-bucketed volume profile for one session/window.
+export type VolumeProfile
+    array<float> bucketPrices   // price at the bottom of each bucket
+    array<float> bucketVolumes  // accumulated volume in each bucket
+    float        bucketSize     // price width of each bucket
+
+// @function Creates a new, empty volume profile.
+// @param priceLow the lowest price the profile should cover
+// @param priceHigh the highest price the profile should cover
+// @param numBuckets how many price buckets to divide the range into (more = finer resolution, more memory)
+export newVolumeProfile(float priceLow, float priceHigh, int numBuckets = 24) =>
+    array<float> prices = array.new<float>()
+    array<float> vols = array.new<float>()
+    float bSize = (priceHigh - priceLow) / numBuckets
+    for i = 0 to numBuckets - 1
+        array.push(prices, priceLow + i * bSize)
+        array.push(vols, 0.0)
+    VolumeProfile.new(prices, vols, bSize)
+
+// @function Adds one bar's volume into the profile, split across whichever
+// buckets its high-low range overlaps (proportional to overlap), rather than
+// dumping the whole bar's volume into a single bucket.
+// @param vp the VolumeProfile to update
+// @param barHigh this bar's high
+// @param barLow this bar's low
+// @param barVolume this bar's volume
+export addBar(VolumeProfile vp, float barHigh, float barLow, float barVolume) =>
+    int n = array.size(vp.bucketPrices)
+    float barRange = barHigh - barLow
+    if n > 0 and barRange > 0 and not na(barVolume)
+        for i = 0 to n - 1
+            float bTop = array.get(vp.bucketPrices, i) + vp.bucketSize
+            float bBot = array.get(vp.bucketPrices, i)
+            float overlap = math.max(0.0, math.min(barHigh, bTop) - math.max(barLow, bBot))
+            if overlap > 0
+                float share = barVolume * (overlap / barRange)
+                array.set(vp.bucketVolumes, i, array.get(vp.bucketVolumes, i) + share)
+
+// @function Finds the Point of Control -- the single bucket with the most
+// accumulated volume.
+// @param vp the VolumeProfile to search
+// @returns the price (bucket midpoint) of the POC
+export pointOfControl(VolumeProfile vp) =>
+    int n = array.size(vp.bucketVolumes)
+    float bestVol = -1.0
+    int bestIdx = -1
+    if n > 0
+        for i = 0 to n - 1
+            v = array.get(vp.bucketVolumes, i)
+            if v > bestVol
+                bestVol := v
+                bestIdx := i
+    bestIdx >= 0 ? array.get(vp.bucketPrices, bestIdx) + vp.bucketSize / 2 : na
+
+// @function Computes the Value Area -- the contiguous price range containing
+// approximately the given percentage of total volume, expanding outward
+// bucket-by-bucket from the POC (the standard Market Profile method).
+// @param vp the VolumeProfile to compute from
+// @param pct fraction of total volume the Value Area should contain (default 0.70, the standard convention)
+// @returns [vaHigh, vaLow] the top and bottom of the Value Area
+export valueArea(VolumeProfile vp, float pct = 0.70) =>
+    int n = array.size(vp.bucketVolumes)
+    float vaHigh = na
+    float vaLow = na
+    if n > 0
+        float total = 0.0
+        for i = 0 to n - 1
+            total += array.get(vp.bucketVolumes, i)
+        // find POC index
+        float bestVol = -1.0
+        int pocIdx = 0
+        for i = 0 to n - 1
+            v = array.get(vp.bucketVolumes, i)
+            if v > bestVol
+                bestVol := v
+                pocIdx := i
+        int lo = pocIdx
+        int hi = pocIdx
+        float covered = array.get(vp.bucketVolumes, pocIdx)
+        while total > 0 and covered / total < pct and (lo > 0 or hi < n - 1)
+            float volBelow = lo > 0 ? array.get(vp.bucketVolumes, lo - 1) : -1.0
+            float volAbove = hi < n - 1 ? array.get(vp.bucketVolumes, hi + 1) : -1.0
+            if volBelow >= volAbove
+                lo := lo - 1
+                covered += volBelow
+            else
+                hi := hi + 1
+                covered += volAbove
+        vaLow := array.get(vp.bucketPrices, lo)
+        vaHigh := array.get(vp.bucketPrices, hi) + vp.bucketSize
+    [vaHigh, vaLow]
+
+// @function The direct confluence check: is a given price inside or outside
+// the Value Area. A gap/sweep/break OUTSIDE the Value Area is the stronger
+// signal -- it represents genuine displacement away from where two-sided
+// agreement was already happening, per the module's core reasoning.
+// NOTE: returns false (not na) when vaHigh/vaLow aren't yet available --
+// Pine v6 booleans can never be na, so an "unknown" state can't be
+// represented directly; check valueArea()'s own na output first if you need
+// to distinguish "confirmed inside" from "not yet computed."
+// @param price the price to check (e.g. an FVG's CE, or a swept pivot level)
+// @param vaHigh top of the Value Area (from valueArea())
+// @param vaLow bottom of the Value Area (from valueArea())
+// @returns true if the price sits outside the Value Area
+export outsideValueArea(float price, float vaHigh, float vaLow) =>
+    bool validRange = not na(vaHigh) and not na(vaLow)
+    validRange and (price > vaHigh or price < vaLow)

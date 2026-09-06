@@ -1,0 +1,406 @@
+//@version=6
+library("MCLib", overlay = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DETERMINISTIC PRNG (Phase 3: Architecture Refactor)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Deterministic pseudo-random number generator (0.0 to 1.0)
+// @param seed1 Primary seed (e.g., bar_index or iteration counter)
+// @param seed2 Secondary seed (e.g., run number or feature index)
+// @returns Uniform random float in [0.0, 1.0)
+// @note Deterministic - same seeds always produce same output (no time dependency)
+export f_prng(int seed1, int seed2) =>
+    float raw = math.sin(seed1 * 12.9898 + seed2 * 78.233) * 43758.5453
+    raw - math.floor(raw)
+
+// @type Monte Carlo physics parameters for generic simulation configuration
+// @field squeeze_intensity Squeeze intensity multiplier (0.0 = no amplitude prediction, per U10)
+// @field use_mean_reversion Enable mean reversion pull toward fair value
+// @field mr_strength Mean reversion strength coefficient
+// @field use_vector_coupling Enable vector coupling to shadow price
+// @field vector_strength Vector coupling strength coefficient
+// @field shadow_price Shadow price for vector coupling (if enabled)
+export type MCPhysicsParams
+    float squeeze_intensity = 0.0
+    bool use_mean_reversion = true
+    float mr_strength = 0.25
+    bool use_vector_coupling = true
+    float vector_strength = 0.05
+    float shadow_price = na
+
+export f_eval_validator_path(array<float> sim_buffer, int run, int setup_horizon, float setup_entry_price, string setup_direction, float setup_sl, int max_hold_bars) =>
+    float path_min = setup_entry_price
+    float path_max = setup_entry_price
+    bool path_exited = false
+    for h = 0 to setup_horizon - 1
+        int idx = run * setup_horizon + h
+        float path_price = array.get(sim_buffer, idx)
+        if not path_exited
+            path_min := math.min(path_min, path_price)
+            path_max := math.max(path_max, path_price)
+            bool hit_sl = setup_direction == "LONG" ? path_price <= setup_sl : path_price >= setup_sl
+            bool exit_hold = h >= max_hold_bars - 1 or h == setup_horizon - 1
+            if hit_sl or exit_hold
+                path_exited := true
+    [path_min, path_max]
+
+export f_calc_validator_rr(float entry_price, string eval_direction, float mae_price, float mfe_price) =>
+    float risk = eval_direction == "LONG" ? entry_price - mae_price : mae_price - entry_price
+    float reward = eval_direction == "LONG" ? mfe_price - entry_price : entry_price - mfe_price
+    reward / math.max(risk, syminfo.mintick)
+
+// --- TP/SL Drawing Helper ---
+export f_draw_mc_cones(bool cone_gate, array<float> p10, array<float> p50, array<float> p90, int horizon, array<line> l10_arr, array<line> l50_arr, array<line> l90_arr, array<linefill> fill_arr, bool show_med, float opacity, int current_bar_index, float mintick) =>
+    if cone_gate
+        // Clear old
+        if array.size(l10_arr) > 0
+            for i = 0 to array.size(l10_arr) - 1
+                line.delete(array.get(l10_arr, i))
+            array.clear(l10_arr)
+        if array.size(l50_arr) > 0
+            for i = 0 to array.size(l50_arr) - 1
+                line.delete(array.get(l50_arr, i))
+            array.clear(l50_arr)
+        if array.size(l90_arr) > 0
+            for i = 0 to array.size(l90_arr) - 1
+                line.delete(array.get(l90_arr, i))
+            array.clear(l90_arr)
+        if array.size(fill_arr) > 0
+            for i = 0 to array.size(fill_arr) - 1
+                linefill.delete(array.get(fill_arr, i))
+            array.clear(fill_arr)
+            
+        float start_50 = array.get(p50, 0)
+        float end_50 = array.get(p50, horizon - 1)
+        float dir_pct = (end_50 - start_50) / math.max(start_50, mintick) * 100
+        
+        color c_cone = dir_pct > 0.1 ? color.new(color.lime, opacity) : (dir_pct < -0.1 ? color.new(color.red, opacity) : color.new(color.gray, opacity))
+        color c_med = dir_pct > 0.1 ? color.new(color.lime, 0) : (dir_pct < -0.1 ? color.new(color.red, 0) : color.new(color.gray, 0))
+        
+        for h = 1 to horizon - 1
+            int x1 = current_bar_index + (h - 1)
+            int x2 = current_bar_index + h
+            float v10_prev = array.get(p10, h - 1), v10_curr = array.get(p10, h)
+            float v50_prev = array.get(p50, h - 1), v50_curr = array.get(p50, h)
+            float v90_prev = array.get(p90, h - 1), v90_curr = array.get(p90, h)
+            
+            if not na(v10_prev) and not na(v10_curr) and not na(v90_prev) and not na(v90_curr)
+                line l10 = line.new(x1, v10_prev, x2, v10_curr, color=c_cone, width=1, force_overlay=true)
+                line l90 = line.new(x1, v90_prev, x2, v90_curr, color=c_cone, width=1, force_overlay=true)
+                array.push(l10_arr, l10)
+                array.push(l90_arr, l90)
+                array.push(fill_arr, linefill.new(l10, l90, c_cone))
+            
+            if show_med and not na(v50_prev) and not na(v50_curr)
+                line l50 = line.new(x1, v50_prev, x2, v50_curr, color=c_med, width=2, style=line.style_dashed, force_overlay=true)
+                array.push(l50_arr, l50)
+        true
+    else
+        false
+
+// Family classification removed - SSoT is SetupsLib.f_get_mc_family()
+// MCLib should only contain: PRNG, Welford MC, cone drawing, backtest table
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WELFORD MC BOOTSTRAP WITH kNN PATH RESAMPLING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Run Welford MC bootstrap with kNN-weighted path resampling and antithetic noise
+// @param final_knn_ids kNN neighbor indices
+// @param cumw Cumulative weights for neighbor selection
+// @param arr_close Close price history
+// @param arr_ATR ATR history
+// @param mc_horizon Simulation horizon
+// @param mc_runs Maximum MC runs (capped at 500)
+// @param mc_noise_scale Noise scaling factor
+// @param current_close Current close price
+// @param pathsUpAtH Output: paths above current price at each horizon step (mutated)
+// @param mc_progressive_p10 Output: 10th percentile path (mutated)
+// @param mc_progressive_p50 Output: 50th percentile path (mutated)
+// @param mc_progressive_p90 Output: 90th percentile path (mutated)
+// @param bar_idx Current bar index (used for deterministic PRNG seed)
+// @returns [paths_up, total_paths, wMean, wM2, wCount] for further analysis
+export f_welford_knn_bootstrap(array<int> final_knn_ids, array<float> cumw, array<float> arr_close, array<float> arr_ATR, 
+                                int mc_horizon, int mc_runs, float mc_noise_scale, float current_close,
+                                array<int> pathsUpAtH, array<float> mc_progressive_p10, array<float> mc_progressive_p50, array<float> mc_progressive_p90,
+                                int bar_idx) =>
+    
+    int mc_runs_sync = math.min(mc_runs, 500)
+    int close_size = array.size(arr_close)
+    int ksync = array.size(final_knn_ids)
+    
+    // Welford accumulators
+    array<float> wMean = array.new_float(mc_horizon, 0.0)
+    array<float> wM2 = array.new_float(mc_horizon, 0.0)
+    array<int> wCount = array.new_int(mc_horizon, 0)
+    
+    // Clear and initialize pathsUpAtH
+    array.clear(pathsUpAtH)
+    for _h = 0 to mc_horizon - 1
+        array.push(pathsUpAtH, 0)
+    
+    int paths_up = 0
+    int total_paths = 0
+    
+    // MC loop with antithetic pairs
+    for run = 0 to mc_runs_sync - 1
+        // Weighted neighbor selection (deterministic PRNG)
+        float rw = f_prng(bar_idx + run + 1, run + 1)
+        int chosen_idx = array.get(final_knn_ids, ksync - 1)
+        for n = 0 to ksync - 1
+            if rw <= array.get(cumw, n)
+                chosen_idx := array.get(final_knn_ids, n)
+                break
+        
+        if chosen_idx + mc_horizon >= close_size
+            continue
+        
+        // Initialize antithetic pair
+        float price_A = current_close
+        float price_B = current_close
+        float neighbor_ATR = nz(array.get(arr_ATR, chosen_idx))
+        float neighbor_close = array.get(arr_close, chosen_idx)
+        float noise_scale = neighbor_close > 0 ? neighbor_ATR * mc_noise_scale / neighbor_close : 0.0
+        
+        // Path simulation with Welford updates
+        for h = 0 to mc_horizon - 1
+            int future_bar = chosen_idx + h + 1
+            // Bug 1 Fix B: Bounds check to prevent array access errors
+            if future_bar >= close_size
+                break  // Stop walk early if we hit buffer edge
+            float raw_close_cur = array.get(arr_close, future_bar)
+            float raw_close_prev = array.get(arr_close, future_bar - 1)
+            float hist_return = not na(raw_close_cur) and not na(raw_close_prev) and raw_close_prev > 0 ? math.log(raw_close_cur / raw_close_prev) : 0.0
+            
+            // Box-Muller transform for Gaussian noise (deterministic PRNG)
+            float u1 = math.max(1e-10, f_prng(bar_idx + run * 997 + h * 61, 11))
+            float u2 = f_prng(bar_idx + run * 991 + h * 67, 17)
+            
+            float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
+            float noise = z * noise_scale
+            
+            // Antithetic paths
+            price_A *= math.exp(hist_return + noise)
+            price_B *= math.exp(hist_return - noise)
+            
+            // Welford update for path A
+            float old_mean_A = array.get(wMean, h)
+            float old_m2_A = array.get(wM2, h)
+            int count_A = array.get(wCount, h) + 1
+            array.set(wCount, h, count_A)
+            float delta_A = price_A - old_mean_A
+            float new_mean_A = old_mean_A + delta_A / count_A
+            array.set(wMean, h, new_mean_A)
+            array.set(wM2, h, old_m2_A + delta_A * (price_A - new_mean_A))
+            
+            // Welford update for path B
+            float old_mean_B = array.get(wMean, h)
+            float old_m2_B = array.get(wM2, h)
+            int count_B = array.get(wCount, h) + 1
+            array.set(wCount, h, count_B)
+            float delta_B = price_B - old_mean_B
+            float new_mean_B = old_mean_B + delta_B / count_B
+            array.set(wMean, h, new_mean_B)
+            array.set(wM2, h, old_m2_B + delta_B * (price_B - new_mean_B))
+            
+            // Track directional paths
+            if price_A > current_close
+                array.set(pathsUpAtH, h, array.get(pathsUpAtH, h) + 1)
+            if price_B > current_close
+                array.set(pathsUpAtH, h, array.get(pathsUpAtH, h) + 1)
+        
+        // Final horizon direction
+        if price_A > current_close
+            paths_up += 1
+        if price_B > current_close
+            paths_up += 1
+        total_paths += 2
+    
+    // Compute percentiles from Welford stats
+    array.clear(mc_progressive_p10)
+    array.clear(mc_progressive_p50)
+    array.clear(mc_progressive_p90)
+    for h = 0 to mc_horizon - 1
+        float mu = array.get(wMean, h)
+        int count_h = array.get(wCount, h)
+        float sigma = count_h > 1 ? math.sqrt(array.get(wM2, h) / count_h) : 0.0
+        array.push(mc_progressive_p10, mu - 1.282 * sigma)
+        array.push(mc_progressive_p50, mu)
+        array.push(mc_progressive_p90, mu + 1.282 * sigma)
+    
+    [paths_up, total_paths, wMean, wM2, wCount]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TICK-BASED CHUNKED MC EXECUTION (for realtime progressive cone building)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Run a CHUNK of MC runs, updating persistent Welford accumulators across ticks
+// @param knn_ids kNN neighbor indices
+// @param cumw Cumulative weights for neighbor selection
+// @param arr_close Close price history
+// @param arr_ATR ATR history
+// @param mc_horizon Simulation horizon
+// @param chunk_runs Number of runs to execute in this chunk
+// @param mc_noise_scale Noise scaling factor
+// @param current_close Current close price
+// @param wMean Persistent Welford mean accumulator (mutated)
+// @param wM2 Persistent Welford M2 accumulator (mutated)
+// @param wCount Persistent Welford count accumulator (mutated)
+// @param pathsUp Persistent paths-up counter (mutated)
+// @param run_offset Starting run index for unique PRNG seeds
+// @param bar_idx Current bar index (used for deterministic PRNG seed)
+// @returns int Number of paths executed (chunk_runs × 2 for antithetic)
+export f_welford_knn_chunk(array<int> knn_ids, array<float> cumw, array<float> arr_close, array<float> arr_ATR,
+                            int mc_horizon, int chunk_runs, float mc_noise_scale, float current_close,
+                            array<float> wMean, array<float> wM2, array<int> wCount, array<int> pathsUp,
+                            int run_offset, int bar_idx) =>
+    
+    int ksync = array.size(knn_ids)
+    int close_size = array.size(arr_close)
+    int paths_executed = 0
+    
+    // Execute chunk of MC runs
+    for run = 0 to chunk_runs - 1
+        int global_run = run_offset + run
+        
+        // Weighted neighbor selection (O(1) with cumulative weights, deterministic)
+        float rw = f_prng(bar_idx + global_run + 1, global_run + 1)
+        
+        int chosen_idx = array.get(knn_ids, ksync - 1)
+        for n = 0 to ksync - 1
+            if rw <= array.get(cumw, n)
+                chosen_idx := array.get(knn_ids, n)
+                break
+        
+        if chosen_idx + mc_horizon >= close_size
+            continue
+        
+        // Initialize antithetic pair
+        float price_A = current_close
+        float price_B = current_close
+        float neighbor_ATR = nz(array.get(arr_ATR, chosen_idx))
+        float neighbor_close = array.get(arr_close, chosen_idx)
+        float noise_scale = neighbor_close > 0 ? neighbor_ATR * mc_noise_scale / neighbor_close : 0.0
+        
+        // Path simulation with Welford updates
+        for h = 0 to mc_horizon - 1
+            int future_bar = chosen_idx + h + 1
+            // Bug 1 Fix B: Bounds check to prevent array access errors
+            if future_bar >= close_size
+                break  // Stop walk early if we hit buffer edge
+            float raw_close_cur = array.get(arr_close, future_bar)
+            float raw_close_prev = array.get(arr_close, future_bar - 1)
+            float hist_return = not na(raw_close_cur) and not na(raw_close_prev) and raw_close_prev > 0 ? 
+                               math.log(raw_close_cur / raw_close_prev) : 0.0
+            
+            // Gaussian noise via Box-Muller (deterministic, reproducible)
+            float u1 = math.max(1e-10, f_prng(bar_idx + global_run * 997 + h * 61, 11))
+            float u2 = f_prng(bar_idx + global_run * 991 + h * 67, 17)
+            
+            float z = math.sqrt(-2.0 * math.log(u1)) * math.cos(6.2831853 * u2)
+            float noise = z * noise_scale
+            
+            // Antithetic paths
+            price_A *= math.exp(hist_return + noise)
+            price_B *= math.exp(hist_return - noise)
+            
+            // Welford update for path A
+            int count_A = array.get(wCount, h) + 1
+            array.set(wCount, h, count_A)
+            float delta_A = price_A - array.get(wMean, h)
+            float new_mean_A = array.get(wMean, h) + delta_A / count_A
+            array.set(wMean, h, new_mean_A)
+            array.set(wM2, h, array.get(wM2, h) + delta_A * (price_A - new_mean_A))
+            
+            // Welford update for path B
+            int count_B = array.get(wCount, h) + 1
+            array.set(wCount, h, count_B)
+            float delta_B = price_B - array.get(wMean, h)
+            float new_mean_B = array.get(wMean, h) + delta_B / count_B
+            array.set(wMean, h, new_mean_B)
+            array.set(wM2, h, array.get(wM2, h) + delta_B * (price_B - new_mean_B))
+            
+            // Track directional paths
+            if price_A > current_close
+                array.set(pathsUp, h, array.get(pathsUp, h) + 1)
+            if price_B > current_close
+                array.set(pathsUp, h, array.get(pathsUp, h) + 1)
+        
+        paths_executed += 2  // antithetic pair
+    
+    paths_executed
+
+// @function Render backtest summary table (Phase 6)
+// @param tbl Table object to populate
+// @param raw_total Total raw setups
+// @param raw_wins Raw wins count
+// @param raw_pnl_sum Raw PnL sum
+// @param raw_mae_sum Raw MAE sum
+// @param raw_mfe_sum Raw MFE sum
+// @param raw_mean Raw Welford mean
+// @param raw_m2 Raw Welford M2
+// @param filt_total Filtered setups (MC confirmed)
+// @param filt_wins Filtered wins count
+// @param filt_pnl_sum Filtered PnL sum
+// @param filt_mae_sum Filtered MAE sum
+// @param filt_mfe_sum Filtered MFE sum
+// @param filt_mean Filtered Welford mean
+// @param filt_m2 Filtered Welford M2
+// @param avg_agree Average MC agreement %
+export f_render_backtest_table(table tbl, int raw_total, int raw_wins, float raw_pnl_sum, float raw_mae_sum, float raw_mfe_sum, float raw_mean, float raw_m2, int filt_total, int filt_wins, float filt_pnl_sum, float filt_mae_sum, float filt_mfe_sum, float filt_mean, float filt_m2, float avg_agree) =>
+    // Calculate all metrics
+    float raw_wr = raw_total > 0 ? raw_wins * 100.0 / raw_total : na
+    float filt_wr = filt_total > 0 ? filt_wins * 100.0 / filt_total : na
+    float raw_avg_pnl = raw_total > 0 ? raw_pnl_sum / raw_total : na
+    float filt_avg_pnl = filt_total > 0 ? filt_pnl_sum / filt_total : na
+    float raw_avg_mae = raw_total > 0 ? raw_mae_sum / raw_total : na
+    float raw_avg_mfe = raw_total > 0 ? raw_mfe_sum / raw_total : na
+    float filt_avg_mae = filt_total > 0 ? filt_mae_sum / filt_total : na
+    float filt_avg_mfe = filt_total > 0 ? filt_mfe_sum / filt_total : na
+    float raw_rr = not na(raw_avg_mae) and raw_avg_mae > 0 ? raw_avg_mfe / raw_avg_mae : na
+    float filt_rr = not na(filt_avg_mae) and filt_avg_mae > 0 ? filt_avg_mfe / filt_avg_mae : na
+    float raw_std = raw_total > 1 ? math.sqrt(raw_m2 / (raw_total - 1)) : na
+    float filt_std = filt_total > 1 ? math.sqrt(filt_m2 / (filt_total - 1)) : na
+    float raw_sharpe = not na(raw_std) and raw_std > 0 ? raw_mean / raw_std : na
+    float filt_sharpe = not na(filt_std) and filt_std > 0 ? filt_mean / filt_std : na
+    
+    // Color logic: green if filtered > raw
+    color wr_col = not na(filt_wr) and not na(raw_wr) and filt_wr > raw_wr ? color.lime : color.orange
+    color pnl_col = not na(filt_avg_pnl) and not na(raw_avg_pnl) and filt_avg_pnl > raw_avg_pnl ? color.lime : color.orange
+    color rr_col = not na(filt_rr) and not na(raw_rr) and filt_rr > raw_rr ? color.lime : color.orange
+    color sharpe_col = not na(filt_sharpe) and not na(raw_sharpe) and filt_sharpe > raw_sharpe ? color.lime : color.orange
+    color yield_col = not na(filt_pnl_sum) and not na(raw_pnl_sum) and filt_pnl_sum > raw_pnl_sum ? color.lime : color.orange
+    
+    // Side-by-side 3-column table: Metric | Raw | Filtered
+    table.cell(tbl, 0, 0, "Metric", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 0, "Raw", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 2, 0, "kNN+MC", text_color=color.black, text_size=size.small)
+    
+    table.cell(tbl, 0, 1, "N trades", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(raw_total), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 1, str.tostring(filt_total), text_color=color.white, text_size=size.small)
+    
+    table.cell(tbl, 0, 2, "WR%", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 2, na(raw_wr) ? "na" : str.tostring(raw_wr, "#.1f") + "%", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 2, na(filt_wr) ? "na" : str.tostring(filt_wr, "#.1f") + "%", text_color=wr_col, text_size=size.small)
+    
+    table.cell(tbl, 0, 3, "Avg PnL%", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 3, na(raw_avg_pnl) ? "na" : str.tostring(raw_avg_pnl, "#.3f") + "%", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 3, na(filt_avg_pnl) ? "na" : str.tostring(filt_avg_pnl, "#.3f") + "%", text_color=pnl_col, text_size=size.small)
+    
+    table.cell(tbl, 0, 4, "Avg RR", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 4, na(raw_rr) ? "na" : str.tostring(raw_rr, "#.2f"), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 4, na(filt_rr) ? "na" : str.tostring(filt_rr, "#.2f"), text_color=rr_col, text_size=size.small)
+    
+    table.cell(tbl, 0, 5, "Sharpe", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 5, na(raw_sharpe) ? "na" : str.tostring(raw_sharpe, "#.2f"), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 5, na(filt_sharpe) ? "na" : str.tostring(filt_sharpe, "#.2f"), text_color=sharpe_col, text_size=size.small)
+    
+    table.cell(tbl, 0, 6, "Σ Yield%", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 6, na(raw_pnl_sum) ? "na" : str.tostring(raw_pnl_sum, "#.2f") + "%", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 6, na(filt_pnl_sum) ? "na" : str.tostring(filt_pnl_sum, "#.2f") + "%", text_color=yield_col, text_size=size.small)
+    
+    table.cell(tbl, 0, 7, "MC Agree%", text_color=color.black, text_size=size.small)
+    table.cell(tbl, 1, 7, "—", text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 2, 7, na(avg_agree) ? "na" : str.tostring(avg_agree, "#.1f") + "%", text_color=color.aqua, text_size=size.small)

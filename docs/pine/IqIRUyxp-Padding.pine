@@ -1,0 +1,880 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © The_Peaceful_Lizard
+
+// @description A comprehensive library for padding time series data with various methods. Supports both single variable and array inputs, with flexible padding directions and periods. Designed for signal processing applications including FFT, filtering, convolution, and wavelets. All methods maintain data ordering with most recent point at index 0.
+//@version=6
+library("Padding")
+
+// enums and types {
+
+//@enum Specifies the direction of padding for time series data
+//@field forward Pads data points ahead of the current data
+//@field backward Pads data points behind the current data 
+//@field both Pads data points in both directions
+export enum Direction
+    forward = "Forward"
+    backward = "Backward"
+    both = "Both"
+
+//@enum Different padding methods available for extending time series data
+//@field symmetric Mirrors the input data across its boundaries
+//@field reflect Similar to symmetric but continues the trend by reflecting around endpoint values
+//@field periodic Repeats the input data in the specified direction
+//@field antisymmetric Like symmetric but alternates sign with each repeat
+//@field antireflect Like reflect but conserves derivatives (loses last data point if an array is uesd)
+//@field smooth Continues the series with constant derivatives from endpoints (loses last data point if an array is uesd)
+//@field constant Extends using the endpoint values
+//@field zero Extends using zero values
+//@field none No padding applied
+export enum PaddingType
+    symmetric = "Symmetric"
+    reflect = "Reflect"
+    periodic = "Periodic"
+    antisymmetric = "Antisymmetric"
+    antireflect = "Antireflect"
+    smooth = "Smooth"
+    constant = "Constant"
+    zero = "Zero"
+    none = "None"
+
+type PaddingMetaData
+    int series_length = na
+    int forward_period = na
+    int backward_period = na
+
+type PaddingData
+    float[] data
+    float[] delta
+    PaddingMetaData info
+    bool ready
+
+// enums and types }
+
+// helpers {
+
+method periods(PaddingData self, Direction direction)=>
+    if direction == Direction.both
+        runtime.error("Both direction not supported for this opperation.")
+    int periods = switch direction
+        Direction.forward => math.ceil(self.info.forward_period / self.info.series_length) - 1
+        Direction.backward => math.ceil(self.info.backward_period / self.info.series_length) - 1
+    periods
+
+method remainder(PaddingData self, Direction direction)=>
+    int remainder = switch direction
+        Direction.forward => (self.info.forward_period % self.info.series_length)
+        Direction.backward => (self.info.backward_period % self.info.series_length)
+    remainder
+
+// helpers }
+
+// data generation {
+
+data_window(float source, int length)=>
+    var float[] data = array.new<float>()
+    var bool init = true
+    if init and not na(source) and data.size() == 0
+        while data.size() < length
+            data.push(source)
+        init := false
+    if not init
+        data.unshift(source)
+        data.pop()
+    data
+
+delta_window(float source, int length)=>
+    var float[] delta = array.new<float>(length, 0)
+    if not na(source[1])
+        delta.unshift(source - source[1])
+        delta.pop()
+    delta
+
+make_data(float source, int length)=>
+    float[] data = array.new<float>()
+    float valid_data = na
+    for i = 0 to length - 1
+        float historical_data = source[i]
+        if not na(historical_data)
+            valid_data := historical_data
+        if na(historical_data) and na(valid_data)
+            break
+        data.push(valid_data)
+    data
+
+make_delta(float source, int length)=>
+    float[] delta = array.new<float>()
+    for i = 0 to length - 1
+        delta.push(nz(source[i] - source[i + 1]))
+    delta
+
+make_delta(float[] source)=>
+    float[] delta = array.new<float>()
+    for i = 0 to source.size() - 2
+        delta.push(source.get(i) - source.get(i + 1))
+    delta
+
+make_meta_data(int series_length, int both_period = na , int forward_period = na, int backward_period = na)=>
+    PaddingMetaData meta_data = PaddingMetaData.new()
+
+    if na(meta_data.forward_period)
+        if na(series_length)
+            runtime.error("series_length can not be na.")
+        if series_length <= 1
+            runtime.error("series_length must be greater than 1.")
+
+        meta_data.series_length := series_length
+
+        if na(both_period)
+            if na(forward_period)
+                meta_data.forward_period := series_length
+            else
+                if forward_period <= 0
+                    runtime.error("forward_period must be greater than 0 if specified.")
+                meta_data.forward_period := forward_period
+        else
+            if both_period <= 0
+                runtime.error("both_period must be breater than 0 if specified.")
+            meta_data.forward_period := both_period
+
+    if na(meta_data.backward_period)
+        if na(both_period)
+            if na(backward_period)
+                meta_data.backward_period := series_length
+            else
+                if backward_period <= 0
+                    runtime.error("backward_period must be greater than 0 if specified.")
+                meta_data.backward_period := backward_period
+        else
+            if both_period <= 0
+                runtime.error("both_period must be breater than 0 if specified.")
+            meta_data.backward_period := both_period
+    meta_data
+
+make_padding_window(float source, int series_length, int both_period = na, int forward_period = na, int backward_period = na)=>
+    float[] data = data_window(source, series_length)
+    float[] delta = delta_window(source, series_length)
+    var bool ready = false
+
+    if not ready and data.size() > 0
+        ready := true
+
+    PaddingMetaData meta_data = make_meta_data(series_length, both_period, forward_period, backward_period)
+    PaddingData padding_data = PaddingData.new(data, delta, meta_data, ready)
+    padding_data
+
+method make_padding_data(float source, int series_length, int both_period = na, int forward_period = na, int backward_period = na)=>
+    float[] data = make_data(source, series_length)
+    float[] delta = make_delta(source, series_length)
+    bool ready = data.size() > 0
+    PaddingMetaData meta_data = make_meta_data(series_length, both_period, forward_period, backward_period)
+    PaddingData padding_data = PaddingData.new(data, delta, meta_data, ready)
+    padding_data
+
+method make_padding_data(float[] source, int both_period = na, int forward_period = na, int backward_period = na)=> // warning, this method will reduce the size of your array by 1 due to the delta op.
+    float[] data = source.copy()
+    data.pop()
+    float[] delta = make_delta(source)
+    bool ready = data.size() > 0
+    PaddingMetaData meta_data = make_meta_data(data.size(), both_period, forward_period, backward_period)
+    PaddingData padding_data = PaddingData.new(source, delta, meta_data, ready)
+    padding_data
+
+// data generation }
+
+// padding methods {
+
+method symmetric(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] symmetric_padding = array.new<float>()
+        float[] forward = array.new<float>()
+        float[] backward = array.new<float>()
+        float[] data_copy = data.data.copy()
+
+        if direction == Direction.forward
+            int periods = data.periods(Direction.forward)
+            int remainder = data.remainder(Direction.forward)
+
+            for period = 0 to periods
+                bool final = remainder != 0 and period == periods
+                int slice_end = final ? remainder : data.info.series_length
+                float[] temp = data_copy.copy().slice(0, slice_end)
+                temp.reverse()
+                data_copy.reverse()
+
+                forward := temp.concat(forward)
+
+            symmetric_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            int periods = data.periods(Direction.backward)
+            int remainder = data.remainder(Direction.backward)
+
+            for period = 0 to periods
+                bool final = remainder != 0 and period == periods
+                int slice_end = final ? remainder : data.info.series_length
+                data_copy.reverse()
+                float[] temp = data_copy.copy().slice(0, slice_end)
+
+                backward := backward.concat(temp)
+
+            symmetric_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            int periods_forward = data.periods(Direction.forward)
+            int remainder_forward = data.remainder(Direction.forward)
+
+            for period = 0 to periods_forward
+                bool final = remainder_forward != 0 and period == periods_forward
+                int slice_end = final ? remainder_forward : data.info.series_length
+                float[] temp = data_copy.copy().slice(0, slice_end)
+                temp.reverse()
+                data_copy.reverse()
+
+                forward := temp.concat(forward)
+
+            data_copy := data.data.copy()
+
+            int periods_backward = data.periods(Direction.backward)
+            int remainder_backward = data.remainder(Direction.backward)
+
+            for period = 0 to periods_backward
+                bool final = remainder_backward != 0 and period == periods_backward
+                int slice_end = final ? remainder_backward : data.info.series_length
+                data_copy.reverse()
+                float[] temp = data_copy.copy().slice(0, slice_end)
+
+                backward := backward.concat(temp)
+            symmetric_padding := forward.concat(data.data).concat(backward)
+        symmetric_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method reflect(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] reflect_padding = array.new<float>()
+        float[] forward = array.new<float>()
+        float[] backward = array.new<float>()
+
+        if direction == Direction.forward
+            int idx = 0
+            int counter = 0
+            while counter < data.info.forward_period
+                int loops = math.floor(counter / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? 1 : -1
+                idx += loop_direction
+                forward.unshift(data.data.get(idx))
+                counter += 1
+
+            reflect_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            int idx = data.info.series_length - 1
+            int counter = 0
+            while counter < data.info.backward_period
+                int loops = math.floor(counter / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? -1 : 1
+                idx += loop_direction
+                backward.push(data.data.get(idx))
+                counter += 1
+
+            reflect_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            int idx_forward = 0
+            int counter_forward = 0
+            while counter_forward < data.info.forward_period
+                int loops = math.floor(counter_forward / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? 1 : -1
+                idx_forward += loop_direction
+                forward.unshift(data.data.get(idx_forward))
+                counter_forward += 1
+
+            int idx_backward = data.info.series_length - 1
+            int counter_backward = 0
+            while counter_backward < data.info.backward_period
+                int loops = math.floor(counter_backward / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? -1 : 1
+                idx_backward += loop_direction
+                backward.push(data.data.get(idx_backward))
+                counter_backward += 1
+
+            reflect_padding := forward.concat(data.data).concat(backward)
+        reflect_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method periodic(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] periodic_padding = array.new<float>()
+        float[] forward = array.new<float>()
+        float[] backward = array.new<float>()
+
+        if direction == Direction.forward
+            int periods = data.periods(Direction.forward)
+            int remainder = data.remainder(Direction.forward)
+
+            for period = 0 to periods
+                bool final = remainder != 0 and period == periods
+                int slice_end = final ? remainder : data.info.series_length
+
+                forward := forward.concat(data.data.slice(0, slice_end))
+
+            periodic_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            int periods = data.periods(Direction.backward)
+            int remainder = data.remainder(Direction.backward)
+
+            for period = 0 to periods
+                bool final = remainder != 0 and period == periods
+                int slice_end = final ? remainder : data.info.series_length
+
+                backward := backward.concat(data.data.slice(0, slice_end))
+
+            periodic_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            int periods_forward = data.periods(Direction.forward)
+            int remainder_forward = data.remainder(Direction.forward)
+
+            for period = 0 to periods_forward
+                bool final = remainder_forward != 0 and period == periods_forward
+                int slice_end = final ? remainder_forward : data.info.series_length
+
+                forward := forward.concat(data.data.slice(0, slice_end))
+
+            int periods_backward = data.periods(Direction.backward)
+            int remainder_backward = data.remainder(Direction.backward)
+
+            for period = 0 to periods_backward
+                bool final = remainder_backward != 0 and period == periods_backward
+                int slice_end = final ? remainder_backward : data.info.series_length
+
+                backward := backward.concat(data.data.slice(0, slice_end))
+
+            periodic_padding := forward.concat(data.data).concat(backward)
+        periodic_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method antisymmetric(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] antisymmetric_padding = array.new<float>()
+        float[] forward = array.new<float>()
+        float[] backward = array.new<float>()
+
+        if direction == Direction.forward
+            int idx = 0
+            int counter = 0
+            while counter < data.info.forward_period
+                int loops = math.floor(counter / data.info.series_length)
+                int loop_direction = loops % 2 == 0 ? 1 : -1
+                forward.unshift(data.data.get(idx) * -loop_direction)
+                idx += loop_direction
+                counter += 1
+
+            antisymmetric_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            int idx = data.info.series_length - 1
+            int counter = 0
+            while counter < data.info.backward_period
+                int loops = math.floor(counter / data.info.series_length)
+                int loop_direction = loops % 2 == 0 ? -1 : 1
+                backward.push(data.data.get(idx) * loop_direction)
+                idx += loop_direction
+                counter += 1
+
+            antisymmetric_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            int idx_forward = 0
+            int counter_forward = 0
+            while counter_forward < data.info.forward_period
+                int loops = math.floor(counter_forward / data.info.series_length)
+                int loop_direction = loops % 2 == 0 ? 1 : -1
+                forward.unshift(data.data.get(idx_forward) * -loop_direction)
+                idx_forward += loop_direction
+                counter_forward += 1
+
+            int idx_backward = data.info.series_length - 1
+            int counter_backward = 0
+            while counter_backward < data.info.backward_period
+                int loops = math.floor(counter_backward / data.info.series_length)
+                int loop_direction = loops % 2 == 0 ? -1 : 1
+                backward.push(data.data.get(idx_backward) * loop_direction)
+                idx_backward += loop_direction
+                counter_backward += 1
+
+            antisymmetric_padding := forward.concat(data.data).concat(backward)
+        antisymmetric_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method antireflect(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] antireflect_padding = array.new<float>()
+        float[] forward = array.new<float>()
+        float[] backward = array.new<float>()
+        float forward_start = data.data.first()
+        float backward_start = data.data.last()
+
+        if direction == Direction.forward
+            int idx = 0
+            int counter = 0
+            while counter < data.info.forward_period
+                int loops = math.floor(counter / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? 1 : -1
+                forward_start += data.delta.get(idx * -loop_direction)
+                forward.unshift(forward_start)
+                idx += loop_direction
+                counter += 1
+
+            antireflect_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            int idx = data.info.series_length - 1
+            int counter = 0
+            while counter < data.info.backward_period
+                int loops = math.floor(counter / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? -1 : 1
+                backward_start += data.delta.get(idx * loop_direction)
+                backward.push(backward_start)
+                idx += loop_direction
+                counter += 1
+
+            antireflect_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            int idx_forward = 0
+            int counter_forward = 0
+            while counter_forward < data.info.forward_period
+                int loops = math.floor(counter_forward / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? 1 : -1
+                forward_start += data.delta.get(idx_forward) * -loop_direction
+                forward.unshift(forward_start)
+                idx_forward += loop_direction
+                counter_forward += 1
+
+            int idx_backward = data.info.series_length - 1
+            int counter_backward = 0
+            while counter_backward < data.info.backward_period
+                int loops = math.floor(counter_backward / (data.info.series_length - 1))
+                int loop_direction = loops % 2 == 0 ? -1 : 1
+                backward_start += data.delta.get(idx_backward) * loop_direction
+                backward.push(backward_start)
+                idx_backward += loop_direction
+                counter_backward += 1
+
+            antireflect_padding := forward.concat(data.data).concat(backward)
+        antireflect_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method smooth(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] smooth_padding = array.new<float>()
+        float[] forward = array.new<float>()
+        float[] backward = array.new<float>()
+        float forward_start = data.data.first()
+        float backward_start = data.data.last()
+        float forward_delta = data.delta.first()
+        float backward_delta = data.delta.last() * -1
+
+        if direction == Direction.forward
+            int periods = data.periods(Direction.forward)
+            int remainder = data.remainder(Direction.forward)
+
+            for period = 0 to periods
+                bool final = remainder != 0 and period == periods
+                int loop_point = final ? remainder : data.info.series_length - 1
+
+                float[] temp = array.new<float>()
+
+                for idx = 0 to loop_point
+                    forward_start += forward_delta
+                    temp.unshift(forward_start)
+
+                forward := temp.concat(forward)
+
+            smooth_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            int periods = data.periods(Direction.backward)
+            int remainder = data.remainder(Direction.backward)
+
+            for period = 0 to periods
+                bool final = remainder != 0 and period == periods
+                int loop_point = final ? remainder : data.info.series_length - 1
+
+                for idx = 0 to loop_point
+                    backward_start += backward_delta
+                    backward.push(backward_start)
+
+            smooth_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            int periods_forward = data.periods(Direction.forward)
+            int remainder_forward = data.remainder(Direction.forward)
+
+            for period = 0 to periods_forward
+                bool final = remainder_forward != 0 and period == periods_forward
+                int loop_point = final ? remainder_forward : data.info.series_length
+
+                float[] temp = array.new<float>()
+
+                for idx = 0 to loop_point
+                    forward_start += forward_delta
+                    temp.unshift(forward_start)
+
+                forward := temp.concat(forward)
+
+            int periods_backward = data.periods(Direction.backward)
+            int remainder_backward = data.remainder(Direction.backward)
+
+            for period = 0 to periods_backward
+                bool final = remainder_backward != 0 and period == periods_backward
+                int loop_point = final ? remainder_backward : data.info.series_length
+
+                for idx = 0 to loop_point
+                    backward_start += backward_delta
+                    backward.push(backward_start)
+
+            smooth_padding := forward.concat(data.data).concat(backward)
+        smooth_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method constant(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] constant_padding = array.new<float>()
+        float[] forward = array.new<float>(data.info.forward_period, data.data.first())
+        float[] backward = array.new<float>(data.info.backward_period, data.data.last())
+
+        if direction == Direction.forward
+            constant_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            constant_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            constant_padding := forward.concat(data.data).concat(backward)
+        constant_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+method zero(PaddingData data, Direction direction)=>
+    if data.ready
+        float[] zero_padding = array.new<float>()
+        float[] forward = array.new<float>(data.info.forward_period, 0)
+        float[] backward = array.new<float>(data.info.backward_period, 0)
+
+        if direction == Direction.forward
+            zero_padding := forward.concat(data.data)
+
+        else if direction == Direction.backward
+            zero_padding := data.data.copy().concat(backward)
+
+        else if direction == Direction.both
+            zero_padding := forward.concat(data.data).concat(backward)
+        zero_padding
+    else
+        log.error("Data not ready. Source variable is na or source array is empty.")
+        array.new<float>()
+
+// padding methods }
+
+// padding method overloads {
+
+// { variable source
+
+// @function Applies symmetric padding by mirroring the input data across boundaries
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with symmetric padding applied
+export symmetric(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).symmetric(direction)
+
+// @function Applies reflect padding by continuing trends through reflection around endpoint values
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with reflect padding applied
+export reflect(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).reflect(direction)
+
+// @function Applies periodic padding by repeating the input data
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with periodic padding applied
+export periodic(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).periodic(direction)
+
+// @function Applies antisymmetric padding by mirroring data and alternating signs
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with antisymmetric padding applied
+export antisymmetric(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).antisymmetric(direction)
+
+// @function Applies antireflect padding by reflecting around endpoints while preserving derivatives
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with antireflect padding applied
+export antireflect(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).antireflect(direction)
+
+// @function Applies smooth padding by extending with constant derivatives from endpoints
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with smooth padding applied
+export smooth(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).smooth(direction)
+
+// @function Applies constant padding by extending endpoint values
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with constant padding applied
+export constant(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).constant(direction)
+
+// @function Applies zero padding by extending with zeros
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with zero padding applied
+export zero(float source, int series_length, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(series_length, both_period, forward_period, backward_period).zero(direction)
+
+// } variable source
+
+// { array source
+
+// @function Applies symmetric padding to an array by mirroring the data across boundaries
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with symmetric padding applied
+export method symmetric(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).symmetric(direction)
+
+// @function Applies reflect padding to an array by continuing trends through reflection around endpoint values
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with reflect padding applied
+export method reflect(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).reflect(direction)
+
+// @function Applies periodic padding to an array by repeating the data
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with periodic padding applied
+export method periodic(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).periodic(direction)
+
+// @function Applies antisymmetric padding to an array by mirroring data and alternating signs
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with antisymmetric padding applied
+export method antisymmetric(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).antisymmetric(direction)
+
+// @function Applies antireflect padding to an array by reflecting around endpoints while preserving derivatives
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with antireflect padding applied. Note: Last data point is lost when using array input
+export method antireflect(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).antireflect(direction)
+
+// @function Applies smooth padding to an array by extending with constant derivatives from endpoints
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with smooth padding applied. Note: Last data point is lost when using array input
+export method smooth(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).smooth(direction)
+
+// @function Applies constant padding to an array by extending endpoint values
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with constant padding applied
+export method constant(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).constant(direction)
+
+// @function Applies zero padding to an array by extending with zeros
+// @param source Array of values to pad
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with zero padding applied
+export method zero(float[] source, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    source.make_padding_data(both_period, forward_period, backward_period).zero(direction)
+
+// } array source
+
+// padding method overloads }
+
+// pad data {
+
+method pad_data(PaddingData self, PaddingType padding_type, Direction direction)=>
+    switch padding_type
+        PaddingType.symmetric => self.symmetric(direction)
+        PaddingType.reflect => self.reflect(direction)
+        PaddingType.periodic => self.periodic(direction)
+        PaddingType.antisymmetric => self.antisymmetric(direction)
+        PaddingType.antireflect => self.antireflect(direction)
+        PaddingType.smooth => self.smooth(direction)
+        PaddingType.constant => self.constant(direction)
+        PaddingType.zero => self.zero(direction)
+        PaddingType.none => self.data
+
+// @function Generic padding function that applies specified padding type to input data
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param padding_type Type of padding to apply (see PaddingType enum)
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with specified padding applied
+export pad_data(float source, int series_length, PaddingType padding_type, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    PaddingData data = source.make_padding_data(series_length, both_period, forward_period, backward_period)
+    switch padding_type
+        PaddingType.symmetric => data.symmetric(direction)
+        PaddingType.reflect => data.reflect(direction)
+        PaddingType.periodic => data.periodic(direction)
+        PaddingType.antisymmetric => data.antisymmetric(direction)
+        PaddingType.antireflect => data.antireflect(direction)
+        PaddingType.smooth => data.smooth(direction)
+        PaddingType.constant => data.constant(direction)
+        PaddingType.zero => data.zero(direction)
+        PaddingType.none => data.data
+
+// @function Generic padding function that applies specified padding type to array input
+// @param source Array of values to pad
+// @param padding_type Type of padding to apply (see PaddingType enum)
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to array length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to array length if not specified
+// @returns Array ordered with most recent point at index 0, containing original data with specified padding applied. Note: Last data point is lost when using antireflect or smooth padding types
+export method pad_data(float[] source, PaddingType padding_type, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    switch padding_type
+        PaddingType.symmetric => source.symmetric(direction, both_period, forward_period, backward_period)
+        PaddingType.reflect => source.reflect(direction, both_period, forward_period, backward_period)
+        PaddingType.periodic => source.periodic(direction, both_period, forward_period, backward_period)
+        PaddingType.antisymmetric => source.antisymmetric(direction, both_period, forward_period, backward_period)
+        PaddingType.antireflect => source.antireflect(direction, both_period, forward_period, backward_period)
+        PaddingType.smooth => source.smooth(direction, both_period, forward_period, backward_period)
+        PaddingType.constant => source.constant(direction, both_period, forward_period, backward_period)
+        PaddingType.zero => source.zero(direction, both_period, forward_period, backward_period)
+        PaddingType.none => source
+
+// @function Creates a window-based padded data series that updates with each new value. WARNING: Function must be called on every bar for consistency. Do not use in scopes where it may not execute on every bar.
+// @param source Input value to pad from
+// @param series_length Length of the data window
+// @param padding_type Type of padding to apply (see PaddingType enum)
+// @param direction Direction to apply padding
+// @param both_period Optional - periods to pad in both directions. Overrides forward_period and backward_period if specified
+// @param forward_period Optional - periods to pad forward. Defaults to series_length if not specified
+// @param backward_period Optional - periods to pad backward. Defaults to series_length if not specified
+// @returns Array ordered with most recent point at index 0, containing windowed data with specified padding applied
+export make_padded_data(float source, int series_length, PaddingType padding_type, Direction direction, int both_period = na, int forward_period = na, int backward_period = na)=>
+    float[] padded_data = make_padding_window(source, series_length, both_period, forward_period, backward_period).pad_data(padding_type, direction)
+    padded_data
+
+// pad data }
+
+// test {
+
+method draw_data(float[] self, int offset = 0)=>
+    chart.point[] points = array.new<chart.point>()
+    var polyline[] drawing = array.new<polyline>()
+    while drawing.size() > 0
+        drawing.pop().delete()
+
+    if self.size() > 0
+        for i = 0 to self.size() - 1
+            points.push(chart.point.new(na, bar_index[i] + offset, self.get(i)))
+
+        drawing.push(polyline.new(points, false, false, xloc.bar_index))
+
+// test }
+
+// inputs {
+
+float source = input.source(close, "Source")
+int length = input.int(10, "Length", minval = 2)
+PaddingType padding_type = input.enum(PaddingType.none, "Padding Type")
+Direction direction = input.enum(Direction.both, "Padding Direction")
+int both_period = na // input.int(1, "Both Period")
+int forward_period = input.int(1, "Forward Period", minval = 1)
+int backward_period = input.int(1, "Backward Period", minval = 1)
+
+// inputs }
+
+// example {
+
+make_padded_data(source, length, padding_type, direction, both_period, forward_period, backward_period).draw_data()
+constant(close, 10, Direction.forward, 4).draw_data(-15)
+float[] test_array = array.from(close, close[5], close[10], close[1], close[3])
+test_array.reflect(Direction.backward, backward_period = 8).draw_data(-40)
+
+// example }

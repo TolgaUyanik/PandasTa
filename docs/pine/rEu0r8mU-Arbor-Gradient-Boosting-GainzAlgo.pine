@@ -1,0 +1,713 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © GainzAlgo
+//    │    │     │        ██████╗  █████╗ ██╗███╗   ██╗███████╗ █████╗ ██╗      ██████╗  ██████╗
+//   ┌┴┐   │    ┌┴┐      ██╔════╝ ██╔══██╗██║████╗  ██║╚══███╔╝██╔══██╗██║     ██╔════╝ ██╔═══██╗
+//   │ │   │    │ │      ██║  ███╗███████║██║██╔██╗ ██║  ███╔╝ ███████║██║     ██║  ███╗██║   ██║
+//   └┬┘  ┌┴┐   └┬┘      ██║   ██║██╔══██║██║██║╚██╗██║ ███╔╝  ██╔══██║██║     ██║   ██║██║   ██║
+//    │   │ │    │       ██████╔╝██║  ██║██║██║ ╚████║███████╗██║  ██║███████╗╚██████╔╝╚██████╔╝
+//    │   └┬┘             ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝  ╚═════╝
+//         │
+//@version=6
+
+// @description Arbor — gradient boosting for Pine Script. From-scratch GBM v2
+//   with XGBoost-style mechanics: Fisher-Yates row subsampling, Newton leaf steps
+//   (second-order hessian weighting), exact XGBoost gain formula with L2
+//   regularization (lambda), minimum gain pruning (gamma), and minimum child
+//   weight. Trees are depth-1 stumps (one split per round) and there is no
+//   column (feature) subsampling — this is an XGBoost-style boosting scheme,
+//   not a full XGBoost reimplementation. Supports classification and regression
+//   across three feature tiers:
+//     - GBM  (1 feature)  : gbm_fit / gbm_predict
+//                            classification or regression via is_classifier
+//     - GBM3 (3 features) : gbm3_fit / gbm3_predict
+//                            classification only
+//     - GBM4 (4 features) : gbm4_fit / gbm4_predict / gbm4_importance_pct
+//                            classification or regression with XGBoost-style
+//                            gain-based feature importance
+//   All variants use Newton leaf steps, exact gain formula, L2 regularization,
+//   Fisher-Yates shuffle subsampling, and gamma/min_child_weight pruning. Pass
+//   an optional seed to any fit function for reproducible training runs.
+library("Arbor_Gradient_Boosting_GainzAlgo", overlay=true)
+
+// Gradient boosting helpers 
+
+// Fisher-Yates shuffle — random row index permutation per boosting round.
+// math.random() reseeds each bar recalculation by default, giving genuine
+// round-to-round stochasticity matching XGBoost's subsample behavior. Pass a
+// non-na seed to get a reproducible (but still pseudo-random) sequence instead
+// — useful when subsample < 1.0 and you don't want the model to silently
+// retrain differently on every reload/recalculation.
+f_shuffle_indices(int n, int seed = na) =>
+    array<int> idx = array.new<int>(n)
+    for i = 0 to n - 1
+        array.set(idx, i, i)
+    for i = n - 1 to 1
+        int j = math.floor(math.random(0, i + 1, seed))
+        int tmp = array.get(idx, i)
+        array.set(idx, i, array.get(idx, j))
+        array.set(idx, j, tmp)
+    idx
+
+// Sigmoid activation for log-odds → probability mapping
+f_sigmoid(float x) =>
+    1.0 / (1.0 + math.exp(-x))
+
+// XGBoost exact gain formula (second-order Taylor expansion of loss):
+//   Gain = 0.5 * [GL²/(HL+λ) + GR²/(HR+λ) - (GL+GR)²/(HL+HR+λ)] - γ
+//   G = sum of gradients, H = sum of hessians
+//   For classification: g_i = p_i - y_i,  h_i = p_i*(1-p_i)
+//   For regression:     g_i = p_i - y_i,  h_i = 1.0  (MSE hessian is constant)
+f_gain(float GL, float GR, float HL, float HR, float lam, float gam) =>
+    0.5 * (GL * GL / (HL + lam) + GR * GR / (HR + lam) - (GL + GR) * (GL + GR) / (HL + HR + lam)) - gam
+
+// Newton leaf step: optimal leaf weight under regularized loss
+//   w* = -(sum G) / (sum H + λ)
+//   L2 term (lambda) in denominator is Ridge regularization —
+//   shrinks leaf weights toward zero as lambda increases.
+f_leaf(float G, float H, float lam) =>
+    -G / (H + lam)
+
+// @function Computes the base score for a fit: log-odds of the training mean
+//   for classifiers (clamped to keep the logit finite), or the raw training
+//   mean for regressors (unclamped, since regression targets aren't bounded
+//   to [0,1] the way class labels are).
+f_base_score(array<float> target, bool is_classifier) =>
+    int n = array.size(target)
+    float rawMean = array.sum(target) / n
+    float base = na
+    if is_classifier
+        float meanClamped = math.max(math.min(rawMean, 0.999), 0.001)
+        base := math.log(meanClamped / (1.0 - meanClamped))
+    else
+        base := rawMean
+    base
+
+// GBM which is the backbone for XG boost gradient boosting machine) 
+
+// @type Holds a fitted gradient-boosted stump ensemble (1 feature).
+// @field thresh      Split threshold for each round's stump
+// @field left_val    Newton leaf value when feature < threshold
+// @field right_val   Newton leaf value when feature >= threshold
+// @field base_score  Log-odds of training mean (classifier) or mean (regressor)
+// @field lr          Learning rate stored for inference
+// @field is_classifier True = sigmoid probability output, False = raw regression output
+export type GBM
+    array<float> thresh
+    array<float> left_val
+    array<float> right_val
+    float        base_score
+    float        lr
+    bool         is_classifier
+
+// @function Fits a single-feature gradient-boosted stump ensemble using
+//   XGBoost-style mechanics: Newton leaf steps (second-order hessian weighting),
+//   exact gain formula with L2 regularization, gamma pruning, minimum child
+//   weight, and Fisher-Yates row subsampling. Each round fits one depth-1 stump
+//   (this is not a full multi-level tree, and there is no column subsampling).
+//   Supports both binary classification (log-odds + sigmoid) and regression (MSE).
+// @param feat        Array of feature values, one per training row
+// @param target      Array of targets — 0.0/1.0 for classification, continuous for regression
+// @param n_rounds    Number of boosting rounds / stumps to fit
+// @param lr          Learning rate / shrinkage applied to each round's leaf contribution
+// @param n_thresh    Candidate split thresholds to scan per round
+// @param is_classifier True = binary classification, False = squared-error regression
+// @param lambda      L2 leaf regularization — Ridge-style shrinkage toward zero (XGBoost default: 1.0)
+// @param gamma       Minimum gain required to accept a split — prunes weak splits (XGBoost default: 0.0)
+// @param min_child_w Minimum hessian sum per child node — prevents tiny noisy splits (XGBoost default: 1.0)
+// @param subsample   Fraction of rows randomly sampled per round via Fisher-Yates (default: 1.0 = all rows)
+// @param seed        Optional seed for the row-subsampling shuffle — pass a fixed value for reproducible fits across reloads (default: na = unseeded/random each time)
+// @returns Fitted GBM object ready for gbm_predict()
+export gbm_fit(array<float> feat, array<float> target, int n_rounds = 15, float lr = 0.3, int n_thresh = 10, bool is_classifier = true, float lambda = 1.0, float gamma = 0.0, float min_child_w = 1.0, float subsample = 1.0, int seed = na) =>
+    int n = array.size(feat)
+    array<float> thresh_arr = array.new<float>()
+    array<float> left_arr   = array.new<float>()
+    array<float> right_arr  = array.new<float>()
+
+    float base = f_base_score(target, is_classifier)
+    array<float> running_pred = array.new<float>(n, base)
+    int sample_n = math.max(2, math.round(n * math.min(math.max(subsample, 0.1), 1.0)))
+
+    for r = 1 to n_rounds
+        // --- Gradients and hessians ---
+        array<float> grads = array.new<float>()
+        array<float> hess  = array.new<float>()
+        for i = 0 to n - 1
+            float f = array.get(running_pred, i)
+            float y = array.get(target, i)
+            float p = is_classifier ? f_sigmoid(f) : f
+            array.push(grads, p - y)
+            // classification hessian: p*(1-p)  |  regression hessian: 1.0 (MSE)
+            array.push(hess, is_classifier ? math.max(p * (1.0 - p), 1e-6) : 1.0)
+
+        // --- Fisher-Yates subsample ---
+        array<int> shuf = f_shuffle_indices(n, seed)
+
+        // --- Scan thresholds for best split ---
+        float xmin = array.min(feat)
+        float xmax = array.max(feat)
+        float best_gain   = -1e10
+        float best_thresh = na
+        float best_left   = 0.0
+        float best_right  = 0.0
+
+        for k = 1 to n_thresh
+            float thr = xmin + (xmax - xmin) * k / (n_thresh + 1)
+            float GL = 0.0, HL = 0.0, GR = 0.0, HR = 0.0
+            for si = 0 to sample_n - 1
+                int   i  = array.get(shuf, si)
+                float xv = array.get(feat, i)
+                float g  = array.get(grads, i)
+                float h  = array.get(hess, i)
+                if xv < thr
+                    GL += g
+                    HL += h
+                else
+                    GR += g
+                    HR += h
+            // Minimum child weight check on hessian sums (not raw counts)
+            if HL >= min_child_w and HR >= min_child_w
+                float gain = f_gain(GL, GR, HL, HR, lambda, gamma)
+                if gain > best_gain
+                    best_gain   := gain
+                    best_thresh := thr
+                    best_left   := f_leaf(GL, HL, lambda)
+                    best_right  := f_leaf(GR, HR, lambda)
+
+        array.push(thresh_arr, best_thresh)
+        array.push(left_arr,   best_left)
+        array.push(right_arr,  best_right)
+
+        // Only update predictions if split was accepted (gain > 0 and valid threshold)
+        if not na(best_thresh) and best_gain > 0
+            for i = 0 to n - 1
+                float xv   = array.get(feat, i)
+                float bump = xv < best_thresh ? best_left : best_right
+                array.set(running_pred, i, array.get(running_pred, i) + lr * bump)
+
+    GBM.new(thresh_arr, left_arr, right_arr, base, lr, is_classifier)
+
+// @function Scores a single feature value against a fitted GBM ensemble.
+// @param model A GBM object previously returned by gbm_fit()
+// @param x     Feature value to score (same feature definition used in training)
+// @returns Predicted probability [0,1] if classifier, raw predicted value if regressor
+export gbm_predict(GBM model, float x) =>
+    float score = model.base_score
+    if not na(model.base_score)
+        for r = 0 to array.size(model.thresh) - 1
+            float thr = array.get(model.thresh, r)
+            if not na(thr)
+                float lval = array.get(model.left_val, r)
+                float rval = array.get(model.right_val, r)
+                score += model.lr * (x < thr ? lval : rval)
+    model.is_classifier ? f_sigmoid(score) : score
+
+// Using gradient boosting for classificaiton tasks 
+
+// @type Holds a fitted 3-feature gradient-boosted stump ensemble (classification only).
+// @field stump_feat  Which feature index (0-2) each round's stump split on
+// @field thresh      Split threshold for each round's stump
+// @field left_val    Newton leaf value when feature < threshold
+// @field right_val   Newton leaf value when feature >= threshold
+// @field base_score  Log-odds of training mean
+// @field lr          Learning rate stored for inference
+export type GBM3
+    array<int>   stump_feat
+    array<float> thresh
+    array<float> left_val
+    array<float> right_val
+    float        base_score
+    float        lr
+
+// @function Fits a 3-feature gradient-boosted classifier using XGBoost-style
+//   mechanics: Newton leaf steps, exact gain formula, L2 regularization, gamma
+//   pruning, minimum child weight, and Fisher-Yates row subsampling. Selects the
+//   best (feature, threshold) pair each round and boosts in log-odds space.
+//   Each round fits a single depth-1 stump; there is no column subsampling.
+// @param feat1       Array of feature 1 values, one per training row
+// @param feat2       Array of feature 2 values, one per training row
+// @param feat3       Array of feature 3 values, one per training row
+// @param target      Array of binary targets (0.0 or 1.0), one per training row
+// @param n_rounds    Number of boosting rounds
+// @param lr          Learning rate / shrinkage
+// @param n_thresh    Candidate thresholds scanned per feature per round
+// @param lambda      L2 leaf regularization (Ridge shrinkage, XGBoost default: 1.0)
+// @param gamma       Minimum gain to accept a split (XGBoost default: 0.0)
+// @param min_child_w Minimum hessian sum per child node (XGBoost default: 1.0)
+// @param subsample   Row sampling fraction per round via Fisher-Yates (default: 1.0)
+// @param seed        Optional seed for the row-subsampling shuffle — pass a fixed value for reproducible fits across reloads (default: na = unseeded/random each time)
+// @returns Fitted GBM3 object ready for gbm3_predict()
+export gbm3_fit(array<float> feat1, array<float> feat2, array<float> feat3, array<float> target, int n_rounds = 20, float lr = 0.3, int n_thresh = 10, float lambda = 1.0, float gamma = 0.0, float min_child_w = 1.0, float subsample = 1.0, int seed = na) =>
+    int n = array.size(target)
+    array<int>   stump_feat = array.new<int>()
+    array<float> thresh_arr = array.new<float>()
+    array<float> left_arr   = array.new<float>()
+    array<float> right_arr  = array.new<float>()
+
+    float base = f_base_score(target, true)
+    array<float> running_pred = array.new<float>(n, base)
+    int sample_n = math.max(2, math.round(n * math.min(math.max(subsample, 0.1), 1.0)))
+
+    for r = 1 to n_rounds
+        array<float> grads = array.new<float>()
+        array<float> hess  = array.new<float>()
+        for i = 0 to n - 1
+            float p = f_sigmoid(array.get(running_pred, i))
+            float y = array.get(target, i)
+            array.push(grads, p - y)
+            array.push(hess,  math.max(p * (1.0 - p), 1e-6))
+
+        array<int> shuf    = f_shuffle_indices(n, seed)
+        float best_gain   = -1e10
+        int   best_feat   = -1
+        float best_thresh = na
+        float best_left   = 0.0
+        float best_right  = 0.0
+
+        for fidx = 0 to 2
+            array<float> fx = fidx == 0 ? feat1 : fidx == 1 ? feat2 : feat3
+            float xmin = array.min(fx)
+            float xmax = array.max(fx)
+            for k = 1 to n_thresh
+                float thr = xmin + (xmax - xmin) * k / (n_thresh + 1)
+                float GL = 0.0, HL = 0.0, GR = 0.0, HR = 0.0
+                for si = 0 to sample_n - 1
+                    int   i  = array.get(shuf, si)
+                    float xv = array.get(fx, i)
+                    float g  = array.get(grads, i)
+                    float h  = array.get(hess, i)
+                    if xv < thr
+                        GL += g
+                        HL += h
+                    else
+                        GR += g
+                        HR += h
+                if HL >= min_child_w and HR >= min_child_w
+                    float gain = f_gain(GL, GR, HL, HR, lambda, gamma)
+                    if gain > best_gain
+                        best_gain   := gain
+                        best_feat   := fidx
+                        best_thresh := thr
+                        best_left   := f_leaf(GL, HL, lambda)
+                        best_right  := f_leaf(GR, HR, lambda)
+
+        array.push(stump_feat, best_feat)
+        array.push(thresh_arr, best_thresh)
+        array.push(left_arr,   best_left)
+        array.push(right_arr,  best_right)
+
+        if best_feat >= 0 and not na(best_thresh) and best_gain > 0
+            array<float> fx_best = best_feat == 0 ? feat1 : best_feat == 1 ? feat2 : feat3
+            for i = 0 to n - 1
+                float xv   = array.get(fx_best, i)
+                float bump = xv < best_thresh ? best_left : best_right
+                array.set(running_pred, i, array.get(running_pred, i) + lr * bump)
+
+    GBM3.new(stump_feat, thresh_arr, left_arr, right_arr, base, lr)
+
+// @function Scores 3 feature values against a fitted GBM3 classifier.
+// @param model GBM3 object from gbm3_fit()
+// @param x1    Current value of feature 1
+// @param x2    Current value of feature 2
+// @param x3    Current value of feature 3
+// @returns Predicted probability [0,1]
+export gbm3_predict(GBM3 model, float x1, float x2, float x3) =>
+    float score = model.base_score
+    if not na(model.base_score)
+        for r = 0 to array.size(model.thresh) - 1
+            int   fidx = array.get(model.stump_feat, r)
+            float thr  = array.get(model.thresh, r)
+            if fidx >= 0 and not na(thr)
+                float lval = array.get(model.left_val, r)
+                float rval = array.get(model.right_val, r)
+                float xv   = fidx == 0 ? x1 : fidx == 1 ? x2 : x3
+                score += model.lr * (xv < thr ? lval : rval)
+    f_sigmoid(score)
+
+// Classification and regression with feature importance selection 
+
+// @type Holds a fitted 4-feature gradient-boosted ensemble with gain-based importance.
+// @field stump_feat  Which feature index (0-3) each round's stump split on
+// @field thresh      Split threshold for each round's stump
+// @field left_val    Newton leaf value when feature < threshold
+// @field right_val   Newton leaf value when feature >= threshold
+// @field importance  Accumulated gain per feature (indices 0-3), raw — normalize via gbm4_importance_pct()
+// @field base_score  Log-odds (classifier) or mean (regressor)
+// @field lr          Learning rate stored for inference
+// @field is_classifier True = sigmoid probability output, False = raw regression output
+export type GBM4
+    array<int>   stump_feat
+    array<float> thresh
+    array<float> left_val
+    array<float> right_val
+    array<float> importance
+    float        base_score
+    float        lr
+    bool         is_classifier
+
+// @function Fits a 4-feature gradient-boosted ensemble with Newton steps, exact gain
+//   formula, L2 regularization, gamma pruning, minimum child weight, Fisher-Yates
+//   row subsampling, and gain-based feature importance tracking.
+//   Supports both binary classification and regression. Each round fits a single
+//   depth-1 stump; there is no column subsampling.
+// @param feat1       Array of feature 1 values, one per training row
+// @param feat2       Array of feature 2 values, one per training row
+// @param feat3       Array of feature 3 values, one per training row
+// @param feat4       Array of feature 4 values, one per training row
+// @param target      Array of targets — 0.0/1.0 for classification, continuous for regression
+// @param n_rounds    Number of boosting rounds
+// @param lr          Learning rate / shrinkage
+// @param n_thresh    Candidate thresholds scanned per feature per round
+// @param is_classifier True = binary classification, False = regression
+// @param lambda      L2 leaf regularization (Ridge shrinkage, XGBoost default: 1.0)
+// @param gamma       Minimum gain to accept a split (XGBoost default: 0.0)
+// @param min_child_w Minimum hessian sum per child node (XGBoost default: 1.0)
+// @param subsample   Row sampling fraction per round via Fisher-Yates (default: 1.0)
+// @param seed        Optional seed for the row-subsampling shuffle — pass a fixed value for reproducible fits across reloads (default: na = unseeded/random each time)
+// @returns Fitted GBM4 object with importance scores, ready for gbm4_predict() / gbm4_importance_pct()
+export gbm4_fit(array<float> feat1, array<float> feat2, array<float> feat3, array<float> feat4, array<float> target, int n_rounds = 20, float lr = 0.3, int n_thresh = 10, bool is_classifier = true, float lambda = 1.0, float gamma = 0.0, float min_child_w = 1.0, float subsample = 1.0, int seed = na) =>
+    int n = array.size(target)
+    array<int>   stump_feat = array.new<int>()
+    array<float> thresh_arr = array.new<float>()
+    array<float> left_arr   = array.new<float>()
+    array<float> right_arr  = array.new<float>()
+    array<float> importance = array.new<float>(4, 0.0)
+
+    float base = f_base_score(target, is_classifier)
+    array<float> running_pred = array.new<float>(n, base)
+    int sample_n = math.max(2, math.round(n * math.min(math.max(subsample, 0.1), 1.0)))
+
+    for r = 1 to n_rounds
+        array<float> grads = array.new<float>()
+        array<float> hess  = array.new<float>()
+        for i = 0 to n - 1
+            float f = array.get(running_pred, i)
+            float y = array.get(target, i)
+            float p = is_classifier ? f_sigmoid(f) : f
+            array.push(grads, p - y)
+            array.push(hess,  is_classifier ? math.max(p * (1.0 - p), 1e-6) : 1.0)
+
+        array<int> shuf    = f_shuffle_indices(n, seed)
+        float best_gain   = -1e10
+        int   best_feat   = -1
+        float best_thresh = na
+        float best_left   = 0.0
+        float best_right  = 0.0
+
+        for fidx = 0 to 3
+            array<float> fx = fidx == 0 ? feat1 : fidx == 1 ? feat2 : fidx == 2 ? feat3 : feat4
+            float xmin = array.min(fx)
+            float xmax = array.max(fx)
+            for k = 1 to n_thresh
+                float thr = xmin + (xmax - xmin) * k / (n_thresh + 1)
+                float GL = 0.0, HL = 0.0, GR = 0.0, HR = 0.0
+                for si = 0 to sample_n - 1
+                    int   i  = array.get(shuf, si)
+                    float xv = array.get(fx, i)
+                    float g  = array.get(grads, i)
+                    float h  = array.get(hess, i)
+                    if xv < thr
+                        GL += g
+                        HL += h
+                    else
+                        GR += g
+                        HR += h
+                if HL >= min_child_w and HR >= min_child_w
+                    float gain = f_gain(GL, GR, HL, HR, lambda, gamma)
+                    if gain > best_gain
+                        best_gain   := gain
+                        best_feat   := fidx
+                        best_thresh := thr
+                        best_left   := f_leaf(GL, HL, lambda)
+                        best_right  := f_leaf(GR, HR, lambda)
+
+        array.push(stump_feat, best_feat)
+        array.push(thresh_arr, best_thresh)
+        array.push(left_arr,   best_left)
+        array.push(right_arr,  best_right)
+
+        // Credit gain to winning feature for importance tracking
+        if best_feat >= 0
+            array.set(importance, best_feat, array.get(importance, best_feat) + math.max(best_gain, 0.0))
+
+        if best_feat >= 0 and not na(best_thresh) and best_gain > 0
+            array<float> fx_best = best_feat == 0 ? feat1 : best_feat == 1 ? feat2 : best_feat == 2 ? feat3 : feat4
+            for i = 0 to n - 1
+                float xv   = array.get(fx_best, i)
+                float bump = xv < best_thresh ? best_left : best_right
+                array.set(running_pred, i, array.get(running_pred, i) + lr * bump)
+
+    GBM4.new(stump_feat, thresh_arr, left_arr, right_arr, importance, base, lr, is_classifier)
+
+// @function Scores 4 feature values against a fitted GBM4 ensemble.
+// @param model GBM4 object from gbm4_fit()
+// @param x1    Current value of feature 1
+// @param x2    Current value of feature 2
+// @param x3    Current value of feature 3
+// @param x4    Current value of feature 4
+// @returns Predicted probability [0,1] if classifier, raw predicted value if regressor
+export gbm4_predict(GBM4 model, float x1, float x2, float x3, float x4) =>
+    float score = model.base_score
+    if not na(model.base_score)
+        for r = 0 to array.size(model.thresh) - 1
+            int   fidx = array.get(model.stump_feat, r)
+            float thr  = array.get(model.thresh, r)
+            if fidx >= 0 and not na(thr)
+                float lval = array.get(model.left_val, r)
+                float rval = array.get(model.right_val, r)
+                float xv   = fidx == 0 ? x1 : fidx == 1 ? x2 : fidx == 2 ? x3 : x4
+                score += model.lr * (xv < thr ? lval : rval)
+    model.is_classifier ? f_sigmoid(score) : score
+
+// @function Returns normalized feature importance as % of total gain for one feature.
+//   Importance = accumulated gain credited to this feature across all boosting rounds,
+//   matching XGBoost's xgb.importance() Gain column definition.
+// @param model    GBM4 object from gbm4_fit()
+// @param feat_idx Feature index to query (0-3)
+// @returns Percentage of total ensemble gain attributed to this feature (0.0–100.0)
+export gbm4_importance_pct(GBM4 model, int feat_idx) =>
+    float total = array.sum(model.importance)
+    total > 0 ? array.get(model.importance, feat_idx) / total * 100 : 0.0
+
+
+// Sample indicator to showcase capabilities 
+string MDL_GRP = "Model"
+string VIS_GRP = "Visuals"
+
+int   lookback     = input.int(200,   "Training lookback (bars)", group=MDL_GRP)
+int   retrain_freq = input.int(50,    "Retrain every N bars",     group=MDL_GRP)
+int   n_rounds     = input.int(20,    "Boosting rounds",          group=MDL_GRP)
+float lr_inp       = input.float(0.3, "Learning rate",            group=MDL_GRP, step=0.05)
+float lambda_inp   = input.float(1.0, "Lambda (L2 reg)",          group=MDL_GRP, step=0.1)
+float gamma_inp    = input.float(0.0, "Gamma (min gain)",         group=MDL_GRP, step=0.1)
+float sub_inp      = input.float(0.8, "Subsample fraction",       group=MDL_GRP, step=0.05)
+int   seed_inp     = input.int(42,    "Random seed (0 = unseeded/random each reload)", group=MDL_GRP, minval=0)
+
+int   panel_off    = input.int(8,     "Panel offset (bars right)", group=VIS_GRP)
+int   bar_max_w    = input.int(38,    "Max bar width (bars)",      group=VIS_GRP)
+int   n_dots       = input.int(8,     "Scatter dots per feature",  group=VIS_GRP, minval=1, maxval=9, tooltip="A library() script has no max_labels_count override, so it's hard-capped at 50 labels total. This demo already spends ~11 labels on the panel chrome, so keep this at 9 or below (4 features × 9 = 36) to stay under the cap without labels silently getting dropped.")
+color bull_col     = input.color(#00e5ff, "Bull color",            group=VIS_GRP, inline="c")
+color bear_col     = input.color(#ff1744, "Bear color",            group=VIS_GRP, inline="c")
+
+int effSeed = seed_inp == 0 ? na : seed_inp
+
+// Feature selection 
+float sma20 = ta.sma(close, 20)
+float std20 = math.max(ta.stdev(close, 20), 0.0001)
+float atr14 = math.max(ta.atr(14), 0.0001)
+
+float f1 = ta.rsi(close, 14)
+float f2 = ta.mfi(hlc3, 14)
+float f3 = (close - sma20) / std20
+float f4 = (close - close[1]) / atr14
+
+[_, _, macd_hist] = ta.macd(close, 12, 26, 9)
+float f5 = macd_hist / std20
+
+bool ok = not (na(f1) or na(f2) or na(f3) or na(f4) or na(f5))
+
+// Training 
+var array<float> a1   = array.new<float>()
+var array<float> a2   = array.new<float>()
+var array<float> a3   = array.new<float>()
+var array<float> a4   = array.new<float>()
+var array<float> a5   = array.new<float>()
+var array<float> targ = array.new<float>()
+
+// Stats 
+var GBM4        model4      = na
+var GBM3        model3      = na
+var array<float> imp_pct    = array.new<float>(4, 25.0)
+var array<float> feat_recent = array.new<float>()
+
+// Training protocol 
+bool do_train = bar_index % retrain_freq == 0 and bar_index > lookback and ok and barstate.isconfirmed
+
+if do_train
+    array.clear(a1), array.clear(a2), array.clear(a3)
+    array.clear(a4), array.clear(a5), array.clear(targ)
+    array.clear(feat_recent)
+
+    for i = lookback to 1
+        if not (na(f1[i]) or na(f2[i]) or na(f3[i]) or na(f4[i]) or na(f5[i]))
+            array.push(a1,   f1[i])
+            array.push(a2,   f2[i])
+            array.push(a3,   f3[i])
+            array.push(a4,   f4[i])
+            array.push(a5,   f5[i])
+            array.push(targ, close[i - 1] > close[i] ? 1.0 : 0.0)
+
+    if array.size(targ) >= 20
+        model4 := gbm4_fit(a1, a2, a3, a4, targ,
+                           n_rounds      = n_rounds,
+                           lr            = lr_inp,
+                           n_thresh      = 10,
+                           is_classifier = true,
+                           lambda        = lambda_inp,
+                           gamma         = gamma_inp,
+                           min_child_w   = 1.0,
+                           subsample     = sub_inp,
+                           seed          = effSeed)
+
+        model3 := gbm3_fit(a1, a2, a5, targ,
+                           n_rounds    = n_rounds,
+                           lr          = lr_inp,
+                           n_thresh    = 10,
+                           lambda      = lambda_inp,
+                           gamma       = gamma_inp,
+                           min_child_w = 1.0,
+                           subsample   = sub_inp,
+                           seed        = effSeed)
+
+        if not na(model4)
+            for fi = 0 to 3
+                array.set(imp_pct, fi, gbm4_importance_pct(model4, fi))
+
+        int dot_n = math.min(array.size(a1), n_dots)
+        for di = 0 to dot_n - 1
+            array.push(feat_recent, array.get(a1, di) / 100.0)
+            array.push(feat_recent, array.get(a2, di) / 100.0)
+            array.push(feat_recent, math.max(math.min(array.get(a3, di) / 4.0 + 0.5, 1.0), 0.0))
+            array.push(feat_recent, math.max(math.min(array.get(a4, di) / 6.0 + 0.5, 1.0), 0.0))
+
+// Predict 
+float cls_prob = na
+if not na(model3) and ok
+    cls_prob := gbm3_predict(model3, f1, f2, f5)
+
+// Plotting 
+var array<box>   box_arr   = array.new<box>()
+var array<line>  line_arr  = array.new<line>()
+var array<label> label_arr = array.new<label>()
+var label        cls_lbl   = na
+
+string[] feat_names = array.from("RSI (14)", "MFI (14)", "Z-Score", "ATR Ret")
+
+color[] holo_cols = array.from(
+    color.rgb(0,   229, 255),
+    color.rgb(0,   255, 148),
+    color.rgb(189, 0,   255),
+    color.rgb(255, 196, 0  )
+)
+
+// Generating scatter plot 
+if barstate.islast
+    if box_arr.size() > 0
+        for b in box_arr
+            b.delete()
+        box_arr.clear()
+    if line_arr.size() > 0
+        for l in line_arr
+            l.delete()
+        line_arr.clear()
+    if label_arr.size() > 0
+        for lb in label_arr
+            lb.delete()
+        label_arr.clear()
+
+    float ph        = ta.highest(high, 100)
+    float pl        = ta.lowest(low, 100)
+    float pr        = math.max(ph - pl, close * 0.001)
+    float row_h     = pr * 0.058
+    float panel_top = ph + pr * 0.10
+    int   px        = bar_index + panel_off
+    float panel_bot = panel_top - row_h * 5.4
+
+    box_arr.push(box.new(
+        px - 1, panel_top + row_h * 0.7,
+        px + bar_max_w + 20, panel_bot,
+        border_color = color.new(color.white, 80),
+        bgcolor      = color.new(#0d1117, 65)))
+
+    box_arr.push(box.new(
+        px, panel_top + row_h * 0.6,
+        px + bar_max_w + 19, panel_bot + row_h * 0.1,
+        border_color = color.new(#00e5ff, 88),
+        bgcolor      = na))
+
+    label_arr.push(label.new(
+        px + bar_max_w / 2, panel_top + row_h * 0.35,
+        "◈  ARBOR  GBM4  ·  FEATURE  IMPORTANCE",
+        style = label.style_none, textcolor = color.new(color.white, 15),
+        size = size.small, text_font_family = font.family_monospace))
+
+    line_arr.push(line.new(
+        px, panel_top + row_h * 0.04,
+        px + bar_max_w + 19, panel_top + row_h * 0.04,
+        color = color.new(color.white, 82), style = line.style_dotted))
+
+    for fi = 0 to 3
+        float pct   = array.get(imp_pct, fi)
+        float bw    = math.max(1.0, pct / 100.0 * bar_max_w)
+        color bc    = array.get(holo_cols, fi)
+        float y_top = panel_top - row_h * (fi + 0.15)
+        float y_bot = y_top - row_h * 0.68
+        float y_mid = (y_top + y_bot) / 2.0
+
+        box_arr.push(box.new(px, y_top + row_h * 0.10, int(px + bw + 3), y_bot - row_h * 0.10,
+            border_color = na, bgcolor = color.new(bc, 91)))
+        box_arr.push(box.new(px, y_top + row_h * 0.05, int(px + bw + 1), y_bot - row_h * 0.05,
+            border_color = na, bgcolor = color.new(bc, 82)))
+        box_arr.push(box.new(px, y_top, int(px + bw), y_bot,
+            border_color = color.new(bc, 45), bgcolor = color.new(bc, 58)))
+
+        line_arr.push(line.new(int(px + bw), y_top, int(px + bw), y_bot,
+            color = color.new(bc, 5), width = 2))
+        line_arr.push(line.new(px, y_top, px, y_bot,
+            color = color.new(bc, 70), width = 1))
+
+        if array.size(feat_recent) > 0
+            int dot_total = array.size(feat_recent) / 4
+            int dot_draw  = math.min(dot_total, n_dots)
+            for di = 0 to dot_draw - 1
+                int pack_idx = di * 4 + fi
+                if pack_idx < array.size(feat_recent)
+                    float norm_val = array.get(feat_recent, pack_idx)
+                    int   dot_x    = int(px + norm_val * bar_max_w)
+                    float jitter   = (di % 3 - 1) * row_h * 0.12
+                    float dot_y    = y_mid + jitter
+                    color dot_c    = color.from_gradient(norm_val, 0, 1,
+                                       color.new(bc, 60), color.new(color.white, 20))
+                    string dot_ch  = norm_val > 0.7 ? "●" : norm_val > 0.35 ? "◉" : "○"
+                    label_arr.push(label.new(dot_x, dot_y, dot_ch,
+                        style = label.style_none, textcolor = dot_c,
+                        size = size.tiny, text_font_family = font.family_monospace))
+
+        label_arr.push(label.new(px - 1, y_mid, array.get(feat_names, fi),
+            style = label.style_label_right, textcolor = color.new(bc, 15),
+            color = #00000000, size = size.small, text_font_family = font.family_monospace))
+
+        label_arr.push(label.new(int(px + bw) + 1, y_mid,
+            str.tostring(pct, "#.#") + "%",
+            style = label.style_label_left, textcolor = color.new(bc, 10),
+            color = #00000000, size = size.small, text_font_family = font.family_monospace))
+
+    label_arr.push(label.new(
+        px + bar_max_w / 2, panel_bot + row_h * 0.3,
+        "λ=" + str.tostring(lambda_inp, "#.##") +
+        "  γ=" + str.tostring(gamma_inp, "#.##") +
+        "  sub=" + str.tostring(sub_inp, "#.##") +
+        "  r=" + str.tostring(n_rounds),
+        style = label.style_none, textcolor = color.new(color.white, 55),
+        size = size.tiny, text_font_family = font.family_monospace))
+
+// Show classifications 
+if not na(cls_lbl)
+    cls_lbl.delete()
+
+if not na(cls_prob)
+    bool   is_bull  = cls_prob >= 0.5
+    float  conf     = is_bull ? cls_prob : 1.0 - cls_prob
+    color  cls_col  = is_bull ? bull_col : bear_col
+    string dir_str  = is_bull ? "▲  BULLISH" : "▼  BEARISH"
+
+    cls_lbl := label.new(
+        bar_index + 1, close,
+        "◈ GBM3  CLASSIFICATION\n" +
+        dir_str + "\n" +
+        "P(Bull) : " + str.tostring(cls_prob * 100, "#.##") + "%\n" +
+        "Conf    : " + str.tostring(conf * 100, "#.#") + "%",
+        style            = label.style_label_left,
+        textcolor        = color.new(cls_col, 5),
+        color            = color.new(#0d1117, 55),
+        size             = size.normal,
+        text_font_family = font.family_monospace)

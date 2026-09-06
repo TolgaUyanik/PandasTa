@@ -1,0 +1,284 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Rafe-Promachos-LLP
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATRIX METRICS LIBRARY v3 — UNIVERSAL (indicator + strategy)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Works in BOTH indicator() and strategy() scripts.
+// No strategy.* calls — the caller passes equity + trade signals.
+//
+// USAGE IN STRATEGY:
+//   import Rafe-Promachos-LLP/MatrixMetrics/1 as mm
+//   bool _tc = strategy.closedtrades > nz(strategy.closedtrades[1])
+//   float _tp = _tc ? strategy.closedtrades.profit(strategy.closedtrades - 1) : na
+//   float _sz = _tc ? strategy.closedtrades.size(strategy.closedtrades - 1) : na
+//   int _bars = _tc ? strategy.closedtrades.exit_bar_index(strategy.closedtrades-1) - strategy.closedtrades.entry_bar_index(strategy.closedtrades-1) : na
+//   mm.metricsTable("Advanced", "Bottom Right", strategy.equity, _tc, _tp, _sz, _bars)
+//   plot(mm.curve(strategy.equity), display=display.pane)
+//
+// USAGE IN INDICATOR (manual equity tracking):
+//   import Rafe-Promachos-LLP/MatrixMetrics/1 as mm
+//   var float _eq = 1000.0
+//   bool _lost = [your loss condition]
+//   bool _tc = _won or _lost
+//   float _pnl = _won ? risk * tp_r : _lost ? -risk : na
+//   if not na(_pnl)
+//       _eq += _pnl
+//   mm.metricsTable("Advanced", "Bottom Right", _eq, _tc, _pnl, 0.0, 0)
+//   plot(mm.curve(_eq), display=display.pane)
+//
+// MODES:
+//   "Simple"   → 8 metrics  (Sharpe, Sortino, Omega, MaxDD, PF, WR, Trades, Net%)
+//   "Full"     → +5 metrics (CurrDD, L/S Ratio, ConsecW/L, MaxFlat)
+// "Advanced" → +8 metrics (Kelly Full/Half/Quarter, Calmar, Avg Intra DD, Bars/Trade, Expectancy)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//@version=6
+library("MatrixMetrics", overlay=true)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLOUR HELPERS (global scope — Pine library requirement)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export c_val(float v, float bad, float mid, float good, bool invert) =>
+    if invert
+        v <= good ? color.rgb(0,200,80) : v <= mid ? color.rgb(200,180,0) : v <= bad ? color.rgb(220,130,0) : color.rgb(200,50,50)
+    else
+        v >= good ? color.rgb(0,200,80) : v >= mid ? color.rgb(200,180,0) : v >= bad ? color.rgb(220,130,0) : color.rgb(200,50,50)
+
+export c_pct(float v) =>
+    v >= 0 ? color.rgb(0,200,80) : color.rgb(200,50,50)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EQUITY CURVE PASS-THROUGH (for plot)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export curve(float equity) =>
+    equity
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN TABLE
+// Parameters:
+//   mode       — "Simple", "Full", "Advanced"
+//   pos        — table position string
+//   equity     — equity curve series (strategy.equity or manual var float)
+//   tradeClosed — true on the bar a trade closes
+//   tradePnl   — P&L of the closed trade (+ = win, - = loss)
+//   tradeSize  — position size of closed trade (>0 = long, <0 = short)
+//   tradeBars  — duration of closed trade in bars
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export metricsTable(simple string mode, simple string pos, float equity, bool tradeClosed, float tradePnl, float tradeSize, int tradeBars) =>
+
+    // ── Equity-based metrics ─────────────────────────────────────────────
+    float eq  = nz(equity)
+    float eq1 = nz(eq[1], eq)
+    float ret = eq1 != 0 ? (eq - eq1) / eq1 : 0.0
+
+    // Sharpe
+    float sh_avg = ta.sma(ret, 252)
+    float sh_sd  = ta.stdev(ret, 252)
+    float sharpe = sh_sd != 0 ? (sh_avg / sh_sd) * math.sqrt(365) : 0.0
+
+    // Sortino
+    float ds_sq  = math.pow(ret < 0 ? ret : 0.0, 2)
+    float dsd    = math.sqrt(ta.sma(ds_sq, 252))
+    float sortino = dsd != 0 ? (sh_avg / dsd) * math.sqrt(365) : 0.0
+
+    // Omega
+    float o_gain = math.sum(ret > 0 ? ret : 0.0, 252)
+    float o_loss = math.sum(ret < 0 ? math.abs(ret) : 0.0, 252)
+    float omega  = o_loss != 0 ? 1.0 + o_gain / o_loss : 0.0
+
+    // Drawdown
+    var float peak_eq = 0.0
+    var float max_dd  = 0.0
+    peak_eq := math.max(peak_eq, eq)
+    float curr_dd = peak_eq > 0 ? (eq - peak_eq) / peak_eq * 100.0 : 0.0
+    max_dd := math.min(max_dd, curr_dd)
+
+    // Net profit
+    var float start_eq = 0.0
+    if bar_index == 0
+        start_eq := eq
+    float net_pct = start_eq > 0 ? (eq - start_eq) / start_eq * 100.0 : 0.0
+
+    // ── Trade-level metrics ──────────────────────────────────────────────
+    var int   tt_total     = 0
+    var int   tt_wins      = 0
+    var int   tt_losses    = 0
+    var float tt_gross_w   = 0.0
+    var float tt_gross_l   = 0.0
+    var int   tt_cw        = 0
+    var int   tt_cl        = 0
+    var int   tt_max_cw    = 0
+    var int   tt_max_cl    = 0
+    var int   tt_bars_tot  = 0
+    var int   tt_flat_bars = 0
+    var int   tt_max_flat  = 0
+    var float tt_intra_pk  = 0.0
+    var float tt_intra_sum = 0.0
+    var int   tt_intra_cnt = 0
+    var float tt_long_pnl  = 0.0
+    var float tt_short_pnl = 0.0
+
+    // Flat tracking
+    if tradeClosed
+        tt_max_flat := math.max(tt_max_flat, tt_flat_bars)
+        tt_flat_bars := 0
+    else
+        tt_flat_bars += 1
+
+    // Process closed trade
+    if tradeClosed and not na(tradePnl)
+        tt_total += 1
+        tt_bars_tot += math.max(nz(tradeBars), 1)
+
+        if nz(tradeSize) > 0
+            tt_long_pnl += tradePnl
+        else
+            tt_short_pnl += tradePnl
+
+// Intra-trade DD: track peak equity between trades, measure worst dip
+        float idd = tt_intra_pk > 0 ? (eq - tt_intra_pk) / tt_intra_pk * 100.0 : 0.0
+        tt_intra_sum += math.min(idd, 0.0)
+        tt_intra_cnt += 1
+        tt_intra_pk  := eq
+
+        if tradePnl > 0
+            tt_wins    += 1
+            tt_gross_w += tradePnl
+            tt_cw      += 1
+            tt_cl      := 0
+            tt_max_cw  := math.max(tt_max_cw, tt_cw)
+        else
+            tt_losses  += 1
+            tt_gross_l += math.abs(tradePnl)
+            tt_cl      += 1
+            tt_cw      := 0
+            tt_max_cl  := math.max(tt_max_cl, tt_cl)
+
+    // ── Derived ──────────────────────────────────────────────────────────
+    float wr      = tt_total > 0 ? float(tt_wins) / float(tt_total) * 100.0 : 0.0
+    float pf      = tt_gross_l > 0 ? tt_gross_w / tt_gross_l : 0.0
+    float avg_w   = tt_wins > 0 ? tt_gross_w / tt_wins : 0.0
+    float avg_l   = tt_losses > 0 ? tt_gross_l / tt_losses : 0.0
+    float wr_dec  = wr / 100.0
+    float kelly   = avg_l > 0 ? (wr_dec - (1.0 - wr_dec) / (avg_w / avg_l)) * 100.0 : 0.0
+    float yrs     = bar_index > 0 ? float(bar_index) / 365.0 : 1.0
+    float cagr    = yrs > 0 and start_eq > 0 ? (math.pow(eq / start_eq, 1.0 / yrs) - 1.0) * 100.0 : 0.0
+    float calmar  = max_dd != 0 ? cagr / math.abs(max_dd) : 0.0
+    float expect  = tt_total > 0 ? (wr_dec * avg_w) - ((1.0 - wr_dec) * avg_l) : 0.0
+    float bpt     = tt_total > 0 ? float(tt_bars_tot) / float(tt_total) : 0.0
+    float avg_idd = tt_intra_cnt > 0 ? tt_intra_sum / float(tt_intra_cnt) : 0.0
+    float ls_rat  = tt_short_pnl != 0 ? tt_long_pnl / math.abs(tt_short_pnl) : 0.0
+
+    // ── Mode flags ───────────────────────────────────────────────────────
+    bool show_full = mode == "Full" or mode == "Advanced"
+    bool show_adv  = mode == "Advanced"
+
+    // ── Colours ──────────────────────────────────────────────────────────
+    color C_HDR = color.rgb(15,15,35)
+    color C_R1  = color.rgb(20,20,30)
+    color C_R2  = color.rgb(28,28,40)
+    color C_LBL = color.rgb(0,180,220)
+    color C_SEP = color.rgb(40,40,55)
+    color C_WHT = color.rgb(200,200,200)
+
+    // ── Render ───────────────────────────────────────────────────────────
+    var table t = table.new(
+         pos == "Top Left" ? position.top_left : pos == "Top Right" ? position.top_right : pos == "Middle Left" ? position.middle_left : pos == "Middle Right" ? position.middle_right : pos == "Bottom Left" ? position.bottom_left : pos == "Bottom Right" ? position.bottom_right : pos == "Top Center" ? position.top_center : position.bottom_center,
+         2, 30, bgcolor=color.rgb(10,10,20), border_color=color.rgb(40,40,50), border_width=1, frame_color=color.rgb(60,60,80), frame_width=2)
+
+    int r = 0
+
+    table.cell(t, 0, r, "◆ MATRIX METRICS ◆", text_color=color.rgb(0,200,255), bgcolor=C_HDR, text_size=size.small, text_halign=text.align_center)
+    table.merge_cells(t, 0, r, 1, r)
+    r += 1
+
+    // ── SIMPLE (always) ──────────────────────────────────────────────────
+    table.cell(t,0,r,"Sharpe",       text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(sharpe,"#.##"), text_color=c_val(sharpe,0,0.5,1.0,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Sortino",      text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(sortino,"#.##"), text_color=c_val(sortino,0,0.5,1.0,false), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Omega",        text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(omega,"#.##"), text_color=c_val(omega,1.0,1.1,1.3,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Max DD",       text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(max_dd,"#.##")+"%", text_color=c_val(max_dd,-60,-40,-20,false), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Profit Factor", text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(pf,"#.##"), text_color=c_val(pf,1.0,1.3,1.5,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Win Rate",     text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(wr,"#.#")+"% ("+str.tostring(tt_wins)+"/"+str.tostring(tt_total)+")", text_color=c_val(wr,30,45,55,false), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Trades",       text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(tt_total), text_color=c_val(tt_total,20,50,100,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    table.cell(t,0,r,"Net Profit",   text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+    table.cell(t,1,r, str.tostring(net_pct,"#.##")+"%", text_color=c_pct(net_pct), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+    r += 1
+
+    // ── FULL ─────────────────────────────────────────────────────────────
+    if show_full
+        table.cell(t,0,r,"", bgcolor=C_SEP), table.cell(t,1,r,"", bgcolor=C_SEP)
+        r += 1
+
+        table.cell(t,0,r,"Current DD",   text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(curr_dd,"#.##")+"%", text_color=c_val(curr_dd,-40,-20,-5,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"L/S Profit Ratio", text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(ls_rat,"#.##"), text_color=C_WHT, bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Consec W/L",   text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, "W"+str.tostring(tt_max_cw)+" / L"+str.tostring(tt_max_cl), text_color=C_WHT, bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Max Flat Bars", text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(tt_max_flat), text_color=C_WHT, bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+    // ── ADVANCED ──────────────────────────────────────────────────────────
+    if show_adv
+        table.cell(t,0,r,"", bgcolor=C_SEP), table.cell(t,1,r,"", bgcolor=C_SEP)
+        r += 1
+
+        table.cell(t,0,r,"Kelly Full",   text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(kelly,"#.##")+"%", text_color=c_val(kelly,0,10,25,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Kelly Half",   text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(kelly * 0.5,"#.##")+"%", text_color=c_val(kelly * 0.5,0,5,12.5,false), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Kelly Quarter", text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(kelly * 0.25,"#.##")+"%", text_color=c_val(kelly * 0.25,0,2.5,6.25,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Calmar",       text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(calmar,"#.##"), text_color=c_val(calmar,0,0.5,1.0,false), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Avg Intra DD", text_color=C_LBL, bgcolor=C_R1, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(avg_idd,"#.#")+"%", text_color=c_val(avg_idd,-20,-10,-3,false), bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Bars/Trade",   text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(bpt,"#.#"), text_color=C_WHT, bgcolor=C_R1, text_size=size.small, text_halign=text.align_right)
+        r += 1
+
+        table.cell(t,0,r,"Expectancy",   text_color=C_LBL, bgcolor=C_R2, text_size=size.small, text_halign=text.align_left)
+        table.cell(t,1,r, str.tostring(expect,"#.##"), text_color=c_pct(expect), bgcolor=C_R2, text_size=size.small, text_halign=text.align_right)
+        r += 1

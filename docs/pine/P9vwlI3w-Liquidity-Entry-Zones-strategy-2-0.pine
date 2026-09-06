@@ -1,0 +1,910 @@
+//@version=6
+strategy("Liquidity Entry Zones", shorttitle="Liquidity Entry Zones", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================================
+// OVERVIEW
+// This script is a liquidity-sweep entry framework.
+// Core workflow:
+// 1) Store recent pivot highs and lows as liquidity levels
+// 2) Detect sweeps through those levels
+// 3) Validate reclaim behavior and candle quality
+// 4) Confirm entries within a limited confirmation window
+// 5) Optionally simulate fixed TP / SL projections
+// 6) Summarize state and projected results in a status panel
+//
+// Notes:
+// - Signals are confirmed on bar close.
+// - If both TP and SL appear on the same bar after entry, SL is prioritized.
+// - The simulation is a chart review tool, not an execution engine.
+// ============================================================================
+
+// ============================================================================
+// COLORS
+// ============================================================================
+color CLR_BG          = color.rgb(7, 10, 16)
+color CLR_PANEL       = color.rgb(13, 18, 27)
+color CLR_PANEL_ALT   = color.rgb(18, 25, 36)
+color CLR_BORDER      = color.rgb(44, 57, 76)
+color CLR_TEXT        = color.rgb(245, 247, 250)
+color CLR_MUTED       = color.rgb(148, 163, 184)
+
+color CLR_CYAN        = color.rgb(34, 211, 238)
+color CLR_CYAN_SOFT   = color.rgb(8, 145, 178)
+color CLR_GREEN       = color.rgb(16, 185, 129)
+color CLR_GREEN_SOFT  = color.rgb(5, 150, 105)
+color CLR_RED         = color.rgb(239, 68, 68)
+color CLR_RED_SOFT    = color.rgb(220, 38, 38)
+color CLR_SILVER      = color.rgb(203, 213, 225)
+color CLR_GOLD        = color.rgb(250, 204, 21)
+color CLR_TRACE_BULL  = color.rgb(74, 222, 128)
+color CLR_TRACE_BEAR  = color.rgb(248, 113, 113)
+
+// ============================================================================
+// INTERNAL SETTINGS
+// ============================================================================
+int BOX_TRANSPARENCY = 86
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+groupTrend    = "Trend Filter"
+groupPip      = "Pip Settings"
+groupSweep    = "Liquidity Sweep Detection"
+groupQuality  = "Candle Quality Filters"
+groupConfirm  = "Entry Confirmation"
+groupSim      = "Trade Projection"
+groupVisual   = "Visual Settings"
+
+localEmaLength    = input.int(50, "EMA Length", minval=1, group=groupTrend)
+useLocalEmaFilter = input.bool(true, "Use EMA Trend Filter", group=groupTrend)
+
+pipPreset = input.string("Auto Detect", "Pip Mode", options=["Auto Detect", "FX 5-Digit", "FX JPY", "XAUUSD / Gold", "Indices / CFD"], group=groupPip)
+
+pivotLength      = input.int(5, "Swing Pivot Length", minval=1, group=groupSweep)
+storedLevels     = input.int(20, "Stored Liquidity Levels", minval=5, maxval=100, group=groupSweep)
+minSweepDistance = input.int(30, "Minimum Sweep Distance (Pips)", minval=1, group=groupSweep)
+reclaimRule      = input.string("Close Back Inside", "Reclaim Rule", options=["Close Back Inside", "Strong Reclaim"], group=groupSweep)
+
+minWickPercent     = input.float(0.35, "Minimum Sweep Wick %", minval=0.0, maxval=1.0, step=0.01, group=groupQuality)
+maxBodyPercent     = input.float(0.65, "Maximum Body %", minval=0.05, maxval=1.0, step=0.01, group=groupQuality)
+minCandleRangePips = input.int(20, "Minimum Candle Range (Pips)", minval=1, group=groupQuality)
+requireBullishBody = input.bool(true, "Long Confirmation Must Be Bullish", group=groupQuality)
+requireBearishBody = input.bool(true, "Short Confirmation Must Be Bearish", group=groupQuality)
+
+confirmationWindow  = input.int(2, "Max Bars After Sweep For Confirmation", minval=0, maxval=10, group=groupConfirm)
+requireMidlineBreak = input.bool(true, "Require Sweep Candle Midline Break", group=groupConfirm)
+signalCooldownBars  = input.int(10, "Cooldown Bars Between Signals", minval=0, group=groupConfirm)
+
+enableSimulation    = input.bool(true, "Enable Internal Trade Simulation", group=groupSim)
+takeProfitPips      = input.int(2000, "Take Profit (Pips)", minval=1, group=groupSim)
+stopLossPips        = input.int(500, "Stop Loss (Pips)", minval=1, group=groupSim)
+blockSignalsInTrade = input.bool(true, "Block New Signals While Trade Is Active", group=groupSim)
+showStoppedTrades   = input.bool(false, "Show Stopped Trades", group=groupSim)
+
+showSignalLabels    = input.bool(true, "Show Signal Labels", group=groupVisual)
+showEntryLine       = input.bool(true, "Show Entry Line", group=groupVisual)
+showStatusPanel     = input.bool(true, "Show Status Panel", group=groupVisual)
+showSignalBarColors = input.bool(true, "Color Signal Bars", group=groupVisual)
+showSweepGuides     = input.bool(true, "Show Sweep Guides", group=groupVisual)
+guideExtendBars     = input.int(20, "Guide Extension Bars", minval=5, maxval=100, group=groupVisual)
+signalLabelSize     = input.string("Normal", "Signal Label Size", options=["Tiny", "Small", "Normal", "Large"], group=groupVisual)
+panelPosition       = input.string("Bottom Right", "Panel Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=groupVisual)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_table_position(_pos) =>
+    _pos == "Top Left" ? position.top_left :
+     _pos == "Bottom Right" ? position.bottom_right :
+     _pos == "Bottom Left" ? position.bottom_left :
+     position.top_right
+
+f_fmt(_value) =>
+    str.tostring(_value, "#.##")
+
+f_label_size(_size) =>
+    _size == "Tiny" ? size.tiny :
+     _size == "Small" ? size.small :
+     _size == "Large" ? size.large :
+     size.normal
+
+f_is_jpy_pair() =>
+    str.contains(str.upper(syminfo.ticker), "JPY")
+
+f_is_xau_symbol() =>
+    str.contains(str.upper(syminfo.ticker), "XAU")
+
+f_get_pip_size(_preset) =>
+    float _pip = na
+    if _preset == "FX 5-Digit"
+        _pip := 0.000001
+    else if _preset == "FX JPY"
+        _pip := 0.0001
+    else if _preset == "XAUUSD / Gold"
+        _pip := 0.01
+    else if _preset == "Indices / CFD"
+        _pip := syminfo.mintick
+    else
+        _pip := f_is_xau_symbol() ? 0.01 : syminfo.type == "forex" ? (f_is_jpy_pair() ? 0.01 : 0.0001) : syminfo.mintick
+    _pip
+
+f_clamp(_value, _min, _max) =>
+    math.max(_min, math.min(_max, _value))
+
+f_score_color(_score) =>
+    _score >= 75 ? CLR_GREEN : _score >= 55 ? CLR_CYAN : CLR_RED
+
+f_push_line_prune(_arr, _line, _max) =>
+    array.push(_arr, _line)
+    if array.size(_arr) > _max
+        line _old = array.shift(_arr)
+        line.delete(_old)
+
+f_push_label_prune(_arr, _label, _max) =>
+    array.push(_arr, _label)
+    if array.size(_arr) > _max
+        label _old = array.shift(_arr)
+        label.delete(_old)
+
+f_push_box_prune(_arr, _box, _max) =>
+    array.push(_arr, _box)
+    if array.size(_arr) > _max
+        box _old = array.shift(_arr)
+        box.delete(_old)
+
+f_panel_clear(_t) =>
+    for col = 0 to 1
+        for row = 0 to 12
+            table.cell(_t, col, row, "", bgcolor=CLR_BG, text_color=CLR_BG)
+
+f_quality_score(_wickPct, _bodyPct, _rangePips, _minWick, _maxBody, _minRange, _emaOk, _reclaimOk, _midBreakOk) =>
+    float wickScore    = _minWick > 0 ? f_clamp((_wickPct / _minWick) * 32.0, 0.0, 32.0) : 32.0
+    float bodyScore    = _maxBody > 0 ? f_clamp(((_maxBody - _bodyPct) / _maxBody) * 24.0, 0.0, 24.0) : 24.0
+    float rangeScore   = _minRange > 0 ? f_clamp((_rangePips / _minRange) * 18.0, 0.0, 18.0) : 18.0
+    float emaScore     = _emaOk ? 10.0 : 0.0
+    float reclaimScore = _reclaimOk ? 10.0 : 0.0
+    float midScore     = _midBreakOk ? 6.0 : 0.0
+    f_clamp(wickScore + bodyScore + rangeScore + emaScore + reclaimScore + midScore, 0.0, 100.0)
+
+f_draw_signal_brackets(_bar, _high, _low, _buffer, _color, _arr) =>
+    int leftX   = _bar - 1
+    int midX    = _bar
+    int rightX  = _bar + 1
+    float topY  = _high + _buffer
+    float botY  = _low - _buffer
+    float topIn = _high + (_buffer * 0.35)
+    float botIn = _low - (_buffer * 0.35)
+
+    line l1 = line.new(x1=leftX, y1=topY, x2=midX, y2=topY, xloc=xloc.bar_index, color=_color, width=1)
+    line l2 = line.new(x1=leftX, y1=topY, x2=leftX, y2=topIn, xloc=xloc.bar_index, color=_color, width=1)
+    line l3 = line.new(x1=leftX, y1=botY, x2=midX, y2=botY, xloc=xloc.bar_index, color=_color, width=1)
+    line l4 = line.new(x1=leftX, y1=botY, x2=leftX, y2=botIn, xloc=xloc.bar_index, color=_color, width=1)
+
+    line l5 = line.new(x1=midX, y1=topY, x2=rightX, y2=topY, xloc=xloc.bar_index, color=_color, width=1)
+    line l6 = line.new(x1=rightX, y1=topY, x2=rightX, y2=topIn, xloc=xloc.bar_index, color=_color, width=1)
+    line l7 = line.new(x1=midX, y1=botY, x2=rightX, y2=botY, xloc=xloc.bar_index, color=_color, width=1)
+    line l8 = line.new(x1=rightX, y1=botY, x2=rightX, y2=botIn, xloc=xloc.bar_index, color=_color, width=1)
+
+    f_push_line_prune(_arr, l1, 160)
+    f_push_line_prune(_arr, l2, 160)
+    f_push_line_prune(_arr, l3, 160)
+    f_push_line_prune(_arr, l4, 160)
+    f_push_line_prune(_arr, l5, 160)
+    f_push_line_prune(_arr, l6, 160)
+    f_push_line_prune(_arr, l7, 160)
+    f_push_line_prune(_arr, l8, 160)
+
+f_add_sweep_trace(_price, _bull, _extendBars, _lineArr, _ghostArr, _labelArr) =>
+    color traceColor = _bull ? color.new(CLR_TRACE_BULL, 0) : color.new(CLR_TRACE_BEAR, 0)
+    color ghostColor = _bull ? color.new(CLR_TRACE_BULL, 82) : color.new(CLR_TRACE_BEAR, 82)
+
+    line traceLine = line.new(x1=bar_index, y1=_price, x2=bar_index + _extendBars, y2=_price, xloc=xloc.bar_index, extend=extend.none, color=traceColor, width=1, style=line.style_dotted)
+    line ghostLine = line.new(x1=bar_index, y1=_price, x2=bar_index + (_extendBars * 2), y2=_price, xloc=xloc.bar_index, extend=extend.none, color=ghostColor, width=1, style=line.style_solid)
+    label traceLab = label.new(bar_index + _extendBars, _price, "SWEEP TRACE", xloc=xloc.bar_index, style=_bull ? label.style_label_up : label.style_label_down, color=_bull ? CLR_GREEN_SOFT : CLR_RED_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+
+    f_push_line_prune(_lineArr, traceLine, 80)
+    f_push_line_prune(_ghostArr, ghostLine, 20)
+    f_push_label_prune(_labelArr, traceLab, 40)
+
+f_session_name(_hour) =>
+    _hour >= 0 and _hour < 8 ? "ASIA" :
+     _hour >= 8 and _hour < 16 ? "LONDON" :
+     _hour >= 16 and _hour < 24 ? "NEW YORK" :
+     "UNKNOWN"
+
+// ============================================================================
+// CORE SERIES
+// ============================================================================
+localEma = ta.ema(close, localEmaLength)
+pipSize  = f_get_pip_size(pipPreset)
+
+atrValue = ta.atr(14)
+
+candleRange = high - low
+candleBody  = math.abs(close - open)
+upperWick   = high - math.max(open, close)
+lowerWick   = math.min(open, close) - low
+
+bodyPercent      = candleRange > 0 ? candleBody / candleRange : 0.0
+upperWickPercent = candleRange > 0 ? upperWick / candleRange : 0.0
+lowerWickPercent = candleRange > 0 ? lowerWick / candleRange : 0.0
+
+candleRangePips    = pipSize > 0 ? candleRange / pipSize : 0.0
+takeProfitDistance = takeProfitPips * pipSize
+stopLossDistance   = stopLossPips * pipSize
+minSweepDistancePx = minSweepDistance * pipSize
+minRangeDistancePx = minCandleRangePips * pipSize
+
+float visualBuffer  = math.max(pipSize * 8.0, candleRange * 0.08)
+float entryZoneHalf = math.max(pipSize * 6.0, atrValue * 0.04)
+
+// ============================================================================
+// VOLATILITY / SESSION STATE
+// ============================================================================
+float atrPct = close != 0 ? (atrValue / close) * 100.0 : 0.0
+string volatilityState = atrPct >= 0.80 ? "HIGH" : atrPct >= 0.35 ? "NORMAL" : "LOW"
+color volatilityColor = atrPct >= 0.80 ? CLR_RED : atrPct >= 0.35 ? CLR_CYAN : CLR_GREEN
+
+int gmt3Hour = hour(time, "GMT+3")
+string sessionState = f_session_name(gmt3Hour)
+color sessionColor = sessionState == "LONDON" ? CLR_CYAN : sessionState == "NEW YORK" ? CLR_GOLD : CLR_SILVER
+
+// ============================================================================
+// PIVOTS AND LIQUIDITY STORAGE
+// ============================================================================
+pivotHigh = ta.pivothigh(high, pivotLength, pivotLength)
+pivotLow  = ta.pivotlow(low, pivotLength, pivotLength)
+
+var float[] storedHighLevels = array.new_float()
+var int[]   storedHighBars   = array.new_int()
+var float[] storedLowLevels  = array.new_float()
+var int[]   storedLowBars    = array.new_int()
+
+if not na(pivotHigh)
+    array.push(storedHighLevels, pivotHigh)
+    array.push(storedHighBars, bar_index - pivotLength)
+    if array.size(storedHighLevels) > storedLevels
+        array.shift(storedHighLevels)
+        array.shift(storedHighBars)
+
+if not na(pivotLow)
+    array.push(storedLowLevels, pivotLow)
+    array.push(storedLowBars, bar_index - pivotLength)
+    if array.size(storedLowLevels) > storedLevels
+        array.shift(storedLowLevels)
+        array.shift(storedLowBars)
+
+// ============================================================================
+// FIND MOST RECENT SWEPT LEVEL
+// ============================================================================
+float sweptHighLevel = na
+int   sweptHighBar   = na
+float sweptLowLevel  = na
+int   sweptLowBar    = na
+
+int highLevelCount = array.size(storedHighLevels)
+if highLevelCount > 0
+    for i = highLevelCount - 1 to 0
+        float highLevel = array.get(storedHighLevels, i)
+        int   highBar   = array.get(storedHighBars, i)
+        if highBar < bar_index and high > highLevel and (high - highLevel) >= minSweepDistancePx
+            sweptHighLevel := highLevel
+            sweptHighBar   := highBar
+            break
+
+int lowLevelCount = array.size(storedLowLevels)
+if lowLevelCount > 0
+    for i = lowLevelCount - 1 to 0
+        float lowLevel = array.get(storedLowLevels, i)
+        int   lowBar   = array.get(storedLowBars, i)
+        if lowBar < bar_index and low < lowLevel and (lowLevel - low) >= minSweepDistancePx
+            sweptLowLevel := lowLevel
+            sweptLowBar   := lowBar
+            break
+
+// ============================================================================
+// SWEEP VALIDATION
+// ============================================================================
+bearishReclaim =
+     not na(sweptHighLevel) and
+     (
+         reclaimRule == "Close Back Inside" ?
+         close < sweptHighLevel :
+         close < sweptHighLevel and close < (high + low) / 2.0
+     )
+
+bullishReclaim =
+     not na(sweptLowLevel) and
+     (
+         reclaimRule == "Close Back Inside" ?
+         close > sweptLowLevel :
+         close > sweptLowLevel and close > (high + low) / 2.0
+     )
+
+validSellSweep =
+     not na(sweptHighLevel) and
+     bearishReclaim and
+     upperWickPercent >= minWickPercent and
+     bodyPercent <= maxBodyPercent and
+     candleRange >= minRangeDistancePx
+
+validBuySweep =
+     not na(sweptLowLevel) and
+     bullishReclaim and
+     lowerWickPercent >= minWickPercent and
+     bodyPercent <= maxBodyPercent and
+     candleRange >= minRangeDistancePx
+
+// ============================================================================
+// SWEEP TRACE / REFERENCE MEMORY
+// ============================================================================
+var line[]  sweepTraceLines = array.new_line()
+var line[]  referenceLines  = array.new_line()
+var label[] sweepTraceLabels = array.new_label()
+
+if showSweepGuides and validBuySweep and not na(sweptLowLevel)
+    f_add_sweep_trace(sweptLowLevel, true, guideExtendBars, sweepTraceLines, referenceLines, sweepTraceLabels)
+
+if showSweepGuides and validSellSweep and not na(sweptHighLevel)
+    f_add_sweep_trace(sweptHighLevel, false, guideExtendBars, sweepTraceLines, referenceLines, sweepTraceLabels)
+
+// ============================================================================
+// STORE PENDING SWEEP EVENTS
+// ============================================================================
+var int   pendingBullSweepBar = na
+var float pendingBullHigh     = na
+var float pendingBullLow      = na
+var float pendingBullMid      = na
+var float pendingBullLevel    = na
+var float pendingBullScore    = na
+
+var int   pendingBearSweepBar = na
+var float pendingBearHigh     = na
+var float pendingBearLow      = na
+var float pendingBearMid      = na
+var float pendingBearLevel    = na
+var float pendingBearScore    = na
+
+bullEmaOkForSweep = not useLocalEmaFilter or close > localEma
+bearEmaOkForSweep = not useLocalEmaFilter or close < localEma
+bullMidOkNow      = not requireMidlineBreak or close > (high + low) / 2.0
+bearMidOkNow      = not requireMidlineBreak or close < (high + low) / 2.0
+
+bullSweepScoreNow = f_quality_score(lowerWickPercent, bodyPercent, candleRangePips, minWickPercent, maxBodyPercent, minCandleRangePips, bullEmaOkForSweep, bullishReclaim, bullMidOkNow)
+bearSweepScoreNow = f_quality_score(upperWickPercent, bodyPercent, candleRangePips, minWickPercent, maxBodyPercent, minCandleRangePips, bearEmaOkForSweep, bearishReclaim, bearMidOkNow)
+
+if validBuySweep
+    pendingBullSweepBar := bar_index
+    pendingBullHigh     := high
+    pendingBullLow      := low
+    pendingBullMid      := (high + low) / 2.0
+    pendingBullLevel    := sweptLowLevel
+    pendingBullScore    := bullSweepScoreNow
+
+if validSellSweep
+    pendingBearSweepBar := bar_index
+    pendingBearHigh     := high
+    pendingBearLow      := low
+    pendingBearMid      := (high + low) / 2.0
+    pendingBearLevel    := sweptHighLevel
+    pendingBearScore    := bearSweepScoreNow
+
+bullWindowOpen = not na(pendingBullSweepBar) and (bar_index - pendingBullSweepBar <= confirmationWindow)
+bearWindowOpen = not na(pendingBearSweepBar) and (bar_index - pendingBearSweepBar <= confirmationWindow)
+
+// ============================================================================
+// CONFIRMATION LOGIC
+// ============================================================================
+localLongOk  = not useLocalEmaFilter or close > localEma
+localShortOk = not useLocalEmaFilter or close < localEma
+bullBodyOk   = not requireBullishBody or close > open
+bearBodyOk   = not requireBearishBody or close < open
+bullMidOk    = not requireMidlineBreak or close > pendingBullMid
+bearMidOk    = not requireMidlineBreak or close < pendingBearMid
+
+buyConfirmed =
+     bullWindowOpen and
+     bullBodyOk and
+     localLongOk and
+     bullMidOk
+
+sellConfirmed =
+     bearWindowOpen and
+     bearBodyOk and
+     localShortOk and
+     bearMidOk
+
+// ============================================================================
+// SIGNAL COOLDOWN
+// ============================================================================
+var int lastSignalBar = na
+cooldownPassed = na(lastSignalBar) or (bar_index - lastSignalBar > signalCooldownBars)
+
+rawBuySignal  = buyConfirmed
+rawSellSignal = sellConfirmed
+
+buySignal  = rawBuySignal and cooldownPassed
+sellSignal = rawSellSignal and cooldownPassed and not buySignal
+
+var float lastSignalScore = na
+var int   lastSignalDir   = 0
+
+if buySignal
+    lastSignalScore := nz(pendingBullScore, bullSweepScoreNow)
+    lastSignalDir   := 1
+
+if sellSignal
+    lastSignalScore := nz(pendingBearScore, bearSweepScoreNow)
+    lastSignalDir   := -1
+
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+
+if buySignal or (not na(pendingBullSweepBar) and bar_index - pendingBullSweepBar > confirmationWindow)
+    pendingBullSweepBar := na
+    pendingBullHigh     := na
+    pendingBullLow      := na
+    pendingBullMid      := na
+    pendingBullLevel    := na
+    pendingBullScore    := na
+
+if sellSignal or (not na(pendingBearSweepBar) and bar_index - pendingBearSweepBar > confirmationWindow)
+    pendingBearSweepBar := na
+    pendingBearHigh     := na
+    pendingBearLow      := na
+    pendingBearMid      := na
+    pendingBearLevel    := na
+    pendingBearScore    := na
+
+// ============================================================================
+// INTERNAL TRADE SIMULATION
+// ============================================================================
+var int   positionDirection = 0
+var float simulatedEntry    = na
+var float simulatedTP       = na
+var float simulatedSL       = na
+var int   simulatedEntryBar = na
+
+var int   totalTrades       = 0
+var int   totalWins         = 0
+var int   totalLosses       = 0
+var float grossWinPips      = 0.0
+var float grossLossPips     = 0.0
+var float netPips           = 0.0
+
+tradeIsActive = positionDirection != 0
+
+allowLongSignal  = enableSimulation ? (blockSignalsInTrade ? not tradeIsActive : true) : true
+allowShortSignal = enableSimulation ? (blockSignalsInTrade ? not tradeIsActive : true) : true
+
+plotLongSignal  = buySignal and allowLongSignal
+plotShortSignal = sellSignal and allowShortSignal
+
+// ============================================================================
+// VISUAL MEMORY ARRAYS
+// ============================================================================
+var line[]  bracketLines   = array.new_line()
+var label[] scoreLabels    = array.new_label()
+var box[]   signalBoxes    = array.new_box()
+var line[]  pathLines      = array.new_line()
+
+// ============================================================================
+// TRADE OBJECTS
+// ============================================================================
+var box   activeTpBox            = na
+var box   activeSlBox            = na
+var box   activeEntryZone        = na
+var line  activeEntryLine1       = na
+var line  activeEntryLine2       = na
+var line  activeInvalidationLine = na
+var line  activeProjectionLine   = na
+var label activeEntryTag         = na
+var label activeTpTag            = na
+var label activeSlTag            = na
+var label activeInvalidationTag  = na
+
+// ============================================================================
+// SIGNAL VISUAL BUILD
+// ============================================================================
+if plotLongSignal
+    f_draw_signal_brackets(bar_index, high, low, visualBuffer, CLR_CYAN, bracketLines)
+
+    float sigTop = math.max(open, close)
+    float sigBot = math.min(open, close)
+    box signalBodyBox = box.new(left=bar_index, top=sigTop, right=bar_index + 1, bottom=sigBot, xloc=xloc.bar_index, border_color=color.new(CLR_CYAN, 0), bgcolor=color.new(CLR_GREEN, 82), border_width=1)
+    f_push_box_prune(signalBoxes, signalBodyBox, 50)
+
+    label scoreTag = label.new(bar_index, low - (visualBuffer * 1.2), "Q:" + str.tostring(math.round(nz(lastSignalScore, 0))), xloc=xloc.bar_index, style=label.style_label_up, color=CLR_CYAN_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    f_push_label_prune(scoreLabels, scoreTag, 50)
+
+if plotShortSignal
+    f_draw_signal_brackets(bar_index, high, low, visualBuffer, CLR_CYAN, bracketLines)
+
+    float sigTop = math.max(open, close)
+    float sigBot = math.min(open, close)
+    box signalBodyBox = box.new(left=bar_index, top=sigTop, right=bar_index + 1, bottom=sigBot, xloc=xloc.bar_index, border_color=color.new(CLR_CYAN, 0), bgcolor=color.new(CLR_RED, 82), border_width=1)
+    f_push_box_prune(signalBoxes, signalBodyBox, 50)
+
+    label scoreTag = label.new(bar_index, high + (visualBuffer * 1.2), "Q:" + str.tostring(math.round(nz(lastSignalScore, 0))), xloc=xloc.bar_index, style=label.style_label_down, color=CLR_CYAN_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    f_push_label_prune(scoreLabels, scoreTag, 50)
+
+// ============================================================================
+// TRADE CREATION
+// ============================================================================
+if enableSimulation and plotLongSignal
+    positionDirection := 1
+    simulatedEntry    := close
+    simulatedTP       := simulatedEntry + takeProfitDistance
+    simulatedSL       := simulatedEntry - stopLossDistance
+    simulatedEntryBar := bar_index
+    totalTrades       += 1
+
+    activeTpBox := box.new(left=bar_index, top=simulatedTP, right=bar_index, bottom=simulatedEntry, xloc=xloc.bar_index, border_color=color.new(CLR_CYAN, 0), bgcolor=color.new(CLR_CYAN, BOX_TRANSPARENCY), border_width=1)
+    activeSlBox := box.new(left=bar_index, top=simulatedEntry, right=bar_index, bottom=simulatedSL, xloc=xloc.bar_index, border_color=color.new(CLR_RED, 0), bgcolor=color.new(CLR_RED, BOX_TRANSPARENCY), border_width=1)
+    activeEntryZone := box.new(left=bar_index, top=simulatedEntry + entryZoneHalf, right=bar_index, bottom=simulatedEntry - entryZoneHalf, xloc=xloc.bar_index, border_color=color.new(CLR_CYAN, 40), bgcolor=color.new(CLR_CYAN, 92), border_width=1)
+
+    if showEntryLine
+        activeEntryLine1 := line.new(x1=bar_index, y1=simulatedEntry, x2=bar_index, y2=simulatedEntry, xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_CYAN, 0), width=1, style=line.style_solid)
+        activeEntryLine2 := line.new(x1=bar_index, y1=simulatedEntry + (pipSize * 1.5), x2=bar_index, y2=simulatedEntry + (pipSize * 1.5), xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_CYAN, 70), width=1, style=line.style_dotted)
+
+    activeInvalidationLine := line.new(x1=bar_index, y1=simulatedSL, x2=bar_index, y2=simulatedSL, xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_RED, 0), width=1, style=line.style_dashed)
+    activeProjectionLine   := line.new(x1=bar_index, y1=simulatedEntry, x2=bar_index + 6, y2=simulatedEntry + ((simulatedTP - simulatedEntry) * 0.22), xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_GREEN, 15), width=1, style=line.style_dotted)
+    f_push_line_prune(pathLines, activeProjectionLine, 60)
+
+    activeEntryTag        := label.new(bar_index, simulatedEntry, "ENTRY", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_CYAN_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    activeTpTag           := label.new(bar_index, simulatedTP, "TARGET", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_GREEN_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    activeSlTag           := label.new(bar_index, simulatedSL, "STOP", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_RED_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    activeInvalidationTag := label.new(bar_index, simulatedSL, "INVALIDATION", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_RED_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+
+if enableSimulation and plotShortSignal
+    positionDirection := -1
+    simulatedEntry    := close
+    simulatedTP       := simulatedEntry - takeProfitDistance
+    simulatedSL       := simulatedEntry + stopLossDistance
+    simulatedEntryBar := bar_index
+    totalTrades       += 1
+
+    activeTpBox := box.new(left=bar_index, top=simulatedEntry, right=bar_index, bottom=simulatedTP, xloc=xloc.bar_index, border_color=color.new(CLR_CYAN, 0), bgcolor=color.new(CLR_CYAN, BOX_TRANSPARENCY), border_width=1)
+    activeSlBox := box.new(left=bar_index, top=simulatedSL, right=bar_index, bottom=simulatedEntry, xloc=xloc.bar_index, border_color=color.new(CLR_RED, 0), bgcolor=color.new(CLR_RED, BOX_TRANSPARENCY), border_width=1)
+    activeEntryZone := box.new(left=bar_index, top=simulatedEntry + entryZoneHalf, right=bar_index, bottom=simulatedEntry - entryZoneHalf, xloc=xloc.bar_index, border_color=color.new(CLR_CYAN, 40), bgcolor=color.new(CLR_CYAN, 92), border_width=1)
+
+    if showEntryLine
+        activeEntryLine1 := line.new(x1=bar_index, y1=simulatedEntry, x2=bar_index, y2=simulatedEntry, xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_CYAN, 0), width=1, style=line.style_solid)
+        activeEntryLine2 := line.new(x1=bar_index, y1=simulatedEntry - (pipSize * 1.5), x2=bar_index, y2=simulatedEntry - (pipSize * 1.5), xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_CYAN, 70), width=1, style=line.style_dotted)
+
+    activeInvalidationLine := line.new(x1=bar_index, y1=simulatedSL, x2=bar_index, y2=simulatedSL, xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_RED, 0), width=1, style=line.style_dashed)
+    activeProjectionLine   := line.new(x1=bar_index, y1=simulatedEntry, x2=bar_index + 6, y2=simulatedEntry - ((simulatedEntry - simulatedTP) * 0.22), xloc=xloc.bar_index, extend=extend.none, color=color.new(CLR_RED, 15), width=1, style=line.style_dotted)
+    f_push_line_prune(pathLines, activeProjectionLine, 60)
+
+    activeEntryTag        := label.new(bar_index, simulatedEntry, "ENTRY", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_CYAN_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    activeTpTag           := label.new(bar_index, simulatedTP, "TARGET", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_GREEN_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    activeSlTag           := label.new(bar_index, simulatedSL, "STOP", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_RED_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+    activeInvalidationTag := label.new(bar_index, simulatedSL, "INVALIDATION", xloc=xloc.bar_index, style=label.style_label_left, color=CLR_RED_SOFT, textcolor=CLR_TEXT, size=size.tiny)
+
+// ============================================================================
+// ACTIVE TRADE VISUAL UPDATE
+// ============================================================================
+if enableSimulation and tradeIsActive
+    if not na(activeTpBox)
+        box.set_right(activeTpBox, bar_index)
+    if not na(activeSlBox)
+        box.set_right(activeSlBox, bar_index)
+    if not na(activeEntryZone)
+        box.set_right(activeEntryZone, bar_index)
+
+    if not na(activeEntryLine1)
+        line.set_x2(activeEntryLine1, bar_index)
+        line.set_y2(activeEntryLine1, simulatedEntry)
+    if not na(activeEntryLine2)
+        line.set_x2(activeEntryLine2, bar_index)
+        line.set_y2(activeEntryLine2, positionDirection == 1 ? simulatedEntry + (pipSize * 1.5) : simulatedEntry - (pipSize * 1.5))
+    if not na(activeInvalidationLine)
+        line.set_x2(activeInvalidationLine, bar_index)
+        line.set_y2(activeInvalidationLine, simulatedSL)
+
+    if not na(activeEntryTag)
+        label.set_x(activeEntryTag, bar_index)
+        label.set_y(activeEntryTag, simulatedEntry)
+    if not na(activeTpTag)
+        label.set_x(activeTpTag, bar_index)
+        label.set_y(activeTpTag, simulatedTP)
+    if not na(activeSlTag)
+        label.set_x(activeSlTag, bar_index)
+        label.set_y(activeSlTag, simulatedSL)
+    if not na(activeInvalidationTag)
+        label.set_x(activeInvalidationTag, bar_index)
+        label.set_y(activeInvalidationTag, simulatedSL)
+
+// ============================================================================
+// EXIT LOGIC
+// ============================================================================
+bool exitWin = false
+bool exitLoss = false
+int  exitDirection = positionDirection
+
+if enableSimulation and tradeIsActive and bar_index > simulatedEntryBar
+    if positionDirection == 1
+        bool longSlHit = low <= simulatedSL
+        bool longTpHit = high >= simulatedTP
+
+        if longSlHit and longTpHit
+            exitLoss := true
+        else if longSlHit
+            exitLoss := true
+        else if longTpHit
+            exitWin := true
+
+    if positionDirection == -1
+        bool shortSlHit = high >= simulatedSL
+        bool shortTpHit = low <= simulatedTP
+
+        if shortSlHit and shortTpHit
+            exitLoss := true
+        else if shortSlHit
+            exitLoss := true
+        else if shortTpHit
+            exitWin := true
+
+if exitWin
+    totalWins    += 1
+    grossWinPips += takeProfitPips
+    netPips      += takeProfitPips
+
+    label.new(bar_index, exitDirection == 1 ? high : low, "TP HIT", xloc=xloc.bar_index, style=exitDirection == 1 ? label.style_label_down : label.style_label_up, color=CLR_GREEN, textcolor=CLR_TEXT, size=f_label_size(signalLabelSize))
+
+    positionDirection := 0
+    simulatedEntry    := na
+    simulatedTP       := na
+    simulatedSL       := na
+    simulatedEntryBar := na
+    activeTpBox       := na
+    activeSlBox       := na
+    activeEntryZone   := na
+    activeEntryLine1  := na
+    activeEntryLine2  := na
+    activeInvalidationLine := na
+    activeProjectionLine   := na
+    activeEntryTag    := na
+    activeTpTag       := na
+    activeSlTag       := na
+    activeInvalidationTag := na
+
+if exitLoss
+    totalLosses   += 1
+    grossLossPips += stopLossPips
+    netPips       -= stopLossPips
+
+    if showStoppedTrades
+        label.new(bar_index, exitDirection == 1 ? low : high, "SL HIT", xloc=xloc.bar_index, style=exitDirection == 1 ? label.style_label_up : label.style_label_down, color=CLR_RED, textcolor=CLR_TEXT, size=f_label_size(signalLabelSize))
+    else
+        if not na(activeTpBox)
+            box.delete(activeTpBox)
+        if not na(activeSlBox)
+            box.delete(activeSlBox)
+        if not na(activeEntryZone)
+            box.delete(activeEntryZone)
+        if not na(activeEntryLine1)
+            line.delete(activeEntryLine1)
+        if not na(activeEntryLine2)
+            line.delete(activeEntryLine2)
+        if not na(activeInvalidationLine)
+            line.delete(activeInvalidationLine)
+        if not na(activeProjectionLine)
+            line.delete(activeProjectionLine)
+        if not na(activeEntryTag)
+            label.delete(activeEntryTag)
+        if not na(activeTpTag)
+            label.delete(activeTpTag)
+        if not na(activeSlTag)
+            label.delete(activeSlTag)
+        if not na(activeInvalidationTag)
+            label.delete(activeInvalidationTag)
+
+    positionDirection := 0
+    simulatedEntry    := na
+    simulatedTP       := na
+    simulatedSL       := na
+    simulatedEntryBar := na
+    activeTpBox       := na
+    activeSlBox       := na
+    activeEntryZone   := na
+    activeEntryLine1  := na
+    activeEntryLine2  := na
+    activeInvalidationLine := na
+    activeProjectionLine   := na
+    activeEntryTag    := na
+    activeTpTag       := na
+    activeSlTag       := na
+    activeInvalidationTag := na
+
+// ============================================================================
+// PERFORMANCE METRICS
+// ============================================================================
+closedTrades = totalWins + totalLosses
+winRate      = closedTrades > 0 ? (totalWins * 100.0 / closedTrades) : 0.0
+avgPips      = closedTrades > 0 ? (netPips / closedTrades) : 0.0
+profitFactor = grossLossPips > 0 ? grossWinPips / grossLossPips : na
+
+// ============================================================================
+// DRAWDOWN ENGINE
+// ============================================================================
+var float equityPeakPips   = 0.0
+var float maxDrawdownPips  = 0.0
+
+equityPeakPips   := math.max(equityPeakPips, netPips)
+currentDDPips    = equityPeakPips - netPips
+maxDrawdownPips := math.max(maxDrawdownPips, currentDDPips)
+
+newDay = ta.change(time("D")) != 0
+
+var float dayEquityPeakPips  = 0.0
+var float dayMaxDrawdownPips = 0.0
+var float worstDailyDDPips   = 0.0
+
+if barstate.isfirst
+    dayEquityPeakPips  := netPips
+    dayMaxDrawdownPips := 0.0
+    worstDailyDDPips   := 0.0
+
+if newDay
+    worstDailyDDPips   := math.max(worstDailyDDPips, dayMaxDrawdownPips)
+    dayEquityPeakPips  := netPips
+    dayMaxDrawdownPips := 0.0
+
+dayEquityPeakPips   := math.max(dayEquityPeakPips, netPips)
+currentDailyDDPips  = dayEquityPeakPips - netPips
+dayMaxDrawdownPips := math.max(dayMaxDrawdownPips, currentDailyDDPips)
+worstDailyDDPips   := math.max(worstDailyDDPips, dayMaxDrawdownPips)
+
+// ============================================================================
+// PANEL STATES
+// ============================================================================
+string simulationState = enableSimulation ? "ON" : "OFF"
+
+string biasText =
+     useLocalEmaFilter ?
+     close > localEma ? "BULLISH" :
+     close < localEma ? "BEARISH" :
+     "NEUTRAL"
+     : "FILTER OFF"
+
+color biasColor =
+     useLocalEmaFilter ?
+     close > localEma ? CLR_GREEN :
+     close < localEma ? CLR_RED :
+     CLR_SILVER
+     : CLR_MUTED
+
+string sweepStateText =
+     validBuySweep ? "BULL SWEEP DETECTED" :
+     validSellSweep ? "BEAR SWEEP DETECTED" :
+     bullWindowOpen ? "BULL SWEEP PENDING" :
+     bearWindowOpen ? "BEAR SWEEP PENDING" :
+     "IDLE"
+
+color sweepStateColor =
+     validBuySweep ? CLR_GREEN :
+     validSellSweep ? CLR_RED :
+     bullWindowOpen or bearWindowOpen ? CLR_CYAN :
+     CLR_MUTED
+
+string signalStateText =
+     plotLongSignal ? "BUY CONFIRMED" :
+     plotShortSignal ? "SELL CONFIRMED" :
+     tradeIsActive ? "TRADE ACTIVE" :
+     "WAITING"
+
+color signalStateColor =
+     plotLongSignal ? CLR_GREEN :
+     plotShortSignal ? CLR_RED :
+     tradeIsActive ? CLR_CYAN :
+     CLR_MUTED
+
+float panelScore =
+     bullWindowOpen ? nz(pendingBullScore, 0.0) :
+     bearWindowOpen ? nz(pendingBearScore, 0.0) :
+     nz(lastSignalScore, 0.0)
+
+color panelScoreColor = f_score_color(panelScore)
+
+float ddPressure = maxDrawdownPips > 0 ? (currentDDPips / maxDrawdownPips) * 100.0 : 0.0
+string riskStateText =
+     ddPressure < 35 ? "CONTROLLED" :
+     ddPressure < 70 ? "ELEVATED" :
+     "DEFENSIVE"
+
+color riskStateColor =
+     ddPressure < 35 ? CLR_GREEN :
+     ddPressure < 70 ? CLR_CYAN :
+     CLR_RED
+
+// ============================================================================
+// SIGNAL VISUALS
+// ============================================================================
+plotshape(validBuySweep,  title="Bull Sweep", style=shape.circle,       location=location.belowbar, color=color.new(CLR_CYAN, 0), size=size.tiny)
+plotshape(validSellSweep, title="Bear Sweep", style=shape.circle,       location=location.abovebar, color=color.new(CLR_CYAN, 0), size=size.tiny)
+
+plotshape(plotLongSignal,  title="Buy Signal Ring",  style=shape.circle,       location=location.belowbar, color=color.new(CLR_CYAN, 0), size=size.small)
+plotshape(plotShortSignal, title="Sell Signal Ring", style=shape.circle,       location=location.abovebar, color=color.new(CLR_CYAN, 0), size=size.small)
+
+plotshape(plotLongSignal,  title="Buy Signal Marker",  style=shape.triangleup,   location=location.belowbar, color=color.new(CLR_GREEN, 0), size=size.tiny)
+plotshape(plotShortSignal, title="Sell Signal Marker", style=shape.triangledown, location=location.abovebar, color=color.new(CLR_RED, 0), size=size.tiny)
+
+if showSignalLabels and plotLongSignal
+    label.new(bar_index, low, "BUY", xloc=xloc.bar_index, style=label.style_label_up, color=CLR_GREEN_SOFT, textcolor=CLR_TEXT, size=f_label_size(signalLabelSize))
+
+if showSignalLabels and plotShortSignal
+    label.new(bar_index, high, "SELL", xloc=xloc.bar_index, style=label.style_label_down, color=CLR_RED_SOFT, textcolor=CLR_TEXT, size=f_label_size(signalLabelSize))
+
+barcolor(
+     showSignalBarColors ?
+     plotLongSignal ? color.new(CLR_GREEN, 0) :
+     plotShortSignal ? color.new(CLR_RED, 0) :
+     na
+     : na
+)
+
+// ============================================================================
+// STATUS PANEL
+// ============================================================================
+var table panel = table.new(f_table_position(panelPosition), 2, 13, border_width=1, border_color=CLR_BORDER)
+
+if barstate.islast
+    if showStatusPanel
+        table.cell(panel, 0, 0, "LIQUIDITY ENTRY", bgcolor=CLR_PANEL_ALT, text_color=CLR_TEXT)
+        table.cell(panel, 1, 0, "STATUS PANEL", bgcolor=CLR_PANEL_ALT, text_color=CLR_GOLD)
+
+        table.cell(panel, 0, 1, "Simulation", bgcolor=CLR_PANEL, text_color=CLR_MUTED)
+        table.cell(panel, 1, 1, simulationState, bgcolor=CLR_PANEL, text_color=CLR_CYAN)
+
+        table.cell(panel, 0, 2, "Bias", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 2, biasText, bgcolor=CLR_BG, text_color=biasColor)
+
+        table.cell(panel, 0, 3, "Sweep State", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 3, sweepStateText, bgcolor=CLR_BG, text_color=sweepStateColor)
+
+        table.cell(panel, 0, 4, "Signal State", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 4, signalStateText, bgcolor=CLR_BG, text_color=signalStateColor)
+
+        table.cell(panel, 0, 5, "Quality Score", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 5, f_fmt(panelScore), bgcolor=CLR_BG, text_color=panelScoreColor)
+
+        table.cell(panel, 0, 6, "Volatility", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 6, volatilityState, bgcolor=CLR_BG, text_color=volatilityColor)
+
+        table.cell(panel, 0, 7, "Session", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 7, sessionState, bgcolor=CLR_BG, text_color=sessionColor)
+
+        table.cell(panel, 0, 8, "Risk State", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 8, riskStateText, bgcolor=CLR_BG, text_color=riskStateColor)
+
+        table.cell(panel, 0, 9, "Trades", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 9, str.tostring(totalTrades), bgcolor=CLR_BG, text_color=CLR_SILVER)
+
+        table.cell(panel, 0, 10, "Win Rate %", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 10, f_fmt(winRate), bgcolor=CLR_BG, text_color=winRate >= 50 ? CLR_GREEN : CLR_RED)
+
+        table.cell(panel, 0, 11, "Net Pips", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 11, f_fmt(netPips), bgcolor=CLR_BG, text_color=netPips >= 0 ? CLR_GREEN : CLR_RED)
+
+        table.cell(panel, 0, 12, "Max DD (Pips)", bgcolor=CLR_BG, text_color=CLR_TEXT)
+        table.cell(panel, 1, 12, f_fmt(maxDrawdownPips), bgcolor=CLR_BG, text_color=CLR_RED)
+    else
+        f_panel_clear(panel)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(plotLongSignal,  title="Bullish Liquidity Reclaim",  message="Bullish liquidity reclaim confirmed")
+alertcondition(plotShortSignal, title="Bearish Liquidity Reclaim", message="Bearish liquidity reclaim confirmed")
+
+// ============================================================================
+// STRATEGY EXECUTION (ADDED FOR NATIVE BACKTESTING)
+// ============================================================================
+if plotLongSignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry="Long", limit=close + takeProfitDistance, stop=close - stopLossDistance)
+
+if plotShortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry="Short", limit=close - takeProfitDistance, stop=close + stopLossDistance)

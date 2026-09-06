@@ -1,0 +1,2849 @@
+// @version=5
+// @description Technical Analysis Utility Library - Collection of functions for market analysis, smoothing, scaling, and structure detection
+library("TAUtilityLib", overlay = false, dynamic_requests = true)
+
+// 
+//  USER DEFINED TYPES (UDTs)
+// 
+
+// @type Fractal data structure consolidating all fractal-related arrays
+// @field bar Bar index where fractal occurred
+// @field price Price level of the fractal
+// @field liquidated Whether this fractal's liquidity has been swept
+// @field sweptStrength Strength/distance of the liquidity sweep
+// @field momentum DEMA momentum value at the fractal
+// @field marker Divergence marker type ("none", "bearishPeak", "bullishPeak", etc.)
+export type FractalData
+    int bar
+    float price
+    bool liquidated
+    float sweptStrength
+    float momentum
+    string marker
+
+// @type Correlation line data structure
+// @field bar Bar index where line was created
+// @field price Price level of the line
+// @field lineType Type of correlation line ("osc_bull", "osc_bear", "extreme_bull", "extreme_bear")
+// @field touchCount Number of times price has touched this line
+// @field active Whether the line is still active for touch detection
+export type CorrelationLine
+    int bar
+    float price
+    string lineType
+    int touchCount
+    bool active
+
+// @type Previous fractal tracking for divergence detection
+// @field price Price at the fractal
+// @field demamom DEMA momentum value at the fractal
+// @field bar Bar index of the fractal
+export type PrevFractalState
+    float price
+    float demamom
+    int bar
+
+export type KalmanState
+    float price = na
+    float velocity = na
+    float P_price = 1.0
+    float P_vel = 1.0
+    float P_cross = 0.0
+    float R_ewma = 0.001
+    int bars_run = 0
+
+// @type SubPane layout container - owns Y-coordinates and hlines for a group of oscillators
+// @field index Layout order (0=top, 1=middle, 2=bottom)
+// @field id Debug identifier ("MAIN", "CORR")
+// @field yoffset Visual center Y coordinate (for plot mapping ONLY, does NOT affect logic)
+// @field plotscale Visual half-height amplitude (for plot mapping ONLY, does NOT affect logic)
+// @field ytop Auto-computed top boundary
+// @field ybottom Auto-computed bottom boundary
+// @field visible True if ANY child oscillator should display
+// @field hlinetop Managed top boundary line
+// @field hlinebottom Managed bottom boundary line
+// @field hlinezero Managed center line
+// @field bordercolor Color for top/bottom lines
+// @field zerocolor Color for center line
+// IMPORTANT: yoffset and plotscale are VISUAL ONLY - all logic (thresholds, gates, conditions)
+// must use ORIGINAL values (e.g., proj_ctot in [0,1], not ctot_mapped in pane coordinates)
+export type SubPane
+    int index
+    string id
+    float yoffset
+    float plotscale
+    float ytop
+    float ybottom
+    bool visible
+    line hlinetop
+    line hlinebottom
+    line hlinezero
+    color bordercolor
+    color zerocolor
+
+// @constructor Create new SubPane instance
+export f_subpane_ctor(int index, string id, float yoffset, float plotscale, float ytop, float ybottom, bool visible, line hlinetop, line hlinebottom, line hlinezero, color bordercolor, color zerocolor) =>
+    [index, id, yoffset, plotscale, ytop, ybottom, visible, hlinetop, hlinebottom, hlinezero, bordercolor, zerocolor]
+
+// @function Factory method to create SubPane instances
+// @param index Layout order (0=top, 1=middle, 2=bottom)
+// @param id Debug identifier ("MAIN", "CORR")
+// @param yoffset Auto-computed center Y coordinate
+// @param plotscale Auto-computed half-height (amplitude)
+// @param ytop Auto-computed top boundary
+// @param ybottom Auto-computed bottom boundary
+// @param visible True if ANY child oscillator shoulddisplay
+// @param hlinetop Managed top boundary line
+// @param hlinebottom Managed bottom boundary line
+// @param hlinezero Managed center line
+// @param bordercolor Color for top/bottom lines
+// @param zerocolor Color for center line
+export f_subpane_new(int index, string id, float yoffset, float plotscale, float ytop, float ybottom, bool visible, line hlinetop, line hlinebottom, line hlinezero, color bordercolor, color zerocolor) =>
+    f_subpane_ctor(index, id, yoffset, plotscale, ytop, ybottom, visible, hlinetop, hlinebottom, hlinezero, bordercolor, zerocolor)
+
+// @type Oscillator metadata - IMMUTABLE config after barstate.isfirst
+// @field id Short identifier ("MR", "TE", "VEC", "CORR", "LTF")
+// @field full_name Full name for tooltip header
+// @field explanation Tooltip body text (static part, built once)
+// @field subpaneidx Index into array<SubPane> for parent layout
+// @field z_clip_lo Lower bound for raw clipping (e.g., -3.0)
+// @field z_clip_hi Upper bound for raw clipping (e.g., 3.0)
+// @field clip_method Clipping method: "tanh" | "sigmoid" | "clamp" | "none"
+// @field clip_steepness Steepness parameter (0.5 MR, 1.5 TE, 0.75 others)
+// @field clip_raw_value If true, clip raw z-score for kNN/MC; if false, clip only visual
+// @field enabled Computation runs (input toggle)
+// @field should_display Visual plot visible (enabled AND visual toggle)
+// @field bull_color Color for positive values
+// @field bear_color Color for negative values
+export type OscMeta
+    string id
+    string full_name
+    string explanation
+    int subpaneidx
+    float z_clip_lo
+    float z_clip_hi
+    string clip_method
+    float clip_steepness
+    bool clip_raw_value
+    bool enabled
+    bool should_display
+    color bull_color
+    color bear_color
+
+// @type Oscillator runtime state - MUTABLE per-bar state
+// @field visualvalue OUTPUT: plot-ready Y coordinate in parent subpane
+// @field rawclipped OUTPUT: clipped raw value for kNN/MC
+// @field rawvalue INPUT: unprocessed raw value (diagnostic)
+// @field lbl Managed end-of-chart label reference
+// @field tooltiptext Full tooltip (static header + live value)
+// @field ob_line Managed overbought boundary line reference
+// @field os_line Managed oversold boundary line reference
+export type OscState
+    float visualvalue
+    float rawclipped
+    float rawvalue
+    label lbl
+    string tooltiptext
+    line ob_line
+    line os_line
+
+export f_kalman_update(KalmanState state, float measurement, float Q_price_scaled, float Q_vel_scaled, float R_scaled) =>
+    float filtered_value = na
+    if na(state.price) or state.bars_run == 0
+        state.price := measurement
+        state.velocity := 0.0
+        state.P_price := R_scaled * 10.0
+        state.P_vel := Q_vel_scaled * 100.0
+        state.P_cross := 0.0
+        state.R_ewma := R_scaled
+        state.bars_run := 1
+        filtered_value := measurement
+    else
+        float x_pred_price = state.price + state.velocity
+        float x_pred_vel = state.velocity
+        float P_pred_price_base = state.P_price + 2.0 * state.P_cross + state.P_vel + Q_price_scaled
+        float innovation = measurement - x_pred_price
+        float innovation_sq = innovation * innovation
+        float S = P_pred_price_base + state.R_ewma
+        float _tanh_x = innovation_sq / math.max(S, 0.0001)
+        float _exp_pos = math.exp(math.min(_tanh_x, 20.0))
+        float _exp_neg = math.exp(math.min(-_tanh_x, 20.0))
+        float _tanh_val = (_exp_pos - _exp_neg) / (_exp_pos + _exp_neg)
+        float Q_adaptive = Q_price_scaled * (1.0 + _tanh_val)
+        state.R_ewma := 0.95 * state.R_ewma + 0.05 * innovation_sq
+        state.R_ewma := math.max(state.R_ewma, R_scaled * 0.1)
+        float P_pred_price = state.P_price + 2.0 * state.P_cross + state.P_vel + Q_adaptive
+        float P_pred_cross = state.P_cross + state.P_vel
+        float P_pred_vel = state.P_vel + Q_vel_scaled
+        float S_final = P_pred_price + state.R_ewma
+        float K_price = S_final > 0 ? P_pred_price / S_final : 0.0
+        float K_vel = S_final > 0 ? P_pred_cross / S_final : 0.0
+        state.price := x_pred_price + K_price * innovation
+        state.velocity := x_pred_vel + K_vel * innovation
+        float one_minus_K = 1.0 - K_price
+        state.P_price := math.max(one_minus_K * P_pred_price, Q_adaptive * 0.01)
+        state.P_cross := one_minus_K * P_pred_cross
+        state.P_vel := math.max(P_pred_vel - K_vel * P_pred_cross, Q_vel_scaled * 0.01)
+        state.bars_run += 1
+        filtered_value := state.price
+    filtered_value
+
+export f_kalman_update_te(KalmanState state, float measurement, float Q_price_scaled, float Q_vel_scaled, float R_scaled, float te_unit, float te_q_gain, float te_r_gain, float te_scale_min, float te_scale_max) =>
+    float u = math.max(0.0, math.min(1.0, nz(te_unit, 0.0)))
+    float q_mult_raw = 1.0 + te_q_gain * u
+    float r_mult_raw = 1.0 + te_r_gain * (1.0 - u)
+    float q_mult = math.max(te_scale_min, math.min(te_scale_max, q_mult_raw))
+    float r_mult = math.max(te_scale_min, math.min(te_scale_max, r_mult_raw))
+    f_kalman_update(state, measurement, Q_price_scaled * q_mult, Q_vel_scaled * q_mult, R_scaled * r_mult)
+
+export f_te_enhanced_kalman_update(KalmanState state, float measurement, float Q_price_base, float Q_vel_base, float R_base, float te_norm, float te_q_sensitivity, float te_r_sensitivity, float te_scale_min, float te_scale_max) =>
+    float q_mult_raw = 1.0 + te_q_sensitivity * te_norm
+    float r_mult_raw = 1.0 + te_r_sensitivity * te_norm
+    float q_mult = math.max(te_scale_min, math.min(te_scale_max, q_mult_raw))
+    float r_mult = math.max(te_scale_min, math.min(te_scale_max, r_mult_raw))
+    f_kalman_update(state, measurement, Q_price_base * q_mult, Q_vel_base * q_mult, R_base * r_mult)
+
+export f_winsorize(float val, float p2, float p98) =>
+    na(val) ? na : math.max(p2, math.min(val, p98))
+
+export f_basis_median_mad(float src, int basis_len) =>
+    // Native percentile (no array.new, no sort, in-place C++ implementation)
+    float ma_local = ta.percentile_linear_interpolation(src, basis_len, 50)
+    float q75 = ta.percentile_linear_interpolation(src, basis_len, 75)
+    float q25 = ta.percentile_linear_interpolation(src, basis_len, 25)
+    // IQR-based robust std (equivalent to MAD × 1.4826 for normal distribution)
+    float dev_local = math.max((q75 - q25) * 0.7413, syminfo.mintick)
+    float z_local = dev_local > 0 ? (src - ma_local) / dev_local : 0.0
+    [ma_local, dev_local, dev_local, 1.0, z_local]
+
+export f_basis_vwma(float src, float vol, int basis_len) =>
+    float vwma = ta.sma(src * vol, basis_len) / ta.sma(vol, basis_len)
+    float vw_variance = ta.sma(vol * math.pow(src - vwma, 2), basis_len) / ta.sma(vol, basis_len)
+    float dev_local = math.sqrt(math.max(vw_variance, 0.0))
+    float z_local = dev_local > 0 ? (src - vwma) / dev_local : 0.0
+    [vwma, dev_local, dev_local, 1.0, z_local]
+
+export f_sgd_update_gated(float current_param, float gradient, float learning_rate, float param_min, float param_max, float coupling_damping, float gate_thresh) =>
+    if na(coupling_damping) or coupling_damping < gate_thresh
+        current_param
+    else
+        float eff_lr = learning_rate * math.min(1.0, coupling_damping)
+        float new_val = current_param - eff_lr * gradient
+        math.max(param_min, math.min(new_val, param_max))
+
+export f_kalman_robust(float measurement, float state, float P, float Q, float R, float innov_std, float clip_sigma) =>
+    float x_pred = state
+    float P_pred = P + Q
+    float raw_innov = measurement - x_pred
+    float max_innov = clip_sigma * math.max(innov_std, 1e-10)
+    float clipped_innov = math.max(-max_innov, math.min(raw_innov, max_innov))
+    float S = P_pred + R
+    float K = S > 0 ? P_pred / S : 0.0
+    x_pred + K * clipped_innov
+
+export f_mr_vol_adjusted(float mr_raw, float atr_current, float atr_baseline) =>
+    float expansion = math.max(0.5, atr_current / math.max(atr_baseline, 1e-10))
+    mr_raw / expansion
+
+export f_ddivf_update(float innov, float prev_sigma, array<float> innov_hist, int k) =>
+    int hist_size = array.size(innov_hist)
+    int n = math.min(hist_size, k)
+    if n < 5
+        prev_sigma
+    else
+        float v_bar = 0.0
+        for i = hist_size - n to hist_size - 1
+            v_bar += array.get(innov_hist, i)
+        v_bar /= n
+        float sum_prod = 0.0
+        float sum_sq_dev = 0.0
+        for i = hist_size - n to hist_size - 1
+            float dev = array.get(innov_hist, i) - v_bar
+            float sign_dev = dev > 0 ? 1.0 : dev < 0 ? -1.0 : 0.0
+            sum_prod += dev * sign_dev
+            sum_sq_dev += dev * dev
+        float rho_v = sum_sq_dev > 0 ? sum_prod / math.sqrt(n * sum_sq_dev) : 0.7979
+        float alpha = 0.06
+        float sigma_seed = na(prev_sigma) or prev_sigma <= 0 ? math.abs(innov) : prev_sigma
+        float new_sigma = (1.0 - alpha) * sigma_seed + alpha * math.abs(innov - v_bar) / math.max(rho_v, 0.01)
+        math.max(new_sigma, 1e-10)
+
+export f_estimate_adaptive_Q(array<float> innov_hist, int window, float current_K, float min_Q, float max_Q) =>
+    int hist_size = array.size(innov_hist)
+    int n = math.min(hist_size, window)
+    if n < 20
+        min_Q
+    else
+        float sum_sq = 0.0
+        for i = hist_size - n to hist_size - 1
+            float v = array.get(innov_hist, i)
+            sum_sq += v * v
+        float C_v0 = sum_sq / n
+        float Q_est = current_K * C_v0 * current_K
+        math.max(min_Q, math.min(Q_est, max_Q))
+
+export f_update_percentile_cache(float te_osc, float mr_osc, float vec_osc, float corr_osc, float ltf_corr, float pred_slope, int window) =>
+    array<float> c = array.new<float>(16, na)
+    array.set(c, 0, ta.percentile_linear_interpolation(te_osc, window, 25))
+    array.set(c, 1, ta.percentile_linear_interpolation(te_osc, window, 75))
+    array.set(c, 2, ta.percentile_linear_interpolation(mr_osc, window, 2))
+    array.set(c, 3, ta.percentile_linear_interpolation(mr_osc, window, 25))
+    array.set(c, 4, ta.percentile_linear_interpolation(mr_osc, window, 75))
+    array.set(c, 5, ta.percentile_linear_interpolation(mr_osc, window, 98))
+    array.set(c, 6, ta.percentile_linear_interpolation(vec_osc, window, 25))
+    array.set(c, 7, ta.percentile_linear_interpolation(vec_osc, window, 75))
+    array.set(c, 8, ta.percentile_linear_interpolation(corr_osc, window, 20))
+    array.set(c, 9, ta.percentile_linear_interpolation(corr_osc, window, 80))
+    array.set(c, 10, ta.percentile_linear_interpolation(ltf_corr, window, 20))
+    array.set(c, 11, ta.percentile_linear_interpolation(ltf_corr, window, 80))
+    array.set(c, 12, ta.percentile_linear_interpolation(pred_slope, window, 25))
+    array.set(c, 13, ta.percentile_linear_interpolation(pred_slope, window, 75))
+    float mr_w = f_winsorize(mr_osc, nz(array.get(c, 2), -5.0), nz(array.get(c, 5), 5.0))
+    array.set(c, 14, ta.percentile_linear_interpolation(mr_w, window, 25))
+    array.set(c, 15, ta.percentile_linear_interpolation(mr_w, window, 75))
+    c
+
+export f_symbol_activity_1m(float s_timeClose_1m, bool s_inAnySess_1m, float fresh_secs) =>
+    float nowMs = barstate.isrealtime ? timenow : time_close
+    float ageMs = nowMs - s_timeClose_1m
+    bool fresh = ageMs <= fresh_secs * 1000.0
+    bool tradingNow = s_inAnySess_1m and fresh
+    bool exchangeClosed = not s_inAnySess_1m
+    bool sessionOpenButStale = s_inAnySess_1m and not fresh
+    [tradingNow, exchangeClosed, sessionOpenButStale]
+
+export f_is_trading_now(string sym, float fresh_secs) =>
+    float s_timeClose_1m = request.security(sym, "1", time_close, barmerge.gaps_off, barmerge.lookahead_off)
+    bool s_inAnySess_1m = request.security(sym, "1", session.ismarket or session.ispremarket or session.ispostmarket, barmerge.gaps_off, barmerge.lookahead_off)
+    f_symbol_activity_1m(s_timeClose_1m, s_inAnySess_1m, fresh_secs)
+
+export f_is_active_symbol(string sym, float fresh_secs) =>
+    [tradingNow, _, _] = f_is_trading_now(sym, fresh_secs)
+    tradingNow
+
+export f_status_icon(string sym, float fresh_secs) =>
+    [tradingNow, exchangeClosed, sessionOpenButStale] = f_is_trading_now(sym, fresh_secs)
+    tradingNow ? "🟢" : exchangeClosed ? "🔴" : sessionOpenButStale ? "🟠" : "🟠"
+
+export f_is_active_symbol(bool tradingNow) =>
+    tradingNow
+
+export f_symbol_status_icon(bool tradingNow, bool exchangeClosed, bool sessionOpenButStale) =>
+    tradingNow ? "🟢" : exchangeClosed ? "🔴" : sessionOpenButStale ? "🟠" : "🟠"
+
+export f_status_icon_from_1m(float s_timeClose_1m, bool s_inAnySess_1m, float fresh_secs) =>
+    [tradingNow, exchangeClosed, sessionOpenButStale] = f_symbol_activity_1m(s_timeClose_1m, s_inAnySess_1m, fresh_secs)
+    f_symbol_status_icon(tradingNow, exchangeClosed, sessionOpenButStale)
+
+// 
+//  DEBUGGING & LOGGING FUNCTIONS 
+// 
+
+// @function Creates formatted log snapshot with 5 labeled values
+// @param label1-5 String labels for each value
+// @param val1-5 Float values to be logged
+// @returns void (logs to console)
+export log_snapshot(string label1, float val1, string label2, float val2, string label3, float val3, string label4, float val4, string label5, float val5) =>
+    str1 = str.format("{0}={1}", label1, str.tostring(val1, "#.##"))
+    str2 = str.format("{0}={1}", label2, str.tostring(val2, "#.##"))
+    str3 = str.format("{0}={1}", label3, str.tostring(val3, "#.##"))
+    str4 = str.format("{0}={1}", label4, str.tostring(val4, "#.##"))
+    str5 = str.format("{0}={1}", label5, str.tostring(val5, "#.##"))
+    txt = str.format("Bar: {0} | {1}, {2}, {3}, {4}, {5}", bar_index, str1, str2, str3, str4, str5)
+    log.info(txt)
+
+export is_replay() =>
+    barstate.islast and (last_bar_index - bar_index > 0)
+
+export f_noop(float x) =>
+    x
+
+// @function Safe array access that prevents out-of-bounds errors
+// @param arr The array to access (float array)
+// @param index The index to access (can be negative or exceed array size)
+// @returns The value at the safe index, or 0.0 if array is empty
+export f_safeArrayGet(array<float> arr, int index) =>
+    int size = array.size(arr)
+    float sagresult = 0.0
+    if size > 0
+        int safeIndex = math.max(0, math.min(index, size - 1))
+        sagresult := array.get(arr, safeIndex)
+    sagresult
+
+// @function Safe array access for integer arrays
+// @param arr The array to access (int array)
+// @param index The index to access
+// @returns The value at the safe index, or 0 if array is empty
+export f_safeArrayGetInt(array<int> arr, int index) =>
+    int size = array.size(arr)
+    int sagresult = 0
+    if size > 0
+        int safeIndex = math.max(0, math.min(index, size - 1))
+        sagresult := array.get(arr, safeIndex)
+    sagresult
+
+// @function Safe array access for boolean arrays
+// @param arr The array to access (bool array)
+// @param index The index to access
+// @returns The value at the safe index, or false if array is empty
+export f_safeArrayGetBool(array<bool> arr, int index) =>
+    int size = array.size(arr)
+    bool sagresult = false
+    if size > 0
+        int safeIndex = math.max(0, math.min(index, size - 1))
+        sagresult := array.get(arr, safeIndex)
+    sagresult
+
+// @function Safe array access for string arrays
+// @param arr The array to access (string array)
+// @param index The index to access
+// @returns The value at the safe index, or empty string if array is empty
+export f_safeArrayGetString(array<string> arr, int index) =>
+    int size = array.size(arr)
+    string sagresult = ""
+    if size > 0
+        int safeIndex = math.max(0, math.min(index, size - 1))
+        sagresult := array.get(arr, safeIndex)
+    sagresult
+
+export f_getOrFloat(array<float> arr, int index, float defval) =>
+    int sz = array.size(arr)
+    (index >= 0 and index < sz) ? array.get(arr, index) : defval
+
+export f_getOrInt(array<int> arr, int index, int defval) =>
+    int sz = array.size(arr)
+    (index >= 0 and index < sz) ? array.get(arr, index) : defval
+
+export f_getOrBool(array<bool> arr, int index, bool defval) =>
+    int sz = array.size(arr)
+    (index >= 0 and index < sz) ? array.get(arr, index) : defval
+
+export f_getOrString(array<string> arr, int index, string defval) =>
+    int sz = array.size(arr)
+    (index >= 0 and index < sz) ? array.get(arr, index) : defval
+
+export f_clamp(float x, float lo, float hi) => math.max(lo, math.min(x, hi))
+
+// @function Hyperbolic tangent for soft symmetric clipping to [-1, 1]
+// @param x Input value
+// @returns tanh(x) bounded to [-1, 1]
+export f_tanh(float x) =>
+    float abs_x = math.abs(x)
+    if abs_x > 10.0
+        x > 0 ? 1.0 : -1.0
+    else if abs_x < 0.0001
+        x
+    else
+        float exp_pos = math.exp(math.min(x, 20.0))
+        float exp_neg = math.exp(math.min(-x, 20.0))
+        (exp_pos - exp_neg) / (exp_pos + exp_neg)
+
+// @function Sigmoid normalization to [0, 1] with configurable steepness
+// @param x Input value
+// @param steepness Steepness parameter (default 2.0)
+// @returns Sigmoid-normalized value in [0, 1]
+export f_sigmoid_norm(float x, float steepness = 2.0) =>
+    float sigmoid_x = x * steepness
+    1.0 / (1.0 + math.exp(-sigmoid_x))
+
+// @function IQR normalization using 25th and 75th percentiles
+// @param val Value to normalize
+// @param p25 25th percentile
+// @param p75 75th percentile
+// @returns IQR-normalized value
+export f_iqr_normalize(float val, float p25, float p75) =>
+    float iqr = math.max(p75 - p25, 1e-10)
+    (val - p25) / iqr
+
+// @function Tanh normalization for oscillator visual rendering
+// @param raw_z Raw z-score or oscillator value
+// @param y_offset Vertical offset (e.g., 0 for MR, -6 for TE/VEC/CORR/LTF)
+// @param steepness Tanh steepness (0.5 for MR, 1.5 for TE, 0.75 for VEC/CORR/LTF)
+// @param amplitude Visual amplitude (typically 3.0)
+// @returns Visually scaled oscillator value: offset + tanh(raw_z × steepness) × amplitude
+export f_tanh_norm(float raw_z, float y_offset, float steepness, float amplitude) =>
+    y_offset + f_tanh(raw_z * steepness) * amplitude
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUBPANE + OSCMETA MANAGEMENT FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// @function Layout subpanes: compute Y ranges with gap support
+// @param panes array<SubPane> to layout
+// @param panetop Top Y coordinate of entire oscillator area
+// @param panebottom Bottom Y coordinate of entire oscillator area
+// @param gappct Gap between subpanes as percentage of total range (e.g., 0.10 = 10%)
+export f_layout_subpanes(array<SubPane> panes, float panetop, float panebottom, float gappct) =>
+    int n = array.size(panes)
+    if n > 0
+        float totalrange = panetop - panebottom
+        float totalgap = n > 1 ? totalrange * gappct : 0.0
+        float gapsize = n > 1 ? totalgap / (n - 1) : 0.0
+        float subheight = (totalrange - totalgap) / n
+        for i = 0 to n - 1
+            SubPane sp = array.get(panes, i)
+            sp.ytop := panetop - i * (subheight + gapsize)
+            sp.ybottom := sp.ytop - subheight
+            sp.yoffset := (sp.ytop + sp.ybottom) / 2.0
+            sp.plotscale := subheight / 2.0
+            array.set(panes, i, sp)
+
+// @function Update subpane visibility: true if ANY child osc should_display
+// @param panes array<SubPane> to update
+// @param oscs array<OscMeta> children
+export f_update_visibility(array<SubPane> panes, array<OscMeta> oscs) =>
+    int np = array.size(panes)
+    if np > 0
+        for p = 0 to np - 1
+            SubPane sp = array.get(panes, p)
+            sp.visible := false
+            array.set(panes, p, sp)
+    int no = array.size(oscs)
+    if no > 0
+        for i = 0 to no - 1
+            OscMeta m = array.get(oscs, i)
+            if m.should_display and m.subpaneidx >= 0 and m.subpaneidx < np
+                SubPane sp = array.get(panes, m.subpaneidx)
+                sp.visible := true
+                array.set(panes, m.subpaneidx, sp)
+
+export f_manage_subpane_lines(array<SubPane> panes) =>
+    int n = array.size(panes)
+    if n > 0
+        for i = 0 to n - 1
+            SubPane sp = array.get(panes, i)
+            if not na(sp.hlinetop)
+                line.delete(sp.hlinetop)
+            if not na(sp.hlinebottom)
+                line.delete(sp.hlinebottom)
+            if not na(sp.hlinezero)
+                line.delete(sp.hlinezero)
+            
+            if sp.visible
+                sp.hlinetop := line.new(bar_index, sp.ytop, bar_index + 1, sp.ytop,color=sp.bordercolor, style=line.style_dotted, extend=extend.both)
+                sp.hlinebottom := line.new(bar_index, sp.ybottom, bar_index + 1, sp.ybottom,color=sp.bordercolor, style=line.style_dotted, extend=extend.both)
+                sp.hlinezero := line.new(bar_index, sp.yoffset, bar_index + 1, sp.yoffset,color=sp.zerocolor, style=line.style_dashed, extend=extend.both)
+            else
+                sp.hlinetop := na
+                sp.hlinebottom := na
+                sp.hlinezero := na
+            array.set(panes, i, sp)
+
+// @function Private: apply softclip to [-1, +1]
+// @param rawz Raw z-score value
+// @param method "tanh" | "sigmoid" | "clamp" | "none"
+// @param steep Steepness parameter
+// @param zlo Lower clip bound
+// @param zhi Upper clip bound
+// @returns Clipped value in [-1, +1]
+export f_apply_softclip(float rawz, string method, float steep, float zlo, float zhi) =>
+    switch method
+        "tanh" =>
+            float tx = rawz * steep
+            float ep = math.exp(math.min(tx, 20.0))
+            float en = math.exp(math.min(-tx, 20.0))
+            (ep - en) / (ep + en)
+        "sigmoid" =>
+            1.0 / (1.0 + math.exp(-rawz * steep)) * 2.0 - 1.0
+        "clamp" =>
+            float range2 = math.max(math.abs(zhi), math.abs(zlo), 1.0)
+            math.max(-1.0, math.min(1.0, rawz / range2))
+        => // "none"
+            float range2 = math.max(math.abs(zhi), math.abs(zlo), 1.0)
+            math.max(-1.0, math.min(1.0, rawz / range2))
+
+// @function Main per-bar manager: compute visualvalue and rawclipped for all oscs
+// @param panes array<SubPane> parent containers
+// @param oscs array<OscMeta> oscillators
+// @param states array<OscState> oscillator states (written)
+// @param rawvalues array<float> raw z-score values (same order as oscs)
+export f_manage_osc_values(array<SubPane> panes, array<OscMeta> oscs, array<OscState> states, array<float> rawvalues) =>
+    int n = math.min(array.size(oscs), array.size(rawvalues))
+    int npanes = array.size(panes)
+    if n > 0 and npanes > 0
+        for i = 0 to n - 1
+            OscMeta m = array.get(oscs, i)
+            OscState st = array.get(states, i)
+            float raw = array.get(rawvalues, i)
+            
+            // Get parent subpane (with bounds check)
+            int safe_idx = math.max(0, math.min(m.subpaneidx, npanes - 1))
+            SubPane sp = array.get(panes, safe_idx)
+            
+            // 1. Raw clip for kNN/MC
+            if m.clip_raw_value and not na(raw)
+                st.rawclipped := m.clip_method == "clamp" ?math.max(m.z_clip_lo, math.min(m.z_clip_hi, raw)) : raw
+            else
+                st.rawclipped := raw
+            
+            // 2. Visual value → mapped into parent subpane coordinates
+            if m.should_display and not na(raw)
+                float normed = f_apply_softclip(raw, m.clip_method,m.clip_steepness, m.z_clip_lo, m.z_clip_hi)
+                st.visualvalue := sp.yoffset + normed * sp.plotscale
+            else
+                st.visualvalue := na
+            
+            array.set(states, i, st)
+
+// @function Process oscillators: compute visualvalue and rawclipped for all oscs
+// @param panes array<SubPane> parent containers
+// @param oscs array<OscMeta> oscillator configs (read-only)
+// @param states array<OscState> oscillator states (written)
+// @param rawvalues array<float> raw z-score values (same order as oscs)
+export f_process_oscs(array<SubPane> panes, array<OscMeta> oscs, array<OscState> states, array<float> rawvalues) =>
+    int n = math.min(array.size(oscs), math.min(array.size(states), array.size(rawvalues)))
+    if n > 0
+        for i = 0 to n - 1
+            OscMeta m = array.get(oscs, i)
+            OscState st = array.get(states, i)
+            float raw = array.get(rawvalues, i)
+            st.rawvalue := raw
+            int pidx = math.max(0, math.min(m.subpaneidx, array.size(panes) - 1))
+            SubPane sp = array.get(panes, pidx)
+            if m.clip_raw_value and not na(raw)
+                st.rawclipped := m.clip_method == "clamp" ? math.max(m.z_clip_lo, math.min(m.z_clip_hi, raw)) : raw
+            else
+                st.rawclipped := raw
+            if m.should_display and not na(raw)
+                float normed = f_apply_softclip(raw, m.clip_method, m.clip_steepness, m.z_clip_lo, m.z_clip_hi)
+                st.visualvalue := sp.yoffset + normed * sp.plotscale
+            else
+                st.visualvalue := na
+            array.set(states, i, st)
+
+// @function Manage oscillator labels: render end-of-chart value labels
+// @param oscs array<OscMeta> oscillator configs (read-only)
+// @param states array<OscState> oscillator states (written)
+// @param labeloffset Horizontal offset for labels (e.g., 3)
+export f_manage_labels(array<OscMeta> oscs, array<OscState> states, int labeloffset) =>
+    int n = math.min(array.size(oscs), array.size(states))
+    if n > 0
+        for i = 0 to n - 1
+            OscMeta m = array.get(oscs, i)
+            OscState st = array.get(states, i)
+            if not na(st.lbl)
+                label.delete(st.lbl)
+                st.lbl := na
+            if m.should_display and not na(st.visualvalue)
+                st.tooltiptext := m.full_name + "\n" + m.explanation +"\nRaw: " + str.tostring(st.rawvalue, "#.####") +"\nClipped: " + str.tostring(st.rawclipped, "#.####")
+                color lcol = nz(st.rawvalue) >= 0 ? m.bull_color : m.bear_color
+                st.lbl := label.new(bar_index + labeloffset, st.visualvalue,m.id + ": " + str.tostring(st.rawvalue, "#.##"),color=color.new(color.black, 100),textcolor=lcol,style=label.style_label_left,size=size.small,tooltip=st.tooltiptext)
+            array.set(states, i, st)
+
+// @function Register oscillator: push OscMeta + blank OscState in one call
+// @param oscs array<OscMeta> to append to
+// @param states array<OscState> to append to
+export f_register_osc(array<OscMeta> oscs, array<OscState> states,
+     string id, string fullname, string explanation,
+     int subpaneidx, float zcliplo, float zcliphi,
+     string clipmethod, float clipsteepness, bool cliprawvalue,
+     bool enabled, bool shoulddisplay,
+     color bullcol, color bearcol) =>
+    array.push(oscs, OscMeta.new(id, fullname, explanation,subpaneidx, zcliplo, zcliphi,clipmethod, clipsteepness, cliprawvalue,enabled, shoulddisplay, bullcol, bearcol))
+    array.push(states, OscState.new(na, na, na, na, "", na, na))
+
+// @function Update overbought/oversold boundary lines for oscillators using line.new()
+// @param panes array<SubPane> parent containers
+// @param oscs array<OscMeta> oscillator configs
+// @param states array<OscState> oscillator states (written)
+// @param ob_values array<float> raw overbought values per oscillator (na = skip)
+// @param os_values array<float> raw oversold values per oscillator (na = skip)
+// @param ob_color Color for overbought line
+// @param os_color Color for oversold line
+export f_update_osc_ob_os_lines(array<SubPane> panes, array<OscMeta> oscs, array<OscState> states, array<float> ob_values, array<float> os_values, color ob_color, color os_color) =>
+    int n = math.min(array.size(oscs), array.size(states))
+    int npanes = array.size(panes)
+    if n > 0 and npanes > 0
+        for i = 0 to n - 1
+            OscMeta m = array.get(oscs, i)
+            OscState st = array.get(states, i)
+            int pidx = math.max(0, math.min(m.subpaneidx, npanes - 1))
+            SubPane sp = array.get(panes, pidx)
+            float ob_raw = f_getOrFloat(ob_values, i, na)
+            float os_raw = f_getOrFloat(os_values, i, na)
+
+            if not na(st.ob_line)
+                line.delete(st.ob_line)
+                st.ob_line := na
+            if not na(st.os_line)
+                line.delete(st.os_line)
+                st.os_line := na
+
+            if m.should_display and not na(ob_raw)
+                float ob_vis = sp.yoffset + f_apply_softclip(ob_raw, m.clip_method, m.clip_steepness, m.z_clip_lo, m.z_clip_hi) * sp.plotscale
+                st.ob_line := line.new(bar_index, ob_vis, bar_index + 1, ob_vis, color=ob_color, style=line.style_dashed, extend=extend.both, width=1)
+            if m.should_display and not na(os_raw)
+                float os_vis = sp.yoffset + f_apply_softclip(os_raw, m.clip_method, m.clip_steepness, m.z_clip_lo, m.z_clip_hi) * sp.plotscale
+                st.os_line := line.new(bar_index, os_vis, bar_index + 1, os_vis, color=os_color, style=line.style_dashed, extend=extend.both, width=1)
+
+            array.set(states, i, st)
+
+// @function Savitzky-Golay filter (21-bar window, 3rd order polynomial) - CAUSAL version
+// @param src Source series to smooth
+// @returns Smoothed value using causal SavGol-21-3 coefficients
+// @description Applies a 21-bar Savitzky-Golay filter with 3rd order polynomial fit.
+// Coefficients computed via least squares at k=0 (current bar). Sum = 1.0 for unity gain.
+// Returns unfiltered value for first 20 bars (warmup period).
+export f_savgol_21_3(float src) =>
+    bar_index < 20 ? src : 
+         src     *  0.1190 +
+         src[1]  *  0.1143 +
+         src[2]  *  0.1048 +
+         src[3]  *  0.0905 +
+         src[4]  *  0.0714 +
+         src[5]  *  0.0476 +
+         src[6]  *  0.0190 +
+         src[7]  * -0.0143 +
+         src[8]  * -0.0524 +
+         src[9]  * -0.0952 +
+         src[10] * -0.1429 +
+         src[11] * -0.1952 +
+         src[12] * -0.2381 +
+         src[13] * -0.2619 +
+         src[14] * -0.2619 +
+         src[15] * -0.2381 +
+         src[16] * -0.1905 +
+         src[17] * -0.1190 +
+         src[18] *  0.0000 +
+         src[19] *  0.1429 +
+         src[20] *  0.3333
+
+export f_tf_ms(string tf) => int(timeframe.in_seconds(tf) * 1000)
+
+export f_sess_part(string sess, bool want_start) =>
+    string[] parts = str.split(sess, "-")
+    want_start ? (array.size(parts) >= 1 ? array.get(parts, 0) : "0000") : (array.size(parts) >= 2 ? array.get(parts, 1) : "0000")
+
+export f_hhmm_to_h(string hhmm) => int(str.tonumber(str.substring(hhmm, 0, 2)))
+
+export f_hhmm_to_m(string hhmm) => int(str.tonumber(str.substring(hhmm, 2, 4)))
+
+export f_session_tz(string session_tz_sel) =>
+    switch session_tz_sel
+        "UTC-12" => "Etc/GMT+12"
+        "UTC-11" => "Etc/GMT+11"
+        "UTC-10" => "Etc/GMT+10"
+        "UTC-9" => "Etc/GMT+9"
+        "UTC-8" => "Etc/GMT+8"
+        "UTC-7" => "Etc/GMT+7"
+        "UTC-6" => "Etc/GMT+6"
+        "UTC-5" => "Etc/GMT+5"
+        "UTC-4" => "Etc/GMT+4"
+        "UTC-3" => "Etc/GMT+3"
+        "UTC-2" => "Etc/GMT+2"
+        "UTC-1" => "Etc/GMT+1"
+        "UTC+0" => "Etc/UTC"
+        "UTC+1" => "Etc/GMT-1"
+        "UTC+2" => "Etc/GMT-2"
+        "UTC+3" => "Etc/GMT-3"
+        "UTC+4" => "Etc/GMT-4"
+        "UTC+5" => "Etc/GMT-5"
+        "UTC+6" => "Etc/GMT-6"
+        "UTC+7" => "Etc/GMT-7"
+        "UTC+8" => "Etc/GMT-8"
+        "UTC+9" => "Etc/GMT-9"
+        "UTC+10" => "Etc/GMT-10"
+        "UTC+11" => "Etc/GMT-11"
+        "UTC+12" => "Etc/GMT-12"
+        => syminfo.timezone
+
+export f_find_key(array<int> keys, int key) =>
+    int pos = -1
+    int n = array.size(keys)
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(keys, i) == key
+                pos := i
+                break
+    pos
+
+export f_lower_bound(array<int> a, int x) =>
+    int lo = 0
+    int hi = array.size(a)
+    while lo < hi
+        int mid = int(math.floor((lo + hi) / 2))
+        int v = array.get(a, mid)
+        if v < x
+            lo := mid + 1
+        else
+            hi := mid
+    lo
+
+export f_upper_bound(array<int> a, int x) =>
+    int lo = 0
+    int hi = array.size(a)
+    while lo < hi
+        int mid = int(math.floor((lo + hi) / 2))
+        int v = array.get(a, mid)
+        if v <= x
+            lo := mid + 1
+        else
+            hi := mid
+    lo
+
+export f_find_key_sorted(array<int> keys, int key) =>
+    int pos = -1
+    int n = array.size(keys)
+    if n > 0
+        int i = f_lower_bound(keys, key)
+        if i >= 0 and i < n and array.get(keys, i) == key
+            pos := i
+    pos
+
+export f_map_add4(map<int, float> m1, map<int, float> m2, map<int, float> m3, map<int, float> m4, int k, float d1, float d2, float d3, float d4) =>
+    float p1 = map.contains(m1, k) ? map.get(m1, k) : 0.0
+    float p2 = map.contains(m2, k) ? map.get(m2, k) : 0.0
+    float p3 = map.contains(m3, k) ? map.get(m3, k) : 0.0
+    float p4 = map.contains(m4, k) ? map.get(m4, k) : 0.0
+    map.put(m1, k, p1 + d1)
+    map.put(m2, k, p2 + d2)
+    map.put(m3, k, p3 + d3)
+    map.put(m4, k, p4 + d4)
+
+export f_get_by_key(array<int> keys, array<float> vals, int key) =>
+    float out = 0.0
+    int mn = math.min(array.size(keys), array.size(vals))
+    if array.size(keys) > mn
+        for i = array.size(keys) - 1 to mn
+            array.remove(keys, i)
+    if array.size(vals) > mn
+        for i = array.size(vals) - 1 to mn
+            array.remove(vals, i)
+    int pos = f_find_key(keys, key)
+    out := pos >= 0 and pos < array.size(vals) ? array.get(vals, pos) : 0.0
+    out
+
+export f_add_to_map(array<int> keys, array<float> vals, int key, float delta) =>
+    int mn = math.min(array.size(keys), array.size(vals))
+    if array.size(keys) > mn
+        for i = array.size(keys) - 1 to mn
+            array.remove(keys, i)
+    if array.size(vals) > mn
+        for i = array.size(vals) - 1 to mn
+            array.remove(vals, i)
+    int pos = f_find_key(keys, key)
+    if pos < 0
+        array.push(keys, key)
+        array.push(vals, delta)
+    else if pos < array.size(vals)
+        array.set(vals, pos, array.get(vals, pos) + delta)
+    else
+        array.push(keys, key)
+        array.push(vals, delta)
+
+export f_add_to_map2(array<int> keys, array<float> vals1, array<float> vals2, int key, float d1, float d2) =>
+    int mn = math.min(array.size(keys), math.min(array.size(vals1), array.size(vals2)))
+    if array.size(keys) > mn
+        for i = array.size(keys) - 1 to mn
+            array.remove(keys, i)
+    if array.size(vals1) > mn
+        for i = array.size(vals1) - 1 to mn
+            array.remove(vals1, i)
+    if array.size(vals2) > mn
+        for i = array.size(vals2) - 1 to mn
+            array.remove(vals2, i)
+    int pos = f_find_key(keys, key)
+    if pos < 0
+        array.push(keys, key)
+        array.push(vals1, d1)
+        array.push(vals2, d2)
+    else if pos < array.size(vals1) and pos < array.size(vals2)
+        array.set(vals1, pos, array.get(vals1, pos) + d1)
+        array.set(vals2, pos, array.get(vals2, pos) + d2)
+    else
+        array.push(keys, key)
+        array.push(vals1, d1)
+        array.push(vals2, d2)
+
+export f_add_to_map3(array<int> keys, array<float> vals1, array<float> vals2, array<float> vals3, int key, float d1, float d2, float d3) =>
+    int mn = math.min(array.size(keys), math.min(array.size(vals1), math.min(array.size(vals2), array.size(vals3))))
+    if array.size(keys) > mn
+        for i = array.size(keys) - 1 to mn
+            array.remove(keys, i)
+    if array.size(vals1) > mn
+        for i = array.size(vals1) - 1 to mn
+            array.remove(vals1, i)
+    if array.size(vals2) > mn
+        for i = array.size(vals2) - 1 to mn
+            array.remove(vals2, i)
+    if array.size(vals3) > mn
+        for i = array.size(vals3) - 1 to mn
+            array.remove(vals3, i)
+    int pos = f_find_key(keys, key)
+    if pos < 0
+        array.push(keys, key)
+        array.push(vals1, d1)
+        array.push(vals2, d2)
+        array.push(vals3, d3)
+    else if pos < array.size(vals1) and pos < array.size(vals2) and pos < array.size(vals3)
+        array.set(vals1, pos, array.get(vals1, pos) + d1)
+        array.set(vals2, pos, array.get(vals2, pos) + d2)
+        array.set(vals3, pos, array.get(vals3, pos) + d3)
+    else
+        array.push(keys, key)
+        array.push(vals1, d1)
+        array.push(vals2, d2)
+        array.push(vals3, d3)
+
+export f_add_to_map4(array<int> keys, array<float> v1, array<float> v2, array<float> v3, array<float> v4, int key, float d1, float d2, float d3, float d4) =>
+    int mn = math.min(array.size(keys), math.min(array.size(v1), math.min(array.size(v2), math.min(array.size(v3), array.size(v4)))))
+    if array.size(keys) > mn
+        for i = array.size(keys) - 1 to mn
+            array.remove(keys, i)
+    if array.size(v1) > mn
+        for i = array.size(v1) - 1 to mn
+            array.remove(v1, i)
+    if array.size(v2) > mn
+        for i = array.size(v2) - 1 to mn
+            array.remove(v2, i)
+    if array.size(v3) > mn
+        for i = array.size(v3) - 1 to mn
+            array.remove(v3, i)
+    if array.size(v4) > mn
+        for i = array.size(v4) - 1 to mn
+            array.remove(v4, i)
+    int pos = f_find_key(keys, key)
+    if pos < 0
+        array.push(keys, key)
+        array.push(v1, d1)
+        array.push(v2, d2)
+        array.push(v3, d3)
+        array.push(v4, d4)
+    else if pos < array.size(v1) and pos < array.size(v2) and pos < array.size(v3) and pos < array.size(v4)
+        array.set(v1, pos, array.get(v1, pos) + d1)
+        array.set(v2, pos, array.get(v2, pos) + d2)
+        array.set(v3, pos, array.get(v3, pos) + d3)
+        array.set(v4, pos, array.get(v4, pos) + d4)
+    else
+        array.push(keys, key)
+        array.push(v1, d1)
+        array.push(v2, d2)
+        array.push(v3, d3)
+        array.push(v4, d4)
+
+export f_add_to_map2_sorted(array<int> keys, array<float> vals1, array<float> vals2, int key, float d1, float d2) =>
+    int nk = array.size(keys)
+    int n1 = array.size(vals1)
+    int n2 = array.size(vals2)
+    int mn = math.min(nk, math.min(n1, n2))
+    if nk > mn
+        for i = nk - 1 to mn
+            array.remove(keys, i)
+    if n1 > mn
+        for i = n1 - 1 to mn
+            array.remove(vals1, i)
+    if n2 > mn
+        for i = n2 - 1 to mn
+            array.remove(vals2, i)
+    if mn <= 0
+        array.push(keys, key)
+        array.push(vals1, d1)
+        array.push(vals2, d2)
+    else
+        int ins = f_lower_bound(keys, key)
+        bool exists = false
+        if ins >= 0 and ins < array.size(keys)
+            exists := array.get(keys, ins) == key
+        if exists and ins < array.size(vals1) and ins < array.size(vals2)
+            array.set(vals1, ins, array.get(vals1, ins) + d1)
+            array.set(vals2, ins, array.get(vals2, ins) + d2)
+        else
+            int ip = math.max(0, math.min(ins, array.size(keys)))
+            array.insert(keys, ip, key)
+            array.insert(vals1, ip, d1)
+            array.insert(vals2, ip, d2)
+
+export f_merge_row_vols_dual(array<int> in_rows, array<float> in_vols, array<int> out_keys, array<float> out_vol, array<float> out_tpo) =>
+    int n = math.min(array.size(in_rows), array.size(in_vols))
+    if n > 0
+        for i = 0 to n - 1
+            f_add_to_map2(out_keys, out_vol, out_tpo, array.get(in_rows, i), array.get(in_vols, i), 0.0)
+
+export f_prune_zero(array<int> keys, array<float> vals1, array<float> vals2) =>
+    int n = math.min(array.size(keys), math.min(array.size(vals1), array.size(vals2)))
+    if array.size(keys) > n
+        for i = array.size(keys) - 1 to n
+            array.remove(keys, i)
+    if array.size(vals1) > n
+        for i = array.size(vals1) - 1 to n
+            array.remove(vals1, i)
+    if array.size(vals2) > n
+        for i = array.size(vals2) - 1 to n
+            array.remove(vals2, i)
+    if n > 0
+        for i = n - 1 to 0
+            float v1 = array.get(vals1, i)
+            float v2 = array.get(vals2, i)
+            if v1 < 0
+                array.set(vals1, i, 0.0)
+                v1 := 0.0
+            if v2 < 0
+                array.set(vals2, i, 0.0)
+                v2 := 0.0
+            if v1 < 1e-8 and v2 < 1e-8
+                array.remove(keys, i)
+                array.remove(vals1, i)
+                array.remove(vals2, i)
+
+export f_prune_zero3(array<int> keys, array<float> vals1, array<float> vals2, array<float> vals3) =>
+    int n = math.min(array.size(keys), math.min(array.size(vals1), math.min(array.size(vals2), array.size(vals3))))
+    if array.size(keys) > n
+        for i = array.size(keys) - 1 to n
+            array.remove(keys, i)
+    if array.size(vals1) > n
+        for i = array.size(vals1) - 1 to n
+            array.remove(vals1, i)
+    if array.size(vals2) > n
+        for i = array.size(vals2) - 1 to n
+            array.remove(vals2, i)
+    if array.size(vals3) > n
+        for i = array.size(vals3) - 1 to n
+            array.remove(vals3, i)
+    if n > 0
+        for i = n - 1 to 0
+            float v1 = array.get(vals1, i)
+            float v2 = array.get(vals2, i)
+            float v3 = array.get(vals3, i)
+            if v1 < 0
+                array.set(vals1, i, 0.0)
+                v1 := 0.0
+            if v2 < 0
+                array.set(vals2, i, 0.0)
+                v2 := 0.0
+            if v3 < 0
+                array.set(vals3, i, 0.0)
+                v3 := 0.0
+            if v1 < 1e-8 and v2 < 1e-8 and v3 < 1e-8
+                array.remove(keys, i)
+                array.remove(vals1, i)
+                array.remove(vals2, i)
+                array.remove(vals3, i)
+
+export f_prune_zero4(array<int> keys, array<float> v1, array<float> v2, array<float> v3, array<float> v4) =>
+    int n = math.min(array.size(keys), math.min(array.size(v1), math.min(array.size(v2), math.min(array.size(v3), array.size(v4)))))
+    if array.size(keys) > n
+        for i = array.size(keys) - 1 to n
+            array.remove(keys, i)
+    if array.size(v1) > n
+        for i = array.size(v1) - 1 to n
+            array.remove(v1, i)
+    if array.size(v2) > n
+        for i = array.size(v2) - 1 to n
+            array.remove(v2, i)
+    if array.size(v3) > n
+        for i = array.size(v3) - 1 to n
+            array.remove(v3, i)
+    if array.size(v4) > n
+        for i = array.size(v4) - 1 to n
+            array.remove(v4, i)
+    if n > 0
+        for i = n - 1 to 0
+            float a = array.get(v1, i)
+            float b = array.get(v2, i)
+            float c = array.get(v3, i)
+            float d = array.get(v4, i)
+            if a < 0
+                array.set(v1, i, 0.0)
+                a := 0.0
+            if b < 0
+                array.set(v2, i, 0.0)
+                b := 0.0
+            if c < 0
+                array.set(v3, i, 0.0)
+                c := 0.0
+            if d < 0
+                array.set(v4, i, 0.0)
+                d := 0.0
+            if a < 1e-8 and b < 1e-8 and c < 1e-8 and d < 1e-8
+                array.remove(keys, i)
+                array.remove(v1, i)
+                array.remove(v2, i)
+                array.remove(v3, i)
+                array.remove(v4, i)
+
+export f_min_max_key(array<int> keys) =>
+    int mn = 0
+    int mx = 0
+    int n = array.size(keys)
+    if n > 0
+        mn := array.get(keys, 0)
+        mx := array.get(keys, 0)
+        if n > 1
+            for i = 1 to n - 1
+                int k = array.get(keys, i)
+                mn := math.min(mn, k)
+                mx := math.max(mx, k)
+    [mn, mx]
+
+export f_total(array<float> vals) =>
+    float s = 0.0
+    int n = array.size(vals)
+    if n > 0
+        for i = 0 to n - 1
+            s += array.get(vals, i)
+    s
+
+export f_push_limited(array<float> arr, float val, int max_size) =>
+    array.push(arr, nz(val))
+    if array.size(arr) > max_size
+        array.shift(arr)
+
+export f_tail(array<float> arr, int len) =>
+    array<float> result = array.new<float>()
+    int arr_size = array.size(arr)
+    int n = math.min(len, arr_size)
+    if n > 0
+        int start_idx = arr_size - n
+        for i = start_idx to arr_size - 1
+            array.push(result, array.get(arr, i))
+    result
+
+export f_symbol_base(string ticker_id) =>
+    string base_txt = str.substring(ticker_id, str.pos(ticker_id, ":") + 1)
+    if str.contains(base_txt, "USDT")
+        base_txt := str.replace(base_txt, "USDT", "")
+    else if str.contains(base_txt, "USD")
+        base_txt := str.replace(base_txt, "USD", "")
+    else if str.contains(base_txt, "PERP")
+        base_txt := str.replace(base_txt, "PERP", "")
+    else if str.contains(base_txt, ".P")
+        base_txt := str.replace(base_txt, ".P", "")
+    base_txt
+
+export f_array_mean_stdev_tail(array<float> arr, int len) =>
+    int arr_size = array.size(arr)
+    int n = math.min(len, arr_size)
+    float mean = 0.0
+    float stdev = 0.0
+    if n > 1
+        // Welford online algorithm: single pass, numerically stable
+        int start_idx = arr_size - n
+        float M2 = 0.0
+        for i = start_idx to arr_size - 1
+            float x = array.get(arr, i)
+            int cnt = i - start_idx + 1
+            float delta = x - mean
+            mean += delta / cnt
+            M2 += delta * (x - mean)
+        stdev := math.sqrt(M2 / math.max(1, n - 1))
+    [mean, stdev]
+
+export f_norm_cdf(float x) =>
+    float ax = math.abs(x)
+    float t = 1.0 / (1.0 + 0.2316419 * ax)
+    float d = 0.3989422804 * math.exp(-ax * ax / 2.0)
+    float p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.8212560 + t * 1.330274))))
+    x >= 0 ? 1.0 - p : p
+
+export f_kalman(float src, float gain) =>
+    var float k_est = na
+    var float k_err = 1.0
+    if na(k_est)
+        k_est := src
+        k_err := 1.0
+    else
+        k_err := math.max(0.1, k_err + gain)
+        float kalman_gain = k_err / (k_err + 1.0)
+        k_est := k_est + kalman_gain * (src - k_est)
+        k_err := (1.0 - kalman_gain) * k_err
+    k_est
+
+export f_kalman_control(float meas, float control, float reactivity) =>
+    var float x_est = na
+    var float P = 1.0
+    if na(x_est)
+        x_est := meas
+        P := 1.0
+    else
+        float x_pred = x_est + control * reactivity
+        float P_pred = P + 0.01
+        float K = P_pred / (P_pred + 0.1)
+        x_est := x_pred + K * (meas - x_pred)
+        P := (1.0 - K) * P_pred
+    x_est
+
+export f_kama(series float src, int len, int fast_len, int slow_len) =>
+    float change = math.abs(src - src[len])
+    float volatility = 0.0
+    for i = 0 to len - 1
+        volatility += math.abs(src[i] - src[i + 1])
+    float er = volatility > 0 ? change / volatility : 0.0
+    float fast_sc = 2.0 / (fast_len + 1.0)
+    float slow_sc = 2.0 / (slow_len + 1.0)
+    float sc = math.pow(er * (fast_sc - slow_sc) + slow_sc, 2)
+    var float kama = na
+    kama := na(kama[1]) ? src : kama[1] + sc * (src - kama[1])
+    kama
+
+export f_zscore_standard(series float src, int len) =>
+    float ma = ta.sma(src, len)
+    float dev = ta.stdev(src, len)
+    float z = dev == 0 ? 0 : (src - ma) / dev
+    [ma, z, dev]
+
+export f_corr_weighted_zscore(series float src_base, series float src_ext, int len, float corr_power) =>
+    float ma = ta.sma(src_ext, len)
+    float dev = ta.stdev(src_ext, len)
+    float z = dev == 0 ? 0 : (src_ext - ma) / dev
+    float corr = ta.correlation(src_base, src_ext, len)
+    float corr_weighted = math.pow(nz(corr, 0), corr_power)
+    z * corr_weighted
+
+f_cld_impl(series float corr_osc, series float price, float z_score, float slope_thresh, bool cld_enable, int cld_min_bars, int cld_max_bars, float cld_price_consist, float cld_z_min) =>
+    float best_signal = 0.0
+    float best_confidence = 0.0
+    int best_bars = 0
+    if cld_enable and bar_index > cld_max_bars * 2 + 10
+        for half_len = cld_min_bars to cld_max_bars
+            float sum_x1 = 0.0
+            float sum_y1 = 0.0
+            float sum_xy1 = 0.0
+            float sum_x21 = 0.0
+            int n1 = half_len
+            for i = 0 to half_len - 1
+                int bar_back = half_len + (half_len - 1 - i)
+                float x = float(i)
+                float y = nz(corr_osc[bar_back])
+                sum_x1 += x
+                sum_y1 += y
+                sum_xy1 += x * y
+                sum_x21 += x * x
+            float denom1 = n1 * sum_x21 - sum_x1 * sum_x1
+            float slope1 = denom1 != 0 ? (n1 * sum_xy1 - sum_x1 * sum_y1) / denom1 : 0.0
+            float sum_x2 = 0.0
+            float sum_y2 = 0.0
+            float sum_xy2 = 0.0
+            float sum_x22 = 0.0
+            int n2 = half_len
+            for i = 0 to half_len - 1
+                int bar_back = half_len - 1 - i
+                float x = float(i)
+                float y = nz(corr_osc[bar_back])
+                sum_x2 += x
+                sum_y2 += y
+                sum_xy2 += x * y
+                sum_x22 += x * x
+            float denom2 = n2 * sum_x22 - sum_x2 * sum_x2
+            float slope2 = denom2 != 0 ? (n2 * sum_xy2 - sum_x2 * sum_y2) / denom2 : 0.0
+            float price_start = nz(price[2 * half_len - 1])
+            float price_end = price
+            float total_move = price_end - price_start
+            int agreeing = 0
+            int total_bars_check = 2 * half_len - 1
+            for i = 0 to total_bars_check - 1
+                float bar_move = nz(price[total_bars_check - 1 - i]) - nz(price[total_bars_check - i])
+                agreeing += (math.sign(bar_move) == math.sign(total_move)) ? 1 : 0
+            float consistency = total_bars_check > 0 ? float(agreeing) / float(total_bars_check) : 0.0
+            bool has_direction = consistency >= (cld_price_consist * 0.7) and math.abs(total_move) > 0
+            bool has_z_stretch = math.abs(z_score) >= (cld_z_min * 0.5)
+            bool slope1_rising = slope1 > slope_thresh
+            bool slope1_falling = slope1 < -slope_thresh
+            bool slope2_rising = slope2 > slope_thresh
+            bool slope2_falling = slope2 < -slope_thresh
+            float this_signal = 0.0
+            if has_direction and has_z_stretch
+                if slope1_falling and slope2_rising
+                    this_signal := 1.0
+                else if slope1_rising and slope2_falling
+                    this_signal := -1.0
+            if this_signal != 0
+                float slope_strength = (math.abs(slope1) + math.abs(slope2)) / 2.0
+                float slope_conf = math.min(slope_strength / 0.25, 1.0)
+                float z_conf = math.min(math.abs(z_score) / 2.0, 1.0)
+                float consist_conf = math.max(0, (consistency - cld_price_consist) / (0.85 - cld_price_consist))
+                float asym = math.abs(slope1 - slope2) / math.max(math.abs(slope1) + math.abs(slope2), 0.001)
+                float conf = (slope_conf * 0.35 + z_conf * 0.30 + consist_conf * 0.20 + asym * 0.15)
+                if conf > best_confidence
+                    best_signal := this_signal
+                    best_confidence := conf
+                    best_bars := 2 * half_len
+                    // Early exit: stop searching when high confidence divergence found (~60% fewer iterations)
+                    if conf > 0.70
+                        break
+    [best_signal, best_confidence, best_bars]
+
+export f_cld(series float corr_osc, series float price, float z_score, float slope_thresh, bool cld_enable, int cld_min_bars, int cld_max_bars, float cld_price_consist, float cld_z_min) =>
+    f_cld_impl(corr_osc, price, z_score, slope_thresh, cld_enable, cld_min_bars, cld_max_bars, cld_price_consist, cld_z_min)
+
+export f_calc_survival_bands(float basis, float dev, float shift_z, float prob_pct, float mr_shift=0.0) =>
+    float prob = prob_pct / 100.0
+    float combined_shift = shift_z - mr_shift
+    float _exp_pos = math.exp(math.min(combined_shift, 20.0))
+    float _exp_neg = math.exp(math.min(-combined_shift, 20.0))
+    float bound_shift = (_exp_pos - _exp_neg) / (_exp_pos + _exp_neg)
+    float adj_prob_upper = prob * math.exp(-bound_shift * 0.693)
+    float adj_prob_lower = prob * math.exp(bound_shift * 0.693)
+    adj_prob_upper := math.max(0.0001, math.min(adj_prob_upper, 0.5))
+    adj_prob_lower := math.max(0.0001, math.min(adj_prob_lower, 0.5))
+    float z_upper = math.sqrt(-2.0 * math.log(adj_prob_upper))
+    float z_lower = math.sqrt(-2.0 * math.log(adj_prob_lower))
+    float band_upper = basis + (z_upper * dev)
+    float band_lower = basis - (z_lower * dev)
+    [band_upper, band_lower]
+
+// 
+//  TIMEFRAME NAVIGATION FUNCTIONS
+// 
+
+// Define ordered list of supported timeframes
+var const_timeframes = array.from("15S", "45S", "1", "3", "5", "15", "30", "60", "240", "D", "W", "M")
+
+// @function Gets next higher timeframe(s) from current
+// @param tf Current timeframe string
+// @param steps "1 TF Higher" for next TF, any other value for 2 TFs higher
+// @returns Next timeframe string or na if at maximum
+export f_get_next_tf(string tf, string steps) =>
+    // Define timeframes array inside the function
+    const_timeframes = array.from("15S", "45S", "1", "3", "5", "15", "30", "60", "240", "D", "W", "M")
+    idx = array.indexof(const_timeframes, tf)
+    if idx == -1
+        na
+    else
+        steps == "1 TF Higher" ? array.get(const_timeframes, math.min(idx + 1, array.size(const_timeframes) - 1)) : array.get(const_timeframes, math.min(idx + 2, array.size(const_timeframes) - 1))
+
+// @function Gets previous lower timeframe from current
+// @param tf Current timeframe string
+// @returns Previous timeframe string or na if at minimum
+export f_get_prev_tf(string tf) =>
+    // Custom lower TF mapping needed by this workspace
+    string out = na
+    if tf == "30"
+        out := "5"
+    else if tf == "5"
+        out := "1"
+    else if tf == "3"
+        out := "45S"
+    else if tf == "1"
+        out := "15S"
+    else
+        // Fallback to generic list
+        const_timeframes = array.from("15S", "45S", "1", "3", "5", "15", "30", "60", "240", "D", "W", "M")
+        idx = array.indexof(const_timeframes, tf)
+        out := idx > 0 ? array.get(const_timeframes, idx - 1) : na
+    out
+
+// @function Calculate percentile-based slope score with optional tanh transformation
+// @param dema_momentums Series of DEMA momentum values
+// @param lookback_bars Number of bars to look back for slope calculation
+// @param percentile_period Period for percentile calculation
+// @param percentile_margin Margin for percentile boundaries (e.g., 5 for 5th and 95th percentiles)
+// @param tanh_strength Strength of tanh transformation (0 for linear, >0 for curved response)
+// @returns Score between -1 and 1 based on percentile position with optional tanh emphasis
+export calculateSlopeScore(series float dema_momentums, int lookback_bars, int percentile_period, float percentile_margin, float tanh_strength) =>
+    // Clamp percentile period to bar_index to prevent history referencing errors
+    safe_percentile_period = int(math.max(1, math.min(math.max(0, bar_index - 10), percentile_period)))
+    
+    slope = dema_momentums - nz(dema_momentums[lookback_bars], dema_momentums)
+    max_bars_back(slope, 4500)
+    low_pct = ta.percentile_nearest_rank(slope, safe_percentile_period, percentile_margin)
+    high_pct = ta.percentile_nearest_rank(slope, safe_percentile_period, 100 - percentile_margin)
+    linear_score = high_pct != low_pct ? math.max(-1, math.min(1, (slope - low_pct) / (high_pct - low_pct) * 2 - 1)) : 0.0
+    e = 2.71828182845904523536
+    tanh_x = tanh_strength > 0 ? linear_score * tanh_strength : linear_score
+    abs_x = math.abs(tanh_x)
+    tanh_result = abs_x > 10 ? (tanh_x > 0 ? 1.0 : -1.0) : (abs_x < 0.0001 ? tanh_x : (math.pow(e, 2 * tanh_x) - 1) / (math.pow(e, 2 * tanh_x) + 1))
+    score = tanh_strength > 0 ? tanh_result : linear_score
+    bar_index >= safe_percentile_period ? score : na
+
+
+// 
+//  SMOOTHING & FILTERING FUNCTIONS
+// 
+
+// @function Ehler's SuperSmoother - low-lag smoothing filter
+// @param _src Source series to smooth
+// @param _length Smoothing period
+// @returns Smoothed series
+export supersmoother(series float _src, simple int _length) =>
+    s_a1 = math.exp(-math.sqrt(2) * math.pi / _length)
+    s_b1 = 2 * s_a1 * math.cos(math.sqrt(2) * math.pi / _length)
+    s_c3 = -math.pow(s_a1, 2)
+    s_c2 = s_b1
+    s_c1 = 1 - s_c2 - s_c3
+    ss = 0.0
+    ss := s_c1 * _src + s_c2 * nz(ss[1], _src[1]) + s_c3 * nz(ss[2], _src[2])
+
+// @function Butterworth filter for ultra-smooth price filtering
+// @param src Source series
+// @param len Filter period
+// @returns Butterworth smoothed series
+export butter_smooth(series float src, simple int len) =>
+    butter_pi = 2 * math.asin(1)
+    butter_cycle = 2 * butter_pi / len
+    butter_beta = 2.415 * (1 - math.cos(butter_cycle))
+    butter_alpha = -butter_beta + math.sqrt(butter_beta * butter_beta + 2 * butter_beta)
+    butter_c0 = butter_alpha * butter_alpha / 4
+    butter_b0 = 1.0
+    butter_b1 = 2.0
+    butter_b2 = 1.0
+    butter_a1 = 2 * (1 - butter_alpha)
+    butter_a2 = -(1 - butter_alpha) * (1 - butter_alpha)
+    butter_out = 0.0
+    butter_out := (butter_c0 * ((butter_b0 * src) + (butter_b1 * nz(src[1])) + (butter_b2 * nz(src[2])))) + (butter_a1 * nz(butter_out[1])) + (butter_a2 * nz(butter_out[2]))
+
+// @function Dynamic EMA with variable length
+// @param source Source series
+// @param dynamic_length Dynamic period (can vary bar to bar)
+// @returns Dynamically adjusted EMA
+export f_dynamic_ema(series float source, series float dynamic_length) =>
+    var float dyn_ema = na
+    alpha = 2.0 / (dynamic_length + 1)
+    dyn_ema := na(dyn_ema[1]) ? source : alpha * source + (1 - alpha) * dyn_ema[1]
+    dyn_ema
+
+
+// @function Dynamic SMA (series period)
+// @param src The input series
+// @param dynamic_len Series-type window length for SMA (must be >=1)
+// @returns SMA with dynamic window length
+export f_dynamic_sma(series float src, series float dynamic_len) =>
+    float val = na, sum = 0.0
+    llen = math.max(1, int(dynamic_len))
+    if bar_index >= llen - 1
+        for i = 0 to llen - 1
+            sum += nz(src[i])
+        val := sum / llen
+    val
+
+// @function Dynamic Standard Deviation (series period)
+// @param src The input series
+// @param dynamic_len Series-type window length for StdDev (must be >=2)
+// @returns Stdev with dynamic window length
+export f_dynamic_stdev(series float src, series float dynamic_len) =>
+    float std = na
+    llen = math.max(2, int(dynamic_len))
+    if bar_index >= llen - 1
+        mean = f_dynamic_sma(src, llen)
+        sumsq = 0.0
+        for i = 0 to llen - 1
+            sumsq += math.pow(nz(src[i]) - mean, 2)
+        std := math.sqrt(sumsq / (llen - 1))
+    std
+
+// @function Double Exponential Moving Average (DEMA)
+// @param source Source series
+// @param length Period for DEMA calculation
+// @returns DEMA value
+export dema(series float source, simple int length) =>
+    ema1 = ta.ema(source, length)
+    ema2 = ta.ema(ema1, length)
+    2 * ema1 - ema2
+
+// 
+//  SCALING & NORMALIZATION FUNCTIONS
+// 
+
+// @function Scales secondary line to match primary line using percentile ranges
+// @param primary_line Reference series for target scale
+// @param secondary_line Series to be scaled
+// @param lookback Lookback bars for percentile calculation
+// @param percentile Percentile value (e.g., 5 for 5th and 95th percentiles)
+// @param chart_level Base chart level offset
+// @returns Scaled version of secondary_line
+export f_scale_percentile(series float primary_line, series float secondary_line, int lookback, float percentile, float chart_level) =>
+    // Clamp lookback to bar_index to prevent history referencing errors
+    safe_lookback = int(math.max(1, math.min(math.max(0, bar_index - 20), lookback)))
+    
+    max_bars_back(primary_line, 4500)
+    max_bars_back(secondary_line, 4500)
+
+    if bar_index < safe_lookback
+        secondary_line + chart_level
+    else
+        primary_p90 = ta.percentile_nearest_rank(primary_line, safe_lookback, 100-percentile)
+        primary_p10 = ta.percentile_nearest_rank(primary_line, safe_lookback, percentile)
+        primary_range = primary_p90 - primary_p10
+        
+        secondary_p90 = ta.percentile_nearest_rank(secondary_line, safe_lookback, 100-percentile)
+        secondary_p10 = ta.percentile_nearest_rank(secondary_line, safe_lookback, percentile)
+        secondary_range = secondary_p90 - secondary_p10
+        
+        scale_coef = secondary_range != 0 ? primary_range / secondary_range : 1
+        scaled_line = secondary_line * scale_coef + chart_level
+        scaled_line
+
+// @function Calculates Bollinger Bands with chart level offset
+// @param src Source series
+// @param length MA period
+// @param mult Standard deviation multiplier
+// @param chartlevel Vertical offset for plotting
+// @returns [upper, lower, basis] tuple
+export getBB(series float src, simple int length, simple float mult, simple float chartlevel) =>
+    basis = ta.sma(src, length)
+    dev = ta.stdev(src, length)
+    upper = chartlevel + basis + mult * dev
+    lower = chartlevel + basis - mult * dev
+    [upper, lower, basis]
+
+// @function Mean Reversion Channel with multiple bands and conditions
+// @param source Price source
+// @param length Channel period
+// @param mult First band multiplier
+// @param mult2 Second band multiplier
+// @param gradsize Gradient size for zone detection
+// @returns [meanline, meanrange, upband1, loband1, upband2, loband2, condition]
+export get_mrc(series float source, simple int length, simple float mult, simple float mult2, simple float gradsize) =>
+
+    tr = ta.tr
+    v_condition = 0
+    v_meanline = supersmoother(source, length)
+    v_meanrange = supersmoother(tr, length)
+    
+    v_upband1 = v_meanline + (v_meanrange * mult)
+    v_loband1 = v_meanline - (v_meanrange * mult)
+    v_upband2 = v_meanline + (v_meanrange * mult2)
+    v_loband2 = v_meanline - (v_meanrange * mult2)
+    
+    if(close > v_meanline)
+        v_upband2_1 = v_upband2 + (v_meanrange * gradsize * 4)
+        v_upband2_9 = v_upband2 + (v_meanrange * gradsize * -4)
+        if(high >= v_upband2_9 and high < v_upband2)
+            v_condition := 1
+        else if(high >= v_upband2 and high < v_upband2_1)
+            v_condition := 2
+        else if(high >= v_upband2_1)
+            v_condition := 3
+        else if(close <= v_meanline + v_meanrange)
+            v_condition := 4
+        else
+            v_condition := 5
+    
+    if(close < v_meanline)
+        v_loband2_1 = v_loband2 - (v_meanrange * gradsize * 4)
+        v_loband2_9 = v_loband2 - (v_meanrange * gradsize * -4)
+        if(low <= v_loband2_9 and low > v_loband2)
+            v_condition := -1
+        else if(low <= v_loband2 and low > v_loband2_1)
+            v_condition := -2
+        else if(low <= v_loband2_1)
+            v_condition := -3
+        else if(close >= v_meanline + v_meanrange)
+            v_condition := -4
+        else
+            v_condition := -5
+            
+    [v_meanline, v_meanrange, v_upband1, v_loband1, v_upband2, v_loband2, v_condition]
+
+// 
+//  MARKET STRUCTURE ANALYSIS
+// 
+
+// @function Analyzes market structure for ChoCH and BOS patterns
+// @param highFractalBars Array of high fractal bar indices
+// @param highFractalPrices Array of high fractal prices
+// @param lowFractalBars Array of low fractal bar indices
+// @param lowFractalPrices Array of low fractal prices
+// @param trendDirection Current trend (1=up, -1=down, 0=neutral)
+// @returns [choch, bos, newTrend] - change signals and new trend direction
+export analyzeMarketStructure(array<int> highFractalBars, array<float> highFractalPrices, 
+                             array<int> lowFractalBars, array<float> lowFractalPrices, 
+                             int trendDirection) =>
+    choch = false
+    bos = false
+    newTrend = trendDirection
+    
+    if array.size(highFractalBars) >= 2 and array.size(lowFractalBars) >= 2
+        lastHigh1 = array.get(highFractalPrices, array.size(highFractalPrices) - 1)
+        lastHigh2 = array.get(highFractalPrices, array.size(highFractalPrices) - 2)
+        lastLow1 = array.get(lowFractalPrices, array.size(lowFractalPrices) - 1)
+        lastLow2 = array.get(lowFractalPrices, array.size(lowFractalPrices) - 2)
+        
+        lastHighBar1 = array.get(highFractalBars, array.size(highFractalBars) - 1)
+        lastLowBar1 = array.get(lowFractalBars, array.size(lowFractalBars) - 1)
+        
+        higherHigh = lastHigh1 > lastHigh2
+        higherLow = lastLow1 > lastLow2
+        lowerHigh = lastHigh1 < lastHigh2
+        lowerLow = lastLow1 < lastLow2
+        
+        // BOS - Break of Structure
+        if trendDirection == 1 and higherHigh and high > lastHigh1
+            bos := true
+            newTrend := 1
+        else if trendDirection == -1 and lowerLow and low < lastLow1
+            bos := true
+            newTrend := -1
+        
+        // ChoCH - Change of Character
+        if trendDirection == 1 and low < lastLow1 and lastLowBar1 > lastHighBar1
+            choch := true
+            newTrend := -1
+        else if trendDirection == -1 and high > lastHigh1 and lastHighBar1 > lastLowBar1
+            choch := true
+            newTrend := 1
+        else if trendDirection == 0
+            if higherHigh and higherLow
+                newTrend := 1
+            else if lowerHigh and lowerLow
+                newTrend := -1
+    
+    [choch, bos, newTrend]
+
+// @function Enhanced function to get the true sweep range for fractals
+// @param fractalBar Bar index of the current fractal
+// @param fractalPrice Price of the current fractal (high for bearish, low for bullish)
+// @param isFractalHigh True if current fractal is a HIGH fractal, false for LOW
+// @param prevFractalBar Bar index of the previous fractal
+// @param prevFractalPrice Price of the previous fractal
+// @param prevFractalWasHigh True if previous fractal was a HIGH fractal
+// @returns [rangeHigh, rangeLow] tuple representing sweep range boundaries
+export getfractalSweepRange(int fractalBar, float fractalPrice, bool isFractalHigh, int prevFractalBar, bool prevFractalWasHigh) => //float prevFractalPrice,
+    float rangeHigh = na
+    float rangeLow = na
+
+    if isFractalHigh  // Current is a HIGH fractal
+        // For high fractals, we need the LOWEST point for sweep range
+
+        // Option 1: If previous was a LOW fractal, use its low
+        float prevFractalLow = na
+        if not na(prevFractalBar) and not prevFractalWasHigh
+            bars_ago = bar_index - prevFractalBar
+            if bars_ago >= 0 and bars_ago < bar_index
+                prevFractalLow := low[bars_ago]
+
+        // Option 2: Get lowest low from the 5 bars of current fractal
+        float fractalStructureLow = fractalPrice
+        fractal_bars_ago = bar_index - fractalBar
+
+        // Check the fractal bar and 2 bars on each side
+        for i = -2 to 2
+            check_bars_ago = fractal_bars_ago + i
+            if check_bars_ago >= 0 and check_bars_ago < bar_index
+                fractalStructureLow := math.min(fractalStructureLow, low[check_bars_ago])
+
+        // Use the lower of the two options
+        rangeLow := na(prevFractalLow) ? fractalStructureLow : math.min(prevFractalLow, fractalStructureLow)
+        rangeHigh := fractalPrice
+
+    else  // Current is a LOW fractal
+        // For low fractals, we need the HIGHEST point for sweep range
+
+        // Option 1: If previous was a HIGH fractal, use its high
+        float prevFractalHigh = na
+        if not na(prevFractalBar) and prevFractalWasHigh
+            bars_ago = bar_index - prevFractalBar
+            if bars_ago >= 0 and bars_ago < bar_index
+                prevFractalHigh := high[bars_ago]
+
+        // Option 2: Get highest high from the 5 bars of current fractal
+        float fractalStructureHigh = fractalPrice
+        fractal_bars_ago = bar_index - fractalBar
+
+        // Check the fractal bar and 2 bars on each side
+        for i = -2 to 2
+            check_bars_ago = fractal_bars_ago + i
+            if check_bars_ago >= 0 and check_bars_ago < bar_index
+                fractalStructureHigh := math.max(fractalStructureHigh, high[check_bars_ago])
+
+        // Use the higher of the two options
+        rangeHigh := na(prevFractalHigh) ? fractalStructureHigh : math.max(prevFractalHigh, fractalStructureHigh)
+        rangeLow := fractalPrice
+
+    [rangeHigh, rangeLow]
+
+
+// ADD TO LIBRARY - Pure scaling helper, no selection logic
+// @function Scales and offsets a series for subchart plotting using existing f_scale_percentile
+// @param primary_line Reference series for scaling
+// @param secondary_line Series to be scaled  
+// @param lookback Lookback period for percentile
+// @param percentile Percentile value (e.g., 8 for 8th/92nd)
+// @param chart_level Base chart level offset
+// @param offset_value Additional offset from chart level
+// @param offset_is_percent If true, offset_value is % of primary range
+// @returns Scaled and offset series ready for plotting
+export scale_for_subchart(series float primary_line, series float secondary_line, 
+                          int lookback, float percentile, float chart_level,
+                          float offset_value, bool offset_is_percent) =>
+    
+    // Use existing f_scale_percentile for base scaling
+    scaled = f_scale_percentile(primary_line, secondary_line, lookback, percentile, chart_level)
+    
+    // Apply additional offset if needed
+    if offset_value != 0
+        if offset_is_percent
+            // Clamp lookback to bar_index
+            safe_lookback = int(math.max(1, math.min(math.max(0, bar_index - 10), lookback)))
+            
+            max_bars_back(primary_line, 4500)
+            
+            primary_p90 = ta.percentile_nearest_rank(primary_line, safe_lookback, 100 - percentile)
+            primary_p10 = ta.percentile_nearest_rank(primary_line, safe_lookback, percentile)
+            primary_range = primary_p90 - primary_p10
+            scaled := scaled + (primary_range * offset_value / 100)
+        else
+            scaled := scaled + offset_value
+    
+    scaled
+
+
+// @function Checks if price crosses through correlation/pivot lines and counts touches
+// @param pivot_bars Array of pivot bar indices
+// @param pivot_prices Array of pivot prices  
+// @param pivot_strengths Array of pivot strengths/scores
+// @param current_bar Current bar index being checked
+// @param current_price Current price level
+// @param is_high True if checking high pivots, false for lows
+// @param max_age Maximum age of pivots to check
+// @param max_touches Maximum touches before pivot expires
+// @returns [bullish_score, bearish_score, touch_count, touched_pivots_string, crossed_price]
+export check_pivot_crossings(array<int> pivot_bars, array<float> pivot_prices, array<float> pivot_strengths, int current_bar, float current_price, bool is_high, int max_age, int max_touches) =>
+    
+    float bullish_score = 0.0
+    float bearish_score = 0.0
+    int touch_count = 0
+    string touched_pivots = ""
+    float crossed_price = na
+    
+    if array.size(pivot_bars) == 0
+        [bullish_score, bearish_score, touch_count, touched_pivots, crossed_price]
+    else
+        // Arrays to track touches per pivot
+        var array<int> pivot_touch_counts = array.new<int>()
+        
+        // Ensure touch count array matches pivot arrays
+        while array.size(pivot_touch_counts) < array.size(pivot_bars)
+            array.push(pivot_touch_counts, 0)
+        
+        // Check each pivot for crossings
+        for i = 0 to math.min(array.size(pivot_bars) - 1, 100)
+            pivot_bar = array.get(pivot_bars, i)
+            pivot_price = array.get(pivot_prices, i) 
+            pivot_strength = array.size(pivot_strengths) > i ? array.get(pivot_strengths, i) : 1.0
+            
+            // Skip if pivot too old
+            if current_bar - pivot_bar > max_age
+                continue
+            
+            // Get current touch count
+            current_touches = array.get(pivot_touch_counts, i)
+            
+            // Skip if max touches exceeded
+            if current_touches >= max_touches
+                continue
+            
+            // Check for crossing
+            crossed = false
+            if is_high  // Resistance line
+                if current_price >= pivot_price and current_price[1] < pivot_price
+                    crossed := true
+                    bullish_score += pivot_strength
+            else  // Support line
+                if current_price <= pivot_price and current_price[1] > pivot_price
+                    crossed := true
+                    bearish_score += pivot_strength
+            
+            // Update touch count if crossed
+            if crossed
+                array.set(pivot_touch_counts, i, current_touches + 1)
+                touch_count += 1
+                crossed_price := pivot_price
+                
+                // Build touched pivots string
+                if touched_pivots != ""
+                    touched_pivots += ", "
+                touched_pivots += str.tostring(pivot_bar) + ":" + str.tostring(math.round(pivot_strength, 2))
+        
+        [bullish_score, bearish_score, touch_count, touched_pivots, crossed_price]
+
+
+// ======================================
+// UNIVERSAL TOOLTIP CREATION FUNCTION
+// ======================================
+
+// @function Universal tooltip builder that formats structured data into tooltip text
+// @param title Main tooltip title
+// @param title_icon Unicode icon for the main title
+// @param section_titles Array of section titles
+// @param section_icons Array of section unicode icons
+// @param param_names Array of parameter names (use "|" to separate sections)
+// @param param_values Array of parameter values (parallel to param_names)
+// @param param_icons Array of parameter icons (parallel to param_names)
+// @param use_dividers Whether to add dividers between sections
+// @returns Formatted tooltip string
+export create_tooltip(string title, string title_icon,
+                     array<string> section_titles, array<string> section_icons,
+                     array<string> param_names, array<float> param_values, array<string> param_icons,
+                     bool use_dividers) =>
+    
+    // Start with main title
+    tooltip = title_icon + " " + title + "\n"//
+    
+    // Track current parameter index
+    param_index = 0
+    
+    // Process each section
+    for s = 0 to array.size(section_titles) - 1
+        // Add divider if needed (not before first section)
+        if use_dividers and s > 0
+            tooltip := tooltip + "━━━━━━━━━━━━━━━\n"
+        
+        // Add section header
+        section_title = array.get(section_titles, s)
+        section_icon = s < array.size(section_icons) ? array.get(section_icons, s) : ""
+        
+        if section_title != ""
+            tooltip := tooltip + "\n" + section_icon + " " + section_title + "\n"
+        
+        // Add parameters for this section (until we hit a delimiter or end)
+        while param_index < array.size(param_names)
+            param_name = array.get(param_names, param_index)
+            
+            // Check if this is a section delimiter
+            if param_name == "|"
+                param_index += 1
+                break  // Move to next section
+            
+            // Get parameter details
+            param_value = param_index < array.size(param_values) ? array.get(param_values, param_index) : na
+            param_icon = param_index < array.size(param_icons) ? array.get(param_icons, param_index) : "  •"
+            
+            // Format the parameter line
+            value_str = na(param_value) ? "N/A" : str.tostring(param_value, "#.##")
+            tooltip := tooltip + param_icon + " " + param_name + ": " + value_str + "\n"
+            
+            param_index += 1
+    
+    tooltip
+
+export f_zscore(series float sourceValue, series int lookbackPeriod, simple int smoothingLength = 0) =>
+    int lookback = int(math.max(2, math.min(math.max(0, bar_index - 10), math.min(int(lookbackPeriod), 4999))))
+    series float smoothedValue = smoothingLength > 0 ? ta.ema(sourceValue, smoothingLength) : sourceValue
+    max_bars_back(smoothedValue, 4500)
+    float mean = ta.sma(smoothedValue, lookback)
+    float stdev = ta.stdev(smoothedValue, lookback)
+    stdev > 0 ? (smoothedValue - mean) / stdev : 0.0
+
+export getNormalizedCoefficientNoClamp(series float sourceValue, series int lookbackPeriod, float percentileMargin = 5.0, simple int smoothingLength = 0, bool useZScore = false, bool oneRange = false) =>
+    int lookback = int(math.max(1, math.min(math.max(0, bar_index - 10), math.min(int(lookbackPeriod), 4999))))
+    series float smoothedValue = smoothingLength > 0 ? ta.ema(sourceValue, smoothingLength) : sourceValue
+    max_bars_back(smoothedValue, 4500)
+
+    float out = na
+    if useZScore
+        out := f_zscore(smoothedValue, lookback, 0)
+    else
+        float lowerPercentile = ta.percentile_nearest_rank(smoothedValue, lookback, percentileMargin)
+        float upperPercentile = ta.percentile_nearest_rank(smoothedValue, lookback, 100 - percentileMargin)
+        if upperPercentile == lowerPercentile
+            out := 0.0
+        else
+            float normalized01 = (smoothedValue - lowerPercentile) / (upperPercentile - lowerPercentile)
+            normalized01 := math.max(0.0, math.min(1.0, normalized01))
+            out := oneRange ? (normalized01 * 2.0 - 1.0) : normalized01
+    out
+
+// @function Alternative version that accepts string values instead of floats
+// @param title Main tooltip title
+// @param title_icon Unicode icon for the main title
+// @param section_titles Array of section titles
+// @param section_icons Array of section unicode icons
+// @param param_names Array of parameter names (use "|" to separate sections)
+// @param param_values Array of parameter values as strings
+// @param param_icons Array of parameter icons
+// @param use_dividers Whether to add dividers between sections
+// @returns Formatted tooltip string
+export create_tooltip_str(string title, string title_icon,
+                         array<string> section_titles, array<string> section_icons,
+                         array<string> param_names, array<string> param_values, array<string> param_icons,
+                         bool use_dividers) =>
+    
+    // Start with main title
+    tooltip = title_icon + " " + title + "\n"
+    
+    // Track current parameter index
+    param_index = 0
+    
+    // Process each section
+    for s = 0 to array.size(section_titles) - 1
+        // Add divider if needed
+        if use_dividers and s > 0
+            tooltip := tooltip + "━━━━━━━━━━━━━━━\n"
+        
+        // Add section header
+        section_title = array.get(section_titles, s)
+        section_icon = s < array.size(section_icons) ? array.get(section_icons, s) : ""
+        
+        if section_title != ""
+            tooltip := tooltip + "\n" + section_icon + " " + section_title + "\n"
+        
+        // Add parameters for this section
+        while param_index < array.size(param_names)
+            param_name = array.get(param_names, param_index)
+            
+            // Check for section delimiter
+            if param_name == "|"
+                param_index += 1
+                break
+            
+            // Get parameter details
+            param_value = param_index < array.size(param_values) ? array.get(param_values, param_index) : "N/A"
+            param_icon = param_index < array.size(param_icons) ? array.get(param_icons, param_index) : "  •"
+            
+            // Format the parameter line
+            tooltip := tooltip + param_icon + " " + param_name + ": " + param_value + "\n"
+            
+            param_index += 1
+    
+    tooltip
+
+// Add this to your TAUtilityLib library
+export getNormalizedCoefficient(series float sourceValue, series int lookbackPeriod, float percentileMargin = 5.0, simple int smoothingLength = 0, bool useZScore = false, float zScoreClamp = 3.0, bool oneRange = false) =>
+    
+    // Handle variable lookback period (can be series or constant) and clamp for safety
+    lookback = int(math.max(1, math.min(math.max(0, bar_index - 10), math.min(int(lookbackPeriod), 4999))))
+    
+    // Apply smoothing if requested
+    smoothedValue = smoothingLength > 0 ? ta.ema(sourceValue, smoothingLength) : sourceValue
+    
+    max_bars_back(smoothedValue, 4500)
+
+    var float normalizedCoeff = na
+    
+    if useZScore
+        // Z-SCORE METHOD
+        mean = ta.sma(smoothedValue, lookback)
+        stdev = ta.stdev(smoothedValue, lookback)
+        zScore = stdev > 0 ? (smoothedValue - mean) / stdev : 0
+        zScoreClamped = math.max(-zScoreClamp, math.min(zScoreClamp, zScore))
+        normalizedCoeff := zScoreClamped / zScoreClamp
+    else
+        // PERCENTILE METHOD  
+        lowerPercentile = ta.percentile_nearest_rank(smoothedValue, lookback, percentileMargin)
+        upperPercentile = ta.percentile_nearest_rank(smoothedValue, lookback, 100 - percentileMargin)
+        
+        if upperPercentile == lowerPercentile
+            normalizedCoeff := 0.0
+        else
+            normalized01 = (smoothedValue - lowerPercentile) / (upperPercentile - lowerPercentile)
+            normalized01 := math.max(0, math.min(1, normalized01))
+            normalizedCoeff := oneRange ? (normalized01 * 2 - 1) : normalized01
+
+    
+    normalizedCoeff
+
+//Quick Reference
+// Basic percentile normalization [-1, 1]
+// norm_value = TAUtilityLib.getNormalizedCoefficient(source, lookback, margin, smoothing, false, 3.0)
+// Z-score normalization [-1, 1]
+//zscore_value = TAUtilityLib.getNormalizedCoefficient(source, lookback, margin, smoothing, true, 3.0)
+// Convert [-1, 1] to [0, 1] if needed
+//norm_01 = (norm_value + 1) / 2
+
+export getNormalizedCoefficientDynamic(series float sourceValue, series float lookbackSource, float percentileMargin = 5.0, simple int smoothingLength = 0) =>
+    // Convert lookback source to valid period
+    // Clamp lookback to bar_index
+    safe_lookback_norm = int(math.max(1, math.min(math.max(0, bar_index - 10), 100)))
+    max_bars_back(lookbackSource, 4500)
+    lookbackNorm = ta.percentile_nearest_rank(lookbackSource, safe_lookback_norm, 50)
+    minLookback = 10
+    maxLookback = 500
+    dynamicLookback = int(minLookback + (maxLookback - minLookback) * lookbackNorm / 100)
+    
+    getNormalizedCoefficient(sourceValue, dynamicLookback, percentileMargin, smoothingLength, false, 3.0)
+
+
+// Touch detection function with grouped toggleable detection methods
+// @param level - Level to check against (EMA, band, any threshold)
+// @param toleranceAbs - Absolute tolerance value (optional, default = 0)
+// @param tolerancePerc - Percentage tolerance (as decimal, optional, default = 0)
+// @param useATR - Use ATR to scale tolerance (default=false)
+// @param atrPeriod - ATR period if useATR is true (default=14)
+// @param atrMultiplier - Multiplier for ATR-based tolerance (default=1.0)
+// @param atrNormPeriod - Period for ATR normalization (default=20)
+// @param enableBodyDetection - Enable all body-related detections (default=true)
+// @param enableWickDetection - Enable all wick-related detections (default=true)
+// @param enableHistoricalDetection - Enable detection using previous bar data (default=true)
+// @returns 0 for body cross, -1 for touch from above, 1 for touch from below, na for no touch
+export touch(float level, float toleranceAbs = 0.0, float tolerancePerc = 0.0,
+      bool useATR = false, int atrPeriod = 14, float atrMultiplier = 1.0, int atrNormPeriod = 20,
+      bool enableBodyDetection = true, bool enableWickDetection = true, 
+      bool enableHistoricalDetection = true, float ltf_delta = na) =>
+    
+    // Calculate tolerance
+    float tolerance = toleranceAbs + (level * tolerancePerc)
+    
+    // Add ATR-based tolerance if enabled
+    if useATR
+        float atrValue = ta.atr(atrPeriod)
+        float normalizedATR = getNormalizedCoefficient(atrValue, atrNormPeriod, 3, 1, false, 0, true)
+        tolerance := tolerance * (1.0 + (normalizedATR * atrMultiplier))
+    
+    // Body detection (body crossed)
+    bodyCrossed = enableBodyDetection and ((open > level and close < level) or (open < level and close > level))
+    
+    // Wick detection (upper and lower wick touches/crosses)
+    upperWickTouched = enableWickDetection and (high >= level - tolerance and high > math.max(open, close) and close < level)
+    upperWickCrossed = enableWickDetection and (high >= level and close < level and math.max(open, close) < high)
+    lowerWickTouched = enableWickDetection and (low <= level + tolerance and low < math.min(open, close) and close > level)
+    lowerWickCrossed = enableWickDetection and (low <= level and close > level and math.min(open, close) > low)
+    
+    // Historical detection (using previous bar data)
+    bodyCrossedDown = enableHistoricalDetection and (high[1] >= level and close < level - tolerance)
+    bodyCrossedUp = enableHistoricalDetection and (low[1] <= level and close > level + tolerance)
+
+    // Determine touch direction
+    touchDirection = bodyCrossed ? 0 : (upperWickTouched or upperWickCrossed or bodyCrossedDown) ? -1 : (lowerWickTouched or lowerWickCrossed or bodyCrossedUp) ? 1 : na
+
+    if not na(ltf_delta)
+        bool ok = touchDirection == 0 ? true : (touchDirection > 0 ? (ltf_delta > 0) : (ltf_delta < 0))
+        touchDirection := ok ? touchDirection : na
+    
+    touchDirection
+
+
+// @function Calculates covariance between two series
+// @param x First data series
+// @param y Second data series  
+// @param length Lookback period
+// @returns Covariance value
+export cov(series float x, series float y, simple int length) =>
+    mean_x = ta.sma(x, length)
+    mean_y = ta.sma(y, length)
+    
+    sum_cov = 0.0
+    for i = 0 to length - 1
+        sum_cov := sum_cov + (x[i] - mean_x) * (y[i] - mean_y)
+    
+    sum_cov / length
+
+
+// @function Dynamic RMA (Wilder) with series length
+// @param src Input series
+// @param dynamic_len Series-type period (>=1). If <1, coerced to 1.
+// @returns RMA with variable length, stable and stateful
+export f_dynamic_rma(series float src, series float dynamic_len) =>
+    var float dyn_rma = na
+    L = math.max(1.0, dynamic_len)
+    alpha = 1.0 / L
+    dyn_rma := na(dyn_rma[1]) ? src : (alpha * src + (1.0 - alpha) * dyn_rma[1])
+    dyn_rma
+
+// @function Dynamic SMA (stateful, O(1) update) with series window
+// Note: exact rolling SMA with variable window requires O(N) sum; this version approximates SMA by adaptive EMA with alpha=2/(L+1) when L varies smoothly.
+// For exact SMA, keep your f_dynamic_sma above.
+// @param src Input series
+// @param dynamic_len Series-type window length (>=1)
+// @returns Adaptive-EMA SMA approximation for speed-critical paths
+export f_dynamic_sma_fast(series float src, series float dynamic_len) =>
+    var float dyn_sma = na
+    L = math.max(1.0, dynamic_len)
+    alpha = 2.0 / (L + 1.0)
+    dyn_sma := na(dyn_sma[1]) ? src : (alpha * src + (1.0 - alpha) * dyn_sma[1])
+    dyn_sma
+
+
+// @function Dynamic Covariance with series length support
+// @param x First data series
+// @param y Second data series  
+// @param dynamic_length Lookback period (can be series)
+// @returns Covariance value with dynamic window
+export cov_dynamic(series float x, series float y, series int dynamic_length) =>
+    // Convert to valid integer length
+    len = math.max(2, int(dynamic_length))
+    
+    // Calculate dynamic means
+    mean_x = 0.0
+    mean_y = 0.0
+    for i = 0 to len - 1
+        mean_x := mean_x + nz(x[i], 0)
+        mean_y := mean_y + nz(y[i], 0)
+    mean_x := mean_x / len
+    mean_y := mean_y / len
+    
+    // Calculate covariance
+    sum_cov = 0.0
+    for i = 0 to len - 1
+        sum_cov := sum_cov + (nz(x[i], mean_x) - mean_x) * (nz(y[i], mean_y) - mean_y)
+    
+    sum_cov / len
+
+// 
+//  FRACTAL & ARRAY MANAGEMENT FUNCTIONS
+// 
+
+// @function Trims a FractalData array to maximum size by removing oldest elements
+// @param arr Array of FractalData to trim
+// @param maxSize Maximum allowed size
+// @returns void (modifies array in place)
+export trimFractalArray(array<FractalData> arr, int maxSize) =>
+    while array.size(arr) > maxSize
+        array.shift(arr)
+
+// @function Trims a CorrelationLine array to maximum size
+// @param arr Array of CorrelationLine to trim
+// @param maxSize Maximum allowed size
+// @returns void (modifies array in place)
+export trimCorrelationArray(array<CorrelationLine> arr, int maxSize) =>
+    while array.size(arr) > maxSize
+        array.shift(arr)
+
+// @function Creates a new FractalData instance
+// @param bar Bar index
+// @param price Fractal price
+// @param momentum DEMA momentum value
+// @param marker Divergence marker type
+// @returns New FractalData instance
+export newFractal(int bar, float price, float momentum, string marker) =>
+    FractalData.new(bar, price, false, 0.0, momentum, marker)
+
+// @function Creates a new CorrelationLine instance
+// @param bar Bar index
+// @param price Line price
+// @param lineType Type of line
+// @returns New CorrelationLine instance
+export newCorrelationLine(int bar, float price, string lineType) =>
+    CorrelationLine.new(bar, price, lineType, 0, true)
+
+// @function Gets maximum value from an array of floats (for swept distances)
+// @param arr Array of float values
+// @returns Maximum value or 0.0 if empty
+export getMaxDistance(array<float> arr) =>
+    array.size(arr) > 0 ? array.max(arr) : 0.0
+
+// @function Checks marker conditions for divergence detection (parameterized)
+// @param peak Main peak condition
+// @param peak1 Peak condition 1 bar ago
+// @param peak2 Peak condition 2 bars ago
+// @param ltfPeak LTF peak condition
+// @param ltfPeak1 LTF peak 1 bar ago
+// @param ltfPeak2 LTF peak 2 bars ago
+// @param entry Entry signal condition
+// @param colorChanged Color changed condition
+// @param colorChanged1 Color changed 1 bar ago
+// @param earlyReversal Early reversal condition
+// @param earlyReversal1 Early reversal 1 bar ago
+// @param colorChangedCurrent Color changed on current bar
+// @param markerPrefix Prefix for marker type ("bearish" or "bullish")
+// @returns Marker type string
+export getMarkerType(bool peak, bool peak1, bool peak2, bool ltfPeak, bool ltfPeak1, bool ltfPeak2, bool entry, bool colorChanged, bool colorChanged1, bool earlyReversal, bool earlyReversal1, bool colorChangedCurrent, string markerPrefix) =>
+    markerType = ""
+    if peak or peak1 or peak2
+        markerType := markerPrefix + "Peak"
+    else if ltfPeak or ltfPeak1 or ltfPeak2
+        markerType := "ltf_" + markerPrefix + "Peak"
+    else if entry
+        markerType := "ltf_entry" + (markerPrefix == "bearish" ? "short" : "long")
+    else if colorChanged or colorChanged1
+        markerType := "color_changed_to_" + markerPrefix
+    else if earlyReversal or earlyReversal1
+        markerType := "early_reversal_" + (markerPrefix == "bearish" ? "down" : "up")
+    else if colorChangedCurrent
+        markerType := "color_changed"
+    markerType
+
+// @function Creates liquidity sweep tooltip data
+// @param title Tooltip title
+// @param icon Title icon
+// @param barIdx Current bar index
+// @param fractalID Fractal ID
+// @param fractalPrice Fractal price
+// @param labelText Label text (liquidity power)
+// @param sweptCount Number of fractals swept
+// @param sweptIDsList String of swept IDs
+// @param maxDistance Maximum sweep distance
+// @param hasDivergence Whether divergence exists
+// @param divergenceType Type of divergence
+// @param currMom Current momentum
+// @returns Formatted tooltip string
+export createLiquiditySweepTooltip(string title, string icon, int barIdx, int fractalID, float fractalPrice, string labelText, int sweptCount, string sweptIDsList, float maxDistance, bool hasDivergence, string divergenceType, float currMom) =>
+    sections = array.from("Sweep Details", "Fractals Info", "Divergence")
+    section_icons = array.from("💧", "📐", "🔄")
+    param_names = array.from("Bar", "Fractal ID", "Fractal Price", "Liquidity Power", "Fractals Swept", "|", "Swept IDs", "Max Distance", "|", "Has Divergence", "Divergence Type", "Current Momentum")
+    param_values = array.from(str.tostring(barIdx), str.tostring(fractalID), str.tostring(fractalPrice, "#.##"), labelText, str.tostring(sweptCount), "|", sweptIDsList, str.tostring(maxDistance, "#.#"), "|", hasDivergence ? "Yes" : "No", str.tostring(divergenceType), str.tostring(math.round(currMom, 2)))
+    param_icons = array.from("📍", "🔢", "💲", "⚡", "🎯", "", "📋", "📏", "", "✅", "🔄", "📈")
+    create_tooltip_str(title, icon, sections, section_icons, param_names, param_values, param_icons, true)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// █ CORRELATION & CAUSALITY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Convert prices array to returns array
+// @param prices Array of price values
+// @returns Array of returns (percentage changes)
+export f_prices_to_returns(array<float> prices) =>
+    array<float> rets = array.new<float>()
+    int n = array.size(prices)
+    if n > 1
+        for i = 1 to n - 1
+            float p0 = array.get(prices, i)
+            float p1 = array.get(prices, i-1)
+            if p1 != 0
+                array.push(rets, (p0 - p1) / p1)
+    rets
+
+// @function Pearson correlation on the TAIL of arrays (newest data)
+// @param x First array
+// @param y Second array  
+// @param length Number of elements from tail to use
+// @returns Correlation coefficient [-1, 1]
+export f_pearson_tail(array<float> x, array<float> y, int length) =>
+    float correlation = 0.0
+    int xs = array.size(x)
+    int ys = array.size(y)
+    int n = math.min(length, math.min(xs, ys))
+    if n >= 5
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to n - 1
+            float xv = array.get(x, xs - 1 - i)
+            float yv = array.get(y, ys - 1 - i)
+            sum_x += xv
+            sum_y += yv
+            sum_xy += xv * yv
+            sum_x2 += xv * xv
+            sum_y2 += yv * yv
+        float num = n * sum_xy - sum_x * sum_y
+        float den = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        correlation := den > 0.0001 ? num / den : 0.0
+    correlation
+
+// @function Pearson correlation on arrays (from beginning)
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @returns Correlation coefficient [-1, 1]
+export f_pearson(array<float> x, array<float> y, int length) =>
+    float correlation = 0.0
+    int safe_length = math.min(length, math.min(array.size(x), array.size(y)))
+    if safe_length >= 5
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to safe_length - 1
+            float xv = array.get(x, i)
+            float yv = array.get(y, i)
+            sum_x += xv
+            sum_y += yv
+            sum_xy += xv * yv
+            sum_x2 += xv * xv
+            sum_y2 += yv * yv
+        float n = safe_length
+        float num = n * sum_xy - sum_x * sum_y
+        float den = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        correlation := den > 0.0001 ? num / den : 0.0
+    correlation
+
+// @function Spearman rank correlation (robust to outliers)
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @returns Rank correlation coefficient [-1, 1]
+export f_spearman(array<float> x, array<float> y, int length) =>
+    float correlation = 0.0
+    int safe_length = math.min(length, math.min(array.size(x), array.size(y)))
+    if safe_length >= 5
+        array<float> x_ranks = array.new<float>(safe_length, 0.0)
+        array<float> y_ranks = array.new<float>(safe_length, 0.0)
+        for i = 0 to safe_length - 1
+            float x_val = array.get(x, i)
+            float y_val = array.get(y, i)
+            float x_rank = 1.0
+            float y_rank = 1.0
+            for j = 0 to safe_length - 1
+                if array.get(x, j) < x_val
+                    x_rank += 1.0
+                else if array.get(x, j) == x_val and j < i
+                    x_rank += 1.0
+                if array.get(y, j) < y_val
+                    y_rank += 1.0
+                else if array.get(y, j) == y_val and j < i
+                    y_rank += 1.0
+            array.set(x_ranks, i, x_rank)
+            array.set(y_ranks, i, y_rank)
+        float x_mean = array.avg(x_ranks)
+        float y_mean = array.avg(y_ranks)
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to safe_length - 1
+            float x_diff = array.get(x_ranks, i) - x_mean
+            float y_diff = array.get(y_ranks, i) - y_mean
+            sum_xy += x_diff * y_diff
+            sum_x2 += x_diff * x_diff
+            sum_y2 += y_diff * y_diff
+        float den = math.sqrt(sum_x2 * sum_y2)
+        correlation := den > 0 ? sum_xy / den : 0.0
+    correlation
+
+// @function Kendall Tau correlation (concordant pairs, most robust)
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @param sampling_step Step for sampling (1 = full precision, higher = faster)
+// @returns Kendall Tau coefficient [-1, 1]
+export f_kendall(array<float> x, array<float> y, int length, int sampling_step) =>
+    float concordant = 0.0
+    float discordant = 0.0
+    int safe_length = math.min(length, math.min(array.size(x), array.size(y)))
+    if safe_length >= 5
+        int step = sampling_step == 0 ? 1 : math.max(1, sampling_step)
+        for i = 0 to safe_length - 2 by step
+            for j = i + 1 to safe_length - 1 by step
+                float x_diff = array.get(x, i) - array.get(x, j)
+                float y_diff = array.get(y, i) - array.get(y, j)
+                if (x_diff * y_diff) > 0
+                    concordant += 1.0
+                else if (x_diff * y_diff) < 0
+                    discordant += 1.0
+    float pairs = concordant + discordant
+    pairs > 0 ? (concordant - discordant) / pairs : 0.0
+
+
+export f_calc_delta(float h, float l, float c, float v) =>
+    float chrange = h - l
+    float buyVol = chrange > 0 ? v * (c - l) / chrange : v / 2
+    float sellVol = chrange > 0 ? v * (h - c) / chrange : v / 2
+    buyVol - sellVol
+
+export f_calc_buy_sell(float h, float l, float c, float v) =>
+    float chrange = h - l
+    float buyVol = chrange > 0 ? v * (c - l) / chrange : v / 2
+    float sellVol = chrange > 0 ? v * (h - c) / chrange : v / 2
+    [buyVol, sellVol]
+
+export f_atr_dynamic(int len) =>
+    float tr1 = high - low
+    float tr2 = math.abs(high - nz(close[1], close))
+    float tr3 = math.abs(low - nz(close[1], close))
+    float tr = math.max(tr1, math.max(tr2, tr3))
+    float alpha = 1.0 / math.max(1.0, float(len))
+    var float atr = na
+    atr := na(atr[1]) ? tr : nz(atr[1]) + alpha * (tr - nz(atr[1]))
+    atr
+
+export f_apply_weight(float p, float w) =>
+    1.0 + w * (p - 1.0)
+
+export f_ema_stateful(float src, int len) =>
+    var float ema_val = na
+    if na(ema_val)
+        ema_val := src
+    else
+        float alpha = 2.0 / (math.max(1, len) + 1)
+        ema_val := alpha * src + (1.0 - alpha) * ema_val
+    ema_val
+
+export f_ema_custom(float src, int len) =>
+    f_ema_stateful(src, len)
+
+export f_get_lower_tf(string tf) =>
+    tf == "W" ? "D" :
+     tf == "D" ? "240" :
+     tf == "240" ? "60" :
+     tf == "60" ? "15" :
+     tf == "30" ? "5" :
+     tf == "15" ? "3" :
+     tf == "5" ? "1" :
+     tf == "3" ? "15S" :
+     tf == "1" ? "15S" :
+     ""
+
+// @function Detects squeeze/bottleneck breakout conditions based on band width dynamics
+// @param band_up Upper band price level
+// @param band_dn Lower band price level
+// @param price Current price for direction detection
+// @param damping Correlation damping factor (0-1) for directional confirmation
+// @param z_len Lookback length for band width percentile calculation
+// @returns [squeeze_bull, squeeze_bear, final_squeeze_signal, bw_pct] Bullish squeeze, bearish squeeze, any squeeze signal, band width percentile
+export f_detect_squeeze(float band_up, float band_dn, float price, float damping, int z_len) =>
+    float bw = band_up - band_dn
+    float bw_roc = (bw - nz(bw[1])) / math.max(nz(bw[1]), syminfo.mintick)
+    float bw_roc2 = bw_roc - nz(bw_roc[1])
+    float bw_min_30 = ta.lowest(bw, 30)
+    bool is_squeeze = bw < bw_min_30 * 1.05
+    bool bw_expanding = bw_roc > 0.0 and (bw_roc2 > 0.0 or nz(bw_roc2[1]) > 0.0)
+    bool bottleneck_break = is_squeeze[1] and bw_expanding
+    float _bw_pct = 0.0
+    int bw_pct_len = z_len
+    for i = 0 to bw_pct_len - 1
+        if bw >= nz(bw[i])
+            _bw_pct += 1.0
+    _bw_pct := _bw_pct / bw_pct_len
+    float vol_short = ta.stdev(price, 5)
+    float vol_long = ta.stdev(price, 30)
+    float vol_ratio = vol_short / math.max(vol_long, syminfo.mintick)
+    float bw_roc_z = bw_roc / math.max(ta.stdev(bw_roc, 20), 0.001)
+    bool expand_by_bw = bw_roc_z > 1.5
+    bool expand_by_vol = ta.crossover(vol_ratio, 0.80) and nz(vol_ratio[3]) < 0.65
+    bool expansion_confirmed = expand_by_bw or expand_by_vol
+    float squeeze_intensity = math.max(0.0, 1.0 - _bw_pct)
+    bool confirmed_break = squeeze_intensity > 0.70 and expansion_confirmed and bottleneck_break
+    float break_dir = math.sign(price - nz(price[3], price))
+    bool dir_ok = damping > 0.4
+    bool _final_sq = confirmed_break and dir_ok
+    bool sq_bull = _final_sq and break_dir > 0
+    bool sq_bear = _final_sq and break_dir < 0
+    [sq_bull, sq_bear, _final_sq, _bw_pct]
+
+// @function Detects confluence zones where multiple price levels cluster together
+// @param basis Baseline MA price level
+// @param fv Fair value (cyclic FV) price level
+// @param dev Standard deviation for band multiples
+// @param tol_mult ATR tolerance multiplier for clustering
+// @param min_lines Minimum number of lines required to form a confluence cluster
+// @returns bool Always returns true (draws confluence lines as side effect)
+export f_detect_confluence(float basis, float fv, float dev, float tol_mult, int min_lines) =>
+    float atr_tol = ta.atr(14) * tol_mult
+    var levels = array.new<float>()
+    array.clear(levels)
+    array.push(levels, basis)
+    array.push(levels, fv)
+    if dev > 0
+        for k = 1 to 6
+            float mult = k * 0.5
+            array.push(levels, basis + mult * dev)
+            array.push(levels, basis - mult * dev)
+            if math.abs(fv - basis) > atr_tol * 2
+                array.push(levels, fv + mult * dev)
+                array.push(levels, fv - mult * dev)
+    array.sort(levels, order.ascending)
+    var prev_cluster_levels = array.new<float>()
+    var next_cluster_levels = array.new<float>()
+    array.clear(next_cluster_levels)
+    int n_levels = array.size(levels)
+    if n_levels > 0
+        int i = 0
+        while i < n_levels
+            float base_level = array.get(levels, i)
+            int current_count = 1
+            float current_sum = base_level
+            int j = i + 1
+            while j < n_levels
+                float check_level = array.get(levels, j)
+                if check_level - base_level <= atr_tol
+                    current_count += 1
+                    current_sum += check_level
+                    j += 1
+                else
+                    break
+            if current_count >= min_lines
+                float avg_level = current_sum / current_count
+                array.push(next_cluster_levels, avg_level)
+                float vicinity = atr_tol * 2.0
+                if math.abs(close - avg_level) < vicinity
+                    bool is_support = avg_level < close
+                    color conf_col = is_support ? color.lime : color.red
+                    float best_prev = na
+                    float min_dist = 1e10
+                    int prev_cluster_size = array.size(prev_cluster_levels)
+                    if prev_cluster_size > 0
+                        for prev_idx = 0 to prev_cluster_size - 1
+                            float p = array.get(prev_cluster_levels, prev_idx)
+                            float d = math.abs(p - avg_level)
+                            if d < min_dist
+                                min_dist = d
+                                best_prev = p
+                    if not na(best_prev) and min_dist < atr_tol * 2.0
+                        line.new(bar_index - 1, best_prev, bar_index, avg_level, color=conf_col, width=1)
+            i += current_count
+    array.clear(prev_cluster_levels)
+    int next_cluster_size = array.size(next_cluster_levels)
+    if next_cluster_size > 0
+        for next_idx = 0 to next_cluster_size - 1
+            array.push(prev_cluster_levels, array.get(next_cluster_levels, next_idx))
+    true
+
+// @function Updates CUSUM (Cumulative Sum) control chart for detecting persistent deviations
+// @param cusum_pos Current positive CUSUM value
+// @param cusum_neg Current negative CUSUM value
+// @param innovation Current innovation/residual value
+// @param threshold Threshold multiplier for CUSUM reset
+// @param innov_abs_dev Absolute deviation of innovation for scaling
+// @returns [new_cusum_pos, new_cusum_neg, cusum_triggered] Updated CUSUM values and trigger signal
+export f_update_cusum(float cusum_pos, float cusum_neg, float innovation, float threshold, float innov_abs_dev) =>
+    float new_pos = math.max(0.0, cusum_pos + innovation - threshold * innov_abs_dev)
+    float new_neg = math.max(0.0, cusum_neg - innovation - threshold * innov_abs_dev)
+    bool triggered = new_pos > 3.0 * innov_abs_dev or new_neg > 3.0 * innov_abs_dev
+    if triggered
+        new_pos := 0.0
+        new_neg := 0.0
+    [new_pos, new_neg, triggered]
+
+// @function Detects bounce at a level (e.g., MA) after price was stretched away
+// @param price Current price level (z-score or normalized position)
+// @param velocity Trend velocity/momentum
+// @param pressure External pressure (e.g., basket vector)
+// @param coupling Coupling strength (e.g., correlation damping)
+// @param hist_price Historical price level at lookback
+// @param price_momentum Price momentum for resumption check
+// @param bounce_thresh Threshold for "near level" detection
+// @param lookback Lookback period for "was stretched" check
+// @returns bool True if bounce condition detected
+export f_detect_bounce_at_level(float price, float velocity, float pressure, float coupling, float hist_price, float price_momentum, float bounce_thresh, int lookback) =>
+    bool near_level = math.abs(price) < bounce_thresh
+    bool trend_alive = math.abs(velocity) > 0.12
+    bool dir_aligned = math.sign(velocity) == math.sign(pressure) and coupling > 0.5
+    // Use lookback parameter to verify historical stretch
+    float price_at_lookback = nz(price[lookback], price)
+    bool was_stretched = math.abs(nz(hist_price)) > bounce_thresh * 1.5 or math.abs(price_at_lookback) > bounce_thresh * 1.5
+    bool resuming = (velocity > 0 and price_momentum > nz(price_momentum[1])) or (velocity < 0 and price_momentum < nz(price_momentum[1]))
+    bool is_bounce = near_level and trend_alive and dir_aligned and was_stretched and resuming
+    is_bounce and not is_bounce[1] and not is_bounce[2]
+// --- TP/SL Drawing Helper ---
+export type TPSLDrawings
+    line ep_line
+    line tp1_line
+    line tp2_line
+    line sl_line
+
+export f_draw_tpsl(float ep, float tp1, float tp2, float sl, int entry_bar, int line_len, color tp_col, color sl_col, color ep_col) =>
+    line l_ep = na(ep) ? na : line.new(entry_bar, ep, entry_bar + line_len, ep, color=ep_col, style=line.style_dashed, width=1, force_overlay=true)
+    line l_tp1 = na(tp1) ? na : line.new(entry_bar, tp1, entry_bar + line_len, tp1, color=tp_col, style=line.style_solid, width=2, force_overlay=true)
+    line l_tp2 = na(tp2) ? na : line.new(entry_bar, tp2, entry_bar + line_len, tp2, color=tp_col, style=line.style_dashed, width=1, force_overlay=true)
+    line l_sl = na(sl) ? na : line.new(entry_bar, sl, entry_bar + line_len, sl, color=sl_col, style=line.style_solid, width=2, force_overlay=true)
+    TPSLDrawings.new(l_ep, l_tp1, l_tp2, l_sl)
+
+export f_remove_tpsl(TPSLDrawings drawings) =>
+    if not na(drawings)
+        if not na(drawings.ep_line)
+            line.delete(drawings.ep_line)
+        if not na(drawings.tp1_line)
+            line.delete(drawings.tp1_line)
+        if not na(drawings.tp2_line)
+            line.delete(drawings.tp2_line)
+        if not na(drawings.sl_line)
+            line.delete(drawings.sl_line)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REGIME-SWITCHED NORMALIZATION SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function 5-layer regime-switched normalization system for adaptive thresholds
+// @param enable_norm Whether normalization is enabled
+// @param te_val TE oscillator value
+// @param mr_val Mean reversion oscillator value
+// @param vec_val Vector oscillator value
+// @param corr_val Correlation oscillator value
+// @param te_p25 TE 25th percentile
+// @param te_p75 TE 75th percentile
+// @param mr_p25 MR 25th percentile
+// @param mr_p75 MR 75th percentile
+// @param vec_p25 Vector 25th percentile
+// @param vec_p75 Vector 75th percentile
+// @param corr_p25 Correlation 25th percentile
+// @param corr_p75 Correlation 75th percentile
+// @param ltf_p20 LTF 20th percentile
+// @param ltf_p50 LTF 50th percentile
+// @param coupling_strong Strong coupling threshold
+// @param coupling_weak Weak coupling threshold
+// @param ltf_decouple_default Default LTF decouple threshold
+// @param ltf_recouple_default Default LTF recouple threshold
+// @param ltf_en Whether LTF is enabled
+// @param mr_vol_look MR volatility lookback period
+// @returns [coupling_regime, te_norm, mr_norm, vec_norm, corr_norm, te_effective, ltf_decouple_adaptive, ltf_recouple_adaptive, mr_vol_adj]
+export f_norm_system(bool enable_norm, float te_val, float mr_val, float vec_val, float corr_val, 
+              float te_p25, float te_p75, float mr_p25, float mr_p75, float vec_p25, float vec_p75, float corr_p25, float corr_p75,
+              float ltf_p20, float ltf_p50, float coupling_strong, float coupling_weak, 
+              float ltf_decouple_default, float ltf_recouple_default, bool ltf_en, int mr_vol_look) =>
+    // Layer 1: Coupling Regime Detection
+    float coupling_strength = enable_norm ? nz(te_p75, 0.5) : 0.8
+    int regime = coupling_strength > coupling_strong ? 2 : (coupling_strength > coupling_weak ? 1 : 0)
+    
+    // Layer 2: IQR-Normalized Oscillators
+    float te_normalized = enable_norm ? f_iqr_normalize(te_val, nz(te_p25, 0.0), nz(te_p75, 0.1)) : te_val
+    
+    float mr_normalized = enable_norm ? f_iqr_normalize(mr_val, nz(mr_p25, 0.0), nz(mr_p75, 1.0)) : mr_val
+    
+    float vec_normalized = enable_norm ? f_iqr_normalize(vec_val, nz(vec_p25, 0.0), nz(vec_p75, 1.0)) : vec_val
+    
+    float corr_normalized = enable_norm ? f_iqr_normalize(corr_val, nz(corr_p25, 0.0), nz(corr_p75, 1.0)) : corr_val
+    
+    // Layer 3: Hybrid TE Threshold (regime-based blending)
+    float te_iqr = math.max(nz(te_p75, 0.1) - nz(te_p25, 0.0), 1e-10)
+    float te_eff = enable_norm ? (regime == 2 ? te_val : (regime == 1 ? (te_val * 0.5 + (te_normalized * te_iqr + nz(te_p25, 0.0)) * 0.5) : (te_normalized * te_iqr + nz(te_p25, 0.0)))) : te_val
+    
+    // LTF adaptive thresholds
+    float ltf_decouple = enable_norm and ltf_en ? nz(ltf_p20, ltf_decouple_default) : ltf_decouple_default
+    float ltf_recouple = enable_norm and ltf_en ? nz(ltf_p50, ltf_recouple_default) : ltf_recouple_default
+    
+    // Layer 4: Volatility-Homoscedastic MR Adjustment
+    float atr_cur = ta.atr(14)
+    float atr_base = ta.sma(atr_cur, mr_vol_look)
+    float vol_exp = enable_norm ? math.max(0.5, atr_cur / math.max(atr_base, syminfo.mintick)) : 1.0
+    float mr_vol_adjusted = enable_norm ? mr_val / vol_exp : mr_val
+    
+    [regime, te_normalized, mr_normalized, vec_normalized, corr_normalized, te_eff, ltf_decouple, ltf_recouple, mr_vol_adjusted]
+
+// @function Stable percentile-rank normalization with Fisher transform
+// @description Converts raw values to time-invariant normalized features using ordinal ranking.
+//              Eliminates temporal drift from rolling z-scores by using percentile position,
+//              then applies Fisher/logit transform to produce Gaussian-like distribution.
+// @param raw Raw input value to normalize
+// @param window Lookback window for percentile calculation (e.g., 200)
+// @returns Normalized value in approximate range [-2.65, +2.65] with Gaussian shape
+// @note Output is time-invariant: percentile 85 two weeks ago = percentile 85 now
+// @note Ideal for kNN distance calculations where temporal consistency is critical
+export f_percentile_rank_fisher(float raw, int window) =>
+    float pct = ta.percentrank(raw, window)           // 0–100, O(1) built-in
+    float u = math.max(0.5, math.min(99.5, pct)) / 100.0  // clamp away from 0/1
+    0.5 * math.log(u / (1.0 - u))                     // logit → ≈ N(0,1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SQUEEZE THROAT DETECTOR
+// ═══════════════════════════════════════════════════════════════════════════════
+// Two-method architecture: pure Hurst RS + composite squeeze state machine.
+// All persistent state (arrays, var bools/ints) lives in caller's scope.
+
+// ─── EXPORT UDT: SqzState ────────────────────────────────────────────────────
+export type SqzState
+    float score          // composite squeeze score [0..1]
+    float innov_bwv      // innovation band width velocity (fractional)
+    float z3_bwv         // z3 band width velocity (fractional)
+    float innov_bwz      // innovation bw z-score vs own history
+    float z3_bwz         // z3 bw z-score vs own history
+    float hurst          // H value echoed for debug
+    bool  armed          // squeeze arm state
+    bool  active         // throat fire: armed + expanding + reactive_confirm
+    bool  sq_expanding   // at least one band expanding this bar
+    float phi_div_score  // phi-divergence intensity [0..1]
+    bool  phi_onset      // first bar of phi divergence
+    float mahal_dist     // 4x4 Mahalanobis distance (0 if not computed)
+    bool  mahal_armed    // mahal_dist > mahal_arm_thresh
+
+// ─── EXPORT: f_hurst_rs ──────────────────────────────────────────────────────
+// Rescaled Range (R/S) Hurst exponent from a pre-filled log-return buffer.
+// Caller owns the buffer array (global scope, push/shift each bar).
+// @param log_ret_buf Pre-filled array of log-returns
+// @returns float H ∈ [0.1, 0.9]  (0.5 = random walk, <0.5 = anti-persistent)
+export f_hurst_rs(array<float> log_ret_buf) =>
+    int n = array.size(log_ret_buf)
+    float h = 0.5
+    if n >= 32
+        float h_mean = 0.0
+        int i = 0
+        for i = 0 to n - 1
+            h_mean += array.get(log_ret_buf, i)
+        h_mean := h_mean / n
+
+        float h_cum = 0.0
+        float h_max = -1e10
+        float h_min =  1e10
+        float h_sum_sq = 0.0
+        for i = 0 to n - 1
+            float v = array.get(log_ret_buf, i)
+            float diff = v - h_mean
+            h_cum += diff
+            h_max := math.max(h_max, h_cum)
+            h_min := math.min(h_min, h_cum)
+            h_sum_sq += diff * diff
+
+        float h_range = h_max - h_min
+        float h_std   = math.sqrt(h_sum_sq / n)
+        float h_rs    = h_std > 1e-10 ? h_range / h_std : 1.0
+        h := h_rs > 0.0 ? math.log(h_rs) / math.log(float(n)) : 0.5
+        h := math.max(0.1, math.min(h, 0.9))
+    h
+
+// ─── EXPORT: f_phi_divergence_score ──────────────────────────────────────
+// Detects start of phi-lines divergence and computes continuous acceleration score.
+// Phi divergence typically coincides with volume surge and squeeze exit move onset.
+//
+// @param phi_latch     PhiLatch oscillator value (series float)
+// @param phi_orth      PhiTotalOrth oscillator value (series float)
+// @param div_len       Lookback for divergence slope (default 5)
+// @param accel_len     Smoothing for acceleration signal (default 3)
+// @returns [phi_div_score, phi_diverg_start, phi_spread, phi_accel]
+//   phi_div_score  float [0..1]  — composite divergence intensity
+//   phi_diverg_start bool        — first bar of new divergence onset
+//   phi_spread       float       — current |PhiLatch - PhiOrth|
+//   phi_accel        float       — d(phi_spread)/dt smoothed
+export f_phi_divergence_score(
+  float phi_latch,
+  float phi_orth,
+  int   div_len,
+  int   accel_len) =>
+
+    float spread      = math.abs(phi_latch - phi_orth)
+    float spread_prev = nz(spread[div_len], spread)
+    float spread_std  = ta.stdev(spread, 50)
+    float spread_mean = ta.sma(spread, 50)
+
+    // Spread z-score (positive = diverging)
+    float spread_z = spread_std > 1e-10 ? (spread - spread_mean) / spread_std : 0.0
+
+    // Acceleration: delta of spread, smoothed
+    float raw_accel  = spread - nz(spread[1], spread)
+    float phi_accel  = ta.ema(raw_accel, accel_len)
+
+    // Divergence onset: spread accelerating from low base
+    bool  was_low    = nz(spread[div_len]) < spread_mean
+    bool  now_rising = phi_accel > 0.0 and spread_z > 0.3
+    bool  phi_diverg_start = was_low and now_rising and not (nz(was_low[1]) and nz(now_rising[1]))
+
+    // Score [0..1]: clamp z-score to [0..3], normalize
+    float phi_div_score = math.min(math.max(spread_z, 0.0), 3.0) / 3.0
+
+    [phi_div_score, phi_diverg_start, spread, phi_accel]
+
+// ─── EXPORT: f_squeeze_state ─────────────────────────────────────────────────
+// Computes squeeze composite score and throat state machine.
+// All persistent state (armed, arm_bar, cooldown_bar, low_counter) is passed
+// in and returned — caller reassigns their var bools/ints from the tuple.
+//
+// @param innov_upper / innov_lower  Current bar Innovation Band prices
+// @param z3_up / z3_dn              Current bar Z3 Survival Band prices
+// @param hurst_exp                  H from f_hurst_rs
+// @param ltf_at_extreme             bool: LTF osc at extreme (reactive confirm #1)
+// @param burst_pct_high             bool: burst_pct > 0.80 (reactive confirm #2)
+// @param bwv_len                    Lookback for velocity (default 3)
+// @param bwz_len                    History length for BW z-score (default 100)
+// @param bwv_sq_thresh              Squeeze velocity threshold (default 0.03)
+// @param bwv_ex_thresh              Expansion velocity threshold (default 0.02)
+// @param arm_thresh                 Squeeze_score to arm (default 0.55)
+// @param cooldown_bars              Bars between fires (default 8)
+// @param prev_armed / prev_arm_bar / prev_cooldown_bar / prev_low_counter
+//                                   Previous state vars from caller
+// @param phi_div_score              [0..1] from f_phi_divergence_score
+// @param phi_onset                  bool from f_phi_divergence_score
+// @param mahal_dist                 Mahalanobis distance from BandsLib.f_mahalanobis_4x4
+// @param mahal_arm_thresh           Threshold for mahal_armed gate (default 1.5)
+// @returns [SqzState, new_armed, new_arm_bar, new_cooldown_bar, new_low_counter]
+export f_squeeze_state(
+  float innov_upper, float innov_lower,
+  float z3_up,       float z3_dn,
+  float hurst_exp,
+  bool  ltf_at_extreme,
+  bool  burst_pct_high,
+  int   bwv_len,
+  int   bwz_len,
+  float bwv_sq_thresh,
+  float bwv_ex_thresh,
+  float arm_thresh,
+  int   cooldown_bars,
+  bool  prev_armed,
+  int   prev_arm_bar,
+  int   prev_cooldown_bar,
+  int   prev_low_counter,
+  float phi_div_score,
+  bool  phi_onset,
+  float mahal_dist,
+  float mahal_arm_thresh) =>
+
+    // ── Band widths ──────────────────────────────────────────────────────────
+    float innov_bw  = innov_upper - innov_lower
+    float z3_bw     = z3_up - z3_dn
+    float innov_bw_prev = nz(innov_bw[bwv_len], innov_bw)
+    float z3_bw_prev    = nz(z3_bw[bwv_len],    z3_bw)
+
+    // ── Band Width Velocity (fractional) ────────────────────────────────────
+    float i_bwv = innov_bw_prev > 1e-10 ? (innov_bw - innov_bw_prev) / innov_bw_prev : 0.0
+    float z_bwv = z3_bw_prev   > 1e-10 ? (z3_bw   - z3_bw_prev)   / z3_bw_prev   : 0.0
+
+    // ── Band Width Z-Score (own history) ────────────────────────────────────
+    float i_bwz_mean = ta.sma(innov_bw, bwz_len)
+    float i_bwz_std  = ta.stdev(innov_bw, bwz_len)
+    float i_bwz      = i_bwz_std > 1e-10 ? (innov_bw - i_bwz_mean) / i_bwz_std : 0.0
+
+    float z_bwz_mean = ta.sma(z3_bw, bwz_len)
+    float z_bwz_std  = ta.stdev(z3_bw, bwz_len)
+    float z_bwz      = z_bwz_std > 1e-10 ? (z3_bw - z_bwz_mean) / z_bwz_std : 0.0
+
+    // ── Component scores [0..1] ─────────────────────────────────────────────
+    float c1 = math.min(math.max(0.0, -i_bwv / math.max(bwv_sq_thresh, 1e-10)), 1.0)
+    float c2 = math.min(math.max(0.0, -z_bwv / math.max(bwv_sq_thresh, 1e-10)), 1.0)
+    float c3 = math.min(math.max(0.0, (-i_bwz + 1.0) / 3.5), 1.0)
+    float c4 = math.min(math.max(0.0, (-z_bwz + 1.0) / 3.5), 1.0)
+    float c5 = math.min(math.max(0.0, (0.5 - hurst_exp + 0.15) / 0.3), 1.0)
+
+    float score = c1 * 0.25 + c2 * 0.25 + c3 * 0.175 + c4 * 0.175 + c5 * 0.15
+
+    // ── Reactive confirms (phi + mahal gates added) ──────────────────────────
+    bool phi_gate    = phi_div_score > 0.4 or phi_onset
+    bool mahal_gate  = mahal_dist > mahal_arm_thresh
+    bool reactive    = ltf_at_extreme or burst_pct_high or (phi_gate and mahal_gate)
+
+    // ── Expansion flags ──────────────────────────────────────────────────────
+    bool sq_exp = (i_bwv > bwv_ex_thresh) or (z_bwv > bwv_ex_thresh)
+
+    // ── State machine ────────────────────────────────────────────────────────
+    bool new_armed          = prev_armed
+    int  new_arm_bar        = prev_arm_bar
+    int  new_cooldown_bar   = prev_cooldown_bar
+    int  new_low_counter    = prev_low_counter
+    bool fire               = false
+
+    // ARM: score OR (phi_onset + score > 0.4)
+    bool arm_cond = score >= arm_thresh or (phi_onset and score > arm_thresh * 0.7)
+    if not new_armed and arm_cond
+        new_armed   := true
+        new_arm_bar := bar_index
+
+    // FIRE: armed + expand confirmed + reactive + cooldown elapsed
+    bool expand_ok    = sq_exp and bar_index >= new_arm_bar + 2
+    bool cooldown_ok  = (bar_index - new_cooldown_bar) >= cooldown_bars
+    if new_armed and expand_ok and reactive and cooldown_ok
+        fire              := true
+        new_cooldown_bar  := bar_index
+        new_armed         := false
+
+    // RESET arm if score stays low >5 bars
+    if score < arm_thresh * 0.7
+        new_low_counter := new_low_counter + 1
+        if new_low_counter > 5
+            new_armed       := false
+            new_low_counter := 0
+    else
+        new_low_counter := 0
+
+    bool mahal_armed = mahal_dist > mahal_arm_thresh
+    SqzState res = SqzState.new(score, i_bwv, z_bwv, i_bwz, z_bwz, hurst_exp, new_armed, fire, sq_exp, phi_div_score, phi_onset, mahal_dist, mahal_armed)
+    [res, new_armed, new_arm_bar, new_cooldown_bar, new_low_counter]
+
+
+// @function Matrix-based Kalman Filter Update
+// @param X Current state vector (Nx1 matrix)
+// @param P Current covariance matrix (NxN matrix)
+// @param Z Measurement vector (Mx1 matrix)
+// @param F State transition matrix (NxN matrix)
+// @param H Measurement mapping matrix (MxN matrix)
+// @param Q Process noise covariance matrix (NxN matrix)
+// @param R Measurement noise covariance matrix (MxM matrix)
+// @returns [X_new, P_new] Updated state and covariance matrices
+export f_kalman_matrix_update(matrix<float> X, matrix<float> P, matrix<float> Z, matrix<float> F, matrix<float> H, matrix<float> Q, matrix<float> R) =>
+    matrix<float> X_pred = matrix.mult(F, X)
+    matrix<float> P_pred = matrix.sum(matrix.mult(matrix.mult(F, P), matrix.transpose(F)), Q)
+    matrix<float> S = matrix.sum(matrix.mult(matrix.mult(H, P_pred), matrix.transpose(H)), R)
+    matrix<float> K_mat = matrix.mult(matrix.mult(P_pred, matrix.transpose(H)), matrix.pinv(S))
+    matrix<float> Y = matrix.diff(Z, matrix.mult(H, X_pred))
+    matrix<float> X_new = matrix.sum(X_pred, matrix.mult(K_mat, Y))
+    
+    int n = matrix.rows(X)
+    matrix<float> I_mat = matrix.new<float>(n, n, 0.0)
+    for i = 0 to n - 1
+        matrix.set(I_mat, i, i, 1.0)
+        
+    matrix<float> P_new = matrix.mult(matrix.diff(I_mat, matrix.mult(K_mat, H)), P_pred)
+    [X_new, P_new]
+
+// @function Reversal Oscillator - Unified formula for mean-reversion signals
+// @param s Normalized extreme oscillator (z-score, recentered RSI, etc.) in [-1, 1]
+// @param v Velocity of s (e.g., EMA(Δs, 3-5))
+// @param p Edge sensitivity curvature (1.0-1.5, higher = sharper response at extremes)
+// @param q Mean-reversion damping speed (0.5-1.0, higher = faster decay to center)
+// @param tau Velocity scale (σ_v over last 20 bars, typical)
+// @returns Reversal signal x: bull extreme → x > 0 signals reversal down, bear extreme → x < 0 signals reversal up
+// @description Combines 4 approaches: (1) -sign(s) inverts so bull extreme → positive signal, (2) |s|^p amplifies edges, (3) (1-|s|^q) nullifies center, (4) sigm(-v/τ) adds confidence only when impulse is already against the extreme
+export f_reversal_osc(float s, float v, float p = 1.0, float q = 0.5, float tau = 1.0) =>
+    float s_abs = math.abs(s)
+    float s_sign = math.sign(s)
+    
+    // Edge amplification: |s|^p
+    float edge_factor = math.pow(s_abs, p)
+    
+    // Mean-reversion damping: (1 - |s|^q) nullifies signal at center
+    float damping_factor = 1.0 - math.pow(s_abs, q)
+    
+    // Velocity-based reversal confidence: sigm(-v/τ) = tanh(-v/(2τ))
+    // When v opposes s (e.g., s > 0 but v < 0), sigm(-v/τ) > 0, adding confidence
+    float tau_safe = math.max(tau, 1e-10)
+    float velocity_confidence = f_tanh(-v / (2.0 * tau_safe))
+    
+    // Final formula: x = -sign(s) * |s|^p * (1 - |s|^q) * sigm(-v/τ)
+    float x = -s_sign * edge_factor * damping_factor * velocity_confidence
+    x

@@ -1,0 +1,173 @@
+// @version=6
+// @description Builds the webhook JSON payload for VoltRouter — route TradingView alerts to IBKR, Alpaca, or Tradovate without running IB Gateway yourself. Supports market, limit, stop, stop-limit, bracket, trailing stop, and FLAT orders. Works with futures and equities. Setup: sign up at voltrouter.com, connect your broker, copy your API key, import this library, call the function matching your order type, paste the output into your alert webhook body. Docs and field reference: voltrouter.com/docs   v4: fixed outsideRth and extendedHours, removed cancel/cancelAll (use the dashboard or direct API instead).
+library("VoltRouterWebhook", overlay = false)
+
+// ─── Changelog ────────────────────────────────────────────────────────────────
+// v5 — Additions and fixes:
+//   NEW: bracketWithTrail() — bracket entry with trailing stop instead of fixed stop-loss.
+//   FIX: bracket() param doc removed erroneous "Mutually exclusive with trailingStopPercent" note.
+//   FIX: stopLimit() takeProfitPrice param clarified — this is the limit leg price, not a take-profit.
+//   FIX: library description removed stale v2 code example with incorrect param order.
+// v4 — Bug fixes:
+//   FIX: cancel() and cancelAll() removed — these are not supported via POST /volt.
+//        Use the dashboard or POST /volt/cancel and POST /volt/cancel-all directly.
+//   FIX: outsideRth parameter renamed to extendedHours across all functions.
+//        Emits "extended_hours" to match current API spec.
+// v3 — updated description
+// v2 (2025-04-25) — Breaking changes to match VoltRouter API v2 field spec.
+//   BREAKING: action values uppercased — BUY, SELL, FLAT, cancel, cancel-all
+//   BREAKING: order_type values uppercased — MARKET, LIMIT, STOP, STOP_LIMIT
+//   BREAKING: limit_price renamed to take_profit_price
+//   BREAKING: stop_price renamed to stop_loss_price
+//   BREAKING: broker parameter now comes before apiKey in all function signatures
+//   BREAKING: flat() — quantity parameter removed (ignored at execution time)
+//   NEW: stopLimit() function
+//   NEW: cancel() function
+//   NEW: expiry, outsideRth, clientOrderId, account params added to all functions
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+_ks(k, v) => '"' + k + '":"' + v + '"'
+_kn(k, v) => '"' + k + '":' + str.tostring(v)
+_kb(k, v) => '"' + k + '":' + (v ? 'true' : 'false')
+
+// ─── Optional field builders ──────────────────────────────────────────────────
+
+_opt_s(k, v) => v != "" ? ',' + _ks(k, v) : ""
+_opt_n(k, v, include) => include ? ',' + _kn(k, v) : ""
+_opt_b(k, v) => v ? ',' + _kb(k, v) : ""
+
+// ─── Exported functions ───────────────────────────────────────────────────────
+
+// @function market
+// @description Market order — executes immediately at best available price.
+// @param symbol Ticker symbol e.g. "MNQ", "ES", "AAPL". Futures symbol for IBKR; equity ticker for Alpaca.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry: YYYYMM (e.g. "202606") or CME code (e.g. "MNQM26"). Omit for front month. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours. IBKR and Alpaca. Defaults to false.
+// @param strategyId Tag for order modification and grouping. Appears in signal log.
+// @param clientOrderId Idempotency key — duplicate signals with the same key are discarded and not charged.
+// @param account Broker account label. Omit to use the primary account.
+// @returns JSON string ready to paste into a TradingView alert webhook body.
+export market(string symbol, string action, int quantity, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "MARKET") + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function limit
+// @description Limit order — rests at the specified price or better.
+// @param symbol Ticker symbol.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param takeProfitPrice Limit price (take profit).
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export limit(string symbol, string action, int quantity, float takeProfitPrice, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "LIMIT") + ',' + _kn("take_profit_price", takeProfitPrice) + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function stop
+// @description Stop order — triggers a market order when price crosses the stop level.
+// @param symbol Ticker symbol.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param stopLossPrice Price that triggers the stop-market order.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export stop(string symbol, string action, int quantity, float stopLossPrice, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "STOP") + ',' + _kn("stop_loss_price", stopLossPrice) + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function stopLimit
+// @description Stop-limit order — triggers a limit order when price crosses the stop level.
+// @param symbol Ticker symbol.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param takeProfitPrice Limit price once the stop triggers.
+// @param stopLossPrice Stop trigger price.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export stopLimit(string symbol, string action, int quantity, float takeProfitPrice, float stopLossPrice, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "STOP_LIMIT") + ',' + _kn("take_profit_price", takeProfitPrice) + ',' + _kn("stop_loss_price", stopLossPrice) + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function bracket
+// @description Bracket order — entry with take-profit limit and stop-loss stop in a single signal.
+// @param symbol Ticker symbol.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param takeProfitPrice Take-profit price. Fills as a limit order.
+// @param stopLossPrice Stop-loss price. Triggers as a stop-market. Mutually exclusive with trailingStopPercent.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export bracket(string symbol, string action, int quantity, float takeProfitPrice, float stopLossPrice, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "MARKET") + ',' + _kn("take_profit_price", takeProfitPrice) + ',' + _kn("stop_loss_price", stopLossPrice) + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function bracketWithTrail
+// @description Bracket order with a trailing stop instead of a fixed stop-loss.
+// @param symbol Ticker symbol.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param takeProfitPrice Take-profit limit price.
+// @param trailPercent Trailing stop distance as a percentage e.g. 1.5 = 1.5%.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export bracketWithTrail(string symbol, string action, int quantity, float takeProfitPrice, float trailPercent, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "MARKET") + ',' + _kn("take_profit_price", takeProfitPrice) + ',' + _kn("trailing_stop_percent", trailPercent) + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function trailingStop
+// @description Trailing stop — stop trails the market by a percentage. Mutually exclusive with stop_loss_price.
+// @param symbol Ticker symbol.
+// @param action "BUY" or "SELL"
+// @param quantity Number of contracts or shares.
+// @param trailPercent Trail amount as a percentage (0.1–100). e.g. 1.5 = 1.5%.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param expiry Contract expiry. IBKR futures only.
+// @param extendedHours Allow fill outside regular trading hours.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export trailingStop(string symbol, string action, int quantity, float trailPercent, string broker, string apiKey, string expiry = "", bool extendedHours = false, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", action) + ',' + _kn("quantity", quantity) + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + ',' + _ks("order_type", "MARKET") + ',' + _kn("trailing_stop_percent", trailPercent) + _opt_s("expiry", expiry) + _opt_b("extended_hours", extendedHours) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'
+
+// @function flat
+// @description FLAT — closes the entire position for the symbol immediately.
+// @param symbol Ticker symbol.
+// @param broker Target broker: "ibkr" | "alpaca" | "tradovate".
+// @param apiKey Your VoltRouter API key.
+// @param strategyId Optional strategy tag.
+// @param clientOrderId Idempotency key.
+// @param account Broker account label.
+// @returns JSON string.
+export flat(string symbol, string broker, string apiKey, string strategyId = "", string clientOrderId = "", string account = "") =>
+    '{' + _ks("symbol", symbol) + ',' + _ks("action", "FLAT") + ',' + _ks("broker", broker) + ',' + _ks("api_key", apiKey) + _opt_s("strategy_id", strategyId) + _opt_s("client_order_id", clientOrderId) + _opt_s("account", account) + '}'

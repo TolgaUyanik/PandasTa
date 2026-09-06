@@ -1,0 +1,130 @@
+//@version=5
+strategy("NASDAQ ORB Strategy - Strict Exec (RRR 2.0) Fixed", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=true)
+
+// --- INPUTS ---
+float rvol_threshold = input.float(1.5, title="Minimálne RVOL pre vstup", step=0.1)
+float rrr             = input.float(2.0, title="Risk Reward Ratio (RRR)", step=0.1) // ZMENENÉ: Predvolené RRR nastavené na 2.0
+
+// --- Time Extraction (Vždy vynútený New York čas) ---
+ny_hour   = hour(time, "America/New_York")
+ny_minute = minute(time, "America/New_York")
+
+// Definícia obchodných okien (NY čas)
+is_orb_window   = (ny_hour == 9 and ny_minute >= 30 and ny_minute < 45)
+is_trade_window = (ny_hour == 9 and ny_minute >= 45) or (ny_hour > 9 and ny_hour < 16)
+
+// --- STATE VARIABLES ---
+var float orb_high = na
+var float orb_low = na
+var float orb_mid = na
+var bool orb_locked = false
+var bool trade_taken_today = false
+
+// UI a grafické prvky
+var box profit_box = na
+var box risk_box = na
+var table rvol_table = table.new(position.top_right, 1, 1)
+
+// Per-trade persistence variables for boxes
+var float current_tp = na
+var float current_sl = na
+var float current_entry = na
+
+// Reset hladín presne o 09:30 AM NY času
+if ny_hour == 9 and ny_minute == 30
+    orb_high := high
+    orb_low := low
+    orb_mid := na
+    orb_locked := false
+    trade_taken_today := false
+else if is_orb_window
+    orb_high := math.max(high, orb_high)
+    orb_low := math.min(low, orb_low)
+
+// Uzamknutie pásma o 09:45 AM NY času
+if ny_hour == 9 and ny_minute == 45 and not orb_locked
+    orb_mid := (orb_high + orb_low) / 2
+    orb_locked := true
+
+// --- STABILNÝ RVOL VÝPOČET ---
+vol_sma = ta.sma(volume, 20)
+rvol = not na(vol_sma) and vol_sma > 0 ? volume / vol_sma : 1.0
+
+// --- UI DASHBOARD ---
+color cell_color = rvol >= rvol_threshold ? color.new(color.green, 20) : color.new(color.red, 20)
+if barstate.islast
+    table.cell(rvol_table, 0, 0, text="RVOL: " + str.tostring(rvol, "#.##"), text_color=color.white, bgcolor=cell_color, text_size=size.normal)
+
+// --- PLOTTING ---
+plot(orb_locked and is_trade_window ? orb_high : na, title="ORB High", color=color.white, linewidth=2, style=plot.style_linebr)
+plot(orb_locked and is_trade_window ? orb_low : na, title="ORB Low", color=color.white, linewidth=2, style=plot.style_linebr)
+plot(orb_locked and is_trade_window ? orb_mid : na, title="ORB Mid (SL)", color=color.yellow, linewidth=2, style=plot.style_linebr)
+
+// --- EXECUTION ENGINE ---
+can_trade = is_trade_window and orb_locked and not trade_taken_today and strategy.position_size == 0
+
+// Striktné kríženie hladín na uzatvorení sviečke
+is_breaking_high = ta.crossover(close, orb_high)
+is_breaking_low  = ta.crossunder(close, orb_low)
+
+if can_trade
+    // STRATÉGIA: LONG
+    if is_breaking_high
+        if rvol >= rvol_threshold
+            long_sl = orb_mid
+            long_risk = close - long_sl
+            long_tp = close + (long_risk * rrr)
+            
+            current_entry := close
+            current_sl := long_sl
+            current_tp := long_tp
+            
+            strategy.entry("Long ORB", strategy.long)
+            strategy.exit("Exit Long", "Long ORB", stop=long_sl, limit=long_tp)
+            
+            alert('{"action": "buy", "symbol": "NQ", "sl": ' + str.tostring(long_sl) + ', "tp": ' + str.tostring(long_tp) + '}', alert.freq_once_per_bar_close)
+
+            profit_box := box.new(left=bar_index, top=long_tp, right=bar_index, bottom=close, bgcolor=color.new(color.blue, 85), border_color=color.blue)
+            risk_box := box.new(left=bar_index, top=close, right=bar_index, bottom=long_sl, bgcolor=color.new(color.purple, 85), border_color=color.purple)
+            
+            trade_taken_today := true
+
+    // STRATÉGIA: SHORT
+    else if is_breaking_low
+        if rvol >= rvol_threshold
+            short_sl = orb_mid
+            short_risk = short_sl - close
+            short_tp = close - (short_risk * rrr)
+            
+            current_entry := close
+            current_sl := short_sl
+            current_tp := short_tp
+            
+            strategy.entry("Short ORB", strategy.short)
+            strategy.exit("Exit Short", "Short ORB", stop=short_sl, limit=short_tp)
+            
+            alert('{"action": "sell", "symbol": "NQ", "sl": ' + str.tostring(short_sl) + ', "tp": ' + str.tostring(short_tp) + '}', alert.freq_once_per_bar_close)
+
+            profit_box := box.new(left=bar_index, top=close, right=bar_index, bottom=short_tp, bgcolor=color.new(color.blue, 85), border_color=color.blue)
+            risk_box := box.new(left=bar_index, top=short_sl, right=bar_index, bottom=close, bgcolor=color.new(color.purple, 85), border_color=color.purple)
+            
+            trade_taken_today := true
+
+// Aktualizácia vizuálnych boxov počas obchodu
+if strategy.position_size != 0
+    box.set_right(profit_box, bar_index)
+    box.set_right(risk_box, bar_index)
+    if strategy.position_size > 0
+        box.set_top(profit_box, current_tp)
+        box.set_bottom(profit_box, current_entry)
+        box.set_top(risk_box, current_entry)
+        box.set_bottom(risk_box, current_sl)
+    else if strategy.position_size < 0
+        box.set_top(profit_box, current_entry)
+        box.set_bottom(profit_box, current_tp)
+        box.set_top(risk_box, current_sl)
+        box.set_bottom(risk_box, current_entry)
+
+// Nútené uzavretie všetkých pozícií na konci dňa (16:00 NY času)
+if ny_hour == 16 and ny_minute == 0
+    strategy.close_all("EOD Close")

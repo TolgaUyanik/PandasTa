@@ -1,0 +1,848 @@
+//@version=6
+strategy(
+     title                   = "Scam or Slam - Day Trading Rauf Strategy",
+     shorttitle              = "Day Trading Rauf",
+     overlay                 = true,
+     initial_capital         = 50000,
+     currency                = currency.USD,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     pyramiding              = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     margin_long             = 0,
+     margin_short            = 0,
+     max_labels_count        = 500,
+     max_lines_count         = 500)
+
+//──────────────────────────────────────────────────────────────────────────────
+// GROUPS
+//──────────────────────────────────────────────────────────────────────────────
+
+groupRange  = "01. Time-Based Ranges"
+groupEntry  = "02. Entry Confirmation"
+groupRisk   = "03. Risk Management"
+groupTrade  = "04. Trade Management"
+groupVisual = "05. Visuals"
+
+//──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+//──────────────────────────────────────────────────────────────────────────────
+
+tradeTz = input.string(
+     defval  = "America/New_York",
+     title   = "Timezone",
+     group   = groupRange,
+     tooltip = "Timezone used for both time-based ranges, the daily reset, and the forced close. Default is New York time.")
+
+useLondonRange = input.bool(
+     defval  = true,
+     title   = "Trade London Range",
+     group   = groupRange,
+     tooltip = "Builds and trades the 1:12 to 2:12 time-based range when enabled.")
+
+londonRangeSession = input.session(
+     defval  = "0112-0212",
+     title   = "London Range Time",
+     group   = groupRange,
+     tooltip = "The time window used to build the London range. Default is 1:12 to 2:12 New York time.")
+
+useNyRange = input.bool(
+     defval  = true,
+     title   = "Trade New York Range",
+     group   = groupRange,
+     tooltip = "Builds and trades the 8:12 to 9:12 time-based range when enabled.")
+
+nyRangeSession = input.session(
+     defval  = "0812-0912",
+     title   = "New York Range Time",
+     group   = groupRange,
+     tooltip = "The time window used to build the New York range. Default is 8:12 to 9:12 New York time.")
+
+sameBarSweepMode = input.string(
+     defval  = "Ignore Same-Bar Double Sweep",
+     title   = "Same-Bar Double Sweep Handling",
+     options = ["Ignore Same-Bar Double Sweep", "Use Candle Close Direction"],
+     group   = groupRange,
+     tooltip = "Controls what happens if one candle sweeps both sides of the range. Ignoring is the cleanest option because OHLC data cannot prove which side was swept first.")
+
+entryMode = input.string(
+     defval  = "3 Candle Reversal",
+     title   = "Entry Confirmation",
+     options = ["3 Candle Reversal", "CHoCH", "IFVG", "Any Confirmation"],
+     group   = groupEntry,
+     tooltip = "Entry trigger after a range sweep. 3 Candle Reversal uses the transcript model. CHoCH uses a close through structure. IFVG uses an inversion close. Any Confirmation allows any of the three.")
+
+chochSwingLen = input.int(
+     defval  = 3,
+     title   = "CHoCH Swing Length",
+     minval  = 1,
+     group   = groupEntry,
+     tooltip = "Swing length used for CHoCH. Longs require a close above the latest confirmed swing high. Shorts require a close below the latest confirmed swing low.")
+
+stopMode = input.string(
+     defval  = "Sweep Extreme + Tick Buffer",
+     title   = "Stop Loss Mode",
+     options = ["Sweep Extreme + Tick Buffer", "Sweep Extreme", "ATR Stop", "Fixed Points"],
+     group   = groupRisk,
+     tooltip = "Controls stop placement. Default places the stop beyond the sweep high/low plus a tick buffer.")
+
+tickBuffer = input.int(
+     defval  = 4,
+     title   = "Sweep Stop Buffer - Ticks",
+     minval  = 0,
+     group   = groupRisk,
+     tooltip = "Extra ticks beyond the sweep extreme when using Sweep Extreme + Tick Buffer.")
+
+atrLen = input.int(
+     defval  = 14,
+     title   = "ATR Length",
+     minval  = 1,
+     group   = groupRisk,
+     tooltip = "ATR length used when Stop Loss Mode is set to ATR Stop.")
+
+atrMult = input.float(
+     defval  = 1.5,
+     title   = "ATR Multiplier",
+     minval  = 0.1,
+     step    = 0.1,
+     group   = groupRisk,
+     tooltip = "ATR multiplier used when Stop Loss Mode is set to ATR Stop.")
+
+fixedSlPoints = input.float(
+     defval  = 20.0,
+     title   = "Fixed Stop - Points",
+     minval  = 0.01,
+     step    = 0.25,
+     group   = groupRisk,
+     tooltip = "Fixed stop distance in points when Stop Loss Mode is set to Fixed Points.")
+
+takeProfitMode = input.string(
+     defval  = "Opposite Range Side",
+     title   = "Take Profit Mode",
+     options = ["Opposite Range Side", "Fixed R:R", "Fixed Points", "Opposite Range Side + Min R:R Filter"],
+     group   = groupRisk,
+     tooltip = "Controls target placement. Default targets the opposite side of the time-based range.")
+
+rrTarget = input.float(
+     defval  = 2.0,
+     title   = "Fixed R:R Target",
+     minval  = 0.1,
+     step    = 0.1,
+     group   = groupRisk,
+     tooltip = "Reward-to-risk target when Take Profit Mode is set to Fixed R:R.")
+
+fixedTpPoints = input.float(
+     defval  = 40.0,
+     title   = "Fixed Target - Points",
+     minval  = 0.01,
+     step    = 0.25,
+     group   = groupRisk,
+     tooltip = "Fixed target distance in points when Take Profit Mode is set to Fixed Points.")
+
+minRR = input.float(
+     defval  = 1.0,
+     title   = "Minimum R:R Filter",
+     minval  = 0.1,
+     step    = 0.1,
+     group   = groupRisk,
+     tooltip = "Minimum reward-to-risk required when Take Profit Mode is Opposite Range Side + Min R:R Filter.")
+
+tradeFrequency = input.string(
+     defval  = "1 Trade Per Range",
+     title   = "Trade Frequency",
+     options = ["1 Trade Per Range", "1 Long + 1 Short Per Range", "Unlimited Trades After Every Sweep", "1 Trade Per Day Total"],
+     group   = groupTrade,
+     tooltip = "Controls how many trades can be taken. Default allows one trade from each completed range.")
+
+entryHandlingMode = input.string(
+     defval  = "Take Every Signal - Close Current Trade First",
+     title   = "Backtest Entry Handling",
+     options = ["Take Every Signal - Close Current Trade First", "Only Enter When Flat"],
+     group   = groupTrade,
+     tooltip = "Controls whether a new valid signal can become a backtest trade while another trade is open. Take Every Signal closes the current trade immediately and opens the new one, so the Strategy Tester follows every visible strategy signal. Only Enter When Flat ignores new signals while a trade is already open.")
+
+useForceClose = input.bool(
+     defval  = true,
+     title   = "Use Forced Close",
+     group   = groupTrade,
+     tooltip = "Closes any open position at the selected time.")
+
+forceCloseHour = input.int(
+     defval  = 16,
+     title   = "Forced Close Hour",
+     minval  = 0,
+     maxval  = 23,
+     group   = groupTrade,
+     tooltip = "Forced close hour, based on the selected timezone.")
+
+forceCloseMinute = input.int(
+     defval  = 0,
+     title   = "Forced Close Minute",
+     minval  = 0,
+     maxval  = 59,
+     group   = groupTrade,
+     tooltip = "Forced close minute, based on the selected timezone.")
+
+showRanges = input.bool(
+     defval  = true,
+     title   = "Show Range High/Low",
+     group   = groupVisual,
+     tooltip = "Plots the locked high and low of each completed time-based range.")
+
+showSignals = input.bool(
+     defval  = true,
+     title   = "Show Entry Markers",
+     group   = groupVisual,
+     tooltip = "Plots custom entry markers only when a real strategy.entry order is submitted. These markers are synced with the backtest entries.")
+
+showTradeLevels = input.bool(
+     defval  = true,
+     title   = "Show Entry / Stop / Target Lines",
+     group   = groupVisual,
+     tooltip = "Draws manual entry, stop loss, and take profit lines on the chart. This makes the trade levels visible even if TradingView's native strategy trade markers are hidden.")
+
+showDebugLevels = input.bool(
+     defval  = false,
+     title   = "Show Debug Levels",
+     group   = groupVisual,
+     tooltip = "Shows the active 3-candle reversal and IFVG trigger levels.")
+
+//──────────────────────────────────────────────────────────────────────────────
+// CORE CALCULATIONS
+//──────────────────────────────────────────────────────────────────────────────
+
+atrValue = ta.atr(atrLen)
+
+nyYear  = year(time, tradeTz)
+nyMonth = month(time, tradeTz)
+nyDay   = dayofmonth(time, tradeTz)
+nyDate  = nyYear * 10000 + nyMonth * 100 + nyDay
+newNyDay = na(nyDate[1]) or nyDate != nyDate[1]
+
+forceCloseTimestamp = timestamp(tradeTz, nyYear, nyMonth, nyDay, forceCloseHour, forceCloseMinute)
+
+pivotHigh = ta.pivothigh(high, chochSwingLen, chochSwingLen)
+pivotLow  = ta.pivotlow(low, chochSwingLen, chochSwingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+
+bullishFvg = low > high[2]
+bearishFvg = high < low[2]
+
+bearishCandle = close < open
+bullishCandle = close > open
+
+threeBearishCandles = bearishCandle and bearishCandle[1] and bearishCandle[2]
+threeBullishCandles = bullishCandle and bullishCandle[1] and bullishCandle[2]
+
+//──────────────────────────────────────────────────────────────────────────────
+// FUNCTIONS
+//──────────────────────────────────────────────────────────────────────────────
+
+f_stop(_isLong, _entry, _sweepExtreme) =>
+    float _sl = na
+
+    if stopMode == "Sweep Extreme + Tick Buffer"
+        _sl := _isLong ? _sweepExtreme - (tickBuffer * syminfo.mintick) : _sweepExtreme + (tickBuffer * syminfo.mintick)
+
+    else if stopMode == "Sweep Extreme"
+        _sl := _sweepExtreme
+
+    else if stopMode == "ATR Stop"
+        _sl := _isLong ? _entry - (atrValue * atrMult) : _entry + (atrValue * atrMult)
+
+    else if stopMode == "Fixed Points"
+        _sl := _isLong ? _entry - fixedSlPoints : _entry + fixedSlPoints
+
+    _sl
+
+f_target(_isLong, _entry, _sl, _rangeHigh, _rangeLow) =>
+    float _tp = na
+    float _risk = _isLong ? _entry - _sl : _sl - _entry
+
+    if takeProfitMode == "Opposite Range Side" or takeProfitMode == "Opposite Range Side + Min R:R Filter"
+        _tp := _isLong ? _rangeHigh : _rangeLow
+
+    else if takeProfitMode == "Fixed R:R"
+        _tp := _isLong ? _entry + (_risk * rrTarget) : _entry - (_risk * rrTarget)
+
+    else if takeProfitMode == "Fixed Points"
+        _tp := _isLong ? _entry + fixedTpPoints : _entry - fixedTpPoints
+
+    _tp
+
+f_validTrade(_isLong, _entry, _sl, _tp) =>
+    float _risk = _isLong ? _entry - _sl : _sl - _entry
+    float _reward = _isLong ? _tp - _entry : _entry - _tp
+    float _rr = _risk > 0 ? _reward / _risk : na
+    bool _minRrOk = takeProfitMode != "Opposite Range Side + Min R:R Filter" or (_rr >= minRR)
+
+    not na(_sl) and not na(_tp) and _risk > 0 and _reward > 0 and _minRrOk
+
+f_canTakeTrade(_isLong, _tradedAny, _tradedLong, _tradedShort, _dailyTradeTaken) =>
+    bool _canTrade = false
+
+    if tradeFrequency == "Unlimited Trades After Every Sweep"
+        _canTrade := true
+
+    else if tradeFrequency == "1 Trade Per Range"
+        _canTrade := not _tradedAny
+
+    else if tradeFrequency == "1 Long + 1 Short Per Range"
+        _canTrade := _isLong ? not _tradedLong : not _tradedShort
+
+    else if tradeFrequency == "1 Trade Per Day Total"
+        _canTrade := not _dailyTradeTaken
+
+    _canTrade
+
+f_confirmationAllowed(_threeTrigger, _chochTrigger, _ifvgTrigger) =>
+    bool _allowed = false
+
+    if entryMode == "3 Candle Reversal"
+        _allowed := _threeTrigger
+
+    else if entryMode == "CHoCH"
+        _allowed := _chochTrigger
+
+    else if entryMode == "IFVG"
+        _allowed := _ifvgTrigger
+
+    else if entryMode == "Any Confirmation"
+        _allowed := _threeTrigger or _chochTrigger or _ifvgTrigger
+
+    _allowed
+
+//──────────────────────────────────────────────────────────────────────────────
+// STATE VARIABLES
+//──────────────────────────────────────────────────────────────────────────────
+
+var float ldnHigh = na
+var float ldnLow = na
+var bool  ldnRangeReady = false
+var int   ldnSetupSide = 0
+var float ldnSweepExtreme = na
+var int   ldnSetupBar = na
+var float ldnThreeLevel = na
+var float ldnIfvgLevel = na
+var bool  ldnTradedAny = false
+var bool  ldnTradedLong = false
+var bool  ldnTradedShort = false
+
+var float nyrHigh = na
+var float nyrLow = na
+var bool  nyrRangeReady = false
+var int   nyrSetupSide = 0
+var float nyrSweepExtreme = na
+var int   nyrSetupBar = na
+var float nyrThreeLevel = na
+var float nyrIfvgLevel = na
+var bool  nyrTradedAny = false
+var bool  nyrTradedLong = false
+var bool  nyrTradedShort = false
+
+var bool dailyTradeTaken = false
+var bool forceCloseDone = false
+
+var float activeEntryPrice = na
+var float activeStopPrice = na
+var float activeTargetPrice = na
+var int   activeDirection = 0
+
+var line  activeEntryLine = na
+var line  activeStopLine = na
+var line  activeTargetLine = na
+
+if newNyDay
+    ldnHigh := na
+    ldnLow := na
+    ldnRangeReady := false
+    ldnSetupSide := 0
+    ldnSweepExtreme := na
+    ldnSetupBar := na
+    ldnThreeLevel := na
+    ldnIfvgLevel := na
+    ldnTradedAny := false
+    ldnTradedLong := false
+    ldnTradedShort := false
+
+    nyrHigh := na
+    nyrLow := na
+    nyrRangeReady := false
+    nyrSetupSide := 0
+    nyrSweepExtreme := na
+    nyrSetupBar := na
+    nyrThreeLevel := na
+    nyrIfvgLevel := na
+    nyrTradedAny := false
+    nyrTradedLong := false
+    nyrTradedShort := false
+
+    dailyTradeTaken := false
+    forceCloseDone := false
+
+ldnLongEntrySignal = false
+ldnShortEntrySignal = false
+nyrLongEntrySignal = false
+nyrShortEntrySignal = false
+
+//──────────────────────────────────────────────────────────────────────────────
+// RANGE BUILDING
+//──────────────────────────────────────────────────────────────────────────────
+
+ldnInSession = useLondonRange and not na(time(timeframe.period, londonRangeSession, tradeTz))
+nyrInSession = useNyRange and not na(time(timeframe.period, nyRangeSession, tradeTz))
+
+ldnSessionStart = ldnInSession and not (ldnInSession[1] == true)
+ldnSessionEnd   = not ldnInSession and (ldnInSession[1] == true)
+
+nyrSessionStart = nyrInSession and not (nyrInSession[1] == true)
+nyrSessionEnd   = not nyrInSession and (nyrInSession[1] == true)
+
+if ldnSessionStart
+    ldnHigh := high
+    ldnLow := low
+    ldnRangeReady := false
+    ldnSetupSide := 0
+    ldnSweepExtreme := na
+    ldnSetupBar := na
+    ldnThreeLevel := na
+    ldnIfvgLevel := na
+
+if ldnInSession
+    ldnHigh := na(ldnHigh) ? high : math.max(ldnHigh, high)
+    ldnLow := na(ldnLow) ? low : math.min(ldnLow, low)
+
+if ldnSessionEnd and not na(ldnHigh) and not na(ldnLow)
+    ldnRangeReady := true
+    ldnSetupSide := 0
+    ldnSweepExtreme := na
+    ldnSetupBar := na
+    ldnThreeLevel := na
+    ldnIfvgLevel := na
+
+if nyrSessionStart
+    nyrHigh := high
+    nyrLow := low
+    nyrRangeReady := false
+    nyrSetupSide := 0
+    nyrSweepExtreme := na
+    nyrSetupBar := na
+    nyrThreeLevel := na
+    nyrIfvgLevel := na
+
+if nyrInSession
+    nyrHigh := na(nyrHigh) ? high : math.max(nyrHigh, high)
+    nyrLow := na(nyrLow) ? low : math.min(nyrLow, low)
+
+if nyrSessionEnd and not na(nyrHigh) and not na(nyrLow)
+    nyrRangeReady := true
+    nyrSetupSide := 0
+    nyrSweepExtreme := na
+    nyrSetupBar := na
+    nyrThreeLevel := na
+    nyrIfvgLevel := na
+
+//──────────────────────────────────────────────────────────────────────────────
+// FORCED CLOSE
+//──────────────────────────────────────────────────────────────────────────────
+
+forceCloseNow = useForceClose and not forceCloseDone and time >= forceCloseTimestamp
+
+if forceCloseNow
+    strategy.close_all(comment = "Forced Close")
+    forceCloseDone := true
+
+    ldnSetupSide := 0
+    ldnSweepExtreme := na
+    ldnSetupBar := na
+    ldnThreeLevel := na
+    ldnIfvgLevel := na
+
+    nyrSetupSide := 0
+    nyrSweepExtreme := na
+    nyrSetupBar := na
+    nyrThreeLevel := na
+    nyrIfvgLevel := na
+
+//──────────────────────────────────────────────────────────────────────────────
+// SWEEP DETECTION
+//──────────────────────────────────────────────────────────────────────────────
+
+ldnCanSearchForSweep = useLondonRange and ldnRangeReady and not ldnInSession and not forceCloseDone
+
+if ldnCanSearchForSweep
+    bool ldnHighSweepEvent = high > ldnHigh
+    bool ldnLowSweepEvent  = low < ldnLow
+
+    if ldnHighSweepEvent or ldnLowSweepEvent
+        int ldnNewSide = 0
+        float ldnNewExtreme = na
+
+        if ldnHighSweepEvent and ldnLowSweepEvent
+            if sameBarSweepMode == "Use Candle Close Direction"
+                float ldnMid = (ldnHigh + ldnLow) / 2.0
+                ldnNewSide := close >= ldnMid ? 1 : -1
+                ldnNewExtreme := ldnNewSide == 1 ? low : high
+            else
+                ldnSetupSide := 0
+                ldnSweepExtreme := na
+                ldnSetupBar := na
+                ldnThreeLevel := na
+                ldnIfvgLevel := na
+
+        else if ldnLowSweepEvent
+            ldnNewSide := 1
+            ldnNewExtreme := low
+
+        else if ldnHighSweepEvent
+            ldnNewSide := -1
+            ldnNewExtreme := high
+
+        if ldnNewSide != 0 and ldnNewSide != ldnSetupSide
+            ldnSetupSide := ldnNewSide
+            ldnSweepExtreme := ldnNewExtreme
+            ldnSetupBar := bar_index
+            ldnThreeLevel := na
+            ldnIfvgLevel := na
+
+        else if ldnNewSide == ldnSetupSide
+            ldnSweepExtreme := ldnSetupSide == 1 ? math.min(ldnSweepExtreme, ldnNewExtreme) : math.max(ldnSweepExtreme, ldnNewExtreme)
+
+nyrCanSearchForSweep = useNyRange and nyrRangeReady and not nyrInSession and not forceCloseDone
+
+if nyrCanSearchForSweep
+    bool nyrHighSweepEvent = high > nyrHigh
+    bool nyrLowSweepEvent  = low < nyrLow
+
+    if nyrHighSweepEvent or nyrLowSweepEvent
+        int nyrNewSide = 0
+        float nyrNewExtreme = na
+
+        if nyrHighSweepEvent and nyrLowSweepEvent
+            if sameBarSweepMode == "Use Candle Close Direction"
+                float nyrMid = (nyrHigh + nyrLow) / 2.0
+                nyrNewSide := close >= nyrMid ? 1 : -1
+                nyrNewExtreme := nyrNewSide == 1 ? low : high
+            else
+                nyrSetupSide := 0
+                nyrSweepExtreme := na
+                nyrSetupBar := na
+                nyrThreeLevel := na
+                nyrIfvgLevel := na
+
+        else if nyrLowSweepEvent
+            nyrNewSide := 1
+            nyrNewExtreme := low
+
+        else if nyrHighSweepEvent
+            nyrNewSide := -1
+            nyrNewExtreme := high
+
+        if nyrNewSide != 0 and nyrNewSide != nyrSetupSide
+            nyrSetupSide := nyrNewSide
+            nyrSweepExtreme := nyrNewExtreme
+            nyrSetupBar := bar_index
+            nyrThreeLevel := na
+            nyrIfvgLevel := na
+
+        else if nyrNewSide == nyrSetupSide
+            nyrSweepExtreme := nyrSetupSide == 1 ? math.min(nyrSweepExtreme, nyrNewExtreme) : math.max(nyrSweepExtreme, nyrNewExtreme)
+
+//──────────────────────────────────────────────────────────────────────────────
+// CONFIRMATION LEVEL UPDATES
+//──────────────────────────────────────────────────────────────────────────────
+
+if ldnSetupSide == 1 and not na(ldnSetupBar) and bar_index - ldnSetupBar >= 3 and threeBearishCandles
+    ldnThreeLevel := math.max(high, math.max(high[1], high[2]))
+
+if ldnSetupSide == -1 and not na(ldnSetupBar) and bar_index - ldnSetupBar >= 3 and threeBullishCandles
+    ldnThreeLevel := math.min(low, math.min(low[1], low[2]))
+
+if ldnSetupSide == 1 and not na(ldnSetupBar) and bar_index - ldnSetupBar >= 2 and bearishFvg
+    ldnIfvgLevel := low[2]
+
+if ldnSetupSide == -1 and not na(ldnSetupBar) and bar_index - ldnSetupBar >= 2 and bullishFvg
+    ldnIfvgLevel := high[2]
+
+if nyrSetupSide == 1 and not na(nyrSetupBar) and bar_index - nyrSetupBar >= 3 and threeBearishCandles
+    nyrThreeLevel := math.max(high, math.max(high[1], high[2]))
+
+if nyrSetupSide == -1 and not na(nyrSetupBar) and bar_index - nyrSetupBar >= 3 and threeBullishCandles
+    nyrThreeLevel := math.min(low, math.min(low[1], low[2]))
+
+if nyrSetupSide == 1 and not na(nyrSetupBar) and bar_index - nyrSetupBar >= 2 and bearishFvg
+    nyrIfvgLevel := low[2]
+
+if nyrSetupSide == -1 and not na(nyrSetupBar) and bar_index - nyrSetupBar >= 2 and bullishFvg
+    nyrIfvgLevel := high[2]
+
+//──────────────────────────────────────────────────────────────────────────────
+// ENTRY TRIGGERS
+//──────────────────────────────────────────────────────────────────────────────
+
+ldnSetupIsValid = not na(ldnSetupBar) and bar_index > ldnSetupBar
+
+ldnThreeLongTrigger  = ldnSetupIsValid and ldnSetupSide == 1 and not na(ldnThreeLevel) and close > ldnThreeLevel
+ldnThreeShortTrigger = ldnSetupIsValid and ldnSetupSide == -1 and not na(ldnThreeLevel) and close < ldnThreeLevel
+
+ldnChochLongTrigger  = ldnSetupIsValid and ldnSetupSide == 1 and not na(lastSwingHigh) and close > lastSwingHigh
+ldnChochShortTrigger = ldnSetupIsValid and ldnSetupSide == -1 and not na(lastSwingLow) and close < lastSwingLow
+
+ldnIfvgLongTrigger  = ldnSetupIsValid and ldnSetupSide == 1 and not na(ldnIfvgLevel) and close > ldnIfvgLevel
+ldnIfvgShortTrigger = ldnSetupIsValid and ldnSetupSide == -1 and not na(ldnIfvgLevel) and close < ldnIfvgLevel
+
+ldnLongTrigger = ldnSetupSide == 1 and f_confirmationAllowed(ldnThreeLongTrigger, ldnChochLongTrigger, ldnIfvgLongTrigger)
+ldnShortTrigger = ldnSetupSide == -1 and f_confirmationAllowed(ldnThreeShortTrigger, ldnChochShortTrigger, ldnIfvgShortTrigger)
+
+nyrSetupIsValid = not na(nyrSetupBar) and bar_index > nyrSetupBar
+
+nyrThreeLongTrigger  = nyrSetupIsValid and nyrSetupSide == 1 and not na(nyrThreeLevel) and close > nyrThreeLevel
+nyrThreeShortTrigger = nyrSetupIsValid and nyrSetupSide == -1 and not na(nyrThreeLevel) and close < nyrThreeLevel
+
+nyrChochLongTrigger  = nyrSetupIsValid and nyrSetupSide == 1 and not na(lastSwingHigh) and close > lastSwingHigh
+nyrChochShortTrigger = nyrSetupIsValid and nyrSetupSide == -1 and not na(lastSwingLow) and close < lastSwingLow
+
+nyrIfvgLongTrigger  = nyrSetupIsValid and nyrSetupSide == 1 and not na(nyrIfvgLevel) and close > nyrIfvgLevel
+nyrIfvgShortTrigger = nyrSetupIsValid and nyrSetupSide == -1 and not na(nyrIfvgLevel) and close < nyrIfvgLevel
+
+nyrLongTrigger = nyrSetupSide == 1 and f_confirmationAllowed(nyrThreeLongTrigger, nyrChochLongTrigger, nyrIfvgLongTrigger)
+nyrShortTrigger = nyrSetupSide == -1 and f_confirmationAllowed(nyrThreeShortTrigger, nyrChochShortTrigger, nyrIfvgShortTrigger)
+
+//──────────────────────────────────────────────────────────────────────────────
+// ORDERS
+//──────────────────────────────────────────────────────────────────────────────
+// IMPORTANT:
+// Custom arrows, manual entry lines, stop lines, and target lines are only created
+// after strategy.entry() is submitted. This keeps visible chart entries synced
+// with Strategy Tester entries. V5 also disables TradingView's notional margin
+// liquidation by setting margin_long and margin_short to 0 in strategy().
+
+
+flatForNewEntry = strategy.position_size == 0 and strategy.opentrades == 0
+canEnterNow = not forceCloseDone and (entryHandlingMode == "Take Every Signal - Close Current Trade First" or flatForNewEntry)
+
+var bool entryPlacedThisBar = false
+entryPlacedThisBar := false
+
+
+if canEnterNow and not entryPlacedThisBar and ldnLongTrigger and f_canTakeTrade(true, ldnTradedAny, ldnTradedLong, ldnTradedShort, dailyTradeTaken)
+    float entryPrice = close
+    float stopPrice = f_stop(true, entryPrice, ldnSweepExtreme)
+    float targetPrice = f_target(true, entryPrice, stopPrice, ldnHigh, ldnLow)
+
+    if f_validTrade(true, entryPrice, stopPrice, targetPrice)
+        if entryHandlingMode == "Take Every Signal - Close Current Trade First" and strategy.position_size != 0
+            strategy.close_all(comment = "Close For New Signal", immediately = true)
+
+        strategy.entry(id = "L-LDN", direction = strategy.long, comment = "London Long")
+        entryPlacedThisBar := true
+
+        activeEntryPrice := entryPrice
+        activeStopPrice := stopPrice
+        activeTargetPrice := targetPrice
+        activeDirection := 1
+
+        ldnLongEntrySignal := true
+        ldnTradedAny := true
+        ldnTradedLong := true
+        dailyTradeTaken := true
+
+        ldnSetupSide := 0
+        ldnSweepExtreme := na
+        ldnSetupBar := na
+        ldnThreeLevel := na
+        ldnIfvgLevel := na
+
+if canEnterNow and not entryPlacedThisBar and ldnShortTrigger and f_canTakeTrade(false, ldnTradedAny, ldnTradedLong, ldnTradedShort, dailyTradeTaken)
+    float entryPrice = close
+    float stopPrice = f_stop(false, entryPrice, ldnSweepExtreme)
+    float targetPrice = f_target(false, entryPrice, stopPrice, ldnHigh, ldnLow)
+
+    if f_validTrade(false, entryPrice, stopPrice, targetPrice)
+        if entryHandlingMode == "Take Every Signal - Close Current Trade First" and strategy.position_size != 0
+            strategy.close_all(comment = "Close For New Signal", immediately = true)
+
+        strategy.entry(id = "S-LDN", direction = strategy.short, comment = "London Short")
+        entryPlacedThisBar := true
+
+        activeEntryPrice := entryPrice
+        activeStopPrice := stopPrice
+        activeTargetPrice := targetPrice
+        activeDirection := -1
+
+        ldnShortEntrySignal := true
+        ldnTradedAny := true
+        ldnTradedShort := true
+        dailyTradeTaken := true
+
+        ldnSetupSide := 0
+        ldnSweepExtreme := na
+        ldnSetupBar := na
+        ldnThreeLevel := na
+        ldnIfvgLevel := na
+
+if canEnterNow and not entryPlacedThisBar and nyrLongTrigger and f_canTakeTrade(true, nyrTradedAny, nyrTradedLong, nyrTradedShort, dailyTradeTaken)
+    float entryPrice = close
+    float stopPrice = f_stop(true, entryPrice, nyrSweepExtreme)
+    float targetPrice = f_target(true, entryPrice, stopPrice, nyrHigh, nyrLow)
+
+    if f_validTrade(true, entryPrice, stopPrice, targetPrice)
+        if entryHandlingMode == "Take Every Signal - Close Current Trade First" and strategy.position_size != 0
+            strategy.close_all(comment = "Close For New Signal", immediately = true)
+
+        strategy.entry(id = "L-NY", direction = strategy.long, comment = "NY Long")
+        entryPlacedThisBar := true
+
+        activeEntryPrice := entryPrice
+        activeStopPrice := stopPrice
+        activeTargetPrice := targetPrice
+        activeDirection := 1
+
+        nyrLongEntrySignal := true
+        nyrTradedAny := true
+        nyrTradedLong := true
+        dailyTradeTaken := true
+
+        nyrSetupSide := 0
+        nyrSweepExtreme := na
+        nyrSetupBar := na
+        nyrThreeLevel := na
+        nyrIfvgLevel := na
+
+if canEnterNow and not entryPlacedThisBar and nyrShortTrigger and f_canTakeTrade(false, nyrTradedAny, nyrTradedLong, nyrTradedShort, dailyTradeTaken)
+    float entryPrice = close
+    float stopPrice = f_stop(false, entryPrice, nyrSweepExtreme)
+    float targetPrice = f_target(false, entryPrice, stopPrice, nyrHigh, nyrLow)
+
+    if f_validTrade(false, entryPrice, stopPrice, targetPrice)
+        if entryHandlingMode == "Take Every Signal - Close Current Trade First" and strategy.position_size != 0
+            strategy.close_all(comment = "Close For New Signal", immediately = true)
+
+        strategy.entry(id = "S-NY", direction = strategy.short, comment = "NY Short")
+        entryPlacedThisBar := true
+
+        activeEntryPrice := entryPrice
+        activeStopPrice := stopPrice
+        activeTargetPrice := targetPrice
+        activeDirection := -1
+
+        nyrShortEntrySignal := true
+        nyrTradedAny := true
+        nyrTradedShort := true
+        dailyTradeTaken := true
+
+        nyrSetupSide := 0
+        nyrSweepExtreme := na
+        nyrSetupBar := na
+        nyrThreeLevel := na
+        nyrIfvgLevel := na
+
+// Submit protective exits every bar while a position is open.
+// This makes the stop/target much more reliable than submitting them only on the signal candle.
+if strategy.position_size > 0 and not na(activeStopPrice) and not na(activeTargetPrice)
+    strategy.exit(id = "XL-LDN", from_entry = "L-LDN", stop = activeStopPrice, limit = activeTargetPrice, comment = "Long Exit")
+    strategy.exit(id = "XL-NY", from_entry = "L-NY", stop = activeStopPrice, limit = activeTargetPrice, comment = "Long Exit")
+
+if strategy.position_size < 0 and not na(activeStopPrice) and not na(activeTargetPrice)
+    strategy.exit(id = "XS-LDN", from_entry = "S-LDN", stop = activeStopPrice, limit = activeTargetPrice, comment = "Short Exit")
+    strategy.exit(id = "XS-NY", from_entry = "S-NY", stop = activeStopPrice, limit = activeTargetPrice, comment = "Short Exit")
+
+//──────────────────────────────────────────────────────────────────────────────
+// MANUAL TRADE LEVEL VISUALS
+//──────────────────────────────────────────────────────────────────────────────
+
+newEntrySignal = ldnLongEntrySignal or ldnShortEntrySignal or nyrLongEntrySignal or nyrShortEntrySignal
+positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if showTradeLevels and newEntrySignal
+    if not na(activeEntryLine)
+        line.delete(activeEntryLine)
+    if not na(activeStopLine)
+        line.delete(activeStopLine)
+    if not na(activeTargetLine)
+        line.delete(activeTargetLine)
+
+    activeEntryLine := na
+    activeStopLine := na
+    activeTargetLine := na
+
+    activeEntryLine := line.new(bar_index, activeEntryPrice, bar_index + 1, activeEntryPrice, extend = extend.right, color = color.new(color.white, 0), width = 1, style = line.style_dotted)
+    activeStopLine := line.new(bar_index, activeStopPrice, bar_index + 1, activeStopPrice, extend = extend.right, color = color.new(color.red, 0), width = 2)
+    activeTargetLine := line.new(bar_index, activeTargetPrice, bar_index + 1, activeTargetPrice, extend = extend.right, color = color.new(color.lime, 0), width = 2)
+
+    label.new(bar_index, activeEntryPrice, "ENTRY", style = label.style_label_left, textcolor = color.white, color = color.new(color.gray, 0), size = size.tiny)
+    label.new(bar_index, activeStopPrice, "SL", style = label.style_label_left, textcolor = color.white, color = color.new(color.red, 0), size = size.tiny)
+    label.new(bar_index, activeTargetPrice, "TP", style = label.style_label_left, textcolor = color.white, color = color.new(color.lime, 0), size = size.tiny)
+
+if showTradeLevels and strategy.position_size != 0
+    if not na(activeEntryLine)
+        line.set_x2(activeEntryLine, bar_index)
+    if not na(activeStopLine)
+        line.set_x2(activeStopLine, bar_index)
+    if not na(activeTargetLine)
+        line.set_x2(activeTargetLine, bar_index)
+
+if positionClosed
+    if not na(activeEntryLine)
+        line.set_extend(activeEntryLine, extend.none)
+        line.set_x2(activeEntryLine, bar_index)
+    if not na(activeStopLine)
+        line.set_extend(activeStopLine, extend.none)
+        line.set_x2(activeStopLine, bar_index)
+    if not na(activeTargetLine)
+        line.set_extend(activeTargetLine, extend.none)
+        line.set_x2(activeTargetLine, bar_index)
+
+    activeEntryPrice := na
+    activeStopPrice := na
+    activeTargetPrice := na
+    activeDirection := 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// VISUALS
+//──────────────────────────────────────────────────────────────────────────────
+
+plot(showRanges and useLondonRange and ldnRangeReady ? ldnHigh : na, title = "London Range High", color = color.new(color.orange, 0), linewidth = 2, style = plot.style_linebr)
+plot(showRanges and useLondonRange and ldnRangeReady ? ldnLow : na, title = "London Range Low", color = color.new(color.orange, 0), linewidth = 2, style = plot.style_linebr)
+
+plot(showRanges and useNyRange and nyrRangeReady ? nyrHigh : na, title = "New York Range High", color = color.new(color.aqua, 0), linewidth = 2, style = plot.style_linebr)
+plot(showRanges and useNyRange and nyrRangeReady ? nyrLow : na, title = "New York Range Low", color = color.new(color.aqua, 0), linewidth = 2, style = plot.style_linebr)
+
+plot(showDebugLevels and ldnSetupSide != 0 ? ldnThreeLevel : na, title = "London 3-Candle Trigger Level", color = color.new(color.yellow, 0), linewidth = 1, style = plot.style_linebr)
+plot(showDebugLevels and ldnSetupSide != 0 ? ldnIfvgLevel : na, title = "London IFVG Trigger Level", color = color.new(color.fuchsia, 0), linewidth = 1, style = plot.style_linebr)
+
+plot(showDebugLevels and nyrSetupSide != 0 ? nyrThreeLevel : na, title = "NY 3-Candle Trigger Level", color = color.new(color.yellow, 0), linewidth = 1, style = plot.style_linebr)
+plot(showDebugLevels and nyrSetupSide != 0 ? nyrIfvgLevel : na, title = "NY IFVG Trigger Level", color = color.new(color.fuchsia, 0), linewidth = 1, style = plot.style_linebr)
+
+plotshape(showSignals and ldnLongEntrySignal, title = "London Long Entry", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), text = "LDN L", size = size.small)
+plotshape(showSignals and ldnShortEntrySignal, title = "London Short Entry", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), text = "LDN S", size = size.small)
+
+plotshape(showSignals and nyrLongEntrySignal, title = "NY Long Entry", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), text = "NY L", size = size.small)
+plotshape(showSignals and nyrShortEntrySignal, title = "NY Short Entry", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), text = "NY S", size = size.small)
+
+// Hidden plots for Data Window.
+plot(activeEntryPrice, title = "Active Entry Price", display = display.data_window)
+plot(activeStopPrice, title = "Active Stop Loss", display = display.data_window)
+plot(activeTargetPrice, title = "Active Take Profit", display = display.data_window)
+plot(strategy.position_size, title = "Backtest Position Size", display = display.data_window)
+plot(strategy.opentrades, title = "Backtest Open Trades", display = display.data_window)
+plot(strategy.closedtrades, title = "Backtest Closed Trades", display = display.data_window)
+plot(entryHandlingMode == "Take Every Signal - Close Current Trade First" ? 1 : 0, title = "Entry Handling: Take Every Signal", display = display.data_window)
+
+//──────────────────────────────────────────────────────────────────────────────
+// ALERTS
+//──────────────────────────────────────────────────────────────────────────────
+
+alertcondition(ldnLongEntrySignal, title = "London Long Entry", message = "Day Trading Rauf Strategy: London long entry triggered.")
+alertcondition(ldnShortEntrySignal, title = "London Short Entry", message = "Day Trading Rauf Strategy: London short entry triggered.")
+alertcondition(nyrLongEntrySignal, title = "New York Long Entry", message = "Day Trading Rauf Strategy: New York long entry triggered.")
+alertcondition(nyrShortEntrySignal, title = "New York Short Entry", message = "Day Trading Rauf Strategy: New York short entry triggered.")

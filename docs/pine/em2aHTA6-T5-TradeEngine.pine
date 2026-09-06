@@ -1,0 +1,327 @@
+//@version=6
+library("T5_TradeEngine", overlay=false)
+
+// =====================================================
+// GLOBAL HELPERS ✅ must be outside export tick()
+// =====================================================
+f_nearestAbove(float px, float[] levels) =>
+    float best = na
+    for i = 0 to array.size(levels) - 1
+        float lv = array.get(levels, i)
+        if lv > px
+            best := na(best) ? lv : math.min(best, lv)
+    best
+
+f_nearestBelow(float px, float[] levels) =>
+    float best = na
+    for i = 0 to array.size(levels) - 1
+        float lv = array.get(levels, i)
+        if lv < px
+            best := na(best) ? lv : math.max(best, lv)
+    best
+
+// -----------------------------------------------------
+// Exported tick() returns FINAL signals + levels.
+// Caller is dumb. Library owns ALL trade state.
+// -----------------------------------------------------
+export tick(
+    // Core series
+    series float close_,
+    series float high_,
+    series float low_,
+
+    // Trend inputs
+    series float ema21,
+    series float ema50,
+    series float ema200,
+
+    // Vol inputs
+    series float atrPct,
+    series float emaGapPct,
+
+    // BTC filter precomputed by caller
+    series float btcEma50,
+    series float btcEma200,
+    bool  btcFilterEffective,
+
+    // Crosses + bar close
+    bool isBarClose,
+    bool crossUp21_50,
+    bool crossDown21_50,
+
+    // Settings
+    bool  allowEntries,
+    bool  exitOnOppositeCross,
+    float feeBps,
+
+    // SR settings
+    bool  useSR_TPSL,
+    int   srLeft,
+    int   srRight,
+    int   srLookbackPivots,
+    float srBufferPct,
+    float srMinDistPct,
+    float srMinNetAfterFeesPct,
+    bool  srFallbackToATR,
+
+    // ATR fallback sizing (safety caps)
+    float tp1CapPct,
+    float slCapPct,
+
+    // TP2 + trail
+    bool  useTP2Trail,
+    bool  trailExitOnCloseOnly,
+    float tp2CapPct,
+    float trailCapPct,
+
+    // HOLD gate settings (bars)
+    int holdBars
+) =>
+    // =====================================================
+    // 1) STATE (PERSISTENT)
+    // =====================================================
+    var bool  inLong  = false
+    var bool  inShort = false
+    var float entryPx = na
+    var int   entryBarIndex = na
+
+    var float slPx  = na
+    var float tp1Px = na
+    var float tp2Px = na
+
+    var bool  tp1Seen = false
+    var bool  tp2Seen = false
+    var bool  trailActive = false
+    var float highWater = na
+    var float lowWater  = na
+    var float trailStopPx = na
+
+    // =====================================================
+    // 2) SR PIVOT COLLECTION (confirmed pivots)
+    // =====================================================
+    ph = ta.pivothigh(high_, srLeft, srRight)
+    pl = ta.pivotlow(low_,  srLeft, srRight)
+
+    var float[] pivHi = array.new_float()
+    var float[] pivLo = array.new_float()
+
+    if not na(ph)
+        array.unshift(pivHi, ph)
+        if array.size(pivHi) > srLookbackPivots
+            array.pop(pivHi)
+
+    if not na(pl)
+        array.unshift(pivLo, pl)
+        if array.size(pivLo) > srLookbackPivots
+            array.pop(pivLo)
+
+    // =====================================================
+    // 3) HOLD GATE (TP logic only)
+    // =====================================================
+    barsInTrade = (inLong or inShort) and not na(entryBarIndex) ? (bar_index - entryBarIndex) : 0
+    tpAllowed   = (inLong or inShort) and barsInTrade >= holdBars
+
+    feeFrac = feeBps / 10000.0
+
+    // =====================================================
+    // 4) ENTRY LOGIC (placeholder gates)
+    //     ✅ PATCH: use ema21 + emaGapPct so library export compiles
+    // =====================================================
+    ema21_ok  = not na(ema21)         // uses ema21 (no behavior change in normal data)
+    emaGap_ok = not na(emaGapPct)     // uses emaGapPct too (prevents next compiler error)
+
+    regimeBull = ema50 >= ema200
+    regimeBear = ema50 <= ema200
+
+    longBTCOK  = (not btcFilterEffective) or (btcEma50 > btcEma200)
+    shortBTCOK = (not btcFilterEffective) or (btcEma50 < btcEma200)
+
+    longEntrySig  = allowEntries and isBarClose and crossUp21_50   and regimeBull and longBTCOK  and ema21_ok and emaGap_ok
+    shortEntrySig = allowEntries and isBarClose and crossDown21_50 and regimeBear and shortBTCOK and ema21_ok and emaGap_ok
+
+    enterLong  = longEntrySig  and not inLong and not inShort
+    enterShort = shortEntrySig and not inLong and not inShort
+
+    // =====================================================
+    // 5) SIZING (caps)
+    // =====================================================
+    TP1pct_raw = 1.00 * atrPct
+    SLpct_raw  = 2.00 * atrPct
+
+    TP1pct = math.min(tp1CapPct, TP1pct_raw)
+    SLpct  = math.min(slCapPct,  SLpct_raw)
+
+    tp1Frac = TP1pct / 100.0
+    slFrac  = SLpct  / 100.0
+
+    TP2pct_raw = math.max(1.10, 2.00 * atrPct)
+    TRLpct_raw = math.max(0.20, 0.60 * atrPct)
+
+    TP2pct = math.min(tp2CapPct, TP2pct_raw)
+    TRLpct = math.min(trailCapPct, TRLpct_raw)
+
+    tp2Frac = TP2pct / 100.0
+    trlFrac = TRLpct / 100.0
+
+    srBufFrac    = srBufferPct / 100.0
+    srMinFrac    = srMinDistPct / 100.0
+    srMinNetFrac = srMinNetAfterFeesPct / 100.0
+
+    // =====================================================
+    // 6) ON ENTRY: CAPTURE SR TP/SL (or ATR fallback)
+    // =====================================================
+    if enterLong
+        inLong := true
+        inShort := false
+        entryPx := close_
+        entryBarIndex := bar_index
+
+        res = f_nearestAbove(entryPx, pivHi)
+        sup = f_nearestBelow(entryPx, pivLo)
+
+        tp_sr = na(res) ? na : res * (1.0 - srBufFrac)
+        sl_sr = na(sup) ? na : sup * (1.0 - srBufFrac)
+
+        haveSR = useSR_TPSL and not na(tp_sr) and not na(sl_sr)
+
+        tpDist = haveSR ? (tp_sr - entryPx) / entryPx : na
+        slDist = haveSR ? (entryPx - sl_sr) / entryPx : na
+
+        srFarEnough = haveSR and tpDist >= srMinFrac and slDist >= srMinFrac
+        srNetOK     = (srMinNetFrac <= 0) or (srFarEnough and tpDist >= (feeFrac + srBufFrac + srMinNetFrac))
+        srOK        = srFarEnough and srNetOK
+
+        tp1Px := srOK ? tp_sr : (srFallbackToATR ? entryPx * (1.0 + tp1Frac) : na)
+        slPx  := srOK ? sl_sr : (srFallbackToATR ? entryPx * (1.0 - slFrac)  : na)
+
+        tp2Px := entryPx * (1.0 + tp2Frac)
+
+        tp1Seen := false
+        tp2Seen := false
+        trailActive := false
+        highWater := high_
+        lowWater := na
+        trailStopPx := na
+
+    if enterShort
+        inShort := true
+        inLong := false
+        entryPx := close_
+        entryBarIndex := bar_index
+
+        sup = f_nearestBelow(entryPx, pivLo)
+        res = f_nearestAbove(entryPx, pivHi)
+
+        tp_sr = na(sup) ? na : sup * (1.0 + srBufFrac)
+        sl_sr = na(res) ? na : res * (1.0 + srBufFrac)
+
+        haveSR = useSR_TPSL and not na(tp_sr) and not na(sl_sr)
+
+        tpDist = haveSR ? (entryPx - tp_sr) / entryPx : na
+        slDist = haveSR ? (sl_sr - entryPx) / entryPx : na
+
+        srFarEnough = haveSR and tpDist >= srMinFrac and slDist >= srMinFrac
+        srNetOK     = (srMinNetFrac <= 0) or (srFarEnough and tpDist >= (feeFrac + srBufFrac + srMinNetFrac))
+        srOK        = srFarEnough and srNetOK
+
+        tp1Px := srOK ? tp_sr : (srFallbackToATR ? entryPx * (1.0 - tp1Frac) : na)
+        slPx  := srOK ? sl_sr : (srFallbackToATR ? entryPx * (1.0 + slFrac)  : na)
+
+        tp2Px := entryPx * (1.0 - tp2Frac)
+
+        tp1Seen := false
+        tp2Seen := false
+        trailActive := false
+        lowWater := low_
+        highWater := na
+        trailStopPx := na
+
+    // =====================================================
+    // 7) MANAGEMENT (TP gated)
+    // =====================================================
+    if tpAllowed and inLong and not tp1Seen and not na(tp1Px) and high_ >= tp1Px
+        tp1Seen := true
+        bePx = entryPx * (1.0 + feeFrac)
+        slPx := na(slPx) ? bePx : math.max(slPx, bePx)
+
+    if tpAllowed and inShort and not tp1Seen and not na(tp1Px) and low_ <= tp1Px
+        tp1Seen := true
+        bePx = entryPx * (1.0 - feeFrac)
+        slPx := na(slPx) ? bePx : math.min(slPx, bePx)
+
+    if tpAllowed and useTP2Trail and inLong and not tp2Seen and not na(tp2Px) and high_ >= tp2Px
+        tp2Seen := true
+        trailActive := (trlFrac > 0)
+        highWater := high_
+        trailStopPx := highWater * (1.0 - trlFrac)
+
+    if tpAllowed and useTP2Trail and inShort and not tp2Seen and not na(tp2Px) and low_ <= tp2Px
+        tp2Seen := true
+        trailActive := (trlFrac > 0)
+        lowWater := low_
+        trailStopPx := lowWater * (1.0 + trlFrac)
+
+    if tpAllowed and useTP2Trail and inLong and trailActive
+        highWater := na(highWater) ? high_ : math.max(highWater, high_)
+        trailStopPx := highWater * (1.0 - trlFrac)
+
+    if tpAllowed and useTP2Trail and inShort and trailActive
+        lowWater := na(lowWater) ? low_ : math.min(lowWater, low_)
+        trailStopPx := lowWater * (1.0 + trlFrac)
+
+    // =====================================================
+    // 8) EXITS
+    // =====================================================
+    hitSL_Long  = inLong  and not na(slPx) and low_  <= slPx
+    hitSL_Short = inShort and not na(slPx) and high_ >= slPx
+
+    hitTP_Long  = tpAllowed and inLong  and not na(tp1Px) and high_ >= tp1Px
+    hitTP_Short = tpAllowed and inShort and not na(tp1Px) and low_  <= tp1Px
+
+    flipExitLong  = exitOnOppositeCross and inLong  and isBarClose and crossDown21_50
+    flipExitShort = exitOnOppositeCross and inShort and isBarClose and crossUp21_50
+
+    trailExitLong_touch  = tpAllowed and useTP2Trail and inLong  and trailActive and not na(trailStopPx) and low_  <= trailStopPx
+    trailExitShort_touch = tpAllowed and useTP2Trail and inShort and trailActive and not na(trailStopPx) and high_ >= trailStopPx
+
+    trailExitLong_close  = tpAllowed and useTP2Trail and inLong  and trailActive and not na(trailStopPx) and isBarClose and close_ <= trailStopPx
+    trailExitShort_close = tpAllowed and useTP2Trail and inShort and trailActive and not na(trailStopPx) and isBarClose and close_ >= trailStopPx
+
+    trailExitLong  = trailExitOnCloseOnly ? trailExitLong_close  : trailExitLong_touch
+    trailExitShort = trailExitOnCloseOnly ? trailExitShort_close : trailExitShort_touch
+
+    exitLong  = hitSL_Long  or hitTP_Long  or flipExitLong  or trailExitLong
+    exitShort = hitSL_Short or hitTP_Short or flipExitShort or trailExitShort
+
+    if exitLong
+        inLong := false
+        entryPx := na
+        entryBarIndex := na
+        slPx := na
+        tp1Px := na
+        tp2Px := na
+        tp1Seen := false
+        tp2Seen := false
+        trailActive := false
+        highWater := na
+        lowWater := na
+        trailStopPx := na
+
+    if exitShort
+        inShort := false
+        entryPx := na
+        entryBarIndex := na
+        slPx := na
+        tp1Px := na
+        tp2Px := na
+        tp1Seen := false
+        tp2Seen := false
+        trailActive := false
+        highWater := na
+        lowWater := na
+        trailStopPx := na
+
+    [enterLong, enterShort, exitLong, exitShort,
+     inLong, inShort,
+     slPx, tp1Px, tp2Px, trailStopPx,
+     barsInTrade, tpAllowed]

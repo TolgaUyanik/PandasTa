@@ -1,0 +1,243 @@
+//@version=6
+library("HawkDoveScoreLib", overlay=false)
+
+// ─────────────────────────────────────────────────────────────
+// Top-level helpers (NO nested defs)
+// ─────────────────────────────────────────────────────────────
+f_trend(x, L) => x - x[L]
+f_clamp_0_100(x) => math.max(0.0, math.min(100.0, x))
+f_has(sym) => str.length(sym) > 0
+
+// Safe fetch: ONLY call request.security() when enabled AND symbol non-empty.
+// This prevents optional toggles from triggering invalid symbol calls.
+f_fetch(sym, tf, enabled) =>
+    (enabled and f_has(sym)) ? request.security(sym, tf, close) : na
+
+// Robust min–max normalization to 0..100
+// returns 50 if not enough bars or series is NA.
+f_norm_0_100(x, win) =>
+    enough = bar_index >= win and not na(x)
+    if not enough
+        50.0
+    else
+        lo = ta.lowest(x, win)
+        hi = ta.highest(x, win)
+        rng = hi - lo
+        eps = 1e-9
+        100.0 * (x - lo) / math.max(rng, eps)
+
+// Regime helpers
+// ─────────────────────────────────────────────────────────────
+// Regime helpers (TYPED — required for exported functions)
+// ─────────────────────────────────────────────────────────────
+export hds_regime(float score, int thrDove, int thrHawk) =>
+    score >= thrHawk ? 1 : score <= thrDove ? -1 : 0
+
+export hds_regime_label(float score, int thrDove, int thrHawk) =>
+    score >= thrHawk ? "HAWKISH" : score <= thrDove ? "DOVISH" : "NEUTRAL"
+
+// Wilson lower bound (conservative confidence)
+f_wilson_conf(hits, sigs, z) =>
+    if sigs <= 0
+        [na, na]
+    else
+        p = hits / sigs
+        n = sigs
+        den = 1.0 + (z*z)/n
+        center = p + (z*z)/(2.0*n)
+        margin = z * math.sqrt((p*(1.0-p) + (z*z)/(4.0*n)) / n)
+        wilsonLow = (center - margin) / den
+        [100.0 * wilsonLow, 100.0 * p]
+
+// ─────────────────────────────────────────────────────────────
+// Core compute (core 5 + plumbing 5 + optional infl/growth 2)
+// Returns:
+// [score, rp, cv, ry, bs, st, repo, rrp, cred, vol, usd, infl, growth]
+// ─────────────────────────────────────────────────────────────
+f_compute_core(
+    // Symbols
+    sym2y, sym10y, symBE10, symBS, symStress,
+    symSOFR, symRRP, symCredit, symVol, symDXY,
+    symInfl, symGrowth,
+    // Settings
+    tfMacro, lenTrend, lenNorm, smoothScore,
+    // Toggles
+    useRatePath, useCurve, useRealYield, useBalanceSh, useStress,
+    useRepo, useRRP, useCredit, useVol, useUSD,
+    useInfl, useGrowth,
+    // Weights
+    wRatePath, wCurve, wRealYield, wBS, wStress,
+    wRepo, wRRP, wCredit, wVol, wUSD,
+    wInfl, wGrowth
+) =>
+    // Fetch (GATED by useX to avoid invalid symbol calls when OFF)
+    y2   = f_fetch(sym2y,     tfMacro, (useRatePath or useCurve))
+    y10  = f_fetch(sym10y,    tfMacro, (useCurve or useRealYield))
+    be10 = f_fetch(symBE10,   tfMacro, useRealYield)
+    bs   = f_fetch(symBS,     tfMacro, useBalanceSh)
+    stx  = f_fetch(symStress, tfMacro, useStress)
+
+    sofr = f_fetch(symSOFR,   tfMacro, useRepo)
+    rrp  = f_fetch(symRRP,    tfMacro, useRRP)
+    cred = f_fetch(symCredit, tfMacro, useCredit)
+    vol  = f_fetch(symVol,    tfMacro, useVol)
+    dxy  = f_fetch(symDXY,    tfMacro, useUSD)
+
+    infl = f_fetch(symInfl,   tfMacro, useInfl)
+    grow = f_fetch(symGrowth, tfMacro, useGrowth)
+
+    // Impulses (positive = more hawkishness)
+    ratePathImp = f_trend(y2, lenTrend)
+    curve       = y10 - y2
+    curveImp    = -(f_trend(curve, lenTrend))
+    realY       = y10 - be10
+    realYImp    = f_trend(realY, lenTrend)
+    bsImp       = -(f_trend(bs, lenTrend))
+    stressImp   = -(f_trend(stx, lenTrend))    // stress up -> dovish pressure -> invert
+
+    repoImp     = -(f_trend(sofr, lenTrend))   // SOFR up -> dovish pressure -> invert
+    rrpImp      = f_trend(rrp, lenTrend)       // RRP up -> hawkish permission (simple)
+    creditImp   = -(f_trend(cred, lenTrend))   // spreads up -> dovish pressure -> invert
+    volImp      = -(f_trend(vol, lenTrend))    // vol up -> dovish pressure -> invert
+    usdImp      = f_trend(dxy, lenTrend)       // DXY up -> tighter -> hawkish
+
+    inflImp     = f_trend(infl, lenTrend)      // inflation expectations up -> hawkish permission
+    growthImp   = f_trend(grow, lenTrend)      // growth up -> hawkish permission
+
+    // Normalize 0..100
+    rpScore   = f_norm_0_100(ratePathImp, lenNorm)
+    cvScore   = f_norm_0_100(curveImp,    lenNorm)
+    ryScore   = f_norm_0_100(realYImp,    lenNorm)
+    bsScore   = f_norm_0_100(bsImp,       lenNorm)
+    stScore   = f_norm_0_100(stressImp,   lenNorm)
+
+    repoScore = f_norm_0_100(repoImp,     lenNorm)
+    rrpScore  = f_norm_0_100(rrpImp,      lenNorm)
+    crScore   = f_norm_0_100(creditImp,   lenNorm)
+    volScore  = f_norm_0_100(volImp,      lenNorm)
+    usdScore  = f_norm_0_100(usdImp,      lenNorm)
+
+    inflScore = f_norm_0_100(inflImp,     lenNorm)
+    grScore   = f_norm_0_100(growthImp,   lenNorm)
+
+    // Weight normalization (enabled + symbol non-empty)
+    sumW =
+       ((useRatePath and f_has(sym2y)) ? wRatePath : 0) +
+       ((useCurve and f_has(sym2y) and f_has(sym10y)) ? wCurve : 0) +
+       ((useRealYield and f_has(sym10y) and f_has(symBE10)) ? wRealYield : 0) +
+       ((useBalanceSh and f_has(symBS)) ? wBS : 0) +
+       ((useStress and f_has(symStress)) ? wStress : 0) +
+       ((useRepo and f_has(symSOFR)) ? wRepo : 0) +
+       ((useRRP and f_has(symRRP)) ? wRRP : 0) +
+       ((useCredit and f_has(symCredit)) ? wCredit : 0) +
+       ((useVol and f_has(symVol)) ? wVol : 0) +
+       ((useUSD and f_has(symDXY)) ? wUSD : 0) +
+       ((useInfl and f_has(symInfl)) ? wInfl : 0) +
+       ((useGrowth and f_has(symGrowth)) ? wGrowth : 0)
+
+    sumW := sumW == 0 ? 1 : sumW
+
+    comp =
+       ((useRatePath and f_has(sym2y)) ? wRatePath * rpScore : 0) +
+       ((useCurve and f_has(sym2y) and f_has(sym10y)) ? wCurve * cvScore : 0) +
+       ((useRealYield and f_has(sym10y) and f_has(symBE10)) ? wRealYield * ryScore : 0) +
+       ((useBalanceSh and f_has(symBS)) ? wBS * bsScore : 0) +
+       ((useStress and f_has(symStress)) ? wStress * stScore : 0) +
+       ((useRepo and f_has(symSOFR)) ? wRepo * repoScore : 0) +
+       ((useRRP and f_has(symRRP)) ? wRRP * rrpScore : 0) +
+       ((useCredit and f_has(symCredit)) ? wCredit * crScore : 0) +
+       ((useVol and f_has(symVol)) ? wVol * volScore : 0) +
+       ((useUSD and f_has(symDXY)) ? wUSD * usdScore : 0) +
+       ((useInfl and f_has(symInfl)) ? wInfl * inflScore : 0) +
+       ((useGrowth and f_has(symGrowth)) ? wGrowth * grScore : 0)
+
+    scoreRaw = comp / sumW
+    scoreSm  = ta.ema(scoreRaw, smoothScore)
+    score    = f_clamp_0_100(scoreSm)
+
+    [score, rpScore, cvScore, ryScore, bsScore, stScore, repoScore, rrpScore, crScore, volScore, usdScore, inflScore, grScore]
+
+// ─────────────────────────────────────────────────────────────
+// Export: Bundle v5 with Confidence% (NO ta.sum)
+// Rolling counts use cumulative subtraction.
+// Returns:
+// [score, rp, cv, ry, bs, st, repo, rrp, cred, vol, usd, infl, gr,
+//  regInt, regLbl, confPct, hitPct, sigCount]
+// ─────────────────────────────────────────────────────────────
+export hds_bundle_v5(
+    // ── Symbols
+    string sym2y, string sym10y, string symBE10, string symBS, string symStress,
+    string symSOFR, string symRRP, string symCredit, string symVol, string symDXY,
+    string symInfl, string symGrowth,
+    string symSPX,
+
+    // ── Settings
+    string tfMacro, int lenTrend, int lenNorm, int smoothScore,
+
+    // ── Toggles
+    bool useRatePath, bool useCurve, bool useRealYield, bool useBalanceSh, bool useStress,
+    bool useRepo, bool useRRP, bool useCredit, bool useVol, bool useUSD,
+    bool useInfl, bool useGrowth,
+    bool useConfidence,
+
+    // ── Weights
+    float wRatePath, float wCurve, float wRealYield, float wBS, float wStress,
+    float wRepo, float wRRP, float wCredit, float wVol, float wUSD,
+    float wInfl, float wGrowth,
+
+    // ── Regime thresholds
+    int thrDove, int thrHawk,
+
+    // ── Validation params
+    int fwdBars, int valWin, float z
+) =>
+    [score, rp, cv, ry, bs, st, repo, rrp, cred, vol, usd, infl, gr] =
+       f_compute_core(
+            sym2y, sym10y, symBE10, symBS, symStress,
+            symSOFR, symRRP, symCredit, symVol, symDXY,
+            symInfl, symGrowth,
+            tfMacro, lenTrend, lenNorm, smoothScore,
+            useRatePath, useCurve, useRealYield, useBalanceSh, useStress,
+            useRepo, useRRP, useCredit, useVol, useUSD,
+            useInfl, useGrowth,
+            wRatePath, wCurve, wRealYield, wBS, wStress,
+            wRepo, wRRP, wCredit, wVol, wUSD,
+            wInfl, wGrowth
+        )
+
+    regInt = hds_regime(score, thrDove, thrHawk)
+    regLbl = hds_regime_label(score, thrDove, thrHawk)
+
+    // Confidence calc (gated)
+    spx = (useConfidence and f_has(symSPX)) ? request.security(symSPX, timeframe.period, close) : na
+
+    // Series cumulative counts for rolling sums (no ta.sum)
+    // Convert booleans to 0/1
+    ret = (not na(spx) and bar_index >= fwdBars) ? (spx - spx[fwdBars]) / spx[fwdBars] : na
+    predScore = score[fwdBars]
+
+    sigH = useConfidence and not na(ret) and (predScore >= thrHawk)
+    sigD = useConfidence and not na(ret) and (predScore <= thrDove)
+    sig  = sigH or sigD
+
+    hit  = (sigH and (ret <= 0)) or (sigD and (ret >= 0))
+
+    sig01 = sig ? 1.0 : 0.0
+    hit01 = hit ? 1.0 : 0.0
+
+    var float cumSig = 0.0
+    var float cumHit = 0.0
+    cumSig += sig01
+    cumHit += hit01
+
+    sigCount = (bar_index >= valWin) ? (cumSig - cumSig[valWin]) : cumSig
+    hitCount = (bar_index >= valWin) ? (cumHit - cumHit[valWin]) : cumHit
+
+    [confPct, hitPct] = f_wilson_conf(hitCount, sigCount, z)
+
+    // If confidence disabled, output NA cleanly
+    confPct := useConfidence ? confPct : na
+    hitPct  := useConfidence ? hitPct  : na
+    sigCount := useConfidence ? sigCount : na
+
+    [score, rp, cv, ry, bs, st, repo, rrp, cred, vol, usd, infl, gr, regInt, regLbl, confPct, hitPct, sigCount]

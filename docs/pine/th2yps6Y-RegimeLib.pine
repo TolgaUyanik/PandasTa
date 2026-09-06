@@ -1,0 +1,188 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description RegimeLib — Bayesian online change-point detection (BOCPD) with score-driven variance.
+//              Implements Tsaknaki, Lillo, Mazzarisi 2023 (arXiv:2307.02375) score-driven extension
+//              to Adams & MacKay 2007 BOCPD. Maintains run-length distribution P(r_t | data_{1:t})
+//              and detects regime changes when MAP run length resets.
+//
+//              Layer L0 (imports NumLib/4 for math helpers only).
+//
+// DESIGN DECISIONS:
+//   1. Score-driven variance adaptation (GARCH-like) handles heteroskedasticity.
+//   2. Broadcast pattern: single BOCPD instance shared across multiple setups via regime_id.
+//   3. varip state arrays (run_length_probs, run_means, run_variances) persist across bars.
+//   4. Compute cost: O(L) per bar where L = max_run_length (default 100).
+//
+library("RegimeLib", overlay=false)
+import cybermediaboy/NumLib/4 as N
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const string REGIME_METHOD_BOCPD = "bocpd"
+export const string REGIME_METHOD_BOCPD_SCORE_DRIVEN = "bocpd_sd"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: REGIME READING UDT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type RegimeReading — output of BOCPD regime detector
+// @field map_run_length Current MAP run length (bars since last regime change)
+// @field change_point_detected True if regime change detected on this bar
+// @field regime_id Incrementing counter per regime (resets on change-point)
+// @field predictive_likelihood Diagnostic: P(x_t | data_in_run_r*)
+// @field current_variance Score-driven variance estimate at MAP run length
+export type RegimeReading
+    int map_run_length
+    bool change_point_detected
+    float regime_id
+    float predictive_likelihood
+    float current_variance
+
+// @function Create default RegimeReading
+// @returns Empty RegimeReading
+export f_default_regime_reading() =>
+    RegimeReading.new(
+         map_run_length = 0,
+         change_point_detected = false,
+         regime_id = 0.0,
+         predictive_likelihood = na,
+         current_variance = na)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: BOCPD SCORE-DRIVEN IMPLEMENTATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function BOCPD with score-driven variance adaptation (Tsaknaki et al. 2023)
+// @param x Current observation (e.g. log return)
+// @param hazard Hazard rate H (probability of regime change per bar), default 1/250
+// @param max_run_length Maximum run length L to track (caps array size), default 100
+// @param omega Score-driven variance ω parameter, default 1e-4
+// @param alpha Score-driven variance α parameter (score weight), default 0.05
+// @param beta Score-driven variance β parameter (persistence), default 0.94
+// @param rl_probs varip array<float> run-length probabilities (size L+1, caller-managed)
+// @param run_means varip array<float> online means per run (size L+1, caller-managed)
+// @param run_vars varip array<float> online variances per run (size L+1, caller-managed)
+// @param prev_map varip int previous MAP run length (caller-managed)
+// @param regime_counter varip float regime ID counter (caller-managed)
+// @returns RegimeReading
+export f_bocpd_regime_score_driven(float x, simple float hazard, simple int max_run_length,
+                                     simple float omega, simple float alpha, simple float beta,
+                                     array<float> rl_probs, array<float> run_means,
+                                     array<float> run_vars, int prev_map, float regime_counter) =>
+    int L = max_run_length
+    float H = math.max(0.0, math.min(1.0, hazard))
+    
+    // Step 1: Compute predictive likelihoods π_t for each run length
+    array<float> pred_likes = array.new<float>(L + 1, 0.0)
+    for r = 0 to L
+        float mu_r = array.get(run_means, r)
+        float var_r = array.get(run_vars, r)
+        
+        // Gaussian predictive likelihood (log-space for numerical stability)
+        float sigma = math.sqrt(math.max(var_r, 1e-12))
+        float z = (x - mu_r) / sigma
+        float log_like = -0.5 * math.log(2.0 * math.pi) - math.log(sigma) - 0.5 * z * z
+        array.set(pred_likes, r, math.exp(log_like))
+    
+    // Step 2: Growth probabilities (run continues)
+    array<float> growth_probs = array.new<float>(L + 1, 0.0)
+    for r = 0 to L - 1
+        float p_r = array.get(rl_probs, r)
+        float pi_r = array.get(pred_likes, r)
+        array.set(growth_probs, r + 1, p_r * pi_r * (1.0 - H))
+    
+    // Step 3: Change-point probability (run resets to 0)
+    float cp_prob = 0.0
+    for r = 0 to L
+        float p_r = array.get(rl_probs, r)
+        float pi_r = array.get(pred_likes, r)
+        cp_prob += p_r * pi_r * H
+    array.set(growth_probs, 0, cp_prob)
+    
+    // Step 4: Normalize
+    float total_prob = 0.0
+    for r = 0 to L
+        total_prob += array.get(growth_probs, r)
+    
+    if total_prob > 1e-12
+        for r = 0 to L
+            array.set(rl_probs, r, array.get(growth_probs, r) / total_prob)
+    else
+        // Numerical collapse — reset to uniform
+        for r = 0 to L
+            array.set(rl_probs, r, 1.0 / (L + 1))
+    
+    // Step 5: MAP run length
+    int map_r = 0
+    float max_prob = array.get(rl_probs, 0)
+    for r = 1 to L
+        float p_r = array.get(rl_probs, r)
+        if p_r > max_prob
+            max_prob := p_r
+            map_r := r
+    
+    // Step 6: Detect change-point (run length reset)
+    bool cp_detected = map_r < prev_map
+    float new_regime_id = regime_counter + (cp_detected ? 1.0 : 0.0)
+    
+    // Step 7: Update run statistics with score-driven variance
+    for r = 0 to L
+        float mu_r = array.get(run_means, r)
+        float var_r = array.get(run_vars, r)
+        
+        // Online mean update (Welford)
+        float n_r = float(r + 1)
+        float delta = x - mu_r
+        float new_mu = mu_r + delta / n_r
+        array.set(run_means, r, new_mu)
+        
+        // Score-driven variance update
+        float score = (delta * delta / math.max(var_r, 1e-12)) - 1.0
+        float new_var = omega + alpha * (score * score) + beta * var_r
+        array.set(run_vars, r, math.max(new_var, 1e-12))
+    
+    // Return reading
+    RegimeReading.new(
+         map_run_length = map_r,
+         change_point_detected = cp_detected,
+         regime_id = new_regime_id,
+         predictive_likelihood = array.get(pred_likes, map_r),
+         current_variance = array.get(run_vars, map_r))
+
+// @function Vanilla BOCPD (fixed variance, no score-driven adaptation)
+// @param x Current observation
+// @param hazard Hazard rate H
+// @param max_run_length Maximum run length L
+// @param rl_probs varip array<float> run-length probabilities (caller-managed)
+// @param run_means varip array<float> online means per run (caller-managed)
+// @param run_vars varip array<float> online variances per run (caller-managed)
+// @param prev_map varip int previous MAP run length (caller-managed)
+// @param regime_counter varip float regime ID counter (caller-managed)
+// @returns RegimeReading
+export f_bocpd_regime(float x, simple float hazard, simple int max_run_length,
+                       array<float> rl_probs, array<float> run_means,
+                       array<float> run_vars, int prev_map, float regime_counter) =>
+    // Vanilla BOCPD = score-driven with omega=0, alpha=0, beta=1 (fixed variance)
+    f_bocpd_regime_score_driven(x, hazard, max_run_length, 0.0, 0.0, 1.0,
+                                  rl_probs, run_means, run_vars, prev_map, regime_counter)
+
+// @function Initialize BOCPD state arrays (call once on first bar)
+// @param max_run_length Maximum run length L
+// @param initial_mean Initial mean estimate
+// @param initial_var Initial variance estimate
+// @returns Tuple of (rl_probs, run_means, run_vars)
+export f_init_bocpd_state(simple int max_run_length, float initial_mean, float initial_var) =>
+    int L = max_run_length
+    array<float> rl_probs = array.new<float>(L + 1, 0.0)
+    array<float> run_means = array.new<float>(L + 1, initial_mean)
+    array<float> run_vars = array.new<float>(L + 1, initial_var)
+    
+    // Initialize run-length distribution (uniform)
+    for r = 0 to L
+        array.set(rl_probs, r, 1.0 / (L + 1))
+    
+    [rl_probs, run_means, run_vars]

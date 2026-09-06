@@ -1,0 +1,343 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   This library serves as a robust engine for advanced volume and
+//                market structure analysis. It provides a modular suite of functions
+//                ranging from classic money flow indicators to physical market
+//                metrics and session-based accumulation tools.
+//
+//                The library is designed with strict data integrity in mind, ensuring
+//                clean outputs for multi-timeframe and algorithmic applications.
+//
+//                1. Trend & Money Flow Analysis (Classic Suite):**
+//                  - **On Balance Volume (`obv`):** Tracks cumulative buying/selling
+//                    pressure based on price direction.
+//                  - **Volume Price Trend (`vpt`):** An enhancement of OBV that weights
+//                    volume by the percentage price change, filtering out high-volume
+//                    churning in tight ranges.
+//                  - **Accumulation/Distribution Line (`adLine`):** Measures money flow
+//                    using the Close Location Value (CLV), focusing on where the candle
+//                    closes relative to its range.
+//                  - **Chaikin Money Flow (`cmf`):** An oscillator derived from the ADL
+//                    to measure buying/selling pressure over a fixed lookback period.
+//
+//                2. Structural Efficiency & Market Physics:**
+//                  - **Ease of Movement (`eom`):** Quantifies market resistance. It relates
+//                    price distance to volume, identifying "thin" liquidity zones (high EOM)
+//                    versus heavy absorption/resistance (low EOM).
+//
+//                3. Anchored & Session-Based Accumulation:**
+//                  - **Anchored VWAP (`vwap`):** Calculates the Volume Weighted Average Price,
+//                    resettable on any custom boolean condition. Returns both the price and
+//                    the bar count of the active period.
+//                  - **Resettable CVD (`cvd`):** Tracks the net Cumulative Volume Delta
+//                    with added memory for the session's **High** and **Low** delta values,
+//                    useful for identifying delta divergences.
+//
+//                4. Data Integrity & Robustness:**
+//                  - **Sanitization:** Automatically replaces `na` values with 0 and clamps
+//                    negative volume inputs to ensure mathematical stability.
+//                  - **Initialization Safety:** All functions include a `hasVol` state check.
+//                    They return `na` until the first valid volume bar appears in history.
+//                    This prevents misleading "zero-lines" or distorted averages at the
+//                    beginning of a chart's data history.
+//                  - **Math Hardening:** Uses EPSILON checks to prevent floating-point
+//                    artifacts and division-by-zero errors in edge cases (e.g., flat ranges).
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibVolm")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.3.0
+// (Ref) Renamed internal helper '_volClean' to '_sanitize' to allow generic
+//       usage on any non-negative series.
+// (Add) Added 'vpt' (Volume Price Trend) and 'eom' (Ease of Movement).
+// (Ref) Hardened mathematical core using EPSILON for floating-point stability
+//       and robust zero-division handling across all functions.
+// (Ref) Optimized 'cvd' internal logic for better Doji detection and clarity.
+// (Doc) Restructured description and clarified 'cvd' approximation method.
+//
+// 2025-11-13 0.2.0
+// (Fix) Improved data validation: Indicators now return `na` instead of `0`
+//       until the first actual volume occurs on the chart. This prevents
+//       misleading zero-baselines at the start of history on assets with
+//       missing or delayed volume data.
+//
+// 2025-11-01 0.1.0
+// (New) Initial release of library
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibVolm"
+const string VERSION = "0.3.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const float EPSILON = 1e-9
+
+// ── PRIVATE ──────────────────────────────────────────────────────────────────
+// @function Sanitises a data series by replacing *na* with 0 and clamping
+//           negative values to 0. Use strictly for data that must be
+//           non-negative (e.g., Volume, Price).
+// @param   src   series float  Raw series that may contain *na* or negatives.
+// @returns       series float  Clean, non-negative series without gaps.
+_sanitize(
+  series float src
+  ) =>
+    series float filled = nz(source = src, replacement = 0)
+    math.max(filled, 0)
+
+// @function Computes the Money Flow Volume (MFV) for a single bar. MFV is the
+//           directional money flow obtained by weighting volume with the close
+//           location value (CLV) inside the bar's range.
+// @param   hi    series float  High price of the bar.
+// @param   lo    series float  Low price of the bar.
+// @param   cl    series float  Close price of the bar.
+// @param   vol   series float  Corresponding volume of the bar.
+// @returns       series float  MFV value for the current bar.
+_calcMfv(
+  series float hi,
+  series float lo,
+  series float cl,
+  series float vol
+  ) =>
+    series float rng     = hi - lo
+    series float rngSafe = rng < EPSILON ? 1 : rng
+
+    series float clv = ((cl - lo) - (hi - cl)) / rngSafe
+    clv * vol
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function Calculates the On Balance Volume (OBV).
+//           Measures cumulative buying and selling pressure by adding volume on
+//           up-bars and subtracting volume on down-bars.
+// @param   price  series float  Source price series, typically the close.
+// @returns        series float  Cumulative OBV value.
+export obv(
+  series float price
+  ) =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+
+    var series float obv = 0.0
+    obv += price > price[1] + EPSILON ? vol : price < price[1] - EPSILON ? -vol : 0.0
+
+    if hasVol
+        obv
+    else
+        na
+
+// @function Computes Volume Price Trend (VPT).
+//           Combines price trend and volume to determine the strength of price
+//           movement. Unlike OBV, it weights volume by the percentage price change.
+// @param   price  series float  Source price series, typically the close.
+// @returns  series float The cumulative Volume Price Trend line.
+export vpt(
+  series float price
+  ) =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+
+    var series float vpt = 0.0
+    series float change = math.abs(price[1]) > EPSILON ? (price - price[1]) / price[1] : 0.0
+    vpt += nz(vol * change)
+
+    if hasVol
+        vpt
+    else
+        na
+
+// @function Computes the Accumulation/Distribution Line (ADL).
+//           Measures the cumulative flow of money into and out of a security.
+//           It weights volume based on the Close Location Value (CLV), prioritizing
+//           closes near the high (accumulation) or low (distribution) of the range.
+// @returns        series float  Cumulative AD Line value.
+export adLine() =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+
+    var series float adl = 0.0
+    adl += nz(_calcMfv(high, low, close, vol))
+
+    if hasVol
+        adl
+    else
+        na
+
+// @function Computes Chaikin Money Flow (CMF).
+//           A volume-weighted oscillator derived from the ADL. It sums Money Flow
+//           Volume over a specific period and divides by total volume to measure
+//           buying or selling pressure (Values > 0 indicate buying pressure).
+// @param   length  series int    Lookback length for the CMF calculation.
+// @returns         series float  CMF value.
+export cmf(
+  series int length
+  ) =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+
+    series int len = math.max(length, 1)
+    
+    series float sumMFV = math.sum(source = _calcMfv(high, low, close, vol), length = len)
+    series float sumV   = math.sum(source = vol, length = len)
+    series float cmf    = sumV > 0 ? sumMFV / sumV : na
+
+    if hasVol
+        cmf
+    else
+        na
+
+// @function Computes Ease of Movement (EOM).
+//           Measures market efficiency: How much volume is needed to move price?
+//           High EOM = Price moves easily (low resistance).
+//           Low EOM  = Price stuck despite volume (high resistance/absorption).
+// @returns  float The raw Ease of Movement value (unscaled).
+export eom() =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+    
+    series float dist = ((high + low) / 2) - ((high[1] + low[1]) / 2)
+    series float rng  = high - low
+    series float eomVal = vol > 0 ? (dist * rng) / vol : na
+
+    if hasVol 
+        eomVal
+    else
+        na
+
+// @function Calculates an anchored Volume Weighted Average Price (VWAP).
+// @param   price  series float   Source price series (usually *close*).
+// @param   reset  series bool    A signal that is *true* on the bar where the
+//                                accumulation should be reset.
+// @returns [vwap, prdBars]
+//          vwap     series float  The calculated Volume Weighted Average Price for the current period.
+//          prdBars  series int    The number of bars that have passed since the last reset.
+export vwap(
+  series float price,
+  series bool reset
+  ) =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+
+    var series int prdBars = 0
+    var series float cumV  = 0.0
+    var series float cumPV = 0.0
+    var series float vwap  = na
+
+    if reset
+        prdBars := 1
+        cumV    := vol
+        cumPV   := price * vol
+        vwap    := cumV > 0 ? cumPV / cumV : price
+    else
+        prdBars += 1
+        cumV    += vol
+        cumPV   += price * vol
+        vwap    := cumV > 0 ? cumPV / cumV : vwap[1]
+
+    if hasVol
+        [vwap, prdBars]
+    else
+        [na, prdBars]
+
+// @function Calculates a resettable, cumulative Volume Delta (CVD).
+//           It accumulates volume delta and tracks its high/low range. The
+//           accumulation is reset to zero whenever the `reset` condition is true.
+//           This is useful for session-based analysis, intra-bar calculations,
+//           or any other custom-anchored accumulation.
+//
+//           NOTE: This uses a "Candle Polarity" approximation. It assigns the
+//           total volume of a bar as positive or negative based on Close vs Open.
+//           It does NOT use intrabar tick data (which is computationally heavier).
+//           Assumption: Close > Open implies dominant buying pressure for the whole bar.
+//
+// @param   reset   series bool   A signal that is *true* on the bar where the
+//                                accumulation should be reset.
+// @returns [cum, hi, lo]
+//          cum  series float  The current cumulative volume delta.
+//          hi   series float  The highest peak the cumulative delta has reached in the current period.
+//          lo   series float  The lowest trough the cumulative delta has reached in the current period.
+export cvd(
+  series bool reset
+  ) =>
+    series float vol = _sanitize(volume)
+
+    var series bool hasVol = false
+    if not hasVol and vol > 0
+        hasVol := true
+
+    var series float cum = 0.0
+    var series float hi  = 0.0
+    var series float lo  = 0.0
+
+    var series int lastSign = 0
+
+    series bool isDoji = math.abs(close - open) < EPSILON
+    series bool isFlat = math.abs(close - close[1]) < EPSILON
+
+    series int candleDir = isDoji ? 0 : close > open ? 1 : -1
+    series int dojiDir   = isFlat ? lastSign: close > close[1] ? 1 : -1
+
+    series int sign = candleDir != 0 ? candleDir : dojiDir
+    
+    if sign != 0
+        lastSign := sign
+
+    if reset
+        cum := 0.0
+        hi  := 0.0
+        lo  := 0.0
+
+    cum += vol * sign
+    hi  := math.max(hi, cum)
+    lo  := math.min(lo, cum)
+
+    if hasVol
+        [cum, hi, lo]
+    else
+        [na, na, na]

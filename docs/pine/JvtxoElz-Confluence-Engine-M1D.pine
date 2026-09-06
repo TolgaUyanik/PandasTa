@@ -1,0 +1,1500 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © mayb1dayy
+//
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONFLUENCE ENGINE+   ·   PD-array analytics (concepts by ICT)
+//  ───────────────────────────────────────────────────────────────────────────
+//  Maps the PD arrays taught by ICT. Rather than plotting a dozen
+//  isolated objects, it weighs the confluences present at price — a liquidity
+//  raid into a discount PD array, confirmed by a breaker, with SMT, inside a
+//  killzone — into the ICT directional bias, the draw on liquidity, and a corner
+//  dashboard. It reports context and leaves the trade to you — it is not a
+//  signal generator.
+//
+//  Modules (each toggleable, built so later stages read earlier state):
+//    1. Killzones & Sessions — London / NY AM / NY PM time-gating; Asia / London
+//       / NY session highs & lows as unmitigated levels; the 00:00 NY Midnight
+//       Open reference. Every time window is resolved on the session source
+//       timeframe, so none of them widens to fit a higher-timeframe candle.
+//    2. Swing Structure — pivots, a dealing range and its premium/discount
+//       equilibrium.
+//    3. Liquidity — session highs & lows (Asia/London/NY), measured on a lower
+//       timeframe so short session windows stay accurate on higher-timeframe charts,
+//       plus prior day/week highs & lows — each anchored to the candle that formed
+//       it, and frozen, dotted and dimmed once taken.
+//    4. PD Arrays — FVG (BISI/SIBI), Volume Imbalance (a body gap the wicks still
+//       bridge), Order Block (candle body) and the OB→Breaker
+//       lifecycle, with a largest-array-wins
+//       declutter and a percentage-fill mitigation decider (kept-as-live until
+//       price trades a chosen depth in, then faded-and-kept or removed).
+//    5. SMT Divergence — swing-by-swing against a correlated symbol, correlation
+//       direction derived from co-movement (works for positive or inverse pairs).
+//    6. Dashboard — the ICT bias read, the draw on liquidity, the named sweep and
+//       the live confluences. Context, not a call to act.
+//
+//  Visual grammar: a solid line or zone is live; once raided or mitigated it turns
+//  dotted, fades, and carries a ✓ at its origin. Purple = bullish, magenta =
+//  bearish; nearby level labels combine so the chart stays readable.
+//
+//  Method & repainting: detection and level capture run on closed bars; completed
+//  period levels are fixed at rollover; session extremes are read from the closed
+//  intrabars of the session source timeframe; the correlated SMT symbol is read on
+//  its confirmed prior bar. All detection evaluates on bar close.
+//
+//  A decision-support tool for discretionary ICT trading — not financial advice.
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=6
+indicator("Confluence Engine+", "ICT Engine+ (M1D)", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+const string G_GEN   = "General"
+const string G_KZ    = "Killzone Gating"
+const string G_SESS  = "Sessions H/L"
+const string G_STR   = "Swing Structure"
+const string G_LVL   = "Liquidity — MTF Levels"
+const string G_PDA   = "PD Arrays"
+const string G_SMT   = "SMT Divergence"
+const string G_SCORE = "Dashboard"
+
+string tzInput      = input.string("America/New_York", "Session Timezone", options = ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Tokyo", "Asia/Hong_Kong", "Australia/Sydney", "UTC"], group = G_GEN)
+int    rightOffset  = input.int(8, "Right-side offset (bars)", minval = 0, maxval = 30, group = G_GEN, tooltip = "Lines & boxes project this many bars past the last candle so labels sit in clear space, never on price.")
+string levelLabelSz = input.string("normal", "Line label size", options = ["tiny", "small", "normal", "large"], group = G_GEN)
+string zoneLabelSz  = input.string("small",  "Zone label size", options = ["tiny", "small", "normal", "large"], group = G_GEN)
+string eventLabelSz = input.string("normal", "SMT label size", options = ["tiny", "small", "normal", "large"], group = G_GEN)
+float  combineAtr   = input.float(0.5, "Combine labels within (× ATR)", minval = 0.0, step = 0.1, group = G_GEN, tooltip = "Levels closer than this merge into one label (both lines stay). 0 = never combine.")
+bool   showMidnight = input.bool(true, "Show Midnight Open (00:00 NY)", group = G_GEN, tooltip = "The 00:00 NY open — a core ICT daily reference. Below it leans bullish for the day, above it leans bearish. Feeds the ICT Bias.")
+color  midnightCol  = input.color(color.new(color.black, 0), "Midnight Open colour", group = G_GEN)
+
+string sessLondon = input.session("0200-0500", "London KZ", group = G_KZ)
+string sessNYAM   = input.session("0830-1100", "NY AM KZ", group = G_KZ)
+string sessNYPM   = input.session("1330-1600", "NY PM KZ", group = G_KZ)
+
+bool   showSess     = input.bool(true, "Show Session Highs / Lows", group = G_SESS)
+int    sessDaysBack = input.int(2, "Days back", minval = 1, maxval = 5, group = G_SESS)
+bool   showAsiaS    = input.bool(true, "Asia", group = G_SESS, inline = "as")
+string sessAsia     = input.session("1800-0000", "", group = G_SESS, inline = "as")
+bool   showLonS     = input.bool(true, "London", group = G_SESS, inline = "ln")
+string sessLonHL    = input.session("0200-0500", "", group = G_SESS, inline = "ln")
+bool   showNyS      = input.bool(true, "New York", group = G_SESS, inline = "ny")
+string sessNyHL     = input.session("0930-1100", "", group = G_SESS, inline = "ny")
+color  sessColor    = input.color(color.black, "Session line", group = G_SESS, inline = "ss")
+int    sessWidth    = input.int(1, "", minval = 1, maxval = 4, group = G_SESS, inline = "ss")
+string sessSrcTf    = input.string("5", "Session source timeframe (min)", options = ["1", "3", "5", "15"], group = G_SESS, tooltip = "Session highs & lows are measured from THIS timeframe, not the chart's. A 3-hour London window is shorter than a single 4H candle, so read off the chart it would just be the high of whichever candle contained it. Sourcing from a lower timeframe keeps Asia / London / NY levels correct on any chart. Ignored when the chart is already at or below this.")
+
+int pivLeft  = input.int(5, "Pivot Left Strength",  minval = 1, group = G_STR)
+int pivRight = input.int(3, "Pivot Right Strength", minval = 1, group = G_STR)
+
+bool   showPD      = input.bool(true, "Prior Day High / Low", group = G_LVL, inline = "d")
+int    pdDaysBack  = input.int(3, "back", minval = 1, maxval = 5, group = G_LVL, inline = "d")
+bool   showPW      = input.bool(true, "Prior Week High / Low", group = G_LVL, inline = "w")
+int    pwWeeksBack = input.int(1, "back", minval = 1, maxval = 3, group = G_LVL, inline = "w")
+color  lvlColor    = input.color(color.black, "Level line", group = G_LVL, inline = "lv")
+int    lvlWidth    = input.int(1, "", minval = 1, maxval = 4, group = G_LVL, inline = "lv")
+int    sweepMemory = input.int(30, "Sweep Relevance Window (bars)", minval = 1, group = G_LVL)
+float  levelMinGap = input.float(0.75, "Min gap between levels (× ATR)", minval = 0.0, step = 0.25, group = G_LVL, tooltip = "Quality over quantity — when levels land within this distance of each other only the most significant is drawn, so the chart shows meaningful liquidity instead of every near-duplicate. A weekly level outranks a prior-day level, which outranks a session level. 0 = keep them all.")
+int    levelDim    = input.int(0, "Mitigated level dim %", minval = 0, maxval = 100, group = G_LVL, tooltip = "Once price touches a level it is mitigated: the line stops extending at that candle and turns dotted. 0 keeps the line at full strength — the dotted style alone marks it as taken; raise this to also fade it.")
+
+// -- PD arrays — per-array sensitivity + declutter ----------------------------
+bool  showFVG     = input.bool(true, "Show FVGs", group = G_PDA, inline = "fv")
+color bullZoneCol = input.color(color.new(#7246CE, 74), "Bull", group = G_PDA, inline = "fv")
+color bearZoneCol = input.color(color.new(#DB1D9C, 74), "Bear", group = G_PDA, inline = "fv")
+float minFvgAtr   = input.float(0.15, "FVG sensitivity — min height (× ATR)", minval = 0.0, step = 0.05, group = G_PDA, tooltip = "Higher = only larger, more significant gaps register.")
+float fvgDispMult = input.float(0.6, "FVG requires displacement — body (× ATR)", minval = 0.0, step = 0.1, group = G_PDA, tooltip = "The candle that OPENS the gap (its middle candle) must have a body at least this large, in the gap's direction, for the FVG to register. This is what makes it a real displacement gap, not every routine three-bar gap — raise it to keep only expansion FVGs, 0 to accept any gap that meets the height above.")
+bool  showVI      = input.bool(true, "Show Volume Imbalances", group = G_PDA, tooltip = "A two-candle BODY gap that a wick still trades through — price gapped between the bodies, but a wick bridged the space, so the only volume in the gap changed hands in wicks. The wick overlap is what separates it from a true opening gap. A thinner cousin of the FVG: drawn, mitigated and decluttered through the same pipeline.")
+float minViAtr    = input.float(0.05, "VI sensitivity — min height (× ATR)", minval = 0.0, step = 0.05, group = G_PDA, tooltip = "Volume Imbalances are naturally thinner tha FVGs, so they carry their own floor. Raise it to keep only the meaningful body gaps.")
+bool  showOB      = input.bool(true, "Show Order Blocks / Breakers", group = G_PDA, tooltip = "An order block registers only when its displacement leg closes through structure AND leaves a Fair Value Gap — the ICT sequence in full. No gap, no order block: only the blocks that matter.")
+bool  obNeedMSS   = input.bool(true, "OBs require a structure break (MSS)", group = G_PDA, tooltip = "ON: a OB registers only when the displacement CLOSES through the last swing (a real MSS), so OBs sit at genuine swing points, not noise.")
+bool  declutterPD = input.bool(true, "Declutter — biggest array wins", group = G_PDA, tooltip = "When PD arrays overlap in the same price area, keep the LARGEST and remove the smaller overlapping ones.")
+int   maxZones    = input.int(3, "Max Live Zones per Type", minval = 1, maxval = 20, group = G_PDA, tooltip = "How many live zones of each type (FVG, OB, Breaker) are kept on the chart at once — the newest win, the oldest drop off. Lower = a more contained, less crowded chart.")
+int   tapMemory   = input.int(5, "Array Tap Memory (bars)", minval = 1, group = G_PDA)
+float mitigatePct = input.float(50.0, "Mitigation fill % (proximal)", minval = 5.0, maxval = 100.0, step = 5.0, group = G_PDA, tooltip = "How deep price must trade INTO a PD array — measured from the side price approaches — before it counts as mitigated. 50% = consequent encroachment (the ICT midpoint); 100% = a full fill. Governs when arrays are kept-as-live vs cleaned up.")
+string mitAction  = input.string("Fade & keep", "On mitigation", options = ["Fade & keep", "Remove"], group = G_PDA, tooltip = "Fade & keep — a mitigated array freezes at the candle that mitigated it, turns dotted + faint and keeps a ✓ at its origin, so worked zones read as history, not live. Remove — the array is deleted for the barest chart.")
+
+bool   smtOn        = input.bool(true, "Enable SMT Divergence", group = G_SMT)
+string smtSymbol    = input.symbol("", "Correlated Symbol", group = G_SMT, tooltip = "Leave EMPTY to auto-pair — NQ↔ES, YM→ES, GC→SI (and their micros), so the same NQ/ES divergence reads identically whether the Engine is on the NQ chart or the ES chart. Set a symbol to override.")
+int    smtMemory    = input.int(30, "SMT Relevance Window (bars)", minval = 1, group = G_SMT, tooltip = "How recently a SMT must have formed to still count as live context in the confluence stack + dashboard.")
+int    smtPivot     = input.int(3, "SMT Pivot Strength", minval = 1, group = G_SMT, tooltip = "Left/right bars for the SMT swing pivots, on both your chart and the peer. Lower = more, smaller swings compared; higher = fewer, cleaner ones.")
+int    smtPoolBars  = input.int(120, "SMT Liquidity Memory (bars)", minval = 10, group = G_SMT, tooltip = "How far back a pooled swing stays eligible to be swept. Past this it leaves the pool, so a SMT is never drawn between two swings that are days apart — the divergence is only meaningful between swings that are still contemporaries.")
+bool   smtCandleCheck = input.bool(true, "Candle-direction validation", group = G_SMT, tooltip = "Only accept a bullish SMT made by an up candle at the swing, and a bearish SMT by a down candle — filters weak, wrong-way divergences.")
+bool   smtDelBroken = input.bool(false, "Remove broken SMTs", group = G_SMT, tooltip = "Delete a SMT once price trades back through its level — the divergence has since been violated.")
+int    smtMaxShow   = input.int(3, "Max SMTs per side", minval = 1, maxval = 20, group = G_SMT, tooltip = "Keep at most this many bullish and this many bearish SMTs on the chart — the oldest drop off so lines never stack up.")
+bool   smtShowLabel = input.bool(true, "Show SMT labels", group = G_SMT)
+
+bool  showDash  = input.bool(true, "Show Dashboard", group = G_SCORE)
+string dashPos  = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = G_SCORE)
+string dashSize = input.string("small", "Dashboard Text Size", options = ["tiny", "small", "normal", "large"], group = G_SCORE)
+
+// ============================================================================
+// SHARED CONTEXT & HELPERS
+// ============================================================================
+float atrVal   = ta.atr(14)
+float labelOff = atrVal * 0.4
+color COLOR_NONE = color.new(color.white, 100)
+
+bool newDay  = timeframe.change("D")
+bool newWeek = timeframe.change("W")
+
+//@function Auto-pairs the SMT peer from the chart symbol so the same divergence reads on
+//          either side of a pair — NQ↔ES, YM→ES, GC→SI, and their micros. Returns na when
+//          the symbol has no known pairing (the caller falls back to the chart itself).
+//@returns (string) The paired symbol, or na.
+smtAutoPeer() =>
+    string t = syminfo.ticker
+    string res = na
+    string m = str.match(t, "^M?(ES|NQ)[1\\w][!\\d]+$")
+    if m != ''
+        int off = str.startswith(m, "M") ? 1 : 0
+        string prefix = str.substring(m, off, 2 + off)
+        string suffix = str.substring(m, 2 + off)
+        res := "CME_MINI:" + (off == 1 ? "M" : "") + (prefix == "NQ" ? "ES" : "NQ") + suffix
+    else if str.contains(t, "MYM")
+        res := "CME_MINI:MES1!"
+    else if str.contains(t, "YM")
+        res := "CME_MINI:ES1!"
+    else if str.contains(t, "MGC")
+        res := "COMEX:SIL1!"
+    else if str.contains(t, "GC")
+        res := "COMEX:SI1!"
+    res
+
+//@variable The resolved SMT peer — the user's symbol if set, else the auto-pair, else the
+//          chart itself (which harmlessly yields no divergence rather than erroring).
+var string smtAuto = smtAutoPeer()
+var string smtPeer = smtSymbol != "" ? smtSymbol : (not na(smtAuto) ? smtAuto : syminfo.tickerid)
+
+// Peer OHLC the sweep-based SMT compares swing-by-swing against the chart symbol.
+[smtHH, smtLL, smtOO, smtCC] = request.security(smtPeer, timeframe.period, [high, low, open, close])
+
+// The SMT draw and validation walk back through these series at dynamic offsets of up to
+// ~5000 bars. The history buffer is scoped to exactly these five series — a script-wide
+// max_bars_back in indicator() would buffer EVERY series that deep and pay for it in memory.
+max_bars_back(high, 5000)
+max_bars_back(low, 5000)
+max_bars_back(time, 5000)
+max_bars_back(smtHH, 5000)
+max_bars_back(smtLL, 5000)
+
+//@variable Short display name of the SMT peer (ticker after the exchange prefix), for the "SMT vs ES1!" marker.
+var array<string> smtParts = str.split(smtPeer, ":")
+string smtName = smtParts.size() > 0 ? array.get(smtParts, smtParts.size() - 1) : smtPeer
+
+//@function Short tag for the chart timeframe — the "M" (minutes) / "H" (hours) /
+//          "D" marker shown on each PD array.
+//@returns (string) e.g. "M5", "M15", "H1", "H4", "D".
+tfTag() =>
+    string tag = switch
+        timeframe.isseconds                                    => "S" + str.tostring(timeframe.multiplier)
+        timeframe.isminutes and timeframe.multiplier % 60 == 0 => "H" + str.tostring(timeframe.multiplier / 60)
+        timeframe.isminutes                                    => "M" + str.tostring(timeframe.multiplier)
+        timeframe.isdaily                                      => "D"
+        timeframe.isweekly                                     => "W"
+        timeframe.ismonthly                                    => "MN"
+        =>                                                        timeframe.period
+    tag
+
+//@function Resolves a size-name string to a Pine size constant.
+//@param s (string) One of "tiny" / "small" / "normal" / "large".
+//@returns (string) The matching size.* constant.
+sizeFromStr(string s) =>
+    switch s
+        "tiny"  => size.tiny
+        "small" => size.small
+        "large" => size.large
+        =>         size.normal
+
+string levelLabelSize = sizeFromStr(levelLabelSz)
+string zoneLabelSize  = sizeFromStr(zoneLabelSz)
+string eventLabelSize = sizeFromStr(eventLabelSz)
+
+color bullTxt = color.new(bullZoneCol, 0)
+color bearTxt = color.new(bearZoneCol, 0)
+
+//@function Line-label (text only, colour-matched), anchored at the right edge.
+mkLineLabel(int x, float y, string txt, color col, string sz) =>
+    label l = label.new(x, y, txt, xloc.bar_index, yloc.price, color(na), label.style_none, col, sz)
+    label.set_text_font_family(l, font.family_monospace)
+    l
+
+//@function Box label centred exactly on its anchor (label_center, no bubble).
+mkBoxLabel(int x, float y, string txt, color col, string sz) =>
+    label l = label.new(x, y, txt, xloc.bar_index, yloc.price, color(na), label.style_label_center, col, sz)
+    label.set_text_font_family(l, font.family_monospace)
+    l
+
+var int lastBuysideRaidBar = na
+var string lastBuysideRaidName = ""
+var string lastSellsideRaidName = ""
+var int lastSellsideRaidBar = na
+
+// ============================================================================
+// MODULE 1 — KILLZONE WINDOWS (gate only) + SESSION H/L CAPTURE
+// ============================================================================
+bool inAsiaS = not na(time(timeframe.period, sessAsia, tzInput))
+bool inLonS  = not na(time(timeframe.period, sessLonHL, tzInput))
+bool inNyS   = not na(time(timeframe.period, sessNyHL, tzInput))
+
+// ── Session source timeframe ─────────────────────────────────────────────────
+// Session extremes are measured on a fixed lower timeframe: session windows are shorter
+// than one higher-TF candle, so chart-bar tracking would collapse a session to the range
+// of whichever candle contained it. Intrabars replay through the same trackers; charts
+// at or below the source timeframe track natively.
+bool   sessUseLtf = timeframe.in_seconds(timeframe.period) > timeframe.in_seconds(sessSrcTf)
+string sessTf     = sessUseLtf ? sessSrcTf : timeframe.period
+[ltfHi, ltfLo, ltfOpen, ltfAsia, ltfLon, ltfNy, ltfMidnight, ltfKzLon, ltfKzAm, ltfKzPm] = request.security_lower_tf(syminfo.tickerid, sessTf, [high, low, open, not na(time(timeframe.period, sessAsia, tzInput)), not na(time(timeframe.period, sessLonHL, tzInput)), not na(time(timeframe.period, sessNyHL, tzInput)), hour(time, tzInput) == 0 and (na(time[1]) or hour(time[1], tzInput) != 0), not na(time(timeframe.period, sessLondon, tzInput)), not na(time(timeframe.period, sessNYAM, tzInput)), not na(time(timeframe.period, sessNYPM, tzInput))], ignore_invalid_timeframe = true)
+
+// ── Killzone windows (gate only) ─────────────────────────────────────────────
+// Judged from the source timeframe on the candle's LAST intrabar — its close — since the
+// grade is struck at close. A higher-TF candle merely overlapping a killzone would
+// otherwise read as fully inside it. Charts fine enough to resolve the window natively
+// read their own bars.
+bool inLondonKZ = false
+bool inNYAMKZ   = false
+bool inNYPMKZ   = false
+if sessUseLtf and ltfKzLon.size() > 0
+    int lastItb = ltfKzLon.size() - 1
+    inLondonKZ := ltfKzLon.get(lastItb)
+    inNYAMKZ   := ltfKzAm.get(lastItb)
+    inNYPMKZ   := ltfKzPm.get(lastItb)
+else
+    inLondonKZ := not na(time(timeframe.period, sessLondon, tzInput))
+    inNYAMKZ   := not na(time(timeframe.period, sessNYAM, tzInput))
+    inNYPMKZ   := not na(time(timeframe.period, sessNYPM, tzInput))
+bool inAnyKZ     = inLondonKZ or inNYAMKZ or inNYPMKZ
+
+// ── Midnight Open (00:00 NY) — daily reference + bias anchor ─────────────────
+// The 00:00 NY open is a core ICT reference: trading BELOW it leans the day
+// bullish (price is discounted vs the daily open), ABOVE it leans bearish. It
+// is a reference midline, so it draws DOTTED. Reset on the first bar of NY 00:00.
+//
+// Only a chart whose candles align to 00:00 can see that open on its own bars — a 4-hour
+// futures candle opens at 18:00 / 22:00 / 02:00, so an hour test against the chart's bars
+// never fires there and the reference would silently go missing. It is therefore read from
+// the session source timeframe, the same stream the session extremes come from, and falls
+// back to the chart's own bars whenever they already resolve it.
+var float midnightOpen = na
+var line  mnLine  = na
+var label mnLabel = na
+bool  mnNative  = hour(time, tzInput) == 0 and (na(time[1]) or hour(time[1], tzInput) != 0)
+bool  newMidnight = false
+float newMnOpen   = na
+if timeframe.isintraday
+    if sessUseLtf
+        if ltfMidnight.size() > 0
+            for k = 0 to ltfMidnight.size() - 1
+                if ltfMidnight.get(k) and not newMidnight
+                    newMidnight := true
+                    newMnOpen   := ltfOpen.get(k)
+    else
+        newMidnight := mnNative
+        newMnOpen   := open
+if barstate.isconfirmed
+    if newMidnight
+        midnightOpen := newMnOpen
+        if showMidnight
+            line.delete(mnLine)
+            label.delete(mnLabel)
+            mnLine := line.new(bar_index, midnightOpen, bar_index + 10, midnightOpen, xloc = xloc.bar_index, color = midnightCol, style = line.style_dotted, width = 1)
+            mnLabel := mkLineLabel(bar_index + 10, midnightOpen, "Midnight Open", midnightCol, levelLabelSize)
+    if not na(mnLine)
+        line.set_x2(mnLine, bar_index + 10)   // Midnight Open projects 10 bars past live price — staggered right of the level labels
+    if not na(mnLabel)
+        label.set_x(mnLabel, bar_index + 10)
+
+//@type Forming-period tracker — records the ORIGIN BAR of the running high/low.
+type Trk
+    bool  active = false
+    float hi = na
+    float lo = na
+    int   hiBar = na
+    int   loBar = na
+    float cHi = na
+    float cLo = na
+    int   cHiBar = na
+    int   cLoBar = na
+
+//@type One horizontal liquidity level. `fam` groups a level with its own kind, `disp` is the
+//      shown text, and `lifeDays` is how many days it stays on the chart. Solid while live;
+//      dotted + faded + a ✓ once swept.
+type Level
+    float  price
+    int    originBar
+    bool   isHigh
+    string fam
+    string disp
+    color  col
+    bool   swept = false
+    int    bornBar = na
+    int    bornDay = na
+    int    lifeDays = na
+    int    rank = 0
+    line   ln = na
+    label  chk = na
+
+method roll(Trk t, bool isRoll) =>
+    bool done = false
+    if isRoll and not na(t.hi)
+        t.cHi := t.hi
+        t.cLo := t.lo
+        t.cHiBar := t.hiBar
+        t.cLoBar := t.loBar
+        done := true
+    if isRoll or na(t.hi)
+        t.hi := high
+        t.lo := low
+        t.hiBar := bar_index
+        t.loBar := bar_index
+    else
+        if high > t.hi
+            t.hi := high
+            t.hiBar := bar_index
+        if low < t.lo
+            t.lo := low
+            t.loBar := bar_index
+    done
+
+//@function Advances a session tracker by one reading — a chart candle, or one intrabar of
+//          the session source timeframe. The origin bar is passed in so the level still
+//          anchors to the chart candle that formed the extreme.
+//@param inWin (bool) Whether this reading falls inside the session window.
+//@param h (float) Reading high.
+//@param l (float) Reading low.
+//@param bIdx (int) Chart bar index to anchor an extreme to.
+//@returns (bool) True on the reading that closes the session.
+method sess(Trk t, bool inWin, float h, float l, int bIdx) =>
+    bool done = false
+    if inWin
+        if not t.active
+            t.active := true
+            t.hi := h
+            t.lo := l
+            t.hiBar := bIdx
+            t.loBar := bIdx
+        else
+            if h > t.hi
+                t.hi := h
+                t.hiBar := bIdx
+            if l < t.lo
+                t.lo := l
+                t.loBar := bIdx
+    else if t.active
+        t.cHi := t.hi
+        t.cLo := t.lo
+        t.cHiBar := t.hiBar
+        t.cLoBar := t.loBar
+        t.active := false
+        done := true
+    done
+
+var array<Level> levels = array.new<Level>()
+
+//@function Deletes a level's drawings (line + any ✓).
+delLevel(Level lv) =>
+    line.delete(lv.ln)
+    label.delete(lv.chk)
+    true
+
+//@variable Days elapsed on the chart, stamped onto each level so it can be retired by age.
+var int dayCount = 0
+
+//@function Retires levels that have aged past their lookback window — the "back" inputs are
+//          a window in days, not a running count.
+//@returns (bool) Always true.
+expireLevels() =>
+    if levels.size() > 0
+        for i = levels.size() - 1 to 0
+            Level lv = levels.get(i)
+            if not na(lv.bornDay) and not na(lv.lifeDays) and dayCount - lv.bornDay >= lv.lifeDays
+                delLevel(lv)
+                levels.remove(i)
+    true
+
+//@function Draws a solid level line from the candle that formed it, extended past price.
+//          Near-duplicates within levelMinGap × ATR resolve by significance: a new level is
+//          blocked by an equal-or-higher-ranked live level and displaces lesser ones. Ranking
+//          matters because a weekly high often sits at the same price as a daily high inside
+//          it. Labels are handled by the combine-pass.
+//@param lifeDays (int) How many days the level stays on the chart before it is retired.
+//@param rank (int) Significance — weekly 3, prior-day 2, session 1.
+addLevel(float price, int originBar, bool isHigh, string fam, string disp, color col, int width, int lifeDays, int rank) =>
+    float gap = atrVal * levelMinGap
+    bool  blocked = false
+    if levelMinGap > 0.0 and levels.size() > 0
+        for i = levels.size() - 1 to 0
+            Level ex = levels.get(i)
+            if not ex.swept and math.abs(ex.price - price) <= gap and ex.rank >= rank
+                blocked := true
+    if not blocked
+        // Nothing of equal or greater significance is sitting here, so any lesser
+        // near-duplicate steps aside for this level rather than blocking it.
+        if levelMinGap > 0.0 and levels.size() > 0
+            for i = levels.size() - 1 to 0
+                Level ex = levels.get(i)
+                if not ex.swept and math.abs(ex.price - price) <= gap
+                    delLevel(ex)
+                    levels.remove(i)
+        Level lv = Level.new(price, originBar, isHigh, fam, disp, col)
+        lv.bornBar := bar_index
+        lv.bornDay := dayCount
+        lv.lifeDays := lifeDays
+        lv.rank := rank
+        lv.ln := line.new(originBar, price, bar_index + rightOffset, price, xloc = xloc.bar_index, color = col, style = line.style_solid, width = width)
+        levels.push(lv)
+        while levels.size() > 60
+            delLevel(levels.shift())
+    true
+
+//@function Extends each live level and MITIGATES it the instant price touches it — a wick to
+//          a high (buyside) or a low (sellside). A mitigated level stops extending at the
+//          candle that took it and turns dotted. Live levels keep tracking the right edge.
+//@returns ([bool, bool, string, string]) Whether a buyside / sellside raid completed here,
+//          and the display name of the raided level on each side ("" when none).
+scanLevels() =>
+    bool raidedUp = false
+    bool raidedDn = false
+    string upName = ""
+    string dnName = ""
+    if levels.size() > 0
+        for i = levels.size() - 1 to 0
+            Level lv = levels.get(i)
+            if not lv.swept
+                bool fresh = na(lv.bornBar) or bar_index > lv.bornBar   // never mitigate on its own birth bar
+                bool touched = fresh and (lv.isHigh ? high >= lv.price : low <= lv.price)
+                if touched
+                    // A close back through it is a raid (feeds the Sweep confluence); a clean
+                    // break simply mitigates. Either way the level freezes here.
+                    if lv.isHigh and close < lv.price
+                        raidedUp := true
+                        upName := lv.disp
+                    else if (not lv.isHigh) and close > lv.price
+                        raidedDn := true
+                        dnName := lv.disp
+                    lv.swept := true
+                    if not na(lv.ln)
+                        line.set_x2(lv.ln, bar_index)                        // stop extending
+                        line.set_style(lv.ln, line.style_dotted)
+                        line.set_color(lv.ln, color.new(lv.col, levelDim))
+                else if not na(lv.ln)
+                    line.set_x2(lv.ln, bar_index + rightOffset)
+    [raidedUp, raidedDn, upName, dnName]
+
+var Trk dayTrk  = Trk.new()
+var Trk weekTrk = Trk.new()
+var Trk asiaTrk = Trk.new()
+var Trk lonTrk  = Trk.new()
+var Trk nyTrk   = Trk.new()
+
+if barstate.isconfirmed and timeframe.isintraday
+    if newDay
+        dayCount += 1
+        expireLevels()
+    if dayTrk.roll(newDay) and showPD
+        string dt = str.format_time(time[1], "dd/MM", tzInput)
+        addLevel(dayTrk.cHi, dayTrk.cHiBar, true,  "PDH", "PDH " + dt, lvlColor, lvlWidth, pdDaysBack, 2)
+        addLevel(dayTrk.cLo, dayTrk.cLoBar, false, "PDL", "PDL " + dt, lvlColor, lvlWidth, pdDaysBack, 2)
+    if weekTrk.roll(newWeek) and showPW
+        string wt = str.format_time(time[1], "dd/MM", tzInput)
+        addLevel(weekTrk.cHi, weekTrk.cHiBar, true,  "PWH", "PWH " + wt, lvlColor, lvlWidth, pwWeeksBack * 7, 3)
+        addLevel(weekTrk.cLo, weekTrk.cLoBar, false, "PWL", "PWL " + wt, lvlColor, lvlWidth, pwWeeksBack * 7, 3)
+    // Replay the source-timeframe intrabars through the trackers (or the chart candle
+    // itself when the chart is already at or below the source timeframe).
+    bool asiaDone = false
+    bool lonDone  = false
+    bool nyDone   = false
+    if sessUseLtf
+        int nItb = ltfHi.size()
+        if nItb > 0
+            for k = 0 to nItb - 1
+                float ih = ltfHi.get(k)
+                float il = ltfLo.get(k)
+                if asiaTrk.sess(ltfAsia.get(k), ih, il, bar_index)
+                    asiaDone := true
+                if lonTrk.sess(ltfLon.get(k), ih, il, bar_index)
+                    lonDone := true
+                if nyTrk.sess(ltfNy.get(k), ih, il, bar_index)
+                    nyDone := true
+    else
+        asiaDone := asiaTrk.sess(inAsiaS, high, low, bar_index)
+        lonDone  := lonTrk.sess(inLonS, high, low, bar_index)
+        nyDone   := nyTrk.sess(inNyS, high, low, bar_index)
+    if asiaDone and showSess and showAsiaS
+        addLevel(asiaTrk.cHi, asiaTrk.cHiBar, true,  "Asia High", "Asia High", sessColor, sessWidth, sessDaysBack, 1)
+        addLevel(asiaTrk.cLo, asiaTrk.cLoBar, false, "Asia Low",  "Asia Low",  sessColor, sessWidth, sessDaysBack, 1)
+    if lonDone and showSess and showLonS
+        addLevel(lonTrk.cHi, lonTrk.cHiBar, true,  "London High", "London High", sessColor, sessWidth, sessDaysBack, 1)
+        addLevel(lonTrk.cLo, lonTrk.cLoBar, false, "London Low",  "London Low",  sessColor, sessWidth, sessDaysBack, 1)
+    if nyDone and showSess and showNyS
+        addLevel(nyTrk.cHi, nyTrk.cHiBar, true,  "NY High", "NY High", sessColor, sessWidth, sessDaysBack, 1)
+        addLevel(nyTrk.cLo, nyTrk.cLoBar, false, "NY Low",  "NY Low",  sessColor, sessWidth, sessDaysBack, 1)
+    [lvUp, lvDn, lvUpNm, lvDnNm] = scanLevels()
+    if lvUp
+        lastBuysideRaidBar := bar_index
+        lastBuysideRaidName := lvUpNm
+    if lvDn
+        lastSellsideRaidBar := bar_index
+        lastSellsideRaidName := lvDnNm
+
+// ============================================================================
+// MODULE 2 — SWING STRUCTURE
+// ----------------------------------------------------------------------------
+// Everything downstream is built from swings: equal highs are clustered pivots and
+// SMT compares pivots across markets. The dealing-range equilibrium that separates
+// premium from discount is taken from a fixed HTF window (weekly on 1H+, daily below).
+// ============================================================================
+float ph = ta.pivothigh(high, pivLeft, pivRight)
+float pl = ta.pivotlow(low, pivLeft, pivRight)
+bool newPH = not na(ph)
+bool newPL = not na(pl)
+int phBar = bar_index - pivRight
+int plBar = bar_index - pivRight
+
+// Each swing is armed when its pivot confirms and consumed by the first confirmed close
+// through it (the MSS check in Module 4). A pivot cannot confirm already-broken — its
+// confirming right-hand bars stayed on the near side.
+var float lastSwingHigh  = na
+var float lastSwingLow   = na
+var bool  swingHighArmed = false
+var bool  swingLowArmed  = false
+if barstate.isconfirmed
+    if newPH
+        lastSwingHigh := ph
+        swingHighArmed := true
+    if newPL
+        lastSwingLow := pl
+        swingLowArmed := true
+
+// ── Dealing range — a fixed higher-TF window rather than the latest swing: the WEEKLY range
+//    on 1H-and-up charts, the DAILY range on anything intraday below 1H. Premium/discount is
+//    then judged off the range price is actually dealing within. Tracked natively on the chart
+//    (running high/low, reset at the period boundary) so there is no repaint from a HTF fetch.
+bool  drUseWeekly = timeframe.in_seconds(timeframe.period) >= 3600
+var float drHi = na
+var float drLo = na
+if barstate.isconfirmed
+    bool drNew = drUseWeekly ? newWeek : newDay
+    if drNew or na(drHi)
+        drHi := high
+        drLo := low
+    else
+        drHi := math.max(drHi, high)
+        drLo := math.min(drLo, low)
+
+float equilibrium = not na(drHi) and not na(drLo) and drHi > drLo ? math.avg(drHi, drLo) : na
+
+bool buysideRaidRecent = not na(lastBuysideRaidBar) and bar_index - lastBuysideRaidBar <= sweepMemory
+bool sellsideRaidRecent = not na(lastSellsideRaidBar) and bar_index - lastSellsideRaidBar <= sweepMemory
+
+// ── Shared PD-array mitigation (see Module 4) ────────────────────────────────
+// One decider for every array: how deeply price has traded in from the side it
+// approaches. A support array (bullish) is approached from above, a resistance
+// array (bearish) from below, so penetration is measured off the proximal edge.
+float mitFrac   = mitigatePct / 100.0
+bool  mitRemove = mitAction == "Remove"
+
+//@function Fraction of a zone's depth this bar has traded into, from the proximal
+//          edge. 0 = untouched, 0.5 = consequent encroachment, ≥1 = fully filled.
+//@param top (float) Zone top.
+//@param bottom (float) Zone bottom.
+//@param isSupport (bool) True for a bullish/support array (price approaches from above).
+//@returns (float) Penetration fraction, floored at 0.
+penFrac(float top, float bottom, bool isSupport) =>
+    float h = top - bottom
+    float f = h <= 0 ? 1.0 : (isSupport ? (top - low) / h : (high - bottom) / h)
+    math.max(f, 0.0)
+
+//@function Applies the mitigated grammar to a PD-array box: freeze at the mitigation candle,
+//          dotted + faint fill, and the text label replaced by "✓ name" carried as box text.
+//          No label object remains on a mitigated zone.
+//@param bx (box) The array's box.
+//@param lbl (label) The array's text label — deleted here; the box text inherits its name.
+//@param isBull (bool) Array polarity — drives the fade colour.
+//@returns (label) na — mitigated zones carry no label object.
+fadeArrayBox(box bx, label lbl, bool isBull) =>
+    color fill = isBull ? color.new(bullZoneCol, 88) : color.new(bearZoneCol, 88)
+    color brd  = isBull ? color.new(bullZoneCol, 35) : color.new(bearZoneCol, 35)
+    string name = na(lbl) ? "" : label.get_text(lbl)
+    label.delete(lbl)
+    if not na(bx)
+        box.set_right(bx, bar_index)  // freeze origin → mitigation, no live-looking stub
+        box.set_bgcolor(bx, fill)
+        box.set_border_color(bx, brd)
+        box.set_border_style(bx, line.style_dotted)
+        box.set_text(bx, "✓ " + name)
+        box.set_text_color(bx, color.new(isBull ? bullZoneCol : bearZoneCol, 20))
+        box.set_text_size(bx, size.tiny)
+        box.set_text_halign(bx, text.align_center)
+        box.set_text_valign(bx, text.align_center)
+        box.set_text_font_family(bx, font.family_monospace)
+    label(na)
+
+// ============================================================================
+// MODULE 4 — PD ARRAYS (FVG · VOLUME IMBALANCE · ORDER BLOCK · BREAKER)
+// ----------------------------------------------------------------------------
+// Zone lifecycle: solid while live with a centred label; on mitigation the
+// box freezes, fades and carries "✓ name" as box text. Where zones overlap the
+// largest wins. OB = body of the origin candle; a Breaker expands to the full
+// candle only when the origin was an outside bar. A OB requires a structure
+// break (MSS) AND a FVG left by its displacement leg. A Volume Imbalance — a
+// body gap the wicks still bridge — runs through the same pipeline as FVGs.
+// A new gap removes any live opposite-direction gap it overlaps.
+// ============================================================================
+type FVG
+    float top
+    float bottom
+    int   bornBar
+    int   leftBar
+    bool  isBull
+    bool  isVI = false    // Volume Imbalance — FVG-family, body-gap variant
+    bool  mitigated = false
+    box   bx = na
+    label lbl = na
+    label chk = na
+
+var array<FVG> fvgs = array.new<FVG>()
+//@variable Born-bar of the most recent true bull FVG — the proof a displacement leg gapped.
+//          Recorded at detection whether or not the box survives declutter: the delivery
+//          happened, and that is what validates an order block. VIs do not count.
+var int lastBullFvgBirth = na
+//@variable Born-bar of the most recent true bear FVG.
+var int lastBearFvgBirth = na
+
+// The gap must clear the height floor AND come from a real displacement candle — the
+// middle bar of the three (the one that opened the gap) must have a body of its own,
+// in the gap's direction. That stops every incidental three-bar gap from registering.
+float fvgDispBody = math.abs(close[1] - open[1])
+bool  fvgDispOK   = fvgDispBody >= atrVal * fvgDispMult
+bool bullFvgNew = barstate.isconfirmed and low > high[2] and (low - high[2]) >= atrVal * minFvgAtr and fvgDispOK and close[1] > open[1]
+bool bearFvgNew = barstate.isconfirmed and high < low[2] and (low[2] - high) >= atrVal * minFvgAtr and fvgDispOK and close[1] < open[1]
+
+// Volume Imbalance — a two-candle BODY gap the wicks still bridge: the body gap is the
+// imbalance, the wick overlap distinguishes it from an opening gap.
+float viBullGap = math.min(open, close) - math.max(open[1], close[1])
+float viBearGap = math.min(open[1], close[1]) - math.max(open, close)
+bool  bullViNew = barstate.isconfirmed and showVI and viBullGap > 0 and viBullGap >= atrVal * minViAtr and low <= high[1]
+bool  bearViNew = barstate.isconfirmed and showVI and viBearGap > 0 and viBearGap >= atrVal * minViAtr and high >= low[1]
+
+//@function Biggest-wins declutter for FVGs. Removes live FVGs that PRICE-overlap
+//          the candidate and are smaller; returns false if an overlapping one is
+//          already bigger (so the candidate is dropped).
+fvgKeep(float nTop, float nBot) =>
+    bool keep = true
+    float nH = nTop - nBot
+    if declutterPD and fvgs.size() > 0
+        for i = fvgs.size() - 1 to 0
+            FVG f = fvgs.get(i)
+            if not f.mitigated and nTop >= f.bottom and nBot <= f.top
+                if (f.top - f.bottom) >= nH
+                    keep := false
+                else
+                    box.delete(f.bx)
+                    label.delete(f.lbl)
+                    label.delete(f.chk)
+                    fvgs.remove(i)
+    keep
+
+//@function Creates a FVG-family zone (light tint, centred label) if it survives the
+//          biggest-wins declutter. Both true FVGs and Volume Imbalances come through here,
+//          so both live under the same mitigation and declutter pipeline.
+//@param isBull (bool) Gap polarity — true = bullish.
+//@param zTop (float) Zone top.
+//@param zBot (float) Zone bottom.
+//@param isVI (bool) True for a Volume Imbalance (body gap), false for a true FVG (wick gap).
+createFvg(bool isBull, float zTop, float zBot, bool isVI) =>
+    // A new true FVG removes any live opposite-polarity true FVG it overlaps — that range
+    // has since been delivered through the other way.
+    if not isVI and fvgs.size() > 0
+        for i = fvgs.size() - 1 to 0
+            FVG f = fvgs.get(i)
+            if not f.mitigated and not f.isVI and f.isBull != isBull and zTop >= f.bottom and zBot <= f.top
+                box.delete(f.bx)
+                label.delete(f.lbl)
+                label.delete(f.chk)
+                fvgs.remove(i)
+    if fvgKeep(zTop, zBot)
+        int leftB = bar_index - 1
+        FVG f = FVG.new(zTop, zBot, bar_index - 1, leftB, isBull)
+        f.isVI := isVI
+        if isVI ? showVI : showFVG
+            color zc = isBull ? bullZoneCol : bearZoneCol
+            color tc = isBull ? bullTxt : bearTxt
+            string tag = isVI ? (isBull ? "VI +" : "VI -") : (isBull ? "BISI +" : "SIBI -")
+            f.bx := box.new(leftB, zTop, bar_index + rightOffset, zBot, border_color = zc, border_width = 1, border_style = line.style_solid, bgcolor = zc)
+            f.lbl := mkBoxLabel(int(math.avg(leftB, bar_index + rightOffset)), math.avg(zTop, zBot), tag + " " + tfTag(), tc, zoneLabelSize)
+        fvgs.push(f)
+        while fvgs.size() > maxZones
+            int drop = -1
+            for j = 0 to fvgs.size() - 1
+                if drop == -1 and fvgs.get(j).mitigated
+                    drop := j
+            if drop == -1
+                drop := 0
+            FVG old = fvgs.get(drop)
+            box.delete(old.bx)
+            label.delete(old.lbl)
+            label.delete(old.chk)
+            fvgs.remove(drop)
+    true
+
+if bullFvgNew
+    lastBullFvgBirth := bar_index - 1
+    createFvg(true, low, high[2], false)
+if bearFvgNew
+    lastBearFvgBirth := bar_index - 1
+    createFvg(false, low[2], high, false)
+if bullViNew
+    createFvg(true, math.min(open, close), math.max(open[1], close[1]), true)
+if bearViNew
+    createFvg(false, math.min(open[1], close[1]), math.max(open, close), true)
+
+if barstate.isconfirmed
+    if fvgs.size() > 0
+        for i = fvgs.size() - 1 to 0
+            FVG f = fvgs.get(i)
+            bool through = f.isBull ? close < f.bottom : close > f.top
+            if through
+                // Closed clean through the far edge — the gap is dead, clear it.
+                box.delete(f.bx)
+                label.delete(f.lbl)
+                label.delete(f.chk)
+                fvgs.remove(i)
+            else
+                if not f.mitigated
+                    if not na(f.bx)
+                        box.set_right(f.bx, bar_index + rightOffset)
+                    if not na(f.lbl)
+                        label.set_x(f.lbl, int(math.avg(f.leftBar, bar_index + rightOffset)))
+                        label.set_y(f.lbl, math.avg(f.top, f.bottom))
+                    float pf = bar_index > f.bornBar + 1 ? penFrac(f.top, f.bottom, f.isBull) : 0.0
+                    if pf >= mitFrac and pf > 0.0
+                        f.mitigated := true
+                        if mitRemove
+                            box.delete(f.bx)
+                            label.delete(f.lbl)
+                            fvgs.remove(i)
+                        else
+                            f.chk := fadeArrayBox(f.bx, f.lbl, f.isBull)
+
+// ── Order Block → Breaker ────────────────────────────────────────────────────
+const int STAGE_PENDING_OB  = 0
+const int STAGE_ACTIVE_BRKR = 1
+
+type SmartBlock
+    float top          // current box top   (body while OB; full if breaker + outside)
+    float bottom       // current box bottom
+    float bodyTop
+    float bodyBot
+    float fullTop
+    float fullBot
+    bool  originOutside
+    int   originBar
+    int   bornBar
+    bool  obIsBull
+    int   stage = 0
+    bool  mitigated = false
+    box   bx = na
+    label lbl = na
+    label chk = na
+
+var array<SmartBlock> blocks = array.new<SmartBlock>()
+var int lastBullObTapBar = na
+var int lastBearObTapBar = na
+var int lastBullBrkBar = na
+var int lastBearBrkBar = na
+
+// An order block is the candle before the displacement leg, so the most recent up
+// and down candle are kept — body, full range, and whether it was an outside sweep
+// bar (which is what lets its breaker later use the full range).
+var float dnFullHi = na
+var float dnFullLo = na
+var float dnBodyTop = na
+var float dnBodyBot = na
+var bool  dnOutside = false
+var int   dnBar = na
+var float upFullHi = na
+var float upFullLo = na
+var float upBodyTop = na
+var float upBodyBot = na
+var bool  upOutside = false
+var int   upBar = na
+var int   lastBullObOrigin = na
+var int   lastBearObOrigin = na
+//@type An order block candidate whose structure break has printed but whose leg has not yet
+//      left its FVG — a gap needs its third candle, so it can confirm a bar or two after the
+//      break. Registers when the leg gaps within the grace window; cancelled when the grace
+//      expires or price closes back through the candidate.
+type PendingOB
+    bool  armed = false
+    float bodyTop = na
+    float bodyBot = na
+    float fullHi = na
+    float fullLo = na
+    bool  outside = false
+    int   obBar = na
+    int   breakBar = na
+
+var PendingOB pBullOB = PendingOB.new()
+var PendingOB pBearOB = PendingOB.new()
+//@variable Bars the leg is given to leave its FVG after the structure break.
+const int OB_FVG_GRACE = 3
+
+//@function Biggest-wins declutter for blocks (by current box height).
+blockKeep(float nTop, float nBot) =>
+    bool keep = true
+    float nH = nTop - nBot
+    if declutterPD and blocks.size() > 0
+        for i = blocks.size() - 1 to 0
+            SmartBlock b = blocks.get(i)
+            if not b.mitigated and nTop >= b.bottom and nBot <= b.top
+                if (b.top - b.bottom) >= nH
+                    keep := false
+                else
+                    box.delete(b.bx)
+                    label.delete(b.lbl)
+                    label.delete(b.chk)
+                    blocks.remove(i)
+    keep
+
+//@function Registers a PendingOB (BODY only) if it survives declutter.
+createBlock(bool isBullOB, float bodyTop, float bodyBot, float fullTop, float fullBot, bool outside, int obBar) =>
+    if blockKeep(bodyTop, bodyBot)
+        SmartBlock b = SmartBlock.new(bodyTop, bodyBot, bodyTop, bodyBot, fullTop, fullBot, outside, obBar, bar_index, isBullOB)
+        if showOB
+            color zc = isBullOB ? bullZoneCol : bearZoneCol
+            color tc = isBullOB ? bullTxt : bearTxt
+            b.bx := box.new(obBar, bodyTop, bar_index + rightOffset, bodyBot, border_color = zc, border_width = 1, border_style = line.style_solid, bgcolor = zc)
+            b.lbl := mkBoxLabel(int(math.avg(obBar, bar_index + rightOffset)), math.avg(bodyTop, bodyBot), (isBullOB ? "Bull OB" : "Bear OB") + " " + tfTag(), tc, zoneLabelSize)
+        blocks.push(b)
+        while blocks.size() > maxZones
+            int drop = -1
+            for j = 0 to blocks.size() - 1
+                if drop == -1 and blocks.get(j).mitigated
+                    drop := j
+            if drop == -1
+                drop := 0
+            SmartBlock old = blocks.get(drop)
+            box.delete(old.bx)
+            label.delete(old.lbl)
+            label.delete(old.chk)
+            blocks.remove(drop)
+    true
+
+if barstate.isconfirmed
+    // MSS is a one-shot event: a swing grants structure-break credit once, on the first
+    // confirmed close through it, and is consumed even when no OB registers there — a
+    // grind through the swing must not bank credit for a later candle. No separate
+    // displacement test: FVG registration already enforces displacement, and the leg
+    // must leave a FVG for its block to register.
+    bool bullBreak = swingHighArmed and not na(lastSwingHigh) and close > lastSwingHigh
+    bool bearBreak = swingLowArmed and not na(lastSwingLow) and close < lastSwingLow
+    if bullBreak
+        swingHighArmed := false
+    if bearBreak
+        swingLowArmed := false
+    bool bullMSS = not obNeedMSS or bullBreak
+    bool bearMSS = not obNeedMSS or bearBreak
+    bool bullDisp = close > open and bullMSS
+    bool bearDisp = close < open and bearMSS
+    // Resolve pending order blocks: a leg FVG confirming this bar validates a break from
+    // up to OB_FVG_GRACE bars ago. Cancel on grace expiry or a close back through the
+    // candidate candle.
+    if pBullOB.armed
+        if not na(lastBullFvgBirth) and lastBullFvgBirth > pBullOB.obBar
+            createBlock(true, pBullOB.bodyTop, pBullOB.bodyBot, pBullOB.fullHi, pBullOB.fullLo, pBullOB.outside, pBullOB.obBar)
+            lastBullObOrigin := pBullOB.obBar
+            pBullOB.armed := false
+        else if bar_index - pBullOB.breakBar > OB_FVG_GRACE or close < pBullOB.fullLo
+            pBullOB.armed := false
+    if pBearOB.armed
+        if not na(lastBearFvgBirth) and lastBearFvgBirth > pBearOB.obBar
+            createBlock(false, pBearOB.bodyTop, pBearOB.bodyBot, pBearOB.fullHi, pBearOB.fullLo, pBearOB.outside, pBearOB.obBar)
+            lastBearObOrigin := pBearOB.obBar
+            pBearOB.armed := false
+        else if bar_index - pBearOB.breakBar > OB_FVG_GRACE or close > pBearOB.fullHi
+            pBearOB.armed := false
+    // New candidates: a leg that has already gapped registers its OB immediately; one
+    // that has not goes pending until its FVG confirms. No gap within the grace window,
+    // no order block.
+    if bullDisp and not na(dnBar) and bar_index - dnBar <= 5 and close > dnFullHi and (na(lastBullObOrigin) or dnBar != lastBullObOrigin)
+        if not na(lastBullFvgBirth) and lastBullFvgBirth > dnBar
+            createBlock(true, dnBodyTop, dnBodyBot, dnFullHi, dnFullLo, dnOutside, dnBar)
+            lastBullObOrigin := dnBar
+        else
+            pBullOB.armed := true
+            pBullOB.bodyTop := dnBodyTop
+            pBullOB.bodyBot := dnBodyBot
+            pBullOB.fullHi := dnFullHi
+            pBullOB.fullLo := dnFullLo
+            pBullOB.outside := dnOutside
+            pBullOB.obBar := dnBar
+            pBullOB.breakBar := bar_index
+    if bearDisp and not na(upBar) and bar_index - upBar <= 5 and close < upFullLo and (na(lastBearObOrigin) or upBar != lastBearObOrigin)
+        if not na(lastBearFvgBirth) and lastBearFvgBirth > upBar
+            createBlock(false, upBodyTop, upBodyBot, upFullHi, upFullLo, upOutside, upBar)
+            lastBearObOrigin := upBar
+        else
+            pBearOB.armed := true
+            pBearOB.bodyTop := upBodyTop
+            pBearOB.bodyBot := upBodyBot
+            pBearOB.fullHi := upFullHi
+            pBearOB.fullLo := upFullLo
+            pBearOB.outside := upOutside
+            pBearOB.obBar := upBar
+            pBearOB.breakBar := bar_index
+    // Record this candle AFTER creation so the OB is the candle BEFORE the leg.
+    if close < open
+        dnFullHi := high
+        dnFullLo := low
+        dnBodyTop := open
+        dnBodyBot := close
+        dnOutside := high > high[1] and low < low[1]
+        dnBar := bar_index
+    if close > open
+        upFullHi := high
+        upFullLo := low
+        upBodyTop := close
+        upBodyBot := open
+        upOutside := high > high[1] and low < low[1]
+        upBar := bar_index
+
+if barstate.isconfirmed
+    if blocks.size() > 0
+        for i = blocks.size() - 1 to 0
+            SmartBlock b = blocks.get(i)
+            if b.stage == STAGE_PENDING_OB
+                bool violated = b.obIsBull ? close < b.bottom : close > b.top
+                if b.mitigated
+                    // Spent OB — clear only once price finally breaks clean through.
+                    if violated
+                        box.delete(b.bx)
+                        label.delete(b.lbl)
+                        label.delete(b.chk)
+                        blocks.remove(i)
+                else if violated
+                    // OB failed → Breaker. Flip polarity, colour and label; the
+                    // breaker then lives fresh under the same mitigation decider.
+                    b.stage := STAGE_ACTIVE_BRKR
+                    // A breaker may use the FULL candle range, but only when the
+                    // origin candle was an outside sweep bar (lower-low-then-
+                    // higher-high for bull; the inverse for bear). Else stay body.
+                    if b.originOutside
+                        b.top := b.fullTop
+                        b.bottom := b.fullBot
+                        if not na(b.bx)
+                            box.set_top(b.bx, b.top)
+                            box.set_bottom(b.bx, b.bottom)
+                    color flip = b.obIsBull ? bearZoneCol : bullZoneCol
+                    color flipTxt = b.obIsBull ? bearTxt : bullTxt
+                    if not na(b.bx)
+                        box.set_bgcolor(b.bx, flip)
+                        box.set_border_color(b.bx, flip)
+                        box.set_right(b.bx, bar_index + rightOffset)
+                    if not na(b.lbl)
+                        label.set_text(b.lbl, "Breaker " + tfTag())
+                        label.set_textcolor(b.lbl, flipTxt)
+                        label.set_x(b.lbl, int(math.avg(b.originBar, bar_index + rightOffset)))
+                        label.set_y(b.lbl, math.avg(b.top, b.bottom))
+                else
+                    // Live OB — extend, then test mitigation from its proximal edge.
+                    if not na(b.bx)
+                        box.set_right(b.bx, bar_index + rightOffset)
+                    if not na(b.lbl)
+                        label.set_x(b.lbl, int(math.avg(b.originBar, bar_index + rightOffset)))
+                        label.set_y(b.lbl, math.avg(b.top, b.bottom))
+                    float pf = bar_index > b.bornBar ? penFrac(b.top, b.bottom, b.obIsBull) : 0.0
+                    if pf >= mitFrac and pf > 0.0
+                        b.mitigated := true
+                        if b.obIsBull
+                            lastBullObTapBar := bar_index
+                        else
+                            lastBearObTapBar := bar_index
+                        if mitRemove
+                            box.delete(b.bx)
+                            label.delete(b.lbl)
+                            blocks.remove(i)
+                        else
+                            b.chk := fadeArrayBox(b.bx, b.lbl, b.obIsBull)
+            else
+                bool brkIsBull = not b.obIsBull
+                bool through = brkIsBull ? close < b.bottom : close > b.top
+                if through
+                    box.delete(b.bx)
+                    label.delete(b.lbl)
+                    label.delete(b.chk)
+                    blocks.remove(i)
+                else if not b.mitigated
+                    if not na(b.bx)
+                        box.set_right(b.bx, bar_index + rightOffset)
+                    if not na(b.lbl)
+                        label.set_x(b.lbl, int(math.avg(b.originBar, bar_index + rightOffset)))
+                        label.set_y(b.lbl, math.avg(b.top, b.bottom))
+                    float pf = penFrac(b.top, b.bottom, brkIsBull)
+                    if pf >= mitFrac and pf > 0.0
+                        b.mitigated := true
+                        if brkIsBull
+                            lastBullBrkBar := bar_index
+                        else
+                            lastBearBrkBar := bar_index
+                        if mitRemove
+                            box.delete(b.bx)
+                            label.delete(b.lbl)
+                            blocks.remove(i)
+                        else
+                            b.chk := fadeArrayBox(b.bx, b.lbl, brkIsBull)
+
+// ── Cross-type declutter — a FVG that sits inside a live Order Block / Breaker hides its
+//    OWN box and label, so the higher-order block reads clean and zones never double up. The
+//    gap is only hidden, not dropped — it still tracks, and returns the moment it is no
+//    longer inside one.
+if barstate.isconfirmed
+    if fvgs.size() > 0
+        for i = 0 to fvgs.size() - 1
+            FVG f = fvgs.get(i)
+            if not f.mitigated and not na(f.bx)
+                bool inside = false
+                if blocks.size() > 0
+                    for bi = 0 to blocks.size() - 1
+                        SmartBlock b = blocks.get(bi)
+                        if not b.mitigated and b.bottom <= f.top and b.top >= f.bottom
+                            inside := true
+                color zc = f.isBull ? bullZoneCol : bearZoneCol
+                color tc = f.isBull ? bullTxt : bearTxt
+                box.set_bgcolor(f.bx, inside ? color.new(zc, 100) : zc)
+                box.set_border_color(f.bx, inside ? color.new(zc, 100) : zc)
+                if not na(f.lbl)
+                    label.set_textcolor(f.lbl, inside ? color.new(tc, 100) : tc)
+
+bool bullObTapRecent  = not na(lastBullObTapBar) and bar_index - lastBullObTapBar <= tapMemory
+bool bearObTapRecent  = not na(lastBearObTapBar) and bar_index - lastBearObTapBar <= tapMemory
+bool bullBrkRecent    = not na(lastBullBrkBar) and bar_index - lastBullBrkBar <= tapMemory
+bool bearBrkRecent    = not na(lastBearBrkBar) and bar_index - lastBearBrkBar <= tapMemory
+
+// ============================================================================
+// MODULE 5 — SMT DIVERGENCE (liquidity-sweep, cross-asset)
+// ----------------------------------------------------------------------------
+// Both the chart symbol and the peer carry a pool of swing-high (buyside) and swing-low
+// (sellside) liquidity. When a new swing SWEEPS one of
+// the pooled levels (price takes it) but the peer does NOT sweep its aligned level — its
+// extreme stays short of the level taken — the move lacks participation: a SMT, drawn
+// from the swept level to the sweep. Each sweep is cross-checked against the peer's pool
+// and candle-validated, so only genuine one-sided sweeps register, not every swing. The
+// peer OHLC is read on the chart timeframe; detection runs on closed bars.
+// ============================================================================
+int smtOneBar = timeframe.in_seconds(timeframe.period) * 1000
+
+//@type A drawn SMT — its line, its label, and the price that invalidates it.
+type SmtLevel
+    line  ln
+    label lb
+    float price
+
+//@type One pooled swing liquidity: its own price, the bar time it formed, and the OTHER
+//      asset's aligned price at that time (the cross-reference the validation reads).
+type SmtLiq
+    float price
+    int   t
+    float refPrice = na
+
+var array<SmtLevel> smtSMbu = array.new<SmtLevel>()   // drawn bullish SMTs
+var array<SmtLevel> smtSMbe = array.new<SmtLevel>()   // drawn bearish SMTs
+var array<SmtLiq>   smtH1 = array.new<SmtLiq>()        // chart swing highs
+var array<SmtLiq>   smtL1 = array.new<SmtLiq>()        // chart swing lows
+var array<SmtLiq>   smtH2 = array.new<SmtLiq>()        // peer swing highs
+var array<SmtLiq>   smtL2 = array.new<SmtLiq>()        // peer swing lows
+var float smtLastBUsmt = 0.0
+var float smtLastBEsmt = 0.0
+var int   lastBullSmtBar = na
+var int   lastBearSmtBar = na
+
+//@function Drops pooled swings older than the liquidity memory, so a SMT is only ever drawn
+//          between swings recent enough to be compared.
+//@param pool (array<SmtLiq>) The pool to age, oldest first.
+//@returns (bool) Always true.
+smtAgePool(array<SmtLiq> pool) =>
+    while pool.size() > 0 and (time - pool.first().t) / smtOneBar > smtPoolBars
+        pool.shift()
+    true
+
+//@function Pops pooled levels the new pivot has swept (price beyond them), returning the
+//          deepest one taken — the liquidity this swing ran through.
+//@param src (array<SmtLiq>) The high or low pool to sweep.
+//@param price (float) The new pivot price.
+//@param up (bool) True for a swing high (buyside), false for a swing low.
+//@returns (SmtLiq) The deepest swept level, or na.
+smtSweep(array<SmtLiq> src, float price, bool up) =>
+    SmtLiq taken = na
+    bool cont = true
+    while cont and src.size() > 0
+        float lp = src.last().price
+        if up ? price > lp : price < lp
+            taken := src.pop()
+        else
+            cont := false
+    taken
+
+//@function Finds, in the OTHER asset's pool, the level that best matches a swept level in
+//          time, so the SMT anchors to the peer's corresponding swing.
+//@param s (SmtLiq) The swept level.
+//@param pool (array<SmtLiq>) The other asset's pool.
+//@param up (bool) Side under test.
+//@returns (SmtLiq) The matching peer level (falls back to the swept level's own reference).
+smtCheck(SmtLiq s, array<SmtLiq> pool, bool up) =>
+    SmtLiq vl = SmtLiq.new(s.refPrice, s.t)
+    int sz = pool.size() - 1
+    if sz > 0
+        bool done = false
+        for i = sz to 0
+            if not done
+                SmtLiq p = pool.get(i)
+                if p.t < s.t
+                    done := true
+                else if p.t > s.t and (up ? p.price < s.refPrice : p.price > s.refPrice)
+                    vl := p
+                    done := true
+    vl
+
+//@function Confirms the sweep sequence between the two assets is valid; returns the bar
+//          offset back to the anchoring swing (0 = not valid).
+//@param pool (array<SmtLiq>) The chart symbol's pool.
+//@param s (SmtLiq) The peer's swept level.
+//@param up (bool) Side under test.
+//@returns (int) Bar offset, or 0.
+smtValidateSMT(array<SmtLiq> pool, SmtLiq s, bool up) =>
+    int b = 0
+    if pool.size() > 0
+        SmtLiq last = pool.last()
+        if (up ? last.price > s.refPrice : last.price < s.refPrice) and last.t > s.t
+            b := int((time - last.t) / smtOneBar)
+    b
+
+//@function Draws one SMT from an anchor time/price to the sweep, walking back to the true
+//          swing extremes so the line sits on the wicks, and caps each side at smtMaxShow.
+//@returns (float) The SMT's invalidating price (or the last one when nothing is drawn).
+smtDrawSMT(int tm, float p1, float p2, bool bull) =>
+    bool ok = bull ? low > low[smtPivot] : high < high[smtPivot]
+    float outPrice = bull ? smtLastBUsmt : smtLastBEsmt
+    if time[smtPivot] - tm > smtOneBar and ok
+        int o = smtPivot
+        float p2final = p2
+        if bull
+            while low[o + 1] <= low[o]
+                o := o + 1
+            p2final := low[o]
+        else
+            while high[o + 1] >= high[o]
+                o := o + 1
+            p2final := high[o]
+        int bars = math.round((time[o] - tm + smtOneBar * smtPivot) / smtOneBar)
+        int newTm = tm
+        float p1final = p1
+        if bars < 4900 and bars > 0
+            while time[bars] < tm
+                bars := bars - 1
+            while (bull ? low[bars + 1] < low[bars] : high[bars + 1] > high[bars])
+                bars := bars + 1
+            newTm   := time[bars]
+            p1final := bull ? low[bars] : high[bars]
+        if time[o] - newTm > smtOneBar
+            color c = bull ? bullTxt : bearTxt
+            line l = line.new(newTm, p1final, time[o], p2final, xloc = xloc.bar_time, color = c, width = 2, style = line.style_solid)
+            label b = na
+            if smtShowLabel
+                // Sit the label clear of its own line — above a bearish SMT, below a bullish one —
+                // so it never lands on the PD-array zone the divergence is pointing at.
+                float lblY = math.avg(p1final, p2final) + (bull ? -labelOff : labelOff)
+                b := label.new(math.round(math.avg(newTm, time[o])), lblY, "SMT vs " + smtName, xloc = xloc.bar_time, style = label.style_none, color = COLOR_NONE, textcolor = c, size = eventLabelSize)
+                label.set_text_font_family(b, font.family_monospace)
+            outPrice := bull ? math.min(p1final, p2final) : math.max(p1final, p2final)
+            array<SmtLevel> arr = bull ? smtSMbu : smtSMbe
+            arr.push(SmtLevel.new(l, b, outPrice))
+            while arr.size() > smtMaxShow
+                SmtLevel old = arr.shift()
+                line.delete(old.ln)
+                label.delete(old.lb)
+    outPrice
+
+// Pivots at top level (ta.* must run every bar) — ours + the peer's, symmetric strength.
+float smt_h  = ta.pivothigh(high,  smtPivot, smtPivot)
+float smt_ht = ta.pivothigh(smtHH, smtPivot, smtPivot)
+float smt_l  = ta.pivotlow(low,    smtPivot, smtPivot)
+float smt_lt = ta.pivotlow(smtLL,  smtPivot, smtPivot)
+
+if smtOn and barstate.isconfirmed
+    // Clean up SMTs price has since traded back through, if enabled.
+    if smtDelBroken
+        if smtSMbe.size() > 0
+            for i = smtSMbe.size() - 1 to 0
+                if high > smtSMbe.get(i).price
+                    line.delete(smtSMbe.get(i).ln)
+                    label.delete(smtSMbe.get(i).lb)
+                    smtSMbe.remove(i)
+        if smtSMbu.size() > 0
+            for i = smtSMbu.size() - 1 to 0
+                if low < smtSMbu.get(i).price
+                    line.delete(smtSMbu.get(i).ln)
+                    label.delete(smtSMbu.get(i).lb)
+                    smtSMbu.remove(i)
+
+    // Age the pools before anything is swept, so a stale swing can never anchor a SMT.
+    smtAgePool(smtH1)
+    smtAgePool(smtL1)
+    smtAgePool(smtH2)
+    smtAgePool(smtL2)
+
+    int prevBu = smtSMbu.size()
+    int prevBe = smtSMbe.size()
+    bool downOK = not smtCandleCheck or (close[smtPivot] < open[smtPivot] and smtOO[smtPivot] > smtCC[smtPivot])
+    bool upOK   = not smtCandleCheck or (close[smtPivot] > open[smtPivot] and smtCC[smtPivot] > smtOO[smtPivot])
+
+    // ── Bearish: chart / peer swing highs ─────────────────────────────────────────
+    SmtLiq s1 = not na(smt_h)  ? smtSweep(smtH1, smt_h,  true) : na
+    SmtLiq s2 = not na(smt_ht) ? smtSweep(smtH2, smt_ht, true) : na
+    if not na(s1)
+        if downOK and time[smtPivot] - s1.t > smtOneBar * smtPivot
+            if na(s2)
+                if smtHH[smtPivot] < s1.refPrice
+                    smtLastBEsmt := smtDrawSMT(s1.t, s1.price, smt_h, false)
+                else if smtH2.size() > 0
+                    SmtLiq lastH2 = smtH2.last()
+                    int b = int((time - lastH2.t) / smtOneBar)
+                    if b > 0 and b < 5000 and lastH2.price > smtHH[smtPivot] and high[b] < smt_h
+                        smtLastBEsmt := smtDrawSMT(lastH2.t, lastH2.refPrice, smt_h, false)
+            else if s1.t < s2.t and smtHH[smtPivot] < s1.refPrice
+                smtLastBEsmt := smtDrawSMT(s1.t, s1.price, smt_h, false)
+            else if s1.t > s2.t and s2.refPrice > high[smtPivot]
+                int b = smtValidateSMT(smtH1, s2, true)
+                if (b > 0 and b < 5000) ? smtHH[b] < smt_ht : true
+                    SmtLiq lc = smtCheck(s2, smtH1, false)
+                    smtLastBEsmt := smtDrawSMT(lc.t, lc.price, high[smtPivot], false)
+    else if not na(s2)
+        if downOK and time[smtPivot] - s2.t > smtOneBar * smtPivot and s2.refPrice > high[smtPivot]
+            int b = smtValidateSMT(smtH1, s2, true)
+            if (b > 0 and b < 5000) ? smtHH[b] < smt_ht : true
+                SmtLiq lc = smtCheck(s2, smtH1, false)
+                smtLastBEsmt := smtDrawSMT(lc.t, lc.price, high[smtPivot], false)
+
+    // ── Bullish: chart / peer swing lows ──────────────────────────────────────────
+    SmtLiq s3 = not na(smt_l)  ? smtSweep(smtL1, smt_l,  false) : na
+    SmtLiq s4 = not na(smt_lt) ? smtSweep(smtL2, smt_lt, false) : na
+    if not na(s3)
+        if upOK and time[smtPivot] - s3.t > smtOneBar * smtPivot
+            if na(s4)
+                if smtLL[smtPivot] > s3.refPrice
+                    smtLastBUsmt := smtDrawSMT(s3.t, s3.price, smt_l, true)
+                else if smtL2.size() > 0
+                    SmtLiq lastL2 = smtL2.last()
+                    int b = int((time - lastL2.t) / smtOneBar)
+                    if b > 0 and b < 5000 and lastL2.price < smtLL[smtPivot] and low[b] > smt_l
+                        smtLastBUsmt := smtDrawSMT(lastL2.t, lastL2.refPrice, smt_l, true)
+            else if s3.t < s4.t and smtLL[smtPivot] > s3.refPrice
+                smtLastBUsmt := smtDrawSMT(s3.t, s3.price, smt_l, true)
+            else if s3.t > s4.t and low[smtPivot] > s4.refPrice
+                int b = smtValidateSMT(smtL1, s4, false)
+                if (b > 0 and b < 5000) ? smtLL[b] < smt_lt : true
+                    SmtLiq lc = smtCheck(s4, smtL1, true)
+                    smtLastBUsmt := smtDrawSMT(lc.t, lc.price, low[smtPivot], true)
+    else if not na(s4)
+        if upOK and time[smtPivot] - s4.t > smtOneBar * smtPivot and low[smtPivot] > s4.refPrice
+            int b = smtValidateSMT(smtL1, s4, false)
+            if (b > 0 and b < 5000) ? smtLL[b] < smt_lt : true
+                SmtLiq lc = smtCheck(s4, smtL1, true)
+                smtLastBUsmt := smtDrawSMT(lc.t, lc.price, low[smtPivot], true)
+
+    if smtSMbe.size() > prevBe
+        lastBearSmtBar := bar_index
+    if smtSMbu.size() > prevBu
+        lastBullSmtBar := bar_index
+
+    // Pool the new swings — each records the OTHER asset's aligned price as its reference.
+    if not na(smt_h)
+        smtH1.push(SmtLiq.new(smt_h, time[smtPivot], smtHH[smtPivot]))
+        while smtH1.size() > 60
+            smtH1.shift()
+    if not na(smt_ht)
+        smtH2.push(SmtLiq.new(smt_ht, time[smtPivot], high[smtPivot]))
+        while smtH2.size() > 60
+            smtH2.shift()
+    if not na(smt_l)
+        smtL1.push(SmtLiq.new(smt_l, time[smtPivot], smtLL[smtPivot]))
+        while smtL1.size() > 60
+            smtL1.shift()
+    if not na(smt_lt)
+        smtL2.push(SmtLiq.new(smt_lt, time[smtPivot], low[smtPivot]))
+        while smtL2.size() > 60
+            smtL2.shift()
+
+bool bullSmtRecent = not na(lastBullSmtBar) and bar_index - lastBullSmtBar <= smtMemory
+bool bearSmtRecent = not na(lastBearSmtBar) and bar_index - lastBearSmtBar <= smtMemory
+
+// ============================================================================
+// LABEL COMBINE-PASS — one label per price cluster, at the right edge
+// ============================================================================
+var array<label> comboLabels = array.new<label>()
+
+if barstate.islast
+    while comboLabels.size() > 0
+        label.delete(comboLabels.pop())
+    array<float>  gP = array.new<float>()
+    array<string> gT = array.new<string>()
+    array<color>  gC = array.new<color>()
+    if levels.size() > 0
+        for i = 0 to levels.size() - 1
+            Level lv = levels.get(i)
+            if not lv.swept
+                gP.push(lv.price)
+                gT.push(lv.disp)
+                gC.push(color.new(lv.col, 0))
+    int n = gP.size()
+    if n > 0
+        float tol = atrVal * combineAtr
+        array<bool> used = array.new<bool>()
+        for i = 0 to n - 1
+            used.push(false)
+        int remaining = n
+        while remaining > 0
+            int seed = -1
+            float seedP = na
+            for i = 0 to n - 1
+                if not used.get(i) and (seed == -1 or gP.get(i) < seedP)
+                    seed := i
+                    seedP := gP.get(i)
+            string combined = ""
+            color cc = gC.get(seed)
+            float labelP = seedP
+            for i = 0 to n - 1
+                if not used.get(i) and math.abs(gP.get(i) - seedP) <= tol
+                    used.set(i, true)
+                    remaining := remaining - 1
+                    string tg = gT.get(i)
+                    if combined == ""
+                        combined := tg
+                    else if not str.contains(combined, tg)
+                        combined := combined + " + " + tg
+                    if gP.get(i) < labelP
+                        labelP := gP.get(i)
+            comboLabels.push(mkLineLabel(bar_index + rightOffset, labelP, combined, cc, levelLabelSize))
+
+// ============================================================================
+// MODULE 6 — DASHBOARD
+// ----------------------------------------------------------------------------
+// Pure confluence read-out: ICT bias, draw on liquidity, the named sweep, live
+// confluences and session state. No alerts, no signals, no buy/sell calls.
+// ============================================================================
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+//@function Resolves the dashboard-position input to a Pine position constant.
+//@param s (string) The position choice.
+//@returns (string) The matching position.* constant.
+dashPosConst(string s) =>
+    switch s
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        "Middle Right" => position.middle_right
+        =>                position.top_right
+
+//@variable Brand-purple header fill.
+color DASH_HEAD = color.new(#cd82ff, 49)
+color DASH_BG   = color.new(#ffffff, 0)
+color DASH_LINE = color.new(#000000, 0)
+
+var table dash = na
+
+//@function Writes one dashboard row: metric | state, monospace on white; the
+//          value cell can carry a directional colour.
+//@param row (int) Table row index.
+//@param k (string) Metric name.
+//@param v (string) Metric state.
+//@param vcol (color) Value-cell text colour.
+dashRow(int row, string k, string v, color vcol) =>
+    table.cell(dash, 0, row, " " + k + " ", text_color = color.rgb(0, 0, 0), text_size = sizeFromStr(dashSize), text_halign = text.align_left, text_font_family = font.family_monospace, bgcolor = DASH_BG)
+    table.cell(dash, 1, row, " " + v + " ", text_color = vcol, text_size = sizeFromStr(dashSize), text_halign = text.align_right, text_font_family = font.family_monospace, bgcolor = DASH_BG)
+    true
+
+//@function Queues one dashboard row into the build lists, so the table renders only the
+//          rows that carry information — momentary confluences that are inactive are simply
+//          never queued, instead of printing an empty "-".
+//@param kA (array<string>) Metric-name list.
+//@param vA (array<string>) Value list.
+//@param cA (array<color>) Value-colour list.
+//@param k (string) Metric name.
+//@param v (string) Metric value.
+//@param c (color) Value-cell colour.
+//@returns (bool) Always true.
+pushRow(array<string> kA, array<string> vA, array<color> cA, string k, string v, color c) =>
+    kA.push(k)
+    vA.push(v)
+    cA.push(c)
+    true
+
+if barstate.islast and showDash
+    // ICT directional bias — dealing-range position (discount = bullish, premium
+    // = bearish) stacked with the Midnight Open (below = bullish, above = bearish).
+    // Both agreeing is a conviction read; a split is MIXED.
+    bool mnBull = not na(midnightOpen) and close < midnightOpen
+    bool mnBear = not na(midnightOpen) and close > midnightOpen
+    bool pdBull = not na(equilibrium) and close < equilibrium
+    bool pdBear = not na(equilibrium) and close > equilibrium
+    int  biasBull = (mnBull ? 1 : 0) + (pdBull ? 1 : 0)
+    int  biasBear = (mnBear ? 1 : 0) + (pdBear ? 1 : 0)
+    string ictBias = biasBull > biasBear ? (biasBull >= 2 ? "BULLISH" : "Bull lean") : biasBear > biasBull ? (biasBear >= 2 ? "BEARISH" : "Bear lean") : "MIXED"
+    color  biasCol = biasBull > biasBear ? bullTxt : biasBear > biasBull ? bearTxt : color.rgb(0, 0, 0)
+    string kzState = not timeframe.isintraday ? "n/a (HTF)" : inLondonKZ ? "London KZ" : inNYAMKZ ? "NY AM KZ" : inNYPMKZ ? "NY PM KZ" : "outside"
+    string mnState = na(midnightOpen) ? "-" : close < midnightOpen ? "below (bull)" : "above (bear)"
+    // Dealing-range position as a % — 0% at the swing low, 100% at the swing high,
+    // 50% = equilibrium. More informative than a bare discount/premium flag.
+    float rangePos = not na(equilibrium) and drHi > drLo ? (close - drLo) / (drHi - drLo) * 100.0 : na
+    string pdState = na(equilibrium) ? "-" : (close < equilibrium ? "disc " : "prem ") + str.tostring(math.round(math.max(0, math.min(100, rangePos)))) + "% " + (drUseWeekly ? "W" : "D")
+
+    // ── Build only the rows that carry information ──────────────────────────────
+    // Context rows are always shown; the momentary confluence rows are queued only
+    // when live, so the table never fills with empty "-" placeholders.
+    array<string> dK = array.new<string>()
+    array<string> dV = array.new<string>()
+    array<color>  dC = array.new<color>()
+    pushRow(dK, dV, dC, "ICT BIAS", ictBias, biasCol)
+    // Draw on liquidity — nearest unmitigated high above (resting buyside) and nearest
+    // unmitigated low below (resting sellside), from the level engine.
+    float drawUpDist = na
+    string drawUpTxt = ""
+    float drawDnDist = na
+    string drawDnTxt = ""
+    if levels.size() > 0
+        for i = 0 to levels.size() - 1
+            Level lv = levels.get(i)
+            if not lv.swept
+                if lv.isHigh and lv.price > close and (na(drawUpDist) or lv.price - close < drawUpDist)
+                    drawUpDist := lv.price - close
+                    drawUpTxt := lv.disp
+                if not lv.isHigh and lv.price < close and (na(drawDnDist) or close - lv.price < drawDnDist)
+                    drawDnDist := close - lv.price
+                    drawDnTxt := lv.disp
+    if not na(drawUpDist)
+        pushRow(dK, dV, dC, "Draw ↑", drawUpTxt + " · " + str.tostring(drawUpDist, format.mintick), color.rgb(0, 0, 0))
+    if not na(drawDnDist)
+        pushRow(dK, dV, dC, "Draw ↓", drawDnTxt + " · " + str.tostring(drawDnDist, format.mintick), color.rgb(0, 0, 0))
+    // The sweep row names the level that was taken.
+    if buysideRaidRecent or sellsideRaidRecent
+        string sweepTxt = buysideRaidRecent and sellsideRaidRecent ? lastBuysideRaidName + " + " + lastSellsideRaidName : buysideRaidRecent ? lastBuysideRaidName + " taken" : lastSellsideRaidName + " taken"
+        pushRow(dK, dV, dC, "Sweep", sweepTxt, color.rgb(0, 0, 0))
+    if bullObTapRecent or bearObTapRecent
+        pushRow(dK, dV, dC, "OB tap", bullObTapRecent and bearObTapRecent ? "both" : bullObTapRecent ? "bullish" : "bearish", bullObTapRecent and not bearObTapRecent ? bullTxt : bearObTapRecent and not bullObTapRecent ? bearTxt : color.rgb(0, 0, 0))
+    if bullBrkRecent or bearBrkRecent
+        pushRow(dK, dV, dC, "Breaker", bullBrkRecent and bearBrkRecent ? "both" : bullBrkRecent ? "bullish" : "bearish", bullBrkRecent and not bearBrkRecent ? bullTxt : bearBrkRecent and not bullBrkRecent ? bearTxt : color.rgb(0, 0, 0))
+    if bullSmtRecent or bearSmtRecent
+        pushRow(dK, dV, dC, "SMT", bullSmtRecent and bearSmtRecent ? "both" : bullSmtRecent ? "bullish" : "bearish", bullSmtRecent and not bearSmtRecent ? bullTxt : bearSmtRecent and not bullSmtRecent ? bearTxt : color.rgb(0, 0, 0))
+    pushRow(dK, dV, dC, "Killzone", kzState, color.rgb(0, 0, 0))
+    pushRow(dK, dV, dC, "Midnight O", mnState, color.rgb(0, 0, 0))
+    pushRow(dK, dV, dC, "Dealing range", pdState, color.rgb(0, 0, 0))
+
+    // Rebuild the table at the exact height the live rows need (header + queued rows),
+    // so it grows and shrinks with the read instead of holding blank lines.
+    if not na(dash)
+        table.delete(dash)
+    dash := table.new(dashPosConst(dashPos), 2, dK.size() + 1, bgcolor = DASH_BG, frame_color = DASH_LINE, frame_width = 1, border_color = DASH_LINE, border_width = 1)
+    table.merge_cells(dash, 0, 0, 1, 0)
+    table.cell(dash, 0, 0, " M1D™ · Confluence ", text_color = color.rgb(0, 0, 0), text_size = sizeFromStr(dashSize), text_halign = text.align_center, text_font_family = font.family_monospace, bgcolor = DASH_HEAD)
+    if dK.size() > 0
+        for r = 0 to dK.size() - 1
+            dashRow(r + 1, dK.get(r), dV.get(r), dC.get(r))

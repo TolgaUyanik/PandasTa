@@ -1,0 +1,786 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ArunaReborn
+
+//@version=6
+
+// @description Multi-Timeframe Event Synchronization Library. Provides utilities for correctly
+// positioning drawing objects when using data from timeframes different than the chart timeframe.
+// Solves the "floating in space" problem where HTF/LTF events are drawn at incorrect bar positions.
+// When drawing FVGs, S/R levels, or other objects based on HTF data, the standard bar_index gives
+// the wrong position because it refers to where data was RECEIVED, not where the event OCCURRED.
+// A 1H candle on a 5m chart spans 12 bars, but naive code draws at bar_index-1 instead of the
+// correct bar range. This library tracks HTF bar boundaries on your chart timeframe and provides
+// functions to create correctly-positioned drawings.
+// to use this library:
+// import ArunaReborn/TimeframeAlign/3
+
+library("TimeframeAlign", overlay = true)
+
+//=============================================================================
+// EXPORTED TYPES
+//=============================================================================
+
+//@type Stores metadata about the relationship between two timeframes
+//@field sourceTimeframe The timeframe where the event originated (e.g., "60", "1D")
+//@field chartTimeframe The current chart timeframe
+//@field isHTF True if source timeframe is higher than chart timeframe
+//@field isLTF True if source timeframe is lower than chart timeframe
+//@field barRatio Approximate number of chart bars per source bar (for HTF)
+//@field secondsRatio Ratio of source TF seconds to chart TF seconds
+export type TimeframePair
+    string sourceTimeframe
+    string chartTimeframe
+    bool   isHTF
+    bool   isLTF
+    int    barRatio
+    float  secondsRatio
+
+//@type Stores a synchronized event with both price and bar position data
+//@field price The price level of the event
+//@field eventTime The timestamp when the event occurred
+//@field chartBarStart The chart bar_index where the event's TF bar started
+//@field chartBarEnd The chart bar_index where the event's TF bar ended/will end
+//@field htfOffset The offset on the HTF (0=current, 1=previous, etc.)
+//@field isValid True if synchronization was successful
+export type MTFEventData
+    float price
+    int   eventTime
+    int   chartBarStart
+    int   chartBarEnd
+    int   htfOffset
+    bool  isValid
+
+//@type Managed box with synchronization metadata for HTF alignment
+//@field bx The Pine Script box object
+//@field htfTimeframe Source timeframe for this box
+//@field leftHtfOffset HTF offset for left edge (e.g., 3 for FVG start)
+//@field rightHtfOffset HTF offset for right edge (e.g., 1 for FVG end)
+//@field topPrice Top price level
+//@field bottomPrice Bottom price level
+//@field extendRight Whether to auto-extend right edge to current bar
+export type SyncedBox
+    box    bx
+    string htfTimeframe
+    int    leftHtfOffset
+    int    rightHtfOffset
+    float  topPrice
+    float  bottomPrice
+    bool   extendRight
+
+//@type Managed line with synchronization metadata for HTF alignment
+//@field ln The Pine Script line object
+//@field htfTimeframe Source timeframe for this line
+//@field htfOffset HTF bar offset where line is anchored
+//@field price Price level (for horizontal lines)
+//@field isHorizontal True = horizontal line, False = vertical line
+//@field extendRight Whether to auto-extend to current bar
+export type SyncedLine
+    line   ln
+    string htfTimeframe
+    int    htfOffset
+    float  price
+    bool   isHorizontal
+    bool   extendRight
+
+//@type Managed label with synchronization metadata for HTF alignment
+//@field lbl The Pine Script label object
+//@field htfTimeframe Source timeframe for this label
+//@field htfOffset HTF bar offset where label is anchored
+//@field price Price level
+//@field anchorPoint Where to anchor: "start", "end", or "middle" of HTF bar
+export type SyncedLabel
+    label  lbl
+    string htfTimeframe
+    int    htfOffset
+    float  price
+    string anchorPoint
+
+//@type Stores OHLCV data for a single bar
+//@field o Open price
+//@field h High price
+//@field l Low price
+//@field c Close price
+//@field v Volume
+//@field hasForce Whether this bar had force (high volume or displacement)
+export type TFBarData
+    float o
+    float h
+    float l
+    float c
+    float v
+    bool  hasForce
+
+//@type Tracks HTF bar boundaries for a specific timeframe. Create one instance per timeframe you want to track.
+//@field htfTimeframe The higher timeframe being tracked
+//@field currentStartBar Chart bar_index where current HTF bar started
+//@field currentEndBar Chart bar_index where current HTF bar ends (provisional until next HTF bar)
+//@field startHistory Array of start bar indices for previous HTF bars
+//@field endHistory Array of end bar indices for previous HTF bars
+//@field lastUpdateBar The bar_index when this tracker was last updated
+//@field barJustChanged True if the HTF bar changed on this chart bar (set by updateTracker)
+//@field oHistory Array of open prices for previous bars
+//@field hHistory Array of high prices for previous bars
+//@field lHistory Array of low prices for previous bars
+//@field cHistory Array of close prices for previous bars
+//@field vHistory Array of volume for previous bars
+//@field forceHistory Array of hasForce flags for previous bars
+//@field barCount Total number of bars tracked (increments on each bar change)
+export type HTFTracker
+    string       htfTimeframe
+    int          currentStartBar
+    int          currentEndBar
+    array<int>   startHistory
+    array<int>   endHistory
+    int          lastUpdateBar
+    bool         barJustChanged
+    array<float> oHistory
+    array<float> hHistory
+    array<float> lHistory
+    array<float> cHistory
+    array<float> vHistory
+    array<bool>  forceHistory
+    int          barCount
+
+//=============================================================================
+// CORE EXPORTED FUNCTIONS
+//=============================================================================
+
+//@function Analyzes the relationship between a source timeframe and the chart timeframe
+//@param sourceTimeframe The timeframe to compare (e.g., "60", "1D", "240")
+//@returns TimeframePair containing comparison metadata including whether it's HTF/LTF and bar ratio
+export getTimeframeInfo(simple string sourceTimeframe) =>
+    int chartSeconds = timeframe.in_seconds(timeframe.period)
+    int sourceSeconds = timeframe.in_seconds(sourceTimeframe)
+
+    bool htf = sourceSeconds > chartSeconds
+    bool ltf = sourceSeconds < chartSeconds
+    int ratio = htf ? int(math.round(sourceSeconds / chartSeconds)) : (ltf ? int(math.round(chartSeconds / sourceSeconds)) : 1)
+    float secRatio = sourceSeconds / chartSeconds
+
+    TimeframePair.new(sourceTimeframe, timeframe.period, htf, ltf, ratio, secRatio)
+
+//@function Creates a new HTF tracker for a specific timeframe. Call this once per timeframe you want to track.
+//@param htfTimeframe The higher timeframe to track (e.g., "60", "240", "1D")
+//@returns A new HTFTracker instance. Store this with `var` and pass to updateTracker() on each bar.
+export createTracker(simple string htfTimeframe) =>
+    HTFTracker.new(
+         htfTimeframe,
+         0,
+         0,
+         array.new_int(0),
+         array.new_int(0),
+         -1,
+         false,
+         array.new_float(0),
+         array.new_float(0),
+         array.new_float(0),
+         array.new_float(0),
+         array.new_float(0),
+         array.new_bool(0),
+         0)
+
+//@function Updates the HTF tracker with current bar data. Call this on every bar for each tracker.
+//@param tracker The HTFTracker to update
+//@param htfTimeframe The timeframe string (must match what was passed to createTracker)
+//@param historyDepth Maximum number of HTF bars to track (default 500)
+//@returns The updated tracker (same reference, modified in place)
+export updateTracker(HTFTracker tracker, simple string htfTimeframe, simple int historyDepth = 500) =>
+    // IMPORTANT: ta.change must be called unconditionally for consistent results
+    bool htfChanged = ta.change(time(htfTimeframe)) != 0
+
+    if not na(tracker)
+        // Store the change state for htfBarChanged() to use
+        tracker.barJustChanged := htfChanged
+
+        // Only update once per bar
+        if tracker.lastUpdateBar != bar_index
+            tracker.lastUpdateBar := bar_index
+
+            if htfChanged
+                // Save current start to history (becomes previous HTF bar's start)
+                array.unshift(tracker.startHistory, tracker.currentStartBar)
+                // The bar before this was the end of the previous HTF bar
+                if bar_index > 0
+                    array.unshift(tracker.endHistory, bar_index - 1)
+
+                // Trim history to configured depth
+                while array.size(tracker.startHistory) > historyDepth
+                    array.pop(tracker.startHistory)
+                while array.size(tracker.endHistory) > historyDepth
+                    array.pop(tracker.endHistory)
+
+                // Update current start to this bar
+                tracker.currentStartBar := bar_index
+
+            // Always update current end to current bar (provisional)
+            tracker.currentEndBar := bar_index
+
+    tracker
+
+//@function Updates the HTF tracker with current bar data AND stores OHLCV history.
+// Call this on every bar for each tracker when you need bar data history for invalidation checks.
+//@param tracker The HTFTracker to update
+//@param htfTimeframe The timeframe string (must match what was passed to createTracker)
+//@param tfO The open price for the timeframe (use confirmed bar, e.g., htfO[1])
+//@param tfH The high price for the timeframe (use confirmed bar, e.g., htfH[1])
+//@param tfL The low price for the timeframe (use confirmed bar, e.g., htfL[1])
+//@param tfC The close price for the timeframe (use confirmed bar, e.g., htfC[1])
+//@param tfV The volume for the timeframe (use confirmed bar, e.g., htfV[1])
+//@param tfHasForce Whether the bar had force (high volume or displacement)
+//@param historyDepth Maximum number of bars to track (default 200)
+//@returns The updated tracker (same reference, modified in place)
+export updateTrackerWithData(HTFTracker tracker, simple string htfTimeframe, series float tfO, series float tfH, series float tfL, series float tfC, series float tfV, series bool tfHasForce, simple int historyDepth = 200) =>
+    // IMPORTANT: ta.change must be called unconditionally for consistent results
+    bool htfChanged = ta.change(time(htfTimeframe)) != 0
+
+    if not na(tracker)
+        // Store the change state for htfBarChanged() to use
+        tracker.barJustChanged := htfChanged
+
+        // Only update once per bar
+        if tracker.lastUpdateBar != bar_index
+            tracker.lastUpdateBar := bar_index
+
+            if htfChanged
+                // Save current start to history (becomes previous bar's start)
+                array.unshift(tracker.startHistory, tracker.currentStartBar)
+                // The bar before this was the end of the previous bar
+                if bar_index > 0
+                    array.unshift(tracker.endHistory, bar_index - 1)
+
+                // Store OHLCV data for the confirmed bar
+                if not na(tfO) and not na(tfH) and not na(tfL) and not na(tfC)
+                    array.unshift(tracker.oHistory, tfO)
+                    array.unshift(tracker.hHistory, tfH)
+                    array.unshift(tracker.lHistory, tfL)
+                    array.unshift(tracker.cHistory, tfC)
+                    array.unshift(tracker.vHistory, nz(tfV, 0.0))
+                    array.unshift(tracker.forceHistory, tfHasForce)
+                    tracker.barCount += 1
+
+                // Trim history to configured depth
+                while array.size(tracker.startHistory) > historyDepth
+                    array.pop(tracker.startHistory)
+                while array.size(tracker.endHistory) > historyDepth
+                    array.pop(tracker.endHistory)
+                while array.size(tracker.oHistory) > historyDepth
+                    array.pop(tracker.oHistory)
+                while array.size(tracker.hHistory) > historyDepth
+                    array.pop(tracker.hHistory)
+                while array.size(tracker.lHistory) > historyDepth
+                    array.pop(tracker.lHistory)
+                while array.size(tracker.cHistory) > historyDepth
+                    array.pop(tracker.cHistory)
+                while array.size(tracker.vHistory) > historyDepth
+                    array.pop(tracker.vHistory)
+                while array.size(tracker.forceHistory) > historyDepth
+                    array.pop(tracker.forceHistory)
+
+                // Update current start to this bar
+                tracker.currentStartBar := bar_index
+
+            // Always update current end to current bar (provisional)
+            tracker.currentEndBar := bar_index
+
+    tracker
+
+//@function Gets the OHLCV data for a specific bar in the tracker's history
+//@param tracker The HTFTracker instance
+//@param idx Index into history (0 = most recent completed bar, 1 = one bar before that, etc.)
+//@returns TFBarData with the bar's OHLCV data, or na if not found
+export getBarData(HTFTracker tracker, series int idx) =>
+    TFBarData result = na
+    if not na(tracker) and idx >= 0 and idx < array.size(tracker.oHistory)
+        result := TFBarData.new(
+             array.get(tracker.oHistory, idx),
+             array.get(tracker.hHistory, idx),
+             array.get(tracker.lHistory, idx),
+             array.get(tracker.cHistory, idx),
+             array.get(tracker.vHistory, idx),
+             array.get(tracker.forceHistory, idx))
+    result
+
+//@function Gets the total number of bars tracked (barCount)
+//@param tracker The HTFTracker instance
+//@returns The number of bars that have been tracked
+export getBarCount(HTFTracker tracker) =>
+    not na(tracker) ? tracker.barCount : 0
+
+//@function Checks if a bar at the given index would invalidate a support/resistance level
+// A level is invalidated by a force break (close beyond level with touch) or gap through
+//@param tracker The HTFTracker instance
+//@param idx Index into history (0 = most recent completed bar)
+//@param zoneTop Top price of the zone
+//@param zoneBottom Bottom price of the zone
+//@param gapThreshold Minimum gap size for gap detection (0 to disable)
+//@returns True if the bar invalidates the level
+export barInvalidatesLevel(HTFTracker tracker, series int idx, series float zoneTop, series float zoneBottom, series float gapThreshold) =>
+    bool result = false
+    int histSize = not na(tracker) ? array.size(tracker.oHistory) : 0
+    float eps = syminfo.mintick * 0.5
+
+    if idx >= 0 and idx < histSize and not na(zoneTop) and not na(zoneBottom)
+        float bO = array.get(tracker.oHistory, idx)
+        float bC = array.get(tracker.cHistory, idx)
+        float bH = array.get(tracker.hHistory, idx)
+        float bL = array.get(tracker.lHistory, idx)
+        bool hasForce = array.get(tracker.forceHistory, idx)
+
+        bool bullishForce = hasForce and bC > bO
+        bool bearishForce = hasForce and bC < bO
+        bool breaksAbove = bullishForce and bC > zoneTop + eps and bL <= zoneTop + eps
+        bool breaksBelow = bearishForce and bC < zoneBottom - eps and bH >= zoneBottom - eps
+
+        // Gap detection (need previous bar)
+        bool gapBreak = false
+        if gapThreshold > 0 and idx + 1 < histSize
+            float prevH = array.get(tracker.hHistory, idx + 1)
+            float prevL = array.get(tracker.lHistory, idx + 1)
+            float prevC = array.get(tracker.cHistory, idx + 1)
+
+            // Gap down through level
+            bool gapDown = prevL > zoneBottom + eps and bH < zoneBottom - eps and (prevL - bH) >= gapThreshold
+            // Gap up through level
+            bool gapUp = prevH < zoneTop - eps and bL > zoneTop + eps and (bL - prevH) >= gapThreshold
+            gapBreak := gapDown or gapUp
+
+        result := breaksAbove or breaksBelow or gapBreak
+
+    result
+
+//@function Checks if a level would be invalidated by any bar in the history since creation
+//@param tracker The HTFTracker instance
+//@param zoneTop Top price of the zone
+//@param zoneBottom Bottom price of the zone
+//@param barsSinceCreation Number of bars to check back from index 0
+//@param gapThreshold Minimum gap size for gap detection (0 to disable)
+//@returns True if any bar in the range invalidates the level
+export wouldLevelBeInvalidated(HTFTracker tracker, series float zoneTop, series float zoneBottom, series int barsSinceCreation, series float gapThreshold) =>
+    bool result = false
+    if not na(tracker) and barsSinceCreation > 0
+        int histSize = array.size(tracker.oHistory)
+        int checkCount = math.min(barsSinceCreation, histSize, 100)
+        for i = 0 to checkCount - 1
+            if barInvalidatesLevel(tracker, i, zoneTop, zoneBottom, gapThreshold)
+                result := true
+                break
+    result
+
+//@function Gets the chart bar_index where a specific HTF bar started using a tracker
+//@param tracker The HTFTracker instance (must be updated each bar via updateTracker)
+//@param htfOffset Offset into HTF history (0=current HTF bar, 1=previous HTF bar, etc.)
+//@returns The chart bar_index where the HTF bar opened, or na if not found
+export getStartBar(HTFTracker tracker, series int htfOffset) =>
+    int result = na
+    if not na(tracker)
+        if htfOffset == 0
+            result := tracker.currentStartBar
+        else if htfOffset > 0 and array.size(tracker.startHistory) >= htfOffset
+            result := array.get(tracker.startHistory, htfOffset - 1)
+    result
+
+//@function Gets the chart bar_index where a specific HTF bar ended using a tracker
+//@param tracker The HTFTracker instance (must be updated each bar via updateTracker)
+//@param htfOffset Offset into HTF history (0=current HTF bar, 1=previous HTF bar, etc.)
+//@returns The chart bar_index where the HTF bar closed. For current bar (offset=0), returns provisional end.
+export getEndBar(HTFTracker tracker, series int htfOffset) =>
+    int result = na
+    if not na(tracker)
+        if htfOffset == 0
+            result := tracker.currentEndBar
+        else if htfOffset > 0 and array.size(tracker.endHistory) >= htfOffset
+            result := array.get(tracker.endHistory, htfOffset - 1)
+    result
+
+//@function Detects if the HTF bar just changed (useful for triggering drawings)
+//@param tracker The HTFTracker instance (must be updated via updateTracker first)
+//@returns True on the first chart bar of a new HTF bar
+export htfBarChanged(HTFTracker tracker) =>
+    not na(tracker) ? tracker.barJustChanged : false
+
+//@function Searches backward to find the chart bar containing a specific timestamp
+//@param timestamp The Unix timestamp to search for
+//@param maxLookback Maximum number of bars to search backward (default 500)
+//@returns The bar_index of the chart bar containing the timestamp, or na if not found
+export findBarAtTime(series int timestamp, simple int maxLookback = 500) =>
+    int result = na
+    int searchLimit = math.min(maxLookback, bar_index)
+
+    for i = 0 to searchLimit
+        // Check if the timestamp falls within this bar's time range
+        if time[i] <= timestamp and (na(time_close[i]) or time_close[i] > timestamp)
+            result := bar_index - i
+            break
+        // Also check if we've gone too far back (timestamp is newer than this bar)
+        if time[i] < timestamp and i > 0 and time[i-1] > timestamp
+            // Timestamp is between bars - use the earlier bar
+            result := bar_index - i
+            break
+
+    result
+
+//@function Generic synchronization function that maps any event to correct chart position
+//@param tracker The HTFTracker instance for the event's timeframe (pass na for time-based lookup)
+//@param eventPrice The price level of the event
+//@param eventTime The timestamp of the event (from request.security)
+//@param anchorPoint Where to anchor chartBarStart: "start", "end", or "middle" of HTF bar
+//@returns MTFEventData with synchronized bar positions
+export syncEventToChart(HTFTracker tracker, series float eventPrice, series int eventTime, simple string anchorPoint = "start") =>
+    MTFEventData result = MTFEventData.new()
+    result.price := eventPrice
+    result.eventTime := eventTime
+    result.isValid := not na(eventPrice)
+    result.htfOffset := 0
+
+    if not na(tracker)
+        // HTFTracker provided: use boundary tracking (designed for HTF)
+        int htfStart = getStartBar(tracker, 0)
+        int htfEnd = getEndBar(tracker, 0)
+
+        // chartBarEnd always represents actual HTF bar end
+        result.chartBarEnd := nz(htfEnd, bar_index)
+
+        // chartBarStart depends on anchorPoint for single-point use cases
+        if anchorPoint == "end"
+            result.chartBarStart := nz(htfEnd, bar_index)
+        else if anchorPoint == "middle" and not na(htfStart) and not na(htfEnd)
+            result.chartBarStart := int(math.round((htfStart + htfEnd) / 2))
+        else  // "start" or default
+            result.chartBarStart := nz(htfStart, bar_index)
+
+        result.isValid := not na(eventPrice) and not na(htfStart)
+    else if not na(eventTime)
+        // No tracker but have eventTime: use time-based lookup (for LTF or generic use)
+        int foundBar = findBarAtTime(eventTime, 500)
+        result.chartBarStart := nz(foundBar, bar_index)
+        result.chartBarEnd := nz(foundBar, bar_index)
+        result.isValid := not na(eventPrice) and not na(foundBar)
+    else
+        // Fallback: current bar
+        result.chartBarStart := bar_index
+        result.chartBarEnd := bar_index
+
+    result
+
+//=============================================================================
+// DRAWING CREATION FUNCTIONS
+//=============================================================================
+
+//@function Creates a box synchronized to the correct HTF bar positions
+//@param tracker The HTFTracker for the source timeframe
+//@param leftHtfOffset HTF bars back for left edge (e.g., 3 for FVG first candle)
+//@param rightHtfOffset HTF bars back for right edge (e.g., 1 for FVG third candle)
+//@param topPrice Top price level of the box
+//@param bottomPrice Bottom price level of the box
+//@param bgcolor Box background color
+//@param borderColor Box border color (default gray)
+//@param borderWidth Border line width (default 1)
+//@param boxText Optional text to display in box
+//@param textColor Text color (default white)
+//@param extendRight Whether to auto-extend right edge (default false)
+//@returns SyncedBox containing the box and sync metadata, or na if invalid
+export syncedBox(
+     HTFTracker tracker,
+     series int leftHtfOffset,
+     series int rightHtfOffset,
+     series float topPrice,
+     series float bottomPrice,
+     series color bgcolor,
+     series color borderColor = color.gray,
+     series int borderWidth = 1,
+     series string boxText = "",
+     series color textColor = color.white,
+     series bool extendRight = false
+     ) =>
+
+    SyncedBox result = na
+
+    if not na(tracker)
+        // Get the chart bar indices for left and right edges
+        int leftBar = getStartBar(tracker, leftHtfOffset)
+        int rightBar = extendRight ? bar_index : getEndBar(tracker, rightHtfOffset)
+
+        // Validate inputs
+        if not na(topPrice) and not na(bottomPrice) and not na(leftBar) and not na(rightBar) and leftBar <= rightBar
+            // Create the box
+            box newBox = box.new(
+                 leftBar, topPrice, rightBar, bottomPrice,
+                 bgcolor = bgcolor,
+                 border_color = borderColor,
+                 border_width = borderWidth,
+                 text = boxText,
+                 text_color = textColor,
+                 text_size = size.tiny,
+                 text_halign = text.align_left,
+                 text_valign = text.align_top)
+
+            // Create managed SyncedBox
+            result := SyncedBox.new(
+                 newBox,
+                 tracker.htfTimeframe,
+                 leftHtfOffset,
+                 rightHtfOffset,
+                 topPrice,
+                 bottomPrice,
+                 extendRight)
+
+    result
+
+//@function Creates a horizontal line synchronized to the correct HTF bar position
+//@param tracker The HTFTracker for the source timeframe
+//@param htfOffset HTF bars back where line starts (0=current, 1=previous)
+//@param price Price level for the horizontal line
+//@param lineColor Line color
+//@param lineStyle Line style constant (line.style_solid, line.style_dashed, line.style_dotted)
+//@param lineWidth Line width (default 1)
+//@param extendRight Whether to extend line to current bar (default true)
+//@returns SyncedLine containing the line and sync metadata, or na if invalid
+export syncedHLine(
+     HTFTracker tracker,
+     series int htfOffset,
+     series float price,
+     series color lineColor,
+     series string lineStyle = line.style_solid,
+     series int lineWidth = 1,
+     series bool extendRight = true
+     ) =>
+
+    SyncedLine result = na
+
+    if not na(tracker)
+        // Get the chart bar index where the HTF bar started
+        int startBar = getStartBar(tracker, htfOffset)
+        int endBar = extendRight ? bar_index : getEndBar(tracker, htfOffset)
+
+        if not na(price) and not na(startBar) and not na(endBar)
+            // Create the line
+            line newLine = line.new(
+                 startBar, price, endBar, price,
+                 color = lineColor,
+                 style = lineStyle,
+                 width = lineWidth)
+
+            // Create managed SyncedLine
+            result := SyncedLine.new(
+                 newLine,
+                 tracker.htfTimeframe,
+                 htfOffset,
+                 price,
+                 true,  // isHorizontal
+                 extendRight)
+
+    result
+
+//@function Creates a vertical line synchronized to the correct HTF bar position
+//@param tracker The HTFTracker for the source timeframe
+//@param htfOffset HTF bars back (0=current, 1=previous)
+//@param atStart If true, line at HTF bar start; if false, at HTF bar end
+//@param lineColor Line color (default gray)
+//@param lineStyle Line style constant (line.style_solid, line.style_dashed, line.style_dotted)
+//@param lineWidth Line width (default 1)
+//@returns SyncedLine containing the line and sync metadata, or na if invalid
+export syncedVLine(
+     HTFTracker tracker,
+     series int htfOffset,
+     series bool atStart = true,
+     series color lineColor = color.gray,
+     series string lineStyle = line.style_solid,
+     series int lineWidth = 1
+     ) =>
+
+    SyncedLine result = na
+
+    if not na(tracker)
+        // Get the chart bar index
+        int barPos = atStart ? getStartBar(tracker, htfOffset) : getEndBar(tracker, htfOffset)
+
+        if not na(barPos)
+            // Create vertical line - use extend.both to make it full height
+            line newLine = line.new(
+                 barPos, high, barPos, low,
+                 color = lineColor,
+                 style = lineStyle,
+                 width = lineWidth,
+                 extend = extend.both)
+
+            // Create managed SyncedLine
+            result := SyncedLine.new(
+                 newLine,
+                 tracker.htfTimeframe,
+                 htfOffset,
+                 na,    // price not applicable for vertical
+                 false, // isHorizontal
+                 false) // extendRight not applicable
+
+    result
+
+//@function Creates a label synchronized to the correct HTF bar position
+//@param tracker The HTFTracker for the source timeframe
+//@param htfOffset HTF bars back (0=current, 1=previous)
+//@param price Price level for the label
+//@param labelText Text to display
+//@param anchorPoint Where to anchor: "start", "end", or "middle" of HTF bar
+//@param labelColor Label background color (default blue)
+//@param textColor Label text color (default white)
+//@param labelStyle Label style constant (default label.style_label_left)
+//@param labelSize Label size constant (default size.small)
+//@returns SyncedLabel containing the label and sync metadata, or na if invalid
+export syncedLabel(
+     HTFTracker tracker,
+     series int htfOffset,
+     series float price,
+     series string labelText,
+     simple string anchorPoint = "start",
+     series color labelColor = color.blue,
+     series color textColor = color.white,
+     series string labelStyle = label.style_label_left,
+     series string labelSize = size.small
+     ) =>
+
+    SyncedLabel result = na
+
+    if not na(tracker)
+        // Get bar position based on anchor point
+        int barPos = na
+        if anchorPoint == "start"
+            barPos := getStartBar(tracker, htfOffset)
+        else if anchorPoint == "end"
+            barPos := getEndBar(tracker, htfOffset)
+        else if anchorPoint == "middle"
+            int startBar = getStartBar(tracker, htfOffset)
+            int endBar = getEndBar(tracker, htfOffset)
+            if not na(startBar) and not na(endBar)
+                barPos := int(math.round((startBar + endBar) / 2))
+
+        if not na(price) and not na(barPos)
+            // Create the label
+            label newLabel = label.new(
+                 barPos, price, labelText,
+                 color = labelColor,
+                 textcolor = textColor,
+                 style = labelStyle,
+                 size = labelSize)
+
+            // Create managed SyncedLabel
+            result := SyncedLabel.new(
+                 newLabel,
+                 tracker.htfTimeframe,
+                 htfOffset,
+                 price,
+                 anchorPoint)
+
+    result
+
+//@function Returns a value for plotting that is only valid at synced HTF bar positions
+//@param tracker The HTFTracker for the source timeframe
+//@param value The value to plot
+//@param htfOffset HTF bars back (0=current, 1=previous)
+//@returns The value if current bar is within the HTF bar range, otherwise na
+export syncedPlotValue(
+     HTFTracker tracker,
+     series float value,
+     series int htfOffset = 0
+     ) =>
+
+    float result = na
+
+    if not na(tracker)
+        int htfStart = getStartBar(tracker, htfOffset)
+        int htfEnd = getEndBar(tracker, htfOffset)
+
+        // Only return value if current bar is within the HTF bar's range
+        if not na(htfStart) and not na(htfEnd)
+            if bar_index >= htfStart and bar_index <= htfEnd
+                result := value
+
+    result
+
+//=============================================================================
+// UPDATE FUNCTIONS
+//=============================================================================
+
+//@function Updates an existing synced box, optionally extending to current bar
+//@param syncedBox The SyncedBox to update
+//@param extendToCurrentBar If true, extends right edge to current bar_index
+//@returns The updated SyncedBox
+export updateSyncedBox(SyncedBox syncedBox, series bool extendToCurrentBar = false) =>
+    if not na(syncedBox) and not na(syncedBox.bx)
+        if extendToCurrentBar or syncedBox.extendRight
+            box.set_right(syncedBox.bx, bar_index)
+    syncedBox
+
+//@function Updates an existing synced line, optionally extending to current bar
+//@param syncedLine The SyncedLine to update
+//@param extendToCurrentBar If true, extends x2 to current bar_index (for horizontal lines)
+//@returns The updated SyncedLine
+export updateSyncedLine(SyncedLine syncedLine, series bool extendToCurrentBar = false) =>
+    if not na(syncedLine) and not na(syncedLine.ln)
+        if syncedLine.isHorizontal and (extendToCurrentBar or syncedLine.extendRight)
+            line.set_x2(syncedLine.ln, bar_index)
+    syncedLine
+
+//@function Updates an existing synced label's text and/or price
+//@param syncedLabel The SyncedLabel to update
+//@param tracker The HTFTracker for repositioning (required for x-axis updates)
+//@param newText New text for the label (pass na to keep current)
+//@param newPrice New price level (pass na to keep current)
+//@returns The updated SyncedLabel
+export updateSyncedLabel(SyncedLabel syncedLabel, HTFTracker tracker, series string newText = na, series float newPrice = na) =>
+    if not na(syncedLabel) and not na(syncedLabel.lbl)
+        // Update text if provided
+        if not na(newText)
+            label.set_text(syncedLabel.lbl, newText)
+
+        // Update price if provided
+        if not na(newPrice)
+            label.set_y(syncedLabel.lbl, newPrice)
+            syncedLabel.price := newPrice
+
+        // Reposition x based on current HTF bar positions
+        if not na(tracker)
+            int barPos = na
+            if syncedLabel.anchorPoint == "start"
+                barPos := getStartBar(tracker, syncedLabel.htfOffset)
+            else if syncedLabel.anchorPoint == "end"
+                barPos := getEndBar(tracker, syncedLabel.htfOffset)
+            else if syncedLabel.anchorPoint == "middle"
+                int startBar = getStartBar(tracker, syncedLabel.htfOffset)
+                int endBar = getEndBar(tracker, syncedLabel.htfOffset)
+                if not na(startBar) and not na(endBar)
+                    barPos := int(math.round((startBar + endBar) / 2))
+
+            if not na(barPos)
+                label.set_x(syncedLabel.lbl, barPos)
+
+    syncedLabel
+
+//=============================================================================
+// CONVENIENCE FUNCTIONS (for simple single-timeframe use cases)
+//=============================================================================
+
+//@function Convenience function to get HTF bar start without explicit tracker management.
+// NOTE: Only tracks ONE timeframe. For multiple timeframes, use createTracker/updateTracker pattern.
+//@param htfTimeframe The higher timeframe string (e.g., "60", "240", "1D")
+//@param htfOffset Offset into HTF history (0=current, 1=previous, etc.)
+//@param historyDepth Maximum number of HTF bars to track (default 500)
+//@returns The chart bar_index where the HTF bar opened, or na if not found
+export htfBarStartIndex(simple string htfTimeframe, series int htfOffset, simple int historyDepth = 500) =>
+    // Use persistent tracker for this single-timeframe convenience function
+    var HTFTracker singleTracker = createTracker(htfTimeframe)
+    updateTracker(singleTracker, htfTimeframe, historyDepth)
+    getStartBar(singleTracker, htfOffset)
+
+//@function Convenience function to get HTF bar end without explicit tracker management.
+// NOTE: Only tracks ONE timeframe. For multiple timeframes, use createTracker/updateTracker pattern.
+//@param htfTimeframe The higher timeframe string (e.g., "60", "240", "1D")
+//@param htfOffset Offset into HTF history (0=current, 1=previous, etc.)
+//@param historyDepth Maximum number of HTF bars to track (default 500)
+//@returns The chart bar_index where the HTF bar closed, or na if not found
+export htfBarEndIndex(simple string htfTimeframe, series int htfOffset, simple int historyDepth = 500) =>
+    // Use persistent tracker for this single-timeframe convenience function
+    var HTFTracker singleTracker = createTracker(htfTimeframe)
+    updateTracker(singleTracker, htfTimeframe, historyDepth)
+    getEndBar(singleTracker, htfOffset)
+
+
+// import ArunaReborn/TimeframeAlign/3

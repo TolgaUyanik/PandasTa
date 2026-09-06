@@ -1,0 +1,327 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LuxAlgo
+
+//@version=6
+indicator('Liquidity Sweeps & Inverse FVGs [LuxAlgo]', 
+     shorttitle='LuxAlgo - Sweeps & IFVGs', 
+     max_lines_count=500, 
+     max_boxes_count=500, 
+     overlay=true)
+
+//------------------------------------------------------------------------------
+// Settings
+//-----------------------------------------------------------------------------{
+// Liquidity Sweep Settings
+len    = input.int(5, 'Swings', minval=1, group='Liquidity Sweeps', tooltip='Lookback period for swing highs and lows.')
+opt    = input.string('Only Wicks', 'Sweep Options', options=['Only Wicks', 'Only Outbreaks & Retest', 'Wicks + Outbreaks & Retest'], group='Liquidity Sweeps')
+
+colBl  = input.color(#ffeb3b, 'Bullish Sweep', group='Liquidity Sweeps', inline='c1')
+colBr  = input.color(#9c27b0, 'Bearish Sweep', group='Liquidity Sweeps', inline='c2')
+colBl2 = input.color(#ffeb3b80, '', group='Liquidity Sweeps', inline='c1')
+colBr2 = input.color(#9c27b080, '', group='Liquidity Sweeps', inline='c2')
+
+
+extend = input.bool(true, 'Extend Sweep Areas', group='Sweep Area') 
+maxB   = input.int(300, 'Max Bars to Extend', minval=1, maxval=5000, group='Sweep Area')
+colBl3 = input.color(#ffeb3b41, 'Bull Area Color', group='Sweep Area')
+colBr3 = input.color(#9c27b041, 'Bear Area Color', group='Sweep Area')
+
+
+// IFVG Settings
+showIfvg       = input.bool(true, "Show Inverse FVGs", group="IFVG Settings")
+volFilter      = input.float(0.3, "Volatility Filter Multiplier", minval=0, step=0.1, group="IFVG Settings", tooltip="Filters out gaps smaller than ATR * Multiplier to focus on significant moves.")
+ifvgBullCol    = input.color(color.new(#089981, 85), "IFVG Bullish Color", group="IFVG Settings")
+ifvgBearCol    = input.color(color.new(#f23645, 85), "IFVG Bearish Color", group="IFVG Settings")
+maxIfvgDisplay = input.int(1, "Max Displayed IFVGs", minval=1, group="IFVG Settings", tooltip="Limits the number of active IFVGs shown on the chart to keep it clean.")
+
+// Centerline Customization Settings
+centerLineCol  = input.color(color.new(#ffffff, 30), "IFVG Centerline Color & Transparency", group="IFVG Settings", tooltip="Controls the color and opacity (see-throughness) of the iFVG centerlines.")
+
+// Alert Settings
+alertSweeps = input.bool(true, "Alert on Liquidity Sweeps", group="Alert Settings")
+alertIfvgs  = input.bool(true, "Alert on IFVG Inversions", group="Alert Settings")
+
+
+
+
+// Internal variables
+oW = opt == 'Only Wicks'
+oO = opt == 'Only Outbreaks & Retest'
+n  = bar_index 
+
+//-----------------------------------------------------------------------------}      
+
+//-----------------------------------------------------------------------------      
+// UDT's
+//-----------------------------------------------------------------------------{
+type piv
+    float prc // price
+    int   bix // bar_index
+    bool  brk // broken
+    bool  mit // mitigated
+    bool  tak // taken
+    bool  wic // wick
+    line  lin 
+
+type boxBr 
+    box   bx 
+    line  ln
+    bool  br
+    int   dr
+
+type fvg
+    float top
+    float bottom
+    int   startIndex
+    bool  isBull
+
+type ifvgObj
+    box   bx
+    line  ln // Centerline tracking
+    label lbl // Added label tracking for the midpoint price
+    float top
+    float bottom
+    bool  isBull
+    bool  mitigated
+
+
+//-----------------------------------------------------------------------------}      
+
+//-----------------------------------------------------------------------------      
+// Variables
+//-----------------------------------------------------------------------------{
+// Initialize arrays empty as requested
+var array<piv>     aPivH      = array.new<piv>()
+var array<piv>     aPivL      = array.new<piv>()
+var array<boxBr>   aBoxBr     = array.new<boxBr>()
+var array<fvg>     activeFvgs = array.new<fvg>()
+var array<ifvgObj> activeIfvgs = array.new<ifvgObj>()
+
+
+//-----------------------------------------------------------------------------}      
+
+//-----------------------------------------------------------------------------      
+// Methods - functions
+//-----------------------------------------------------------------------------{
+method is_not_na(float val) => not na(val)
+
+method l(piv get, color c, string s='sd') => 
+    style = switch s 
+        'dt' => line.style_dotted
+        'ds' => line.style_dashed
+        =>      line.style_solid 
+    line.new(get.bix, get.prc, n, get.prc, color=c, style=style)
+
+method br(piv get, color c3, color c, int d) =>
+    y1 = d == 1 ? high : get.prc
+    y2 = d == 1 ? get.prc : low
+    boxBr.new( 
+     box.new(n - 1, y1, n + 1, y2, border_color=color.new(na, 100), bgcolor=c3),
+     line.new(n, y1, n, y2, color=c, width=3),
+     false,
+     d)
+
+lnDot(y, c) => line.new(n, y, n + 3, y, color=c, style=line.style_dotted)
+
+//-----------------------------------------------------------------------------}      
+
+//-----------------------------------------------------------------------------      
+// Execution - Liquidity Sweeps
+//-----------------------------------------------------------------------------{
+ph = ta.pivothigh(len, len)
+pl = ta.pivotlow (len, len)
+
+if ph.is_not_na() 
+    aPivH.unshift(piv.new(ph, n - len, false, false, false, false, na))
+
+if pl.is_not_na() 
+    aPivL.unshift(piv.new(pl, n - len, false, false, false, false, na)) 
+
+// Bullish Sweeps / Bearish Resistance
+if aPivH.size() > 0
+    for i = aPivH.size() - 1 to 0
+        get = aPivH.get(i)
+        if not get.mit
+            if not get.brk
+                if close > get.prc 
+                    if not oW
+                        get.brk := true
+                    else 
+                        get.mit := true
+                if not oO and not get.wic 
+                    if high > get.prc and close < get.prc                   
+                        aBoxBr.unshift(get.br(colBr3, colBr, 1))       
+                        get.lin := get.l(colBr2, 'dt')
+                        lnDot(low, colBr)
+                        get.wic := true  
+                        if alertSweeps
+                            alert("Bearish Sweep Detected at " + str.tostring(get.prc), alert.freq_once_per_bar)
+
+            else 
+                if close < get.prc 
+                    get.mit := true
+                if not oW and low < get.prc and close > get.prc                    
+                    aBoxBr.unshift(get.br(colBl3, colBl, -1))    
+                    get.lin := get.l(colBl2, 'ds')
+                    lnDot(high, colBl)
+                    get.tak := true 
+                    if alertSweeps
+                        alert("Bullish Sweep Detected at " + str.tostring(get.prc), alert.freq_once_per_bar)
+
+
+        // Safety checks for cleanup
+        if n - get.bix > 2000 or get.mit or get.tak 
+            p = aPivH.remove(i)
+            if not na(p.lin)
+                p.lin.delete()
+
+// Bearish Sweeps / Bullish Support
+if aPivL.size() > 0
+    for i = aPivL.size() - 1 to 0
+        get = aPivL.get(i)
+        if not get.mit
+            if not get.brk
+                if close < get.prc 
+                    if not oW
+                        get.brk := true
+                    else 
+                        get.mit := true
+                if not oO and not get.wic 
+                    if low < get.prc and close > get.prc                                              
+                        aBoxBr.unshift(get.br(colBl3, colBl, -1))     
+                        get.lin := get.l(colBl2, 'dt')
+                        lnDot(high, colBl)
+                        get.wic := true 
+                        if alertSweeps
+                            alert("Bullish Sweep Detected at " + str.tostring(get.prc), alert.freq_once_per_bar)
+
+            else 
+                if close > get.prc 
+                    get.mit := true
+                if not oW and high > get.prc and close < get.prc                     
+                    aBoxBr.unshift(get.br(colBr3, colBr, 1))    
+                    get.lin := get.l(colBr2, 'ds')
+                    lnDot(low, colBr)
+                    get.tak := true  
+                    if alertSweeps
+                        alert("Bearish Sweep Detected at " + str.tostring(get.prc), alert.freq_once_per_bar)
+
+
+        // Safety checks for cleanup
+        if n - get.bix > 2000 or get.mit or get.tak 
+            p = aPivL.remove(i)
+            if not na(p.lin)
+                p.lin.delete()
+
+// Extend Sweep Boxes
+if extend and aBoxBr.size() > 0
+    for bx in aBoxBr 
+        if not bx.br and n - bx.bx.get_left() - 1 <= maxB 
+            bx.bx.set_right(n)
+            if bx.dr == -1 and close < bx.bx.get_bottom() 
+                bx.br := true 
+            if bx.dr ==  1 and close > bx.bx.get_top() 
+                bx.br := true 
+
+//-----------------------------------------------------------------------------}
+
+//-----------------------------------------------------------------------------      
+// Execution - Inverse Fair Value Gaps (IFVG)
+//-----------------------------------------------------------------------------{
+atr = ta.atr(14)
+threshold = atr * volFilter
+
+// Detection of new FVGs
+if low > high[2]
+    gapSize = low - high[2]
+    if gapSize > threshold
+        activeFvgs.push(fvg.new(low, high[2], n - 2, true))
+
+if high < low[2]
+    gapSize = low[2] - high
+    if gapSize > threshold
+        activeFvgs.push(fvg.new(low[2], high, n - 2, false))
+
+if showIfvg
+    // 2. Process existing FVGs for Inversion
+    if activeFvgs.size() > 0
+        for i = activeFvgs.size() - 1 to 0
+            item = activeFvgs.get(i)
+            bool confirmed = false
+            
+            if item.isBull
+                if close < item.bottom // Inversion confirmed (Bearish IFVG)
+                    borderCol = color.new(ifvgBearCol, 20)
+                    newBx = box.new(item.startIndex, item.top, n + 5, item.bottom, 
+                                 bgcolor=ifvgBearCol, border_color=borderCol,
+                                 text="IFVG", text_color=chart.fg_color, text_size=size.tiny)
+                    // Draw customized Centerline for Bearish IFVG
+                    midY = (item.top + item.bottom) / 2
+                    newLn = line.new(item.startIndex, midY, n + 5, midY, color=centerLineCol, width=1)
+                    
+                    // Create dynamic label formatted to the chart's tick format
+                    priceText = str.tostring(midY, format.mintick)
+                    newLbl = label.new(n + 5, midY, text=priceText, color=color.new(na, 100), textcolor=centerLineCol, style=label.style_label_left, size=size.small)
+                    
+                    activeIfvgs.unshift(ifvgObj.new(newBx, newLn, newLbl, item.top, item.bottom, false, false))
+                    if alertIfvgs
+                        alert("Bearish IFVG Confirmed", alert.freq_once_per_bar_close)
+                    confirmed := true
+                else if high < item.bottom
+                    confirmed := true
+            else
+                if close > item.top // Inversion confirmed (Bullish IFVG)
+                    borderCol = color.new(ifvgBullCol, 20)
+                    newBx = box.new(item.startIndex, item.top, n + 5, item.bottom, 
+                                 bgcolor=ifvgBullCol, border_color=borderCol,
+                                 text="IFVG", text_color=chart.fg_color, text_size=size.tiny)
+                    // Draw customized Centerline for Bullish IFVG
+                    midY = (item.top + item.bottom) / 2
+                    newLn = line.new(item.startIndex, midY, n + 5, midY, color=centerLineCol, width=1)
+                    
+                    // Create dynamic label formatted to the chart's tick format
+                    priceText = str.tostring(midY, format.mintick)
+                    newLbl = label.new(n + 5, midY, text=priceText, color=color.new(na, 100), textcolor=centerLineCol, style=label.style_label_left, size=size.small)
+                    
+                    activeIfvgs.unshift(ifvgObj.new(newBx, newLn, newLbl, item.top, item.bottom, true, false))
+                    if alertIfvgs
+                        alert("Bullish IFVG Confirmed", alert.freq_once_per_bar_close)
+                    confirmed := true
+                else if low > item.top
+                    confirmed := true
+
+            if confirmed or n - item.startIndex > 1000
+                activeFvgs.remove(i)
+
+
+    // 3. Update coordinates and check mitigation for confirmed IFVGs
+    if activeIfvgs.size() > 0
+        for i = activeIfvgs.size() - 1 to 0
+            ifvO = activeIfvgs.get(i)
+            
+            if not ifvO.mitigated
+                if ifvO.isBull // Bullish IFVG (Support)
+                    if close < ifvO.bottom
+                        ifvO.mitigated := true
+                        ifvO.bx.set_right(n)
+                        ifvO.ln.set_x2(n)
+                        ifvO.lbl.set_x(n)
+                else // Bearish IFVG (Resistance)
+                    if close > ifvO.top
+                        ifvO.mitigated := true
+                        ifvO.bx.set_right(n)
+                        ifvO.ln.set_x2(n)
+                        ifvO.lbl.set_x(n)
+            
+            if not ifvO.mitigated
+                ifvO.bx.set_right(n + 5)
+                ifvO.ln.set_x2(n + 5)
+                ifvO.lbl.set_x(n + 5)
+            
+    // 4. Strict FIFO Limiting: Keep only the most recently confirmed
+    if activeIfvgs.size() > maxIfvgDisplay
+        while activeIfvgs.size() > maxIfvgDisplay
+            oldIfvg = activeIfvgs.pop()
+            oldIfvg.bx.delete()
+            oldIfvg.ln.delete()
+            oldIfvg.lbl.delete()

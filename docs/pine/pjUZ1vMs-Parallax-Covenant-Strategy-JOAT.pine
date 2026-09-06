@@ -1,0 +1,502 @@
+//@version=6
+strategy("Parallax Covenant Strategy [JOAT]", shorttitle = "PCS [JOAT]", overlay = true, max_boxes_count = 100, max_labels_count = 200, max_lines_count = 200, initial_capital = 100000, currency = currency.USD, pyramiding = 0, commission_type = strategy.commission.percent, commission_value = 0.04, slippage = 1, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, calc_on_every_tick = false, process_orders_on_close = true)
+
+//------------------------------------------------------------------------------
+// Utility helpers
+//------------------------------------------------------------------------------
+clamp(float value, float floorValue, float ceilValue) =>
+    math.max(floorValue, math.min(ceilValue, value))
+
+asPercent(float value) =>
+    str.tostring(value, "#.0") + "%"
+
+asPrice(float value) =>
+    str.tostring(value, format.mintick)
+
+zoneMid(float topValue, float bottomValue) =>
+    (topValue + bottomValue) * 0.5
+
+directionColor(int state, color bullColor, color bearColor, color neutralColor) =>
+    state > 0 ? bullColor : state < 0 ? bearColor : neutralColor
+
+boolToText(bool condition, string onText, string offText) =>
+    condition ? onText : offText
+
+//------------------------------------------------------------------------------
+// Display palette
+//------------------------------------------------------------------------------
+var string GROUP_DISPLAY = "Display"
+themeBull = input.color(color.rgb(24, 166, 120), "Bull Color", group = GROUP_DISPLAY)
+themeBear = input.color(color.rgb(203, 74, 86), "Bear Color", group = GROUP_DISPLAY)
+themeNeutral = input.color(color.rgb(123, 137, 161), "Neutral Color", group = GROUP_DISPLAY)
+themeAccent = input.color(color.rgb(223, 191, 92), "Accent Color", group = GROUP_DISPLAY)
+themeSurface = input.color(color.rgb(23, 28, 39), "Dashboard Surface", group = GROUP_DISPLAY)
+showDashboard = input.bool(true, "Show Dashboard", group = GROUP_DISPLAY)
+showCloud = input.bool(true, "Show Regime Cloud", group = GROUP_DISPLAY)
+showStructure = input.bool(true, "Show Structure Levels", group = GROUP_DISPLAY)
+showCandleTint = input.bool(true, "Tint Candles", group = GROUP_DISPLAY)
+showTradeLevels = input.bool(true, "Show Active Stop / Target", group = GROUP_DISPLAY)
+
+//------------------------------------------------------------------------------
+// Regime engine inputs
+//------------------------------------------------------------------------------
+var string GROUP_REGIME = "Regime Engine"
+tenkanLength = input.int(9, "Tenkan Length", minval = 1, group = GROUP_REGIME)
+kijunLength = input.int(26, "Kijun Length", minval = 1, group = GROUP_REGIME)
+spanBLength = input.int(52, "Span B Length", minval = 1, group = GROUP_REGIME)
+bodyLength = input.int(55, "Body Average Length", minval = 1, group = GROUP_REGIME)
+bodyMultiplier = input.float(1.35, "Body Tolerance Multiplier", minval = 0.1, step = 0.05, group = GROUP_REGIME)
+bandLength = input.int(89, "Band Length", minval = 5, group = GROUP_REGIME)
+bandScale = input.float(160.0, "Band Scale Percent", minval = 50.0, step = 5.0, group = GROUP_REGIME)
+compressionThreshold = input.float(0.72, "Compression Threshold", minval = 0.1, maxval = 2.0, step = 0.01, group = GROUP_REGIME)
+expansionThreshold = input.float(1.18, "Expansion Threshold", minval = 0.5, maxval = 3.0, step = 0.01, group = GROUP_REGIME)
+
+//------------------------------------------------------------------------------
+// Pressure engine inputs
+//------------------------------------------------------------------------------
+var string GROUP_PRESSURE = "Pressure Engine"
+pressureLength = input.int(18, "Pressure Window", minval = 2, group = GROUP_PRESSURE)
+pressureSmooth = input.int(5, "Pressure EMA", minval = 1, group = GROUP_PRESSURE)
+pressureSignalLength = input.int(9, "Pressure Signal SMA", minval = 1, group = GROUP_PRESSURE)
+pressureWeightCap = input.float(2.50, "Body Weight Cap", minval = 0.5, step = 0.05, group = GROUP_PRESSURE)
+channelScale = input.float(180.0, "Channel Scale Percent", minval = 50.0, step = 5.0, group = GROUP_PRESSURE)
+pressureThreshold = input.float(10.0, "Pressure Threshold", minval = 0.0, step = 0.5, group = GROUP_PRESSURE)
+
+//------------------------------------------------------------------------------
+// Mapping and bias inputs
+//------------------------------------------------------------------------------
+var string GROUP_MAPPING = "Mapping And Bias"
+rsiLength = input.int(21, "RSI Length", minval = 2, group = GROUP_MAPPING)
+rsiSmoothing = input.int(8, "RSI Smoothing", minval = 1, group = GROUP_MAPPING)
+mappingLookback = input.int(120, "Price Mapping Lookback", minval = 20, group = GROUP_MAPPING)
+mappingStretch = input.float(1.05, "Mapping Stretch", minval = 0.25, step = 0.05, group = GROUP_MAPPING)
+useHigherTimeframeBias = input.bool(true, "Use Higher Timeframe Bias", group = GROUP_MAPPING)
+higherTimeframe = input.timeframe("240", "Higher Timeframe", group = GROUP_MAPPING)
+higherTimeframeLength = input.int(34, "HTF EMA Length", minval = 2, group = GROUP_MAPPING)
+
+//------------------------------------------------------------------------------
+// Structure and zone inputs
+//------------------------------------------------------------------------------
+var string GROUP_STRUCTURE = "Structure And Zones"
+pivotLength = input.int(4, "Pivot Length", minval = 1, group = GROUP_STRUCTURE)
+volumeLookback = input.int(34, "Volume Average Length", minval = 2, group = GROUP_STRUCTURE)
+volumeImpulse = input.float(1.90, "Volume Impulse Multiplier", minval = 0.5, step = 0.1, group = GROUP_STRUCTURE)
+zoneAtrLength = input.int(14, "Zone ATR Length", minval = 1, group = GROUP_STRUCTURE)
+zoneAtrMult = input.float(0.65, "Zone Height ATR Multiplier", minval = 0.1, step = 0.05, group = GROUP_STRUCTURE)
+structureDecayBars = input.int(180, "Structure Decay Bars", minval = 20, group = GROUP_STRUCTURE)
+
+//------------------------------------------------------------------------------
+// Risk management inputs
+//------------------------------------------------------------------------------
+var string GROUP_RISK = "Risk Management"
+atrRiskLength = input.int(14, "ATR Length", minval = 1, group = GROUP_RISK)
+stopAtrMultiple = input.float(1.8, "Stop ATR Multiple", minval = 0.25, step = 0.05, group = GROUP_RISK)
+targetRR = input.float(2.4, "Base Reward / Risk", minval = 0.5, step = 0.1, group = GROUP_RISK)
+trailActivationRR = input.float(1.2, "Trail Activation R", minval = 0.5, step = 0.1, group = GROUP_RISK)
+trailAtrMultiple = input.float(1.1, "Trail ATR Multiple", minval = 0.2, step = 0.05, group = GROUP_RISK)
+maxBarsInTrade = input.int(80, "Maximum Bars In Trade", minval = 5, group = GROUP_RISK)
+flatOnRegimeFailure = input.bool(true, "Close On Regime Failure", group = GROUP_RISK)
+
+//------------------------------------------------------------------------------
+// Regime calculations
+//------------------------------------------------------------------------------
+donchianMid(int length) =>
+    math.avg(ta.lowest(length), ta.highest(length))
+
+tenkan = donchianMid(tenkanLength)
+kijun = donchianMid(kijunLength)
+spanA = math.avg(tenkan, kijun)
+spanB = donchianMid(spanBLength)
+compositeBaseline = (tenkan + kijun + spanA + spanB) / 4.0
+
+bodyValue = math.abs(close - open)
+bodyAverage = ta.sma(bodyValue, bodyLength)
+bodyTolerance = bodyAverage * bodyMultiplier
+
+candleMid = hl2
+bandMid = ta.sma(candleMid, bandLength)
+avgRange = ta.sma(high - low, bandLength)
+bandOffset = avgRange * bandScale / 100.0
+regimeUpper = bandMid + bandOffset
+regimeLower = bandMid - bandOffset
+
+regimeFloor = math.max(compositeBaseline - bodyTolerance, regimeLower)
+regimeCeiling = math.min(compositeBaseline + bodyTolerance, regimeUpper)
+regimeCompressionRatio = avgRange / math.max(ta.sma(avgRange, bandLength), syminfo.mintick)
+isCompressed = regimeCompressionRatio <= compressionThreshold
+isExpanded = regimeCompressionRatio >= expansionThreshold
+
+var int regimeState = 0
+if barstate.isconfirmed
+    if close > regimeCeiling and close > compositeBaseline
+        regimeState := 1
+    else if close < regimeFloor and close < compositeBaseline
+        regimeState := -1
+    else
+        regimeState := nz(regimeState[1], 0)
+
+regimeShiftUp = barstate.isconfirmed and regimeState == 1 and nz(regimeState[1], 0) != 1
+regimeShiftDown = barstate.isconfirmed and regimeState == -1 and nz(regimeState[1], 0) != -1
+
+//------------------------------------------------------------------------------
+// Pressure calculations
+//------------------------------------------------------------------------------
+avgBodyPressure = ta.sma(bodyValue, pressureLength)
+directionUnit = close > open ? 1.0 : close < open ? -1.0 : 0.0
+bodyWeight = avgBodyPressure == 0.0 ? 0.0 : clamp(bodyValue / avgBodyPressure, 0.0, pressureWeightCap)
+pressureContribution = directionUnit * bodyWeight
+
+rollingPressure = 0.0
+for i = 0 to pressureLength - 1
+    rollingPressure += pressureContribution[i]
+
+pressureNormalized = rollingPressure / math.max(pressureLength * pressureWeightCap, 1e-10) * 100.0
+
+channelBody = ta.sma(bodyValue, pressureLength)
+channelRange = ta.sma(high - low, pressureLength)
+channelOffset = channelRange * channelScale / 100.0 * (1.0 + channelBody / math.max(channelRange, 1e-10))
+channelUpper = bandMid + channelOffset
+channelLower = bandMid - channelOffset
+channelWidth = math.max(channelUpper - channelLower, syminfo.mintick)
+channelPosition = clamp(100.0 * (close - channelLower) / channelWidth - 50.0, -100.0, 100.0)
+
+pressureCompositeRaw = pressureNormalized * 0.55 + channelPosition * 0.45
+pressureComposite = ta.ema(pressureCompositeRaw, pressureSmooth)
+pressureSignal = ta.sma(pressureComposite, pressureSignalLength)
+pressureBull = pressureComposite > pressureThreshold and pressureComposite > pressureSignal
+pressureBear = pressureComposite < -pressureThreshold and pressureComposite < pressureSignal
+pressureCrossUp = barstate.isconfirmed and ta.crossover(pressureComposite, pressureSignal)
+pressureCrossDown = barstate.isconfirmed and ta.crossunder(pressureComposite, pressureSignal)
+
+//------------------------------------------------------------------------------
+// Mapping and higher-timeframe bias
+//------------------------------------------------------------------------------
+rsiBase = ta.rsi(close, rsiLength)
+rsiSmooth = ta.ema(rsiBase, rsiSmoothing)
+priceHigh = ta.highest(high, mappingLookback)
+priceLow = ta.lowest(low, mappingLookback)
+priceSpan = math.max(priceHigh - priceLow, syminfo.mintick)
+mappingScale = priceSpan / 100.0 * mappingStretch
+
+mappedFair = priceLow + rsiSmooth * mappingScale
+mappedUpper = priceLow + (rsiSmooth + 15.0) * mappingScale
+mappedLower = priceLow + (rsiSmooth - 15.0) * mappingScale
+mappedMid = zoneMid(mappedUpper, mappedLower)
+mappedSlope = ta.ema(mappedMid - mappedMid[1], 5)
+mappingBull = close > mappedMid and mappedSlope >= 0
+mappingBear = close < mappedMid and mappedSlope <= 0
+
+htfCloseConfirmed = useHigherTimeframeBias ? request.security(syminfo.tickerid, higherTimeframe, close[1], lookahead = barmerge.lookahead_on) : close
+htfEmaConfirmed = useHigherTimeframeBias ? request.security(syminfo.tickerid, higherTimeframe, ta.ema(close, higherTimeframeLength)[1], lookahead = barmerge.lookahead_on) : ta.ema(close, higherTimeframeLength)
+htfBiasState = htfCloseConfirmed > htfEmaConfirmed ? 1 : htfCloseConfirmed < htfEmaConfirmed ? -1 : 0
+
+//------------------------------------------------------------------------------
+// Structure and zone calculations
+//------------------------------------------------------------------------------
+avgVolume = ta.sma(volume, volumeLookback)
+atrZone = ta.atr(zoneAtrLength)
+volumeEvent = volume > avgVolume * volumeImpulse
+
+pivotHigh = ta.pivothigh(high, pivotLength, pivotLength)
+pivotLow = ta.pivotlow(low, pivotLength, pivotLength)
+
+var float lastResistance = na
+var float lastSupport = na
+var int lastResistanceBar = na
+var int lastSupportBar = na
+var float demandTop = na
+var float demandBottom = na
+var float supplyTop = na
+var float supplyBottom = na
+var int demandBar = na
+var int supplyBar = na
+
+if not na(pivotHigh)
+    lastResistance := pivotHigh
+    lastResistanceBar := bar_index[pivotLength]
+
+if not na(pivotLow)
+    lastSupport := pivotLow
+    lastSupportBar := bar_index[pivotLength]
+
+if volumeEvent and close > open
+    demandTop := high
+    demandBottom := math.max(low, close - atrZone * zoneAtrMult)
+    demandBar := bar_index
+
+if volumeEvent and close < open
+    supplyBottom := low
+    supplyTop := math.min(high, close + atrZone * zoneAtrMult)
+    supplyBar := bar_index
+
+demandActive = not na(demandBar) and bar_index - demandBar <= structureDecayBars
+supplyActive = not na(supplyBar) and bar_index - supplyBar <= structureDecayBars
+supportActive = not na(lastSupportBar) and bar_index - lastSupportBar <= structureDecayBars
+resistanceActive = not na(lastResistanceBar) and bar_index - lastResistanceBar <= structureDecayBars
+
+demandMid = demandActive ? zoneMid(demandTop, demandBottom) : na
+supplyMid = supplyActive ? zoneMid(supplyTop, supplyBottom) : na
+
+nearDemand = demandActive and close >= demandBottom and close <= demandTop
+nearSupply = supplyActive and close <= supplyTop and close >= supplyBottom
+structureBull = (supportActive and close > lastSupport) or nearDemand
+structureBear = (resistanceActive and close < lastResistance) or nearSupply
+
+//------------------------------------------------------------------------------
+// Wave and expansion state
+//------------------------------------------------------------------------------
+waveMethod = input.string("Impulse", "Wave Method", options = ["Impulse", "Directional"], group = GROUP_REGIME)
+waveLength = input.int(6, "Wave Length", minval = 2, group = GROUP_REGIME)
+waveUseShadows = input.bool(true, "Wave Uses Shadows", group = GROUP_REGIME)
+
+waveSize = waveUseShadows ? bodyValue + (high - low) * 0.5 : bodyValue
+waveDirectionBase = close > close[1] ? 1 : close < close[1] ? -1 : 0
+directionalImpulse = math.sum(waveDirectionBase, waveLength)
+waveDirection = waveMethod == "Impulse" ? directionalImpulse > 0 ? 1 : directionalImpulse < 0 ? -1 : nz(waveDirectionBase[1], 0) : waveDirectionBase
+
+var int waveState = 0
+if barstate.isconfirmed
+    waveState := waveDirection == 0 ? nz(waveState[1], 0) : waveDirection
+
+var float waveTotal = 0.0
+waveTotal := waveState == nz(waveState[1], 0) ? nz(waveTotal[1]) + waveSize : waveSize
+waveAverage = ta.sma(waveTotal, math.max(waveLength * 2, 2))
+waveNormalized = waveAverage == 0.0 ? 0.0 : waveTotal / waveAverage
+waveBull = waveState == 1 and waveNormalized >= 1.0
+waveBear = waveState == -1 and waveNormalized >= 1.0
+
+releaseBull = barstate.isconfirmed and isCompressed[1] and not isCompressed and waveBull
+releaseBear = barstate.isconfirmed and isCompressed[1] and not isCompressed and waveBear
+
+//------------------------------------------------------------------------------
+// Composite bias model
+//------------------------------------------------------------------------------
+regimeScore = 0
+regimeScore += regimeState
+regimeScore += pressureBull ? 1 : pressureBear ? -1 : 0
+regimeScore += mappingBull ? 1 : mappingBear ? -1 : 0
+regimeScore += structureBull ? 1 : structureBear ? -1 : 0
+regimeScore += waveBull ? 1 : waveBear ? -1 : 0
+regimeScore += useHigherTimeframeBias ? htfBiasState : 0
+
+bullBias = regimeScore >= 3
+bearBias = regimeScore <= -3
+balancedBias = not bullBias and not bearBias
+bullStackCount = (pressureBull ? 1 : 0) + (mappingBull ? 1 : 0) + (structureBull ? 1 : 0) + (waveBull ? 1 : 0)
+bearStackCount = (pressureBear ? 1 : 0) + (mappingBear ? 1 : 0) + (structureBear ? 1 : 0) + (waveBear ? 1 : 0)
+
+//------------------------------------------------------------------------------
+// Entry logic
+//------------------------------------------------------------------------------
+allowLong = input.bool(true, "Allow Long Entries", group = GROUP_RISK)
+allowShort = input.bool(true, "Allow Short Entries", group = GROUP_RISK)
+requireRelease = input.bool(true, "Require Compression Release", group = GROUP_RISK)
+requireDemandRetest = input.bool(false, "Require Demand / Supply Zone Contact", group = GROUP_RISK)
+
+longBiasConfirmed = regimeState >= 0 and bullStackCount >= 2 and (not useHigherTimeframeBias or htfBiasState >= 0)
+shortBiasConfirmed = regimeState <= 0 and bearStackCount >= 2 and (not useHigherTimeframeBias or htfBiasState <= 0)
+
+longReleaseFilter = requireRelease ? (releaseBull or waveBull) : (waveBull and not isCompressed)
+shortReleaseFilter = requireRelease ? (releaseBear or waveBear) : (waveBear and not isCompressed)
+
+longStructureFilter = requireDemandRetest ? nearDemand : (structureBull or close > compositeBaseline)
+shortStructureFilter = requireDemandRetest ? nearSupply : (structureBear or close < compositeBaseline)
+
+longMomentumTrigger = pressureCrossUp or ta.crossover(close, mappedMid) or ta.crossover(close, compositeBaseline)
+shortMomentumTrigger = pressureCrossDown or ta.crossunder(close, mappedMid) or ta.crossunder(close, compositeBaseline)
+longEntrySignal = barstate.isconfirmed and allowLong and longBiasConfirmed and (longReleaseFilter or pressureBull) and longStructureFilter and longMomentumTrigger
+shortEntrySignal = barstate.isconfirmed and allowShort and shortBiasConfirmed and (shortReleaseFilter or pressureBear) and shortStructureFilter and shortMomentumTrigger
+
+//------------------------------------------------------------------------------
+// Risk and exit model
+//------------------------------------------------------------------------------
+atrRisk = ta.atr(atrRiskLength)
+longStopDistance = atrRisk * stopAtrMultiple
+shortStopDistance = atrRisk * stopAtrMultiple
+
+var float activeLongStop = na
+var float activeLongTarget = na
+var float activeShortStop = na
+var float activeShortTarget = na
+var float activeLongTrail = na
+var float activeShortTrail = na
+var int activeEntryBar = na
+
+newLong = longEntrySignal and strategy.position_size <= 0
+newShort = shortEntrySignal and strategy.position_size >= 0
+
+if newLong
+    strategy.entry("PCS Long", strategy.long, comment = "Bull regime")
+
+if newShort
+    strategy.entry("PCS Short", strategy.short, comment = "Bear regime")
+
+if ta.change(strategy.opentrades) > 0
+    activeEntryBar := bar_index
+    if strategy.position_size > 0
+        entryPrice = strategy.position_avg_price
+        activeLongStop := entryPrice - longStopDistance
+        activeLongTarget := entryPrice + longStopDistance * targetRR
+        activeLongTrail := na
+        activeShortStop := na
+        activeShortTarget := na
+        activeShortTrail := na
+    else if strategy.position_size < 0
+        entryPrice = strategy.position_avg_price
+        activeShortStop := entryPrice + shortStopDistance
+        activeShortTarget := entryPrice - shortStopDistance * targetRR
+        activeShortTrail := na
+        activeLongStop := na
+        activeLongTarget := na
+        activeLongTrail := na
+
+barsInTrade = strategy.position_size != 0 and not na(activeEntryBar) ? bar_index - activeEntryBar : 0
+
+if strategy.position_size > 0
+    entryPrice = strategy.position_avg_price
+    initialRisk = math.max(entryPrice - nz(activeLongStop, entryPrice - longStopDistance), syminfo.mintick)
+    activationPrice = entryPrice + initialRisk * trailActivationRR
+    if high >= activationPrice
+        trailingCandidate = close - atrRisk * trailAtrMultiple
+        activeLongTrail := na(activeLongTrail) ? trailingCandidate : math.max(activeLongTrail, trailingCandidate)
+    effectiveLongStop = na(activeLongTrail) ? activeLongStop : math.max(activeLongStop, activeLongTrail)
+    strategy.exit("PCS Long Exit", "PCS Long", stop = effectiveLongStop, limit = activeLongTarget, comment_profit = "Target", comment_loss = "Stop")
+
+if strategy.position_size < 0
+    entryPrice = strategy.position_avg_price
+    initialRisk = math.max(nz(activeShortStop, entryPrice + shortStopDistance) - entryPrice, syminfo.mintick)
+    activationPrice = entryPrice - initialRisk * trailActivationRR
+    if low <= activationPrice
+        trailingCandidate = close + atrRisk * trailAtrMultiple
+        activeShortTrail := na(activeShortTrail) ? trailingCandidate : math.min(activeShortTrail, trailingCandidate)
+    effectiveShortStop = na(activeShortTrail) ? activeShortStop : math.min(activeShortStop, activeShortTrail)
+    strategy.exit("PCS Short Exit", "PCS Short", stop = effectiveShortStop, limit = activeShortTarget, comment_profit = "Target", comment_loss = "Stop")
+
+longFailure = strategy.position_size > 0 and flatOnRegimeFailure and barstate.isconfirmed and (regimeState < 0 or pressureComposite < 0 or mappingBear)
+shortFailure = strategy.position_size < 0 and flatOnRegimeFailure and barstate.isconfirmed and (regimeState > 0 or pressureComposite > 0 or mappingBull)
+timeStop = strategy.position_size != 0 and barsInTrade >= maxBarsInTrade
+
+if longFailure
+    strategy.close("PCS Long", comment = "Regime failure")
+
+if shortFailure
+    strategy.close("PCS Short", comment = "Regime failure")
+
+if timeStop
+    strategy.close_all(comment = "Time stop")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeLongStop := na
+    activeLongTarget := na
+    activeShortStop := na
+    activeShortTarget := na
+    activeLongTrail := na
+    activeShortTrail := na
+    activeEntryBar := na
+
+//------------------------------------------------------------------------------
+// Visual model
+//------------------------------------------------------------------------------
+regimeColor = directionColor(regimeState, themeBull, themeBear, themeNeutral)
+pressureColor = pressureComposite >= pressureSignal ? color.new(themeBull, 0) : color.new(themeBear, 0)
+mappingColor = mappingBull ? color.new(themeBull, 20) : mappingBear ? color.new(themeBear, 20) : color.new(themeNeutral, 30)
+
+baselinePlot = plot(compositeBaseline, "Composite Baseline", color = regimeColor, linewidth = 2)
+floorPlot = plot(regimeFloor, "Regime Floor", color = color.new(regimeColor, 40), linewidth = 1)
+ceilingPlot = plot(regimeCeiling, "Regime Ceiling", color = color.new(regimeColor, 40), linewidth = 1)
+mappedMidPlot = plot(mappedMid, "Mapped Mid", color = mappingColor, linewidth = 2)
+
+plot(showCloud ? regimeUpper : na, "Regime Upper", color = color.new(regimeColor, 85), linewidth = 1)
+plot(showCloud ? regimeLower : na, "Regime Lower", color = color.new(regimeColor, 85), linewidth = 1)
+fill(floorPlot, ceilingPlot, color = showCloud ? color.new(regimeColor, 88) : na, title = "Regime Tolerance Fill")
+fill(baselinePlot, mappedMidPlot, color = showCloud ? color.new(regimeColor, 92) : na, title = "Baseline Mapping Fill")
+
+demandTopPlot = plot(showStructure and demandActive ? demandTop : na, "Demand Top", color = color.new(themeBull, 70), linewidth = 1, style = plot.style_linebr)
+demandBottomPlot = plot(showStructure and demandActive ? demandBottom : na, "Demand Bottom", color = color.new(themeBull, 80), linewidth = 1, style = plot.style_linebr)
+supplyTopPlot = plot(showStructure and supplyActive ? supplyTop : na, "Supply Top", color = color.new(themeBear, 80), linewidth = 1, style = plot.style_linebr)
+supplyBottomPlot = plot(showStructure and supplyActive ? supplyBottom : na, "Supply Bottom", color = color.new(themeBear, 70), linewidth = 1, style = plot.style_linebr)
+fill(demandTopPlot, demandBottomPlot, color = showStructure and demandActive ? color.new(themeBull, 90) : na, title = "Demand Fill")
+fill(supplyTopPlot, supplyBottomPlot, color = showStructure and supplyActive ? color.new(themeBear, 90) : na, title = "Supply Fill")
+
+plot(showTradeLevels and strategy.position_size > 0 ? nz(activeLongStop) : na, "Long Stop", color = color.new(themeBear, 0), linewidth = 2, style = plot.style_linebr)
+plot(showTradeLevels and strategy.position_size > 0 ? nz(activeLongTarget) : na, "Long Target", color = color.new(themeBull, 0), linewidth = 2, style = plot.style_linebr)
+plot(showTradeLevels and strategy.position_size < 0 ? nz(activeShortStop) : na, "Short Stop", color = color.new(themeBear, 0), linewidth = 2, style = plot.style_linebr)
+plot(showTradeLevels and strategy.position_size < 0 ? nz(activeShortTarget) : na, "Short Target", color = color.new(themeBull, 0), linewidth = 2, style = plot.style_linebr)
+
+candleTint = showCandleTint ? color.new(regimeColor, pressureComposite > pressureSignal ? 65 : 78) : na
+barcolor(candleTint)
+
+bgcolor(regimeShiftUp ? color.new(themeBull, 90) : regimeShiftDown ? color.new(themeBear, 90) : na, title = "Regime Shift Background")
+
+//------------------------------------------------------------------------------
+// Minimal labels for event context
+//------------------------------------------------------------------------------
+showEventLabels = input.bool(true, "Show Event Labels", group = GROUP_DISPLAY)
+
+makeEventLabel(bool trigger, float level, string textValue, color labelColor, bool isUp) =>
+    if trigger and showEventLabels
+        label.new(bar_index, level, textValue, style = isUp ? label.style_label_up : label.style_label_down, color = color.new(labelColor, 70), textcolor = color.white, size = size.small)
+
+makeEventLabel(regimeShiftUp, low, "Regime Up", themeBull, true)
+makeEventLabel(regimeShiftDown, high, "Regime Down", themeBear, false)
+makeEventLabel(releaseBull, low, "Release", themeAccent, true)
+makeEventLabel(releaseBear, high, "Release", themeAccent, false)
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+var table dashboard = table.new(position.top_right, 2, 10, bgcolor = color.new(themeSurface, 10), frame_color = color.new(themeNeutral, 50), frame_width = 1, border_width = 1, border_color = color.new(themeNeutral, 80))
+dashHeader = color.new(color.rgb(22, 40, 68), 6)
+dashAccent = color.new(color.rgb(46, 78, 128), 18)
+dashRowA = color.new(color.rgb(17, 23, 35), 10)
+dashRowB = color.new(color.rgb(25, 32, 48), 16)
+
+if barstate.islast and showDashboard
+    table.cell(dashboard, 0, 0, "Parallax", text_color = color.white, bgcolor = dashHeader, text_size = size.normal)
+    table.cell(dashboard, 1, 0, "Covenant", text_color = color.white, bgcolor = dashHeader, text_size = size.normal)
+
+    table.cell(dashboard, 0, 1, "Regime", text_color = color.white, bgcolor = dashAccent)
+    table.cell(dashboard, 1, 1, regimeState == 1 ? "Bullish" : regimeState == -1 ? "Bearish" : "Balanced", text_color = color.white, bgcolor = color.new(regimeColor, 50))
+
+    table.cell(dashboard, 0, 2, "Pressure", text_color = color.white, bgcolor = dashRowA)
+    table.cell(dashboard, 1, 2, str.tostring(pressureComposite, "#.0"), text_color = color.white, bgcolor = color.new(pressureColor, 60))
+
+    table.cell(dashboard, 0, 3, "Bias Score", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 3, str.tostring(regimeScore), text_color = color.white, bgcolor = color.new(directionColor(regimeScore, themeBull, themeBear, themeNeutral), 60))
+
+    table.cell(dashboard, 0, 4, "Compression", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 4, isCompressed ? "Compressed" : isExpanded ? "Expanded" : "Neutral", text_color = color.white, bgcolor = color.new(isCompressed ? themeAccent : isExpanded ? regimeColor : themeNeutral, 65))
+
+    table.cell(dashboard, 0, 5, "Wave", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 5, waveState == 1 ? "Up" : waveState == -1 ? "Down" : "Flat", text_color = color.white, bgcolor = color.new(directionColor(waveState, themeBull, themeBear, themeNeutral), 60))
+
+    table.cell(dashboard, 0, 6, "HTF Bias", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 6, useHigherTimeframeBias ? (htfBiasState == 1 ? "Bull" : htfBiasState == -1 ? "Bear" : "Flat") : "Off", text_color = color.white, bgcolor = color.new(directionColor(htfBiasState, themeBull, themeBear, themeNeutral), 60))
+
+    table.cell(dashboard, 0, 7, "Structure", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 7, structureBull ? "Demand" : structureBear ? "Supply" : "Neutral", text_color = color.white, bgcolor = color.new(structureBull ? themeBull : structureBear ? themeBear : themeNeutral, 65))
+
+    table.cell(dashboard, 0, 8, "Position", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 8, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", text_color = color.white, bgcolor = color.new(strategy.position_size > 0 ? themeBull : strategy.position_size < 0 ? themeBear : themeNeutral, 60))
+
+    table.cell(dashboard, 0, 9, "Bars In", text_color = color.white, bgcolor = color.new(themeSurface, 0))
+    table.cell(dashboard, 1, 9, strategy.position_size == 0 ? "0" : str.tostring(barsInTrade), text_color = color.white, bgcolor = color.new(themeSurface, 0))
+
+//------------------------------------------------------------------------------
+// Alert conditions
+//------------------------------------------------------------------------------
+alertcondition(regimeShiftUp, "PCS Regime Up", "Parallax Covenant Strategy [JOAT] shifted into a confirmed bullish regime.")
+alertcondition(regimeShiftDown, "PCS Regime Down", "Parallax Covenant Strategy [JOAT] shifted into a confirmed bearish regime.")
+alertcondition(releaseBull, "PCS Bull Release", "Parallax Covenant Strategy [JOAT] detected a bullish compression release.")
+alertcondition(releaseBear, "PCS Bear Release", "Parallax Covenant Strategy [JOAT] detected a bearish compression release.")
+alertcondition(longEntrySignal, "PCS Long Setup", "Parallax Covenant Strategy [JOAT] confirmed a long entry stack.")
+alertcondition(shortEntrySignal, "PCS Short Setup", "Parallax Covenant Strategy [JOAT] confirmed a short entry stack.")
+
+//------------------------------------------------------------------------------
+// Strategy commentary plots for Data Window
+//------------------------------------------------------------------------------
+plot(pressureComposite, "Pressure Composite", color = color.new(pressureColor, 100), display = display.none)
+plot(pressureSignal, "Pressure Signal", color = color.new(themeNeutral, 100), display = display.none)
+plot(regimeScore, "Bias Score Hidden", color = color.new(themeNeutral, 100), display = display.none)
+plot(regimeCompressionRatio, "Compression Ratio Hidden", color = color.new(themeNeutral, 100), display = display.none)
+plot(mappedMid, "Mapped Mid Hidden", color = color.new(themeNeutral, 100), display = display.none)

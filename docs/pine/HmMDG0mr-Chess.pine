@@ -1,0 +1,807 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © @SimpleCryptoLife
+
+//@version=6
+indicator(title = "Chess", behind_chart = false, calc_bars_count = 1000, overlay = false)  //  Don't use linktoseries for non-overlay indicators.
+
+import SimpleCryptoLife/Public_Library_ChessCore/1 as Core  // The rules engine. Bump the version number here and in ChessAI whenever ChessCore is republished.
+import SimpleCryptoLife/Public_Library_ChessAI/1 as AI  // The ten-rule ladder and foresee. Bump on republish, and remember ChessAI itself imports ChessCore.
+import SimpleCryptoLife/Public_Library_ChessBook/1 as Book  // The opening book, split out of ChessAI so pure data can grow without republishing the brain. Bump on republish.
+import SimpleCryptoLife/Public_Library_ChessTalk/1 as Talk  // The trash-talk bank and picker. Bump on republish.
+
+
+//#region 🟢🟢🟢🟢🟢🟢 META 🟢🟢🟢🟢🟢🟢
+
+color watermarkColour = color.new(chart.fg_color, 70)
+
+//@function Yo dawg I heard you like strings and things (place this function definition after any enums that you'll want to use it with).
+s(_thing) => string _string = str.tostring(_thing)
+
+const int STATUS_WRAP_CHARS = 55  // Longest status line before we wrap. Roughly matches the board's width at default sizing.
+
+//@function Wraps text across multiple lines without expanding its table column.
+f_wrapStatus(string _text, int _maxLen) =>
+    if _maxLen < 1
+        runtime.error("_maxLen must be at least 1.")
+
+    string _remaining = _text
+    string _wrapped = ""
+
+    while str.length(_remaining) > _maxLen
+        string _searchWindow = str.substring(_remaining, 0, _maxLen + 1)
+        string _throughLastSpace = str.match(_searchWindow, "^.+ ")  // This magic-word regex is "greedy" which means it takes as much as it can before the final space, so the match runs through the LAST space in the window.
+        bool _foundSpace = str.length(_throughLastSpace) > 0
+
+        int _lineEnd = _foundSpace ? str.length(_throughLastSpace) - 1 : _maxLen
+        int _nextStart = _foundSpace ? _lineEnd + 1 : _lineEnd  // Skip the space we broke on. A hard break loses nothing.
+
+        _wrapped := _wrapped + str.substring(_remaining, 0, _lineEnd) + "\n"
+        _remaining := str.substring(_remaining, _nextStart)
+
+    _wrapped + _remaining
+
+//#endregion META
+
+
+//#region 🟢🟢🟢🟢🟢🟢 INPUTS 🟢🟢🟢🟢🟢🟢
+
+const string TT_MOVES = "Type moves as coordinate pairs like \"e2e4\", the from-square then the to-square, separated by spaces or new lines: \"e2e4 e7e5 g1f3\". Add both your moves AND the computer's replies here. Castle: type the King's move, e.g., e1g1. To promote a piece, add a 5th letter (e7e8q). Case doesn't matter and any junk between tokens is ignored. Delete your last entry to take a move back. Clear the field to start a new game."
+const string TT_PLAY_AS = "Choose your colour; the computer plays the other side and announces each of its moves in the status row for you to add to the Moves record."
+const string TT_TRASH_TALK = "What, you don't know what trash talk is? Quit while you're behind."
+const string TT_THINKING_DEPTH = "Deep looks a little further ahead but is slower. Quick is....quicker."
+const string TT_VARIETY = "Random allows the computer the possibility to choose different options among equal moves, every time the chart loads or a move is added, so replaying the same moves can give a different game. Deterministic uses only the move record."
+
+enum PlayAs
+    white = "White"  // You play White. The computer answers as Black. The default.
+    black = "Black"  // You play Black. The computer answers as White.
+
+// How far the foresee sees.
+enum ThinkingDepth
+    deep = "Deep"       // Reads two moves further. The default.
+    standard = "Quick"
+
+// Whether the computer's tied choices can vary between sessions.
+enum PickVariety
+    random = "Random"                // Re-roll each reload and each added move. The default for playing.
+    deterministic = "Deterministic"  // Pure record seed. Use for benchmarking.
+
+string in_movesText = input.text_area(defval="", title="Moves", tooltip=TT_MOVES)
+PlayAs in_playAs = input.enum(defval=PlayAs.white, title="Play as", tooltip=TT_PLAY_AS)
+ThinkingDepth in_thinkingDepth = input.enum(defval=ThinkingDepth.deep, title="Thinking", tooltip=TT_THINKING_DEPTH)
+PickVariety in_variety = input.enum(defval=PickVariety.random, title="Replies", tooltip=TT_VARIETY)
+bool in_trashTalk = input.bool(defval=true, title="Trash Talk", tooltip=TT_TRASH_TALK)
+bool deepThinking = in_thinkingDepth == ThinkingDepth.deep
+Core.Side computerSide = in_playAs == PlayAs.white ? Core.Side.black : Core.Side.white  // You play one side. The computer plays the other. Derived once here next to its input, and read everywhere else.
+
+const string G_DISPLAY = "Display"
+const string TT_BOARD_POSITION = "Where the board sits in the pane. Centre for wide chart panes. Right or Left if you're pushed for space and still want to show the Inputs window alongside the board (which is a good idea)."
+
+// Where the board table anchors in the pane.
+enum BoardPosition
+    centre = "Centre"
+    left = "Left"
+    right = "Right"
+const string TT_PIECE_TEXT_SIZE = "Text size for the pieces, in points."
+const string TT_CELL_WIDTH = "Width of each board square as a percentage of the pane width. Tune to your own window shape."
+const string TT_CELL_HEIGHT = "Height of each board square as a percentage of the pane height."
+BoardPosition in_boardPosition = input.enum(defval=BoardPosition.centre, title="Board", tooltip=TT_BOARD_POSITION, group=G_DISPLAY, inline="boardPiece")
+int in_pieceTextSize = input.int(defval=60, title="Piece Size", minval=8, maxval=96, tooltip=TT_PIECE_TEXT_SIZE, group=G_DISPLAY, inline="boardPiece")  // Shares the Board row.
+float in_cellWidth = input.float(defval=4.8, title="Square Width %", minval=1.0, maxval=12.0, step=0.1, tooltip=TT_CELL_WIDTH, group=G_DISPLAY, inline="squareSize")
+float in_cellHeight = input.float(defval=9.2, title="Height %", minval=1.0, maxval=12.0, step=0.1, tooltip=TT_CELL_HEIGHT, group=G_DISPLAY, inline="squareSize")
+
+//#endregion
+
+
+//#region 🟢🟢🟢🟢🟢🟢 GAME STATE 🟢🟢🟢🟢🟢🟢
+
+// The board data model lives in the ChessCore library. We import enums for pieces and so on from the library so we can use them freely here.
+//
+// ORIENTATION CONVENTION
+//   - The board matrix is 8x8, indexed (row, column).
+//   - row 0 is the TOP of the displayed board = rank 8 = Black's back rank.
+//   - row 7 is the BOTTOM = rank 1 = White's back rank. White sits at the bottom, as a human player expects.
+//   - column 0 is file "a" (left), column 7 is file "h" (right).
+//   So the mapping is: row = 8 - rank, rank = 8 - row, column = file (a=0 .. h=7).
+//   a1 is (row 7, column 0) and is a DARK square. h1 is (row 7, column 7) and is LIGHT (see f_squareIsLight).
+
+//@function Lucky for us Pine can use Unicode characters in strings, and Unicode has little chess pieces. Both sides share the SOLID glyph set (see BOARD DISPLAY for why).
+// Text colour tells the armies apart.
+f_pieceGlyph(Core.Piece _piece) =>
+    string _glyph = switch Core.pieceTypeOf(_piece)
+        Core.PieceType.pawn => "♟"
+        Core.PieceType.knight => "♞"
+        Core.PieceType.bishop => "♝"
+        Core.PieceType.rook => "♜"
+        Core.PieceType.queen => "♛"
+        Core.PieceType.king => "♚"
+        => " "  // Piece.empty.
+
+//@function The lower-case piece name for when we want to talk about pieces.
+f_pieceNameLower(Core.Piece _piece) =>
+    string _name = switch Core.pieceTypeOf(_piece)
+        Core.PieceType.pawn => "pawn"
+        Core.PieceType.knight => "knight"
+        Core.PieceType.bishop => "bishop"
+        Core.PieceType.rook => "rook"
+        Core.PieceType.queen => "queen"
+        Core.PieceType.king => "king"
+        => ""  // Piece.empty.
+
+//@function Converts a matrix row to a chessboard rank.
+f_rowToRank(int _row) =>
+    int _rank = 8 - _row
+
+//@function True when the square at the supplid row and column is a LIGHT square.
+// We know that the rightmost squaure for White is always a light square, so a1 is always dark.
+// A quick kind of cheat is that if you add the number of the column to the number of the row, even results are light and odd results are dark.
+f_squareIsLight(int _row, int _col) =>
+    bool _isLight = (_row + _col) % 2 == 0
+
+//#endregion GAME STATE
+
+
+//#region 🟢🟢🟢🟢🟢🟢 TRASH TALK DECISION 🟢🟢🟢🟢🟢🟢
+
+//@function Decides the trash-talk line for the move just applied. Game over always fires -> promoted -> won material -> wounded -> game start -> still in book.
+//@param    _talk The talk state (banks, rates, memory). Updated in place.
+//@param    _status The game status AFTER the move.
+//@param    _computerSide The side the computer plays.
+//@param    _moverIsComputer True when the move just applied was the computer's.
+//@param    _isCapture True when that move captured.
+//@param    _wonClean True when it captured cleanly (victim dearer than mover, or nothing recaptures).
+//@param    _victimPiece The captured piece, Piece.empty for none.
+//@param    _isPromotion True when the move promoted.
+//@param    _isGameStart True when this was the record's very first ply.
+//@param    _inBook True when the book knew this move.
+//@param    _match The applied move (the wounded test needs its landing square).
+//@param    _prefixSeed The seed hashed from the move record INCLUDING this move.
+//@returns  The talk line for this occasion, "" when silent.
+f_decideTalk(Talk.o_talk _talk, Core.GameStatus _status, Core.Side _computerSide, bool _moverIsComputer, bool _isCapture, bool _wonClean, Core.Piece _victimPiece, bool _isPromotion, bool _isGameStart, bool _inBook, Core.o_move _match, int _prefixSeed) =>
+    string _talkLine = ""
+    if Core.isGameOver(_status)
+        // Game over: the result decides the category (6 wins / 7 loses / 8 draw), no fire roll.
+        bool _computerWon = (_status == Core.GameStatus.whiteWinsCheckmate and _computerSide == Core.Side.white) or (_status == Core.GameStatus.blackWinsCheckmate and _computerSide == Core.Side.black)
+        bool _humanWon = (_status == Core.GameStatus.whiteWinsCheckmate and _computerSide == Core.Side.black) or (_status == Core.GameStatus.blackWinsCheckmate and _computerSide == Core.Side.white)
+        int _category = na
+        array<string> _bank = na
+        if _computerWon
+            _category := 6
+            _bank := _talk.a_winsLines
+        else if _humanWon
+            _category := 7
+            _bank := _talk.a_losesLines
+        else  // Any draw status.
+            _category := 8
+            _bank := _talk.a_drawLines
+        int _idx = Talk.pickIndex(_prefixSeed, _category + 100, _bank.size(), _talk.a_lastIndex.get(_category - 1))
+        if _idx >= 0
+            _talkLine := _bank.get(_idx)
+            _talk.a_lastIndex.set(_category - 1, _idx)
+        else  // An empty game-over bank should never happen, but degrade silently rather than error.
+            _talkLine := ""
+    else if _moverIsComputer
+        // The game continues: resolve the category by precedence, then fire-roll and pick.
+        // WOUNDED: the human's previous move captured, and this move did NOT recapture on that square.
+        bool _isWounded = _talk.prevHumanMoveWasCapture and not (_isCapture and _match.toRow == _talk.prevHumanCaptureToRow and _match.toCol == _talk.prevHumanCaptureToCol)
+        int _category = na
+        array<string> _bank = na
+        int _rate = 0
+        if _isPromotion
+            _category := 3
+            _bank := _talk.a_promotedLines
+            _rate := _talk.ratePromoted
+        else if _wonClean
+            _category := 1
+            _bank := _talk.a_wonLines  // Won material has its own piece-filtered pick below. _bank unused for it.
+            _rate := _talk.rateWon
+        else if _isWounded
+            _category := 2
+            _bank := _talk.a_woundedLines
+            _rate := _talk.rateWounded
+        else if _isGameStart
+            _category := 5
+            _bank := _talk.a_gameStartLines
+            _rate := _talk.rateGameStart
+        else if _inBook
+            _category := 4
+            _bank := _talk.a_inBookLines
+            _rate := _talk.rateInBook
+        if na(_category)  // No category fired: silent.
+            _talkLine := ""
+        else if not Talk.fireRoll(_prefixSeed, _category, _rate)  // Eligible, but the roll said no: silent.
+            _talkLine := ""
+        else if _category == 1
+            // WON MATERIAL: seeded pick among lines whose tag is "" or matches the captured piece.
+            // The no-repeat skip is done by hand because the eligible-list indirection hides it from pickIndex.
+            string _victimName = f_pieceNameLower(_victimPiece)
+            array<int> _a_eligible = array.new<int>()  // Bank indices eligible for this capture.
+            for [_li, _tag] in _talk.a_wonTags
+                if _tag == "" or _tag == _victimName
+                    _a_eligible.push(_li)
+            if _a_eligible.size() > 0
+                int _pos = Talk.mixSalt(_prefixSeed, 101) % _a_eligible.size()  // Position within the eligible list.
+                int _bankIdx = _a_eligible.get(_pos)
+                if _a_eligible.size() > 1 and _bankIdx == _talk.a_lastIndex.get(0)  // No-repeat skip, mapped through the eligible list.
+                    _pos := (_pos + 1) % _a_eligible.size()
+                    _bankIdx := _a_eligible.get(_pos)
+                _talkLine := Talk.fillPieceToken(_talk.a_wonLines.get(_bankIdx), _victimName)
+                _talk.a_lastIndex.set(0, _bankIdx)
+            else  // No eligible line (every won-material line filtered out): stay silent.
+                _talkLine := ""
+        else
+            // Every other in-game category: a plain seeded pick with the no-repeat skip.
+            int _idx = Talk.pickIndex(_prefixSeed, _category + 100, _bank.size(), _talk.a_lastIndex.get(_category - 1))
+            if _idx >= 0
+                _talkLine := _bank.get(_idx)
+                _talk.a_lastIndex.set(_category - 1, _idx)
+            else  // Empty bank: degrade to silence rather than error.
+                _talkLine := ""
+    // Maintain the wounded state LAST, for the NEXT move's decision: did the HUMAN just capture, and where?
+    _talk.prevHumanMoveWasCapture := (not _moverIsComputer) and _isCapture
+    if _talk.prevHumanMoveWasCapture
+        _talk.prevHumanCaptureToRow := _match.toRow
+        _talk.prevHumanCaptureToCol := _match.toCol
+    else
+        _talk.prevHumanCaptureToRow := -1
+        _talk.prevHumanCaptureToCol := -1
+    _talkLine
+
+//#endregion TRASH TALK DECISION
+
+
+//#region 🟢🟢🟢🟢🟢🟢 PHASE MACHINE 🟢🟢🟢🟢🟢🟢
+
+// Y'all know I love FSMs. Here we use a state machine to build the game anew from scratch every single time you enter a move.
+// It runs on HISTORICAL BARS, one small unit of work per bar.
+// Phases declare their own completion so they can easily be extended, as happened many time during development.
+
+// These phases happen in the order they're presented here:
+enum EnginePhase
+    parsing = "Parsing"      // On bar zero: book, tokens, canonical record, seed, headroom check.
+    replaying = "Replaying"  // Validate that each mvoe is legal and watch for threefold draw.
+    aiPrepare = "Preparing"  // All hapens on one bar: prepare a list of EVERY legal move available to the computer from the current position.
+    aiForesee = "Foreseeing" // Use up to 3 bars per candidate to check each move and record how good or bad it is (by stamping its foreseeScore value).
+    aiLadder = "Laddering"   // One ladder rule per bar. The first rule that fires selects its own type of move from the list we just prepared, and uses the foreseeScore value to rule out doomed moves and, where it matters, pick the best option.
+    done = "Done"            // FSM is idle. The live bar draws. An edit to the move field starts everything again from bar zero.
+
+const int LADDER_RULE_COUNT = 10  // How many rules in the ladder.
+const int HEADROOM_MARGIN = 2    // Spare bars just in case.
+const int FORESEE_BARS_ALLOWANCE = 192  // Foresee headroom: three bars per candidate, 64 moves covers practical positions.
+
+// We use persistent `var` variables for all state. Everything is historical so no `varip` needed.
+
+//@variable The one live board. The replay walks it forward move by move and every AI phase reads it. There is never a second board here -- the libraries make their own scratch copies when they need to try things out.
+var Core.o_position workingPosition = Core.newStartingPosition()
+
+//@variable Which phase the next bar runs. The whole machine is this one enum stepping through its values.
+var EnginePhase enginePhase = EnginePhase.parsing
+
+//@variable We convert all the moves typed into the Moves text box into numbers to make them easier to work with. Each move string is converted to a format of four integers (fromRow, fromCol, toRow, toCol). For example, "e2e4" becomes 6, 4, 4, 4 (rank 2 is row 6 -- see the ORIENTATION CONVENTION above). We use an integer array, which means that code that reads this needs to know to read it in exact 4-int chunks, and we accept this unintuitiveness because Pine arrays can't hold tuples, and the alternatives are worse: four parallel arrays to keep in sync, or heavyweight objects for what is still just text. Later, we use objects to represent moves. We don't do that here because an o_move object describes a LEGAL move -- its flags and annotations only get filled in when the generator checks a token against a real position.
+var array<int> a_moveSquares = array.new<int>()
+
+//@variable A parallel array to a_moveSquares. Holds promotion letters ("q" etc.), one per move in the same order. If there is no promotion (the most common case), we insert an empty string, so the two arrays always stay the same length. Normally I don't like parallel arrays but here we don't want to spoil the 4-ints-at-a-time breakdown of the a_moveSquares array. And arrays are still faster than objects.
+var array<string> a_movePromos = array.new<string>()
+
+//@variable The canonical move record, built by tidying up whatever the user typed in the Moves input field. It must be a uniform format because we use it to look up the next move from the opening book, and it is the source of the seed, so the same game always means the same thing.
+var string canonicalRec = ""
+
+//@variable How many moves the record parsed to. The replay's finish line, and the biggest term in the headroom check.
+var int totalParsedMoves = 0
+
+//@variable How many moves are validated (and applied) so far. We use this number to find the next move in a_moveSquares when replaying the historical moves to build the current position.
+var int replayIndex = 0
+
+//@variable The game's fingerprint as a number, hashed from canonicalRec. Same record, same seed, forever -- this is what makes Deterministic mode deterministic.
+var int seed = 0
+
+//@variable The seed the picks actually use. It starts as `seed`, and when Replies is Random we mix in the load time, so tied choices can land differently on every reload. Every tie-break in the script -- the ladder rules and the book pick alike -- draws from this one variable, so mix or don't mix is the whole difference between the two Replies modes.
+var int ladderSeed = 0
+
+//@variable Which ladder rule the next aiLadder bar runs. We increment this to move the ladder along.
+var int ladderRule = 1
+
+//@variable Which candidate the next aiForesee bar works on (0..a_aiMoves.size()-1.
+var int foreseeIndex = 0
+
+//@variable The half-done candidate between its prepare bar and its finish bars (na = none pending). This is how a job that needs up to three bars survives a machine that only does one unit of work per bar.
+var AI.o_foresee foreseeCarry = na
+
+//@variable True in an endgame. Computed once by aiPrepare so the foresee bars know to stamp each candidate's safe-attack bonus for rule 8 -- games that never reach an endgame never pay for that scan.
+var bool endgameActive = false
+
+//@variable The anti-shuffle gate. True when we hold a material lead, ANY phase: the foresee bars stamp repeatsPosition on candidates that would recreate a seen position and the quiet rules refuse them. When we're losing, nothing is stamped -- repeating a position in hopes of a draw.
+var bool banRepeats = false
+
+//@variable The AI's chosen move as a string (e.g. "g8f6"), "" when none. What the status row announces for the user to type into the record.
+var string aiSuggestionToken = ""
+
+//@variable True when rule 10's coin resigned: every legal move walked into a foreseen mate. The status row announces it. No move is suggested.
+var bool aiResigned = false
+
+//@variable What the computer says when it loses.
+var string resignLine = ""
+
+//@variable "" when the record replayed cleanly. Otherwise the problem to show, frozen at the last legal position.
+var string replayProblemText = ""
+
+//@variable "" when the chart has enough bars. Otherwise the too-short-chart notice. The phases all stand down and the board area shows the notice instead of a board.
+var string historyProblemText = ""
+
+//@variable The game's verdict, updated after every validated move: in progress, a win, or one of the draws. The phases, the talk and the status row all read it.
+var Core.GameStatus gameStatus = Core.GameStatus.inProgress
+
+//@variable Stores all the pieces that were taken. We need this so we can display taken pieces.
+var array<Core.Piece> a_capturedPieces = array.new<Core.Piece>()
+
+//@variable True when either side just captured something. We show the piece in square brackets.
+var bool lastMoveWasCapture = false
+
+//@variable We keep one key per position the game has visited: the starting position, then one more per validated move. A key is a short string holding everything repetition law cares about -- far cheaper than keeping whole boards. Two customers: the threefold check reads the recent tail, and the repetition guard tests each candidate move against the whole history to stop us shuffling a won game into a draw.
+var array<string> a_positionKeys = array.new<string>()
+
+//@variable The annotated, filtered, classified legal list of moves, built once by aiPrepare and read by every foresee and ladder bar.
+var array<Core.o_move> a_aiMoves = array.new<Core.o_move>()
+
+// The last two RECORD moves, for the square highlights. -1 means none. Source coordinates.
+var int lastFromRow = -1
+var int lastFromCol = -1
+var int lastToRow = -1
+var int lastToCol = -1
+var int prevFromRow = -1
+var int prevFromCol = -1
+var int prevToRow = -1
+var int prevToCol = -1
+
+// The computer side's own last two moves, for the classify stage's undo/oscillation flag. Distinct
+// from the highlight pairs, which track the record's last two moves regardless of side.
+var Core.o_move aiLastMove = na
+var Core.o_move aiPrevMove = na
+
+// The game entropy: `timenow` in milliseconds captured ONCE at bar zero each time the script recalculates.
+// Mixed into ladderSeed when Replies is Random. Captured but unused on Deterministic.
+var int gameEntropy = 0
+
+// Trash talk state, decided during the recalculation and committed as var state -- the live bar only reads it.
+var string talkLine = ""  // "" = silent this occasion.
+var string talkPrefixRecord = ""  // Canonical record prefix, maintained move by move during replay.
+var Talk.o_talk talk = na  // Banks, rates, no-repeat memory, wounded state -- built once at bar zero.
+
+// The opening move book, built once at bar zero alongside parsing.
+var map<string, string> map_book = na
+
+//@function We try to help the user by saying WHY an illegal move can't be played -- wrong-side castling token, an empty or wrong-side from-square, an ignored check.
+// Returns "" when none apply.
+//@param    _position The position the move failed in.
+//@param    _fromRow The failed move's from-square row.
+//@param    _fromCol The failed move's from-square column.
+//@param    _toRow The failed move's to-square row.
+//@param    _toCol The failed move's to-square column.
+//@returns  The detail sentence, or "" for the generic case.
+f_illegalMoveDetail(Core.o_position _position, int _fromRow, int _fromCol, int _toRow, int _toCol) =>
+    Core.Side _mover = _position.sideToMove
+    string _moverName = _mover == Core.Side.white ? "White" : "Black"
+    string _otherName = _mover == Core.Side.white ? "Black" : "White"
+    string _fromName = Core.squareName(_fromRow, _fromCol)
+    Core.Piece _fromPiece = _position.mat_board.get(_fromRow, _fromCol)
+    string _detail = ""
+    // The wrong-side castling token is tested first, or the wrong-piece rule below would catch it with a blunter message.
+    // Coordinates: row 0 = rank 8, row 7 = rank 1; column 4 = e, column 6 = g, column 2 = c.
+    bool _whiteCastleToken = _fromRow == 7 and _fromCol == 4 and _toRow == 7 and (_toCol == 6 or _toCol == 2)
+    bool _blackCastleToken = _fromRow == 0 and _fromCol == 4 and _toRow == 0 and (_toCol == 6 or _toCol == 2)
+    if _mover == Core.Side.black and _whiteCastleToken
+        _detail := "Castling is typed as the king's move: e8g8 for kingside, e8c8 for queenside."
+    else if _mover == Core.Side.white and _blackCastleToken
+        _detail := "Castling is typed as the king's move: e1g1 for kingside, e1c1 for queenside."
+    else if _fromPiece == Core.Piece.empty
+        _detail := "There's nothing on " + _fromName + "."
+    else if not Core.pieceBelongsTo(_fromPiece, _mover)
+        _detail := "It's " + _moverName + "'s move, but the piece on " + _fromName + " is " + _otherName + "'s."
+    else if Core.isInCheck(_position, _mover)
+        _detail := _moverName + " is in check: this move doesn't get out of it."
+    _detail
+
+//@function Records the piece _move captures from _position, if any, onto _a_captured. Must be called BEFORE the move is applied, while the victim is still on the board.
+// En passant's victim is the enemy pawn, which is not on the destination square.
+f_recordCapture(Core.o_position _position, Core.o_move _move, array<Core.Piece> _a_captured) =>
+    Core.Piece _victim = _move.isEnPassant ? (_position.sideToMove == Core.Side.white ? Core.Piece.blackPawn : Core.Piece.whitePawn) : _position.mat_board.get(_move.toRow, _move.toCol)
+    if _victim != Core.Piece.empty
+        _a_captured.push(_victim)
+
+// THE DISPATCHER: exactly one unit of work per bar, chosen by the live phase. An if/else-if chain so a single bar can never run two phases.
+// The machine only works on historical bars. The live bar is read-only.
+
+// PHASE 1: parsing – bar zero. Book, tokens, canonical record, seed, headroom, talk banks.
+if barstate.isfirst
+    map_book := Book.buildOpeningBook()
+    talk := Talk.buildTalkState()  // All the trash-talk machinery -- banks, rates, memory -- in one object.
+    [_a_parsedSquares, _a_parsedPromos] = Core.parseMoves(in_movesText)  // One pass returns both.
+    a_moveSquares := _a_parsedSquares
+    a_movePromos := _a_parsedPromos
+    canonicalRec := Core.canonicalRecord(a_moveSquares, a_movePromos)
+    seed := AI.seedFromRecord(canonicalRec)
+    gameEntropy := timenow  // Captured once per recalculation: the moment this game (or this edit of it) began.
+    ladderSeed := in_variety == PickVariety.random ? AI.mixSeedWithTime(seed, gameEntropy) : seed  // One line converts every tie-break – the ladder rules and the book pick: Random re-rolls per recalculation. Deterministic replays identically forever, opening included.
+    a_positionKeys.push(Core.positionKey(workingPosition))  // The starting position counts as occurrence one of itself.
+    totalParsedMoves := a_moveSquares.size() / 4
+    // Headroom: the parse bar, one bar per half-move, a bookkeeping bar, the aiPrepare bar, the foresee allowance, one bar per ladder rule, and the margin.
+    // A short chart gets a SOFT stop: the notice renders where the board would be, instead of a red runtime error.
+    int _barsNeeded = 1 + totalParsedMoves + 1 + 1 + FORESEE_BARS_ALLOWANCE + LADDER_RULE_COUNT + HEADROOM_MARGIN
+    if last_bar_index < _barsNeeded
+        historyProblemText := "This game needs at least " + s(_barsNeeded) + " chart bars to think on, but this chart only has " + s(last_bar_index + 1) + ". Open a chart with more history – a lower timeframe gives you more bars. Any symbol works, market open or closed."
+        enginePhase := EnginePhase.done  // Nothing can be computed without the bars: every phase stands down and the live bar draws the notice.
+    else
+        enginePhase := EnginePhase.replaying
+
+// PHASE 2: replaying – one half-move per bar. Game-end and illegal tokens stop the replay with a message and freeze the position where it stood.
+else if not barstate.islast and enginePhase == EnginePhase.replaying
+    if replayIndex >= totalParsedMoves
+        // The record is fully validated. Does the AI choose a move for the current position?
+        bool _aiToMove = not Core.isGameOver(gameStatus) and workingPosition.sideToMove == computerSide
+        enginePhase := _aiToMove ? EnginePhase.aiPrepare : EnginePhase.done
+    else if Core.isGameOver(gameStatus)
+        string _tok = Core.canonicalTokenAt(a_moveSquares, a_movePromos, replayIndex)
+        replayProblemText := "Move " + s(replayIndex + 1) + " (" + _tok + ") came after the game ended. Clear the field for a new game."
+        enginePhase := EnginePhase.done
+    else
+        int _base = replayIndex * 4
+        int _fromRow = a_moveSquares.get(_base)
+        int _fromCol = a_moveSquares.get(_base + 1)
+        int _toRow = a_moveSquares.get(_base + 2)
+        int _toCol = a_moveSquares.get(_base + 3)
+        string _promo = replayIndex < a_movePromos.size() ? a_movePromos.get(replayIndex) : ""
+        array<Core.o_move> _a_legal = Core.generateLegalMoves(workingPosition)
+        Core.o_move _match = Core.matchLegalMove(_a_legal, _fromRow, _fromCol, _toRow, _toCol, _promo)
+        if na(_match)  // No legal move matches this token: report it and stop at the last legal position.
+            string _tok = Core.canonicalTokenAt(a_moveSquares, a_movePromos, replayIndex)
+            // Kindness: say WHY when we can (wrong-side castling token, an empty or wrong-side from-square, an ignored check).
+            string _detail = f_illegalMoveDetail(workingPosition, _fromRow, _fromCol, _toRow, _toCol)
+            replayProblemText := "Move " + s(replayIndex + 1) + " (" + _tok + ") isn't legal here. " + (_detail == "" ? "" : _detail + " ") + "Delete " + _tok + " and try again."
+            enginePhase := EnginePhase.done
+        else
+            // Track the COMPUTER's own last two moves for the classify stage's undo/oscillation flag, BEFORE applyMove flips the side.
+            if workingPosition.sideToMove == computerSide
+                aiPrevMove := aiLastMove
+                aiLastMove := _match
+            // Trash-talk facts, captured BEFORE applyMove while the board still holds the mover and victim.
+            bool _moverIsComputer = workingPosition.sideToMove == computerSide
+            Core.Side _humanSide = workingPosition.sideToMove == Core.Side.white ? Core.Side.black : Core.Side.white  // The side NOT moving is the human here.
+            Core.Piece _victimPiece = _match.isEnPassant ? (workingPosition.sideToMove == Core.Side.white ? Core.Piece.blackPawn : Core.Piece.whitePawn) : workingPosition.mat_board.get(_match.toRow, _match.toCol)
+            float _victimValue = Core.pieceValue(_victimPiece)  // 0 for an empty destination.
+            float _moverValue = Core.pieceValue(workingPosition.mat_board.get(_match.fromRow, _match.fromCol))
+            bool _isCapture = _victimPiece != Core.Piece.empty or _match.isEnPassant
+            bool _isPromotion = _match.promotion != Core.Piece.empty
+            string _tok = Core.canonicalTokenAt(a_moveSquares, a_movePromos, replayIndex)
+            string _prefixBeforeMove = talkPrefixRecord  // The book key is the record BEFORE this move.
+
+            lastMoveWasCapture := _isCapture  // Commits per move, so the tray's "just taken" brackets vanish as soon as a quiet move follows.
+            f_recordCapture(workingPosition, _match, a_capturedPieces)  // BEFORE applyMove, while the victim is still on the board.
+            Core.applyMove(workingPosition, _match)
+            gameStatus := Core.gameStatusOf(workingPosition)
+
+            // Threefold repetition: detected here rather than in gameStatusOf because only the replay holds the position-key history.
+            string _positionKey = Core.positionKey(workingPosition)
+            a_positionKeys.push(_positionKey)
+            if not Core.isGameOver(gameStatus) and Core.isThreefoldRepetition(a_positionKeys, _positionKey, workingPosition.halfmoveClock)
+                gameStatus := Core.GameStatus.drawThreefold
+
+            // Grow the canonical prefix by this move's token, so the seed below hashes the record-so-far.
+            talkPrefixRecord := talkPrefixRecord == "" ? _tok : talkPrefixRecord + " " + _tok
+
+            // Decide the talk line: compute the two facts that need GAME state (the board and the book) and hand everything to f_decideTalk.
+            bool _wonClean = _isCapture and (_victimValue > _moverValue or Core.countAttackers(workingPosition.mat_board, _match.toRow, _match.toCol, _humanSide) == 0)
+            bool _inBook = false
+            if map_book.contains(_prefixBeforeMove)
+                array<string> _a_bookTokens = str.split(map_book.get(_prefixBeforeMove), "|")
+                for [_bi, _bookTok] in _a_bookTokens
+                    if _bookTok == _tok
+                        _inBook := true
+                        break
+            int _prefixSeed = AI.seedFromRecord(talkPrefixRecord)
+            talkLine := f_decideTalk(talk, gameStatus, computerSide, _moverIsComputer, _isCapture, _wonClean, _victimPiece, _isPromotion, replayIndex == 0, _inBook, _match, _prefixSeed)
+
+            // Shuffle the highlight coordinates: newest becomes "last", the old "last" becomes "previous".
+            prevFromRow := lastFromRow
+            prevFromCol := lastFromCol
+            prevToRow := lastToRow
+            prevToCol := lastToCol
+            lastFromRow := _match.fromRow
+            lastFromCol := _match.fromCol
+            lastToRow := _match.toRow
+            lastToCol := _match.toCol
+            replayIndex += 1
+
+// PHASE 3: aiPrepare – one bar that builds what every ladder bar reads: generate, annotate, filter and classify the legal list into var state.
+else if not barstate.islast and enginePhase == EnginePhase.aiPrepare
+    array<Core.o_move> _a_legal = Core.generateLegalMoves(workingPosition)
+    AI.annotateMoves(workingPosition, _a_legal)
+    AI.filterPromotions(workingPosition, _a_legal)
+    AI.classifyMoves(workingPosition, _a_legal, aiLastMove, aiPrevMove)  // Sets each move's isShield/isUndo in place.
+    a_aiMoves := _a_legal
+    endgameActive := AI.isEndgame(workingPosition)  // Gates the foresee bars' rule-8 bonus stamping.
+    banRepeats := AI.materialLead(workingPosition, workingPosition.sideToMove) > 0  // Gates the repetition stamping. Deliberately NOT endgame-gated (see the var's comment).
+    foreseeIndex := 0
+    foreseeCarry := na
+    enginePhase := EnginePhase.aiForesee
+
+// PHASE 4: aiForesee – up to THREE bars per candidate: a PREPARE bar, a CAPTURES bar and a CHECK-AND-QUIET bar.
+// Every stage declares its own completion: a candidate that resolves on its prepare bar (mate/stalemate) skips both finish bars.
+else if not barstate.islast and enginePhase == EnginePhase.aiForesee
+    if foreseeIndex < a_aiMoves.size()
+        if na(foreseeCarry)  // No half-done candidate: this bar is a PREPARE bar.
+            if endgameActive  // Rule 8's safe-attack bonus, stamped onto the move. Non-endgame games never pay for the scan.
+                AI.stampEndgameAttackBonus(workingPosition, a_aiMoves.get(foreseeIndex))
+            if banRepeats  // The anti-shuffle stamp: the consumer owns the key history, so the stamp lives here, not in the library.
+                Core.o_move _candidate = a_aiMoves.get(foreseeIndex)
+                Core.o_position _afterCandidate = Core.copyPosition(workingPosition)
+                Core.applyMove(_afterCandidate, _candidate)
+                _candidate.repeatsPosition := a_positionKeys.includes(Core.positionKey(_afterCandidate))
+            AI.o_foresee _prepared = AI.foreseePrepare(workingPosition, a_aiMoves.get(foreseeIndex), deepThinking)
+            if _prepared.resolved  // Stamp already written (mate/stalemate): no finish bars needed.
+                foreseeIndex += 1
+            else
+                foreseeCarry := _prepared
+        else if not foreseeCarry.capturesDone  // First finish bar: the capture lines.
+            if AI.foreseeFinishCaptures(foreseeCarry, a_aiMoves.get(foreseeIndex), deepThinking)  // True = stamp written, nothing left for a second finish bar.
+                foreseeCarry := na
+                foreseeIndex += 1
+        else  // Second finish bar: the check line and, in Deep, the quiet-threat line. Writes the stamp.
+            AI.foreseeFinishRest(foreseeCarry, a_aiMoves.get(foreseeIndex), deepThinking)
+            foreseeCarry := na
+            foreseeIndex += 1
+    if foreseeIndex >= a_aiMoves.size() and na(foreseeCarry)
+        ladderRule := 1
+        enginePhase := EnginePhase.aiLadder
+
+// PHASE 5: aiLadder – one rule per bar over the held list. Rule 10 always returns a move for a live position -- or a RESIGNATION when every legal move walks into a foreseen mate and the coin says quit.
+else if not barstate.islast and enginePhase == EnginePhase.aiLadder
+    // An if/else-if chain rather than a switch: the branches assign different-typed locals, which Pine's switch would reject.
+    Core.o_move _pick = na
+    if ladderRule == 1
+        _pick := AI.ruleMateInOne(workingPosition, a_aiMoves)
+    else if ladderRule == 2
+        [_a_bookMoves, _bookBad] = AI.ruleOpeningBook(a_aiMoves, map_book, canonicalRec)  // No position param: the legal list already encodes legality.
+        if _a_bookMoves.size() > 0
+            // The book pick takes ladderSeed like every other rule, so it respects the Replies input.
+            _pick := _a_bookMoves.get(ladderSeed % _a_bookMoves.size())
+    else if ladderRule == 3
+        _pick := AI.ruleAvoidMate(a_aiMoves, ladderSeed)  // Crisis rule: a foreseen mate looms and nothing keeps material -- play the least-bad stamp.
+    else if ladderRule == 4
+        _pick := AI.ruleDefence(workingPosition, a_aiMoves, ladderSeed)
+    else if ladderRule == 5
+        _pick := AI.ruleWinMaterial(workingPosition, a_aiMoves, ladderSeed)
+    else if ladderRule == 6
+        _pick := AI.ruleSafeCheck(workingPosition, a_aiMoves, ladderSeed)
+    else if ladderRule == 7
+        _pick := AI.ruleExchangeWhenAhead(workingPosition, a_aiMoves, ladderSeed)
+    else if ladderRule == 8
+        _pick := AI.ruleEndgame(workingPosition, a_aiMoves, ladderSeed)  // Convert a won ending or hold a lost one. na when it is not an endgame.
+    else if ladderRule == 9
+        [_pick9, _detail9] = AI.ruleDevelop(workingPosition, a_aiMoves, ladderSeed)  // Returns [move, tier name]. Only the move is used here.
+        _pick := _pick9
+    else if ladderRule == 10
+        [_pick10, _resigned10] = AI.ruleFallback(workingPosition, a_aiMoves, ladderSeed)  // Returns [move, resigned]. A resignation returns na for the move.
+        _pick := _pick10
+        aiResigned := _resigned10
+        if _resigned10 and in_trashTalk  // Commit the resignation's salt line here on the ladder bar, like every displayed string.
+            int _loseIdx = Talk.pickIndex(seed, 7 + 100, talk.a_losesLines.size(), talk.a_lastIndex.get(6))
+            resignLine := _loseIdx >= 0 ? talk.a_losesLines.get(_loseIdx) : ""
+    if aiResigned  // Rule 10 resigned: no suggestion. The status row announces it.
+        aiSuggestionToken := ""
+        enginePhase := EnginePhase.done
+    else if not na(_pick)  // This rule fired: record the suggestion and finish.
+        aiSuggestionToken := Core.moveToToken(_pick)
+        enginePhase := EnginePhase.done
+    else if ladderRule >= LADDER_RULE_COUNT  // Safety net: should never happen for a live position, but never hang the phase.
+        aiSuggestionToken := ""
+        enginePhase := EnginePhase.done
+    else
+        ladderRule += 1  // Try the next rule on the next bar.
+
+//#endregion PHASE MACHINE
+
+
+//#region 🟢🟢🟢🟢🟢🟢 STATUS TEXT 🟢🟢🟢🟢🟢🟢
+
+//@function The status line for the current state, in plain English. Priority, highest first: a broken record; a game ending; the computer's announcement; whose turn it is.
+// The talk line weaves in after game-over results and before the "Your move." prompt. In check the joke is dropped ("Check!" always beats it).
+//@param    _talkLine The committed trash-talk line to weave in, or "" for none.
+//@param    _resigned True when the engine resigned: announce it instead of a move.
+//@param    _resignLine The committed computer-loses line to append to the resignation, or "".
+//@returns  A tuple [_text, _needsMove]: the status string, and true only for the add-my-move prompt (the display paints the row orange on that flag, so the highlight can never disagree with the wording).
+f_statusText(EnginePhase _phase, Core.GameStatus _status, Core.Side _turn, bool _inCheck, string _problem, string _suggestion, int _parsedCount, Core.Side _computerSide, string _talkLine, bool _resigned, string _resignLine) =>
+    string _turnName = _turn == Core.Side.white ? "White" : "Black"
+    string _text = na
+    bool _needsMove = false
+    if _problem != ""  // A broken record beats everything else: say what is wrong with it.
+        _text := _problem
+    else if _phase != EnginePhase.done  // Should never show: the machine finishes before the live bar draws.
+        _text := "Setting up the board..."
+    else if _status == Core.GameStatus.whiteWinsCheckmate
+        _text := "White wins by checkmate" + (_talkLine != "" ? " – " + _talkLine : "")
+    else if _status == Core.GameStatus.blackWinsCheckmate
+        _text := "Black wins by checkmate" + (_talkLine != "" ? " – " + _talkLine : "")
+    else if _status == Core.GameStatus.drawStalemate
+        _text := "Draw by stalemate" + (_talkLine != "" ? " – " + _talkLine : "")
+    else if _status == Core.GameStatus.drawFiftyMove
+        _text := "Draw by the 50-move rule" + (_talkLine != "" ? " – " + _talkLine : "")
+    else if _status == Core.GameStatus.drawThreefold
+        _text := "Draw by threefold repetition" + (_talkLine != "" ? " – " + _talkLine : "")
+    else if _status == Core.GameStatus.drawInsufficient
+        _text := "Draw by insufficient material" + (_talkLine != "" ? " – " + _talkLine : "")
+    else if _turn == _computerSide and _resigned  // Every move walks into a mate it can see, and the coin said quit.
+        _text := "I resign. You win." + (_resignLine != "" ? " " + _resignLine : "")
+    else if _turn == _computerSide and _suggestion != ""
+        _text := "Add my move " + _suggestion + " to the Moves input field"  // The computer to move, with its choice made.
+        _needsMove := true
+    else if _parsedCount == 0 and _turn != _computerSide
+        _text := _turnName + " to move – type moves like e2e4 in the settings"
+    else  // The human to move: reaction first (a check note beats any joke), the prompt lands last.
+        _text := (_inCheck ? "Check! " : (_talkLine != "" ? _talkLine + " " : "")) + "Your move."
+    [_text, _needsMove]
+
+//#endregion STATUS TEXT
+
+
+//#region 🟦🟦🟦🟦🟦🟦  BOARD DISPLAY  🟦🟦🟦🟦🟦🟦
+
+// One table, 9 columns x 12 rows. The row map: row 0 = status, row 1 = a captured row, rows 2-9 = the board (board row r -> table row r + 2), row 10 = file labels, row 11 = the other captured row.
+// The cell width and height percentages are what make the board big -- text size alone wouldn't do it.
+//
+// AUTO-FLIP: when you play Black the board flips so your army sits at the bottom. Display-only: the loop indices become DISPLAY coordinates reading the real board through flipped SOURCE coordinates.
+//
+// GLYPH CHOICE: TradingView renders the outline "white" glyphs (♙♘♗♖♕♔) thin next to the solid ones (♟♞♝♜♛♚), so both armies draw the SOLID set and text colour tells them apart.
+
+// Square colours are blends of the theme's foreground colour. The catch: "more foreground" paints DARKER on a light chart but LIGHTER on a dark one, so we test the background's brightness and hand the lighter-looking blend to the light squares on both themes.
+bool chartIsDark = (color.r(chart.bg_color) + color.g(chart.bg_color) + color.b(chart.bg_color)) / 3 < 128
+color c_lightSquare = color.new(chart.fg_color, chartIsDark ? 55 : 82)
+color c_darkSquare = color.new(chart.fg_color, chartIsDark ? 82 : 55)
+color c_labelBackground = color.new(chart.fg_color, 92)
+color c_gridLineColour = color.new(chart.fg_color, 60)
+// Piece colours: near-white and near-black rather than pure, so neither vanishes into a same-coloured square.
+color c_whitePiece = color.white
+color c_blackPiece = #101010
+// Highlight tints, strongest to faintest: the newest move's landing square, its departure square, then the previous move's pair.
+// Light charts use a darker amber base with tighter steps -- pale orange fades towards white there and a white piece on it was unreadable.
+color c_hlBase = chartIsDark ? color.orange : #B45309
+color c_hlNewTo = color.new(c_hlBase, chartIsDark ? 45 : 0)
+color c_hlNewFrom = color.new(c_hlBase, chartIsDark ? 65 : 25)
+color c_hlOldTo = color.new(c_hlBase, chartIsDark ? 78 : 45)
+color c_hlOldFrom = color.new(c_hlBase, chartIsDark ? 87 : 60)
+// Rank/file labels scale with the pieces (a third of their size), floored so tiny settings stay readable.
+int labelTextSize = math.max(10, math.round(in_pieceTextSize / 3.0))
+
+// The board's anchor. An input change triggers a recalculation and re-creates the table, so no set_position call is needed.
+string boardAnchor = switch in_boardPosition
+    BoardPosition.centre => position.middle_center
+    BoardPosition.left => position.middle_left
+    BoardPosition.right => position.middle_right
+    => position.middle_center  // Catch-all for safety. The enum is exhaustive so it never fires.
+var table t_board = table.new(position=boardAnchor, columns=9, rows=12, border_width=1, border_color=c_gridLineColour, frame_width=2, frame_color=c_gridLineColour)
+var bool tableRowsMerged = false  // Guards the one-time merge of the three full-width rows: status (0) and the two captured rows (1 and 11).
+
+if barstate.islast
+    bool flipBoard = in_playAs == PlayAs.black
+
+    // The board draws the real, typed position -- nothing else. Locals only: the live bar never changes machine state.
+    matrix<Core.Piece> mat_display = workingPosition.mat_board
+
+    // Status row, merged across the top. The line itself is built by the STATUS TEXT region. Here we just write it.
+    Core.Side currentTurn = workingPosition.sideToMove
+    bool sideToMoveInCheck = Core.isInCheck(workingPosition, workingPosition.sideToMove)
+    string _problemToShow = historyProblemText != "" ? historyProblemText : replayProblemText  // The short-chart notice outranks even a broken record: without the bars nothing was ever validated.
+    [statusRaw, statusNeedsMove] = f_statusText(enginePhase, gameStatus, currentTurn, sideToMoveInCheck, _problemToShow, aiSuggestionToken, totalParsedMoves, computerSide, in_trashTalk ? talkLine : "", aiResigned, resignLine)
+    string statusText = f_wrapStatus(statusRaw, STATUS_WRAP_CHARS)
+    // The add-my-move prompt paints orange so "the computer has answered" is unmissable. The short-chart notice paints red -- the one status that means "nothing works yet".
+    color statusBackground = historyProblemText != "" ? color.red : statusNeedsMove ? c_hlNewFrom : c_labelBackground
+    table.cell(table_id=t_board, column=0, row=0, text=statusText, text_color=chart.fg_color, text_size=size.large, bgcolor=statusBackground)
+    for _fillCol = 1 to 8  // The remaining status-row slots must exist before we can merge across them.
+        table.cell(table_id=t_board, column=_fillCol, row=0, text="")
+
+    // Captured pieces, split by the victim's colour. The newest victim gets [brackets] only while the latest validated move captured. One quiet move later the brackets vanish.
+    string _whiteCaptures = ""
+    string _blackCaptures = ""
+    bool _markNewest = lastMoveWasCapture
+    int _newestIndex = a_capturedPieces.size() - 1
+    for [_i, _victim] in a_capturedPieces
+        string _glyph = f_pieceGlyph(_victim)
+        if _markNewest and _i == _newestIndex
+            _glyph := "[" + _glyph + "]"
+        if Core.pieceSide(_victim) == Core.Side.white
+            _whiteCaptures := _whiteCaptures + (_whiteCaptures == "" ? "" : " ") + _glyph
+        else
+            _blackCaptures := _blackCaptures + (_blackCaptures == "" ? "" : " ") + _glyph
+    // The row above the board shows the pieces lost by whoever is drawn at the bottom. The flip swaps text and colour together so a row's glyph colour always matches its army.
+    string _topCaptureText = flipBoard ? _blackCaptures : _whiteCaptures
+    color _topCaptureColour = flipBoard ? c_blackPiece : c_whitePiece
+    string _bottomCaptureText = flipBoard ? _whiteCaptures : _blackCaptures
+    color _bottomCaptureColour = flipBoard ? c_whitePiece : c_blackPiece
+    // NO height argument on the captured rows, so an empty row collapses instead of leaving a blank band.
+    // On the short-chart notice the captured rows are not drawn at all: even empty, their borders render as two stray bands under the notice, so the table must hold the one red status cell and nothing else.
+    if historyProblemText == ""
+        table.cell(table_id=t_board, column=0, row=1, text=_topCaptureText, text_color=_topCaptureColour, text_size=20, text_halign=text.align_center)
+        table.cell(table_id=t_board, column=0, row=11, text=_bottomCaptureText, text_color=_bottomCaptureColour, text_size=20, text_halign=text.align_center)
+        for _fillCol = 1 to 8  // The remaining slots of both captured rows must exist before we can merge across them.
+            table.cell(table_id=t_board, column=_fillCol, row=1, text="")
+            table.cell(table_id=t_board, column=_fillCol, row=11, text="")
+
+    if not tableRowsMerged  // Merge only after each row's cells exist. Merging empty cell slots throws.
+        t_board.merge_cells(start_column=0, start_row=0, end_column=8, end_row=0)
+        if historyProblemText == ""  // The captured rows exist only when the board draws. Merging absent cells throws.
+            t_board.merge_cells(start_column=0, start_row=1, end_column=8, end_row=1)
+            t_board.merge_cells(start_column=0, start_row=11, end_column=8, end_row=11)
+        tableRowsMerged := true
+
+    // The 8x8 board: board row r -> table row r + 2, board column c -> table column c + 1. On a too-short chart the board and file labels don't draw: the table collapses to the status row and the board area IS the error message.
+    if historyProblemText == ""
+        for _row = 0 to 7
+            int _srcRow = flipBoard ? 7 - _row : _row  // Display row -> real board row.
+            // Rank-label cell down the left edge. The SOURCE rank prints 1 at the top when flipped, automatically.
+            table.cell(table_id=t_board, column=0, row=_row + 2,
+              text=s(f_rowToRank(_srcRow)),
+              text_color=chart.fg_color,
+              text_size=labelTextSize,
+              bgcolor=c_labelBackground,
+              width=2,
+              height=in_cellHeight,  // Must match the board squares or the row heights fight each other.
+              text_halign=text.align_center,
+              text_valign=text.align_center)
+            for _col = 0 to 7
+                int _srcCol = flipBoard ? 7 - _col : _col  // Display column -> real board column.
+                Core.Piece _piece = mat_display.get(_srcRow, _srcCol)
+                string _glyph = f_pieceGlyph(_piece)
+                color _squareColour = f_squareIsLight(_srcRow, _srcCol) ? c_lightSquare : c_darkSquare  // Parity anchored to the real square: a1 is dark from either side.
+                // Highlights replace the square colour outright. The -1 sentinels never match a real square, so "no move yet" needs no special case.
+                if _srcRow == lastToRow and _srcCol == lastToCol
+                    _squareColour := c_hlNewTo
+                else if _srcRow == lastFromRow and _srcCol == lastFromCol
+                    _squareColour := c_hlNewFrom
+                else if _srcRow == prevToRow and _srcCol == prevToCol
+                    _squareColour := c_hlOldTo
+                else if _srcRow == prevFromRow and _srcCol == prevFromCol
+                    _squareColour := c_hlOldFrom
+                color _pieceColour = Core.pieceSide(_piece) == Core.Side.white ? c_whitePiece : c_blackPiece
+                table.cell(table_id=t_board, column=_col + 1, row=_row + 2,
+                  text=_glyph,
+                  text_color=_pieceColour,
+                  text_size=in_pieceTextSize,  // An int, not a size.* constant, so it can go bigger than size.huge.
+                  bgcolor=_squareColour,
+                  width=in_cellWidth,
+                  height=in_cellHeight,
+                  text_halign=text.align_center,
+                  text_valign=text.align_center)
+
+        // File-label row. The SOURCE file prints h..a when flipped, automatically.
+        table.cell(table_id=t_board, column=0, row=10, text="", bgcolor=c_labelBackground, width=2, height=6)
+        for _col = 0 to 7
+            int _srcCol = flipBoard ? 7 - _col : _col
+            table.cell(table_id=t_board, column=_col + 1, row=10,
+              text=Core.colToFile(_srcCol),
+              text_color=chart.fg_color,
+              text_size=labelTextSize,
+              bgcolor=c_labelBackground,
+              height=6,
+              text_halign=text.align_center,
+              text_valign=text.align_center)
+
+//#endregion BOARD DISPLAY
+
+
+//#region 🟦🟦🟦🟦🟦🟦  WATERMARK  🟦🟦🟦🟦🟦🟦
+var table t_watermark = na
+
+if barstate.islastconfirmedhistory
+    // The watermark and the board must not share a side: with the board on the right, the bottom-right corner sits under it, so the watermark swaps to the bottom left.
+    // Left/centre boards keep the usual corner.
+    string _watermarkAnchor = in_boardPosition == BoardPosition.right ? position.bottom_left : position.bottom_right
+    t_watermark := table.new(position=_watermarkAnchor, columns=1, rows=1)
+    table.cell(table_id=t_watermark, column=0, row=0, text=
+      "  _____ _                 _        _____                   _        _     _  __     \n" +
+      " /  ___(_)               | |      /  __ \\                 | |      | |   (_)/ _|    \n" +
+      " \\ `--. _ _ __ ___  _ __ | | ___  | /  \\/ _ __ _   _ _ __ | |_ ___ | |    _| |_ ___ \n" +
+      "  `--. \\ | '_ ` _ \\| '_ \\| |/ _ \\ | |    | '__| | | | '_ \\| __/ _ \\| |   | |  _/ _ \\\n" +
+      " /\\__/ / | | | | | | |_) | |  __/ | \\__/\\| |  | |_| | |_) | || (_) | |___| | ||  __/\n" +
+      "\\____/|_|_| |_| |_| .__/|_|\\___|  \\____/|_|   \\__, | .__/ \\__\\___/\\_____/_|_| \\__|\n" +
+      "                     | |                         __/ | |                              \n" +
+      "                     |_|                        |___/|_|                              ",
+      text_color=watermarkColour, text_size=size.tiny, text_font_family=font.family_monospace)
+//#endregion

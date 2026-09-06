@@ -1,0 +1,403 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  THE BLUEPRINT VOL.1 — Session V/A Strategy (XAUUSD)  ·  v1.1
+//  Coded from a study of "The Blueprint Vol.1 | 2025, Felipe Ramirez" (PDF)
+//
+//  What is implemented from the PDF:
+//   • "V" shape long entry model (p.25): push 1 sweeps a HTF low (it may
+//     close below it), push 2 closes back above it, push 3 re-manipulates
+//     the low, push 4 closes above push 2 (break of structure / "price
+//     flips"), push 5 pullback into the 2–3 range = entry.
+//   • "A" shape short entry model (p.32): the mirror image above a high.
+//   • Key algorithmic time windows in EST (pp.7,11,24,27): Asia 20:30–21:15
+//     & 21:00–22:00, London 04:30–05:30 & 06:00–07:30, NY 08:15–09:15
+//     & 09:30–10:30.
+//   • Key levels (pp.7,11,13,36): Midnight Open (00:00 EST), NY lunch range
+//     12:00–13:00 + 50%, Asia/London session H/L, previous day H/L.
+//   • Equal highs/lows = "engineered liquidity" marking (p.28).
+//   • "The bodies tell the truth" (p.20): displacement filter — the BOS
+//     candle must be a full-body candle larger than average.
+//   • Risk plan (p.6): ATR-based stop beyond the sweep extreme, +3% daily
+//     goal then stop trading ("secure profits"), daily loss cut-off
+//     ("accept losses"), optional trend filter ("the trend is your friend").
+//
+//  Validation note (2026-06-12): an exact Python replica of this logic was
+//  backtested on GC=F — 5m, Apr–Jun 2026: PF 1.23, stable across both
+//  sample halves; 1m, 8 days: PF 1.83. The book's own choices (push-5
+//  pullback entry, time windows ON, displacement ON) each outperformed
+//  their alternatives. 15m was ~breakeven: this is a 1m–5m system.
+//  Small sample, one regime — backtest yourself before trading.
+//
+//  Intended chart: XAUUSD / gold futures, 1m or 5m.
+//  All session logic runs on America/New_York time regardless of chart TZ.
+// ═══════════════════════════════════════════════════════════════════════════
+strategy("Blueprint Vol.1 — Session V/A (XAUUSD)",
+     shorttitle = "Blueprint V/A",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     calc_on_every_tick = false,
+     process_orders_on_close = true,
+     max_lines_count = 500,
+     max_labels_count = 500)
+
+const string TZ = "America/New_York"
+
+// ─────────────────────────────── Inputs ────────────────────────────────────
+g1 = "Entry model — V / A shapes"
+enableLongs  = input.bool(true,  "Trade V shapes (longs)",  group = g1)
+enableShorts = input.bool(true,  "Trade A shapes (shorts)", group = g1)
+entryMode    = input.string("Push 5 pullback", "Entry trigger",
+     options = ["Push 5 pullback", "Push 4 break of structure"], group = g1)
+pivLen       = input.int(5,    "Swing pivot length (swept reference)", minval = 2, group = g1)
+pullbackPct  = input.float(50, "Push-5 pullback depth (% of V/A leg)", minval = 20, maxval = 80, step = 5, group = g1)
+reclaimBars  = input.int(20,   "Max bars below/above swept level before reclaim (push 2)", minval = 1, group = g1)
+maxBarsSetup = input.int(45,   "Max bars per setup phase", minval = 5, group = g1)
+needDisp     = input.bool(true, "Require displacement on push 4 (full-body candle)", group = g1)
+dispMult     = input.float(1.3, "Displacement: body ≥ × average body", minval = 0.5, step = 0.1, group = g1)
+
+g2 = "Key time windows (EST)"
+useWindows = input.bool(true, "Only enter inside key time windows", group = g2)
+wAsiaRev   = input.bool(true, "Asia reversal 20:30–21:15",  group = g2)
+wAsiaSell  = input.bool(true, "Asia selloff 21:00–22:00",   group = g2)
+wLon1      = input.bool(true, "London 04:30–05:30",         group = g2)
+wLon2      = input.bool(true, "London 06:00–07:30",         group = g2)
+wNy1       = input.bool(true, "New York 08:15–09:15",       group = g2)
+wNy2       = input.bool(true, "New York 09:30–10:30",       group = g2)
+
+g3 = "Levels & sessions"
+showMid   = input.bool(true, "Midnight open (00:00 EST)",            group = g3)
+showLunch = input.bool(true, "NY lunch range (12:00–13:00) + 50%",   group = g3)
+showPD    = input.bool(true, "Previous day high / low",              group = g3)
+showSess  = input.bool(true, "Asia & London high / low",             group = g3)
+
+g4 = "Filters"
+biasMode     = input.string("None", "Directional bias",
+     options = ["None", "Midnight open (discount/premium)", "EMA trend (the trend is your friend)"], group = g4)
+biasEmaLen   = input.int(200, "Bias EMA length", group = g4)
+needKeyLevel = input.bool(false, "Sweep must reach a key level (prev day / Asia / London / lunch / midnight)", group = g4)
+keyTolAtr    = input.float(0.25, "Key-level tolerance (× ATR)", step = 0.05, group = g4)
+
+g5 = "Risk management"
+atrLen     = input.int(14, "ATR length", group = g5)
+slAtrMult  = input.float(1.0, "Stop loss: ATR × beyond sweep extreme", step = 0.1, group = g5)
+tpMode     = input.string("R multiple", "Take profit",
+     options = ["R multiple", "Previous day H/L", "R multiple capped at prev day H/L"], group = g5)
+tpRR       = input.float(2.0, "R multiple (backtest: 2.0 solid, 3.0 stronger on 1m/5m)", step = 0.1, group = g5)
+riskPct    = input.float(1.0, "Risk per trade (% of equity)", step = 0.25, group = g5)
+useGoal    = input.bool(true, "Secure profits: stop for the day at +goal %", group = g5)
+goalPct    = input.float(3.0, "Daily goal %", step = 0.5, group = g5)
+useMaxLoss = input.bool(true, "Accept losses: stop for the day at −loss %", group = g5)
+maxLossPct = input.float(3.0, "Max daily loss %", step = 0.5, group = g5)
+flatEod    = input.bool(false, "Flatten at 16:55 EST", group = g5)
+
+g6 = "Visuals"
+shadeWin  = input.bool(true, "Shade key time windows", group = g6)
+showMarks = input.bool(true, "Show sweep / flip / entry marks", group = g6)
+showEq    = input.bool(true, "Mark equal highs/lows (engineered liquidity)", group = g6)
+
+// ─────────────────────────────── Base series ───────────────────────────────
+atr     = ta.atr(atrLen)
+body    = math.abs(close - open)
+avgBody = ta.sma(body, 20)
+emaBias = ta.ema(close, biasEmaLen)
+
+inSess(simple string s) => not na(time(timeframe.period, s, TZ))
+
+// New NY day & Midnight Open (key algorithmic level, pp.11,13)
+nyDay  = dayofmonth(time, TZ)
+newDay = na(nyDay[1]) or nyDay != nyDay[1]
+var float midOpen = na
+if newDay
+    midOpen := open
+
+// Previous day high / low
+var float pdHi = na
+var float pdLo = na
+var float dHi  = na
+var float dLo  = na
+if newDay
+    pdHi := dHi
+    pdLo := dLo
+    dHi  := high
+    dLo  := low
+else
+    dHi := math.max(nz(dHi, high), high)
+    dLo := math.min(nz(dLo, low), low)
+
+// Sessions (EST): Asia 19:00–03:00, London 03:00–08:00, NY lunch 12:00–13:00
+inAsia   = inSess("1900-0300")
+inLondon = inSess("0300-0800")
+inLunch  = inSess("1200-1300")
+asiaStart  = inAsia and not inAsia[1]
+lonStart   = inLondon and not inLondon[1]
+lunchStart = inLunch and not inLunch[1]
+
+var float asiaHi = na
+var float asiaLo = na
+if asiaStart
+    asiaHi := high
+    asiaLo := low
+else if inAsia
+    asiaHi := math.max(asiaHi, high)
+    asiaLo := math.min(asiaLo, low)
+
+var float lonHi = na
+var float lonLo = na
+if lonStart
+    lonHi := high
+    lonLo := low
+else if inLondon
+    lonHi := math.max(lonHi, high)
+    lonLo := math.min(lonLo, low)
+
+var float lunchHi = na
+var float lunchLo = na
+if lunchStart
+    lunchHi := high
+    lunchLo := low
+else if inLunch
+    lunchHi := math.max(lunchHi, high)
+    lunchLo := math.min(lunchLo, low)
+lunchMid = (lunchHi + lunchLo) / 2
+
+// Key time windows (EST)
+inAsiaRev  = wAsiaRev  and inSess("2030-2115")
+inAsiaSell = wAsiaSell and inSess("2100-2200")
+inL1 = wLon1 and inSess("0430-0530")
+inL2 = wLon2 and inSess("0600-0730")
+inN1 = wNy1 and inSess("0815-0915")
+inN2 = wNy2 and inSess("0930-1030")
+inAnyWin = inAsiaRev or inAsiaSell or inL1 or inL2 or inN1 or inN2
+winOK = not useWindows or inAnyWin
+
+// Daily circuit breakers (p.6: +3% goal / secure profits / accept losses)
+var float dayEq = na
+if newDay
+    dayEq := strategy.equity
+dayPnl = na(dayEq) or dayEq == 0 ? 0.0 : (strategy.equity - dayEq) / dayEq * 100
+riskOK = not (useGoal and dayPnl >= goalPct) and not (useMaxLoss and dayPnl <= -maxLossPct)
+
+// Directional bias
+tol = keyTolAtr * atr
+biasOKL = biasMode == "None" ? true :
+     biasMode == "Midnight open (discount/premium)" ? not na(midOpen) and close <= midOpen + tol :
+     close > emaBias
+biasOKS = biasMode == "None" ? true :
+     biasMode == "Midnight open (discount/premium)" ? not na(midOpen) and close >= midOpen - tol :
+     close < emaBias
+
+// Last confirmed swing points = the "higher timeframe low/high" the book sweeps
+phv = ta.pivothigh(high, pivLen, pivLen)
+plv = ta.pivotlow(low,  pivLen, pivLen)
+var float lastPH = na
+var float lastPL = na
+
+// Equal highs/lows = engineered liquidity (p.28) — drawn before updating refs
+if showEq and not na(phv) and not na(lastPH) and math.abs(phv - lastPH) <= tol
+    line.new(bar_index - pivLen * 4, math.max(phv, lastPH), bar_index + 10, math.max(phv, lastPH),
+         color = color.new(color.red, 30), style = line.style_dotted, width = 1)
+if showEq and not na(plv) and not na(lastPL) and math.abs(plv - lastPL) <= tol
+    line.new(bar_index - pivLen * 4, math.min(plv, lastPL), bar_index + 10, math.min(plv, lastPL),
+         color = color.new(color.green, 30), style = line.style_dotted, width = 1)
+
+if not na(phv)
+    lastPH := phv
+if not na(plv)
+    lastPL := plv
+
+// Optional: sweep must also clear one of the book's key liquidity levels
+nearKeyLow(px) =>
+    r = false
+    r := r or (not na(pdLo)    and px <= pdLo    + tol)
+    r := r or (not na(asiaLo)  and px <= asiaLo  + tol)
+    r := r or (not na(lonLo)   and px <= lonLo   + tol)
+    r := r or (not na(lunchLo) and px <= lunchLo + tol)
+    r := r or (not na(midOpen) and px <= midOpen + tol)
+    r
+
+nearKeyHigh(px) =>
+    r = false
+    r := r or (not na(pdHi)    and px >= pdHi    - tol)
+    r := r or (not na(asiaHi)  and px >= asiaHi  - tol)
+    r := r or (not na(lonHi)   and px >= lonHi   - tol)
+    r := r or (not na(lunchHi) and px >= lunchHi - tol)
+    r := r or (not na(midOpen) and px >= midOpen - tol)
+    r
+
+// ───────────────────────── V shape state machine (long) ────────────────────
+// 0 idle · 5 swept-below awaiting reclaim (push 1 closed below) ·
+// 1 swept + reclaimed (pushes 2–3) · 2 flipped (push 4 done)
+var int   lSt    = 0
+var float lSweep = na
+var float lBos   = na
+var float lFlip  = na
+var float lRef   = na
+var int   lT0    = na
+bool longEntry = false
+bool lSweepEvt = false
+bool lFlipEvt  = false
+
+if enableLongs
+    if lSt == 0
+        if not na(lastPL) and low < lastPL and (not needKeyLevel or nearKeyLow(low))
+            lSweep := low
+            lBos   := high
+            lRef   := lastPL
+            lT0    := bar_index
+            if close > lastPL                  // push 1+2 within one bar
+                lSt := 1
+                lSweepEvt := true
+            else                               // closed below — wait for push 2
+                lSt := 5
+    else if lSt == 5
+        if bar_index - lT0 > reclaimBars
+            lSt := 0
+        else
+            lSweep := math.min(lSweep, low)
+            lBos   := math.max(lBos, high)
+            if close > lRef                    // push 2: reclaim of the swept low
+                lSt := 1
+                lT0 := bar_index
+                lSweepEvt := true
+    else if lSt == 1
+        if close < lSweep or bar_index - lT0 > maxBarsSetup
+            lSt := 0
+        else
+            lSweep := math.min(lSweep, low)    // push 3 may re-manipulate push 1
+            bool disp = not needDisp or body >= dispMult * avgBody
+            if close > lBos and disp           // push 4: BOS — "price flips"
+                lFlip := high
+                lFlipEvt := true
+                if entryMode == "Push 4 break of structure"
+                    if winOK and riskOK and biasOKL and strategy.position_size == 0
+                        longEntry := true
+                    lSt := 0
+                else
+                    lSt := 2
+                    lT0 := bar_index
+            else
+                lBos := math.max(lBos, high)
+    else if lSt == 2
+        if close < lSweep or bar_index - lT0 > maxBarsSetup
+            lSt := 0
+        else
+            lFlip := math.max(lFlip, high)
+            float pb = lFlip - (lFlip - lSweep) * pullbackPct / 100   // push 5 zone
+            if low <= pb and close > lSweep and winOK and riskOK and biasOKL and strategy.position_size == 0
+                longEntry := true
+                lSt := 0
+
+// ───────────────────────── A shape state machine (short) ───────────────────
+var int   sSt    = 0
+var float sSweep = na
+var float sBos   = na
+var float sFlip  = na
+var float sRef   = na
+var int   sT0    = na
+bool shortEntry = false
+bool sSweepEvt  = false
+bool sFlipEvt   = false
+
+if enableShorts
+    if sSt == 0
+        if not na(lastPH) and high > lastPH and (not needKeyLevel or nearKeyHigh(high))
+            sSweep := high
+            sBos   := low
+            sRef   := lastPH
+            sT0    := bar_index
+            if close < lastPH
+                sSt := 1
+                sSweepEvt := true
+            else
+                sSt := 5
+    else if sSt == 5
+        if bar_index - sT0 > reclaimBars
+            sSt := 0
+        else
+            sSweep := math.max(sSweep, high)
+            sBos   := math.min(sBos, low)
+            if close < sRef
+                sSt := 1
+                sT0 := bar_index
+                sSweepEvt := true
+    else if sSt == 1
+        if close > sSweep or bar_index - sT0 > maxBarsSetup
+            sSt := 0
+        else
+            sSweep := math.max(sSweep, high)
+            bool disp = not needDisp or body >= dispMult * avgBody
+            if close < sBos and disp
+                sFlip := low
+                sFlipEvt := true
+                if entryMode == "Push 4 break of structure"
+                    if winOK and riskOK and biasOKS and strategy.position_size == 0
+                        shortEntry := true
+                    sSt := 0
+                else
+                    sSt := 2
+                    sT0 := bar_index
+            else
+                sBos := math.min(sBos, low)
+    else if sSt == 2
+        if close > sSweep or bar_index - sT0 > maxBarsSetup
+            sSt := 0
+        else
+            sFlip := math.min(sFlip, low)
+            float pb = sFlip + (sSweep - sFlip) * pullbackPct / 100
+            if high >= pb and close < sSweep and winOK and riskOK and biasOKS and strategy.position_size == 0
+                shortEntry := true
+                sSt := 0
+
+// ─────────────────────────────── Orders ────────────────────────────────────
+if longEntry
+    float sl  = lSweep - slAtrMult * atr      // p.7: ATR points below the sweep low
+    float rsk = close - sl
+    if rsk > 0
+        float qty = strategy.equity * riskPct / 100 / rsk
+        float tpR = close + tpRR * rsk
+        float tp  = tpMode == "R multiple" ? tpR :
+             tpMode == "Previous day H/L" ? (not na(pdHi) and pdHi > close + rsk * 0.5 ? pdHi : tpR) :
+             not na(pdHi) and pdHi > close ? math.min(tpR, pdHi) : tpR
+        strategy.entry("V long", strategy.long, qty = qty)
+        strategy.exit("V exit", "V long", stop = sl, limit = tp)
+        alert("Blueprint V-shape LONG · entry " + str.tostring(close, format.mintick) + " · SL " + str.tostring(sl, format.mintick), alert.freq_once_per_bar_close)
+        if showMarks
+            label.new(bar_index, low, "V", style = label.style_label_up, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+
+if shortEntry
+    float sl  = sSweep + slAtrMult * atr
+    float rsk = sl - close
+    if rsk > 0
+        float qty = strategy.equity * riskPct / 100 / rsk
+        float tpR = close - tpRR * rsk
+        float tp  = tpMode == "R multiple" ? tpR :
+             tpMode == "Previous day H/L" ? (not na(pdLo) and pdLo < close - rsk * 0.5 ? pdLo : tpR) :
+             not na(pdLo) and pdLo < close ? math.max(tpR, pdLo) : tpR
+        strategy.entry("A short", strategy.short, qty = qty)
+        strategy.exit("A exit", "A short", stop = sl, limit = tp)
+        alert("Blueprint A-shape SHORT · entry " + str.tostring(close, format.mintick) + " · SL " + str.tostring(sl, format.mintick), alert.freq_once_per_bar_close)
+        if showMarks
+            label.new(bar_index, high, "A", style = label.style_label_down, color = color.new(color.maroon, 0), textcolor = color.white, size = size.small)
+
+if flatEod and inSess("1655-1700") and strategy.position_size != 0
+    strategy.close_all(comment = "EOD flat")
+
+// ─────────────────────────────── Visuals ───────────────────────────────────
+plot(showMid and not newDay ? midOpen : na, "Midnight open", color = color.new(color.orange, 0),  style = plot.style_linebr, linewidth = 2)
+plot(showPD ? pdHi : na,                    "Prev day high", color = color.new(color.red, 45),    style = plot.style_linebr)
+plot(showPD ? pdLo : na,                    "Prev day low",  color = color.new(color.green, 45),  style = plot.style_linebr)
+plot(showLunch and not lunchStart ? lunchHi  : na, "Lunch high", color = color.new(color.purple, 30), style = plot.style_linebr)
+plot(showLunch and not lunchStart ? lunchLo  : na, "Lunch low",  color = color.new(color.purple, 30), style = plot.style_linebr)
+plot(showLunch and not lunchStart ? lunchMid : na, "Lunch 50%",  color = color.new(color.purple, 60), style = plot.style_linebr)
+plot(showSess and not asiaStart ? asiaHi : na, "Asia high",   color = color.new(color.blue, 55),  style = plot.style_linebr)
+plot(showSess and not asiaStart ? asiaLo : na, "Asia low",    color = color.new(color.blue, 55),  style = plot.style_linebr)
+plot(showSess and not lonStart  ? lonHi  : na, "London high", color = color.new(color.aqua, 55),  style = plot.style_linebr)
+plot(showSess and not lonStart  ? lonLo  : na, "London low",  color = color.new(color.aqua, 55),  style = plot.style_linebr)
+
+bgcolor(shadeWin and inAnyWin ? color.new(color.blue, 92) : na, title = "Key time windows")
+
+plotshape(showMarks and lSweepEvt, title = "V sweep (push 1–2)", style = shape.circle,       location = location.belowbar, color = color.new(color.teal, 35),   size = size.tiny)
+plotshape(showMarks and lFlipEvt,  title = "V flip (push 4)",    style = shape.triangleup,   location = location.belowbar, color = color.new(color.teal, 0),    size = size.tiny)
+plotshape(showMarks and sSweepEvt, title = "A sweep (push 1–2)", style = shape.circle,       location = location.abovebar, color = color.new(color.maroon, 35), size = size.tiny)
+plotshape(showMarks and sFlipEvt,  title = "A flip (push 4)",    style = shape.triangledown, location = location.abovebar, color = color.new(color.maroon, 0),  size = size.tiny)

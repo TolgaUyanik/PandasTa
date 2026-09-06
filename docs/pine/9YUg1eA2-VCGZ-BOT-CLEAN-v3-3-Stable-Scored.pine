@@ -1,0 +1,316 @@
+//@version=6
+strategy("VCGZ BOT CLEAN v3.3 - Stable Scored", overlay=true, initial_capital=2000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, process_orders_on_close=true, calc_on_order_fills=false, commission_type=strategy.commission.cash_per_contract, commission_value=0, max_labels_count=500, max_lines_count=50, max_bars_back=5000, margin_long=1, margin_short=1)
+
+// =====================================================
+// Inputs
+// =====================================================
+emaLen           = input.int(20, "EMA Length", minval=1)
+rsiLen           = input.int(14, "RSI Length", minval=1)
+atrLen           = input.int(14, "ATR Length", minval=1)
+
+lookback         = input.int(24, "Impulse Lookback", minval=5)
+minImpulseATR    = input.float(1.0, "Minimum Impulse ATR", minval=0.1, step=0.1)
+strongImpulseATR = input.float(1.25, "Strong Impulse ATR Score", minval=0.5, step=0.05)
+
+freshBars        = input.int(16, "Freshness Bars", minval=1)
+confirmBars      = input.int(4, "Bars Allowed After Zone Touch", minval=1, maxval=10)
+sweepLookback    = input.int(3, "Local Sweep Lookback", minval=2, maxval=10)
+
+gzLow            = input.float(0.618, "Golden Zone Low", minval=0.0, maxval=1.0, step=0.001)
+gzHigh           = input.float(0.650, "Golden Zone High", minval=0.0, maxval=1.0, step=0.001)
+
+stopBufATR       = input.float(0.10, "Stop Buffer ATR", minval=0.0, step=0.05)
+tpR              = input.float(2.0, "TP1 R Multiple", minval=0.5, step=0.25)
+
+minBodyATR       = input.float(0.20, "Min Confirmation Body ATR", minval=0.05, step=0.05)
+closeStrength    = input.float(0.68, "Close Strength", minval=0.50, maxval=0.95, step=0.01)
+
+volLen           = input.int(20, "Volume MA Length", minval=1)
+volMult          = input.float(1.15, "Volume Score Multiplier", minval=0.5, step=0.05)
+
+minScoreToTrade  = input.int(3, "Minimum Score To Trade", minval=1, maxval=5)
+
+useSession       = input.bool(false, "Use Session Filter")
+sessionInput     = input.session("0630-1000", "Session")
+
+showInfoBoxes    = input.bool(true, "Show Trade Info Boxes")
+maxBoxes         = input.int(30, "Max Info Boxes Kept", minval=1, maxval=200)
+
+// =====================================================
+// 15m Bias
+// =====================================================
+htfClose   = request.security(syminfo.tickerid, "15", close, lookahead=barmerge.lookahead_off)
+htfEma     = request.security(syminfo.tickerid, "15", ta.ema(close, emaLen), lookahead=barmerge.lookahead_off)
+htfEmaPrev = request.security(syminfo.tickerid, "15", ta.ema(close, emaLen)[1], lookahead=barmerge.lookahead_off)
+htfRsi     = request.security(syminfo.tickerid, "15", ta.rsi(close, rsiLen), lookahead=barmerge.lookahead_off)
+
+htfSlope = htfEma - htfEmaPrev
+
+bullBias = htfClose > htfEma and htfSlope > 0 and htfRsi >= 52
+bearBias = htfClose < htfEma and htfSlope < 0 and htfRsi <= 48
+
+// =====================================================
+// Core Metrics
+// =====================================================
+inSession    = not na(time(timeframe.period, sessionInput))
+tradeAllowed = useSession ? inSession : true
+
+atr = ta.atr(atrLen)
+ema = ta.ema(close, emaLen)
+
+emaUp   = ema > ema[1]
+emaDown = ema < ema[1]
+
+lbHigh  = ta.highest(high, lookback)
+lbLow   = ta.lowest(low, lookback)
+rangeLB = lbHigh - lbLow
+
+barsAgoHigh = nz(ta.highestbars(high, lookback), lookback - 1)
+barsAgoLow  = nz(ta.lowestbars(low, lookback), lookback - 1)
+
+recentLowBeforeBar  = ta.lowest(low[1], sweepLookback)
+recentHighBeforeBar = ta.highest(high[1], sweepLookback)
+
+recent3Low  = ta.lowest(low, 3)
+recent3High = ta.highest(high, 3)
+
+barRange = math.max(high - low, syminfo.mintick)
+bodySize = math.abs(close - open)
+bodyATR  = bodySize / math.max(atr, syminfo.mintick)
+
+volMA = ta.sma(volume, volLen)
+
+flat = strategy.position_size == 0
+
+// =====================================================
+// Candle Confirmation
+// =====================================================
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+
+longSweep  = low < recentLowBeforeBar
+shortSweep = high > recentHighBeforeBar
+
+longRejection  = lowerWick > bodySize * 0.45
+shortRejection = upperWick > bodySize * 0.45
+
+longStrongClose  = close >= low + barRange * closeStrength
+shortStrongClose = close <= high - barRange * closeStrength
+
+longLocalTrend  = close > ema and emaUp
+shortLocalTrend = close < ema and emaDown
+
+longDirectionalVolume  = not na(volMA) and volume > volMA * volMult and close > open
+shortDirectionalVolume = not na(volMA) and volume > volMA * volMult and close < open
+
+// =====================================================
+// Long State
+// =====================================================
+var bool  longLocked      = false
+var bool  longTouched     = false
+var float longImpulseLow  = na
+var float longImpulseHigh = na
+var float longZoneTop     = na
+var float longZoneBot     = na
+var float longZoneMid     = na
+var int   longExtremeBar  = na
+var int   longTouchBar    = na
+
+// =====================================================
+// Short State
+// =====================================================
+var bool  shortLocked      = false
+var bool  shortTouched     = false
+var float shortImpulseHigh = na
+var float shortImpulseLow  = na
+var float shortZoneTop     = na
+var float shortZoneBot     = na
+var float shortZoneMid     = na
+var int   shortExtremeBar  = na
+var int   shortTouchBar    = na
+
+// =====================================================
+// Info Box Storage
+// =====================================================
+var label[] signalBoxes = array.new<label>()
+
+saveInfoBox(_label) =>
+    array.push(signalBoxes, _label)
+    if array.size(signalBoxes) > maxBoxes
+        oldBox = array.shift(signalBoxes)
+        label.delete(oldBox)
+
+// =====================================================
+// Reset State
+// =====================================================
+if not bullBias or not tradeAllowed or not flat
+    longLocked := false
+    longTouched := false
+    longImpulseLow := na
+    longImpulseHigh := na
+    longZoneTop := na
+    longZoneBot := na
+    longZoneMid := na
+    longExtremeBar := na
+    longTouchBar := na
+
+if not bearBias or not tradeAllowed or not flat
+    shortLocked := false
+    shortTouched := false
+    shortImpulseHigh := na
+    shortImpulseLow := na
+    shortZoneTop := na
+    shortZoneBot := na
+    shortZoneMid := na
+    shortExtremeBar := na
+    shortTouchBar := na
+
+// =====================================================
+// Lock Impulse
+// =====================================================
+newLongImpulse  = bullBias and tradeAllowed and flat and not longLocked and rangeLB >= atr * minImpulseATR and barsAgoLow > barsAgoHigh
+newShortImpulse = bearBias and tradeAllowed and flat and not shortLocked and rangeLB >= atr * minImpulseATR and barsAgoHigh > barsAgoLow
+
+if newLongImpulse
+    longImpulseLow  := lbLow
+    longImpulseHigh := lbHigh
+    longZoneTop     := longImpulseHigh - (longImpulseHigh - longImpulseLow) * gzLow
+    longZoneBot     := longImpulseHigh - (longImpulseHigh - longImpulseLow) * gzHigh
+    longZoneMid     := (longZoneTop + longZoneBot) / 2.0
+    longExtremeBar  := bar_index - barsAgoHigh
+    longTouched     := false
+    longTouchBar    := na
+    longLocked      := true
+
+if newShortImpulse
+    shortImpulseHigh := lbHigh
+    shortImpulseLow  := lbLow
+    shortZoneBot     := shortImpulseLow + (shortImpulseHigh - shortImpulseLow) * gzLow
+    shortZoneTop     := shortImpulseLow + (shortImpulseHigh - shortImpulseLow) * gzHigh
+    shortZoneMid     := (shortZoneTop + shortZoneBot) / 2.0
+    shortExtremeBar  := bar_index - barsAgoLow
+    shortTouched     := false
+    shortTouchBar    := na
+    shortLocked      := true
+
+// =====================================================
+// Freshness
+// =====================================================
+longFresh  = longLocked and not na(longExtremeBar) and (bar_index - longExtremeBar) <= freshBars
+shortFresh = shortLocked and not na(shortExtremeBar) and (bar_index - shortExtremeBar) <= freshBars
+
+if longLocked and not longFresh
+    longLocked := false
+    longTouched := false
+    longTouchBar := na
+
+if shortLocked and not shortFresh
+    shortLocked := false
+    shortTouched := false
+    shortTouchBar := na
+
+// =====================================================
+// Golden Zone Touch
+// =====================================================
+longTouchNow  = longLocked and longFresh and low <= longZoneTop and high >= longZoneBot
+shortTouchNow = shortLocked and shortFresh and high >= shortZoneBot and low <= shortZoneTop
+
+if longTouchNow and not longTouched
+    longTouched := true
+    longTouchBar := bar_index
+
+if shortTouchNow and not shortTouched
+    shortTouched := true
+    shortTouchBar := bar_index
+
+if longTouched and not na(longTouchBar) and (bar_index - longTouchBar) > confirmBars
+    longLocked := false
+    longTouched := false
+    longTouchBar := na
+
+if shortTouched and not na(shortTouchBar) and (bar_index - shortTouchBar) > confirmBars
+    shortLocked := false
+    shortTouched := false
+    shortTouchBar := na
+
+// =====================================================
+// Signal Logic
+// =====================================================
+longImpulseSize  = not na(longImpulseHigh) and not na(longImpulseLow) ? longImpulseHigh - longImpulseLow : na
+shortImpulseSize = not na(shortImpulseHigh) and not na(shortImpulseLow) ? shortImpulseHigh - shortImpulseLow : na
+
+longStrongImpulse  = not na(longImpulseSize) and longImpulseSize >= atr * strongImpulseATR
+shortStrongImpulse = not na(shortImpulseSize) and shortImpulseSize >= atr * strongImpulseATR
+
+longZoneReaction  = longTouched and longFresh and low <= longZoneTop and high >= longZoneBot and close > longZoneMid
+shortZoneReaction = shortTouched and shortFresh and high >= shortZoneBot and low <= shortZoneTop and close < shortZoneMid
+
+longConfirmCandle  = close > open and longStrongClose and bodyATR >= minBodyATR and (longSweep or longRejection)
+shortConfirmCandle = close < open and shortStrongClose and bodyATR >= minBodyATR and (shortSweep or shortRejection)
+
+longSignal  = longZoneReaction and longConfirmCandle and longLocalTrend
+shortSignal = shortZoneReaction and shortConfirmCandle and shortLocalTrend
+
+// =====================================================
+// 1-5 Score
+// =====================================================
+longScore = (bullBias ? 1 : 0) + (longLocalTrend ? 1 : 0) + (longStrongImpulse ? 1 : 0) + (longZoneReaction and longConfirmCandle ? 1 : 0) + (longDirectionalVolume ? 1 : 0)
+shortScore = (bearBias ? 1 : 0) + (shortLocalTrend ? 1 : 0) + (shortStrongImpulse ? 1 : 0) + (shortZoneReaction and shortConfirmCandle ? 1 : 0) + (shortDirectionalVolume ? 1 : 0)
+
+// =====================================================
+// Fire
+// =====================================================
+longFire  = barstate.isconfirmed and flat and longSignal and longScore >= minScoreToTrade
+shortFire = barstate.isconfirmed and flat and shortSignal and shortScore >= minScoreToTrade
+
+longFire  := longFire and not longFire[1]
+shortFire := shortFire and not shortFire[1]
+
+// =====================================================
+// Trade Levels
+// =====================================================
+longEntry = close
+longStop  = math.min(low, recent3Low) - atr * stopBufATR
+longRisk  = longEntry - longStop
+longTP1   = longEntry + longRisk * tpR
+
+shortEntry = close
+shortStop  = math.max(high, recent3High) + atr * stopBufATR
+shortRisk  = shortStop - shortEntry
+shortTP1   = shortEntry - shortRisk * tpR
+
+validLong  = longFire and longRisk > syminfo.mintick
+validShort = shortFire and shortRisk > syminfo.mintick
+
+// =====================================================
+// Orders + Entry-Only Alerts
+// =====================================================
+if validLong
+    strategy.entry("L", strategy.long, qty=1)
+    strategy.exit("L EXIT", from_entry="L", stop=longStop, limit=longTP1)
+
+    if showInfoBoxes
+        infoText = "VCGZ LONG\nSCORE: " + str.tostring(longScore) + "/5\nENTRY: " + str.tostring(longEntry, format.mintick) + "\nSTOP: " + str.tostring(longStop, format.mintick) + "\nTP1: " + str.tostring(longTP1, format.mintick)
+        newBox = label.new(bar_index, high + atr * 4.0, infoText, style=label.style_label_down, color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+        saveInfoBox(newBox)
+
+    alert('{"action":"ENTRY","strategy":"VCGZ BOT CLEAN v3.3","side":"LONG","ticker":"' + syminfo.ticker + '","score":' + str.tostring(longScore) + ',"entry":' + str.tostring(longEntry) + ',"stop":' + str.tostring(longStop) + ',"tp1":' + str.tostring(longTP1) + '}', alert.freq_once_per_bar_close)
+
+    longLocked := false
+    longTouched := false
+    longTouchBar := na
+
+if validShort
+    strategy.entry("S", strategy.short, qty=1)
+    strategy.exit("S EXIT", from_entry="S", stop=shortStop, limit=shortTP1)
+
+    if showInfoBoxes
+        infoText = "VCGZ SHORT\nSCORE: " + str.tostring(shortScore) + "/5\nENTRY: " + str.tostring(shortEntry, format.mintick) + "\nSTOP: " + str.tostring(shortStop, format.mintick) + "\nTP1: " + str.tostring(shortTP1, format.mintick)
+        newBox = label.new(bar_index, high + atr * 4.0, infoText, style=label.style_label_down, color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+        saveInfoBox(newBox)
+
+    alert('{"action":"ENTRY","strategy":"VCGZ BOT CLEAN v3.3","side":"SHORT","ticker":"' + syminfo.ticker + '","score":' + str.tostring(shortScore) + ',"entry":' + str.tostring(shortEntry) + ',"stop":' + str.tostring(shortStop) + ',"tp1":' + str.tostring(shortTP1) + '}', alert.freq_once_per_bar_close)
+
+    shortLocked := false
+    shortTouched := false
+    shortTouchBar := na

@@ -1,0 +1,111 @@
+//@version=6
+indicator("Liquidation Imbalance Squeeze", overlay=true, max_labels_count=500)
+
+// ==========================================
+// 1. INPUT PARAMETERS
+// ==========================================
+grp_sig      = "Signal Settings"
+z_thresh     = input.float(2.0, "Z-Score Threshold", minval=0.5, step=0.1, group=grp_sig)
+lookback_win = input.int(48, "Z-Score Lookback Window (Bars)", minval=10, group=grp_sig)
+entry_disc   = input.float(0.8, "Limit Entry Discount (%)", minval=0.1, step=0.1, group=grp_sig) / 100.0
+order_ttl    = input.int(24, "Limit Order TTL (Bars)", minval=1, group=grp_sig)
+
+grp_flt      = "Squeeze Filter Settings"
+use_squeeze  = input.bool(true, "Require Volatility Squeeze Gate", group=grp_flt)
+bb_len       = input.int(20, "Bollinger Bands Length", group=grp_flt)
+kc_len       = input.int(20, "Keltner Channel Length", group=grp_flt)
+
+// ==========================================
+// 2. CONTINUOUS LIQUIDATION PROXY & Z-SCORE
+// ==========================================
+// Estimate buying/selling volume pressure continuously to avoid log(0) issues
+float bar_range  = math.max(high - low, syminfo.mintick)
+float buy_pct    = (close - low) / bar_range
+float sell_pct   = (high - close) / bar_range
+
+float buy_vol    = volume * buy_pct
+float sell_vol   = volume * sell_pct
+
+// Smooth order flow intensity
+float buy_smooth  = ta.ema(buy_vol, 6)
+float sell_smooth = ta.ema(sell_vol, 6)
+
+// Continuous Log-Intensity Ratio
+float liq_ratio  = math.log(math.max(buy_smooth, 1.0)) - math.log(math.max(sell_smooth, 1.0))
+
+// Non-lookahead Z-Score
+float ratio_mean = ta.sma(liq_ratio[1], lookback_win)
+float ratio_std  = ta.stdev(liq_ratio[1], lookback_win)
+float z_score    = ratio_std > 0 ? (liq_ratio[1] - ratio_mean) / ratio_std : 0.0
+
+// ==========================================
+// 3. VOLATILITY SQUEEZE FILTER
+// ==========================================
+float bb_basis = ta.sma(close, bb_len)
+float bb_dev   = ta.stdev(close, bb_len) * 2.0
+float bb_upper = bb_basis + bb_dev
+
+float kc_basis = ta.sma(close, kc_len)
+float kc_range = ta.atr(kc_len) * 1.5
+float kc_upper = kc_basis + kc_range
+
+// Squeeze condition: Bollinger Bands inside Keltner Channels
+bool in_squeeze = (bb_upper < kc_upper)
+bool filter_passed = use_squeeze ? in_squeeze : true
+
+// ==========================================
+// 4. SIGNALS & LIMIT BIDS
+// ==========================================
+bool long_trigger  = (z_score > z_thresh) and filter_passed
+bool short_trigger = (z_score < -z_thresh) and filter_passed
+
+var float active_limit_price = na
+var int   order_age          = 0
+var string active_dir        = ""
+
+if long_trigger and na(active_limit_price)
+    active_limit_price := close * (1.0 - entry_disc)
+    order_age          := 0
+    active_dir         := "LONG"
+else if short_trigger and na(active_limit_price)
+    active_limit_price := close * (1.0 + entry_disc)
+    order_age          := 0
+    active_dir         := "SHORT"
+
+// TTL and Fill Logic
+if not na(active_limit_price)
+    order_age += 1
+    bool filled = (active_dir == "LONG" and low <= active_limit_price) or (active_dir == "SHORT" and high >= active_limit_price)
+    if order_age >= order_ttl or filled
+        active_limit_price := na
+        active_dir         := ""
+
+// ==========================================
+// 5. CHART VISUALIZATIONS
+// ==========================================
+// Plot limit level line on chart
+plot(active_limit_price, "Active Limit Bid/Offer", color=active_dir == "LONG" ? color.green : color.red, linewidth=2, style=plot.style_linebr)
+
+// Signal Shapes
+plotshape(long_trigger, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, text="LONG BID")
+plotshape(short_trigger, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, text="SHORT OFFER")
+
+// Bar Coloring during Squeeze
+barcolor(in_squeeze ? color.new(color.purple, 40) : na)
+
+// ==========================================
+// 6. ON-SCREEN STATUS PANEL
+// ==========================================
+var table status_tbl = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+if barstate.islast
+    table.cell(status_tbl, 0, 0, "OFLIS Status", bgcolor=color.navy, text_color=color.white)
+    table.cell(status_tbl, 1, 0, "Value", bgcolor=color.navy, text_color=color.white)
+    
+    table.cell(status_tbl, 0, 1, "Z-Score", text_color=color.white)
+    table.cell(status_tbl, 1, 1, str.tostring(z_score, "#.##"), text_color=z_score > z_thresh ? color.green : z_score < -z_thresh ? color.red : color.white)
+    
+    table.cell(status_tbl, 0, 2, "Squeeze Active", text_color=color.white)
+    table.cell(status_tbl, 1, 2, in_squeeze ? "YES" : "NO", text_color=in_squeeze ? color.purple : color.gray)
+    
+    table.cell(status_tbl, 0, 3, "Pending Order", text_color=color.white)
+    table.cell(status_tbl, 1, 3, na(active_limit_price) ? "None" : active_dir + " @ " + str.tostring(active_limit_price, "#.##"), text_color=na(active_limit_price) ? color.gray : color.yellow)

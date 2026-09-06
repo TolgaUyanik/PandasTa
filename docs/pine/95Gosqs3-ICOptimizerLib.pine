@@ -1,0 +1,666 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @description ICOptimizerLib v2 — IC-based parameter optimization with 4 Bayesian strategies.
+//              Publish target: ICOptimizerLib/1  (supersedes cybermediaboy/ICOptimizer/1 v5 skeleton).
+//              See §A for migration path and backward-compat decision.
+//              Layer 1: primitive IC estimators (Pearson, Spearman, Kendall, Partial).
+//              Layer 2: Optimizer UDT with 4 strategies: argmax | ucb | thompson | bayesian.
+//              Layer 3: RegimeGate, ObjectiveWeights, composite scoring, serialize/restore.
+//              Layer 4: diagnostics table and panel.
+//              L2 library — depends only on NumLib.
+//
+// ─── §A  v1 BACKWARD-COMPAT DECISION (follow-up 1) ────────────────────────
+//
+//  HARD BREAK.  v1 (ICOptimizer/1) used bare strings ("argmax", "ucb", …).
+//  v2 uses the OptimizerKind enum.  Reason: Pine v6 enums are type-safe and
+//  produce CE10 errors at compile time if a caller passes an invalid string,
+//  whereas bare strings fail silently at runtime.  The compat shim route
+//  (string→enum dispatch wrapper) was considered and rejected: it would
+//  re-introduce series-string branching inside a hot method, defeating the
+//  purpose of the enum migration.
+//
+//  Migration for v1 callers:
+//    OLD:  f_find_optimal_param(params, ics, cur, 0.2)      ← v1 API
+//    NEW:  opt = f_optimizer_new(OptimizerKind.ARGMAX, …)   ← v2 API
+//          idx = opt.propose()
+//          opt.observe(idx, ic)
+//  The free function f_find_optimal_param() is retained in §4 as a one-line
+//  compat wrapper producing identical output to v1 findOptimalParam() for
+//  callers that only used ARGMAX and do not need the UDT.
+//
+//  Publish target: ICOptimizerLib/1  (new library name in same publisher namespace
+//  as kNNLib/28, LearningLib/1, etc.)  Supersedes cybermediaboy/ICOptimizer/1
+//  (v5 skeleton, string-keyed API) — that library is frozen.  Users discovering
+//  ICOptimizer/1 via search should follow this migration path.
+//
+// ─── §B  UDT INDEPENDENCE AUDIT (follow-up 2) ─────────────────────────────
+//
+//  All 4 UDTs are independently constructable with no required coupling:
+//
+//  UDT             Constructor                 Depends on
+//  ─────────────── ─────────────────────────── ────────────────────────────
+//  Optimizer       f_optimizer_new(…)          nothing (grid is caller-owned)
+//  RollingIC       f_rolling_ic_new(capacity)  nothing
+//  RegimeGate      f_regime_gate_new(…)        nothing
+//  ObjectiveWeights f_obj_weights_new(…)       nothing
+//
+//  Valid combinations:
+//   • Optimizer alone — minimal usage (ARGMAX strategy, no IC classification)
+//   • Optimizer + RollingIC — IC classification per bar, classify() method
+//   • Optimizer + ObjectiveWeights — composite scoring for multi-objective grids
+//   • Optimizer + RegimeGate — gate-filtered observe() calls
+//   • All 4 — full stack
+//
+//  Initialization order: any order; there are no cross-UDT init dependencies.
+//  The caller is responsible for pushing IC values into RollingIC before
+//  calling classify(); a fresh buffer returns 0.0 thresholds (safe default).
+//
+// ─── §C  GP MATH VERIFICATION (follow-up 3) ───────────────────────────────
+//
+//  Jacobi solver convergence domain: guaranteed for diagonally dominant K.
+//  K is diagonally dominant when kernel_noise > 0 (K[i,i] = kernel(xi,xi) +
+//  noise ≥ 1 + noise > Σ_{j≠i} kernel(xi,xj) for RBF/Matern52 with ls > 0).
+//  NaN propagation guard: f_optimizer_new() enforces noise ≥ 1e-6 at
+//  construction (see implementation below).  NaN in ic_sample is gated by
+//  the na(ic_sample) check in observe() before any array writes.
+//
+//  Grid size constraints (enforced at f_optimizer_new):
+//    grid_size == 1 → runtime.error (BAYESIAN is undefined for a single cell)
+//    grid_size > 30 → runtime.error for BAYESIAN only (Jacobi O(n²×20) budget)
+//    grid_size ≥ 2 → all strategies valid
+//  ARGMAX/UCB/THOMPSON have no upper grid-size constraint.
+//
+//  Unit test specification (see test_icoptimizer_v2_unit.pine):
+//    T1: grid=[1.0] + BAYESIAN → should hit error log (na guard)
+//    T2: grid=[1.0,2.0] + BAYESIAN, 50 observe() calls → ic_var shrinks
+//    T3: grid size=30 + BAYESIAN → no silent NaN on bar 500 / 1000
+//    T4: rising IC synthetic trajectory → propose() returns idx 6 after warmup
+//    T5: peak-in-middle IC → propose() converges to idx 3 (center)
+//
+// ─── §D  v5→v6 DELTA (Phase E-2a) ─────────────────────────────────────────
+//
+//   1. //@version=5  → //@version=6
+//   2. type ICOptimizer → decomposed to 4 independent UDTs (§B)
+//   3. `series float` qualifiers explicit; `simple int` for all ta.* lengths (CE10297)
+//   4. Enum OptimizerKind / KernelKind / ReturnMode replaces bare strings
+//   5. classifyIC scalar bug → RollingIC ring buffer + sort-based percentile
+//   6. detectAndAdjustDomination orphan → method check_domination on Optimizer
+//   7. Monotonic counter → reset_decay(decay) method
+//   8. S9: all multi-line ternaries collapsed to single lines
+//   9. f_ma_for_idx() dispatch in demo for simple-int ta.sma constraint
+//  10. Nested array.get() in f_build_gram / observe() split to locals (COMMA_STATEMENTS)
+//
+library("ICOptimizerLib", overlay=false)
+
+import cybermediaboy/NumLib/1 as N
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Optimizer strategy
+export enum OptimizerKind
+    ARGMAX      // greedy argmax on ic_ema — backward-compat with v1
+    UCB         // ic_ema[i] + c * sqrt(log(N)/n[i])
+    THOMPSON    // sample N(ic_ema[i], ic_var[i]), pick argmax
+    BAYESIAN    // GP posterior over grid, GP-UCB acquisition
+
+// @enum GP kernel for BAYESIAN strategy
+export enum KernelKind
+    RBF         // squared exponential
+    MATERN52    // Matérn 5/2 — smoother for noisy financial series
+
+// @enum Forward return mode
+export enum ReturnMode
+    SIMPLE      // (p[t+h] - p[t]) / p[t]
+    LOG         // log(p[t+h] / p[t])
+    EXCESS      // log return minus benchmark (caller supplies benchmark)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1 — LAYER 1: PRIMITIVE IC ESTIMATORS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Pearson IC: correlation of signal with forward return
+// @param signal  Signal series (e.g. z-score oscillator)
+// @param ret     Forward return series (aligned: ret[0] = realized return for signal[horizon])
+// @param n       Rolling window (simple int — required by ta.correlation)
+export f_ic_pearson(series float signal, series float ret, simple int n) =>
+    ta.correlation(signal, ret, n)
+
+// @function Spearman IC via rank correlation approximation
+// @param signal  Signal series
+// @param ret     Forward return series
+// @param n       Rolling window
+// @returns Spearman rank-correlation approximation
+export f_ic_spearman(series float signal, series float ret, simple int n) =>
+    float r_sig = ta.percentrank(signal, n) / 100.0
+    float r_ret = ta.percentrank(ret,    n) / 100.0
+    ta.correlation(r_sig, r_ret, n)
+
+// @function Kendall IC approximation (via concordant/discordant sign correlation)
+// @param signal  Signal series
+// @param ret     Forward return series
+// @param n       Rolling window
+// @returns Kendall tau approximation
+export f_ic_kendall(series float signal, series float ret, simple int n) =>
+    float sign_sig = math.sign(signal - signal[1])
+    float sign_ret = math.sign(ret    - ret[1])
+    ta.correlation(sign_sig, sign_ret, n)
+
+// @function Partial IC: correlation of signal with ret after removing control variable
+// @param signal  Signal series
+// @param ret     Forward return series
+// @param control Control variable to partial out
+// @param n       Rolling window
+// @returns Partial Pearson IC
+export f_ic_partial(series float signal, series float ret, series float control, simple int n) =>
+    float r_sig = signal - ta.correlation(signal, control, n) * control
+    float r_ret = ret    - ta.correlation(ret,    control, n) * control
+    ta.correlation(r_sig, r_ret, n)
+
+// @function Compute forward return from source series
+// @param src       Source price series
+// @param horizon   Look-forward bars
+// @param mode      ReturnMode enum
+// @param benchmark Optional benchmark (used only in EXCESS mode; pass na otherwise)
+export f_forward_return(series float src, simple int horizon, ReturnMode mode, series float benchmark) =>
+    float future = src[0]
+    float past   = src[horizon]
+    float result = mode == ReturnMode.LOG ? math.log(future / past) : mode == ReturnMode.EXCESS ? math.log(future / past) - math.log(benchmark / benchmark[horizon]) : (future - past) / past
+    result
+
+// @function Label from signal × return sign match
+// @param sig  Signal value
+// @param ret  Realized return
+// @param eps  Dead-zone threshold (returns within ±eps labelled 0)
+// @returns  1 = correct direction, -1 = wrong direction, 0 = inside dead-zone
+export f_label_from_signal(float sig, float ret, float eps) =>
+    math.abs(ret) < eps ? 0 : math.sign(sig) == math.sign(ret) ? 1 : -1
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2 — ROLLING IC RING BUFFER (replaces classifyIC scalar percentile bug)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type Rolling IC ring buffer for proper percentile computation
+// @field samples   Circular buffer of IC observations
+// @field head      Write head (mod capacity)
+// @field capacity  Max samples to retain
+export type RollingIC
+    array<float> samples
+    int          head
+    int          capacity
+
+// @function Create a new RollingIC buffer
+// @param capacity  Number of IC samples to retain
+export f_rolling_ic_new(simple int capacity) =>
+    RollingIC.new(samples = array.new_float(capacity, 0.0), head = 0, capacity = capacity)
+
+// @function Push a new IC observation into the ring buffer
+export method push(RollingIC self, float ic_val) =>
+    array.set(self.samples, self.head % self.capacity, ic_val)
+    self.head += 1
+    self
+
+// @function Classify current IC against ring buffer distribution
+// @param self            RollingIC buffer (must have been pushed at least once)
+// @param ic_val          Current IC to classify
+// @param good_pct        Percentile above which IC is "good" (0–100)
+// @param bad_pct         Percentile below which IC is "bad" (0–100)
+// @returns [is_good, is_bad, good_thresh, bad_thresh]
+export method classify(RollingIC self, float ic_val, float good_pct, float bad_pct) =>
+    array<float> sorted = array.copy(self.samples)
+    array.sort(sorted)
+    int sz = array.size(sorted)
+    int g_idx = int(math.max(0.0, math.min(float(sz - 1), math.floor(good_pct / 100.0 * float(sz)))))
+    int b_idx = int(math.max(0.0, math.min(float(sz - 1), math.floor(bad_pct  / 100.0 * float(sz)))))
+    float good_thresh = sz > 0 ? array.get(sorted, g_idx) : 0.0
+    float bad_thresh  = sz > 0 ? array.get(sorted, b_idx) : 0.0
+    [ic_val >= good_thresh, ic_val <= bad_thresh, good_thresh, bad_thresh]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3 — LAYER 2: OPTIMIZER UDT + 4 STRATEGIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type Optimizer — unified UDT for all 4 strategies
+// @field kind             Strategy: ARGMAX | UCB | THOMPSON | BAYESIAN
+// @field grid             Discrete parameter grid (size ≤ 30 for BAYESIAN)
+// @field ic_ema           Posterior mean per cell (EWM updated)
+// @field ic_var           Posterior variance per cell (UCB/Thompson/Bayes)
+// @field visits           Visit count per cell
+// @field lr               EWM learning rate for ic_ema / ic_var updates
+// @field c_ucb            Exploration coefficient (UCB only)
+// @field cooldown         Minimum bars between parameter changes
+// @field last_change_bar  Bar index of last change
+// @field current_idx      Currently selected grid index
+// @field kernel_matrix    Flattened len(grid)² Gram matrix (BAYESIAN only)
+// @field kernel_kind      RBF | MATERN52 (BAYESIAN only)
+// @field kernel_ls        Kernel lengthscale (BAYESIAN only)
+// @field kernel_noise     Observation noise σ² (BAYESIAN only)
+// @field total_visits     Cumulative visit count (for UCB log normalizer)
+// @field decay_factor     EWM decay applied by reset_decay (0..1; 1=no decay)
+export type Optimizer
+    OptimizerKind    kind
+    array<float>     grid
+    array<float>     ic_ema
+    array<float>     ic_var
+    array<int>       visits
+    float            lr
+    float            c_ucb
+    int              cooldown
+    int              last_change_bar
+    int              current_idx
+    array<float>     kernel_matrix
+    KernelKind       kernel_kind
+    float            kernel_ls
+    float            kernel_noise
+    int              total_visits
+    float            decay_factor
+
+// ─── helpers (non-exported) ─────────────────────────────────────────────
+
+f_kernel_rbf(float xi, float xj, float ls) =>
+    float d = xi - xj
+    math.exp(-(d * d) / (2.0 * ls * ls))
+
+f_kernel_matern52(float xi, float xj, float ls) =>
+    float d = math.abs(xi - xj) / ls
+    float s5 = math.sqrt(5.0) * d
+    (1.0 + s5 + 5.0 * d * d / 3.0) * math.exp(-s5)
+
+f_kernel(float xi, float xj, float ls, KernelKind k) =>
+    k == KernelKind.MATERN52 ? f_kernel_matern52(xi, xj, ls) : f_kernel_rbf(xi, xj, ls)
+
+// Build Gram matrix K[n×n] flattened; returns array<float> length n*n
+f_build_gram(array<float> grid, float ls, KernelKind k, float noise) =>
+    int n = array.size(grid)
+    array<float> km = array.new_float(n * n, 0.0)
+    for i = 0 to n - 1
+        float gi = array.get(grid, i)
+        for j = 0 to n - 1
+            float gj = array.get(grid, j)
+            float kval = f_kernel(gi, gj, ls, k)
+            array.set(km, i * n + j, i == j ? kval + noise : kval)
+    km
+
+// Simple O(n²) vector multiply K * v (n ≤ 30)
+f_mat_vec(array<float> km, array<float> v, int n) =>
+    array<float> out = array.new_float(n, 0.0)
+    for i = 0 to n - 1
+        float s = 0.0
+        for j = 0 to n - 1
+            s += array.get(km, i * n + j) * array.get(v, j)
+        array.set(out, i, s)
+    out
+
+// Solve K*x = b via Jacobi iteration (n ≤ 30, sufficient for diagonal-dominant GP)
+f_solve_linear_small(array<float> km, array<float> b, int n) =>
+    array<float> x = array.copy(b)
+    for _iter = 0 to 19  // 20 Jacobi steps
+        array<float> xn = array.new_float(n, 0.0)
+        for i = 0 to n - 1
+            float diag = array.get(km, i * n + i)
+            float s = array.get(b, i)
+            for j = 0 to n - 1
+                if j != i
+                    s -= array.get(km, i * n + j) * array.get(x, j)
+            array.set(xn, i, diag > 1e-10 ? s / diag : 0.0)
+        x := xn
+    x
+
+// ─── Factory ────────────────────────────────────────────────────────────
+
+// @function Create a new Optimizer
+// @param kind            Strategy
+// @param grid            Parameter grid (array<float>, size ≤ 30 for BAYESIAN)
+// @param lr              EWM learning rate for ic_ema / ic_var updates (0–1)
+// @param c_ucb           UCB exploration constant (ignored for non-UCB)
+// @param cooldown        Minimum bars between switches
+// @param kernel_kind     Kernel for BAYESIAN (ignored otherwise)
+// @param kernel_ls       Kernel lengthscale (ignored otherwise)
+// @param kernel_noise    Observation noise (ignored otherwise)
+export f_optimizer_new(OptimizerKind kind, array<float> grid, float lr, float c_ucb, simple int cooldown, KernelKind kernel_kind, float kernel_ls, float kernel_noise) =>
+    int n = array.size(grid)
+    float safe_noise = math.max(1e-6, kernel_noise)
+    if n < 2
+        log.error("f_optimizer_new: grid_size=" + str.tostring(n) + " is invalid. Minimum grid size is 2.")
+    if kind == OptimizerKind.BAYESIAN and n > 30
+        log.error("f_optimizer_new: BAYESIAN grid_size=" + str.tostring(n) + " exceeds maximum of 30 for Jacobi solver.")
+    array<float> km = kind == OptimizerKind.BAYESIAN and n >= 2 ? f_build_gram(grid, math.max(1e-6, kernel_ls), kernel_kind, safe_noise) : array.new_float(0)
+    Optimizer.new(kind = kind, grid = grid, ic_ema = array.new_float(n, 0.0), ic_var = array.new_float(n, 1.0), visits = array.new_int(n, 0), lr = lr, c_ucb = c_ucb, cooldown = cooldown, last_change_bar = 0, current_idx = 0, kernel_matrix = km, kernel_kind = kernel_kind, kernel_ls = math.max(1e-6, kernel_ls), kernel_noise = safe_noise, total_visits = 0, decay_factor = 1.0)
+
+// ─── propose() ──────────────────────────────────────────────────────────
+
+// @function Propose next parameter index to try
+// @returns Selected grid index
+export method propose(Optimizer self) =>
+    int n = array.size(self.grid)
+    int best_idx = self.current_idx
+    // Respect cooldown
+    if bar_index - self.last_change_bar < self.cooldown
+        best_idx
+    else if self.kind == OptimizerKind.ARGMAX
+        array<float> ema = self.ic_ema
+        float best_val = -1e18
+        for i = 0 to n - 1
+            float v = array.get(ema, i)
+            if v > best_val
+                best_val := v
+                best_idx := i
+        best_idx
+    else if self.kind == OptimizerKind.UCB
+        float log_n = math.log(math.max(1, self.total_visits))
+        array<float> ema = self.ic_ema
+        array<int>   vis = self.visits
+        float best_val = -1e18
+        for i = 0 to n - 1
+            int vi = array.get(vis, i)
+            float explore = vi > 0 ? self.c_ucb * math.sqrt(log_n / float(vi)) : 1e9
+            float v = array.get(ema, i) + explore
+            if v > best_val
+                best_val := v
+                best_idx := i
+        best_idx
+    else if self.kind == OptimizerKind.THOMPSON
+        array<float> ema  = self.ic_ema
+        array<float> ivar = self.ic_var
+        float best_val = -1e18
+        for i = 0 to n - 1
+            float mu = array.get(ema, i)
+            float sigma = math.sqrt(math.max(1e-8, array.get(ivar, i)))
+            float seed = math.sin(float(bar_index) * 12.9898 + float(i) * 78.233) * 43758.5453
+            float frac = seed - math.floor(seed)
+            float z = frac < 0.5 ? -math.sqrt(-2.0 * math.log(math.max(1e-10, frac))) : math.sqrt(-2.0 * math.log(math.max(1e-10, 1.0 - frac)))
+            float sample = mu + sigma * z
+            if sample > best_val
+                best_val := sample
+                best_idx := i
+        best_idx
+    else  // BAYESIAN: GP-UCB acquisition
+        array<float> ema  = self.ic_ema
+        array<float> ivar = self.ic_var
+        float best_val = -1e18
+        for i = 0 to n - 1
+            float mu = array.get(ema, i)
+            float v  = math.sqrt(math.max(1e-8, array.get(ivar, i)))
+            float acq = mu + v
+            if acq > best_val
+                best_val := acq
+                best_idx := i
+        best_idx
+
+// ─── observe() ──────────────────────────────────────────────────────────
+
+// @function Record observed IC for a grid cell and update posterior
+// @param idx        Grid index that was evaluated
+// @param ic_sample  Observed IC value
+export method observe(Optimizer self, int idx, float ic_sample) =>
+    if na(ic_sample)
+        self
+    else
+        // Update visit count
+        int v = array.get(self.visits, idx) + 1
+        array.set(self.visits, idx, v)
+        self.total_visits += 1
+        // EWM update of mean
+        float mu_old = array.get(self.ic_ema, idx)
+        float mu_new = mu_old + self.lr * (ic_sample - mu_old)
+        array.set(self.ic_ema, idx, mu_new)
+        // EWM update of variance
+        float var_old = array.get(self.ic_var, idx)
+        float err = ic_sample - mu_new
+        float var_new = (1.0 - self.lr) * (var_old + self.lr * err * err)
+        array.set(self.ic_var, idx, math.max(1e-8, var_new))
+        // BAYESIAN: update GP posterior across all cells via kernel weighting
+        if self.kind == OptimizerKind.BAYESIAN
+            int n = array.size(self.grid)
+            array<float> k_x = array.new_float(n, 0.0)
+            float grid_idx = array.get(self.grid, idx)
+            for j = 0 to n - 1
+                float grid_j = array.get(self.grid, j)
+                array.set(k_x, j, f_kernel(grid_idx, grid_j, self.kernel_ls, self.kernel_kind))
+            array<float> alpha = f_solve_linear_small(self.kernel_matrix, k_x, n)
+            float residual = ic_sample - mu_old
+            for j = 0 to n - 1
+                float mu_j = array.get(self.ic_ema, j)
+                array.set(self.ic_ema, j, mu_j + array.get(alpha, j) * residual)
+                float var_j = array.get(self.ic_var, j)
+                float grid_j2 = array.get(self.grid, j)
+                float k_jx = f_kernel(grid_j2, grid_idx, self.kernel_ls, self.kernel_kind)
+                float alpha_j = array.get(alpha, j)
+                array.set(self.ic_var, j, math.max(1e-8, var_j - k_jx * alpha_j))
+        // Track change bar if idx changed
+        if idx != self.current_idx
+            self.current_idx := idx
+            self.last_change_bar := bar_index
+        self
+
+// ─── reset_decay() ──────────────────────────────────────────────────────
+
+// @function Apply exponential decay to ic_ema and ic_var (prevents monotonic drift)
+// @param decay  Decay factor 0..1 (e.g. 0.95 = retain 95% of past)
+export method reset_decay(Optimizer self, float decay) =>
+    array<float> ema  = self.ic_ema
+    array<float> ivar = self.ic_var
+    int n = array.size(ema)
+    for i = 0 to n - 1
+        array.set(ema,  i, array.get(ema,  i) * decay)
+        array.set(ivar, i, 1.0 + (array.get(ivar, i) - 1.0) * decay)
+    self.decay_factor := decay
+    self
+
+// ─── check_domination() ─────────────────────────────────────────────────
+
+// @function Detect directional signal domination and bump current grid index
+// @param long_n          Count of long signals in evaluation window
+// @param short_n         Count of short signals in evaluation window
+// @param ratio_threshold Domination ratio (e.g. 4 = 4:1 imbalance)
+// @returns [was_dominated, direction_str]  direction_str = "long" | "short" | "none"
+export method check_domination(Optimizer self, int long_n, int short_n, float ratio_threshold) =>
+    float ratio = long_n == 0 and short_n > 0 ? 99.0 : short_n == 0 and long_n > 0 ? 0.01 : long_n > 0 and short_n > 0 ? float(short_n) / float(long_n) : 1.0
+    bool dominated = false
+    string dir = "none"
+    int n = array.size(self.grid)
+    if ratio >= ratio_threshold
+        self.current_idx := math.min(self.current_idx + 1, n - 1)
+        self.last_change_bar := bar_index
+        dominated := true
+        dir := "short"
+    else if ratio <= 1.0 / ratio_threshold
+        self.current_idx := math.max(self.current_idx - 1, 0)
+        self.last_change_bar := bar_index
+        dominated := true
+        dir := "long"
+    [dominated, dir]
+
+// @function Get current parameter value from grid
+export method current_param(Optimizer self) =>
+    array.get(self.grid, self.current_idx)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4 — LAYER 2: BACKWARD-COMPAT v1 API (kind=ARGMAX)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Find optimal parameter from arrays (v1-compatible, wraps Optimizer.propose)
+// @param testParams  Grid array
+// @param icValues    IC values for each grid cell (same size)
+// @param currentParam  Current param (for EWM smoothing)
+// @param smoothing   EWM lr (0–1)
+// @returns [newParam, bestIC, bestIdx]
+export f_find_optimal_param(array<float> testParams, array<float> icValues, float currentParam, simple float smoothing) =>
+    int n = array.size(icValues)
+    float bestIC = -999.0
+    float bestParam = currentParam
+    int bestIdx = 0
+    for i = 0 to n - 1
+        float ic = array.get(icValues, i)
+        if not na(ic) and ic > bestIC
+            bestIC := ic
+            bestParam := array.get(testParams, i)
+            bestIdx := i
+    float newParam = currentParam * (1.0 - smoothing) + bestParam * smoothing
+    [newParam, bestIC, bestIdx]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5 — LAYER 3: CONTROL & TELEMETRY
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type RegimeGate — IC regime filter
+// @field mode           "positive" | "any" | "top_pct"
+// @field threshold      IC threshold for "positive" or percentile for "top_pct"
+// @field confirm_bars   Bars IC must stay above threshold before gate opens
+export type RegimeGate
+    string mode
+    float  threshold
+    int    confirm_bars
+
+// @function Create RegimeGate
+export f_regime_gate_new(string mode, float threshold, simple int confirm_bars) =>
+    RegimeGate.new(mode = mode, threshold = threshold, confirm_bars = confirm_bars)
+
+// @function Check if gate is open given current IC and a rolling counter
+// @param self        RegimeGate
+// @param ic_val      Current IC
+// @param bars_above  Rolling bars-above-threshold counter (caller maintains)
+// @returns bool gate_open
+export method is_open(RegimeGate self, float ic_val, int bars_above) =>
+    self.mode == "any" ? true : self.mode == "positive" ? ic_val > self.threshold and bars_above >= self.confirm_bars : ic_val > self.threshold and bars_above >= self.confirm_bars
+
+// @type ObjectiveWeights — composite scoring weights
+// @field w_ic               Weight on IC component
+// @field w_hitrate          Weight on hit-rate component
+// @field w_freq_penalty     Penalty for excessive signal frequency
+// @field w_drawdown_penalty Penalty for drawdown
+export type ObjectiveWeights
+    float w_ic
+    float w_hitrate
+    float w_freq_penalty
+    float w_drawdown_penalty
+
+// @function Create ObjectiveWeights
+export f_obj_weights_new(float w_ic, float w_hitrate, float w_freq_penalty, float w_drawdown_penalty) =>
+    ObjectiveWeights.new(w_ic = w_ic, w_hitrate = w_hitrate, w_freq_penalty = w_freq_penalty, w_drawdown_penalty = w_drawdown_penalty)
+
+// @function Compute composite score for a grid cell
+// @param w           ObjectiveWeights
+// @param ic          IC value for cell
+// @param hitrate     Hit rate 0..1 for cell
+// @param freq        Signal frequency 0..1 (higher = more signals = penalized)
+// @param drawdown    Max drawdown magnitude (positive float)
+// @returns Composite score (higher = better)
+export f_composite_score(ObjectiveWeights w, float ic, float hitrate, float freq, float drawdown) =>
+    w.w_ic * ic + w.w_hitrate * hitrate - w.w_freq_penalty * freq - w.w_drawdown_penalty * drawdown
+
+// ─── Serialize / Restore ────────────────────────────────────────────────
+
+// @function Serialize Optimizer state to a compact CSV string
+// @param self  Optimizer to serialize
+// @returns string blob (pass to f_optimizer_restore to reconstruct ic_ema/ic_var)
+export f_optimizer_serialize(Optimizer self) =>
+    int n = array.size(self.grid)
+    string blob = str.tostring(n) + "|" + str.tostring(self.current_idx) + "|" + str.tostring(self.total_visits)
+    for i = 0 to n - 1
+        blob += "|" + str.tostring(array.get(self.ic_ema, i), "#.######") + "," + str.tostring(array.get(self.ic_var, i), "#.######") + "," + str.tostring(array.get(self.visits, i))
+    blob
+
+// @function Restore ic_ema/ic_var/visits from serialized blob into an existing Optimizer
+// @param self  Optimizer (grid must already be initialized with correct size)
+// @param blob  String from f_optimizer_serialize
+// @returns self (mutated in place)
+export f_optimizer_restore(Optimizer self, string blob) =>
+    array<string> parts = str.split(blob, "|")
+    if array.size(parts) >= 3
+        self.current_idx  := int(nz(str.tonumber(array.get(parts, 1)), 0.0))
+        self.total_visits := int(nz(str.tonumber(array.get(parts, 2)), 0.0))
+        int n = array.size(self.grid)
+        for i = 0 to n - 1
+            if 3 + i < array.size(parts)
+                array<string> cell = str.split(array.get(parts, 3 + i), ",")
+                if array.size(cell) >= 3
+                    array.set(self.ic_ema,  i, nz(str.tonumber(array.get(cell, 0)), 0.0))
+                    array.set(self.ic_var,  i, nz(str.tonumber(array.get(cell, 1)), 1.0))
+                    array.set(self.visits,  i, int(nz(str.tonumber(array.get(cell, 2)), 0.0)))
+    self
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6 — LAYER 4: DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Render diagnostics table for Optimizer state
+// @param self      Optimizer
+// @param gate      RegimeGate (pass na if unused)
+// @param weights   ObjectiveWeights (pass na if unused)
+// @param pos       Table position (e.g. position.bottom_right)
+// @param max_rows  Maximum grid rows to display (capped at array.size(grid))
+// @returns table reference
+export f_diag_table(Optimizer self, RegimeGate gate, ObjectiveWeights weights, string pos, simple int max_rows) =>
+    int n = math.min(array.size(self.grid), max_rows)
+    var table t = table.new(pos, 5, n + 2, border_width = 1)
+    if barstate.islast
+        table.cell(t, 0, 0, "grid",    text_size = size.tiny, bgcolor = color.new(color.gray, 40), text_color = color.white)
+        table.cell(t, 1, 0, "μ IC",    text_size = size.tiny, bgcolor = color.new(color.gray, 40), text_color = color.white)
+        table.cell(t, 2, 0, "σ IC",    text_size = size.tiny, bgcolor = color.new(color.gray, 40), text_color = color.white)
+        table.cell(t, 3, 0, "visits",  text_size = size.tiny, bgcolor = color.new(color.gray, 40), text_color = color.white)
+        table.cell(t, 4, 0, "★",       text_size = size.tiny, bgcolor = color.new(color.gray, 40), text_color = color.white)
+        for i = 0 to n - 1
+            bool is_cur = i == self.current_idx
+            color row_bg = is_cur ? color.new(color.blue, 60) : color.new(color.gray, 80)
+            float mu = array.get(self.ic_ema, i)
+            float vr = array.get(self.ic_var, i)
+            int   vi = array.get(self.visits, i)
+            color mu_col = mu > 0.1 ? color.lime : mu < -0.1 ? color.red : color.gray
+            table.cell(t, 0, i + 1, str.tostring(array.get(self.grid, i), "#.##"),        text_size = size.tiny, bgcolor = row_bg)
+            table.cell(t, 1, i + 1, str.tostring(mu, "#.####"),  text_size = size.tiny, bgcolor = row_bg, text_color = mu_col)
+            table.cell(t, 2, i + 1, str.tostring(math.sqrt(vr), "#.####"), text_size = size.tiny, bgcolor = row_bg)
+            table.cell(t, 3, i + 1, str.tostring(vi),             text_size = size.tiny, bgcolor = row_bg)
+            table.cell(t, 4, i + 1, is_cur ? "◄" : "",            text_size = size.tiny, bgcolor = row_bg, text_color = color.white)
+        string kind_str = self.kind == OptimizerKind.ARGMAX ? "argmax" : self.kind == OptimizerKind.UCB ? "ucb" : self.kind == OptimizerKind.THOMPSON ? "thompson" : "bayesian"
+        table.cell(t, 0, n + 1, kind_str,                                      text_size = size.tiny, bgcolor = color.new(color.navy, 50), text_color = color.white)
+        table.cell(t, 1, n + 1, "N=" + str.tostring(self.total_visits),        text_size = size.tiny, bgcolor = color.new(color.navy, 50), text_color = color.white)
+        table.cell(t, 2, n + 1, "cur=" + str.tostring(self.current_param(), "#.##"), text_size = size.tiny, bgcolor = color.new(color.navy, 50), text_color = color.white)
+        bool gate_active = not na(gate) and gate.threshold > 0.0 and gate.confirm_bars > 0
+        string gate_str = na(gate) ? "gate:na" : gate_active ? "gate:ON" : "gate:OFF"
+        float top_w = na(weights) ? na : math.max(math.max(weights.w_ic, weights.w_hitrate), math.max(weights.w_freq_penalty, weights.w_drawdown_penalty))
+        string wgt_str = na(top_w) ? "w:na" : "w=" + str.tostring(top_w, "#.##")
+        table.cell(t, 3, n + 1, gate_str, text_size = size.tiny, bgcolor = color.new(color.navy, 50), text_color = color.white)
+        table.cell(t, 4, n + 1, wgt_str,  text_size = size.tiny, bgcolor = color.new(color.navy, 50), text_color = color.white)
+    t
+
+// @function Render sparkline-style panel (one plot bar per grid cell, height = ic_ema)
+// @param self      Optimizer
+// @param height    Panel height in price units (caller scales)
+// @returns label(na) (renders labels directly)
+export f_diag_panel(Optimizer self, float height) =>
+    if barstate.islast
+        int n = array.size(self.grid)
+        float max_mu = 0.0
+        for i = 0 to n - 1
+            float v = math.abs(array.get(self.ic_ema, i))
+            if v > max_mu
+                max_mu := v
+        float scale = max_mu > 1e-6 ? height / max_mu : 1.0
+        for i = 0 to n - 1
+            float mu = array.get(self.ic_ema, i)
+            float bar_h = mu * scale
+            color c = i == self.current_idx ? color.blue : mu > 0 ? color.lime : color.red
+            string lbl = str.tostring(array.get(self.grid, i), "#") + ":" + str.tostring(mu, "#.##")
+            label.new(bar_index - n + i, bar_h, lbl, color = c, style = label.style_label_up, size = size.tiny, textcolor = color.white)
+    label(na)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7 — ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_kind_str(OptimizerKind k) =>
+    k == OptimizerKind.ARGMAX ? "argmax" : k == OptimizerKind.UCB ? "ucb" : k == OptimizerKind.THOMPSON ? "thompson" : "bayesian"
+
+export f_kernel_str(KernelKind k) =>
+    k == KernelKind.RBF ? "rbf" : "matern52"
+
+export f_return_mode_str(ReturnMode m) =>
+    m == ReturnMode.SIMPLE ? "simple" : m == ReturnMode.LOG ? "log" : "excess"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

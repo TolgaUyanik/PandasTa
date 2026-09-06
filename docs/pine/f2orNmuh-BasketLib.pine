@@ -1,0 +1,559 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 5
+// @tw_status published
+// Single source of truth: cybermediaboy/BasketLib/5
+// @description BasketLib — multi-asset basket aggregation, ratio/spread analysis,
+//              cross-asset correlation, lead-lag detection.
+//              Layer L2. Depends on CyberNumLib + CyberSignalLib + CyberAssetLib.
+//
+// Step 11 of restructuring.
+//
+// Rebuild from prior basket helpers + cross-asset slice of TaUtilityLib.
+//
+// Key design decisions:
+//   - BasketSpec UDT-config IS allowed: all internal math is array-based,
+//     no ta.* simple-required usage. CE10297 does not bind.
+//   - Constituent count CAP_N is a compile-time simple int; runtime active
+//     count is series int. This separates buffer allocation from per-bar logic.
+//   - request.security() calls are emitted at indicator level (not in lib)
+//     because dynamic_requests cannot be conditional inside library functions
+//     in a guaranteed way; caller passes resolved series to BasketLib.
+//
+library("BasketLib", overlay=false)
+import cybermediaboy/CyberNumLib/1 as N
+import cybermediaboy/CyberSignalLib/1 as S
+import cybermediaboy/CyberAssetLib/1 as A
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen — P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Constituent weighting scheme
+export enum WeightScheme
+    EQUAL              // 1/n each
+    MARKETCAP          // weight ∝ caller-supplied marketcap
+    INVERSE_VOL        // weight ∝ 1/stdev
+    FIXED              // caller-supplied static weights
+    LIQUIDITY_TIER     // weight ∝ AssetLib LiquidityTier rank
+
+// @enum Aggregation operator on weighted constituents
+export enum AggregateOp
+    WEIGHTED_MEAN      // Σ wi · xi
+    GEOMETRIC_MEAN     // exp(Σ wi · ln(xi))
+    MEDIAN             // robust unweighted
+    MAX                // pointwise max
+    MIN                // pointwise min
+    SUM                // unnormalized sum (totals)
+
+// @enum Normalization applied to constituent series before aggregation
+export enum NormMode
+    NONE               // raw price
+    ZSCORE             // (x - μ) / σ over window
+    PCT_CHANGE         // log return
+    REBASE_100         // index to first non-na value = 100
+    MINMAX_01          // (x - min) / (max - min)
+
+// @enum Pair relationship type
+export enum PairKind
+    RATIO              // a / b
+    SPREAD             // a - b
+    LOG_RATIO          // log(a / b)
+    NORMALIZED_DIFF    // (a - b) / (a + b)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: BASKET SPEC
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type Constituent — one basket member
+// @field symbol     ticker (e.g. "BINANCE:BTCUSDT")
+// @field weight     normalized [0,1] weight
+// @field tier       liquidity tier (from AssetLib classification)
+// @field active     enabled flag
+export type Constituent
+    string symbol
+    float weight
+    A.LiquidityTier tier
+    bool active
+
+// @type BasketSpec — basket configuration
+// @field name        human label
+// @field members     list of Constituents
+// @field scheme      weighting scheme
+// @field op          aggregation operator
+// @field norm        per-constituent normalization
+// @field norm_len    window for normalization (caller passes simple int when
+//                    feeding to ta.*, but here used in array math — series OK)
+export type BasketSpec
+    string name
+    array<Constituent> members
+    WeightScheme scheme
+    AggregateOp op
+    NormMode norm
+    int norm_len
+
+// @function Build empty basket
+export f_basket_new(string name, WeightScheme scheme, AggregateOp op,
+                    NormMode norm, int norm_len) =>
+    BasketSpec.new(name = name, members = array.new<Constituent>(),
+                    scheme = scheme, op = op, norm = norm, norm_len = norm_len)
+
+// @function Add constituent
+export method add(BasketSpec b, string symbol, float weight,
+                  A.LiquidityTier tier) =>
+    array.push(b.members, Constituent.new(symbol = symbol, weight = weight,
+                                            tier = tier, active = true))
+    b
+
+// @function Toggle constituent active flag by symbol
+export method set_active(BasketSpec b, string symbol, bool active) =>
+    int n = array.size(b.members)
+    if n > 0
+        for i = 0 to n - 1
+            Constituent c = array.get(b.members, i)
+            if c.symbol == symbol
+                c.active := active
+                array.set(b.members, i, c)
+                break
+    b
+
+// @function Count active members
+export method count_active(BasketSpec b) =>
+    int n = array.size(b.members)
+    int c = 0
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(b.members, i).active
+                c += 1
+    c
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: WEIGHT NORMALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Compute normalized weights given scheme + per-constituent stats.
+//           Returns array<float> aligned with b.members (inactive → 0).
+//           For schemes requiring stats (MARKETCAP, INVERSE_VOL), caller
+//           supplies parallel arrays. Pass na arrays when scheme doesn't need them.
+export method compute_weights(BasketSpec b, array<float> caps,
+                               array<float> vols) =>
+    int n = array.size(b.members)
+    array<float> w = array.new<float>(n, 0.0)
+    if n == 0
+        w
+    else
+        // First pass — raw weight per scheme
+        float total = 0.0
+        int active_n = 0
+        for i = 0 to n - 1
+            Constituent c = array.get(b.members, i)
+            if c.active
+                active_n += 1
+                float raw = 0.0
+                if b.scheme == WeightScheme.EQUAL
+                    raw := 1.0
+                else if b.scheme == WeightScheme.FIXED
+                    raw := math.max(0.0, c.weight)
+                else if b.scheme == WeightScheme.MARKETCAP
+                    raw := not na(caps) and i < array.size(caps) ? math.max(0.0, array.get(caps, i)) : 0.0
+                else if b.scheme == WeightScheme.INVERSE_VOL
+                    float v = not na(vols) and i < array.size(vols) ? array.get(vols, i) : na
+                    raw := not na(v) and v > 0.0 ? 1.0 / v : 0.0
+                else  // LIQUIDITY_TIER
+                    raw := c.tier == A.LiquidityTier.T1 ? 3.0 : c.tier == A.LiquidityTier.T2 ? 2.0 : 1.0
+                array.set(w, i, raw)
+                total += raw
+        // Normalize to sum=1
+        if total > 0.0
+            for i = 0 to n - 1
+                array.set(w, i, array.get(w, i) / total)
+        w
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: NORMALIZATION OPS (per-constituent)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Normalize a single constituent series value.
+//           Caller pre-computes window stats (μ, σ, min, max, anchor) and
+//           passes them. This avoids series-len issues on ta.* simple slots.
+//           For ZSCORE: μ = sma(price, window); σ = stdev(price, window) — both series-int OK.
+//           For PCT_CHANGE: anchor = price[1] (or price[len]).
+//           For REBASE_100: anchor = first_non_na_price.
+//           For MINMAX_01: ta.lowest / ta.highest series-int OK in v6.
+export f_normalize_value(float price, NormMode mode,
+                          float mu, float sigma, float anchor, float lo, float hi) =>
+    if na(price)
+        na
+    else
+        if mode == NormMode.NONE
+            price
+        else if mode == NormMode.ZSCORE
+            sigma > 0.0 ? (price - mu) / sigma : 0.0
+        else if mode == NormMode.PCT_CHANGE
+            not na(anchor) and anchor > 0.0 ? math.log(price / anchor) : na
+        else if mode == NormMode.REBASE_100
+            not na(anchor) and anchor > 0.0 ? 100.0 * price / anchor : na
+        else  // MINMAX_01
+            hi > lo ? (price - lo) / (hi - lo) : 0.5
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: AGGREGATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Aggregate normalized constituent values using basket op + weights.
+//           `values` and `weights` parallel to b.members. Inactive → ignored.
+export method aggregate(BasketSpec b, array<float> values,
+                         array<float> weights) =>
+    int n = math.min(array.size(values),
+                      math.min(array.size(weights), array.size(b.members)))
+    float result = na
+    if n > 0
+        if b.op == AggregateOp.WEIGHTED_MEAN
+            float num = 0.0, float den = 0.0
+            int counted = 0
+            for i = 0 to n - 1
+                Constituent c = array.get(b.members, i)
+                if c.active
+                    float v = array.get(values, i)
+                    float w = array.get(weights, i)
+                    if not na(v) and w > 0.0
+                        num += w * v
+                        den += w
+                        counted += 1
+            result := den > 0.0 ? num / den : na
+        else if b.op == AggregateOp.GEOMETRIC_MEAN
+            float log_sum = 0.0, float w_sum = 0.0
+            for i = 0 to n - 1
+                Constituent c = array.get(b.members, i)
+                if c.active
+                    float v = array.get(values, i)
+                    float w = array.get(weights, i)
+                    if not na(v) and v > 0.0 and w > 0.0
+                        log_sum += w * math.log(v)
+                        w_sum += w
+            result := w_sum > 0.0 ? math.exp(log_sum / w_sum) : na
+        else if b.op == AggregateOp.MEDIAN
+            array<float> tmp = array.new<float>()
+            for i = 0 to n - 1
+                Constituent c = array.get(b.members, i)
+                if c.active
+                    float v = array.get(values, i)
+                    if not na(v)
+                        array.push(tmp, v)
+            int m = array.size(tmp)
+            if m > 0
+                array.sort(tmp, order.ascending)
+                result := m % 2 == 0 ? 0.5 * (array.get(tmp, m/2 - 1) + array.get(tmp, m/2)) : array.get(tmp, m/2)
+        else if b.op == AggregateOp.MAX
+            for i = 0 to n - 1
+                Constituent c = array.get(b.members, i)
+                if c.active
+                    float v = array.get(values, i)
+                    if not na(v)
+                        result := na(result) ? v : math.max(result, v)
+        else if b.op == AggregateOp.MIN
+            for i = 0 to n - 1
+                Constituent c = array.get(b.members, i)
+                if c.active
+                    float v = array.get(values, i)
+                    if not na(v)
+                        result := na(result) ? v : math.min(result, v)
+        else  // SUM
+            float s = 0.0
+            int counted = 0
+            for i = 0 to n - 1
+                Constituent c = array.get(b.members, i)
+                if c.active
+                    float v = array.get(values, i)
+                    if not na(v)
+                        s += v
+                        counted += 1
+            result := counted > 0 ? s : na
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: PAIR / SPREAD ANALYSIS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type PairSpec — two-asset relationship descriptor
+// @field a_symbol / b_symbol   tickers
+// @field kind                  PairKind enum
+// @field zscore_len            window for z-score of pair value (caller uses
+//                              simple int when consuming via ta.*)
+export type PairSpec
+    string a_symbol
+    string b_symbol
+    PairKind kind
+    int zscore_len
+
+// @function Compute pair value given two prices and PairKind
+export f_pair_value(float a, float b, PairKind kind) =>
+    if na(a) or na(b)
+        na
+    else if kind == PairKind.RATIO
+        b != 0.0 ? a / b : na
+    else if kind == PairKind.SPREAD
+        a - b
+    else if kind == PairKind.LOG_RATIO
+        a > 0.0 and b > 0.0 ? math.log(a / b) : na
+    else  // NORMALIZED_DIFF
+        (a + b) != 0.0 ? (a - b) / (a + b) : na
+
+// @function Pair z-score helper.
+//           Caller pre-computes μ and σ via ta.sma/stdev (series-int OK).
+//           Returns (pair_value - μ) / σ.
+export f_pair_zscore(float pair_val, float mu, float sigma) =>
+    sigma > 0.0 ? (pair_val - mu) / sigma : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: LEAD-LAG DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type LeadLagState — tracker for cross-correlation across lags
+// @field max_lag         maximum offset to scan
+// @field corrs           array of corr at each lag in [-max_lag, +max_lag]
+// @field best_lag        lag with maximum |corr|
+// @field best_corr       signed correlation at best_lag
+// @field len             window length used (informational)
+export type LeadLagState
+    int max_lag
+    array<float> corrs
+    int best_lag
+    float best_corr
+    int len
+
+export f_leadlag_new(int max_lag) =>
+    LeadLagState.new(max_lag = max_lag, corrs = array.new<float>(2 * max_lag + 1, na),
+                      best_lag = 0, best_corr = 0.0, len = 0)
+
+// @function Update lead-lag state.
+//           Caller maintains var rolling buffers x_buf, y_buf of len ≥ max_lag + window.
+//           Returns mutated state with best_lag / best_corr filled.
+//           Cost: O((2·max_lag + 1) · window) — bounded.
+export method update(LeadLagState st, array<float> x_buf, array<float> y_buf,
+                      int window) =>
+    int sx = array.size(x_buf), int sy = array.size(y_buf)
+    int min_required = window + st.max_lag
+    if sx >= min_required and sy >= min_required
+        st.len := window
+        float best_abs = 0.0
+        int best_l = 0
+        float best_c = 0.0
+        for lag = -st.max_lag to st.max_lag
+            // Compute Pearson on x[t] vs y[t-lag] over `window` recent bars
+            float mx = 0.0, float my = 0.0
+            int n = window
+            for i = 0 to n - 1
+                int xi = sx - 1 - i
+                int yi = sy - 1 - i + lag
+                if yi < 0 or yi >= sy
+                    n := i
+                    break
+                mx += array.get(x_buf, xi)
+                my += array.get(y_buf, yi)
+            if n > 1
+                mx := mx / n
+                my := my / n
+                float cov = 0.0, float vx = 0.0, float vy = 0.0
+                for i = 0 to n - 1
+                    int xi = sx - 1 - i
+                    int yi = sy - 1 - i + lag
+                    float dx = array.get(x_buf, xi) - mx
+                    float dy = array.get(y_buf, yi) - my
+                    cov += dx * dy
+                    vx  += dx * dx
+                    vy  += dy * dy
+                float denom = math.sqrt(vx * vy)
+                float c = denom > 0.0 ? cov / denom : 0.0
+                array.set(st.corrs, lag + st.max_lag, c)
+                if math.abs(c) > best_abs
+                    best_abs := math.abs(c)
+                    best_l := lag
+                    best_c := c
+        st.best_lag := best_l
+        st.best_corr := best_c
+    st
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_scheme_str(WeightScheme s) =>
+    s == WeightScheme.EQUAL ? "equal" : s == WeightScheme.MARKETCAP ? "marketcap" : s == WeightScheme.INVERSE_VOL ? "inverse-vol" : s == WeightScheme.FIXED ? "fixed" : s == WeightScheme.LIQUIDITY_TIER ? "liquidity-tier" : "unknown"
+
+export f_op_str(AggregateOp o) =>
+    o == AggregateOp.WEIGHTED_MEAN ? "wmean" : o == AggregateOp.GEOMETRIC_MEAN ? "gmean" : o == AggregateOp.MEDIAN ? "median" : o == AggregateOp.MAX ? "max" : o == AggregateOp.MIN ? "min" : o == AggregateOp.SUM ? "sum" : "unknown"
+
+export f_norm_str(NormMode m) =>
+    m == NormMode.NONE ? "none" : m == NormMode.ZSCORE ? "zscore" : m == NormMode.PCT_CHANGE ? "log-ret" : m == NormMode.REBASE_100 ? "rebase-100" : m == NormMode.MINMAX_01 ? "minmax01" : "unknown"
+
+export f_pairkind_str(PairKind k) =>
+    k == PairKind.RATIO ? "ratio" : k == PairKind.SPREAD ? "spread" : k == PairKind.LOG_RATIO ? "log-ratio" : k == PairKind.NORMALIZED_DIFF ? "normalized-diff" : "unknown"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: TICKER SLEEP/WAKE STATE MACHINE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Combines Phase2_KRC hysteresis FSM + soft weight blending with ZG Magnet
+// session gating, volume liveness, stall detection, bit-encoded debug, and
+// cubic-shaped warmup damping.
+//
+// Simple usage (price-only):
+//   var TickerState st = TickerState.new()
+//   bool active = BasketLib.f_is_active(high, low, close, 1e-5)
+//   st.update(active, 3, 2, 14)
+//   float w = BasketLib.f_sw_ramp(st.is_live())
+//   float out = BasketLib.f_sw_blend(primary, proxy, w)
+//
+// Full usage (session + volume + stall detection):
+//   bool sess = BasketLib.f_in_session("0930-1600:23456", "America/New_York")
+//   bool active = BasketLib.f_is_active_full(high, low, close, volume, sess, 1e-5)
+//   st.update_full(active, volume > 0, sess, true, 3, 2, 14)
+//   float trust = st.live_weight()   // 0→0 ramp, cubic-shaped after wake
+
+// @type TickerState — per-ticker hysteresis sleep/wake tracker
+// @field silent_bars   consecutive dead bars (sleep counter)
+// @field awake_bars    consecutive live bars (wake counter)
+// @field asleep        current sleep state; true = ticker considered dead
+// @field warmup        bars remaining in post-wake cooldown
+// @field warmup_damp   cubic ramp [0,1]; 1=fully suppressed, 0=fully live
+// @field stalled       in session but not publishing price or volume
+// @field debug_bits    sensor bits: +1 H≠L, +2 C≠C[1], +4 vol>0, +8 session
+export type TickerState
+    int   silent_bars = 0
+    int   awake_bars  = 0
+    bool  asleep      = true
+    int   warmup      = 0
+    float warmup_damp = 0.0
+    bool  stalled     = false
+    int   debug_bits  = 0
+
+export type BlendRamp
+    float weight = 0.0
+
+export method update(BlendRamp state, bool toward_one, float rise_step, float fall_step) =>
+    state.weight := toward_one ? math.min(1.0, state.weight + rise_step) : math.max(0.0, state.weight - fall_step)
+    state.weight
+
+// @function Price-based activity: H/L range OR close delta > eps.
+export f_is_active(float h, float l, float c, float price_eps) =>
+    (h - l > price_eps) or (math.abs(c - nz(c[1], c)) > price_eps)
+
+// @function Close-only activity — for macro tickers where H/L is unavailable.
+export f_is_active_close(float c, float price_eps) =>
+    math.abs(c - nz(c[1], c)) > price_eps
+
+// @function Full sensor: session-gated H/L + close delta + volume.
+//           Returns false outside session when session_active=false.
+export f_is_active_full(float h, float l, float c, float v,
+                          bool session_active, float price_eps) =>
+    bool price_moved = (h - l > price_eps) or (math.abs(c - nz(c[1], c)) > price_eps)
+    session_active and (price_moved or nz(v) > 0)
+
+// @function Bit-encoded debug: +1 H≠L, +2 C≠C[1], +4 vol>0, +8 session open.
+export f_compute_debug_bits(float h, float l, float c, float v,
+                              bool session_active, float price_eps) =>
+    int bits = 0
+    if h - l > price_eps
+        bits += 1
+    if math.abs(c - nz(c[1], c)) > price_eps
+        bits += 2
+    if nz(v) > 0
+        bits += 4
+    if session_active
+        bits += 8
+    bits
+
+// @function Session check: true when bar is inside the given session schedule.
+//           session_str: TradingView format e.g. "0930-1600:23456"
+//           tz: timezone e.g. "America/New_York", "UTC"
+export f_in_session(string session_str, string tz) =>
+    not na(time(timeframe.period, session_str, tz))
+
+// @function Update TickerState (simple, price-only). Adds cubic warmup_damp.
+export method update(TickerState st, bool active,
+                      int sleep_bars, int wake_bars, int warmup_bars) =>
+    bool was_asleep = st.asleep
+    if active
+        st.silent_bars := 0
+        st.awake_bars  := st.awake_bars + 1
+    else
+        st.silent_bars := st.silent_bars + 1
+        st.awake_bars  := 0
+    if st.asleep
+        if st.awake_bars >= wake_bars
+            st.asleep := false
+    else
+        if st.silent_bars >= sleep_bars
+            st.asleep := true
+    bool just_woke = not st.asleep and was_asleep
+    if just_woke
+        st.warmup := warmup_bars
+    else if st.warmup > 0
+        st.warmup := st.warmup - 1
+    float wb = math.max(float(warmup_bars), 1.0)
+    st.warmup_damp := st.warmup > 0 ? math.pow(float(st.warmup) / wb, 3.0) : 0.0
+    st
+
+// @function Update TickerState (full: session + volume + stall detection).
+//           price_active:     H/L or close moved
+//           vol_active:       volume > 0 (pass false for volumeless tickers)
+//           in_session:       from f_in_session() or external schedule check
+//           gate_by_session:  when true, forces asleep outside session
+export method update_full(TickerState st, bool price_active, bool vol_active,
+                           bool in_session, bool gate_by_session, int sleep_bars, int wake_bars, int warmup_bars) =>
+    bool effective_active = gate_by_session
+         ? (in_session and (price_active or vol_active))
+         : (price_active or vol_active)
+    st.stalled := in_session and not price_active and not vol_active
+    bool was_asleep = st.asleep
+    if effective_active
+        st.silent_bars := 0
+        st.awake_bars  := st.awake_bars + 1
+    else
+        st.silent_bars := st.silent_bars + 1
+        st.awake_bars  := 0
+    if st.asleep
+        if st.awake_bars >= wake_bars
+            st.asleep := false
+    else
+        if st.silent_bars >= sleep_bars
+            st.asleep := true
+    bool just_woke = not st.asleep and was_asleep
+    if just_woke
+        st.warmup := warmup_bars
+    else if st.warmup > 0
+        st.warmup := st.warmup - 1
+    float wb = math.max(float(warmup_bars), 1.0)
+    st.warmup_damp := st.warmup > 0 ? math.pow(float(st.warmup) / wb, 3.0) : 0.0
+    st
+
+// @function True when awake AND warmup damping is effectively zero.
+export method is_live(TickerState st) =>
+    not st.asleep and st.warmup_damp < 0.01
+
+// @function Trust weight [0,1]: 0 when asleep, cubic ramp 0→1 after wake.
+export method live_weight(TickerState st) =>
+    st.asleep ? 0.0 : 1.0 - st.warmup_damp
+
+// @function Soft blend ramp weight — +0.15/bar when live, -0.05/bar when dead.
+//           Each call site maintains independent state (Pine v6 stateful function).
+export f_sw_ramp(bool primary_live) =>
+    var float w = 0.0
+    if primary_live
+        w := math.min(1.0, w + 0.15)
+    else
+        w := math.max(0.0, w - 0.05)
+    w
+
+// @function Blend primary and proxy using hysteresis-driven soft weight. na-safe.
+export f_sw_blend(float primary, float proxy, float ramp) =>
+    float p = na(primary) ? nz(proxy) : primary
+    float q = na(proxy)   ? nz(primary) : proxy
+    ramp * p + (1.0 - ramp) * q
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,249 @@
+//@version=6
+// @description Classify a TradingView symbol (stock / crypto / future / etc.) and, for
+//              continuous futures, resolve the real front-month contract ticker with a
+//              4-digit year (e.g. "MNQ1!" -> "MNQU2026"). Prefers the built-in
+//              syminfo.current_contract (authoritative, roll-aware) and falls back to a
+//              calendar estimate only when current_contract is na.
+library("ContractResolver", overlay = true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Result type
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @type Parsed/resolved symbol.
+// @field ticker        Original ticker without exchange prefix (e.g. "MNQ1!").
+// @field exchange      Exchange / prefix (e.g. "CME_MINI").
+// @field assetClass    "stock" | "crypto" | "future" | "forex" | "index" | "fund" | "other".
+// @field isContinuous  True when the ticker is a continuous future (ends with "!").
+// @field root          Futures root (e.g. "MNQ"); na for non-futures.
+// @field monthCode     Futures month letter (F,G,H,J,K,M,N,Q,U,V,X,Z); na for non-futures.
+// @field contractMonth Contract month 1-12; na for non-futures.
+// @field contractYear  4-digit contract year; na for non-futures.
+// @field resolved      Final ticker: real contract for futures, unchanged for stock/crypto/other.
+// @field approximated  True when month/year were estimated by calendar (not from current_contract).
+export type Contract
+    string ticker
+    string exchange
+    string assetClass
+    bool   isContinuous
+    string root
+    string monthCode
+    int    contractMonth
+    int    contractYear
+    string resolved
+    bool   approximated
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Month-code helpers (universal CME letters)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Month number (1-12) -> futures month-code letter. Returns na if out of range.
+// @param m Month number, 1-12.
+// @returns Single-letter month code, or na.
+export monthCode(int m) =>
+    codes = array.from("F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z")
+    na(m) or m < 1 or m > 12 ? na : array.get(codes, m - 1)
+
+// @function Month-code letter -> month number (1-12). Returns na if not a valid code.
+// @param code Single-letter month code (case-insensitive).
+// @returns Month number 1-12, or na.
+export monthNumber(string code) =>
+    codes = array.from("F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z")
+    c = na(code) ? "" : str.upper(code)
+    int res = na
+    i = 0
+    while i < 12 and na(res)
+        if array.get(codes, i) == c
+            res := i + 1
+        i += 1
+    res
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal string utilities (not exported)
+// ─────────────────────────────────────────────────────────────────────────────
+
+isDigit(string ch) =>
+    str.contains("0123456789", ch)
+
+endsWith(string s, string suf) =>
+    ls = str.length(s)
+    lf = str.length(suf)
+    ls >= lf and str.substring(s, ls - lf, ls) == suf
+
+// Strip a trailing continuous suffix ("1!", "2!", "!") to get the root.
+stripContinuous(string t) =>
+    s = t
+    if endsWith(s, "!")
+        s := str.substring(s, 0, str.length(s) - 1)            // drop "!"
+        while str.length(s) > 0 and isDigit(str.substring(s, str.length(s) - 1, str.length(s)))
+            s := str.substring(s, 0, str.length(s) - 1)        // drop the depth digit(s)
+    s
+
+// Parse an explicit contract like "ESM2025" / "ESM25" -> [root, monthCode, year(4-digit)].
+parseContract(string c) =>
+    string root = na
+    string mc   = na
+    int    yr   = na
+    if not (na(c) or c == "")
+        n = str.length(c)
+        k = 0                                                  // count trailing digits
+        while k < n and isDigit(str.substring(c, n - 1 - k, n - k))
+            k += 1
+        digits = k > 0 ? str.substring(c, n - k, n) : ""
+        body   = str.substring(c, 0, n - k)
+        if k >= 4
+            yr := int(math.round(str.tonumber(str.substring(digits, str.length(digits) - 4, str.length(digits)))))
+        else if k == 2
+            yr := 2000 + int(math.round(str.tonumber(digits)))
+        else if k == 1
+            yr := 2020 + int(math.round(str.tonumber(digits)))  // ambiguous single digit, best-effort
+        if str.length(body) >= 1
+            mc   := str.upper(str.substring(body, str.length(body) - 1, str.length(body)))
+            root := str.substring(body, 0, str.length(body) - 1)
+    [root, mc, yr]
+
+// Approximate listing cycle (which months list) for a root. Whole-token match via delimiters.
+// QUARTERLY = Mar/Jun/Sep/Dec; EVEN = Feb/Apr/Jun/Aug/Oct/Dec; else MONTHLY.
+cycleMonths(string root) =>
+    r = "|" + str.upper(na(root) ? "" : root) + "|"
+    quarterly = array.from(3, 6, 9, 12)
+    even      = array.from(2, 4, 6, 8, 10, 12)
+    monthly   = array.from(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+    isQ = str.contains("|ES|MES|NQ|MNQ|YM|MYM|RTY|M2K|EMD|NKD|SP|ND|ZB|ZN|ZF|ZT|UB|TN|6A|6B|6C|6E|6J|6M|6N|6S|E7|M6E|M6A|M6B|", r)
+    isE = str.contains("|GC|MGC|PL|PA|", r)
+    isQ ? quarterly : isE ? even : monthly
+
+// Estimate front-month [month, year] from a reference date for a given root.
+// rollDay is a day-of-month heuristic: once past it inside a contract month, advance.
+estimate(string root, int refY, int refM, int refD, int rollDay) =>
+    months = cycleMonths(root)
+    sz = array.size(months)
+    int selM = na
+    selY = refY
+    i = 0
+    while i < sz and na(selM)
+        m = array.get(months, i)
+        if m > refM
+            selM := m
+        else if m == refM and refD <= rollDay
+            selM := m
+        i += 1
+    if na(selM)
+        selM := array.get(months, 0)
+        selY := refY + 1
+    [selM, selY]
+
+// Step back one listed contract in the root's cycle -> [month, year] of the previous contract.
+prevContract(string root, int m, int y) =>
+    months = cycleMonths(root)
+    sz = array.size(months)
+    int pm = na
+    py = y
+    i = sz - 1
+    while i >= 0 and na(pm)
+        cm = array.get(months, i)
+        if cm < m
+            pm := cm
+        i -= 1
+    if na(pm)
+        pm := array.get(months, sz - 1)   // wrap to last month of the previous year
+        py := y - 1
+    [pm, py]
+
+classifyType(string typ, bool cont) =>
+    t = na(typ) ? "" : str.lower(typ)
+    t == "futures" ? "future" : t == "crypto" ? "crypto" : t == "stock" ? "stock" : t == "forex" ? "forex" : t == "fund" ? "fund" : t == "index" ? "index" : t == "dr" ? "stock" : t == "" ? (cont ? "future" : "other") : "other"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main API
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @function Resolve a symbol into its asset class and, for continuous futures, the
+//           front-month contract ticker. Pass syminfo.current_contract for an exact,
+//           roll-aware result; if it is na, a calendar estimate is used (approximated=true).
+// @param ticker          Symbol without exchange prefix (e.g. syminfo.ticker).
+// @param exchange        Exchange / prefix (e.g. syminfo.prefix).
+// @param symType         syminfo.type ("stock","crypto","futures","forex","fund","index","dr"...).
+// @param currentContract syminfo.current_contract (na when chart is not a continuous future).
+// @param refTime         Reference time (ms) for the estimate fallback; 0 -> use timenow.
+// @param rollDay         Day-of-month threshold for rolling to the next contract in the fallback.
+// @param previous        When true, return the previous contract (one step back in the cycle) instead of the front month.
+// @returns A Contract object.
+export resolve(string ticker, string exchange, string symType, string currentContract, int refTime = 0, int rollDay = 8, bool previous = false) =>
+    t    = na(ticker) ? "" : ticker
+    cont = endsWith(t, "!")
+    ac   = classifyType(symType, cont)
+
+    string root     = na
+    string mc       = na
+    int    cm       = na
+    int    cy       = na
+    string resolved = t
+    bool   approx   = false
+
+    if ac == "future"
+        if not (na(currentContract) or currentContract == "")
+            [pr, pmc, pyr] = parseContract(currentContract)         // authoritative, roll-aware
+            root     := pr
+            mc       := pmc
+            cm       := monthNumber(pmc)
+            cy       := pyr
+            resolved := root + mc + str.tostring(cy)
+            approx   := false
+        else
+            root      = stripContinuous(t)                          // fallback: calendar estimate
+            rt        = refTime <= 0 ? timenow : refTime
+            [em, ey]  = estimate(root, year(rt), month(rt), dayofmonth(rt), rollDay)
+            cm       := em
+            cy       := ey
+            mc       := monthCode(em)
+            resolved := root + mc + str.tostring(cy)
+            approx   := true
+    // stock / crypto / forex / index / fund / other: leave the ticker unchanged
+
+    // Optionally step back one listed contract (the previous / most-recently-rolled contract).
+    if previous and ac == "future" and not na(cm) and not na(cy)
+        [pm, py] = prevContract(root, cm, cy)
+        cm       := pm
+        cy       := py
+        mc       := monthCode(pm)
+        resolved := root + mc + str.tostring(cy)
+
+    Contract.new(t, na(exchange) ? "" : exchange, ac, cont, root, mc, cm, cy, resolved, approx)
+
+// @function Convenience wrapper: resolve the chart's own symbol from its syminfo.* fields.
+// @param rollDay Day-of-month threshold used only by the estimate fallback.
+// @param previous When true, return the previous contract instead of the front month.
+// @returns A Contract object for the current chart symbol.
+export resolveChart(int rollDay = 8, bool previous = false) =>
+    resolve(syminfo.ticker, syminfo.prefix, syminfo.type, syminfo.current_contract, timenow, rollDay, previous)
+
+// @function Build a custom string from a resolved Contract using a placeholder pattern.
+//           Placeholders: {root} {mc} {m} {mm} {yyyy} {yy} {ticker} {exch} {class}
+//           e.g. format(c, "{exch}:{root}{mc}{yyyy}") -> "CME_MINI:MNQU2026"
+// @param c       A Contract (typically from resolve / resolveChart).
+// @param pattern Template string containing any of the placeholders above.
+// @returns The pattern with placeholders substituted (missing fields -> "").
+export format(Contract c, string pattern) =>
+    yyyy = na(c.contractYear)  ? "" : str.tostring(c.contractYear)
+    yy   = str.length(yyyy) >= 2 ? str.substring(yyyy, str.length(yyyy) - 2, str.length(yyyy)) : yyyy
+    mm   = na(c.contractMonth) ? "" : (c.contractMonth < 10 ? "0" + str.tostring(c.contractMonth) : str.tostring(c.contractMonth))
+    out = pattern
+    out := str.replace_all(out, "{root}",   na(c.root)       ? "" : c.root)
+    out := str.replace_all(out, "{mc}",     na(c.monthCode)  ? "" : c.monthCode)
+    out := str.replace_all(out, "{mm}",     mm)
+    out := str.replace_all(out, "{m}",      na(c.contractMonth) ? "" : str.tostring(c.contractMonth))
+    out := str.replace_all(out, "{yyyy}",   yyyy)
+    out := str.replace_all(out, "{yy}",     yy)
+    out := str.replace_all(out, "{ticker}", na(c.ticker)     ? "" : c.ticker)
+    out := str.replace_all(out, "{exch}",   na(c.exchange)   ? "" : c.exchange)
+    out := str.replace_all(out, "{class}",  na(c.assetClass) ? "" : c.assetClass)
+    out
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Demo (not imported by consumers) — shows the resolver on the current chart
+// ─────────────────────────────────────────────────────────────────────────────
+demo = resolveChart()
+if barstate.islast
+    txt = str.format("class: {0}\nticker: {1}\nresolved: {2}\nestimated: {3}", demo.assetClass, demo.ticker, demo.resolved, demo.approximated)
+    label.new(bar_index, high, txt, style = label.style_label_left, color = color.new(color.blue, 0), textcolor = color.white, size = size.normal)

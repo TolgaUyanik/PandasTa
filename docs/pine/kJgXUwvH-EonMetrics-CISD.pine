@@ -1,0 +1,300 @@
+//@version=6
+indicator('EonMetrics CISD', 'CISD by EonMetrics', overlay=true, max_lines_count=500, max_labels_count=500)
+
+// CISD by EonMetrics — Change In State of Delivery levels (open-source).
+//
+// CONCEPT: price is "delivered" in one direction through a series of consecutive
+// same-direction candles. The OPEN of the FIRST candle of that series is the
+// delivery level. When a later candle CLOSES through it against the series
+// (close above the open of a down-series, or below the open of an up-series),
+// the state of delivery has changed — that close is the CISD.
+//
+// Unlike MSS/BOS, CISD needs NO swing pivot: the level comes from the candle
+// series itself, so it confirms earlier than structure-based tools. After
+// confirmation the level is kept on the chart as support/resistance and tracked
+// bar by bar (retest / invalidation), same lifecycle engine as our MTF S&D zones.
+//
+// NON-REPAINT: the whole state machine advances on CONFIRMED bars only —
+// nothing is drawn, moved or removed intrabar. No signals, no targets:
+// levels only. Annotation, not advice.
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  DETECTION
+// ═════════════════════════════════════════════════════════════════════════════
+grpDet = 'Detection'
+
+minLen = input.int(2, 'Min Series Length', minval=1, maxval=10, group=grpDet,
+  tooltip = 'Minimum number of consecutive same-direction candles for the series to count as delivery. 2 (default) = a real push, not a single candle; raise to 3-4 for only the strongest legs (fewer, more meaningful levels).')
+
+dirMode = input.string('Body (close vs open)', 'Candle Direction', options=['Body (close vs open)', 'Close vs Previous Close'], group=grpDet,
+  tooltip = 'How a candle\'s direction is read. Body = candle color (the canonical CISD definition). Close vs Previous Close = direction of the closing price itself — slightly smoother on markets with frequent open gaps.')
+
+dojiKeep = input.bool(true, 'Doji Continues the Series', group=grpDet,
+  tooltip = 'ON (default) = a doji (no direction) does not interrupt a running series — delivery continues through it. OFF = a doji ends the series.')
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  LEVELS
+// ═════════════════════════════════════════════════════════════════════════════
+grpLvl = 'Levels'
+
+maxPerSide = input.int(3, 'Max Active Levels per Side', minval=1, maxval=10, group=grpLvl,
+  tooltip = 'How many confirmed CISD levels are kept per direction. When a new one confirms above the cap, the oldest of that side is dropped. Keeps the chart readable.')
+
+lifetime = input.int(0, 'Level Lifetime (bars, 0 = until broken)', minval=0, maxval=5000, group=grpLvl,
+  tooltip = '0 (default) = a confirmed level stays until price CLOSES back through it. Any other value = the level also expires quietly after this many bars.')
+
+keepBroken = input.bool(false, 'Keep Broken Levels on Chart', group=grpLvl,
+  tooltip = 'ON = a level invalidated by a close back through it stays visible, dimmed and frozen at the break bar. OFF (default) = broken levels are removed.')
+
+showRetests = input.bool(true, 'Mark Retests', group=grpLvl,
+  tooltip = 'Draws a small marker each time price returns and touches an active level after having fully left it. The touch is wick-based; a close through the level is a break, not a retest.')
+
+showPending = input.bool(true, 'Show Pending Level (dotted)', group=grpLvl,
+  tooltip = 'Shows the CURRENT candidate level as a dotted line before it confirms: the open of the most recent qualifying series, waiting for a close through it. This is where the next CISD would trigger.')
+
+showOrigin = input.bool(true, 'Show CISD Segment (solid, origin → confirmation)', group=grpLvl,
+  tooltip = 'ON (default) = draws the CISD event itself as a SOLID segment from the series origin (the candle whose open defines the level) to the confirmation bar. The level while it then acts as support/resistance — from confirmation onward — is DASHED. OFF = only the dashed active line from the confirmation bar.')
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  STYLE
+// ═════════════════════════════════════════════════════════════════════════════
+grpSty = 'Style'
+
+bullC = input.color(#089981, 'Bullish CISD', inline='c', group=grpSty)
+bearC = input.color(#f23645, 'Bearish CISD', inline='c', group=grpSty)
+
+lvlWidth = input.int(1, 'Line Width', minval=1, maxval=4, group=grpSty)
+
+textSizeInp = input.string('Small', 'Label Size', options=['Tiny', 'Small', 'Normal'], group=grpSty)
+
+showState = input.bool(false, 'Show Current Delivery State', group=grpSty,
+  tooltip = 'Small floating label at the last bar: current series direction and its candle count (e.g. "Bearish x4").')
+
+tSize = textSizeInp == 'Tiny' ? size.tiny : textSizeInp == 'Normal' ? size.normal : size.small
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  STATE
+// ═════════════════════════════════════════════════════════════════════════════
+type Lvl
+    line  ln
+    label lb
+    int   dir       // 1 = bullish CISD (support) · -1 = bearish (resistance)
+    float price
+    int   startBar
+    int   trigBar
+    bool  broken
+    bool  armed     // price has fully left the level → next touch is a retest
+    array<label> marks
+    line  lnBack    // dashed provenance segment (origin → confirmation), static
+
+var array<Lvl> lvls = array.new<Lvl>()
+
+// running series
+var int   curDir  = 0
+var int   curLen  = 0
+var float curOpen = na
+var int   curBar  = na
+
+// pending (candidate) levels — open of the first candle of the last qualifying series
+var float pendBull    = na
+var int   pendBullBar = na
+var float pendBear    = na
+var int   pendBearBar = na
+
+// per-bar event flags (reset every bar, set on confirmed bars only)
+bool evBullNew = false
+bool evBearNew = false
+bool evBullRt  = false
+bool evBearRt  = false
+bool evBullBrk = false
+bool evBearBrk = false
+
+// deletes a level's drawings
+f_wipe(Lvl L) =>
+    line.delete(L.ln)
+    if not na(L.lnBack)
+        line.delete(L.lnBack)
+    label.delete(L.lb)
+    if array.size(L.marks) > 0
+        for j = 0 to array.size(L.marks) - 1
+            label.delete(array.get(L.marks, j))
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SERIES ENGINE + TRIGGERS — confirmed bars only (non-repaint)
+// ═════════════════════════════════════════════════════════════════════════════
+int rawDir = dirMode == 'Body (close vs open)' ? (close > open ? 1 : close < open ? -1 : 0) : (close > close[1] ? 1 : close < close[1] ? -1 : 0)
+
+if barstate.isconfirmed
+    int d = rawDir
+    if d == 0 and dojiKeep
+        d := curDir                      // doji rides the running series
+
+    if d == 0 and not dojiKeep and curDir != 0
+        // doji ends the series — record it as pending if it qualifies
+        if curDir == -1 and curLen >= minLen
+            pendBull    := curOpen
+            pendBullBar := curBar
+        if curDir == 1 and curLen >= minLen
+            pendBear    := curOpen
+            pendBearBar := curBar
+        curDir  := 0
+        curLen  := 0
+        curOpen := na
+        curBar  := na
+
+    if d != 0
+        if d == curDir
+            curLen += 1
+        else
+            // direction flipped — close out the ended series first
+            if curDir == -1 and curLen >= minLen
+                pendBull    := curOpen
+                pendBullBar := curBar
+            if curDir == 1 and curLen >= minLen
+                pendBear    := curOpen
+                pendBearBar := curBar
+            curDir  := d
+            curLen  := 1
+            curOpen := open
+            curBar  := bar_index
+
+    // ── triggers: a close through the pending level = CISD confirmed ─────────
+    if not na(pendBull)
+        if close > pendBull
+            // SOLID CISD segment: origin → confirmation (the delivery-change event
+            // itself). DASHED active segment: confirmation → right (the level while
+            // it acts as support/resistance), trails the live bar.
+            line ln = line.new(bar_index, pendBull, bar_index, pendBull, color=bullC, width=lvlWidth, style=line.style_dashed)
+            line lnBack = showOrigin ? line.new(pendBullBar, pendBull, bar_index, pendBull, color=bullC, width=lvlWidth, style=line.style_solid) : na
+            label lb = label.new(bar_index, pendBull, 'CISD', style=label.style_label_up, color=color.new(bullC, 100), textcolor=bullC, size=tSize)
+            array.push(lvls, Lvl.new(ln, lb, 1, pendBull, pendBullBar, bar_index, false, false, array.new<label>(), lnBack))
+            evBullNew   := true
+            pendBull    := na
+            pendBullBar := na
+    if not na(pendBear)
+        if close < pendBear
+            // solid CISD segment (origin→confirmation) + dashed active level (see bullish note)
+            line ln = line.new(bar_index, pendBear, bar_index, pendBear, color=bearC, width=lvlWidth, style=line.style_dashed)
+            line lnBack = showOrigin ? line.new(pendBearBar, pendBear, bar_index, pendBear, color=bearC, width=lvlWidth, style=line.style_solid) : na
+            label lb = label.new(bar_index, pendBear, 'CISD', style=label.style_label_down, color=color.new(bearC, 100), textcolor=bearC, size=tSize)
+            array.push(lvls, Lvl.new(ln, lb, -1, pendBear, pendBearBar, bar_index, false, false, array.new<label>(), lnBack))
+            evBearNew   := true
+            pendBear    := na
+            pendBearBar := na
+
+    // ── per-side cap: drop the oldest ACTIVE level of an overfull side ───────
+    for sideDir = 0 to 1
+        int dSide = sideDir == 0 ? 1 : -1
+        int cnt = 0
+        if array.size(lvls) > 0
+            for i = 0 to array.size(lvls) - 1
+                Lvl L = array.get(lvls, i)
+                if L.dir == dSide and not L.broken
+                    cnt += 1
+        if cnt > maxPerSide
+            if array.size(lvls) > 0
+                for i = 0 to array.size(lvls) - 1
+                    Lvl L = array.get(lvls, i)
+                    if L.dir == dSide and not L.broken
+                        f_wipe(L)
+                        array.remove(lvls, i)
+                        break
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  LEVEL LIFECYCLE — trail right edge every bar; state changes on close only
+// ═════════════════════════════════════════════════════════════════════════════
+if array.size(lvls) > 0
+    for i = array.size(lvls) - 1 to 0
+        Lvl L = array.get(lvls, i)
+        if not L.broken
+            line.set_x2(L.ln, bar_index)
+            if barstate.isconfirmed
+                bool isBull = L.dir == 1
+                bool expired = lifetime > 0 and bar_index - L.trigBar > lifetime
+                if expired
+                    f_wipe(L)
+                    array.remove(lvls, i)
+                else
+                    bool broke = isBull ? close < L.price : close > L.price
+                    if broke
+                        L.broken := true
+                        if isBull
+                            evBullBrk := true
+                        else
+                            evBearBrk := true
+                        if keepBroken
+                            line.set_color(L.ln, color.new(isBull ? bullC : bearC, 78))
+                            if not na(L.lnBack)
+                                line.set_color(L.lnBack, color.new(isBull ? bullC : bearC, 75))
+                                line.set_style(L.lnBack, line.style_dashed)
+                            label.set_textcolor(L.lb, color.new(isBull ? bullC : bearC, 60))
+                        else
+                            f_wipe(L)
+                            array.remove(lvls, i)
+                    else
+                        if L.armed
+                            bool touch = isBull ? low <= L.price : high >= L.price
+                            if touch
+                                L.armed := false
+                                if isBull
+                                    evBullRt := true
+                                else
+                                    evBearRt := true
+                                if showRetests
+                                    label mk = label.new(bar_index, L.price, '•', style=label.style_label_center, color=color.new(isBull ? bullC : bearC, 100), textcolor=isBull ? bullC : bearC, size=size.tiny)
+                                    array.push(L.marks, mk)
+                        else
+                            bool out = isBull ? low > L.price : high < L.price
+                            if out
+                                L.armed := true
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  PENDING LINES + STATE LABEL — cosmetic, last bar only
+// ═════════════════════════════════════════════════════════════════════════════
+var line  pendBullLn = na
+var line  pendBearLn = na
+var label stateLb    = na
+
+if barstate.islast
+    // pending bullish (dotted, waiting for a close above)
+    if showPending and not na(pendBull)
+        if na(pendBullLn)
+            pendBullLn := line.new(pendBullBar, pendBull, bar_index, pendBull, color=color.new(bullC, 45), width=1, style=line.style_dotted)
+        line.set_xy1(pendBullLn, pendBullBar, pendBull)
+        line.set_xy2(pendBullLn, bar_index, pendBull)
+    else
+        if not na(pendBullLn)
+            line.delete(pendBullLn)
+            pendBullLn := na
+    // pending bearish
+    if showPending and not na(pendBear)
+        if na(pendBearLn)
+            pendBearLn := line.new(pendBearBar, pendBear, bar_index, pendBear, color=color.new(bearC, 45), width=1, style=line.style_dotted)
+        line.set_xy1(pendBearLn, pendBearBar, pendBear)
+        line.set_xy2(pendBearLn, bar_index, pendBear)
+    else
+        if not na(pendBearLn)
+            line.delete(pendBearLn)
+            pendBearLn := na
+    // current delivery state
+    if showState and curDir != 0
+        string stTxt = (curDir == 1 ? 'Bullish' : 'Bearish') + ' x' + str.tostring(curLen)
+        if na(stateLb)
+            stateLb := label.new(bar_index, close, stTxt, style=label.style_label_left, color=color.new(color.gray, 80), textcolor=color.white, size=size.small)
+        label.set_xy(stateLb, bar_index, close)
+        label.set_text(stateLb, stTxt)
+        label.set_textcolor(stateLb, curDir == 1 ? bullC : bearC)
+    else
+        if not na(stateLb)
+            label.delete(stateLb)
+            stateLb := na
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ALERTS
+// ═════════════════════════════════════════════════════════════════════════════
+alertcondition(evBullNew, title='1. Bullish CISD confirmed',  message='CISD: bullish change in state of delivery — close above the down-series open.')
+alertcondition(evBearNew, title='2. Bearish CISD confirmed',  message='CISD: bearish change in state of delivery — close below the up-series open.')
+alertcondition(evBullRt,  title='3. Bullish level retested',  message='CISD: price returned to an active bullish CISD level.')
+alertcondition(evBearRt,  title='4. Bearish level retested',  message='CISD: price returned to an active bearish CISD level.')
+alertcondition(evBullBrk, title='5. Bullish level broken',    message='CISD: a bullish CISD level was invalidated by a close below it.')
+alertcondition(evBearBrk, title='6. Bearish level broken',    message='CISD: a bearish CISD level was invalidated by a close above it.')

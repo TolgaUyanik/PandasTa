@@ -1,0 +1,199 @@
+//@version=6
+indicator("Regime + RS Score Table", overlay=true)
+
+// ============================================================
+// SCORE LOGIC
+// C1: Price vs Weekly MA | C2: Price vs Monthly MA | C3: Weekly vs Monthly MA
+// Score = C1+C2+C3 -> realizable values: -3, -1, +1, +3
+// Applied to absolute price, and to ratio-vs-benchmark synthetic series
+// (e.g. "OKX:SOLUSDT/OKX:BTCUSDT" for crypto, "OANDA:XAGUSD/OANDA:XAUUSD"
+// for commodities). Benchmark's own ratio cell = N/A.
+// Bucket-agnostic: symbols (Tickers group) and display names (Display:
+// Labels group) are independent inputs, so the same script serves any
+// benchmark + 3-ticker bucket. Optional second table: full pairwise
+// cross-ratio matrix among the 3 non-benchmark tickers, tie-break only.
+// ============================================================
+
+// ---------------- Score Settings ----------------
+grpScore = "Score Settings"
+weeklyLen  = input.int(56, "Weekly MA Length (bars)", minval=1, group=grpScore)
+monthlyLen = input.int(240, "Monthly MA Length (bars)", minval=1, group=grpScore)
+maType     = input.string("SMA", "MA Type", options=["SMA", "EMA"], group=grpScore)
+
+grpTF = "Timeframe"
+tfOverride = input.timeframe("", "Override Timeframe (blank = chart TF)", group=grpTF)
+
+grpSym = "Tickers"
+btcSym  = input.symbol("OKX:BTCUSDT",  "Benchmark Symbol", group=grpSym,
+     tooltip="Crypto example: OKX:BTCUSDT. Commodities example: OANDA:XAUUSD or TVC:GOLD.")
+solSym  = input.symbol("OKX:SOLUSDT",  "Ticker 1 Symbol",  group=grpSym)
+ethSym  = input.symbol("OKX:ETHUSDT",  "Ticker 2 Symbol",  group=grpSym)
+hypeSym = input.symbol("OKX:HYPEUSDT", "Ticker 3 Symbol",  group=grpSym)
+
+grpLabel = "Display: Labels"
+benchmarkLabel = input.string("BTC",  "Benchmark Display Name", group=grpLabel)
+ticker1Label   = input.string("SOL",  "Ticker 1 Display Name",  group=grpLabel)
+ticker2Label   = input.string("ETH",  "Ticker 2 Display Name",  group=grpLabel)
+ticker3Label   = input.string("HYPE", "Ticker 3 Display Name",  group=grpLabel)
+
+grpCross = "Cross-Ratio Matrix"
+showCrossMatrix = input.bool(false, "Show cross-ratio matrix (Ticker1/2/3 vs each other)", group=grpCross,
+     tooltip="Off by default to keep the main table clean. Turn on when you need to break a tie between two bucket-mates.")
+
+// ---------------- Display: Layout ----------------
+grpLayout = "Display: Layout"
+mainPosStr  = input.string("Top Right", "Main Table Position", group=grpLayout,
+     options=["Top Right","Top Left","Top Center","Bottom Right","Bottom Left","Bottom Center","Middle Right","Middle Left","Middle Center"])
+crossPosStr = input.string("Bottom Right", "Cross-Matrix Table Position", group=grpLayout,
+     options=["Top Right","Top Left","Top Center","Bottom Right","Bottom Left","Bottom Center","Middle Right","Middle Left","Middle Center"])
+textSizeStr = input.string("Normal", "Text Size", group=grpLayout, options=["Auto","Small","Normal","Large","Huge"])
+borderWidth = input.int(1, "Border Width", minval=0, group=grpLayout)
+
+// ---------------- Display: Colors ----------------
+grpColor = "Display: Colors"
+headerBgColor   = input.color(color.new(color.gray, 20), "Header Background", group=grpColor)
+headerTextColor = input.color(color.white, "Header Text", group=grpColor)
+labelTextColor  = input.color(color.white, "Ticker/Pair Label Text", group=grpColor)
+scoreTextColor  = input.color(color.black, "Score Cell Text", group=grpColor)
+
+posStrongColor = input.color(color.new(color.green, 0),  "Score +3 Background", group=grpColor)
+posWeakColor   = input.color(color.new(color.green, 65), "Score +1 Background", group=grpColor)
+negWeakColor   = input.color(color.new(color.red, 65),   "Score -1 Background", group=grpColor)
+negStrongColor = input.color(color.new(color.red, 0),    "Score -3 Background", group=grpColor)
+naColor        = input.color(color.new(color.gray, 40),  "N/A Background", group=grpColor)
+borderColor    = input.color(color.gray, "Border Color", group=grpColor)
+
+// ---------------- Position / size mapping ----------------
+f_mapPosition(s) =>
+    switch s
+        "Top Right"     => position.top_right
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Bottom Right"  => position.bottom_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Middle Right"  => position.middle_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        => position.top_right
+
+f_mapTextSize(s) =>
+    switch s
+        "Auto"   => size.auto
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        => size.normal
+
+mainPos  = f_mapPosition(mainPosStr)
+crossPos = f_mapPosition(crossPosStr)
+txtSize  = f_mapTextSize(textSizeStr)
+
+// ---------------- Effective timeframe ----------------
+effTF = tfOverride == "" ? timeframe.period : tfOverride
+
+// ---------------- Core helpers ----------------
+f_ma(src, len) =>
+    maType == "EMA" ? ta.ema(src, len) : ta.sma(src, len)
+
+f_score(price, wma, mma) =>
+    c1 = price >= wma ? 1 : -1
+    c2 = price >= mma ? 1 : -1
+    c3 = wma  >= mma ? 1 : -1
+    c1 + c2 + c3
+
+f_fmt(score) =>
+    score > 0 ? "+" + str.tostring(score) : str.tostring(score)
+
+f_scoreColor(score) =>
+    score == 3  ? posStrongColor :
+     score == 1  ? posWeakColor   :
+     score == -1 ? negWeakColor   :
+     score == -3 ? negStrongColor : naColor
+
+f_getAbsData(sym) =>
+    [c, w, m] = request.security(sym, effTF,
+         [close, f_ma(close, weeklyLen), f_ma(close, monthlyLen)],
+         lookahead=barmerge.lookahead_off)
+    [c, w, m]
+
+f_getRatioData(sym1, sym2) =>
+    ratioSym = sym1 + "/" + sym2
+    [c, w, m] = request.security(ratioSym, effTF,
+         [close, f_ma(close, weeklyLen), f_ma(close, monthlyLen)],
+         lookahead=barmerge.lookahead_off)
+    [c, w, m]
+
+// ---------------- Absolute scores ----------------
+[btcC, btcW, btcM]    = f_getAbsData(btcSym)
+[solC, solW, solM]    = f_getAbsData(solSym)
+[ethC, ethW, ethM]    = f_getAbsData(ethSym)
+[hypeC, hypeW, hypeM] = f_getAbsData(hypeSym)
+
+btcAbsScore  = f_score(btcC, btcW, btcM)
+solAbsScore  = f_score(solC, solW, solM)
+ethAbsScore  = f_score(ethC, ethW, ethM)
+hypeAbsScore = f_score(hypeC, hypeW, hypeM)
+
+// ---------------- Ratio scores (vs BTC) ----------------
+[solRC, solRW, solRM]   = f_getRatioData(solSym, btcSym)
+[ethRC, ethRW, ethRM]   = f_getRatioData(ethSym, btcSym)
+[hypeRC, hypeRW, hypeRM] = f_getRatioData(hypeSym, btcSym)
+
+solRatioScore  = f_score(solRC, solRW, solRM)
+ethRatioScore  = f_score(ethRC, ethRW, ethRM)
+hypeRatioScore = f_score(hypeRC, hypeRW, hypeRM)
+
+// ---------------- Cross-ratio matrix (optional) ----------------
+// Computed unconditionally (cheap) — the showCrossMatrix toggle gates
+// only the table rendering below, not this calculation. Pine's ternary
+// operator can't branch between two tuple-returning expressions, so an
+// if/else (or, as here, unconditional compute) is required instead.
+[solEthC, solEthW, solEthM]    = f_getRatioData(solSym, ethSym)
+[solHypeC, solHypeW, solHypeM] = f_getRatioData(solSym, hypeSym)
+[ethHypeC, ethHypeW, ethHypeM] = f_getRatioData(ethSym, hypeSym)
+
+solEthScore  = f_score(solEthC, solEthW, solEthM)
+solHypeScore = f_score(solHypeC, solHypeW, solHypeM)
+ethHypeScore = f_score(ethHypeC, ethHypeW, ethHypeM)
+
+// ---------------- Main table ----------------
+var table t = table.new(mainPos, 3, 5, border_width=borderWidth, border_color=borderColor)
+
+if barstate.islast
+    table.cell(t, 0, 0, "Ticker",       bgcolor=headerBgColor, text_color=headerTextColor, text_size=txtSize)
+    table.cell(t, 1, 0, "Abs Score",    bgcolor=headerBgColor, text_color=headerTextColor, text_size=txtSize)
+    table.cell(t, 2, 0, "Ratio vs " + benchmarkLabel, bgcolor=headerBgColor, text_color=headerTextColor, text_size=txtSize)
+
+    table.cell(t, 0, 1, benchmarkLabel, text_color=labelTextColor, text_size=txtSize)
+    table.cell(t, 1, 1, f_fmt(btcAbsScore), bgcolor=f_scoreColor(btcAbsScore), text_color=scoreTextColor, text_size=txtSize)
+    table.cell(t, 2, 1, "N/A", bgcolor=naColor, text_color=labelTextColor, text_size=txtSize)
+
+    table.cell(t, 0, 2, ticker1Label, text_color=labelTextColor, text_size=txtSize)
+    table.cell(t, 1, 2, f_fmt(solAbsScore), bgcolor=f_scoreColor(solAbsScore), text_color=scoreTextColor, text_size=txtSize)
+    table.cell(t, 2, 2, f_fmt(solRatioScore), bgcolor=f_scoreColor(solRatioScore), text_color=scoreTextColor, text_size=txtSize)
+
+    table.cell(t, 0, 3, ticker2Label, text_color=labelTextColor, text_size=txtSize)
+    table.cell(t, 1, 3, f_fmt(ethAbsScore), bgcolor=f_scoreColor(ethAbsScore), text_color=scoreTextColor, text_size=txtSize)
+    table.cell(t, 2, 3, f_fmt(ethRatioScore), bgcolor=f_scoreColor(ethRatioScore), text_color=scoreTextColor, text_size=txtSize)
+
+    table.cell(t, 0, 4, ticker3Label, text_color=labelTextColor, text_size=txtSize)
+    table.cell(t, 1, 4, f_fmt(hypeAbsScore), bgcolor=f_scoreColor(hypeAbsScore), text_color=scoreTextColor, text_size=txtSize)
+    table.cell(t, 2, 4, f_fmt(hypeRatioScore), bgcolor=f_scoreColor(hypeRatioScore), text_color=scoreTextColor, text_size=txtSize)
+
+// ---------------- Cross-ratio matrix table (optional) ----------------
+var table ct = table.new(crossPos, 2, 4, border_width=borderWidth, border_color=borderColor)
+
+if barstate.islast and showCrossMatrix
+    table.cell(ct, 0, 0, "Pair (tiebreak)", bgcolor=headerBgColor, text_color=headerTextColor, text_size=txtSize)
+    table.cell(ct, 1, 0, "Score",           bgcolor=headerBgColor, text_color=headerTextColor, text_size=txtSize)
+
+    table.cell(ct, 0, 1, ticker1Label + "/" + ticker2Label, text_color=labelTextColor, text_size=txtSize)
+    table.cell(ct, 1, 1, f_fmt(solEthScore), bgcolor=f_scoreColor(solEthScore), text_color=scoreTextColor, text_size=txtSize)
+
+    table.cell(ct, 0, 2, ticker1Label + "/" + ticker3Label, text_color=labelTextColor, text_size=txtSize)
+    table.cell(ct, 1, 2, f_fmt(solHypeScore), bgcolor=f_scoreColor(solHypeScore), text_color=scoreTextColor, text_size=txtSize)
+
+    table.cell(ct, 0, 3, ticker2Label + "/" + ticker3Label, text_color=labelTextColor, text_size=txtSize)
+    table.cell(ct, 1, 3, f_fmt(ethHypeScore), bgcolor=f_scoreColor(ethHypeScore), text_color=scoreTextColor, text_size=txtSize)

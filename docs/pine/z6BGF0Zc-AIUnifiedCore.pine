@@ -1,0 +1,337 @@
+//@version=6
+// @description Core signal engine for the AI Learning Trader Bot unified system.
+// This library contains reusable logic only. Inputs, plots, labels, strategy orders,
+// and alerts belong in the wrapper scripts that import this library.
+library("AIUnifiedCore", overlay = true)
+
+//────────────────────────────────────────────────────
+// ACTION CODES
+//  1 = BUY
+// -1 = SHORT
+//  2 = EXIT LONG
+// -2 = EXIT SHORT
+//  3 = FLIP LONG
+// -3 = FLIP SHORT
+//  4 = LIKELY REV UP
+// -4 = LIKELY REV DOWN
+//  9 = NO TRADE
+//  0 = WAIT
+//────────────────────────────────────────────────────
+
+// @function Clamps a number between a minimum and maximum.
+// @param value Number to clamp.
+// @param minValue Minimum allowed value.
+// @param maxValue Maximum allowed value.
+// @returns Clamped value.
+export clampFloat(float value, float minValue, float maxValue) =>
+    math.min(math.max(value, minValue), maxValue)
+
+// @function Calculates the EMA/VWAP trend engine.
+// @param source Source price.
+// @param fastLen Fast EMA length.
+// @param midLen Middle EMA length.
+// @param slowLen Slow EMA length.
+// @returns Fast EMA, middle EMA, slow EMA, VWAP, bullish trend, bearish trend.
+export trendEngine(float source, simple int fastLen, simple int midLen, simple int slowLen) =>
+    float emaFast = ta.ema(source, fastLen)
+    float emaMid = ta.ema(source, midLen)
+    float emaSlow = ta.ema(source, slowLen)
+    float vwapValue = ta.vwap(hlc3)
+    bool bullTrend = emaFast > emaMid and emaMid > emaSlow and close > vwapValue
+    bool bearTrend = emaFast < emaMid and emaMid < emaSlow and close < vwapValue
+    [emaFast, emaMid, emaSlow, vwapValue, bullTrend, bearTrend]
+
+// @function Calculates RSI/MACD momentum engine.
+// @param source Source price.
+// @param rsiLen RSI length.
+// @returns RSI, MACD line, MACD signal, MACD histogram, bullish momentum, bearish momentum.
+export momentumEngine(float source, simple int rsiLen) =>
+    float rsiValue = ta.rsi(source, rsiLen)
+    [macdLine, macdSignal, macdHist] = ta.macd(source, 12, 26, 9)
+    bool bullMomentum = rsiValue > 50 and macdLine > macdSignal and macdHist > 0
+    bool bearMomentum = rsiValue < 50 and macdLine < macdSignal and macdHist < 0
+    [rsiValue, macdLine, macdSignal, macdHist, bullMomentum, bearMomentum]
+
+// @function Calculates volume confirmation.
+// @param volumeLen Volume average length.
+// @returns Volume average, high volume, bullish volume, bearish volume.
+export volumeEngine(simple int volumeLen) =>
+    float volAvg = ta.sma(volume, volumeLen)
+    bool highVolume = volume > volAvg
+    bool bullVolume = highVolume and close > open
+    bool bearVolume = highVolume and close < open
+    [volAvg, highVolume, bullVolume, bearVolume]
+
+// @function Calculates price action breakout and candle direction.
+// @param swingLen Swing lookback length.
+// @returns Swing high, swing low, bullish break, bearish break, bullish candle, bearish candle.
+export priceActionEngine(simple int swingLen) =>
+    float swingHigh = ta.highest(high, swingLen)
+    float swingLow = ta.lowest(low, swingLen)
+    bool bullBreak = close > swingHigh[1]
+    bool bearBreak = close < swingLow[1]
+    bool bullCandle = close > open and close > close[1]
+    bool bearCandle = close < open and close < close[1]
+    [swingHigh, swingLow, bullBreak, bearBreak, bullCandle, bearCandle]
+
+// @function Calculates the chop/no-trade filter.
+// @param diLen DMI DI length.
+// @param adxSmooth ADX smoothing.
+// @param minAdx Minimum ADX trend strength.
+// @param atrLen ATR length.
+// @param minAtrPercent Minimum ATR percent.
+// @param minEmaSpreadPercent Minimum EMA spread percent.
+// @param votesNeeded Number of chop votes needed.
+// @param emaFast Fast EMA.
+// @param emaSlow Slow EMA.
+// @returns DI+, DI-, ADX, ATR, ATR percent, EMA spread percent, chop votes, chop market.
+export chopEngine(simple int diLen, simple int adxSmooth, float minAdx, simple int atrLen, float minAtrPercent, float minEmaSpreadPercent, simple int votesNeeded, float emaFast, float emaSlow) =>
+    [diPlus, diMinus, adxValue] = ta.dmi(diLen, adxSmooth)
+    float atrValue = ta.atr(atrLen)
+    float atrPercent = close != 0 ? atrValue / math.abs(close) * 100.0 : 0.0
+    float emaSpreadPercent = close != 0 ? math.abs(emaFast - emaSlow) / math.abs(close) * 100.0 : 0.0
+    bool lowAdx = adxValue < minAdx
+    bool lowAtr = atrPercent < minAtrPercent
+    bool compressedEma = emaSpreadPercent < minEmaSpreadPercent
+    int chopVotes = (lowAdx ? 1 : 0) + (lowAtr ? 1 : 0) + (compressedEma ? 1 : 0)
+    bool chopMarket = chopVotes >= votesNeeded
+    [diPlus, diMinus, adxValue, atrValue, atrPercent, emaSpreadPercent, chopVotes, chopMarket]
+
+// @function Calculates long/short probability scores.
+// @param bullTrend Bullish trend.
+// @param bearTrend Bearish trend.
+// @param bullMomentum Bullish momentum.
+// @param bearMomentum Bearish momentum.
+// @param bullVolume Bullish volume.
+// @param bearVolume Bearish volume.
+// @param bullBreak Bullish breakout.
+// @param bearBreak Bearish breakout.
+// @param bullCandle Bullish candle.
+// @param bearCandle Bearish candle.
+// @param mtfLongOk Higher-timeframe long confirmation.
+// @param mtfShortOk Higher-timeframe short confirmation.
+// @returns Long probability and short probability.
+export probabilityEngine(bool bullTrend, bool bearTrend, bool bullMomentum, bool bearMomentum, bool bullVolume, bool bearVolume, bool bullBreak, bool bearBreak, bool bullCandle, bool bearCandle, bool mtfLongOk, bool mtfShortOk) =>
+    float longScore = 0.0
+    longScore += bullTrend ? 25.0 : 0.0
+    longScore += bullMomentum ? 20.0 : 0.0
+    longScore += bullVolume ? 15.0 : 0.0
+    longScore += bullBreak ? 15.0 : 0.0
+    longScore += bullCandle ? 10.0 : 0.0
+    longScore += mtfLongOk ? 15.0 : 0.0
+    float shortScore = 0.0
+    shortScore += bearTrend ? 25.0 : 0.0
+    shortScore += bearMomentum ? 20.0 : 0.0
+    shortScore += bearVolume ? 15.0 : 0.0
+    shortScore += bearBreak ? 15.0 : 0.0
+    shortScore += bearCandle ? 10.0 : 0.0
+    shortScore += mtfShortOk ? 15.0 : 0.0
+
+    [math.min(longScore, 100.0), math.min(shortScore, 100.0)]
+
+// @function Calculates premium super-aggressive pressure scores.
+// @param emaFast Fast EMA.
+// @param emaMid Middle EMA.
+// @param rsiValue RSI value.
+// @param macdHist MACD histogram.
+// @returns Super long probability, super short probability.
+export superEngine(float emaFast, float emaMid, float rsiValue, float macdHist) =>
+    bool priceAboveFast = close > emaFast
+    bool priceBelowFast = close < emaFast
+
+    bool emaBullPush = emaFast > emaFast[1] and emaMid >= emaMid[1]
+    bool emaBearPush = emaFast < emaFast[1] and emaMid <= emaMid[1]
+
+    bool rsiBullPush = rsiValue > 48 and rsiValue > rsiValue[1]
+    bool rsiBearPush = rsiValue < 52 and rsiValue < rsiValue[1]
+
+    bool macdBullPush = macdHist > macdHist[1]
+    bool macdBearPush = macdHist < macdHist[1]
+
+    bool microBullBreak = close > high[1]
+    bool microBearBreak = close < low[1]
+
+    float superLongScore = 0.0
+    superLongScore += priceAboveFast ? 20.0 : 0.0
+    superLongScore += emaBullPush ? 20.0 : 0.0
+    superLongScore += rsiBullPush ? 20.0 : 0.0
+    superLongScore += macdBullPush ? 20.0 : 0.0
+    superLongScore += microBullBreak ? 20.0 : 0.0
+
+    float superShortScore = 0.0
+    superShortScore += priceBelowFast ? 20.0 : 0.0
+    superShortScore += emaBearPush ? 20.0 : 0.0
+    superShortScore += rsiBearPush ? 20.0 : 0.0
+    superShortScore += macdBearPush ? 20.0 : 0.0
+    superShortScore += microBearBreak ? 20.0 : 0.0
+
+    [math.min(superLongScore, 100.0), math.min(superShortScore, 100.0)]
+
+// @function Calculates early likely reversal votes/signals.
+// @param showSignals Master toggle.
+// @param aggression Aggression text: Balanced, Aggressive, or Hyper.
+// @param minVotes Minimum votes.
+// @param realtimeOnly Only allow before candle closes.
+// @param chopOk Whether chop filter allows signal.
+// @param cooldownOk Whether caller cooldown allows signal.
+// @param longProbability Long probability.
+// @param shortProbability Short probability.
+// @param superLongProbability Super long probability.
+// @param superShortProbability Super short probability.
+// @param bullTrend Bull trend.
+// @param bearTrend Bear trend.
+// @param emaFast Fast EMA.
+// @param rsiValue RSI value.
+// @param macdHist MACD histogram.
+// @param superSensitivity Super aggressive threshold.
+// @param minEntryProbability Minimum entry probability.
+// @returns Up votes, down votes, votes needed, likely rev up, likely rev down.
+export likelyRevEngine(bool showSignals, simple string aggression, simple int minVotes, bool realtimeOnly, bool chopOk, bool cooldownUpOk, bool cooldownDownOk, float longProbability, float shortProbability, float superLongProbability, float superShortProbability, bool bullTrend, bool bearTrend, float emaFast, float rsiValue, float macdHist, simple int superSensitivity, simple int minEntryProbability) =>
+    int baseNeeded = switch aggression
+        "Balanced" => 4
+        "Aggressive" => 3
+        "Hyper" => 2
+        => 3
+
+    int votesNeeded = math.max(baseNeeded, minVotes)
+
+    bool priorBearPressure = shortProbability[1] >= 60 or superShortProbability[1] >= 60 or bearTrend[1]
+    bool priorBullPressure = longProbability[1] >= 60 or superLongProbability[1] >= 60 or bullTrend[1]
+
+    bool liveBullReclaim = close > emaFast
+    bool liveBearLoss = close < emaFast
+
+    bool liveBullMomentum = rsiValue > rsiValue[1] and macdHist > macdHist[1]
+    bool liveBearMomentum = rsiValue < rsiValue[1] and macdHist < macdHist[1]
+
+    bool liveBullCandle = close > open
+    bool liveBearCandle = close < open
+
+    bool liveBullMicroBreak = close > high[1]
+    bool liveBearMicroBreak = close < low[1]
+
+    bool liveBullSuperPressure = superLongProbability >= superSensitivity or longProbability >= minEntryProbability - 10
+    bool liveBearSuperPressure = superShortProbability >= superSensitivity or shortProbability >= minEntryProbability - 10
+
+    int upVotes = 0
+    upVotes += priorBearPressure ? 1 : 0
+    upVotes += liveBullReclaim ? 1 : 0
+    upVotes += liveBullMomentum ? 1 : 0
+    upVotes += liveBullCandle ? 1 : 0
+    upVotes += liveBullMicroBreak ? 1 : 0
+    upVotes += liveBullSuperPressure ? 1 : 0
+
+    int downVotes = 0
+    downVotes += priorBullPressure ? 1 : 0
+    downVotes += liveBearLoss ? 1 : 0
+    downVotes += liveBearMomentum ? 1 : 0
+    downVotes += liveBearCandle ? 1 : 0
+    downVotes += liveBearMicroBreak ? 1 : 0
+    downVotes += liveBearSuperPressure ? 1 : 0
+
+    bool barOk = realtimeOnly ? not barstate.isconfirmed : true
+
+    bool likelyUp = showSignals and barOk and chopOk and cooldownUpOk and upVotes >= votesNeeded and upVotes > downVotes
+    bool likelyDown = showSignals and barOk and chopOk and cooldownDownOk and downVotes >= votesNeeded and downVotes > upVotes
+
+    [upVotes, downVotes, votesNeeded, likelyUp, likelyDown]
+
+// @function Calculates Easy Mode trade quality score.
+// @param longSide True for long, false for short.
+// @param trendOk Trend agreement.
+// @param momentumOk Momentum agreement.
+// @param mtfOk Higher-timeframe agreement.
+// @param volumeOk Volume agreement.
+// @param breakOk Breakout agreement.
+// @param chopMarket No-trade/chop state.
+// @param oppositeLikelyRev Opposite likely reversal warning.
+// @param probability Direction probability.
+// @returns Easy Mode quality score.
+export easyQuality( bool trendOk, bool momentumOk, bool mtfOk, bool volumeOk, bool breakOk, bool chopMarket, bool oppositeLikelyRev, float probability) =>
+    float score = 0.0
+    score += trendOk ? 25.0 : 0.0
+    score += momentumOk ? 20.0 : 0.0
+    score += mtfOk ? 20.0 : 0.0
+    score += volumeOk ? 10.0 : 0.0
+    score += breakOk ? 10.0 : 0.0
+    score += probability >= 75 ? 15.0 : probability >= 65 ? 8.0 : 0.0
+    score -= chopMarket ? 35.0 : 0.0
+    score -= oppositeLikelyRev ? 25.0 : 0.0
+    math.round(clampFloat(score, 0.0, 100.0))
+
+// @function Final unified action code.
+// @param chopMarket No-trade market.
+// @param masterLong Master long.
+// @param masterShort Master short.
+// @param exitLong Exit long.
+// @param exitShort Exit short.
+// @param flipLong Flip to long.
+// @param flipShort Flip to short.
+// @param likelyRevUp Likely reversal up.
+// @param likelyRevDown Likely reversal down.
+// @returns Integer action code.
+export actionCode(bool chopMarket, bool masterLong, bool masterShort, bool exitLong, bool exitShort, bool flipLong, bool flipShort, bool likelyRevUp, bool likelyRevDown) =>
+    int action = 0
+    if chopMarket and not exitLong and not exitShort
+        action := 9
+    else if exitLong
+        action := 2
+    else if exitShort
+        action := -2
+    else if flipLong
+        action := 3
+    else if flipShort
+        action := -3
+    else if masterLong
+        action := 1
+    else if masterShort
+        action := -1
+    else if likelyRevUp
+        action := 4
+    else if likelyRevDown
+        action := -4
+    else
+        action := 0
+    action
+
+// @function Converts an action code into text.
+// @param action Action code.
+// @returns Action text.
+export actionText(int action) =>
+    switch action
+        1 => "BUY"
+        -1 => "SHORT"
+        2 => "EXIT LONG"
+        -2 => "EXIT SHORT"
+        3 => "FLIP LONG"
+        -3 => "FLIP SHORT"
+        4 => "LIKELY REV UP"
+        -4 => "LIKELY REV DOWN"
+        9 => "NO TRADE"
+        => "WAIT"
+
+// @function Converts trend states into text.
+// @param bullTrend Bull trend.
+// @param bearTrend Bear trend.
+// @returns Trend text.
+export trendText(bool bullTrend, bool bearTrend) =>
+    bullTrend ? "BULLISH" : bearTrend ? "BEARISH" : "MIXED"
+
+// @function Returns stacked label price above the candle.
+// @param highValue Candle high.
+// @param atrValue ATR.
+// @param gapAtr Gap in ATR multiples.
+// @param slot Stack slot, starting at 1.
+// @returns Label price.
+export topStackPrice(float highValue, float atrValue, float gapAtr, int slot) =>
+    highValue + atrValue * gapAtr * slot
+
+// @function Returns stacked label price below the candle.
+// @param lowValue Candle low.
+// @param atrValue ATR.
+// @param gapAtr Gap in ATR multiples.
+// @param slot Stack slot, starting at 1.
+// @returns Label price.
+export bottomStackPrice(float lowValue, float atrValue, float gapAtr, int slot) =>
+    lowValue - atrValue * gapAtr * slot
+

@@ -1,0 +1,893 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © liquid-trader
+
+//@version=6
+
+// @description A collection of functions used to model skewed distributions as log-normal.
+library("LogNormal")
+
+import liquid-trader/ErrorFunctions/8 as gaussian
+
+
+// --------------------------------------------------- CONSTANTS ---------------------------------------------------- {
+
+// @variable Pre-computed high precision `log(sqrt( 2π ))`
+export const float LOG_ROOT_TWO_PI = 9.189385332046727417803297364056176398e-01
+
+// @variable **Lower Whisker Endpoint** normalized percentile for a seven-number summary: 0.0215123953691948
+export const float LW_PERCENTILE = 0.0215123953691948
+
+// @variable **Lower Whisker Crosshatch** normalized percentile for a seven-number summary: 0.0886717753261761
+export const float LC_PERCENTILE = 0.0886717753261761
+
+// @variable **First Quartile** normalized percentile for a seven-number summary: 0.25
+export const float Q1_PERCENTILE = 0.25
+
+// @variable **Second Quartile** normalized percentile for a seven-number summary: 0.50
+export const float Q2_PERCENTILE = 0.50
+
+// @variable **Third Quartile** normalized percentile for a seven-number summary: 0.75
+export const float Q3_PERCENTILE = 0.75
+
+// @variable **Upper Whisker Crosshatch** normalized percentile for a seven-number summary: 0.9113282246738239
+export const float UC_PERCENTILE = 0.9113282246738239
+
+// @variable **Upper Whisker Endpoint** normalized percentile for a seven-number summary: 0.9784876046308051
+export const float UW_PERCENTILE = 0.9784876046308051
+
+// }
+
+
+// ----------------------------------------------------- TYPES ------------------------------------------------------ {
+
+// @type Object for **linear quantiles**, akin to a seven-number summary.
+// @field Q0 Smallest Value ( 0% )
+// @field LW Lower Whisker Endpoint ( 2.15…% )
+// @field LC Lower Whisker Crosshatch ( 8.86…% )
+// @field Q1 First Quartile ( 25% )
+// @field Q2 Second Quartile ( 50% )
+// @field Q3 Third Quartile ( 75% )
+// @field UC Upper Whisker Crosshatch ( 91.13…% )
+// @field UW Upper Whisker Endpoint ( 97.84…% )
+// @field Q4 Largest Value ( 100%, or 99.99% in LogNorm to avoid infinity )
+// @field IQR Interquartile Range ( Q3 - Q1 )
+// @field MH Midhinge ( (Q1 + Q3) / 2 )
+// @field TM Trimean ( (Q1 + 2 × Q2 + Q3) / 4 )
+// @field MR Mid-Range ( (Q0 + Q4) / 2 )
+export type Quantile
+    float Q0
+    float LW
+    float LC
+    float Q1
+    float Q2
+    float Q3
+    float UC
+    float UW
+    float Q4
+    float IQR
+    float MH
+    float TM
+    float MR
+
+
+// @type Object for **log space parameters** and **linear space quantiles**. *Avoid setting these field directly*. Use `init` or `set`.
+// @field mu **Log** space mu ( µ ) of the underlying normal distribution.
+// @field sigma **Log** space sigma ( σ ) of the underlying normal distribution.
+// @field variance **Log** space variance ( σ² ) of the underlying normal distribution.
+// @field quantiles **Linear** space quantiles of the log-normal distribution.
+export type LogNorm
+    float mu
+    float sigma
+    float variance
+    Quantile quantiles
+
+// }
+
+
+// ------------------------------------------------- LIBRARY HELPERS ------------------------------------------------ {
+
+// @function Ensures a number is positive prior to returning its natural logarithm.
+log(float number) =>
+    math.log(math.abs(number))
+
+
+// @function Shifts decimal 6 digits to the right.
+method e6(float number) =>
+    number * 1.0e6
+
+
+// @function Ensures a value remains between 0 and 1.
+clamp(float number) =>
+    math.min(math.max(number, 0), 1)
+
+
+// @function Linearly interpolates between two values.
+lerp(float a, float b, float t = 0.5) =>
+    a + (b - a) * clamp(t)
+
+
+// @function Helper for `fit`.
+fit_lerp(float x, float a, float b, float z, float y) =>
+    lerp(a, b, (x - z) / (y - z))
+
+
+// @function Helper for `fisher`. Transforms a Fisher Information Matrix from log space to linear space.
+fisher_log_to_lin(LogNorm ln, matrix<float> fim) =>
+    m  = math.exp(ln.mu + ln.variance * 0.5)
+    v  = (math.exp(ln.variance) - 1) * math.exp(2 * ln.mu + ln.variance)
+    s  = ln.sigma
+    v2 = v * 2
+    ev = math.exp(ln.variance)
+
+    // Jacobian matrix of partial derivatives
+    jm = matrix.new<float>(2, 2, 0)
+    jm.set(0, 0, m)
+    jm.set(0, 1, m * s)
+    jm.set(1, 0, v2)
+    jm.set(1, 1, v2 * s * (2 * ev - 1) / (ev - 1))
+
+    // Transform the FIM into linear space
+    jm.transpose().mult(fim.mult(jm))
+
+
+// @function Helper for `fisher` and `confidence_interval`.
+// Computes the gradient vector (score vector) of the log-likelihood at linear X.
+fisher_grad(LogNorm ln, float x) =>
+    z = log(x) - ln.mu
+    gradient_vector = matrix.new<float>(2, 1, 0)
+    gradient_vector.set(0, 0, z / ln.variance)
+    gradient_vector.set(1, 0, -1 / ln.sigma + (z * z) / (ln.sigma * ln.variance))
+    gradient_vector
+
+
+// @function Helper for `quantiles`. Computes the Interquartile Range, Midhinge, Trimean, and Mid-Range.
+method qstats(Quantile q) =>
+    q.IQR := q.Q3 - q.Q1
+    q.MH := (q.Q1 + q.Q3) * 0.5
+    q.TM := (q.Q1 + 2 * q.Q2 + q.Q3) * 0.25
+    q.MR := (q.Q0 + q.Q4) * 0.5
+    q
+
+
+// @function General helper for linear moments. Computes parameters shared by higher-order moments.
+method higher_order_moment_params(LogNorm ln) =>
+    m = ln.mu
+    v = ln.variance
+
+    // Raw moments
+    m1 = math.exp(1 * m +  0.5 * v)
+    m2 = math.exp(2 * m +  2.0 * v)
+    m3 = math.exp(3 * m +  4.5 * v)
+    m4 = math.exp(4 * m +  8.0 * v)
+    m5 = math.exp(5 * m + 12.5 * v)
+    m6 = math.exp(6 * m + 18.0 * v)
+
+    // Squared moments
+    m12 = m1  * m1
+    m13 = m12 * m1
+    m14 = m13 * m1
+    m15 = m14 * m1
+    m16 = m15 * m1
+
+    // Squared sigmas
+    s1 = m2 - m1
+    s5 = s1 * s1 * s1 * s1 * s1
+    s6 = s5 * s1
+
+    [ m1, m2, m3, m4, m5, m6, m12, m13, m14, m15, m16, s5, s6 ]
+
+// }
+
+
+// ------------------------------------------------ EXPORTED HELPERS ------------------------------------------------ {
+
+// @function Converts a linear X coordinate of a log-normal distribution into a standard normal Z Score.
+// @param ln Object containing log space parameters.
+// @param x Linear X coordinate of a log-normal distribution. Negative inputs are made absolute.
+// @returns Between -∞ and +∞
+export method z_score(LogNorm ln, float x) =>
+    (log(x) - ln.mu) / ln.sigma
+
+
+// @function Converts a standard normal Z Score into a linear X coordinate of a log-normal distribution.
+// @param ln Object containing log space parameters.
+// @param z Standard normal Z Score.
+// @returns Between 0 and ∞
+export method x_coord(LogNorm ln, float z) =>
+    math.exp(ln.mu + ln.sigma * z)
+
+
+// @function Gets an **interpolated** value **between** array elements located at `floor(i)` and `ceil(i)`.
+// Useful when computing the quantiles of a sorted array. Alternate to the built-in `percentile` methods,
+// which function differently.
+// @param arr Float array object.
+// @param index Index of the *pseudo* element whose **interpolated** value is to be returned.
+// @returns Interpolated value of the arrays pseudo element.
+export method iget(float[] arr, float index) =>
+    i = index < 0 ? index - arr.size() * math.floor(index / arr.size()) : index
+    lerp(arr.get(math.floor(i)), arr.get(math.ceil(i)), i % 1)
+
+// }
+
+
+// --------------------------------------------- DESCRIPTIVE STATISTICS --------------------------------------------- {
+
+// @function Computes the **linear mean** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @returns Between 0 and ∞
+export method mean(LogNorm ln) =>
+    math.exp(ln.mu + ln.variance * 0.5)
+
+
+// @function Computes the **linear median** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @returns Between 0 and ∞
+export method median(LogNorm ln) =>
+    math.exp(ln.mu)
+
+
+// @function Computes the **linear mode** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @returns Between 0 and ∞
+export method mode(LogNorm ln) =>
+    math.exp(ln.mu - ln.variance)
+
+
+// @function Computes the **linear variance** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @returns Between 0 and ∞
+export method variance(LogNorm ln) =>
+    (math.exp(ln.variance) - 1) * math.exp(2 * ln.mu + ln.variance)
+
+
+// @function Computes the **linear skewness** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @returns Between 0 and ∞
+export method skewness(LogNorm ln) =>
+    (math.exp(ln.variance) + 2) * math.sqrt(math.exp(ln.variance) - 1)
+
+
+// @function Computes the **linear kurtosis** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @param excess Sets if the result should be *Excess Kurtosis* ([true](#const_true), default) or *regular Kurtosis* ([false](#const_false)).
+// @returns Between 0 and ∞
+export method kurtosis(LogNorm ln, bool excess = true) =>
+    math.exp(4 * ln.variance) + 2 * math.exp(3 * ln.variance) + 3 * math.exp(2 * ln.variance) - (excess ? 6 : 3)
+
+
+// @function Computes the **linear hyper skewness** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @returns Between 0 and ∞
+export method hyper_skewness(LogNorm ln) =>
+    [ m1, m2, m3, m4, m5, _, m12, m13, _, m15, _, s5, _ ] = ln.higher_order_moment_params()
+    (m5 - 5 * m4 * m1 + 10 * m3 * m12 - 10 * m2 * m13 + 4 * m15) / s5
+
+
+// @function Computes the **linear hyper kurtosis** of a log-normal distribution from log space parameters.
+// @param ln Object containing log space parameters.
+// @param excess Sets if the result should be *Excess Hyper Kurtosis* ([true](#const_true), default) or *regular Hyper Kurtosis* ([false](#const_false)).
+// @returns Between 0 and ∞
+export method hyper_kurtosis(LogNorm ln, bool excess = true) =>
+    [ m1, m2, m3, m4, m5, m6, m12, m13, m14, _, m16, _, s6 ] = ln.higher_order_moment_params()
+    (m6 - 6 * m5 * m1 + 15 * m4 * m12 - 20 * m3 * m13 + 15 * m2 * m14 - 5 * m16) / s6 - (excess ? 15 : 0)
+
+// }
+
+
+// --------------------------------------------- DISTRIBUTION FUNCTIONS --------------------------------------------- {
+
+// @function **Probability Density Function**\
+// Estimates the probability *density* of a Log-Normal distribution. For clarity, **density is not a probability**.\
+// It's simply the Y coordinate of a Log-Normal curve at coordinate X.\
+// \
+// **Note:** \
+// Because the PDF computes a Y coordinate, and `fit` exclusively transforms X coordinates, if the result should be fit,
+// use the overload to pass in empirical quantiles for a more accurate transformation.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate for which a density will be estimated [0, ∞]. Negative inputs are made absolute.
+// @returns Between 0 and ∞
+export method pdf(LogNorm ln, float x) =>
+    gaussian.pdf(log(x), ln.mu, ln.sigma, ln.variance) / x
+
+
+// @function **Cumulative Distribution Function**\
+// Estimates the area under a Log-Normal curve between Zero and a linear X coordinate.\
+// \
+// **Note:** \
+// Use `gaussian.cdf` if you want to input a Z Score instead of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and 1
+export method cdf(LogNorm ln, float x, bool precise = true) =>
+    gaussian.cdf(ln.z_score(x), precise)
+
+
+// @function **Complementary Cumulative Distribution Function**\
+// Estimates the area under a Log-Normal curve between a linear X coordinate and Infinity.\
+// \
+// **Note:** \
+// Use `gaussian.ccdf` if you want to input a Z Score instead of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and 1
+export method ccdf(LogNorm ln, float x, bool precise = true) =>
+    gaussian.ccdf(ln.z_score(x), precise)
+
+
+// @function **Inverse Cumulative Distribution Function**\
+// Reverses the Log-Normal `cdf` by estimating the linear X coordinate from an area.\
+// \
+// **Note:** \
+// Use `gaussian.cdfinv` if you want a Z Score returned instead of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param a Normalized area [0, 1]. Out of range inputs return [na](#var_na).
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method cdfinv(LogNorm ln, float a, bool precise = true) =>
+    ln.x_coord(gaussian.cdfinv(a, precise))
+
+
+// @function **Inverse Complementary Cumulative Distribution Function**\
+// Reverses the Log-Normal `ccdf` by estimating the linear X coordinate from an area.\
+// \
+// **Note:** \
+// Use `gaussian.ccdfinv` if you want a Z Score returned instead of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param a Normalized area [0, 1].
+// @param precise Double precision ([true](#const_true)) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method ccdfinv(LogNorm ln, float a, bool precise = true) =>
+    ln.x_coord(gaussian.ccdfinv(a, precise))
+
+
+// @function **Cumulative Distribution Function** from **A** to **B**\
+// Estimates the area under a Log-Normal curve between two linear X coordinates (A and B).\
+// \
+// **Note:** \
+// Use `gaussian.cdfab` if you want to input Z Scores instead of linear X coordinates.
+// @param ln Object of log space parameters.
+// @param x1 First linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param x2 Second linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and 1
+export method cdfab(LogNorm ln, float x1, float x2, bool precise = true) =>
+    gaussian.cdfab(ln.z_score(x1), ln.z_score(x2), precise)
+
+
+// @function **One-Tailed Test**\
+// Transforms a linear X coordinate into an absolute Z Score before estimating the area under a Log-Normal curve
+// between Z and Infinity.\
+// \
+// **Note:**
+// - Use `gaussian.ott` if you want to input a Z Score instead of a linear X coordinate.
+// - Use `gaussian.ccdf` if you want to measure from a signed Z Score to Positive Infinity.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true)) or single precision ([false](#const_false)).
+// @returns Between 0 and 0.5
+export method ott(LogNorm ln, float x, bool precise = true) =>
+    gaussian.ott(ln.z_score(x), precise)
+
+
+// @function **Two-Tailed Test**\
+// Transforms a linear X coordinate into symmetrical ± Z Scores before estimating the area under a Log-Normal curve
+// from Zero to -Z, and +Z to Infinity.\
+// \
+// **Note:** \
+// Use `gaussian.ttt` if you want to input a Z Score instead of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true)) or single precision ([false](#const_false)).
+// @returns Between 0 and 1
+export method ttt(LogNorm ln, float x, bool precise = true) =>
+    gaussian.ttt(ln.z_score(x), precise)
+
+
+// @function **Inverse One-Tailed Test**\
+// Reverses the Log-Normal `ott` by estimating a linear X coordinate for the right tail from an area.\
+// \
+// **Note:** \
+// Use `gaussian.ottinv` if you want an absolute Z Score returned instead of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param a Half a normalized area [0, 0.5]. Out of range inputs return [na](#var_na).
+// @param precise Double precision ([true](#const_true)) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method ottinv(LogNorm ln, float a, bool precise = true) =>
+    ln.x_coord(gaussian.ottinv(a, precise))
+
+
+// @function **Inverse Two-Tailed Test**\
+// Reverses the Log-Normal `ttt` by estimating two linear X coordinates from an area.\
+// \
+// **Note:** \
+// Use `gaussian.tttinv` if you want an absolute Z Score returned instead of two linear X coordinates.
+// @param ln Object of log space parameters.
+// @param a Normalized area [0, 1]. Out of range inputs return [na](#var_na).
+// @param precise Double precision ([true](#const_true)) or single precision ([false](#const_false)).
+// @returns Linear space tuple : [ lower_x, upper_x ]
+export method tttinv(LogNorm ln, float a, bool precise = true) =>
+    z = gaussian.tttinv(a, precise)
+    [ ln.x_coord(-z), ln.x_coord(z) ]
+
+// }
+
+
+// -------------------------------------------------- UNCERTAINTY --------------------------------------------------- {
+
+// @function The standard error (standard deviation) of a sample statistic. Assumes independent observations.
+// @param sample_size Number of observations.
+// @param fisher_info Fisher information.
+// @returns Between 0 and ∞
+export sterr(float sample_size, float fisher_info) =>
+    math.sqrt(1 / (sample_size * fisher_info))
+
+
+// @function Quantifies the information content of a *single* event; the level of uncertainty associated with a state.
+// Does *not* quantify the level of uncertainty of the distribution.
+// @param p Probability of the event [0, 1].
+// @param base Logarithmic base (optional). The default is the natural base (Nats) but the base can be anything
+// (ie. 2, aka. Bits).
+// @returns Between 0 and ∞
+export method surprisal(float p, float base = na) =>
+    if p < 0 or 1 < p
+        na
+    else
+        surprisal = -math.log(p)
+        na(base) ? surprisal : surprisal / math.log(base)
+
+
+// @function Computes the *differential* entropy (average surprisal) of a log-normal distribution; the average level of
+// uncertainty among all potential states.
+// @param ln Object of log space parameters.
+// @param base Logarithmic base (optional). The default is the natural base (Nats) but the base can be anything
+// (ie. 2, aka. Bits).
+// @returns Between 0 and ∞
+export method entropy(LogNorm ln, float base = na) =>
+    nats = math.log(ln.sigma) + ln.mu + LOG_ROOT_TWO_PI + 0.5
+    na(base) ? nats : nats / math.log(base)
+
+
+// @function Computes the average effective number of distinguishable outcomes from the entropy of a log-normal distribution.
+// @param base Logarithmic base used for Entropy (optional; default is natural base).
+// @returns Between 0 and ∞
+export method perplexity(LogNorm ln, float base = na) =>
+    entropy = ln.entropy(base)
+    na(base) ? math.exp(entropy) : math.pow(base, entropy)
+
+
+// @function Estimates a risk threshold under normal market conditions for a given confidence level.
+// @param ln Object of log space parameters.
+// @param p Probability threshold, aka. the confidence level [0, 1].
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method value_at_risk(LogNorm ln, float p, bool precise = true) =>
+    math.exp(ln.mu + ln.sigma * gaussian.cdfinv(p, precise))
+
+
+// @function Reverses the `value_at_risk` by estimating the confidence level (probability) from the risk threshold.
+// @param ln Object of log space parameters.
+// @param value_at_risk Value at Risk.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and 1
+export method value_at_risk_inv(LogNorm ln, float value_at_risk, bool precise = true) =>
+    gaussian.cdf(ln.z_score(value_at_risk), precise)
+
+
+// @function Estimates the average loss *beyond* a confidence level, aka. expected shortfall.
+// @param ln Object of log space parameters.
+// @param p Probability threshold, aka. the confidence level [0, 1].
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method conditional_value_at_risk(LogNorm ln, float p, bool precise = true) =>
+    if p < 0 or 1 < p
+        na
+    else if p == 1 and p.e6() == 1.0e6
+        gaussian.INFINITY
+    else
+        ln.mean() / (1 - p) * (gaussian.ccdf(gaussian.cdfinv(p) - ln.sigma, precise))
+
+
+// @function Reverses the `conditional_value_at_risk` by estimating the confidence level (probability) of an average loss.
+// @param ln Object of log space parameters.
+// @param conditional_value_at_risk Conditional Value at Risk.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and 1
+export method conditional_value_at_risk_inv(LogNorm ln, float conditional_value_at_risk, bool precise = true) =>
+    float result = na
+    a = 0.0
+    b = 1.0
+
+    // Nan, ±Infinity
+    if na(conditional_value_at_risk)
+        sign = math.sign(conditional_value_at_risk)
+        if not na(sign)
+            result := sign < 0 ? a : b
+
+    else
+        p = 0.5
+        m_e6 = ln.mean().e6()
+        target = conditional_value_at_risk.e6()
+
+        // Bifurcation method for approximating confidence interval
+        for i = 0 to 52
+            guess = ln.conditional_value_at_risk(p, precise).e6()
+            switch
+                guess < target => a := p
+                guess > target => b := p
+                => p := guess == m_e6 ? 1.0e-16 : p, break
+            p := (a + b) * 0.5
+
+        result := p
+
+    result
+
+
+// @function Estimates the partial expectation of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and µ
+export method partial_expectation(LogNorm ln, float x, bool precise = true) =>
+    ln.mean() * gaussian.ccdf(ln.z_score(x) + ln.sigma, precise)
+
+
+// @function Reverses the `partial_expectation` by estimating a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param partial_expectation Partial Expectation [0, µ].
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method partial_expectation_inv(LogNorm ln, float partial_expectation, bool precise = true) =>
+    ln.x_coord(gaussian.ccdfinv(partial_expectation / ln.mean(), precise) - ln.sigma)
+
+
+// @function Estimates the conditional expectation of a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between X and ∞
+export method conditional_expectation(LogNorm ln, float x, bool precise = true) =>
+    ln.partial_expectation(x, precise) / gaussian.ccdf(ln.z_score(x), precise)
+
+
+// @function Reverses the `conditional_expectation` by estimating a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param conditional_expectation Conditional Expectation [0, ∞].
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns Between 0 and ∞
+export method conditional_expectation_inv(LogNorm ln, float conditional_expectation, bool precise = true) =>
+    float result = na
+    a = 0.0
+    b = gaussian.MAX_VALUE
+
+    // Nan, ±Infinity
+    if na(conditional_expectation)
+        sign = math.sign(conditional_expectation)
+        if not na(sign)
+            result := sign < 0 ? a : gaussian.INFINITY
+    else
+        x = b * 0.5
+        target = conditional_expectation.e6()
+
+        // Bifurcation method for approximating confidence interval
+        for i = 0 to 52
+            guess = ln.conditional_expectation(x, precise).e6()
+            switch
+                guess < target => b := x
+                guess > target => a := x
+                => break
+            x := (a + b) * 0.5
+
+        result := x
+
+    result
+
+
+// @function Computes the Fisher Information Matrix for the log-normal distribution, *not* a linear X coordinate.
+// @param ln Object of log space parameters.
+// @param log Sets if the matrix should be in log space ([true](#const_true), default) or linear space ([false](#const_true)).
+// @returns FIM for the distribution
+export method fisher(LogNorm ln, bool log = true) =>
+
+    // Fisher Information Matrix
+    fim = matrix.new<float>(2, 2, 0)
+    fim.set(0, 0, 1 / ln.variance) // For log space mean
+    fim.set(1, 1, 2 / ln.variance) // For log space variance
+
+    log ? fim : fisher_log_to_lin(ln, fim)
+
+
+// @function Computes the Fisher Information Matrix for a linear X coordinate in a log-normal distribution,
+// *not* the distribution itself.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param log Sets if the matrix should be in log space ([true](#const_true), default) or linear space ([false](#const_true)).
+// @returns FIM for the linear X coordinate
+export method fisher(LogNorm ln, float x, bool log = true) =>
+
+    // Gradient vector (score vector)
+    g = fisher_grad(ln, x)
+    m = g.get(0, 0)
+    s = g.get(1, 0)
+
+    // Outer product of the gradient vector
+    mm = m * m // ∂μ × ∂μ
+    ms = m * s // ∂μ × ∂σ
+    ss = s * s // ∂σ × ∂σ
+
+    // Fisher Information Matrix
+    fim = matrix.new<float>(2, 2, 0)
+    fim.set(0, 0, mm)
+    fim.set(0, 1, ms)
+    fim.set(1, 0, ms)
+    fim.set(1, 1, ss)
+
+    log ? fim : fisher_log_to_lin(ln, fim)
+
+
+// @function Estimates a confidence interval for a linear X coordinate, based on the uncertainty in the log-normal parameters.
+// @param ln Object of log space parameters.
+// @param x Linear X coordinate [0, ∞]. Negative inputs are made absolute.
+// @param sample_size Number of observations.
+// @param confidence Confidence level [0,1].
+// @param precise Double precision ([true](#const_true), default) or single precision ([false](#const_false)).
+// @returns CI for the linear X coordinate
+export method confidence_interval(LogNorm ln, float x, float sample_size, float confidence = 0.95, bool precise = true) =>
+
+    // Fisher Information for X
+    fim = ln.fisher(x, log = true)
+
+    // Gradient vector (score vector)
+    g = fisher_grad(ln, x)
+
+    // Inverse variance of the estimator (delta method): gradᵀ × invFIM × grad
+    fisher_info = 1 / g.transpose().mult(fim.pinv().mult(g)).get(0,0)
+
+    // CI Margin
+    err = sterr(sample_size, fisher_info)
+    err *= gaussian.cdfinv(0.5 + confidence * 0.5, precise) // Two sided : cdfinv( (1 + 0.95) / 2 ) ≈ 1.96
+
+    lx = log(x)
+    [ math.exp(lx - err), math.exp(lx + err) ]
+
+// }
+
+
+// ------------------------------------------------ TYPE MANAGEMENT ------------------------------------------------- {
+
+// @function Gets empirical quantiles from an array of floats.
+// @param arr Float array object.
+// @returns Quantiles Object
+export method quantiles(float[] arr) =>
+    id = arr.copy()
+    id.sort()
+    last_index = id.size() - 1
+    Quantile.new(
+       Q0 = id.first()
+     , LW = id.iget(last_index * LW_PERCENTILE)
+     , LC = id.iget(last_index * LC_PERCENTILE)
+     , Q1 = id.iget(last_index * Q1_PERCENTILE)
+     , Q2 = id.iget(last_index * Q2_PERCENTILE)
+     , Q3 = id.iget(last_index * Q3_PERCENTILE)
+     , UC = id.iget(last_index * UC_PERCENTILE)
+     , UW = id.iget(last_index * UW_PERCENTILE)
+     , Q4 = id.last()
+     ).qstats()
+
+
+// @function Transforms linear measurements into **log space** parameters. Negative inputs are made absolute.
+// @param ln Object containing log space parameters.
+// @param mean Linearly measured mean ( µ ).
+// @param stdev Linearly measured standard deviation. While either (or both) the Standard Deviation and Variance can be passed into the function, only one is required.
+// @param variance Linearly measured variance ( σ² ). While either (or both) the Standard Deviation and Variance can be passed into the function, only one is required.
+// @returns LogNorm Object
+export method set(LogNorm ln, float mean = na, float stdev = na, float variance = na) =>
+
+    if not na(mean) or not na(stdev) or not na(variance)
+        s = nz(math.abs(stdev), math.sqrt(variance))
+        v = nz(variance, nz(s * s, ln.variance()))
+        m = nz(mean, ln.mean())
+
+        // Log Parameters
+        ln.variance := nz(log(1 + v / (m * m)), ln.variance)
+        ln.sigma := nz(math.sqrt(ln.variance), ln.sigma)
+        ln.mu := log(m) - ln.variance * 0.5
+
+        // Linear Quantiles
+        ln.quantiles := Quantile.new(
+           Q0 = 0
+         , LW = ln.cdfinv(LW_PERCENTILE)
+         , LC = ln.cdfinv(LC_PERCENTILE)
+         , Q1 = ln.cdfinv(Q1_PERCENTILE)
+         , Q2 = ln.cdfinv(Q2_PERCENTILE)
+         , Q3 = ln.cdfinv(Q3_PERCENTILE)
+         , UC = ln.cdfinv(UC_PERCENTILE)
+         , UW = ln.cdfinv(UW_PERCENTILE)
+         , Q4 = ln.cdfinv(0.9999)
+         ).qstats()
+
+    ln
+
+
+// @function Initializes a LogNorm object.
+// @param mean Linearly measured mean.
+// @param stdev Linearly measured standard deviation. While either (or both) the Standard Deviation and Variance can be passed into the function, only one is required.
+// @param variance Linearly measured variance ( σ² ). While either (or both) the Standard Deviation and Variance can be passed into the function, only one is required.
+// @returns LogNorm Object
+export init(float mean, float stdev = na, float variance = na) =>
+    if na(stdev) and na(variance)
+        log.error("LogNormal → init() → Sigma and / or Variance is required.")
+    LogNorm.new().set(mean, stdev, variance)
+
+// }
+
+
+// ------------------------------------------------- CURVE FITTING -------------------------------------------------- {
+
+// @function **Fit : Quantile A → Quantile B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from Quantile space A [0, ∞]. Negative inputs are made absolute.
+// @param a Quantile object.
+// @param b Quantile object.
+// @returns Adjusted linear X coordinate
+export method fit(float x, Quantile a, Quantile b) =>
+    ax = math.abs(x)
+    ix = ax.e6()
+    switch
+        ix < a.Q0.e6() => b.Q0
+        ix < a.LW.e6() => fit_lerp(ax, b.Q0, b.LW, a.Q0, a.LW)
+        ix < a.LC.e6() => fit_lerp(ax, b.LW, b.LC, a.LW, a.LC)
+        ix < a.Q1.e6() => fit_lerp(ax, b.LC, b.Q1, a.LC, a.Q1)
+        ix < a.Q2.e6() => fit_lerp(ax, b.Q1, b.Q2, a.Q1, a.Q2)
+        ix < a.Q3.e6() => fit_lerp(ax, b.Q2, b.Q3, a.Q2, a.Q3)
+        ix < a.UC.e6() => fit_lerp(ax, b.Q3, b.UC, a.Q3, a.UC)
+        ix < a.UW.e6() => fit_lerp(ax, b.UC, b.UW, a.UC, a.UW)
+        ix < a.Q4.e6() => fit_lerp(ax, b.UW, b.Q4, a.UW, a.Q4)
+        => ax + (b.Q4 - a.Q4)
+
+
+// @function **Fit : LogNorm A → Quantile B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from LogNorm space A [0, ∞]. Negative inputs are made absolute.
+// @param a Object of log space parameters.
+// @param b Quantiles as observed in the data.
+// @returns Adjusted linear X coordinate
+export method fit(float x, LogNorm a, Quantile b) =>
+    fit(x, a.quantiles, b)
+
+
+// @function **Fit : Quantile A → LogNorm B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from Quantile space A [0, ∞]. Negative inputs are made absolute.
+// @param a Quantiles as observed in the data.
+// @param b Object of log space parameters.
+// @returns Adjusted linear X coordinate
+export method fit(float x, Quantile a, LogNorm b) =>
+    fit(x, a, b.quantiles)
+
+
+// @function **Fit : LogNorm A → LogNorm B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from LogNorm space A [0, ∞]. Negative inputs are made absolute.
+// @param a Object of log space parameters.
+// @param b Object of log space parameters.
+// @returns Adjusted linear X coordinate
+export method fit(float x, LogNorm a, LogNorm b) =>
+    fit(x, a.quantiles, b.quantiles)
+
+
+// @function **Fit : LogNorm A → Float Array B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from LogNorm space A [0, ∞]. Negative inputs are made absolute.
+// @param a Object of log space parameters.
+// @param b Float array object.
+// @param update_quantiles Sets if the array quantiles should be updated.
+// @returns Adjusted linear X coordinate
+export method fit(float x, LogNorm a, float[] b, bool update_quantiles = false) =>
+    var b_quantiles = b.quantiles()
+    if update_quantiles
+        b_quantiles := b.quantiles()
+    fit(x, a.quantiles, b_quantiles)
+
+
+// @function **Fit : Float Array A → LogNorm B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from array space A [0, ∞]. Negative inputs are made absolute.
+// @param a Float array object.
+// @param b Object of log space parameters.
+// @param update_quantiles Sets if the array quantiles should be updated.
+// @returns Adjusted linear X coordinate
+export method fit(float x, float[] a, LogNorm b, bool update_quantiles = false) =>
+    var a_quantiles = a.quantiles()
+    if update_quantiles
+        a_quantiles := a.quantiles()
+    fit(x, a_quantiles, b.quantiles)
+
+
+// @function **Fit : Quantile A → Float Array B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from Quantile space A [0, ∞]. Negative inputs are made absolute.
+// @param a Quantiles as observed in the data.
+// @param b Float array object.
+// @param update_quantiles Sets if the array quantiles should be updated.
+// @returns Adjusted linear X coordinate
+export method fit(float x, Quantile a, float[] b, bool update_quantiles = false) =>
+    var b_quantiles = b.quantiles()
+    if update_quantiles
+        b_quantiles := b.quantiles()
+    fit(x, a, b_quantiles)
+
+
+// @function **Fit : Float Array A → Quantile B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from array space A [0, ∞]. Negative inputs are made absolute.
+// @param a Float array object.
+// @param b Float array object.
+// @param update_quantiles Sets if the array quantiles should be updated.
+// @returns Adjusted linear X coordinate
+export method fit(float x, float[] a, Quantile b, bool update_quantiles = false) =>
+    var a_quantiles = a.quantiles()
+    if update_quantiles
+        a_quantiles := a.quantiles()
+    fit(x, a_quantiles, b)
+
+
+// @function **Fit : Float Array A → Float Array B**\
+// Transforms X coordinate between spaces A and B.
+// @param x Linear X coordinate from array space A [0, ∞]. Negative inputs are made absolute.
+// @param a Float array object.
+// @param b Float array object.
+// @param update_quantiles Sets if the array quantiles should be updated.
+// @returns Adjusted linear X coordinate
+export method fit(float x, float[] a, float[] b, bool update_quantiles = false) =>
+    var a_quantiles = a.quantiles()
+    var b_quantiles = b.quantiles()
+    if update_quantiles
+        a_quantiles := a.quantiles()
+        b_quantiles := b.quantiles()
+    fit(x, a_quantiles, b_quantiles)
+
+
+// @function **Probability Density Function**\
+// Estimates the probability *density* of a Log-Normal distribution. For clarity, **density is not a probability**.\
+// It's simply the Y coordinate of a Log-Normal curve at coordinate X.\
+// \
+// **Note:** \
+// Because the PDF computes a Y coordinate, and `fit` exclusively transforms X coordinates, if the result should be fit,
+// use the overload to pass in empirical quantiles for a more accurate transformation.
+// @param ln Object of log space parameters. The two functions are not compatible.
+// @param x Linear X coordinate for which a density will be estimated [0, ∞]. Negative inputs are made absolute.
+// @param empirical_quantiles Quantiles as observed in the data.
+// @returns Between 0 and ∞
+export method pdf(LogNorm ln, float x, Quantile empirical_quantiles) =>
+    ax = math.abs(x)
+    Q0 = empirical_quantiles.Q0
+    LW = empirical_quantiles.LW
+
+    // A mode is not a quantile and needs to be fit
+    models_mode = ln.mode()
+    fitted_mode = models_mode.fit(ln, empirical_quantiles)
+
+    // Offset X by the lowest empirical value
+    X0 = ax - Q0
+
+    // When the lowest empirical value is not zero
+    // shift lower tail relative to lower whisker
+    init_shift = Q0 // aka. Q0 - 0
+    init_scale = clamp(1 - X0 / (LW - Q0))
+
+    // Shift and scale all densities relative to the fitted mode
+    mode_shift = fitted_mode - models_mode
+    mode_scale = X0 / (fitted_mode - Q0)
+
+    // Combine the mode shift & scale with the initial shift & scale
+    // to determine how much the input X needs to be adjusted
+    x_offset = mode_shift * mode_scale + init_shift * init_scale
+
+    // Use relative mode difference to approximate relative density differences
+    y_offset = fitted_mode / models_mode
+
+    ln.pdf(ax - x_offset) / y_offset
+
+// }

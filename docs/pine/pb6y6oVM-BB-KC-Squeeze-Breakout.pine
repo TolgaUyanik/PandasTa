@@ -1,0 +1,191 @@
+//@version=6
+strategy("BB/KC Squeeze Breakout", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     initial_capital=10000, commission_type=strategy.commission.percent,
+     commission_value=0.1, slippage=1)
+
+// ── INPUTS ────────────────────────────────────────────────────────────────────
+bb_len     = input.int   (20,   "Length",       group="Bollinger Bands", minval=1)
+bb_mult    = input.float (2.0,  "Std Dev Mult", group="Bollinger Bands", step=0.1, minval=0.1)
+
+kc_len     = input.int   (20,   "Length",       group="Keltner Channel", minval=1)
+kc_atr_len = input.int   (14,   "ATR Length",   group="Keltner Channel", minval=1)
+kc_mult    = input.float (1.5,  "ATR Mult",     group="Keltner Channel", step=0.1, minval=0.1)
+
+use_squeeze_filter = input.bool(true, "Enable squeeze filter", group="Conditions",
+             tooltip="When enabled, entry require")
+ltf        = input.timeframe("1", "Lower TF",
+             tooltip="Lower timeframe for the squeeze filter (e.g. 1m). Uses the chart TF data filtered through this resolution.",
+             group="Conditions")
+htf        = input.timeframe("15", "Higher TF",
+             tooltip="Higher timeframe for squeeze confirmation. Must be above the chart TF.",
+             group="Conditions")
+max_out    = input.int   (10,   "Max bars BB outside KC (LTF)", group="Conditions", minval=0,
+             tooltip="Entry allowed up to this many bars after the lower TF BB exits the KC. Set to 0 = only while inside squeeze.")
+entry_grace = input.int  (3,    "Grace candles after BB breaks KC", group="Conditions", minval=0,
+             tooltip="After BB breaks out of KC on the relevant side (upper for longs, lower for shorts), entry is still valid for this many candles. 0 = only while BB is inside KC.")
+one_trade  = input.bool  (false, "One trade per breakout", group="Conditions",
+             tooltip="When enabled, only one entry is allowed per squeeze breakout. Resets when a new squeeze forms.")
+
+sl_type    = input.string("Breakout Candle", "SL Type", group="Stop Loss",
+             options=["Percent", "Breakout Candle"],
+             tooltip="Percent: fixed % from entry. Breakout Candle: long=bar low, short=bar high")
+sl_pct     = input.float (1.0,  "SL %",         group="Stop Loss", step=0.05, minval=0.01,
+             tooltip="Used when SL Type = Percent")
+use_be     = input.bool  (true, "Move SL to breakeven", group="Stop Loss")
+be_r       = input.float (1.0,  "BE trigger (R)", group="Stop Loss", step=0.1, minval=0.1,
+             tooltip="Move SL to breakeven when price reaches this many R from entry (e.g. 1.0 = 1R, 0.5 = half R)")
+max_loss_usd = input.float(0.0, "Max Loss per Position ($)", group="Stop Loss", minval=0.0, step=1.0,
+             tooltip="If > 0, overrides SL to cap loss at this dollar amount. Set to 0 to disable.")
+
+rr         = input.float (2.0,  "Risk : Reward", group="Take Profit", step=0.1, minval=0.1)
+
+// ── INDICATORS (chart TF) ─────────────────────────────────────────────────────
+bb_basis = ta.sma(close, bb_len)
+bb_upper = bb_basis + bb_mult * ta.stdev(close, bb_len)
+bb_lower = bb_basis - bb_mult * ta.stdev(close, bb_len)
+
+kc_basis = ta.ema(close, kc_len)
+kc_upper = kc_basis + kc_mult * ta.atr(kc_atr_len)
+kc_lower = kc_basis - kc_mult * ta.atr(kc_atr_len)
+
+// ── LOWER TF (squeeze filter) ─────────────────────────────────────────────────
+ltf_bb_u = request.security(syminfo.tickerid, ltf,
+     ta.sma(close, bb_len) + bb_mult * ta.stdev(close, bb_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+ltf_bb_l = request.security(syminfo.tickerid, ltf,
+     ta.sma(close, bb_len) - bb_mult * ta.stdev(close, bb_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+ltf_kc_u = request.security(syminfo.tickerid, ltf,
+     ta.ema(close, kc_len) + kc_mult * ta.atr(kc_atr_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+ltf_kc_l = request.security(syminfo.tickerid, ltf,
+     ta.ema(close, kc_len) - kc_mult * ta.atr(kc_atr_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+
+// ── HIGHER TF (squeeze confirmation) ─────────────────────────────────────────
+htf_bb_u = request.security(syminfo.tickerid, htf,
+     ta.sma(close, bb_len) + bb_mult * ta.stdev(close, bb_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+htf_bb_l = request.security(syminfo.tickerid, htf,
+     ta.sma(close, bb_len) - bb_mult * ta.stdev(close, bb_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+htf_kc_u = request.security(syminfo.tickerid, htf,
+     ta.ema(close, kc_len) + kc_mult * ta.atr(kc_atr_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+htf_kc_l = request.security(syminfo.tickerid, htf,
+     ta.ema(close, kc_len) - kc_mult * ta.atr(kc_atr_len),
+     barmerge.gaps_off, barmerge.lookahead_off)
+
+// ── CONDITIONS ────────────────────────────────────────────────────────────────
+// Chart-TF squeeze: both BB bands must be inside KC
+squeeze_chart = bb_upper < kc_upper and bb_lower > kc_lower
+
+// Lower TF squeeze
+squeeze_ltf   = ltf_bb_u < ltf_kc_u and ltf_bb_l > ltf_kc_l
+// HTF squeeze
+squeeze_htf   = htf_bb_u < htf_kc_u and htf_bb_l > htf_kc_l
+
+// Count consecutive bars since lower TF last had BB inside KC (0 = currently inside)
+var int bars_outside = 0
+bars_outside := squeeze_ltf ? 0 : bars_outside + 1
+
+cond_squeeze = not use_squeeze_filter or (bars_outside <= max_out)
+cond_htf     = squeeze_htf
+setup        = cond_squeeze and cond_htf
+
+// Count bars since full chart-TF squeeze ended (0 = currently in squeeze)
+var int bars_squeeze_outside = 0
+bars_squeeze_outside := squeeze_chart ? 0 : bars_squeeze_outside + 1
+
+// Entry valid while in squeeze or within grace candles after squeeze broke
+squeeze_valid = bars_squeeze_outside <= entry_grace
+
+// ── ONE TRADE PER BREAKOUT ────────────────────────────────────────────────────
+// Resets when a new full squeeze forms
+var bool breakout_traded = false
+if squeeze_chart and not squeeze_chart[1]
+    breakout_traded := false
+trade_allowed = not one_trade or not breakout_traded
+
+// ── ENTRY SIGNALS ─────────────────────────────────────────────────────────────
+// Both BB bands must have been inside KC (full squeeze), close breaks KC upper/lower.
+// Grace period allows entry for entry_grace candles after squeeze breaks.
+var int last_entry_bar = -1
+one_per_candle = bar_index != last_entry_bar
+
+long_sig  = barstate.isconfirmed and squeeze_valid and trade_allowed and one_per_candle and close > kc_upper and strategy.position_size == 0
+short_sig = barstate.isconfirmed and squeeze_valid and trade_allowed and one_per_candle and close < kc_lower and strategy.position_size == 0
+
+// ── POSITION STATE ────────────────────────────────────────────────────────────
+var float entry_price = na
+var float active_sl   = na
+var float tp_price    = na
+var float risk_pts    = na
+var bool  be_done     = false
+
+// ── ENTRIES ───────────────────────────────────────────────────────────────────
+if long_sig
+    raw_sl      = sl_type == "Percent" ? close * (1.0 - sl_pct / 100.0) : low
+    if max_loss_usd > 0
+        qty          = strategy.equity * 0.1 / close
+        max_risk_pts = max_loss_usd / math.max(qty, syminfo.mintick)
+        raw_sl      := math.max(raw_sl, close - max_risk_pts)
+    entry_price     := close
+    active_sl       := raw_sl
+    risk_pts        := math.max(entry_price - active_sl, syminfo.mintick)
+    tp_price        := entry_price + risk_pts * rr
+    be_done         := false
+    breakout_traded := true
+    last_entry_bar  := bar_index
+    strategy.entry("Long", strategy.long)
+
+if short_sig
+    raw_sl      = sl_type == "Percent" ? close * (1.0 + sl_pct / 100.0) : high
+    if max_loss_usd > 0
+        qty          = strategy.equity * 0.1 / close
+        max_risk_pts = max_loss_usd / math.max(qty, syminfo.mintick)
+        raw_sl      := math.min(raw_sl, close + max_risk_pts)
+    entry_price     := close
+    active_sl       := raw_sl
+    risk_pts        := math.max(active_sl - entry_price, syminfo.mintick)
+    tp_price        := entry_price - risk_pts * rr
+    be_done         := false
+    breakout_traded := true
+    last_entry_bar  := bar_index
+    strategy.entry("Short", strategy.short)
+
+// ── EXITS (re-evaluated each bar to manage breakeven) ─────────────────────────
+if strategy.position_size > 0
+    if use_be and not be_done and high >= entry_price + risk_pts * be_r
+        active_sl := entry_price
+        be_done   := true
+    strategy.exit("Long Exit", "Long", stop=active_sl, limit=tp_price)
+
+if strategy.position_size < 0
+    if use_be and not be_done and low <= entry_price - risk_pts * be_r
+        active_sl := entry_price
+        be_done   := true
+    strategy.exit("Short Exit", "Short", stop=active_sl, limit=tp_price)
+
+// ── VISUALS ───────────────────────────────────────────────────────────────────
+bb_col = color.new(color.blue,   55)
+kc_col = color.new(color.orange, 35)
+
+p_bb_u = plot(bb_upper, "BB Upper", bb_col, 1)
+p_bb_l = plot(bb_lower, "BB Lower", bb_col, 1)
+plot(bb_basis, "BB Mid", color.new(color.blue, 75), 1)
+fill(p_bb_u, p_bb_l, color.new(color.blue, 92), title="BB Fill")
+
+p_kc_u = plot(kc_upper, "KC Upper", kc_col, 1)
+p_kc_l = plot(kc_lower, "KC Lower", kc_col, 1)
+plot(kc_basis, "KC Mid", color.new(color.orange, 60), 1)
+fill(p_kc_u, p_kc_l, color.new(color.orange, 92), title="KC Fill")
+
+bgcolor(setup ? color.new(color.teal, 87) : na, title="Setup Active")
+
+plotshape(long_sig,  "Long Entry",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), size=size.small)
+plotshape(short_sig, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red,  0), size=size.small)
+
+plot(strategy.position_size != 0 ? active_sl : na, "Stop Loss",   color.new(color.red,   15), 1, plot.style_linebr)
+plot(strategy.position_size != 0 ? tp_price  : na, "Take Profit", color.new(color.green, 15), 1, plot.style_linebr)

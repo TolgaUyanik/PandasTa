@@ -1,0 +1,578 @@
+// This Pine Script(R) code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// @description True Opens library: calculation, drawing, history management, and price tracking table
+//   for opening prices at multiple timeframes (yearly, quarterly, monthly, weekly, daily, session, 90-minute).
+//   Extracted from qt-ultimate-enigma.pine lines 1951-2597.
+library("EKTrueOpens", overlay=true)
+
+// =============================================================================
+// EXPORTED TYPES
+// =============================================================================
+
+// @type Core level structure for a single True Open line/label pair
+// @field l The line object drawn on chart
+// @field lbl The label object drawn on chart
+// @field price The opening price value
+// @field active Whether this level is the current (still-extending) period
+// @field name Display name for the label (e.g. "TYO", "AO", "90m")
+// @field c The color assigned to this level
+// @field start_t Bar time when this level started
+// @field end_t Hard end time (0 = no hard end, extends until next period)
+export type TO_Level
+    line l
+    label lbl
+    float price
+    bool active
+    string name
+    color c
+    int start_t
+    int end_t
+
+// @type Configuration for True Opens general settings (replaces input.*() calls)
+// @field to_style_mode "Auto" or "Custom" line style mode
+// @field to_custom_style "Solid", "Dashed", or "Dotted" when mode is Custom
+// @field to_hist_count_global How many past lines to keep for selected timeframes
+// @field to_offset_val Label offset in bars
+// @field to_textSize Text size for chart labels
+// @field to_font_fam Font family string (font.family_monospace or font.family_default)
+// @field to_sess_lbl_mode "Name" or "Time" for session label display
+export type TOConfig
+    string to_style_mode      = "Auto"
+    string to_custom_style    = "Solid"
+    int    to_hist_count_global = 1
+    int    to_offset_val      = 10
+    string to_textSize        = "small"
+    string to_font_fam        = ""
+    string to_sess_lbl_mode   = "Time"
+
+// @type Configuration for the True Opens price tracking table (replaces input.*() calls)
+// @field to_show_table Whether to show the table at all
+// @field to_table_pos Table position string (e.g. position.bottom_right)
+// @field to_table_txt_size Table text size
+// @field to_tbl_show_90m Show 90-Min row
+// @field to_tbl_show_sess Show Session row
+// @field to_tbl_show_dy Show Daily row
+// @field to_tbl_show_wk Show Weekly row
+// @field to_tbl_show_mn Show Monthly row
+// @field to_tbl_show_qt Show Quarterly row
+// @field to_tbl_show_yr Show Yearly row
+// @field to_c_tbl_above Color when price is above True Open
+// @field to_c_tbl_below Color when price is below True Open
+// @field to_c_tbl_none Color when period is not open
+// @field to_font_fam Font family string for table cells
+export type TOTableConfig
+    bool   to_show_table      = true
+    string to_table_pos       = "bottom_right"
+    string to_table_txt_size  = "small"
+    bool   to_tbl_show_90m    = true
+    bool   to_tbl_show_sess   = true
+    bool   to_tbl_show_dy     = true
+    bool   to_tbl_show_wk     = true
+    bool   to_tbl_show_mn     = false
+    bool   to_tbl_show_qt     = false
+    bool   to_tbl_show_yr     = false
+    color  to_c_tbl_above     = #1090f9A3
+    color  to_c_tbl_below     = #c8452bAB
+    color  to_c_tbl_none      = color.gray
+    string to_font_fam        = ""
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+// @function Converts a timeframe string to minutes
+// @param tf Timeframe string (e.g. "1", "60", "D", "W")
+// @returns Float value in minutes
+export to_tf_to_min(string tf) =>
+    timeframe.in_seconds(tf) / 60.0
+
+// @function Checks if current chart timeframe is within the given min/max range
+// @param min_s Minimum timeframe string
+// @param max_s Maximum timeframe string
+// @returns True if current timeframe is within range
+export to_is_visible(string min_s, string max_s) =>
+    float current_min = timeframe.multiplier
+    if timeframe.isseconds
+        current_min := current_min / 60.0
+    if timeframe.isdaily
+        current_min := 1440.0
+    if timeframe.isweekly
+        current_min := 10080.0
+    if timeframe.ismonthly
+        current_min := 43200.0
+
+    float min_val = to_tf_to_min(min_s)
+    float max_val = to_tf_to_min(max_s)
+    current_min >= min_val and current_min <= max_val
+
+// @function Converts a style name string to a line style constant
+// @param s Style name: "Solid", "Dashed", or "Dotted"
+// @returns line.style_* constant
+export to_get_style_const(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+// @function Returns the line style for active (current) True Open lines
+// @param cfg TOConfig with style_mode and custom_style settings
+// @returns line.style_* constant
+export to_get_active_style(TOConfig cfg) =>
+    if cfg.to_style_mode == "Auto"
+        line.style_dotted
+    else
+        to_get_style_const(cfg.to_custom_style)
+
+// @function Calculates the hard session end time for a given start time
+// @param start_time Bar time of the session start
+// @returns Timestamp of the session end (6-hour boundaries in NY time)
+export to_get_sess_end(int start_time) =>
+    string tz = "America/New_York"
+    int h = hour(start_time, tz)
+    int y = year(start_time, tz)
+    int m = month(start_time, tz)
+    int d = dayofmonth(start_time, tz)
+
+    int end_h = 0
+
+    if h >= 18
+        end_h := 0
+    else if h >= 12
+        end_h := 18
+    else if h >= 6
+        end_h := 12
+    else
+        end_h := 6
+
+    int target = 0
+    if h >= 18
+        int today_zero = timestamp(tz, y, m, d, 0, 0)
+        target := today_zero + 86400000 // +24 hours
+    else
+        target := timestamp(tz, y, m, d, end_h, 0)
+    target
+
+// =============================================================================
+// MANAGEMENT FUNCTIONS
+// =============================================================================
+
+// @function Enforces the history limit on a TO_Level array, deleting excess old lines/labels
+// @param arr The array of TO_Level objects
+// @param allow_hist Whether history is enabled for this timeframe
+// @param hist_count Maximum number of historical levels to keep
+export to_enforce_limit(array<TO_Level> arr, bool allow_hist, int hist_count) =>
+    bool has_active = array.size(arr) > 0 and array.get(arr, array.size(arr)-1).active
+    int hist_limit = allow_hist ? hist_count : 0
+    int total_limit = hist_limit + (has_active ? 1 : 0)
+    while array.size(arr) > total_limit
+        oldObj = array.shift(arr)
+        line.delete(oldObj.l)
+        label.delete(oldObj.lbl)
+
+// @function Force-closes the current active period in an array (used at timeframe boundaries)
+// @param arr The array of TO_Level objects
+// @param allow_hist Whether history is enabled for this timeframe
+// @param cfg TOConfig with style settings
+export to_force_close_period(array<TO_Level> arr, bool allow_hist, TOConfig cfg) =>
+    if array.size(arr) > 0
+        lastObj = array.get(arr, array.size(arr) - 1)
+        if lastObj.active
+            lastObj.active := false
+            line.set_x2(lastObj.l, time)
+            label.set_x(lastObj.lbl, time)
+            if cfg.to_style_mode == "Auto"
+                line.set_style(lastObj.l, line.style_solid)
+            label.delete(lastObj.lbl)
+            to_enforce_limit(arr, allow_hist, cfg.to_hist_count_global)
+
+// @function Closes the previous active level and creates a new one for the new period
+// @param arr The array of TO_Level objects
+// @param p The opening price for the new period
+// @param start_time Bar time of the new period start
+// @param txt Label text for the new level
+// @param col Color for the new level
+// @param allow_hist Whether history is enabled for this timeframe
+// @param use_hard_end Whether to calculate a hard session end time
+// @param custom_end Custom end time (0 = none, overrides hard end calc)
+// @param cfg TOConfig with style, font, and text size settings
+export to_manage_history(array<TO_Level> arr, float p, int start_time, string txt, color col, bool allow_hist, bool use_hard_end, int custom_end, TOConfig cfg) =>
+    if array.size(arr) > 0
+        prevObj = array.get(arr, array.size(arr) - 1)
+        if prevObj.active
+            prevObj.active := false
+
+            // If the previous object had a hard end, we cut the line there.
+            int cut_time = start_time
+            if prevObj.end_t != 0 and prevObj.end_t < start_time
+                cut_time := prevObj.end_t
+
+            line.set_x2(prevObj.l, cut_time)
+            label.set_x(prevObj.lbl, cut_time)
+
+            if cfg.to_style_mode == "Auto"
+                line.set_style(prevObj.l, line.style_solid)
+            label.delete(prevObj.lbl)
+
+    l_new = line.new(x1=start_time, y1=p, x2=start_time, y2=p, xloc=xloc.bar_time, width=1, style=to_get_active_style(cfg), color=col)
+    lb_new = label.new(x=start_time, y=p, xloc=xloc.bar_time, text="", style=label.style_label_left, color=color(na), textcolor=col, text_font_family=cfg.to_font_fam, size=cfg.to_textSize)
+
+    // Determine End Time
+    int final_end = 0
+    if custom_end > 0
+        final_end := custom_end
+    else if use_hard_end
+        final_end := to_get_sess_end(start_time)
+
+    newObj = TO_Level.new(l_new, lb_new, p, true, txt, col, start_time, final_end)
+    array.push(arr, newObj)
+    to_enforce_limit(arr, allow_hist, cfg.to_hist_count_global)
+
+// @function Updates line extensions, visibility, colors, and label text for all levels in an array
+// @param arr The array of TO_Level objects
+// @param is_vis Whether this timeframe is visible at current chart resolution
+// @param is_time_label_mode Whether labels should show time instead of name (for sessions/90m)
+// @param allow_hist Whether history is enabled for this timeframe
+// @param cfg TOConfig with offset, session label mode, and font settings
+export to_maintain_lines(array<TO_Level> arr, bool is_vis, bool is_time_label_mode, bool allow_hist, TOConfig cfg) =>
+    if array.size(arr) > 0
+        int tf_ms = int(timeframe.in_seconds(timeframe.period) * 1000)
+        int future_t = time + (cfg.to_offset_val * tf_ms)
+
+        for i = 0 to array.size(arr) - 1
+            obj = array.get(arr, i)
+
+            // Extension Logic
+            if obj.active
+                int target_x = future_t
+                // STRICT END CHECK
+                if obj.end_t != 0 and future_t > obj.end_t
+                    target_x := obj.end_t
+
+                line.set_x2(obj.l, target_x)
+                label.set_x(obj.lbl, target_x)
+
+            // Visibility & Color Logic
+            bool show_line = is_vis
+            if not allow_hist and not obj.active
+                show_line := false
+
+            color final_c = show_line ? obj.c : color.new(color.white, 100)
+            line.set_color(obj.l, final_c)
+            label.set_textcolor(obj.lbl, show_line ? obj.c : color.new(color.white, 100))
+
+            // Dynamic Label Text
+            string final_txt = obj.name
+
+            if is_time_label_mode
+                if cfg.to_sess_lbl_mode == "Time" or obj.name == "90m"
+                    final_txt := str.format_time(obj.start_t, "HH:mm", "America/New_York")
+
+            label.set_text(obj.lbl, final_txt)
+
+// =============================================================================
+// CALCULATION FUNCTIONS (for use inside request.security)
+// =============================================================================
+
+// @function Calculates the True Yearly Open (April open per ICT/Daye methodology)
+// @returns Tuple [price, new_period_flag, trigger_time]
+export to_calc_yr_func() =>
+    int m = month(time)
+    var float p = na
+    var int trig_t = 0
+    bool new_yr = false
+    if m == 4 and m[1] != 4
+        p := open
+        new_yr := true
+        trig_t := time
+    [p, new_yr, trig_t]
+
+// Internal helper: gets the 4th Sunday timestamp for quarterly open calculation
+to_get_4th_sunday_timestamp(int y, int m) =>
+    int d = 1
+    int first_sunday_day = 0
+    for i = 0 to 6
+        int ts_check = timestamp(y, m, d + i, 0, 0)
+        if dayofweek(ts_check) == dayofweek.sunday
+            first_sunday_day := d + i
+            break
+    int fourth_sunday_day = first_sunday_day + 21
+    timestamp(y, m, fourth_sunday_day, 0, 0)
+
+// @function Calculates the True Quarterly Open (4th Sunday of quarter-start month)
+// @returns Tuple [price, new_period_flag, trigger_time]
+export to_calc_qt_func() =>
+    int m = month(time)
+    int y = year(time)
+    int q_start_m = m <= 3 ? 1 : m <= 6 ? 4 : m <= 9 ? 7 : 10
+    int target_time = to_get_4th_sunday_timestamp(y, q_start_m)
+    var float p = na
+    var int last_t = 0
+    var int trig_t = 0
+    bool new_qt = false
+    if time >= target_time and last_t != target_time
+        p := open
+        last_t := target_time
+        new_qt := true
+        trig_t := time
+    [p, new_qt, trig_t]
+
+// @function Calculates the True Monthly Open (2nd week Sunday at trigger hour)
+// @param t_hour The trigger hour in NY time (typically 18)
+// @returns Tuple [price, new_period_flag, trigger_time]
+export to_calc_mn_func(int t_hour) =>
+    string tz = "America/New_York"
+    int d = dayofmonth(time, tz)
+    int dow = dayofweek(time, tz)
+    int h = hour(time, tz)
+    bool is_sec_wk = d >= 7 and d <= 13
+    bool is_sun = dow == dayofweek.sunday
+    bool time_trig = h == t_hour or (h > t_hour and h[1] < t_hour)
+    var float p = na
+    var int trig_t = 0
+    bool new_mn = false
+    var int last_m = -1
+    int cur_m = month(time, tz)
+    if is_sec_wk and is_sun and time_trig and cur_m != last_m
+        p := open
+        new_mn := true
+        last_m := cur_m
+        trig_t := time
+    [p, new_mn, trig_t]
+
+// @function Calculates the True Weekly Open (Monday at trigger hour)
+// @param t_hour The trigger hour in NY time (typically 18)
+// @returns Tuple [price, new_period_flag, trigger_time]
+export to_calc_wk_func(int t_hour) =>
+    string tz = "America/New_York"
+    int dow = dayofweek(time, tz)
+    int h = hour(time, tz)
+    int min = minute(time, tz)
+    bool is_mon = dow == dayofweek.monday
+    bool time_trig = h == t_hour and min == 0
+    var float p = na
+    var int trig_t = 0
+    bool new_wk = false
+    var int last_time = 0
+    if is_mon and time_trig and time != last_time
+        p := open
+        new_wk := true
+        last_time := time
+        trig_t := time
+    [p, new_wk, trig_t]
+
+// @function Calculates the True Daily Open (midnight NY time)
+// @returns Tuple [price, new_period_flag, trigger_time]
+export to_calc_dy_func() =>
+    string tz = "America/New_York"
+    int h = hour(time, tz)
+    int d = dayofmonth(time, tz)
+    int min = minute(time, tz)
+
+    var float p = na
+    var int trig_t = 0
+    bool new_dy = false
+    var int last_d = -1
+
+    if d != last_d and h == 0 and min == 0
+        p := open
+        new_dy := true
+        last_d := d
+        trig_t := time
+    [p, new_dy, trig_t]
+
+// @function Calculates a True Session Open at the given hour:minute in NY time
+// @param t_h Session start hour (NY time)
+// @param t_m Session start minute (NY time)
+// @returns Tuple [price, new_period_flag, trigger_time]
+export to_calc_session_func(int t_h, int t_m) =>
+    string tz = "America/New_York"
+    int h = hour(time, tz)
+    int min = minute(time, tz)
+    bool time_trig = (h == t_h and min == t_m)
+    var float p = na
+    var int trig_t = 0
+    bool new_sess = false
+    var int last_trigger_time = 0
+    if time_trig and time != last_trigger_time
+        p := open
+        new_sess := true
+        trig_t := time
+        last_trigger_time := time
+    [p, new_sess, trig_t]
+
+// @function Calculates the True 90-Minute Open (:23/:53 cycle boundaries)
+// @returns Tuple [price, new_period_flag, trigger_time, strict_end_time]
+export to_calc_90m_func() =>
+    string tz = "America/New_York"
+    int h = hour(time, tz)
+    int min = minute(time, tz)
+    int y = year(time, tz)
+    int m = month(time, tz)
+    int d = dayofmonth(time, tz)
+
+    bool is_cycle_a = (h % 3 == 0) and (min == 23)
+    bool is_cycle_b = (h % 3 == 1) and (min == 53)
+
+    bool time_trig = is_cycle_a or is_cycle_b
+
+    var float p = na
+    var int trig_t = 0
+    var int strict_end_t = 0
+    bool new_90 = false
+    var int last_trigger_time = 0
+
+    if time_trig and time != last_trigger_time
+        p := open
+        new_90 := true
+        trig_t := time
+        last_trigger_time := time
+
+        if is_cycle_a
+            strict_end_t := timestamp(tz, y, m, d, h+1, 30, 0)
+        if is_cycle_b
+            strict_end_t := timestamp(tz, y, m, d, h+2, 0, 0)
+
+    [p, new_90, trig_t, strict_end_t]
+
+// =============================================================================
+// TABLE FUNCTIONS
+// =============================================================================
+
+// @function Checks if a trigger time falls within the current period of the given type
+// @param trigger_time The bar time when the True Open was triggered
+// @param type Period type: "D", "W", "M", "Q", "Y", "SESS", or "90M"
+// @returns True if the trigger time is within the current period
+export to_is_current_period(int trigger_time, string type) =>
+    bool current = false
+    if trigger_time == 0 or na(trigger_time)
+        current := false
+    else
+        string tz = "America/New_York"
+        int t_y = year(trigger_time, tz)
+        int t_m = month(trigger_time, tz)
+        int t_d = dayofmonth(trigger_time, tz)
+        int c_y = year(time, tz)
+        int c_m = month(time, tz)
+        int c_d = dayofmonth(time, tz)
+
+        if type == "D"
+            current := (t_d == c_d and t_m == c_m and t_y == c_y)
+        else if type == "W"
+            int t_w = weekofyear(trigger_time, tz)
+            int c_w = weekofyear(time, tz)
+            bool is_sunday = dayofweek(time, tz) == dayofweek.sunday
+            current := (t_w == c_w and t_y == c_y and not is_sunday)
+        else if type == "M"
+            current := (t_m == c_m and t_y == c_y)
+        else if type == "Q"
+            int t_q = math.floor((t_m - 1) / 3)
+            int c_q = math.floor((c_m - 1) / 3)
+            current := (t_q == c_q and t_y == c_y)
+        else if type == "Y"
+            current := (t_y == c_y)
+        else if type == "SESS" or type == "90M"
+            current := (t_d == c_d and t_m == c_m and t_y == c_y)
+    current
+
+// @function Gets the status text and color for a single True Open level vs current close
+// @param lvl_price The True Open price
+// @param trig_t The trigger time for the True Open
+// @param period_type Period type string for is_current_period check
+// @param c_tbl_none Color for "Not Open" state
+// @param c_tbl_above Color for "Above" state
+// @param c_tbl_below Color for "Below" state
+// @returns Tuple [status_text, status_color]
+export to_get_status(float lvl_price, int trig_t, string period_type, color c_tbl_none, color c_tbl_above, color c_tbl_below) =>
+    string txt = "Not Open"
+    color col = c_tbl_none
+    if not na(lvl_price) and to_is_current_period(trig_t, period_type)
+        if close > lvl_price
+            txt := "Above"
+            col := c_tbl_above
+        else
+            txt := "Below"
+            col := c_tbl_below
+    [txt, col]
+
+// @function Gets the status for an array-based True Open (sessions, 90m) including label text
+// @param arr The array of TO_Level objects
+// @param label_name Display name for the table row (e.g. "Session", "90-Min")
+// @param c_tbl_none Color for "Not Open" state
+// @param c_tbl_above Color for "Above" state
+// @param c_tbl_below Color for "Below" state
+// @returns Tuple [label_text, status_text, status_color]
+export to_get_array_status(array<TO_Level> arr, string label_name, color c_tbl_none, color c_tbl_above, color c_tbl_below) =>
+    string label_txt = label_name
+    string status_txt = "Not Open"
+    color col = c_tbl_none
+
+    if array.size(arr) > 0
+        lastObj = array.get(arr, array.size(arr)-1)
+        bool is_time_valid = lastObj.end_t == 0 or time < lastObj.end_t
+
+        if lastObj.active and is_time_valid
+            if close > lastObj.price
+                status_txt := "Above"
+                col := c_tbl_above
+            else
+                status_txt := "Below"
+                col := c_tbl_below
+    [label_txt, status_txt, col]
+
+// @function Renders the True Opens price tracking table with all timeframe rows
+// @param tbl_cfg TOTableConfig with all table display settings
+// @param to_tbl The pre-created table object
+// @param to_arr_sess Session TO_Level array
+// @param to_arr_90m 90-minute TO_Level array
+// @param to_yr_p Yearly True Open price (from request.security)
+// @param to_yr_t Yearly trigger time
+// @param to_qt_p Quarterly True Open price
+// @param to_qt_t Quarterly trigger time
+// @param to_mn_p Monthly True Open price
+// @param to_mn_t Monthly trigger time
+// @param to_wk_p Weekly True Open price
+// @param to_wk_t Weekly trigger time
+// @param to_dy_p Daily True Open price
+// @param to_dy_t Daily trigger time
+export to_render_table(TOTableConfig tbl_cfg, table to_tbl, array<TO_Level> to_arr_sess, array<TO_Level> to_arr_90m, float to_yr_p, int to_yr_t, float to_qt_p, int to_qt_t, float to_mn_p, int to_mn_t, float to_wk_p, int to_wk_t, float to_dy_p, int to_dy_t) =>
+    if tbl_cfg.to_show_table and barstate.islast
+        int row_idx = 0
+
+        if tbl_cfg.to_tbl_show_90m
+            [lbl_90, txt_90, col_90] = to_get_array_status(to_arr_90m, "90-Min", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, lbl_90, text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, txt_90, text_color=col_90, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1
+
+        if tbl_cfg.to_tbl_show_sess
+            [lbl_s, txt_s, col_s] = to_get_array_status(to_arr_sess, "Session", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, lbl_s, text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, txt_s, text_color=col_s, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1
+
+        if tbl_cfg.to_tbl_show_dy
+            [st_txt, st_col] = to_get_status(to_dy_p, to_dy_t, "D", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, "Daily", text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, st_txt, text_color=st_col, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1
+
+        if tbl_cfg.to_tbl_show_wk
+            [st_txt, st_col] = to_get_status(to_wk_p, to_wk_t, "W", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, "Weekly", text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, st_txt, text_color=st_col, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1
+
+        if tbl_cfg.to_tbl_show_mn
+            [st_txt, st_col] = to_get_status(to_mn_p, to_mn_t, "M", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, "Monthly", text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, st_txt, text_color=st_col, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1
+
+        if tbl_cfg.to_tbl_show_qt
+            [st_txt, st_col] = to_get_status(to_qt_p, to_qt_t, "Q", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, "Quarterly", text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, st_txt, text_color=st_col, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1
+
+        if tbl_cfg.to_tbl_show_yr
+            [st_txt, st_col] = to_get_status(to_yr_p, to_yr_t, "Y", tbl_cfg.to_c_tbl_none, tbl_cfg.to_c_tbl_above, tbl_cfg.to_c_tbl_below)
+            table.cell(to_tbl, 0, row_idx, "Yearly", text_color=chart.fg_color, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            table.cell(to_tbl, 1, row_idx, st_txt, text_color=st_col, text_size=tbl_cfg.to_table_txt_size, bgcolor=color(na), text_font_family=tbl_cfg.to_font_fam)
+            row_idx += 1

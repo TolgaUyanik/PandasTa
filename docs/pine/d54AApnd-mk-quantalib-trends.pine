@@ -1,0 +1,346 @@
+// Licensed under the Apache License, Version 2.0
+// Incomplete subset of QuanTAlib trend indicators (lib/trends_*) by mihakralj.
+//   https://github.com/mihakralj/QuanTAlib
+// Warmup compensation code from the originals is omitted for simplicity;
+// values on early bars may differ slightly from the reference implementations.
+// © mihakralj (original algorithms)
+
+//@version=6
+library("mk_quantalib_trends")
+
+
+//#region ------ DEMA -----------------
+
+//@function Double Exponential Moving Average (DEMA)
+//@param source Series to calculate from
+//@param period Lookback period
+//@param alpha Optional smoothing factor (overrides period when > 0)
+//@returns DEMA value
+export dema(series float source, simple int period, simple float alpha = 0) =>
+    float a = alpha > 0 ? alpha : 2.0 / (period + 1)
+    var float ema1Raw = 0.0
+    var float ema2Raw = 0.0
+    var float ema1    = source
+    var float ema2    = source
+    ema1Raw := a * (source - ema1Raw) + ema1Raw
+    ema1    := ema1Raw
+    ema2Raw := a * (ema1 - ema2Raw) + ema2Raw
+    ema2    := ema2Raw
+    2.0 * ema1 - ema2
+
+//#endregion --- DEMA -----------------
+
+
+//#region ------ HEMA -----------------
+
+alphaFromWmaLag(int p) =>
+    float fp = math.max(float(p), 1.0)
+    3.0 / (fp + 2.0)
+
+//@function Hull Exponential Moving Average (HEMA, exponential Hull analog)
+//@param src Series to calculate from
+//@param period Period (matches HMA lag at same period, >= 2)
+//@returns HEMA value
+export hema(series float src, simple int period) =>
+    int   n     = math.max(period, 2)
+    int   halfN = int(n / 2)
+    int   sqrtN = math.max(int(math.sqrt(n)), 1)
+    float aS    = alphaFromWmaLag(n)
+    float aF    = alphaFromWmaLag(math.max(halfN, 1))
+    float aM    = alphaFromWmaLag(math.max(sqrtN, 1))
+    float bS    = 1.0 - aS
+    float bF    = 1.0 - aF
+    float lagS  = bS / aS
+    float lagF  = bF / aF
+    float r     = math.min(math.max(lagF / lagS, 0.0), 0.999999)
+    var float eSraw = 0.0
+    var float eFraw = 0.0
+    var float eMraw = 0.0
+    eSraw := aS * (src - eSraw) + eSraw
+    eFraw := aF * (src - eFraw) + eFraw
+    float eS    = eSraw
+    float eF    = eFraw
+    float deLag = (eF - r * eS) / (1.0 - r)
+    eMraw := aM * (deLag - eMraw) + eMraw
+    eMraw
+
+//#endregion --- HEMA -----------------
+
+
+//#region ------ JMA ------------------
+
+//@function Jurik Moving Average (JMA)
+//@param source Series to calculate from
+//@param period Number of bars used in the calculation (>= 1)
+//@param phase Phase shift (-100 to 100). Negative = smoother, positive = more leading
+//@returns JMA value
+export jma(series float source, simple int period, simple int phase = 0) =>
+    simple float phaseVal    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : (phase * 0.01) + 1.5
+    simple float len0        = period < 1.0000000002 ? 1e-10 : (period - 1.0) / 2.0
+    simple float logParam    = math.max(math.log(math.sqrt(len0)) / math.log(2.0) + 2.0, 0.0)
+    simple float sqrtParam   = math.sqrt(len0) * logParam
+    simple float lenAdj      = len0 * 0.9
+    simple float lenDiv      = lenAdj / (lenAdj + 2.0)
+    simple float sqrtDiv     = sqrtParam / (sqrtParam + 1.0)
+    simple float pExp        = math.max(logParam - 2.0, 0.5)
+    var float    paramA      = na
+    var float    paramB      = na
+    var float    lastC0      = na
+    var float    lastC8      = na
+    var float    lastA8      = na
+    var float    lastJma     = na
+    var int      bars        = 0
+    var float    cycleDelta  = 0.0
+    var int      volIndex    = 0
+    var int      volCount    = 0
+    var array<float> volWindow  = array.new_float(10, 0.0)
+    var int      distIndex   = 0
+    var int      distCount   = 0
+    var array<float> distWindow = array.new_float(128, 0.0)
+    var array<float> sorted     = array.new_float(0)
+    float currentJma = na
+    if not na(source)
+        bars += 1
+        if bars == 1
+            paramA      := source
+            paramB      := source
+            lastC0      := source
+            lastC8      := 0.0
+            lastA8      := 0.0
+            lastJma     := source
+            currentJma  := source
+        else
+            float diffA    = source - paramA
+            float diffB    = source - paramB
+            float absA     = math.abs(diffA)
+            float absB     = math.abs(diffB)
+            float absValue = absA > absB ? absA : absB
+            float dLocal   = absValue + 1e-10
+            float oldVol   = array.get(volWindow, volIndex)
+            cycleDelta    += dLocal - oldVol
+            array.set(volWindow, volIndex, dLocal)
+            volIndex += 1
+            if volIndex >= 10
+                volIndex := 0
+            if volCount < 10
+                volCount += 1
+            float highD = volCount > 0 ? cycleDelta / (volCount < 10 ? volCount : 10) : dLocal
+            array.set(distWindow, distIndex, highD)
+            distIndex += 1
+            if distIndex >= 128
+                distIndex := 0
+            if distCount < 128
+                distCount += 1
+            float dRef = highD
+            if distCount >= 16
+                int count = distCount
+                array.clear(sorted)
+                for i = 0 to count - 1
+                    int idx = distIndex - 1 - i
+                    if idx < 0
+                        idx += 128
+                    array.push(sorted, array.get(distWindow, idx))
+                array.sort(sorted)
+                int idxLo = 0
+                int idxHi = 0
+                if count >= 128
+                    idxLo := 32
+                    idxHi := 96
+                else
+                    int slice = int(math.max(5.0, math.round(count * 0.5)))
+                    int drop  = (count - slice) / 2
+                    idxLo := drop
+                    idxHi := drop + slice - 1
+                if idxLo < 0
+                    idxLo := 0
+                if idxHi >= count
+                    idxHi := count - 1
+                float sum = 0.0
+                for i = idxLo to idxHi
+                    sum += array.get(sorted, i)
+                dRef := sum / float(idxHi - idxLo + 1)
+            if dRef <= 0.0
+                dRef := dLocal
+            float ratio = math.max(absValue / dRef, 0.0)
+            float d     = math.min(math.max(math.pow(ratio, pExp), 1.0), logParam)
+            float adapt = math.pow(sqrtDiv, math.sqrt(d))
+            if source > paramA
+                paramA := source
+            else
+                paramA := source - (source - paramA) * adapt
+            if source < paramB
+                paramB := source
+            else
+                paramB := source - (source - paramB) * adapt
+            float prevJma = na(lastJma) ? source : lastJma
+            float alpha   = math.pow(lenDiv, d)
+            float alpha2  = alpha * alpha
+            float c0      = (1.0 - alpha) * source + alpha * lastC0
+            float c8      = (source - c0) * (1.0 - lenDiv) + lenDiv * lastC8
+            float a8      = (phaseVal * c8 + c0 - prevJma) * (alpha * -2.0 + alpha2 + 1.0) + alpha2 * lastA8
+            float jmaVal  = prevJma + a8
+            lastC0      := c0
+            lastC8      := c8
+            lastA8      := a8
+            lastJma     := jmaVal
+            currentJma  := jmaVal
+    currentJma
+
+//#endregion --- JMA ------------------
+
+
+//#region ------ KAMA -----------------
+
+//@function Kaufman's Adaptive Moving Average (KAMA)
+//@param source Series to calculate from
+//@param period Efficiency ratio lookback period
+//@param fast_alpha Fastest EMA constant (default 2/(2+1))
+//@param slow_alpha Slowest EMA constant (default 2/(30+1))
+//@returns KAMA value
+export kama(series float source, simple int period, simple float fast_alpha = 0.666667, simple float slow_alpha = 0.0645) =>
+    var float kamaState = na
+    float currentKama = na
+    if not na(source)
+        float changeVal      = math.abs(source - source[period])
+        float volatilityVal  = math.sum(math.abs(source - source[1]), period)
+        float er = 0.0
+        if not na(changeVal) and not na(volatilityVal) and volatilityVal != 0.0
+            er := changeVal / volatilityVal
+        float sc = math.pow(er * (fast_alpha - slow_alpha) + slow_alpha, 2)
+        kamaState    := na(kamaState) ? source : kamaState + sc * (source - kamaState)
+        currentKama  := kamaState
+    currentKama
+
+//#endregion --- KAMA -----------------
+
+
+//#region ------ TEMA -----------------
+
+//@function Triple Exponential Moving Average (TEMA)
+//@param source Series to calculate from
+//@param period Lookback period
+//@param alpha Optional smoothing factor (overrides period when > 0)
+//@param corrected Use diminishing alpha factors for each stage
+//@returns TEMA value
+export tema(series float source, simple int period, simple float alpha = 0.0, simple bool corrected = false) =>
+    float a1 = alpha > 0 ? alpha : (period > 0 ? 2.0 / (period + 1) : 0.1)
+    float r  = math.pow(1.0 / a1, 1.0 / 3.0)
+    float a2 = corrected ? a1 * r : a1
+    float a3 = corrected ? a2 * r : a1
+    var float rema1 = 0.0
+    var float rema2 = 0.0
+    var float rema3 = 0.0
+    var float ema1  = source
+    var float ema2  = source
+    var float ema3  = source
+    rema1 := a1 * (source - rema1) + rema1
+    ema1  := rema1
+    rema2 := a2 * (ema1 - rema2) + rema2
+    ema2  := rema2
+    rema3 := a3 * (ema2 - rema3) + rema3
+    ema3  := rema3
+    3.0 * ema1 - 3.0 * ema2 + ema3
+
+//#endregion --- TEMA -----------------
+
+
+//#region ------ QEMA -----------------
+
+clamp01(float x) =>
+    math.min(1.0, math.max(x, 1e-12))
+
+lag(float alpha) =>
+    (1.0 - alpha) / alpha
+
+//@function Quad Exponential Moving Average (QEMA, OptA progressive alpha)
+//@param srcIn Series to calculate from
+//@param period Lookback period (>= 1)
+//@returns QEMA value
+export qema(series float srcIn, simple int period) =>
+    var float lastFinite = na
+    float src = srcIn
+    if na(src)
+        src := nz(lastFinite, src)
+    else
+        lastFinite := src
+
+    float a1 = clamp01(2.0 / (period + 1.0))
+    float r  = math.pow(1.0 / a1, 0.25)
+    float a2 = clamp01(a1 * r)
+    float a3 = clamp01(a2 * r)
+    float a4 = clamp01(a3 * r)
+
+    var float rema1 = 0.0
+    var float rema2 = 0.0
+    var float rema3 = 0.0
+    var float rema4 = 0.0
+
+    rema1  := rema1 + a1 * (src - rema1)
+    float ema1 = rema1
+    rema2  := rema2 + a2 * (ema1 - rema2)
+    float ema2 = rema2
+    rema3  := rema3 + a3 * (ema2 - rema3)
+    float ema3 = rema3
+    rema4  := rema4 + a4 * (ema3 - rema4)
+    float ema4 = rema4
+
+    float t1 = lag(a1)
+    float t2 = lag(a2)
+    float t3 = lag(a3)
+    float t4 = lag(a4)
+    float L1 = t1
+    float L2 = t1 + t2
+    float L3 = L2 + t3
+    float L4 = L3 + t4
+
+    float delta = 0.0
+    float B     = L1 + L2 + L3 + L4
+    float C     = L1 * L1 + L2 * L2 + L3 * L3 + L4 * L4
+    float D     = 4.0 * C - B * B
+
+    float w1 = na
+    float w2 = na
+    float w3 = na
+    float w4 = na
+
+    if math.abs(D) < 1e-12
+        w1 := 1.0
+        w2 := 0.0
+        w3 := 0.0
+        w4 := 0.0
+    else
+        float lambda = (C - B * delta) / D
+        float mu     = (-B + 4.0 * delta) / D
+        w1 := lambda + mu * L1
+        w2 := lambda + mu * L2
+        w3 := lambda + mu * L3
+        w4 := lambda + mu * L4
+
+    w1 * ema1 + w2 * ema2 + w3 * ema3 + w4 * ema4
+
+//#endregion --- QEMA -----------------
+
+
+//#region ------ ZLEMA ----------------
+
+//@function Zero-Lag Exponential Moving Average (ZLEMA)
+//@param source Series to calculate from
+//@param period Smoothing period
+//@param alpha Optional smoothing factor (overrides period when > 0)
+//@returns ZLEMA value
+export zlema(series float source, simple int period, simple float alpha = 0) =>
+    float a = alpha > 0 ? alpha : 2.0 / (period + 1)
+    int   lagBars = math.max(1, math.round((period - 1) / 2))
+    var float zlemaState = 0.0
+    var priceBuffer = array.new<float>(lagBars + 1, 0.0)
+    float result = source
+    if not na(source)
+        array.shift(priceBuffer)
+        array.push(priceBuffer, source)
+        float laggedPrice = array.get(priceBuffer, 0)
+        float signal      = 2.0 * source - laggedPrice
+        zlemaState := a * (signal - zlemaState) + zlemaState
+        result     := zlemaState
+    result
+
+//#endregion --- ZLEMA ----------------

@@ -1,0 +1,407 @@
+//@version=6
+
+strategy("ATM",
+     shorttitle="Automation",
+     overlay=true,
+     initial_capital=100,
+     default_qty_type=strategy.cash,
+     default_qty_value=1,
+     pyramiding=1,
+     calc_on_every_tick=false,
+     margin_long=0,
+     margin_short=0,
+     process_orders_on_close=true,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2)
+
+// ============================================================================
+// PIONEX WEBHOOK INTEGRATION
+// ============================================================================
+uuid = input.string("8a17bcf9-0d9c-4a09-92ae-27adf755d95d", "Pionex Signal Bot UUID", group="Pionex Webhook")
+string pionex_payload = '{ "data": { "action": "{{strategy.order.action}}", "contracts": "{{strategy.order.contracts}}", "position_size": "{{strategy.position_size}}" }, "price": "{{close}}", "signal_param": "{}", "signal_type": "' + uuid + '", "symbol": "{{ticker}}", "time": "{{timenow}}" }'
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+bool use_doji           = input.bool(true, "Doji aktivieren", group="01. Kerzen-Erkennung")
+bool use_rejection      = input.bool(true, "Rejection Candles aktivieren", group="01. Kerzen-Erkennung")
+bool use_momentum       = input.bool(true, "High Momentum aktivieren", group="01. Kerzen-Erkennung")
+bool use_cluster        = input.bool(true, "Low Momentum Cluster aktivieren", group="01. Kerzen-Erkennung")
+
+float doji_max_body_pct   = input.float(5.0, "Doji: Max Body %", minval=0.5, maxval=30.0, step=0.5, group="01. Kerzen-Erkennung")
+float rej_min_wick_ratio  = input.float(2.5, "Rejection: Min Wick/Body", minval=0.25, maxval=8.0, step=0.25, group="01. Kerzen-Erkennung")
+float rej_max_body_pct    = input.float(25.0, "Rejection: Max Body %", minval=5.0, maxval=50.0, step=2.5, group="01. Kerzen-Erkennung")
+
+float mom_min_atr_mult    = input.float(1.0, "Momentum: Min Body/ATR", minval=0.1, maxval=5.0, step=0.1, group="01. Kerzen-Erkennung")
+float mom_max_wick_pct    = input.float(30.0, "Momentum: Max Wick/Body %", minval=5.0, maxval=60.0, step=2.5, group="01. Kerzen-Erkennung")
+int   cluster_min_candles = input.int(3, "Cluster: Min Kerzen", minval=2, maxval=8, group="01. Kerzen-Erkennung")
+float cluster_max_range_pct = input.float(0.5, "Cluster: Max Range %", minval=0.1, maxval=2.0, step=0.1, group="01. Kerzen-Erkennung")
+
+int   zone_max_age      = input.int(200, "Zone: Max Alter (Bars)", minval=50, maxval=500, group="02. Zonen-Einstellungen")
+float zone_merge_pips   = input.float(2.0, "Zone: Merge Abstand (Pips)", minval=0.5, maxval=10.0, step=0.5, group="02. Zonen-Einstellungen")
+int   zone_max_count    = input.int(20, "Zone: Max aktive Zonen", minval=5, maxval=50, group="02. Zonen-Einstellungen")
+
+bool  use_zone_entries  = input.bool(true, "Zone-basierte Entries", group="03. Trading")
+bool  use_breakout      = input.bool(true, "Breakout-Entries", group="03. Trading")
+float entry_atr_mult    = input.float(0.3, "Entry: Zone-Buffer ATR-Mult", minval=0.05, maxval=2.0, step=0.05, group="03. Trading")
+float sl_atr_mult       = input.float(1.0, "Stop-Loss ATR-Mult", minval=0.25, maxval=5.0, step=0.25, group="03. Trading")
+float tp_atr_mult       = input.float(2.0, "Take-Profit ATR-Mult", minval=0.5, maxval=15.0, step=0.25, group="03. Trading")
+float risk_per_trade    = input.float(1.0, "Risk % pro Trade", minval=0.5, maxval=50, step=0.5, group="03. Trading")
+
+bool show_demand_zones  = input.bool(true, "Demand-Zonen anzeigen", group="04. Visualisierung")
+bool show_supply_zones  = input.bool(true, "Supply-Zonen anzeigen", group="04. Visualisierung")
+bool show_zone_labels   = input.bool(true, "Zone-Labels anzeigen", group="04. Visualisierung")
+bool show_entry_markers = input.bool(true, "Entry-Marker anzeigen", group="04. Visualisierung")
+bool show_dashboard     = input.bool(true, "Dashboard anzeigen", group="04. Visualisierung")
+bool show_signals       = input.bool(true, "Kerzen-Signale anzeigen", group="04. Visualisierung")
+
+// ============================================================================
+// TYPES & ARRAYS
+// ============================================================================
+
+type Zone
+    float top
+    float bottom
+    int   ztype // 1: Demand, 2: Supply
+    int   strength
+    int   start_bar
+    string source
+    int   touches = 0
+    bool  neutralized = false
+    box   box_id
+    label label_id
+
+var Zone[] active_zones = array.new<Zone>(0)
+
+// ============================================================================
+// INDIKATOREN
+// ============================================================================
+float atr = ta.atr(14)
+float pip_value = syminfo.mintick * 10.0
+
+// ============================================================================
+// KERZE 1: DOJI
+// ============================================================================
+float doji_range = high - low
+float doji_body = math.abs(close - open)
+float doji_body_pct = doji_range > 0.0 ? (doji_body / doji_range) * 100.0 : 100.0
+bool doji_detected = use_doji and doji_body_pct <= doji_max_body_pct and doji_range > pip_value
+
+float doji_zone_top = 0.0
+float doji_zone_bottom = 0.0
+int doji_strength = 0
+
+if doji_detected
+    if close >= open
+        doji_zone_bottom := low
+        doji_zone_top := open
+        doji_strength := doji_body_pct < 5.0 ? 5 : doji_body_pct < 10.0 ? 3 : 2
+    else
+        doji_zone_bottom := close
+        doji_zone_top := high
+        doji_strength := doji_body_pct < 5.0 ? 5 : doji_body_pct < 10.0 ? 3 : 2
+
+// ============================================================================
+// KERZE 2: REJECTION CANDLE
+// ============================================================================
+float rej_range = high - low
+float rej_body = math.abs(close - open)
+float rej_body_pct = rej_range > 0.0 ? (rej_body / rej_range) * 100.0 : 100.0
+float rej_upper_wick = high - math.max(open, close)
+float rej_lower_wick = math.min(open, close) - low
+float uw_ratio = rej_body > 0.0 ? rej_upper_wick / rej_body : 999.0
+float lw_ratio = rej_body > 0.0 ? rej_lower_wick / rej_body : 999.0
+
+bool is_bull_rej = use_rejection and lw_ratio >= rej_min_wick_ratio and rej_body_pct <= rej_max_body_pct and rej_lower_wick > rej_upper_wick * 0.5
+bool is_bear_rej = use_rejection and uw_ratio >= rej_min_wick_ratio and rej_body_pct <= rej_max_body_pct and rej_upper_wick > rej_lower_wick * 0.5
+bool rej_detected = is_bull_rej or is_bear_rej
+bool rej_bull = is_bull_rej
+
+float rej_zone_top = 0.0
+float rej_zone_bottom = 0.0
+int rej_strength = 0
+
+if is_bull_rej
+    rej_zone_bottom := low
+    rej_zone_top := low + rej_lower_wick * 0.5
+    rej_strength := int(math.min(5.0, lw_ratio))
+else if is_bear_rej
+    rej_zone_bottom := high - rej_upper_wick * 0.5
+    rej_zone_top := high
+    rej_strength := int(math.min(5.0, uw_ratio))
+
+// ============================================================================
+// KERZE 3: HIGH MOMENTUM
+// ============================================================================
+float mom_body = math.abs(close - open)
+float body_atr_ratio = atr > 0.0 ? mom_body / atr : 0.0
+float mom_upper_wick = high - math.max(open, close)
+float mom_lower_wick = math.min(open, close) - low
+bool small_wicks = mom_body > 0.0 and (mom_upper_wick / mom_body <= mom_max_wick_pct / 100.0) and (mom_lower_wick / mom_body <= mom_max_wick_pct / 100.0)
+bool mom_detected = use_momentum and body_atr_ratio >= mom_min_atr_mult and small_wicks
+bool mom_bull = close > open and mom_detected
+
+float mom_zone_top = 0.0
+float mom_zone_bottom = 0.0
+int mom_strength = 0
+
+if mom_detected
+    if close > open
+        mom_zone_bottom := low
+        mom_zone_top := open
+        mom_strength := int(math.min(5.0, body_atr_ratio))
+    else
+        mom_zone_bottom := close
+        mom_zone_top := high
+        mom_strength := int(math.min(5.0, body_atr_ratio))
+
+// ============================================================================
+// KERZE 4: LOW MOMENTUM CLUSTER
+// ============================================================================
+var float cluster_high_val = 0.0
+var float cluster_low_val = 0.0
+var int   cluster_count_val = 0
+var int   cluster_start_bar = 0
+var bool  in_cluster = false
+var bool  cluster_just_ended = false
+
+float body_pct_of_range = (high - low) > 0.0 ? math.abs(close - open) / (high - low) * 100.0 : 100.0
+bool is_small_body = body_pct_of_range <= 50.0 and (high - low) <= atr * 0.5
+
+if is_small_body
+    if not in_cluster
+        cluster_high_val := high
+        cluster_low_val := low
+        cluster_count_val := 1
+        cluster_start_bar := bar_index
+        in_cluster := true
+    else
+        cluster_high_val := math.max(cluster_high_val, high)
+        cluster_low_val := math.min(cluster_low_val, low)
+        cluster_count_val += 1
+    cluster_just_ended := false
+else
+    if in_cluster and cluster_count_val >= cluster_min_candles
+        cluster_just_ended := true
+    else
+        cluster_just_ended := false
+    in_cluster := false
+
+bool cluster_detected = cluster_just_ended
+float cluster_zt = cluster_high_val
+float cluster_zb = cluster_low_val
+float cluster_range_pct = (cluster_high_val + cluster_low_val) > 0.0 ? (cluster_high_val - cluster_low_val) / ((cluster_high_val + cluster_low_val) / 2.0) * 100.0 : 0.0
+
+// ============================================================================
+// ZONEN-MANAGEMENT
+// ============================================================================
+
+add_zone(float zt, float zb, int ztype, int zstr, string zsrc) =>
+    if zt > zb and math.abs(zt - zb) > pip_value
+        bool merged = false
+        for active_zone in active_zones
+            if active_zone.ztype != ztype or active_zone.neutralized
+                continue
+            float mid_existing = (active_zone.top + active_zone.bottom) / 2.0
+            float mid_new = (zt + zb) / 2.0
+            if math.abs(mid_existing - mid_new) <= zone_merge_pips * pip_value
+                active_zone.top := math.max(active_zone.top, zt)
+                active_zone.bottom := math.min(active_zone.bottom, zb)
+                active_zone.strength := math.max(active_zone.strength, zstr)
+                // Update existing box
+                box.set_top(active_zone.box_id, active_zone.top)
+                box.set_bottom(active_zone.box_id, active_zone.bottom)
+                merged := true
+                break
+        
+        if not merged and active_zones.size() < zone_max_count
+            color bcolor = ztype == 1 ? color.new(#00BCD4, 80) : color.new(#FF5722, 80)
+            box new_box = box.new(bar_index, zt, bar_index, zb, border_color=na, bgcolor=bcolor)
+            label new_label = na
+            if show_zone_labels
+                new_label := label.new(bar_index, (zt + zb) / 2.0, (ztype == 1 ? "D" : "S") + str.tostring(zstr) + "\n" + zsrc,
+                     color=color.new(bcolor, 30), textcolor=color.white, size=size.tiny, style=label.style_label_left)
+            
+            array.push(active_zones, Zone.new(zt, zb, ztype, zstr, bar_index, zsrc, box_id=new_box, label_id=new_label))
+
+if barstate.isconfirmed
+    if doji_detected
+        add_zone(doji_zone_top, doji_zone_bottom, close >= open ? 1 : 2, doji_strength, "Doji")
+    if rej_detected
+        add_zone(rej_zone_top, rej_zone_bottom, rej_bull ? 1 : 2, rej_strength, "Rejection")
+    if mom_detected
+        add_zone(mom_zone_top, mom_zone_bottom, mom_bull ? 1 : 2, mom_strength, "Momentum")
+    if cluster_detected and cluster_range_pct <= cluster_max_range_pct
+        add_zone(cluster_zt, cluster_zb, 1, int(math.min(5, cluster_count_val)), "Cluster")
+        add_zone(cluster_zt, cluster_zb, 2, int(math.min(5, cluster_count_val)), "Cluster")
+
+    // Loop through zones for update/cleanup
+    int i = 0
+    while i < active_zones.size()
+        Zone z = active_zones.get(i)
+        bool remove = false
+        
+        // Age check
+        if bar_index - z.start_bar > zone_max_age
+            remove := true
+        
+        // Neutralization check
+        if not z.neutralized
+            if z.ztype == 1 and close < z.bottom
+                z.neutralized := true
+                box.set_bgcolor(z.box_id, color.new(color.gray, 90))
+                box.set_border_color(z.box_id, color.new(color.gray, 70))
+                if not na(z.label_id)
+                    label.set_color(z.label_id, color.new(color.gray, 50))
+                    label.set_textcolor(z.label_id, color.new(color.white, 50))
+            if z.ztype == 2 and close > z.top
+                z.neutralized := true
+                box.set_bgcolor(z.box_id, color.new(color.gray, 90))
+                box.set_border_color(z.box_id, color.new(color.gray, 70))
+                if not na(z.label_id)
+                    label.set_color(z.label_id, color.new(color.gray, 50))
+                    label.set_textcolor(z.label_id, color.new(color.white, 50))
+        
+        if remove
+            box.delete(z.box_id)
+            if not na(z.label_id)
+                label.delete(z.label_id)
+            active_zones.remove(i)
+        else
+            // Extend drawings
+            box.set_right(z.box_id, bar_index)
+            if not na(z.label_id)
+                label.set_x(z.label_id, bar_index)
+            i += 1
+
+// ============================================================================
+// ZONE-TOUCHES & SIGNALS
+// ============================================================================
+
+bool demand_tested = false
+bool supply_tested = false
+float nearest_demand_zt = 0.0
+float nearest_demand_zb = 0.0
+float nearest_supply_zt = 0.0
+float nearest_supply_zb = 0.0
+
+for z in active_zones
+    if z.neutralized
+        continue
+    float buffer = atr * entry_atr_mult
+    if z.ztype == 1
+        if low <= z.top + buffer and close >= z.bottom
+            demand_tested := true
+            nearest_demand_zt := z.top
+            nearest_demand_zb := z.bottom
+            if low <= z.top and high >= z.top
+                z.touches += 1
+    else if z.ztype == 2
+        if high >= z.bottom - buffer and close <= z.top
+            supply_tested := true
+            nearest_supply_zt := z.top
+            nearest_supply_zb := z.bottom
+            if high >= z.bottom and low <= z.bottom
+                z.touches += 1
+
+bool long_signal = use_zone_entries and demand_tested and close > open and strategy.position_size == 0
+bool short_signal = use_zone_entries and supply_tested and close < open and strategy.position_size == 0
+
+bool is_rising_close = ta.rising(close, 3)
+bool is_falling_close = ta.falling(close, 3)
+bool long_breakout = use_breakout and strategy.position_size == 0 and bar_index > 3 and close > high[1] and close > open and is_rising_close
+bool short_breakout = use_breakout and strategy.position_size == 0 and bar_index > 3 and close < low[1] and close < open and is_falling_close
+
+bool final_long = (long_signal or long_breakout) and strategy.position_size == 0
+bool final_short = (short_signal or short_breakout) and strategy.position_size == 0
+
+// Ensure signals only trigger once (clean trigger)
+bool entry_long = final_long and not final_long[1]
+bool entry_short = final_short and not final_short[1]
+
+// ============================================================================
+// ORDER-AUSFUEHRUNG
+// ============================================================================
+
+if entry_long and nearest_demand_zb > 0.0
+    float sl_price_l = nearest_demand_zb - atr * sl_atr_mult
+    float tp_price_l = nearest_supply_zb > 0.0 and nearest_supply_zb > close ? nearest_supply_zb : close + atr * tp_atr_mult
+    strategy.entry("Long", strategy.long, comment="Long Zone", alert_message=pionex_payload)
+    strategy.exit("Long_SL", "Long", stop=sl_price_l, limit=tp_price_l, comment_loss="SL", comment_profit="TP", alert_message=pionex_payload)
+
+if entry_short and nearest_supply_zt > 0.0
+    float sl_price_s = nearest_supply_zt + atr * sl_atr_mult
+    float tp_price_s = nearest_demand_zt > 0.0 and nearest_demand_zt < close ? nearest_demand_zt : close - atr * tp_atr_mult
+    strategy.entry("Short", strategy.short, comment="Short Zone", alert_message=pionex_payload)
+    strategy.exit("Short_SL", "Short", stop=sl_price_s, limit=tp_price_s, comment_loss="SL", comment_profit="TP", alert_message=pionex_payload)
+
+// ============================================================================
+// VISUALISIERUNG
+// ============================================================================
+
+plotshape(show_signals and doji_detected, style=shape.diamond, location=location.abovebar, color=color.new(color.gray, 0), size=size.tiny, title="Doji")
+plotshape(show_signals and use_rejection and is_bull_rej, style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 0), size=size.small, title="Bull Rejection")
+plotshape(show_signals and use_rejection and is_bear_rej, style=shape.triangledown, location=location.abovebar, color=color.new(color.purple, 0), size=size.small, title="Bear Rejection")
+plotshape(show_signals and use_momentum and mom_detected and mom_bull, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 30), size=size.tiny, title="Bull Momentum")
+plotshape(show_signals and use_momentum and mom_detected and not mom_bull, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 30), size=size.tiny, title="Bear Momentum")
+
+plotshape(show_entry_markers and entry_long, style=shape.triangleup, location=location.belowbar,
+     color=color.new(color.lime, 0), size=size.normal, title="Long Entry", text="L", textcolor=color.white)
+plotshape(show_entry_markers and entry_short, style=shape.triangledown, location=location.abovebar,
+     color=color.new(color.red, 0), size=size.normal, title="Short Entry", text="S", textcolor=color.white)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 9,
+     bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
+
+if show_dashboard and barstate.isconfirmed and bar_index % 5 == 0
+    int active_demand = 0
+    int active_supply = 0
+    for z in active_zones
+        if not z.neutralized
+            if z.ztype == 1
+                active_demand += 1
+            else
+                active_supply += 1
+
+    table.cell(dash, 0, 0, "Net Profit", text_color=color.white, text_size=size.small)
+    color netprofit_color = strategy.netprofit >= 0.0 ? color.green : color.red
+    table.cell(dash, 1, 0, str.tostring(strategy.netprofit, "#.##"), text_color=netprofit_color, text_size=size.small)
+
+    float total_trades_w = strategy.wintrades + strategy.losstrades
+    float win_rate = total_trades_w > 0.0 ? (strategy.wintrades / total_trades_w) * 100.0 : 0.0
+    table.cell(dash, 0, 1, "Win Rate", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(win_rate, "#.##") + "%", text_color=color.gray, text_size=size.small)
+
+    float grossloss_pf = strategy.grossloss
+    float pf = grossloss_pf > 0.0 ? strategy.grossprofit / grossloss_pf : 0.0
+    table.cell(dash, 0, 2, "Profit Factor", text_color=color.white, text_size=size.small)
+    color pf_color = pf >= 1.5 ? color.green : color.gray
+    table.cell(dash, 1, 2, str.tostring(pf, "#.##"), text_color=pf_color, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Active Demand", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(active_demand), text_color=color.new(#00BCD4, 0), text_size=size.small)
+
+    table.cell(dash, 0, 4, "Active Supply", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(active_supply), text_color=color.new(#FF5722, 0), text_size=size.small)
+
+    table.cell(dash, 0, 5, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(atr, "#.##"), text_color=color.gray, text_size=size.small)
+
+    string pos_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    color pos_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dash, 0, 6, "Position", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, pos_text, text_color=pos_color, text_size=size.small)
+
+    table.cell(dash, 0, 7, "In Cluster", text_color=color.white, text_size=size.small)
+    string cluster_text = in_cluster ? str.tostring(cluster_count_val) : "No"
+    color cluster_color = in_cluster ? color.yellow : color.gray
+    table.cell(dash, 1, 7, cluster_text, text_color=cluster_color, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Total Zones", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, str.tostring(active_zones.size()), text_color=color.gray, text_size=size.small)

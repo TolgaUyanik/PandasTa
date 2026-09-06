@@ -1,0 +1,461 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LuxAlgo — ICT Suite: Liquidity Zones, HTF Candles, FVGs, Market Structure, Volume Spikes
+
+//@version=6
+indicator("ICT Suite [LuxAlgo]", shorttitle="Lux_ICT", overlay=true,
+     max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── Spikes ───────────────────────────────────────────────────────────────────
+grp10 = "── Spikes ──"
+showBubbles   = input.bool(true,  "Show Spike Bubbles",       group=grp10)
+spikeThresh   = input.float(3.0,  "Spike Threshold (Std Dev)", group=grp10)
+colBullSpike  = input.color(#089981, "Bull Spike Color", group=grp10)
+colBearSpike  = input.color(#f23645, "Bear Spike Color", group=grp10)
+
+
+// ─── Liquidity Zones ──────────────────────────────────────────────────────────
+grp11 = "── Liquidity Zones (EQH/EQL) ──"
+showLiqZones  = input.bool(true,  "Show Liquidity Zones",        group=grp11)
+liqLeftLen    = input.int(10,     "Pivot Left Length",  minval=1, group=grp11,
+     tooltip="Bars to the left required to confirm a pivot high/low.")
+liqRightLen   = input.int(2,      "Pivot Right Length", minval=1, group=grp11,
+     tooltip="Bars to the right required to confirm a pivot high/low.")
+liqThreshPct  = input.float(0.03, "Equality Threshold (%)", minval=0, step=0.01, group=grp11,
+     tooltip="Max % difference to consider two highs/lows equal (EQH/EQL).")
+liqMaxZones   = input.int(60,     "Max Active Zones", minval=1, maxval=100, group=grp11)
+liqBullColor  = input.color(#089981, "Bullish Zone Color",  group=grp11)
+liqBearColor  = input.color(#f23645, "Bearish Zone Color",  group=grp11)
+liqTransp     = input.int(85,     "Zone Transparency", minval=0, maxval=100, group=grp11)
+liqMidline    = input.bool(false,  "Show Midline",            group=grp11)
+liqMidCol     = input.color(#787b86, "Midline Color",         group=grp11)
+liqShowVol    = input.bool(true,   "Show Volume on Zones",    group=grp11)
+liqDeleteOnSweep = input.bool(false, "Delete Zone on Sweep",  group=grp11,
+     tooltip="When off, swept zones turn grey. When on, they are removed entirely.")
+
+// ─── HTF Projected Candles ────────────────────────────────────────────────────
+grp12 = "── HTF Projected Candles ──"
+showHtf       = input.bool(true,   "Show HTF Projected Candles",  group=grp12)
+htfInput      = input.timeframe("D", "HTF Timeframe",             group=grp12,
+     tooltip="The higher timeframe whose candles are projected to the right of current price.")
+htfCount      = input.int(1,  "Number of Candles", minval=1, maxval=5,  group=grp12)
+htfOffset     = input.int(5,  "Projection Offset", minval=1, maxval=50, group=grp12,
+     tooltip="Distance (in bars) of the first projected candle from the current bar.")
+htfHistOpacity = input.int(40, "Historical Candle Opacity", minval=0, maxval=100, group=grp12,
+     tooltip="Opacity of prior HTF candles. 100 = fully solid.")
+openLineCss   = input.color(#5b9cf6, "Open Price Line Color",     group=grp12)
+showHtfLines  = input.bool(true,   "Show Open Price Line",        group=grp12)
+
+// ─── Fair Value Gaps ──────────────────────────────────────────────────────────
+grp13 = "── Fair Value Gaps ──"
+showFvg       = input.bool(true,  "Show FVGs",                   group=grp13)
+fvgSens       = input.float(0.5,  "Volatility Sensitivity", minval=0, step=0.1, group=grp13,
+     tooltip="Minimum FVG size relative to ATR. Higher = only show larger gaps.")
+fvgExtend     = input.int(5,      "Extend Bars", minval=1, maxval=20,  group=grp13)
+bullFvgCss    = input.color(color.new(#089981, 70), "Bullish FVG Color", group=grp13)
+bearFvgCss    = input.color(color.new(#f23645, 70), "Bearish FVG Color", group=grp13)
+
+// ─── Market Structure ─────────────────────────────────────────────────────────
+grp14 = "── Market Structure (BOS / CHoCH) ──"
+showMs        = input.bool(true,  "Show Market Structure",        group=grp14)
+msSens        = input.int(5,      "Pivot Sensitivity", minval=1,  group=grp14,
+     tooltip="Number of bars on each side required to confirm a structural pivot.")
+bullMsCss     = input.color(#089981, "Bullish Structure Color",   group=grp14)
+bearMsCss     = input.color(#f23645, "Bearish Structure Color",   group=grp14)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE & HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+max_bars_back(time,  5000)
+max_bars_back(open,  5000)
+max_bars_back(high,  5000)
+max_bars_back(low,   5000)
+max_bars_back(close, 5000)
+
+var array<float> htfOpenArr  = array.new_float()
+var array<float> htfHighArr  = array.new_float()
+var array<float> htfLowArr   = array.new_float()
+var array<float> htfCloseArr = array.new_float()
+var array<int>   htfStartArr = array.new_int()
+
+var float htfCurO      = na
+var float htfCurH      = na
+var float htfCurL      = na
+var float htfSessClose = na
+var int   htfCurStart  = na
+
+bool newDay = ta.change(dayofmonth) != 0
+
+// SPIKES — graduated bubble size based on how extreme the volume is
+// ═══════════════════════════════════════════════════════════════════════════════
+avgVol   = ta.sma(volume, 50)
+stdVol   = ta.stdev(volume, 50)
+// How many standard deviations above average is this bar's volume?
+volSigma = stdVol > 0 ? (volume - avgVol) / stdVol : 0.0
+isSpike  = showBubbles and volSigma >= spikeThresh
+
+// Grade bubble size by sigma level:
+//   3–4σ  → tiny
+//   4–6σ  → small
+//   6–9σ  → normal
+//   9–12σ → large
+//   12σ+  → huge
+spikeSize = size.tiny
+if volSigma >= 12
+    spikeSize := size.huge
+else if volSigma >= 9
+    spikeSize := size.large
+else if volSigma >= 6
+    spikeSize := size.normal
+else if volSigma >= 4
+    spikeSize := size.small
+
+// Pine requires plotshape size to be a constant, so we plot five layers
+// each gated by its sigma threshold — only the matching one fires per bar.
+plotshape(isSpike and close > open  and volSigma <  4, "Bull Spike S1", shape.circle, location.belowbar, colBullSpike, size=size.tiny)
+plotshape(isSpike and close <= open and volSigma <  4, "Bear Spike S1", shape.circle, location.abovebar, colBearSpike, size=size.tiny)
+plotshape(isSpike and close > open  and volSigma >= 4  and volSigma < 6,  "Bull Spike S2", shape.circle, location.belowbar, colBullSpike, size=size.small)
+plotshape(isSpike and close <= open and volSigma >= 4  and volSigma < 6,  "Bear Spike S2", shape.circle, location.abovebar, colBearSpike, size=size.small)
+plotshape(isSpike and close > open  and volSigma >= 6  and volSigma < 9,  "Bull Spike S3", shape.circle, location.belowbar, colBullSpike, size=size.normal)
+plotshape(isSpike and close <= open and volSigma >= 6  and volSigma < 9,  "Bear Spike S3", shape.circle, location.abovebar, colBearSpike, size=size.normal)
+plotshape(isSpike and close > open  and volSigma >= 9  and volSigma < 12, "Bull Spike S4", shape.circle, location.belowbar, colBullSpike, size=size.large)
+plotshape(isSpike and close <= open and volSigma >= 9  and volSigma < 12, "Bear Spike S4", shape.circle, location.abovebar, colBearSpike, size=size.large)
+plotshape(isSpike and close > open  and volSigma >= 12, "Bull Spike S5", shape.circle, location.belowbar, colBullSpike, size=size.huge)
+plotshape(isSpike and close <= open and volSigma >= 12, "Bear Spike S5", shape.circle, location.abovebar, colBearSpike, size=size.huge)
+
+
+// LIQUIDITY ZONES (EQH / EQL) — Dynamic pivot-based detection
+// Detects equal highs/lows within threshold, draws zones, tracks sweeps.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+type LiquidityZone
+    box   zbox
+    line  zmid
+    label zlbl
+    label zb1
+    label zb2
+    label zv1
+    label zv2
+    float sweepLevel
+    float totalVol
+    int   createdIdx
+    bool  isHigh
+    bool  isSwept
+
+type PivotPoint
+    float price
+    int   idx
+    float vol
+
+// ─── Storage ──────────────────────────────────────────────────────────────────
+var array<LiquidityZone> liqZones    = array.new<LiquidityZone>()
+var array<PivotPoint>    liqPivotHi  = array.new<PivotPoint>()
+var array<PivotPoint>    liqPivotLo  = array.new<PivotPoint>()
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+liq_fmtVol(float v) =>
+    string res = ""
+    if v >= 1000000
+        res := str.format("{0,number,#.#}M", v / 1000000)
+    else if v >= 1000
+        res := str.format("{0,number,#.#}K", v / 1000)
+    else
+        res := str.tostring(v, "#")
+    res
+
+// ─── Zone update (runs per zone per bar) ─────────────────────────────────────
+liq_updateZone(LiquidityZone z) =>
+    bool remove = false
+    if not z.isSwept
+        box.set_right(z.zbox, bar_index)
+        if not na(z.zmid)
+            line.set_x2(z.zmid, bar_index)
+        label.set_x(z.zlbl, bar_index)
+
+        if bar_index > z.createdIdx
+            bool swept = z.isHigh ? high > z.sweepLevel : low < z.sweepLevel
+            if swept
+                z.isSwept := true
+                remove    := true
+                if liqDeleteOnSweep
+                    box.delete(z.zbox)
+                    line.delete(z.zmid)
+                    label.delete(z.zlbl)
+                    label.delete(z.zb1)
+                    label.delete(z.zb2)
+                    label.delete(z.zv1)
+                    label.delete(z.zv2)
+                else
+                    box.set_bgcolor(z.zbox,      color.new(chart.fg_color, 95))
+                    box.set_border_color(z.zbox, color.new(chart.fg_color, 80))
+                    if not na(z.zmid)
+                        line.set_color(z.zmid, color.new(chart.fg_color, 80))
+                    label.set_textcolor(z.zlbl, color.new(chart.fg_color, 75))
+                    string vs = liqShowVol ? str.format(" ({0})", liq_fmtVol(z.totalVol)) : ""
+                    label.set_text(z.zlbl, "Swept " + (z.isHigh ? "EQH" : "EQL") + vs)
+                    label.set_color(z.zb1, color.new(chart.fg_color, 85))
+                    label.set_color(z.zb2, color.new(chart.fg_color, 85))
+                    label.set_text(z.zv1, "")
+                    label.set_text(z.zv2, "")
+    remove
+
+// ─── Label consolidation ──────────────────────────────────────────────────────
+liq_consolidate(array<LiquidityZone> zones) =>
+    int sz = zones.size()
+    if sz > 0
+        for i = 0 to sz - 1
+            LiquidityZone z = zones.get(i)
+            if not z.isSwept
+                label.set_text(z.zlbl, "")
+
+        array<int> done = array.new<int>()
+        for i = 0 to sz - 1
+            if done.includes(i) or zones.get(i).isSwept
+                continue
+            LiquidityZone base = zones.get(i)
+            done.push(i)
+            float cVol  = base.totalVol
+            int   cCnt  = 1
+            if i < sz - 1
+                for j = i + 1 to sz - 1
+                    if done.includes(j)
+                        continue
+                    LiquidityZone comp = zones.get(j)
+                    if comp.isSwept
+                        continue
+                    if base.isHigh == comp.isHigh and math.abs(base.sweepLevel - comp.sweepLevel) / base.sweepLevel * 100 <= liqThreshPct * 3
+                        cVol += comp.totalVol
+                        cCnt += 1
+                        done.push(j)
+            string typeStr  = base.isHigh ? "EQH" : "EQL"
+            string countStr = cCnt > 1 ? str.format("{0}x ", cCnt) : ""
+            string volStr   = liqShowVol ? str.format(" ({0})", liq_fmtVol(cVol)) : ""
+            label.set_text(base.zlbl, countStr + typeStr + volStr)
+
+// ─── Pivot detection ──────────────────────────────────────────────────────────
+float liqPH = showLiqZones ? ta.pivothigh(liqLeftLen, liqRightLen) : na
+float liqPL = showLiqZones ? ta.pivotlow(liqLeftLen,  liqRightLen) : na
+
+// Equal Highs
+if not na(liqPH) and showLiqZones
+    int   pivIdx  = bar_index - liqRightLen
+    float pivVol  = volume[liqRightLen]
+    if liqPivotHi.size() > 0
+        for i = 0 to liqPivotHi.size() - 1
+            PivotPoint prev = liqPivotHi.get(i)
+            float diff = math.abs(liqPH - prev.price) / prev.price * 100
+            if diff <= liqThreshPct
+                float top  = math.max(liqPH, prev.price)
+                float bot  = math.min(liqPH, prev.price)
+                float mid  = (top + bot) / 2
+                float tVol = prev.vol + pivVol
+
+                box   zb  = box.new(prev.idx, top, bar_index, bot, border_color=liqBearColor, bgcolor=color.new(liqBearColor, liqTransp))
+                line  zml = liqMidline ? line.new(prev.idx, mid, bar_index, mid, color=liqMidCol, style=line.style_dashed) : na
+                label zlb = label.new(bar_index, mid, "", color=#00000000, textcolor=liqBearColor, style=label.style_label_left, size=size.small)
+                label zb1 = label.new(prev.idx,  prev.price, "", color=liqBearColor, style=label.style_circle, size=size.small)
+                label zb2 = label.new(pivIdx,     liqPH,     "", color=liqBearColor, style=label.style_circle, size=size.small)
+                label zv1 = liqShowVol ? label.new(prev.idx, prev.price, liq_fmtVol(prev.vol), color=#00000000, textcolor=liqBearColor, style=label.style_label_down, size=size.small) : na
+                label zv2 = liqShowVol ? label.new(pivIdx,   liqPH,      liq_fmtVol(pivVol),   color=#00000000, textcolor=liqBearColor, style=label.style_label_down, size=size.small) : na
+
+                liqZones.push(LiquidityZone.new(zb, zml, zlb, zb1, zb2, zv1, zv2, top, tVol, bar_index, true, false))
+                break
+    liqPivotHi.unshift(PivotPoint.new(liqPH, pivIdx, pivVol))
+    if liqPivotHi.size() > 50
+        liqPivotHi.pop()
+
+// Equal Lows
+if not na(liqPL) and showLiqZones
+    int   pivIdx  = bar_index - liqRightLen
+    float pivVol  = volume[liqRightLen]
+    if liqPivotLo.size() > 0
+        for i = 0 to liqPivotLo.size() - 1
+            PivotPoint prev = liqPivotLo.get(i)
+            float diff = math.abs(liqPL - prev.price) / prev.price * 100
+            if diff <= liqThreshPct
+                float top  = math.max(liqPL, prev.price)
+                float bot  = math.min(liqPL, prev.price)
+                float mid  = (top + bot) / 2
+                float tVol = prev.vol + pivVol
+
+                box   zb  = box.new(prev.idx, top, bar_index, bot, border_color=liqBullColor, bgcolor=color.new(liqBullColor, liqTransp))
+                line  zml = liqMidline ? line.new(prev.idx, mid, bar_index, mid, color=liqMidCol, style=line.style_dashed) : na
+                label zlb = label.new(bar_index, mid, "", color=#00000000, textcolor=liqBullColor, style=label.style_label_left, size=size.small)
+                label zb1 = label.new(prev.idx, prev.price, "", color=liqBullColor, style=label.style_circle, size=size.small)
+                label zb2 = label.new(pivIdx,   liqPL,      "", color=liqBullColor, style=label.style_circle, size=size.small)
+                label zv1 = liqShowVol ? label.new(prev.idx, prev.price, liq_fmtVol(prev.vol), color=#00000000, textcolor=liqBullColor, style=label.style_label_up, size=size.small) : na
+                label zv2 = liqShowVol ? label.new(pivIdx,   liqPL,      liq_fmtVol(pivVol),   color=#00000000, textcolor=liqBullColor, style=label.style_label_up, size=size.small) : na
+
+                liqZones.push(LiquidityZone.new(zb, zml, zlb, zb1, zb2, zv1, zv2, bot, tVol, bar_index, false, false))
+                break
+    liqPivotLo.unshift(PivotPoint.new(liqPL, pivIdx, pivVol))
+    if liqPivotLo.size() > 50
+        liqPivotLo.pop()
+
+// ─── Manage zones every bar ───────────────────────────────────────────────────
+if showLiqZones and liqZones.size() > 0
+    for i = liqZones.size() - 1 to 0
+        LiquidityZone z = liqZones.get(i)
+        bool swept = liq_updateZone(z)
+        if swept
+            liqZones.remove(i)
+
+    while liqZones.size() > liqMaxZones
+        liqZones.remove(0)
+
+    if liqZones.size() > 0
+        liq_consolidate(liqZones)
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(showLiqZones and liqZones.size() > 0 and
+     (high > liqZones.get(liqZones.size()-1).sweepLevel or low < liqZones.get(liqZones.size()-1).sweepLevel),
+     "Liquidity Zone Swept", "Price swept a liquidity zone (EQH or EQL)")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// HTF PROJECTED CANDLES
+// ═══════════════════════════════════════════════════════════════════════════════
+isNewHtf      = ta.change(time(htfInput, "0000-2400:1234567", "America/New_York")) != 0
+isMarketClose = not na(time(timeframe.period, "1600-1601", "America/New_York"))
+
+if isMarketClose
+    htfSessClose := close
+
+if isNewHtf
+    if not na(htfCurO)
+        array.unshift(htfOpenArr,  htfCurO)
+        array.unshift(htfHighArr,  htfCurH)
+        array.unshift(htfLowArr,   htfCurL)
+        array.unshift(htfCloseArr, nz(htfSessClose, close[1]))
+        array.unshift(htfStartArr, htfCurStart)
+        if array.size(htfOpenArr) > 10
+            array.pop(htfOpenArr)
+            array.pop(htfHighArr)
+            array.pop(htfLowArr)
+            array.pop(htfCloseArr)
+            array.pop(htfStartArr)
+    htfCurO     := open
+    htfCurH     := high
+    htfCurL     := low
+    htfCurStart := bar_index
+    htfSessClose := na
+else
+    htfCurH := math.max(high, nz(htfCurH, high))
+    htfCurL := math.min(low,  nz(htfCurL, low))
+
+var array<box>  htfBoxes  = array.new_box()
+var array<line> htfWicks  = array.new_line()
+var array<line> htfOLines = array.new_line()
+
+if barstate.islast and showHtf
+    int _hb = array.size(htfBoxes)
+    if _hb > 0
+        for i = 0 to _hb - 1
+            box.delete(array.get(htfBoxes, i))
+    int _hw = array.size(htfWicks)
+    if _hw > 0
+        for i = 0 to _hw - 1
+            line.delete(array.get(htfWicks, i))
+    int _ho = array.size(htfOLines)
+    if _ho > 0
+        for i = 0 to _ho - 1
+            line.delete(array.get(htfOLines, i))
+    array.clear(htfBoxes)
+    array.clear(htfWicks)
+    array.clear(htfOLines)
+
+    for i = 0 to htfCount - 1
+        float o = i == 0 ? htfCurO : (array.size(htfOpenArr)  > i-1 ? array.get(htfOpenArr,  i-1) : na)
+        float h = i == 0 ? htfCurH : (array.size(htfHighArr)  > i-1 ? array.get(htfHighArr,  i-1) : na)
+        float l = i == 0 ? htfCurL : (array.size(htfLowArr)   > i-1 ? array.get(htfLowArr,   i-1) : na)
+        float c = i == 0 ? close   : (array.size(htfCloseArr) > i-1 ? array.get(htfCloseArr, i-1) : na)
+        int   s = i == 0 ? htfCurStart : (array.size(htfStartArr) > i-1 ? array.get(htfStartArr, i-1) : na)
+
+        if not na(o) and not na(h) and not na(l) and not na(c)
+            int spacing    = 12
+            int posIdx     = htfCount - 1 - i
+            int left       = bar_index + htfOffset + (posIdx * spacing)
+            int right      = left + 8
+            color htfCss   = c >= o ? #089981 : #f23645
+            int bodyTrans  = i == 0 ? 50 : 100 - htfHistOpacity
+            int lineTrans  = i == 0 ? 0  : 100 - htfHistOpacity
+
+            array.push(htfBoxes, box.new(left, math.max(o, c), right, math.min(o, c),
+                 bgcolor=color.new(htfCss, bodyTrans), border_color=color.new(htfCss, lineTrans)))
+            array.push(htfWicks, line.new(int(math.avg(left, right)), h,
+                 int(math.avg(left, right)), l, color=color.new(htfCss, lineTrans)))
+            if showHtfLines and not na(s)
+                array.push(htfOLines, line.new(s, o, left, o, color=openLineCss, style=line.style_solid))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAIR VALUE GAPS
+// ═══════════════════════════════════════════════════════════════════════════════
+fvgAtr      = ta.atr(14)
+isBullFvg   = showFvg and low > high[2] and (low - high[2]) > (fvgAtr * fvgSens)
+isBearFvg   = showFvg and high < low[2] and (low[2] - high) > (fvgAtr * fvgSens)
+
+if isBullFvg
+    float fvgMid = math.avg(low, high[2])
+    box.new(bar_index - 1, low,  bar_index + fvgExtend, high[2], bgcolor=bullFvgCss, border_color=na)
+    line.new(bar_index - 1, fvgMid, bar_index + fvgExtend, fvgMid, color=color.new(bullFvgCss, 20), style=line.style_dotted)
+
+if isBearFvg
+    float fvgMid = math.avg(high, low[2])
+    box.new(bar_index - 1, high, bar_index + fvgExtend, low[2],  bgcolor=bearFvgCss, border_color=na)
+    line.new(bar_index - 1, fvgMid, bar_index + fvgExtend, fvgMid, color=color.new(bearFvgCss, 20), style=line.style_dotted)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKET STRUCTURE — BOS / CHoCH
+// ═══════════════════════════════════════════════════════════════════════════════
+var float msLastHi    = na
+var float msLastLo    = na
+var int   msLastHiIdx = na
+var int   msLastLoIdx = na
+var int   msTrend     = 0
+
+msPH = ta.pivothigh(msSens, msSens)
+msPL = ta.pivotlow(msSens,  msSens)
+
+if not na(msPH)
+    msLastHi    := msPH
+    msLastHiIdx := bar_index - msSens
+
+if not na(msPL)
+    msLastLo    := msPL
+    msLastLoIdx := bar_index - msSens
+
+msBullBreak = not na(msLastHi) and ta.crossover(close,  msLastHi)
+msBearBreak = not na(msLastLo) and ta.crossunder(close, msLastLo)
+
+if showMs
+    if msBullBreak
+        bool isChoch = msTrend == -1
+        label.new(int(math.avg(msLastHiIdx, bar_index)), msLastHi,
+             isChoch ? "CHoCH" : "BOS",
+             color=#00000000, textcolor=bullMsCss, style=label.style_label_down, size=size.tiny)
+        line.new(msLastHiIdx, msLastHi, bar_index, msLastHi,
+             color=bullMsCss, style=line.style_dotted)
+        msTrend  := 1
+        msLastHi := na
+
+    if msBearBreak
+        bool isChoch = msTrend == 1
+        label.new(int(math.avg(msLastLoIdx, bar_index)), msLastLo,
+             isChoch ? "CHoCH" : "BOS",
+             color=#00000000, textcolor=bearMsCss, style=label.style_label_up, size=size.tiny)
+        line.new(msLastLoIdx, msLastLo, bar_index, msLastLo,
+             color=bearMsCss, style=line.style_dotted)
+        msTrend  := -1
+        msLastLo := na
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(msBullBreak and msTrend == -1, "CHoCH Bullish", "Bullish Change of Character detected")
+alertcondition(msBearBreak and msTrend ==  1, "CHoCH Bearish", "Bearish Change of Character detected")
+alertcondition(msBullBreak and msTrend ==  1, "BOS Bullish",   "Bullish Break of Structure detected")
+alertcondition(msBearBreak and msTrend == -1, "BOS Bearish",   "Bearish Break of Structure detected")
+alertcondition(isBullFvg, "Bullish FVG", "Bullish Fair Value Gap formed")
+alertcondition(isBearFvg, "Bearish FVG", "Bearish Fair Value Gap formed")

@@ -1,0 +1,276 @@
+//@version=6
+// =====================================================================
+//  Dow Theory Market Structure Strategy 
+//
+//  第5・6回の4つの設計判断とコードの対応：
+//   ①スイング（高値・安値）の定義 → Depth（可変・ユーザー設定。業界標準のピボットを採用）
+//   ②トレンドの継続と終了        → HH/HL成立＝継続、直近HL終値割れ＝終了確定（固定・不可変）
+//   ③エントリー                  → 突破／押し目（選択式。世の実装で見解が割れる論点のため）
+//   ④エグジット（撤退ライン）    → 安値割れ方式（既定。ATRは単一の外部検証のみで優位性未確認）／ATR方式（比較用）を選択式に
+//     ※2026-07-12 オーナー裁可（DECISION_20260712_7）：ATR優位性が自社データで未確認のため既定をATR→安値割れへ変更。
+//
+//  ロングの型（ショートは左右対称）：
+//   1. セットアップ：HH（高値切り上げ）かつ HL（安値切り上げ）＝上昇トレンド成立。
+//   2. エントリー（選択式）：
+//      - 突破　：確定した直近高値(H2)を、セットアップ成立後に改めて終値で上抜けた瞬間に買い。
+//      - 押し目：直近安値(L2)〜直近高値(H2)のレンジを pullbackPct だけ戻り、
+//                L2を終値で割らないまま、戻り水準を終値で回復した瞬間に買い。
+//   3. 撤退ライン（利確・損切りを分けず単一のラインで扱う。第6回の説明に準拠）：
+//      - 安値割れ方式（既定）：直近HL（押し安値）。安値が切り上がるほどラインも引き上げる。v1と同じ定義。
+//      - ATR方式　　（比較用）：エントリー時に固定したATR×倍率の距離を価格から離して置く。
+//                    価格が有利に動くほどラインも追従して切り上げる（トレール）。
+//
+//  誠実さ：判断に使うスイングは確定したもののみ（ta.pivot、リペイントしない）。
+//          ピボットは Depth 本"後"に確定。確定の遅れも含めて忠実に検証する。
+//
+//  v1からの変更点：
+//   ・エントリーを「突破」固定→「突破／押し目」選択式に拡張。
+//   ・撤退ラインを「安値割れ固定＋別建て1:RR利確」→「ATR／安値割れの選択式・単一ライン」に変更
+//     （固定RR利確は第6回の設計方針に合わせて撤去。撤退ラインへの接触のみで手仕舞う）。
+//   ・スイング検出・ジグザグ描画ロジックはv1から変更なし。
+//
+//  v2 → v2.1（2026-07-12・オーナー指示）の変更点：
+//   ・建玉サイズを「資産の100%（percent_of_equity）」から「固定金額（strategy.cash）」に変更。
+//     証拠金100万円×レバレッジ5倍＝建玉500万円を既定値とし、以後は損益によらず一定サイズで発注する
+//     （Apex制式版の固定ロット方式に合わせた設計。複利は別途Python集計側で扱う想定）。
+//   ・証拠金・レバレッジをそれぞれ独立した設定項目にし、建玉＝証拠金×レバレッジを自動計算（2026-07-12オーナー指示）。
+//   ・v2（`CODE_DowStrategy_v2.pine`）はDepth=3の初回BT（`BT_DowStrategyV2_USDJPY_Depth3_Breakout_20260712.md`）と
+//     対応する原本として変更せず保持。本ファイルはその複製からの派生（オリジナル不可侵の原則）。
+//
+//  注意（初版で発生したコンパイルエラーの修正）：strategy()の default_qty_value は const float のみを受け付け、
+//        input.float() 同士の掛け算（input float）は渡せない（TradingViewでエラー確認・2026-07-12）。
+//        そのため証拠金・レバレッジは strategy() の外で通常の input として宣言し、
+//        各 strategy.entry() 呼び出しに qty=posSize/close を明示的に渡す方式に変更した。
+//        バックテストの初期資金(initial_capital)はPine仕様上コード内の固定値のままで、証拠金の入力欄とは
+//        連動しない（証拠金の入力欄は建玉サイズの計算にのみ使う）。initial_capitalも変えたい場合はコードを直接編集する必要がある。
+//        また「情報（右上）」テーブルのsStr行で、三項演算子の連鎖（a?b:c?d:e）がTradingView側で
+//        行継続エラーになったため、if/elseによる書き方に変更した（2026-07-12・オーナー報告）。
+//        公開スクリプトの投稿にはPine Script v6が必須（v5では投稿不可、とTradingView側で表示・2026-07-13
+//        オーナー報告）のため@versionを5→6へ変更。構文自体はv5のまま特に手を入れていないため、
+//        v6固有の非推奨警告・エラーが別途出た場合はTradingView側の指摘に従って個別対応が必要。
+//
+//  ステータス：TradingViewでの実地バックテスト・TV突合は未実施（Phase未了）。この資金管理まわりの
+//              入力構成もTV上での動作未確認。第7回でオーナーがTradingViewに貼り付けて検証する前提のドラフト。
+// =====================================================================
+
+strategy("Dow Theory Market Structure Strategy", overlay=true, max_lines_count=500,
+     initial_capital=1000000, default_qty_type=strategy.cash, default_qty_value=5000000,
+     commission_type=strategy.commission.percent, commission_value=0.01, pyramiding=0, calc_on_every_tick=false,
+     margin_long=4, margin_short=4)
+
+// ========== 資金管理（証拠金×レバレッジ＝建玉サイズ） ==========
+grp_mm = "資金管理"
+float capital  = input.float(1000000, "証拠金 (円)", minval=0, group=grp_mm, tooltip="バックテストの初期資金(initial_capital)はコード内固定値のため連動しない。建玉サイズの計算にのみ使う。")
+float leverage = input.float(5.0, "レバレッジ (倍)", minval=1.0, step=0.5, group=grp_mm)
+float posSize  = capital * leverage   // 建玉サイズ(円)。各エントリーでqty=posSize/closeとして使う
+
+// ========== ①スイング定義 ==========
+grp_swing = "①スイング定義"
+int    depth       = input.int(5, "Depth（頂点の左右の本数）", minval=1, group=grp_swing, tooltip="スイングと認めるのに、頂点の左右に何本の“坂”を要求するか。この値ひとつで、成立もブレイクも撤退幅も成績も変わる——それを確かめるのが目的。")
+
+// ========== ③エントリー方式 ==========
+grp_entry = "③エントリー方式"
+string entryMode   = input.string("突破", "エントリー方式", options=["突破", "押し目"], group=grp_entry)
+float  pullbackPct = input.float(0.5, "押し目：戻り幅（0=直近安値/高値側 〜 1=直近高値/安値側）", minval=0.1, maxval=0.9, step=0.05, group=grp_entry, tooltip="押し目モードのみ有効。ロングはL2〜H2、ショートはH2〜L2のレンジのうち、どこまで戻ったら押し目とみなすか。")
+
+// ========== ④撤退ライン（利確・損切り共用の単一ライン） ==========
+grp_exit = "④撤退ライン"
+string exitMode    = input.string("安値割れ(HL)", "撤退ラインの方式", options=["安値割れ(HL)", "ATR"], group=grp_exit)
+int    atrLen      = input.int(14, "ATR期間", group=grp_exit)
+float  atrMult     = input.float(2.0, "ATR倍率", minval=0.5, step=0.1, group=grp_exit, tooltip="エントリー時のATR×この倍率を、価格からの初期距離として使う（ATR方式のみ）。")
+
+string mode         = input.string("ロング＆ショート", "売買方向", options=["ロング＆ショート", "ロングのみ"])
+bool   showBrackets = input.bool(true, "撤退ラインを表示")
+bool   showMarkers  = input.bool(true, "スイングのマーカーを表示")
+bool   showZigzag   = input.bool(true, "ジグザグ線を表示")
+bool   showLevels   = input.bool(true, "直近高値／安値ラインを表示")
+color  hiCol        = input.color(#c0392b, "スイングハイ／直近高値")
+color  loCol        = input.color(#1f7a2e, "スイングロー／直近安値")
+color  zzCol        = input.color(#1f4e79, "ジグザグ線")
+int    zzW          = input.int(2, "ジグザグ線の太さ", minval=1, maxval=6)
+
+float atrVal = ta.atr(atrLen)
+
+// ========== ピボット検出（確定＝depth本遅れ・リペイントしない） ==========
+float ph = ta.pivothigh(high, depth, depth)
+float pl = ta.pivotlow(low,  depth, depth)
+
+// ========== 直近2つのスイング ==========
+var float h1 = na
+var float h2 = na
+var float l1 = na
+var float l2 = na
+if not na(ph)
+    h1 := h2
+    h2 := ph
+if not na(pl)
+    l1 := l2
+    l2 := pl
+
+// ========== ブレイク待ちレベル（突破モード用：確定時にまだ抜けていない＝高値掴み回避） ==========
+var float armHigh = na
+var float armLow  = na
+if not na(ph)
+    armHigh := close <= ph ? ph : na
+if not na(pl)
+    armLow := close >= pl ? pl : na
+
+// ========== マーカー ==========
+plotshape(showMarkers and not na(ph), title="Swing High", style=shape.triangledown, location=location.abovebar, color=hiCol, size=size.tiny, offset=-depth)
+plotshape(showMarkers and not na(pl), title="Swing Low",  style=shape.triangleup,   location=location.belowbar, color=loCol, size=size.tiny, offset=-depth)
+
+// ========== 直近高値／安値ライン ==========
+plot(showLevels ? h2 : na, "直近高値", color=hiCol, style=plot.style_linebr, linewidth=1)
+plot(showLevels ? l2 : na, "直近安値(HL)", color=loCol, style=plot.style_linebr, linewidth=1)
+
+// ========== ジグザグ（交互化・v1から変更なし） ==========
+var int   lpBar = na
+var float lpVal = na
+var int   lpDir = 0
+var line  seg   = na
+if not na(ph)
+    int pb = bar_index - depth
+    if lpDir == 0
+        lpBar := pb
+        lpVal := ph
+        lpDir := 1
+    else if lpDir == 1
+        if ph >= lpVal
+            lpVal := ph
+            lpBar := pb
+            if showZigzag and not na(seg)
+                line.set_xy2(seg, pb, ph)
+    else
+        if showZigzag
+            seg := line.new(lpBar, lpVal, pb, ph, xloc=xloc.bar_index, color=zzCol, width=zzW)
+        lpBar := pb
+        lpVal := ph
+        lpDir := 1
+if not na(pl)
+    int pb2 = bar_index - depth
+    if lpDir == 0
+        lpBar := pb2
+        lpVal := pl
+        lpDir := -1
+    else if lpDir == -1
+        if pl <= lpVal
+            lpVal := pl
+            lpBar := pb2
+            if showZigzag and not na(seg)
+                line.set_xy2(seg, pb2, pl)
+    else
+        if showZigzag
+            seg := line.new(lpBar, lpVal, pb2, pl, xloc=xloc.bar_index, color=zzCol, width=zzW)
+        lpBar := pb2
+        lpVal := pl
+        lpDir := -1
+
+// ========== ②セットアップ（継続/終了の土台。固定・不可変） ==========
+bool haveAll   = not na(h1) and not na(h2) and not na(l1) and not na(l2)
+bool upSetup   = haveAll and h2 > h1 and l2 > l1
+bool downSetup = haveAll and h2 < h1 and l2 < l1
+
+// ========== ③-A エントリー：突破モード ==========
+bool breakLong  = entryMode == "突破" and upSetup   and not na(armHigh) and ta.crossover(close, armHigh)
+bool breakShort = entryMode == "突破" and downSetup and not na(armLow)  and ta.crossunder(close, armLow)
+
+// ========== ③-B エントリー：押し目モード ==========
+// ロング：upSetup中、H2からL2への下げ幅のうちpullbackPctだけ戻った水準を「押し目ライン」とする。
+// L2を終値で割らずにこの水準まで下げ（armed）、その後に終値で回復した瞬間に買い。
+var float pbLevelLong = na
+var bool  pbArmedLong = false
+var bool  pbUsedLong  = false
+
+if upSetup and not na(h2) and not na(l2)
+    if na(pbLevelLong) or h2 != h2[1] or l2 != l2[1]
+        pbLevelLong := h2 - pullbackPct * (h2 - l2)
+        pbArmedLong := false
+        pbUsedLong  := false
+
+bool invalidLong = not na(l2) and close < l2
+if invalidLong
+    pbArmedLong := false
+    pbUsedLong  := true
+
+if entryMode == "押し目" and upSetup and not na(pbLevelLong) and not pbUsedLong and not invalidLong and not pbArmedLong and low <= pbLevelLong
+    pbArmedLong := true
+
+bool pullbackLong = entryMode == "押し目" and pbArmedLong and not pbUsedLong and ta.crossover(close, pbLevelLong)
+
+// ショート：downSetup中、L2からH2への戻り幅のうちpullbackPctだけ戻った水準を「戻り売りライン」とする。
+var float pbLevelShort = na
+var bool  pbArmedShort = false
+var bool  pbUsedShort  = false
+
+if downSetup and not na(h2) and not na(l2)
+    if na(pbLevelShort) or h2 != h2[1] or l2 != l2[1]
+        pbLevelShort := l2 + pullbackPct * (h2 - l2)
+        pbArmedShort := false
+        pbUsedShort  := false
+
+bool invalidShort = not na(h2) and close > h2
+if invalidShort
+    pbArmedShort := false
+    pbUsedShort  := true
+
+if entryMode == "押し目" and downSetup and not na(pbLevelShort) and not pbUsedShort and not invalidShort and not pbArmedShort and high >= pbLevelShort
+    pbArmedShort := true
+
+bool pullbackShort = entryMode == "押し目" and pbArmedShort and not pbUsedShort and ta.crossunder(close, pbLevelShort)
+
+// ========== エントリー執行 ==========
+bool longEntry  = breakLong  or pullbackLong
+bool shortEntry = breakShort or pullbackShort
+
+var float lStop       = na
+var float sStop       = na
+var float atrDistLong = na
+var float atrDistShort= na
+
+if longEntry
+    if entryMode == "突破"
+        armHigh := na
+    else
+        pbUsedLong := true
+    strategy.entry("Long", strategy.long, qty=posSize/close, comment=entryMode == "突破" ? "上昇成立→高値ブレイク" : "上昇成立→押し目回復")
+    atrDistLong := atrMult * atrVal
+    lStop := exitMode == "ATR" ? close - atrDistLong : l2
+
+if shortEntry
+    if entryMode == "突破"
+        armLow := na
+    else
+        pbUsedShort := true
+    if mode == "ロング＆ショート"
+        strategy.entry("Short", strategy.short, qty=posSize/close, comment=entryMode == "突破" ? "下降成立→安値ブレイク" : "下降成立→戻り売り")
+        atrDistShort := atrMult * atrVal
+        sStop := exitMode == "ATR" ? close + atrDistShort : h2
+    else
+        strategy.close("Long", comment="下降成立・手仕舞い")
+
+// ========== ④出口：撤退ライン（単一ライン・トレーリング） ==========
+if strategy.position_size > 0
+    float candidateL = exitMode == "ATR" ? high - atrDistLong : l2
+    if not na(candidateL) and (na(lStop) or candidateL > lStop)
+        lStop := candidateL
+    strategy.exit("L-Exit", from_entry="Long", stop=lStop)
+
+if strategy.position_size < 0
+    float candidateS = exitMode == "ATR" ? low + atrDistShort : h2
+    if not na(candidateS) and (na(sStop) or candidateS < sStop)
+        sStop := candidateS
+    strategy.exit("S-Exit", from_entry="Short", stop=sStop)
+
+// ========== 撤退ラインの表示 ==========
+plot(showBrackets and strategy.position_size > 0 ? lStop : na, "撤退ライン(Long)",  color=color.new(#c0392b, 0), style=plot.style_linebr, linewidth=1)
+plot(showBrackets and strategy.position_size < 0 ? sStop : na, "撤退ライン(Short)", color=color.new(#c0392b, 0), style=plot.style_linebr, linewidth=1)
+
+// ========== 情報（右上） ==========
+string sStr = "未成立"
+if upSetup
+    sStr := "上昇成立"
+else if downSetup
+    sStr := "下降成立"
+var table info = table.new(position.top_right, 1, 1, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Depth=" + str.tostring(depth) + " ｜ " + entryMode + " ｜ 撤退:" + exitMode + " ｜ " + mode + " ｜ " + sStr, text_color=color.white, bgcolor=color.new(#1a2b45, 0), text_size=size.normal)

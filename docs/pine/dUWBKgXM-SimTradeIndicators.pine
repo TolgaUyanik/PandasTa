@@ -1,0 +1,503 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © simtrade
+
+//@version=6
+
+// @description SimTrade indicator library — exact parity with Python pipeline (TA-Lib + pandas_ta).
+// Each function replicates the formula used in base.py / signals.py so that
+// TradingView charts match the GPU hunt / validator / live engine outputs.
+//
+// Formula sources:
+//   TA-Lib     → RSI, ATR, EMA, MACD, CCI, Stoch, WILLR, MFI, ADX, PSAR, OBV, BBANDS, AROON, PPO, AD
+//   pandas_ta  → SuperTrend, Vortex, Ichimoku, Donchian, HMA, TSI, CMF, EFI, CHOP, Heikin-Ashi
+//   Manual     → Keltner (EMA+ATR Wilder), TTM Squeeze, Chandelier Exit, VWAP reset, Pivot Points
+//
+// Known intentional deviations (documented):
+//   - Stoch trigger 11 uses Full %D (double-smoothed), not single %K
+//   - OBV filter 206 uses windowed 800-bar OBV (GPU-aligned, not cumulative)
+//   - Pivot Points use rolling window, not session-based (see pivot_pp notes)
+//   - EMA has longer warmup in TA-Lib (~50 bars unstable period) vs TW (from bar 1); steady-state identical
+library("SimTradeIndicators", overlay=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MOVING AVERAGES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function SMMA / Wilder RMA. alpha = 1/length. Matches talib "RMA" used for ATR/RSI internally.
+// @param src Source series
+// @param length Period
+// @returns RMA value
+export smma(float src, simple int length) =>
+    alpha = 1.0 / length
+    var float s = na
+    s := na(s) ? math.sum(src, length) / length : alpha * src + (1.0 - alpha) * s
+    s
+
+// @function HMA (Hull Moving Average). HMA = WMA(2·WMA(N/2) − WMA(N), √N). Matches pandas_ta.hma.
+// @param src Source series
+// @param length Period
+// @returns HMA value
+export hma(float src, simple int length) =>
+    half    = math.round(length / 2)
+    sqrtLen = math.round(math.sqrt(float(length)))
+    ta.wma(2.0 * ta.wma(src, half) - ta.wma(src, length), sqrtLen)
+
+// @function DEMA (Double EMA) = 2·EMA − EMA(EMA). Matches talib.DEMA.
+// @param src Source series
+// @param length Period
+// @returns DEMA value
+export dema(float src, simple int length) =>
+    e = ta.ema(src, length)
+    2.0 * e - ta.ema(e, length)
+
+// @function TEMA (Triple EMA) = 3·EMA − 3·EMA² + EMA³. Matches talib.TEMA.
+// @param src Source series
+// @param length Period
+// @returns TEMA value
+export tema(float src, simple int length) =>
+    e1 = ta.ema(src, length)
+    e2 = ta.ema(e1, length)
+    e3 = ta.ema(e2, length)
+    3.0 * e1 - 3.0 * e2 + e3
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  VOLATILITY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function ATR using Wilder RMA. Identical to talib.ATR and TW ta.atr.
+// @param length Period (default 14)
+// @returns ATR value
+export atr_wilder(simple int length = 14) =>
+    ta.atr(length)
+
+// @function ATR percentile rank over a rolling window. Matches Python vol_filter 201.
+// Logic: for each bar count how many ATR values in [i-lookback+1 .. i] are <= current ATR,
+// return that fraction as 0..100. Warmup bars (< lookback + length) return 50.0.
+// @param length ATR period / Wilder RMA (default 14). Matches params[0].
+// @param lookback Rolling window for percentile rank (default 30). Matches params[1].
+// @returns Percentile rank 0..100 (pass filter when >= pct_min / params[2])
+export atr_percentile_pct(simple int length = 14, simple int lookback = 30) =>
+    cur = ta.atr(length)
+    le_count = 0
+    total    = 0
+    for i = 0 to lookback - 1
+        a = ta.atr(length)[i]
+        if a > 0.0
+            total     += 1
+            le_count  += cur >= a ? 1 : 0
+    total > 0 ? 100.0 * le_count / total : 50.0
+
+// @function Bollinger Bands. Returns [upper, mid, lower].
+// mid = SMA. Matches talib.BBANDS (matype=0 = SMA).
+// @param src Source series (typically close)
+// @param length Period (default 20)
+// @param mult Standard deviation multiplier (default 2.0)
+// @returns [upper, mid, lower]
+export bbands(float src, simple int length = 20, float mult = 2.0) =>
+    mid = ta.sma(src, length)
+    dev = mult * ta.stdev(src, length)
+    [mid + dev, mid, mid - dev]
+
+// @function Bollinger Bands %B = (close − lower) / (upper − lower).
+// Returns 0.5 during warmup (matches Python _nan50 fallback in base.bb_pctb).
+// @param src Source series
+// @param length Period (default 20)
+// @param mult Multiplier (default 2.0)
+// @returns %B value
+export bb_pctb(float src, simple int length = 20, float mult = 2.0) =>
+    [upper, _, lower] = bbands(src, length, mult)
+    bw = upper - lower
+    bw > 1e-8 ? (src - lower) / bw : 0.5
+
+// @function BB bandwidth × 1000 / mid. Used by vol filter 202 (bb_width).
+// @param src Source series
+// @param length Period (default 20)
+// @param mult Multiplier (default 2.0)
+// @returns (upper − lower) / |mid| × 1000
+export bb_width_x1000(float src, simple int length = 20, float mult = 2.0) =>
+    [upper, mid, lower] = bbands(src, length, mult)
+    math.abs(mid) > 1e-8 ? (upper - lower) / math.abs(mid) * 1000.0 : 0.0
+
+// @function Keltner Channel. mid = EMA(close, ema_period), band = ATR(atr_period) Wilder RMA.
+// IMPORTANT: this is the TW-standard formula. NOT pandas_ta kc(mamode="ema") which uses EMA(TR).
+// That version produces ~40% narrower bands than TW. This library uses the correct RMA(ATR) band.
+// @param ema_period EMA period for midline (default 20)
+// @param atr_period ATR period for band width (default 10)
+// @param mult ATR multiplier (default 1.5)
+// @returns [upper, mid, lower]
+export keltner(simple int ema_period = 20, simple int atr_period = 10, float mult = 1.5) =>
+    mid  = ta.ema(close, ema_period)
+    band = ta.atr(atr_period)
+    [mid + mult * band, mid, mid - mult * band]
+
+// @function Keltner Channel bandwidth × 1000 / mid. Used by vol filter 204 (keltner_width).
+// @param period Period for both EMA and ATR (default 20)
+// @param mult ATR multiplier (default 1.5)
+// @returns (upper − lower) / |mid| × 1000
+export keltner_width_x1000(simple int period = 20, float mult = 1.5) =>
+    [upper, mid, lower] = keltner(period, period, mult)
+    math.abs(mid) > 1e-8 ? (upper - lower) / math.abs(mid) * 1000.0 : 0.0
+
+// @function Choppiness Index. CHOP = 100·log10(Σ ATR1 / (HH − LL)) / log10(N).
+// Matches pandas_ta.chop and TW built-in CHOP. Returns 50.0 during warmup.
+// @param length Period (default 14)
+// @returns CHOP value
+export choppiness(simple int length = 14) =>
+    atr1   = ta.atr(1)
+    sumAtr = math.sum(atr1, length)
+    hh     = ta.highest(high, length)
+    ll     = ta.lowest(low, length)
+    rng    = hh - ll
+    result = rng > 1e-8 ? 100.0 * math.log10(sumAtr / rng) / math.log10(float(length)) : 50.0
+    na(result) ? 50.0 : result
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  OSCILLATORS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function RSI using Wilder RMA. Identical to talib.RSI and TW ta.rsi.
+// Returns 50.0 during warmup (matches Python _nan50 fallback).
+// @param src Source series (typically close)
+// @param length Period (default 14)
+// @returns RSI value
+export rsi_val(float src, simple int length = 14) =>
+    r = ta.rsi(src, length)
+    na(r) ? 50.0 : r
+
+// @function CCI = (typical − SMA(typical)) / (0.015 · mean_deviation). Matches talib.CCI.
+// Returns 0.0 during warmup (matches Python _nan0 fallback).
+// @param length Period (default 20)
+// @returns CCI value
+export cci_val(simple int length = 20) =>
+    tp  = (high + low + close) / 3.0
+    avg = ta.sma(tp, length)
+    dev = 0.0
+    for i = 0 to length - 1
+        dev += math.abs(tp[i] - avg)
+    dev := dev / length
+    result = dev > 1e-8 ? (tp - avg) / (0.015 * dev) : 0.0
+    na(result) ? 0.0 : result
+
+// @function Stochastic raw %K (no smoothing). Matches base.stoch_k (talib slowk_period=1).
+// NOTE: TW ta.stoch default smooths %K with SMA(3). This is the unsmoothed fast %K.
+// Used by filter 103 (stoch_k_below).
+// @param k_period Lookback period (default 14)
+// @returns Raw %K (50.0 during warmup)
+export stoch_raw_k(simple int k_period = 14) =>
+    ll = ta.lowest(low, k_period)
+    hh = ta.highest(high, k_period)
+    rng = hh - ll
+    rng > 1e-8 ? 100.0 * (close - ll) / rng : 50.0
+
+// @function Full Stochastic %D = SMA(SMA(raw%K, d_period), d_period). Matches talib.STOCH output.
+// Used by trigger 11 (stoch_cross). NOT single-smoothed %K — lag is +2-3 bars vs TW default.
+// @param k_period Raw %K lookback (default 14)
+// @param d_period Smoothing applied twice (default 3)
+// @returns Full Stochastic %D (50.0 during warmup)
+export stoch_full_d(simple int k_period = 14, simple int d_period = 3) =>
+    rk     = stoch_raw_k(k_period)
+    slow_k = ta.sma(rk, d_period)
+    slow_d = ta.sma(slow_k, d_period)
+    na(slow_d) ? 50.0 : slow_d
+
+// @function Williams %R = −100 · (HH − close) / (HH − LL). Matches talib.WILLR.
+// Range: −100 to 0. Returns −50.0 during warmup.
+// @param length Period (default 14)
+// @returns Williams %R value
+export williams_r(simple int length = 14) =>
+    hh  = ta.highest(high, length)
+    ll  = ta.lowest(low, length)
+    rng = hh - ll
+    result = rng > 1e-8 ? -100.0 * (hh - close) / rng : -50.0
+    na(result) ? -50.0 : result
+
+// @function MFI (Money Flow Index). Matches talib.MFI.
+// Returns 50.0 during warmup.
+// @param length Period (default 14)
+// @returns MFI value
+export mfi_val(simple int length = 14) =>
+    tp      = (high + low + close) / 3.0
+    mf      = tp * volume
+    up_mf   = tp > tp[1] ? mf : 0.0
+    down_mf = tp < tp[1] ? mf : 0.0
+    su      = math.sum(up_mf, length)
+    sd      = math.sum(down_mf, length)
+    result  = sd > 1e-8 ? 100.0 - 100.0 / (1.0 + su / sd) : (su > 0.0 ? 100.0 : 50.0)
+    na(result) ? 50.0 : result
+
+// @function MACD. Returns [macd_line, signal_line, histogram]. Identical to talib.MACD.
+// All NaN values replaced with 0.0 (matches Python _nan0).
+// @param src Source series
+// @param fast Fast EMA period (default 12)
+// @param slow Slow EMA period (default 26)
+// @param signal_period Signal EMA period (default 9)
+// @returns [macd_line, signal_line, histogram]
+export macd_val(float src, simple int fast = 12, simple int slow = 26, simple int signal_period = 9) =>
+    [ml, sl, hl] = ta.macd(src, fast, slow, signal_period)
+    [na(ml) ? 0.0 : ml, na(sl) ? 0.0 : sl, na(hl) ? 0.0 : hl]
+
+// @function PPO = (EMA(fast) − EMA(slow)) / EMA(slow) × 100. Matches talib.PPO.
+// Returns 0.0 during warmup.
+// @param src Source series
+// @param fast Fast period (default 12)
+// @param slow Slow period (default 26)
+// @returns PPO value
+export ppo_val(float src, simple int fast = 12, simple int slow = 26) =>
+    ef = ta.ema(src, fast)
+    es = ta.ema(src, slow)
+    result = math.abs(es) > 1e-8 ? (ef - es) / es * 100.0 : 0.0
+    na(result) ? 0.0 : result
+
+// @function TSI (True Strength Index). Matches pandas_ta.tsi parameter order.
+// TSI = 100 · EMA(EMA(Δclose, slow), fast) / EMA(EMA(|Δclose|, slow), fast)
+// slow is the OUTER (first) smoothing, fast is the INNER (second). Same as TW.
+// @param src Source series
+// @param long_period Outer (slow) EMA period (default 25)
+// @param short_period Inner (fast) EMA period (default 13)
+// @returns TSI value (0.0 during warmup)
+export tsi_val(float src, simple int long_period = 25, simple int short_period = 13) =>
+    mom      = src - src[1]
+    abs_mom  = math.abs(mom)
+    smooth   = ta.ema(ta.ema(mom, long_period), short_period)
+    abs_sm   = ta.ema(ta.ema(abs_mom, long_period), short_period)
+    result   = math.abs(abs_sm) > 1e-8 ? 100.0 * smooth / abs_sm : 0.0
+    na(result) ? 0.0 : result
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TREND
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function ADX + DI lines. Returns [adx, plus_di, minus_di]. Matches talib.ADX/PLUS_DI/MINUS_DI.
+// Uses Wilder RMA (identical to TW ta.dmi / ta.adx).
+// @param length Period (default 14)
+// @returns [adx, plus_di, minus_di] — 0.0 during warmup
+export adx_di(simple int length = 14) =>
+    [adxV, pdi, mdi] = ta.dmi(length, length)
+    [na(adxV) ? 0.0 : adxV, na(pdi) ? 0.0 : pdi, na(mdi) ? 0.0 : mdi]
+
+// @function SuperTrend direction and value. Matches pandas_ta.supertrend (RMA ATR).
+// Returns [direction, supertrend_value]: direction = 1 (bull) or −1 (bear).
+// @param length ATR period (default 10)
+// @param mult ATR multiplier (default 3.0)
+// @returns [direction, supertrend_value]
+export supertrend_val(simple int length = 10, float mult = 3.0) =>
+    [stv, dir] = ta.supertrend(mult, length)
+    [na(dir) ? 1 : (dir > 0 ? 1 : -1), na(stv) ? close : stv]
+
+// @function Parabolic SAR. Returns [direction, sar_value]. Matches talib.SAR.
+// direction = 1 if close > SAR (bull), −1 bear.
+// @param start Initial AF / step (default 0.02)
+// @param inc AF increment per bar (default 0.02)
+// @param max_af Maximum AF cap (default 0.2)
+// @returns [direction, sar_value]
+export psar_val(float start = 0.02, float inc = 0.02, float max_af = 0.2) =>
+    sarV = ta.sar(start, inc, max_af)
+    sarV := na(sarV) ? close : sarV
+    [close > sarV ? 1 : -1, sarV]
+
+// @function Aroon Up and Down. Returns [up, down]. Matches talib.AROON.
+// ta.aroon does not exist in Pine v6 — computed manually:
+//   Aroon Up   = (length − bars since highest high over length+1 bars) / length × 100
+//   Aroon Down = (length − bars since lowest  low  over length+1 bars) / length × 100
+// This is identical to talib.AROON and TradingView's built-in Aroon indicator.
+// Returns 50.0 during warmup (matches Python _nan50).
+// @param length Period (default 25)
+// @returns [aroon_up, aroon_down]
+export aroon_val(simple int length = 25) =>
+    bars_high = -ta.highestbars(high, length + 1)
+    bars_low  = -ta.lowestbars(low,  length + 1)
+    aUp = (length - bars_high) / length * 100.0
+    aDn = (length - bars_low)  / length * 100.0
+    [na(aUp) ? 50.0 : aUp, na(aDn) ? 50.0 : aDn]
+
+// @function Vortex Indicator difference (VI+ − VI−). Matches base.vortex.
+// Positive = bullish regime, negative = bearish. Returns 0.0 during warmup.
+// @param length Period (default 14)
+// @returns VI+ minus VI−
+export vortex_diff(simple int length = 14) =>
+    vmp     = math.abs(high - low[1])
+    vmm     = math.abs(low  - high[1])
+    str1    = ta.atr(1)
+    sum_str = math.sum(str1, length)
+    vip     = sum_str > 1e-8 ? math.sum(vmp, length) / sum_str : 0.0
+    vim     = sum_str > 1e-8 ? math.sum(vmm, length) / sum_str : 0.0
+    na(vip - vim) ? 0.0 : vip - vim
+
+// @function Linear Regression Slope. Matches talib.LINEARREG_SLOPE exactly.
+// Computes OLS slope for x = 0..N-1 (oldest=0, newest=N-1).
+// Positive = uptrend, negative = downtrend. Returns 0.0 during warmup.
+// @param src Source series
+// @param length Period (default 20)
+// @returns Slope value
+export linreg_slope(float src, simple int length = 20) =>
+    n     = float(length)
+    sumX  = n * (n - 1.0) / 2.0
+    sumX2 = n * (n - 1.0) * (2.0 * n - 1.0) / 6.0
+    sumY  = 0.0
+    sumXY = 0.0
+    for i = 0 to length - 1
+        x      = float(length - 1 - i)   // newest bar → x=N-1, oldest → x=0
+        y      = src[i]
+        sumY  += y
+        sumXY += x * y
+    denom  = n * sumX2 - sumX * sumX
+    result = denom > 1e-8 ? (n * sumXY - sumX * sumY) / denom : 0.0
+    na(result) ? 0.0 : result
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  VOLUME
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function OBV (On-Balance Volume). Cumulative. Matches talib.OBV.
+// @returns Cumulative OBV
+export obv_val() =>
+    delta     = close - close[1]
+    signed_v  = delta > 0.0 ? volume : delta < 0.0 ? -volume : 0.0
+    ta.cum(signed_v)
+
+// @function VWAP with periodic session reset. Matches base.vwap(reset_bars).
+// reset_bars=24 on H1 ≈ daily VWAP (crypto 24/7). reset_bars=6 on H4 ≈ daily.
+// reset_bars=0 uses TW built-in ta.vwap (session anchor).
+// @param reset_bars Bars per session (0 = TW session anchor, 24 = H1 daily, 6 = H4 daily)
+// @returns VWAP value
+export vwap_reset(simple int reset_bars = 24) =>
+    tp = (high + low + close) / 3.0
+    if reset_bars <= 0
+        ta.vwap(tp)
+    else
+        var float cum_tpv = 0.0
+        var float cum_vol = 0.0
+        if bar_index % reset_bars == 0
+            cum_tpv := tp * volume
+            cum_vol := volume
+        else
+            cum_tpv += tp * volume
+            cum_vol += volume
+        cum_vol > 1e-8 ? cum_tpv / cum_vol : close
+
+// @function CMF (Chaikin Money Flow) = Σ(CLV·vol) / Σvol. Matches pandas_ta.cmf.
+// CLV = ((close − low) − (high − close)) / (high − low). Returns 0.0 during warmup.
+// @param length Period (default 20)
+// @returns CMF value (−1 to 1)
+export cmf_val(simple int length = 20) =>
+    hl  = high - low
+    clv = hl > 1e-8 ? ((close - low) - (high - close)) / hl : 0.0
+    sv  = math.sum(volume, length)
+    result = sv > 1e-8 ? math.sum(clv * volume, length) / sv : 0.0
+    na(result) ? 0.0 : result
+
+// @function Accumulation/Distribution Line. Matches talib.AD.
+// @returns Cumulative A/D value
+export ad_val() =>
+    hl  = high - low
+    clv = hl > 1e-8 ? ((close - low) - (high - close)) / hl : 0.0
+    ta.cum(clv * volume)
+
+// @function EFI (Elder Force Index). EFI = EMA((close − close[1]) · volume, length).
+// Matches pandas_ta.efi. Returns 0.0 during warmup.
+// @param length EMA period (default 13)
+// @returns EFI value
+export efi_val(simple int length = 13) =>
+    fi     = (close - close[1]) * volume
+    result = ta.ema(fi, length)
+    na(result) ? 0.0 : result
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MULTI-COMPONENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// @function Ichimoku lines. Returns [tenkan, kijun, senkou_a, senkou_b, chikou].
+// Matches pandas_ta.ichimoku with CORRECTED column mapping (ISA, ISB, ITS, IKS, ICS).
+// senkou_a/b are plotted 26 bars AHEAD in TW — values here are for current bar alignment.
+// @param tenkan_period Tenkan-sen period (default 9)
+// @param kijun_period  Kijun-sen period (default 26)
+// @param senkou_b_period Senkou B period (default 52)
+// @returns [tenkan, kijun, senkou_a, senkou_b, chikou]
+export ichimoku_val(simple int tenkan_period = 9, simple int kijun_period = 26, simple int senkou_b_period = 52) =>
+    tenkan   = (ta.highest(high, tenkan_period)    + ta.lowest(low, tenkan_period))    / 2.0
+    kijun    = (ta.highest(high, kijun_period)     + ta.lowest(low, kijun_period))     / 2.0
+    senkou_a = (tenkan + kijun) / 2.0
+    senkou_b = (ta.highest(high, senkou_b_period)  + ta.lowest(low, senkou_b_period))  / 2.0
+    chikou   = close[kijun_period]
+    [tenkan, kijun, senkou_a, senkou_b, chikou]
+
+// @function Donchian Channel. Returns [upper, mid, lower].
+// upper = highest(high, N), lower = lowest(low, N). Matches pandas_ta.donchian.
+// NOTE: lookback may differ ±1 bar from TA-Lib; consistent across all pipeline stages.
+// Trigger 37 (donchian_break) compares close[i] > upper[i-1] — use upper[1] in Pine.
+// @param length Period (default 20)
+// @returns [upper, mid, lower]
+export donchian_val(simple int length = 20) =>
+    upper = ta.highest(high, length)
+    lower = ta.lowest(low, length)
+    mid   = (upper + lower) / 2.0
+    [upper, mid, lower]
+
+// @function TTM Squeeze. Returns [squeeze_on, momentum].
+// squeeze_on: BB inside KC (volatility compression).
+// momentum:   ta.linreg(close − (donchian_mid + SMA) / 2, bb_period)
+// EXACT match with John Carter formula and base.ttm_squeeze after fix.
+// @param bb_period  BB period (default 20)
+// @param bb_mult    BB multiplier (default 2.0)
+// @param kc_period  KC period — same for EMA midline and ATR band (default 20)
+// @param kc_mult    KC ATR multiplier (default 1.5)
+// @returns [squeeze_on (bool), momentum (float)]
+export ttm_squeeze_val(simple int bb_period = 20, float bb_mult = 2.0, simple int kc_period = 20, float kc_mult = 1.5) =>
+    [bb_u, _, bb_l]   = bbands(close, bb_period, bb_mult)
+    [kc_u, _, kc_l]   = keltner(kc_period, kc_period, kc_mult)
+    squeeze_on = bb_l > kc_l and bb_u < kc_u
+    [don_u, don_mid, don_l] = donchian_val(bb_period)
+    delta    = close - (don_mid + ta.sma(close, bb_period)) / 2.0
+    momentum = ta.linreg(delta, bb_period, 0)
+    [squeeze_on, na(momentum) ? 0.0 : momentum]
+
+// @function Chandelier Exit. Returns [long_exit, short_exit].
+// long_exit  = highest(high, period) − mult · ATR(period)
+// short_exit = lowest(low, period)  + mult · ATR(period)
+// Exact match with base.chandelier_exit. Both include current bar in rolling max/min.
+// Trigger 45 fires when close crosses long_exit or short_exit (up = bull, down = bear).
+// @param period Lookback and ATR period (default 22)
+// @param mult   ATR multiplier (default 3.0)
+// @returns [long_exit, short_exit]
+export chandelier_val(simple int period = 22, float mult = 3.0) =>
+    atr_v = ta.atr(period)
+    le    = ta.highest(high, period) - mult * atr_v
+    se    = ta.lowest(low, period)   + mult * atr_v
+    [na(le) ? 0.0 : le, na(se) ? 0.0 : se]
+
+// @function Heikin Ashi close. HA_close = (open + high + low + close) / 4. Matches pandas_ta.ha.
+// @returns HA close value
+export ha_close() =>
+    (open + high + low + close) / 4.0
+
+// @function Heikin Ashi open. HA_open[i] = (HA_open[i-1] + HA_close[i-1]) / 2.
+// Trigger 48 fires on HA candle color flip: HA_close vs HA_open.
+// @returns HA open value
+export ha_open() =>
+    var float ha_o = na
+    ha_c_prev = (open[1] + high[1] + low[1] + close[1]) / 4.0
+    ha_o      := na(ha_o) ? (open + close) / 2.0 : (ha_o + ha_c_prev) / 2.0
+    ha_o
+
+// @function Rolling Pivot Point (floor method). Matches base.pivot_points.
+// pp = (max(high, period bars ago) + min(low, period bars ago) + close[1]) / 3
+// NOTE: Rolling window, NOT session-based. H1 default period=24 ≈ 1 day (crypto 24/7).
+//       For H4 set period=6 (6 × 4h = 1 day). TW Pivot Points use session H/L/C — differs.
+// @param period Rolling lookback (default 24)
+// @returns Pivot point value
+export pivot_pp(simple int period = 24) =>
+    ph = ta.highest(high[1], period)
+    pl = ta.lowest(low[1], period)
+    pc = close[1]
+    (ph + pl + pc) / 3.0
+
+// @function Rolling R1 and S1 levels. Matches base.pivot_points r1/s1.
+// r1 = 2·pp − lowest_low, s1 = 2·pp − highest_high
+// @param period Rolling lookback (default 24)
+// @returns [r1, s1]
+export pivot_r1_s1(simple int period = 24) =>
+    ph = ta.highest(high[1], period)
+    pl = ta.lowest(low[1], period)
+    pc = close[1]
+    pp = (ph + pl + pc) / 3.0
+    [2.0 * pp - pl, 2.0 * pp - ph]

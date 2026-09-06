@@ -1,0 +1,323 @@
+//@version=6
+// @description Position sizing for strategies that pair a primary trade with a
+// recovery (recoup) trade under a daily loss budget (DLL). The scan finds the
+// largest primary quantity where a correctly-sized recovery trade still fits in
+// the budget, subject to one of four risk-reward modes. Single-instrument math:
+// no cross-instrument proxy, no partial-exit k-scan, no instrument rounding.
+//
+// Entry points:
+//   CalcPositionSize       — main auto-sizer; returns AutoSizeResult with primary + recoup qty
+//   IsRangeAffordable      — quick check: does this price geometry support ≥1 contract within DLL
+//   CalcTradeRiskDollars   — utility: $ risk for a qty between two prices
+//   CalcTradeProfitDollars — utility: $ profit for a qty between two prices
+library("Vantage_PairedSizing", overlay=true)
+
+// ─────────────────────────────────────────────────────────────────────────
+// USAGE — call CalcPositionSize at trade-arm time with primary + recoup levels.
+// ─────────────────────────────────────────────────────────────────────────
+//
+//   import Vantage-Stack/Vantage_PairedSizing/2 as sz
+//
+//   sz.AutoSizeResult result = sz.CalcPositionSize(
+//       entry       = primaryEntry,   stop       = primaryStop,   tp       = primaryTp,
+//       recoupEntry = recoveryEntry,  recoupStop = recoveryStop,  recoupTp = recoveryTp,
+//       dll         = dailyLossLimit,
+//       mode        = sz.SizingMode.NetGreenRecoup)
+//
+//   if result.affordable
+//       int primaryQty  = result.t1Qty
+//       int recoveryQty = result.recoupQty   // 0 if no-recoup fallback path
+//
+// ─────────────────────────────────────────────────────────────────────────
+
+// @enum Auto-sizing mode (picks the constraint for the T1-quantity scan).
+export enum SizingMode
+    MaxDrawdownTarget
+    NetGreenRecoup
+    MatchT1Profit
+    MatchPctOfT1
+
+// @type Result of the auto-sizing pipeline.
+// @field t1Qty             MYM contracts for the base (T1) trade
+// @field recoupQty         MYM contracts for the recoup trade (0 = no-recoup path)
+// @field t1Risk            dollar risk for T1 = t1Qty × risk-per-contract
+// @field recoupRisk        dollar risk for recoup
+// @field worstCase         t1Risk + recoupRisk (total worst-case dollar loss)
+// @field recoupNet         −t1Risk + recoupProfit − commBuffer (net P&L if T1 stops, recoup wins)
+// @field t1Profit          dollar profit if T1 hits TP
+// @field affordable        true if at least 1 contract fits within DLL
+// @field noRecoupFallback  true if fell back to no-recoup sizing (recoupQty=0)
+// @field modeUsed          the SizingMode that produced this result (na for fallback paths)
+export type AutoSizeResult
+    int t1Qty               = 0
+    int recoupQty           = 0
+    float t1Risk            = 0.0
+    float recoupRisk        = 0.0
+    float worstCase         = 0.0
+    float recoupNet         = 0.0
+    float t1Profit          = 0.0
+    bool affordable         = false
+    bool noRecoupFallback   = false
+    SizingMode modeUsed     = na
+
+// ─── internal helpers ────────────────────────────────────────────────────
+
+// $ risk for 1 contract between entry and stop.
+_riskPerContract(float entry, float stop, float tickSize, float tickValue) =>
+    math.abs(entry - stop) / tickSize * tickValue
+
+// $ profit for 1 contract between entry and target.
+_profitPerContract(float entry, float tp, float tickSize, float tickValue) =>
+    math.abs(entry - tp) / tickSize * tickValue
+
+// Recoup MYM qty for a given T1 qty (with DLL cap). Matches QC `_size_recoup`.
+_sizeRecoup(int t1Qty, float t1RiskPer, float recoupEntry, float recoupStop,
+            float oppMult, float dll, float tickSize, float tickValue) =>
+    float recoupRiskPer = _riskPerContract(recoupEntry, recoupStop, tickSize, tickValue)
+    int result = 0
+    if recoupRiskPer > 0
+        float baseRisk        = t1RiskPer * t1Qty
+        float targetRisk      = baseRisk * oppMult
+        float additionalRisk  = targetRisk - baseRisk
+        if additionalRisk > 0
+            int microRaw = int(math.ceil(additionalRisk / recoupRiskPer))
+            if dll >= 0
+                float dllRemaining = math.max(0.0, dll - baseRisk)
+                if dllRemaining > 0
+                    int microCap = int(math.floor(dllRemaining / recoupRiskPer))
+                    result := math.min(microRaw, microCap)
+            else
+                result := microRaw
+    result
+
+// Human-readable mode tag for diagnostic logs.
+_modeStr(SizingMode m) =>
+    switch m
+        SizingMode.MaxDrawdownTarget => "MaxDrawdown"
+        SizingMode.NetGreenRecoup    => "NetGreen"
+        SizingMode.MatchT1Profit     => "MatchT1"
+        SizingMode.MatchPctOfT1      => "MatchPct"
+        => "?"
+
+// Evaluate a candidate T1 qty → full AutoSizeResult. Matches QC `_evaluate_candidate`
+// with simulate_tv=False (i.e., no TV-adapter rounding, just pure MYM math).
+_evaluateCandidate(int t1Qty, float entry, float stop, float tp,
+                   float recoupEntry, float recoupStop, float recoupTp,
+                   float oppMult, float commBuffer, float commPerContract,
+                   int slippageTicks, float dll, float tickSize, float tickValue) =>
+    float t1RiskPer     = _riskPerContract(entry, stop, tickSize, tickValue)
+    float t1Risk        = t1RiskPer * t1Qty
+    float t1ProfitPer   = _profitPerContract(entry, tp, tickSize, tickValue)
+    float t1Profit      = t1ProfitPer * t1Qty
+
+    int   recoupQty     = _sizeRecoup(t1Qty, t1RiskPer, recoupEntry, recoupStop,
+                                      oppMult, dll, tickSize, tickValue)
+
+    float recoupRiskPer = _riskPerContract(recoupEntry, recoupStop, tickSize, tickValue)
+    float recoupProfPer = _profitPerContract(recoupEntry, recoupTp, tickSize, tickValue)
+    float recoupRisk    = recoupRiskPer * recoupQty
+    float recoupProfit  = recoupProfPer * recoupQty
+
+    float commTotal     = (t1Qty + recoupQty) * 2 * commPerContract
+    float slipTotal     = (t1Qty + recoupQty) * 2 * slippageTicks * tickValue
+    float worstCase     = t1Risk + recoupRisk + commTotal + slipTotal
+    float recoupNet     = -t1Risk + recoupProfit - commBuffer
+
+    AutoSizeResult.new(t1Qty = t1Qty, recoupQty = recoupQty,
+                       t1Risk = t1Risk, recoupRisk = recoupRisk,
+                       worstCase = worstCase, recoupNet = recoupNet,
+                       t1Profit = t1Profit, affordable = true,
+                       noRecoupFallback = false, modeUsed = na)
+
+// Does a candidate satisfy the given mode's constraint?
+_modeAccepts(AutoSizeResult r, SizingMode mode, float dll,
+             float drawdownCapPct, float matchT1Pct) =>
+    switch mode
+        SizingMode.MaxDrawdownTarget => r.worstCase <= dll * drawdownCapPct
+        SizingMode.NetGreenRecoup    => r.worstCase <= dll and r.recoupNet >= 0
+        SizingMode.MatchT1Profit     => r.worstCase <= dll and r.recoupNet >= r.t1Profit
+        SizingMode.MatchPctOfT1      => r.worstCase <= dll and r.recoupNet >= r.t1Profit * matchT1Pct
+        => false
+
+// No-recoup fallback T1 qty — matches QC `_no_recoup_qty`:
+//     q = floor(DLL * tpRatio / (riskPerContract * (1 + tpRatio)))
+// This allocates T1 without reserving budget for recoup. Uses the recoup-TP ratio
+// (typically 0.45) per the QC reference.
+_noRecoupQty(float entry, float stop, float dll, float tpRatio,
+             float tickSize, float tickValue) =>
+    float riskPer = _riskPerContract(entry, stop, tickSize, tickValue)
+    int result = 0
+    if riskPer > 0 and tpRatio > 0
+        result := int(math.floor(dll * tpRatio / (riskPer * (1 + tpRatio))))
+    result
+
+// ─── utility exports ─────────────────────────────────────────────────────
+
+// @function Dollar risk for `qty` contracts between entry and stop.
+export CalcTradeRiskDollars(float entry, float stop, float qty,
+                            float tickSize = 0.0, float tickValue = 0.0) =>
+    float ts = tickSize  <= 0 ? syminfo.mintick   : tickSize
+    float tv = tickValue <= 0 ? syminfo.pointvalue : tickValue
+    _riskPerContract(entry, stop, ts, tv) * qty
+
+// @function Dollar profit for `qty` contracts between entry and TP.
+export CalcTradeProfitDollars(float entry, float tp, float qty,
+                              float tickSize = 0.0, float tickValue = 0.0) =>
+    float ts = tickSize  <= 0 ? syminfo.mintick   : tickSize
+    float tv = tickValue <= 0 ? syminfo.pointvalue : tickValue
+    _profitPerContract(entry, tp, ts, tv) * qty
+
+// ─── main entry point ────────────────────────────────────────────────────
+
+// @function Main auto-sizing entry point. Scans T1 quantities top-down for the largest
+// qty that satisfies the selected mode with the recoup fitting in DLL. Falls through a
+// mode ladder (MatchT1/MatchPct → NetGreen) and a no-recoup fallback before giving up.
+// Mirrors QC `RiskManager.calculate_auto_size` minus the TV proxy adapter (Phases 1–2
+// partial-exit logic) — PMT is single-instrument MYM throughout.
+//
+// @param entry            T1 entry price
+// @param stop             T1 stop-loss price
+// @param tp               T1 take-profit price
+// @param recoupEntry      recoup-trade entry price (typically = T1 stop level)
+// @param recoupStop       recoup-trade stop-loss price
+// @param recoupTp         recoup-trade take-profit price
+// @param dll              daily loss limit in dollars. Negative = disabled.
+// @param mode             sizing mode (see SizingMode)
+// @param recoupTpRatio    recoup TP ratio used by no-recoup fallback formula (default 0.45)
+// @param oppMult          recoup risk multiplier (default 4.0)
+// @param drawdownCapPct   MaxDrawdownTarget cap as fraction of DLL (default 0.75)
+// @param matchT1Pct       MatchPctOfT1 target as fraction (default 1.0)
+// @param commBuffer       dollars subtracted from recoup net for safety (default 10.0)
+// @param commPerContract  commission per contract per side in dollars (default 0.0). Included in worst-case DLL check.
+// @param slippageTicks    ticks of adverse slippage per stop-market fill (default 0). Included in worst-case DLL check as (t1Qty + recoupQty) * 2 * slippageTicks * tickValue.
+// @param maxT1Qty         hard cap on T1 contracts (0 = no cap)
+// @param minQtyFloor      if true, return qty=1 when T1 risk alone exceeds DLL
+// @param tickSize         override (0 = use syminfo.mintick)
+// @param tickValue        override (0 = use syminfo.pointvalue)
+// @param enableLog        emit SIZER-SCAN / SIZER-CAND diagnostic logs. Caller should
+//                         pass its own historical/realtime gate (e.g. withinSimLogWindow
+//                         or realtimeEffective) so log volume stays bounded.
+// @returns AutoSizeResult
+export CalcPositionSize(
+     float entry, float stop, float tp,
+     float recoupEntry, float recoupStop, float recoupTp,
+     float dll,
+     SizingMode mode,
+     float recoupTpRatio     = 0.45,
+     float oppMult           = 4.0,
+     float drawdownCapPct    = 0.75,
+     float matchT1Pct        = 1.0,
+     float commBuffer        = 10.0,
+     float commPerContract   = 0.0,
+     int   slippageTicks     = 0,
+     int   maxT1Qty          = 0,
+     bool  minQtyFloor       = true,
+     float tickSize          = 0.0,
+     float tickValue         = 0.0,
+     bool  enableLog         = false) =>
+
+    float ts = tickSize  <= 0 ? syminfo.mintick   : tickSize
+    float tv = tickValue <= 0 ? syminfo.pointvalue : tickValue
+
+    AutoSizeResult out = AutoSizeResult.new()
+
+    // Guard: need valid contract specs and non-zero per-contract risk
+    if tv > 0 and ts > 0
+        float t1RiskPer = _riskPerContract(entry, stop, ts, tv)
+        if t1RiskPer > 0
+            if dll < 0
+                // DLL disabled — trivial 1-contract answer
+                out := AutoSizeResult.new(t1Qty = 1, affordable = true)
+            else
+                int scanMax = int(math.floor(dll / t1RiskPer))
+                if maxT1Qty > 0
+                    scanMax := math.min(scanMax, maxT1Qty)
+
+                if scanMax <= 0
+                    // Even 1 contract's T1 risk exceeds DLL
+                    if minQtyFloor
+                        out := AutoSizeResult.new(t1Qty = 1, t1Risk = t1RiskPer,
+                                                  worstCase = t1RiskPer,
+                                                  affordable = false,
+                                                  noRecoupFallback = true)
+                else
+                    if enableLog
+                        log.info("SIZER-SCAN • scanMax=" + str.tostring(scanMax) + " • mode=" + _modeStr(mode) + " • dll=" + str.tostring(dll, "#.##") + " • oppMult=" + str.tostring(oppMult, "#.##") + " • drawdownCapPct=" + str.tostring(drawdownCapPct, "#.##") + " • matchT1Pct=" + str.tostring(matchT1Pct, "#.##") + " • commBuffer=" + str.tostring(commBuffer, "#.##"))
+                    // Phase 1: top-down scan for chosen mode
+                    AutoSizeResult best = na
+                    for q = scanMax to 1
+                        AutoSizeResult r = _evaluateCandidate(q, entry, stop, tp,
+                                                              recoupEntry, recoupStop, recoupTp,
+                                                              oppMult, commBuffer, commPerContract, slippageTicks, dll, ts, tv)
+                        bool _accept = _modeAccepts(r, mode, dll, drawdownCapPct, matchT1Pct)
+                        if enableLog
+                            log.info("SIZER-CAND • q=" + str.tostring(q) + " • scan=primary • mode=" + _modeStr(mode) + " • t1Risk=" + str.tostring(r.t1Risk, "#.##") + " • recoupQty=" + str.tostring(r.recoupQty) + " • worstCase=" + str.tostring(r.worstCase, "#.##") + " • recoupNet=" + str.tostring(r.recoupNet, "#.##") + " • t1Profit=" + str.tostring(r.t1Profit, "#.##") + " • accept=" + str.tostring(_accept))
+                        if _accept
+                            r.modeUsed := mode
+                            best := r
+                            break
+
+                    // Fallback: if primary was MatchT1 / MatchPctOfT1, retry as NetGreen
+                    if na(best) and (mode == SizingMode.MatchT1Profit or mode == SizingMode.MatchPctOfT1)
+                        if enableLog
+                            log.info("SIZER-SCAN • scanMax=" + str.tostring(scanMax) + " • mode=NetGreen • scan=fallback • reason=primaryNoFit • dll=" + str.tostring(dll, "#.##"))
+                        for q = scanMax to 1
+                            AutoSizeResult r = _evaluateCandidate(q, entry, stop, tp,
+                                                                  recoupEntry, recoupStop, recoupTp,
+                                                                  oppMult, commBuffer, commPerContract, slippageTicks, dll, ts, tv)
+                            bool _accept = _modeAccepts(r, SizingMode.NetGreenRecoup, dll, drawdownCapPct, matchT1Pct)
+                            if enableLog
+                                log.info("SIZER-CAND • q=" + str.tostring(q) + " • scan=fallback • mode=NetGreen • t1Risk=" + str.tostring(r.t1Risk, "#.##") + " • recoupQty=" + str.tostring(r.recoupQty) + " • worstCase=" + str.tostring(r.worstCase, "#.##") + " • recoupNet=" + str.tostring(r.recoupNet, "#.##") + " • t1Profit=" + str.tostring(r.t1Profit, "#.##") + " • accept=" + str.tostring(_accept))
+                            if _accept
+                                r.modeUsed := SizingMode.NetGreenRecoup
+                                best := r
+                                break
+
+                    if not na(best)
+                        out := best
+                    else
+                        // No green candidate — try no-recoup fallback formula
+                        int nrQty = _noRecoupQty(entry, stop, dll, recoupTpRatio, ts, tv)
+                        if enableLog
+                            log.info("SIZER-FALLBACK • path=noRecoupFormula • nrQty=" + str.tostring(nrQty) + " • recoupTpRatio=" + str.tostring(recoupTpRatio, "#.##"))
+                        if nrQty > 0
+                            float nrT1Risk   = t1RiskPer * nrQty
+                            float nrFees     = nrQty * 2 * (commPerContract + slippageTicks * tv)
+                            float nrT1Profit = _profitPerContract(entry, tp, ts, tv) * nrQty
+                            out := AutoSizeResult.new(t1Qty = nrQty, recoupQty = 0,
+                                                      t1Risk = nrT1Risk, recoupRisk = 0.0,
+                                                      worstCase = nrT1Risk + nrFees, recoupNet = 0.0,
+                                                      t1Profit = nrT1Profit,
+                                                      affordable = true,
+                                                      noRecoupFallback = true)
+                        else
+                            // Minimum floor: does qty=1 + recoup fit within DLL?
+                            AutoSizeResult r1 = _evaluateCandidate(1, entry, stop, tp,
+                                                                   recoupEntry, recoupStop, recoupTp,
+                                                                   oppMult, commBuffer, commPerContract, slippageTicks, dll, ts, tv)
+                            if enableLog
+                                log.info("SIZER-FALLBACK • path=minFloor • q=1 • worstCase=" + str.tostring(r1.worstCase, "#.##") + " • recoupQty=" + str.tostring(r1.recoupQty) + " • fits=" + str.tostring(r1.worstCase <= dll))
+                            if r1.worstCase <= dll
+                                r1.noRecoupFallback := r1.recoupQty == 0
+                                out := r1
+                            // else: range is unaffordable; out keeps its default (affordable=true but t1Qty=0)
+                            //       — that's wrong; explicit mark-unaffordable:
+                            else
+                                out := AutoSizeResult.new(affordable = false)
+    out
+
+// @function Is the range affordable enough to place at least 1 T1 contract with a viable
+// recoup within DLL? Used as the Auto Range Sizer replacement for the static max-range cap.
+// @returns true if CalcPositionSize yields affordable = true and t1Qty > 0
+export IsRangeAffordable(
+     float entry, float stop, float tp,
+     float recoupEntry, float recoupStop, float recoupTp,
+     float dll,
+     float oppMult    = 4.0,
+     float tickSize   = 0.0,
+     float tickValue  = 0.0) =>
+    AutoSizeResult r = CalcPositionSize(entry, stop, tp, recoupEntry, recoupStop, recoupTp,
+                                        dll, SizingMode.NetGreenRecoup,
+                                        0.45, oppMult, 0.75, 1.0, 10.0, 0.0, 0,
+                                        0, false, tickSize, tickValue)
+    r.affordable and r.t1Qty > 0

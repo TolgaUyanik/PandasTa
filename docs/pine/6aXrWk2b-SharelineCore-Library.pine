@@ -1,0 +1,1022 @@
+//@version=6
+library("SharelineCore_Library", overlay = false)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CORE HELPERS (GLOBAL)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Normierung auf [0..1]
+normalize(float v, int len) =>
+    lo = ta.lowest(v, len)
+    hi = ta.highest(v, len)
+    hi - lo == 0.0 ? 0.0 : (v - lo) / (hi - lo)
+
+// Symmetrische Normierung [-1..1]
+normalize_symmetric(float v, int len) =>
+    maxAbs = ta.highest(math.abs(v), len)
+    maxAbs == 0.0 ? 0.0 : v / maxAbs
+
+// Z-Score
+zscore(float src, int len) =>
+    mean = ta.sma(src, len)
+    dev  = ta.stdev(src, len)
+    dev == 0.0 ? 0.0 : (src - mean) / dev
+
+// Z-Score → [-100..100]
+zmap(float z) =>
+    math.min(math.max(z * 10.0, -100.0), 100.0)
+
+// Safe Division
+safe_div(float num, float den, float fallback) =>
+    den == 0.0 ? fallback : num / den
+
+// Clamp
+clamp(float v, float minv, float maxv) =>
+    math.max(math.min(v, maxv), minv)
+
+// Slope via LinReg (Helper)
+get_slope(float src, int len) =>
+    ta.linreg(src, len, 0)
+
+// LinReg Wrapper
+get_linreg(float src, int len, int offset) =>
+    ta.linreg(src, len, offset)
+
+// MTF Helper (einfacher Wrapper)
+extract_htf(string tf, float src) =>
+    request.security(syminfo.tickerid, tf, src)
+
+// Debug-String (für spätere Nutzung im Indi)
+debug_log(string lbl, float value) =>
+    lbl + ": " + str.tostring(value, "#.####")
+
+// NaN/na-safe running average (RMA style)
+// Works even if built-in ta.sma/ta.ema returns na/NaN for the stream.
+rma_safe(float src, int len) =>
+    int L = math.max(1, len)
+    float x = nz(src, 0.0)
+    float a = 1.0 / L
+    var float r = na
+    r := na(r[1]) ? x : (r[1] + a * (x - r[1]))
+    r
+
+// na + NaN safe float
+clean_float(float x) =>
+    (na(x) or x != x) ? 0.0 : x
+
+// Na/NaN-safe SMA via cumulative sum
+sma_cum_safe(float src, int len) =>
+    int L = math.max(1, len)
+    float x = clean_float(src)
+    float cumx = ta.cum(x)
+    int bars = bar_index + 1
+    bars < L ? (cumx / bars) : ((cumx - cumx[L]) / L)
+
+
+
+
+//────────────────────────────────────────────────────────────────────
+// VECTOR / VOLUME + SIMPLE SMC STATE (Community)
+// RETURNS:
+// [state, volText, pushText, smcText,
+//  aboveVol, climaxVol, pushBull, pushBear, smcActive]
+// state: 0=GRAY, 1=GREEN, 2=RED, 3=ORANGE
+//────────────────────────────────────────────────────────────────────
+vector_smc_state_impl(
+    float o,
+    float h,
+    float l,
+    float c,
+    float v,
+    int   vol_len,
+    float above_mult,
+    float climax_mult,
+    int   sweep_len,
+    float reclaim_pct,
+    float abs_body_max,
+    float wick_min,
+    float push_body_min
+) =>
+    // Volume refs (NaN-safe)
+    float vSafe = clean_float(v)
+    float avgVol = sma_cum_safe(vSafe, vol_len)
+
+    // avgVolSafe darf NIE na/0/NaN sein, sonst wird ratio unbrauchbar
+    float avgVolSafe = (na(avgVol) or avgVol == 0.0 or avgVol != avgVol) ? 1.0 : avgVol
+
+    bool aboveVol  = vSafe > avgVolSafe * above_mult
+    bool climaxVol = vSafe > avgVolSafe * climax_mult
+
+
+    // Candle anatomy
+    float rng = h - l
+    float rngSafe = rng == 0.0 ? na : rng
+    float body = math.abs(c - o)
+    float bodyRatio = na(rngSafe) ? 0.0 : body / rngSafe
+
+    float upperW = h - math.max(o, c)
+    float lowerW = math.min(o, c) - l
+    float wickRatio = na(rngSafe) ? 0.0 : (upperW + lowerW) / rngSafe
+
+    // Push (Volumen bringt Bewegung)
+    bool pushBull = aboveVol and c > o and bodyRatio >= push_body_min
+    bool pushBear = aboveVol and c < o and bodyRatio >= push_body_min
+
+    // Absorption (viel Effort, wenig Result)
+    bool absorption = bodyRatio <= abs_body_max and wickRatio >= wick_min
+
+    // Sweep (Liquidity Grab) + Reclaim (robuster als 1-bar Sweep)
+    int lenSweep = math.max(2, math.min(sweep_len, bar_index + 1))
+
+    float prevLow  = ta.lowest(l, lenSweep)[1]
+    float prevHigh = ta.highest(h, lenSweep)[1]
+
+    // if prevLow/prevHigh are na, sweep cannot be evaluated yet
+    bool downSweep = (not na(prevLow))  and (l < prevLow)  and (c >= (l + rng * reclaim_pct))
+    bool upSweep   = (not na(prevHigh)) and (h > prevHigh) and (c <= (h - rng * reclaim_pct))
+
+
+    bool smcActive = climaxVol and absorption and (downSweep or upSweep)
+
+    // State (Orange priorisiert)
+    int state = 0
+    if smcActive
+        state := 3
+    else if pushBull
+        state := 1
+    else if pushBear
+        state := 2
+    else
+        state := 0
+
+    // HUD Texte (einfach, senior-friendly)
+    string volText  = climaxVol ? "CLIMAX" : aboveVol ? "HIGH" : "NORMAL"
+    string pushText = smcActive ? "SMC" : pushBull ? "BULL" : pushBear ? "BEAR" : "NONE"
+    string smcText  = smcActive ? "YES" : "NO"
+
+    float volRatio = vSafe / avgVolSafe
+    [state, volText, pushText, smcText, aboveVol, climaxVol, pushBull, pushBear, smcActive, avgVolSafe, volRatio]
+
+
+
+
+export vector_smc_state(
+    float o,
+    float h,
+    float l,
+    float c,
+    float v,
+    int   vol_len,
+    float above_mult,
+    float climax_mult,
+    int   sweep_len,
+    float reclaim_pct,
+    float abs_body_max,
+    float wick_min,
+    float push_body_min
+) =>
+    vector_smc_state_impl(o, h, l, c, v, vol_len, above_mult, climax_mult, sweep_len, reclaim_pct, abs_body_max, wick_min, push_body_min)
+
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PREMIUM / FUNDING – INTERNAL HELPERS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// granular averaging method 1 (LTF 1m agg)
+granular_averaging_method1(arr, int l) =>
+    _min = timeframe.multiplier
+
+    // Nur bei Minuten-TF mit sauberer Teilung von 480
+    if timeframe.isminutes and 480 % _min == 0 and _min < 480 and bar_index > (480 / _min)
+        _acum = array.new_float(0)
+        max_size = 480 / (timeframe.in_seconds() / timeframe.in_seconds("1"))
+        valid_data_count = 0
+
+        // Daten sammeln
+        for i = 0 to l - 1
+            if not na(arr[l - i])
+                current_arr = arr[l - i]
+                // Safety: nur nicht-leere Arrays
+                if not na(current_arr) and array.size(current_arr) > 0
+                    _acum := array.concat(_acum, current_arr)
+                    valid_data_count += 1
+
+        // Zu wenig Daten?
+        if valid_data_count < (l * 0.7)
+            na
+        else
+            // Safety: leeres Acum vermeiden
+            if array.size(_acum) == 0
+                na
+            else
+                if array.size(_acum) > max_size
+                    _acum := array.slice(_acum, array.size(_acum) - max_size, array.size(_acum))
+
+                final_size = array.size(_acum)
+
+                if final_size > 0
+                    _cum = 0.0
+                    weight_sum = 0.0
+                    for i = 0 to final_size - 1
+                        data_point = array.get(_acum, i)
+                        if not na(data_point)
+                            weight = i + 1
+                            _cum += data_point * weight
+                            weight_sum += weight
+
+                    weight_sum > 0.0 ? _cum / weight_sum : na
+                else
+                    na
+    else
+        na
+
+
+// granular averaging method 2 (flexibler, sekundäres TF)
+granular_averaging_method2(arr, int l) =>
+    _min = timeframe.multiplier
+    can_use_ltf = false
+    max_size = 96
+
+    // TF-Logik
+    if timeframe.isminutes and _min <= 480
+        can_use_ltf := 480 % _min == 0 and _min < 480 and bar_index > (480 / _min)
+        max_size := 480 / (timeframe.in_seconds() / timeframe.in_seconds("1"))
+    else if timeframe.isdaily
+        can_use_ltf := bar_index > 1
+        max_size := 24
+    else if not timeframe.isdaily and _min > 480
+        can_use_ltf := bar_index > 1
+        max_size := math.max(24, int(1440 / _min))
+
+    // LTF Aggregation
+    if can_use_ltf
+        _acum = array.new_float(0)
+        valid_data_count = 0
+
+        for i = 0 to l - 1
+            if not na(arr[l - i])
+                current_arr = arr[l - i]
+                // Safety
+                if not na(current_arr) and array.size(current_arr) > 0
+                    _acum := array.concat(_acum, current_arr)
+                    valid_data_count += 1
+
+        min_threshold = timeframe.isdaily ? 0.5 : 0.7
+        if valid_data_count < (l * min_threshold)
+            na
+        else
+            if array.size(_acum) == 0
+                na
+            else
+                if array.size(_acum) > max_size
+                    _acum := array.slice(_acum, array.size(_acum) - max_size, array.size(_acum))
+
+                final_size = array.size(_acum)
+
+                if final_size > 0
+                    _cum = 0.0
+                    weight_sum = 0.0
+
+                    for i = 0 to final_size - 1
+                        data_point = array.get(_acum, i)
+                        if not na(data_point)
+                            weight = i + 1
+                            _cum += data_point * weight
+                            weight_sum += weight
+
+                    weight_sum > 0.0 ? _cum / weight_sum : na
+                else
+                    na
+
+    // Fallback für sehr hohe TFs
+    else
+        if not na(arr[0])
+            current_arr = arr[0]
+            if not na(current_arr) and array.size(current_arr) > 0
+                sum_val = 0.0
+                count   = 0
+
+                for i = 0 to array.size(current_arr) - 1
+                    v = array.get(current_arr, i)
+                    if not na(v)
+                        sum_val += v
+                        count   += 1
+
+                count > 0 ? sum_val / count : na
+            else
+                na
+        else
+            na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FUNDING / PREMIUM – IMPLEMENTATION
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RETURN: [prem_avg, funding_raw, fr, apr, plot_value]
+funding_premium_impl(string premiumSym, string funding_period, string plot_type, float interest_rate, float fundScale) =>
+    // TF-Auswahl für zweite LTF-Abfrage
+    ltf_tf = timeframe.isdaily ? "60" : timeframe.multiplier >= 240 ? "15" : "5"
+
+    // LTF-Daten (1m + dynamische LTF) & Fallback auf aktuelles TF
+    c1 = request.security_lower_tf(premiumSym, "1",  close * 100.0, ignore_invalid_symbol = true)
+    c2 = request.security_lower_tf(premiumSym, ltf_tf, close * 100.0, ignore_invalid_symbol = true)
+    fallback = request.security(premiumSym, timeframe.period, close * 100.0, ignore_invalid_symbol = true)
+
+    len1 = timeframe.isminutes ? int(480 / timeframe.multiplier) : 0
+    len2 = timeframe.isdaily ? 7 : timeframe.multiplier >= 480 ? 3 : int(math.max(1, 480 / timeframe.multiplier))
+
+    avg1 = granular_averaging_method1(c1, len1)
+    avg2 = granular_averaging_method2(c2, len2)
+
+    prem_avg = na(avg1) ? (na(avg2) ? (not na(fallback) ? fallback : 0.0) : avg2) : avg1
+
+    // Funding-Berechnung (8h Basis)
+    fr_8h = prem_avg + clamp(interest_rate - prem_avg, -0.05, 0.05)
+    fr = funding_period == "1 Hour" ? fr_8h / 8.0 : fr_8h
+    apr = fr_8h * 3.0 * 365.0
+
+    plot_value = plot_type == "APR" ? apr : fr
+    funding_raw = plot_value * fundScale
+    [prem_avg, funding_raw, fr, apr, plot_value]
+
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FUNDING / PREMIUM – EXPORT
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export funding_premium(string premiumSym, string funding_period, string plot_type, float interest_rate, float fundScale) =>
+    funding_premium_impl(premiumSym, funding_period, plot_type, interest_rate, fundScale)
+
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CVD VWAP DELTA – IMPLEMENTATION
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RETURN: [cvdSpotRaw, cvdPerpRaw, cvdSpotNorm, cvdPerpNorm]
+cvd_vwap_delta_impl(string spotSym, string perpSym, int normLen, bool resetCVD) =>
+    // Spot-Daten
+    sClose = request.security(spotSym, timeframe.period, close,  ignore_invalid_symbol = true)
+    sOpen  = request.security(spotSym, timeframe.period, open,   ignore_invalid_symbol = true)
+    sVol   = request.security(spotSym, timeframe.period, volume, ignore_invalid_symbol = true)
+
+    // Perp-Daten
+    pClose = request.security(perpSym, timeframe.period, close,  ignore_invalid_symbol = true)
+    pOpen  = request.security(perpSym, timeframe.period, open,   ignore_invalid_symbol = true)
+    pVol   = request.security(perpSym, timeframe.period, volume, ignore_invalid_symbol = true)
+
+    // VWAP auf Spot
+    vwap = ta.vwap(sClose)
+
+    // Delta-Definition (Spot um VWAP, Perp Candle-basiert)
+    sDelta = ((sClose - vwap) / safe_div(vwap, 1.0, 1.0)) * sVol
+    pDelta = ((pClose - pOpen) / safe_div(pOpen, 1.0, 1.0)) * pVol
+
+    // Session-Reset
+    newSession = ta.change(time("D")) != 0
+
+    // CVD Raw – Spot
+    var float cvdSpotRaw = 0.0
+    cvdSpotRaw := resetCVD and newSession ? sDelta : na(cvdSpotRaw[1]) ? sDelta : cvdSpotRaw[1] + sDelta
+
+    // CVD Raw – Perp
+    var float cvdPerpRaw = 0.0
+    cvdPerpRaw := resetCVD and newSession ? pDelta : na(cvdPerpRaw[1]) ? pDelta : cvdPerpRaw[1] + pDelta
+
+    // Normierung auf [-100..100]
+    cvdSpotNorm = normalize(cvdSpotRaw, normLen) * 200.0 - 100.0
+    cvdPerpNorm = normalize(cvdPerpRaw, normLen) * 200.0 - 100.0
+
+    [cvdSpotRaw, cvdPerpRaw, cvdSpotNorm, cvdPerpNorm]
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CVD VWAP DELTA – EXPORT
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export cvd_vwap_delta(string spotSym, string perpSym, int normLen, bool resetCVD) =>
+    cvd_vwap_delta_impl(spotSym, perpSym, normLen, resetCVD)
+
+//────────────────────────────────────────────────────────────────────
+// CVD ENGINE (Delta-Berechnung + Session Reset + Normalisierung)
+//────────────────────────────────────────────────────────────────────
+//
+// RETURNS:
+// [sDelta, pDelta, cvdSpotNorm, cvdPerpNorm]
+//
+// Diese Funktion ist eine reine CVD-Engine.
+// Sie liefert dieselben Werte wie deine Indikator-Version,
+// ohne Trend- oder Bias-Logik.
+//────────────────────────────────────────────────────────────────────
+cvd_engine_impl(
+    string spotSym,
+    string perpSym,
+    bool   resetCVD,
+    int    normLen
+) =>
+    // Spot-Preis- & Volumen-Daten
+    sClose = request.security(spotSym, timeframe.period, close)
+    sOpen  = request.security(spotSym, timeframe.period, open)
+    sVol   = request.security(spotSym, timeframe.period, volume)
+
+    // Perp-Preis- & Volumen-Daten
+    pClose = request.security(perpSym, timeframe.period, close)
+    pOpen  = request.security(perpSym, timeframe.period, open)
+    pVol   = request.security(perpSym, timeframe.period, volume)
+
+    // Delta-Modell
+    sDelta = (sClose > sOpen ? sVol : sClose < sOpen ? -sVol : 0.0)
+    pDelta = (pClose > pOpen ? pVol : pClose < pOpen ? -pVol : 0.0)
+
+    // Session Reset
+    newSession = ta.change(time("D")) != 0
+
+    // Spot-CVD Raw
+    var float cvdSpotRaw = 0.0
+    cvdSpotRaw := resetCVD and newSession ? sDelta : nz(cvdSpotRaw[1]) + sDelta
+
+    // Perp-CVD Raw
+    var float cvdPerpRaw = 0.0
+    cvdPerpRaw := resetCVD and newSession ? pDelta : nz(cvdPerpRaw[1]) + pDelta
+
+    // Normalisierung: -100 bis +100
+    loS = ta.lowest(cvdSpotRaw, normLen)
+    hiS = ta.highest(cvdSpotRaw, normLen)
+    cvdSpotNorm = hiS - loS == 0 ? 0 : ((cvdSpotRaw - loS) / (hiS - loS) * 200) - 100
+
+    loP = ta.lowest(cvdPerpRaw, normLen)
+    hiP = ta.highest(cvdPerpRaw, normLen)
+    cvdPerpNorm = hiP - loP == 0 ? 0 : ((cvdPerpRaw - loP) / (hiP - loP) * 200) - 100
+
+    [sDelta, pDelta, cvdSpotNorm, cvdPerpNorm]
+
+
+//────────────────────────────────────────────────────────────────────
+// EXPORT: CVD ENGINE
+//────────────────────────────────────────────────────────────────────
+export cvd_engine(
+    string spotSym,
+    string perpSym,
+    bool   resetCVD,
+    int    normLen
+) =>
+    cvd_engine_impl(spotSym, perpSym, resetCVD, normLen)
+
+//────────────────────────────────────────────────────────────────────
+// BLOCK 2 — CVD NORMALIZED TREND ENGINE
+//────────────────────────────────────────────────────────────────────
+// RETURN: [cvdSpot, cvdPerp, cvdSpotRaw, cvdPerpRaw]
+
+// Internal implementation
+cvd_trend_norm_impl(string spotSymbol, string perpSymbol, int normLen, bool resetOnSession) =>
+    // Spot-Daten
+    sClose = request.security(spotSymbol, timeframe.period, close,  ignore_invalid_symbol = true)
+    sOpen  = request.security(spotSymbol, timeframe.period, open,   ignore_invalid_symbol = true)
+    sVol   = request.security(spotSymbol, timeframe.period, volume, ignore_invalid_symbol = true)
+
+    // Perp-Daten
+    pClose = request.security(perpSymbol, timeframe.period, close,  ignore_invalid_symbol = true)
+    pOpen  = request.security(perpSymbol, timeframe.period, open,   ignore_invalid_symbol = true)
+    pVol   = request.security(perpSymbol, timeframe.period, volume, ignore_invalid_symbol = true)
+
+    // VWAP auf Spot
+    vwapSpot = ta.vwap(sClose)
+
+    // Deltas mit Zero-Schutz
+    sDelta = vwapSpot == 0.0 ? 0.0 : ((sClose - vwapSpot) / vwapSpot) * sVol
+    pDelta = pOpen    == 0.0 ? 0.0 : ((pClose - pOpen)     / pOpen)   * pVol
+
+    // Session-Reset
+    newSession = ta.change(time("D")) != 0
+
+    // CVD Raw – Spot
+    var float cvdSpotRaw = 0.0
+    cvdSpotRaw := resetOnSession and newSession ? sDelta :
+         na(cvdSpotRaw[1]) ? sDelta :
+         cvdSpotRaw[1] + sDelta
+
+    // CVD Raw – Perp
+    var float cvdPerpRaw = 0.0
+    cvdPerpRaw := resetOnSession and newSession ? pDelta :
+         na(cvdPerpRaw[1]) ? pDelta :
+         cvdPerpRaw[1] + pDelta
+
+    // Normalisierung auf [-100 .. +100] mit globaler normalize() + clamp()
+    cvdSpotNorm = normalize(cvdSpotRaw, normLen) * 200.0 - 100.0
+    cvdPerpNorm = normalize(cvdPerpRaw, normLen) * 200.0 - 100.0
+
+    cvdSpot = clamp(cvdSpotNorm, -100.0, 100.0)
+    cvdPerp = clamp(cvdPerpNorm, -100.0, 100.0)
+
+    [cvdSpot, cvdPerp, cvdSpotRaw, cvdPerpRaw]
+
+
+// Public export
+export cvd_trend_norm(string spotSymbol, string perpSymbol, int normLen, bool resetOnSession) =>
+    cvd_trend_norm_impl(spotSymbol, perpSymbol, normLen, resetOnSession)
+
+//────────────────────────────────────────────────────────────────────
+// BLOCK 3 — TREND ENGINE • TREND STRENGTH • BIAS ENGINE
+//────────────────────────────────────────────────────────────────────
+//
+// RETURNS:
+// trend_strength_engine() → [spotTrendVal, perpTrendVal, spotStrength, perpStrength]
+// bias_engine()           → [overallBiasNum, overallBiasText, biasStrength]
+//
+//────────────────────────────────────────────────────────────────────
+
+
+//────────────────────────────────────────────────────────────────────
+// INTERNAL — Dynamic Trend Length Selection Based on Timeframe
+//────────────────────────────────────────────────────────────────────
+get_dynamic_lenTrend() =>
+    int lenTrend = 20
+
+    if timeframe.isminutes
+        if timeframe.multiplier >= 240       // H4+
+            lenTrend := 20
+        else if timeframe.multiplier >= 60   // H1 – unter H4
+            lenTrend := 40
+        else if timeframe.multiplier >= 15   // M15 – unter H1
+            lenTrend := 100
+        else                                  // M1–M5
+            lenTrend := 150
+    else if timeframe.isdaily
+        lenTrend := 20
+    else
+        lenTrend := 40
+
+    lenTrend
+
+
+//────────────────────────────────────────────────────────────────────
+// INTERNAL — Dynamic Strength Length
+//────────────────────────────────────────────────────────────────────
+get_dynamic_lenStrength(int lenTrend) =>
+    lenTrend * 5
+
+
+//────────────────────────────────────────────────────────────────────
+// INTERNAL — Trend Strength Normalization [-100 .. +100]
+//────────────────────────────────────────────────────────────────────
+normalize_symmetric_local(float v, int len) =>
+    maxAbs = ta.highest(math.abs(v), len)
+    maxAbs == 0.0 ? 0.0 : clamp((v / maxAbs) * 100.0, -100.0, 100.0)
+
+
+//────────────────────────────────────────────────────────────────────
+// INTERNAL — Trend Engine Implementation
+//────────────────────────────────────────────────────────────────────
+trend_strength_engine_impl(float cvdSpot, float cvdPerp) =>
+    int lenTrend    = get_dynamic_lenTrend()
+    int lenStrength = get_dynamic_lenStrength(lenTrend)
+
+    // Trend Values via Linear Regression on CVD
+    float spotTrendVal = ta.linreg(cvdSpot, lenTrend, 0)
+    float perpTrendVal = ta.linreg(cvdPerp, lenTrend, 0)
+
+    // Trend Strength via normalized slope
+    float spotStrength = normalize_symmetric_local(spotTrendVal, lenStrength)
+    float perpStrength = normalize_symmetric_local(perpTrendVal, lenStrength)
+
+    [spotTrendVal, perpTrendVal, spotStrength, perpStrength]
+
+
+//────────────────────────────────────────────────────────────────────
+// EXPORTED — Trend Engine
+//────────────────────────────────────────────────────────────────────
+export trend_strength_engine(float cvdSpot, float cvdPerp) =>
+    trend_strength_engine_impl(cvdSpot, cvdPerp)
+
+
+//────────────────────────────────────────────────────────────────────
+// INTERNAL — Bias Engine Implementation
+//────────────────────────────────────────────────────────────────────
+bias_engine_impl(
+    float plot_value,         // funding bias raw value
+    float spotTrendVal,
+    float perpTrendVal,
+    float spotStrength,
+    float perpStrength
+) =>
+    // Combined bias strength: 40% spot, 40% perp, 20 pt funding bonus
+    float fundingBonus = plot_value > 0 ? 20.0 : plot_value < 0 ? -20.0 : 0.0
+    float biasStrength = (spotStrength * 0.4) + (perpStrength * 0.4) + fundingBonus
+
+    // Overall direction
+    string overall = plot_value > 0 and spotTrendVal > 0 and perpTrendVal > 0 ? "BULL" :
+                     plot_value < 0 and spotTrendVal < 0 and perpTrendVal < 0 ? "BEAR" :
+                     "NEUTRAL"
+
+    int overallNum = overall == "BULL" ? 1 :
+                     overall == "BEAR" ? -1 : 0
+
+    [overallNum, overall, biasStrength]
+
+
+
+//────────────────────────────────────────────────────────────────────
+// EXPORTED — Bias Engine
+//────────────────────────────────────────────────────────────────────
+export bias_engine(
+    float plot_value,
+    float spotTrendVal,
+    float perpTrendVal,
+    float spotStrength,
+    float perpStrength
+) =>
+    bias_engine_impl(plot_value, spotTrendVal, perpTrendVal, spotStrength, perpStrength)
+
+
+//────────────────────────────────────────────────────────────────────
+// BLOCK SMC — STRUCTURE / BOS / CHoCH / SWEEP / FVG / ORDERBLOCK
+//────────────────────────────────────────────────────────────────────
+// RETURNS:
+// [ ms_score,
+//   bos_score,
+//   choch_score,
+//   sweep_score,
+//   fvg_score,
+//   ob_score,
+//   raw_score,
+//   smc_score,
+//   smooth_score,
+//   signal_line,
+//   hist_diff,
+//   trend_num,        // numerischer Trendwert (smooth_score)
+//   trend_cat ]       // "Top Bull" / "Bull" / "Bear" / "Top Bear" / "Neutral"
+//────────────────────────────────────────────────────────────────────
+
+
+// Internal implementation
+smc_engine_impl(
+    float h,
+    float l,
+    float c,
+    float v,
+    int   ms_len,
+    int   bos_len,
+    bool  vol_filter,
+    float scale_factor,
+    int   smooth_len,
+    int   signal_len
+) =>
+    // 1) MARKET STRUCTURE
+    ph = ta.pivothigh(h, ms_len, ms_len)
+    pl = ta.pivotlow(l, ms_len, ms_len)
+
+    hh = not na(ph)
+    hl = not na(pl) and l > l[ms_len]
+    ll = not na(pl)
+    lh = not na(ph) and h < h[ms_len]
+
+    ms_bull  = hh and hl
+    ms_bear  = ll and lh
+    ms_score = ms_bull ? 1.0 : ms_bear ? -1.0 : 0.0
+
+    // 2) BOS
+    bos_up   = c > ta.highest(h, bos_len)[1]
+    bos_down = c < ta.lowest(l, bos_len)[1]
+    bos_score = bos_up ? 2.0 : bos_down ? -2.0 : 0.0
+
+    // 3) CHoCH
+    prev_trend = nz(ms_score[1], 0.0)
+    choch_bull = bos_up and (prev_trend < 0.0 or ll)
+    choch_bear = bos_down and (prev_trend > 0.0 or hh)
+    choch_score = choch_bull ? 3.0 : choch_bear ? -3.0 : 0.0
+
+    // 4) LIQUIDITY SWEEP
+    sweep_high = (h > h[1]) and (c < h[1]) and ((h - c) > (c - l))
+    sweep_low  = (l < l[1]) and (c > l[1]) and ((c - l) > (h - c))
+    sweep_score = sweep_low ? 1.5 : sweep_high ? -1.5 : 0.0
+
+    // 5) FVG
+    fvg_up   = l > h[2]
+    fvg_down = h < l[2]
+    fvg_score = fvg_up ? 2.0 : fvg_down ? -2.0 : 0.0
+
+    // 6) ORDER BLOCK (sehr nah an deinem Original)
+    ob_bull = choch_bull[1] ? l[1] : na
+    ob_bear = choch_bear[1] ? h[1] : na
+
+    ob_score = c < ob_bear and not na(ob_bear) ? -2.0 :
+               c > ob_bull and not na(ob_bull) ?  2.0 : 0.0
+
+
+    // 7) COMBINED SCORE
+    raw_score = (ms_score + bos_score + choch_score + sweep_score + fvg_score + ob_score) * scale_factor
+
+    vol_conf = vol_filter ? (v > ta.sma(v, 20) ? 1.0 : 0.0) : 1.0
+    smc_score = raw_score * vol_conf
+
+    smooth_score = ta.ema(smc_score, smooth_len)
+    signal_line  = ta.ema(smooth_score, signal_len)
+    hist_diff    = smooth_score - signal_line
+
+    // Trend Kategorie (wie im Original)
+    trend_num  = smooth_score
+    trend_cat = trend_num > 5.0 ? "Top Bull" : trend_num > 0.5 ? "Bull" : trend_num < -5.0 ? "Top Bear" : trend_num < -0.5 ? "Bear" : "Neutral"
+
+    [ms_score, bos_score, choch_score, sweep_score, fvg_score, ob_score, raw_score, smc_score, smooth_score, signal_line, hist_diff, trend_num, trend_cat]
+
+
+
+// Export-Funktion
+export smc_engine(
+    float h,
+    float l,
+    float c,
+    float v,
+    int   ms_len,
+    int   bos_len,
+    bool  vol_filter,
+    float scale_factor,
+    int   smooth_len,
+    int   signal_len
+) =>
+    smc_engine_impl(h, l, c, v, ms_len, bos_len, vol_filter, scale_factor, smooth_len, signal_len)
+
+//────────────────────────────────────────────────────────────────────
+// BLOCK MOMENTUM — NORMALIZED MOMENTUM ENGINE (aus V2.2)
+//────────────────────────────────────────────────────────────────────
+// RETURNS:
+// [ momentumScore, macdMom, rsiMom, cvdMom, vpiMom, trendBias ]
+//────────────────────────────────────────────────────────────────────
+
+
+// Falls noch nicht global definiert, Z-Score Helper in der Library ergänzen.
+// Wenn du bereits zscore()/zmap() global hast, diesen Block NICHT doppelt einfügen!
+zscore_mom(float src, int len) =>
+    mean = ta.sma(src, len)
+    dev  = ta.stdev(src, len)
+    dev == 0.0 ? 0.0 : (src - mean) / dev
+
+zmap_mom(float z) =>
+    clamp(z * 10.0, -100.0, 100.0)
+
+
+// Interne Implementierung
+momentum_engine_impl(
+    float o,           // Open
+    float c,           // Close
+    float v,           // Volume
+    int   fast,        // MACD Fast
+    int   slow,        // MACD Slow
+    int   signal,      // MACD Signal
+    int   rsiLen,      // RSI Length
+    int   normLen,     // Normalization Length
+    int   smaShort,    // SMA Short
+    int   smaLong,     // SMA Long
+    float wMacd,       // Base Weight MACD
+    float wRsi,        // Base Weight RSI
+    float wCvd,        // Base Weight CVD
+    float wVpi         // Base Weight VPI
+) =>
+    //––––––––––––––––––––––––––––––––––––––––
+    // TREND BIAS (SMA short vs long)
+    //––––––––––––––––––––––––––––––––––––––––
+    smaS = ta.sma(c, smaShort)
+    smaL = ta.sma(c, smaLong)
+
+    trendBiasRaw = smaS - smaL
+    trendBiasZ   = zscore_mom(trendBiasRaw, normLen)
+    trendBias    = zmap_mom(trendBiasZ)
+    trendFactor  = math.abs(trendBias) / 100.0
+
+    //––––––––––––––––––––––––––––––––––––––––
+    // MACD IMPULSE ENGINE
+    //––––––––––––––––––––––––––––––––––––––––
+    macdRaw   = ta.ema(c, fast) - ta.ema(c, slow)
+    signalRaw = ta.ema(macdRaw, signal)
+    impulse   = macdRaw - signalRaw
+    impulseSm = ta.ema(impulse, 3)
+
+    macdMom = zmap_mom(zscore_mom(impulseSm, normLen))
+
+    //––––––––––––––––––––––––––––––––––––––––
+    // RSI VELOCITY ENGINE
+    //––––––––––––––––––––––––––––––––––––––––
+    rsi     = ta.rsi(c, rsiLen)
+    rsiVel  = rsi - rsi[1]
+    rsiGrad = ta.sma(rsiVel, 5)
+
+    rsiMom = zmap_mom(zscore_mom(rsiGrad, normLen))
+
+    //––––––––––––––––––––––––––––––––––––––––
+    // CVD MOMENTUM ENGINE (3-bar flow, lokal)
+    //––––––––––––––––––––––––––––––––––––––––
+    upVol = c > o ? v : 0.0
+    dnVol = c < o ? v : 0.0
+    delta = upVol - dnVol
+
+    cvdLocal = ta.cum(delta)
+    cvdDelta = (cvdLocal - cvdLocal[1]) + (cvdLocal[1] - cvdLocal[2]) + (cvdLocal[2] - cvdLocal[3])
+
+    cvdMom = zmap_mom(zscore_mom(cvdDelta, normLen))
+
+    //––––––––––––––––––––––––––––––––––––––––
+    // VPI ENERGY ENGINE
+    //––––––––––––––––––––––––––––––––––––––––
+    vpi = v * math.abs(c - o)
+    vpiMom = zmap_mom(zscore_mom(vpi, normLen))
+
+    //––––––––––––––––––––––––––––––––––––––––
+    // ADAPTIVE WEIGHTING
+    //––––––––––––––––––––––––––––––––––––––––
+    volFac = math.abs(zscore_mom(vpi, normLen))
+
+    wMacdDyn = wMacd * (0.5 + trendFactor)
+    wRsiDyn  = wRsi  * (1.0 - trendFactor)
+    wCvdDyn  = wCvd  * (0.5 + volFac)
+    wVpiDyn  = wVpi  * (0.5 + volFac)
+
+    wSum = wMacdDyn + wRsiDyn + wCvdDyn + wVpiDyn
+    wMacdFinal = wSum == 0.0 ? 0.0 : wMacdDyn / wSum
+    wRsiFinal  = wSum == 0.0 ? 0.0 : wRsiDyn  / wSum
+    wCvdFinal  = wSum == 0.0 ? 0.0 : wCvdDyn  / wSum
+    wVpiFinal  = wSum == 0.0 ? 0.0 : wVpiDyn  / wSum
+
+    //––––––––––––––––––––––––––––––––––––––––
+    // FINAL MOMENTUM SCORE (–100…+100)
+    //––––––––––––––––––––––––––––––––––––––––
+    rawMomentum =
+          macdMom * wMacdFinal +
+          rsiMom  * wRsiFinal  +
+          cvdMom  * wCvdFinal  +
+          vpiMom  * wVpiFinal
+
+    momentumScore = clamp(rawMomentum * (1.0 + trendFactor), -100.0, 100.0)
+
+    [momentumScore, macdMom, rsiMom, cvdMom, vpiMom, trendBias]
+
+
+// Exportierte Funktion
+export momentum_engine(
+    float o,
+    float c,
+    float v,
+    int   fast,
+    int   slow,
+    int   signal,
+    int   rsiLen,
+    int   normLen,
+    int   smaShort,
+    int   smaLong,
+    float wMacd,
+    float wRsi,
+    float wCvd,
+    float wVpi
+) =>
+    momentum_engine_impl(
+        o, c, v,
+        fast, slow, signal,
+        rsiLen, normLen,
+        smaShort, smaLong,
+        wMacd, wRsi, wCvd, wVpi
+    )
+
+//────────────────────────────────────────────────────────────────────
+// BLOCK OI — OPEN INTEREST ENGINE (AGGREGATION + STRENGTH LEVELS)
+//────────────────────────────────────────────────────────────────────
+// RETURNS:
+// [ O_, H_, L_, C_,          // aggregiertes OI (quote-adaptiert)
+//   deltaOI,                 // aggregierte OI-Delta
+//   p_delta_thresh,          // positiver Delta-Schwellenwert
+//   n_delta_thresh,          // negativer Delta-Schwellenwert
+//   large_oi_up,             // bool: starkes OI+
+//   large_oi_dw,             // bool: starkes OI-
+//   is_lvl1_up,              // bool: Level 1 OI+
+//   is_lvl1_down,            // bool: Level 1 OI-
+//   is_lvl2_up,              // bool: Level 2 OI+ (extrem)
+//   is_lvl2_down ]           // bool: Level 2 OI- (extrem)
+//────────────────────────────────────────────────────────────────────
+
+
+// interne Implementierung
+oi_engine_impl(
+    string quotecur,       // "USD" oder "COIN"
+    bool   useBinance,
+    bool   useBinance2,
+    bool   useBinance3,
+    bool   useBitmex,
+    bool   useBitmex2,
+    bool   useKraken,
+    float  d_mult,
+    float  strength1_mult,
+    float  strength2_mult
+) =>
+    // BITMEX Symbolmapping
+    mex = syminfo.basecurrency == "BTC" ? "XBT" : syminfo.basecurrency
+
+    // OI-Daten anfordern (wie im Original)
+    [oid1,oic1,oio1,oih1,oil1] = request.security("BINANCE:" + syminfo.basecurrency + "USDT.P_OI", timeframe.period, [close - close[1], close, open, high, low], ignore_invalid_symbol = true)
+    [oid2,oic2,oio2,oih2,oil2] = request.security("BINANCE:" + syminfo.basecurrency + "USD.P_OI",  timeframe.period, [close - close[1], close, open, high, low], ignore_invalid_symbol = true)
+    [oid3,oic3,oio3,oih3,oil3] = request.security("BINANCE:" + syminfo.basecurrency + "BUSD.P_OI", timeframe.period, [close - close[1], close, open, high, low], ignore_invalid_symbol = true)
+    [oid4,oic4,oio4,oih4,oil4] = request.security("BITMEX:"  + mex + "USD.P_OI",                timeframe.period, [close - close[1], close, open, high, low], ignore_invalid_symbol = true)
+    [oid5,oic5,oio5,oih5,oil5] = request.security("BITMEX:"  + mex + "USDT.P_OI",               timeframe.period, [close - close[1], close, open, high, low], ignore_invalid_symbol = true)
+    [oid6,oic6,oio6,oih6,oil6] = request.security("KRAKEN:"  + syminfo.basecurrency + "USD.P_OI", timeframe.period, [close - close[1], close, open, high, low], ignore_invalid_symbol = true)
+
+    // Delta-Aggregation (wie im Script, mit USD-Pairing geteilt durch Spot-Close)
+    deltaOI =
+          (useBinance  ? nz(oid1, 0.0)           : 0.0) +
+          (useBinance2 ? nz(oid2, 0.0) / close  : 0.0) +
+          (useBinance3 ? nz(oid3, 0.0)           : 0.0) +
+          (useBitmex   ? nz(oid4, 0.0) / close  : 0.0) +
+          (useBitmex2  ? nz(oid5, 0.0) / close  : 0.0) +
+          (useKraken   ? nz(oid6, 0.0) / close  : 0.0)
+
+    // Schwellenwerte (SMA-basierte Thresholds wie im Original)
+    p_delta_thresh = ta.sma(deltaOI > 0.0 ? deltaOI : 0.0, 300) * d_mult
+    n_delta_thresh = ta.sma(deltaOI < 0.0 ? deltaOI : 0.0, 300) * d_mult
+
+    large_oi_up = deltaOI > p_delta_thresh
+    large_oi_dw = deltaOI < n_delta_thresh
+
+    // Multi-Stärke Schwellenwerte (Option 1 – SMA-basiert)
+    avgDelta = ta.sma(math.abs(deltaOI), 300)
+
+    thresh_up_lvl1   = avgDelta * strength1_mult
+    thresh_down_lvl1 = avgDelta * strength1_mult
+    thresh_up_lvl2   = avgDelta * strength2_mult
+    thresh_down_lvl2 = avgDelta * strength2_mult
+
+    is_lvl1_up   = deltaOI >  thresh_up_lvl1
+    is_lvl2_up   = deltaOI >  thresh_up_lvl2
+    is_lvl1_down = deltaOI < -math.abs(thresh_down_lvl1)
+    is_lvl2_down = deltaOI < -math.abs(thresh_down_lvl2)
+
+    // Aggregierte OI-OHLC (COIN-basiert) – in Teilstücke aufgeteilt, damit Pine nicht meckert
+    o_bin1 = useBinance  ? nz(oio1, 0.0)          : 0.0
+    o_bin2 = useBinance2 ? nz(oio2, 0.0) / close  : 0.0
+    o_bin3 = useBinance3 ? nz(oio3, 0.0)          : 0.0
+    o_bin4 = useBitmex   ? nz(oio4, 0.0) / close  : 0.0
+    o_bin5 = useBitmex2  ? nz(oio5, 0.0) / close  : 0.0
+    o_bin6 = useKraken   ? nz(oio6, 0.0) / close  : 0.0
+    O = o_bin1 + o_bin2 + o_bin3 + o_bin4 + o_bin5 + o_bin6
+
+    h_bin1 = useBinance  ? nz(oih1, 0.0)          : 0.0
+    h_bin2 = useBinance2 ? nz(oih2, 0.0) / close  : 0.0
+    h_bin3 = useBinance3 ? nz(oih3, 0.0)          : 0.0
+    h_bin4 = useBitmex   ? nz(oih4, 0.0) / close  : 0.0
+    h_bin5 = useBitmex2  ? nz(oih5, 0.0) / close  : 0.0
+    h_bin6 = useKraken   ? nz(oih6, 0.0) / close  : 0.0
+    H = h_bin1 + h_bin2 + h_bin3 + h_bin4 + h_bin5 + h_bin6
+
+    l_bin1 = useBinance  ? nz(oil1, 0.0)          : 0.0
+    l_bin2 = useBinance2 ? nz(oil2, 0.0) / close  : 0.0
+    l_bin3 = useBinance3 ? nz(oil3, 0.0)          : 0.0
+    l_bin4 = useBitmex   ? nz(oil4, 0.0) / close  : 0.0
+    l_bin5 = useBitmex2  ? nz(oil5, 0.0) / close  : 0.0
+    l_bin6 = useKraken   ? nz(oil6, 0.0) / close  : 0.0
+    L = l_bin1 + l_bin2 + l_bin3 + l_bin4 + l_bin5 + l_bin6
+
+    c_bin1 = useBinance  ? nz(oic1, 0.0)          : 0.0
+    c_bin2 = useBinance2 ? nz(oic2, 0.0) / close  : 0.0
+    c_bin3 = useBinance3 ? nz(oic3, 0.0)          : 0.0
+    c_bin4 = useBitmex   ? nz(oic4, 0.0) / close  : 0.0
+    c_bin5 = useBitmex2  ? nz(oic5, 0.0) / close  : 0.0
+    c_bin6 = useKraken   ? nz(oic6, 0.0) / close  : 0.0
+    C = c_bin1 + c_bin2 + c_bin3 + c_bin4 + c_bin5 + c_bin6
+
+    // Quoting: COIN oder USD?
+    O_ = quotecur == "COIN" ? O : O * close
+    H_ = quotecur == "COIN" ? H : H * close
+    L_ = quotecur == "COIN" ? L : L * close
+    C_ = quotecur == "COIN" ? C : C * close
+
+    [O_, H_, L_, C_, deltaOI, p_delta_thresh, n_delta_thresh, large_oi_up, large_oi_dw, is_lvl1_up, is_lvl1_down, is_lvl2_up, is_lvl2_down]
+
+
+
+// Export-Funktion
+export oi_engine(
+    string quotecur,
+    bool   useBinance,
+    bool   useBinance2,
+    bool   useBinance3,
+    bool   useBitmex,
+    bool   useBitmex2,
+    bool   useKraken,
+    float  d_mult,
+    float  strength1_mult,
+    float  strength2_mult
+) =>
+    oi_engine_impl(
+        quotecur,
+        useBinance,
+        useBinance2,
+        useBinance3,
+        useBitmex,
+        useBitmex2,
+        useKraken,
+        d_mult,
+        strength1_mult,
+        strength2_mult
+    )
+
+
+//────────────────────────────────────────────────────────────────────
+// H4 EMA ENGINE (immer H4, egal Chart-Timeframe)
+// Returns: [ema50_h4, ema200_h4]
+//────────────────────────────────────────────────────────────────────
+h4_ema_impl(string symbol, int len) =>
+    request.security(symbol, "240", ta.ema(close, len), ignore_invalid_symbol=true)
+
+export h4_ema50_ema200(string symbol) =>
+    float ema50_h4 = h4_ema_impl(symbol, 50)
+    float ema200_h4 = h4_ema_impl(symbol, 200)
+    [ema50_h4, ema200_h4]

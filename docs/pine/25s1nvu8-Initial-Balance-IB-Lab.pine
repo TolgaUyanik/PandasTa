@@ -1,0 +1,527 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ib-lab
+
+//@version=6
+
+// ============================================================================
+// Initial Balance [IB Lab.] (NY + London sessions)
+// ============================================================================
+// Draws the Initial Balance (IB) — the first hour of a session — for the NY
+// and London sessions, using fixed New York and London session definitions.
+// Works on any chart symbol with intraday data; built and tuned on CME index
+// and commodity futures (NQ, ES, GC).
+// Session and break definitions mirror the reference implementation in
+// pipeline/build_data.js (~124-186) and
+// lib/ib-core/analyze.ts (~72-79); keep this port in sync with those files.
+//
+// SESSIONS
+// --------
+// NY:      IB window 09:30-10:30 America/New_York (RTH open, first hour).
+//          Session end 16:00 America/New_York (RTH close).
+//
+// London:  IB window 08:00-09:00 Europe/London (real UK wall clock — DST is
+//          handled by TradingView's own Europe/London timezone support, not
+//          manual offset arithmetic).
+//          Session end 08:30 America/New_York, EXCLUSIVE (last included bar
+//          is 08:29 ET). This is a cross-timezone window: post-IB session
+//          membership is the INTERSECTION of a broad London-anchored window
+//          ("0800-1330" Europe/London — 13:30 UK is the widest the session
+//          can ever reach, per the pipeline/build_data.js comment) and a
+//          NY-anchored cap ("0000-0830" America/New_York). During the ~2-3
+//          weeks/year when the US and UK DST transitions don't align, the
+//          intersection naturally ends earlier in UK wall-clock terms than
+//          13:30 — that is correct and matches the reference implementation.
+//
+// Both session strings are weekday-only (":23456" = Mon-Fri).
+//
+// BREAK RULE (lib/ib-core/analyze.ts:72-79)
+// ------------------------------------------
+// After the IB window ends, the FIRST bar whose WICK exceeds an IB level
+// breaks it: high > ibHigh breaks the high side, low < ibLow breaks the low
+// side (strict inequality). The broken side's line ends ON the break bar and
+// is never extended again. An unbroken line extends to the last bar of the
+// session and stops there.
+//
+// Break detection runs on whatever timeframe the chart is on: it is an EXACT
+// match with the reference implementation on the 5-minute timeframe (its
+// canonical analysis timeframe) and only an APPROXIMATION on any other
+// intraday timeframe (a different bar size can see a different
+// first-touching bar/wick).
+//
+// IB MIDPOINT
+// -----------
+// (IB high + IB low) / 2, dashed. It cannot be "broken" — once the IB window
+// closes it is fixed and always extends to the end of the session, whatever
+// happens to the high/low lines. Drawn only while "Retracement from" is Off:
+// with retracement on, the solid -0.5 rung is the only 50% line (see LEVELS).
+//
+// LEVELS (retracement + extension, lib/ib-core/analyze.ts + stats.ts)
+// ---------------------------------------------------------------------------
+// Retracement is created ONCE per day, at the moment the IB window closes
+// (never during the developing IB), anchored on the "Retracement from" input
+// ("IB start" | "IB end" | "Off"). Its 9 solid lines (own color input,
+// default black — distinct from the session colors so they stand out) sit
+// INSIDE the IB at 0.1..0.9 of the IB range (0.5 included), labeled as a
+// SIGNED scale: 0 sits at the bias TARGET edge. The bias is the IB drift
+// direction, matching the reference implementation's Break Bias tile (lib/ib-core/render/day.ts:
+// low printed first -> "Upside (L->H)" -> bias long, 0 at ibHigh; high
+// printed first -> "Downside (H->L)" -> bias short, 0 at ibLow; a same-bar
+// tie resolves to short, same rule as the break tie below). The rungs count
+// NEGATIVE into the IB: -0.1 next to the 0 edge through -0.9 next to the
+// opposite edge. While
+// "Retracement from" is not "Off" the dashed IB midpoint is suppressed
+// entirely (including its developing phase) — the solid -0.5 rung is the
+// only 50% line; with "Off" the midpoint behaves exactly like v1, gated by
+// its own "IB midpoint" toggle.
+//
+// Break vs bias: a first break WITH the bias changes nothing — 0 already
+// sits at the broken edge, so the extension pair simply appears. A first
+// break AGAINST the bias inverts the whole scale in place: 0 moves to the
+// actually broken edge and every retracement LABEL is re-texted (rung k
+// becomes -(1 - 0.1k)) — the lines themselves never move, since the same 9
+// rungs sit at identical physical prices whichever edge they are measured
+// from. Either way the day ends with 0 at the broken edge and the
+// retracement counting negative into the IB — the reference implementation's max-retracement
+// convention, just signed (owner decision 2026-07-24). A same-bar break tie
+// resolves to bear, matching analyzeDay()'s `firstUp` tie-break; a later,
+// second-side break on a double-break day changes nothing further
+// (first-break direction only).
+// A zero-range IB (ibHigh == ibLow) creates no levels at all.
+//
+// Extension: a signed +/- pair, 4 dotted lines each (own retracement color,
+// dotted, fully opaque), created ONCE at the day's first break and anchored
+// there — the "+" ladder runs +0.25..+1.00 outward from the BROKEN edge in
+// the break direction, the "-" ladder runs -0.25..-1.00 outward from the
+// OPPOSITE edge the other way. This mirrors the reference implementation's "beyond 0.25"
+// threshold card (EXT_REACH_MIN in lib/ib-core/stats.ts) with a symmetric
+// cap. A later, second-side break on a double-break day creates nothing.
+//
+// Both retracement and extension are unbreakable targets: once created they
+// extend bar by bar to the end of the session exactly like the midpoint,
+// never stopped by a later touch.
+//
+// Rolling window: level lines/labels (not the base IB lines/box/midpoint,
+// which keep v1's TradingView-managed-cap behavior) are kept for the last N
+// session-days per session (default 20, "Levels: last N days") and deleted
+// exactly, oldest day first, once that window is exceeded. Worst case per
+// session-day: 9 retracement + 4+4 extension = 17 lines and 17 labels — with
+// both sessions and all elements on that is ~38 lines/day against
+// TradingView's hard 500-per-type drawing caps (the declared maximums), so
+// only roughly the last ~13 days can show COMPLETE levels; beyond that
+// TradingView silently removes the oldest drawings, old days' base IB lines
+// included (operations on such removed objects are no-ops, so the exact
+// window deletion stays safe). Lower N to trade recent levels for deeper
+// base-IB history; "all days" is impossible by platform design.
+// ============================================================================
+
+indicator("Initial Balance [IB Lab.]", shorttitle = "IB [IB Lab.]",
+     overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
+
+// ---- session strings (IANA timezones, "HHMM-HHMM:days", 2-6 = Mon-Fri) ----
+NY_TZ               = "America/New_York"
+NY_IB_SESSION        = "0930-1030:23456"   // IB hour: 09:30-10:30 ET
+NY_FULL_SESSION      = "0930-1600:23456"   // full RTH session: 09:30-16:00 ET
+
+LONDON_TZ             = "Europe/London"
+LONDON_IB_SESSION     = "0800-0900:23456"  // IB hour: 08:00-09:00 UK wall clock
+LONDON_BROAD_SESSION  = "0800-1330:23456"  // widest possible UK-time reach of the post-IB window
+LONDON_NY_CAP_SESSION = "0000-0830:23456"  // hard NY-time cap: session ends 08:30 ET exclusive
+
+// ---- inputs ----
+GRP_NY   = "NY session"
+GRP_LDN  = "London session"
+GRP_DISP = "Display"
+GRP_LVL  = "Levels"
+
+showNy   = input.bool(true, "Enable NY IB", group = GRP_NY)
+colorNy  = input.color(#e0a534, "NY color", group = GRP_NY)
+
+showLdn  = input.bool(true, "Enable London IB", group = GRP_LDN)
+colorLdn = input.color(#4ea8de, "London color", group = GRP_LDN)
+
+showDevIB = input.bool(true, "Developing IB", group = GRP_DISP,
+     tooltip = "When off, lines/box/midpoint only appear once the IB window has ended.")
+showBox   = input.bool(true, "IB box", group = GRP_DISP)
+showMid   = input.bool(true, "IB midpoint", group = GRP_DISP,
+     tooltip = "Applies only while Retracement from (Levels group) is Off — the solid -0.5 retracement rung replaces the dashed midpoint otherwise.")
+lineWidth = input.int(2, "Line width", minval = 1, maxval = 10, group = GRP_DISP)
+
+retrMode        = input.string("IB start", "Retracement from", options = ["IB start", "IB end", "Off"], group = GRP_LVL)
+retrColor       = input.color(color.black, "Retracement color", group = GRP_LVL,
+     tooltip = "Solid, fully opaque — pick a light color on dark chart themes.")
+showExt         = input.bool(true, "Extension levels", group = GRP_LVL)
+showLevelLabels = input.bool(true, "Level labels", group = GRP_LVL)
+levelDays       = input.int(20, "Levels: last N days", minval = 1, maxval = 60, group = GRP_LVL,
+     tooltip = "TradingView hard-caps every indicator at 500 lines and 500 labels. With both sessions and all elements on (~38 lines/day) only roughly the last ~13 days can show complete levels — TradingView silently drops the oldest drawings beyond that, old base IB lines included. Lower N to keep deeper base-IB history instead.")
+
+// ---- derived level toggles (computed once, passed down to f_updateSession) ----
+retrOn        = retrMode != "Off"        // retracement rungs active (extensions have their own independent toggle)
+retrFromStart = retrMode == "IB start"   // false => anchor retracement lines at IB end instead
+midEnabled    = showMid and not retrOn   // dashed midpoint only while retracement is fully Off
+
+// ---- level ladder constants (IB-range units) ----
+RETR_STEP    = 0.1   // retracement step: 0.1 .. 0.9 of the IB range, including 0.5
+RETR_COUNT   = 9
+EXT_STEP     = 0.25   // extension step, matches EXT_REACH_MIN in lib/ib-core/stats.ts
+EXT_MAX      = 1.0    // extension cap: signed +/- pair, 4 rungs each side
+EXT_COUNT    = int(math.round(EXT_MAX / EXT_STEP))   // 4 rungs per ladder at the current EXT_STEP/EXT_MAX
+
+// ---- per-session drawing state (mutated in place; UDTs are reference types) ----
+type SessionState
+    float ibHigh     = na
+    float ibLow      = na
+    int   ibStartBar = na
+    int   ibEndBar   = na
+    int   ibhBar     = na   // bar_index that FIRST set today's final IB high (strict >, mirrors ibhT)
+    int   iblBar     = na   // bar_index that FIRST set today's final IB low (strict <, mirrors iblT)
+    bool  brokeHigh  = false
+    bool  brokeLow   = false
+    line  hiLine     = na
+    line  loLine     = na
+    line  midLine    = na
+    box   ibBox      = na
+    // ---- levels (retracement + extension) — see the LEVELS header section ----
+    bool  firstBreakSet     = false   // has today's first break happened yet?
+    bool  firstBreakBull    = false   // true = high broke first (extension pair anchored from ibHigh outward)
+    bool  retrAnchorBull    = false   // edge today's retracement labels are measured from (true = ibHigh)
+    array<line>  levelLines        = na   // all live level lines in the rolling window, oldest-first
+    array<label> levelLabels       = na   // all live level labels in the rolling window, oldest-first
+    array<int>   dayLineCounts     = na   // per-day line counts, oldest-first, parallel with levelLines
+    array<int>   dayLabelCounts    = na   // per-day label counts, oldest-first, parallel with levelLabels
+    array<line>  activeLevelLines  = na   // today's level lines only — cheap per-bar extend loop
+    array<label> activeLevelLabels = na   // today's level labels only — cheap per-bar move loop
+    array<label> todayRetrLabels   = na   // today's retracement labels, creation order — aliases of levelLabels objects
+
+var SessionState nyState  = SessionState.new()
+var SessionState ldnState = SessionState.new()
+
+// ---- timeframe guard: intraday, <= 60 min, and divides 60 evenly ----
+tfSeconds = timeframe.in_seconds()
+isValidTf = timeframe.isintraday and tfSeconds % 60 == 0 and tfSeconds <= 3600 and 3600 % tfSeconds == 0
+
+var table noteTable = table.new(position.bottom_right, 1, 1)
+if not isValidTf and barstate.islast
+    table.cell(noteTable, 0, 0, "Use an intraday timeframe that divides evenly into 60 min",
+         text_color = color.gray, bgcolor = color.new(color.black, 20), text_size = size.small)
+
+// ---- level helpers (retracement + extension ladders, rolling last-N-days window) ----
+// Every helper below is written with single-branch `if`s (no `else`) only —
+// see the CE10235 comment further down for why: any `if/else` whose branches'
+// last statements have different types fails to compile, so new code sticks
+// to single-branch `if`s whose (discarded) value can never conflict with
+// anything, plus `while`/`for..in` loops, which are not typed expressions.
+
+// bumps the count for "today" — always the LAST element of a per-day count array
+f_incrLastCount(counts) =>
+    if not na(counts) and array.size(counts) > 0
+        int idx = array.size(counts) - 1
+        array.set(counts, idx, array.get(counts, idx) + 1)
+
+// creates one ladder of `count` level lines, anchored at `anchorBar`, each
+// `stepSize * k` IB-range units from `edgePrice` in the `dirSign` direction.
+// Pushes every created line/label into both the rolling (all live days) and
+// active (today only) arrays and bumps today's object counts. `prefix` is
+// prepended to the label's numeric text ("" for retracement, "+"/"-" for the
+// signed extension pair).
+f_createLevels(s, anchorBar, edgePrice, rangeVal, dirSign, stepSize, count, lineCol, lineStyle, lblCol, showLbl, prefix) =>
+    for k = 1 to count
+        float lvl = edgePrice + dirSign * k * stepSize * rangeVal
+        line ln = line.new(x1 = anchorBar, y1 = lvl, x2 = anchorBar, y2 = lvl, xloc = xloc.bar_index,
+             extend = extend.none, color = lineCol, style = lineStyle, width = 1)
+        array.push(s.levelLines, ln)
+        array.push(s.activeLevelLines, ln)
+        f_incrLastCount(s.dayLineCounts)
+        if showLbl
+            // "0.##" (not "#.##"): the leading-zero digit is mandatory in
+            // DecimalFormat semantics, so 0.3 renders "0.3", never ".3"
+            string txt = prefix + str.tostring(k * stepSize, "0.##")
+            label lbl = label.new(x = anchorBar, y = lvl, text = txt, xloc = xloc.bar_index,
+                 color = color.new(lblCol, 100), style = label.style_label_left, textcolor = lblCol, size = size.small)
+            array.push(s.levelLabels, lbl)
+            array.push(s.activeLevelLabels, lbl)
+            f_incrLastCount(s.dayLabelCounts)
+
+// extends every level line/label created so far TODAY to the current bar —
+// the same "unbreakable target" behavior as the IB midpoint, just applied to
+// the whole active-day list instead of a single line
+f_extendActiveLevels(lineArr, labelArr) =>
+    if not na(lineArr)
+        for ln in lineArr
+            if not na(ln)
+                line.set_x2(ln, bar_index)
+    if not na(labelArr)
+        for lbl in labelArr
+            if not na(lbl)
+                label.set_x(lbl, bar_index)
+
+// rolling last-N-days window: while more than `maxDays` day slots are being
+// tracked, pops the oldest slot's exact object count off the front of the
+// count arrays and deletes exactly that many objects off the front of the
+// rolling line/label arrays (both arrays are oldest-first and grow in lockstep
+// with the count arrays, so this is always an exact, ordered deletion)
+f_pruneOldestDay(s, maxDays) =>
+    // one loop drops a day slot from BOTH count arrays atomically — they are
+    // always pushed together at isNewIbBar, and a single loop keeps that
+    // invariant explicit instead of relying on two while conditions staying
+    // in sync
+    while array.size(s.dayLineCounts) > maxDays
+        int n = array.shift(s.dayLineCounts)
+        int remaining = n
+        while remaining > 0
+            line ln = array.shift(s.levelLines)
+            if not na(ln)
+                line.delete(ln)
+            remaining := remaining - 1
+        int m = array.shift(s.dayLabelCounts)
+        int remainingLbl = m
+        while remainingLbl > 0
+            label lbl = array.shift(s.levelLabels)
+            if not na(lbl)
+                label.delete(lbl)
+            remainingLbl := remainingLbl - 1
+
+// ---- shared per-session update logic (written once, called per session) ----
+// ibActive/isNewIbBar/ibJustEnded/dayStart are derived once per session at
+// the top level (they need history-referencing on a plain series, not a
+// function parameter) and passed in as plain booleans.
+f_updateSession(s, ibActive, isNewIbBar, ibJustEnded, fullActive, dayStart, col, showDev, showBx, showMd, width,
+     retrOn, retrFromStart, retrCol, showXt, showLbl, maxDays) =>
+    // one-time lazy init: UDT array-field defaults must be `na` (a UDT field's
+    // default value cannot call array.new()) — guard-initialize here instead;
+    // this only ever runs once per session, on that session's very first bar
+    if na(s.levelLines)
+        s.levelLines := array.new<line>()
+    if na(s.levelLabels)
+        s.levelLabels := array.new<label>()
+    if na(s.dayLineCounts)
+        s.dayLineCounts := array.new<int>()
+    if na(s.dayLabelCounts)
+        s.dayLabelCounts := array.new<int>()
+    if na(s.activeLevelLines)
+        s.activeLevelLines := array.new<line>()
+    if na(s.activeLevelLabels)
+        s.activeLevelLabels := array.new<label>()
+    if na(s.todayRetrLabels)
+        s.todayRetrLabels := array.new<label>()
+
+    if dayStart and not isNewIbBar
+        // the session started today but the IB window itself produced zero
+        // bars (holiday/short/gapped session) — forget any stale state left
+        // over from a previous day so nothing carries into today; previously
+        // drawn objects on the chart are left untouched
+        s.ibEndBar := na
+        s.ibHigh := na
+        s.ibLow := na
+        s.ibStartBar := na
+        s.ibhBar := na
+        s.iblBar := na
+        s.hiLine := na
+        s.loLine := na
+        s.midLine := na
+        s.ibBox := na
+        s.brokeHigh := false
+        s.brokeLow := false
+        s.firstBreakSet := false
+        s.firstBreakBull := false
+        s.retrAnchorBull := false
+        s.activeLevelLines := array.new<line>()
+        s.activeLevelLabels := array.new<label>()
+        s.todayRetrLabels := array.new<label>()
+
+    if ibActive
+        // ---- developing IB: accumulate the running high/low, plus the bar
+        // that FIRST set each (drives the retracement bias — whichever
+        // extreme printed first). Strict-improvement single-branch ifs only,
+        // no else: mirrors ibhT/iblT's strict >/< in pipeline/build_data.js. ----
+        if isNewIbBar
+            s.ibHigh := high
+            s.ibLow := low
+            s.ibhBar := bar_index
+            s.iblBar := bar_index
+            s.ibStartBar := bar_index
+            s.brokeHigh := false
+            s.brokeLow := false
+        if high > s.ibHigh
+            s.ibHigh := high
+            s.ibhBar := bar_index
+        if low < s.ibLow
+            s.ibLow := low
+            s.iblBar := bar_index
+
+        if isNewIbBar
+            // new IB day: reset first-break tracking, open a fresh active-level
+            // list, and slide the rolling last-N-days window (push today's slot,
+            // then prune the oldest slot if the window is now over maxDays)
+            s.firstBreakSet := false
+            s.firstBreakBull := false
+            s.activeLevelLines := array.new<line>()
+            s.activeLevelLabels := array.new<label>()
+            s.todayRetrLabels := array.new<label>()
+            array.push(s.dayLineCounts, 0)
+            array.push(s.dayLabelCounts, 0)
+            f_pruneOldestDay(s, maxDays)
+
+        s.ibEndBar := bar_index
+        float mid = (s.ibHigh + s.ibLow) / 2
+
+        if showDev
+            // Creation and update are deliberately NOT an if/else: Pine treats
+            // if/else as an expression and rejects branches whose last
+            // statements have different types (here `:= box.new` vs a void
+            // set_* call, error CE10235). Creating in a single-branch if and
+            // then updating unconditionally keeps every branch void — on the
+            // creation bar the update just re-sets the same values.
+            if isNewIbBar
+                s.hiLine := line.new(x1 = s.ibStartBar, y1 = s.ibHigh, x2 = bar_index, y2 = s.ibHigh,
+                     xloc = xloc.bar_index, extend = extend.none, color = col, style = line.style_solid, width = width)
+                s.loLine := line.new(x1 = s.ibStartBar, y1 = s.ibLow, x2 = bar_index, y2 = s.ibLow,
+                     xloc = xloc.bar_index, extend = extend.none, color = col, style = line.style_solid, width = width)
+                if showMd
+                    s.midLine := line.new(x1 = s.ibStartBar, y1 = mid, x2 = bar_index, y2 = mid,
+                         xloc = xloc.bar_index, extend = extend.none, color = col, style = line.style_dashed, width = 1)
+                if showBx
+                    s.ibBox := box.new(left = s.ibStartBar, top = s.ibHigh, right = bar_index, bottom = s.ibLow,
+                         border_color = color.new(col, 50), border_width = 1, bgcolor = color.new(col, 90), xloc = xloc.bar_index)
+            if not na(s.hiLine)
+                line.set_y1(s.hiLine, s.ibHigh)
+                line.set_y2(s.hiLine, s.ibHigh)
+                line.set_x2(s.hiLine, bar_index)
+            if not na(s.loLine)
+                line.set_y1(s.loLine, s.ibLow)
+                line.set_y2(s.loLine, s.ibLow)
+                line.set_x2(s.loLine, bar_index)
+            if showMd and not na(s.midLine)
+                line.set_y1(s.midLine, mid)
+                line.set_y2(s.midLine, mid)
+                line.set_x2(s.midLine, bar_index)
+            if showBx and not na(s.ibBox)
+                box.set_top(s.ibBox, s.ibHigh)
+                box.set_bottom(s.ibBox, s.ibLow)
+                box.set_right(s.ibBox, bar_index)
+    else
+        // ---- post-IB: create the frozen objects if "Developing IB" was off, then anchor retracement, then break-track / extend ----
+        if ibJustEnded and not showDev and not na(s.ibEndBar)
+            float mid = (s.ibHigh + s.ibLow) / 2
+            s.hiLine := line.new(x1 = s.ibStartBar, y1 = s.ibHigh, x2 = s.ibEndBar, y2 = s.ibHigh,
+                 xloc = xloc.bar_index, extend = extend.none, color = col, style = line.style_solid, width = width)
+            s.loLine := line.new(x1 = s.ibStartBar, y1 = s.ibLow, x2 = s.ibEndBar, y2 = s.ibLow,
+                 xloc = xloc.bar_index, extend = extend.none, color = col, style = line.style_solid, width = width)
+            s.midLine := showMd ? line.new(x1 = s.ibStartBar, y1 = mid, x2 = s.ibEndBar, y2 = mid,
+                 xloc = xloc.bar_index, extend = extend.none, color = col, style = line.style_dashed, width = 1) : na
+            s.ibBox := showBx ? box.new(left = s.ibStartBar, top = s.ibHigh, right = s.ibEndBar, bottom = s.ibLow,
+                 border_color = color.new(col, 50), border_width = 1, bgcolor = color.new(col, 90), xloc = xloc.bar_index) : na
+
+        // ---- LEVELS: retracement is created ONCE, right here at IB close,
+        // anchored on the bias (whichever IB extreme printed first — see the
+        // LEVELS header section). Deliberately its own sibling `if`, NOT
+        // nested inside the "not showDev" block above: retracement creation
+        // must not depend on that toggle. A zero-range IB creates nothing. ----
+        if ibJustEnded and retrOn and not na(s.ibEndBar)
+            float ibRangeRetr    = s.ibHigh - s.ibLow
+            bool  validRangeRetr = not na(ibRangeRetr) and ibRangeRetr != 0
+            if validRangeRetr
+                // bias = the IB drift direction, exactly the reference implementation's
+                // Break Bias tile (lib/ib-core/render/day.ts:136 — loFirst -> "Upside
+                // (L->H)", hiFirst -> "Downside (H->L)"): the extreme printed
+                // LAST is the expected break target and carries 0. Low printed
+                // first -> bias long, 0 at ibHigh; high first -> bias short,
+                // 0 at ibLow; a same-bar tie resolves to short, matching the
+                // break tie rule below.
+                bool biasBull = s.iblBar < s.ibhBar
+                s.retrAnchorBull := biasBull
+                int retrAnchorBar = retrFromStart ? s.ibStartBar : s.ibEndBar
+                f_createLevels(s, retrAnchorBar, biasBull ? s.ibHigh : s.ibLow, ibRangeRetr,
+                     biasBull ? -1 : 1, RETR_STEP, RETR_COUNT, retrCol, line.style_solid, retrCol, showLbl, "-")
+                s.todayRetrLabels := array.copy(s.activeLevelLabels)
+
+        if fullActive and not na(s.ibEndBar)
+            // wick-break check: strict inequality, first post-IB bar to exceed a level breaks it
+            bool justBrokeHigh = false
+            bool justBrokeLow  = false
+            if not s.brokeHigh
+                if not na(s.hiLine)
+                    line.set_x2(s.hiLine, bar_index)
+                if high > s.ibHigh
+                    s.brokeHigh := true
+                    justBrokeHigh := true
+            if not s.brokeLow
+                if not na(s.loLine)
+                    line.set_x2(s.loLine, bar_index)
+                if low < s.ibLow
+                    s.brokeLow := true
+                    justBrokeLow := true
+            // midpoint: unbreakable, always extends to the last bar of the session
+            if showMd and not na(s.midLine)
+                line.set_x2(s.midLine, bar_index)
+
+            // ---- LEVELS: the day's first break re-texts the bias-anchored
+            // retracement labels if the realized break direction differs from
+            // the bias they were created with (lines stay put — the 9 rungs
+            // sit at the same physical prices from either edge), then creates
+            // the signed +/- extension pair anchored on the break bar; a
+            // zero-range IB creates nothing, and a later, second-side break on
+            // a double-break day changes nothing further (first-break
+            // direction only) ----
+            float ibRange    = s.ibHigh - s.ibLow
+            bool  validRange = not na(ibRange) and ibRange != 0
+            if validRange and not s.firstBreakSet and (justBrokeHigh or justBrokeLow)
+                s.firstBreakSet := true
+                // same-bar tie (both sides break together) resolves to bear, matching analyzeDay()'s firstUp tie-break
+                bool firstBreakBull = justBrokeHigh and not justBrokeLow
+                s.firstBreakBull := firstBreakBull
+                // a break WITH the bias changes nothing (0 already sits at the
+                // broken edge); a break AGAINST the bias inverts the signed
+                // scale in place — 0 moves to the actually broken edge, rung
+                // k's label becomes -(1 - 0.1k). See the LEVELS header.
+                // the size guard is load-bearing, not defensive style: Pine's
+                // `for 0 to -1` iterates DOWNWARD (implicit -1 step), so an
+                // empty array (labels off, retracement Off, chart starting
+                // mid-day) would hit array.get(_, 0) and die at runtime.
+                // s.todayRetrLabels is never na here (lazy-initialized at the
+                // top of this function).
+                if firstBreakBull != s.retrAnchorBull and array.size(s.todayRetrLabels) > 0
+                    for i = 0 to array.size(s.todayRetrLabels) - 1
+                        label lbl = array.get(s.todayRetrLabels, i)
+                        if not na(lbl)
+                            label.set_text(lbl, "-" + str.tostring(1 - (i + 1) * RETR_STEP, "0.##"))
+                    s.retrAnchorBull := firstBreakBull
+                if showXt
+                    f_createLevels(s, bar_index, firstBreakBull ? s.ibHigh : s.ibLow, ibRange,
+                         firstBreakBull ? 1 : -1, EXT_STEP, EXT_COUNT, retrCol, line.style_dotted, retrCol, showLbl, "+")
+                    f_createLevels(s, bar_index, firstBreakBull ? s.ibLow : s.ibHigh, ibRange,
+                         firstBreakBull ? -1 : 1, EXT_STEP, EXT_COUNT, retrCol, line.style_dotted, retrCol, showLbl, "-")
+
+            f_extendActiveLevels(s.activeLevelLines, s.activeLevelLabels)
+
+// ---- NY session membership ----
+nyIbTime      = time(timeframe.period, NY_IB_SESSION, NY_TZ)
+nyIbActive    = not na(nyIbTime)
+nyIsNewIbBar  = nyIbActive and na(nyIbTime[1])
+nyIbJustEnded = na(nyIbTime) and not na(nyIbTime[1])
+nyFullTime    = time(timeframe.period, NY_FULL_SESSION, NY_TZ)
+nyFullActive  = not na(nyFullTime)
+nyDayStart    = nyFullActive and na(nyFullTime[1])   // first bar of today's full session, IB or not
+
+// ---- London session membership ----
+// IB window: real UK wall clock, DST handled by the Europe/London tz.
+londonIbTime      = time(timeframe.period, LONDON_IB_SESSION, LONDON_TZ)
+londonIbActive    = not na(londonIbTime)
+londonIsNewIbBar  = londonIbActive and na(londonIbTime[1])
+londonIbJustEnded = na(londonIbTime) and not na(londonIbTime[1])
+// post-IB membership = intersection of the broad UK-anchored window and the NY-anchored 08:30-ET-exclusive cap
+londonBroadActive = not na(time(timeframe.period, LONDON_BROAD_SESSION, LONDON_TZ))
+londonNyCapActive = not na(time(timeframe.period, LONDON_NY_CAP_SESSION, NY_TZ))
+londonFullActive  = londonBroadActive and londonNyCapActive
+// londonFullActive is a derived bool (not a raw time() na/non-na value), so
+// route it through a float na-proxy to get the same unambiguous na()-based
+// day-start idiom used for NY above (avoids negating a possibly-na bool[1]).
+londonFullVal     = londonFullActive ? 1.0 : na
+londonDayStart    = londonFullActive and na(londonFullVal[1])
+
+// ---- run (timeframe guard applies to all drawing side effects) ----
+if isValidTf and showNy
+    f_updateSession(nyState, nyIbActive, nyIsNewIbBar, nyIbJustEnded, nyFullActive, nyDayStart,
+         colorNy, showDevIB, showBox, midEnabled, lineWidth, retrOn, retrFromStart, retrColor, showExt, showLevelLabels, levelDays)
+if isValidTf and showLdn
+    f_updateSession(ldnState, londonIbActive, londonIsNewIbBar, londonIbJustEnded, londonFullActive, londonDayStart,
+         colorLdn, showDevIB, showBox, midEnabled, lineWidth, retrOn, retrFromStart, retrColor, showExt, showLevelLabels, levelDays)

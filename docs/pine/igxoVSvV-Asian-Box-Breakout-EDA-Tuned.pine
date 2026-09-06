@@ -1,0 +1,166 @@
+//@version=5
+strategy("Asian Box Breakout - EDA Tuned", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, pyramiding=0)
+
+// =========================================================================
+// 1) INPUTS
+// =========================================================================
+trade_dir          = input.string("Long Only", "Trade Direction", options=["Both", "Long Only", "Short Only"], group="Strategy")
+asian_session      = input.session("0500-1300", "Asian Session (UTC+7)", group="Time")
+trade_session      = input.session("1300-0400", "Trading Session (UTC+7)", group="Time")
+force_eod_close    = input.bool(true, "Force EOD Close", group="Time")
+skip_monday        = input.bool(false, "Skip Monday", group="Time")
+
+atr_length         = input.int(14, "Daily ATR Length", group="Risk")
+sl_multiplier      = input.float(1.0, "Initial SL (x Daily ATR)", step=0.1, group="Risk")
+risk_pct           = input.float(1.0, "Risk per Trade (% Equity)", step=0.1, minval=0.1, group="Risk")
+max_qty_cap_pct    = input.float(100.0, "Max Notional Cap (% Equity)", step=5.0, minval=10, group="Risk")
+
+trail_activate_r   = input.float(1.0, "Trail Activate (R)", step=0.1, minval=0.1, group="Trailing")
+trail_gap_r        = input.float(0.5, "Trail Gap (R)", step=0.1, minval=0.1, group="Trailing")
+
+use_trend_filter   = input.bool(true, "Use Daily EMA Trend Filter", group="Filter")
+trend_ema_len      = input.int(50, "Daily EMA Length", minval=5, group="Filter")
+min_box_atr_ratio  = input.float(0.20, "Min Box Width / ATR", step=0.05, minval=0.0, group="Filter")
+
+// Webhook fields for Google Sheet / Apps Script
+bot_symbol         = input.string("US100", "Bot Symbol", options=["US100", "BTC"], group="Webhook")
+webhook_secret     = input.string("PUT_WEBHOOK_SECRET", "Webhook Secret", group="Webhook")
+account_tag        = input.string("practice-main", "Account Tag", group="Webhook")
+
+// =========================================================================
+// 2) SESSIONS & TIME
+// =========================================================================
+in_asian_box  = not na(time(timeframe.period, asian_session, "Asia/Bangkok"))
+in_trade_zone = not na(time(timeframe.period, trade_session, "Asia/Bangkok"))
+new_asian_box = in_asian_box and not in_asian_box[1]
+trade_zone_end = not in_trade_zone and in_trade_zone[1]
+
+is_monday = dayofweek == dayofweek.monday
+day_ok = not (skip_monday and is_monday)
+
+// =========================================================================
+// 3) ASIAN BOX
+// =========================================================================
+var float asian_high = na
+var float asian_low  = na
+
+if new_asian_box
+    asian_high := high
+    asian_low  := low
+else if in_asian_box
+    asian_high := math.max(asian_high, high)
+    asian_low  := math.min(asian_low, low)
+
+box_width = asian_high - asian_low
+
+// =========================================================================
+// 4) DAILY CONTEXT
+// =========================================================================
+d_atr = request.security(syminfo.tickerid, "D", ta.atr(atr_length)[1], lookahead=barmerge.lookahead_on)
+d_ema = request.security(syminfo.tickerid, "D", ta.ema(close, trend_ema_len), lookahead=barmerge.lookahead_on)
+d_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_on)
+
+sl_dist = d_atr * sl_multiplier
+box_ok  = not na(box_width) and not na(d_atr) and d_atr > 0 and (box_width / d_atr) >= min_box_atr_ratio
+
+trend_long_ok  = not use_trend_filter or (d_close > d_ema)
+trend_short_ok = not use_trend_filter or (d_close < d_ema)
+
+// =========================================================================
+// 5) RISK-BASED POSITION SIZE
+// =========================================================================
+risk_value = strategy.equity * (risk_pct * 0.01)
+raw_qty = sl_dist > 0 ? risk_value / sl_dist : 0.0
+
+cap_notional = strategy.equity * (max_qty_cap_pct * 0.01)
+long_cap_qty = asian_high > 0 ? cap_notional / asian_high : 0.0
+short_cap_qty = asian_low > 0 ? cap_notional / asian_low : 0.0
+
+long_qty  = math.max(0.0, math.min(raw_qty, long_cap_qty))
+short_qty = math.max(0.0, math.min(raw_qty, short_cap_qty))
+
+// =========================================================================
+// 6) METRICS + ALERT
+// =========================================================================
+total_trades = strategy.closedtrades
+win_trades   = strategy.wintrades
+win_rate     = total_trades > 0 ? (win_trades / total_trades) * 100 : 0.0
+
+f_alert(_signal, _order_id, _action, _price, _qty) =>
+    sig_id = bot_symbol + "-" + timeframe.period + "-" + str.tostring(time) + "-" + _signal
+    '{"strategy":"Asian Box Breakout EDA Tuned","symbol":"' + bot_symbol + '","signal":"' + _signal + '","signal_id":"' + sig_id + '","order_id":"' + _order_id + '","action":"' + _action + '","price":"' + str.tostring(_price, "#.####") + '","qty":"' + str.tostring(_qty, "#.####") + '","position_size":"' + str.tostring(strategy.position_size) + '","net_profit":"' + str.tostring(strategy.netprofit, "#.##") + '","win_rate":"' + str.tostring(win_rate, "#.##") + '","equity":"' + str.tostring(strategy.equity, "#.##") + '","tv_ticker":"' + syminfo.ticker + '","account_tag":"' + account_tag + '","time":"{{time}}","webhook_secret":"' + webhook_secret + '"}'
+
+// =========================================================================
+// 7) ENTRY LOGIC
+// =========================================================================
+var bool traded_today = false
+
+if new_asian_box
+    traded_today := false
+    strategy.cancel_all()
+
+can_place = in_trade_zone and not traded_today and strategy.position_size == 0 and day_ok and box_ok and not na(asian_high) and not na(asian_low) and sl_dist > 0
+
+if can_place
+    if (trade_dir == "Both" or trade_dir == "Long Only") and trend_long_ok and long_qty > 0
+        strategy.entry("Long Breakout", strategy.long, stop=asian_high, qty=long_qty, alert_message=f_alert("OPEN_LONG", "Long Breakout", "buy", asian_high, long_qty))
+
+    if (trade_dir == "Both" or trade_dir == "Short Only") and trend_short_ok and short_qty > 0
+        strategy.entry("Short Breakout", strategy.short, stop=asian_low, qty=short_qty, alert_message=f_alert("OPEN_SHORT", "Short Breakout", "sell", asian_low, short_qty))
+
+if strategy.position_size != 0
+    traded_today := true
+    strategy.cancel_all()
+
+// =========================================================================
+// 8) EXIT LOGIC: INITIAL SL + ACTIVATED TRAILING
+// =========================================================================
+var float peak_high = na
+var float trough_low = na
+
+new_long  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+new_short = strategy.position_size < 0 and strategy.position_size[1] >= 0
+flat_now  = strategy.position_size == 0
+
+if new_long
+    peak_high := high
+    trough_low := na
+if new_short
+    trough_low := low
+    peak_high := na
+if flat_now
+    peak_high := na
+    trough_low := na
+
+if strategy.position_size > 0
+    peak_high := math.max(nz(peak_high, high), high)
+    entry = strategy.position_avg_price
+    init_sl = entry - sl_dist
+    move_r = sl_dist > 0 ? (peak_high - entry) / sl_dist : 0.0
+    trail_sl = peak_high - trail_gap_r * sl_dist
+    stop_long = move_r >= trail_activate_r ? math.max(init_sl, trail_sl) : init_sl
+
+    strategy.exit("Exit Long", "Long Breakout", stop=stop_long, alert_message=f_alert("CLOSE_LONG", "Exit Long", "sell", stop_long, math.abs(strategy.position_size)))
+
+if strategy.position_size < 0
+    trough_low := math.min(nz(trough_low, low), low)
+    entry = strategy.position_avg_price
+    init_sl = entry + sl_dist
+    move_r = sl_dist > 0 ? (entry - trough_low) / sl_dist : 0.0
+    trail_sl = trough_low + trail_gap_r * sl_dist
+    stop_short = move_r >= trail_activate_r ? math.min(init_sl, trail_sl) : init_sl
+
+    strategy.exit("Exit Short", "Short Breakout", stop=stop_short, alert_message=f_alert("CLOSE_SHORT", "Exit Short", "buy", stop_short, math.abs(strategy.position_size)))
+
+// =========================================================================
+// 9) EOD FORCE CLOSE
+// =========================================================================
+if force_eod_close and trade_zone_end and strategy.position_size != 0
+    strategy.close_all(comment="EOD Close", alert_message=f_alert("CLOSE_EOD", "EOD Close", strategy.position_size > 0 ? "sell" : "buy", close, math.abs(strategy.position_size)))
+
+// =========================================================================
+// 10) VISUALIZATION
+// =========================================================================
+bgcolor(in_asian_box ? color.new(color.gray, 90) : na, title="Asian Box Background")
+plot(in_trade_zone and (trade_dir == "Both" or trade_dir == "Long Only") ? asian_high : na, "Asian High", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(in_trade_zone and (trade_dir == "Both" or trade_dir == "Short Only") ? asian_low : na, "Asian Low", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)

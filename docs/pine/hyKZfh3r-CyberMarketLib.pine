@@ -1,0 +1,300 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 1
+// @tw_status twPublishDenied (moderation review required)
+// Last published: cybermediaboy/MarketLib/1
+// @description CyberMarketLib — market structure & context. Isolated layer (L2*).
+//              Does NOT participate in SetupsLib import chain. Ready for future
+//              merge with SmartMoneyLib.
+//
+//              Contents:
+//                • Session / timeframe / symbol context helpers
+//                • TimeOfDay regime classification
+//                • FractalData (pivot tracking)
+//                • SwingPoint history with BoS / CHoCH detection
+//                • CorrelationLine (pivot-anchored zigzag)
+//                • Volatility regime (ATR percentile, range expansion)
+//
+// Step 9 of restructuring.
+//
+
+//
+library("CyberMarketLib", overlay=true)
+import cybermediaboy/CyberNumLib/1 as N
+import cybermediaboy/CyberSignalLib/1 as S
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 0: ENUMS (frozen — P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @enum Coarse session bucket — exchange-agnostic UTC partitioning
+export enum Session
+    UNKNOWN
+    ASIA           // 00:00–08:00 UTC
+    LONDON         // 08:00–13:00 UTC
+    NY_OVERLAP     // 13:00–17:00 UTC
+    NY_AFTERNOON   // 17:00–21:00 UTC
+    OFF_HOURS      // 21:00–24:00 UTC
+
+// @enum Day-of-week (ISO 8601: Mon=0..Sun=6 in enum order)
+export enum Weekday
+    MON
+    TUE
+    WED
+    THU
+    FRI
+    SAT
+    SUN
+
+// @enum Pivot type
+export enum PivotKind
+    SWING_HIGH
+    SWING_LOW
+
+// @enum Market structure event
+export enum StructureEvent
+    NONE
+    BOS_UP        // break of structure higher high
+    BOS_DOWN      // break of structure lower low
+    CHOCH_UP      // change of character — bullish reversal
+    CHOCH_DOWN    // change of character — bearish reversal
+
+// @enum Volatility regime
+export enum VolRegime
+    LOW
+    NORMAL
+    HIGH
+    EXTREME
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: TIMEFRAME / SYMBOL HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Chart timeframe in seconds
+export f_chart_tf_secs() => timeframe.in_seconds(timeframe.period)
+
+// @function Chart timeframe bucket — short label
+export f_tf_bucket() =>
+    int s = f_chart_tf_secs()
+    s <= 60 ? "1m-or-less" : s <= 300 ? "5m" : s <= 900 ? "15m" : s <= 3600 ? "1h" : s <= 14400 ? "4h" : s <= 86400 ? "1D" : "above-1D"
+
+// @function HTF lookup — returns higher TF string given ratio multiplier
+//           e.g. f_htf_for(4) on 15m chart returns "60"
+export f_htf_for(int multiplier) =>
+    int s = f_chart_tf_secs() * math.max(1, multiplier)
+    int mins = int(s / 60)
+    mins >= 1440 ? str.tostring(int(mins / 1440)) + "D" : mins >= 60 ? str.tostring(int(mins / 60)) + "h" : str.tostring(mins) + "m"
+
+// @function Active symbol's tick size, mintick, type label
+export f_symbol_meta() =>
+    [syminfo.tickerid, syminfo.mintick, syminfo.type]
+
+// @function Test if active chart is crypto (heuristic via syminfo.type)
+export f_is_crypto() => syminfo.type == "crypto"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: TIME OF DAY / SESSION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Current bar UTC hour [0, 23]
+export f_utc_hour() => hour(time, "UTC")
+
+// @function Coarse session classification (UTC-based)
+export f_current_session() =>
+    int h = f_utc_hour()
+    h < 8 ? Session.ASIA : h < 13 ? Session.LONDON : h < 17 ? Session.NY_OVERLAP : h < 21 ? Session.NY_AFTERNOON : Session.OFF_HOURS
+
+// @function ISO weekday enum
+export f_current_weekday() =>
+    int dn = dayofweek(time, "UTC")
+    // dayofweek: 1=Sun..7=Sat — remap to enum order (0=Mon..6=Sun)
+    // dn: 1→6, 2→0, 3→1, 4→2, 5→3, 6→4, 7→5
+    dn == 1 ? Weekday.SUN : dn == 2 ? Weekday.MON : dn == 3 ? Weekday.TUE : dn == 4 ? Weekday.WED : dn == 5 ? Weekday.THU : dn == 6 ? Weekday.FRI : Weekday.SAT
+
+// @function Test if bar falls within explicit hour range (UTC)
+export f_in_hours_utc(int hour_start, int hour_end) =>
+    int h = f_utc_hour()
+    hour_start <= hour_end ? (h >= hour_start and h < hour_end) : (h >= hour_start or h < hour_end)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: FRACTAL / PIVOT DATA
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type FractalData — single confirmed pivot point
+// @field kind     SWING_HIGH or SWING_LOW
+// @field price    pivot price
+// @field bar      bar_index of pivot
+// @field strength left_len + right_len that confirmed it
+export type FractalData
+    PivotKind kind
+    float price
+    int   bar
+    int   strength
+
+// @type SwingHistory — rolling buffer of recent pivots
+// @field highs    last N swing highs (most recent at end)
+// @field lows     last N swing lows
+// @field max_n    cap
+export type SwingHistory
+    array<FractalData> highs
+    array<FractalData> lows
+    int max_n
+
+export f_swing_history_new(int max_n) =>
+    SwingHistory.new(highs = array.new<FractalData>(), lows = array.new<FractalData>(), max_n = math.max(2, max_n))
+
+// @function Detect pivots using ta.pivothigh / ta.pivotlow with given lookback
+//           Push detected pivot into history.
+export method detect_step(SwingHistory sh, simple int left, simple int right) =>
+    float ph = ta.pivothigh(left, right)
+    float pl = ta.pivotlow(left, right)
+    if not na(ph)
+        FractalData fh = FractalData.new(kind = PivotKind.SWING_HIGH, price = ph, bar = bar_index - right, strength = left + right)
+        array.push(sh.highs, fh)
+        while array.size(sh.highs) > sh.max_n
+            array.shift(sh.highs)
+    if not na(pl)
+        FractalData fl = FractalData.new(kind = PivotKind.SWING_LOW, price = pl, bar = bar_index - right, strength = left + right)
+        array.push(sh.lows, fl)
+        while array.size(sh.lows) > sh.max_n
+            array.shift(sh.lows)
+    sh
+
+// @function Last confirmed swing high (na if none)
+export method last_high(SwingHistory sh) =>
+    int n = array.size(sh.highs)
+    n > 0 ? array.get(sh.highs, n - 1) : na
+
+// @function Last confirmed swing low (na if none)
+export method last_low(SwingHistory sh) =>
+    int n = array.size(sh.lows)
+    n > 0 ? array.get(sh.lows, n - 1) : na
+
+// @function Previous (n-2) swing high
+export method prev_high(SwingHistory sh) =>
+    int n = array.size(sh.highs)
+    n > 1 ? array.get(sh.highs, n - 2) : na
+
+export method prev_low(SwingHistory sh) =>
+    int n = array.size(sh.lows)
+    n > 1 ? array.get(sh.lows, n - 2) : na
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: STRUCTURE DETECTION (BoS / CHoCH stubs)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type StructureContext — minimal market structure tracker
+// @field last_event       most recent event
+// @field last_event_bar   bar of last event
+// @field trend_dir        +1 bullish, -1 bearish, 0 unknown
+export type StructureContext
+    StructureEvent last_event
+    int  last_event_bar
+    int  trend_dir
+
+export f_structure_new() =>
+    StructureContext.new(last_event = StructureEvent.NONE,
+                          last_event_bar = 0, trend_dir = 0)
+
+// @function Evaluate structure from current price action vs SwingHistory.
+//           BoS_UP: close > prev swing high in established uptrend
+//           BoS_DOWN: close < prev swing low in downtrend
+//           CHoCH_UP: close > prev swing high in established downtrend
+//           CHoCH_DOWN: close < prev swing low in uptrend
+//
+//           NOTE: Stub implementation. Future SmartMoneyLib merge will refine.
+export method evaluate(StructureContext sc, SwingHistory sh, float current_close) =>
+    FractalData lh = sh.last_high()
+    FractalData ll = sh.last_low()
+    StructureEvent ev = StructureEvent.NONE
+    if not na(lh) and current_close > lh.price
+        ev := sc.trend_dir < 0 ? StructureEvent.CHOCH_UP : StructureEvent.BOS_UP
+        sc.trend_dir := 1
+    else if not na(ll) and current_close < ll.price
+        ev := sc.trend_dir > 0 ? StructureEvent.CHOCH_DOWN : StructureEvent.BOS_DOWN
+        sc.trend_dir := -1
+    if ev != StructureEvent.NONE
+        sc.last_event := ev
+        sc.last_event_bar := bar_index
+    sc
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: CORRELATION ZIGZAG LINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @type CorrelationLine — pivot-anchored zigzag visualization
+// @field anchor_bar / anchor_price   start point
+// @field current_line                 line ref (rebuild on new pivot)
+// @field is_up                        last leg direction
+export type CorrelationLine
+    int   anchor_bar
+    float anchor_price
+    line  current_line
+    bool  is_up
+
+export f_corrline_new() =>
+    CorrelationLine.new(anchor_bar = na, anchor_price = na,
+                         current_line = na, is_up = true)
+
+// @function Update zigzag from latest swing pivot
+export method update(CorrelationLine cl, FractalData fd, color line_color) =>
+    if na(fd)
+        cl
+    else
+        if not na(cl.current_line)
+            line.delete(cl.current_line)
+        if not na(cl.anchor_bar)
+            cl.current_line := line.new(x1 = cl.anchor_bar, y1 = cl.anchor_price, x2 = fd.bar, y2 = fd.price, xloc = xloc.bar_index, color = line_color, width = 1)
+        cl.anchor_bar := fd.bar
+        cl.anchor_price := fd.price
+        cl.is_up := fd.kind == PivotKind.SWING_HIGH
+        cl
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: VOLATILITY REGIME
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function ATR percentile rank — vol regime classifier
+//           Returns [atr_value, percentile_rank, VolRegime]
+export f_vol_regime(simple int atr_len, simple int rank_len, float low_p, float high_p, float extreme_p) =>
+    float a = ta.atr(atr_len)
+    float pr = ta.percentrank(a, rank_len)
+    VolRegime reg = VolRegime.NORMAL
+    if pr < low_p
+        reg := VolRegime.LOW
+    else if pr > extreme_p
+        reg := VolRegime.EXTREME
+    else if pr > high_p
+        reg := VolRegime.HIGH
+    [a, pr, reg]
+
+// @function Range expansion ratio — current bar range vs n-bar mean
+export f_range_expansion(int len) =>
+    float cur = high - low
+    float avg = ta.sma(high - low, len)
+    avg > 0.0 ? cur / avg : 1.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: ENUM ↔ STRING BRIDGES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export f_session_str(Session s) =>
+    s == Session.ASIA ? "asia" : s == Session.LONDON ? "london" : s == Session.NY_OVERLAP ? "ny-overlap" : s == Session.NY_AFTERNOON ? "ny-afternoon" : s == Session.OFF_HOURS ? "off-hours" : "unknown"
+
+export f_weekday_str(Weekday w) =>
+    w == Weekday.MON ? "Mon" : w == Weekday.TUE ? "Tue" : w == Weekday.WED ? "Wed" : w == Weekday.THU ? "Thu" : w == Weekday.FRI ? "Fri" : w == Weekday.SAT ? "Sat" : "Sun"
+
+export f_event_str(StructureEvent e) =>
+    e == StructureEvent.BOS_UP ? "bos-up" : e == StructureEvent.BOS_DOWN ? "bos-down" : e == StructureEvent.CHOCH_UP ? "choch-up" : e == StructureEvent.CHOCH_DOWN ? "choch-down" : "none"
+
+export f_volregime_str(VolRegime v) =>
+    v == VolRegime.LOW ? "low" : v == VolRegime.NORMAL ? "normal" : v == VolRegime.HIGH ? "high" : v == VolRegime.EXTREME ? "extreme" : "unknown"
+
+export f_pivot_str(PivotKind k) =>
+    k == PivotKind.SWING_HIGH ? "swing-high" : "swing-low"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

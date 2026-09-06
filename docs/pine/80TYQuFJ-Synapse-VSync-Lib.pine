@@ -1,0 +1,160 @@
+// © 2026 Synapse Labs
+
+//@version=6
+// @library Synapse_VSync_Lib
+// @description Core Volume Synchronization (V-Sync) algorithms for the Synapse Ecosystem.
+library("Synapse_VSync_Lib", overlay = true)
+
+// --- SYNERGY TYPES ---
+export type VSyncResult
+    float bias
+    string mode
+    int lookback
+
+// --- HELPER FUNCTIONS ---
+
+// @function f_get_tick_source
+// Auto-detects the appropriate TICK source based on the current instrument.
+export f_get_tick_source() =>
+    string ticker = syminfo.ticker
+    str.contains(ticker, "NQ") or str.contains(ticker, "NAS") ? "TICKQ" : "TICK"
+
+// @function f_calc_tick_extreme
+// Calculates the High-Fidelity extreme value from a TICK bar.
+export f_calc_tick_extreme(float h, float l) =>
+    math.abs(h) > math.abs(l) ? h : l
+
+// --- CORE FUNCTIONS ---
+
+// @function f_temporal_bias
+// Calculates a volume-weighted bias using exponential time-decay.
+export f_temporal_bias(int lookback) =>
+    float up_v = 0.0, float dn_v = 0.0
+    for i = 1 to lookback
+        float v = nz(volume[i])
+        float weight = math.exp(-i/lookback)
+        if close[i] > open[i]
+            up_v += v * weight
+        else
+            dn_v += v * weight
+    up_v / math.max(1, up_v + dn_v)
+
+// @function f_footprint_bias
+// Calculates bias based on Buy/Sell volume delta.
+export f_footprint_bias(float buy_v, float sell_v, int smooth_p = 1) =>
+    float delta = buy_v - sell_v
+    float total = buy_v + sell_v
+    float raw_bias = total > 0 ? (delta / total + 1.0) / 2.0 : 0.5
+    ta.ema(raw_bias, smooth_p)
+
+// @function f_thermal_heatmap
+// Range-based Heatmap binning for depth analysis.
+export f_thermal_heatmap(float cur_price, int lookback, int bins = 30) =>
+    float phiL = ta.lowest(lookback)
+    float phiH = ta.highest(lookback)
+    float phiStep = (phiH - phiL) / bins
+    float buyLiq = 0.0, float sellLiq = 0.0
+    
+    if phiStep > 0
+        for i = 0 to bins - 1
+            float bin_mid = phiL + phiStep * i + phiStep / 2.0
+            for k = 0 to (lookback - 1)
+                if math.abs(close[k] - bin_mid) < phiStep
+                    if bin_mid < cur_price
+                        buyLiq += volume[k] 
+                    else
+                        sellLiq += volume[k]
+    
+    float totalLiq = buyLiq + sellLiq
+    totalLiq > 0 ? buyLiq / totalLiq : 0.5
+
+// @function f_normalize_tick
+// Normalizes TICK values based on commitment tiers.
+export f_normalize_tick(float val, int tier = 1000) =>
+    float n_val = nz(val, 0)
+    math.max(0, math.min(1, (n_val + tier) / (2 * tier)))
+
+// @function f_vsync_stack
+// Multi-source confluence aggregator. Returns [Vol Consensus, TICK Bias].
+// @param base_v Base volume bias.
+// @param foot_v Footprint delta bias.
+// @param heat_v Thermal heatmap bias.
+// @param tick_h High of the TICK ticker.
+// @param tick_l Low of the TICK ticker.
+// @param tick_c Close of the TICK ticker.
+// @param tick_tier Normalization threshold.
+export f_vsync_stack(float base_v, float foot_v, float heat_v, float tick_h, float tick_l, float tick_c, int tick_tier=1000, float w_base=0.4, float w_foot=0.3, float w_heat=0.3) =>
+    float tick_ext = nz(f_calc_tick_extreme(tick_h, tick_l), tick_c)
+    float vol_consensus = (base_v * w_base) + (foot_v * w_foot) + (heat_v * w_heat)
+    float t_bias = f_normalize_tick(tick_ext, tick_tier)
+    [vol_consensus, t_bias]
+
+// --- MATHEMATICAL KERNELS & FILTERS ---
+
+// @function f_kernel_smooth
+// Gaussian kernel smoothing for non-linear signal processing.
+export f_kernel_smooth(float src, float h, int lookback, bool useAll=false, int maxBars=500) =>
+    float sumW = 0.0
+    float sumSW = 0.0
+    int dynamicLb = useAll ? math.min(bar_index, maxBars) : lookback
+    int lb = math.max(1, dynamicLb)
+    for i = 0 to lb
+        float w = math.exp(-(math.pow(i, 2)) / (2.0 * math.pow(h, 2)))
+        float v = nz(src[i], src)
+        sumW += w
+        sumSW += v * w
+    sumW > 0 ? (sumSW / sumW) : src
+
+// @function f_kalman_next
+// State-space filter for dynamic regime tracking.
+// @returns [next_state, next_cov]
+export f_kalman_next(float src, float q, float r, float prevState, float prevCov) =>
+    float statePred = na(prevState) ? src : prevState
+    float covPred = nz(prevCov, 1.0) + q
+    float gain = covPred / (covPred + r)
+    float nextState = statePred + gain * (src - statePred)
+    float nextCov = (1.0 - gain) * covPred
+    [nextState, nextCov]
+
+// --- INTERACTION & DATA MODULES ---
+
+// @function f_delta_aggregator
+// Tracks and decays session delta sum for a specific level.
+export f_delta_aggregator(float current_sum, float new_delta, float decay = 0.95) =>
+    (current_sum * decay) + new_delta
+
+// @function f_interpret_bias
+// Categorizes interaction as Aggressive (A) or Defensive (D).
+// @param is_support True if price is above the level.
+// @param delta Average or session delta at the level.
+// @returns [bias_val, tag] where bias_val is direction and tag is "A" or "D".
+export f_interpret_bias(bool is_support, float delta) =>
+    int  bias_dir = is_support ? (delta >= 0 ? 1 : 1) : (delta <= 0 ? -1 : -1)
+    string tag = ""
+    if is_support
+        tag := delta > 0 ? "A" : "D"
+    else
+        tag := delta < 0 ? "A" : "D"
+    [bias_dir, tag]
+
+// @function f_vsync_tooltip
+// Generates a standardized forensic tooltip for level interactions.
+export f_vsync_tooltip(string name, string context, float v_stack, float t_bias, float lvl_delta) =>
+    str.format("LVL: {0}\nContext: {1}\nV-Stack: {2}%\nTICK Bias: {3}%\nCluster Avg: {4}", name, context, str.tostring(v_stack * 100, "#.#"), str.tostring(t_bias * 100, "#.#"), str.tostring(lvl_delta, format.volume))
+
+// @function f_audit_interaction
+// Audits price interaction with any arbitrary level or plot (MA, VWAP, etc.).
+// @param price Current price to check against (usually high or low).
+// @param level The price level or plot value to audit.
+// @param prox Ticks proximity for a "touch".
+// @returns [is_touch, is_break_up, is_break_dn]
+export f_audit_interaction(float price, float level, int prox_ticks = 2) =>
+    float p_val = prox_ticks * syminfo.mintick
+    bool is_touch = math.abs(price - level) <= p_val
+    bool is_break_up = ta.crossover(close, level)
+    bool is_break_dn = ta.crossunder(close, level)
+    [is_touch, is_break_up, is_break_dn]
+
+// --- LICENSE & ATTRIBUTION ---
+// This library is Open Source under the MIT License.
+// Copyright (c) 2026 Synapse Labs

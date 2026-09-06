@@ -1,0 +1,243 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Bradseaton05
+
+//@version=6
+strategy("PM Range – Breakout Retest + Fade", shorttitle="PM BR+Fade", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+inp_showpm      = input.bool(true,  "Show PM Lines")
+inp_showmid     = input.bool(true,  "Show Midline")
+inp_pmhcol      = input.color(color.new(#00E5FF, 0),  "PM High Line")
+inp_pmlcol      = input.color(color.new(#FF4D6D, 0),  "PM Low Line")
+inp_midcol      = input.color(color.new(#FFD600, 50), "Midline")
+inp_lw          = input.int(2, "Line Width", minval=1, maxval=4)
+
+inp_use_br      = input.bool(true,  "Enable Breakout Retest Setups", group="Breakout Retest")
+inp_tol         = input.float(3.0,  "BR Retest Tolerance (ticks)",   minval=0.1, step=0.1, group="Breakout Retest")
+inp_br_sl       = input.float(10.0, "BR Stop Loss (ticks)",          minval=1,             group="Breakout Retest")
+inp_br_rr       = input.float(2.0,  "BR Risk Reward",                minval=0.1, step=0.1, group="Breakout Retest")
+
+inp_use_fade    = input.bool(true,  "Enable Fade Setups",            group="Fade")
+inp_fade_brk    = input.float(1.0,  "Fade Breakout Min (points)",    minval=0.1, step=0.1, group="Fade")
+inp_fade_ret    = input.float(2.0,  "Fade Close Back Min (points)",  minval=0.1, step=0.1, group="Fade")
+inp_fade_sl     = input.float(10.0, "Fade Stop Loss (ticks)",        minval=1,             group="Fade")
+inp_fade_rr     = input.float(2.0,  "Fade Risk Reward",              minval=0.1, step=0.1, group="Fade")
+
+inp_winhrs      = input.float(1.0,  "Setup Window (hours after open)", minval=0.25, maxval=6.0, step=0.25, group="Session")
+
+// ─────────────────────────────────────────────
+// SESSION DETECTION
+// ─────────────────────────────────────────────
+strat_tz        = "Europe/London"
+strat_premarket = not na(time("1", "2115-1430", strat_tz))
+strat_mktopen   = not strat_premarket and strat_premarket[1]
+strat_overnight = strat_premarket and not strat_premarket[1]
+
+var int strat_opentime = 0
+if strat_mktopen
+    strat_opentime := int(time)
+
+float strat_winms = inp_winhrs * 60.0 * 60.0 * 1000.0
+bool  strat_inwin = not strat_premarket and strat_opentime > 0 and
+     (time - strat_opentime) <= int(strat_winms)
+
+// ─────────────────────────────────────────────
+// PRE-MARKET HIGH / LOW
+// ─────────────────────────────────────────────
+var float raw_pmh = na
+var float raw_pml = na
+
+if strat_overnight
+    raw_pmh := high
+    raw_pml := low
+else if strat_premarket
+    raw_pmh := math.max(nz(raw_pmh, high), high)
+    raw_pml := math.min(nz(raw_pml, low),  low)
+
+// ─────────────────────────────────────────────
+// LOCK LEVELS + DRAW LINES
+// ─────────────────────────────────────────────
+var float lck_pmh = na
+var float lck_pml = na
+var line  ln_pmh  = na
+var line  ln_pml  = na
+var line  ln_pmm  = na
+
+if strat_mktopen and not na(raw_pmh)
+    lck_pmh := raw_pmh
+    lck_pml := raw_pml
+    line.delete(ln_pmh)
+    line.delete(ln_pml)
+    line.delete(ln_pmm)
+    if inp_showpm
+        ln_pmh := line.new(bar_index, lck_pmh, bar_index + 1, lck_pmh,
+             color=inp_pmhcol, width=inp_lw, style=line.style_solid, extend=extend.right)
+        ln_pml := line.new(bar_index, lck_pml, bar_index + 1, lck_pml,
+             color=inp_pmlcol, width=inp_lw, style=line.style_solid, extend=extend.right)
+    if inp_showmid
+        ln_pmm := line.new(bar_index, (lck_pmh + lck_pml) / 2.0,
+             bar_index + 1, (lck_pmh + lck_pml) / 2.0,
+             color=inp_midcol, width=1, style=line.style_dashed, extend=extend.right)
+
+// ─────────────────────────────────────────────
+// STATE FLAGS
+// ─────────────────────────────────────────────
+var int  br_lstep  = 0
+var int  br_sstep  = 0
+var int  br_lbar   = -1
+var int  br_sbar   = -1
+
+var int  fd_lstep  = 0
+var int  fd_sstep  = 0
+var int  fd_lbar   = -1
+var int  fd_sbar   = -1
+
+var bool strat_done = false
+
+if strat_overnight
+    br_lstep   := 0
+    br_sstep   := 0
+    br_lbar    := -1
+    br_sbar    := -1
+    fd_lstep   := 0
+    fd_sstep   := 0
+    fd_lbar    := -1
+    fd_sbar    := -1
+    strat_done := false
+
+// ─────────────────────────────────────────────
+// DISTANCES
+// ─────────────────────────────────────────────
+float dist_tol     = inp_tol     * syminfo.mintick
+float dist_br_sl   = inp_br_sl   * syminfo.mintick
+float dist_br_tp   = inp_br_sl   * inp_br_rr   * syminfo.mintick
+float dist_fade_sl = inp_fade_sl * syminfo.mintick
+float dist_fade_tp = inp_fade_sl * inp_fade_rr * syminfo.mintick
+
+bool strat_active = not strat_premarket and not na(lck_pmh)
+
+if strat_active and not strat_done and strat_inwin
+
+    // ════════════════════════════════
+    // BR LONG
+    // ════════════════════════════════
+    if inp_use_br
+
+        if br_lstep == 0
+            if close > lck_pmh
+                br_lstep := 1
+                br_lbar  := bar_index
+
+        if br_lstep == 1 and bar_index > br_lbar
+            if low <= lck_pmh + dist_tol
+                br_lstep := 2
+
+        if br_lstep == 2 and bar_index > br_lbar and strategy.position_size == 0
+            bool br_lentry = close > lck_pmh or (close[1] < lck_pmh and close > lck_pmh)
+            if br_lentry
+                strategy.entry("BR Long", strategy.long, comment="BR Long")
+                strategy.exit("X BR Long", "BR Long",
+                     stop  = close - dist_br_sl,
+                     limit = close + dist_br_tp)
+                br_lstep   := 0
+                strat_done := true
+
+        // ════════════════════════════════
+        // BR SHORT
+        // ════════════════════════════════
+        if br_sstep == 0 and not strat_done
+            if close < lck_pml
+                br_sstep := 1
+                br_sbar  := bar_index
+
+        if br_sstep == 1 and bar_index > br_sbar and not strat_done
+            if high >= lck_pml - dist_tol
+                br_sstep := 2
+
+        if br_sstep == 2 and bar_index > br_sbar and not strat_done and strategy.position_size == 0
+            bool br_sentry = close < lck_pml or (close[1] > lck_pml and close < lck_pml)
+            if br_sentry
+                strategy.entry("BR Short", strategy.short, comment="BR Short")
+                strategy.exit("X BR Short", "BR Short",
+                     stop  = close + dist_br_sl,
+                     limit = close - dist_br_tp)
+                br_sstep   := 0
+                strat_done := true
+
+    // ════════════════════════════════
+    // FADE SHORT — wick above PM high, close back inside
+    // ════════════════════════════════
+    if inp_use_fade
+
+        if fd_lstep == 0 and not strat_done
+            bool fd_swept_high = high >= lck_pmh + inp_fade_brk and close < lck_pmh - inp_fade_ret
+            if fd_swept_high
+                fd_lstep := 1
+                fd_lbar  := bar_index
+
+        if fd_lstep == 1 and bar_index >= fd_lbar and not strat_done and strategy.position_size == 0
+            strategy.entry("Fade Short", strategy.short, comment="Fade Short")
+            strategy.exit("X Fade Short", "Fade Short",
+                 stop  = close + dist_fade_sl,
+                 limit = close - dist_fade_tp)
+            fd_lstep   := 0
+            strat_done := true
+
+        // ════════════════════════════════
+        // FADE LONG — wick below PM low, close back inside
+        // ════════════════════════════════
+        if fd_sstep == 0 and not strat_done
+            bool fd_swept_low = low <= lck_pml - inp_fade_brk and close > lck_pml + inp_fade_ret
+            if fd_swept_low
+                fd_sstep := 1
+                fd_sbar  := bar_index
+
+        if fd_sstep == 1 and bar_index >= fd_sbar and not strat_done and strategy.position_size == 0
+            strategy.entry("Fade Long", strategy.long, comment="Fade Long")
+            strategy.exit("X Fade Long", "Fade Long",
+                 stop  = close - dist_fade_sl,
+                 limit = close + dist_fade_tp)
+            fd_sstep   := 0
+            strat_done := true
+
+// ─────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────
+bgcolor(strat_premarket ? color.new(color.blue,   92) : na, title="Pre-Market Window")
+bgcolor(strat_inwin     ? color.new(color.yellow, 97) : na, title="Setup Window")
+
+plot(strat_premarket ? raw_pmh : na, "Live PM High", color.new(inp_pmhcol, 70), linewidth=1, style=plot.style_linebr)
+plot(strat_premarket ? raw_pml : na, "Live PM Low",  color.new(inp_pmlcol, 70), linewidth=1, style=plot.style_linebr)
+
+plotshape(strat_active and strat_inwin and inp_use_br and br_lstep == 1 and br_lbar == bar_index,
+     title="BR Bull Break", location=location.abovebar,
+     style=shape.circle, color=color.new(color.lime, 40), size=size.tiny)
+plotshape(strat_active and strat_inwin and inp_use_br and br_sstep == 1 and br_sbar == bar_index,
+     title="BR Bear Break", location=location.belowbar,
+     style=shape.circle, color=color.new(color.red, 40), size=size.tiny)
+plotshape(strat_active and strat_inwin and inp_use_br and br_lstep == 2 and br_lstep[1] == 1,
+     title="BR Bull Retest", location=location.belowbar,
+     style=shape.diamond, color=color.new(color.lime, 20), size=size.tiny)
+plotshape(strat_active and strat_inwin and inp_use_br and br_sstep == 2 and br_sstep[1] == 1,
+     title="BR Bear Retest", location=location.abovebar,
+     style=shape.diamond, color=color.new(color.red, 20), size=size.tiny)
+
+plotshape(strat_active and strat_inwin and inp_use_fade and not strat_done and
+     high >= lck_pmh + inp_fade_brk and close < lck_pmh - inp_fade_ret and strategy.position_size == 0,
+     title="Fade Short Signal", location=location.abovebar,
+     style=shape.triangledown, color=color.orange, size=size.normal)
+plotshape(strat_active and strat_inwin and inp_use_fade and not strat_done and
+     low <= lck_pml - inp_fade_brk and close > lck_pml + inp_fade_ret and strategy.position_size == 0,
+     title="Fade Long Signal", location=location.belowbar,
+     style=shape.triangleup, color=color.orange, size=size.normal)
+
+bool sig_brlong  = strat_active and strat_inwin and inp_use_br and not strat_done and br_lstep == 2 and bar_index > br_lbar and (close > lck_pmh or (close[1] < lck_pmh and close > lck_pmh)) and strategy.position_size == 0
+bool sig_brshort = strat_active and strat_inwin and inp_use_br and not strat_done and br_sstep == 2 and bar_index > br_sbar and (close < lck_pml or (close[1] > lck_pml and close < lck_pml)) and strategy.position_size == 0
+
+plotshape(sig_brlong,  title="BR Long",  location=location.belowbar, style=shape.triangleup,   color=color.lime, size=size.normal)
+plotshape(sig_brshort, title="BR Short", location=location.abovebar, style=shape.triangledown, color=color.red,  size=size.normal)
+

@@ -1,0 +1,1608 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AustrianTradingMachine
+
+// ── HEADER ───────────────────────────────────────────────────────────────────
+// @version=6
+//
+// @description   This library provides a rigorous framework for quantitative analysis,
+//                estimating statistical properties of price movements *within* a single
+//                OHLC bar without requiring tick data. It implements a suite of
+//                estimators based on statistical and econometric models to analyze
+//                intra-bar volatility, distribution shape, and probability density.
+//
+//                The library distinguishes strictly between **Real-Space** (Price Level)
+//                and **Log-Space** (Return) estimations to ensure mathematical consistency.
+//
+//                **1. Real-Space Structural Models (`RealEst`)**
+//                Models the probability density of the **absolute price level** over the
+//                [High, Low] support. Unlike return-based models, these functions return
+//                values in the instrument's quote currency (e.g., USD, Points).
+//                - **Primary Functions:** `realMu` (Expected Price), `realSigma` (Structural Dispersion).
+//                - **Symmetric Distributions:**
+//                  - `uniform`: Max entropy assumption (no structural information).
+//                  - `triangular`: Peaked at mid-range; good for narrow spread consolidation.
+//                  - `arcsine`: U-shaped (Brownian Bridge); models bars where price lingers at high/low.
+//                  - `betaSym`: Beta(2,2); a smooth, parabolic bell curve (Standard Use Case).
+//                  - `t4Sym`: Student-t(df=4); heavy-tailed model for volatile shuffling.
+//                - **Skewed Distributions:**
+//                  - betaSkew: Beta distribution adapted to the Open/Close bias. Uses exact
+//                    analytical moments and a high-precision Camp-Paulson approximation
+//                    for the CDF, eliminating numerical loops. Ideal for standard trend bars.
+//                  - `t4Skew`: Truncated Student-t(df=4). Uses **Exact Analytical Antiderivatives**
+//                    to calculate the true Expected Value (Mean) and Variance, strictly distinguishing
+//                    them from the Mode (Peak). This accurately models "Fat Tail" risks in trends
+//                    without the approximation errors of numerical loops.
+//                - **Dual-Domain Analysis**
+//                  - Linear Domain: Standard behavior. Models absolute prices (e.g., for Value Area).
+//                  - Logarithmic Domain:  Models Log-Prices ($\ln P$). This effectively applies the
+//                     structural distribution (e.g., Beta, Student-t) to the log-returns. This allows for
+//                     **exact analytical calculation** of Return-Skewness and Return-Kurtosis without
+//                     the approximation errors of moment-matching methods.
+//
+//                **2. Econometric Log-Return Estimators (`LogEst`)**
+//                Standard econometric estimators for calculating the volatility (`logSigma`)
+//                and drift (`logMu`) of logarithmic returns. These are unit-less measures.
+//                - **Parkinson (1980):** High-Low range estimator. Efficient but assumes zero drift.
+//                - **Garman-Klass (1980):** OHLC estimator. More efficient, assumes zero drift.
+//                - **Rogers-Satchell (1991):** OHLC estimator robust to non-zero drift (trend).
+//                  Used internally for precise magnitude estimation in covariance calculations.
+//
+//                **3. Advanced Moment Analysis (Skewness, Kurtosis & Partial Expectation)**
+//                Tools to quantify the shape of the intra-bar distribution beyond volatility.
+//                - `realMoment(n)`: Generic n-th Central Moment. Uses a **Hybrid Architecture**:
+//                   It applies exact analytical formulas for all distributions up to Order 4.
+//                   For Hyper-Moments (Order > 4) on complex models, it switches to a dynamic
+//                   high-precision integration engine.
+//                - `realSkew`: Measures asymmetry. Positive = Tail towards Highs.
+//                - `realKurt`: Measures "Tail Heaviness" (Outlier Risk). High Kurtosis
+//                   indicates significant price action occurring at the bar's extremes.
+//                - `realPartialMuRel`: Lower Partial Expectation ($\int x \cdot f(x)$). Uses exact
+//                   **Mass/Shape Decomposition** to calculate the mean of a partial segment.
+//                   Essential for VWAP components, Order Flow splitting, and Expected Shortfall.
+//
+//                **4. Distribution Analysis (PDF, CDF, Quantile)**
+//                - `realPdf`: Probability Density Function at a specific price level.
+//                - realCdf: Cumulative Distribution Function. Uses analytical solutions for
+//                  all standard models (including Beta & T4).
+//                - `realQuantile`: Inverse CDF. Uses the **Bisection Method** (Binary Search)
+//                  to numerically find the exact price level for a given probability.
+//                  Crucial for intra-bar "Value at Risk" (VaR) calculations.
+//
+//                **5. Covariance & Correlation (Hybrid Copula)**
+//                - `realCoVar`: Solves the "Directionality Problem" of range-based data by combining:
+//                  1. **Direction:** From Log-Returns (Open/Close) to capture true trend sign.
+//                  2. **Magnitude:** From Rogers-Satchell Volatility (High/Low) to capture true energy.
+//                  Formula: $Cov(A,B) \approx \rho_{LogRet} \cdot \sigma_{RS}^A \cdot \sigma_{RS}^B$.
+//
+//                **6. Model Assumptions & Constraints**
+//                - **Stationarity:** Probability distributions are assumed static over the bar duration.
+//                - **Truncation:** Infinite support models (Student-t) are mathematically truncated
+//                  to [High, Low] and renormalized to ensure Probability Mass = 1.0.
+//
+//                **7. Mathematical Core**
+//                The library prioritizes accuracy and stability over approximation.
+//                - Beta models use the Lanczos approximation for Gamma functions.
+//                - `T4_EDGE_LIMIT` (1e-4) guards against singularities in Student-t density peaks.
+//                - Global `EPSILON` (1e-9) prevents division-by-zero at price boundaries.
+//
+//                ---
+//
+//                **DISCLAIMER**
+//
+//                This library is provided "AS IS" and for informational and
+//                educational purposes only. It does not constitute financial,
+//                investment, or trading advice.
+//
+//                The author assumes no liability for any errors, inaccuracies,
+//                or omissions in the code. Using this library to build
+//                trading indicators or strategies is entirely at your own risk.
+//
+//                As a developer using this library, you are solely responsible
+//                for the rigorous testing, validation, and performance of any
+//                scripts you create based on these functions. The author shall
+//                not be held liable for any financial losses incurred directly
+//                or indirectly from the use of this library or any scripts
+//                derived from it.
+library(
+  title   = "LibBrSt")
+
+// ── LOG ──────────────────────────────────────────────────────────────────────
+// 2026-01-25 0.2.0
+// (Mod) API: Renamed `PriceEst` to `RealEst` and all `price*` functions to `real*`
+//       to strictly distinguish Real-Space from Log-Space models.
+// (Mod) API: Renamed `...Mean` to `...Mu`, `...StdDev` to `...Sigma` to align
+//       with standard mathematical notation.
+// (Add) Functionality: Added `realSkew`, `realKurt`, and `realMoment` (n-th)
+//       using a hybrid analytical/integration engine.
+// (Add) Functionality: Added `realQuantile` using the Bisection Method for numerical
+//       CDF inversion.
+// (Add) Functionality: Added `realCoVar` (Hybrid Copula) and `logCoVar`.
+//       Uses a robust Hybrid Estimator (Direction from Log-Returns, Magnitude from RS)
+//       to correctly handle directional correlation in range-based data.
+// (Ref) Math: Replaced numerical loops with Exact Analytical Antiderivatives for
+//       Mean, Variance, Skewness, and Kurtosis calculations.
+// (Opt) Math: Refactored Student-t scaling factors to use compile-time constant chaining
+//       instead of hardcoded literals. Improves readability while maintaining zero-cost runtime.
+// (Ref) Core: Implemented `T4_EDGE_LIMIT` (1e-4) and `EPSILON` (1e-9) guardrails.
+// (Opt) Performance: Switched from Simpson's Rule to Composite Gauss-Legendre Quadrature 
+//       (5-point) for high-precision CDF calculation.
+// (Mod) API: Unified Real-Space and Log-Space analysis. Added `logSpace` parameter to
+//       all `real*` functions (PDF, CDF, Quantile, Moments).
+// (Ref) Core: Centralized coordinate transformation in `_calcOhlcSpace` to ensure
+//       consistent epsilon-handling and reduced code duplication.
+// (Ref) Math: Replaced numerical integration loop for `betaSkew` CDF with the 
+//       Camp-Paulson analytical approximation. This eliminates sampling errors ("needle peaks")
+//       in extreme trends and significantly improves performance.
+// (Add) Math: Implemented `_normCdf` using the Abramowitz & Stegun approximation 
+//       (Error < 1.5e-7) to support analytical Beta calculations.
+// (Add) Math: Implemented `realPartialMuRel` using exact analytical antiderivatives
+//       for all distributions.
+//
+// 2025-11-01 0.1.0
+// (New) Initial release of library
+
+// ── CONTROL ──────────────────────────────────────────────────────────────────
+const string NAME    = "LibBrSt"
+const string VERSION = "0.2.0"
+const string STATUS  = "rel"        // "rel", "dev", "dep"
+
+if barstate.isfirst
+    switch STATUS
+        "rel" => log.info("Library '" + NAME + " " + VERSION + "' released")
+        "dev" => log.warning("Library '" + NAME + " " + VERSION + "' in development")
+        "dep" => log.error("Library '" + NAME + " " + VERSION + "' deprecated!")
+        => runtime.error("Undefined status of library " + NAME + " " + VERSION)
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const float EPSILON = 1e-9
+
+// @variable Controls the shape concentration of the Beta distribution. 
+//           Higher values = narrower bell curve. Default 4.0 implies moderate tails.
+//           DONT CHANGE! Analytical exact solutions require value
+const float BETA_SKEW_CONCENTRATION = 4.0
+
+// @variable Scaling factor to map the Student-t(df=4) shape onto the normalized [0, 1] interval.
+//           Derived from sqrt(50) to approximate the relevant probability mass within the bar.
+//           DONT CHANGE! Analytical exact solutions require value
+const float T4_SHAPE_FACTOR = 7.0710678
+
+// @variable Threshold to clamp the Skew-Mode of the Student-t distribution away from
+//           absolute bounds [0, 1]. Unlike generic EPSILON (1e-9), this larger margin (1e-4)
+//           is mathematically required to prevent density singularities (infinite spikes)
+//           and floating-point overflows during the calculation of higher-order moments (z^4).
+const float T4_EDGE_LIMIT = 1e-4
+
+// ── ENUM ─────────────────────────────────────────────────────────────────────
+// @enum RealEst  Real-Space Structural Models (Absolute Price Units).
+// @field uniform        **Uniform** distribution on [High, Low].  
+//                       *Assumes maximum entropy / no information about intra-bar structure.*
+// @field triangular     **Triangular** pdf peaked at the midpoint.  
+//                       *Good for markets with narrow spreads.*
+// @field arcsine        **Arcsine / Brownian Bridge** pdf (U-shape).  
+//                       *Fits where extrema cluster at
+//                       bar start/end.*
+// @field betaSym       **Beta (2,2)** – smooth bell, slightly fatter tails
+//                       than Triangular. *General purpose, modest tails.*
+// @field betaSkew     **Skewed Beta** matching the Open/Close bias.  
+//                       *Select when Close is clearly near High or Low (trend
+//                       bars, breakouts).*
+// @field t4Sym         **Student-t(df = 4)**, symmetric, heavy-tail.  
+//                       *Captures fat tails.*
+// @field t4Skew       **Student-t(df = 4) with skew** from Open/Close.  
+//                       *Heavy-tail **and** directional bias – extreme momentum
+//                       bars, range breakouts.*
+export enum RealEst
+    uniform      = "Uniform"
+    triangular   = "Triangular"
+    arcsine      = "Arcsine"
+    betaSym      = "Beta-Sym"
+    betaSkew     = "Beta-Skew"
+    t4Sym        = "Student-T4-Sym"
+    t4Skew       = "Student-T4-Skew"
+
+// @enum LogEst   Log-return (unit-less) intra-bar σ estimators.
+// @field parkinson       **Parkinson (1980)** High-Low range estimator.  
+//                         *Fast; best when intrabar drift is negligible.*
+// @field garmanKlass     **Garman–Klass (1980)** OHLC estimator, efficient under
+//                         zero drift.
+// @field rogersSatchell  **Rogers–Satchell (1991)** OHLC estimator robust to drift.
+export enum LogEst
+    parkinson       = "Parkinson"
+    garmanKlass     = "Garman-Klass"
+    rogersSatchell  = "Rogers-Satchell"
+
+// ── PRIVATE ──────────────────────────────────────────────────────────────────
+// @function Calculates the natural logarithm of the Gamma function, ln(Γ(z)),
+//           using the Lanczos approximation.
+//           This is the core implementation for arguments z >= 0.5.
+//           The Gamma function extends the factorial function to complex numbers: Γ(n) = (n-1)!
+// @param    z series float The argument (must be >= 0.5).
+// @returns    series float The value of ln(Γ(z)).
+_calcLnGammaCore(
+  series float z
+  ) =>
+    // Lanczos coefficients (g = 7, n = 9)
+    const float P0 = 0.99999999999980993
+    const float P1 = 676.5203681218851
+    const float P2 = -1259.1392167224028
+    const float P3 = 771.32342877765313
+    const float P4 = -176.61502916214059
+    const float P5 = 12.507343278686905
+    const float P6 = -0.13857109526572012
+    const float P7 = 9.9843695780195716e-6
+    const float P8 = 1.5056327351493116e-7
+    const float LANCZOS_G = 7.0
+
+    // Shift variable so the series is formed around z−1
+    series float zz = z - 1.0
+
+    // Evaluate the rational function part of the approximation
+    series float x = P0
+    x += P1 / (zz + 1.0)
+    x += P2 / (zz + 2.0)
+    x += P3 / (zz + 3.0)
+    x += P4 / (zz + 4.0)
+    x += P5 / (zz + 5.0)
+    x += P6 / (zz + 6.0)
+    x += P7 / (zz + 7.0)
+    x += P8 / (zz + 8.0)
+    series float t = zz + LANCZOS_G + 0.5
+
+    // Apply the logarithmic form of the Lanczos formula:
+    // ln(Γ(z)) ≈ ln(sqrt(2π)) + (z-0.5)ln(t) - t + ln(x)
+    // 0.9189385332 is ln(sqrt(2*PI))
+    const float LANCZOS_STIRLING_TERM = 0.5 * math.log(2 * math.pi)
+    LANCZOS_STIRLING_TERM + (zz + 0.5) * math.log(t) - t + math.log(x)
+
+// @function Natural-log Gamma function ln Γ(z) for z > 0, using Lanczos with
+//           reflection. For z < 0.5, applies the reflection identity:
+//           ln Γ(z) = ln π − ln sin(πz) − ln Γ(1 − z).
+//           For z ≥ 0.5, uses the Lanczos core directly.
+// @param   z series float  Argument (z > 0). Returns `na` when z ≤ 0.
+// @returns   series float  ln Γ(z).
+_calcLnGamma(
+  series float z
+  ) =>
+    z <= 0.0 ? na : z < 0.5 ?
+      // Reflection formula for small z
+      math.log(math.pi) - math.log(math.sin(math.pi * z)) - _calcLnGammaCore(1.0 - z) :
+      // Direct Lanczos for z >= 0.5
+      _calcLnGammaCore(z)
+
+// @function Calculates the probability density of the Beta distribution B(α, β).
+//           Computes the result in logarithmic space first to avoid overflow/underflow
+//           with large powers, then exponentiates.
+//           PDF(x) = x^(α-1) * (1-x)^(β-1) / Beta(α, β)
+// @param    a series float Shape parameter α (alpha).
+// @param    b series float Shape parameter β (beta).
+// @param    x series float The point at which to evaluate the density (0 <= x <= 1).
+// @returns    series float The probability density f(x).
+_calcBetaPdf(
+  series float a,
+  series float b,
+  series float x
+  ) =>
+    (x <= 0 or x >= 1) ? 0 :
+      // ln(PDF) = (a-1)ln(x) + (b-1)ln(1-x) - ln(Beta(a,b))
+      // where ln(Beta(a,b)) = ln(Γ(a)) + ln(Γ(b)) - ln(Γ(a+b))
+      math.exp((a - 1) * math.log(math.max(x, EPSILON)) + (b - 1) * math.log(1 - math.min(x, 1 - EPSILON)) - 
+      (_calcLnGamma(a) + _calcLnGamma(b) - _calcLnGamma(a + b)))
+
+// @function Calculates safe Alpha/Beta parameters ensuring unimodal shape.
+//           Prevents singularities (infinite density) at edges by ensuring
+//           parameters are always >= 1.01.
+//           NOTE: No upper limit (ceiling) is applied. The analytical CDF approximation
+//           (Camp-Paulson) handles extreme concentrations (needle shapes) correctly and stable.
+// @param    mu    series float Relative Mean [0..1]
+// @returns        [alpha, beta] Tuple.
+//           alpha series float  Shape parameter for the Upper Bound (High).
+//           beta  series float  Shape parameter for the Lower Bound (Low).
+_calcSafeBetaParams(
+  series float mu
+  ) =>
+    // Base concentration from constant (User preference: 4.0)
+    series float rawAlpha = BETA_SKEW_CONCENTRATION * mu
+    series float rawBeta  = BETA_SKEW_CONCENTRATION * (1.0 - mu)
+    
+    // Check for singularity risk (param <= 1.0 implies J-shape or U-shape)
+    // We use 1.01 as a safe floor to ensure zero density at exact edges.
+    series float minParam = 1.01
+    series float scale    = 1.0
+    
+    // If alpha or beta is too small, calculate the scaling factor needed
+    // to bring the smaller parameter up to minParam.
+    // This naturally increases the other parameter, creating a sharper peak (higher kurtosis)
+    // which is the mathematically correct behavior for extreme means.
+    if rawAlpha < minParam
+        scale := minParam / rawAlpha
+    else if rawBeta < minParam
+        scale := minParam / rawBeta
+        
+    // Apply scaling
+    [rawAlpha * scale, rawBeta * scale]
+
+// @function Computes the antiderivative for the Area (0th Moment) of T(df=4).
+//           Integral: ∫ (1 + z^2/4)^-2.5 dz
+// @param    z series float The integration limit (z-score).
+// @returns    series float The value F(z).
+_calcT4AntiderivArea(
+  series float z
+  ) =>
+    (z * (z * z + 6.0)) / (6.0 * math.pow(1.0 + z * z * 0.25, 1.5))
+
+// @function Computes the antiderivative for the 1st Moment (Mean) of T(df=4).
+//           Integral: ∫ z * (1 + z^2/4)^-2.5 dz
+// @param    z series float The integration limit.
+// @returns    series float The value F(z).
+_calcT4AntiderivMoment(
+  series float z
+  ) =>
+    // Derived via u-substitution u = 1 + z^2/4
+    -1.33333333 * math.pow(1.0 + z * z * 0.25, -1.5)
+
+// @function Computes the antiderivative for the 2nd Moment (Variance) of T(df=4).
+//           Integral: ∫ z^2 * (1 + z^2/4)^-2.5 dz
+// @param    z series float The integration limit.
+// @returns    series float The value F(z).
+_calcT4AntiderivMoment2(
+  series float z
+  ) =>
+    // Derived via integration by parts or algebraic identity z^2 = 4(1+z^2/4) - 4
+    ((4.0 * z) / math.sqrt(1.0 + z * z * 0.25)) - (4.0 * _calcT4AntiderivArea(z))
+
+// @function Computes the antiderivative for the 3rd Moment (Skewness) of T(df=4).
+//           Integral: ∫ z^3 * (1 + z^2/4)^-2.5 dz
+// @param    z series float The integration limit.
+// @returns    series float The value F(z).
+_calcT4AntiderivMoment3(
+  series float z
+  ) =>
+    // Pure algebraic solution
+    -1.0 * ((16.0 * (z * z + 8.0)) / (3.0 * math.pow(z * z + 4.0, 1.5)))
+
+// @function Computes the antiderivative for the 4th Moment (Kurtosis) of T(df=4).
+//           Integral: ∫ z^4 * (1 + z^2/4)^-2.5 dz
+// @param    z series float The integration limit.
+// @returns    series float The value F(z).
+_calcT4AntiderivMoment4(
+  series float z
+  ) =>
+    // Requires Inverse Hyperbolic Sine (asinh)
+    series float halfZ = 0.5 * z
+    series float termLog = 16.0 * math.log(halfZ + math.sqrt(halfZ * halfZ + 1.0)) // 16 * asinh(z/2)
+    series float num = 2.0 * z * (5.0 * z * z + 32.0)
+    series float den = math.pow(z * z + 4.0, 1.5)
+    termLog - (num / den)
+
+// @function Calculates the partial relative moment integral for T4 distributions.
+//           Computes ∫ ξ * f(ξ) dξ from 0 to x using exact antiderivatives.
+//           Utilizes the decomposition: ∫ (m + z*σ) f(z) dz = m * ∫ f(z) + σ * ∫ z*f(z).
+// @param    x      series float Integration limit in relative coordinates [0, 1].
+// @param    muRel  series float Relative Mode location [0, 1].
+// @returns         series float The partial first moment value.
+_calcT4PartialRelMom(
+  series float x,
+  series float muRel
+  ) =>
+    series float m      = math.min(math.max(muRel, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+    series float sigmaL = 2.0 * m
+    series float sigmaR = 2.0 * (1.0 - m)
+    
+    // Integration limits (Z-score) at the absolute edges (0.0 and 1.0)
+    // Corresponds to the range limits of the truncated distribution.
+    series float zL_max = 0.5 * T4_SHAPE_FACTOR
+    series float zR_max = 0.5 * T4_SHAPE_FACTOR
+    
+    // 1. Calculate Total Area (Normalization Constant) via exact antiderivative
+    series float areaL = _calcT4AntiderivArea(zL_max) * sigmaL
+    series float areaR = _calcT4AntiderivArea(zR_max) * sigmaR
+    series float totalArea = areaL + areaR
+
+    // Scaling constant for the Student-t distribution
+    series float scale = T4_SHAPE_FACTOR
+
+    if x <= m
+        // Case 1: Integration on Left Wing (from 0 to x)
+        // Distance from Mode 'm' to point 'x'
+        series float dist = m - x
+        series float z = (dist / sigmaL) * scale
+        
+        // A. Mass Component: m * Area
+        // We integrate from the left edge (0) up to x.
+        // Area(0->x) = TotalLeftArea - Area(x->m)
+        series float partialArea = _calcT4AntiderivArea(zL_max) - _calcT4AntiderivArea(z)
+        
+        // B. Moment Component: σ * Integral(z * f(z))
+        // The first moment relative to the mode is negative on the left wing.
+        // We compute the definite integral difference: Mom(Edge) - Mom(z)
+        series float partialMom1 = _calcT4AntiderivMoment(zL_max) - _calcT4AntiderivMoment(z)
+        
+        // Exact Algebraic Formulation:
+        // Term 1 (Center of Mass Shift): m * PartialArea
+        series float termMass = m * (partialArea * sigmaL)
+        
+        // Term 2 (Shape Contribution): Scaled Moment Integral
+        // Factor (sigmaL^2 / scale) arises from substitution rule dξ = σ dz and z-scaling.
+        series float termShape = (sigmaL * sigmaL / scale) * partialMom1
+        
+        // Result is Mass - Shape (since left wing moment reduces the global mean)
+        (termMass - termShape) / totalArea
+
+    else
+        // Case 2: Integration covers Full Left Wing + Partial Right Wing
+        
+        // 1. Exact Moment of the Full Left Wing
+        series float fullAreaL = _calcT4AntiderivArea(zL_max)
+        series float fullMomL  = _calcT4AntiderivMoment(zL_max) - (-1.33333333) // Definite Integral [0..Max]
+        
+        series float momentLeft = (m * fullAreaL * sigmaL) - ((sigmaL * sigmaL / scale) * fullMomL)
+        
+        // 2. Exact Moment of the Partial Right Wing (from m to x)
+        series float dist = x - m
+        series float z = (dist / sigmaR) * scale
+        
+        // On the right wing, we integrate from 0 (at Mode) to z (at x)
+        series float partAreaR = _calcT4AntiderivArea(z)
+        series float partMomR  = _calcT4AntiderivMoment(z) - (-1.33333333) // Definite Integral [0..z]
+        
+        // On Right wing, shape contribution is additive: (m + z*σ)
+        series float momentRight = (m * partAreaR * sigmaR) + ((sigmaR * sigmaR / scale) * partMomR)
+        
+        (momentLeft + momentRight) / totalArea
+
+// @function **Truncated Student-t(df=4)** density on [0, 1]. Symmetric version
+//          used for *T4_SYM*;
+// @param   z series float  point in [0, 1]
+// @returns   series float  f(z)  (already normalised for truncation)
+_calcT4SymPdf(
+  series float z
+  ) =>
+    // Normalization factor for the Student-t PDF with ν=4 degrees of freedom.
+    // Formula: Γ((ν+1)/2) / (√(νπ) * Γ(ν/2)), which equals 3/8 for ν=4.
+    const float T4_PDF_NORMALIZER = 0.375
+    const float T4_TRUNC_INTEGRAL = 0.951447128
+
+    // Standard t-pdf with ν=4
+    series float term = (z - 0.5) * T4_SHAPE_FACTOR
+    series float base = 1.0 + (term * term) * 0.25
+    // Algebraic Speedup: pow(base, -2.5) -> 1 / (base^2 * sqrt(base))
+    series float t = T4_PDF_NORMALIZER / (base * base * math.sqrt(base))
+    
+    t / T4_TRUNC_INTEGRAL
+
+// @function **Skewed, truncated Student-t(df=4)** density on [0, 1].
+//           Its shape is controlled by a `mode` parameter that defines the peak,
+//           allowing for asymmetric stretching of the distribution.
+// @param   x    series float  Point in [0, 1] to evaluate.
+// @param   mode series float  The distribution's peak (skew parameter) on the [0, 1] interval.
+// @returns      series float  f(x) (already normalised for truncation).
+_calcT4SkewPdf(
+  series float x,
+  series float mode
+  ) =>
+    series float m = math.min(math.max(mode, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+
+    series float p = x == m ? x - EPSILON : x
+
+    // Define asymmetric widths based on mode location
+    series float sigmaL = 2 * m
+    series float sigmaR = 2 * (1 - m)
+
+    // Calculate z-score relative to the specific side (left or right)
+    series float z = math.abs(p - m) / (p < m ? sigmaL : sigmaR)
+    
+    // Normalization factor for the Student-t PDF with ν=4 degrees of freedom.
+    // Formula: Γ((ν+1)/2) / (√(νπ) * Γ(ν/2)), which equals 3/8 for ν=4.
+    const float T4_PDF_NORMALIZER = 0.375
+    const float T4_TRUNC_INTEGRAL = 0.951447128
+
+    // Base term: 1 + (z*Scale)^2 / 4
+    // Note: math.pow(..., 2) is okay, or use tmp * tmp for squeeze.
+    series float zScaled = z * T4_SHAPE_FACTOR
+    series float base = 1.0 + (zScaled * zScaled) * 0.25
+
+    // Algebraic Speedup: base^-2.5 -> 1 / (base^2 * sqrt(base))
+    series float t = T4_PDF_NORMALIZER / (base * base * math.sqrt(base))
+
+    series float normFactor = 2 / (sigmaL + sigmaR)
+    // Divide by integral over [0,1] (≈0.95145) to truncate/renormalise
+    (t / T4_TRUNC_INTEGRAL) * normFactor
+
+// @function Calculates the relative position of the Open/Close midpoint within the bar
+//           and clamps it safely to (EPSILON, 1-EPSILON) to prevent distribution singularities.
+// @param   o    series float Open price.
+// @param   c    series float Close price.
+// @param   l    series float Low price.
+// @param   rng  series float Price range (High - Low).
+// @returns      series float Clamped relative position [0..1].
+_calcMuRel(
+  series float o,
+  series float c,
+  series float l,
+  series float rng
+  ) =>
+    series float mid = (o + c) * 0.5
+    series float rel = (mid - l) / rng
+    math.min(math.max(rel, EPSILON), 1.0 - EPSILON)
+
+// @function Fetches OHLC data and transforms it into the target space (Real or Log).
+//           Also calculates the range (High - Low) respecting the space's minimum tick.
+// @param    logSpace series bool If true, returns log-values: ln(High), ln(Low), etc.
+// @param    offset   series int  Bar offset.
+// @returns  [o, h, l, c, rng] Tuple of transformed values and range.
+//           o    series float  Open price (or ln(Open))
+//           h    series float  High price (or ln(High))
+//           l    series float  Low price (or ln(Low))
+//           c    series float  Close price (or ln(Close))
+//           rng  series float  Range (h - l). In Log-Space, this is ln(High/Low).
+_calcOhlcSpace(
+  series bool logSpace,
+  series int offset
+  ) =>
+    series float rawO = open[offset]
+    series float rawH = high[offset]
+    series float rawL = low[offset]
+    series float rawC = close[offset]
+
+    if logSpace and (rawO <= 0 or rawH <= 0 or rawL <= 0 or rawC <= 0)
+        runtime.error("Log-Space analysis requires strictly positive prices. Negative values or zero found.")
+
+    series float o = logSpace ? math.log(math.max(rawO, EPSILON)) : rawO
+    series float h = logSpace ? math.log(math.max(rawH, EPSILON)) : rawH
+    series float l = logSpace ? math.log(math.max(rawL, EPSILON)) : rawL
+    series float c = logSpace ? math.log(math.max(rawC, EPSILON)) : rawC
+
+    series float minRng = logSpace ? EPSILON : syminfo.mintick[offset]
+    series float rng = math.max(h - l, minRng)
+    [o, h, l, c, rng]
+
+// @function Transforms a single price value into the target space.
+// @param    val      series float Value to transform.
+// @param    logSpace series bool  If true, applies ln(max(val, EPSILON)).
+// @returns           series float Transformed value.
+_toSpace(
+  series float val,
+  series bool logSpace
+  ) =>
+    logSpace ? math.log(math.max(val, EPSILON)) : val
+
+// @function Core PDF Logic.
+//           Operates on pre-transformed values (Linear or Log).
+//           Does not fetch data. Strictly math.
+// @param    estimator  series RealEst Structural model assumption.
+// @param    s          series float   Point to evaluate (in target space).
+// @param    o          series float   Open (in target space).
+// @param    h          series float   High (in target space).
+// @param    l          series float   Low (in target space).
+// @param    c          series float   Close (in target space).
+// @param    rng        series float.  Range (in target space).
+_calcPdfCore(
+  series RealEst estimator,
+  series float s,
+  series float o,
+  series float h,
+  series float l,
+  series float c,
+  series float rng
+  ) =>
+    if (s < l) or (s > h)
+        0.0
+    else
+        series float x = (s - l)/rng
+
+        switch estimator
+            RealEst.uniform =>
+                // ANALYTICAL SOLUTION (Exact)
+                1.0 / rng
+
+            RealEst.triangular =>
+                // ANALYTICAL SOLUTION (Exact)
+                x <= 0.5 ? (2 / rng) * (x / 0.5) : (2 / rng) * ((1 - x) / 0.5)
+
+            RealEst.arcsine =>
+                // ANALYTICAL SOLUTION (Exact)
+                series float safeP = math.max(l + EPSILON, math.min(s, h - EPSILON))
+                series float term  = (safeP - l) * (h - safeP)
+                term <= 0 ? 0.0 : 1.0 / (math.pi * math.sqrt(term))
+
+            RealEst.betaSym =>
+                // ANALYTICAL SOLUTION (Exact)
+                6 * x * (1 - x) / rng
+
+            RealEst.betaSkew =>
+                // ANALYTICAL SOLUTION (Exact)
+                series float muRel = _calcMuRel(o, c, l, rng)
+                [alpha, beta]      = _calcSafeBetaParams(muRel)
+                _calcBetaPdf(alpha, beta, x) / rng
+
+            RealEst.t4Sym =>
+                // ANALYTICAL SOLUTION (Exact)
+                _calcT4SymPdf(x) / rng
+
+            RealEst.t4Skew =>
+                // ANALYTICAL SOLUTION (Exact)
+                series float muRel = _calcMuRel(o, c, l, rng)
+                _calcT4SkewPdf(x, muRel) / rng
+
+// @function Analytical CDF for the triangular distribution on [hi, lo].
+// @param   x  series float  Point to evaluate.
+// @param   hi series float  Upper Boundary of Bar.
+// @param   lo series float  Lower Boundary of Bar.
+// @returns    series float  Cumulative probability F(x).
+_calcCdfTriangular(
+  series float x,
+  series float hi,
+  series float lo
+  ) =>
+    series float mid = (hi + lo) / 2.0
+    series float rng = hi - lo
+    if rng == 0.0
+        // Handle singularity: zero range implies step function at 'lo'
+        x >= lo ? 1.0 : 0.0
+    else if x <= lo
+        // Below support
+        0.0
+    else if x <= mid
+        // Rising Slope: Integrated PDF 4x / rng^2 -> 2x^2 / rng
+        // Normalized relative to half-width: (dx / half_rng)^2 / 2 * 2
+        series float dx = x - lo
+        (dx * dx) / (rng * (mid - lo))
+    else if x < hi
+        // Falling Slope: 1 - Area(Right Side)
+        // Symmetric approach from the top down
+        series float dx = hi - x
+        1.0 - (dx * dx) / (rng * (hi - mid))
+    else
+        // Above support
+        1.0
+
+// @function Analytical CDF for the arcsine distribution on [hi, lo].
+// @param   x  series float  Point to evaluate.
+// @param   hi series float  Upper Boundary of Bar.
+// @param   lo series float  Lower Boundary of Bar.
+// @returns    series float  Cumulative probability F(x).
+_calcCdfArcsine(
+  series float x,
+  series float hi,
+  series float lo
+  ) =>
+    series float rng = hi - lo
+    if rng == 0.0
+        // Singularity check
+        x >= lo ? 1.0 : 0.0
+    else
+        // Clamp x to support [lo, hi] to avoid NaN in sqrt/asin
+        series float xClp = math.max(lo, math.min(x, hi))
+        // Normalize x to [0, 1]
+        series float xRel = (xClp - lo) / rng
+        series float xSafe = math.min(math.max(xRel, 0.0), 1.0)
+        // Arcsine CDF formula: 2/pi * arcsin(sqrt(x))
+        (2.0 / math.pi) * math.asin(math.sqrt(xSafe))
+
+// @function Analytical CDF for the Symmetric Beta(2,2) distribution.
+//           Corresponds to the "Smoothstep" polynomial used in interpolation.
+// @param    x  series float Point to evaluate.
+// @param    hi series float Upper Boundary of Bar.
+// @param    lo series float Lower Boundary of Bar.
+// @returns     series float Cumulative probability F(x).
+_calcCdfBetaSym(
+  series float x,
+  series float hi,
+  series float lo
+  ) =>
+    series float rng = hi - lo
+    if rng <= 0.0
+        x >= lo ? 1.0 : 0.0
+    else
+        // Normalize x to [0, 1] relative to the bar range
+        series float xRel = (x - lo) / rng
+        // Clamp to ensure valid polynomial evaluation range
+        series float clp = math.max(0.0, math.min(xRel, 1.0))
+        // Analytic Integral of PDF 6x(1-x):
+        // F(x) = ∫ 6x - 6x^2 dx = 3x^2 - 2x^3
+        3.0 * clp * clp - 2.0 * clp * clp * clp     
+
+// @function Standard Normal CDF Approximation.
+//           Implementation based on Abramowitz and Stegun (7.1.26).
+//           Max error: < 1.5e-7.
+//           Uses only basic arithmetic and exp(), no erf() needed.
+// @param    z      series float The Z-Score.
+// @returns         series float Probability p in [0, 1].
+_normCdf(
+  series float z
+  ) =>
+    // Constants from A&S 7.1.26
+    const float b1 =  0.319381530
+    const float b2 = -0.356563782
+    const float b3 =  1.781477937
+    const float b4 = -1.821255978
+    const float b5 =  1.330274429
+    const float p  =  0.2316419
+    const float c2 =  0.398942280 // 1 / sqrt(2 * pi)
+
+    // Handle symmetry: work with absolute z
+    series float absZ = math.abs(z)
+    
+    // Calculate Taylor series / Polynomial approximation
+    series float t = 1.0 / (1.0 + p * absZ)
+    
+    // Horner's method for polynomial evaluation (faster than math.pow)
+    series float poly = ((((b5 * t + b4) * t + b3) * t + b2) * t + b1) * t
+    
+    // PDF at z
+    series float pdf = c2 * math.exp(-0.5 * z * z)
+    
+    // Area calculation
+    series float y = 1.0 - pdf * poly
+
+    // Adjust for sign of original z
+    z < 0 ? 1.0 - y : y
+
+// @function Camp-Paulson Approximation for Beta CDF.
+//           Transforms the Beta CDF problem into a Standard Normal CDF problem.
+//           Eliminates the need for numerical integration loops.
+// @param    alpha  series float Shape parameter Alpha (> 0).
+// @param    beta   series float Shape parameter Beta (> 0).
+// @param    x      series float Evaluation point [0..1].
+// @returns         series float CDF value F(x).
+_calcCdfBetaCampPaulson(
+  series float alpha,
+  series float beta,
+  series float x
+  ) =>
+    // 1. Clamp x to prevent division by zero or log errors
+    series float p = math.max(math.min(x, 1.0 - EPSILON), EPSILON)
+
+    // 2. Pre-calculate inverse constants
+    series float inv9A = 1.0 / (9.0 * alpha)
+    series float inv9B = 1.0 / (9.0 * beta)
+
+    // 3. Calculate ratio 'r'
+    //    r = (beta * x) / (alpha * (1-x))
+    series float r = (beta * p) / (alpha * (1.0 - p))
+    
+    // 4. Cubic root of r (Wilson-Hilferty transformation base)
+    series float r1_3 = math.pow(r, 0.333333333) // r^(1/3)
+    series float r2_3 = r1_3 * r1_3              // r^(2/3)
+
+    // 5. Calculate Z-Score for Normal Distribution
+    //    y = [ (1 - 1/9b)*r^(1/3) - (1 - 1/9a) ] / sqrt( 1/9b * r^(2/3) + 1/9a )
+    series float num = (1.0 - inv9B) * r1_3 - (1.0 - inv9A)
+    series float den = math.sqrt(inv9B * r2_3 + inv9A)
+    
+    series float z = num / den
+
+    // 6. Result via Approximation
+    _normCdf(z)
+
+// @function Analytical CDF for the Skewed Truncated Student-t(df=4) distribution.
+//           Calculates probability mass via split integration around the Mode.
+//           Utilizes exact antiderivatives to avoid numerical loops.
+// @param    xVal      series float Normalized point to evaluate [0, 1].
+// @param    mode      series float Relative location of the Mode (Peak) [0, 1].
+// @param    shapeFact series float Scaling factor determining tail heaviness.
+// @returns            series float Cumulative probability F(x).
+_calcCdfT4Norm(
+  series float xVal,
+  series float mode,
+  series float shapeFact
+  ) =>
+    // Clamp mode to avoid singularity at exactly 0.0 or 1.0
+    series float m      = math.min(math.max(mode, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+    
+    // Define widths of the Left (L) and Right (R) wings
+    series float sigmaL = 2.0 * m
+    series float sigmaR = 2.0 * (1.0 - m)
+    
+    // Integration limit (Z-score) at the absolute edges (0 and 1)
+    series float zL_max = 0.5 * shapeFact
+    series float zR_max = 0.5 * shapeFact
+    
+    // Calculate total area under the curve for normalization
+    // AntiderivArea calculates integral from Peak(0) to Edge(Z)
+    series float areaL = _calcT4AntiderivArea(zL_max) * sigmaL
+    series float areaR = _calcT4AntiderivArea(zR_max) * sigmaR
+    series float totalArea = areaL + areaR
+    
+    // Case 1: Query point is on the Left Wing (x <= Mode)
+    if xVal <= m
+        series float dist = m - xVal
+        series float z = (dist / sigmaL) * shapeFact
+        
+        // Area from Edge(0) to xVal is (Total Left Area) - (Area from xVal to Mode)
+        series float partArea = _calcT4AntiderivArea(zL_max) - _calcT4AntiderivArea(z)
+        (partArea * sigmaL) / totalArea
+        
+    // Case 2: Query point is on the Right Wing (x > Mode)
+    else
+        series float dist = xVal - m
+        series float z = (dist / sigmaR) * shapeFact
+        
+        // Area is (Full Left Wing) + (Area from Mode to xVal)
+        series float partAreaR = _calcT4AntiderivArea(z)
+        (areaL + partAreaR * sigmaR) / totalArea
+
+// @function Core CDF Logic (Integration & Analytical).
+//           Operates on pre-transformed values. 
+//           Allows `realQuantile` to loop without re-transforming.
+// @param    estimator series RealEst Structural model assumption.
+// @param    up        series float   Upper Integration Boundary (Raw Price).
+// @param    lo        series float   Lower Integration Boundary (Raw Price).
+// @param    o          series float   Open (in target space).
+// @param    h          series float   High (in target space).
+// @param    l          series float   Low (in target space).
+// @param    c          series float   Close (in target space).
+// @param    rng        series float.  Range (in target space).
+// @returns            series float   Probability mass ∈ [0,1].
+_calcCdfCore(
+  series RealEst estimator,
+  series float up,
+  series float lo,
+  series float o,
+  series float h,
+  series float l,
+  series float c,
+  series float rng
+  ) =>
+    series float upBd = math.min(math.max(up, lo), h)
+    series float loBd = math.max(math.min(up, lo), l)
+
+    if upBd <= loBd or rng <= 0.0
+        0.0
+    else
+        switch estimator
+            RealEst.uniform =>
+                // ANALYTICAL SOLUTION (Exact)
+                (upBd - loBd) / rng
+
+            RealEst.triangular =>
+                // ANALYTICAL SOLUTION (Exact)
+                _calcCdfTriangular(upBd, h, l) - _calcCdfTriangular(loBd, h, l)
+
+            RealEst.arcsine =>
+                // ANALYTICAL SOLUTION (Exact)
+                _calcCdfArcsine(upBd, h, l) - _calcCdfArcsine(loBd, h, l)
+
+            RealEst.betaSym =>
+                // ANALYTICAL SOLUTION (Exact)
+                _calcCdfBetaSym(upBd, h, l) - _calcCdfBetaSym(loBd, h, l)
+
+            RealEst.betaSkew =>
+                // ANALYTICAL APPROXIMATION (Camp-Paulson + Abramowitz-Stegun)
+                series float muRel = _calcMuRel(o, c, l, rng)
+                [alpha, beta]      = _calcSafeBetaParams(muRel)
+                
+                // Normalize to [0, 1]
+                series float xUp = (upBd - l) / rng
+                series float xLo = (loBd - l) / rng
+                
+                _calcCdfBetaCampPaulson(alpha, beta, xUp) - _calcCdfBetaCampPaulson(alpha, beta, xLo)
+
+            RealEst.t4Sym =>
+                // ANALYTICAL SOLUTION (Exact)
+                series float xUp = (upBd - l) / rng
+                series float xLo = (loBd - l) / rng
+                _calcCdfT4Norm(xUp, 0.5, T4_SHAPE_FACTOR) - _calcCdfT4Norm(xLo, 0.5, T4_SHAPE_FACTOR)
+            
+            RealEst.t4Skew =>
+                // ANALYTICAL SOLUTION (Exact)
+                series float xUp   = (upBd - l) / rng
+                series float xLo   = (loBd - l) / rng
+                series float muRel = _calcMuRel(o, c, l, rng)
+                _calcCdfT4Norm(xUp, muRel, T4_SHAPE_FACTOR) - _calcCdfT4Norm(xLo, muRel, T4_SHAPE_FACTOR)
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────────
+// @function Probability Density Function (PDF) under the chosen structural model.
+//           Evaluates the density at a specific source level.
+// @param    estimator series RealEst Structural model assumption (e.g., Beta, Student-t).
+// @param    source    series float   The level to evaluate. 
+//                                    If `logSpace=true`, provide the raw price; 
+//                                    it is converted internally.
+// @param    logSpace  series bool    If true, calculates density in Log-Space.
+//                                    Useful for analyzing distribution of returns.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Density value.
+export realPdf(
+  series RealEst estimator,
+  series float source,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+    series float s = _toSpace(source, logSpace)
+
+    _calcPdfCore(estimator, s, o, h, l, c, rng)
+
+// @function Cumulative Distribution Function (CDF).
+//           Calculates the probability mass between `upper` and `lower` bounds.
+//           Uses Composite Gauss-Legendre Quadrature for complex models.
+// @param    estimator series RealEst Structural model assumption.
+// @param    upper     series float   Upper Integration Boundary (Raw Price).
+// @param    lower     series float   Lower Integration Boundary (Raw Price).
+// @param    logSpace  series bool    If true, integration is performed in Log-Space.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Probability mass ∈ [0,1].
+export realCdf(
+  series RealEst estimator,
+  series float upper,
+  series float lower,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+    series float up = _toSpace(upper, logSpace)
+    series float lo = _toSpace(lower, logSpace)
+
+    _calcCdfCore(estimator, up, lo, o, h, l, c, rng)
+
+// @function Inverse CDF (Quantile Function).
+//           Calculates the exact price level for a given cumulative probability.
+// @param    estimator  series RealEst Structural model assumption.
+// @param    prob       series float   Target probability (0.0 to 1.0).
+// @param    iterations series int     Bisection steps for solver precision (default: 12).
+// @param    logSpace   series bool    If true, calculation accounts for log-normal properties.
+//                                     Returns result as Log-Price (ln(P)).
+// @param    offset     series int     Bar offset.
+// @returns             series float   Price level (or Log-Price if logSpace=true).
+export realQuantile(
+  series RealEst estimator,
+  series float prob,
+  series int iterations = 12,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    series int iter = math.max(iterations, 1)
+
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+    
+    series float p = math.max(math.min(prob, 1.0), 0.0)
+
+    if rng <= 0 or p <= 0.0 + EPSILON
+        l
+    else if p >= 1.0 - EPSILON
+        h
+    else
+        switch estimator
+            RealEst.uniform =>
+                l + p * rng
+
+            RealEst.triangular =>
+                p <= 0.5 ? 
+                  l + math.sqrt(p * 0.5 * rng * rng) : 
+                  h - math.sqrt((1.0 - p) * 0.5 * rng * rng)
+
+            RealEst.arcsine =>
+                series float sin = math.sin(p * math.pi * 0.5)
+                l + rng * sin * sin
+
+            =>
+                series float min = l
+                series float max = h
+                
+                for i = 1 to math.max(iter, 1)
+                    series float mid = (min + max) * 0.5
+
+                    series float cdfVal = _calcCdfCore(estimator, mid, l, o, h, l, c, rng)
+                    
+                    if math.abs(cdfVal - p) < EPSILON
+                        min := mid
+                        max := mid
+                        break
+
+                    if cdfVal < p
+                        min := mid
+                    else
+                        max := mid
+                
+                (min + max) * 0.5
+
+// @function Expected Value (Mean) of the intra-bar distribution.
+//           - **Normal Space:** Returns Arithmetic Mean ($E[P]$).
+//           - **Log Space:** Returns Log-Mean ($E[\ln P]$). 
+//             To get Geometric Mean price, apply $e^x$ to the result.
+// @param    estimator series RealEst Structural model assumption.
+// @param    logSpace  series bool    If true, calculates Mean of Log-Prices.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Expected Value.
+export realMu(
+  series RealEst estimator,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+
+    series float mid = (h + l) * 0.5
+    series float muRel = _calcMuRel(o, c, l, rng)
+
+    switch estimator
+        RealEst.uniform    => mid // ANALYTICAL SOLUTION (Exact)
+        RealEst.triangular => mid // ANALYTICAL SOLUTION (Exact)
+        RealEst.arcsine    => mid // ANALYTICAL SOLUTION (Exact)
+        RealEst.betaSym    => mid // ANALYTICAL SOLUTION (Exact)
+        RealEst.t4Sym      => mid // ANALYTICAL SOLUTION (Exact)
+        RealEst.betaSkew   => l + muRel * rng // ANALYTICAL SOLUTION (Exact)
+        RealEst.t4Skew     => 
+            // ANALYTICAL SOLUTION (Exact)
+            
+            // 1. Geometry Setup
+            series float m      = math.min(math.max(muRel, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+            series float sigmaL = 2.0 * m
+            series float sigmaR = 2.0 * (1.0 - m)
+            
+            // 2. Integration Bounds (Z-Score)
+            series float zL_max = 0.5 * T4_SHAPE_FACTOR
+            series float zR_max = 0.5 * T4_SHAPE_FACTOR
+            
+            // 3. Area (Normalization)
+            series float areaL = _calcT4AntiderivArea(zL_max) * sigmaL
+            series float areaR = _calcT4AntiderivArea(zR_max) * sigmaR
+            series float totalArea = areaL + areaR
+            
+            // 4. First Moment (Net shift from Mode)
+            // M1 integral from 0 to Z is Negative on left wing, Positive on right wing
+            series float M1_L = _calcT4AntiderivMoment(zL_max) - (-1.33333333)
+            series float M1_R = _calcT4AntiderivMoment(zR_max) - (-1.33333333)
+            
+            // Scale by Sigma^2 (dx substitution)
+            series float momentNet = (sigmaR * sigmaR * M1_R) - (sigmaL * sigmaL * M1_L)
+            
+            // 5. Result
+            series float meanZ = momentNet / totalArea
+            series float muNorm = m + (meanZ / T4_SHAPE_FACTOR)
+            
+            l + muNorm * rng
+
+// @function Relative Partial First Moment (Lower Partial Expectation).
+//           Calculates the integral ∫ x * PDF(x) dx from 0 to 'limit' in RELATIVE SPACE [0..1].
+//           Operates strictly in normalized space to avoid floating point cancellation errors.
+// @param    estimator series RealEst Structural model.
+// @param    limit     series float   Upper limit of integration (Raw Price).
+// @param    logSpace  series bool    If true, analysis is performed in Log-Space.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Value of integral x_rel * PDF (Value between 0 and ~0.5).
+export realPartialMuRel(
+  series RealEst estimator,
+  series float limit,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+    series float xRaw = _toSpace(limit, logSpace)
+    
+    series float upBd = math.min(math.max(xRaw, l), h)
+    series float x    = (rng > EPSILON) ? (upBd - l) / rng : 0.0
+    
+    switch estimator
+        RealEst.uniform =>
+            // Int(t dt) = t^2 / 2
+            0.5 * x * x
+
+        RealEst.triangular =>
+            if x <= 0.5
+                // Rising Slope (PDF = 4t) -> Int(4t^2) = 4/3 t^3
+                1.33333333 * x * x * x
+            else
+                // Falling Slope integration
+                // Moment of full left wing (0.5 * 0.333...) = 0.1666...
+                // Plus partial moment of right wing
+                series float valX  = 2.0 * x * x - 1.33333333 * x * x * x
+                series float val05 = 0.33333333
+                0.16666667 + (valX - val05)
+
+        RealEst.arcsine =>
+            // RelMom = 0.5 * CDF - (1/π) * sqrt(x(1-x))
+            series float safeX = math.max(EPSILON, math.min(x, 1.0 - EPSILON))
+            series float term1 = (1.0 / math.pi) * math.asin(math.sqrt(safeX)) // 0.5 * CDF
+            series float term2 = (1.0 / math.pi) * math.sqrt(safeX * (1.0 - safeX))
+            term1 - term2
+
+        RealEst.betaSym =>
+            // Analytical polynomial solution for Beta(2,2) relative moment
+            2.0 * x * x * x - 1.5 * x * x * x * x
+
+        RealEst.betaSkew =>
+            series float muRel = _calcMuRel(o, c, l, rng)
+            [alpha, beta]      = _calcSafeBetaParams(muRel)
+            
+            // Identity: ∫ x B(α,β) = μ * F(x | α+1, β)
+            series float meanRel  = alpha / (alpha + beta)
+            series float cdfShift = _calcCdfBetaCampPaulson(alpha + 1.0, beta, x)
+            
+            meanRel * cdfShift
+
+        RealEst.t4Sym =>
+            _calcT4PartialRelMom(x, 0.5)
+
+        RealEst.t4Skew =>
+            series float muRel = _calcMuRel(o, c, l, rng)
+            _calcT4PartialRelMom(x, muRel)
+
+// @function Standard Deviation (Sigma) of the intra-bar distribution.
+//           - **Normal Space:** Returns price dispersion in currency units ($).
+//           - **Log Space:** Returns **Volatility** (dispersion of log-returns).
+//             This provides a direct, unit-less volatility estimate for the bar.
+// @param    estimator series RealEst Structural model assumption.
+// @param    logSpace  series bool    If true, calculates Standard Deviation of Log-Prices.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Standard Deviation (or Volatility).
+export realSigma(
+  series RealEst estimator,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+    
+    series float varRel = 0.0
+    
+    switch estimator
+        RealEst.uniform    => varRel := 1.0 / 12.0 // ANALYTICAL SOLUTION (Exact)
+        RealEst.triangular => varRel := 1.0 / 24.0 // ANALYTICAL SOLUTION (Exact)
+        RealEst.arcsine    => varRel := 1.0 / 8.0  // ANALYTICAL SOLUTION (Exact)
+        RealEst.betaSym    => varRel := 1.0 / 20.0 // ANALYTICAL SOLUTION (Exact)
+        
+        RealEst.t4Sym      =>
+            // ANALYTICAL SOLUTION (Exact)
+            // Mode = 0.5, symmetric.
+            series float zMax = 0.5 * T4_SHAPE_FACTOR
+            series float area = _calcT4AntiderivArea(zMax) // Half area
+            series float mom2 = _calcT4AntiderivMoment2(zMax) // Half raw moment
+
+            // For T4Sym on [0,1], sigma_scale = 1.0. 
+            // Var = E[x^2] (centered) / Area
+            varRel := (mom2 / area) / 50.0
+            
+        RealEst.betaSkew   =>
+            // ANALYTICAL SOLUTION (Exact)
+            series float muRel  = _calcMuRel(o, c, l, rng)
+            [alpha, beta]      = _calcSafeBetaParams(muRel)
+            series float sumAB  = alpha + beta
+            // Variance of Beta: (α*β) / ((α+β)^2 * (α+β+1))
+            varRel := (alpha * beta) / ((sumAB * sumAB) * (sumAB + 1.0))
+            
+        RealEst.t4Skew     => 
+            // ANALYTICAL SOLUTION (Exact)
+            series float muRel = _calcMuRel(o, c, l, rng)
+            
+            series float m      = math.min(math.max(muRel, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+            series float sigmaL = 2.0 * m
+            series float sigmaR = 2.0 * (1.0 - m)
+            series float zL_max = 0.5 * T4_SHAPE_FACTOR
+            series float zR_max = 0.5 * T4_SHAPE_FACTOR
+
+            // Normalization
+            series float areaL = _calcT4AntiderivArea(zL_max) * sigmaL
+            series float areaR = _calcT4AntiderivArea(zR_max) * sigmaR
+            series float totalArea = areaL + areaR
+
+            // Scaling Factors
+            const float SCALE_M1 = T4_SHAPE_FACTOR
+            const float SCALE_M2 = SCALE_M1 * T4_SHAPE_FACTOR
+
+            // 1st Moment (Mean Shift)
+            series float M1_L = _calcT4AntiderivMoment(zL_max) - (-1.33333333)
+            series float M1_R = _calcT4AntiderivMoment(zR_max) - (-1.33333333)
+            series float meanRel = (((sigmaR * sigmaR * M1_R) - (sigmaL * sigmaL * M1_L)) / totalArea) / SCALE_M1
+
+            // 2nd Moment (Raw Variance around Mode)
+            series float M2_L = _calcT4AntiderivMoment2(zL_max)
+            series float M2_R = _calcT4AntiderivMoment2(zR_max)
+            series float rawMom2 = (((math.pow(sigmaR, 3) * M2_R) + (math.pow(sigmaL, 3) * M2_L)) / totalArea) / SCALE_M2
+
+            // Central Variance: E[X^2] - (E[X])^2
+            varRel := rawMom2 - (meanRel * meanRel)
+    
+    math.sqrt(math.max(varRel, 0.0)) * rng
+
+// @function Skewness (3rd Standardized Moment).
+//           Measures asymmetry. In Log-Space, this accurately captures the 
+//           skew of the return distribution without approximation errors.
+// @param    estimator series RealEst Structural model assumption.
+// @param    logSpace  series bool    If true, calculates Skewness of Log-Prices.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Skewness value (Positive = Tail High, Negative = Tail Low).
+export realSkew(
+  series RealEst estimator,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+
+    switch estimator
+        RealEst.uniform    => 0.0 // ANALYTICAL SOLUTION (Exact)
+        RealEst.triangular => 0.0 // ANALYTICAL SOLUTION (Exact)
+        RealEst.arcsine    => 0.0 // ANALYTICAL SOLUTION (Exact)
+        RealEst.betaSym    => 0.0 // ANALYTICAL SOLUTION (Exact)
+        RealEst.t4Sym      => 0.0 // ANALYTICAL SOLUTION (Exact)
+
+        RealEst.betaSkew =>
+            // ANALYTICAL SOLUTION (Exact)
+            series float muRel = _calcMuRel(o, c, l, rng)
+            [alpha, beta]      = _calcSafeBetaParams(muRel)
+
+            series float num   = 2.0 * (beta - alpha) * math.sqrt(alpha + beta + 1.0)
+            series float den   = (alpha + beta + 2.0) * math.sqrt(alpha * beta)
+            num / den
+
+        =>
+            // ANALYTICAL SOLUTION (Exact)
+            series float muRel = (estimator == RealEst.t4Sym) ? 0.5 : _calcMuRel(o, c, l, rng)
+
+            series float m      = math.min(math.max(muRel, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+            series float sigmaL = 2.0 * m
+            series float sigmaR = 2.0 * (1.0 - m)
+            series float zL = 0.5 * T4_SHAPE_FACTOR
+            series float zR = 0.5 * T4_SHAPE_FACTOR
+            
+            series float totalArea = (_calcT4AntiderivArea(zL) * sigmaL) + (_calcT4AntiderivArea(zR) * sigmaR)
+
+            // Scaling Factors
+            const float SCALE_M1 = T4_SHAPE_FACTOR
+            const float SCALE_M2 = SCALE_M1 * T4_SHAPE_FACTOR
+            const float SCALE_M3 = SCALE_M2 * T4_SHAPE_FACTOR
+
+            // 1. Mean Shift
+            series float M1_L = _calcT4AntiderivMoment(zL) - (-1.33333333)
+            series float M1_R = _calcT4AntiderivMoment(zR) - (-1.33333333)
+            series float meanRel = (((sigmaR * sigmaR * M1_R) - (sigmaL * sigmaL * M1_L)) / totalArea) / SCALE_M1
+
+            // 2. Raw Moment 2
+            series float M2_L = _calcT4AntiderivMoment2(zL)
+            series float M2_R = _calcT4AntiderivMoment2(zR)
+            series float rawM2 = (((math.pow(sigmaR, 3) * M2_R) + (math.pow(sigmaL, 3) * M2_L)) / totalArea) / SCALE_M2
+            
+            // 3. Raw Moment 3
+            series float constM3 = -5.33333333
+            series float M3_L = _calcT4AntiderivMoment3(zL) - constM3
+            series float M3_R = _calcT4AntiderivMoment3(zR) - constM3
+            series float rawM3 = (((math.pow(sigmaR, 4) * M3_R) - (math.pow(sigmaL, 4) * M3_L)) / totalArea) / SCALE_M3
+            
+            // 4. Central Moments (Steiner Translation)
+            series float varRel = rawM2 - (meanRel * meanRel)
+            series float centM3 = rawM3 - (3.0 * meanRel * rawM2) + (2.0 * math.pow(meanRel, 3))
+            
+            // 5. Standardized Skewness
+            if varRel <= EPSILON
+                0.0
+            else
+                centM3 / math.pow(varRel, 1.5)
+
+// @function Excess Kurtosis (4th Standardized Moment).
+//           Measures "Fat Tails". In Log-Space, this accurately captures 
+//           outlier risk in returns (Leptokurtic vs Platykurtic).
+// @param    estimator series RealEst Structural model assumption.
+// @param    logSpace  series bool    If true, calculates Kurtosis of Log-Prices.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Excess Kurtosis (>0 means fat tails).
+export realKurt(
+  series RealEst estimator,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    switch estimator
+        RealEst.uniform    => -1.2 // ANALYTICAL SOLUTION (Exact)
+        RealEst.triangular => -0.6 // ANALYTICAL SOLUTION (Exact)
+        RealEst.arcsine    => -1.5 // ANALYTICAL SOLUTION (Exact)
+        RealEst.betaSym    => -0.85714 // ANALYTICAL SOLUTION (Exact)
+
+        RealEst.betaSkew =>
+            // ANALYTICAL SOLUTION (Exact)
+            [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+
+            series float muRel = _calcMuRel(o, c, l, rng)
+            [alpha, beta]      = _calcSafeBetaParams(muRel)
+
+            series float sumAB = alpha + beta
+            series float diffAB = alpha - beta
+            series float num = 6.0 * ((diffAB * diffAB) * (sumAB + 1.0) - alpha * beta * (sumAB + 2.0))
+            series float den = alpha * beta * (sumAB + 2.0) * (sumAB + 3.0)
+            num / den
+
+        =>
+            // ANALYTICAL SOLUTION (Exact)
+            [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+
+            series float muRel = (estimator == RealEst.t4Sym) ? 0.5 : _calcMuRel(o, c, l, rng)
+
+            series float m      = math.min(math.max(muRel, T4_EDGE_LIMIT), 1 - T4_EDGE_LIMIT)
+            series float sigmaL = 2.0 * m
+            series float sigmaR = 2.0 * (1.0 - m)
+            series float zL = 0.5 * T4_SHAPE_FACTOR
+            series float zR = 0.5 * T4_SHAPE_FACTOR
+            series float totalArea = (_calcT4AntiderivArea(zL) * sigmaL) + (_calcT4AntiderivArea(zR) * sigmaR)
+
+            // Scaling Factors
+            const float SCALE_M1 = T4_SHAPE_FACTOR
+            const float SCALE_M2 = SCALE_M1 * T4_SHAPE_FACTOR
+            const float SCALE_M3 = SCALE_M2 * T4_SHAPE_FACTOR
+            const float SCALE_M4 = SCALE_M2 * SCALE_M2
+
+            // Mean & Raw Moments 2, 3 needed for translation
+            series float M1_L = _calcT4AntiderivMoment(zL) - (-1.33333333)
+            series float M1_R = _calcT4AntiderivMoment(zR) - (-1.33333333)
+            series float meanRel = (((sigmaR * sigmaR * M1_R) - (sigmaL * sigmaL * M1_L)) / totalArea) / SCALE_M1
+
+            series float M2_L = _calcT4AntiderivMoment2(zL)
+            series float M2_R = _calcT4AntiderivMoment2(zR)
+            series float rawM2 = (((math.pow(sigmaR, 3) * M2_R) + (math.pow(sigmaL, 3) * M2_L)) / totalArea) / SCALE_M2
+            
+            series float constM3 = -5.33333333
+            series float M3_L = _calcT4AntiderivMoment3(zL) - constM3
+            series float M3_R = _calcT4AntiderivMoment3(zR) - constM3
+            series float rawM3 = (((math.pow(sigmaR, 4) * M3_R) - (math.pow(sigmaL, 4) * M3_L)) / totalArea) / SCALE_M3
+
+            // Raw Moment 4
+            series float M4_L = _calcT4AntiderivMoment4(zL)
+            series float M4_R = _calcT4AntiderivMoment4(zR)
+            series float rawM4 = (((math.pow(sigmaR, 5) * M4_R) + (math.pow(sigmaL, 5) * M4_L)) / totalArea) / SCALE_M4
+
+            // Central Moments
+            series float varRel = rawM2 - (meanRel * meanRel)
+            series float centM4 = rawM4 - (4.0 * meanRel * rawM3) + (6.0 * math.pow(meanRel, 2) * rawM2) - (3.0 * math.pow(meanRel, 4))
+
+            // Excess Kurtosis
+            if varRel <= EPSILON
+                0.0
+            else
+                (centM4 / (varRel * varRel)) - 3.0
+
+// @function Generic n-th Central Moment.
+//           Calculates higher-order moments ($E[(x - \mu)^n]$) or standardized 
+//           moments depending on internal logic.
+// @param    estimator series RealEst Structural model assumption.
+// @param    order     series int     Order of the moment (2=Var, 3=Skew, 4=Kurt, >4=Raw).
+// @param    steps     series int     Integration steps for complex high-order moments.
+// @param    logSpace  series bool    If true, calculates moment in Log-Space.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Moment value.
+export realMoment(
+  series RealEst estimator,
+  series int order,
+  series int steps = 1,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    // Order 1 is the 1st Central Moment, which is always 0 by definition: E[x - E[x]] = 0
+    if order == 1
+        0.0
+    // Order 2 is Variance (Sigma^2)
+    else if order == 2
+        series float sigma = realSigma(estimator, logSpace, offset)
+        sigma * sigma
+
+    // Order 3 (Unstandardized) = Skewness * Sigma^3
+    else if order == 3
+        series float skew  = realSkew(estimator, logSpace, offset)
+        series float sigma = realSigma(estimator, logSpace, offset)
+
+        skew * math.pow(sigma, 3)
+        
+    // Order 4 (Unstandardized) = Kurtosis * Sigma^4
+    // Note: realKurt returns *Excess* Kurtosis (Norm-3). We need raw kurtosis here, so +3.
+    else if order == 4
+        series float kurt  = realKurt(estimator, logSpace, offset)
+        series float sigma = realSigma(estimator, logSpace, offset)
+        (kurt + 3.0) * math.pow(sigma, 4)
+
+    // Order > 4 or arbitrary moments not covered by standard functions
+    else
+        [o, h, l, c, rng] = _calcOhlcSpace(logSpace, offset)
+
+        // Case A: Simple Analytical Distributions
+        // For Uniform, Triangular, etc., we can derive n-th moments via algebra.
+        if (estimator == RealEst.uniform or 
+            estimator == RealEst.triangular or 
+            estimator == RealEst.arcsine or 
+            estimator == RealEst.betaSym)
+
+            // Symmetric distributions have 0 odd central moments
+            if order % 2 != 0
+                0.0
+            else
+                series float rHalf = rng * 0.5
+
+                if estimator == RealEst.uniform
+                    // E[x^n] on [-a, a] -> a^n / (n+1) * 2 (if even) ... simplified logic here
+                    math.pow(rHalf, order) / (order + 1.0)
+                else if estimator == RealEst.triangular
+                    math.pow(rHalf, order) * 2.0 / ((order + 1.0) * (order + 2.0))
+                else if estimator == RealEst.arcsine
+                    // Recursive product for arcsine moments involving factorials
+                    series float coeff = 1.0
+                    for i = 1 to order / 2
+                        coeff *= (2.0 * i - 1.0) / (2.0 * i)
+                    coeff * math.pow(rHalf, order)
+                else if estimator == RealEst.betaSym
+                    // Moments of Beta(2,2) scaled to range
+                    (3.0 * math.pow(rHalf, order)) / ((order + 1.0) * (order + 3.0))
+
+        // Case B: Complex/Skewed Distributions (BetaSkew, T4)
+        // Analytical general n-th moments for truncated/skewed T4 are extremely complex.
+        // We use numerical integration (Composite Gauss-Legendre Quadrature).
+        else if (estimator == RealEst.betaSkew or 
+                 estimator == RealEst.t4Sym or 
+                 estimator == RealEst.t4Skew)
+            
+            series bool isT4 = (estimator == RealEst.t4Skew or estimator == RealEst.t4Sym)
+            // Higher orders require more steps to capture the curve curvature
+            series int autoSteps = isT4 ? (10 + order * 2) : (5 + order)
+            series int dynSteps = math.max(steps, autoSteps)
+            
+            // Calculate Mean first to perform the shift (x - Mean)
+            series float effectiveMu = realMu(estimator, logSpace, offset)
+            
+            series float totalSum = 0.0
+            series float segWidth = rng / dynSteps
+            series float halfLen  = segWidth * 0.5
+            
+            // Gauss-Legendre Nodes (relative to center of segment)
+            series float dx1 = 0.5384693 * halfLen
+            series float dx2 = 0.9061798 * halfLen
+            
+            for i = 0 to dynSteps - 1
+                series float midPt  = l + (i * segWidth) + halfLen
+
+                // Evaluate PDF at 5 points per segment
+                series float pdfC   = _calcPdfCore(estimator, midPt, o, h, l, c, rng)
+                series float pdfO1a = _calcPdfCore(estimator, midPt - dx1, o, h, l, c, rng)
+                series float pdfO1b = _calcPdfCore(estimator, midPt + dx1, o, h, l, c, rng)
+                series float pdfO2a = _calcPdfCore(estimator, midPt - dx2, o, h, l, c, rng)
+                series float pdfO2b = _calcPdfCore(estimator, midPt + dx2, o, h, l, c, rng)
+
+                // Moment contribution: (x - Mu)^n * PDF(x)
+                series float termCenter = 0.5688889 * math.pow(midPt - effectiveMu, order) * pdfC   
+
+                series float termOuter1 = 0.4786287 * (math.pow(midPt - dx1 - effectiveMu, order) * pdfO1a + 
+                                                       math.pow(midPt + dx1 - effectiveMu, order) * pdfO1b)
+                                           
+                series float termOuter2 = 0.2369269 * (math.pow(midPt - dx2 - effectiveMu, order) * pdfO2a + 
+                                                       math.pow(midPt + dx2 - effectiveMu, order) * pdfO2b)
+                
+                totalSum += termCenter + termOuter1 + termOuter2
+            
+            totalSum * halfLen
+
+// @function Covariance using Hybrid Copula Estimator.
+//           Combines Direction (Correlation) and Magnitude (Sigma).
+//           - If `logSpace=true`, returns Covariance of Log-Returns (unit-less).
+//           - If `logSpace=false`, returns Covariance of Prices ($^2).
+// @param    estimator series RealEst Structural model for the base asset.
+// @param    extOpen   series float   External Asset Open.
+// @param    extHigh   series float   External Asset High.
+// @param    extLow    series float   External Asset Low.
+// @param    extClose  series float   External Asset Close.
+// @param    extSigma  series float   External Asset Sigma (must match logSpace setting).
+// @param    logSpace  series bool    If true, calculates covariance of returns.
+// @param    offset    series int     Bar offset.
+// @returns            series float   Covariance.
+export realCoVar(
+  series RealEst estimator,
+  series float extOpen,
+  series float extHigh,
+  series float extLow,
+  series float extClose,
+  series float extSigma,
+  series bool logSpace = false,
+  series int offset = 0
+  ) =>
+    // 1. Get Magnitudes (Sigmas)
+    series float sigA = realSigma(estimator, logSpace, offset)
+    series float sigB = math.max(extSigma[offset], 0)
+    
+    // Safety check for flat bars
+    if sigA <= EPSILON or sigB <= EPSILON or open[offset] <= EPSILON or extOpen[offset] <= EPSILON
+        0.0
+    else
+        // 2. Hybrid Correlation Logic
+        // Problem: Range-based volatility (sigA, sigB) is always positive. It loses direction.
+        // Solution: Use simple Log-Returns (Open-to-Close) to determine correlation (rho),
+        //           but use Rogers-Satchell (via realSigma) for the magnitude/energy.
+        
+        // Calculate Rogers-Satchell Variance for Asset A (Internal)
+        [lnO_A, lnH_A, lnL_A, lnC_A, _] = _calcOhlcSpace(true, offset)
+        series float uA = lnH_A - lnO_A
+        series float dA = lnL_A - lnO_A
+        series float cA = lnC_A - lnO_A
+        series float varRsA = uA * (uA - cA) + dA * (dA - cA)
+
+        // Calculate Rogers-Satchell Variance for Asset B (External)
+        if logSpace and (extOpen[offset] <= 0 or extHigh[offset] <= 0 or extLow[offset] <= 0 or extClose[offset] <= 0)
+            runtime.error("Log-Space analysis requires strictly positive prices. Negative values or zero found.")
+        
+        series float lnO_B = math.log(math.max(extOpen[offset], EPSILON))
+        series float lnH_B = math.log(math.max(extHigh[offset], EPSILON))
+        series float lnL_B = math.log(math.max(extLow[offset], EPSILON))
+        series float lnC_B = math.log(math.max(extClose[offset], EPSILON))
+        
+        series float uB = lnH_B - lnO_B
+        series float dB = lnL_B - lnO_B
+        series float cB = lnC_B - lnO_B
+        series float varRsB = uB * (uB - cB) + dB * (dB - cB)
+
+        // 3. Calculate Correlation Coefficient (Rho)
+        series float rho = 0.0
+        float volRsA = math.sqrt(math.max(varRsA, 0.0))
+        float volRsB = math.sqrt(math.max(varRsB, 0.0))
+
+        if volRsA > EPSILON and volRsB > EPSILON
+            // Cosine similarity of the return vectors (simplified to scalar product here)
+            // Normalized by their RS-Volatility to get a correlation [-1, 1]
+            rho := (cA * cB) / (volRsA * volRsB)
+            rho := math.max(math.min(rho, 1.0), -1.0)
+            
+        // 4. Combine: Rho * SigmaA * SigmaB
+        rho * sigA * sigB
+
+// @function Estimates **μ̂** (mean log-return / drift) consistent with the chosen estimator's assumptions.
+//           - **Parkinson / Garman-Klass:** Assume zero drift ($\mu=0$) to derive their efficiency. Returns `0.0`.
+//           - **Rogers-Satchell:** Allows for non-zero drift. Returns the empirical log-return $\ln(C/O)$.
+// @param   estimator  series LogEst  Distribution assumption (see enum).
+// @param   offset     series int     To offset the calculated bar 
+// @returns            series float   μ̂ (unit-less log-return).
+export logMu(
+  series LogEst estimator,
+  series int offset = 0
+  ) =>
+    if open[offset] <= EPSILON or close[offset] <= EPSILON
+        na
+    else
+        switch estimator
+            LogEst.parkinson      => 0.0
+            LogEst.garmanKlass    => 0.0
+            LogEst.rogersSatchell => math.log(close[offset] / open[offset])
+            => runtime.error("Unknown estimator"), na
+
+// @function Estimates **σ̂** (standard deviation) of *log-returns* for the current bar.
+//           - **Parkinson:** Scaled High-Low range. Assumes zero drift.
+//           - **Garman-Klass:** Composite OHLC. Assumes zero drift.
+//           - **Rogers-Satchell:** Drift-independent OHLC estimator. Best for trending assets.
+// @param   estimator  series LogEst  Distribution assumption (see enum).
+// @param   offset     series int     To offset the calculated bar 
+// @returns            series float   σ̂ (unit-less); `na` if undefined.
+export logSigma(
+  series LogEst estimator,
+  series int offset = 0
+  ) =>
+    if low[offset] <= EPSILON or high[offset] <= EPSILON or open[offset] <= EPSILON or close[offset] <= EPSILON
+        0.0
+    else
+        switch estimator
+            LogEst.parkinson =>
+                math.abs(math.log(high[offset] / low[offset])) / 1.66510922
+
+            LogEst.garmanKlass =>
+                series float hl = math.log(high[offset] / low[offset])
+                series float co = math.log(close[offset] / open[offset])
+                series float varGK = 0.5 * (hl * hl) - 0.38629436 * (co * co)
+                math.sqrt(math.max(varGK, 0.0))
+
+            LogEst.rogersSatchell =>
+                series float u = math.log(high[offset] / open[offset])
+                series float d = math.log(low[offset]  / open[offset])
+                series float c = math.log(close[offset] / open[offset])
+                
+                series float varRS = u * (u - c) + d * (d - c)
+                math.sqrt(math.max(varRS, 0.0))
+
+            => runtime.error("Unknown estimator"), na
+
+// @function Estimates the **Covariance of Log-Returns**.
+//           Uses the standard product of log-returns: $\ln(C_A/O_A) \cdot \ln(C_B/O_B)$.
+//           Unlike range-based variance estimators (which are always positive), this method 
+//           correctly captures directional correlation (positive and negative), making it 
+//           the reliable choice for determining the sign of the relationship.
+// @param    extOpen     series float   Open price of the benchmark asset.
+// @param    extClose    series float   Close price of the benchmark asset.
+// @param    offset      series int     To offset the calculated bar.
+// @returns  series float Covariance estimate (unit-less).
+export logCoVar(
+  series float extOpen,
+  series float extClose,
+  series int offset = 0
+  ) =>
+    if open[offset] <= EPSILON or close[offset] <= EPSILON or 
+       extOpen[offset] <= EPSILON or extClose[offset] <= EPSILON
+        na
+    else
+        series float r1 = math.log(close[offset] / open[offset])
+        series float r2 = math.log(extClose[offset] / extOpen[offset])
+        r1 * r2

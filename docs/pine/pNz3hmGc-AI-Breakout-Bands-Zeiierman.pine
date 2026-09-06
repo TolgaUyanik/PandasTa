@@ -1,0 +1,133 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+// © Zeiierman {
+//@version=6
+indicator("AI Breakout Bands (Zeiierman)", overlay=true, max_bars_back=500)
+//~~}
+
+// TOOLTIPS {
+var string t1 = "Controls the assumed process noise in the position state. Lower = smoother but less responsive; higher = more reactive to price changes."
+var string t2 = "Controls the assumed process noise in the velocity state. Lower = smoother trend detection; higher = more responsive to velocity changes."
+var string t3 = "Defines the expected noise in price observations. Higher = less sensitivity to spikes, but more lag."
+var string t4 = "Number of past Kalman estimates to consider. Larger = smoother curve; smaller = more responsive."
+var string t5 = "Bars used to compute the slope of the smoothed Kalman line. Larger = smoother slope; smaller = more sensitive."
+var string t6 = "Number of bars over which to average absolute error for band width. Larger = smoother bands; smaller = tighter bands."
+var string t7 = "Multiplier applied to MAE to set band distance. Higher = wider bands; lower = narrower bands."
+var string t8 = "Color used for bullish trend and upper band."
+var string t9 = "Color used for bearish trend and lower band."
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ INPUTS {
+processNoisePos   = input.float(0.02,  "Process Noise (Position)",  group="Kalman Filter",  minval=0.0001,  step=0.1, tooltip=t1)
+processNoiseVel   = input.float(0.001, "Process Noise (Velocity)",  group="Kalman Filter",  minval=0.00001, step=0.01, tooltip=t2)
+measurementNoise  = input.float(200,   "Measurement Noise (R)",     group="Kalman Filter",  minval=1,            tooltip=t3)
+klen              = input.int(10,     "K-Neighbor Length",         group="K-Neighbor Smoothing", minval=1, tooltip=t4)
+slope_window      = input.int(20,     "Slope Calculation Window",  group="Slope Settings",       minval=1, tooltip=t5)
+bandLookback      = input.int(100,    "Band Lookback (MAE)",       group="Breakout Bands",       minval=1, tooltip=t6)
+bandMultiplier    = input.float(2.1,  "Band Multiplier",           group="Breakout Bands",       step=0.1, tooltip=t7)
+colPos            = input.color(#00bcd4, "Positive Color",         group="Style", tooltip=t8)
+colNeg            = input.color(#2962ff, "Negative Color",         group="Style", tooltip=t9)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ STATE VARIABLES {
+var float x_p = na
+var float x_v = na
+var float p00 = na
+var float p01 = na
+var float p10 = na
+var float p11 = na
+
+if barstate.isfirst
+    x_p := close
+    x_v := 0.0
+    p00 := 1.0
+    p01 := 0.0
+    p10 := 0.0
+    p11 := 1.0
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ KALMAN UPDATE FUNCTION {
+f_kalman(z, xp, xv, m00, m01, m10, m11) =>
+    // 1) Predict
+    float pred_p = xp + xv
+    float pred_v = xv
+    // 2) Covariance predict: F·P·Fᵀ + Q
+    float a00 = m00 + m10
+    float a01 = m01 + m11
+    float a10 = m10
+    float a11 = m11
+    float p00_ = a00 + a01 + processNoisePos
+    float p01_ = a01
+    float p10_ = a10 + a11
+    float p11_ = a11 + processNoiseVel
+    // 3) Measurement update
+    float y  = z - pred_p
+    float S  = p00_ + measurementNoise
+    float K0 = p00_ / S
+    float K1 = p10_ / S
+    float upd_p = pred_p + K0 * y
+    float upd_v = pred_v + K1 * y
+    // 4) Covariance update: (I − K·H)·P_
+    float pp00 = (1 - K0) * p00_
+    float pp01 = (1 - K0) * p01_
+    float pp10 = -K1 * p00_ + p10_
+    float pp11 = -K1 * p01_ + p11_
+    [upd_p, upd_v, pp00, pp01, pp10, pp11]
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ RUN KALMAN {
+[kp, kv, np00, np01, np10, np11] = f_kalman(close, x_p, x_v, p00, p01, p10, p11)
+x_p := kp
+x_v := kv
+p00 := np00
+p01 := np01
+p10 := np10
+p11 := np11
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ ADVANCED K-NEIGHBOR SMOOTHING (exclude self) {
+f_knn_smooth(src, len) =>
+    float curr = src
+    float sumW = 0.0
+    float sumX = 0.0
+    for i = 1 to len
+        float xi   = src[i]
+        float dist = math.abs(curr - xi) + 1e-6
+        float w    = 1.0 / dist
+        sumW  += w
+        sumX  += xi * w
+    sumW > 0 ? sumX / sumW : curr
+
+smoothKalman = f_knn_smooth(x_p, klen)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ SLOPE CALCULATION {
+float slope = na
+if true
+    slope := ta.linreg(smoothKalman, slope_window, 0) - ta.linreg(smoothKalman, slope_window, 1)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ BANDS {
+float absErr    = math.abs(close - smoothKalman)
+float mae       = ta.sma(absErr, bandLookback)
+float upperBand = smoothKalman + bandMultiplier * mae
+float lowerBand = smoothKalman - bandMultiplier * mae
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ COLOR LOGIC {
+bool bull = close > upperBand
+bool bear = close < lowerBand
+color mainCol = bull ? colPos : bear ? colNeg : na
+if na(mainCol) and true
+    mainCol := slope > 0 ? colPos : colNeg
+mainCol := nz(mainCol, color.orange)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ PLOTTING {
+p_base = plot(smoothKalman, color=color.new(color.blue, 100), title="Smoothed Kalman Base")
+plot(smoothKalman, color=mainCol, linewidth=2, title="Smoothed Kalman Trend")
+p_up   = plot(upperBand,     color=color.new(colPos, 75), title="Upper Band")
+p_down = plot(lowerBand,     color=color.new(colNeg, 75), title="Lower Band")
+fill(p_base, p_up,   color=color.new(colPos, 90), title="Upper Fill")
+fill(p_base, p_down, color=color.new(colNeg, 90), title="Lower Fill")
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}

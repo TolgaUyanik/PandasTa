@@ -1,0 +1,358 @@
+//@version=5
+strategy("long only simple moving average, standard deviation band for chop control and exit regulation and ema emergency exit",
+     overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=3,
+     pyramiding=0,
+     process_orders_on_close=false,
+     calc_on_every_tick=false,
+     calc_on_order_fills=true,
+     use_bar_magnifier=false)
+
+// =====================
+// LONG ONLY
+// =====================
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+// =====================
+// WEBHOOK SETTINGS
+// Leave blank to use the chart ticker.
+// If needed, type the exact ticker TradersPost expects.
+// =====================
+webhookTickerInput = input.string("", "Webhook Ticker Override")
+webhookTicker = webhookTickerInput == "" ? syminfo.ticker : webhookTickerInput
+
+// =====================
+// BOLLINGER BAND SETTINGS
+// =====================
+bbLength = input.int(20, "Bollinger Band Length")
+entryMult = input.float(0.5, "Entry Bollinger Band Multiplier")
+tp2Mult = input.float(2.5, "Exit 2 Bollinger Band Multiplier")
+runnerMult = input.float(2.0, "Runner Exit Bollinger Band Multiplier")
+
+// =====================
+// EMA SETTINGS
+// =====================
+emaLength = input.int(25, "EMA Exit Length")
+
+// =====================
+// PROFIT TARGET SETTINGS
+// $2,000 profit target converted into chart points
+// using syminfo.pointvalue.
+// =====================
+profitTargetUSD = input.float(2000.0, "Exit 1 Profit Target Dollars")
+profitTargetPoints = profitTargetUSD / syminfo.pointvalue
+
+// =====================
+// STOP LOSS SETTINGS
+// $4,500 stop loss converted into chart points
+// using syminfo.pointvalue.
+// =====================
+stopLossUSD = input.float(4500.0, "Stop Loss Dollars")
+stopLossPoints = stopLossUSD / syminfo.pointvalue
+
+// =====================
+// BOLLINGER BAND CALCULATION
+// =====================
+bbBasis = ta.sma(close, bbLength)
+bbDev   = ta.stdev(close, bbLength)
+
+upperEntryBand  = bbBasis + bbDev * entryMult
+upperTP2Band    = bbBasis + bbDev * tp2Mult
+upperRunnerBand = bbBasis + bbDev * runnerMult
+
+lowerEntryBand  = bbBasis - bbDev * entryMult
+lowerTP2Band    = bbBasis - bbDev * tp2Mult
+lowerRunnerBand = bbBasis - bbDev * runnerMult
+
+// =====================
+// EMA CALCULATION
+// =====================
+ema25 = ta.ema(close, emaLength)
+
+// =====================
+// WEBHOOK JSON
+// Uses timenow for live automation alert time.
+// =====================
+longEntryJSON =
+     '{"ticker":"' + webhookTicker +
+     '","action":"buy","sentiment":"long","quantity":3,"price":' +
+     str.tostring(close) +
+     ',"time":' +
+     str.tostring(timenow) +
+     ',"interval":"' +
+     timeframe.period +
+     '","reason":"long_entry_3_contracts"}'
+
+longTP1_JSON =
+     '{"ticker":"' + webhookTicker +
+     '","action":"sell","sentiment":"flat","quantity":1,"reduce_only":true,"price":' +
+     str.tostring(close) +
+     ',"time":' +
+     str.tostring(timenow) +
+     ',"interval":"' +
+     timeframe.period +
+     '","reason":"tp1_2000_profit"}'
+
+longTP2_JSON =
+     '{"ticker":"' + webhookTicker +
+     '","action":"sell","sentiment":"flat","quantity":1,"reduce_only":true,"price":' +
+     str.tostring(close) +
+     ',"time":' +
+     str.tostring(timenow) +
+     ',"interval":"' +
+     timeframe.period +
+     '","reason":"tp2_upper_2_5_bb_touch"}'
+
+longRunnerExitJSON =
+     '{"ticker":"' + webhookTicker +
+     '","action":"sell","sentiment":"flat","quantity":1,"reduce_only":true,"price":' +
+     str.tostring(close) +
+     ',"time":' +
+     str.tostring(timenow) +
+     ',"interval":"' +
+     timeframe.period +
+     '","reason":"runner_drop_below_upper_2_0_bb"}'
+
+longEMAExitJSON =
+     '{"ticker":"' + webhookTicker +
+     '","action":"sell","sentiment":"flat","quantity":3,"reduce_only":true,"price":' +
+     str.tostring(close) +
+     ',"time":' +
+     str.tostring(timenow) +
+     ',"interval":"' +
+     timeframe.period +
+     '","reason":"close_below_25_ema_exit_remaining"}'
+
+longStopJSON =
+     '{"ticker":"' + webhookTicker +
+     '","action":"sell","sentiment":"flat","quantity":1,"reduce_only":true,"price":' +
+     str.tostring(close) +
+     ',"time":' +
+     str.tostring(timenow) +
+     ',"interval":"' +
+     timeframe.period +
+     '","reason":"4500_stop_loss"}'
+
+// =====================
+// ENTRY CONDITION
+// Entry requires BOTH:
+// 1. The candle CLOSES above the upper 0.5 Bollinger Band
+//    for 3 bars in a row.
+// 2. The candle CLOSES above the 20 SMA
+//    for 3 bars in a row.
+// =====================
+day1ClosedAbove = close > upperEntryBand
+day2ClosedAbove = close[1] > upperEntryBand[1]
+day3ClosedAbove = close[2] > upperEntryBand[2]
+
+threeDailyClosesAbove =
+     day1ClosedAbove and
+     day2ClosedAbove and
+     day3ClosedAbove
+
+day1ClosedAbove20SMA = close > bbBasis
+day2ClosedAbove20SMA = close[1] > bbBasis[1]
+day3ClosedAbove20SMA = close[2] > bbBasis[2]
+
+threeClosesAbove20SMA =
+     day1ClosedAbove20SMA and
+     day2ClosedAbove20SMA and
+     day3ClosedAbove20SMA
+
+// =====================
+// RESET / RE-ARM LOGIC
+// After a completed trade fully exits, the system will NOT allow
+// another entry until price closes below the 20 SMA,
+// then closes back above the 20 SMA.
+// After that, it still must close above the upper 0.5 BB
+// and above the 20 SMA for 3 bars in a row before entering again.
+// =====================
+var bool tradeCycleLocked = false
+var bool waitingForSMAReset = false
+var bool closedBelowSMAAfterSell = false
+
+newClosedTrade = strategy.closedtrades > strategy.closedtrades[1]
+
+if newClosedTrade and strategy.position_size == 0
+    tradeCycleLocked := true
+    waitingForSMAReset := true
+    closedBelowSMAAfterSell := false
+
+if waitingForSMAReset and strategy.position_size == 0
+    if close < bbBasis
+        closedBelowSMAAfterSell := true
+
+    if closedBelowSMAAfterSell and close > bbBasis
+        tradeCycleLocked := false
+        waitingForSMAReset := false
+        closedBelowSMAAfterSell := false
+
+longEntry =
+     threeDailyClosesAbove and
+     threeClosesAbove20SMA and
+     strategy.position_size == 0 and
+     strategy.opentrades == 0 and
+     not tradeCycleLocked
+
+if longEntry
+    strategy.entry("Long", strategy.long, alert_message=longEntryJSON)
+    tradeCycleLocked := true
+
+// =====================
+// ORDER-SEQUENCED BOLLINGER BAND 1-2-3 EXITS + STOP LOSS
+//
+// Exit 1:
+// Sell 1 contract at +$2,000 profit.
+//
+// Exit 2:
+// Sell 1 contract at upper 2.5 BB touch,
+// but ONLY after TP1 has already happened.
+//
+// Exit 3 Runner:
+// Sell final 1 contract when price drops back below upper 2.0 BB,
+// but ONLY after TP2 has already happened.
+//
+// Additional Exit:
+// If price closes below the 25 EMA, sell whatever position remains.
+//
+// Stop Loss:
+// $4,500 stop loss protects each remaining contract.
+// =====================
+longTP1Price = strategy.position_avg_price + profitTargetPoints
+longStopPrice = strategy.position_avg_price - stopLossPoints
+
+var bool tp1Done = false
+var bool tp2Done = false
+var bool runnerArmed = false
+
+if strategy.position_size == 0
+    tp1Done := false
+    tp2Done := false
+    runnerArmed := false
+
+if strategy.position_size > 0 and strategy.position_size <= 2
+    tp1Done := true
+
+if strategy.position_size > 0 and tp1Done and strategy.position_size <= 1
+    tp2Done := true
+
+if strategy.position_size > 0 and tp2Done
+    runnerArmed := true
+
+emaExitSignal =
+     strategy.position_size > 0 and
+     close < ema25
+
+// TP1 is the first active profit exit, with stop protection.
+if strategy.position_size > 0 and not tp1Done
+    strategy.exit("TP1 $2000 Profit / Stop",
+         from_entry="Long",
+         qty=1,
+         limit=longTP1Price,
+         stop=longStopPrice,
+         alert_profit=longTP1_JSON,
+         alert_loss=longStopJSON)
+
+// TP2 is protected by the stop from the start,
+// but its 2.5 BB profit target is not active until TP1 is done.
+tp2LimitPrice = tp1Done ? upperTP2Band : na
+
+if strategy.position_size > 0 and not tp2Done
+    strategy.exit("TP2 Upper 2.5 BB / Stop",
+         from_entry="Long",
+         qty=1,
+         limit=tp2LimitPrice,
+         stop=longStopPrice,
+         alert_profit=longTP2_JSON,
+         alert_loss=longStopJSON)
+
+// Runner uses the $4,500 stop until TP2 is done.
+// After TP2 is done, the runner stop moves to the upper 2.0 BB.
+runnerStopPrice = runnerArmed ? upperRunnerBand : longStopPrice
+runnerExitJSON = runnerArmed ? longRunnerExitJSON : longStopJSON
+
+if strategy.position_size > 0
+    strategy.exit("Runner 2.0 BB / Stop",
+         from_entry="Long",
+         qty=1,
+         stop=runnerStopPrice,
+         alert_message=runnerExitJSON)
+
+// Additional 25 EMA exit closes whatever position remains.
+if emaExitSignal
+    strategy.close("Long", alert_message=longEMAExitJSON, immediately=true)
+
+// =====================
+// VISUALS
+// =====================
+plot(bbBasis, "BB Basis / 20 SMA", color=color.white, linewidth=2)
+plot(ema25, "25 EMA", color=color.aqua, linewidth=2)
+
+plot(upperEntryBand, "Upper 0.5 BB", color=color.orange, linewidth=2)
+plot(upperRunnerBand, "Upper 2.0 BB Runner Line", color=color.yellow, linewidth=2)
+plot(upperTP2Band, "Upper 2.5 BB Exit Line", color=color.green, linewidth=2)
+
+plot(lowerEntryBand, "Lower 0.5 BB", color=color.orange, linewidth=1)
+plot(lowerRunnerBand, "Lower 2.0 BB", color=color.yellow, linewidth=1)
+plot(lowerTP2Band, "Lower 2.5 BB", color=color.red, linewidth=1)
+
+plotshape(longEntry,
+     title="BUY SIGNAL",
+     text="BUY\n3 CONTRACTS",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.green,
+     textcolor=color.white,
+     size=size.small)
+
+tp1Touch = strategy.position_size > 0 and not tp1Done and high >= longTP1Price
+tp2Touch = strategy.position_size > 0 and tp1Done and not tp2Done and high >= upperTP2Band
+runnerExitTouch = strategy.position_size > 0 and runnerArmed and low <= upperRunnerBand
+emaExitTouch = emaExitSignal
+stopTouch = strategy.position_size > 0 and low <= longStopPrice
+
+plotshape(tp1Touch,
+     title="TP1 TOUCH",
+     text="TP1\n$2000",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(tp2Touch,
+     title="TP2 TOUCH",
+     text="TP2\n2.5 BB",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(runnerExitTouch,
+     title="RUNNER EXIT TOUCH",
+     text="RUNNER\n2.0 BB",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(emaExitTouch,
+     title="25 EMA EXIT",
+     text="EXIT\n25 EMA",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(stopTouch,
+     title="STOP TOUCH",
+     text="STOP\n$4500",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     textcolor=color.white,
+     size=size.small)

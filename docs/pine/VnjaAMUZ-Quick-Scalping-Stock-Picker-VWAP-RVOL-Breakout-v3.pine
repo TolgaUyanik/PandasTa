@@ -1,0 +1,239 @@
+//@version=6
+strategy("Quick Scalping Stock Picker - VWAP RVOL Breakout v3",
+     overlay              = true,
+     initial_capital      = 100000,
+     pyramiding           = 0,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 1,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.02,
+     slippage             = 2,
+     process_orders_on_close = false,
+     calc_on_every_tick   = false)
+
+//─────────────────────────────────────────
+// Inputs
+//─────────────────────────────────────────
+grpSession   = "Session & Timeframe"
+grpFilters   = "Signal Filters"
+grpRisk      = "Risk Management"
+grpDebug     = "Debug"
+
+tradeSession = input.session("0930-1130", "Trade window",        group = grpSession)
+bypassSession= input.bool(false,          "Bypass session filter (debug)", group = grpSession,
+     tooltip = "Enable to confirm signals fire regardless of time. Disable for live use.")
+
+htf          = input.timeframe("15",  "HTF trend timeframe",    group = grpSession)
+fastLen      = input.int(9,    "Fast EMA",                      group = grpFilters)
+slowLen      = input.int(21,   "Slow EMA",                      group = grpFilters)
+breakLen     = input.int(8,    "Breakout lookback",             group = grpFilters)
+volLen       = input.int(20,   "Volume avg length",             group = grpFilters)
+rvolMin      = input.float(1.5,"Min relative volume", step=0.1, group = grpFilters)
+rsiLen       = input.int(14,   "RSI length",                    group = grpFilters)
+scoreThresh  = input.int(80,   "Score threshold (0-100)",
+     minval = 0, maxval = 100,                                   group = grpFilters,
+     tooltip = "Lower to 60-70 temporarily to confirm signals fire, then raise back to 80.")
+allowShorts  = input.bool(true,"Allow shorts",                  group = grpFilters)
+
+atrLen       = input.int(14,   "ATR length",                    group = grpRisk)
+stopATR      = input.float(0.55,"Stop ATR multiplier", step=0.05, group = grpRisk)
+targetR      = input.float(1.25,"Target R multiple",   step=0.05, group = grpRisk)
+maxBarsHold  = input.int(8,    "Max bars to hold",              group = grpRisk)
+riskPct      = input.float(1.0,"Risk % per trade",    step=0.1,
+     minval = 0.1, maxval = 10.0,                                group = grpRisk)
+
+//─────────────────────────────────────────
+// Core calculations
+//─────────────────────────────────────────
+
+// Session: bypass flag lets you confirm logic works before worrying about time
+inSession = bypassSession or not na(time(timeframe.period, tradeSession))
+
+vwapLine = ta.vwap(hlc3)
+emaFast  = ta.ema(close, fastLen)
+emaSlow  = ta.ema(close, slowLen)
+atr      = ta.atr(atrLen)
+rsi      = ta.rsi(close, rsiLen)
+
+// Shift avgVol by 1 to avoid self-reference
+avgVol = ta.sma(volume, volLen)[1]
+rvol   = avgVol > 0 ? volume / avgVol : 0.0   // default 0 instead of na — prevents volOK being killed by warmup bars
+
+breakHigh = ta.highest(high, breakLen)[1]
+breakLow  = ta.lowest(low,  breakLen)[1]
+
+// Higher-timeframe bias
+htfBull = request.security(syminfo.tickerid, htf, close > ta.ema(close, slowLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfBear = request.security(syminfo.tickerid, htf, close < ta.ema(close, slowLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Candle pressure
+barRange = high - low
+body     = math.abs(close - open)
+bodyPct  = barRange > 0 ? body / barRange : 0.0
+closePos = barRange > 0 ? (close - low) / barRange : 0.5
+
+bullCandlePressure = close > open and closePos > 0.65 and bodyPct > 0.45
+bearCandlePressure = close < open and closePos < 0.35 and bodyPct > 0.45
+
+//─────────────────────────────────────────
+// Stock-picking score
+//─────────────────────────────────────────
+volOK         = rvol >= rvolMin
+longTrend     = close > vwapLine and emaFast > emaSlow and close > emaFast and htfBull
+shortTrend    = close < vwapLine and emaFast < emaSlow and close < emaFast and htfBear
+longMomentum  = rsi > 55 and rsi < 78
+shortMomentum = rsi < 45 and rsi > 22
+longBreakout  = close > breakHigh
+shortBreakout = close < breakLow
+
+int longScore = 0
+longScore += volOK              ? 25 : 0
+longScore += longTrend          ? 25 : 0
+longScore += longMomentum       ? 20 : 0
+longScore += longBreakout       ? 20 : 0
+longScore += bullCandlePressure ? 10 : 0
+
+int shortScore = 0
+shortScore += volOK              ? 25 : 0
+shortScore += shortTrend         ? 25 : 0
+shortScore += shortMomentum      ? 20 : 0
+shortScore += shortBreakout      ? 20 : 0
+shortScore += bearCandlePressure ? 10 : 0
+
+//─────────────────────────────────────────
+// Entry signals
+//─────────────────────────────────────────
+longSignal  = inSession and longScore  >= scoreThresh
+shortSignal = inSession and allowShorts and shortScore >= scoreThresh
+
+//─────────────────────────────────────────
+// Risk-based position sizing
+//─────────────────────────────────────────
+stopDist = atr * stopATR
+riskAmt  = strategy.equity * (riskPct / 100)
+qty      = stopDist > 0 ? math.floor(riskAmt / stopDist) : 1
+safeQty  = math.max(qty, 1)
+
+if longSignal and strategy.position_size <= 0
+    strategy.entry("LONG SCALP", strategy.long, qty = safeQty)
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("SHORT SCALP", strategy.short, qty = safeQty)
+
+//─────────────────────────────────────────
+// Stop & target — locked at entry bar
+//─────────────────────────────────────────
+var float longStop    = na
+var float longTarget  = na
+var float shortStop   = na
+var float shortTarget = na
+
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+    longStop   := strategy.position_avg_price - atr * stopATR
+    longTarget := strategy.position_avg_price + atr * stopATR * targetR
+
+if strategy.position_size < 0 and strategy.position_size[1] >= 0
+    shortStop   := strategy.position_avg_price + atr * stopATR
+    shortTarget := strategy.position_avg_price - atr * stopATR * targetR
+
+if strategy.position_size == 0
+    longStop    := na
+    longTarget  := na
+    shortStop   := na
+    shortTarget := na
+
+if strategy.position_size > 0 and not na(longStop)
+    strategy.exit("LONG EXIT", "LONG SCALP", stop = longStop, limit = longTarget)
+
+if strategy.position_size < 0 and not na(shortStop)
+    strategy.exit("SHORT EXIT", "SHORT SCALP", stop = shortStop, limit = shortTarget)
+
+//─────────────────────────────────────────
+// Time-based exit
+//─────────────────────────────────────────
+var int entryBar = na
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+
+if strategy.position_size == 0
+    entryBar := na
+
+barsHeld = not na(entryBar) ? bar_index - entryBar : 0
+
+if strategy.position_size != 0 and barsHeld >= maxBarsHold
+    strategy.close_all(comment = "Time scalp exit")
+
+if not inSession and strategy.position_size != 0
+    strategy.close_all(comment = "Session close")
+
+//─────────────────────────────────────────
+// Visuals
+//─────────────────────────────────────────
+plot(vwapLine, "VWAP",     color = color.new(color.blue,   0))
+plot(emaFast,  "EMA Fast", color = color.new(color.green,  0))
+plot(emaSlow,  "EMA Slow", color = color.new(color.orange, 0))
+
+plot(strategy.position_size > 0 ? longStop    : na, "Long Stop",    color = color.red,   style = plot.style_linebr, linewidth = 1)
+plot(strategy.position_size > 0 ? longTarget  : na, "Long Target",  color = color.green, style = plot.style_linebr, linewidth = 1)
+plot(strategy.position_size < 0 ? shortStop   : na, "Short Stop",   color = color.red,   style = plot.style_linebr, linewidth = 1)
+plot(strategy.position_size < 0 ? shortTarget : na, "Short Target", color = color.green, style = plot.style_linebr, linewidth = 1)
+
+plotshape(longSignal,  title = "Long",  style = shape.triangleup,   location = location.belowbar, color = color.green, size = size.small, text = "SCALP L")
+plotshape(shortSignal, title = "Short", style = shape.triangledown, location = location.abovebar, color = color.red,   size = size.small, text = "SCALP S")
+
+bgcolor(longSignal ? color.new(color.green, 88) : shortSignal ? color.new(color.red, 88) : na)
+
+//─────────────────────────────────────────
+// Dashboard — shows every condition so you
+// can see exactly what is blocking signals
+//─────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 12, border_width = 1)
+
+okColor  = color.new(color.green, 20)
+nokColor = color.new(color.red,   20)
+hdrColor = color.new(color.gray,  20)
+
+f_cell(tbl, t, col, row, ok) =>
+    table.cell(tbl, col, row, t,
+         text_color = color.white,
+         bgcolor     = ok ? okColor : nokColor,
+         text_size   = size.small)
+
+f_hdr(tbl, t, col, row) =>
+    table.cell(tbl, col, row, t,
+         text_color = color.white,
+         bgcolor     = hdrColor,
+         text_size   = size.small)
+
+if barstate.islast
+    f_hdr(dash, "Condition",    0, 0)
+    f_hdr(dash, "Status",       1, 0)
+    f_cell(dash, "In Session",         0, 1,  inSession)
+    f_cell(dash, inSession ? "YES" : "NO — fix timeframe/symbol", 1, 1, inSession)
+    f_cell(dash, "RVOL ≥ " + str.tostring(rvolMin, "#.#"), 0, 2, volOK)
+    f_cell(dash, str.tostring(rvol, "#.##"),                1, 2, volOK)
+    f_cell(dash, "Long Trend",  0, 3, longTrend)
+    f_cell(dash, longTrend  ? "YES" : "NO", 1, 3, longTrend)
+    f_cell(dash, "Long Mom (RSI)", 0, 4, longMomentum)
+    f_cell(dash, str.tostring(math.round(rsi, 1)), 1, 4, longMomentum)
+    f_cell(dash, "Long Breakout",  0, 5, longBreakout)
+    f_cell(dash, longBreakout ? "YES" : "NO", 1, 5, longBreakout)
+    f_cell(dash, "Long Score / " + str.tostring(scoreThresh), 0, 6, longScore >= scoreThresh)
+    f_cell(dash, str.tostring(longScore) + (longScore >= scoreThresh ? " ✓" : " ✗"), 1, 6, longScore >= scoreThresh)
+    f_hdr(dash, "─────────────", 0, 7)
+    f_hdr(dash, "─────────────", 1, 7)
+    f_cell(dash, "Short Trend",  0, 8, shortTrend)
+    f_cell(dash, shortTrend ? "YES" : "NO", 1, 8, shortTrend)
+    f_cell(dash, "Short Mom (RSI)", 0, 9, shortMomentum)
+    f_cell(dash, str.tostring(math.round(rsi, 1)), 1, 9, shortMomentum)
+    f_cell(dash, "Short Breakout",  0, 10, shortBreakout)
+    f_cell(dash, shortBreakout ? "YES" : "NO", 1, 10, shortBreakout)
+    f_cell(dash, "Short Score / " + str.tostring(scoreThresh), 0, 11, shortScore >= scoreThresh)
+    f_cell(dash, str.tostring(shortScore) + (shortScore >= scoreThresh ? " ✓" : " ✗"), 1, 11, shortScore >= scoreThresh)
+
+//─────────────────────────────────────────
+// Alerts
+//─────────────────────────────────────────
+alertcondition(longSignal,  title = "Long scalp setup",  message = "{{ticker}} LONG scalp setup on {{interval}}")
+alertcondition(shortSignal, title = "Short scalp setup", message = "{{ticker}} SHORT scalp setup on {{interval}}")

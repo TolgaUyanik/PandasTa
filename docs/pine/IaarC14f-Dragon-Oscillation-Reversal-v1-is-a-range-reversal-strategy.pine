@@ -1,0 +1,182 @@
+// © richardgong1988 — 游龙震荡反转 v1 (Dragon Oscillation Reversal)
+// Brief : docs/strategies/version1/readme.md
+// Design: docs/design/dragon-reversal-v1.md
+
+//@version=6
+strategy("游龙震荡反转 v1.2", overlay = true,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     pyramiding              = 1,
+     calc_on_every_tick      = false,
+     process_orders_on_close = true,
+     initial_capital         = 100000,
+     currency                = currency.USD,
+     margin_long             = 1,
+     margin_short            = 1)
+
+import richardgong1988/HanJinSignals26/15 as S
+
+// ─── Inputs ────────────────────────────────────────────────────────
+bbLen     = input.int  (60,   "BB length",            1, 500,        group = "Band")
+bbMult    = input.float(2.0,  "BB σ",                 0.5, 5.0, 0.1, group = "Band")
+flatLook  = input.int  (20,   "Flat lookback (bars)", 2, 200,        group = "Flat")
+flatTol   = input.float(0.50, "Flat tolerance × ATR", 0.01, 5.0, 0.01, group = "Flat")
+atrLen    = input.int  (14,   "ATR length",           1, 200,        group = "Flat")
+winStart  = input.int  (0,    "Signal window start",  0, 100,        group = "Window")
+winEnd    = input.int  (8,    "Signal window end",    0, 100,        group = "Window")
+usePin    = input.bool (true, "Use Pinbar",                          group = "Reversal")
+useEng    = input.bool (true, "Use Engulfing",                       group = "Reversal")
+useFrac   = input.bool (true, "Use Fractal",                         group = "Reversal")
+riskPct       = input.float(1.0, "Risk % per trade",   0.1, 10.0, 0.1, group = "Risk")
+stopOffTicks  = input.int  (15,  "Stop offset (ticks)", 0, 1000,       group = "Risk")
+breakOffTicks = input.int  (15,  "Breakeven + ticks",   0, 1000,       group = "Risk")
+minRR         = input.float(2.0, "Min profit potential (R)", 0.5, 10.0, 0.1, group = "Risk")
+secret        = input.string("demo-secret-change-me", "Webhook secret", group = "Bridge")
+showDbg       = input.bool (false, "Show raw signal markers", group = "Debug")
+
+// ─── Reader: indicator snapshot ────────────────────────────────────
+basis    = ta.sma  (close, bbLen)
+stdv     = ta.stdev(close, bbLen)
+upBand   = basis + bbMult * stdv
+loBand   = basis - bbMult * stdv
+atrVal   = ta.atr  (atrLen)
+tickOff  = syminfo.mintick * stopOffTicks
+breakOff = syminfo.mintick * breakOffTicks
+pivotLow  = math.min(low,  low[1],  low[2])   // reversal-signal low  extreme
+pivotHigh = math.max(high, high[1], high[2])  // reversal-signal high extreme
+
+// ─── Parser: reversal signals (lazy via S library) ─────────────────
+pinSig = usePin ? S.pinbar() : na
+engSig = useEng ? S.engulf() : na
+[fTop, fBot] = if useFrac
+    S.fractal()
+else
+    [string(na), string(na)]
+
+buyRev  = pinSig == "BUY"
+sellRev = pinSig == "SELL"
+
+// ─── Validator: three-condition trigger ────────────────────────────
+isFlat() =>
+    haveData = not na(basis) and not na(basis[flatLook]) and not na(atrVal)
+    haveData and math.abs(basis - basis[flatLook]) <= flatTol * atrVal
+
+flat      = isFlat()
+
+// sequence: middle flat FIRST, then a band touch *while flat* opens the window.
+// count bars since the most recent touch that happened in a flat regime.
+touchLow  = flat and low  <= loBand
+touchHigh = flat and high >= upBand
+barsLow   = ta.barssince(touchLow)
+barsHigh  = ta.barssince(touchHigh)
+// valid on bars 0–8 after the touch (bar 0 = the touch bar itself); 9+ invalid
+inWindow(bars) =>
+    not na(bars) and bars >= winStart and bars <= winEnd
+
+// flat must STILL hold when the signal appears (no entry once the band re-slopes)
+longWin   = flat and inWindow(barsLow)   // flat + within window of a flat lower-touch
+shortWin  = flat and inWindow(barsHigh)  // flat + within window of a flat upper-touch
+
+// prospective stop / risk (entry = close); single source reused by the planners
+stopLong  = pivotLow  - tickOff
+stopShort = pivotHigh + tickOff
+riskLong  = close - stopLong
+riskShort = stopShort - close
+
+// 2R filter: opposite band must be at least minRR×risk away, else skip the trade
+okLongR   = riskLong  > 0 and (upBand - close) >= minRR * riskLong
+okShortR  = riskShort > 0 and (close - loBand) >= minRR * riskShort
+
+longTrig  = flat and longWin  and buyRev  and okLongR
+shortTrig = flat and shortWin and sellRev and okShortR
+
+// ─── Service: pure planners (≤ 30 lines, ≤ 3 args, no I/O) ─────────
+planLong() =>
+    qty = riskLong > 0 ? (strategy.equity * riskPct / 100.0) / riskLong : 0.0
+    [close, stopLong, riskLong, qty]
+
+planShort() =>
+    qty = riskShort > 0 ? (strategy.equity * riskPct / 100.0) / riskShort : 0.0
+    [close, stopShort, riskShort, qty]
+
+// ─── Service: per-position state (single bounded context) ──────────
+var float gEntry  = na
+var float gStop   = na
+var float gRisk   = na
+var int   gDir    = 0       // 0 flat, 1 long, -1 short
+var bool  gBE     = false   // 1-R breakeven push already applied
+var bool  gOpened = false   // entry order has actually filled
+
+beStop() =>
+    gDir > 0 ? gEntry + breakOff : gEntry - breakOff
+
+// ─── Repository: webhook payload ───────────────────────────────────
+payload(string side, string tag) =>
+    '{"secret":"' + secret +
+      '","id":"'  + tag + '-' + side + '-{{timenow}}"' +
+      ',"ts":"{{timenow}}"' +
+      ',"symbol":"' + syminfo.ticker +
+      '","side":"' + side +
+      '","comment":"' + tag + '"}'
+
+// ─── Orchestrator ──────────────────────────────────────────────────
+// Flow:
+// 1. Read indicators              (Reader section)
+// 2. Parse S reversal signals     (Parser section)
+// 3. Validate triggers            (Validator section)
+// 4. Open if flat and trigger
+// 5. Push breakeven at +1 R
+// 6. Opposite-band emergency exit
+// 7. Reset state on close
+
+// Step 4: Open — only when fully flat (one position at a time; no add / reverse)
+noPos = gDir == 0 and strategy.position_size == 0
+if noPos and barstate.isconfirmed
+    if longTrig
+        [entry, stop, risk, qty] = planLong()
+        if qty > 0
+            gEntry  := entry
+            gStop   := stop
+            gRisk   := risk
+            gDir    := 1
+            gBE     := false
+            gOpened := false
+            strategy.entry("L", strategy.long, qty = qty)
+            strategy.exit ("TP1_L",  from_entry = "L", qty_percent = 50, limit = entry + 2 * risk)
+            strategy.exit ("MAIN_L", from_entry = "L", stop = stop,      limit = entry + 4 * risk)
+            alert(payload("BUY", "dragon-v1"), alert.freq_once_per_bar_close)
+    else if shortTrig
+        [entry, stop, risk, qty] = planShort()
+        if qty > 0
+            gEntry  := entry
+            gStop   := stop
+            gRisk   := risk
+            gDir    := -1
+            gBE     := false
+            gOpened := false
+            strategy.entry("S", strategy.short, qty = qty)
+            strategy.exit ("TP1_S",  from_entry = "S", qty_percent = 50, limit = entry - 2 * risk)
+            strategy.exit ("MAIN_S", from_entry = "S", stop = stop,      limit = entry - 4 * risk)
+            alert(payload("SELL", "dragon-v1"), alert.freq_once_per_bar_close)
+
+// Step 5a: detect actual fill (transition from no position to position)
+if not gOpened and strategy.position_size != 0
+    gOpened := true
+
+// Step 7: reset state once position is flat again
+if gOpened and strategy.position_size == 0
+    gDir    := 0
+    gEntry  := na
+    gStop   := na
+    gRisk   := na
+    gBE     := false
+    gOpened := false
+
+// ─── Plots ─────────────────────────────────────────────────────────
+plot(upBand, "Upper", color.new(color.gray,   0))
+plot(basis,  "Basis", color.new(color.orange, 0))
+plot(loBand, "Lower", color.new(color.gray,   0))
+bgcolor(flat ? color.new(color.yellow, 92) : na, title = "Flat zone")
+plotshape(longTrig,  "Long trig",  shape.triangleup,   location.belowbar, color.lime, text = "L", size = size.small)
+plotshape(shortTrig, "Short trig", shape.triangledown, location. abovebar, color.red,  text = "S", size = size.small)
+

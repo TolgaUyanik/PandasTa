@@ -1,0 +1,238 @@
+//@version=6
+strategy("Shinobi HA Stratégia v3", overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     process_orders_on_close=true)
+
+// ─── SUPERTREND ────────────────────────────────────────────────────────────
+atrLen   = input.int(15,     "ATR Length",        group="SuperTrend", minval=1)
+stFactor = input.float(3.44, "SuperTrend Factor", group="SuperTrend", minval=0.01, step=0.01)
+
+// ─── ADX ───────────────────────────────────────────────────────────────────
+adxLen = input.int(14,   "ADX Length",  group="ADX szűrő")
+adxMin = input.float(22, "Minimum ADX", group="ADX szűrő")
+
+// ─── GYERTYA FORMÁCIÓ ──────────────────────────────────────────────────────
+dojiMaxPct   = input.float(20,  "Doji max test %",           group="Gyertya formáció", minval=1, maxval=50) / 100
+wickTolPct   = input.float(3,   "Kanóc tolerancia %",        group="Gyertya formáció", minval=0, maxval=50) / 100
+dojiWickMult = input.float(0.3, "Doji kanóc minimum szorzó", group="Gyertya formáció", minval=0.0, maxval=2.0, step=0.1)
+
+// ─── RR BEÁLLÍTÁS ──────────────────────────────────────────────────────────
+rrRatio = input.float(1.0, "Risk/Reward arány", group="RR beállítás", minval=0.1, step=0.1,
+     tooltip="1.0 = 1:1 RR, 1.5 = 1:1.5 RR, 2.0 = 1:2 RR stb.")
+
+// ─── VOLUME SZŰRŐ ──────────────────────────────────────────────────────────
+useVolume = input.bool(true,  "Volume szűrő bekapcsolva", group="Volume szűrő")
+vol_len   = input.int(20,    "Volume MA periódus",        group="Volume szűrő", minval=1)
+vol_mult  = input.float(1.0, "Volume minimum szorzó",     group="Volume szűrő", minval=0.1, step=0.1,
+     tooltip="Pl. 1.2 = volume legalább 20%-kal nagyobb legyen az átlagnál")
+
+// ─── IDŐSZŰRŐ ──────────────────────────────────────────────────────────────
+tradeSess = input.session("1700-2000", "Trading időszak", group="Időszűrő")
+tradeTz   = input.string("Europe/Budapest", "Időzóna",   group="Időszűrő",
+     options=["Europe/Budapest", "America/New_York", "UTC"])
+
+// ─── STRUKTÚRA SZŰRŐ ───────────────────────────────────────────────────────
+filter_type = input.string("Swing HL", "Struktúra szűrő típusa",
+     options=["LinReg csatorna", "ATR csatorna", "Donchian Channel", "Swing HL"],
+     group="Struktúra szűrő")
+
+lr_len      = input.int(100,      "LinReg periódus",               group="Struktúra szűrő — LinReg", minval=10)
+lr_src      = input.source(close, "LinReg forrás",                 group="Struktúra szűrő — LinReg")
+lr_dev_mult = input.float(2.0,    "Sáv szélesség (StdDev szorzó)", group="Struktúra szűrő — LinReg", step=0.1)
+
+atr_ma_len = input.int(50,    "MA periódus", group="Struktúra szűrő — ATR csatorna")
+atr_mult   = input.float(2.0, "ATR szorzó",  group="Struktúra szűrő — ATR csatorna", step=0.1)
+
+don_len   = input.int(20, "Periódus",          group="Struktúra szűrő — Donchian")
+swing_len = input.int(5,  "Swing érzékenység", group="Struktúra szűrő — Swing HL")
+
+// ─── HEIKIN ASHI ──────────────────────────────────────────────────────────
+ha_close = (open + high + low + close) / 4
+var float ha_open = na
+ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + nz(ha_close[1])) / 2
+ha_high = math.max(high, math.max(ha_open, ha_close))
+ha_low  = math.min(low,  math.min(ha_open, ha_close))
+
+// ─── SUPERTREND ────────────────────────────────────────────────────────────
+[supertrend, direction] = ta.supertrend(stFactor, atrLen)
+supertrend := barstate.isfirst ? na : supertrend
+
+ha_bull = direction < 0
+ha_bear = direction > 0
+
+bodyMiddle  = barstate.isfirst ? na : (open + close) / 2
+upTrend_p   = plot(direction < 0 ? supertrend : na, "Up Trend",   color=color.green, style=plot.style_linebr)
+downTrend_p = plot(direction < 0 ? na : supertrend, "Down Trend", color=color.red,   style=plot.style_linebr)
+bodyMid_p   = plot(bodyMiddle, "Body Middle", display=display.none)
+fill(bodyMid_p, upTrend_p,   title="Uptrend background",   color=color.new(color.green, 90), fillgaps=false)
+fill(bodyMid_p, downTrend_p, title="Downtrend background", color=color.new(color.red,   90), fillgaps=false)
+
+alertcondition(direction[1] > direction,  title="Downtrend to Uptrend", message="Supertrend: Downtrend to Uptrend")
+alertcondition(direction[1] < direction,  title="Uptrend to Downtrend", message="Supertrend: Uptrend to Downtrend")
+alertcondition(direction[1] != direction, title="Trend Change",         message="Supertrend: Trend Change")
+
+// ─── ADX ───────────────────────────────────────────────────────────────────
+[_, __, adx_val] = ta.dmi(adxLen, adxLen)
+adx_ok = adx_val >= adxMin
+
+// ─── SESSION ───────────────────────────────────────────────────────────────
+inSession = not na(time(timeframe.period, tradeSess, tradeTz))
+
+// ─── VOLUME ────────────────────────────────────────────────────────────────
+vol_ma = ta.ema(volume, vol_len)
+vol_ok = not useVolume or volume >= vol_ma * vol_mult
+
+// ─── LINREG CHANNEL ────────────────────────────────────────────────────────
+calcSlope(source, length) =>
+    sumX = 0.0
+    sumY = 0.0
+    sumXSqr = 0.0
+    sumXY = 0.0
+    for i = 0 to length - 1
+        v = source[i]
+        p = float(i + 1)
+        sumX += p
+        sumY += v
+        sumXSqr += p * p
+        sumXY += v * p
+    slope = (length * sumXY - sumX * sumY) / (length * sumXSqr - sumX * sumX)
+    avg = sumY / length
+    intercept = avg - slope * sumX / length + slope
+    [slope, avg, intercept]
+
+calcDev(source, length, slope, intercept) =>
+    stdAcc = 0.0
+    val = intercept
+    for j = 0 to length - 1
+        diff = source[j] - val
+        stdAcc += diff * diff
+        val += slope
+    math.sqrt(stdAcc / length)
+
+[lr_s, lr_a, lr_i] = calcSlope(lr_src, lr_len)
+lr_stdDev  = calcDev(lr_src, lr_len, lr_s, lr_i)
+lr_start   = lr_i + lr_s * (lr_len - 1)
+lr_upper   = lr_start + lr_dev_mult * lr_stdDev
+lr_lower   = lr_start - lr_dev_mult * lr_stdDev
+lr_in_band = close <= lr_upper and close >= lr_lower
+
+// ─── ATR CSATORNA ──────────────────────────────────────────────────────────
+atr_ma      = ta.ema(ha_close, atr_ma_len)
+atr_val     = ta.atr(atr_ma_len)
+atr_upper   = atr_ma + atr_mult * atr_val
+atr_lower   = atr_ma - atr_mult * atr_val
+atr_in_band = ha_close <= atr_upper and ha_close >= atr_lower
+
+// ─── DONCHIAN ──────────────────────────────────────────────────────────────
+don_upper   = ta.highest(high, don_len)
+don_lower   = ta.lowest(low,   don_len)
+don_in_band = ha_close <= don_upper and ha_close >= don_lower
+
+// ─── SWING HL ──────────────────────────────────────────────────────────────
+swing_high = ta.pivothigh(ha_high, swing_len, swing_len)
+swing_low  = ta.pivotlow(ha_low,  swing_len, swing_len)
+
+var float last_sh  = na
+var float last_sh2 = na
+var float last_sl  = na
+var float last_sl2 = na
+
+if not na(swing_high)
+    last_sh2 := last_sh
+    last_sh  := swing_high
+if not na(swing_low)
+    last_sl2 := last_sl
+    last_sl  := swing_low
+
+swing_bull_ok = na(last_sl2) or last_sl > last_sl2
+swing_bear_ok = na(last_sh2) or last_sh < last_sh2
+
+// ─── SZŰRŐ KIVÁLASZTÁS ────────────────────────────────────────────────────
+struct_bull = switch filter_type
+    "LinReg csatorna"  => lr_in_band  and close > (lr_upper + lr_lower) / 2
+    "ATR csatorna"     => atr_in_band and ha_close > atr_ma
+    "Donchian Channel" => don_in_band and ha_close > (don_upper + don_lower) / 2
+    "Swing HL"         => swing_bull_ok
+    => true
+
+struct_bear = switch filter_type
+    "LinReg csatorna"  => lr_in_band  and close < (lr_upper + lr_lower) / 2
+    "ATR csatorna"     => atr_in_band and ha_close < atr_ma
+    "Donchian Channel" => don_in_band and ha_close < (don_upper + don_lower) / 2
+    "Swing HL"         => swing_bear_ok
+    => true
+
+// ─── GYERTYA TULAJDONSÁGOK ────────────────────────────────────────────────
+ha_body(i)       => math.abs(ha_close[i] - ha_open[i])
+ha_total(i)      => ha_high[i] - ha_low[i]
+ha_upper_wick(i) => ha_high[i] - math.max(ha_close[i], ha_open[i])
+ha_lower_wick(i) => math.min(ha_close[i], ha_open[i]) - ha_low[i]
+ha_bearish(i)    => ha_close[i] < ha_open[i]
+ha_bullish(i)    => ha_close[i] >= ha_open[i]
+
+no_upper_wick(i) =>
+    total = ha_total(i)
+    upper = ha_upper_wick(i)
+    total > 0 ? (upper / total) <= wickTolPct : true
+
+no_lower_wick(i) =>
+    total = ha_total(i)
+    lower = ha_lower_wick(i)
+    total > 0 ? (lower / total) <= wickTolPct : true
+
+is_doji(i) =>
+    body       = ha_body(i)
+    total      = ha_total(i)
+    upper      = ha_upper_wick(i)
+    lower      = ha_lower_wick(i)
+    body_pct   = total > 0 ? body / total : 1.0
+    both_wicks = upper >= body * dojiWickMult and lower >= body * dojiWickMult
+    body_pct <= dojiMaxPct and both_wicks
+
+// ─── FORMÁCIÓ ─────────────────────────────────────────────────────────────
+s_bull2    = ha_bullish(2)
+s_lowwick2 = no_lower_wick(2)
+s_bull1    = ha_bullish(1)
+s_lowwick1 = no_lower_wick(1)
+s_doji     = is_doji(0)
+s_size     = ha_total(0) > ha_total(1)
+sell_setup = s_bull2 and s_lowwick2 and s_bull1 and s_lowwick1 and s_doji and s_size
+
+b_bear2    = ha_bearish(2)
+b_upwick2  = no_upper_wick(2)
+b_bear1    = ha_bearish(1)
+b_upwick1  = no_upper_wick(1)
+b_doji     = is_doji(0)
+b_size     = ha_total(0) > ha_total(1)
+buy_setup  = b_bear2 and b_upwick2 and b_bear1 and b_upwick1 and b_doji and b_size
+
+// ─── BELÉPÉSI FELTÉTELEK ───────────────────────────────────────────────────
+long_signal  = buy_setup  and ha_bull and adx_ok and struct_bull and inSession and vol_ok
+short_signal = sell_setup and ha_bear and adx_ok and struct_bear and inSession and vol_ok
+
+// ─── SL / TP (állítható RR) ───────────────────────────────────────────────
+if long_signal and strategy.position_size == 0
+    sl = ha_low
+    tp = close + (close - sl) * rrRatio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+if short_signal and strategy.position_size == 0
+    sl = ha_high
+    tp = close - (sl - close) * rrRatio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// ─── VIZUALIZÁCIÓ ─────────────────────────────────────────────────────────
+plotshape(long_signal,  "Buy",  shape.labelup,   location.belowbar, color.new(color.teal, 20), text="B", textcolor=color.white, size=size.small)
+plotshape(short_signal, "Sell", shape.labeldown, location.abovebar, color.new(color.red,  20), text="S", textcolor=color.white, size=size.small)
+
+plot(filter_type == "LinReg csatorna"  ? lr_upper  : na, "LR Felső",  color.new(color.blue,   60), linewidth=1)
+plot(filter_type == "LinReg csatorna"  ? lr_lower  : na, "LR Alsó",   color.new(color.blue,   60), linewidth=1)
+plot(filter_type == "ATR csatorna"     ? atr_upper : na, "ATR Felső", color.new(color.purple, 60), linewidth=1)
+plot(filter_type == "ATR csatorna"     ? atr_lower : na, "ATR Alsó",  color.new(color.purple, 60), linewidth=1)
+plot(filter_type == "Donchian Channel" ? don_upper : na, "Don Felső", color.new(color.orange, 60), linewidth=1)
+plot(filter_type == "Donchian Channel" ? don_lower : na, "Don Alsó",  color.new(color.orange, 60), linewidth=1)

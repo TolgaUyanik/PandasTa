@@ -1,0 +1,185 @@
+//@version=6
+// =============================================================================
+//  Dual RSI DCA — Long Strategy
+//  Long-only DCA framework with TWO independent RSI conditions on a lower
+//  timeframe: one gates the base entry (oversold reversal), one arms the
+//  take-profit (overbought rotation). Five safety orders form a deviation
+//  ladder for adverse price action.
+// =============================================================================
+//  NO STOP LOSS — risk is structurally capped by the bounded position-size
+//  ladder. Max deployed capital across base + 5 safety orders ≈ 9.93% of
+//  equity at default settings (within TradingView's 5–10% per-trade band).
+// =============================================================================
+strategy("Dual RSI DCA — Long Strategy", shorttitle = "DualRSI-L", overlay = true, initial_capital = 10000, default_qty_type = strategy.cash, default_qty_value = 90, pyramiding = 6, commission_type = strategy.commission.percent, commission_value = 0.08, slippage = 3, process_orders_on_close = true, calc_on_every_tick = false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+grpBase = "Base Order"
+baseOrderSize = input.float(90.0, "Base Order Size (USDT)", minval = 1, group = grpBase, tooltip = "0.9% of default 10k capital. Sized so that base + all 5 AOs ≤ 9.93% of equity.")
+useLimitBase  = input.bool(false, "Use LIMIT for Base (else Market)", group = grpBase)
+
+grpAO = "Averaging Orders"
+aoCount    = input.int(5, "Averaging Orders per Trade", minval = 0, maxval = 10, group = grpAO)
+aoSize     = input.float(110.0, "First AO Size (USDT)", minval = 1, group = grpAO)
+aoStep     = input.float(1.3, "Deviation to First AO (%)", minval = 0.1, step = 0.1, group = grpAO)
+aoStepMult = input.float(1.3, "Deviation Step Multiplier", minval = 1.0, step = 0.1, group = grpAO)
+aoSizeMult = input.float(1.25, "Order Size Multiplier", minval = 1.0, step = 0.05, group = grpAO)
+
+grpEntry = "Entry RSI Filter"
+entryTF       = input.timeframe("3", "RSI Timeframe", group = grpEntry)
+entryRsiLen   = input.int(14, "RSI Length", minval = 2, group = grpEntry)
+entryRsiLevel = input.float(31.0, "RSI Crossing Up Level", minval = 1, maxval = 100, group = grpEntry, tooltip = "Base order arms when LTF RSI crosses up this level (oversold reversal).")
+
+grpExit = "Exit RSI Filter"
+exitTF        = input.timeframe("3", "RSI Timeframe", group = grpExit)
+exitRsiLen    = input.int(14, "RSI Length", minval = 2, group = grpExit)
+exitRsiLevel  = input.float(69.0, "RSI Crossing Down Level", minval = 1, maxval = 100, group = grpExit, tooltip = "Take profit fires when LTF RSI crosses down this level AND minimum profit is reached.")
+minProfitPct  = input.float(2.4, "Minimum Profit (%)", minval = 0.1, step = 0.1, group = grpExit, tooltip = "Gate on the exit signal — profit from average entry must be at least this to close.")
+
+grpDate = "Backtest Window"
+useDateFilter = input.bool(false, "Limit Backtest Period", group = grpDate)
+fromDate      = input.time(timestamp("01 Jan 2024 00:00 +0000"), "From", group = grpDate)
+toDate        = input.time(timestamp("01 Jan 2030 00:00 +0000"), "To", group = grpDate)
+
+grpHook = "DCA Bot Webhook"
+botId       = input.string("YOUR_BOT_ID", "Bot ID", group = grpHook)
+emailToken  = input.string("YOUR_EMAIL_TOKEN", "Email Token", group = grpHook)
+pairWebhook = input.string("USDT_HYPE", "Pair (QUOTE_BASE)", group = grpHook)
+
+grpViz = "Visualization"
+showLevels = input.bool(true, "Show DCA Ladder", group = grpViz)
+showLabels = input.bool(true, "Show Fill Labels", group = grpViz)
+showTable  = input.bool(true, "Show Status Table", group = grpViz)
+
+inWindow = not useDateFilter or (time >= fromDate and time <= toDate)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOWER-TIMEFRAME RSI VALUES (no repaint)
+// Detection of cross is done at host-bar granularity: a cross is counted
+// when LTF RSI moves from one side of the threshold to the other between
+// successive HTF bar closes.
+// ─────────────────────────────────────────────────────────────────────────────
+entryRsi = request.security(syminfo.tickerid, entryTF, ta.rsi(close, entryRsiLen), lookahead = barmerge.lookahead_off)
+exitRsi  = request.security(syminfo.tickerid, exitTF,  ta.rsi(close, exitRsiLen),  lookahead = barmerge.lookahead_off)
+
+entryCrossUp   = entryRsi[1] < entryRsiLevel and entryRsi >= entryRsiLevel
+exitCrossDown  = exitRsi[1]  > exitRsiLevel  and exitRsi  <= exitRsiLevel
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+f_cumDev(int k) =>
+    float dev  = 0.0
+    float step = aoStep
+    for i = 1 to k
+        if i == 1
+            dev := step
+        else
+            step := step * aoStepMult
+            dev  := dev + step
+    dev
+
+f_aoSize(int k) =>
+    aoSize * math.pow(aoSizeMult, k - 1)
+
+f_msgEntry() => '{"message_type":"bot","bot_id":' + botId + ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairWebhook + '"}'
+f_msgAddAO() => '{"action":"add_funds_in_quote","message_type":"bot","bot_id":' + botId + ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairWebhook + '"}'
+f_msgClose() => '{"action":"close_at_market_price","message_type":"bot","bot_id":' + botId + ',"email_token":"' + emailToken + '","delay_seconds":0,"pair":"' + pairWebhook + '"}'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────────────────────────────────────
+var float baseEntry = na
+var int   aoFilled  = 0
+
+inPosition       = strategy.position_size != 0
+justEntered      = nz(strategy.position_size[1]) == 0 and inPosition
+positionJustFlat = nz(strategy.position_size[1]) != 0 and not inPosition
+
+if justEntered and na(baseEntry)
+    baseEntry := strategy.position_avg_price
+    aoFilled  := 0
+
+if positionJustFlat or not inPosition
+    baseEntry := na
+    aoFilled  := 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. ENTRY — BASE ORDER (gated by RSI cross up 31 on 3m)
+// ─────────────────────────────────────────────────────────────────────────────
+openBase = inWindow and not inPosition and strategy.opentrades == 0 and entryCrossUp
+if openBase
+    baseQty = baseOrderSize / close
+    if useLimitBase
+        strategy.entry("Long_Base", strategy.long, qty = baseQty, limit = close)
+    else
+        strategy.entry("Long_Base", strategy.long, qty = baseQty)
+    alert(f_msgEntry(), alert.freq_once_per_bar_close)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. AVERAGING ORDERS (pure deviation ladder, no AO condition)
+// ─────────────────────────────────────────────────────────────────────────────
+if inPosition and inWindow and aoFilled < aoCount and not na(baseEntry)
+    nextIdx   = aoFilled + 1
+    threshold = f_cumDev(nextIdx)
+    triggerPx = baseEntry * (1.0 - threshold / 100.0)
+    if close <= triggerPx
+        aoQtyUsdt = f_aoSize(nextIdx)
+        strategy.entry("Long_AO_" + str.tostring(nextIdx), strategy.long, qty = aoQtyUsdt / close)
+        aoFilled := nextIdx
+        alert(f_msgAddAO(), alert.freq_once_per_bar_close)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. EXIT — RSI cross down 69 AND minimum profit ≥ 2.4%
+// ─────────────────────────────────────────────────────────────────────────────
+if inPosition
+    avgPx       = strategy.position_avg_price
+    minTpPrice  = avgPx * (1.0 + minProfitPct / 100.0)
+    profitArmed = close >= minTpPrice
+    if profitArmed and exitCrossDown
+        strategy.close_all(comment = "RSI_TP")
+        alert(f_msgClose(), alert.freq_once_per_bar_close)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+plot(inPosition ? strategy.position_avg_price : na, title = "Avg Entry", color = color.new(color.orange, 0), linewidth = 2, style = plot.style_linebr)
+plot(inPosition ? strategy.position_avg_price * (1.0 + minProfitPct / 100.0) : na, title = "Min Profit", color = color.new(color.green, 0), linewidth = 1, style = plot.style_linebr)
+
+var aoLines = array.new<line>()
+
+if barstate.islast and showLevels and not na(baseEntry)
+    if array.size(aoLines) > 0
+        for i = 0 to array.size(aoLines) - 1
+            line.delete(array.get(aoLines, i))
+        array.clear(aoLines)
+    for k = 1 to aoCount
+        dev = f_cumDev(k)
+        px  = baseEntry * (1.0 - dev / 100.0)
+        col = k <= aoFilled ? color.new(color.green, 20) : color.new(color.gray, 50)
+        ln  = line.new(x1 = bar_index - 80, x2 = bar_index + 8, y1 = px, y2 = px, color = col, style = line.style_dashed, width = 1)
+        array.push(aoLines, ln)
+        label.new(x = bar_index + 8, y = px, text = "AO" + str.tostring(k) + "  -" + str.tostring(dev, "#.##") + "%", style = label.style_label_left, color = color.new(color.gray, 70), textcolor = color.white, size = size.tiny)
+
+if showLabels and openBase
+    label.new(bar_index, high, "Base ▲", style = label.style_label_down, color = color.new(color.green, 20), textcolor = color.white, size = size.tiny)
+
+if showTable and barstate.islast
+    var table tbl = table.new(position = position.top_right, columns = 2, rows = 7, border_width = 1)
+    bg  = color.new(color.gray, 30)
+    bgH = color.new(color.gray, 0)
+    table.cell(tbl, 0, 0, "Status", text_color = color.white, bgcolor = bgH)
+    table.cell(tbl, 1, 0, inPosition ? "In Long" : "Flat", text_color = color.white, bgcolor = bgH)
+    table.cell(tbl, 0, 1, "AOs Filled", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 1, str.tostring(aoFilled) + " / " + str.tostring(aoCount), text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 2, "Base Entry", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 2, na(baseEntry) ? "—" : str.tostring(baseEntry, "#.####"), text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 3, "Avg Entry", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 3, inPosition ? str.tostring(strategy.position_avg_price, "#.####") : "—", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 4, "Min TP", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 4, inPosition ? str.tostring(strategy.position_avg_price * (1.0 + minProfitPct / 100.0), "#.####") : "—", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 0, 5, entryTF + " RSI (Entry)", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 5, str.tostring(entryRsi, "#.#"), text_color = entryRsi < entryRsiLevel ? color.red : color.white, bgcolor = bg)
+    table.cell(tbl, 0, 6, exitTF + " RSI (Exit)", text_color = color.white, bgcolor = bg)
+    table.cell(tbl, 1, 6, str.tostring(exitRsi, "#.#"), text_color = exitRsi > exitRsiLevel ? color.green : color.white, bgcolor = bg)

@@ -1,0 +1,251 @@
+//@version=6
+strategy("EMA 2/4 Advanced Trend Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=true, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.0)
+
+//==============================
+// General inputs
+//==============================
+entryGroup = "1. Entry"
+useEMAEntry          = input.bool(true,  "Use EMA crossover entry", group=entryGroup)
+emaFastLen           = input.int(2,      "Fast entry EMA", minval=1, group=entryGroup)
+emaSlowLen           = input.int(4,      "Slow entry EMA", minval=1, group=entryGroup)
+entryMode            = input.string("Candle close", "Entry mode", options=["Candle close", "Intrabar"], group=entryGroup)
+waitForConfirmation  = input.bool(false, "Wait for crossover confirmation", group=entryGroup)
+confirmationBars     = input.int(1,      "Confirmation bars", minval=1, group=entryGroup)
+closeOnOpposite      = input.bool(true,  "Close and reverse on valid opposite signal", group=entryGroup)
+
+trendGroup = "2. Trend filters"
+trendFastLen         = input.int(21, "Fast trend EMA", minval=1, group=trendGroup)
+trendSlowLen         = input.int(50, "Slow trend EMA", minval=1, group=trendGroup)
+requirePriceSide     = input.bool(true, "Require price on correct side of EMA 21", group=trendGroup)
+useHTF               = input.bool(true, "Use higher-timeframe confirmation", group=trendGroup)
+htf                  = input.timeframe("60", "Higher timeframe", group=trendGroup)
+useSlope             = input.bool(true, "Use EMA slope filter", group=trendGroup)
+slopeBars            = input.int(5, "Slope lookback bars", minval=1, group=trendGroup)
+minSlopePips         = input.float(0.5, "Minimum slope (pips)", minval=0, step=0.1, group=trendGroup)
+useEntryDistance     = input.bool(true, "Use EMA 2/4 distance filter", group=trendGroup)
+minEntryDistancePips = input.float(0.5, "Minimum EMA 2/4 distance (pips)", minval=0, step=0.1, group=trendGroup)
+useTrendDistance     = input.bool(true, "Use EMA 21/50 trend-strength filter", group=trendGroup)
+minTrendDistancePips = input.float(5.0, "Minimum EMA 21/50 distance (pips)", minval=0, step=0.1, group=trendGroup)
+
+filterGroup = "3. Additional filters"
+useATR               = input.bool(false, "Use ATR filter", group=filterGroup)
+atrPeriod            = input.int(14, "ATR period", minval=1, group=filterGroup)
+minATRPips           = input.float(5.0, "Minimum ATR (pips)", minval=0, step=0.1, group=filterGroup)
+useSession           = input.bool(false, "Use session filter", group=filterGroup)
+tradeSession         = input.session("0700-2000", "Trading session", group=filterGroup)
+tradeMonday          = input.bool(true, "Monday", inline="days1", group=filterGroup)
+tradeTuesday         = input.bool(true, "Tuesday", inline="days1", group=filterGroup)
+tradeWednesday       = input.bool(true, "Wednesday", inline="days1", group=filterGroup)
+tradeThursday        = input.bool(true, "Thursday", inline="days2", group=filterGroup)
+tradeFriday          = input.bool(true, "Friday", inline="days2", group=filterGroup)
+cooldownBars         = input.int(0, "Cooldown bars after entry", minval=0, group=filterGroup)
+
+exitGroup = "4. Exits"
+useEMACrossExit      = input.bool(true, "Use opposite EMA crossover exit", group=exitGroup)
+useEMATrail          = input.bool(true, "Use EMA 4 trailing stop", group=exitGroup)
+useFixedSL           = input.bool(true, "Use fixed stop loss", group=exitGroup)
+fixedSLPips          = input.float(10.0, "Fixed stop loss (pips)", minval=0, step=0.1, group=exitGroup)
+useFixedTP           = input.bool(true, "Use fixed take profit", group=exitGroup)
+fixedTPPips          = input.float(20.0, "Fixed take profit (pips)", minval=0, step=0.1, group=exitGroup)
+useBreakEven         = input.bool(true, "Use break-even", group=exitGroup)
+beTriggerPips        = input.float(1.0, "Break-even trigger (pips)", minval=0, step=0.1, group=exitGroup)
+beOffsetPips         = input.float(0.0, "Break-even offset (pips)", step=0.1, group=exitGroup)
+
+riskGroup = "5. Position sizing"
+useRiskPercent       = input.bool(false, "Use risk-based quantity", group=riskGroup)
+riskPercent          = input.float(1.0, "Risk per trade (%)", minval=0.01, step=0.1, group=riskGroup)
+fixedQty             = input.float(1.0, "Fixed quantity", minval=0.0001, step=0.01, group=riskGroup)
+
+symbolGroup = "6. Symbol conversion"
+pipSizeMode          = input.string("Automatic", "Pip size", options=["Automatic", "Custom"], group=symbolGroup)
+customPipSize        = input.float(0.01, "Custom pip size", minval=0.00000001, step=0.00001, group=symbolGroup)
+
+visualGroup = "7. Visuals and alerts"
+showSignals          = input.bool(true, "Show entry markers", group=visualGroup)
+showTrendEMAs        = input.bool(true, "Show EMA 21 and EMA 50", group=visualGroup)
+
+//==============================
+// Pip conversion
+// Automatic: 0.0001 for most 5/4-digit Forex, 0.01 for 3/2-digit symbols.
+// For gold and indices, Custom is often safer because broker conventions vary.
+//==============================
+autoPip = syminfo.mintick * ((syminfo.type == "forex" and (syminfo.mintick == 0.00001 or syminfo.mintick == 0.001)) ? 10.0 : 1.0)
+pip = pipSizeMode == "Custom" ? customPipSize : autoPip
+
+//==============================
+// Indicator calculations
+//==============================
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+ema21    = ta.ema(close, trendFastLen)
+ema50    = ta.ema(close, trendSlowLen)
+atrValue = ta.atr(atrPeriod)
+
+htfEMA21 = request.security(syminfo.tickerid, htf, ta.ema(close, trendFastLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfEMA50 = request.security(syminfo.tickerid, htf, ta.ema(close, trendSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+//==============================
+// Filters
+//==============================
+entryDistanceOK = not useEntryDistance or math.abs(emaFast - emaSlow) / pip >= minEntryDistancePips
+trendDistanceOK = not useTrendDistance or math.abs(ema21 - ema50) / pip >= minTrendDistancePips
+atrOK           = not useATR or atrValue / pip >= minATRPips
+
+ema21SlopePips = (ema21 - ema21[slopeBars]) / pip
+ema50SlopePips = (ema50 - ema50[slopeBars]) / pip
+longSlopeOK    = not useSlope or (ema21SlopePips >= minSlopePips and ema50SlopePips >= minSlopePips)
+shortSlopeOK   = not useSlope or (ema21SlopePips <= -minSlopePips and ema50SlopePips <= -minSlopePips)
+
+longTrendOK  = ema21 > ema50 and (not requirePriceSide or close > ema21) and trendDistanceOK and longSlopeOK and (not useHTF or htfEMA21 > htfEMA50)
+shortTrendOK = ema21 < ema50 and (not requirePriceSide or close < ema21) and trendDistanceOK and shortSlopeOK and (not useHTF or htfEMA21 < htfEMA50)
+
+inSession = not useSession or not na(time(timeframe.period, tradeSession))
+dayOK = switch dayofweek
+    dayofweek.monday    => tradeMonday
+    dayofweek.tuesday   => tradeTuesday
+    dayofweek.wednesday => tradeWednesday
+    dayofweek.thursday  => tradeThursday
+    dayofweek.friday    => tradeFriday
+    => false
+
+var int lastEntryBar = na
+cooldownOK = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+
+//==============================
+// Crossover and confirmation logic
+//==============================
+rawBullCross = ta.crossover(emaFast, emaSlow)
+rawBearCross = ta.crossunder(emaFast, emaSlow)
+
+var int bullCrossBar = na
+var int bearCrossBar = na
+if rawBullCross
+    bullCrossBar := bar_index
+if rawBearCross
+    bearCrossBar := bar_index
+
+bullConfirmed = waitForConfirmation ? (not na(bullCrossBar) and bar_index - bullCrossBar >= confirmationBars and emaFast > emaSlow) : rawBullCross
+bearConfirmed = waitForConfirmation ? (not na(bearCrossBar) and bar_index - bearCrossBar >= confirmationBars and emaFast < emaSlow) : rawBearCross
+
+// Consume confirmed signals once.
+var int lastBullUsed = na
+var int lastBearUsed = na
+bullSignalFresh = bullConfirmed and (na(lastBullUsed) or bar_index != lastBullUsed)
+bearSignalFresh = bearConfirmed and (na(lastBearUsed) or bar_index != lastBearUsed)
+
+entryTimingOK = entryMode == "Intrabar" or barstate.isconfirmed
+commonEntryOK = useEMAEntry and entryTimingOK and entryDistanceOK and atrOK and inSession and dayOK and cooldownOK
+validLongSignal  = bullSignalFresh and longTrendOK and commonEntryOK
+validShortSignal = bearSignalFresh and shortTrendOK and commonEntryOK
+
+//==============================
+// Position sizing
+//==============================
+pointValue = math.max(syminfo.pointvalue, 0.00000001)
+riskCash = strategy.equity * riskPercent / 100.0
+riskPerUnit = fixedSLPips * pip * pointValue
+riskQty = riskPerUnit > 0 ? riskCash / riskPerUnit : fixedQty
+orderQty = useRiskPercent and useFixedSL and fixedSLPips > 0 ? math.max(riskQty, 0.0001) : fixedQty
+
+//==============================
+// Entries and opposite-signal behavior
+//==============================
+if validLongSignal
+    lastBullUsed := bar_index
+    if closeOnOpposite and strategy.position_size < 0
+        strategy.close("Short", comment="Close short: opposite signal")
+    if strategy.position_size <= 0
+        strategy.entry("Long", strategy.long, qty=orderQty, comment="EMA 2 crossed above EMA 4")
+        lastEntryBar := bar_index
+
+if validShortSignal
+    lastBearUsed := bar_index
+    if closeOnOpposite and strategy.position_size > 0
+        strategy.close("Long", comment="Close long: opposite signal")
+    if strategy.position_size >= 0
+        strategy.entry("Short", strategy.short, qty=orderQty, comment="EMA 2 crossed below EMA 4")
+        lastEntryBar := bar_index
+
+//==============================
+// EMA crossover exits
+// These exits do not require trend filters or minimum EMA distance.
+//==============================
+exitTimingOK = entryMode == "Intrabar" or barstate.isconfirmed
+if useEMACrossExit and exitTimingOK
+    if strategy.position_size > 0 and rawBearCross
+        strategy.close("Long", comment="Long exit: bearish EMA cross")
+    if strategy.position_size < 0 and rawBullCross
+        strategy.close("Short", comment="Short exit: bullish EMA cross")
+
+//==============================
+// Dynamic stops: fixed SL, EMA 4 trail, and break-even
+//==============================
+var float longStop = na
+var float shortStop = na
+var float longTarget = na
+var float shortTarget = na
+
+newLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+flatNow  = strategy.position_size == 0
+
+if newLong
+    longStop   := useFixedSL ? strategy.position_avg_price - fixedSLPips * pip : na
+    longTarget := useFixedTP ? strategy.position_avg_price + fixedTPPips * pip : na
+    shortStop := na
+    shortTarget := na
+
+if newShort
+    shortStop   := useFixedSL ? strategy.position_avg_price + fixedSLPips * pip : na
+    shortTarget := useFixedTP ? strategy.position_avg_price - fixedTPPips * pip : na
+    longStop := na
+    longTarget := na
+
+if strategy.position_size > 0
+    fixedLongStop = useFixedSL ? strategy.position_avg_price - fixedSLPips * pip : na
+    emaLongStop = useEMATrail and emaSlow < close ? emaSlow : na
+    beLongStop = useBreakEven and high >= strategy.position_avg_price + beTriggerPips * pip ? strategy.position_avg_price + beOffsetPips * pip : na
+    candidateLong = fixedLongStop
+    candidateLong := na(candidateLong) ? emaLongStop : na(emaLongStop) ? candidateLong : math.max(candidateLong, emaLongStop)
+    candidateLong := na(candidateLong) ? beLongStop : na(beLongStop) ? candidateLong : math.max(candidateLong, beLongStop)
+    longStop := na(longStop) ? candidateLong : na(candidateLong) ? longStop : math.max(longStop, candidateLong)
+    longTarget := useFixedTP ? strategy.position_avg_price + fixedTPPips * pip : na
+    strategy.exit("Long risk exit", from_entry="Long", stop=longStop, limit=longTarget, comment="Long SL/TP")
+
+if strategy.position_size < 0
+    fixedShortStop = useFixedSL ? strategy.position_avg_price + fixedSLPips * pip : na
+    emaShortStop = useEMATrail and emaSlow > close ? emaSlow : na
+    beShortStop = useBreakEven and low <= strategy.position_avg_price - beTriggerPips * pip ? strategy.position_avg_price - beOffsetPips * pip : na
+    candidateShort = fixedShortStop
+    candidateShort := na(candidateShort) ? emaShortStop : na(emaShortStop) ? candidateShort : math.min(candidateShort, emaShortStop)
+    candidateShort := na(candidateShort) ? beShortStop : na(beShortStop) ? candidateShort : math.min(candidateShort, beShortStop)
+    shortStop := na(shortStop) ? candidateShort : na(candidateShort) ? shortStop : math.min(shortStop, candidateShort)
+    shortTarget := useFixedTP ? strategy.position_avg_price - fixedTPPips * pip : na
+    strategy.exit("Short risk exit", from_entry="Short", stop=shortStop, limit=shortTarget, comment="Short SL/TP")
+
+if flatNow
+    longStop := na
+    shortStop := na
+    longTarget := na
+    shortTarget := na
+
+//==============================
+// Visuals
+//==============================
+plot(emaFast, "EMA 2", color=color.aqua, linewidth=1)
+plot(emaSlow, "EMA 4", color=color.orange, linewidth=2)
+plot(showTrendEMAs ? ema21 : na, "EMA 21", color=color.blue)
+plot(showTrendEMAs ? ema50 : na, "EMA 50", color=color.purple)
+plot(strategy.position_size > 0 ? longStop : strategy.position_size < 0 ? shortStop : na, "Active stop", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size > 0 ? longTarget : strategy.position_size < 0 ? shortTarget : na, "Fixed target", color=color.green, style=plot.style_linebr)
+
+plotshape(showSignals and validLongSignal, title="Buy signal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny, text="BUY")
+plotshape(showSignals and validShortSignal, title="Sell signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, text="SELL")
+
+//==============================
+// Alerts
+//==============================
+alertcondition(validLongSignal, "EMA 2/4 Buy", "EMA 2 crossed above EMA 4 with all enabled buy filters confirmed.")
+alertcondition(validShortSignal, "EMA 2/4 Sell", "EMA 2 crossed below EMA 4 with all enabled sell filters confirmed.")
+alertcondition(useEMACrossExit and rawBearCross and strategy.position_size > 0, "Close Long", "Bearish EMA 2/4 crossover: close long.")
+alertcondition(useEMACrossExit and rawBullCross and strategy.position_size < 0, "Close Short", "Bullish EMA 2/4 crossover: close short.")

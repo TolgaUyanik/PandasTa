@@ -1,0 +1,337 @@
+//@version=6
+// =============================================================================
+// MES ORB STRATEGY v6 - Santi
+// 9:45 ET Opening Range Breakout
+// Pine Script v6 compatible
+// =============================================================================
+
+strategy(
+     "MES ORB v6 - Santi",
+     overlay=true,
+     initial_capital=50000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=18,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.85,
+     pyramiding=0,
+     process_orders_on_close=false,
+     calc_on_every_tick=false,
+     slippage=1,
+     max_boxes_count=500,
+     max_lines_count=500,
+     max_labels_count=500,
+     max_bars_back=5000,
+     margin_long=0,
+     margin_short=0)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+g_time = "⏰ Tiempo (ET)"
+orb_hour = input.int(9, "Hora ORB", minval=0, maxval=23, group=g_time)
+orb_min = input.int(45, "Minuto ORB", minval=0, maxval=59, group=g_time)
+orb_duration_min = input.int(15, "Duración ORB (minutos)", minval=1, maxval=60, group=g_time, tooltip="15 = vela tradicional. Funciona en cualquier timeframe.")
+fc_hour = input.int(16, "Force Close Hora", minval=0, maxval=23, group=g_time)
+fc_min = input.int(55, "Force Close Min", minval=0, maxval=59, group=g_time)
+
+g_trade = "📊 Configuración"
+qty = input.int(18, "Quantity", minval=1, group=g_trade)
+max_trades_per_day = input.int(1, "Max trades/día", minval=1, maxval=10, group=g_trade)
+buffer_pts = input.float(2.0, "Buffer breakout (puntos)", step=0.25, group=g_trade)
+min_body_pts = input.float(1.0, "Cuerpo mínimo (puntos)", step=0.25, group=g_trade)
+sl_ticks = input.int(36, "SL (ticks)", minval=1, group=g_trade)
+tp_ticks = input.int(13, "TP (ticks)", minval=1, group=g_trade)
+
+g_days = "📅 Días"
+t_sun = input.bool(true, "Domingo", group=g_days)
+t_mon = input.bool(true, "Lunes", group=g_days)
+t_tue = input.bool(false, "Martes", group=g_days)
+t_wed = input.bool(true, "Miércoles", group=g_days)
+t_thu = input.bool(true, "Jueves", group=g_days)
+t_fri = input.bool(true, "Viernes", group=g_days)
+
+g_filters = "🎯 Filtros"
+use_retest_entry = input.bool(false, "Retest entry", group=g_filters)
+retest_max_bars = input.int(4, "Max bars retest", minval=1, group=g_filters)
+use_atr_filter = input.bool(false, "Filtro ATR", group=g_filters)
+atr_period = input.int(15, "ATR period", minval=1, group=g_filters)
+atr_min_val = input.float(2.0, "ATR mín (puntos)", step=0.5, group=g_filters)
+atr_max_val = input.float(25.0, "ATR máx (puntos)", step=0.5, group=g_filters)
+use_consec_loss_filter = input.bool(true, "Skip día post-N losses", group=g_filters)
+max_consec_losses = input.int(2, "Max consecutive losses", minval=1, group=g_filters)
+
+g_vis = "🎨 Visual"
+show_orb = input.bool(true, "ORB lines", group=g_vis)
+show_orb_bg = input.bool(true, "Resaltar vela ORB", group=g_vis)
+show_zones = input.bool(true, "Zonas TP/SL", group=g_vis)
+show_stats = input.bool(true, "Stats table", group=g_vis)
+
+// =============================================================================
+// TIMEZONE & TIME
+// =============================================================================
+tz = "America/New_York"
+et_h = hour(time, tz)
+et_m = minute(time, tz)
+et_dow = dayofweek(time, tz)
+et_total = et_h * 60 + et_m
+
+// =============================================================================
+// DAY FILTER
+// =============================================================================
+day_ok = (et_dow == dayofweek.sunday and t_sun) or
+         (et_dow == dayofweek.monday and t_mon) or
+         (et_dow == dayofweek.tuesday and t_tue) or
+         (et_dow == dayofweek.wednesday and t_wed) or
+         (et_dow == dayofweek.thursday and t_thu) or
+         (et_dow == dayofweek.friday and t_fri)
+
+// =============================================================================
+// ORB DETECTION
+// =============================================================================
+orb_start_total = orb_hour * 60 + orb_min
+orb_end_total = orb_start_total + orb_duration_min
+
+in_orb_period = et_total >= orb_start_total and et_total < orb_end_total
+orb_done = et_total >= orb_end_total
+is_orb_bar = in_orb_period
+
+var float orb_h_val = na
+var float orb_l_val = na
+var int trades_today = 0
+
+new_day = ta.change(dayofmonth(time, tz)) != 0
+if new_day
+    orb_h_val := na
+    orb_l_val := na
+    trades_today := 0
+
+if in_orb_period
+    orb_h_val := na(orb_h_val) ? high : math.max(orb_h_val, high)
+    orb_l_val := na(orb_l_val) ? low : math.min(orb_l_val, low)
+
+// =============================================================================
+// 15-MIN CLOSE FILTER
+// =============================================================================
+tf_min = timeframe.in_seconds() / 60
+is_15min_close = math.round(et_m + tf_min) % 15 == 0
+
+bars_per_15 = math.max(1, math.round(15 / tf_min))
+bars_back_15min_open = int(bars_per_15 - 1)
+open_15min = open[bars_back_15min_open]
+candle_body = math.abs(close - open_15min)
+body_ok = candle_body >= min_body_pts
+is_bullish_15min = close > open_15min
+is_bearish_15min = close < open_15min
+
+// =============================================================================
+// FILTERS
+// =============================================================================
+atr_val = ta.atr(atr_period)
+atr_ok = not use_atr_filter or (not na(atr_val) and atr_val >= atr_min_val and atr_val <= atr_max_val)
+
+// Consecutive losses filter
+var int cl_count = 0
+var bool cl_skip_next_tradeable = false
+var bool cl_skip_today = false
+var int cl_last_closed_count = 0
+
+if new_day
+    if day_ok
+        cl_skip_today := cl_skip_next_tradeable
+        cl_skip_next_tradeable := false
+    else
+        cl_skip_today := false
+
+if strategy.closedtrades > cl_last_closed_count
+    for i = cl_last_closed_count to strategy.closedtrades - 1
+        pnl = strategy.closedtrades.profit(i)
+        if pnl <= 0
+            cl_count += 1
+            if cl_count >= max_consec_losses
+                cl_skip_next_tradeable := true
+                cl_count := 0
+        else
+            cl_count := 0
+    cl_last_closed_count := strategy.closedtrades
+
+skip_due_to_losses = use_consec_loss_filter and cl_skip_today
+
+// Retest entry filter
+var bool waiting_retest_long = false
+var bool waiting_retest_short = false
+var bool retest_long_done = false
+var bool retest_short_done = false
+var int retest_start_bar = na
+
+if new_day
+    waiting_retest_long := false
+    waiting_retest_short := false
+    retest_long_done := false
+    retest_short_done := false
+    retest_start_bar := na
+
+initial_brk_long = orb_done and is_15min_close and not na(orb_h_val) and close > orb_h_val + buffer_pts
+initial_brk_short = orb_done and is_15min_close and not na(orb_l_val) and close < orb_l_val - buffer_pts
+
+if use_retest_entry and initial_brk_long and not waiting_retest_long and not retest_long_done
+    waiting_retest_long := true
+    retest_start_bar := bar_index
+
+if use_retest_entry and initial_brk_short and not waiting_retest_short and not retest_short_done
+    waiting_retest_short := true
+    retest_start_bar := bar_index
+
+if waiting_retest_long and low <= orb_h_val + 1 * syminfo.mintick
+    retest_long_done := true
+    waiting_retest_long := false
+
+if waiting_retest_short and high >= orb_l_val - 1 * syminfo.mintick
+    retest_short_done := true
+    waiting_retest_short := false
+
+if waiting_retest_long and not na(retest_start_bar) and (bar_index - retest_start_bar) > retest_max_bars
+    waiting_retest_long := false
+
+if waiting_retest_short and not na(retest_start_bar) and (bar_index - retest_start_bar) > retest_max_bars
+    waiting_retest_short := false
+
+retest_long_ok = not use_retest_entry or retest_long_done
+retest_short_ok = not use_retest_entry or retest_short_done
+
+// =============================================================================
+// ENTRY CONDITIONS
+// =============================================================================
+traded_today = trades_today >= max_trades_per_day
+
+brk_long = orb_done and is_15min_close and not na(orb_h_val) and close > orb_h_val + buffer_pts and is_bullish_15min and body_ok and not traded_today and day_ok and atr_ok and retest_long_ok and not skip_due_to_losses
+brk_short = orb_done and is_15min_close and not na(orb_l_val) and close < orb_l_val - buffer_pts and is_bearish_15min and body_ok and not traded_today and day_ok and atr_ok and retest_short_ok and not skip_due_to_losses
+
+// =============================================================================
+// EXECUTE TRADES
+// =============================================================================
+var box tp_box = na
+var box sl_box = na
+
+if brk_long and strategy.position_size == 0
+    trades_today += 1
+    sl_dist = sl_ticks * syminfo.mintick
+    tp_dist = tp_ticks * syminfo.mintick
+
+    strategy.entry("LONG", strategy.long, qty=qty)
+    strategy.exit("EXIT LONG", "LONG", loss=sl_ticks, profit=tp_ticks)
+
+    if show_zones
+        tp_box := box.new(bar_index, close + tp_dist, bar_index, close,
+             bgcolor=color.new(color.green, 75),
+             border_color=color.new(color.green, 30),
+             border_width=2,
+             extend=extend.none)
+        sl_box := box.new(bar_index, close, bar_index, close - sl_dist,
+             bgcolor=color.new(color.red, 75),
+             border_color=color.new(color.red, 30),
+             border_width=2,
+             extend=extend.none)
+
+if brk_short and strategy.position_size == 0
+    trades_today += 1
+    sl_dist = sl_ticks * syminfo.mintick
+    tp_dist = tp_ticks * syminfo.mintick
+
+    strategy.entry("SHORT", strategy.short, qty=qty)
+    strategy.exit("EXIT SHORT", "SHORT", loss=sl_ticks, profit=tp_ticks)
+
+    if show_zones
+        tp_box := box.new(bar_index, close, bar_index, close - tp_dist,
+             bgcolor=color.new(color.green, 75),
+             border_color=color.new(color.green, 30),
+             border_width=2,
+             extend=extend.none)
+        sl_box := box.new(bar_index, close + sl_dist, bar_index, close,
+             bgcolor=color.new(color.red, 75),
+             border_color=color.new(color.red, 30),
+             border_width=2,
+             extend=extend.none)
+
+// Extend boxes mientras trade abierto
+if show_zones and strategy.position_size != 0 and not na(tp_box) and not na(sl_box)
+    box.set_right(tp_box, bar_index)
+    box.set_right(sl_box, bar_index)
+
+// =============================================================================
+// FORCE CLOSE
+// =============================================================================
+fc = (et_h == fc_hour and et_m >= fc_min) or (et_h > fc_hour and et_h < 24)
+if fc and strategy.position_size != 0
+    strategy.close_all(comment="FC")
+
+// =============================================================================
+// VISUAL - ORB LINES
+// =============================================================================
+plot(show_orb and not na(orb_h_val) ? orb_h_val : na, "ORB H",
+     color=color.new(color.green, 20),
+     style=plot.style_linebr,
+     linewidth=2)
+plot(show_orb and not na(orb_l_val) ? orb_l_val : na, "ORB L",
+     color=color.new(color.red, 20),
+     style=plot.style_linebr,
+     linewidth=2)
+
+bgcolor(show_orb_bg and is_orb_bar ? color.new(color.yellow, 85) : na, title="ORB Candle")
+
+// =============================================================================
+// STATS TABLE
+// =============================================================================
+if show_stats and barstate.islast
+    tbl = table.new(position.top_right, 2, 8,
+         bgcolor=color.new(color.black, 10),
+         border_width=1,
+         border_color=color.new(color.gray, 50))
+
+    total = strategy.closedtrades
+    wins = strategy.wintrades
+    losses = strategy.losstrades
+    wr = total > 0 ? wins / total * 100 : 0.0
+    avg_win = wins > 0 ? strategy.grossprofit / wins : 0.0
+    avg_loss = losses > 0 ? strategy.grossloss / losses : 0.0
+    pf = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : 0.0
+    net = strategy.netprofit
+    max_dd = strategy.max_drawdown
+
+    txt_col = color.new(color.white, 10)
+    label_col = color.new(color.gray, 30)
+
+    table.cell(tbl, 0, 0, "MES ORB v6", text_color=color.white,
+         bgcolor=color.new(color.blue, 40))
+    table.cell(tbl, 1, 0, str.format("{0,number,00}:{1,number,00} ET", orb_hour, orb_min),
+         text_color=color.white,
+         bgcolor=color.new(color.blue, 40))
+
+    table.cell(tbl, 0, 1, "TRADES", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(total), text_color=txt_col, text_size=size.small)
+
+    table.cell(tbl, 0, 2, "WIN RATE", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(wr, "#.#") + "%",
+         text_color=wr >= 80 ? color.lime : wr >= 60 ? color.yellow : color.orange,
+         text_size=size.small)
+
+    table.cell(tbl, 0, 3, "W / L", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(wins) + " / " + str.tostring(losses),
+         text_color=txt_col, text_size=size.small)
+
+    table.cell(tbl, 0, 4, "AVG WIN", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 4, "$" + str.tostring(avg_win, "#,###"),
+         text_color=color.lime, text_size=size.small)
+
+    table.cell(tbl, 0, 5, "AVG LOSS", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 5, "$" + str.tostring(avg_loss, "#,###"),
+         text_color=color.red, text_size=size.small)
+
+    table.cell(tbl, 0, 6, "PROFIT FACTOR", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 6, str.tostring(pf, "#.##"),
+         text_color=pf >= 2 ? color.lime : pf >= 1.5 ? color.yellow : color.orange,
+         text_size=size.small)
+
+    table.cell(tbl, 0, 7, "NET", text_color=label_col, text_size=size.small)
+    table.cell(tbl, 1, 7, "$" + str.tostring(net, "#,###"),
+         text_color=net > 0 ? color.lime : color.red,
+         text_size=size.normal)

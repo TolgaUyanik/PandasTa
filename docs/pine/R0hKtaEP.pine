@@ -1,0 +1,109 @@
+//@version=6
+strategy(title="VWAP StdDev + SVP (Clean)", shorttitle="VWAP+SVP_Clean", overlay=true,
+     default_qty_type=strategy.cash, default_qty_value=10000, initial_capital=10000,
+     process_orders_on_close=true, close_entries_rule="ANY", pyramiding=0)
+
+// === 1. Einstellungen ===
+hideonDWM = input(false, title="Hide VWAP on 1D or above")
+var anchor = input.string("Session", "Anchor Period", options=["Session","Week","Month","Quarter","Year","Decade","Century","Earnings","Dividends","Splits"])
+src = input(hlc3, "Source")
+resetOnSessionOpen = input(true, "Reset on Session Open")
+sessionTime = input.session("0930-1600", "Session Time")
+sessionTimezone = input.string("America/New_York", "Session Timezone")
+svp_dpoc = input.source(close, "SVP Developing POC")
+svp_dvah = input.source(close, "SVP Developing VA High")
+svp_dval = input.source(close, "SVP Developing VA Low")
+riskPerTrade = input.float(100.0, "Risk per Trade ($)", step=10)
+
+// === 2. Volumen & Splits ===
+if barstate.islast and ta.cum(volume) == 0
+    runtime.error("No volume")
+dollarVolume = volume * close
+minDollarVolume = (100000 / 60) * timeframe.multiplier
+volumeCheck = dollarVolume >= minDollarVolume
+
+new_earnings  = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_dividends = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_split     = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+// === 3. VWAP Reset Periode ===
+isNewPeriod = switch anchor
+    "Earnings"  => not na(new_earnings)
+    "Dividends" => not na(new_dividends)
+    "Splits"    => not na(new_split)
+    "Session"   => timeframe.change("D")
+    "Week"      => timeframe.change("W")
+    "Month"     => timeframe.change("M")
+    "Quarter"   => timeframe.change("3M")
+    "Year"      => timeframe.change("12M")
+    "Decade"    => timeframe.change("12M") and year % 10 == 0
+    "Century"   => timeframe.change("12M") and year % 100 == 0
+    => false
+
+isSessionOpen = not na(time(timeframe.period, sessionTime, sessionTimezone))
+isNewSession = isSessionOpen and not isSessionOpen[1]
+if resetOnSessionOpen
+    isNewPeriod := isNewPeriod or isNewSession
+if na(src[1]) and anchor != "Earnings" and anchor != "Dividends" and anchor != "Splits"
+    isNewPeriod := true
+
+// === 4. VWAP und Bänder ===
+var float vwapValue = na
+var float upper1 = na
+var float lower1 = na
+var float u1p025 = na
+var float u1m025 = na
+var float l1p025 = na
+var float l1m025 = na
+var float u1p05 = na
+var float u1m05 = na
+var float l1p05 = na
+var float l1m05 = na
+
+if not (hideonDWM and timeframe.isdwm)
+    [vw, stdevUp, _] = ta.vwap(src, isNewPeriod, 1)
+    if not na(vw)
+        vwapValue := vw
+        float stdev = stdevUp - vw
+        upper1 := vw + stdev
+        lower1 := vw - stdev
+        u1p025 := upper1 + stdev * 0.25
+        u1m025 := upper1 - stdev * 0.25
+        l1p025 := lower1 + stdev * 0.25
+        l1m025 := lower1 - stdev * 0.25
+        u1p05  := upper1 + stdev * 0.5
+        u1m05  := upper1 - stdev * 0.5
+        l1p05  := lower1 + stdev * 0.5
+        l1m05  := lower1 - stdev * 0.5
+
+// === 5. Risiko (ohne Spread) ===
+riskDiff = math.abs(upper1 - vwapValue)
+slTicks = math.ceil(riskDiff / syminfo.mintick)
+shares = math.floor(riskPerTrade / riskDiff)
+
+// === 6. Signal ===
+inUpperZone = close[1] >= u1m025[1] and close[1] <= u1p025[1]
+inLowerZone = close[1] >= l1m025[1] and close[1] <= l1p025[1]
+
+longCond = not na(vwapValue) and inUpperZone and volumeCheck and
+           svp_dpoc >= u1m025[1] and svp_dpoc <= u1p025[1] and
+           svp_dvah >= upper1[1] and svp_dvah <= u1p05[1]
+shortCond = not na(vwapValue) and inLowerZone and volumeCheck and svp_dpoc >= l1m025[1] and svp_dpoc <= l1p025[1] and svp_dval <= lower1[1] and svp_dval >= l1m05[1]
+
+longSignal  = longCond and not longCond[1]
+shortSignal = shortCond and not shortCond[1]
+
+// === 7. Orders mit alert_message (CSV: Ticker,Shares,slTicks) ===
+if longSignal and shares > 0
+    msg = syminfo.ticker + "," + str.tostring(shares) + "," + str.tostring(slTicks)
+    strategy.entry("Long", strategy.long, qty=shares, alert_message=msg)
+    strategy.exit("Long SL", "Long", stop=vwapValue - syminfo.mintick)
+
+if shortSignal and shares > 0
+    msg = syminfo.ticker + "," + str.tostring(shares) + "," + str.tostring(slTicks)
+    strategy.entry("Short", strategy.short, qty=shares, alert_message=msg)
+    strategy.exit("Short SL", "Short", stop=vwapValue + syminfo.mintick)
+
+// === 8. Optional: alertcondition für Popup (nur Ticker) ===
+//alertcondition(longSignal, title="Long Signal", message=" Long")
+//alertcondition(shortSignal, title="Short Signal", message=" Short")

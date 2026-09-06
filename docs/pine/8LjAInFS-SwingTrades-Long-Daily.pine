@@ -1,0 +1,250 @@
+//@version=6
+indicator("SwingTrades-Long-Daily", shorttitle="SWT-Daily", overlay=true)
+
+// =====================================================================================
+// SwingTrades-Long-Daily — WHAT THIS INDICATOR DOES AND HOW (read this first)
+// =====================================================================================
+// THIS IS HALF OF A PAIR
+//   SwingTrades-Long used to be one script covering 4 categories (MT, 3Q, TR, R). It
+//   has been split into two independent indicators so each runs on the timeframe that
+//   actually fits its checks:
+//     - SwingTrades-Long-Daily  (THIS script)  — Category 1 (MT) only.
+//       Runs on the DAILY chart. Answers: "is this stock structurally set up to buy?"
+//       Updates once per day.
+//     - SwingTrades-Long-30Mins (companion script) — Category 2 (3Q) + Category 3 (TR)
+//       + Category 4 (R). Runs on the 30-MINUTE chart. Answers: "where has it come
+//       from, where can it go, is the reward-vs-risk worth it, and right now, is this
+//       a safe moment to pull the trigger?" Updates every 30 minutes throughout the
+//       session.
+//   NOTE: 3Q (Category 2) originally lived in this Daily script but has been MOVED to
+//   the companion 30-min script so its RvR check can reuse the stop/target machinery
+//   that already exists there. This script now only computes Category 1 (MT).
+//   The overall 0-10 score (Step F) is currently COMMENTED OUT in BOTH scripts — see
+//   Step F below for how to re-enable it.
+//
+// PURPOSE OF THIS SCRIPT
+//   Scores a stock on: (1) Multi-Timeframe Price Action — is price aligned with
+//   higher timeframes, the broader market, and in an uptrend structure. Every
+//   threshold is a configurable input.
+//
+// WHERE DATA COMES FROM
+//   - Runs on a DAILY chart. Daily Fast/Mid/Slow SMA (defaults 20/50/200), a separate
+//     Daily 5-SMA (used only for the 30-min pattern check), and volume are native.
+//   - Weekly data (HTF alignment) uses its OWN independently configurable Fast/Mid/Slow
+//     SMA lengths (defaults 10/20/50) — Daily and Weekly lengths are no longer tied
+//     together. The benchmark symbol (broader market alignment) is also pulled via
+//     request.security(), on "D", reusing the Daily Mid SMA length.
+//   - The 30-minute timeframe is pulled via request.security() purely to help confirm
+//     the "pattern" check (1.b.i).
+//
+// STEP-BY-STEP LOGIC
+//   STEP A — Inputs, grouped by category.
+//   STEP B — Daily-native series: Daily Fast/Mid/Slow SMA, a separate Daily 5-SMA, and
+//            their "rising" slope flags.
+//   STEP C — Multi-timeframe pulls: Weekly (HTF, using its own Fast/Mid/Slow lengths),
+//            Benchmark (broader market), 30-min (just the close, for the pattern check).
+//   STEP D — 1. MULTI-TIMEFRAME PRICE ACTION (MT) — 9 checks, category score /10:
+//            a. HTF Aligned (Weekly)   — weekly close > rising Weekly Fast SMA, AND
+//                                        Weekly Fast SMA > Weekly Mid SMA > Weekly Slow
+//                                        SMA (a full weekly SMA-stack check, mirroring
+//                                        the Daily stack checks below)
+//            b. Broader Market Aligned — benchmark close > rising benchmark Daily Mid
+//                                        SMA
+//            c. Pattern Confirmed      — Daily price above a rising Daily Fast SMA, AND
+//                                        the current 30-min close is above the Daily
+//                                        5-SMA AND that Daily 5-SMA is sloped up (see
+//                                        pattern-recognition note below)
+//            d. Price > Daily Fast SMA
+//            e. Price > Daily Mid SMA
+//            f. Daily Fast SMA > Daily Mid SMA
+//            g. Daily Mid SMA > Daily Slow SMA
+//            h. Volume > configured minimum
+//            i. Daily Fast, Mid, AND Slow SMA all sloped up
+//            NOTE: true chart-pattern recognition (flags, H&S, triangles, etc.) can't
+//            be reliably automated in Pine. The Daily side of "pattern confirmed" is
+//            approximated as price trading above a rising short-term SMA; the 30-min
+//            side checks that the live 30-min price is above the Daily 5-SMA AND that
+//            the Daily 5-SMA itself is sloped up — not a full trend-structure test.
+//   STEP E — [MOVED] 2. 3Q (Base / Target / RvR) has been relocated to the companion
+//            SwingTrades-Long-30Mins script — see that script's "STEP E: 2. 3Q" section.
+//   STEP F — [COMMENTED OUT] Overall score. With 3Q moved out, this script only scores
+//            one category (MT), so the weighted-combination/market-cap formula below
+//            is disabled. The MT category score (mtScoreFrac, shown as "MT Score" in
+//            the dashboard) is still fully computed in Step D — only the extra
+//            combination layer is turned off. Uncomment the code block to re-enable it.
+//   STEP G — Optionally plots the Daily Fast/Mid/Slow SMAs (off by default — toggle in
+//            "Chart Display") and builds the dashboard table (MT section only).
+// =====================================================================================
+
+// ============================== STEP A: INPUTS =======================================
+grpGen = "General & Market"
+benchmarkSym          = input.symbol("QQQ", "Broader Market Benchmark", group=grpGen) // symbol used for "align with broader market" (1.a.ii)
+maxScoreAgainstMarket  = input.float(3.0, "Score Cap When Against Market", minval=0, maxval=10, step=0.5, group=grpGen) // used only if Step F (Overall Score) is re-enabled
+
+grpMT = "1. Multi-Timeframe Price Action (MT)"
+useWeeklyHTF   = input.bool(true, "Include Weekly in HTF Alignment", group=grpMT)      // toggles the weekly HTF check (1.a.i) on/off
+dailyFastLen   = input.int(20, "Daily Fast SMA Length", group=grpMT)                   // "20-Day SMA" — Daily side of the MT stack checks
+dailyMidLen    = input.int(50, "Daily Mid SMA Length", group=grpMT)                    // "50-Day SMA" — Daily side of the MT stack checks; also reused for the benchmark's SMA
+dailySlowLen   = input.int(200, "Daily Slow SMA Length", group=grpMT)                  // "200-Day SMA" — Daily side of the MT stack checks
+weeklyFastLen  = input.int(10, "Weekly Fast SMA Length", group=grpMT)                  // independent from Daily lengths — used only by the Weekly HTF check (1.a.i)
+weeklyMidLen   = input.int(20, "Weekly Mid SMA Length", group=grpMT)                   // independent from Daily lengths — used only by the Weekly HTF check (1.a.i)
+weeklySlowLen  = input.int(50, "Weekly Slow SMA Length", group=grpMT)                  // independent from Daily lengths — used only by the Weekly HTF check (1.a.i)
+sma5Len        = input.int(5, "Daily 5-SMA Length (used by 30-min Pattern Check)", group=grpMT) // the "Daily 5-SMA" the 30-min close is compared against (1.b.i)
+minVolume      = input.int(2000000, "Minimum Daily Volume", group=grpMT)              // configurable; defaults to 2,000,000 daily volume (rule 1.b.vi)
+slopeLookback  = input.int(5, "SMA Slope Lookback (bars)", group=grpMT)               // bars back used to decide "sloped up" (1.b.vii); applied in both Daily-bars and Weekly-bars contexts
+tf30           = input.timeframe("30", "Intraday Pattern Timeframe", group=grpMT)      // the "30-minute" timeframe used for pattern confirmation (1.b.i)
+
+grpScore = "Scoring Weights (relative, auto-normalized) — currently unused, Step F is commented out"
+wMT = input.float(5.0, "Weight: MT", group=grpScore)
+scoreGoodTh = input.float(7.0, "Score: Good Threshold (>=)", group=grpScore)           // overall score >= this shows green (only relevant if Step F is re-enabled)
+scoreWarnTh = input.float(4.0, "Score: Caution Threshold (>=)", group=grpScore)        // overall score >= this (but < good) shows orange; below shows red (only relevant if Step F is re-enabled)
+
+grpDisp = "Chart Display"
+showSmaLines = input.bool(false, "Draw Daily Fast/Mid/Slow SMA Lines on Chart", group=grpDisp) // off by default; toggle on to plot the 3 Daily SMAs
+
+grpTbl = "Dashboard"
+showDashboard = input.bool(true, "Show Dashboard", group=grpTbl)
+tblPositionIn = input.string("Top Right", "Table Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grpTbl)
+
+// helper: maps the dashboard-position input string to a Pine position constant
+f_pos(p) =>
+    switch p
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        => position.top_right
+
+tblPosition = f_pos(tblPositionIn)
+
+// ============================== STEP B: DAILY-NATIVE SERIES ==========================
+smaDailyFast = ta.sma(close, dailyFastLen)   // Daily Fast SMA (default 20-Day)
+smaDailyMid  = ta.sma(close, dailyMidLen)    // Daily Mid SMA (default 50-Day)
+smaDailySlow = ta.sma(close, dailySlowLen)   // Daily Slow SMA (default 200-Day)
+smaDaily5    = ta.sma(close, sma5Len)        // Daily 5-SMA, used only by the 30-min pattern check (1.b.i)
+
+smaDailyFastRising = smaDailyFast > smaDailyFast[slopeLookback]   // "Sloped up" = higher now than `slopeLookback` bars ago (rule 1.b.vii)
+smaDailyMidRising  = smaDailyMid > smaDailyMid[slopeLookback]
+smaDailySlowRising = smaDailySlow > smaDailySlow[slopeLookback]
+smaDaily5Rising    = smaDaily5 > smaDaily5[slopeLookback]         // used only by the 30-min pattern check (1.b.i)
+slopesUp = smaDailyFastRising and smaDailyMidRising and smaDailySlowRising   // all three sloped up together
+
+priceAboveDailyFast = close > smaDailyFast    // rules 1.b.ii - 1.b.v
+priceAboveDailyMid  = close > smaDailyMid
+dailyFastAboveMid   = smaDailyFast > smaDailyMid
+dailyMidAboveSlow   = smaDailyMid > smaDailySlow
+volumeOK = volume > minVolume   // rule 1.b.vi
+
+// ============================== STEP C1: HIGHER TIMEFRAME (Weekly) ====================
+// Implements rule 1.a.i "Align with Higher Timeframes" as a full weekly SMA-stack
+// check (mirroring the Daily stack checks above), using its OWN independently
+// configurable Fast/Mid/Slow lengths (defaults 10/20/50 — shorter than the Daily
+// defaults since these are weekly, not daily, periods).
+[wClose, wFast, wFastPrev, wMid, wSlow] = request.security(syminfo.tickerid, "W",
+     [close, ta.sma(close, weeklyFastLen), ta.sma(close, weeklyFastLen)[slopeLookback],
+      ta.sma(close, weeklyMidLen), ta.sma(close, weeklySlowLen)])
+weeklyUp = wClose > wFast and wFast > wFastPrev and wFast > wMid and wMid > wSlow
+htfAligned = useWeeklyHTF ? weeklyUp : true   // if the weekly check is disabled, treat as always-aligned
+
+// ============================== STEP C2: BROADER MARKET (Benchmark) ===================
+// Implements rule 1.a.ii "Align with broader market". Reuses the Daily Mid SMA length
+// for the benchmark's own SMA (this is a Daily-timeframe concept, so it doesn't get a
+// separate Weekly variant).
+[bClose, bSMA50, bSMA50Prev] = request.security(benchmarkSym, "D",
+     [close, ta.sma(close, dailyMidLen), ta.sma(close, dailyMidLen)[slopeLookback]])
+marketAligned = bClose > bSMA50 and bSMA50 > bSMA50Prev
+
+// ============================== STEP C3: 30-MIN PATTERN CHECK ==========================
+// Implements rule 1.b.i "Confirm Pattern in 1-Day, 30-minute" (see pattern-recognition
+// note at the top). The 30-min side is: is the live 30-min close trading above the
+// Daily 5-SMA computed in Step B, AND is that Daily 5-SMA itself sloped up?
+c30 = request.security(syminfo.tickerid, tf30, close)
+pattern30    = c30 > smaDaily5 and smaDaily5Rising               // 30-min close above a rising Daily 5-SMA
+patternDaily = priceAboveDailyFast and smaDailyFastRising        // Daily trend structure confirmed
+patternConfirmed = patternDaily and pattern30                     // both timeframes must agree
+
+// ============================== STEP D: 1. MT SCORE ====================================
+// Tallies the 9 MT criteria (a-i above) and converts to a 0-10 score.
+mtCount = (htfAligned ? 1 : 0) + (marketAligned ? 1 : 0) + (patternConfirmed ? 1 : 0) +
+          (priceAboveDailyFast ? 1 : 0) + (priceAboveDailyMid ? 1 : 0) + (dailyFastAboveMid ? 1 : 0) +
+          (dailyMidAboveSlow ? 1 : 0) + (volumeOK ? 1 : 0) + (slopesUp ? 1 : 0)
+mtScoreFrac = mtCount / 9.0   // fraction of the 9 MT checks passed
+
+// ============================== STEP E: [MOVED] 2. 3Q ===================================
+// The 3Q (Base / Target / RvR) section that used to live here has been moved to the
+// companion SwingTrades-Long-30Mins script (see its "STEP E: 2. 3Q" section), so its
+// RvR check can reuse the stop/target machinery that script already computes for Risk.
+
+// ============================== STEP F: OVERALL SCORE (COMMENTED OUT) ===================
+// Per user request, this step is disabled. It used to combine MT + 3Q into one 0-10
+// score with a market-alignment cap; since 3Q has moved to the companion 30-min
+// script, only MT remains here. Uncomment the lines below to re-enable a
+// single-category "overall" score for MT (still capped when the market isn't aligned).
+// wSum = wMT
+// rawScore = wSum != 0 ? (mtScoreFrac * wMT) / wSum * 10 : 0.0
+// overallScore = marketAligned ? rawScore : math.min(rawScore, maxScoreAgainstMarket)
+
+// ============================== STEP G: PLOTS ============================================
+// Off by default (showSmaLines = false); toggle on in "Chart Display" to draw the 3
+// Daily SMAs. Using display=display.none (rather than removing the plot calls) keeps
+// the series available for the price scale / status line without cluttering the chart.
+plot(smaDailyFast, "Daily Fast SMA", color=color.new(color.blue, 0), linewidth=1, display = showSmaLines ? display.all : display.none)
+plot(smaDailyMid,  "Daily Mid SMA",  color=color.new(color.purple, 0), linewidth=1, display = showSmaLines ? display.all : display.none)
+plot(smaDailySlow, "Daily Slow SMA", color=color.new(color.gray, 0), linewidth=2, display = showSmaLines ? display.all : display.none)
+
+// ============================== STEP G: DASHBOARD TABLE ==================================
+var table tbl = table.new(tblPosition, 2, 30, border_width=1, border_color=color.gray, frame_color=color.gray, frame_width=1)
+
+f_hdr(_t, _r, _txt) =>
+    table.cell(_t, 0, _r, _txt, bgcolor=color.new(color.navy, 20), text_color=color.white, text_halign=text.align_left, text_size=size.small)
+    table.cell(_t, 1, _r, "", bgcolor=color.new(color.navy, 20))
+
+f_row(_t, _r, _label, _value, _pass) =>
+    table.cell(_t, 0, _r, _label, bgcolor=color.new(color.gray, 85), text_color=color.black, text_halign=text.align_left, text_size=size.small)
+    table.cell(_t, 1, _r, _value, bgcolor=_pass ? color.new(color.green, 75) : color.new(color.red, 75), text_color=color.black, text_size=size.small)
+
+f_rowNeutral(_t, _r, _label, _value, _flag) =>
+    table.cell(_t, 0, _r, _label, bgcolor=color.new(color.gray, 85), text_color=color.black, text_halign=text.align_left, text_size=size.small)
+    table.cell(_t, 1, _r, _value, bgcolor=_flag ? color.new(color.orange, 60) : color.new(color.green, 75), text_color=color.black, text_size=size.small)
+
+if showDashboard and barstate.islast
+    table.clear(tbl, 0, 0, 1, 29)
+    r = 0
+
+    // ---- Section 1: Multi-Timeframe Price Action (MT) ----
+    f_hdr(tbl, r, "1. Multi-Timeframe (MT)")
+    r += 1
+    f_row(tbl, r, "HTF Aligned (Weekly)", htfAligned ? "Yes" : "No", htfAligned)
+    r += 1
+    f_row(tbl, r, "Broader Market Aligned", marketAligned ? "Yes" : "No", marketAligned)
+    r += 1
+    f_row(tbl, r, "Pattern Confirmed (Daily & 30m)", patternConfirmed ? "Yes" : "No", patternConfirmed)
+    r += 1
+    f_row(tbl, r, "Price > Daily Fast SMA", str.tostring(close, "#.##") + " / " + str.tostring(smaDailyFast, "#.##"), priceAboveDailyFast)
+    r += 1
+    f_row(tbl, r, "Price > Daily Mid SMA", str.tostring(close, "#.##") + " / " + str.tostring(smaDailyMid, "#.##"), priceAboveDailyMid)
+    r += 1
+    f_row(tbl, r, "Daily Fast SMA > Daily Mid SMA", dailyFastAboveMid ? "Yes" : "No", dailyFastAboveMid)
+    r += 1
+    f_row(tbl, r, "Daily Mid SMA > Daily Slow SMA", dailyMidAboveSlow ? "Yes" : "No", dailyMidAboveSlow)
+    r += 1
+    f_row(tbl, r, "Volume > Min", str.tostring(volume, "#,###"), volumeOK)
+    r += 1
+    f_row(tbl, r, "Daily Fast/Mid/Slow SMA Sloped Up", slopesUp ? "Yes" : "No", slopesUp)
+    r += 1
+    f_row(tbl, r, "MT Score", str.tostring(mtScoreFrac * 10, "#.#") + " / 10", mtScoreFrac >= 0.6)
+    r += 1
+
+    // ---- Section 2: 3Q — MOVED to the companion SwingTrades-Long-30Mins script ----
+    // (rows removed from here; see that script's "2. 3Q - Base / Target / RvR" section)
+
+    // ---- Overall score row — COMMENTED OUT (Step F disabled) ----
+    // f_hdr(tbl, r, "OVERALL (Daily)")
+    // r += 1
+    // scoreColor = overallScore >= scoreGoodTh ? color.new(color.green, 40) : overallScore >= scoreWarnTh ? color.new(color.orange, 40) : color.new(color.red, 40)
+    // table.cell(tbl, 0, r, "SCORE (0-10)", bgcolor=scoreColor, text_color=color.white, text_halign=text.align_left, text_size=size.normal)
+    // table.cell(tbl, 1, r, str.tostring(overallScore, "#.#"), bgcolor=scoreColor, text_color=color.white, text_size=size.normal)
+    // r += 1
+    // if not marketAligned
+    //     f_rowNeutral(tbl, r, "Capped: Against Market", "Cap = " + str.tostring(maxScoreAgainstMarket, "#.#"), true)
+    //     r += 1

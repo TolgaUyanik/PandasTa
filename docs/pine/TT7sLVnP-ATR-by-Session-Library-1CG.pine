@@ -1,0 +1,177 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © OneCleverGuy
+
+//@version=6
+
+//@description      Calculates the average true range of bars within a chosen session and returns the rolling average across the last N completed sessions.
+
+library("ATRxSession", true)
+
+//+-------------------------------------------------------+
+//                           UDT'S                        |
+//+-------------------------------------------------------+
+// #region UDT's
+
+// @type    SessionAtrConfig      Consumer-facing inputs for session-scoped ATR.
+// @field   timezone              IANA timezone used for session timing.
+// @field   session               TradingView session string.
+// @field   sessionCount          Number of completed sessions to average.
+export type SessionAtrConfig
+    string timezone     = na
+    string session      = na
+    int    sessionCount = na
+
+// #endregion UDT's
+
+//+-------------------------------------------------------+
+//                         FUNCTIONS                      |
+//+-------------------------------------------------------+
+//#region Functions
+
+//#region Helpers *****************************************
+
+// @function h_isBarInSession          - Checks if the current bar falls within the given session and timezone.
+// @param    _timezone    (string)     - Timezone string (e.g., "America/New_York").
+// @param    _session     (string)     - Session time range string (e.g., "0930-1600").
+// @returns               (bool)       - True if bar is within the session, false otherwise.
+h_isBarInSession(string _timezone, string _session) =>
+    not na(time(timeframe.period, _session, _timezone))
+
+// @function h_pushCapped              - Pushes a value into an array, removing the oldest element if the array exceeds the cap.
+// @param    _arr         (array<float>) - The array to update.
+// @param    _val         (float)      - The value to push into the array.
+// @param    _cap         (int)        - The maximum size of the array.
+// @returns               (void)       - Updates the array in place.
+h_pushCapped(array<float> _arr, float _val, int _cap) =>
+    if array.size(_arr) >= _cap
+        array.shift(_arr)
+    array.push(_arr, _val)
+
+// @function h_getFallbackAtr         - Computes a Wilder-style ATR fallback without requiring a simple length.
+// @param    _atrLength   (int)       - ATR smoothing length.
+// @returns               (float)     - ATR value using the current chart bars.
+h_getFallbackAtr(int _atrLength) =>
+    int minimumAtrLength = 1
+    int atrLength = math.max(_atrLength, minimumAtrLength)
+
+    var float fallbackAtrState = na
+    var float fallbackSeedSum = 0.0
+    var int fallbackSeedCount = 0
+    var bool fallbackInitialized = false
+    var int previousAtrLength = 0
+
+    bool atrLengthChanged = atrLength != previousAtrLength
+    if atrLengthChanged
+        fallbackAtrState := na
+        fallbackSeedSum := 0.0
+        fallbackSeedCount := 0
+        fallbackInitialized := false
+        previousAtrLength := atrLength
+
+    float previousClose = close[1]
+    float rangeHighLow = high - low
+    float trueRange = na(previousClose) ? rangeHighLow : math.max(rangeHighLow, math.max(math.abs(high - previousClose), math.abs(low - previousClose)))
+
+    if fallbackInitialized
+        fallbackAtrState := fallbackAtrState + (trueRange - fallbackAtrState) / atrLength
+    else
+        fallbackSeedCount += 1
+        fallbackSeedSum += trueRange
+        if fallbackSeedCount == atrLength
+            fallbackAtrState := fallbackSeedSum / atrLength
+            fallbackInitialized := true
+
+    fallbackInitialized ? fallbackAtrState : (fallbackSeedCount > 0 ? fallbackSeedSum / fallbackSeedCount : na)
+
+// @function h_isSessionWithinOneBar   - Determines if a session window fits inside a single bar on the current timeframe.
+// @param    _session     (string)     - Session time range string (e.g., "0930-1600").
+// @returns               (bool)       - True if the session duration is less than or equal to the bar duration.
+h_isSessionWithinOneBar(string _session) =>
+    int tfSec = timeframe.in_seconds(timeframe.period)
+    string[] parts = str.split(_session, "-")
+    if array.size(parts) < 2
+        false
+    else
+        string start  = array.get(parts, 0)
+        string finish = array.get(parts, 1)
+        int sMin = int(str.tonumber(str.substring(start, 0, 2)) * 60 + str.tonumber(str.substring(start, 2, 4)))
+        int eMin = int(str.tonumber(str.substring(finish, 0, 2)) * 60 + str.tonumber(str.substring(finish, 2, 4)))
+        int sessMin = eMin >= sMin ? (eMin - sMin) : ((24 * 60 - sMin) + eMin)
+        tfSec >= sessMin * 60
+
+//#endregion Helpers
+
+
+//#region Main ********************************************
+
+// @function h_getSessionAtrCore       - Computes a session-aware ATR over completed sessions on the current timeframe context.
+// @param    _timezone    (string)     - Timezone string to evaluate session timing.
+// @param    _session     (string)     - Session time range string (e.g., "0930-1600").
+// @param    _sessionCount (int)       - Number of past completed sessions to include in the rolling average.
+// @returns               (float)      - The session ATR, or fallback ATR when the session doesn't fit or data is insufficient.
+h_getSessionAtrCore(string _timezone, string _session, int _sessionCount) =>
+    var bool    wasInSession      = false
+    var array<float> sessionQueue = array.new_float()
+    var float   atrState          = na
+    var float   seedSum           = 0.0
+    var int     seedCount         = 0
+    var bool    atrInitialized    = false
+    var int     prevSessionCount  = 0
+
+    atrLen = math.max(_sessionCount, 1)
+    sessionCountChanged = atrLen != prevSessionCount
+    if sessionCountChanged
+        atrState       := na
+        seedSum        := 0.0
+        seedCount      := 0
+        atrInitialized := false
+        array.clear(sessionQueue)
+        prevSessionCount := atrLen
+
+    inSession = h_isBarInSession(_timezone, _session)
+
+    if inSession
+        prevClose = close[1]
+        rangeHighLow = high - low
+        tr = na(prevClose) ? rangeHighLow : math.max(rangeHighLow, math.max(math.abs(high - prevClose), math.abs(low - prevClose)))
+
+        if atrInitialized
+            atrState := atrState + (tr - atrState) / atrLen
+        else
+            seedCount += 1
+            seedSum += tr
+            if seedCount == atrLen
+                atrState       := seedSum / atrLen
+                atrInitialized := true
+
+    if wasInSession and not inSession and atrInitialized and not na(atrState)
+        h_pushCapped(sessionQueue, atrState, atrLen)
+
+    wasInSession := inSession
+
+    arrSize = array.size(sessionQueue)
+    sessionAtr = (arrSize == 0 ? na : array.sum(sessionQueue) / arrSize)
+    fallbackAtr = h_getFallbackAtr(atrLen)
+
+    (h_isSessionWithinOneBar(_session) or na(sessionAtr) or sessionAtr == 0
+        ? fallbackAtr
+        : sessionAtr
+        )
+
+// @function getSessionAtr             - Computes a session-aware ATR over completed sessions.
+// @param    _timezone    (string)     - Timezone string to evaluate session timing.
+// @param    _session     (string)     - Session time range string (e.g., "0930-1600").
+// @param    _sessionCount (int)       - Number of past completed sessions to include in the rolling average and ATR smoothing.
+// @returns               (float)      - The session ATR, with automatic fallback to standard ATR when needed.
+export getSessionAtr(string _timezone, string _session, int _sessionCount) =>
+    h_getSessionAtrCore(_timezone, _session, _sessionCount)
+
+// @function sessionAtrFromConfig      - Session ATR using the library-owned config UDT.
+// @param    _config       (SessionAtrConfig) - Consumer-facing session ATR config.
+// @returns               (float)            - Session ATR with fallback handling.
+export sessionAtrFromConfig(SessionAtrConfig _config) =>
+    h_getSessionAtrCore(_config.timezone, _config.session, _config.sessionCount)
+
+//#endregion Main
+
+//#endregion Functions

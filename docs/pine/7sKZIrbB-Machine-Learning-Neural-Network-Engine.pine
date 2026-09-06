@@ -1,0 +1,366 @@
+// © Julien_Exe
+//@version=6
+indicator("Machine Learning Neural Network Engine", "ML Neural Engine", overlay = true, max_bars_back = 1500)
+
+// =============================================================================
+// MACHINE LEARNING NEURAL NETWORK ENGINE
+//
+// Standalone online machine-learning model built around a neural network
+// (6 → 5 → 1). It learns causally: on bar t, the network may only train on the
+// feature vector at t-H, once its H-bar outcome is known. The current prediction
+// never sees future bars. Signals use confirmed Daily closes only.
+// No request.security(), no lookahead and no repainting of confirmed states.
+// =============================================================================
+
+string GRP_BEHAVIOR = "1 — Machine learning engine"
+string GRP_VISUAL = "2 — Visual"
+string GRP_AUDIT = "3 — Honest comparison"
+
+string response = input.string("Balanced", "ML response",
+     options = ["Fast", "Balanced", "Smooth"], group = GRP_BEHAVIOR,
+     tooltip = "Controls the online learning horizon, adaptation speed and signal confirmation. Fast reacts sooner; Smooth prioritizes stability.")
+string selectivity = input.string("Balanced", "ML selectivity",
+     options = ["Responsive", "Balanced", "Selective"], group = GRP_BEHAVIOR,
+     tooltip = "Controls the evidence required before a confirmed LONG/CASH transition.")
+bool enforceDaily = input.bool(true, "Reject non-Daily charts", group = GRP_BEHAVIOR)
+
+bool tintCandles = input.bool(true, "Tint candles", group = GRP_VISUAL)
+bool showTransitions = input.bool(true, "Transition pulses", group = GRP_VISUAL)
+bool showStructure = input.bool(false, "Show structural averages", group = GRP_VISUAL)
+bool showDashboard = input.bool(true, "Show dashboard", group = GRP_VISUAL)
+color longColor = input.color(#18D6B4, "LONG", inline = "palette", group = GRP_VISUAL)
+color watchColor = input.color(#FFB020, "WATCH", inline = "palette", group = GRP_VISUAL)
+color cashColor = input.color(#FF4D6D, "CASH", inline = "palette2", group = GRP_VISUAL)
+color quietColor = input.color(#7E8BA8, "Neutral", inline = "palette2", group = GRP_VISUAL)
+
+int auditStart = input.time(1420070400000, "Comparison start", group = GRP_AUDIT,
+     tooltip = "Default: 1 January 2015. The same start is used for the model and buy-and-hold.")
+float oneWayCostPercent = input.float(0.07, "Cost per entry or exit (%)",
+     minval = 0.0, maxval = 2.0, step = 0.01, group = GRP_AUDIT)
+
+bool isOneDay = timeframe.isdaily and timeframe.multiplier == 1
+if barstate.isfirst and enforceDaily and not isOneDay
+    runtime.error("ML Neural Engine is designed for confirmed 1D bars only.")
+
+int normalizationLength = response == "Fast" ? 60 : response == "Smooth" ? 160 : 100
+int forecastHorizon = response == "Fast" ? 5 : response == "Smooth" ? 13 : 8
+float learningRate = response == "Fast" ? 0.0045 : response == "Smooth" ? 0.0018 : 0.0030
+int warmupSamples = response == "Fast" ? 100 : response == "Smooth" ? 220 : 150
+float entryThreshold = selectivity == "Responsive" ? 0.51 : selectivity == "Selective" ? 0.59 : 0.55
+float exitThreshold = selectivity == "Responsive" ? 0.43 : selectivity == "Selective" ? 0.35 : 0.39
+int entryConfirmations = response == "Fast" ? 2 : response == "Smooth" ? 5 : 3
+int exitConfirmations = response == "Fast" ? 1 : response == "Smooth" ? 3 : 2
+
+const int INPUT_COUNT = 6
+const int HIDDEN_COUNT = 5
+const float RMS_DECAY = 0.99
+const float EPSILON = 0.000001
+const float REGULARIZATION = 0.0002
+
+// ——— Neural parameters and deterministic initialization
+var array<float> inputWeights = array.new_float(INPUT_COUNT * HIDDEN_COUNT, 0.0)
+var array<float> hiddenBiases = array.new_float(HIDDEN_COUNT, 0.0)
+var array<float> outputWeights = array.new_float(HIDDEN_COUNT, 0.0)
+var float outputBias = 0.0
+var array<float> inputMoments = array.new_float(INPUT_COUNT * HIDDEN_COUNT, 0.0)
+var array<float> hiddenBiasMoments = array.new_float(HIDDEN_COUNT, 0.0)
+var array<float> outputMoments = array.new_float(HIDDEN_COUNT, 0.0)
+var float outputBiasMoment = 0.0
+
+if barstate.isfirst
+    for index = 0 to INPUT_COUNT * HIDDEN_COUNT - 1
+        float seed = math.sin((index + 1) * 12.9898) * 0.10
+        array.set(inputWeights, index, seed)
+    for hidden = 0 to HIDDEN_COUNT - 1
+        float seed = math.sin((hidden + 1) * 7.233) * 0.08
+        array.set(outputWeights, hidden, seed)
+
+// ——— Helpers
+f_clamp(float value, float floor, float ceiling) =>
+    math.max(floor, math.min(ceiling, value))
+
+f_safe_ratio(float numerator, float denominator, float fallback) =>
+    na(numerator) or na(denominator) or math.abs(denominator) <= 0.0000000001 ? fallback : numerator / denominator
+
+f_tanh(float value) =>
+    float bounded = f_clamp(value, -10.0, 10.0)
+    2.0 / (1.0 + math.exp(-2.0 * bounded)) - 1.0
+
+f_sigmoid(float value) =>
+    1.0 / (1.0 + math.exp(-f_clamp(value, -30.0, 30.0)))
+
+f_feature(int index, float a, float b, float c, float d, float e, float f) =>
+    index == 0 ? a : index == 1 ? b : index == 2 ? c : index == 3 ? d : index == 4 ? e : f
+
+f_rms_update(array<float> weights, array<float> moments, int index, float gradient, float rate, float penalty) =>
+    float previousMoment = array.get(moments, index)
+    float nextMoment = RMS_DECAY * previousMoment + (1.0 - RMS_DECAY) * gradient * gradient
+    float previousWeight = array.get(weights, index)
+    float nextWeight = previousWeight + rate * gradient / math.sqrt(nextMoment + EPSILON) - rate * penalty * previousWeight
+    array.set(moments, index, nextMoment)
+    array.set(weights, index, nextWeight)
+    nextWeight
+
+f_predict(float a, float b, float c, float d, float e, float f) =>
+    array<float> hiddenValues = array.new_float(HIDDEN_COUNT, 0.0)
+    for hidden = 0 to HIDDEN_COUNT - 1
+        float activation = array.get(hiddenBiases, hidden)
+        for feature = 0 to INPUT_COUNT - 1
+            int weightIndex = hidden * INPUT_COUNT + feature
+            activation += array.get(inputWeights, weightIndex) * f_feature(feature, a, b, c, d, e, f)
+        array.set(hiddenValues, hidden, f_tanh(activation))
+    float activation = outputBias
+    for hidden = 0 to HIDDEN_COUNT - 1
+        activation += array.get(outputWeights, hidden) * array.get(hiddenValues, hidden)
+    f_tanh(activation)
+
+f_percent(float value) =>
+    na(value) ? "—" : str.tostring(math.round(value * 1000.0) / 10.0) + "%"
+
+f_multiple(float value) =>
+    na(value) ? "—" : str.tostring(math.round(value * 100.0) / 100.0) + "×"
+
+// ——— Scale-free causal features
+float atr14 = ta.atr(14)
+float ema21 = ta.ema(close, 21)
+float ema34 = ta.ema(close, 34)
+float ema55 = ta.ema(close, 55)
+float ema120 = ta.ema(close, 120)
+float ema250 = ta.ema(close, 250)
+
+float featureLevel = f_clamp(f_safe_ratio(ema21 - ema55, atr14, 0.0) / 3.0, -1.0, 1.0)
+float featureSlope = f_clamp((ta.rsi(close, 14) - 50.0) / 50.0, -1.0, 1.0)
+float regressionMean = ta.linreg(close, 20, 0)
+float featureCurve = f_clamp(f_safe_ratio(close - regressionMean, atr14, 0.0) / 2.0, -1.0, 1.0)
+float absolutePath = math.sum(math.abs(ta.change(close)), 10)
+float featureTrend = f_clamp(f_safe_ratio(close - close[10], absolutePath, 0.0), -1.0, 1.0)
+float atrAverage = ta.sma(atr14, normalizationLength)
+float featureVolatility = f_clamp(f_safe_ratio(atr14, atrAverage, 1.0) - 1.0, -1.0, 1.0)
+float usableVolume = na(volume) ? 1.0 : volume
+float relativeVolume = f_clamp(f_safe_ratio(usableVolume, ta.sma(usableVolume, 50), 1.0), 0.0, 3.0)
+float featurePressure = f_clamp(f_safe_ratio(close - open, high - low, 0.0) * relativeVolume / 2.0, -1.0, 1.0)
+
+bool featuresReady = not na(featureLevel) and not na(featureSlope) and not na(featureCurve) and
+     not na(featureTrend) and not na(featureVolatility) and not na(featurePressure)
+bool canResolve = bar_index > normalizationLength + forecastHorizon + 60 and featuresReady
+float resolvedTarget = canResolve ?
+     f_clamp(f_safe_ratio(close - close[forecastHorizon],
+     math.max(atr14[forecastHorizon], syminfo.mintick * 4), 0.0), -1.0, 1.0) : na
+
+// ——— Causal online machine learning
+if barstate.isconfirmed and canResolve
+    float trainA = featureLevel[forecastHorizon]
+    float trainB = featureSlope[forecastHorizon]
+    float trainC = featureCurve[forecastHorizon]
+    float trainD = featureTrend[forecastHorizon]
+    float trainE = featureVolatility[forecastHorizon]
+    float trainF = featurePressure[forecastHorizon]
+
+    array<float> trainHidden = array.new_float(HIDDEN_COUNT, 0.0)
+    for hidden = 0 to HIDDEN_COUNT - 1
+        float activation = array.get(hiddenBiases, hidden)
+        for feature = 0 to INPUT_COUNT - 1
+            int weightIndex = hidden * INPUT_COUNT + feature
+            activation += array.get(inputWeights, weightIndex) * f_feature(feature, trainA, trainB, trainC, trainD, trainE, trainF)
+        array.set(trainHidden, hidden, f_tanh(activation))
+
+    float trainActivation = outputBias
+    for hidden = 0 to HIDDEN_COUNT - 1
+        trainActivation += array.get(outputWeights, hidden) * array.get(trainHidden, hidden)
+    float trainOutput = f_tanh(trainActivation)
+    float clippedError = f_clamp(resolvedTarget - trainOutput, -0.50, 0.50)
+    float outputGradient = clippedError * (1.0 - trainOutput * trainOutput)
+    array<float> hiddenGradients = array.new_float(HIDDEN_COUNT, 0.0)
+
+    for hidden = 0 to HIDDEN_COUNT - 1
+        float hiddenValue = array.get(trainHidden, hidden)
+        float oldOutputWeight = array.get(outputWeights, hidden)
+        array.set(hiddenGradients, hidden, outputGradient * oldOutputWeight * (1.0 - hiddenValue * hiddenValue))
+
+    for hidden = 0 to HIDDEN_COUNT - 1
+        f_rms_update(outputWeights, outputMoments, hidden,
+             outputGradient * array.get(trainHidden, hidden), learningRate, REGULARIZATION)
+
+    outputBiasMoment := RMS_DECAY * outputBiasMoment + (1.0 - RMS_DECAY) * outputGradient * outputGradient
+    outputBias := outputBias + learningRate * outputGradient / math.sqrt(outputBiasMoment + EPSILON)
+
+    for hidden = 0 to HIDDEN_COUNT - 1
+        float hiddenGradient = array.get(hiddenGradients, hidden)
+        for feature = 0 to INPUT_COUNT - 1
+            int weightIndex = hidden * INPUT_COUNT + feature
+            f_rms_update(inputWeights, inputMoments, weightIndex,
+                 hiddenGradient * f_feature(feature, trainA, trainB, trainC, trainD, trainE, trainF),
+                 learningRate, REGULARIZATION)
+        f_rms_update(hiddenBiases, hiddenBiasMoments, hidden, hiddenGradient, learningRate, 0.0)
+
+// ——— Prediction and live self-audit
+float neuralOutput = featuresReady ?
+     f_predict(featureLevel, featureSlope, featureCurve, featureTrend, featureVolatility, featurePressure) : 0.0
+float structuralScore = f_clamp(
+     featureLevel * 0.32 + featureSlope * 0.13 + featureCurve * 0.10 +
+     featureTrend * 0.35 - featureVolatility * 0.10, -1.0, 1.0)
+
+var float modelError = na
+var float baselineError = na
+var int resolvedSamples = 0
+float pastPrediction = neuralOutput[forecastHorizon]
+float pastBaseline = structuralScore[forecastHorizon]
+if barstate.isconfirmed and canResolve and not na(pastPrediction) and not na(pastBaseline)
+    float currentModelError = math.abs(resolvedTarget - pastPrediction)
+    float currentBaselineError = math.abs(resolvedTarget - pastBaseline)
+    modelError := na(modelError) ? currentModelError : modelError * 0.98 + currentModelError * 0.02
+    baselineError := na(baselineError) ? currentBaselineError : baselineError * 0.98 + currentBaselineError * 0.02
+    resolvedSamples += 1
+
+float liveSkill = na(modelError) or na(baselineError) or baselineError <= EPSILON ? na : 1.0 - modelError / baselineError
+bool warmedUp = resolvedSamples >= warmupSamples
+float neuralInfluence = not warmedUp ? math.min(0.30, resolvedSamples * 0.30 / warmupSamples) :
+     not na(liveSkill) and liveSkill > 0.0 ? f_clamp(0.45 + liveSkill, 0.35, 0.70) : 0.20
+float combinedScore = f_clamp(neuralOutput * neuralInfluence + structuralScore * (1.0 - neuralInfluence), -1.0, 1.0)
+float bullProbability = f_sigmoid(combinedScore * 2.60)
+
+// ——— Independent crash stress
+float return10 = f_safe_ratio(close, close[10], 1.0) - 1.0
+float drawdown63 = f_safe_ratio(close, ta.highest(close, 63), 1.0) - 1.0
+float volatilityRatio = f_safe_ratio(atr14, ta.sma(atr14, 100), 1.0)
+float fastDropThreshold = math.max(0.06, f_safe_ratio(atr14, close, 0.01) * 6.0)
+float dropStress = f_clamp(-return10 / fastDropThreshold, 0.0, 1.0)
+float drawdownStress = f_clamp(-drawdown63 / 0.14, 0.0, 1.0)
+float volatilityStress = f_clamp((volatilityRatio - 1.0) / 1.20, 0.0, 1.0)
+float neuralRisk = f_clamp((1.0 - bullProbability) * 0.45 + dropStress * 0.25 +
+     drawdownStress * 0.15 + volatilityStress * 0.15, 0.0, 1.0)
+bool crisisAlarm = (return10 <= -fastDropThreshold and volatilityRatio >= 1.45) or
+     (drawdown63 <= -0.14 and close < ema120 and volatilityRatio >= 1.25)
+
+// ——— Confirmed LONG / WATCH / CASH state machine
+bool rawExit = crisisAlarm or (bullProbability <= exitThreshold and close < ema120 and close < ema250)
+bool rawEntry = bullProbability >= entryThreshold and close > ema34 and (close > close[20] or close > ema120)
+var bool modelLong = true
+var int entryCount = 0
+var int exitCount = 0
+bool previousLong = modelLong
+
+if barstate.isconfirmed and featuresReady
+    if modelLong
+        exitCount := rawExit ? exitCount + 1 : 0
+        entryCount := 0
+        if crisisAlarm or exitCount >= exitConfirmations
+            modelLong := false
+            exitCount := 0
+    else
+        entryCount := rawEntry and not crisisAlarm ? entryCount + 1 : 0
+        exitCount := 0
+        if entryCount >= entryConfirmations
+            modelLong := true
+            entryCount := 0
+
+bool transitionLong = barstate.isconfirmed and modelLong and not previousLong
+bool transitionCash = barstate.isconfirmed and not modelLong and previousLong
+bool watchState = modelLong and (rawExit or neuralRisk >= 0.55)
+int displayState = modelLong ? watchState ? 1 : 2 : 0
+float confidence = math.abs(bullProbability - 0.50) * 2.0
+
+// ——— Honest lagged long/cash comparison
+float oneWayCost = oneWayCostPercent / 100.0
+bool currentPosition = bar_index > 0 ? modelLong[1] : true
+bool previousPosition = bar_index > 1 ? modelLong[2] : true
+float overnightReturn = previousPosition ? f_safe_ratio(open, close[1], 1.0) - 1.0 : 0.0
+float intradayReturn = currentPosition ? f_safe_ratio(close, open, 1.0) - 1.0 : 0.0
+float grossModelReturn = (1.0 + overnightReturn) * (1.0 + intradayReturn) - 1.0
+float transitionCost = currentPosition != previousPosition ? oneWayCost : 0.0
+float netModelReturn = math.max(-0.999, grossModelReturn - transitionCost)
+float holdReturn = f_safe_ratio(close, close[1], 1.0) - 1.0
+
+var float modelEquity = 1.0
+var float holdEquity = 1.0
+var float modelPeak = 1.0
+var float holdPeak = 1.0
+var float modelMaxDrawdown = 0.0
+var float holdMaxDrawdown = 0.0
+bool auditBegins = time >= auditStart and nz(time[1], 0) < auditStart
+bool auditActive = time >= auditStart and not na(close[1])
+if auditBegins
+    modelEquity := 1.0
+    holdEquity := 1.0
+    modelPeak := 1.0
+    holdPeak := 1.0
+    modelMaxDrawdown := 0.0
+    holdMaxDrawdown := 0.0
+else if auditActive
+    modelEquity *= 1.0 + netModelReturn
+    holdEquity *= 1.0 + holdReturn
+    modelPeak := math.max(modelPeak, modelEquity)
+    holdPeak := math.max(holdPeak, holdEquity)
+    modelMaxDrawdown := math.max(modelMaxDrawdown, 1.0 - modelEquity / modelPeak)
+    holdMaxDrawdown := math.max(holdMaxDrawdown, 1.0 - holdEquity / holdPeak)
+
+// ——— Neural halo: high information density, no label forest
+color stateColor = displayState == 2 ? longColor : displayState == 1 ? watchColor : cashColor
+color scoreColor = color.from_gradient(bullProbability, 0.0, 1.0, cashColor, longColor)
+float haloWidth = atr14 * (0.10 + confidence * 0.32 + neuralRisk * 0.18)
+float haloUpper = ema34 + haloWidth
+float haloLower = ema34 - haloWidth
+int haloTransparency = 90 - int(math.round(f_clamp(confidence + neuralRisk * 0.40, 0.0, 1.0) * 42.0))
+
+centerPlot = plot(ema34, "Neural axis", color = stateColor, linewidth = 3)
+upperPlot = plot(haloUpper, "Halo upper", color = color.new(stateColor, 100), display = display.pane)
+lowerPlot = plot(haloLower, "Halo lower", color = color.new(stateColor, 100), display = display.pane)
+fill(upperPlot, lowerPlot, color = color.new(stateColor, haloTransparency), title = "Neural confidence halo")
+
+plot(showStructure ? ema120 : na, "EMA 120 structure", color = color.new(quietColor, 58), linewidth = 1)
+plot(showStructure ? ema250 : na, "EMA 250 structure", color = color.new(cashColor, 62), linewidth = 1)
+bgcolor(crisisAlarm ? color.new(cashColor, 91) : na, title = "Confirmed crisis stress")
+barcolor(tintCandles ? color.new(stateColor, displayState == 1 ? 48 : 24) : na, title = "Neural state candles")
+plot(showTransitions and transitionLong ? haloLower : na, "LONG pulse",
+     color = longColor, linewidth = 5, style = plot.style_circles)
+plot(showTransitions and transitionCash ? haloUpper : na, "CASH pulse",
+     color = cashColor, linewidth = 5, style = plot.style_circles)
+
+// ——— Always-visible ethical mark plus compact dashboard
+var table disclosureMark = table.new(position.top_left, 1, 1)
+var table dashboard = table.new(position.top_right, 2, 7,
+     frame_color = color.new(color.gray, 72), frame_width = 1)
+
+if barstate.islast
+    table.cell(disclosureMark, 0, 0, "EDUCATIONAL INDICATOR · NO PERFORMANCE GUARANTEE",
+         text_color = color.silver, bgcolor = color.new(color.rgb(24, 27, 36), 8), text_size = size.tiny)
+    if showDashboard
+        color header = color.rgb(24, 27, 36)
+        color body = color.new(color.rgb(24, 27, 36), 8)
+        string stateText = displayState == 2 ? "LONG" : displayState == 1 ? "WATCH" : "CASH"
+        string auditLeader = modelEquity > holdEquity ? "MODEL" : modelEquity < holdEquity ? "MARKET" : "TIED"
+        color auditColor = modelEquity > holdEquity ? longColor : modelEquity < holdEquity ? cashColor : quietColor
+        string skillText = not warmedUp ? "LEARNING" : na(liveSkill) ? "UNRESOLVED" :
+             liveSkill > 0.0 ? "POSITIVE" : "WEAK"
+        color skillColor = not warmedUp or na(liveSkill) ? quietColor : liveSkill > 0.0 ? longColor : watchColor
+
+        table.cell(dashboard, 0, 0, "ML NEURAL ENGINE", text_color = color.white, bgcolor = header, text_size = size.small)
+        table.cell(dashboard, 1, 0, stateText, text_color = stateColor, bgcolor = header, text_size = size.small)
+        table.cell(dashboard, 0, 1, "Bull probability", text_color = color.silver, bgcolor = body, text_size = size.tiny)
+        table.cell(dashboard, 1, 1, f_percent(bullProbability), text_color = scoreColor, bgcolor = body, text_size = size.small)
+        table.cell(dashboard, 0, 2, "Neural risk", text_color = color.silver, bgcolor = body, text_size = size.tiny)
+        table.cell(dashboard, 1, 2, f_percent(neuralRisk), text_color = neuralRisk > 0.60 ? cashColor : neuralRisk > 0.40 ? watchColor : longColor, bgcolor = body, text_size = size.small)
+        table.cell(dashboard, 0, 3, "ML live audit", text_color = color.silver, bgcolor = body, text_size = size.tiny)
+        table.cell(dashboard, 1, 3, skillText, text_color = skillColor, bgcolor = body, text_size = size.small)
+        table.cell(dashboard, 0, 4, "Model / Buy & Hold", text_color = color.silver, bgcolor = body, text_size = size.tiny)
+        table.cell(dashboard, 1, 4, f_multiple(modelEquity) + " / " + f_multiple(holdEquity), text_color = auditColor, bgcolor = body, text_size = size.small)
+        table.cell(dashboard, 0, 5, "Max DD model / market", text_color = color.silver, bgcolor = body, text_size = size.tiny)
+        table.cell(dashboard, 1, 5, f_percent(modelMaxDrawdown) + " / " + f_percent(holdMaxDrawdown), text_color = quietColor, bgcolor = body, text_size = size.small)
+        table.cell(dashboard, 0, 6, "Observed leader", text_color = color.silver, bgcolor = body, text_size = size.tiny)
+        table.cell(dashboard, 1, 6, auditLeader, text_color = auditColor, bgcolor = body, text_size = size.small)
+    else
+        table.clear(dashboard, 0, 0, 1, 6)
+
+// ——— Data-window audit and alerts
+plot(neuralOutput, "Raw neural output", display = display.data_window)
+plot(combinedScore, "Combined causal score", display = display.data_window)
+plot(bullProbability, "Bull probability", display = display.data_window)
+plot(neuralRisk, "Neural risk", display = display.data_window)
+plot(liveSkill, "Live ML skill vs structural baseline", display = display.data_window)
+plot(modelLong ? 1.0 : 0.0, "Confirmed long/cash state", display = display.data_window)
+plot(modelEquity, "Lagged model equity", display = display.data_window)
+plot(holdEquity, "Buy-and-hold equity", display = display.data_window)
+
+alertcondition(transitionLong, "ML Neural Engine LONG", "ML Neural Engine confirmed LONG on {{exchange}}:{{ticker}} at {{close}}.")
+alertcondition(transitionCash, "ML Neural Engine CASH", "ML Neural Engine confirmed CASH on {{exchange}}:{{ticker}} at {{close}}.")
+alertcondition(crisisAlarm and not crisisAlarm[1], "ML Neural Engine crisis stress", "ML Neural Engine detected confirmed crisis stress on {{exchange}}:{{ticker}} at {{close}}.")

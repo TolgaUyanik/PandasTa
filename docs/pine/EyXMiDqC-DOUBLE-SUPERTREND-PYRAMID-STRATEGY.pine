@@ -1,0 +1,1083 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// STRATEGY: DOUBLE SUPERTREND PYRAMID STRATEGY
+// Built on top of "Double Supertrend HTF Filter" (c) Harrocop
+//
+// CHANGE LOG (this revision):
+// - Renamed strategy.
+// - Every pyramid type now has its OWN entry id and its OWN strategy.exit,
+//   so each type is closed independently instead of sharing one exit call.
+// - Added Master Pyramid TP/SL/Trailing override switch: when ON it overrides
+//   every individual pyramid type's exit settings; when OFF each type runs
+//   its own TP/SL/Trailing (or none, if left at 0).
+// - Added per-type: max contracts added per course, max signals per course,
+//   delay between signals (seconds), minimum distance before next add
+//   (Multiplier-of-ATR / Percent / Ticks / Points / Dollar).
+// - Added master "Max Total Contract Signals Allowed Per Plotted Course".
+// - Added master "Enable Tiered Exit System" checkbox.
+// - Fixed a trail_points/trail_offset swap bug in the tiered exits.
+// - Added on-chart debug labels for every actual order fill (entries, tier
+//   exits, course exit, protective stop, volatility exit, reversals) so you
+//   can see exactly what closed a position and why.
+// - Session timezone is now a dropdown of common IANA zones (incl. UTC).
+// - New defaults: Supertrend 1 = 1min/ATR10/Factor3, Supertrend 2 = 2min/ATR10/Factor3,
+//   Max Reversals Per Course = 2.
+// - Removed the old "Z-Score/Student-T" pyramid type entirely (redundant with
+//   the Error-Function One-Tailed Test type). Pyramid types renumbered 1-8.
+//
+// NOTE: still a large, feature-dense script - validate every group in the
+// Pine Editor / Strategy Tester before trusting it live.
+
+//@version=6
+strategy(title = "DOUBLE SUPERTREND PYRAMID STRATEGY", shorttitle = "DBLST-PYR", overlay = true, initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding = 30, calc_on_every_tick = true, process_orders_on_close = true, max_bars_back = 2000, currency = currency.USD, margin_long = 0, margin_short = 0)
+
+tick = syminfo.mintick
+
+// =========================================================================
+// SECTION 1: TRADE DIRECTION
+// =========================================================================
+grpDir = "1) Trade Direction"
+tradeDirection = input.string(defval = "Both", title = "Allowed Direction", options = ["Long Only", "Short Only", "Both"], group = grpDir, tooltip = "When 'Both' is selected the strategy runs continuously and will flip / re-enter at each new plotting course when trend direction changes.")
+
+allowLong  = tradeDirection == "Long Only"  or tradeDirection == "Both"
+allowShort = tradeDirection == "Short Only" or tradeDirection == "Both"
+
+// =========================================================================
+// SECTION 2: SESSION / TIME WINDOW FILTER
+// =========================================================================
+grpTime = "2) Session Time Filter"
+useTimeFilter   = input.bool(true, title = "Enable Trading Time Window?", group = grpTime)
+sessionString   = input.session(defval = "0930-1600", title = "Trading Time Window", group = grpTime, tooltip = "When unchecked above, the strategy runs continuously with no time restriction.")
+sessionTZ       = input.string(defval = "America/New_York", title = "Session Timezone", options = ["UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Sao_Paulo", "Europe/London", "Europe/Berlin", "Europe/Moscow", "Africa/Johannesburg", "Asia/Dubai", "Asia/Kolkata", "Asia/Shanghai", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "Pacific/Auckland"], group = grpTime)
+closeAtSessionEnd = input.bool(true, title = "Close All Positions At End Of Time Window?", group = grpTime)
+
+inSession = not useTimeFilter or not na(time(timeframe.period, sessionString, sessionTZ))
+sessionActive     = useTimeFilter ? inSession : true
+sessionEndThisBar = useTimeFilter and sessionActive[1] and not sessionActive
+
+// =========================================================================
+// SECTION 3: MASTER DAILY RISK (TAKE PROFIT / MAX LOSS) & CONTRACT LIMIT
+// =========================================================================
+grpRisk = "3) Master Daily Risk / Position Limits"
+useDailyTP   = input.bool(false, title = "Enable Master Daily Take Profit ($)", inline = "dtp", group = grpRisk)
+dailyTPUSD   = input.float(defval = 500.0, title = "Amount ($)", minval = 0.0, inline = "dtp", group = grpRisk)
+useDailyMaxLoss = input.bool(false, title = "Enable Master Daily Max Loss ($)", inline = "dml", group = grpRisk)
+dailyMaxLossUSD = input.float(defval = 500.0, title = "Amount ($)", minval = 0.0, inline = "dml", group = grpRisk)
+useMaxContracts = input.bool(true, title = "Enable Max Contract Position Limit", inline = "mc", group = grpRisk)
+maxContracts    = input.int(defval = 5, title = "Max Contracts Per Trade (incl. pyramids)", minval = 1, inline = "mc", group = grpRisk)
+
+var float dayStartEquity = na
+var bool  dailyHalt      = false
+newDay = ta.change(time("D")) != 0
+if newDay
+    dayStartEquity := strategy.equity
+    dailyHalt := false
+
+dayPnL = strategy.equity - nz(dayStartEquity, strategy.equity)
+if useDailyTP and dayPnL >= dailyTPUSD
+    dailyHalt := true
+if useDailyMaxLoss and dayPnL <= -dailyMaxLossUSD
+    dailyHalt := true
+
+canTrade = sessionActive and not dailyHalt
+
+// =========================================================================
+// SECTION 4: SUPERTREND HTF 1
+// =========================================================================
+grpST1 = "4) Supertrend HTF 1"
+useSupertrend1 = input.bool(true, title = "Plot Supertrend 1?", inline = "st1a", group = grpST1)
+tfSupertrend1  = input.timeframe(defval = "1", title = "Higher Time Frame", inline = "st1a", group = grpST1)
+atrLen1        = input.int(defval = 10, title = "ATR Length", minval = 1, maxval = 1000, step = 1, inline = "st1b", group = grpST1)
+factor1        = input.float(defval = 3.0, title = "ATR Factor", minval = 0.1, maxval = 10.0, step = 0.1, inline = "st1b", group = grpST1)
+
+[supertrend1Raw, direction1Raw] = ta.supertrend(factor1, atrLen1)
+supertrendHTF1 = request.security(syminfo.tickerid, tfSupertrend1, supertrend1Raw, barmerge.gaps_off, barmerge.lookahead_off)
+directionHTF1  = request.security(syminfo.tickerid, tfSupertrend1, direction1Raw, barmerge.gaps_off, barmerge.lookahead_off)
+
+// =========================================================================
+// SECTION 5: SUPERTREND HTF 2
+// =========================================================================
+grpST2 = "5) Supertrend HTF 2"
+useSupertrend2 = input.bool(true, title = "Plot Supertrend 2?", inline = "st2a", group = grpST2)
+tfSupertrend2  = input.timeframe(defval = "2", title = "Higher Time Frame", inline = "st2a", group = grpST2)
+atrLen2        = input.int(defval = 10, title = "ATR Length", minval = 1, maxval = 1000, step = 1, inline = "st2b", group = grpST2)
+factor2        = input.float(defval = 3.0, title = "ATR Factor", minval = 0.1, maxval = 10.0, step = 0.1, inline = "st2b", group = grpST2)
+
+[supertrend2Raw, direction2Raw] = ta.supertrend(factor2, atrLen2)
+supertrendHTF2 = request.security(syminfo.tickerid, tfSupertrend2, supertrend2Raw, barmerge.gaps_off, barmerge.lookahead_off)
+directionHTF2  = request.security(syminfo.tickerid, tfSupertrend2, direction2Raw, barmerge.gaps_off, barmerge.lookahead_off)
+
+colorHTF1 = directionHTF1 < 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+colorHTF2 = directionHTF2 < 0 ? color.new(color.lime, 20) : color.new(color.maroon, 20)
+plot(useSupertrend1 ? supertrendHTF1 : na, title = "Supertrend HTF 1", color = colorHTF1, linewidth = 1)
+plot(useSupertrend2 ? supertrendHTF2 : na, title = "Supertrend HTF 2", color = colorHTF2, linewidth = 1, style = plot.style_line)
+
+alignUp    = directionHTF1 < 0 and directionHTF2 < 0
+alignDown  = directionHTF1 > 0 and directionHTF2 > 0
+
+var int coursesDirection = 0
+newUpCourse   = alignUp   and coursesDirection != 1
+newDownCourse = alignDown and coursesDirection != -1
+if newUpCourse
+    coursesDirection := 1
+if newDownCourse
+    coursesDirection := -1
+newCourse = newUpCourse or newDownCourse
+
+var int pendingDirection = 0
+if newUpCourse
+    pendingDirection := 1
+if newDownCourse
+    pendingDirection := -1
+
+// =========================================================================
+// SECTION 6: PER-PLOTTING-COURSE TAKE PROFIT / STOP LOSS (in ticks)
+// NOTE: The Stop Loss value here also becomes the trigger threshold used by
+// the "Reverse At Stop Loss" system in Section 7.
+// =========================================================================
+grpCourse = "6) Per-Plotting-Course TP / SL"
+useCourseTP = input.bool(true, title = "Enable Take Profit (ticks)", inline = "ctp", group = grpCourse)
+courseTPTicks = input.int(defval = 80, title = "Take Profit (ticks)", minval = 1, inline = "ctp", group = grpCourse)
+useCourseSL = input.bool(true, title = "Enable Stop Loss (ticks)", inline = "csl", group = grpCourse)
+courseSLTicks = input.int(defval = 40, title = "Stop Loss (ticks) - also the Reverse-At-SL threshold", minval = 1, inline = "csl", group = grpCourse)
+
+// =========================================================================
+// SECTION 7: REVERSE AT STOP LOSS
+// =========================================================================
+grpReverse = "7) Reverse At Stop Loss"
+useReverseAtSL = input.bool(false, title = "Enable Reverse At Stop Loss", group = grpReverse, tooltip = "Uses the Per-Plotting-Course Stop Loss (Section 6) tick amount as the reversal trigger. When met, ALL positions (including tiered exits) are closed and the strategy immediately re-enters in the opposite direction, fresh, honoring the new plotting course. Does NOT affect the Pyramid system.")
+maxReversalsPerCourse = input.int(defval = 2, title = "Max Reversals Allowed Per Plotting Course", minval = 1, maxval = 20, group = grpReverse)
+
+var int reversalsThisCourse = 0
+if newCourse
+    reversalsThisCourse := 0
+
+// =========================================================================
+// SECTION 8: VOLATILITY EXIT
+// =========================================================================
+grpVol = "8) Volatility Exit"
+useVolatilityExit = input.bool(false, title = "Enable Volatility Exit", group = grpVol)
+volLookback   = input.int(defval = 20, title = "ATR Lookback", minval = 2, group = grpVol)
+volSpikeMult  = input.float(defval = 2.0, title = "Exit When ATR Expands By (x Average ATR)", minval = 1.0, step = 0.1, group = grpVol)
+volAvgLen     = input.int(defval = 50, title = "Average ATR Length", minval = 2, group = grpVol)
+
+atrNow = ta.atr(volLookback)
+atrAvg = ta.sma(atrNow, volAvgLen)
+volatilityExitTriggered = useVolatilityExit and atrNow >= atrAvg * volSpikeMult
+
+// =========================================================================
+// SECTION 9: PROTECTIVE STOP (ATR)
+// =========================================================================
+grpProt = "9) Protective Stop (ATR)"
+useProtectiveStop = input.bool(true, title = "Enable ATR Protective Stop", inline = "prot", group = grpProt)
+protectiveATRLen  = input.int(defval = 14, title = "ATR Length", minval = 1, inline = "prot2", group = grpProt)
+protectiveATRMult = input.float(defval = 3.0, title = "ATR Multiplier", minval = 0.1, step = 0.1, inline = "prot2", group = grpProt)
+
+protectiveATR = ta.atr(protectiveATRLen)
+longProtectiveStop  = strategy.position_avg_price - protectiveATR * protectiveATRMult
+shortProtectiveStop = strategy.position_avg_price + protectiveATR * protectiveATRMult
+
+// =========================================================================
+// SECTION 10: TIERED EXITS (3 tiers, independent of pyramid system)
+// Each tier is fully self-contained: Target (always active when the tier is
+// enabled), plus optional Stop Loss and Trailing Stop, each with its own
+// enable checkbox.
+// =========================================================================
+grpT1 = "10a) Tiered Exit 1"
+useTier1 = input.bool(false, title = "Enable Tier 1", group = grpT1)
+tier1Target    = input.int(defval = 60, title = "Tier 1 Target (ticks)", minval = 1, group = grpT1)
+tier1Qty       = input.int(defval = 1,  title = "Tier 1 Quantity", minval = 1, group = grpT1)
+tier1UseSL     = input.bool(false, title = "Enable Stop Loss", inline = "T1sl", group = grpT1)
+tier1SL        = input.int(defval = 40, title = "Tier 1 Stop Loss (ticks)", minval = 1, inline = "T1sl", group = grpT1)
+tier1UseTrail  = input.bool(false, title = "Enable Trailing Stop", inline = "T1trail", group = grpT1)
+tier1Trail     = input.int(defval = 15, title = "Tier 1 Trailing Stop (ticks)", minval = 1, inline = "T1trail", group = grpT1)
+tier1Threshold = input.int(defval = 20, title = "Tier 1 Trail Activation Threshold (ticks)", minval = 1, inline = "T1trail", group = grpT1)
+tier1ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpT1, tooltip = "UNCHECKED (default): this tier's contracts only close via its own Target / Stop Loss / Trailing Stop above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this tier's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+
+grpT2 = "10b) Tiered Exit 2"
+useTier2 = input.bool(false, title = "Enable Tier 2", group = grpT2)
+tier2Target    = input.int(defval = 84, title = "Tier 2 Target (ticks)", minval = 1, group = grpT2)
+tier2Qty       = input.int(defval = 1,  title = "Tier 2 Quantity", minval = 1, group = grpT2)
+tier2UseSL     = input.bool(false, title = "Enable Stop Loss", inline = "T2sl", group = grpT2)
+tier2SL        = input.int(defval = 40, title = "Tier 2 Stop Loss (ticks)", minval = 1, inline = "T2sl", group = grpT2)
+tier2UseTrail  = input.bool(false, title = "Enable Trailing Stop", inline = "T2trail", group = grpT2)
+tier2Trail     = input.int(defval = 25, title = "Tier 2 Trailing Stop (ticks)", minval = 1, inline = "T2trail", group = grpT2)
+tier2Threshold = input.int(defval = 20, title = "Tier 2 Trail Activation Threshold (ticks)", minval = 1, inline = "T2trail", group = grpT2)
+tier2ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpT2, tooltip = "UNCHECKED (default): this tier's contracts only close via its own Target / Stop Loss / Trailing Stop above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this tier's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+
+grpT3 = "10c) Tiered Exit 3"
+useTier3 = input.bool(false, title = "Enable Tier 3", group = grpT3)
+tier3Target    = input.int(defval = 100, title = "Tier 3 Target (ticks)", minval = 1, group = grpT3)
+tier3Qty       = input.int(defval = 1,   title = "Tier 3 Quantity", minval = 1, group = grpT3)
+tier3UseSL     = input.bool(false, title = "Enable Stop Loss", inline = "T3sl", group = grpT3)
+tier3SL        = input.int(defval = 40, title = "Tier 3 Stop Loss (ticks)", minval = 1, inline = "T3sl", group = grpT3)
+tier3UseTrail  = input.bool(false, title = "Enable Trailing Stop", inline = "T3trail", group = grpT3)
+tier3Trail     = input.int(defval = 30,  title = "Tier 3 Trailing Stop (ticks)", minval = 1, inline = "T3trail", group = grpT3)
+tier3Threshold = input.int(defval = 20, title = "Tier 3 Trail Activation Threshold (ticks)", minval = 1, inline = "T3trail", group = grpT3)
+tier3ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpT3, tooltip = "UNCHECKED (default): this tier's contracts only close via its own Target / Stop Loss / Trailing Stop above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this tier's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+
+// The core "Long"/"Short" entry is what the tiers scale out of (they share
+// the same entry id), so if ANY enabled tier asks to exit-at-flip, the whole
+// core+tiered position closes together at the next plotted course.
+coreExitAtFlip = (useTier1 and tier1ExitAtFlip) or (useTier2 and tier2ExitAtFlip) or (useTier3 and tier3ExitAtFlip)
+
+// =========================================================================
+// SHARED PYRAMID HELPERS (used by each Pyramid Type section below)
+// =========================================================================
+// Volatility Exit / Protective Stop ALWAYS override the pyramid system.
+pyramidForceExit = volatilityExitTriggered or (useProtectiveStop and ((strategy.position_size > 0 and low <= longProtectiveStop) or (strategy.position_size < 0 and high >= shortProtectiveStop)))
+
+f_pyrExitProfit(useOwn, ownVal) =>
+    useOwn and ownVal > 0 ? ownVal : na
+f_pyrExitLoss(useOwn, ownVal) =>
+    useOwn and ownVal > 0 ? ownVal : na
+f_pyrExitTrail(useOwn, useTrailChk, ownVal) =>
+    useOwn and useTrailChk and ownVal > 0 ? ownVal : na
+
+f_distanceOK(useMin, distType, amount, lastPrice, currentPrice, atrVal) =>
+    result = true
+    if useMin and not na(lastPrice)
+        diff = math.abs(currentPrice - lastPrice)
+        result := switch distType
+            "Multiplier (ATR)" => diff >= amount * atrVal
+            "Percent"          => diff >= lastPrice * (amount / 100.0)
+            "Ticks"            => diff >= amount * tick
+            "Points"           => diff >= amount
+            "Dollar"           => diff >= amount
+            => true
+    result
+
+// =========================================================================
+// MATH HELPERS (self-contained - mirrors the uploaded Error Functions / KDE /
+// Viterbi reference libraries, implemented inline, no external imports)
+// =========================================================================
+erfApprox(x) =>
+    sign = x < 0 ? -1.0 : 1.0
+    ax = math.abs(x)
+    a1 = 0.254829592
+    a2 = -0.284496736
+    a3 = 1.421413741
+    a4 = -1.453152027
+    a5 = 1.061405429
+    p  = 0.3275911
+    t = 1.0 / (1.0 + p * ax)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-ax * ax)
+    sign * y
+
+normalCDF(z) =>
+    0.5 * (1.0 + erfApprox(z / math.sqrt(2.0)))
+
+oneTailedProb(z) =>
+    1.0 - normalCDF(math.abs(z))
+
+studentTOneTailedProb(t, df) =>
+    dfAdj = df <= 2 ? 2.0001 : df
+    correction = 1.0 + (t * t) / (4.0 * dfAdj)
+    zEff = math.abs(t) / correction
+    1.0 - normalCDF(zEff)
+
+distanceATR = ta.atr(14)
+
+// =========================================================================
+// SECTION 11: PYRAMID TYPE 1: TURTLE ATR UNIT
+// =========================================================================
+grpPyr1 = "11) Pyramid Type 1: Turtle ATR Unit"
+usePyr1 = input.bool(false, title = "Enable Turtle ATR Unit Adds", group = grpPyr1)
+pyr1ATRLen   = input.int(defval = 20, title = "ATR Length (N)", minval = 1, group = grpPyr1)
+pyr1UnitFrac = input.float(defval = 0.5, title = "Add Every X * N Move In Favor", minval = 0.1, step = 0.1, group = grpPyr1)
+
+pyr1ATR = ta.atr(pyr1ATRLen)
+pyr1LastEntryPrice = strategy.opentrades > 0 ? strategy.opentrades.entry_price(strategy.opentrades - 1) : na
+pyr1LongTrigger  = strategy.position_size > 0 and not na(pyr1LastEntryPrice) and (close - pyr1LastEntryPrice) >= pyr1ATR * pyr1UnitFrac
+pyr1ShortTrigger = strategy.position_size < 0 and not na(pyr1LastEntryPrice) and (pyr1LastEntryPrice - close) >= pyr1ATR * pyr1UnitFrac
+pyr1RawTrigger = pyr1LongTrigger or pyr1ShortTrigger
+
+
+pyr1_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr1)
+pyr1_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr1, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr1_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr1)
+pyr1_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "1exit", group = grpPyr1)
+pyr1_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "1exit", group = grpPyr1)
+pyr1_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "1trail", group = grpPyr1)
+pyr1_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "1trail", group = grpPyr1)
+pyr1_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "1lim1", group = grpPyr1)
+pyr1_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "1lim1", group = grpPyr1)
+pyr1_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr1)
+pyr1_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "1dist", group = grpPyr1)
+pyr1_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "1dist", group = grpPyr1)
+pyr1_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr1)
+
+var int pyr1_addedThisCourse = 0
+var int pyr1_signalsThisCourse = 0
+var float pyr1_lastSignalTime = na
+var float pyr1_lastFillPrice = na
+if newCourse
+    pyr1_addedThisCourse := 0
+    pyr1_signalsThisCourse := 0
+
+pyr1_CourseAddOK    = pyr1_MaxAddPerCourse <= 0 or pyr1_addedThisCourse < pyr1_MaxAddPerCourse
+pyr1_CourseSignalOK = pyr1_MaxSignalsPerCourse <= 0 or pyr1_signalsThisCourse < pyr1_MaxSignalsPerCourse
+pyr1_DelayOK        = pyr1_DelaySeconds <= 0 or na(pyr1_lastSignalTime) or (time - pyr1_lastSignalTime) >= pyr1_DelaySeconds * 1000
+pyr1_DistOK         = f_distanceOK(pyr1_UseMinDistance, pyr1_DistanceType, pyr1_DistanceAmount, pyr1_lastFillPrice, close, distanceATR)
+
+pyr1_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr1_AddQty <= maxContracts)
+pyr1Signal = usePyr1 and canTrade and not pyramidForceExit and pyr1_CanAddContracts and pyr1RawTrigger and pyr1_CourseAddOK and pyr1_CourseSignalOK and pyr1_DelayOK and pyr1_DistOK
+
+if pyr1Signal and strategy.position_size > 0
+    strategy.entry("Pyr1-L", strategy.long, qty = pyr1_AddQty, comment = "Pyr1 Add L")
+    pyr1_addedThisCourse := pyr1_addedThisCourse + pyr1_AddQty
+    pyr1_signalsThisCourse := pyr1_signalsThisCourse + 1
+    pyr1_lastSignalTime := time
+    pyr1_lastFillPrice := close
+if pyr1Signal and strategy.position_size < 0
+    strategy.entry("Pyr1-S", strategy.short, qty = pyr1_AddQty, comment = "Pyr1 Add S")
+    pyr1_addedThisCourse := pyr1_addedThisCourse + pyr1_AddQty
+    pyr1_signalsThisCourse := pyr1_signalsThisCourse + 1
+    pyr1_lastSignalTime := time
+    pyr1_lastFillPrice := close
+
+pyr1_ExitProfit = f_pyrExitProfit(pyr1_UseOwnExits, pyr1_TP)
+pyr1_ExitLoss   = f_pyrExitLoss(pyr1_UseOwnExits, pyr1_SL)
+pyr1_ExitTrail  = f_pyrExitTrail(pyr1_UseOwnExits, pyr1_UseTrail, pyr1_Trail)
+strategy.exit("Pyr1-ExitL", from_entry = "Pyr1-L", profit = pyr1_ExitProfit, loss = pyr1_ExitLoss, trail_points = pyr1_ExitTrail, trail_offset = pyr1_ExitTrail)
+strategy.exit("Pyr1-ExitS", from_entry = "Pyr1-S", profit = pyr1_ExitProfit, loss = pyr1_ExitLoss, trail_points = pyr1_ExitTrail, trail_offset = pyr1_ExitTrail)
+
+
+// =========================================================================
+// SECTION 12: PYRAMID TYPE 2: SWING STRUCTURE
+// =========================================================================
+grpPyr2 = "12) Pyramid Type 2: Swing Structure"
+usePyr2 = input.bool(false, title = "Enable Swing Structure Adds", group = grpPyr2)
+pyr2SwingLen = input.int(defval = 5, title = "Swing Pivot Length (bars each side)", minval = 1, group = grpPyr2)
+
+pyr2PivotHigh = ta.pivothigh(high, pyr2SwingLen, pyr2SwingLen)
+pyr2PivotLow  = ta.pivotlow(low, pyr2SwingLen, pyr2SwingLen)
+var float pyr2LastSwingHigh = na
+var float pyr2LastSwingLow  = na
+if not na(pyr2PivotHigh)
+    pyr2LastSwingHigh := pyr2PivotHigh
+if not na(pyr2PivotLow)
+    pyr2LastSwingLow := pyr2PivotLow
+
+pyr2LongTrigger  = strategy.position_size > 0 and not na(pyr2LastSwingHigh) and close > pyr2LastSwingHigh
+pyr2ShortTrigger = strategy.position_size < 0 and not na(pyr2LastSwingLow)  and close < pyr2LastSwingLow
+pyr2RawTrigger = pyr2LongTrigger or pyr2ShortTrigger
+
+
+pyr2_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr2)
+pyr2_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr2, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr2_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr2)
+pyr2_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "2exit", group = grpPyr2)
+pyr2_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "2exit", group = grpPyr2)
+pyr2_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "2trail", group = grpPyr2)
+pyr2_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "2trail", group = grpPyr2)
+pyr2_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "2lim1", group = grpPyr2)
+pyr2_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "2lim1", group = grpPyr2)
+pyr2_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr2)
+pyr2_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "2dist", group = grpPyr2)
+pyr2_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "2dist", group = grpPyr2)
+pyr2_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr2)
+
+var int pyr2_addedThisCourse = 0
+var int pyr2_signalsThisCourse = 0
+var float pyr2_lastSignalTime = na
+var float pyr2_lastFillPrice = na
+if newCourse
+    pyr2_addedThisCourse := 0
+    pyr2_signalsThisCourse := 0
+
+pyr2_CourseAddOK    = pyr2_MaxAddPerCourse <= 0 or pyr2_addedThisCourse < pyr2_MaxAddPerCourse
+pyr2_CourseSignalOK = pyr2_MaxSignalsPerCourse <= 0 or pyr2_signalsThisCourse < pyr2_MaxSignalsPerCourse
+pyr2_DelayOK        = pyr2_DelaySeconds <= 0 or na(pyr2_lastSignalTime) or (time - pyr2_lastSignalTime) >= pyr2_DelaySeconds * 1000
+pyr2_DistOK         = f_distanceOK(pyr2_UseMinDistance, pyr2_DistanceType, pyr2_DistanceAmount, pyr2_lastFillPrice, close, distanceATR)
+
+pyr2_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr2_AddQty <= maxContracts)
+pyr2Signal = usePyr2 and canTrade and not pyramidForceExit and pyr2_CanAddContracts and pyr2RawTrigger and pyr2_CourseAddOK and pyr2_CourseSignalOK and pyr2_DelayOK and pyr2_DistOK
+
+if pyr2Signal and strategy.position_size > 0
+    strategy.entry("Pyr2-L", strategy.long, qty = pyr2_AddQty, comment = "Pyr2 Add L")
+    pyr2_addedThisCourse := pyr2_addedThisCourse + pyr2_AddQty
+    pyr2_signalsThisCourse := pyr2_signalsThisCourse + 1
+    pyr2_lastSignalTime := time
+    pyr2_lastFillPrice := close
+if pyr2Signal and strategy.position_size < 0
+    strategy.entry("Pyr2-S", strategy.short, qty = pyr2_AddQty, comment = "Pyr2 Add S")
+    pyr2_addedThisCourse := pyr2_addedThisCourse + pyr2_AddQty
+    pyr2_signalsThisCourse := pyr2_signalsThisCourse + 1
+    pyr2_lastSignalTime := time
+    pyr2_lastFillPrice := close
+
+pyr2_ExitProfit = f_pyrExitProfit(pyr2_UseOwnExits, pyr2_TP)
+pyr2_ExitLoss   = f_pyrExitLoss(pyr2_UseOwnExits, pyr2_SL)
+pyr2_ExitTrail  = f_pyrExitTrail(pyr2_UseOwnExits, pyr2_UseTrail, pyr2_Trail)
+strategy.exit("Pyr2-ExitL", from_entry = "Pyr2-L", profit = pyr2_ExitProfit, loss = pyr2_ExitLoss, trail_points = pyr2_ExitTrail, trail_offset = pyr2_ExitTrail)
+strategy.exit("Pyr2-ExitS", from_entry = "Pyr2-S", profit = pyr2_ExitProfit, loss = pyr2_ExitLoss, trail_points = pyr2_ExitTrail, trail_offset = pyr2_ExitTrail)
+
+
+// =========================================================================
+// SECTION 13: PYRAMID TYPE 3: MOMENTUM RE-CONFIRMATION
+// =========================================================================
+grpPyr3 = "13) Pyramid Type 3: Momentum Re-confirmation"
+usePyr3 = input.bool(false, title = "Enable Momentum Re-confirmation Adds", group = grpPyr3)
+pyr3ADXLen = input.int(defval = 14, title = "ADX/DI Length", minval = 1, group = grpPyr3)
+pyr3ADXMin = input.float(defval = 20.0, title = "Minimum Rising ADX", minval = 0, group = grpPyr3)
+pyr3RSILen = input.int(defval = 14, title = "RSI Length", minval = 1, group = grpPyr3)
+pyr3RSILongMin  = input.float(defval = 55.0, title = "RSI Must Hold Above (long)", group = grpPyr3)
+pyr3RSIShortMax = input.float(defval = 45.0, title = "RSI Must Hold Below (short)", group = grpPyr3)
+
+[pyr3DIPlus, pyr3DIMinus, pyr3ADX] = ta.dmi(pyr3ADXLen, pyr3ADXLen)
+pyr3ADXRising = pyr3ADX > pyr3ADX[1] and pyr3ADX >= pyr3ADXMin
+pyr3RSI = ta.rsi(close, pyr3RSILen)
+
+pyr3LongTrigger  = strategy.position_size > 0 and pyr3ADXRising and pyr3DIPlus > pyr3DIMinus and pyr3RSI > pyr3RSILongMin
+pyr3ShortTrigger = strategy.position_size < 0 and pyr3ADXRising and pyr3DIMinus > pyr3DIPlus and pyr3RSI < pyr3RSIShortMax
+pyr3RawTrigger = pyr3LongTrigger or pyr3ShortTrigger
+
+
+pyr3_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr3)
+pyr3_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr3, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr3_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr3)
+pyr3_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "3exit", group = grpPyr3)
+pyr3_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "3exit", group = grpPyr3)
+pyr3_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "3trail", group = grpPyr3)
+pyr3_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "3trail", group = grpPyr3)
+pyr3_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "3lim1", group = grpPyr3)
+pyr3_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "3lim1", group = grpPyr3)
+pyr3_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr3)
+pyr3_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "3dist", group = grpPyr3)
+pyr3_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "3dist", group = grpPyr3)
+pyr3_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr3)
+
+var int pyr3_addedThisCourse = 0
+var int pyr3_signalsThisCourse = 0
+var float pyr3_lastSignalTime = na
+var float pyr3_lastFillPrice = na
+if newCourse
+    pyr3_addedThisCourse := 0
+    pyr3_signalsThisCourse := 0
+
+pyr3_CourseAddOK    = pyr3_MaxAddPerCourse <= 0 or pyr3_addedThisCourse < pyr3_MaxAddPerCourse
+pyr3_CourseSignalOK = pyr3_MaxSignalsPerCourse <= 0 or pyr3_signalsThisCourse < pyr3_MaxSignalsPerCourse
+pyr3_DelayOK        = pyr3_DelaySeconds <= 0 or na(pyr3_lastSignalTime) or (time - pyr3_lastSignalTime) >= pyr3_DelaySeconds * 1000
+pyr3_DistOK         = f_distanceOK(pyr3_UseMinDistance, pyr3_DistanceType, pyr3_DistanceAmount, pyr3_lastFillPrice, close, distanceATR)
+
+pyr3_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr3_AddQty <= maxContracts)
+pyr3Signal = usePyr3 and canTrade and not pyramidForceExit and pyr3_CanAddContracts and pyr3RawTrigger and pyr3_CourseAddOK and pyr3_CourseSignalOK and pyr3_DelayOK and pyr3_DistOK
+
+if pyr3Signal and strategy.position_size > 0
+    strategy.entry("Pyr3-L", strategy.long, qty = pyr3_AddQty, comment = "Pyr3 Add L")
+    pyr3_addedThisCourse := pyr3_addedThisCourse + pyr3_AddQty
+    pyr3_signalsThisCourse := pyr3_signalsThisCourse + 1
+    pyr3_lastSignalTime := time
+    pyr3_lastFillPrice := close
+if pyr3Signal and strategy.position_size < 0
+    strategy.entry("Pyr3-S", strategy.short, qty = pyr3_AddQty, comment = "Pyr3 Add S")
+    pyr3_addedThisCourse := pyr3_addedThisCourse + pyr3_AddQty
+    pyr3_signalsThisCourse := pyr3_signalsThisCourse + 1
+    pyr3_lastSignalTime := time
+    pyr3_lastFillPrice := close
+
+pyr3_ExitProfit = f_pyrExitProfit(pyr3_UseOwnExits, pyr3_TP)
+pyr3_ExitLoss   = f_pyrExitLoss(pyr3_UseOwnExits, pyr3_SL)
+pyr3_ExitTrail  = f_pyrExitTrail(pyr3_UseOwnExits, pyr3_UseTrail, pyr3_Trail)
+strategy.exit("Pyr3-ExitL", from_entry = "Pyr3-L", profit = pyr3_ExitProfit, loss = pyr3_ExitLoss, trail_points = pyr3_ExitTrail, trail_offset = pyr3_ExitTrail)
+strategy.exit("Pyr3-ExitS", from_entry = "Pyr3-S", profit = pyr3_ExitProfit, loss = pyr3_ExitLoss, trail_points = pyr3_ExitTrail, trail_offset = pyr3_ExitTrail)
+
+
+// =========================================================================
+// SECTION 14: PYRAMID TYPE 4: BREAKOUT / CONSOLIDATION
+// =========================================================================
+grpPyr4 = "14) Pyramid Type 4: Breakout / Consolidation"
+usePyr4 = input.bool(false, title = "Enable Breakout / Consolidation Adds", group = grpPyr4)
+pyr4DonchianLen = input.int(defval = 10, title = "Donchian Lookback (bars)", minval = 2, group = grpPyr4)
+
+pyr4Highest = ta.highest(high, pyr4DonchianLen)
+pyr4Lowest  = ta.lowest(low, pyr4DonchianLen)
+pyr4LongTrigger  = strategy.position_size > 0 and close > pyr4Highest[1]
+pyr4ShortTrigger = strategy.position_size < 0 and close < pyr4Lowest[1]
+pyr4RawTrigger = pyr4LongTrigger or pyr4ShortTrigger
+
+
+pyr4_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr4)
+pyr4_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr4, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr4_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr4)
+pyr4_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "4exit", group = grpPyr4)
+pyr4_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "4exit", group = grpPyr4)
+pyr4_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "4trail", group = grpPyr4)
+pyr4_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "4trail", group = grpPyr4)
+pyr4_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "4lim1", group = grpPyr4)
+pyr4_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "4lim1", group = grpPyr4)
+pyr4_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr4)
+pyr4_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "4dist", group = grpPyr4)
+pyr4_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "4dist", group = grpPyr4)
+pyr4_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr4)
+
+var int pyr4_addedThisCourse = 0
+var int pyr4_signalsThisCourse = 0
+var float pyr4_lastSignalTime = na
+var float pyr4_lastFillPrice = na
+if newCourse
+    pyr4_addedThisCourse := 0
+    pyr4_signalsThisCourse := 0
+
+pyr4_CourseAddOK    = pyr4_MaxAddPerCourse <= 0 or pyr4_addedThisCourse < pyr4_MaxAddPerCourse
+pyr4_CourseSignalOK = pyr4_MaxSignalsPerCourse <= 0 or pyr4_signalsThisCourse < pyr4_MaxSignalsPerCourse
+pyr4_DelayOK        = pyr4_DelaySeconds <= 0 or na(pyr4_lastSignalTime) or (time - pyr4_lastSignalTime) >= pyr4_DelaySeconds * 1000
+pyr4_DistOK         = f_distanceOK(pyr4_UseMinDistance, pyr4_DistanceType, pyr4_DistanceAmount, pyr4_lastFillPrice, close, distanceATR)
+
+pyr4_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr4_AddQty <= maxContracts)
+pyr4Signal = usePyr4 and canTrade and not pyramidForceExit and pyr4_CanAddContracts and pyr4RawTrigger and pyr4_CourseAddOK and pyr4_CourseSignalOK and pyr4_DelayOK and pyr4_DistOK
+
+if pyr4Signal and strategy.position_size > 0
+    strategy.entry("Pyr4-L", strategy.long, qty = pyr4_AddQty, comment = "Pyr4 Add L")
+    pyr4_addedThisCourse := pyr4_addedThisCourse + pyr4_AddQty
+    pyr4_signalsThisCourse := pyr4_signalsThisCourse + 1
+    pyr4_lastSignalTime := time
+    pyr4_lastFillPrice := close
+if pyr4Signal and strategy.position_size < 0
+    strategy.entry("Pyr4-S", strategy.short, qty = pyr4_AddQty, comment = "Pyr4 Add S")
+    pyr4_addedThisCourse := pyr4_addedThisCourse + pyr4_AddQty
+    pyr4_signalsThisCourse := pyr4_signalsThisCourse + 1
+    pyr4_lastSignalTime := time
+    pyr4_lastFillPrice := close
+
+pyr4_ExitProfit = f_pyrExitProfit(pyr4_UseOwnExits, pyr4_TP)
+pyr4_ExitLoss   = f_pyrExitLoss(pyr4_UseOwnExits, pyr4_SL)
+pyr4_ExitTrail  = f_pyrExitTrail(pyr4_UseOwnExits, pyr4_UseTrail, pyr4_Trail)
+strategy.exit("Pyr4-ExitL", from_entry = "Pyr4-L", profit = pyr4_ExitProfit, loss = pyr4_ExitLoss, trail_points = pyr4_ExitTrail, trail_offset = pyr4_ExitTrail)
+strategy.exit("Pyr4-ExitS", from_entry = "Pyr4-S", profit = pyr4_ExitProfit, loss = pyr4_ExitLoss, trail_points = pyr4_ExitTrail, trail_offset = pyr4_ExitTrail)
+
+
+// =========================================================================
+// SECTION 15: PYRAMID TYPE 5: MULTI-TIMEFRAME ALIGNMENT
+// =========================================================================
+grpPyr5 = "15) Pyramid Type 5: Multi-Timeframe Alignment"
+usePyr5 = input.bool(false, title = "Enable Multi-Timeframe Alignment Adds", group = grpPyr5)
+pyr5FilterTF = input.timeframe(defval = "D", title = "Higher Timeframe Trend Filter", group = grpPyr5)
+pyr5FilterLen = input.int(defval = 50, title = "Filter EMA Length", minval = 1, group = grpPyr5)
+
+pyr5HTFClose = request.security(syminfo.tickerid, pyr5FilterTF, close, barmerge.gaps_off, barmerge.lookahead_off)
+pyr5HTFEma   = request.security(syminfo.tickerid, pyr5FilterTF, ta.ema(close, pyr5FilterLen), barmerge.gaps_off, barmerge.lookahead_off)
+pyr5HTFUp    = pyr5HTFClose > pyr5HTFEma
+pyr5HTFDown  = pyr5HTFClose < pyr5HTFEma
+
+pyr5LongTrigger  = strategy.position_size > 0 and pyr5HTFUp
+pyr5ShortTrigger = strategy.position_size < 0 and pyr5HTFDown
+pyr5RawTrigger = pyr5LongTrigger or pyr5ShortTrigger
+
+
+pyr5_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr5)
+pyr5_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr5, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr5_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr5)
+pyr5_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "5exit", group = grpPyr5)
+pyr5_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "5exit", group = grpPyr5)
+pyr5_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "5trail", group = grpPyr5)
+pyr5_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "5trail", group = grpPyr5)
+pyr5_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "5lim1", group = grpPyr5)
+pyr5_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "5lim1", group = grpPyr5)
+pyr5_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr5)
+pyr5_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "5dist", group = grpPyr5)
+pyr5_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "5dist", group = grpPyr5)
+pyr5_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr5)
+
+var int pyr5_addedThisCourse = 0
+var int pyr5_signalsThisCourse = 0
+var float pyr5_lastSignalTime = na
+var float pyr5_lastFillPrice = na
+if newCourse
+    pyr5_addedThisCourse := 0
+    pyr5_signalsThisCourse := 0
+
+pyr5_CourseAddOK    = pyr5_MaxAddPerCourse <= 0 or pyr5_addedThisCourse < pyr5_MaxAddPerCourse
+pyr5_CourseSignalOK = pyr5_MaxSignalsPerCourse <= 0 or pyr5_signalsThisCourse < pyr5_MaxSignalsPerCourse
+pyr5_DelayOK        = pyr5_DelaySeconds <= 0 or na(pyr5_lastSignalTime) or (time - pyr5_lastSignalTime) >= pyr5_DelaySeconds * 1000
+pyr5_DistOK         = f_distanceOK(pyr5_UseMinDistance, pyr5_DistanceType, pyr5_DistanceAmount, pyr5_lastFillPrice, close, distanceATR)
+
+pyr5_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr5_AddQty <= maxContracts)
+pyr5Signal = usePyr5 and canTrade and not pyramidForceExit and pyr5_CanAddContracts and pyr5RawTrigger and pyr5_CourseAddOK and pyr5_CourseSignalOK and pyr5_DelayOK and pyr5_DistOK
+
+if pyr5Signal and strategy.position_size > 0
+    strategy.entry("Pyr5-L", strategy.long, qty = pyr5_AddQty, comment = "Pyr5 Add L")
+    pyr5_addedThisCourse := pyr5_addedThisCourse + pyr5_AddQty
+    pyr5_signalsThisCourse := pyr5_signalsThisCourse + 1
+    pyr5_lastSignalTime := time
+    pyr5_lastFillPrice := close
+if pyr5Signal and strategy.position_size < 0
+    strategy.entry("Pyr5-S", strategy.short, qty = pyr5_AddQty, comment = "Pyr5 Add S")
+    pyr5_addedThisCourse := pyr5_addedThisCourse + pyr5_AddQty
+    pyr5_signalsThisCourse := pyr5_signalsThisCourse + 1
+    pyr5_lastSignalTime := time
+    pyr5_lastFillPrice := close
+
+pyr5_ExitProfit = f_pyrExitProfit(pyr5_UseOwnExits, pyr5_TP)
+pyr5_ExitLoss   = f_pyrExitLoss(pyr5_UseOwnExits, pyr5_SL)
+pyr5_ExitTrail  = f_pyrExitTrail(pyr5_UseOwnExits, pyr5_UseTrail, pyr5_Trail)
+strategy.exit("Pyr5-ExitL", from_entry = "Pyr5-L", profit = pyr5_ExitProfit, loss = pyr5_ExitLoss, trail_points = pyr5_ExitTrail, trail_offset = pyr5_ExitTrail)
+strategy.exit("Pyr5-ExitS", from_entry = "Pyr5-S", profit = pyr5_ExitProfit, loss = pyr5_ExitLoss, trail_points = pyr5_ExitTrail, trail_offset = pyr5_ExitTrail)
+
+
+// =========================================================================
+// SECTION 16: PYRAMID TYPE 6: ERROR FUNCTION ONE-TAILED TEST
+// =========================================================================
+grpPyr6 = "16) Pyramid Type 6: Error Function One-Tailed Test"
+usePyr6 = input.bool(false, title = "Enable Error Function One-Tailed Test Adds", group = grpPyr6)
+pyr6RetLen    = input.int(defval = 100, title = "Return Distribution Lookback (bars)", minval = 10, group = grpPyr6)
+pyr6UseT      = input.bool(false, title = "Use Student-T Approximation Instead Of Normal", group = grpPyr6)
+pyr6DF        = input.int(defval = 5, title = "Student-T Degrees Of Freedom", minval = 2, group = grpPyr6)
+pyr6MaxProb   = input.float(defval = 0.10, title = "Max One-Tailed Probability To Trigger (0.10 = top 10%)", minval = 0.001, maxval = 0.5, step = 0.01, group = grpPyr6)
+
+pyr6Return = ta.change(close)
+pyr6Mean   = ta.sma(pyr6Return, pyr6RetLen)
+pyr6Std    = ta.stdev(pyr6Return, pyr6RetLen)
+pyr6Z      = pyr6Std == 0 ? 0.0 : (pyr6Return - pyr6Mean) / pyr6Std
+pyr6Prob   = pyr6UseT ? studentTOneTailedProb(pyr6Z, pyr6DF) : oneTailedProb(pyr6Z)
+
+pyr6LongTrigger  = strategy.position_size > 0 and pyr6Return > 0 and pyr6Prob <= pyr6MaxProb
+pyr6ShortTrigger = strategy.position_size < 0 and pyr6Return < 0 and pyr6Prob <= pyr6MaxProb
+pyr6RawTrigger = pyr6LongTrigger or pyr6ShortTrigger
+
+
+pyr6_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr6)
+pyr6_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr6, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr6_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr6)
+pyr6_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "6exit", group = grpPyr6)
+pyr6_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "6exit", group = grpPyr6)
+pyr6_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "6trail", group = grpPyr6)
+pyr6_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "6trail", group = grpPyr6)
+pyr6_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "6lim1", group = grpPyr6)
+pyr6_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "6lim1", group = grpPyr6)
+pyr6_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr6)
+pyr6_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "6dist", group = grpPyr6)
+pyr6_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "6dist", group = grpPyr6)
+pyr6_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr6)
+
+var int pyr6_addedThisCourse = 0
+var int pyr6_signalsThisCourse = 0
+var float pyr6_lastSignalTime = na
+var float pyr6_lastFillPrice = na
+if newCourse
+    pyr6_addedThisCourse := 0
+    pyr6_signalsThisCourse := 0
+
+pyr6_CourseAddOK    = pyr6_MaxAddPerCourse <= 0 or pyr6_addedThisCourse < pyr6_MaxAddPerCourse
+pyr6_CourseSignalOK = pyr6_MaxSignalsPerCourse <= 0 or pyr6_signalsThisCourse < pyr6_MaxSignalsPerCourse
+pyr6_DelayOK        = pyr6_DelaySeconds <= 0 or na(pyr6_lastSignalTime) or (time - pyr6_lastSignalTime) >= pyr6_DelaySeconds * 1000
+pyr6_DistOK         = f_distanceOK(pyr6_UseMinDistance, pyr6_DistanceType, pyr6_DistanceAmount, pyr6_lastFillPrice, close, distanceATR)
+
+pyr6_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr6_AddQty <= maxContracts)
+pyr6Signal = usePyr6 and canTrade and not pyramidForceExit and pyr6_CanAddContracts and pyr6RawTrigger and pyr6_CourseAddOK and pyr6_CourseSignalOK and pyr6_DelayOK and pyr6_DistOK
+
+if pyr6Signal and strategy.position_size > 0
+    strategy.entry("Pyr6-L", strategy.long, qty = pyr6_AddQty, comment = "Pyr6 Add L")
+    pyr6_addedThisCourse := pyr6_addedThisCourse + pyr6_AddQty
+    pyr6_signalsThisCourse := pyr6_signalsThisCourse + 1
+    pyr6_lastSignalTime := time
+    pyr6_lastFillPrice := close
+if pyr6Signal and strategy.position_size < 0
+    strategy.entry("Pyr6-S", strategy.short, qty = pyr6_AddQty, comment = "Pyr6 Add S")
+    pyr6_addedThisCourse := pyr6_addedThisCourse + pyr6_AddQty
+    pyr6_signalsThisCourse := pyr6_signalsThisCourse + 1
+    pyr6_lastSignalTime := time
+    pyr6_lastFillPrice := close
+
+pyr6_ExitProfit = f_pyrExitProfit(pyr6_UseOwnExits, pyr6_TP)
+pyr6_ExitLoss   = f_pyrExitLoss(pyr6_UseOwnExits, pyr6_SL)
+pyr6_ExitTrail  = f_pyrExitTrail(pyr6_UseOwnExits, pyr6_UseTrail, pyr6_Trail)
+strategy.exit("Pyr6-ExitL", from_entry = "Pyr6-L", profit = pyr6_ExitProfit, loss = pyr6_ExitLoss, trail_points = pyr6_ExitTrail, trail_offset = pyr6_ExitTrail)
+strategy.exit("Pyr6-ExitS", from_entry = "Pyr6-S", profit = pyr6_ExitProfit, loss = pyr6_ExitLoss, trail_points = pyr6_ExitTrail, trail_offset = pyr6_ExitTrail)
+
+
+// =========================================================================
+// SECTION 17: PYRAMID TYPE 7: KDE PERCENTILE
+// =========================================================================
+grpPyr7 = "17) Pyramid Type 7: KDE Percentile"
+usePyr7 = input.bool(false, title = "Enable KDE Percentile Adds", group = grpPyr7)
+pyr7SampleSize = input.int(defval = 100, title = "Sample Window (bars of returns)", minval = 20, maxval = 500, group = grpPyr7)
+pyr7Bandwidth  = input.float(defval = 0.5, title = "Kernel Bandwidth", minval = 0.01, step = 0.05, group = grpPyr7)
+pyr7Steps      = input.int(defval = 40, title = "KDE Grid Steps", minval = 10, maxval = 200, group = grpPyr7)
+pyr7TopPct     = input.float(defval = 0.10, title = "Trigger When Move Is In Top X% (0.10 = top 10%)", minval = 0.01, maxval = 0.5, step = 0.01, group = grpPyr7)
+
+var array<float> pyr7Samples = array.new_float(0)
+pyr7Return = ta.change(close)
+if not na(pyr7Return)
+    array.push(pyr7Samples, pyr7Return)
+    if array.size(pyr7Samples) > pyr7SampleSize
+        array.shift(pyr7Samples)
+
+f_kdePercentile(samples, x, h, steps) =>
+    n = array.size(samples)
+    result = 0.0
+    if n >= 20
+        lo = array.min(samples)
+        hi = array.max(samples)
+        span = hi - lo
+        gridLo = lo - span * 0.1
+        gridHi = hi + span * 0.1
+        stepSize = (gridHi - gridLo) / steps
+        cumDensity = 0.0
+        totalDensity = 0.0
+        for s = 0 to steps
+            gx = gridLo + s * stepSize
+            dens = 0.0
+            for i = 0 to n - 1
+                xi = array.get(samples, i)
+                u = (gx - xi) / h
+                dens := dens + math.exp(-0.5 * u * u)
+            dens := dens / (n * h * math.sqrt(2.0 * math.pi))
+            totalDensity := totalDensity + dens
+            if gx <= x
+                cumDensity := cumDensity + dens
+        result := totalDensity == 0.0 ? 0.5 : cumDensity / totalDensity
+    else
+        result := 0.5
+    result
+
+pyr7Percentile = usePyr7 ? f_kdePercentile(pyr7Samples, pyr7Return, pyr7Bandwidth, pyr7Steps) : 0.5
+
+pyr7LongTrigger  = strategy.position_size > 0 and pyr7Return > 0 and pyr7Percentile >= (1.0 - pyr7TopPct)
+pyr7ShortTrigger = strategy.position_size < 0 and pyr7Return < 0 and pyr7Percentile <= pyr7TopPct
+pyr7RawTrigger = pyr7LongTrigger or pyr7ShortTrigger
+
+
+pyr7_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr7)
+pyr7_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr7, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr7_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr7)
+pyr7_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "7exit", group = grpPyr7)
+pyr7_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "7exit", group = grpPyr7)
+pyr7_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "7trail", group = grpPyr7)
+pyr7_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "7trail", group = grpPyr7)
+pyr7_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "7lim1", group = grpPyr7)
+pyr7_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "7lim1", group = grpPyr7)
+pyr7_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr7)
+pyr7_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "7dist", group = grpPyr7)
+pyr7_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "7dist", group = grpPyr7)
+pyr7_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr7)
+
+var int pyr7_addedThisCourse = 0
+var int pyr7_signalsThisCourse = 0
+var float pyr7_lastSignalTime = na
+var float pyr7_lastFillPrice = na
+if newCourse
+    pyr7_addedThisCourse := 0
+    pyr7_signalsThisCourse := 0
+
+pyr7_CourseAddOK    = pyr7_MaxAddPerCourse <= 0 or pyr7_addedThisCourse < pyr7_MaxAddPerCourse
+pyr7_CourseSignalOK = pyr7_MaxSignalsPerCourse <= 0 or pyr7_signalsThisCourse < pyr7_MaxSignalsPerCourse
+pyr7_DelayOK        = pyr7_DelaySeconds <= 0 or na(pyr7_lastSignalTime) or (time - pyr7_lastSignalTime) >= pyr7_DelaySeconds * 1000
+pyr7_DistOK         = f_distanceOK(pyr7_UseMinDistance, pyr7_DistanceType, pyr7_DistanceAmount, pyr7_lastFillPrice, close, distanceATR)
+
+pyr7_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr7_AddQty <= maxContracts)
+pyr7Signal = usePyr7 and canTrade and not pyramidForceExit and pyr7_CanAddContracts and pyr7RawTrigger and pyr7_CourseAddOK and pyr7_CourseSignalOK and pyr7_DelayOK and pyr7_DistOK
+
+if pyr7Signal and strategy.position_size > 0
+    strategy.entry("Pyr7-L", strategy.long, qty = pyr7_AddQty, comment = "Pyr7 Add L")
+    pyr7_addedThisCourse := pyr7_addedThisCourse + pyr7_AddQty
+    pyr7_signalsThisCourse := pyr7_signalsThisCourse + 1
+    pyr7_lastSignalTime := time
+    pyr7_lastFillPrice := close
+if pyr7Signal and strategy.position_size < 0
+    strategy.entry("Pyr7-S", strategy.short, qty = pyr7_AddQty, comment = "Pyr7 Add S")
+    pyr7_addedThisCourse := pyr7_addedThisCourse + pyr7_AddQty
+    pyr7_signalsThisCourse := pyr7_signalsThisCourse + 1
+    pyr7_lastSignalTime := time
+    pyr7_lastFillPrice := close
+
+pyr7_ExitProfit = f_pyrExitProfit(pyr7_UseOwnExits, pyr7_TP)
+pyr7_ExitLoss   = f_pyrExitLoss(pyr7_UseOwnExits, pyr7_SL)
+pyr7_ExitTrail  = f_pyrExitTrail(pyr7_UseOwnExits, pyr7_UseTrail, pyr7_Trail)
+strategy.exit("Pyr7-ExitL", from_entry = "Pyr7-L", profit = pyr7_ExitProfit, loss = pyr7_ExitLoss, trail_points = pyr7_ExitTrail, trail_offset = pyr7_ExitTrail)
+strategy.exit("Pyr7-ExitS", from_entry = "Pyr7-S", profit = pyr7_ExitProfit, loss = pyr7_ExitLoss, trail_points = pyr7_ExitTrail, trail_offset = pyr7_ExitTrail)
+
+
+// =========================================================================
+// SECTION 18: PYRAMID TYPE 8: VITERBI REGIME DETECTION
+// =========================================================================
+grpPyr8 = "18) Pyramid Type 8: Viterbi Regime Detection"
+usePyr8 = input.bool(false, title = "Enable Viterbi Regime Detection Adds", group = grpPyr8)
+pyr8Window = input.int(defval = 20, title = "Observation Window (bars)", minval = 5, maxval = 100, group = grpPyr8)
+pyr8ATRLen = input.int(defval = 14, title = "ATR Length (for observation discretization)", minval = 1, group = grpPyr8)
+pyr8TransStay = input.float(defval = 0.85, title = "P(Stay In Same Regime) [transition diag]", minval = 0.5, maxval = 0.99, step = 0.01, group = grpPyr8)
+pyr8EmisTrendHigh = input.float(defval = 0.6, title = "P(High-Vol Move | Trending)", minval = 0.34, maxval = 0.98, step = 0.01, group = grpPyr8)
+pyr8EmisRangeLow  = input.float(defval = 0.6, title = "P(Low-Vol Move | Ranging)", minval = 0.34, maxval = 0.98, step = 0.01, group = grpPyr8)
+
+pyr8ATR = ta.atr(pyr8ATRLen)
+pyr8NormMove = pyr8ATR == 0 ? 0.0 : math.abs(ta.change(close)) / pyr8ATR
+pyr8Obs = pyr8NormMove < 0.5 ? 0 : (pyr8NormMove < 1.5 ? 1 : 2)
+
+var array<int> pyr8Obs_window = array.new_int(0)
+array.push(pyr8Obs_window, pyr8Obs)
+if array.size(pyr8Obs_window) > pyr8Window
+    array.shift(pyr8Obs_window)
+
+pyr8Trans = matrix.new<float>(2, 2, 0.0)
+matrix.set(pyr8Trans, 0, 0, pyr8TransStay)
+matrix.set(pyr8Trans, 0, 1, 1.0 - pyr8TransStay)
+matrix.set(pyr8Trans, 1, 0, 1.0 - pyr8TransStay)
+matrix.set(pyr8Trans, 1, 1, pyr8TransStay)
+
+pyr8RemainderTrend = (1.0 - pyr8EmisTrendHigh) / 2.0
+pyr8RemainderRange = (1.0 - pyr8EmisRangeLow) / 2.0
+pyr8Emis = matrix.new<float>(2, 3, 0.0)
+matrix.set(pyr8Emis, 0, 0, pyr8RemainderTrend)
+matrix.set(pyr8Emis, 0, 1, pyr8RemainderTrend)
+matrix.set(pyr8Emis, 0, 2, pyr8EmisTrendHigh)
+matrix.set(pyr8Emis, 1, 0, pyr8EmisRangeLow)
+matrix.set(pyr8Emis, 1, 1, pyr8RemainderRange)
+matrix.set(pyr8Emis, 1, 2, pyr8RemainderRange)
+
+f_viterbiCurrentState(obsArr, transMat, emisMat) =>
+    nObs = array.size(obsArr)
+    result = 0
+    if nObs >= 2
+        omega0 = math.log(0.5 * matrix.get(emisMat, 0, array.get(obsArr, 0)))
+        omega1 = math.log(0.5 * matrix.get(emisMat, 1, array.get(obsArr, 0)))
+        for t = 1 to nObs - 1
+            obsT = array.get(obsArr, t)
+            cand00 = omega0 + math.log(matrix.get(transMat, 0, 0)) + math.log(matrix.get(emisMat, 0, obsT))
+            cand10 = omega1 + math.log(matrix.get(transMat, 1, 0)) + math.log(matrix.get(emisMat, 0, obsT))
+            new0 = math.max(cand00, cand10)
+            cand01 = omega0 + math.log(matrix.get(transMat, 0, 1)) + math.log(matrix.get(emisMat, 1, obsT))
+            cand11 = omega1 + math.log(matrix.get(transMat, 1, 1)) + math.log(matrix.get(emisMat, 1, obsT))
+            new1 = math.max(cand01, cand11)
+            omega0 := new0
+            omega1 := new1
+        result := omega0 >= omega1 ? 0 : 1
+    result
+
+pyr8State = usePyr8 ? f_viterbiCurrentState(pyr8Obs_window, pyr8Trans, pyr8Emis) : 1
+pyr8Trending = pyr8State == 0
+
+pyr8LongTrigger  = strategy.position_size > 0 and pyr8Trending
+pyr8ShortTrigger = strategy.position_size < 0 and pyr8Trending
+pyr8RawTrigger = pyr8LongTrigger or pyr8ShortTrigger
+
+
+pyr8_UseOwnExits = input.bool(false, title = "Enable TP/SL/Trailing For This Type", group = grpPyr8)
+pyr8_ExitAtFlip = input.bool(false, title = "Exit At Next Supertrend Plotted Course", group = grpPyr8, tooltip = "UNCHECKED (default): this pyramid type's contracts only close via its own TP/SL/Trailing above (or the global Volatility Exit / Protective Stop / Session / Daily limits). CHECKED: this type's contracts are force-closed the instant the Supertrend flips to a new plotted course.")
+pyr8_AddQty = input.int(defval = 1, title = "Contracts Added Per Signal", minval = 1, group = grpPyr8)
+pyr8_TP    = input.int(defval = 60, title = "Take Profit (ticks, 0=off)", minval = 0, inline = "8exit", group = grpPyr8)
+pyr8_SL    = input.int(defval = 30, title = "Stop Loss (ticks, 0=off)", minval = 0, inline = "8exit", group = grpPyr8)
+pyr8_UseTrail = input.bool(false, title = "Enable Trailing Stop", inline = "8trail", group = grpPyr8)
+pyr8_Trail = input.int(defval = 20, title = "Trailing Stop (ticks)", minval = 0, inline = "8trail", group = grpPyr8)
+pyr8_MaxAddPerCourse = input.int(defval = 0, title = "Max Contracts Added Per Plotted Course (0=off)", minval = 0, inline = "8lim1", group = grpPyr8)
+pyr8_MaxSignalsPerCourse = input.int(defval = 0, title = "Max Total Signals Per Plotted Course (0=off)", minval = 0, inline = "8lim1", group = grpPyr8)
+pyr8_DelaySeconds = input.int(defval = 0, title = "Delay Between Signals (seconds, 0=off)", minval = 0, group = grpPyr8)
+pyr8_UseMinDistance = input.bool(false, title = "Require Minimum Distance Before Next Add", inline = "8dist", group = grpPyr8)
+pyr8_DistanceType = input.string(defval = "Ticks", title = "Distance Type", options = ["Multiplier (ATR)", "Percent", "Ticks", "Points", "Dollar"], inline = "8dist", group = grpPyr8)
+pyr8_DistanceAmount = input.float(defval = 20.0, title = "Distance Amount", minval = 0.0, group = grpPyr8)
+
+var int pyr8_addedThisCourse = 0
+var int pyr8_signalsThisCourse = 0
+var float pyr8_lastSignalTime = na
+var float pyr8_lastFillPrice = na
+if newCourse
+    pyr8_addedThisCourse := 0
+    pyr8_signalsThisCourse := 0
+
+pyr8_CourseAddOK    = pyr8_MaxAddPerCourse <= 0 or pyr8_addedThisCourse < pyr8_MaxAddPerCourse
+pyr8_CourseSignalOK = pyr8_MaxSignalsPerCourse <= 0 or pyr8_signalsThisCourse < pyr8_MaxSignalsPerCourse
+pyr8_DelayOK        = pyr8_DelaySeconds <= 0 or na(pyr8_lastSignalTime) or (time - pyr8_lastSignalTime) >= pyr8_DelaySeconds * 1000
+pyr8_DistOK         = f_distanceOK(pyr8_UseMinDistance, pyr8_DistanceType, pyr8_DistanceAmount, pyr8_lastFillPrice, close, distanceATR)
+
+pyr8_CanAddContracts = not useMaxContracts or (math.abs(strategy.position_size) + pyr8_AddQty <= maxContracts)
+pyr8Signal = usePyr8 and canTrade and not pyramidForceExit and pyr8_CanAddContracts and pyr8RawTrigger and pyr8_CourseAddOK and pyr8_CourseSignalOK and pyr8_DelayOK and pyr8_DistOK
+
+if pyr8Signal and strategy.position_size > 0
+    strategy.entry("Pyr8-L", strategy.long, qty = pyr8_AddQty, comment = "Pyr8 Add L")
+    pyr8_addedThisCourse := pyr8_addedThisCourse + pyr8_AddQty
+    pyr8_signalsThisCourse := pyr8_signalsThisCourse + 1
+    pyr8_lastSignalTime := time
+    pyr8_lastFillPrice := close
+if pyr8Signal and strategy.position_size < 0
+    strategy.entry("Pyr8-S", strategy.short, qty = pyr8_AddQty, comment = "Pyr8 Add S")
+    pyr8_addedThisCourse := pyr8_addedThisCourse + pyr8_AddQty
+    pyr8_signalsThisCourse := pyr8_signalsThisCourse + 1
+    pyr8_lastSignalTime := time
+    pyr8_lastFillPrice := close
+
+pyr8_ExitProfit = f_pyrExitProfit(pyr8_UseOwnExits, pyr8_TP)
+pyr8_ExitLoss   = f_pyrExitLoss(pyr8_UseOwnExits, pyr8_SL)
+pyr8_ExitTrail  = f_pyrExitTrail(pyr8_UseOwnExits, pyr8_UseTrail, pyr8_Trail)
+strategy.exit("Pyr8-ExitL", from_entry = "Pyr8-L", profit = pyr8_ExitProfit, loss = pyr8_ExitLoss, trail_points = pyr8_ExitTrail, trail_offset = pyr8_ExitTrail)
+strategy.exit("Pyr8-ExitS", from_entry = "Pyr8-S", profit = pyr8_ExitProfit, loss = pyr8_ExitLoss, trail_points = pyr8_ExitTrail, trail_offset = pyr8_ExitTrail)
+
+// =========================================================================
+// SECTION 19: MAIN ENTRIES (double-supertrend "plotting course" signal)
+// Each subsystem's own "Exit At Next Supertrend Plotted Course" checkbox
+// (Sections 10a-10c, and inside each Pyramid Type) decides whether ITS
+// contracts get force-closed on a flip. Subsystems left unchecked simply
+// keep running on their own TP/SL/Trailing until they close themselves.
+// The new-direction entry waits until the strategy is fully flat.
+// =========================================================================
+if newCourse and coreExitAtFlip
+    strategy.close("Long",  comment = "Exit At Next Supertrend Course")
+    strategy.close("Short", comment = "Exit At Next Supertrend Course")
+
+if newCourse and pyr1_ExitAtFlip
+    strategy.close("Pyr1-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr1-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr2_ExitAtFlip
+    strategy.close("Pyr2-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr2-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr3_ExitAtFlip
+    strategy.close("Pyr3-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr3-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr4_ExitAtFlip
+    strategy.close("Pyr4-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr4-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr5_ExitAtFlip
+    strategy.close("Pyr5-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr5-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr6_ExitAtFlip
+    strategy.close("Pyr6-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr6-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr7_ExitAtFlip
+    strategy.close("Pyr7-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr7-S", comment = "Exit At Next Supertrend Course")
+if newCourse and pyr8_ExitAtFlip
+    strategy.close("Pyr8-L", comment = "Exit At Next Supertrend Course")
+    strategy.close("Pyr8-S", comment = "Exit At Next Supertrend Course")
+
+canEnterLong  = canTrade and allowLong  and pendingDirection == 1  and strategy.position_size <= 0
+canEnterShort = canTrade and allowShort and pendingDirection == -1 and strategy.position_size >= 0
+
+if canEnterLong
+    strategy.entry("Long", strategy.long, comment = "Long Entry")
+    pendingDirection := 0
+
+if canEnterShort
+    strategy.entry("Short", strategy.short, comment = "Short Entry")
+    pendingDirection := 0
+
+// =========================================================================
+// SECTION 20: TIERED EXITS (scale-outs on the core "Long"/"Short" entries)
+// trail_points = activation threshold (ticks in favor before trailing starts)
+// trail_offset = the trailing distance itself
+// Only these orders (plus the global Volatility Exit / Protective Stop /
+// Session / Daily limits) can close a tiered position - see Section 19.
+// =========================================================================
+tier1LossVal  = tier1UseSL ? tier1SL : na
+tier1TrailPts = tier1UseTrail ? tier1Threshold : na
+tier1TrailOff = tier1UseTrail ? tier1Trail : na
+tier2LossVal  = tier2UseSL ? tier2SL : na
+tier2TrailPts = tier2UseTrail ? tier2Threshold : na
+tier2TrailOff = tier2UseTrail ? tier2Trail : na
+tier3LossVal  = tier3UseSL ? tier3SL : na
+tier3TrailPts = tier3UseTrail ? tier3Threshold : na
+tier3TrailOff = tier3UseTrail ? tier3Trail : na
+
+if useTier1
+    strategy.exit("Tier1-L", from_entry = "Long",  qty = tier1Qty, profit = tier1Target, loss = tier1LossVal, trail_points = tier1TrailPts, trail_offset = tier1TrailOff)
+    strategy.exit("Tier1-S", from_entry = "Short", qty = tier1Qty, profit = tier1Target, loss = tier1LossVal, trail_points = tier1TrailPts, trail_offset = tier1TrailOff)
+if useTier2
+    strategy.exit("Tier2-L", from_entry = "Long",  qty = tier2Qty, profit = tier2Target, loss = tier2LossVal, trail_points = tier2TrailPts, trail_offset = tier2TrailOff)
+    strategy.exit("Tier2-S", from_entry = "Short", qty = tier2Qty, profit = tier2Target, loss = tier2LossVal, trail_points = tier2TrailPts, trail_offset = tier2TrailOff)
+if useTier3
+    strategy.exit("Tier3-L", from_entry = "Long",  qty = tier3Qty, profit = tier3Target, loss = tier3LossVal, trail_points = tier3TrailPts, trail_offset = tier3TrailOff)
+    strategy.exit("Tier3-S", from_entry = "Short", qty = tier3Qty, profit = tier3Target, loss = tier3LossVal, trail_points = tier3TrailPts, trail_offset = tier3TrailOff)
+
+// =========================================================================
+// SECTION 21: PER-PLOTTING-COURSE TP / SL (skipped when Reverse-At-SL is on;
+//             that subsystem replaces the SL leg - see Section 23)
+// =========================================================================
+courseSLActive = useCourseSL and not useReverseAtSL
+courseProfitVal = useCourseTP ? courseTPTicks : na
+courseLossVal   = courseSLActive ? courseSLTicks : na
+
+if useCourseTP or courseSLActive
+    strategy.exit("CourseExit-L", from_entry = "Long",  profit = courseProfitVal, loss = courseLossVal)
+    strategy.exit("CourseExit-S", from_entry = "Short", profit = courseProfitVal, loss = courseLossVal)
+
+// =========================================================================
+// SECTION 22: REVERSE AT STOP LOSS
+// =========================================================================
+longSLPrice  = strategy.position_avg_price - courseSLTicks * tick
+shortSLPrice = strategy.position_avg_price + courseSLTicks * tick
+
+reverseLongTrigger  = useReverseAtSL and strategy.position_size > 0 and low  <= longSLPrice  and reversalsThisCourse < maxReversalsPerCourse
+reverseShortTrigger = useReverseAtSL and strategy.position_size < 0 and high >= shortSLPrice and reversalsThisCourse < maxReversalsPerCourse
+
+if reverseLongTrigger
+    strategy.close("Long", comment = "Reverse@SL")
+    strategy.close_all(comment = "Reverse@SL - flatten pyramids")
+    strategy.entry("Short", strategy.short, comment = "Reverse Entry S")
+    reversalsThisCourse := reversalsThisCourse + 1
+
+if reverseShortTrigger
+    strategy.close("Short", comment = "Reverse@SL")
+    strategy.close_all(comment = "Reverse@SL - flatten pyramids")
+    strategy.entry("Long", strategy.long, comment = "Reverse Entry L")
+    reversalsThisCourse := reversalsThisCourse + 1
+
+// =========================================================================
+// SECTION 23: VOLATILITY EXIT & PROTECTIVE STOP (override everything, incl. pyramids)
+// =========================================================================
+if volatilityExitTriggered
+    strategy.close_all(comment = "Volatility Exit")
+
+if useProtectiveStop and strategy.position_size > 0 and low <= longProtectiveStop
+    strategy.close_all(comment = "Protective Stop (Long)")
+
+if useProtectiveStop and strategy.position_size < 0 and high >= shortProtectiveStop
+    strategy.close_all(comment = "Protective Stop (Short)")
+
+// =========================================================================
+// SECTION 24: SESSION END / DAILY LIMIT CLOSE-OUT
+// =========================================================================
+if sessionEndThisBar and closeAtSessionEnd
+    strategy.close_all(comment = "Session End")
+
+if (useDailyTP or useDailyMaxLoss) and dailyHalt and not dailyHalt[1]
+    strategy.close_all(comment = "Daily Limit Hit")
+
+// =========================================================================
+// SECTION 25: VISUALS - ENTRY / EXIT SIGNALS
+// =========================================================================
+plotshape(canEnterLong,  title = "Long Entry",  style = shape.triangleup,   location = location.belowbar, color = color.green, size = size.small)
+plotshape(canEnterShort, title = "Short Entry", style = shape.triangledown, location = location.abovebar, color = color.red,   size = size.small)
+plotshape(reverseLongTrigger,  title = "Reverse To Long",  style = shape.arrowup,   location = location.belowbar, color = color.aqua,   size = size.small)
+plotshape(reverseShortTrigger, title = "Reverse To Short", style = shape.arrowdown, location = location.abovebar, color = color.fuchsia, size = size.small)
+plotshape(volatilityExitTriggered, title = "Volatility Exit", style = shape.xcross, location = location.abovebar, color = color.orange, size = size.small)
+bgcolor(dailyHalt ? color.new(color.gray, 85) : na, title = "Daily Halt Shading")
+
+// Pyramid add markers - one per type so you can tell them apart on the chart
+plotshape(pyr1Signal and strategy.position_size > 0, title = "Pyr1 Turtle Add L",   style = shape.circle, location = location.belowbar, color = color.new(color.teal, 20),    size = size.tiny, text = "T")
+plotshape(pyr1Signal and strategy.position_size < 0, title = "Pyr1 Turtle Add S",   style = shape.circle, location = location.abovebar, color = color.new(color.teal, 20),    size = size.tiny, text = "T")
+plotshape(pyr2Signal and strategy.position_size > 0, title = "Pyr2 Swing Add L",    style = shape.circle, location = location.belowbar, color = color.new(color.blue, 20),    size = size.tiny, text = "SW")
+plotshape(pyr2Signal and strategy.position_size < 0, title = "Pyr2 Swing Add S",    style = shape.circle, location = location.abovebar, color = color.new(color.blue, 20),    size = size.tiny, text = "SW")
+plotshape(pyr3Signal and strategy.position_size > 0, title = "Pyr3 Momentum Add L", style = shape.circle, location = location.belowbar, color = color.new(color.purple, 20),  size = size.tiny, text = "M")
+plotshape(pyr3Signal and strategy.position_size < 0, title = "Pyr3 Momentum Add S", style = shape.circle, location = location.abovebar, color = color.new(color.purple, 20),  size = size.tiny, text = "M")
+plotshape(pyr4Signal and strategy.position_size > 0, title = "Pyr4 Breakout Add L", style = shape.circle, location = location.belowbar, color = color.new(color.olive, 20),   size = size.tiny, text = "BO")
+plotshape(pyr4Signal and strategy.position_size < 0, title = "Pyr4 Breakout Add S", style = shape.circle, location = location.abovebar, color = color.new(color.olive, 20),   size = size.tiny, text = "BO")
+plotshape(pyr5Signal and strategy.position_size > 0, title = "Pyr5 MTF Add L",      style = shape.circle, location = location.belowbar, color = color.new(color.navy, 20),    size = size.tiny, text = "MTF")
+plotshape(pyr5Signal and strategy.position_size < 0, title = "Pyr5 MTF Add S",      style = shape.circle, location = location.abovebar, color = color.new(color.navy, 20),    size = size.tiny, text = "MTF")
+plotshape(pyr6Signal and strategy.position_size > 0, title = "Pyr6 ErfTest Add L",  style = shape.circle, location = location.belowbar, color = color.new(color.maroon, 20),  size = size.tiny, text = "ERF")
+plotshape(pyr6Signal and strategy.position_size < 0, title = "Pyr6 ErfTest Add S",  style = shape.circle, location = location.abovebar, color = color.new(color.maroon, 20),  size = size.tiny, text = "ERF")
+plotshape(pyr7Signal and strategy.position_size > 0, title = "Pyr7 KDE Add L",      style = shape.circle, location = location.belowbar, color = color.new(color.fuchsia, 20), size = size.tiny, text = "KDE")
+plotshape(pyr7Signal and strategy.position_size < 0, title = "Pyr7 KDE Add S",      style = shape.circle, location = location.abovebar, color = color.new(color.fuchsia, 20), size = size.tiny, text = "KDE")
+plotshape(pyr8Signal and strategy.position_size > 0, title = "Pyr8 Viterbi Add L",  style = shape.circle, location = location.belowbar, color = color.new(color.orange, 20),  size = size.tiny, text = "VIT")
+plotshape(pyr8Signal and strategy.position_size < 0, title = "Pyr8 Viterbi Add S",  style = shape.circle, location = location.abovebar, color = color.new(color.orange, 20),  size = size.tiny, text = "VIT")
+
+// =========================================================================
+// SECTION 26: DEBUG LABELS - every actual order fill, labeled by exit/entry id
+// This directly shows what closed a position and why (tiered exit, course
+// exit, protective stop, pyramid exit, reversal, etc.)
+// =========================================================================
+showFillLabels = input.bool(true, title = "Show Fill Debug Labels On Chart", group = "26) Debug")
+
+var int lastClosedCount = 0
+if showFillLabels and strategy.closedtrades > lastClosedCount
+    for idx = lastClosedCount to strategy.closedtrades - 1
+        exitId = strategy.closedtrades.exit_id(idx)
+        exitPrice = strategy.closedtrades.exit_price(idx)
+        tradeSize = strategy.closedtrades.size(idx)
+        label.new(bar_index, exitPrice, text = exitId, style = tradeSize > 0 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 70), textcolor = color.white, size = size.tiny)
+    lastClosedCount := strategy.closedtrades
+
+// =========================================================================
+// SECTION 27: ALERTS
+// =========================================================================
+alertcondition(canEnterLong,  title = "Long Entry",  message = "DOUBLE SUPERTREND PYRAMID: Long Entry")
+alertcondition(canEnterShort, title = "Short Entry", message = "DOUBLE SUPERTREND PYRAMID: Short Entry")
+alertcondition(reverseLongTrigger,  title = "Reverse To Long",  message = "DOUBLE SUPERTREND PYRAMID: Reverse to Long")
+alertcondition(reverseShortTrigger, title = "Reverse To Short", message = "DOUBLE SUPERTREND PYRAMID: Reverse to Short")
+alertcondition(pyr1Signal or pyr2Signal or pyr3Signal or pyr4Signal or pyr5Signal or pyr6Signal or pyr7Signal or pyr8Signal, title = "Pyramid Add", message = "DOUBLE SUPERTREND PYRAMID: Pyramid Add Triggered")

@@ -1,0 +1,804 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cybermediaboy
+
+//@version=6
+// @published_version 2
+// @tw_status published
+// Single source of truth: cybermediaboy/CyberNumLib/2
+// @description CyberNumLib — stateless numerical primitives for advanced statistical analysis.
+//              Provides math polyfills (tanh, normal CDF/inverse), smoothing filters 
+//              (Ehlers Super Smoother, Butterworth, Savitzky-Golay), robust statistics 
+//              (median-MAD, IQR scaling), normalization methods, and correlation analysis 
+//              (Pearson, Spearman, Kendall, Hurst exponent). Pure functions, no UDTs.
+//
+// CHANGELOG v4:
+//   - Correlation: Pearson, Spearman, Kendall tau, Hurst exponent (R/S analysis)
+//   - Divergence detection: phi divergence score for price-indicator divergence
+//   - ATR utilities: f_atr_scale, f_atr_dynamic for volatility-adaptive indicators
+//   - Fisher transform: percentile rank with Fisher transformation
+//   - Confidence conversion: f_confidence_to_alpha for adaptive smoothing
+//
+// USAGE EXAMPLES:
+//   // Robust z-score with median-MAD
+//   [med, scale, _, _, z] = f_basis_median_mad(close, 50)
+//   
+//   // Smooth price with Ehlers Super Smoother
+//   smooth = f_supersmoother(close, 20)
+//   
+//   // Detect mean-reversion vs trending via Hurst exponent
+//   hurst = f_hurst_rs(close, 100)  // < 0.5 = mean-reversion, > 0.5 = trending
+//
+library("CyberNumLib", overlay=false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: MATH POLYFILLS (no native in Pine v6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Hyperbolic tangent (no native ta/math equivalent)
+export f_tanh(float x) =>
+    float xc = math.max(-20.0, math.min(20.0, nz(x)))
+    float e_pos = math.exp(xc)
+    float e_neg = math.exp(-xc)
+    (e_pos - e_neg) / (e_pos + e_neg)
+
+// @function Sigmoid 1/(1+exp(-x))
+export f_sigmoid(float x) =>
+    1.0 / (1.0 + math.exp(-math.max(-20.0, math.min(20.0, nz(x)))))
+
+// @function Normal CDF — Abramowitz & Stegun 26.2.17 approximation, ~7e-8 max error
+export f_norm_cdf(float x) =>
+    float xv = nz(x)
+    float sign = xv < 0.0 ? -1.0 : 1.0
+    float ax = math.abs(xv)
+    float k = 1.0 / (1.0 + 0.2316419 * ax)
+    float w = (0.31938153 + (-0.356563782 + (1.781477937 +
+              (-1.821255978 + 1.330274429 * k) * k) * k) * k) * k
+    float pdf = math.exp(-0.5 * ax * ax) / math.sqrt(2.0 * math.pi)
+    0.5 + sign * (0.5 - pdf * w)
+
+// @function Inverse normal CDF (rational approximation, Beasley–Springer–Moro)
+export f_norm_inv(float p) =>
+    float pp = math.max(1e-10, math.min(1.0 - 1e-10, p))
+    float q = pp - 0.5
+    float r = 0.0, x = 0.0
+    if math.abs(q) <= 0.425
+        r := q * q
+        x := q * (((((-39.6968302866538*r + 220.946098424521)*r - 275.928510446969)*r +
+                    138.357751867269)*r - 30.6647980661472)*r + 2.50662827745924) /
+                  (((((-54.4760987982241*r + 161.585836858041)*r - 155.698979859887)*r +
+                    66.8013118877197)*r - 13.2806815528857)*r + 1.0)
+    else
+        r := pp < 0.5 ? math.sqrt(-math.log(pp)) : math.sqrt(-math.log(1.0 - pp))
+        x := (((((2.93816398269878*r - 4.37466414146497)*r - 2.54973253934373)*r -
+              2.40075827716184)*r - 0.32239645804113)*r + 1.0) /
+             ((((1.32741256302973*r + 0.0)*r + 0.0)*r + 0.0)*r + 1.0)
+        x := pp < 0.5 ? -x : x
+    x
+
+// @function Abramowitz & Stegun 7.1.26 erf approximation, max error ~1.5e-7
+export f_erf(float x) =>
+    float a1 =  0.254829592, float a2 = -0.284496736, float a3 = 1.421413741
+    float a4 = -1.453152027, float a5 =  1.061405429, float p  = 0.3275911
+    float sgn = math.sign(x)
+    float ax  = math.abs(x)
+    float t   = 1.0 / (1.0 + p * ax)
+    float y   = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-ax * ax)
+    sgn * y
+
+// @function Factorial with overflow guard (returns na for n>20 or n<0)
+export f_factorial(int n) =>
+    float result = na
+    if n >= 0 and n <= 20
+        float r = 1.0
+        for i = 2 to math.max(n, 1)
+            r *= float(i)
+        result := r
+    result
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: SMOOTHING (Ehlers / SavGol — no native equivalent)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Ehlers Super Smoother (2-pole IIR Butterworth-like)
+export f_supersmoother(float src, int len) =>
+    var float a1 = na, var float b1 = na, var float c1 = na, var float c2 = na, var float c3 = na
+    var float ss = na
+    if barstate.isfirst
+        a1 := math.exp(-1.414 * math.pi / len)
+        b1 := 2.0 * a1 * math.cos(1.414 * math.pi / len)
+        c2 := b1
+        c3 := -a1 * a1
+        c1 := 1.0 - c2 - c3
+    float prev1 = nz(ss[1], src)
+    float prev2 = nz(ss[2], src)
+    ss := c1 * (src + nz(src[1], src)) * 0.5 + c2 * prev1 + c3 * prev2
+    ss
+
+// @function Ehlers Butterworth 2-pole low-pass
+export f_buttersmooth(float src, int len) =>
+    var float a = na, var float b = na, var float c2 = na, var float c3 = na, var float c1 = na
+    var float bs = na
+    if barstate.isfirst
+        a  := math.exp(-math.sqrt(2.0) * math.pi / len)
+        b  := 2.0 * a * math.cos(math.sqrt(2.0) * math.pi / len)
+        c2 := b
+        c3 := -a * a
+        c1 := (1.0 - b + a * a) / 4.0
+    float prev1 = nz(bs[1], src)
+    float prev2 = nz(bs[2], src)
+    bs := c1 * (src + 2.0 * nz(src[1], src) + nz(src[2], src)) + c2 * prev1 + c3 * prev2
+    bs
+
+// @function Savitzky–Golay smoother, length 13, polyorder 2 (fixed coefficients)
+export f_savgol_2_13(float src) =>
+    -11.0/143.0*nz(src[12]) + 0.0*nz(src[11]) + 9.0/143.0*nz(src[10]) + 16.0/143.0*nz(src[9]) + 21.0/143.0*nz(src[8]) + 24.0/143.0*nz(src[7]) + 25.0/143.0*nz(src[6]) + 24.0/143.0*nz(src[5]) + 21.0/143.0*nz(src[4]) + 16.0/143.0*nz(src[3]) + 9.0/143.0*nz(src[2]) + 0.0*nz(src[1]) + -11.0/143.0*src
+
+// @function Savitzky–Golay smoother, length 21, polyorder 3 (fixed coefficients)
+// Coefficients from Savitzky-Golay tables for 21-tap, 3rd order polynomial
+// Sum of coefficients = 1.0 (unity gain at DC)
+export f_savgol_21_3(float src) =>
+    float c0  = -0.084
+    float c1  = -0.021
+    float c2  =  0.030
+    float c3  =  0.069
+    float c4  =  0.097
+    float c5  =  0.113
+    float c6  =  0.120
+    float c7  =  0.118
+    float c8  =  0.108
+    float c9  =  0.091
+    float c10 =  0.067
+    // Symmetric: c11=c9, c12=c8, ..., c20=c0
+    float part1 = c0*nz(src[20]) + c1*nz(src[19]) + c2*nz(src[18]) + c3*nz(src[17]) + c4*nz(src[16])
+    float part2 = c5*nz(src[15]) + c6*nz(src[14]) + c7*nz(src[13]) + c8*nz(src[12]) + c9*nz(src[11])
+    float part3 = c10*nz(src[10]) + c9*nz(src[9]) + c8*nz(src[8]) + c7*nz(src[7]) + c6*nz(src[6])
+    float part4 = c5*nz(src[5]) + c4*nz(src[4]) + c3*nz(src[3]) + c2*nz(src[2]) + c1*nz(src[1]) + c0*src
+    part1 + part2 + part3 + part4
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: ROBUST STATISTICS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Winsorize value to [p2, p98] bounds
+export f_winsorize(float val, float p2, float p98) =>
+    na(val) ? na : math.max(p2, math.min(val, p98))
+
+// @function IQR-based robust scale (median + MAD-equivalent via IQR/0.7413)
+// @returns [median, scale, dev, iqr_factor, z]
+export f_basis_median_mad(float src, simple int len) =>
+    float med  = ta.percentile_linear_interpolation(src, len, 50)
+    float q75  = ta.percentile_linear_interpolation(src, len, 75)
+    float q25  = ta.percentile_linear_interpolation(src, len, 25)
+    float dev  = math.max((q75 - q25) / 0.7413, syminfo.mintick)
+    float z    = dev > 0.0 ? (src - med) / dev : 0.0
+    [med, dev, dev, 1.0, z]
+
+// @function Standard z-score over rolling window (single ta.stdev call; mean inferred)
+export f_zscore(float src, simple int len) =>
+    float mu = ta.sma(src, len)
+    float sd = ta.stdev(src, len)
+    sd > 0.0 ? (src - mu) / sd : 0.0
+
+// @function Safe z-score with explicit guards for warmup
+export f_zscore_safe(float src, int len) =>
+    if bar_index < len or na(src)
+        0.0
+    else
+        f_zscore(src, len)
+
+// @function EWMA-based z-score (no rolling window; constant memory)
+export f_zscore_ewma(float src, float alpha) =>
+    var float mu = na, var float var_acc = na
+    if na(mu)
+        mu := src
+        var_acc := 0.0
+    float diff = src - mu
+    mu := mu + alpha * diff
+    var_acc := (1.0 - alpha) * (var_acc + alpha * diff * diff)
+    float sd = math.sqrt(math.max(var_acc, 0.0))
+    sd > 0.0 ? (src - mu) / sd : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: NORMALIZATION / SCALING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Tanh-based soft normalization to [-1, 1]
+export f_tanh_norm(float val, float steepness) =>
+    f_tanh(nz(val) * nz(steepness, 1.0))
+
+// @function Sigmoid normalization to [0, 1]
+export f_sigmoid_norm(float val, float steepness) =>
+    f_sigmoid(nz(val) * nz(steepness, 1.0))
+
+// @function Silverman's rule of thumb for KDE bandwidth
+// @param stdev_ Sample standard deviation
+// @param n Sample size
+// @returns Optimal bandwidth h = 1.06 * σ * n^(-1/5)
+export f_silverman_bandwidth(float stdev_, int n) =>
+    n > 1 ? 1.06 * stdev_ * math.pow(float(n), -0.2) : 0.0
+
+// @function IQR-based normalization to [-1, 1]
+export f_iqr_normalize(float src, simple int len) =>
+    float q75 = ta.percentile_linear_interpolation(src, len, 75)
+    float q25 = ta.percentile_linear_interpolation(src, len, 25)
+    float med = ta.percentile_linear_interpolation(src, len, 50)
+    float iqr = math.max(q75 - q25, syminfo.mintick)
+    f_tanh(2.0 * (src - med) / iqr)
+
+// @function Smoothed-percentile-rank coefficient in [0, 1]
+//           Replaces TaUtilityLib.getNormalizedCoefficient() main path.
+export f_normalized_coefficient(float src, simple int len) =>
+    float pr = ta.percentrank(src, len) / 100.0
+    math.max(0.0, math.min(1.0, pr))
+
+// @function Z-score variant returning value clamped to [zlo, zhi]
+export f_zscore_clamped(float src, int len, float zlo, float zhi) =>
+    float z = f_zscore_safe(src, len)
+    math.max(zlo, math.min(zhi, z))
+
+// @function Percentile bands [p_low, p_mid, p_high]
+export f_percentile_bands(float src, simple int len, simple int p_low, simple int p_high) =>
+    float lo  = ta.percentile_linear_interpolation(src, len, float(p_low))
+    float mid = ta.percentile_linear_interpolation(src, len, 50.0)
+    float hi  = ta.percentile_linear_interpolation(src, len, float(p_high))
+    [lo, mid, hi]
+
+// @function Min-max normalization to [0,1] with NA and zero-range guards
+//           Mirrors logreg_support_lib's normalize / ta.normalize semantics
+export f_normalize(float value, float minval, float maxval) =>
+    float result = 0.0
+    if not (na(value) or na(minval) or na(maxval)) and (maxval - minval) != 0.0
+        result := (value - minval) / (maxval - minval)
+    result
+
+// @function Mean-reversion z-score volatility-adjusted (replaces fmrvoladjusted)
+export f_mr_voladjusted(float src, simple int len_short, simple int len_long) =>
+    float mu_s = ta.sma(src, len_short)
+    float sd_l = ta.stdev(src, len_long)
+    sd_l > 0.0 ? (src - mu_s) / sd_l : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: COLLECTION HELPERS — TYPED SAFE-GET
+// ═══════════════════════════════════════════════════════════════════════════
+// Unified replacements for f_safe_array_get / f_safe_array_get_int / _bool / _string
+// AND f_get_or_float / _int / _bool / _string from TaUtilityLib (12 fns → 4).
+
+// @function Safe array.get<float> with default fallback
+export f_safe_get_f(array<float> arr, int idx, float fallback = na) =>
+    if na(arr) or array.size(arr) <= idx or idx < 0
+        fallback
+    else
+        float v = array.get(arr, idx)
+        na(v) ? fallback : v
+
+// @function Safe array.get<int> with default fallback
+export f_safe_get_i(array<int> arr, int idx, int fallback) =>
+    if na(arr) or array.size(arr) <= idx or idx < 0
+        fallback
+    else
+        int v = array.get(arr, idx)
+        na(v) ? fallback : v
+
+// @function Safe array.get<bool> with default fallback
+export f_safe_get_b(array<bool> arr, int idx, bool fallback) =>
+    if na(arr) or array.size(arr) <= idx or idx < 0
+        fallback
+    else
+        array.get(arr, idx)
+
+// @function Safe array.get<string> with default fallback
+export f_safe_get_s(array<string> arr, int idx, string fallback) =>
+    if na(arr) or array.size(arr) <= idx or idx < 0
+        fallback
+    else
+        string v = array.get(arr, idx)
+        na(v) ? fallback : v
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: COLLECTION HELPERS — MAP CRUD
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Add or accumulate float value into map<string, float>
+export f_map_add_f(map<string, float> m, string key, float val) =>
+    float prev = nz(map.get(m, key), 0.0)
+    map.put(m, key, prev + val)
+    m
+
+// @function Set string→int map entry (accumulates)
+export f_map_add_i(map<string, int> m, string key, int val) =>
+    int prev = nz(map.get(m, key), 0)
+    map.put(m, key, prev + val)
+    m
+
+// @function Get with default — float
+export f_map_get_or_f(map<string, float> m, string key, float fallback) =>
+    float v = map.get(m, key)
+    na(v) ? fallback : v
+
+// @function Get with default — int
+export f_map_get_or_i(map<string, int> m, string key, int fallback) =>
+    int v = map.get(m, key)
+    na(v) ? fallback : v
+
+// @function Get with default — bool (no na for bool, returns fallback if key missing)
+export f_map_get_or_b(map<string, bool> m, string key, bool fallback) =>
+    map.contains(m, key) ? map.get(m, key) : fallback
+
+// @function Get with default — string
+export f_map_get_or_s(map<string, string> m, string key, string fallback) =>
+    string v = map.get(m, key)
+    na(v) ? fallback : v
+
+// @function Remove all entries with zero/na value (float map)
+export f_map_prune_zero_f(map<string, float> m) =>
+    array<string> ks = map.keys(m)
+    int n = array.size(ks)
+    if n > 0
+        for i = 0 to n - 1
+            string k = array.get(ks, i)
+            float v = map.get(m, k)
+            if na(v) or v == 0.0
+                map.remove(m, k)
+    m
+
+// @function Remove all entries with zero/na value (int map)
+export f_map_prune_zero_i(map<string, int> m) =>
+    array<string> ks = map.keys(m)
+    int n = array.size(ks)
+    if n > 0
+        for i = 0 to n - 1
+            string k = array.get(ks, i)
+            int v = map.get(m, k)
+            if na(v) or v == 0
+                map.remove(m, k)
+    m
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: ARRAY UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Sum of float array
+export f_total(array<float> arr) =>
+    float s = 0.0
+    int n = array.size(arr)
+    if n > 0
+        for i = 0 to n - 1
+            float val = array.get(arr, i)
+            if not na(val)
+                s += val
+    s
+
+// @function Mean and stdev of last `tail_n` elements
+export f_meanstdev_tail(array<float> arr, int tail_n) =>
+    int n = array.size(arr)
+    int start = math.max(0, n - tail_n)
+    int count = n - start
+    if count < 2
+        [0.0, 0.0]
+    else
+        float sum = 0.0
+        for i = start to n - 1
+            float val = array.get(arr, i)
+            if not na(val)
+                sum += val
+        float mean = sum / count
+        float ss = 0.0
+        for i = start to n - 1
+            float val2 = array.get(arr, i)
+            if not na(val2)
+                float d = val2 - mean
+                ss += d * d
+        [mean, math.sqrt(ss / (count - 1))]
+
+// @function Push-limited: append and trim oldest if size exceeds cap
+export method push_limited(array<float> arr, float val, int cap) =>
+    array.push(arr, val)
+    while array.size(arr) > cap
+        array.shift(arr)
+    arr
+
+// @function Last N elements as new array
+export f_tail(array<float> arr, int n) =>
+    int sz = array.size(arr)
+    int start = math.max(0, sz - n)
+    array<float> out = array.new<float>()
+    if sz > 0
+        for i = start to sz - 1
+            array.push(out, array.get(arr, i))
+    out
+
+// @function Linear scan find — returns -1 if missing
+export f_find_key(array<string> keys, string target) =>
+    int idx = -1
+    int n = array.size(keys)
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(keys, i) == target
+                idx := i
+                break
+    idx
+
+// @function Lower bound (binary search, sorted ascending float array)
+export f_lower_bound(array<float> arr, float target) =>
+    int lo = 0
+    int hi = array.size(arr)
+    while lo < hi
+        int mid = int((lo + hi) / 2)
+        if array.get(arr, mid) < target
+            lo := mid + 1
+        else
+            hi := mid
+    lo
+
+// @function Upper bound (binary search)
+export f_upper_bound(array<float> arr, float target) =>
+    int lo = 0
+    int hi = array.size(arr)
+    while lo < hi
+        int mid = int((lo + hi) / 2)
+        if array.get(arr, mid) <= target
+            lo := mid + 1
+        else
+            hi := mid
+    lo
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8: ROBUST WEIGHTED AGGREGATORS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Weighted mean (na-safe; zero total weight returns na)
+export f_weighted_mean(array<float> vals, array<float> weights) =>
+    int n = math.min(array.size(vals), array.size(weights))
+    float sw = 0.0
+    float swv = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float v = array.get(vals, i)
+            float w = array.get(weights, i)
+            if not na(v) and not na(w)
+                sw  += w
+                swv += w * v
+    sw > 0.0 ? swv / sw : na
+
+// @function Trimmed mean — drops top/bottom `trim_pct` fraction
+export f_trimmed_mean(array<float> arr, float trim_pct) =>
+    int n = array.size(arr)
+    if n == 0
+        na
+    else
+        array<float> sorted = array.copy(arr)
+        array.sort(sorted, order.ascending)
+        int k = int(math.floor(n * math.max(0.0, math.min(0.5, trim_pct))))
+        int lo = k, int hi = n - k
+        float s = 0.0, int c = 0
+        if hi > lo
+            for i = lo to hi - 1
+                float v = array.get(sorted, i)
+                if not na(v)
+                    s += v
+                    c += 1
+        c > 0 ? s / c : na
+
+// @function Tukey's trimean — robust location estimator (Q1 + 2*median + Q3) / 4
+// @param arr Input array
+// @returns Trimean value
+export f_trimean(array<float> arr) =>
+    int n = array.size(arr)
+    if n == 0
+        na
+    else
+        array<float> sorted = array.copy(arr)
+        array.sort(sorted, order.ascending)
+        float q1 = array.get(sorted, int(n * 0.25))
+        float q2 = array.get(sorted, int(n * 0.5))
+        float q3 = array.get(sorted, int(n * 0.75))
+        (q1 + 2.0 * q2 + q3) / 4.0
+
+// @function NW Gaussian factor-distance and time-decay weight
+export f_nw_weight(float d1, float d2, float d3, int i, float factor_bw, float time_bw) =>
+    float dsq = d1 * d1 + d2 * d2 + d3 * d3
+    math.exp(-0.5 * dsq / math.max(factor_bw * factor_bw, 1e-6)) * math.exp(-float(i) / math.max(time_bw, 1.0))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9: CORRELATION / WEIGHTED Z
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Correlation-weighted z-score (replaces fcorrweightedzscore)
+export f_corr_weighted_zscore(float src, float ref, simple int len) =>
+    float corr = ta.correlation(src, ref, len)
+    float z = f_zscore_safe(src, len)
+    z * math.max(0.0, corr)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 10: CORRELATION COEFFICIENTS (from TaUtilityLib)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Pearson correlation on array tails (most recent values)
+// @param x First array
+// @param y Second array
+// @param length Number of elements from tail to use
+// @returns Correlation coefficient [-1, 1]
+export f_pearson_tail(array<float> x, array<float> y, int length) =>
+    float correlation = 0.0
+    int xs = array.size(x)
+    int ys = array.size(y)
+    int n = math.min(length, math.min(xs, ys))
+    if n >= 5
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to n - 1
+            float xv = array.get(x, xs - 1 - i)
+            float yv = array.get(y, ys - 1 - i)
+            if not na(xv) and not na(yv)
+                sum_x += xv
+                sum_y += yv
+                sum_xy += xv * yv
+                sum_x2 += xv * xv
+                sum_y2 += yv * yv
+        float num = n * sum_xy - sum_x * sum_y
+        float den = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        correlation := den > 0.0001 ? num / den : 0.0
+    correlation
+
+// @function Pearson correlation on arrays (from beginning)
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @returns Correlation coefficient [-1, 1]
+export f_pearson(array<float> x, array<float> y, int length) =>
+    float correlation = 0.0
+    int safe_length = math.min(length, math.min(array.size(x), array.size(y)))
+    if safe_length >= 5
+        float sum_x = 0.0
+        float sum_y = 0.0
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to safe_length - 1
+            float xv = array.get(x, i)
+            float yv = array.get(y, i)
+            if not na(xv) and not na(yv)
+                sum_x += xv
+                sum_y += yv
+                sum_xy += xv * yv
+                sum_x2 += xv * xv
+                sum_y2 += yv * yv
+        float n = safe_length
+        float num = n * sum_xy - sum_x * sum_y
+        float den = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        correlation := den > 0.0001 ? num / den : 0.0
+    correlation
+
+// @function Spearman rank correlation (robust to outliers)
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @returns Rank correlation coefficient [-1, 1]
+export f_spearman(array<float> x, array<float> y, int length) =>
+    float correlation = 0.0
+    int safe_length = math.min(length, math.min(array.size(x), array.size(y)))
+    if safe_length >= 5
+        array<float> x_ranks = array.new<float>(safe_length, 0.0)
+        array<float> y_ranks = array.new<float>(safe_length, 0.0)
+        for i = 0 to safe_length - 1
+            float x_val = array.get(x, i)
+            float y_val = array.get(y, i)
+            float x_rank = 1.0
+            float y_rank = 1.0
+            for j = 0 to safe_length - 1
+                if array.get(x, j) < x_val
+                    x_rank += 1.0
+                else if array.get(x, j) == x_val and j < i
+                    x_rank += 1.0
+                if array.get(y, j) < y_val
+                    y_rank += 1.0
+                else if array.get(y, j) == y_val and j < i
+                    y_rank += 1.0
+            array.set(x_ranks, i, x_rank)
+            array.set(y_ranks, i, y_rank)
+        float x_mean = array.avg(x_ranks)
+        float y_mean = array.avg(y_ranks)
+        float sum_xy = 0.0
+        float sum_x2 = 0.0
+        float sum_y2 = 0.0
+        for i = 0 to safe_length - 1
+            float x_rank_val = array.get(x_ranks, i)
+            float y_rank_val = array.get(y_ranks, i)
+            if not na(x_rank_val) and not na(y_rank_val)
+                float x_diff = x_rank_val - x_mean
+                float y_diff = y_rank_val - y_mean
+                sum_xy += x_diff * y_diff
+                sum_x2 += x_diff * x_diff
+                sum_y2 += y_diff * y_diff
+        float den = math.sqrt(sum_x2 * sum_y2)
+        correlation := den > 0 ? sum_xy / den : 0.0
+    correlation
+
+// @function Kendall Tau correlation (concordant pairs, most robust)
+// @param x First array
+// @param y Second array
+// @param length Number of elements to use
+// @param sampling_step Step for sampling (1 = full precision, higher = faster)
+// @returns Kendall Tau coefficient [-1, 1]
+export f_kendall(array<float> x, array<float> y, int length, int sampling_step) =>
+    float concordant = 0.0
+    float discordant = 0.0
+    int safe_length = math.min(length, math.min(array.size(x), array.size(y)))
+    if safe_length >= 5
+        int step = sampling_step == 0 ? 1 : math.max(1, sampling_step)
+        for i = 0 to safe_length - 2 by step
+            for j = i + 1 to safe_length - 1 by step
+                float xi = array.get(x, i)
+                float xj = array.get(x, j)
+                float yi = array.get(y, i)
+                float yj = array.get(y, j)
+                if not na(xi) and not na(xj) and not na(yi) and not na(yj)
+                    float x_diff = xi - xj
+                    float y_diff = yi - yj
+                    if (x_diff * y_diff) > 0
+                        concordant += 1.0
+                    else if (x_diff * y_diff) < 0
+                        discordant += 1.0
+    float pairs = concordant + discordant
+    pairs > 0 ? (concordant - discordant) / pairs : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11: HURST EXPONENT & DIVERGENCE (from TaUtilityLib)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Hurst exponent via R/S analysis
+// Caller owns the buffer array (global scope, push/shift each bar).
+// @param log_ret_buf Pre-filled array of log-returns
+// @returns float H ∈ [0.1, 0.9] (0.5 = random walk, <0.5 = anti-persistent)
+export f_hurst_rs(array<float> log_ret_buf) =>
+    int n = array.size(log_ret_buf)
+    float h = 0.5
+    if n >= 32
+        float h_mean = 0.0
+        int i = 0
+        for i = 0 to n - 1
+            float val = array.get(log_ret_buf, i)
+            if not na(val)
+                h_mean += val
+        h_mean := h_mean / n
+
+        float h_cum = 0.0
+        float h_max = -1e10
+        float h_min = 1e10
+        float h_sum_sq = 0.0
+        for i = 0 to n - 1
+            float v = array.get(log_ret_buf, i)
+            if not na(v)
+                float diff = v - h_mean
+                h_cum += diff
+                h_max := math.max(h_max, h_cum)
+                h_min := math.min(h_min, h_cum)
+                h_sum_sq += diff * diff
+
+        float h_range = h_max - h_min
+        float h_std = math.sqrt(h_sum_sq / n)
+        float h_rs = h_std > 1e-10 ? h_range / h_std : 1.0
+        h := h_rs > 0.0 ? math.log(h_rs) / math.log(float(n)) : 0.5
+        h := math.max(0.1, math.min(h, 0.9))
+    h
+
+// @function Phi divergence detection and acceleration score
+// Detects start of phi-lines divergence and computes continuous acceleration score.
+// @param phi_latch PhiLatch oscillator value (series float)
+// @param phi_orth PhiTotalOrth oscillator value (series float)
+// @param div_len Lookback for divergence slope (default 5)
+// @param accel_len Smoothing for acceleration signal (default 3)
+// @returns [phi_div_score, phi_diverg_start, phi_spread, phi_accel]
+export f_phi_divergence_score(float phi_latch, float phi_orth, int div_len, int accel_len) =>
+    float spread = math.abs(phi_latch - phi_orth)
+    float spread_prev = nz(spread[div_len], spread)
+    float spread_std = ta.stdev(spread, 50)
+    float spread_mean = ta.sma(spread, 50)
+
+    // Spread z-score (positive = diverging)
+    float spread_z = spread_std > 1e-10 ? (spread - spread_mean) / spread_std : 0.0
+
+    // Acceleration: delta of spread, smoothed
+    float raw_accel = spread - nz(spread[1], spread)
+    float phi_accel = ta.ema(raw_accel, accel_len)
+
+    // Divergence onset: spread accelerating from low base
+    bool was_low = nz(spread[div_len]) < spread_mean
+    bool now_rising = phi_accel > 0.0 and spread_z > 0.3
+    // Pine v6: nz() only accepts int/float. Convert bool→int (1/0) for nz, then back to bool
+    bool phi_diverg_start = was_low and now_rising and not (nz(was_low[1] ? 1 : 0, 0) == 1 and nz(now_rising[1] ? 1 : 0, 0) == 1)
+
+    // Score [0..1]: clamp z-score to [0..3], normalize
+    float phi_div_score = math.min(math.max(spread_z, 0.0), 3.0) / 3.0
+
+    [phi_div_score, phi_diverg_start, spread, phi_accel]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 12: PERCENTILE & ATR UTILITIES (from TaUtilityLib)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// @function Fisher-transformed percentile rank
+// Normalized value in approximate range [-2.65, +2.65] with Gaussian shape.
+// Time-invariant: percentile 85 two weeks ago = percentile 85 now.
+// Ideal for kNN distance calculations where temporal consistency is critical.
+// @param raw Raw value to rank
+// @param window Lookback window
+// @returns Fisher-transformed percentile in ~N(0,1) range
+export f_percentile_rank_fisher(float raw, int window) =>
+    float pct = ta.percentrank(raw, window)  // 0-100, O(1) built-in
+    float u = math.max(0.5, math.min(99.5, pct)) / 100.0  // clamp away from 0/1
+    0.5 * math.log(u / (1.0 - u))  // logit → ≈ N(0,1)
+
+// @function Get ATR with minimum floor to prevent division by zero
+// @param len ATR window length
+// @returns ATR value with 1e-6 minimum
+export f_atr_scale(int len) =>
+    math.max(ta.atr(len), 1e-6)
+
+// @function Dynamic ATR with EMA smoothing
+// @param len ATR EMA smoothing length
+// @returns Smoothed ATR value
+export f_atr_dynamic(int len) =>
+    float tr1 = high - low
+    float tr2 = math.abs(high - nz(close[1], close))
+    float tr3 = math.abs(low - nz(close[1], close))
+    float tr = math.max(tr1, math.max(tr2, tr3))
+    float alpha = 1.0 / math.max(1.0, float(len))
+    var float atr = na
+    atr := na(atr[1]) ? tr : nz(atr[1]) + alpha * (tr - nz(atr[1]))
+    atr
+
+// @function Convert confidence to alpha transparency
+// @param confidence Confidence value [0, 1]
+// @param baseAlpha Base transparency (default 70)
+// @param strongAlpha Strong signal transparency (default 30)
+// @returns Alpha value (0-100)
+export f_confidence_to_alpha(float confidence, int baseAlpha, int strongAlpha) =>
+    float c = math.max(0.0, math.min(1.0, confidence))
+    int alpha = int(math.round(baseAlpha - (baseAlpha - strongAlpha) * c))
+    int(alpha > 0 ? math.min(100, alpha) : 0)
+
+export f_supersmoother_seeded(float src, int len, bool zero_seed = true) =>
+    float a = math.exp(-1.41421356 * 3.14159265358979 / len)
+    float b = 2.0 * a * math.cos(1.41421356 * 3.14159265358979 / len)
+    float c2 = b
+    float c3 = -(a * a)
+    float c1 = 1.0 - c2 - c3
+    var float filt = zero_seed ? 0.0 : na
+    float p1 = zero_seed ? nz(filt[1]) : nz(filt[1], src)
+    float p2 = zero_seed ? nz(filt[2]) : nz(filt[2], src)
+    float s1 = zero_seed ? nz(src[1]) : nz(src[1], src)
+    filt := c1 * (nz(src) + s1) * 0.5 + c2 * p1 + c3 * p2
+    filt
+
+export f_relative_ema(float src, int len, float floor_value = 0.01, bool preserve_na = true) =>
+    float src_nz = nz(src)
+    float baseline = math.max(ta.ema(src_nz, int(len)), floor_value)
+    preserve_na and na(src) ? na : src_nz / baseline - 1.0
+
+export f_zscore_mean_mad(float src, int len, float consistency = 1.2533, float floor_value = 1e-10) =>
+    float mean = ta.sma(src, int(len))
+    float mad = math.max(ta.rma(math.abs(src - mean), int(len)) * consistency, floor_value)
+    (src - mean) / mad
+
+export f_parse_float_at(array<string> values, int idx, float fallback) =>
+    idx >= 0 and idx < array.size(values) ? nz(str.tonumber(array.get(values, idx)), fallback) : fallback
+
+export f_matrix_diag_mean(matrix<float> values, float fallback) =>
+    float acc = 0.0
+    int count = 0
+    int n = math.min(matrix.rows(values), matrix.columns(values))
+    if n > 0
+        for i = 0 to n - 1
+            float value = matrix.get(values, i, i)
+            if not na(value)
+                acc += value
+                count += 1
+    count > 0 ? acc / float(count) : fallback
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END OF LIBRARY
+// ═══════════════════════════════════════════════════════════════════════════

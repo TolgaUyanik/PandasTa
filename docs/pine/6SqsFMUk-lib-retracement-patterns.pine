@@ -1,0 +1,1469 @@
+// © robbatt - Robert Brendler - 2024
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International, see <https://creativecommons.org/licenses/by-nc-sa/4.0/>
+
+//@version=5
+// v134 updated filter process
+// v145 updated defaults & license
+
+import robbatt/lib_plot_objects/36 as D
+import robbatt/lib_pivot/52 as P
+import robbatt/lib_retracement_label/6 as RL
+import robbatt/lib_zig/27 as ZZ
+import robbatt/lib_priceaction/6 as PA
+
+//@description types and functions for XABCD pattern detection and plotting
+library("lib_retracement_patterns", overlay = true)
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#region                               HELPERS
+//////////////////////////////////////////////////////////////////////////////////////
+
+method replace_all(string source, string target, string replacement) =>
+    str.replace_all(source, target, replacement)
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#endregion                               HELPERS
+//////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#region                               XABC SETUP
+//////////////////////////////////////////////////////////////////////////////////////
+
+type Setup
+    string id
+    P.Pivot X
+    P.Pivot A
+    P.Pivot B
+    P.Pivot C
+
+setup_id(P.Pivot X, P.Pivot A, P.Pivot B, P.Pivot C) =>
+    str.format('X-{0}_A-{1}_B-{2}_C-{3}', X.point.index, A.point.index, B.point.index, C.point.index)
+
+pattern_id(string name, Setup setup) =>
+    var id_num = 0
+    id_num += 1
+    id = str.format('{0}_{1}_{2}', id_num, name, setup.id)
+    [id_num, id]
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#endregion                               XABC SETUP
+//////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#region                               PATTERN
+//////////////////////////////////////////////////////////////////////////////////////
+
+//@type type to hold retracement ratio target areas for this pattern
+export type PatternRatioZone
+    float min
+    float max
+
+method contains_ratio(PatternRatioZone[] zones, float ratio) =>
+    bool contains = false
+    if not na(zones)
+        for zone in zones
+            contains := contains or PA.in_range(ratio, zone.min, zone.max)
+            if contains
+                break
+    contains
+
+//@type type to hold retracement ratios and tolerances for this pattern, as well as targets for trades
+export type Pattern
+    string name
+    // setup
+    float XABmin = na
+    float XABmax = na
+    float ABCmin = na
+    float ABCmax = na
+    float BCDmin = na
+    float BCDmax = na
+
+    // D target ranges
+    float XBDmin = na
+    float XBDmax = na
+    float XADmin = na
+    float XADmax = na
+    float XCDmin = na
+    float XCDmax = na
+
+    // trade targets
+    float tp1 = na
+    float tp2 = na
+    float sl = na
+
+    PatternRatioZone[] XABzones = na
+    PatternRatioZone[] ABCzones = na
+
+    // tolerances
+    float tolerance_Bmin = 0
+    float tolerance_Bmax = 0
+    float tolerance_Cmin = 0
+    float tolerance_Cmax = 0
+    float tolerance_Dmin = 0
+    float tolerance_Dmax = 0
+
+    // another pattern with tolerances applied
+    Pattern tolerances = na
+
+//@function sets tolerances for B, C and D retracements. This creates another Pattern instance that is set as tolerances field on the original and will be used for detection instead of the original ratios.
+export method set_tolerances(Pattern this, float tolerance_Bmin = 0, float tolerance_Bmax = 0, float tolerance_Cmin = 0, float tolerance_Cmax = 0, float tolerance_Dmin = 0, float tolerance_Dmax = 0) =>
+    if not na(this)
+        this.tolerance_Bmin := tolerance_Bmin
+        this.tolerance_Bmax := tolerance_Bmax
+        this.tolerance_Cmin := tolerance_Cmin
+        this.tolerance_Cmax := tolerance_Cmax
+        this.tolerance_Dmin := tolerance_Dmin
+        this.tolerance_Dmax := tolerance_Dmax
+        this.tolerances := Pattern.new(
+         XABmin = this.XABmin - tolerance_Bmin,
+         XABmax = this.XABmax + tolerance_Bmax,
+         ABCmin = this.ABCmin - tolerance_Cmin,
+         ABCmax = this.ABCmax + tolerance_Cmax,
+         BCDmin = this.BCDmin - tolerance_Dmin,
+         BCDmax = this.BCDmax + tolerance_Dmax,
+         XBDmin = this.XBDmin - tolerance_Dmin,
+         XBDmax = this.XBDmax + tolerance_Dmax,
+         XADmin = this.XADmin - tolerance_Dmin,
+         XADmax = this.XADmax + tolerance_Dmax,
+         XCDmin = this.XCDmin - tolerance_Dmin,
+         XCDmax = this.XCDmax + tolerance_Dmax
+         )
+    this
+    
+check_pattern_point(pivots, start_offset, offset, max_age_idx, float[] checked_starts_max_price_result, end_pivot) =>
+    P.Pivot pivot = na
+    string interrupt = na
+    float starts_max_price = checked_starts_max_price_result.get(0)
+
+    if offset >= pivots.size() // out of pivots
+        interrupt := 'out of pivots'
+    else 
+        start_pivot = pivots.get(offset)
+        if start_pivot.point.index < max_age_idx // out of bar range
+            interrupt := 'out of bar range'
+        else if start_offset % 2 == offset % 2 // point in direction
+            if not na(starts_max_price) and start_pivot.exceeded_by(starts_max_price) // pattern broken by intermediate pivot
+                interrupt := na
+                // just skip
+            else
+                pivot := start_pivot
+                checked_starts_max_price_result.set(0, 
+                 na(starts_max_price) ? pivot.point.price
+                 : pivot.direction() == 1 ? math.max(starts_max_price, pivot.point.price)
+                 : math.min(starts_max_price, pivot.point.price)
+                 )
+        else if not start_pivot.exceeded_by(end_pivot) // checking intermediate pivot, same direction as end (not start), if pattern broken by intermediate pivot
+            interrupt := 'pattern broken by intermediate pivot exceeded by endpoint'
+
+    [pivot, interrupt]
+
+method check_target_ranges_overlap(Pattern this, float priceX, float priceA, float priceB, float priceC, int dir) =>
+    mins = array.new<float>()
+    maxs = array.new<float>()
+    
+    if not na(this.BCDmin) and not na(this.BCDmax)
+        mins.push(PA.target_ratio_price(priceB, priceC, this.BCDmin))
+        maxs.push(PA.target_ratio_price(priceB, priceC, this.BCDmax))
+    if not na(this.XADmin) and not na(this.XADmax)
+        mins.push(PA.target_ratio_price(priceX, priceA, this.XADmin))
+        maxs.push(PA.target_ratio_price(priceX, priceA, this.XADmax))   
+    if not na(this.XBDmin) and not na(this.XBDmax)
+        mins.push(PA.target_ratio_price(priceX, priceB, this.XBDmin))
+        maxs.push(PA.target_ratio_price(priceX, priceB, this.XBDmax))   
+    if not na(this.XCDmin) and not na(this.XCDmax)
+        mins.push(PA.target_ratio_price(priceX, priceC, this.XCDmin))
+        maxs.push(PA.target_ratio_price(priceX, priceC, this.XCDmax))   
+
+    // target area validation
+    min = dir == 1 ? mins.min() : mins.max()
+    max = dir == 1 ? maxs.max() : maxs.min()
+    targets_overlap = dir == 1 ? min >= max : min <= max
+    targets_overlap := targets_overlap and min > 0 // ensure we don't target values under 0
+
+    [targets_overlap, min, max, mins, maxs]
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#endregion                               PATTERN
+//////////////////////////////////////////////////////////////////////////////////////
+    
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#region                               PATTERN CONFIG
+//////////////////////////////////////////////////////////////////////////////////////
+
+//@type allows control of pattern plotting shape and colors, as well as settings for hiding overlapped patterns etc.
+export type Config
+    D.LineArgs line_bull
+    D.LineArgs line_bear
+    D.LineArgs line_bull_live
+    D.LineArgs line_bear_live
+    color fill_bull
+    color fill_bear
+    color fill_muted
+    color color_muted
+    D.LabelArgs label_args_name_up
+    D.LabelArgs label_args_name_down
+    D.LabelArgs label_args_xabcd_down
+    D.LabelArgs label_args_xabcd_up
+    D.LineArgs label_args_retrace_line
+    D.LabelArgs retrace_down
+    D.LabelArgs retrace_up
+    D.LineArgs line_Dtarget
+    D.LineArgs line_args_completion
+    D.LineArgs line_args_tp1
+    D.LineArgs line_args_tp2
+    D.LineArgs line_args_sl
+    D.LabelArgs label_args_completion
+    D.LabelArgs label_args_tp1
+    D.LabelArgs label_args_tp2
+    D.LabelArgs label_args_sl
+    D.LabelArgs label_args_terminal_bar_up
+    D.LabelArgs label_args_terminal_bar_down
+    string terminal_bar_up_char = '▲'
+    string terminal_bar_down_char = '▼'
+    bool draw_point_labels = true
+    bool draw_retracements = true
+    bool draw_target_range = true
+    bool draw_trade_levels = true
+    bool draw_trade_levels_live = true
+    bool keep_failed_patterns = false
+
+
+//@function generates a complete Config for Pattern plotting from minimal information and defaults.
+//@param pattern_line_args (default: na)
+//@param pattern_point_args (default: na)
+//@param name_label_args (default: na)
+//@param retracement_line_args (default: na)
+//@param retracement_label_args (default: na)
+//@param line_args_Dtarget (default: na)
+//@param line_args_completion (default: na)
+//@param line_args_tp1 (default: na)
+//@param line_args_tp2 (default: na)
+//@param line_args_sl (default: na)
+//@param label_args_completion (default: na)
+//@param label_args_tp1 (default: na)
+//@param label_args_tp2 (default: na)
+//@param label_args_sl (default: na)
+//@param label_terminal (default: na)
+//@param label_terminal_up_char (default: '▲',)
+//@param label_terminal_down_char (default: '▼',)
+//@param color_bull (default: color.green)
+//@param color_bear (default: color.red)
+//@param color_muted (default: color.gray)
+//@param fill_opacity (default: 15)
+//@param draw_point_labels (default: true)
+//@param draw_retracements (default: true)
+//@param draw_target_range (default: true)
+//@param draw_levels (default: true)
+//@param hide_shorter_if_shared_legs_greater_than_max (default: true)
+//@param hide_engulfed_pattern (default: false)
+//@param hide_engulfed_pattern_of_same_type (default: true)
+//@param hide_longer_pattern_with_same_X (default: false)
+//@param mute_previous_pattern_when_next_overlaps (default: false)
+export create_config(D.LineArgs pattern_line_args = na, D.LabelArgs pattern_point_args = na, D.LabelArgs name_label_args = na, D.LineArgs retracement_line_args = na, D.LabelArgs retracement_label_args = na, D.LineArgs line_args_completion = na, D.LineArgs line_args_tp1 = na, D.LineArgs line_args_tp2 = na, D.LineArgs line_args_sl = na, D.LabelArgs label_args_completion = na, D.LabelArgs label_args_tp1 = na, D.LabelArgs label_args_tp2 = na, D.LabelArgs label_args_sl = na, D.LabelArgs label_terminal = na, string label_terminal_up_char = '▲', string label_terminal_down_char = '▼', color color_bull = color.green, color color_bear = color.red, color color_muted = color.gray, int fill_opacity = 15, bool draw_point_labels = false, bool draw_retracements = false, bool draw_target_range = false, D.LineArgs line_args_Dtarget = na, bool draw_trade_levels = false, bool draw_trade_levels_live = false, bool keep_failed_patterns = false) =>
+    Config.new(
+     pattern_line_args.copy().set_line_color(color_bull),
+     pattern_line_args.copy().set_line_color(color_bear),
+     pattern_line_args.copy().set_line_color(color_bull).set_style(line.style_dashed),
+     pattern_line_args.copy().set_line_color(color_bear).set_style(line.style_dashed),
+     color.new(color_bull, 100 - fill_opacity),
+     color.new(color_bear, 100 - fill_opacity),
+     color.new(color_muted, 100 - 5),  // muted fills
+     color.new(color_muted, 100 - 30), // muted lines
+     name_label_args.copy().set_style(label.style_label_up).set_txt_color(color_bull),
+     name_label_args.copy().set_style(label.style_label_down).set_txt_color(color_bear),
+     pattern_point_args.copy().set_style(label.style_label_down),
+     pattern_point_args.copy().set_style(label.style_label_up),
+     retracement_line_args,
+     retracement_label_args.copy().set_style(label.style_label_down),
+     retracement_label_args.copy().set_style(label.style_label_up),
+     line_args_Dtarget,
+     line_args_completion,
+     line_args_tp1,
+     line_args_tp2,
+     line_args_sl,
+     label_args_completion,
+     label_args_tp1,
+     label_args_tp2,
+     label_args_sl,
+     label_terminal.copy().set_txt_color(color_bull),
+     label_terminal.copy().set_txt_color(color_bear),
+     label_terminal_up_char,
+     label_terminal_down_char,
+     draw_point_labels,
+     draw_retracements, 
+     draw_target_range,
+     draw_trade_levels,
+     draw_trade_levels_live,
+     keep_failed_patterns
+     )
+
+export type Filters
+    bool filter_outside_zone = false
+    bool filter_low_potential = false
+    bool filter_longer_pattern_with_same_X = false
+    bool filter_shorter_if_shared_legs_greater_than_max = false
+    int shared_legs_max = 5
+    bool mute_previous_pattern_when_next_overlaps = false
+    bool filter_engulfed_pattern = false
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#endregion                               PATTERN CONFIG
+//////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#region                               PATTERN MATCH
+//////////////////////////////////////////////////////////////////////////////////////
+
+//@type holds all information on a Pattern and a successful match in the chart. Includes XABCD pivot points as well as all D.Line and D.Label objects to draw it
+export type Match
+    Pattern pattern
+    int id_num
+    string id
+    string name
+    P.Pivot X
+    P.Pivot A
+    P.Pivot B
+    P.Pivot C
+    float Dmin_price = na
+    float Dmax_price = na
+    P.Pivot D = na
+    P.Pivot Dmin = na
+    P.Pivot Dmax = na
+    D.Line[] static_lines = na
+    D.Line[] dynamic_lines = na // always update second point (idx:1)
+    D.Line[] trade_lines = na
+    RL.RetracementLabel[] static_labels = na
+    RL.RetracementLabel[] dynamic_labels = na // always update second point (idx:1)
+    D.Label[] dynamic_point_labels = na // always update second point (idx:1)
+    D.Label[] static_point_labels = na // 0:X , 1:A , 2:B , 3:C , 4:D , 5:Dmin , 6:Dmax // alwasy update last 3 as long as not is_complete / not is_expired / not is_invalidated
+    D.Label[] trade_labels = na
+    
+    D.LineFill[] fills = na
+    D.Label name_label = na
+
+    float hhll = na
+    float price_offset_B = na
+    float tp1 = na
+    float tp2 = na
+    float sl = na // a.k.a HOP / LRP
+    int terminal_bar_idx = na
+    int terminal_bar_time = na
+
+    int length = 0
+    float height = 0
+    float XB_BD_ratio = 0
+    bool D_is_high_potential = false
+
+    bool is_complete = false
+    bool is_expired = false
+    bool is_invalidated = false
+    bool is_filtered = false
+    bool is_filtered_muted = false
+    bool is_hidden = false
+    bool is_muted = false
+
+    map<int,string> overlapped_by_engulfing = na // helps cut down plotting iterations
+    map<int,string> overlapped_by_shared_legs = na // helps cut down plotting iterations
+    map<int,string> overlapped_by_next = na // mute due to overlap by next pattern
+    map<int,string> overlapped_by_same_origin = na // in case we hide engulfed as well as longer patterns with same origin, then don't hide this engulfed pattern
+    map<int,string> overlapping_by_engulfing = na // helps cut down plotting iterations
+    map<int,string> overlapping_by_shared_legs = na // in case we hide engulfed as well as longer patterns with same origin, then don't hide this engulfed pattern
+    map<int,string> overlapping_by_next = na // mute due to overlap by next pattern
+    map<int,string> overlapping_by_same_origin = na // in case we hide engulfed as well as longer patterns with same origin, then don't hide this engulfed pattern
+
+    bool is_valid_length = false
+    bool is_valid_XB_BD_ratio = false
+    bool is_valid_C_not_exceeded = false
+
+//@function return the direction of this Match, determined by the C Point of this pattern
+export method direction(Match this) =>
+    na(this) ? 0 : na(this.C) ? 0 : this.C.direction()
+
+//@function return the length of this pattern, determined by the distance between X and D point
+export method length(Match this) =>
+    na(this) ? 0 : na(this.X) or na (this.D) ? 0 : this.D.point.index - this.X.point.index
+
+//@function return the height of this pattern, determined by the distance between the biggest distance between A/C and X/D
+export method height(Match this) =>
+    na(this) ? 0 : na(this.X) or na (this.A) or na (this.C) or na (this.D) ? 0 : 
+     this.direction() == 1 
+     ? math.max(this.A.point.price, this.C.point.price) - math.min(this.X.point.price, this.D.point.price) 
+     : math.max(this.X.point.price, this.D.point.price) - math.min(this.A.point.price, this.C.point.price)
+
+//@function returns true if not complete, not expired and not invalidated
+export method is_forming(Match this) =>
+    na(this) ? false : not this.is_complete and not this.is_expired and not this.is_invalidated
+
+//@function return a string representation of this Match
+method tostring(Match this) =>
+    na(this) ? 'null' : '{' + str.format('"id": "{0}", "Dmin_price": {1}, "Dmax_price": {2}, "is_complete": {3}, "is_expired": {4}, "is_invalidated": {5}', this.id, this.Dmin_price, this.Dmax_price, this.is_complete, this.is_expired, this.is_invalidated) + '}'
+
+//@function return a string representation of all Matches in this map
+export method tostring(map<string, Match> this) =>
+    if na(this)
+        'null'
+    else
+        result = array.new<string>()
+        for i in this.values()
+            result.push(i.tostring())
+        '[' + result.join(', ') + ']'
+
+
+calc_XB_BD_ratio(idx_X, idx_B, idx_D) =>
+    (idx_D - idx_B) / (idx_B - idx_X)
+
+method XB_BD_ratio(Match this) =>
+    na(this) ? 0 : calc_XB_BD_ratio (this.X.point.index, this.B.point.index, this.D.point.index)
+
+
+method remove_na(array<string> id) =>
+    for i = id.size()-1 to 0
+        if na(id.get(i))
+            id.remove(i)
+    id
+
+
+export method status(Match match) =>
+    reasons = array.from(
+     match.is_complete                           ? 'complete'           : na,
+     match.is_expired                            ? 'expired'            : na,
+     match.is_invalidated                        ? 'ivalidated:'        : na,
+     not match.is_valid_C_not_exceeded           ? 'C_exceeded'         : na,
+     match.is_filtered                           ? 'filtered'           : na,
+     match.is_filtered_muted                     ? 'filtered (muted)'   : na,
+     match.is_hidden                             ? 'hidden:'            : na,
+     match.is_muted                              ? 'muted:'             : na,
+     match.overlapped_by_engulfing.size() > 0    ? str.format('overlapped by engulfing: {0}', array.join(match.overlapped_by_engulfing.keys(), '|')) : na,
+     match.overlapped_by_shared_legs.size() > 0  ? str.format('overlapped by shared legs: {0}', array.join(match.overlapped_by_shared_legs.keys(), '|')) : na,
+     match.overlapped_by_next.size() > 0         ? str.format('overlapped by next: {0}', array.join(match.overlapped_by_next.keys(), '|')) : na,
+     match.overlapped_by_same_origin.size() > 0  ? str.format('overlapped by same origin: {0}', array.join(match.overlapped_by_same_origin.keys(), '|')) : na,
+     match.overlapping_by_engulfing.size() > 0   ? str.format('overlapping by engulfing: {0}', array.join(match.overlapping_by_engulfing.keys(), '|')) : na,
+     match.overlapping_by_shared_legs.size() > 0 ? str.format('overlapping by shared legs: {0}', array.join(match.overlapping_by_shared_legs.keys(), '|')) : na,
+     match.overlapping_by_next.size() > 0        ? str.format('overlapping by next: {0}', array.join(match.overlapping_by_next.keys(), '|')) : na,
+     match.overlapping_by_same_origin.size() > 0 ? str.format('overlapping by same origin: {0}', array.join(match.overlapping_by_same_origin.keys(), '|')) : na,
+     not match.is_valid_length                   ? str.format('length ({0})', match.length) : na,
+     not match.is_valid_XB_BD_ratio              ? str.format('XB_BD ({0})', match.XB_BD_ratio) : na
+     )
+
+    reasons.remove_na()
+
+    reason = ''
+    if reasons.size() > 0
+        reason := str.format('status: ({0})', array.join(reasons, ', '))
+    else
+        reason := 'status: (forming)'
+    reason
+
+
+//@function remove complete and expired Matches from this map
+export remove_complete_and_expired(map<string, Match> this) =>
+    if na(this) ? false : this.size() > 0
+        for match_id in this.keys()
+            match = this.get(match_id)
+            if match.is_complete or match.is_expired
+                this.remove(match_id)
+    this
+
+//@function add a match to this map, with it's id as key, silent skip if this or item is na
+export method add(map<string, Match> this, Match item) =>
+    if not na(this) and not na(item)
+        this.put(item.id, item)
+    this
+
+//@function remove Matches from this map that fit the parameter criteria
+//@param when_pattern_len_exceeds (default: na) remove a pattern if it's longer than this value
+//@param when_older_than_idx (default: na) remove a pattern if it's X bar_index is less than this value
+//@param when_BD_becomes_unproportional_ratio (default: na) remove a pattern if it's BCD part becomes unproportionally bigger than its XAB part
+//@param when_completed (default: false) remove a pattern if it is completed
+//@param when_invalidated (default: false) remove a pattern if it is invalidated (by D exceeding C in direction of C)
+//@param when_engulfed_by_completed (default: false) remove a pattern if it is engulfed by another completed pattern
+//@param when_overlapped_by_shared_legs (default: false) remove a pattern if it is overlapped by another, that shares a certain amount of legs with it
+//@param handled_matches_buffer (default: na) all patterns that were removed will be added to this buffer (if not passed from caller, nothing happens)
+//@param handled_completed_buffer (default: na) completed patterns will also be added to this buffer (if not passed from caller, nothing happens)
+//@param invalid_buffer (default: na) invalidated patterns will also be added to this buffer (if not passed from caller, nothing happens)
+method cleanup(map<string, Match> matches, int when_pattern_len_exceeds = na, int when_older_than_idx = na, bool when_completed = false, bool when_invalidated = false, bool when_filtered = false, map<string, Match> handled_matches_buffer = na, map<string, Match> handled_completed_buffer = na, map<string, Match> invalid_buffer = na, bool debug = false) =>  
+    if not na(matches)
+        for match_id in matches.keys()
+            match = matches.get(match_id)
+            completed = when_completed and match.is_complete
+            expired = na(when_older_than_idx) ? false : match.X.point.index < when_older_than_idx
+            exceeded = na(when_pattern_len_exceeds) ? false : match.D.point.index - match.X.point.index > when_pattern_len_exceeds
+            invalidated = not when_invalidated ? false : match.is_invalidated
+            filtered = not when_filtered ? false : match.is_filtered
+
+            if invalidated
+                inv = matches.remove(match_id)
+                handled_matches_buffer.add(inv)
+                invalid_buffer.add(inv)
+                if debug
+                    log.info(str.format('cleaned up match {0} (invalidated)', match_id, invalidated))
+
+            else if filtered
+                handled_matches_buffer.add(matches.remove(match_id))                
+                if debug
+                    log.info(str.format('cleaned up match {0} (filtered)', match_id))
+
+            else if completed
+                complete_match = matches.remove(match_id)
+                handled_completed_buffer.add(complete_match)
+                handled_matches_buffer.add(complete_match)
+                if debug
+                    log.info(str.format('cleaned up match {0} (completed)', match_id))
+
+            else if expired or exceeded
+                exp = matches.remove(match_id)
+                exp.is_expired := true
+                handled_matches_buffer.add(exp)
+                invalid_buffer.add(exp)
+                if debug
+                    log.info(str.format('cleaned up match {0} (expired: {1}, exceeded: {2})', match_id, expired, exceeded))
+    matches
+
+method update_same_origin(Match this, Match other, bool enabled = false, bool debug = false) =>
+    // PERFORMANCE OPTIMIZATION (less secure)
+    // na(this) or na(next) ? false : 
+    if not enabled ? false : this.X.point.index == other.X.point.index
+        if this.D.point.index < other.D.point.index and not this.is_filtered
+            other.is_filtered := true
+            this.overlapped_by_same_origin.put(other.id_num, other.id)
+            other.overlapping_by_same_origin.put(this.id_num, this.id)
+            if debug
+                log.info('match filtered {0} overlapped by same origin (other) {1}', this.id, other.id)
+        else if other.D.point.index < this.D.point.index and not other.is_filtered
+            this.is_filtered := true
+            other.overlapped_by_same_origin.put(this.id_num, this.id)
+            this.overlapping_by_same_origin.put(other.id_num, other.id)
+            if debug
+                log.info('match (other) filtered {0} overlapped by same origin {1}', other.id, this.id)
+ 
+method update_overlapped_by_shared_legs(Match this, Match other, int max_shared_legs = 1, bool enabled = false, bool debug = false) =>
+    // PERFORMANCE OPTIMIZATION (less secure)
+    // if not na(this) and not na(other)
+
+    if not enabled ? false : this.id != other.id and this.is_complete == other.is_complete and not this.is_filtered and not other.is_filtered
+        shared_legs = 
+         (this.X.point.index == other.X.point.index and this.A.point.index == other.A.point.index ? 1 : 0) +
+         (this.A.point.index == other.A.point.index and this.B.point.index == other.B.point.index ? 1 : 0) +
+         (this.B.point.index == other.B.point.index and this.C.point.index == other.C.point.index ? 1 : 0) +
+         (this.C.point.index == other.C.point.index and this.D.point.index == other.D.point.index ? 1 : 0)
+
+        if shared_legs > max_shared_legs
+            overlapped = math.sign(this.length - other.length) // if -1 this is overlapped, 0 equal, 1 other
+            if overlapped == 0 
+                overlapped := math.sign(this.height - other.height) // if -1 this is overlapped, 0 equal, 1 other
+                if overlapped == 0
+                    overlapped := math.sign(other.price_offset_B - this.price_offset_B)
+            
+            if overlapped < 0
+                this.is_filtered := true
+                this.overlapped_by_shared_legs.put(other.id_num, other.id)
+                other.overlapping_by_shared_legs.put(this.id_num, this.id)
+                if debug
+                    log.info('match filtered ({2} shared legs) {0} overlapped by (other) {1}', other.id, this.id, shared_legs)
+
+            else if overlapped > 0
+                other.is_filtered := true
+                other.overlapped_by_shared_legs.put(this.id_num, this.id)
+                this.overlapping_by_shared_legs.put(other.id_num, other.id)
+                if debug
+                    log.info('match (other) filtered ({2} shared legs) {0} overlapped by {1}', this.id, other.id, shared_legs)
+
+            shared_legs
+        else
+            0
+    else
+        0
+
+method update_overlapped_by_next(Match this, Match next, bool enabled = false, bool debug = false) =>
+    // PERFORMANCE OPTIMIZATION (less secure)
+    // na(this) or na(next) ? false : 
+
+    if enabled and not this.is_filtered and not next.is_filtered and this.is_complete and next.is_complete
+        if not this.is_filtered_muted and this.X.point.index < next.X.point.index and next.X.point.index < this.D.point.index and this.D.point.index < next.D.point.index
+            this.is_filtered_muted := true // MUTED
+            this.overlapped_by_next.put(next.id_num,next.id)
+            next.overlapping_by_next.put(this.id_num, this.id)
+            if debug
+                log.info('match filtered {0} overlapped by next (other) {1}', this.id, next.id)
+
+        else if not next.is_filtered_muted and next.X.point.index < this.X.point.index and this.X.point.index < next.D.point.index and next.D.point.index < this.D.point.index
+            next.is_filtered_muted := true // MUTED
+            next.overlapped_by_next.put(this.id_num, this.id)
+            this.overlapping_by_next.put(next.id_num, next.id)
+            if debug
+                log.info('match (other) filtered {0} overlapped by next {1}', next.id, this.id)
+                    
+
+//@function checks if this Match is engulfed by the other
+method update_overlapped_by_engulfing (Match this, Match other, bool enabled = false, bool debug = false) =>
+
+    // PERFORMANCE OPTIMIZATION (less secure)
+    // if na(this) or na(other)
+    //     false
+    // else 
+    same_start_and_end = this.X.point.index != other.X.point.index and this.D.point.index == other.D.point.index
+    within_other_pattern = other.X.point.index <= this.X.point.index and this.D.point.index <= other.D.point.index
+    BC_shorter = math.sign((this.C.point.index - this.B.point.index) - (other.C.point.index - other.B.point.index))
+
+    if enabled and this.is_complete == other.is_complete and not this.is_filtered and not other.is_filtered // same state
+        if this.X.point.index <= other.X.point.index and other.D.point.index <= this.D.point.index // other within this    
+         and (
+         not same_start_and_end ? true
+         : this.height > other.height ? true
+         : this.height == other.height and BC_shorter > 0 ? true // other BC shorter
+         : this.id_num < other.id_num
+         )         
+            other.is_filtered := true
+            other.overlapped_by_engulfing.put(this.id_num, this.id)
+            this.overlapping_by_engulfing.put(other.id_num, other.id)
+            if debug
+                log.info('match (other) filtered {0} overlapped by engulfing {1}', other.id, this.id)
+
+        else if other.X.point.index <= this.X.point.index and this.D.point.index <= other.D.point.index // this within other
+         and (
+         not same_start_and_end ? true
+         : other.height > this.height ? true
+         : other.height == this.height and BC_shorter < 0 ? true // this BC shorter
+         : other.id_num < this.id_num
+         )  
+            this.is_filtered := true
+            this.overlapped_by_engulfing.put(other.id_num, other.id)
+            other.overlapping_by_engulfing.put(this.id_num, this.id)
+            if debug
+                log.info('match filtered {0} overlapped by engulfing (other) {1}', this.id, other.id)
+
+     
+method update_overlapped(Match match, Match other, Filters filters, bool debug = false) =>
+
+    if match.id != other.id
+
+// TODO log before and after why matches get filtered
+        match.update_same_origin(other, filters.filter_longer_pattern_with_same_X, debug)
+        match.update_overlapped_by_shared_legs(other, filters.shared_legs_max, filters.filter_shorter_if_shared_legs_greater_than_max, debug)
+        match.update_overlapped_by_engulfing(other, filters.filter_engulfed_pattern, debug)
+        
+        match.update_overlapped_by_next(other, filters.mute_previous_pattern_when_next_overlaps, debug)
+        
+
+method update_overlapped_optimized(map<string, Match> this, string[] tracking_match_ids, int match_idx, Match match, Filters filters, bool debug = false) =>
+    
+    // PERFORMANCE OPTIMIZATION (less secure)
+    // if not na(this) and not na(match)
+    size = tracking_match_ids.size()
+    if match_idx + 1 < size
+            
+        for i = match_idx + 1 to size - 1 // this will only cross check each match with every other once, by checking only overlaps with indexes higher than the own and updating other's overlap status on check
+            other_id = tracking_match_ids.get(i)
+            other = this.get(other_id)
+            match.update_overlapped(other, filters, debug)
+
+method update_overlapped(map<string, Match> this, Match match, Filters filters, bool debug = false) =>
+    // PERFORMANCE OPTIMIZATION (less secure)
+    // if not na(this) and not na(match)
+    for [other_id, other] in this
+        match.update_overlapped(other, filters, debug)
+        
+
+method match(Pattern pattern, Setup setup, bool debug = false) =>
+    Match match = na
+
+    P.Pivot X = setup.X
+    P.Pivot A = setup.A
+    P.Pivot B = setup.B
+    P.Pivot C = setup.C
+
+    int dir = C.direction()
+    string prefix = dir == 1 ? "Bullish" : "Bearish"      
+    string name = prefix + ' ' + pattern.name
+    Pattern tolerances = na(pattern.tolerances) ? pattern : pattern.tolerances
+
+    float priceX = X.point.price    
+    float priceA = A.point.price
+    float priceB = na
+    float priceC = na
+    bool XAB_price_inRange = false
+    bool ABC_price_inRange = false
+
+    float priceB_min = PA.target_ratio_price(priceX, priceA, tolerances.XABmin)
+    float priceB_max = PA.target_ratio_price(priceX, priceA, tolerances.XABmax)
+    if pattern.XABmin != pattern.XABmax // explicit retracement -> therefore price range for B
+        priceB := B.point.price
+        XAB_price_inRange := PA.in_range(priceB, priceB_min, priceB_max)
+    else // explicit retracement for B -> whole candle allowed +- tolerance above/below (OUR USE CASE)
+        priceB := PA.target_ratio_price(priceX, priceA, pattern.XABmin)
+        // XAB_price_inRange := range_overlap(priceB_min, priceB_max, B.candle.l, B.candle.h)
+        XAB_price_inRange := PA.in_range(priceB, priceB_min, priceB_max) and PA.in_range(B.point.price, priceB_min, priceB_max) 
+
+    float priceC_min = PA.target_ratio_price(priceA, B.point.price, tolerances.ABCmin)
+    float priceC_max = PA.target_ratio_price(priceA, B.point.price, tolerances.ABCmax)
+    float priceC_ideal_min = PA.target_ratio_price(priceA, priceB, tolerances.ABCmin)
+    float priceC_ideal_max = PA.target_ratio_price(priceA, priceB, tolerances.ABCmax)
+    if pattern.ABCmin != pattern.ABCmax // explicit retracement -> therefore price range for C (OUR USE CASE)
+        priceC := C.point.price
+        ABC_price_inRange := PA.in_range(priceC, priceC_min, priceC_max) and PA.in_range(priceC, priceC_ideal_min, priceC_ideal_max)
+    else // explicit retracement for C -> whole candle allowed +- tolerance above/below
+        priceC := PA.target_ratio_price(priceA, B.point.price, pattern.ABCmin)
+        // ABC_price_inRange := range_overlap(priceC_min, priceC_max, C.candle.l, C.candle.h)
+        ABC_price_inRange := PA.in_range(priceC, priceC_min, priceC_max) and PA.in_range(priceC, priceC_ideal_min, priceC_ideal_max)
+
+    // retracements must be calculated here, as they might be off for different pattern types
+    float XAB = PA.retracement_ratio(X.point.price, A.point.price, priceB)
+    float ABC = PA.retracement_ratio(A.point.price, priceB, priceC)
+    bool XAB_inRange = not na(pattern.XABzones) ? pattern.XABzones.contains_ratio(XAB) : PA.in_range(XAB, tolerances.XABmin, tolerances.XABmax)
+    bool ABC_inRange = not na(pattern.ABCzones) ? pattern.ABCzones.contains_ratio(ABC) : PA.in_range(ABC, tolerances.ABCmin, tolerances.ABCmax)
+
+
+    // retracements must be calculated here, as they might be off for different pattern types
+    bool xabc_match = XAB_inRange and ABC_inRange and XAB_price_inRange and ABC_price_inRange// Design decision: using the ideal price level (priceB) as origin for allowed retracement range of C, not the actual price (B.point.price)
+
+    if xabc_match
+        // check possible D within all target ranges
+        [targets_overlap, Dmin_price, Dmax_price, mins, maxs] = tolerances.check_target_ranges_overlap(priceX, priceA, priceB, C.point.price, dir)
+
+        // PATTERN FOUND, CHECKS PASSED
+        if targets_overlap
+            [id_num, pattern_id] = pattern_id(prefix+'_'+pattern.name,setup)
+            match := Match.new(pattern, id_num, pattern_id , name,
+             X.copy(),
+             A.copy(),
+             pattern.XABmin != pattern.XABmax ? B.copy() : P.Pivot.new(chart.point.new(B.point.time, B.point.index, priceB), candle = B.candle),
+             pattern.ABCmin != pattern.ABCmax ? C.copy() : P.Pivot.new(chart.point.new(C.point.time, C.point.index, priceC), candle = C.candle), 
+             Dmin_price, Dmax_price)
+            match.A.update_relation(match.X)
+            match.B.update_relation(match.A)
+            match.C.update_relation(match.B)
+            candle = D.create_candle()
+            match.D := C.create_next(close, candle)
+            match.Dmin := C.create_next(Dmin_price, candle)
+            match.Dmax := C.create_next(Dmax_price, candle)
+            match.hhll := (match.A.exceeded_by(match.C) ? match.C : match.A).point.price
+            match.price_offset_B := math.abs(B.point.price - priceB)
+            match.static_lines := array.new<D.Line>(0)
+            match.dynamic_lines := array.new<D.Line>(0)
+            match.trade_lines := array.new<D.Line>(0)
+            match.static_labels := array.new<RL.RetracementLabel>(0)
+            match.dynamic_labels := array.new<RL.RetracementLabel>(0)
+            match.trade_labels := array.new<D.Label>(0)
+            match.static_point_labels := array.new<D.Label>(0)
+            match.dynamic_point_labels := array.new<D.Label>(0)
+            match.fills := array.new<D.LineFill>(0)
+            match.overlapped_by_engulfing := map.new<int,string>()
+            match.overlapped_by_shared_legs := map.new<int,string>()
+            match.overlapped_by_next := map.new<int,string>()
+            match.overlapped_by_same_origin := map.new<int,string>()
+            match.overlapping_by_engulfing := map.new<int,string>()
+            match.overlapping_by_shared_legs := map.new<int,string>()
+            match.overlapping_by_next := map.new<int,string>()
+            match.overlapping_by_same_origin := map.new<int,string>()
+            
+            if debug
+                // label.new(bar_index, close, str.format('XABC\n{0}', match.id.replace_all('_','\n')), textcolor = color.white)
+                log.info(str.format('Detected XABC {0} | mins: {1} | maxs: {2} | Dmin_price: {3} | Dmax_price: {4}', match.id, mins, maxs, Dmin_price, Dmax_price))
+        else if not targets_overlap and debug
+            log.info(str.format('{0} {1} - target range check failed | mins: {2} | maxs: {3} | Dmin_price: {4} | Dmax_price: {5}', setup.id, name, mins, maxs, Dmin_price, Dmax_price))        
+    else if debug
+        msg = str.format('{0} - pattern match failed', setup.id +' '+name)
+
+        if not XAB_price_inRange
+            msg += str.format('| B price ({0}) not in range ({1}-{2}) for tolerance range({3}-{4})', B.point.price, priceB_min, priceB_max, tolerances.XABmin, tolerances.XABmax)
+        if not ABC_price_inRange
+            msg += str.format('| C price ({0}) not in range ({1}-{2})', C.point.price, priceC_min, priceC_max)
+        if not XAB_inRange
+            msg += str.format('| XAB ({0}) not in range ({1}-{2})', XAB, tolerances.XABmin, tolerances.XABmax)
+        if not ABC_inRange
+            msg += str.format('| ABC ({0}) not in range ({1}-{2})', ABC, tolerances.ABCmin, tolerances.ABCmax)
+        log.warning(msg)   
+    match
+
+
+find_xabc_patterns(P.Pivot[] pivots, Pattern[] patterns, int max_age_idx, simple int detect_dir = 0, simple int pattern_minlen = 30, simple int pattern_maxlen = 300, simple float max_XD_BD_ratio = 5, simple int max_sub_waves = 2, bool debug = false) =>
+    map<string, Match> matches = map.new<string, Match>()
+    var max_sub_offset = 2 * max_sub_waves
+    int count = pivots.size()
+
+    if count >= 5
+        bool interrupt = false
+
+        int offset_C = 1
+        P.Pivot C = pivots.get(offset_C)
+        int dir = C.direction()
+        
+        if detect_dir == 0 or dir == detect_dir           
+            var checked_Bs_max_price_result = array.new<float>(1,na)
+            var checked_As_max_price_result = array.new<float>(1,na)
+            var checked_Xs_max_price_result = array.new<float>(1,na)
+            checked_Bs_max_price_result.set(0,na)
+            checked_As_max_price_result.set(0,na)
+            checked_Xs_max_price_result.set(0,na)
+            possible_XABC_setups = array.new<Setup>()
+
+            // find all valid XABC Pattern setups that don't violate pattern rules
+            for offset_B = offset_C + 1 to offset_C + 1 + max_sub_offset // go through all Bs
+                [B, interrupt_B] = check_pattern_point(pivots, offset_C + 1, offset_B, max_age_idx, checked_Bs_max_price_result, C)
+                if not na(interrupt_B)
+                    if debug
+                        log.info(str.format('found C at offset {0}({1})\ninterrupt B at offset {2}: {3}', offset_C, C.point.index, offset_B, interrupt_B))
+                    break
+                if not na(B)
+                    if debug
+                        log.info(str.format('found C at offset {0}({1})\nfound B at offset {2}({3})', offset_C, C.point.index, offset_B, B.point.index))
+                    // checked_As.clear()           
+                    for offset_A = offset_B + 1 to offset_B + 1 + max_sub_offset // go through all As
+                        [A, interrupt_A] = check_pattern_point(pivots, offset_B + 1, offset_A, max_age_idx, checked_As_max_price_result, B)
+                        if not na(interrupt_A)
+                            if debug
+                                log.info(str.format('interrupt A at offset {0}: {1}', offset_A, interrupt_A))
+                            break
+                        if not na(A)
+                            if debug
+                                log.info(str.format('found A at offset {0}({1}) -> ABC:{2}', offset_A, A.point.index, PA.retracement_ratio(A.point.price, B.point.price, C.point.price)))
+                            // checked_Xs.clear()
+                            for offset_X = offset_A + 1 to offset_A + 1 + max_sub_offset  // go through all Xs
+                                [X, interrupt_X] = check_pattern_point(pivots, offset_A + 1, offset_X, max_age_idx, checked_Xs_max_price_result, A)
+                                if not na(interrupt_X)
+                                    if debug
+                                        log.info(str.format('interrupt X at offset {0}: {1}', offset_X, interrupt_X))
+                                    break
+                                if not na(X)
+                                    if debug
+                                        log.info(str.format('found X at offset {0}({1}) -> XAB:{2}', offset_X, X.point.index, PA.retracement_ratio(X.point.price, A.point.price, B.point.price)))
+
+                                    XD_Bbi_ratio = calc_XB_BD_ratio(X.point.index, B.point.index, bar_index)
+                                    if XD_Bbi_ratio <= max_XD_BD_ratio
+                                        possible_XABC_setups.push(Setup.new(setup_id(X,A,B,C),X,A,B,C))
+                                    else if debug // already too big
+                                        log.info(str.format('XB/BD ratio {0} already too big (>{1})', XD_Bbi_ratio, max_XD_BD_ratio))
+
+                                
+                                    
+            // check each of these setups for match with any of our patterns
+            for possible_XABC_setup in possible_XABC_setups
+                for pattern in patterns
+                    match = pattern.match(possible_XABC_setup, debug)
+                    if not na(match)
+                        matches.put(match.id, match)
+
+
+    matches
+
+
+//@function checks this map of tracking Matches if any of them was completed or invalidated in this iteration. This map is also updated with new XABC Setups as they appear.
+//@param tracking_matches this map of tracking Matches
+//@param zigzag the base ZigZag on which P.Pivot Points used for XABCD are based
+//@param patterns the list of patterns to search for
+//@param max_age_idx the oldest bar_index to consider for new Setups and to remove currently tracking matches respectively
+//@param detect_dir setting to filter detection direction (-1: bearish only, 0: both, 1: bullish only)
+//@param pattern_minlen minimum amount of bars per pattern
+//@param pattern_maxlen maximum amount of bars per pattern
+//@param max_sub_waves (default: 2) maximum up-down movements between two points of XABCD
+//@param max_shared_legs (default: 1) maximum shared legs between two patterns before the shorter one is removed
+//@param max_XB_BD_ratio (default: 5) maximum ratio of BCD compared to XAB part (XAB part should not drag on too long)
+//@param debug (default : false) if true enables logging
+export method update(map<string, Match> tracking_matches, ZZ.Zigzag zigzag, Pattern[] patterns, int max_age_idx, simple int detect_dir, simple int pattern_minlen, simple int pattern_maxlen, simple int max_sub_waves = 2, simple float max_XB_BD_ratio = 5, Filters filters = na, bool debug = false, bool calculation_enabled = true, bool live_detection = false) =>
+    var map<string, Match> handled_matches = map.new<string, Match>() // holds all handled patterns up to max_age_idx that should be ignored when found again by find_xabc_patterns (skip that, now handled by XABC_Setups)
+    var map<string, Match> buffered_completed_matches = map.new<string, Match>() // holds matches completed, that need to be considered when hiding patterns due to being engulfed by patterns starting earlier
+    map<string, Match> just_completed_matches = map.new<string, Match>() // holds matches completed this iteration, for return
+    map<string, Match> just_invalidated_matches = map.new<string, Match>() // holds matches invalidated this iteration, for return
+    var min_XB_BD_ratio = 1/max_XB_BD_ratio
+
+    _filters = not na(filters) ? filters : Filters.new()
+
+    // clear the buffer of expired tracking_matches (they won't be added anymore and it saves us from iterating over them)
+    buffered_completed_matches.cleanup(when_completed = false, when_invalidated = true, when_filtered = true, when_older_than_idx = max_age_idx, handled_matches_buffer = handled_matches, debug = debug)
+
+    // remove completed / expired / invalidated (by pivot exceeding C in same direction)
+    if calculation_enabled and not na(tracking_matches)
+        // find new XABC patterns
+        if zigzag.has_new_pivot()
+            // TODO tracking live pivot was confirmed, ignore as long as there's one that exceeds C??? or there are more than x subwaves in between, or X idx is > max_age_bars
+            new_matches = find_xabc_patterns(zigzag.pivots, patterns, max_age_idx, detect_dir, pattern_minlen, pattern_maxlen, max_XB_BD_ratio, max_sub_waves, debug)
+            for [new_match_id, new_match] in new_matches
+                if not tracking_matches.contains(new_match_id) and not handled_matches.contains(new_match_id)
+                    tracking_matches.put(new_match_id, new_match)
+
+        tracking_matches.cleanup(when_completed = true, when_invalidated = true, when_filtered = true, when_older_than_idx = max_age_idx, when_pattern_len_exceeds = pattern_maxlen, handled_matches_buffer = handled_matches, handled_completed_buffer = buffered_completed_matches, invalid_buffer = just_invalidated_matches, debug = debug)
+
+
+    // every iteration so target lines are drawn and updated as long as they are there
+    candle = D.create_candle(time, time_close, bar_index, open, high, low, close, volume)
+    
+    tracking_match_ids = tracking_matches.keys()
+    size = tracking_match_ids.size()
+    if calculation_enabled and size > 0
+        for match_idx = 0 to size-1
+            match_id = tracking_match_ids.get(match_idx)
+            match = tracking_matches.get(match_id)
+
+            if match.is_forming()
+
+                // pattern length validation
+                candle_in_target_range = PA.range_overlap(match.Dmin_price, match.Dmax_price, low, high)
+                close_in_target_range = PA.in_range(close, match.Dmin_price, match.Dmax_price) 
+                invalidated_by_C_exceeded = match.direction() == 1 ? match.C.exceeded_by(high) or open < match.Dmax_price : match.C.exceeded_by(low) or open > match.Dmax_price
+                just_completed = (candle_in_target_range or close_in_target_range)// and match.is_forming()
+
+                // update dynamic points
+                match.Dmin.point.index := bar_index
+                match.Dmax.point.index := bar_index
+                match.D.point.index := bar_index
+
+                match.Dmin.point.time := time
+                match.Dmax.point.time := time
+                match.D.point.time := time
+                
+                match.D.point.price := not just_completed or close_in_target_range ? close : match.Dmin_price
+                match.D.candle := candle
+                match.length := match.length()
+                match.height := match.height()
+                match.XB_BD_ratio := match.XB_BD_ratio()
+                match.D_is_high_potential := match.D_is_high_potential or match.B.exceeded_by(close) and barstate.isconfirmed
+
+                // for potential,live tracking matches that want to display the trade levels
+                match.tp1 := PA.target_ratio_price(match.hhll, match.Dmin_price, match.pattern.tp1)
+                match.tp2 := PA.target_ratio_price(match.hhll, match.Dmin_price, match.pattern.tp2)
+                match.sl  := PA.target_ratio_price(match.Dmin_price, match.hhll, match.pattern.sl)
+ 
+
+                if invalidated_by_C_exceeded
+                    match.is_invalidated := true
+                    match.is_valid_C_not_exceeded := false
+                    just_invalidated_matches.add(match)
+                    if debug
+                        log.info(str.format('{0} invalidated on C exceeded', match.id))
+
+                else if just_completed or live_detection
+                    // reset state // TODO possibly optimize
+                    match.overlapped_by_engulfing.clear()
+                    match.overlapped_by_shared_legs.clear()
+                    match.overlapped_by_next.clear()
+                    match.overlapped_by_same_origin.clear()
+                    match.overlapping_by_engulfing.clear()
+                    match.overlapping_by_shared_legs.clear()
+                    match.overlapping_by_next.clear()
+                    match.overlapping_by_same_origin.clear()
+
+                    tracking_matches.update_overlapped_optimized(tracking_match_ids, match_idx, match, _filters, debug)
+                    // tracking_matches.update_overlapped(match, max_shared_legs, debug, update_others = false)
+        
+                    if just_completed
+                        match.is_valid_length :=  PA.in_range(match.length, pattern_minlen, pattern_maxlen)
+                        match.is_valid_XB_BD_ratio := PA.in_range(match.XB_BD_ratio, min_XB_BD_ratio, max_XB_BD_ratio)
+
+                        // label.new(bar_index, match.B.point.price, str.format('completing\n{0}\xbbd_ratio: {1}\npatternlen: {2}', match.id, match.XB_BD_ratio, pattern_len), style = label.style_label_down, textcolor = color.white, color = color.new(color.green,50))
+
+                        if match.is_valid_length and match.is_valid_XB_BD_ratio
+                            match.is_complete := true
+
+                            // reset live drawing state
+                            match.is_hidden := false
+                            match.is_muted := false
+                            match.is_filtered := false
+
+                            match.tp1 := PA.target_ratio_price(match.hhll, match.D.point.price, match.pattern.tp1)
+                            match.tp2 := PA.target_ratio_price(match.hhll, match.D.point.price, match.pattern.tp2)
+                            match.sl := PA.target_ratio_price(match.D.point.price, match.hhll, match.pattern.sl)
+                            match.terminal_bar_idx := match.D.point.index
+                            match.terminal_bar_time := match.D.point.time
+
+                            // --- check all muted and hidden buffered completed matches if their condition still applies
+        
+                            // optimize drawing by marking this for removal from the buffered_completed_matches buffer (next round, needs to be hidden this iteration)
+                            if debug
+                                log.info(str.format('update overlapped (buffered complete) {0}', buffered_completed_matches.tostring()))
+                            buffered_completed_matches.update_overlapped(match, _filters, debug)
+
+                            // in case other patterns finished simulteaneously, check them too, also allow them to overlap this match (wasn't in buffered_completed_matches before)
+                            if debug
+                                log.info(str.format('update overlapped (just complete) {0}', just_completed_matches.tostring()))
+                            just_completed_matches.update_overlapped(match, _filters, debug)
+
+                            just_completed_matches.add(match)
+                            // label.new(bar_index, low, str.format('complete\n{0}', match.pattern.name), style = label.style_label_up, textcolor = color.white)
+                        else
+                            match.is_invalidated := true
+                            just_invalidated_matches.add(match)
+
+                            if debug
+                                msg = str.format('{0} invalidated on completion', match.id)
+                                
+                                if not match.is_valid_length
+                                    msg += str.format('| pattern_len {0} not in range ({1}-{2})', match.length, pattern_minlen, pattern_maxlen)
+                                if not match.is_valid_XB_BD_ratio
+                                    msg += str.format('| XB_BD_ratio {0} not in range ({1}-{2})', match.XB_BD_ratio, min_XB_BD_ratio, max_XB_BD_ratio)
+                                log.info(msg)
+
+        
+    // cleanup expired matches to avoid memory overflow
+    tracking_matches.cleanup(when_invalidated = true, handled_matches_buffer = handled_matches, debug = debug)
+    handled_matches.cleanup(when_older_than_idx = max_age_idx, debug = debug)
+
+    if debug and barstate.isconfirmed
+        log.info(str.format('tracking: {0}', tracking_matches.keys().join('|')))
+        log.info(str.format('just completed: {0}', just_completed_matches.keys().join('|')))
+        log.info(str.format('just invalidated: {0}', just_invalidated_matches.keys().join('|')))
+        log.info(str.format('buffered completed: {0}', buffered_completed_matches.keys().join('|')))
+        log.info(str.format('handled total: {0}', handled_matches.size()))
+
+    [just_completed_matches, just_invalidated_matches, buffered_completed_matches, handled_matches]
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#endregion                               PATTERN MATCH
+//////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#region                              DEMO
+//////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//                                                     DRAW
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//@function mute this pattern by making it all one color (lines and labels, for pattern fill there's another)
+export method mute(Match this, color mute_color, color mute_fill_color) =>
+    if not na(this)
+        for i in this.static_lines
+            i.plot.set_color(mute_color)
+        for i in this.dynamic_lines
+            i.plot.set_color(mute_color)
+        for i in this.trade_lines
+            i.plot.set_color(mute_color)
+        for i in this.static_labels
+            i.center_label.center_label.plot.set_textcolor(mute_color)
+        for i in this.dynamic_labels
+            i.center_label.center_label.plot.set_textcolor(mute_color)
+        for i in this.trade_labels
+            i.plot.set_textcolor(mute_color)
+        for i in this.fills            
+            i.plot.set_color(mute_fill_color)
+            if not na(i.flip_support)
+                i.flip_support.plot.set_color(mute_fill_color)
+        for i in this.dynamic_point_labels
+            i.plot.set_textcolor(mute_color)
+        for i in this.static_point_labels
+            i.plot.set_textcolor(mute_color)
+
+        this.name_label.plot.set_textcolor(mute_color)
+        this.name_label.plot.set_color(#00000000)
+
+
+//@function hide this pattern by muting it with a transparent color
+export method hide(Match this) =>
+    this.mute(#00000000, #00000000)
+    
+//@function reset the style of a muted or hidden match back to the preset configuration
+export method reset_styles(Match this) =>
+    if not na(this)
+        for i in this.static_lines
+            i.plot.set_color(i.args.line_color)
+        for i in this.dynamic_lines
+            i.plot.set_color(i.args.line_color)
+        for i in this.trade_lines
+            i.plot.set_color(i.args.line_color)
+        for i in this.static_labels
+            i.center_label.center_label.plot.set_textcolor(i.center_label.center_label.args.text_color)
+        for i in this.dynamic_labels
+            i.center_label.center_label.plot.set_textcolor(i.center_label.center_label.args.text_color)
+        for i in this.trade_labels
+            i.plot.set_textcolor(i.args.text_color)
+        for i in this.fills            
+            i.plot.set_color(i.fill_color)
+            if not na(i.flip_support)
+                i.flip_support.plot.set_color(i.fill_color)
+        for i in this.dynamic_point_labels
+            i.plot.set_textcolor(i.args.text_color)
+        for i in this.static_point_labels
+            i.plot.set_textcolor(i.args.text_color)
+
+        this.name_label.plot.set_textcolor(this.name_label.args.text_color)
+
+//@function remove the plot of this Match from the chart
+export method delete(Match this) =>
+    if not na(this)        
+        this.static_lines.delete()
+        this.dynamic_lines.delete()
+        this.trade_lines.delete()
+        this.static_labels.delete()
+        this.dynamic_labels.delete()
+        this.trade_labels.delete()
+        this.static_point_labels.delete()
+        this.fills.delete()
+        this.dynamic_point_labels.delete()
+        this.static_point_labels.delete()
+        this.name_label.delete()
+
+
+//@function mute all patterns in this map by making it all one color (lines and labels, for pattern fill there's another)
+export method mute(map<string, Match> this, color mute_color, color mute_fill_color) =>
+    if not na(this)
+        for i in this.values()
+            i.mute(mute_color, mute_fill_color)
+    this
+
+//@function remove all the plots of the Matches in this map from the chart
+export method delete(map<string, Match> this) =>
+    if not na(this)
+        for i in this.values()
+            i.delete()
+    this
+
+//@function draw this Match on the chart
+//@param config configuration for plotting this Match
+//@param hide set this Match's colors to transparent
+//@param mute set this Match's colors to mute colors
+//@param terminal_label_yoffset distance of terminal bar label from the terminal bar high/low
+export method draw(Match this, Config config, bool hide = false, bool mute = false, float terminal_label_yoffset, bool debug = false) =>
+    tf_ms = timeframe.in_seconds() * 1000
+    dir = this.direction()
+    line_args = dir == 1 ? config.line_bull : config.line_bear
+    line_args_live = dir == 1 ? config.line_bull_live : config.line_bear_live
+    fill_color = dir == 1 ? config.fill_bull : config.fill_bear    
+    point_in_dir = dir == 1 ? config.label_args_xabcd_up : config.label_args_xabcd_down
+    point_opp_dir = dir == 1 ? config.label_args_xabcd_down : config.label_args_xabcd_up
+    retrace_in_dir = dir == 1 ? config.retrace_up : config.retrace_down
+    retrace_opp_dir = dir == 1 ? config.retrace_down : config.retrace_up
+    name_in_dir = dir == 1 ? config.label_args_name_up : config.label_args_name_down
+    terminal_args = dir == 1 ? config.label_args_terminal_bar_up : config.label_args_terminal_bar_down
+    terminal_char = dir == 1 ? config.terminal_bar_up_char : config.terminal_bar_down_char
+    // name_opp_dir = dir == 1 ? config.label_args_xabcd_down : config.label_args_xabcd_up
+
+    initial = this.static_lines.size() == 0
+    live = not this.is_complete and na(this.terminal_bar_idx)
+    just_complete = this.is_complete and bar_index == this.terminal_bar_idx
+    prefix = dir == 1 ? "Bullish\n" : "Bearish\n"
+
+    if initial 
+        center_points = array.from(this.A.point, this.B.point, this.C.point)
+        this.name_label := D.Label.new(this.B.point, debug ? this.id : this.pattern.name, name_in_dir, tooltip = debug ? this.id : na)
+
+        // static
+        XA = this.X.point.create_line(this.A.point, line_args)
+        AB = this.A.point.create_line(this.B.point, line_args)
+        BC = this.B.point.create_line(this.C.point, line_args)
+        this.static_lines.enqueue(XA).enqueue(AB).enqueue(BC)
+
+        // dynamic
+        CD = this.C.point.create_line(this.D.point, this.is_complete ? line_args : line_args_live)
+        this.dynamic_lines.enqueue(CD)
+
+        // fills
+        this.fills.enqueue(XA.create_fill(AB, fill_color, flip = true))
+        this.fills.enqueue(BC.create_fill(CD, fill_color, flip = true))
+
+        // prepare point labels
+        if config.draw_point_labels
+            // static
+            this.static_point_labels
+             .enqueue(this.X.point.create_label('X', point_in_dir))
+             .enqueue(this.A.point.create_label('A', point_opp_dir))
+             .enqueue(this.B.point.create_label('B', point_in_dir))
+             .enqueue(this.C.point.create_label('C', point_opp_dir))
+
+            // dynamic
+            this.dynamic_point_labels.enqueue(this.D.point.create_label('D', point_in_dir))
+
+        // prepare retracement lines and labels
+        if config.draw_retracements
+            XB = this.X.point.create_line(this.B.point, config.label_args_retrace_line)
+            AC = this.A.point.create_line(this.C.point, config.label_args_retrace_line)
+            this.static_lines.enqueue(XB).enqueue(AC)
+            
+            this.static_labels
+             .enqueue(XB.create_retracement_label(this.A, retrace_in_dir)) //, 'XAB', this.pattern.XABmin, this.pattern.XABmax, this.pattern.tolerances.XABmin, this.pattern.tolerances.XABmax))
+             .enqueue(AC.create_retracement_label(this.B, retrace_opp_dir)) //, 'ABC', this.pattern.ABCmin, this.pattern.ABCmax, this.pattern.tolerances.ABCmin, this.pattern.tolerances.ABCmax))
+
+            if not na(this.pattern.BCDmin) and not na(this.pattern.BCDmax)
+                BD = this.B.point.create_line(this.D.point, config.label_args_retrace_line)
+                this.dynamic_lines.enqueue(BD)
+                this.dynamic_labels.enqueue(BD.create_retracement_label(this.C, retrace_in_dir)) //, 'BCD', this.pattern.BCDmin, this.pattern.BCDmax, this.pattern.tolerances.BCDmin, this.pattern.tolerances.BCDmax))
+
+            if not na(this.pattern.XADmin) or not na(this.pattern.XBDmin) or not na(this.pattern.XCDmin) or not na(this.pattern.XADmax) or not na(this.pattern.XBDmax) or not na(this.pattern.XCDmax)
+                XD = this.X.point.create_line(this.D.point, config.label_args_retrace_line)
+                this.dynamic_lines.enqueue(XD)
+                if not na(this.pattern.XADmin) and not na(this.pattern.XADmax)
+                    this.dynamic_labels.enqueue(XD.create_retracement_label(this.A, retrace_in_dir)) //, 'XAD', this.pattern.XADmin, this.pattern.XADmax, this.pattern.tolerances.XADmin, this.pattern.tolerances.XADmax))
+                if not na(this.pattern.XBDmin) and not na(this.pattern.XBDmax)
+                    this.dynamic_labels.enqueue(XD.create_retracement_label(this.B, retrace_in_dir)) //, 'XBD', this.pattern.XBDmin, this.pattern.XBDmax, this.pattern.tolerances.XBDmin, this.pattern.tolerances.XBDmax))
+                if not na(this.pattern.XCDmin) and not na(this.pattern.XCDmax)
+                    this.dynamic_labels.enqueue(XD.create_retracement_label(this.C, retrace_in_dir)) //, 'XCD', this.pattern.XCDmin, this.pattern.XCDmax, this.pattern.tolerances.XCDmin, this.pattern.tolerances.XCDmax))
+            
+        // prepare target range plot
+        if config.draw_target_range
+            this.dynamic_lines
+             .enqueue(this.C.point.create_line(this.Dmin.point, config.line_Dtarget))
+             .enqueue(this.C.point.create_line(this.Dmax.point, config.line_Dtarget))
+
+            if config.draw_point_labels
+                if this.Dmin_price == this.Dmax_price
+                    this.dynamic_point_labels
+                     .enqueue(this.Dmax.point.create_label(this.pattern.name + ' - Dtarget', point_in_dir)) //, str.format('{0}', this.Dmax_price)))
+                else
+                    this.dynamic_point_labels
+                     .enqueue(this.Dmin.point.create_label('Dmin', point_opp_dir)) //, str.format('{0}', this.Dmin_price)))
+                     .enqueue(this.Dmax.point.create_label('Dmax', point_in_dir)) //, str.format('{0}', this.Dmax_price)))
+
+            // optional retracements
+            if not na(this.pattern.XADmin) or not na(this.pattern.XBDmin) or not na(this.pattern.XCDmin)
+                XDmin = this.X.point.create_line(this.Dmin.point, config.line_Dtarget)
+                this.dynamic_lines.enqueue(XDmin)
+
+            if not na(this.pattern.XADmax) or not na(this.pattern.XBDmax) or not na(this.pattern.XCDmax)
+                XDmax = this.X.point.create_line(this.Dmax.point, config.line_Dtarget)
+                this.dynamic_lines.enqueue(XDmax)
+                // no center label, this is only drawn on the retracement line            
+
+        this.name_label.draw()
+        this.static_lines.draw(extend_only = false)
+        this.static_labels.draw()
+        this.static_point_labels.draw()        
+
+    if (just_complete or live and config.draw_trade_levels_live and this.Dmin_price == this.Dmax_price) and config.draw_trade_levels
+        if this.trade_lines.size() == 0
+            from_idx        = bar_index
+            from_time       = time
+            until_idx       = from_idx + 40
+            until_time      = from_time + 40 * tf_ms
+            complete_price  = just_complete ? this.D.point.price : this.Dmin_price
+            line_completion = D.Line.new(chart.point.now(complete_price), chart.point.new(until_time, until_idx, complete_price), config.line_args_completion)
+            line_tp1        = D.Line.new(chart.point.now(this.tp1)      , chart.point.new(until_time, until_idx, this.tp1)      , config.line_args_tp1)
+            line_tp2        = D.Line.new(chart.point.now(this.tp2)      , chart.point.new(until_time, until_idx, this.tp2)      , config.line_args_tp2)
+            line_sl         = D.Line.new(chart.point.now(this.sl)       , chart.point.new(until_time, until_idx, this.sl)       , config.line_args_sl)
+            
+            this.trade_lines
+             .enqueue(line_completion)
+             .enqueue(line_tp1)
+             .enqueue(line_tp2)
+             .enqueue(line_sl)    
+
+            this.trade_labels
+             .enqueue(D.Label.new(line_completion.end, str.format('complete {0} ({1})', this.pattern.name             , str.tostring(math.round_to_mintick(complete_price))) , config.label_args_completion))
+             .enqueue(D.Label.new(line_tp1.end       , str.format('TP 1 {0} ({1})'    , live ? this.pattern.name : '' , str.tostring(math.round_to_mintick(this.tp1)))       , config.label_args_tp1       ))
+             .enqueue(D.Label.new(line_tp2.end       , str.format('TP 2 {0} ({1})'    , live ? this.pattern.name : '' , str.tostring(math.round_to_mintick(this.tp2)))       , config.label_args_tp2       ))
+             .enqueue(D.Label.new(line_sl.end        , str.format('LRP {0} ({1})'     , live ? this.pattern.name : '' , str.tostring(math.round_to_mintick(this.sl)))        , config.label_args_sl        ))
+
+            for trade_line in this.trade_lines
+                trade_line.draw(extend_only = false)
+                trade_line.plot.set_style(live ? line.style_dotted : line.style_dashed)
+
+            this.trade_labels.draw()
+
+        else
+            for trade_line in this.trade_lines
+                trade_line.start.index := bar_index
+                trade_line.start.time := time
+                trade_line.end.index := bar_index + 40
+                trade_line.end.time := time + 40 * tf_ms
+                trade_line.draw(extend_only = false)
+                trade_line.plot.set_style(live ? line.style_dotted : line.style_dashed)
+
+            for trade_label in this.trade_labels
+                trade_label.point.index := bar_index + 40
+                trade_label.point.time := time + 40 * tf_ms
+                trade_label.draw()
+
+
+    if just_complete
+        D_line = this.dynamic_lines.get(this.dynamic_lines.size() - 1).apply_style(line_args)
+        if config.draw_point_labels
+            D_label = this.dynamic_point_labels.remove(this.dynamic_point_labels.size() - 1)
+            this.dynamic_point_labels.delete().clear()
+            this.dynamic_point_labels.enqueue(D_label)
+
+        
+
+        if barstate.isconfirmed
+            terminal_point = this.D.point.copy()            
+            terminal_point.price := dir == 1 ? this.D.candle.l - terminal_label_yoffset : this.D.candle.h + terminal_label_yoffset
+            this.static_point_labels.enqueue(D.Label.new(terminal_point, terminal_char, terminal_args))
+
+        this.static_point_labels.draw()
+        this.static_lines.draw(extend_only = false)
+
+        // in case this is currently engulfed, we have drawn new lines and labels, but need to hide them (until the engulfing pattern fails)
+        if this.is_hidden
+            this.hide()
+        else if this.is_muted
+            this.mute(config.color_muted, config.fill_muted)
+
+
+    // dynamic update (values of points are updated via update() method)
+    if initial or just_complete or this.is_forming()
+        this.dynamic_lines.draw(extend_only = false) // retracement and pattern lines
+        this.dynamic_labels.draw() // retracement labels
+        this.dynamic_point_labels.draw()
+        this.fills.draw()
+
+
+    // update hidden, muted matches
+    
+    // if delete_early
+    //     this.delete()
+    //     this.is_hidden := true
+    if hide 
+        if not this.is_hidden
+            this.hide()
+            this.is_hidden := true
+    else if mute
+        if not this.is_muted
+            this.mute(config.color_muted, config.fill_muted)
+            this.is_muted := true
+    else if this.is_hidden or this.is_muted
+        this.reset_styles()
+        this.is_hidden := false
+        this.is_muted := false
+
+    this
+
+
+//@function draw all Matches in this map, considering all other patterns for engulfing and overlapping
+export method draw(map<string, Match> this, Config config, float terminal_label_yoffset = 0, bool debug = false) =>
+    if not na(this) and not na(config)
+        for match in this.values()
+            if not na(match)
+                mute = match.is_filtered_muted and not match.is_filtered
+                hide = match.is_filtered
+                match.draw(config, hide, mute, terminal_label_yoffset, debug)
+    this
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//#endregion                                           DRAW
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//                                  DEMO
+//////////////////////////////////////////////////////////////////////////////////////
+
+
+// Inputs
+//@function convenience function to add a search pattern to a list, only if given condition (input.bool) is true
+export method add_if(Pattern[] id, Pattern item, bool condition) =>
+    if not na(id) and condition
+        id.push(item)
+    id
+
+
+to_style(style) =>
+    switch style
+        'dotted' => line.style_dotted
+        'dashed' => line.style_dashed
+        => line.style_solid
+
+var g_selection = 'Pattern Selection'
+var string i_direction = input.string('Bullish & Bearish', 'Direction', ['Bullish & Bearish', 'Bullish', 'Bearish'], group = g_selection, inline = 'ld')
+var detect_bullish = str.contains(i_direction,'Bullish')
+var detect_bearish = str.contains(i_direction,'Bearish')
+var detect_both = detect_bullish and detect_bearish
+var detect_dir = detect_both ? 0 : detect_bearish ? -1 : 1
+
+var Pattern[] patterns = array.new<Pattern>()
+ .add_if(Pattern.new('Bat',                XABmin = 0.382, XABmax = 0.500, ABCmin = 0.382, ABCmax = 0.886, BCDmin = 1.618, BCDmax = 2.618, XADmin = 0.886, XADmax = 0.886, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0.03, 0     ), input.bool(false, 'Bat'         , group = g_selection, inline = '1'))
+ .add_if(Pattern.new('Alt Bat',            XABmin = 0.382, XABmax = 0.382, ABCmin = 0.382, ABCmax = 0.886, BCDmin = 2.000, BCDmax = 3.618, XADmin = 1.130, XADmax = 1.130, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0.03, 0     ), input.bool(false, 'Alt Bat'     , group = g_selection, inline = '1'))
+ .add_if(Pattern.new('Crab',               XABmin = 0.382, XABmax = 0.618, ABCmin = 0.382, ABCmax = 0.886, BCDmin = 2.618, BCDmax = 3.618, XADmin = 1.618, XADmax = 1.618, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0.03, 0     ), input.bool(false, 'Crab'        , group = g_selection, inline = '2'))
+ .add_if(Pattern.new('Deep Crab',          XABmin = 0.886, XABmax = 0.886, ABCmin = 0.382, ABCmax = 0.886, BCDmin = 2.000, BCDmax = 3.618, XADmin = 1.618, XADmax = 1.618, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0.03, 0     ), input.bool(false, 'Deep Crab'   , group = g_selection, inline = '2'))
+ .add_if(Pattern.new('Butterfly',          XABmin = 0.786, XABmax = 0.786, ABCmin = 0.382, ABCmax = 0.886, BCDmin = 1.618, BCDmax = 2.618, XADmin = 1.272, XADmax = 1.618, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0.03, 0     ), input.bool(false, 'Butterfly'   , group = g_selection, inline = '3'))
+ .add_if(Pattern.new('Gartley',            XABmin = 0.618, XABmax = 0.618, ABCmin = 0.382, ABCmax = 0.886, BCDmin = 1.272, BCDmax = 1.618, XADmin = 0.786, XADmax = 0.786, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0.03, 0     ), input.bool(false, 'Gartley'     , group = g_selection, inline = '3'))
+ .add_if(Pattern.new('Shark',              XABmin = 0.382, XABmax = 0.618, ABCmin = 1.130, ABCmax = 1.618, BCDmin = 1.618, BCDmax = 2.240, XCDmin = 0.886, XCDmax = 1.130, tp1 = 0.5, tp2 = 1.5, sl = 1.5).set_tolerances(0.03, 0.03, 0    , 0.03 ), input.bool(false, 'Shark'       , group = g_selection, inline = '3'))
+
+var g_patterns = 'Pattern Detection'
+var bool live = false // input.bool(false, 'live (repainting)', group = g_patterns, inline = 'ld')
+var bool keep_failed = false // input.bool(false, 'keep failed patterns', group = g_patterns, inline = 'ld')
+var int length = 10 // input.int(10, 'P.Pivot confirmation bars', group = g_patterns)
+var int pattern_minlen = 20 // input.int(30, 'Min length', group = g_patterns)
+var int pattern_maxlen = 150 // input.int(300, 'Max length', group = g_patterns)
+var int max_lookback = 244 // input.int(400, 'Lookback bars', group = g_patterns)
+var float max_XB_BD_ratio = 5
+var int tolerance_xabc_sub_waves = 2 // input.int(2, 'Max sub waves', 0, 20, group = g_patterns)
+
+var g_plot = 'Pattern Plot'
+var color color_bull = color.green // input.color(color.green, 'Pattern:  Bull', group = g_plot, inline = 'col')
+var color color_bear = color.red // input.color(color.red, ' Bear', group = g_plot, inline = 'col')
+var color color_muted = color.gray // input.color(color.gray, ' Fail/Mute', group = g_plot, inline = 'col')
+var int fill_opacity = 10 // input.int(10, ' Fill %', group = g_plot, inline = 'col')
+
+var bool draw_retracements = false // input.bool(true, 'Show retracements: ', group = g_plot, inline = 'color_retr')
+var color color_retracment_label = color.gray // input.color(color.gray, 'D.Label', group = g_plot, inline = 'color_retr')
+var color color_retracment_line = color.gray // input.color(color.gray, ' Line', group = g_plot, inline = 'color_retr')
+var string style_retracment_line = line.style_dotted // to_style(input.string('dotted', ' Style', ['dotted', 'dashed', 'solid'], group = g_plot, inline = 'color_retr'))
+
+var bool draw_point_labels = false // input.bool(false, 'Show XABCD:   ', group = g_plot, inline = 'color_points')
+var color color_point_labels  = color.gray // input.color(color.gray, '  Label', group = g_plot, inline = 'color_points')
+
+var color color_completion = color.gray // input.color(color.gray, ' Complete', group = g_plot, inline = 'col_trade')
+var color color_tp1 = color.lime // input.color(color.lime, ' TP1', group = g_plot, inline = 'col_trade')
+var color color_tp2 = color.green // input.color(color.green, ' TP2', group = g_plot, inline = 'col_trade')
+var color color_sl = color.red // input.color(color.red, ' LRP', group = g_plot, inline = 'col_trade')
+
+var g_debug = 'Debug'
+var bool debug_detection = input.bool(false, 'detection', group = g_debug, inline = 'debug')
+var bool debug_plotting = input.bool(false, 'plotting', group = g_debug, inline = 'debug')
+var bool debug_completed = input.bool(false, 'completed', group = g_debug, inline = 'debug')
+
+
+// Set up configuration
+var D.LineArgs  pattern_line_args   = D.LineArgs.new(#00000000, width = 2)
+var D.LabelArgs pattern_point_args = D.LabelArgs.new(color_point_labels)
+var D.LabelArgs name_label_args = D.LabelArgs.new(#00000000, #00000000, size = size.large)
+var D.LabelArgs retracement_label_args  = D.LabelArgs.new(color_retracment_label)
+var D.LineArgs  retracement_line_args  = D.LineArgs.new(color_retracment_line, style = style_retracment_line)
+var D.LineArgs  line_args_completion = D.LineArgs.new(color_completion, style = line.style_dashed)
+var D.LineArgs  line_args_tp1 = D.LineArgs.new(color_tp1, style = line.style_dashed)
+var D.LineArgs  line_args_tp2 = D.LineArgs.new(color_tp2, style = line.style_dashed)
+var D.LineArgs  line_args_sl = D.LineArgs.new(color_sl, style = line.style_dashed)
+var D.LabelArgs label_args_completion = D.LabelArgs.new(color_completion, #00000000, style = label.style_label_lower_right, size = size.small)
+var D.LabelArgs label_args_tp1 = D.LabelArgs.new(color_tp1, #00000000, style = label.style_label_lower_right, size = size.small)
+var D.LabelArgs label_args_tp2 = D.LabelArgs.new(color_tp2, #00000000, style = label.style_label_lower_right, size = size.small)
+var D.LabelArgs label_args_sl = D.LabelArgs.new(color_sl, #00000000, style = label.style_label_lower_right, size = size.small)
+var D.LabelArgs label_terminal = D.LabelArgs.new(#00000000, #00000000, style = label.style_label_center, size = size.huge)
+
+var Config config = create_config(pattern_line_args, pattern_point_args, name_label_args, retracement_line_args, retracement_label_args, line_args_completion, line_args_tp1, line_args_tp2, line_args_sl, label_args_completion, label_args_tp1, label_args_tp2, label_args_sl, label_terminal, '☼', '☼', color_bull, color_bear, color_muted, fill_opacity, draw_point_labels, draw_retracements)
+var map<string, Match> tracking_matches = map.new<string, Match>()
+
+var ZZ.Zigzag zigzag = ZZ.Zigzag.new(max_lookback, P.HLData.new(length, xloc.bar_time))
+zigzag.update()
+
+max_age_idx = bar_index - max_lookback
+[just_completed_matches, just_invalidated_setups, buffered_completed_matches, handled_matches] = tracking_matches.update(zigzag, patterns, max_age_idx, detect_dir, pattern_minlen, pattern_maxlen, tolerance_xabc_sub_waves, max_XB_BD_ratio)
+
+all_patterns = buffered_completed_matches.copy()
+all_patterns.put_all(just_completed_matches)
+
+terminal_label_yoffset = ta.atr(100)
+all_patterns.draw(config, terminal_label_yoffset, debug_plotting)
+
+if keep_failed
+    just_invalidated_setups.mute(config.color_muted, config.fill_muted)
+else 
+    just_invalidated_setups.delete()
+
+if debug_completed
+    for match in just_completed_matches.values()
+        if match.is_complete and not match.is_hidden and not match.is_muted
+            log.info(str.format('Completed {0}', debug_plotting or debug_detection ? match.id : match.name))
+        
+    
+plot(bar_index, 'bar_index', display = display.data_window)
+plot(tracking_matches.size(), 'Patterns active', display = display.data_window)
+
+plotshape(ta.crossover(tracking_matches.size(), 0),  'Pattern new',      shape.cross,    location.bottom, color.gray, editable = false, size = size.tiny, display = display.data_window)
+plotchar(tracking_matches.size() > 0,                'Pattern tracking', '_',            location.bottom, color.gray, editable = false, size = size.tiny, display = display.data_window)
+plotshape(just_completed_matches.size() > 0,         'Pattern complete', shape.square,   location.bottom, color.gray, editable = false, size = size.tiny, display = display.data_window)
+plotshape(just_invalidated_setups.size() > 0,        'Pattern invalid',  shape.xcross,   location.bottom, color.gray, editable = false, size = size.tiny, display = display.data_window)
+plot(all_patterns.size(), 'Overlaps checked (complete, buffered)', display = display.data_window)
+plot(buffered_completed_matches.size(), 'Patterns complete (buffered)', display = display.data_window)
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//#regionend                           DEMO 
+//////////////////////////////////////////////////////////////////////////////////////

@@ -1,0 +1,395 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © matt_spinola
+
+//@version=6
+
+// @description Provides a collection of helper functions in support of the Rifle Shooter Indicators.
+//              Functions support the key components of the Rifle Trade algorithm including
+//                * measuring momentum
+//                * identifying paraboloic price action (to disable the algorthim during such time)
+//                * determine the lookback criteria of X point movement in last N minutes
+//                * processing and navigating between the 23/43/73 levels
+//                * maintaining a status table of algorithm progress
+library("RifleShooterLib")
+
+// --------------------- Non Rifle Helper Functions { ------------------------- \\
+export toStrRnd(float val, int digits = 0) =>
+    str.tostring(math.round(val, digits))
+
+// Check if the current time is within the defined range
+export _isValidTimeRange(string startTimeInput, string endTimeInput) =>
+    not na(time(timeframe.period, startTimeInput + "-" + endTimeInput + ":23456", "America/New_York"))
+
+// @function _normalize Normalizes series with unknown min/max using historical min/max.
+// @param _src Source series to normalize
+// @param _min minimum value of the rescaled series
+// @param _max maximum value of the rescaled series
+// @returns The series scaled with values between min and max
+export _normalize(float _src, float _min, float _max) =>
+    var _historicMin =  10e10
+    var _historicMax = -10e10
+    _historicMin := math.min(nz(_src, _historicMin), _historicMin)
+    _historicMax := math.max(nz(_src, _historicMax), _historicMax)
+    _min + (_max - _min) * (_src - _historicMin) / math.max(_historicMax - _historicMin, 10e-10)
+
+// @function  arrayToSeries Return an array from the provided series.
+// @param arrayInput Source array to convert to a series
+// @returns The array as a series datatype
+export arrayToSeries(array<float> arrayInput) =>
+    series = 0.0
+    if array.size(arrayInput) > 0
+        for i = 0 to array.size(arrayInput) - 1
+            series := array.get(arrayInput, i)
+    series
+//}
+
+// --------------------- Non Rifle Functions { ------------------------- \\
+// @function f_parabolicFiltering Return true when price action indicates a parabolic active movement based on the provided inputs and thresholds.
+export f_parabolicFiltering(int _activeCount, bool long, 
+     float shooterRsi, float shooterRsiLongThreshold, float shooterRsiShortThreshold,
+     float fiveMinuteRsi, float fiveMinRsiLongThreshold, float fiveMinRsiShortThreshold,
+     float shooterRsiRoc, float shooterRsiRocLongThreshold, float shooterRsiRocShortThreshold, 
+     int quickChangeLookbackBars, int quckChangeThreshold,
+     int curBarChangeThreshold, int changeFromPrevBarThreshold, int maxBarsToholdParabolicMoveActive, bool generateLabels=false) =>
+    activeCount = _activeCount
+    highestLb = ta.highest(high, quickChangeLookbackBars)
+    lowestLb = ta.lowest(low, quickChangeLookbackBars)
+    if barstate.isconfirmed
+        excessiveShooterRsiRoc = long ? shooterRsiRoc < shooterRsiRocLongThreshold : shooterRsiRoc > shooterRsiRocShortThreshold
+        excessiveCurBarChange = math.abs(open - close) > curBarChangeThreshold
+        changeFromPrevBar = math.abs(close[1] - open)
+        excessiveChangeFromPrevBarClose = bar_index == 0 ? false : changeFromPrevBar > changeFromPrevBarThreshold
+        excessiveShooterRsi = long ? shooterRsi < shooterRsiLongThreshold : shooterRsi > shooterRsiShortThreshold
+        excessiveFiveMinRsi = long ? fiveMinuteRsi < fiveMinRsiLongThreshold : fiveMinuteRsi > fiveMinRsiShortThreshold
+        quickChange = math.abs(long ? highestLb - low : lowestLb - high)
+        excessiveQuickChange = bar_index < 4 ? false : quickChange > quckChangeThreshold
+        
+        active = activeCount > 0
+        if excessiveShooterRsiRoc or excessiveCurBarChange or excessiveChangeFromPrevBarClose or excessiveShooterRsi or excessiveFiveMinRsi or excessiveQuickChange
+            // Stay in this state doing nothing. Wait for sufficent time to pass then abort to start over
+            activeCount += 2
+            activeCount := math.min(maxBarsToholdParabolicMoveActive, activeCount)
+            if not active
+                active := true
+                if generateLabels
+                    label.new(x=bar_index, y=high + 20,
+                         text="Parabolic", textcolor=color.white, text_formatting=text.format_bold,
+                         tooltip="rsiRoc: " + toStrRnd(shooterRsiRoc) + "\n curBarChange: " + toStrRnd(open - close) + 
+                         "\n changePrevClose: " + toStrRnd(changeFromPrevBar) + "\n rsi: " + toStrRnd(shooterRsi) + ", " + 
+                         toStrRnd(fiveMinuteRsi) + "\n lookback change: " + toStrRnd(quickChange),
+                         color=color.new(color.orange, 50), style=label.style_label_down, force_overlay=true)
+        else if active
+            activeCount -= 1
+            if activeCount <= 0
+                activeCount := 0
+    activeCount
+
+
+//@function rsiValid Returns true if the provided RSI value is withing the associated threshold. For the unused threshold set it to na
+export rsiValid(float rsi, float buyThreshold, float sellThreshold) =>
+    shooterRsiValid = false
+    if na(sellThreshold)
+        shooterRsiValid := rsi <= buyThreshold
+    else if na(buyThreshold)
+        shooterRsiValid := rsi >= sellThreshold
+    shooterRsiValid
+
+
+//@function squezeBands Returns the squeeze bands momentum color of current source series input
+export squezeBands(float source, int length) =>
+    ma = ta.sma(source,length)
+    devBB = ta.stdev(source,length)
+    devKC = ta.sma(ta.tr,length)
+
+    //Bollinger 2x
+    upBB = ma + devBB * 2
+    lowBB = ma - devBB * 2
+
+    //Keltner 2x
+    upKCWide = ma + devKC * 2
+    lowKCWide = ma - devKC * 2
+
+    //Keltner 1.5x
+    upKCNormal = ma + devKC * 1.5
+    lowKCNormal = ma - devKC * 1.5
+
+    //Keltner 1x
+    upKCNarrow = ma + devKC
+    lowKCNarrow = ma - devKC
+
+    sqzOnWide  = (lowBB >= lowKCWide) and (upBB <= upKCWide) //WIDE SQUEEZE: ORANGE
+    sqzOnNormal  = (lowBB >= lowKCNormal) and (upBB <= upKCNormal) //NORMAL SQUEEZE: RED
+    sqzOnNarrow  = (lowBB >= lowKCNarrow) and (upBB <= upKCNarrow) //NARROW SQUEEZE: YELLOW
+    sqzOffWide = (lowBB < lowKCWide) and (upBB > upKCWide) //FIRED WIDE SQUEEZE: GREEN
+    noSqz  = (sqzOnWide == false) and (sqzOffWide == false) //NO SQUEEZE: BLUE
+    sq_color = noSqz ? color.blue : sqzOnNarrow ? color.yellow : sqzOnNormal ? color.red : sqzOnWide ? color.orange : color.lime
+
+//@function f_momentumOscilator Returns the squeeze pro momentum value and bar color states of the series input
+export f_momentumOscilator(float source, int length, int transperency=50) =>
+    redBar = false
+    yellowBar = false
+    aquaBar = false
+    blueBar = false
+    color momentumColor = na
+    momentum = ta.linreg(source - math.avg(math.avg(ta.highest(high, length), ta.lowest(low, length)), ta.sma(close, length)), length, 0)
+    if momentum > 0
+        if momentum > nz(momentum[1])
+            momentumColor := color.new(color.aqua, transperency)
+            aquaBar := true
+        else
+            momentumColor := color.rgb(0, 0, 255, transperency)
+            blueBar := true
+    else if momentum < nz(momentum[1])
+        momentumColor := color.new(color.red, transperency)
+        redBar := true
+    else
+        momentumColor := color.new(color.yellow, transperency)
+        yellowBar := true
+    [momentum, momentumColor, redBar, yellowBar, aquaBar, blueBar]
+//}
+
+// --------------------- Rifle Functions { ------------------------- \\
+//@function f_getLookbackExtreme Return the highest high or lowest low over the look back window
+export f_getLookbackExtreme(float lowSeries, float highSeries, int lbBars, bool long) =>
+    highestLb = ta.highest(highSeries, lbBars)
+    lowestLb = ta.lowest(lowSeries, lbBars)
+    extreme = long ? highestLb : lowestLb
+
+//@function f_getInitialMoveTarget Return the point delta required to achieve an initial rifle move (X points over Y lookback)
+export f_getInitialMoveTarget(float lbExtreme, int priveMoveOffset, bool long) =>
+    long ? math.floor(lbExtreme - priveMoveOffset) : math.ceil(lbExtreme + priveMoveOffset)
+
+//@function isSymbolSupported Return true if provided symbol is one of the supported DOW Rifle Indicator symbols
+export isSymbolSupported(string sym) =>
+    supported = false
+    if sym == "MYM1!" or sym == "YM1!" or sym == "DJI" or sym == "US30" or sym == "BTCUSD" or sym == "DOW"
+        supported := true
+
+//@function getBasePrice Returns integer portion of provided float
+export getBasePrice(float price) =>
+    // Get the current price substracting out the two digits
+    // Example: 44606.25 to 44600; 44699.75 to 44600
+    int basePrice = math.floor(price / 100) * 100 
+    basePrice
+
+//@function getBasePrice Returns last two integer numerals of provided float value
+export getLastTwoDigitsOfPrice(float price) =>
+    // Get last two integer digits of the current price
+    // Example: 44606.25 to 6; 44699.75 to 99
+    int lastTwoDigits = math.floor(price) % 100
+    lastTwoDigits
+
+//@function getNextLevelDown Returns the next level above the provided price value
+export getNextLevelDown(float price, float lowestLevel, float middleLevel, float highestLevel) =>
+    int basePrice = getBasePrice(price)
+    int lastTwoDigits = getLastTwoDigitsOfPrice(price)
+
+    float targetLevel = na
+    if lastTwoDigits > highestLevel
+        targetLevel := basePrice + highestLevel
+    else if lastTwoDigits <= highestLevel and lastTwoDigits > middleLevel
+        targetLevel := basePrice + middleLevel
+    else if lastTwoDigits <= middleLevel and lastTwoDigits > lowestLevel
+        targetLevel := basePrice + lowestLevel
+    else if lastTwoDigits <= lowestLevel
+        targetLevel := basePrice - (100 - highestLevel) // target below basePrice
+    targetLevel
+
+//@function getNextLevelUp Returns the next level below the provided price value
+export getNextLevelUp(float price, float lowestLevel, float middleLevel, float highestLevel) =>
+    int basePrice = getBasePrice(price)
+    int lastTwoDigits = getLastTwoDigitsOfPrice(price)
+
+    float targetLevel = na
+    if lastTwoDigits < lowestLevel
+        targetLevel := basePrice + lowestLevel
+    else if lastTwoDigits >= lowestLevel and lastTwoDigits < middleLevel
+        targetLevel := basePrice + middleLevel
+    else if lastTwoDigits >= middleLevel and lastTwoDigits < highestLevel
+        targetLevel := basePrice + highestLevel
+    else if lastTwoDigits >= highestLevel
+        targetLevel := basePrice + 100 + lowestLevel
+    targetLevel
+
+//@function isALevel Returns true if the provided price is onve of the specified levels
+export isALevel(float price, float lowestLevel, float middleLevel, float highestLevel) =>
+    validLevel = false
+    int lastTwoDigits = getLastTwoDigitsOfPrice(price)
+    if lastTwoDigits == lowestLevel or lastTwoDigits == middleLevel or lastTwoDigits == highestLevel
+        validLevel := true
+    validLevel
+
+//@function getClosestLevel Returns the level closest to the price value provided
+export getClosestLevel(float price, float lowestLevel, float middleLevel, float highestLevel) =>
+    float closestLevel = na
+    if isALevel(price, lowestLevel, middleLevel, highestLevel)
+        closestLevel := price
+    else
+        levelDown = getNextLevelDown(price, lowestLevel, middleLevel, highestLevel)
+        levelUp =  getNextLevelUp(price, lowestLevel, middleLevel, highestLevel)
+        if math.abs(levelDown - price) <= math.abs(levelUp - price)
+            closestLevel := levelDown
+        else
+            closestLevel := levelUp
+    closestLevel
+
+//@function f_fillSetupTableCell Helper function to fill a setup table celll
+export f_fillSetupTableCell(table _table, int _col, int _row, string _text, color _bgcolor, color _txtcolor=color.white, string _text_size=size.auto) =>
+    table.cell(_table, _col, _row, _text, bgcolor=_bgcolor, text_color=_txtcolor, text_size=_text_size)
+
+//@function f_fillSetupTableRow Helper function to fill a setup table row
+export f_fillSetupTableRow(table _table, int _row, string _col0Str, string _col1Str, string _col2Str, color _bgcolor, color _textColor, string _textSize) =>
+    col2Bgcolor = _col2Str == "Valid" ? color.new(color.green, 50) : _bgcolor
+    f_fillSetupTableCell(_table, 0, _row, _col0Str, _bgcolor, _textColor, _textSize)
+    f_fillSetupTableCell(_table, 1, _row, _col1Str, _bgcolor, _textColor, _textSize)
+    f_fillSetupTableCell(_table, 2, _row, _col2Str, col2Bgcolor, _textColor, _textSize)
+    _row + 1
+
+//@function f_addBlankRow Helper function to fill a setup table row with empty values
+export f_addBlankRow(table _table, int _row) =>
+    _bgcolor=color.new(color.black, 100)
+    f_fillSetupTableCell(_table, 0, _row, "", _bgcolor)
+    f_fillSetupTableCell(_table, 1, _row, "", _bgcolor)
+    f_fillSetupTableCell(_table, 2, _row, "", _bgcolor)
+    _row + 1 
+
+//@function f_updateVersionTable Helper function to fill the version table with provided values
+export f_updateVersionTable(table versionTable, string versionStr, string versionDateStr) =>
+    _bgcolor=color.new(color.black, 100)
+    table.cell(versionTable, 0, 0, "Version", bgcolor=_bgcolor, text_color=color.white, text_size=size.auto)
+    table.cell(versionTable, 1, 0, "Date", bgcolor=_bgcolor, text_color=color.white, text_size=size.auto)
+    table.cell(versionTable, 0, 1, versionStr, bgcolor=_bgcolor, text_color=color.white, text_size=size.auto)
+    table.cell(versionTable, 1, 1, versionDateStr, bgcolor=_bgcolor, text_color=color.white, text_size=size.auto)
+    versionTable
+
+//@function f_updateSetupTable Manages writing current data to the setup table
+export f_updateSetupTable(table _table, 
+     bool parabolicMoveActive, 
+     float initialMoveTargetOffset, 
+     bool initialMoveAchieved,
+     float shooterRsi,
+     bool shooterRsiValid,
+     float rsiRocEnterThreshold,
+     float shooterRsiRoc,
+     float fiveMinuteRsi,
+     bool fiveMinuteRsiValid,
+     bool requireValid5MinuteRsiForEntry,
+     float stallLevelOffset,
+     bool stallLevelExceeded,
+     float stallTargetOffset,
+     bool recoverStallLevelValid,
+     bool curBarChangeValid,
+     float volumeRoc,
+     float volumeRocThreshold,
+     bool enableVolumeRocForTrigger,
+     bool tradeActive,
+     float entryPrice,
+     float curCloseOffset,
+     float curSymCashDelta,
+     float djiCashDelta,
+     bool showDjiDelta,
+     bool longIndicator,
+     string fontSize) =>
+    if barstate.islast
+        tableBgColor = color.new(color.black, 70)
+        row = 0
+        col0Str = ""
+        col1Str = ""
+        col2Str = ""    
+
+        if timeframe.period != "30S"
+            row := f_fillSetupTableRow(_table, row, "TIMEFRAME", "30 Sec", "Only", color.red, color.white, fontSize)
+        else if not tradeActive
+            if parabolicMoveActive
+                row := f_fillSetupTableRow(_table, row, "Ignoring", "Parabolic", "Move", color.orange, color.white, fontSize)
+
+            // Initial Target    
+            col0Str := "Initial Target"
+            col1Str := not na(initialMoveTargetOffset) ? toStrRnd(initialMoveTargetOffset) : ""
+            // distToTarget = math.abs(initialMoveTargetOffset - curCloseOffset)
+            // col2Str := initialMoveAchieved or distToTarget < 1 ? "Valid" : (not na(distToTarget) ? toStrRnd(distToTarget) : "")
+            col2Str := initialMoveAchieved ? "Valid" : "Waiting"
+            row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.new(#0099FF, 0), fontSize)
+
+            // RSI
+            col0Str := "RSI"
+            col1Str := not na(shooterRsi) ? toStrRnd(shooterRsi) : ""
+            col2Str := ""
+            if initialMoveAchieved
+                col2Str := shooterRsiValid ? "Valid" : "Waiting"
+            row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.yellow, fontSize)
+
+            // Stall Target / Level
+            col0Str := "Stall Target"
+            col1Str := ""
+            col2Str := ""
+            if initialMoveAchieved
+                if not stallLevelExceeded
+                    col0Str := "Stall Target"
+                    col1Str := not na(stallTargetOffset) ? toStrRnd(stallTargetOffset) : ""
+                    col2Str := "Waiting"
+                else
+                    col0Str := "Stall Level"
+                    col1Str := not na(stallLevelOffset) ? toStrRnd(stallLevelOffset) : ""
+                    col2Str := "Valid"
+            row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.yellow, fontSize)
+
+            // RSI Rate of Change
+            col0Str := "RSI ROC"
+            col1Str := ""
+            col2Str := ""
+            if initialMoveAchieved and stallLevelExceeded
+                col1Str := not na(shooterRsiRoc) ? toStrRnd(shooterRsiRoc) : ""
+                col2Str := shooterRsiRoc > rsiRocEnterThreshold ? "Valid" : "Waiting"
+            row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.white, fontSize)
+
+            // Stall Level Recovered
+            col0Str := "Level Recovered"
+            col1Str := ""
+            col2Str := ""
+            if initialMoveAchieved and stallLevelExceeded
+                col2Str := recoverStallLevelValid ? "Valid" : "Waiting"
+            row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.white, fontSize)
+
+            // Stall Level Recovered
+            col0Str := "Momentum"
+            col1Str := ""
+            col2Str := ""
+            if initialMoveAchieved and stallLevelExceeded
+                col2Str := curBarChangeValid ? "Valid" : "Waiting"
+            row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.white, fontSize)
+
+            // Volume
+            if enableVolumeRocForTrigger
+                col0Str := "Vol ROC"
+                col1Str := ""
+                col2Str := ""
+                if initialMoveAchieved and stallLevelExceeded
+                    col1Str := not na(volumeRoc) ? toStrRnd(volumeRoc) : ""
+                    col2Str := volumeRoc > volumeRocThreshold ? "Valid" : "Waiting"
+                row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.white, fontSize)
+
+            // 5 minute RSI
+            if requireValid5MinuteRsiForEntry
+                col0Str := "RSI 5 Min"
+                col1Str := toStrRnd(fiveMinuteRsi)
+                if initialMoveAchieved and stallLevelExceeded
+                    col2Str := fiveMinuteRsiValid ? "Valid" : "Invalid"
+                row := f_fillSetupTableRow(_table, row, col0Str, col1Str, col2Str, tableBgColor, color.white, fontSize)
+        else
+            row := f_addBlankRow(_table, row)
+            row := f_fillSetupTableRow(_table, row, "RSI", toStrRnd(shooterRsi), "", tableBgColor, color.white, fontSize)
+            row := f_fillSetupTableRow(_table, row, "RSI 5 Min", toStrRnd(fiveMinuteRsi), "", tableBgColor, color.white, fontSize)
+            col1Str := toStrRnd(entryPrice)
+            col2Str := toStrRnd(longIndicator ? curCloseOffset - entryPrice : entryPrice - curCloseOffset)
+            row := f_fillSetupTableRow(_table, row, "Entry Price", col1Str, col2Str, tableBgColor, color.white, fontSize)
+
+        // CMC DJI comparison
+        row := f_fillSetupTableRow(_table, row, "US30 - "  + syminfo.ticker, toStrRnd(curSymCashDelta), "", tableBgColor, color.new(color.gray, 0), fontSize)
+        if showDjiDelta
+            row := f_fillSetupTableRow(_table, row, "US30 - DJI", toStrRnd(djiCashDelta), "", tableBgColor, color.new(color.gray, 0), fontSize)
+
+        if not isSymbolSupported(syminfo.ticker)
+            row := f_fillSetupTableRow(_table, row, syminfo.ticker, "Symbol", "Warning", color.red, color.white, fontSize)
+    _table
+//}
