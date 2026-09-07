@@ -94,6 +94,12 @@ def classify(col1, col2):
     if a.empty:
         return "empty", None, None
     uniq = set(np.unique(np.round(a.values, 9)))
+    if len(uniq) == 1:
+        # One value across the whole probe series. Folding this into "binary"
+        # (because {0.0} is a subset of {0, 1}) is how two provably dead fvg
+        # columns were recommended as feed-ready.
+        warm = int(v1.isna().values.argmin()) if v1.isna().any() else 0
+        return "constant", warm, (float(a.min()), float(a.max()))
     kind = None
     if uniq <= {0.0, 1.0} or uniq <= {-1.0, 0.0, 1.0} or uniq <= {0.0, -1.0}:
         kind = "binary"
@@ -183,7 +189,7 @@ for cat, names in cats.items():
         out[cat][name] = rec
 
 TAG = {"scale-free": "SF", "price": "PX", "price^2": "PX2", "binary": "BIN",
-       "ordinal": "ORD", "empty": "??", "unknown": "??"}
+       "ordinal": "ORD", "constant": "CONST", "empty": "??", "unknown": "??"}
 
 # Columns that are NOT causal at default parameters. Keyed by indicator; the value is
 # (column-name predicate, why).
@@ -274,19 +280,26 @@ A("| `PX` | price level — value scaled 1:1 with price | **no** — convert to 
 A("| `PX2` | price squared — scaled with price² (variance-like) | no — take a root or normalize by price² |")
 A("| `BIN` | binary / sign, values in {-1, 0, 1} | yes, as a flag |")
 A("| `ORD` | small integer set (counts, states) | yes, as ordinal or one-hot |")
+A("| `CONST` | **one value across the whole probe series** — the column never fires | **no** — it carries no information; check the indicator before using it |")
 A("| `??` | no value produced on the synthetic probe series (event-driven column), or a mixed form | inspect on real data before using |")
 A("")
 A("Warm-up = index of the first non-NaN value on the probe series at default parameters.")
 A("It scales with `length`, so treat it as a floor, not a constant. Drop the warm-up")
 A("window per ticker before concatenating tickers.")
 A("")
-A("`df.ta` column = the indicator has a DataFrame-extension method (`df.ta.<name>()`, usable")
-A("inside `ta.Strategy`). `no` means it is standalone-only: call `ta.<name>(...)` and join.")
+A("`*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is")
+A("invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.")
 A("")
 
 # ---- summary counts
 tot = sum(len(v) for v in out.values())
-A(f"**{tot} indicators** probed. Broken on this environment (pandas 2.x): see [Known breaks](#known-breaks).")
+broken_now = [n for cat in CAT_ORDER for n, r in out.get(cat, {}).items() if r.get("error")]
+if broken_now:
+    A(f"**{tot} indicators** probed; {len(broken_now)} raise on this environment "
+      f"(pandas 2.x) -- see [Known breaks](#known-breaks).")
+else:
+    A(f"**{tot} indicators** probed. All of them call cleanly on this environment "
+      f"(pandas {pd.__version__}).")
 A("")
 
 for cat in CAT_ORDER:
@@ -324,12 +337,32 @@ for cat in CAT_ORDER:
         if not cols:
             continue
         tags = {tag(c["scale"]) for c in cols}
-        if tags <= {"SF", "BIN", "ORD"}:
+        if tags <= {"SF", "BIN", "ORD"} and "CONST" not in tags:
             ready.append(name)
         elif "PX" in tags or "PX2" in tags:
             needs.append((name, [c["name"] for c in cols if tag(c["scale"]) in ("PX", "PX2")]))
 A(" ".join(f"`{n}`" for n in ready))
 A("")
+
+# ---- columns that cannot fire at all
+dead = [(name, [c["name"] for c in (r.get("cols") or []) if tag(c["scale"]) == "CONST"])
+        for cat in CAT_ORDER for name, r in sorted(out.get(cat, {}).items())
+        if any(tag(c["scale"]) == "CONST" for c in (r.get("cols") or []))]
+if dead:
+    A("## Never fires on the probe")
+    A("")
+    A("One value across the whole probe series. A column that cannot fire is worse than an")
+    A("absent one: it looks like a feature, occupies a slot, and the miner can match on it.")
+    A("Confirm on real data, then repair or delete the column.")
+    A("")
+    A("| indicator | column(s) | owning task |")
+    A("|---|---|---|")
+    DEAD_TASKS = {"fvg": "FVGDEAD in `TODO.md` — the zone is evicted on the bar that "
+                         "creates it (`pandas_ta/trend/fvg.py:46`, `:54`)"}
+    for name, cols in dead:
+        A(f"| `{name}` | {' '.join(f'`{c}`' for c in cols)} | {DEAD_TASKS.get(name, '— unregistered, file one')} |")
+    A("")
+
 A("## Needs a transform before modelling")
 A("")
 A("These emit at least one absolute price level. Convert each `PX` column to a distance,")
@@ -360,19 +393,29 @@ A("")
 
 A("## Known breaks")
 A("")
-A("Observed while probing on pandas 2.3.3 / numpy 2.x:")
-A("")
 BREAK_NOTES = {
     "mcgd": "`Series.append` was removed in pandas 2.0; port the line to `pd.concat`.",
     "aberration": "Import-order bug: `pandas_ta.overlap.sma` resolves to the submodule, "
                   "not the function, at the time `aberration` is imported. Broken on every call.",
 }
-A("| indicator | failure | note |")
-A("|---|---|---|")
 brk = [(n, r["error"]) for cat in CAT_ORDER for n, r in sorted(out.get(cat, {}).items())
        if r.get("error")]
-for n, e in brk:
-    A(f"| `{n}` | `{e[:90]}` | {BREAK_NOTES.get(n, '')} |")
+if brk:
+    A("Observed while probing on pandas 2.3.3 / numpy 2.x:")
+    A("")
+    A("| indicator | failure | note |")
+    A("|---|---|---|")
+    for n, e in brk:
+        A(f"| `{n}` | `{e[:90]}` | {BREAK_NOTES.get(n, '')} |")
+else:
+    A("None. Every registered indicator was probed and returned data on "
+      f"pandas {pd.__version__} / numpy {np.__version__}.")
+    A("")
+    A("Previously broken and now fixed (WIRING, 2026-09-07): `mcgd` "
+      "(`Series.append`, removed in pandas 2.0), `aberration`, `zlma` (every "
+      "`mamode`) and `ui` (`everget=True`) -- the last three all bound a "
+      "SUBMODULE where a function of the same name was meant, and raised "
+      "`TypeError: 'module' object is not callable` on every call.")
 A("")
 A("## Not indicators")
 A("")

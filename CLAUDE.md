@@ -15,7 +15,7 @@ GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicat
 ## Commands
 
 ```sh
-python -m pytest -q                     # full suite: 1085 pass, 21 skip, ~30s
+python -m pytest -q                     # full suite: 1250 pass, 21 skip, ~2min
 python -m pytest tests/test_tvstop.py -q            # one module
 python -m pytest tests/test_tvstop.py::test_name -q # one test
 python -m pytest -q -k "causal or scale"            # one concern across modules
@@ -52,10 +52,14 @@ indicator module.
 | 4 | `pandas_ta/core.py` | `df.ta.<name>()` accessor |
 | 5 | `tests/test_<name>.py` | test suite |
 
-Touch points 3 and 4 have drifted: 11 indicators (`wavetrend`, `ema_align`, `ichimoku_ml`,
-`linreg_channel`, `bos`, `choch`, `fvg`, `halftrend`, `ob`, `zigzag`, `vol_delta`) sit in `Category`
-with no accessor, so `df.ta.strategy()` and the affected category runs raise `AttributeError`. They
-work standalone. Adding the missing `core.py` methods is open work.
+Touch points 3 and 4 drifted apart once: 11 indicators (`wavetrend`, `ema_align`,
+`ichimoku_ml`, `linreg_channel`, `bos`, `choch`, `fvg`, `halftrend`, `ob`, `zigzag`, `vol_delta`) sat
+in `Category` with no accessor, so `df.ta.strategy()` and the affected category runs raised
+`AttributeError`. Fixed 2026-09-07 (WIRING-1). `tests/test_wiring_accessors.py` is now the guard:
+`test_every_registered_indicator_has_an_accessor` fails the moment a name enters `Category` without a
+`core.py` method, and `test_the_eleven_forward_their_parameters_under_the_right_name` spies on the
+call to catch a keyword forwarded under the wrong name — the `supertrend` failure mode, which
+`hasattr` cannot see.
 
 **Naming is API.** Column names encode parameters (`STOCHk_14_3_3`, `BBU_20_2.0`). Renaming a column
 breaks mined strategy rules in the parent repo, which match on these strings.
@@ -75,7 +79,11 @@ live package and lists every column's observed form.
 ## Porting a Pine indicator
 
 Full protocol: `../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`. Source corpus:
-`docs/pine/` (2,211 `.pine` files, untracked). Summary of the gates a port must clear:
+`docs/pine/` — 2,211 `.pine` files, 46MB, **untracked on purpose** (`.gitignore`). 912 of them
+carry `Mozilla Public License 2.0` / `© TradingView` and the rest state no licence at all, so
+committing them under this repo's root MIT `LICENSE` would misstate their terms. They were tracked
+until 2026-09-07; if you re-add them, add a `NOTICE` first. Summary of the gates a port must
+clear:
 
 | Gate | Requirement |
 |---|---|
@@ -100,11 +108,32 @@ hurt to lose, with the measured numbers. Match that when adding one — see `tes
 
 ## Known breaks
 
-Both raise on every call under pandas 2.3.3 (documented in `docs/IndicatorDictionary.md`):
+None outstanding — every registered indicator calls cleanly on pandas 2.3.3. Verify with
+`python docs/gen_indicator_dictionary.py`, whose *Known breaks* section is generated from a live
+probe, not hand-maintained.
 
-- `mcgd` — uses `Series.append`, removed in pandas 2.0.
-- `aberration` — `from pandas_ta.overlap import sma` binds the submodule, not the function, because of
-  circular-import ordering.
+Fixed 2026-09-07 (WIRING), kept here because the second one is a trap worth recognising:
+
+- `mcgd` — used `Series.append`, removed in pandas 2.0. Now `pd.concat`.
+- `aberration`, `zlma` (every `mamode`), `ui` (`everget=True`) — all wrote
+  `from pandas_ta.overlap import sma`, which binds the **submodule** while pandas_ta is still
+  importing itself, so the call raised `TypeError: 'module' object is not callable`. **Import a
+  helper from its own module** (`from pandas_ta.overlap.sma import sma`), never from the package.
+  `test_no_module_shadows_a_function_name_anywhere_in_the_package` scans for the whole class.
+
+**FVGDEAD is closed (2026-09-07).** `fvg`'s `IN_FVG_BULL`/`IN_FVG_BEAR` are repaired and fire at
+22.17% / 19.85% on real data. The original "constant zero by construction" diagnosis was measured on
+synthetic continuous-float frames and was wrong on real prices: the old loop retained a zone only
+while `close <= zone_high`, true on an exact tie, and 86,415 of 408,253 BIST daily bars (21.17%)
+close exactly at an extreme — so the columns fired at 4.63% / 3.51%, driven by tick rounding rather
+than by structure. Gates C/D/E cleared (Gate E max |ρ| 0.6390 / 0.5962, under the 0.76 ship line);
+evidence in `../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
+
+What is still open is **FVGENG** in `TODO.md`: the engine kept three private copies of the same
+loop. Two are now delegating to `pandas_ta.fvg` (`indicator_engine._calculate_fvg`,
+`speedy_indicators`), and the third — `deploy/app/paper_trading/paper_trading.py:~804`, inside the
+live container — is unchanged behind the TRADING FREEZE. **Do not add a fourth copy: import the
+function.**
 
 ## Commit conventions
 
