@@ -4,8 +4,13 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**199 indicators** registered in `Category` (201 counting `drawdown` and `vp`, which are
-shipped but excluded from `df.ta.strategy()`), across 9 categories. Every indicator returns a `Series` or `DataFrame`
+**199 indicators** registered in `Category`, across 9 categories — that is the number
+that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
+counts are true of the same package and are easy to confuse with it: **201** are callable
+as `df.ta.<name>()` (`Category` plus `hwma` and `vp`), and `drawdown` and `ma` are
+importable as `ta.<name>()` without being either. All of them are in the dictionary; the
+three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
+section drifts from the package. Every indicator returns a `Series` or `DataFrame`
 with `UPPERCASE_UNDERSCORE_PARAM` column names.
 
 ---
@@ -149,7 +154,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 `sinwma` `sma` `ssf` `supertrend` `swma` `t3` `tema` `trima` `vidya` `vwap` `vwma` `wcp`
 `wma` `zlma`
 
-**performance (4)** — `drawdown` `log_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
+**performance (3)** — `log_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
 
 **statistics (9)** — `entropy` `kurtosis` `mad` `median` `quantile` `skew` `stdev` `variance` `zscore`
 
@@ -168,9 +173,11 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 `pocket_pivot` `pvi` `pvol` `pvr` `pvt` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta`
 `weis_wave`
 
-Present but outside `Category`, so skipped by `df.ta.strategy()`: `drawdown`, `vp`, and
-`ma` (moving-average selector — `help(ta.ma)`). All three are callable and covered in the
-dictionary.
+Present but outside `Category`, so skipped by `df.ta.strategy()`: `drawdown`, `hwma`,
+`vp`, and `ma` (moving-average selector — `help(ta.ma)`). `hwma` and `vp` are reachable as
+`df.ta.hwma()` / `df.ta.vp()`; `drawdown` and `ma` only as `ta.drawdown()` / `ta.ma()`.
+All four are covered in the dictionary. `drawdown` was previously counted under
+**performance** above AND listed here as outside `Category` — it is the latter.
 
 Utilities: `above` `above_value` `below` `below_value` `cross`.
 

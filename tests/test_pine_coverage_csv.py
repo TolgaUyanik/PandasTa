@@ -9,8 +9,11 @@ It exists because the promise was broken once, in a way that was invisible until
 someone re-ran the script: PINEBI-1a landed the 18 primitives into
 `pandas_ta.utils`, `classify()` consulted `equivalent()` before its `PRIMITIVES`
 check, and fourteen rows silently flipped from `port - primitive` to `have` --
-turning the frozen split (now 60/18/13/9/4/2/1/1) into (75/2/...) and invalidating the
-CSV the four downstream tasks are scoped from. The fix was to make `PRIMITIVES`
+collapsing the split into two buckets and invalidating the CSV the four
+downstream tasks are scoped from. The figures are deliberately NOT retyped
+here: this docstring was itself one of the three places the split went
+stale, and `test_no_other_document_retypes_the_split` now scans this file
+along with every document in the fork. The fix was to make `PRIMITIVES`
 outrank a namespace match; this test is the guard.
 
 The corpus test is skipped when `docs/pine/` is absent — it is untracked by design
@@ -34,6 +37,11 @@ DOCS = os.path.join(_FORK, "docs")
 CSV = os.path.join(DOCS, "pine_builtin_coverage.csv")
 GEN = os.path.join(DOCS, "gen_pine_builtin_coverage.py")
 CORPUS = os.path.join(DOCS, "pine")
+
+# One definition of "a verdict-count claim", used by both split guards. It was
+# inline in a single test; two tests reading the same shape must not drift.
+TABLE_ROW = r"^\s*\|\s*`([A-Za-z0-9/ '\-]+)`[^|]*\|\s*(\d+)\s*\|\s*$"
+NAMELESS_SPLIT = r"\b\d+(?:/\d+){4,}\b"
 
 VERDICTS = {
     "have", "port", "port - primitive", "port - alternate impl",
@@ -220,29 +228,116 @@ def test_every_tier2_have_row_was_docstring_audited():
         )
 
 
+# The one document allowed to state the verdict split. Everything else points
+# at it. See `test_no_other_document_retypes_the_split`.
+SPLIT_SOURCE = "TODO.md"
+
+# A line carrying this marker may quote a wrong split on purpose -- review
+# records narrate the numbers that WERE wrong, and "correcting" those would
+# destroy the record. The marker makes deliberately-stale a declaration rather
+# than an oversight.
+STALE_BY_DESIGN = "<!--stale-by-design-->"
+
+
+def _documents():
+    """Every prose file in the fork, plus this guard's own source.
+
+    Discovered, not enumerated. Round 8 fixed the three known copies of the
+    stale split and left the class open; a hard-coded list of three files is
+    the same escape route one level up.
+    """
+    found = []
+    for root, dirs, files in os.walk(_FORK):
+        dirs[:] = [d for d in dirs if d not in {
+            ".git", "pine", "__pycache__", ".pytest_cache", "build", "dist",
+        }]
+        for name in files:
+            if name.endswith(".md"):
+                found.append(os.path.join(root, name))
+    found.append(os.path.abspath(__file__))
+    return found
+
+
+def _quoted_counts(text, verdicts):
+    """Verdict-count claims, in the two shapes documents actually use.
+
+    Shape A -- a markdown table row: ``| `have` | 55 |``.
+    Shape B -- a backticked span: ``have 75 / port - primitive 2``  <!--stale-by-design-->. Requiring
+    the span is what keeps ordinary English ("we have 3 tests") out of the scan
+    while still catching a real claim.
+    """
+    rows = re.findall(TABLE_ROW, text, re.M)
+    found = [(name.strip(), int(n)) for name, n in rows]
+    for span in re.findall(r"`([^`\n]+)`", text):
+        for verdict in sorted(verdicts, key=len, reverse=True):
+            for match in re.finditer(re.escape(verdict) + r"\s+(\d+)\b", span):
+                found.append((verdict, int(match.group(1))))
+    return found
+
+
+def test_no_other_document_retypes_the_split():
+    """MAJOR (round 9): exactly ONE document may state the split.
+
+    The previous guard read `TODO.md` only, so the very file written to stop
+    the split going stale carried a stale split in its own docstring -- three
+    positions wrong, summing to 108 against 107 rows. Correcting that fixes the
+    instance. This closes the class: any document naming a verdict and a
+    number, anywhere in the fork, must either BE the single asserted source or
+    declare itself deliberately historical.
+    """
+    actual = collections.Counter(r["verdict"] for r in _rows())
+    source = os.path.normcase(os.path.join(_FORK, SPLIT_SOURCE))
+
+    offenders = {}
+    for path in _documents():
+        if os.path.normcase(path) == source:
+            continue
+        text = io.open(path, encoding="utf8").read()
+        claims = _quoted_counts(text, set(actual))
+        # A nameless split -- `55/18/16/9/4/2/2/1` <!--stale-by-design--> -- is the shape that went
+        # stale in this file. Five or more slash-joined numbers is specific
+        # enough to mean a split and nothing else.
+        claims += [(m.group(0), None) for m in re.finditer(NAMELESS_SPLIT, text)]
+        if not claims:
+            continue
+        lines = text.splitlines()
+        undeclared = [c for c in claims
+                      if not any(STALE_BY_DESIGN in ln and str(c[0]) in ln
+                                 for ln in lines)]
+        if undeclared:
+            offenders[os.path.relpath(path, _FORK)] = sorted(
+                set(undeclared), key=str)
+
+    assert offenders == {}, (
+        f"these documents retype the verdict split instead of pointing at "
+        f"{SPLIT_SOURCE}: {offenders}. Either delete the numbers and cite the "
+        f"asserted table, or mark the line {STALE_BY_DESIGN} if it quotes a "
+        f"historically wrong value on purpose."
+    )
+
+
 def test_the_docs_quote_the_csvs_actual_split():
     """Numbers in prose are asserted, not retyped.
 
-    The verdict split was written by hand into `TODO.md`, `03-PINEBI.md` and
-    this file's own docstring, and went stale in all three across four review
-    rounds -- the repo's dominant defect, per CLAUDE.md. Any document that
-    states a count for a verdict must now state the right one.
+    The verdict split was hand-written into three documents and went stale in
+    all three across four review rounds -- the repo's dominant defect, per
+    CLAUDE.md. `TODO.md` is now the single place allowed to state it, and this
+    asserts it against the CSV; `test_no_other_document_retypes_the_split`
+    keeps it single.
     """
-    import collections
-    import re
-
     actual = collections.Counter(r["verdict"] for r in _rows())
-    todo = os.path.join(_FORK, "TODO.md")
-    if not os.path.exists(todo):
-        pytest.skip("TODO.md missing")
+    todo = os.path.join(_FORK, SPLIT_SOURCE)
+    assert os.path.exists(todo), (
+        f"{SPLIT_SOURCE} is the declared home of the verdict split and is "
+        f"missing. This was a pytest.skip, which is how a guard evaporates."
+    )
     text = io.open(todo, encoding="utf8").read()
 
     # Rows of the PINEBI-0 verdict table: `| \`verdict\` (→ -1x) | n |`.
     # The character class must admit capitals: the first version was
     # lowercase-only and silently skipped `n/a - not a Pine built-in`, so that
     # row's count was unasserted on the day the guard shipped.
-    rows = re.findall(r"^\s*\|\s*`([A-Za-z0-9/ '\-]+)`[^|]*\|\s*(\d+)\s*\|\s*$",
-                      text, re.M)
+    rows = re.findall(TABLE_ROW, text, re.M)
     # Keep the raw LIST. The previous version built a dict comprehension, so two
     # tables with contradictory counts collapsed to whichever came last -- which
     # is exactly the stale-duplicate-table defect this guard exists for, and it
@@ -291,7 +386,17 @@ def test_every_map_entry_is_reachable():
     names = {r["name"] for r in _rows()}
 
     # Collections that are keyed by something other than a Pine name.
-    NOT_NAME_KEYED = {"SHAPE_UNUSED"}
+    # Empty, and it must stay honest: the previous value was {"SHAPE_UNUSED"},
+    # an attribute the classifier has never defined. A typo'd or outdated
+    # exclusion is a hole opened in advance -- it excuses a map that does not
+    # exist today and would silently excuse one appearing under that name
+    # tomorrow. So every exclusion must name something real.
+    NOT_NAME_KEYED = set()
+    phantom = sorted(n for n in NOT_NAME_KEYED if not hasattr(gen, n))
+    assert phantom == [], (
+        f"NOT_NAME_KEYED excludes attributes the classifier does not define: "
+        f"{phantom}. Delete them, or the exclusion is a pre-opened hole."
+    )
 
     discovered = {}
     for attr in dir(gen):

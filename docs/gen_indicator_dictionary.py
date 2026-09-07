@@ -292,6 +292,26 @@ A("invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yoursel
 A("")
 
 # ---- summary counts
+#
+# THREE counts, all true of the same package, emitted together because quoting
+# one of them alone is how the README came to say 199, 200, 201 and 202 in a
+# single section. `Category` is the headline: it is exactly what
+# `df.ta.strategy()` sweeps. The other two are wider surfaces.
+import inspect as _inspect
+
+from pandas_ta.core import AnalysisIndicators as _AI
+
+_NOT_INDICATORS = {
+    "above", "above_value", "below", "below_value", "cross", "cross_value",
+    "constants", "indicators", "strategy", "ticker",
+}
+_registered = {n for names in ta.Category.values() for n in names}
+_accessor = {n for n, v in vars(_AI).items()
+             if not n.startswith("_") and _inspect.isfunction(v)} - _NOT_INDICATORS
+_module_only = sorted(n for n in ("ma", "drawdown")
+                      if callable(getattr(ta, n, None)))
+_accessor_only = sorted(_accessor - _registered)
+
 tot = sum(len(v) for v in out.values())
 broken_now = [n for cat in CAT_ORDER for n, r in out.get(cat, {}).items() if r.get("error")]
 if broken_now:
@@ -300,6 +320,25 @@ if broken_now:
 else:
     A(f"**{tot} indicators** probed. All of them call cleanly on this environment "
       f"(pandas {pd.__version__}).")
+A("")
+A("### How many indicators is that, exactly")
+A("")
+A("Three numbers are all true of this package and are easy to quote at each "
+  "other. Measured on the probe run above, not typed:")
+A("")
+A("| surface | n | what it means |")
+A("|---|---|---|")
+A(f"| registered in `Category` | **{len(_registered)}** | "
+  f"the headline — exactly what `df.ta.strategy()` and the category runs sweep |")
+A(f"| callable as `df.ta.<name>()` | **{len(_accessor)}** | "
+  f"adds {', '.join('`%s`' % n for n in _accessor_only) or '—'}, which have an "
+  f"accessor but no `Category` entry, so a strategy run skips them |")
+A(f"| callable as `ta.<name>()` only | **{len(_module_only)}** | "
+  f"{', '.join('`%s`' % n for n in _module_only) or '—'} — no accessor either; "
+  f"call and join the result yourself |")
+A("")
+A("`tests/test_readme_counts.py` asserts the README's copy of these against the "
+  "live package, so the section cannot drift from the code.")
 A("")
 
 for cat in CAT_ORDER:

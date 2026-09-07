@@ -5,8 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A fork of [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, published as
-`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork ships **201**, the
-extras being TradingView/Pine and SMC price-action ports.
+`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **199** in `Category` — the count that
+matters, since `Category` is what `df.ta.strategy()` sweeps — with the extras being
+TradingView/Pine and SMC price-action ports. README's "Indicators by category" section
+gives the two adjacent counts (201 callable on `df.ta`, plus `drawdown`/`ma` on the module)
+and is checked against the package by `tests/test_readme_counts.py`. Do not retype any of
+the three here.
 
 Its only consumer is the parent repo, `d:/AwakenAnalytics/Backtesting/`, which pip-installs it from
 GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicator here is a candidate
@@ -15,7 +19,7 @@ GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicat
 ## Commands
 
 ```sh
-python -m pytest -q                     # full suite: 1250 pass, 21 skip, ~2min
+python -m pytest -q                     # full suite; the 21 skips are explained below
 python -m pytest tests/test_tvstop.py -q            # one module
 python -m pytest tests/test_tvstop.py::test_name -q # one test
 python -m pytest -q -k "causal or scale"            # one concern across modules

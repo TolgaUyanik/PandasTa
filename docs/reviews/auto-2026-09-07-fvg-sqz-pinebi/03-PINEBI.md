@@ -23,7 +23,7 @@ explicit `__all__`, none registered in `Category` or on `df.ta`. Tests: `test_pi
 
 > **CRITICAL** — The CSV is not reproducible, which is PINEBI-0's stated acceptance criterion.
 > `equivalent()` is consulted *before* the `PRIMITIVES` check, and PINEBI-1a has now put all 14 core
-> primitives in the top-level namespace … Re-running today writes `have 75 / port - primitive 2`.
+> primitives in the top-level namespace … Re-running today writes `have 75 / port - primitive 2`. <!--stale-by-design--> (the numbers that WERE produced by the break; the live split is in `TODO.md`)
 
 Landing -1a invalidated -0's artifact. `PRIMITIVES` now outranks a namespace match; regeneration is
 byte-identical.

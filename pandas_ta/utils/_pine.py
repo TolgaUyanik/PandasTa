@@ -34,9 +34,9 @@ nearest_bar`; it was NOT confirmed against a live TradingView chart.
 | behaviour | functions |
 |---|---|
 | propagate NaN | `highest` `lowest` `highestbars` `lowestbars` `correlation` `percentrank` and both percentiles -- a window containing NaN yields NaN |
-| NaN is FALSE | every `condition` argument (`barssince`, `valuewhen`, `highest_since`, `lowest_since`) -- Pine's `na` condition never fires |
+| NaN is FALSE | every condition-shaped argument -- `barssince`, `valuewhen`, `highest_since`, `lowest_since` and `pivot_point_levels`'s `anchor` -- Pine's `na` condition never fires. This row is not hand-maintained: `test_the_na_false_row_names_every_condition_argument` discovers the callers of `_as_condition` from the source and fails if one is missing from it. |
 | NaN absorbed as 0 | `cum` only, and that one is this port's choice rather than a verified Pine behaviour (see its docstring) |
-| unverified against a live chart | the `*bars` tie-break, `cum`'s na handling, and `pivothigh`/`pivotlow`'s two-sided strictness -- each marked ⚠ at its own definition |
+| unverified against a live chart | FOUR: the `*bars` tie-break, `cum`'s na handling, `pivothigh`/`pivotlow`'s two-sided strictness, and `alltime_max`/`alltime_min`'s na handling (the row below) -- each marked ⚠ at its own definition. The previous version of this row said three and the row under it added a fourth. |
 | NaN emitted, then ignored | `alltime_max` `alltime_min` -- `cummax`/`cummin` blank the gap bar and resume as if it were not there, so `[1, na, 3, 2, 5]` gives `[1, na, 3, 3, 5]`. Pine's behaviour on `na` inside `ta.max` is **unverified**; this is the port's. Pinned by `test_all_time_extremes_on_a_gap`. |
 
 Sources: the Pine v6 reference for the core intrinsics; `highest_since` /
@@ -66,13 +66,27 @@ def _as_series(x, name=None):
 
 
 def _length(length, minimum=1, default=None):
-    """Pine raises on a non-positive length; coercing one to 1 hides a typo."""
+    """Pine raises on a non-positive length; coercing one to 1 hides a typo.
+
+    The docstring above promised that and the body then called `int()`, which
+    truncates: `highest(src, 2.7)` returned a 2-bar window under the name
+    `HIGHEST_2`. A rejected typo is loud; a truncated one is a wrong feature
+    column with a plausible name, which is the harder bug of the two.
+    """
     if length is None:
         return default if default is not None else minimum
-    length = int(length)
-    if length < minimum:
-        raise ValueError(f"length must be >= {minimum}, got {length}")
-    return length
+    try:
+        as_int = int(length)
+    except (TypeError, ValueError):
+        raise TypeError(f"length must be an integer, got {length!r}")
+    if as_int != length:
+        raise ValueError(
+            f"length must be a whole number, got {length!r} -- `int()` would "
+            f"have truncated it to {as_int}"
+        )
+    if as_int < minimum:
+        raise ValueError(f"length must be >= {minimum}, got {as_int}")
+    return as_int
 
 
 def _as_condition(x):

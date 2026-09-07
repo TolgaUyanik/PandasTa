@@ -85,7 +85,7 @@ the `fvg` repair do not reach the only consumer without `--force-reinstall`.
 ## MAJOR
 
 - **`tests/test_pine_coverage_csv.py:12`** — the guard module's own docstring quotes a stale split
-  (`60/18/13/9/4/2/1/1`; actual `55/18/16/9/4/2/2/1`, and the quoted figures sum to 108 against 107
+  (`60/18/13/9/4/2/1/1`; actual `55/18/16/9/4/2/2/1` <!--stale-by-design-->, and the quoted figures sum to 108 against 107
   rows). The file's own text names its docstring as one of the three places the number went stale,
   and the guard reads only `TODO.md`. Round 8 fixed the instances and left the class open **inside
   the test written to close it**. → make the guard iterate `TODO.md`, `03-PINEBI.md` and `__file__`,

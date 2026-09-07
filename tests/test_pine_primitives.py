@@ -35,6 +35,7 @@ What these tests pin, in order of how much it would hurt to lose:
 test, and for using only bars strictly before its anchor.
 """
 import importlib.util
+import io
 import re
 
 import numpy as np
@@ -234,11 +235,19 @@ def test_pivot_mutant_backdating_is_caught():
     ns = {"__name__": "pine_mutant"}
     exec(compile(mutated, "<pine_mutant>", "exec"), ns)
 
-    real = pandas_ta.pivothigh(S, 1, 1).to_numpy()
-    mutant = ns["pivothigh"](S, 1, 1).to_numpy()
-    assert not np.array_equal(real, mutant, equal_nan=True), (
-        "back-dating the pivot write changed nothing -- the confirmation lag "
-        "is not actually being applied"
+    # BOTH patched sites are compared. The previous version patched two and
+    # checked `pivothigh` only, so `pivotlow` could have lost its confirmation
+    # lag with the mutant test still green -- a guard that half-covers the
+    # thing it mutates.
+    unguarded = []
+    for fn in ("pivothigh", "pivotlow"):
+        real = getattr(pandas_ta, fn)(S, 1, 1).to_numpy()
+        mutant = ns[fn](S, 1, 1).to_numpy()
+        if np.array_equal(real, mutant, equal_nan=True):
+            unguarded.append(fn)
+    assert unguarded == [], (
+        f"back-dating the pivot write changed nothing for {unguarded} -- the "
+        f"confirmation lag is not actually being applied there"
     )
 
 
@@ -486,3 +495,69 @@ def test_all_time_extremes_are_not_rolling():
     # A running extreme never retreats.
     assert pandas_ta.alltime_max(S).is_monotonic_increasing
     assert pandas_ta.alltime_min(S).is_monotonic_decreasing
+
+
+def test_the_na_false_row_names_every_condition_argument():
+    """MINOR (round 9): the na-policy table is discovered, not maintained.
+
+    The module docstring's "NaN is FALSE" row listed four functions while five
+    route an argument through `_as_condition` -- `pivot_point_levels`'s `anchor`
+    was missing. Correcting the row would fix the instance; this closes the
+    class, so a sixth condition-taking primitive added tomorrow fails here until
+    it is documented AND until it actually treats `na` as false.
+    """
+    import importlib.util
+
+    spec = importlib.util.find_spec("pandas_ta.utils._pine")
+    src = io.open(spec.origin, encoding="utf8").read()
+
+    # Discover from the source: every top-level def whose body calls
+    # `_as_condition`. Not a hand list -- that is the defect being closed.
+    callers = set()
+    current = None
+    for line in src.splitlines():
+        match = re.match(r"^def ([a-z_][a-z0-9_]*)\(", line)
+        if match:
+            current = match.group(1)
+        elif current and not current.startswith("_") and "_as_condition(" in line:
+            callers.add(current)
+
+    assert len(callers) >= 5, (
+        f"expected at least the five known condition-taking primitives, "
+        f"discovered {sorted(callers)} -- the scan is broken, not the module"
+    )
+
+    from pandas_ta.utils import _pine
+
+    doc = _pine.__doc__
+    row = [ln for ln in doc.splitlines() if "NaN is FALSE" in ln]
+    assert len(row) == 1, "expected exactly one `NaN is FALSE` table row"
+    undocumented = sorted(n for n in callers if f"`{n}`" not in row[0])
+    assert undocumented == [], (
+        f"these route an argument through `_as_condition` but are absent from "
+        f"the module docstring's `NaN is FALSE` row: {undocumented}"
+    )
+
+    # And the row must be true, not merely complete: a NaN condition must not
+    # fire. Each caller takes its condition first, so a NaN-only condition is
+    # enough to separate "never fires" from "always fires".
+    never = pd.Series([np.nan] * len(S), index=S.index)
+    assert pandas_ta.barssince(never).isna().all(), "NaN condition fired"
+    assert pandas_ta.valuewhen(never, S).isna().all(), "NaN condition fired"
+
+
+@pytest.mark.parametrize("bad", [2.7, 3.5, -0.5])
+def test_a_non_integral_length_is_rejected_not_truncated(bad):
+    """MINOR (round 9): `_length`'s docstring promised a typo would raise.
+
+    Its body called `int()`, so `highest(S, 2.7)` silently produced a 2-bar
+    window named `HIGHEST_2` -- a wrong feature column under a plausible name,
+    which survives review better than a crash does.
+    """
+    with pytest.raises((ValueError, TypeError)):
+        pandas_ta.highest(S, bad)
+
+    # Whole-number floats still work: `length=3.0` is not a typo, and callers
+    # pass numpy integers.
+    assert pandas_ta.highest(S, 3.0).equals(pandas_ta.highest(S, 3))
+    assert pandas_ta.highest(S, np.int64(3)).equals(pandas_ta.highest(S, 3))

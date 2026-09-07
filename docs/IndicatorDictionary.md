@@ -28,13 +28,25 @@ invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
 **201 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 
+### How many indicators is that, exactly
+
+Three numbers are all true of this package and are easy to quote at each other. Measured on the probe run above, not typed:
+
+| surface | n | what it means |
+|---|---|---|
+| registered in `Category` | **199** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **201** | adds `hwma`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
+
+`tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
+
 ## candles (5)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `cdl_doji` | O/H/L/C | `length=None`, `factor=None`, `scalar=None`, `asint=True` | `CDL_DOJI_10_0.1` ORD | 0 | A candle body is Doji, when it's shorter than 10% of the average of the 10 previous candles' high-low range. |
 | `cdl_inside` | O/H/L/C | `asbool=False` | `CDL_INSIDE` BIN | 0 | An Inside Bar is a bar that is engulfed by the prior highs and lows of it's previous bar. In other words, the current bar is smaller than it's… |
-| `cdl_pattern` | O/H/L/C | `name='all'`, `scalar=None` | `CDL_DOJI_10_0.1` ORD<br>`CDL_INSIDE` BIN | 0 | A wrapper around all candle patterns. |
+| `cdl_pattern` | O/H/L/C | `name='all'`, `scalar=None` | `CDL_2CROWS` ORD<br>`CDL_3BLACKCROWS` CONST<br>`CDL_3INSIDE` ORD<br>`CDL_3LINESTRIKE` CONST<br>`CDL_3OUTSIDE` ORD<br>`CDL_3STARSINSOUTH` CONST<br>`CDL_3WHITESOLDIERS` CONST<br>`CDL_ABANDONEDBABY` CONST<br>`CDL_ADVANCEBLOCK` CONST<br>`CDL_BELTHOLD` ORD<br>`CDL_BREAKAWAY` CONST<br>`CDL_CLOSINGMARUBOZU` ORD<br>`CDL_CONCEALBABYSWALL` CONST<br>`CDL_COUNTERATTACK` ORD<br>`CDL_DARKCLOUDCOVER` CONST<br>`CDL_DOJI_10_0.1` ORD<br>`CDL_DOJISTAR` ORD<br>`CDL_DRAGONFLYDOJI` ORD<br>`CDL_ENGULFING` ORD<br>`CDL_EVENINGDOJISTAR` CONST<br>`CDL_EVENINGSTAR` CONST<br>`CDL_GAPSIDESIDEWHITE` ORD<br>`CDL_GRAVESTONEDOJI` ORD<br>`CDL_HAMMER` ORD<br>`CDL_HANGINGMAN` ORD<br>`CDL_HARAMI` ORD<br>`CDL_HARAMICROSS` ORD<br>`CDL_HIGHWAVE` ORD<br>`CDL_HIKKAKE` ORD<br>`CDL_HIKKAKEMOD` CONST<br>`CDL_HOMINGPIGEON` ORD<br>`CDL_IDENTICAL3CROWS` CONST<br>`CDL_INNECK` ORD<br>`CDL_INSIDE` BIN<br>`CDL_INVERTEDHAMMER` ORD<br>`CDL_KICKING` CONST<br>`CDL_KICKINGBYLENGTH` CONST<br>`CDL_LADDERBOTTOM` ORD<br>`CDL_LONGLEGGEDDOJI` ORD<br>`CDL_LONGLINE` ORD<br>`CDL_MARUBOZU` ORD<br>`CDL_MATCHINGLOW` ORD<br>`CDL_MATHOLD` CONST<br>`CDL_MORNINGDOJISTAR` CONST<br>`CDL_MORNINGSTAR` ORD<br>`CDL_ONNECK` ORD<br>`CDL_PIERCING` CONST<br>`CDL_RICKSHAWMAN` ORD<br>`CDL_RISEFALL3METHODS` CONST<br>`CDL_SEPARATINGLINES` ORD<br>`CDL_SHOOTINGSTAR` ORD<br>`CDL_SHORTLINE` ORD<br>`CDL_SPINNINGTOP` ORD<br>`CDL_STALLEDPATTERN` ORD<br>`CDL_STICKSANDWICH` CONST<br>`CDL_TAKURI` ORD<br>`CDL_TASUKIGAP` ORD<br>`CDL_THRUSTING` CONST<br>`CDL_TRISTAR` CONST<br>`CDL_UNIQUE3RIVER` CONST<br>`CDL_UPSIDEGAP2CROWS` ORD<br>`CDL_XSIDEGAP3METHODS` ORD | 0 | A wrapper around all candle patterns. |
 | `cdl_z` | O/H/L/C | `length=None`, `full=None`, `ddof=None` | `open_Z_30_1` SF<br>`high_Z_30_1` SF<br>`low_Z_30_1` SF<br>`close_Z_30_1` SF | 29 | Normalizes OHLC Candles with a rolling Z Score. |
 | `ha` | O/H/L/C | — | `HA_open` PX<br>`HA_high` PX<br>`HA_low` PX<br>`HA_close` PX | 0 | The Heikin-Ashi technique averages price data to create a Japanese candlestick chart that filters out market noise. Heikin-Ashi charts, developed by… |
 
@@ -61,7 +73,7 @@ invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 | `cmo` | C | `length=None`, `scalar=None`, `drift=None` | `CMO_14` SF | 14 | Attempts to capture the momentum of an asset with overbought at 50 and oversold at -50. |
 | `coppock` | C | `length=None`, `fast=None`, `slow=None` | `COPC_11_14_10` SF | 23 | Coppock Curve (originally called the "Trendex Model") is a momentum indicator is designed for use on a monthly time scale. Although designed for… |
 | `cti` | C | `length=None` | `CTI_12` SF | 11 | The Correlation Trend Indicator is an oscillator created by John Ehler in 2020. It assigns a value depending on how close prices in that range are to… |
-| `dm` | H/L | `length=None`, `mamode=None`, `talib=None`, `drift=None` | `DMP_14` PX<br>`DMN_14` PX | 14 | The Directional Movement was developed by J. Welles Wilder in 1978 attempts to determine which direction the price of an asset is moving. It compares… |
+| `dm` | H/L | `length=None`, `mamode=None`, `talib=None`, `drift=None` | `DMP_14` PX<br>`DMN_14` PX | 13 | The Directional Movement was developed by J. Welles Wilder in 1978 attempts to determine which direction the price of an asset is moving. It compares… |
 | `er` | C | `length=None`, `drift=None` | `ER_10` SF | 10 | The Efficiency Ratio was invented by Perry J. Kaufman and presented in his book "New Trading Systems and Methods". It is designed to account for… |
 | `eri` | H/L/C | `length=None` | `BULLP_13` PX<br>`BEARP_13` PX | 12 | Elder's Bulls Ray Index contains his Bull and Bear Powers. Which are useful ways to look at the price and see the strength behind the market. Bull… |
 | `fisher` | H/L | `length=None`, `signal=None` | `FISHERT_9_1` SF<br>`FISHERTs_9_1` SF | 9 | Attempts to identify significant price reversals by normalizing prices over a user-specified number of periods. A reversal signal is suggested when… |
@@ -278,7 +290,7 @@ invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ebsw` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stoch` `stochrsi` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `bpress` `ema_align` `iama` `ichimoku_ml` `ma_disparity` `log_return` `percent_return` `trend_return` `entropy` `kurtosis` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `zigzag_fib` `atr_ma_multiple` `har_park` `massi` `natr` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `cmf` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta`
+`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stoch` `stochrsi` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `bpress` `ema_align` `iama` `ichimoku_ml` `ma_disparity` `log_return` `percent_return` `trend_return` `entropy` `kurtosis` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `zigzag_fib` `atr_ma_multiple` `har_park` `massi` `natr` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `cmf` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta`
 
 ## Never fires on the probe
 
@@ -288,6 +300,7 @@ Confirm on real data, then repair or delete the column.
 
 | indicator | column(s) | owning task |
 |---|---|---|
+| `cdl_pattern` | `CDL_3BLACKCROWS` `CDL_3LINESTRIKE` `CDL_3STARSINSOUTH` `CDL_3WHITESOLDIERS` `CDL_ABANDONEDBABY` `CDL_ADVANCEBLOCK` `CDL_BREAKAWAY` `CDL_CONCEALBABYSWALL` `CDL_DARKCLOUDCOVER` `CDL_EVENINGDOJISTAR` `CDL_EVENINGSTAR` `CDL_HIKKAKEMOD` `CDL_IDENTICAL3CROWS` `CDL_KICKING` `CDL_KICKINGBYLENGTH` `CDL_MATHOLD` `CDL_MORNINGDOJISTAR` `CDL_PIERCING` `CDL_RISEFALL3METHODS` `CDL_STICKSANDWICH` `CDL_THRUSTING` `CDL_TRISTAR` `CDL_UNIQUE3RIVER` | — unregistered, file one |
 | `macd_area_divergence` | `MADIV_TOP_20_60_120` `MADIV_BOT_20_60_120` | — unregistered, file one |
 | `rsi_divergence` | `RSIDIV_BEAR_14_4_4` | — unregistered, file one |
 | `band_cross_retest` | `BANDXR_CROSS_UP_EMA_66_288` `BANDXR_CROSS_DN_EMA_66_288` `BANDXR_RETEST_FAST_EMA_66_288` `BANDXR_RETEST_SLOW_EMA_66_288` `BANDXR_GAP_ATR_EMA_66_288` | — unregistered, file one |

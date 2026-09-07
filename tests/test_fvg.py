@@ -186,30 +186,71 @@ def test_max_zones_caps_the_live_zone_set():
         )
 
 
-def test_mutant_backdating_is_caught():
-    """Gate B: a back-dated write must change the output.
+# The module's four write sites, each paired with the column it feeds. Written
+# out so that adding a fifth column without a mutant is a test failure, not an
+# omission -- see `test_every_write_site_has_a_mutant`.
+WRITE_SITES = [
+    ("fvg_bull_flag[i] = 1", "FVG_BULL"),
+    ("fvg_bear_flag[i] = 1", "FVG_BEAR"),
+    ("in_fvg_bull[i] = 1", "IN_FVG_BULL"),
+    ("in_fvg_bear[i] = 1", "IN_FVG_BEAR"),
+]
 
-    The module source is read, `in_fvg_bull[i] = 1` is shifted to
-    `in_fvg_bull[i - 1] = 1` -- a one-bar lookahead -- and the mutant is exec'd
-    in memory. If the real module's output equals the mutant's, this test suite
-    cannot see back-dating at all and every causality claim here is unfounded.
-    """
+
+def _fvg_source():
     spec = importlib.util.find_spec("pandas_ta.trend.fvg")
-    src = open(spec.origin, encoding="utf8").read()
-    mutated, count = re.subn(r"in_fvg_bull\[i\] = 1",
-                             "in_fvg_bull[i - 1] = 1", src)
-    assert count == 1, f"expected exactly one write site, patched {count}"
+    return open(spec.origin, encoding="utf8").read()
+
+
+@pytest.mark.parametrize("write,column", WRITE_SITES)
+def test_mutant_backdating_is_caught(write, column):
+    """Gate B: a back-dated write must change the output. ALL FOUR of them.
+
+    The module source is read, one write is shifted from `[i]` to `[i - 1]` --
+    a one-bar lookahead -- and the mutant is exec'd in memory. If the real
+    module's output equals the mutant's, this suite cannot see back-dating in
+    that column and every causality claim about it is unfounded.
+
+    Previously this mutated `in_fvg_bull` alone, so three of the four columns
+    were unguarded -- including `IN_FVG_BEAR`, the other polarity of the column
+    the repair changed. A mutant that patches one site and checks one column
+    proves the harness works, not that the module is causal.
+    """
+    src = _fvg_source()
+    mutated, count = re.subn(re.escape(write), write.replace("[i]", "[i - 1]"),
+                             src)
+    assert count == 1, f"expected exactly one `{write}` site, patched {count}"
 
     ns = {"__name__": "fvg_mutant"}
     exec(compile(mutated, "<fvg_mutant>", "exec"), ns)
 
     high, low, close = _frame(n=700, seed=11)
-    real = fvg(high, low, close)["IN_FVG_BULL"].to_numpy()
-    mutant = ns["fvg"](high, low, close)["IN_FVG_BULL"].to_numpy()
+    real = fvg(high, low, close)[column].to_numpy()
+    mutant = ns["fvg"](high, low, close)[column].to_numpy()
     assert not np.array_equal(real, mutant), (
-        "back-dating the membership write changed nothing -- the column is "
-        "either dead again or the test is not exercising it"
+        f"back-dating {write} changed nothing in {column} -- the column is "
+        f"either dead again or this test is not exercising it"
     )
+
+
+def test_every_write_site_has_a_mutant():
+    """No column may be added to `fvg` without a back-dating mutant.
+
+    The parametrised list above is still a list, and a list is the escape route
+    this repo keeps finding: the previous version guarded one site because one
+    site was what someone thought to write down. This discovers the sites from
+    the source and fails if the list has fallen behind.
+    """
+    src = _fvg_source()
+    discovered = set(re.findall(r"^\s*(\w+\[i\] = 1)\s*$", src, re.M))
+    listed = {w for w, _ in WRITE_SITES}
+    unguarded = sorted(discovered - listed)
+    assert unguarded == [], (
+        f"these write sites have no mutant: {unguarded}. Add them to "
+        f"WRITE_SITES with the column each one feeds."
+    )
+    stale = sorted(listed - discovered)
+    assert stale == [], f"WRITE_SITES names writes the module no longer has: {stale}"
 
 
 def test_offset_shifts_every_column():
