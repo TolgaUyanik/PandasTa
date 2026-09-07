@@ -1189,6 +1189,13 @@ class AnalysisIndicators(BasePandasObject):
         result = vwmacd(close=close, volume=volume, fast=fast, slow=slow, signal=signal, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def wavetrend(self, n1=None, n2=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = wavetrend(high=high, low=low, close=close, n1=n1, n2=n2, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def willr(self, length=None, percentage=True, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -1215,6 +1222,11 @@ class AnalysisIndicators(BasePandasObject):
     def ema(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ema(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ema_align(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ema_align(close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def flag_breakout(self, staff_min_atr=None, staff_min_bars=None,
@@ -1326,9 +1338,43 @@ class AnalysisIndicators(BasePandasObject):
         # return self._post_process(result, **kwargs), span
         return result, span
 
+    def ichimoku_ml(self, tenkan=None, kijun=None, senkou=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        # ichimoku_ml's lengths carry real defaults (9/26/52) that it uses
+        # directly in rolling(). Restating them here would duplicate them;
+        # passing None would break it. So forward only what the caller set, in
+        # a local dict -- do not pollute the kwargs bag `_post_process` sees.
+        params = {k: v for k, v in
+                  (("tenkan", tenkan), ("kijun", kijun), ("senkou", senkou))
+                  if v is not None}
+        result = ichimoku_ml(high=high, low=low, close=close, **params, **kwargs)
+        # The indicator itself takes no `offset`, so apply it here rather than
+        # dropping it: every sibling accessor honors offset, and `strategy()`
+        # fans its kwargs into every call, so refusing it would abort a whole
+        # bulk run (`df.ta.strategy("overlap", offset=1)`) on this one method.
+        offset = get_offset(offset)
+        if result is not None:
+            if offset != 0:
+                result = result.shift(offset)
+            # Siblings fill AFTER their shift, inside the indicator. Doing it
+            # here keeps `df.ta.strategy(offset=1, fillna=0)` from leaving this
+            # one indicator with a different NaN policy from the other forty.
+            if "fillna" in kwargs:
+                result.fillna(kwargs["fillna"], inplace=True)
+            if "fill_method" in kwargs:
+                result.fillna(method=kwargs["fill_method"], inplace=True)
+        return self._post_process(result, **kwargs)
+
     def linreg(self, length=None, offset=None, adjust=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = linreg(close=close, length=length, offset=offset, adjust=adjust, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def linreg_channel(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = linreg_channel(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def ma_disparity(self, length=None, ma_type=None, offset=None, **kwargs):
@@ -1610,6 +1656,20 @@ class AnalysisIndicators(BasePandasObject):
                            enable_rescue_branch=enable_rescue_branch, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def bos(self, swing_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = bos(high=high, low=low, close=close, swing_length=swing_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def choch(self, swing_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = choch(high=high, low=low, close=close, swing_length=swing_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def chop(self, length=None, atr_length=None, scalar=None, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -1657,6 +1717,20 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = equal_highs_lows(high=high, low=low, close=close, left=left, right=right, tol_mode=tol_mode, atr_length=atr_length, atr_mult=atr_mult, pct_tol=pct_tol, lookback_pivots=lookback_pivots, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def fvg(self, max_zones=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = fvg(high=high, low=low, close=close, max_zones=max_zones, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def halftrend(self, atr_period=None, amplitude=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = halftrend(high=high, low=low, close=close, atr_period=atr_period, amplitude=amplitude, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def increasing(self, length=None, strict=None, asint=None, offset=None, **kwargs):
@@ -1731,6 +1805,14 @@ class AnalysisIndicators(BasePandasObject):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = nwog(open_=open_, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ob(self, max_zones=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ob(open_=open_, high=high, low=low, close=close, max_zones=max_zones, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def qstick(self, length=None, offset=None, **kwargs):
@@ -1884,6 +1966,11 @@ class AnalysisIndicators(BasePandasObject):
     def xsignals(self, xa=None, xb=None, above=True, long=True, asbool=None, trend_reset=0, trade_offset=None, offset=None, **kwargs):
         signal = self._get_column(kwargs.pop("close", "close"))
         result = xsignals(signal=signal, xa=xa, xb=xb, above=above, long=long, asbool=asbool, trend_reset=trend_reset, trade_offset=trade_offset, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def zigzag(self, pct_threshold=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = zigzag(close=close, pct_threshold=pct_threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def zigzag_fib(self, length=None, offset=None, **kwargs):
@@ -2183,6 +2270,15 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = vfi(close=close, volume=volume, length=length, coef=coef, vcoef=vcoef, mamode=mamode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def vol_delta(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = vol_delta(open_=open_, high=high, low=low, close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def vp(self, width=None, percent=None, **kwargs):

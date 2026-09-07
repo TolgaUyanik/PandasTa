@@ -119,3 +119,18 @@ def verify_series(series: Series, min_length: int = None) -> Series:
     has_length = min_length is not None and isinstance(min_length, int)
     if series is not None and isinstance(series, Series):
         return None if has_length and series.size < min_length else series
+
+
+def flag_as_int(series, asint: bool = True):
+    """Cast a boolean flag Series to int, unless NaNs make that impossible.
+
+    `astype(int)` raises `ValueError: cannot convert float NaN to integer` on a
+    shifted flag, which is why every non-zero `offset` used to fail in `squeeze`
+    and `squeeze_pro` (SQZOFF). Where a NaN is present the float form is kept --
+    a leading NaN, exactly what every other indicator's offset produces. With
+    `offset=0`, or after a `fillna`, the flag is clean and still casts to int,
+    so default output is unchanged.
+    """
+    if not asint:
+        return series
+    return series.astype(int) if series.notna().all() else series.astype(float)
