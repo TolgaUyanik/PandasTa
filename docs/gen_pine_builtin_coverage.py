@@ -1,0 +1,432 @@
+# -*- coding: utf-8 -*-
+"""PINEBI-0: classify every Pine `ta.*` name the corpus uses against this fork.
+
+Writes `docs/pine_builtin_coverage.csv`. The classifier IS the artifact -- the
+counts are whatever it prints on the day it runs, so a changed count is not a
+finding, but a changed VERDICT is.
+
+"Built-in" is three populations and only two are portable:
+
+  tier 1  core `ta.*` compiler intrinsics (`ta.sma`, `ta.pivothigh`). No source
+          is published; the spec is the Pine v6 reference.
+  tier 2  the official `TradingView/ta` library, MPL-2.0, (c) TradingView. Its
+          source IS on disk: `docs/pine/RA2vGpkA-ta.pine`.
+  tier 3  the Indicators-dialog built-ins ("Bollinger Bands"). Closed source,
+          nothing to port against -- out of scope, and not in this CSV.
+
+⚠ Tier 1 and tier 2 share the namespace `ta`. `import TradingView/ta/<n>` binds
+the library to that name WITH OR WITHOUT an `as` clause, so a `ta.foo` call in a
+file carrying that import may be either. Every row therefore records how many
+files use it WITH and WITHOUT the library import; a name used only in importing
+files is tier 2, not core.
+
+Usage:  python docs/gen_pine_builtin_coverage.py [out.csv]
+"""
+import collections
+import csv
+import os
+import re
+import sys
+import warnings
+
+warnings.filterwarnings("ignore")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+FORK = os.path.dirname(HERE)
+sys.path.insert(0, FORK)
+
+import pandas_ta as ta  # noqa: E402
+
+CORPUS = os.path.join(HERE, "pine")
+LIB = os.path.join(CORPUS, "RA2vGpkA-ta.pine")
+OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    HERE, "pine_builtin_coverage.csv")
+
+TA_CALL = re.compile(r"\bta\.([A-Za-z_][A-Za-z0-9_]*)")
+LIB_IMPORT = re.compile(r"^\s*import\s+TradingView/ta/\d+", re.M)
+# `export [method] <type> <name>(` -- the library's public surface.
+# `export <name>(args) =>` -- the library declares no return type.
+LIB_EXPORT = re.compile(
+    r"^\s*export\s+(?:method\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
+
+# pandas_ta equivalents that are not a bare name match.
+ALIAS = {
+    # ⚠ No `bbw` and no `kcw` entry. `ta.bbw` never appears in the corpus and is
+    # not a library export, so an alias for it was dead code; `ta.kcw` is the
+    # Keltner WIDTH and `pandas_ta.kc` emits no width column (round 4).
+    "tr": "true_range", "dmi": "adx", "bb": "bbands",
+    "cog": "cg", "wpr": "willr", "dev": "mad", "sar": "psar",
+    "change": "mom", "rising": "increasing", "falling": "decreasing",
+    "crossover": "cross", "crossunder": "cross", "stochRsi": "stochrsi",
+    "stochFull": "stoch", "atr2": "atr", "ema2": "ema", "rma2": "rma",
+    "dema2": "dema", "tema2": "tema", "t3Alt": "t3",
+    "supertrend2": "supertrend",   # no `vStop2` -> `vStop`: the fork has neither
+    # camelCase library names -> the snake_case primitives PINEBI-1a shipped
+    "highestSince": "highest_since", "lowestSince": "lowest_since",
+    "max": "alltime_max", "min": "alltime_min",
+    # Library names that hide a shipped indicator behind an abbreviation. Caught
+    # by reading the library's own @function docstrings -- porting these would
+    # have duplicated `fisher` and `vortex` under new names.
+    "ft": "fisher",             # "Calculates the value of the Fisher Transform"
+    "vi": "vortex",             # "Calculates the values of the Vortex Indicator"
+    # NOT an alias -- see NOT_PORTED below. Kept out of ALIAS on purpose.
+}
+
+# Names whose corpus hits are comments or third-party library methods rather
+# than Pine built-ins. Checked by hand 2026-09-07; see the `note` column.
+# ⚠ Corrected 2026-09-07 (review round 2). `max`, `min` and `sum` were hand-
+# labelled here as "not Pine built-ins". All three ARE built-ins and the corpus
+# proves it: `docs/pine/c1pPR2kI.pine:137-139` comments `// All Time High and
+# Low` directly over `ta.max(HIGH_)` / `ta.min(LOW_)`, and `sHoqdgZr.pine:118`
+# calls the two-argument `ta.sum(x, Days)`. `max`/`min` are now PRIMITIVES (they
+# are all-time, NOT rolling); `sum` keeps its verdict but for the right reason.
+# A real built-in that the corpus never actually calls. Its own bucket, because
+# labelling it `n/a - not a Pine built-in` put a falsehood in the machine-readable
+# verdict column that the -1a..-1e scopes are cut from.
+NEVER_CALLED = {
+    "sum": ("`ta.sum(src, len)` IS a real built-in (sliding sum), but every "
+            "corpus hit is a comment or `math.sum`/`array.sum` -- nothing live "
+            "to port against"),
+}
+
+# Not every primitive is a rolling window, and the note column says so. Driven
+# by a map rather than an if/else on two names: round 3 flagged `max`/`min` being
+# described as "rolling", that was patched for those two names only, and `cum`
+# and `pivot_point_levels` -- neither of which takes a length -- kept shipping
+# the same wrong word into the artifact the -1b..-1e scopes are read from.
+SHAPE = {
+    "max": "all-time running extreme (no length)",
+    "min": "all-time running extreme (no length)",
+    "cum": "all-time running total (no length)",
+    "pivot_point_levels": "period-anchored levels (no rolling window)",
+}
+DEFAULT_SHAPE = "rolling primitive"
+
+NOT_BUILTIN = {
+    "adx": ("not a Pine built-in -- the built-in is `ta.dmi`. Both corpus hits "
+            "are comments: `PTBeZtM4-BestTimeFrameFinder.pine:5` "
+            "('hand-rolled ADX (identical to ta.adx)') and "
+            "`dUWBKgXM-SimTradeIndicators.pine:271`. It escaped the hand check "
+            "because it RESOLVED to a pandas_ta name and so never reached this "
+            "branch -- the check had been applied to names that failed to "
+            "resolve, not to the population"),
+    "pivot": "user-defined; the built-in is `ta.pivot_point_levels`",
+    "normalize": "hit is a comment in a third-party lib describing its own fn",
+    "covariance": 'hit is the comment "Pine has no native ta.covariance"',
+}
+
+# Rolling primitives: real core built-ins, but vocabulary rather than features.
+# ⚠ `audited` is a claim, so it now carries its receipt.
+#
+# Round 6 answered "nobody read the sources" with a NAME LIST of 29. Round 7
+# broke four of them in twenty minutes -- `trima`, `stc`, `aroon`, `kvo`, all
+# `audited=yes`, all divergent, one with the correct formula sitting in
+# pandas_ta's own docstring. A list long enough to pass a test is not an audit.
+#
+# The value is the EVIDENCE: which library line was read and what the comparison
+# found. `test_audited_rows_carry_their_evidence` requires it to be non-empty and
+# to cite a line. A name with no receipt is `audited=no`, and no is fine -- the
+# 28-row backlog is PINEBI-0b, and an honest backlog beats a false all-clear.
+AUDITED = {
+    # Compared body-to-body, round 6-7. Those that diverged carry a
+    # SEMANTIC_CAVEAT; the divergence IS the evidence the comparison happened.
+    "crossunder": "core namespace, no library body; "
+                  "pandas_ta/utils/_signals.py:79 -- "
+                  "`cross = current & previous if above else` is upward-only "
+                  "by default. Caveated.",
+    "cross": "core `ta.cross` is either-direction; "
+             "pandas_ta/utils/_signals.py:79 "
+             "`cross = current & previous if above else` is one direction per "
+             "call. Caveated.",
+    "swma": "pandas_ta/overlap/swma.py:8 `length = int(length)` defaults to 10 "
+            "against TradingView's fixed 4-bar kernel. Caveated.",
+    "supertrend": "RA2vGpkA-ta.pine:591 `direction == -1` is the uptrend; "
+                  "pandas_ta/overlap/supertrend.py:35 `dir_[i] = 1` is the "
+                  "uptrend there. Caveated.",
+    "eom": "RA2vGpkA-ta.pine:196 `div = 10000` vs "
+           "pandas_ta/volume/eom.py:10 `100000000`. Caveated.",
+    "trima": "RA2vGpkA-ta.pine:693 `math.ceil(length / 2)` (two different "
+             "windows) vs "
+             "pandas_ta/overlap/trima.py:16 `half_length` used for both "
+             "passes. Caveated.",
+    "aroon": "RA2vGpkA-ta.pine:94 `ta.highestbars(high, length)` (L-bar) vs "
+             "pandas_ta/trend/aroon.py:19 `rolling(length + 1)`. Caveated.",
+    "kvo": "RA2vGpkA-ta.pine:292 `* 100` absent from "
+           "pandas_ta/volume/kvo.py:41 `signed_volume`. Caveated.",
+    "change": "core `ta.change` defaults to 1; "
+              "pandas_ta/momentum/mom.py:8 `else 10`. Caveated.",
+    "sar": "core returns one series; pandas_ta/trend/psar.py:104 "
+           "`PSARl` is emitted beside PSARs. Caveated.",
+    "stoch": "core `ta.stoch` is raw %K; pandas_ta/momentum/stoch.py:12 "
+             "`smooth_k` resolves to 3. Caveated.",
+    # NO caveat: measured, and there is no divergence to record.
+    "variance": "core defaults `biased=true` (ddof=0); "
+                "pandas_ta/statistics/variance.py:9 `else 0` resolves to the "
+                "same. MATCHES -- no caveat. (An earlier round pasted `stdev`'s "
+                "caveat here without running the code.)",
+    "stdev": "core defaults `biased=true` (ddof=0); "
+             "pandas_ta/statistics/stdev.py:7 `ddof=1` in the signature -- "
+             "genuinely differs, unlike `variance`. Caveated.",
+    "rising": "core is monotone over `length`; "
+              "pandas_ta/trend/increasing.py:9 `strict` resolves to "
+              "False. Caveated.",
+    "falling": "core is monotone over `length`; "
+               "pandas_ta/trend/decreasing.py:9 `strict` resolves to "
+               "False. Caveated.",
+}
+
+# `have`, but not a drop-in: the shipped function computes the same idea with a
+# different default or shape. Recorded so a porter does not transliterate a Pine
+# call into a pandas_ta call that quietly means something else.
+SEMANTIC_CAVEAT = {
+    "rising": "Pine's `ta.rising` is monotone over `length` bars; pass "
+              "`strict=True` (and mind the window: pandas_ta compares "
+              "`length` values, Pine `length` diffs)",
+    "falling": "⚠ Pine's `ta.falling` is monotone over `length` bars; pass "
+               "`strict=True` (and mind the window: pandas_ta compares "
+               "`length` values, Pine `length` diffs)",
+    "change": "Pine's `ta.change` defaults to length 1; `pandas_ta.mom` "
+              "defaults to 10",
+    "stoch": "Pine's `ta.stoch` is the raw %K; `pandas_ta.stoch` smooths it "
+             "unless `smooth_k=1`",
+    # (no `stochFull` entry: it is classified `port - alternate impl` before the
+    # `have` branch is reached, so a caveat here would never be emitted --
+    # `test_every_map_entry_is_reachable` now proves that for all five maps.)
+    "crossunder": "⚠ DIRECTION: `pandas_ta.cross` defaults `above=True` and "
+                  "detects UPWARD crosses only; a crossunder needs "
+                  "`cross(a, b, above=False)`",
+    "cross": "⚠ Pine's `ta.cross` is EITHER direction; `pandas_ta.cross` is "
+             "one direction per call -- use `cross(a,b,True) | cross(a,b,False)`",
+    "swma": "⚠ Pine's `ta.swma` is the FIXED 4-bar [1,2,2,1]/6 kernel and takes "
+            "no length; `pandas_ta.swma` defaults to length=10 and says so in "
+            "its own docstring ('variable length in contrast to TradingView's "
+            "fixed length') -- pass `length=4`",
+    "supertrend": "⚠ DIRECTION SIGN IS INVERTED: the library's `direction == -1` "
+                  "is the uptrend (`RA2vGpkA-ta.pine:591`), pandas_ta's "
+                  "`SUPERTd == 1` is. The library also has a `wicks` option "
+                  "(reverse on high/low) with no pandas_ta equivalent",
+    "eom": "⚠ divisor default differs by 1e4: the library uses `div = 10000` "
+           "(`RA2vGpkA-ta.pine:196`), `pandas_ta.eom` uses 100000000",
+    "trima": "⚠ DIFFERENT LENGTHS: the library is "
+             "`sma(sma(src, ceil(L/2)), floor(L/2)+1)` "
+             "(`RA2vGpkA-ta.pine:692`) -- two different windows; "
+             "`pandas_ta.trima` uses `round(0.5*(L+1))` for BOTH passes, so the "
+             "two diverge at every EVEN length (L=10 -> Pine 5,6 vs fork 6,6). "
+             "pandas_ta's own docstring quotes the formula it does not implement",
+    "aroon": "⚠ window off by one: the library is "
+             "`100 * (highestbars(high, L) + L) / L` (`RA2vGpkA-ta.pine:93`), an "
+             "L-bar window whose Aroon-Up cannot fall below 100/L; "
+             "`pandas_ta.aroon` rolls L+1 bars and does reach 0",
+    "kvo": "⚠ scale: the library's trend is `sign(change(hlc3)) * volume * 100` "
+           "(`RA2vGpkA-ta.pine:292`); `pandas_ta.kvo` omits the x100, so every "
+           "value is 100x smaller. It also trims to `first_valid_index()` "
+           "before the EMAs, changing the warm-up seed",
+    "stdev": "Pine defaults `biased=true` (ddof=0); pandas_ta defaults to 1",
+    "sar": "Pine's `ta.sar` is one series; `pandas_ta.psar` returns "
+           "complementary `PSARl`/`PSARs` -- combine with `PSARl.fillna(PSARs)`",
+}
+
+PRIMITIVES = {
+    "highest", "lowest", "highestbars", "lowestbars", "valuewhen", "barssince",
+    "cum", "correlation", "percentrank", "percentile_nearest_rank",
+    "percentile_linear_interpolation", "pivot_point_levels", "pivothigh",
+    "pivotlow", "highestSince", "lowestSince",
+    # All-time, not rolling: `ta.max(high)` takes no length and returns the
+    # running extreme from bar 0.
+    "max", "min",
+}
+
+DATA_REQUEST = {"requestVolumeDelta", "requestUpAndDownVolume"}
+
+# ⚠ Names where a bare match to a pandas_ta function is WRONG -- the two
+# libraries use the same short name for different indicators. Found by reading
+# the `@function` line above every tier-2 export rather than trusting the name;
+# `test_every_tier2_have_row_was_docstring_audited` keeps that audit honest.
+WRONG_NAME_MATCH = {
+    "stc": ("the library is `ema(stoch(ema(stoch(macd, cycle), d1), cycle), d2)` "
+            "clamped to [0,100] (`RA2vGpkA-ta.pine:527`), with `d1`/`d2` as "
+            "parameters. `pandas_ta.stc` has NEITHER -- it substitutes a "
+            "fixed-alpha recursion (`factor=0.5`) and no clamp, and its "
+            "`if lowest_xmacd.iloc[i] > 0` guard (`stc.py:195`) freezes the "
+            "first stochastic whenever the rolling MACD minimum is <= 0, which "
+            "for a zero-centred oscillator is the normal case. Not expressible "
+            "as a call to the shipped function"),
+    "dm": ("the library's `dm` is the **Demarker** oscillator "
+           "(`RA2vGpkA-ta.pine:174`: `sma(demax)/(sma(demax)+sma(demin))`, "
+           "bounded 0-1). `pandas_ta.dm` is Wilder's Directional Movement "
+           "(`DMP_`/`DMN_`) -- a different indicator, no ratio column"),
+}
+
+# Portable, but deliberately not ported, with the reason recorded.
+# ⚠ `kcw` was aliased to `kc` and classified `have` until round 4. It is not
+# had: Pine's `ta.kcw` is the Keltner WIDTH, `(upper - lower) / basis`, and
+# `pandas_ta.kc` returns `KCLe_/KCBe_/KCUe_` with no width column and no
+# parameter that produces one. The sibling `bbw -> bbands` is correct only by
+# accident, because `bbands` does emit `BBB_`. A `have` verdict would have
+# deleted a real port permanently -- `P8mcVgcu-FastMetrix.pine:58` calls it live.
+NOT_PORTED = {
+    "cagr": ("`cagr(entryTime, entryPrice, exitTime, exitPrice)` is a two-POINT "
+             "growth rate over arbitrary endpoints (`RA2vGpkA-ta.pine:114`). "
+             "`pandas_ta.cagr` is a whole-series scalar over the first and last "
+             "bar with no endpoint arguments -- it cannot express the call. A "
+             "two-point CAGR is a one-liner; same ruling as `changePercent`"),
+    "changePercent": (
+        "`100 * (a - b) / b` on two ARBITRARY series (library docstring: "
+        "'between two distinct values'). `percent_return` is a one-series "
+        "rolling return and is NOT the same function; this one is a one-liner "
+        "at the call site and needs no primitive"),
+}
+
+
+def scan_corpus():
+    """-> {name: [files_without_lib_import, files_with_lib_import]}"""
+    usage = collections.defaultdict(lambda: [0, 0])
+    files = 0
+    for entry in sorted(os.listdir(CORPUS)):
+        if not entry.endswith(".pine"):
+            continue
+        files += 1
+        src = open(os.path.join(CORPUS, entry), encoding="utf8",
+                   errors="replace").read()
+        has_lib = bool(LIB_IMPORT.search(src))
+        for name in set(TA_CALL.findall(src)):
+            usage[name][1 if has_lib else 0] += 1
+    return usage, files
+
+
+def library_exports():
+    if not os.path.exists(LIB):
+        return set()
+    src = open(LIB, encoding="utf8", errors="replace").read()
+    return set(LIB_EXPORT.findall(src))
+
+
+def equivalent(name):
+    """The pandas_ta callable this Pine name maps to, or ''."""
+    for candidate in (name, name.lower(), ALIAS.get(name, "")):
+        if candidate and callable(getattr(ta, candidate, None)):
+            return candidate
+    return ""
+
+
+def classify(name, clean_files, lib_files, exports):
+    """-> (tier, verdict, note)"""
+    if name in NOT_BUILTIN:
+        return "none", "n/a - not a Pine built-in", NOT_BUILTIN[name]
+
+    if name in NEVER_CALLED:
+        return "1", "n/a - never called live in the corpus", NEVER_CALLED[name]
+
+    tier2 = name in exports
+    core_only = clean_files > 0
+    if tier2 and not core_only:
+        tier = "2"
+    elif tier2:
+        tier = "1+2"          # the library re-exports a core name
+    else:
+        tier = "1"
+
+    if name in WRONG_NAME_MATCH:
+        return tier, "port", WRONG_NAME_MATCH[name] + "; PINEBI-1b"
+
+    if name in NOT_PORTED:
+        return tier, "n/a - not worth a primitive", NOT_PORTED[name]
+
+    if name in DATA_REQUEST:
+        return tier, "port - blocked on data", (
+            "needs lower-timeframe data below the engine's 1h floor; PINEBI-1d")
+
+    eq = equivalent(name)
+    if eq and name in ALIAS and ALIAS[name] == eq and name.endswith(
+            ("2", "Alt", "Full", "Rsi")):
+        return tier, "port - alternate impl", (
+            "restates shipped `%s`; keep only if it saves warm-up or reaches a "
+            "parameter the sibling cannot; PINEBI-1c" % eq)
+    # PRIMITIVES outranks a namespace match ON PURPOSE. Once PINEBI-1a landed,
+    # `equivalent()` started resolving all 18 against the fork's own utils and
+    # flipped them to `have`, which would make this CSV unreproducible -- the
+    # one thing PINEBI-0 has to be. A name declared vocabulary stays vocabulary;
+    # `pandas_ta_equivalent` still records where it now lives.
+    if name in PRIMITIVES:
+        landed = " (landed: pandas_ta.%s)" % eq if eq else ""
+        # `max`/`min` are all-time, not rolling. Emitting the generic note for
+        # them would ship the exact wrong semantic into the artifact that the
+        # -1a..-1e scopes are read from -- which it did, for one round.
+        shape = SHAPE.get(name, DEFAULT_SHAPE)
+        return tier, "port - primitive", (
+            "%s, belongs in pandas_ta/utils/, not Category; PINEBI-1a%s"
+            % (shape, landed))
+    if eq:
+        caveat = SEMANTIC_CAVEAT.get(name)
+        return tier, "have", ("pandas_ta.%s (⚠ %s)" % (eq, caveat) if caveat
+                              else "pandas_ta.%s" % eq)
+    if tier == "1":
+        return tier, "port", ("no pandas_ta equivalent; PINEBI-1b "
+                              "(tier-1 core gap, no MPL attribution)")
+    return tier, "port", "no pandas_ta equivalent; PINEBI-1b"
+
+
+def main():
+    usage, files = scan_corpus()
+    exports = library_exports()
+    print("corpus files scanned: %d" % files)
+    print("library exports found in %s: %d" % (os.path.basename(LIB),
+                                               len(exports)))
+
+    rows = []
+    for name in sorted(usage, key=lambda n: (-sum(usage[n]), n)):
+        clean, with_lib = usage[name]
+        tier, verdict, note = classify(name, clean, with_lib, exports)
+        rows.append({
+            "tier": tier,
+            "name": name,
+            "files_using": clean + with_lib,
+            "files_without_lib_import": clean,
+            "files_with_lib_import": with_lib,
+            "in_tradingview_ta_library": int(name in exports),
+            "pandas_ta_equivalent": equivalent(name),
+            "verdict": verdict,
+            "audited": ("yes" if name in AUDITED else
+                        "no" if verdict == "have" else "n/a"),
+            "audit_evidence": AUDITED.get(name, ""),
+            "note": note,
+        })
+
+    # Library exports the corpus never calls are still portable candidates.
+    seen = {r["name"] for r in rows}
+    for name in sorted(exports - seen):
+        tier, verdict, note = classify(name, 0, 0, exports)
+        rows.append({
+            "tier": "2", "name": name, "files_using": 0,
+            "files_without_lib_import": 0, "files_with_lib_import": 0,
+            "in_tradingview_ta_library": 1,
+            "pandas_ta_equivalent": equivalent(name),
+            "verdict": verdict,
+            "audited": ("yes" if name in AUDITED else
+                        "no" if verdict == "have" else "n/a"),
+            "audit_evidence": AUDITED.get(name, ""),
+            "note": note + " (exported but never called in the corpus)",
+        })
+
+    with open(OUT, "w", encoding="utf8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    print("WROTE %s (%d rows)" % (OUT, len(rows)))
+
+    by_verdict = collections.Counter(r["verdict"] for r in rows)
+    for verdict, n in by_verdict.most_common():
+        print("  %-26s %3d" % (verdict, n))
+
+    core = [r for r in rows if r["tier"].startswith("1")]
+    lib = [r for r in rows if "2" in r["tier"]]
+    print("tier 1 (core, incl. 1+2): %d used, %d have, %d port" % (
+        len(core), sum(r["verdict"] == "have" for r in core),
+        sum(r["verdict"].startswith("port") for r in core)))
+    print("tier 2 (TradingView/ta):  %d exports, %d have, %d port" % (
+        len(lib), sum(r["verdict"] == "have" for r in lib),
+        sum(r["verdict"].startswith("port") for r in lib)))
+
+
+if __name__ == "__main__":
+    main()
