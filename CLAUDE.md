@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A fork of [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, published as
-`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **199** in `Category` — the count that
+`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **221** in `Category` — the count that
 matters, since `Category` is what `df.ta.strategy()` sweeps — with the extras being
 TradingView/Pine and SMC price-action ports. README's "Indicators by category" section
-gives the two adjacent counts (201 callable on `df.ta`, plus `drawdown`/`ma` on the module)
+gives the two adjacent counts (229 callable on `df.ta`, plus `drawdown`/`ma` on the module)
 and is checked against the package by `tests/test_readme_counts.py`. Do not retype any of
 the three here.
 
@@ -112,7 +112,9 @@ hurt to lose, with the measured numbers. Match that when adding one — see `tes
 
 ## Known breaks
 
-None outstanding — every registered indicator calls cleanly on pandas 2.3.3. Verify with
+None outstanding. Two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
+they need a lower-timeframe frame the single-frame harness cannot synthesise — and the generated
+*Known breaks* section says so rather than counting them either way. Verify with
 `python docs/gen_indicator_dictionary.py`, whose *Known breaks* section is generated from a live
 probe, not hand-maintained.
 
@@ -138,6 +140,35 @@ loop. Two are now delegating to `pandas_ta.fvg` (`indicator_engine._calculate_fv
 `speedy_indicators`), and the third — `deploy/app/paper_trading/paper_trading.py:~804`, inside the
 live container — is unchanged behind the TRADING FREEZE. **Do not add a fourth copy: import the
 function.**
+
+## Porting a TA-Lib indicator
+
+Done once, as **TALIB-1** (2026-09-08): the ten `port` rows of
+`../AlternativeRepos/altrepo_talib.csv`. Same five touch points, same Gates A-F; Gate A's
+citation becomes the TA-Lib C function name instead of a Pine line number. Measurements,
+per indicator: `docs/TalibPortsMeasured.md`. Tests: `tests/test_talib1_ports.py`.
+Overlap harness: `../Backtesting/scripts/analysis/measure_talib1_overlap_full.py`.
+
+Four things worth knowing before touching any of it:
+
+* **`talib` is a DEV-ONLY dependency** (`setup.py`, `extras_require["dev"]`). It is the
+  Gate A oracle and must never be imported by shipped code -- the fork's only consumer
+  pip-installs it without TA-Lib. `test_no_shipped_module_imports_talib` pins the
+  complete set of modules that do import it, which is two UPSTREAM files
+  (`candles/cdl_pattern.py`, `momentum/dm.py`) behind `if Imports["talib"]`.
+* **Seven of the ten are one state machine**, in `pandas_ta/cycles/_hilbert.py`, not
+  seven algorithms. It has TWO warm-ups -- 12 bars for the lookback-32 read-outs
+  (`HT_DCPERIOD`, `HT_PHASOR`, `MAMA`) and 37 for the lookback-63 ones (`HT_DCPHASE`,
+  `HT_SINE`, `HT_TRENDLINE`, `HT_TRENDMODE`). Using 12 everywhere reproduces
+  `HT_DCPERIOD` EXACTLY and leaves `HT_TRENDLINE` wrong by 0.18 as a transient that
+  decays to zero by bar ~700, so it passes any check run on the tail.
+* **The Hilbert taps are summed in TA-Lib's order on purpose.** The algebraically
+  identical one-expression form is wrong by 1.1e-2 on MAMA, because MAMA's clamped alpha
+  amplifies a 1-ulp difference in an ill-conditioned `atan`.
+* **TA-Lib's price-level outputs are not features.** `HT_TRENDLINE`, `MAMA`, `FAMA` and
+  `SAREXT` ship as percent distances; the levels are behind `raw=True` and are registered
+  nowhere. `BETA` needs a benchmark series, so it is out of `Category` AND in
+  `strategy`'s exclusion list.
 
 ## Commit conventions
 

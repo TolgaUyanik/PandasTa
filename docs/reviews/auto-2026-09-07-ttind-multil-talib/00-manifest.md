@@ -51,15 +51,16 @@ and neither artifact said so.** Both CSVs now carry a `probe_env` column,
 `test_the_csv_records_the_environment_its_verdicts_depend_on` fails if the committed
 stamp disagrees with the interpreter running the suite (3 mutations, 3 caught).
 
-Post-install split, regenerated: have **115** · port - alternate impl
-**38** · port **38** · n/a
-**28** · unknown **5**.
-Divergence: seeding **15** · default-only **8** · maths
-**11** · shape **2** · warmup **2**.
+Post-install split as it stood AT THE CLOSE OF THAT RUN <!--stale-by-design-->:
+have 115 · port - alternate impl 38 · port 38 · n/a 28 · unknown 5; divergence
+seeding 15 · default-only 8 · maths 11 · shape 2 · warmup 2.
 
-⚠ These moved again in review round 1, when the shared comparison stopped short-circuiting on
-`type(a) is not type(b)`. Column-aware comparison alone rescued 13 real matches in the classic scan
-(have 102 → 115). The numbers above are the CURRENT ones, re-read from the CSVs.
+⚠ **Superseded on 2026-09-08 by ALTFIX-1**, which gave the classic scanner the
+shared resolver: sweeping both sides under every declared kwargs variant moved
+`have` to 118 and the gap to 33. This paragraph is a record of that run, not a
+current statement — `tests/test_prose_counts_match_the_csvs.py` caught it
+claiming otherwise. The live numbers are in the CSVs and in
+`../AlternativeRepos/IndicatorList.md`, which is generated from them.
 
 ## Execution map
 

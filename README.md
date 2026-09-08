@@ -4,10 +4,10 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**199 indicators** registered in `Category`, across 9 categories — that is the number
+**221 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **201** are callable
-as `df.ta.<name>()` (`Category` plus `hwma` and `vp`), and `drawdown` and `ma` are
+counts are true of the same package and are easy to confuse with it: **229** are callable
+as `df.ta.<name>()` (`Category` plus `beta`, `hwma` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
 three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
 section drifts from the package. Every indicator returns a `Series` or `DataFrame`
@@ -140,43 +140,61 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **candles (5)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ha`
 
-**cycles (2)** — `dsp` `ebsw`
+**cycles (7)** — `dsp` `ebsw` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode`
 
-**momentum (51)** — `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock`
-`cti` `dm` `er` `eri` `fisher` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd`
+**momentum (52)** — `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock`
+`cti` `dm` `er` `eri` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd`
 `macd_area_divergence` `mom` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `qqe` `roc`
 `rsi` `rsi_divergence` `rsx` `rvgi` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stoch`
 `stochrsi` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr`
 
-**overlap (41)** — `alma` `bpress` `dema` `ema` `ema_align` `fwma` `hilo` `hl2` `hlc3` `hma`
-`iama` `ichimoku` `ichimoku_ml` `jma` `kama` `linreg` `linreg_channel` `ma_disparity` `mcgd`
-`midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma` `rainbow` `rma`
-`sinwma` `sma` `ssf` `supertrend` `swma` `t3` `tema` `trima` `vidya` `vwap` `vwma` `wcp`
-`wma` `zlma`
+**overlap (48)** — `alma` `bpress` `dema` `dema2` `ema` `ema2` `ema_align` `fwma` `hilo` `hl2`
+`hlc3` `hma` `iama` `ichimoku` `ichimoku_ml` `jma` `kama` `linreg` `linreg_channel`
+`ma_disparity` `mcgd` `midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma`
+`rainbow` `rma` `rma2` `sinwma` `sma` `ssf` `supertrend` `supertrend2` `swma` `t3` `t3_tv`
+`tema` `tema2` `trima` `vidya` `vwap` `vwma` `wcp` `wilder_rma` `wma` `zlma`
 
 **performance (3)** — `log_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
 
-**statistics (9)** — `entropy` `kurtosis` `mad` `median` `quantile` `skew` `stdev` `variance` `zscore`
+**statistics (12)** — `covariance` `entropy` `kurtosis` `mad` `median` `normalize` `quantile` `rolling_sum` `skew` `stdev` `variance` `zscore`
 
-**trend (50)** — `adx` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch`
+**trend (55)** — `adx` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch`
 `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `equal_highs_lows` `flag_breakout` `fvg`
-`fvg_sweep_magnet` `halftrend` `increasing` `inverse_fvg` `liquidity_compression_box`
-`liquidity_sweep` `long_run` `nwog` `ob` `pmax` `priorday_fib` `priormonth_range` `psar`
-`qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run`
-`sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `tsignals`
+`fvg_sweep_magnet` `halftrend` `head_shoulders` `increasing` `inverse_fvg`
+`liquidity_compression_box`
+`liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar`
+`qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro`
+`short_run`
+`sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge`
+`triple_top_bottom` `tsignals`
 `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `xsignals` `zigzag` `zigzag_fib`
 
-**volatility (17)** — `aberration` `accbands` `atr` `atr_ma_multiple` `bbands` `donchian`
+**volatility (18)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `donchian`
 `har_park` `hwc` `kc` `massi` `natr` `pdist` `range_profile` `rvi` `thermo` `true_range` `ui`
 
 **volume (21)** — `ad` `adosc` `aobv` `avwap_z` `cmf` `efi` `eom` `kvo` `mfi` `nvi` `obv`
 `pocket_pivot` `pvi` `pvol` `pvr` `pvt` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta`
 `weis_wave`
 
-Present but outside `Category`, so skipped by `df.ta.strategy()`: `drawdown`, `hwma`,
-`vp`, and `ma` (moving-average selector — `help(ta.ma)`). `hwma` and `vp` are reachable as
-`df.ta.hwma()` / `df.ta.vp()`; `drawdown` and `ma` only as `ta.drawdown()` / `ta.ma()`.
-All four are covered in the dictionary. `drawdown` was previously counted under
+Present but outside `Category`, so skipped by `df.ta.strategy()`: `beta`, `drawdown`,
+`hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), and the two lower-timeframe
+functions `up_and_down_volume` / `volume_delta`, and the four TA-Lib ports
+`beta`, `ht_trendline`, `mama` and `sarext`. `beta`, `hwma`, `vp`,
+`up_and_down_volume` and `volume_delta` are reachable as `df.ta.<name>()`; `drawdown` and
+`ma` only as `ta.drawdown()` / `ta.ma()`. `beta` is a TALIB-1 port and needs a BENCHMARK
+series a single-frame sweep cannot supply, which is the same reason as the two volume
+functions below; it is absent from the dictionary for the same reason they are.
+
+`ht_trendline`, `mama` and `sarext` return TA-Lib's raw PRICE LEVELS, and their
+scale-free distance forms were measured into the Gate E revert band against columns
+the engine already ships — `bias` 0.9576, `QQE_RSIMA` 0.9408, `dist_to_psar_pct`
+0.9850. They stay callable (`emit_dist=True` restores the deleted columns for
+re-measurement) but a strategy sweep would only emit dead `PX` columns. `beta`
+needs a second series a sweep cannot supply.
+
+The two volume functions are excluded **deliberately**: they require a second
+(lower-timeframe) frame, which a strategy sweep cannot supply, so registering them took
+the whole multiprocessing path down with a `ValueError`. See `docs/LowerTimeframeData.md`. `drawdown` was previously counted under
 **performance** above AND listed here as outside `Category` — it is the latter.
 
 Utilities: `above` `above_value` `below` `below_value` `cross`.
