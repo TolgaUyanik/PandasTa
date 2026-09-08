@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""PINEBI-1a: Pine Script's rolling primitives, transliterated.
+# r"""  <- the docstring is RAW: it quotes a grep whose `` and `\.` are not
+# valid Python escapes. Harmless while the module is imported from a cached
+# .pyc, but `tests/test_pinebi_1e_utilities.py::test_pivot_is_causal_with_a_mutant`
+# exec()s this source fresh to build its mutant, and that emitted a
+# DeprecationWarning on every run.
+r"""PINEBI-1a: Pine Script's rolling primitives, transliterated.
 
 These are NOT indicators and are deliberately absent from `Category`: they are
 the vocabulary the Pine corpus is written in. `ta.highest` or `ta.lowest` appear

@@ -43,42 +43,52 @@ Category = {
         "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha"
     ],
     # Cycles
-    "cycles": ["dsp", "ebsw"],
+    "cycles": [
+        "dsp", "ebsw", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
+        "ht_trendmode",
+    ],
     # Momentum
     "momentum": [
         "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
-        "coppock", "cti", "dm", "er", "eri", "fisher", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
+        "coppock", "cti", "dm", "er", "eri", "fisher", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
         "mom", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr"
     ],
     # Overlap
     "overlap": [
-        "alma", "bpress", "dema", "ema", "ema_align", "fwma", "hilo", "hl2", "hlc3", "hma", "iama", "ichimoku", "ichimoku_ml",
+        "alma", "bpress", "dema", "dema2", "ema", "ema2", "ema_align", "fwma", "hilo", "hl2", "hlc3", "hma", "iama", "ichimoku", "ichimoku_ml",
         "jma", "kama", "linreg", "linreg_channel", "ma_disparity", "mcgd", "midpoint", "midprice", "mmar",
-        "nadaraya_watson_envelope", "ohlc4", "pwma", "rainbow", "rma", "sinwma", "sma", "ssf", "supertrend",
-        "swma", "t3", "tema", "trima", "vidya", "vwap", "vwma", "wcp", "wma", "zlma"
+        "nadaraya_watson_envelope", "ohlc4", "pwma", "rainbow", "rma", "rma2", "sinwma", "sma", "ssf", "supertrend",
+        "supertrend2",
+        "swma", "t3", "t3_tv", "tema", "tema2", "trima", "vidya", "vwap", "vwma", "wcp",
+        "wilder_rma", "wma", "zlma"
     ],
     # Performance
     "performance": ["log_return", "percent_return", "trend_return"],
     # Statistics
     "statistics": [
         "entropy", "kurtosis", "mad", "median", "quantile", "skew", "stdev",
-        "variance", "zscore"
+        "variance", "zscore",
+        "rolling_sum", "normalize", "covariance"
     ],
     # Trend
     "trend": [
         "adx", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
         "dpo", "equal_highs_lows", "flag_breakout", "fvg", "fvg_sweep_magnet", "halftrend", "increasing", "inverse_fvg", "liquidity_compression_box",
+        "head_shoulders",
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
         "ribbon_concordance", "sd_zone_pro", "short_run", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
+        "rounding_cup",
+        "triangle_wedge", "triple_top_bottom",
         "ttm_trend", "tvstop",
-        "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib"
+        "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib",
+        "pivot"
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr_ma_multiple", "bbands", "donchian", "har_park", "hwc", "kc",
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "donchian", "har_park", "hwc", "kc",
         "massi", "natr", "pdist", "range_profile", "rvi", "thermo", "true_range", "ui"
     ],
 
@@ -86,6 +96,13 @@ Category = {
     "volume": [
         "ad", "adosc", "aobv", "avwap_z", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
         "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave"
+        # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
+        # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`
+        # cannot supply -- registering them took the whole multiprocessing sweep
+        # down with a ValueError, which is WIRING-1 in reverse: last time a
+        # Category name had no accessor, this time it had one that cannot be
+        # called with what a sweep passes. They stay module- and accessor-
+        # callable, like `drawdown`/`ma`/`vp`.
     ],
 }
 
@@ -117,4 +134,5 @@ RATE = {
     "YEARLY": 1,
 }
 
+from pandas_ta.ml import *
 from pandas_ta.core import *
