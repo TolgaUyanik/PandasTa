@@ -71,6 +71,13 @@ import pandas_ta as ta                                    # noqa: E402
 import pandas_ta_classic as tac                           # noqa: E402
 from pandas_ta.core import AnalysisIndicators as AI       # noqa: E402
 
+sys.path.insert(0, HERE)
+from _altrepo_resolve import (
+    fork_surface_cache,                              # noqa: E402
+    PINNED_LENGTH, call_fork, fork_signature_kind, probe_variants,
+    validate_alias_targets,
+)
+
 # ---------------------------------------------------------------- the fork
 CATEGORY = {n for v in ta.Category.values() for n in v}
 ACCESSOR = {n for n, v in vars(AI).items()
@@ -107,6 +114,10 @@ ALIAS.update({
     "linregslope": "linreg", "linregangle": "linreg",
     "linregintercept": "linreg", "tsf": "linreg",
     "correl": "correlation",
+    # `ta.dm` returns DMP_14/DMN_14 -- the same indicator, differently scaled
+    # (measured 9.0 at length 14). `port` would send a reader to reimplement
+    # Wilder DM from scratch; it is an alternate implementation.
+    "plus_dm": "dm", "minus_dm": "dm",
 })
 
 # Two-series signatures the close-only probe could never build. `correlation`
@@ -136,13 +147,7 @@ EVIDENCE = {
     "rolling_sum": ("pandas_ta/utils/_pine.py", "def cum"),
 }
 
-_broken_alias = sorted(v for v in ALIAS.values() if v not in SURFACE)
-if _broken_alias:
-    raise SystemExit(
-        f"ALIAS maps to names the fork does not have: {_broken_alias}. An "
-        f"alias is a claim of equivalence; an unresolvable one silently became "
-        f"a `have` in the first version of this scanner."
-    )
+validate_alias_targets(ALIAS, SURFACE, "gen_altrepo_pandas_ta_classic")
 
 
 class _NotCallable:
@@ -314,37 +319,6 @@ def _agree(x, y, rtol=1e-9, atol=1e-12):
     return "identical", f"agree on all {int(both.sum())} values"
 
 
-def call_fork(fork_name, frame, kwargs=None, length=None):
-    """Call a fork function, honouring kwargs variants and two-series shapes."""
-    fn = getattr(ta, fork_name, None)
-    if fn is None:
-        return NOT_CALLABLE
-    params = inspect.signature(fn).parameters
-    call = {}
-    for pname in params:
-        if pname in ("open", "open_", "high", "low", "close", "volume",
-                     "source", "source_a"):
-            column = {"open_": "open", "open": "open", "high": "high",
-                      "low": "low", "close": "close", "volume": "volume",
-                      "source": "close", "source_a": "close"}[pname]
-            call[pname] = frame[column]
-        elif pname in ("source_b", "close2", "other"):
-            # A distinct second series, not a copy: correlation(x, x) is 1.
-            call[pname] = frame["open"]
-    if not call:
-        return NOT_CALLABLE
-    extra = dict(kwargs or {})
-    if length is not None and "length" in params:
-        extra["length"] = length
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            np.seterr(all="ignore")
-            return fn(**call, **extra)
-    except Exception:                                       # noqa: BLE001
-        return NOT_CALLABLE
-
-
 def _same_output(a, b, frame=None):
     """-> (verdict_word, detail). Shape-, NaN- and COLUMN-aware.
 
@@ -438,7 +412,7 @@ def _rel(path, root):
         return path
 
 
-def classify(name, category):
+def classify(name, category, frame):
     """-> (verdict, equivalent, audited, evidence, divergence, note)
 
     Pure enough to test: it consults only the module-level sets above and the
@@ -454,118 +428,199 @@ def classify(name, category):
         return ("port", "", "n/a", "", "",
                 "no fork function of this NAME, and no cross-name equivalent "
                 "found by the output search over the fork surface (default "
-                "kwargs plus the declared ALIAS_KWARGS variants). NOT a claim "
-                "that no reachable parameterisation exists.")
+                "kwargs plus the declared ALIAS_KWARGS variants, each swept at "
+                "length 1/5/14/30 and with the primary series overridden to "
+                "volume). NOT a claim that no reachable parameterisation "
+                "exists.{near_miss}")
 
     fork_file = _source_file(ta, fork_name)
     where = _rel(fork_file, FORK) if fork_file else f"Category[{category}]"
 
     cls_fn = getattr(tac, name, None)
     fork_fn = getattr(ta, fork_name, None)
-    alias_kwargs = ALIAS_KWARGS.get(name)
+    fork_file = _source_file(ta, fork_name)
+    where = _rel(fork_file, FORK) if fork_file else f"Category[{category}]"
+
     if cls_fn is None or fork_fn is None:
         return ("unknown - not comparable", fork_name, "no", f"{where}:1",
                 "not-compared",
                 "name is registered but not resolvable as a module-level "
                 "function on one side; NOT recorded as `have`")
 
-    frame = _probe_frame()
+    # The alt-repo side. `correl`/`beta` take two series and the close-only
+    # probe could never build the call -- which is how `correl` shipped as
+    # "the harness cannot call it" while the answer was `have` at 0.0.
     try:
         out_cls = _call(cls_fn, frame, name)
-        out_fork = (call_fork(fork_name, frame, alias_kwargs)
-                    if (alias_kwargs or fork_name in TWO_SERIES)
-                    else _call(fork_fn, frame, fork_name))
-        if out_fork is NOT_CALLABLE:
-            out_fork = _call(fork_fn, frame, fork_name)
-        if out_cls is NOT_CALLABLE and name in TWO_SERIES_CLS:
-            out_cls = _call_two_series(cls_fn, frame)
-    except Exception as exc:                                # noqa: BLE001
+    except Exception:                                       # noqa: BLE001
+        out_cls = None
+    if out_cls is NOT_CALLABLE or out_cls is None:
+        out_cls = call_fork(cls_fn, frame)
+    if out_cls is None or out_cls is NOT_CALLABLE:
         return ("unknown - not comparable", fork_name, "no", f"{where}:1",
                 "not-compared",
-                f"probe call raised ({type(exc).__name__}: "
-                f"{str(exc)[:80]}); NOT recorded as `have`")
+                f"the alt-repo function could not be driven on the probe frame "
+                f"(signature kind: {fork_signature_kind(cls_fn)})")
 
-    outcome, detail = _same_output(out_cls, out_fork, frame)
-    if outcome in ("identical", "warmup-offset"):
-        # A pair identical on every overlapping value, differing only in how
-        # many warm-up bars each side emits, is the SAME indicator. Filing that
-        # as a porting candidate sent a reader to compare two identical
-        # formulas -- `ULTOSC` vs `uo` differed by 7.1e-15 and one NaN.
-        return ("have", fork_name, "yes",
-                f"{where}:{_def_line(fork_file, fork_name)}",
-                outcome, detail)
-    if outcome in ("unknown", "not-callable", "degenerate", "shape"):
+    # EVERY declared way of calling the fork side, not just the default.
+    variants = [ALIAS_KWARGS[name]] if name in ALIAS_KWARGS else []
+    attempts = probe_variants(fork_fn, frame, kwargs_variants=variants,
+                              fork_name=fork_name)
+    if not attempts:
         return ("unknown - not comparable", fork_name, "no", f"{where}:1",
+                "not-compared",
+                f"the probe harness has no call for `{fork_name}` "
+                f"(signature kind: {fork_signature_kind(fork_fn)}); the pair "
+                f"was never compared. NOT an absence.")
+
+    # Sweep BOTH sides. Sweeping only the fork side left the alt-repo call at
+    # its own default window, so `correl` (classic default 30 vs a fork call at
+    # 14) read divergent when the two agree exactly at a matched length.
+    cls_attempts = probe_variants(cls_fn, frame) or [("default", out_cls)]
+
+    best = None
+    for (cls_label, out_cls_v) in cls_attempts:
+      for label, out_fork in attempts:
+        outcome, detail = _same_output(out_cls_v, out_fork, frame)
+        label = f"{label} vs classic {cls_label}"
+        rank = {"identical": 0, "warmup-offset": 1, "divergent": 2,
+                "shape": 3, "degenerate": 4, "unknown": 5,
+                "not-callable": 6}.get(outcome, 7)
+        if best is None or rank < best[0]:
+            best = (rank, outcome, detail, label)
+        if rank == 0:
+            break
+      if best and best[0] == 0:
+          break
+    _, outcome, detail, label = best
+    line = _def_line(fork_file, fork_name) if fork_file else 1
+
+    if outcome in ("identical", "warmup-offset"):
+        return ("have", fork_name, "yes", f"{where}:{line}", outcome,
+                f"{detail} [resolved with {label}]")
+    if outcome in ("unknown", "not-callable", "degenerate", "shape"):
+        return ("unknown - not comparable", fork_name, "no", f"{where}:{line}",
                 outcome, detail + "; NOT recorded as `have`")
 
     if name in ALIAS:
-        return ("port - alternate impl", fork_name, "yes", f"{where}:1",
+        return ("port - alternate impl", fork_name, "yes", f"{where}:{line}",
                 "divergent",
-                f"cross-name match ({name} -> {fork_name}) but {detail}")
-    return ("port - alternate impl", fork_name, "yes", f"{where}:1",
+                f"cross-name match ({name} -> {fork_name}); best of "
+                f"{len(attempts)} probed variants was {label}: {detail}")
+    return ("port - alternate impl", fork_name, "yes", f"{where}:{line}",
             "divergent",
-            f"same name, different behaviour: {detail}. Shared ancestry means "
-            f"one side may carry a fix the other lacks -- PTCLASSIC-1 resolves "
-            f"which.")
+            f"same name, different behaviour across all {len(attempts)} probed "
+            f"variants (best {label}): {detail}. Shared ancestry means one side "
+            f"may carry a fix the other lacks -- PTCLASSIC-1 resolves which.")
+
+
+def _environment_stamp():
+    """What the verdicts are conditional on. Installing TA-Lib moved `dm`."""
+    try:
+        import talib
+        have = f"talib {talib.__version__}"
+    except Exception:                                       # noqa: BLE001
+        have = "talib ABSENT"
+    import pandas
+    return f"{have}; pandas {pandas.__version__}"
 
 
 def _fork_outputs(frame):
-    """Every fork indicator's output on the probe frame, computed once."""
-    out = {}
-    for name in sorted(SURFACE):
-        fn = getattr(ta, name, None)
-        if fn is None or not callable(fn):
-            continue
+    """Delegates to the ONE shared surface cache (`_altrepo_resolve`).
+
+    This was a private reimplementation -- one of three, each with its own
+    series map and its own idea of which parameter is the window.
+    """
+    return fork_surface_cache(frame, SURFACE, ta)
+
+
+def _related_to(mine, fork_cache, frame):
+    """The closest NON-identical relative on the fork surface, or (None, "").
+
+    An affine or monotone twin is an alternate implementation, not an absence.
+    `emv` vs `eom` differ by a divisor and a smoothing; `fosc` vs `cfo` by
+    TA-Lib dispatch; `rocr` vs `roc` by `100*(x-1)`. Each was published as
+    "genuinely absent".
+    """
+    import numpy as np
+    from scipy.stats import spearmanr
+
+    def flat(value):
         try:
-            value = _call(fn, frame, name)
+            arr = np.asarray(value, dtype="float64")
         except Exception:                                   # noqa: BLE001
-            continue
-        if value is NOT_CALLABLE or value is None:
-            continue
-        out[name] = value
-    return out
+            return None
+        if arr.ndim == 2:
+            arr = arr[:, 0]
+        return arr if arr.ndim == 1 else None
+
+    a = flat(mine)
+    if a is None:
+        return None, ""
+    best = (0.0, None, "")
+    for fork_name, values in fork_cache.items():
+        for theirs in (values if isinstance(values, list) else [values]):
+            b = flat(theirs)
+            if b is None or b.shape != a.shape:
+                continue
+            mask = ~(np.isnan(a) | np.isnan(b))
+            if mask.sum() < 40:
+                continue
+            x, y = a[mask], b[mask]
+            if np.ptp(x) == 0 or np.ptp(y) == 0:
+                continue
+            rho = spearmanr(x, y).statistic
+            if np.isnan(rho):
+                continue
+            if abs(rho) > abs(best[0]):
+                # affine? fit y = m*x + c and report the residual
+                m, c = np.polyfit(x, y, 1)
+                resid = float(np.max(np.abs(y - (m * x + c))))
+                scale = max(float(np.max(np.abs(y))), 1.0)
+                best = (rho, fork_name,
+                        f"Spearman {rho:+.6f}; affine fit y={m:.4g}x{c:+.4g} "
+                        f"leaves max residual {resid:.3g} "
+                        f"({resid / scale:.2e} relative)")
+    if best[1] is not None and abs(best[0]) >= 0.99:
+        return best[1], best[2]
+    if best[1] is not None and abs(best[0]) >= 0.90:
+        # A near-miss is NOT an equivalence, but it is not "nothing" either.
+        # `fosc` sits at +0.950818 against `cfo` at every length and scalar
+        # tried -- same family, genuinely different maths (TSF vs linreg).
+        # Publishing that as "no cross-name equivalent found" invites the next
+        # reviewer to read the two docstrings and call it a false gap, which is
+        # exactly what happened. Name the near-miss and the number.
+        return None, f"NEAR-MISS {best[1]}: {best[2]}"
+    return None, ""
 
 
 def find_equivalent(cls_name, frame, fork_cache):
     """Search the whole fork surface for a numerical match to `cls_name`.
 
     `port` asserts absence. Asserting absence by name alone is what put
-    `medprice`, `typprice` and `avgprice` in the gap list when the fork ships
-    all three as `hl2`, `hlc3` and `ohlc4`.
+    `medprice`, `typprice` and `avgprice` in the gap list while the fork ships
+    them as `hl2`, `hlc3` and `ohlc4`.
     """
     fn = getattr(tac, cls_name, None)
     if fn is None:
         return None, ""
-    try:
-        mine = _call(fn, frame, cls_name)
-    except Exception:                                       # noqa: BLE001
-        return None, ""
-    if mine is NOT_CALLABLE or mine is None:
-        return None, ""
+    # BOTH sides swept. Sweeping only the fork side left the alt-repo call at
+    # its own default window, and that is why `stochf` (classic default
+    # fastk=5) never met `ta.stoch(k=14, smooth_k=1)` -- false gap #10.
+    mine_variants = probe_variants(fn, frame)
+    if not mine_variants:
+        single = _call(fn, frame, cls_name)
+        if single is NOT_CALLABLE or single is None:
+            return None, ""
+        mine_variants = [("default", single)]
 
-    for fork_name, theirs in fork_cache.items():
-        outcome, detail = _same_output(mine, theirs, frame)
-        if outcome == "identical":
-            return fork_name, detail
+    for _label, mine in mine_variants:
+        for fork_name, values in fork_cache.items():
+            for theirs in values:
+                outcome, detail = _same_output(mine, theirs, frame)
+                if outcome in ("identical", "warmup-offset"):
+                    return fork_name, detail
     return None, ""
-
-
-def _environment_stamp():
-    """What the verdicts below are conditional on.
-
-    Installing TA-Lib moved `dm` from `port - alternate impl` to `have`: both
-    packages defer to TA-Lib when it is importable, so their outputs converge.
-    A verdict column is therefore a statement about THIS environment, and a
-    regeneration elsewhere can legitimately differ. Recording it turns a silent
-    reclassification into a visible one.
-    """
-    try:
-        import talib
-        have_talib = f"talib {talib.__version__}"
-    except Exception:                                       # noqa: BLE001
-        have_talib = "talib ABSENT"
-    import pandas
-    return f"{have_talib}; pandas {pandas.__version__}"
 
 
 def main():
@@ -575,14 +630,33 @@ def main():
     print(f"fork probe cache: {len(fork_cache)} indicators callable", flush=True)
 
     discovered = {}
+    related = {}
+    near_miss = {}
     for category in sorted(tac.Category):
         for name in sorted(tac.Category[category]):
             verdict, equiv, audited, evidence, divergence, note = classify(
-                name, category)
+                name, category, frame)
 
             # `port` is a claim of ABSENCE -- search before making it.
             if verdict == "port":
                 match, detail = find_equivalent(name, frame, fork_cache)
+                if not match:
+                    # Nothing reproduces it exactly -- but is anything on the
+                    # surface an affine/monotone twin? `rocr`/`rocr100` are
+                    # `100*(x-1)` relabellings of `roc` and shipped as absent
+                    # because this branch did not exist. `fosc` is NOT: it
+                    # peaks at +0.950818 against `cfo`, below the bar, and is
+                    # reported as a near-miss rather than promoted.
+                    fn = getattr(tac, name, None)
+                    probe = _call(fn, frame, name) if fn is not None else None
+                    if probe is NOT_CALLABLE or probe is None:
+                        probe = call_fork(fn, frame) if fn is not None else None
+                    if probe is not None and probe is not NOT_CALLABLE:
+                        rel, why = _related_to(probe, fork_cache, frame)
+                        if rel:
+                            related[name] = (rel, why)
+                        elif why:
+                            near_miss[name] = why
                 if match:
                     discovered[name] = match
                     verdict = "have"
@@ -593,6 +667,26 @@ def main():
                         f"{_def_line(fork_file, match)}" if fork_file else "")
                     note = (f"CROSS-NAME match found by search, not by name: "
                             f"classic `{name}` == fork `{match}`. {detail}")
+
+            if "{near_miss}" in note:
+                extra = near_miss.get(name, "")
+                note = note.replace(
+                    "{near_miss}", f" Nearest relative on the surface -- "
+                                   f"{extra} -- close but NOT equivalent."
+                    if extra else " Nothing on the fork surface correlates "
+                                  "above 0.90 with it either.")
+
+            if name in related:
+                rel, why = related[name]
+                fork_file = _source_file(ta, rel)
+                verdict = "port - alternate impl"
+                equiv, audited, divergence = rel, "yes", "related"
+                evidence = (f"{_rel(fork_file, FORK)}:"
+                            f"{_def_line(fork_file, rel)}" if fork_file else "")
+                note = (f"NOT bit-identical, but an affine/monotone twin of the "
+                        f"fork's `{rel}` -- {why}. Published as `port` "
+                        f"(\"genuinely absent\") until the relation search "
+                        f"existed.")
 
             rows.append({
                 "name": name,

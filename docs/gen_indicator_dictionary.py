@@ -50,8 +50,18 @@ def call(fn, d):
     for name, p in sig.parameters.items():
         if p.kind == p.VAR_KEYWORD:
             continue
-        if name in PRICE_ARGS:
+        if name == "other":
+            # Two-series indicators (`covariance`) need a real second series.
+            # `other` DEFAULTS to None, so the "required arg" branch below never
+            # sees it: the probe called them one-armed, they returned None, and
+            # the generated *Known breaks* table libelled working code while
+            # CLAUDE.md next door swore nothing was outstanding. Returns on both
+            # sides, matching what `core.py`'s accessor now defaults to.
+            kw[name] = d["close"].pct_change()
+        elif name in PRICE_ARGS:
             kw[name] = d[PRICE_ARGS[name]]
+            if fn.__name__ == "covariance" and name == "close":
+                kw[name] = d["close"].pct_change()
         elif p.default is inspect.Parameter.empty:
             # required non-price arg (e.g. trend series, benchmark)
             if name in ("trend",):
@@ -84,6 +94,37 @@ def as_frame(res):
     if isinstance(res, pd.DataFrame):
         return res.loc[:, ~res.columns.duplicated()]
     return None
+
+
+# Columns whose ML form the SYNTHETIC PROBE gets wrong, keyed by indicator, with
+# the real-data measurement that says so. `classify` reads the probe's observed
+# cardinality, which is the right default; but a COUNT column on a 600-bar
+# synthetic frame can happen to take only two values and then be tagged BIN, and
+# a downstream reader will treat a count as a flag.
+#
+# Only entries measured on real data belong here. Measured 2026-09-08 over 40
+# BIST daily frames / 71,402 bars:
+#
+#   HS_PEND_5_5_0.03_60      5 distinct, range [-2, +2]   -> ORD (probe said BIN)
+#   DTDB_PEND_8_0.5_0.15     5 distinct, range [-2, +2]   -> ORD (probe said BIN)
+#   FLAG_PEND_12_0.85_0.15   3 distinct, range [-1, +1]   -> BIN is CORRECT,
+#                            so it is deliberately NOT listed. A blanket
+#                            "*_PEND is ordinal" rule would have mislabelled it.
+#   TRPL_PEND / TRIW_PEND    already ORD from the probe; no entry needed.
+#
+# Format matches LEAK_RULES below: {indicator: (column predicate, forced tag,
+# why)}.
+FORM_OVERRIDES = {
+    "head_shoulders": (
+        lambda c: c.startswith("HS_PEND"), "ordinal",
+        "net pending-pattern count; the 600-bar probe frame never carries two "
+        "live patterns of the same sign, so it observes only {0, -1} and tags "
+        "BIN. Real range measured [-2, +2] over 71,402 BIST daily bars."),
+    "dtdb": (
+        lambda c: c.startswith("DTDB_PEND"), "ordinal",
+        "same defect, same fix, in a module that shipped before CANDLE-1: "
+        "real range measured [-2, +2] over the same 71,402 bars."),
+}
 
 
 def classify(col1, col2):
@@ -182,6 +223,9 @@ for cat, names in cats.items():
                         scale, warm, rng_ = classify(r1[c], r2[c])
                     else:
                         scale, warm, rng_ = "unknown", None, None
+                    ov = FORM_OVERRIDES.get(name)
+                    if ov and ov[0](str(c)):
+                        scale = ov[1]
                     rec["cols"].append({"name": str(c), "scale": scale,
                                         "warmup": warm, "range": rng_})
         except Exception as e:
@@ -254,7 +298,15 @@ def desc(rec, limit=150):
 def inputs(sig):
     got = [a for a in ("open", "high", "low", "close", "volume")
            if re.search(rf"[(,]\s*{a}_?\s*[=:,)]", sig)]
-    return "/".join(g[0] for g in got).upper() or "close"
+    if got:
+        return "/".join(g[0] for g in got).upper()
+    # Falling back to "close" printed a falsehood for anything that takes
+    # neither: `up_and_down_volume(lower, anchor)` was documented as taking
+    # `close`, in the file CLAUDE.md tells readers to consult before judging a
+    # column. Say what it actually wants.
+    if re.search(r"[(,]\s*lower\s*[=:,)]", sig):
+        return "lower frame"
+    return "—"
 
 
 out_path = sys.argv[1] if len(sys.argv) > 1 else str(Path(__file__).resolve().parent / "IndicatorDictionary.md")
@@ -313,6 +365,22 @@ _module_only = sorted(n for n in ("ma", "drawdown")
 _accessor_only = sorted(_accessor - _registered)
 
 tot = sum(len(v) for v in out.values())
+# Indicators whose REQUIRED input this probe cannot synthesise from a single
+# daily OHLCV frame. Their `error` is a harness limitation, not a runtime break,
+# and listing them under *Known breaks* would libel working code -- which the
+# one-armed `covariance` call already did once.
+PROBE_CANNOT_CONSTRUCT = {
+    "up_and_down_volume": "needs a lower-timeframe OHLCV frame (`lower=`)",
+    "volume_delta": "needs a lower-timeframe OHLCV frame (`lower=`)",
+}
+for _cat in CAT_ORDER:
+    for _n, _r in out.get(_cat, {}).items():
+        if _n in PROBE_CANNOT_CONSTRUCT and _r.get("error"):
+            _r["error"] = None
+            _r["probe_note"] = (
+                f"not probed: {PROBE_CANNOT_CONSTRUCT[_n]} -- harness "
+                f"limitation, not a runtime break")
+
 broken_now = [n for cat in CAT_ORDER for n, r in out.get(cat, {}).items() if r.get("error")]
 if broken_now:
     A(f"**{tot} indicators** probed; {len(broken_now)} raise on this environment "
@@ -358,6 +426,12 @@ for cat in CAT_ORDER:
         cell = "<br>".join(
             f"`{c['name']}` {tag(c['scale'])}" + (" **LEAK**" if leaks(name, c["name"]) else "")
             for c in cols) or "—"
+        # An unprobed indicator printed an outputs cell of "—" with no marker,
+        # so a reader working the category table -- the actual ML feature
+        # contract surface -- saw an indicator with no columns and no reason.
+        # Half the exemption was dead code.
+        if r.get("probe_note"):
+            cell = f"⚠ {r['probe_note']}"
         warms = [c["warmup"] for c in cols if isinstance(c["warmup"], int) and c["warmup"] >= 0]
         warm = str(max(warms)) if warms else "—"
         ext = "" if r.get("ext") else " *(standalone)*"
@@ -396,8 +470,19 @@ if dead:
     A("")
     A("| indicator | column(s) | owning task |")
     A("|---|---|---|")
+    A("⚠ **`cdl_pattern`'s CONST columns are a FIXTURE artifact, not a defect.**")
+    A("This probe runs one 600-bar synthetic frame; rare candle patterns simply do not")
+    A("occur in it. CANDLE-0 measured the same set over 50 BIST tickers / 91,197 daily")
+    A("bars and found **0 of 62 constant** — every pattern fires on real data")
+    A("(`docs/CandlePatternShortlist.md` §1b, and")
+    A("`tests/test_candle_patterns_reachable.py` re-checks it against the cache).")
+    A("Do NOT delete these columns. The rule above — *confirm on real data, then repair")
+    A("or delete* — was followed here, and the answer was that they are fine.")
+    A("")
     DEAD_TASKS = {"fvg": "FVGDEAD in `TODO.md` — the zone is evicted on the bar that "
-                         "creates it (`pandas_ta/trend/fvg.py:46`, `:54`)"}
+                         "creates it (`pandas_ta/trend/fvg.py:46`, `:54`)",
+                  "cdl_pattern": "none — fixture artifact, 0 of 62 constant on "
+                                 "91,197 real BIST bars (CANDLE-0)"}
     for name, cols in dead:
         A(f"| `{name}` | {' '.join(f'`{c}`' for c in cols)} | {DEAD_TASKS.get(name, '— unregistered, file one')} |")
     A("")
@@ -447,9 +532,21 @@ if brk:
     for n, e in brk:
         A(f"| `{n}` | `{e[:90]}` | {BREAK_NOTES.get(n, '')} |")
 else:
-    A("None. Every registered indicator was probed and returned data on "
+    A(f"None. Every registered indicator THIS PROBE CAN CALL returned data on "
       f"pandas {pd.__version__} / numpy {np.__version__}.")
     A("")
+    if PROBE_CANNOT_CONSTRUCT:
+        A(f"⚠ {len(PROBE_CANNOT_CONSTRUCT)} indicator(s) were **not probed** "
+          f"because this harness builds a single daily OHLCV frame and cannot "
+          f"synthesise their required input. Absence from the table above is "
+          f"therefore not evidence they work — they are covered by their own "
+          f"test modules instead:")
+        A("")
+        A("| indicator | why not probed |")
+        A("|---|---|")
+        for _n in sorted(PROBE_CANNOT_CONSTRUCT):
+            A(f"| `{_n}` | {PROBE_CANNOT_CONSTRUCT[_n]} |")
+        A("")
     A("Previously broken and now fixed (WIRING, 2026-09-07): `mcgd` "
       "(`Series.append`, removed in pandas 2.0), `aberration`, `zlma` (every "
       "`mamode`) and `ui` (`everget=True`) -- the last three all bound a "

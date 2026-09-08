@@ -60,6 +60,26 @@ def block_for(rows, key):
     lines.append("")
     lines.append(f"**The gap ({len(gap)}):** " +
                  ("`" + "` `".join(gap) + "`" if gap else "_none_"))
+
+    # The per-category breakdown, generated. It used to be hand-typed OUTSIDE
+    # the markers and went stale by seven rows -- publishing `stochf`, `correl`,
+    # `rocp`, `linregslope` and `linregangle` as absent after they were resolved
+    # to `have`.
+    if gap and "category" in rows[0]:
+        from collections import defaultdict
+
+        by_cat = defaultdict(list)
+        for row in rows:
+            if row["verdict"] == "port":
+                by_cat[row.get("category") or row.get("group") or "-"].append(
+                    row[key])
+        lines.append("")
+        lines.append("| category | n | names |")
+        lines.append("|---|---|---|")
+        for cat in sorted(by_cat, key=lambda c: (-len(by_cat[c]), c)):
+            names = sorted(by_cat[cat])
+            lines.append(f"| {cat} | {len(names)} | `"
+                         + "` `".join(names) + "` |")
     lines.append("")
     lines.append(f"_{len(rows)} rows total. Generated from the CSV by "
                  f"`docs/gen_indicator_list_tables.py`; "

@@ -40,8 +40,12 @@ VERDICTS = {
     "have", "port", "port - alternate impl", "unknown - not comparable",
     "n/a - arithmetic helper, not a feature",
 }
+# `related`: the relation search found an affine/monotone twin under a
+# DIFFERENT name -- `emv` is `eom(length=1, divisor=1)` to 5.42e-20, `rocr` is
+# `100*(roc-1)`. Not bit-identical, so not `identical`; not absent either, and
+# every one of them shipped as "genuinely absent" before this class existed.
 DIVERGENCE = {"identical", "divergent", "not-compared", "not-callable",
-              "degenerate", "warmup-offset", "shape", "unknown", ""}
+              "degenerate", "warmup-offset", "shape", "unknown", "related", ""}
 
 
 def _rows():

@@ -59,7 +59,7 @@ ALIAS = {
     "change": "mom", "rising": "increasing", "falling": "decreasing",
     "crossover": "cross", "crossunder": "cross", "stochRsi": "stochrsi",
     "stochFull": "stoch", "atr2": "atr", "ema2": "ema", "rma2": "rma",
-    "dema2": "dema", "tema2": "tema", "t3Alt": "t3",
+    "dema2": "dema", "tema2": "tema", "t3Alt": "t3_tv",
     "supertrend2": "supertrend",   # no `vStop2` -> `vStop`: the fork has neither
     # camelCase library names -> the snake_case primitives PINEBI-1a shipped
     "highestSince": "highest_since", "lowestSince": "lowest_since",
@@ -127,7 +127,46 @@ NOT_BUILTIN = {
 # found. `test_audited_rows_carry_their_evidence` requires it to be non-empty and
 # to cite a line. A name with no receipt is `audited=no`, and no is fine -- the
 # 28-row backlog is PINEBI-0b, and an honest backlog beats a false all-clear.
+# PINEBI-0b: `have` rows the audit did NOT certify, each with the reason.
+# Silence is what let five wrong `have` verdicts ship, so an uncertified
+# row must say why.
+#
+# IMPORTED, not retyped. This was a hand-maintained duplicate sitting under
+# a comment that claimed `audit_pine_have_rows.py` wrote it. No such writer
+# existed, so the two copies could drift with nothing to catch it -- the
+# same defect as the `audited` column, one file over.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    # The test suite loads this module by path, not as `docs.<name>`, so a bare
+    # `import audit_pine_have_rows` resolves for the CLI and nowhere else.
+    sys.path.insert(0, _HERE)
+from audit_pine_have_rows import NOT_CERTIFIED as PINEBI_0B_UNCERTIFIED
+
 AUDITED = {
+    'atr2': 'RA2vGpkA-ta.pine:102 `export atr2(series float length) =>` ported as pandas_ta/volatility/atr2.py:56 `def atr2(high, low, close, length=None, drift=None, offset=None, **kwargs):` -- PINEBI-1c measured: 14 bars of warm-up saved vs `atr(14)`, per-bar Series length reached; rho vs sibling 0.9708 on the 400-bar fixture, 0.9963-1.0000 across 40 BIST_100 daily parquets',
+    'dema2': 'RA2vGpkA-ta.pine:168 `export dema2(series float source, series float length) =>` ported as pandas_ta/overlap/dema2.py:33 `def dema2(close, length=None, offset=None, **kwargs):` -- PINEBI-1c measured: 9 bars of warm-up saved vs `dema(10)`, per-bar Series length reached; rho 0.99997 / 0.9980-1.0000',
+    'ema2': 'RA2vGpkA-ta.pine:158 `export ema2(series float source, series float length)` ported as pandas_ta/overlap/ema2.py:176 `def ema2(close, length=None, offset=None, **kwargs):` -- PINEBI-1c measured: 9 bars of warm-up saved vs `ema(10)`, per-bar Series length and a fractional scalar length reached; rho 0.99999 / 0.9998-1.0000',
+    'rma2': 'RA2vGpkA-ta.pine:496 `export rma2(series float source, series float length)` ported as pandas_ta/overlap/rma2.py:44 `def rma2(close, length=None, offset=None, **kwargs):` -- PINEBI-1c measured against `wilder_rma`, NOT `rma`: 9 bars saved, per-bar Series length reached; max|diff| 0.0711 vs wilder_rma against 0.4667 vs rma, so the two fork functions are not interchangeable',
+    'stochFull': 'RA2vGpkA-ta.pine:541 `export stochFull(simple int periodK, simple int smoothK, simple int periodD) =>` against pandas_ta/momentum/stoch.py:28 `stoch_k = sma(stoch, length=smooth_k)` -- PINEBI-1c measured: `stoch(k=periodK, d=periodD, smooth_k=smoothK)` reproduces it to max|diff| 0.0 on the 400-bar fixture, including at smoothK != periodD; 2.59e-12 worst case across 40 BIST_100 dailies (float summation order in a ~5,700-bar rolling window, not a behavioural difference), rho 1.0 on all 40. DELETED rather than shipped',
+    'stochRsi': 'RA2vGpkA-ta.pine:554 `export stochRsi(` against pandas_ta/momentum/stochrsi.py:28 `stochrsi_k = sma(stoch, length=k)` -- PINEBI-1c measured: `stochrsi(length=periodK, rsi_length=lengthRsi, k=smoothK, d=periodD)` reproduces it to max|diff| 0.0; DELETED rather than shipped',
+    'supertrend2': 'RA2vGpkA-ta.pine:602 `export supertrend2(series float factor, series float atrLength, simple bool wicks = false) =>` ported as pandas_ta/overlap/supertrend2.py:65 `def supertrend2(high, low, close, length=None, multiplier=None, wicks=None,` -- PINEBI-1c measured: 7 bars of warm-up saved vs `supertrend(7, 3.0)`; THREE parameters reached, the per-bar ATR length, the per-bar factor (L602 declares both `series float`) and `wicks`; rho 0.9928 on the fixture but 0.7901-1.0000 across 40 tickers, so on some tickers this is a materially different line. Direction follows Pine: -1 is the UPTREND, the negation of SUPERTd',
+    't3Alt': 'RA2vGpkA-ta.pine:661 `export t3Alt(series float source, series float length, simple float vf = 0.7) =>` ported as pandas_ta/overlap/t3_tv.py:55 `def t3_tv(close, length=None, vf=None, offset=None, **kwargs):` -- PINEBI-1c measured: 9 bars of warm-up saved vs `t3(10, 0.7)`, per-bar Series length reached, and the volume factor left unclamped where `t3` rewrites anything outside (0, 1) to 0.7 without saying so; rho 0.99998 / 0.9970-1.0000',
+    'tema2': 'RA2vGpkA-ta.pine:681 `export tema2(series float source, series float length) =>` ported as pandas_ta/overlap/tema2.py:31 `def tema2(close, length=None, offset=None, **kwargs):` -- PINEBI-1c measured: 9 bars of warm-up saved vs `tema(10)`, per-bar Series length reached; rho 0.99994 / 0.9982-1.0000',
+    "cci": "PINEBI-0b measured: docs/audit_pine_have_rows.py:168 `ta.cci(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "cog": "PINEBI-0b measured: docs/audit_pine_have_rows.py:170 `ta.cg(` -- matches an independent implementation of the Pine v6 formula to 4.441e-15 over 287 bars",
+    "dema": "PINEBI-0b measured: docs/audit_pine_have_rows.py:163 `ta.dema(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "dev": "PINEBI-0b measured: docs/audit_pine_have_rows.py:130 `ta.mad(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "ema": "PINEBI-0b measured: docs/audit_pine_have_rows.py:112 `ta.ema(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "mom": "PINEBI-0b measured: docs/audit_pine_have_rows.py:128 `ta.mom(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 286 bars",
+    "obv": "PINEBI-0b measured: docs/audit_pine_have_rows.py:156 `ta.obv(` -- identical to the Pine v6 formula up to a CONSTANT offset of 40429 over 300 bars -- an initialisation convention -- the fork seeds the running total with the first bar's volume, Pine's `ta.cum` treats the leading `na` as 0. ⚠ the offset is volume[0], so it differs per ticker: harmless within one series, NOT harmless across a cross-ticker feature matrix",
+    "roc": "PINEBI-0b measured: docs/audit_pine_have_rows.py:125 `ta.roc(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 286 bars",
+    "sma": "PINEBI-0b measured: docs/audit_pine_have_rows.py:110 `ta.sma(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "tema": "PINEBI-0b measured: docs/audit_pine_have_rows.py:166 `ta.tema(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "tr": "PINEBI-0b measured: docs/audit_pine_have_rows.py:121 `ta.true_range(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 299 bars",
+    "vhf": "PINEBI-0b measured: docs/audit_pine_have_rows.py:172 `ta.vhf(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 286 bars",
+    "vwma": "PINEBI-0b measured: docs/audit_pine_have_rows.py:158 `ta.vwma(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "wma": "PINEBI-0b measured: docs/audit_pine_have_rows.py:116 `ta.wma(` -- matches an independent implementation of the Pine v6 formula to 0.000e+00 over 287 bars",
+    "wpr": "PINEBI-0b measured: docs/audit_pine_have_rows.py:152 `ta.willr(` -- matches an independent implementation of the Pine v6 formula to 1.421e-14 over 287 bars",
     # Compared body-to-body, round 6-7. Those that diverged carry a
     # SEMANTIC_CAVEAT; the divergence IS the evidence the comparison happened.
     "crossunder": "core namespace, no library body; "
@@ -178,7 +217,54 @@ AUDITED = {
 # `have`, but not a drop-in: the shipped function computes the same idea with a
 # different default or shape. Recorded so a porter does not transliterate a Pine
 # call into a pandas_ta call that quietly means something else.
+# PINEBI-1c CLOSED 2026-09-08. These nine were `port - alternate impl` -- each
+# restates an indicator the fork already ships, so Gate E reads rho ~ 1.0 and the
+# revert rule would have deleted all nine unread. The rule was suspended and the
+# nine were measured on two axes instead, warm-up saved and parameter reach, on a
+# 400-bar seeded fixture and on 40 BIST_100 daily parquets. Seven earned a column;
+# two were reproduced BIT FOR BIT by their sibling and were deleted rather than
+# shipped, which is the outcome this map has to be able to express -- a verdict
+# vocabulary that can only say "ported" cannot record a measured deletion.
+# Full table: docs/PineAlternatesMeasured.md.
+PINEBI_1C = {
+    "ema2": "pandas_ta.ema2 -- PINEBI-1c KEPT: saves 9 bars of warm-up over "
+            "`ema(10)` and takes a per-bar `Series` length, which `ema` raises on",
+    "rma2": "pandas_ta.rma2 -- PINEBI-1c KEPT: saves 9 bars over `wilder_rma(10)` "
+            "(NOT `rma`, which is `adjust=True` and a different filter) and takes "
+            "a per-bar `Series` length",
+    "dema2": "pandas_ta.dema2 -- PINEBI-1c KEPT: saves 9 bars over `dema(10)` and "
+             "takes a per-bar `Series` length",
+    "tema2": "pandas_ta.tema2 -- PINEBI-1c KEPT: saves 9 bars over `tema(10)` and "
+             "takes a per-bar `Series` length",
+    "t3Alt": "pandas_ta.t3_tv -- PINEBI-1c KEPT: saves 9 bars over `t3(10, 0.7)`, "
+             "takes a per-bar `Series` length, and reaches a volume factor >= 1 "
+             "that `t3` silently clamps back to 0.7 while still naming the column "
+             "T3_10_0.7",
+    "atr2": "pandas_ta.atr2 -- PINEBI-1c KEPT: saves 14 bars over `atr(14)` and "
+            "takes a per-bar `Series` length",
+    "supertrend2": "pandas_ta.supertrend2 -- PINEBI-1c KEPT: saves 7 bars over "
+                   "`supertrend(7, 3.0)`, takes a per-bar `Series` ATR length, and "
+                   "reaches `wicks`, which the sibling swallows into **kwargs. "
+                   "⚠ DIRECTION SIGN follows Pine (-1 is the uptrend), the "
+                   "opposite of SUPERTd",
+    "stochFull": "pandas_ta.stoch -- PINEBI-1c DELETED, not shipped: "
+                 "`stoch(k=periodK, d=periodD, smooth_k=smoothK)` reproduces it "
+                 "bit for bit on the 400-bar fixture (max|diff| 0.0, including at "
+                 "smoothK != periodD) and to 2.59e-12 across 40 BIST_100 dailies, "
+                 "rho 1.0 on all 40; saves no warm-up and reaches no parameter the "
+                 "sibling lacks -- `smooth_k` has always been separate from `d`",
+    "stochRsi": "pandas_ta.stochrsi -- PINEBI-1c DELETED, not shipped: "
+                "`stochrsi(length=periodK, rsi_length=lengthRsi, k=smoothK, "
+                "d=periodD)` reproduces it bit for bit (max|diff| 0.0, rho 1.0 on "
+                "all 40 tickers)",
+}
+
 SEMANTIC_CAVEAT = {
+    "atr": "inherits `rma`'s divergence: `pandas_ta.atr` smooths the true range with `pandas_ta.rma`, which is `ewm(adjust=True)` rather than Wilder's recursion. Max divergence 0.0349 from the Pine formula.",
+    "cmo": "`pandas_ta.cmo` DEFAULTS to `talib=True`, which Wilder-smooths the up/down sums; Pine's `ta.cmo` sums them plainly. Max divergence 42.48 on a +/-100 oscillator. `ta.cmo(close, talib=False)` matches Pine exactly -- the default does not.",
+    "hma": "Pine's `ta.hma` smooths with `math.round(sqrt(length))`; `pandas_ta/overlap/hma.py` uses `int(sqrt(length))` (floor). At length=14 the roots are 4 vs 3 and the outputs differ by 0.474 on a ~103 price. Differs at every length where floor != round: 7, 14, 15, 22, 23, 30, ...",
+    "median": "Pine's `ta.median` is the nearest-rank median (`percentile_nearest_rank(src, len, 50)`), which returns an actual sample value; `pandas_ta.median` is `rolling().median()`, which averages the two middles at even lengths. Max divergence 1.0122 at length 14.",
+    "rma": "`pandas_ta.rma` is `ewm(alpha=1/length, adjust=True)` -- verified bit-equal to that -- which is NOT Wilder's smoothing. Pine's `ta.rma` is the SMA-seeded `adjust=False` recursion. Max divergence 0.2138 on a ~103 price, and 189 of 287 bars differ by more than 1e-6, so this is a permanent difference, not a warm-up.",
     "rising": "Pine's `ta.rising` is monotone over `length` bars; pass "
               "`strict=True` (and mind the window: pandas_ta compares "
               "`length` values, Pine `length` diffs)",
@@ -337,11 +423,8 @@ def classify(name, clean_files, lib_files, exports):
             "needs lower-timeframe data below the engine's 1h floor; PINEBI-1d")
 
     eq = equivalent(name)
-    if eq and name in ALIAS and ALIAS[name] == eq and name.endswith(
-            ("2", "Alt", "Full", "Rsi")):
-        return tier, "port - alternate impl", (
-            "restates shipped `%s`; keep only if it saves warm-up or reaches a "
-            "parameter the sibling cannot; PINEBI-1c" % eq)
+    if name in PINEBI_1C:
+        return tier, "have", PINEBI_1C[name]
     # PRIMITIVES outranks a namespace match ON PURPOSE. Once PINEBI-1a landed,
     # `equivalent()` started resolving all 18 against the fork's own utils and
     # flipped them to `have`, which would make this CSV unreproducible -- the
@@ -389,7 +472,11 @@ def main():
             "audited": ("yes" if name in AUDITED else
                         "no" if verdict == "have" else "n/a"),
             "audit_evidence": AUDITED.get(name, ""),
-            "note": note,
+            "note": note + (
+                " | PINEBI-0b not certified: "
+                + PINEBI_0B_UNCERTIFIED[name]
+                if verdict == "have" and name in PINEBI_0B_UNCERTIFIED
+                and name not in AUDITED else ""),
         })
 
     # Library exports the corpus never calls are still portable candidates.
@@ -405,8 +492,25 @@ def main():
             "audited": ("yes" if name in AUDITED else
                         "no" if verdict == "have" else "n/a"),
             "audit_evidence": AUDITED.get(name, ""),
-            "note": note + " (exported but never called in the corpus)",
+            "note": note + " (exported but never called in the corpus)" + (
+                " | PINEBI-0b not certified: "
+                + PINEBI_0B_UNCERTIFIED[name]
+                if verdict == "have" and name in PINEBI_0B_UNCERTIFIED
+                and name not in AUDITED else ""),
         })
+
+    # Same stamp the three altrepo CSVs carry. These verdicts are conditional
+    # on the probe environment -- installing TA-Lib moved `dm` -- and this was
+    # the one of the four files that did not say so.
+    try:
+        import talib
+        _have = f"talib {talib.__version__}"
+    except Exception:                                       # noqa: BLE001
+        _have = "talib ABSENT"
+    import pandas as _pd
+    _env = f"{_have}; pandas {_pd.__version__}"
+    for _r in rows:
+        _r["probe_env"] = _env
 
     with open(OUT, "w", encoding="utf8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(rows[0]), lineterminator="\n")

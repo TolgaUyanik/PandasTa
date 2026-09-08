@@ -52,6 +52,10 @@ except ImportError:                                         # pragma: no cover
 import numpy as np                                          # noqa: E402
 import pandas_ta as ta                                      # noqa: E402
 from pandas import Series                                   # noqa: E402
+from _altrepo_resolve import (
+    fork_surface_cache,                              # noqa: E402
+    PINNED_LENGTH, call_fork, probe_variants,
+)
 from gen_altrepo_pandas_ta_classic import (                 # noqa: E402
     SURFACE, NOT_CALLABLE, _call, _def_line, _probe_frame, _rel, _same_output,
     _source_file,
@@ -69,12 +73,15 @@ CANDIDATE = {
     "MINUS_DI": "adx", "PLUS_DI": "adx", "MINUS_DM": "dm", "PLUS_DM": "dm",
     "DX": "adx", "ADXR": "adx", "AROONOSC": "aroon", "MACDEXT": "macd",
     "MACDFIX": "macd", "CORREL": "correlation", "TSF": "linreg",
-    # DELIBERATELY ABSENT:
-    #   BETA  pointed at a fork `beta` that DOES NOT EXIST -- a dangling
-    #         candidate, the defect the reference scanner made fatal.
+    # DELIBERATELY ABSENT, and still absent after TALIB-1:
+    #   BETA  once pointed at a fork `beta` that DID NOT EXIST -- a dangling
+    #         candidate, the defect the reference scanner made fatal. TALIB-1
+    #         ported one, so the name now resolves through the lower-case
+    #         path; it does not need, and must not get, a hand alias.
     #   IMI   Intraday Momentum Index is open->close INTRABAR; `rsi` is
-    #         close-to-close. Mapping it dressed a genuinely absent indicator
-    #         as a variant of a shipped one.
+    #         close-to-close. Mapping it to `rsi` dressed a genuinely absent
+    #         indicator as a variant of a shipped one. TALIB-1 ported `imi`
+    #         itself, which is what closed the row -- again by name, not here.
 }
 
 # Restored from the reference scanner, which made this fatal after a dangling
@@ -99,7 +106,7 @@ CANDIDATE_KWARGS = {
 
 # Pin both sides to the same window before calling a difference behavioural --
 # the lesson PTCLASSIC-1 and TTIND-0 each had to learn separately.
-PINNED_PERIOD = 14
+PINNED_PERIOD = PINNED_LENGTH   # ONE constant, from the resolver
 
 CANDLE_GROUP = "Pattern Recognition"
 MATH_GROUPS = {"Math Operators", "Math Transform"}
@@ -144,8 +151,15 @@ def _call_talib_pinned(name, inputs, index):
     try:
         fn = abstract.Function(name)
         params = fn.parameters
-        if "timeperiod" in params:
-            fn.set_parameters(timeperiod=PINNED_PERIOD)
+        # By ROLE, not by the single literal name. `STOCHF` exposes
+        # `fastk_period`, so pinning only `timeperiod` moved neither side and
+        # the row shipped as a 59.1 "divergence" while the classic scan called
+        # the same thing `have` -- the cross-scanner contradiction again.
+        for window in ("timeperiod", "fastk_period", "fast_period", "period",
+                       "slowk_period"):
+            if window in params:
+                fn.set_parameters(**{window: PINNED_PERIOD})
+                break
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             np.seterr(all="ignore")
@@ -163,47 +177,24 @@ def _call_talib_pinned(name, inputs, index):
 
 
 def _fork_pinned(fork_name, frame, talib_name=None):
-    import inspect
+    """Call the fork side through the SHARED resolver.
 
-    fn = getattr(ta, fork_name, None)
-    if fn is None:
-        return None
-    try:
-        params = inspect.signature(fn).parameters
-        series_kwargs = {
-            p: frame[{"open_": "open", "open": "open", "high": "high",
-                      "low": "low", "close": "close", "volume": "volume",
-                      "source": "close"}[p]]
-            for p in params
-            if p in ("open", "open_", "high", "low", "close", "volume",
-                     "source")}
-        if not series_kwargs:
-            return None
-        extra = dict(CANDIDATE_KWARGS.get(talib_name or "", {}))
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            np.seterr(all="ignore")
-            if "length" in params:
-                return fn(**series_kwargs, length=PINNED_PERIOD, **extra)
-            return fn(**series_kwargs, **extra)
-    except Exception:                                       # noqa: BLE001
-        return None
+    The private version had no two-series path, which is why TA-Lib `CORREL`
+    shipped `unknown - not comparable` while `ta.correlation` reproduces it to
+    1.289e-11.
+    """
+    return call_fork(getattr(ta, fork_name, None), frame,
+                     kwargs=CANDIDATE_KWARGS.get(talib_name or ""),
+                     length=PINNED_PERIOD)
 
 
 def _fork_outputs(frame):
-    out = {}
-    for name in sorted(SURFACE):
-        fn = getattr(ta, name, None)
-        if fn is None or not callable(fn):
-            continue
-        try:
-            value = _call(fn, frame, name)
-        except Exception:                                   # noqa: BLE001
-            continue
-        if value is NOT_CALLABLE or value is None:
-            continue
-        out[name] = value
-    return out
+    """Delegates to the ONE shared surface cache (`_altrepo_resolve`).
+
+    This was a private reimplementation -- one of three, each with its own
+    series map and its own idea of which parameter is the window.
+    """
+    return fork_surface_cache(frame, SURFACE, ta)
 
 
 def _tail_diff(a, b):
@@ -221,14 +212,30 @@ def _tail_diff(a, b):
         return None
     if x.shape != y.shape:
         return None
+    # Single-column only. `ravel()` on two multi-column frames interleaves them
+    # row-major, so the "comparison" would be between two meaningless
+    # interleavings whenever both sides happen to share a shape.
+    for side in (a, b):
+        if getattr(side, "ndim", 1) > 1 or (
+                hasattr(side, "columns") and len(side.columns) > 1):
+            return None
     mask = ~(np.isnan(x) | np.isnan(y))
     if mask.sum() < 40:
         return None
     xs, ys = x[mask], y[mask]
+    cut = int(len(xs) * 0.75)
+    tail_x, tail_y = xs[cut:], ys[cut:]
+    if tail_x.size < 10:
+        return None
+    # Degeneracy: two unrelated series that both sit near zero, or both
+    # saturate at the same bound over the final quarter, give rel ~ 0 and would
+    # be promoted to `have` on nothing.
+    if np.ptp(tail_x) == 0 or np.ptp(tail_y) == 0:
+        return None
     scale = np.maximum(np.abs(xs), np.abs(ys))
     scale[scale < 1e-12] = 1.0
     rel = np.abs(xs - ys) / scale
-    return float(rel[int(len(rel) * 0.75):].max())
+    return float(rel[cut:].max())
 
 
 def classify(name, group, frame, inputs, fork_cache):
@@ -258,9 +265,17 @@ def classify(name, group, frame, inputs, fork_cache):
     # alphabetical coincidence.
     preferred = CANDIDATE.get(name, name.lower())
     if preferred in SURFACE:
-        for pinned in (False, True):
-            theirs = (_fork_pinned(preferred, frame, name) if pinned
-                      else fork_cache.get(preferred))
+        # Every cached variant, plus the pinned call. Passing the cache's LIST
+        # straight into `_same_output` made this block silently unable to
+        # compare anything -- and the search loop below skips `preferred`, so
+        # `stoch` was never compared at all. That is how `STOCHF` stayed a
+        # "divergence" against a fork function the classic scan calls `have`.
+        cached_variants = fork_cache.get(preferred) or []
+        if not isinstance(cached_variants, list):
+            cached_variants = [cached_variants]
+        candidates = [(False, v) for v in cached_variants]
+        candidates.append((True, _fork_pinned(preferred, frame, name)))
+        for pinned, theirs in candidates:
             mine_side = (_call_talib_pinned(name, inputs, frame.index) if pinned
                          else mine)
             if theirs is None or mine_side is NOT_CALLABLE:
@@ -284,10 +299,17 @@ def classify(name, group, frame, inputs, fork_cache):
     # WCLPRICE, TRANGE) immediately reappeared in the gap while the fork ships
     # ohlc4/hl2/hlc3/wcp/true_range. Restored, and it now records that the
     # match came from a search rather than a name.
-    for fork_name, theirs in fork_cache.items():
+    for fork_name, variants in fork_cache.items():
         if fork_name == preferred:
             continue
-        outcome, detail = _same_output(mine, theirs, frame)
+        # The shared cache holds a LIST of probed variants per name, not one
+        # output. Treating it as a single value silently un-found the five
+        # price transforms.
+        outcome = detail = None
+        for theirs in variants:
+            outcome, detail = _same_output(mine, theirs, frame)
+            if outcome in ("identical", "warmup-offset"):
+                break
         if outcome in ("identical", "warmup-offset"):
             fork_file = _source_file(ta, fork_name)
             evidence = (f"{_rel(fork_file, FORK)}:{_def_line(fork_file, fork_name)}"
@@ -299,13 +321,55 @@ def classify(name, group, frame, inputs, fork_cache):
 
     lower = preferred
     if lower in SURFACE:
-        theirs = fork_cache.get(lower)
+        # The default cache is built close-only, so a two-series fork function
+        # (`correlation`) is simply absent from it. Guarding the whole block on
+        # its presence skipped straight past the shared resolver -- which is
+        # exactly why `CORREL` stayed `unknown` after ALTFIX-0 supposedly fixed
+        # it. Fall through to the pinned path either way.
+        aligned_frame = None
+        # ALL cached variants, not just the first. Taking `cached[0]` meant the
+        # preferred-candidate branch saw one parameterisation while the search
+        # branch saw every one -- which is why `STOCHF` stayed a "divergence"
+        # against `stoch` that the classic scan calls `have`.
+        cached = fork_cache.get(lower)
+        variants = cached if isinstance(cached, list) else (
+            [cached] if cached is not None else [])
+        theirs = None
+        for candidate_out in variants:
+            if _same_output(mine, candidate_out, frame)[0] in (
+                    "identical", "warmup-offset"):
+                theirs = candidate_out
+                break
+        if theirs is None and variants:
+            theirs = variants[0]
+        if theirs is None:
+            # TA-Lib's abstract API feeds its two-input functions (high, low);
+            # the resolver's generic second series is `open`. Comparing those is
+            # comparing two different questions, and it read as a 1.99
+            # divergence. Feed the fork the SAME pair TA-Lib used.
+            fn = getattr(ta, lower, None)
+            # NOT `frame.rename` -- the frame already HAS close/open, so
+            # renaming high->close produced DUPLICATE columns and
+            # `frame["close"]` came back as a 2-column DataFrame.
+            aligned = frame.copy()
+            aligned["close"] = frame["high"]
+            aligned["open"] = frame["low"]
+            aligned_frame = aligned
+            theirs = call_fork(fn, aligned) if fn is not None else None
+            if theirs is None:
+                theirs = call_fork(fn, frame)
         if theirs is not None:
             outcome, _ = _same_output(mine, theirs, frame)
             if outcome != "identical":
                 # Retry with both sides on the same window.
                 pinned_mine = _call_talib_pinned(name, inputs, frame.index)
-                pinned_theirs = _fork_pinned(lower, frame)
+                # Same aligned inputs as above, or the pinned retry compares
+                # (high, low) against (close, open) and reports a 1.99
+                # "divergence" between two identical implementations.
+                pinned_theirs = _fork_pinned(lower,
+                                             frame if aligned_frame is None
+                                             else aligned_frame,
+                                             name)
                 if (pinned_mine is not NOT_CALLABLE
                         and pinned_theirs is not None):
                     p_out, p_detail = _same_output(pinned_mine, pinned_theirs,

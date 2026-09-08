@@ -270,7 +270,12 @@ def _quoted_counts(text, verdicts):
     found = [(name.strip(), int(n)) for name, n in rows]
     for span in re.findall(r"`([^`\n]+)`", text):
         for verdict in sorted(verdicts, key=len, reverse=True):
-            for match in re.finditer(re.escape(verdict) + r"\s+(\d+)\b", span):
+            # \b BEFORE the verdict too: without it "report 25" matched the
+            # verdict `port`, and `docs/CandlePatternShortlist.md` was accused
+            # of retyping the split by a probe banner reading "functions
+            # report 25". A guard with a false positive gets switched off.
+            for match in re.finditer(
+                    r"\b" + re.escape(verdict) + r"\s+(\d+)\b", span):
                 found.append((verdict, int(match.group(1))))
     return found
 
@@ -446,11 +451,40 @@ def test_have_rows_declare_whether_anyone_checked_them():
 
     unaudited = sorted(r["name"] for r in _rows()
                        if r["verdict"] == "have" and r["audited"] == "no")
-    # Not an assertion that the backlog is empty -- it is not, and pretending
-    # otherwise is the defect. This pins that the backlog is DECLARED.
-    assert unaudited, (
-        "every `have` row is marked audited; if that is genuinely true, delete "
-        "this test and the PINEBI-0b backlog task with it"
+    # PINEBI-0b certifies by measuring each `have` against an independent
+    # implementation of the Pine v6 formula. The counts here are NOT retyped
+    # into prose any more: an earlier version of this comment said "20 of the
+    # 40" long after the real figures had moved, and a stale comment on a
+    # ratchet is how the ratchet stops meaning anything. The rest stay unaudited ON PURPOSE
+    # and every one must SAY WHY -- silence is what let five wrong `have`
+    # verdicts ship. A shrinking backlog is progress; an unexplained one is not.
+    # A row carrying a measured SEMANTIC_CAVEAT has stated its reason in the
+    # strongest available form -- `hma` and `cmo` diverge from Pine and the
+    # caveat says by how much. That is not silence.
+    gen = _load_classifier()
+    silent = [r["name"] for r in _rows()
+              if r["verdict"] == "have" and r["audited"] == "no"
+              and "PINEBI-0b not certified:" not in r["note"]
+              and r["name"] not in gen.SEMANTIC_CAVEAT]
+    assert silent == [], (
+        f"unaudited `have` rows with no stated reason: {silent}. Add them to "
+        f"NOT_CERTIFIED in docs/audit_pine_have_rows.py with the reason."
+    )
+    # Count the CERTIFICATIONS, not the backlog. The backlog grew when `hma`
+    # and `cmo` moved from "certified" to "measured divergence with a caveat"
+    # -- a stronger result, not a regression, and a ceiling on the backlog
+    # would have punished it.
+    #
+    # The floor sits two below the established count so that same move stays
+    # possible; it is a ratchet, so raise it when the count rises, never lower
+    # it to make a red suite green.
+    CERTIFIED_FLOOR = 28              # established 30 of 55 `have` rows
+    certified = [r["name"] for r in _rows()
+                 if r["verdict"] == "have" and r["audited"] == "yes"]
+    assert len(certified) >= CERTIFIED_FLOOR, (
+        f"certifications fell to {len(certified)}; PINEBI-0b established "
+        f"{CERTIFIED_FLOOR}+ by measurement against an independent Pine v6 "
+        f"implementation and that floor should only rise"
     )
 
 

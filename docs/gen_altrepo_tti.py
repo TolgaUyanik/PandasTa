@@ -64,6 +64,10 @@ sys.path.insert(0, HERE)
 import numpy as np                                          # noqa: E402
 import pandas_ta as ta                                      # noqa: E402
 import tti.indicators as tti_ind                            # noqa: E402
+from _altrepo_resolve import (
+    fork_surface_cache,                              # noqa: E402
+    PINNED_LENGTH, call_fork, probe_variants,
+)
 from gen_altrepo_pandas_ta_classic import (                 # noqa: E402
     SURFACE, NOT_CALLABLE, _call, _def_line, _probe_frame, _rel, _same_output,
     _source_file,
@@ -246,7 +250,7 @@ def _tti_frame(frame):
 # mismatch as different behaviour. The first run of this scanner did exactly
 # that -- only the three parameter-FREE price transforms matched, and all 32
 # length-taking indicators were filed `port - alternate impl`.
-PINNED_PERIOD = 14
+PINNED_PERIOD = PINNED_LENGTH   # ONE constant, from the resolver
 
 
 def _compute_tti(cls, frame, period=None):
@@ -267,67 +271,25 @@ def _compute_tti(cls, frame, period=None):
 
 
 def _call_candidate(fork_name, frame, class_name, length=None):
-    """Call the fork side using this class's declared kwargs and input source."""
-    fn = getattr(ta, fork_name, None)
-    if fn is None:
-        return NOT_CALLABLE
-    extra = dict(CANDIDATE_KWARGS.get(class_name, {}))
-    source = CANDIDATE_INPUT.get(class_name)
-    params = inspect.signature(fn).parameters
-    kwargs = {}
-    for pname in params:
-        if pname in ("open", "open_", "high", "low", "close", "volume",
-                     "source"):
-            column = source if (source and pname in ("close", "source")) else {
-                "open_": "open", "open": "open", "high": "high", "low": "low",
-                "close": "close", "volume": "volume", "source": "close"}[pname]
-            kwargs[pname] = frame[column]
-    if not kwargs:
-        return NOT_CALLABLE
-    if length is not None and "length" in params:
-        extra["length"] = length
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            np.seterr(all="ignore")
-            return fn(**kwargs, **extra)
-    except Exception:                                       # noqa: BLE001
-        return NOT_CALLABLE
+    """Call the fork side through the SHARED resolver.
+
+    This used to be a private reimplementation with its own series map -- one of
+    three, which is how the scanners came to disagree about the same fork
+    function.
+    """
+    return call_fork(getattr(ta, fork_name, None), frame,
+                     kwargs=CANDIDATE_KWARGS.get(class_name),
+                     length=length,
+                     input_override=CANDIDATE_INPUT.get(class_name))
 
 
 def _fork_outputs(frame, length=None):
-    """Every fork indicator on the probe frame, optionally with `length` pinned."""
-    out = {}
-    for name in sorted(SURFACE):
-        fn = getattr(ta, name, None)
-        if fn is None or not callable(fn):
-            continue
-        try:
-            if length is not None and "length" in inspect.signature(fn).parameters:
-                base = _call(fn, frame, name)
-                if base is NOT_CALLABLE:
-                    continue
-                series_kwargs = {
-                    p: frame[{"open_": "open", "open": "open", "high": "high",
-                              "low": "low", "close": "close",
-                              "volume": "volume", "source": "close"}[p]]
-                    for p in inspect.signature(fn).parameters
-                    if p in ("open", "open_", "high", "low", "close", "volume",
-                             "source")}
-                if not series_kwargs:
-                    continue
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    np.seterr(all="ignore")
-                    value = fn(**series_kwargs, length=length)
-            else:
-                value = _call(fn, frame, name)
-        except Exception:                                   # noqa: BLE001
-            continue
-        if value is NOT_CALLABLE or value is None:
-            continue
-        out[name] = value
-    return out
+    """Delegates to the ONE shared surface cache (`_altrepo_resolve`).
+
+    This was a private reimplementation -- one of three, each with its own
+    series map and its own idea of which parameter is the window.
+    """
+    return fork_surface_cache(frame, SURFACE, ta)
 
 
 def _first_column(value):
@@ -367,7 +329,11 @@ def classify(class_name, cls, frame, fork_cache, pinned_cache):
     # `accbands` to both BollingerBands and MovingAverage because both agree
     # with it at 4 decimals. A hypothesis checked beats a coincidence found.
     preferred = CANDIDATE.get(class_name)
-    ordered = ([(preferred, fork_cache[preferred])]
+    def _flat(value):
+        # The shared cache stores a LIST of probed variants per name.
+        return value if isinstance(value, list) else [value]
+
+    ordered = ([(preferred, v) for v in _flat(fork_cache[preferred])]
                if preferred and preferred in fork_cache else [])
     # If this class HAS a mapped identity, only that identity may produce a
     # `have`. Searching the whole surface for a multi-column output finds
@@ -376,7 +342,8 @@ def classify(class_name, cls, frame, fork_cache, pinned_cache):
     # function. A mapped class that does not match its map is an alternate
     # implementation, not a match to something else.
     if preferred is None:
-        ordered += [(k, v) for k, v in fork_cache.items()]
+        ordered += [(k, v) for k, vs in fork_cache.items()
+                    for v in _flat(vs)]
 
     for fork_name, theirs in ordered:
         outcome, detail = _same_output(rounded, _round_like_tti(theirs),
