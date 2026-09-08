@@ -80,6 +80,13 @@ setup(
             "scikit-learn", "statsmodels", "stochastic",
             "talib", "tqdm", "vectorbt", "yfinance",
         ],
+        # CANDLE-2: `talib` gets its own extra as well as sitting in `dev`.
+        # It is the ONLY optional dependency that changes what the package
+        # COMPUTES rather than what it can plot or test: without it
+        # `cdl_pattern` reaches 2 native patterns, with it 62. Burying that
+        # beside matplotlib and vectorbt made it read as a dev convenience.
+        # `pip install pandas-ta[talib]` is now the documented way to get them.
+        "talib": ["talib"],
         "test": ["pytest"],
     },
 )
