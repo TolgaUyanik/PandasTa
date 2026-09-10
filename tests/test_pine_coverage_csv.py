@@ -606,8 +606,21 @@ def test_every_scoped_row_is_named_in_its_task(verdict, block, next_block):
     if not os.path.exists(todo):
         pytest.skip("TODO.md missing")
     text = io.open(todo, encoding="utf8").read()
-    start = text.index(block)
-    body = text[start:text.index(next_block, start)]
+    # Anchor on the task BLOCK, not the first bare mention. `text.index(block)`
+    # matched the ACTIVE band's one-line summary ("**PINEBI-1c/-1d/-1e**"),
+    # where the next tag follows immediately, so `body` was a ten-character
+    # slice with no `ROWS:` line and the guard reported a real, present
+    # enumeration as missing. Search for the thing, not the name -- the same
+    # lesson the altrepo scanners keep teaching.
+    def _block_start(tag, frm=0):
+        for marker in (f"**{tag} —", f"**{tag} -", f"**{tag}"):
+            i = text.find(marker, frm)
+            if i != -1:
+                return i
+        return text.index(tag, frm)
+
+    start = _block_start(block)
+    body = text[start:_block_start(next_block, start)]
 
     expected = sorted(r["name"] for r in _rows() if r["verdict"] == verdict)
 

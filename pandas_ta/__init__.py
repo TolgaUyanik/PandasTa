@@ -79,7 +79,7 @@ Category = {
         "head_shoulders",
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
-        "ribbon_concordance", "sd_zone_pro", "short_run", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
+        "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
         "rounding_cup",
         "triangle_wedge", "triple_top_bottom",
         "ttm_trend", "tvstop",
@@ -88,13 +88,13 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "donchian", "har_park", "hwc", "kc",
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "cvi", "donchian", "har_park", "hwc", "kc",
         "massi", "natr", "pdist", "range_profile", "rvi", "thermo", "true_range", "ui"
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "aobv", "avwap_z", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
+        "ad", "adosc", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
         "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave"
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`

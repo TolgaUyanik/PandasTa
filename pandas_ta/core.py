@@ -1964,6 +1964,14 @@ class AnalysisIndicators(BasePandasObject):
                                   offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def smc_sweep(self, length=None, wick_mult=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = smc_sweep(open_=open_, high=high, low=low, close=close, length=length, wick_mult=wick_mult, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def long_run(self, fast=None, slow=None, length=None, offset=None, **kwargs):
         if fast is None and slow is None:
             return self._df
@@ -2272,6 +2280,12 @@ class AnalysisIndicators(BasePandasObject):
         result = bbands(close=close, length=length, std=std, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def cvi(self, length=None, roc_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = cvi(high=high, low=low, length=length, roc_length=roc_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def donchian(self, lower_length=None, upper_length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -2384,6 +2398,14 @@ class AnalysisIndicators(BasePandasObject):
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = avwap_z(high=high, low=low, close=close, volume=volume, anchor=anchor,
                           min_samples=min_samples, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def bw_mfi(self, length=None, raw=False, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = bw_mfi(high=high, low=low, close=close, volume=volume, length=length, raw=raw, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def cmf(self, open_=None, length=None, offset=None, **kwargs):

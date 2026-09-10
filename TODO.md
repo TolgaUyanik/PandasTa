@@ -617,6 +617,127 @@ Two measurements worth keeping:
 `../Backtesting/` measurement the owner removed from both batches.
 ⚠ **Audit only** (ALTREPO scope decision). Do not port anything under this tag.
 
+## ALTPORT — port the 20 measured AlternativeRepos gaps (NEW 2026-09-09, user)
+
+> **Goal (user):** *"Do we have tasks for these new indicators from engine & AlternativeRepos? If not please create that tasks"* — the audit is finished and the gap is now a short, measured list; this is the decision about what to do with it.
+
+**ALTREPO was scoped AUDIT ONLY (owner, 2026-09-07) and that scope is now spent.** The three
+scanners hold, all three verifiers report no reproducible row, and the gap is **20 rows of 442
+scanned**. This tag is the porting decision the audit deliberately deferred; ALTREPO itself stays
+audit-only and must not grow port sub-items.
+
+**Where the 442 went** (`../AlternativeRepos/*.csv`, regenerated 2026-09-09): `have` **184** ·
+`port - alternate impl` **114** · **`port` 20** · `n/a` **115** · `unknown` **9**. ta-lib is at
+**0** after TALIB-1.
+
+⚠ **`port - alternate impl` (114) is NOT a queue.** Those are the same indicator with different
+behaviour; porting one yields a variant, not a capability. PINEBI-1c did exactly that for 9 of
+them, kept 7 on parameter reach alone, and its own write-up calls the result "a capability with no
+customer" — zero call sites in either repo. Do not treat that column as backlog without a reason
+per row.
+
+- [x] **ALTPORT-0 — Triage the 20 before building anything (MAJOR). GATES the rest.** ✅ DONE 2026-09-09 (round 3)
+      **OUTCOME: 7 BUILD / 13 SKIP — `docs/AltportTriage.md`**, measured by
+      `docs/gen_altport0_triage.py` + `docs/scalecheck_altport0.py` on 12 BIST daily frames
+      (52,022 bars). Rounds 2–3 retracted all three round-1 "identity" claims (`fosc`, `dx`,
+      `VolatilityChaikins`) — each had been produced by transcribing the candidate with FORK
+      helpers and comparing it to a FORK column — and REVERSED `smc_sweep` to BUILD on a
+      coincidence test round 1 named but did not run. Verdicts survived; the stated reasons did not.
+      ⚠ The checkbox was left open until 2026-09-10; closed as part of ALTPORT-1, which consumed it.
+      The 11 classic rows are `adxr` `avolume` `ce` `cvi` `dx` `fosc` `hvol` `mavp` `msw`
+      `smc_sweep` `vosc`. The 9 tti rows are `Envelopes` `MarketFacilitationIndex`
+      `ProjectionBands` `ProjectionOscillator` `RangeIndicator` `RelativeMomentumIndex`
+      `SwingIndex` `VolatilityChaikins` `WilliamsAccumulationDistribution`.
+      Each already carries a measured note saying why it is not a rename of something shipped —
+      e.g. `MarketFacilitationIndex` is Bill Williams `(high-low)/volume`, NOT the fork's `mfi`;
+      `ProjectionOscillator` shares an acronym with the shipped `po` and is a different indicator.
+      **Read those notes; do not re-derive them.**
+      ⚠ **`fosc` is a known near-miss, not a clean gap** — it peaks at Spearman **+0.950818**
+      against the fork's `cfo` at every length and scalar tried (residual 1.18, 17.6% relative).
+      Same family, different maths. It is the row most likely to fail Gate E.
+      **Done when:** every one of the 20 has a BUILD / SKIP verdict with a stated reason, and each
+      BUILD names the economic question it answers that no shipped column answers. A SKIP is the
+      expected outcome for several.
+- [x] **ALTPORT-1 — Screen every BUILD against the production set BEFORE writing it (MAJOR, depends on ALTPORT-0).** ✅ DONE 2026-09-10 (round 3)
+      Inverted deliberately: measure first, build second. The 2026-09-08 batch built ~35 columns
+      and **deleted 12** on redundancy against columns the engine already ships —
+      `NWE_MID_200_8.0_8.0`, `bias`, `dist_to_psar_pct`, `QQE_RSIMA`, `PSAR_Signal`. MLCOL-2
+      shipped 0 of 5 for the same reason. Screening a formula against the shipped set is far
+      cheaper than porting it through Gates A–F and then reverting it.
+      ⚠ **Depends on `TVPTA-9` in `../Backtesting/TODO.md`** — Gate E currently drops object-dtype
+      comparators via `select_dtypes`, which nearly shipped `SAREXTs` at 0.8393 when the true
+      figure against `PSAR_Signal` is 0.9598. Screening before that fix lands measures against an
+      incomplete set.
+      **Done when:** each BUILD candidate has a max |ρ| against the full production config with its
+      sample size, taken with non-numeric comparators included, and anything in the revert band is
+      struck from the queue with the measurement recorded.
+      **OUTCOME (round 3) — the two standards in this batch DISAGREE, and that is the finding.**
+      Write-up: `docs/AltportScreen.md`. Harness
+      `../Backtesting/scripts/analysis/measure_altport1_overlap_full.py` (8 stages, all exit 0);
+      10 CSVs under `../Backtesting/backtest_results/altport1/`.
+      * **Gate E band as written: 1 STRUCK / 4 ship-with-disclosure / 4 ship.**
+        **ALTPORT-0's own applied standard (question-redundancy): 3 clear / 2 conditional /
+        3 skipped / 1 struck.**
+      * **492 comparators** (485 numeric + 1 bool + 6 ordered), **`n_unmapped` 0 AND
+        `n_unmapped_values` 0** on all 89 rows; 89 BIST_100 daily frames / **408,253 bars**.
+      * **STRUCK: `ProjectionOscillator` → `POSC_14`** — pooled |ρ| **0.894742** vs `cfo`,
+        per-frame **median 0.910212, ≥0.90 on 62.9% of 89 frames**. Corroborating mechanism:
+        `AltportTriage.md` row 10 SKIPs `fosc` at **0.967784 vs `CFO_14`** — the same
+        linreg-forecast-residual collision against the same column. (The 0.950818 quoted at
+        line 648 is a PROBE-frame figure, not the basis of that SKIP.)
+      * **CLEAR on both standards (3): `cvi` → `CVI_10` 0.501290 · `MarketFacilitationIndex`
+        → `MFI_BW_SF_20` 0.536816 (0.573380 after the quantisation correction) ·
+        `smc_sweep` → `SMC_SWEEP` 0.161383**, whose event test now carries a chance baseline:
+        observed 20.96% vs null **11.09 ± 0.36** (200 per-frame circular shifts),
+        **enrichment 1.89×, z 27.4** — an UPPER BOUND on bar-level alignment.
+      * **CONDITIONAL (2), together or not at all: `PB_UP_DIST_PCT` 0.773573 ·
+        `PB_LO_DIST_PCT` 0.727354.** They are the same construction mirrored; splitting them
+        on 0.046 of ρ would be a correlation gate, not the question gate ALTPORT-0 applied.
+        One ruling decides both: *is a slope-corrected extreme a different question from a raw one?*
+      * **SKIPPED on question-redundancy (3): `HVOL_20` 0.834724 vs `natr` · `PB_WIDTH_PCT`
+        0.874411 vs `natr` · `WAD_BAR_SF` 0.889416 vs the signed daily return.** ALTPORT-0
+        SKIPped `vosc` at **0.753468** on exactly this test — these are 0.83–0.89.
+        Shippable under the Gate E band alone; that is a choice to be made explicitly.
+      * New guard: `../Backtesting/tests/test_comparators.py` — **14 passed, pytest exit 0**.
+      🔴 **ALTPORT-2 MUST NOT START until the owner rules on (a) the standards clash and
+      (b) the slope-correction question.** The input set is 3, 5, or 8 columns depending on both.
+      ⚠ **`CLAUDE.md:98` has no rule for 0.80–0.90.** Round 3 resolves it on the PER-FRAME
+      median at the same 0.90 the band already names — no new constant. (Round 2 used a
+      fitted `REVERT_APPROX = 0.89`, deleted.) `docs/AltportScreen.md` proposes an exact
+      replacement; its `pct_frames_ge_090 >= 25%` clause is calibrated on ONE datapoint and
+      is marked provisional. **Owner decision pending — not applied.**
+      ⚠ **Gate D was RUN, not inferred: 6 of 9 columns are NOT bit-identical at ×8/×64**
+      (tti's fixed-decimal rounding; `POSC_14` worst at 0.4807; NaN masks match on all 18
+      cells). ALTPORT-2 must re-run Gate D bit-identical on the ported fork implementation.
+      ⚠ **`MFI_BW_SF_20` is a LOCAL construction around a DECORATIVE tti call** — tti returns
+      `(h−l)/volume` and the form multiplies volume back out (verified: tti `mfi` vs a local
+      `(h−l)/volume`, max|d| **4.99908e-11**). Its Gate A must go to Bill Williams directly.
+      ⚠ **`TVPTA-9` still OPEN** — this fixed ONE harness; ~14 others still `select_dtypes`.
+
+- [ ] **ALTPORT-2 — Port the survivors through Gates A–F (MAJOR, depends on ALTPORT-1).**
+      Five wiring touch points per `CLAUDE.md`. Attribution: pandas-ta-classic is MIT, tti is MIT —
+      permissive, but attribution is still required on any port and neither repo may be committed
+      into this one.
+      ⚠ **Gate B needs the right mutant.** Prefix truncation cannot certify anchor-sparse or
+      event-flag output — a back-dating mutant scores 0.0 under it AND under endpoint rescanning.
+      Use future-perturbation, and SWEEP the perturbation point: CANDLE-1's mutant escapes at
+      J=200 for one module and J≥250 for another. See
+      `tests/test_pinebi_1e_utilities.py::test_pivot_is_causal_with_a_mutant`.
+      ⚠ **Gate D is bit-identical** at x8/x64 (`== 0.0`, not a tolerance).
+      ⚠ For any event-flag column, screen the **tied-zero trap**: an unsigned magnitude nonzero
+      only on its own event's support is mostly a description of that support — two such columns
+      correlate ρ ≈ 1.0000. Signing one escapes it.
+      **Done when:** each survivor ships with a test module, a measured Gate E max with its sample
+      size, and `docs/IndicatorDictionary.md` regenerated; reverted candidates stay in the write-up
+      with their measurement, as `docs/TalibPortsMeasured.md` does.
+
+⚠ Ties: extends the **ALTREPO** contract (audit-only; this tag owns the porting). Consumes
+`../AlternativeRepos/IndicatorList.md` + the three CSVs. Engine-side consumption is **TVPTA-8** in
+`../Backtesting/TODO.md`, and the Gate E correctness fix it depends on is **TVPTA-9**. Precedent
+for the measure-then-delete discipline: `docs/TalibPortsMeasured.md`,
+`docs/CandlePatternsMeasured.md`, `docs/PineAlternatesMeasured.md`.
+
+
 ## MLCOL — per-indicator ML companion columns (NEW 2026-09-06, user)
 
 > **Goal (user):** *"We should optimize each indicator for ML. Each indicator should show binary fields

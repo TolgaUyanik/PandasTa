@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A fork of [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, published as
-`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **221** in `Category` — the count that
+`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **224** in `Category` — the count that
 matters, since `Category` is what `df.ta.strategy()` sweeps — with the extras being
 TradingView/Pine and SMC price-action ports. README's "Indicators by category" section
-gives the two adjacent counts (229 callable on `df.ta`, plus `drawdown`/`ma` on the module)
+gives the two adjacent counts (232 callable on `df.ta`, plus `drawdown`/`ma` on the module)
 and is checked against the package by `tests/test_readme_counts.py`. Do not retype any of
 the three here.
 

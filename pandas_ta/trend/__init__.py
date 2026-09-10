@@ -23,6 +23,7 @@ from .increasing import increasing
 from .inverse_fvg import inverse_fvg
 from .liquidity_compression_box import liquidity_compression_box
 from .liquidity_sweep import liquidity_sweep
+from .smc_sweep import smc_sweep
 from .long_run import long_run
 from .nwog import nwog
 from .ob import ob
