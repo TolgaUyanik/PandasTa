@@ -20,8 +20,10 @@ ta-lib 10 → **0**; all three verifiers report no reproducible row.
 
 Closed: **RMA-W** (new, owner-directed), **PINEBI-1c/-1d/-1e**, **TALIB-1**,
 **CANDLE-0/-1/-2**, **INDREF-0**, **MLCOL-2**.
-Deferred by the owner up front: **PINEBI-2, INDREF-1, MLCOL-1**.
-Dropped with reason: **INDREF-2** (depends on the deferred INDREF-1).
+Deferred by the owner up front: **PINEBI-2, INDREF-1, MLCOL-1** — of these **INDREF-1 was since
+done (2026-09-10)**, see the INDREF section.
+Dropped with reason and later revived: **INDREF-2** (dropped because INDREF-1 was deferred; INDREF-1
+landed 2026-09-10 and **INDREF-2 was done 2026-09-11** — see the INDREF section).
 Still open and NOT started: **PINEBI-1b** — the 16 `port` rows.
 
 ⚠ **The batch's output was mostly DELETIONS.** Twelve columns were built, measured
@@ -294,9 +296,54 @@ column is still `SUM_<length>`), `normalize`, `covariance`, and `pivot`. 25 test
   **Done when:** this repo's side of whichever queue is picked is ported and green; the queue's own
   acceptance criteria stay owned by the parent task.
 
+  🔶 **TRIAGE HALF DONE 2026-09-10/11 → `docs/PineCorpusTriage.md`. Porting half NOT started, and
+  the triage now recommends NOT starting it.** Nothing ported, nothing committed to the corpus.
+  Every count above is wrong and the doc measures the corrections:
+  - **"ported 195" was the port *target*.** `tvpta_status.py` measures **~37 actually landed**
+    (±2 on two AMBIGUOUS rows); 5 `port` rows never landed and 1 `defer` row did (`iama`).
+  - **"43-candidate `defer` backlog" is 7**, of which 1 already landed and 2 are recorded NOT
+    PORTABLE → **4 actionable**. Queue A is cleanup, hours, not a MAJOR.
+  - **Libraries are the LEAST math-dense bucket, not the most.** Verbatim `classify_bucket` over
+    all 992: `no_math` **649 (65.4%)** vs 21.2% for `indicator`; shortlist-eligible **269 (27.1%)**
+    vs 44.0%. What gets published as a Pine `library()` is overwhelmingly infrastructure —
+    theming, logging, drawing, alert strings, matrix algebra, expression parsers.
+  - **Sampled survival 4/30 = 13.3%**, Wilson 95% CI [5.3%, 29.7%], seed 20260910, recipe in the
+    doc and executable.
+
+  **Round 2 (2026-09-11) — the Fletcher gate returned REVISE with 2 CRITICALs + 3 MAJORs; all
+  applied, and they inverted the recommendation.**
+  - **The yield headline did not compose from its own discounts.** It printed "10–25 landed
+    indicators" while instructing the reader to shrink 3–6× behaviourally and then delete 34% at
+    Gate E — which gives 4–8. Add the licence cut below and the honest figure is **3–6 landed
+    indicators, plausibly 1**. Every band is now shown as multiplication that can be checked.
+  - **Licensing was measured in §1 and then never mentioned in the recommendation.** Of the 269
+    candidate files, **179 carry MPL-2.0, 19 a bare ©, and 71 carry no attribution at all
+    (26.4%)**. By `Backtesting/TODO.md`'s own IP gate those 71 cannot ship to a public MIT repo,
+    so the effective pool is **198** — and the unshippable count exceeds the entire projected
+    yield. A licence-attribution gate is now a precondition on Queue B.
+  - **§1.1's headline accusation was a strawman and is retracted.** It claimed "the documented
+    source is wrong"; `TODO.md:91` actually claims a *basename* join (`tv_source.jsonl`,
+    3,730 rows, 2,211/2,211), which reproduces and is correct. The *script_type* join is a
+    separate lookup the TODO never attributed to that file.
+  - **TVPTA-8's objection is now answered instead of dodged.** Cost is stated: **198 files read to
+    land 3–6 indicators, 33–66 files each**, while 62 already-built indicators sit unexecuted by
+    any engine path (INDREF-2 §5b).
+  - **Recommendation inverted: DEFER Queue B; do the wiring pass first.** Order is now
+    TVPTA-9 → PINEBI-1b → TVPTA-6 close-out → **wiring pass (TVPTA-8's 30 + INDREF-2's 62)** →
+    TVPTA-1b, if at all. This agrees with INDREF-2 §7, reached independently.
+
+  🔴 **LICENSING, OWNER DECISION, NOT AUTO SCOPE.** The gate closed a limit the triage had filed as
+  "not checked": there is a **second copy of the whole corpus at `Backtesting/docs/TradingView/pine/`
+  and it is TRACKED** — `git -C Backtesting ls-files docs/TradingView/pine | wc -l` → **2211**,
+  `check-ignore` → not ignored. 912 carry MPL-2.0 headers under **hundreds of individual
+  rightsholders** (only 8 say `© TradingView`), and **`Backtesting` has no `LICENSE` file at all**.
+  The 2026-09-07 untracking closed this for `PandasTa` only. Whether that repo is public is
+  **unverified**. No action taken: remediation means history rewriting and a force-push.
+
 ⚠ Ties: extends **TVPTA-1b** (`../Backtesting/TODO.md:489`) and **TVPTA-6** (`:253`) — do not open a
-third pine initiative. `docs/pine/` is currently neither committed nor gitignored; decide which in
-PINEBI-0. `williamsFractal` (-1b) overlaps the engine's existing `FRACTAL_UP`/`FRACTAL_DN` columns and
+third pine initiative. ~~`docs/pine/` is currently neither committed nor gitignored; decide which in
+PINEBI-0.~~ **Stale — it IS gitignored** (`.gitignore:167`, decided 2026-09-07). The open licensing
+question is the tracked second copy in `Backtesting`, above, not this one. `williamsFractal` (-1b) overlaps the engine's existing `FRACTAL_UP`/`FRACTAL_DN` columns and
 `ta.pivothigh`/`ta.pivotlow` (-1a) — measure all three against each other before shipping any.
 The other 6 `© TradingView` libraries on disk (`ZigZag`, `zigzag-force`, `RiskMetrics`, `ValueAtTime`,
 `Request`, `Color`) are unaudited; `ZigZag`/`zigzag-force` overlap the shipped `zigzag`/`zigzag_fib`.
@@ -456,17 +503,171 @@ first version passed. `DERIVED` is a first-class provenance class beside QUOTED 
 
 ⚠ **The Gate C/D/E numbers on that page are QUOTED, and their CSVs are gone** — `backtest_results/`
 is gitignored, so they were never committed. The page says so and names the re-run commands.
-INDREF-1 (deferred) will hit this for every indicator.
+INDREF-1 hit exactly this for every indicator: most pages carry the stub token in
+§6–§9 rather than a quoted number whose artifact nobody opened. (The 3-measured/230-stub split
+first recorded here was itself wrong — see the round-2 note below; it is **40 / 193**.)
 
-- [ ] **INDREF-1 — Generate the pages for every shipped indicator (MAJOR, depends on INDREF-0).**
-  Machine-fill everything the dictionary probe already knows; hand-write only provenance and the
-  "what it measures" paragraph.
-  **Done when:** `docs/indicators/<name>.md` exists for all 201, an index page links them, and the
-  generator is committed next to `docs/gen_indicator_dictionary.py`.
-- [ ] **INDREF-2 — Engine-side results write-up (MAJOR, depends on INDREF-1, lands in `../Backtesting/docs/`).**
+✅ **INDREF-1 — DONE 2026-09-10/11.** `docs/gen_indicator_pages.py` beside
+`docs/gen_indicator_dictionary.py`, **233 pages** in `docs/indicators/` plus
+`docs/indicators/README.md` as the index. `tests/test_indref_pages.py` is green over all of them:
+**1,404 passed**, `python -m pytest tests/test_indref_pages.py -q`, **pytest exit 0**, re-run
+2026-09-11. Measurements behind the pages were taken 2026-09-10 and are frozen in
+`docs/indicators/_facts.json`; the full suite at that point was **2,983 passed / 0 failed / 23
+skipped, exit 0** (1,585 before these pages existed — the pages add 1,398 guard cases).
+
+**Round 2 (2026-09-11) — the Fletcher gate returned REVISE with two CRITICALs, both fixed and
+re-emitted.** Both were the same defect: the generator stated the limits of its own greps as facts
+about the world, in bold, with a machine's authority.
+
+- 🔴 **Round 2 found both CRITICAL fixes had been applied to one cell each and not swept through
+  the page**, so the top-of-page Gate-coverage banner still printed the round-1 sentence on 230
+  pages and contradicted §7 on 33 of them; the banner and §7 now share one branch. The wiring cell's
+  "not reached by **any** engine call path" was also a fresh absolute the source could not support —
+  INDREF-2's facts cover only the two engine modules — so it is now scoped to those two modules and
+  reports the Gate-E/analysis script count alongside, from a new `ANALYSIS_CALLERS()` scan.
+- 🔴 **"not called by the parent engine" was false on 206 pages.** The cell was driven by a
+  `ta.<name>(` literal grep, which is structurally blind to `getattr(ta, func_name)` over
+  `INDICATOR_SPECS` (104 entries) and to import aliases (41). `kc`, `eom`, `squeeze` and 200-odd
+  others are dispatched every run at `speedy_indicators.py:1064`. The generator now reads
+  INDREF-2's measured swept set from `_indref2_facts.json`: **170 pages say "called by the parent
+  engine" with the mechanism named, 62 say "not reached by the engine" scoped to the two modules
+  actually scanned, 0 carry the old claim** — and 170 + 62 reconciles exactly with INDREF-2's swept 171 (minus protected `tvstop`)
+  and never-swept 62. When that file is absent the cell degrades to naming the scan's limits, not
+  asserting a negative.
+- 🔴 **"No overlap campaign has been run for this indicator" was printed on pages whose Gate A–F
+  record is in a tracked file two directories up** — `sarext` among them, whose Gate E is ρ +0.9850
+  vs `dist_to_psar_pct` over 408,075 bars in `docs/TalibPortsMeasured.md`. The `measured` test was
+  a filename match on `measure_<name>_overlap_full.py` and could not see a batch campaign. Now
+  joins the four campaign docs (TALIB-1, ALTPORT, CANDLE-1, PINEBI-1c): **measured 3 → 40, stub
+  230 → 193** (36 after round 2's first pass; 40 once the five probe-raising indicators, which have
+  no probed columns to match on, were made to fall back to their declared stem — `sarext` was still
+  being branded uncampaigned until then). The match is by emitted column name, and because a campaign doc names comparator
+  columns as well as ported ones, the page says so explicitly and tells the reader to open the doc
+  rather than guessing which it is — matching on the function name instead marked 47 indicators
+  measured, which was the same overclaim with the opposite sign.
+- Also fixed: probe-derived provenance rows no longer carry the frozen cache date as if it dated a
+  live measurement; the five indicators whose probe raises now say "probe raised — see §2" instead
+  of "— no probed column", which read as "emits nothing".
+- Idempotence re-verified after all of it: `--check` → **changed=0**.
+
+The guard was re-verified to BITE on a GENERATED page, not merely to pass: a fabricated row
+(`| \`ROC_FAKE\` | 3.14 | 2,718 |`) inserted into `roc.md`'s already-registered §10 table failed
+`test_every_number_group_is_covered_with_a_matching_count[roc.md]` with exit 1, and the page was
+restored.
+
+⚠ **The task line said "all 201" and that number was already stale by 32.** The live surface,
+re-probed on the day: **224** registered in `Category`, **232** callable as `df.ta.<name>()`, **2**
+callable on the module only. INDREF-1 therefore had to define "shipped" before it could count, and
+the definition it applies — stated on the index page and in the generator's docstring — is
+`Category` **plus** every callable the registry does not know about, **minus** `ma`. `ma` is a
+moving-average *dispatcher* that emits no column of its own, which is not a fresh judgement:
+`gen_indicator_dictionary.py` already carries `SKIP = {"ma"}` and the dictionary lists it under
+*Not indicators*. The other nine unregistered callables (`beta`, `drawdown`, `ht_trendline`,
+`hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`) each get a page whose header
+says a `df.ta.strategy()` sweep skips them.
+
+⚠ **193 of the 233 pages carry the stub token in §6–§9 (corrected in round 2 — it was reported as
+230, which understated the measured set by an order of magnitude).** A page counts as measured if
+any of three things holds: a harness named for that indicator exists
+(`measure_<name>_overlap_full.py` — true for `dtdb` and `fvg`), one of the four batch campaign
+documents names one of its emitted columns, or the page is hand-written (`tvstop`). The first test
+alone branded `sarext` a stub while its Gate E (ρ +0.9850, n=408,075) sat in a tracked
+`docs/TalibPortsMeasured.md`. The campaign match is by column name and **cannot separate a ported
+column from a Gate E comparator** — matching on the function name instead swings the count to 47 by
+catching every comparator mention — so each affected page states the ambiguity and points at the
+document rather than guessing. It is a compromise, and the index says so.
+
+Machine-filled from a real run: the header table's declared rows, §2 (columns, ML form, warm-up,
+probe range, register verdict joined from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md`),
+§3's module length, §5's leak flag, §10's mining greps, §12's Gate F count. Owed by a human and
+stub-tokened: §1, §3's source identification, §4, §6–§9, §11, and the *effective defaults* row —
+the last one deliberately, because `inspect.signature` reports `None` for every validated parameter
+on this fork's ports and substituting the real value into a row labelled "declared signature" would
+contradict the dictionary row beside it.
+
+Slow inputs (the full-suite `--junitxml` run, the one-pass read of the gitignored
+`backtest_results/` tree — 383 non-image files, 4.9 GB, measured by the generator on the run) are frozen in `docs/indicators/_facts.json`, so a plain re-run is
+byte-stable and `python docs/gen_indicator_pages.py --check` exits 0 (verified: `changed=0`). Re-measure with
+`--refresh-facts`; it takes tens of minutes and is the only path that touches the parent repo.
+
+⚠ **Left for a human, named so nobody assumes otherwise:** the §1 paragraph, §3 provenance and §4
+formula on 232 generated pages. The generator quotes the module docstring as a labelled *seed* and
+refuses to promote it to §1, per `_TEMPLATE.md`. `tvstop.md` is `PROTECTED` in the generator and was
+not regenerated.
+- [x] **INDREF-2 — Engine-side results write-up. DONE 2026-09-11.**
   Which ported columns mining actually selected, which never fired, and what they cost in compute.
-  **Done when:** the doc names, per indicator, selected / never-selected / never-fired, and links back
-  to the INDREF page.
+  **Deliverable:** `../Backtesting/docs/indicators/IndicatorSelectionResults.md` (233 rows, one per
+  shipped indicator, each linking back to its INDREF-1 page), regenerated end-to-end by
+  `../Backtesting/scripts/analysis/measure_indref2_selection.py --refresh` into
+  `../Backtesting/docs/indicators/_indref2_facts.json`. No number on the page is hand-typed.
+
+  **OUTCOME (all measured 2026-09-11, 6 cleaned BIST daily frames, 37,144 bars):**
+  SELECTED **34** · NEVER SELECTED **60** · barred-by-`MiningConfig` **59** · SWEPT-BUT-CALL-FAILS
+  **16** · SWEPT-BUT-EMITS-NOTHING **1** (`vp`) · NEVER FIRED **1** (`tod_profile` — 2 constant
+  columns on daily bars, confirmed engine-side) · NEVER SWEPT **62** (= 233).
+  Three states beyond the four the task named were forced by the data; each would have credited our
+  own plumbing to the indicator if folded into "never selected". **175 of 233 (75%) were never in a
+  position to be selected at all**, so the ties line's premise fails as stated. Compute:
+  `IndicatorEngine(include_advanced=True).compute_all` measured at 66.1 s per ticker-history in the
+  cached run, but an earlier run the same day measured ~20 s — **treat it as a 20–66 s band**, not
+  a point (§8; needs N≥3 cached runs to settle).
+
+  **Round 2 (2026-09-11) — the Fletcher gate returned REVISE on six load-bearing overclaims in the
+  prose, all now corrected in the renderer and re-rendered.** The measurement scaffolding survived
+  the gate intact; the failures were all in sentences the machine did not generate:
+  - **"139 / 60%" and "only the 60 were genuinely passed over" were wrong.** The page's own §2
+    measured that 73 indicators postdate the last mining run (2026-07-20) — and **36 of those sit
+    inside the 60**. Corrected to **175 (75%)** and a genuinely-offered set of **24**.
+  - **"34 indicators account for *every* feature reference"** contradicted §3 three sections
+    earlier. It is **1118 of 1370 (82%)**; the rest name engine-native columns.
+  - **"9.91 s provably wasted on barred columns, the specs can be skipped" was wrong by ~40×.** A
+    consumer scan added to `analyse()` finds **9.66 s of the 9.91 s has a consumer outside mining**
+    — `strategy_factory.py` builds named crossover strategies on 59 of the barred columns
+    (`ha_HA_close`, `alma`, `vidya`, `mcgd`, `t3`, `rma`, …). Genuine orphan: **0.24 s**. Skipping
+    those specs would have broken a shipped non-mining consumer.
+  - **"never executed by anything in this repo"** was asserted after parsing two files. A repo-wide
+    scan finds **21 of the 62 never-swept are executed by the Gate-E/overlap scripts** under
+    `scripts/analysis/`. The defensible claim is "no *engine* call path reaches them".
+  - **Tokeniser bug:** `[A-Za-z_]\w*` shattered the real column `BB_%B` into phantom tokens `BB_`
+    and `B`, and minted `e` from float exponents — 12 uses over 3 non-features. Now matches the
+    actual column list longest-first, with an assertion that no counted token is unknown. Distinct
+    selection tokens 59 → **54**. No state flipped.
+  - **The "RECALL LAW" was false as printed** (a dozen hand-typed figures in §2 and §6). Narrowed
+    to §1 and §3–§9, with the cited-elsewhere figures marked as quoted, not re-measured.
+  Also downgraded: §5c's shadowing claim now says co-existence, not causation, and no longer
+  recommends swapping in `ta.zigzag` — `indicator_engine.py:1430` documents its `ZIGZAG` as
+  LOOKAHEAD-CONTAMINATED and the fork's causality was never checked against it.
+
+  **Two corrections to INDREF-1's cached facts** (both reproduce exactly, both mislead): the
+  `ta.<name>(` scan finds 26 call sites but the engine actually sweeps **171** — 104 through
+  `getattr(ta, func_name)` over `INDICATOR_SPECS` and 41 through import aliases, neither visible to
+  a name grep; and the `StrategyMaster` stem scan is case-sensitive, so it reports 18 stems where
+  exact column-token matching finds **34** indicators. The `backtest_results/` column is not a
+  selection signal at all (`HARPARK`'s 215 "files" are 208 dumped `_work/*.parquet` frames).
+
+  🔴 **New defect — §5d: 16 of the 104 `INDICATOR_SPECS` entries pass an arg list that does not
+  match the pandas_ta signature** (`("kc", ["Close"], …)` where `ta.kc` needs high/low/close;
+  `eom` given High/Low/Volume where the signature is high/low/close/volume). Each raises
+  `TypeError` on every run and is swallowed by the bulk loop's bare `except: continue`, so
+  `aberration`, `eom`, `hilo`, `kc`, `long_run`, `pdist`, `pgo`, `pvol`, `pvr`, `rvgi`,
+  `short_run`, `smi`, `squeeze`, `thermo`, `trend_return`, `ttm_trend` **have never emitted a
+  column in any mining run.** Reproduced independently on the main thread by AST-parsing the spec
+  table and executing each entry through the engine's own `df.get(arg)` resolution: same 16 names,
+  same exception strings, 104 specs.
+
+  🔴 **And it is not one table — the same 16 are broken in all SIX copies** (verified 2026-09-11 by
+  running every spec table the same way): `backtesting_engine/speedy_indicators.py` (104),
+  `deploy/app/analysis/DailyAnalysis.py` (104), `MarketAnalysis.py` (104), `SpeedyAnalysis.py`
+  (104), `SpeedyAnalysisUS.py` (106), and the untracked root `SpeedyAnalysisDaily.py` (104).
+  Fix not attempted: out of INDREF-2's scope, it changes the engine's column set, and **four of
+  the six are inside `deploy/`, where repairing the arg lists would make 16 indicators start
+  emitting columns in the live container — a strategy-affecting change under the TRADING FREEZE.**
+  Owner decision required before any of the six is touched.
+
+  **New finding — §5c:** the engine keeps **private re-implementations of 14 fork indicators**
+  (`bos`, `choch`, `ob`, `zigzag`, `halftrend`, `wavetrend`, `zscore`, `chop`, …), which is why 10
+  of the 62 never-swept are never swept. 35 mined-rule references land on those private copies.
+  This is FVGENG generalised.
 
 ⚠ Ties: the parent repo already runs a family-doc convention at `../Backtesting/docs/indicators/`
 (`family-oscillator-momentum.md`, `family-trend-overlay.md`) — match it, don't invent a second shape.
