@@ -31,7 +31,18 @@ def ssf(close, length=None, poles=None, offset=None, **kwargs):
         c2 = c0 + b0 # e^(-2x) + 2e^(-x)*cos(3^(.5) * x)
         c1 = 1 - c2 - c3 - c4
 
-        for i in range(0, m):
+        # LOOK-AHEAD FIX (MLCOL-1, 2026-09-11). This loop started at i = 0,
+        # where `ssf.iloc[i - 1]` is `ssf.iloc[-1]` -- Python negative
+        # indexing, i.e. the LAST bar of the series. The first three bars
+        # therefore read the last three, and because the filter is recursive
+        # that contamination propagates forward through every subsequent bar.
+        # Measured before the fix: altering only bars >= 300 of a 400-bar
+        # frame moved the output at bar 0 by 31.4.
+        #
+        # Seeding the first `poles` bars with `close` (already true -- `ssf`
+        # is a copy) and starting the recursion after them is the
+        # conventional warm-up and is what Ehlers' formulation assumes.
+        for i in range(3, m):
             ssf.iloc[i] = c1 * close.iloc[i] + c2 * ssf.iloc[i - 1] + c3 * ssf.iloc[i - 2] + c4 * ssf.iloc[i - 3]
 
     else: # poles == 2
@@ -41,7 +52,8 @@ def ssf(close, length=None, poles=None, offset=None, **kwargs):
         b1 = 2 * a0 * npCos(x) # 2e^(-x)*cos(x)
         c1 = 1 - a1 - b1 # e^(-2x) - 2e^(-x)*cos(x) + 1
 
-        for i in range(0, m):
+        # Same look-ahead fix as the 3-pole branch above.
+        for i in range(2, m):
             ssf.iloc[i] = c1 * close.iloc[i] + b1 * ssf.iloc[i - 1] + a1 * ssf.iloc[i - 2]
 
     # Offset

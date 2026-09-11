@@ -362,6 +362,43 @@ and not applied to the contract is the more useful finding.
 four *primitives*, not per-parent columns, and no measurement in either round
 found a defect in any primitive. What is deleted is the reference COLUMN SET.
 
+## Causality is a PRECONDITION of the incremental axis, not a parallel check
+
+Added 2026-09-11, from MLCOL-1's screen, because it inverts how the axis reads.
+
+`dpo` defaults to `centered=True`, which `PandasTa/CLAUDE.md` names as one of
+exactly **two** known non-causal columns in the entire package (the other is
+`ichimoku`'s `ICS_26`). Measured directly: altering only bars from index 300
+onward moves `dpo`'s output on bars *before* 300 by up to **24.0**; at
+`centered=False` the same perturbation moves it by **0.000000**.
+
+MLCOL-1 screened a companion off that parent and axis 3a **ranked it first**:
+
+    DPO_20_RATIO_PCT   dAUC +0.0473   perm. importance +0.35693   15/15 beats NULL
+
+against a field where every honest candidate scored ~0.01 and dAUC ~0.008.
+
+**That is the lesson, and it generalises past `dpo`.** Leakage is the
+strongest signal a model can be handed, so an incremental axis does not merely
+fail to catch a non-causal feature — it *promotes* it to the top of the
+ranking, with a clean-looking 15/15 against its own shuffled null. Every
+control in the procedure behaves exactly as designed and the answer is still
+wrong, because all of them ask "is this better than noise", and leaked future
+is much better than noise.
+
+So the order is fixed:
+
+1. **Causality, measured per parent** — perturb the tail, assert the prefix is
+   bit-identical. Not read off a list: a list only contains the cases someone
+   already knew about, and `MLCOL-1`'s guard is a measurement precisely so it
+   catches the ones nobody has written down.
+2. Gate E.
+3. The incremental axes.
+
+A companion whose parent fails (1) is not a weak candidate to be weighed
+against the others — it is not a candidate. `measure_mlcol1_screen.py`
+excludes it as `EXCLUDED-NON-CAUSAL` before any correlation is computed.
+
 ## What MLCOL-1 must do differently
 
 1. **Gate E is necessary but not sufficient.** Three of these five clear Gate E
