@@ -26,10 +26,10 @@ terms that a `df.ta.strategy()` sweep skips them.
 
 | surface | n |
 |---|---|
-| registered in `Category` | 224 |
-| callable as `df.ta.<name>()` | 232 |
+| registered in `Category` | 231 |
+| callable as `df.ta.<name>()` | 239 |
 | callable on the module only | 2 |
-| **pages in this directory** | **233** |
+| **pages in this directory** | **240** |
 
 The 9 callable-but-unregistered indicators that got a page: `beta`, `drawdown`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`. `ma` is the one callable this
 definition deliberately drops.
@@ -65,16 +65,16 @@ currently has no ticket.
 | | pages |
 |---|---|
 | measured — dedicated harness, campaign-doc match, or hand-written | 40 |
-| §6–§9 stubbed | 193 |
+| §6–§9 stubbed | 200 |
 
-That is **82.8 %** of the pages carrying the stub token in §6–§9 — the number is derived here
+That is **83.3 %** of the pages carrying the stub token in §6–§9 — the number is derived here
 from the two rows above and appears in no artifact.
 
 Pages in the measured column: [`atr`](atr.md), [`atr2`](atr2.md), [`beta`](beta.md), [`bos`](bos.md), [`bw_mfi`](bw_mfi.md), [`cvi`](cvi.md), [`dema2`](dema2.md), [`dtdb`](dtdb.md), [`ema`](ema.md), [`ema2`](ema2.md), [`equal_highs_lows`](equal_highs_lows.md), [`fvg`](fvg.md), [`fvg_sweep_magnet`](fvg_sweep_magnet.md), [`har_park`](har_park.md), [`head_shoulders`](head_shoulders.md), [`ht_dcperiod`](ht_dcperiod.md), [`ht_dcphase`](ht_dcphase.md), [`ht_phasor`](ht_phasor.md), [`ht_sine`](ht_sine.md), [`ht_trendline`](ht_trendline.md), [`ht_trendmode`](ht_trendmode.md), [`imi`](imi.md), [`liquidity_compression_box`](liquidity_compression_box.md), [`macd_area_divergence`](macd_area_divergence.md), [`mama`](mama.md), [`nadaraya_watson_envelope`](nadaraya_watson_envelope.md), [`pressure_pulse`](pressure_pulse.md), [`range_profile`](range_profile.md), [`rma2`](rma2.md), [`rounding_cup`](rounding_cup.md), [`sarext`](sarext.md), [`smc_sweep`](smc_sweep.md), [`sr_corridor`](sr_corridor.md), [`supertrend2`](supertrend2.md), [`t3`](t3.md), [`t3_tv`](t3_tv.md), [`tema2`](tema2.md), [`triangle_wedge`](triangle_wedge.md), [`triple_top_bottom`](triple_top_bottom.md), [`tvstop`](tvstop.md).
 
 **Every page's Gate A, C and E rows are stubs unless that page says otherwise.**
 `ls ../Backtesting/scripts/analysis/measure_*overlap*.py` returns **16** harnesses (counted by
-this generator on 2026-09-10) against 233 pages, and most of those harnesses are batch harnesses
+this generator on 2026-09-10) against 240 pages, and most of those harnesses are batch harnesses
 covering a single recent port campaign. The gates were run for recent ports, not for the
 upstream body of the package, and the pages say so rather than leaving an inviting blank.
 
@@ -125,7 +125,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`ht_sine`](ht_sine.md) | yes | 2 | measured |
 | [`ht_trendmode`](ht_trendmode.md) | yes | 1 | measured |
 
-### 5.3 `momentum` (52)
+### 5.3 `momentum` (56)
 
 | indicator | in `Category` | columns probed | §6–§9 |
 |---|---|---|---|
@@ -160,12 +160,14 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`pressure_pulse`](pressure_pulse.md) | yes | 1 | measured |
 | [`psl`](psl.md) | yes | 1 | stub |
 | [`pvo`](pvo.md) | yes | 3 | stub |
+| [`pzo`](pzo.md) | yes | 1 | stub |
 | [`qqe`](qqe.md) | yes | 4 | stub |
 | [`roc`](roc.md) | yes | 1 | stub |
 | [`rsi`](rsi.md) | yes | 1 | stub |
 | [`rsi_divergence`](rsi_divergence.md) | yes | 2 | stub |
 | [`rsx`](rsx.md) | yes | 1 | stub |
 | [`rvgi`](rvgi.md) | yes | 2 | stub |
+| [`rwi`](rwi.md) | yes | 2 | stub |
 | [`slope`](slope.md) | yes | 1 | stub |
 | [`smi`](smi.md) | yes | 3 | stub |
 | [`squeeze`](squeeze.md) | yes | 4 | stub |
@@ -173,6 +175,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`stc`](stc.md) | yes | 3 | stub |
 | [`stoch`](stoch.md) | yes | 2 | stub |
 | [`stochrsi`](stochrsi.md) | yes | 2 | stub |
+| [`szo`](szo.md) | yes | 1 | stub |
 | [`td_seq`](td_seq.md) | yes | 2 | stub |
 | [`trix`](trix.md) | yes | 2 | stub |
 | [`trixh`](trixh.md) | yes | 3 | stub |
@@ -181,6 +184,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`vwmacd`](vwmacd.md) | yes | 3 | stub |
 | [`wavetrend`](wavetrend.md) | yes | 5 | stub |
 | [`willr`](willr.md) | yes | 1 | stub |
+| [`wpo`](wpo.md) | yes | 1 | stub |
 
 ### 5.4 `overlap` (51)
 
@@ -247,7 +251,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`percent_return`](percent_return.md) | yes | 1 | stub |
 | [`trend_return`](trend_return.md) | yes | 6 | stub |
 
-### 5.6 `statistics` (13)
+### 5.6 `statistics` (14)
 
 | indicator | in `Category` | columns probed | §6–§9 |
 |---|---|---|---|
@@ -259,6 +263,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`median`](median.md) | yes | 1 | stub |
 | [`normalize`](normalize.md) | yes | 1 | stub |
 | [`quantile`](quantile.md) | yes | 1 | stub |
+| [`rms`](rms.md) | yes | 1 | stub |
 | [`rolling_sum`](rolling_sum.md) | yes | 1 | stub |
 | [`skew`](skew.md) | yes | 1 | stub |
 | [`stdev`](stdev.md) | yes | 1 | stub |
@@ -327,7 +332,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`zigzag`](zigzag.md) | yes | 1 | stub |
 | [`zigzag_fib`](zigzag_fib.md) | yes | 2 | stub |
 
-### 5.8 `volatility` (19)
+### 5.8 `volatility` (20)
 
 | indicator | in `Category` | columns probed | §6–§9 |
 |---|---|---|---|
@@ -342,6 +347,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`har_park`](har_park.md) | yes | 1 | measured |
 | [`hwc`](hwc.md) | yes | 3 | stub |
 | [`kc`](kc.md) | yes | 3 | stub |
+| [`kcw`](kcw.md) | yes | 1 | stub |
 | [`massi`](massi.md) | yes | 1 | stub |
 | [`natr`](natr.md) | yes | 1 | stub |
 | [`pdist`](pdist.md) | yes | 1 | stub |
@@ -351,7 +357,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`true_range`](true_range.md) | yes | 1 | stub |
 | [`ui`](ui.md) | yes | 1 | stub |
 
-### 5.9 `volume` (25)
+### 5.9 `volume` (26)
 
 | indicator | in `Category` | columns probed | §6–§9 |
 |---|---|---|---|
@@ -379,6 +385,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`vol_delta`](vol_delta.md) | yes | 1 | stub |
 | [`volume_delta`](volume_delta.md) | **no** | 0 | stub |
 | [`vp`](vp.md) | **no** | 6 | stub |
+| [`vzo`](vzo.md) | yes | 1 | stub |
 | [`weis_wave`](weis_wave.md) | yes | 1 | stub |
 
 ## 6. Provenance metrics

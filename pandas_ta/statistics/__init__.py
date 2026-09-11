@@ -12,3 +12,4 @@ from .rolling_sum import rolling_sum
 from .normalize import normalize
 from .covariance import covariance
 from .beta import beta
+from .rms import rms

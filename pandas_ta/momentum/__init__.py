@@ -51,3 +51,7 @@ from .uo import uo
 from .vwmacd import vwmacd
 from .wavetrend import wavetrend
 from .willr import willr
+from .pzo import pzo
+from .rwi import rwi
+from .szo import szo
+from .wpo import wpo

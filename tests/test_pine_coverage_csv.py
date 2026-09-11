@@ -187,18 +187,40 @@ def test_non_rolling_primitives_are_not_described_as_rolling(name, expected_shap
     assert expected_shape in note
 
 
-def test_kcw_is_not_classified_as_covered():
+def test_kcw_is_covered_by_its_own_port_and_not_by_an_alias_to_kc():
     """`pandas_ta.kc` ships the Keltner bands, not the Keltner WIDTH.
 
-    An alias to `kc` marked this `have` and silently deleted a real port. The
-    sibling `bbw -> bbands` is correct only because `bbands` does emit `BBB_`;
-    the two cases were never checked separately.
+    HISTORY, kept because the failure mode outlived the bug: an alias to `kc`
+    marked this `have` and silently deleted a real port. The sibling
+    `bbw -> bbands` is correct only because `bbands` does emit `BBB_`; the two
+    cases were never checked separately.
+
+    `kcw` is now genuinely ported (PINEBI-1b tranche 1), so the assertion
+    flips: it must be `have`, and it must be `have` because a real `ta.kcw`
+    exists emitting a WIDTH column -- not because something aliased it back to
+    the band function. Both halves are checked, because only the second one
+    would have caught the original bug.
     """
+    import pandas_ta as _ta
     gen = _load_classifier()
     verdict = gen.classify("kcw", 1, 0, set())[1]
-    assert verdict != "have", (
-        "kc returns KCLe_/KCBe_/KCUe_ with no width column"
-    )
+    assert verdict == "have", "kcw is ported; the classifier should see it"
+
+    assert callable(getattr(_ta, "kcw", None)), "no real ta.kcw"
+    assert _ta.kcw is not _ta.kc, "kcw must not be an alias to kc"
+
+    import numpy as _np
+    from pandas import Series as _S
+    n = 200
+    rng = _np.random.default_rng(0)
+    c = _S(100 * _np.exp(_np.cumsum(rng.normal(0, 0.01, n))))
+    out = _ta.kcw(c * 1.01, c * 0.99, c)
+    assert out is not None and out.ndim == 1, "kcw must emit one width column"
+    # The width is a RATIO: scale every price and it does not move. A band
+    # level would.
+    out8 = _ta.kcw(c * 8 * 1.01, c * 8 * 0.99, c * 8)
+    m = out.notna() & out8.notna()
+    assert float((out[m] - out8[m]).abs().max()) == 0.0,         "kcw is not scale-free, so it is returning a level, not a width"
 
 
 def test_every_tier2_have_row_was_docstring_audited():

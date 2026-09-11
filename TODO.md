@@ -24,7 +24,8 @@ Deferred by the owner up front: **PINEBI-2, INDREF-1, MLCOL-1** — of these **I
 done (2026-09-10)**, see the INDREF section.
 Dropped with reason and later revived: **INDREF-2** (dropped because INDREF-1 was deferred; INDREF-1
 landed 2026-09-10 and **INDREF-2 was done 2026-09-11** — see the INDREF section).
-Still open and NOT started: **PINEBI-1b** — the 16 `port` rows.
+Still open: **PINEBI-1b** — 7 of the 16 `port` rows landed 2026-09-11 (tranche 1: `kcw`, `rwi`,
+`pzo`, `vzo`, `szo`, `rms`, `wpo`); **9 remain**.
 
 ⚠ **The batch's output was mostly DELETIONS.** Twelve columns were built, measured
 and deleted, and one whole task shipped nothing. Read that as the gates working,
@@ -115,9 +116,9 @@ Produced by `docs/gen_pine_builtin_coverage.py` (PINEBI-0, done 2026-09-07).
 
 | verdict | n |
 |---|---|
-| `have` | 64 |
+| `have` | 71 |
 | `port - primitive` (→ -1a) | 18 |
-| `port` (→ -1b) | 16 |
+| `port` (→ -1b) | 9 |
 | `n/a - not a Pine built-in` | 4 |
 | `n/a - not worth a primitive` | 2 |
 | `port - blocked on data` (→ -1d) | 2 |
@@ -170,8 +171,37 @@ Two findings worth carrying forward:
   `test_audited_rows_carry_their_evidence` until the audit and then the generator are re-run. That is
   the guard working; the script's docstring says so.
 
-- [ ] **PINEBI-1b — Port the 16 `port` rows (MAJOR, depends on PINEBI-0).**
-  ROWS: `dm`, `frama`, `ht`, `ift`, `kcw`, `pzo`, `relativeVolume`, `rms`, `rwi`, `stc`, `szo`, `vStop`, `vStop2`, `vzo`, `williamsFractal`, `wpo`
+- [ ] **PINEBI-1b — Port the `port` rows (MAJOR, depends on PINEBI-0). 7 of 16 DONE 2026-09-11.**
+  ROWS: `dm`, `frama`, `ht`, `ift`, `relativeVolume`, `stc`, `vStop`, `vStop2`, `williamsFractal`
+  (9 remaining; the CSV is the source of truth, not this line)
+
+  ✅ **Tranche 1 landed 2026-09-11** — `kcw`, `rwi`, `pzo`, `vzo`, `szo`, `rms`, `wpo`. All seven
+  wired through the five touch points, `Category` 224 → **231**, `tests/test_pinebi1b_ports.py`
+  **50 passed**. Per-port evidence is in the CSV's `audit_evidence` column, written by
+  `docs/gen_pine_builtin_coverage.py`'s `AUDITED` table rather than retyped here.
+
+  ⚠ **Two findings from tranche 1 that outlive it, both about the GATE rather than the ports:**
+  1. **A sign-based indicator cannot be causality-tested with a multiplicative perturbation.**
+     Scaling every future close by 1.3 leaves their ORDER unchanged, so `sign(change(close))` is
+     unchanged, so a genuinely non-causal `szo` mutant reproduced the prefix exactly and
+     **escaped at 65 of 113 J values**. Mirroring the future fixes most of it but not at bar `J`
+     itself, where the mirror is the identity. The reliable mutant for these mutates the
+     SMOOTHER, where magnitude is visible, not the sign input.
+  2. **A centred-window mutant on a NaN-heavy series is degenerate.** `wpo`'s `ti` is NaN on
+     every gap-down bar, so `rolling(center=True)` at the default `min_periods` needs a fully
+     finite window and produced a mutant that was **99.8% NaN** — nothing to compare, `caught=0`,
+     an escape that was an artifact of the mutant rather than a statement about `wpo`.
+     `min_periods=1` is load-bearing.
+
+  ⚠ **`ift` needs a decision before it can be ported** (flagged, not silently made): it is
+  `tanh`, so on raw price it saturates to a constant and would fail Gate C as a close-based
+  column. It is a TRANSFORM, and the honest options are to register it applied to a bounded
+  input, or to ship it unregistered like the `ma` dispatcher. Owner/next-session call.
+
+  ⚠ **`dm` and `stc` collide with shipped names** and need distinct ones: the library's `dm` is
+  the **Demarker** oscillator while `pandas_ta.dm` is Wilder's Directional Movement, and the
+  library's `stc` differs from the shipped `stc` in parameters, clamping and a guard (see the
+  round-5/round-7 notes below). The `-2`/`_tv` suffix convention PINEBI-1c set is the precedent.
   Take the list from the CSV's `port` rows, not from here — `test_the_docs_quote_the_csvs_actual_split`
   now asserts every one of them appears in this block, because `stc` was announced as "scoped into
   -1b" for a whole round while living only in a CSV note string.
