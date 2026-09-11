@@ -303,7 +303,11 @@ column is still `SUM_<length>`), `normalize`, `covariance`, and `pivot`. 25 test
   it `math.sum`, which is called **214 times across 88 files**. The no-attribution conclusion holds
   for the real reason — no source is copied.
 
-- [ ] **PINEBI-2 — Resume the community corpus after the built-ins (MAJOR, depends on PINEBI-1a…-1e).**
+- [x] **PINEBI-2 — Resume the community corpus after the built-ins. ✅ CLOSED 2026-09-11 — triage delivered, porting half DEFERRED on the triage's own measurement.**
+  **Closed, not abandoned**, and the distinction is the point: the deliverable was "this repo's side of whichever queue is picked", and the measurement picked *neither* queue. Queue A is drained (4 actionable candidates, hours of cleanup). Queue B measures 2–7 landed indicators for 179–269 files read — 36–90 files per indicator — while 62 already-built indicators sat unexecuted by any engine path.
+  **The recommended alternative was done instead and is committed:** the wiring pass, as WIRE-0 (`Backtesting` `6751d6d4`). 62 screened → 17 wired → engine 492 → **535 columns**, all 43 new columns firing. INDREF-2 §7 reached the same conclusion independently.
+  **TVPTA-1b's actual deliverable is already delivered by this triage** — "extend `triage_pine_indicators.py`'s classifier against `script_type == 'library'`" is exactly what `docs/PineCorpusTriage.md` ran, verbatim classifier, over all 992: `no_math` 649 (65.4%), `portable` 179, `extractable_core` 90, `needs_multisymbol` 74. **Read that document before writing TVPTA-1b's spec; do not re-run the classifier.** Refer any resumption of Queue B to TVPTA-1b (`../Backtesting/TODO.md:489`) — **no third pine initiative.**
+  ⚠ **If Queue B is resumed anyway**, the preconditions are in `PineCorpusTriage.md` §5 and are not optional: TVPTA-9 first (every Gate E verdict produced before it is against an incomplete comparator set), then the licence terms of the **90 non-MPL-headered files** of the 269 resolved per file, then the wiring backlog. Expected yield after all of it: 2–7, plausibly 1.
   `docs/pine/` holds 2,211 `.pine` files, untracked since 2026-09-07 (912 are MPL-2.0
   © TradingView; root `LICENSE` is MIT). TVPTA already ported 195 and left two queues:
   the 43-candidate `defer` backlog (TVPTA-6) and the 992 never-scanned `library`-type files (TVPTA-1b).
