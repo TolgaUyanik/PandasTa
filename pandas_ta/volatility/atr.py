@@ -36,7 +36,14 @@ def atr(high, low, close, length=None, mamode=None, drift=None, offset=None, **k
         atr.fillna(method=kwargs["fill_method"], inplace=True)
 
     # Name and Categorize it
-    atr.name = f"ATR{mamode[0]}_{length}{'p' if percentage else ''}"
+    # `mamode[0]` collides: "wma" and "wrma" both yield "w", so ATRw_14 named
+    # two different indicators and the second write silently overwrote the
+    # first in any run emitting both. Naming is API here -- mined rules match
+    # on these strings -- so the ambiguous pair gets an explicit token. Every
+    # pre-existing mamode keeps the name it has always had; only "wrma", which
+    # is new, takes a two-letter one.
+    suffix = {"wrma": "wr"}.get(mamode, mamode[0])
+    atr.name = f"ATR{suffix}_{length}{'p' if percentage else ''}"
     atr.category = "volatility"
 
     return atr

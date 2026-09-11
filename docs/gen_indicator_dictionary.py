@@ -50,8 +50,18 @@ def call(fn, d):
     for name, p in sig.parameters.items():
         if p.kind == p.VAR_KEYWORD:
             continue
-        if name in PRICE_ARGS:
+        if name == "other":
+            # Two-series indicators (`covariance`) need a real second series.
+            # `other` DEFAULTS to None, so the "required arg" branch below never
+            # sees it: the probe called them one-armed, they returned None, and
+            # the generated *Known breaks* table libelled working code while
+            # CLAUDE.md next door swore nothing was outstanding. Returns on both
+            # sides, matching what `core.py`'s accessor now defaults to.
+            kw[name] = d["close"].pct_change()
+        elif name in PRICE_ARGS:
             kw[name] = d[PRICE_ARGS[name]]
+            if fn.__name__ == "covariance" and name == "close":
+                kw[name] = d["close"].pct_change()
         elif p.default is inspect.Parameter.empty:
             # required non-price arg (e.g. trend series, benchmark)
             if name in ("trend",):
@@ -86,6 +96,37 @@ def as_frame(res):
     return None
 
 
+# Columns whose ML form the SYNTHETIC PROBE gets wrong, keyed by indicator, with
+# the real-data measurement that says so. `classify` reads the probe's observed
+# cardinality, which is the right default; but a COUNT column on a 600-bar
+# synthetic frame can happen to take only two values and then be tagged BIN, and
+# a downstream reader will treat a count as a flag.
+#
+# Only entries measured on real data belong here. Measured 2026-09-08 over 40
+# BIST daily frames / 71,402 bars:
+#
+#   HS_PEND_5_5_0.03_60      5 distinct, range [-2, +2]   -> ORD (probe said BIN)
+#   DTDB_PEND_8_0.5_0.15     5 distinct, range [-2, +2]   -> ORD (probe said BIN)
+#   FLAG_PEND_12_0.85_0.15   3 distinct, range [-1, +1]   -> BIN is CORRECT,
+#                            so it is deliberately NOT listed. A blanket
+#                            "*_PEND is ordinal" rule would have mislabelled it.
+#   TRPL_PEND / TRIW_PEND    already ORD from the probe; no entry needed.
+#
+# Format matches LEAK_RULES below: {indicator: (column predicate, forced tag,
+# why)}.
+FORM_OVERRIDES = {
+    "head_shoulders": (
+        lambda c: c.startswith("HS_PEND"), "ordinal",
+        "net pending-pattern count; the 600-bar probe frame never carries two "
+        "live patterns of the same sign, so it observes only {0, -1} and tags "
+        "BIN. Real range measured [-2, +2] over 71,402 BIST daily bars."),
+    "dtdb": (
+        lambda c: c.startswith("DTDB_PEND"), "ordinal",
+        "same defect, same fix, in a module that shipped before CANDLE-1: "
+        "real range measured [-2, +2] over the same 71,402 bars."),
+}
+
+
 def classify(col1, col2):
     """price | scale-free | binary | ordinal | unknown"""
     v1 = pd.to_numeric(col1, errors="coerce").astype(float)
@@ -94,6 +135,12 @@ def classify(col1, col2):
     if a.empty:
         return "empty", None, None
     uniq = set(np.unique(np.round(a.values, 9)))
+    if len(uniq) == 1:
+        # One value across the whole probe series. Folding this into "binary"
+        # (because {0.0} is a subset of {0, 1}) is how two provably dead fvg
+        # columns were recommended as feed-ready.
+        warm = int(v1.isna().values.argmin()) if v1.isna().any() else 0
+        return "constant", warm, (float(a.min()), float(a.max()))
     kind = None
     if uniq <= {0.0, 1.0} or uniq <= {-1.0, 0.0, 1.0} or uniq <= {0.0, -1.0}:
         kind = "binary"
@@ -176,6 +223,9 @@ for cat, names in cats.items():
                         scale, warm, rng_ = classify(r1[c], r2[c])
                     else:
                         scale, warm, rng_ = "unknown", None, None
+                    ov = FORM_OVERRIDES.get(name)
+                    if ov and ov[0](str(c)):
+                        scale = ov[1]
                     rec["cols"].append({"name": str(c), "scale": scale,
                                         "warmup": warm, "range": rng_})
         except Exception as e:
@@ -183,7 +233,7 @@ for cat, names in cats.items():
         out[cat][name] = rec
 
 TAG = {"scale-free": "SF", "price": "PX", "price^2": "PX2", "binary": "BIN",
-       "ordinal": "ORD", "empty": "??", "unknown": "??"}
+       "ordinal": "ORD", "constant": "CONST", "empty": "??", "unknown": "??"}
 
 # Columns that are NOT causal at default parameters. Keyed by indicator; the value is
 # (column-name predicate, why).
@@ -248,150 +298,291 @@ def desc(rec, limit=150):
 def inputs(sig):
     got = [a for a in ("open", "high", "low", "close", "volume")
            if re.search(rf"[(,]\s*{a}_?\s*[=:,)]", sig)]
-    return "/".join(g[0] for g in got).upper() or "close"
+    if got:
+        return "/".join(g[0] for g in got).upper()
+    # Falling back to "close" printed a falsehood for anything that takes
+    # neither: `up_and_down_volume(lower, anchor)` was documented as taking
+    # `close`, in the file CLAUDE.md tells readers to consult before judging a
+    # column. Say what it actually wants.
+    if re.search(r"[(,]\s*lower\s*[=:,)]", sig):
+        return "lower frame"
+    return "—"
 
 
-out_path = sys.argv[1] if len(sys.argv) > 1 else str(Path(__file__).resolve().parent / "IndicatorDictionary.md")
-lines = []
-A = lines.append
-today = datetime.date.today().isoformat()
-
-A("# Indicator Dictionary")
-A("")
-A("Every indicator in this fork: inputs, parameters, the exact columns it emits, the")
-A("**ML form** of each column, and its warm-up cost. Generated by probing the live")
-A(f"package on a synthetic 600-bar OHLCV series (probe run {today}) — column names and")
-A("forms below are observed, not transcribed.")
-A("")
-A("See [README](../README.md) for the ML feature rules this table serves.")
-A("")
-A("## How to read the ML form tag")
-A("")
-A("| tag | meaning | feed to a model? |")
-A("|---|---|---|")
-A("| `SF` | scale-free — value did not change when the price series was multiplied by 137 | yes, directly |")
-A("| `PX` | price level — value scaled 1:1 with price | **no** — convert to a relation first, e.g. `(close - col) / close` |")
-A("| `PX2` | price squared — scaled with price² (variance-like) | no — take a root or normalize by price² |")
-A("| `BIN` | binary / sign, values in {-1, 0, 1} | yes, as a flag |")
-A("| `ORD` | small integer set (counts, states) | yes, as ordinal or one-hot |")
-A("| `??` | no value produced on the synthetic probe series (event-driven column), or a mixed form | inspect on real data before using |")
-A("")
-A("Warm-up = index of the first non-NaN value on the probe series at default parameters.")
-A("It scales with `length`, so treat it as a floor, not a constant. Drop the warm-up")
-A("window per ticker before concatenating tickers.")
-A("")
-A("`df.ta` column = the indicator has a DataFrame-extension method (`df.ta.<name>()`, usable")
-A("inside `ta.Strategy`). `no` means it is standalone-only: call `ta.<name>(...)` and join.")
-A("")
-
-# ---- summary counts
-tot = sum(len(v) for v in out.values())
-A(f"**{tot} indicators** probed. Broken on this environment (pandas 2.x): see [Known breaks](#known-breaks).")
-A("")
-
-for cat in CAT_ORDER:
-    recs = out.get(cat, {})
-    if not recs:
-        continue
-    A(f"## {cat} ({len(recs)})")
-    A("")
-    A("| indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |")
-    A("|---|---|---|---|---|---|")
-    for name in sorted(recs):
-        r = recs[name]
-        if r.get("error") and not r.get("cols"):
-            A(f"| `{name}` | — | — | ⚠ {r['error'][:60]} | — | {desc(r, 90)} |")
-            continue
-        cols = r.get("cols", [])
-        cell = "<br>".join(
-            f"`{c['name']}` {tag(c['scale'])}" + (" **LEAK**" if leaks(name, c["name"]) else "")
-            for c in cols) or "—"
-        warms = [c["warmup"] for c in cols if isinstance(c["warmup"], int) and c["warmup"] >= 0]
-        warm = str(max(warms)) if warms else "—"
-        ext = "" if r.get("ext") else " *(standalone)*"
-        A(f"| `{name}`{ext} | {inputs(r['signature'])} | {params(r['signature'])} | {cell} | {warm} | {desc(r)} |")
-    A("")
-
-# ---- ML shortlists
-A("## Feed-ready shortlist")
-A("")
-A("Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.")
-A("")
-ready, needs = [], []
-for cat in CAT_ORDER:
-    for name, r in sorted(out.get(cat, {}).items()):
-        cols = r.get("cols") or []
-        if not cols:
-            continue
-        tags = {tag(c["scale"]) for c in cols}
-        if tags <= {"SF", "BIN", "ORD"}:
-            ready.append(name)
-        elif "PX" in tags or "PX2" in tags:
-            needs.append((name, [c["name"] for c in cols if tag(c["scale"]) in ("PX", "PX2")]))
-A(" ".join(f"`{n}`" for n in ready))
-A("")
-A("## Needs a transform before modelling")
-A("")
-A("These emit at least one absolute price level. Convert each `PX` column to a distance,")
-A("ratio, or z-score against `close` (or drop it and keep the indicator's `SF` columns).")
-A("")
-A("| indicator | price-level columns |")
-A("|---|---|")
-for n, cs in needs:
-    A(f"| `{n}` | {' '.join('`%s`' % c for c in cs)} |")
-A("")
-
-A("## Leak watchlist")
-A("")
-A("Columns that are **not** causal at default parameters. Everything else in this file was")
-A("written to read only bars `<= T`; these are the documented exceptions.")
-A("")
-A("| indicator | column | why |")
-A("|---|---|---|")
-for cat in CAT_ORDER:
-    for name, r in sorted(out.get(cat, {}).items()):
-        rule = LEAK_RULES.get(name)
-        if not rule:
-            continue
-        hit = [c["name"] for c in r.get("cols", []) if rule[0](c["name"])] or ["(all)"]
-        for c in hit:
-            A(f"| `{name}` | `{c}` | {rule[1]} |")
-A("")
-
-A("## Known breaks")
-A("")
-A("Observed while probing on pandas 2.3.3 / numpy 2.x:")
-A("")
-BREAK_NOTES = {
-    "mcgd": "`Series.append` was removed in pandas 2.0; port the line to `pd.concat`.",
-    "aberration": "Import-order bug: `pandas_ta.overlap.sma` resolves to the submodule, "
-                  "not the function, at the time `aberration` is imported. Broken on every call.",
+# Indicators whose REQUIRED input this probe cannot synthesise from a single
+# daily OHLCV frame. Their `error` is a harness limitation, not a runtime break,
+# and listing them under *Known breaks* would libel working code -- which the
+# one-armed `covariance` call already did once.
+PROBE_CANNOT_CONSTRUCT = {
+    "up_and_down_volume": "needs a lower-timeframe OHLCV frame (`lower=`)",
+    "volume_delta": "needs a lower-timeframe OHLCV frame (`lower=`)",
 }
-A("| indicator | failure | note |")
-A("|---|---|---|")
-brk = [(n, r["error"]) for cat in CAT_ORDER for n, r in sorted(out.get(cat, {}).items())
-       if r.get("error")]
-for n, e in brk:
-    A(f"| `{n}` | `{e[:90]}` | {BREAK_NOTES.get(n, '')} |")
-A("")
-A("## Not indicators")
-A("")
-A("| callable | what it is |")
-A("|---|---|")
-A("| `ta.ma(name, source, **kwargs)` | moving-average dispatcher — returns the named MA (`dema`, `ema`, `fwma`, `hma`, `linreg`, `midpoint`, `pwma`, `rma`, `sinwma`, `sma`, `swma`, `t3`, `tema`, `trima`, `vidya`, `wma`, `zlma`). Used internally by every `mamode` kwarg. |")
-A("| `ta.above` `ta.above_value` `ta.below` `ta.below_value` `ta.cross` | comparison helpers returning 0/1 series — building blocks for rules and labels. |")
-A("| `ta.cagr` `ta.calmar_ratio` `ta.downside_deviation` `ta.jensens_alpha` `ta.log_max_drawdown` `ta.max_drawdown` `ta.pure_profit_score` `ta.sharpe_ratio` `ta.sortino_ratio` `ta.volatility` | performance metrics — take a close series, return a single `float`. Not features. |")
-A("")
+for _cat in CAT_ORDER:
+    for _n, _r in out.get(_cat, {}).items():
+        if _n in PROBE_CANNOT_CONSTRUCT and _r.get("error"):
+            _r["error"] = None
+            _r["probe_note"] = (
+                f"not probed: {PROBE_CANNOT_CONSTRUCT[_n]} -- harness "
+                f"limitation, not a runtime break")
 
-A("## Regenerating this file")
-A("")
-A("This document is generated, not hand-maintained. Re-probe after adding or changing an")
-A("indicator so the column names, forms, and warm-ups stay true:")
-A("")
-A("```sh")
-A("python docs/gen_indicator_dictionary.py docs/IndicatorDictionary.md")
-A("```")
-A("")
+def main(argv=None):
+    """Render docs/IndicatorDictionary.md from the module-level probe above.
 
-open(out_path, "w", encoding="utf8").write("\n".join(lines) + "\n")
-print("wrote", out_path, len(lines), "lines")
+    Split out of module scope so `docs/gen_indicator_pages.py` can `import`
+    this file for the PROBE (df1/df2, call, classify, tag, params, inputs,
+    LEAK_RULES, `out`) without writing the dictionary as a side effect.
+    """
+    argv = list(sys.argv) if argv is None else list(argv)
+    out_path = argv[1] if len(argv) > 1 else str(Path(__file__).resolve().parent / "IndicatorDictionary.md")
+    lines = []
+    A = lines.append
+    today = datetime.date.today().isoformat()
+
+    A("# Indicator Dictionary")
+    A("")
+    A("Every indicator in this fork: inputs, parameters, the exact columns it emits, the")
+    A("**ML form** of each column, and its warm-up cost. Generated by probing the live")
+    A(f"package on a synthetic 600-bar OHLCV series (probe run {today}) — column names and")
+    A("forms below are observed, not transcribed.")
+    A("")
+    A("See [README](../README.md) for the ML feature rules this table serves.")
+    A("")
+    A("## How to read the ML form tag")
+    A("")
+    A("| tag | meaning | feed to a model? |")
+    A("|---|---|---|")
+    A("| `SF` | scale-free — value did not change when the price series was multiplied by 137 | yes, directly |")
+    A("| `PX` | price level — value scaled 1:1 with price | **no** — convert to a relation first, e.g. `(close - col) / close` |")
+    A("| `PX2` | price squared — scaled with price² (variance-like) | no — take a root or normalize by price² |")
+    A("| `BIN` | binary / sign, values in {-1, 0, 1} | yes, as a flag |")
+    A("| `ORD` | small integer set (counts, states) | yes, as ordinal or one-hot |")
+    A("| `CONST` | **one value across the whole probe series** — the column never fires | **no** — it carries no information; check the indicator before using it |")
+    A("| `??` | no value produced on the synthetic probe series (event-driven column), or a mixed form | inspect on real data before using |")
+    A("")
+    A("Warm-up = index of the first non-NaN value on the probe series at default parameters.")
+    A("It scales with `length`, so treat it as a floor, not a constant. Drop the warm-up")
+    A("window per ticker before concatenating tickers.")
+    A("")
+    A("`*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is")
+    A("invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.")
+    A("")
+
+    # ---- summary counts
+    #
+    # THREE counts, all true of the same package, emitted together because quoting
+    # one of them alone is how the README came to say 199, 200, 201 and 202 in a
+    # single section. `Category` is the headline: it is exactly what
+    # `df.ta.strategy()` sweeps. The other two are wider surfaces.
+    import inspect as _inspect
+
+    from pandas_ta.core import AnalysisIndicators as _AI
+
+    _NOT_INDICATORS = {
+        "above", "above_value", "below", "below_value", "cross", "cross_value",
+        "constants", "indicators", "strategy", "ticker",
+    }
+    _registered = {n for names in ta.Category.values() for n in names}
+    _accessor = {n for n, v in vars(_AI).items()
+                 if not n.startswith("_") and _inspect.isfunction(v)} - _NOT_INDICATORS
+    _module_only = sorted(n for n in ("ma", "drawdown")
+                          if callable(getattr(ta, n, None)))
+    _accessor_only = sorted(_accessor - _registered)
+
+    tot = sum(len(v) for v in out.values())
+    broken_now = [n for cat in CAT_ORDER for n, r in out.get(cat, {}).items() if r.get("error")]
+    if broken_now:
+        A(f"**{tot} indicators** probed; {len(broken_now)} raise on this environment "
+          f"(pandas 2.x) -- see [Known breaks](#known-breaks).")
+    else:
+        A(f"**{tot} indicators** probed. All of them call cleanly on this environment "
+          f"(pandas {pd.__version__}).")
+    A("")
+    A("### How many indicators is that, exactly")
+    A("")
+    A("Three numbers are all true of this package and are easy to quote at each "
+      "other. Measured on the probe run above, not typed:")
+    A("")
+    A("| surface | n | what it means |")
+    A("|---|---|---|")
+    A(f"| registered in `Category` | **{len(_registered)}** | "
+      f"the headline — exactly what `df.ta.strategy()` and the category runs sweep |")
+    A(f"| callable as `df.ta.<name>()` | **{len(_accessor)}** | "
+      f"adds {', '.join('`%s`' % n for n in _accessor_only) or '—'}, which have an "
+      f"accessor but no `Category` entry, so a strategy run skips them |")
+    A(f"| callable as `ta.<name>()` only | **{len(_module_only)}** | "
+      f"{', '.join('`%s`' % n for n in _module_only) or '—'} — no accessor either; "
+      f"call and join the result yourself |")
+    A("")
+    A("`tests/test_readme_counts.py` asserts the README's copy of these against the "
+      "live package, so the section cannot drift from the code.")
+    A("")
+
+    for cat in CAT_ORDER:
+        recs = out.get(cat, {})
+        if not recs:
+            continue
+        A(f"## {cat} ({len(recs)})")
+        A("")
+        A("| indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |")
+        A("|---|---|---|---|---|---|")
+        for name in sorted(recs):
+            r = recs[name]
+            if r.get("error") and not r.get("cols"):
+                A(f"| `{name}` | — | — | ⚠ {r['error'][:60]} | — | {desc(r, 90)} |")
+                continue
+            cols = r.get("cols", [])
+            cell = "<br>".join(
+                f"`{c['name']}` {tag(c['scale'])}" + (" **LEAK**" if leaks(name, c["name"]) else "")
+                for c in cols) or "—"
+            # An unprobed indicator printed an outputs cell of "—" with no marker,
+            # so a reader working the category table -- the actual ML feature
+            # contract surface -- saw an indicator with no columns and no reason.
+            # Half the exemption was dead code.
+            if r.get("probe_note"):
+                cell = f"⚠ {r['probe_note']}"
+            warms = [c["warmup"] for c in cols if isinstance(c["warmup"], int) and c["warmup"] >= 0]
+            warm = str(max(warms)) if warms else "—"
+            ext = "" if r.get("ext") else " *(standalone)*"
+            A(f"| `{name}`{ext} | {inputs(r['signature'])} | {params(r['signature'])} | {cell} | {warm} | {desc(r)} |")
+        A("")
+
+    # ---- ML shortlists
+    A("## Feed-ready shortlist")
+    A("")
+    A("Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.")
+    A("")
+    ready, needs = [], []
+    for cat in CAT_ORDER:
+        for name, r in sorted(out.get(cat, {}).items()):
+            cols = r.get("cols") or []
+            if not cols:
+                continue
+            tags = {tag(c["scale"]) for c in cols}
+            if tags <= {"SF", "BIN", "ORD"} and "CONST" not in tags:
+                ready.append(name)
+            elif "PX" in tags or "PX2" in tags:
+                needs.append((name, [c["name"] for c in cols if tag(c["scale"]) in ("PX", "PX2")]))
+    A(" ".join(f"`{n}`" for n in ready))
+    A("")
+
+    # ---- columns that cannot fire at all
+    dead = [(name, [c["name"] for c in (r.get("cols") or []) if tag(c["scale"]) == "CONST"])
+            for cat in CAT_ORDER for name, r in sorted(out.get(cat, {}).items())
+            if any(tag(c["scale"]) == "CONST" for c in (r.get("cols") or []))]
+    if dead:
+        A("## Never fires on the probe")
+        A("")
+        A("One value across the whole probe series. A column that cannot fire is worse than an")
+        A("absent one: it looks like a feature, occupies a slot, and the miner can match on it.")
+        A("Confirm on real data, then repair or delete the column.")
+        A("")
+        A("| indicator | column(s) | owning task |")
+        A("|---|---|---|")
+        A("⚠ **`cdl_pattern`'s CONST columns are a FIXTURE artifact, not a defect.**")
+        A("This probe runs one 600-bar synthetic frame; rare candle patterns simply do not")
+        A("occur in it. CANDLE-0 measured the same set over 50 BIST tickers / 91,197 daily")
+        A("bars and found **0 of 62 constant** — every pattern fires on real data")
+        A("(`docs/CandlePatternShortlist.md` §1b, and")
+        A("`tests/test_candle_patterns_reachable.py` re-checks it against the cache).")
+        A("Do NOT delete these columns. The rule above — *confirm on real data, then repair")
+        A("or delete* — was followed here, and the answer was that they are fine.")
+        A("")
+        DEAD_TASKS = {"fvg": "FVGDEAD in `TODO.md` — the zone is evicted on the bar that "
+                             "creates it (`pandas_ta/trend/fvg.py:46`, `:54`)",
+                      "cdl_pattern": "none — fixture artifact, 0 of 62 constant on "
+                                     "91,197 real BIST bars (CANDLE-0)"}
+        for name, cols in dead:
+            A(f"| `{name}` | {' '.join(f'`{c}`' for c in cols)} | {DEAD_TASKS.get(name, '— unregistered, file one')} |")
+        A("")
+
+    A("## Needs a transform before modelling")
+    A("")
+    A("These emit at least one absolute price level. Convert each `PX` column to a distance,")
+    A("ratio, or z-score against `close` (or drop it and keep the indicator's `SF` columns).")
+    A("")
+    A("| indicator | price-level columns |")
+    A("|---|---|")
+    for n, cs in needs:
+        A(f"| `{n}` | {' '.join('`%s`' % c for c in cs)} |")
+    A("")
+
+    A("## Leak watchlist")
+    A("")
+    A("Columns that are **not** causal at default parameters. Everything else in this file was")
+    A("written to read only bars `<= T`; these are the documented exceptions.")
+    A("")
+    A("| indicator | column | why |")
+    A("|---|---|---|")
+    for cat in CAT_ORDER:
+        for name, r in sorted(out.get(cat, {}).items()):
+            rule = LEAK_RULES.get(name)
+            if not rule:
+                continue
+            hit = [c["name"] for c in r.get("cols", []) if rule[0](c["name"])] or ["(all)"]
+            for c in hit:
+                A(f"| `{name}` | `{c}` | {rule[1]} |")
+    A("")
+
+    A("## Known breaks")
+    A("")
+    BREAK_NOTES = {
+        "mcgd": "`Series.append` was removed in pandas 2.0; port the line to `pd.concat`.",
+        "aberration": "Import-order bug: `pandas_ta.overlap.sma` resolves to the submodule, "
+                      "not the function, at the time `aberration` is imported. Broken on every call.",
+    }
+    brk = [(n, r["error"]) for cat in CAT_ORDER for n, r in sorted(out.get(cat, {}).items())
+           if r.get("error")]
+    if brk:
+        A("Observed while probing on pandas 2.3.3 / numpy 2.x:")
+        A("")
+        A("| indicator | failure | note |")
+        A("|---|---|---|")
+        for n, e in brk:
+            A(f"| `{n}` | `{e[:90]}` | {BREAK_NOTES.get(n, '')} |")
+    else:
+        A(f"None. Every registered indicator THIS PROBE CAN CALL returned data on "
+          f"pandas {pd.__version__} / numpy {np.__version__}.")
+        A("")
+        if PROBE_CANNOT_CONSTRUCT:
+            A(f"⚠ {len(PROBE_CANNOT_CONSTRUCT)} indicator(s) were **not probed** "
+              f"because this harness builds a single daily OHLCV frame and cannot "
+              f"synthesise their required input. Absence from the table above is "
+              f"therefore not evidence they work — they are covered by their own "
+              f"test modules instead:")
+            A("")
+            A("| indicator | why not probed |")
+            A("|---|---|")
+            for _n in sorted(PROBE_CANNOT_CONSTRUCT):
+                A(f"| `{_n}` | {PROBE_CANNOT_CONSTRUCT[_n]} |")
+            A("")
+        A("Previously broken and now fixed (WIRING, 2026-09-07): `mcgd` "
+          "(`Series.append`, removed in pandas 2.0), `aberration`, `zlma` (every "
+          "`mamode`) and `ui` (`everget=True`) -- the last three all bound a "
+          "SUBMODULE where a function of the same name was meant, and raised "
+          "`TypeError: 'module' object is not callable` on every call.")
+    A("")
+    A("## Not indicators")
+    A("")
+    A("| callable | what it is |")
+    A("|---|---|")
+    A("| `ta.ma(name, source, **kwargs)` | moving-average dispatcher — returns the named MA (`dema`, `ema`, `fwma`, `hma`, `linreg`, `midpoint`, `pwma`, `rma`, `sinwma`, `sma`, `swma`, `t3`, `tema`, `trima`, `vidya`, `wma`, `zlma`). Used internally by every `mamode` kwarg. |")
+    A("| `ta.above` `ta.above_value` `ta.below` `ta.below_value` `ta.cross` | comparison helpers returning 0/1 series — building blocks for rules and labels. |")
+    A("| `ta.cagr` `ta.calmar_ratio` `ta.downside_deviation` `ta.jensens_alpha` `ta.log_max_drawdown` `ta.max_drawdown` `ta.pure_profit_score` `ta.sharpe_ratio` `ta.sortino_ratio` `ta.volatility` | performance metrics — take a close series, return a single `float`. Not features. |")
+    A("")
+
+    A("## Regenerating this file")
+    A("")
+    A("This document is generated, not hand-maintained. Re-probe after adding or changing an")
+    A("indicator so the column names, forms, and warm-ups stay true:")
+    A("")
+    A("```sh")
+    A("python docs/gen_indicator_dictionary.py docs/IndicatorDictionary.md")
+    A("```")
+    A("")
+
+    open(out_path, "w", encoding="utf8").write("\n".join(lines) + "\n")
+    print("wrote", out_path, len(lines), "lines")
+
+
+if __name__ == "__main__":
+    main()

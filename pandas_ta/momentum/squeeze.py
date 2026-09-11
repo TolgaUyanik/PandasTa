@@ -7,7 +7,7 @@ from pandas_ta.momentum import mom
 from pandas_ta.overlap import ema, linreg, sma
 from pandas_ta.trend import decreasing, increasing
 from pandas_ta.volatility import bbands, kc
-from pandas_ta.utils import get_offset
+from pandas_ta.utils import flag_as_int, get_offset
 from pandas_ta.utils import unsigned_differences, verify_series
 
 
@@ -92,9 +92,9 @@ def squeeze(high, low, close, bb_length=None, bb_std=None, kc_length=None, kc_sc
 
     data = {
         squeeze.name: squeeze,
-        f"SQZ_ON": squeeze_on.astype(int) if asint else squeeze_on,
-        f"SQZ_OFF": squeeze_off.astype(int) if asint else squeeze_off,
-        f"SQZ_NO": no_squeeze.astype(int) if asint else no_squeeze,
+        f"SQZ_ON": flag_as_int(squeeze_on, asint),
+        f"SQZ_OFF": flag_as_int(squeeze_off, asint),
+        f"SQZ_NO": flag_as_int(no_squeeze, asint),
     }
     df = DataFrame(data)
     df.name = squeeze.name

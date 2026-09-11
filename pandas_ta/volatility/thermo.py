@@ -4,7 +4,7 @@ from pandas_ta.overlap import ma
 from pandas_ta.utils import get_offset, verify_series, get_drift
 
 
-def thermo(high, low, length=None, long=None, short=None, mamode=None, drift=None, offset=None, **kwargs):
+def thermo(high, low, close=None, length=None, long=None, short=None, mamode=None, drift=None, offset=None, **kwargs):
     """Indicator: Elders Thermometer (THERMO)"""
     # Validate arguments
     length = int(length) if length and length > 0 else 20
@@ -66,9 +66,28 @@ def thermo(high, low, length=None, long=None, short=None, mamode=None, drift=Non
 
     thermo.category = thermo_ma.category = thermo_long.category = thermo_short.category = "volatility"
 
+    # MLCOL-1 companion. `thermo` is a DIFFERENCE parent (it oscillates about
+    # zero, it is not a price level), so the contract's `(close - parent) /
+    # close` shape would evaluate to about 1.0 with the signal in the fourth
+    # decimal. The scale-free form for a difference is `parent / close`, and
+    # the column is NAMED for that -- `_RATIO_PCT`, not `_DIST_PCT` -- because
+    # naming is API here and calling a ratio a distance misdescribes it
+    # permanently. Screened at max rho +0.4669 vs `natr`; axis 3a 15/15.
+    # `thermo` is computed from high/low alone, so `close` is optional and
+    # only exists to scale the companion. It defaults to hl2 -- but the
+    # SCREEN measured this companion against `close`, so when close is
+    # absent the shipped column is not the column that was screened, and
+    # that is stated rather than glossed: the fallback is a substitute, not
+    # an equivalence anyone measured.
+    _scale = close if close is not None else 0.5 * (high + low)
+    thermo_ratio = 100.0 * thermo / _scale
+    thermo_ratio.name = f"THERMO{_props}_RATIO_PCT"
+    thermo_ratio.category = thermo.category
+
     # Prepare Dataframe to return
     data = {
         thermo.name: thermo,
+        thermo_ratio.name: thermo_ratio,
         thermo_ma.name: thermo_ma,
         thermo_long.name: thermo_long,
         thermo_short.name: thermo_short

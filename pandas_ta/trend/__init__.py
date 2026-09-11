@@ -18,10 +18,12 @@ from .flag_breakout import flag_breakout
 from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
 from .halftrend import halftrend
+from .head_shoulders import head_shoulders
 from .increasing import increasing
 from .inverse_fvg import inverse_fvg
 from .liquidity_compression_box import liquidity_compression_box
 from .liquidity_sweep import liquidity_sweep
+from .smc_sweep import smc_sweep
 from .long_run import long_run
 from .nwog import nwog
 from .ob import ob
@@ -29,10 +31,12 @@ from .pmax import pmax
 from .priorday_fib import priorday_fib
 from .priormonth_range import priormonth_range
 from .psar import psar
+from .sarext import sarext
 from .qstick import qstick
 from .rejection_blocks import rejection_blocks
 from .renko_trend import renko_trend
 from .ribbon_concordance import ribbon_concordance
+from .rounding_cup import rounding_cup
 from .sd_zone_pro import sd_zone_pro
 from .short_run import short_run
 from .sphinx_unicorn import sphinx_unicorn
@@ -41,6 +45,8 @@ from .sr_decay import sr_decay
 from .sr_force import sr_force
 from .swing_equilibrium import swing_equilibrium
 from .tsignals import tsignals
+from .triangle_wedge import triangle_wedge
+from .triple_top_bottom import triple_top_bottom
 from .tvstop import tvstop
 from .ttm_trend import ttm_trend
 from .vhf import vhf
@@ -49,3 +55,6 @@ from .vortex import vortex
 from .xsignals import xsignals
 from .zigzag import zigzag
 from .zigzag_fib import zigzag_fib
+from .pivot import pivot
+from .vstop import vstop
+from .vstop2 import vstop2

@@ -16,6 +16,7 @@ from .er import er
 from .eri import eri
 from .fisher import fisher
 from .inertia import inertia
+from .imi import imi
 from .kalman_rsi import kalman_rsi
 from .kdj import kdj
 from .kst import kst
@@ -50,3 +51,7 @@ from .uo import uo
 from .vwmacd import vwmacd
 from .wavetrend import wavetrend
 from .willr import willr
+from .pzo import pzo
+from .szo import szo
+from .wpo import wpo
+from .stc_tv import stc_tv

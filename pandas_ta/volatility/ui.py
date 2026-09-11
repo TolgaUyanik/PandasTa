@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 from numpy import sqrt as npsqrt
-from pandas_ta.overlap import sma
+# From the submodule, not the package: see the note in overlap/zlma.py --
+# `from pandas_ta.overlap import sma` binds the MODULE during import and
+# `everget=True` then raised TypeError: 'module' object is not callable.
+from pandas_ta.overlap.sma import sma
 from pandas_ta.utils import get_offset, non_zero_range, verify_series
 
 

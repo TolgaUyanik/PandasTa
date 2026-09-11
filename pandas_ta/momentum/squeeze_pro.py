@@ -10,7 +10,7 @@ from pandas_ta.overlap.ema import ema
 from pandas_ta.overlap.sma import sma
 from pandas_ta.trend import decreasing, increasing
 from pandas_ta.volatility import bbands, kc
-from pandas_ta.utils import get_offset
+from pandas_ta.utils import flag_as_int, get_offset
 from pandas_ta.utils import unsigned_differences, verify_series
 
 
@@ -201,15 +201,15 @@ def squeeze_pro(
 
     data = {
         squeeze.name: squeeze,
-        f"SQZPRO_ON_WIDE": squeeze_on_wide.astype(int) if asint else squeeze_on_wide,
+        f"SQZPRO_ON_WIDE": flag_as_int(squeeze_on_wide, asint),
         f"SQZPRO_ON_NORMAL": (
-            squeeze_on_normal.astype(int) if asint else squeeze_on_normal
+            flag_as_int(squeeze_on_normal, asint)
         ),
         f"SQZPRO_ON_NARROW": (
-            squeeze_on_narrow.astype(int) if asint else squeeze_on_narrow
+            flag_as_int(squeeze_on_narrow, asint)
         ),
-        f"SQZPRO_OFF": squeeze_off_wide.astype(int) if asint else squeeze_off_wide,
-        f"SQZPRO_NO": no_squeeze.astype(int) if asint else no_squeeze,
+        f"SQZPRO_OFF": flag_as_int(squeeze_off_wide, asint),
+        f"SQZPRO_NO": flag_as_int(no_squeeze, asint),
     }
     df = DataFrame(data)
     df.name = squeeze.name

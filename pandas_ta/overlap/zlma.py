@@ -1,7 +1,20 @@
 # -*- coding: utf-8 -*-
-from . import (
-    dema, ema, hma, linreg, rma, sma, swma, t3, tema, trima, vidya, wma
-)
+# Import each helper from its OWN module, never from the package. While
+# pandas_ta is still importing, `pandas_ta.overlap.<name>` is the SUBMODULE,
+# so `from . import sma` binds a module and every mamode call raised
+# TypeError: 'module' object is not callable.
+from pandas_ta.overlap.dema import dema
+from pandas_ta.overlap.ema import ema
+from pandas_ta.overlap.hma import hma
+from pandas_ta.overlap.linreg import linreg
+from pandas_ta.overlap.rma import rma
+from pandas_ta.overlap.sma import sma
+from pandas_ta.overlap.swma import swma
+from pandas_ta.overlap.t3 import t3
+from pandas_ta.overlap.tema import tema
+from pandas_ta.overlap.trima import trima
+from pandas_ta.overlap.vidya import vidya
+from pandas_ta.overlap.wma import wma
 from pandas_ta.utils import get_offset, verify_series
 
 

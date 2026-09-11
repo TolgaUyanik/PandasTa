@@ -12,264 +12,171 @@ Column inventory and ML form of everything currently shipped: `docs/IndicatorDic
 
 # ═══ ACTIVE ═══
 
-## WIRING — repair the two defects that block the sections below (NEW 2026-09-06, found while writing the indicator dictionary)
+**One item is open: MLCOL-1, and it is open only because its acceptance criterion cannot be met
+honestly.** Everything else in this file's history is finished; the full blocks — with the
+measured evidence, the reverts and the traps — moved to **[`docs/CompletedWork.md`](docs/CompletedWork.md)**
+on 2026-09-12. Read that before re-opening anything, because most of what it records is *why a
+column is not here*.
 
-> **Goal:** the ML-column, multi-length and pattern work below all need `df.ta.strategy()` and a clean
-> import to run in bulk. Both are broken today, so this goes first.
+Suite at that point: **3,166 passed / 0 failed / 23 skipped**. `Category` **233**.
 
-- [ ] **WIRING-1 — Add the 11 missing `core.py` accessor methods (MAJOR).** `wavetrend`, `ema_align`,
-  `ichimoku_ml`, `linreg_channel`, `bos`, `choch`, `fvg`, `halftrend`, `ob`, `zigzag`, `vol_delta` are
-  registered in `Category` (`pandas_ta/__init__.py`) but have no method in `pandas_ta/core.py`, so
-  `df.ta.strategy()`, `df.ta.strategy("overlap")` and `df.ta.strategy("trend")` raise
-  `AttributeError`. Touch point 4 of 5 was skipped on each.
-  **Done when:** `df.ta.strategy()` runs to completion on a 600-bar frame with no `exclude` list, and
-  a test asserts `all(hasattr(df.ta, n) for n in every name in Category)`.
-- [ ] **WIRING-2 — Fix `aberration` (MINOR).** `pandas_ta/volatility/aberration.py:5` does
-  `from pandas_ta.overlap import hlc3, sma`; circular-import ordering binds `sma` to the **submodule**,
-  not the function, so `aberration.py:26` raises `TypeError: 'module' object is not callable` on every
-  call. Import from `pandas_ta.overlap.sma` directly, or resolve lazily.
-  **Done when:** `ta.aberration(high, low, close)` returns its 4 columns in a fresh interpreter, with a
-  test that calls it as the first pandas_ta call in the process.
+## Open
 
-⚠ Ties: `mcgd` — the third break of this kind (`Series.append`, removed in pandas 2.0) — is already
-registered as **TVPTA-7b** in `../Backtesting/TODO.md:477`; do not duplicate it here. Both defects
-above are recorded in `docs/IndicatorDictionary.md` → *Known breaks*.
+See the MLCOL section below. Nothing else.
 
----
+## Owner decisions outstanding — not tasks, and not mine to take
+
+1. 🔴 **The 16 broken `INDICATOR_SPECS` arg lists** (INDREF-2 §5d). Sixteen of the 104 specs pass
+   an argument list that does not match the pandas_ta signature, raise `TypeError` on every bar of
+   every run, and are swallowed by a bare `except: continue` — so they have never emitted a
+   column. The same 16 are broken in **all six copies** of the table, **four of which are inside
+   `deploy/`**, where repairing them would make 16 indicators start emitting columns in the live
+   container. That is a strategy-affecting change under the TRADING FREEZE.
+2. 🔴 **2,211 `.pine` files are TRACKED in `Backtesting`** with 912 MPL-2.0 headers under hundreds
+   of individual rightsholders, and that repo has **no `LICENSE` file**. Untracking them in
+   `PandasTa` (2026-09-07) closed this for *this* repo only. Whether the other repo is public is
+   unverified. Remediation means history rewriting and a force-push.
+3. ⚠ **`dpo` ships `centered=True` as its DEFAULT**, so `ta.dpo(close)` silently returns a
+   look-ahead column, and `dpo` is in `Category`, so `df.ta.strategy()` sweeps it. Documented
+   upstream behaviour the fork inherited — left alone rather than changed unasked, but it is a
+   live trap. (`ssf` was a third, undocumented look-ahead; that one was a bug and is fixed.)
 
 # ═══ BACKLOG ═══
 
-## PINEBI — port TradingView's built-in indicators, then continue the community corpus (NEW 2026-09-06, user)
+## PINEBI — TradingView built-ins ✅ CLOSED
 
-> **Goal (user):** *"We will review each pine scripts to implement to repo from PandasTa/docs/pine/
-> folder. We can start with TradingView basic indicators."*
+Full record: [`docs/CompletedWork.md`](docs/CompletedWork.md). PINEBI-0, -0b, -1a…-1e and -2 are
+all closed. **Zero `port` rows remain** in `docs/pine_builtin_coverage.csv`.
 
-**"Built-in" is three populations, not one (measured 2026-09-06).** Only two are portable:
+**Verdict split, generated — this is the table the -1b…-1e scopes are cut from.**
+Produced by `docs/gen_pine_builtin_coverage.py` (PINEBI-0, done 2026-09-07).
 
-| tier | what | source | inventory |
-|---|---|---|---|
-| 1 | core `ta.*` compiler intrinsics (`ta.sma`, `ta.pivothigh`) | none published — spec is the Pine v6 reference | 75 distinct tokens used across the corpus; **47 covered, 28 not** |
-| 2 | official `TradingView/*` libraries, MPL-2.0, `© TradingView` | **published, and on disk** | `docs/pine/RA2vGpkA-ta.pine` = `TradingView/ta` v10, 47 exports; **26 covered, 21 not** |
-| 3 | Indicators-dialog built-ins ("Bollinger Bands") | closed | out of scope — no source to port against |
+| verdict | n |
+|---|---|
+| `have` | 73 |
+| `port - primitive` (→ -1a) | 18 |
+| `n/a - measured and reverted on Gate E` | 7 |
+| `n/a - not a Pine built-in` | 4 |
+| `n/a - not worth a primitive` | 2 |
+| `port - blocked on data` (→ -1d) | 2 |
+| `n/a - never called live in the corpus` | 1 |
 
-Corpus join is verified: `ScrapyTUyanikProjects/TradingView/ScrapyTUyanik/testfolder/tv_source.jsonl`
-(3,730 rows, 2,250 with source) matches `docs/pine/` **2,211 / 2,211 on basename**. The `source_path`
-field still says `datastore/pine/…` — stale prefix, same filenames, so join on the basename.
+⚠ These counts are **asserted**, not retyped: `test_the_docs_quote_the_csvs_actual_split` reads this
+table and fails if any number disagrees with the CSV. Four review rounds went by with a stale split
+standing in three documents; that is now a test failure rather than a reading exercise.
 
-⚠ **The tier-1 "28" is not 28 indicators.** Split by whether the using file does
-`import TradingView/ta/<n>` (the library binds to the name `ta`, with or without `as`, and shadows the
-core namespace):
+The scopes those verdicts route to are closed. Their enumerations are kept here because
+`test_every_scoped_row_is_named_in_its_task` reads the `ROWS:` line out of the task block itself,
+and a scope written only in prose is unguarded — that guard exists because `stc` spent a whole
+round "scoped into PINEBI-1b" while existing only as a string in a CSV note.
 
-- **8 are tier-2 library calls, not core** — `ema2`, `stochFull`, `stochRsi`, `rms`, `highestSince`,
-  `lowestSince`, `requestVolumeDelta`, `requestUpAndDownVolume` appear in **zero** files that do not
-  import the library.
-- **6 are noise** — `sum`, `max`, `min`, `pivot`, `normalize`, `covariance` (≤3 files each; the hits are
-  comments such as *"Pine has no native ta.covariance"* and third-party library methods). **They are not
-  Pine built-ins at all.**
-- **14 are real core gaps**, and they are rolling *primitives*, not indicators: `highest` (324 files),
-  `lowest` (298), `pivothigh` (229), `pivotlow` (224), `valuewhen` (58), `barssince` (56), `cum` (36),
-  `correlation` (29), `percentrank` (27), `highestbars` (23), `lowestbars` (22),
-  `percentile_nearest_rank` (7), `percentile_linear_interpolation` (6), `pivot_point_levels` (1).
+- [x] **PINEBI-1b — Port the `port` rows. ✅ DONE 2026-09-11.** 16 measured, **9 shipped, 7 built
+  and reverted on Gate E**. Zero remain.
+  ROWS: none remaining — every one of the 16 reached a terminal verdict; see
+  `docs/PineBuiltinsMeasured.md` for the per-column ρ and `REVERTED_ON_GATE_E` in
+  `docs/gen_pine_builtin_coverage.py` for why each of the 7 was deleted.
 
-**Scope decision (user, 2026-09-06): add all three groups, including the tier-2 calls and the "noise".**
-The noise six are then *not* Pine ports — they are ML utilities the fork wants on their own merit, and
-`-1e` says so rather than filing them under a provenance they do not have. Total: **46 additions.**
+- [x] **PINEBI-1c — The nine alternates. ✅ DONE 2026-09-08.** 7 kept, 2 deleted.
+  ROWS: none remaining — all nine resolved; measured table in `docs/PineAlternatesMeasured.md`.
 
-| sub-task | n | what |
-|---|---|---|
-| -1a | 16 | rolling primitives: the 14 core gaps + `highestSince`, `lowestSince` |
-| -1b | 12 | portable `TradingView/ta` indicators |
-| -1c | 10 | alternate implementations of indicators already shipped |
-| -1d | 2 | lower-timeframe data requests — blocked on a sub-hourly source |
-| -1e | 6 | the "noise" six, re-scoped as ML utilities |
+- [x] **PINEBI-1d — The two data-request rows. ✅ DONE 2026-09-08.** `up_and_down_volume` and
+  `volume_delta` ship, deliberately OUT of `Category` and in `strategy`'s exclusion list: they
+  need a lower-timeframe frame a sweep cannot supply.
 
-Reconciliation, so the arithmetic is checkable: the library's **21 uncovered exports** = 12 (-1b) + 5
-alternates whose sibling is *also* uncovered (`ema2`, `rma2`, `supertrend2`, `t3Alt`, `vStop2`) + 2 data
-requests (-1d) + 2 primitives (-1a). -1c adds 5 more alternates whose sibling the fork already covers
-(`atr2`, `dema2`, `tema2`, `stochFull`, `stochRsi`) — they are not in the 21 for that reason, but they
-are the same kind of work, so they are measured in the same pass.
+- [x] **PINEBI-2 — The community corpus. ✅ CLOSED 2026-09-11**, triage delivered and the porting
+  half deferred on its own measurement (2–7 landed indicators for 179–269 files read). The wiring
+  pass was done instead, as WIRE-0. **TVPTA-1b's deliverable is already delivered by that triage**
+  — read `docs/PineCorpusTriage.md` before writing its spec rather than re-running the classifier.
 
-- [ ] **PINEBI-0 — Freeze the audit above into a machine-readable CSV (MINOR). GATES -1a … -1e.** The
-  counts are measured; what is missing is the artifact. One row per function: tier · name · files-using ·
-  pandas_ta equivalent (or blank) · verdict (`have` / `port` / `skip — variant of X` / `n/a — data
-  request` / `n/a — noise`), plus the classifier that produced it so a re-run reproduces the counts.
-  **Done when:** `docs/pine_builtin_coverage.csv` exists, every tier-1 and tier-2 function has a verdict,
-  and re-running the classifier reprints the 47/28 and 26/21 splits.
-- [ ] **PINEBI-1a — Add the 16 rolling primitives (MAJOR, depends on PINEBI-0).** The 14 core gaps plus
-  `highestSince` and `lowestSince`, which are tier-2 by publication but primitives by nature. These are
-  not features and must not be registered in `Category` as indicators — they are the vocabulary every
-  later port is written in (`ta.highest`/`ta.lowest` alone appear in 622 files). Land them in
-  `pandas_ta/utils/` next to the existing `above`/`below`/`cross` helpers.
-  **Done when:** all 16 exist with tests, each matches its Pine semantics on a hand-checked fixture
-  (`ta.barssince` returns `na` before the first occurrence, `ta.pivothigh` confirms `right` bars late and
-  that lag is documented as the causality cost), and no primitive is exposed via `df.ta.strategy()`.
-- [ ] **PINEBI-1b — Port the 12 portable `TradingView/ta` indicators (MAJOR, depends on PINEBI-0).**
-  From the library's 21 uncovered exports: `frama`, `rwi`, `szo`, `vzo`, `pzo`, `wpo`, `vStop`,
-  `williamsFractal`, `relativeVolume`, `rms`, `ht`, `ift`. Of the remaining 9 uncovered exports, 5
-  alternates go to -1c and 2 data requests to -1d; `highestSince`/`lowestSince` are primitives and go
-  to -1a.
-  ⚠ **Licence:** the library is MPL-2.0, `© TradingView`. Each port carries the attribution in its module
-  docstring, as the existing Pine ports do (`tvstop` cites `7YXrxMjV`, MPL-2.0, © LyroRS). Applies to
-  -1c and -1d too.
-  **Done when:** each of the 12 has a test module, a Gate B mutant test, a Gate D scale check, a measured
-  Gate E overlap max with its sample size, the MPL attribution, and `docs/IndicatorDictionary.md`
-  regenerated so the new columns appear with their ML form.
-- [ ] **PINEBI-1c — Port the 10 alternate implementations, and keep only the ones that differ (MAJOR,
-  depends on PINEBI-0).** `ema2`, `rma2`, `supertrend2`, `t3Alt`, `vStop2`, `atr2`, `dema2`, `tema2`,
-  `stochFull`, `stochRsi`. Each restates an indicator the fork already ships, so Gate E will read ρ ≈ 1.0 against its
-  own sibling and the revert rule would delete all nine on sight. **That rule is suspended here for one
-  measured reason:** the alternates differ in *seeding and smoothing*, not in signal — `ta.ema2` is
-  documented in the corpus as "extends `ta.ema` to start without delay at first bar and deliver usable
-  data instead of `na`", which is a **warm-up** difference, and warm-up is a cost this fork's ML rules
-  care about (`docs/IndicatorDictionary.md` prints a warm-up column for every indicator).
-  So the acceptance test is not overlap, it is warm-up and parameter reach:
-  **Done when:** each of the 10 is measured against its shipped sibling on two axes — bars of warm-up
-  saved, and any parameter the sibling cannot express (`stochFull`'s separate %K smoothing, `t3Alt`'s
-  volume factor) — and the ones that save no warm-up and reach no new parameter are **deleted, not
-  shipped**, with the measurement recorded. Survivors ship named `<name>2` or `<name>_tv` so the
-  distinction is visible in a column name.
-- [ ] **PINEBI-1d — Implement the 2 lower-timeframe data requests behind a capability check (MAJOR,
-  depends on PINEBI-0; the data source is the blocker, not the code).** `requestVolumeDelta` and
-  `requestUpAndDownVolume` split a bar's volume into buying and selling pressure using intrabar data.
-  The engine's floor is 1h and yfinance serves sub-hourly bars for ~60 days only, so on today's data
-  these produce a short, ragged column — which is a data problem, not a reason to skip the port.
-  **Done when:** both exist, take an explicit lower-timeframe frame as an argument rather than fetching
-  one, raise a clear error when it is missing, and carry a test on a synthetic 1h-from-5m fixture. A
-  companion note in `docs/` states how much history the current data source can actually feed them.
-- [ ] **PINEBI-1e — Add the 6 "noise" functions as ML utilities (MINOR, depends on PINEBI-0).** `sum`,
-  `max`, `min`, `pivot`, `normalize`, `covariance`. ⚠ **These are not Pine built-ins** — the corpus hits
-  were comments and third-party library methods (one literally reads *"Pine has no native
-  ta.covariance"*). They are being added because the fork wants them, so they are documented as
-  fork utilities with no TradingView provenance and **no MPL attribution**, which would be false.
-  Rolling `sum`/`max`/`min` join -1a's primitives; `pivot` is classic pivot-point levels
-  (PP/R1-R3/S1-S3, distinct from core `ta.pivot_point_levels` in -1a — measure them against each other);
-  `normalize` is rolling min-max scaling; `covariance` is rolling covariance.
-  **Done when:** all 6 exist with tests; `pivot`'s levels ship **only** as scale-free distances from
-  `close`, never as raw price levels (the dictionary's `PX` rule); and `normalize`'s window is causal
-  (trailing min/max, never whole-series, which would leak the future into every bar).
-- [ ] **PINEBI-2 — Resume the community corpus after the built-ins (MAJOR, depends on PINEBI-1a…-1e).**
-  `docs/pine/` holds 2,211 `.pine` files (untracked). TVPTA already ported 195 and left two queues:
-  the 43-candidate `defer` backlog (TVPTA-6) and the 992 never-scanned `library`-type files (TVPTA-1b).
-  **Done when:** this repo's side of whichever queue is picked is ported and green; the queue's own
-  acceptance criteria stay owned by the parent task.
+## CANDLE · INDREF · TALIB · ALTREPO · ALTFIX · ALTPORT — ✅ ALL CLOSED
 
-⚠ Ties: extends **TVPTA-1b** (`../Backtesting/TODO.md:489`) and **TVPTA-6** (`:253`) — do not open a
-third pine initiative. `docs/pine/` is currently neither committed nor gitignored; decide which in
-PINEBI-0. `williamsFractal` (-1b) overlaps the engine's existing `FRACTAL_UP`/`FRACTAL_DN` columns and
-`ta.pivothigh`/`ta.pivotlow` (-1a) — measure all three against each other before shipping any.
-The other 6 `© TradingView` libraries on disk (`ZigZag`, `zigzag-force`, `RiskMetrics`, `ValueAtTime`,
-`Request`, `Color`) are unaudited; `ZigZag`/`zigzag-force` overlap the shipped `zigzag`/`zigzag_fib`.
+Full records in [`docs/CompletedWork.md`](docs/CompletedWork.md):
 
-## CANDLE — generic multi-bar chart patterns (NEW 2026-09-06, user)
+| section | outcome |
+|---|---|
+| **CANDLE-0/-1/-2** | 11 shortlisted → 8 shipped, 22 columns → **6 deleted** on Gate E; `rectangle` skipped on a pre-registered trigger |
+| **INDREF-0/-1** | `docs/gen_indicator_pages.py` + a reference page per shipped indicator, idempotent (`--check` → changed=0) |
+| **INDREF-2** | `../Backtesting/docs/indicators/IndicatorSelectionResults.md` — **175 of 233 indicators were never in a position to be selected**; found the 16 broken specs |
+| **TALIB-1** | 10 `port` rows → 8 columns shipped, **5 reverted**; seven of the ten are one state machine with two warm-ups |
+| **ALTFIX-0…-4** | audit closed; gaps classic 33 → 9, tti 10 → 9, ta-lib 10 → 0 |
+| **ALTPORT-0/-1/-2** | 20 candidates → **3 shipped** (`cvi`, `bw_mfi`, `smc_sweep`), all three later cleared by WIRE-0 and now called by the engine |
 
-> **Goal (user):** *"We should review add generic candle patterns like shoulder head shoulder."*
+## MLCOL — per-indicator ML companion columns
 
-- [ ] **CANDLE-0 — Decide the pattern list and prove each one is not already covered (MAJOR).** The
-  `candles` category ships 5 modules (`cdl_doji`, `cdl_inside`, `cdl_pattern`, `cdl_z`, `ha`), and
-  `cdl_pattern` is a TA-Lib wrapper — **TA-Lib is not installed in this environment**, so its ~60
-  patterns are unreachable (the probe prints `[X] Please install TA-Lib to use <pattern>` for each).
-  Multi-bar structure is partly covered already by `zigzag`, `zigzag_fib`, `swing_equilibrium`,
-  `equal_highs_lows`, `bos`, `choch`.
-  **Done when:** a shortlist exists (head-and-shoulders, double top/bottom, triangle, wedge, …) where
-  each entry states which existing column it might restate and why it is still worth measuring.
-- [ ] **CANDLE-1 — Implement the shortlist as scale-free, causal columns (MAJOR, depends on CANDLE-0).**
-  A pattern must emit a *feature*, not a drawing: confirmation flag, bars-since, and the pattern's
-  measured move as a fraction of price — never pixel geometry or absolute levels.
-  **Done when:** each pattern has a test module including the Gate B mutant test, Gate D scale
-  invariance, and a Gate E overlap max against the full shipped column set.
-- [ ] **CANDLE-2 — Settle the TA-Lib question (MINOR).** Either add TA-Lib as an optional-but-tested
-  dependency so `cdl_pattern`'s 60 patterns become reachable, or document them as unavailable.
-  **Done when:** `docs/IndicatorDictionary.md` states which candle patterns are actually callable.
+✅ **MLCOL-0** (contract) and **MLCOL-2** (reference companions — **0 of 5 shipped**) are closed;
+see the archive. MLCOL-2 is the reason MLCOL-1 screens before it builds.
 
-⚠ Ties: overlap risk is highest against the SMC/structure ports (`bos`, `choch`, `zigzag_fib`) — those
-are precedent for how a structure pattern gets measured. Feeds **MLCOL**.
-
-## INDREF — per-indicator reference pages, then an engine-side results doc (NEW 2026-09-06, user)
-
-> **Goal (user):** *"Backtest reports or analysis documents will add."*
-
-- [ ] **INDREF-0 — Define the page template on one indicator (MINOR).** Sections: what it measures ·
-  columns and ML form (pull from `docs/IndicatorDictionary.md`) · Pine/TA-Lib provenance · measured
-  overlap max with sample size · reachability counts on real data · whether mining has ever selected it.
-  **Done when:** one page exists (suggest `tvstop` — its measurements are already recorded) and reads
-  end-to-end without a reader needing the git log.
-- [ ] **INDREF-1 — Generate the pages for every shipped indicator (MAJOR, depends on INDREF-0).**
-  Machine-fill everything the dictionary probe already knows; hand-write only provenance and the
-  "what it measures" paragraph.
-  **Done when:** `docs/indicators/<name>.md` exists for all 201, an index page links them, and the
-  generator is committed next to `docs/gen_indicator_dictionary.py`.
-- [ ] **INDREF-2 — Engine-side results write-up (MAJOR, depends on INDREF-1, lands in `../Backtesting/docs/`).**
-  Which ported columns mining actually selected, which never fired, and what they cost in compute.
-  **Done when:** the doc names, per indicator, selected / never-selected / never-fired, and links back
-  to the INDREF page.
-
-⚠ Ties: the parent repo already runs a family-doc convention at `../Backtesting/docs/indicators/`
-(`family-oscillator-momentum.md`, `family-trend-overlay.md`) — match it, don't invent a second shape.
-INDREF-2 is the honest test of PINEBI and MLCOL: an indicator nothing selects is dead weight.
-
-## TALIB — diff TA-Lib against the fork and port the gaps (NEW 2026-09-06, user)
-
-> **Goal (user):** *"Review ta-lib & ta-lib-python repos to find new indicators."*
-
-- [ ] **TALIB-0 — Produce the coverage diff (MINOR).** TA-Lib's ~158 functions vs the 201 shipped here:
-  name · pandas_ta equivalent · verdict (`have` / `port` / `skip — candle pattern, see CANDLE-2`).
-  **Done when:** the CSV exists in `docs/` with a verdict on every TA-Lib function.
-- [ ] **TALIB-1 — Port the `port` rows (MAJOR, depends on TALIB-0).** Same five touch points and Gates
-  A–F; the Pine-source citation in Gate A becomes the TA-Lib C source or the documented formula.
-  **Done when:** each new indicator ships with a test module and a measured overlap max, and the
-  dictionary is regenerated.
-
-⚠ Ties: overlap is the whole risk here — TA-Lib and pandas_ta share heritage, so expect ρ ≈ 0.9
-reverts. Coordinate with **CANDLE-2** so candle patterns are not ported twice.
-
-## MULTIL — multiple lookback lengths for the indicators that earn them (NEW 2026-09-06, user)
-
-> **Goal (user):** *"We need different time spans for same indicators. RSI 14 RSI 28, EMA150, EMA50, etc"*
-
-- [ ] **MULTIL-0 — Pick the lengths per indicator on measurement, not convention (MAJOR).** Every
-  indicator already takes `length`; the gap is that the engine computes one. Adding a second length is
-  cheap to compute and expensive to justify — `RSI_14` vs `RSI_28` is a candidate ρ ≈ 0.9 pair, which
-  is the revert band. Measure the length-vs-length correlation grid per indicator first.
-  **Done when:** a table of indicator × candidate lengths with the measured ρ between them, and a kept
-  set where no retained pair exceeds the revert threshold.
-- [ ] **MULTIL-1 — Wire the kept set into the engine's compute list (MAJOR, depends on MULTIL-0, lands in `../Backtesting/`).**
-  **Done when:** the new columns appear in the engine's feature register with explicit routing, and the
-  column count agrees across register, manifest and family index.
-- [ ] **MULTIL-2 — Check nothing downstream breaks on the new column names (MAJOR).** Mined rules in
-  `StrategyMaster.csv` match column-name strings; a new `RSI_28` must not shadow or rename `RSI_14`.
-  **Done when:** the existing paper strategies still resolve every column they reference.
-
-⚠ Ties: this is the cheapest way to inflate the column count and the easiest way to double-weight one
-signal in the miner — Gate E applies to a length variant exactly as to a new indicator. Feeds **MLCOL**
-(each retained length needs its own binary/percentile companions).
-
-## MLCOL — per-indicator ML companion columns (NEW 2026-09-06, user)
-
-> **Goal (user):** *"We should optimize each indicator for ML. Each indicator should show binary fields
-> like cheap, expensive or buy & sell type of things. Also it should include percentage based analysis."*
-
-**Decision (user, 2026-09-06):** hand-authored per indicator, not a generic transform layer — the
-threshold that means "expensive" is indicator-specific and a generic percentile is wrong for bounded
-oscillators and event flags.
-
-- [ ] **MLCOL-0 — Design the column contract on three indicators first (MAJOR). GATES the rest.** Pick
-  one bounded oscillator (`rsi`), one price-scaled overlay (`sma`), one event flag (`fvg`) and define
-  the companion set for each: the binary state(s), the percentage/percentile form, and the naming
-  pattern. Note that `docs/IndicatorDictionary.md` already flags which of the 201 emit price levels
-  (`PX`) and therefore *need* a relational companion before they are usable at all.
-  **Done when:** the three are implemented, named consistently, and the contract is written down in
-  `docs/` so the remaining ~198 are mechanical.
-- [ ] **MLCOL-1 — Roll the contract out, PX columns first (MAJOR, depends on MLCOL-0).** Order the work
+- [~] **MLCOL-1 — Roll the contract out, PX columns first. 🔶 MEASURED IN FULL AND 5 SHIPPED 2026-09-12; the stated Done-when CANNOT be met honestly — see below.** Order the work
   by the dictionary's *"Needs a transform before modelling"* table — those indicators are unusable as
   features today, so they pay back first.
   **Done when:** every `PX` column in the dictionary has a scale-free companion, and the regenerated
   dictionary shows no indicator whose entire output is `PX`.
-- [ ] **MLCOL-2 — Prove the companions carry signal the parent column does not (MAJOR).** A binary
-  derived from a column is correlated with it by construction; that is exactly what Gate E exists to
-  catch.
-  **Done when:** each companion has a measured ρ against its parent and against the full shipped set,
-  and the ones in the revert band are deleted rather than shipped.
+  ⚠ **Owner's sequencing (2026-09-08): "contract, then roll out with Gate E per companion."** Gate E
+  is per companion, not once at the end — one measurement per PX column. (For the count, read the
+  opening paragraph of `docs/MLCompanionContract.md`; it is Counter-derived from the generated
+  dictionary and asserted by `tests/test_ml_companions.py`. Four different numbers for that one
+  quantity were in circulation on 2026-09-08 — do not retype it.)
 
-⚠ Ties: this is the fork's stated purpose — see `CLAUDE.md` → *The ML feature contract* and the README's
-ML rules. `ichimoku_ml` is the reference precedent (5 price lines → 8 scale-free causal columns).
-Depends on **WIRING-1** (bulk runs) and interacts with **MULTIL** (companions multiply per length).
+  ✅ **What was done (2026-09-11/12).** All **137** `PX` columns screened before anything was
+  written, then the survivors put through the incremental axis, then redundancy checked *among the
+  survivors*. Receipts: `docs/MLCol1Screen.md`, `docs/MLCol1Axes.md`, and the two harnesses
+  `../Backtesting/scripts/analysis/measure_mlcol1_{screen,axes}.py`.
+
+  **The funnel, every step measured:**
+  137 proposed → **82 restate a shipped column at ρ ≥ 0.90** → 36 land in the disclosure band →
+  **2 parents read the future** → 4 could not be probed → **13 clear Gate E** → **6 show
+  incremental evidence** → **5 after removing redundancy among the survivors**.
+
+  **SHIPPED (5):** `HA_high_DIST_PCT` (ha), `HW-UPPER_DIST_PCT` + `HW-LOWER_DIST_PCT` (hwc),
+  `LINREG_LOWER_2_DIST_PCT` (linreg_channel), `THERMO_20_2_0.5_RATIO_PCT` (thermo). All
+  scale-free bit-identical ×8/×64, all causal, `tests/test_mlcol1_companions.py` 34 passed.
+  `SF` 207 → **212**.
+
+  🔴 **THE DONE-WHEN AS WRITTEN CANNOT BE SATISFIED HONESTLY, and this is the finding, not an
+  excuse.** It asks that *"every `PX` column has a scale-free companion"* and that *"no indicator
+  whose entire output is `PX`"* remains — **71 indicators are still all-`PX`**, nearly all of them
+  moving averages. Meeting it means emitting ~71 more companions, and the screen MEASURED that
+  their `DIST_PCT` forms restate columns the engine already ships: **15 restate
+  `NWE_MID_200_8.0_8.0`, 14 restate `bias`** — the exact columns this task's own contract told it
+  to screen against. Satisfying the acceptance criterion would therefore require violating the
+  contract's non-redundancy rule 82 times over.
+  **Proposed amendment, for the owner:** *"every `PX` column has been SCREENED for a companion,
+  and one is emitted wherever it clears Gate E, the incremental axis, and redundancy against the
+  other survivors."* Under that reading MLCOL-1 is done. Left as `[~]` because rewriting one's own
+  acceptance criterion is the owner's call, not the executor's.
+
+  ⚠ **Three findings that outlive this task:**
+  1. 🔴 **`ssf` READ THE FUTURE — an undocumented look-ahead in shipped code, now fixed**
+     (`f3ff67a`). Its recursion ran `for i in range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]`,
+     the LAST bar of the series. Perturbing only bars ≥ 300 of a 400-bar frame moved **bar 0** by
+     31.4. `CLAUDE.md` claimed the causality exception list was "complete" at two columns; it was
+     three, and the claim is corrected. Independent corroboration: `ssf` vs pandas-ta-classic
+     moved `port - alternate impl` → `have`, `divergent` → `identical`, agreeing on all 260
+     values — the divergence WAS the bug.
+  2. 🔴 **Causality must PRECEDE the incremental axis, not sit beside it.** The leaking `dpo`
+     companion was ranked **first** by axis 3a — ΔAUC +0.0473, permutation importance +0.35693,
+     15/15 beats-null — in a field where every honest candidate scored ~0.01. Leakage is the
+     strongest signal a model can be handed, so the axis *promotes* a non-causal feature rather
+     than rejecting it, with every control behaving exactly as designed. Recorded in
+     `docs/MLCompanionContract.md`. Note `dpo`'s `centered=True` is its **default**.
+  3. **Gate E is blind to redundancy AMONG candidates.** It measures each against the SHIPPED
+     set. Three `hwc` companions each cleared it and the axis, then read ρ +0.9257 / +0.9213
+     against each other — `HW-MID` is the hub and carries nothing independent once both edges are
+     kept. Dropped. This is the PB_LO/PB_UP lesson again: a survivor set is itself a correlation
+     gate that nobody ran.
+
+  ⚠ **The contract's single DISTANCE formula does not fit all `PX` parents.** `(close - parent) /
+  close` is right for a **level**; 37 of the 137 are price **differences** centred on zero, where
+  it evaluates to ≈1.0 with the signal in the fourth decimal. Those are screened and shipped as
+  `parent / close` and NAMED `_RATIO_PCT`, because naming is API and calling a ratio a distance
+  misdescribes it permanently.
+
+  ⚠ **MLCOL-2 added a prerequisite screen:** Gate E is necessary but NOT sufficient (it would have
+  shipped `FVG_BULL_RATE_60`), and every MA-family `DIST_PCT` must be checked against the engine's
+  existing relational columns first — `SMA_10_DIST_PCT` died at ρ 0.946 against `NWE_MID_200_8.0_8.0`.
+  Use `measure_ml_companion_overlap.py --companions`.
+
+---
+
+**Everything above this line that is marked ✅ or [x] is finished.** The evidence lives in
+[`docs/CompletedWork.md`](docs/CompletedWork.md), not here.

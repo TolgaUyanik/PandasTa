@@ -60,6 +60,16 @@ def linreg_channel(close, length=None, offset=None, **kwargs):
         "LINREG_LOWER_2": values - 2 * devs,
     }, index=close.index)
 
+    # MLCOL-1 companion. Six of this indicator's seven columns are PX (price
+    # levels) and unusable as ML features. Only the lower-2 band's DISTANCE
+    # form survived both the screen (max rho +0.7186 vs `cfo`) and axis 3a
+    # (15/15 beats-null, dAUC +0.0048). The other five levels' companions
+    # restate a shipped column at or above the line and are NOT emitted --
+    # `LINREG_DEV`'s ratio form cleared the screen at 0.7331 but produced no
+    # evidence on the incremental axis, which is the MLCOL-2 pattern exactly:
+    # Gate E is necessary and not sufficient.
+    df["LINREG_LOWER_2_DIST_PCT"] = 100.0 * (close - df["LINREG_LOWER_2"]) / close
+
     df.name = f"LINREGCH_{length}"
     df.category = "overlap"
 

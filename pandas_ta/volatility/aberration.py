@@ -2,7 +2,11 @@
 # from numpy import sqrt as npsqrt
 from pandas import DataFrame
 from .atr import atr
-from pandas_ta.overlap import hlc3, sma
+# Import the functions from their own modules, not from the package: during
+# pandas_ta's own import, `pandas_ta.overlap.sma` still names the SUBMODULE
+# here, and calling it raises TypeError: 'module' object is not callable.
+from pandas_ta.overlap.hlc3 import hlc3
+from pandas_ta.overlap.sma import sma
 from pandas_ta.utils import get_offset, verify_series
 
 
